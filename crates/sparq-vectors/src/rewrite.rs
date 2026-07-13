@@ -646,12 +646,17 @@ fn require_var(t: &TermPattern, what: &str) -> Result<Variable, String> {
 }
 
 /// Maps a dictionary [`Term`] to a [`GroundTerm`] for a VALUES row, or `None`
-/// for a blank node / triple term (not expressible in a VALUES neighbour slot).
+/// for a blank node (including one nested inside a triple term).
 fn term_to_ground(t: Term) -> Option<GroundTerm> {
     match t {
         Term::NamedNode(n) => Some(GroundTerm::NamedNode(n)),
         Term::Literal(l) => Some(GroundTerm::Literal(l)),
-        _ => None,
+        // [GPT-5.6] sq-1ijoc: SPARQL 1.2 VALUES admits ground triple terms;
+        // spargebra's conversion recursively rejects any nested blank node.
+        Term::Triple(t) => spargebra::term::GroundTriple::try_from(*t)
+            .ok()
+            .map(|t| GroundTerm::Triple(Box::new(t))),
+        Term::BlankNode(_) => None,
     }
 }
 
