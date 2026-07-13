@@ -1,0 +1,69 @@
+{
+  "@context": {
+    "@vocab": "http://schema.org/",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+    "ex": "https://example.org/people/",
+    "knows": {"@id": "http://schema.org/knows", "@type": "@id"},
+    "birthDate": {"@id": "http://schema.org/birthDate", "@type": "xsd:date"},
+    "label": {"@id": "http://www.w3.org/2000/01/rdf-schema#label", "@container": "@language"},
+    "authoredInOrder": {"@id": "https://example.org/vocab/authoredInOrder", "@container": "@list", "@type": "@id"},
+    "homepage": {"@id": "http://schema.org/url", "@type": "@id"}
+  },
+  "@graph": [
+    {
+      "@id": "ex:ada",
+      "@type": "Person",
+      "name": "Ada Byron",
+      "label": {"en": "Ada Byron", "de": "Ada Byron (Mathematikerin)"},
+      "birthDate": "1815-12-10",
+      "knows": ["ex:charles", "ex:mary"],
+      "authoredInOrder": ["ex:notes-a", "ex:notes-b", "ex:notes-g"],
+      "affiliation": {
+        "@type": "Organization",
+        "name": "Analytical Engine Society",
+        "homepage": "https://example.org/orgs/aes"
+      }
+    },
+    {
+      "@id": "ex:charles",
+      "@type": "Person",
+      "name": "Charles Babbage",
+      "label": {"en": "Charles Babbage"},
+      "birthDate": "1791-12-26",
+      "knows": ["ex:ada"],
+      "jobTitle": "Engineer"
+    },
+    {
+      "@id": "ex:mary",
+      "@type": "Person",
+      "name": "Mary Somerville",
+      "label": {"en": "Mary Somerville", "fr": "Mary Somerville (scientifique)"},
+      "birthDate": "1780-12-26",
+      "knows": ["ex:ada", "ex:charles"],
+      "award": ["Victoria Gold Medal", "Patron's Medal"]
+    },
+    {
+      "@id": "ex:notes-a",
+      "@type": "CreativeWork",
+      "name": "Note A",
+      "position": 1
+    },
+    {
+      "@id": "ex:notes-b",
+      "@type": "CreativeWork",
+      "name": "Note B",
+      "position": 2
+    },
+    {
+      "@id": "ex:notes-g",
+      "@type": "CreativeWork",
+      "name": "Note G",
+      "position": 7,
+      "about": {
+        "@type": "SoftwareSourceCode",
+        "name": "Bernoulli number program",
+        "programmingLanguage": "Analytical Engine order code"
+      }
+    }
+  ]
+}

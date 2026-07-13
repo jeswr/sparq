@@ -1,0 +1,29 @@
+<https://example.org/org/acme/apac> <http://schema.org/name> "ACME APAC" .
+<https://example.org/org/acme/emea> <http://schema.org/name> "ACME EMEA" .
+<https://example.org/org/acme/platform> <http://schema.org/name> "Platform" .
+<https://example.org/org/acme/platform> <https://example.org/vocab/headcount> "17"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://example.org/org/acme/platform> <https://example.org/vocab/lead> <https://example.org/people/mary> .
+<https://example.org/org/acme/research> <http://schema.org/name> "Research" .
+<https://example.org/org/acme/research> <https://example.org/vocab/headcount> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://example.org/org/acme/research> <https://example.org/vocab/lead> <https://example.org/people/ada> .
+<https://example.org/org/acme> <http://schema.org/name> "ACME Analytics" .
+<https://example.org/org/acme> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://schema.org/Organization> .
+<https://example.org/org/acme> <https://example.org/vocab/byRegion> <https://example.org/org/acme/apac> .
+<https://example.org/org/acme> <https://example.org/vocab/byRegion> <https://example.org/org/acme/emea> .
+<https://example.org/org/acme> <https://example.org/vocab/department> <https://example.org/org/acme/platform> .
+<https://example.org/org/acme> <https://example.org/vocab/department> <https://example.org/org/acme/research> .
+<https://example.org/org/acme> <https://example.org/vocab/slogan> "Des chiffres qui comptent"@fr .
+<https://example.org/org/acme> <https://example.org/vocab/slogan> "Numbers that matter"@en .
+<https://example.org/org/acme> <https://example.org/vocab/slogan> "Zahlen, die zaehlen"@de .
+<https://example.org/org/acme> <https://example.org/vocab/term00> "100"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://example.org/org/acme> <https://example.org/vocab/term08> "108"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://example.org/org/acme> <https://example.org/vocab/term16> "116"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://example.org/org/acme> <https://example.org/vocab/term24> "124"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://example.org/org/acme> <https://example.org/vocab/term32> "132"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://example.org/org/acme> <https://example.org/vocab/term40> "140"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://example.org/org/acme> <https://example.org/vocab/term48> "148"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://example.org/org/acme> <https://example.org/vocab/term56> "156"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://example.org/org/acme> <https://example.org/vocab/term64> "164"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://example.org/org/acme> <https://example.org/vocab/term72> "172"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://example.org/org/acme> <https://example.org/vocab/term80> "180"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://example.org/org/acme> <https://example.org/vocab/term88> "188"^^<http://www.w3.org/2001/XMLSchema#integer> .
