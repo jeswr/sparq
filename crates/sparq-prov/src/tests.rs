@@ -76,6 +76,35 @@ fn construct_derivation_emits_core_prov_shape() {
     assert!(lines.iter().any(|l| l.contains("#endedAtTime>")));
 }
 
+/// [GPT-5.6] sq-cg237: the direct accessor preserves configured order and agrees with
+/// every `prov:used` edge materialised for the derivation activity.
+#[test]
+fn construct_used_inputs_are_exposed_in_order_and_materialised() {
+    let source1 = NamedNode::new_unchecked("http://ex/source-1");
+    let source2 = NamedNode::new_unchecked("http://ex/source-2");
+    let inputs = [source1, source2];
+    let config = ProvConfig {
+        used: inputs.to_vec(),
+        clock: fixed_clock,
+        ..ProvConfig::default()
+    };
+    let derivation =
+        derive_construct(&g(), "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }", config).unwrap();
+
+    assert_eq!(derivation.used_inputs(), inputs.as_slice());
+    assert_eq!(derivation.used_inputs().len(), 2);
+
+    let activity = NamedOrBlankNode::NamedNode(derivation.activity().clone());
+    let provenance = derivation.prov_graph();
+    for input in &inputs {
+        assert!(provenance.iter().any(|triple| {
+            triple.subject == activity
+                && triple.predicate.as_str() == "http://www.w3.org/ns/prov#used"
+                && triple.object == Term::NamedNode(input.clone())
+        }));
+    }
+}
+
 #[test]
 fn prov_graph_is_valid_rdf_and_round_trips() {
     let d = derive_construct(

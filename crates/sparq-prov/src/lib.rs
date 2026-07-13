@@ -186,6 +186,12 @@ impl Derivation {
         &self.entity
     }
 
+    /// The configured input-source IRIs, in their original order.
+    // [GPT-5.6] sq-cg237
+    pub fn used_inputs(&self) -> &[NamedNode] {
+        &self.used
+    }
+
     /// The PROV-O lineage of this derivation as an RDF graph (a `Vec<Triple>`).
     ///
     /// Emits, for the result entity `E`, activity `A`, and each input `Iᵢ`:
