@@ -58,6 +58,46 @@ fn predicate_filter_matches_full_load_oracle() {
     assert_eq!(triple_set(&actual), expected);
 }
 
+// [GPT-5.6] sq-obhf1: value-pinned parity and mutation witness for filtered stats.
+#[test]
+fn filtered_stats_match_filtered_load_and_wildcard_stats() {
+    let bytes = load_bytes();
+    let predicate = NamedNode::new("http://www.w3.org/2000/01/rdf-schema#label").unwrap();
+    let pattern = (None, Some(predicate), None);
+
+    let filtered_stats =
+        sparq_hdt::stats_reader_filtered(std::io::Cursor::new(bytes.clone()), &pattern)
+            .expect("counting predicate matches");
+    let filtered_graph =
+        sparq_hdt::load_reader_filtered(std::io::Cursor::new(bytes.clone()), &pattern)
+            .expect("loading predicate matches");
+    let archive_stats = sparq_hdt::stats_reader(std::io::Cursor::new(bytes.clone()))
+        .expect("counting the complete archive");
+    let wildcard_stats =
+        sparq_hdt::stats_reader_filtered(std::io::Cursor::new(bytes), &(None, None, None))
+            .expect("counting an all-wildcard pattern");
+
+    assert_eq!(archive_stats.triples, 328, "fixture triple count changed");
+    assert_eq!(
+        filtered_stats.triples, 74,
+        "fixture predicate count changed"
+    );
+    assert_eq!(filtered_stats.triples, filtered_graph.len());
+    assert_eq!(wildcard_stats, archive_stats);
+    assert_eq!(
+        filtered_stats,
+        sparq_hdt::HdtStats {
+            triples: 74,
+            ..archive_stats
+        },
+        "dictionary cardinalities remain archive-wide"
+    );
+    assert_ne!(
+        filtered_stats.triples, archive_stats.triples,
+        "a real predicate filter must not return the unfiltered count"
+    );
+}
+
 #[test]
 fn all_wildcards_are_identical_to_load_reader() {
     let bytes = load_bytes();

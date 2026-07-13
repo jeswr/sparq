@@ -657,7 +657,7 @@ pub struct StageTimings {
 /// [`decode_dict`] when (and only when) the caller asks for finer timings. Each section
 /// wall is the elapsed of that section's lone [`decode_section`] call (timed inside the
 /// rayon worker in the parallel path, so the four overlap there); `merge` is the four
-/// [`merge_section`] calls. Folded into [`StageTimings`] by [`graph_from_reader_impl`].
+/// [`merge_section`] calls. Folded into [`StageTimings`] by [`decode_reader_with`].
 #[derive(Debug, Clone, Copy, Default)]
 struct DictSectionTimings {
     shared: std::time::Duration,
@@ -671,35 +671,34 @@ struct DictSectionTimings {
 /// collector is monomorphised, keeping the existing unfiltered hot loop free of
 /// dynamic dispatch and feature-specific branches.
 trait TripleCollector {
+    type Output;
+
     fn push(&mut self, source: &Dict, triple: [Id; 3]);
-    fn into_graph(self, source: Dict) -> Graph;
+    fn finish(self, source: Dict, archive_stats: HdtStats) -> Self::Output;
 }
 
 struct AllTriples(Vec<[Id; 3]>);
 
 impl TripleCollector for AllTriples {
+    type Output = Graph;
+
     #[inline]
     fn push(&mut self, _source: &Dict, triple: [Id; 3]) {
         self.0.push(triple);
     }
 
-    fn into_graph(self, source: Dict) -> Graph {
+    fn finish(self, source: Dict, _archive_stats: HdtStats) -> Self::Output {
         Graph::from_parts(source, self.0)
     }
 }
 
-/// [GPT-5.6] sq-lsp7k.24: collector for the opt-in filtered loader. Pattern
-/// terms are resolved once to source-dictionary ids; only accepted triples are
-/// re-interned into the result dictionary.
+/// [GPT-5.6] sq-obhf1: one pattern-resolution and match predicate shared by
+/// filtered graph loading and filtered statistics.
 #[cfg(feature = "load-filter")]
-struct FilteredTriples {
-    bound: [Option<Id>; 3],
-    dict: Dict,
-    triples: Vec<[Id; 3]>,
-}
+struct ResolvedPattern([Option<Id>; 3]);
 
 #[cfg(feature = "load-filter")]
-impl FilteredTriples {
+impl ResolvedPattern {
     fn new(source: &Dict, pattern: &TriplePattern) -> Self {
         let subject = pattern.0.as_ref().map(|subject| {
             let term: oxrdf::Term = subject.clone().into();
@@ -710,8 +709,33 @@ impl FilteredTriples {
             source.lookup(&term)
         });
         let object = pattern.2.as_ref().map(|object| source.lookup(object));
+        Self([subject, predicate, object])
+    }
+
+    #[inline]
+    fn matches(&self, triple: [Id; 3]) -> bool {
+        self.0
+            .iter()
+            .zip(triple)
+            .all(|(bound, id)| bound.is_none_or(|expected| expected == id))
+    }
+}
+
+/// [GPT-5.6] sq-lsp7k.24: collector for the opt-in filtered loader. Pattern
+/// terms are resolved once to source-dictionary ids; only accepted triples are
+/// re-interned into the result dictionary.
+#[cfg(feature = "load-filter")]
+struct FilteredTriples {
+    pattern: ResolvedPattern,
+    dict: Dict,
+    triples: Vec<[Id; 3]>,
+}
+
+#[cfg(feature = "load-filter")]
+impl FilteredTriples {
+    fn new(source: &Dict, pattern: &TriplePattern) -> Self {
         Self {
-            bound: [subject, predicate, object],
+            pattern: ResolvedPattern::new(source, pattern),
             dict: Dict::new(),
             // Do not reserve the archive's full triple count: a selective pattern
             // must retain memory in proportion to its matches, not its input.
@@ -722,14 +746,11 @@ impl FilteredTriples {
 
 #[cfg(feature = "load-filter")]
 impl TripleCollector for FilteredTriples {
+    type Output = Graph;
+
     #[inline]
     fn push(&mut self, source: &Dict, triple: [Id; 3]) {
-        if !self
-            .bound
-            .iter()
-            .zip(triple)
-            .all(|(bound, id)| bound.is_none_or(|expected| expected == id))
-        {
+        if !self.pattern.matches(triple) {
             return;
         }
 
@@ -737,8 +758,43 @@ impl TripleCollector for FilteredTriples {
         self.triples.push(translated);
     }
 
-    fn into_graph(self, _source: Dict) -> Graph {
+    fn finish(self, _source: Dict, _archive_stats: HdtStats) -> Self::Output {
         Graph::from_parts(self.dict, self.triples)
+    }
+}
+
+/// [GPT-5.6] sq-obhf1: counts accepted triples in the same monomorphised SPO
+/// walk as [`FilteredTriples`], without constructing a result dictionary or graph.
+#[cfg(feature = "load-filter")]
+struct FilteredStats {
+    pattern: ResolvedPattern,
+    triples: usize,
+}
+
+#[cfg(feature = "load-filter")]
+impl FilteredStats {
+    fn new(source: &Dict, pattern: &TriplePattern) -> Self {
+        Self {
+            pattern: ResolvedPattern::new(source, pattern),
+            triples: 0,
+        }
+    }
+}
+
+#[cfg(feature = "load-filter")]
+impl TripleCollector for FilteredStats {
+    type Output = HdtStats;
+
+    #[inline]
+    fn push(&mut self, _source: &Dict, triple: [Id; 3]) {
+        if self.pattern.matches(triple) {
+            self.triples += 1;
+        }
+    }
+
+    fn finish(self, _source: Dict, mut archive_stats: HdtStats) -> Self::Output {
+        archive_stats.triples = self.triples;
+        archive_stats
     }
 }
 
@@ -747,7 +803,7 @@ impl TripleCollector for FilteredTriples {
 /// decodes the triples section's bitmaps/sequences directly and emits SPO
 /// id-triples — never constructing the upstream wavelet matrix / OP-index.
 pub fn graph_from_reader<R: BufRead>(reader: R) -> Result<Graph, Error> {
-    graph_from_reader_impl(reader, None, |_dict, capacity| {
+    decode_reader_with(reader, None, |_dict, capacity| {
         AllTriples(Vec::with_capacity(capacity))
     })
 }
@@ -758,8 +814,19 @@ pub(crate) fn graph_from_reader_filtered<R: BufRead>(
     reader: R,
     pattern: &TriplePattern,
 ) -> Result<Graph, Error> {
-    graph_from_reader_impl(reader, None, |dict, _capacity| {
+    decode_reader_with(reader, None, |dict, _capacity| {
         FilteredTriples::new(dict, pattern)
+    })
+}
+
+/// Opt-in filtered statistics over the same walk as [`graph_from_reader_filtered`].
+#[cfg(feature = "load-filter")]
+pub(crate) fn stats_from_reader_filtered<R: BufRead>(
+    reader: R,
+    pattern: &TriplePattern,
+) -> Result<HdtStats, Error> {
+    decode_reader_with(reader, None, |dict, _capacity| {
+        FilteredStats::new(dict, pattern)
     })
 }
 
@@ -771,16 +838,16 @@ pub fn graph_from_reader_timed<R: BufRead>(
     reader: R,
     timings: &mut StageTimings,
 ) -> Result<Graph, Error> {
-    graph_from_reader_impl(reader, Some(timings), |_dict, capacity| {
+    decode_reader_with(reader, Some(timings), |_dict, capacity| {
         AllTriples(Vec::with_capacity(capacity))
     })
 }
 
-fn graph_from_reader_impl<R, C, F>(
+fn decode_reader_with<R, C, F>(
     mut reader: R,
     mut timings: Option<&mut StageTimings>,
     make_collector: F,
-) -> Result<Graph, Error>
+) -> Result<C::Output, Error>
 where
     R: BufRead,
     C: TripleCollector,
@@ -861,6 +928,13 @@ where
     // `stats.reserve(n.min(max_records))` in sparq-core's `load_pred_stats`.
     let cap_triples = num_triples.min(sequence_z.data.len().saturating_mul(64));
     let mut collector = make_collector(&dict, cap_triples);
+    let archive_stats = HdtStats {
+        triples: num_triples,
+        shared: dict_hdt.shared.num_strings,
+        subjects_only: dict_hdt.subjects.num_strings,
+        objects_only: dict_hdt.objects.num_strings,
+        predicates: dict_hdt.predicates.num_strings,
+    };
 
     // Sequential SPO walk, mirroring `SubjectIter::next` but with predicates from
     // `sequence_y` (H2) and end-of-run bits from raw bitmap reads (no wavelet, no
@@ -899,11 +973,11 @@ where
         t.scan_walk = t_build.duration_since(t_walk);
     }
 
-    let graph = collector.into_graph(dict);
+    let output = collector.finish(dict, archive_stats);
     if let Some(t) = timings.as_mut() {
         t.build = t_build.elapsed();
     }
-    Ok(graph)
+    Ok(output)
 }
 
 #[cfg(test)]

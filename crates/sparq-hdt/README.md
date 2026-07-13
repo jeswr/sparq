@@ -65,11 +65,11 @@ export direction over `save` (sq-8ju74).
 - **Header access**: `header()` / `header_reader()` decode just the dataset
   metadata triples (the "H" in HDT) into a queryable `Graph` without touching
   the dictionary/triples sections.
-- **Filtered loading** (opt-in `load-filter` feature, [GPT-5.6] sq-lsp7k.24):
-  `load_reader_filtered(reader, &(subject, predicate, object))` accepts an
-  `Option` in each position, with `None` as a wildcard. It filters during the
-  one-shot SPO walk and interns only accepted triples into the returned graph;
-  an all-wildcard pattern is identical to `load_reader`.
+- **Filtered loading and stats** (opt-in `load-filter` feature, [GPT-5.6]
+  sq-lsp7k.24 / sq-obhf1): `load_reader_filtered(reader, &pattern)` loads matches;
+  `stats_reader_filtered(reader, &pattern)` counts them without constructing a
+  result graph. Both filter during the one-shot SPO walk; an all-wildcard pattern
+  is identical to the corresponding unfiltered operation.
 - **Writing** (opt-in `write` feature): `save(&graph, path)` serialises a `Graph` to a
   standard-layout `.hdt` (or `.hdt.gz`/`.hdt.zst`/`.hdt.bz2`, chosen by the output
   extension), encoding the HDT sections **directly** from sparq's in-memory dictionary +
