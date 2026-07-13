@@ -1,0 +1,63 @@
+# Routing table for issue-native orchestration (PUBLIC — no account information).
+# Maps a triaged issue's role/labels to a model fallback-chain + the agent that implements it.
+# The private account registry (jeswr/agent-account-registry) consumes `model_chain` to pick the
+# first AVAILABLE account (respecting per-account limits + the reaction-lock + cache affinity).
+# See research/issue-native-orchestration.md.
+#
+# model tiers: haiku, terra (haiku's fallback), sonnet, opus, fable, codex (OpenAI/GPT-5.6).
+# `escalate = true` marks surfaces that, once `needs:user` exists (future), route to the maintainer
+# instead of auto-merging.
+
+[defaults]
+model_chain = ["sonnet"]
+agent = "sparq-rust-impl"
+
+# --- by role label -----------------------------------------------------------------------
+[[route]]
+role = "docs"
+model_chain = ["haiku", "terra"]
+agent = "sparq-docs"
+
+[[route]]
+role = "research"
+model_chain = ["sonnet", "opus"]
+agent = "sparq-researcher"
+
+[[route]]
+role = "impl"
+model_chain = ["codex", "sonnet"]
+agent = "sparq-rust-impl"
+
+[[route]]
+role = "site"
+model_chain = ["codex", "sonnet"]
+agent = "sparq-site"
+
+[[route]]
+role = "ci"
+model_chain = ["sonnet"]
+agent = "sparq-ci-infra"
+
+[[route]]
+role = "perf"
+model_chain = ["opus", "sonnet"]
+agent = "sparq-perf-engineer"
+
+[[route]]
+role = "review"
+model_chain = ["opus"]
+agent = "sparq-reviewer"
+
+# --- soundness-sensitive surfaces: opus, and escalate once needs:user exists ------------
+[[route]]
+role = "soundness"
+model_chain = ["opus"]
+agent = "sparq-reviewer"
+escalate = true
+
+# label-keyword surfaces that force the soundness lane regardless of role
+[[route]]
+match_labels = ["zk", "mpc", "reasoner", "crypto", "auth", "e2ee"]
+model_chain = ["opus"]
+agent = "sparq-reviewer"
+escalate = true
