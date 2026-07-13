@@ -9,4 +9,6 @@
 mod server;
 
 #[cfg(feature = "server")]
-pub use server::{quic_server_config, serve_h3, Http3ConfigError};
+pub use server::{
+    quic_server_config, serve_h3, serve_h3_with_limits, H3ConnectionLimits, Http3ConfigError,
+};

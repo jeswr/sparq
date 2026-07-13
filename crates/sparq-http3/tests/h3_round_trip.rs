@@ -14,7 +14,9 @@ use h3::quic::OpenStreams;
 use quinn::crypto::rustls::QuicClientConfig;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use sparq_http3::{quic_server_config, serve_h3, Http3ConfigError};
+use sparq_http3::{
+    quic_server_config, serve_h3, serve_h3_with_limits, H3ConnectionLimits, Http3ConfigError,
+};
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -89,6 +91,28 @@ fn config_rejects_a_server_without_h3_alpn() -> TestResult {
     Ok(())
 }
 
+#[test]
+fn config_replaces_quinns_unbounded_connection_receive_window() -> TestResult {
+    let (cert, key) = certificate()?;
+    let mut tls = rustls_server_config(cert, key)?;
+    tls.alpn_protocols = vec![b"h3".to_vec()];
+
+    let config = quic_server_config(tls)?;
+    let transport = format!("{:?}", config.transport);
+    assert!(
+        transport.contains("receive_window:"),
+        "Quinn's transport debug output must expose the checked receive window: {transport}"
+    );
+    assert!(
+        !transport.contains(&format!(
+            "receive_window: {}",
+            quinn::VarInt::MAX.into_inner()
+        )),
+        "the connection receive window must not retain Quinn's VarInt::MAX default: {transport}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn h3_dispatches_body_status_and_peer_connect_info() -> TestResult {
     async fn echo(body: Bytes) -> (StatusCode, Bytes) {
@@ -149,4 +173,108 @@ async fn h3_dispatches_body_status_and_peer_connect_info() -> TestResult {
         .map_err(|()| "server stopped before shutdown")?;
     tokio::time::timeout(Duration::from_secs(5), server).await???;
     Ok(())
+}
+
+async fn limited_server(
+    limits: H3ConnectionLimits,
+) -> TestResult<(
+    SocketAddr,
+    CertificateDer<'static>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+)> {
+    let (cert, key) = certificate()?;
+    let mut tls = rustls_server_config(cert.clone(), key)?;
+    tls.alpn_protocols = vec![b"h3".to_vec()];
+    let endpoint = quinn::Endpoint::server(quic_server_config(tls)?, "127.0.0.1:0".parse()?)?;
+    let server_addr = endpoint.local_addr()?;
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(serve_h3_with_limits(
+        endpoint,
+        Router::new(),
+        limits,
+        async move {
+            let _ = shutdown_rx.await;
+        },
+    ));
+    Ok((server_addr, cert, shutdown_tx, server))
+}
+
+async fn stop_limited_server(
+    endpoint: quinn::Endpoint,
+    shutdown_tx: tokio::sync::oneshot::Sender<()>,
+    server: tokio::task::JoinHandle<std::io::Result<()>>,
+) -> TestResult {
+    endpoint.close(quinn::VarInt::from_u32(0), b"test complete");
+    shutdown_tx
+        .send(())
+        .map_err(|()| "server stopped before shutdown")?;
+    tokio::time::timeout(Duration::from_secs(5), server).await???;
+    Ok(())
+}
+
+#[tokio::test]
+async fn global_connection_cap_queues_excess_connections_until_release() -> TestResult {
+    let limits = H3ConnectionLimits {
+        max_connections: 1,
+        max_connections_per_ip: None,
+        exempt_internal_ips: true,
+    };
+    let (server_addr, cert, shutdown_tx, server) = limited_server(limits).await?;
+    let endpoint = client_endpoint(cert)?;
+
+    let first = endpoint.connect(server_addr, "localhost")?.await?;
+    let second = endpoint.connect(server_addr, "localhost")?;
+    tokio::pin!(second);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), &mut second)
+            .await
+            .is_err(),
+        "a second QUIC connection must remain queued while the sole global slot is held"
+    );
+
+    first.close(quinn::VarInt::from_u32(0), b"release global slot");
+    let second = tokio::time::timeout(Duration::from_secs(5), second).await??;
+    second.close(quinn::VarInt::from_u32(0), b"test complete");
+    stop_limited_server(endpoint, shutdown_tx, server).await
+}
+
+#[tokio::test]
+async fn per_ip_connection_cap_refuses_excess_connections() -> TestResult {
+    let limits = H3ConnectionLimits {
+        max_connections: 4,
+        max_connections_per_ip: Some(1),
+        exempt_internal_ips: false,
+    };
+    let (server_addr, cert, shutdown_tx, server) = limited_server(limits).await?;
+    let endpoint = client_endpoint(cert)?;
+
+    let first = endpoint.connect(server_addr, "localhost")?.await?;
+    let second = endpoint.connect(server_addr, "localhost")?;
+    let refusal = tokio::time::timeout(Duration::from_secs(5), second).await?;
+    assert!(
+        refusal.is_err(),
+        "a second connection from the same IP must be refused at the per-IP cap"
+    );
+
+    first.close(quinn::VarInt::from_u32(0), b"test complete");
+    stop_limited_server(endpoint, shutdown_tx, server).await
+}
+
+#[tokio::test]
+async fn internal_ip_exemption_leaves_only_the_global_cap() -> TestResult {
+    let limits = H3ConnectionLimits {
+        max_connections: 2,
+        max_connections_per_ip: Some(1),
+        exempt_internal_ips: true,
+    };
+    let (server_addr, cert, shutdown_tx, server) = limited_server(limits).await?;
+    let endpoint = client_endpoint(cert)?;
+
+    let first = endpoint.connect(server_addr, "localhost")?.await?;
+    let second = endpoint.connect(server_addr, "localhost")?.await?;
+
+    first.close(quinn::VarInt::from_u32(0), b"test complete");
+    second.close(quinn::VarInt::from_u32(0), b"test complete");
+    stop_limited_server(endpoint, shutdown_tx, server).await
 }
