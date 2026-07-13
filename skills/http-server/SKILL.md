@@ -37,6 +37,23 @@ cargo run -p sparq-server
 cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriples data.nt
 ```
 
+Opt-in HTTP/3 adds an encrypted QUIC/UDP listener beside the unchanged plain-HTTP TCP
+listener. The two listeners dispatch through the same router; the UDP address defaults to
+`--addr` and can be overridden independently:
+
+```sh
+cargo run -p sparq-server --features http3 -- data.ttl \
+  --http3 --http3-addr 127.0.0.1:3443 \
+  --tls-cert ./cert.pem --tls-key ./key.pem
+```
+
+Both PEM paths are required when `--http3` is set, and malformed or mismatched material
+fails startup. QUIC is mandatorily encrypted, while the TCP listener remains plain HTTP for
+proxy/backward compatibility. The pre-1.0 h3 stack is contained behind the default-off
+feature. `/subscriptions` WebSockets remain HTTP/1.1-only; clients must fall back because
+HTTP/3 extended CONNECT is not implemented. This phase does not advertise `Alt-Svc`, so clients
+connect directly to the configured QUIC address. [GPT-5.6] sq-oprna.3
+
 > **Security: optional Bearer-token write gate; loopback by default.** With no token
 > configured, every endpoint is unauthenticated (the back-compat default). Set
 > `--auth-token <TOKEN>` (env `SPARQ_AUTH_TOKEN`) to require `Authorization: Bearer <TOKEN>`

@@ -116,6 +116,10 @@ server = ["dep:sparq-serve", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tok
 # cfg-stripped and tower-http's compression codecs are not compiled. The middleware preserves
 # streaming bodies and its default predicate excludes SSE and already-encoded responses.
 response-compression = ["server", "tower-http/compression-gzip", "tower-http/compression-zstd"]
+# [GPT-5.6] sq-oprna.3: HTTP/3 is a second, encrypted UDP listener dispatching into the
+# same Router as the unchanged plain-HTTP TCP listener. Every QUIC/TLS dependency remains
+# absent from the normal dependency graph unless this default-off feature is selected.
+http3 = ["server", "dep:quinn", "dep:rustls", "dep:rustls-pemfile", "dep:sparq-http3"]
 # [OPUS-4.8] (sq-i3xc, lever H5) `zlib-ng`: opt-in, OFF by default, NATIVE-ONLY faster
 # gzip backend (zlib-ng C library) for the server's `Content-Encoding: gzip` request
 # inflate (MultiGzDecoder) — a measured 1.5–3× at ~zero code change. The weak
@@ -490,6 +494,13 @@ serde_json = { version = "1", optional = true }
 # `flate2 = "1"` the CLI / parse / hdt crates already use, so the workspace gains no new
 # transitive code. Server-feature only (the decode lives on the async HTTP body path).
 flate2 = { version = "1", optional = true }
+# [GPT-5.6] sq-oprna.3: owned by the default-off `http3` feature. Quinn and the shared
+# bridge use the same rustls 0.23 aws-lc-rs provider; rustls-pemfile reads the operator's
+# certificate chain and private key without introducing a TLS path on the TCP listener.
+quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
+sparq-http3 = { path = "../sparq-http3", optional = true, features = ["server"] }
 
 mimalloc = "0.1"
 
@@ -528,3 +539,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 # [OPUS-4.8] (sq-ebii) The decompression-ratio-cap test gzips a request body (a high-ratio
 # "zip bomb" and a benign small body) to assert the 413 guard fires before / not on each.
 flate2 = "1"
+# [GPT-5.6] sq-oprna.3: feature-gated integration client for the real QUIC listener.
+bytes = "1"
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
