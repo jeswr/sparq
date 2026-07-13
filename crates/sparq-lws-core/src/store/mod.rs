@@ -27,6 +27,7 @@ pub mod embedded;
 // engine in-process (`embedded` above) instead of paying an HTTP round-trip per index operation.
 #[cfg(all(feature = "http-sparq", not(target_arch = "wasm32")))]
 pub mod http;
+mod limits;
 pub mod reconcile;
 pub mod sparq;
 pub mod sparql;
@@ -47,6 +48,10 @@ pub use counting::{
 pub use embedded::EmbeddedSparqClient;
 #[cfg(all(feature = "http-sparq", not(target_arch = "wasm32")))]
 pub use http::{HttpSparqClient, SparqHttpError};
+pub use limits::{
+    InMemoryStoreLimits, StoreUsage, DEFAULT_IN_MEMORY_MAX_RESOURCE_COUNT,
+    DEFAULT_IN_MEMORY_MAX_TOTAL_BYTES,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use reconcile::spawn_periodic;
 pub use reconcile::{
@@ -277,6 +282,7 @@ impl<S: SparqClient, B: BlobStore> CompositeStore<S, B> {
         let body = self.blob.get(&meta.blob_key).await.map_err(|e| match e {
             // The index says it exists but bytes are missing: a reconciler-class inconsistency.
             BlobError::NotFound => ServerError::Storage("byte/index inconsistency".into()),
+            BlobError::QuotaExceeded => ServerError::InsufficientStorage,
             BlobError::Backend(msg) => ServerError::Storage(msg),
         })?;
         self.body_cache.insert(&meta.blob_key, &meta.etag, &body);
@@ -354,6 +360,46 @@ impl<S: SparqClient, B: BlobStore> CompositeStore<S, B> {
     }
 }
 
+// [GPT-5.6] The concrete wasm/dev-store pair exposes one combined limits and usage view without
+// widening the production backend traits, whose remote stores have backend-specific quota models.
+impl CompositeStore<InMemorySparqClient, InMemoryBlobStore> {
+    /// Build a bounded in-memory store with the same limits enforced at both storage seams.
+    pub fn in_memory_with_limits(limits: InMemoryStoreLimits) -> Self {
+        Self::new(
+            InMemorySparqClient::with_limits(limits),
+            InMemoryBlobStore::with_limits(limits),
+        )
+    }
+
+    /// Return physical byte usage and the fuller storage map's occupied-entry count.
+    pub fn usage(&self) -> ServerResult<StoreUsage> {
+        let blob = self.blob.usage().map_err(|error| match error {
+            BlobError::NotFound => ServerError::Storage("blob usage lookup failed".into()),
+            BlobError::QuotaExceeded => ServerError::InsufficientStorage,
+            BlobError::Backend(message) => ServerError::Storage(message),
+        })?;
+        let indexed = self.sparq.usage().map_err(|error| match error {
+            SparqError::NotFound => ServerError::Storage("index usage lookup failed".into()),
+            SparqError::QuotaExceeded => ServerError::InsufficientStorage,
+            SparqError::Backend(message) => ServerError::Storage(message),
+        })?;
+        Ok(StoreUsage {
+            total_bytes: blob.total_bytes,
+            resource_count: blob.resource_count.max(indexed),
+        })
+    }
+
+    /// Return the effective limits; mismatched manually-constructed backends report the tighter cap.
+    pub fn quota(&self) -> InMemoryStoreLimits {
+        let blob = self.blob.quota();
+        let index = self.sparq.quota();
+        InMemoryStoreLimits::new(
+            blob.max_total_bytes,
+            blob.max_resource_count.min(index.max_resource_count),
+        )
+    }
+}
+
 #[async_trait]
 impl<S: SparqClient, B: BlobStore> Store for CompositeStore<S, B> {
     async fn read(&self, iri: &str) -> ServerResult<Resource> {
@@ -363,6 +409,7 @@ impl<S: SparqClient, B: BlobStore> Store for CompositeStore<S, B> {
         let meta = match self.sparq.get_meta(iri).await {
             Ok(m) => m,
             Err(SparqError::NotFound) => return Err(ServerError::NotFound),
+            Err(SparqError::QuotaExceeded) => return Err(ServerError::InsufficientStorage),
             Err(SparqError::Backend(e)) => return Err(ServerError::Storage(e)),
         };
         let body = self.fetch_body(&meta).await?;
@@ -373,6 +420,7 @@ impl<S: SparqClient, B: BlobStore> Store for CompositeStore<S, B> {
         match self.sparq.get_meta(iri).await {
             Ok(m) => Ok(Some(m)),
             Err(SparqError::NotFound) => Ok(None),
+            Err(SparqError::QuotaExceeded) => Err(ServerError::InsufficientStorage),
             Err(SparqError::Backend(e)) => Err(ServerError::Storage(e)),
         }
     }
@@ -404,10 +452,10 @@ impl<S: SparqClient, B: BlobStore> Store for CompositeStore<S, B> {
         // key) — the write errors instead, so the no-two-writes-share-a-key invariant holds even then.
         let blob_key = Self::mint_blob_key(iri)?;
         let etag = Self::etag_for(&body);
-        self.blob
-            .put(&blob_key, body)
-            .await
-            .map_err(|e| ServerError::Storage(format!("{e}")))?;
+        self.blob.put(&blob_key, body).await.map_err(|e| match e {
+            BlobError::QuotaExceeded => ServerError::InsufficientStorage,
+            other => ServerError::Storage(format!("{other}")),
+        })?;
         let meta = ResourceMeta {
             content_type: content_type.to_string(),
             blob_key,
@@ -419,7 +467,10 @@ impl<S: SparqClient, B: BlobStore> Store for CompositeStore<S, B> {
         self.sparq
             .put_meta(iri, meta.clone())
             .await
-            .map_err(|e| ServerError::Storage(format!("{e}")))?;
+            .map_err(|e| match e {
+                SparqError::QuotaExceeded => ServerError::InsufficientStorage,
+                other => ServerError::Storage(format!("{other}")),
+            })?;
         Ok(meta)
     }
 
@@ -444,10 +495,10 @@ impl<S: SparqClient, B: BlobStore> Store for CompositeStore<S, B> {
         // key), so the no-shared-key invariant holds even then.
         let blob_key = Self::mint_blob_key(child)?;
         let etag = Self::etag_for(&body);
-        self.blob
-            .put(&blob_key, body)
-            .await
-            .map_err(|e| ServerError::Storage(format!("{e}")))?;
+        self.blob.put(&blob_key, body).await.map_err(|e| match e {
+            BlobError::QuotaExceeded => ServerError::InsufficientStorage,
+            other => ServerError::Storage(format!("{other}")),
+        })?;
         let meta = ResourceMeta {
             content_type: content_type.to_string(),
             blob_key,
@@ -463,6 +514,7 @@ impl<S: SparqClient, B: BlobStore> Store for CompositeStore<S, B> {
         {
             Ok(()) => Ok(meta),
             Err(SparqError::NotFound) => Err(ServerError::NotFound),
+            Err(SparqError::QuotaExceeded) => Err(ServerError::InsufficientStorage),
             Err(SparqError::Backend(e)) => Err(ServerError::Storage(e)),
         }
     }
@@ -472,6 +524,7 @@ impl<S: SparqClient, B: BlobStore> Store for CompositeStore<S, B> {
         let blob_key = match self.sparq.get_meta(iri).await {
             Ok(m) => Some(m.blob_key),
             Err(SparqError::NotFound) => None,
+            Err(SparqError::QuotaExceeded) => return Err(ServerError::InsufficientStorage),
             Err(SparqError::Backend(e)) => return Err(ServerError::Storage(e)),
         };
         // Detach from the parent's containment first, then drop the index record, then the bytes.
@@ -539,6 +592,7 @@ impl<S: SparqClient, B: BlobStore> Store for CompositeStore<S, B> {
             .await
             .map_err(|e| match e {
                 SparqError::NotFound => ServerError::NotFound,
+                SparqError::QuotaExceeded => ServerError::InsufficientStorage,
                 SparqError::Backend(msg) => ServerError::Storage(msg),
             })
     }

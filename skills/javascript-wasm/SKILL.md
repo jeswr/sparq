@@ -129,6 +129,16 @@ The host MUST complete OIDC validation before supplying an authenticated WebID; 
 owner parameter only provisions WAC and is not authentication. Do not enable or stub
 `solid-oidc-verifier` inside wasm: its pinned crypto backend is native-only.
 
+[GPT-5.6] The in-memory Solid store is bounded by default: its physical blob map admits at most
+64 MiB in aggregate and 4,096 stored entries, and its metadata map independently admits at most
+4,096 indexed resources. Physical usage includes unreferenced blob versions awaiting reconciliation,
+so repeated overwrites cannot bypass the ceiling. A PUT/POST that would exceed either limit fails
+closed with HTTP 507; deleting a current blob releases its bytes and entry slot. Rust embedders can
+configure both ceilings with `InMemoryStoreLimits::new(max_total_bytes, max_resource_count)` and
+`CompositeStore::in_memory_with_limits(limits)`, then inspect the concrete store's `usage()` and
+`quota()` views. The current JS `SolidServer` constructor uses the bounded Rust defaults and does not
+yet expose per-instance limit options.
+
 [GPT-5.6] `@jeswr/solid-server` supplies the local Node host. Install and run it with
 `npx @jeswr/solid-server --port 3000 --base-url http://127.0.0.1:3000 --owner-webid
 https://id.example/alice#me`, or import `startSolidServer({ port, baseUrl, ownerWebid })`; it resolves

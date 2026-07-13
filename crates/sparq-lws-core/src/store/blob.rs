@@ -14,11 +14,16 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use bytes::Bytes;
 
+use super::{InMemoryStoreLimits, StoreUsage};
+
 /// A blob-store error (kept opaque so it never leaks backend detail to a client).
 #[derive(Debug, thiserror::Error)]
 pub enum BlobError {
     #[error("blob not found")]
     NotFound,
+    /// The configured in-memory byte or entry ceiling would be exceeded.
+    #[error("in-memory blob-store quota exceeded")]
+    QuotaExceeded,
     #[error("blob backend error: {0}")]
     Backend(String),
 }
@@ -178,6 +183,14 @@ struct StoredBlob {
     generation: u64,
 }
 
+/// Blob entries and their exact aggregate body-byte usage, protected by one lock so admission and
+/// accounting are atomic under concurrent PUTs.
+#[derive(Default)]
+struct BlobState {
+    entries: HashMap<String, StoredBlob>,
+    total_bytes: usize,
+}
+
 /// An in-memory [`BlobStore`] for tests and the M1 boot-without-S3 path.
 ///
 /// Each [`put`](InMemoryBlobStore::put) stamps the wall-clock insert time, mirroring an object store's
@@ -191,9 +204,8 @@ struct StoredBlob {
 /// STRICTLY DIFFERENT generation. That generation is the CAS witness the reconciler deletes on, making
 /// [`delete_if_unchanged`](BlobStore::delete_if_unchanged) race-free AND clock-independent (the HIGH fix:
 /// a `SystemTime` is not a unique write version, a monotonic generation is).
-#[derive(Default)]
 pub struct InMemoryBlobStore {
-    inner: Mutex<HashMap<String, StoredBlob>>,
+    inner: Mutex<BlobState>,
     /// Store-wide monotonic write counter. Every write does `fetch_add(1)` and stamps the returned value
     /// onto the entry's `generation`, so generations are globally unique + strictly increasing across the
     /// store. The bump is done WHILE the store `Mutex` is held (Finding 2: `bump_generation_locked`), in
@@ -202,11 +214,81 @@ pub struct InMemoryBlobStore {
     /// The `AtomicU64` type is retained only to keep the bump callable through the `&self` API; all
     /// ordering/visibility comes from the surrounding `Mutex`, so `Relaxed` suffices.
     next_generation: AtomicU64,
+    /// [GPT-5.6] Immutable admission ceilings; checks happen under `inner`'s lock.
+    limits: InMemoryStoreLimits,
+}
+
+impl Default for InMemoryBlobStore {
+    fn default() -> Self {
+        Self::with_limits(InMemoryStoreLimits::default())
+    }
 }
 
 impl InMemoryBlobStore {
+    /// Build with the bounded default limits.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Build with explicit aggregate byte and stored-entry limits.
+    pub fn with_limits(limits: InMemoryStoreLimits) -> Self {
+        Self {
+            inner: Mutex::new(BlobState::default()),
+            next_generation: AtomicU64::new(0),
+            limits,
+        }
+    }
+
+    /// Return exact physical usage, including unreferenced versions awaiting reconciliation.
+    pub fn usage(&self) -> Result<StoreUsage, BlobError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| BlobError::Backend("poisoned".into()))?;
+        Ok(StoreUsage {
+            total_bytes: guard.total_bytes,
+            resource_count: guard.entries.len(),
+        })
+    }
+
+    /// Return the immutable admission limits configured for this store.
+    pub fn quota(&self) -> InMemoryStoreLimits {
+        self.limits
+    }
+
+    /// Insert one body while atomically enforcing byte and entry ceilings and updating accounting.
+    fn put_at(&self, key: &str, body: Bytes, last_modified: SystemTime) -> Result<(), BlobError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| BlobError::Backend("poisoned".into()))?;
+        let previous_bytes = guard.entries.get(key).map_or(0, |blob| blob.body.len());
+        let is_new = !guard.entries.contains_key(key);
+        if is_new && guard.entries.len() >= self.limits.max_resource_count {
+            return Err(BlobError::QuotaExceeded);
+        }
+        let retained_bytes = guard
+            .total_bytes
+            .checked_sub(previous_bytes)
+            .ok_or_else(|| BlobError::Backend("blob byte accounting underflow".into()))?;
+        let next_total = retained_bytes
+            .checked_add(body.len())
+            .ok_or(BlobError::QuotaExceeded)?;
+        if next_total > self.limits.max_total_bytes {
+            return Err(BlobError::QuotaExceeded);
+        }
+
+        let generation = self.bump_generation_locked(&guard);
+        guard.entries.insert(
+            key.to_string(),
+            StoredBlob {
+                body,
+                last_modified,
+                generation,
+            },
+        );
+        guard.total_bytes = next_total;
+        Ok(())
     }
 
     /// The next strictly-increasing generation, read+incremented WHILE the store `Mutex` is held (the
@@ -222,7 +304,7 @@ impl InMemoryBlobStore {
     /// provides the ordering/visibility — the atomic's own ordering carries no additional guarantee here.
     /// (The `AtomicU64` is retained over a plain `u64` only to avoid threading a `&mut` field through the
     /// `&self` API; correctness comes entirely from the surrounding lock.)
-    fn bump_generation_locked(&self, _guard: &HashMap<String, StoredBlob>) -> u64 {
+    fn bump_generation_locked(&self, _guard: &BlobState) -> u64 {
         self.next_generation.fetch_add(1, Ordering::Relaxed)
     }
 
@@ -233,20 +315,13 @@ impl InMemoryBlobStore {
     /// Still stamps a FRESH monotonic `generation` (the CAS witness) on every call, exactly like `put` —
     /// so two `put_with_time` calls with the SAME `last_modified` are correctly distinguished by their
     /// generations (the property the grace-vs-CAS separation relies on).
-    pub fn put_with_time(&self, key: &str, body: Bytes, last_modified: SystemTime) {
-        // Finding 2: bump AND stamp the generation while holding the SAME lock as the insert, so the
-        // counter increment + the entry insertion are one atomic critical section ⇒ generations are
-        // strictly WRITE-ORDERED (no interleave between bump and insert).
-        let mut guard = self.inner.lock().expect("blob store mutex poisoned");
-        let generation = self.bump_generation_locked(&guard);
-        guard.insert(
-            key.to_string(),
-            StoredBlob {
-                body,
-                last_modified,
-                generation,
-            },
-        );
+    pub fn put_with_time(
+        &self,
+        key: &str,
+        body: Bytes,
+        last_modified: SystemTime,
+    ) -> Result<(), BlobError> {
+        self.put_at(key, body, last_modified)
     }
 
     /// Read the current stamped generation of a key (test helper — lets a test capture the CAS witness a
@@ -254,7 +329,7 @@ impl InMemoryBlobStore {
     /// generation and is therefore refused by `delete_if_unchanged`).
     pub fn generation_of(&self, key: &str) -> Option<u64> {
         let guard = self.inner.lock().expect("blob store mutex poisoned");
-        guard.get(key).map(|b| b.generation)
+        guard.entries.get(key).map(|b| b.generation)
     }
 }
 
@@ -266,31 +341,14 @@ impl BlobStore for InMemoryBlobStore {
             .lock()
             .map_err(|_| BlobError::Backend("poisoned".into()))?;
         guard
+            .entries
             .get(key)
             .map(|b| b.body.clone())
             .ok_or(BlobError::NotFound)
     }
 
     async fn put(&self, key: &str, body: Bytes) -> Result<(), BlobError> {
-        // Finding 2: bump AND stamp the generation WHILE holding the lock, so the counter increment + the
-        // insert are one atomic critical section ⇒ generations are strictly WRITE-ORDERED (a write stamped
-        // generation N is the one that inserts it; no other write interleaves between the bump and the
-        // insert). Every put — overwrite or not — still gets a strictly different generation, so a
-        // same-timestamp overwrite has a distinct CAS witness.
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| BlobError::Backend("poisoned".into()))?;
-        let generation = self.bump_generation_locked(&guard);
-        guard.insert(
-            key.to_string(),
-            StoredBlob {
-                body,
-                last_modified: crate::clock::now(),
-                generation,
-            },
-        );
-        Ok(())
+        self.put_at(key, body, crate::clock::now())
     }
 
     async fn exists(&self, key: &str) -> Result<bool, BlobError> {
@@ -298,7 +356,7 @@ impl BlobStore for InMemoryBlobStore {
             .inner
             .lock()
             .map_err(|_| BlobError::Backend("poisoned".into()))?;
-        Ok(guard.contains_key(key))
+        Ok(guard.entries.contains_key(key))
     }
 
     async fn delete(&self, key: &str) -> Result<(), BlobError> {
@@ -306,7 +364,12 @@ impl BlobStore for InMemoryBlobStore {
             .inner
             .lock()
             .map_err(|_| BlobError::Backend("poisoned".into()))?;
-        guard.remove(key);
+        if let Some(blob) = guard.entries.remove(key) {
+            guard.total_bytes = guard
+                .total_bytes
+                .checked_sub(blob.body.len())
+                .ok_or_else(|| BlobError::Backend("blob byte accounting underflow".into()))?;
+        }
         Ok(())
     }
 
@@ -316,6 +379,7 @@ impl BlobStore for InMemoryBlobStore {
             .lock()
             .map_err(|_| BlobError::Backend("poisoned".into()))?;
         Ok(guard
+            .entries
             .iter()
             .map(|(key, blob)| BlobEntry {
                 key: key.clone(),
@@ -333,7 +397,7 @@ impl BlobStore for InMemoryBlobStore {
             .inner
             .lock()
             .map_err(|_| BlobError::Backend("poisoned".into()))?;
-        Ok(guard.get(key).map(|blob| BlobEntry {
+        Ok(guard.entries.get(key).map(|blob| BlobEntry {
             key: key.to_string(),
             last_modified: Some(blob.last_modified),
             generation: Some(blob.generation),
@@ -359,9 +423,16 @@ impl BlobStore for InMemoryBlobStore {
             .lock()
             .map_err(|_| BlobError::Backend("poisoned".into()))?;
         // Compare the CURRENT generation to the witness, then remove, all while still holding the lock.
-        match guard.get(key) {
+        match guard.entries.get(key) {
             Some(blob) if blob.generation == expected_generation => {
-                guard.remove(key);
+                let blob = guard
+                    .entries
+                    .remove(key)
+                    .expect("entry was present under the same lock");
+                guard.total_bytes = guard
+                    .total_bytes
+                    .checked_sub(blob.body.len())
+                    .ok_or_else(|| BlobError::Backend("blob byte accounting underflow".into()))?;
                 Ok(true)
             }
             // Key gone, or its generation moved since the witness was observed (a rewrite landed — even a
@@ -387,13 +458,16 @@ mod tests {
         let blob = InMemoryBlobStore::new();
         let same_stamp = SystemTime::now() - Duration::from_secs(3600);
 
-        blob.put_with_time("k", Bytes::from_static(b"v1"), same_stamp);
+        blob.put_with_time("k", Bytes::from_static(b"v1"), same_stamp)
+            .unwrap();
         let g1 = blob.generation_of("k").expect("v1 exists");
         // A same-key OVERWRITE at the IDENTICAL last_modified still bumps the generation.
-        blob.put_with_time("k", Bytes::from_static(b"v2"), same_stamp);
+        blob.put_with_time("k", Bytes::from_static(b"v2"), same_stamp)
+            .unwrap();
         let g2 = blob.generation_of("k").expect("v2 exists");
         // A DIFFERENT key advances the same store-wide counter.
-        blob.put_with_time("other", Bytes::from_static(b"o"), same_stamp);
+        blob.put_with_time("other", Bytes::from_static(b"o"), same_stamp)
+            .unwrap();
         let g3 = blob.generation_of("other").expect("other exists");
 
         assert!(
@@ -403,6 +477,85 @@ mod tests {
         assert!(
             g2 < g3,
             "the store-wide generation counter is strictly increasing across keys too"
+        );
+    }
+
+    #[tokio::test]
+    async fn byte_and_entry_limits_fail_without_mutating_usage() {
+        // [GPT-5.6] Mutation witness: removing either admission check makes its corresponding
+        // rejected put succeed and changes the pinned usage below.
+        let limits = InMemoryStoreLimits::new(4, 2);
+        let blob = InMemoryBlobStore::with_limits(limits);
+
+        blob.put("a", Bytes::from_static(b"123")).await.unwrap();
+        assert_eq!(
+            blob.usage().unwrap(),
+            StoreUsage {
+                total_bytes: 3,
+                resource_count: 1,
+            }
+        );
+        assert!(matches!(
+            blob.put("b", Bytes::from_static(b"45")).await,
+            Err(BlobError::QuotaExceeded)
+        ));
+        assert_eq!(blob.usage().unwrap().total_bytes, 3);
+
+        // Replacing a key subtracts its old body before testing the aggregate byte ceiling.
+        blob.put("a", Bytes::from_static(b"1234")).await.unwrap();
+        blob.put("b", Bytes::new()).await.unwrap();
+        assert!(matches!(
+            blob.put("c", Bytes::new()).await,
+            Err(BlobError::QuotaExceeded)
+        ));
+        assert_eq!(
+            blob.usage().unwrap(),
+            StoreUsage {
+                total_bytes: 4,
+                resource_count: 2,
+            }
+        );
+
+        blob.delete("a").await.unwrap();
+        assert_eq!(
+            blob.usage().unwrap(),
+            StoreUsage {
+                total_bytes: 0,
+                resource_count: 1,
+            }
+        );
+        assert_eq!(blob.quota(), limits);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_puts_cannot_over_admit_the_limits() {
+        // [GPT-5.6] The check and insert share one lock: a racing burst can fill, never overshoot.
+        let blob = Arc::new(InMemoryBlobStore::with_limits(InMemoryStoreLimits::new(
+            8, 8,
+        )));
+        let mut handles = Vec::new();
+        for n in 0..64 {
+            let blob = Arc::clone(&blob);
+            handles.push(tokio::spawn(async move {
+                blob.put(&format!("k{n}"), Bytes::from_static(b"x")).await
+            }));
+        }
+
+        let mut admitted = 0;
+        for handle in handles {
+            match handle.await.unwrap() {
+                Ok(()) => admitted += 1,
+                Err(BlobError::QuotaExceeded) => {}
+                Err(other) => panic!("unexpected blob error: {other}"),
+            }
+        }
+        assert_eq!(admitted, 8);
+        assert_eq!(
+            blob.usage().unwrap(),
+            StoreUsage {
+                total_bytes: 8,
+                resource_count: 8,
+            }
         );
     }
 
