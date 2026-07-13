@@ -17,24 +17,7 @@ use sparq_shaclc::{parse_strict, DEFAULT_BASE};
 /// tracking bead. An entry here asserts the divergence STILL EXISTS, so
 /// fixing sparq-shacl turns this test red until the entry is deleted —
 /// the list can only shrink, never rot.
-const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    (
-        "relative-base",
-        "sq-0g57x: after `BASE <#>` the hand-rolled scs emits its stored base verbatim as the \
-         owl:Ontology subject (urn:x-base:default#); RFC 3986 empty-reference resolution strips \
-         the empty fragment (urn:x-base:default) — generated parser + oxttl + shaclc-parse agree",
-    ),
-    (
-        "relativeHash",
-        "sq-0g57x (same root cause): a fragment-carrying BASE keeps its #fragment in the \
-         hand-rolled owl:Ontology subject; empty-reference resolution strips it",
-    ),
-    (
-        "relativePrefixFragmentThing",
-        "sq-0g57x (same root cause): a fragment-carrying BASE keeps its #fragment in the \
-         hand-rolled owl:Ontology subject; empty-reference resolution strips it",
-    ),
-];
+const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
 
 #[test]
 fn generated_parser_matches_the_hand_rolled_scs_parser_on_the_shared_corpus() {
