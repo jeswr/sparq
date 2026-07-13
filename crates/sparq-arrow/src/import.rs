@@ -1,6 +1,7 @@
 //! The `arrow`-feature-gated import: Arrow `RecordBatch` → `QueryResult`.
 
 use arrow_array::{Array, RecordBatch, StringArray, StructArray};
+use arrow_schema::Schema;
 use oxrdf::{BaseDirection, BlankNode, Literal, NamedNode, Term, Variable};
 use sparq_engine::QueryResult;
 
@@ -31,6 +32,35 @@ impl std::fmt::Display for ArrowError {
 }
 
 impl std::error::Error for ArrowError {}
+
+// [GPT-5.6] One schema-validation path serves RecordBatch, IPC, and Parquet imports so
+// schema-only readers cannot drift from the full row decoders.
+pub(crate) fn variables_from_schema(schema: &Schema) -> Result<Vec<Variable>, ArrowError> {
+    let mut vars = Vec::with_capacity(schema.fields().len());
+    for field in schema.fields() {
+        let variable = Variable::new(field.name().to_string()).map_err(|error| {
+            ArrowError::invalid(format!(
+                "invalid SELECT variable in Arrow field '{}': {}",
+                field.name(),
+                error
+            ))
+        })?;
+        if vars.iter().any(|existing: &Variable| existing == &variable) {
+            return Err(ArrowError::invalid(format!(
+                "duplicate SELECT variable '{}' in Arrow schema",
+                field.name()
+            )));
+        }
+        if !field.is_nullable() || field.data_type() != &term_struct_type() {
+            return Err(ArrowError::invalid(format!(
+                "Arrow field '{}' does not use the nullable RDF-term struct schema",
+                field.name()
+            )));
+        }
+        vars.push(variable);
+    }
+    Ok(vars)
+}
 
 /// Convert an Arrow [`RecordBatch`] using this crate's RDF-term struct projection back
 /// into a SPARQL [`QueryResult`].
@@ -65,30 +95,10 @@ pub fn from_record_batch(batch: &RecordBatch) -> Result<QueryResult, ArrowError>
     // [GPT-5.6] Validate before reading: Arrow permits arbitrary struct schemas, while
     // this inverse is sound only for the exact lossless projection emitted by this crate.
     let schema = batch.schema();
-    let mut vars = Vec::with_capacity(schema.fields().len());
+    let vars = variables_from_schema(schema.as_ref())?;
     let mut columns = Vec::with_capacity(schema.fields().len());
 
     for (index, field) in schema.fields().iter().enumerate() {
-        let variable = Variable::new(field.name().to_string()).map_err(|error| {
-            ArrowError::invalid(format!(
-                "invalid SELECT variable in Arrow field '{}': {}",
-                field.name(),
-                error
-            ))
-        })?;
-        if vars.iter().any(|existing: &Variable| existing == &variable) {
-            return Err(ArrowError::invalid(format!(
-                "duplicate SELECT variable '{}' in Arrow schema",
-                field.name()
-            )));
-        }
-        if !field.is_nullable() || field.data_type() != &term_struct_type() {
-            return Err(ArrowError::invalid(format!(
-                "Arrow field '{}' does not use the nullable RDF-term struct schema",
-                field.name()
-            )));
-        }
-
         let column = batch
             .column(index)
             .as_any()
@@ -99,7 +109,6 @@ pub fn from_record_batch(batch: &RecordBatch) -> Result<QueryResult, ArrowError>
                     field.name()
                 ))
             })?;
-        vars.push(variable);
         columns.push(column);
     }
 

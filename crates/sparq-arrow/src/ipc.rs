@@ -1,11 +1,12 @@
 //! The `ipc`-feature-gated Arrow IPC stream serialization of the RDF-term projection.
 
-use arrow_array::RecordBatch;
 use arrow_ipc::reader::StreamReader;
 use arrow_ipc::writer::StreamWriter;
 use arrow_schema::ArrowError as ArrowLibraryError;
+use oxrdf::Variable;
 use sparq_engine::QueryResult;
 
+use crate::import::variables_from_schema;
 use crate::{from_record_batch, to_record_batch, ArrowError, ArrowExportError};
 
 fn import_error(error: ArrowLibraryError) -> ArrowError {
@@ -33,6 +34,20 @@ pub fn to_ipc_bytes(result: &QueryResult) -> Result<Vec<u8>, ArrowExportError> {
     writer.into_inner().map_err(ArrowExportError::from)
 }
 
+/// Read the SPARQL `SELECT` variables from an Arrow IPC stream schema.
+///
+/// This validates the same variable names and nullable five-field RDF-term struct
+/// schema as [`from_ipc_bytes`], but does not decode any record batches.
+///
+/// # Errors
+///
+/// Returns [`ArrowError`] if `bytes` do not contain a readable Arrow IPC stream header
+/// or its schema violates this crate's RDF-term projection contract.
+pub fn ipc_variables_from_bytes(bytes: &[u8]) -> Result<Vec<Variable>, ArrowError> {
+    let reader = StreamReader::try_new(bytes, None).map_err(import_error)?;
+    variables_from_schema(reader.schema().as_ref())
+}
+
 /// Deserialize an Arrow IPC stream containing this crate's RDF-term projection.
 ///
 /// Every decoded batch is validated through [`from_record_batch`]. The stream schema is
@@ -48,9 +63,11 @@ pub fn from_ipc_bytes(bytes: &[u8]) -> Result<QueryResult, ArrowError> {
     let reader = StreamReader::try_new(bytes, None).map_err(import_error)?;
 
     // Validate the stream header independently of its batches so a zero-row stream
-    // cannot bypass the schema contract. `new_empty` retains the SELECT variable names.
-    let empty = RecordBatch::new_empty(reader.schema());
-    let mut result = from_record_batch(&empty)?;
+    // cannot bypass the schema contract.
+    let mut result = QueryResult {
+        vars: variables_from_schema(reader.schema().as_ref())?,
+        rows: Vec::new(),
+    };
 
     for batch in reader {
         let decoded = from_record_batch(&batch.map_err(decode_error)?)?;

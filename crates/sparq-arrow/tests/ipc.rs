@@ -2,7 +2,7 @@
 #![cfg(feature = "ipc")]
 
 use oxrdf::{BaseDirection, BlankNode, Literal, NamedNode, Term, Triple, Variable};
-use sparq_arrow::{from_ipc_bytes, to_ipc_bytes};
+use sparq_arrow::{from_ipc_bytes, ipc_variables_from_bytes, to_ipc_bytes};
 use sparq_engine::QueryResult;
 
 fn assert_ipc_identity(result: &QueryResult) {
@@ -48,6 +48,29 @@ fn every_term_kind_empty_literal_and_unbound_round_trip_row_for_row() {
     assert_ipc_identity(&result);
 }
 
+/// [GPT-5.6] Value-pinned mutation witness: changing either expected name fails while
+/// the encoded rows remain untouched.
+#[test]
+fn schema_only_reader_recovers_nonempty_result_variables() {
+    let result = QueryResult {
+        vars: vec![Variable::new("s").unwrap(), Variable::new("label").unwrap()],
+        rows: vec![vec![
+            Some(Term::NamedNode(
+                NamedNode::new("https://example.test/s").unwrap(),
+            )),
+            Some(Term::Literal(Literal::new_simple_literal("label"))),
+        ]],
+    };
+    let bytes = to_ipc_bytes(&result).unwrap();
+
+    let variables = ipc_variables_from_bytes(&bytes).unwrap();
+    assert_eq!(variables, result.vars);
+    assert_eq!(
+        variables.iter().map(Variable::as_str).collect::<Vec<_>>(),
+        ["s", "label"]
+    );
+}
+
 #[test]
 fn empty_result_preserves_two_variable_schema_and_zero_rows() {
     let result = QueryResult {
@@ -58,6 +81,8 @@ fn empty_result_preserves_two_variable_schema_and_zero_rows() {
         rows: Vec::new(),
     };
 
+    let bytes = to_ipc_bytes(&result).unwrap();
+    assert_eq!(ipc_variables_from_bytes(&bytes).unwrap(), result.vars);
     assert_ipc_identity(&result);
 }
 

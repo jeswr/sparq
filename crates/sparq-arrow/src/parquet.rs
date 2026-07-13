@@ -1,13 +1,14 @@
 //! The `parquet`-feature-gated serialization of the Arrow RDF-term projection.
 
-use arrow_array::RecordBatch;
 use arrow_schema::ArrowError as ArrowLibraryError;
 use bytes::Bytes;
+use oxrdf::Variable;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::arrow::ArrowWriter;
 use parquet::errors::ParquetError;
 use sparq_engine::QueryResult;
 
+use crate::import::variables_from_schema;
 use crate::{from_record_batch, to_record_batch, ArrowError, ArrowExportError};
 
 // [GPT-5.6] Keep Parquet failures inside the existing export error surface instead of
@@ -42,6 +43,22 @@ pub fn to_parquet_bytes(result: &QueryResult) -> Result<Vec<u8>, ArrowExportErro
     writer.into_inner().map_err(export_error)
 }
 
+/// Read the SPARQL `SELECT` variables from a Parquet file's Arrow schema.
+///
+/// This validates the same variable names and nullable five-field RDF-term struct
+/// schema as [`from_parquet_bytes`], but does not build a record-batch reader or decode
+/// any row groups.
+///
+/// # Errors
+///
+/// Returns [`ArrowError`] if `bytes` do not contain readable Parquet metadata or their
+/// Arrow schema violates this crate's RDF-term projection contract.
+pub fn parquet_variables_from_bytes(bytes: &[u8]) -> Result<Vec<Variable>, ArrowError> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(bytes))
+        .map_err(import_error)?;
+    variables_from_schema(builder.schema().as_ref())
+}
+
 /// Deserialize Parquet bytes containing this crate's RDF-term Arrow projection.
 ///
 /// Every decoded batch is validated through [`from_record_batch`]. This includes files
@@ -59,9 +76,11 @@ pub fn from_parquet_bytes(bytes: &[u8]) -> Result<QueryResult, ArrowError> {
         .map_err(import_error)?;
 
     // Validate independently of decoded batches so a zero-row file cannot bypass the
-    // schema contract. `new_empty` retains all variable names and struct field metadata.
-    let empty = RecordBatch::new_empty(builder.schema().clone());
-    let mut result = from_record_batch(&empty)?;
+    // schema contract.
+    let mut result = QueryResult {
+        vars: variables_from_schema(builder.schema().as_ref())?,
+        rows: Vec::new(),
+    };
 
     let reader = builder.build().map_err(import_error)?;
     for batch in reader {
