@@ -9,7 +9,7 @@ use std::{
 use axum::{
     body::Body,
     extract::ConnectInfo,
-    http::{Request, Response},
+    http::{HeaderName, HeaderValue, Request, Response},
     Router,
 };
 use bytes::{Buf, Bytes};
@@ -19,6 +19,7 @@ use http_body_util::BodyExt as _;
 use quinn::crypto::rustls::{NoInitialCipherSuite, QuicServerConfig};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tower::ServiceExt as _;
+use tower_http::set_header::SetResponseHeaderLayer;
 
 /// Default ceiling for concurrently served HTTP/3 connections.
 const DEFAULT_MAX_CONNECTIONS: usize = 10_000;
@@ -28,6 +29,9 @@ const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 512;
 
 /// Connection-level QUIC receive window used by [`quic_server_config`].
 const RECEIVE_WINDOW_BYTES: u32 = 16 * 1024 * 1024;
+
+/// Lifetime advertised for the HTTP/3 alternative service, in seconds.
+const ALT_SVC_MAX_AGE_SECONDS: u32 = 86_400;
 
 type PerIpCounts = Arc<Mutex<HashMap<IpAddr, usize>>>;
 
@@ -71,6 +75,19 @@ pub enum Http3ConfigError {
     /// The configured crypto provider lacks QUIC's required initial cipher suite.
     #[error("rustls server configuration is not QUIC-compatible: {0}")]
     NoInitialCipherSuite(#[from] NoInitialCipherSuite),
+}
+
+/// Builds a response-header layer advertising HTTP/3 on `port`.
+///
+/// The layer writes `Alt-Svc: h3=":<port>"; ma=86400` on every response and replaces any
+/// pre-existing value. Apply it to the HTTP/1.1 or HTTP/2 router only after the corresponding QUIC
+/// endpoint has bound successfully. Constructing this layer from configuration alone can advertise
+/// a listener that does not exist.
+// [GPT-5.6] sq-oprna.4: one exact advertisement format shared by both TCP servers.
+pub fn alt_svc_layer(port: u16) -> SetResponseHeaderLayer<HeaderValue> {
+    let value = HeaderValue::from_str(&format!("h3=\":{port}\"; ma={ALT_SVC_MAX_AGE_SECONDS}"))
+        .expect("a u16 port and fixed Alt-Svc syntax always form a valid header value");
+    SetResponseHeaderLayer::overriding(HeaderName::from_static("alt-svc"), value)
 }
 
 /// Converts an aws-lc-rs-backed rustls server configuration into Quinn's server config.

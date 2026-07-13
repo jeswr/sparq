@@ -888,18 +888,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Endpoint construction happens before the TCP listener is handed off: a UDP bind/config
             // failure aborts startup rather than silently serving only the unadvertised TCP subset.
             #[cfg(feature = "http3")]
-            let http3_server = {
+            let (app, http3_server) = {
                 let endpoint = bind_http3_endpoint(&config, http3_addr)?;
                 let bound_addr = endpoint.local_addr()?;
+                // [GPT-5.6] sq-oprna.4: an Alt-Svc promise is created only after UDP bind succeeds,
+                // and names the endpoint's actual port. The unlayered clone remains the h3 router.
+                let h3_app = app.clone();
+                let tcp_app = app.layer(sparq_http3::alt_svc_layer(bound_addr.port()));
                 eprintln!(
                     "  HTTP/3: QUIC listener ACTIVE on udp://{bound_addr} (ALPN h3; shared LDP router; \
                      WebSocket extended CONNECT is out of scope)."
                 );
-                tokio::spawn(sparq_http3::serve_h3(
+                let server = tokio::spawn(sparq_http3::serve_h3(
                     endpoint,
-                    app.clone(),
+                    h3_app,
                     shutdown_signal(),
-                ))
+                ));
+                (tcp_app, server)
             };
 
             // axum-server wants a blocking `std::net::TcpListener`; converting the tokio one keeps the

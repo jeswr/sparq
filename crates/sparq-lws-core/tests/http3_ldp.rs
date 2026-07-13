@@ -13,7 +13,7 @@ mod common;
 
 use std::{error::Error, future::poll_fn, sync::Arc, time::Duration};
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::http::{Method, Request, StatusCode};
 use bytes::Buf as _;
 use common::{jwks_provider, KeyKit, BASE_URL};
@@ -31,6 +31,7 @@ use sparq_lws_core::overload::AdmissionControl;
 use sparq_lws_core::rate_limit::RateLimiter;
 use sparq_lws_core::store::{CompositeStore, InMemoryBlobStore, InMemorySparqClient, Store};
 use sparq_lws_core::tls::{build_rustls_config, TlsMode};
+use tower::ServiceExt as _;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -156,10 +157,13 @@ async fn h3_ldp_get_matches_h1_and_carries_peer_connect_info() -> TestResult {
     let mut quic_tls = (*tcp_tls.get_inner()).clone();
     quic_tls.alpn_protocols = vec![b"h3".to_vec()];
     let h3_endpoint = quinn::Endpoint::server(quic_server_config(quic_tls)?, server_addr)?;
+    let h3_addr = h3_endpoint.local_addr()?;
 
     let tcp_handle = axum_server::Handle::new();
     let tcp_server_handle = tcp_handle.clone();
-    let tcp_app = app.clone();
+    let tcp_app = app
+        .clone()
+        .layer(sparq_http3::alt_svc_layer(h3_addr.port()));
     let tcp_server = tokio::spawn(async move {
         axum_server::from_tcp_rustls(std_listener, tcp_tls)
             .expect("construct TLS server")
@@ -184,6 +188,15 @@ async fn h3_ldp_get_matches_h1_and_carries_peer_connect_info() -> TestResult {
     let resource_uri = format!("https://localhost:{}/pub", server_addr.port());
     let h1_response = h1_client.get(&resource_uri).send().await?;
     assert_eq!(h1_response.version(), reqwest::Version::HTTP_11);
+    let expected_alt_svc = format!("h3=\":{}\"; ma=86400", h3_addr.port());
+    assert_eq!(
+        h1_response
+            .headers()
+            .get("alt-svc")
+            .and_then(|value| value.to_str().ok()),
+        Some(expected_alt_svc.as_str()),
+        "the h1 GET response must advertise the live h3 listener port"
+    );
     let h1_status = h1_response.status();
     let h1_body = h1_response.bytes().await?;
     assert_eq!(h1_status, StatusCode::OK);
@@ -219,5 +232,24 @@ async fn h3_ldp_get_matches_h1_and_carries_peer_connect_info() -> TestResult {
     drop(h1_client);
     tcp_handle.graceful_shutdown(Some(Duration::from_secs(1)));
     tokio::time::timeout(Duration::from_secs(5), tcp_server).await???;
+    Ok(())
+}
+
+#[tokio::test]
+async fn unconfigured_http3_router_does_not_advertise_alt_svc() -> TestResult {
+    let app = production_router(100.0, 100.0).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("{BASE_URL}/pub"))
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert!(
+        response.headers().get("alt-svc").is_none(),
+        "the original TCP router must not advertise HTTP/3 before a QUIC endpoint binds"
+    );
     Ok(())
 }
