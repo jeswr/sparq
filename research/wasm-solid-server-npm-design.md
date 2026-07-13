@@ -1,11 +1,12 @@
 # WebAssembly build of the sparq Solid server on npm — feasibility + design (2026-07) [OPUS-4.8]
 
-Status: **design-for-review, maintainer-requested** (epic `sq-6xasp`, P1). This
-record gives an honest feasibility verdict for compiling the sparq Solid server
+Status: **partially implemented architecture record, maintainer-requested** (epic `sq-6xasp`, P1).
+[GPT-5.6] The reduced-scope wasm adapter, npm build tiers, and loopback Node host now ship; CI,
+OIDC, and persistence remain separately tracked under the epic. This record gives an honest
+feasibility verdict for compiling the sparq Solid server
 (`sparq-lws-core`) — or its request-handling core — to `wasm32`, publishing it as
 an npm package for `npx`/`npm` spin-up, and decomposes the realistic (reduced-
-scope) path into disjoint child beads. The author is a SPARQ research agent;
-nothing here is implemented. It is verified against the checked-out code.
+scope) path into disjoint child beads. It is verified against the checked-out code.
 
 ## 0. Feasibility verdict (read first)
 
@@ -203,8 +204,8 @@ build points, of which we ship the useful three —
 | --- | --- | --- |
 | native full | `sparql-endpoint` (default) | the `solid-server` binary (default) |
 | native core | `--no-default-features` (or without `sparql-endpoint`) | `solid-server` core / a `core` CI test target |
-| wasm full | `wasm,sparql-endpoint` | `@sparq/solid-server` (default bundle) |
-| wasm core | `wasm` (no `sparql-endpoint`) | `@sparq/solid-server` **core** variant / a `build:lws-wasm-core` script |
+| wasm full | `wasm,sparql-endpoint` | `@jeswr/solid-server` (default bundle) |
+| wasm core | `wasm` (no `sparql-endpoint`) | `@jeswr/solid-server` **core** variant / a `build:lws-wasm-core` script |
 
 INVARIANT: `sparql-endpoint` gates **route + handler only** — the `Store`'s own
 SPARQL-backed methods (used internally by LDP/WAC where relevant) are unaffected;
