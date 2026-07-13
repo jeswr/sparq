@@ -44,7 +44,9 @@ let endpoint = quinn::Endpoint::server(quic, udp_addr)?;
 ```
 
 `quic_server_config` fails closed when `h3` is missing from ALPN or the provider lacks
-QUIC's required initial cipher suite.
+QUIC's required initial cipher suite. It also replaces Quinn's effectively unbounded default
+connection receive window with an owned finite bound; a caller may still replace the returned
+config's transport settings before binding the endpoint.
 
 ## Serve the shared router
 
@@ -56,8 +58,25 @@ sparq_http3::serve_h3(endpoint, router.clone(), async move {
 # Ok::<(), std::io::Error>(())
 ```
 
-The bridge clones the router per connection and request, streams request and response
-bodies, and inserts the Quinn peer address as `axum::extract::ConnectInfo<SocketAddr>`.
+The compatibility entry point is safe by default: it limits total concurrent connections and
+connections from one public IP. Internal addresses are exempt from the per-IP cap to avoid treating
+a proxy, container bridge, or conformance runner as one client, but the global cap still applies.
+Existing callers need no changes. To tune the caps, use the additive variant:
+
+```rust
+let limits = sparq_http3::H3ConnectionLimits {
+    max_connections: 2_000,
+    max_connections_per_ip: Some(128),
+    exempt_internal_ips: true,
+};
+sparq_http3::serve_h3_with_limits(endpoint, router.clone(), limits, shutdown_signal).await?;
+# Ok::<(), std::io::Error>(())
+```
+
+Set `max_connections_per_ip` to `None` only when the global cap is sufficient for the deployment.
+Zero numeric caps are clamped to one rather than disabling the listener. The bridge clones the
+router per connection and request, streams request and response bodies, and inserts the Quinn peer
+address as `axum::extract::ConnectInfo<SocketAddr>`.
 That extension is load-bearing for request policies keyed by the remote socket address.
 Protocol failures are isolated to their connection or stream; resolving the shutdown
 future closes the endpoint and waits for its QUIC connections to drain.
@@ -84,8 +103,9 @@ HTTP/1.1 or HTTP/2 because RFC 9220 extended CONNECT is outside this integration
 
 ## Boundaries
 
-- The caller owns rustls policy, certificates, client authentication, Quinn transport
-  tuning, listener binding, and process-wide provider installation.
+- The caller owns rustls policy, certificates, client authentication, any Quinn transport
+  tuning beyond the helper's bounded receive window, listener binding, and process-wide provider
+  installation.
 - HTTP/3 is a separate UDP listener. Keep the existing TCP listener running for HTTP/1.1
   and HTTP/2 clients.
 - `h3` and `h3-quinn` are pre-1.0 dependencies; keep all direct use inside this helper.

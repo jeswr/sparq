@@ -44,7 +44,7 @@ http-body-util = { version = "0.1", optional = true }
 quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"], optional = true }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"], optional = true }
 thiserror = { version = "2", optional = true }
-tokio = { version = "1", default-features = false, features = ["macros", "rt"], optional = true }
+tokio = { version = "1", default-features = false, features = ["macros", "rt", "sync"], optional = true }
 tower = { version = "0.5", default-features = false, features = ["util"], optional = true }
 
 [dev-dependencies]
