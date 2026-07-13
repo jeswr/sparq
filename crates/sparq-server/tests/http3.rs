@@ -1,5 +1,5 @@
 #![cfg(feature = "http3")]
-//! [GPT-5.6] sq-oprna.3: production-binary HTTP/3 wiring and cross-protocol parity.
+//! [GPT-5.6] sq-oprna.3/.5: production HTTP/3 wiring and cross-protocol conformance.
 
 use std::{
     error::Error,
@@ -13,13 +13,41 @@ use std::{
 };
 
 use bytes::{Buf as _, Bytes};
+use futures_util::{SinkExt as _, StreamExt as _};
 use h3::quic::OpenStreams;
 use quinn::crypto::rustls::QuicClientConfig;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
-const QUERY: &str = "SELECT ?x WHERE { VALUES ?x { <http://example.com/http3> } }";
 const RESULTS_JSON: &str = "application/sparql-results+json";
+
+// [GPT-5.6] sq-oprna.5: compare the transport-neutral response contract, not incidental headers.
+#[derive(Debug, PartialEq, Eq)]
+struct ResponseSnapshot {
+    status: u16,
+    content_type: Option<String>,
+    body: Bytes,
+}
+
+struct RequestCase {
+    name: &'static str,
+    method: axum::http::Method,
+    path: &'static str,
+    content_type: Option<&'static str>,
+    accept: Option<&'static str>,
+    body: &'static [u8],
+    expected_status: axum::http::StatusCode,
+    body_witness: &'static [u8],
+}
+
+struct H3Request<'a> {
+    method: axum::http::Method,
+    path: &'a str,
+    content_type: Option<&'a str>,
+    accept: Option<&'a str>,
+    headers: &'a [(&'a str, &'a str)],
+    body: &'a [u8],
+}
 
 struct ChildGuard(Child);
 
@@ -64,23 +92,32 @@ fn h3_client(ca_path: &std::path::Path) -> TestResult<quinn::Endpoint> {
     Ok(endpoint)
 }
 
-async fn h3_query<O>(
+async fn h3_request<O>(
     sender: &mut h3::client::SendRequest<O, Bytes>,
     addr: SocketAddr,
-) -> TestResult<(u16, Option<String>, Bytes)>
+    request: H3Request<'_>,
+) -> TestResult<ResponseSnapshot>
 where
     O: OpenStreams<Bytes>,
 {
-    let request = axum::http::Request::builder()
-        .method(axum::http::Method::POST)
-        .uri(format!("https://localhost:{}/sparql", addr.port()))
-        .header(axum::http::header::CONTENT_TYPE, "application/sparql-query")
-        .header(axum::http::header::ACCEPT, RESULTS_JSON)
-        .body(())?;
-    let mut stream = sender.send_request(request).await?;
-    stream
-        .send_data(Bytes::from_static(QUERY.as_bytes()))
-        .await?;
+    let mut builder = axum::http::Request::builder()
+        .method(request.method)
+        .uri(format!("https://localhost:{}{}", addr.port(), request.path));
+    if let Some(value) = request.content_type {
+        builder = builder.header(axum::http::header::CONTENT_TYPE, value);
+    }
+    if let Some(value) = request.accept {
+        builder = builder.header(axum::http::header::ACCEPT, value);
+    }
+    for &(name, value) in request.headers {
+        builder = builder.header(name, value);
+    }
+    let mut stream = sender.send_request(builder.body(())?).await?;
+    if !request.body.is_empty() {
+        stream
+            .send_data(Bytes::copy_from_slice(request.body))
+            .await?;
+    }
     stream.finish().await?;
 
     let response = stream.recv_response().await?;
@@ -95,7 +132,45 @@ where
         let remaining = chunk.remaining();
         body.extend_from_slice(&chunk.copy_to_bytes(remaining));
     }
-    Ok((status, content_type, Bytes::from(body)))
+    Ok(ResponseSnapshot {
+        status,
+        content_type,
+        body: Bytes::from(body),
+    })
+}
+
+async fn h1_request(
+    client: &reqwest::Client,
+    addr: SocketAddr,
+    case: &RequestCase,
+) -> TestResult<ResponseSnapshot> {
+    let mut request = client.request(
+        reqwest::Method::from_bytes(case.method.as_str().as_bytes())?,
+        format!("http://{addr}{}", case.path),
+    );
+    if let Some(value) = case.content_type {
+        request = request.header(reqwest::header::CONTENT_TYPE, value);
+    }
+    if let Some(value) = case.accept {
+        request = request.header(reqwest::header::ACCEPT, value);
+    }
+    if !case.body.is_empty() {
+        request = request.body(case.body.to_vec());
+    }
+    let response = request.send().await?;
+    assert_eq!(response.version(), reqwest::Version::HTTP_11);
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let body = response.bytes().await?;
+    Ok(ResponseSnapshot {
+        status,
+        content_type,
+        body,
+    })
 }
 
 #[test]
@@ -113,7 +188,7 @@ fn http3_requires_both_certificate_and_key_flags() -> TestResult {
 }
 
 #[tokio::test]
-async fn h3_sparql_response_matches_the_unchanged_http1_listener() -> TestResult {
+async fn h3_response_matrix_matches_h1_and_websocket_falls_back() -> TestResult {
     let tcp_addr = free_tcp_addr()?;
     let udp_addr = free_udp_addr()?;
     let child = Command::new(env!("CARGO_BIN_EXE_sparq-server"))
@@ -132,36 +207,26 @@ async fn h3_sparql_response_matches_the_unchanged_http1_listener() -> TestResult
     let mut server = ChildGuard(child);
 
     let http = reqwest::Client::new();
-    let url = format!("http://{tcp_addr}/sparql");
-    let mut http1 = None;
+    let readiness_url = format!("http://{tcp_addr}/health");
+    let mut ready = false;
     for _ in 0..100 {
-        match http
-            .post(&url)
-            .header(reqwest::header::CONTENT_TYPE, "application/sparql-query")
-            .header(reqwest::header::ACCEPT, RESULTS_JSON)
-            .body(QUERY)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                http1 = Some(response);
+        match http.get(&readiness_url).send().await {
+            Ok(_) => {
+                ready = true;
                 break;
             }
             Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
         }
     }
-    let http1 = match http1 {
-        Some(response) => response,
-        None => {
-            let _ = server.0.kill();
-            let mut stderr = String::new();
-            if let Some(mut pipe) = server.0.stderr.take() {
-                pipe.read_to_string(&mut stderr)?;
-            }
-            let _ = server.0.wait();
-            return Err(format!("server did not become ready: {stderr}").into());
+    if !ready {
+        let _ = server.0.kill();
+        let mut stderr = String::new();
+        if let Some(mut pipe) = server.0.stderr.take() {
+            pipe.read_to_string(&mut stderr)?;
         }
-    };
+        let _ = server.0.wait();
+        return Err(format!("server did not become ready: {stderr}").into());
+    }
     let health = http.get(format!("http://{tcp_addr}/health")).send().await?;
     assert_eq!(health.version(), reqwest::Version::HTTP_11);
     let expected_alt_svc = format!("h3=\":{}\"; ma=86400", udp_addr.port());
@@ -173,29 +238,154 @@ async fn h3_sparql_response_matches_the_unchanged_http1_listener() -> TestResult
         Some(expected_alt_svc.as_str()),
         "the h1 GET response must advertise the successfully bound QUIC port"
     );
-    let h1_status = http1.status().as_u16();
-    let h1_content_type = http1
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let h1_body = http1.bytes().await?;
-
     let endpoint = h3_client(&fixture("http3-ca.pem"))?;
     let connection = endpoint.connect(udp_addr, "localhost")?.await?;
     let (mut driver, mut sender) = h3::client::new(h3_quinn::Connection::new(connection)).await?;
     let driver = tokio::spawn(async move {
         let _ = poll_fn(|context| driver.poll_close(context)).await;
     });
-    let (h3_status, h3_content_type, h3_body) = h3_query(&mut sender, udp_addr).await?;
+    let cases = [
+        RequestCase {
+            name: "health",
+            method: axum::http::Method::GET,
+            path: "/health",
+            content_type: None,
+            accept: None,
+            body: b"",
+            expected_status: axum::http::StatusCode::OK,
+            body_witness: b"ok",
+        },
+        RequestCase {
+            name: "GET SELECT as CSV",
+            method: axum::http::Method::GET,
+            path: "/sparql?query=SELECT%20%3Fx%20WHERE%20%7B%20VALUES%20%3Fx%20%7B%20%3Chttp%3A%2F%2Fexample.com%2Fhttp3-get%3E%20%7D%20%7D",
+            content_type: None,
+            accept: Some("text/csv"),
+            body: b"",
+            expected_status: axum::http::StatusCode::OK,
+            body_witness: b"http://example.com/http3-get",
+        },
+        RequestCase {
+            name: "POST ASK as SPARQL JSON",
+            method: axum::http::Method::POST,
+            path: "/sparql",
+            content_type: Some("application/sparql-query"),
+            accept: Some(RESULTS_JSON),
+            body: b"ASK { }",
+            expected_status: axum::http::StatusCode::OK,
+            body_witness: b"\"boolean\":true",
+        },
+        RequestCase {
+            name: "not-found error",
+            method: axum::http::Method::GET,
+            path: "/not-an-endpoint",
+            content_type: None,
+            accept: None,
+            body: b"",
+            expected_status: axum::http::StatusCode::NOT_FOUND,
+            body_witness: b"not found",
+        },
+    ];
 
-    assert_eq!(h3_status, h1_status);
-    assert_eq!(h3_content_type, h1_content_type);
-    assert_eq!(h3_body, h1_body);
-    assert!(
-        String::from_utf8_lossy(&h3_body).contains("http://example.com/http3"),
-        "the parity assertion must cover a non-empty query result"
+    for case in &cases {
+        let h1 = h1_request(&http, tcp_addr, case).await?;
+        let h3 = h3_request(
+            &mut sender,
+            udp_addr,
+            H3Request {
+                method: case.method.clone(),
+                path: case.path,
+                content_type: case.content_type,
+                accept: case.accept,
+                headers: &[],
+                body: case.body,
+            },
+        )
+        .await?;
+        assert_eq!(h1.status, case.expected_status.as_u16(), "{}", case.name);
+        assert!(
+            h1.body
+                .windows(case.body_witness.len())
+                .any(|window| window == case.body_witness),
+            "{} must exercise a non-vacuous response: {:?}",
+            case.name,
+            h1.body
+        );
+        assert_eq!(
+            h3, h1,
+            "{} must be byte-equivalent over h3 and h1",
+            case.name
+        );
+    }
+
+    // HTTP/1.1 Upgrade headers are illegal in h3. Axum consequently requires RFC 9220 CONNECT for
+    // this HTTP version, but the server deliberately exposes no extended-CONNECT route: the h3 GET
+    // is refused with 405 without closing the connection, then the client falls back to TCP.
+    let refused = h3_request(
+        &mut sender,
+        udp_addr,
+        H3Request {
+            method: axum::http::Method::GET,
+            path: "/subscriptions",
+            content_type: None,
+            accept: None,
+            headers: &[
+                ("sec-websocket-version", "13"),
+                ("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="),
+            ],
+            body: b"",
+        },
+    )
+    .await?;
+    assert_eq!(
+        refused.status,
+        axum::http::StatusCode::METHOD_NOT_ALLOWED.as_u16(),
+        "WebSocket over h3 must be cleanly refused until extended CONNECT is implemented"
     );
+    let after_refusal = h3_request(
+        &mut sender,
+        udp_addr,
+        H3Request {
+            method: axum::http::Method::GET,
+            path: "/health",
+            content_type: None,
+            accept: None,
+            headers: &[],
+            body: b"",
+        },
+    )
+    .await?;
+    assert_eq!(after_refusal.status, axum::http::StatusCode::OK.as_u16());
+
+    let (mut websocket, upgrade) =
+        tokio_tungstenite::connect_async(format!("ws://{tcp_addr}/subscriptions")).await?;
+    assert_eq!(
+        upgrade.status(),
+        axum::http::StatusCode::SWITCHING_PROTOCOLS
+    );
+    assert_eq!(upgrade.version(), axum::http::Version::HTTP_11);
+    websocket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            serde_json::json!({ "subscribe": { "query": "SELECT ?x WHERE { VALUES ?x { <http://example.com/ws-fallback> } }" } })
+                .to_string()
+                .into(),
+        ))
+        .await?;
+    let subscribed = tokio::time::timeout(Duration::from_secs(5), websocket.next())
+        .await?
+        .ok_or_else(|| std::io::Error::other("WebSocket closed before subscribed response"))??;
+    let subscribed: serde_json::Value = serde_json::from_str(subscribed.to_text()?)?;
+    assert!(subscribed.get("subscribed").is_some(), "{subscribed}");
+    let initial = tokio::time::timeout(Duration::from_secs(5), websocket.next())
+        .await?
+        .ok_or_else(|| std::io::Error::other("WebSocket closed before initial notification"))??;
+    assert!(
+        initial
+            .to_text()?
+            .contains("http://example.com/ws-fallback"),
+        "the h1 fallback must carry a real subscription result"
+    );
+    websocket.close(None).await?;
 
     drop(sender);
     endpoint.close(quinn::VarInt::from_u32(0), b"test complete");
