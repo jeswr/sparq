@@ -156,6 +156,34 @@ fn bm25_ordering() {
 }
 
 #[test]
+fn term_stats_match_bm25_corpus_statistics() {
+    let g = graph_of(&[r#""fox""#, r#""jumps""#, r#""quick fox""#]);
+    let idx = TextIndex::build(&g);
+
+    let fox = idx.term_stats("FOX").expect("fox has postings");
+    assert_eq!(fox.doc_count, 2);
+    assert_eq!(fox.total_tf, 2);
+    let expected_fox_idf = ((3.0_f32 - 2.0 + 0.5) / (2.0 + 0.5) + 1.0).ln();
+    assert_eq!(fox.idf, expected_fox_idf);
+
+    let jumps = idx.term_stats("jumps").expect("jumps has postings");
+    assert_eq!(jumps.doc_count, 1);
+    assert_eq!(jumps.total_tf, 1);
+    assert_eq!(idx.term_stats("nonexistent"), None);
+
+    // Exact single-token lookup: query-prefix syntax is not expanded.
+    assert_eq!(idx.term_stats("fo*"), None);
+    assert_eq!(idx.term_stats("fox jumps"), None);
+
+    // Total term frequency is occurrence-counted, not an alias for document
+    // frequency.
+    let repeated = TextIndex::build(&graph_of(&[r#""echo echo""#, r#""echo""#]));
+    let echo = repeated.term_stats("echo").expect("echo has postings");
+    assert_eq!(echo.doc_count, 2);
+    assert_eq!(echo.total_tf, 3);
+}
+
+#[test]
 fn duplicate_literals_are_one_document() {
     // The same literal in many triples is ONE dictionary term = one document.
     let nt = r#"

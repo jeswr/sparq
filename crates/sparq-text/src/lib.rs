@@ -17,7 +17,7 @@ pub mod tokenize;
 pub use complete::{Candidate, CandidateKind, CompletionIndex};
 #[cfg(feature = "fuzzy")]
 pub use fuzzy::{FuzzyError, FuzzyHit, DEFAULT_MAX_DISTANCE, MAX_DISTANCE};
-pub use index::{Hit, TextIndex};
+pub use index::{Hit, TermStats, TextIndex};
 #[cfg(feature = "engine")]
 pub use rewrite::{prepare_text, query_text, query_text_with_budget, rewrite_query};
 #[cfg(feature = "highlight")]
