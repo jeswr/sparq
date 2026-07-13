@@ -137,6 +137,10 @@ version = "0.4.42"
 criteria = "safe-to-deploy"
 notes = "all-features tower-http compression dependency inherited from the merged workspace graph; exemption closes the frozen cargo-vet deployment criterion gap [GPT-5.6]"
 
+[[exemptions.async-lock]]
+version = "3.4.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.async-trait]]
 version = "0.1.89"
 criteria = "safe-to-deploy"
@@ -265,6 +269,10 @@ notes = "async-compression codec layer in the all-features tower-http graph; fro
 version = "0.4.32"
 criteria = "safe-to-deploy"
 notes = "shared async-compression core in the all-features tower-http graph; frozen cargo-vet requires the deployment criterion explicitly [GPT-5.6]"
+
+[[exemptions.concurrent-queue]]
+version = "2.5.0"
+criteria = "safe-to-deploy"
 
 [[exemptions.console_log]]
 version = "1.0.0"
@@ -434,6 +442,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.enum-ordinalize-derive]]
 version = "4.3.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.event-listener]]
+version = "5.4.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.event-listener-strategy]]
+version = "0.5.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.fastrand]]
@@ -1021,6 +1037,10 @@ version = "0.13.2"
 criteria = "safe-to-run"
 notes = "solid-server-rs import pre-flight (sq-gg0qq.1): DEV-ONLY (safe-to-run) — mints test JWS access tokens + DPoP proofs in the incoming server's auth-middleware unit tests; RustCrypto ES256 stack, never in the shipped build. [FABLE-5]"
 
+[[exemptions.parking]]
+version = "2.2.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.parking_lot]]
 version = "0.12.5"
 criteria = "safe-to-deploy"
@@ -1094,31 +1114,6 @@ notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or
 version = "1.0.1"
 criteria = "safe-to-deploy"
 notes = "dependabot 0.4.0->1.0.1 (#2242). Reviewed the delta [OPUS-4.8]: 1.0.0 broadens FutureExt to IntoFuture (additive) + stabilizes to 1.0; 1.0.1 is a docsrs doc_cfg build fix. No new deps, no new unsafe, no behavioural change — a minimal blocking-executor stabilization bump."
-
-# [OPUS-4.8] sq-r1ei8 (#2282): the default-on `sparql-endpoint` feature of sparq-lws-core
-# pulls sparq-engine, which brings the smol-rs foundational async primitives below. These are
-# among the most widely-used, ecosystem-audited low-level async crates (the async-lock / event
-# notification / lock-free-queue substrate under async-std/smol/tokio-adjacent stacks). Exempted
-# as safe-to-deploy pending a rustsec/imported-audit pickup; no unsafe of concern surfaced.
-[[exemptions.async-lock]]
-version = "3.4.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.concurrent-queue]]
-version = "2.5.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.event-listener]]
-version = "5.4.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.event-listener-strategy]]
-version = "0.5.4"
-criteria = "safe-to-deploy"
-
-[[exemptions.parking]]
-version = "2.2.1"
-criteria = "safe-to-deploy"
 
 [[exemptions.portable-atomic]]
 version = "1.13.1"
