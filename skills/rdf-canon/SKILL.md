@@ -69,7 +69,7 @@ let canon = sparq_canon::canonicalize_nquads(
 assert!(canon.contains("_:c14n"));
 ```
 
-### Non-default hash profile
+### Hash profiles and final digests
 
 The spec default is SHA-256. To use the SHA-384 profile (or any
 `digest::Digest`), use the `*_with` functions; `Digest` is re-exported so you do
@@ -78,6 +78,20 @@ not need a direct `digest` dependency:
 ```rust
 let nq = sparq_canon::canonicalize_quads_with::<sha2::Sha384>(&dataset).unwrap();
 ```
+
+To hash the exact standard canonical N-Quads bytes in one call, including the
+final newline on a non-empty dataset, supply the final digest algorithm to
+`digest_quads_with`:
+
+```rust
+let digest = sparq_canon::digest_quads_with::<sha2::Sha256>(&dataset).unwrap();
+assert_eq!(digest.len(), 32);
+```
+
+Here `D` selects only the digest of the finished canonical document;
+canonicalization still follows `canonicalize_quads` and its default RDFC-1.0
+hash profile. Callers choose the digest crate and algorithm; `sparq-canon` adds
+no default digest alias.
 
 ## Single-graph API — one graph's triples
 
