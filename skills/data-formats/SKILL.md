@@ -194,6 +194,8 @@ pub type TriplePattern = (
 );
 #[cfg(feature = "load-filter")]
 pub fn load_reader_filtered<R: BufRead>(reader: R, pattern: &TriplePattern) -> Result<Graph, Error>
+#[cfg(feature = "load-filter")]
+pub fn stats_reader_filtered<R: BufRead>(reader: R, pattern: &TriplePattern) -> Result<HdtStats, Error>
 
 pub fn header(path: impl AsRef<Path>) -> Result<Graph, Error>       // HDT header metadata as a Graph
 pub fn header_reader<R: BufRead>(reader: R) -> Result<Graph, Error>
@@ -268,7 +270,10 @@ let pattern: sparq_hdt::TriplePattern = (
     Some(oxrdf::NamedNode::new("http://www.w3.org/2000/01/rdf-schema#label")?),
     None,
 );
+// [GPT-5.6] sq-obhf1: count matches without constructing a result Graph/Dict.
+let label_stats = sparq_hdt::stats_reader_filtered(std::io::Cursor::new(bytes.clone()), &pattern)?;
 let labels = sparq_hdt::load_reader_filtered(std::io::Cursor::new(bytes), &pattern)?;
+assert_eq!(label_stats.triples, labels.len());
 // WRITE back (opt-in `write` feature): sparq_hdt::save(&g, "out.hdt.gz")?;
 //   (currently a temp-N-Triples round-trip through the wrapped builder — see
 //    sparq-hdt/UPSTREAM.md for the queued in-memory-builder contribution)
@@ -626,10 +631,11 @@ cargo build -p sparq-cli --features serialize-rdf
   file extension**, so a mislabeled `.hdt` still loads; all three (`gz`/`zst`/`bz2`) decode
   in a streaming fashion.
 - **HDT triple-pattern loading is separately opt-in.** Enable `sparq-hdt`'s
-  `load-filter` feature for `TriplePattern` and `load_reader_filtered`. The
-  decoder still validates and decodes the archive dictionary, but rejected
-  triples are not accumulated, interned into the result, or indexed; result
-  memory therefore follows the matches rather than the full triple set.
+  `load-filter` feature for `TriplePattern`, `load_reader_filtered`, and
+  `stats_reader_filtered`. Both filtered operations share one resolved-pattern
+  SPO walk. The stats call counts matches without building a result graph; its
+  dictionary cardinalities remain archive-wide. The loader does not accumulate,
+  intern, or index rejected triples, so result memory follows the matches.
 - **HDT format coverage:** standard v1.0 layout only (FourSectionDictionary / Plain Front
   Coding + BitmapTriples, SPO order) as emitted by hdt-cpp / hdt-java. Exotic submission
   layouts are rejected with an error.

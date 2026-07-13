@@ -332,6 +332,25 @@ pub fn stats_reader<R: BufRead>(reader: R) -> Result<HdtStats, Error> {
     with_hdt_stream(reader, |r| decode::stats_from_reader(r))
 }
 
+// [GPT-5.6] sq-obhf1: filtered count parity with `load_reader_filtered`.
+/// Counts triples matching `pattern` without constructing a result [`Graph`].
+///
+/// Matching uses the same one-shot SPO walk and resolved [`TriplePattern`] as
+/// [`load_reader_filtered`]. The returned [`HdtStats::triples`] is the number of
+/// matches; its dictionary cardinalities still describe the complete archive.
+/// An all-wildcard pattern is exactly equivalent to [`stats_reader`]. Compressed
+/// containers are detected and streamed as in [`load_reader`].
+#[cfg(feature = "load-filter")]
+pub fn stats_reader_filtered<R: BufRead>(
+    reader: R,
+    pattern: &TriplePattern,
+) -> Result<HdtStats, Error> {
+    if pattern.0.is_none() && pattern.1.is_none() && pattern.2.is_none() {
+        return stats_reader(reader);
+    }
+    with_hdt_stream(reader, |r| decode::stats_from_reader_filtered(r, pattern))
+}
+
 /// Converts an already-decoded [`hdt::Hdt`] into a sparq [`Graph`] — the seam for
 /// callers that hold an `Hdt` (e.g. to also query its header metadata).
 pub fn graph_from_hdt(hdt: &Hdt) -> Result<Graph, Error> {
