@@ -127,13 +127,14 @@ jobs:
       # (http/auth/server/oidc, including the npx spin-up round-trip in server.test.mjs). The wasm
       # build MUST precede `npm test`: src/index.js statically imports ../wasm/sparq_lws_wasm.js,
       # so server.test.mjs / oidc.test.mjs (which `import { startSolidServer } from '../src/index.js'`)
-      # fail module resolution without the built wasm/ tree. No `check:package` step — this package
-      # ships no guardrail script (mirrors its package.json, which has only build:lws-wasm + test).
-      - name: solid-server package (build wasm + node:test)
+      # fail module resolution without the built wasm/ tree. [GPT-5.6] sq-hcy7c also checks the
+      # exact dry-run tarball file list so neither the allowlist nor the artifact can regress.
+      - name: solid-server package (build wasm + node:test + package guardrail)
         working-directory: packages/solid-server
         run: |
           npm run build:lws-wasm
           npm test
+          npm run check:package
 
       # Publish guardrail + git-pin verification (sq-bkag): `prepare` wired, the
       # `files` allowlist intact, and the packed tarball actually ships dist/ + wasm/.
