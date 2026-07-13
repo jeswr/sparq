@@ -32,6 +32,12 @@ default = []
 # [GPT-5.6] sq-zckkq: gap-triggered event-time session windows are an explicit
 # opt-in so the established time/count paths remain byte-neutral by default.
 session_windows = []
+# [GPT-5.6] sq-ayn0i: the T0/MAXDELAY RSP-QL textual clauses are an explicit
+# opt-in so the established parser remains byte-identical by default.
+window-origin = []
+# [GPT-5.6] sq-lsp7k.27: deterministic scalar folds over closed SELECT
+# window results are opt-in, leaving the established RSP surface unchanged.
+window-aggregate = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

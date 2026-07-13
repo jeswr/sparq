@@ -18,6 +18,33 @@ pub enum QueryPolicy {
     Mutating,
 }
 
+/// The SPARQL result form of a read-only query (SPARQL 1.1 section 16).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueryForm {
+    /// A solution sequence produced by `SELECT`.
+    Select,
+    /// A boolean result produced by `ASK`.
+    Ask,
+    /// An RDF graph produced by `CONSTRUCT`.
+    Construct,
+    /// An RDF graph produced by `DESCRIBE`.
+    Describe,
+}
+
+/// Returns the result form of parsed read-only query algebra.
+///
+/// The exhaustive match intentionally makes a new upstream query variant a
+/// compile-time decision instead of silently assigning it a result form.
+#[must_use]
+pub fn query_form(query: &Query) -> QueryForm {
+    match query {
+        Query::Select { .. } => QueryForm::Select,
+        Query::Ask { .. } => QueryForm::Ask,
+        Query::Construct { .. } => QueryForm::Construct,
+        Query::Describe { .. } => QueryForm::Describe,
+    }
+}
+
 /// Classifies parsed query algebra.
 ///
 /// All SPARQL query result forms (`SELECT`, `ASK`, `CONSTRUCT`, and
@@ -46,20 +73,28 @@ pub const fn classify_update(_update: &Update) -> QueryPolicy {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_query, classify_update, QueryPolicy};
+    use super::{classify_query, classify_update, query_form, QueryForm, QueryPolicy};
     use spargebra::SparqlParser;
 
     #[test]
-    fn read_only_algebra_classified() {
-        for sparql in [
-            "SELECT * WHERE { ?s ?p ?o }",
-            "ASK WHERE { ?s ?p ?o }",
-            "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
-            "DESCRIBE ?s WHERE { ?s ?p ?o }",
-        ] {
+    fn read_only_algebra_form_and_policy_classified() {
+        let cases = [
+            ("SELECT * WHERE { ?s ?p ?o }", QueryForm::Select),
+            ("ASK WHERE { ?s ?p ?o }", QueryForm::Ask),
+            (
+                "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
+                QueryForm::Construct,
+            ),
+            ("DESCRIBE ?s WHERE { ?s ?p ?o }", QueryForm::Describe),
+        ];
+
+        assert_ne!(QueryForm::Ask, QueryForm::Select);
+
+        for (sparql, expected_form) in cases {
             let query = SparqlParser::new()
                 .parse_query(sparql)
                 .expect("valid query fixture");
+            assert_eq!(query_form(&query), expected_form, "{sparql}");
             assert_eq!(classify_query(&query), QueryPolicy::ReadOnly, "{sparql}");
         }
     }

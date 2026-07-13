@@ -10,7 +10,7 @@ use sparq_lws_core::error::ServerError;
 use sparq_lws_core::ldp::content::{classify, validate_rdf, RdfFormat};
 use sparq_lws_core::store::{
     BlobError, BlobStore, CompositeStore, DeleteOutcome, InMemoryBlobStore, InMemorySparqClient,
-    ResourceMeta, SparqClient, SparqError, Store,
+    InMemoryStoreLimits, ResourceMeta, SparqClient, SparqError, Store, StoreUsage,
 };
 
 const IRI: &str = "https://pod.example/alice/data";
@@ -47,6 +47,41 @@ async fn write_then_read_round_trips_bytes_and_content_type() {
     assert_eq!(resource.body, body);
     assert_eq!(resource.meta.content_type, "text/turtle");
     assert_eq!(resource.meta.etag, meta.etag);
+}
+
+#[tokio::test]
+async fn bounded_store_reports_usage_and_refuses_bytes_beyond_quota() {
+    // [GPT-5.6] Mutation witness: removing the aggregate-byte admission check makes the second write
+    // succeed, so both the error and unchanged usage assertions fail.
+    let limits = InMemoryStoreLimits::new(5, 4);
+    let s = CompositeStore::in_memory_with_limits(limits);
+
+    s.write("urn:a", Bytes::from_static(b"123"), "text/plain")
+        .await
+        .unwrap();
+    assert_eq!(
+        s.usage().unwrap(),
+        StoreUsage {
+            total_bytes: 3,
+            resource_count: 1,
+        }
+    );
+
+    let error = s
+        .write("urn:b", Bytes::from_static(b"456"), "text/plain")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ServerError::InsufficientStorage));
+    assert_eq!(error.status(), axum::http::StatusCode::INSUFFICIENT_STORAGE);
+    assert_eq!(
+        s.usage().unwrap(),
+        StoreUsage {
+            total_bytes: 3,
+            resource_count: 1,
+        }
+    );
+    assert_eq!(s.quota(), limits);
+    assert!(!s.exists("urn:b").await.unwrap());
 }
 
 #[tokio::test]

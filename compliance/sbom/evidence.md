@@ -260,34 +260,40 @@ the GATING job `.github/workflows/supply-chain.yml#sbom-purl-canonical` (job nam
 `SBOM purl-canonicality assertion (GS-6/GS-7) — GATING`; no `advisory`/`informational` whole word, so
 ci-summary gates it), which runs the self-test then the live regenerate→normalize→assert.
 
-## 7. JS / npm SBOM — the published WASM client (GS-3 — [OPUS-4.8], sq-toze.27)
+## 7. JS / npm SBOM — shipped clients (GS-3 — [OPUS-4.8], sq-toze.27; [GPT-5.6], sq-epbw4)
 
-The published npm package `@jeswr/sparq` (the WASM client, `js/`) now has a dedicated CycloneDX 1.5
-SBOM, closing the un-SBOM'd JS supply-chain surface.
+The published npm package `@jeswr/sparq` and the shared `@sparq/client` code bundled into the
+site/GUI artifacts have dedicated CycloneDX 1.5 SBOMs, closing their JS supply-chain surfaces.
 
 **Scope decision (honest):**
 
 | Workspace | npm name | Shipped? | SBOM'd? | Why |
 |---|---|---|---|---|
 | `js/` | `@jeswr/sparq` | **published to npm** | **YES** | the consumable WASM client; its lockfile tree is a real supply-chain surface |
+| `packages/sparq-client/` | `@sparq/client` (`"private": true`) | **bundled into site/GUI artifacts** | **YES** | its runtime tree includes the lazy zstd and bzip2 codecs shipped to browser consumers |
 | `site/` | `sparq-site` (`"private": true`) | never (GitHub-Pages demo) | **NO** (intentional) | not a shipped artifact; dev/showcase tree (Next.js/React/bb.js) covered by npm Dependabot |
 
 ```sh
-scripts/gen-js-sbom.sh         # writes sbom/sparq-js-<ver>.sbom.cdx.json + sbom/sparq-js-dev-<ver>.sbom.cdx.json
+scripts/gen-js-sbom.sh # writes runtime + development SBOMs for both JS clients
 ```
 
-Two views are shipped (both CycloneDX **1.5**, matching the Rust SBOM + VEX; `--package-lock-only`, so
-the tree is read deterministically from the committed `js/package-lock.json` with no network install):
+Two views per client are shipped (all CycloneDX **1.5**, matching the Rust SBOM + VEX;
+`--package-lock-only`, with transient member locks derived deterministically from the committed
+root workspace lock and no dependency resolution):
 
 | Artifact | Tree | Components (this branch) | Audience |
 |---|---|---|---|
 | `sparq-js-<ver>.sbom.cdx.json` | runtime (`--omit dev`) | **1** — `pkg:npm/fzstd@0.1.1` | what a CONSUMER of `@jeswr/sparq` installs (matches the published-tarball dep surface) |
-| `sparq-js-dev-<ver>.sbom.cdx.json` | full build tree | **5** — `fzstd`, `@rdfjs/types`, `@types/node`, `typescript`, `undici-types` | BUILD-time surface (SSDF parity with the Rust full-tree SBOM) |
+| `sparq-js-dev-<ver>.sbom.cdx.json` | full build tree | `@jeswr/sparq` runtime plus build dependencies | BUILD-time surface (SSDF parity with the Rust full-tree SBOM) |
+| `sparq-js-client-<ver>.sbom.cdx.json` | runtime (`--omit dev`) | `fzstd`, `seek-bzip`, browser `buffer`, and their closure | codec dependencies bundled on demand into browser artifacts |
+| `sparq-js-client-dev-<ver>.sbom.cdx.json` | full build tree | `@sparq/client` runtime plus build dependencies | full shared-client build surface |
 
-**Validity:** both VALIDATED against the official CycloneDX 1.5 JSON schema — cyclonedx-npm's built-in
+**Validity:** all are VALIDATED against the official CycloneDX 1.5 JSON schema — cyclonedx-npm's built-in
 `--validate` (default on) plus an independent `jsonschema` check against
 `CycloneDX/specification` `bom-1.5.schema.json` (+ referenced `spdx`/`jsf` schemas): **VALID**, root
-component `pkg:npm/%40jeswr/sparq@0.1.0`, all component purls `pkg:npm/…`. Wired as the per-PR GATING
+root components `pkg:npm/%40jeswr/sparq@0.1.0` and `pkg:npm/%40sparq/client@0.1.0`, all component
+purls `pkg:npm/…`. The generator also fails unless the shared-client runtime SBOM contains both
+lazy codecs. Wired as the per-PR GATING
 job `.github/workflows/supply-chain.yml#js-sbom` (uploads `sbom-js-cyclonedx`) + the per-release step
 `.github/workflows/release.yml#sbom` "Generate per-release JS/npm SBOM" (the `sbom/*.sbom.cdx.json`
 attest + attach + checksum globs already cover the JS SBOMs, so they are SLSA-attested and on the

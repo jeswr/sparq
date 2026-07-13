@@ -1,17 +1,21 @@
 //! [FABLE-5] sq-6tykl.3 (epic sq-6tykl, RDFox-parity BIG ROCK) — **stratified Datalog
 //! rules** with negation-as-failure and aggregation, behind the opt-in `datalog` feature.
 //!
-//! This is Phase 1 of the stratified-Datalog program (design record
+//! The stratified-Datalog program (design record
 //! `research/stratified-datalog-rules.md`): a small **native rule dialect** modelled on
 //! RDFox's Datalog surface (the maintainer's open question 4 — see the record §2 for the
-//! decision), a **stratification checker**, and a **semi-naive per-stratum evaluator**
+//! decision), a **stratification checker**, a **semi-naive per-stratum evaluator**
 //! (Phase 2, sq-8sve7 — delta-restricted positive joins; see `eval`) supporting `NOT`
-//! (store-scoped negation as failure) and `AGGREGATE … BIND COUNT(?v) AS ?c` atoms plus
-//! a minimal numeric `FILTER`. The remaining aggregate functions (`SUM`/`MIN`/`MAX`/`AVG`)
-//! and incremental maintenance under insert/delete are **later phases**, beaded from the
-//! design record — this module is honest about being the fixture-scale foundation.
+//! (store-scoped negation as failure), `AGGREGATE … BIND
+//! COUNT/SUM/MIN/MAX/AVG(?v) AS ?c` atoms (Phase 2b, sq-citho) and a minimal numeric
+//! `FILTER`, plus **incremental maintenance under insert/delete across strata**
+//! (Phase 3, sq-4foq0 — see [`MaterializedProgram`]: DRed for positive strata,
+//! rederivation at stratum boundaries for `NOT`/`AGGREGATE` strata). [GPT-5.6]
+//! Phase 4 (sq-a7bmo) adds grouped `NOT`, projected `COUNT(DISTINCT ?v)`, the full
+//! numeric tower for `FILTER`, and conservative variable-predicate atoms. Surface
+//! wiring and an external-engine differential arm stay beaded from the design record.
 //!
-//! # The dialect (Phase-1 fragment)
+//! # The dialect
 //!
 //! ```text
 //! @prefix ex: <http://example.org/> .
@@ -23,26 +27,26 @@
 //! [?x, a, ex:Hub]      :- [?x, ex:deg, ?c], FILTER(?c >= 3) .             # threshold
 //! ```
 //!
-//! * **Atoms** are triple patterns `[s, p, o]` with a **constant predicate** (an IRI or
-//!   `a` = `rdf:type`); subjects/objects are IRIs, literals (bare integers are
+//! * **Atoms** are triple patterns `[s, p, o]`; `p` may be an IRI, `a` = `rdf:type`,
+//!   or a variable. Subjects/objects are IRIs, literals (bare integers are
 //!   `xsd:integer`; `"…"` with optional `^^dt`), or `?variables`.
-//! * **`NOT atom`** is negation as failure against the completed lower strata. Variables
-//!   not bound by a positive atom are existential wildcards (a repeated wildcard inside
-//!   one `NOT` atom must match equal terms).
+//! * **`NOT atom` / `NOT { atom, atom }`** is negation as failure against the
+//!   completed lower strata. A group succeeds only when its whole conjunction has a
+//!   joint match. Variables not bound by a positive atom are existential wildcards;
+//!   their bindings are shared within one group and discarded outside it.
 //! * **`AGGREGATE(atoms ON ?g… BIND COUNT(?v) AS ?c)`** groups the DISTINCT matches of
 //!   its positive body (set semantics — Datalog relations are sets, so `COUNT(?v)`
-//!   counts distinct body matches per group; there are no rows for empty groups) by the
-//!   `ON` variables and binds the count (an `xsd:integer`) to `?c`. Body variables other
+//!   counts distinct body matches per group; `COUNT(DISTINCT ?v)` instead projects and
+//!   de-duplicates `?v`; there are no rows for empty groups) by the `ON` variables and
+//!   binds the count (an `xsd:integer`) to `?c`. Body variables other
 //!   than the `ON` list are aggregate-local. `ON` may be omitted for a global count.
-//! * **`FILTER(x op y)`** compares two bound-or-constant EXACT numeric values
-//!   (`xsd:integer`/`xsd:decimal` + the derived integer types) with
-//!   `= != < <= > >=` via the shared [`sparq_substrate::numeric::Dec`] tower —
-//!   non-numeric or float/double operands fail the row (fail-closed; floats are a
-//!   later-phase decision, see the record §5).
+//! * **`FILTER(x op y)`** compares two bound-or-constant XSD numeric values with
+//!   `= != < <= > >=` via [`sparq_substrate::numeric::Num::cmp_relational`].
+//!   Float/double operands participate with XPath promotion; NaN and non-numeric
+//!   operands fail the row.
 //!
 //! Everything else is a **loud [`parse_program`] error**, never a silent divergence:
-//! variable predicates, `SUM`/`MIN`/`MAX`/`AVG` (named as not-yet-implemented), nested
-//! `NOT`/`AGGREGATE` inside an aggregate body, unbound head/filter variables, and
+//! nested `NOT`/`AGGREGATE` inside an aggregate body, unbound head/filter variables, and
 //! aggregate-local variable capture.
 //!
 //! # Stratified semantics
@@ -76,11 +80,13 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
 mod eval;
+mod incr;
 #[cfg(test)]
 mod oracle;
 mod parser;
 mod stratify;
 
+pub use incr::MaterializedProgram;
 pub use stratify::{stratify, Stratification};
 
 /// One term position of a parsed atom: a dictionary constant or a rule-scoped
@@ -93,22 +99,24 @@ pub(crate) enum DTerm {
     Var(u32),
 }
 
-/// One triple-pattern atom. The predicate is always a constant in the Phase-1
-/// fragment (`pred` duplicates `t[1]` for direct access).
+/// One triple-pattern atom. `pred` caches the constant predicate for indexed
+/// access; `None` denotes a variable predicate and scans the predicate-index union.
 #[derive(Clone, Debug)]
 pub(crate) struct Atom {
     pub(crate) t: [DTerm; 3],
-    pub(crate) pred: Id,
+    pub(crate) pred: Option<Id>,
 }
 
 /// One `AGGREGATE(body ON ?g… BIND FUNC(?v) AS ?out)` atom. The body has its own
 /// variable scope (`n_slots` local slots); `on` maps each grouping variable's
-/// aggregate-local slot to its outer rule slot. Phase 1 carries no function/value
-/// fields: every function consumes DISTINCT body matches, while `value` identifies
-/// the input slot for numeric aggregates (`COUNT` has no value slot).
+/// aggregate-local slot to its outer rule slot. Every function consumes distinct
+/// full-body matches first; `value` identifies the numeric input slot, or the
+/// projected slot for `COUNT(DISTINCT)` (legacy `COUNT` needs no value slot).
 #[derive(Clone, Debug)]
 pub(crate) struct AggAtom {
     pub(crate) func: AggFunc,
+    /// `COUNT(DISTINCT ?v)` projects `value` before de-duplication.
+    pub(crate) distinct: bool,
     pub(crate) value: Option<u32>,
     pub(crate) body: Vec<Atom>,
     /// `(aggregate-local slot, outer rule slot)` per `ON` variable, in `ON` order.
@@ -156,7 +164,8 @@ pub(crate) struct Rule {
     pub(crate) head: Vec<Atom>,
     pub(crate) positive: Vec<Atom>,
     pub(crate) aggregates: Vec<AggAtom>,
-    pub(crate) negated: Vec<Atom>,
+    /// Each entry is one jointly-matched negated conjunction.
+    pub(crate) negated: Vec<Vec<Atom>>,
     pub(crate) filters: Vec<Filter>,
     /// Rule-scope slot count (head + positive + NOT + `ON` + `AS` variables).
     pub(crate) n_slots: usize,
@@ -196,8 +205,8 @@ impl Program {
 /// # Errors
 ///
 /// Returns `Err` on a syntax error or on any construct outside the documented
-/// fragment (variable predicates, unknown aggregate functions, unbound head
-/// or `FILTER` variables, aggregate-local variable capture, …) — always a loud
+/// fragment (unknown aggregate functions, unbound head or `FILTER` variables,
+/// aggregate-local variable capture, …) — always a loud
 /// error naming the construct, never a silent divergence.
 ///
 /// # Examples
@@ -256,40 +265,12 @@ pub fn eval(dict: &mut Dict, facts: &[[Id; 3]], program: &Program) -> Result<Vec
     Ok(eval::eval_stratified(dict, facts, program, &strat))
 }
 
-/// The XSD datatypes whose literals the `FILTER` comparison accepts as EXACT
-/// numerics (Phase 1: the `Dec`-representable integer/decimal family; float/double
-/// are a later-phase decision — see the design record §5).
-pub(crate) const NUMERIC_XSD: &[&str] = &[
-    "integer",
-    "decimal",
-    "long",
-    "int",
-    "short",
-    "byte",
-    "nonNegativeInteger",
-    "nonPositiveInteger",
-    "negativeInteger",
-    "positiveInteger",
-    "unsignedLong",
-    "unsignedInt",
-    "unsignedShort",
-    "unsignedByte",
-];
-
-/// Resolve a dictionary id to its exact numeric value, if it is a literal of a
-/// recognised exact-numeric XSD datatype with a valid lexical form.
-pub(crate) fn numeric_value(dict: &Dict, id: Id) -> Option<sparq_substrate::numeric::Dec> {
+/// Resolve a dictionary id through the shared XSD numeric tower.
+pub(crate) fn numeric_value(dict: &Dict, id: Id) -> Option<sparq_substrate::numeric::Num> {
     let oxrdf::Term::Literal(l) = dict.term(id) else {
         return None;
     };
-    let local = l
-        .datatype()
-        .as_str()
-        .strip_prefix("http://www.w3.org/2001/XMLSchema#")?;
-    if !NUMERIC_XSD.contains(&local) {
-        return None;
-    }
-    sparq_substrate::numeric::Dec::parse_lexical(l.value())
+    sparq_substrate::numeric::as_numeric(&l)
 }
 
 /// The set of variable slots a rule's positive machinery binds: positive-atom

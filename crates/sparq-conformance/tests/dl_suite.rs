@@ -102,7 +102,8 @@
 //!
 //! ## Feature gating (both states)
 //!
-//! Behind the opt-in `dl-direct` feature (forwards to `sparq-reason-dl/dispatch`). OFF:
+//! Behind the opt-in `dl-direct` feature (forwards to `sparq-reason-dl/dispatch` plus the
+//! default-off `sparq-reason-dl/dl_transitive` ALCHS extension). OFF:
 //! this file compiles to a single self-SKIP `#[test]` — no Direct-Semantics code links.
 //! The export is fetched by `scripts/fetch-inference-suites.sh` into the gitignored
 //! `tests/w3c/owl2/`; when absent the runner SKIPS so a fresh offline checkout stays
@@ -157,26 +158,36 @@ mod gated {
     /// move from refuted to abstained (`DL_PROFILE_NEGATIVE_ABSTAINED` 615 → 617; checkable
     /// denominator 319 → 317). Not a refutation regression: the rows became honestly
     /// out-of-fragment, exactly the fail-closed L1 boundary. [FABLE-5]
-    pub const DL_PROFILE_NEGATIVE_REFUTED: usize = 137;
+    /// Re-pinned by sq-zfwzq ([GPT-5.6]): +1 (137 → 138). Enabling fail-closed extraction
+    /// of `owl:TransitiveProperty` makes one formerly-abstained negative-profile row
+    /// definitively refutable; the two other newly checkable rows enter the measured In-gap.
+    pub const DL_PROFILE_NEGATIVE_REFUTED: usize = 138;
 
     /// EXPLICIT-NEGATIVE profile lane In-GAP — checkable explicit-negation rows where L2
     /// answered `In` (could not refute full-profile membership from axiom-grammar membership
     /// over the ALCH shadow). An HONEST measured limitation, NOT a soundness bug; FALL-only
     /// (the gap may only shrink as L2 grows the deferred full-profile restrictions,
     /// sq-1ivw7-style follow-ups). The In-vs-negative gap is `IN_GAP` of
-    /// `REFUTED + IN_GAP` = 180 of 319 (improved from the pre-lane measurement 211/322 — the
+    /// `REFUTED + IN_GAP` = 182 of 320 (the sq-zfwzq transitivity extraction broadening;
+    /// improved from the pre-lane measurement 211/322 — the
     /// M7 normalization moved the 27 singleton cases into the checkable set on BOTH sides).
     /// Unchanged by sq-pbz04.4.9: the two datatype rows that left the checkable set were
     /// REFUTED (not In-gap), so IN_GAP stays 180 while the denominator drops 319 → 317.
     /// [FABLE-5] sq-pbz04.4.16
-    pub const DL_PROFILE_NEGATIVE_IN_GAP: usize = 180;
+    /// Re-pinned by sq-zfwzq ([GPT-5.6]): +2 (180 → 182) as two transitive-property inputs
+    /// become structurally checkable but L2 axiom-grammar membership cannot refute their
+    /// full-profile negations. This is the existing honest In-gap, never a fabricated pass.
+    pub const DL_PROFILE_NEGATIVE_IN_GAP: usize = 182;
 
     /// EXPLICIT-NEGATIVE profile lane ABSTAINED — explicit-negation rows where L1 extraction
     /// refused (out-of-fragment input), so L2 abstained (`Unknown`) rather than answering
     /// either direction. Pinned so the tri-state accounting closes. [FABLE-5] sq-pbz04.4.16
     /// Re-pinned by sq-pbz04.4.9 (datatype-map IRI refusal at L1): +2 (615 → 617) — the two
     /// datatype rows that left [`DL_PROFILE_NEGATIVE_REFUTED`] land here. [FABLE-5]
-    pub const DL_PROFILE_NEGATIVE_ABSTAINED: usize = 617;
+    /// Re-pinned by sq-zfwzq ([GPT-5.6]): −3 (617 → 614); all three rows moved out only
+    /// because `dl_transitive` now extracts their transitivity axiom, closing accounting
+    /// with +1 refuted pass and +2 measured In-gap rows above.
+    pub const DL_PROFILE_NEGATIVE_ABSTAINED: usize = 614;
 
     /// EXPLICIT-NEGATIVE profile lane OUT-OF-SCOPE — explicit-negation rows excluded at
     /// selection (owl:imports / functional-syntax-only input). [FABLE-5] sq-pbz04.4.16
@@ -188,9 +199,10 @@ mod gated {
     /// `tests/scoreboard_floors.rs`. A sparq EXTENSION measurement over the scoped
     /// fragment — NOT full OWL 2 DL.
     ///
-    /// COMPOSITION: 96 consistency + 14 inconsistency + 70 positive-entailment +
-    /// 2 negative-entailment = 182. [FABLE-5] sq-pbz04.4.5 / [OPUS-4.8] sq-pbz04.4.12/.13
-    /// (was 97+14+69+2 before sq-pbz04.4.9 — see the sq-pbz04.4.9 re-pin note below.)
+    /// COMPOSITION: 98 consistency + 14 inconsistency + 72 positive-entailment +
+    /// 2 negative-entailment = 186. [FABLE-5] sq-pbz04.4.5 / [OPUS-4.8]
+    /// sq-pbz04.4.12/.13 / [GPT-5.6] sq-zfwzq (was 96+14+70+2 before sq-zfwzq;
+    /// see the re-pin notes below).
     /// Re-pinned by sq-pbz04.4.11 (M1 named-composite fix): +8 net.
     /// Re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix): −3 (192 → 189) — three graphs with
     /// an unconsumed anonymous composite (`WebOnt-I5.26-001`/`-006` consistency; `WebOnt-I5.5-005`
@@ -233,7 +245,13 @@ mod gated {
     ///       definitive verdict on an input the fragment cannot actually reason about; the
     ///       escalated soundness verdict directed refusing at L1 rather than pinning it). Net:
     ///       DIRECT pass total 182 → 182, fail set unchanged. [FABLE-5] sq-pbz04.4.9
-    pub const DL_DIRECT_FLOOR: usize = 182;
+    /// Re-pinned by sq-zfwzq ([GPT-5.6]): +4 (182 → 186): +2 consistency
+    /// (`rdfbased-sem-char-transitive-inst`, `WebOnt-TransitiveProperty-001`) and +2
+    /// positive entailment for those same composed-edge cases (96 → 98 consistency,
+    /// 70 → 72 positive-entailment). They previously failed closed at L1; the premise
+    /// now extracts into ALCHS and the declaration-free conclusion roles reuse only the
+    /// premise-confirmed role kind. The audited five-row divergence set is unchanged.
+    pub const DL_DIRECT_FLOOR: usize = 186;
 
     /// Abstained (fail-closed OutOfFragment / guard / deferred / budget) row totals,
     /// EXACT-pinned so the tri-state accounting is closed: profile lane, then the four
@@ -275,7 +293,9 @@ mod gated {
     /// consistency row plus its would-be positive-entailment divergence INTO OutOfFragment
     /// abstention (+N) — the two effects net to zero on the total; see [`DL_DIRECT_FLOOR`].
     /// [FABLE-5] sq-pbz04.4.9
-    pub const DL_DIRECT_ABSTAINED: usize = 472;
+    /// Re-pinned by sq-zfwzq ([GPT-5.6]): −4 (472 → 468), exactly the two consistency
+    /// and two positive-entailment rows graduated into [`DL_DIRECT_FLOOR`].
+    pub const DL_DIRECT_ABSTAINED: usize = 468;
 
     /// Audited, PINNED divergence rows (module docs — mechanisms M3/M5/M6): every row
     /// where a checker verdict contradicts the export expectation, keyed by the
@@ -362,11 +382,16 @@ mod gated {
     /// extraction-refused (`DL_RENDER_ROUNDTRIP_REFUSED` 378 → 380). Honest shift — a
     /// coincidental round-trip under a wrong reading becomes an honest refusal; `violations`
     /// stays 0 (no fidelity bug). [FABLE-5]
-    pub const DL_RENDER_ROUNDTRIP_FLOOR: usize = 291;
+    /// Re-pinned by sq-zfwzq ([GPT-5.6]): +5 (291 → 296). Five corpus documents whose
+    /// only formerly-unmodelled role characteristic was `owl:TransitiveProperty` now
+    /// extract and round-trip through the feature-gated structural axiom; violations stay 0.
+    pub const DL_RENDER_ROUNDTRIP_FLOOR: usize = 296;
     /// See [`DL_RENDER_ROUNDTRIP_FLOOR`] — documents the L1 extractor refused
     /// (out-of-ALCH-fragment; the renderer contract is scoped to successful extractions).
     /// Re-pinned by sq-pbz04.4.9: +2 (378 → 380) — see [`DL_RENDER_ROUNDTRIP_FLOOR`].
-    pub const DL_RENDER_ROUNDTRIP_REFUSED: usize = 380;
+    /// Re-pinned by sq-zfwzq ([GPT-5.6]): −5 (380 → 375), exactly the five documents
+    /// graduated to [`DL_RENDER_ROUNDTRIP_FLOOR`].
+    pub const DL_RENDER_ROUNDTRIP_REFUSED: usize = 375;
     /// See [`DL_RENDER_ROUNDTRIP_FLOOR`] — documents whose RDF/XML literal oxrdfxml
     /// rejects (the M6 mechanism, `FS2RDF-literals-ar`); they reach no lane's extraction.
     pub const DL_RENDER_ROUNDTRIP_PARSE_FAILED: usize = 1;

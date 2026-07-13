@@ -17,7 +17,7 @@
 //! Each SELECT variable becomes one Arrow column of the struct type produced by
 //! `term_struct_type` (a `Struct` of five nullable `Utf8` fields — the names are the
 //! [`FIELD_*`](FIELD_KIND) constants; the `arrow`-gated `term_struct_type` /
-//! `to_record_batch` / `term_schema` items carry the full rustdoc):
+//! `to_record_batch` / `from_record_batch` / `term_schema` items carry the full rustdoc):
 //!
 //! | field        | meaning                                                                                   |
 //! |--------------|-------------------------------------------------------------------------------------------|
@@ -45,9 +45,17 @@
 //!   N-Triples form in `value` (`kind = "triple"`); its components are not exploded into
 //!   nested struct fields. RDF-1.2 triple terms in result *bindings* are rare; a nested
 //!   encoding is left to the same typed-view follow-up.
-//! * This is a **projection for transport**, not a canonical RDF serialisation: round-tripping
-//!   back to terms is straightforward from the five fields, but the Arrow batch is not itself
-//!   an RDF document.
+//! * This is a **projection for transport**, not a canonical RDF serialisation:
+//!   `from_record_batch` reconstructs terms from the five fields, but the Arrow batch is not
+//!   itself an RDF document.
+//! * With the opt-in `parquet` feature, `to_parquet_bytes` / `from_parquet_bytes`
+//!   serialize and restore this exact RecordBatch projection;
+//!   `parquet_variables_from_bytes` reads only its variables from the stored schema,
+//!   while `parquet_row_count_from_bytes` reads only its total row count from metadata.
+//!   Parquet adds a container; it does not define a second RDF-term encoding.
+//! * With the opt-in `ipc` feature, `to_ipc_bytes` / `from_ipc_bytes` do the same through
+//!   the Arrow IPC streaming format, including preservation of an empty result's schema;
+//!   `ipc_variables_from_bytes` reads that schema without decoding record batches.
 
 /// Struct field name: the term kind — `"uri"`, `"bnode"`, `"literal"`, or `"triple"`.
 pub const FIELD_KIND: &str = "kind";
@@ -78,5 +86,29 @@ pub const RDF_TERM_FIELDS: [&str; 5] = [
 mod export;
 
 #[cfg(feature = "arrow")]
+mod import;
+
+#[cfg(feature = "parquet")]
+mod parquet;
+
+#[cfg(feature = "ipc")]
+mod ipc;
+
+#[cfg(feature = "arrow")]
 #[cfg_attr(docsrs, doc(cfg(feature = "arrow")))]
 pub use export::{term_schema, term_struct_type, to_record_batch, ArrowExportError};
+
+#[cfg(feature = "arrow")]
+#[cfg_attr(docsrs, doc(cfg(feature = "arrow")))]
+pub use import::{from_record_batch, ArrowError};
+
+#[cfg(feature = "parquet")]
+#[cfg_attr(docsrs, doc(cfg(feature = "parquet")))]
+pub use parquet::{
+    from_parquet_bytes, parquet_row_count_from_bytes, parquet_variables_from_bytes,
+    to_parquet_bytes,
+};
+
+#[cfg(feature = "ipc")]
+#[cfg_attr(docsrs, doc(cfg(feature = "ipc")))]
+pub use ipc::{from_ipc_bytes, ipc_variables_from_bytes, to_ipc_bytes};

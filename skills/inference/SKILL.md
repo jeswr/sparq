@@ -205,41 +205,67 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
 
 ## Stratified Datalog rules (opt-in `datalog` feature, `sparq_reason::datalog`)
 
-RDFox-parity track, Phase 1 (`research/stratified-datalog-rules.md`): a small native
-rule dialect with `NOT` (negation as failure), `AGGREGATE COUNT`/`SUM`/`MIN`/`MAX`/`AVG`
-atoms and a minimal
-exact-numeric `FILTER`, a **stratification checker** (programs with a recursion cycle
-through NOT/AGGREGATE are rejected loudly; class-granular for `rdf:type` atoms), and a
-non-incremental per-stratum evaluator on the shared substrate join kernels.
+RDFox-parity track (`research/stratified-datalog-rules.md`): a small native
+rule dialect with single/grouped `NOT` (negation as failure),
+`AGGREGATE COUNT`/`SUM`/`MIN`/`MAX`/`AVG` atoms (including
+`COUNT(DISTINCT ?v)`), variable predicates, and numeric `FILTER` over exact,
+float, and double values. Its **stratification checker** rejects programs with a
+recursion cycle through NOT/AGGREGATE; dependencies are class-granular for
+`rdf:type`, while variable predicates conservatively couple to every relation. It has a
+semi-naive per-stratum evaluator on the shared substrate join kernels, and
+**incrementally maintained materialization** (`MaterializedProgram`: DRed for positive
+strata, stratum-boundary rederivation for `NOT`/`AGGREGATE` strata).
 
 ```rust
-use sparq_reason::datalog::{eval, parse_program, stratify};
+use sparq_reason::datalog::{eval, parse_program, stratify, MaterializedProgram};
 
 pub fn parse_program(dict: &mut Dict, src: &str) -> Result<Program, String>;
 pub fn stratify(dict: &Dict, p: &Program) -> Result<Stratification, String>; // checker alone
 pub fn eval(dict: &mut Dict, facts: &[[Id;3]], p: &Program) -> Result<Vec<[Id;3]>, String>;
 impl Program { pub fn n_rules(&self) -> usize; }
 impl Stratification { pub fn n_strata(&self) -> usize; }
+
+// Incrementally maintained materialization (sq-4foq0). insert/delete return the
+// exact closure delta; delete of a still-derivable fact keeps it (owner changes);
+// update() is one batch: new base = (base \ deletes) ∪ inserts.
+impl MaterializedProgram {
+    pub fn new(dict: &mut Dict, facts: &[[Id;3]], p: Program) -> Result<Self, String>;
+    pub fn insert(&mut self, dict: &mut Dict, facts: &[[Id;3]]) -> usize;
+    pub fn delete(&mut self, dict: &mut Dict, facts: &[[Id;3]]) -> usize;
+    pub fn update(&mut self, dict: &mut Dict, ins: &[[Id;3]], del: &[[Id;3]]) -> (usize, usize);
+    pub fn contains(&self, f: &[Id;3]) -> bool;
+    pub fn closure(&self) -> Vec<[Id;3]>;   // a SET; also len() / is_empty()
+}
 ```
 
 ```rust
 let mut dict = Dict::new();
 let rules = parse_program(&mut dict, r#"@prefix ex: <http://ex/> .
-[?x, ex:deg, ?c] :- AGGREGATE([?x, ex:edge, ?y] ON ?x BIND COUNT(?y) AS ?c) .
+[?x, ex:deg, ?c] :- AGGREGATE([?x, ex:edge, ?y], [?y, ex:tag, ?t]
+                               ON ?x BIND COUNT(DISTINCT ?y) AS ?c) .
 [?x, a, ex:Hub]  :- [?x, ex:deg, ?c], FILTER(?c >= 3) .
-[?x, a, ex:Leaf] :- [?x, a, ex:Node], NOT [?x, a, ex:Hub] ."#)?;
+[?x, a, ex:Leaf] :- [?x, a, ex:Node],
+                     NOT { [?x, a, ex:Hub], [?x, ex:disabled, "yes"] } ."#)?;
 let closure = eval(&mut dict, &facts, &rules)?; // inputs + derivations, a SET
 ```
 
-Fragment honesty (all loud parse errors, never silent): constant predicates only;
-aggregate numeric inputs use the shared XSD numeric tower and non-numeric rows fail
-closed; `FILTER` is exact `xsd:integer`/`decimal`
-comparison, fail-closed on anything else; head/FILTER vars must be bound positively;
+Grouped absence accepts `NOT { atom, atom }` or `NOT EXISTS { atom, atom }`; atoms
+may be comma- or period-separated. The whole conjunction is tested jointly, with
+free variables existential and group-local. Legacy `NOT atom` is unchanged. Variable
+predicate atoms scan all relations; a variable head predicate emits only when its
+binding is an IRI. Aggregate numeric inputs use the shared XSD numeric tower and
+non-numeric rows fail closed; `FILTER` uses relational numeric comparison, so NaN
+also fails the row (including `!=`). Head/FILTER vars must be bound positively;
 non-`ON` aggregate-body vars are aggregate-local (name collisions rejected). `COUNT(?v)`
-counts DISTINCT body matches per group; counts mint `xsd:integer` literals. `SUM`
+counts distinct full-body matches per group; `COUNT(DISTINCT ?v)` de-duplicates the
+projected value within each group. Counts mint `xsd:integer` literals. `SUM`
 and `AVG` follow SPARQL numeric promotion (`AVG` of integers is `xsd:decimal`), while
-`MIN`/`MAX` preserve the original extremal term id. Semi-naive rounds run per stratum;
-incremental maintenance is beaded. <!-- [GPT-5.6] sq-citho -->
+`MIN`/`MAX` preserve the original extremal term id. Semi-naive rounds run per stratum.
+Incremental maintenance is differential-pinned (closure == from-scratch `eval` after
+every randomized insert/delete step) and skips strata whose input predicates did not
+change; its per-update set/index bookkeeping is O(affected visible input) — the
+incrementality win is delta-driven RULE-FIRING work (deterministic counters), not set
+ops. <!-- [GPT-5.6] sq-citho / sq-a7bmo --> <!-- [FABLE-5] sq-4foq0 -->
 
 ## D-entailment datatype typing (opt-in `d-entail` feature, `sparq_reason::dtype`)
 
@@ -366,6 +392,28 @@ termination argument rests on. HONEST BOUNDARY: verdicts are sound/complete ONLY
 ALCH fragment (named classes, ⊤/⊥, ⊓/⊔/¬, ∃/∀ over named properties, GCIs, `subPropertyOf`,
 ground ABox) — never beyond it; the implementation is not claimed worst-case optimal (ALC+GCI
 satisfiability is EXPTIME-complete).
+
+**Opt-in transitive roles (`dl_transitive` cargo feature, OFF by default, bead sq-zfwzq
+[GPT-5.6]):** extends the fragment to **ALCH + transitive roles** (Horrocks–Sattler *S with
+role hierarchies* — still NO inverses / cardinality / nominals, which stay fail-closed): L1
+recognises `owl:TransitiveProperty` as the feature-gated `Axiom::TransitiveObjectProperty`
+(instead of refusing it), L2 classifies it per the profile grammars (IN EL §2, NOT-in QL §3,
+IN RL §4), and the L3 tableau adds the **∀₊-propagation rule** (`∀R.C` at `x`, edge `x –S→ y`,
+transitive `T` with `S ⊑* T ⊑* R` ⇒ add `∀T.C` at `y`) with the termination / soundness /
+completeness argument EXTENDED AND WRITTEN OUT in `tableau.rs` module docs **§5a** (subset
+blocking is UNCHANGED — sufficient precisely because there are still no inverses; the model
+construction interprets `R^I = E(R) ∪ ⋃ E(T)⁺`). L4 dispatch routes any transitive ontology
+STRAIGHT to the tableau (the only transitivity-complete branch; the RL/EL guards also
+recognise the axiom kind fail-closed as defence in depth); a transitivity CONCLUSION in
+entailment is decided by the two-step-chain refutation encoding (`O ⊨ Trans(R)` iff
+`O ∪ {R(a,b), R(b,c), B(c), (∀R.¬B)(a)}` unsatisfiable — argued in `check.rs`). With the feature
+enabled, a declaration-free conclusion role assertion may reuse a role kind established by
+a transitivity-bearing premise; the checker adds only semantically inert declarations for
+premise-confirmed roles during conclusion extraction and never guesses an unknown predicate.
+With the feature OFF the crate compiles to exactly the pre-extension code (fail-closed refusal). The
+`sparq-conformance` `dl-direct` arm enables it, graduating the corpus's transitive
+consistency/entailment cases from abstentions to definitive verdicts (floors re-pinned with
+evidence in `tests/dl_suite.rs`).
 
 **L4 — fragment-dispatch checker + entailment-by-refutation (`check`, opt-in `dispatch`
 feature, bead sq-pbz04.4.4):** NOW BUILT. `check::DirectChecker` (constructed with `new()` or

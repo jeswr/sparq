@@ -44,8 +44,8 @@ let f = facets(&graph, &FacetRequest { class: Some("http://e/Person".into()),
   subjects by their *exact* predicate set; each set carries its subject count,
   per-predicate triple counts (avg multiplicity), and the `rdf:type` histogram of its
   subjects. Top sets retained, exact tail aggregates.
-- **Facet counts** (`facets`) — deterministic type, predicate, and N-Triples value
-  distributions over subjects filtered by class and `(predicate, object)` constraints.
+- **Facet counts** (`facets`) — deterministic type/predicate/value distributions; default-off
+  `numeric-facets` adds finite XSD numeric min/max/count plus ten equal-width buckets. [GPT-5.6]
 - **Schema summary** — classes with instance counts; per-class predicate usage with
   subject/triple counts, **coverage ratios**, and **per-class sample object labels**
   (`ClassPredicate::samples`, drawn only from *this* class's triples, so a minority class

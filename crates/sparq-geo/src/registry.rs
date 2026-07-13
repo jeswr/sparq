@@ -22,15 +22,21 @@
 //! ```
 //!
 //! Argument/result conventions (each function has the same semantics as its
-//! [`crate::geof::lex`] mirror):
+//! typed [`crate::geof`] implementation):
 //!
 //! * geometry arguments must be `geo:wktLiteral` literals (anything else — wrong
 //!   datatype, an IRI, a plain string — is a SPARQL *expression* error: the row is
 //!   filtered by a `FILTER`, left unbound by a `BIND`; never a hard query error);
 //! * `geof:distance`'s third argument is a unit IRI ([`crate::geof::Unit`]),
 //!   result `xsd:double`;
+//! * `geof:metricArea`, `metricLength`, and `metricPerimeter` return
+//!   `xsd:double` in square metres / metres;
+//! * `geof:maxX`, `minX`, `maxY`, and `minY` return the corresponding envelope
+//!   coordinate as `xsd:double`;
+//! * `geof:isEmpty` returns `xsd:boolean`;
 //! * the `geof:sf*` relations return `xsd:boolean`;
-//! * `geof:envelope` / `geof:boundary` / `geof:convexHull` return `geo:wktLiteral`;
+//! * `geof:envelope` / `geof:boundary` / `geof:centroid` /
+//!   `geof:convexHull` / `geof:simplify` return `geo:wktLiteral`;
 //! * every [`crate::GeoError`] (WKT parse failure, CRS mismatch, unknown unit, …)
 //!   is the same expression error.
 //!
@@ -417,8 +423,13 @@ fn num_arg(name: &str, args: &[Term], i: usize) -> Result<f64, String> {
     }
 }
 
-/// A [`crate::geof`] unary geometry function (`envelope` / `boundary` / `convex_hull`).
+/// A [`crate::geof`] unary geometry function (`envelope` / `boundary` / `centroid` /
+/// `convex_hull`).
 type GeomUnary = fn(&GeoGeometry) -> Result<GeoGeometry, GeoError>;
+/// A [`crate::geof`] unary numeric measurement function.
+type NumericUnary = fn(&GeoGeometry) -> Result<f64, GeoError>;
+/// A [`crate::geof`] unary boolean geometry predicate.
+type BooleanUnary = fn(&GeoGeometry) -> Result<bool, GeoError>;
 /// A [`crate::geof`] binary set operation (`intersection` / `union` / …).
 type GeomSetOp = fn(&GeoGeometry, &GeoGeometry) -> Result<GeoGeometry, GeoError>;
 
@@ -429,13 +440,20 @@ type GeomSetOp = fn(&GeoGeometry, &GeoGeometry) -> Result<GeoGeometry, GeoError>
 /// Registered IRIs (all under `http://www.opengis.net/def/function/geosparql/`):
 ///
 /// * `distance(g1, g2, unitIri)` -> `xsd:double`;
+/// * `metricArea(g)` -> square-metre `xsd:double`, and `metricLength(g)` /
+///   `metricPerimeter(g)` -> metre `xsd:double`;
+/// * `maxX(g)` / `minX(g)` / `maxY(g)` / `minY(g)` -> the corresponding
+///   envelope coordinate as `xsd:double`;
+/// * `isEmpty(g)` -> `xsd:boolean`;
 /// * the relation families, all `(g1, g2)` -> `xsd:boolean`: simple features
 ///   `sfEquals sfDisjoint sfIntersects sfTouches sfCrosses sfWithin sfContains
 ///   sfOverlaps`, Egenhofer `ehEquals ehDisjoint ehMeet ehOverlap ehCovers
 ///   ehCoveredBy ehInside ehContains`, RCC8 `rcc8eq rcc8dc rcc8ec rcc8po
 ///   rcc8tppi rcc8tpp rcc8ntpp rcc8ntppi`, plus the generic
 ///   `relate(g1, g2, de9imPattern)`;
-/// * `envelope` / `boundary` / `convexHull` `(g)` -> `geo:wktLiteral`;
+/// * `envelope` / `boundary` / `centroid` / `convexHull` `(g)` ->
+///   `geo:wktLiteral`;
+/// * `simplify(g, tolerance)` -> Douglas–Peucker-simplified `geo:wktLiteral`;
 /// * `buffer(g, radius, unitIri)` -> `geo:wktLiteral` (a MULTIPOLYGON);
 /// * `intersection` / `union` / `difference` / `symDifference` `(g1, g2)` ->
 ///   `geo:wktLiteral` (point-set ops: polygon overlay plus the well-defined
@@ -468,6 +486,34 @@ pub fn geof_registry() -> FunctionRegistry {
         let d = geof::distance(&a, &b, unit).map_err(|e| e.to_string())?;
         Ok(Term::Literal(Literal::from(d)))
     });
+
+    // Unary numeric functions: geometry -> xsd:double.
+    let measurements: [(&'static str, NumericUnary); 7] = [
+        ("metricArea", geof::metric_area),
+        ("metricLength", geof::metric_length),
+        ("metricPerimeter", geof::metric_perimeter),
+        ("maxX", geof::max_x),
+        ("minX", geof::min_x),
+        ("maxY", geof::max_y),
+        ("minY", geof::min_y),
+    ];
+    for (name, f) in measurements {
+        reg.register(format!("{GEOF_NS}{name}"), move |args: &[Term]| {
+            arity(name, args, 1)?;
+            let g = geom_arg(name, args, 0)?;
+            Ok(Term::Literal(Literal::from(f(&g).map_err(|e| e.to_string())?)))
+        });
+    }
+
+    // Unary geometry predicates: geometry -> xsd:boolean. [GPT-5.6] sq-lc2io
+    let predicates: [(&'static str, BooleanUnary); 1] = [("isEmpty", geof::is_empty)];
+    for (name, f) in predicates {
+        reg.register(format!("{GEOF_NS}{name}"), move |args: &[Term]| {
+            arity(name, args, 1)?;
+            let g = geom_arg(name, args, 0)?;
+            Ok(Term::Literal(Literal::from(f(&g).map_err(|e| e.to_string())?)))
+        });
+    }
 
     // The relation families: geof:sf* / geof:eh* / geof:rcc8*(?g1, ?g2) -> xsd:boolean.
     // Registered as (matrix predicate) over the shared prepared-aware
@@ -535,9 +581,10 @@ pub fn geof_registry() -> FunctionRegistry {
     });
 
     // The unary geometry functions: geof:*(?g) -> geo:wktLiteral.
-    let unary: [(&'static str, GeomUnary); 3] = [
+    let unary: [(&'static str, GeomUnary); 4] = [
         ("envelope", geof::envelope),
         ("boundary", geof::boundary),
+        ("centroid", geof::centroid),
         ("convexHull", geof::convex_hull),
     ];
     for (name, f) in unary {
@@ -547,6 +594,18 @@ pub fn geof_registry() -> FunctionRegistry {
             Ok(wkt_term(f(&g).map_err(|e| e.to_string())?.to_wkt_literal()))
         });
     }
+
+    // geof:simplify(?g, ?tolerance) -> geo:wktLiteral. [GPT-5.6] sq-lsp7k.23
+    reg.register(format!("{GEOF_NS}simplify"), |args: &[Term]| {
+        arity("simplify", args, 2)?;
+        let g = geom_arg("simplify", args, 0)?;
+        let tolerance = num_arg("simplify", args, 1)?;
+        Ok(wkt_term(
+            geof::simplify(&g, tolerance)
+                .map_err(|e| e.to_string())?
+                .to_wkt_literal(),
+        ))
+    });
 
     // The set operations: geof:*(?g1, ?g2) -> geo:wktLiteral (point-set ops over
     // polygon/line/point operands; see geof for the supported matrix).
@@ -598,20 +657,108 @@ mod tests {
     #[test]
     fn registry_contents() {
         let reg = geof_registry();
-        assert_eq!(reg.len(), 35);
+        assert_eq!(reg.len(), 45);
         for name in [
             "distance", "relate", "getSRID", "buffer",
+            "metricArea", "metricLength", "metricPerimeter", "centroid",
+            "maxX", "minX", "maxY", "minY", "isEmpty",
             "sfEquals", "sfDisjoint", "sfIntersects", "sfTouches", "sfCrosses",
             "sfWithin", "sfContains", "sfOverlaps",
             "ehEquals", "ehDisjoint", "ehMeet", "ehOverlap", "ehCovers", "ehCoveredBy",
             "ehInside", "ehContains",
             "rcc8eq", "rcc8dc", "rcc8ec", "rcc8po", "rcc8tppi", "rcc8tpp", "rcc8ntpp",
             "rcc8ntppi",
-            "envelope", "boundary", "convexHull",
+            "envelope", "boundary", "convexHull", "simplify",
             "intersection", "union", "difference", "symDifference",
         ] {
             assert!(reg.get(&format!("{GEOF_NS}{name}")).is_some(), "missing geof:{name}");
         }
+    }
+
+    #[test]
+    fn measurement_functions_term_level() {
+        let reg = geof_registry();
+        let square = wkt("POLYGON((0 0, 1 0, 1 1, 0 1, 0 0))");
+
+        for name in ["metricArea", "metricLength", "metricPerimeter"] {
+            let f = reg.get(&format!("{GEOF_NS}{name}")).unwrap();
+            let Term::Literal(value) = f(std::slice::from_ref(&square)).unwrap() else {
+                panic!("literal")
+            };
+            assert_eq!(value.datatype().as_str(), "http://www.w3.org/2001/XMLSchema#double");
+            assert!(value.value().parse::<f64>().unwrap() > 0.0, "geof:{name} returned {value}");
+            assert!(f(&[]).is_err(), "geof:{name} must enforce unary arity");
+        }
+
+        let centroid = reg.get(&format!("{GEOF_NS}centroid")).unwrap();
+        let Term::Literal(value) = centroid(&[square]).unwrap() else { panic!("literal") };
+        assert_eq!(value.datatype().as_str(), WKT_LITERAL);
+        assert!(value.value().contains("0.5"), "got {value}");
+    }
+
+    #[test]
+    fn bounding_coordinate_function_term_level() {
+        let reg = geof_registry();
+        let polygon = wkt("POLYGON((0 0, 4 0, 4 3, 0 3, 0 0))");
+        let max_x = reg
+            .get(&format!("{GEOF_NS}maxX"))
+            .expect("registered geof:maxX");
+
+        let Term::Literal(value) = max_x(std::slice::from_ref(&polygon)).unwrap() else {
+            panic!("literal")
+        };
+        assert_eq!(value.datatype().as_str(), "http://www.w3.org/2001/XMLSchema#double");
+        assert!((value.value().parse::<f64>().unwrap() - 4.0).abs() < 1e-12);
+        assert!(max_x(&[]).is_err(), "geof:maxX must enforce unary arity");
+    }
+
+    #[test]
+    fn is_empty_term_level() {
+        let reg = geof_registry();
+        let is_empty = reg
+            .get(&format!("{GEOF_NS}isEmpty"))
+            .expect("registered geof:isEmpty");
+
+        for (wkt_lexical, expected) in [
+            ("POINT(1 2)", false),
+            ("POINT EMPTY", true),
+            ("LINESTRING EMPTY", true),
+            ("POLYGON((0 0,1 0,1 1,0 1,0 0))", false),
+        ] {
+            let Term::Literal(value) = is_empty(&[wkt(wkt_lexical)]).unwrap() else {
+                panic!("literal")
+            };
+            assert_eq!(
+                value.datatype().as_str(),
+                "http://www.w3.org/2001/XMLSchema#boolean"
+            );
+            assert_eq!(value.value(), expected.to_string(), "WKT: {wkt_lexical}");
+        }
+        assert!(
+            is_empty(&[]).is_err(),
+            "geof:isEmpty must enforce unary arity"
+        );
+    }
+
+    #[test]
+    fn simplify_term_level() {
+        let reg = geof_registry();
+        let simplify = reg.get(&format!("{GEOF_NS}simplify")).unwrap();
+        let tolerance = Term::Literal(Literal::from(0.2));
+        let Term::Literal(value) =
+            simplify(&[wkt("LINESTRING(0 0,1 0.1,2 0)"), tolerance]).unwrap()
+        else {
+            panic!("literal")
+        };
+
+        assert_eq!(value.datatype().as_str(), WKT_LITERAL);
+        assert_eq!(value.value(), "LINESTRING(0 0,2 0)");
+        assert!(simplify(&[wkt("POINT(0 0)")]).is_err());
+        assert!(simplify(&[
+            wkt("POINT(0 0)"),
+            Term::Literal(Literal::new_simple_literal("not-a-number")),
+        ])
+        .is_err());
     }
 
     #[test]

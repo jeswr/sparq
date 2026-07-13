@@ -158,6 +158,185 @@ fn cyclic_tbox_with_universal_contradiction_is_unsatisfiable() {
     assert_eq!(consistency(&o, Budget::default()), Verdict::Unsatisfiable);
 }
 
+// -------------------------------------------------------------------------------------------
+// (e) Opt-in transitive roles (`dl_transitive`, [GPT-5.6] sq-zfwzq) — the ∀₊-rule
+// -------------------------------------------------------------------------------------------
+//
+// ACCEPTANCE (bead sq-zfwzq): hand-built ALCH+transitive fixtures with hand-derived
+// verdicts, where transitivity is LOAD-BEARING — each unsat case is paired with the SAME
+// ontology minus the transitivity declaration, which is satisfiable. The pair IS the
+// mutation witness: knocking out the ∀₊-propagation (equivalently, dropping `Trans(R)`)
+// flips the verdict, so the pinned Unsatisfiable is non-vacuous. Plus the termination
+// stress case: a satisfiable cyclic transitive-role concept MUST block-and-halt.
+#[cfg(feature = "dl_transitive")]
+mod transitive {
+    use super::*;
+
+    const IC: Id = 102;
+
+    fn transitive(role: Id) -> Axiom {
+        Axiom::TransitiveObjectProperty {
+            property: OPE::ObjectProperty(role),
+        }
+    }
+
+    /// LOAD-BEARING chain propagation (hand-derived): `Trans(R)`, `R(a,b)`, `R(b,c)`,
+    /// `a : ∀R.B`, `c : ¬B`. Transitivity gives `R(a,c)`, so `B(c)` clashes with `¬B(c)`
+    /// — Unsatisfiable. In the tableau this is exactly the ∀₊-rule: `∀R.B ∈ L(a)` pushes
+    /// `∀R.B` (not just `B`) into `L(b)`, whose `R`-edge to `c` then forces the clash.
+    #[test]
+    fn transitive_chain_forall_unsat_and_control_sat() {
+        let with_trans = onto(vec![
+            transitive(R),
+            edge(IA, R, IB),
+            edge(IB, R, IC),
+            is_a(IA, CE::only(R, named(B))),
+            is_a(IC, not(named(B))),
+        ]);
+        assert_eq!(
+            consistency(&with_trans, Budget::default()),
+            Verdict::Unsatisfiable,
+            "Trans(R) must carry ∀R.B two steps down the chain"
+        );
+
+        // MUTATION WITNESS (the control): the SAME ontology without `Trans(R)` is
+        // satisfiable — `∀R.B` constrains only the direct successor `b`, never `c`. A
+        // tableau whose ∀₊-rule is knocked out returns Satisfiable on the fixture above,
+        // so the pinned Unsatisfiable is non-vacuous.
+        let without_trans = onto(vec![
+            edge(IA, R, IB),
+            edge(IB, R, IC),
+            is_a(IA, CE::only(R, named(B))),
+            is_a(IC, not(named(B))),
+        ]);
+        assert_eq!(
+            consistency(&without_trans, Budget::default()),
+            Verdict::Satisfiable,
+            "without Trans(R) the two-step successor is unconstrained"
+        );
+    }
+
+    /// The ∀₊-rule on ∃-GENERATED tree successors: `(∃R.∃R.¬B) ⊓ ∀R.B` is unsatisfiable
+    /// w.r.t. `{Trans(R)}` (the generated grandchild holds ¬B but transitivity forces B)
+    /// and satisfiable w.r.t. the empty ontology (control — the mutation witness).
+    #[test]
+    fn transitive_generated_successors_unsat_and_control_sat() {
+        let concept = and(vec![
+            CE::some(R, CE::some(R, not(named(B)))),
+            CE::only(R, named(B)),
+        ]);
+        assert_eq!(
+            class_satisfiability(&concept, &onto(vec![transitive(R)]), Budget::default()),
+            Verdict::Unsatisfiable
+        );
+        assert_eq!(
+            class_satisfiability(&concept, &onto(vec![]), Budget::default()),
+            Verdict::Satisfiable
+        );
+    }
+
+    /// ∀₊ THROUGH the role hierarchy (the `S ⊑* T ⊑* R` side conditions, hand-derived):
+    /// `S ⊑ T ⊑ R`, `Trans(T)`, `a : ∀R.B`, `S(a,b)`, `T(b,c)`. Semantically
+    /// `(a,b) ∈ S ⊆ T` and `(b,c) ∈ T`, so `Trans(T)` gives `(a,c) ∈ T ⊆ R`, forcing
+    /// `B(c)` — clash with `c : ¬B`. In the tableau: the ∀₊-rule (S ⊑* T, T ⊑* R) puts
+    /// `∀T.B` into `L(b)`, whose `T`-edge delivers `B` to `c`. Without `Trans(T)` the
+    /// same ontology is satisfiable (control / mutation witness).
+    #[test]
+    fn transitive_subrole_routes_forall_through_hierarchy() {
+        let axioms = |with_trans: bool| {
+            let mut v = vec![
+                subrole(S, T),
+                subrole(T, R),
+                is_a(IA, CE::only(R, named(B))),
+                edge(IA, S, IB),
+                edge(IB, T, IC),
+                is_a(IC, not(named(B))),
+            ];
+            if with_trans {
+                v.push(transitive(T));
+            }
+            onto(v)
+        };
+        assert_eq!(
+            consistency(&axioms(true), Budget::default()),
+            Verdict::Unsatisfiable
+        );
+        assert_eq!(
+            consistency(&axioms(false), Budget::default()),
+            Verdict::Satisfiable
+        );
+    }
+
+    /// A transitive role must NOT leak constraints onto an UNRELATED role: `Trans(T)`,
+    /// `R(a,b)`, `R(b,c)`, `a : ∀R.B`, `c : ¬B` stays satisfiable when `R` is neither
+    /// transitive nor `⊑*`-related to `T` (the ∀₊ side conditions are role-specific).
+    #[test]
+    fn unrelated_transitive_role_does_not_leak() {
+        let o = onto(vec![
+            transitive(T),
+            edge(IA, R, IB),
+            edge(IB, R, IC),
+            is_a(IA, CE::only(R, named(B))),
+            is_a(IC, not(named(B))),
+        ]);
+        assert_eq!(consistency(&o, Budget::default()), Verdict::Satisfiable);
+    }
+
+    /// ACCEPTANCE (termination stress): a SATISFIABLE cyclic transitive-role concept must
+    /// BLOCK-AND-HALT with a definitive verdict — not loop, and not exhaust the budget.
+    /// `A ⊑ ∃R.A`, `A ⊑ ∀R.A`, `Trans(R)`: every fresh successor carries `{A, ∃R.A, ∀R.A,
+    /// the GCI internalisations}` — the ∀₊-rule re-propagates `∀R.A` down the chain, the
+    /// labels equalise, and ancestor subset blocking gates the ∃-rule. A budget-shaped
+    /// Unknown here would mean the ∀₊-closure broke the §5a termination argument.
+    #[test]
+    fn transitive_cycle_blocks_and_halts_satisfiable() {
+        let o = onto(vec![
+            transitive(R),
+            subclass(named(A), CE::some(R, named(A))),
+            subclass(named(A), CE::only(R, named(A))),
+        ]);
+        let blocking_canary = Budget {
+            max_nodes: 4,
+            max_rule_applications: 10_000,
+        };
+        assert_eq!(
+            class_satisfiability(&named(A), &o, blocking_canary),
+            Verdict::Satisfiable,
+            "must block-and-halt below the node cap, never exhaust it"
+        );
+        // The same with a hierarchy above the transitive role (a bigger ∀₊-closure and a
+        // ⊔ in the filler) still halts satisfiable.
+        let o = onto(vec![
+            transitive(S),
+            subrole(S, R),
+            subclass(named(A), CE::some(S, named(A))),
+            subclass(CE::Thing, CE::only(R, or(vec![named(A), named(B)]))),
+        ]);
+        assert_eq!(
+            class_satisfiability(&named(A), &o, Budget::default()),
+            Verdict::Satisfiable
+        );
+    }
+
+    /// End-to-end through the REAL pipeline (Turtle → Dict → extract → tableau): with the
+    /// feature ON, `owl:TransitiveProperty` EXTRACTS (no longer fail-closed) and the
+    /// chain fixture is decided Unsatisfiable; the same graph minus the transitivity
+    /// typing is Satisfiable.
+    #[test]
+    fn end_to_end_turtle_transitive_chain() {
+        let base = ":r a owl:ObjectProperty .\n\
+             :a :r :b . :b :r :c .\n\
+             :a a [ a owl:Restriction ; owl:onProperty :r ; owl:allValuesFrom :B ] .\n\
+             :c a [ owl:complementOf :B ] .";
+        let v = check_turtle(
+            &format!(":r a owl:TransitiveProperty .\n{}", base),
+            Budget::default(),
+        );
+        assert_eq!(v, Verdict::Unsatisfiable);
+        assert_eq!(check_turtle(base, Budget::default()), Verdict::Satisfiable);
+    }
+}
+
 /// Blocking must not mask an inconsistency that only becomes visible BEYOND depth 1:
 /// `A ⊑ ∃R.B`, `B ⊑ ∃R.Q`, `Q ⊑ ⊥` with `A(a)` clashes only when the depth-1 node is
 /// expanded to depth 2 — an implementation that wrongly blocks non-root nodes (whose

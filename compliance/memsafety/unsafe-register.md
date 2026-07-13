@@ -40,18 +40,16 @@ register distinguishes two trust classes of `unsafe`:
 |---|---|
 | `miri` lane (`.github/workflows/miri.yml`, sq-fo28) | pure-Rust unsafe in `sparq-core` reachable without `mmap`/`dict-spill`: the parallel scatter writes, POD↔bytes reinterprets, `from_utf8_unchecked` over in-memory buffers, `MaybeUninit`+`set_len`. Runs nightly under Tree-Borrows for aliasing/provenance/data-race UB. |
 | `mmap_corruption_oracle` test (`crates/sparq-core/tests/`, run under `--features mmap,dict-spill`) + `fuzz` lane's mmap-loader target | the **B5** mmap sites Miri structurally cannot run (file-backed mappings): hostile/corrupt index → loader must reject or stay in-bounds, never UB. |
-| `#![forbid(unsafe_code)]` on 31 crates (sq-emay) | proves the unsafe surface is *confined* to the 5 crates below; a new `unsafe` anywhere else fails to compile. |
+| `#![forbid(unsafe_code)]` across the safe-only crates (sq-emay) | proves the unsafe surface is confined; a new `unsafe` in those crates fails to compile. |
 | `scripts/unsafe-gate.py --check` (this PR, GX-5) | the count **ratchet** — a PR cannot add `unsafe` without updating this register + re-seeding the snapshot. |
-| `// SAFETY:` argument on every site, **enforced by `clippy::undocumented_unsafe_blocks`** | the per-site argument lives next to the code. `#![warn(clippy::undocumented_unsafe_blocks)]` is set crate-root on all 5 unsafe-bearing crates (sparq-core, sparq-vectors, sparq-cli, sparq-zk-compose, sparq-bench), so the existing `clippy --all-targets -D warnings` gate **mechanically** rejects any `unsafe` block/impl that lacks a literal `// SAFETY:` comment. Combined with the **register + review + count ratchet** (a new `unsafe` cannot land without a register row, the `// SAFETY:` comment, and a re-seed). Closes gap MS-G2 (sq-8wbn) in [`gap-register.md`](./gap-register.md). [OPUS-4.8] |
+| `// SAFETY:` argument on every site, **enforced by `clippy::undocumented_unsafe_blocks`** | the per-site argument lives next to the code. The lint is set at crate root on unsafe-bearing library crates (including `sparq-engine`) and locally on unsafe-bearing test/example crates, so the existing `clippy --all-targets -D warnings` gate **mechanically** rejects any `unsafe` block/impl that lacks a literal `// SAFETY:` comment. Combined with the **register + review + count ratchet** (a new `unsafe` cannot land without a register row, the `// SAFETY:` comment, and a re-seed). Closes gap MS-G2 (sq-8wbn) in [`gap-register.md`](./gap-register.md). [OPUS-4.8] |
 
 ## Register
 
-**75 `unsafe` sites** across 8 crates (the other crates are `#![forbid(unsafe_code)]`).
+**87 `unsafe` sites** across 8 crates (the other crates contain no first-party `unsafe`).
 Counts and the file:line list are produced by `scripts/unsafe-gate.py --list` and
-must equal `bench/unsafe-snapshot.json`. Two crates are a special NON-SHIPPING case:
-**`sparq-engine`**'s library stays `#![forbid(unsafe_code)]` (zero shipped `unsafe`) — its
-4 sites are confined to a single **integration test's** byte-counting `#[global_allocator]`
-— and **`sparq-lws-core`** (sq-gg0qq.2) likewise ships a `forbid(unsafe_code)` lib + bin
+must equal `bench/unsafe-snapshot.json`. One crate is a special NON-SHIPPING case:
+**`sparq-lws-core`** (sq-gg0qq.2) ships a `forbid(unsafe_code)` lib + bin
 with its 8 sites confined to two **example benchmark harnesses'** counting allocators, which
 a custom `#[global_allocator]` unavoidably requires (see each crate's subsection below).
 
@@ -182,19 +180,38 @@ capsule destructor's drop is idempotent.
 | `src/arrow_export.rs:123` | `ffi::PyCapsule_GetPointer` (CPython FFI) | `capsule` is the live capsule CPython passes; name matches the `'static` CStr it was created under | returns the leaked `*mut FFI_ArrowArrayStream` (or null on a name mismatch — guarded by the `!ptr.is_null()` check below). Raw CPython call, GIL held inside the destructor. |
 | `src/arrow_export.rs:125` | `Box::from_raw` (reclaim) | `ptr` is exactly the pointer leaked at :107 via `Box::into_raw`, of the same type, same allocator | reconstitutes and drops the `Box<FFI_ArrowArrayStream>` exactly once per capsule (null-guarded, so never on a name mismatch). `FFI_ArrowArrayStream::Drop` is idempotent on an already-released stream (`release` is set `None` after the first call), so no double free / no leak whether or not pyarrow consumed it. |
 
-### `sparq-engine` — 4 sites (test-only byte-counting global allocator) [OPUS-4.8]
+### `sparq-engine` — 8 sites (cancellation pointer + test-only byte-counting allocator)
 
-(sq-my8wd.4.) The engine **library** is `#![forbid(unsafe_code)]` and ships **zero**
-`unsafe`. These 4 sites live entirely in one integration test,
+(sq-kq9ia.) Four shipped sites form one narrow cooperative-cancellation boundary. The
+thread-local/rayon `Limits` snapshot must remain `Copy`, so it carries `CancelPtr`, a
+`NonNull<AtomicBool>` borrowed from the `Arc<AtomicBool>` in `QueryBudget`. The returned
+`Guard<'a>` carries `PhantomData<&'a QueryBudget>`, preventing the owning budget or its
+last `Arc` from being dropped while the pointer is installed; `Guard::drop` clears
+`ACTIVE` to `OFF` before the borrow can end. A second `PhantomData<Rc<()>>` makes the guard
+non-`Send`, so it can only clear the thread-local state on the installing thread. Rayon
+parallel iterators are scoped and join before that guard drops. The pointer is dereferenced
+only for `AtomicBool::load(Relaxed)`:
+the flag gates control flow and publishes no data, so no synchronisation edge is needed.
+The direct 0-vs-1 test exercises both poll paths and the sticky `"cancelled"` reason; the
+cross-thread test exercises visibility, and the same-thread second-query test witnesses
+pointer cleanup. [GPT-5.6]
+
+| File:line | Kind | Invariant relied on | Why sound / how bounded |
+|---|---|---|---|
+| `src/exec.rs:87` | `unsafe impl Send for CancelPtr` | `AtomicBool: Sync`; allocation remains live | moving the shared pointer to a worker is sound because `Guard<'a>` borrows the owning `QueryBudget` through every scoped rayon join and the pointer is only atomically loaded. |
+| `src/exec.rs:90` | `unsafe impl Sync for CancelPtr` | `AtomicBool: Sync`; all shared access is atomic | no mutation or non-atomic access occurs through the pointer; the lifetime-bound guard keeps the allocation live. |
+| `src/exec.rs:167` | `NonNull::as_ref` in `Limits::hit` | live, aligned `AtomicBool` from `Arc::as_ref` | `NonNull::from` preserves the reference's alignment/provenance; the snapshot cannot outlive the guard's scoped rayon work. Direct false/true assertions cover this poll. |
+| `src/exec.rs:415` | `NonNull::as_ref` in `budget::exhausted` | live, aligned `AtomicBool` from `Arc::as_ref` | the installing thread holds `Guard<'a>` until the query returns, then clears the pointer before the borrowed budget may drop. Direct and cross-thread cancellation tests cover this poll. |
+
+(sq-my8wd.4.) The other 4 sites live entirely in one integration test,
 `tests/service_stream_bounded.rs`, which pins the DoS-relevant invariant of streaming
 SERVICE consumption: a large/duplicate-heavy remote SPARQL result must be consumed in
 memory **O(body)**, not O(parsed DOM + a term-level relation copy) — the old
 collect-everything path amplified a remote result into a multiple of its wire size. The
 test proves this with a **thread-local byte-counting allocator**, and a `#[global_allocator]`
 unavoidably requires `unsafe` (the `GlobalAlloc` trait is `unsafe` by definition; there is
-no safe substitute for a deterministic per-thread allocation counter). It is deliberately
-placed in the integration-test crate, not the lib, precisely so the lib keeps its
-`forbid(unsafe_code)` posture. **Not** a B5 (untrusted-input) surface: every method is a
+no safe substitute for a deterministic per-thread allocation counter). **Not** a B5
+(untrusted-input) surface: every method is a
 verbatim forward to the process `System` allocator with the identical arguments, so
 `System` discharges all of `GlobalAlloc`'s obligations; the wrapper only reads
 `Layout::size()`/`new_size` and mutates a thread-local `Cell<isize>` — no pointer `System`
@@ -207,7 +224,7 @@ Miri does not cover it (Miri supplies its own allocator and does not model a
 
 | File:line | Kind | Invariant relied on | Why sound / how bounded |
 |---|---|---|---|
-| `tests/service_stream_bounded.rs:83` | `unsafe impl GlobalAlloc for Counting` | forward-to-`System` | every method delegates verbatim to `System` with the same args, so `System` upholds the trait contract; the wrapper adds only size reads + a thread-local counter. TEST-only; lib stays `forbid(unsafe_code)`. |
+| `tests/service_stream_bounded.rs:83` | `unsafe impl GlobalAlloc for Counting` | forward-to-`System` | every method delegates verbatim to `System` with the same args, so `System` upholds the trait contract; the wrapper adds only size reads + a thread-local counter. TEST-only. |
 | `tests/service_stream_bounded.rs:87` | `unsafe fn alloc` | caller's `layout` contract forwarded | `System.alloc(layout)` unchanged; only the returned pointer's nullness is inspected before recording `layout.size()`. |
 | `tests/service_stream_bounded.rs:98` | `unsafe fn dealloc` | `ptr` came from this allocator with this `layout` | `System.dealloc(ptr, layout)` unchanged; holds because every `alloc`/`realloc` also forwarded to `System`. |
 | `tests/service_stream_bounded.rs:106` | `unsafe fn realloc` | caller's `ptr`/`layout`/`new_size` contract forwarded | `System.realloc(ptr, layout, new_size)` unchanged; only the returned pointer's nullness is inspected before recording the delta. |
@@ -246,11 +263,11 @@ the examples run on the standard toolchain.
 
 ## NEEDS-REVIEW
 
-**None.** Every one of the 75 sites now carries a literal `// SAFETY:` comment
+**None.** Every one of the 87 sites now carries a literal `// SAFETY:` comment
 immediately preceding the `unsafe` block/impl, mechanically enforced by
 `clippy::undocumented_unsafe_blocks` (MS-G2 closed, sq-8wbn, [OPUS-4.8]) — set
-crate-root on the 5 unsafe-bearing lib crates and file-local on the one `sparq-engine`
-integration test and the two `sparq-lws-core` example files that carry counting
+at crate root on unsafe-bearing libraries and file-local on the `sparq-engine`
+integration test and the `sparq-lws-core` example files that carry counting
 allocators. The 6 sites that
 previously relied on an adjacent block comment — the two `unsafe impl Send`/`Sync for
 SlotPtr` pairs (`dict.rs` + `dictspill.rs`), the `MmapMut` `from_raw_parts_mut` view, and

@@ -755,6 +755,17 @@ export {
   workspaceSummary,
 } from "./workspace.js";
 
+// ---------------------------------------------------------------------------
+// [GPT-5.6] sq-epbw4 — shared browser dataset decompression. gzip/ZIP use native
+// browser streams; zstd/bzip2 stay in independent lazy chunks loaded only on demand.
+// ---------------------------------------------------------------------------
+
+export {
+  type DatasetCompressionCodec,
+  type DecompressedDatasetBytes,
+  decompressDatasetBytes,
+} from "./decompress.js";
+
 /** Renders a term for display, with a compact datatype/lang suffix. */
 export function formatTerm(t: SparqlTerm | undefined): string {
   if (!t) return "";

@@ -32,10 +32,10 @@ let map = sparq_canon::issued_identifiers(&[q]).unwrap();
 
 ## ✨ Features
 
-- **Dataset API** — [`canonicalize`]/`canonicalize_quads` return the canonical
-  N-Quads `String`; `issued_identifiers`/`issue_quads` return the blank-node
-  issuer map. `*_with::<D: Digest>` selects a non-default hash profile (the spec
-  default is SHA-256; `sha2::Sha384` gives the SHA-384 profile).
+- **Dataset API** — [`canonicalize`]/`canonicalize_quads` return canonical
+  N-Quads; `digest_quads_with::<D>` returns its exact digest bytes; and
+  `issued_identifiers`/`issue_quads` return the blank-node issuer map. The other
+  `*_with::<D: Digest>` functions select a non-default RDFC-1.0 hash profile.
 - **Single-graph API** — `canonicalize_triples` / `canonicalize_graph_content`
   return a `CanonicalGraph` (sorted canonical N-Quads lines + re-parsed
   canonical triples). This is what the ZK per-graph commitment pipeline

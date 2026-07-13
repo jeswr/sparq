@@ -16,6 +16,8 @@ use std::time::SystemTime;
 
 use async_trait::async_trait;
 
+use super::InMemoryStoreLimits;
+
 /// The authoritative metadata SPARQ holds for a resource (the index record, not the bytes).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceMeta {
@@ -82,6 +84,9 @@ pub enum DeleteOutcome {
 pub enum SparqError {
     #[error("resource not indexed")]
     NotFound,
+    /// The configured in-memory resource-count ceiling would be exceeded.
+    #[error("in-memory index quota exceeded")]
+    QuotaExceeded,
     #[error("sparq backend error: {0}")]
     Backend(String),
 }
@@ -100,8 +105,9 @@ impl From<super::sparql::BuildError> for SparqError {
 /// ([`SparqClient::delete_meta`]) and containment membership ([`SparqClient::create_child`] /
 /// [`remove_child`](SparqClient::remove_child) / [`list_children`](SparqClient::list_children)) —
 /// SPARQ is authoritative for containment, so POST (mint a child) + the empty-container DELETE check
-/// flow through it, never an S3 LIST. M2-next: the `usage()` quota view + the WAC/ACP ACL-document
-/// graphs the (future) access-evaluation step reads.
+/// flow through it, never an S3 LIST. [GPT-5.6] The in-memory implementation exposes its concrete
+/// `usage()` and `quota()` views without imposing that backend-specific model on this trait. M2-next
+/// retains the WAC/ACP ACL-document graphs the (future) access-evaluation step reads.
 #[async_trait]
 pub trait SparqClient: Send + Sync {
     /// Fetch the authoritative metadata for a resource IRI, or [`SparqError::NotFound`].
@@ -221,9 +227,16 @@ pub trait SparqClient: Send + Sync {
 /// Holds the metadata records AND the containment edges (container IRI → ordered child IRIs) behind
 /// a single lock, so a POST/DELETE that touches both stays internally consistent under the test
 /// double's coarse locking.
-#[derive(Default)]
 pub struct InMemorySparqClient {
     inner: Mutex<Index>,
+    /// [GPT-5.6] Immutable admission ceiling, enforced under the index lock.
+    limits: InMemoryStoreLimits,
+}
+
+impl Default for InMemorySparqClient {
+    fn default() -> Self {
+        Self::with_limits(InMemoryStoreLimits::default())
+    }
 }
 
 /// The in-memory index state: metadata records + containment membership.
@@ -235,8 +248,39 @@ struct Index {
 }
 
 impl InMemorySparqClient {
+    /// Build with the bounded default limits.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Build with an explicit resource-count limit.
+    pub fn with_limits(limits: InMemoryStoreLimits) -> Self {
+        Self {
+            inner: Mutex::new(Index::default()),
+            limits,
+        }
+    }
+
+    /// Return the exact number of indexed resources.
+    pub fn usage(&self) -> Result<usize, SparqError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| SparqError::Backend("poisoned".into()))?;
+        Ok(guard.meta.len())
+    }
+
+    /// Return the immutable admission limits configured for this index.
+    pub fn quota(&self) -> InMemoryStoreLimits {
+        self.limits
+    }
+
+    /// Reserve a metadata slot for a new IRI, or fail without mutating the index.
+    fn admit_resource(&self, index: &Index, iri: &str) -> Result<(), SparqError> {
+        if !index.meta.contains_key(iri) && index.meta.len() >= self.limits.max_resource_count {
+            return Err(SparqError::QuotaExceeded);
+        }
+        Ok(())
     }
 }
 
@@ -255,6 +299,7 @@ impl SparqClient for InMemorySparqClient {
             .inner
             .lock()
             .map_err(|_| SparqError::Backend("poisoned".into()))?;
+        self.admit_resource(&guard, iri)?;
         guard.meta.insert(iri.to_string(), meta);
         Ok(())
     }
@@ -337,6 +382,7 @@ impl SparqClient for InMemorySparqClient {
         if !guard.meta.contains_key(container) {
             return Err(SparqError::NotFound);
         }
+        self.admit_resource(&guard, child)?;
         guard.meta.insert(child.to_string(), meta);
         let entry = guard.children.entry(container.to_string()).or_default();
         if !entry.iter().any(|c| c == child) {
@@ -393,5 +439,68 @@ impl SparqClient for InMemorySparqClient {
                 .map(|c| (c.clone(), guard.meta.get(c).map(|m| m.etag.clone())))
                 .collect(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn meta(blob_key: &str) -> ResourceMeta {
+        ResourceMeta {
+            content_type: "text/plain".into(),
+            blob_key: blob_key.into(),
+            etag: "\"etag\"".into(),
+            last_modified: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resource_limit_rejects_new_records_but_allows_replacement() {
+        // [GPT-5.6] Mutation witness: removing `admit_resource` makes the second IRI succeed and
+        // changes usage from the configured one-resource ceiling.
+        let limits = InMemoryStoreLimits::new(usize::MAX, 1);
+        let index = InMemorySparqClient::with_limits(limits);
+
+        index.put_meta("urn:a", meta("a1")).await.unwrap();
+        assert_eq!(index.usage().unwrap(), 1);
+        assert!(matches!(
+            index.put_meta("urn:b", meta("b")).await,
+            Err(SparqError::QuotaExceeded)
+        ));
+        assert_eq!(index.usage().unwrap(), 1);
+
+        index.put_meta("urn:a", meta("a2")).await.unwrap();
+        assert_eq!(index.get_meta("urn:a").await.unwrap().blob_key, "a2");
+        assert_eq!(index.quota(), limits);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn concurrent_metadata_writes_cannot_over_admit_resource_limit() {
+        // [GPT-5.6] Admission and insertion happen under one lock, so racing writers cannot each
+        // observe a spare final slot.
+        let index = Arc::new(InMemorySparqClient::with_limits(InMemoryStoreLimits::new(
+            usize::MAX,
+            8,
+        )));
+        let mut handles = Vec::new();
+        for n in 0..64 {
+            let index = Arc::clone(&index);
+            handles.push(tokio::spawn(async move {
+                index.put_meta(&format!("urn:{n}"), meta("blob")).await
+            }));
+        }
+
+        let mut admitted = 0;
+        for handle in handles {
+            match handle.await.unwrap() {
+                Ok(()) => admitted += 1,
+                Err(SparqError::QuotaExceeded) => {}
+                Err(other) => panic!("unexpected index error: {other}"),
+            }
+        }
+        assert_eq!(admitted, 8);
+        assert_eq!(index.usage().unwrap(), 8);
     }
 }

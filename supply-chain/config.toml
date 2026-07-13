@@ -106,9 +106,31 @@ criteria = "safe-to-deploy"
 version = "59.0.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.arrow-ipc]]
+version = "59.0.0"
+criteria = "safe-to-deploy"
+notes = "Opt-in sparq-arrow Parquet closure and direct Arrow IPC stream dependency; explicit review backlog exemption for PR #2196 [GPT-5.6]"
+
 [[exemptions.arrow-schema]]
 version = "59.0.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.arrow-select]]
+version = "59.0.0"
+criteria = "safe-to-deploy"
+notes = "Opt-in sparq-arrow Parquet dependency closure; explicit review backlog exemption for PR #2196 [GPT-5.6]"
+
+[[exemptions.asn1-rs]]
+version = "0.7.2"
+criteria = "safe-to-run"
+
+[[exemptions.asn1-rs-derive]]
+version = "0.6.0"
+criteria = "safe-to-run"
+
+[[exemptions.asn1-rs-impl]]
+version = "0.2.0"
+criteria = "safe-to-run"
 
 [[exemptions.async-compression]]
 version = "0.4.42"
@@ -350,6 +372,10 @@ criteria = "safe-to-deploy"
 version = "2.11.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.der-parser]]
+version = "10.0.0"
+criteria = "safe-to-run"
+
 [[exemptions.deranged]]
 version = "0.5.8"
 criteria = "safe-to-deploy"
@@ -412,6 +438,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.fastrand]]
 version = "2.4.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.fastrand]]
+version = "2.4.1"
 criteria = "safe-to-run"
 
 [[exemptions.ff]]
@@ -421,6 +451,11 @@ criteria = "safe-to-run"
 [[exemptions.find-msvc-tools]]
 version = "0.1.9"
 criteria = "safe-to-deploy"
+
+[[exemptions.flatbuffers]]
+version = "25.12.19"
+criteria = "safe-to-deploy"
+notes = "Opt-in sparq-arrow Parquet dependency closure; explicit review backlog exemption for PR #2196 [GPT-5.6]"
 
 [[exemptions.flate2]]
 version = "1.1.9"
@@ -438,11 +473,19 @@ criteria = "safe-to-deploy"
 version = "1.3.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.futures]]
+version = "0.3.32"
+criteria = "safe-to-deploy"
+
 [[exemptions.futures-channel]]
 version = "0.3.32"
 criteria = "safe-to-deploy"
 
 [[exemptions.futures-core]]
+version = "0.3.32"
+criteria = "safe-to-deploy"
+
+[[exemptions.futures-executor]]
 version = "0.3.32"
 criteria = "safe-to-deploy"
 
@@ -520,6 +563,14 @@ criteria = "safe-to-run"
 
 [[exemptions.h2]]
 version = "0.4.15"
+criteria = "safe-to-deploy"
+
+[[exemptions.h3]]
+version = "0.0.8"
+criteria = "safe-to-deploy"
+
+[[exemptions.h3-quinn]]
+version = "0.0.10"
 criteria = "safe-to-deploy"
 
 [[exemptions.half]]
@@ -824,6 +875,10 @@ criteria = "safe-to-deploy"
 version = "0.3.8"
 criteria = "safe-to-run"
 
+[[exemptions.minimal-lexical]]
+version = "0.2.1"
+criteria = "safe-to-run"
+
 [[exemptions.mio]]
 version = "1.2.1"
 criteria = "safe-to-deploy"
@@ -851,6 +906,10 @@ criteria = "safe-to-deploy"
 [[exemptions.ndk-sys]]
 version = "0.6.0+11769913"
 criteria = "safe-to-deploy"
+
+[[exemptions.nom]]
+version = "7.1.3"
+criteria = "safe-to-run"
 
 [[exemptions.ntriple]]
 version = "0.1.1"
@@ -896,6 +955,10 @@ criteria = "safe-to-deploy"
 version = "0.13.2"
 criteria = "safe-to-deploy"
 notes = "solid-server-rs import pre-flight (sq-gg0qq.1): Apache Arrow's blob-store trait (S3/GCS/Azure/local) — backup/bytes-only seam of the incoming server, never authoritative. [FABLE-5]"
+
+[[exemptions.oid-registry]]
+version = "0.8.1"
+criteria = "safe-to-run"
 
 [[exemptions.once_cell]]
 version = "1.21.4"
@@ -965,6 +1028,16 @@ criteria = "safe-to-deploy"
 [[exemptions.parking_lot_core]]
 version = "0.9.12"
 criteria = "safe-to-deploy"
+
+[[exemptions.parquet]]
+version = "59.0.0"
+criteria = "safe-to-deploy"
+notes = "Opt-in sparq-arrow Parquet dependency closure; explicit review backlog exemption for PR #2196 [GPT-5.6]"
+
+[[exemptions.paste]]
+version = "1.0.15"
+criteria = "safe-to-deploy"
+notes = "Opt-in sparq-arrow Parquet dependency closure; explicit review backlog exemption for PR #2196 [GPT-5.6]"
 
 [[exemptions.peg]]
 version = "0.5.7"
@@ -1098,8 +1171,16 @@ criteria = "safe-to-deploy"
 version = "0.11.9"
 criteria = "safe-to-deploy"
 
+[[exemptions.quinn]]
+version = "0.11.11"
+criteria = "safe-to-deploy"
+
 [[exemptions.quinn-proto]]
 version = "0.11.14"
+criteria = "safe-to-deploy"
+
+[[exemptions.quinn-proto]]
+version = "0.11.16"
 criteria = "safe-to-deploy"
 
 [[exemptions.quote]]
@@ -1134,6 +1215,10 @@ criteria = "safe-to-deploy"
 [[exemptions.rayon]]
 version = "1.12.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.rcgen]]
+version = "0.14.8"
+criteria = "safe-to-run"
 
 [[exemptions.rdf-canon]]
 version = "0.15.3"
@@ -1207,6 +1292,10 @@ criteria = "safe-to-deploy"
 [[exemptions.rustc-hash]]
 version = "2.1.3"
 criteria = "safe-to-deploy"
+
+[[exemptions.rusticata-macros]]
+version = "4.1.0"
+criteria = "safe-to-run"
 
 [[exemptions.rustix]]
 version = "1.1.4"
@@ -1285,6 +1374,11 @@ criteria = "safe-to-deploy"
 [[exemptions.semver]]
 version = "1.0.28"
 criteria = "safe-to-deploy"
+
+[[exemptions.seq-macro]]
+version = "0.3.6"
+criteria = "safe-to-deploy"
+notes = "Opt-in sparq-arrow Parquet dependency closure; explicit review backlog exemption for PR #2196 [GPT-5.6]"
 
 [[exemptions.serde_json]]
 version = "1.0.150"
@@ -1549,6 +1643,11 @@ criteria = "safe-to-deploy"
 [[exemptions.tungstenite]]
 version = "0.29.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.twox-hash]]
+version = "2.1.2"
+criteria = "safe-to-deploy"
+notes = "Opt-in sparq-arrow Parquet dependency closure; explicit review backlog exemption for PR #2196 [GPT-5.6]"
 
 [[exemptions.typenum]]
 version = "1.20.1"
@@ -1872,6 +1971,10 @@ criteria = "safe-to-deploy"
 version = "0.6.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.x509-parser]]
+version = "0.18.1"
+criteria = "safe-to-run"
+
 [[exemptions.xml-rs]]
 version = "0.8.28"
 criteria = "safe-to-deploy"
@@ -1879,6 +1982,10 @@ criteria = "safe-to-deploy"
 [[exemptions.xxhash-rust]]
 version = "0.8.16"
 criteria = "safe-to-deploy"
+
+[[exemptions.yasna]]
+version = "0.6.0"
+criteria = "safe-to-run"
 
 [[exemptions.yoke]]
 version = "0.8.3"

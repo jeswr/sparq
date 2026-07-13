@@ -60,6 +60,18 @@ spqcprm2 = ["sparq-core/spqcprm2"]
 # OFF by default: the default native build and the wasm bundle carry zero incidence code and
 # pull in ZERO new dependencies. [FABLE-5]
 cs-anchor-incidence = []
+# [FABLE-5] (sq-lk3aw.4) EXACT-candidate spatial pushdown: adds the
+# `SpatialProvider::candidates_exact` certification seam (`SpatialExactQuery`) and
+# teaches the spatial FILTER pushdown to (a) recognise the previously-unpushable
+# `geof:sfContains(REGION, ?g)` constant-region-first operand order and (b) SKIP the
+# residual `geof:` DE-9IM refinement when the provider CERTIFIES an exact answer set
+# AND every surviving row's binding is certified (a not-indexed binding always keeps
+# the residual FILTER — see `apply_spatial_pushdown_exact`'s soundness argument).
+# Result-identical by construction (differential vs the post-hoc path); driven
+# end-to-end by sparq-geo's opt-in `topology_index` feature. OPT-IN and OFF by
+# default: off, zero exact-seam code compiles and the existing superset pushdown +
+# residual-FILTER behaviour is unchanged; pulls in ZERO new dependencies.
+spatial-exact-pushdown = []
 # zk-trace seam (research/zkp-query-proofs-plan.md §4.E): records per-obligation
 # witness input sets (matched triples per BGP pattern, executed join order,
 # FILTER operand bindings) for the sparq-zk derived-credential prover. OPT-IN

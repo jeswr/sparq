@@ -21,11 +21,15 @@ cargo run -p sparq-lws-core
 cargo test -p sparq-lws-core
 # Engine-free profile (in-memory double only)
 cargo test -p sparq-lws-core --no-default-features
+# [GPT-5.6] Opt in to one periodic orphan-blob sweep task (interval in seconds)
+SOLID_SERVER_RECONCILE_INTERVAL_SECS=3600 cargo run -p sparq-lws-core
 ```
 
 The binary is configured entirely by `SOLID_SERVER_*` / `PSS_*` environment
 variables (bind address, TLS PEM paths, backend selection, seeding) — see the
-module docs on `src/main.rs`.
+module docs on `src/main.rs`. `SOLID_SERVER_RECONCILE_INTERVAL_SECS` is unset by
+default; a positive integer enables one periodic sweep using the unchanged
+one-hour orphan grace period. Invalid or zero values fail boot.
 
 ## ✨ Features
 
@@ -50,6 +54,10 @@ module docs on `src/main.rs`.
     `--no-default-features` builds the engine-free profile.
   - `http-sparq` (off) — the remote SPARQL-over-HTTP backend
     (`PSS_SPARQ_BACKEND=http`) for a shared-service deployment.
+  - `http3` (off, [GPT-5.6] sq-oprna.2) — when the existing TLS PEM variables
+    are configured, also serve the same hardened LDP router over HTTP/3 on UDP
+    at the resolved `SOLID_SERVER_BIND` address and port. TCP remains HTTP/2 +
+    HTTP/1.1; WebSocket notifications remain on TCP.
   - `redis-replay` (off) — a shared Redis-backed DPoP `jti` replay store for
     horizontally-scaled deployments.
 

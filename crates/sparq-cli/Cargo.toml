@@ -113,6 +113,11 @@ topk-lazy-strkey = ["sparq-engine/topk-lazy-strkey"]
 # `.csv.zst` / `.csv.bz2` inputs reuse `open_reader`'s transparent decompression. Enable with
 # `cargo build -p sparq-cli --features tabular`.
 tabular = []
+# [GPT-5.6] (sq-lsp7k.28) `diff <file-a> <file-b> [--exact]` compares the two RDF
+# triple sets and emits a deterministic N-Triples patch. OFF by default: without this
+# feature the dispatch arm, implementation, and subprocess contract tests are absent.
+# The implementation uses only sparq-core's existing load path and adds no dependency.
+diff = []
 
 [dependencies]
 # `version` alongside `path` on the sparq-* deps: cargo uses the path locally and the

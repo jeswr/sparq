@@ -4,6 +4,8 @@
 #![doc = include_str!("../README.md")]
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
+#[cfg(feature = "window-aggregate")]
+mod aggregate;
 mod eval;
 mod multi;
 mod query;
@@ -11,6 +13,8 @@ mod rspql;
 mod stream;
 mod window;
 
+#[cfg(feature = "window-aggregate")]
+pub use aggregate::{window_aggregate, Agg};
 pub use eval::EvalMode;
 pub use multi::ContinuousMultiQuery;
 pub use query::{

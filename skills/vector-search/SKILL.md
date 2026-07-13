@@ -1,6 +1,6 @@
 ---
 name: vector-search
-description: "Semantic / ANN vector search over a sparq RDF graph: build a memory-mapped per-term-id embedding store (.spqv), then run cosine top-k with an in-RAM HNSW, a persistent on-disk DiskANN/Vamana graph (.spqg), or an exact brute-force baseline; verbalize entities (label+type+description) for embedding, scalar/product quantize (SQ/PQ) for large stores, fuse with another ranked signal (RRF / score blend) for hybrid retrieval, run predicate-constrained (filtered) ANN over a BGP-selected dict-id mask behind the opt-in `filtered-ann` feature, and — behind the opt-in `vec-predicate` feature — run k-NN INSIDE plain SPARQL via the `vec:nearest` / `vec:search` magic predicates. Use when adding embedding/semantic-search/nearest-neighbour over a sparq Graph in the sparq-vectors crate."
+description: "Semantic / ANN vector search over a sparq RDF graph: build a memory-mapped per-term-id embedding store (.spqv), then run cosine top-k with an in-RAM HNSW, a persistent on-disk DiskANN/Vamana graph (.spqg), or an exact brute-force baseline; verbalize entities (label+type+description) for embedding, scalar/product quantize (SQ/PQ) for large stores, fuse with another ranked signal (RRF / score blend) for hybrid retrieval, run predicate-constrained (filtered) ANN over a BGP-selected dict-id mask behind the opt-in `filtered-ann` feature, run recall-gated concept dedup + k-NN over a RAW (id, vector) matrix behind the opt-in `approx-ann` feature (build_ann/knn/dedup: merges apply only after measured ANN recall vs an exact ground truth clears a pre-registered gate), and — behind the opt-in `vec-predicate` feature — run k-NN INSIDE plain SPARQL via the `vec:nearest` / `vec:search` magic predicates. Use when adding embedding/semantic-search/nearest-neighbour/near-duplicate-merging over a sparq Graph or a raw concept-vector matrix in the sparq-vectors crate."
 ---
 
 # sparq-vector-search
@@ -68,6 +68,9 @@ impl VectorStore {
     fn get(&self, id: Id) -> Option<&[f32]>;  fn iter(&self) -> impl Iterator<Item=(Id, &[f32])>
     fn dim(&self) -> usize;  fn len(&self) -> usize;  fn is_empty(&self) -> bool
 }
+# feature = "metadata-sidecar": opaque per-vector tags persisted in `.spqv` v4; no new dependency
+store.put_with_meta(id, vector, meta: &str) -> Result<(), String>               // build phase; exact UTF-8 bytes retained
+store.meta(id) -> Option<&str>                                                  // None for untagged or absent ids
 StreamingWriter::create(path, dim);  fn put(&mut self, id, &[f32]); fn finalize(self) -> Result<VectorStore, String>  // O(1) build RAM, byte-identical output
 
 // --- bulk import of externally-computed embeddings (src/import.rs) --- bring-your-own vectors; reuses the store writer
@@ -147,6 +150,8 @@ VectorStore::sibling_delta_path(&Path) -> PathBuf;  VectorStore::has_persisted_d
 
 // --- search (src/ann.rs) --- all return cosine in [-1,1], best first; zero query -> empty
 nearest_exact(&VectorStore, query: &[f32], k) -> Vec<(Id, f32)>                 // ground-truth full scan
+# feature = "metadata-sidecar": same ranking/scores, decorated after ranking
+nearest_exact_with_meta(&VectorStore, query: &[f32], k) -> Vec<(Id, f32, Option<String>)>
 nearest_term_exact(&VectorStore, &Graph, &Term, k) -> Vec<(Term, f32)>          // UNCHECKED: stale store -> silently wrong
 nearest_term_exact_checked(&VectorStore, &Graph, &Term, k) -> Result<Vec<(Term, f32)>, String>  // errs on stale store
 cosine(a: &[f32], b: &[f32]) -> f32
@@ -162,6 +167,20 @@ impl VectorIndex { fn nearest(&self, query: &[f32], k) -> Vec<(Id, f32)>;
                    // differs) cached by ef level — amortised for sweeps. Monotone-recall: higher ef >= lower ef recall.
                    fn nearest_term(&self, &Term, &Graph, &VectorStore, k) -> Vec<(Term, f32)>;
                    fn nearest_term_checked(..) -> Result<Vec<(Term, f32)>, String> }
+
+// --- recall-gated concept ANN + dedup (src/dedup.rs) --- feature = "approx-ann" ONLY [FABLE-5] #2251
+// HNSW over RAW (id, vector) pairs (no VectorStore needed) + type-level dedup whose merges are
+// emitted ONLY after measured ANN recall vs an exact O(m^2) ground truth clears a pre-registered
+// gate (fail-closed: below the gate dedup() is Err and NO merge is computed). Recipe 22.
+build_ann(vectors: &[(Id, Vec<f32>)], policy: HnswConfig) -> Result<ConceptAnnIndex, String>  // fail-closed input validation
+knn(&ConceptAnnIndex, query: &[f32], k) -> Vec<(Id, f32)>                        // free fn == index.knn(); APPROXIMATE, recall < 1.0
+impl ConceptAnnIndex { fn knn(&self, query: &[f32], k) -> Vec<(Id, f32)>; fn knn_of(&self, Id, k) -> Vec<(Id, f32)>;  // by indexed id, self excluded
+                       fn len()/is_empty()/dim(); fn ids() -> &[Id] }
+exact_ground_truth(vectors, k) -> Result<GroundTruth, String>                    // the exact O(m^2) oracle; build ONCE at a tractable rung
+GroundTruth::new(k, Vec<(Id, Vec<Id>)>) -> Result<GroundTruth, String>           // or wrap an externally-computed oracle; fn k(); fn neighbors()
+DedupPolicy { recall_gate: f64 /*0.99*/, merge_threshold: f32 /*0.995, NON-canonical default*/, k /*10*/ }  // FREEZE one per scale track
+dedup(&ConceptAnnIndex, &DedupPolicy, &GroundTruth) -> Result<DedupReport, String>   // gate FIRST, merges only after it passes
+DedupReport { recall: f64, merges: Vec<(Id /*dup*/, Id /*canonical=smallest*/)>, groups: Vec<Vec<Id>> }
 
 // --- persistent on-disk ANN (src/diskann.rs) ---
 DiskAnnIndex::build(&VectorStore, path) / ::build_with(&store, path, VamanaConfig{degree, build_beam, search_beam, alpha, seed})
@@ -1320,6 +1339,87 @@ dimension + graph fingerprint). The v3 format + the mandatory `check_provenance`
 the DEFINED axes. The extensible-provenance profile itself (the `#1746` reserved-area semantics) is
 NOT frozen, so the reserved area stays opaque here — it is the remaining, deliberately-deferred, part.
 
+### 21. Carry opaque metadata beside exact-search hits (opt-in, feature = `metadata-sidecar`)
+
+Use the metadata sidecar when each vector needs a caller-owned label, partition token, or
+post-filtering tag without a second id-to-tag lookup table. Tags do not affect similarity or rank.
+
+```toml
+sparq-vectors = { path = "../sparq-vectors", features = ["metadata-sidecar"] }
+```
+
+```rust,ignore
+use sparq_vectors::{nearest_exact_with_meta, VectorStore};
+
+let mut store = VectorStore::create("graph.spqv", 2)?;
+store.put_with_meta(10, &[1.0, 0.0], "tenant-a")?;
+store.put(20, &[0.0, 1.0])?; // untagged is valid
+store.finalize()?;
+
+let hits = nearest_exact_with_meta(&store, &[1.0, 0.0], 2);
+assert_eq!(hits[0].2.as_deref(), Some("tenant-a"));
+assert_eq!(store.meta(20), None);
+
+let reopened = VectorStore::open_from_bytes(std::fs::read("graph.spqv")?)?;
+assert_eq!(reopened.meta(10), Some("tenant-a"));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The first `put_with_meta` selects `.spqv` v4. A build that only calls `put` still emits the existing
+v2 format, or v3 when embedding provenance is bound, even when `metadata-sidecar` is enabled. Tagged
+and untagged vectors can be mixed; an empty string is a present tag (`Some("")`), distinct from
+`None`. The metadata is returned only after `nearest_exact` has fixed the top-`k`, so the `(id,
+score)` sequence and deterministic tie-break are identical to the undecorated search. The v4 reader
+and writer are both feature-gated; enable `metadata-sidecar` in every process that opens a tagged
+store. A feature-off build continues to support the pre-existing v1/v2/v3 formats only.
+
+### 22. Recall-gated concept dedup + k-NN over raw vectors (opt-in, feature = `approx-ann`) [FABLE-5] #2251
+
+For a **raw concept-vector matrix** (no sparq `Graph` / `VectorStore` — e.g. the
+Kernel-of-Truth's structure-aware concept vectors) that needs **type-level near-duplicate
+merging at a scale where exact O(m²) dedup is intractable**. The contract: build one exact
+O(m²) ground truth at a rung where that is still tractable (~10⁵), then let ANN carry the
+larger rungs — but every merge pass first **proves, on that ground truth, that the index's
+recall clears a pre-registered gate** (default `0.99`). Below the gate `dedup` is an `Err`
+and **no merge is emitted** (fail-closed: an under-recalling index silently *misses* true
+duplicates, which is a correctness loss, not a graceful degradation).
+
+```rust,ignore
+# // cargo build -p sparq-vectors --features approx-ann
+use sparq_vectors::{build_ann, dedup, exact_ground_truth, knn, DedupPolicy, HnswConfig};
+
+let vectors: Vec<(u32, Vec<f32>)> = /* (concept id, vector) pairs, any consistent dim */;
+
+// ONE-OFF at the tractable rung: the exact O(m^2) oracle (or wrap your own external
+// oracle with GroundTruth::new(k, pairs)).
+let truth = exact_ground_truth(&vectors, 10)?;
+
+// Every rung: build the ANN index (HnswConfig is the build policy; deterministic per seed)…
+let index = build_ann(&vectors, HnswConfig::high_recall())?;
+
+// …and dedup under ONE FROZEN policy. The recall gate runs FIRST; merges are computed
+// only after it passes.
+let policy = DedupPolicy { recall_gate: 0.99, merge_threshold: 0.995, k: 10 };
+let report = dedup(&index, &policy, &truth)?;   // Err (no merges) below the gate
+println!("recall {:.4}", report.recall);        // >= 0.99, or we wouldn't be here
+for (dup, canonical) in &report.merges { /* merge dup -> canonical (smallest id in group) */ }
+
+// Plain k-NN over the same index (crosstalk/collision checks, composition):
+let hits = knn(&index, &query, 10);             // Vec<(Id, f32 cosine)>, best first
+# Ok::<(), String>(())
+```
+
+**Honest scope.** The gate is **evidence on the measured corpus**, not a universal recall
+guarantee — a different corpus, dimension, vectoriser, or policy needs its own ground
+truth; re-gate after any re-vectorisation. `merge_threshold = 0.995` is a plain default,
+NOT a canonical value (the right threshold is a property of the consumer's vectoriser);
+**freeze one `DedupPolicy` per scale track** and report per-rung metrics under it — the
+issue-#2251 protocol. Groups are the union-find transitive closure of above-threshold
+neighbour pairs, so `policy.k` bounds the per-vector merge fan-in; the canonical id is the
+group's smallest (deterministic). Misconfigurations are `Err`, never silent: a `k` the
+build `ef_search` beam cannot serve, a ground-truth id absent from the index, a
+gate/threshold outside its range, an all-zero/non-finite/duplicate-id input.
+
 ## Gotchas / feature flags / prerequisites
 
 - **Opt-in.** Nothing in the workspace depends on `sparq-vectors`; the default engine
@@ -1378,10 +1478,12 @@ NOT frozen, so the reserved area stays opaque here — it is the remaining, deli
   (work-box non-canonical). **DistMult is symmetric → near-random on directional relations; read
   ablation deltas off the asymmetric ComplEx, multi-seed.**
 - **`approx-ann` is the ONLY heavy ANN dependency, and it is OFF by default (sq-ip3a).** The HNSW
-  index (`VectorIndex`/`HnswConfig`) and the `ApproxBackend` are gated behind it — it is the only
-  thing pulling `instant-distance`. With it OFF the default build is lean: exact brute-force
+  index (`VectorIndex`/`HnswConfig`), the `ApproxBackend`, and the recall-gated concept-ANN dedup
+  surface (`build_ann`/`knn`/`dedup`, recipe 22 — [FABLE-5] #2251) are gated behind it — it is the
+  only thing pulling `instant-distance`. With it OFF the default build is lean: exact brute-force
   (`nearest_exact`, answer-exact) + the hand-rolled on-disk Vamana graph (`DiskAnnIndex`, no extra
-  dep). Approximate search is **APPROXIMATE** — recall < 1.0, NOT answer-exact (recipes 2 & 11).
+  dep). Approximate search is **APPROXIMATE** — recall < 1.0, NOT answer-exact (recipes 2 & 11);
+  the dedup surface's recall gate is measured evidence against an exact oracle, not exactness.
 - **Reference-library verification (sq-6te5).** The recall floors are anchored not only against
   this crate's own exact searcher but against an **established ANN library** (hnswlib/FAISS):
   `tests/ref_lib_verify.rs` loads a committed fixture (`tests/fixtures/hnswlib_ref.tsv`, a REAL

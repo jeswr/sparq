@@ -189,6 +189,10 @@ fn el_axiom(axiom: &Axiom) -> Result<(), String> {
         Axiom::ClassAssertion { class, .. } => el_ce(class, "ClassAssertion"),
         // Ground role assertions are always EL (§2 ABox)
         Axiom::ObjectPropertyAssertion { .. } => Ok(()),
+        // TransitiveObjectProperty is in the EL grammar (§2 supports transitive object
+        // properties, a special case of property chains). [GPT-5.6] sq-zfwzq
+        #[cfg(feature = "dl_transitive")]
+        Axiom::TransitiveObjectProperty { .. } => Ok(()),
     }
 }
 
@@ -283,6 +287,12 @@ fn ql_axiom(axiom: &Axiom) -> Result<(), String> {
             ),
         },
         Axiom::ObjectPropertyAssertion { .. } => Ok(()),
+        // TransitiveObjectProperty is NOT in the QL grammar (§3 explicitly excludes
+        // transitive object properties). [GPT-5.6] sq-zfwzq
+        #[cfg(feature = "dl_transitive")]
+        Axiom::TransitiveObjectProperty { .. } => Err(
+            "TransitiveObjectProperty is not permitted in OWL 2 QL (QL §3)".into(),
+        ),
     }
 }
 
@@ -431,6 +441,10 @@ fn rl_axiom(axiom: &Axiom) -> Result<(), String> {
         // RL §4.2.5: ClassAssertion uses a superClassExpression (not sub-CE)
         Axiom::ClassAssertion { class, .. } => rl_super_ce(class, "ClassAssertion"),
         Axiom::ObjectPropertyAssertion { .. } => Ok(()),
+        // TransitiveObjectProperty is in the RL grammar (§4 supports transitive object
+        // properties). [GPT-5.6] sq-zfwzq
+        #[cfg(feature = "dl_transitive")]
+        Axiom::TransitiveObjectProperty { .. } => Ok(()),
     }
 }
 
