@@ -3,7 +3,9 @@
 #![cfg(feature = "topology")]
 
 use proptest::prelude::*;
-use sparq_algos::{strongly_connected_components, topological_sort, CycleError, NodeGraph};
+use sparq_algos::{
+    is_acyclic, strongly_connected_components, topological_sort, CycleError, NodeGraph,
+};
 use sparq_core::Graph;
 
 fn build(nt: &str) -> NodeGraph {
@@ -57,6 +59,30 @@ fn self_loop_is_a_singleton_component_but_a_cycle() {
     let graph = build("<http://e/0> <http://p/edge> <http://e/0> .\n");
     assert_eq!(strongly_connected_components(&graph), vec![0]);
     assert_eq!(topological_sort(&graph), Err(CycleError));
+}
+
+/// [GPT-5.6] sq-ulsqh: pins both boolean outcomes and the self-loop boundary so negating
+/// the thin `topological_sort(...).is_ok()` wrapper fails on the DAG and directed cycle.
+#[test]
+fn acyclicity_predicate_distinguishes_dag_cycle_and_self_loop() {
+    let dag = build(
+        r#"
+<http://e/a> <http://p/edge> <http://e/b> .
+<http://e/b> <http://p/edge> <http://e/c> .
+"#,
+    );
+    let cycle = build(
+        r#"
+<http://e/a> <http://p/edge> <http://e/b> .
+<http://e/b> <http://p/edge> <http://e/c> .
+<http://e/c> <http://p/edge> <http://e/a> .
+"#,
+    );
+    let self_loop = build("<http://e/a> <http://p/edge> <http://e/a> .\n");
+
+    assert!(is_acyclic(&dag));
+    assert!(!is_acyclic(&cycle));
+    assert!(!is_acyclic(&self_loop));
 }
 
 #[test]

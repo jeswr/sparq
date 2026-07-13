@@ -1,6 +1,6 @@
 ---
 name: graph-analytics
-description: "Graph analytics over a sparq RDF graph with the opt-in sparq-algos crate: project the graph onto a directed NodeGraph and run PageRank, centrality, k-core decomposition, community detection, and feature-gated directed strongly connected components or topological sorting — all read directly from sparq-core's permutation indexes, deterministic, no model, no network. Use when ranking entities, measuring node cohesion, finding communities, classifying directed cycles, or ordering a DAG; topology-only (edges are predicate-erased and unweighted — filter the source graph for a per-predicate sub-graph)."
+description: "Graph analytics over a sparq RDF graph with the opt-in sparq-algos crate: project the graph onto a directed NodeGraph and run PageRank, centrality, k-core decomposition, community detection, and feature-gated directed strongly connected components, acyclicity checks, or topological sorting — all read directly from sparq-core's permutation indexes, deterministic, no model, no network. Use when ranking entities, measuring node cohesion, finding communities, classifying directed cycles, or ordering a DAG; topology-only (edges are predicate-erased and unweighted — filter the source graph for a per-predicate sub-graph)."
 license: MIT
 metadata:
   version: "0.1.0"
@@ -15,9 +15,10 @@ total), feature-gated exact **Brandes betweenness**, **harmonic closeness**, and
 decomposition**,
 **weakly-connected components**, and a deterministic **label-propagation** community
 heuristic, plus feature-gated directed **strongly connected components** and
-**topological sorting**. It consumes only sparq-core's public read API (the borrowing
-triple-id iterator + dict lookups), holds no graph state of its own, and nothing in the
-workspace depends on it — the default engine build does not even compile it.
+boolean **acyclicity checks** and **topological sorting**. It consumes only sparq-core's
+public read API (the borrowing triple-id iterator + dict lookups), holds no graph state of
+its own, and nothing in the workspace depends on it — the default engine build does not
+even compile it.
 
 These are **topology** algorithms: every triple `(s, p, o)` becomes one directed edge
 `s → o`, the predicate is **erased**, parallel edges are collapsed, and edges are
@@ -44,7 +45,7 @@ use sparq_algos::{
     degree_centrality, degree_centrality_normalized, Direction, top_k,
     betweenness_centrality, closeness_centrality, core_number,
     weakly_connected_components, label_propagation, LabelPropConfig, num_communities,
-    strongly_connected_components, topological_sort,
+    is_acyclic, strongly_connected_components, topological_sort,
 };
 
 // Project the RDF graph onto a directed node graph.
@@ -74,6 +75,7 @@ let k    = num_communities(&comm);                         // distinct community
 
 // --- Directed topology ---
 let scc   = strongly_connected_components(&g);             // dense component id per node
+let dag   = is_acyclic(&g);                                 // false for any directed cycle
 let order = topological_sort(&g)?;                         // canonical DAG order; Err on cycle
 ```
 
@@ -97,6 +99,7 @@ let order = topological_sort(&g)?;                         // canonical DAG orde
 | `label_propagation(&g, LabelPropConfig)` | heuristic community labels (`Vec<usize>`) |
 | `num_communities(&labels)` | distinct community count |
 | `strongly_connected_components(&g)` | directed SCC id per node; requires `topology` |
+| `is_acyclic(&g)` | whether the directed graph has no cycle; requires `topology` |
 | `topological_sort(&g)` | canonical `Result<Vec<usize>, CycleError>`; requires `topology` |
 
 ## Honest scope / caveats
@@ -124,10 +127,10 @@ let order = topological_sort(&g)?;                         // canonical DAG orde
   closeness take `O(V * (V + E))` time, while k-core decomposition takes `O(V + E)`.
   Enable the default-OFF `centrality-extended` feature to compile them.
 - **Directed topology preserves direction.** SCC follows out-edges and identifies mutual
-  directed reachability. Topological sorting succeeds only for a DAG; self-loops and larger
-  cycles return `CycleError`. Both are deterministic, with ascending node indices fixing
-  component ids and ready-node ties. Enable the default-OFF `topology` feature to compile
-  them.
+  directed reachability. `is_acyclic` reports the same cycle classification as topological
+  sorting, which succeeds only for a DAG; self-loops and larger cycles return `CycleError`.
+  Both are deterministic, with ascending node indices fixing component ids and ready-node
+  ties. Enable the default-OFF `topology` feature to compile them.
 - **PageRank** handles dangling (out-degree-0) nodes by redistributing their mass
   uniformly each iteration, so the result is a proper probability distribution.
 - **In-memory.** The `NodeGraph` is built from one pass over `Graph::iter_ids` and held in

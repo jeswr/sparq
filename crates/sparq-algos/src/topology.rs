@@ -1,7 +1,7 @@
 //! Directed topology algorithms over a [`NodeGraph`].
 //!
 //! [GPT-5.6] sq-lsp7k.20: unlike the crate's weak community and extended-centrality
-//! passes, both algorithms in this module preserve edge direction. Strongly connected
+//! passes, the algorithms in this module preserve edge direction. Strongly connected
 //! components use an iterative Tarjan traversal, and topological sorting uses Kahn's
 //! algorithm with an ascending-node ready queue. Neither algorithm uses recursion or RNG.
 
@@ -178,4 +178,13 @@ pub fn topological_sort(g: &NodeGraph) -> Result<Vec<usize>, CycleError> {
     } else {
         Err(CycleError)
     }
+}
+
+/// Returns whether the directed graph is acyclic.
+///
+/// A self-loop counts as a cycle. This is a convenience wrapper around
+/// [`topological_sort`] and has the same `O((V + E) log V)` running time.
+/// [GPT-5.6] sq-ulsqh.
+pub fn is_acyclic(g: &NodeGraph) -> bool {
+    topological_sort(g).is_ok()
 }

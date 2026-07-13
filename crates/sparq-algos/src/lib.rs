@@ -19,7 +19,7 @@ pub use community::{
 pub use graph::{NodeFilter, NodeGraph};
 pub use pagerank::{pagerank, PageRankConfig};
 #[cfg(feature = "topology")]
-pub use topology::{strongly_connected_components, topological_sort, CycleError};
+pub use topology::{is_acyclic, strongly_connected_components, topological_sort, CycleError};
 
 #[cfg(test)]
 mod tests {
