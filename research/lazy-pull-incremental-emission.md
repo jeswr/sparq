@@ -3,7 +3,17 @@
 > 🤖 SPARQ agent — Fable-tier architect design deliverable for **sq-7d3dj.34.2**
 > (D9c TTFB: first solution of a large SELECT). [FABLE-5]
 
-**Status: design + decomposition (no production code in this record).** This is the
+**Status: design + decomposition (no production code in this record). Amended
+2026-07-12 (decision `sq-7d3dj.34.2.7`, [FABLE]):** implementation of `.2.3` verified
+that the buffered `bind_join` emits in `FxHashMap` group-iteration order (§2), so the
+original "block-slice the seed" driver could NOT satisfy the original §8.1 byte-identity
+for bind-join chains. Adjudicated resolution: the driver keeps block-slicing and the
+emission-order contract for admitted join chains is **relaxed to deterministic seed-lex
+order** (§5.1); byte-identity is retained only where structurally replicable. §5/§6/§8
+and the §10 bead specs are amended in place; the superseded text is not preserved
+inline (git history has it).
+
+This is the
 engine-side counterpart of `research/wave-d-pull-streaming-response-body.md` (Wave D):
 Wave D designed the *transport* (emit sink → bounded channel → chunked HTTP body), and
 PR #1745 implements its core; this record designs the *evaluate-phase* incremental
@@ -64,11 +74,28 @@ running result), `merge_join` (both sides sorted), or `hash_join` (rhs scanned t
 joined). This left-deep, seed-driven shape is the structural reason a streaming path
 can *reuse* the existing probe machinery block-by-block instead of rewriting operators.
 
-**One structural blocker for byte-identity, verified:** `hash_join` (exec.rs:5617)
-picks its build side by comparing **actual** row counts (`left.rows.len() <=
-right.rows.len()`). A streaming path cannot know the driving side's total count without
-materialising it, so the buffered path's emission order for hash-step plans is not
-replicable from a stream. §5 turns this into an explicit two-mode contract.
+**Two structural blockers for byte-identity, verified:**
+
+1. `hash_join` (exec.rs:5617) picks its build side by comparing **actual** row counts
+   (`left.rows.len() <= right.rows.len()`). A streaming path cannot know the driving
+   side's total count without materialising it, so the buffered path's emission order
+   for hash-step plans is not replicable from a stream.
+2. `bind_join` (exec.rs:8058–8100; found during `.2.3` implementation, adjudicated in
+   `sq-7d3dj.34.2.7`) groups ALL result rows into an `FxHashMap<join_value,
+   Vec<row_idx>>` and iterates `for (val, ris) in groups` — **hash-bucket order over
+   the full key set**, not seed/insertion order — returning `Bindings::unsorted` with
+   no post-sort (project/distinct/slice all preserve that order). Slicing the seed
+   into blocks regroups over each block's key subset, so a join value whose seed rows
+   span a block boundary has its output rows split across the stream — bytes differ
+   from the buffered path, guaranteed on any large fan-out result (the q04 class).
+   Counterexample: seed join values block₁ = [A, B], block₂ = [A, C]; buffered emits
+   all A-rows contiguously, block-sliced emits A(b₁), B, A(b₂), C.
+
+§5.1 turns both into an explicit order-contract fork. Note the buffered `bind_join`
+order being given up is an *incidental* artifact of fxhash values and table growth —
+deterministic per build but semantically meaningless, unstable under a `rustc-hash`
+bump or any result-set change, and destructive of seed sortedness. No consumer can
+meaningfully rely on it (§5.1).
 
 **In-flight exec.rs chain (designed-against, per their PR diffs):**
 
@@ -180,8 +207,12 @@ pending, `sq-qhy4`) and whenever EXPLAIN/analyze instrumentation is active.
 engine work; large steady-state blocks ⇒ per-block overhead amortised to noise. For
 each block, the chain steps are applied with the existing kernels:
 
-- `bind_join` step → probe the block's rows through the pattern's index (the existing
-  bind-join lookup, unchanged semantics);
+- `bind_join` step → probe the block's rows through the pattern's index (unchanged
+  match semantics), **emitting in seed-lex order** (§5.1): within a block the
+  `FxHashMap` grouping is used ONLY as a scan cache (one index scan per distinct join
+  value, matches cached), then the block's rows are walked **in order**, each row's
+  matches appended contiguously in scan order — NOT the buffered kernel's
+  hash-bucket-order group loop;
 - `hash_join` step → the rhs scan is materialised ONCE up front as the build side (rhs
   is an independent single-pattern scan — cheap and size-known), the block probes it
   (the `sjoin` substrate's `probe_emit`, posting lists in build-row order);
@@ -203,33 +234,80 @@ scanned rows); `ControlFlow::Break` from the sink aborts the driver (client gone
 **Parallelism without losing order.** Within a block, row building/probing/filtering
 uses the existing order-preserving `par_iter().filter_map(..).collect()` pattern
 (worker budget snapshots re-installed exactly as `hash_join`'s parallel probe does
-today); blocks are emitted strictly in seed-scan order. Steady-state throughput ≈ the
+today); blocks are emitted strictly in seed-scan order and rows within a block in
+seed-lex order (§5.1) — the parallel collect must preserve that order, exactly as the
+buffered kernels' parallel paths already do. Steady-state throughput ≈ the
 buffered path (same kernels, same parallelism, one extra sequence point per block);
 the differential and bench beads (§10) verify "≈" instead of asserting it.
 
-**Two admission modes — the byte-identity fork (the load-bearing decision).**
+### 5.1 The emission-order contract (decision `sq-7d3dj.34.2.7`, amended)
 
-- **M1 (byte-identical), mandatory first:** plans whose buffered emission order the
-  stream provably replicates — seed + `bind_join`-only chains (+ filters / Project /
-  Distinct / Reduced / Slice / Union-of-such). For these the concatenated emit bytes
-  are **identical** to the buffered path; the #1745 API contract is preserved verbatim
-  and verification is a mechanical byte-diff.
-- **M2 (order-relaxed, deterministic), gated on B1 evidence:** plans with `hash_join`
-  steps. Because the buffered build-side choice depends on materialised sizes (§2),
-  byte-identity is structurally unavailable; M2 instead **fixes** build = rhs and
-  guarantees a *deterministic* emission order (seed-scan order × posting order) that
-  may differ from the buffered path. Contract change confined to: the
-  `query_json_stream_with_budget` docs gain "for hash-join-classified shapes the
-  solution order is deterministic but may differ from the buffered API"; legal because
-  the affected shapes are order-undefined in SPARQL (M2 never admits ORDER BY).
-  Verification: multiset equality + head equality + valid-JSON. M2 ships only if B1
-  shows q04-class plans actually contain hash steps; if q04 is bind-join-dominated,
-  M2 is deferred and the record's scope shrinks honestly.
+The record originally forked the contract by *step kind*: bind-join chains
+byte-identical (old M1), hash-step plans order-relaxed (old M2). §2's blocker 2 proved
+the bind-chain half unimplementable under block-slicing, leaving two candidate
+resolutions, adjudicated as follows.
+
+**Rejected — final-join group-loop replay (byte-identity preserved):** materialise the
+chain prefix through the same kernels, rebuild the identical `FxHashMap` groups, and
+interleave serialisation into the group loop. Byte-identical by construction, but:
+(i) the whole prefix is materialised, so "first solution before the join completes"
+holds only for the FINAL step — the TTFS win shrinks exactly on the long-chain /
+large-fan-out class the epic targets; (ii) it invalidates the block-ramp premise (and
+bead `.2.4`'s in-block parallel probe) for bind chains; (iii) it welds the streaming
+path to the buffered kernel's *incidental* hash-bucket order — any future improvement
+to `bind_join`'s iteration order would break the streamed contract. That trades the
+mandate's target metric for an order no spec, no consumer, and no design intent asked
+for.
+
+**Adopted — deterministic seed-lex order for ALL admitted join chains (bind and,
+later, hash):** the streamed emission order is the **seed-lex order** — blocks in
+seed-scan order; within a block, seed rows in order; per row, matches contiguous in
+match-scan order; composing through the chain as the lexicographic
+(seed row, match₁, match₂, …) order. Properties that make this *stronger* than the
+raw "deterministic but may differ" phrasing: it is stable (independent of hash
+internals), documentable, cheap (the per-block grouping stays as a scan cache), and it
+**preserves seed sortedness** — which makes the §5-ladder step 1 ORDER BY elision
+(bead `.2.5`) correct by construction, something the buffered hash-bucket order
+destroys. Legal because admitted shapes never include ORDER BY: a SPARQL SELECT
+without ORDER BY is a solution **multiset** with no order guarantee, and the emit
+sink's only production consumer is `stream_select_json` → HTTP clients bound by that
+spec. The lib.rs byte-identity rustdoc was true only while the general path still
+evaluated buffered; `.2.3` amends the `query_json_stream_with_budget` /
+`…_prepared_…` docs to the two-mode contract below.
+
+**The resulting contract (supersedes the old M1/M2 fork; M1/M2 remain as
+*milestones* — M1 = bind chains, M2 = hash-step extension, still gated on B1
+evidence):**
+
+- **Byte-identical (structural):** shapes whose emission the stream replicates
+  exactly — the single-pattern scan fast path (landed, #1745) and any future
+  order-preserving step kind (e.g. merge-join chains). Verification: byte-diff.
+- **Relaxed (admitted join chains, bind or hash):** deterministic seed-lex order
+  (hash steps: build fixed = rhs, posting-list order), which may differ from the
+  buffered path. Verification is per-shape solution equivalence, NOT byte-diff:
+  - DISTINCT/REDUCED shapes → solution-**set** equality vs buffered + head equality +
+    valid JSON (dedup makes order the only difference);
+  - non-slice, non-distinct → solution-**multiset** equality + head + valid JSON;
+  - Slice (LIMIT/OFFSET) → the streamed solutions are a **sub-multiset of the
+    UN-sliced buffered result with the buffered sliced count** — under a different
+    legal order, LIMIT legitimately selects different rows, so bag-equality against
+    the sliced buffered output would be a false invariant;
+  - determinism itself → the streamed path run twice is byte-identical to itself.
+- **Fallback (everything else):** the buffered path unchanged — trivially
+  byte-identical; the harness asserts the path taken via testing stats rather than
+  assuming it.
+
+Budget-trip note: a row/byte/deadline trip mid-stream truncates a *different prefix*
+on the two paths (seed-lex vs hash order). Both surface as a truncated chunked body /
+`Err`, never a clean short 200 (§8.4) — a truncated response is an error surface, not
+an answer, so prefix divergence there is contract-consistent.
 
 **ORDER BY degradation ladder (v1.5, §10 B5):**
 
 1. `ORDER BY` key already satisfied by the seed-scan order (`sorted_by` propagates
-   through the chain) → sort elided, plan admitted to M1 — streams fully.
+   through the chain — which §5.1's seed-lex emission preserves) → sort elided, plan
+   admitted, streams fully; contract = ORDER-key-correct output (§8.2), not
+   byte-identity to the buffered sort.
 2. `ORDER BY` + small `LIMIT` → #1741's top-k: still blocking, but the buffer is k
    rows and the output tiny; no streaming needed (TTFS ≈ total, both small).
 3. Full `ORDER BY` (no index order, no top-k) → **honest floor**: sort is a true
@@ -247,8 +325,8 @@ the buffered path and are out of scope.
 | operator | class | streaming treatment |
 |---|---|---|
 | BGP triple scan (seed) | streaming | block driver, adaptive ramp |
-| bind_join (INL probe) | streaming | per-block probe, order-preserving (M1) |
-| hash_join | streaming-after-build | rhs built once, block probes (M2 only) |
+| bind_join (INL probe) | streaming | per-block probe, seed-lex order (§5.1; M1) |
+| hash_join | streaming-after-build | rhs built once, block probes, seed-lex × posting order (M2 only) |
 | merge_join | not admitted v1 | fallback (buffered) |
 | FILTER (scalar, compiled) | streaming | per-block, `CompiledExpr` |
 | Project | streaming | static head, early head emission |
@@ -281,12 +359,18 @@ the buffered path and are out of scope.
 
 ## 8. Invariants (what every child bead preserves)
 
-1. **Byte-identity-or-fallback (M1):** for every admitted M1 plan, concatenated emit
-   bytes are identical to the buffered path; any shape the implementation cannot
-   replicate exactly is *not admitted* rather than emitted differently.
-2. **Deterministic-order + multiset-equality (M2):** admitted hash-step plans emit a
-   deterministic order; multiset of solutions, head, and JSON validity equal the
-   buffered path; never admitted for ORDER BY plans.
+1. **Exact-or-relaxed-or-fallback (§5.1, amended by `sq-7d3dj.34.2.7`):** shapes
+   whose emission is structurally order-preserving (single-pattern fast path; future
+   merge-join chains) stay byte-identical to the buffered path; any shape not
+   provably meeting its contract is *not admitted* rather than emitted differently.
+2. **Deterministic seed-lex order + per-shape solution equivalence (admitted join
+   chains, bind AND hash):** emission is the documented seed-lex order — deterministic
+   (double-run byte-identical) but permitted to differ from the buffered path; the
+   solutions satisfy the §5.1 per-shape equivalence vs buffered (set equality under
+   DISTINCT/REDUCED, multiset equality otherwise, sub-multiset + count under Slice),
+   with head equality and valid JSON. Never admitted for ORDER BY plans (elided-sort
+   admission in `.2.5` must be **ORDER-key-correct**, which seed-lex order provides
+   when the seed order satisfies the key).
 3. **Fail-closed classification:** unknown/instrumented/recorder-armed shapes take the
    buffered path unchanged. The streaming path can only *narrow* — never alter — the
    semantics of what it admits.
@@ -318,12 +402,17 @@ only B1 ∥ B4 and B5 ∥ B6 run in parallel, and no two parallel beads share a 
 | id | bead | crate / files | tier | invariant | acceptance test |
 |---|---|---|---|---|---|
 | sq-7d3dj.34.2.1 | q04 plan-shape + phase profile post-#1745: EXPLAIN the canonical q04 plan (bind_join vs hash_join steps), time eval vs serialise, pin M1-vs-M2 scope | bench (analysis only; findings as bead comments) | sonnet | honest scope call — M2 ships only on evidence | bead comment with plan shape + phase timings + explicit M1/M2 verdict |
-| sq-7d3dj.34.2.2 | differential equivalence harness: byte-diff `eval_select_json_emit` concat vs `eval_select_json` over a corpus incl. multi-var DISTINCT-join, UNION, LIMIT, filters; non-vacuity mutation check | `crates/sparq-engine/tests/stream_pipeline_equivalence.rs` (new) | sonnet | harness is non-vacuous (a perturbed byte goes red) | `cargo test -p sparq-engine --test stream_pipeline_equivalence` |
-| sq-7d3dj.34.2.3 | streaming pipeline v1 (M1): classifier + block driver + bind_join/filter/project/first-seen-DISTINCT/slice + early head + budget/recorder fallbacks + `stream_pipeline_testing` toggle | `crates/sparq-engine/src/stream_pipeline.rs` (new) + one hook in `exec.rs` + `mod` in `lib.rs` + harness extension | opus | §8.1 byte-identity-or-fallback; §8.3 fail-closed | harness green + a first-emit-before-eval-complete probe test (emit observed while the driver's row counter < total) |
-| sq-7d3dj.34.2.4 | in-block parallel probe + adaptive ramp: order-preserving `par_iter` within blocks, worker budget snapshots, ramp constants | `crates/sparq-engine/src/stream_pipeline.rs` (serialised after .3) | sonnet | §8.1 retained; steady-state totals ≈ buffered (bench-verified, no number hard-coded) | harness green + criterion bench added and running (`cargo bench -p sparq-engine --bench stream_pipeline` compiles/runs) |
-| sq-7d3dj.34.2.5 | classifier extensions: ORDER BY index-order elision (§5 ladder 1) + M2 hash-step admission IF the .1 verdict requires it (else explicitly skipped) | `crates/sparq-engine/src/stream_pipeline.rs` + harness (serialised after .4) | opus | §8.2 for M2; ordered results byte-identical for elided sorts | harness ORDER BY + multiset suites green |
+| sq-7d3dj.34.2.2 | differential equivalence harness: byte-diff `eval_select_json_emit` concat vs `eval_select_json` over a corpus incl. multi-var DISTINCT-join, UNION, LIMIT, filters; non-vacuity mutation check. **Delivered — but its 4 000-row corpus fits one default block, so it is vacuous at the block boundary; the multi-block + §5.1-contract extension moved into `.2.3`'s acceptance.** | `crates/sparq-engine/tests/stream_pipeline_equivalence.rs` (new) | sonnet | harness is non-vacuous (a perturbed byte goes red) | `cargo test -p sparq-engine --test stream_pipeline_equivalence` |
+| sq-7d3dj.34.2.3 | streaming pipeline v1 (M1, **seed-lex order contract §5.1**): classifier + block driver (per-block scan-cache probe, seed-order emission) + filter/project/first-seen-DISTINCT/slice + early head + budget/recorder fallbacks + `stream_pipeline_testing` toggle **with ramp-constant override** + rustdoc two-mode contract on the stream APIs + the §5.1 harness suites | `crates/sparq-engine/src/stream_pipeline.rs` (new) + one hook in `exec.rs` + `mod`/rustdoc in `lib.rs` + harness extension | opus | §8.1/§8.2 as amended (seed-lex determinism + per-shape solution equivalence); §8.3 fail-closed | harness green **including**: a testing-ramp (first = 8) fixture where a join value's seed rows straddle a block boundary (stats assert ≥ 2 blocks + streamed path taken), one default-ramp fixture with seed > 4 096 rows, a streamed double-run byte-diff (determinism), per-shape set/multiset/sub-multiset suites, a perturbed-**solution** mutation test going red, and a first-emit-before-eval-complete probe (emit observed while processed seed rows < total) |
+| sq-7d3dj.34.2.4 | in-block parallel probe + adaptive ramp: order-preserving `par_iter` within blocks, worker budget snapshots, ramp constants. **Premise unchanged by `sq-7d3dj.34.2.7`** — the block ramp survives; the order preserved is §5.1 seed-lex | `crates/sparq-engine/src/stream_pipeline.rs` (serialised after .3) | sonnet | §8.2 seed-lex order retained; steady-state totals ≈ buffered (bench-verified, no number hard-coded) | harness green (incl. the multi-block suites) + criterion bench added and running (`cargo bench -p sparq-engine --bench stream_pipeline` compiles/runs) |
+| sq-7d3dj.34.2.5 | classifier extensions: ORDER BY index-order elision (§5 ladder 1, **ORDER-key-correct** — byte-identity to the buffered sort is NOT the contract) + M2 hash-step admission IF the .1 verdict requires it (else explicitly skipped), under the same §5.1 relaxed contract | `crates/sparq-engine/src/stream_pipeline.rs` + harness (serialised after .4) | opus | §8.2 (uniform for bind + hash); elided sorts satisfy the ORDER BY key | harness ORDER BY (key-correctness) + per-shape equivalence suites green |
 | sq-7d3dj.34.2.6 | canonical D9c re-gather: EC2 same-box panel with TTFS instrumentation added to the adapter; dashboard ingest; honest verdict row | `scripts/bench-adapters/http_sparql_adapter.py`, `bench/canonical-competitor-results/`, `bench/dashboard/` | sonnet | honest verdict — TTFS AND totals reported, regression = fail | new canonical envelope committed + `scripts/bench/ingest-canonical-competitors.mjs` clean |
 
 Ordering edges (wired in bd): .1 → .3, .2 → .3, .3 → .4, .4 → .5, .4 → .6. Estate
 reconciliation: sq-7d3dj.29 closed as superseded by this record (done at decomposition
 time); on merge of #1745 close sq-7d3dj.24/.25 and re-verify-then-close .27.
+
+Decision bead `sq-7d3dj.34.2.7` (raised from `.2.3` implementation, blocking):
+adjudicated 2026-07-12 per §5.1 — driver keeps block-slicing, bind chains move to the
+deterministic seed-lex contract, byte-identity retained only where structural;
+`.2.3`/`.2.4`/`.2.5` re-specced as above; closed with this amendment.
