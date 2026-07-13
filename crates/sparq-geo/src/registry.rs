@@ -33,6 +33,7 @@
 //!   `xsd:double` in square metres / metres;
 //! * `geof:maxX`, `minX`, `maxY`, and `minY` return the corresponding envelope
 //!   coordinate as `xsd:double`;
+//! * `geof:isEmpty` returns `xsd:boolean`;
 //! * the `geof:sf*` relations return `xsd:boolean`;
 //! * `geof:envelope` / `geof:boundary` / `geof:centroid` /
 //!   `geof:convexHull` / `geof:simplify` return `geo:wktLiteral`;
@@ -427,6 +428,8 @@ fn num_arg(name: &str, args: &[Term], i: usize) -> Result<f64, String> {
 type GeomUnary = fn(&GeoGeometry) -> Result<GeoGeometry, GeoError>;
 /// A [`crate::geof`] unary numeric measurement function.
 type NumericUnary = fn(&GeoGeometry) -> Result<f64, GeoError>;
+/// A [`crate::geof`] unary boolean geometry predicate.
+type BooleanUnary = fn(&GeoGeometry) -> Result<bool, GeoError>;
 /// A [`crate::geof`] binary set operation (`intersection` / `union` / …).
 type GeomSetOp = fn(&GeoGeometry, &GeoGeometry) -> Result<GeoGeometry, GeoError>;
 
@@ -441,6 +444,7 @@ type GeomSetOp = fn(&GeoGeometry, &GeoGeometry) -> Result<GeoGeometry, GeoError>
 ///   `metricPerimeter(g)` -> metre `xsd:double`;
 /// * `maxX(g)` / `minX(g)` / `maxY(g)` / `minY(g)` -> the corresponding
 ///   envelope coordinate as `xsd:double`;
+/// * `isEmpty(g)` -> `xsd:boolean`;
 /// * the relation families, all `(g1, g2)` -> `xsd:boolean`: simple features
 ///   `sfEquals sfDisjoint sfIntersects sfTouches sfCrosses sfWithin sfContains
 ///   sfOverlaps`, Egenhofer `ehEquals ehDisjoint ehMeet ehOverlap ehCovers
@@ -494,6 +498,16 @@ pub fn geof_registry() -> FunctionRegistry {
         ("minY", geof::min_y),
     ];
     for (name, f) in measurements {
+        reg.register(format!("{GEOF_NS}{name}"), move |args: &[Term]| {
+            arity(name, args, 1)?;
+            let g = geom_arg(name, args, 0)?;
+            Ok(Term::Literal(Literal::from(f(&g).map_err(|e| e.to_string())?)))
+        });
+    }
+
+    // Unary geometry predicates: geometry -> xsd:boolean. [GPT-5.6] sq-lc2io
+    let predicates: [(&'static str, BooleanUnary); 1] = [("isEmpty", geof::is_empty)];
+    for (name, f) in predicates {
         reg.register(format!("{GEOF_NS}{name}"), move |args: &[Term]| {
             arity(name, args, 1)?;
             let g = geom_arg(name, args, 0)?;
@@ -643,11 +657,11 @@ mod tests {
     #[test]
     fn registry_contents() {
         let reg = geof_registry();
-        assert_eq!(reg.len(), 44);
+        assert_eq!(reg.len(), 45);
         for name in [
             "distance", "relate", "getSRID", "buffer",
             "metricArea", "metricLength", "metricPerimeter", "centroid",
-            "maxX", "minX", "maxY", "minY",
+            "maxX", "minX", "maxY", "minY", "isEmpty",
             "sfEquals", "sfDisjoint", "sfIntersects", "sfTouches", "sfCrosses",
             "sfWithin", "sfContains", "sfOverlaps",
             "ehEquals", "ehDisjoint", "ehMeet", "ehOverlap", "ehCovers", "ehCoveredBy",
@@ -696,6 +710,34 @@ mod tests {
         assert_eq!(value.datatype().as_str(), "http://www.w3.org/2001/XMLSchema#double");
         assert!((value.value().parse::<f64>().unwrap() - 4.0).abs() < 1e-12);
         assert!(max_x(&[]).is_err(), "geof:maxX must enforce unary arity");
+    }
+
+    #[test]
+    fn is_empty_term_level() {
+        let reg = geof_registry();
+        let is_empty = reg
+            .get(&format!("{GEOF_NS}isEmpty"))
+            .expect("registered geof:isEmpty");
+
+        for (wkt_lexical, expected) in [
+            ("POINT(1 2)", false),
+            ("POINT EMPTY", true),
+            ("LINESTRING EMPTY", true),
+            ("POLYGON((0 0,1 0,1 1,0 1,0 0))", false),
+        ] {
+            let Term::Literal(value) = is_empty(&[wkt(wkt_lexical)]).unwrap() else {
+                panic!("literal")
+            };
+            assert_eq!(
+                value.datatype().as_str(),
+                "http://www.w3.org/2001/XMLSchema#boolean"
+            );
+            assert_eq!(value.value(), expected.to_string(), "WKT: {wkt_lexical}");
+        }
+        assert!(
+            is_empty(&[]).is_err(),
+            "geof:isEmpty must enforce unary arity"
+        );
     }
 
     #[test]

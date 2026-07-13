@@ -20,6 +20,7 @@
 //!   metric radii via a local equirectangular frame).
 //! - [`max_x`] / [`min_x`] / [`max_y`] / [`min_y`] — the bounding-box
 //!   coordinates in the geometry's stored CRS.
+//! - [`is_empty`] — `geof:isEmpty`, a unit-free geometry predicate.
 //! - [`metric_area`] / [`metric_length`] / [`metric_perimeter`] and
 //!   [`centroid`] — metric measurements and the mathematical centroid, using
 //!   the same local equirectangular frame for geographic geometries.
@@ -46,8 +47,8 @@ use crate::GeoError;
 use geo::relate::IntersectionMatrix;
 use geo::{
     Area, BooleanOps, BoundingRect, Buffer, Centroid, Closest, ConvexHull, CoordsIter, Distance,
-    Euclidean, Haversine, HaversineClosestPoint, Intersects, Length, LineIntersection, MapCoords,
-    Relate, Simplify,
+    Euclidean, HasDimensions, Haversine, HaversineClosestPoint, Intersects, Length,
+    LineIntersection, MapCoords, Relate, Simplify,
 };
 use geo_types::{
     Coord, Geometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon,
@@ -522,6 +523,14 @@ de9im_relation!(
 );
 
 // ---- Envelope and bounding-coordinate functions -----------------------------------
+
+/// `geof:isEmpty` — whether the geometry is the empty set.
+///
+/// This predicate is pure geometry introspection and does not depend on the
+/// geometry's CRS or any unit convention. [GPT-5.6] sq-lc2io
+pub fn is_empty(g: &GeoGeometry) -> Result<bool, GeoError> {
+    Ok(g.geometry.is_empty())
+}
 
 fn bounding_box(g: &GeoGeometry) -> Result<geo_types::Rect<f64>, GeoError> {
     g.geometry
@@ -1514,7 +1523,7 @@ pub mod lex {
 
 #[cfg(test)]
 mod tests {
-    use super::{max_x, max_y, min_x, min_y};
+    use super::{is_empty, max_x, max_y, min_x, min_y};
     use crate::{parse_wkt_literal, GeoError, GeoGeometry};
 
     type CoordinateAccessor = fn(&GeoGeometry) -> Result<f64, GeoError>;
@@ -1558,6 +1567,19 @@ mod tests {
                 accessor(&empty),
                 Err(GeoError::Unsupported(_))
             ));
+        }
+    }
+
+    #[test]
+    fn empty_predicate_distinguishes_empty_and_non_empty_geometries() {
+        for (wkt, expected) in [
+            ("POINT(1 2)", false),
+            ("POINT EMPTY", true),
+            ("LINESTRING EMPTY", true),
+            ("POLYGON((0 0,1 0,1 1,0 1,0 0))", false),
+        ] {
+            let geometry = parse_wkt_literal(wkt).expect("geometry WKT");
+            assert_eq!(is_empty(&geometry), Ok(expected), "WKT: {wkt}");
         }
     }
 }
