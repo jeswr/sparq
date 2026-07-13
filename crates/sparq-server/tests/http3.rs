@@ -141,12 +141,12 @@ where
 
 async fn h1_request(
     client: &reqwest::Client,
-    addr: SocketAddr,
+    base_url: &str,
     case: &RequestCase,
 ) -> TestResult<ResponseSnapshot> {
     let mut request = client.request(
         reqwest::Method::from_bytes(case.method.as_str().as_bytes())?,
-        format!("http://{addr}{}", case.path),
+        format!("{base_url}{}", case.path),
     );
     if let Some(value) = case.content_type {
         request = request.header(reqwest::header::CONTENT_TYPE, value);
@@ -171,6 +171,25 @@ async fn h1_request(
         content_type,
         body,
     })
+}
+
+// [GPT-5.6] sq-oprna.6: the combined http2+http3 build reuses the PEM pair for TLS TCP;
+// http3 alone and runtime-off listeners stay cleartext. Force h1 so this remains the h1↔h3
+// parity oracle in both configurations.
+fn tcp_client(addr: SocketAddr, tls: bool) -> TestResult<(reqwest::Client, String)> {
+    let mut builder = reqwest::Client::builder().http1_only();
+    let base_url = if tls {
+        let ca = reqwest::Certificate::from_pem(&std::fs::read(fixture("http3-ca.pem"))?)?;
+        builder = builder
+            .use_rustls_tls()
+            .tls_built_in_root_certs(false)
+            .add_root_certificate(ca)
+            .resolve("localhost", addr);
+        format!("https://localhost:{}", addr.port())
+    } else {
+        format!("http://{addr}")
+    };
+    Ok((builder.build()?, base_url))
 }
 
 #[test]
@@ -206,8 +225,8 @@ async fn h3_response_matrix_matches_h1_and_websocket_falls_back() -> TestResult 
         .spawn()?;
     let mut server = ChildGuard(child);
 
-    let http = reqwest::Client::new();
-    let readiness_url = format!("http://{tcp_addr}/health");
+    let (http, tcp_base) = tcp_client(tcp_addr, cfg!(feature = "http2"))?;
+    let readiness_url = format!("{tcp_base}/health");
     let mut ready = false;
     for _ in 0..100 {
         match http.get(&readiness_url).send().await {
@@ -227,7 +246,7 @@ async fn h3_response_matrix_matches_h1_and_websocket_falls_back() -> TestResult 
         let _ = server.0.wait();
         return Err(format!("server did not become ready: {stderr}").into());
     }
-    let health = http.get(format!("http://{tcp_addr}/health")).send().await?;
+    let health = http.get(format!("{tcp_base}/health")).send().await?;
     assert_eq!(health.version(), reqwest::Version::HTTP_11);
     let expected_alt_svc = format!("h3=\":{}\"; ma=86400", udp_addr.port());
     assert_eq!(
@@ -288,7 +307,7 @@ async fn h3_response_matrix_matches_h1_and_websocket_falls_back() -> TestResult 
     ];
 
     for case in &cases {
-        let h1 = h1_request(&http, tcp_addr, case).await?;
+        let h1 = h1_request(&http, &tcp_base, case).await?;
         let h3 = h3_request(
             &mut sender,
             udp_addr,
@@ -357,8 +376,36 @@ async fn h3_response_matrix_matches_h1_and_websocket_falls_back() -> TestResult 
     .await?;
     assert_eq!(after_refusal.status, axum::http::StatusCode::OK.as_u16());
 
+    #[cfg(not(feature = "http2"))]
     let (mut websocket, upgrade) =
         tokio_tungstenite::connect_async(format!("ws://{tcp_addr}/subscriptions")).await?;
+    #[cfg(feature = "http2")]
+    let (mut websocket, upgrade) = {
+        let ca_file = std::fs::File::open(fixture("http3-ca.pem"))?;
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut std::io::BufReader::new(ca_file)) {
+            roots.add(cert?)?;
+        }
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let mut tls = rustls::ClientConfig::builder_with_provider(provider)
+            .with_protocol_versions(&[&rustls::version::TLS13])?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(tls));
+        let stream = tokio::net::TcpStream::connect(tcp_addr).await?;
+        let stream = connector
+            .connect(
+                rustls::pki_types::ServerName::try_from("localhost")?,
+                stream,
+            )
+            .await?;
+        tokio_tungstenite::client_async(
+            format!("wss://localhost:{}/subscriptions", tcp_addr.port()),
+            stream,
+        )
+        .await?
+    };
     assert_eq!(
         upgrade.status(),
         axum::http::StatusCode::SWITCHING_PROTOCOLS
@@ -404,8 +451,8 @@ async fn http3_runtime_off_does_not_advertise_alt_svc() -> TestResult {
         .spawn()?;
     let mut server = ChildGuard(child);
 
-    let http = reqwest::Client::new();
-    let url = format!("http://{tcp_addr}/health");
+    let (http, tcp_base) = tcp_client(tcp_addr, false)?;
+    let url = format!("{tcp_base}/health");
     for _ in 0..100 {
         match http.get(&url).send().await {
             Ok(response) => {

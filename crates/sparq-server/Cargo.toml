@@ -116,6 +116,11 @@ server = ["dep:sparq-serve", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tok
 # cfg-stripped and tower-http's compression codecs are not compiled. The middleware preserves
 # streaming bodies and its default predicate excludes SSE and already-encoded responses.
 response-compression = ["server", "tower-http/compression-gzip", "tower-http/compression-zstd"]
+# [GPT-5.6] sq-oprna.6: opt-in HTTP/2 on the TCP listener. The feature switches only the
+# connection builder from hyper's HTTP/1-only builder to hyper-util's h1+h2 auto builder and
+# enables optional rustls termination with ALPN when --tls-cert/--tls-key are supplied. Without
+# this feature the original HTTP/1-only accept loop and dependency graph are unchanged.
+http2 = ["server", "axum/http2", "hyper/http2", "hyper-util/http2", "dep:rustls", "dep:rustls-pemfile", "dep:tokio-rustls"]
 # [GPT-5.6] sq-oprna.3: HTTP/3 is a second, encrypted UDP listener dispatching into the
 # same Router as the unchanged plain-HTTP TCP listener. Every QUIC/TLS dependency remains
 # absent from the normal dependency graph unless this default-off feature is selected.
@@ -464,6 +469,10 @@ axum = { version = "0.8", optional = true, default-features = false, features = 
 # only names them as direct deps so we can call `Builder`. http1-only (matches axum's config).
 hyper = { version = "1", optional = true, default-features = false, features = ["http1", "server"] }
 hyper-util = { version = "0.1", optional = true, default-features = false, features = ["server", "tokio", "service"] }
+# [GPT-5.6] sq-oprna.6: TLS wrapping for the opt-in HTTP/2 TCP listener. Crypto and PEM parsing
+# are shared with http3 when both features are selected; TLS 1.2 stays absent because the server
+# config intentionally admits TLS 1.3 only.
+tokio-rustls = { version = "0.26", optional = true, default-features = false }
 # `sync` adds the watch channel that carries the commit generation to subscription tasks (T23).
 # [OPUS-4.8] sq-toze.36: `io-util` adds AsyncReadExt/AsyncWriteExt for the in-binary --health-probe
 # (health_probe::run_probe): the distroless image has no curl/wget, so the server probes its own
@@ -526,7 +535,7 @@ oxttl = { workspace = true }
 sparesults = { version = "0.3", features = ["sparql-12"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "time"] }
 # In-process HTTP client for integration tests (spin the server, assert protocol shape).
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls-manual-roots"] }
 # WebSocket client for the /subscriptions integration tests (T23) — pinned to the SAME
 # version axum 0.8's `ws` feature resolves to (0.29) so the dependency tree gains nothing
 # new (no duplicate tungstenite/tungstenite-http). [OPUS-4.8] (sq-1qkm) Bumped 0.24 -> 0.29
