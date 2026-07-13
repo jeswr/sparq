@@ -29,6 +29,14 @@
   features: "http-sparq"
   test: true
 
+# [GPT-5.6] sq-oprna.2: the encrypted HTTP/3 listener over the same hardened
+# LDP router. The feature-gated integration test drives real TLS TCP + QUIC
+# sockets, response parity, and peer ConnectInfo-backed rate limiting.
+- name: "sparq-lws-core (http3)"
+  crate: "sparq-lws-core"
+  features: "http3"
+  test: true
+
 # The distributed Redis-backed DPoP-`jti` replay store (src/redis_replay.rs).
 # tests/redis_replay.rs is feature-gated on it; this leg compiles + runs the suite's
 # in-process tests. The LIVE-Redis tests inside stay `#[ignore]` + env-gated on
