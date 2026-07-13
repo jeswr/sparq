@@ -53,6 +53,9 @@ fn main() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+mod reconcile_runtime;
+
+#[cfg(not(target_arch = "wasm32"))]
 macro_rules! native_main {
     ($($item:item)*) => {
         $($item)*
@@ -95,6 +98,10 @@ use sparq_lws_core::store::{
 };
 use sparq_lws_core::tls::{self, TlsMode};
 use sparq_lws_core::transport::{ConnectionLimiter, TransportConfig};
+
+use crate::reconcile_runtime::{
+    reconcile_interval_from_env, spawn_periodic_if_configured, SharedStore,
+};
 
 // --- Environment configuration keys ----------------------------------------------------------------
 const ENV_BASE_URL: &str = "SOLID_SERVER_BASE_URL";
@@ -696,16 +703,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    let app = match backend.as_str() {
+    // [GPT-5.6] Each backend arm returns its router plus at most ONE boot-owned reconciler task.
+    // Crucially, the OFF path keeps the original direct backend construction (no Arc allocation or
+    // indirection); only an explicitly-present interval selects shared handles for request path + sweep.
+    let reconcile_interval = reconcile_interval_from_env()?;
+    let (app, reconcile_task) = match backend.as_str() {
         "memory" => {
             eprintln!("  STORAGE: SPARQ backend = MEMORY (in-memory double — boot-without-SPARQ; the conformance/test default).");
-            let store = CompositeStore::with_body_cache(
+            build_app_for_backend(
                 InMemorySparqClient::new(),
                 InMemoryBlobStore::new(),
-                body_cache_from_env(),
-            );
-            build_app_for_store(
-                store,
+                reconcile_interval,
                 &base_url,
                 &issuer,
                 jwks_cache_ttl,
@@ -723,13 +731,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             })?;
             eprintln!("  STORAGE: SPARQ backend = HTTP (live SPARQL endpoint {endpoint}).");
-            let store = CompositeStore::with_body_cache(
+            build_app_for_backend(
                 HttpSparqClient::new(endpoint),
                 InMemoryBlobStore::new(),
-                body_cache_from_env(),
-            );
-            build_app_for_store(
-                store,
+                reconcile_interval,
                 &base_url,
                 &issuer,
                 jwks_cache_ttl,
@@ -760,13 +765,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map_err(|e| format!("failed to init the embedded SPARQ graph: {e}"))?
                 }
             };
-            let store = CompositeStore::with_body_cache(
+            build_app_for_backend(
                 sparq,
                 InMemoryBlobStore::new(),
-                body_cache_from_env(),
-            );
-            build_app_for_store(
-                store,
+                reconcile_interval,
                 &base_url,
                 &issuer,
                 jwks_cache_ttl,
@@ -1029,7 +1031,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         }
     }
+    // The runtime would cancel this task on process exit, but abort explicitly after the listener
+    // drains so the task's ownership/lifetime stays bounded to the server boot that created it.
+    if let Some(task) = reconcile_task {
+        task.abort();
+    }
     Ok(())
+}
+
+/// Build one selected backend in one of two shapes: the original direct store when reconciliation is
+/// OFF, or shared handles owned by both the request path and one periodic task when it is ON. Keeping
+/// the branch here makes the default path allocation- and indirection-identical to the pre-wiring boot.
+#[allow(clippy::too_many_arguments)]
+async fn build_app_for_backend<S, B, J, R>(
+    sparq: S,
+    blob: B,
+    reconcile_interval: Option<Duration>,
+    base_url: &str,
+    issuer: &str,
+    jwks_cache_ttl: Duration,
+    auth: AuthContext<J, R>,
+    overload_config: OverloadConfig,
+    identity: Option<IdentityConfig>,
+) -> Result<(axum::Router, Option<tokio::task::JoinHandle<()>>), Box<dyn std::error::Error>>
+where
+    S: sparq_lws_core::store::SparqClient + 'static,
+    B: sparq_lws_core::store::BlobStore + 'static,
+    J: JwksProvider + Send + Sync + 'static,
+    R: ReplayStore + Send + Sync + 'static,
+{
+    if reconcile_interval.is_some() {
+        let sparq = SharedStore::new(sparq);
+        let blob = SharedStore::new(blob);
+        let store = CompositeStore::with_body_cache(
+            sparq.clone(),
+            blob.clone(),
+            body_cache_from_env(),
+        );
+        let app = build_app_for_store(
+            store,
+            base_url,
+            issuer,
+            jwks_cache_ttl,
+            auth,
+            overload_config,
+            identity,
+        )
+        .await?;
+        let task = spawn_periodic_if_configured(sparq, blob, reconcile_interval);
+        Ok((app, task))
+    } else {
+        let store = CompositeStore::with_body_cache(sparq, blob, body_cache_from_env());
+        let app = build_app_for_store(
+            store,
+            base_url,
+            issuer,
+            jwks_cache_ttl,
+            auth,
+            overload_config,
+            identity,
+        )
+        .await?;
+        Ok((app, None))
+    }
 }
 
 /// Build the application router for a chosen, already-constructed [`Store`] backend — the SAME
