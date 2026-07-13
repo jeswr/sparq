@@ -1095,6 +1095,31 @@ version = "1.0.1"
 criteria = "safe-to-deploy"
 notes = "dependabot 0.4.0->1.0.1 (#2242). Reviewed the delta [OPUS-4.8]: 1.0.0 broadens FutureExt to IntoFuture (additive) + stabilizes to 1.0; 1.0.1 is a docsrs doc_cfg build fix. No new deps, no new unsafe, no behavioural change — a minimal blocking-executor stabilization bump."
 
+# [OPUS-4.8] sq-r1ei8 (#2282): the default-on `sparql-endpoint` feature of sparq-lws-core
+# pulls sparq-engine, which brings the smol-rs foundational async primitives below. These are
+# among the most widely-used, ecosystem-audited low-level async crates (the async-lock / event
+# notification / lock-free-queue substrate under async-std/smol/tokio-adjacent stacks). Exempted
+# as safe-to-deploy pending a rustsec/imported-audit pickup; no unsafe of concern surfaced.
+[[exemptions.async-lock]]
+version = "3.4.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.concurrent-queue]]
+version = "2.5.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.event-listener]]
+version = "5.4.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.event-listener-strategy]]
+version = "0.5.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.parking]]
+version = "2.2.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.portable-atomic]]
 version = "1.13.1"
 criteria = "safe-to-deploy"
