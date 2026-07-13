@@ -12,6 +12,7 @@ fn wasm_graph_contains_router_but_no_native_transport_or_crypto() {
             "tree",
             "--package",
             "sparq-lws-core",
+            "--no-default-features",
             "--features",
             "wasm",
             "--target",
@@ -34,14 +35,17 @@ fn wasm_graph_contains_router_but_no_native_transport_or_crypto() {
     );
 
     for forbidden in [
+        "async-lock",
         "aws-lc-rs",
         "axum-server",
+        "form_urlencoded",
         "hyper-util",
         "mimalloc",
         "object_store",
         "redis v",
         "rustls v",
         "solid-oidc-verifier",
+        "spargebra",
         "sparq-core",
         "sparq-engine",
         "tokio v",

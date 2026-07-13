@@ -50,9 +50,18 @@ where
             .options(options_handler::<S>)
     };
 
-    Router::new()
+    let router = Router::new()
         .route("/", ldp_methods())
-        .route("/{*path}", ldp_methods())
+        .route("/{*path}", ldp_methods());
+    // [GPT-5.6] sq-r1ei8: this static route and its engine-backed handler are
+    // both absent from the core wasm tier.
+    #[cfg(feature = "sparql-endpoint")]
+    let router = router.route(
+        "/sparql",
+        get(crate::sparql_endpoint::get_handler::<S>)
+            .post(crate::sparql_endpoint::post_handler::<S>),
+    );
+    router
         .layer(crate::body_limit::layer(
             crate::body_limit::DEFAULT_MAX_BODY_BYTES,
         ))

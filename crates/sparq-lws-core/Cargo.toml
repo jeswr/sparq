@@ -140,6 +140,11 @@ http = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# [GPT-5.6] sq-r1ei8: the query-only Solid endpoint is a separately removable
+# surface. All three direct dependency edges stay inactive in the core tier.
+form_urlencoded = { version = "1", optional = true }
+spargebra = { workspace = true, optional = true }
+async-lock = { version = "3", optional = true }
 # Cryptographically-strong OS randomness for the unique-per-write blob-key suffix (the root fix that
 # retires the deterministic-key race class — see `store::CompositeStore::mint_blob_key`). `getrandom`
 # is the de-facto OS-RNG crate and is ALREADY resolved in the non-dev tree (transitively via
@@ -240,6 +245,12 @@ quinn = { version = "0.11.11", default-features = false, features = ["runtime-to
 sparq-http3 = { path = "../sparq-http3", optional = true, features = ["server"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# [GPT-5.6] sq-r1ei8: only the full wasm tier links the query engine. In
+# particular, `--no-default-features --features wasm` remains the pure Solid
+# request core and keeps both crates out of its normal dependency graph.
+sparq-core = { path = "../sparq-core", default-features = false, optional = true }
+sparq-engine = { path = "../sparq-engine", default-features = false, optional = true }
+
 # getrandom 0.2 predates the workspace's getrandom_backend cfg and needs its explicit JS shim.
 getrandom = { version = "0.2", features = ["js"] }
 # oxrdf's random vocabulary identifiers use getrandom 0.3, paired with the workspace wasm_js cfg.
@@ -302,7 +313,7 @@ h3-quinn = "0.0.10"
 # in-workspace builds. Build with `--no-default-features` for the engine-free profile (the
 # in-memory double only — the former default), e.g. for an out-of-workspace consumer that wants
 # no engine dependency.
-default = ["embedded-sparq"]
+default = ["embedded-sparq", "sparql-endpoint"]
 # Opt-in: compile the distributed Redis-backed DPoP-`jti` replay store (`src/redis_replay.rs`) + its
 # `redis`/`r2d2` deps. OFF by default so the standard build, tests, and conformance are byte-identical
 # and carry no extra dependency. Enable for a horizontally-scaled deployment that shares one replay set
@@ -315,6 +326,16 @@ redis-replay = ["dep:redis", "dep:r2d2"]
 # `--no-default-features` to build the engine-free profile.
 # See `sparq_lws_core::store::embedded` and decisions/0001-embed-sparq-in-process.md.
 embedded-sparq = ["dep:sparq-core", "dep:sparq-engine"]
+# [GPT-5.6] sq-r1ei8: default-on full-tier query surface. The route, handler,
+# protocol parser, and engine dependencies are all compiled out together; this
+# is independent of `embedded-sparq`, which remains an internal LDP store backend.
+sparql-endpoint = [
+    "dep:async-lock",
+    "dep:form_urlencoded",
+    "dep:spargebra",
+    "dep:sparq-core",
+    "dep:sparq-engine",
+]
 # Opt-in REMOTE backend (sq-gg0qq.3): the live `HttpSparqClient` (`src/store/http.rs`) — a SPARQL
 # 1.1 Protocol client over a remote SPARQ `/sparql` endpoint, selected at runtime by
 # `PSS_SPARQ_BACKEND=http`. OFF by default: in-workspace builds talk to the engine in-process

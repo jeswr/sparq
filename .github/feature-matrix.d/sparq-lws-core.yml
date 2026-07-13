@@ -20,6 +20,14 @@
   features: "embedded-sparq"
   test: true
 
+# [GPT-5.6] sq-r1ei8: explicit compile/test coverage for the default-on full
+# tier. The complementary core tier cannot be expressed by this additive matrix;
+# `feature-matrix.yml` gates it in a dedicated `--no-default-features` job.
+- name: "sparq-lws-core (sparql-endpoint)"
+  crate: "sparq-lws-core"
+  features: "sparql-endpoint"
+  test: true
+
 # The live REMOTE SPARQL-over-HTTP backend (src/store/http.rs), opt-in `http-sparq`
 # since sq-gg0qq.3 (in-workspace builds bind the engine in-process instead).
 # tests/http_sparq_client.rs is entirely feature-gated on it; without this leg the

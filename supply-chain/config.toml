@@ -137,6 +137,10 @@ version = "0.4.42"
 criteria = "safe-to-deploy"
 notes = "all-features tower-http compression dependency inherited from the merged workspace graph; exemption closes the frozen cargo-vet deployment criterion gap [GPT-5.6]"
 
+[[exemptions.async-lock]]
+version = "3.4.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.async-trait]]
 version = "0.1.89"
 criteria = "safe-to-deploy"
@@ -265,6 +269,10 @@ notes = "async-compression codec layer in the all-features tower-http graph; fro
 version = "0.4.32"
 criteria = "safe-to-deploy"
 notes = "shared async-compression core in the all-features tower-http graph; frozen cargo-vet requires the deployment criterion explicitly [GPT-5.6]"
+
+[[exemptions.concurrent-queue]]
+version = "2.5.0"
+criteria = "safe-to-deploy"
 
 [[exemptions.console_log]]
 version = "1.0.0"
@@ -434,6 +442,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.enum-ordinalize-derive]]
 version = "4.3.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.event-listener]]
+version = "5.4.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.event-listener-strategy]]
+version = "0.5.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.fastrand]]
@@ -1020,6 +1036,10 @@ criteria = "safe-to-deploy"
 version = "0.13.2"
 criteria = "safe-to-run"
 notes = "solid-server-rs import pre-flight (sq-gg0qq.1): DEV-ONLY (safe-to-run) — mints test JWS access tokens + DPoP proofs in the incoming server's auth-middleware unit tests; RustCrypto ES256 stack, never in the shipped build. [FABLE-5]"
+
+[[exemptions.parking]]
+version = "2.2.1"
+criteria = "safe-to-deploy"
 
 [[exemptions.parking_lot]]
 version = "0.12.5"

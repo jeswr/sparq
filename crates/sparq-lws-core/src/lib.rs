@@ -92,6 +92,8 @@ pub mod rate_limit;
 #[cfg(all(feature = "redis-replay", not(target_arch = "wasm32")))]
 pub mod redis_replay;
 pub mod seed;
+#[cfg(feature = "sparql-endpoint")]
+mod sparql_endpoint;
 pub mod store;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tls;

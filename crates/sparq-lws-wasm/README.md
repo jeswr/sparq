@@ -23,9 +23,9 @@ npm --workspace @jeswr/solid-server run build:lws-wasm
 npm --workspace @jeswr/solid-server run build:lws-wasm-core
 ```
 
-Both commands intentionally emit the same core-Solid artifact until `sq-r1ei8` adds the
-`sparq-lws-core/sparql-endpoint` implementation. The default-off `sparql-endpoint` feature
-reserves that future full-tier selector without changing the feature-off wasm build.
+The first command enables the [GPT-5.6] `sparql-endpoint` passthrough and stages
+the full LDP/WAC + query artifact. `build:lws-wasm-core` leaves that feature off,
+so `/sparql` and the query-engine dependencies are absent from the core artifact.
 
 ```js
 import init, { SolidServer } from "./pkg/sparq_lws_wasm.js";
@@ -53,6 +53,9 @@ console.log(response.status);
 - The constructor provisions one owner ACL. Each request is anonymous when
   `authenticatedWebid` is absent; otherwise the host must have verified that
   WebID before passing it to wasm.
+- The default-off `sparql-endpoint` feature adds query-only GET/POST `/sparql`
+  over the resources that the supplied WebID may read. SELECT/ASK return
+  SPARQL-results JSON; CONSTRUCT returns N-Triples.
 - No Tokio reactor, native listener, filesystem, TLS, OIDC verifier, PoP,
   notifications, or network backend is linked into the wasm artifact.
 
