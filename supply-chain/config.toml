@@ -1091,8 +1091,9 @@ criteria = "safe-to-run"
 notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
 
 [[exemptions.pollster]]
-version = "0.4.0"
+version = "1.0.1"
 criteria = "safe-to-deploy"
+notes = "dependabot 0.4.0->1.0.1 (#2242). Reviewed the delta [OPUS-4.8]: 1.0.0 broadens FutureExt to IntoFuture (additive) + stabilizes to 1.0; 1.0.1 is a docsrs doc_cfg build fix. No new deps, no new unsafe, no behavioural change — a minimal blocking-executor stabilization bump."
 
 [[exemptions.portable-atomic]]
 version = "1.13.1"
