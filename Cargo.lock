@@ -4860,7 +4860,7 @@ name = "sparq-fedplan"
 version = "0.1.0"
 dependencies = [
  "criterion",
- "foldhash 0.1.5",
+ "foldhash 0.2.0",
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
  "rustc-hash 2.1.3",
