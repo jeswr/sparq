@@ -4,9 +4,9 @@
 epic sq-3183) that runs classic graph algorithms directly over a `sparq_core::Graph`.
 PageRank, degree/in/out centrality, weakly-connected-component and label-propagation
 community detection — plus feature-gated exact betweenness, harmonic closeness, strongly
-connected components, and topological sorting — computed from sparq-core's permutation
-indexes with no model and no network. Nothing in the workspace depends on it; the default
-engine build does not even compile it.
+connected components, boolean acyclicity checks, and topological sorting — computed from
+sparq-core's permutation indexes with no model and no network. Nothing in the workspace
+depends on it; the default engine build does not even compile it.
 
 ## 🚀 Quickstart
 
@@ -17,7 +17,7 @@ use sparq_algos::{
     degree_centrality, Direction, top_k,
     betweenness_centrality, closeness_centrality,
     weakly_connected_components, label_propagation, LabelPropConfig, num_communities,
-    strongly_connected_components, topological_sort,
+    is_acyclic, strongly_connected_components, topological_sort,
 };
 
 // Project the RDF graph onto a directed node graph (subjects + entity objects = nodes,
@@ -44,6 +44,7 @@ let k    = num_communities(&comm);
 
 // Directed topology; requires feature `topology`.
 let scc = strongly_connected_components(&g);              // dense component id per node
+let dag = is_acyclic(&g);                                  // false for any directed cycle
 let order = topological_sort(&g)?;                         // Err(CycleError) on a cycle
 ```
 
@@ -69,7 +70,7 @@ let order = topological_sort(&g)?;                         // Err(CycleError) on
 - **Directed topology** — with the default-OFF `topology` feature, iterative Tarjan
   strongly connected components and a canonical topological sort. SCC ids are densified by
   ascending node index; topological-sort ties choose the smallest ready node and cycles,
-  including self-loops, return `CycleError`.
+  including self-loops, return `CycleError`; `is_acyclic` exposes the same check as a boolean.
 - **Opt-in & lean** — consumes only sparq-core's public read API; the only dependencies
   are `sparq-core`, `oxrdf`, and `rustc-hash`. The heavier all-pairs algorithms are behind
   `centrality-extended`, and directed topology is behind `topology`; both features are OFF
