@@ -8,7 +8,7 @@
 </p>
 
 A **Model Context Protocol (MCP)** server exposing a sparq RDF graph as **agent tools** —
-an **opt-in** crate. An LLM/agent can use `query`, `introspect`, `stats`, `prefixes`, and `void` over a
+an **opt-in** crate. An LLM/agent can use `query`, `introspect`, `stats`, `classes`, `prefixes`, and `void` over a
 dataset as first-class MCP tools; SPARQL **`update` is OFF by default**. It is a thin
 wrapper over the existing engine read API (`sparq-engine` query path + `sparq-introspect`
 schema mining): nothing in the workspace depends on it, the default engine build does not
@@ -45,14 +45,14 @@ transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
 - **`query`** — run a read-only SELECT/ASK; returns SPARQL 1.1 Query Results JSON. Bounded by a configurable `QueryBudget` (default 30 s / 1M rows).
 - **`construct`** — run a read-only CONSTRUCT/DESCRIBE; returns N-Triples text.
 - **`introspect`** — the effective schema the graph actually uses (classes, predicates,
-  prefixes, characteristic sets) as full JSON or a token-budgeted text summary for LLM
-  grounding — exact counts from the store indexes, no sampling.
+  prefixes, characteristic sets) as JSON or token-budgeted text; exact counts, no sampling.
 - **`shapes`** — given a class IRI, the data-grounded SHACL-style shape of that class:
   the valid predicates, their datatypes/object-kinds, observed range, and the
   cardinalities the data supports (`min_count`/`max_count` only when proven, never
   fabricated). Structured grounding so a **client** LLM can write NL→SPARQL — **no
   server-side model**. Ships in the default build.
 - **`stats`** — dataset totals (triples, distinct subjects, typed entities, class / predicate / namespace counts).
+- **`classes`** — list class IRIs with instance and predicate counts, largest class first. <!-- [GPT-5.6] sq-cekgj -->
 - **`prefixes`** — list detected namespace declarations and distinct IRI term counts, largest namespace first. <!-- [GPT-5.6] sq-kx5b0 -->
 - **`void`** — emit a W3C VoID dataset descriptor as N-Triples, optionally including characteristic-set statistics; `dataset` defaults to `urn:sparq:dataset`.
 - **`ask`** *(feature `nlq`, OFF by default)* — answer a natural-language question

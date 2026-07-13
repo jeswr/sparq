@@ -230,6 +230,7 @@ impl McpServer {
             "introspect" => self.tool_introspect(&args),
             "shapes" => self.tool_shapes(&args),
             "stats" => self.tool_stats(),
+            "classes" => self.tool_classes(),
             "prefixes" => self.tool_prefixes(),
             "void" => self.tool_void(&args),
             #[cfg(feature = "nlq")]
@@ -322,6 +323,29 @@ impl McpServer {
             "namespaces": ix.vocabularies.distinct,
         });
         Ok(serde_json::to_string_pretty(&stats).unwrap_or_else(|_| stats.to_string()))
+    }
+
+    /// [GPT-5.6] sq-cekgj: `classes`, class profiles ranked by instance count.
+    fn tool_classes(&self) -> Result<String, String> {
+        let ix = Introspection::build(&self.graph);
+        let mut profiles = ix.classes;
+        let distinct_classes = profiles.len();
+        profiles.sort_by(|a, b| b.instances.cmp(&a.instances).then(a.class.cmp(&b.class)));
+        let classes: Vec<Value> = profiles
+            .into_iter()
+            .map(|profile| {
+                json!({
+                    "class": profile.class,
+                    "instances": profile.instances,
+                    "predicate_count": profile.predicates.len(),
+                })
+            })
+            .collect();
+        let result = json!({
+            "distinct_classes": distinct_classes,
+            "classes": classes,
+        });
+        Ok(serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()))
     }
 
     /// [GPT-5.6] sq-kx5b0: `prefixes`, namespace declarations ranked by term count.

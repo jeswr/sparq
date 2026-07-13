@@ -12,6 +12,7 @@
 //!   cardinality constraints for one class IRI; structured grounding for a client LLM —
 //!   no server-side model). [OPUS-4.8] sq-zak4f
 //! - `stats` → graph triple count + introspection totals.
+//! - `classes` → per-class instance and predicate counts.
 //! - `prefixes` → namespace declarations + per-namespace distinct-IRI term counts.
 //! - `void` → `sparq_introspect::Introspection::to_void` (W3C VoID N-Triples).
 //! - `validate` (feature `shacl`, OFF by default) → `sparq_shacl::validate` over
@@ -165,6 +166,23 @@ pub const STATS: ToolSpec = ToolSpec {
                   distinct subjects, typed entities, and the number of distinct \
                   classes / predicates / namespaces. Cheap, structured counts for \
                   deciding how to query the dataset.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        })
+    },
+};
+
+/// [GPT-5.6] sq-cekgj: class profiles ranked by instance count.
+pub const CLASSES: ToolSpec = ToolSpec {
+    name: "classes",
+    description: "Return the classes detected in the loaded graph: each class IRI, its \
+                  instance count, and the number of predicates used by its instances, \
+                  sorted by instance count descending then class IRI ascending. Also \
+                  returns the total number of classes as distinct_classes. No LLM is \
+                  involved.",
     input_schema: || {
         json!({
             "type": "object",
@@ -413,6 +431,7 @@ pub const READ_ONLY: &[&ToolSpec] = &[
     &INTROSPECT,
     &SHAPES,
     &STATS,
+    &CLASSES,
     &PREFIXES,
     &VOID,
 ];
