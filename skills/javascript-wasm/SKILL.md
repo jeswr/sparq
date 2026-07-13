@@ -134,9 +134,18 @@ owner parameter only provisions WAC and is not authentication. Do not enable or 
 https://id.example/alice#me`, or import `startSolidServer({ port, baseUrl, ownerWebid })`; it resolves
 to a listening Node `http.Server` with an async `closeAsync()` helper. The listener binds
 `127.0.0.1`, owns one wasm pod for its lifetime, and preserves repeated request/response headers.
-It is deliberately fixed-owner: every HTTP caller acts as `ownerWebid` without authentication.
-Use it only for local development, never expose it, and expect all data to disappear on shutdown.
-TLS, OIDC, persistent storage, notifications, and the separately tracked SPARQL endpoint are absent.
+It defaults to deliberately unauthenticated fixed-owner mode: every caller acts as `ownerWebid`.
+For the opt-in Node authentication path, call
+`startSolidServer({ port, baseUrl, ownerWebid, oidc: true })`. The host then requires and verifies a
+Solid-OIDC access token plus request-bound DPoP proof with `@solid/access-token-verifier` before
+passing the resolved WebID into wasm; missing, invalid, expired, replayed, bearer-only, or ambiguous
+credentials pass no WebID and WAC treats them as anonymous. `ownerWebid` provisions the root ACL but
+is not proof of identity in this mode. `baseUrl` must be the public request origin used in each DPoP
+proof because the host binds the proof to the reconstructed request URL. The verifier dereferences
+WebID and issuer/JWKS documents.
+Use the package only for local development, do not expose it as a production server, and expect all
+data to disappear on shutdown. TLS termination, persistent storage, notifications, and the
+separately tracked SPARQL endpoint remain absent; OIDC verification runs in Node, not wasm.
 
 ## Common recipes
 

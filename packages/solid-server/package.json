@@ -25,6 +25,12 @@
   "engines": {
     "node": ">=18"
   },
+  "dependencies": {
+    "@solid/access-token-verifier": "^2.1.1"
+  },
+  "devDependencies": {
+    "jose": "^5.10.0"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jeswr/sparq.git",
@@ -40,8 +46,8 @@
   },
   "scripts": {
     "_copy:wasm": "rm -rf wasm && mkdir wasm && cp ../../crates/sparq-lws-wasm/pkg/sparq_lws_wasm.js ../../crates/sparq-lws-wasm/pkg/sparq_lws_wasm.d.ts ../../crates/sparq-lws-wasm/pkg/sparq_lws_wasm_bg.wasm ../../crates/sparq-lws-wasm/pkg/sparq_lws_wasm_bg.wasm.d.ts wasm/",
-    "build:lws-wasm": "wasm-pack build ../../crates/sparq-lws-wasm --target web --profile release-wasm -- --config profile.release-wasm.strip=false && npm run _copy:wasm",
-    "build:lws-wasm-core": "wasm-pack build ../../crates/sparq-lws-wasm --target web --profile release-wasm -- --config profile.release-wasm.strip=false && npm run _copy:wasm",
+    "build:lws-wasm": "wasm-pack build ../../crates/sparq-lws-wasm --target web --profile release-wasm --config profile.release-wasm.strip=false && npm run _copy:wasm",
+    "build:lws-wasm-core": "wasm-pack build ../../crates/sparq-lws-wasm --target web --profile release-wasm --config profile.release-wasm.strip=false && npm run _copy:wasm",
     "test": "node --test test/*.test.mjs"
   },
   "keywords": [

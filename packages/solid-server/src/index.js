@@ -1,8 +1,9 @@
-// [GPT-5.6] sq-6xasp.9: loopback Node listener over one long-lived in-memory wasm pod.
+// [GPT-5.6] sq-6xasp.9/.10: loopback Node listener with optional verified identity into wasm.
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 
 import initWasm, { SolidServer } from '../wasm/sparq_lws_wasm.js';
+import { createOidcAuthenticator } from './auth.js';
 import {
   RequestBodyTooLargeError,
   copyWasmResponse,
@@ -59,6 +60,12 @@ function normalizeOwnerWebid(value) {
   return ownerWebid;
 }
 
+function normalizeOidc(value) {
+  if (value === undefined || value === false) return false;
+  if (value === true) return true;
+  throw new TypeError('oidc must be a boolean');
+}
+
 async function closeServer(server) {
   await new Promise((resolve, reject) => {
     server.close((error) => (error ? reject(error) : resolve()));
@@ -66,18 +73,21 @@ async function closeServer(server) {
 }
 
 /**
- * Start a loopback-only, fixed-owner Solid/LDP development server.
+ * Start a loopback-only Solid/LDP development server.
  *
- * Every HTTP request acts as `ownerWebid`; this is deliberately not authentication.
+ * The default fixed-owner mode is deliberately not authentication. With `oidc: true`, the Node
+ * host verifies each credential and anonymous requests remain anonymous.
  * The returned Node server owns one in-memory wasm pod until `server.close()` completes.
  */
 export async function startSolidServer(options = {}) {
   const port = normalizePort(options.port);
   const baseUrl = normalizeBaseUrl(options.baseUrl, port);
   const ownerWebid = normalizeOwnerWebid(options.ownerWebid);
+  const oidc = normalizeOidc(options.oidc);
 
   await init();
   const pod = new SolidServer(baseUrl, ownerWebid);
+  const authenticate = oidc ? createOidcAuthenticator(baseUrl) : async () => ownerWebid;
   let podFreed = false;
   const freePod = () => {
     if (!podFreed) {
@@ -94,7 +104,7 @@ export async function startSolidServer(options = {}) {
           request.url ?? '/',
           flattenRequestHeaders(request.rawHeaders),
           await readRequestBody(request),
-          ownerWebid,
+          await authenticate(request),
         );
         writeNodeResponse(response, copyWasmResponse(wasmResponse));
       } catch (error) {
