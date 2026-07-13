@@ -148,6 +148,25 @@ pub struct Hit {
     pub score: f32,
 }
 
+/// Corpus statistics for one analyzed index token. [GPT-5.6] sq-rviwn
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TermStats {
+    /// Number of indexed documents containing the token.
+    pub doc_count: usize,
+    /// Total number of token occurrences across those documents.
+    pub total_tf: u32,
+    /// BM25 inverse document frequency used by this index's scoring paths.
+    pub idf: f32,
+}
+
+/// The BM25 inverse-document-frequency formula shared by every scoring path.
+/// [GPT-5.6] sq-rviwn
+fn bm25_idf(document_count: usize, document_frequency: usize) -> f32 {
+    let n = document_count as f32;
+    let df = document_frequency as f32;
+    ((n - df + 0.5) / (df + 0.5) + 1.0).ln()
+}
+
 /// A BM25 inverted index over the string literals of a sparq [`Graph`]'s
 /// dictionary (see the module docs for design and maintenance).
 ///
@@ -184,15 +203,21 @@ pub struct TextIndex {
     /// of the index state, so two indexes built with different analyzers are not
     /// equal. [OPUS-4.8] sq-m3ln
     analyzer: Analyzer,
+    /// Bounded deletion-neighbour index, absent from feature-OFF builds.
+    /// [GPT-5.6] sq-lsp7k.14
+    #[cfg(feature = "fuzzy")]
+    fuzzy: crate::fuzzy::FuzzyTerms,
 }
 
 /// The lexical value of a string literal (plain `xsd:string` or
 /// language-tagged), `None` for every other term kind.
 fn text_value<'a>(parts: &TermParts<'a>) -> Option<&'a str> {
     match parts {
-        TermParts::Lit { value, datatype, lang } => {
-            (lang.is_some() || *datatype == XSD_STRING).then_some(*value)
-        }
+        TermParts::Lit {
+            value,
+            datatype,
+            lang,
+        } => (lang.is_some() || *datatype == XSD_STRING).then_some(*value),
         _ => None,
     }
 }
@@ -237,14 +262,21 @@ impl TextIndex {
     /// incremental/delta-fed case (the [`with_positions`](Self::with_positions)
     /// counterpart with an explicit analyzer). [OPUS-4.8] sq-m3ln
     pub fn with_positions_analyzer(analyzer: Analyzer) -> TextIndex {
-        TextIndex { positions: Some(BTreeMap::new()), analyzer, ..Default::default() }
+        TextIndex {
+            positions: Some(BTreeMap::new()),
+            analyzer,
+            ..Default::default()
+        }
     }
 
     /// An empty index that uses `analyzer` (the `TextIndex::default()`
     /// counterpart with an explicit analyzer), for the delta-fed case without
     /// positions. [OPUS-4.8] sq-m3ln
     pub fn with_analyzer(analyzer: Analyzer) -> TextIndex {
-        TextIndex { analyzer, ..Default::default() }
+        TextIndex {
+            analyzer,
+            ..Default::default()
+        }
     }
 
     /// The [`Analyzer`] this index was built/seeded with. [OPUS-4.8] sq-m3ln
@@ -266,7 +298,10 @@ impl TextIndex {
     /// counterpart of `TextIndex::default()`, for the incremental/delta-fed
     /// case. [OPUS-4.8]
     pub fn with_positions() -> TextIndex {
-        TextIndex { positions: Some(BTreeMap::new()), ..Default::default() }
+        TextIndex {
+            positions: Some(BTreeMap::new()),
+            ..Default::default()
+        }
     }
 
     // Note: `Analyzer::default()` is `Unicode`, so `TextIndex::default()` and
@@ -349,6 +384,32 @@ impl TextIndex {
         self.postings.len()
     }
 
+    /// Number of (token, document) posting pairs. [GPT-5.6] sq-ukr2k
+    pub fn total_postings(&self) -> usize {
+        self.postings.values().map(|v| v.len()).sum()
+    }
+
+    /// Returns corpus statistics for exactly one analyzed token.
+    ///
+    /// `token` is normalized with this index's [`Analyzer`], exactly as indexed
+    /// text is. Input that analyzes to zero or multiple tokens, or whose token
+    /// has no postings, returns `None`. Lookup is exact: this method does not
+    /// expand query-prefix syntax such as `*`. [GPT-5.6] sq-rviwn
+    pub fn term_stats(&self, token: &str) -> Option<TermStats> {
+        let mut tokens = tokenize_with(token, self.analyzer).into_iter();
+        let token = tokens.next()?;
+        if tokens.next().is_some() {
+            return None;
+        }
+        let rows = self.postings.get(token.as_str())?;
+        let doc_count = rows.len();
+        Some(TermStats {
+            doc_count,
+            total_tf: rows.iter().map(|(_, tf)| tf).sum(),
+            idf: bm25_idf(self.docs.len(), doc_count),
+        })
+    }
+
     /// A rough estimate of the index's heap footprint in bytes (for
     /// benchmarking): posting entries, token keys, the doc-length table, and —
     /// when enabled — the positional postings (one `u32` per token occurrence
@@ -364,11 +425,21 @@ impl TextIndex {
             .iter()
             .flat_map(|m| m.iter())
             .map(|(k, docs)| {
-                k.len() + std::mem::size_of::<Box<str>>() + 24
+                k.len()
+                    + std::mem::size_of::<Box<str>>()
+                    + 24
                     + docs.values().map(|p| 16 + p.capacity() * 4).sum::<usize>()
             })
             .sum();
-        postings + positions + self.docs.len() * 16
+        let base = postings + positions + self.docs.len() * 16;
+        #[cfg(feature = "fuzzy")]
+        {
+            base + self.fuzzy.heap_bytes()
+        }
+        #[cfg(not(feature = "fuzzy"))]
+        {
+            base
+        }
     }
 
     /// Tokenizes `text` and adds it as document `id`. Caller guarantees `id`
@@ -394,6 +465,10 @@ impl TextIndex {
             *tf.entry(t).or_insert(0) += 1;
         }
         for (token, n) in tf {
+            #[cfg(feature = "fuzzy")]
+            if !self.postings.contains_key(token.as_str()) {
+                self.fuzzy.insert(&token);
+            }
             let rows = self.postings.entry(token.into_boxed_str()).or_default();
             match rows.last() {
                 // Build and delta both feed increasing ids: append is the fast path.
@@ -414,6 +489,10 @@ impl TextIndex {
     #[cfg(feature = "parallel")]
     fn append_shard(&mut self, shard: TextIndex) {
         for (token, rows) in shard.postings {
+            #[cfg(feature = "fuzzy")]
+            if !self.postings.contains_key(token.as_ref()) {
+                self.fuzzy.insert(&token);
+            }
             self.postings.entry(token).or_default().extend(rows);
         }
         // Merge per-token position maps the same way: shard doc ids are
@@ -558,7 +637,11 @@ impl TextIndex {
     /// (tf summed, df = union size) — one pseudo-term for scoring.
     fn resolve(&self, t: &QueryToken) -> Vec<(Id, u32)> {
         if !t.prefix {
-            return self.postings.get(t.token.as_str()).cloned().unwrap_or_default();
+            return self
+                .postings
+                .get(t.token.as_str())
+                .cloned()
+                .unwrap_or_default();
         }
         let mut merged: FxHashMap<Id, u32> = FxHashMap::default();
         for (token, rows) in self.postings.range(t.token.clone().into_boxed_str()..) {
@@ -587,6 +670,83 @@ impl TextIndex {
         self.run(query, false)
     }
 
+    /// Typo-tolerant single-token search behind the default-OFF `fuzzy`
+    /// feature. Candidate terms come from a bounded deletion-neighbourhood
+    /// index and are verified with exact Levenshtein distance; the token
+    /// dictionary is never scanned at query time. Results are stably ordered
+    /// by edit distance ascending, BM25 descending, matched term ascending,
+    /// then dictionary id ascending. [GPT-5.6] sq-lsp7k.14
+    ///
+    /// At `max_distance == 0`, this returns exactly the same hit set and BM25
+    /// scores as [`search`](Self::search) for the same single-token query.
+    #[cfg(feature = "fuzzy")]
+    pub fn fuzzy(
+        &self,
+        query: &str,
+        max_distance: u8,
+    ) -> Result<Vec<crate::fuzzy::FuzzyHit>, crate::fuzzy::FuzzyError> {
+        use crate::fuzzy::{FuzzyError, FuzzyHit, MAX_DISTANCE};
+
+        if max_distance > MAX_DISTANCE {
+            return Err(FuzzyError::DistanceTooLarge {
+                requested: max_distance,
+            });
+        }
+        let tokens = tokenize_query_with(query, self.analyzer);
+        if tokens.len() != 1 {
+            return Err(FuzzyError::ExpectedSingleToken {
+                found: tokens.len(),
+            });
+        }
+        if tokens[0].prefix {
+            return Err(FuzzyError::PrefixNotSupported);
+        }
+        if self.docs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let query = &tokens[0].token;
+        let n = self.docs.len() as f32;
+        let avgdl = (self.total_tokens as f32 / n).max(f32::MIN_POSITIVE);
+        let mut best: FxHashMap<Id, FuzzyHit> = FxHashMap::default();
+        for (term, distance) in self.fuzzy.candidates(query, max_distance) {
+            let rows = self
+                .postings
+                .get(term)
+                .expect("fuzzy signatures are derived from posting keys");
+            let idf = bm25_idf(self.docs.len(), rows.len());
+            for &(id, tf) in rows {
+                let dl = self.docs[&id] as f32;
+                let tf = tf as f32;
+                let score = idf * tf * (K1 + 1.0) / (tf + K1 * (1.0 - B + B * dl / avgdl));
+                let candidate = FuzzyHit {
+                    id,
+                    distance,
+                    score,
+                    term: term.into(),
+                };
+                let replace = best.get(&id).is_none_or(|known| {
+                    candidate.distance < known.distance
+                        || (candidate.distance == known.distance
+                            && (candidate.score > known.score
+                                || (candidate.score == known.score && candidate.term < known.term)))
+                });
+                if replace {
+                    best.insert(id, candidate);
+                }
+            }
+        }
+        let mut hits: Vec<FuzzyHit> = best.into_values().collect();
+        hits.sort_unstable_by(|a, b| {
+            a.distance
+                .cmp(&b.distance)
+                .then_with(|| b.score.total_cmp(&a.score))
+                .then_with(|| a.term.cmp(&b.term))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(hits)
+    }
+
     /// Phrase query: literals where the query's tokens appear ADJACENT
     /// (consecutive positions) and IN ORDER. `phrase("foo bar")` matches a
     /// document only where `foo` is immediately followed by `bar`; the same
@@ -607,10 +767,9 @@ impl TextIndex {
     /// [`with_positions`](Self::with_positions)). Guard with
     /// [`has_positions`](Self::has_positions) if unsure.
     pub fn phrase(&self, query: &str) -> Vec<Id> {
-        let positions = self
-            .positions
-            .as_ref()
-            .expect("phrase() requires a positional index: build with TextIndex::build_with_positions");
+        let positions = self.positions.as_ref().expect(
+            "phrase() requires a positional index: build with TextIndex::build_with_positions",
+        );
         let tokens = tokenize_with(query, self.analyzer);
         if tokens.is_empty() {
             return Vec::new();
@@ -729,7 +888,10 @@ impl TextIndex {
             .filter_map(|id| {
                 Self::min_phrase_gap(&lists, driver_i, id)
                     .filter(|&g| g <= slop)
-                    .map(|g| Hit { id, score: 1.0 / (1.0 + g as f32) })
+                    .map(|g| Hit {
+                        id,
+                        score: 1.0 / (1.0 + g as f32),
+                    })
             })
             .collect();
         // Best-first (tighter proximity = higher score), ties by ascending id —
@@ -761,15 +923,18 @@ impl TextIndex {
         // over all starts is the document's minimum. Positions are ascending, so
         // `partition_point` is a binary search for "strictly greater than prev".
         let first = &lists[0][&id];
-        first.iter().filter_map(|&start| {
-            let mut prev = start;
-            for docs in &lists[1..] {
-                let ps = &docs[&id];
-                let i = ps.partition_point(|&p| p <= prev);
-                prev = *ps.get(i)?; // no in-order position for this token after prev
-            }
-            Some((prev - start) - (n - 1))
-        }).min()
+        first
+            .iter()
+            .filter_map(|&start| {
+                let mut prev = start;
+                for docs in &lists[1..] {
+                    let ps = &docs[&id];
+                    let i = ps.partition_point(|&p| p <= prev);
+                    prev = *ps.get(i)?; // no in-order position for this token after prev
+                }
+                Some((prev - start) - (n - 1))
+            })
+            .min()
     }
 
     fn run(&self, query: &str, all: bool) -> Vec<Hit> {
@@ -806,8 +971,7 @@ impl TextIndex {
         // doc id -> (accumulated score, number of query terms present).
         let mut acc: FxHashMap<Id, (f32, u32)> = FxHashMap::default();
         for rows in &lists {
-            let df = rows.len() as f32;
-            let idf = ((n - df + 0.5) / (df + 0.5) + 1.0).ln();
+            let idf = bm25_idf(self.docs.len(), rows.len());
             for &(id, tf) in rows {
                 let dl = self.docs[&id] as f32;
                 let tf = tf as f32;

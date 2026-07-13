@@ -24,8 +24,9 @@ use oxrdf::Term;
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum NodeFilter {
     /// Only IRIs and blank nodes are nodes; a triple whose object is a literal
-    /// contributes **no** edge (the subject is still a node if it appears elsewhere).
-    /// This is the default — analytics over the *entity* graph, not its data values.
+    /// contributes **no** edge, while its subject remains an isolated node unless it has
+    /// another entity-valued edge. This is the default — analytics over the *entity*
+    /// graph, not its data values.
     #[default]
     EntitiesOnly,
     /// Every distinct subject/object term — including literals — is a node. A literal
@@ -99,11 +100,12 @@ impl NodeGraph {
 
         for [s, _p, o] in graph.iter_ids() {
             // The subject of an RDF triple is always an IRI or blank node, so it is
-            // always a node. The object may be a literal.
+            // always a node, even when the object is excluded. This also preserves
+            // data-only entities as isolated nodes in the topology projection.
+            let si = intern(s, &mut index_of, &mut dict_ids);
             if filter == NodeFilter::EntitiesOnly && is_literal(graph, o) {
                 continue;
             }
-            let si = intern(s, &mut index_of, &mut dict_ids);
             let oi = intern(o, &mut index_of, &mut dict_ids);
             edge_set.insert((si, oi));
         }

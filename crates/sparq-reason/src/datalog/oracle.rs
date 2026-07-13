@@ -7,10 +7,10 @@
 //! numeric path is independent for the `xsd:integer` values the fixtures use.
 //!
 //! Slow on purpose — fixture scale only. Agreement between this evaluator and
-//! [`super::eval`] on the fixtures and the seed-randomised graphs is the Phase-1
-//! acceptance differential.
+//! [`super::eval`] on the fixtures and the seed-randomised graphs is the acceptance
+//! differential.
 
-use super::{numeric_value, AggAtom, AggFunc, Atom, DTerm, Program, Rule, Stratification};
+use super::{AggAtom, AggFunc, Atom, DTerm, Program, Rule, Stratification};
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{Dict, Id};
 
@@ -40,6 +40,10 @@ pub(super) fn eval_naive(
                             subst(&h.t[1], &env),
                             subst(&h.t[2], &env),
                         ];
+                        if h.pred.is_none() && !matches!(dict.term(g[1]), oxrdf::Term::NamedNode(_))
+                        {
+                            continue;
+                        }
                         if !store.contains(&g) {
                             fresh.push(g);
                         }
@@ -102,25 +106,37 @@ fn rule_matches(dict: &mut Dict, rule: &Rule, store: &FxHashSet<[Id; 3]>) -> Vec
         }
         envs = next;
     }
-    for atom in &rule.negated {
-        envs.retain(|env| !store.iter().any(|f| unifies(atom, f, env)));
+    for group in &rule.negated {
+        envs.retain(|env| {
+            let mut joint = vec![env.clone()];
+            for atom in group {
+                joint = joint
+                    .iter()
+                    .flat_map(|candidate| atom_matches(atom, candidate, store))
+                    .collect();
+                if joint.is_empty() {
+                    break;
+                }
+            }
+            joint.is_empty()
+        });
     }
     for f in &rule.filters {
         envs.retain(|env| {
             let val = |t: &DTerm| match t {
-                DTerm::Const(id) => num(dict, *id),
-                DTerm::Var(v) => env.get(v).and_then(|&id| num(dict, id)),
+                DTerm::Const(id) => oracle_num(dict, *id),
+                DTerm::Var(v) => env.get(v).and_then(|&id| oracle_num(dict, id)),
             };
             match (val(&f.a), val(&f.b)) {
                 (Some(a), Some(b)) => {
                     use super::CmpOp::*;
                     match f.op {
-                        Eq => a == b,
-                        Ne => a != b,
-                        Lt => a < b,
-                        Le => a <= b,
-                        Gt => a > b,
-                        Ge => a >= b,
+                        Eq => a.cmp_relational(b).is_some_and(|o| o.is_eq()),
+                        Ne => a.cmp_relational(b).is_some_and(|o| o.is_ne()),
+                        Lt => a.cmp_relational(b).is_some_and(|o| o.is_lt()),
+                        Le => a.cmp_relational(b).is_some_and(|o| o.is_le()),
+                        Gt => a.cmp_relational(b).is_some_and(|o| o.is_gt()),
+                        Ge => a.cmp_relational(b).is_some_and(|o| o.is_ge()),
                     }
                 }
                 _ => false,
@@ -151,19 +167,6 @@ fn atom_matches(atom: &Atom, env: &Env, store: &FxHashSet<[Id; 3]>) -> Vec<Env> 
     out
 }
 
-/// Does the NOT atom unify with `f` under `env` (unbound vars are wildcards; a
-/// repeated wildcard must match equal terms)?
-fn unifies(atom: &Atom, f: &[Id; 3], env: &Env) -> bool {
-    let mut wild: Env = Env::default();
-    atom.t.iter().enumerate().all(|(i, t)| match t {
-        DTerm::Const(id) => f[i] == *id,
-        DTerm::Var(v) => match env.get(v) {
-            Some(&b) => b == f[i],
-            None => *wild.entry(*v).or_insert(f[i]) == f[i],
-        },
-    })
-}
-
 /// The aggregate's grouped table over the distinct full matches of its body.
 fn agg_table(dict: &mut Dict, agg: &AggAtom, store: &FxHashSet<[Id; 3]>) -> Vec<(Vec<Id>, Id)> {
     let mut envs = vec![Env::default()];
@@ -184,16 +187,25 @@ fn agg_table(dict: &mut Dict, agg: &AggAtom, store: &FxHashSet<[Id; 3]>) -> Vec<
         .collect();
     let mut groups: FxHashMap<Vec<Id>, Vec<(Id, OracleNum)>> = FxHashMap::default();
     let mut counts: FxHashMap<Vec<Id>, u64> = FxHashMap::default();
+    let mut distinct_counts: FxHashMap<Vec<Id>, FxHashSet<Id>> = FxHashMap::default();
     for tup in &distinct {
         let key: Vec<Id> = agg.on.iter().map(|&(l, _)| tup[l as usize]).collect();
         if agg.func == AggFunc::Count {
-            *counts.entry(key).or_insert(0) += 1;
+            if agg.distinct {
+                let value = tup[agg.value.expect("COUNT DISTINCT has a value slot") as usize];
+                distinct_counts.entry(key).or_default().insert(value);
+            } else {
+                *counts.entry(key).or_insert(0) += 1;
+            }
         } else {
             let id = tup[agg.value.expect("numeric aggregate has a value slot") as usize];
             if let Some(n) = oracle_num(dict, id) {
                 groups.entry(key).or_default().push((id, n));
             }
         }
+    }
+    for (key, values) in distinct_counts {
+        counts.insert(key, values.len() as u64);
     }
     let mut out: Vec<(Vec<Id>, Id)> = counts
         .into_iter()
@@ -263,6 +275,13 @@ impl OracleNum {
             Self::Float(v) => v,
         }
     }
+
+    fn cmp_relational(self, other: Self) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Self::Exact(a), Self::Exact(b)) => Some(a.cmp(&b)),
+            (a, b) => a.as_f64().partial_cmp(&b.as_f64()),
+        }
+    }
 }
 
 fn oracle_num(dict: &Dict, id: Id) -> Option<OracleNum> {
@@ -279,7 +298,13 @@ fn oracle_num(dict: &Dict, id: Id) -> Option<OracleNum> {
             | "http://www.w3.org/2001/XMLSchema#float"
             | "http://www.w3.org/2001/XMLSchema#double"
     ) {
-        return l.value().parse::<f64>().ok().map(OracleNum::Float);
+        let parsed = match l.value() {
+            "INF" => Some(f64::INFINITY),
+            "-INF" => Some(f64::NEG_INFINITY),
+            "NaN" => Some(f64::NAN),
+            lexical => lexical.parse::<f64>().ok(),
+        };
+        return parsed.map(OracleNum::Float);
     }
     None
 }
@@ -351,20 +376,4 @@ fn canonical_double(v: f64) -> String {
         Some((m, e)) if !m.contains('.') => format!("{m}.0E{e}"),
         _ => s,
     }
-}
-
-/// Independent exact numeric view for the fixtures' value space: `xsd:integer`
-/// via `i128` lexical parsing (no shared code); anything else falls back to the
-/// shared tower (the differential still exercises the full join/NAF/aggregate
-/// pipeline independently).
-fn num(dict: &Dict, id: Id) -> Option<i128> {
-    let oxrdf::Term::Literal(l) = dict.term(id) else {
-        return None;
-    };
-    if l.datatype().as_str() == "http://www.w3.org/2001/XMLSchema#integer" {
-        return l.value().parse::<i128>().ok();
-    }
-    // Non-integer numerics: approximate via the shared tower's f64 view — the
-    // fixtures keep FILTER operands integral, so this branch is a safety net.
-    numeric_value(dict, id).map(|d| (d.f64() * 1e6) as i128)
 }

@@ -680,7 +680,7 @@ impl<'a, S: Store> WacAuthorizer<'a, S> {
     /// (pre-1970, impossible in practice) yields 0 — the cache then treats every entry as old (a miss),
     /// which is the SAFE direction (re-read + re-parse, never a stale hit).
     fn now_secs() -> i64 {
-        std::time::SystemTime::now()
+        crate::clock::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0)

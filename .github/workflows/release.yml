@@ -129,13 +129,12 @@ jobs:
         env:
           VERSION: ${{ needs.setup.outputs.version }}
         run: scripts/gen-sbom-vex.sh
-      # [OPUS-4.8] sq-toze.27 (GS-3): per-release CycloneDX SBOM for the published npm
-      # client (`js/` = @jeswr/sparq). Writes sbom/sparq-js-<ver>.sbom.cdx.json (runtime
-      # tree) + sbom/sparq-js-dev-<ver>.sbom.cdx.json (full build tree) into the same
-      # sbom/ dir, so they are attested + attached + checksummed alongside the Rust SBOMs.
+      # [OPUS-4.8] sq-toze.27 / [GPT-5.6] sq-epbw4: per-release CycloneDX SBOMs for
+      # `@jeswr/sparq` and the shared `@sparq/client` code bundled into browser artifacts.
+      # Runtime + full build trees land in sbom/, so the attestation glob below covers all four.
       # [OPUS-4.8] sq-gl3cf: gen-js-sbom.sh ALSO reads GITHUB_REF_NAME for the version-stamped
       # filenames, so it needs the same VERSION thread for the dispatch path to name JS SBOMs right.
-      - name: Generate per-release JS/npm SBOM (published WASM client)
+      - name: Generate per-release JS/npm SBOMs (WASM + shared browser clients)
         env:
           VERSION: ${{ needs.setup.outputs.version }}
         run: scripts/gen-js-sbom.sh
@@ -559,7 +558,7 @@ jobs:
 
             **Desktop GUI bundles (UNSIGNED).** This release also includes cross-platform [sparq GUI](https://github.com/${{ github.repository }}/tree/${{ needs.setup.outputs.version }}/gui) desktop installers (`sparq-gui_${{ needs.setup.outputs.version }}_*`): macOS `.dmg`, Windows `.msi` + NSIS `.exe`, and Linux `.deb` + `.AppImage`. **These bundles are NOT code-signed or notarized.** On macOS, Gatekeeper will quarantine them; on Windows, SmartScreen will warn — see [/download](https://github.com/${{ github.repository }}/tree/${{ needs.setup.outputs.version }}/gui) for the install bypass instructions (Gatekeeper/SmartScreen). OS-level code-signing (Apple Developer ID notarization + Windows Authenticode) requires maintainer-held credentials and is tracked separately — until then, treat the GUI bundles as developer/test installs. The SLSA attestation below proves *who built* each bundle (build provenance); it is not a substitute for OS code-signing. (No `win-arm64` GUI installer yet — the Tauri bundler cannot cross-bundle it from the x64 Windows runner; no mobile app bundles yet.)
 
-            **Supply chain:** each release carries a CycloneDX SBOM per binary (`*-${{ needs.setup.outputs.version }}.sbom.cdx.json`, including the GUI shell `sparq-gui-${{ needs.setup.outputs.version }}.sbom.cdx.json`), a CycloneDX SBOM for the published npm/WASM client (`sparq-js-${{ needs.setup.outputs.version }}.sbom.cdx.json` runtime tree + `sparq-js-dev-${{ needs.setup.outputs.version }}.sbom.cdx.json` full build tree), and a VEX (`sparq-${{ needs.setup.outputs.version }}.vex.cdx.json`) stating the exploitability of every advisory the dependency policy ignores. All artifacts (archives, GUI bundles, SBOMs, VEX) are SLSA build-provenance attested — verify with `gh attestation verify <file> --repo ${{ github.repository }}`.
+            **Supply chain:** each release carries a CycloneDX SBOM per binary (`*-${{ needs.setup.outputs.version }}.sbom.cdx.json`, including the GUI shell `sparq-gui-${{ needs.setup.outputs.version }}.sbom.cdx.json`), runtime + full-build CycloneDX SBOMs for the published npm/WASM client (`sparq-js-*`) and shared browser client (`sparq-js-client-*`), and a VEX (`sparq-${{ needs.setup.outputs.version }}.vex.cdx.json`) stating the exploitability of every advisory the dependency policy ignores. All artifacts (archives, GUI bundles, SBOMs, VEX) are SLSA build-provenance attested — verify with `gh attestation verify <file> --repo ${{ github.repository }}`.
           fail_on_unmatched_files: true
 
   # ---- 3. server container -> ghcr.io ----

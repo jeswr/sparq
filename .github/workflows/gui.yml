@@ -113,6 +113,9 @@ jobs:
       - name: Typecheck (@sparq/client)
         run: npm run typecheck
 
+      - name: Unit tests (@sparq/client)
+        run: npm test
+
   site-with-shared-client:
     name: site build + typecheck (consuming @sparq/client)
     runs-on: ubuntu-latest

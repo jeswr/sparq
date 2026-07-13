@@ -154,6 +154,31 @@ fn lineage_is_valid_rdf_and_round_trips() {
 }
 
 #[test]
+fn prov_ntriples_matches_the_lineage_graph_and_parses() {
+    // [GPT-5.6] sq-8jn86: the exact string oracle witnesses the serializer call;
+    // replacing the wrapper body with an empty or differently rendered value fails.
+    let (g, dict, fact) = dog_setup();
+    let proof = g.why(&dict, fact).unwrap();
+    let cfg = ProvProofConfig::default();
+    let triples = prov_from_proof(&proof, &cfg);
+    let expected = triples
+        .iter()
+        .map(|t| format!("{} {} {} .\n", t.subject, t.predicate, t.object))
+        .collect::<String>();
+    assert!(!expected.is_empty(), "dog proof must emit lineage triples");
+
+    let nt = sparq_prov::prov_ntriples(&proof, &cfg);
+    assert_eq!(nt, expected);
+
+    use oxttl::NTriplesParser;
+    let parsed: Vec<_> = NTriplesParser::new()
+        .for_reader(nt.as_bytes())
+        .collect::<Result<_, _>>()
+        .expect("rendered lineage must be well-formed N-Triples");
+    assert_eq!(parsed.len(), triples.len());
+}
+
+#[test]
 fn deterministic_and_content_addressed() {
     let (g, dict, fact) = dog_setup();
     let proof = g.why(&dict, fact).unwrap();

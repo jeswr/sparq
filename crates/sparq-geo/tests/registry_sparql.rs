@@ -78,6 +78,52 @@ fn bind_distance_value() {
 }
 
 #[test]
+fn metric_measurements_and_centroid_through_sparql() {
+    // [GPT-5.6] sq-lsp7k.18: exercise custom-function dispatch, numeric RDF
+    // typing, and geometry-result re-entry through the real SPARQL evaluator.
+    let r = query_with_functions(
+        &cities(),
+        &format!(
+            "{PREFIXES} SELECT ?area ?length ?perimeter ?centroid WHERE {{ \
+               ex:france ex:area ?g . \
+               BIND(geof:metricArea(?g) AS ?area) \
+               BIND(geof:metricLength(?g) AS ?length) \
+               BIND(geof:metricPerimeter(?g) AS ?perimeter) \
+               BIND(geof:centroid(?g) AS ?centroid) \
+             }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(r.len(), 1);
+
+    let values = names(&r, 0)
+        .into_iter()
+        .chain(names(&r, 1))
+        .chain(names(&r, 2))
+        .collect::<Vec<_>>();
+    let numeric = values
+        .iter()
+        .map(|term| {
+            assert!(term.ends_with("^^<http://www.w3.org/2001/XMLSchema#double>"));
+            term.strip_prefix('"')
+                .and_then(|value| value.split('"').next())
+                .unwrap()
+                .parse::<f64>()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(numeric.iter().all(|value| *value > 0.0));
+    assert_eq!(numeric[1], numeric[2]);
+
+    let centroid = names(&r, 3).pop().unwrap();
+    assert!(centroid.contains("POINT"), "got {centroid}");
+    assert!(centroid.ends_with(
+        "^^<http://www.opengis.net/ont/geosparql#wktLiteral>"
+    ));
+}
+
+#[test]
 fn spatial_join_sf_within() {
     // Which city lies within which area — a real spatial join (FILTER over the
     // cross product of 3 points x 2 polygons).
@@ -121,6 +167,37 @@ fn unary_geometry_function_roundtrips_through_relations() {
     )
     .unwrap();
     assert_eq!(names(&r, 0), vec!["<http://ex/france>"]);
+}
+
+#[test]
+fn simplify_through_sparql_drops_the_midpoint() {
+    // [GPT-5.6] sq-lsp7k.23: witness the real custom-function dispatch, numeric
+    // tolerance parsing, and geometry-literal result type.
+    let graph = Graph::load_str(
+        r#"@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+           <http://ex/line> <http://ex/loc> "LINESTRING(0 0,1 0.1,2 0)"^^geo:wktLiteral ."#,
+        "turtle",
+    )
+    .unwrap();
+    let result = query_with_functions(
+        &graph,
+        &format!(
+            "{PREFIXES} SELECT ?simplified WHERE {{ \
+               ex:line ex:loc ?line . \
+               BIND(geof:simplify(?line, 0.2) AS ?simplified) \
+             }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        names(&result, 0),
+        vec![
+            "\"LINESTRING(0 0,2 0)\"^^<http://www.opengis.net/ont/geosparql#wktLiteral>"
+                .to_string()
+        ]
+    );
 }
 
 #[test]

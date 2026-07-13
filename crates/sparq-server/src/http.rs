@@ -36,6 +36,8 @@ use axum::{
     routing::{any, get, post},
     BoxError, Router,
 };
+#[cfg(feature = "federation-descriptors")]
+use axum::http::Uri;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 #[cfg(feature = "response-compression")]
@@ -616,6 +618,18 @@ pub struct ServerConfig {
     /// binary's `--federation-descriptors` flag / `SPARQ_FEDERATION_DESCRIPTORS=1` env.
     #[cfg(feature = "federation-descriptors")]
     pub federation_descriptors: bool,
+    /// [GPT-5.6] (sq-lsp7k.5.2) OPT-IN grouped facet-count endpoint. When `true`, the server
+    /// serves `POST /facets`: the client supplies a JSON `sparq_introspect::FacetRequest`, and
+    /// the server evaluates its class / constraint filters against one pinned graph snapshot,
+    /// returning the `sparq_introspect::FacetResponse` JSON with type, predicate, and value
+    /// distributions. `false` (the default) leaves the endpoint off: `/facets` is `404`.
+    ///
+    /// This field exists only with the `facets` cargo feature. A build without that feature
+    /// compiles no facet route or `sparq-introspect` dependency and pays zero cost. Set by the
+    /// binary's `--facets` flag / `SPARQ_FACETS=1` env. Facet evaluation is a READ over the
+    /// store, so the endpoint is gated by the read auth.
+    #[cfg(feature = "facets")]
+    pub facets: bool,
     /// [OPUS-4.8] (sq-bzh1, epic sq-3183) OPT-IN Triple Pattern Fragments / Linked Data
     /// Fragments READ-ONLY source endpoint. When `true`, the server serves a paged RDF
     /// fragment of the triples matching one triple pattern at `GET /tpf?subject=&predicate=&
@@ -878,6 +892,10 @@ impl Default for ServerConfig {
             // when the feature is compiled in (the operator opts in deliberately).
             #[cfg(feature = "federation-descriptors")]
             federation_descriptors: false,
+            // [GPT-5.6] sq-lsp7k.5.2: safe default — the grouped facet-count endpoint is OFF
+            // even when compiled in; the operator opts in via --facets / SPARQ_FACETS=1.
+            #[cfg(feature = "facets")]
+            facets: false,
             // [OPUS-4.8] sq-bzh1: safe default — the TPF / LDF source endpoint is OFF even when
             // the feature is compiled in (the operator opts in deliberately via --tpf / SPARQ_TPF=1).
             #[cfg(feature = "tpf")]
@@ -1168,6 +1186,12 @@ impl ServerConfig {
         #[cfg(feature = "federation-descriptors")]
         if let Ok(v) = std::env::var("SPARQ_FEDERATION_DESCRIPTORS") {
             cfg.federation_descriptors = env_truthy(&v);
+        }
+        // [GPT-5.6] sq-lsp7k.5.2: SPARQ_FACETS truthy ("1"/"true"/"yes"/"on") serves the
+        // grouped facet-count endpoint. Off by default. Only present with the `facets` feature.
+        #[cfg(feature = "facets")]
+        if let Ok(v) = std::env::var("SPARQ_FACETS") {
+            cfg.facets = env_truthy(&v);
         }
         // [OPUS-4.8] sq-bzh1: SPARQ_TPF truthy ("1"/"true"/"yes"/"on") serves the Triple Pattern
         // Fragments / LDF source endpoint. Off by default. Only present with the `tpf` feature.
@@ -3037,6 +3061,11 @@ pub fn router(state: AppState) -> Router {
     // "GET with no query" response). See [`crate::descriptors`].
     #[cfg(feature = "federation-descriptors")]
     let routes = routes.route("/.well-known/void", get(well_known_void));
+    // [GPT-5.6] sq-lsp7k.5.2: OPT-IN grouped facet counts over one pinned graph snapshot.
+    // Compiled only with the `facets` feature; even then the handler returns 404 unless the
+    // runtime flag is set. POST is a READ and is gated by the read auth.
+    #[cfg(feature = "facets")]
+    let routes = routes.route("/facets", post(facets_endpoint));
     // [OPUS-4.8] sq-bzh1 (epic sq-3183): OPT-IN Triple Pattern Fragments / LDF source endpoint.
     // Compiled only with the `tpf` feature; even then the handler refuses (404) unless the config
     // flag is set. READ-only — a GET (with HEAD) only. See [`crate::tpf`].
@@ -3165,24 +3194,46 @@ async fn metrics_endpoint(State(state): State<AppState>, headers: HeaderMap) -> 
 // [OPUS-4.8] sq-d3d8 (epic sq-3183) — OPT-IN federation discovery descriptors
 // ---------------------------------------------------------------------------
 
+/// [GPT-5.6] sq-oprna.6: transport scheme injected by the feature-on TCP accept loop. HTTP/2
+/// and HTTP/3 also carry `:scheme` in the request URI; HTTP/1 TLS needs this explicit marker.
+#[cfg(feature = "http2")]
+#[derive(Clone, Copy)]
+enum TransportScheme {
+    Http,
+    Https,
+}
+
+#[cfg(all(feature = "http2", feature = "federation-descriptors"))]
+impl TransportScheme {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+}
+
 /// [OPUS-4.8] sq-d3d8: derives the base URL (`scheme://host`) this server is reached at,
 /// from the request `Host` header. Used to name the VoID dataset, the `sd:Service`/endpoint
 /// and the `dcterms:source` link in the descriptors, so they self-describe the URL a client
 /// actually used to fetch them.
 ///
-/// Scheme is `http` (the server terminates plain HTTP; a TLS-terminating reverse proxy
-/// forwarding `X-Forwarded-Proto` is out of scope for this minimal discovery surface). If
-/// there is no usable `Host` header (HTTP/1.0 without one), falls back to `http://localhost`
-/// so the descriptor is always well-formed RDF rather than a 500.
+/// The direct-TLS listener supplies its transport scheme explicitly; HTTP/2 and HTTP/3 may also
+/// supply `:scheme` through the request URI. A TLS-terminating reverse proxy forwarding
+/// `X-Forwarded-Proto` remains out of scope. If there is no transport scheme or usable `Host`
+/// header, this falls back to plain HTTP and/or `localhost`, preserving the historical result.
 #[cfg(feature = "federation-descriptors")]
-fn request_base(headers: &HeaderMap) -> String {
+fn request_base(headers: &HeaderMap, uri: &Uri, transport: Option<&str>) -> String {
+    let scheme = transport
+        .or_else(|| uri.scheme_str())
+        .unwrap_or("http");
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|h| !h.is_empty())
         .unwrap_or("localhost");
-    let base = format!("http://{host}");
+    let base = format!("{scheme}://{host}");
     // The Host header is attacker-controlled; a value that makes `http://{host}` an
     // invalid IRI (spaces, control chars, `<`/`>`, …) would otherwise propagate into the
     // descriptor IRIs and yield malformed RDF → a 500. Validate here and fall back to a
@@ -3190,7 +3241,34 @@ fn request_base(headers: &HeaderMap) -> String {
     if oxrdf::NamedNode::new(&base).is_ok() {
         base
     } else {
-        "http://localhost".to_string()
+        format!("{scheme}://localhost")
+    }
+}
+
+#[cfg(all(test, feature = "federation-descriptors"))]
+mod request_base_tests {
+    use super::*;
+
+    /// [GPT-5.6] sq-oprna.6: direct TLS must not advertise a plain-HTTP descriptor IRI.
+    #[test]
+    fn transport_or_pseudo_header_selects_https() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "example.test:3443".parse().unwrap());
+        let relative: Uri = "/.well-known/void".parse().unwrap();
+        assert_eq!(
+            request_base(&headers, &relative, Some("https")),
+            "https://example.test:3443"
+        );
+
+        let absolute: Uri = "https://example.test:3443/sparql".parse().unwrap();
+        assert_eq!(
+            request_base(&headers, &absolute, None),
+            "https://example.test:3443"
+        );
+        assert_eq!(
+            request_base(&headers, &relative, None),
+            "http://example.test:3443"
+        );
     }
 }
 
@@ -3203,14 +3281,24 @@ fn request_base(headers: &HeaderMap) -> String {
 /// Turtle (default) / N-Triples / RDF-XML from `Accept`. As a read, it is gated by
 /// `--auth-token-read` like any other GET.
 #[cfg(feature = "federation-descriptors")]
-async fn well_known_void(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn well_known_void(
+    State(state): State<AppState>,
+    uri: Uri,
+    #[cfg(feature = "http2")]
+    transport: Option<axum::Extension<TransportScheme>>,
+    headers: HeaderMap,
+) -> Response {
     if !state.config().federation_descriptors {
         return json_error(StatusCode::NOT_FOUND, "not found");
     }
     if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
         return resp;
     }
-    let base = request_base(&headers);
+    #[cfg(feature = "http2")]
+    let transport = transport.map(|extension| extension.0.as_str());
+    #[cfg(not(feature = "http2"))]
+    let transport = None;
+    let base = request_base(&headers, &uri, transport);
     let dataset_iri = format!("{base}/.well-known/void#dataset");
     let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
     // Pin the current generation; generate against its immutable snapshot.
@@ -3235,11 +3323,16 @@ async fn well_known_void(State(state): State<AppState>, headers: HeaderMap) -> R
 /// Advertises the endpoint, the supported query languages, the supported result formats and
 /// the default dataset (linked to the VoID document). Content-negotiates from `Accept`.
 #[cfg(feature = "federation-descriptors")]
-fn service_description_response(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+fn service_description_response(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+    transport: Option<&str>,
+) -> Option<Response> {
     if !state.config().federation_descriptors {
         return None;
     }
-    let base = request_base(headers);
+    let base = request_base(headers, uri, transport);
     let endpoint_iri = format!("{base}/sparql");
     let dataset_iri = format!("{base}/.well-known/void#dataset");
     let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
@@ -3425,6 +3518,57 @@ fn negotiate_tpf(accept: Option<&str>) -> GraphFormat {
         }
         _ => GraphFormat::Turtle,
     }
+}
+
+/// [GPT-5.6] sq-lsp7k.5.2: `POST /facets` — grouped type, predicate, and value counts for a
+/// filtered candidate-subject set.
+///
+/// The JSON body is a `sparq_introspect::FacetRequest`. Evaluation pins exactly one published
+/// graph generation and runs the scan-heavy `sparq_introspect::facets` call on the blocking pool;
+/// the response is the corresponding `sparq_introspect::FacetResponse::to_json` document.
+///
+/// Double opt-in: the route is compiled only with the `facets` feature and returns `404` unless
+/// [`ServerConfig::facets`] is set (`--facets` / `SPARQ_FACETS=1`). It is a read surface, so
+/// `--auth-token-read` applies. Malformed JSON is a sanitized `400`.
+#[cfg(feature = "facets")]
+async fn facets_endpoint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !state.config().facets {
+        return json_error(StatusCode::NOT_FOUND, "not found");
+    }
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
+        return resp;
+    }
+    let body = match decode_request_body(&body, &headers, state.config()) {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let request = match serde_json::from_slice::<sparq_introspect::FacetRequest>(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return sanitized_error(
+                StatusCode::BAD_REQUEST,
+                "facet-request-json",
+                "malformed facet request",
+                &error.to_string(),
+            )
+        }
+    };
+
+    let pin = state.current();
+    let task = tokio::task::spawn_blocking(move || {
+        let response = sparq_introspect::facets(pin.snapshot(), &request);
+        text_response(
+            StatusCode::OK,
+            "application/json; charset=utf-8",
+            response.to_json(),
+            false,
+        )
+    });
+    await_worker(task, state.config()).await
 }
 
 /// [OPUS-4.8] sq-bzh1: `GET /tpf?subject=&predicate=&object=` — the Triple Pattern Fragments /
@@ -4150,11 +4294,13 @@ pub fn harden(routes: Router, config: &ServerConfig) -> Router {
 /// This loop is a faithful port of `axum::serve`'s own accept + graceful-shutdown loop
 /// (per-connection task, watch-channel drain, `serve_connection(...).with_upgrades()` so the
 /// `/subscriptions` WebSocket upgrade still works) with two behavioural additions: the connection
-/// builder installs a `TokioTimer` and sets `header_read_timeout`, and the per-connection service
-/// optionally wraps the body in the `body_read_timeout` layer. `None` on either opts back out to
-/// the unbounded behaviour. axum is configured HTTP/1-only (no `http2` feature), so this uses
-/// hyper's `http1::Builder` directly — the smallest builder that carries the header knob.
-#[cfg(feature = "server")]
+/// builder installs a `TokioTimer` and sets `header_read_timeout`, the per-connection service
+/// optionally wraps the body in the `body_read_timeout` layer, and each request receives the
+/// accepted peer as `ConnectInfo<SocketAddr>` (matching the HTTP/3 listener). `None` on either
+/// deadline opts back out to the unbounded behaviour. axum is configured HTTP/1-only (no `http2`
+/// feature), so this uses hyper's `http1::Builder` directly — the smallest builder that carries
+/// the header knob.
+#[cfg(all(feature = "server", not(feature = "http2")))]
 pub async fn serve<F>(
     listener: tokio::net::TcpListener,
     app: Router,
@@ -4165,6 +4311,7 @@ pub async fn serve<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
+    use axum::{extract::ConnectInfo, Extension};
     use futures_util::FutureExt;
     use hyper_util::rt::{TokioIo, TokioTimer};
     use hyper_util::service::TowerToHyperService;
@@ -4195,7 +4342,7 @@ where
     drop(_close_rx); // the loop itself does not hold a connection slot
 
     loop {
-        let (stream, _remote) = tokio::select! {
+        let (stream, remote) = tokio::select! {
             conn = listener.accept() => match conn {
                 Ok(c) => c,
                 // A transient accept error (e.g. EMFILE / a peer that vanished mid-handshake)
@@ -4216,7 +4363,9 @@ where
         let io = TokioIo::new(stream);
         // [OPUS-4.8] sq-lodb: apply the (optional) slow-body read/idle deadline around this
         // connection's clone of the router, then hand the composed tower service to hyper.
+        // [GPT-5.6] sq-rejk9: expose the accepted TCP peer to every request, matching serve_h3.
         let service = ServiceBuilder::new()
+            .layer(Extension(ConnectInfo(remote)))
             .layer(body_timeout_layer.clone())
             .service(app.clone());
         let hyper_service = TowerToHyperService::new(service);
@@ -4272,6 +4421,221 @@ where
     );
     close_tx.closed().await;
     Ok(())
+}
+
+/// Serves HTTP/1.1 and HTTP/2 on `listener` until `shutdown` resolves.
+///
+/// [GPT-5.6] sq-oprna.6: with the default-off `http2` feature, [`serve`] switches from
+/// hyper's HTTP/1-only builder to hyper-util's h1+h2 auto builder. Its HTTP/1 configuration
+/// retains [`ServerConfig::header_read_timeout`], request-body idle deadlines, WebSocket
+/// upgrades, peer `ConnectInfo`, and graceful drain. A plain listener accepts h1 and h2c;
+/// use [`serve_tls`] for TLS with ALPN.
+#[cfg(all(feature = "server", feature = "http2"))]
+pub async fn serve<F>(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    header_read_timeout: Option<Duration>,
+    body_read_timeout: Option<Duration>,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    serve_auto(
+        listener,
+        app,
+        header_read_timeout,
+        body_read_timeout,
+        None,
+        shutdown,
+    )
+    .await
+}
+
+/// Serves HTTP/1.1 and HTTP/2 over TLS on `listener` until `shutdown` resolves.
+///
+/// This is the TLS counterpart to [`serve`], available only with the default-off `http2` feature.
+/// The supplied rustls configuration should advertise `h2` and `http/1.1` through ALPN. The
+/// HTTP/1 path preserves [`ServerConfig::header_read_timeout`], request-body idle deadlines,
+/// WebSocket upgrades, peer `ConnectInfo`, and graceful drain exactly as [`serve`]. HTTP/2
+/// multiplexed streams share the same request middleware and graceful-drain path.
+///
+/// [GPT-5.6] sq-oprna.6
+#[cfg(feature = "http2")]
+#[cfg_attr(docsrs, doc(cfg(feature = "http2")))]
+pub async fn serve_tls<F>(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    tls_config: std::sync::Arc<rustls::ServerConfig>,
+    header_read_timeout: Option<Duration>,
+    body_read_timeout: Option<Duration>,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    serve_auto(
+        listener,
+        app,
+        header_read_timeout,
+        body_read_timeout,
+        Some(tokio_rustls::TlsAcceptor::from(tls_config)),
+        shutdown,
+    )
+    .await
+}
+
+/// [GPT-5.6] sq-oprna.6: feature-on h1+h2 accept loop shared by cleartext and TLS entry points.
+#[cfg(feature = "http2")]
+async fn serve_auto<F>(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    header_read_timeout: Option<Duration>,
+    body_read_timeout: Option<Duration>,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let (signal_tx, signal_rx) = tokio::sync::watch::channel(());
+    tokio::spawn(async move {
+        shutdown.await;
+        tracing::trace!(target: "sparq_server", "shutdown signal received, starting graceful drain");
+        drop(signal_rx);
+    });
+
+    let (close_tx, close_rx) = tokio::sync::watch::channel(());
+    drop(close_rx);
+
+    loop {
+        let (stream, remote) = tokio::select! {
+            conn = listener.accept() => match conn {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::trace!(target: "sparq_server", %error, "accept error (continuing)");
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+            },
+            _ = signal_tx.closed() => {
+                tracing::trace!(target: "sparq_server", "accept loop stopping (graceful shutdown)");
+                break;
+            }
+        };
+
+        let app = app.clone();
+        let signal_tx = signal_tx.clone();
+        let close_rx = close_tx.subscribe();
+        let tls_acceptor = tls_acceptor.clone();
+        tokio::spawn(async move {
+            if let Some(acceptor) = tls_acceptor {
+                // A peer that never completes TLS must not prevent shutdown from draining. The
+                // HTTP header timer starts after this handshake, where hyper can parse headers.
+                let accepted = tokio::select! {
+                    accepted = acceptor.accept(stream) => accepted,
+                    _ = signal_tx.closed() => {
+                        drop(close_rx);
+                        return;
+                    }
+                };
+                match accepted {
+                    Ok(stream) => {
+                        serve_auto_connection(
+                            stream,
+                            remote,
+                            TransportScheme::Https,
+                            app,
+                            header_read_timeout,
+                            body_read_timeout,
+                            signal_tx,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        tracing::trace!(target: "sparq_server", %error, "TLS handshake ended with error");
+                    }
+                }
+            } else {
+                serve_auto_connection(
+                    stream,
+                    remote,
+                    TransportScheme::Http,
+                    app,
+                    header_read_timeout,
+                    body_read_timeout,
+                    signal_tx,
+                )
+                .await;
+            }
+            drop(close_rx);
+        });
+    }
+
+    tracing::trace!(
+        target: "sparq_server",
+        tasks = close_tx.receiver_count(),
+        "waiting for in-flight connections to drain"
+    );
+    close_tx.closed().await;
+    Ok(())
+}
+
+/// [GPT-5.6] sq-oprna.6: one auto-detected HTTP/1.1 or HTTP/2 connection.
+#[cfg(feature = "http2")]
+async fn serve_auto_connection<I>(
+    stream: I,
+    remote: std::net::SocketAddr,
+    transport: TransportScheme,
+    app: Router,
+    header_read_timeout: Option<Duration>,
+    body_read_timeout: Option<Duration>,
+    signal_tx: tokio::sync::watch::Sender<()>,
+) where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use axum::{extract::ConnectInfo, Extension};
+    use futures_util::FutureExt;
+    use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+    use hyper_util::service::TowerToHyperService;
+    use tower::ServiceBuilder;
+    use tower_http::timeout::RequestBodyTimeoutLayer;
+
+    let body_timeout_layer =
+        tower::util::option_layer(body_read_timeout.map(RequestBodyTimeoutLayer::new));
+    let service = ServiceBuilder::new()
+        .layer(Extension(ConnectInfo(remote)))
+        .layer(Extension(transport))
+        .layer(body_timeout_layer)
+        .service(app);
+    let hyper_service = TowerToHyperService::new(service);
+    let io = TokioIo::new(stream);
+
+    let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+    if let Some(timeout) = header_read_timeout {
+        builder
+            .http1()
+            .timer(TokioTimer::new())
+            .header_read_timeout(timeout);
+    }
+    let conn = builder.serve_connection_with_upgrades(io, hyper_service);
+    let mut conn = std::pin::pin!(conn);
+    let mut signal_closed = std::pin::pin!(signal_tx.closed().fuse());
+
+    loop {
+        tokio::select! {
+            result = conn.as_mut() => {
+                if let Err(error) = result {
+                    tracing::trace!(target: "sparq_server", %error, "connection ended with error");
+                }
+                break;
+            }
+            _ = &mut signal_closed => {
+                tracing::trace!(target: "sparq_server", "shutdown signal in connection task, starting graceful shutdown");
+                conn.as_mut().graceful_shutdown();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4523,6 +4887,10 @@ fn with_generation_header(mut resp: Response, number: u64) -> Response {
 async fn sparql_endpoint(
     State(state): State<AppState>,
     method: Method,
+    #[cfg(feature = "federation-descriptors")]
+    uri: Uri,
+    #[cfg(all(feature = "federation-descriptors", feature = "http2"))]
+    transport: Option<axum::Extension<TransportScheme>>,
     RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
     body: Bytes,
@@ -4608,7 +4976,16 @@ async fn sparql_endpoint(
                 // Otherwise the historical 400.
                 #[cfg(feature = "federation-descriptors")]
                 None if method != Method::HEAD => {
-                    match service_description_response(&state, &headers) {
+                    #[cfg(feature = "http2")]
+                    let transport = transport.map(|extension| extension.0.as_str());
+                    #[cfg(not(feature = "http2"))]
+                    let transport = None;
+                    match service_description_response(
+                        &state,
+                        &headers,
+                        &uri,
+                        transport,
+                    ) {
                         Some(resp) => resp,
                         None => bad_request("missing 'query' parameter"),
                     }
@@ -5551,6 +5928,7 @@ pub(crate) fn make_budget(config: &ServerConfig, apply_max_results: bool) -> Que
         // [OPUS-4.8] (sq-s5is) byte-accounted cap applies on every form (it has no
         // `--max-results` analogue — it bounds the working set, not the projection).
         max_bytes: config.max_query_bytes,
+        cancel: None,
     }
 }
 
@@ -5573,6 +5951,7 @@ fn update_budget(config: &ServerConfig) -> QueryBudget {
         max_rows: config.max_query_rows,
         // [OPUS-4.8] (sq-s5is) the byte cap reaches the UPDATE's WHERE evaluation too.
         max_bytes: config.max_query_bytes,
+        cancel: None,
     }
 }
 
@@ -9517,5 +9896,25 @@ mod from_env_tests {
         let cfg = result.expect("SPARQ_LOG_FULL_REQUESTS must succeed");
         // SPARQ_LOG_FULL_REQUESTS=1 opts out of redaction → redact_logs becomes false.
         assert!(!cfg.redact_logs, "SPARQ_LOG_FULL_REQUESTS=1 must disable redact_logs");
+    }
+
+    // [GPT-5.6] sq-lsp7k.5.2: direct config tests for the public facets runtime flag.
+    #[cfg(feature = "facets")]
+    #[test]
+    fn facets_is_off_by_default() {
+        assert!(
+            !ServerConfig::default().facets,
+            "the facet-count route must remain runtime-off by default"
+        );
+    }
+
+    #[cfg(feature = "facets")]
+    #[test]
+    fn from_env_reads_sparq_facets() {
+        std::env::set_var("SPARQ_FACETS", "1");
+        let result = ServerConfig::from_env();
+        std::env::remove_var("SPARQ_FACETS");
+        let cfg = result.expect("SPARQ_FACETS=1 must succeed");
+        assert!(cfg.facets, "SPARQ_FACETS=1 must enable the facet-count route");
     }
 }

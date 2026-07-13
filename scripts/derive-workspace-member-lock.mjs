@@ -154,32 +154,47 @@ const materializeLinkTarget = (linkNode, seenKeys) => {
   }
 };
 
-// Member closure: re-home each resolved dep to a flat top-level `node_modules/<name>` key (hoisted),
-// exactly as before. A `link: true` dep additionally pulls in its target subtree (above).
-const queue = declared(memberPkg).map((n) => n);
-const seen = new Set();
+// Member closure: direct dependencies become top-level standalone nodes. Transitive dependencies
+// retain their nearest-ancestor layout, including a version-conflicting node nested below its
+// parent. The previous name-only queue re-resolved every transitive edge from the MEMBER root,
+// incorrectly substituting a hoisted incompatible version for packages such as seek-bzip's nested
+// commander. npm ls then rejected the derived runtime lock, blocking an honest client SBOM.
+const queue = declared(memberPkg).map((name) => ({
+  direct: true,
+  from: memberKey,
+  name,
+  outFrom: "",
+}));
 const seenKeys = new Set();
 while (queue.length) {
-  const name = queue.shift();
-  if (seen.has(name)) continue;
-  seen.add(name);
-  const r = resolveKey(name);
+  const { direct, from, name, outFrom } = queue.shift();
+  const r = direct ? resolveKey(name) : resolveFrom(from, name);
   if (!r) {
     console.error(`ERROR: dependency "${name}" in the ${memberKey} closure is not present in the root lock`);
     unresolved++;
     continue;
   }
-  // Re-home to a top-level node_modules/<name> key in the standalone lock (flat, hoisted).
-  const memberLinkKey = `node_modules/${name}`;
-  out.packages[memberLinkKey] = r.node;
-  seenKeys.add(memberLinkKey);
+  const nestedPrefix = `${from}/node_modules/`;
+  let outKey = r.key;
+  if (direct) {
+    outKey = `node_modules/${name}`;
+  } else if (r.key.startsWith(nestedPrefix)) {
+    outKey = `${outFrom}${r.key.slice(from.length)}`;
+  } else if (r.key.startsWith(`${memberKey}/node_modules/`)) {
+    outKey = r.key.slice(memberKey.length + 1);
+  }
+  if (seenKeys.has(outKey)) continue;
+  out.packages[outKey] = r.node;
+  seenKeys.add(outKey);
   if (r.node.link === true && r.node.resolved) {
     // [OPUS-4.8] sq-f04e: a workspace-link dep — emit its real target node + closure so npm ls
     // resolves it instead of crashing on a dangling link (sq-f04e). Do NOT recurse into the link
     // node's (empty) own deps; the target carries the real dependency edges.
     materializeLinkTarget(r.node, seenKeys);
   } else {
-    for (const d of declared(r.node)) queue.push(d);
+    for (const dependency of declared(r.node)) {
+      queue.push({ direct: false, from: r.key, name: dependency, outFrom: outKey });
+    }
   }
 }
 if (unresolved > 0) {

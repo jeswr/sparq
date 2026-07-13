@@ -102,7 +102,80 @@ Other named exports from `@jeswr/sparq`: `DataFactory` (RDF/JS factory: `namedNo
 
 Raw wasm `Store` (from `../wasm/sparq_wasm.js`, re-exported as `WasmStore` internally) — use only when you need CONSTRUCT/DESCRIBE, batch cursors, or **query-plan introspection**. Methods return SPARQL-JSON / N-Triples / plan-text **strings**, not RDF/JS terms: `Store.load/loadDataset/loadCompressed(text, format)`, `Store.loadBytes(bytes, format)` / `Store.loadBytesWithBase(bytes, format, base)` (ingest a `Uint8Array` directly, `bytes-ingest` bundle only — see below), `.query(sparql)`, `.queryChunks(sparql)`, `.queryCursor(sparql, batchSize)`, `.queryQuads(sparql)` (CONSTRUCT/DESCRIBE -> N-Triples), `.queryQuadsChunks(sparql, batchSize)`, `.count`, `.ask`, `.askWithMaxRows(sparql, maxRows)`, `.explain(sparql)`, `.explainAnalyze(sparql)`, `.validate(data, shapes, format)` (SHACL report as a JSON **string**, shacl bundle only), `.serialize(format, pretty, indent, abbreviate, prefixes?)` (the store's contents as a Turtle / TriG / JSON-LD **string**, serialize-rdf bundle only — see below), `.parseShaclCompact(text, base?)` (SHACL Compact Syntax → the shapes graph as a Turtle **string**, scs bundle only — see below), `.update`, `.updateInPlace`, `.applyDelta(inserts, deletes)`, `.size`, `.heapBytes()`.
 
+### Solid server wasm adapter (host integration)
+
+The dedicated `sparq-lws-wasm` crate is the opt-in request adapter for a Solid-server wasm host; it
+is separate from the `@jeswr/sparq` RDF/JS store package. It owns the real axum LDP routes and WAC
+evaluator over `CompositeStore<InMemorySparqClient, InMemoryBlobStore>`, while excluding the native
+listener, Tokio runtime, TLS/PoP/notifications, live OIDC verifier, and non-memory backends.
+
+Build and stage it with
+`npm --workspace @jeswr/solid-server run build:lws-wasm`; use `build:lws-wasm-core` for the named
+core tier. Both commands currently produce the same core-Solid artifact because the full
+`sparql-endpoint` surface is tracked separately in `sq-r1ei8`. Construct `SolidServer` with the pod
+base URL and the WebID that owns its provisioned root ACL, then call the Promise-returning
+`handleRequest(method, path, headers, body, authenticatedWebid)`. Header arguments and response
+headers are flat name/value arrays. Omit `authenticatedWebid` for a public request.
+
+```js
+const owner = "https://id.example/alice#me";
+const pod = new SolidServer("https://pod.example", owner);
+const response = await pod.handleRequest(
+  "PUT", "/card", ["content-type", "text/turtle"], turtleBytes, owner,
+);
+```
+
+The host MUST complete OIDC validation before supplying an authenticated WebID; the constructor's
+owner parameter only provisions WAC and is not authentication. Do not enable or stub
+`solid-oidc-verifier` inside wasm: its pinned crypto backend is native-only.
+
+[GPT-5.6] The in-memory Solid store is bounded by default: its physical blob map admits at most
+64 MiB in aggregate and 4,096 stored entries, and its metadata map independently admits at most
+4,096 indexed resources. Physical usage includes unreferenced blob versions awaiting reconciliation,
+so repeated overwrites cannot bypass the ceiling. A PUT/POST that would exceed either limit fails
+closed with HTTP 507; deleting a current blob releases its bytes and entry slot. Rust embedders can
+configure both ceilings with `InMemoryStoreLimits::new(max_total_bytes, max_resource_count)` and
+`CompositeStore::in_memory_with_limits(limits)`, then inspect the concrete store's `usage()` and
+`quota()` views. The current JS `SolidServer` constructor uses the bounded Rust defaults and does not
+yet expose per-instance limit options.
+
+[GPT-5.6] `@jeswr/solid-server` supplies the local Node host. Install and run it with
+`npx @jeswr/solid-server --port 3000 --base-url http://127.0.0.1:3000 --owner-webid
+https://id.example/alice#me`, or import `startSolidServer({ port, baseUrl, ownerWebid })`; it resolves
+to a listening Node `http.Server` with an async `closeAsync()` helper. The listener binds
+`127.0.0.1`, owns one wasm pod for its lifetime, and preserves repeated request/response headers.
+It defaults to deliberately unauthenticated fixed-owner mode: every caller acts as `ownerWebid`.
+For the opt-in Node authentication path, call
+`startSolidServer({ port, baseUrl, ownerWebid, oidc: true })`. The host then requires and verifies a
+Solid-OIDC access token plus request-bound DPoP proof with `@solid/access-token-verifier` before
+passing the resolved WebID into wasm; missing, invalid, expired, replayed, bearer-only, or ambiguous
+credentials pass no WebID and WAC treats them as anonymous. `ownerWebid` provisions the root ACL but
+is not proof of identity in this mode. `baseUrl` must be the public request origin used in each DPoP
+proof because the host binds the proof to the reconstructed request URL. The verifier dereferences
+WebID and issuer/JWKS documents.
+Use the package only for local development, do not expose it as a production server, and expect all
+data to disappear on shutdown. TLS termination, persistent storage, notifications, and the
+separately tracked SPARQL endpoint remain absent; OIDC verification runs in Node, not wasm.
+
 ## Common recipes
+
+**Decompress a browser dataset before loading it (`@sparq/client`).** The shared site/GUI client
+selects gzip, ZIP, zstd, or bzip2 by payload magic first and filename extension second. gzip and
+ZIP use native browser streams; zstd and bzip2 are separate lazy chunks fetched only when invoked.
+
+```ts
+import { decompressDatasetBytes } from '@sparq/client';
+
+const compressed = new Uint8Array(await file.arrayBuffer());
+const { bytes, innerName, codec } = await decompressDatasetBytes(compressed, file.name);
+const rdfText = new TextDecoder().decode(bytes);
+// Route rdfText using innerName (for example, "dataset.nt") and record codec if useful.
+```
+
+ZIP selects the first RDF-looking STORED or DEFLATE member and reports its member name. Encrypted
+ZIP, ZIP64, unsupported ZIP methods, zstd dictionary frames, and malformed streams reject rather
+than returning undecoded bytes. Browser gzip follows `DecompressionStream` semantics; do not rely
+on it to concatenate multiple gzip members.
 
 **Stream a large SELECT without holding the whole result.** One solution at a time, from ~64 KiB wasm-boundary chunks; `break` frees the cursor.
 

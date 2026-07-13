@@ -94,6 +94,12 @@ impl UpdateDerivation {
         &self.entity
     }
 
+    /// The configured input-source IRIs, in their original order.
+    // [GPT-5.6] sq-cg237
+    pub fn used_inputs(&self) -> &[NamedNode] {
+        &self.used
+    }
+
     /// Start/end wall-clock instants of the update activity.
     pub fn timing(&self) -> (SystemTime, SystemTime) {
         (self.started, self.ended)
@@ -214,6 +220,14 @@ impl UpdateDerivation {
     /// The PROV-O lineage serialised as N-Triples (also a valid Turtle document).
     pub fn prov_ntriples(&self) -> String {
         sparq_engine::triples_to_ntriples(&self.prov_graph())
+    }
+
+    /// The same PROV-O lineage as [`prov_graph`](Self::prov_graph), serialised as
+    /// prefix-compacted Turtle.
+    ///
+    /// [GPT-5.6] sq-ijw35
+    pub fn prov_turtle(&self) -> String {
+        crate::triples_to_prov_turtle(&self.prov_graph())
     }
 }
 
@@ -495,6 +509,30 @@ mod tests {
         assert!(d.deleted().is_empty());
     }
 
+    /// [GPT-5.6] sq-cg237: the direct accessor exposes the configured input and agrees
+    /// with the update activity's materialised `prov:used` edge.
+    #[test]
+    fn update_used_inputs_are_exposed_and_materialised() {
+        let source = NamedNode::new_unchecked("http://ex/update-source");
+        let mut graph = g();
+        let derivation = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+            ProvConfig::with_inputs([source.clone()]),
+        )
+        .unwrap();
+
+        assert_eq!(derivation.used_inputs(), std::slice::from_ref(&source));
+        assert_eq!(derivation.used_inputs().len(), 1);
+
+        let activity = NamedOrBlankNode::NamedNode(derivation.activity().clone());
+        assert!(derivation.prov_graph().iter().any(|triple| {
+            triple.subject == activity
+                && triple.predicate.as_str() == "http://www.w3.org/ns/prov#used"
+                && triple.object == Term::NamedNode(source.clone())
+        }));
+    }
+
     #[test]
     fn insert_where_is_applied_in_place() {
         let mut graph = g();
@@ -651,6 +689,36 @@ mod tests {
             .collect::<Result<_, _>>()
             .expect("emitted lineage must be well-formed N-Triples");
         assert_eq!(parsed.len(), d.prov_graph().len());
+    }
+
+    /// [GPT-5.6] sq-ijw35: the UpdateDerivation Turtle method preserves every
+    /// provenance triple, and the inserted-result entity uses the registered prefix.
+    #[test]
+    fn prov_turtle_round_trips_the_exact_update_graph() {
+        let mut graph = g();
+        let d = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+            cfg(),
+        )
+        .unwrap();
+
+        let turtle = d.prov_turtle();
+        assert!(
+            turtle.contains("prov:Entity"),
+            "expected the prefix-compacted result entity in {turtle}"
+        );
+
+        let parsed: Vec<_> = oxttl::TurtleParser::new()
+            .for_slice(turtle.as_bytes())
+            .collect::<Result<_, _>>()
+            .expect("emitted lineage must be well-formed Turtle");
+        let expected = d.prov_graph();
+        assert_eq!(parsed.len(), expected.len());
+        assert_eq!(
+            parsed.into_iter().collect::<HashSet<_>>(),
+            expected.into_iter().collect::<HashSet<_>>()
+        );
     }
 
     #[test]

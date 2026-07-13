@@ -9,13 +9,16 @@
 //!
 //! Two things are computed:
 //!
-//! * [`decision_diff`] — the full structural diff: allows/denies added or dropped by side B
-//!   relative to side A, and whether the two outcomes are the *same* decision.
+//! * [`decision_diff`] — the full structural diff: allows/denies added or dropped by the
+//!   [`Candidate`] relative to the [`Baseline`], and whether the two outcomes are the *same*
+//!   decision.
 //! * [`fail_closed_asymmetry`] — the **privilege-escalation direction** only: every tuple side
-//!   B **allows** that side A did **not** allow (A either denied it or omitted it entirely —
-//!   under a fail-closed policy, absence is a deny, so both are escalations). By construction
-//!   this is exactly `B.allow \ A.allow`, so it has zero false negatives on that direction:
-//!   a tuple escapes the report iff A already allowed it.
+//!   the candidate **allows** that the baseline did **not** allow (the baseline either denied
+//!   it or omitted it entirely — under a fail-closed policy, absence is a deny, so both are
+//!   escalations). By construction this is exactly `candidate.allow \ baseline.allow`, so it
+//!   has zero false negatives on that direction: a tuple escapes the report iff the baseline
+//!   already allowed it. Distinct [`Baseline`] / [`Candidate`] argument types make an
+//!   accidental positional swap a compile-time error.
 //!
 //! # Honesty
 //!
@@ -58,7 +61,35 @@ impl<T: Ord> DecisionOutcome<T> {
     }
 }
 
-/// The structural diff between two decision outcomes (side B relative to side A).
+/// The trusted reference outcome in a directional decision comparison. [GPT-5.6]
+///
+/// This is intentionally a distinct type from [`Candidate`]: callers must name which outcome
+/// defines the no-escalation boundary, so swapping the two arguments cannot compile.
+#[derive(Debug, Clone, Copy)]
+pub struct Baseline<'a, T: Ord>(&'a DecisionOutcome<T>);
+
+impl<'a, T: Ord> Baseline<'a, T> {
+    /// Mark `outcome` as the trusted baseline for a directional comparison.
+    pub const fn new(outcome: &'a DecisionOutcome<T>) -> Self {
+        Self(outcome)
+    }
+}
+
+/// The outcome being checked against a trusted [`Baseline`].
+///
+/// This is intentionally a distinct type from [`Baseline`]: callers must name the outcome
+/// whose newly admitted tuples would be privilege escalations.
+#[derive(Debug, Clone, Copy)]
+pub struct Candidate<'a, T: Ord>(&'a DecisionOutcome<T>);
+
+impl<'a, T: Ord> Candidate<'a, T> {
+    /// Mark `outcome` as the candidate in a directional comparison.
+    pub const fn new(outcome: &'a DecisionOutcome<T>) -> Self {
+        Self(outcome)
+    }
+}
+
+/// The structural diff between two decision outcomes (candidate relative to baseline).
 ///
 /// `same` is `true` iff **all four** diff sets are empty — i.e. the allow sets are equal *and*
 /// the deny sets are equal. The escalation direction (`added_allow`) is exactly what
@@ -77,18 +108,30 @@ pub struct DecisionDiff<T: Ord> {
     pub dropped_deny: BTreeSet<T>,
 }
 
-/// Compute the full structural [`DecisionDiff`] of side `b` relative to side `a`.
+/// Compute the full structural [`DecisionDiff`] of `candidate` relative to `baseline`.
 ///
-/// Pure set arithmetic: `added_allow = b.allow \ a.allow`, `dropped_allow = a.allow \ b.allow`,
-/// and likewise for the deny sets. `same` iff every diff set is empty.
+/// Pure set arithmetic: `added_allow = candidate.allow \ baseline.allow`,
+/// `dropped_allow = baseline.allow \ candidate.allow`, and likewise for the deny sets. `same`
+/// iff every diff set is empty. The distinct argument types prevent a positional swap from
+/// silently reversing every directional field.
 pub fn decision_diff<T: Ord + Clone>(
-    a: &DecisionOutcome<T>,
-    b: &DecisionOutcome<T>,
+    baseline: Baseline<'_, T>,
+    candidate: Candidate<'_, T>,
 ) -> DecisionDiff<T> {
-    let added_allow: BTreeSet<T> = b.allow.difference(&a.allow).cloned().collect();
-    let dropped_allow: BTreeSet<T> = a.allow.difference(&b.allow).cloned().collect();
-    let added_deny: BTreeSet<T> = b.deny.difference(&a.deny).cloned().collect();
-    let dropped_deny: BTreeSet<T> = a.deny.difference(&b.deny).cloned().collect();
+    let baseline = baseline.0;
+    let candidate = candidate.0;
+    let added_allow: BTreeSet<T> = candidate
+        .allow
+        .difference(&baseline.allow)
+        .cloned()
+        .collect();
+    let dropped_allow: BTreeSet<T> = baseline
+        .allow
+        .difference(&candidate.allow)
+        .cloned()
+        .collect();
+    let added_deny: BTreeSet<T> = candidate.deny.difference(&baseline.deny).cloned().collect();
+    let dropped_deny: BTreeSet<T> = baseline.deny.difference(&candidate.deny).cloned().collect();
     let same = added_allow.is_empty()
         && dropped_allow.is_empty()
         && added_deny.is_empty()
@@ -102,20 +145,38 @@ pub fn decision_diff<T: Ord + Clone>(
     }
 }
 
-/// Report every tuple side `b` **allows** that side `a` did **not** allow — the
+/// Report every tuple `candidate` **allows** that `baseline` did **not** allow — the
 /// privilege-escalation (fail-closed-violation) direction.
 ///
-/// A tuple lands in the result whether side A explicitly *denied* it or merely *omitted* it:
-/// under a fail-closed policy both mean "not admitted", so a B-side allow is an escalation
-/// either way. Equivalently this is `b.allow \ a.allow`, so the check has **zero false
-/// negatives** in this direction: the only tuples excluded are those A itself already allowed.
-/// An empty result means B admits nothing beyond A (B may still be *stricter* — dropped
-/// allows are the safe direction and are reported by [`decision_diff`], not here).
+/// A tuple lands in the result whether the baseline explicitly *denied* it or merely *omitted*
+/// it: under a fail-closed policy both mean "not admitted", so a candidate allow is an
+/// escalation either way. Equivalently this is `candidate.allow \ baseline.allow`, so the check
+/// has **zero false negatives** in this direction: the only tuples excluded are those the
+/// baseline itself already allowed. An empty result means the candidate admits nothing beyond
+/// the baseline (the candidate may still be *stricter* — dropped allows are the safe direction
+/// and are reported by [`decision_diff`], not here).
+///
+/// The direction is part of the argument types. A swapped call does not compile:
+///
+/// ```compile_fail
+/// use sparq_difftest::{
+///     fail_closed_asymmetry, Baseline, Candidate, DecisionOutcome,
+/// };
+///
+/// let baseline = DecisionOutcome::new([1_u8], []);
+/// let candidate = DecisionOutcome::new([1_u8, 2], []);
+/// fail_closed_asymmetry(Candidate::new(&candidate), Baseline::new(&baseline));
+/// ```
 pub fn fail_closed_asymmetry<T: Ord + Clone>(
-    a: &DecisionOutcome<T>,
-    b: &DecisionOutcome<T>,
+    baseline: Baseline<'_, T>,
+    candidate: Candidate<'_, T>,
 ) -> BTreeSet<T> {
-    b.allow.difference(&a.allow).cloned().collect()
+    candidate
+        .0
+        .allow
+        .difference(&baseline.0.allow)
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -151,7 +212,7 @@ mod tests {
             [t("alice", "Read", "/a"), t("eve", "Read", "/e")],
             [t("bob", "Write", "/a"), t("frank", "Write", "/f")],
         );
-        let d = decision_diff(&a, &b);
+        let d = decision_diff(Baseline::new(&a), Candidate::new(&b));
         assert!(!d.same);
         assert_eq!(d.added_allow, BTreeSet::from([t("eve", "Read", "/e")]));
         assert_eq!(d.dropped_allow, BTreeSet::from([t("carol", "Read", "/c")]));
@@ -175,7 +236,7 @@ mod tests {
             ],
             [],
         );
-        let esc = fail_closed_asymmetry(&a, &b);
+        let esc = fail_closed_asymmetry(Baseline::new(&a), Candidate::new(&b));
         assert_eq!(
             esc,
             BTreeSet::from([t("bob", "Write", "/a"), t("mallory", "Read", "/s")])

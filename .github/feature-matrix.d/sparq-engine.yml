@@ -347,3 +347,10 @@
   crate: "sparq-engine"
   features: "paths"
   test: true
+
+# [GPT-5.6] sq-lk3aw.4: exact-certified spatial FILTER pushdown is default-OFF,
+# and tests/spatial_exact_pushdown.rs is compiled only with this feature.
+- name: "sparq-engine (spatial-exact-pushdown)"
+  crate: "sparq-engine"
+  features: "spatial-exact-pushdown"
+  test: true

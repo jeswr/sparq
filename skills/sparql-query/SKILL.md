@@ -68,14 +68,16 @@ All entry points take `&Graph` + `&str` and return `Result<_, String>` (parse + 
   unbound), `sol.iter()` over the bound `(VariableRef, &Term)` pairs (unbound cells skipped),
   `&sol[var]` (panicking `Index`), plus `variables()` / `values()` / `len()` / `is_empty()`. Use it
   for ergonomic Rust Oxigraph interop / migration; the underlying `{vars, rows}` layout is unchanged.
-- `pub struct QueryBudget { pub deadline: Option<Instant> /*native only*/, pub max_rows: Option<usize>, pub max_bytes: Option<usize> }`
+- `pub struct QueryBudget { pub deadline: Option<Instant> /*native only*/, pub max_rows: Option<usize>, pub max_bytes: Option<usize>, pub cancel: Option<Arc<AtomicBool>> }`
   — `QueryBudget::unlimited()` is the no-op default. `max_rows` caps the working-set ROW count;
   `max_bytes` (`sq-s5is`) is the byte-accounted companion — it prices row WIDTH
   (`rows × vars × size_of::<Id>()`) plus the bytes of query-computed (BIND/aggregate/CONSTRUCT)
   literals, so a few very wide rows or a huge computed literal is bounded where the row cap is
   blind. Both are coarse cooperative ceilings (checked at operator entry / per outer loop), a
   conservative LOWER bound on heap — not an exact RSS quota; whichever trips first aborts with
-  `query budget exceeded (max-rows|max-bytes)`.
+  `query budget exceeded (max-rows|max-bytes)`. `with_cancel(Arc<AtomicBool>)` adds a cross-thread
+  cancellation handle; a `Relaxed` store of `true` aborts cooperatively at the next coarse poll with
+  `query budget exceeded (cancelled)`. `cancelled_by(flag)` creates an otherwise-unlimited budget.
 
 SELECT/ASK entry points (each has `_prepared`, `_with_budget`, and `_view` variants):
 
@@ -388,17 +390,21 @@ over a computed expression.
 
 **Budgets / timeouts / ASK-style early exit** — a `QueryBudget` is checked cooperatively at coarse
 sites; tripping it fails with `"query budget exceeded (timeout)"` / `"... (max-rows)"` /
-`"... (max-bytes)"`:
+`"... (max-bytes)"` / `"... (cancelled)"`:
 
 ```rust
 use sparq_engine::QueryBudget;
+use std::sync::{Arc, atomic::AtomicBool};
+let cancel = Arc::new(AtomicBool::new(false));
 let budget = QueryBudget {
     max_rows: Some(10_000),
     max_bytes: Some(64 << 20), // byte-accounted companion (sq-s5is); None = off
     #[cfg(not(target_arch = "wasm32"))]
     deadline: Some(std::time::Instant::now() + std::time::Duration::from_secs(2)),
-};
+    ..QueryBudget::unlimited()
+}.with_cancel(Arc::clone(&cancel));
 let r = sparq_engine::query_with_budget(&g, "SELECT * WHERE { ?s ?p ?o }", &budget);
+// Another thread may call cancel.store(true, std::sync::atomic::Ordering::Relaxed).
 // For existence checks prefer ask()/ASK — it streams under an implicit LIMIT 1 (cheapest early exit).
 ```
 
@@ -1011,24 +1017,28 @@ let r = query_view(&v, "SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap(); //
   prefer `PreparedQuery` when running one query against many graphs (e.g. continuous/RSP queries).
 - **CLI/HTTP alternative**: `sparq-cli` and `sparq-server` (W3C SPARQL Protocol, `?explain=`,
   result formats JSON/XML/CSV/TSV, `/metrics`) wrap this same surface if you don't want to embed.
-- **Apache Arrow columnar export** is the opt-in `sparq-arrow` crate (separate leaf crate +
+- **Apache Arrow columnar import/export** is the opt-in `sparq-arrow` crate (separate leaf crate +
   its own `arrow` feature, both OFF the default build — the `arrow-*` deps NEVER reach
   `sparq-core`/`sparq-engine`/wasm). `sparq_arrow::to_record_batch(&QueryResult) -> RecordBatch`
-  projects a SELECT result into one Arrow **struct column per variable** —
+  projects a SELECT result into one Arrow **struct column per variable**, and
+  `sparq_arrow::from_record_batch(&RecordBatch) -> Result<QueryResult, ArrowError>` is its
+  checked inverse —
   `Struct<kind, value, datatype, language, direction>` (all nullable `Utf8`; the field names are
   `sparq_arrow::RDF_TERM_FIELDS`). Faithful & round-trippable: an **unbound** binding is a `null`
   struct slot (distinct from a bound empty string); `xsd:string` is written **explicitly** (not
   elided). Honest v1 boundaries — **no numeric narrowing** (`42^^xsd:integer` is the string `"42"`
   + a datatype field, not an `Int64`; a typed-column view is a follow-up) and **triple terms are
-  stringified** to N-Triples in `value`. The intended on-ramp into Polars/DuckDB/pandas; a
+  stringified** to N-Triples in `value`. Import rejects malformed schemas, term kinds, and
+  incompatible field combinations instead of guessing. The intended on-ramp into
+  Polars/DuckDB/pandas; a
   `sparq-py` `Graph.query_arrow() -> pyarrow.Table` PyO3 binding is a follow-up (bead `sq-lt1ml`).
 
 ## See also
 
 - `rust-parallel-parsing` / `fused-decompress-parse` — fast/compressed RDF ingest into a `Graph`.
 - `hdt-format` — loading `.hdt` archives into a `Graph` (`sparq-hdt`).
-- `sparq-arrow` — opt-in Apache Arrow columnar export of a SELECT `QueryResult` into a
-  `RecordBatch` (one struct column per variable) for transfer into the dataframe ecosystem.
+- `sparq-arrow` — opt-in Apache Arrow columnar import/export between a SELECT `QueryResult`
+  and a `RecordBatch` (one struct column per variable) for dataframe interoperability.
 - `sparql-formal-semantics` — the algebra/semantics reference for the SPARQL fragment.
 - `noir-circuit-patterns` / `verifiable-credentials-zk` / `mpc-protocols` — the ZK/MPC estate built
   on the `zk` trace seam (non-default `zk` feature; consumed by `sparq-zk`).

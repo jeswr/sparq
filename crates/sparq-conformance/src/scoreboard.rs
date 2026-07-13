@@ -1094,7 +1094,8 @@ pub const SUITES: &[Suite] = &[
     },
     // [FABLE-5] sq-pbz04.4.5 (epic sq-pbz04.4) — the OWL 2 DIRECT-SEMANTICS arm's two
     // ratchets (runner: `inference::dl_suite` + the crate-local `tests/dl_suite.rs`,
-    // behind the opt-in `dl-direct` feature → `sparq-reason-dl/dispatch`). HONESTLY
+    // behind the opt-in `dl-direct` feature → `sparq-reason-dl/dispatch` + the default-off
+    // `sparq-reason-dl/dl_transitive` extension). HONESTLY
     // tallied as sparq EXTENSION rows over the SCOPED FRAGMENT the layered
     // `sparq-reason-dl` checker implements — **scoped fragment, NOT full OWL 2 DL** —
     // and never folded into the standards-conformance total. TRI-STATE accounting
@@ -1136,9 +1137,9 @@ pub const SUITES: &[Suite] = &[
                normalizes a 1-ary owl:intersectionOf to its member) and now pass; the \
                positive PROFILE_DIVERGENCES pin is empty. The EXPLICIT-NEGATIVE direction is \
                a SEPARATE lane (sq-pbz04.4.16): the export's owl:NegativePropertyAssertion \
-               profile negations refuted where L2 can (137 after sq-pbz04.4.9's L1 \
-               datatype-map-IRI refusal moved 2 datatype rows out of the checkable set), with \
-               an honest measured In-gap (180 of 317 checkable) where axiom-grammar membership \
+               profile negations refuted where L2 can (138 after sq-zfwzq graduated three \
+               transitive-property inputs from extraction abstention: +1 refuted and +2 \
+               measured In-gap), with an honest measured In-gap (182 of 320 checkable) where axiom-grammar membership \
                over the ALCH shadow cannot refute full-profile membership (deferred \
                restrictions); species assertions remain unchecked (documented)",
     },
@@ -1151,7 +1152,7 @@ pub const SUITES: &[Suite] = &[
             feature: "dl-direct",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 182,
+        ratchet_floor: 186,
         floor_basis: "definitive expected verdicts through the L4 dispatch, EXACT-pinned \
                       (sparq EXTENSION over the scoped fragment — NOT full OWL 2 DL); \
                       re-pinned by sq-pbz04.4.11 (M1 named-composite fix, net +8); \
@@ -1163,7 +1164,9 @@ pub const SUITES: &[Suite] = &[
                       disjointWith divergence guard, never a wrong verdict; fail set unchanged); \
                       unchanged at 182 by sq-pbz04.4.9 (SubObjectPropertyOf conclusion encoding \
                       + L1 datatype-map-IRI refusal net to zero on the pass total, composition \
-                      97+69 -> 96+70; fail set still 5, M3/M5/M6)",
+                      97+69 -> 96+70; fail set still 5, M3/M5/M6); re-pinned by sq-zfwzq \
+                      (ALCHS transitive roles: +2 consistency and +2 positive-entailment \
+                      passes, 182 -> 186; composition 98+14+72+2, fail set unchanged)",
         note: "EXTENSION ratchet — the DIRECT-arm consistency / inconsistency / positive- / \
                negative-entailment tests decided by the REAL sparq-reason-dl L4 dispatch \
                (RL guarded / EL guarded / QL deferred / ALCH tableau) under a pinned \
@@ -1171,7 +1174,9 @@ pub const SUITES: &[Suite] = &[
                passes, and all 5 remaining wrong-verdict divergences are pinned by name \
                with audited mechanisms (M1 FIXED sq-pbz04.4.11; M4 FIXED sq-pbz04.4.12; \
                M2 FIXED sq-pbz04.4.13; M7 FIXED sq-pbz04.4.16 — those rows now pass/abstain; \
-               remaining: M3/M5/M6)",
+               remaining: M3/M5/M6). The default-off dl_transitive extension graduates \
+               transitive-role inputs only through the tableau whose termination and \
+               soundness argument is written in sparq-reason-dl::tableau §5a",
     },
     // [FABLE-5] the UFO-SN3 finite-world expressibility ratchet (runner lives
     // crate-local in `sparq-conformance/tests/ufo_sn3_suite.rs`, UNGATED — it calls

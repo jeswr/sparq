@@ -73,6 +73,10 @@ pub enum ServerError {
     /// A failure in the storage layer (SPARQ index or blob store).
     #[error("storage error: {0}")]
     Storage(String),
+
+    /// A write would exceed a configured in-memory storage limit.
+    #[error("insufficient storage")]
+    InsufficientStorage,
 }
 
 impl ServerError {
@@ -93,6 +97,7 @@ impl ServerError {
             ServerError::UnprocessablePatch(_) => StatusCode::UNPROCESSABLE_ENTITY,
             ServerError::UnsupportedMediaType(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             ServerError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ServerError::InsufficientStorage => StatusCode::INSUFFICIENT_STORAGE,
         }
     }
 }
@@ -125,6 +130,7 @@ impl IntoResponse for ServerError {
             StatusCode::NOT_ACCEPTABLE => "not acceptable",
             StatusCode::UNPROCESSABLE_ENTITY => "unprocessable entity",
             StatusCode::UNSUPPORTED_MEDIA_TYPE => "unsupported media type",
+            StatusCode::INSUFFICIENT_STORAGE => "insufficient storage",
             _ => "bad request",
         };
         (status, public_body).into_response()

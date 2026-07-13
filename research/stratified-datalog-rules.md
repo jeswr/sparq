@@ -44,10 +44,13 @@ fragment is a loud parse error naming the construct.
 [?x, a, ex:Leaf] :- [?x, a, ex:Node], NOT [?x, a, ex:Hub] .
 ```
 
-Grammar (Phase 1): `@prefix` declarations; rules `head :- body .` with comma-separated
-triple-pattern atoms `[s, p, o]` (constant predicate; `a` = `rdf:type`; IRIs, prefixed
+Grammar (Phase 1 plus the shipped Phase-4 extensions): `@prefix` declarations; rules
+`head :- body .` with comma-separated triple-pattern atoms `[s, p, o]` (constant or
+variable predicate; `a` = `rdf:type`; IRIs, prefixed
 names, `?vars`, bare-integer/`"…"^^dt` literals); body elements `atom`, `NOT atom`,
-`AGGREGATE(atoms [ON ?g…] BIND COUNT(?v) AS ?c)`, `FILTER(x op y)`; multi-atom heads.
+`NOT { atom, atom }` / `NOT EXISTS { atom, atom }`,
+`AGGREGATE(atoms [ON ?g…] BIND COUNT([DISTINCT] ?v) AS ?c)`, `FILTER(x op y)`;
+multi-atom heads. <!-- [GPT-5.6] sq-a7bmo -->
 
 ## 3. Semantics
 
@@ -69,15 +72,20 @@ Load-bearing details, each pinned by a test:
 - **Safety (range restriction).** Every head/`FILTER` variable must be bound by a
   positive atom or an `AGGREGATE` (`ON`/`AS`) — checked at parse. `NOT` variables not so
   bound are existential wildcards (a repeated wildcard inside one `NOT` atom must match
-  equal terms — the `log:notIncludes` idiom, kept).
+  equal terms — the `log:notIncludes` idiom, kept). In a grouped `NOT`, wildcard
+  bindings join every atom in that group and are discarded outside it.
 - **Aggregate scoping.** Non-`ON` aggregate-body variables are aggregate-local; a name
   collision with the outer rule is a loud error (silent capture would be ambiguous).
-  The `AS` output must be fresh. `COUNT(?v)` counts DISTINCT body matches per group
-  (set semantics — Datalog relations are sets); empty groups produce no row, and counts
+  The `AS` output must be fresh. `COUNT(?v)` counts DISTINCT full body matches per group
+  (set semantics — Datalog relations are sets); `COUNT(DISTINCT ?v)` de-duplicates the
+  projected value within each group; empty groups produce no row, and counts
   mint `xsd:integer` literals into the caller's `Dict`.
-- **FILTER** compares EXACT numerics (`xsd:integer`/`decimal` + derived integer types)
-  via the shared substrate `Dec` tower; non-numeric/float operands fail the row
-  (fail-closed — see §5 for the float decision).
+- **FILTER** compares exact/float/double numerics through the shared substrate
+  `Num::cmp_relational`; non-numeric values and NaN fail the row.
+- **Variable predicates.** The dependency checker maps them to a conservative top
+  node coupled to predicates, rdf:type classes, and the variable-class node. Dynamic
+  head predicates emit only IRI bindings. The incremental relevance index mirrors the
+  top node with read-any/head-any flags.
 - **Co-head predicates** of one rule share a stratum (mutual positive edges), so a
   rule's stratum is well-defined.
 
@@ -106,19 +114,17 @@ slices, no new transitive crate):
 Public API (5 items, each with a doctest + direct unit test): `parse_program`,
 `Program::n_rules`, `stratify`, `Stratification::n_strata`, `eval`.
 
-## 5. Honest scope: what Phase 1 does NOT do
+## 5. Historical Phase-1 scope and later status
 
 - **Naive rounds within a stratum** (dedup at insertion) — correct, fixture-scale;
   semi-naive delta restriction is the next perf phase. No performance claims are made.
-- **COUNT only**; `SUM`/`MIN`/`MAX`/`AVG` parse to a loud error (they need the value
-  tower on aggregate inputs, not just outputs).
-- **No `COUNT(DISTINCT ?v)`** distinct-of-one-variable form (COUNT = distinct matches).
-- **No float/double FILTER operands** — exact `Dec` only, fail-closed rows. Extending
-  to the engine's full relational comparison (`Num::cmp_relational`) is beaded.
-- **Constant predicates everywhere**; variable predicates rejected loudly.
+- Phase 1 shipped COUNT only; `SUM`/`MIN`/`MAX`/`AVG` shipped in sq-citho.
+- `COUNT(DISTINCT ?v)`, float/double FILTER, grouped NOT, and variable predicates
+  shipped together in sq-a7bmo. <!-- [GPT-5.6] -->
 - **No incremental maintenance** — inserts/deletes re-evaluate; DRed/FBF-grade
   maintenance across strata is the BIG follow-up phase and must be SEQUENCED with the
   deletion-maintenance bead sq-6tykl.4 (same-crate collision, per the epic note).
+  *(Since shipped as Phase 3, sq-4foq0 — see §6 item 3 and `datalog::incr`.)*
 - **No CLI/`MaterializedGraph` wiring** — library API only.
 - The `datalog` feature is not yet in `scripts/coverage.sh`'s per-crate measurement
   (sparq-reason is measured default-features, so the module doesn't regress the floor;
@@ -130,13 +136,21 @@ Public API (5 items, each with a doctest + direct unit test): `parse_program`,
    joins (the `n3::compiled` `join_steps` discipline); measure before claiming.
 2. **SUM/MIN/MAX/AVG aggregate functions** (sq-citho) — value slot on `AggAtom`, substrate `Num`
    tower for input values, overflow semantics decided against SPARQL's.
-3. **Incremental maintenance under insert/delete across strata** (sq-4foq0, blocked by sq-6tykl.4) — counting/DRed for
-   positive strata, rederivation at stratum boundaries; SEQUENCE with sq-6tykl.4.
+3. **Incremental maintenance under insert/delete across strata** (sq-4foq0) — SHIPPED:
+   `MaterializedProgram` in `datalog::incr` — DRed (delete-and-rederive) for positive strata,
+   stratum-boundary rederivation for `NOT`/`AGGREGATE` strata, predicate-level stratum
+   skipping, differential-pinned against from-scratch `eval` on randomized insert/delete
+   sequences. DRed over counting: counting is unsound under recursion without derivation-depth
+   tracking. v1 honest scope: per-affected-stratum set/index bookkeeping is O(visible input)
+   (no persistent deletable index); the incrementality is delta-driven rule-firing work,
+   measured by deterministic counters. FBF-style over-deletion limits await the sq-6tykl.4
+   deletion-heavy benchmark (profile first).
 4. **External-engine differential arm** (sq-xzb9p) — the same fixtures run through Soufflé (or
    crepe) in an optional CI lane; requires a cargo-vet/tooling decision.
-5. **Fragment extensions** (sq-a7bmo) — `NOT` over conjunctions / `NOT EXISTS ?v IN`, FILTER
-   expressions beyond binary numeric comparison, variable predicates (conservative ⊤
-   dependency node), `COUNT(DISTINCT ?v)`.
+5. **Fragment extensions** (sq-a7bmo) — SHIPPED: grouped `NOT` / `NOT EXISTS`,
+   projected `COUNT(DISTINCT ?v)`, relational float/double FILTER, and variable
+   predicates with conservative top-node stratification and incremental relevance.
+   <!-- [GPT-5.6] -->
 6. **Surface wiring** (sq-p4zci) — CLI `--reason datalog:<rules.dlog>`, `MaterializedGraph`-style
    handle, SKILL/docs examples beyond the API reference.
 7. **N3-compiled adoption of the checker** (sq-pi2k0) — replace the documented caller-discipline

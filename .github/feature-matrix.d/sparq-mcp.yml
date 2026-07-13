@@ -67,3 +67,10 @@
   crate: "sparq-mcp"
   features: "templates,text"
   test: true
+
+# [GPT-5.6] sq-lsp7k.22: the opt-in read-only SHACL validation tool. Exercises real
+# JSON-RPC round trips for malformed, non-conforming, and conforming shapes graphs.
+- name: "sparq-mcp (shacl — caller-supplied shapes validation tool)"
+  crate: "sparq-mcp"
+  features: "shacl"
+  test: true

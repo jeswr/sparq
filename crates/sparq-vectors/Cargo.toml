@@ -109,6 +109,11 @@ filtered-ann = []
 # pending the cross-implementation profile #1746 — the KERN boundary), so this ships the core v3
 # record without privileging any encoder.
 spqv-provenance = []
+# [GPT-5.6] sq-lsp7k.25: opaque per-vector UTF-8 metadata persisted inside `.spqv` and returned
+# beside exact-search hits. OPT-IN and OFF by default; a LEAN feature with no new dependency.
+# Ordinary `put` stores keep writing the existing v2/v3 formats byte-for-byte; the v4 metadata
+# block is selected only after `put_with_meta` records at least one tag.
+metadata-sidecar = []
 # [OPUS-4.8] sq-pi44: incremental add / remove / update of vectors against an already-finalized
 # store via an in-RAM DELTA SIDECAR (+ `compact` to fold it back into a fresh base), so a single
 # graph change no longer forces a full re-embed + file rebuild. OPT-IN and OFF by default; a LEAN

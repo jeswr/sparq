@@ -116,6 +116,15 @@ server = ["dep:sparq-serve", "dep:axum", "dep:hyper", "dep:hyper-util", "dep:tok
 # cfg-stripped and tower-http's compression codecs are not compiled. The middleware preserves
 # streaming bodies and its default predicate excludes SSE and already-encoded responses.
 response-compression = ["server", "tower-http/compression-gzip", "tower-http/compression-zstd"]
+# [GPT-5.6] sq-oprna.6: opt-in HTTP/2 on the TCP listener. The feature switches only the
+# connection builder from hyper's HTTP/1-only builder to hyper-util's h1+h2 auto builder and
+# enables optional rustls termination with ALPN when --tls-cert/--tls-key are supplied. Without
+# this feature the original HTTP/1-only accept loop and dependency graph are unchanged.
+http2 = ["server", "axum/http2", "hyper/http2", "hyper-util/http2", "dep:rustls", "dep:rustls-pemfile", "dep:tokio-rustls"]
+# [GPT-5.6] sq-oprna.3: HTTP/3 is a second, encrypted UDP listener dispatching into the
+# same Router as the unchanged plain-HTTP TCP listener. Every QUIC/TLS dependency remains
+# absent from the normal dependency graph unless this default-off feature is selected.
+http3 = ["server", "dep:quinn", "dep:rustls", "dep:rustls-pemfile", "dep:sparq-http3"]
 # [OPUS-4.8] (sq-i3xc, lever H5) `zlib-ng`: opt-in, OFF by default, NATIVE-ONLY faster
 # gzip backend (zlib-ng C library) for the server's `Content-Encoding: gzip` request
 # inflate (MultiGzDecoder) — a measured 1.5–3× at ~zero code change. The weak
@@ -160,6 +169,13 @@ geo = ["dep:sparq-geo"]
 # turned on. Without the feature, zero cost: no sparq-introspect dependency, no routes,
 # byte-identical to before; sparq-core/sparq-engine untouched either way.
 federation-descriptors = ["server", "dep:sparq-introspect"]
+# [GPT-5.6] sq-lsp7k.5.2: `facets` (default OFF) exposes a grouped facet-count API at
+# `POST /facets`. The JSON request selects a class / constraints / facet predicates and the
+# response carries type, predicate, and value distributions computed by `sparq-introspect` over
+# one pinned graph snapshot. It is DOUBLE opt-in: this build feature compiles the dependency +
+# route, while `--facets` / `SPARQ_FACETS=1` enables the route at runtime. Without the feature,
+# there is no introspection dependency or route and the default server binary stays unchanged.
+facets = ["server", "dep:sparq-introspect"]
 # [OPUS-4.8] (sq-bzh1, epic sq-3183) `tpf` (default OFF) exposes a Triple Pattern Fragments /
 # Linked Data Fragments (Hartig LDF) READ-ONLY source endpoint at `GET /tpf?subject=&predicate=&
 # object=`: a paged RDF fragment of the triples matching one triple pattern, with Hydra controls
@@ -460,6 +476,10 @@ axum = { version = "0.8", optional = true, default-features = false, features = 
 # only names them as direct deps so we can call `Builder`. http1-only (matches axum's config).
 hyper = { version = "1", optional = true, default-features = false, features = ["http1", "server"] }
 hyper-util = { version = "0.1", optional = true, default-features = false, features = ["server", "tokio", "service"] }
+# [GPT-5.6] sq-oprna.6: TLS wrapping for the opt-in HTTP/2 TCP listener. Crypto and PEM parsing
+# are shared with http3 when both features are selected; TLS 1.2 stays absent because the server
+# config intentionally admits TLS 1.3 only.
+tokio-rustls = { version = "0.26", optional = true, default-features = false }
 # `sync` adds the watch channel that carries the commit generation to subscription tasks (T23).
 # [OPUS-4.8] sq-toze.36: `io-util` adds AsyncReadExt/AsyncWriteExt for the in-binary --health-probe
 # (health_probe::run_probe): the distroless image has no curl/wget, so the server probes its own
@@ -490,6 +510,13 @@ serde_json = { version = "1", optional = true }
 # `flate2 = "1"` the CLI / parse / hdt crates already use, so the workspace gains no new
 # transitive code. Server-feature only (the decode lives on the async HTTP body path).
 flate2 = { version = "1", optional = true }
+# [GPT-5.6] sq-oprna.3: owned by the default-off `http3` feature. Quinn and the shared
+# bridge use the same rustls 0.23 aws-lc-rs provider; rustls-pemfile reads the operator's
+# certificate chain and private key without introducing a TLS path on the TCP listener.
+quinn = { version = "0.11.11", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"], optional = true }
+rustls-pemfile = { version = "2", optional = true }
+sparq-http3 = { path = "../sparq-http3", optional = true, features = ["server"] }
 
 mimalloc = "0.1"
 
@@ -515,7 +542,7 @@ oxttl = { workspace = true }
 sparesults = { version = "0.3", features = ["sparql-12"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "macros", "net", "time"] }
 # In-process HTTP client for integration tests (spin the server, assert protocol shape).
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
+reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls-manual-roots"] }
 # WebSocket client for the /subscriptions integration tests (T23) — pinned to the SAME
 # version axum 0.8's `ws` feature resolves to (0.29) so the dependency tree gains nothing
 # new (no duplicate tungstenite/tungstenite-http). [OPUS-4.8] (sq-1qkm) Bumped 0.24 -> 0.29
@@ -528,3 +555,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 # [OPUS-4.8] (sq-ebii) The decompression-ratio-cap test gzips a request body (a high-ratio
 # "zip bomb" and a benign small body) to assert the 413 guard fires before / not on each.
 flate2 = "1"
+# [GPT-5.6] sq-oprna.3: feature-gated integration client for the real QUIC listener.
+bytes = "1"
+h3 = "0.0.8"
+h3-quinn = "0.0.10"

@@ -31,13 +31,48 @@ pub struct PredicateValues {
     pub elided: u64,
 }
 
+/// One equal-width interval in a numeric facet histogram.
+///
+/// Buckets are half-open (`[lo, hi)`) except for the final bucket, which includes
+/// `hi`. A constant-valued facet has ten zero-width buckets and places every value
+/// in the final, closed bucket.
+#[cfg(feature = "numeric-facets")]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NumericBucket {
+    pub lo: f64,
+    pub hi: f64,
+    pub count: u64,
+}
+
+/// [GPT-5.6] Numeric range and fixed ten-bucket histogram for one predicate.
+///
+/// `count` includes finite, well-formed XSD numeric literal occurrences only.
+/// Non-numeric, ill-formed, NaN, and infinite objects remain in the ordinary value
+/// distribution but are excluded here so `min`, `max`, and every bucket edge stay
+/// finite and ordered.
+#[cfg(feature = "numeric-facets")]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NumericFacet {
+    pub predicate: String,
+    pub min: f64,
+    pub max: f64,
+    pub count: u64,
+    pub buckets: Vec<NumericBucket>,
+}
+
 /// Facet distributions for the request's candidate subjects.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(not(feature = "numeric-facets"), derive(Eq))]
 pub struct FacetResponse {
     pub candidates: u64,
     pub types: Vec<Counted>,
     pub predicates: Vec<Counted>,
     pub values: Vec<PredicateValues>,
+    /// Numeric summaries in predicate-IRI order. Present only with the
+    /// `numeric-facets` feature; predicates without finite numeric values are omitted.
+    #[cfg(feature = "numeric-facets")]
+    #[serde(default)]
+    pub numeric: Vec<NumericFacet>,
 }
 
 impl FacetResponse {
@@ -103,6 +138,67 @@ fn ranked(map: BTreeMap<String, u64>, top_k: usize) -> (Vec<Counted>, u64) {
     (values, elided)
 }
 
+#[cfg(feature = "numeric-facets")]
+const NUMERIC_BUCKET_COUNT: usize = 10;
+
+#[cfg(feature = "numeric-facets")]
+fn numeric_facet(predicate: String, values: Vec<f64>) -> NumericFacet {
+    debug_assert!(!values.is_empty());
+    debug_assert!(values.iter().all(|value| value.is_finite()));
+
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let span = max - min;
+    let mut edges = Vec::with_capacity(NUMERIC_BUCKET_COUNT + 1);
+    for index in 0..=NUMERIC_BUCKET_COUNT {
+        let fraction = index as f64 / NUMERIC_BUCKET_COUNT as f64;
+        let edge = if span.is_finite() {
+            min + span * fraction
+        } else {
+            // [GPT-5.6] Opposite-sign finite extrema can overflow `max - min`.
+            // Convex interpolation keeps every interior edge finite and ordered.
+            min * (1.0 - fraction) + max * fraction
+        };
+        edges.push(edge);
+    }
+    // Avoid arithmetic drift at the two closed range endpoints.
+    edges[0] = min;
+    edges[NUMERIC_BUCKET_COUNT] = max;
+
+    let mut counts = [0_u64; NUMERIC_BUCKET_COUNT];
+    if min == max {
+        counts[NUMERIC_BUCKET_COUNT - 1] = values.len() as u64;
+    } else {
+        for value in &values {
+            let bucket = if *value == max {
+                NUMERIC_BUCKET_COUNT - 1
+            } else {
+                edges
+                    .partition_point(|edge| *edge <= *value)
+                    .saturating_sub(1)
+            };
+            counts[bucket.min(NUMERIC_BUCKET_COUNT - 1)] += 1;
+        }
+    }
+
+    let buckets = counts
+        .into_iter()
+        .enumerate()
+        .map(|(index, count)| NumericBucket {
+            lo: edges[index],
+            hi: edges[index + 1],
+            count,
+        })
+        .collect();
+    NumericFacet {
+        predicate,
+        min,
+        max,
+        count: values.len() as u64,
+        buckets,
+    }
+}
+
 /// Computes type, predicate, and object-value distributions for subjects matching
 /// all request filters. Invalid or absent filter terms produce an empty candidate set.
 pub fn facets(graph: &Graph, req: &FacetRequest) -> FacetResponse {
@@ -145,6 +241,8 @@ pub fn facets(graph: &Graph, req: &FacetRequest) -> FacetResponse {
     let mut type_counts = BTreeMap::new();
     let mut predicate_counts = BTreeMap::new();
     let mut value_counts: BTreeMap<String, BTreeMap<String, u64>> = BTreeMap::new();
+    #[cfg(feature = "numeric-facets")]
+    let mut numeric_values: BTreeMap<String, Vec<f64>> = BTreeMap::new();
 
     for subject in &candidates {
         let scan = graph.store.scan(&[Some(*subject), None, None]);
@@ -168,12 +266,24 @@ pub fn facets(graph: &Graph, req: &FacetRequest) -> FacetResponse {
                 .as_ref()
                 .is_none_or(|set| set.contains(&predicate))
             {
+                #[cfg(feature = "numeric-facets")]
+                let numeric_predicate_iri = predicate_iri.clone();
                 let value = graph.dict.term(object).to_string();
                 *value_counts
                     .entry(predicate_iri)
                     .or_default()
                     .entry(value)
                     .or_insert(0) += 1;
+                #[cfg(feature = "numeric-facets")]
+                if let Some(value) = graph
+                    .numeric_value(object)
+                    .filter(|value| value.is_finite())
+                {
+                    numeric_values
+                        .entry(numeric_predicate_iri)
+                        .or_default()
+                        .push(value);
+                }
             }
         }
     }
@@ -200,11 +310,18 @@ pub fn facets(graph: &Graph, req: &FacetRequest) -> FacetResponse {
             }
         })
         .collect();
+    #[cfg(feature = "numeric-facets")]
+    let numeric = numeric_values
+        .into_iter()
+        .map(|(predicate, values)| numeric_facet(predicate, values))
+        .collect();
     FacetResponse {
         candidates: candidates.len() as u64,
         types,
         predicates,
         values,
+        #[cfg(feature = "numeric-facets")]
+        numeric,
     }
 }
 
@@ -214,6 +331,8 @@ fn empty_response() -> FacetResponse {
         types: Vec::new(),
         predicates: Vec::new(),
         values: Vec::new(),
+        #[cfg(feature = "numeric-facets")]
+        numeric: Vec::new(),
     }
 }
 
@@ -245,5 +364,7 @@ mod tests {
             }]
         );
         assert!(response.to_json().contains("candidates"));
+        #[cfg(not(feature = "numeric-facets"))]
+        assert!(!response.to_json().contains("\"numeric\""));
     }
 }

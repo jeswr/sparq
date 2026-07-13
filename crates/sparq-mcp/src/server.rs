@@ -230,6 +230,9 @@ impl McpServer {
             "introspect" => self.tool_introspect(&args),
             "shapes" => self.tool_shapes(&args),
             "stats" => self.tool_stats(),
+            "classes" => self.tool_classes(),
+            "prefixes" => self.tool_prefixes(),
+            "void" => self.tool_void(&args),
             #[cfg(feature = "nlq")]
             "ask" => self.tool_ask(&args),
             #[cfg(feature = "templates")]
@@ -238,6 +241,8 @@ impl McpServer {
             "template_invoke" => self.tool_template_invoke(&args),
             #[cfg(feature = "text")]
             "text_search" => self.tool_text_search(&args),
+            #[cfg(feature = "shacl")]
+            "validate" => self.tool_validate(&args),
             "update" => self.tool_update(&args),
             other => {
                 return Err(RpcError::new(
@@ -318,6 +323,74 @@ impl McpServer {
             "namespaces": ix.vocabularies.distinct,
         });
         Ok(serde_json::to_string_pretty(&stats).unwrap_or_else(|_| stats.to_string()))
+    }
+
+    /// [GPT-5.6] sq-cekgj: `classes`, class profiles ranked by instance count.
+    fn tool_classes(&self) -> Result<String, String> {
+        let ix = Introspection::build(&self.graph);
+        let mut profiles = ix.classes;
+        let distinct_classes = profiles.len();
+        profiles.sort_by(|a, b| b.instances.cmp(&a.instances).then(a.class.cmp(&b.class)));
+        let classes: Vec<Value> = profiles
+            .into_iter()
+            .map(|profile| {
+                json!({
+                    "class": profile.class,
+                    "instances": profile.instances,
+                    "predicate_count": profile.predicates.len(),
+                })
+            })
+            .collect();
+        let result = json!({
+            "distinct_classes": distinct_classes,
+            "classes": classes,
+        });
+        Ok(serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()))
+    }
+
+    /// [GPT-5.6] sq-kx5b0: `prefixes`, namespace declarations ranked by term count.
+    fn tool_prefixes(&self) -> Result<String, String> {
+        let ix = Introspection::build(&self.graph);
+        let distinct_prefixes = ix.vocabularies.distinct;
+        let mut namespaces = ix.vocabularies.namespaces;
+        namespaces.sort_by(|a, b| b.terms.cmp(&a.terms).then(a.namespace.cmp(&b.namespace)));
+        let prefixes: Vec<Value> = namespaces
+            .into_iter()
+            .map(|vocabulary| {
+                json!({
+                    "prefix": vocabulary.prefix,
+                    "namespace": vocabulary.namespace,
+                    "term_count": vocabulary.terms,
+                })
+            })
+            .collect();
+        let result = json!({
+            "distinct_prefixes": distinct_prefixes,
+            "prefixes": prefixes,
+        });
+        Ok(serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()))
+    }
+
+    /// `void`: W3C VoID dataset descriptor as deterministic N-Triples.
+    fn tool_void(&self, args: &Value) -> Result<String, String> {
+        let dataset_iri = match args.get("dataset") {
+            None => "urn:sparq:dataset",
+            Some(value) => value
+                .as_str()
+                .ok_or_else(|| "argument `dataset` must be a string".to_string())?,
+        };
+        let characteristic_sets = match args.get("characteristic_sets") {
+            None => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| "argument `characteristic_sets` must be a boolean".to_string())?,
+        };
+        let ix = Introspection::build(&self.graph);
+        Ok(if characteristic_sets {
+            ix.to_void_with_cs(dataset_iri)
+        } else {
+            ix.to_void(dataset_iri)
+        })
     }
 
     /// `template_list` (feature `templates`): the registered named-template definitions
@@ -417,6 +490,53 @@ impl McpServer {
             })
             .collect();
         let out = json!({ "total_matches": total, "returned": rows.len(), "hits": rows });
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()))
+    }
+
+    /// `validate` (feature `shacl`): parse a caller-owned shapes graph and run the
+    /// existing SHACL validator over a shared borrow of the served data. [GPT-5.6]
+    #[cfg(feature = "shacl")]
+    fn tool_validate(&self, args: &Value) -> Result<String, String> {
+        let source = arg_str(args, "shapes")?;
+        let format = args
+            .get("format")
+            .and_then(Value::as_str)
+            .unwrap_or("turtle");
+        let shapes = Graph::load_str(source, format)
+            .map_err(|error| format!("invalid SHACL shapes graph: {error}"))?;
+
+        let report = sparq_shacl::validate(self.graph(), &shapes);
+        // ValidationReport retains below-threshold results for diagnostics. The MCP
+        // contract returns only results at severities that participate in this shapes
+        // graph's conformance decision.
+        let model = sparq_shacl::ShapesModel::parse(&shapes);
+        let disallowed: Vec<&str> = model
+            .conformance_disallows()
+            .map(|set| set.iter().map(String::as_str).collect())
+            .unwrap_or_else(|| sparq_shacl::DEFAULT_CONFORMANCE_DISALLOWS.to_vec());
+        let results: Vec<Value> = report
+            .results
+            .iter()
+            .filter(|result| disallowed.contains(&result.severity.as_str()))
+            .map(|result| {
+                let message = result
+                    .effective_messages()
+                    .into_iter()
+                    .next()
+                    .map(|term| match term {
+                        oxrdf::Term::Literal(literal) => literal.value().to_owned(),
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_default();
+                json!({
+                    "focusNode": result.focus_node.to_string(),
+                    "path": result.path.as_ref().map(|path| path.to_turtle()),
+                    "severity": result.severity,
+                    "message": message,
+                })
+            })
+            .collect();
+        let out = json!({ "conforms": report.conforms, "results": results });
         Ok(serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()))
     }
 

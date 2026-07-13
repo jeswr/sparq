@@ -74,6 +74,10 @@ templates = ["sparq-engine/templates"]
 # TextIndex + BM25) compiles — no engine seam, no rayon. OFF by default; in-workspace
 # path dep (no supply-chain delta).
 text = ["dep:sparq-text"]
+# [GPT-5.6] sq-lsp7k.22: caller-supplied SHACL validation as an MCP tool. OFF by
+# default; the optional edge keeps sparq-shacl (and its validator dependencies) out
+# of the lean MCP build. The tool is read-only and advertised only with this feature.
+shacl = ["dep:sparq-shacl", "dep:oxrdf"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io.
@@ -93,6 +97,8 @@ sparq-solid = { path = "../sparq-solid", version = "0.1.0", optional = true }
 # `text_search` tool. OPTIONAL + lean (`default-features = false`: pure index only — no
 # engine rewrite seam, no rayon), so the default build never compiles it.
 sparq-text = { path = "../sparq-text", version = "0.1.0", optional = true, default-features = false }
+# [GPT-5.6] sq-lsp7k.22: optional validator behind the `shacl` tool feature.
+sparq-shacl = { path = "../sparq-shacl", version = "0.1.0", optional = true }
 oxrdf = { workspace = true, optional = true }
 # The MCP wire format is JSON-RPC 2.0; serde_json (already ubiquitous in the tree —
 # sparq-engine/introspect/nlq all use it) is the only dependency the framing needs.

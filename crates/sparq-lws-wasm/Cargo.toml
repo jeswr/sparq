@@ -1,0 +1,40 @@
+[package]
+name = "sparq-lws-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The host build intentionally has no request-core dependencies. Building this dedicated crate for
+# wasm32 is the opt-in: it does not add Solid-server code to sparq-core, sparq-engine, or sparq-wasm.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+axum = { version = "0.8", default-features = false }
+futures-executor = "0.3"
+http = "1"
+oxrdf.workspace = true
+sparq-lws-core = { path = "../sparq-lws-core", default-features = false, features = ["wasm"] }
+tower = { version = "0.5", features = ["util"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+# sparq-lws-core uses both generations: 0.2 for blob-key entropy and 0.3 through oxrdf.
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[features]
+default = []
+# [GPT-5.6] sq-6xasp.8: reserve the npm full-tier selector. The request core has no
+# SPARQL endpoint yet, so sq-r1ei8 will turn this into the downstream passthrough when
+# it adds `sparq-lws-core/sparql-endpoint`. Keeping this empty now makes both published
+# build commands honestly byte-identical and keeps the default feature set unchanged.
+sparql-endpoint = []
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz"]
