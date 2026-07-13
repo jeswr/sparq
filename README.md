@@ -68,8 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 The CLI, HTTP server, Python (`sparq-rdf` on PyPI — `import sparq`), and JS/WASM
-(`@jeswr/sparq`) mirror the same surface. Per-surface how-tos live in the
-[usage skills](skills/SKILL.md).
+(`@jeswr/sparq`) mirror the same surface. [GPT-5.6] The separate
+`@jeswr/solid-server` package hosts the Solid/LDP wasm adapter for loopback-only
+local development. Per-surface how-tos live in the [usage skills](skills/SKILL.md).
 
 ## ✨ Features
 

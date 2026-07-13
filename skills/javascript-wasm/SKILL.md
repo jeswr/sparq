@@ -110,7 +110,7 @@ evaluator over `CompositeStore<InMemorySparqClient, InMemoryBlobStore>`, while e
 listener, Tokio runtime, TLS/PoP/notifications, live OIDC verifier, and non-memory backends.
 
 Build and stage it with
-`npm --workspace @sparq/solid-server run build:lws-wasm`; use `build:lws-wasm-core` for the named
+`npm --workspace @jeswr/solid-server run build:lws-wasm`; use `build:lws-wasm-core` for the named
 core tier. Both commands currently produce the same core-Solid artifact because the full
 `sparql-endpoint` surface is tracked separately in `sq-r1ei8`. Construct `SolidServer` with the pod
 base URL and the WebID that owns its provisioned root ACL, then call the Promise-returning
@@ -127,8 +127,16 @@ const response = await pod.handleRequest(
 
 The host MUST complete OIDC validation before supplying an authenticated WebID; the constructor's
 owner parameter only provisions WAC and is not authentication. Do not enable or stub
-`solid-oidc-verifier` inside wasm: its pinned crypto backend is native-only. This v1 adapter is
-single-process and ephemeral. The Node listener and npm wrapper are separate work.
+`solid-oidc-verifier` inside wasm: its pinned crypto backend is native-only.
+
+[GPT-5.6] `@jeswr/solid-server` supplies the local Node host. Install and run it with
+`npx @jeswr/solid-server --port 3000 --base-url http://127.0.0.1:3000 --owner-webid
+https://id.example/alice#me`, or import `startSolidServer({ port, baseUrl, ownerWebid })`; it resolves
+to a listening Node `http.Server` with an async `closeAsync()` helper. The listener binds
+`127.0.0.1`, owns one wasm pod for its lifetime, and preserves repeated request/response headers.
+It is deliberately fixed-owner: every HTTP caller acts as `ownerWebid` without authentication.
+Use it only for local development, never expose it, and expect all data to disappear on shutdown.
+TLS, OIDC, persistent storage, notifications, and the separately tracked SPARQL endpoint are absent.
 
 ## Common recipes
 

@@ -1,16 +1,54 @@
 {
-  "name": "@sparq/solid-server",
+  "name": "@jeswr/solid-server",
   "version": "0.1.0",
-  "private": true,
-  "description": "Build-only staging package for the sparq Solid server WebAssembly adapter.",
-  "license": "MIT OR Apache-2.0",
+  "description": "Local-development Solid/LDP server backed by sparq WebAssembly.",
+  "license": "MIT",
   "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "bin": {
+    "solid-server": "./bin/solid-server.js"
+  },
   "files": [
-    "wasm"
+    "bin",
+    "src",
+    "wasm",
+    "README.md"
   ],
+  "sideEffects": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jeswr/sparq.git",
+    "directory": "packages/solid-server"
+  },
+  "homepage": "https://github.com/jeswr/sparq/tree/main/packages/solid-server#readme",
+  "bugs": {
+    "url": "https://github.com/jeswr/sparq/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "_copy:wasm": "rm -rf wasm && mkdir wasm && cp ../../crates/sparq-lws-wasm/pkg/sparq_lws_wasm.js ../../crates/sparq-lws-wasm/pkg/sparq_lws_wasm.d.ts ../../crates/sparq-lws-wasm/pkg/sparq_lws_wasm_bg.wasm ../../crates/sparq-lws-wasm/pkg/sparq_lws_wasm_bg.wasm.d.ts wasm/",
     "build:lws-wasm": "wasm-pack build ../../crates/sparq-lws-wasm --target web --profile release-wasm -- --config profile.release-wasm.strip=false && npm run _copy:wasm",
-    "build:lws-wasm-core": "wasm-pack build ../../crates/sparq-lws-wasm --target web --profile release-wasm -- --config profile.release-wasm.strip=false && npm run _copy:wasm"
-  }
+    "build:lws-wasm-core": "wasm-pack build ../../crates/sparq-lws-wasm --target web --profile release-wasm -- --config profile.release-wasm.strip=false && npm run _copy:wasm",
+    "test": "node --test test/*.test.mjs"
+  },
+  "keywords": [
+    "solid",
+    "ldp",
+    "wac",
+    "rdf",
+    "wasm"
+  ]
 }

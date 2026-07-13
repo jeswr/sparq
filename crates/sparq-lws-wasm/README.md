@@ -15,12 +15,12 @@ service. The JavaScript host supplies the HTTP listener and authenticated WebID.
 wasm-pack build crates/sparq-lws-wasm --target web
 ```
 
-The build-only `@sparq/solid-server` workspace package stages the generated JavaScript,
+The `@jeswr/solid-server` workspace package stages the generated JavaScript,
 TypeScript declarations, and wasm binary in its own `wasm/` directory:
 
 ```sh
-npm --workspace @sparq/solid-server run build:lws-wasm
-npm --workspace @sparq/solid-server run build:lws-wasm-core
+npm --workspace @jeswr/solid-server run build:lws-wasm
+npm --workspace @jeswr/solid-server run build:lws-wasm-core
 ```
 
 Both commands intentionally emit the same core-Solid artifact until `sq-r1ei8` adds the
@@ -62,8 +62,9 @@ console.log(response.status);
   [`skills/javascript-wasm/SKILL.md`](../../skills/javascript-wasm/SKILL.md).
 - Portable request core: [`sparq-lws-core`](../sparq-lws-core/README.md), built
   with its default-off `wasm` feature.
-- npm and Node-listener packaging are deliberately outside this crate and are
-  tracked by `sq-6xasp.4`.
+- [GPT-5.6] The [`@jeswr/solid-server`](../../packages/solid-server/) package owns
+  the loopback Node listener and `npx` entry. Its fixed-owner mode is for local
+  development only; OIDC verification remains outside this wasm crate.
 
 ## License
 
