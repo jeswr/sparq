@@ -1,0 +1,7 @@
+# [GPT-5.6] sq-6xasp.8: reserve and compile-check the default-off full-tier selector.
+# Until sq-r1ei8 adds the real /sparql route to sparq-lws-core, this feature is an
+# intentionally empty staging seam and both npm wasm build tiers are byte-identical.
+- name: "sparq-lws-wasm (sparql-endpoint)"
+  crate: "sparq-lws-wasm"
+  features: "sparql-endpoint"
+  test: true
