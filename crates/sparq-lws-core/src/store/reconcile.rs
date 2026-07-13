@@ -114,17 +114,17 @@
 //! - A per-blob delete failure is recorded (`delete_errors`) and the sweep CONTINUES — one bad key
 //!   never aborts the whole GC.
 //!
-//! ## On-demand vs periodic (the best call, documented)
+//! ## On-demand vs periodic
 //! The core [`reconcile_orphans`] is **on-demand**: a pure function over the two seams, callable from a
-//! future admin endpoint / CLI / a one-shot boot sweep. That is the right primary shape — GC is a rare,
-//! operator-or-schedule-triggered maintenance op, not part of the hot request path, and an on-demand
-//! function is trivially testable and composable. A periodic background runner is OFFERED as an
-//! opt-in convenience (`spawn_periodic`, gated behind `SOLID_SERVER_RECONCILE_INTERVAL_SECS`, OFF by
-//! default) for a single-instance deployment that wants a self-driving sweep; in a horizontally-scaled
-//! deployment GC should instead be a single scheduled job (a leader-elected task / a cron hitting the
-//! admin endpoint), NOT a per-replica timer racing N sweeps — which is why periodic is opt-in and
-//! documented, not wired on by default. The in-memory M1 boot does not wire it (a single-process,
-//! never-crashing in-memory store produces no durable orphans), so it stays a seam for the live store.
+//! future admin endpoint / CLI / a one-shot boot sweep. The native server also wires the existing
+//! [`spawn_periodic`] runner behind `SOLID_SERVER_RECONCILE_INTERVAL_SECS`: UNSET (the default) spawns
+//! no task; a positive integer starts exactly one task after router assembly, using
+//! [`ReconcileOptions::default`] and therefore the unchanged one-hour grace window. [GPT-5.6]
+//!
+//! This is intended for a single-instance deployment that wants a self-driving sweep. In a
+//! horizontally-scaled deployment GC should instead be one scheduled job (a leader-elected task / a
+//! cron hitting an admin endpoint), NOT a per-replica timer racing N sweeps — which is why periodic
+//! remains an explicit runtime opt-in rather than a boot default.
 
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};

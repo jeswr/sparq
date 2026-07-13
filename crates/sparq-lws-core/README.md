@@ -21,11 +21,15 @@ cargo run -p sparq-lws-core
 cargo test -p sparq-lws-core
 # Engine-free profile (in-memory double only)
 cargo test -p sparq-lws-core --no-default-features
+# [GPT-5.6] Opt in to one periodic orphan-blob sweep task (interval in seconds)
+SOLID_SERVER_RECONCILE_INTERVAL_SECS=3600 cargo run -p sparq-lws-core
 ```
 
 The binary is configured entirely by `SOLID_SERVER_*` / `PSS_*` environment
 variables (bind address, TLS PEM paths, backend selection, seeding) — see the
-module docs on `src/main.rs`.
+module docs on `src/main.rs`. `SOLID_SERVER_RECONCILE_INTERVAL_SECS` is unset by
+default; a positive integer enables one periodic sweep using the unchanged
+one-hour orphan grace period. Invalid or zero values fail boot.
 
 ## ✨ Features
 
