@@ -37,6 +37,20 @@ cargo run -p sparq-server
 cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriples data.nt
 ```
 
+Opt-in HTTP/2 switches the TCP listener from its default HTTP/1.1-only builder to the
+hyper-util h1+h2 auto builder. With no certificate flags it accepts HTTP/1.1 and cleartext h2c;
+supplying both PEM paths enables TLS 1.3 with ALPN `h2,http/1.1`:
+
+```sh
+cargo run -p sparq-server --features http2 -- data.ttl \
+  --tls-cert ./cert.pem --tls-key ./key.pem
+```
+
+The PEM flags are a pair: supplying only one fails startup. Omitting both preserves plain HTTP.
+The HTTP/1 slow-loris header deadline, body idle deadline, peer `ConnectInfo`, graceful drain, and
+WebSocket upgrade remain on the same bespoke serve path; HTTP/2 uses the same router and request
+middleware. [GPT-5.6] sq-oprna.6
+
 Opt-in HTTP/3 adds an encrypted QUIC/UDP listener beside the unchanged plain-HTTP TCP
 listener. The two listeners dispatch through the same router; the UDP address defaults to
 `--addr` and can be overridden independently:
@@ -48,9 +62,10 @@ cargo run -p sparq-server --features http3 -- data.ttl \
 ```
 
 Both PEM paths are required when `--http3` is set, and malformed or mismatched material
-fails startup. QUIC is mandatorily encrypted, while the TCP listener remains plain HTTP for
-proxy/backward compatibility. The pre-1.0 h3 stack is contained behind the default-off
-feature. `/subscriptions` WebSockets remain HTTP/1.1-only; clients must fall back because
+fails startup. QUIC is mandatorily encrypted. With `http3` alone the TCP listener remains plain
+HTTP for proxy/backward compatibility; with `--features http2,http3` the same PEM pair also
+secures TCP and negotiates h2/h1 through ALPN. The pre-1.0 h3 stack is contained behind the
+default-off feature. `/subscriptions` WebSockets remain HTTP/1.1-only; clients must fall back because
 HTTP/3 extended CONNECT is not implemented. Once the UDP endpoint has bound, every plain-HTTP TCP
 response advertises its live port as `Alt-Svc: h3=":<port>"; ma=86400`; no header is emitted when
 `--http3` is absent or startup cannot bind the QUIC listener. [GPT-5.6] sq-oprna.4
@@ -235,7 +250,15 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   never installs a timer, so hyper's header-read deadline is inert there and a slow-loris client
   holds a connection (and a `concurrency_limit` slot) open indefinitely; and even with that fixed, a
   complete-header client can still dribble the BODY to hold the slot — `body_read_timeout` closes
-  that complementary hole. Pass `None` on either to opt back out of that guard.
+  that complementary hole. Pass `None` on either to opt back out of that guard. With the
+  default-off `http2` feature this same function uses hyper-util's h1+h2 auto builder (h2c on a
+  plain listener) and retains the timer on the builder's HTTP/1 configuration.
+- `async fn serve_tls(listener: tokio::net::TcpListener, app: axum::Router, tls_config:
+  Arc<rustls::ServerConfig>, header_read_timeout: Option<Duration>, body_read_timeout:
+  Option<Duration>, shutdown: impl Future<Output=()>) -> std::io::Result<()>` (**`http2` feature
+  only**) — TLS counterpart to `serve`; the binary supplies a TLS-1.3 config advertising
+  `h2,http/1.1` via ALPN. It shares the auto-builder connection body, middleware, timeout hooks,
+  peer `ConnectInfo`, and graceful drain with the cleartext feature-on path. [GPT-5.6] sq-oprna.6
 - Re-exports for cache layers/tests: `PinnedGen`, `GLOBAL_POD: &str`
   (`"urn:sparq:pod:global"`), and `sparq_serve::{Epoch, PodEpochs, PodId}`.
 - **Response-bytes result cache** (opt-in, `sparq-serve`'s `result-cache` feature,

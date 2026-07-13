@@ -88,6 +88,13 @@
   features: "response-compression"
   test: true
 
+# [GPT-5.6] sq-oprna.6: the default-off h1+h2 auto-builder TCP path, including real TLS/ALPN
+# negotiation, HTTP/1.1 fallback, and the inherited slow-loris header deadline integration test.
+- name: "sparq-server (http2)"
+  crate: "sparq-server"
+  features: "http2"
+  test: true
+
 # [GPT-5.6] sq-oprna.3: encrypted HTTP/3 over a second UDP listener, including the
 # real cross-protocol SPARQL serialization parity integration test.
 - name: "sparq-server (http3)"

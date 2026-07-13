@@ -5321,6 +5321,7 @@ dependencies = [
  "sparq-trust",
  "sparq-zk",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite",
  "tower",
  "tower-http 0.7.0",

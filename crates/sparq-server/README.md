@@ -57,9 +57,9 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   `backup` (no-stop-the-world `/admin/backup` snapshot + PITR delta `/admin/backup/delta` +
   `/admin/restore` — single-flight: a second concurrent restore is an explicit `409`; on `--persist`,
   `?persist=true`/`--restore-persist` writes the restore through to disk crash-safely so it survives a restart), `change-stream` (durable CDC — commits recorded to a segmented fsync'd log + the Neptune-`GetRecords`-shaped `GET /streams` poll, `--change-stream DIR`),
-  `audit-log`/`access-audit`, `zlib-ng`, and `http3` (encrypted QUIC/UDP; see the HTTP/3 note below).
-- **HTTP/3 transport** ([GPT-5.6] sq-oprna.3) — `--features http3` + `--http3 --tls-cert cert.pem --tls-key key.pem`
-  adds an always-encrypted QUIC/UDP listener (defaults to the `--addr` port; `--http3-addr` overrides) serving the same router beside the unchanged HTTP/1.1 TCP listener; missing/invalid PEM fails startup; WebSockets stay HTTP/1.1-only; no `Alt-Svc` yet. Detail in the SKILL.
+  `audit-log`/`access-audit`, `zlib-ng`, `http2`, and `http3` (encrypted QUIC/UDP; see below).
+- **HTTP/2 transport** ([GPT-5.6] sq-oprna.6) — `--features http2` switches TCP to HTTP/1.1+h2c; add `--tls-cert cert.pem --tls-key key.pem` for TLS 1.3 with ALPN `h2,http/1.1`. Omitting both PEM flags preserves cleartext; WebSocket upgrades keep using HTTP/1.1; the slow-loris header deadline remains active.
+- **HTTP/3 transport** ([GPT-5.6] sq-oprna.3/.4) — `--features http3` + `--http3 --tls-cert cert.pem --tls-key key.pem` adds encrypted QUIC/UDP on the same router and advertises its live port with `Alt-Svc`; combine `http2,http3` to use the PEM pair for both TLS TCP and QUIC. Detail in the SKILL.
 - **Default-on JSON-LD** ([OPUS-4.8] sq-oy1f.4) — `jsonld` is in the **default** set: `application/ld+json`
   joins q-value RDF conneg both directions (`--no-default-features --features server` → 406 read / 415 write).
 - **Default-on algebra rewrite** ([FABLE-5] sq-7d3dj.30.13) — `algebra-rewrite` is in the default set too: the engine's result-equivalent pre-execution rewrite (#1735 — `FILTER(?v = <iri>)` constant folding + `!bound` anti-join), so the shipped binary runs the same plans the CLI/canonical benchmarks measure. Drop via `--no-default-features --features server,jsonld`.

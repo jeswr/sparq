@@ -11,7 +11,8 @@
 //!                [--max-subscriptions N] [--max-subscriptions-per-conn N]
 //!                [--service-allow HOST|*.SUFFIX]... [--service-allow-file PATH]
 //!                [--cors-allow-origin ORIGIN]... [--cors-allow-origin-file PATH]
-//!                [--http3 [--http3-addr HOST:PORT] --tls-cert FILE --tls-key FILE]
+//!                [--tls-cert FILE --tls-key FILE]
+//!                [--http3 [--http3-addr HOST:PORT]]
 //!                [--verbose] [DATA_FILE]
 //!
 //! DURABLE PERSISTENCE (`--persist DIR`, env `SPARQ_PERSIST_DIR`; QLever's `--persist-updates`
@@ -172,7 +173,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
-#[cfg(feature = "http3")]
+#[cfg(any(feature = "http2", feature = "http3"))]
 use std::{path::PathBuf, sync::Arc};
 
 use sparq_core::Graph;
@@ -212,9 +213,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut http3 = false;
     #[cfg(feature = "http3")]
     let mut http3_addr: Option<String> = None;
-    #[cfg(feature = "http3")]
+    #[cfg(any(feature = "http2", feature = "http3"))]
     let mut tls_cert: Option<PathBuf> = None;
-    #[cfg(feature = "http3")]
+    #[cfg(any(feature = "http2", feature = "http3"))]
     let mut tls_key: Option<PathBuf> = None;
     let mut format = "turtle".to_string();
     let mut data_file: Option<String> = None;
@@ -254,13 +255,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .ok_or("--http3-addr requires a HOST:PORT value")?,
                 );
             }
-            #[cfg(feature = "http3")]
+            #[cfg(any(feature = "http2", feature = "http3"))]
             "--tls-cert" => {
                 tls_cert = Some(PathBuf::from(
                     args.next().ok_or("--tls-cert requires a file path")?,
                 ));
             }
-            #[cfg(feature = "http3")]
+            #[cfg(any(feature = "http2", feature = "http3"))]
             "--tls-key" => {
                 tls_key = Some(PathBuf::from(
                     args.next().ok_or("--tls-key requires a file path")?,
@@ -662,11 +663,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      ?at=N / ?after=N, ?limit=N) returning the records + a nextSequenceNumber \
                      continuation token. Resumes the same stream gaplessly across a restart. Off by \
                      default; reading is gated by the read auth.\n  \
+                     HTTP/2 (the `http2` build feature): the TCP listener accepts h1 and h2c. \
+                     Supply both --tls-cert and --tls-key PEM files to enable TLS with ALPN \
+                     h2/http/1.1; omitting both keeps cleartext compatibility. WebSocket \
+                     subscriptions use HTTP/1.1 upgrade.\n  \
                      HTTP/3 (the `http3` build feature): --http3 starts an encrypted QUIC/UDP \
-                     listener beside the unchanged plain-HTTP TCP listener. It defaults to the \
-                     same address and numeric port; override UDP with --http3-addr. Both \
-                     --tls-cert and --tls-key PEM files are required. WebSocket subscriptions \
-                     remain on HTTP/1.1.\n  \
+                     listener beside TCP. It defaults to the same address and numeric port; \
+                     override UDP with --http3-addr. Both PEM flags are required.\n  \
                      CORS: NO CORS headers by default (a cross-origin browser fetch cannot read \
                      responses). For a FIRST-PARTY browser app on another origin, allowlist its \
                      exact origin(s) via --cors-allow-origin ORIGIN (repeatable) / \
@@ -678,6 +681,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             other => data_file = Some(other.to_string()),
         }
+    }
+
+    // [GPT-5.6] sq-oprna.6: TCP TLS is selected by a complete credential pair. Reject a lone
+    // path rather than silently serving cleartext; `http3` retains its stricter runtime rule.
+    #[cfg(feature = "http2")]
+    if tls_cert.is_some() != tls_key.is_some() {
+        return Err("--tls-cert and --tls-key must be provided together".into());
     }
 
     // [GPT-5.6] sq-oprna.3: QUIC cannot run without TLS. Reject incomplete configuration
@@ -1067,8 +1077,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState::try_with_config(graph, config)?;
     let app = router(state);
 
+    // [GPT-5.6] sq-oprna.6: a complete PEM pair opts the HTTP/2-capable TCP listener into TLS;
+    // no pair preserves the cleartext h1+h2c path. Parse before binding so invalid material fails
+    // startup without briefly exposing a listening socket.
+    #[cfg(feature = "http2")]
+    let tcp_tls_config = match (tls_cert.as_deref(), tls_key.as_deref()) {
+        (Some(cert), Some(key)) => Some(load_tcp_tls_config(cert, key)?),
+        (None, None) => None,
+        _ => unreachable!("the credential-pair invariant was validated above"),
+    };
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    #[cfg(not(feature = "http2"))]
     eprintln!("sparq-server listening on http://{addr}  (SPARQL endpoint: /sparql, subscriptions: ws://{addr}/subscriptions)");
+    #[cfg(feature = "http2")]
+    if tcp_tls_config.is_some() {
+        eprintln!("sparq-server listening on https://{addr} (HTTP/1.1 + HTTP/2; SPARQL endpoint: /sparql, subscriptions: wss://{addr}/subscriptions)");
+    } else {
+        eprintln!("sparq-server listening on http://{addr} (HTTP/1.1 + h2c; SPARQL endpoint: /sparql, subscriptions: ws://{addr}/subscriptions)");
+    }
     // [GPT-5.6] sq-oprna.3: feature-on/runtime-on adds a separate encrypted UDP listener,
     // but both transports dispatch through clones of the one router built above. The TCP
     // future is still the exact bespoke `sparq_server::serve` path with both slow-client
@@ -1094,6 +1121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         let tcp_shutdown = wait_for_shutdown(shutdown_rx.clone());
         let h3_shutdown = wait_for_shutdown(shutdown_rx);
+        #[cfg(not(feature = "http2"))]
         let tcp = sparq_server::serve(
             listener,
             tcp_app,
@@ -1101,6 +1129,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             body_read_timeout,
             tcp_shutdown,
         );
+        #[cfg(feature = "http2")]
+        let tcp = {
+            let tcp_tls_config = tcp_tls_config.clone();
+            async move {
+                if let Some(tls_config) = tcp_tls_config {
+                    sparq_server::serve_tls(
+                        listener,
+                        tcp_app,
+                        tls_config,
+                        header_read_timeout,
+                        body_read_timeout,
+                        tcp_shutdown,
+                    )
+                    .await
+                } else {
+                    sparq_server::serve(
+                        listener,
+                        tcp_app,
+                        header_read_timeout,
+                        body_read_timeout,
+                        tcp_shutdown,
+                    )
+                    .await
+                }
+            }
+        };
         let h3 = sparq_http3::serve_h3(endpoint, app, h3_shutdown);
         let result = tokio::try_join!(tcp, h3);
         shutdown_task.abort();
@@ -1112,6 +1166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // concurrency slot) open forever. `sparq_server::serve` is the same accept + graceful-drain
     // loop WITH the header-read deadline (slow-loris HEADER guard) and the body read/idle deadline
     // (slow-BODY guard) wired in.
+    #[cfg(not(feature = "http2"))]
     sparq_server::serve(
         listener,
         app,
@@ -1120,7 +1175,64 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         shutdown_signal(),
     )
     .await?;
+    #[cfg(feature = "http2")]
+    if let Some(tls_config) = tcp_tls_config {
+        sparq_server::serve_tls(
+            listener,
+            app,
+            tls_config,
+            header_read_timeout,
+            body_read_timeout,
+            shutdown_signal(),
+        )
+        .await?;
+    } else {
+        sparq_server::serve(
+            listener,
+            app,
+            header_read_timeout,
+            body_read_timeout,
+            shutdown_signal(),
+        )
+        .await?;
+    }
     Ok(())
+}
+
+/// [GPT-5.6] sq-oprna.6: load the TCP listener's TLS-1.3 certificate and key and advertise both
+/// supported application protocols. The auto builder selects the matching h1/h2 connection.
+#[cfg(feature = "http2")]
+fn load_tcp_tls_config(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> Result<Arc<rustls::ServerConfig>, Box<dyn std::error::Error>> {
+    let cert_file = std::fs::File::open(cert_path)
+        .map_err(|e| format!("--tls-cert: cannot read {}: {e}", cert_path.display()))?;
+    let certs = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("--tls-cert: malformed PEM in {}: {e}", cert_path.display()))?;
+    if certs.is_empty() {
+        return Err(format!(
+            "--tls-cert: {} contains no certificates",
+            cert_path.display()
+        )
+        .into());
+    }
+
+    let key_file = std::fs::File::open(key_path)
+        .map_err(|e| format!("--tls-key: cannot read {}: {e}", key_path.display()))?;
+    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file))
+        .map_err(|e| format!("--tls-key: malformed PEM in {}: {e}", key_path.display()))?
+        .ok_or_else(|| format!("--tls-key: {} contains no private key", key_path.display()))?;
+
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("TCP TLS certificate/key configuration is invalid: {e}"))?;
+    tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(Arc::new(tls))
 }
 
 /// [GPT-5.6] sq-oprna.3: load an operator-supplied PEM chain/key into an aws-lc-rs-backed,

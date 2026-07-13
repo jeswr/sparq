@@ -161,6 +161,11 @@ pub use http::{
     ServerConfig, GLOBAL_POD,
 }; // [OPUS-4.8] sq-o4qf: bind_posture / BindPosture for the bind gate; sq-zcby: AuthPosture folds the --auth-token gate into it; sq-2gqr: serve = the accept loop with the slow-loris header-read deadline
 
+/// [GPT-5.6] sq-oprna.6: TLS h1+h2 accept loop, opt-in with the `http2` feature.
+#[cfg(feature = "http2")]
+#[cfg_attr(docsrs, doc(cfg(feature = "http2")))]
+pub use http::serve_tls;
+
 /// [GPT-5.6] Loaded shapes wrapper for opt-in SHACL transaction guard mode.
 #[cfg(feature = "shacl")]
 pub use http::ShaclShapes;
