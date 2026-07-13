@@ -15,6 +15,18 @@ service. The JavaScript host supplies the HTTP listener and authenticated WebID.
 wasm-pack build crates/sparq-lws-wasm --target web
 ```
 
+The build-only `@sparq/solid-server` workspace package stages the generated JavaScript,
+TypeScript declarations, and wasm binary in its own `wasm/` directory:
+
+```sh
+npm --workspace @sparq/solid-server run build:lws-wasm
+npm --workspace @sparq/solid-server run build:lws-wasm-core
+```
+
+Both commands intentionally emit the same core-Solid artifact until `sq-r1ei8` adds the
+`sparq-lws-core/sparql-endpoint` implementation. The default-off `sparql-endpoint` feature
+reserves that future full-tier selector without changing the feature-off wasm build.
+
 ```js
 import init, { SolidServer } from "./pkg/sparq_lws_wasm.js";
 await init();

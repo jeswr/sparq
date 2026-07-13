@@ -109,8 +109,11 @@ is separate from the `@jeswr/sparq` RDF/JS store package. It owns the real axum 
 evaluator over `CompositeStore<InMemorySparqClient, InMemoryBlobStore>`, while excluding the native
 listener, Tokio runtime, TLS/PoP/notifications, live OIDC verifier, and non-memory backends.
 
-Build it with `wasm-pack build crates/sparq-lws-wasm --target web`. Construct `SolidServer` with the
-pod base URL and the WebID that owns its provisioned root ACL, then call the Promise-returning
+Build and stage it with
+`npm --workspace @sparq/solid-server run build:lws-wasm`; use `build:lws-wasm-core` for the named
+core tier. Both commands currently produce the same core-Solid artifact because the full
+`sparql-endpoint` surface is tracked separately in `sq-r1ei8`. Construct `SolidServer` with the pod
+base URL and the WebID that owns its provisioned root ACL, then call the Promise-returning
 `handleRequest(method, path, headers, body, authenticatedWebid)`. Header arguments and response
 headers are flat name/value arrays. Omit `authenticatedWebid` for a public request.
 

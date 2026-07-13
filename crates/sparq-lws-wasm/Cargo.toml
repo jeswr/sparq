@@ -30,6 +30,11 @@ wasm-bindgen-test = "0.3"
 
 [features]
 default = []
+# [GPT-5.6] sq-6xasp.8: reserve the npm full-tier selector. The request core has no
+# SPARQL endpoint yet, so sq-r1ei8 will turn this into the downstream passthrough when
+# it adds `sparq-lws-core/sparql-endpoint`. Keeping this empty now makes both published
+# build commands honestly byte-identical and keeps the default feature set unchanged.
+sparql-endpoint = []
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = ["-Oz"]
