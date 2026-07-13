@@ -81,6 +81,23 @@ That extension is load-bearing for request policies keyed by the remote socket a
 Protocol failures are isolated to their connection or stream; resolving the shutdown
 future closes the endpoint and waits for its QUIC connections to drain.
 
+## Advertise a bound endpoint to TCP clients
+
+After the QUIC endpoint has bound successfully, apply the shared response layer to the separate
+HTTP/1.1 or HTTP/2 router. Derive the advertised port from `Endpoint::local_addr`; do not use the
+requested configuration because binding port `0` may select a different live port:
+
+```rust
+let endpoint = quinn::Endpoint::server(quic, udp_addr)?;
+let bound_addr = endpoint.local_addr()?;
+let h3_router = router.clone();
+let tcp_router = router.layer(sparq_http3::alt_svc_layer(bound_addr.port()));
+```
+
+`alt_svc_layer` overwrites `Alt-Svc` with `h3=":<port>"; ma=86400`. Serve `tcp_router` only
+while the bound endpoint is also being served; use the unlayered `h3_router` for `serve_h3`.
+Feature-enabled but unconfigured servers must keep serving the original router without this layer.
+
 ## Solid/LDP server integration
 
 `sparq-lws-core` carries this bridge behind its default-off `http3` feature
@@ -111,7 +128,8 @@ HTTP/1.1 or HTTP/2 because RFC 9220 extended CONNECT is outside this integration
 - `h3` and `h3-quinn` are pre-1.0 dependencies; keep all direct use inside this helper.
 - WebSocket-over-HTTP/3 extended CONNECT is not implemented. WebSocket clients fall back
   to the existing TCP listener.
-- Do not advertise `Alt-Svc` until the UDP listener has successfully bound.
+- Do not call `alt_svc_layer` until the UDP listener has successfully bound, and remove the
+  advertisement whenever that listener is not served.
 
 ## Related material
 

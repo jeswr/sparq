@@ -162,6 +162,17 @@ async fn h3_sparql_response_matches_the_unchanged_http1_listener() -> TestResult
             return Err(format!("server did not become ready: {stderr}").into());
         }
     };
+    let health = http.get(format!("http://{tcp_addr}/health")).send().await?;
+    assert_eq!(health.version(), reqwest::Version::HTTP_11);
+    let expected_alt_svc = format!("h3=\":{}\"; ma=86400", udp_addr.port());
+    assert_eq!(
+        health
+            .headers()
+            .get("alt-svc")
+            .and_then(|value| value.to_str().ok()),
+        Some(expected_alt_svc.as_str()),
+        "the h1 GET response must advertise the successfully bound QUIC port"
+    );
     let h1_status = http1.status().as_u16();
     let h1_content_type = http1
         .headers()
@@ -190,4 +201,39 @@ async fn h3_sparql_response_matches_the_unchanged_http1_listener() -> TestResult
     endpoint.close(quinn::VarInt::from_u32(0), b"test complete");
     tokio::time::timeout(Duration::from_secs(5), driver).await??;
     Ok(())
+}
+
+#[tokio::test]
+async fn http3_runtime_off_does_not_advertise_alt_svc() -> TestResult {
+    let tcp_addr = free_tcp_addr()?;
+    let child = Command::new(env!("CARGO_BIN_EXE_sparq-server"))
+        .arg("--addr")
+        .arg(tcp_addr.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let mut server = ChildGuard(child);
+
+    let http = reqwest::Client::new();
+    let url = format!("http://{tcp_addr}/health");
+    for _ in 0..100 {
+        match http.get(&url).send().await {
+            Ok(response) => {
+                assert!(
+                    response.headers().get("alt-svc").is_none(),
+                    "a feature-on binary without --http3 must not advertise an unbound listener"
+                );
+                return Ok(());
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(25)).await,
+        }
+    }
+
+    let _ = server.0.kill();
+    let mut stderr = String::new();
+    if let Some(mut pipe) = server.0.stderr.take() {
+        pipe.read_to_string(&mut stderr)?;
+    }
+    let _ = server.0.wait();
+    Err(format!("server did not become ready: {stderr}").into())
 }

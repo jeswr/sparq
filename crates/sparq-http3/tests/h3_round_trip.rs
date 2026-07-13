@@ -3,7 +3,7 @@
 use std::{error::Error, future::poll_fn, net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::ConnectInfo,
     http::{Method, Request, StatusCode},
     routing::{get, post},
@@ -15,8 +15,10 @@ use quinn::crypto::rustls::QuicClientConfig;
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use sparq_http3::{
-    quic_server_config, serve_h3, serve_h3_with_limits, H3ConnectionLimits, Http3ConfigError,
+    alt_svc_layer, quic_server_config, serve_h3, serve_h3_with_limits, H3ConnectionLimits,
+    Http3ConfigError,
 };
+use tower::ServiceExt as _;
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -109,6 +111,25 @@ fn config_replaces_quinns_unbounded_connection_receive_window() -> TestResult {
             quinn::VarInt::MAX.into_inner()
         )),
         "the connection receive window must not retain Quinn's VarInt::MAX default: {transport}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn alt_svc_layer_emits_the_exact_advertisement_and_replaces_stale_values() -> TestResult {
+    let app = Router::new()
+        .route("/", get(|| async { [("alt-svc", "h2=\":8443\"; ma=60")] }))
+        .layer(alt_svc_layer(443));
+    let response = app
+        .oneshot(Request::builder().uri("/").body(Body::empty())?)
+        .await?;
+
+    assert_eq!(
+        response
+            .headers()
+            .get("alt-svc")
+            .and_then(|value| value.to_str().ok()),
+        Some("h3=\":443\"; ma=86400")
     );
     Ok(())
 }

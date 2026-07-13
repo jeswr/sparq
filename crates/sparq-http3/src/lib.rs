@@ -10,5 +10,6 @@ mod server;
 
 #[cfg(feature = "server")]
 pub use server::{
-    quic_server_config, serve_h3, serve_h3_with_limits, H3ConnectionLimits, Http3ConfigError,
+    alt_svc_layer, quic_server_config, serve_h3, serve_h3_with_limits, H3ConnectionLimits,
+    Http3ConfigError,
 };

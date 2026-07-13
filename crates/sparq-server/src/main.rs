@@ -1079,6 +1079,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let key = tls_key.as_deref().expect("validated with --http3");
         let endpoint = bind_http3_endpoint(http3_addr, cert, key)?;
         let bound_addr = endpoint.local_addr()?;
+        // [GPT-5.6] sq-oprna.4: derive the advertisement from the successfully bound endpoint, not
+        // from requested configuration. Keep the h3 router unlayered: Alt-Svc is discovery for the
+        // TCP response path, and both routers still share the same application handlers.
+        let tcp_app = app
+            .clone()
+            .layer(sparq_http3::alt_svc_layer(bound_addr.port()));
         eprintln!("sparq-server HTTP/3 listening on https://{bound_addr} (QUIC/UDP; WebSocket subscriptions remain HTTP/1.1-only)");
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -1090,7 +1096,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let h3_shutdown = wait_for_shutdown(shutdown_rx);
         let tcp = sparq_server::serve(
             listener,
-            app.clone(),
+            tcp_app,
             header_read_timeout,
             body_read_timeout,
             tcp_shutdown,

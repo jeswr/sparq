@@ -4952,6 +4952,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tower",
+ "tower-http 0.7.0",
 ]
 
 [[package]]

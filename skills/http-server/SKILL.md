@@ -51,8 +51,9 @@ Both PEM paths are required when `--http3` is set, and malformed or mismatched m
 fails startup. QUIC is mandatorily encrypted, while the TCP listener remains plain HTTP for
 proxy/backward compatibility. The pre-1.0 h3 stack is contained behind the default-off
 feature. `/subscriptions` WebSockets remain HTTP/1.1-only; clients must fall back because
-HTTP/3 extended CONNECT is not implemented. This phase does not advertise `Alt-Svc`, so clients
-connect directly to the configured QUIC address. [GPT-5.6] sq-oprna.3
+HTTP/3 extended CONNECT is not implemented. Once the UDP endpoint has bound, every plain-HTTP TCP
+response advertises its live port as `Alt-Svc: h3=":<port>"; ma=86400`; no header is emitted when
+`--http3` is absent or startup cannot bind the QUIC listener. [GPT-5.6] sq-oprna.4
 
 > **Security: optional Bearer-token write gate; loopback by default.** With no token
 > configured, every endpoint is unauthenticated (the back-compat default). Set
