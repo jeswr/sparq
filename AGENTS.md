@@ -8,8 +8,8 @@ sparq is a from-scratch **RDF triplestore and SPARQL 1.1 engine in Rust** — di
 
 - **Rust crates** (crates.io): `sparq-core`, `sparq-engine` (core), `sparq-cli`, `sparq-server`, plus opt-in capability crates (`sparq-reason`, `sparq-reason-el`, `sparq-shacl`, `sparq-geo`, `sparq-text`, `sparq-rsp`, `sparq-hdt`, `sparq-solid`, `sparq-arrow`, `sparq-mcp`, `sparq-vc`, ...). `sparq-reason-el` is a **separate** opt-in crate (depending on it is the opt-in): an OWL 2 EL consequence-based classifier that computes the **complete** `rdfs:subClassOf` subsumption lattice that OWL 2 RL (`sparq-reason`) is sound but silently incomplete for — see [`skills/inference/SKILL.md`](skills/inference/SKILL.md).
 - **npm**: `@jeswr/sparq` — RDF/JS-typed API over the wasm build, zero runtime deps;
-  [GPT-5.6] `@jeswr/solid-server` — loopback-only fixed-owner Solid/LDP development host over the
-  separate in-memory wasm adapter.
+  [GPT-5.6] `@jeswr/solid-server` — loopback-only Solid/LDP development host over the separate
+  in-memory wasm adapter, with fixed-owner default and opt-in Node-side Solid-OIDC verification.
 - **PyPI**: `sparq-rdf` (import name `sparq`) — pyo3/maturin bindings.
 
 Status: experimental research engine; the API is unstable.

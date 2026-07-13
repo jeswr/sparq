@@ -1,13 +1,13 @@
-<!-- [GPT-5.6] sq-6xasp.9: honest public-package README for the Node wasm host. -->
+<!-- [GPT-5.6] sq-6xasp.9/.10: honest public-package README for the Node wasm host. -->
 # @jeswr/solid-server
 
 A local-development [Solid](https://solidproject.org/) LDP + WAC server backed by
 sparq WebAssembly. Node owns the loopback HTTP listener; one long-lived wasm
 `SolidServer` owns the in-memory pod.
 
-> This v1 package is not a production server. Every request is treated as the
-> configured owner WebID without authentication. Do not expose the listener or
-> place sensitive data in it.
+> This v1 package is not a production server. Its default mode treats every
+> request as the configured owner without authentication. Solid-OIDC verification
+> is opt-in and does not add production transport or persistence hardening.
 
 ## 🚀 Quickstart
 
@@ -36,6 +36,7 @@ const server = await startSolidServer({
   port: 3000,
   baseUrl: 'http://127.0.0.1:3000',
   ownerWebid: 'https://id.example/alice#me',
+  oidc: true,
 });
 
 // Later: await server.closeAsync();
@@ -51,7 +52,12 @@ Options may also come from `SPARQ_SOLID_PORT` (or `PORT`),
 - The listener binds only `127.0.0.1`; `baseUrl` is the public pod origin and
   may differ when a local proxy terminates TLS.
 - Storage is process-local and disappears on shutdown.
-- Authentication is fixed-owner local mode. There is no OIDC verification.
+- Authentication defaults to fixed-owner local mode. Set `oidc: true` in the
+  Node API to require and verify Solid-OIDC access tokens plus request-bound DPoP
+  proofs with `@solid/access-token-verifier`; missing, invalid, expired, replayed,
+  or bearer-only credentials stay anonymous. The `npx` command remains fixed-owner.
+- OIDC verification runs in Node, not wasm. `baseUrl` must match the public URL
+  used in DPoP proofs; the verifier dereferences the WebID and issuer JWKS.
 - TLS, persistent storage, notifications, PoP, and native networking remain
   outside the wasm module.
 - The current full/core builds contain the same Solid-only surface; the SPARQL
@@ -59,10 +65,11 @@ Options may also come from `SPARQ_SOLID_PORT` (or `PORT`),
 
 ## 📚 API
 
-`startSolidServer({ port, baseUrl, ownerWebid })` resolves to a Node
+`startSolidServer({ port, baseUrl, ownerWebid, oidc })` resolves to a Node
 `http.Server` after it is listening. The package adds
 `server.closeAsync(): Promise<void>` for clean shutdown. One server instance
-reuses one wasm pod, so writes remain visible until shutdown.
+reuses one wasm pod, so writes remain visible until shutdown. `ownerWebid`
+provisions the root WAC policy; in OIDC mode it is not an authentication claim.
 
 See the [JavaScript/Wasm usage skill](../../skills/javascript-wasm/SKILL.md)
 for the raw request adapter and host contract.
