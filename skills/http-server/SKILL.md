@@ -1,6 +1,6 @@
 ---
 name: http-server
-description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST (plus the query-only HTTP QUERY method, w3c/sparql-protocol#40, for Oxigraph interop), content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML/JSON-LD — JSON-LD via the default-on jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + default-on JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and generation-pinned snapshot reads (a Sparq-Generation header + ?generation=N pin in the DEFAULT build, bounded to the ring's concurrency-retention window; opt-in time-travel widens it). Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
+description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST (plus the query-only HTTP QUERY method, w3c/sparql-protocol#40, for Oxigraph interop), content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML/JSON-LD — JSON-LD via the default-on jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + default-on JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, opt-in grouped facet counts, and generation-pinned snapshot reads (a Sparq-Generation header + ?generation=N pin in the DEFAULT build, bounded to the ring's concurrency-retention window; opt-in time-travel widens it). Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
 ---
 
 # sparq-http-server
@@ -11,7 +11,7 @@ with `--persist DIR` (updates WAL-fsync'd, survive a restart with no rebuild; se
 "Durability" gotcha). It implements the **SPARQL 1.1 Protocol** (`query` + `update` at
 `/sparql`) and the **Graph Store HTTP Protocol** (read + write), with `Accept`-driven
 content negotiation, hardening guards, Prometheus `/metrics`, WebSocket + SSE subscriptions,
-and opt-in time-travel + GeoSPARQL.
+and opt-in grouped facet counts, time-travel, and GeoSPARQL.
 
 Build with the default-off `response-compression` feature to negotiate gzip or zstd for outbound
 result bodies from `Accept-Encoding`. Compression is transport-transparent and streaming; SSE
@@ -179,7 +179,9 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
 
 - `fn router(state: AppState) -> axum::Router` — builds the hardened endpoint router
   (`/sparql`, `/sparql/graph`, `/graphs/*path`, `/subscriptions`, `/subscriptions/sse`,
-  `/health`, `/metrics`). [OPUS-4.8] sq-bxog: `/subscriptions/sse` is the SSE transport.
+  `/health`, `/metrics`, plus feature-gated routes such as `/facets`). [OPUS-4.8] sq-bxog:
+  `/subscriptions/sse` is the SSE transport. [GPT-5.6] sq-lsp7k.5.2: `/facets` needs the
+  `facets` build feature and the runtime `ServerConfig::facets` flag.
 - `AppState::new(graph: Graph) -> AppState` — default `ServerConfig`.
 - `AppState::with_config(graph: Graph, config: ServerConfig) -> AppState`.
 - `AppState::current(&self) -> PinnedGen` — lock-free pin of the current immutable
@@ -204,7 +206,7 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   max_query_bytes: Option<usize>,
   max_decompress_ratio: usize, max_subscriptions: usize, max_subscriptions_per_conn: usize,
   verbose: bool, redact_logs: bool, allow_remote: bool, auth_token: Option<String>, auth_token_read: bool,
-  service_allow: ServiceAllowlist, /* + time_travel_* under feature, + audit_log under audit-log feature */ }` with
+  service_allow: ServiceAllowlist, /* + time_travel_* / facets under their features, + audit_log under audit-log feature */ }` with
   `ServerConfig::default()` and `ServerConfig::from_env()`.
   (`update_where_timeout` = separate, typically-SHORTER writer-side WHERE deadline for SPARQL
   UPDATE that bounds writer-queue **head-of-line blocking** from a slow update — `None` =
@@ -952,6 +954,29 @@ curl http://127.0.0.1:3030/.well-known/void                         # VoID + scs
 curl -H 'Accept: application/n-triples' http://127.0.0.1:3030/sparql # Service Description (no query)
 ```
 
+**5c-bis. Grouped facet counts (OPT-IN, [GPT-5.6] `sq-lsp7k.5.2`; feature `facets`).**
+`POST /facets` evaluates one `sparq_introspect::FacetRequest` against a pinned store snapshot and
+returns its `FacetResponse` JSON: candidate-subject count plus ranked type, predicate, and requested
+object-value distributions. `class` is an optional `rdf:type` class IRI; every `constraints` pair is
+`[predicate IRI, object N-Triples term]` and the pairs are AND-combined; `facet_predicates: null`
+requests values for every candidate predicate; `top_k` bounds every retained distribution.
+
+```sh
+cargo run -p sparq-server --features facets -- data.ttl --facets
+curl -X POST -H 'Content-Type: application/json' http://127.0.0.1:3030/facets -d '{
+  "class":"http://ex/Person",
+  "constraints":[["http://ex/status","<http://ex/active>"]],
+  "facet_predicates":["http://ex/tag"],
+  "top_k":10
+}'
+```
+
+The response is `200 application/json`; malformed JSON is a sanitized `400`. The scan runs on the
+blocking pool and holds one immutable generation pin for the whole evaluation. The endpoint is a
+READ, so `--auth-token-read` gates it. It is double opt-in and OFF by default: the `facets` cargo
+feature compiles the route + `sparq-introspect` dependency, and `--facets` / `SPARQ_FACETS=1`
+serves it. Feature on but flag off gives `404`; feature off compiles no route or dependency.
+
 **5d. Triple Pattern Fragments / LDF source endpoint (OPT-IN, `sq-bzh1`).** A server can expose
 itself as a low-cost [Linked Data Fragments](http://linkeddatafragments.org/) /
 [Triple Pattern Fragments](https://www.hydra-cg.com/spec/latest/triple-pattern-fragments/)
@@ -1259,6 +1284,7 @@ env overrides the default.
 | `--time-travel-generations N` | `SPARQ_TIME_TRAVEL_GENERATIONS` | `16` | (feature) retained generations |
 | `--time-travel-max-age SECS` | `SPARQ_TIME_TRAVEL_MAX_AGE` | off | (feature) age-out window |
 | `--federation-descriptors` | `SPARQ_FEDERATION_DESCRIPTORS` | off | (feature `federation-descriptors`) serve a VoID at `/.well-known/void` + a SPARQL Service Description on `GET /sparql` with no query — see "Federation discovery" |
+| `--facets` | `SPARQ_FACETS` | off | (feature `facets`) serve `POST /facets` grouped type/predicate/value counts over a pinned snapshot; read-gated — see "Grouped facet counts" ([GPT-5.6] sq-lsp7k.5.2) |
 | `--tpf` | `SPARQ_TPF` | off | (feature `tpf`) serve a Triple Pattern Fragments / LDF source endpoint at `GET /tpf?subject=&predicate=&object=` (paged, full Hydra paging incl. `first`/`last`, read-only); same flag also serves brTPF bind-restricted fragments (`values` param / `POST` body) when built with the `brtpf` feature — see "Triple Pattern Fragments" |
 | `--shacl` | `SPARQ_SHACL` | off | (feature `shacl`) serve the SHACL validate endpoint `POST /shacl/validate` — POST a shapes graph, the server validates its loaded data graph against it; JSON report (default) or W3C report Turtle (`Accept: text/turtle`); read-only — see "SHACL validation endpoint" |
 | `--shacl-guard` | `SPARQ_SHACL_GUARD` | off | (feature `shacl`) reject non-conforming UPDATE/GSP post-states with `422` + JSON validation report; store unchanged |
@@ -1589,8 +1615,10 @@ identities and resource IRIs by design (see the privacy-boundary note above).
   `500`. `federation-descriptors` (default **off**, `sq-d3d8`) pulls the light
   `sparq-introspect` crate and serves the OPT-IN VoID + Service-Description discovery
   endpoints (still gated at runtime by `--federation-descriptors`; see "Federation
-  discovery"). Run feature tests: `cargo test -p sparq-server --features time-travel` /
-  `--features geo` / `--features federation-descriptors`.
+  discovery"). `facets` (default **off**, [GPT-5.6] `sq-lsp7k.5.2`) uses the same light
+  `sparq-introspect` dependency for `POST /facets`, still gated at runtime by `--facets`.
+  Run feature tests: `cargo test -p sparq-server --features time-travel` / `--features geo` /
+  `--features federation-descriptors` / `--features facets`.
 - **Named graphs are real (since conformance round 3).** The engine stores the FULL dataset
   — default graph + named graphs — so `GRAPH <g> { … }` / `GRAPH ?g { … }` evaluate, and a
   GSP graph resource (`?graph=<iri>` or the direct request URI) addresses a genuine named

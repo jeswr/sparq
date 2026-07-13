@@ -104,6 +104,9 @@
 //!   --max-decompress-ratio N  [OPUS-4.8 sq-ebii] DECOMPRESSION-RATIO cap for a `Content-Encoding: gzip`
 //!                             request body (zip-bomb guard; 413), 0 = refuse gzip bodies
 //!                                                                        [20, env SPARQ_MAX_DECOMPRESS_RATIO]
+//!   --facets                  [GPT-5.6 sq-lsp7k.5.2] (feature `facets`) serve the OPT-IN grouped
+//!                             facet-count endpoint `POST /facets`. Read-only. Off by default
+//!                                                                        [off, env SPARQ_FACETS=1]
 //!   --brtpf-max-bindings N    [OPUS-4.8 sq-r74h] (feature `brtpf`) DoS cap on the brTPF binding-set
 //!                             MAPPING COUNT — one index scan runs per mapping, so cost is super-linear
 //!                             in the count, not the bytes (413 beyond), 0 off
@@ -453,6 +456,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // GET /sparql with no query. Off by default (env SPARQ_FEDERATION_DESCRIPTORS=1).
             #[cfg(feature = "federation-descriptors")]
             "--federation-descriptors" => config.federation_descriptors = true,
+            // [GPT-5.6] sq-lsp7k.5.2: OPT-IN grouped facet counts over a pinned snapshot.
+            // Read-only. Off by default (env SPARQ_FACETS=1).
+            #[cfg(feature = "facets")]
+            "--facets" => config.facets = true,
             // [OPUS-4.8] sq-bzh1 (epic sq-3183): OPT-IN Triple Pattern Fragments / LDF source
             // endpoint — serve a paged RDF fragment of a triple pattern at GET /tpf with Hydra
             // controls. Read-only. Off by default (env SPARQ_TPF=1).
@@ -564,6 +571,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     ""
                 };
+                // [GPT-5.6] sq-lsp7k.5.2: surface the OPT-IN facet-count endpoint flag.
+                let facets = if cfg!(feature = "facets") {
+                    " [--facets]"
+                } else {
+                    ""
+                };
                 // [OPUS-4.8] sq-r74h: surface the brTPF binding-set DoS caps in --help (feature brtpf).
                 let brtpf = if cfg!(feature = "brtpf") {
                     " [--brtpf-max-bindings N] [--brtpf-max-values-bytes N]"
@@ -619,7 +632,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
-                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl}{n3_patch}{terse}{templates}{backup}{change_stream} \
+                     [--max-subscriptions-per-conn N]{time_travel}{service}{facets}{brtpf}{shacl}{n3_patch}{terse}{templates}{backup}{change_stream} \
                      [--cors-allow-origin ORIGIN]... [--cors-allow-origin-file PATH] [--verbose] \
                      [--log-full-requests]{http3} [DATA_FILE]\n  \
                      or: sparq-server --health-probe [--health-probe-addr HOST:PORT]\n\n  \
