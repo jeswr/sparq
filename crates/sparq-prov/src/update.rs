@@ -221,6 +221,14 @@ impl UpdateDerivation {
     pub fn prov_ntriples(&self) -> String {
         sparq_engine::triples_to_ntriples(&self.prov_graph())
     }
+
+    /// The same PROV-O lineage as [`prov_graph`](Self::prov_graph), serialised as
+    /// prefix-compacted Turtle.
+    ///
+    /// [GPT-5.6] sq-ijw35
+    pub fn prov_turtle(&self) -> String {
+        crate::triples_to_prov_turtle(&self.prov_graph())
+    }
 }
 
 /// Apply a SPARQL UPDATE to `graph` **in place**, capturing W3C PROV-O lineage for the
@@ -681,6 +689,36 @@ mod tests {
             .collect::<Result<_, _>>()
             .expect("emitted lineage must be well-formed N-Triples");
         assert_eq!(parsed.len(), d.prov_graph().len());
+    }
+
+    /// [GPT-5.6] sq-ijw35: the UpdateDerivation Turtle method preserves every
+    /// provenance triple, and the inserted-result entity uses the registered prefix.
+    #[test]
+    fn prov_turtle_round_trips_the_exact_update_graph() {
+        let mut graph = g();
+        let d = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+            cfg(),
+        )
+        .unwrap();
+
+        let turtle = d.prov_turtle();
+        assert!(
+            turtle.contains("prov:Entity"),
+            "expected the prefix-compacted result entity in {turtle}"
+        );
+
+        let parsed: Vec<_> = oxttl::TurtleParser::new()
+            .for_slice(turtle.as_bytes())
+            .collect::<Result<_, _>>()
+            .expect("emitted lineage must be well-formed Turtle");
+        let expected = d.prov_graph();
+        assert_eq!(parsed.len(), expected.len());
+        assert_eq!(
+            parsed.into_iter().collect::<HashSet<_>>(),
+            expected.into_iter().collect::<HashSet<_>>()
+        );
     }
 
     #[test]

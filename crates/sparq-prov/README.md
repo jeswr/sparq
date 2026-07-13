@@ -34,7 +34,8 @@ let d = derive_construct(
 
 let derived = d.triples();          // the data the operation produced
 let lineage = d.prov_graph();       // its PROV-O record (Vec<Triple>)
-let turtle  = d.prov_ntriples();    // …serialised (N-Triples ⊂ Turtle)
+let turtle  = d.prov_turtle();      // …serialised as prefix-compacted Turtle
+let nt      = d.prov_ntriples();    // …or canonical N-Triples
 ```
 
 ## ✨ Features
