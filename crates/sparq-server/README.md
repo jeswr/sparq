@@ -57,7 +57,16 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   `backup` (no-stop-the-world `/admin/backup` snapshot + PITR delta `/admin/backup/delta` +
   `/admin/restore` — single-flight: a second concurrent restore is an explicit `409`; on `--persist`,
   `?persist=true`/`--restore-persist` writes the restore through to disk crash-safely so it survives a restart), `change-stream` (durable CDC — commits recorded to a segmented fsync'd log + the Neptune-`GetRecords`-shaped `GET /streams` poll, `--change-stream DIR`),
-  `audit-log`/`access-audit`, `zlib-ng`.
+  `audit-log`/`access-audit`, `zlib-ng`, and `http3` (encrypted QUIC/UDP beside the unchanged
+  plain-HTTP TCP listener; see below).
+- **HTTP/3 transport** ([GPT-5.6] sq-oprna.3) — compile with `--features http3`, then pass
+  `--http3 --tls-cert cert.pem --tls-key key.pem`. The QUIC listener defaults to the same
+  address and numeric port as `--addr` (UDP rather than TCP); `--http3-addr HOST:PORT` overrides
+  it. It serves the same router and byte serialization while the existing HTTP/1.1 listener and
+  its slow-client timers remain unchanged. QUIC is always encrypted; startup fails clearly when
+  either PEM path is missing or invalid. `/subscriptions` WebSockets remain HTTP/1.1-only because
+  HTTP/3 extended CONNECT is outside this feature. This phase does not emit `Alt-Svc`; clients
+  connect to the configured QUIC address directly until the advertising layer lands.
 - **Default-on JSON-LD** ([OPUS-4.8] sq-oy1f.4, epic sq-oy1f) — the `jsonld` feature is in the
   server's **default** set: `application/ld+json` joins q-value-aware RDF conneg out of the box, **both
   directions** (flattened JSON-LD on CONSTRUCT/DESCRIBE/GSP-read; `oxjsonld` GSP write body). Off via

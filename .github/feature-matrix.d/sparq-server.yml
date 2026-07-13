@@ -88,6 +88,13 @@
   features: "response-compression"
   test: true
 
+# [GPT-5.6] sq-oprna.3: encrypted HTTP/3 over a second UDP listener, including the
+# real cross-protocol SPARQL serialization parity integration test.
+- name: "sparq-server (http3)"
+  crate: "sparq-server"
+  features: "http3"
+  test: true
+
 # [OPUS-4.8] sq-2999l (gh-906): the OPT-IN CDC change-stream poll endpoint (`GET /streams`) in the
 # Amazon-Neptune-Streams `GetRecords` shape, over the merged durable change-stream (sq-b4fns /
 # #1223). The `streams_endpoint` handler, the `streams::*` pure builder (iterator-type resolution +
