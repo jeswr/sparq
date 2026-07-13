@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 
-use sparq_difftest::{decision_diff, fail_closed_asymmetry, DecisionOutcome};
+use sparq_difftest::{decision_diff, fail_closed_asymmetry, Baseline, Candidate, DecisionOutcome};
 
 type Tuple = (&'static str, &'static str, &'static str);
 
@@ -23,13 +23,13 @@ fn identical_decisions_yield_empty_diff() {
     );
     let b = a.clone();
 
-    let d = decision_diff(&a, &b);
+    let d = decision_diff(Baseline::new(&a), Candidate::new(&b));
     assert!(d.same);
     assert!(d.added_allow.is_empty());
     assert!(d.dropped_allow.is_empty());
     assert!(d.added_deny.is_empty());
     assert!(d.dropped_deny.is_empty());
-    assert!(fail_closed_asymmetry(&a, &b).is_empty());
+    assert!(fail_closed_asymmetry(Baseline::new(&a), Candidate::new(&b)).is_empty());
 }
 
 /// Acceptance (2): an added allow on side B — whether A explicitly denied the tuple or merely
@@ -49,13 +49,13 @@ fn added_allow_on_b_is_flagged_as_escalation() {
         [],
     );
 
-    let esc = fail_closed_asymmetry(&a, &b);
+    let esc = fail_closed_asymmetry(Baseline::new(&a), Candidate::new(&b));
     assert_eq!(
         esc,
         BTreeSet::from([t("bob", "Write", "/doc"), t("mallory", "Read", "/priv")])
     );
     // The full diff agrees: the escalation direction IS added_allow, and same == false.
-    let d = decision_diff(&a, &b);
+    let d = decision_diff(Baseline::new(&a), Candidate::new(&b));
     assert!(!d.same);
     assert_eq!(d.added_allow, esc);
 }
@@ -75,8 +75,8 @@ fn dropped_allow_only_yields_empty_asymmetry() {
         [t("bob", "Write", "/doc")],
     );
 
-    assert!(fail_closed_asymmetry(&a, &b).is_empty());
-    let d = decision_diff(&a, &b);
+    assert!(fail_closed_asymmetry(Baseline::new(&a), Candidate::new(&b)).is_empty());
+    let d = decision_diff(Baseline::new(&a), Candidate::new(&b));
     assert!(!d.same); // the decisions DO differ…
     assert_eq!(
         d.dropped_allow,
@@ -98,7 +98,7 @@ fn deny_changes_classified_correctly() {
         [t("bob", "Write", "/doc"), t("erin", "Control", "/doc")],
     );
 
-    let d = decision_diff(&a, &b);
+    let d = decision_diff(Baseline::new(&a), Candidate::new(&b));
     assert!(!d.same);
     assert_eq!(d.added_deny, BTreeSet::from([t("erin", "Control", "/doc")]));
     assert_eq!(
@@ -107,5 +107,5 @@ fn deny_changes_classified_correctly() {
     );
     assert!(d.added_allow.is_empty());
     assert!(d.dropped_allow.is_empty());
-    assert!(fail_closed_asymmetry(&a, &b).is_empty());
+    assert!(fail_closed_asymmetry(Baseline::new(&a), Candidate::new(&b)).is_empty());
 }
