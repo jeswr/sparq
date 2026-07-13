@@ -368,6 +368,36 @@ let (matched, retracted) =
 // ambiguous re-eval (no constraint evidence) → retracted == 0 (deny KEPT, fail-closed).
 ```
 
+## Pattern-scoped ODRL targets (sub-graph result masking) — [GPT-5.6] sq-f9u1y
+
+An ODRL target can denote a **triple-pattern sub-graph** of a source graph rather than the whole graph — a *pattern asset*. Two layers, at different maturity:
+
+**Shipped — the `pattern-scope` masking primitive** (opt-in `pattern-scope` feature of `sparq-solid`, library-level, off by default). A `GraphScope` is a set of allow/deny `ScopePattern`s; each pattern's subject/predicate/object is a concrete `Term` or a **wildcard** (`None` = matches anything in that position). A triple is visible iff it matches ≥1 allow pattern **and** 0 deny patterns — **deny overrides allow**. Matching is **term-identity**, not value equality (`"01"^^xsd:integer` does not match a pattern naming the canonical `1`). `masked_graph(base, &scope)` **materializes** the masked sub-graph — it does not filter at query time — so the engine evaluates a real `Graph = D ∖ masked-triples`: OPTIONAL / EXISTS / MINUS / aggregate / COUNT / ASK equivalence is an identity, inherited by every engine fast path.
+
+```rust,ignore
+// Only phone triples are visible in this scope; every other triple is masked out.
+let scope = GraphScope::allow_only(vec![
+    ScopePattern::new(None, Some(phone_pred), None), // wildcard S/O, fixed predicate
+]);
+let masked = masked_graph(&contacts, &scope);
+```
+
+**Fail-closed:** `GraphScope::allow_only(vec![])` (an empty allow-set) grants **nothing** — never a whole-graph fallback.
+
+**Designed — the ODRL→pattern-grant bridge vocabulary** (research §5). The policy parsing + `auth:PatternGrant` materialization are **follow-up beads, not yet wired**, so an ODRL policy cannot yet target a pattern asset end-to-end; the intended triples-native vocabulary (sparq ODRL-profile namespace) is:
+
+```turtle
+<urn:ex:asset:contacts-sans-phone> a sparq:PatternAsset ;
+    sparq:sourceGraph <https://pod.ex/contacts> ;                 # exactly one
+    sparq:pattern [ sparq:predicate <https://ex.dev/ns#phone> ] . # >=1; absent component = wildcard
+```
+
+`odrl:target <PatternAsset>` on a **permission** yields allow-patterns over `sourceGraph`; on a **prohibition**, deny-patterns (deny overrides allow, as in the graph-granular bridge). The materialized output (in the reserved `<urn:sparq:auth>` graph) is an `auth:PatternGrant` node (`auth:agent` / `auth:mode` / `auth:graph` + ≥1 `auth:allowPattern` / `auth:denyPattern` blank nodes), structurally parallel to the existing `auth:ConditionalGrant`.
+
+**Fail-closed parse rule (designed):** a `PatternAsset` with **zero** parseable patterns, an **ambiguous** `sourceGraph`, or **any** non-concrete component ⇒ the rule materializes **nothing** (absence-of-grant, never a whole-graph fallback).
+
+*Honest scope:* clear-path authorisation — no cryptographic / privacy / unlinkability guarantee is claimed. Design record: [`research/odrl-pattern-scoped-targets-2026-07.md`](../../research/odrl-pattern-scoped-targets-2026-07.md).
+
 ## Conformance — SolidLab ODRL Test Suite — [OPUS-4.8] sq-tmsd6
 
 The evaluator is ratcheted against the MIT-licensed
