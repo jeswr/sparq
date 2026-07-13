@@ -1,7 +1,7 @@
 //! [OPUS-4.8] (sq-0z43i, gh #909) Real MCP round-trip over an in-memory store:
 //! initialize → tools/list → tools/call. Exercises the actual dispatch core
 //! (`McpServer::handle_message`) — no mock bypasses the engine; `query` runs through
-//! the real `sparq-engine` query path and `introspect`/`stats` through the real
+//! the real `sparq-engine` query path and `introspect`/`stats`/`prefixes` through the real
 //! `sparq-introspect` schema miner. The load-bearing invariants asserted here:
 //!   - read-only by DEFAULT: `update` is absent from `tools/list` and a `tools/call`
 //!     for it is refused (fail-closed mutation surface);
@@ -19,8 +19,19 @@ ex:alice rdf:type ex:Person ; ex:name "Alice" ; ex:knows ex:bob .
 ex:bob   rdf:type ex:Person ; ex:name "Bob" .
 "#;
 
+// [GPT-5.6] sq-kx5b0: three distinct schema.org IRIs and one FOAF IRI give the
+// `prefixes` tool a mutation-witnessed ordering/count fixture.
+const PREFIXES_TTL: &str = r#"@prefix schema: <https://schema.org/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+schema:alice schema:knows schema:bob ; foaf:name "Alice" .
+"#;
+
 fn graph() -> Graph {
     Graph::load_str(TTL, "turtle").expect("load turtle")
+}
+
+fn prefixes_graph() -> Graph {
+    Graph::load_str(PREFIXES_TTL, "turtle").expect("load prefixes turtle")
 }
 
 /// Parse a server response line into JSON.
@@ -69,6 +80,7 @@ fn read_only_server_lists_read_tools_only() {
     assert!(names.contains(&"introspect"));
     assert!(names.contains(&"shapes"));
     assert!(names.contains(&"stats"));
+    assert!(names.contains(&"prefixes"));
     assert!(names.contains(&"void"));
     // [GPT-5.6] sq-lsp7k.22: the validator dependency and tool stay opt-in.
     #[cfg(not(feature = "shacl"))]
@@ -182,6 +194,29 @@ fn introspect_and_stats_reflect_the_graph() {
     );
     let summary = ix["result"]["content"][0]["text"].as_str().unwrap();
     assert!(summary.contains("Schema summary"), "got: {}", summary);
+}
+
+#[test]
+fn prefixes_tool_lists_namespaces_by_descending_term_count() {
+    let mut server = McpServer::new(prefixes_graph());
+    let response = call(
+        &mut server,
+        r#"{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"prefixes","arguments":{}}}"#,
+    );
+    let result = &response["result"];
+    assert_eq!(result["isError"], false, "{response}");
+    let payload: Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+
+    assert_eq!(payload["distinct_prefixes"], 2);
+    let prefixes = payload["prefixes"].as_array().unwrap();
+    assert_eq!(prefixes.len(), 2);
+    assert_eq!(prefixes[0]["prefix"], "schema");
+    assert_eq!(prefixes[0]["namespace"], "https://schema.org/");
+    assert_eq!(prefixes[0]["term_count"], 3);
+    assert_eq!(prefixes[1]["prefix"], "foaf");
+    assert_eq!(prefixes[1]["namespace"], "http://xmlns.com/foaf/0.1/");
+    assert_eq!(prefixes[1]["term_count"], 1);
 }
 
 #[test]

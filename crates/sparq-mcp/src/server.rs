@@ -230,6 +230,7 @@ impl McpServer {
             "introspect" => self.tool_introspect(&args),
             "shapes" => self.tool_shapes(&args),
             "stats" => self.tool_stats(),
+            "prefixes" => self.tool_prefixes(),
             "void" => self.tool_void(&args),
             #[cfg(feature = "nlq")]
             "ask" => self.tool_ask(&args),
@@ -321,6 +322,29 @@ impl McpServer {
             "namespaces": ix.vocabularies.distinct,
         });
         Ok(serde_json::to_string_pretty(&stats).unwrap_or_else(|_| stats.to_string()))
+    }
+
+    /// [GPT-5.6] sq-kx5b0: `prefixes`, namespace declarations ranked by term count.
+    fn tool_prefixes(&self) -> Result<String, String> {
+        let ix = Introspection::build(&self.graph);
+        let distinct_prefixes = ix.vocabularies.distinct;
+        let mut namespaces = ix.vocabularies.namespaces;
+        namespaces.sort_by(|a, b| b.terms.cmp(&a.terms).then(a.namespace.cmp(&b.namespace)));
+        let prefixes: Vec<Value> = namespaces
+            .into_iter()
+            .map(|vocabulary| {
+                json!({
+                    "prefix": vocabulary.prefix,
+                    "namespace": vocabulary.namespace,
+                    "term_count": vocabulary.terms,
+                })
+            })
+            .collect();
+        let result = json!({
+            "distinct_prefixes": distinct_prefixes,
+            "prefixes": prefixes,
+        });
+        Ok(serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()))
     }
 
     /// `void`: W3C VoID dataset descriptor as deterministic N-Triples.

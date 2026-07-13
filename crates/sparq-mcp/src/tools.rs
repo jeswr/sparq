@@ -12,6 +12,7 @@
 //!   cardinality constraints for one class IRI; structured grounding for a client LLM —
 //!   no server-side model). [OPUS-4.8] sq-zak4f
 //! - `stats` → graph triple count + introspection totals.
+//! - `prefixes` → namespace declarations + per-namespace distinct-IRI term counts.
 //! - `void` → `sparq_introspect::Introspection::to_void` (W3C VoID N-Triples).
 //! - `validate` (feature `shacl`, OFF by default) → `sparq_shacl::validate` over
 //!   caller-supplied shapes; read-only and absent from the default tool surface.
@@ -164,6 +165,22 @@ pub const STATS: ToolSpec = ToolSpec {
                   distinct subjects, typed entities, and the number of distinct \
                   classes / predicates / namespaces. Cheap, structured counts for \
                   deciding how to query the dataset.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        })
+    },
+};
+
+/// [GPT-5.6] sq-kx5b0: namespace declarations ranked by distinct-IRI term count.
+pub const PREFIXES: ToolSpec = ToolSpec {
+    name: "prefixes",
+    description: "Return namespace declarations detected in the loaded graph: each known \
+                  prefix, its namespace IRI, and its distinct IRI term count, sorted by \
+                  term count descending. Also returns the total number of distinct \
+                  namespaces as distinct_prefixes. No LLM is involved.",
     input_schema: || {
         json!({
             "type": "object",
@@ -390,7 +407,15 @@ pub const VALIDATE: ToolSpec = ToolSpec {
 
 /// The read-only tool set, always advertised in the default build. `ask` (feature `nlq`)
 /// is appended by [`advertised`] only when a model backend is configured.
-pub const READ_ONLY: &[&ToolSpec] = &[&QUERY, &CONSTRUCT, &INTROSPECT, &SHAPES, &STATS, &VOID];
+pub const READ_ONLY: &[&ToolSpec] = &[
+    &QUERY,
+    &CONSTRUCT,
+    &INTROSPECT,
+    &SHAPES,
+    &STATS,
+    &PREFIXES,
+    &VOID,
+];
 
 /// The full list of tools this server advertises, given its config — `UPDATE` is
 /// appended only when [`McpServer`] was built with update enabled, and `ask` (feature
