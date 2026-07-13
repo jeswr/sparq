@@ -45,6 +45,7 @@ let d = derive_construct(
 ).unwrap();
 
 let derived = d.triples();       // the derived data (Vec<Triple>)
+let inputs  = d.used_inputs();   // configured input IRIs, in order (&[NamedNode])
 let lineage = d.prov_graph();    // its PROV-O record (Vec<Triple>)
 let turtle  = d.prov_ntriples(); // …serialised (N-Triples ⊂ Turtle)
 ```
@@ -93,6 +94,7 @@ let d = derive_update(
 
 let inserted = d.inserted();    // the generated (derived) triples
 let deleted  = d.deleted();     // the retracted (invalidated) triples
+let inputs   = d.used_inputs(); // configured input IRIs, in order
 let lineage  = d.prov_graph();  // its PROV-O record (Vec<Triple>)
 ```
 

@@ -94,6 +94,12 @@ impl UpdateDerivation {
         &self.entity
     }
 
+    /// The configured input-source IRIs, in their original order.
+    // [GPT-5.6] sq-cg237
+    pub fn used_inputs(&self) -> &[NamedNode] {
+        &self.used
+    }
+
     /// Start/end wall-clock instants of the update activity.
     pub fn timing(&self) -> (SystemTime, SystemTime) {
         (self.started, self.ended)
@@ -493,6 +499,30 @@ mod tests {
         // The derived data: one renamed triple per matched subject; nothing retracted.
         assert_eq!(d.inserted().len(), 2);
         assert!(d.deleted().is_empty());
+    }
+
+    /// [GPT-5.6] sq-cg237: the direct accessor exposes the configured input and agrees
+    /// with the update activity's materialised `prov:used` edge.
+    #[test]
+    fn update_used_inputs_are_exposed_and_materialised() {
+        let source = NamedNode::new_unchecked("http://ex/update-source");
+        let mut graph = g();
+        let derivation = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+            ProvConfig::with_inputs([source.clone()]),
+        )
+        .unwrap();
+
+        assert_eq!(derivation.used_inputs(), std::slice::from_ref(&source));
+        assert_eq!(derivation.used_inputs().len(), 1);
+
+        let activity = NamedOrBlankNode::NamedNode(derivation.activity().clone());
+        assert!(derivation.prov_graph().iter().any(|triple| {
+            triple.subject == activity
+                && triple.predicate.as_str() == "http://www.w3.org/ns/prov#used"
+                && triple.object == Term::NamedNode(source.clone())
+        }));
     }
 
     #[test]
