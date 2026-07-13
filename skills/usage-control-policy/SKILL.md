@@ -368,7 +368,7 @@ let (matched, retracted) =
 // ambiguous re-eval (no constraint evidence) → retracted == 0 (deny KEPT, fail-closed).
 ```
 
-## Pattern-scoped ODRL targets (sub-graph result masking) — [GPT-5.6] sq-f9u1y
+## Pattern-scoped ODRL targets (sub-graph result masking) — [OPUS-4.8] sq-f9u1y
 
 An ODRL target can denote a **triple-pattern sub-graph** of a source graph rather than the whole graph — a *pattern asset*. Two layers, at different maturity:
 
