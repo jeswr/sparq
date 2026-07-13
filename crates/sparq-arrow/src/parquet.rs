@@ -59,6 +59,20 @@ pub fn parquet_variables_from_bytes(bytes: &[u8]) -> Result<Vec<Variable>, Arrow
     variables_from_schema(builder.schema().as_ref())
 }
 
+/// Read the total row count from a Parquet file's metadata.
+///
+/// This does not build a record-batch reader or decode any row groups.
+///
+/// # Errors
+///
+/// Returns [`ArrowError`] if `bytes` do not contain readable Parquet metadata.
+// [GPT-5.6] Keep the metadata-only path separate from full row decoding.
+pub fn parquet_row_count_from_bytes(bytes: &[u8]) -> Result<usize, ArrowError> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(Bytes::copy_from_slice(bytes))
+        .map_err(import_error)?;
+    Ok(builder.metadata().file_metadata().num_rows() as usize)
+}
+
 /// Deserialize Parquet bytes containing this crate's RDF-term Arrow projection.
 ///
 /// Every decoded batch is validated through [`from_record_batch`]. This includes files
