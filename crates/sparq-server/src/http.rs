@@ -618,6 +618,18 @@ pub struct ServerConfig {
     /// binary's `--federation-descriptors` flag / `SPARQ_FEDERATION_DESCRIPTORS=1` env.
     #[cfg(feature = "federation-descriptors")]
     pub federation_descriptors: bool,
+    /// [GPT-5.6] (sq-lsp7k.5.2) OPT-IN grouped facet-count endpoint. When `true`, the server
+    /// serves `POST /facets`: the client supplies a JSON `sparq_introspect::FacetRequest`, and
+    /// the server evaluates its class / constraint filters against one pinned graph snapshot,
+    /// returning the `sparq_introspect::FacetResponse` JSON with type, predicate, and value
+    /// distributions. `false` (the default) leaves the endpoint off: `/facets` is `404`.
+    ///
+    /// This field exists only with the `facets` cargo feature. A build without that feature
+    /// compiles no facet route or `sparq-introspect` dependency and pays zero cost. Set by the
+    /// binary's `--facets` flag / `SPARQ_FACETS=1` env. Facet evaluation is a READ over the
+    /// store, so the endpoint is gated by the read auth.
+    #[cfg(feature = "facets")]
+    pub facets: bool,
     /// [OPUS-4.8] (sq-bzh1, epic sq-3183) OPT-IN Triple Pattern Fragments / Linked Data
     /// Fragments READ-ONLY source endpoint. When `true`, the server serves a paged RDF
     /// fragment of the triples matching one triple pattern at `GET /tpf?subject=&predicate=&
@@ -880,6 +892,10 @@ impl Default for ServerConfig {
             // when the feature is compiled in (the operator opts in deliberately).
             #[cfg(feature = "federation-descriptors")]
             federation_descriptors: false,
+            // [GPT-5.6] sq-lsp7k.5.2: safe default — the grouped facet-count endpoint is OFF
+            // even when compiled in; the operator opts in via --facets / SPARQ_FACETS=1.
+            #[cfg(feature = "facets")]
+            facets: false,
             // [OPUS-4.8] sq-bzh1: safe default — the TPF / LDF source endpoint is OFF even when
             // the feature is compiled in (the operator opts in deliberately via --tpf / SPARQ_TPF=1).
             #[cfg(feature = "tpf")]
@@ -1170,6 +1186,12 @@ impl ServerConfig {
         #[cfg(feature = "federation-descriptors")]
         if let Ok(v) = std::env::var("SPARQ_FEDERATION_DESCRIPTORS") {
             cfg.federation_descriptors = env_truthy(&v);
+        }
+        // [GPT-5.6] sq-lsp7k.5.2: SPARQ_FACETS truthy ("1"/"true"/"yes"/"on") serves the
+        // grouped facet-count endpoint. Off by default. Only present with the `facets` feature.
+        #[cfg(feature = "facets")]
+        if let Ok(v) = std::env::var("SPARQ_FACETS") {
+            cfg.facets = env_truthy(&v);
         }
         // [OPUS-4.8] sq-bzh1: SPARQ_TPF truthy ("1"/"true"/"yes"/"on") serves the Triple Pattern
         // Fragments / LDF source endpoint. Off by default. Only present with the `tpf` feature.
@@ -3039,6 +3061,11 @@ pub fn router(state: AppState) -> Router {
     // "GET with no query" response). See [`crate::descriptors`].
     #[cfg(feature = "federation-descriptors")]
     let routes = routes.route("/.well-known/void", get(well_known_void));
+    // [GPT-5.6] sq-lsp7k.5.2: OPT-IN grouped facet counts over one pinned graph snapshot.
+    // Compiled only with the `facets` feature; even then the handler returns 404 unless the
+    // runtime flag is set. POST is a READ and is gated by the read auth.
+    #[cfg(feature = "facets")]
+    let routes = routes.route("/facets", post(facets_endpoint));
     // [OPUS-4.8] sq-bzh1 (epic sq-3183): OPT-IN Triple Pattern Fragments / LDF source endpoint.
     // Compiled only with the `tpf` feature; even then the handler refuses (404) unless the config
     // flag is set. READ-only — a GET (with HEAD) only. See [`crate::tpf`].
@@ -3491,6 +3518,57 @@ fn negotiate_tpf(accept: Option<&str>) -> GraphFormat {
         }
         _ => GraphFormat::Turtle,
     }
+}
+
+/// [GPT-5.6] sq-lsp7k.5.2: `POST /facets` — grouped type, predicate, and value counts for a
+/// filtered candidate-subject set.
+///
+/// The JSON body is a `sparq_introspect::FacetRequest`. Evaluation pins exactly one published
+/// graph generation and runs the scan-heavy `sparq_introspect::facets` call on the blocking pool;
+/// the response is the corresponding `sparq_introspect::FacetResponse::to_json` document.
+///
+/// Double opt-in: the route is compiled only with the `facets` feature and returns `404` unless
+/// [`ServerConfig::facets`] is set (`--facets` / `SPARQ_FACETS=1`). It is a read surface, so
+/// `--auth-token-read` applies. Malformed JSON is a sanitized `400`.
+#[cfg(feature = "facets")]
+async fn facets_endpoint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !state.config().facets {
+        return json_error(StatusCode::NOT_FOUND, "not found");
+    }
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
+        return resp;
+    }
+    let body = match decode_request_body(&body, &headers, state.config()) {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let request = match serde_json::from_slice::<sparq_introspect::FacetRequest>(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return sanitized_error(
+                StatusCode::BAD_REQUEST,
+                "facet-request-json",
+                "malformed facet request",
+                &error.to_string(),
+            )
+        }
+    };
+
+    let pin = state.current();
+    let task = tokio::task::spawn_blocking(move || {
+        let response = sparq_introspect::facets(pin.snapshot(), &request);
+        text_response(
+            StatusCode::OK,
+            "application/json; charset=utf-8",
+            response.to_json(),
+            false,
+        )
+    });
+    await_worker(task, state.config()).await
 }
 
 /// [OPUS-4.8] sq-bzh1: `GET /tpf?subject=&predicate=&object=` — the Triple Pattern Fragments /
@@ -9818,5 +9896,25 @@ mod from_env_tests {
         let cfg = result.expect("SPARQ_LOG_FULL_REQUESTS must succeed");
         // SPARQ_LOG_FULL_REQUESTS=1 opts out of redaction → redact_logs becomes false.
         assert!(!cfg.redact_logs, "SPARQ_LOG_FULL_REQUESTS=1 must disable redact_logs");
+    }
+
+    // [GPT-5.6] sq-lsp7k.5.2: direct config tests for the public facets runtime flag.
+    #[cfg(feature = "facets")]
+    #[test]
+    fn facets_is_off_by_default() {
+        assert!(
+            !ServerConfig::default().facets,
+            "the facet-count route must remain runtime-off by default"
+        );
+    }
+
+    #[cfg(feature = "facets")]
+    #[test]
+    fn from_env_reads_sparq_facets() {
+        std::env::set_var("SPARQ_FACETS", "1");
+        let result = ServerConfig::from_env();
+        std::env::remove_var("SPARQ_FACETS");
+        let cfg = result.expect("SPARQ_FACETS=1 must succeed");
+        assert!(cfg.facets, "SPARQ_FACETS=1 must enable the facet-count route");
     }
 }

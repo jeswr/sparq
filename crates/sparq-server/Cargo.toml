@@ -169,6 +169,13 @@ geo = ["dep:sparq-geo"]
 # turned on. Without the feature, zero cost: no sparq-introspect dependency, no routes,
 # byte-identical to before; sparq-core/sparq-engine untouched either way.
 federation-descriptors = ["server", "dep:sparq-introspect"]
+# [GPT-5.6] sq-lsp7k.5.2: `facets` (default OFF) exposes a grouped facet-count API at
+# `POST /facets`. The JSON request selects a class / constraints / facet predicates and the
+# response carries type, predicate, and value distributions computed by `sparq-introspect` over
+# one pinned graph snapshot. It is DOUBLE opt-in: this build feature compiles the dependency +
+# route, while `--facets` / `SPARQ_FACETS=1` enables the route at runtime. Without the feature,
+# there is no introspection dependency or route and the default server binary stays unchanged.
+facets = ["server", "dep:sparq-introspect"]
 # [OPUS-4.8] (sq-bzh1, epic sq-3183) `tpf` (default OFF) exposes a Triple Pattern Fragments /
 # Linked Data Fragments (Hartig LDF) READ-ONLY source endpoint at `GET /tpf?subject=&predicate=&
 # object=`: a paged RDF fragment of the triples matching one triple pattern, with Hydra controls
