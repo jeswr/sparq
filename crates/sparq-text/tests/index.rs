@@ -184,6 +184,28 @@ fn term_stats_match_bm25_corpus_statistics() {
 }
 
 #[test]
+fn index_counts_posting_pairs() {
+    let index = TextIndex::build(&graph_of(&[
+        r#""hello world""#,
+        r#""hello there""#,
+        r#""goodbye""#,
+    ]));
+    assert_eq!(index.len(), 3);
+    assert_eq!(index.token_count(), 4);
+    assert_eq!(index.total_postings(), 5);
+
+    let empty = TextIndex::build(&Graph::load_str("", "ntriples").unwrap());
+    assert_eq!(empty.total_postings(), 0);
+
+    // Distinct RDF literals with the same lexical form are three documents
+    // in the single `cat` posting list.
+    let cats = TextIndex::build(&graph_of(&[r#""cat""#, r#""cat"@en"#, r#""cat"@fr"#]));
+    assert_eq!(cats.len(), 3);
+    assert_eq!(cats.token_count(), 1);
+    assert_eq!(cats.total_postings(), 3);
+}
+
+#[test]
 fn duplicate_literals_are_one_document() {
     // The same literal in many triples is ONE dictionary term = one document.
     let nt = r#"
