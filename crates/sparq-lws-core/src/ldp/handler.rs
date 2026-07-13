@@ -143,6 +143,13 @@ fn unchecked_const_iri(iri: &str) -> NamedNode {
 /// refactor). The hub is cheap to clone (an `Arc` inside) and shared with the notification routes.
 pub struct LdpState<S: Store> {
     pub store: S,
+    /// [GPT-5.6] sq-r1ei8: request-local snapshot barrier shared by LDP writes
+    /// and the optional SPARQL endpoint. Queries hold a read guard while they
+    /// assemble and evaluate; every mutation holds a write guard, so one server
+    /// instance cannot expose a dataset assembled across an interleaved write.
+    /// Compiled out with `sparql-endpoint`, including its dependency.
+    #[cfg(feature = "sparql-endpoint")]
+    sparql_snapshot: async_lock::RwLock<()>,
     /// The server's public base URL. PRIVATE on purpose: [`discovery_link_values`] is a cache derived
     /// from it at construction, so a post-construction mutation of `base_url` would desync the two
     /// (the cached discovery `Link` headers would advertise the OLD storage-description URL while
@@ -218,6 +225,8 @@ impl<S: Store> LdpState<S> {
             let discovery_link_values = build_discovery_link_values(&base_url);
             Self {
                 store,
+                #[cfg(feature = "sparql-endpoint")]
+                sparql_snapshot: async_lock::RwLock::new(()),
                 base_url,
                 www_authenticate: DEFAULT_WWW_AUTHENTICATE.to_string(),
                 acl_cache: AclCache::new(crate::acl_cache::DEFAULT_ACL_CACHE_CAPACITY),
@@ -236,6 +245,8 @@ impl<S: Store> LdpState<S> {
         let discovery_link_values = build_discovery_link_values(&base_url);
         Self {
             store,
+            #[cfg(feature = "sparql-endpoint")]
+            sparql_snapshot: async_lock::RwLock::new(()),
             base_url,
             notifications,
             www_authenticate: DEFAULT_WWW_AUTHENTICATE.to_string(),
@@ -263,6 +274,20 @@ impl<S: Store> LdpState<S> {
     /// by router assembly ([`AppState`](crate::app)) and any external consumer.
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Hold the server-local dataset stable while the SPARQL handler assembles
+    /// and evaluates a query. LDP reads do not need the barrier: their existing
+    /// per-resource read plan is already internally consistent.
+    #[cfg(feature = "sparql-endpoint")]
+    pub(crate) async fn sparql_snapshot_read(&self) -> async_lock::RwLockReadGuard<'_, ()> {
+        self.sparql_snapshot.read().await
+    }
+
+    /// Serialize an LDP mutation against in-flight SPARQL dataset snapshots.
+    #[cfg(feature = "sparql-endpoint")]
+    async fn sparql_snapshot_write(&self) -> async_lock::RwLockWriteGuard<'_, ()> {
+        self.sparql_snapshot.write().await
     }
 
     /// Replace the base URL, REBUILDING the derived discovery-link cache so the two never desync.
@@ -1002,6 +1027,8 @@ pub async fn put_handler<S: Store>(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ServerError> {
+    #[cfg(feature = "sparql-endpoint")]
+    let _snapshot_guard = state.sparql_snapshot_write().await;
     let target = parse_target(&state.base_url, uri.path())?;
 
     // WAC for PUT — EXISTENCE-NON-DISCLOSURE (decisions/0003): a PUT requires `acl:Write` on the
@@ -1144,6 +1171,8 @@ pub async fn post_handler<S: Store>(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ServerError> {
+    #[cfg(feature = "sparql-endpoint")]
+    let _snapshot_guard = state.sparql_snapshot_write().await;
     let container = parse_target(&state.base_url, uri.path())?;
     // WAC: a POST to a container requires `acl:Append` on the container (a writer also satisfies it).
     // Anonymous ⇒ 401, authenticated-but-unauthorized ⇒ 403. Authorize BEFORE the container-shape /
@@ -1309,6 +1338,8 @@ pub async fn delete_handler<S: Store>(
     uri: axum::http::Uri,
     headers: HeaderMap,
 ) -> Result<Response, ServerError> {
+    #[cfg(feature = "sparql-endpoint")]
+    let _snapshot_guard = state.sparql_snapshot_write().await;
     let target = parse_target(&state.base_url, uri.path())?;
 
     // WAC for DELETE (Solid WAC write-access matrix). Authorize BEFORE the existence check so an
@@ -1438,6 +1469,8 @@ pub async fn patch_handler<S: Store>(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ServerError> {
+    #[cfg(feature = "sparql-endpoint")]
+    let _snapshot_guard = state.sparql_snapshot_write().await;
     let target = parse_target(&state.base_url, uri.path())?;
 
     // Select the PATCH language from the Content-Type (ABSENT ⇒ 400, unsupported ⇒ 415) and parse the
@@ -2309,6 +2342,32 @@ mod tests {
             iri: iri.to_string(),
             is_container: iri.ends_with('/'),
         }
+    }
+
+    #[cfg(feature = "sparql-endpoint")]
+    #[tokio::test]
+    async fn sparql_snapshot_read_guard_blocks_an_ldp_write_guard() {
+        // [GPT-5.6] sq-r1ei8 mutation witness: replacing the shared barrier
+        // with independent guards lets this writer finish during the snapshot.
+        let store = CompositeStore::new(InMemorySparqClient::new(), InMemoryBlobStore::new());
+        let state = Arc::new(LdpState::new(store, "https://pod.example"));
+        let read = state.sparql_snapshot_read().await;
+        let writer_state = Arc::clone(&state);
+        let mut writer = tokio::spawn(async move {
+            let _write = writer_state.sparql_snapshot_write().await;
+        });
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut writer)
+                .await
+                .is_err(),
+            "an LDP mutation must wait until the query snapshot is released"
+        );
+        drop(read);
+        tokio::time::timeout(std::time::Duration::from_secs(1), writer)
+            .await
+            .expect("writer resumes after the snapshot")
+            .expect("writer task completes");
     }
 
     fn link_values(headers: &HeaderMap) -> Vec<String> {

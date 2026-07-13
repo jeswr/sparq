@@ -19,7 +19,7 @@ proof-of-possession (mTLS cert-bound tokens, DPoP-SK), notifications
 cargo run -p sparq-lws-core
 # Full test suite (default features — includes the in-process engine backend)
 cargo test -p sparq-lws-core
-# Engine-free profile (in-memory double only)
+# Core Solid tier: engine-free and `/sparql` compiled out
 cargo test -p sparq-lws-core --no-default-features
 # [GPT-5.6] Opt in to one periodic orphan-blob sweep task (interval in seconds)
 SOLID_SERVER_RECONCILE_INTERVAL_SECS=3600 cargo run -p sparq-lws-core
@@ -37,6 +37,10 @@ one-hour orphan grace period. Invalid or zero values fail boot.
   negotiation (oxrdf/oxttl/oxjsonld), conditional requests, `Content-Range` reads.
 - **Access control** — WAC (`acl:`) evaluated against the SPARQ-authoritative
   store, with an ACL decision cache; public-read fast path.
+- **WAC-scoped query endpoint** — [GPT-5.6] default-on, query-only
+  `GET`/`POST /sparql` for SELECT, ASK, and CONSTRUCT. Each request rebuilds a
+  named-graph-per-readable-resource dataset; the default graph is empty and
+  unreadable or uncertain resources never reach the query engine.
 - **Auth** — Solid-OIDC access tokens + mandatory DPoP, verified-token cache,
   tiered PoP: RFC 8705 mTLS cert-bound tokens and HKDF/HMAC DPoP-SK attestation.
 - **Storage seams** — `Store` / `SparqClient` / `BlobStore` traits: the
@@ -52,6 +56,9 @@ one-hour orphan grace period. Invalid or zero values fail boot.
   - `embedded-sparq` (**default-on**, sq-gg0qq.3) — the first-class in-process
     SPARQ engine backend (in-workspace path deps on `sparq-core`/`sparq-engine`);
     `--no-default-features` builds the engine-free profile.
+  - `sparql-endpoint` (**default-on**, [GPT-5.6] sq-r1ei8) — the WAC-scoped,
+    query-only `/sparql` route. Disable all defaults for the pure Solid core
+    tier; the internal Store methods used by LDP/WAC are independent of it.
   - `http-sparq` (off) — the remote SPARQL-over-HTTP backend
     (`PSS_SPARQ_BACKEND=http`) for a shared-service deployment.
   - `http3` (off, [GPT-5.6] sq-oprna.2) — when the existing TLS PEM variables

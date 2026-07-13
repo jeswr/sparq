@@ -503,6 +503,58 @@ jobs:
             echo "::endgroup::"
           done
 
+  # [GPT-5.6] sq-r1ei8: the opt-in fragment matrix can only add Cargo features,
+  # so it cannot express the core tier of a default-on feature. This dedicated
+  # lane gates the exact pure-Solid build: `/sparql` and the query-engine normal
+  # dependencies are absent, while the feature-off LDP CRUD + WAC test remains
+  # executable. The sibling fragment leg covers the explicit full-tier spelling.
+  lws-core-no-sparql-endpoint:
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-lws-core"'))
+    name: sparq-lws-core pure Solid (--no-default-features)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: feature-matrix-sparq-lws-core-no-default-features
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Fetch dependencies (retry transient crates.io fetch)
+        run: |
+          set -euo pipefail
+          n=0
+          until cargo fetch --locked; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "::error::cargo fetch failed after $n attempts (registry outage?)" >&2
+              exit 1
+            fi
+            echo "cargo fetch attempt $n failed; retrying in 10s..." >&2
+            sleep 10
+          done
+      - name: Build core tier (--no-default-features)
+        run: cargo build -p sparq-lws-core --no-default-features
+      - name: Test core tier — route absence plus LDP CRUD and WAC
+        run: cargo test -p sparq-lws-core --no-default-features
+      - name: Assert endpoint-only dependencies are absent from the core tier
+        run: |
+          set -euo pipefail
+          if cargo tree -p sparq-lws-core --no-default-features --edges normal | grep -Eq 'async-lock v|spargebra v|sparq-(core|engine) v'; then
+            echo "::error::SPARQL endpoint dependency leaked into the pure Solid tier" >&2
+            exit 1
+          fi
+      - name: Clippy core tier (--all-targets -D warnings)
+        run: cargo clippy -p sparq-lws-core --no-default-features --all-targets -- -D warnings
+
   # [OPUS-4.8] sq-1b390: THE pure-serialiser-library build of sparq-server — i.e. the crate
   # with `--no-default-features` (the `server` async HTTP stack OFF), the contract a consumer
   # relies on when it wants only the XML/CSV/TSV/graph serialisers without dragging in

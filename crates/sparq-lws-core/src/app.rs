@@ -302,8 +302,11 @@ where
             crate::ldp::public_read_skip::public_read_skip_middleware::<S>,
         ))
         // OUTERMOST: CORS (preflight short-circuit + the Access-Control-* headers on every response).
-        .layer(axum::middleware::from_fn(cors_middleware))
-        .with_state(ldp);
+        .layer(axum::middleware::from_fn(cors_middleware));
+    #[cfg(feature = "sparql-endpoint")]
+    let protected = protected.with_state(ldp.clone());
+    #[cfg(not(feature = "sparql-endpoint"))]
+    let protected = protected.with_state(ldp);
 
     // The AUTH-GATED subscribe route: behind the SAME DPoP middleware so the handler sees a
     // VerifiedToken (fail-closed on anonymous).
@@ -323,6 +326,27 @@ where
         .with_state(notify_state);
 
     let mut router = Router::new().merge(subscribe).merge(public_notify);
+
+    // [GPT-5.6] sq-r1ei8: the query surface is a distinct protected route so
+    // the LDP public-read shortcut cannot reinterpret `/sparql` as a resource.
+    // It still uses the identical authentication and CORS layers, and its
+    // handler performs WAC independently for every assembled resource.
+    #[cfg(feature = "sparql-endpoint")]
+    {
+        let sparql = Router::new()
+            .route(
+                "/sparql",
+                get(crate::sparql_endpoint::get_handler::<S>)
+                    .post(crate::sparql_endpoint::post_handler::<S>),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                auth.clone(),
+                auth_middleware::<J, R>,
+            ))
+            .layer(axum::middleware::from_fn(cors_middleware))
+            .with_state(ldp.clone());
+        router = router.merge(sparql);
+    }
 
     // PoP Tier 2 (DPoP-SK, `SOLID_SERVER_DPOP_SK`) — the session establishment/termination
     // endpoint, mounted ONLY when the tier is enabled so a flag-off build's route table (and the

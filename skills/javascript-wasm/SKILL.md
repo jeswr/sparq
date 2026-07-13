@@ -111,9 +111,10 @@ listener, Tokio runtime, TLS/PoP/notifications, live OIDC verifier, and non-memo
 
 Build and stage it with
 `npm --workspace @jeswr/solid-server run build:lws-wasm`; use `build:lws-wasm-core` for the named
-core tier. Both commands currently produce the same core-Solid artifact because the full
-`sparql-endpoint` surface is tracked separately in `sq-r1ei8`. Construct `SolidServer` with the pod
-base URL and the WebID that owns its provisioned root ACL, then call the Promise-returning
+core tier. [GPT-5.6] The full build enables `sparq-lws-wasm/sparql-endpoint`; the core command leaves
+that feature off, so the core wasm omits the route and query-engine dependency graph. Construct
+`SolidServer` with the pod base URL and the WebID that owns its provisioned root ACL, then call the
+Promise-returning
 `handleRequest(method, path, headers, body, authenticatedWebid)`. Header arguments and response
 headers are flat name/value arrays. Omit `authenticatedWebid` for a public request.
 
@@ -128,6 +129,18 @@ const response = await pod.handleRequest(
 The host MUST complete OIDC validation before supplying an authenticated WebID; the constructor's
 owner parameter only provisions WAC and is not authentication. Do not enable or stub
 `solid-oidc-verifier` inside wasm: its pinned crypto backend is native-only.
+
+[GPT-5.6] The full tier's `/sparql` is query-only SPARQL 1.1 Protocol: GET uses the `query`
+parameter; POST accepts `application/sparql-query` or form encoding. SELECT/ASK return
+`application/sparql-results+json`; CONSTRUCT returns `application/n-triples`; DESCRIBE and UPDATE
+are refused in v1. Each request walks authoritative `ldp:contains`, applies the same per-resource
+WAC read decision as LDP GET, and gives the engine only admitted RDF. Each resource is a named graph
+at its canonical IRI, the standing default graph is empty, and
+`FROM <http://www.w3.org/ns/solid/sparql#union-default-graph>` opts into the admitted union.
+Unreadable, malformed, or indeterminate resources are excluded. Assembly is currently O(pod) per
+query; the endpoint does not yet retain a cross-request dataset cache. Within one server instance,
+assembly and evaluation hold a shared read barrier while LDP mutations take its write side, so a
+query cannot combine resources from an interleaved LDP write.
 
 [GPT-5.6] The in-memory Solid store is bounded by default: its physical blob map admits at most
 64 MiB in aggregate and 4,096 stored entries, and its metadata map independently admits at most
@@ -154,8 +167,8 @@ is not proof of identity in this mode. `baseUrl` must be the public request orig
 proof because the host binds the proof to the reconstructed request URL. The verifier dereferences
 WebID and issuer/JWKS documents.
 Use the package only for local development, do not expose it as a production server, and expect all
-data to disappear on shutdown. TLS termination, persistent storage, notifications, and the
-separately tracked SPARQL endpoint remain absent; OIDC verification runs in Node, not wasm.
+data to disappear on shutdown. TLS termination, persistent storage, and notifications remain
+absent; OIDC verification runs in Node, not wasm.
 
 ## Common recipes
 

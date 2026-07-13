@@ -50,4 +50,45 @@ async fn put_get_round_trip_and_wac_denial_drive_the_real_router() {
         .await
         .expect("WAC denial is an HTTP response, not a host error");
     assert_eq!(denied.status(), 403, "an authenticated non-owner is denied");
+
+    #[cfg(not(feature = "sparql-endpoint"))]
+    {
+        let absent = server
+            .handle_request(
+                "GET".to_owned(),
+                "/sparql".to_owned(),
+                Vec::new(),
+                Vec::new(),
+                Some(OWNER.to_owned()),
+            )
+            .await
+            .expect("core-tier route absence is an HTTP response");
+        assert_eq!(absent.status(), 404, "core wasm compiles /sparql out");
+    }
+
+    #[cfg(feature = "sparql-endpoint")]
+    {
+        // [GPT-5.6] sq-r1ei8: the full wasm artifact drives the same WAC-scoped
+        // handler. The owner can query the card just PUT through LDP.
+        let query = server
+            .handle_request(
+                "POST".to_owned(),
+                "/sparql".to_owned(),
+                vec![
+                    "content-type".to_owned(),
+                    "application/sparql-query".to_owned(),
+                ],
+                b"ASK { GRAPH <https://pod.example/card> { <https://pod.example/card> <http://xmlns.com/foaf/0.1/name> \"Ada\" } }".to_vec(),
+                Some(OWNER.to_owned()),
+            )
+            .await
+            .expect("full-tier SPARQL request completes");
+        assert_eq!(query.status(), 200);
+        assert!(
+            String::from_utf8(query.body())
+                .expect("SPARQL JSON is UTF-8")
+                .contains("\"boolean\":true"),
+            "the LDP-created resource is queryable in its authorized named graph"
+        );
+    }
 }

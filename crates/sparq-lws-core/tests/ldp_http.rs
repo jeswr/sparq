@@ -234,6 +234,37 @@ async fn put_creates_then_get_reads_it_back() {
     assert_eq!(&bytes[..], TURTLE.as_bytes());
 }
 
+/// [GPT-5.6] sq-r1ei8: in the core tier `/sparql` is an ordinary absent LDP
+/// resource (404), while authenticated CRUD and private-resource WAC remain live.
+/// Enabling the route mutates the first assertion to 400 (missing query), so this
+/// is a direct compiled-route witness rather than a symbol-only check.
+#[cfg(not(feature = "sparql-endpoint"))]
+#[tokio::test]
+async fn core_tier_has_no_sparql_route_but_keeps_ldp_and_wac() {
+    let h = Harness::new().await;
+    let absent = h.request("GET", "/sparql", None, Body::empty()).await;
+    assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+
+    let put = h
+        .request(
+            "PUT",
+            "/core-round-trip",
+            Some("text/turtle"),
+            Body::from("<urn:core> <urn:p> \"ok\" ."),
+        )
+        .await;
+    assert_eq!(put.status(), StatusCode::CREATED);
+    let get = h
+        .request("GET", "/core-round-trip", None, Body::empty())
+        .await;
+    assert_eq!(get.status(), StatusCode::OK);
+
+    let anonymous = h
+        .unauth_request("GET", "/core-round-trip", None, Body::empty())
+        .await;
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn put_flood_beyond_resource_cap_is_refused_with_507() {
     // [GPT-5.6] The seed ACL and any implicit ancestor containers consume the same bounded store.

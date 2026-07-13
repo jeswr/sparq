@@ -60,8 +60,12 @@ Options may also come from `SPARQ_SOLID_PORT` (or `PORT`),
   used in DPoP proofs; the verifier dereferences the WebID and issuer JWKS.
 - TLS, persistent storage, notifications, PoP, and native networking remain
   outside the wasm module.
-- The current full/core builds contain the same Solid-only surface; the SPARQL
-  endpoint is tracked separately in `sq-r1ei8`.
+- [GPT-5.6] The shipped full build includes query-only GET/POST `/sparql` for
+  SELECT, ASK, and CONSTRUCT. Its dataset contains one named graph per resource
+  the authenticated WebID may read; the default graph is empty. SPARQL Update
+  is not exposed.
+- `npm run build:lws-wasm-core` produces the pure Solid tier with `/sparql` and
+  the embedded query engine compiled out.
 
 ## 📚 API
 
