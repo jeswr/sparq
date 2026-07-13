@@ -631,7 +631,8 @@ mod tests {
         let sparq = InMemorySparqClient::new();
         let blob = InMemoryBlobStore::new();
         // An orphan: bytes exist, NO index row references "orphan". Back-dated past the grace window.
-        blob.put_with_time("orphan", Bytes::from_static(b"x"), ago(3600));
+        blob.put_with_time("orphan", Bytes::from_static(b"x"), ago(3600))
+            .unwrap();
 
         let report = reconcile_orphans(&sparq, &blob, &opts()).await.unwrap();
         assert_eq!(report.scanned, 1);
@@ -647,7 +648,8 @@ mod tests {
         let blob = InMemoryBlobStore::new();
         // A LIVE resource: an index row references "live-key", and its bytes are old.
         sparq.put_meta("iri", meta("live-key")).await.unwrap();
-        blob.put_with_time("live-key", Bytes::from_static(b"x"), ago(99999));
+        blob.put_with_time("live-key", Bytes::from_static(b"x"), ago(99999))
+            .unwrap();
 
         let report = reconcile_orphans(&sparq, &blob, &opts()).await.unwrap();
         assert_eq!(report.scanned, 1);
@@ -666,7 +668,8 @@ mod tests {
         // (bytes PUT, index row not yet committed) — it MUST be protected.
         let sparq = InMemorySparqClient::new();
         let blob = InMemoryBlobStore::new();
-        blob.put_with_time("fresh-orphan", Bytes::from_static(b"x"), ago(1)); // 1s < 60s grace
+        blob.put_with_time("fresh-orphan", Bytes::from_static(b"x"), ago(1))
+            .unwrap(); // 1s < 60s grace
 
         let report = reconcile_orphans(&sparq, &blob, &opts()).await.unwrap();
         assert_eq!(report.scanned, 1);
@@ -685,14 +688,18 @@ mod tests {
         let blob = InMemoryBlobStore::new();
         // 1 referenced (old), 1 old orphan (deleted), 1 young orphan (kept), 1 unknown-age orphan (kept).
         sparq.put_meta("iri", meta("ref")).await.unwrap();
-        blob.put_with_time("ref", Bytes::from_static(b"r"), ago(99999));
-        blob.put_with_time("old-orphan", Bytes::from_static(b"o"), ago(3600));
-        blob.put_with_time("young-orphan", Bytes::from_static(b"y"), ago(1));
+        blob.put_with_time("ref", Bytes::from_static(b"r"), ago(99999))
+            .unwrap();
+        blob.put_with_time("old-orphan", Bytes::from_static(b"o"), ago(3600))
+            .unwrap();
+        blob.put_with_time("young-orphan", Bytes::from_static(b"y"), ago(1))
+            .unwrap();
         blob.put_with_time(
             "undated-orphan",
             Bytes::from_static(b"u"),
             SystemTime::now(),
-        );
+        )
+        .unwrap();
         // Force the unknown-age path by listing-time stamping is awkward; instead assert the
         // partition algebra on the known stamps. (The unknown-age branch is covered separately below.)
 
@@ -734,7 +741,8 @@ mod tests {
     async fn idempotent_second_run_deletes_nothing() {
         let sparq = InMemorySparqClient::new();
         let blob = InMemoryBlobStore::new();
-        blob.put_with_time("orphan", Bytes::from_static(b"x"), ago(3600));
+        blob.put_with_time("orphan", Bytes::from_static(b"x"), ago(3600))
+            .unwrap();
 
         let first = reconcile_orphans(&sparq, &blob, &opts()).await.unwrap();
         assert_eq!(first.deleted, 1);
@@ -752,9 +760,12 @@ mod tests {
         let blob = InMemoryBlobStore::new();
         // 1 deletable orphan (old), 1 too-young orphan, 1 referenced — so the partition has >1 term.
         sparq.put_meta("iri", meta("ref")).await.unwrap();
-        blob.put_with_time("ref", Bytes::from_static(b"r"), ago(99999));
-        blob.put_with_time("orphan", Bytes::from_static(b"x"), ago(3600));
-        blob.put_with_time("young", Bytes::from_static(b"y"), ago(1));
+        blob.put_with_time("ref", Bytes::from_static(b"r"), ago(99999))
+            .unwrap();
+        blob.put_with_time("orphan", Bytes::from_static(b"x"), ago(3600))
+            .unwrap();
+        blob.put_with_time("young", Bytes::from_static(b"y"), ago(1))
+            .unwrap();
 
         let dry = ReconcileOptions {
             grace: Duration::from_secs(60),
@@ -800,7 +811,8 @@ mod tests {
         // the fresh re-check it WOULD be classified deletable and removed — the mutation-check.
         let sparq = ToggleReferencedSparq::new(["orphan"]);
         let blob = InMemoryBlobStore::new();
-        blob.put_with_time("orphan", Bytes::from_static(b"x"), ago(3600));
+        blob.put_with_time("orphan", Bytes::from_static(b"x"), ago(3600))
+            .unwrap();
 
         let report = reconcile_orphans(&sparq, &blob, &opts()).await.unwrap();
         assert_eq!(report.scanned, 1);
@@ -897,7 +909,8 @@ mod tests {
 
         // Write #1 at `same_stamp`. Capture its generation — the witness a reconciler would carry from a
         // stat taken right after this write.
-        blob.put_with_time("k", Bytes::from_static(b"v1"), same_stamp);
+        blob.put_with_time("k", Bytes::from_static(b"v1"), same_stamp)
+            .unwrap();
         let witness_gen_v1 = blob.generation_of("k").expect("v1 must exist");
         let stamp_v1 = blob
             .stat("k")
@@ -909,7 +922,8 @@ mod tests {
 
         // OVERWRITE at the IDENTICAL last_modified (clock granularity / rollback). The generation MUST
         // bump even though the timestamp did not.
-        blob.put_with_time("k", Bytes::from_static(b"v2"), same_stamp);
+        blob.put_with_time("k", Bytes::from_static(b"v2"), same_stamp)
+            .unwrap();
         let stamp_v2 = blob
             .stat("k")
             .await
@@ -1083,7 +1097,8 @@ mod tests {
         // sweep would abort with ReferencedSet — the mutation-check.
         let sparq = SecondCallFailsSparq::new();
         let blob = InMemoryBlobStore::new();
-        blob.put_with_time("young-orphan", Bytes::from_static(b"x"), ago(1)); // < 60s grace ⇒ too-young
+        blob.put_with_time("young-orphan", Bytes::from_static(b"x"), ago(1))
+            .unwrap(); // < 60s grace ⇒ too-young
 
         let report = reconcile_orphans(&sparq, &blob, &opts())
             .await
@@ -1183,7 +1198,8 @@ mod tests {
         // "nothing is referenced"). The blob list is never even consulted.
         let sparq = FailingSparq;
         let blob = InMemoryBlobStore::new();
-        blob.put_with_time("orphan", Bytes::from_static(b"x"), ago(3600));
+        blob.put_with_time("orphan", Bytes::from_static(b"x"), ago(3600))
+            .unwrap();
 
         let err = reconcile_orphans(&sparq, &blob, &opts()).await.unwrap_err();
         assert!(matches!(err, ReconcileError::ReferencedSet(_)));
@@ -1735,7 +1751,9 @@ mod tests {
     impl UndatedBlobStore {
         fn with_key(key: &str) -> Self {
             let inner = InMemoryBlobStore::new();
-            inner.put_with_time(key, Bytes::from_static(b"x"), SystemTime::now());
+            inner
+                .put_with_time(key, Bytes::from_static(b"x"), SystemTime::now())
+                .unwrap();
             Self {
                 key: key.to_string(),
                 inner,
