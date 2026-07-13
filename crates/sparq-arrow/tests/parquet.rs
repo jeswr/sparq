@@ -7,7 +7,10 @@ use arrow_array::{ArrayRef, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use oxrdf::{BaseDirection, BlankNode, Literal, NamedNode, Term, Triple, Variable};
 use parquet::arrow::ArrowWriter;
-use sparq_arrow::{from_parquet_bytes, parquet_variables_from_bytes, to_parquet_bytes};
+use sparq_arrow::{
+    from_parquet_bytes, parquet_row_count_from_bytes, parquet_variables_from_bytes,
+    to_parquet_bytes,
+};
 use sparq_engine::QueryResult;
 
 fn assert_identity(result: &QueryResult) {
@@ -76,6 +79,36 @@ fn schema_only_reader_recovers_nonempty_result_variables() {
     );
 }
 
+/// [GPT-5.6] Value-pinned mutation witness: the two variables and three rows make a
+/// column-count implementation return 2, while the all-unbound row exercises nullability.
+#[test]
+fn metadata_only_reader_recovers_exact_row_count() {
+    let result = QueryResult {
+        vars: vec![Variable::new("s").unwrap(), Variable::new("o").unwrap()],
+        rows: vec![
+            vec![
+                Some(Term::NamedNode(
+                    NamedNode::new("https://example.test/s").unwrap(),
+                )),
+                Some(Term::Literal(Literal::new_simple_literal("object"))),
+            ],
+            vec![None, None],
+            vec![
+                Some(Term::BlankNode(BlankNode::new("blank-2").unwrap())),
+                None,
+            ],
+        ],
+    };
+    let bytes = to_parquet_bytes(&result).unwrap();
+
+    assert!(matches!(parquet_row_count_from_bytes(&bytes), Ok(3)));
+    let restored = from_parquet_bytes(&bytes).unwrap();
+    assert_eq!(
+        parquet_row_count_from_bytes(&bytes).unwrap(),
+        restored.rows.len()
+    );
+}
+
 #[test]
 fn empty_result_preserves_variable_schema_and_zero_rows() {
     let result = QueryResult {
@@ -88,6 +121,7 @@ fn empty_result_preserves_variable_schema_and_zero_rows() {
 
     let bytes = to_parquet_bytes(&result).unwrap();
     assert_eq!(parquet_variables_from_bytes(&bytes).unwrap(), result.vars);
+    assert_eq!(parquet_row_count_from_bytes(&bytes).unwrap(), 0);
     assert_identity(&result);
 }
 
