@@ -4150,10 +4150,12 @@ pub fn harden(routes: Router, config: &ServerConfig) -> Router {
 /// This loop is a faithful port of `axum::serve`'s own accept + graceful-shutdown loop
 /// (per-connection task, watch-channel drain, `serve_connection(...).with_upgrades()` so the
 /// `/subscriptions` WebSocket upgrade still works) with two behavioural additions: the connection
-/// builder installs a `TokioTimer` and sets `header_read_timeout`, and the per-connection service
-/// optionally wraps the body in the `body_read_timeout` layer. `None` on either opts back out to
-/// the unbounded behaviour. axum is configured HTTP/1-only (no `http2` feature), so this uses
-/// hyper's `http1::Builder` directly — the smallest builder that carries the header knob.
+/// builder installs a `TokioTimer` and sets `header_read_timeout`, the per-connection service
+/// optionally wraps the body in the `body_read_timeout` layer, and each request receives the
+/// accepted peer as `ConnectInfo<SocketAddr>` (matching the HTTP/3 listener). `None` on either
+/// deadline opts back out to the unbounded behaviour. axum is configured HTTP/1-only (no `http2`
+/// feature), so this uses hyper's `http1::Builder` directly — the smallest builder that carries
+/// the header knob.
 #[cfg(feature = "server")]
 pub async fn serve<F>(
     listener: tokio::net::TcpListener,
@@ -4165,6 +4167,7 @@ pub async fn serve<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
+    use axum::{extract::ConnectInfo, Extension};
     use futures_util::FutureExt;
     use hyper_util::rt::{TokioIo, TokioTimer};
     use hyper_util::service::TowerToHyperService;
@@ -4195,7 +4198,7 @@ where
     drop(_close_rx); // the loop itself does not hold a connection slot
 
     loop {
-        let (stream, _remote) = tokio::select! {
+        let (stream, remote) = tokio::select! {
             conn = listener.accept() => match conn {
                 Ok(c) => c,
                 // A transient accept error (e.g. EMFILE / a peer that vanished mid-handshake)
@@ -4216,7 +4219,9 @@ where
         let io = TokioIo::new(stream);
         // [OPUS-4.8] sq-lodb: apply the (optional) slow-body read/idle deadline around this
         // connection's clone of the router, then hand the composed tower service to hyper.
+        // [GPT-5.6] sq-rejk9: expose the accepted TCP peer to every request, matching serve_h3.
         let service = ServiceBuilder::new()
+            .layer(Extension(ConnectInfo(remote)))
             .layer(body_timeout_layer.clone())
             .service(app.clone());
         let hyper_service = TowerToHyperService::new(service);
