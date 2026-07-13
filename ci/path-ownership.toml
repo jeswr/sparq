@@ -221,6 +221,21 @@ readers = ["sparq-zk", "sparq-trust"]
 pattern = "crates/sparq-solid/rules/**"
 readers = ["sparq-reason"]
 
+# [OPUS-4.8] sq-oti9m: sparq-acbench's GENAI_RETRIEVAL_EXPRESSIBILITY grounding test
+# reads sibling sparq-vectors / sparq-nlq Cargo.toml manifests at runtime to prove
+# every cited provider feature (vec-predicate/filtered-ann/default, live/citations)
+# still EXISTS — so a feature rename in those crates re-runs acbench and re-grounds
+# the catalogue. A real acbench -> vectors/nlq dev-dep is unwanted coupling for a
+# bench crate; additional-readers unions acbench in monotonically instead. Manifest
+# scope (not dir/**) so only a Cargo.toml edit re-runs acbench.
+[[map]]
+pattern = "crates/sparq-vectors/Cargo.toml"
+readers = ["sparq-acbench"]
+
+[[map]]
+pattern = "crates/sparq-nlq/Cargo.toml"
+readers = ["sparq-acbench"]
+
 # ---------------------------------------------------------------------------
 # SAFE list — paths AUDIT-PROVEN inert for the Rust matrix (design §4.2). The
 # list started EMPTY; each entry below was added only after the audit confirmed
