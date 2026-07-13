@@ -615,9 +615,10 @@ impl Parser {
                 _ => break,
             }
         }
-        // The ontology triple: `?baseURI rdf:type owl:Ontology`. (Imports were
-        // already attached to this same base subject during the directive phase.)
-        let base_term = Term::NamedNode(NamedNode::new_unchecked(&self.base));
+        // [GPT-5.6] (sq-0g57x) The document IRI is the empty reference resolved
+        // against the final base, so RFC 3986 resolution removes its fragment.
+        // Imports were already emitted against the base in effect at each directive.
+        let base_term = Term::NamedNode(NamedNode::new_unchecked(self.resolve("")));
         self.add(
             iri_subject(&base_term)?,
             RDF_TYPE,
@@ -1543,6 +1544,36 @@ mod tests {
         match &t.subject {
             NamedOrBlankNode::NamedNode(n) => assert_eq!(n.as_str(), DEFAULT_BASE),
             other => panic!("expected named ontology subject, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn ontology_subject_resolves_empty_reference_against_effective_base() {
+        // [GPT-5.6] (sq-0g57x) The document production resolves an empty
+        // reference against the final base, which strips any fragment.
+        for (source, expected) in [
+            ("BASE <#>\n", "urn:x-base:default"),
+            (
+                "BASE <http://example.org/basic-shape-with-targets#thing>\n",
+                "http://example.org/basic-shape-with-targets",
+            ),
+        ] {
+            let triples = parse(source, DEFAULT_BASE).unwrap();
+            let ontology = triples
+                .iter()
+                .find(|triple| {
+                    triple.predicate.as_str() == RDF_TYPE
+                        && matches!(
+                            &triple.object,
+                            Term::NamedNode(node)
+                                if node.as_str() == "http://www.w3.org/2002/07/owl#Ontology"
+                        )
+                })
+                .expect("document ontology triple");
+            match &ontology.subject {
+                NamedOrBlankNode::NamedNode(node) => assert_eq!(node.as_str(), expected),
+                other => panic!("expected named ontology subject, got {other:?}"),
+            }
         }
     }
 
