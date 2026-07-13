@@ -630,6 +630,18 @@ pub struct ServerConfig {
     /// store, so the endpoint is gated by the read auth.
     #[cfg(feature = "facets")]
     pub facets: bool,
+    /// [GPT-5.6] (sq-lsp7k.9.3) OPT-IN prefix-completion endpoint. When `true`, the server
+    /// serves `GET /complete?q=<prefix>&limit=<k>` from a `sparq_text::CompletionIndex` built
+    /// against one pinned graph generation. The index is cached in [`AppState`] and rebuilt on
+    /// the blocking pool when a later published generation makes it stale. Results are capped at
+    /// 100 candidates. `false` (the default) leaves the endpoint off: `/complete` is `404`.
+    ///
+    /// This field exists only with the `complete` cargo feature. A build without that feature
+    /// compiles no completion route, cache, or `sparq-text` dependency and pays zero cost. Set by
+    /// the binary's `--complete` flag / `SPARQ_COMPLETE=1` env. Completion is a READ over the
+    /// store, so the endpoint is gated by the read auth.
+    #[cfg(feature = "complete")]
+    pub complete: bool,
     /// [OPUS-4.8] (sq-bzh1, epic sq-3183) OPT-IN Triple Pattern Fragments / Linked Data
     /// Fragments READ-ONLY source endpoint. When `true`, the server serves a paged RDF
     /// fragment of the triples matching one triple pattern at `GET /tpf?subject=&predicate=&
@@ -896,6 +908,10 @@ impl Default for ServerConfig {
             // even when compiled in; the operator opts in via --facets / SPARQ_FACETS=1.
             #[cfg(feature = "facets")]
             facets: false,
+            // [GPT-5.6] sq-lsp7k.9.3: safe default — prefix completion is OFF even when compiled
+            // in; the operator opts in via --complete / SPARQ_COMPLETE=1.
+            #[cfg(feature = "complete")]
+            complete: false,
             // [OPUS-4.8] sq-bzh1: safe default — the TPF / LDF source endpoint is OFF even when
             // the feature is compiled in (the operator opts in deliberately via --tpf / SPARQ_TPF=1).
             #[cfg(feature = "tpf")]
@@ -1192,6 +1208,12 @@ impl ServerConfig {
         #[cfg(feature = "facets")]
         if let Ok(v) = std::env::var("SPARQ_FACETS") {
             cfg.facets = env_truthy(&v);
+        }
+        // [GPT-5.6] sq-lsp7k.9.3: SPARQ_COMPLETE truthy ("1"/"true"/"yes"/"on") serves the
+        // prefix-completion endpoint. Off by default. Only present with the `complete` feature.
+        #[cfg(feature = "complete")]
+        if let Ok(v) = std::env::var("SPARQ_COMPLETE") {
+            cfg.complete = env_truthy(&v);
         }
         // [OPUS-4.8] sq-bzh1: SPARQ_TPF truthy ("1"/"true"/"yes"/"on") serves the Triple Pattern
         // Fragments / LDF source endpoint. Off by default. Only present with the `tpf` feature.
@@ -2293,6 +2315,12 @@ pub struct AppState {
     pub(crate) subs: Arc<crate::subscriptions::SubscriptionCounters>,
     /// Prometheus metrics (T22), exposed at `GET /metrics`.
     metrics: Arc<crate::metrics::Metrics>,
+    /// [GPT-5.6] (sq-lsp7k.9.3) Lazily-built prefix-completion index, paired with the immutable
+    /// graph generation it represents. A matching generation reuses the index; a newer pinned
+    /// generation rebuilds it on the blocking pool before replacing this entry. The whole cache
+    /// is feature-gated so the default AppState layout and request path remain unchanged.
+    #[cfg(feature = "complete")]
+    completion_index: Arc<std::sync::RwLock<Option<(u64, sparq_text::CompletionIndex)>>>,
     /// [OPUS-4.8] (sq-gos8) The opt-in structured access-audit sink. `None` unless the operator
     /// configured one (`--access-audit` / `SPARQ_ACCESS_AUDIT`); shared across handlers.
     #[cfg(feature = "access-audit")]
@@ -2521,6 +2549,8 @@ impl AppState {
             commits: Arc::new(tokio::sync::watch::channel(0).0),
             subs: Arc::new(crate::subscriptions::SubscriptionCounters::default()),
             metrics: Arc::new(crate::metrics::Metrics::default()),
+            #[cfg(feature = "complete")]
+            completion_index: Arc::new(std::sync::RwLock::new(None)),
             #[cfg(feature = "access-audit")]
             access_audit_sink,
             #[cfg(feature = "change-stream")]
@@ -2907,6 +2937,16 @@ impl AppState {
         // Atomic swap: subsequent loads see the new ring+writer; the old core's writer thread
         // joins once its last in-flight reader/Arc drops (Writer's Drop drains + joins).
         self.core.store(Arc::new(ServingCore { ring, writer }));
+        // [GPT-5.6] sq-lsp7k.9.3: a restored ring restarts at generation zero. Clear a cached
+        // generation-zero index from the prior lineage so equality on the numeric generation
+        // cannot reuse completion data from the replaced graph.
+        #[cfg(feature = "complete")]
+        {
+            *self
+                .completion_index
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
         // Advance the commit watch so active subscriptions re-evaluate against the restored store.
         let restored_gen = self.current().number();
         self.commits.send_replace(restored_gen);
@@ -3066,6 +3106,11 @@ pub fn router(state: AppState) -> Router {
     // runtime flag is set. POST is a READ and is gated by the read auth.
     #[cfg(feature = "facets")]
     let routes = routes.route("/facets", post(facets_endpoint));
+    // [GPT-5.6] sq-lsp7k.9.3: OPT-IN IRI/label/local-name prefix completion over a cached
+    // generation-pinned index. Compiled only with `complete`; even then the handler returns 404
+    // unless the runtime flag is set. GET is a READ and is gated by the read auth.
+    #[cfg(feature = "complete")]
+    let routes = routes.route("/complete", get(complete_endpoint));
     // [OPUS-4.8] sq-bzh1 (epic sq-3183): OPT-IN Triple Pattern Fragments / LDF source endpoint.
     // Compiled only with the `tpf` feature; even then the handler refuses (404) unless the config
     // flag is set. READ-only — a GET (with HEAD) only. See [`crate::tpf`].
@@ -3565,6 +3610,127 @@ async fn facets_endpoint(
             StatusCode::OK,
             "application/json; charset=utf-8",
             response.to_json(),
+            false,
+        )
+    });
+    await_worker(task, state.config()).await
+}
+
+#[cfg(feature = "complete")]
+const COMPLETION_DEFAULT_LIMIT: usize = 20;
+#[cfg(feature = "complete")]
+const COMPLETION_MAX_LIMIT: usize = 100;
+
+/// [GPT-5.6] sq-lsp7k.9.3: stable wire names for `sparq_text::CandidateKind`.
+#[cfg(feature = "complete")]
+fn completion_kind_name(kind: sparq_text::CandidateKind) -> &'static str {
+    match kind {
+        sparq_text::CandidateKind::Iri => "iri",
+        sparq_text::CandidateKind::LocalName => "localName",
+        sparq_text::CandidateKind::Label(_) => "label",
+    }
+}
+
+/// [GPT-5.6] sq-lsp7k.9.3: materialises completion candidates into the endpoint's compact JSON
+/// array. Entity ids are resolved through the same pinned snapshot dictionary that the index was
+/// built against; IRI terms use their raw IRI string, while the defensive non-IRI fallback uses
+/// the term's N-Triples display form.
+#[cfg(feature = "complete")]
+fn completion_json(
+    graph: &Graph,
+    index: &sparq_text::CompletionIndex,
+    prefix: &str,
+    limit: usize,
+) -> String {
+    let candidates: Vec<serde_json::Value> = index
+        .complete(prefix, limit, None)
+        .into_iter()
+        .map(|candidate| {
+            let term = graph.dict.term(candidate.id);
+            let iri = match &term {
+                oxrdf::Term::NamedNode(node) => node.as_str().to_string(),
+                _ => term.to_string(),
+            };
+            serde_json::json!({
+                "iri": iri,
+                "key": candidate.key,
+                "kind": completion_kind_name(candidate.kind),
+                "score": candidate.score,
+            })
+        })
+        .collect();
+    serde_json::to_string(&candidates).expect("completion candidates are JSON-serializable")
+}
+
+/// [GPT-5.6] sq-lsp7k.9.3: `GET /complete?q=<prefix>&limit=<k>` — case-insensitive prefix
+/// completion over graph IRIs, local names, and `rdfs:label`/`skos:prefLabel` values.
+///
+/// The handler pins one immutable graph generation. A generation-matched AppState cache answers
+/// directly; otherwise `CompletionIndex::build` runs on the blocking pool and the resulting
+/// `(generation, index)` replaces the stale entry. Scores are intentionally `None` in v1 (wire
+/// score `0.0`); rank injection and incremental reconciliation are follow-ups. `limit` defaults to
+/// 20 and is capped at 100. Missing `q` or a malformed `limit` is `400`.
+///
+/// Double opt-in: the route is compiled only with `complete` and returns `404` unless
+/// [`ServerConfig::complete`] is set (`--complete` / `SPARQ_COMPLETE=1`). It is a read surface,
+/// so `--auth-token-read` applies.
+#[cfg(feature = "complete")]
+async fn complete_endpoint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if !state.config().complete {
+        return json_error(StatusCode::NOT_FOUND, "not found");
+    }
+    if let Some(response) = auth_gate(state.config(), &headers, Operation::Read) {
+        return response;
+    }
+    let Some(prefix) = params.get("q").cloned() else {
+        return json_error(StatusCode::BAD_REQUEST, "missing 'q' parameter");
+    };
+    let limit = match params.get("limit") {
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(limit) => limit.min(COMPLETION_MAX_LIMIT),
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "malformed completion limit"),
+        },
+        None => COMPLETION_DEFAULT_LIMIT,
+    };
+
+    let pin = state.current();
+    let generation = pin.number();
+    let cache = state.completion_index.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        {
+            let cached = cache
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some((cached_generation, index)) = &*cached {
+                if *cached_generation == generation {
+                    return text_response(
+                        StatusCode::OK,
+                        "application/json; charset=utf-8",
+                        completion_json(pin.snapshot(), index, &prefix, limit),
+                        false,
+                    );
+                }
+            }
+        }
+
+        let rebuilt = sparq_text::CompletionIndex::build(pin.snapshot());
+        let body = completion_json(pin.snapshot(), &rebuilt, &prefix, limit);
+        let mut cached = cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Always replace a mismatched entry. Generations are monotonic within a ring, but an
+        // online restore starts a new lineage at zero; numeric ordering is therefore not a safe
+        // cross-lineage recency test. A racing older request can cause one extra rebuild, never a
+        // wrong response (each response uses its own pin).
+        *cached = Some((generation, rebuilt));
+        text_response(
+            StatusCode::OK,
+            "application/json; charset=utf-8",
+            body,
             false,
         )
     });
@@ -9916,5 +10082,42 @@ mod from_env_tests {
         std::env::remove_var("SPARQ_FACETS");
         let cfg = result.expect("SPARQ_FACETS=1 must succeed");
         assert!(cfg.facets, "SPARQ_FACETS=1 must enable the facet-count route");
+    }
+
+    // [GPT-5.6] sq-lsp7k.9.3: direct config tests for the public completion runtime flag.
+    #[cfg(feature = "complete")]
+    #[test]
+    fn complete_is_off_by_default() {
+        assert!(
+            !ServerConfig::default().complete,
+            "the completion route must remain runtime-off by default"
+        );
+    }
+
+    #[cfg(feature = "complete")]
+    #[test]
+    fn from_env_reads_sparq_complete() {
+        std::env::set_var("SPARQ_COMPLETE", "1");
+        let result = ServerConfig::from_env();
+        std::env::remove_var("SPARQ_COMPLETE");
+        let cfg = result.expect("SPARQ_COMPLETE=1 must succeed");
+        assert!(cfg.complete, "SPARQ_COMPLETE=1 must enable completion");
+    }
+
+    #[cfg(feature = "complete")]
+    #[test]
+    fn completion_candidate_kinds_have_stable_wire_names() {
+        assert_eq!(
+            super::completion_kind_name(sparq_text::CandidateKind::Iri),
+            "iri"
+        );
+        assert_eq!(
+            super::completion_kind_name(sparq_text::CandidateKind::LocalName),
+            "localName"
+        );
+        assert_eq!(
+            super::completion_kind_name(sparq_text::CandidateKind::Label(1_u32)),
+            "label"
+        );
     }
 }

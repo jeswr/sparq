@@ -9,6 +9,7 @@
 //!                [--query-timeout SECS] [--update-where-timeout SECS] [--max-body-bytes N] [--max-concurrent N]
 //!                [--max-results N] [--max-query-rows N] [--max-decompress-ratio N]
 //!                [--max-subscriptions N] [--max-subscriptions-per-conn N]
+//!                [--complete]
 //!                [--service-allow HOST|*.SUFFIX]... [--service-allow-file PATH]
 //!                [--cors-allow-origin ORIGIN]... [--cors-allow-origin-file PATH]
 //!                [--tls-cert FILE --tls-key FILE]
@@ -107,6 +108,9 @@
 //!   --facets                  [GPT-5.6 sq-lsp7k.5.2] (feature `facets`) serve the OPT-IN grouped
 //!                             facet-count endpoint `POST /facets`. Read-only. Off by default
 //!                                                                        [off, env SPARQ_FACETS=1]
+//!   --complete                [GPT-5.6 sq-lsp7k.9.3] (feature `complete`) serve the OPT-IN
+//!                             prefix-completion endpoint `GET /complete`. Read-only. Off by default
+//!                                                                        [off, env SPARQ_COMPLETE=1]
 //!   --brtpf-max-bindings N    [OPUS-4.8 sq-r74h] (feature `brtpf`) DoS cap on the brTPF binding-set
 //!                             MAPPING COUNT — one index scan runs per mapping, so cost is super-linear
 //!                             in the count, not the bytes (413 beyond), 0 off
@@ -460,6 +464,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Read-only. Off by default (env SPARQ_FACETS=1).
             #[cfg(feature = "facets")]
             "--facets" => config.facets = true,
+            // [GPT-5.6] sq-lsp7k.9.3: OPT-IN prefix completion backed by a generation-keyed
+            // AppState cache. Read-only. Off by default (env SPARQ_COMPLETE=1).
+            #[cfg(feature = "complete")]
+            "--complete" => config.complete = true,
             // [OPUS-4.8] sq-bzh1 (epic sq-3183): OPT-IN Triple Pattern Fragments / LDF source
             // endpoint — serve a paged RDF fragment of a triple pattern at GET /tpf with Hydra
             // controls. Read-only. Off by default (env SPARQ_TPF=1).
@@ -577,6 +585,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     ""
                 };
+                // [GPT-5.6] sq-lsp7k.9.3: surface the OPT-IN prefix-completion endpoint flag.
+                let complete = if cfg!(feature = "complete") {
+                    " [--complete]"
+                } else {
+                    ""
+                };
                 // [OPUS-4.8] sq-r74h: surface the brTPF binding-set DoS caps in --help (feature brtpf).
                 let brtpf = if cfg!(feature = "brtpf") {
                     " [--brtpf-max-bindings N] [--brtpf-max-values-bytes N]"
@@ -632,7 +646,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
-                     [--max-subscriptions-per-conn N]{time_travel}{service}{facets}{brtpf}{shacl}{n3_patch}{terse}{templates}{backup}{change_stream} \
+                     [--max-subscriptions-per-conn N]{time_travel}{service}{facets}{complete}{brtpf}{shacl}{n3_patch}{terse}{templates}{backup}{change_stream} \
                      [--cors-allow-origin ORIGIN]... [--cors-allow-origin-file PATH] [--verbose] \
                      [--log-full-requests]{http3} [DATA_FILE]\n  \
                      or: sparq-server --health-probe [--health-probe-addr HOST:PORT]\n\n  \

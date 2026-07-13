@@ -5318,6 +5318,7 @@ dependencies = [
  "sparq-shacl",
  "sparq-solid",
  "sparq-terse",
+ "sparq-text",
  "sparq-trust",
  "sparq-zk",
  "tokio",
