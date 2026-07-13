@@ -49,6 +49,118 @@ const TTL: &str = "\
 s:alice s:name \"Alice\" ; s:knows s:bob .
 ";
 
+/// [GPT-5.6] (sq-g3pji) Dataset fixture for textual dump round-trips: two default-graph
+/// triples, three in `ex:g1`, and one in `ex:g2`. The blank node ensures the invariant is
+/// about counts rather than serializer-specific blank-node labels.
+const DATASET_TRIG: &str = "\
+@prefix ex: <http://example.com/> .
+ex:d0 ex:p \"default one\" .
+ex:d1 ex:p ex:o .
+ex:g1 {
+  ex:a ex:p ex:b .
+  ex:b ex:p \"named two\" .
+  _:local ex:p ex:c .
+}
+ex:g2 { ex:x ex:p ex:y . }
+";
+
+/// Run a non-aggregate SELECT through the mmap index and return its solution count.
+fn query_mmap_count(index: &Path, query: &str) -> usize {
+    let (code, out, err) = run3(&["query-mmap", s(index), query, "--count"]);
+    assert_eq!(
+        code, 0,
+        "query-mmap failed for {query:?}; stderr: {err}"
+    );
+    out.split_whitespace()
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or_else(|| panic!("query-mmap returned no solution count for {query:?}: {out}"))
+}
+
+/// Dump the shared TriG fixture, reload the emitted format through `save`, and assert the
+/// default, whole-dataset, and named-graph counts exposed by `query-mmap`.
+fn assert_textual_dump_roundtrip(
+    out_format: &str,
+    extension: &str,
+    expected_total: usize,
+    named_counts: &[(&str, usize)],
+) {
+    let dir = scratch(&format!("roundtrip-{out_format}"));
+    let input = write(&dir, "input.trig", DATASET_TRIG);
+    let (dump_code, dumped, dump_err) = run3(&["dump", s(&input), "trig", out_format]);
+    assert_eq!(
+        dump_code, 0,
+        "dump to {out_format} failed; stderr: {dump_err}"
+    );
+
+    let output = write(&dir, &format!("dump.{extension}"), &dumped);
+    let index = dir.join("index");
+    let (save_code, _save_out, save_err) = run3(&["save", s(&output), out_format, s(&index)]);
+    assert_eq!(
+        save_code, 0,
+        "reload of dumped {out_format} failed; stderr: {save_err}"
+    );
+
+    // Check graph identity first: if a serializer silently flattens named triples into the
+    // default graph, this is the assertion that witnesses the regression.
+    for &(graph, expected) in named_counts {
+        let query = format!("SELECT ?s ?p ?o WHERE {{ GRAPH <{graph}> {{ ?s ?p ?o }} }}");
+        assert_eq!(
+            query_mmap_count(&index, &query),
+            expected,
+            "{out_format} changed named graph <{graph}>"
+        );
+    }
+
+    let default_query = "SELECT ?s ?p ?o WHERE { ?s ?p ?o }";
+    assert_eq!(
+        query_mmap_count(&index, default_query),
+        2,
+        "{out_format} changed the default graph"
+    );
+
+    // A plain triple pattern is scoped to the default graph. UNION it with GRAPH ?g to count
+    // the complete dataset without using COUNT(*), because `--count` counts solution rows.
+    let dataset_query =
+        "SELECT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }";
+    assert_eq!(
+        query_mmap_count(&index, dataset_query),
+        expected_total,
+        "{out_format} changed the full dataset count"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Turtle is a graph format, so dumping a dataset intentionally preserves only its two
+/// default-graph triples; named graphs must neither leak into nor be flattened into that graph.
+#[test]
+fn dump_turtle_roundtrips_default_graph_count() {
+    assert_textual_dump_roundtrip("turtle", "ttl", 2, &[]);
+}
+
+/// TriG is a dataset format and must preserve all six triples and both graph identities.
+#[test]
+fn dump_trig_roundtrips_default_and_named_graph_counts() {
+    assert_textual_dump_roundtrip(
+        "trig",
+        "trig",
+        6,
+        &[("http://example.com/g1", 3), ("http://example.com/g2", 1)],
+    );
+}
+
+/// N-Quads is a dataset format and must preserve all six triples and both graph identities.
+#[test]
+fn dump_nquads_roundtrips_default_and_named_graph_counts() {
+    assert_textual_dump_roundtrip(
+        "nquads",
+        "nq",
+        6,
+        &[("http://example.com/g1", 3), ("http://example.com/g2", 1)],
+    );
+}
+
 /// Baseline: `dump … jsonld-expanded` emits a JSON-LD array (no `@context`) — the always-on
 /// expanded path still works (a regression guard for the new match arm ordering).
 #[test]
