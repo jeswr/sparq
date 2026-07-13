@@ -120,6 +120,21 @@ jobs:
           npm test
           npm run check:package
 
+      # [OPUS-4.8] sq-6xasp.11 (epic sq-6xasp): the @jeswr/solid-server package — a local-dev
+      # Solid/LDP pod backed by the sparq-lws wasm handler. Build the wasm bundle
+      # (crates/sparq-lws-wasm, matched by the `crates/sparq-*-wasm/**` paths filter above) with
+      # the same wasm-pack installed earlier in this job, then run the package's node:test suite
+      # (http/auth/server/oidc, including the npx spin-up round-trip in server.test.mjs). The wasm
+      # build MUST precede `npm test`: src/index.js statically imports ../wasm/sparq_lws_wasm.js,
+      # so server.test.mjs / oidc.test.mjs (which `import { startSolidServer } from '../src/index.js'`)
+      # fail module resolution without the built wasm/ tree. No `check:package` step — this package
+      # ships no guardrail script (mirrors its package.json, which has only build:lws-wasm + test).
+      - name: solid-server package (build wasm + node:test)
+        working-directory: packages/solid-server
+        run: |
+          npm run build:lws-wasm
+          npm test
+
       # Publish guardrail + git-pin verification (sq-bkag): `prepare` wired, the
       # `files` allowlist intact, and the packed tarball actually ships dist/ + wasm/.
       - name: Package guardrail check
