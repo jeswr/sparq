@@ -1,6 +1,6 @@
-//! Validation reports: the result structs, the report RDF graph (as Turtle, per
-//! the SHACL results vocabulary), deterministic JSON and a human-readable text
-//! rendering.
+//! Validation reports: the result structs, the report RDF graph (as Turtle or
+//! N-Triples, per the SHACL results vocabulary), deterministic JSON and a
+//! human-readable text rendering.
 
 use crate::model::SH;
 use crate::path::Path;
@@ -183,6 +183,28 @@ impl ValidationReport {
         }
         let _ = writeln!(out, " .");
         out
+    }
+
+    /// The report RDF graph serialised as one N-Triples statement per line.
+    ///
+    /// This emits the same validation-report graph as [`to_turtle`](Self::to_turtle),
+    /// including nested `sh:detail` results.
+    pub fn to_ntriples(&self) -> String {
+        // [GPT-5.6] (sq-qcuhh) Keep the Turtle renderer as the single report-graph
+        // construction path, then use oxttl for complete N-Triples term escaping.
+        let turtle = self.to_turtle();
+        let triples = oxttl::TurtleParser::new().for_slice(turtle.as_bytes());
+        let mut serializer = oxttl::NTriplesSerializer::new().low_level();
+        let mut out = Vec::new();
+
+        for triple in triples {
+            let triple = triple.expect("ValidationReport::to_turtle must emit valid Turtle");
+            serializer
+                .serialize_triple(triple.as_ref(), &mut out)
+                .expect("serialising N-Triples into memory must succeed");
+        }
+
+        String::from_utf8(out).expect("N-Triples output must be valid UTF-8")
     }
 
     /// A human-readable rendering of the report.
@@ -719,6 +741,81 @@ mod tests {
             .filter(|t| t.predicate.as_str().ends_with("#result"))
             .count();
         assert_eq!(n_results, 2, "{ttl}");
+    }
+
+    // [GPT-5.6] (sq-qcuhh) Value-pinned direct coverage for the public N-Triples
+    // serializer: two violations must remain two report links and conformity must
+    // be the boolean false in the emitted report graph.
+    #[test]
+    fn ntriples_emits_two_result_nonconforming_report_graph() {
+        let report = ValidationReport::new(vec![
+            result(
+                iri(&format!("{EX}alice")),
+                None,
+                None,
+                "MinCountConstraintComponent",
+                "Violation",
+                vec![],
+            ),
+            result(
+                iri(&format!("{EX}bob")),
+                Some(Path::Predicate(format!("{EX}age"))),
+                Some(lit("thirty")),
+                "DatatypeConstraintComponent",
+                "Violation",
+                vec![],
+            ),
+        ]);
+
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 2);
+        let nt = report.to_ntriples();
+        assert!(
+            nt.lines()
+                .filter(|line| !line.trim().is_empty())
+                .all(|line| line.trim_end().ends_with(" .")),
+            "{nt}"
+        );
+
+        let triples = oxttl::NTriplesParser::new()
+            .for_slice(nt.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap_or_else(|error| panic!("report N-Triples does not parse: {error}\n{nt}"));
+        let report_type = format!("{SH}ValidationReport");
+        let report_nodes: Vec<_> = triples
+            .iter()
+            .filter(|triple| {
+                triple.predicate.as_str() == "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+                    && matches!(&triple.object, Term::NamedNode(node) if node.as_str() == report_type)
+            })
+            .map(|triple| triple.subject.clone())
+            .collect();
+        assert_eq!(report_nodes.len(), 1, "{nt}");
+        let report_node = &report_nodes[0];
+
+        let conforms: Vec<_> = triples
+            .iter()
+            .filter(|triple| {
+                &triple.subject == report_node
+                    && triple.predicate.as_str() == format!("{SH}conforms")
+            })
+            .collect();
+        assert_eq!(conforms.len(), 1, "{nt}");
+        assert!(
+            matches!(&conforms[0].object, Term::Literal(literal) if literal.value() == "false"),
+            "{nt}"
+        );
+        assert_eq!(
+            triples
+                .iter()
+                .filter(|triple| {
+                    &triple.subject == report_node
+                        && triple.predicate.as_str() == format!("{SH}result")
+                })
+                .count(),
+            2,
+            "{nt}"
+        );
     }
 
     #[test]

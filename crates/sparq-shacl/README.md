@@ -11,7 +11,7 @@ Opt-in **SHACL Core + SHACL-SPARQL (`sh:sparql`)** validation over
 [`sparq_core::Graph`]s. Core constraints run at the dictionary-id level via direct,
 index-backed permutation scans (no SPARQL round-trip; terms materialise only at the
 report boundary); `sh:sparql` routes its `sh:select` through `sparq-engine`. Reports:
-`conforms` + per-result detail, `to_turtle()` (W3C vocabulary), `to_text()`.
+`conforms` + per-result detail; `to_turtle()` / `to_ntriples()` (W3C report graph), `to_json()`, and `to_text()`.
 
 Like `sparq-reason`, this crate is **isolated**: no other sparq crate depends on it, so
 the core engine and the default wasm bundle carry zero SHACL code. The browser/JS
