@@ -16,6 +16,9 @@ pub enum Agg {
     Avg,
     /// Minimum of the selected variable's numeric literal bindings.
     Min,
+    /// Median of the selected variable's numeric literal bindings.
+    // [GPT-5.6] sq-sfle1: fold the sorted numeric input at its middle value(s).
+    Median,
     /// Maximum of the selected variable's numeric literal bindings.
     Max,
 }
@@ -26,7 +29,7 @@ pub enum Agg {
 /// `window.vars`, this returns `None`. [`Agg::Count`] counts every emitted row,
 /// including unbound and non-numeric bindings. The other aggregates skip
 /// unbound, non-literal, non-numeric, and ill-formed numeric bindings. An empty
-/// numeric input has sum `0.0` and no average, minimum, or maximum.
+/// numeric input has sum `0.0` and no average, minimum, median, or maximum.
 ///
 /// This helper only folds `window.rows`: it does not read the clock, re-query
 /// the graph, or mutate the continuous query.
@@ -64,6 +67,16 @@ pub fn window_aggregate(window: &WindowResult, var: &str, aggregate: Agg) -> Opt
             (count != 0).then(|| numbers.into_iter().sum::<f64>() / count as f64)
         }
         Agg::Min => numbers.first().copied(),
+        Agg::Median => {
+            let middle = numbers.len() / 2;
+            if numbers.len() % 2 == 1 {
+                numbers.get(middle).copied()
+            } else if middle == 0 {
+                None
+            } else {
+                Some((numbers[middle - 1] + numbers[middle]) / 2.0)
+            }
+        }
         Agg::Max => numbers.last().copied(),
         Agg::Count => unreachable!("count returns before the numeric fold"),
     }

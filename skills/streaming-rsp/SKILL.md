@@ -90,7 +90,7 @@ ContinuousQuery::register(sparql: &str, spec: WindowSpec) -> Result<ContinuousQu
   .late_dropped() -> u64            // arrivals dropped because every covering window had closed
 
 // --- Optional closed-window scalar fold (feature = "window-aggregate") ---
-enum Agg { Count, Sum, Avg, Min, Max }
+enum Agg { Count, Sum, Avg, Min, Median, Max } // [GPT-5.6] sq-sfle1
 window_aggregate(window: &WindowResult, var: &str, aggregate: Agg) -> Option<f64>
 
 // --- Continuous CONSTRUCT: GraphResult { start, end, triples: Vec<Triple> } (stream->stream) ---
@@ -150,10 +150,11 @@ clock, and reported bounds are inclusive `[first_event_ts, last_event_ts]`.
 
 **Fold an emitted SELECT window to a scalar:** enable `window-aggregate`, then call
 `window_aggregate(&result, "v", Agg::Sum)`. `Count` includes every emitted row,
-even when `v` is unbound or non-numeric. `Sum`/`Avg`/`Min`/`Max` use well-formed
-XSD numeric literal bindings only. An unknown projected variable returns `None`;
-an empty numeric input returns `Some(0.0)` for `Sum` and `None` for
-`Avg`/`Min`/`Max`.
+even when `v` is unbound or non-numeric. `Sum`/`Avg`/`Min`/`Median`/`Max` use
+well-formed XSD numeric literal bindings only. `Median` returns the middle numeric
+binding after sorting, or the arithmetic mean of the two middle bindings for an even
+count. An unknown projected variable returns `None`; an empty numeric input returns
+`Some(0.0)` for `Sum` and `None` for `Avg`/`Min`/`Median`/`Max`.
 
 **CONSTRUCT to transform a stream into another stream (each window -> a graph):**
 
