@@ -8,6 +8,7 @@
 > [GPT-5.6] Bead `sq-lsp7k.16` adds the checked inverse, `from_record_batch`.
 > [GPT-5.6] Bead `sq-lsp7k.21` adds Parquet byte serialization over that same schema.
 > [GPT-5.6] Bead `sq-r3cab` adds Arrow IPC stream byte serialization.
+> [GPT-5.6] Bead `sq-ksxa2` adds schema-only variable readers for both containers.
 
 **Opt-in / lean-core by construction.** This is a separate leaf crate, and Arrow
 import/export sits behind the `arrow` feature (OFF by default). The `arrow-*` dependency
@@ -44,9 +45,10 @@ To serialize the same term-struct batch as an in-memory Parquet file, enable the
 default-OFF `parquet` feature:
 
 ```rust,ignore
-use sparq_arrow::{from_parquet_bytes, to_parquet_bytes};
+use sparq_arrow::{from_parquet_bytes, parquet_variables_from_bytes, to_parquet_bytes};
 
 let bytes = to_parquet_bytes(&result)?;
+assert_eq!(parquet_variables_from_bytes(&bytes)?, result.vars);
 let restored = from_parquet_bytes(&bytes)?;
 assert_eq!(restored.vars, result.vars);
 assert_eq!(restored.rows, result.rows);
@@ -57,8 +59,10 @@ Use `cargo add sparq-arrow --features parquet` (or
 `cargo build -p sparq-arrow --features parquet`); `parquet` implies `arrow`.
 
 For an Arrow IPC stream instead, enable the default-OFF `ipc` feature and call
-`to_ipc_bytes(&result)` / `from_ipc_bytes(&bytes)`. The stream uses the same term-struct
-schema and preserves empty-result variables. Use `cargo add sparq-arrow --features ipc`.
+`to_ipc_bytes(&result)` / `from_ipc_bytes(&bytes)`. Call
+`ipc_variables_from_bytes(&bytes)` to read only its schema. The stream uses the same
+term-struct schema and preserves empty-result variables. Use
+`cargo add sparq-arrow --features ipc`.
 
 ## ✨ The RDF-term → Arrow mapping
 
@@ -85,6 +89,8 @@ metadata return `ArrowError`; they never panic or silently select a fallback ter
 `from_parquet_bytes` validates the recovered schema before decoding any row. Empty
 results retain their variable projection, and multiple row groups keep file order.
 `to_ipc_bytes` and `from_ipc_bytes` provide the equivalent checked Arrow IPC stream.
+The `parquet_variables_from_bytes` and `ipc_variables_from_bytes` schema readers recover
+only the variables without decoding rows.
 
 ## 📚 Honest boundary / caveats
 

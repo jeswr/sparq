@@ -13,11 +13,11 @@ use std::sync::Arc;
 
 use arrow_array::cast::AsArray;
 use arrow_array::{Array, ArrayRef, RecordBatch, StringArray, StructArray};
-use arrow_schema::{DataType, Field};
+use arrow_schema::{DataType, Field, Schema};
 use oxrdf::{BaseDirection, BlankNode, Literal, NamedNode, Term, Triple, Variable};
 use sparq_arrow::{
-    from_record_batch, term_schema, to_record_batch, FIELD_DATATYPE, FIELD_DIRECTION, FIELD_KIND,
-    FIELD_LANGUAGE, FIELD_VALUE,
+    from_record_batch, term_schema, term_struct_type, to_record_batch, FIELD_DATATYPE,
+    FIELD_DIRECTION, FIELD_KIND, FIELD_LANGUAGE, FIELD_VALUE,
 };
 use sparq_core::Graph;
 use sparq_engine::{query, QueryResult};
@@ -293,6 +293,22 @@ fn invalid_term_schema_is_rejected() {
         error
             .to_string()
             .contains("does not use the nullable RDF-term struct schema"),
+        "{error}"
+    );
+}
+
+/// Duplicate field names are rejected by the shared schema-to-variable validator.
+#[test]
+fn duplicate_import_variable_is_rejected() {
+    let field = Field::new("term", term_struct_type(), true);
+    let schema = Arc::new(Schema::new(vec![field.clone(), field]));
+    let batch = RecordBatch::new_empty(schema);
+
+    let error = from_record_batch(&batch).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate SELECT variable 'term' in Arrow schema"),
         "{error}"
     );
 }

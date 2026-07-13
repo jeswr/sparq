@@ -14,8 +14,10 @@ Use `sparq-arrow` when a Rust application needs a faithful columnar representati
 
 - Enable `arrow` for `to_record_batch`, `from_record_batch`, `term_schema`, and
   `term_struct_type`.
-- Enable `parquet` for `to_parquet_bytes` and `from_parquet_bytes`; it implies `arrow`.
-- Enable `ipc` for `to_ipc_bytes` and `from_ipc_bytes`; it implies `arrow`.
+- Enable `parquet` for `to_parquet_bytes`, `from_parquet_bytes`, and
+  `parquet_variables_from_bytes`; it implies `arrow`.
+- Enable `ipc` for `to_ipc_bytes`, `from_ipc_bytes`, and
+  `ipc_variables_from_bytes`; it implies `arrow`.
 - Leave all features disabled to retain only the dependency-free field-name constants.
 
 All features are default-OFF. The crate is a leaf capability crate, so no Arrow
@@ -38,10 +40,12 @@ Add the feature with `cargo add sparq-arrow --features arrow`.
 ## Use Parquet bytes
 
 ```rust,ignore
-use sparq_arrow::{from_parquet_bytes, to_parquet_bytes};
+use sparq_arrow::{from_parquet_bytes, parquet_variables_from_bytes, to_parquet_bytes};
 
 let bytes: Vec<u8> = to_parquet_bytes(&result)?;
+let variables = parquet_variables_from_bytes(&bytes)?;
 let restored = from_parquet_bytes(&bytes)?;
+assert_eq!(variables, result.vars);
 assert_eq!(restored.vars, result.vars);
 assert_eq!(restored.rows, result.rows);
 # Ok::<(), Box<dyn std::error::Error>>(())
@@ -49,16 +53,19 @@ assert_eq!(restored.rows, result.rows);
 
 Add the feature with `cargo add sparq-arrow --features parquet`. Parquet is only a
 serialization of the same RecordBatch projection; it does not use a second term
-encoding. `from_parquet_bytes` rejects unreadable files, a schema that deviates from the
-five-field term struct, and invalid RDF lexical components.
+encoding. `parquet_variables_from_bytes` validates and reads only the stored schema,
+without decoding row groups. `from_parquet_bytes` additionally rejects invalid RDF
+lexical components while decoding rows.
 
 ## Use Arrow IPC stream bytes
 
 ```rust,ignore
-use sparq_arrow::{from_ipc_bytes, to_ipc_bytes};
+use sparq_arrow::{from_ipc_bytes, ipc_variables_from_bytes, to_ipc_bytes};
 
 let bytes: Vec<u8> = to_ipc_bytes(&result)?;
+let variables = ipc_variables_from_bytes(&bytes)?;
 let restored = from_ipc_bytes(&bytes)?;
+assert_eq!(variables, result.vars);
 assert_eq!(restored.vars, result.vars);
 assert_eq!(restored.rows, result.rows);
 # Ok::<(), Box<dyn std::error::Error>>(())
@@ -66,6 +73,7 @@ assert_eq!(restored.rows, result.rows);
 
 Add the feature with `cargo add sparq-arrow --features ipc`. The IPC stream carries the
 same schema as the RecordBatch and preserves variable names for an empty result.
+`ipc_variables_from_bytes` validates and reads that schema without decoding batches.
 
 ## Preserve the mapping
 

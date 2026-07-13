@@ -49,10 +49,12 @@
 //!   `from_record_batch` reconstructs terms from the five fields, but the Arrow batch is not
 //!   itself an RDF document.
 //! * With the opt-in `parquet` feature, `to_parquet_bytes` / `from_parquet_bytes`
-//!   serialize and restore this exact RecordBatch projection. Parquet adds a container;
-//!   it does not define a second RDF-term encoding.
+//!   serialize and restore this exact RecordBatch projection;
+//!   `parquet_variables_from_bytes` reads only its variables from the stored schema.
+//!   Parquet adds a container; it does not define a second RDF-term encoding.
 //! * With the opt-in `ipc` feature, `to_ipc_bytes` / `from_ipc_bytes` do the same through
-//!   the Arrow IPC streaming format, including preservation of an empty result's schema.
+//!   the Arrow IPC streaming format, including preservation of an empty result's schema;
+//!   `ipc_variables_from_bytes` reads that schema without decoding record batches.
 
 /// Struct field name: the term kind — `"uri"`, `"bnode"`, `"literal"`, or `"triple"`.
 pub const FIELD_KIND: &str = "kind";
@@ -101,8 +103,8 @@ pub use import::{from_record_batch, ArrowError};
 
 #[cfg(feature = "parquet")]
 #[cfg_attr(docsrs, doc(cfg(feature = "parquet")))]
-pub use parquet::{from_parquet_bytes, to_parquet_bytes};
+pub use parquet::{from_parquet_bytes, parquet_variables_from_bytes, to_parquet_bytes};
 
 #[cfg(feature = "ipc")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ipc")))]
-pub use ipc::{from_ipc_bytes, to_ipc_bytes};
+pub use ipc::{from_ipc_bytes, ipc_variables_from_bytes, to_ipc_bytes};
