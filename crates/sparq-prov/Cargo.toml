@@ -38,6 +38,9 @@ sparq-core = { path = "../sparq-core" }
 # The CONSTRUCT derivation we wrap (and, by extension, DESCRIBE).
 sparq-engine = { path = "../sparq-engine" }
 oxrdf = { workspace = true }
+# Prefix-compacted Turtle output for `Derivation` and `UpdateDerivation`.
+# [GPT-5.6] sq-ijw35: promoted from the test-only dependency below; no new crate.
+oxttl = { workspace = true }
 # Parsed BGP algebra, only for the opt-in missing-answer explainer.
 spargebra = { workspace = true, optional = true }
 # Reasoner proof trees (`why()`), only under the `reason` feature. `explain` is the
@@ -46,8 +49,5 @@ spargebra = { workspace = true, optional = true }
 sparq-reason = { path = "../sparq-reason", features = ["explain"], optional = true }
 
 [dev-dependencies]
-# Round-trip the emitted PROV-O graph back through the loader to prove it is
-# well-formed RDF (Turtle ⊇ N-Triples).
-oxttl = { workspace = true }
 # [GPT-5.6] sq-hggpo: generate derivation shapes for structural PROV-O properties.
 proptest = "1"

@@ -128,6 +128,35 @@ fn prov_graph_is_valid_rdf_and_round_trips() {
     assert_eq!(parsed.len(), d.prov_graph().len());
 }
 
+/// [GPT-5.6] sq-ijw35: the Derivation Turtle method preserves every provenance
+/// triple, and the generation edge uses the registered prefix.
+#[test]
+fn prov_turtle_round_trips_the_exact_derivation_graph() {
+    let d = derive_construct(
+        &g(),
+        "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+        cfg(),
+    )
+    .unwrap();
+
+    let turtle = d.prov_turtle();
+    assert!(
+        turtle.contains("prov:wasGeneratedBy"),
+        "expected the prefix-compacted generation predicate in {turtle}"
+    );
+
+    let parsed: Vec<_> = oxttl::TurtleParser::new()
+        .for_slice(turtle.as_bytes())
+        .collect::<Result<_, _>>()
+        .expect("emitted lineage must be well-formed Turtle");
+    let expected = d.prov_graph();
+    assert_eq!(parsed.len(), expected.len());
+    assert_eq!(
+        parsed.into_iter().collect::<HashSet<_>>(),
+        expected.into_iter().collect::<HashSet<_>>()
+    );
+}
+
 #[test]
 fn explicit_iris_and_agent_are_honoured() {
     let activity = NamedNode::new_unchecked("http://ex/act/1");

@@ -47,7 +47,8 @@ let d = derive_construct(
 let derived = d.triples();       // the derived data (Vec<Triple>)
 let inputs  = d.used_inputs();   // configured input IRIs, in order (&[NamedNode])
 let lineage = d.prov_graph();    // its PROV-O record (Vec<Triple>)
-let turtle  = d.prov_ntriples(); // …serialised (N-Triples ⊂ Turtle)
+let turtle  = d.prov_turtle();   // …prefix-compacted Turtle
+let nt      = d.prov_ntriples(); // …or canonical N-Triples
 ```
 
 ## The emitted PROV-O shape
@@ -96,6 +97,7 @@ let inserted = d.inserted();    // the generated (derived) triples
 let deleted  = d.deleted();     // the retracted (invalidated) triples
 let inputs   = d.used_inputs(); // configured input IRIs, in order
 let lineage  = d.prov_graph();  // its PROV-O record (Vec<Triple>)
+let turtle   = d.prov_turtle(); // prefix-compacted Turtle for that same graph
 ```
 
 Emitted shape — for update activity `A`, generated entity `E` (the inserts), inputs `Iᵢ`:
