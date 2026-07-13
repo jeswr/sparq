@@ -11,6 +11,9 @@ pub enum Agg {
     Count,
     /// Sum of the selected variable's numeric literal bindings.
     Sum,
+    /// Arithmetic mean of the selected variable's numeric literal bindings.
+    // [GPT-5.6] sq-xf3b8: keep AVG on the same deterministic numeric fold as SUM.
+    Avg,
     /// Minimum of the selected variable's numeric literal bindings.
     Min,
     /// Maximum of the selected variable's numeric literal bindings.
@@ -23,7 +26,7 @@ pub enum Agg {
 /// `window.vars`, this returns `None`. [`Agg::Count`] counts every emitted row,
 /// including unbound and non-numeric bindings. The other aggregates skip
 /// unbound, non-literal, non-numeric, and ill-formed numeric bindings. An empty
-/// numeric input has sum `0.0` and no minimum or maximum.
+/// numeric input has sum `0.0` and no average, minimum, or maximum.
 ///
 /// This helper only folds `window.rows`: it does not read the clock, re-query
 /// the graph, or mutate the continuous query.
@@ -56,6 +59,10 @@ pub fn window_aggregate(window: &WindowResult, var: &str, aggregate: Agg) -> Opt
 
     match aggregate {
         Agg::Sum => Some(numbers.into_iter().sum()),
+        Agg::Avg => {
+            let count = numbers.len();
+            (count != 0).then(|| numbers.into_iter().sum::<f64>() / count as f64)
+        }
         Agg::Min => numbers.first().copied(),
         Agg::Max => numbers.last().copied(),
         Agg::Count => unreachable!("count returns before the numeric fold"),
