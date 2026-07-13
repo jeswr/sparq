@@ -384,6 +384,11 @@ impl TextIndex {
         self.postings.len()
     }
 
+    /// Number of (token, document) posting pairs. [GPT-5.6] sq-ukr2k
+    pub fn total_postings(&self) -> usize {
+        self.postings.values().map(|v| v.len()).sum()
+    }
+
     /// Returns corpus statistics for exactly one analyzed token.
     ///
     /// `token` is normalized with this index's [`Analyzer`], exactly as indexed
