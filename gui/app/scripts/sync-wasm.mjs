@@ -6,9 +6,18 @@
 // @sparq/client loader, which keys its asset URLs off NEXT_PUBLIC_BASE_PATH), so they must live
 // in public/. The core SPARQL + SHACL engine is REQUIRED; the tier-b W-reason bundle (below) is
 // OPTIONAL (the Inference tool degrades honestly without it).
-import { mkdir, copyFile, access, rm } from "node:fs/promises";
+//
+// [SONNET-4.6] sq-b66fc — content-hashing added: every .js/.wasm runtime file gets
+// a hashed copy written alongside the unhashed original, and a wasm-manifest.json is
+// emitted to public/wasm/ so the @sparq/client resolveWasmAsset() loader can request
+// content-addressed URLs (defeating GitHub Pages' ~10 min max-age after redeployment).
+import { mkdir, copyFile, access, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  hashFile,
+  hashedName,
+} from "../../../packages/sparq-client/scripts/hash-asset.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const src = join(here, "..", "..", "..", "js", "wasm");
@@ -43,6 +52,19 @@ for (const f of files) {
 await rmStale(join(dest, "sparq_wasm.d.ts"));
 console.log(`[sync-wasm] copied ${files.length} files → public/wasm/`);
 
+// [SONNET-4.6] sq-b66fc — accumulate manifest entries: logicalName → hashed filename.
+/** @type {Record<string, string>} */
+const manifest = {};
+
+// Hash core runtime files and write hashed copies alongside the originals.
+for (const f of files) {
+  const destPath = join(dest, f);
+  const hash = await hashFile(destPath);
+  const hashed = hashedName(f, hash);
+  await copyFile(destPath, join(dest, hashed));
+  manifest[f] = hashed;
+}
+
 // [OPUS-4.8] sq-tp1m (#757) — also sync the tier-b "W-reason" bundle that powers the Inference
 // tool (crates/sparq-reason-wasm, built with `--features explain` by `js/`'s `build:reason-wasm`,
 // exactly as the marketing site syncs it). Its wasm-pack output stays in the crate's own pkg/
@@ -65,6 +87,14 @@ try {
   console.log(
     `[sync-wasm] copied ${reasonFiles.length} files → public/wasm/reason/ (W-reason)`,
   );
+  // [SONNET-4.6] sq-b66fc — hash W-reason runtime files.
+  for (const f of reasonFiles) {
+    const destPath = join(reasonDest, f);
+    const hash = await hashFile(destPath);
+    const hashed = hashedName(f, hash);
+    await copyFile(destPath, join(reasonDest, hashed));
+    manifest[`reason/${f}`] = hashed;
+  }
 } catch {
   console.warn(
     `[sync-wasm] W-reason bundle not found at ${reasonSrc}; the Inference tool will not run\n` +
@@ -92,6 +122,14 @@ try {
   console.log(
     `[sync-wasm] copied ${textFiles.length} files → public/wasm/text/ (W-text)`,
   );
+  // [SONNET-4.6] sq-b66fc — hash W-text runtime files.
+  for (const f of textFiles) {
+    const destPath = join(textDest, f);
+    const hash = await hashFile(destPath);
+    const hashed = hashedName(f, hash);
+    await copyFile(destPath, join(textDest, hashed));
+    manifest[`text/${f}`] = hashed;
+  }
 } catch {
   console.warn(
     `[sync-wasm] W-text bundle not found at ${textSrc}; the Full-text tool will not run\n` +
@@ -119,9 +157,27 @@ try {
   console.log(
     `[sync-wasm] copied ${rspFiles.length} files → public/wasm/rsp/ (W-rsp)`,
   );
+  // [SONNET-4.6] sq-b66fc — hash W-rsp runtime files.
+  for (const f of rspFiles) {
+    const destPath = join(rspDest, f);
+    const hash = await hashFile(destPath);
+    const hashed = hashedName(f, hash);
+    await copyFile(destPath, join(rspDest, hashed));
+    manifest[`rsp/${f}`] = hashed;
+  }
 } catch {
   console.warn(
     `[sync-wasm] W-rsp bundle not found at ${rspSrc}; the Streaming tool will not run\n` +
       `            live. Build it:  (cd ../../js && npm run build:rsp-wasm)`,
   );
 }
+
+// [SONNET-4.6] sq-b66fc — write the manifest. Same contract as the site sync: maps
+// each logical runtime filename (relative to public/wasm/) to its content-hashed copy.
+// The @sparq/client resolveWasmAsset() loader reads this once and caches it; falls back
+// to the unhashed name when absent (Tauri local disk / dev mode).
+const manifestPath = join(dest, "wasm-manifest.json");
+await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + "\n", "utf8");
+console.log(
+  `[sync-wasm] wrote wasm-manifest.json with ${Object.keys(manifest).length} entries → public/wasm/`,
+);
