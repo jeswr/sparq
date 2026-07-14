@@ -77,6 +77,16 @@ algebra-rewrite = ["sparq-engine/algebra-rewrite"]
 # integration test. Production builds never enable it (the seam field + constructor
 # vanish), so production behaviour is byte-identical to a build without this feature.
 test-seams = []
+# [SONNET-4.6] (sq-qsm5z) `query-registry` (default OFF): opt-in in-memory running-query
+# registry: each executing SELECT/ASK/CONSTRUCT/DESCRIBE registers on start and deregisters on
+# completion or error (RAII). `GET /queries` lists active queries (id, start timestamp, a
+# NON-REVERSIBLE fingerprint — never raw text per the #241 / sq-m9prn redaction posture,
+# elapsed ms) behind the READ auth gate (fail-closed). `DELETE /queries/{id}` cooperatively
+# cancels one query by flipping the `sq-kq9ia` cross-thread `Arc<AtomicBool>` cancel flag
+# already wired into the engine's `QueryBudget`, behind the WRITE auth gate (fail-closed).
+# Zero cost when compiled out: no fields in `AppState`, no routes, byte-identical to before.
+# Pulls no new dependencies beyond those already present via `server`.
+query-registry = ["server"]
 # [OPUS-4.8] (sq-0bxp) `audit-log` (default OFF): compiles the OPT-IN per-query access
 # audit log (CDMC CD-2 / ISO 27001 A.8.15 / EU CRA logging). With the feature on, the
 # server can emit a structured `tracing` record under target `sparq_server::audit` for
