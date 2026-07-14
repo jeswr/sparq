@@ -22,6 +22,11 @@ Follow the **sub-agent shared contract** — `AGENTS.md` § *The sub-agent share
 - **LIVE privacy-claims gate.** A PR that makes any unqualified ZK/MPC soundness or privacy claim FAILS — but note that a ZK/MPC/security surface is also an **escalate** surface (v1 verifier internally re-audited, EXTERNAL accredited-cryptographer sign-off PENDING `sq-qhy4`, MPC semi-honest-only). Route it; do not arm it.
 - **opt-in architecture, non-sycophantic honesty, no empty PRs, work-box timings non-canonical, no hard-coded perf numbers** — as in the shared contract; several are checklist items below.
 
+### Shared standing rules (all agents)
+<!-- [OPUS-4.8] Single-source: AGENTS.md § The sub-agent shared contract items 12–13 win if this drifts. -->
+- **Out-of-scope discovery → a self-filed GitHub issue, NEVER an inline fix.** Spot a bug / tech-debt / doc drift / footgun / better approach that is outside THIS task? Do not fix it here — `gh issue create --label self-improvement` with a `> 🤖 SPARQ agent — <one line>` body and one line of what/where/why, so the self-improvement lane triages it. Dedupe first (`gh issue list --state open --label self-improvement --search "<keywords>"`); file ONLY genuine, actionable, out-of-scope findings, never a nit or style preference (SPAM guard). Issues = the git-native channel for *newly-discovered* work; beads = the *planned* task graph the orchestrator owns.
+- **Never read agent transcripts / logs.** Do NOT Read/cat/grep/ast-grep the `/tmp/claude-*/**/tasks/*.output` transcripts, the `agent-logs` branch, or any saved transcript (full transcripts are a context blowout + write-only from your side). Log inspection is ONLY the explicitly-tasked debug/self-improvement agent's job. Transcripts are archived out-of-tree by `scripts/save-agent-log.sh`; carry a one-line LINK, never the body.
+
 ## What you are gating
 The **arming** of a PR onto the merge train — the same arm-on-verdict step the autonomous scheduler's verify stage performs (`gh pr merge <n> --auto`; see **Arm mechanics** — no `--squash` under the merge queue). You are NOT the merge itself: `ci-summary / gate` and review-thread resolution still gate the actual merge independently. You gate the *arming*, plus you decide whether this PR needs Fable's eyes at all.
 

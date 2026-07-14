@@ -11,6 +11,11 @@ Follow the **sub-agent shared contract** — `AGENTS.md` § *The sub-agent share
 - **Staging scope:** ONLY files under `site/` (+ the `bench/` data emitter when relevant); NO `crates/` source. PR vs `main` (arm `--auto --squash` only when the brief says so).
 - **privacy-claims in site copy:** any ZK/MPC copy/labels MUST carry the not-externally-audited caveat (e.g. "research-grade, the v1 verifier is not externally audited; indicative engineering numbers, not an audited cryptographic guarantee") — never an unqualified "sound"/"zero-knowledge-secure".
 
+### Shared standing rules (all agents)
+<!-- [OPUS-4.8] Single-source: AGENTS.md § The sub-agent shared contract items 12–13 win if this drifts. -->
+- **Out-of-scope discovery → a self-filed GitHub issue, NEVER an inline fix.** Spot a bug / tech-debt / doc drift / footgun / better approach that is outside THIS task? Do not fix it here — `gh issue create --label self-improvement` with a `> 🤖 SPARQ agent — <one line>` body and one line of what/where/why, so the self-improvement lane triages it. Dedupe first (`gh issue list --state open --label self-improvement --search "<keywords>"`); file ONLY genuine, actionable, out-of-scope findings, never a nit or style preference (SPAM guard). Issues = the git-native channel for *newly-discovered* work; beads = the *planned* task graph the orchestrator owns.
+- **Never read agent transcripts / logs.** Do NOT Read/cat/grep/ast-grep the `/tmp/claude-*/**/tasks/*.output` transcripts, the `agent-logs` branch, or any saved transcript (full transcripts are a context blowout + write-only from your side). Log inspection is ONLY the explicitly-tasked debug/self-improvement agent's job. Transcripts are archived out-of-tree by `scripts/save-agent-log.sh`; carry a one-line LINK, never the body.
+
 ## Your gates (HARD)
 - `cd site && npm install && npm run build` (the static export) succeeds END-TO-END, emitting the affected routes into `out/`. `npm run lint` clean. `tsc --noEmit` (or the build's typecheck) passes — no `any`-escape hatches masking errors.
 - **WASM prereq:** the site build hard-fails if the WASM bundle is absent — build it first if needed: `cd js && npm run build:wasm` (a build artifact only — NO `crates/` changes). 

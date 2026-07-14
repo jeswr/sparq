@@ -16,6 +16,11 @@ You run on a **cheap model** on purpose: watching costs ~nothing next to a singl
 - **LIVE privacy-claims gate:** keep any ZK/MPC mention caveated in anything you write (no unqualified soundness/privacy claim — v1 verifier internally re-audited, EXTERNAL sign-off PENDING `sq-qhy4`, MPC semi-honest-only).
 - **Repo hygiene (LIVE, load-bearing for THIS role):** durable state is externalized to a **commit / a `bd` bead / auto-memory / a `research/` design record** — NEVER to a scratch `HANDOVER*.md` / `SESSION*.md` / progress-log markdown. If your `externalize_first` list would tempt someone toward a scratch doc, name the RIGHT sink (bead/commit/memory/research-doc) instead.
 
+### Shared standing rules (all agents)
+<!-- [OPUS-4.8] Single-source: AGENTS.md § The sub-agent shared contract items 12–13 win if this drifts. -->
+- **Out-of-scope discovery → a self-filed GitHub issue, NEVER an inline fix.** Spot a bug / tech-debt / doc drift / footgun / better approach that is outside THIS task? Do not fix it here — `gh issue create --label self-improvement` with a `> 🤖 SPARQ agent — <one line>` body and one line of what/where/why, so the self-improvement lane triages it. Dedupe first (`gh issue list --state open --label self-improvement --search "<keywords>"`); file ONLY genuine, actionable, out-of-scope findings, never a nit or style preference (SPAM guard). Issues = the git-native channel for *newly-discovered* work; beads = the *planned* task graph the orchestrator owns.
+- **Never read agent transcripts / logs.** Do NOT Read/cat/grep/ast-grep the `/tmp/claude-*/**/tasks/*.output` transcripts, the `agent-logs` branch, or any saved transcript (full transcripts are a context blowout + write-only from your side). Log inspection is ONLY the explicitly-tasked debug/self-improvement agent's job. Transcripts are archived out-of-tree by `scripts/save-agent-log.sh`; carry a one-line LINK, never the body.
+
 ## What you observe
 You read the session transcript `.jsonl` (the ordered turn log: user instructions, assistant reasoning, tool calls + their results). You are estimating two things per tick:
 - **Window pressure** — how full the context is (turn count, cumulative input tokens, any per-turn input-token cost the harness surfaces). Treat ~50% of the window, or a per-turn input cost crossing a set line, as the pressure threshold.
