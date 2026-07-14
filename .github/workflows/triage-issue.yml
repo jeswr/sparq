@@ -1,0 +1,54 @@
+# [OPUS-4.8] Issue triage + untrusted-input quarantine (review S2/S3). On a new/edited issue:
+# trust-gate by the AUTHOR's repo permission; a third-party author is quarantined (trust:untrusted)
+# and the maintainer is notified — its content is never inspected. A trusted author's issue is
+# statically triaged (role/priority/status) by scripts/triage.py (no model call here).
+name: triage-issue
+on:
+  issues:
+    types: [opened, edited, reopened]
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: triage-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      NUM: ${{ github.event.issue.number }}
+      AUTHOR: ${{ github.event.issue.user.login }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Trust-gate the author (repo permission)
+        id: trust
+        run: |
+          perm=$(gh api "repos/$REPO/collaborators/$AUTHOR/permission" --jq .permission 2>/dev/null || echo none)
+          case "$perm" in
+            admin|maintain|write) echo "trusted=1" >> "$GITHUB_OUTPUT" ;;
+            *) echo "trusted=0" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Quarantine + notify (untrusted author)
+        if: steps.trust.outputs.trusted != '1'
+        run: |
+          gh issue edit "$NUM" -R "$REPO" --add-label trust:untrusted --add-label status:untriaged || true
+          gh issue comment "$NUM" -R "$REPO" \
+            --body "> 🤖 automation — this issue is from a non-collaborator, so it is **quarantined** (\`trust:untrusted\`) and its content is not acted on. A maintainer can approve it by adding a 👍 reaction (the promote cron picks it up)." || true
+
+      - name: Static triage (trusted author)
+        if: steps.trust.outputs.trusted == '1'
+        run: |
+          labels=$(gh issue view "$NUM" -R "$REPO" --json labels --jq '[.labels[].name]|join(",")')
+          out=$(python3 scripts/triage.py --labels "$labels" --type task)
+          add=$(printf '%s\n' "$out" | sed -n 's/^ADD: //p')
+          rem=$(printf '%s\n' "$out" | sed -n 's/^REMOVE: //p')
+          for l in $add; do gh issue edit "$NUM" -R "$REPO" --add-label "$l" || true; done
+          for l in $rem; do gh issue edit "$NUM" -R "$REPO" --remove-label "$l" || true; done
