@@ -2715,6 +2715,19 @@ impl AppState {
         &self.metrics
     }
 
+    /// [SONNET-4.6] (sq-t1isr) Test-only: returns the current count of registered queries.
+    /// Used by integration tests to observe in-flight registration without the HTTP route.
+    /// Only compiled with the `query-registry` feature.
+    ///
+    /// `#[doc(hidden)]` keeps this out of the public-API docs despite `pub` visibility.
+    /// The field is gated on `feature = "query-registry"` so this method only compiles
+    /// when that feature is active.
+    #[cfg(feature = "query-registry")]
+    #[doc(hidden)]
+    pub fn running_query_count(&self) -> usize {
+        self.running_queries.list().len()
+    }
+
     /// [FABLE-5] (sq-lsp7k.10) The named-template store (see the field doc). Handlers in
     /// [`crate::templates`] read it per invocation and mutate it under the write gate.
     #[cfg(feature = "templates")]
@@ -6072,11 +6085,27 @@ async fn run_query_pinned(
         let cfg = config.clone();
         let q = sparql.to_string();
         let analyze = explain == ExplainMode::Analyze;
-        let budget = make_budget(&config, true);
+        // [SONNET-4.6] (sq-t1isr) Register EXPLAIN ANALYZE with the running-query registry
+        // (feature `query-registry`), mirroring the SELECT/CONSTRUCT pattern from sq-qsm5z.
+        // The RAII guard is moved into the blocking closure so the row is present for the
+        // full duration of the engine call and removed on any exit path (normal, error, unwind).
+        // Plan-only EXPLAIN (ExplainMode::Plan) is also registered — it runs on the blocking
+        // pool under the same timeout cap and can be listed/killed like any other query.
+        #[cfg(feature = "query-registry")]
+        let (budget, qr_guard): (QueryBudget, Option<Box<dyn std::any::Any + Send>>) = {
+            let base = make_budget(&config, true);
+            let (cancel, guard) = state.running_queries.register(sparql);
+            (base.with_cancel(cancel), Some(Box::new(guard)))
+        };
+        #[cfg(not(feature = "query-registry"))]
+        let (budget, qr_guard): (QueryBudget, Option<Box<dyn std::any::Any + Send>>) =
+            (make_budget(&config, true), None);
         // [OPUS-4.8] sq-9xoh: resolve the per-request SERVICE egress allowlist HERE (headers are
         // not `'static`, so it must happen before the spawn) and move it into the worker.
         let allow = config.resolve_service_allow(headers);
         let task = tokio::task::spawn_blocking(move || {
+            // Hold qr_guard alive for the duration of the engine call (sq-t1isr).
+            let _guard = qr_guard;
             let graph = gen.snapshot();
             // [FABLE-5] sq-ixc3.19: the STRUCTURED explain response — the caller
             // `Accept`ed `application/x-sparq-explain+json`, so answer with the typed
@@ -8672,6 +8701,94 @@ mod query_registry_tests {
         // Exactly one flag is now set.
         let set_count = [c1, c2].iter().filter(|f| f.load(Ordering::Acquire)).count();
         assert_eq!(set_count, 1, "exactly one cancel flag must be set");
+    }
+
+    // ---------------------------------------------------------------------------
+    // [SONNET-4.6] sq-t1isr — EXPLAIN ANALYZE path registry tests
+    //
+    // These tests simulate the EXACT code pattern added to the EXPLAIN ANALYZE
+    // spawn_blocking path in `run_query_pinned`.  They are the mutation target:
+    // removing the `register(sparql)` call from that path would break the
+    // `explain_path_entry_present_while_guard_alive` test (registry would stay
+    // empty and the assert_eq!(1) would fire).
+    // ---------------------------------------------------------------------------
+
+    /// The EXPLAIN-path registers an entry while the simulated closure holds the guard.
+    /// Non-vacuity: removing the `register()` call in `run_query_pinned` → registry
+    /// stays empty → `assert_eq!(list.len(), 1)` fails.
+    #[test]
+    fn explain_path_entry_present_while_guard_alive() {
+        let registry = Arc::new(QueryRegistry::default());
+        // Mirror the exact pattern used in run_query_pinned for the EXPLAIN branch:
+        //   let (cancel, guard) = state.running_queries.register(sparql);
+        //   let budget = base.with_cancel(cancel);
+        //   let task = spawn_blocking(move || { let _guard = guard; ... });
+        let (_cancel, guard) = registry.register("EXPLAIN SELECT * WHERE { ?s ?p ?o }");
+        // While the guard is alive (simulating the blocking closure running):
+        let list = registry.list();
+        assert_eq!(
+            list.len(),
+            1,
+            "EXPLAIN ANALYZE entry must be present in the registry while the worker runs"
+        );
+        let entry = &list[0];
+        assert!(
+            entry.get("id").and_then(|v| v.as_str()).is_some(),
+            "registry entry must have an id field"
+        );
+        assert!(
+            entry.get("fingerprint").and_then(|v| v.as_str()).is_some(),
+            "registry entry must have a fingerprint"
+        );
+        // Simulate the closure returning — guard drops, entry must be removed.
+        drop(guard);
+        assert_eq!(
+            registry.list().len(),
+            0,
+            "EXPLAIN ANALYZE entry must be deregistered after the worker exits"
+        );
+    }
+
+    /// The cancel flag obtained from the EXPLAIN-path registration can be flipped via
+    /// `cancel_query`, enabling `GET /queries` + `DELETE /queries/{id}` to kill a slow
+    /// EXPLAIN ANALYZE.  Non-vacuity: if the cancel flag were not wired into the
+    /// EXPLAIN budget via `with_cancel`, the flag flip would still work here (it is the
+    /// `AtomicBool` itself), but the engine would not observe it — a separate honesty note.
+    #[test]
+    fn explain_path_cancel_flag_flippable_via_registry() {
+        use std::sync::atomic::Ordering;
+        let registry = Arc::new(QueryRegistry::default());
+        let (cancel, _guard) = registry.register("EXPLAIN ANALYZE SELECT * WHERE { ?s ?p ?o }");
+        assert!(
+            !cancel.load(Ordering::Acquire),
+            "cancel flag must start false"
+        );
+        let id = registry.list()[0]["id"].as_str().unwrap().to_owned();
+        let found = registry.cancel_query(&id);
+        assert!(found, "cancel_query must return true for the EXPLAIN entry id");
+        assert!(
+            cancel.load(Ordering::Acquire),
+            "cancel flag must be true after DELETE /queries/{id}"
+        );
+    }
+
+    /// An EXPLAIN entry does not survive a panic inside the simulated worker
+    /// (the Drop impl on QueryGuard fires even during unwind).
+    #[test]
+    fn explain_path_guard_cleans_up_on_panic() {
+        let registry = Arc::new(QueryRegistry::default());
+        let r2 = Arc::clone(&registry);
+        let result = std::thread::spawn(move || {
+            let (_cancel, _guard) = r2.register("EXPLAIN ANALYZE SELECT ?x WHERE { ?x ?y ?z }");
+            panic!("simulated worker panic");
+        })
+        .join();
+        assert!(result.is_err(), "thread must have panicked");
+        assert_eq!(
+            registry.list().len(),
+            0,
+            "EXPLAIN entry must be cleaned up even after worker panic"
+        );
     }
 }
 

@@ -229,15 +229,17 @@
 # [SONNET-4.6] sq-qsm5z: the OPT-IN running-query registry (`GET /queries` list +
 # `DELETE /queries/{id}` cooperative cancel). The `QueryRegistry` struct, `QueryGuard` RAII
 # type, `registry_fingerprint` helper, `list_queries_handler` + `cancel_query_handler` handlers,
-# the `AppState::running_queries` field, the route mounts, and the 7 in-module
+# the `AppState::running_queries` field, the route mounts, and the in-module
 # `query_registry_tests` unit tests are ALL `#[cfg(feature = "query-registry")]`, so the
 # DEFAULT build never compiled, clippy'd or tested this code. This leg builds it, runs
 # `clippy --all-targets -D warnings` with the feature ON (the real gate), and runs the
-# crate's unit tests — which now include all 7 gated `query_registry_tests` (fingerprint
+# crate's unit tests — which now include 10 gated `query_registry_tests` (fingerprint
 # stability + distinctness, RAII guard cleanup on normal return, RAII guard cleanup on unwind,
 # cancel flips the flag to true, cancel unknown id returns false, multiple entries listed and
-# individually cancellable). `query-registry` pulls only `server` (no new dependency). Zero
-# cost when feature is OFF: no `AppState` fields, no routes, byte-identical to before.
+# individually cancellable; plus sq-t1isr EXPLAIN-path tests: entry present while guard alive,
+# cancel flag flippable, guard cleans up on panic). `query-registry` pulls only `server` (no
+# new dependency). Zero cost when feature is OFF: no `AppState` fields, no routes, byte-identical
+# to before. sq-t1isr ([SONNET-4.6]) wires the SAME registration into the EXPLAIN ANALYZE path.
 - name: "sparq-server (query-registry — GET /queries list + DELETE /queries/{id} cancel)"
   crate: "sparq-server"
   features: "query-registry"
