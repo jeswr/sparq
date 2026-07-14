@@ -1,26 +1,63 @@
 # Routing table for issue-native orchestration (PUBLIC — no account information).
 # Maps a triaged issue's role/labels to a MODEL fallback-chain + the agent that implements it.
 # The private account registry (jeswr/agent-account-registry) consumes `model_chain` to pick the
-# first AVAILABLE account (respecting per-account limits + the reaction-lock + cache affinity).
-# See research/issue-native-orchestration.md.
+# first AVAILABLE account (respecting per-account limits + the lease + cache affinity).
+# See research/issue-native-orchestration.md. Validated by scripts/routing-validate.py.
 #
-# MODELS (not harnesses):
-#   Anthropic / Claude, run via the `claude` CLI:  haiku, sonnet, opus, FABLE
-#   OpenAI / GPT, run via the `codex` CLI:          terra  (codex is the HARNESS, not a model)
-# The account selector resolves a model -> (account, harness): a Claude model uses an Anthropic
-# account via `claude`; a GPT model (terra) uses an OpenAI account via `codex`.
+# PRECEDENCE (consumer contract): security-label overrides > explicit role > [defaults]. Rules are
+# evaluated top-to-bottom, FIRST MATCH WINS, so the `[[route]]` blocks with `match_labels` (security
+# surfaces) are listed FIRST and win over the role blocks below them.
 #
-# DOCTRINE (maintainer): FABLE is the primary code-writer and is used heavily; OPUS for
-# security/adversarial/soundness review; haiku/sonnet for cheap or mechanical work; terra (GPT) is a
-# capable cross-provider fallback for implementation. `escalate = true` marks surfaces that, once
-# `needs:user` exists (future), route to the maintainer instead of auto-merging.
+# match_labels SEMANTICS: a rule matches if ANY of the issue's labels CONTAINS any listed keyword as
+# a substring (so `zk` matches `area:sparq-zk`, `mpc` matches `area:sparq-mpc`, etc.). role rules
+# match the exact `role:<r>` label.
+
+# ---------------------------------------------------------------------------------------------------
+# [models] — the catalog. A model alias resolves to a provider + harness + concrete provider model id
+# + credential format. `codex` and `claude` are HARNESSES (CLIs), not models. The account selector +
+# worker use these to pick the right account and restore the right credential.
+[models.haiku]
+provider = "anthropic"
+harness = "claude"
+provider_model = "claude-haiku-4-5"   # concrete id; maintainer confirms exact pin
+credential_format = "claude-credentials-json"
+[models.sonnet]
+provider = "anthropic"
+harness = "claude"
+provider_model = "claude-sonnet-4-6"
+credential_format = "claude-credentials-json"
+[models.opus]
+provider = "anthropic"
+harness = "claude"
+provider_model = "claude-opus-4-8"
+credential_format = "claude-credentials-json"
+[models.fable]
+provider = "anthropic"
+harness = "claude"
+provider_model = "claude-fable-5"
+credential_format = "claude-credentials-json"
+[models.terra]
+provider = "openai"
+harness = "codex"
+provider_model = "TBD"                 # terra is an internal alias; maintainer sets the concrete GPT id
+credential_format = "codex-auth-json"
 
 [defaults]
 model_chain = ["fable", "sonnet", "terra"]
 agent = "sparq-rust-impl"
 
-# --- by role label -----------------------------------------------------------------------
-# Implementation / code-writing: FABLE primary, then Sonnet, then terra (GPT) for resilience.
+# ---------------------------------------------------------------------------------------------------
+# SECURITY-LABEL OVERRIDES (first-match; win over role). Soundness surfaces run on Opus and, if Opus
+# is unavailable, ESCALATE to a human (needs:user) rather than fall to a weaker/cross-provider model.
+[[route]]
+match_labels = ["zk", "mpc", "reasoner", "crypto", "auth", "e2ee"]
+model_chain = ["opus"]
+agent = "sparq-reviewer"
+escalate = true                        # consumed by dispatch: on chain-exhaustion, label needs:user
+
+# ---------------------------------------------------------------------------------------------------
+# ROLE ROUTES. Fable is the primary code-writer (maintainer doctrine); terra (GPT) is the
+# cross-provider implementation fallback so an Anthropic outage does not stall implementation.
 [[route]]
 role = "impl"
 model_chain = ["fable", "sonnet", "terra"]
@@ -33,7 +70,7 @@ agent = "sparq-site"
 
 [[route]]
 role = "ci"
-model_chain = ["fable", "sonnet"]
+model_chain = ["fable", "sonnet", "terra"]   # cross-provider fallback (was Anthropic-only)
 agent = "sparq-ci-infra"
 
 [[route]]
@@ -46,27 +83,20 @@ role = "research"
 model_chain = ["fable", "opus"]
 agent = "sparq-researcher"
 
-# Docs: cheap tier first (haiku), then fable.
 [[route]]
 role = "docs"
 model_chain = ["haiku", "fable"]
 agent = "sparq-docs"
 
-# Review / soundness: OPUS (security/adversarial); escalate once needs:user exists.
+# Review / soundness: Opus only; escalate to human on unavailability (do NOT fall to a weaker model).
 [[route]]
 role = "review"
 model_chain = ["opus"]
 agent = "sparq-reviewer"
+escalate = true
 
 [[route]]
 role = "soundness"
-model_chain = ["opus"]
-agent = "sparq-reviewer"
-escalate = true
-
-# label-keyword surfaces that force the soundness lane regardless of role
-[[route]]
-match_labels = ["zk", "mpc", "reasoner", "crypto", "auth", "e2ee"]
 model_chain = ["opus"]
 agent = "sparq-reviewer"
 escalate = true
