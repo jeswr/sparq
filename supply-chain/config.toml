@@ -274,6 +274,11 @@ notes = "shared async-compression core in the all-features tower-http graph; fro
 version = "2.5.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.console_error_panic_hook]]
+version = "0.1.7"
+criteria = "safe-to-deploy"
+notes = "[SONNET-4.6] sq-250si: wasm32-only panic diagnostic hook (sparq-lws-wasm). Tiny crate (~30 lines) that routes Rust panics to console.error via wasm-bindgen. MIT, Rust+WASM WG. No unsafe code. Not in the host/native build graph."
+
 [[exemptions.console_log]]
 version = "1.0.0"
 criteria = "safe-to-deploy"

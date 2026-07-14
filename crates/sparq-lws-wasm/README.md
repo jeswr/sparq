@@ -56,6 +56,9 @@ console.log(response.status);
 - The default-off `sparql-endpoint` feature adds query-only GET/POST `/sparql`
   over the resources that the supplied WebID may read. SELECT/ASK return
   SPARQL-results JSON; CONSTRUCT returns N-Triples.
+- [SONNET-4.6] A `console_error_panic_hook` is installed at module init so any
+  Rust panic emits a diagnostic to `console.error` before the wasm `unreachable`
+  trap propagates to the host as `WebAssembly.RuntimeError`.
 - No Tokio reactor, native listener, filesystem, TLS, OIDC verifier, PoP,
   notifications, or network backend is linked into the wasm artifact.
 
@@ -68,6 +71,9 @@ console.log(response.status);
 - [GPT-5.6] The [`@jeswr/solid-server`](../../packages/solid-server/) package owns
   the loopback Node listener and `npx` entry. Its fixed-owner mode is for local
   development only; OIDC verification remains outside this wasm crate.
+- [SONNET-4.6] The Node host catches `WebAssembly.RuntimeError` and recycles the
+  `SolidServer` instance before the next request (sq-250si). A single wasm trap no
+  longer bricks the process; the triggering request receives HTTP 503.
 
 ## License
 

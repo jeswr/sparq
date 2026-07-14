@@ -1,4 +1,5 @@
 // [GPT-5.6] sq-6xasp.3: wasm host adapter over the real LWS router.
+// [SONNET-4.6] sq-250si: wasm panic hook + host trap-recovery boundary.
 #![forbid(unsafe_code)]
 #![deny(rust_2018_idioms)]
 //! WebAssembly request entry for the in-memory Solid/LDP server core.
@@ -6,6 +7,19 @@
 //! Building this dedicated crate is the opt-in boundary. On wasm32, `SolidServer` owns the real axum
 //! router over the in-memory SPARQ metadata and blob stores. JavaScript remains responsible for the
 //! HTTP listener and OIDC verification; each request supplies only an already-authenticated WebID.
+//!
+//! # Panic and trap behaviour
+//!
+//! The release profile uses `panic=abort`, so a Rust panic lowers to a `wasm32` `unreachable`
+//! trap rather than unwinding. The `lws_init` function registered via `#[wasm_bindgen(start)]`
+//! installs a `console_error_panic_hook` that forwards the panic message to `console.error`
+//! before the trap fires — giving the host a readable diagnostic in environments where the
+//! hook can run (debug builds, `wasm-bindgen-test`). In `panic=abort` release builds the hook
+//! fires before the abort and the message appears in the browser or Node console.
+//!
+//! The Node host (`@jeswr/solid-server`) catches the resulting `WebAssembly.RuntimeError` and
+//! recreates the `SolidServer` before the next request, so a single trap does not permanently
+//! brick the process. See `packages/solid-server/src/index.js`.
 
 #[cfg(target_arch = "wasm32")]
 mod wasm {
@@ -25,6 +39,17 @@ mod wasm {
 
     const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
     const ACL: &str = "http://www.w3.org/ns/auth/acl#";
+
+    /// Called once by the wasm-bindgen runtime when the module is first loaded.
+    ///
+    /// Installs a panic hook that writes the panic message to `console.error` before the
+    /// `unreachable` trap propagates to the host as a `WebAssembly.RuntimeError`. The hook
+    /// is idempotent — safe to call from any context, and a no-op if already installed.
+    // [SONNET-4.6] sq-250si: set_once is idempotent; safe for concurrent (future) init paths.
+    #[wasm_bindgen(start)]
+    pub fn lws_init() {
+        console_error_panic_hook::set_once();
+    }
 
     /// A response returned across the wasm boundary.
     ///
@@ -137,10 +162,10 @@ mod wasm {
         }
 
         let method = Method::from_bytes(method.as_bytes())
-            .map_err(|error| format!("invalid HTTP method: {error}"))?;
+            .map_err(|error| format!("invalid HTTP method: {}", error))?;
         let uri: Uri = path
             .parse()
-            .map_err(|error| format!("invalid request path: {error}"))?;
+            .map_err(|error| format!("invalid request path: {}", error))?;
         if uri.scheme().is_some() || uri.authority().is_some() || !uri.path().starts_with('/') {
             return Err("path must be an origin-form URI beginning with '/'".to_owned());
         }
@@ -149,12 +174,12 @@ mod wasm {
             .method(method)
             .uri(uri)
             .body(Body::from(body))
-            .map_err(|error| format!("could not build request: {error}"))?;
+            .map_err(|error| format!("could not build request: {}", error))?;
         for pair in headers.chunks_exact(2) {
             let name = HeaderName::from_bytes(pair[0].as_bytes())
-                .map_err(|error| format!("invalid header name {:?}: {error}", pair[0]))?;
+                .map_err(|error| format!("invalid header name {:?}: {}", pair[0], error))?;
             let value = HeaderValue::from_str(&pair[1])
-                .map_err(|error| format!("invalid value for header {}: {error}", pair[0]))?;
+                .map_err(|error| format!("invalid value for header {}: {}", pair[0], error))?;
             request.headers_mut().append(name, value);
         }
         if let Some(webid) = authenticated_webid {
@@ -184,11 +209,11 @@ mod wasm {
         base_url: &str,
         owner_webid: &str,
     ) -> Result<(), String> {
-        let root = format!("{base_url}/");
-        let acl_doc = format!("{root}.acl");
-        let auth = named_node(&format!("{acl_doc}#owner"))?;
+        let root = format!("{}/", base_url);
+        let acl_doc = format!("{}.acl", root);
+        let auth = named_node(&format!("{}#owner", acl_doc))?;
         let root_node = named_node(&root)?;
-        let mode = |local: &str| named_node(&format!("{ACL}{local}"));
+        let mode = |local: &str| named_node(&format!("{}{}", ACL, local));
         let triples = vec![
             Triple::new(auth.clone(), named_node(RDF_TYPE)?, mode("Authorization")?),
             Triple::new(auth.clone(), mode("agent")?, named_node(owner_webid)?),
@@ -199,16 +224,16 @@ mod wasm {
             Triple::new(auth, mode("mode")?, mode("Control")?),
         ];
         let bytes = serialize_triples(RdfFormat::Turtle, &triples)
-            .map_err(|error| format!("could not serialize owner ACL: {error}"))?;
+            .map_err(|error| format!("could not serialize owner ACL: {}", error))?;
         store
             .write(&acl_doc, Bytes::from(bytes), RdfFormat::Turtle.media_type())
             .await
-            .map_err(|error| format!("could not provision owner ACL: {error}"))?;
+            .map_err(|error| format!("could not provision owner ACL: {}", error))?;
         Ok(())
     }
 
     fn named_node(iri: &str) -> Result<NamedNode, String> {
-        NamedNode::new(iri).map_err(|error| format!("invalid IRI {iri:?}: {error}"))
+        NamedNode::new(iri).map_err(|error| format!("invalid IRI {:?}: {}", iri, error))
     }
 }
 

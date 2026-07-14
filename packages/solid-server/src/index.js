@@ -1,16 +1,12 @@
 // [GPT-5.6] sq-6xasp.9/.10: loopback Node listener with optional verified identity into wasm.
-import { createServer } from 'node:http';
+// [SONNET-4.6] sq-250si: trap recovery — catch WebAssembly.RuntimeError and recycle the instance.
 import { readFile } from 'node:fs/promises';
 
 import initWasm, { SolidServer } from '../wasm/sparq_lws_wasm.js';
 import { createOidcAuthenticator } from './auth.js';
-import {
-  RequestBodyTooLargeError,
-  copyWasmResponse,
-  flattenRequestHeaders,
-  readRequestBody,
-  writeNodeResponse,
-} from './http.js';
+import { attachTrapRecoveryHandler, isWasmTrap } from './trap-recovery.js';
+
+export { attachTrapRecoveryHandler, isWasmTrap };
 
 const DEFAULT_PORT = 3000;
 const DEFAULT_OWNER_WEBID = 'https://example.invalid/profile/card#me';
@@ -66,18 +62,21 @@ function normalizeOidc(value) {
   throw new TypeError('oidc must be a boolean');
 }
 
-async function closeServer(server) {
-  await new Promise((resolve, reject) => {
-    server.close((error) => (error ? reject(error) : resolve()));
-  });
-}
-
 /**
  * Start a loopback-only Solid/LDP development server.
  *
  * The default fixed-owner mode is deliberately not authentication. With `oidc: true`, the Node
  * host verifies each credential and anonymous requests remain anonymous.
  * The returned Node server owns one in-memory wasm pod until `server.close()` completes.
+ *
+ * ## Trap recovery (sq-250si)
+ *
+ * A Rust panic or allocation failure inside the wasm module raises a `WebAssembly.RuntimeError`
+ * that permanently poisons the current `SolidServer` instance. When this happens, the host
+ * automatically frees the poisoned instance, allocates a fresh one (state loss is acceptable for
+ * the ephemeral development server), and responds to the triggering request with HTTP 503. The
+ * next request is served by the new instance — a single trap no longer bricks the process
+ * indefinitely. Trap events are logged to `console.error`.
  */
 export async function startSolidServer(options = {}) {
   const port = normalizePort(options.port);
@@ -86,41 +85,11 @@ export async function startSolidServer(options = {}) {
   const oidc = normalizeOidc(options.oidc);
 
   await init();
-  const pod = new SolidServer(baseUrl, ownerWebid);
+
   const authenticate = oidc ? createOidcAuthenticator(baseUrl) : async () => ownerWebid;
-  let podFreed = false;
-  const freePod = () => {
-    if (!podFreed) {
-      podFreed = true;
-      pod.free?.();
-    }
-  };
+  const makePod = () => new SolidServer(baseUrl, ownerWebid);
 
-  const server = createServer((request, response) => {
-    void (async () => {
-      try {
-        const wasmResponse = await pod.handleRequest(
-          request.method ?? 'GET',
-          request.url ?? '/',
-          flattenRequestHeaders(request.rawHeaders),
-          await readRequestBody(request),
-          await authenticate(request),
-        );
-        writeNodeResponse(response, copyWasmResponse(wasmResponse));
-      } catch (error) {
-        if (response.headersSent) {
-          response.destroy();
-          return;
-        }
-        response.statusCode = error instanceof RequestBodyTooLargeError ? 413 : 500;
-        response.setHeader('content-type', 'text/plain; charset=utf-8');
-        response.end(error instanceof RequestBodyTooLargeError ? 'request body too large\n' : 'internal server error\n');
-      }
-    })();
-  });
-
-  server.once('close', freePod);
-  server.closeAsync = () => closeServer(server);
+  const { server, freePod } = attachTrapRecoveryHandler(makePod, { authenticate });
 
   try {
     await new Promise((resolve, reject) => {

@@ -170,6 +170,16 @@ Use the package only for local development, do not expose it as a production ser
 data to disappear on shutdown. TLS termination, persistent storage, and notifications remain
 absent; OIDC verification runs in Node, not wasm.
 
+[SONNET-4.6] **Trap recovery (sq-250si).** The wasm artifact uses `panic=abort` (release profile):
+a Rust panic or allocation failure at the wasm32 linear-memory ceiling lowers to an `unreachable`
+trap that the host sees as `WebAssembly.RuntimeError`. Before the abort fires, a `console_error_panic_hook`
+installed at module init emits the panic message to `console.error`. The Node host catches the
+`WebAssembly.RuntimeError`, frees the poisoned `SolidServer`, constructs a fresh instance (state
+loss is acceptable for the ephemeral dev server), and returns HTTP 503 for the triggering request.
+The next request is served by the new instance — a single trap no longer bricks the server process
+indefinitely. The `attachTrapRecoveryHandler` and `isWasmTrap` helpers are exported from
+`@jeswr/solid-server/src/trap-recovery.js` for testing without a real wasm binary.
+
 ## Common recipes
 
 **Decompress a browser dataset before loading it (`@sparq/client`).** The shared site/GUI client
