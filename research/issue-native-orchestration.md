@@ -71,15 +71,17 @@ account.
 registry (its own README documents the full schema):
 - **One issue per account** (body = YAML: provider, tier caps, reset schedule, `max_concurrent_workers`,
   `secret_ref`). **Tokens live only in GitHub secrets** named by `secret_ref`.
-- **Reaction-lock mutex (cross-codebase):** claim = add a 🚀 reaction to the account issue;
-  **reaction-count = active workers**; `count >= cap` → full; release = remove it. A **claim-receipt
-  comment** (`repo/run/package/role/model/at`) is the audit trail + stale-claim reclaim signal. Two
-  codebases can't jointly exceed a cap because they react on the same shared issue.
-- **`select-and-claim`** (private): walk the model-fallback chain → filter by cap + reset window →
-  prefer **prompt-cache affinity** (most-recently-used-for-same-`package+role` within the ~5-min
-  Anthropic cache TTL) → **atomically claim** (add 🚀, **recount** to resolve the check-then-claim
-  race; if recount > cap, back off + un-react) → return the `secret_ref`. Cache-affinity metadata is
-  stored privately.
+- **Lease mutex (cross-codebase) — CAS ledger, not reactions.** The GPT-5.6 review
+  ([issue-native-orchestration-review-gpt56.md](issue-native-orchestration-review-gpt56.md), C3)
+  showed reaction-counting cannot be a mutex (GitHub allows one reaction per identity, so same-bot
+  workers all see one 🚀). Replaced with a **compare-and-swap lease ledger** (`data/leases.json` in the
+  private registry): claim = read the file + its blob SHA, reclaim expired leases, append a lease with
+  a **unique `claim_id` + `expires_at`** if a slot is free, then `PUT` with the read SHA (a concurrent
+  writer changed the SHA → 409 → retry). Every codebase CAS-updates the SAME ledger, so capacity is
+  global. Release + heartbeat are keyed by `claim_id`; the groomer reclaims by expiry.
+- **`select-and-claim`** (`scripts/select-and-claim.py`, private, self-tested): walk the model chain →
+  filter by cap + reset → prefer **prompt-cache affinity** (most-recent same-`package+role` within the
+  ~5-min Anthropic cache TTL) → CAS-claim → return `{account, secret_ref, claim_id}`.
 - **`deferred`:** all eligible accounts full → the sparq issue is labeled `status:deferred`; a later
   tick retries.
 
@@ -97,9 +99,15 @@ sign-off before real tokens are wired):
   token never touches the public repo. Strongest isolation, but needs a running service and complex
   agent-CLI plumbing (agents expect direct provider access).
 
-Recommendation: **(A)** — it satisfies "no account info public" (handles/limits/usage/logic stay
-private; only a masked, fork-blocked token value is public) at zero cost. (B) is a later hardening
-option.
+Recommendation **REVISED after the GPT-5.6 review (S1/D4): (B) the private broker.** The review shows
+(A) is **not an adequate isolation boundary** — an autonomous, repo-writing agent + `toJSON(secrets)`
+can exfiltrate *every* repo secret; masking is log-redaction, not DLP; `pull_request_target` /
+same-repo branches defeat fork-withholding. Adopt (B): a private allocator/broker that validates the
+public worker's GitHub **OIDC** identity, atomically grants a **lease**, and returns a **short-lived,
+model-scoped, single-claim** capability (or proxies the model call) — no long-lived provider/registry/
+admin credential ever sits in the public repo. **Interim remediation already done:** the seeded
+account tokens were moved out of the public repo into the private registry. This decision awaits the
+maintainer's final sign-off before Phase 3 wires worker credentials.
 
 ## Automation identity + the trust safeguard
 
