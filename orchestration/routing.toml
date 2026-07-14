@@ -1,54 +1,63 @@
 # Routing table for issue-native orchestration (PUBLIC — no account information).
-# Maps a triaged issue's role/labels to a model fallback-chain + the agent that implements it.
+# Maps a triaged issue's role/labels to a MODEL fallback-chain + the agent that implements it.
 # The private account registry (jeswr/agent-account-registry) consumes `model_chain` to pick the
 # first AVAILABLE account (respecting per-account limits + the reaction-lock + cache affinity).
 # See research/issue-native-orchestration.md.
 #
-# model tiers: haiku, terra (haiku's fallback), sonnet, opus, fable, codex (OpenAI/GPT-5.6).
-# `escalate = true` marks surfaces that, once `needs:user` exists (future), route to the maintainer
-# instead of auto-merging.
+# MODELS (not harnesses):
+#   Anthropic / Claude, run via the `claude` CLI:  haiku, sonnet, opus, FABLE
+#   OpenAI / GPT, run via the `codex` CLI:          terra  (codex is the HARNESS, not a model)
+# The account selector resolves a model -> (account, harness): a Claude model uses an Anthropic
+# account via `claude`; a GPT model (terra) uses an OpenAI account via `codex`.
+#
+# DOCTRINE (maintainer): FABLE is the primary code-writer and is used heavily; OPUS for
+# security/adversarial/soundness review; haiku/sonnet for cheap or mechanical work; terra (GPT) is a
+# capable cross-provider fallback for implementation. `escalate = true` marks surfaces that, once
+# `needs:user` exists (future), route to the maintainer instead of auto-merging.
 
 [defaults]
-model_chain = ["sonnet"]
+model_chain = ["fable", "sonnet", "terra"]
 agent = "sparq-rust-impl"
 
 # --- by role label -----------------------------------------------------------------------
-[[route]]
-role = "docs"
-model_chain = ["haiku", "terra"]
-agent = "sparq-docs"
-
-[[route]]
-role = "research"
-model_chain = ["sonnet", "opus"]
-agent = "sparq-researcher"
-
+# Implementation / code-writing: FABLE primary, then Sonnet, then terra (GPT) for resilience.
 [[route]]
 role = "impl"
-model_chain = ["codex", "sonnet"]
+model_chain = ["fable", "sonnet", "terra"]
 agent = "sparq-rust-impl"
 
 [[route]]
 role = "site"
-model_chain = ["codex", "sonnet"]
+model_chain = ["fable", "sonnet", "terra"]
 agent = "sparq-site"
 
 [[route]]
 role = "ci"
-model_chain = ["sonnet"]
+model_chain = ["fable", "sonnet"]
 agent = "sparq-ci-infra"
 
 [[route]]
 role = "perf"
-model_chain = ["opus", "sonnet"]
+model_chain = ["fable", "opus"]
 agent = "sparq-perf-engineer"
 
+[[route]]
+role = "research"
+model_chain = ["fable", "opus"]
+agent = "sparq-researcher"
+
+# Docs: cheap tier first (haiku), then fable.
+[[route]]
+role = "docs"
+model_chain = ["haiku", "fable"]
+agent = "sparq-docs"
+
+# Review / soundness: OPUS (security/adversarial); escalate once needs:user exists.
 [[route]]
 role = "review"
 model_chain = ["opus"]
 agent = "sparq-reviewer"
 
-# --- soundness-sensitive surfaces: opus, and escalate once needs:user exists ------------
 [[route]]
 role = "soundness"
 model_chain = ["opus"]

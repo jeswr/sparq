@@ -52,13 +52,18 @@ bd's features are reproduced on issues + workflows:
 | auto-close on merge | issue-native retarget of `bead-autoclose.yml` |
 | `sq-…` PR tokens | preserved via a `sq-… ↔ #NN` map written at migration |
 
-**Label taxonomy** (created in Phase 0): `priority:P0..P4` · `model:{haiku,terra,sonnet,opus,fable,codex}`
-· `role:{impl,review,docs,research,perf,ci,site,soundness}` · `status:{ready,in-progress,blocked,deferred,untriaged}`
-· `trust:untrusted` · package = existing `area:<crate>`.
+**Label taxonomy** (created in Phase 0): `priority:P0..P4` · `role:{impl,review,docs,research,perf,ci,site,soundness}`
+· `status:{ready,in-progress,blocked,deferred,untriaged}` · `trust:untrusted` · package = existing
+`area:<crate>` · `model:*` — the **models** are `haiku,sonnet,opus,fable` (Anthropic/Claude, via the
+`claude` CLI) and `terra` (OpenAI/GPT, via the `codex` CLI). **`codex` is the HARNESS, not a model**
+(as `claude` is the harness for Claude models); the selector resolves a model → (account, harness).
 
 **Routing** (`orchestration/routing.toml`, public — no account info): `(role/label) → (model-chain,
-agent)`, with **model fallback chains** first-class (e.g. `haiku → terra`). The registry consumes the
-chain to pick the first available account.
+agent)` with first-class **model fallback chains**. Per maintainer doctrine, **Fable is the primary
+code-writer, used heavily** (impl/site/ci/perf/research lead with `fable`); **Opus** does
+security/adversarial/soundness review; `haiku`/`sonnet` do cheap or mechanical work; `terra` (GPT) is
+a cross-provider implementation fallback. The registry consumes the chain to pick the first available
+account.
 
 ## Private account registry (separate private repo `jeswr/agent-account-registry`)
 
@@ -102,9 +107,13 @@ option.
   **trigger downstream workflows** (the default `GITHUB_TOKEN` cannot trigger further workflows). Options:
   a **GitHub App** (recommended; scoped, rotatable, own login) or a **fine-grained PAT** on a machine
   account. Requires a one-time maintainer setup (App creation isn't fully CLI-scriptable); until then a
-  maintainer PAT secret is the stopgap. Trusted authors = `{maintainer, automation identity}`.
-- **Untrusted-input safeguard (fails closed).** `scripts/trust-gate.py` is consulted before any model
-  reads issue/PR/comment CONTENT. Third-party content → label `trust:untrusted`, **no** model action,
+  maintainer PAT secret is the stopgap.
+- **Trust is derived from repo permission (no hard-coded logins).** `scripts/trust-gate.py` calls
+  `repos/OWNER/REPO/collaborators/USER/permission`: **write / maintain / admin** (anyone who could
+  already push code) → trusted; the automation identity → trusted; everyone else (read / triage /
+  none = third-party) → untrusted. This auto-tracks the repo's collaborators/maintainers.
+- **Untrusted-input safeguard (fails closed).** trust-gate is consulted before any model reads
+  issue/PR/comment CONTENT. Third-party content → label `trust:untrusted`, **no** model action,
   and `notify-maintainer` @-mentions you ("react 👍 to approve"). **Your 👍 promotes it**
   (`promote-on-approval` un-quarantines) — the ONLY path by which third-party input reaches a model.
   This defends against prompt-injection via third-party issues / PR comments.
