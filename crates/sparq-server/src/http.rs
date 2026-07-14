@@ -2352,6 +2352,150 @@ pub struct AppState {
     /// invocations (reads) dominate and never block each other.
     #[cfg(feature = "templates")]
     templates: Arc<std::sync::RwLock<std::collections::BTreeMap<String, sparq_engine::templates::Template>>>,
+    /// [SONNET-4.6] (sq-qsm5z) The opt-in running-query registry backing `GET /queries` and
+    /// `DELETE /queries/{id}`. Compiled only with the `query-registry` feature. The registry
+    /// stores cancellation handles and metadata but never raw query text; cloned `AppState`
+    /// values share one registry (the `Arc`).
+    #[cfg(feature = "query-registry")]
+    running_queries: Arc<QueryRegistry>,
+}
+
+// ---------------------------------------------------------------------------
+// [SONNET-4.6] (sq-qsm5z) Running-query registry — feature `query-registry`.
+// ---------------------------------------------------------------------------
+
+/// [SONNET-4.6] (sq-qsm5z) Metadata and cooperative-cancel handles for currently executing
+/// queries. The mutex is never held while engine code runs — registration and deregistration
+/// are the only critical sections, and they are short (HashMap insert / remove). Listing clones
+/// the small per-entry view; cancellation flips an atomic flag while holding the lock.
+#[cfg(feature = "query-registry")]
+#[derive(Default)]
+struct QueryRegistry {
+    next_id: std::sync::atomic::AtomicU64,
+    entries: std::sync::Mutex<std::collections::HashMap<String, RegistryEntry>>,
+}
+
+/// [SONNET-4.6] (sq-qsm5z) One row in the registry. The `cancel` flag is wired into the
+/// `QueryBudget` passed to the engine, so flipping it trips the engine's cooperative-cancellation
+/// poll site on the next iteration.
+#[cfg(feature = "query-registry")]
+struct RegistryEntry {
+    /// Unix epoch in milliseconds — serialised to the `GET /queries` response.
+    started_at_unix_ms: u64,
+    /// Monotonic start — used to compute elapsed ms without clock-skew noise.
+    started: std::time::Instant,
+    /// FNV-1a non-reversible fingerprint of the raw SPARQL text (trimmed). Never the raw text.
+    fingerprint: String,
+    /// The `sq-kq9ia` cross-thread cancel flag shared with the engine's `QueryBudget`.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// [SONNET-4.6] (sq-qsm5z) RAII membership token. Moving it into the `spawn_blocking` closure
+/// means the registry row is present exactly while the engine is running; any return path —
+/// normal, panic, or engine abort — fires `Drop` and removes the row.
+#[cfg(feature = "query-registry")]
+pub(crate) struct QueryGuard {
+    id: String,
+    registry: Arc<QueryRegistry>,
+}
+
+#[cfg(feature = "query-registry")]
+impl Drop for QueryGuard {
+    fn drop(&mut self) {
+        self.registry
+            .entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.id);
+    }
+}
+
+#[cfg(feature = "query-registry")]
+impl QueryRegistry {
+    /// Register a new query and return a cancel flag + RAII guard.
+    /// The returned `Arc<AtomicBool>` should be installed into the `QueryBudget`; the
+    /// guard should be held for the entire duration of the engine call.
+    pub(crate) fn register(
+        self: &Arc<Self>,
+        sparql: &str,
+    ) -> (Arc<std::sync::atomic::AtomicBool>, QueryGuard) {
+        use std::sync::atomic::Ordering;
+        let seq = self.next_id.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        let id = format!("{:016x}", seq);
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started_at_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                id.clone(),
+                RegistryEntry {
+                    started_at_unix_ms,
+                    started: std::time::Instant::now(),
+                    fingerprint: registry_fingerprint(sparql),
+                    cancel: Arc::clone(&cancel),
+                },
+            );
+        let guard = QueryGuard { id, registry: Arc::clone(self) };
+        (cancel, guard)
+    }
+
+    /// List all currently registered queries as JSON-ready values, sorted by id.
+    pub(crate) fn list(&self) -> Vec<serde_json::Value> {
+        let mut entries: Vec<_> = self
+            .entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|(id, e)| {
+                serde_json::json!({
+                    "id": id,
+                    "start": e.started_at_unix_ms,
+                    "fingerprint": e.fingerprint,
+                    "elapsed_ms": u64::try_from(e.started.elapsed().as_millis())
+                        .unwrap_or(u64::MAX),
+                })
+            })
+            .collect();
+        entries.sort_unstable_by(|a, b| {
+            a["id"].as_str().cmp(&b["id"].as_str())
+        });
+        entries
+    }
+
+    /// Flip the cancel flag for a registered query. Returns `false` if the id is not found.
+    pub(crate) fn cancel_query(&self, id: &str) -> bool {
+        use std::sync::atomic::Ordering;
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        match entries.get(id) {
+            Some(e) => {
+                e.cancel.store(true, Ordering::Release);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// [SONNET-4.6] (sq-qsm5z) FNV-1a non-reversible fingerprint of the SPARQL query text
+/// (trimmed). Satisfies the #241 / sq-m9prn audit-log discipline: the `GET /queries` listing
+/// exposes only this hash, never raw query text.
+#[cfg(feature = "query-registry")]
+fn registry_fingerprint(sparql: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in sparql.trim().as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:016x}", hash)
 }
 
 /// [FABLE-5] (sq-fy8ci) RAII permit for the SINGLE-FLIGHT restore guard: while one of these is
@@ -2559,6 +2703,10 @@ impl AppState {
             // seed graph in main.rs BEFORE this state exists, so it never holds the permit).
             #[cfg(feature = "backup")]
             restore_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            // [SONNET-4.6] (sq-qsm5z) Empty registry at boot; queries self-register when
+            // the `query-registry` feature is compiled in.
+            #[cfg(feature = "query-registry")]
+            running_queries: Arc::new(QueryRegistry::default()),
         })
     }
 
@@ -3144,6 +3292,15 @@ pub fn router(state: AppState) -> Router {
     // [`streams_endpoint`].
     #[cfg(feature = "change-stream")]
     let routes = routes.route("/streams", get(streams_endpoint).head(streams_endpoint));
+    // [SONNET-4.6] (sq-qsm5z) OPT-IN running-query registry admin routes.
+    // `GET /queries` — admin READ-gated list; `DELETE /queries/{id}` — admin WRITE-gated kill.
+    // Both compiled only with the `query-registry` feature; without it the routes are absent
+    // and the fallback handler produces the standard 404. No runtime flag needed: the routes
+    // are always active when the feature is compiled in (the feature IS the opt-in).
+    #[cfg(feature = "query-registry")]
+    let routes = routes
+        .route("/queries", get(list_queries_handler))
+        .route("/queries/{id}", axum::routing::delete(cancel_query_handler));
     // [FABLE-5] sq-snopa.6 (issue #992 FR-4): OPT-IN Solid WAC/ACP HTTP authorization surface.
     // Compiled only with the `solid-authz` feature; even then each handler refuses (404) unless the
     // config flag is set. POST only — a thin HTTP shell over the `sparq-solid` library authoriser
@@ -5989,7 +6146,19 @@ async fn run_query_pinned(
                 Err(_) => return not_acceptable_response(head_only),
             };
             let is_ask = prepared.form == QueryForm::Ask;
-            let budget = make_budget(&config, !is_ask);
+            // [SONNET-4.6] (sq-qsm5z) Register with the running-query registry (feature
+            // `query-registry`). The RAII guard is boxed as `Box<dyn Any + Send>` so the
+            // call site is uniform in both feature states; it is moved into the blocking
+            // closure and held alive for the entire engine call, then dropped on exit.
+            #[cfg(feature = "query-registry")]
+            let (budget, qr_guard): (QueryBudget, Option<Box<dyn std::any::Any + Send>>) = {
+                let base = make_budget(&config, !is_ask);
+                let (cancel, guard) = state.running_queries.register(sparql);
+                (base.with_cancel(cancel), Some(Box::new(guard)))
+            };
+            #[cfg(not(feature = "query-registry"))]
+            let (budget, qr_guard): (QueryBudget, Option<Box<dyn std::any::Any + Send>>) =
+                (make_budget(&config, !is_ask), None);
             let cfg = config.clone();
             let allow = allow.clone();
             // [OPUS-4.8] (sq-7d3dj.34.2) SELECT → SPARQL-results JSON streams its body: the
@@ -6001,12 +6170,14 @@ async fn run_query_pinned(
             // algebra already parsed in `prepare` via the engine's `*_prepared` entry points —
             // no second parse per request.
             if !is_ask && fmt == Format::Json {
-                return stream_select_json(gen, prepared.query, budget, head_only, allow, &config)
+                return stream_select_json(gen, prepared.query, budget, head_only, allow, qr_guard, &config)
                     .await;
             }
             let pquery = prepared.query;
             let select = prepared.runnable;
             let task = tokio::task::spawn_blocking(move || {
+                // Hold qr_guard alive for the duration of the engine call.
+                let _guard = qr_guard;
                 with_engine_scope_allow(&allow, || {
                     if is_ask {
                         match sparq_engine::ask_prepared_with_budget(
@@ -6047,9 +6218,19 @@ async fn run_query_pinned(
                 Err(_) => return not_acceptable_response(head_only),
             };
             let query = prepared.runnable;
-            let budget = make_budget(&config, true);
+            // [SONNET-4.6] (sq-qsm5z) Register with the running-query registry.
+            #[cfg(feature = "query-registry")]
+            let (budget, qr_guard): (QueryBudget, Option<Box<dyn std::any::Any + Send>>) = {
+                let base = make_budget(&config, true);
+                let (cancel, guard) = state.running_queries.register(sparql);
+                (base.with_cancel(cancel), Some(Box::new(guard)))
+            };
+            #[cfg(not(feature = "query-registry"))]
+            let (budget, qr_guard): (QueryBudget, Option<Box<dyn std::any::Any + Send>>) =
+                (make_budget(&config, true), None);
             let cfg = config.clone();
             let task = tokio::task::spawn_blocking(move || {
+                let _guard = qr_guard;
                 // [OPUS-4.8] sq-rt6v: produce the triple list once, then serialise it in the
                 // negotiated graph syntax — N-Triples (default), prefix-compacting Turtle, or
                 // RDF/XML — rather than always emitting N-Triples.
@@ -6321,11 +6502,17 @@ async fn stream_select_json(
     budget: QueryBudget,
     head_only: bool,
     allow: crate::service_config::ServiceAllowlist,
+    // [SONNET-4.6] (sq-qsm5z) The RAII registry guard, as a type-erased send-able box so the
+    // signature compiles in both feature states without a conditional type. Moved into the worker
+    // so the row is present for the full streaming evaluation; dropped when the worker exits.
+    qr_guard: Option<Box<dyn std::any::Any + Send>>,
     config: &ServerConfig,
 ) -> Response {
     let ct = Format::Json.select_content_type();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Bytes, String>>(STREAM_CHANNEL_CAP);
     tokio::task::spawn_blocking(move || {
+        // Hold the registry guard alive for the entire streaming evaluation.
+        let _guard = qr_guard;
         with_engine_scope_allow(&allow, || {
             let graph = gen.snapshot();
             let mut sink = |chunk: String| match tx.blocking_send(Ok(Bytes::from(chunk.into_bytes()))) {
@@ -8342,6 +8529,149 @@ mod bind_posture_tests {
         for f in ["", "0", "false", "no", "off", "2", "maybe"] {
             assert!(!env_truthy(f), "{f:?} should be falsy");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [SONNET-4.6] sq-qsm5z — running-query registry HTTP handlers
+// ---------------------------------------------------------------------------
+
+/// [SONNET-4.6] (sq-qsm5z) `GET /queries` — list currently executing SPARQL queries.
+///
+/// Returns a JSON object `{"queries": [...]}` where each entry carries `id`, `start`
+/// (Unix epoch ms), `fingerprint` (FNV-1a hex — never raw query text), and `elapsed_ms`.
+/// Entries are sorted by `id` (registration order). An empty registry returns `{"queries":[]}`.
+///
+/// **Auth:** READ-gated (fail-closed). Mirrors the posture of every other admin route.
+#[cfg(feature = "query-registry")]
+async fn list_queries_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
+        return resp;
+    }
+    let body = serde_json::json!({ "queries": state.running_queries.list() }).to_string();
+    text_response(StatusCode::OK, "application/json", body, false)
+}
+
+/// [SONNET-4.6] (sq-qsm5z) `DELETE /queries/{id}` — cooperatively cancel one executing query.
+///
+/// Flips the `sq-kq9ia` `Arc<AtomicBool>` cancel flag that was wired into the query's
+/// `QueryBudget` at registration time. The engine observes the flag at its next cooperative
+/// poll site and aborts with `"query budget exceeded (cancelled)"`. The registry row stays
+/// until the worker exits and the RAII `QueryGuard` fires its `Drop`.
+///
+/// - `204 No Content` — the cancel flag was flipped.
+/// - `404 Not Found` — no query with that id in the registry (already finished, or bad id).
+///
+/// **Auth:** WRITE-gated (fail-closed). An unauthenticated or wrongly-authenticated request
+/// receives a `401` identical for missing vs. wrong token.
+#[cfg(feature = "query-registry")]
+async fn cancel_query_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Write) {
+        return resp;
+    }
+    if state.running_queries.cancel_query(&id) {
+        Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    } else {
+        json_error(StatusCode::NOT_FOUND, "running query not found")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [SONNET-4.6] sq-qsm5z — registry unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "query-registry"))]
+mod query_registry_tests {
+    use super::{QueryRegistry, registry_fingerprint};
+    use std::sync::Arc;
+
+    // Fingerprint must be stable across calls with the same input.
+    #[test]
+    fn fingerprint_is_stable() {
+        let a = registry_fingerprint("SELECT * WHERE { ?s ?p ?o }");
+        let b = registry_fingerprint("SELECT * WHERE { ?s ?p ?o }");
+        assert_eq!(a, b, "fingerprint must be deterministic");
+        // 16 hex chars for a 64-bit hash.
+        assert_eq!(a.len(), 16);
+    }
+
+    // Different queries must produce different fingerprints.
+    #[test]
+    fn fingerprint_differs_for_distinct_queries() {
+        let a = registry_fingerprint("SELECT * WHERE { ?s ?p ?o }");
+        let b = registry_fingerprint("ASK WHERE { ?s ?p ?o }");
+        assert_ne!(a, b, "distinct queries must yield distinct fingerprints");
+    }
+
+    // The RAII guard removes the entry on normal return.
+    #[test]
+    fn guard_removes_entry_on_normal_return() {
+        let registry = Arc::new(QueryRegistry::default());
+        {
+            let (_cancel, _guard) = registry.register("SELECT * WHERE { ?s ?p ?o }");
+            assert_eq!(registry.list().len(), 1, "entry must be present while guard is alive");
+        }
+        assert_eq!(registry.list().len(), 0, "entry must be removed after guard drops");
+    }
+
+    // The RAII guard removes the entry even during a panic / unwind.
+    #[test]
+    fn guard_removes_entry_during_panic_unwind() {
+        let registry = Arc::new(QueryRegistry::default());
+        let r2 = Arc::clone(&registry);
+        let result = std::thread::spawn(move || {
+            let (_cancel, _guard) = r2.register("SELECT 1 WHERE {}");
+            panic!("witness panic");
+        })
+        .join();
+        assert!(result.is_err(), "thread must have panicked");
+        assert_eq!(registry.list().len(), 0, "entry must be cleaned up after unwind");
+    }
+
+    // Cancelling an entry flips the flag (non-vacuous: verify the flag starts false).
+    #[test]
+    fn cancel_flips_flag_to_true() {
+        use std::sync::atomic::Ordering;
+        let registry = Arc::new(QueryRegistry::default());
+        let (cancel, _guard) = registry.register("SELECT * WHERE { ?s ?p ?o }");
+        assert!(!cancel.load(Ordering::Acquire), "flag must start false");
+        let id = registry.list()[0]["id"].as_str().unwrap().to_owned();
+        let found = registry.cancel_query(&id);
+        assert!(found, "cancel must return true for a known id");
+        assert!(cancel.load(Ordering::Acquire), "flag must be true after cancel");
+    }
+
+    // Cancelling an unknown id returns false (the 404 path).
+    #[test]
+    fn cancel_unknown_id_returns_false() {
+        let registry = Arc::new(QueryRegistry::default());
+        assert!(!registry.cancel_query("0000000000000000"), "unknown id must return false");
+    }
+
+    // Multiple simultaneous entries are all listed and all individually cancellable.
+    #[test]
+    fn multiple_entries_listed_and_cancellable() {
+        use std::sync::atomic::Ordering;
+        let registry = Arc::new(QueryRegistry::default());
+        let (c1, _g1) = registry.register("SELECT ?a WHERE { ?a ?b ?c }");
+        let (c2, _g2) = registry.register("ASK WHERE { ?x ?y ?z }");
+        let list = registry.list();
+        assert_eq!(list.len(), 2, "both entries must be present");
+        let id0 = list[0]["id"].as_str().unwrap().to_owned();
+        registry.cancel_query(&id0);
+        // Exactly one flag is now set.
+        let set_count = [c1, c2].iter().filter(|f| f.load(Ordering::Acquire)).count();
+        assert_eq!(set_count, 1, "exactly one cancel flag must be set");
     }
 }
 

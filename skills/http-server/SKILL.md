@@ -815,6 +815,33 @@ no anchor is a fail-closed `400` (never a silent replay-all). With the feature o
 recording hook are `#[cfg]`-stripped (byte-identical); recording serialises updates only while the
 stream is on. The `ChangeSink` broker trait stays a separate later opt-in (`sq-l6zks`).
 
+**`GET /queries` + `DELETE /queries/{id}` — running-query registry (`sparq-server` feature
+`query-registry`, default OFF; sq-qsm5z, [SONNET-4.6]).** An opt-in in-memory registry of
+currently executing SPARQL queries, providing GraphDB query-monitoring and kill parity.
+
+- **`GET /queries`** — READ-gated (fail-closed). Returns `{"queries":[…]}` where each entry
+  carries `id` (opaque hex), `start` (Unix epoch ms), `fingerprint` (FNV-1a hex — a
+  NON-REVERSIBLE hash of the trimmed query text, never raw text per the #241 / sq-m9prn
+  audit-log posture), and `elapsed_ms`. Sorted by `id` (registration order).
+- **`DELETE /queries/{id}`** — WRITE-gated (fail-closed). Cooperatively cancels the named
+  query by flipping the `sq-kq9ia` `Arc<AtomicBool>` cancel flag wired into its `QueryBudget`.
+  The engine observes it at the next poll site and aborts. Returns `204 No Content` on success;
+  `404` if the id is not found (already finished or bad id).
+- **RAII lifetime**: each executing SELECT/ASK/CONSTRUCT/DESCRIBE registers on start and
+  deregisters on completion, error, or panic — the entry is always cleaned up.
+- **Fingerprint-only**: the `GET /queries` listing NEVER exposes raw query text; only the
+  non-reversible fingerprint is visible, satisfying the audit-log discipline.
+- **Zero cost when feature is OFF**: no `AppState` fields, no routes; byte-identical to before.
+
+```sh
+# (--features query-registry required at build time)
+# List running queries:
+curl -H 'Authorization: Bearer <TOKEN>' http://127.0.0.1:3030/queries
+
+# Cancel a query by id:
+curl -X DELETE -H 'Authorization: Bearer <TOKEN>' http://127.0.0.1:3030/queries/0000000000000001
+```
+
 GSP **writes** translate into a server-minted SPARQL Update (`DROP`/`CLEAR` + `INSERT
 DATA`) and submit through the SAME sequenced group-commit writer the
 `application/sparql-update` operation uses — so they share its atomicity, snapshot
