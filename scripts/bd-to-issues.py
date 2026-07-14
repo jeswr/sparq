@@ -16,6 +16,7 @@ The bead id (`sq-…`) is preserved in the issue title so existing PR-title toke
 """
 import argparse
 import json
+import re
 import subprocess
 import sys
 
@@ -96,10 +97,74 @@ def plan(issues, edges, include_closed=False):
     return open_ids, blockers, parents
 
 
+# --- idempotent two-pass --apply (review C2) -----------------------------------------------------
+def _run(args, check=True):
+    return subprocess.run(args, capture_output=True, text=True, check=check)
+
+
+def fetch_bd_map(repo):
+    """{bd-id: issue_number} from existing issues carrying a `<!-- bd-id:... -->` marker (resume)."""
+    out = _run(["gh", "issue", "list", "-R", repo, "--state", "all", "--limit", "10000",
+                "--json", "number,body"]).stdout
+    m = {}
+    for it in json.loads(out or "[]"):
+        mm = re.search(r"<!--\s*bd-id:(\S+?)\s*-->", it.get("body") or "")
+        if mm:
+            m[mm.group(1)] = it["number"]
+    return m
+
+
+def _body(bead, bid):
+    desc = (bead.get("description") or "").strip()
+    return f"{desc}\n\n<!-- bd-id:{bid} -->\n"
+
+
+def _create_issue(repo, bid, bead):
+    base = ["gh", "issue", "create", "-R", repo, "--title", f"{bid}: {bead['title']}", "--body", _body(bead, bid)]
+    args = list(base)
+    for l in issue_labels(bead):
+        args += ["--label", l]
+    r = _run(args, check=False)
+    if r.returncode != 0:            # a label may not exist in a scratch repo → create without labels
+        r = _run(base)
+    return int(re.search(r"/issues/(\d+)", r.stdout).group(1))
+
+
+def _ensure_marker(repo, num, marker):
+    """Append `marker` to the issue body iff absent (idempotent)."""
+    body = json.loads(_run(["gh", "issue", "view", str(num), "-R", repo, "--json", "body"]).stdout)["body"] or ""
+    if marker in body:
+        return
+    _run(["gh", "issue", "edit", str(num), "-R", repo, "--body", body.rstrip() + "\n" + marker + "\n"])
+
+
+def apply_migration(repo, open_ids, blockers, parents, limit=None, checkpoint="/tmp/bd-migration-map.json"):
+    """Resumable: pass 1 upserts issues by bd-id marker (checkpointing the map); pass 2 idempotently
+    adds Blocked-by:/Parent: markers. Re-running creates nothing new."""
+    id_map = fetch_bd_map(repo)
+    ids = list(open_ids)[: limit] if limit else list(open_ids)
+    created = 0
+    for bid in ids:                                  # pass 1
+        if bid in id_map:
+            continue
+        id_map[bid] = _create_issue(repo, bid, open_ids[bid])
+        created += 1
+        json.dump(id_map, open(checkpoint, "w"))     # checkpoint immediately (crash-resumable)
+    for bid in ids:                                  # pass 2 (idempotent)
+        for b in blockers.get(bid, []):
+            if b in id_map:
+                _ensure_marker(repo, id_map[bid], f"Blocked-by: #{id_map[b]}")
+        for p in parents.get(bid, []):
+            if p in id_map:
+                _ensure_marker(repo, id_map[bid], f"Parent: #{id_map[p]}")
+    return id_map, created
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default="sparq-org/sparq")
     ap.add_argument("--apply", action="store_true", help="actually create issues (bulk!) — held for go-ahead")
+    ap.add_argument("--limit", type=int, help="migrate only the first N open beads (for testing)")
     ap.add_argument("--export-file", help="read bd export from a file instead of running bd")
     args = ap.parse_args()
 
@@ -135,7 +200,10 @@ def main():
         print("\n[dry-run] nothing created. Re-run with --apply (after go-ahead) to bulk-create.")
         return 0
 
-    print("\n[apply] would create issues + link blockers here (guarded — implement on go-ahead).")
+    tag = f" (limit {args.limit})" if args.limit else ""
+    print(f"\n[apply] migrating to {args.repo}{tag} — idempotent two-pass...")
+    id_map, created = apply_migration(args.repo, open_ids, blockers, parents, limit=args.limit)
+    print(f"[apply] created {created} new issue(s); {len(id_map)} bd-ids mapped (re-run is a no-op).")
     return 0
 
 
