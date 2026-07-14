@@ -764,7 +764,12 @@ impl<'a> Parser<'a> {
                     return Err(format!("illegal character 0x{c:02x} in IRI"));
                 }
                 _ => {
+                    // [SONNET-4.6] sq-95q0d: bounds-check before slicing so a
+                    // truncated multibyte lead byte returns Err, never panics.
                     let len = utf8_len(c);
+                    if self.i + len > self.s.len() {
+                        return Err(format!("truncated multibyte character in IRI at byte {}", self.i));
+                    }
                     iri.push_str(
                         std::str::from_utf8(&self.s[self.i..self.i + len])
                             .map_err(|e| e.to_string())?,
@@ -870,7 +875,11 @@ impl<'a> Parser<'a> {
                     return Err(format!("character '{}' must be escaped in a local name", c as char));
                 }
             }
+            // [SONNET-4.6] sq-95q0d: bounds-check before slicing.
             let len = utf8_len(c);
+            if self.i + len > self.s.len() {
+                return Err(format!("truncated multibyte character in prefixed name at byte {}", self.i));
+            }
             tok.push_str(std::str::from_utf8(&self.s[self.i..self.i + len]).map_err(|e| e.to_string())?);
             self.i += len;
         }
@@ -912,7 +921,10 @@ impl<'a> Parser<'a> {
             if c.is_ascii_alphanumeric() || c == b'_' || c == b'-' {
                 self.i += 1;
             } else if c >= 0x80 {
-                self.i += utf8_len(c); // whole code point (PN_CHARS go beyond ASCII)
+                // [SONNET-4.6] sq-95q0d: cap the advance so self.i never
+                // exceeds self.s.len() (read_name returns String not Result).
+                let advance = utf8_len(c).min(self.s.len() - self.i);
+                self.i += advance; // whole code point (PN_CHARS go beyond ASCII)
             } else {
                 break;
             }
@@ -985,8 +997,11 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
-            // utf-8 safe push
+            // utf-8 safe push — [SONNET-4.6] sq-95q0d: bounds-check before slicing.
             let ch_len = utf8_len(c);
+            if self.i + ch_len > self.s.len() {
+                return Err(format!("truncated multibyte character in literal at byte {}", self.i));
+            }
             val.push_str(std::str::from_utf8(&self.s[self.i..self.i + ch_len]).map_err(|e| e.to_string())?);
             self.i += ch_len;
         }

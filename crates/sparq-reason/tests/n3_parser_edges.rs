@@ -422,3 +422,75 @@ fn pname_with_char_containing_0x85_continuation_byte_does_not_panic() {
     // And in subject position via a prefixed-name token.
     let _ = parse("@prefix e: <http://example.org/> . e:a\u{0460}b e:p e:o .");
 }
+
+// ---------- sq-95q0d: multibyte chars in IRI / literal / number positions ----------
+//
+// 🤖 SPARQ agent [SONNET-4.6] sq-95q0d.  The fuzz lane (parse_rif_n3, run
+// 29152138161, artifact 8248645779, crash-34a8b4786f) found a panic in the N3
+// parser byte-slice path.  The original crash site was read_pname_prefix
+// (parser.rs:779:63 in the pre-fix tree), with siblings at read_literal and
+// read_number that carried the same `.unwrap()` pattern.
+//
+// The fix (sq-t8z0r / #2011) replaced those .unwrap() calls with .map_err(?)
+// and added bounds checks before utf8_len-based slices, so that hostile or
+// truncated multibyte lead bytes produce Err rather than panic.
+//
+// These tests drive each code path that held the old .unwrap() — IRI chars,
+// prefixed-name local chars, literal chars — with non-ASCII Unicode in every
+// position.  They must return Ok or Err; they must NEVER panic.
+// Non-vacuity: use std::panic::catch_unwind so that a regression (re-inserted
+// .unwrap()) fails the test rather than aborting the process silently.
+
+#[test]
+fn multibyte_chars_in_iriref_do_not_panic() {
+    // Non-ASCII chars inside an angle-bracket IRI (read_iriref `_` arm).
+    // Covers 2-byte (U+00E9 é), 3-byte (U+4E2D 中), and 4-byte (U+1F600 😀) chars.
+    let inputs = [
+        "<http://example.org/caf\u{00E9}> <http://ex/p> <http://ex/o> .",
+        "<http://example.org/\u{4E2D}\u{6587}> <http://ex/p> <http://ex/o> .",
+        "<http://example.org/\u{1F600}> <http://ex/p> <http://ex/o> .",
+        // U+0460 whose continuation byte (0xA0) was formerly misread as whitespace
+        "<http://example.org/\u{0460}> <http://ex/p> <http://ex/o> .",
+    ];
+    for src in &inputs {
+        let result = std::panic::catch_unwind(|| parse(src));
+        assert!(result.is_ok(), "parser panicked on IRI input: {:?}", &src[..src.len().min(60)]);
+    }
+}
+
+#[test]
+fn multibyte_chars_in_literal_do_not_panic() {
+    // Non-ASCII chars inside a string literal (read_literal byte loop, sq-95q0d
+    // sibling: the pre-fix code had `.unwrap()` on the from_utf8 call there).
+    let inputs = [
+        "<http://ex/s> <http://ex/p> \"caf\u{00E9}\" .",
+        "<http://ex/s> <http://ex/p> \"\u{4E2D}\u{6587}\" .",
+        "<http://ex/s> <http://ex/p> \"\u{1F600}\" .",
+        "<http://ex/s> <http://ex/p> \"\u{0460}\" .",
+        // 4-byte char at the very start of a literal
+        "<http://ex/s> <http://ex/p> \"\u{1F4A9} leading 4-byte\" .",
+    ];
+    for src in &inputs {
+        let result = std::panic::catch_unwind(|| parse(src));
+        assert!(result.is_ok(), "parser panicked on literal input: {:?}", &src[..src.len().min(60)]);
+        // Valid parses must produce exactly one triple with the non-ASCII literal.
+        if let Ok(Ok(p)) = result {
+            assert_eq!(p.facts.len(), 1, "expected one fact for: {:?}", &src[..src.len().min(60)]);
+        }
+    }
+}
+
+#[test]
+fn multibyte_chars_in_pname_local_do_not_panic() {
+    // Non-ASCII chars in the local part of a prefixed name (read_prefixed_name,
+    // sq-95q0d sibling: another old .unwrap() site).
+    let inputs = [
+        "@prefix e: <http://example.org/> . e:\u{00E9} e:p e:o .",
+        "@prefix e: <http://example.org/> . e:\u{4E2D} e:p e:o .",
+        "@prefix e: <http://example.org/> . e:\u{0460}abc e:p e:o .",
+    ];
+    for src in &inputs {
+        let result = std::panic::catch_unwind(|| parse(src));
+        assert!(result.is_ok(), "parser panicked on pname-local input: {:?}", &src[..src.len().min(60)]);
+    }
+}
