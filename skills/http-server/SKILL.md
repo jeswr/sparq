@@ -827,8 +827,9 @@ currently executing SPARQL queries, providing GraphDB query-monitoring and kill 
   query by flipping the `sq-kq9ia` `Arc<AtomicBool>` cancel flag wired into its `QueryBudget`.
   The engine observes it at the next poll site and aborts. Returns `204 No Content` on success;
   `404` if the id is not found (already finished or bad id).
-- **RAII lifetime**: each executing SELECT/ASK/CONSTRUCT/DESCRIBE registers on start and
-  deregisters on completion, error, or panic — the entry is always cleaned up.
+- **RAII lifetime**: each executing SELECT/ASK/CONSTRUCT/DESCRIBE/**EXPLAIN (plan + analyze)**
+  registers on start and deregisters on completion, error, or panic — the entry is always cleaned
+  up. (EXPLAIN ANALYZE wiring added in sq-t1isr, [SONNET-4.6].)
 - **Fingerprint-only**: the `GET /queries` listing NEVER exposes raw query text; only the
   non-reversible fingerprint is visible, satisfying the audit-log discipline.
 - **Zero cost when feature is OFF**: no `AppState` fields, no routes; byte-identical to before.
