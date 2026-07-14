@@ -5,15 +5,22 @@
 //
 // (sq-eydh9) [SONNET-4.6] Browser-upload addition: the File tab now works in BOTH personas —
 //   * WEB  — multi-file picker via `file-ingest.ts` + drag-and-drop via `dropzone.tsx`;
-//            reads File.text() in-tab, guesses format from name, imports sequentially with
-//            per-file ok/error feedback + aggregate summary. Compressed (.gz/.bz2/.zst) and
-//            native-only HDT need the desktop app (stated honestly; no silent failure).
+//            reads the file as binary, decompresses via `@sparq/client` when compressed
+//            (.gz/.bz2/.zst/.zip), then parses in-tab. Native-only HDT still needs the
+//            desktop app (stated honestly; no silent failure).
 //   * TAURI — multi-file native dialog (multiple:true, sq-eydh9 change to tauri-ipc.ts);
 //            each path loaded sequentially via the native loader.
 //
+// (sq-1y04h) [SONNET-4.6] Decompression wiring: the web pane now routes compressed uploads
+//   through `maybeDecompressFile` (file-decompress.ts), which calls `decompressDatasetBytes`
+//   from `@sparq/client` (sq-epbw4). Codec selection is magic-bytes first, extension second.
+//   gzip/zip are native browser APIs; zstd/bzip2 load codec chunks on demand. The import
+//   drawer no longer tells web users "compressed files need the desktop app" for these four
+//   formats. Native-only HDT still requires the desktop (no JS/WASM bead for it).
+//
 // Three tabs:
-//   * FILE  — web: browser File upload (all non-compressed text RDF); desktop: native loader
-//             (every format incl. COMPRESSED + native-only HDT), off the main thread.
+//   * FILE  — web: browser File upload (incl. compressed .gz/.zip/.zst/.bz2); desktop: native
+//             loader (every format incl. HDT), off the main thread.
 //   * URL   — fetch a remote document, then load it.
 //   * PASTE — load a typed/pasted document.
 
@@ -47,8 +54,10 @@ import {
   urlLabel,
 } from "@/lib/rdf-format";
 import { hasNativeLoader, pickRdfFile } from "@/lib/tauri-ipc";
-import { Dropzone } from "@/components/workbench/dropzone";
+import { hasDraggedFiles } from "@/lib/file-ingest";
 import type { IngestedFile, RejectedFile, IngestResult } from "@/lib/file-ingest";
+// [SONNET-4.6] sq-1y04h — decompression shim; codec chunks loaded lazily on demand.
+import { maybeDecompressFile } from "@/lib/file-decompress";
 import type { WorkspaceSourceMeta } from "@sparq/client";
 
 // ── Open-state context (so the rail / top bar / Cmd-K can open the drawer) ─────────────────────
@@ -83,8 +92,14 @@ type FileItemStatus =
   | { kind: "error"; message: string };
 
 // ── RDF extensions the browser file picker + drop filter allow ─────────────────────────────────
+// [SONNET-4.6] sq-1y04h — compressed archives (.gz/.gzip/.zip/.zst/.zstd/.bz2/.bzip2) are now
+// accepted on the web persona too; `maybeDecompressFile` handles the decode before RDF parse.
+// Native-only HDT is NOT included — there is no JS/WASM decoder bead for it.
 
-const WEB_RDF_ACCEPT = [".ttl", ".nt", ".nq", ".trig", ".jsonld", ".json"];
+const WEB_RDF_ACCEPT = [
+  ".ttl", ".nt", ".nq", ".trig", ".jsonld", ".json",
+  ".gz", ".gzip", ".tgz", ".zip", ".zst", ".zstd", ".bz2", ".bzip2",
+];
 
 // ── The drawer body ────────────────────────────────────────────────────────────────────────────
 
@@ -566,6 +581,32 @@ function DrawerTab({
   );
 }
 
+// ── Web file read helper (decompress-aware) ────────────────────────────────────────────────────
+
+/**
+ * [SONNET-4.6] sq-1y04h — read a list of `File` objects into an `IngestResult`, routing each
+ * through `maybeDecompressFile` so compressed archives (.gz / .zip / .zst / .bz2) are decoded
+ * before the text is handed to the RDF parser. Replaces the `readDroppedFiles` / `File.text()`
+ * call paths in the web-upload pane; the `file-ingest.ts` text-only paths are unchanged and
+ * continue to serve SHACL shapes / N3 rules (no compression needed there).
+ */
+async function readFilesWithDecompress(files: File[]): Promise<IngestResult> {
+  const accepted: IngestedFile[] = [];
+  const rejected: RejectedFile[] = [];
+  for (const file of files) {
+    try {
+      const decoded = await maybeDecompressFile(file);
+      accepted.push({ name: file.name, text: decoded.text, bytes: file.size });
+    } catch (err) {
+      rejected.push({
+        name: file.name,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return { accepted, rejected };
+}
+
 // ── Web FilePane — browser multi-file upload ──────────────────────────────────────────────────
 
 function WebFilePane({
@@ -587,6 +628,13 @@ function WebFilePane({
   // The Dropzone "Browse files…" button uses pickTextFiles (a dynamic hidden input) for the
   // keyboard/mouse path. This input is an additional test-accessible hook and accessible label.
   const inputRef = React.useRef<HTMLInputElement>(null);
+  // [SONNET-4.6] sq-1y04h — custom drop state: we handle the drop event ourselves (instead of
+  // delegating to Dropzone's readDroppedFiles) so that compressed archives are decoded BEFORE
+  // the RDF parser sees them. Dropzone's internal readDroppedFiles uses File.text() which
+  // corrupts binary payloads; here we extract File objects synchronously from the drop event
+  // and pass them through readFilesWithDecompress.
+  const [dragActive, setDragActive] = React.useState(false);
+  const dragDepth = React.useRef(0);
 
   const handleInputChange = React.useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -594,35 +642,89 @@ function WebFilePane({
       if (fileArr.length === 0) return;
       // Reset so the same filenames can be re-picked after a remove.
       if (inputRef.current) inputRef.current.value = "";
-      const accepted: IngestedFile[] = [];
-      const rejectedArr: RejectedFile[] = [];
-      for (const file of fileArr) {
-        try {
-          const text = await file.text();
-          accepted.push({ name: file.name, text, bytes: file.size });
-        } catch (err) {
-          rejectedArr.push({
-            name: file.name,
-            reason: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      onIngest({ accepted, rejected: rejectedArr });
+      // [SONNET-4.6] sq-1y04h — readFilesWithDecompress routes each file through
+      // maybeDecompressFile (binary read + codec detection + decode) before handing text to
+      // the RDF parser; uncompressed files fall through with File.arrayBuffer() semantics.
+      const result = await readFilesWithDecompress(fileArr);
+      onIngest(result);
     },
     [onIngest],
   );
 
+  // [SONNET-4.6] sq-1y04h — custom drag handlers that bypass the text-read path.
+  const handleDragEnter = React.useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (busy || !hasDraggedFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    dragDepth.current += 1;
+    setDragActive(true);
+  }, [busy]);
+
+  const handleDragOver = React.useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (busy || !hasDraggedFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  }, [busy]);
+
+  const handleDragLeave = React.useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (busy || !hasDraggedFiles(e.dataTransfer)) return;
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragActive(false);
+  }, [busy]);
+
+  const handleDrop = React.useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (busy || !hasDraggedFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    dragDepth.current = 0;
+    setDragActive(false);
+    // Extract File objects synchronously before the first await — browsers neuter the
+    // DataTransfer items list once this handler yields.
+    const files: File[] = [];
+    const rejected: RejectedFile[] = [];
+    if (e.dataTransfer.items?.length) {
+      for (const item of Array.from(e.dataTransfer.items)) {
+        if (item.kind !== "file") continue;
+        const entry = typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null;
+        const file = item.getAsFile();
+        if (entry?.isDirectory) {
+          rejected.push({ name: entry.name || file?.name || "(directory)", reason: "directories cannot be ingested — drop the files inside it instead" });
+          continue;
+        }
+        if (!file) {
+          rejected.push({ name: entry?.name ?? "(unreadable item)", reason: "the browser could not expose this dropped item as a file" });
+          continue;
+        }
+        files.push(file);
+      }
+    } else {
+      files.push(...Array.from(e.dataTransfer.files ?? []));
+    }
+    void readFilesWithDecompress(files).then((res) => {
+      onIngest({ accepted: res.accepted, rejected: [...rejected, ...res.rejected] });
+    });
+  }, [busy, onIngest]);
+
+  const handleBrowse = React.useCallback(async () => {
+    // pickTextFiles opens a file picker; we then re-read the File objects as binary so
+    // compressed archives are handled. We can't get File objects back from pickTextFiles,
+    // so instead we open our own hidden input programmatically (same pattern as pickViaInput).
+    if (inputRef.current) inputRef.current.click();
+  }, []);
+
   return (
     <div className="space-y-3">
+      {/* [SONNET-4.6] sq-1y04h — updated copy: compressed archives are now handled in-tab.
+          Only native-only HDT still requires the desktop app (no JS decoder bead). */}
       <p className="text-xs text-muted-foreground">
-        Upload RDF files from your computer — Turtle, N-Triples, N-Quads, TriG, JSON-LD. Each
-        file is read in-tab by the WASM engine.{" "}
+        Upload RDF files from your computer — Turtle, N-Triples, N-Quads, TriG, JSON-LD, or a
+        compressed archive (.gz / .zip / .zst / .bz2). Each file is read and decompressed
+        in-tab by the WASM engine.{" "}
         <span className="font-medium text-foreground">
-          Compressed (.gz / .bz2 / .zst) and native-only HDT archives need the desktop app.
+          Native-only HDT archives (.hdt) still require the desktop app.
         </span>
       </p>
 
-      {/* Stable file input: Playwright setInputFiles() target + accessible fallback. */}
+      {/* Stable file input: Playwright setInputFiles() target + accessible fallback.
+          Also the backing input for the "Browse files…" button below (handleBrowse → click). */}
       <input
         ref={inputRef}
         type="file"
@@ -635,14 +737,40 @@ function WebFilePane({
         onChange={handleInputChange}
       />
 
-      <Dropzone
-        onFiles={onIngest}
-        accept={WEB_RDF_ACCEPT}
-        label="Drag & drop RDF files here"
-        hint=".ttl · .nt · .nq · .trig · .jsonld"
-        browseLabel="Browse files…"
-        disabled={busy}
-      />
+      {/* [SONNET-4.6] sq-1y04h — custom drop zone panel: we handle drag/drop ourselves so that
+          Files are read as binary (maybeDecompressFile) rather than via readDroppedFiles/text(). */}
+      <div
+        role="region"
+        aria-label="File drop zone"
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+        className={cn(
+          "relative rounded-md border border-dashed p-5 text-center transition-colors",
+          dragActive ? "border-primary bg-primary/5" : "border-border",
+          busy && "opacity-50",
+        )}
+      >
+        <FileUp className="mx-auto size-6 text-muted-foreground" aria-hidden />
+        <p className="mt-2 text-sm">Drag &amp; drop RDF files here</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          .ttl · .nt · .nq · .trig · .jsonld · .gz · .zip · .zst · .bz2
+        </p>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="mt-3"
+          onClick={handleBrowse}
+          disabled={busy}
+        >
+          <Upload className="size-4" /> Browse files…
+        </Button>
+        <span className="sr-only" role="status">
+          {dragActive ? "Release to drop the files" : ""}
+        </span>
+      </div>
 
       {/* Per-file list: queued + status (appears after first pick/drop). */}
       {(files.length > 0 || rejected.length > 0) && (
