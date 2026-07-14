@@ -53,7 +53,10 @@ bd's features are reproduced on issues + workflows:
 | `sq-…` PR tokens | preserved via a `sq-… ↔ #NN` map written at migration |
 
 **Label taxonomy** (created in Phase 0): `priority:P0..P4` · `role:{impl,review,docs,research,perf,ci,site,soundness}`
-· `status:{ready,in-progress,blocked,deferred,untriaged}` · `trust:untrusted` · package = existing
+· `status:{ready,in-progress,blocked,deferred,untriaged}` · `trust:untrusted` · `self-improvement`
+(agent-discovered out-of-scope work — bug/tech-debt/doc-drift/footgun/better-approach — for the
+self-improvement triage lane; see [`agent-observability-and-self-improvement.md`](agent-observability-and-self-improvement.md))
+· package = existing
 `area:<crate>` · `model:*` — the **models** are `haiku,sonnet,opus,fable` (Anthropic/Claude, via the
 `claude` CLI) and `terra` (OpenAI/GPT, via the `codex` CLI). **`codex` is the HARNESS, not a model**
 (as `claude` is the harness for Claude models); the selector resolves a model → (account, harness).
