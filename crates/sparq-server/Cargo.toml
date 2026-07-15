@@ -311,9 +311,10 @@ terse = ["server", "dep:sparq-terse"]
 # change-stream (sq-b4fns / #1223, in sparq-serve). The endpoint reads the segmented, fsync'd
 # append-only `ChangeLog` and returns the ordered change records (op / quads / seq / generation /
 # timestamp) as JSON from a given offset, with a continuation token, driven by `iteratorType` /
-# `at` / `after` / `limit` parameters. The same feature also turns on RECORDING: when the durable
-# log directory is configured, every committed SPARQL Update appends one ordered change record to
-# the log (the in-server publish path), so the endpoint serves a live, resumable feed. It turns on
+# `at` / `after` / `limit` parameters. The same feature also turns on RECORDING:
+# [GPT-5.6] (sq-kqofk) with a configured log directory, every published group-commit generation
+# appends one ordered record on the writer thread (possibly covering several concurrent SPARQL
+# Updates), so the endpoint serves a live, resumable feed without serialising submitters. It turns on
 # `sparq-serve/change-stream` (the segmented log + N-Quads same-lineage quad-set diff + the backup
 # family's self-contained FNV-1a digest — std-only IO, NO new external dependency, no extra HTTP/
 # async beyond the already-present axum + serde_json). STILL OFF AT RUNTIME by default even when

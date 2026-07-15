@@ -530,10 +530,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (env SPARQ_SOLID_AUTHZ=1).
             #[cfg(feature = "solid-authz")]
             "--solid-authz" => config.solid_authz = true,
-            // [OPUS-4.8] sq-2999l (gh-906): OPT-IN durable CDC change-stream at DIR. Enables both
-            // RECORDING every committed update to the segmented, fsync'd append-only log AND the
-            // Neptune-GetRecords-shaped poll endpoint GET /streams over it. Resumes the same stream
-            // gaplessly when DIR already holds segments. Off by default (env SPARQ_CHANGE_STREAM=DIR).
+            // [GPT-5.6] (sq-kqofk, gh-906): OPT-IN durable CDC change-stream at DIR. Records each
+            // published group-commit generation on the writer thread to the segmented, fsync'd log
+            // and serves the Neptune-GetRecords-shaped GET /streams endpoint. Resumes gaplessly
+            // when DIR already holds segments. Off by default (env SPARQ_CHANGE_STREAM=DIR).
             #[cfg(feature = "change-stream")]
             "--change-stream" => {
                 let dir = args.next().ok_or("--change-stream requires a directory path")?;

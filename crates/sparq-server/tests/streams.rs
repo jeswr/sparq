@@ -403,8 +403,8 @@ async fn recorded_changes_are_durable_on_disk() {
 }
 
 // ---------------------------------------------------------------------------
-// Concurrency: CONCURRENT updates produce a gapless, monotonic stream (the recording lock
-// serialises recording so no commit is dropped and seq never skips).
+// [GPT-5.6] (sq-kqofk) Concurrency: concurrent updates may share a group-committed generation;
+// the writer-thread hook records one gapless, monotonic stream record per published generation.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -412,8 +412,8 @@ async fn concurrent_updates_record_a_gapless_monotonic_stream() {
     let dir = scratch("concurrent");
     let base = spawn(Some(dir.clone()), None).await;
 
-    // Fire 12 distinct updates concurrently from 4 tasks; each is a single-quad INSERT, so each
-    // produces one commit and one change record.
+    // Fire 12 distinct updates concurrently from 4 tasks. Group commit may place several updates
+    // in one generation, but every inserted quad must appear exactly once in the stream.
     const N: usize = 12;
     let mut handles = Vec::new();
     for i in 0..N {
@@ -432,28 +432,44 @@ async fn concurrent_updates_record_a_gapless_monotonic_stream() {
         h.await.unwrap();
     }
 
-    // Poll the whole stream: exactly N records, seqs 0..N gapless and strictly increasing, each
-    // generation strictly increasing (the gapless + monotonic ChangeLog contract under concurrency).
+    // Poll the whole stream: one record per PUBLISHED generation (not per submitter), gapless seqs,
+    // strictly increasing generations, and exactly N flattened quad changes.
     let cl = client();
     let (status, body) = poll(&cl, &base, &[("limit", "1000")]).await;
     assert_eq!(status, 200);
-    assert_eq!(
-        body["totalRecords"], N,
-        "every concurrent commit recorded: {body}"
+    let commit_count = body["totalRecords"].as_u64().unwrap();
+    assert!(
+        (1..=N as u64).contains(&commit_count),
+        "every published generation is recorded: {body}"
     );
     let records = body["records"].as_array().unwrap();
-    assert_eq!(records.len(), N, "one change per single-quad commit");
-    let mut prev_gen = 0u64;
-    for (i, r) in records.iter().enumerate() {
-        assert_eq!(
-            r["eventId"]["commitNum"], i as u64,
-            "gapless seq at index {i}: {body}"
+    assert_eq!(records.len(), N, "every concurrent insert is recorded once");
+    let mut commit_generations = std::collections::BTreeMap::new();
+    for record in records {
+        let commit = record["eventId"]["commitNum"].as_u64().unwrap();
+        let generation = record["generation"].as_u64().unwrap();
+        assert!(
+            commit < commit_count,
+            "commit seq stays inside the gapless range: {body}"
         );
-        let gen = r["generation"].as_u64().unwrap();
-        assert!(gen > prev_gen, "strictly increasing generation: {body}");
-        prev_gen = gen;
+        if let Some(previous) = commit_generations.insert(commit, generation) {
+            assert_eq!(
+                previous, generation,
+                "one commit seq identifies one generation: {body}"
+            );
+        }
     }
-    assert_eq!(body["nextSequenceNumber"], N as u64);
+    assert_eq!(commit_generations.len() as u64, commit_count);
+    let mut previous_generation = 0;
+    for (expected_seq, (&seq, &generation)) in commit_generations.iter().enumerate() {
+        assert_eq!(seq, expected_seq as u64, "commit seqs are gapless: {body}");
+        assert!(
+            generation > previous_generation,
+            "published generations are strictly increasing: {body}"
+        );
+        previous_generation = generation;
+    }
+    assert_eq!(body["nextSequenceNumber"], commit_count);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
