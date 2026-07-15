@@ -70,6 +70,11 @@ federation = ["sparq-engine/service"]
 # honestly to a native-only message in the browser). Lean builds register a stub that fails
 # loudly with a rebuild hint (odrl.rs).
 odrl = ["dep:sparq-policy", "dep:sparq-solid"]
+# [GPT-5.6] sq-1cnox — native SHACL-to-form derivation for the Forms tool. OFF by
+# default so the standalone desktop shell stays lean unless a release explicitly
+# opts into the sparq-forms + SHACL model stack. Lean builds still register the
+# command, whose stub returns an actionable unavailable error (forms.rs).
+forms = ["dep:oxrdf", "dep:sparq-forms"]
 # [FABLE-5] sq-t6492 — embed + serve the frontendDist static export instead of connecting to
 # `devUrl` (http://localhost:3001). Tauri's build script sets `cfg(dev) = !custom-protocol`
 # (tauri build.rs: `let dev = !custom_protocol`), and in dev mode the webview navigates to
@@ -117,6 +122,12 @@ sparq-hdt = { path = "../../crates/sparq-hdt", optional = true }
 # by the `odrl-bridge` materialization). Pulled in only under this crate's `odrl` feature.
 sparq-policy = { path = "../../crates/sparq-policy", optional = true }
 sparq-solid = { path = "../../crates/sparq-solid", features = ["odrl-bridge"], optional = true }
+
+# [GPT-5.6] sq-1cnox — optional native Forms bridge. oxrdf is named directly because the
+# Tauri boundary validates the serialized focus/shape nodes into typed RDF terms before it
+# calls sparq_forms::derive_form; neither dependency enters the default desktop build.
+oxrdf = { version = "0.3", features = ["rdf-12"], optional = true }
+sparq-forms = { path = "../../crates/sparq-forms", optional = true }
 
 # [OPUS-4.8] sq-ixc3.13 — streaming decompression for the native disk loader: gzip + bzip2 +
 # zstd, the SAME codec matrix the CLI's `open_reader` handles (crates/sparq-cli/src/main.rs).
