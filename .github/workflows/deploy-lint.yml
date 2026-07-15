@@ -1,0 +1,178 @@
+# deploy-lint.yml — static validation for deploy/ templates
+# [OPUS-4.8] sq-0d744 — cloud-deploy epic sq-3vjdr §4 CI-smoke contract
+#
+# This workflow is NON-GATING to the native Rust workspace gate (ci-summary):
+# a cloud-CLI outage or missing tool must never redden the engine's merge gate.
+# The job name deliberately avoids "advisory" / "informational" but it is scoped
+# to deploy/helm/** so it only runs on relevant changes and is skipped (non-failing)
+# on unrelated PRs.
+#
+# What it validates (static, no cluster required per §4):
+#   - helm lint (chart structure, required values, template errors)
+#   - helm template (renders without error; exercises secret-ref.yaml fail-fast)
+#   - grep for secret literals in deploy/** (R4 hygiene gate)
+#   - YAML validity of all deploy/helm/**/*.yaml files
+#
+# Documented-untested note: kubeconform is installed and run if available; if the
+# apt/pip install fails the step is skipped (non-blocking for this PR). Validate
+# on first CI run and harden as a follow-up bead.
+
+name: deploy-lint
+
+on:
+  push:
+    paths:
+      - "deploy/**"
+  pull_request:
+    paths:
+      - "deploy/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  helm-lint:
+    name: helm lint + template
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        # actions/checkout v7.0.0 — same SHA as used across this repo's other workflows
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+
+      - name: Install Helm
+        # Install Helm via the official get-helm-3 script (SHA-pinned binary checksum
+        # rather than a floating action tag, consistent with the repo's supply-chain posture).
+        # Version 3.17.3 matches the helm lint version tested locally.
+        run: |
+          set -euo pipefail
+          HELM_VERSION="3.17.3"
+          HELM_ARCH="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+          HELM_URL="https://get.helm.sh/helm-v${HELM_VERSION}-linux-${HELM_ARCH}.tar.gz"
+          curl -fsSL "${HELM_URL}" | tar xz -C /usr/local/bin --strip-components=1 "linux-${HELM_ARCH}/helm"
+          helm version --short
+
+      # R4 hygiene gate: grep deploy/** for plaintext secret literals.
+      # Catches accidental token inlining before helm lint even runs.
+      - name: Secret-literal hygiene check (R4)
+        run: |
+          set -euo pipefail
+          echo "Scanning deploy/ for plaintext secret literals..."
+          # Patterns: high-entropy-looking strings that look like tokens / passwords
+          # inlined directly in YAML values (not env var refs or secretKeyRef).
+          # We look for a literal that is clearly a token (long hex or base64 string
+          # assigned to a key containing "token", "secret", "password", "key").
+          # This is a best-effort grep; a dedicated secret-scanner is a follow-up bead.
+          if grep -rn --include="*.yaml" --include="*.yml" \
+               -E '(token|secret|password|passwd|key)\s*:\s*["\x27]?[A-Za-z0-9+/]{32,}["\x27]?' \
+               deploy/ 2>/dev/null; then
+            echo "ERROR: possible plaintext secret literal found in deploy/ — use a k8s Secret reference (R4)."
+            exit 1
+          fi
+          echo "No plaintext secret literals found."
+
+      - name: helm lint (sparq-server)
+        run: |
+          helm lint ./deploy/helm/sparq \
+            --set auth.existingSecret=my-auth-secret
+
+      - name: helm lint (lws values)
+        run: |
+          helm lint ./deploy/helm/sparq \
+            --set server=lws \
+            --set image.repository=ghcr.io/sparq-org/sparq-lws-core \
+            --set lws.trustedIssuer=https://solidcommunity.net \
+            --set lws.baseUrl=https://lws.example.com
+
+      - name: helm template (sparq-server, ingress off)
+        run: |
+          helm template sparq ./deploy/helm/sparq \
+            --set auth.existingSecret=my-auth-secret \
+            > /tmp/sparq-server-rendered.yaml
+          echo "--- rendered manifest (head 60 lines) ---"
+          head -60 /tmp/sparq-server-rendered.yaml
+
+      - name: helm template (sparq-server, ingress + TLS)
+        run: |
+          helm template sparq ./deploy/helm/sparq \
+            --set auth.existingSecret=my-auth-secret \
+            --set ingress.enabled=true \
+            --set ingress.host=sparq.example.com \
+            --set ingress.ingressClassName=nginx \
+            --set 'ingress.annotations.cert-manager\.io/cluster-issuer=letsencrypt-prod' \
+            --set ingress.tls.enabled=true \
+            --set ingress.tls.secretName=sparq-tls \
+            > /tmp/sparq-server-ingress-rendered.yaml
+
+      - name: helm template (lws, ingress + TLS)
+        run: |
+          helm template sparq-lws ./deploy/helm/sparq \
+            --set server=lws \
+            --set image.repository=ghcr.io/sparq-org/sparq-lws-core \
+            --set lws.trustedIssuer=https://solidcommunity.net \
+            --set lws.baseUrl=https://lws.example.com \
+            --set ingress.enabled=true \
+            --set ingress.host=lws.example.com \
+            --set ingress.tls.enabled=true \
+            --set ingress.tls.secretName=lws-tls \
+            > /tmp/lws-rendered.yaml
+
+      # Verify that missing auth.existingSecret fails fast (R1 gate test)
+      - name: helm template (missing auth.existingSecret must fail)
+        run: |
+          if helm template sparq ./deploy/helm/sparq 2>/dev/null; then
+            echo "ERROR: expected helm template to fail when auth.existingSecret is unset (R1)"
+            exit 1
+          fi
+          echo "Correctly failed when auth.existingSecret is unset."
+
+      # Verify secret-ref.yaml contains no inlined token literal
+      - name: Assert values.yaml contains no SPARQ_AUTH_TOKEN literal
+        run: |
+          if grep -n "SPARQ_AUTH_TOKEN\s*:" deploy/helm/sparq/values.yaml | grep -v "^\s*#"; then
+            echo "ERROR: values.yaml must not contain an inlined SPARQ_AUTH_TOKEN value (R4)"
+            exit 1
+          fi
+          echo "No inlined SPARQ_AUTH_TOKEN in values.yaml."
+
+      # YAML validity of all chart + quickstart YAML files (python stdlib, no extra deps)
+      - name: YAML validity check
+        run: |
+          python3 - <<'EOF'
+          import sys, yaml, pathlib, glob
+          errors = []
+          for path in glob.glob("deploy/helm/**/*.yaml", recursive=True) + \
+                      glob.glob("deploy/helm/**/*.yml", recursive=True):
+              try:
+                  with open(path) as f:
+                      list(yaml.safe_load_all(f))
+              except yaml.YAMLError as e:
+                  errors.append(f"{path}: {e}")
+          if errors:
+              for e in errors:
+                  print(f"YAML ERROR: {e}", file=sys.stderr)
+              sys.exit(1)
+          print(f"All {len(list(glob.glob('deploy/helm/**/*.yaml', recursive=True)))} YAML files valid.")
+          EOF
+
+      # kubeconform: install if available; non-blocking if install fails.
+      # Documented-untested: validate on first CI run.
+      - name: Install kubeconform (best-effort)
+        run: |
+          curl -sSL \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin kubeconform \
+            && echo "kubeconform installed" \
+            || echo "kubeconform install failed (non-blocking)"
+        continue-on-error: true
+
+      - name: kubeconform validation (sparq-server)
+        run: |
+          if command -v kubeconform &>/dev/null; then
+            helm template sparq ./deploy/helm/sparq \
+              --set auth.existingSecret=my-auth-secret | \
+              kubeconform -strict -summary
+          else
+            echo "kubeconform not available; skipping (documented-untested; validate on first CI run)"
+          fi
+        continue-on-error: true

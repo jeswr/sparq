@@ -1,0 +1,181 @@
+# Deployment for sparq-server or sparq-lws-core
+# [OPUS-4.8] sq-0d744 — cloud-deploy epic sq-3vjdr §3.5
+#
+# Secure-defaults enforced here:
+#   R1/R2: SPARQ_AUTH_TOKEN wired from existing k8s Secret (never inlined)
+#   R7:    livenessProbe/readinessProbe on per-server health path (sparq.livenessPath / sparq.readinessPath)
+#   R8:    non-root securityContext, readOnlyRootFilesystem, no privilege escalation, no added caps
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "sparq.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sparq.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "sparq.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "sparq.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "sparq.serviceAccountName" . }}
+      # R8 — pod-level security: enforce non-root + seccomp
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: {{ include "sparq.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # R8 — container-level: no privilege escalation, read-only rootfs, drop all caps
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ include "sparq.containerPort" . }}
+              protocol: TCP
+          # R7 — liveness probe: /health (sparq-server) or /livez (lws)
+          livenessProbe:
+            httpGet:
+              path: {{ include "sparq.livenessPath" . }}
+              port: http
+            initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+          # R7 — readiness probe: /health (sparq-server) or /readyz (lws, deregisters on 503)
+          readinessProbe:
+            httpGet:
+              path: {{ include "sparq.readinessPath" . }}
+              port: http
+            initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          env:
+            {{- if eq .Values.server "sparq-server" }}
+            # R1/R4: auth token from existing k8s Secret (NEVER inlined here)
+            - name: SPARQ_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.existingSecret }}
+                  key: {{ .Values.auth.tokenKey }}
+            {{- if .Values.auth.requireTokenForReads }}
+            - name: SPARQ_AUTH_TOKEN_READ
+              value: "1"
+            {{- end }}
+            {{- if .Values.sparqServer.corsAllowOrigin }}
+            - name: SPARQ_CORS_ALLOW_ORIGIN
+              value: {{ .Values.sparqServer.corsAllowOrigin | quote }}
+            {{- end }}
+            {{- if .Values.sparqServer.maxBodyBytes }}
+            - name: SPARQ_MAX_BODY_BYTES
+              value: {{ .Values.sparqServer.maxBodyBytes | quote }}
+            {{- end }}
+            {{- if .Values.sparqServer.maxConcurrent }}
+            - name: SPARQ_MAX_CONCURRENT
+              value: {{ .Values.sparqServer.maxConcurrent | quote }}
+            {{- end }}
+            {{- if .Values.sparqServer.queryTimeout }}
+            - name: SPARQ_QUERY_TIMEOUT
+              value: {{ .Values.sparqServer.queryTimeout | quote }}
+            {{- end }}
+            {{- if .Values.sparqServer.serviceAllow }}
+            - name: SPARQ_SERVICE_ALLOW
+              value: {{ .Values.sparqServer.serviceAllow | quote }}
+            {{- end }}
+            {{- if .Values.sparqServer.accessAudit }}
+            - name: SPARQ_ACCESS_AUDIT
+              value: {{ .Values.sparqServer.accessAudit | quote }}
+            {{- end }}
+            {{- else if eq .Values.server "lws" }}
+            # LWS — activates once sq-lmz40 ships (image not yet published)
+            # LWS is fail-closed by default (R2); no auth token needed — anonymous mutation
+            # rejected, HTTPS-only WebIDs, DPoP required (all default-on in main.rs).
+            {{- if .Values.lws.trustedIssuer }}
+            - name: SOLID_SERVER_TRUSTED_ISSUER
+              value: {{ .Values.lws.trustedIssuer | quote }}
+            {{- else }}
+            {{- fail "lws.trustedIssuer must be set for server=lws (LWS requires an external OIDC IdP; see §1.3 in research/cloud-deploy-architecture.md)" }}
+            {{- end }}
+            {{- if .Values.lws.baseUrl }}
+            - name: SOLID_SERVER_BASE_URL
+              value: {{ .Values.lws.baseUrl | quote }}
+            {{- else }}
+            {{- fail "lws.baseUrl must be set for server=lws (the public https:// base URL)" }}
+            {{- end }}
+            {{- if .Values.lws.audience }}
+            - name: SOLID_SERVER_AUDIENCE
+              value: {{ .Values.lws.audience | quote }}
+            {{- end }}
+            {{- if .Values.lws.tlsCertPath }}
+            - name: SOLID_SERVER_TLS_CERT
+              value: {{ .Values.lws.tlsCertPath | quote }}
+            {{- end }}
+            {{- if .Values.lws.tlsKeyPath }}
+            - name: SOLID_SERVER_TLS_KEY
+              value: {{ .Values.lws.tlsKeyPath | quote }}
+            {{- end }}
+            {{- if .Values.lws.replayRedisExistingSecret }}
+            - name: SOLID_SERVER_REPLAY_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.lws.replayRedisExistingSecret }}
+                  key: SOLID_SERVER_REPLAY_REDIS_URL
+            {{- end }}
+            {{- end }}
+          {{- if and (eq .Values.server "sparq-server") (gt (len .Values.sparqServer.extraArgs) 0) }}
+          args:
+            {{- range .Values.sparqServer.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          {{- end }}
+          volumeMounts:
+            # R8: /tmp writable scratch (required for distroless + readOnlyRootFilesystem)
+            - name: tmp
+              mountPath: /tmp
+            {{- if and (eq .Values.server "sparq-server") .Values.persistence.enabled }}
+            - name: data
+              mountPath: /data
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if and (eq .Values.server "sparq-server") .Values.persistence.enabled }}
+        - name: data
+          {{- if .Values.persistence.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim }}
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ include "sparq.fullname" . }}-data
+          {{- end }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

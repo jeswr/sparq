@@ -1,0 +1,37 @@
+{{- if .Values.ingress.enabled -}}
+# Ingress with TLS (R3 — TLS at the edge via cert-manager or pre-provisioned cert)
+# [OPUS-4.8] sq-0d744
+# For cert-manager: add cert-manager.io/cluster-issuer annotation in ingress.annotations.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "sparq.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sparq.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.ingress.ingressClassName }}
+  ingressClassName: {{ .Values.ingress.ingressClassName }}
+  {{- end }}
+  {{- if and .Values.ingress.tls.enabled .Values.ingress.tls.secretName }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: {{ .Values.ingress.path }}
+            pathType: {{ .Values.ingress.pathType }}
+            backend:
+              service:
+                name: {{ include "sparq.fullname" . }}
+                port:
+                  number: {{ include "sparq.containerPort" . }}
+{{- end }}

@@ -1,0 +1,35 @@
+apiVersion: v2
+name: sparq
+description: >
+  Helm chart for sparq-server (W3C SPARQL 1.1 Protocol HTTP server) and sparq-lws-core
+  (native Solid/LWS server). Consumes published container images from
+  ghcr.io/sparq-org — does NOT rebuild any server. Auth is ON by default at the
+  template layer (R1 secure-default): sparq-server is open-by-default at the image
+  layer, so this chart always wires SPARQ_AUTH_TOKEN from an existing k8s Secret.
+  See deploy/helm/README.md for the secure-defaults posture.
+  [OPUS-4.8] sq-0d744 — part of the cloud-deploy epic sq-3vjdr.
+
+# "application" because this deploys a running service; use "library" for helper-only charts.
+type: application
+
+# Chart version (semver). Bump when the chart itself changes.
+version: 0.1.0
+
+# appVersion is the DEFAULT image tag. Override with --set image.tag=vX.Y.Z.
+# Kept as a string ("latest") because numeric semver would strip the "v" prefix.
+appVersion: "latest"
+
+keywords:
+  - sparql
+  - rdf
+  - triplestore
+  - solid
+  - lws
+
+home: https://github.com/sparq-org/sparq
+sources:
+  - https://github.com/sparq-org/sparq
+
+maintainers:
+  - name: sparq-org
+    url: https://github.com/sparq-org/sparq

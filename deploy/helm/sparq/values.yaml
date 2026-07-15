@@ -1,0 +1,200 @@
+# sparq Helm chart values
+# [OPUS-4.8] sq-0d744 — cloud-deploy epic sq-3vjdr, §3.5
+#
+# SECURE DEFAULTS (R1/R2/R4/R8/R9):
+#   - sparq-server is open-by-default at the IMAGE layer. This chart enforces auth at
+#     the TEMPLATE layer: auth.existingSecret (or auth.secretName) MUST name an existing
+#     k8s Secret. No token literal may appear here. See R9 note in deploy/helm/README.md.
+#   - readOnlyRootFilesystem: true + non-root securityContext by default (R8).
+#   - TLS at the Ingress via cert-manager (R3).
+#   - Secret referenced, never inlined (R4).
+
+# ---------------------------------------------------------------------------
+# Server selector
+# ---------------------------------------------------------------------------
+# server: "sparq-server" → SPARQL endpoint, port 3030, health GET /health
+# server: "lws"          → Solid/LWS server, port 3000, health GET /livez + /readyz
+#                          NOTE: lws values below are marked "(activates once sq-lmz40 ships)"
+#                          because the ghcr.io/sparq-org/sparq-lws-core image is not yet
+#                          published. Set server: lws once sq-lmz40 merges and the image
+#                          is available.
+server: sparq-server
+
+# ---------------------------------------------------------------------------
+# Image
+# ---------------------------------------------------------------------------
+image:
+  # sparq-server canonical ref (sparq-org; verified from release.yml / §0 premise-check)
+  # For lws: override with ghcr.io/sparq-org/sparq-lws-core (activates once sq-lmz40 ships)
+  repository: ghcr.io/sparq-org/sparq-server
+  # pullPolicy: use IfNotPresent for stable tags; Always for "latest" in dev
+  pullPolicy: IfNotPresent
+  # tag defaults to chart appVersion; override with --set image.tag=v0.5.0
+  tag: ""
+
+imagePullSecrets: []
+
+# ---------------------------------------------------------------------------
+# Replica count
+# NOTE on LWS multi-replica: the lws server uses an in-memory DPoP-jti replay store
+# per replica. Multi-replica LWS requires redis.url (see below) to share the replay
+# store; without it set replicas: 1 to preserve correctness (R2 / §1.3).
+# ---------------------------------------------------------------------------
+replicaCount: 1
+
+# ---------------------------------------------------------------------------
+# Auth (R1 / R4) — token referenced from an EXISTING k8s Secret, NEVER inlined
+# ---------------------------------------------------------------------------
+auth:
+  # Name of an existing k8s Secret that holds the auth token.
+  # The Secret MUST contain a key named by auth.tokenKey.
+  # Create with:
+  #   kubectl create secret generic sparq-auth-token \
+  #     --from-literal=SPARQ_AUTH_TOKEN=$(openssl rand -hex 32)
+  existingSecret: ""      # REQUIRED for sparq-server. Set to the Secret name.
+  tokenKey: SPARQ_AUTH_TOKEN
+
+  # If true, also gate READ requests with the same token (SPARQ_AUTH_TOKEN_READ=1).
+  # Default false: writes gated, reads open (QLever-style).
+  requireTokenForReads: false
+
+# ---------------------------------------------------------------------------
+# sparq-server specific config (ignored when server=lws)
+# ---------------------------------------------------------------------------
+sparqServer:
+  # Env vars injected into the container. All are optional; see Dockerfile + http.rs.
+  # SPARQ_AUTH_TOKEN is NOT here — it comes from auth.existingSecret (R4).
+  corsAllowOrigin: ""           # SPARQ_CORS_ALLOW_ORIGIN
+  maxBodyBytes: ""              # SPARQ_MAX_BODY_BYTES
+  maxConcurrent: ""             # SPARQ_MAX_CONCURRENT
+  queryTimeout: ""              # SPARQ_QUERY_TIMEOUT (e.g. "30s")
+  serviceAllow: ""              # SPARQ_SERVICE_ALLOW (comma-sep allowlist for SERVICE federation)
+  accessAudit: ""               # SPARQ_ACCESS_AUDIT ("1" to enable)
+  # Data volume: mount a PV at /data and pass the dataset path as extraArgs.
+  # Example: extraArgs: ["--format", "turtle", "/data/dataset.ttl"]
+  extraArgs: []
+
+# ---------------------------------------------------------------------------
+# LWS / sparq-lws-core config (ignored when server=sparq-server)
+# ACTIVATES ONCE sq-lmz40 SHIPS (image not yet published).
+# ---------------------------------------------------------------------------
+lws:
+  # REQUIRED for any production LWS deploy. LWS cannot start without a trusted OIDC IdP.
+  # Set to your OIDC provider URL (e.g. https://solidcommunity.net).
+  trustedIssuer: ""             # SOLID_SERVER_TRUSTED_ISSUER — REQUIRED for lws
+  # REQUIRED: the public https:// base URL at which this LWS instance is reachable.
+  baseUrl: ""                   # SOLID_SERVER_BASE_URL — REQUIRED for lws
+  audience: ""                  # SOLID_SERVER_AUDIENCE (defaults to baseUrl in the server)
+  # TLS: if your Ingress does NOT terminate TLS and you need in-pod TLS (rare),
+  # set tlsCertPath / tlsKeyPath to PEM paths mounted from a volume.
+  tlsCertPath: ""               # SOLID_SERVER_TLS_CERT
+  tlsKeyPath: ""                # SOLID_SERVER_TLS_KEY
+  # Redis replay store for multi-replica DPoP-jti dedup (see replicaCount note above).
+  # Name of an existing Secret with key SOLID_SERVER_REPLAY_REDIS_URL.
+  # Without this set, keep replicaCount: 1.
+  replayRedisExistingSecret: "" # holds SOLID_SERVER_REPLAY_REDIS_URL
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  # Port exposed on the Service (cluster-internal).
+  # Defaults to the server's container port: 3030 (sparq-server) or 3000 (lws).
+  # Override only if you need a non-standard port on the Service object.
+  port: 3030   # overridden by _helpers.tpl per server selector
+
+# ---------------------------------------------------------------------------
+# Ingress (R3 — TLS at the edge)
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: false
+  # ingressClassName: nginx
+  ingressClassName: ""
+  annotations: {}
+    # To provision a TLS cert via cert-manager:
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  # Hostname for the Ingress rule (required when ingress.enabled=true).
+  host: ""
+  # path: "/"
+  path: /
+  pathType: Prefix
+  tls:
+    enabled: false
+    # secretName: sparq-tls  (cert-manager will populate this)
+    secretName: ""
+
+# ---------------------------------------------------------------------------
+# Resource requests and limits (R8 context: right-size to avoid privilege escalation)
+# These are intentional conservative defaults; tune for your workload.
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: "100m"
+    memory: "256Mi"
+  limits:
+    cpu: "2000m"
+    memory: "2Gi"
+
+# ---------------------------------------------------------------------------
+# Persistent volume for the dataset (/data) — sparq-server only
+# ---------------------------------------------------------------------------
+persistence:
+  enabled: false
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 10Gi
+  # existingClaim: ""  # use an existing PVC
+
+# ---------------------------------------------------------------------------
+# Security context (R8 — least-priv, non-root, readOnlyRootFilesystem)
+# Both images already run non-root; these reinforce and should NOT be relaxed.
+# ---------------------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  capabilities:
+    drop:
+      - ALL
+
+# ---------------------------------------------------------------------------
+# Service account (R5 — minimal, no cluster-admin)
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+# ---------------------------------------------------------------------------
+# Pod-level settings
+# ---------------------------------------------------------------------------
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ---------------------------------------------------------------------------
+# Liveness / readiness probes (R7 — parameterised per server)
+# These are defaults; the _helpers.tpl picks the right path per server selector.
+# Override only if you have unusual probe requirements.
+# ---------------------------------------------------------------------------
+livenessProbe:
+  # path is set by _helpers.tpl based on .Values.server
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  # path is set by _helpers.tpl based on .Values.server
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3

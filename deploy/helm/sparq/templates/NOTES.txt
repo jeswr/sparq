@@ -1,0 +1,32 @@
+sparq has been deployed!
+
+Server: {{ .Values.server }}
+
+{{- if eq .Values.server "sparq-server" }}
+SPARQL endpoint: http(s)://<HOST>/sparql
+Health:         http(s)://<HOST>/health
+
+SECURITY NOTE (R9): sparq-server is open-by-default at the IMAGE layer. This
+chart gates it with the Bearer token in Secret {{ .Values.auth.existingSecret }}.
+Do NOT remove the auth.existingSecret wiring — without it writes (and optionally
+reads) are unauthenticated.
+{{- else if eq .Values.server "lws" }}
+NOTE: lws (sparq-lws-core) values are active. This server is fail-closed by
+default (anonymous mutation rejected, DPoP required). The image is available once
+sq-lmz40 ships.
+Health (liveness):  http(s)://<HOST>/livez
+Health (readiness): http(s)://<HOST>/readyz
+{{- end }}
+
+{{- if .Values.ingress.enabled }}
+Ingress host: {{ .Values.ingress.host }}
+{{- if .Values.ingress.tls.enabled }}
+TLS:          enabled (cert from Secret {{ .Values.ingress.tls.secretName }})
+{{- else }}
+TLS:          NOT enabled on Ingress — add ingress.tls.enabled=true + a cert-manager
+              cluster-issuer annotation to enforce HTTPS (R3).
+{{- end }}
+{{- else }}
+Ingress:      disabled. Access via port-forward:
+              kubectl port-forward svc/{{ include "sparq.fullname" . }} {{ include "sparq.containerPort" . }}:{{ include "sparq.containerPort" . }}
+{{- end }}

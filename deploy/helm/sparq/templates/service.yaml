@@ -1,0 +1,18 @@
+# Service for the sparq pod
+# [OPUS-4.8] sq-0d744
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sparq.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sparq.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  ports:
+    - port: {{ include "sparq.containerPort" . }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "sparq.selectorLabels" . | nindent 4 }}
