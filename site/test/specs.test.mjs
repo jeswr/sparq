@@ -63,6 +63,50 @@ test("trust-graph-authz: registered, and its honesty caveats are present in the 
   );
 });
 
+// [GPT-5.6] sq-tag1q.4 — pin the acceptance-critical SPARQL-CRDT design boundaries. These
+// assertions are deliberately exact enough that weakening the convergence claim, omitting
+// skolemisation, or moving WHERE evaluation to receivers makes the test fail.
+test("sparql-crdt: registered with the required convergence and origin-evaluation boundaries", () => {
+  const spec = specBySlug("sparql-crdt");
+  assert.ok(spec, "specBySlug('sparql-crdt') must resolve");
+  const src = readFileSync(join(SITE, "specs", spec.source), "utf8");
+  const compact = src.replace(/\s+/g, " ");
+
+  assert.match(compact, /SU-Set and Live Linked Data/, "the SU-Set prior-art section must remain");
+  assert.match(compact, /== m-ld/, "the m-ld prior-art section must remain");
+  assert.match(compact, /== NextGraph/, "the NextGraph prior-art section must remain");
+  assert.match(
+    compact,
+    /Every blank node entering the replicated dataset.*MUST.*replaced at the origin boundary.*Skolem IRI/,
+    "blank-node identity must be resolved through mandatory origin skolemisation",
+  );
+  assert.match(
+    compact,
+    /WHERE` group graph pattern.*MUST.*evaluated exactly once at the origin/,
+    "pattern updates must use evaluate-at-origin semantics",
+  );
+  assert.match(
+    compact,
+    /strong eventual consistency:.*same set of valid deltas.*same materialised quad set/,
+    "the precise dataset-level SEC claim must remain",
+  );
+  assert.match(
+    compact,
+    /MUST NOT.*preservation of the source.*pattern-based update/,
+    "the draft must not overclaim intention preservation",
+  );
+  assert.match(
+    compact,
+    /#dfn\[replica\].*#dfn\[delta-relay\].*#dfn\[origin-evaluator\]/,
+    "all three conformance classes must remain",
+  );
+  assert.match(
+    compact,
+    /Version-1 CRDT metadata.*MUST.*stored and exchanged out of band/,
+    "the out-of-band journal/sidecar decision must remain explicit",
+  );
+});
+
 test("injectTocAndIds slugs numbered headings and builds a linked ToC", () => {
   const body =
     '<section class="introductory" id="abstract"><h2>Abstract</h2><p>a</p></section>' +
