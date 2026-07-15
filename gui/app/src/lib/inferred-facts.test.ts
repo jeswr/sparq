@@ -9,7 +9,9 @@ import { test } from "node:test";
 import { parseNTriples, type SparqlTerm } from "@sparq/client";
 
 import {
+  entailedFactsFromClosure,
   entailedKeysFromClosure,
+  inferredFactsMatchingKeys,
   keyOfRdfTerm,
   keyOfSparqlTerm,
   termToNT,
@@ -99,4 +101,28 @@ test("entailedKeysFromClosure is exactly closure minus base", () => {
   assert.ok(entailed.has(keyOfLine("<http://ex/a> <http://ex/q> <http://ex/b> .")));
   // Membership is the affordance gate: the asserted triple is NOT marked.
   assert.ok(!entailed.has(keyOfLine("<http://ex/a> <http://ex/p> <http://ex/b> .")));
+});
+
+test("entailed facts retain one exact, explainable N-Triples line per added triple", () => {
+  // [GPT-5.6] Exact expected values make this non-vacuous: changing q→r, retaining the asserted
+  // p fact, or failing to fold the duplicate named-graph statement makes the test fail.
+  const base = tripleKeysOfNTriples("<http://ex/a> <http://ex/p> <http://ex/b> .");
+  const closure = [
+    "<http://ex/a> <http://ex/p> <http://ex/b> .",
+    '<http://ex/a> <http://ex/q> "entailed"@en .',
+    '<http://ex/a> <http://ex/q> "entailed"@en <http://ex/graph> .',
+  ].join("\n");
+  const entailed = entailedFactsFromClosure(closure, base);
+
+  assert.equal(entailed.keys.size, 1);
+  assert.deepEqual(entailed.facts, [
+    {
+      key: keyOfLine('<http://ex/a> <http://ex/q> "entailed"@en .'),
+      s: "<http://ex/a>",
+      p: "<http://ex/q>",
+      o: '"entailed"@en',
+      ntriples: '<http://ex/a> <http://ex/q> "entailed"@en .',
+    },
+  ]);
+  assert.deepEqual(inferredFactsMatchingKeys(closure, entailed.keys), entailed.facts);
 });

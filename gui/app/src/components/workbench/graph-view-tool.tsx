@@ -19,7 +19,8 @@ import { Play, Loader2, Network } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useEngine, type QueryOutcome } from "@/lib/engine-context";
-import { GraphView } from "@/components/workbench/graph-view";
+import { GraphView, type InferredAffordance } from "@/components/workbench/graph-view";
+import { ProofPanel, type ExplainTarget } from "@/components/workbench/proof-panel";
 import { WorkbenchSparqlEditor } from "@/components/workbench/sparql-editor";
 
 // [FABLE-5] sq-qgkwy.2 — the override lives in the sibling `.meta.ts` (eagerly bundled for the
@@ -31,11 +32,25 @@ export { GRAPH_VIEW_TOOL_OVERRIDE } from "@/components/workbench/graph-view-tool
 const DEFAULT_CONSTRUCT = `CONSTRUCT WHERE { ?s ?p ?o } LIMIT 100`;
 
 export function GraphViewTool() {
-  const { run, status } = useEngine();
+  const { run, status, entailedTripleKeys, inferenceMode, inferenceStatus } = useEngine();
   const [query, setQuery] = React.useState(DEFAULT_CONSTRUCT);
   const [running, setRunning] = React.useState(false);
   const [outcome, setOutcome] = React.useState<QueryOutcome | null>(null);
+  // [GPT-5.6] The standalone Graph tool owns its proof overlay just as QueryWorkbench does.
+  const [explainTarget, setExplainTarget] = React.useState<ExplainTarget | null>(null);
   const abortRef = React.useRef<AbortController | null>(null);
+
+  // [GPT-5.6] Exact closure-minus-base membership; an asserted edge never gains why().
+  const inferred = React.useMemo<InferredAffordance | null>(() => {
+    if (inferenceMode === "off" || inferenceStatus.kind !== "ready") return null;
+    const keys = entailedTripleKeys();
+    if (!keys || keys.size === 0) return null;
+    return { keys, onExplain: setExplainTarget };
+  }, [inferenceMode, inferenceStatus, entailedTripleKeys]);
+
+  React.useEffect(() => {
+    setExplainTarget(null);
+  }, [inferenceMode]);
 
   const onRun = React.useCallback(async () => {
     // A run already in flight: ignore (no parallel runs for this tool).
@@ -103,7 +118,7 @@ export function GraphViewTool() {
       </div>
 
       {/* Result area */}
-      <div className="min-h-0 flex-1 overflow-auto" data-graph-view-result>
+      <div className="relative min-h-0 flex-1 overflow-auto" data-graph-view-result>
         {outcome === null ? (
           <p className="p-4 text-sm text-muted-foreground">
             {ready
@@ -111,7 +126,7 @@ export function GraphViewTool() {
               : "Waiting for the engine to warm…"}
           </p>
         ) : outcome.kind === "graph" ? (
-          <GraphView ntriples={outcome.ntriples} />
+          <GraphView ntriples={outcome.ntriples} inferred={inferred} />
         ) : outcome.kind === "error" ? (
           <pre
             className="overflow-auto whitespace-pre-wrap p-3 font-mono text-xs text-destructive"
@@ -128,6 +143,10 @@ export function GraphViewTool() {
             <code className="rounded bg-muted px-1 py-0.5">DESCRIBE</code> query to generate a
             graph result that can be visualised here.
           </p>
+        )}
+        {/* [GPT-5.6] why() overlay for an inferred edge clicked in this standalone tool. */}
+        {explainTarget && (
+          <ProofPanel target={explainTarget} onClose={() => setExplainTarget(null)} />
         )}
       </div>
     </div>
