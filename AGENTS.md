@@ -25,6 +25,7 @@ Read [`skills/SKILL.md`](skills/SKILL.md) first — it is the router skill that 
 - [`skills/rdf-wrapper/SKILL.md`](skills/rdf-wrapper/SKILL.md) — traverse RDF as Rust-native focus objects with the opt-in `sparq-wrapper` crate.
 - [`skills/cli/SKILL.md`](skills/cli/SKILL.md) — the `sparq` CLI (query, mmap build/query, reason, bench).
 - [`skills/http-server/SKILL.md`](skills/http-server/SKILL.md) — the SPARQL 1.1 Protocol HTTP server.
+- [`skills/helm-deploy/SKILL.md`](skills/helm-deploy/SKILL.md) — [GPT-5.6] deploy either native server to Kubernetes with the secure-default Helm chart.
 - [`skills/javascript-wasm/SKILL.md`](skills/javascript-wasm/SKILL.md) — the `@jeswr/sparq` npm package.
 - [`skills/python/SKILL.md`](skills/python/SKILL.md) — the `sparq` Python package.
 

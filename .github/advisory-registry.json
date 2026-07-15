@@ -133,6 +133,12 @@
       "owner_bead": "sq-ymr2e.1",
       "promotion_criteria": "sq-ymr2e.12 probation bar: 50 consecutive green runs spanning at least 10 distinct PRs or two weeks, zero quarantine events (E2E-GATING-POLICY.md §3)",
       "registered": "2026-07-06"
+    },
+    "Helm lint, render, and schema validation (advisory)": {
+      "workflow": "deploy-lint.yml",
+      "owner_bead": "sq-0d744",
+      "promotion_criteria": "advisory: the helm-validate job runs on push/PR (path-filtered to deploy/**), NOT merge_group, and installs network-fetched helm+kubeconform, so it must not gate the merge queue (a missing merge_group check otherwise fails ci-summary). Promote by running it on merge_group + removing the (advisory) token once proven non-flaky on main",
+      "registered": "2026-07-15"
     }
   }
 }
