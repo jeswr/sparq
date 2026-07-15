@@ -50,6 +50,10 @@
       "floor": 94,
       "note": "[OPUS-4.8] sq-bif.1: OPT-IN cost-based federated planner. Measured WITH --features fedplan,adaptive-replan (its surface is entirely feature-gated). Measured line% 96.04 (2307/2402); floor = floor(measured) - 2 margin. Conservative work-box seed; CI is the ratchet of record."
     },
+    "sparq-forms": {
+      "floor": 93,
+      "note": "[GPT-5.6] sq-ncrhx: opt-in headless SHACL-to-form derivation crate. The crate defines no Cargo features, so its whole surface is measured in the default feature state. Measured line% 95.39 (1345/1410) via COVERAGE_CRATES=sparq-forms scripts/coverage.sh; floor = floor(measured) - 2 margin = 93. Conservative work-box seed; CI's --check-robust is the ratchet of record."
+    },
     "sparq-geo": {
       "floor": 90,
       "note": "[OPUS-4.8] sq-qcnn.17: raised from 87 to 90. Added tests/coverage_direct.rs (30 tests) covering: GeoGeometry::new, Crs::from_iri Other branch, parse_geometry_literal unsupported-datatype, euclidean_distance dispatch for MultiPolygon/MultiPoint/Rect/Triangle/GeometryCollection as first arg, distance_meters empty-geometry error path, point_to_geometry_meters Indeterminate branch (empty GeometryCollection), boundary on bare Line/MultiLineString/MultiPolygon/Rect/Triangle, polygonal() Rect/Triangle arms via intersection, sym_difference (None,None) path, union (None,_)/(_, None) empty-operand arms and mixed-dimension GEOMETRYCOLLECTION, buffer at-pole kx<=0 error, empty_of_dimension via intersection/difference set-ops, within_distance_literals, bbox_candidate_literals (incl. non-geographic CRS guard), ball_windows pole-covering window, topological_dimension for empty MultiLineString and non-empty MultiPolygon, is_simple for MultiLineString, lex::spatial_dimension. Measured line% 90.27 (1873/2075); floor = 90 (target from bead sq-qcnn.17). Conservative work-box seed; CI's --check-robust is the ratchet of record."

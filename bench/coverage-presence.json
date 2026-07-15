@@ -53,6 +53,11 @@
       "had_integration_dir": true,
       "min_tests": 50
     },
+    "sparq-forms": {
+      "had_integration_dir": true,
+      "min_tests": 44,
+      "note": "[GPT-5.6] sq-ncrhx: current source scan counts 44 #[test] attributes across src/ and tests/; the crate keeps its tests/ integration directory."
+    },
     "sparq-geo": {
       "had_integration_dir": true,
       "min_tests": 85
