@@ -97,15 +97,18 @@ engine calls directly. The foundation frontend runs the in-tab WASM engine in BO
 total for the status bar's disk gauge (least-privilege — confined in Rust to that subtree, follows
 no symlink out of it; the byte-summing walk is unit-tested directly).
 
+<!-- [GPT-5.6] sq-n18o5 — browser URL imports now share the compressed-file decoder. -->
 For **ingest**, the Import drawer (`sq-ixc3.13`) calls the engine's **native loader** IPC
 (`load_path` / `load_text`) when running in the desktop shell: a disk file — including
 **compressed** (`.gz` / `.bz2` / `.zst`) streams and **native-only HDT** (`.hdt` / `.hdt.gz`,
 behind the crate's opt-in `hdt` feature) — is decoded by the native engine (threads, no ~2 GiB
 wasm-tab ceiling) and handed back as N-Quads for the in-tab store to merge (named-graph-
-preserving). On the hosted web target, the drawer's paste/URL tabs parse in the in-tab WASM
-engine instead (no compressed-file / HDT path — the drawer says so). A successful import records a
-`WorkspaceSourceMeta` + a workspace snapshot (the `sq-atb0` save/open cache). The full on-disk
-workspace persistence path activates once the shell grants the `fs` capability (`sq-ixc3.6`).
+preserving). On the hosted web target, the drawer parses paste, file uploads, and URL responses in
+the in-tab WASM engine; compressed uploads and URL responses (`.gz` / `.zip` / `.zst` / `.bz2`)
+are decoded in the browser before parsing, while HDT remains native-only. A successful import
+records a `WorkspaceSourceMeta` + a workspace snapshot (the `sq-atb0` save/open cache). The full
+on-disk workspace persistence path activates once the shell grants the `fs` capability
+(`sq-ixc3.6`).
 
 For **federation** (`sq-ixc3.14`), a SERVICE-bearing SELECT/ASK in the Query tool routes to the
 native `query_service` command (behind the crate's opt-in `federation` feature, which forwards to
