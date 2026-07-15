@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.45.15.27210",
-      "templateHash": "10211673918775254683"
+      "templateHash": "5973716727936043057"
     },
     "gpt56Review": "[GPT-5.6] Corrected by the stronger-tier IaC security review.",
     "securityNotice": "sparq-server is open-by-default at the image layer; this template gates it with a Key Vault token. Do not remove the token wiring."
@@ -66,19 +66,19 @@
     "minReplicas": {
       "type": "int",
       "defaultValue": 1,
-      "minValue": 0,
-      "maxValue": 25,
+      "minValue": 1,
+      "maxValue": 1,
       "metadata": {
-        "description": "Minimum replica count. Default 1 keeps /health warm."
+        "description": "Minimum replica count. Pinned to 1 for the single-writer in-memory server; raise only after wiring a shared persistent backing store."
       }
     },
     "maxReplicas": {
       "type": "int",
-      "defaultValue": 3,
+      "defaultValue": 1,
       "minValue": 1,
-      "maxValue": 25,
+      "maxValue": 1,
       "metadata": {
-        "description": "Maximum replica count."
+        "description": "Maximum replica count. Pinned to 1 for the single-writer in-memory server; raise only after wiring a shared persistent backing store."
       }
     },
     "authTokenRead": {
@@ -145,8 +145,7 @@
       "1.5": "3Gi",
       "1.75": "3.5Gi",
       "2.0": "4Gi"
-    },
-    "effectiveMaxReplicas": "[if(greaterOrEquals(parameters('maxReplicas'), parameters('minReplicas')), parameters('maxReplicas'), fail('maxReplicas must be greater than or equal to minReplicas.'))]"
+    }
   },
   "resources": [
     {
@@ -319,7 +318,7 @@
           ],
           "scale": {
             "minReplicas": "[parameters('minReplicas')]",
-            "maxReplicas": "[variables('effectiveMaxReplicas')]"
+            "maxReplicas": "[parameters('maxReplicas')]"
           }
         }
       },

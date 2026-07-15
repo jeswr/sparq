@@ -55,6 +55,12 @@ Secure defaults enforced per `research/cloud-deploy-architecture.md`:
 
 ## sparq-server — Deploy to Azure
 
+<!-- [GPT-5.6] Keep the single-writer constraint visible beside the deployment entry point. -->
+> **Note on replicas:** sparq-server keeps a separate in-memory dataset in every replica. This
+> template pins both `minReplicas` and `maxReplicas` to `1` so SPARQL UPDATE requests cannot
+> silently diverge across replicas. Raise these limits only after wiring a shared persistent
+> backing store; this template does not provision one.
+
 ### Prerequisites
 
 1. An Azure subscription with the `Microsoft.App`, `Microsoft.OperationalInsights`,

@@ -18,7 +18,8 @@
 //   - External HTTPS-only ingress on targetPort 3030 only; no management ports public (R6).
 //   - Container Apps auto-provisions a managed TLS cert on the *.azurecontainerapps.io FQDN
 //     (R3). Custom domain TLS follows the same managed path.
-//   - minReplicas: 1 default (ensures health probe and /health path stay warm).
+//   - Both replica bounds are pinned to 1: every replica owns an independent in-memory dataset,
+//     so horizontal scaling requires a shared persistent backing store this template does not provide.
 //   - sparq-server runs non-root in the distroless image; Container Apps' 2024-03-01 API has no
 //     container securityContext/readOnlyRootFilesystem property, so the template does not emit an
 //     invalid no-op security block (R8 applies where the platform supports it).
@@ -60,15 +61,15 @@ param healthPath string = '/health'
 @minLength(32)
 param authToken string
 
-@description('Minimum replica count. Default 1 keeps /health warm.')
-@minValue(0)
-@maxValue(25)
+@description('Minimum replica count. Pinned to 1 for the single-writer in-memory server; raise only after wiring a shared persistent backing store.')
+@minValue(1)
+@maxValue(1)
 param minReplicas int = 1
 
-@description('Maximum replica count.')
+@description('Maximum replica count. Pinned to 1 for the single-writer in-memory server; raise only after wiring a shared persistent backing store.')
 @minValue(1)
-@maxValue(25)
-param maxReplicas int = 3
+@maxValue(1)
+param maxReplicas int = 1
 
 @description('''
   Set to "1" to also require the auth token for read (SELECT/CONSTRUCT) queries.
@@ -113,11 +114,6 @@ var memoryByCpu = {
   '1.75': '3.5Gi'
   '2.0': '4Gi'
 }
-
-// [GPT-5.6] Fail during ARM expression evaluation instead of reaching the provider with invalid scale.
-var effectiveMaxReplicas = maxReplicas >= minReplicas
-  ? maxReplicas
-  : fail('maxReplicas must be greater than or equal to minReplicas.')
 
 // ---------------------------------------------------------------------------
 // User-assigned managed identity (R5 — least privilege)
@@ -323,7 +319,8 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
       ]
       scale: {
         minReplicas: minReplicas
-        maxReplicas: effectiveMaxReplicas
+        // [GPT-5.6] Single-writer safety boundary: replicas do not share the in-memory dataset.
+        maxReplicas: maxReplicas
       }
     }
   }
