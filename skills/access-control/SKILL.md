@@ -300,7 +300,9 @@ Materialize the authorization view from the access-control documents, then enfor
   (`lteq` → `auth:notAfter`, `gteq` → `auth:notBefore`) maps to a **live-clock window**
   re-checked against `Session::now` per request ([OPUS-4.8] sq-0q7n — a lapsed window denies
   immediately, no `refresh_odrl_grant` needed); `odrl:purpose`/`count`/a *strict* `dateTime`
-  bound have no faithful analogue and STAY one-shot; a rule mixing mappable + unmappable
+  bound, **and any compound `odrl:LogicalConstraint`** (`odrl:and`/`odrl:or`/`odrl:xone` —
+  no faithful single-head analogue; [OPUS-4.8] sq-izzak) have no faithful analogue and STAY
+  one-shot; a rule mixing mappable + unmappable
   constraints falls back **entirely** to one-shot (fail-safe — never drops a bound). A
   dateTime window is mapped only on an **allow** (a lapsed *deny* would fail open). Mapping
   table in the [`usage-control-policy`](../usage-control-policy/SKILL.md) skill.
