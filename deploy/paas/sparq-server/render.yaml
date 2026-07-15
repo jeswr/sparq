@@ -1,16 +1,22 @@
 # [SONNET-4.6] sq-dwame — Render Blueprint for sparq-server.
+# [GPT-5.6] Post-hoc hardening: generated env-group secret and single-writer pin.
 #
 # SECURE-DEFAULTS NOTICE (R1/R9):
 # The sparq-server image is open-by-default (bakes SPARQ_ALLOW_REMOTE=1, no auth at the
 # image layer). This template enforces auth ON at the template layer via SPARQ_AUTH_TOKEN.
-# The token is marked sync: false — Render will prompt you to set it in the dashboard;
-# it is NEVER stored in this file (R4). Unauthenticated writes return 401.
+# Render generates the token into an environment group; no plaintext value is committed (R4).
+# Unauthenticated reads and writes return 401.
 #
-# Auto-HTTPS (R4): Render provides automatic TLS on its *.onrender.com domain and on
+# Auto-HTTPS (R3): Render provides automatic TLS on its *.onrender.com domain and on
 # custom domains — plaintext HTTP is redirected to HTTPS automatically.
 #
-# Deploy: https://render.com/deploy (use the button in deploy/paas/README.md)
-#         or: render blueprint apply
+# Deploy from Render's New Blueprint flow and select this file as the custom Blueprint Path.
+
+envVarGroups:
+  - name: sparq-server-secrets
+    envVars:
+      - key: SPARQ_AUTH_TOKEN
+        generateValue: true
 
 services:
   - type: web
@@ -25,17 +31,24 @@ services:
     healthCheckPath: /health
 
     plan: starter          # cheapest plan that supports custom images; upgrade as needed
+    # Single-writer invariant: the in-memory dataset is not coordinated across replicas.
     numInstances: 1
 
-    # R4: secrets — sync: false means Render prompts for the value at deploy time;
-    # the value is NEVER stored in this YAML.
     envVars:
-      - key: SPARQ_AUTH_TOKEN
-        sync: false          # REQUIRED: set a strong random token in the Render dashboard
+      # R4: inject the platform-generated token from Render's environment-group store.
+      - fromGroup: sparq-server-secrets
 
-      # Optional — uncomment to require auth for reads as well:
-      # - key: SPARQ_AUTH_TOKEN_READ
-      #   value: "1"
+      # Override the image's open bind opt-in. A missing token now makes startup fail closed.
+      - key: SPARQ_ALLOW_REMOTE
+        value: "0"
+
+      # Secure default: gate reads as well as writes.
+      - key: SPARQ_AUTH_TOKEN_READ
+        value: "1"
+
+      # The image binds 3030; declaring PORT makes Render's routing/probe selection explicit.
+      - key: PORT
+        value: "3030"
 
       # Optional — set to your front-end origin in production:
       # - key: SPARQ_CORS_ALLOW_ORIGIN

@@ -1,4 +1,5 @@
 # [SONNET-4.6] sq-dwame — Fly.io app config for sparq-lws-core (Solid/LWS server).
+# [GPT-5.6] Post-hoc hardening: public bind plus single-instance Fly deployment.
 #
 # DEPENDENCY NOTE: the sparq-lws-core image is built by bead sq-lmz40 and will be
 # published to ghcr.io/sparq-org/sparq-lws-core. Until sq-lmz40 is merged and the image
@@ -12,14 +13,15 @@
 # (unlike sparq-server). However, SOLID_SERVER_TRUSTED_ISSUER and SOLID_SERVER_BASE_URL
 # are REQUIRED for any real deployment (the server cannot self-issue an OIDC IdP).
 #
-# Auto-HTTPS (R4): Fly.io terminates TLS on its shared *.fly.dev domain and on custom
+# Auto-HTTPS (R3): Fly.io terminates TLS on its shared *.fly.dev domain and on custom
 # domains. The SOLID_SERVER_BASE_URL MUST match your public HTTPS URL.
 #
 # Multi-instance note: LWS uses an in-memory DPoP jti replay store by default.
 # For >1 replica, set SOLID_SERVER_REPLAY_REDIS_URL (with the redis-replay feature).
 # Single-instance deployments are safe without Redis.
 
-app = "sparq-lws"             # override with: fly apps create --name <your-app>
+# `fly launch --name <unique-name>` replaces this schema-required placeholder.
+app = "sparq-lws-change-me"
 primary_region = "iad"        # US East; change to the region nearest your users
 
 [build]
@@ -28,6 +30,9 @@ primary_region = "iad"        # US East; change to the region nearest your users
   #   image = "ghcr.io/sparq-org/sparq-lws-core:0.1.0"
 
 [env]
+  # The binary defaults to loopback; PaaS ingress requires an explicit public container bind.
+  SOLID_SERVER_BIND = "0.0.0.0:3000"
+
   # REQUIRED: set these to your actual public deployment URLs.
   # Alternatively, set via: fly secrets set SOLID_SERVER_BASE_URL="https://…"
   #
@@ -49,6 +54,19 @@ primary_region = "iad"        # US East; change to the region nearest your users
   auto_stop_machines  = "stop"
   auto_start_machines = true
   min_machines_running = 1
+
+  # Fly creates two Machines by default for a service on first deploy. This file cannot cap
+  # Machine count: deploy with --ha=false, then run `fly scale count 1` (README). LWS uses an
+  # in-memory DPoP replay store unless a shared Redis replay backend is configured.
+
+  [[http_service.checks]]
+    # R7: liveness path for sparq-lws-core.
+    grace_period    = "15s"
+    interval        = "15s"
+    method          = "GET"
+    path            = "/livez"
+    timeout         = "5s"
+    tls_skip_verify = false
 
   [[http_service.checks]]
     # R7: readiness health-check path for sparq-lws-core.
