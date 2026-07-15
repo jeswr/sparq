@@ -1,0 +1,41 @@
+# [SONNET-4.6] sq-dwame — Railway config for sparq-lws-core (Solid/LWS server).
+#
+# DEPENDENCY NOTE: the sparq-lws-core image is built by bead sq-lmz40 and will be
+# published to ghcr.io/sparq-org/sparq-lws-core. This config references the canonical
+# image ref; it activates once sq-lmz40 ships.
+#
+# SECURE-DEFAULTS NOTICE (R9):
+# The sparq-lws-core image is fail-closed by design — anonymous mutation is rejected,
+# DPoP is required, HTTPS-only WebIDs. SOLID_SERVER_TRUSTED_ISSUER and
+# SOLID_SERVER_BASE_URL are REQUIRED (the server cannot self-issue an OIDC IdP).
+#
+# Auto-HTTPS (R4): Railway provides automatic TLS on *.railway.app and custom domains.
+#
+# Set required variables before deploying:
+#   railway variables set SOLID_SERVER_BASE_URL="https://sparq-lws.railway.app"
+#   railway variables set SOLID_SERVER_TRUSTED_ISSUER="https://your-oidc-provider.example.com"
+
+[build]
+  dockerfilePath = ""    # not building from source — using the pre-built GHCR image
+
+[deploy]
+  startCommand = ""      # image ENTRYPOINT is used; no override needed
+  healthcheckPath = "/readyz"    # R7: readiness health-check for sparq-lws-core
+  healthcheckTimeout = 30
+  restartPolicyType = "ON_FAILURE"
+  restartPolicyMaxRetries = 3
+
+# Variables required in Railway dashboard (R4 — never put literal values here):
+#
+#   SOLID_SERVER_BASE_URL       = "https://sparq-lws.railway.app"  [REQUIRED]
+#   SOLID_SERVER_TRUSTED_ISSUER = "https://your-oidc-provider.example.com"  [REQUIRED]
+#
+# Optional:
+#   SOLID_SERVER_AUDIENCE         = "https://…"    # defaults to BASE_URL
+#   SOLID_SERVER_REPLAY_REDIS_URL = "redis://…"    # required for >1 replica
+#   PORT                          = 3000            # Railway injects $PORT; set to 3000
+#
+# DEV-ONLY escape hatches (NEVER set in production — R2):
+#   SOLID_SERVER_ALLOW_LOOPBACK       = "1"
+#   SOLID_SERVER_SEED_CONFORMANCE     = "1"
+#   SOLID_SERVER_ALLOW_SEED_NONMEMORY = "1"
