@@ -15,6 +15,7 @@ mod disk;
 mod engine;
 mod explain;
 mod federation;
+mod forms;
 mod odrl;
 
 use engine::EngineState;
@@ -75,6 +76,11 @@ pub fn run() {
             // pins the STRICT EMPTY egress allowlist so an ANALYZE of a SERVICE-bearing
             // query is refused pre-HTTP, never dialed (explain.rs).
             explain::explain_native,
+            // [GPT-5.6] sq-1cnox — derive the Forms tool's complete serde FormDescription
+            // from serialized snapshots of the active workspace. The sparq-forms stack is
+            // default-OFF behind the `forms` feature; lean builds register the same command
+            // name but return an actionable unavailable error instead of demo content.
+            forms::derive_form,
             // [FABLE-5] sq-ixc3.15 — the ODRL policy tool's ONE native command: parse/validate
             // a Turtle ODRL policy, evaluate the (party, action, target) request, materialize
             // the policy through the odrl-bridge, and run the SAME query per requester through
