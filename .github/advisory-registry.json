@@ -1,6 +1,18 @@
 {
   "_doc": "Advisory-job registry (sq-qcnn.32). [SONNET-4.6] Every job whose NAME matches the ci-summary exclusion pattern \\b(advisory|informational)\\b must have an entry here with {owner_bead, promotion_criteria, registered}. A job that intentionally runs a gate-classified script (scripts/*gate*.py) must also carry gate_script_waiver. Maintained by check-advisory-registry.py (C2/C3). See scripts/check-advisory-registry.py for the enforcement rule.",
   "jobs": {
+    "secret-literal grep (advisory)": {
+      "workflow": "deploy-terraform-lint.yml",
+      "owner_bead": "sq-sos84",
+      "promotion_criteria": "advisory while the multi-cloud Terraform deploy templates are new; promote by moving the R4 secret-literal grep into a gating deploy-lint job once the deploy surface is proven stable on main",
+      "registered": "2026-07-15"
+    },
+    "terraform validate (advisory)": {
+      "workflow": "deploy-terraform-lint.yml",
+      "owner_bead": "sq-sos84",
+      "promotion_criteria": "advisory while terraform validate runs credential-free across provider-version drift; promote by removing the (advisory) token once validate is proven stable on main across the pinned terraform_version",
+      "registered": "2026-07-15"
+    },
     "asan (mmap corruption corpus, informational)": {
       "workflow": "asan.yml",
       "owner_bead": "sq-hybl",
