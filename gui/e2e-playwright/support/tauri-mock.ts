@@ -22,6 +22,8 @@
 //                      prohibition flipped, bob's + the ungated pane keep it)
 //   (any other cmd)  → throws Error (catches unexpected IPC surface drift)
 
+import { formsMockPrelude } from "./forms-mock.ts";
+
 /** The script string injected via page.addInitScript before the page's own scripts run. */
 export const tauriMockScript: string = `
 (function () {
@@ -35,6 +37,7 @@ export const tauriMockScript: string = `
     count: 1,
     format: "turtle"
   };
+  ${formsMockPrelude}
   // The LOG accumulates every invoke call so tests can assert the IPC contract.
   var LOG = [];
 
@@ -92,6 +95,11 @@ export const tauriMockScript: string = `
         if (cmd === "disk_usage")        return Promise.resolve(DISK_FIXTURE);
         if (cmd === "load_text")         return Promise.resolve(LOAD_FIXTURE);
         if (cmd === "load_path")         return Promise.resolve(LOAD_FIXTURE);
+        if (cmd === "derive_form")       return Promise.resolve(formsMockDescription(
+          args && args.focus,
+          (args && args.mode) || "edit",
+          args && args.shape
+        ));
         if (cmd === "plugin:dialog|open") return Promise.resolve("/tmp/test.ttl");
         if (cmd === "query_service") {
           var allow = (args && args.allow) || [];
