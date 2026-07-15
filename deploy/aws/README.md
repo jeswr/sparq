@@ -1,6 +1,7 @@
 <!-- [SONNET-4.6] sq-17rgw — AWS CloudFormation Launch-Stack deploy for sparq-server + sparq-lws-core. -->
+<!-- [GPT-5.6] Provider-specific security/correctness review fixes. -->
 
-# AWS one-click deploy (sq-17rgw)
+# AWS CloudFormation deploy (sq-17rgw)
 
 CloudFormation templates for running sparq on AWS **ECS Fargate** with an
 **Application Load Balancer** and **HTTPS via ACM**.
@@ -26,22 +27,25 @@ Key rules applied:
 
 - **R1 (auth ON):** `SPARQ_AUTH_TOKEN` is required and comes from Secrets Manager — never
   a template parameter value.
-- **R2 (no anonymous write):** Unauthenticated writes return 401. sparq-lws-core is
+- **R2 (no anonymous write):** Unauthenticated writes return 401/403. sparq-lws-core is
   fail-closed by design; anonymous mutation is rejected at the image layer.
 - **R3 (TLS at edge):** The ALB terminates HTTPS (TLS 1.2+ with TLS 1.3 preferred) via an
-  ACM certificate. Port 80 redirects to 443. The task SG accepts traffic only from the ALB
-  SG on the app port — not from the internet directly.
+  ACM certificate. [GPT-5.6] No port-80 listener or security-group rule exists, so credentials
+  cannot be sent to a public plaintext endpoint. The private task hop is restricted to the ALB SG.
 - **R4 (secrets in Secrets Manager):** No literal token, password, or key in any committed
   file. Secrets are referenced by ARN only.
-- **R5 (least-privilege IAM):** Separate `ExecutionRole` (image pull + secret read, scoped
-  to the stack's own secret ARN) and `TaskRole` (CloudWatch logs only).
+- **R5 (least-privilege IAM):** [GPT-5.6] The execution role can read only the selected
+  secret and write only this stack's log streams. The application task role has no AWS API
+  permissions. Neither role uses the wildcard AWS-managed ECS execution policy.
 - **R6 (ingress only on app port from ALB SG):** Tasks run in private subnets (no public
   IP). The ALB SG allows 443 from the internet; the task SG allows the app port only from
   the ALB SG.
 - **R7 (health check):** ALB target group health check on `/health` (sparq-server) or
-  `/readyz` (LWS), matcher 200. ECS liveness check via the server's built-in `--health-probe`.
-- **R8 (non-root):** Both images run as non-root; `ReadonlyRootFilesystem: true` in the
-  task definition.
+  `/readyz` (LWS), matcher 200. The sparq-server task also uses its built-in `--health-probe`;
+  [GPT-5.6] LWS service health follows the ALB because its image contract has no probe command.
+- **R8 (non-root):** Both images run as non-root; `ReadonlyRootFilesystem: true` and a
+  drop-all Linux-capability set are enforced. [GPT-5.6] sparq-server receives a writable,
+  task-local `/data` volume while the rest of its root filesystem stays read-only.
 
 ---
 
@@ -59,14 +63,18 @@ Key rules applied:
    # Note the ARN from the output.
    ```
 
-### Launch Stack button
+### Quick-create link
 
-Replace the `<REGION>` and URL-encode the parameter values before clicking.
+CloudFormation quick-create links accept templates stored in Amazon S3, not raw GitHub URLs.
+[GPT-5.6] Upload the reviewed template to a bucket you control, then URL-encode its S3 HTTPS
+URL in the following link format:
 
-[![Launch Stack](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home#/stacks/create/review?templateURL=https://raw.githubusercontent.com/sparq-org/sparq/main/deploy/aws/sparq-server.yaml&stackName=sparq-server)
+```text
+https://<REGION>.console.aws.amazon.com/cloudformation/home?region=<REGION>#/stacks/create/review?templateURL=<URL_ENCODED_S3_TEMPLATE_URL>&stackName=sparq-server
+```
 
-> The button above links to the template on the `main` branch. For production, pin to a
-> specific release tag by substituting the commit SHA in the raw URL.
+The repository does not currently publish these templates to a project-owned S3 bucket, so it
+does not claim a working public Launch Stack button.
 
 ### CLI deploy
 
@@ -74,7 +82,7 @@ Replace the `<REGION>` and URL-encode the parameter values before clicking.
 aws cloudformation create-stack \
   --stack-name sparq-server \
   --template-body file://sparq-server.yaml \
-  --capabilities CAPABILITY_NAMED_IAM \
+  --capabilities CAPABILITY_IAM \
   --parameters \
     ParameterKey=AuthTokenSecretArn,ParameterValue=arn:aws:secretsmanager:<REGION>:<ACCOUNT>:secret:/sparq/server/auth-token-XXXXXX \
     ParameterKey=AcmCertificateArn,ParameterValue=arn:aws:acm:<REGION>:<ACCOUNT>:certificate/<UUID>
@@ -95,10 +103,11 @@ aws cloudformation create-stack \
 3. Confirm an unauthenticated write is rejected:
 
    ```bash
-   curl -X POST https://<your-domain>/sparql/update \
-     -d 'update=INSERT DATA { <urn:x> <urn:y> <urn:z> }' \
+   curl -X POST https://<your-domain>/sparql \
+     -H 'Content-Type: application/x-www-form-urlencoded' \
+     --data-urlencode 'update=INSERT DATA { <urn:x> <urn:y> <urn:z> }' \
      -w "%{http_code}"
-   # Expect: 401
+   # Expect: 401 or 403
    ```
 
 ### Parameters
@@ -110,7 +119,8 @@ aws cloudformation create-stack \
 | `ImageRef` | No | `ghcr.io/sparq-org/sparq-server:latest` | Full image reference |
 | `TaskCpu` | No | `512` | Fargate CPU units |
 | `TaskMemory` | No | `1024` | Fargate memory (MiB) |
-| `DesiredCount` | No | `1` | Number of running tasks |
+| `DesiredCount` | No | `1` | Fixed at one for task-local dataset consistency |
+| `HealthCheckPath` | No | `/health` | ALB health path for sparq-server |
 | `AuthTokenRead` | No | `""` | Set `"1"` to also gate reads |
 | `CorsAllowOrigin` | No | `""` | Value for `SPARQ_CORS_ALLOW_ORIGIN` |
 | `MaxConcurrent` | No | `16` | Max concurrent query workers |
@@ -139,18 +149,18 @@ aws secretsmanager create-secret \
 aws cloudformation create-stack \
   --stack-name sparq-lws \
   --template-body file://sparq-lws.yaml \
-  --capabilities CAPABILITY_NAMED_IAM \
+  --capabilities CAPABILITY_IAM \
   --parameters \
     ParameterKey=AcmCertificateArn,ParameterValue=arn:aws:acm:<REGION>:<ACCOUNT>:certificate/<UUID> \
     ParameterKey=SolidBaseUrl,ParameterValue=https://solid.example.com \
     ParameterKey=SolidTrustedIssuerSecretArn,ParameterValue=arn:aws:secretsmanager:<REGION>:<ACCOUNT>:secret:/sparq/lws/trusted-issuer-XXXXXX
 ```
 
-### Multi-replica note
+### Single-replica constraint
 
-For `DesiredCount > 1`, you must supply a Redis URL via `RedisReplaySecretArn` for shared
-DPoP-jti replay protection. With `DesiredCount=1` (the default), in-memory replay is
-correct and no Redis is needed.
+[GPT-5.6] The canonical image contract builds the crate's default features, which exclude the
+opt-in `redis-replay` feature. The template therefore fixes `DesiredCount` at one; accepting a
+Redis URL would otherwise make that image abort at boot instead of enabling shared replay state.
 
 ### Parameters
 
@@ -161,11 +171,10 @@ correct and no Redis is needed.
 | `SolidTrustedIssuerSecretArn` | Yes | — | Secrets Manager ARN for the OIDC issuer URL |
 | `ImageRef` | No | `ghcr.io/sparq-org/sparq-lws-core:latest` | Full image reference |
 | `SolidAudience` | No | `""` | `SOLID_SERVER_AUDIENCE` (defaults to `SolidBaseUrl`) |
-| `RedisReplaySecretArn` | No | `""` | Secrets Manager ARN for Redis URL (multi-replica) |
-| `RedisReplayUrl` | No | `""` | Redis URL plaintext (single-replica only) |
 | `TaskCpu` | No | `512` | Fargate CPU units |
 | `TaskMemory` | No | `1024` | Fargate memory (MiB) |
-| `DesiredCount` | No | `1` | Number of running tasks |
+| `DesiredCount` | No | `1` | Fixed at one for the canonical image contract |
+| `HealthCheckPath` | No | `/readyz` | ALB readiness path for sparq-lws-core |
 
 ---
 
@@ -193,7 +202,7 @@ discovered work).
 
 ## CI validation
 
-These templates are validated by `cfn-lint` (exit 0 on both). The
+These templates are validated by `cfn-lint` (exit 0 on both). [GPT-5.6] The
 `aws cloudformation validate-template` call requires `cloudformation:ValidateTemplate` IAM
 permission and a live AWS endpoint — the dev box IAM role does not allow this, so it is
 documented as manual validation.
@@ -214,7 +223,7 @@ The following was noted during implementation but is out of scope for this bead:
   (non-gating, `workflow_dispatch` + path filter as per design record §4).
 - Parameterising the VPC so operators can supply an existing VPC + subnets instead of having
   each stack create its own.
-- An EC2 fallback template (user-data `docker run` behind Elastic IP or ALB) for operators
-  who prefer EC2 over Fargate — noted in §3.1 of the design record as optional.
+- [GPT-5.6] An EC2 fallback template behind ALB/ACM for operators who prefer EC2 over
+  Fargate. A direct public EIP path must not expose the credentialed service over plaintext.
 - Auto-generation of a random token at stack deploy time (via CloudFormation custom resource
   or Lambda-backed resource) so the `AuthTokenSecretArn` parameter is not required upfront.

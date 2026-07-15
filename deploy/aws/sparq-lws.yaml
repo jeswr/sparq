@@ -12,16 +12,17 @@
 #   - DPoP required; bidirectional WebID<->issuer check is strict
 # Therefore R1 (auth ON) is already satisfied by the image; the template's job is
 # to wire the required env vars and connect it to HTTPS (R3/ALB+ACM).
+# [GPT-5.6] R9: the sibling sparq-server image is open by default; its template gates it
+# with a Secrets Manager token. Never remove that sibling template's token wiring.
 #
 # KEY REQUIREMENT: This template requires an external OIDC issuer
 # (SOLID_SERVER_TRUSTED_ISSUER). An LWS deploy cannot be zero-input — you must name
 # a trusted IdP. The /readyz probe is the seam that keeps a mis-configured instance
 # from serving traffic behind the ALB.
 #
-# MULTI-REPLICA NOTE: For >1 replica, you must provide a Redis URL
-# (SOLID_SERVER_REPLAY_REDIS_URL) for shared DPoP-jti replay protection.
-# With a single replica (DesiredCount=1), in-memory replay is correct and sufficient.
-# This template defaults DesiredCount=1. To scale out, supply RedisReplayUrl.
+# [GPT-5.6] SINGLE-REPLICA NOTE: the canonical image contract builds default features,
+# which do not include the opt-in redis-replay feature. DesiredCount is therefore pinned
+# to one so cross-instance DPoP replay protection cannot silently fail or abort at boot.
 #
 # DECISION LOG (sq-17rgw):
 #   - ECS Fargate + ALB + ACM: same architecture as sparq-server.yaml (R3).
@@ -29,7 +30,7 @@
 #   - Dedicated TaskRole + ExecutionRole scoped to own resources (R5).
 #   - Task SG accepts traffic on port 3000 ONLY from ALB SG (R6).
 #   - ALB target group health check on /readyz (R7, readiness probe).
-#   - ECS container health check on /livez (R7, liveness).
+#   - ECS service health is driven by the ALB /readyz target check; /livez remains available (R7).
 #   - Dev-only escape hatches (ALLOW_LOOPBACK / SEED_CONFORMANCE / etc.) NEVER present (R2).
 
 AWSTemplateFormatVersion: "2010-09-09"
@@ -88,23 +89,13 @@ Parameters:
       SOLID_SERVER_AUDIENCE — defaults to SolidBaseUrl if left empty.
       Set this if your OIDC 'aud' claim differs from the base URL.
 
-  RedisReplayUrl:
+  # [GPT-5.6] R7 requires a per-server, overridable readiness path.
+  HealthCheckPath:
     Type: String
-    Default: ""
-    Description: >
-      Optional Redis URL for shared DPoP-jti replay protection across replicas
-      (SOLID_SERVER_REPLAY_REDIS_URL). Required when DesiredCount > 1 for correct
-      DPoP replay prevention. Leave empty for single-replica deploys (default).
-    NoEcho: true
-
-  RedisReplaySecretArn:
-    Type: String
-    Default: ""
-    Description: >
-      ARN of a Secrets Manager secret whose value is the Redis connection URL.
-      Use this instead of RedisReplayUrl to keep the Redis credentials out of
-      parameter logs. Takes precedence over RedisReplayUrl if both are set.
-    AllowedPattern: "^(arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+)?$"
+    Default: "/readyz"
+    AllowedPattern: "^/[-A-Za-z0-9._~/%]*$"
+    ConstraintDescription: Must be an absolute HTTP path.
+    Description: ALB readiness path. The canonical sparq-lws-core image serves /readyz.
 
   TaskCpu:
     Type: Number
@@ -122,19 +113,38 @@ Parameters:
     Type: Number
     Default: 1
     MinValue: 1
-    MaxValue: 10
+    MaxValue: 1
     Description: >
-      Number of running tasks. For >1, RedisReplaySecretArn (or RedisReplayUrl)
-      is required for correct DPoP replay protection. Single-replica (1) is safe
-      without Redis.
+      [GPT-5.6] Number of running tasks, fixed at one because the canonical image does not
+      include the opt-in redis-replay feature required for safe horizontal scaling.
 
 # ---------------------------------------------------------------------------
 # Conditions
 # ---------------------------------------------------------------------------
 Conditions:
   HasCustomAudience: !Not [!Equals [!Ref SolidAudience, ""]]
-  HasRedisSecretArn: !Not [!Equals [!Ref RedisReplaySecretArn, ""]]
-  HasRedisUrl: !Not [!Equals [!Ref RedisReplayUrl, ""]]
+
+# [GPT-5.6] Reject CPU/memory pairs that ECS Fargate cannot register.
+Rules:
+  ValidFargateTaskSize:
+    Assertions:
+      - Assert: !Or
+          - !And
+            - !Equals [!Ref TaskCpu, 256]
+            - !Contains [[512, 1024, 2048], !Ref TaskMemory]
+          - !And
+            - !Equals [!Ref TaskCpu, 512]
+            - !Contains [[1024, 2048, 4096], !Ref TaskMemory]
+          - !And
+            - !Equals [!Ref TaskCpu, 1024]
+            - !Contains [[2048, 4096, 8192], !Ref TaskMemory]
+          - !And
+            - !Equals [!Ref TaskCpu, 2048]
+            - !Contains [[4096, 8192, 16384], !Ref TaskMemory]
+          - !And
+            - !Equals [!Ref TaskCpu, 4096]
+            - !Contains [[8192, 16384], !Ref TaskMemory]
+        AssertDescription: Select a CPU and memory combination supported by ECS Fargate.
 
 # ---------------------------------------------------------------------------
 # Resources
@@ -295,11 +305,13 @@ Resources:
           ToPort: 443
           CidrIp: "0.0.0.0/0"
           Description: "HTTPS from internet"
+      # [GPT-5.6] Prevent implicit allow-all egress; the ALB reaches only this task SG.
+      SecurityGroupEgress:
         - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIpv6: "::/0"
-          Description: "HTTPS from internet (IPv6)"
+          FromPort: 3000
+          ToPort: 3000
+          DestinationSecurityGroupId: !Ref TaskSecurityGroup
+          Description: "HTTP to sparq-lws tasks only"
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-alb-sg"
@@ -310,23 +322,27 @@ Resources:
     Properties:
       GroupDescription: "sparq-lws task: inbound port 3000 from ALB SG only"
       VpcId: !Ref VPC
-      SecurityGroupIngress:
+      # [GPT-5.6] HTTPS-only egress covers GHCR, Secrets Manager, OIDC, and CloudWatch.
+      SecurityGroupEgress:
         - IpProtocol: tcp
-          FromPort: 3000
-          ToPort: 3000
-          SourceSecurityGroupId: !Ref AlbSecurityGroup
-          Description: "sparq-lws-core port from ALB only"
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+          Description: "HTTPS dependencies via NAT"
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-task-sg"
 
-  TaskEgressAll:
-    Type: AWS::EC2::SecurityGroupEgress
+  # [GPT-5.6] Standalone rule avoids a circular SG dependency and limits task ingress to ALB.
+  TaskIngressFromAlb:
+    Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !Ref TaskSecurityGroup
-      IpProtocol: "-1"
-      CidrIp: "0.0.0.0/0"
-      Description: "Outbound for image pull + Secrets Manager + OIDC IdP + CloudWatch"
+      IpProtocol: tcp
+      FromPort: 3000
+      ToPort: 3000
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Description: "sparq-lws-core port from ALB only"
 
   # -------------------------------------------------------------------------
   # CloudWatch Logs
@@ -343,7 +359,6 @@ Resources:
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${AWS::StackName}-execution-role"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -351,23 +366,28 @@ Resources:
             Principal:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
-      ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+            # [GPT-5.6] Bind ECS assumptions to this account to mitigate confused-deputy use.
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
       Policies:
-        - PolicyName: ReadLwsSecrets
+        # [GPT-5.6] GHCR is public, so the wildcard AWS-managed ECR policy is unnecessary.
+        - PolicyName: LaunchLwsTask
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
               - Effect: Allow
                 Action:
                   - secretsmanager:GetSecretValue
-                # Scoped to only the secrets this stack uses — no wildcard (R5)
-                Resource:
-                  - !Ref SolidTrustedIssuerSecretArn
-                  - !If
-                    - HasRedisSecretArn
-                    - !Ref RedisReplaySecretArn
-                    - !Ref AWS::NoValue
+                Resource: !Ref SolidTrustedIssuerSecretArn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroup}:log-stream:*
 
   # -------------------------------------------------------------------------
   # IAM: Task Role (R5)
@@ -375,7 +395,6 @@ Resources:
   TaskRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${AWS::StackName}-task-role"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -383,16 +402,12 @@ Resources:
             Principal:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
-      Policies:
-        - PolicyName: WriteCloudWatchLogs
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: !GetAtt LogGroup.Arn
+            # [GPT-5.6] The application gets no AWS API permissions; trust is account-scoped.
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
 
   # -------------------------------------------------------------------------
   # ECS Cluster
@@ -425,6 +440,11 @@ Resources:
           Essential: true
           ReadonlyRootFilesystem: true
           # Non-root: the image runs as nonroot (R8). Do not override.
+          # [GPT-5.6] The service needs no Linux capabilities.
+          LinuxParameters:
+            Capabilities:
+              Drop:
+                - ALL
           PortMappings:
             - ContainerPort: 3000
               Protocol: tcp
@@ -433,11 +453,6 @@ Resources:
           Secrets:
             - Name: SOLID_SERVER_TRUSTED_ISSUER
               ValueFrom: !Ref SolidTrustedIssuerSecretArn
-            - !If
-              - HasRedisSecretArn
-              - Name: SOLID_SERVER_REPLAY_REDIS_URL
-                ValueFrom: !Ref RedisReplaySecretArn
-              - !Ref AWS::NoValue
           Environment:
             # Required: public HTTPS base URL known at boot.
             - Name: SOLID_SERVER_BASE_URL
@@ -448,10 +463,6 @@ Resources:
             # Bind on all interfaces inside the container.
             - Name: SOLID_SERVER_BIND
               Value: "0.0.0.0:3000"
-            # Redis URL (plain, non-secret) — only if HasRedisUrl and NOT HasRedisSecretArn.
-            # If HasRedisSecretArn, the secret is injected via Secrets above; this is empty.
-            - Name: SOLID_SERVER_REPLAY_REDIS_URL
-              Value: !If [HasRedisUrl, !Ref RedisReplayUrl, ""]
             # BIDIRECTIONAL strict check is the default in the image; make it explicit.
             - Name: SOLID_SERVER_BIDIRECTIONAL
               Value: "strict"
@@ -466,19 +477,8 @@ Resources:
               awslogs-group: !Ref LogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: sparq-lws
-          # R7: /livez = liveness (process up), /readyz = readiness (ready to serve).
-          # The ALB target group uses /readyz (503 = not ready → deregister).
-          # The ECS health check uses /livez (liveness only — replaces crashed tasks).
-          # Both paths are mounted outside the auth gate in the LWS server.
-          HealthCheck:
-            Command:
-              - CMD
-              - /sparq-lws-core
-              - --health-probe
-            Interval: 30
-            Timeout: 5
-            Retries: 3
-            StartPeriod: 20
+          # [GPT-5.6] Do not invent a local --health-probe command: the LWS image contract
+          # exposes HTTP /livez and /readyz only. ECS uses the ALB readiness check below.
 
   # -------------------------------------------------------------------------
   # Application Load Balancer (HTTPS-only, R3)
@@ -486,7 +486,6 @@ Resources:
   ALB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      Name: !Sub "${AWS::StackName}-alb"
       Type: application
       Scheme: internet-facing
       Subnets:
@@ -505,14 +504,13 @@ Resources:
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Sub "${AWS::StackName}-tg"
       VpcId: !Ref VPC
       Protocol: HTTP
       Port: 3000
       TargetType: ip
       HealthCheckEnabled: true
       HealthCheckProtocol: HTTP
-      HealthCheckPath: /readyz
+      HealthCheckPath: !Ref HealthCheckPath
       HealthCheckIntervalSeconds: 30
       HealthCheckTimeoutSeconds: 5
       HealthyThresholdCount: 2
@@ -536,19 +534,6 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup
 
-  HttpListener:
-    Type: AWS::ElasticLoadBalancingV2::Listener
-    Properties:
-      LoadBalancerArn: !Ref ALB
-      Port: 80
-      Protocol: HTTP
-      DefaultActions:
-        - Type: redirect
-          RedirectConfig:
-            Protocol: HTTPS
-            Port: "443"
-            StatusCode: HTTP_301
-
   # -------------------------------------------------------------------------
   # ECS Service
   # -------------------------------------------------------------------------
@@ -556,7 +541,7 @@ Resources:
     Type: AWS::ECS::Service
     DependsOn:
       - HttpsListener
-      - HttpListener
+      - TaskIngressFromAlb
     Properties:
       ServiceName: !Sub "${AWS::StackName}-service"
       Cluster: !Ref Cluster

@@ -12,8 +12,7 @@
 #   - ALB + ACM (HTTPS only): TLS terminated at ALB; task SG accepts traffic only from ALB SG (R6).
 #   - Secrets Manager (ValueFrom): token never touches CloudFormation parameter plaintext (R4).
 #   - Dedicated TaskRole + ExecutionRole (least-privilege): policies scoped to own resources (R5).
-#   - A VPC is created by this template for simplicity; supply an existing VPC ID via parameter
-#     if you have one. Two public subnets (ALB) + two private subnets (task) are created.
+#   - [GPT-5.6] A dedicated VPC is created with two public ALB subnets and two private task subnets.
 #   - Default desired count = 1 (single-instance; dataset is in-memory/local volume).
 #   - ACM cert ARN is a required parameter — no self-signed cert is provisioned (R3).
 #
@@ -27,7 +26,7 @@
 #        aws cloudformation create-stack \
 #          --stack-name sparq-server \
 #          --template-body file://sparq-server.yaml \
-#          --capabilities CAPABILITY_NAMED_IAM \
+#          --capabilities CAPABILITY_IAM \
 #          --parameters \
 #            ParameterKey=AuthTokenSecretArn,ParameterValue=arn:aws:secretsmanager:... \
 #            ParameterKey=AcmCertificateArn,ParameterValue=arn:aws:acm:...
@@ -89,11 +88,18 @@ Parameters:
     Type: Number
     Default: 1
     MinValue: 1
-    MaxValue: 10
+    MaxValue: 1
     Description: >
-      Number of running Fargate tasks. Note: the dataset is stored per-task (in-memory or
-      local volume). For shared persistent data, mount an EFS volume (future work). Keep
-      this at 1 for a single-writer dataset or read-replica scenario.
+      [GPT-5.6] Number of running Fargate tasks, fixed at one because this template uses
+      task-local storage. Scaling independent writable graphs would return inconsistent data.
+
+  # [GPT-5.6] R7 requires a per-server, overridable platform health path.
+  HealthCheckPath:
+    Type: String
+    Default: "/health"
+    AllowedPattern: "^/[-A-Za-z0-9._~/%]*$"
+    ConstraintDescription: Must be an absolute HTTP path.
+    Description: ALB health-check path. The canonical sparq-server image serves /health.
 
   # Read-gate: also require the token for reads (set "1" to enforce).
   AuthTokenRead:
@@ -133,6 +139,28 @@ Parameters:
 Conditions:
   EnableAuthRead: !Equals [!Ref AuthTokenRead, "1"]
   HasCorsOrigin: !Not [!Equals [!Ref CorsAllowOrigin, ""]]
+
+# [GPT-5.6] Reject CPU/memory pairs that ECS Fargate cannot register.
+Rules:
+  ValidFargateTaskSize:
+    Assertions:
+      - Assert: !Or
+          - !And
+            - !Equals [!Ref TaskCpu, 256]
+            - !Contains [[512, 1024, 2048], !Ref TaskMemory]
+          - !And
+            - !Equals [!Ref TaskCpu, 512]
+            - !Contains [[1024, 2048, 4096], !Ref TaskMemory]
+          - !And
+            - !Equals [!Ref TaskCpu, 1024]
+            - !Contains [[2048, 4096, 8192], !Ref TaskMemory]
+          - !And
+            - !Equals [!Ref TaskCpu, 2048]
+            - !Contains [[4096, 8192, 16384], !Ref TaskMemory]
+          - !And
+            - !Equals [!Ref TaskCpu, 4096]
+            - !Contains [[8192, 16384], !Ref TaskMemory]
+        AssertDescription: Select a CPU and memory combination supported by ECS Fargate.
 
 # ---------------------------------------------------------------------------
 # Resources
@@ -298,11 +326,13 @@ Resources:
           ToPort: 443
           CidrIp: "0.0.0.0/0"
           Description: "HTTPS from internet"
+      # [GPT-5.6] Prevent EC2's implicit allow-all egress; the ALB reaches only this task SG.
+      SecurityGroupEgress:
         - IpProtocol: tcp
-          FromPort: 443
-          ToPort: 443
-          CidrIpv6: "::/0"
-          Description: "HTTPS from internet (IPv6)"
+          FromPort: 3030
+          ToPort: 3030
+          DestinationSecurityGroupId: !Ref TaskSecurityGroup
+          Description: "HTTP to sparq-server tasks only"
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-alb-sg"
@@ -313,24 +343,27 @@ Resources:
     Properties:
       GroupDescription: "sparq-server task: inbound port 3030 from ALB SG only"
       VpcId: !Ref VPC
-      SecurityGroupIngress:
+      # [GPT-5.6] HTTPS-only egress covers GHCR, Secrets Manager, and CloudWatch via NAT.
+      SecurityGroupEgress:
         - IpProtocol: tcp
-          FromPort: 3030
-          ToPort: 3030
-          SourceSecurityGroupId: !Ref AlbSecurityGroup
-          Description: "sparq-server port from ALB only"
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+          Description: "HTTPS dependencies via NAT"
       Tags:
         - Key: Name
           Value: !Sub "${AWS::StackName}-task-sg"
 
-  # Egress: allow tasks to reach GHCR (image pull via NAT) and Secrets Manager (VPC endpoint if present)
-  TaskEgressAll:
-    Type: AWS::EC2::SecurityGroupEgress
+  # [GPT-5.6] Standalone rule avoids a circular SG dependency while restricting task ingress to ALB.
+  TaskIngressFromAlb:
+    Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !Ref TaskSecurityGroup
-      IpProtocol: "-1"
-      CidrIp: "0.0.0.0/0"
-      Description: "Outbound for image pull + Secrets Manager + CloudWatch"
+      IpProtocol: tcp
+      FromPort: 3030
+      ToPort: 3030
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Description: "sparq-server port from ALB only"
 
   # -------------------------------------------------------------------------
   # CloudWatch Logs
@@ -342,12 +375,11 @@ Resources:
       RetentionInDays: 30
 
   # -------------------------------------------------------------------------
-  # IAM: Execution Role (ECS pulls image + reads secrets) — R5
+  # [GPT-5.6] IAM execution role: inject the secret and write logs; public GHCR needs no IAM pull grant.
   # -------------------------------------------------------------------------
   ExecutionRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${AWS::StackName}-execution-role"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -355,11 +387,15 @@ Resources:
             Principal:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
-      ManagedPolicyArns:
-        # Required for ECS to pull images from ECR / GHCR and write logs
-        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+            # [GPT-5.6] Bind ECS assumptions to this account to mitigate confused-deputy use.
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
       Policies:
-        - PolicyName: ReadAuthTokenSecret
+        # [GPT-5.6] GHCR is public, so the wildcard AWS-managed ECR policy is unnecessary.
+        - PolicyName: LaunchSparqTask
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
@@ -368,6 +404,12 @@ Resources:
                   - secretsmanager:GetSecretValue
                 # Scoped to ONLY this stack's secret — no wildcard (R5)
                 Resource: !Ref AuthTokenSecretArn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroup}:log-stream:*
 
   # -------------------------------------------------------------------------
   # IAM: Task Role (the running container's identity) — R5
@@ -375,7 +417,6 @@ Resources:
   TaskRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Sub "${AWS::StackName}-task-role"
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -383,19 +424,12 @@ Resources:
             Principal:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
-      Policies:
-        - PolicyName: WriteCloudWatchLogs
-          PolicyDocument:
-            Version: "2012-10-17"
-            Statement:
-              - Effect: Allow
-                Action:
-                  - logs:CreateLogStream
-                  - logs:PutLogEvents
-                Resource: !GetAtt LogGroup.Arn
-      # No additional permissions: the running container only needs to write logs.
-      # It does NOT need access to Secrets Manager at runtime (the execution role
-      # injects the secret value at task launch via ValueFrom — it is never runtime-fetched).
+            # [GPT-5.6] The application gets no AWS API permissions; trust is account-scoped.
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
 
   # -------------------------------------------------------------------------
   # ECS Cluster
@@ -422,6 +456,9 @@ Resources:
         - FARGATE
       ExecutionRoleArn: !GetAtt ExecutionRole.Arn
       TaskRoleArn: !GetAtt TaskRole.Arn
+      # [GPT-5.6] Keep /data writable while the container root filesystem stays read-only (R8).
+      Volumes:
+        - Name: data
       ContainerDefinitions:
         - Name: sparq-server
           Image: !Ref ImageRef
@@ -429,9 +466,18 @@ Resources:
           ReadonlyRootFilesystem: true
           # Non-root: the distroless image already runs as nonroot (uid 65532). (R8)
           # Do NOT add privileged: true or user: root.
+          # [GPT-5.6] The service needs no Linux capabilities.
+          LinuxParameters:
+            Capabilities:
+              Drop:
+                - ALL
           PortMappings:
             - ContainerPort: 3030
               Protocol: tcp
+          MountPoints:
+            - SourceVolume: data
+              ContainerPath: /data
+              ReadOnly: false
           # R1/R4: SPARQ_AUTH_TOKEN is NEVER a literal — always injected from Secrets Manager.
           Secrets:
             - Name: SPARQ_AUTH_TOKEN
@@ -468,7 +514,7 @@ Resources:
           HealthCheck:
             Command:
               - CMD
-              - /sparq-server
+              - /usr/local/bin/sparq-server
               - --health-probe
             Interval: 30
             Timeout: 5
@@ -481,7 +527,6 @@ Resources:
   ALB:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      Name: !Sub "${AWS::StackName}-alb"
       Type: application
       Scheme: internet-facing
       Subnets:
@@ -500,7 +545,6 @@ Resources:
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
-      Name: !Sub "${AWS::StackName}-tg"
       VpcId: !Ref VPC
       Protocol: HTTP
       Port: 3030
@@ -508,7 +552,7 @@ Resources:
       # R7: health check on /health, expects "ok" (200)
       HealthCheckEnabled: true
       HealthCheckProtocol: HTTP
-      HealthCheckPath: /health
+      HealthCheckPath: !Ref HealthCheckPath
       HealthCheckIntervalSeconds: 30
       HealthCheckTimeoutSeconds: 5
       HealthyThresholdCount: 2
@@ -533,20 +577,6 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup
 
-  # HTTP→HTTPS redirect (R3: no plaintext Bearer token in transit)
-  HttpListener:
-    Type: AWS::ElasticLoadBalancingV2::Listener
-    Properties:
-      LoadBalancerArn: !Ref ALB
-      Port: 80
-      Protocol: HTTP
-      DefaultActions:
-        - Type: redirect
-          RedirectConfig:
-            Protocol: HTTPS
-            Port: "443"
-            StatusCode: HTTP_301
-
   # -------------------------------------------------------------------------
   # ECS Service
   # -------------------------------------------------------------------------
@@ -554,7 +584,7 @@ Resources:
     Type: AWS::ECS::Service
     DependsOn:
       - HttpsListener
-      - HttpListener
+      - TaskIngressFromAlb
     Properties:
       ServiceName: !Sub "${AWS::StackName}-service"
       Cluster: !Ref Cluster
@@ -609,10 +639,6 @@ Outputs:
     Value: !GetAtt Service.Name
     Export:
       Name: !Sub "${AWS::StackName}-ServiceName"
-
-  SparqlEndpoint:
-    Description: "SPARQL 1.1 Protocol endpoint (requires Authorization: Bearer <token> header)."
-    Value: !Sub "https://${ALB.DNSName}/sparql"
 
   LogGroupName:
     Description: CloudWatch log group for sparq-server container logs.
