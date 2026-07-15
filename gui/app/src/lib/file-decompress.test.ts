@@ -10,7 +10,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { gzipSync } from "node:zlib";
 
-import { maybeDecompressFile } from "./file-decompress.js";
+import { fetchRdfDocument, maybeDecompressFile } from "./file-decompress.js";
+import { formatFromContentType, guessFormat } from "./rdf-format.js";
 
 // ── Sample RDF content ────────────────────────────────────────────────────────────────────────
 
@@ -96,4 +97,46 @@ test("[SONNET-4.6] sq-1y04h: gzip by magic bytes (file named .nt but gzip-compre
 
   assert.strictEqual(result.wasDecompressed, true, "magic-bytes probe must detect gzip regardless of extension");
   assert.strictEqual(result.text, SAMPLE_NT, "decompressed text must match original");
+});
+
+test("[GPT-5.6] sq-n18o5: compressed URL is fetched as binary and decompressed before format detection", async () => {
+  const compressed = gzipSync(Buffer.from(SAMPLE_NT, "utf8"));
+  let arrayBufferCalls = 0;
+
+  // [GPT-5.6] The response deliberately has no text() method: a regression to text-first fetch
+  // fails instead of silently feeding corrupted compressed bytes to the RDF parser.
+  const document = await fetchRdfDocument(
+    "https://example.org/dataset.nt.gz?download=1",
+    async (url) => {
+      assert.strictEqual(url, "https://example.org/dataset.nt.gz?download=1");
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        headers: new Headers({ "content-type": "application/gzip" }),
+        arrayBuffer: async () => {
+          arrayBufferCalls += 1;
+          return compressed.buffer.slice(
+            compressed.byteOffset,
+            compressed.byteOffset + compressed.byteLength,
+          ) as ArrayBuffer;
+        },
+      };
+    },
+  );
+
+  assert.strictEqual(arrayBufferCalls, 1, "the URL response must be consumed exactly once as binary");
+  assert.strictEqual(document.wasDecompressed, true);
+  assert.strictEqual(document.codec, "gzip");
+  assert.strictEqual(document.text, SAMPLE_NT, "URL decompression must recover the exact RDF text");
+  assert.notStrictEqual(
+    new TextDecoder("utf-8", { fatal: false }).decode(compressed),
+    document.text,
+    "mutation check: decoding the fetched archive without decompression must produce different text",
+  );
+  assert.strictEqual(
+    formatFromContentType(document.contentType) ?? guessFormat(document.effectiveName),
+    "ntriples",
+    "the decompressed inner .nt name must select N-Triples before RDF parse",
+  );
 });

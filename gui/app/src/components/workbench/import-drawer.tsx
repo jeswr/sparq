@@ -18,6 +18,10 @@
 //   drawer no longer tells web users "compressed files need the desktop app" for these four
 //   formats. Native-only HDT still requires the desktop (no JS/WASM bead for it).
 //
+// [GPT-5.6] sq-n18o5 — the URL tab now fetches response bytes with `arrayBuffer()` and sends
+//   them through that same decompression path before RDF parsing. Format detection uses the
+//   served RDF Content-Type when available, otherwise the decompressed archive's inner name.
+//
 // Three tabs:
 //   * FILE  — web: browser File upload (incl. compressed .gz/.zip/.zst/.bz2); desktop: native
 //             loader (every format incl. HDT), off the main thread.
@@ -57,7 +61,7 @@ import { hasNativeLoader, pickRdfFile } from "@/lib/tauri-ipc";
 import { hasDraggedFiles } from "@/lib/file-ingest";
 import type { IngestedFile, RejectedFile, IngestResult } from "@/lib/file-ingest";
 // [SONNET-4.6] sq-1y04h — decompression shim; codec chunks loaded lazily on demand.
-import { maybeDecompressFile } from "@/lib/file-decompress";
+import { fetchRdfDocument, maybeDecompressFile } from "@/lib/file-decompress";
 import type { WorkspaceSourceMeta } from "@sparq/client";
 
 // ── Open-state context (so the rail / top bar / Cmd-K can open the drawer) ─────────────────────
@@ -346,18 +350,17 @@ function ImportDrawer({
     const target = url.trim();
     if (!target) return;
     void finishImport("url", async () => {
-      const res = await fetch(target);
-      if (!res.ok) throw new Error(`Fetch failed: HTTP ${res.status} ${res.statusText}`);
-      const body = await res.text();
+      // [GPT-5.6] sq-n18o5 — keep compressed response bytes intact until after codec detection.
+      const document = await fetchRdfDocument(target);
       const format =
-        formatFromContentType(res.headers.get("content-type")) ?? guessFormat(target);
+        formatFromContentType(document.contentType) ?? guessFormat(document.effectiveName);
       const result = await importRdf({
         kind: "url",
         mode,
         preserveGraphs,
         label: urlLabel(target),
         format,
-        text: body,
+        text: document.text,
         url: target,
       });
       const source: WorkspaceSourceMeta = {
@@ -964,9 +967,9 @@ function UrlPane({ url, onUrl }: { url: string; onUrl: (v: string) => void }) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        Fetch an RDF document from a URL and load it into the store. The source is recorded as a
-        re-fetchable workspace source. The format is auto-detected from the served{" "}
-        <code>Content-Type</code> (or the URL extension).
+        Fetch an RDF document, including a compressed archive, from a URL and load it into the
+        store. The source is recorded as a re-fetchable workspace source. The format is
+        auto-detected from the served <code>Content-Type</code> (or the inner file extension).
       </p>
       <input
         type="url"
