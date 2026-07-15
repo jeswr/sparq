@@ -1,0 +1,72 @@
+# [SONNET-4.6] sq-dwame — Fly.io app config for sparq-lws-core (Solid/LWS server).
+#
+# DEPENDENCY NOTE: the sparq-lws-core image is built by bead sq-lmz40 and will be
+# published to ghcr.io/sparq-org/sparq-lws-core. Until sq-lmz40 is merged and the image
+# is published, this config references the canonical image ref from the design record but
+# the image will not yet be pullable. Decision (per bead brief): ship this config now so
+# the sparq-server path is unblocked; the LWS path activates once sq-lmz40 ships.
+#
+# SECURE-DEFAULTS NOTICE (R9):
+# The sparq-lws-core image is fail-closed by design — anonymous mutation is rejected,
+# DPoP is required, HTTPS-only WebIDs. No auth token is needed at the template layer
+# (unlike sparq-server). However, SOLID_SERVER_TRUSTED_ISSUER and SOLID_SERVER_BASE_URL
+# are REQUIRED for any real deployment (the server cannot self-issue an OIDC IdP).
+#
+# Auto-HTTPS (R4): Fly.io terminates TLS on its shared *.fly.dev domain and on custom
+# domains. The SOLID_SERVER_BASE_URL MUST match your public HTTPS URL.
+#
+# Multi-instance note: LWS uses an in-memory DPoP jti replay store by default.
+# For >1 replica, set SOLID_SERVER_REPLAY_REDIS_URL (with the redis-replay feature).
+# Single-instance deployments are safe without Redis.
+
+app = "sparq-lws"             # override with: fly apps create --name <your-app>
+primary_region = "iad"        # US East; change to the region nearest your users
+
+[build]
+  image = "ghcr.io/sparq-org/sparq-lws-core:latest"
+  # Pin to a specific release tag in production:
+  #   image = "ghcr.io/sparq-org/sparq-lws-core:0.1.0"
+
+[env]
+  # REQUIRED: set these to your actual public deployment URLs.
+  # Alternatively, set via: fly secrets set SOLID_SERVER_BASE_URL="https://…"
+  #
+  # SOLID_SERVER_BASE_URL        = "https://sparq-lws.fly.dev"
+  # SOLID_SERVER_TRUSTED_ISSUER  = "https://your-oidc-provider.example.com"
+  # SOLID_SERVER_AUDIENCE        = "https://sparq-lws.fly.dev"  # defaults to BASE_URL
+  #
+  # Optional scale-out (for >1 replica — requires redis-replay feature):
+  # SOLID_SERVER_REPLAY_REDIS_URL = "redis://..."
+  #
+  # DEV-ONLY escape hatches — NEVER uncomment in production (R2):
+  # SOLID_SERVER_ALLOW_LOOPBACK        = "1"   # dev only
+  # SOLID_SERVER_SEED_CONFORMANCE      = "1"   # IT/conformance only
+  # SOLID_SERVER_ALLOW_SEED_NONMEMORY  = "1"   # dev only
+
+[http_service]
+  internal_port       = 3000
+  force_https         = true   # R4: redirect plain HTTP to HTTPS at the Fly edge
+  auto_stop_machines  = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[http_service.checks]]
+    # R7: readiness health-check path for sparq-lws-core.
+    # /readyz returns 503 when not ready (e.g. storage not initialised); /livez for liveness.
+    grace_period    = "15s"
+    interval        = "15s"
+    method          = "GET"
+    path            = "/readyz"
+    timeout         = "5s"
+    tls_skip_verify = false
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+# Secret setup (R4 — required before first deploy):
+#   fly secrets set SOLID_SERVER_BASE_URL="https://sparq-lws.fly.dev"
+#   fly secrets set SOLID_SERVER_TRUSTED_ISSUER="https://your-oidc-provider.example.com"
+#
+# These are injected at runtime and are NEVER stored in this file.
