@@ -38,6 +38,8 @@ const TIER_LEGEND: { tier: Tier; note: string }[] = [
   { tier: "live-bbjs", note: "in-tab proving via the 3rd-party bb.js UltraHonk prover" },
   { tier: "live-sim", note: "a faithful in-tab JS simulation of a native protocol" },
   { tier: "hosted", note: "a small hosted sparq-server where a wasm rebuild is uneconomic" },
+  // [GPT-5.6] sq-vw3ax.15 — the dot used by built opt-in crates has an explicit legend.
+  { tier: "native", note: "a built, opt-in Rust crate with code and docs linked from this site" },
   { tier: "walkthrough", note: "real, captured engine output replayed (native-only surface)" },
 ];
 

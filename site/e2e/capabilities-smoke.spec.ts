@@ -32,6 +32,46 @@ const THEMES = [
   "Serve & embed",
 ];
 
+// [GPT-5.6] sq-vw3ax.15 — exact native-row contract. Mutating a title, snippet, or link makes
+// this smoke fail, so the coverage is non-vacuous and guards the content the bead added.
+const NATIVE_ROWS = [
+  {
+    slug: "graph-analytics",
+    title: "Graph analytics",
+    snippet: "let ranks = sparq_algos::pagerank(&graph, Default::default());",
+    readme: "https://github.com/jeswr/sparq/tree/main/crates/sparq-algos",
+    skill: "https://github.com/jeswr/sparq/blob/main/skills/graph-analytics/SKILL.md",
+  },
+  {
+    slug: "rdf-canon",
+    title: "RDFC-1.0 canonicalization",
+    snippet: "let canonical = sparq_canon::canonicalize(&quads)?;",
+    readme: "https://github.com/jeswr/sparq/tree/main/crates/sparq-canon",
+    skill: "https://github.com/jeswr/sparq/blob/main/skills/rdf-canon/SKILL.md",
+  },
+  {
+    slug: "arrow-columnar",
+    title: "Arrow export",
+    snippet: "let batch = sparq_arrow::to_record_batch(&result)?;",
+    readme: "https://github.com/jeswr/sparq/tree/main/crates/sparq-arrow",
+    skill: "https://github.com/jeswr/sparq/blob/main/skills/arrow-columnar/SKILL.md",
+  },
+  {
+    slug: "prov-lineage",
+    title: "PROV-O lineage",
+    snippet: "let derivation = sparq_prov::derive_construct(&graph, query, config)?;",
+    readme: "https://github.com/jeswr/sparq/tree/main/crates/sparq-prov",
+    skill: "https://github.com/jeswr/sparq/blob/main/skills/prov-lineage/SKILL.md",
+  },
+  {
+    slug: "mcp-server",
+    title: "MCP server",
+    snippet: "let mut server = sparq_mcp::McpServer::new(graph);",
+    readme: "https://github.com/jeswr/sparq/tree/main/crates/sparq-mcp",
+    skill: "https://github.com/jeswr/sparq/blob/main/skills/agent-tools/SKILL.md",
+  },
+] as const;
+
 /** Collect every `console.error` the page emits, so the test can assert there were none. */
 function trackConsoleErrors(page: Page): string[] {
   const errors: string[] = [];
@@ -73,6 +113,24 @@ test("the showcase renders its hero, flagship band and all five theme sections w
   // theme fails this loudly — the showcase's load-bearing structural invariant.
   for (const theme of THEMES) {
     await expect(page.getByRole("heading", { name: theme })).toBeVisible();
+  }
+
+  // Every newly surfaced native crate renders as a real row with the native honesty badge,
+  // its exact API line, and both working deep-link targets.
+  for (const expected of NATIVE_ROWS) {
+    const row = page.locator(`[data-capability="${expected.slug}"]`);
+    await expect(row).toBeVisible();
+    await expect(row.getByText(expected.title, { exact: true })).toBeVisible();
+    await expect(row.getByText("Native crate", { exact: true })).toBeVisible();
+    await expect(row.locator("code")).toHaveText(expected.snippet);
+    await expect(row.getByRole("link", { name: /Crate \/ source/i })).toHaveAttribute(
+      "href",
+      expected.readme,
+    );
+    await expect(row.getByRole("link", { name: /SKILL\.md/i })).toHaveAttribute(
+      "href",
+      expected.skill,
+    );
   }
 
   // No demo BODY is eagerly mounted on entry (the lazy-mount invariant is fully owned by
