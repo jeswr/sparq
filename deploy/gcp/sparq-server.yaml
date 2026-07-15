@@ -1,0 +1,130 @@
+# [SONNET-4.6] sq-agolp — GCP Cloud Run service spec: sparq-server.
+#
+# SECURE-DEFAULTS NOTICE (R1/R9):
+# The sparq-server image is open-by-default at the image layer (bakes SPARQ_ALLOW_REMOTE=1,
+# no auth). Anyone reaching the published port can read AND write the dataset.
+# This spec enforces auth ON at the template layer:
+#   - SPARQ_AUTH_TOKEN is injected from GCP Secret Manager (secretKeyRef) — never a literal.
+#   - Do NOT remove the Secret Manager wiring. Do NOT set a default token value here.
+#
+# PREREQUISITES:
+#   1. Enable Cloud Run + Secret Manager APIs:
+#        gcloud services enable run.googleapis.com secretmanager.googleapis.com
+#
+#   2. Create the auth token secret:
+#        echo -n "$(openssl rand -hex 32)" | \
+#          gcloud secrets create sparq-auth-token \
+#            --replication-policy=automatic \
+#            --data-file=-
+#
+#   3. Create a dedicated runtime service account (least-privilege, R5):
+#        gcloud iam service-accounts create sparq-server-sa \
+#          --display-name="sparq-server Cloud Run runtime SA"
+#
+#        gcloud secrets add-iam-policy-binding sparq-auth-token \
+#          --member="serviceAccount:sparq-server-sa@PROJECT_ID.iam.gserviceaccount.com" \
+#          --role="roles/secretmanager.secretAccessor"
+#
+#   4. Deploy (replace PROJECT_ID and REGION):
+#        gcloud run services replace deploy/gcp/sparq-server.yaml \
+#          --region REGION
+#
+#      Or use the one-liner in deploy/gcp/README.md.
+#
+# DECISIONS (sq-agolp):
+#   - Cloud Run (fully managed): automatic HTTPS on run.app, no VPC/firewall config needed (R3).
+#   - Secret Manager secretKeyRef: token is never in the YAML or env-var plaintext (R4).
+#   - Dedicated service account sparq-server-sa with secretAccessor on own secret only (R5).
+#   - min-instances: 1 to avoid cold-start on health-probe path (R7 + bead acceptance).
+#   - max-instances: 10 default (adjust to workload; reduce to 1 for single-writer datasets).
+#   - containerConcurrency: 80 (Cloud Run default; reduce for memory-heavy analytical loads).
+#   - Cloud Run ingress defaults to "all" (public). For internal-only, set ingress: internal.
+#   - SPARQ_AUTH_TOKEN_READ left commented out: read-gating is opt-in per design (R1 requires
+#     writes gated; read-gating is an operator choice).
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  # [SONNET-4.6] sq-agolp
+  name: sparq-server
+  annotations:
+    # Cloud Run region must be set at deploy time via --region flag or gcloud config;
+    # this annotation is set by Cloud Run on the returned resource — do not set it here.
+    run.googleapis.com/ingress: all
+    run.googleapis.com/description: >
+      sparq SPARQL 1.1 server (sq-agolp). Auth enforced via Secret Manager (R1/R4).
+      Secure-defaults: open-by-default image gated with token at deploy layer.
+      Do not remove the SPARQ_AUTH_TOKEN secret wiring.
+spec:
+  template:
+    metadata:
+      annotations:
+        # Min 1 instance: avoids cold-start on health-probe path; dataset stays warm.
+        autoscaling.knative.dev/minScale: "1"
+        autoscaling.knative.dev/maxScale: "10"
+    spec:
+      # Dedicated least-privilege service account (R5).
+      # Replace PROJECT_ID with your GCP project ID.
+      serviceAccountName: sparq-server-sa@PROJECT_ID.iam.gserviceaccount.com
+
+      # Each container instance handles up to 80 concurrent requests (Cloud Run default).
+      containerConcurrency: 80
+
+      # Request timeout: 300 s (matches sparq-server's default SPARQ_QUERY_TIMEOUT headroom).
+      timeoutSeconds: 300
+
+      containers:
+        - name: sparq-server
+          # Image: multi-arch (linux/amd64 + linux/arm64). Pin to a release tag in production.
+          # Replace :latest with a specific version tag (e.g. :0.5.0) for reproducible deploys.
+          image: ghcr.io/sparq-org/sparq-server:latest
+
+          ports:
+            - name: http1
+              containerPort: 3030
+
+          resources:
+            limits:
+              # 2 vCPU + 2 GiB RAM: reasonable default for analytical SPARQL workloads.
+              # Increase memory for large in-memory datasets.
+              cpu: "2"
+              memory: 2Gi
+
+          env:
+            # Auth token (R1/R4): injected from Secret Manager — never a literal value.
+            # Secret name "sparq-auth-token" must exist in the same project (see PREREQUISITES).
+            - name: SPARQ_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sparq-auth-token
+                  key: latest
+
+            # Optional: also gate read requests behind the same token.
+            # Uncomment to require Bearer auth on GET /sparql as well.
+            # - name: SPARQ_AUTH_TOKEN_READ
+            #   value: "1"
+
+            # Optional: CORS allowed origin (e.g. your frontend domain).
+            # - name: SPARQ_CORS_ALLOW_ORIGIN
+            #   value: "https://your-frontend.example.com"
+
+          # Startup probe: wait up to 30 s for the server to come up before liveness kicks in.
+          # Uses the ungated /health endpoint (returns 200 "ok" — verified in http.rs:3236).
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 3030
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 6
+            timeoutSeconds: 3
+
+          # Liveness probe: restart the container if /health stops responding.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3030
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3

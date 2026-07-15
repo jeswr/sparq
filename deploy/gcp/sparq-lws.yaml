@@ -1,0 +1,150 @@
+# [SONNET-4.6] sq-agolp — GCP Cloud Run service spec: sparq-lws-core (Solid/LWS server).
+#
+# STATUS: Activates once sq-lmz40 ships (the ghcr.io/sparq-org/sparq-lws-core image is not
+# yet published). The spec is structurally complete and schema-valid. Deploy once sq-lmz40
+# lands and the image is available at ghcr.io/sparq-org/sparq-lws-core.
+#
+# SECURE-DEFAULTS NOTICE (R2/R9):
+# The LWS server is fail-closed by design — anonymous mutation is rejected, HTTPS-only
+# WebIDs, DPoP required, strict bidirectional WebID/issuer check — all default-on.
+# This spec relies on the image's fail-closed posture. DO NOT set any of the following
+# dev-only escape hatches in a production deploy:
+#   SOLID_SERVER_ALLOW_LOOPBACK, SOLID_SERVER_SEED_CONFORMANCE,
+#   SOLID_SERVER_SEED_BENCH, SOLID_SERVER_ALLOW_SEED_NONMEMORY
+#
+# PREREQUISITES:
+#   1. Enable Cloud Run + Secret Manager APIs:
+#        gcloud services enable run.googleapis.com secretmanager.googleapis.com
+#
+#   2. Set your public HTTPS base URL and trusted OIDC issuer before deploying:
+#      These are required parameters — LWS cannot self-issue tokens and needs an
+#      external OIDC provider (see §1.3 of research/cloud-deploy-architecture.md).
+#
+#   3. Create a dedicated runtime service account (least-privilege, R5):
+#        gcloud iam service-accounts create sparq-lws-sa \
+#          --display-name="sparq-lws Cloud Run runtime SA"
+#
+#      If storing any secrets in Secret Manager for LWS (e.g. Redis URL):
+#        gcloud secrets add-iam-policy-binding <secret-name> \
+#          --member="serviceAccount:sparq-lws-sa@PROJECT_ID.iam.gserviceaccount.com" \
+#          --role="roles/secretmanager.secretAccessor"
+#
+#   4. Deploy (replace PROJECT_ID, REGION, BASE_URL, TRUSTED_ISSUER):
+#        gcloud run services replace deploy/gcp/sparq-lws.yaml \
+#          --region REGION
+#
+# DECISIONS (sq-agolp):
+#   - Cloud Run (fully managed): automatic HTTPS on run.app domain (R3). The run.app
+#     HTTPS URL is used as SOLID_SERVER_BASE_URL; set it after first deploy or use a
+#     custom domain mapped via Cloud Run domain mapping.
+#   - max-instances: 1 default. Multi-instance requires Redis DPoP replay store
+#     (SOLID_SERVER_REPLAY_REDIS_URL + redis-replay feature, §1.3 of the design record).
+#     Do NOT increase max-instances without wiring Redis first.
+#   - Dedicated service account sparq-lws-sa with minimal permissions only (R5).
+#   - Health: /livez (liveness) + /readyz (readiness) — asymmetric from sparq-server (R7).
+#   - No Secret Manager reference by default (LWS has no equivalent of SPARQ_AUTH_TOKEN;
+#     its auth is the OIDC issuer contract). Add a secretKeyRef for Redis URL if scaling.
+
+apiVersion: serving.knative.dev/v1
+kind: Service
+metadata:
+  # [SONNET-4.6] sq-agolp
+  name: sparq-lws
+  annotations:
+    run.googleapis.com/ingress: all
+    run.googleapis.com/description: >
+      sparq Solid/LWS server (sq-agolp, activates once sq-lmz40 ships). Fail-closed by
+      design: anonymous mutation rejected, DPoP required, HTTPS-only WebIDs. R2 enforced
+      at the image layer. Do not set dev-only escape hatches in production.
+spec:
+  template:
+    metadata:
+      annotations:
+        # Min 1 instance: keeps the Solid server warm; avoids cold-start on /readyz.
+        autoscaling.knative.dev/minScale: "1"
+        # Max 1 instance: DPoP replay protection requires single-instance or Redis.
+        # Increase ONLY after wiring SOLID_SERVER_REPLAY_REDIS_URL (§1.3).
+        autoscaling.knative.dev/maxScale: "1"
+    spec:
+      # Dedicated least-privilege service account (R5).
+      # Replace PROJECT_ID with your GCP project ID.
+      serviceAccountName: sparq-lws-sa@PROJECT_ID.iam.gserviceaccount.com
+
+      containerConcurrency: 80
+      timeoutSeconds: 300
+
+      containers:
+        - name: sparq-lws
+          # Image: activates once sq-lmz40 ships.
+          # Replace :latest with a specific release tag in production.
+          image: ghcr.io/sparq-org/sparq-lws-core:latest
+
+          ports:
+            - name: http1
+              containerPort: 3000
+
+          resources:
+            limits:
+              cpu: "2"
+              memory: 2Gi
+
+          env:
+            # Required: public HTTPS base URL for this Solid server.
+            # After first deploy, Cloud Run assigns a run.app URL; use that here, or
+            # configure a custom domain and use the custom domain URL.
+            # Replace https://your-lws-domain.example.com with your actual public URL.
+            - name: SOLID_SERVER_BASE_URL
+              value: "https://your-lws-domain.example.com"
+
+            # Required: trusted OIDC issuer (external IdP). LWS cannot self-issue tokens.
+            # Example: a public Solid-OIDC provider. Replace with your actual IdP URL.
+            - name: SOLID_SERVER_TRUSTED_ISSUER
+              value: "https://your-oidc-provider.example.com"
+
+            # Optional: override the audience claim (defaults to SOLID_SERVER_BASE_URL).
+            # - name: SOLID_SERVER_AUDIENCE
+            #   value: "https://your-lws-domain.example.com"
+
+            # Optional: Redis URL for DPoP replay store across multiple instances.
+            # Required if max-instances > 1. Use Secret Manager secretKeyRef for the URL.
+            # - name: SOLID_SERVER_REPLAY_REDIS_URL
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: sparq-lws-redis-url
+            #       key: latest
+
+            # NEVER set in production (dev-only escape hatches — R2):
+            # SOLID_SERVER_ALLOW_LOOPBACK, SOLID_SERVER_SEED_CONFORMANCE,
+            # SOLID_SERVER_SEED_BENCH, SOLID_SERVER_ALLOW_SEED_NONMEMORY
+
+          # Startup probe: uses /livez (process-up check, ungated — verified in app.rs:56).
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 6
+            timeoutSeconds: 3
+
+          # Liveness probe: /livez — restarts if the process is unresponsive.
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 3000
+            initialDelaySeconds: 0
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+
+          # Readiness probe: /readyz — keeps traffic away until the server is configured.
+          # Cloud Run uses the liveness probe for traffic routing; readyz is advisory here
+          # but is the correct path (503 = not ready per design record §1.2).
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
