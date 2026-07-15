@@ -31,6 +31,71 @@ module docs on `src/main.rs`. `SOLID_SERVER_RECONCILE_INTERVAL_SECS` is unset by
 default; a positive integer enables one periodic sweep using the unchanged
 one-hour orphan grace period. Invalid or zero values fail boot.
 
+## 📦 Native container image
+
+<!-- [GPT-5.6] sq-lmz40: native image contract; distinct from the wasm/npm development host. -->
+
+Release tags publish `ghcr.io/sparq-org/sparq-lws-core` as a multi-architecture
+image for `linux/amd64` and `linux/arm64`. Use an immutable `X.Y.Z` tag in a
+deployment; releases also publish `X.Y` and `latest` convenience tags.
+
+```bash
+VERSION=0.1.0 # replace with the release to deploy
+IMAGE="ghcr.io/sparq-org/sparq-lws-core:${VERSION}"
+docker pull "${IMAGE}"
+
+# Example with TLS terminated by a trusted reverse proxy.
+docker run --rm --name sparq-lws-core \
+  -p 127.0.0.1:3000:3000 \
+  -e SOLID_SERVER_BASE_URL=https://solid.example \
+  -e SOLID_SERVER_TRUSTED_ISSUER=https://idp.example/realms/solid \
+  -e SOLID_SERVER_AUDIENCE=https://solid.example \
+  "${IMAGE}"
+```
+
+The image binds `0.0.0.0:3000` through `SOLID_SERVER_BIND` and runs as uid/gid
+65532. `GET /livez` and `GET /readyz` are the unauthenticated liveness and
+readiness probes. All other `SOLID_SERVER_*` / `PSS_*` settings pass through to
+the binary; the image enables no auth bypass or development escape hatch.
+
+### Required production configuration
+
+- **Public base URL:** set `SOLID_SERVER_BASE_URL` to the externally visible
+  `https://` origin. Set `SOLID_SERVER_AUDIENCE` when token audience differs;
+  otherwise it defaults to the base URL.
+- **TLS:** either terminate TLS at a trusted ingress/reverse proxy, or mount
+  readable PEM files and set both `SOLID_SERVER_TLS_CERT` and
+  `SOLID_SERVER_TLS_KEY`. Setting only one fails boot. Keep the container port
+  private when TLS terminates upstream.
+- **Authentication and authorization:** set `SOLID_SERVER_TRUSTED_ISSUER` to
+  the production HTTPS Solid-OIDC issuer. DPoP, HTTPS-only WebIDs, anonymous
+  mutation rejection, and strict bidirectional WebID-to-issuer validation are
+  secure defaults. Do not set `SOLID_SERVER_ALLOW_LOOPBACK`, the seed variables,
+  or `SOLID_SERVER_BIDIRECTIONAL=off` in production. Resource access remains
+  controlled by WAC.
+- **Storage:** explicitly review `PSS_SPARQ_BACKEND` before deployment. Its
+  default, `memory`, is ephemeral. The default-feature image also includes the
+  `embedded` backend, selected with `PSS_SPARQ_BACKEND=embedded`; without
+  `SOLID_SERVER_SPARQ_DIR` it is also ephemeral. The current native binary has
+  only an in-memory blob backend and therefore deliberately refuses a durable
+  SPARQ index paired with ephemeral resource bytes. Until a durable BlobStore
+  implementation is available, this image is not suitable for durable
+  production data. The `http` SPARQ and Redis replay backends require opt-in
+  compile-time features and are not present in this default-feature image.
+
+For in-process TLS, mount certificate material read-only and ensure uid 65532
+can read it:
+
+```bash
+docker run --rm -p 3000:3000 \
+  --mount type=bind,src="${PWD}/tls",dst=/run/tls,readonly \
+  -e SOLID_SERVER_BASE_URL=https://solid.example \
+  -e SOLID_SERVER_TRUSTED_ISSUER=https://idp.example/realms/solid \
+  -e SOLID_SERVER_TLS_CERT=/run/tls/tls.crt \
+  -e SOLID_SERVER_TLS_KEY=/run/tls/tls.key \
+  "ghcr.io/sparq-org/sparq-lws-core:${VERSION}"
+```
+
 ## ✨ Features
 
 - **LDP surface** — containers + RDF/non-RDF resources, Turtle / JSON-LD content
