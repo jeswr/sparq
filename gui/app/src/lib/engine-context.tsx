@@ -92,6 +92,12 @@ export interface GraphSummary {
   count: number;
 }
 
+/** [GPT-5.6] sq-3eukz — one subject resource selectable as a Forms focus node. */
+export interface FormResource {
+  kind: "iri" | "bnode";
+  value: string;
+}
+
 /**
  * The SELECT result the workbench renders. A streamed SELECT keeps at most {@link RunOptions.rowCap}
  * rows in JS (so a large result cannot blow the tab's memory); `truncated` records whether the
@@ -356,6 +362,23 @@ export interface EngineContextValue {
   /** True when the native loader IPC is available (inside the Tauri desktop shell). */
   nativeLoaderAvailable: boolean;
   /**
+   * [GPT-5.6] sq-3eukz — enumerate focus-node candidates from the active live store without
+   * routing an internal picker refresh through the user-visible query-run metrics.
+   */
+  listFormResources: () => FormResource[];
+  /**
+   * [GPT-5.6] sq-3eukz — invoke the optional sparq-wasm `Store.deriveForm` method against the
+   * live runtime. Returns `null` when that feature-detected method is absent; otherwise returns
+   * the host's snake_case FormDescription JSON (or throws its derivation error).
+   */
+  wasmDeriveForm: (
+    data: string,
+    shapes: string,
+    focus: string,
+    format: string,
+    optionsJson: string,
+  ) => string | null;
+  /**
    * [OPUS-4.8] sq-tp1m (#757) — the active per-workspace INFERENCE regime (query-time entailment).
    * `"off"` runs plain SPARQL; `"rdfs"` / `"owl-rl"` forward-chain the deductive closure (via the
    * real `sparq-reason` W-reason bundle) so a query matches entailed triples too. This is the
@@ -522,6 +545,11 @@ function fnv1aHash(s: string): number {
 // graphs are folded exactly as the RDFS/OWL-RL reasoner folds them).
 const ALL_TRIPLES_QUERY =
   "SELECT DISTINCT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }";
+
+// [GPT-5.6] sq-3eukz — subjects in either the default or a named graph are the live workspace's
+// focus-resource candidates. Literal objects are intentionally not candidates for SHACL focus.
+const FORM_RESOURCES_QUERY =
+  "SELECT DISTINCT ?resource WHERE { { ?resource ?p ?o } UNION { GRAPH ?g { ?resource ?p ?o } } } ORDER BY ?resource LIMIT 200";
 
 /**
  * [sq-glo5r] Serialise the whole dataset as N-TRIPLES, folding named graphs into the default
@@ -1418,6 +1446,50 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     return storeToNQuads(store);
   }, []);
 
+  // [GPT-5.6] sq-3eukz — picker resources come directly from the current store so every store
+  // epoch (including workspace hydration) can synchronously replace the candidate list.
+  const listFormResources = React.useCallback((): FormResource[] => {
+    const store = storeRef.current;
+    if (!store) return [];
+    const parsed = JSON.parse(store.query(FORM_RESOURCES_QUERY)) as SparqlResults;
+    const resources: FormResource[] = [];
+    for (const binding of parsed.results?.bindings ?? []) {
+      const term = binding["resource"];
+      if (term?.type === "uri") resources.push({ kind: "iri", value: term.value });
+      if (term?.type === "bnode") resources.push({ kind: "bnode", value: term.value });
+    }
+    return resources;
+  }, []);
+
+  // [GPT-5.6] sq-3eukz — structural feature detection keeps the GUI independently buildable
+  // until the opt-in wasm forms binding lands. Preserve the receiver when invoking wasm-bindgen.
+  const wasmDeriveForm = React.useCallback(
+    (
+      data: string,
+      shapes: string,
+      focus: string,
+      format: string,
+      optionsJson: string,
+    ): string | null => {
+      const store = storeRef.current;
+      if (!store) return null;
+      const derive = (
+        store as unknown as {
+          deriveForm?: (
+            data: string,
+            shapes: string,
+            focus: string,
+            format: string,
+            optionsJson: string,
+          ) => string;
+        }
+      ).deriveForm;
+      if (typeof derive !== "function") return null;
+      return derive.call(store, data, shapes, focus, format, optionsJson);
+    },
+    [],
+  );
+
   // [OPUS-4.8] sq-ixc3.13 — whether the native loader IPC is reachable (inside the Tauri shell).
   // Computed once on mount (the runtime never changes mid-session) so the status bar / drawer can
   // label the loader honestly without re-detecting on every render.
@@ -1450,6 +1522,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       exportStore,
       importRdf,
       nativeLoaderAvailable,
+      listFormResources,
+      wasmDeriveForm,
       snapshotStore,
       storeEpoch,
       hydrateFromSnapshot,
@@ -1477,6 +1551,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       exportStore,
       importRdf,
       nativeLoaderAvailable,
+      listFormResources,
+      wasmDeriveForm,
       snapshotStore,
       storeEpoch,
       hydrateFromSnapshot,
