@@ -877,11 +877,14 @@ resource applies an atomic modify to the addressed graph, with two body dialects
   feature-on adds NO new crate. Success → `204`. `PATCH` is a WRITE, gated by `--auth-token` like an
   UPDATE.
 
-**5b. Container (ghcr.io).** Published on every release tag (`ghcr.io/jeswr/sparq-server`,
-distroless). The image sets `SPARQ_ALLOW_REMOTE=1` so the `0.0.0.0` bind it needs (loopback
-is unreachable through Docker's port map) boots out of the box — running the container is the
-operator's explicit choice to publish a surface. **This default has NO auth.** Because every
-`SPARQ_*` var is read from the environment, secure it with `-e` (no flag wiring):
+**5b. Container (ghcr.io).** Published on every `vX.Y.Z` release tag as a distroless OCI image
+index at `ghcr.io/jeswr/sparq-server`, with `linux/amd64` and `linux/arm64` runtime images.
+[GPT-5.6] `sq-fvzi6`: each release publishes `:X.Y.Z` (pin this for reproducible deployments),
+`:X.Y` (tracks the newest patch in that minor line), and `:latest` (tracks the newest release);
+an omitted tag selects `:latest`. The image sets `SPARQ_ALLOW_REMOTE=1` so the `0.0.0.0` bind it
+needs (loopback is unreachable through Docker's port map) boots out of the box — running the
+container is the operator's explicit choice to publish a surface. **This default has NO auth.**
+Because every `SPARQ_*` var is read from the environment, secure it with `-e` (no flag wiring):
 
 ```sh
 docker run --rm -p 3030:3030 ghcr.io/jeswr/sparq-server                       # empty graph, no auth
