@@ -1,6 +1,9 @@
 {{- if .Values.ingress.enabled -}}
+{{- $annotations := omit .Values.ingress.annotations "nginx.ingress.kubernetes.io/ssl-redirect" "nginx.ingress.kubernetes.io/force-ssl-redirect" -}}
 # Ingress with TLS (R3 — TLS at the edge via cert-manager or pre-provisioned cert)
-# [OPUS-4.8] sq-0d744
+# [OPUS-4.8] sq-0d744; [GPT-5.6] TLS and ingress-nginx HTTPS redirects are mandatory.
+# R9: sparq-server is open-by-default at the image layer; this chart gates it with
+# SPARQ_AUTH_TOKEN from an existing Secret. Do not remove that wiring.
 # For cert-manager: add cert-manager.io/cluster-issuer annotation in ingress.annotations.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -9,29 +12,28 @@ metadata:
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "sparq.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
   annotations:
+    # [GPT-5.6] Do not permit values to override the HTTPS-only redirect posture.
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    {{- with $annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
 spec:
-  {{- if .Values.ingress.ingressClassName }}
-  ingressClassName: {{ .Values.ingress.ingressClassName }}
-  {{- end }}
-  {{- if and .Values.ingress.tls.enabled .Values.ingress.tls.secretName }}
+  ingressClassName: {{ .Values.ingress.ingressClassName | quote }}
   tls:
     - hosts:
         - {{ .Values.ingress.host | quote }}
-      secretName: {{ .Values.ingress.tls.secretName }}
-  {{- end }}
+      secretName: {{ .Values.ingress.tls.secretName | quote }}
   rules:
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
-          - path: {{ .Values.ingress.path }}
-            pathType: {{ .Values.ingress.pathType }}
+          - path: {{ .Values.ingress.path | quote }}
+            pathType: {{ .Values.ingress.pathType | quote }}
             backend:
               service:
                 name: {{ include "sparq.fullname" . }}
                 port:
-                  number: {{ include "sparq.containerPort" . }}
+                  number: {{ include "sparq.servicePort" . }}
 {{- end }}

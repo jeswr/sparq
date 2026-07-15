@@ -1,5 +1,7 @@
 # Deployment for sparq-server or sparq-lws-core
 # [OPUS-4.8] sq-0d744 — cloud-deploy epic sq-3vjdr §3.5
+# [GPT-5.6] R9: sparq-server is open-by-default at the image layer; this chart
+# gates it with SPARQ_AUTH_TOKEN from an existing Secret. Do not remove that wiring.
 #
 # Secure-defaults enforced here:
 #   R1/R2: SPARQ_AUTH_TOKEN wired from existing k8s Secret (never inlined)
@@ -21,7 +23,9 @@ spec:
     metadata:
       labels:
         {{- include "sparq.selectorLabels" . | nindent 8 }}
-        {{- with .Values.podLabels }}
+        {{- /* [GPT-5.6] Reserved selector labels cannot be overridden by podLabels. */}}
+        {{- $podLabels := omit .Values.podLabels "app.kubernetes.io/name" "app.kubernetes.io/instance" }}
+        {{- with $podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
       {{- with .Values.podAnnotations }}
@@ -33,21 +37,42 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      serviceAccountName: {{ include "sparq.serviceAccountName" . }}
-      # R8 — pod-level security: enforce non-root + seccomp
+      serviceAccountName: {{ include "sparq.serviceAccountName" . | quote }}
+      # [GPT-5.6] R5: keep API credentials disabled even for an operator-supplied SA.
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      # [GPT-5.6] R8: required controls are chart invariants, not user-relaxable values.
       securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        runAsNonRoot: true
+        # [GPT-5.6] Distroless nonroot GID; lets supported CSI drivers make /data writable.
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: {{ .Chart.Name }}
-          image: {{ include "sparq.image" . }}
+          image: {{ include "sparq.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          # R8 — container-level: no privilege escalation, read-only rootfs, drop all caps
+          # [GPT-5.6] R8: no root, privilege escalation, writable rootfs, or capabilities.
           securityContext:
-            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
           ports:
             - name: http
               containerPort: {{ include "sparq.containerPort" . }}
               protocol: TCP
+          # [GPT-5.6] R7: startup probe prevents slow dataset loads from liveness restarts.
+          startupProbe:
+            httpGet:
+              path: {{ include "sparq.livenessPath" . }}
+              port: http
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
           # R7 — liveness probe: /health (sparq-server) or /livez (lws)
           livenessProbe:
             httpGet:
@@ -74,8 +99,8 @@ spec:
             - name: SPARQ_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
-                  name: {{ .Values.auth.existingSecret }}
-                  key: {{ .Values.auth.tokenKey }}
+                  name: {{ .Values.auth.existingSecret | quote }}
+                  key: {{ .Values.auth.tokenKey | quote }}
             {{- if .Values.auth.requireTokenForReads }}
             - name: SPARQ_AUTH_TOKEN_READ
               value: "1"
@@ -108,6 +133,9 @@ spec:
             # LWS — activates once sq-lmz40 ships (image not yet published)
             # LWS is fail-closed by default (R2); no auth token needed — anonymous mutation
             # rejected, HTTPS-only WebIDs, DPoP required (all default-on in main.rs).
+            # [GPT-5.6] The binary defaults to loopback, which is unreachable through a Service.
+            - name: SOLID_SERVER_BIND
+              value: "0.0.0.0:3000"
             {{- if .Values.lws.trustedIssuer }}
             - name: SOLID_SERVER_TRUSTED_ISSUER
               value: {{ .Values.lws.trustedIssuer | quote }}
@@ -124,21 +152,6 @@ spec:
             - name: SOLID_SERVER_AUDIENCE
               value: {{ .Values.lws.audience | quote }}
             {{- end }}
-            {{- if .Values.lws.tlsCertPath }}
-            - name: SOLID_SERVER_TLS_CERT
-              value: {{ .Values.lws.tlsCertPath | quote }}
-            {{- end }}
-            {{- if .Values.lws.tlsKeyPath }}
-            - name: SOLID_SERVER_TLS_KEY
-              value: {{ .Values.lws.tlsKeyPath | quote }}
-            {{- end }}
-            {{- if .Values.lws.replayRedisExistingSecret }}
-            - name: SOLID_SERVER_REPLAY_REDIS_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ .Values.lws.replayRedisExistingSecret }}
-                  key: SOLID_SERVER_REPLAY_REDIS_URL
-            {{- end }}
             {{- end }}
           {{- if and (eq .Values.server "sparq-server") (gt (len .Values.sparqServer.extraArgs) 0) }}
           args:
@@ -150,21 +163,26 @@ spec:
             # R8: /tmp writable scratch (required for distroless + readOnlyRootFilesystem)
             - name: tmp
               mountPath: /tmp
-            {{- if and (eq .Values.server "sparq-server") .Values.persistence.enabled }}
+            {{- if eq .Values.server "sparq-server" }}
+            # [GPT-5.6] R8: /data stays writable while the image root remains read-only.
             - name: data
               mountPath: /data
             {{- end }}
       volumes:
         - name: tmp
           emptyDir: {}
-        {{- if and (eq .Values.server "sparq-server") .Values.persistence.enabled }}
+        {{- if eq .Values.server "sparq-server" }}
         - name: data
+          {{- if .Values.persistence.enabled }}
           {{- if .Values.persistence.existingClaim }}
           persistentVolumeClaim:
-            claimName: {{ .Values.persistence.existingClaim }}
+            claimName: {{ .Values.persistence.existingClaim | quote }}
           {{- else }}
           persistentVolumeClaim:
-            claimName: {{ include "sparq.fullname" . }}-data
+            claimName: {{ printf "%s-data" (include "sparq.fullname" .) | quote }}
+          {{- end }}
+          {{- else }}
+          emptyDir: {}
           {{- end }}
         {{- end }}
       {{- with .Values.nodeSelector }}

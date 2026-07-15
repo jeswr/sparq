@@ -79,6 +79,18 @@ Container port — 3030 for sparq-server, 3000 for lws.
 {{- end }}
 
 {{/*
+[GPT-5.6] Service port defaults to the selected server's container port but may
+be overridden without changing the targetPort.
+*/}}
+{{- define "sparq.servicePort" -}}
+{{- if .Values.service.port -}}
+{{- .Values.service.port -}}
+{{- else -}}
+{{- include "sparq.containerPort" . -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Liveness probe path — /health for sparq-server, /livez for lws.
 (R7: health path is per-server, never a shared constant.)
 */}}
@@ -95,9 +107,23 @@ Readiness probe path — /health for sparq-server, /readyz for lws.
 {{- end }}
 
 {{/*
+[GPT-5.6] Canonical image repository selected per server. An explicit repository
+still supports forks and private registries without risking the wrong default image.
+*/}}
+{{- define "sparq.imageRepository" -}}
+{{- if .Values.image.repository -}}
+{{- .Values.image.repository -}}
+{{- else if eq .Values.server "lws" -}}
+{{- "ghcr.io/sparq-org/sparq-lws-core" -}}
+{{- else -}}
+{{- "ghcr.io/sparq-org/sparq-server" -}}
+{{- end -}}
+{{- end }}
+
+{{/*
 Image reference: repo:tag (tag falls back to Chart.AppVersion when unset).
 */}}
 {{- define "sparq.image" -}}
 {{- $tag := .Values.image.tag | default .Chart.AppVersion }}
-{{- printf "%s:%s" .Values.image.repository $tag }}
+{{- printf "%s:%s" (include "sparq.imageRepository" .) $tag }}
 {{- end }}

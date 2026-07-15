@@ -1,6 +1,8 @@
 {{- if and (eq .Values.server "sparq-server") .Values.persistence.enabled (not .Values.persistence.existingClaim) -}}
 # PersistentVolumeClaim for /data (dataset storage) — sparq-server only
 # [OPUS-4.8] sq-0d744
+# [GPT-5.6] R9: sparq-server is open-by-default at the image layer; this chart
+# gates it with SPARQ_AUTH_TOKEN from an existing Secret. Do not remove that wiring.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -10,11 +12,12 @@ metadata:
     {{- include "sparq.labels" . | nindent 4 }}
 spec:
   accessModes:
-    - {{ .Values.persistence.accessMode }}
+    - {{ .Values.persistence.accessMode | quote }}
   resources:
     requests:
-      storage: {{ .Values.persistence.size }}
+      storage: {{ .Values.persistence.size | quote }}
   {{- if .Values.persistence.storageClass }}
-  storageClassName: {{ .Values.persistence.storageClass }}
+  # [GPT-5.6] Quote user-supplied Kubernetes identifiers and quantities.
+  storageClassName: {{ .Values.persistence.storageClass | quote }}
   {{- end }}
 {{- end }}

@@ -3,7 +3,7 @@
 #
 # SECURE DEFAULTS (R1/R2/R4/R8/R9):
 #   - sparq-server is open-by-default at the IMAGE layer. This chart enforces auth at
-#     the TEMPLATE layer: auth.existingSecret (or auth.secretName) MUST name an existing
+#     the TEMPLATE layer: auth.existingSecret MUST name an existing
 #     k8s Secret. No token literal may appear here. See R9 note in deploy/helm/README.md.
 #   - readOnlyRootFilesystem: true + non-root securityContext by default (R8).
 #   - TLS at the Ingress via cert-manager (R3).
@@ -24,11 +24,14 @@ server: sparq-server
 # Image
 # ---------------------------------------------------------------------------
 image:
-  # sparq-server canonical ref (sparq-org; verified from release.yml / §0 premise-check)
-  # For lws: override with ghcr.io/sparq-org/sparq-lws-core (activates once sq-lmz40 ships)
-  repository: ghcr.io/sparq-org/sparq-server
-  # pullPolicy: use IfNotPresent for stable tags; Always for "latest" in dev
-  pullPolicy: IfNotPresent
+  # [GPT-5.6] Empty selects the canonical repository for the server selector:
+  # sparq-server -> ghcr.io/sparq-org/sparq-server
+  # lws          -> ghcr.io/sparq-org/sparq-lws-core
+  # Set this only to use a fork or private registry.
+  repository: ""
+  # [GPT-5.6] appVersion defaults to "latest", so always re-resolve it on pod start.
+  # Use IfNotPresent only together with a pinned, immutable release tag.
+  pullPolicy: Always
   # tag defaults to chart appVersion; override with --set image.tag=v0.5.0
   tag: ""
 
@@ -36,9 +39,10 @@ imagePullSecrets: []
 
 # ---------------------------------------------------------------------------
 # Replica count
-# NOTE on LWS multi-replica: the lws server uses an in-memory DPoP-jti replay store
-# per replica. Multi-replica LWS requires redis.url (see below) to share the replay
-# store; without it set replicas: 1 to preserve correctness (R2 / §1.3).
+# [GPT-5.6] Both servers are pinned to one replica. sparq-server has one writable
+# in-memory store per pod. The planned canonical LWS image lacks redis-replay, and
+# the current LWS runtime has no shared durable blob store, so Redis alone cannot
+# make its data path safe to scale out.
 # ---------------------------------------------------------------------------
 replicaCount: 1
 
@@ -85,32 +89,27 @@ lws:
   # REQUIRED: the public https:// base URL at which this LWS instance is reachable.
   baseUrl: ""                   # SOLID_SERVER_BASE_URL — REQUIRED for lws
   audience: ""                  # SOLID_SERVER_AUDIENCE (defaults to baseUrl in the server)
-  # TLS: if your Ingress does NOT terminate TLS and you need in-pod TLS (rare),
-  # set tlsCertPath / tlsKeyPath to PEM paths mounted from a volume.
-  tlsCertPath: ""               # SOLID_SERVER_TLS_CERT
-  tlsKeyPath: ""                # SOLID_SERVER_TLS_KEY
-  # Redis replay store for multi-replica DPoP-jti dedup (see replicaCount note above).
-  # Name of an existing Secret with key SOLID_SERVER_REPLAY_REDIS_URL.
-  # Without this set, keep replicaCount: 1.
-  replayRedisExistingSecret: "" # holds SOLID_SERVER_REPLAY_REDIS_URL
 
 # ---------------------------------------------------------------------------
 # Service
 # ---------------------------------------------------------------------------
 service:
+  # [GPT-5.6] Fixed to ClusterIP so the Service cannot bypass the TLS-enforcing Ingress.
   type: ClusterIP
   # Port exposed on the Service (cluster-internal).
   # Defaults to the server's container port: 3030 (sparq-server) or 3000 (lws).
   # Override only if you need a non-standard port on the Service object.
-  port: 3030   # overridden by _helpers.tpl per server selector
+  port: null
 
 # ---------------------------------------------------------------------------
 # Ingress (R3 — TLS at the edge)
 # ---------------------------------------------------------------------------
 ingress:
   enabled: false
-  # ingressClassName: nginx
-  ingressClassName: ""
+  # [GPT-5.6] The built-in Ingress is for ingress-nginx because the chart enforces
+  # HTTPS redirects with ingress-nginx annotations. For another controller, keep
+  # this Ingress disabled and supply a controller-specific HTTPS-only route.
+  ingressClassName: nginx
   annotations: {}
     # To provision a TLS cert via cert-manager:
     # cert-manager.io/cluster-issuer: "letsencrypt-prod"
@@ -120,6 +119,7 @@ ingress:
   path: /
   pathType: Prefix
   tls:
+    # [GPT-5.6] Both fields become mandatory when ingress.enabled=true.
     enabled: false
     # secretName: sparq-tls  (cert-manager will populate this)
     secretName: ""
@@ -141,27 +141,11 @@ resources:
 # ---------------------------------------------------------------------------
 persistence:
   enabled: false
+  # Set enabled=true and name a pre-provisioned PVC here, or leave empty to create one.
+  existingClaim: ""
   storageClass: ""
   accessMode: ReadWriteOnce
   size: 10Gi
-  # existingClaim: ""  # use an existing PVC
-
-# ---------------------------------------------------------------------------
-# Security context (R8 — least-priv, non-root, readOnlyRootFilesystem)
-# Both images already run non-root; these reinforce and should NOT be relaxed.
-# ---------------------------------------------------------------------------
-podSecurityContext:
-  runAsNonRoot: true
-  seccompProfile:
-    type: RuntimeDefault
-
-containerSecurityContext:
-  allowPrivilegeEscalation: false
-  readOnlyRootFilesystem: true
-  runAsNonRoot: true
-  capabilities:
-    drop:
-      - ALL
 
 # ---------------------------------------------------------------------------
 # Service account (R5 — minimal, no cluster-admin)
@@ -169,6 +153,7 @@ containerSecurityContext:
 serviceAccount:
   create: true
   annotations: {}
+  # Required when create=false; the pod token still remains disabled.
   name: ""
 
 # ---------------------------------------------------------------------------
@@ -181,10 +166,16 @@ tolerations: []
 affinity: {}
 
 # ---------------------------------------------------------------------------
-# Liveness / readiness probes (R7 — parameterised per server)
+# Startup / liveness / readiness probes (R7 — parameterised per server)
 # These are defaults; the _helpers.tpl picks the right path per server selector.
 # Override only if you have unusual probe requirements.
 # ---------------------------------------------------------------------------
+startupProbe:
+  # [GPT-5.6] Prevent large initial dataset loads from being killed by liveness checks.
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 30
+
 livenessProbe:
   # path is set by _helpers.tpl based on .Values.server
   initialDelaySeconds: 10
