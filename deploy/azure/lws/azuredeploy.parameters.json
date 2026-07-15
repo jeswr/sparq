@@ -1,0 +1,42 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {
+      "value": "sparq-lws-env"
+    },
+    "containerAppName": {
+      "value": "sparq-lws"
+    },
+    "imageRef": {
+      "value": "ghcr.io/sparq-org/sparq-lws-core:latest"
+    },
+    "solidBaseUrl": {
+      "value": "https://YOUR-APP-FQDN.azurecontainerapps.io"
+    },
+    "solidTrustedIssuer": {
+      "value": "https://YOUR-OIDC-ISSUER"
+    },
+    "redisUrl": {
+      "reference": {
+        "_comment": "R4 — Optional. Only required for maxReplicas > 1. Use a Key Vault reference or supply --parameters redisUrl=<value> at deploy time. Leave empty for single-replica deployments.",
+        "keyVault": {
+          "id": "/subscriptions/<subscription-id>/resourceGroups/<rg>/providers/Microsoft.KeyVault/vaults/<vault-name>"
+        },
+        "secretName": "sparq-lws-redis-url"
+      }
+    },
+    "minReplicas": {
+      "value": 1
+    },
+    "maxReplicas": {
+      "value": 1
+    },
+    "cpuCores": {
+      "value": "0.5"
+    },
+    "memory": {
+      "value": "1Gi"
+    }
+  }
+}

@@ -1,0 +1,197 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "_comment": "[SONNET-4.6] sq-zcou4 — ARM template for sparq-lws-core on Azure Container Apps. Compiled from main.bicep. STATUS: activates once sq-lmz40 ships. Do not edit directly — edit main.bicep and run: az bicep build --file main.bicep",
+  "parameters": {
+    "environmentName": {
+      "type": "string",
+      "defaultValue": "sparq-lws-env",
+      "metadata": { "description": "Container Apps Environment name." }
+    },
+    "containerAppName": {
+      "type": "string",
+      "defaultValue": "sparq-lws",
+      "metadata": { "description": "Container App name." }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": { "description": "Azure region." }
+    },
+    "imageRef": {
+      "type": "string",
+      "defaultValue": "ghcr.io/sparq-org/sparq-lws-core:latest",
+      "metadata": { "description": "Full image reference. Activates once sq-lmz40 ships." }
+    },
+    "solidBaseUrl": {
+      "type": "string",
+      "metadata": { "description": "Public HTTPS base URL of this server. REQUIRED." }
+    },
+    "solidTrustedIssuer": {
+      "type": "string",
+      "metadata": { "description": "Trusted OIDC issuer URL. REQUIRED." }
+    },
+    "redisUrl": {
+      "type": "securestring",
+      "defaultValue": "",
+      "metadata": { "description": "Redis URL for DPoP-jti replay across replicas. Required if maxReplicas > 1. (R4: supply via Key Vault reference)" }
+    },
+    "minReplicas": {
+      "type": "int",
+      "defaultValue": 1,
+      "minValue": 0,
+      "maxValue": 1,
+      "metadata": { "description": "Minimum replicas. Keep at 1 for warm readiness probe." }
+    },
+    "maxReplicas": {
+      "type": "int",
+      "defaultValue": 1,
+      "minValue": 1,
+      "maxValue": 25,
+      "metadata": { "description": "Maximum replicas. Keep at 1 without Redis URL (replay protection)." }
+    },
+    "cpuCores": {
+      "type": "string",
+      "defaultValue": "0.5",
+      "metadata": { "description": "CPU allocation per replica." }
+    },
+    "memory": {
+      "type": "string",
+      "defaultValue": "1Gi",
+      "metadata": { "description": "Memory allocation per replica." }
+    }
+  },
+  "variables": {
+    "identityName": "[concat(parameters('containerAppName'), '-identity')]",
+    "logWorkspaceName": "[concat(parameters('environmentName'), '-logs')]",
+    "hasRedis": "[not(empty(parameters('redisUrl')))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2023-01-31",
+      "name": "[variables('identityName')]",
+      "location": "[parameters('location')]",
+      "comments": "User-assigned managed identity — least-privilege (R5). Grant Key Vault get on Redis URL secret post-deploy if using Key Vault reference."
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2022-10-01",
+      "name": "[variables('logWorkspaceName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "sku": { "name": "PerGB2018" },
+        "retentionInDays": 30
+      }
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2024-03-01",
+      "name": "[parameters('environmentName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces', variables('logWorkspaceName'))]"
+      ],
+      "properties": {
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', variables('logWorkspaceName')), '2022-10-01').customerId]",
+            "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', variables('logWorkspaceName')), '2022-10-01').primarySharedKey]"
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "[parameters('containerAppName')]",
+      "location": "[parameters('location')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName'))]"
+      ],
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName'))]": {}
+        }
+      },
+      "properties": {
+        "environmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
+        "configuration": {
+          "secrets": "[if(variables('hasRedis'), createArray(createObject('name', 'redis-url', 'value', parameters('redisUrl'))), createArray())]",
+          "ingress": {
+            "external": true,
+            "targetPort": 3000,
+            "transport": "http",
+            "allowInsecure": false
+          }
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "sparq-lws",
+              "image": "[parameters('imageRef')]",
+              "securityContext": {
+                "runAsNonRoot": true,
+                "readOnlyRootFilesystem": true,
+                "allowPrivilegeEscalation": false
+              },
+              "resources": {
+                "cpu": "[json(parameters('cpuCores'))]",
+                "memory": "[parameters('memory')]"
+              },
+              "env": "[if(variables('hasRedis'), createArray(createObject('name', 'SOLID_SERVER_BASE_URL', 'value', parameters('solidBaseUrl')), createObject('name', 'SOLID_SERVER_TRUSTED_ISSUER', 'value', parameters('solidTrustedIssuer')), createObject('name', 'SOLID_SERVER_AUDIENCE', 'value', parameters('solidBaseUrl')), createObject('name', 'SOLID_SERVER_REPLAY_REDIS_URL', 'secretRef', 'redis-url')), createArray(createObject('name', 'SOLID_SERVER_BASE_URL', 'value', parameters('solidBaseUrl')), createObject('name', 'SOLID_SERVER_TRUSTED_ISSUER', 'value', parameters('solidTrustedIssuer')), createObject('name', 'SOLID_SERVER_AUDIENCE', 'value', parameters('solidBaseUrl'))))]",
+              "probes": [
+                {
+                  "type": "Liveness",
+                  "httpGet": { "path": "/livez", "port": 3000 },
+                  "initialDelaySeconds": 10,
+                  "periodSeconds": 30,
+                  "failureThreshold": 3
+                },
+                {
+                  "type": "Readiness",
+                  "httpGet": { "path": "/readyz", "port": 3000 },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 10,
+                  "failureThreshold": 3
+                },
+                {
+                  "type": "Startup",
+                  "httpGet": { "path": "/livez", "port": 3000 },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 5,
+                  "failureThreshold": 12
+                }
+              ]
+            }
+          ],
+          "scale": {
+            "minReplicas": "[parameters('minReplicas')]",
+            "maxReplicas": "[parameters('maxReplicas')]"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "fqdn": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.App/containerApps', parameters('containerAppName')), '2024-03-01').configuration.ingress.fqdn]"
+    },
+    "solidEndpoint": {
+      "type": "string",
+      "value": "[concat('https://', reference(resourceId('Microsoft.App/containerApps', parameters('containerAppName')), '2024-03-01').configuration.ingress.fqdn, '/')]"
+    },
+    "managedIdentityClientId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName')), '2023-01-31').clientId]"
+    },
+    "managedIdentityPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', variables('identityName')), '2023-01-31').principalId]"
+    }
+  }
+}
