@@ -307,6 +307,11 @@ resource "azurerm_container_app" "sparq" {
       condition     = var.server != "lws" || (var.min_replicas == 1 && var.max_replicas == 1)
       error_message = "lws must use exactly one replica unless shared Redis replay protection is wired."
     }
+    # [GPT-5.6] Replicas would hold divergent process-local datasets.
+    precondition {
+      condition     = var.server != "sparq-server" || (var.min_replicas == 1 && var.max_replicas == 1)
+      error_message = "sparq-server must use exactly one replica unless a shared persistent backing store is wired."
+    }
     precondition {
       condition = (
         var.server == "sparq-server" && var.container_port == 3030

@@ -80,22 +80,21 @@ variable "memory" {
   default     = "512Mi"
 }
 
+# [GPT-5.6] Scaling needs backing stores that this module does not provision.
 variable "min_instances" {
   description = <<-EOT
     Minimum Cloud Run instances. Set >= 1 to avoid cold-start latency on the
-    health path (R7). Single-instance avoids multi-replica DPoP replay
-    collision for lws (§1.3 of design record).
+    health path (R7). Must be 1 because this module provisions no shared state.
   EOT
   type        = number
   default     = 1
 }
 
 variable "max_instances" {
-  description = "Maximum Cloud Run instances"
+  # [GPT-5.6] Scaling needs backing stores that this module does not provision.
+  description = "Maximum Cloud Run instances; must be 1 because this module provisions no shared state"
   type        = number
-  # [GPT-5.6] Safe for direct lws module use; the root raises this only for
-  # sparq-server and pins lws to one without Redis replay wiring.
-  default = 1
+  default     = 1
 }
 
 variable "allow_unauthenticated" {

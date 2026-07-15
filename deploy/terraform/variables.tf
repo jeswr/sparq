@@ -188,15 +188,17 @@ variable "azure_rg_name" {
 }
 
 variable "min_replicas" {
-  description = "Minimum Azure Container Apps replica count (forced to 1 for lws without Redis replay wiring)"
+  # [GPT-5.6] Retained for interface compatibility; the root enforces one replica.
+  description = "Reserved Azure Container Apps minimum replica count; forced to 1 because these templates provision no shared state"
   type        = number
   default     = 1
 }
 
 variable "max_replicas" {
-  description = "Maximum Azure Container Apps replica count (forced to 1 for lws without Redis replay wiring)"
+  # [GPT-5.6] Retained for interface compatibility; the root enforces one replica.
+  description = "Reserved Azure Container Apps maximum replica count; forced to 1 because these templates provision no shared state"
   type        = number
-  default     = 3
+  default     = 1
 }
 
 # ---------------------------------------------------------------------------
@@ -216,15 +218,17 @@ variable "gcp_region" {
 }
 
 variable "min_instances" {
-  description = "Minimum GCP Cloud Run instances (forced to 1 for lws without Redis replay wiring)"
+  # [GPT-5.6] Retained for interface compatibility; the root enforces one instance.
+  description = "Reserved GCP Cloud Run minimum instance count; forced to 1 because these templates provision no shared state"
   type        = number
   default     = 1
 }
 
 variable "max_instances" {
-  description = "Maximum GCP Cloud Run instances (forced to 1 for lws without Redis replay wiring)"
+  # [GPT-5.6] Retained for interface compatibility; the root enforces one instance.
+  description = "Reserved GCP Cloud Run maximum instance count; forced to 1 because these templates provision no shared state"
   type        = number
-  default     = 3
+  default     = 1
 }
 
 # ---------------------------------------------------------------------------

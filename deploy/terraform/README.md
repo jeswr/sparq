@@ -7,6 +7,13 @@ Deploy either `sparq-server` (SPARQL 1.1 endpoint) or the Solid/LWS server
 (bakes `SPARQ_ALLOW_REMOTE=1`, no auth). This module enforces auth ON at the
 template layer via `auth_token` (R1). **Do not remove the token wiring.**
 
+<!-- [GPT-5.6] Document the state contract behind the scaling invariant. -->
+**Single-writer note:** `sparq-server` keeps its dataset only in process memory;
+separate replicas would accept writes into divergent datasets. These Terraform
+templates therefore enforce exactly one `sparq-server` instance on every cloud.
+Raise that limit only after wiring a shared persistent backing store, which
+these templates do not provision.
+
 ## Quick start
 
 ```sh
@@ -73,6 +80,8 @@ deploy/terraform/
 | `aws_acm_certificate_arn` | `""` | Required for `target=aws`; public plaintext mode is unavailable |
 | `aws_public_hostname` | `""` | Required for `target=aws`; must match the ACM certificate |
 | `aws_route53_zone_id` | `""` | Optional Route 53 zone; otherwise create the DNS record externally |
+| `min_replicas` / `max_replicas` | `1` | Reserved Azure sizing inputs; forced to 1 until shared state is provisioned |
+| `min_instances` / `max_instances` | `1` | Reserved GCP sizing inputs; forced to 1 until shared state is provisioned |
 | `solid_server_base_url` | `""` | Required when `server=lws` |
 | `solid_server_trusted_issuer` | `""` | Required when `server=lws` |
 

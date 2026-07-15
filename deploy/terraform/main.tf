@@ -102,12 +102,13 @@ locals {
   cpu    = var.cpu != "" ? var.cpu : local.cpu_defaults[var.target]
   memory = var.memory != "" ? var.memory : local.memory_defaults[var.target]
 
-  # [GPT-5.6] LWS uses an in-memory DPoP replay set unless Redis is wired, so
-  # the secure root module pins it to one replica on managed autoscalers.
-  azure_min_replicas = var.server == "lws" ? 1 : var.min_replicas
-  azure_max_replicas = var.server == "lws" ? 1 : var.max_replicas
-  gcp_min_instances  = var.server == "lws" ? 1 : var.min_instances
-  gcp_max_instances  = var.server == "lws" ? 1 : var.max_instances
+  # [GPT-5.6] Both images require one managed replica: sparq-server stores an
+  # uncoordinated in-memory dataset, while LWS needs Redis-backed DPoP replay
+  # protection before it can scale safely. These templates wire neither store.
+  azure_min_replicas = 1
+  azure_max_replicas = 1
+  gcp_min_instances  = 1
+  gcp_max_instances  = 1
 }
 
 # [GPT-5.6] Prefer generating the bearer token at deploy time. The container

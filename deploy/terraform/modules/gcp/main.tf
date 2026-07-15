@@ -243,6 +243,11 @@ resource "google_cloud_run_v2_service" "sparq" {
       condition     = var.server != "lws" || (var.min_instances == 1 && var.max_instances == 1)
       error_message = "lws must use exactly one instance unless shared Redis replay protection is wired."
     }
+    # [GPT-5.6] Instances would hold divergent process-local datasets.
+    precondition {
+      condition     = var.server != "sparq-server" || (var.min_instances == 1 && var.max_instances == 1)
+      error_message = "sparq-server must use exactly one instance unless a shared persistent backing store is wired."
+    }
     precondition {
       condition = (
         var.server == "sparq-server" && var.container_port == 3030

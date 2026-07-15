@@ -70,17 +70,17 @@ variable "memory" {
 }
 
 variable "min_replicas" {
-  description = "Minimum Container App replicas"
+  # [GPT-5.6] Scaling needs backing stores that this module does not provision.
+  description = "Minimum Container App replicas; must be 1 because this module provisions no shared state"
   type        = number
   default     = 1
 }
 
 variable "max_replicas" {
-  description = "Maximum Container App replicas"
+  # [GPT-5.6] Scaling needs backing stores that this module does not provision.
+  description = "Maximum Container App replicas; must be 1 because this module provisions no shared state"
   type        = number
-  # [GPT-5.6] Safe for direct lws module use; the root raises this only for
-  # sparq-server and pins lws to one without Redis replay wiring.
-  default = 1
+  default     = 1
 }
 
 variable "solid_server_base_url" {
