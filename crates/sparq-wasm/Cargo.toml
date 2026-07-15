@@ -55,6 +55,14 @@ sparq-canon = { path = "../sparq-canon", default-features = false, optional = tr
 # new external dependency enters the wasm graph.
 sparq-policy = { path = "../sparq-policy", default-features = false, optional = true }
 
+# [GPT-5.6] sq-q4apb: stateless SHACL/DASH FormDescription derivation for the hosted
+# workbench, OPT-IN behind `forms` (OFF by default). `sparq-forms` already owns the
+# derivation model and serde contract; `serde_json` only decodes the structured TermRef /
+# options inputs and returns that model's direct serialization. Both stay out of the lean
+# dependency graph, so the default `wasm_bundle_bytes` artifact is unchanged.
+sparq-forms = { path = "../sparq-forms", default-features = false, optional = true }
+serde_json = { version = "1", optional = true }
+
 # oxrdf pulls `rand`/getrandom (blank-node ids). On wasm there is no OS RNG, so
 # select getrandom's browser backend (crypto.getRandomValues). The matching
 # `--cfg getrandom_backend="wasm_js"` is set in .cargo/config.toml.
@@ -131,6 +139,10 @@ canon = ["dep:sparq-canon", "dep:getrandom02"]
 # [FABLE-5] sq-586sh: the ODRL usage-control wasm32 probe (see the sparq-policy
 # dependency note above). OFF by default; NOT enabled by the published bundle build.
 policy = ["dep:sparq-policy"]
+# [GPT-5.6] sq-q4apb: expose the stateless `Store::deriveForm(...)` bridge used by the
+# hosted GUI. Pulls the opt-in headless forms crate plus JSON boundary codec only when
+# requested; the published/hosted bundle enables it, while the lean default remains empty.
+forms = ["dep:sparq-forms", "dep:serde_json"]
 # [FABLE-5] sq-ixc3.19: expose the engine's STRUCTURED query plan (sparq-engine's
 # `explain_json::PlanNode` — the sq-u4lgr/#902 typed EXPLAIN tree) as the
 # `Store::explainPlanJson(sparql)` / `Store::explainPlanAnalyzeJson(sparql)` bindings,

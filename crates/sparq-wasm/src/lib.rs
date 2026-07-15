@@ -109,6 +109,13 @@ mod canon;
 #[cfg(feature = "canon")]
 pub use canon::canonicalize_nquads;
 
+// [GPT-5.6] sq-q4apb: the opt-in stateless `Store::deriveForm(...)` hosted-web
+// binding. All parsing, TermRef/options decoding, F1 derivation, and direct serde
+// serialization live in this crate; the lean bundle has neither the method nor the
+// `sparq-forms` / `serde_json` dependency graph.
+#[cfg(feature = "forms")]
+mod forms;
+
 /// An immutable, dictionary-encoded RDF store queryable with SPARQL.
 #[wasm_bindgen]
 pub struct Store {

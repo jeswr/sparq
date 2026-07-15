@@ -119,6 +119,16 @@ export class Store {
      */
     count(sparql: string): number;
     /**
+     * Derives a complete `sparq_forms::FormDescription` from serialized data and SHACL
+     * shapes graphs, returning its direct snake_case serde JSON.
+     *
+     * `focus` is a serialized `TermRef`; `format` is the RDF syntax for both graphs; and
+     * `options_json` is `{ "mode": "edit" | "view", "shape"?: TermRef }`. The explicit
+     * shape must be an IRI or blank node. This is stateless: the receiver's graph is ignored.
+     * Parse/term/options failures throw a `JsError` with contextual input-boundary text.
+     */
+    deriveForm(data: string, shapes: string, focus: string, format: string, options_json: string): string;
+    /**
      * [OPUS-4.8] sq-ncvq.14: query-plan introspection — `EXPLAIN`.
      *
      * Returns the engine's plan for `sparql` as a human-readable string — the
@@ -487,6 +497,7 @@ export interface InitOutput {
     readonly store_ask: (a: number, b: number, c: number) => [number, number, number];
     readonly store_askWithMaxRows: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly store_count: (a: number, b: number, c: number) => [number, number, number];
+    readonly store_deriveForm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
     readonly store_explain: (a: number, b: number, c: number) => [number, number, number, number];
     readonly store_explainAnalyze: (a: number, b: number, c: number) => [number, number, number, number];
     readonly store_explainPlanAnalyzeJson: (a: number, b: number, c: number) => [number, number, number, number];

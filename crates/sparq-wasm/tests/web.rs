@@ -1004,3 +1004,126 @@ mod bytes_ingest {
         );
     }
 }
+
+// ---- [GPT-5.6] sq-q4apb: forms bridge in the real wasm runtime ------------
+
+#[cfg(feature = "forms")]
+mod forms {
+    use oxrdf::{NamedNode, Term};
+    use sparq_forms::{FormOptions, Mode};
+
+    use super::*;
+
+    const FORM_DATA: &str = r#"
+        @prefix ex: <http://example.org/> .
+        ex:alice a ex:Person ; ex:name "Alice" ; ex:audit "reviewed" .
+    "#;
+
+    const FORM_SHAPES: &str = r#"
+        @prefix ex: <http://example.org/> .
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ;
+            sh:property [ sh:path ex:name ; sh:name "Name" ; sh:minCount 1 ] .
+        ex:AuditShape a sh:NodeShape ;
+            sh:property [ sh:path ex:audit ; sh:name "Audit status" ] .
+    "#;
+
+    fn direct_description(mode: Mode, shape: Option<&str>) -> String {
+        let data = sparq_core::Graph::load_dataset(FORM_DATA, "turtle").unwrap();
+        let shapes = sparq_core::Graph::load_dataset(FORM_SHAPES, "turtle").unwrap();
+        let focus = Term::from(NamedNode::new_unchecked("http://example.org/alice"));
+        let options = FormOptions {
+            mode,
+            shape: shape.map(|iri| Term::from(NamedNode::new_unchecked(iri))),
+            ..FormOptions::default()
+        };
+        serde_json::to_string(&sparq_forms::derive_form(&data, &shapes, &focus, &options)).unwrap()
+    }
+
+    /// Applicable edit and view derivations execute through the real wasm export and match
+    /// direct `sparq_forms` serialization byte-for-byte.
+    #[wasm_bindgen_test]
+    fn derive_form_applicable_edit_and_view_match_direct() {
+        let store = Store::load("", "turtle").unwrap();
+        let focus = r#"{"kind":"iri","value":"http://example.org/alice"}"#;
+        for (mode_text, mode) in [("edit", Mode::Edit), ("view", Mode::View)] {
+            let actual = store
+                .derive_form(
+                    FORM_DATA,
+                    FORM_SHAPES,
+                    focus,
+                    "turtle",
+                    &format!(r#"{{"mode":"{mode_text}"}}"#),
+                )
+                .unwrap();
+            assert_eq!(actual, direct_description(mode, None));
+        }
+    }
+
+    /// An explicit shape TermRef reaches the engine in wasm and materially changes the form.
+    #[wasm_bindgen_test]
+    fn derive_form_explicit_shape_matches_direct() {
+        const AUDIT_SHAPE: &str = "http://example.org/AuditShape";
+        let store = Store::load("", "turtle").unwrap();
+        let actual = store
+            .derive_form(
+                FORM_DATA,
+                FORM_SHAPES,
+                r#"{"kind":"iri","value":"http://example.org/alice"}"#,
+                "turtle",
+                r#"{"mode":"edit","shape":{"kind":"iri","value":"http://example.org/AuditShape"}}"#,
+            )
+            .unwrap();
+        assert_eq!(
+            actual,
+            direct_description(Mode::Edit, Some(AUDIT_SHAPE))
+        );
+        assert!(actual.contains(r#""label":"Audit status""#));
+    }
+
+    /// Malformed graph, TermRef, options, and explicit-shape inputs all become catchable
+    /// `JsError`s in the real runtime; the native helper tests pin their contextual messages.
+    #[wasm_bindgen_test]
+    fn derive_form_malformed_inputs_fail_closed() {
+        let store = Store::load("", "turtle").unwrap();
+        let focus = r#"{"kind":"iri","value":"http://example.org/alice"}"#;
+        assert!(
+            store
+                .derive_form(
+                    "<http://example.org/alice> <http://example.org/name>",
+                    FORM_SHAPES,
+                    focus,
+                    "ntriples",
+                    r#"{"mode":"edit"}"#,
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .derive_form(
+                    FORM_DATA,
+                    FORM_SHAPES,
+                    r#"{"kind":"iri"}"#,
+                    "turtle",
+                    r#"{"mode":"edit"}"#,
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .derive_form(FORM_DATA, FORM_SHAPES, focus, "turtle", "not json")
+                .is_err()
+        );
+        assert!(
+            store
+                .derive_form(
+                    FORM_DATA,
+                    FORM_SHAPES,
+                    focus,
+                    "turtle",
+                    r#"{"mode":"edit","shape":{"kind":"literal","value":"no"}}"#,
+                )
+                .is_err()
+        );
+    }
+}
