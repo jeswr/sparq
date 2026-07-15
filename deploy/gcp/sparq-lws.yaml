@@ -5,6 +5,9 @@
 # lands and the image is available at ghcr.io/sparq-org/sparq-lws-core.
 #
 # SECURE-DEFAULTS NOTICE (R2/R9):
+# The sparq-server image is open-by-default at the image layer. This spec does not deploy that
+# image; use sparq-server.yaml, which gates it with a Secret Manager token. [GPT-5.6]
+#
 # The LWS server is fail-closed by design — anonymous mutation is rejected, HTTPS-only
 # WebIDs, DPoP required, strict bidirectional WebID/issuer check — all default-on.
 # This spec relies on the image's fail-closed posture. DO NOT set any of the following
@@ -29,14 +32,17 @@
 #          --member="serviceAccount:sparq-lws-sa@PROJECT_ID.iam.gserviceaccount.com" \
 #          --role="roles/secretmanager.secretAccessor"
 #
-#   4. Deploy (replace PROJECT_ID, REGION, BASE_URL, TRUSTED_ISSUER):
-#        gcloud run services replace deploy/gcp/sparq-lws.yaml \
-#          --region REGION
+#   4. Grant the deployer principal roles/iam.serviceAccountUser on sparq-lws-sa so it can
+#      attach the runtime identity. Do not grant roles/run.invoker to the runtime identity.
+#
+#   5. Render PROJECT_ID, PROJECT_NUMBER, REGION, and TRUSTED_ISSUER_URL into a temporary
+#      copy and deploy it using the commands in deploy/gcp/README.md.
 #
 # DECISIONS (sq-agolp):
 #   - Cloud Run (fully managed): automatic HTTPS on run.app domain (R3). The run.app
-#     HTTPS URL is used as SOLID_SERVER_BASE_URL; set it after first deploy or use a
-#     custom domain mapped via Cloud Run domain mapping.
+#     deterministic HTTPS URL is used as SOLID_SERVER_BASE_URL. [GPT-5.6]
+#   - Public invocation is explicit because LWS performs its own OIDC/DPoP authorization.
+#     [GPT-5.6]
 #   - max-instances: 1 default. Multi-instance requires Redis DPoP replay store
 #     (SOLID_SERVER_REPLAY_REDIS_URL + redis-replay feature, §1.3 of the design record).
 #     Do NOT increase max-instances without wiring Redis first.
@@ -52,6 +58,10 @@ metadata:
   name: sparq-lws
   annotations:
     run.googleapis.com/ingress: all
+    # [GPT-5.6] Cloud Run readiness probes are Preview and require the BETA launch stage.
+    run.googleapis.com/launch-stage: BETA
+    # [GPT-5.6] Public invocation is intentional; LWS OIDC/DPoP is the front door.
+    run.googleapis.com/invoker-iam-disabled: "true"
     run.googleapis.com/description: >
       sparq Solid/LWS server (sq-agolp, activates once sq-lmz40 ships). Fail-closed by
       design: anonymous mutation rejected, DPoP required, HTTPS-only WebIDs. R2 enforced
@@ -65,6 +75,10 @@ spec:
         # Max 1 instance: DPoP replay protection requires single-instance or Redis.
         # Increase ONLY after wiring SOLID_SERVER_REPLAY_REDIS_URL (§1.3).
         autoscaling.knative.dev/maxScale: "1"
+        # [GPT-5.6] Cloud Run custom probes require instance-based CPU allocation.
+        run.googleapis.com/cpu-throttling: "false"
+        # [GPT-5.6] If Redis replay is enabled, uncomment this exact secret alias mapping.
+        # run.googleapis.com/secrets: sparq-lws-redis-url:projects/PROJECT_ID/secrets/sparq-lws-redis-url
     spec:
       # Dedicated least-privilege service account (R5).
       # Replace PROJECT_ID with your GCP project ID.
@@ -90,16 +104,15 @@ spec:
 
           env:
             # Required: public HTTPS base URL for this Solid server.
-            # After first deploy, Cloud Run assigns a run.app URL; use that here, or
-            # configure a custom domain and use the custom domain URL.
-            # Replace https://your-lws-domain.example.com with your actual public URL.
+            # [GPT-5.6] Cloud Run's deterministic URL is known before first deployment.
+            # Replace PROJECT_NUMBER and REGION, or use a mapped custom HTTPS domain.
             - name: SOLID_SERVER_BASE_URL
-              value: "https://your-lws-domain.example.com"
+              value: "https://sparq-lws-PROJECT_NUMBER.REGION.run.app"
 
             # Required: trusted OIDC issuer (external IdP). LWS cannot self-issue tokens.
-            # Example: a public Solid-OIDC provider. Replace with your actual IdP URL.
+            # [GPT-5.6] Required placeholder: replace with the complete HTTPS issuer URL.
             - name: SOLID_SERVER_TRUSTED_ISSUER
-              value: "https://your-oidc-provider.example.com"
+              value: "TRUSTED_ISSUER_URL"
 
             # Optional: override the audience claim (defaults to SOLID_SERVER_BASE_URL).
             # - name: SOLID_SERVER_AUDIENCE
@@ -111,16 +124,16 @@ spec:
             #   valueFrom:
             #     secretKeyRef:
             #       name: sparq-lws-redis-url
-            #       key: latest
+            #       key: "1"
 
             # NEVER set in production (dev-only escape hatches — R2):
             # SOLID_SERVER_ALLOW_LOOPBACK, SOLID_SERVER_SEED_CONFORMANCE,
             # SOLID_SERVER_SEED_BENCH, SOLID_SERVER_ALLOW_SEED_NONMEMORY
 
-          # Startup probe: uses /livez (process-up check, ungated — verified in app.rs:56).
+          # [GPT-5.6] Startup must establish readiness before Cloud Run can route traffic.
           startupProbe:
             httpGet:
-              path: /livez
+              path: /readyz
               port: 3000
             initialDelaySeconds: 5
             periodSeconds: 5
@@ -137,14 +150,15 @@ spec:
             failureThreshold: 3
             timeoutSeconds: 3
 
-          # Readiness probe: /readyz — keeps traffic away until the server is configured.
-          # Cloud Run uses the liveness probe for traffic routing; readyz is advisory here
-          # but is the correct path (503 = not ready per design record §1.2).
+          # [GPT-5.6] Readiness failures remove the instance from traffic without restarting it.
           readinessProbe:
             httpGet:
               path: /readyz
               port: 3000
-            initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
             timeoutSeconds: 3
+
+          # [GPT-5.6] Cloud Run rejects container securityContext/readOnlyRootFilesystem.
+          # The published image remains non-root, and Cloud Run removes added capabilities and
+          # privilege escalation; its writable root overlay is ephemeral.

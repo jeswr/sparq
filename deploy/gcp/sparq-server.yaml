@@ -11,8 +11,9 @@
 #   1. Enable Cloud Run + Secret Manager APIs:
 #        gcloud services enable run.googleapis.com secretmanager.googleapis.com
 #
-#   2. Create the auth token secret:
-#        echo -n "$(openssl rand -hex 32)" | \
+#   2. Create the auth token secret (version 1 is pinned below):
+#        # [GPT-5.6] Strip openssl's newline so the stored token matches HTTP headers.
+#        openssl rand -hex 32 | tr -d '\n' | \
 #          gcloud secrets create sparq-auth-token \
 #            --replication-policy=automatic \
 #            --data-file=-
@@ -25,9 +26,12 @@
 #          --member="serviceAccount:sparq-server-sa@PROJECT_ID.iam.gserviceaccount.com" \
 #          --role="roles/secretmanager.secretAccessor"
 #
-#   4. Deploy (replace PROJECT_ID and REGION):
-#        gcloud run services replace deploy/gcp/sparq-server.yaml \
-#          --region REGION
+#   4. The deployer needs iam.serviceAccounts.actAs on this runtime identity. Grant
+#      roles/iam.serviceAccountUser on this service account to the deployer principal;
+#      do not grant roles/run.invoker to the runtime identity.
+#
+#   5. Render PROJECT_ID and PROJECT_NUMBER into a temporary copy using the commands in
+#      deploy/gcp/README.md. The committed manifest intentionally has no project default.
 #
 #      Or use the one-liner in deploy/gcp/README.md.
 #
@@ -36,11 +40,13 @@
 #   - Secret Manager secretKeyRef: token is never in the YAML or env-var plaintext (R4).
 #   - Dedicated service account sparq-server-sa with secretAccessor on own secret only (R5).
 #   - min-instances: 1 to avoid cold-start on health-probe path (R7 + bead acceptance).
-#   - max-instances: 10 default (adjust to workload; reduce to 1 for single-writer datasets).
+#     Cloud Run may still restart it; in-memory state is not durable. [GPT-5.6]
 #   - containerConcurrency: 80 (Cloud Run default; reduce for memory-heavy analytical loads).
-#   - Cloud Run ingress defaults to "all" (public). For internal-only, set ingress: internal.
-#   - SPARQ_AUTH_TOKEN_READ left commented out: read-gating is opt-in per design (R1 requires
-#     writes gated; read-gating is an operator choice).
+#   - Public invocation is explicit so the application Bearer token reaches the server; Cloud Run
+#     IAM and the application cannot both consume the single Authorization header. [GPT-5.6]
+#   - SPARQ_AUTH_TOKEN_READ=1 gates reads as well as writes by default. [GPT-5.6]
+#   - max-instances: 1 because the current server state is in-memory and is not shared between
+#     Cloud Run instances; the filesystem is also ephemeral. [GPT-5.6]
 
 apiVersion: serving.knative.dev/v1
 kind: Service
@@ -51,6 +57,8 @@ metadata:
     # Cloud Run region must be set at deploy time via --region flag or gcloud config;
     # this annotation is set by Cloud Run on the returned resource — do not set it here.
     run.googleapis.com/ingress: all
+    # [GPT-5.6] Public invocation is intentional; SPARQ auth below is the front door.
+    run.googleapis.com/invoker-iam-disabled: "true"
     run.googleapis.com/description: >
       sparq SPARQL 1.1 server (sq-agolp). Auth enforced via Secret Manager (R1/R4).
       Secure-defaults: open-by-default image gated with token at deploy layer.
@@ -59,9 +67,14 @@ spec:
   template:
     metadata:
       annotations:
-        # Min 1 instance: avoids cold-start on health-probe path; dataset stays warm.
+        # Min 1 instance avoids cold starts; it does not make in-memory state durable.
         autoscaling.knative.dev/minScale: "1"
-        autoscaling.knative.dev/maxScale: "10"
+        # [GPT-5.6] Independent instances would diverge because the graph is in-memory.
+        autoscaling.knative.dev/maxScale: "1"
+        # [GPT-5.6] Cloud Run custom probes require instance-based CPU allocation.
+        run.googleapis.com/cpu-throttling: "false"
+        # [GPT-5.6] Resolve the v1 secret alias to this exact same-project secret.
+        run.googleapis.com/secrets: sparq-auth-token:projects/PROJECT_NUMBER/secrets/sparq-auth-token
     spec:
       # Dedicated least-privilege service account (R5).
       # Replace PROJECT_ID with your GCP project ID.
@@ -97,12 +110,12 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: sparq-auth-token
-                  key: latest
+                  # [GPT-5.6] Pin env-var secrets; deploy a new revision to rotate.
+                  key: "1"
 
-            # Optional: also gate read requests behind the same token.
-            # Uncomment to require Bearer auth on GET /sparql as well.
-            # - name: SPARQ_AUTH_TOKEN_READ
-            #   value: "1"
+            # [GPT-5.6] Secure default: require Bearer auth on reads as well as writes.
+            - name: SPARQ_AUTH_TOKEN_READ
+              value: "1"
 
             # Optional: CORS allowed origin (e.g. your frontend domain).
             # - name: SPARQ_CORS_ALLOW_ORIGIN
@@ -118,6 +131,10 @@ spec:
             periodSeconds: 5
             failureThreshold: 6
             timeoutSeconds: 3
+
+          # [GPT-5.6] Cloud Run rejects container securityContext/readOnlyRootFilesystem.
+          # The published image remains non-root, and Cloud Run removes added capabilities and
+          # privilege escalation; its writable root overlay is ephemeral.
 
           # Liveness probe: restart the container if /health stops responding.
           livenessProbe:
