@@ -10,6 +10,7 @@
 //             body out as a full-content-width row instead of squeezing it into a half-column
 //             tile (sq-67qji — issue #1675). The lane grid (capability-lane-grid.tsx) owns the
 //             open/mounted state and pairs each button with its body by slug.
+//   * native → a static built-crate row with a one-line API snippet + crate/SKILL deep links.
 //   * soon  → a non-interactive "Coming soon" row that links out to GitHub.
 //
 // [OPUS-4.8] sq-vw3ax — BOLD redesign: each affordance renders as a depth TILE (the approved
@@ -28,7 +29,7 @@ import { ArrowRight, ChevronRight, ExternalLink } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { TIER_LABEL, TIER_VARIANT, type Surface } from "@/data/surfaces";
-import { surfaceBySlug } from "@/data/capabilities";
+import { surfaceBySlug, type CapabilityKind } from "@/data/capabilities";
 import {
   LazyDemo,
   hasLazyDemo,
@@ -122,12 +123,15 @@ function TileShell({
   surface,
   accent,
   cta,
+  details,
   interactive = true,
   active = false,
 }: {
   surface: Surface;
   accent: string;
   cta: React.ReactNode;
+  /** Optional compact proof/deep-link block for a built native-only capability. */
+  details?: React.ReactNode;
   interactive?: boolean;
   /** Pins the accent + elevation on (used while a demo tile's body is open). */
   active?: boolean;
@@ -135,6 +139,7 @@ function TileShell({
   const Icon = surface.icon;
   return (
     <div
+      data-capability={surface.slug}
       className={cn(
         "relative flex items-start gap-3 overflow-hidden rounded-[var(--radius-lg)] border bg-card px-4 py-3.5 transition-all duration-150",
         interactive &&
@@ -160,12 +165,54 @@ function TileShell({
         <div className="mt-1 text-[12.7px] leading-snug text-muted-foreground">
           {surface.blurb}
         </div>
+        {details}
       </div>
       <div className="flex shrink-0 flex-col items-end gap-2">
         <TierBadge surface={surface} />
         {cta}
       </div>
     </div>
+  );
+}
+
+/** [GPT-5.6] sq-vw3ax.15 — built native crate: copyable API proof + direct depth links,
+ *  without inventing a demo, route, or browser bundle. */
+function NativeTile({ surface, accent }: { surface: Surface; accent: string }) {
+  const native = surface.native;
+  if (!native) return null;
+
+  return (
+    <TileShell
+      surface={surface}
+      accent={accent}
+      interactive={false}
+      cta={null}
+      details={
+        <div className="mt-3 space-y-2 border-t pt-2.5">
+          <code className="block overflow-x-auto rounded-md bg-muted px-2.5 py-2 font-mono text-[11.5px] text-foreground">
+            {native.snippet}
+          </code>
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px]">
+            <a
+              className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
+              href={native.readme}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Crate / source <ExternalLink className="size-3" aria-hidden />
+            </a>
+            <a
+              className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
+              href={native.skill}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              SKILL.md <ExternalLink className="size-3" aria-hidden />
+            </a>
+          </div>
+        </div>
+      }
+    />
   );
 }
 
@@ -367,7 +414,7 @@ export function CapabilityRowItem({
   onToggle,
 }: {
   slug: string;
-  kind: "deep" | "demo" | "soon";
+  kind: CapabilityKind;
   accent?: string;
   /** Controlled disclosure state for a demo tile — owned by the lane grid (sq-67qji). */
   open?: boolean;
@@ -376,6 +423,7 @@ export function CapabilityRowItem({
   const surface = surfaceBySlug(slug);
   if (!surface) return null; // data drift — a row for an unknown surface; render nothing.
   if (kind === "deep") return <DeepTile surface={surface} accent={accent} />;
+  if (kind === "native") return <NativeTile surface={surface} accent={accent} />;
   if (kind === "soon") return <SoonTile surface={surface} accent={accent} />;
   // demo — guard against a data drift where a "demo" surface lacks a registered demo.
   if (hasLazyDemo(surface.slug)) {

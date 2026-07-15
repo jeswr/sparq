@@ -9,6 +9,8 @@
 //     whose existing interactive component is now lazily mounted in-place on /capabilities
 //     (see components/capabilities/lazy-demo.tsx). Its old route ships a client redirect stub
 //     to /capabilities#<theme> (static export cannot 301).
+//   * a NATIVE row — a built opt-in Rust crate with one API snippet + crate/SKILL deep links;
+//     it has no dense site page and adds no browser implementation to the static bundle.
 //   * a SOON row — a surface with no built page yet (cli, python); a plain "coming soon" row
 //     that links out to GitHub. Its old /surface/<slug> route is a placeholder today and is
 //     redirected too.
@@ -33,7 +35,7 @@ export const DEEP_PAGE_SLUGS = new Set([
   "inference",
 ]);
 
-export type CapabilityKind = "deep" | "demo" | "soon";
+export type CapabilityKind = "deep" | "demo" | "native" | "soon";
 
 export interface CapabilityRow {
   surface: Surface;
@@ -45,6 +47,8 @@ export interface CapabilityRow {
 /** Classify one surface for the gallery. `built === false` (cli/python) → "soon". */
 export function classify(surface: Surface): CapabilityKind {
   if (DEEP_PAGE_SLUGS.has(surface.slug)) return "deep";
+  // [GPT-5.6] sq-vw3ax.15 — native metadata is the explicit built-without-a-site-demo seam.
+  if (surface.native) return "native";
   if (surface.built === false || surface.built === undefined) {
     // cli / python have no `built: true` flag and no page → honest "coming soon" row.
     return surface.slug === "cli" || surface.slug === "python" ? "soon" : "demo";

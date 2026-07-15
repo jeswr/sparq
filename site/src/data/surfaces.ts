@@ -38,8 +38,18 @@ export type Tier =
   | "live-bbjs" // (c) 3rd-party WASM (bb.js UltraHonk proving)
   | "live-sim" // (d) faithful in-tab JS simulation
   | "hosted" // (e) hosted sparq-server
+  | "native" // built, opt-in native Rust crate; linked from the static site
   | "walkthrough" // (e) captured-I/O replay (different host / native-only)
   | "soon"; // not yet built — honest placeholder
+
+// [GPT-5.6] sq-vw3ax.15 — compact native-only rows carry their proof-of-existence inline:
+// one copyable API line plus direct crate and Agent Skill links. Keeping this metadata beside
+// the surface makes /capabilities, Home, and Cmd-K update from the same IA source.
+export interface NativeSurfaceMeta {
+  snippet: string;
+  readme: string;
+  skill: string;
+}
 
 export interface Surface {
   slug: string;
@@ -49,6 +59,7 @@ export interface Surface {
   tier: Tier;
   icon: LucideIcon;
   built?: boolean; // does a real page exist yet?
+  native?: NativeSurfaceMeta;
 }
 
 export interface SurfaceGroup {
@@ -66,6 +77,7 @@ export const TIER_LABEL: Record<Tier, string> = {
   "live-bbjs": "Live via bb.js",
   "live-sim": "Live simulation",
   hosted: "Hosted",
+  native: "Native crate",
   walkthrough: "Walkthrough",
   soon: "Coming soon",
 };
@@ -79,6 +91,7 @@ export const TIER_VARIANT: Record<
   "live-bbjs": "success",
   "live-sim": "default",
   hosted: "warning",
+  native: "muted",
   walkthrough: "muted",
   soon: "muted",
 };
@@ -119,12 +132,12 @@ export const FLAGSHIPS: Surface[] = [
 // [OPUS-4.8] sq-vw3ax.2 — the 5 capability THEMES (research/website-redesign.md §2).
 // Surfaces are mapped to themes by what they DO, keeping every existing surface, route,
 // blurb and tier verbatim:
-//   1. Query & data      — SPARQL + the data-format/JS-WASM/geo query surfaces
-//   2. Reason & validate — inference + SHACL
+//   1. Query & data      — SPARQL + formats/JS-WASM/geo + native analytics/canon/Arrow
+//   2. Reason & validate — inference + SHACL + native PROV-O lineage
 //   3. Search & GenAI    — full-text BM25, vector, GenAI/NLQ
 //   4. Privacy (ZK / MPC)— ZK query proofs + MPC federation (the Solid flagship sits in
 //      /showcase; it is surfaced via FLAGSHIPS, not duplicated as a /surface row here)
-//   5. Serve & embed     — HTTP server, CLI, Python, streaming RSP-QL
+//   5. Serve & embed     — HTTP/MCP servers, CLI, Python, streaming RSP-QL
 // The redesign's aspirational extra rows became beads, not fabricated nav entries: the
 // federation row landed via sq-vw3ax.13 (a captured-output demo row under Serve & embed);
 // structural-similarity remains unbuilt and is still NOT invented here.
@@ -135,7 +148,7 @@ export const GROUPS: SurfaceGroup[] = [
     // [OPUS-4.8] sq-4hiqe — the in-tab workbench now lives at /app (the /try REPL was removed);
     // this description is user-facing copy, so it stays clean (no route/bead cross-reference).
     description:
-      "Run SPARQL 1.1/1.2 over RDF — the query engine and the formats it ingests.",
+      "Query, exchange, and analyse RDF — SPARQL 1.1/1.2, data formats, canonicalization, and graph algorithms.",
     surfaces: [
       {
         slug: "sparql",
@@ -179,13 +192,57 @@ export const GROUPS: SurfaceGroup[] = [
         icon: MapPin,
         built: true,
       },
+      // [GPT-5.6] sq-vw3ax.15 — shipped native capabilities stay compact: no dense surface
+      // page, only an honest native tier, one API line, and direct code/docs links.
+      {
+        slug: "graph-analytics",
+        href: "https://github.com/jeswr/sparq/tree/main/crates/sparq-algos",
+        title: "Graph analytics",
+        blurb:
+          "PageRank, centrality, communities, SCCs, and topological order over a directed RDF projection.",
+        tier: "native",
+        icon: Network,
+        native: {
+          snippet: "let ranks = sparq_algos::pagerank(&graph, Default::default());",
+          readme: "https://github.com/jeswr/sparq/tree/main/crates/sparq-algos",
+          skill: "https://github.com/jeswr/sparq/blob/main/skills/graph-analytics/SKILL.md",
+        },
+      },
+      {
+        slug: "rdf-canon",
+        href: "https://github.com/jeswr/sparq/tree/main/crates/sparq-canon",
+        title: "RDFC-1.0 canonicalization",
+        blurb:
+          "Canonical blank-node labelling for stable N-Quads, hashing, signing, and graph isomorphism.",
+        tier: "native",
+        icon: Binary,
+        native: {
+          snippet: "let canonical = sparq_canon::canonicalize(&quads)?;",
+          readme: "https://github.com/jeswr/sparq/tree/main/crates/sparq-canon",
+          skill: "https://github.com/jeswr/sparq/blob/main/skills/rdf-canon/SKILL.md",
+        },
+      },
+      {
+        slug: "arrow-columnar",
+        href: "https://github.com/jeswr/sparq/tree/main/crates/sparq-arrow",
+        title: "Arrow export",
+        blurb:
+          "Faithful SPARQL SELECT interchange through Arrow RecordBatch, Parquet, and Arrow IPC.",
+        tier: "native",
+        icon: Database,
+        native: {
+          snippet: "let batch = sparq_arrow::to_record_batch(&result)?;",
+          readme: "https://github.com/jeswr/sparq/tree/main/crates/sparq-arrow",
+          skill: "https://github.com/jeswr/sparq/blob/main/skills/arrow-columnar/SKILL.md",
+        },
+      },
     ],
   },
   {
     id: "reason-validate",
     label: "Reason & validate",
     description:
-      "Derive new triples and check graphs against shapes — RDFS / OWL 2 RL / N3 closure and SHACL.",
+      "Derive, trace, and validate RDF — RDFS / OWL 2 RL / N3 closure, PROV-O lineage, and SHACL.",
     surfaces: [
       {
         slug: "inference",
@@ -204,6 +261,21 @@ export const GROUPS: SurfaceGroup[] = [
         tier: "live",
         icon: ShieldCheck,
         built: true,
+      },
+      {
+        // [GPT-5.6] sq-vw3ax.15 — PROV-O is a built opt-in crate, not an in-tab demo.
+        slug: "prov-lineage",
+        href: "https://github.com/jeswr/sparq/tree/main/crates/sparq-prov",
+        title: "PROV-O lineage",
+        blurb:
+          "PROV-O derivations for CONSTRUCT, DESCRIBE, UPDATE, and optional reasoner proof trees.",
+        tier: "native",
+        icon: Waypoints,
+        native: {
+          snippet: "let derivation = sparq_prov::derive_construct(&graph, query, config)?;",
+          readme: "https://github.com/jeswr/sparq/tree/main/crates/sparq-prov",
+          skill: "https://github.com/jeswr/sparq/blob/main/skills/prov-lineage/SKILL.md",
+        },
       },
     ],
   },
@@ -283,7 +355,7 @@ export const GROUPS: SurfaceGroup[] = [
     id: "serve-embed",
     label: "Serve & embed",
     description:
-      "Run sparq as a service or embed it — the HTTP endpoint, the CLI, Python bindings, and streaming RSP-QL.",
+      "Run sparq as a service or embed it — HTTP, MCP, CLI, Python, and streaming RSP-QL.",
     surfaces: [
       {
         slug: "http-server",
@@ -322,6 +394,21 @@ export const GROUPS: SurfaceGroup[] = [
         tier: "walkthrough",
         icon: Waypoints,
         built: true,
+      },
+      {
+        // [GPT-5.6] sq-vw3ax.15 — the MCP front door is native and read-only by default.
+        slug: "mcp-server",
+        href: "https://github.com/jeswr/sparq/tree/main/crates/sparq-mcp",
+        title: "MCP server",
+        blurb:
+          "Read-only-by-default MCP tools for SPARQL, schema introspection, stats, prefixes, and VoID.",
+        tier: "native",
+        icon: Server,
+        native: {
+          snippet: "let mut server = sparq_mcp::McpServer::new(graph);",
+          readme: "https://github.com/jeswr/sparq/tree/main/crates/sparq-mcp",
+          skill: "https://github.com/jeswr/sparq/blob/main/skills/agent-tools/SKILL.md",
+        },
       },
       {
         slug: "cli",
