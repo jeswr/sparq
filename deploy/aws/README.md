@@ -207,7 +207,7 @@ These templates are validated by `cfn-lint` (exit 0 on both). [GPT-5.6] The
 permission and a live AWS endpoint — the dev box IAM role does not allow this, so it is
 documented as manual validation.
 
-Secret hygiene: `grep -rEin "SPARQ_AUTH_TOKEN\s*[:=]\s*['\"][a-zA-Z0-9+/]{16,}" deploy/aws/`
+Secret hygiene: `grep -rniE "SPARQ_AUTH_TOKEN\s*[:=]\s*['\"][a-zA-Z0-9+/]{16,}" deploy/aws/`
 returns no matches.
 
 A CI workflow for automatic cfn-lint on `paths: deploy/aws/**` is tracked as discovered work
