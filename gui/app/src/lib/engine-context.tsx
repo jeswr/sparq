@@ -57,12 +57,13 @@ import {
 // query engine pays nothing until a workspace turns inference on.
 import { loadReasoner, modeToProfile, type WasmReasoner } from "@/lib/reason-wasm";
 // [FABLE-5] sq-ixc3.20 — canonical triple identity for the inferred-fact affordance (the
-// entailed-key set the results views consult) + the shared N-Triples term writer (moved out
+// entailed fact cache the results views consult) + the shared N-Triples term writer (moved out
 // of this file so the click-to-explain path and the snapshot writer share ONE writer).
 import {
-  entailedKeysFromClosure,
+  entailedFactsFromClosure,
   termToNT,
   tripleKeysOfNTriples,
+  type InferredFact,
 } from "@/lib/inferred-facts";
 
 /**
@@ -383,6 +384,12 @@ export interface EngineContextValue {
    */
   entailedTripleKeys: () => ReadonlySet<string> | null;
   /**
+   * [GPT-5.6] The same exact closure-added set as {@link entailedTripleKeys}, retained in the
+   * N-Triples term spelling accepted by {@link explainWhy}. Used by the Inference tool's fact
+   * browser; guarded by the same active closure cache key, so stale facts are never exposed.
+   */
+  entailedTripleFacts: () => readonly InferredFact[] | null;
+  /**
    * [FABLE-5] sq-ixc3.20 — ONE derivation ("why?") of the triple `(s, p, o)` under the
    * ACTIVE inference regime, as `sparq-reason`'s proof-tree JSON (parse with
    * @/lib/proof-view `parseProofJson`; the string `"null"` means "not entailed"). `s`/`p`/`o`
@@ -667,11 +674,15 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   // changes (warm / import / update) so a stale closure is rebuilt automatically.
   const reasonedStoreRef = React.useRef<WasmStore | null>(null);
   const reasonedKeyRef = React.useRef<string | null>(null);
-  // [FABLE-5] sq-ixc3.20 — the canonical keys of the triples the ACTIVE closure ADDED
+  // [GPT-5.6] sq-l54uy — the canonical keys + displayable facts the ACTIVE closure ADDED
   // (closure − base), computed alongside the closure build and cached under the SAME
   // `mode:epoch[:rulesHash]` key so it can never describe a different store than
   // `reasonedStoreRef` (the guard in `entailedTripleKeys` checks the key, not just presence).
-  const entailedKeysRef = React.useRef<{ key: string; keys: Set<string> } | null>(null);
+  const entailedCacheRef = React.useRef<{
+    key: string;
+    keys: Set<string>;
+    facts: InferredFact[];
+  } | null>(null);
   // [OPUS-4.8] sq-tp1m — the SINGLE-FLIGHT slot for an in-flight closure build, keyed by the
   // same `mode:epoch`. Overlapping callers (the applyInferenceMode effect + a run(), or two
   // run()s) that request the same key while the first materialisation is still awaiting share
@@ -741,7 +752,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       reasonedStoreRef.current = null;
       reasonedKeyRef.current = null;
       reasonedBuildRef.current = null;
-      entailedKeysRef.current = null;
+      entailedCacheRef.current = null;
       storeEpochRef.current += 1;
       setStoreEpoch(storeEpochRef.current);
       const { size, graphs: gs } = summariseGraphs(store);
@@ -876,7 +887,10 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
           const reasoned = Store.load(closure || " ", "ntriples");
           // [FABLE-5] sq-ixc3.20 — the derived lines ARE the entailed set for N3 mode;
           // reduce them to canonical keys for the inferred-fact affordance.
-          entailedKeysRef.current = { key, keys: tripleKeysOfNTriples(derived) };
+          // [GPT-5.6] Retain the same exact derived set as explainable N-Triples facts for the
+          // Inference tool browser. An empty base is correct because reasonN3 returns additions.
+          const entailed = entailedFactsFromClosure(derived, new Set<string>());
+          entailedCacheRef.current = { key, ...entailed };
           reasonedStoreRef.current = reasoned;
           reasonedKeyRef.current = key;
           return reasoned;
@@ -912,10 +926,10 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
         // [FABLE-5] sq-ixc3.20 — entailed = closure − base at CANONICAL key level (the two
         // texts come from different writers — Rust vs the JS termToNT — so identity is the
         // decoded key, never the raw line; see @/lib/inferred-facts).
-        entailedKeysRef.current = {
-          key,
-          keys: entailedKeysFromClosure(closure, tripleKeysOfNTriples(snapshot)),
-        };
+        // [GPT-5.6] Compute closure-minus-base once, retaining both membership keys and the
+        // exact N-Triples terms needed by the entailed-facts browser and why() panel.
+        const entailed = entailedFactsFromClosure(closure, tripleKeysOfNTriples(snapshot));
+        entailedCacheRef.current = { key, ...entailed };
         reasonedStoreRef.current = reasoned;
         reasonedKeyRef.current = key;
         return reasoned;
@@ -942,7 +956,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       if (mode === "off") {
         reasonedStoreRef.current = null;
         reasonedKeyRef.current = null;
-        entailedKeysRef.current = null;
+        entailedCacheRef.current = null;
         setInferenceStatus({ kind: "off" });
         return;
       }
@@ -982,7 +996,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
         if (gen !== inferenceGenRef.current) return;
         reasonedStoreRef.current = null;
         reasonedKeyRef.current = null;
-        entailedKeysRef.current = null;
+        entailedCacheRef.current = null;
         setInferenceStatus({
           kind: "error",
           message: err instanceof Error ? err.message : String(err),
@@ -1011,9 +1025,17 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   // The key guard makes staleness impossible: the set is only handed out while it describes
   // exactly the closure `run()` queries against (same `mode:epoch[:rulesHash]` key).
   const entailedTripleKeys = React.useCallback((): ReadonlySet<string> | null => {
-    const cached = entailedKeysRef.current;
+    const cached = entailedCacheRef.current;
     if (!cached || cached.key !== reasonedKeyRef.current) return null;
     return cached.keys;
+  }, []);
+
+  // [GPT-5.6] Displayable/provable facts for the ACTIVE closure, with the identical stale-key
+  // guard as entailedTripleKeys. The cached array is immutable by convention to consumers.
+  const entailedTripleFacts = React.useCallback((): readonly InferredFact[] | null => {
+    const cached = entailedCacheRef.current;
+    if (!cached || cached.key !== reasonedKeyRef.current) return null;
+    return cached.facts;
   }, []);
 
   // [FABLE-5] sq-ixc3.20 — one witness derivation of a clicked triple under the active
@@ -1457,6 +1479,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       inferenceStatus,
       setInferenceMode,
       entailedTripleKeys,
+      entailedTripleFacts,
       explainWhy,
       setN3Rules,
       setServiceAllowlist,
@@ -1484,6 +1507,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       inferenceStatus,
       setInferenceMode,
       entailedTripleKeys,
+      entailedTripleFacts,
       explainWhy,
       setN3Rules,
       setServiceAllowlist,

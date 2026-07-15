@@ -21,6 +21,23 @@ const XSD_STRING = "http://www.w3.org/2001/XMLSchema#string";
  *  on both sides of any comparison — the key stays injective per term kind). */
 const SEP = "";
 
+/** [GPT-5.6] One closure-added fact in the exact N-Triples term form accepted by why(). */
+export interface InferredFact {
+  /** Canonical decoded identity used by every inferred-fact affordance. */
+  key: string;
+  s: string;
+  p: string;
+  o: string;
+  /** A displayable N-Triples statement (the reasoner folds named graphs to s/p/o). */
+  ntriples: string;
+}
+
+/** [GPT-5.6] The exact closure-minus-base result retained for UI membership + browsing. */
+export interface EntailedFacts {
+  keys: Set<string>;
+  facts: InferredFact[];
+}
+
 // ---------------------------------------------------------------------------
 // N-Triples term writing (the engine wire shape) — moved here from engine-context so the
 // click-to-explain path and the snapshot writer share ONE writer.
@@ -143,6 +160,17 @@ export function tripleKeyOfTerms(s: RdfTerm, p: RdfTerm, o: RdfTerm): string {
   return `${keyOfRdfTerm(s)} ${keyOfRdfTerm(p)} ${keyOfRdfTerm(o)}`;
 }
 
+/** [GPT-5.6] Preserve a parsed statement in the term spelling required by the proof API. */
+function inferredFactOfTerms(s: RdfTerm, p: RdfTerm, o: RdfTerm): InferredFact {
+  return {
+    key: tripleKeyOfTerms(s, p, o),
+    s: s.nt,
+    p: p.nt,
+    o: o.nt,
+    ntriples: `${s.nt} ${p.nt} ${o.nt} .`,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Entailed-set construction (fed by the closure build in engine-context).
 // ---------------------------------------------------------------------------
@@ -162,6 +190,50 @@ export function tripleKeysOfNTriples(text: string): Set<string> {
 }
 
 /**
+ * [GPT-5.6] Facts in an N-Triples/N-Quads document whose canonical identities are in
+ * `includedKeys`. The first occurrence wins, so named-graph folding and duplicate closure
+ * emission still produce one browser row per distinct inferred triple.
+ */
+export function inferredFactsMatchingKeys(
+  text: string,
+  includedKeys: ReadonlySet<string>,
+): InferredFact[] {
+  if (!text.trim() || includedKeys.size === 0) return [];
+  const facts: InferredFact[] = [];
+  const seen = new Set<string>();
+  const { statements } = parseNTriples(text);
+  for (const st of statements) {
+    const fact = inferredFactOfTerms(st.s, st.p, st.o);
+    if (!includedKeys.has(fact.key) || seen.has(fact.key)) continue;
+    seen.add(fact.key);
+    facts.push(fact);
+  }
+  return facts;
+}
+
+/**
+ * [GPT-5.6] Compute closure minus base once while retaining both canonical membership keys and
+ * displayable/provable N-Triples facts. This is the shared source for result affordances and the
+ * Inference tool's entailed-facts browser.
+ */
+export function entailedFactsFromClosure(
+  closureText: string,
+  baseKeys: ReadonlySet<string>,
+): EntailedFacts {
+  const keys = new Set<string>();
+  const facts: InferredFact[] = [];
+  if (!closureText.trim()) return { keys, facts };
+  const { statements } = parseNTriples(closureText);
+  for (const st of statements) {
+    const fact = inferredFactOfTerms(st.s, st.p, st.o);
+    if (baseKeys.has(fact.key) || keys.has(fact.key)) continue;
+    keys.add(fact.key);
+    facts.push(fact);
+  }
+  return { keys, facts };
+}
+
+/**
  * The ENTAILED triple keys: every key of `closureText` that is not a key of `baseKeys`
  * (set difference — `closureText` is the reasoner's base+entailed output; what remains is
  * exactly what reasoning added).
@@ -171,6 +243,6 @@ export function entailedKeysFromClosure(
   baseKeys: ReadonlySet<string>,
 ): Set<string> {
   const keys = tripleKeysOfNTriples(closureText);
-  for (const k of baseKeys) keys.delete(k);
+  for (const key of baseKeys) keys.delete(key);
   return keys;
 }
