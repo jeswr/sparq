@@ -259,8 +259,12 @@ also fails the row (including `!=`). Head/FILTER vars must be bound positively;
 non-`ON` aggregate-body vars are aggregate-local (name collisions rejected). `COUNT(?v)`
 counts distinct full-body matches per group; `COUNT(DISTINCT ?v)` de-duplicates the
 projected value within each group. Counts mint `xsd:integer` literals. `SUM`
-and `AVG` follow SPARQL numeric promotion (`AVG` of integers is `xsd:decimal`), while
-`MIN`/`MAX` preserve the original extremal term id. Semi-naive rounds run per stratum.
+and `AVG` follow SPARQL numeric promotion (`AVG` of integers is `xsd:decimal`).
+Float/double operands promote the result and propagate IEEE `INF`/`-INF`/`NaN`.
+`MIN`/`MAX` preserve an original extremal term under the shared exact-rational total
+order: NaN sorts first and signed zeros compare equal. The lexical representative of
+an equal-valued tie is unspecified. <!-- [GPT-5.6] sq-r2nor --> Semi-naive rounds run
+per stratum.
 Incremental maintenance is differential-pinned (closure == from-scratch `eval` after
 every randomized insert/delete step) and skips strata whose input predicates did not
 change; its per-update set/index bookkeeping is O(affected visible input) — the

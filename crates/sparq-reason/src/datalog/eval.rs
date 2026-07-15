@@ -297,6 +297,12 @@ fn join_rows(
 /// variables and fold the selected aggregate, minting computed numeric results.
 /// Returns rows `[on₀ … onₖ₋₁, value]` in the OUTER join
 /// layout (`ON` columns first, in `ON` order). Empty groups produce no row.
+///
+/// [GPT-5.6] Floating operands deliberately stay on the shared numeric tower:
+/// `SUM`/`AVG` use XPath promotion and IEEE arithmetic (including special-value
+/// propagation), while `MIN`/`MAX` use `Num::cmp_total` so NaN is least and signed
+/// zeros compare equal. An equal-value tie keeps an original input term; its lexical
+/// representative is unspecified because Datalog relations are unordered sets.
 fn aggregate_table(dict: &mut Dict, agg: &AggAtom, store: &FactStore) -> Vec<Row> {
     let empty: Row = std::iter::repeat_n(NO_ID, agg.n_slots).collect();
     let mut rows: Vec<Row> = vec![empty];

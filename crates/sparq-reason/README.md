@@ -63,6 +63,10 @@ let g = Graph::from_parts(dict, triples);
   track): single or grouped `NOT { atom, atom }` (negation as failure),
   `AGGREGATE … BIND COUNT(DISTINCT ?v)/SUM/MIN/MAX/AVG(?v) AS ?c`, variable
   predicates, and numeric `FILTER` over the shared exact/float/double tower. The
+  numeric aggregates intentionally accept all four XSD tiers: `SUM`/`AVG` use XPath
+  promotion and propagate IEEE specials, while `MIN`/`MAX` use the shared total order
+  (NaN first, signed zeros equal) and preserve an original extremal term; the lexical
+  representative of an equal-value tie is unspecified. <!-- [GPT-5.6] sq-r2nor --> The
   **stratification checker** rejects cycles through NOT/AGGREGATE and conservatively
   couples variable predicates to every relation; the semi-naive evaluator and
   incremental maintainer share that invariant. <!-- [GPT-5.6] sq-a7bmo -->

@@ -80,6 +80,11 @@ Load-bearing details, each pinned by a test:
   (set semantics — Datalog relations are sets); `COUNT(DISTINCT ?v)` de-duplicates the
   projected value within each group; empty groups produce no row, and counts
   mint `xsd:integer` literals into the caller's `Dict`.
+- **Numeric aggregates.** `SUM`/`AVG` accept the shared integer/decimal/float/double
+  tower with XPath promotion and IEEE special-value propagation. `MIN`/`MAX` use
+  `Num::cmp_total` (NaN first, signed zeros equal), preserve an original extremal
+  term, and leave the lexical representative unspecified for equal-valued terms.
+  <!-- [GPT-5.6] sq-r2nor -->
 - **FILTER** compares exact/float/double numerics through the shared substrate
   `Num::cmp_relational`; non-numeric values and NaN fail the row.
 - **Variable predicates.** The dependency checker maps them to a conservative top

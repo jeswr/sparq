@@ -40,6 +40,12 @@
 //!   de-duplicates `?v`; there are no rows for empty groups) by the `ON` variables and
 //!   binds the count (an `xsd:integer`) to `?c`. Body variables other
 //!   than the `ON` list are aggregate-local. `ON` may be omitted for a global count.
+//! * **Numeric aggregates** accept `xsd:integer`/`decimal`/`float`/`double`. `SUM` and
+//!   `AVG` use XPath promotion, so a float/double operand promotes the result and IEEE
+//!   `INF`/`-INF`/`NaN` values propagate. `MIN`/`MAX` preserve an original extremal
+//!   term and use the shared exact-rational total order: NaN sorts first and signed
+//!   zeros compare equal. If equal-valued original terms differ lexically (including
+//!   `-0.0` and `0.0`), which representative is preserved is unspecified. [GPT-5.6]
 //! * **`FILTER(x op y)`** compares two bound-or-constant XSD numeric values with
 //!   `= != < <= > >=` via [`sparq_substrate::numeric::Num::cmp_relational`].
 //!   Float/double operands participate with XPath promotion; NaN and non-numeric

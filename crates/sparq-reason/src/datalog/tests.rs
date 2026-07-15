@@ -805,6 +805,123 @@ fn avg_of_integers_is_decimal() {
     assert_eq!(got, [[g, avg, one_half]].into_iter().collect());
 }
 
+/// [GPT-5.6] Floating aggregates are intentional numeric-tower behavior, not an
+/// accidental f64 coercion: float-only arithmetic remains float and a double operand
+/// promotes the result to double. Exact term assertions make datatype mutations fail.
+#[test]
+fn sum_avg_float_double_follow_xpath_promotion() {
+    const XSD_FLOAT: &str = "http://www.w3.org/2001/XMLSchema#float";
+    const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
+
+    let mut d = Dict::new();
+    let (float_group, double_group, value, sum, avg) = (
+        iri(&mut d, "floatGroup"),
+        iri(&mut d, "doubleGroup"),
+        iri(&mut d, "value"),
+        iri(&mut d, "sum"),
+        iri(&mut d, "avg"),
+    );
+    let one = int(&mut d, 1);
+    let one_half_float = d.intern_lit("1.5", XSD_FLOAT, None);
+    let two_half_double = d.intern_lit("2.5", XSD_DOUBLE, None);
+    let facts = vec![
+        [float_group, value, one],
+        [float_group, value, one_half_float],
+        [double_group, value, one_half_float],
+        [double_group, value, two_half_double],
+    ];
+    let got = derived(
+        &mut d,
+        &facts,
+        &format!(
+            "{P}[?g, ex:sum, ?v] :- AGGREGATE([?g, ex:value, ?n] ON ?g BIND SUM(?n) AS ?v) .\n\
+             [?g, ex:avg, ?v] :- AGGREGATE([?g, ex:value, ?n] ON ?g BIND AVG(?n) AS ?v) ."
+        ),
+    );
+    let float_sum = d.intern_lit("2.5E0", XSD_FLOAT, None);
+    let float_avg = d.intern_lit("1.25E0", XSD_FLOAT, None);
+    let double_sum = d.intern_lit("4.0E0", XSD_DOUBLE, None);
+    let double_avg = d.intern_lit("2.0E0", XSD_DOUBLE, None);
+    assert_eq!(
+        got,
+        [
+            [float_group, sum, float_sum],
+            [float_group, avg, float_avg],
+            [double_group, sum, double_sum],
+            [double_group, avg, double_avg],
+        ]
+        .into_iter()
+        .collect()
+    );
+}
+
+/// [GPT-5.6] Aggregate float-edge policy: IEEE arithmetic propagates NaN, whereas
+/// MIN/MAX use the shared total order with NaN least. A lone negative zero remains
+/// the original extremal term; when both signed zeros occur they compare equal and
+/// the native dialect deliberately does not promise which lexical representative wins.
+#[test]
+fn floating_aggregates_pin_nan_and_negative_zero_policy() {
+    const XSD_DOUBLE: &str = "http://www.w3.org/2001/XMLSchema#double";
+
+    let mut d = Dict::new();
+    let (nan_group, zero_group, value, sum, avg, min, max) = (
+        iri(&mut d, "nanGroup"),
+        iri(&mut d, "zeroGroup"),
+        iri(&mut d, "value"),
+        iri(&mut d, "sum"),
+        iri(&mut d, "avg"),
+        iri(&mut d, "min"),
+        iri(&mut d, "max"),
+    );
+    let nan = d.intern_lit("NaN", XSD_DOUBLE, None);
+    let neg_zero = d.intern_lit("-0.0E0", XSD_DOUBLE, None);
+    let one = int(&mut d, 1);
+    let facts = vec![
+        [nan_group, value, nan],
+        [nan_group, value, one],
+        [zero_group, value, neg_zero],
+    ];
+    let got = derived(
+        &mut d,
+        &facts,
+        &format!(
+            "{P}[?g, ex:sum, ?v] :- AGGREGATE([?g, ex:value, ?n] ON ?g BIND SUM(?n) AS ?v) .\n\
+             [?g, ex:avg, ?v] :- AGGREGATE([?g, ex:value, ?n] ON ?g BIND AVG(?n) AS ?v) .\n\
+             [?g, ex:min, ?v] :- AGGREGATE([?g, ex:value, ?n] ON ?g BIND MIN(?n) AS ?v) .\n\
+             [?g, ex:max, ?v] :- AGGREGATE([?g, ex:value, ?n] ON ?g BIND MAX(?n) AS ?v) ."
+        ),
+    );
+    assert!(
+        got.contains(&[nan_group, sum, nan]),
+        "SUM must propagate NaN"
+    );
+    assert!(
+        got.contains(&[nan_group, avg, nan]),
+        "AVG must propagate NaN"
+    );
+    assert!(got.contains(&[nan_group, min, nan]), "NaN is least for MIN");
+    assert!(
+        got.contains(&[nan_group, max, one]),
+        "finite 1 is above NaN for MAX"
+    );
+    assert!(
+        got.contains(&[zero_group, sum, neg_zero]),
+        "SUM preserves IEEE -0"
+    );
+    assert!(
+        got.contains(&[zero_group, avg, neg_zero]),
+        "AVG preserves IEEE -0"
+    );
+    assert!(
+        got.contains(&[zero_group, min, neg_zero]),
+        "MIN preserves its input term"
+    );
+    assert!(
+        got.contains(&[zero_group, max, neg_zero]),
+        "MAX preserves its input term"
+    );
+}
+
 #[test]
 fn empty_group_yields_no_row_for_sum() {
     let mut d = Dict::new();
