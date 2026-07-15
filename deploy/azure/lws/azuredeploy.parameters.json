@@ -1,0 +1,30 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {
+      "value": "sparq-lws-env"
+    },
+    "containerAppName": {
+      "value": "sparq-lws"
+    },
+    "imageRef": {
+      "value": "ghcr.io/sparq-org/sparq-lws-core:latest"
+    },
+    "livenessPath": {
+      "value": "/livez"
+    },
+    "readinessPath": {
+      "value": "/readyz"
+    },
+    "solidTrustedIssuer": {
+      "value": "https://YOUR-OIDC-ISSUER"
+    },
+    "minReplicas": {
+      "value": 1
+    },
+    "cpuCores": {
+      "value": "0.5"
+    }
+  }
+}
