@@ -22,7 +22,7 @@ permissions:
 
 jobs:
   helm-validate:
-    name: Helm lint, render, and schema validation
+    name: Helm lint, render, and schema validation (advisory)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
