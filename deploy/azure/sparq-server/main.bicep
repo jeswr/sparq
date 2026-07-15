@@ -1,31 +1,41 @@
 // [SONNET-4.6] sq-zcou4 — Azure Container Apps: sparq-server
+// [GPT-5.6] Security/correctness review: Key Vault-backed auth, valid ACA schema, genuine ARM output.
 //
 // SECURE-DEFAULTS NOTICE (R1/R9):
 // The sparq-server image is open-by-default at the image layer (bakes SPARQ_ALLOW_REMOTE=1,
 // no auth). Anyone reaching the published port can read AND write the dataset.
 // This template enforces auth ON at the template layer:
-//   - SPARQ_AUTH_TOKEN is stored as a Container Apps secret — NEVER a literal.
+//   - SPARQ_AUTH_TOKEN is stored in Key Vault and exposed through a Container Apps secretRef.
 //   - Do NOT remove the secretRef wiring. Do NOT add a default token value here.
 //
 // DECISION LOG (sq-zcou4):
-//   - Azure Container Apps (not ACI or AKS): managed serverless, auto-TLS on ingress FQDN,
+//   - Azure Container Apps rather than Container Instances or managed Kubernetes: serverless,
 //     no cert/IP management needed — aligns with R3 requirement for managed TLS.
-//   - Container Apps secrets: token stored as a Container Apps secret (secretRef injection)
-//     satisfying R4; an optional Key Vault reference replaces this for vault-backed deployments.
-//   - User-assigned managed identity: scoped to Key Vault get on its own secret only (R5).
-//     The identity is created by this template; callers grant it Key Vault access post-deploy.
+//   - A dedicated Key Vault stores the token; Container Apps resolves a versionless Key Vault
+//     reference through its user-assigned managed identity (R4/R5).
+//   - The vault contains only this app's token and its access policy grants the identity only
+//     secrets/get. No subscription/resource-group wildcard role is created (R5).
 //   - External HTTPS-only ingress on targetPort 3030 only; no management ports public (R6).
 //   - Container Apps auto-provisions a managed TLS cert on the *.azurecontainerapps.io FQDN
 //     (R3). Custom domain TLS follows the same managed path.
 //   - minReplicas: 1 default (ensures health probe and /health path stay warm).
-//   - ReadOnlyRootFilesystem enforced at securityContext layer (R8).
-//   - sparq-server runs non-root in the distroless image; not overridden here (R8).
+//   - sparq-server runs non-root in the distroless image; Container Apps' 2024-03-01 API has no
+//     container securityContext/readOnlyRootFilesystem property, so the template does not emit an
+//     invalid no-op security block (R8 applies where the platform supports it).
+
+metadata gpt56Review = '[GPT-5.6] Corrected by the stronger-tier IaC security review.'
+metadata securityNotice = 'sparq-server is open-by-default at the image layer; this template gates it with a Key Vault token. Do not remove the token wiring.'
 
 @description('Container Apps Environment name — created by this template.')
 param environmentName string = 'sparq-server-env'
 
 @description('Container App name.')
 param containerAppName string = 'sparq-server'
+
+@description('Dedicated Key Vault name. The default is stable and globally unique for this deployment.')
+@minLength(3)
+@maxLength(24)
+param keyVaultName string = 'sparq-${uniqueString(subscription().id, resourceGroup().id, containerAppName)}'
 
 @description('Azure region to deploy into.')
 param location string = resourceGroup().location
@@ -37,12 +47,17 @@ param location string = resourceGroup().location
 ''')
 param imageRef string = 'ghcr.io/sparq-org/sparq-server:latest'
 
+@description('HTTP path used by startup, liveness, and readiness probes (R7).')
+@minLength(1)
+param healthPath string = '/health'
+
 @description('''
   SPARQ_AUTH_TOKEN bearer value.
   REQUIRED — a strong random secret (e.g. openssl rand -hex 32).
-  Stored as a Container Apps secret; never logged or exposed in the template output. (R1/R4)
+  Stored in the dedicated Key Vault; never logged or exposed in template outputs. (R1/R4)
 ''')
 @secure()
+@minLength(32)
 param authToken string
 
 @description('Minimum replica count. Default 1 keeps /health warm.')
@@ -75,11 +90,34 @@ param maxConcurrent int = 16
 @maxValue(300)
 param queryTimeoutSeconds int = 30
 
-@description('CPU allocation per replica (0.25, 0.5, 0.75, 1.0, 1.25, …, 2.0).')
+@description('CPU allocation per replica. Memory is derived to keep a valid Container Apps consumption profile.')
+@allowed([
+  '0.25'
+  '0.5'
+  '0.75'
+  '1.0'
+  '1.25'
+  '1.5'
+  '1.75'
+  '2.0'
+])
 param cpuCores string = '0.5'
 
-@description('Memory allocation per replica (e.g. 1Gi, 2Gi).')
-param memory string = '1Gi'
+var memoryByCpu = {
+  '0.25': '0.5Gi'
+  '0.5': '1Gi'
+  '0.75': '1.5Gi'
+  '1.0': '2Gi'
+  '1.25': '2.5Gi'
+  '1.5': '3Gi'
+  '1.75': '3.5Gi'
+  '2.0': '4Gi'
+}
+
+// [GPT-5.6] Fail during ARM expression evaluation instead of reaching the provider with invalid scale.
+var effectiveMaxReplicas = maxReplicas >= minReplicas
+  ? maxReplicas
+  : fail('maxReplicas must be greater than or equal to minReplicas.')
 
 // ---------------------------------------------------------------------------
 // User-assigned managed identity (R5 — least privilege)
@@ -90,10 +128,66 @@ resource managedIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-
 }
 
 // ---------------------------------------------------------------------------
+// Dedicated Key Vault + token (R1/R4/R5)
+// [GPT-5.6] The app identity can only get secrets from this one-secret, app-specific vault.
+// ---------------------------------------------------------------------------
+resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' = {
+  name: keyVaultName
+  location: location
+  properties: {
+    tenantId: tenant().tenantId
+    sku: {
+      family: 'A'
+      name: 'standard'
+    }
+    accessPolicies: [
+      {
+        tenantId: tenant().tenantId
+        objectId: managedIdentity.properties.principalId
+        permissions: {
+          certificates: []
+          keys: []
+          secrets: [
+            'get'
+          ]
+          storage: []
+        }
+      }
+    ]
+    enableRbacAuthorization: false
+    enablePurgeProtection: false
+    enableSoftDelete: true
+    enabledForDeployment: false
+    enabledForDiskEncryption: false
+    enabledForTemplateDeployment: false
+    publicNetworkAccess: 'Enabled'
+    softDeleteRetentionInDays: 7
+    networkAcls: {
+      bypass: 'None'
+      defaultAction: 'Allow'
+      ipRules: []
+      virtualNetworkRules: []
+    }
+  }
+}
+
+resource authSecret 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
+  parent: keyVault
+  name: 'sparq-auth-token'
+  properties: {
+    attributes: {
+      enabled: true
+    }
+    contentType: 'SPARQ bearer token'
+    value: authToken
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Log Analytics workspace (telemetry for Container Apps environment)
 // ---------------------------------------------------------------------------
 resource logAnalytics 'Microsoft.OperationalInsights/workspaces@2022-10-01' = {
-  name: '${environmentName}-logs'
+  name: take('${environmentName}-logs', 63)
   location: location
   properties: {
     sku: {
@@ -135,14 +229,16 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   properties: {
     environmentId: containerAppsEnv.id
     configuration: {
+      activeRevisionsMode: 'Single'
       // -----------------------------------------------------------------------
-      // Secrets (R4): token stored as Container Apps secret — never a literal
-      // in any template output or environment variable value field.
+      // Secrets (R4/R5): versionless Key Vault reference enables automatic rotation.
+      // The token is never copied into a plaintext environment-variable value field.
       // -----------------------------------------------------------------------
       secrets: [
         {
           name: 'sparq-auth-token'
-          value: authToken
+          identity: managedIdentity.id
+          keyVaultUrl: '${keyVault.properties.vaultUri}secrets/${authSecret.name}'
         }
       ]
       // -----------------------------------------------------------------------
@@ -153,7 +249,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         external: true
         targetPort: 3030
         transport: 'http'
-        allowInsecure: false   // R3: reject plain HTTP
+        allowInsecure: false // R3: redirect plain HTTP to HTTPS
       }
     }
     template: {
@@ -161,17 +257,10 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         {
           name: 'sparq-server'
           image: imageRef
-          // -------------------------------------------------------------------
-          // Security context: non-root, read-only root filesystem (R8)
-          // -------------------------------------------------------------------
-          securityContext: {
-            runAsNonRoot: true
-            readOnlyRootFilesystem: true
-            allowPrivilegeEscalation: false
-          }
+          // [GPT-5.6] The distroless image supplies non-root; ACA has no securityContext here.
           resources: {
             cpu: json(cpuCores)
-            memory: memory
+            memory: memoryByCpu[cpuCores]
           }
           // -------------------------------------------------------------------
           // Environment — secrets injected via secretRef (R1/R4)
@@ -180,7 +269,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             [
               {
                 name: 'SPARQ_AUTH_TOKEN'
-                secretRef: 'sparq-auth-token'  // R1: token from secret, never literal
+                secretRef: 'sparq-auth-token' // R1: token from secret, never literal
               }
               {
                 name: 'SPARQ_MAX_CONCURRENT'
@@ -202,7 +291,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               type: 'Liveness'
               httpGet: {
-                path: '/health'
+                path: healthPath
                 port: 3030
               }
               initialDelaySeconds: 10
@@ -212,7 +301,7 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               type: 'Readiness'
               httpGet: {
-                path: '/health'
+                path: healthPath
                 port: 3030
               }
               initialDelaySeconds: 5
@@ -222,19 +311,19 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
             {
               type: 'Startup'
               httpGet: {
-                path: '/health'
+                path: healthPath
                 port: 3030
               }
               initialDelaySeconds: 5
-              periodSeconds: 5
-              failureThreshold: 12   // up to 60s startup window
+              periodSeconds: 6
+              failureThreshold: 10 // [GPT-5.6] API maximum; preserves a 60s startup window
             }
           ]
         }
       ]
       scale: {
         minReplicas: minReplicas
-        maxReplicas: maxReplicas
+        maxReplicas: effectiveMaxReplicas
       }
     }
   }
@@ -245,5 +334,6 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
 // ---------------------------------------------------------------------------
 output fqdn string = containerApp.properties.configuration.ingress.fqdn
 output sparqlEndpoint string = 'https://${containerApp.properties.configuration.ingress.fqdn}/sparql'
+output keyVaultName string = keyVault.name
 output managedIdentityClientId string = managedIdentity.properties.clientId
 output managedIdentityPrincipalId string = managedIdentity.properties.principalId

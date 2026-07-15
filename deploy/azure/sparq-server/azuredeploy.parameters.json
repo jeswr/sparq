@@ -11,9 +11,11 @@
     "imageRef": {
       "value": "ghcr.io/sparq-org/sparq-server:latest"
     },
+    "healthPath": {
+      "value": "/health"
+    },
     "authToken": {
       "reference": {
-        "_comment": "R4 — NEVER set a plaintext value here. Use a Key Vault reference or supply --parameters authToken=<value> at deploy time. Example Key Vault reference:",
         "keyVault": {
           "id": "/subscriptions/<subscription-id>/resourceGroups/<rg>/providers/Microsoft.KeyVault/vaults/<vault-name>"
         },
@@ -40,9 +42,6 @@
     },
     "cpuCores": {
       "value": "0.5"
-    },
-    "memory": {
-      "value": "1Gi"
     }
   }
 }
