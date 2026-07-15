@@ -31,6 +31,40 @@ module docs on `src/main.rs`. `SOLID_SERVER_RECONCILE_INTERVAL_SECS` is unset by
 default; a positive integer enables one periodic sweep using the unchanged
 one-hour orphan grace period. Invalid or zero values fail boot.
 
+## 📦 Native container image
+
+<!-- [GPT-5.6] sq-lmz40: native image contract; distinct from the wasm/npm development host. -->
+
+Release tags publish `ghcr.io/sparq-org/sparq-lws-core` as a multi-arch image
+(`linux/amd64` + `linux/arm64`); pin an immutable `X.Y.Z` tag (also `X.Y` / `latest`).
+It binds `0.0.0.0:3000` via `SOLID_SERVER_BIND`, runs as uid/gid **65532** (non-root),
+serves unauthenticated `GET /livez` + `GET /readyz` probes, and enables **no** auth
+bypass or dev escape hatch — all other `SOLID_SERVER_*` / `PSS_*` settings pass through.
+
+```bash
+VERSION=0.1.0   # the release to deploy
+docker run --rm --name sparq-lws-core -p 127.0.0.1:3000:3000 \
+  -e SOLID_SERVER_BASE_URL=https://solid.example \
+  -e SOLID_SERVER_TRUSTED_ISSUER=https://idp.example/realms/solid \
+  "ghcr.io/sparq-org/sparq-lws-core:${VERSION}"
+```
+
+**Required production configuration:**
+
+- **Base URL:** `SOLID_SERVER_BASE_URL` = the public `https://` origin (set
+  `SOLID_SERVER_AUDIENCE` only if the token audience differs).
+- **TLS:** terminate at a trusted proxy (keep the container port private), or mount PEMs
+  and set both `SOLID_SERVER_TLS_CERT` + `SOLID_SERVER_TLS_KEY` (setting one fails boot;
+  uid 65532 must read them).
+- **Auth:** `SOLID_SERVER_TRUSTED_ISSUER` = the production Solid-OIDC issuer. DPoP,
+  HTTPS-only WebIDs, anonymous-mutation rejection, and strict WebID↔issuer checks are on
+  by default — never set `SOLID_SERVER_ALLOW_LOOPBACK`, the seed vars, or
+  `SOLID_SERVER_BIDIRECTIONAL=off`; access stays WAC-controlled.
+- **Storage:** review `PSS_SPARQ_BACKEND` — its default `memory` (and `embedded` without
+  `SOLID_SERVER_SPARQ_DIR`) is **ephemeral**, and the native binary has only an in-memory
+  blob backend, so this image is **not for durable production data** yet. The `http` and
+  `redis-replay` backends need opt-in compile-time features.
+
 ## ✨ Features
 
 - **LDP surface** — containers + RDF/non-RDF resources, Turtle / JSON-LD content
