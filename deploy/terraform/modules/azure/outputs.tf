@@ -12,8 +12,9 @@ output "service_name" {
 
 output "secret_id" {
   description = "Key Vault secret ID for the auth token (R4)"
-  value       = azurerm_key_vault_secret.auth_token.id
-  sensitive   = true
+  # [GPT-5.6] LWS does not create an unused bearer-token secret.
+  value     = var.server == "sparq-server" ? azurerm_key_vault_secret.auth_token[0].id : null
+  sensitive = true
 }
 
 output "identity_principal_id" {

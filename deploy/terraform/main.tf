@@ -10,9 +10,9 @@
 #
 # Usage:
 #   terraform init
-#   terraform apply -var target=aws -var auth_token=<secret>
+#   terraform apply -var target=azure
 #
-# terraform plan is the CI dry-run; terraform apply requires provider credentials.
+# terraform validate is the credential-free CI check; plan/apply require provider credentials.
 
 terraform {
   required_version = ">= 1.5.0"
@@ -37,6 +37,28 @@ terraform {
   }
 }
 
+# [GPT-5.6] Provider configurations belong in the root module. Keeping them out
+# of counted child modules avoids Terraform's legacy-module apply failure.
+provider "aws" {
+  region = var.aws_region
+}
+
+provider "azurerm" {
+  features {
+    key_vault {
+      purge_soft_delete_on_destroy    = false
+      recover_soft_deleted_key_vaults = true
+    }
+  }
+}
+
+provider "google" {
+  project = var.gcp_project != "" ? var.gcp_project : null
+  region  = var.gcp_region
+}
+
+provider "random" {}
+
 # ---------------------------------------------------------------------------
 # Root-level local resolution
 # ---------------------------------------------------------------------------
@@ -48,7 +70,7 @@ locals {
     lws          = "ghcr.io/sparq-org/sparq-lws-core"
   }
 
-  image_ref = var.image_override != "" ? var.image_override : local.image_defaults[var.server]
+  image_ref  = var.image_override != "" ? var.image_override : local.image_defaults[var.server]
   full_image = "${local.image_ref}:${var.image_tag}"
 
   # Health-check path per server (R7 — parameterised, NOT shared constant)
@@ -64,6 +86,45 @@ locals {
     lws          = 3000
   }
   container_port = local.container_port_defaults[var.server]
+
+  # [GPT-5.6] A single literal default cannot be valid across ECS, Container
+  # Apps, and Cloud Run. Resolve provider-native defaults before delegation.
+  cpu_defaults = {
+    aws   = "512"
+    azure = "0.5"
+    gcp   = "1"
+  }
+  memory_defaults = {
+    aws   = "1024"
+    azure = "1.0Gi"
+    gcp   = "512Mi"
+  }
+  cpu    = var.cpu != "" ? var.cpu : local.cpu_defaults[var.target]
+  memory = var.memory != "" ? var.memory : local.memory_defaults[var.target]
+
+  # [GPT-5.6] LWS uses an in-memory DPoP replay set unless Redis is wired, so
+  # the secure root module pins it to one replica on managed autoscalers.
+  azure_min_replicas = var.server == "lws" ? 1 : var.min_replicas
+  azure_max_replicas = var.server == "lws" ? 1 : var.max_replicas
+  gcp_min_instances  = var.server == "lws" ? 1 : var.min_instances
+  gcp_max_instances  = var.server == "lws" ? 1 : var.max_instances
+}
+
+# [GPT-5.6] Prefer generating the bearer token at deploy time. The container
+# receives it only through the selected cloud's secret-store reference.
+resource "random_password" "auth_token" {
+  # [GPT-5.6] Count depends only on the non-sensitive server selector; Terraform
+  # must not derive resource addresses from whether a sensitive override is set.
+  count = var.server == "sparq-server" ? 1 : 0
+
+  length  = 48
+  special = false
+}
+
+locals {
+  auth_token = var.server == "sparq-server" ? (
+    var.auth_token != null ? var.auth_token : random_password.auth_token[0].result
+  ) : null
 }
 
 # ---------------------------------------------------------------------------
@@ -74,16 +135,27 @@ module "aws" {
   count  = var.target == "aws" ? 1 : 0
   source = "./modules/aws"
 
+  providers = {
+    aws = aws
+  }
+
   name           = var.name
   server         = var.server
   image          = local.full_image
   container_port = local.container_port
   health_path    = local.health_path
-  auth_token     = var.auth_token
+  auth_token     = local.auth_token
 
-  aws_region = var.aws_region
-  cpu        = var.cpu
-  memory     = var.memory
+  cpu    = local.cpu
+  memory = local.memory
+
+  acm_certificate_arn = var.aws_acm_certificate_arn
+  public_hostname     = var.aws_public_hostname
+  route53_zone_id     = var.aws_route53_zone_id
+  vpc_id              = var.aws_vpc_id
+  alb_subnet_ids      = var.aws_alb_subnet_ids
+  task_subnet_ids     = var.aws_task_subnet_ids
+  assign_public_ip    = var.aws_assign_public_ip
 
   # LWS-only required params (ignored for sparq-server)
   solid_server_base_url       = var.solid_server_base_url
@@ -98,19 +170,24 @@ module "azure" {
   count  = var.target == "azure" ? 1 : 0
   source = "./modules/azure"
 
+  providers = {
+    azurerm = azurerm
+    random  = random
+  }
+
   name           = var.name
   server         = var.server
   image          = local.full_image
   container_port = local.container_port
   health_path    = local.health_path
-  auth_token     = var.auth_token
+  auth_token     = local.auth_token
 
-  azure_location      = var.azure_location
-  azure_rg_name       = var.azure_rg_name
-  cpu                 = var.cpu
-  memory              = var.memory
-  min_replicas        = var.min_replicas
-  max_replicas        = var.max_replicas
+  azure_location = var.azure_location
+  azure_rg_name  = var.azure_rg_name
+  cpu            = local.cpu
+  memory         = local.memory
+  min_replicas   = local.azure_min_replicas
+  max_replicas   = local.azure_max_replicas
 
   # LWS-only required params (ignored for sparq-server)
   solid_server_base_url       = var.solid_server_base_url
@@ -125,19 +202,23 @@ module "gcp" {
   count  = var.target == "gcp" ? 1 : 0
   source = "./modules/gcp"
 
+  providers = {
+    google = google
+  }
+
   name           = var.name
   server         = var.server
   image          = local.full_image
   container_port = local.container_port
   health_path    = local.health_path
-  auth_token     = var.auth_token
+  auth_token     = local.auth_token
 
-  gcp_project  = var.gcp_project
-  gcp_region   = var.gcp_region
-  min_instances = var.min_instances
-  max_instances = var.max_instances
-  cpu           = var.cpu
-  memory        = var.memory
+  gcp_project   = var.gcp_project
+  gcp_region    = var.gcp_region
+  min_instances = local.gcp_min_instances
+  max_instances = local.gcp_max_instances
+  cpu           = local.cpu
+  memory        = local.memory
 
   # LWS-only required params (ignored for sparq-server)
   solid_server_base_url       = var.solid_server_base_url

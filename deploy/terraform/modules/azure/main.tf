@@ -28,15 +28,6 @@ terraform {
   }
 }
 
-provider "azurerm" {
-  features {
-    key_vault {
-      purge_soft_delete_on_destroy    = false
-      recover_soft_deleted_key_vaults = true
-    }
-  }
-}
-
 data "azurerm_client_config" "current" {}
 
 # ---------------------------------------------------------------------------
@@ -73,19 +64,23 @@ resource "azurerm_user_assigned_identity" "sparq" {
 
 # Key Vault name must be globally unique and <=24 chars
 resource "random_string" "kv_suffix" {
+  count = var.server == "sparq-server" ? 1 : 0
+
   length  = 6
   special = false
   upper   = false
 }
 
 resource "azurerm_key_vault" "sparq" {
-  name                       = "${substr(var.name, 0, 17)}-${random_string.kv_suffix.result}"
+  count = var.server == "sparq-server" ? 1 : 0
+
+  name                       = "${substr(var.name, 0, 17)}-${random_string.kv_suffix[0].result}"
   location                   = azurerm_resource_group.sparq.location
   resource_group_name        = azurerm_resource_group.sparq.name
   tenant_id                  = data.azurerm_client_config.current.tenant_id
   sku_name                   = "standard"
   soft_delete_retention_days = 7
-  purge_protection_enabled   = false
+  purge_protection_enabled   = true
 
   # Current Terraform executor can manage secrets
   access_policy {
@@ -97,8 +92,6 @@ resource "azurerm_key_vault" "sparq" {
       "List",
       "Set",
       "Delete",
-      "Purge",
-      "Recover",
     ]
   }
 
@@ -116,13 +109,24 @@ resource "azurerm_key_vault" "sparq" {
 }
 
 resource "azurerm_key_vault_secret" "auth_token" {
+  count = var.server == "sparq-server" ? 1 : 0
+
   name         = "sparq-auth-token"
   value        = var.auth_token
-  key_vault_id = azurerm_key_vault.sparq.id
+  key_vault_id = azurerm_key_vault.sparq[0].id
   content_type = "sparq-server SPARQ_AUTH_TOKEN — do not remove (R1/R4)"
 
   tags = {
     ManagedBy = "sparq-terraform"
+  }
+
+  lifecycle {
+    # [GPT-5.6] Direct child-module callers cannot create an open server with
+    # a missing or trivially weak token.
+    precondition {
+      condition     = try(length(var.auth_token) >= 32, false)
+      error_message = "sparq-server requires auth_token with at least 32 characters."
+    }
   }
 }
 
@@ -168,6 +172,11 @@ locals {
     {
       name  = "SPARQ_ALLOW_REMOTE"
       value = "1"
+    },
+    {
+      # [GPT-5.6] Gate reads as well as writes; probes remain ungated.
+      name  = "SPARQ_AUTH_TOKEN_READ"
+      value = "1"
     }
   ]
 
@@ -199,11 +208,15 @@ resource "azurerm_container_app" "sparq" {
     identity_ids = [azurerm_user_assigned_identity.sparq.id]
   }
 
-  # Auth token from Key Vault via managed identity (R4)
-  secret {
-    name                = local.secret_ref_name
-    key_vault_secret_id = azurerm_key_vault_secret.auth_token.id
-    identity            = azurerm_user_assigned_identity.sparq.id
+  # Auth token from Key Vault via managed identity (R4); LWS creates no unused
+  # secret or data-plane permission.
+  dynamic "secret" {
+    for_each = var.server == "sparq-server" ? [1] : []
+    content {
+      name                = local.secret_ref_name
+      key_vault_secret_id = azurerm_key_vault_secret.auth_token[0].versionless_id
+      identity            = azurerm_user_assigned_identity.sparq.id
+    }
   }
 
   template {
@@ -249,20 +262,23 @@ resource "azurerm_container_app" "sparq" {
       }
 
       startup_probe {
-        transport        = "HTTP"
-        path             = var.health_path
-        port             = var.container_port
+        transport               = "HTTP"
+        path                    = var.health_path
+        port                    = var.container_port
         failure_count_threshold = 10
-        period_seconds   = 10
+        # [GPT-5.6] AzureRM names this field interval_seconds, not the
+        # Kubernetes/Cloud Run period_seconds spelling.
+        interval_seconds = 10
       }
     }
   }
 
   # Automatic HTTPS on Container Apps FQDN (R3); ingress on app port only (R6)
   ingress {
-    external_enabled = true
-    target_port      = var.container_port
-    transport        = "http"
+    external_enabled           = true
+    target_port                = var.container_port
+    transport                  = "http"
+    allow_insecure_connections = false
 
     traffic_weight {
       percentage      = 100
@@ -275,5 +291,29 @@ resource "azurerm_container_app" "sparq" {
     Server    = var.server
   }
 
-  depends_on = [azurerm_key_vault_secret.auth_token]
+  lifecycle {
+    precondition {
+      condition = var.server != "lws" || (
+        startswith(var.solid_server_base_url, "https://") &&
+        startswith(var.solid_server_trusted_issuer, "https://")
+      )
+      error_message = "lws requires HTTPS solid_server_base_url and solid_server_trusted_issuer values."
+    }
+    precondition {
+      condition     = var.min_replicas <= var.max_replicas
+      error_message = "min_replicas must not exceed max_replicas."
+    }
+    precondition {
+      condition     = var.server != "lws" || (var.min_replicas == 1 && var.max_replicas == 1)
+      error_message = "lws must use exactly one replica unless shared Redis replay protection is wired."
+    }
+    precondition {
+      condition = (
+        var.server == "sparq-server" && var.container_port == 3030
+        ) || (
+        var.server == "lws" && var.container_port == 3000
+      )
+      error_message = "container_port must be 3030 for sparq-server or 3000 for lws."
+    }
+  }
 }

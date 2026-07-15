@@ -14,25 +14,32 @@ template layer via `auth_token` (R1). **Do not remove the token wiring.**
 terraform init
 terraform apply \
   -var target=aws \
-  -var auth_token="$(openssl rand -hex 32)" \
-  -var aws_region=us-east-1
+  -var aws_region=us-east-1 \
+  -var 'aws_acm_certificate_arn=arn:aws:acm:us-east-1:123456789012:certificate/REPLACE-ME' \
+  -var aws_public_hostname=sparq.example.com \
+  -var aws_route53_zone_id=Z1234567890
 
 # Azure — Container Apps + Key Vault
 terraform apply \
   -var target=azure \
-  -var auth_token="$(openssl rand -hex 32)" \
   -var azure_location=eastus
 
 # GCP — Cloud Run + Secret Manager
 terraform apply \
   -var target=gcp \
-  -var auth_token="$(openssl rand -hex 32)" \
   -var gcp_project=my-project \
   -var gcp_region=us-central1
 ```
 
-Never commit `auth_token` to `.tfvars` or version control. The token is stored
-in the target cloud's secret store and injected at runtime (R4).
+<!-- [GPT-5.6] The default avoids command-line secret exposure. -->
+Omit `auth_token` to generate a strong token during apply. Terraform writes it
+to the target cloud's secret store, and the container receives only that secret
+reference (R4). Retrieve it later using the cloud secret-store CLI.
+
+Never commit an `auth_token` override to `.tfvars` or version control. Like all
+Terraform-managed secret values, a generated or supplied token is also present
+in Terraform state; use an encrypted remote backend with tightly restricted
+state access.
 
 ## Structure
 
@@ -40,7 +47,7 @@ in the target cloud's secret store and injected at runtime (R4).
 deploy/terraform/
   main.tf          Root module — delegates to ./modules/<target>
   variables.tf     All root variables
-  outputs.tf       endpoint_url, service_name, secret_id
+  outputs.tf       endpoint_url, service_name, secret_id, AWS DNS target
   modules/
     aws/           ECS Fargate + ALB + Secrets Manager
     azure/         Container Apps + Key Vault
@@ -60,9 +67,12 @@ deploy/terraform/
 |---|---|---|
 | `target` | (required) | `aws` / `azure` / `gcp` |
 | `server` | `sparq-server` | `sparq-server` or `lws` |
-| `auth_token` | (required) | Bearer token — stored in cloud secret store, never a literal |
+| `auth_token` | generated | Optional 32+ character override; stored in the cloud secret store |
 | `image_tag` | `latest` | Image tag to deploy |
 | `name` | `sparq` | Base name for all resources |
+| `aws_acm_certificate_arn` | `""` | Required for `target=aws`; public plaintext mode is unavailable |
+| `aws_public_hostname` | `""` | Required for `target=aws`; must match the ACM certificate |
+| `aws_route53_zone_id` | `""` | Optional Route 53 zone; otherwise create the DNS record externally |
 | `solid_server_base_url` | `""` | Required when `server=lws` |
 | `solid_server_trusted_issuer` | `""` | Required when `server=lws` |
 
@@ -73,21 +83,36 @@ ACM cert ARN for AWS HTTPS, replica counts, etc.).
 
 | Rule | What this module does |
 |---|---|
-| R1 — Auth ON | `SPARQ_AUTH_TOKEN` injected from cloud secret store; no unauthenticated public endpoint |
+| R1 — Auth ON | `SPARQ_AUTH_TOKEN` comes from the cloud secret store and `SPARQ_AUTH_TOKEN_READ=1` gates reads and writes; health remains public |
 | R2 — No anonymous write | Token required for writes; LWS dev escape hatches (`ALLOW_LOOPBACK` etc.) absent |
-| R3 — TLS at edge | AWS: ALB + ACM; Azure: Container Apps auto-HTTPS; GCP: Cloud Run auto-HTTPS |
+| R3 — TLS at edge | AWS requires ALB + ACM and redirects HTTP; Azure rejects insecure ingress; GCP uses Cloud Run HTTPS |
 | R4 — Secrets in store | Token in Secrets Manager / Key Vault / Secret Manager; `sensitive = true` variable |
-| R5 — Least-privilege IAM | Dedicated task/execution role (AWS) / managed identity (Azure) / service account (GCP); no wildcard grants |
-| R6 — Ingress scoped | App port only; ALB SG source-based (AWS); Container Apps external ingress on targetPort only |
+| R5 — Least-privilege IAM | Dedicated empty task role + scoped execution role (AWS) / managed identity (Azure) / service account (GCP); no global wildcard grants |
+| R6 — Ingress scoped | AWS tasks accept traffic only from the ALB; Container Apps and Cloud Run expose only managed HTTPS ingress |
 | R7 — Health checks | `/health` (sparq-server) or `/readyz`+`/livez` (lws); parameterised, not shared constant |
-| R8 — Non-root | Images run non-root by default; not overridden; read-only rootfs where supported |
+| R8 — Non-root | Images run non-root; AWS also uses a read-only rootfs and drops all Linux capabilities |
 
 ## LWS notes
 
 LWS requires an external OIDC provider — it cannot self-issue. Set
 `solid_server_base_url` and `solid_server_trusted_issuer`. For multi-replica
-LWS deployments a shared Redis replay store is needed (single-instance default
-avoids DPoP replay collision; `max_replicas=1` is the safe default for lws).
+LWS deployments a shared Redis replay store is needed. This root module does not
+wire Redis, so it forces exactly one LWS replica/instance on every provider.
+
+## AWS networking
+
+The default-VPC quick start assigns ECS tasks a public IP so they can pull the
+public GHCR image and reach AWS APIs, but the task security group permits no
+public ingress: only the ALB security group can reach the app port. For private
+tasks, pass `aws_task_subnet_ids` for subnets with NAT or the necessary VPC
+endpoints and set `aws_assign_public_ip=false`. Pass public subnets separately
+through `aws_alb_subnet_ids`.
+
+AWS returns `https://<aws_public_hostname>` rather than the generated ALB name:
+ACM cannot issue a certificate for an `amazonaws.com` hostname. When Route 53 is
+not authoritative, point `aws_public_hostname` at the
+`aws_load_balancer_dns_name` root output using your external DNS provider before
+sending credentials.
 
 ## Static CI validation
 

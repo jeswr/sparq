@@ -10,6 +10,11 @@ variable "server" {
   description = "sparq-server | lws"
   type        = string
   default     = "sparq-server"
+
+  validation {
+    condition     = contains(["sparq-server", "lws"], var.server)
+    error_message = "server must be sparq-server or lws."
+  }
 }
 
 variable "image" {
@@ -25,17 +30,29 @@ variable "container_port" {
 variable "health_path" {
   description = "Health-check path (/health or /readyz) — parameterised per R7"
   type        = string
+
+  validation {
+    condition     = startswith(var.health_path, "/")
+    error_message = "health_path must start with '/'."
+  }
 }
 
 variable "auth_token" {
   description = "SPARQ_AUTH_TOKEN — stored in Secret Manager, never a literal (R4)"
   type        = string
+  default     = null
+  nullable    = true
   sensitive   = true
 }
 
 variable "gcp_project" {
   description = "GCP project ID"
   type        = string
+
+  validation {
+    condition     = trimspace(var.gcp_project) != ""
+    error_message = "gcp_project must not be empty."
+  }
 }
 
 variable "gcp_region" {
@@ -45,9 +62,16 @@ variable "gcp_region" {
 }
 
 variable "cpu" {
-  description = "CPU limit for Cloud Run container (e.g. '1000m' or '1')"
+  description = "CPU limit for Cloud Run container (1, 2, 4, 6, or 8 vCPU)"
   type        = string
-  default     = "1000m"
+  # [GPT-5.6] Cloud Run rejects the root's former AWS-style value and current
+  # Cloud Run v2 accepts integer vCPU quantities.
+  default = "1"
+
+  validation {
+    condition     = contains(["1", "2", "4", "6", "8"], var.cpu)
+    error_message = "cpu must be one of Cloud Run's supported vCPU values: 1, 2, 4, 6, 8."
+  }
 }
 
 variable "memory" {
@@ -62,14 +86,16 @@ variable "min_instances" {
     health path (R7). Single-instance avoids multi-replica DPoP replay
     collision for lws (§1.3 of design record).
   EOT
-  type    = number
-  default = 1
+  type        = number
+  default     = 1
 }
 
 variable "max_instances" {
   description = "Maximum Cloud Run instances"
   type        = number
-  default     = 3
+  # [GPT-5.6] Safe for direct lws module use; the root raises this only for
+  # sparq-server and pins lws to one without Redis replay wiring.
+  default = 1
 }
 
 variable "allow_unauthenticated" {
@@ -78,8 +104,8 @@ variable "allow_unauthenticated" {
     because sparq-server uses its own Bearer token (R1) as the access control.
     Set false to add Cloud Run IAM as a second layer for internal deployments.
   EOT
-  type    = bool
-  default = true
+  type        = bool
+  default     = true
 }
 
 variable "solid_server_base_url" {

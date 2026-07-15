@@ -10,6 +10,11 @@ variable "server" {
   description = "sparq-server | lws"
   type        = string
   default     = "sparq-server"
+
+  validation {
+    condition     = contains(["sparq-server", "lws"], var.server)
+    error_message = "server must be sparq-server or lws."
+  }
 }
 
 variable "image" {
@@ -25,18 +30,19 @@ variable "container_port" {
 variable "health_path" {
   description = "Health-check path (/health or /readyz) — parameterised per R7"
   type        = string
+
+  validation {
+    condition     = startswith(var.health_path, "/")
+    error_message = "health_path must start with '/'."
+  }
 }
 
 variable "auth_token" {
   description = "SPARQ_AUTH_TOKEN — stored in Secrets Manager, never a literal (R4)"
   type        = string
+  default     = null
+  nullable    = true
   sensitive   = true
-}
-
-variable "aws_region" {
-  description = "AWS region"
-  type        = string
-  default     = "us-east-1"
 }
 
 variable "vpc_id" {
@@ -45,10 +51,22 @@ variable "vpc_id" {
   default     = ""
 }
 
-variable "subnet_ids" {
-  description = "List of subnet IDs for the ALB and ECS tasks; defaults to default VPC subnets"
+variable "alb_subnet_ids" {
+  description = "Public subnet IDs for the internet-facing ALB; defaults to default VPC subnets"
   type        = list(string)
   default     = []
+}
+
+variable "task_subnet_ids" {
+  description = "ECS task subnet IDs; defaults to alb_subnet_ids"
+  type        = list(string)
+  default     = []
+}
+
+variable "assign_public_ip" {
+  description = "Assign task public IPs for outbound access; disable only with private-subnet NAT or endpoints"
+  type        = bool
+  default     = true
 }
 
 variable "cpu" {
@@ -73,11 +91,33 @@ variable "acm_certificate_arn" {
   description = <<-EOT
     ACM certificate ARN for HTTPS termination on the ALB (R3). When set, the
     module creates an HTTPS:443 listener with TLS 1.3 preferred + an HTTP:80→443
-    redirect. When empty, an HTTP-only listener is created (dev/internal only —
-    not recommended for public endpoints bearing Bearer tokens).
+    redirect. Public plaintext forwarding is intentionally unsupported.
   EOT
-  type    = string
-  default = ""
+  type        = string
+
+  # [GPT-5.6] Fail during planning instead of silently creating public HTTP.
+  validation {
+    condition     = can(regex("^arn:[^:]+:acm:[^:]+:[0-9]{12}:certificate/[0-9A-Za-z-]+$", var.acm_certificate_arn))
+    error_message = "acm_certificate_arn must be a complete ACM certificate ARN."
+  }
+}
+
+variable "public_hostname" {
+  description = "Public DNS hostname covered by acm_certificate_arn"
+  type        = string
+
+  # [GPT-5.6] The ALB-generated amazonaws.com name cannot be covered by an
+  # operator ACM certificate, so a real application hostname is mandatory.
+  validation {
+    condition     = can(regex("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$", var.public_hostname))
+    error_message = "public_hostname must be a lowercase fully qualified DNS hostname without a scheme or trailing dot."
+  }
+}
+
+variable "route53_zone_id" {
+  description = "Optional Route 53 hosted zone ID for public_hostname; leave empty when DNS is managed elsewhere"
+  type        = string
+  default     = ""
 }
 
 variable "enable_deletion_protection" {

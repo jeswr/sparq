@@ -68,8 +68,9 @@ jobs:
           # Find variable "auth_token" block
           m = re.search(r'variable\s+"auth_token"\s*\{([^}]+(?:\{[^}]*\}[^}]*)*)\}', text, re.DOTALL)
           if not m:
-              print(f"SKIP: no auth_token variable in {sys.argv[1]}")
-              sys.exit(0)
+              # [GPT-5.6] Missing security input is a failure, not a skippable case.
+              print(f"ERROR: no auth_token variable in {sys.argv[1]}")
+              sys.exit(1)
           block = m.group(1)
           if re.search(r'sensitive\s*=\s*true', block):
               print(f"OK: auth_token is sensitive in {sys.argv[1]}")
@@ -109,6 +110,9 @@ jobs:
 
       - name: Set up Terraform
         uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269ef065 # v3.1.2
+        with:
+          # [GPT-5.6] Keep CI on the validator version used for this review.
+          terraform_version: 1.15.8
 
       - name: terraform init (no backend)
         working-directory: ${{ matrix.module.path }}

@@ -1,10 +1,13 @@
 # sparq Terraform — AWS submodule outputs (sq-sos84) [SONNET]
 
 output "endpoint_url" {
-  description = "ALB DNS name (HTTPS if ACM cert provided, HTTP otherwise)"
-  value = var.acm_certificate_arn != "" ? (
-    "https://${aws_lb.sparq.dns_name}"
-  ) : "http://${aws_lb.sparq.dns_name}"
+  description = "Public HTTPS endpoint covered by the ACM certificate (R3)"
+  value       = "https://${var.public_hostname}"
+}
+
+output "load_balancer_dns_name" {
+  description = "Generated ALB DNS target for external DNS providers"
+  value       = aws_lb.sparq.dns_name
 }
 
 output "service_name" {
@@ -14,8 +17,9 @@ output "service_name" {
 
 output "secret_id" {
   description = "Secrets Manager ARN for the auth token (R4)"
-  value       = aws_secretsmanager_secret.auth_token.arn
-  sensitive   = true
+  # [GPT-5.6] LWS does not create an unused bearer-token secret.
+  value     = var.server == "sparq-server" ? aws_secretsmanager_secret.auth_token[0].arn : null
+  sensitive = true
 }
 
 output "cluster_arn" {

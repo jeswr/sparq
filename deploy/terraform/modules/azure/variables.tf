@@ -10,6 +10,11 @@ variable "server" {
   description = "sparq-server | lws"
   type        = string
   default     = "sparq-server"
+
+  validation {
+    condition     = contains(["sparq-server", "lws"], var.server)
+    error_message = "server must be sparq-server or lws."
+  }
 }
 
 variable "image" {
@@ -25,11 +30,18 @@ variable "container_port" {
 variable "health_path" {
   description = "Readiness health-check path (/health or /readyz) — parameterised per R7"
   type        = string
+
+  validation {
+    condition     = startswith(var.health_path, "/")
+    error_message = "health_path must start with '/'."
+  }
 }
 
 variable "auth_token" {
   description = "SPARQ_AUTH_TOKEN — stored in Key Vault, never a literal (R4)"
   type        = string
+  default     = null
+  nullable    = true
   sensitive   = true
 }
 
@@ -40,7 +52,7 @@ variable "azure_location" {
 }
 
 variable "azure_rg_name" {
-  description = "Resource group name (created if it does not exist)"
+  description = "Resource group name to create (import it first if it already exists)"
   type        = string
   default     = "sparq-rg"
 }
@@ -66,7 +78,9 @@ variable "min_replicas" {
 variable "max_replicas" {
   description = "Maximum Container App replicas"
   type        = number
-  default     = 3
+  # [GPT-5.6] Safe for direct lws module use; the root raises this only for
+  # sparq-server and pins lws to one without Redis replay wiring.
+  default = 1
 }
 
 variable "solid_server_base_url" {

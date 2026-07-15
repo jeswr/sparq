@@ -5,9 +5,9 @@ output "endpoint_url" {
   value = (
     var.target == "aws" ? (
       length(module.aws) > 0 ? module.aws[0].endpoint_url : ""
-    ) : var.target == "azure" ? (
+      ) : var.target == "azure" ? (
       length(module.azure) > 0 ? module.azure[0].endpoint_url : ""
-    ) : (
+      ) : (
       length(module.gcp) > 0 ? module.gcp[0].endpoint_url : ""
     )
   )
@@ -18,9 +18,9 @@ output "service_name" {
   value = (
     var.target == "aws" ? (
       length(module.aws) > 0 ? module.aws[0].service_name : ""
-    ) : var.target == "azure" ? (
+      ) : var.target == "azure" ? (
       length(module.azure) > 0 ? module.azure[0].service_name : ""
-    ) : (
+      ) : (
       length(module.gcp) > 0 ? module.gcp[0].service_name : ""
     )
   )
@@ -31,11 +31,20 @@ output "secret_id" {
   value = (
     var.target == "aws" ? (
       length(module.aws) > 0 ? module.aws[0].secret_id : ""
-    ) : var.target == "azure" ? (
+      ) : var.target == "azure" ? (
       length(module.azure) > 0 ? module.azure[0].secret_id : ""
-    ) : (
+      ) : (
       length(module.gcp) > 0 ? module.gcp[0].secret_id : ""
     )
   )
   sensitive = true
+}
+
+# [GPT-5.6] External DNS providers need the raw ALB target while clients use
+# endpoint_url, whose hostname is covered by the ACM certificate.
+output "aws_load_balancer_dns_name" {
+  description = "Generated ALB DNS target when target=aws; null otherwise"
+  value = var.target == "aws" && length(module.aws) > 0 ? (
+    module.aws[0].load_balancer_dns_name
+  ) : null
 }
