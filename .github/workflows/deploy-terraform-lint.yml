@@ -1,0 +1,123 @@
+# deploy-terraform-lint — static validation for the multi-cloud Terraform module (sq-sos84)
+#
+# [SONNET] Runs: terraform init -backend=false + terraform validate + terraform fmt -check
+# per submodule, plus a secret-literal grep (R4).
+#
+# This workflow is NON-GATING (design record §4): "a cloud-CLI outage or a provider-
+# credential gap must never redden the engine's merge gate."
+# Job names contain "advisory" so the ci-summary gate aggregator excludes them.
+#
+# Triggers: push/PR changes to deploy/terraform/**, or workflow_dispatch.
+# No cloud credentials required — static analysis only.
+
+name: terraform lint (advisory)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "deploy/terraform/**"
+  pull_request:
+    paths:
+      - "deploy/terraform/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Secret-literal hygiene grep (R4) — advisory
+  # -------------------------------------------------------------------------
+  secret-grep-advisory:
+    name: secret-literal grep (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Grep for plaintext secret literals in deploy/terraform
+        run: |
+          echo "Scanning deploy/terraform for committed secret literals (R4)..."
+          # Patterns that suggest a hard-coded token / password / key
+          # Intentionally conservative: flags obvious literals, not high-entropy strings
+          if grep -rEn \
+              '(password|passwd|secret|token|key)\s*=\s*"[A-Za-z0-9+/]{8,}"' \
+              deploy/terraform/ \
+              --include="*.tf" \
+              --include="*.tfvars" \
+              --include="*.json"; then
+            echo "ERROR: plaintext secret literal found in deploy/terraform/ (R4 violation)"
+            exit 1
+          fi
+          echo "OK: no plaintext secret literals found"
+
+      - name: Verify auth_token variable is marked sensitive
+        run: |
+          echo "Verifying auth_token is marked sensitive = true in root and submodules..."
+          for f in \
+            deploy/terraform/variables.tf \
+            deploy/terraform/modules/aws/variables.tf \
+            deploy/terraform/modules/azure/variables.tf \
+            deploy/terraform/modules/gcp/variables.tf; do
+            # Extract the auth_token variable block and check for sensitive = true
+            if ! python3 - "$f" <<'PYEOF'
+          import sys, re
+
+          text = open(sys.argv[1]).read()
+          # Find variable "auth_token" block
+          m = re.search(r'variable\s+"auth_token"\s*\{([^}]+(?:\{[^}]*\}[^}]*)*)\}', text, re.DOTALL)
+          if not m:
+              print(f"SKIP: no auth_token variable in {sys.argv[1]}")
+              sys.exit(0)
+          block = m.group(1)
+          if re.search(r'sensitive\s*=\s*true', block):
+              print(f"OK: auth_token is sensitive in {sys.argv[1]}")
+              sys.exit(0)
+          else:
+              print(f"ERROR: auth_token missing sensitive = true in {sys.argv[1]}")
+              sys.exit(1)
+          PYEOF
+            then
+              exit 1
+            fi
+          done
+          echo "OK: all auth_token variables are marked sensitive"
+
+  # -------------------------------------------------------------------------
+  # Terraform static validation — per submodule — advisory
+  # -------------------------------------------------------------------------
+  terraform-validate-advisory:
+    name: terraform validate (advisory)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - path: deploy/terraform
+            label: root
+          - path: deploy/terraform/modules/aws
+            label: aws
+          - path: deploy/terraform/modules/azure
+            label: azure
+          - path: deploy/terraform/modules/gcp
+            label: gcp
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269ef065 # v3.1.2
+
+      - name: terraform init (no backend)
+        working-directory: ${{ matrix.module.path }}
+        run: terraform init -backend=false
+
+      - name: terraform validate
+        working-directory: ${{ matrix.module.path }}
+        run: terraform validate
+
+      - name: terraform fmt -check
+        working-directory: ${{ matrix.module.path }}
+        run: terraform fmt -check -recursive
