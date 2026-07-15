@@ -1,4 +1,5 @@
 # [SONNET-4.6] sq-dwame — Render Blueprint for sparq-lws-core (Solid/LWS server).
+# [GPT-5.6] Post-hoc hardening: explicit public bind and single-instance pin.
 #
 # DEPENDENCY NOTE: the sparq-lws-core image is built by bead sq-lmz40 and will be
 # published to ghcr.io/sparq-org/sparq-lws-core. This config references the canonical
@@ -9,7 +10,7 @@
 # DPoP is required, HTTPS-only WebIDs. SOLID_SERVER_TRUSTED_ISSUER and
 # SOLID_SERVER_BASE_URL are REQUIRED parameters (the server cannot self-issue).
 #
-# Auto-HTTPS (R4): Render provides automatic TLS on *.onrender.com and custom domains.
+# Auto-HTTPS (R3): Render provides automatic TLS on *.onrender.com and custom domains.
 # SOLID_SERVER_BASE_URL MUST match your actual public HTTPS URL.
 #
 # Multi-instance note: set numInstances > 1 only when SOLID_SERVER_REPLAY_REDIS_URL is
@@ -29,9 +30,17 @@ services:
     healthCheckPath: /readyz
 
     plan: starter
+    # Single-instance invariant: the default DPoP replay store is in-memory.
     numInstances: 1
 
     envVars:
+      # The binary defaults to loopback; PaaS ingress requires an explicit public container bind.
+      - key: SOLID_SERVER_BIND
+        value: 0.0.0.0:3000
+
+      - key: PORT
+        value: "3000"
+
       # REQUIRED — sync: false means Render prompts at deploy time; values are NEVER
       # stored in this YAML (R4).
       - key: SOLID_SERVER_BASE_URL

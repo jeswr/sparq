@@ -1,138 +1,170 @@
 <!-- [SONNET-4.6] sq-dwame — PaaS one-click deploy configs for sparq-server + sparq-lws-core. -->
+<!-- [GPT-5.6] Post-hoc correctness/security review and hardening after PR #2314. -->
 
-# PaaS one-click deploy
+# PaaS deployment
 
-One-click deploy configs for the sparq SPARQL server (`sparq-server`) and the Solid/LWS
-server (`sparq-lws-core`) on three fast PaaS providers: **Fly.io**, **Render**, and
-**Railway**.
+Deployment configs for the SPARQL server (`sparq-server`) and Solid/LWS server
+(`sparq-lws-core`) on Fly.io, Render, and Railway.
 
-## Secure-defaults notice (R1/R2/R4/R9)
+These are intentionally explicit setup flows, not unsafe deploy buttons. A generic button cannot
+both select these nested config files and guarantee that secrets are installed before public
+ingress. Follow the provider steps below in order.
 
-> **sparq-server is open-by-default at the image layer** (it bakes `SPARQ_ALLOW_REMOTE=1`
-> and ships with no auth). Anyone who can reach the published port can read AND write the
-> dataset. **These templates enforce auth ON** at the template layer via `SPARQ_AUTH_TOKEN`
-> — do not remove that wiring.
+## Secure defaults
 
-Key rules applied in every config here:
+> **sparq-server is open by default at the image layer.** It bakes
+> `SPARQ_ALLOW_REMOTE=1` and has no token unless the deployment supplies one. These templates
+> inject `SPARQ_AUTH_TOKEN` from the provider's secret store and set
+> `SPARQ_AUTH_TOKEN_READ=1`, so both reads and writes require the token. Do not remove that
+> wiring. They also override the baked `SPARQ_ALLOW_REMOTE=1` to `0`, so a missing token makes
+> the public bind fail closed instead of starting an unauthenticated server.
 
-- **R1 (auth ON):** `SPARQ_AUTH_TOKEN` is a required secret for sparq-server. The token is
-  stored only in the PaaS secret store — never in the config files.
-- **R2 (no anonymous write):** Unauthenticated write requests return 401/403. The
-  sparq-lws-core image is fail-closed by design; anonymous mutation is rejected by default.
-- **R4 (secrets in the secret store):** No literal token, password, or key appears in any
-  committed config file. Secrets are set via `fly secrets set`, Render's dashboard prompt
-  (`sync: false`), or `railway variables set`.
-- **Auto-HTTPS:** All three providers terminate TLS automatically on their managed domains.
-  Plaintext HTTP is redirected to HTTPS at the edge (`force_https = true` on Fly; automatic
-  on Render and Railway). **Do not expose either server on a plaintext public endpoint.**
+- **Secrets:** no token, password, key, or Redis URL is committed. Use Fly secrets, Render's
+  generated environment-group secret, or Railway variables.
+- **HTTPS:** Fly sets `force_https = true`; Render and Railway terminate TLS and redirect HTTP
+  at their managed edges. Do not expose the internal container ports directly.
+- **Health:** `sparq-server` uses port 3030 and `/health`. LWS uses port 3000,
+  `/livez` for liveness, and `/readyz` for readiness.
+- **One instance only:** `sparq-server` owns an uncoordinated in-memory dataset, so writable
+  replicas silently diverge. LWS has an in-memory DPoP replay store unless a shared Redis replay
+  backend is wired. Every flow below pins one instance.
 
-## 🚀 sparq-server (SPARQL 1.1 Protocol server)
+The configs consume the canonical images `ghcr.io/sparq-org/sparq-server:latest` and
+`ghcr.io/sparq-org/sparq-lws-core:latest`. A deployment cannot succeed until its selected tag is
+published. The LWS image remains dependent on `sq-lmz40`.
 
-Image: `ghcr.io/sparq-org/sparq-server:latest`
-Port: 3030 | Health: `GET /health`
+## sparq-server
 
 ### Fly.io
 
-[![Deploy on Fly.io](https://img.shields.io/badge/Deploy%20on-Fly.io-7B5EA7?logo=fly.io)](https://fly.io/launch?source=github&template=https://github.com/sparq-org/sparq/tree/main/deploy/paas/sparq-server)
+Fly creates two Machines by default for a new HTTP service. Both `--ha=false` and the explicit
+scale command are load-bearing single-writer safeguards.
 
 ```bash
-# 1. Install flyctl: https://fly.io/docs/getting-started/installing-flyctl/
 cd deploy/paas/sparq-server
-fly launch --copy-config --no-deploy
+fly launch --copy-config --generate-name --no-deploy --ha=false
 fly secrets set SPARQ_AUTH_TOKEN="$(openssl rand -hex 32)"
-fly deploy
+fly deploy --ha=false
+fly scale count 1
+fly scale show
 ```
 
-Config: [`deploy/paas/sparq-server/fly.toml`](sparq-server/fly.toml)
+The app is not deployed until after the token is in Fly's encrypted secret vault. The config
+enforces HTTPS and probes `GET /health`.
+
+Config: [`sparq-server/fly.toml`](sparq-server/fly.toml)
 
 ### Render
 
-[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/sparq-org/sparq&branch=main&blueprint=deploy/paas/sparq-server/render.yaml)
+1. In the Render dashboard, choose **New → Blueprint** and connect this repository.
+2. Select branch `main` and Blueprint Path
+   `deploy/paas/sparq-server/render.yaml`.
+3. Review and deploy the Blueprint.
 
-Render will prompt you to set `SPARQ_AUTH_TOKEN` during deployment — set a strong random
-value (e.g. `openssl rand -hex 32`).
+The Blueprint generates `SPARQ_AUTH_TOKEN` into the `sparq-server-secrets` environment group,
+injects it into the service, enables read auth, and pins `numInstances: 1`. Copy the generated
+token from the environment group for authenticated clients.
 
-Config: [`deploy/paas/sparq-server/render.yaml`](sparq-server/render.yaml)
+Config: [`sparq-server/render.yaml`](sparq-server/render.yaml)
 
 ### Railway
 
-[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template?template=https://github.com/sparq-org/sparq&envs=SPARQ_AUTH_TOKEN,IMAGE&SPARQ_AUTH_TOKENDesc=Bearer+auth+token+for+sparq-server+(required)&IMAGEDesc=GHCR+image+ref&IMAGEDefault=ghcr.io%2Fsparq-org%2Fsparq-server%3Alatest)
+Railway config-as-code controls build/deploy settings but cannot select an image or create
+variables. The adjacent `Dockerfile` consumes and fail-closes the canonical image; the commands below
+create an empty service, install variables before its first deployment, and upload only this
+config directory.
 
 ```bash
-# Via Railway CLI:
-railway link   # link to your Railway project
-railway variables set SPARQ_AUTH_TOKEN="$(openssl rand -hex 32)"
-railway up
+railway init
+railway add --service sparq-server
+openssl rand -hex 32 | railway variables set SPARQ_AUTH_TOKEN --stdin --skip-deploys
+railway variables set SPARQ_AUTH_TOKEN_READ=1 PORT=3030 --skip-deploys
+railway up deploy/paas/sparq-server --path-as-root
+railway domain --port 3030
 ```
 
-Config: [`deploy/paas/sparq-server/railway.toml`](sparq-server/railway.toml)
+`PORT=3030` is required because Railway uses `PORT` for deployment health checks while the
+image binds a fixed port. The TOML pins `numReplicas = 1`, probes `/health`, and leaves the
+image entrypoint intact. Railway provisions TLS and redirects HTTP when the domain is created.
 
----
+Configs: [`sparq-server/railway.toml`](sparq-server/railway.toml) and
+[`sparq-server/Dockerfile`](sparq-server/Dockerfile)
 
-## 🚀 sparq-lws-core (Solid/LWS server)
+## sparq-lws-core
 
-Image: `ghcr.io/sparq-org/sparq-lws-core:latest`
-Port: 3000 | Health: `GET /readyz` (readiness), `GET /livez` (liveness)
+The LWS server requires `SOLID_SERVER_BASE_URL` (the public HTTPS origin) and
+`SOLID_SERVER_TRUSTED_ISSUER` (an external OIDC issuer). It rejects anonymous mutation by
+default. Do not set its loopback or seed escape hatches in production.
 
-> **Dependency:** The `sparq-lws-core` image is built by bead `sq-lmz40` and will be
-> published to `ghcr.io/sparq-org/sparq-lws-core`. The configs below are correct and
-> ready; the image activates once `sq-lmz40` ships. Link the deploy buttons from the
-> `/deploy` site surface once that bead lands.
-
-> **Required inputs:** Unlike sparq-server, the LWS server requires two parameters at boot:
-> `SOLID_SERVER_BASE_URL` (your public HTTPS URL) and `SOLID_SERVER_TRUSTED_ISSUER`
-> (your OIDC identity provider). The server cannot self-issue an IdP — a Solid OIDC
-> provider must be named. These are supplied as secrets, never inlined.
-
-> **Multi-instance:** LWS uses an in-memory DPoP jti replay store by default. Running more
-> than one replica requires `SOLID_SERVER_REPLAY_REDIS_URL` (the `redis-replay` feature).
-> Single-instance is correct and safe without Redis.
+LWS uses an in-memory DPoP `jti` replay store by default. Keep one instance unless the image was
+built with `redis-replay` and every instance uses the same secret
+`SOLID_SERVER_REPLAY_REDIS_URL`.
 
 ### Fly.io
+
+Choose a globally unique app name first so the configured base URL exactly matches Fly's public
+HTTPS hostname.
 
 ```bash
 cd deploy/paas/lws
-fly launch --copy-config --no-deploy
-fly secrets set SOLID_SERVER_BASE_URL="https://sparq-lws.fly.dev"
+APP="sparq-lws-$(openssl rand -hex 4)"
+fly launch --copy-config --no-deploy --ha=false --name "$APP"
+fly secrets set SOLID_SERVER_BASE_URL="https://${APP}.fly.dev"
 fly secrets set SOLID_SERVER_TRUSTED_ISSUER="https://your-oidc-provider.example.com"
-fly deploy
+fly deploy --ha=false
+fly scale count 1
+fly scale show
 ```
 
-Config: [`deploy/paas/lws/fly.toml`](lws/fly.toml)
+The config binds `0.0.0.0:3000`, enforces HTTPS, and checks both `/livez` and `/readyz`.
+
+Config: [`lws/fly.toml`](lws/fly.toml)
 
 ### Render
 
-Render will prompt you to set `SOLID_SERVER_BASE_URL` and `SOLID_SERVER_TRUSTED_ISSUER`
-during deployment.
+1. In the Render dashboard, choose **New → Blueprint** and connect this repository.
+2. Select branch `main` and Blueprint Path `deploy/paas/lws/render.yaml`.
+3. Supply the prompted base URL and trusted issuer, then deploy.
 
-Config: [`deploy/paas/lws/render.yaml`](lws/render.yaml)
+The Blueprint binds port 3000, probes `/readyz`, and pins `numInstances: 1`.
+
+Config: [`lws/render.yaml`](lws/render.yaml)
 
 ### Railway
 
+Create the domain before the first deployment so its HTTPS origin can be used as the LWS base URL.
+Replace `<generated>.up.railway.app` below with the hostname printed by `railway domain`.
+
 ```bash
-railway link
-railway variables set SOLID_SERVER_BASE_URL="https://sparq-lws.railway.app"
-railway variables set SOLID_SERVER_TRUSTED_ISSUER="https://your-oidc-provider.example.com"
-railway up
+railway init
+railway add --service sparq-lws
+railway domain --port 3000
+railway variables set PORT=3000 SOLID_SERVER_BIND=0.0.0.0:3000 --skip-deploys
+railway variables set SOLID_SERVER_BASE_URL="https://<generated>.up.railway.app" --skip-deploys
+railway variables set SOLID_SERVER_TRUSTED_ISSUER="https://your-oidc-provider.example.com" --skip-deploys
+railway up deploy/paas/lws --path-as-root
 ```
 
-Config: [`deploy/paas/lws/railway.toml`](lws/railway.toml)
+The TOML pins `numReplicas = 1` and probes `/readyz`. Railway terminates TLS and redirects HTTP
+for the generated domain.
 
----
+Configs: [`lws/railway.toml`](lws/railway.toml) and [`lws/Dockerfile`](lws/Dockerfile)
 
 ## File layout
 
-```
+```text
 deploy/paas/
   sparq-server/
-    fly.toml       Fly.io app config (port 3030, /health, auth required)
-    render.yaml    Render Blueprint  (port 3030, /health, auth required)
-    railway.toml   Railway config    (port 3030, /health, auth required)
+    fly.toml
+    render.yaml
+    railway.toml
+    Dockerfile
   lws/
-    fly.toml       Fly.io app config (port 3000, /readyz, fail-closed)
-    render.yaml    Render Blueprint  (port 3000, /readyz, fail-closed)
-    railway.toml   Railway config    (port 3000, /readyz, fail-closed)
-  README.md        This file (deploy buttons + secure-defaults guidance)
+    fly.toml
+    render.yaml
+    railway.toml
+    Dockerfile
+  README.md
 ```
 
 ## License
