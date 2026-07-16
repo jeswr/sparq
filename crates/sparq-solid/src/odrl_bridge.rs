@@ -714,7 +714,29 @@ enum AgentMapping {
 /// `isNoneOf`, or a numeric/dateTime operand under `isNoneOf` (the evaluator never
 /// satisfies those — `set_negation_representable` — so persisting an exception for
 /// them would widen access). Any one such constraint forces the whole rule one-shot.
+///
+/// **Unmappable (→ stay one-shot): a COMPOUND `odrl:LogicalConstraint`** ([OPUS-4.8]
+/// sq-izzak — WIDENING FIX). A rule that carries ANY `odrl:and`/`odrl:or`/`odrl:xone`
+/// (`rule.logical_constraints`) has no faithful single-head ACP analogue and MUST stay
+/// one-shot, even when it has ZERO atomic constraints. A grant head is a UNION of
+/// `auth:agent` allows, so: an `odrl:and` of recipient constraints is an INTERSECTION
+/// (folding it as a union widens — wrong direction); an `odrl:or` may mix a recipient
+/// operand with a non-recipient dimension (time/purpose) that has no head analogue; and
+/// `odrl:xone` (exactly-one) has no ACP analogue at all. Over-approximating any compound
+/// agent-restriction into the head would grant unlisted/anonymous agents — the very
+/// widening this classification prevents. Before this fix the loop below examined only
+/// `rule.constraints`, so a rule whose ONLY restriction was a compound constraint mapped
+/// `Faithful` with an EMPTY recipient set → an `auth:Public` head (the compound
+/// restriction silently DROPPED). Fail-closed: any `logical_constraints` forces the whole
+/// rule to the one-shot path ([`materialize_permission`]/[`materialize_prohibition`]),
+/// whose evaluator DOES enforce the compound constraint (frozen) — never dropping it.
 fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
+    // [OPUS-4.8] sq-izzak: a rule carrying any compound `odrl:LogicalConstraint` has no
+    // faithful ACP-condition head — stay one-shot so the compound restriction is enforced
+    // (frozen) rather than silently dropped by folding an empty recipient set to public.
+    if !rule.logical_constraints.is_empty() {
+        return AgentMapping::Unmappable;
+    }
     let mut agents: Vec<String> = Vec::new();
     let mut except: Vec<String> = Vec::new();
     let mut window = TimeWindow::default();

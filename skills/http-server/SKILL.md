@@ -801,9 +801,10 @@ silently gapping.
 **`GET /streams` — CDC poll endpoint (`sparq-server` feature `change-stream`, default OFF;
 `sq-2999l`, gh-906).** The HTTP poll surface over that durable log, in the Amazon-Neptune-Streams
 `GetRecords` shape. Configure a log directory (`--change-stream DIR` / `SPARQ_CHANGE_STREAM`,
-`ServerConfig::change_stream_dir`) and the server (1) RECORDS every committed SPARQL Update as one
-ordered change record on the update path, and (2) serves `GET /streams` over it (the route is `404`
-unless the directory is set — the same double-opt-in as `/tpf`). Parameters: `iteratorType`
+`ServerConfig::change_stream_dir`) and the server (1) RECORDS every published group-commit
+generation as one ordered change record on the writer thread (possibly containing several
+concurrent SPARQL Updates; [GPT-5.6] `sq-kqofk`), and (2) serves `GET /streams` over it (the route
+is `404` unless the directory is set — the same double-opt-in as `/tpf`). Parameters: `iteratorType`
 (`TRIM_HORIZON` = replay all, the default; `AT_SEQUENCE_NUMBER` + `at=N`; `AFTER_SEQUENCE_NUMBER` +
 `after=N`, the resume case; `LATEST` = tail only) and `limit` (max commits per page, default 100,
 clamped to 10000). The JSON response flattens each commit's quad-level changes to one stream record
@@ -812,8 +813,9 @@ commitTimestampNanos, data: { stmt: "<n-quads line>" } }` — plus a `nextSequen
 token (pass as `at=`/`after=`), `lastSequenceNumber`, `totalRecords` (commit count) and
 `hasMoreRecords`. A poll is a READ (gated by the read auth). A sequence-anchored `iteratorType` with
 no anchor is a fail-closed `400` (never a silent replay-all). With the feature off the route + the
-recording hook are `#[cfg]`-stripped (byte-identical); recording serialises updates only while the
-stream is on. The `ChangeSink` broker trait stays a separate later opt-in (`sq-l6zks`).
+recording hook are `#[cfg]`-stripped (byte-identical); with it on, recording rides the sequenced
+writer's group commit and does not serialise submitters. The `ChangeSink` broker trait stays a
+separate later opt-in (`sq-l6zks`).
 
 **`GET /queries` + `DELETE /queries/{id}` — running-query registry (`sparq-server` feature
 `query-registry`, default OFF; sq-qsm5z, [SONNET-4.6]).** An opt-in in-memory registry of
