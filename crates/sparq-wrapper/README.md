@@ -32,8 +32,10 @@ Use `Store::borrowed(&graph)` for a read-only wrapper, or
 `Store::owned(graph)` / `Store::new()` when the wrapper should own and mutate
 the graph. A `Node<'a>` borrows the graph, owns its focus `Term`, and cannot
 outlive or overlap a mutable borrow of its store. Reacquire nodes after writes.
-Traversal is currently over the default graph; use `node.dataset().graph()` as
-the explicit raw-graph escape hatch.
+The default wrapper surface traverses the default graph; enable
+`proposed-graph-scope` for an explicit named-graph read projection and one
+named-graph write target. Use `node.dataset().graph()` as the raw-graph escape
+hatch.
 
 ## ✨ Features
 
@@ -53,6 +55,11 @@ the explicit raw-graph escape hatch.
   draft PR #92. Live collection reads re-query the store, and value-to-term
   conversion completes before mutation so conversion failures leave the graph
   unchanged. This proposal is not landed upstream. <!-- [GPT-5.6] sq-1rg2q.3 -->
+- `proposed-graph-scope` adds `proposed::graph_scope::GraphScope`, an explicit
+  deduplicated read projection over selected named graphs (plus the default
+  graph when requested) whose insert/remove operations target one configured
+  named graph. This proposal follows rdfjs/wrapper draft PR #95 and is not
+  landed upstream. <!-- [GPT-5.6] sq-1rg2q.6 -->
 - All crate features are off by default, and the dependency on `sparq-core`
   disables its default features to keep this capability isolated.
 

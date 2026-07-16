@@ -32,3 +32,8 @@
   crate: "sparq-wrapper"
   features: "proposed-typed-focus"
   test: true
+
+- name: "sparq-wrapper (proposed-graph-scope)"
+  crate: "sparq-wrapper"
+  features: "proposed-graph-scope"
+  test: true
