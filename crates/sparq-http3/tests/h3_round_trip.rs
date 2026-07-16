@@ -198,6 +198,7 @@ async fn h3_dispatches_body_status_and_peer_connect_info() -> TestResult {
 
 async fn limited_server(
     limits: H3ConnectionLimits,
+    router: Router,
 ) -> TestResult<(
     SocketAddr,
     CertificateDer<'static>,
@@ -210,14 +211,9 @@ async fn limited_server(
     let endpoint = quinn::Endpoint::server(quic_server_config(tls)?, "127.0.0.1:0".parse()?)?;
     let server_addr = endpoint.local_addr()?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-    let server = tokio::spawn(serve_h3_with_limits(
-        endpoint,
-        Router::new(),
-        limits,
-        async move {
-            let _ = shutdown_rx.await;
-        },
-    ));
+    let server = tokio::spawn(serve_h3_with_limits(endpoint, router, limits, async move {
+        let _ = shutdown_rx.await;
+    }));
     Ok((server_addr, cert, shutdown_tx, server))
 }
 
@@ -240,8 +236,9 @@ async fn global_connection_cap_queues_excess_connections_until_release() -> Test
         max_connections: 1,
         max_connections_per_ip: None,
         exempt_internal_ips: true,
+        ..H3ConnectionLimits::default()
     };
-    let (server_addr, cert, shutdown_tx, server) = limited_server(limits).await?;
+    let (server_addr, cert, shutdown_tx, server) = limited_server(limits, Router::new()).await?;
     let endpoint = client_endpoint(cert)?;
 
     let first = endpoint.connect(server_addr, "localhost")?.await?;
@@ -266,8 +263,9 @@ async fn per_ip_connection_cap_refuses_excess_connections() -> TestResult {
         max_connections: 4,
         max_connections_per_ip: Some(1),
         exempt_internal_ips: false,
+        ..H3ConnectionLimits::default()
     };
-    let (server_addr, cert, shutdown_tx, server) = limited_server(limits).await?;
+    let (server_addr, cert, shutdown_tx, server) = limited_server(limits, Router::new()).await?;
     let endpoint = client_endpoint(cert)?;
 
     let first = endpoint.connect(server_addr, "localhost")?.await?;
@@ -282,14 +280,89 @@ async fn per_ip_connection_cap_refuses_excess_connections() -> TestResult {
     stop_limited_server(endpoint, shutdown_tx, server).await
 }
 
+// [FABLE-5] sq-4rkcc: the load-bearing DoS-hardening invariant — with the per-connection request
+// limit at 1, a second request on the SAME connection must not reach the router while the first
+// request task still holds the sole permit; it may start only after that task completes. A raised
+// or removed limit, a permit dropped at the end of the accept-loop iteration, or a permit dropped
+// inside the task before dispatch all let the second request enter concurrently and turn the
+// negative-window assertion red.
+#[tokio::test]
+async fn per_connection_request_cap_backpressures_the_excess_request() -> TestResult {
+    let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let handler_release = release.clone();
+    let gated = move || {
+        let entered_tx = entered_tx.clone();
+        let release = handler_release.clone();
+        async move {
+            let _ = entered_tx.send(());
+            release
+                .acquire()
+                .await
+                .expect("the test release semaphore is never closed")
+                .forget();
+            StatusCode::OK
+        }
+    };
+    let limits = H3ConnectionLimits {
+        max_requests_per_connection: 1,
+        ..H3ConnectionLimits::default()
+    };
+    let router = Router::new().route("/gated", get(gated));
+    let (server_addr, cert, shutdown_tx, server) = limited_server(limits, router).await?;
+
+    let client_endpoint = client_endpoint(cert)?;
+    let connection = client_endpoint.connect(server_addr, "localhost")?.await?;
+    let (mut driver, sender) = h3::client::new(h3_quinn::Connection::new(connection)).await?;
+    let driver = tokio::spawn(async move {
+        let _ = poll_fn(|context| driver.poll_close(context)).await;
+    });
+
+    let url = format!("https://localhost:{}/gated", server_addr.port());
+    let mut first_sender = sender.clone();
+    let first_url = url.clone();
+    let first =
+        tokio::spawn(async move { request(&mut first_sender, Method::GET, first_url, None).await });
+    tokio::time::timeout(Duration::from_secs(5), entered_rx.recv())
+        .await?
+        .ok_or("the first request never entered the handler")?;
+
+    let mut second_sender = sender.clone();
+    let second = tokio::spawn(async move { request(&mut second_sender, Method::GET, url, None).await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), entered_rx.recv())
+            .await
+            .is_err(),
+        "the second request must not enter the handler while the sole request permit is held"
+    );
+
+    // Completing the first request task releases its permit and unblocks the accept loop.
+    release.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(5), entered_rx.recv())
+        .await?
+        .ok_or("the second request never entered the handler after the permit was released")?;
+    release.add_permits(1);
+
+    let (status, _) = tokio::time::timeout(Duration::from_secs(5), first).await???;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = tokio::time::timeout(Duration::from_secs(5), second).await???;
+    assert_eq!(status, StatusCode::OK);
+
+    drop(sender);
+    client_endpoint.close(quinn::VarInt::from_u32(0), b"test complete");
+    tokio::time::timeout(Duration::from_secs(5), driver).await??;
+    stop_limited_server(client_endpoint, shutdown_tx, server).await
+}
+
 #[tokio::test]
 async fn internal_ip_exemption_leaves_only_the_global_cap() -> TestResult {
     let limits = H3ConnectionLimits {
         max_connections: 2,
         max_connections_per_ip: Some(1),
         exempt_internal_ips: true,
+        ..H3ConnectionLimits::default()
     };
-    let (server_addr, cert, shutdown_tx, server) = limited_server(limits).await?;
+    let (server_addr, cert, shutdown_tx, server) = limited_server(limits, Router::new()).await?;
     let endpoint = client_endpoint(cert)?;
 
     let first = endpoint.connect(server_addr, "localhost")?.await?;

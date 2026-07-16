@@ -12,7 +12,7 @@ so a default workspace build does not pull those dependencies.
 Enable `server` to convert an aws-lc-rs-backed rustls server configuration and dispatch
 HTTP/3 requests into a cloned `axum::Router`. The bridge injects the QUIC peer address as
 `ConnectInfo<SocketAddr>` and streams request and response bodies. Its compatibility entry point is
-safe by default: `serve_h3` applies global and per-IP concurrent-connection caps, while
+safe by default: `serve_h3` bounds global, per-IP, and per-connection-request concurrency;
 `serve_h3_with_limits` accepts custom `H3ConnectionLimits`. Internal IPs are exempt from the per-IP
 default but remain covered by the global cap. The generated Quinn configuration also uses a bounded
 connection receive window. After a QUIC endpoint binds, `alt_svc_layer` adds the exact
