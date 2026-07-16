@@ -11,7 +11,7 @@ pub mod widgets;
 
 pub use description::{
     Constraints, FormDescription, FormField, FormGroup, FormValue, GroupKind, Mode, ShapeChoice,
-    ShapeVia, TermRef, WidgetChoice,
+    ShapeVia, TermRef, ValidationHint, WidgetChoice,
 };
 pub use diff::{to_sparql_update, FieldValueDiff, FormDiff};
 pub use widgets::{Resolution, Scorer, Suitability, WidgetContext, WidgetRegistry, DASH};
@@ -85,6 +85,58 @@ pub fn derive_form_with_model(
         opts,
         registry,
     )
+}
+
+/// [GPT-5.6] Derives a form and attaches live SHACL results for `focus` to
+/// matching declared, editable fields without mutating `data`.
+///
+/// Validation is additive and opt-in: [`derive_form`] and
+/// [`derive_form_with_model`] continue to return fields with empty validation
+/// vectors. Property-level results are matched using the same rendered SHACL
+/// path stored in [`FormField::path`]; node-level and unmatched results are not
+/// attached.
+pub fn derive_form_validated(
+    data: &Graph,
+    shapes: &Graph,
+    model: &ShapesModel,
+    focus: &Term,
+    opts: &FormOptions,
+    registry: &WidgetRegistry,
+) -> FormDescription {
+    let mut form = derive_form_with_model(data, shapes, model, focus, opts, registry);
+    let report = sparq_shacl::validate_with_model(data, model);
+
+    for result in report.results {
+        if result.focus_node != *focus {
+            continue;
+        }
+        let Some(path) = result.path.as_ref() else {
+            continue;
+        };
+        let rendered_path = derive::render_path(path);
+        let Some(field) = form
+            .groups
+            .iter_mut()
+            .flat_map(|group| &mut group.fields)
+            .find(|field| {
+                field.editable
+                    && field.property_shape.is_some()
+                    && field.path == rendered_path
+            })
+        else {
+            continue;
+        };
+        let message =
+            derive::pick_literal(result.messages).unwrap_or(result.default_message);
+        field.validation.push(ValidationHint {
+            source_component: result.source_component,
+            message,
+            value: result.value.as_ref().map(TermRef::from_term),
+            severity: result.severity,
+        });
+    }
+
+    form
 }
 
 /// The node shapes applicable to `focus` — the renderer's shape switcher:

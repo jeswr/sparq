@@ -385,9 +385,7 @@ fn build_field(
     let label = field_label(shapes, prop, path);
     FormField {
         property_shape: Some(TermRef::from_term(&prop.node)),
-        path: path
-            .to_sparql_property_path()
-            .unwrap_or_else(|| path.to_turtle()),
+        path: render_path(path),
         inverse: matches!(path, Path::Inverse(_)),
         label,
         description: literal_object(shapes, &prop.node, &sh("description")).or_else(|| {
@@ -400,6 +398,7 @@ fn build_field(
         widget,
         values,
         constraints,
+        validation: Vec::new(),
     }
 }
 
@@ -470,6 +469,7 @@ fn other_fields(
                     })
                     .collect(),
                 constraints,
+                validation: Vec::new(),
             }
         })
         .collect()
@@ -568,6 +568,11 @@ fn field_label(shapes: &GraphView, prop: &Shape, path: &Path) -> String {
             return local_name(n.as_str()).to_string();
         }
     }
+    render_path(path)
+}
+
+/// [GPT-5.6] Canonical field/result key for a parsed SHACL property path.
+pub(crate) fn render_path(path: &Path) -> String {
     path.to_sparql_property_path()
         .unwrap_or_else(|| path.to_turtle())
 }
@@ -582,7 +587,7 @@ fn predicate_term(path: &Path) -> Option<Term> {
 }
 
 /// Deterministic literal pick: no-language first, then by tag, then by value.
-fn pick_literal(terms: Vec<Term>) -> Option<String> {
+pub(crate) fn pick_literal(terms: Vec<Term>) -> Option<String> {
     let mut lits: Vec<(bool, String, String)> = terms
         .into_iter()
         .filter_map(|t| match t {

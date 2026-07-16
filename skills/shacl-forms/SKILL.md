@@ -1,6 +1,6 @@
 ---
 name: shacl-forms
-description: "Derive a DASH-compatible, renderer-agnostic form description from SHACL shapes with the opt-in sparq-forms crate: (data graph, shapes graph, focus node, view|edit mode) -> serde-JSON FormDescription — applicable-shape switcher, property-group/field layout (sh:name/sh:description/sh:order/sh:group, sh:inversePath incoming references, sh:deactivated, implicit read-only Other group), DASH widget auto-selection via the documented 0-100 scoring registry (TextField/TextArea/BooleanSelect/Date+DateTimePicker/EnumSelect/InstancesSelect/URIEditor/RichText/SubClass/DetailsEditor and the viewers) with dash:editor/dash:viewer overrides, required/multi cardinality typing, per-field constraints, and nested sh:node sub-forms. Use when an agent or GUI needs a shape-directed data-entry/edit/view form for a focus node (headless: no GUI deps, builds for wasm32)."
+description: "Derive a DASH-compatible, renderer-agnostic form description from SHACL shapes with the opt-in sparq-forms crate: (data graph, shapes graph, focus node, view|edit mode) -> serde-JSON FormDescription — applicable-shape switcher, property-group/field layout (sh:name/sh:description/sh:order/sh:group, sh:inversePath incoming references, sh:deactivated, implicit read-only Other group), DASH widget auto-selection via the documented 0-100 scoring registry (TextField/TextArea/BooleanSelect/Date+DateTimePicker/EnumSelect/InstancesSelect/URIEditor/RichText/SubClass/DetailsEditor and the viewers) with dash:editor/dash:viewer overrides, required/multi cardinality typing, per-field constraints and opt-in live SHACL validation hints, and nested sh:node sub-forms. Use when an agent or GUI needs a shape-directed data-entry/edit/view form for a focus node (headless: no GUI deps, builds for wasm32)."
 license: MIT
 metadata:
   version: "0.1.0"
@@ -66,7 +66,13 @@ What the description carries (all serde `Serialize + Deserialize`):
 - **`required` / `multi`** — `sh:minCount >= 1` / `sh:maxCount != 1` (the
   add/remove affordance signal).
 - **`constraints`** — per-field counts/datatypes/classes/nodeKind/`sh:in`/
-  pattern/length/range/`sh:or` for live validation hints.
+  pattern/length/range/`sh:or` for renderer-side guidance.
+- **`validation`** — with `derive_form_validated(data, shapes, model, focus,
+  opts, registry)`, SHACL results for the focus node are attached to the
+  matching declared, editable field by property path. Each `ValidationHint`
+  carries the source-component IRI, selected shape message (or generated
+  fallback), optional offending value, and severity. Plain `derive_form` and
+  `derive_form_with_model` leave this vector empty.
 - **`values[].nested`** — `sh:node` values recurse into nested sub-forms
   (`dash:DetailsEditor`), `max_depth`-limited and cycle-safe.
 
@@ -76,10 +82,10 @@ Amortise shape parsing across focus nodes with `derive_form_with_model`
 switcher with `applicable_shapes`. Blank-node labels in the output are
 renamed deterministically (`b0`, `b1`, …) — do not treat them as graph handles.
 
-Scope: derivation plus pure edit-to-UPDATE building. Applying the request,
-validate-before-commit guards, draft graphs, in-form validation + DASH
-suggestions, `dash:propertyRole`, and the GUI renderer are follow-on beads
-(sq-lsp7k.1.2/.1.3/.1.4/.1.5/.1.6); `sparq-shacl` (see
+Scope: derivation, opt-in live validation hints, plus pure edit-to-UPDATE
+building. Applying the request, validate-before-commit guards, draft graphs,
+DASH suggestions, `dash:propertyRole`, and the GUI renderer are follow-on
+beads (sq-lsp7k.1.2/.1.4/.1.5/.1.6); `sparq-shacl` (see
 [`shacl-validation`](../shacl-validation/SKILL.md)) already validates the same
 graphs.
 
