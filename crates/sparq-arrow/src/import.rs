@@ -1,7 +1,7 @@
 //! The `arrow`-feature-gated import: Arrow `RecordBatch` → `QueryResult`.
 
 use arrow_array::{Array, RecordBatch, StringArray, StructArray};
-use arrow_schema::Schema;
+use arrow_schema::{DataType, Schema};
 use oxrdf::{BaseDirection, BlankNode, Literal, NamedNode, Term, Variable};
 use sparq_engine::QueryResult;
 
@@ -48,6 +48,17 @@ pub(crate) fn variables_from_schema(schema: &Schema) -> Result<Vec<Variable>, Ar
         if vars.iter().any(|existing: &Variable| existing == &variable) {
             return Err(ArrowError::invalid(format!(
                 "duplicate SELECT variable '{}' in Arrow schema",
+                field.name()
+            )));
+        }
+        // [GPT-5.6] Report malformed struct arity explicitly before the exact-schema
+        // check so safely constructed malformed batches fail closed without a cell read.
+        if matches!(
+            field.data_type(),
+            DataType::Struct(fields) if fields.len() != RDF_TERM_FIELDS.len()
+        ) {
+            return Err(ArrowError::invalid(format!(
+                "Arrow field '{}' does not have five RDF-term children",
                 field.name()
             )));
         }
