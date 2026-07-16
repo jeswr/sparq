@@ -111,6 +111,7 @@ ContinuousMultiQuery::register(rspql_text: &str) -> Result<ContinuousMultiQuery,
   .window_iris() -> Vec<&NamedNode>   .output_stream() -> Option<&NamedNode>   .r2s() -> R2S
 
 // --- Low-level S2R only (no query): WindowedStream<[Term;3]>, Window { start, end, triples } ---
+TripleStream::new().push(triple, ts).push_item(item).push_batch(items)  // batch preserves iterator order
 WindowedStream::empty(spec) / ::new(stream: TripleStream, spec)
   .push(triple, ts)  .take_closed() -> Vec<Window>  .flush() -> Vec<Window>  .late_dropped()
 ```
