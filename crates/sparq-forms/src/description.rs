@@ -268,8 +268,20 @@ pub struct FormField {
     pub required: bool,
     /// `sh:maxCount != 1`: the renderer shows add/remove affordances.
     pub multi: bool,
-    /// `false` for view mode and for off-shape (read-only) fields.
+    /// `false` for view mode, for off-shape (read-only) fields, and for
+    /// property shapes declaring `dash:readOnly true` (read-only even in
+    /// edit mode). [FABLE-5]
     pub editable: bool,
+    /// `dash:hidden true` on the property shape: the field still participates
+    /// in the data model (values, constraints, diffing) but a renderer should
+    /// not display it. [FABLE-5] sq-lsp7k.1.5
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
+    pub hidden: bool,
+    /// `sh:defaultValue` on the property shape, carried verbatim: the seed
+    /// value a renderer pre-fills when the field currently has no values.
+    /// [FABLE-5] sq-lsp7k.1.5
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub default_value: Option<TermRef>,
     pub widget: WidgetChoice,
     pub values: Vec<FormValue>,
     pub constraints: Constraints,
