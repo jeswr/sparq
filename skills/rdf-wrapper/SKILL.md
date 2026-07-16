@@ -62,7 +62,7 @@ Typed accessors are strict:
 All return `Result<_, AccessError>`; do not silently coerce a mismatched RDF
 datatype.
 
-Five explicitly experimental features implement proposals that remain unlanded
+Six explicitly experimental features implement proposals that remain unlanded
 in rdfjs/wrapper:
 
 ```toml
@@ -70,9 +70,40 @@ sparq-wrapper = { version = "0.1", features = [
   "proposed-distinct",
   "proposed-cardinality",
   "proposed-codecs",
+  "proposed-graph-scope",
   "proposed-observe",
   "proposed-typed-focus",
 ] }
+```
+
+`proposed-graph-scope` adds a read-many/write-one `GraphScope` based on
+rdfjs/wrapper draft PR #95. Its reads are the deduplicated projection of
+exactly the named graphs supplied to `GraphScope::new`; call
+`with_default_graph()` to include the default graph explicitly. Scoped nodes
+retain the projection for chained `out`/`in` traversal, while node- or
+scope-level `insert`/`remove` operations affect only the configured named write
+graph and leave copies elsewhere untouched. <!-- [GPT-5.6] sq-1rg2q.6 -->
+
+```rust
+use oxrdf::{Literal, NamedNode, Term};
+use sparq_core::Graph;
+use sparq_wrapper::proposed::graph_scope::GraphScope;
+
+let mut graph = Graph::load_dataset(
+    "<http://example.org/alice> <http://example.org/tag> \"rdf\" <http://example.org/g1> .\n\
+     <http://example.org/alice> <http://example.org/tag> \"rdf\" <http://example.org/g2> .",
+    "nquads",
+)?;
+let alice = NamedNode::new("http://example.org/alice")?;
+let tag = NamedNode::new("http://example.org/tag")?;
+let g1 = Term::NamedNode(NamedNode::new("http://example.org/g1")?);
+let g2 = Term::NamedNode(NamedNode::new("http://example.org/g2")?);
+
+let scope = GraphScope::new(&mut graph, [g1.clone(), g2], g1);
+let alice = scope.node(alice);
+assert_eq!(alice.out(&tag).len(), 1); // duplicate triple projected once
+alice.insert(tag, Literal::new_simple_literal("rust"))?; // writes only g1
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 `proposed-distinct` adds `Dataset::subjects_of` / `objects_of` and yields each
