@@ -31,9 +31,11 @@ weighted_jaccard(&sig_a, &sig_b);        // for callers that cache signatures
 - **Structural signature** — an entity's signature is its set of
   `(direction, predicate, neighbor)` pairs (outgoing from one SPO range scan, incoming
   from one OSP/OPS scan), cost `O(log n + degree)`.
-- **Opt-in multi-hop expansion** — enable the default-off `multi-hop` Cargo feature and
-  set `SimConfig::depth` above `1` for deterministic breadth-first expansion. Hop `h`
-  weights are attenuated by `0.5^(h - 1)`; first-hop elements remain unchanged.
+- **Opt-in multi-hop expansion** — the default-off `multi-hop` feature + `SimConfig::depth > 1`:
+  deterministic breadth-first expansion; hop `h` weights attenuated by `0.5^(h - 1)`.
+- **Opt-in explanation** — the default-off `explain` feature adds `explain_similarity(&a, &b)`:
+  the shared signature elements (direction, predicate Term, neighbor Term, weight) behind a
+  score, strongest evidence first; the weights sum to the exact weighted-Jaccard numerator.
 - **IDF-weighted Jaccard** — `w(e) = 1 + ln(|G| / freq(pred))`, frequencies from the
   store's existing planner stats, so sharing a rare predicate counts for more than
   sharing `rdf:type`.

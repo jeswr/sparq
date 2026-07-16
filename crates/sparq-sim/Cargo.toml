@@ -29,6 +29,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = []
 # Deterministic breadth-first structural expansion beyond the existing one-hop signature.
 multi-hop = []
+# [FABLE-5] sq-lsp7k: similarity explanation surface — `Sim::explain_similarity` returns
+# the decoded shared signature elements (the weighted-Jaccard intersection) behind a
+# similarity/most_similar score, for reasoning UX ("WHY are these two similar").
+explain = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
