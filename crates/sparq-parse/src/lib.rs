@@ -493,6 +493,10 @@ pub fn gzip_single_member<S: AsRef<[u8]>>(
 /// research note's consumer matrix; for browser-facing gzip use
 /// [`SingleMemberGzipSink`] instead).
 pub fn decode_gzip_concat(data: &[u8]) -> io::Result<Vec<u8>> {
+    // [GPT-5.6] The zero-chunk encoder emits no gzip member.
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
     flate2::read::MultiGzDecoder::new(data).read_to_end(&mut out)?;
     Ok(out)
@@ -569,6 +573,12 @@ mod tests {
                 "{mode:?}"
             );
         }
+    }
+
+    // [GPT-5.6] sq-ue37p: decoding a zero-chunk gzip stream is the empty identity.
+    #[test]
+    fn decode_gzip_concat_accepts_empty_input() {
+        assert_eq!(decode_gzip_concat(&[]).unwrap(), Vec::<u8>::new());
     }
 
     #[test]
