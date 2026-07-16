@@ -5138,6 +5138,7 @@ dependencies = [
  "serde_json",
  "sparq-core",
  "sparq-engine",
+ "sparq-forms",
  "sparq-introspect",
  "sparq-nlq",
  "sparq-shacl",
