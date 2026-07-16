@@ -1,9 +1,9 @@
 ---
 name: arrow-columnar
-description: Export and import sparq SPARQL SELECT QueryResult values through Apache Arrow RecordBatch, in-memory Parquet bytes, or Arrow IPC stream bytes with the opt-in sparq-arrow crate. Use when moving query results into dataframe, analytics, transport, or storage tooling while preserving RDF term kinds, datatype and language metadata, RDF 1.2 triple terms, empty literals, and unbound cells.
+description: Export and import sparq SPARQL SELECT QueryResult values through Apache Arrow RecordBatch, in-memory Parquet bytes, Arrow IPC stream bytes, or flattened CSV bytes with the opt-in sparq-arrow crate. Use when moving query results into dataframe, analytics, transport, or storage tooling while preserving RDF term kinds, datatype and language metadata, RDF 1.2 triple terms, empty literals, and unbound cells.
 ---
 
-# sparq-arrow — Arrow, Parquet, and IPC interop
+# sparq-arrow — Arrow, Parquet, IPC, and CSV interop
 
 Use `sparq-arrow` when a Rust application needs a faithful columnar representation of a
 `sparq_engine::QueryResult`. The crate maps every SELECT variable to one nullable Arrow
@@ -19,6 +19,9 @@ Use `sparq-arrow` when a Rust application needs a faithful columnar representati
   `arrow`.
 - Enable `ipc` for `to_ipc_bytes`, `from_ipc_bytes`, and
   `ipc_variables_from_bytes`; it implies `arrow`.
+- Enable `csv` for `to_csv_bytes`, `from_csv_bytes`, and
+  `csv_variables_from_bytes`; it implies `arrow` and adds no further dependencies
+  (the RFC 4180 serializer and parser are hand-rolled over `std`).
 - Leave all features disabled to retain only the dependency-free field-name constants.
 
 All features are default-OFF. The crate is a leaf capability crate, so no Arrow
@@ -81,6 +84,31 @@ assert_eq!(restored.rows, result.rows);
 Add the feature with `cargo add sparq-arrow --features ipc`. The IPC stream carries the
 same schema as the RecordBatch and preserves variable names for an empty result.
 `ipc_variables_from_bytes` validates and reads that schema without decoding batches.
+
+## Use CSV bytes
+
+```rust,ignore
+use sparq_arrow::{csv_variables_from_bytes, from_csv_bytes, to_csv_bytes};
+
+let bytes: Vec<u8> = to_csv_bytes(&result)?;
+let variables = csv_variables_from_bytes(&bytes)?;
+let restored = from_csv_bytes(&bytes)?;
+assert_eq!(variables, result.vars);
+assert_eq!(restored.vars, result.vars);
+assert_eq!(restored.rows, result.rows);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Add the feature with `cargo add sparq-arrow --features csv`. CSV has no nested types,
+so each variable's five-field term struct is flattened to the five header columns
+`var.kind`, `var.value`, `var.datatype`, `var.language`, and `var.direction`; and CSV
+has no value-level null, so an unbound cell is five empty fields with boundness carried
+by the `kind` column — still distinct from a bound empty-string literal (`kind` is
+`literal` with the explicit `xsd:string` datatype). The dialect is RFC 4180 (quoting
+on comma, quote, CR, or LF; doubled-quote escaping; LF record terminators, with CRLF
+accepted on read). Every term the struct can express round-trips losslessly; the one
+shape CSV cannot carry is a zero-variable result, which `to_csv_bytes` rejects with an
+error. `csv_variables_from_bytes` validates and reads only the header row.
 
 ## Preserve the mapping
 

@@ -42,6 +42,14 @@ arrow = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-buffer"]
 parquet = ["arrow", "dep:bytes", "dep:parquet"]
 # [GPT-5.6] Arrow IPC streams are another opt-in container over the term projection.
 ipc = ["arrow", "dep:arrow-ipc"]
+# [FABLE-5] CSV is a third opt-in container over the SAME term projection (issue #910's
+# BI/pandas/DuckDB target): each variable's five-field term struct is flattened to five
+# `var.field` Utf8 columns. The RFC-4180 serializer/parser is hand-rolled over std —
+# the schema is fixed, so it adds ZERO dependencies (measured faster than the arrow-csv
+# path, and it keeps the arrow-csv/arrow-cast/lexical vet closure out of the tree).
+# It still enables `arrow`: the reader shares the RecordBatch importers' schema
+# validation and error types.
+csv = ["arrow"]
 
 [dependencies]
 # The SELECT result we project (`QueryResult { vars, rows }`). Always present — the

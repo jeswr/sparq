@@ -1,6 +1,7 @@
 opt-in sparq-algos (centrality-extended)
 opt-in sparq-algos (topology)
 opt-in sparq-arrow (arrow — QueryResult -> RecordBatch columnar export)
+opt-in sparq-arrow (csv — QueryResult <-> CSV byte round-trip)
 opt-in sparq-arrow (ipc — Arrow stream byte round-trip)
 opt-in sparq-arrow (parquet — in-memory byte round-trip)
 opt-in sparq-cli (diff)
