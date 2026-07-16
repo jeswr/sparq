@@ -105,7 +105,7 @@ pub enum Unit { Metre, Kilometre, Mile, Degree, Radian }        // Unit::from_ir
 
 // --- GeoIndex: R-tree over a Graph (always available) ---
 pub fn GeoIndex::build(graph: &sparq_core::Graph) -> GeoIndex;
-pub fn within_distance(&self, center: Point<f64>, meters: f64, limit: Option<usize>) -> Vec<(&Term, f64)>;
+pub fn within_distance(&self, center: Point<f64>, meters: f64, limit: Option<usize>) -> Vec<(&Term, f64)>; // + within_distance_wkt(&str, meters, limit) [GPT-5.6]
 pub fn nearest(&self, center: Point<f64>, k: usize) -> Vec<(&Term, f64)>;
 pub fn intersects(&self, g: &GeoGeometry) -> Vec<&Term>;        // + intersects_wkt(&str)
 // `topology_index` feature (OFF by default): exact DE-9IM matches after an R-tree window scan.
