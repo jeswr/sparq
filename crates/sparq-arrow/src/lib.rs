@@ -56,6 +56,16 @@
 //! * With the opt-in `ipc` feature, `to_ipc_bytes` / `from_ipc_bytes` do the same through
 //!   the Arrow IPC streaming format, including preservation of an empty result's schema;
 //!   `ipc_variables_from_bytes` reads that schema without decoding record batches.
+//! * With the opt-in `csv` feature, `to_csv_bytes` / `from_csv_bytes` serialize the same
+//!   projection as CSV, and `csv_variables_from_bytes` reads only the header row. CSV has
+//!   no nested types, so each variable's term struct is **flattened** to the five columns
+//!   `var.kind` / `var.value` / `var.datatype` / `var.language` / `var.direction`; and CSV
+//!   has no value-level null, so an unbound cell is five empty fields with boundness
+//!   carried by the `kind` column — distinct from a bound empty-string literal
+//!   (`kind=literal` + explicit `xsd:string`). Every term the struct can express
+//!   round-trips losslessly; the one shape CSV cannot carry is a **zero-variable** result
+//!   (no columns), which `to_csv_bytes` rejects with an error rather than corrupting.
+//!   [FABLE-5]
 
 /// Struct field name: the term kind — `"uri"`, `"bnode"`, `"literal"`, or `"triple"`.
 pub const FIELD_KIND: &str = "kind";
@@ -94,6 +104,9 @@ mod parquet;
 #[cfg(feature = "ipc")]
 mod ipc;
 
+#[cfg(feature = "csv")]
+mod csv;
+
 #[cfg(feature = "arrow")]
 #[cfg_attr(docsrs, doc(cfg(feature = "arrow")))]
 pub use export::{term_schema, term_struct_type, to_record_batch, ArrowExportError};
@@ -112,3 +125,7 @@ pub use parquet::{
 #[cfg(feature = "ipc")]
 #[cfg_attr(docsrs, doc(cfg(feature = "ipc")))]
 pub use ipc::{from_ipc_bytes, ipc_variables_from_bytes, to_ipc_bytes};
+
+#[cfg(feature = "csv")]
+#[cfg_attr(docsrs, doc(cfg(feature = "csv")))]
+pub use csv::{csv_variables_from_bytes, from_csv_bytes, to_csv_bytes};

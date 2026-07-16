@@ -46,3 +46,8 @@
   crate: "sparq-arrow"
   features: "ipc"
   test: true
+
+- name: "sparq-arrow (csv — QueryResult <-> CSV byte round-trip)"
+  crate: "sparq-arrow"
+  features: "csv"
+  test: true

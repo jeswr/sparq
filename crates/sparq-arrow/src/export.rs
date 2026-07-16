@@ -70,7 +70,8 @@ pub fn term_struct_type() -> DataType {
     DataType::Struct(term_fields())
 }
 
-fn term_fields() -> Fields {
+// [FABLE-5] pub(crate): the CSV layer rebuilds the term struct from flattened columns.
+pub(crate) fn term_fields() -> Fields {
     Fields::from(vec![
         Field::new(FIELD_KIND, DataType::Utf8, true),
         Field::new(FIELD_VALUE, DataType::Utf8, true),

@@ -42,6 +42,11 @@ arrow = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-buffer"]
 parquet = ["arrow", "dep:bytes", "dep:parquet"]
 # [GPT-5.6] Arrow IPC streams are another opt-in container over the term projection.
 ipc = ["arrow", "dep:arrow-ipc"]
+# [FABLE-5] CSV is a third opt-in container over the SAME term projection (issue #910's
+# BI/pandas/DuckDB target): each variable's five-field term struct is flattened to five
+# `var.field` Utf8 columns. Enabling it necessarily enables `arrow`; without it, the
+# arrow-csv dependency closure is absent.
+csv = ["arrow", "dep:arrow-csv"]
 
 [dependencies]
 # The SELECT result we project (`QueryResult { vars, rows }`). Always present — the
@@ -63,6 +68,9 @@ arrow-schema = { version = "59", optional = true }
 arrow-buffer = { version = "59", optional = true }
 # Arrow IPC stream serialization only; the `arrow` feature supplies RecordBatch values.
 arrow-ipc = { version = "59", optional = true }
+# Arrow CSV serialization only (the flattened five-columns-per-variable projection);
+# the `arrow` feature supplies RecordBatch values. [FABLE-5]
+arrow-csv = { version = "59", optional = true }
 # Parquet serialization only; the `arrow` feature provides RecordBatch integration.
 # Compression codecs stay disabled so this opt-in surface pulls the narrowest closure.
 parquet = { version = "59", optional = true, default-features = false, features = ["arrow"] }
