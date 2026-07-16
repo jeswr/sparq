@@ -232,7 +232,7 @@ use oxrdf::{NamedNode, Term, Variable};
 use spargebra::algebra::GraphPattern;
 use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
 use sparq_core::Graph;
-use sparq_prov::why_not;
+use sparq_prov::{why_not, why_not_report_ntriples, why_not_report_turtle};
 
 let ex = |local: &str| NamedNode::new_unchecked(format!("http://example.com/{local}"));
 let var = |name: &str| Variable::new_unchecked(name);
@@ -255,8 +255,30 @@ let target = HashMap::from([
 let missing = why_not(&graph, &bgp, &target)?;
 assert_eq!(missing.len(), 1);
 assert_eq!(missing[0].grounded().predicate, ex("q"));
+let ntriples = why_not_report_ntriples(&target, &missing)?;
+let turtle = why_not_report_turtle(&target, &missing)?;
+assert!(ntriples.contains("urn:sparq:prov:absent"));
+assert!(turtle.contains("spqprov:absent"));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
+
+<!-- [GPT-5.6] sq-lsp7k -->
+Both report functions validate that `target` still grounds every retained
+pattern to its recorded `MissingPattern::grounded()` triple; a different or
+incomplete target fails closed. The emitted graph has one deterministic report
+node per missing conjunct, in BGP order:
+
+```turtle
+<urn:sparq:prov:missing:0:…> a prov:Entity ;
+    rdf:reifies <<( <http://example.com/a> <http://example.com/q> <http://example.com/c> )>> ;
+    spqprov:absent true ;
+    spqprov:position 0 ;
+    spqprov:targetBinding "?x=<http://example.com/a>; …" .
+```
+
+`rdf:reifies` carries an RDF 1.2 triple term: the missing triple is quoted exactly and
+is not asserted into the report graph. N-Triples and Turtle serialize the same
+five metadata triples per missing conjunct with stable bytes/triple order.
 
 ## See also
 

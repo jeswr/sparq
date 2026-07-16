@@ -6,12 +6,20 @@
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::fmt;
+use std::fmt::{self, Write as _};
 
-use oxrdf::{NamedOrBlankNode, Term, Triple, Variable};
+use oxrdf::vocab::rdf;
+use oxrdf::{Literal, NamedNode, NamedOrBlankNode, Term, Triple, Variable};
 use spargebra::algebra::GraphPattern;
 use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
 use sparq_core::Graph;
+
+use crate::{prov, PROV, SPARQ_PROV_NS};
+
+// [GPT-5.6] sq-lsp7k: RDF vocabulary for deterministic missing-answer reports.
+const ABSENT: &str = "urn:sparq:prov:absent";
+const POSITION: &str = "urn:sparq:prov:position";
+const TARGET_BINDING: &str = "urn:sparq:prov:targetBinding";
 
 /// One failing conjunct in a missing-answer explanation.
 ///
@@ -35,7 +43,7 @@ impl MissingPattern {
     }
 }
 
-/// Why-not explanation failed closed before graph membership could be checked.
+/// Why-not explanation or report construction failed closed.
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum WhyNotError {
@@ -47,6 +55,8 @@ pub enum WhyNotError {
     InvalidSubject(Term),
     /// Substitution produced a term that is not an IRI in predicate position.
     InvalidPredicate(Term),
+    /// A report was requested with a target other than the one that grounded it.
+    TargetMismatch,
 }
 
 impl fmt::Display for WhyNotError {
@@ -64,6 +74,9 @@ impl fmt::Display for WhyNotError {
             Self::InvalidPredicate(term) => {
                 write!(f, "target binding produces a non-IRI triple predicate: {term}")
             }
+            Self::TargetMismatch => f.write_str(
+                "target binding does not reproduce a missing pattern's grounded triple",
+            ),
         }
     }
 }
@@ -101,6 +114,133 @@ pub fn why_not(
         }
     }
     Ok(missing)
+}
+
+/// Serialises a missing-answer report as deterministic RDF 1.2 N-Triples.
+///
+/// `missing` is the vector returned by [`why_not`] for `target`. Each entry
+/// becomes one `prov:Entity` whose `rdf:reifies` is the exact grounded triple as
+/// an RDF 1.2 triple term. The entity also carries
+/// `urn:sparq:prov:absent true`, its zero-based BGP position, and a canonical
+/// target-binding literal. Entries and their metadata retain `missing` order.
+///
+/// The target is applied to every retained original pattern again before any
+/// RDF is emitted. Invalid bindings return the corresponding [`WhyNotError`],
+/// and a target that does not reproduce [`MissingPattern::grounded`] returns
+/// [`WhyNotError::TargetMismatch`]. Because `MissingPattern` has no public
+/// constructor, report entries can originate only from the bounded, single-BGP
+/// [`why_not`] surface.
+///
+/// [GPT-5.6] sq-lsp7k
+pub fn why_not_report_ntriples(
+    target: &HashMap<Variable, Term>,
+    missing: &[MissingPattern],
+) -> Result<String, WhyNotError> {
+    Ok(sparq_engine::triples_to_ntriples(&why_not_report_graph(
+        target, missing,
+    )?))
+}
+
+/// Serialises the same missing-answer report as prefix-compacted Turtle.
+///
+/// The RDF graph and validation rules are identical to
+/// [`why_not_report_ntriples`]. Output is deterministic and retains the BGP
+/// order preserved by [`why_not`].
+///
+/// [GPT-5.6] sq-lsp7k
+pub fn why_not_report_turtle(
+    target: &HashMap<Variable, Term>,
+    missing: &[MissingPattern],
+) -> Result<String, WhyNotError> {
+    let triples = why_not_report_graph(target, missing)?;
+    let serializer = oxttl::TurtleSerializer::new()
+        .with_prefix("prov", PROV)
+        .expect("the PROV namespace must be a valid prefix IRI")
+        .with_prefix("spqprov", SPARQ_PROV_NS)
+        .expect("the sparq provenance namespace must be a valid prefix IRI")
+        .with_prefix("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
+        .expect("the RDF namespace must be a valid prefix IRI")
+        .with_prefix("xsd", "http://www.w3.org/2001/XMLSchema#")
+        .expect("the XSD namespace must be a valid prefix IRI");
+    let mut writer = serializer.for_writer(Vec::new());
+    for triple in &triples {
+        writer
+            .serialize_triple(triple)
+            .expect("serialising a why-not report into memory must succeed");
+    }
+    let bytes = writer
+        .finish()
+        .expect("finishing why-not Turtle serialisation into memory must succeed");
+    Ok(String::from_utf8(bytes).expect("why-not Turtle output must be valid UTF-8"))
+}
+
+fn why_not_report_graph(
+    target: &HashMap<Variable, Term>,
+    missing: &[MissingPattern],
+) -> Result<Vec<Triple>, WhyNotError> {
+    for entry in missing {
+        if &ground_triple(entry.pattern(), target)? != entry.grounded() {
+            return Err(WhyNotError::TargetMismatch);
+        }
+    }
+
+    let target_binding = canonical_target(target);
+    let mut report = Vec::with_capacity(missing.len() * 5);
+    for (position, entry) in missing.iter().enumerate() {
+        let node = report_node(&target_binding, position, entry.grounded());
+        let subject = NamedOrBlankNode::NamedNode(node);
+        report.push(Triple::new(
+            subject.clone(),
+            rdf::TYPE,
+            Term::NamedNode(prov("Entity")),
+        ));
+        report.push(Triple::new(
+            subject.clone(),
+            rdf::REIFIES,
+            Term::Triple(Box::new(entry.grounded().clone())),
+        ));
+        report.push(Triple::new(
+            subject.clone(),
+            NamedNode::new_unchecked(ABSENT),
+            Term::Literal(Literal::from(true)),
+        ));
+        report.push(Triple::new(
+            subject.clone(),
+            NamedNode::new_unchecked(POSITION),
+            Term::Literal(Literal::from(
+                u64::try_from(position).expect("a report vector must fit in u64"),
+            )),
+        ));
+        report.push(Triple::new(
+            subject,
+            NamedNode::new_unchecked(TARGET_BINDING),
+            Term::Literal(Literal::new_simple_literal(target_binding.clone())),
+        ));
+    }
+    Ok(report)
+}
+
+fn canonical_target(target: &HashMap<Variable, Term>) -> String {
+    let mut bindings: Vec<_> = target.iter().collect();
+    bindings.sort_unstable_by(|(left, _), (right, _)| left.as_str().cmp(right.as_str()));
+
+    let mut canonical = String::new();
+    for (index, (variable, term)) in bindings.into_iter().enumerate() {
+        if index != 0 {
+            canonical.push_str("; ");
+        }
+        write!(&mut canonical, "{variable}={term}")
+            .expect("writing a target binding into memory must succeed");
+    }
+    canonical
+}
+
+fn report_node(target_binding: &str, position: usize, grounded: &Triple) -> NamedNode {
+    let identity = format!("{target_binding}\n{position}\n{grounded}");
+    NamedNode::new_unchecked(format!(
+        "{SPARQ_PROV_NS}missing:{position}:{:016x}",
+        crate::fnv1a(identity.as_bytes())
+    ))
 }
 
 fn ground_triple(
@@ -168,6 +308,7 @@ fn contains(graph: &Graph, triple: &Triple) -> bool {
 mod tests {
     use super::*;
     use oxrdf::{Literal, NamedNode};
+    use std::collections::HashSet;
 
     fn iri(local: &str) -> NamedNode {
         NamedNode::new_unchecked(format!("http://example.com/{local}"))
@@ -258,6 +399,130 @@ mod tests {
                 .map(MissingPattern::pattern)
                 .collect::<Vec<_>>(),
             vec![&first, &second]
+        );
+    }
+
+    /// [GPT-5.6] sq-lsp7k: a parsed report exposes exactly the grounded missing
+    /// triples, while a predicate mutation is observably rejected by the oracle.
+    #[test]
+    fn why_not_report_ntriples_round_trips_exact_grounded_triples() {
+        let algebra = GraphPattern::Bgp {
+            patterns: vec![
+                pattern(variable_term("x"), "p", variable_term("y")),
+                pattern(variable_term("x"), "q", variable_term("z")),
+            ],
+        };
+        let mut target = HashMap::new();
+        target.insert(variable("z"), Term::NamedNode(iri("c")));
+        target.insert(variable("x"), Term::NamedNode(iri("a")));
+        target.insert(variable("y"), Term::NamedNode(iri("b")));
+        let missing = why_not(&Graph::default(), &algebra, &target).unwrap();
+
+        let report = why_not_report_ntriples(&target, &missing).unwrap();
+        let parsed: Vec<_> = oxttl::NTriplesParser::new()
+            .for_reader(report.as_bytes())
+            .collect::<Result<_, _>>()
+            .expect("why-not report must be valid RDF 1.2 N-Triples");
+
+        assert_eq!(parsed.len(), missing.len() * 5);
+        assert_eq!(
+            parsed
+                .iter()
+                .map(|triple| triple.subject.clone())
+                .collect::<HashSet<_>>()
+                .len(),
+            missing.len(),
+            "each missing conjunct must have exactly one report node"
+        );
+        let grounded: Vec<_> = parsed
+            .iter()
+            .filter(|triple| triple.predicate == rdf::REIFIES)
+            .map(|triple| match &triple.object {
+                Term::Triple(grounded) => grounded.as_ref().clone(),
+                other => panic!("rdf:reifies must carry a triple term, got {other}"),
+            })
+            .collect();
+        let expected: Vec<_> = missing
+            .iter()
+            .map(|entry| entry.grounded().clone())
+            .collect();
+        assert_eq!(grounded, expected);
+
+        let mut mutated = expected;
+        mutated[0] = Triple::new(iri("a"), iri("mutated"), iri("b"));
+        assert_ne!(
+            grounded, mutated,
+            "mutation witness: an invented grounded triple must fail the oracle"
+        );
+
+        let absent_subjects: HashSet<_> = parsed
+            .iter()
+            .filter(|triple| {
+                triple.predicate.as_str() == ABSENT
+                    && triple.object == Term::Literal(Literal::from(true))
+            })
+            .map(|triple| triple.subject.clone())
+            .collect();
+        assert_eq!(absent_subjects.len(), missing.len());
+    }
+
+    /// [GPT-5.6] sq-lsp7k: HashMap iteration does not influence bytes, and the
+    /// Turtle surface denotes the exact same report graph as N-Triples.
+    #[test]
+    fn why_not_report_is_deterministic_and_turtle_round_trips() {
+        let algebra = GraphPattern::Bgp {
+            patterns: vec![pattern(variable_term("x"), "p", variable_term("y"))],
+        };
+        let target = HashMap::from([
+            (variable("x"), Term::NamedNode(iri("a"))),
+            (variable("y"), Term::NamedNode(iri("b"))),
+        ]);
+        let reverse_target = HashMap::from([
+            (variable("y"), Term::NamedNode(iri("b"))),
+            (variable("x"), Term::NamedNode(iri("a"))),
+        ]);
+        let missing = why_not(&Graph::default(), &algebra, &target).unwrap();
+
+        let ntriples = why_not_report_ntriples(&target, &missing).unwrap();
+        assert_eq!(
+            ntriples,
+            why_not_report_ntriples(&reverse_target, &missing).unwrap()
+        );
+        let turtle = why_not_report_turtle(&target, &missing).unwrap();
+        assert!(turtle.contains("@prefix prov:"));
+        assert!(turtle.contains("@prefix spqprov:"));
+
+        let nt_graph: HashSet<_> = oxttl::NTriplesParser::new()
+            .for_reader(ntriples.as_bytes())
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let turtle_graph: HashSet<_> = oxttl::TurtleParser::new()
+            .for_slice(turtle.as_bytes())
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(turtle_graph, nt_graph);
+    }
+
+    /// [GPT-5.6] sq-lsp7k: a report cannot silently relabel an explanation with
+    /// a different target binding.
+    #[test]
+    fn why_not_report_rejects_target_mismatch() {
+        let algebra = GraphPattern::Bgp {
+            patterns: vec![pattern(variable_term("x"), "p", variable_term("y"))],
+        };
+        let target = HashMap::from([
+            (variable("x"), Term::NamedNode(iri("a"))),
+            (variable("y"), Term::NamedNode(iri("b"))),
+        ]);
+        let missing = why_not(&Graph::default(), &algebra, &target).unwrap();
+        let mismatched = HashMap::from([
+            (variable("x"), Term::NamedNode(iri("a"))),
+            (variable("y"), Term::NamedNode(iri("other"))),
+        ]);
+
+        assert_eq!(
+            why_not_report_ntriples(&mismatched, &missing),
+            Err(WhyNotError::TargetMismatch)
         );
     }
 
