@@ -60,7 +60,11 @@ assert_eq!(field.widget.editor.as_deref(),
   `FormDescription` (`dash:DetailsEditor`), depth-limited and cycle-safe.
 - **Constraints carried per field** — counts, datatypes, classes, node kinds,
   `sh:in` enumerations, pattern/length/range bounds, `sh:or` unions — the
-  renderer's live-validation hints (F3) and the widget-scoring inputs.
+  widget-scoring inputs.
+- **Opt-in live validation** — `derive_form_validated(data, shapes, model,
+  focus, opts, registry)` runs the base SHACL validator and adds each
+  focus-node property violation to the matching editable field's `validation`
+  vector without changing the data graph or the plain derivation APIs.
 - **Pure edit diff** — `FormDiff::between(&before, &after)` reports added and
   removed RDF terms, while `to_sparql_update` renders them as one SPARQL 1.1
   `DELETE`/`INSERT` request. It intentionally excludes read-only, inverse,
@@ -75,8 +79,8 @@ assert_eq!(field.widget.editor.as_deref(),
   vocabulary and scoring contract this crate implements (documented
   deviations are marked *(sparq)* in the `widgets` module docs).
 - `sparq-shacl` — the shapes model + validation engine this crate consumes.
-- Roadmap: F2 GUI renderer (sq-lsp7k.1.2), F3 live validation + DASH
-  suggestions (sq-lsp7k.1.3), F5 RDF 1.2 / computed fields (sq-lsp7k.1.5),
+- Roadmap: F2 GUI renderer (sq-lsp7k.1.2), DASH suggestions (sq-lsp7k.1.4),
+  F5 RDF 1.2 / computed fields (sq-lsp7k.1.5),
   F6 sparq-mcp agent tools (sq-lsp7k.1.6).
 
 ## License

@@ -227,6 +227,20 @@ pub struct FormValue {
     pub nested: Option<Box<FormDescription>>,
 }
 
+/// [GPT-5.6] One SHACL validation result attached to its declared form field.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ValidationHint {
+    /// Constraint-component IRI (for example, `sh:PatternConstraintComponent`).
+    pub source_component: String,
+    /// Shape-provided `sh:message`, or the validator's generated fallback.
+    pub message: String,
+    /// Offending value node, when the constraint reports one.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub value: Option<TermRef>,
+    /// Result severity IRI (`sh:Violation`, `sh:Warning`, `sh:Info`, or custom).
+    pub severity: String,
+}
+
 /// One field of the form (per property shape, or per off-shape predicate).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FormField {
@@ -259,6 +273,9 @@ pub struct FormField {
     pub widget: WidgetChoice,
     pub values: Vec<FormValue>,
     pub constraints: Constraints,
+    /// [GPT-5.6] Live SHACL results for this declared, editable field.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub validation: Vec<ValidationHint>,
 }
 
 /// The whole derived form: what a renderer needs to draw (and an agent needs
