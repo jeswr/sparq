@@ -16,26 +16,34 @@
 # [models] — the catalog. A model alias resolves to a provider + harness + concrete provider model id
 # + credential format. `codex` and `claude` are HARNESSES (CLIs), not models. The account selector +
 # worker use these to pick the right account and restore the right credential.
+#
+# CREDENTIAL FORMAT (Anthropic): use `claude-oauth-token` — a long-lived, NON-rotating token from
+# `claude setup-token`, designed for headless/CI. Do NOT use the interactive `claude-credentials-json`
+# subscription blob for a worker: its refresh token ROTATES, so a copy seeded into a secret is
+# invalidated the moment the interactive session (or another worker) refreshes — the worker then
+# fails with an auth error. setup-token also creates a SEPARATE credential, so the worker never
+# rotates the coordinating session's own login out from under it. (anthropic-api-key is also
+# supported by the worker if a Console key is preferred over the subscription.)
 [models.haiku]
 provider = "anthropic"
 harness = "claude"
 provider_model = "claude-haiku-4-5"   # concrete id; maintainer confirms exact pin
-credential_format = "claude-credentials-json"
+credential_format = "claude-oauth-token"
 [models.sonnet]
 provider = "anthropic"
 harness = "claude"
 provider_model = "claude-sonnet-4-6"
-credential_format = "claude-credentials-json"
+credential_format = "claude-oauth-token"
 [models.opus]
 provider = "anthropic"
 harness = "claude"
 provider_model = "claude-opus-4-8"
-credential_format = "claude-credentials-json"
+credential_format = "claude-oauth-token"
 [models.fable]
 provider = "anthropic"
 harness = "claude"
 provider_model = "claude-fable-5"
-credential_format = "claude-credentials-json"
+credential_format = "claude-oauth-token"
 [models.terra]
 provider = "openai"
 harness = "codex"
