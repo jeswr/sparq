@@ -13,8 +13,10 @@
 //! only permitted difference is the *labels* of ANONYMOUS blank nodes (`[]`, collections `()`, and
 //! `[ … ]` property lists): oxttl mints those as random 128-bit ids, so two oxttl parses of the
 //! same document already differ there — every differential/conformance comparison is therefore
-//! blank-node **isomorphic**, and this parser mints fresh document-scoped labels that are unique
-//! and cannot collide with a user-written `_:label`.
+//! blank-node **isomorphic**. [GPT-5.6] This parser mints labels with a process-global monotonic
+//! seed so independently minted anonymous nodes remain distinct. Turtle does not reserve that
+//! internal label spelling, however, so a deliberately matching user-written `_:label` could
+//! collide in principle.
 //!
 //! # How byte-identity is achieved, not re-derived
 //!
@@ -789,14 +791,16 @@ impl Parser<'_, '_> {
         Ok(self.dict.intern_blank(label))
     }
 
-    /// Mint a fresh anonymous blank node id. The label is namespaced so it can never collide with a
-    /// user-written `_:label`, AND it embeds a PROCESS-GLOBAL monotonic seed (not just a per-parse
-    /// counter) so that two chunks parsed independently by the parallel loader — each a fresh
-    /// [`Parser`] — never mint the SAME anon label and get wrongly unified by the label-based dict
-    /// merge. This mirrors oxttl's random-128-bit anonymous ids: distinct anon nodes stay distinct
-    /// across chunk boundaries, and no anon node crosses a chunk boundary anyway (a `[]`/`()` nest
-    /// is confined to one statement). Two ground-equal documents parsed twice differ only in these
-    /// labels, exactly as two oxttl parses do — every comparison is blank-node-isomorphic.
+    /// [GPT-5.6] Mint a fresh anonymous blank node id. The label embeds a PROCESS-GLOBAL monotonic
+    /// seed (not just a per-parse counter) so that two chunks parsed independently by the parallel
+    /// loader — each a fresh [`Parser`] — never mint the SAME anon label and get wrongly unified by
+    /// the label-based dict merge. Its spelling uses legal Turtle `PN_CHARS`, so it is not
+    /// structurally disjoint from a deliberately matching user-written `_:label`. This mirrors
+    /// oxttl's random-128-bit anonymous ids for the operational requirement: distinct anon nodes
+    /// stay distinct across chunk boundaries, and no anon node crosses a chunk boundary anyway (a
+    /// `[]`/`()` nest is confined to one statement). Two ground-equal documents parsed twice differ
+    /// only in these labels, exactly as two oxttl parses do — every comparison is
+    /// blank-node-isomorphic.
     fn fresh_blank(&mut self) -> Id {
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEED: AtomicU64 = AtomicU64::new(0);
