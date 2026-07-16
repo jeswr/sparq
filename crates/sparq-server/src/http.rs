@@ -759,14 +759,16 @@ pub struct ServerConfig {
     /// `SPARQ_TEMPLATES_FILE`.
     #[cfg(feature = "templates")]
     pub templates_file: Option<std::path::PathBuf>,
-    /// [OPUS-4.8] (sq-2999l, gh-906) OPT-IN durable CDC change-stream directory. When `Some(dir)`,
-    /// the server (1) RECORDS every committed SPARQL Update as one ordered change record to the
-    /// segmented, fsync'd append-only `sparq_serve::ChangeLog` rooted at `dir`, and (2) serves the
-    /// Amazon-Neptune-Streams `GetRecords`-shaped poll endpoint `GET /streams` over that log
-    /// (`iteratorType` / `at` / `after` / `limit`, returning the ordered records + a continuation
-    /// token). `None` (the default) leaves both off: `/streams` is `404` and nothing is recorded —
-    /// byte-identical to before. The log resumes after a restart (`ChangeLog::open` re-reads the
-    /// segments), so pointing the server at an existing dir continues the same stream gaplessly.
+    /// [GPT-5.6] (sq-kqofk, gh-906) OPT-IN durable CDC change-stream directory. When `Some(dir)`,
+    /// the server (1) RECORDS every published update generation as one ordered change record on
+    /// the writer thread to the segmented, fsync'd append-only `sparq_serve::ChangeLog` rooted at
+    /// `dir`, and (2) serves the Amazon-Neptune-Streams `GetRecords`-shaped poll endpoint
+    /// `GET /streams` over that log (`iteratorType` / `at` / `after` / `limit`, returning the
+    /// ordered records + a continuation token). A group-committed generation may contain several
+    /// concurrent SPARQL Updates. `None` (the default) leaves both off: `/streams` is `404` and
+    /// nothing is recorded — byte-identical to before. The log resumes after a restart
+    /// (`ChangeLog::open` re-reads the segments), so pointing the server at an existing dir
+    /// continues the same stream gaplessly.
     ///
     /// This field exists only with the `change-stream` cargo feature (like [`tpf`](Self::tpf)
     /// under `tpf`); a build without that feature compiles no change-stream code and pays zero
@@ -2264,6 +2266,76 @@ struct ServingCore {
     writer: Arc<Writer<String, Graph>>,
 }
 
+/// [GPT-5.6] (sq-kqofk) The opt-in server adapter around the writer-thread CDC hook. The
+/// append-capable `ChangeLog` is consumed by `into_commit_hook`; the separate handle is read-only
+/// by convention and may safely `poll` concurrently because polling never mutates the log. The
+/// hook mutex is writer-thread-side only: it keeps the single log writer safe across an online
+/// backup restore's briefly-overlapping old/new writer threads, and is never held by submitters.
+#[cfg(feature = "change-stream")]
+struct ChangeStreamState {
+    reader: sparq_serve::ChangeLog,
+    hook: Arc<std::sync::Mutex<Box<ChangeStreamHook>>>,
+    next_seq: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// [GPT-5.6] (sq-kqofk) Named to keep the optional state's writer-thread callback readable.
+#[cfg(feature = "change-stream")]
+type ChangeStreamHook = dyn FnMut(&Generation<Graph>, &Generation<Graph>) + Send + 'static;
+
+#[cfg(feature = "change-stream")]
+impl ChangeStreamState {
+    /// [GPT-5.6] (sq-kqofk) Opens separate writer/read handles before the writer thread starts,
+    /// then consumes the append handle into the production `ChangeLog` commit hook. The tracked
+    /// tail advances only after a successful durable append, so `LATEST` remains an O(1) lookup.
+    fn open(dir: &std::path::Path) -> Result<Self, sparq_serve::BackupError> {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        let writer_log = sparq_serve::ChangeLog::open(dir)?;
+        let reader = sparq_serve::ChangeLog::open(dir)?;
+        let next_seq = Arc::new(AtomicU64::new(writer_log.next_seq()));
+        let append_failed = Arc::new(AtomicBool::new(false));
+
+        let failed_on_error = append_failed.clone();
+        let mut record = writer_log.into_commit_hook(move |e| {
+            failed_on_error.store(true, Ordering::Relaxed);
+            tracing::warn!(target: "sparq_server", detail = %e, "change-stream record append failed (update committed; record dropped)");
+        });
+        let failed_for_hook = append_failed;
+        let next_for_hook = next_seq.clone();
+        let tracked_hook = move |from: &Generation<Graph>, to: &Generation<Graph>| {
+            failed_for_hook.store(false, Ordering::Relaxed);
+            record(from, to);
+            if !failed_for_hook.load(Ordering::Relaxed) {
+                next_for_hook.fetch_add(1, Ordering::Release);
+            }
+        };
+
+        Ok(Self {
+            reader,
+            hook: Arc::new(std::sync::Mutex::new(Box::new(tracked_hook))),
+            next_seq,
+        })
+    }
+
+    /// [GPT-5.6] (sq-kqofk) Gives each sequenced writer a lightweight adapter to the one durable
+    /// hook. Normal serving has one writer; online restore may briefly retain the old one too.
+    fn commit_hook(&self) -> impl FnMut(&Generation<Graph>, &Generation<Graph>) + Send + 'static {
+        let hook = self.hook.clone();
+        move |from, to| {
+            let mut hook = hook.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            hook(from, to);
+        }
+    }
+
+    fn poll(&self, from_seq: u64) -> Result<Vec<sparq_serve::ChangeRecord>, String> {
+        self.reader.poll(from_seq).map_err(|e| e.to_string())
+    }
+
+    fn next_seq(&self) -> u64 {
+        self.next_seq.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
 /// [OPUS-4.8] (sq-o5bi) Builds the ring's retention config from the server config — the default
 /// concurrency-only retention, or, under the `time-travel` feature, the extended retention so
 /// `?generation=N` has history to serve. Shared by the constructor and the online restore so a
@@ -2284,6 +2356,28 @@ fn build_ring_config(config: &ServerConfig) -> sparq_serve::RingConfig {
             ..sparq_serve::RingConfig::default()
         }
     }
+}
+
+/// [GPT-5.6] (sq-kqofk) Spawns the server's sequenced writer, installing the optional durable
+/// change-stream hook on the writer thread. Without `change-stream`, the conditional parameter and
+/// branch are compiled out and this remains the original `Writer::spawn` path.
+fn spawn_server_writer(
+    ring: Arc<GenerationRing<Graph>>,
+    applier: ServerApplier,
+    config: WriterConfig,
+    #[cfg(feature = "change-stream")] change_stream: Option<&ChangeStreamState>,
+) -> Arc<Writer<String, Graph>> {
+    #[cfg(feature = "change-stream")]
+    if let Some(change_stream) = change_stream {
+        return Arc::new(Writer::spawn_with_commit_hook(
+            ring,
+            applier,
+            config,
+            change_stream.commit_hook(),
+        ));
+    }
+
+    Arc::new(Writer::spawn(ring, applier, config))
 }
 
 #[derive(Clone)]
@@ -2325,15 +2419,11 @@ pub struct AppState {
     /// configured one (`--access-audit` / `SPARQ_ACCESS_AUDIT`); shared across handlers.
     #[cfg(feature = "access-audit")]
     access_audit_sink: Option<Arc<dyn crate::access_audit::AuditSink>>,
-    /// [OPUS-4.8] (sq-2999l) The opt-in durable CDC change-stream log. `Some(mutex)` only when the
-    /// operator configured a directory (`--change-stream` / `SPARQ_CHANGE_STREAM`); shared across
-    /// handlers behind a [`std::sync::Mutex`] because the log is single-writer (it serialises the
-    /// commit-recording append) while a concurrent reader [`poll`](sparq_serve::ChangeLog::poll)s
-    /// the SAME on-disk directory through a separate `ChangeLog::open` handle in the endpoint. The
-    /// recording path holds this lock across an update's pre/post generation pin so the recorded
-    /// `(from, to)` pair is exactly that commit (gapless, monotonic — the `ChangeLog` contract).
+    /// [GPT-5.6] (sq-kqofk) The opt-in durable CDC adapter. The append handle lives inside the
+    /// writer-thread commit hook, while handlers poll through a separate read handle. Recording
+    /// therefore rides group commit and never holds a caller-side lock across `submit`.
     #[cfg(feature = "change-stream")]
-    change_log: Option<Arc<std::sync::Mutex<sparq_serve::ChangeLog>>>,
+    change_stream: Option<Arc<ChangeStreamState>>,
     /// [FABLE-5] (sq-fy8ci) SINGLE-FLIGHT restore permit. `true` while a restore is in flight.
     /// Two concurrent restores were previously silently serialized by the single writer thread
     /// (each individually crash-safe, last-writer-wins) — harmless but surprising: an operator
@@ -2641,11 +2731,24 @@ impl AppState {
             }
             None => ServerApplier::new(config.clone()),
         };
-        let writer = Arc::new(Writer::spawn(
+        // [GPT-5.6] (sq-kqofk) Open the CDC state before spawning the writer so the append log can
+        // be consumed into its commit hook. A corrupt log remains a clean startup failure.
+        #[cfg(feature = "change-stream")]
+        let change_stream = match &config.change_stream_dir {
+            Some(dir) => {
+                Some(Arc::new(ChangeStreamState::open(dir).map_err(|e| {
+                    format!("change-stream log open failed: {e}")
+                })?))
+            }
+            None => None,
+        };
+        let writer = spawn_server_writer(
             ring.clone(),
             applier,
             writer_config(&config),
-        ));
+            #[cfg(feature = "change-stream")]
+            change_stream.as_deref(),
+        );
         // [OPUS-4.8] sq-gos8: open the structured access-audit sink if one is configured. A
         // failure to open (e.g. an unwritable audit-file path) is surfaced as a clean startup
         // error rather than silently dropping the trail — the operator asked for an audit log.
@@ -2655,20 +2758,6 @@ impl AppState {
                 crate::access_audit::make_sink(target)
                     .map_err(|e| format!("access-audit sink open failed: {e}"))?,
             ),
-            None => None,
-        };
-        // [OPUS-4.8] sq-2999l: open (creating + recovering) the durable CDC change-stream log when a
-        // directory is configured. `ChangeLog::open` re-reads any existing segments and resumes at
-        // the next seq, so restarting on the same dir continues the stream gaplessly. A corrupt log
-        // (bad digest / out-of-order seq / unknown segment version) is surfaced as a clean startup
-        // error (fail-closed) rather than silently serving a wrong feed — the operator asked for a
-        // durable change stream.
-        #[cfg(feature = "change-stream")]
-        let change_log = match &config.change_stream_dir {
-            Some(dir) => Some(Arc::new(std::sync::Mutex::new(
-                sparq_serve::ChangeLog::open(dir)
-                    .map_err(|e| format!("change-stream log open failed: {e}"))?,
-            ))),
             None => None,
         };
         // [FABLE-5] sq-lsp7k.10: seed the named-template store from the optional persistence
@@ -2698,7 +2787,7 @@ impl AppState {
             #[cfg(feature = "access-audit")]
             access_audit_sink,
             #[cfg(feature = "change-stream")]
-            change_log,
+            change_stream,
             // [FABLE-5] sq-fy8ci: no restore in flight at boot (restore-on-start runs on the
             // seed graph in main.rs BEFORE this state exists, so it never holds the permit).
             #[cfg(feature = "backup")]
@@ -2742,7 +2831,7 @@ impl AppState {
     /// set via `--change-stream` / `SPARQ_CHANGE_STREAM`). When `false`, `GET /streams` is `404`.
     #[cfg(feature = "change-stream")]
     pub(crate) fn change_stream_enabled(&self) -> bool {
-        self.change_log.is_some()
+        self.change_stream.is_some()
     }
 
     /// [OPUS-4.8] (sq-2999l) Polls the durable CDC change-stream for every recorded change record
@@ -2757,11 +2846,8 @@ impl AppState {
         &self,
         from_seq: u64,
     ) -> Result<Option<Vec<sparq_serve::ChangeRecord>>, String> {
-        match &self.change_log {
-            Some(log) => {
-                let guard = log.lock().unwrap_or_else(|p| p.into_inner());
-                guard.poll(from_seq).map(Some).map_err(|e| e.to_string())
-            }
+        match &self.change_stream {
+            Some(stream) => stream.poll(from_seq).map(Some),
             None => Ok(None),
         }
     }
@@ -2771,9 +2857,7 @@ impl AppState {
     /// when the change-stream is not configured.
     #[cfg(feature = "change-stream")]
     pub(crate) fn change_stream_next_seq(&self) -> Option<u64> {
-        self.change_log
-            .as_ref()
-            .map(|log| log.lock().unwrap_or_else(|p| p.into_inner()).next_seq())
+        self.change_stream.as_ref().map(|stream| stream.next_seq())
     }
 
     /// Pins the current generation for a request: lock-free, never blocked
@@ -2859,40 +2943,10 @@ impl AppState {
         // default-graph / dynamically-scoped writes still fall back to the global pod
         // (conservative, never under-invalidating). See [`touched_pods`].
         let touched = touched_pods(sparql);
-        // [OPUS-4.8] sq-2999l: when a durable CDC change-stream is configured, record this commit.
-        // Acquire the log lock FIRST, then — UNDER the lock — capture the predecessor generation and
-        // run the submit, and HOLD the lock across both. Because every recording update takes this
-        // same lock, only the lock-holder is ever inside `submit`, so under the lock no other thread
-        // can publish: the pin captured here is the last published generation (== the log's
-        // `last_generation`), and the post-submit `current()` is exactly THIS commit's published
-        // generation. The recorded `(pin, post)` pair is therefore exactly this commit — gapless +
-        // monotonic, the `ChangeLog` contract. Capturing the pin BEFORE the lock would race a
-        // concurrent commit and break the gapless chain; capturing it after is load-bearing. The
-        // whole dance is on the recording path only, so the default build is byte-identical.
-        #[cfg(feature = "change-stream")]
-        let _record = self.change_log.clone();
-        #[cfg(feature = "change-stream")]
-        let _record_lock_and_pin = _record
-            .as_ref()
-            .map(|log| (log.lock().unwrap_or_else(|p| p.into_inner()), self.current()));
+        // [GPT-5.6] (sq-kqofk) CDC recording now happens inside the writer's commit hook, once per
+        // published generation and before its acknowledgements. Concurrent submitters can join the
+        // same group-commit batch; there is no caller-side change-log lock on this path.
         let result = self.writer().submit(sparql.to_string(), touched);
-        #[cfg(feature = "change-stream")]
-        if let (Ok(_number), Some((mut guard, pin))) = (&result, _record_lock_and_pin) {
-            // The published generation is `current()` — holding the lock guarantees no concurrent
-            // update advanced it past this commit. Record only when it moved forward (a batch-mate
-            // sharing the generation, or a no-op update, records nothing; the log would reject a
-            // non-forward range, so this guard preserves the gapless contract proactively).
-            let post = self.current();
-            if post.number() > pin.number() {
-                // A recording I/O failure must NOT lose the already-committed update (it is durable
-                // + published). Surface it to the OPERATOR's log and continue serving; the next poll
-                // simply will not see this one record (an honest gap the operator can detect).
-                if let Err(e) = guard.record_commit(&pin, &post) {
-                    // [OPUS-4.8] positional format arg (CodeQL rust/unused-variable false-positive).
-                    tracing::warn!(target: "sparq_server", detail = %e, "change-stream record append failed (update committed; record dropped)");
-                }
-            }
-        }
         match result {
             Ok(number) => {
                 // Monotonic max: batch-mates share a generation number and may ack in
@@ -3090,11 +3144,15 @@ impl AppState {
         let ring_config = build_ring_config(&self.config);
         let ring = Arc::new(GenerationRing::with_config(graph, ring_config));
         let applier = ServerApplier::new(self.config.clone());
-        let writer = Arc::new(Writer::spawn(
+        // [GPT-5.6] (sq-kqofk) A restored writer retains the same single CDC hook. The hook's
+        // same-lineage guard reports the documented restore discontinuity instead of diffing it.
+        let writer = spawn_server_writer(
             ring.clone(),
             applier,
             writer_config(&self.config),
-        ));
+            #[cfg(feature = "change-stream")]
+            self.change_stream.as_deref(),
+        );
         // Atomic swap: subsequent loads see the new ring+writer; the old core's writer thread
         // joins once its last in-flight reader/Arc drops (Writer's Drop drains + joins).
         self.core.store(Arc::new(ServingCore { ring, writer }));
@@ -4476,8 +4534,9 @@ async fn streams_endpoint(
     };
     let limit = parse_limit(params.get("limit").map(String::as_str));
 
-    // `LATEST` starts at the log's current tail; the others ignore `next_seq`. Reading it under the
-    // log lock is cheap (no disk scan). Absent (disabled) is the 404 above, so this is `Some`.
+    // [GPT-5.6] (sq-kqofk) `LATEST` starts at the successful-hook tail. The writer-thread hook
+    // advances this atomic only after a durable append, so the lookup needs no submitter/log lock.
+    // Absent (disabled) is the 404 above, so this is `Some`.
     let next_seq = state.change_stream_next_seq().unwrap_or(0);
     let from_seq = iter.from_seq(next_seq);
 
@@ -10189,6 +10248,86 @@ mod apply_update_mvcc_tests {
             gen1,
             gen2
         );
+    }
+}
+
+/// [GPT-5.6] (sq-kqofk) Server-adapter coverage for writer-thread CDC recording. This uses a
+/// deliberately wide group-commit window so concurrent submitters deterministically share one
+/// published generation. Mutation witness: replacing `spawn_with_commit_hook` with `spawn` makes
+/// the log empty, while changing the expected record/generation count makes the test fail.
+#[cfg(all(test, feature = "change-stream"))]
+mod change_stream_commit_hook_tests {
+    use super::{spawn_server_writer, ChangeStreamState, ServerApplier, ServerConfig};
+    use sparq_core::Graph;
+    use sparq_serve::{GenerationRing, PodId, WriterConfig};
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    #[test]
+    fn concurrent_submitters_share_one_recorded_generation() {
+        const N: usize = 8;
+        let dir = std::env::temp_dir().join(format!(
+            "sparq-server-cdc-hook-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let stream = Arc::new(ChangeStreamState::open(&dir).expect("open change stream"));
+        let config = Arc::new(ServerConfig::default());
+        let ring = Arc::new(GenerationRing::new(Graph::default()));
+        let writer = spawn_server_writer(
+            ring,
+            ServerApplier::new(config),
+            WriterConfig {
+                window: Duration::from_millis(100),
+                adaptive_commit: false,
+                ..WriterConfig::default()
+            },
+            Some(stream.as_ref()),
+        );
+
+        let barrier = Arc::new(Barrier::new(N + 1));
+        let mut submitters = Vec::with_capacity(N);
+        for i in 0..N {
+            let writer = writer.clone();
+            let barrier = barrier.clone();
+            submitters.push(std::thread::spawn(move || {
+                barrier.wait();
+                writer
+                    .submit(
+                        format!(
+                            "INSERT DATA {{ <http://ex/s{i}> <http://ex/p> <http://ex/o{i}> }}"
+                        ),
+                        [PodId::new("http://ex/g")],
+                    )
+                    .expect("concurrent update commits")
+            }));
+        }
+        barrier.wait();
+        let generations: Vec<u64> = submitters
+            .into_iter()
+            .map(|thread| thread.join().expect("submitter joins"))
+            .collect();
+
+        assert!(generations.iter().all(|&generation| generation == 1));
+        let records = stream.poll(0).expect("poll recorded generation");
+        assert_eq!(records.len(), 1, "one group commit produces one CDC record");
+        assert_eq!(records[0].generation, 1);
+        assert_eq!(
+            records[0].changes.len(),
+            N,
+            "the record contains every update"
+        );
+        assert_eq!(
+            stream.next_seq(),
+            1,
+            "the hook advances the LATEST tail once"
+        );
+
+        drop(writer);
+        drop(stream);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
