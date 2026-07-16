@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 export const metadata: Metadata = {
   title: "SHACL-driven forms",
   description:
-    "See how sparq derives open, DASH-compatible forms from SHACL shapes, with an honest view of what works today and what remains designed.",
+    "See how sparq derives open, DASH-compatible forms from SHACL shapes — live validation, SPARQL UPDATE commits, and native GUI rendering are available today; the MCP agent surface and shape editor are planned.",
 };
 
 const shape = `ex:PersonShape a sh:NodeShape ;
@@ -20,6 +20,11 @@ const shape = `ex:PersonShape a sh:NodeShape ;
     sh:order 2
   ] .`;
 
+// [claude] sq-lsp7k: updated statuses to reflect shipped capabilities:
+// - Live field validation landed in PR #2364 (sq-lsp7k.1.3)
+// - Form-diff to SPARQL UPDATE landed in PR #2022 (sparq_forms::to_sparql_update)
+// - Native GUI forms IPC bridge landed in PRs #2308/#2300 (sq-1cnox/sq-3eukz)
+// Still designed-only: F5 role/hidden/readOnly filtering, F6 MCP describe_form, Phase-2 shape editor.
 const architecture = [
   {
     label: "Headless core",
@@ -28,21 +33,21 @@ const architecture = [
     active: true,
   },
   {
-    label: "Web + desktop renderers",
-    status: "Designed, not shipped",
-    detail: "The same description can drive accessible controls in either host without GUI code in the core.",
-    active: false,
+    label: "Native desktop renderer",
+    status: "Available today",
+    detail: "The native GUI exposes a forms IPC bridge and derives forms from the active workspace without GUI code in the headless core.",
+    active: true,
   },
   {
     label: "Edit + commit",
-    status: "Designed, not shipped",
-    detail: "Term-level edits become a reviewable SPARQL UPDATE, with validation before commit.",
-    active: false,
+    status: "Available today",
+    detail: "Term-level edits produce a reviewable SPARQL 1.1 UPDATE (via sparq_forms::to_sparql_update); live per-field validation runs before commit.",
+    active: true,
   },
   {
     label: "Agent surface",
     status: "Designed, not shipped",
-    detail: "MCP tools can eventually expose the same shape-aware description and guarded edit path.",
+    detail: "MCP tools to expose the shape-aware description and guarded edit path (F6 describe_form) remain planned.",
     active: false,
   },
 ] as const;
@@ -61,14 +66,22 @@ export default function ShaclFormsPage() {
         </h1>
         <p className="text-pretty text-lg leading-8 text-muted-foreground">
           sparq turns SHACL shapes into an open form description instead of making people
-          edit raw triples. The headless derivation works today; the editing interfaces do not.
+          edit raw triples. The headless core, live validation, SPARQL UPDATE commit, and
+          native desktop renderer are available today; the MCP agent surface and the
+          meta-circular shape editor remain planned.
         </p>
         <div className="flex flex-wrap gap-2 text-sm" aria-label="Implementation status">
           <span className="rounded-full border border-primary/40 bg-primary/10 px-3 py-1 font-medium text-primary">
             F1 headless core: implemented
           </span>
+          <span className="rounded-full border border-primary/40 bg-primary/10 px-3 py-1 font-medium text-primary">
+            Live validation + SPARQL UPDATE: available
+          </span>
+          <span className="rounded-full border border-primary/40 bg-primary/10 px-3 py-1 font-medium text-primary">
+            Native GUI forms bridge: available
+          </span>
           <span className="rounded-full border px-3 py-1 text-muted-foreground">
-            Renderers and editing: designed only
+            MCP agent surface + shape editor: planned
           </span>
         </div>
       </header>
@@ -165,9 +178,11 @@ export default function ShaclFormsPage() {
             constraints, and editability. Web and desktop hosts can render that same result.
           </p>
           <p>
-            Planned downstream work adds live validation, guarded SPARQL UPDATE commits,
-            computed read-only fields, and agent tools. Those pieces remain designs, not
-            available product features.
+            Live per-field validation, guarded SPARQL UPDATE commits (via{" "}
+            <code>sparq_forms::to_sparql_update</code>), and the native GUI forms bridge
+            are available today. What remains planned: role-based and hidden/readOnly field
+            filtering (F5), the MCP <code>describe_form</code> agent tool (F6), and the
+            Phase-2 meta-circular shape editor.
           </p>
           <a
             href="https://datashapes.org/forms.html"

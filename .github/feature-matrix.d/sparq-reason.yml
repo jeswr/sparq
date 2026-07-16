@@ -18,6 +18,17 @@
   features: "explain"
   test: true
 
+# [GPT-5.6] Exercise the standalone d-entail and rif-core feature-on states.
+- name: "sparq-reason (d-entail)"
+  crate: "sparq-reason"
+  features: "d-entail"
+  test: true
+
+- name: "sparq-reason (rif-core)"
+  crate: "sparq-reason"
+  features: "rif-core"
+  test: true
+
 # [SONNET-4.6] sq-pbz04.5.3: RIF/XML presentation-syntax importer. rif-xml is opt-in
 # (off by default); enables `sparq_reason::rif_xml::import` and pulls in quick-xml.
 # Wired here post-Opus adversarial-verify so CI covers capture-avoidance + fail-closed

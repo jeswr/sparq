@@ -117,6 +117,8 @@ pub fn entries(&self) -> impl Iterator<Item=&Entry>;  // len() / is_empty() / sk
 
 Function IRIs are all under `http://www.opengis.net/def/function/geosparql/`. Result types in SPARQL: `geof:distance` / `metricArea` / `metricLength` / `metricPerimeter` / `maxX` / `minX` / `maxY` / `minY` → `xsd:double`; `isEmpty` and the relation families → `xsd:boolean`; `envelope`/`boundary`/`centroid`/`convexHull`/`simplify`/`buffer`/the four set ops → `geo:wktLiteral`; `getSRID` → `xsd:anyURI`. [GPT-5.6] sq-lc2io
 
+The OPT-IN `geof_accessors` feature (OFF by default; the default `geof_registry()` byte-set is unchanged) adds the GeoSPARQL 1.1 §8.5 non-topological accessor functions — `geof:dimension` / `geof:coordinateDimension` / `geof:spatialDimension` → `xsd:integer`, `geof:isSimple` → `xsd:boolean`, `geof:geometryType` → the OGC Simple-Features geometry-class IRI (`sf:Point` etc.) — each delegating to the pure `sparq_geo::metadata` accessors; undefined cases (an empty geometry's dimensions, an unmapped collection's `sf:` class) return a `GeoError::Unsupported`-mapped per-row expression error rather than a fabricated value. [FABLE-5] sq-lsp7k
+
 ## Common recipes
 
 **Spatial join — which point is within which polygon (SPARQL):**

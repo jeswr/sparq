@@ -1,6 +1,6 @@
 ---
 name: shacl-forms
-description: "Derive a DASH-compatible, renderer-agnostic form description from SHACL shapes with the opt-in sparq-forms crate: (data graph, shapes graph, focus node, view|edit mode) -> serde-JSON FormDescription — applicable-shape switcher, property-group/field layout (sh:name/sh:description/sh:order/sh:group, sh:inversePath incoming references, sh:deactivated, implicit read-only Other group), DASH widget auto-selection via the documented 0-100 scoring registry (TextField/TextArea/BooleanSelect/Date+DateTimePicker/EnumSelect/InstancesSelect/URIEditor/RichText/SubClass/DetailsEditor and the viewers) with dash:editor/dash:viewer overrides, required/multi cardinality typing, per-field constraints and opt-in live SHACL validation hints, and nested sh:node sub-forms. Use when an agent or GUI needs a shape-directed data-entry/edit/view form for a focus node (headless: no GUI deps, builds for wasm32)."
+description: "Derive a DASH-compatible, renderer-agnostic form description from SHACL shapes with the opt-in sparq-forms crate: (data graph, shapes graph, focus node, view|edit mode) -> serde-JSON FormDescription — applicable-shape switcher, property-group/field layout (sh:name/sh:description/sh:order/sh:group, sh:inversePath incoming references, sh:deactivated, implicit read-only Other group), DASH widget auto-selection via the documented 0-100 scoring registry (TextField/TextArea/BooleanSelect/Date+DateTimePicker/EnumSelect/InstancesSelect/URIEditor/RichText/SubClass/DetailsEditor and the viewers) with dash:editor/dash:viewer overrides, required/multi cardinality typing, dash:hidden/dash:readOnly/sh:defaultValue presentation flags, per-field constraints and opt-in live SHACL validation hints, and nested sh:node sub-forms. Use when an agent or GUI needs a shape-directed data-entry/edit/view form for a focus node (headless: no GUI deps, builds for wasm32)."
 license: MIT
 metadata:
   version: "0.1.0"
@@ -67,6 +67,12 @@ What the description carries (all serde `Serialize + Deserialize`):
   add/remove affordance signal).
 - **`constraints`** — per-field counts/datatypes/classes/nodeKind/`sh:in`/
   pattern/length/range/`sh:or` for renderer-side guidance.
+- **`hidden` / `editable` / `default_value`** — `dash:hidden true` flags a
+  field the renderer should omit (it still derives, with values and
+  constraints), `dash:readOnly true` forces `editable: false` even in edit
+  mode, and `sh:defaultValue` is carried verbatim as the seed term a renderer
+  pre-fills when a field has no values. All additive: omitted from the JSON
+  when the property shape does not declare them.
 - **`validation`** — with `derive_form_validated(data, shapes, model, focus,
   opts, registry)`, SHACL results for the focus node are attached to the
   matching declared, editable field by property path. Each `ValidationHint`

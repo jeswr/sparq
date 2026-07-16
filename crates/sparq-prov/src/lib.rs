@@ -46,7 +46,9 @@
 //! **Missing-answer explanation** is available under the non-default `why-not`
 //! feature. The `why_not` function accepts one basic graph pattern and a fully
 //! ground target binding, then reports exactly the substituted triples absent
-//! from the graph. More general SPARQL algebra is rejected as unsupported.
+//! from the graph. `why_not_report_ntriples` and `why_not_report_turtle` render
+//! that result as deterministic, PROV-flavoured RDF 1.2. More general SPARQL
+//! algebra is rejected as unsupported. <!-- [GPT-5.6] sq-lsp7k -->
 //!
 //! **Out of scope for per-triple lineage** (a deliberate honesty boundary, not a TODO):
 //! the structural UPDATE operations `CLEAR` / `DROP` / `CREATE` change a graph's
@@ -86,7 +88,9 @@ pub use reason::{prov_from_proof, prov_ntriples, ProvProofConfig};
 #[cfg(feature = "why-not")]
 mod why_not;
 #[cfg(feature = "why-not")]
-pub use why_not::{why_not, MissingPattern, WhyNotError};
+pub use why_not::{
+    why_not, why_not_report_ntriples, why_not_report_turtle, MissingPattern, WhyNotError,
+};
 
 // ── PROV-O vocabulary IRIs ─────────────────────────────────────────────────
 const PROV: &str = "http://www.w3.org/ns/prov#";

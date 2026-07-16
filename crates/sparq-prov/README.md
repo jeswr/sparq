@@ -78,8 +78,12 @@ let nt      = d.prov_ntriples();    // …or canonical N-Triples
 - **Missing-answer explanation** (`why-not` feature) — `why_not` accepts one
   basic graph pattern (BGP) plus a fully-ground target binding and reports every
   substituted triple absent from the graph, in BGP order. It returns an empty
-  vector when every conjunct is present. `OPTIONAL`, `UNION`, `FILTER`, property
+  vector when every conjunct is present. `why_not_report_ntriples` /
+  `why_not_report_turtle` turn that vector into deterministic RDF 1.2: one
+  `prov:Entity` per missing conjunct carrying its exact grounded triple term and
+  an `urn:sparq:prov:absent true` marker. `OPTIONAL`, `UNION`, `FILTER`, property
   paths, named graphs, and all other algebra fail closed as unsupported.
+  <!-- [GPT-5.6] sq-lsp7k -->
 - **Dependency-light** — `xsd:dateTime` is formatted in-crate (no `chrono`/
   `time` dep); the formatter is the inverse of `sparq-core`'s dateTime parser,
   so a recorded timestamp parses back to the same instant (tested).
