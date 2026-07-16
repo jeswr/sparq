@@ -2550,6 +2550,113 @@ fn isanyof_prohibition_persists_conditional_deny_per_member() {
 }
 
 // ===========================================================================
+// [OPUS-4.8] sq-9n1q4 — a BARE odrl:assignee (the rule PROPERTY, not an
+// odrl:assignee CONSTRAINT block) with ZERO constraints must NOT widen to
+// auth:Public through the conditional entry points. Regression guard for the
+// access-control WIDENING bug: `condition_agents` used to ignore `rule.assignee`
+// and default an empty recipient set to auth:Public, so a permission scoped to
+// ONE assignee granted EVERYONE (incl. anonymous), and a prohibition scoped to
+// one assignee DENIED everyone (over-deny). Both are closed by folding
+// `rule.assignee` into the condition head when there is no recipient constraint.
+// ===========================================================================
+
+// 30. WIDENING CLOSED (permission): a bare-assignee permission (assignee=alice,
+//     ZERO constraints) via the CONDITIONAL entry point grants ONLY alice — bob
+//     AND an anonymous session are DENIED accessible()/query_as for the target.
+//     Before the fix this granted auth:Public (bob + anonymous read n1).
+#[test]
+fn bare_assignee_permission_conditional_scopes_to_assignee_not_public() {
+    // The rule carries `odrl:assignee alice` as a PROPERTY and no constraint block.
+    // (`read_policy()` in this file is exactly this shape.)
+    let pol = read_policy();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+
+    // Free-function form: the ConditionalGrant head is ALICE, NOT auth:Public.
+    let mut g = pod();
+    let out = materialize_permission_conditional(&mut g, &pol, &req);
+    assert!(out.granted, "bare-assignee permission still grants: {out:?}");
+    assert_eq!(
+        cond_grants_for(&g, Some("https://sparq.dev/ns/auth#Public")),
+        0,
+        "NO auth:Public head — the assignee restriction is honoured"
+    );
+    assert_eq!(cond_grants_for(&g, Some(ALICE)), 1, "the grant head is scoped to alice");
+
+    // Through the real enforcement path: only alice reads n1.
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&pol, &req).granted);
+    assert!(reads(&mut store, ALICE), "the assignee (alice) is granted");
+    assert!(!reads(&mut store, BOB), "bob (not the assignee) is DENIED — widening closed");
+    assert!(
+        store.accessible(&Session::default(), Mode::Read).is_empty(),
+        "an anonymous session is DENIED — widening closed"
+    );
+
+    // End-to-end through query_as: only alice sees the content.
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
+    let bob = Session { agent: Some(BOB), client: None, issuer: None, now: None };
+    assert_eq!(store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 1);
+    assert_eq!(store.query_as(&bob, Mode::Read, sel).unwrap().rows.len(), 0);
+    assert_eq!(
+        store.query_as(&Session::default(), Mode::Read, sel).unwrap().rows.len(),
+        0,
+        "anonymous query sees nothing"
+    );
+}
+
+// 31. WIDENING CLOSED (prohibition dual): a bare-assignee prohibition
+//     (assignee=alice, ZERO constraints) via the CONDITIONAL entry point denies
+//     ONLY alice — bob keeps a pre-existing public allow. Before the fix this
+//     materialized a PUBLIC deny (over-deny: everyone, incl. bob, denied).
+#[test]
+fn bare_assignee_prohibition_conditional_scopes_to_assignee_not_public() {
+    let mut store = PodStore::new(pod());
+    // Baseline PUBLIC allow so we can observe the deny biting only the assignee.
+    let permit = parse_policy_str(
+        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+        <urn:pol/pub> a odrl:Set ; odrl:permission [
+            odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ] ."#,
+        "turtle",
+    )
+    .unwrap();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission_conditional(&permit, &req).granted);
+    assert!(reads(&mut store, BOB), "bob reads via the public allow before the deny");
+
+    // A bare-assignee prohibition: `odrl:assignee alice`, ZERO constraints.
+    let prohib = parse_policy_str(
+        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+        <urn:pol/pbare> a odrl:Set ; odrl:prohibition [
+            odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ;
+            odrl:assignee <https://alice.ex/card#me> ] ."#,
+        "turtle",
+    )
+    .unwrap();
+
+    // Free-function form: the deny head is ALICE, NOT auth:Public.
+    let mut g = pod();
+    assert!(materialize_permission_conditional(&mut g, &permit, &req).granted);
+    let dout = materialize_prohibition_conditional(&mut g, &prohib, &req);
+    assert!(dout.prohibited, "bare-assignee prohibition materialises a deny: {dout:?}");
+    assert_eq!(
+        cond_denies_for(&g, Some("https://sparq.dev/ns/auth#Public")),
+        0,
+        "NO auth:Public deny — the deny is scoped to the assignee"
+    );
+    assert_eq!(cond_denies_for(&g, Some(ALICE)), 1, "the deny head is scoped to alice");
+
+    // Through the real enforcement path: deny-overrides removes ONLY alice's access.
+    assert!(store.materialize_odrl_prohibition_conditional(&prohib, &req).prohibited);
+    assert!(!reads(&mut store, ALICE), "alice (the assignee) is denied — deny-overrides");
+    assert!(reads(&mut store, BOB), "bob keeps the public allow — NOT over-denied");
+    assert!(
+        !store.accessible(&Session::default(), Mode::Read).is_empty(),
+        "an anonymous session keeps the public allow — NOT over-denied"
+    );
+}
+
+// ===========================================================================
 // [OPUS-4.8] sq-izzak — a rule whose ONLY restriction is a COMPOUND
 // `odrl:LogicalConstraint` (`odrl:and`/`odrl:or`/`odrl:xone`) with ZERO atomic
 // constraints must NOT widen to auth:Public through the conditional entry
