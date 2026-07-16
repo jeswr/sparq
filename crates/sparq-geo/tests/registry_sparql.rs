@@ -517,3 +517,69 @@ fn constant_polygon_filter_cold_and_warm_runs_agree() {
     assert_eq!(names(&cold, 0), expected);
     assert_eq!(names(&warm, 0), expected, "warm (cached) run must equal the cold run");
 }
+
+#[test]
+#[cfg(feature = "geof_accessors")]
+fn geof_accessor_functions_through_sparql() {
+    // [FABLE-5] sq-lsp7k: the GeoSPARQL 1.1 non-topological accessors
+    // (opt-in `geof_accessors` feature) dispatch through real SPARQL BIND —
+    // integer/boolean/anyURI result typing included.
+    let r = query_with_functions(
+        &cities(),
+        &format!(
+            "{PREFIXES} SELECT ?d ?cd ?sd ?simple ?ty WHERE {{ \
+               ex:uk ex:area ?g . \
+               BIND(geof:dimension(?g) AS ?d) \
+               BIND(geof:coordinateDimension(?g) AS ?cd) \
+               BIND(geof:spatialDimension(?g) AS ?sd) \
+               BIND(geof:isSimple(?g) AS ?simple) \
+               BIND(geof:geometryType(?g) AS ?ty) \
+             }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(r.len(), 1);
+    let int = |v: &str| vec![format!("\"{v}\"^^<http://www.w3.org/2001/XMLSchema#integer>")];
+    assert_eq!(names(&r, 0), int("2"), "geof:dimension(polygon)");
+    assert_eq!(names(&r, 1), int("2"), "geof:coordinateDimension");
+    assert_eq!(names(&r, 2), int("2"), "geof:spatialDimension");
+    assert_eq!(
+        names(&r, 3),
+        vec!["\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()]
+    );
+    assert_eq!(
+        names(&r, 4),
+        vec![
+            "\"http://www.opengis.net/ont/sf#Polygon\"^^<http://www.w3.org/2001/XMLSchema#anyURI>"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+#[cfg(feature = "geof_accessors")]
+fn geof_accessor_empty_geometry_is_a_per_row_expression_error() {
+    // [FABLE-5] sq-lsp7k: an accessor with NO defined value (the empty
+    // geometry's dimension) is a per-row expression error — the row is
+    // FILTERed out / left unbound, never a fabricated integer and never a
+    // hard query error.
+    let graph = Graph::load_str(
+        r#"@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+           <http://ex/somewhere> <http://ex/loc> "POINT(1 2)"^^geo:wktLiteral .
+           <http://ex/nowhere>   <http://ex/loc> "POINT EMPTY"^^geo:wktLiteral ."#,
+        "turtle",
+    )
+    .unwrap();
+    let r = query_with_functions(
+        &graph,
+        &format!(
+            "{PREFIXES} SELECT ?s WHERE {{ \
+               ?s ex:loc ?g . FILTER(geof:dimension(?g) >= 0) \
+             }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(names(&r, 0), vec!["<http://ex/somewhere>"]);
+}

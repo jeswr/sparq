@@ -91,6 +91,11 @@ pub mod vocab {
     pub const HAS_SERIALIZATION: &str = "http://www.opengis.net/ont/geosparql#hasSerialization";
     /// `geof:` — the GeoSPARQL function namespace.
     pub const GEOF_NS: &str = "http://www.opengis.net/def/function/geosparql/";
+    /// `sf:` — the OGC Simple Features geometry-class namespace (`sf:Point`,
+    /// `sf:Polygon`, …), the value space of the opt-in `geof:geometryType`
+    /// accessor (`geof_accessors` feature). [FABLE-5] sq-lsp7k
+    #[cfg(feature = "geof_accessors")]
+    pub const SF_NS: &str = "http://www.opengis.net/ont/sf#";
     /// `uom:` — the OGC units-of-measure namespace used by `geof:distance`.
     pub const UOM_NS: &str = "http://www.opengis.net/def/uom/OGC/1.0/";
     /// CRS84 (WGS84 long/lat) — the GeoSPARQL DEFAULT CRS for wktLiterals.
