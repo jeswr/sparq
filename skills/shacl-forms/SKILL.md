@@ -89,9 +89,12 @@ switcher with `applicable_shapes`. Blank-node labels in the output are
 renamed deterministically (`b0`, `b1`, …) — do not treat them as graph handles.
 
 Scope: derivation, opt-in live validation hints, plus pure edit-to-UPDATE
-building. Applying the request, validate-before-commit guards, draft graphs,
-DASH suggestions, `dash:propertyRole`, and the GUI renderer are follow-on
-beads (sq-lsp7k.1.2/.1.4/.1.5/.1.6); `sparq-shacl` (see
+building. An MCP agent can call the derivation as the `describe_form` tool
+(sparq-mcp feature `shacl`, `FormDescription` JSON verbatim — see
+[`agent-tools`](../agent-tools/SKILL.md)). [FABLE-5] sq-lsp7k.1.6. Applying the
+request, validate-before-commit guards, draft graphs, DASH suggestions,
+`dash:propertyRole`, and the GUI renderer are follow-on beads
+(sq-lsp7k.1.2/.1.4/.1.5); `sparq-shacl` (see
 [`shacl-validation`](../shacl-validation/SKILL.md)) already validates the same
 graphs.
 

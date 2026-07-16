@@ -30,6 +30,9 @@
 //!   index. [FABLE-5] sq-lsp7k.10
 //! - `shacl` (feature `shacl`) — the read-only `validate` tool: validate the served
 //!   graph against caller-supplied shapes via `sparq-shacl`. [GPT-5.6] sq-lsp7k.22
+//!   The same feature lights the read-only `describe_form` tool: derive a shape-aware
+//!   form for one focus node against caller-supplied shapes via `sparq-forms`,
+//!   returning the `FormDescription` JSON verbatim. [FABLE-5] sq-lsp7k.1.6
 
 pub mod jsonrpc;
 pub mod server;

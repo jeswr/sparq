@@ -57,12 +57,11 @@ transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
 - **`void`** — emit a W3C VoID dataset descriptor as N-Triples, optionally including characteristic-set statistics; `dataset` defaults to `urn:sparq:dataset`.
 - **`ask`** *(feature `nlq`, OFF by default)* — answer a natural-language question
   **server-side**: NL→SPARQL→validate→execute via `sparq-nlq`, returning the executed
-  SPARQL + the real result rows (+ in-graph citations). It embeds a **configurable** LLM
-  call — cost/quality depend on the model **you** configure (`ANTHROPIC_API_KEY`, or an
-  OpenAI-compatible `SPARQ_NLQ_ENDPOINT_URL`+`_MODEL`); no model is bundled. With no
-  backend configured it is unadvertised and a call returns a clear "not configured"
-  error — never a fabricated answer. This is an ergonomics/grounding aid (no
-  token-saving claim); the structured tools are the no-LLM default.
+  SPARQL + the real result rows (+ in-graph citations). Embeds a **configurable** LLM
+  call (`ANTHROPIC_API_KEY`, or an OpenAI-compatible `SPARQ_NLQ_ENDPOINT_URL`+`_MODEL`);
+  no model is bundled. With no backend configured it is unadvertised and a call returns
+  a clear "not configured" error — never a fabricated answer. An ergonomics/grounding
+  aid (no token-saving claim); the structured tools are the no-LLM default.
 - **`update`** *(gated, OFF by default)* — apply an atomic SPARQL 1.1 Update. Neither
   advertised in `tools/list` nor callable unless `ServerConfig::allow_update` is set.
 - **`template_list` / `template_invoke`** *(feature `templates`, OFF by default)* — named
@@ -72,6 +71,7 @@ transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
 - **`text_search`** *(feature `text`, OFF by default)* — BM25 full-text search over the
   graph's string literals (`sparq-text`; lazily built, incrementally reconciled).
 - **`validate`** *(feature `shacl`, OFF by default)* — read-only validation against caller-supplied shapes; returns `{conforms, results}`, with parse failures as tool errors. [GPT-5.6] sq-lsp7k.22
+- **`describe_form`** *(feature `shacl`, OFF by default)* — derive a shape-aware form for one focus node against caller-supplied shapes via `sparq-forms`; returns the `FormDescription` JSON **verbatim** (fields, widget choices, constraints, current values). Read-only; `mode` `edit`/`view`, optional explicit `shape` IRI. [FABLE-5] sq-lsp7k.1.6
 
 **Pod mode** *(feature `solid`, OFF by default)*: `SolidMcpServer` serves a
 `sparq-solid` `PodStore` (named graph per document, WAC/ACP-authorized, bound to one
@@ -95,7 +95,7 @@ built-in authentication or authorization**: the MCP transport (stdio) is a trust
 you, the operator, establish — whoever can speak to the server has exactly the access the
 server was configured with. Run it only against a client you trust.
 
-- **Read-only by default.** Default tools cannot mutate; feature-gated `validate` is read-only.
+- **Read-only by default.** Default tools cannot mutate; the feature-gated `validate` and `describe_form` tools are read-only.
 - **`update` is a mutation surface** and is exposed **only** when you set
   `ServerConfig::allow_update = true` (or a binary's `--allow-update` flag). Turn it on
   only when the client is trusted to issue writes. There is no per-tool ACL beyond this

@@ -1,6 +1,6 @@
 ---
 name: agent-tools
-description: Use when an LLM/agent should access a sparq RDF dataset over the Model Context Protocol (MCP) as first-class tools — run SPARQL queries, mine the dataset schema, list class profiles or namespace prefixes, read stats or a VoID descriptor, optionally SHACL-validate against caller-supplied shapes, and (gated, off by default) apply SPARQL updates. Covers the opt-in sparq-mcp crate — a JSON-RPC 2.0 MCP server (initialize, tools/list, tools/call) exposing query (SELECT/ASK to SPARQL-JSON), construct (CONSTRUCT/DESCRIBE to N-Triples), introspect (effective schema as JSON or token-budgeted text), stats, classes (class IRIs with instance and predicate counts), prefixes (namespace declarations and term counts), void (W3C VoID N-Triples), an opt-in read-only validate tool, and a gated update tool that is OFF by default; the transport-agnostic handle_message dispatch core plus the optional stdio feature; and the honest trust model (a local agent-tool server with no built-in auth, read-only by default, queries bounded by a QueryBudget). Also covers the opt-in solid feature — SolidMcpServer, a pod-backed server over sparq-solid's PodStore with WAC/ACP-authorized session-scoped query plus LDP resource tools (resource_get, container_list from stored ldp:contains data, and gated resource_put/resource_delete/container_create with existence non-disclosure and atomic ACL write-through). Complements genai-retrieval (sparq-nlq/sparq-introspect) — that is the NL-to-SPARQL loop; this is the MCP front door.
+description: Use when an LLM/agent should access a sparq RDF dataset over the Model Context Protocol (MCP) as first-class tools — run SPARQL queries, mine the dataset schema, list class profiles or namespace prefixes, read stats or a VoID descriptor, optionally SHACL-validate against caller-supplied shapes or derive a shape-aware describe_form FormDescription for a focus node, and (gated, off by default) apply SPARQL updates. Covers the opt-in sparq-mcp crate — a JSON-RPC 2.0 MCP server (initialize, tools/list, tools/call) exposing query (SELECT/ASK to SPARQL-JSON), construct (CONSTRUCT/DESCRIBE to N-Triples), introspect (effective schema as JSON or token-budgeted text), stats, classes (class IRIs with instance and predicate counts), prefixes (namespace declarations and term counts), void (W3C VoID N-Triples), an opt-in read-only validate tool, and a gated update tool that is OFF by default; the transport-agnostic handle_message dispatch core plus the optional stdio feature; and the honest trust model (a local agent-tool server with no built-in auth, read-only by default, queries bounded by a QueryBudget). Also covers the opt-in solid feature — SolidMcpServer, a pod-backed server over sparq-solid's PodStore with WAC/ACP-authorized session-scoped query plus LDP resource tools (resource_get, container_list from stored ldp:contains data, and gated resource_put/resource_delete/container_create with existence non-disclosure and atomic ACL write-through). Complements genai-retrieval (sparq-nlq/sparq-introspect) — that is the NL-to-SPARQL loop; this is the MCP front door.
 ---
 
 # sparq agent-tools (MCP)
@@ -31,6 +31,7 @@ heavy MCP-SDK dependency.
 | `template_list` / `template_invoke` *(feature `templates`, OFF by default)* | `sparq_engine::templates` (#901 injection-safe binding) | definitions / typed fail-closed invocation |
 | `text_search` *(feature `text`, OFF by default)* | `sparq_text::TextIndex` (BM25, lazily built + reconciled) | ranked literal hits JSON |
 | `validate` *(feature `shacl`, OFF by default)* | `sparq_shacl::validate` | `{conforms, results}` JSON |
+| `describe_form` *(feature `shacl`, OFF by default)* | `sparq_forms::derive_form` | `FormDescription` JSON, verbatim |
 
 ### SHACL validation (feature `shacl`, OFF by default) — [GPT-5.6] sq-lsp7k.22
 
@@ -39,6 +40,19 @@ Call `validate` with `{"shapes": "...Turtle..."}` and optionally `format` (defau
 graph, and returns `conforms` plus disallowed-severity results containing `focusNode`,
 `path`, `severity`, and `message`. It never mutates the served graph. A malformed shapes
 string returns an MCP tool result with `isError: true`, not a JSON-RPC protocol error.
+
+### Shape-aware forms (feature `shacl`, OFF by default) — [FABLE-5] sq-lsp7k.1.6
+
+Call `describe_form` with `{"focus": "<IRI or _:label>", "shapes": "...Turtle..."}`,
+optionally `format` (defaults to `turtle`), `mode` (`"edit"`, the default, or `"view"`),
+and `shape` (an explicit node-shape IRI instead of the first applicable one). The tool
+parses the shapes with the same path `validate` uses, runs `sparq_forms::derive_form`
+over the served data graph, and returns the **`FormDescription` JSON verbatim** — the
+same contract the GUI renderer consumes (see `skills/shacl-forms/SKILL.md`), so an agent
+gets a shape-directed, widget-scored view/editor description instead of guessing
+predicates. Read-only: neither graph is mutated (form *editing* — applying a diff back —
+is a separate gated surface, sq-lsp7k.1.4/F6b, not shipped here). Bad focus IRIs,
+malformed shapes, and unknown modes are tool errors (`isError: true`), fail-closed.
 
 ### Named templates + full-text search (features `templates` / `text`, OFF by default) — [FABLE-5] sq-lsp7k.10
 
