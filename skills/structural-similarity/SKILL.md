@@ -77,6 +77,15 @@ let _ = (score, top10, by_sig, dice, overlap);
 - `overlap_coefficient(&sig_a, &sig_b) -> f64` — weighted
   Szymkiewicz-Simpson coefficient; returns `0` when either signature has zero total
   weight.
+- `sim.explain_similarity(&a, &b) -> Vec<SharedElement>` (default-off `explain` Cargo
+  feature) — the decoded shared signature elements behind a `similarity` /
+  `most_similar` score, for reasoning UX ("WHY are these two similar"). Each
+  `SharedElement` carries `direction: Direction` (`Out`/`In`), `predicate: Term`,
+  `neighbor: Option<Term>` (`None` in `Predicates` mode), and `weight: f64` =
+  `min(w_a, w_b)`, the element's contribution to the weighted-Jaccard NUMERATOR — so
+  `Σ weight / (total_a + total_b − Σ weight)` reconstructs the exact score. Ordered
+  weight-descending (strongest evidence first), then predicate/neighbor/direction id
+  ascending; deterministic. Empty for absent terms or disjoint signatures.
 
 ### Configuration (`SimConfig`)
 
@@ -157,7 +166,10 @@ reward. See the [`vector-search`](../vector-search/SKILL.md) skill for `fuse_sco
   (or the default graph) explicitly; the quads are not merged for you.
 
 _(status: Verified against `crates/sparq-sim/src/lib.rs` + README and the crate's tests
-on 2026-07-12 [GPT-5.6] for sq-da2bz.
+on 2026-07-16 [FABLE-5] for sq-lsp7k (added the default-off `explain` feature:
+`Sim::explain_similarity` + `SharedElement`/`Direction`, with a differential test that
+the returned weights reconstruct the exact similarity score and a multi-hop min-weight
+witness); previously 2026-07-12 [GPT-5.6] for sq-da2bz.
 Workspace v0.1.0, opt-in (GenAI phase 1, `research/genai-design.md`), zero `unsafe`
 (`#![forbid(unsafe_code)]`). Measured quality/latency gates (same-class precision@10;
 `Predicates`-mode class-separation AUC; `most_similar(k=10)` latency) are enforced by
