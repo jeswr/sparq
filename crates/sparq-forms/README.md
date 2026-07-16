@@ -61,6 +61,10 @@ assert_eq!(field.widget.editor.as_deref(),
 - **Constraints carried per field** — counts, datatypes, classes, node kinds,
   `sh:in` enumerations, pattern/length/range bounds, `sh:or` unions — the
   widget-scoring inputs.
+- **Presentation flags** — `dash:hidden` (field derives but a renderer omits
+  it), `dash:readOnly` (forces `editable: false` even in edit mode), and
+  `sh:defaultValue` (verbatim seed term to pre-fill an empty field); all three
+  are additive JSON keys, omitted when the property shape does not declare them.
 - **Opt-in live validation** — `derive_form_validated(data, shapes, model,
   focus, opts, registry)` runs the base SHACL validator and adds each
   focus-node property violation to the matching editable field's `validation`

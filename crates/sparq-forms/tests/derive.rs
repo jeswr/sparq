@@ -291,6 +291,79 @@ fn form_options_default_values() {
     assert_eq!(opts.max_depth, 3);
 }
 
+// ---- dash presentation flags: hidden / readOnly / defaultValue -------------
+// [FABLE] sq-lsp7k.1.5
+
+const FLAGGABLE_SHAPES: &str = r#"
+  ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ;
+    sh:property ex:nameProp ; sh:property ex:secretProp ; sh:property ex:codeProp .
+  ex:nameProp sh:path ex:name ; sh:name "Name" ; sh:order 1 .
+  ex:secretProp sh:path ex:secret ; sh:name "Secret" ; sh:order 2 .
+  ex:codeProp sh:path ex:code ; sh:name "Code" ; sh:order 3 .
+"#;
+
+const PRESENTATION_FLAGS: &str = r#"
+  ex:secretProp dash:hidden true .
+  ex:codeProp dash:readOnly true ; sh:defaultValue ex:draft .
+  ex:nameProp sh:defaultValue "Anon" .
+"#;
+
+#[test]
+fn dash_hidden_readonly_and_default_value_surface_on_fields() {
+    let shapes = g(&format!("{FLAGGABLE_SHAPES}{PRESENTATION_FLAGS}"));
+    let form = derive_form(&g(ALICE), &shapes, &iri("alice"), &FormOptions::default());
+    assert_eq!(form.mode, Mode::Edit);
+    let fields = &form.groups[0].fields;
+    let by = |label: &str| fields.iter().find(|f| f.label == label).unwrap();
+
+    // dash:hidden true → flagged; the field still derives (the RENDERER omits it).
+    let secret = by("Secret");
+    assert!(secret.hidden);
+    assert!(secret.editable, "dash:hidden does not imply read-only");
+
+    // dash:readOnly true → editable=false even though the form is in Edit mode.
+    let code = by("Code");
+    assert!(!code.editable, "dash:readOnly true forces read-only in Mode::Edit");
+    assert!(!code.hidden);
+
+    // sh:defaultValue terms carried verbatim (literal and IRI kinds).
+    let name = by("Name");
+    assert!(!name.hidden && name.editable);
+    let dv = name.default_value.as_ref().expect("literal default");
+    assert_eq!((dv.kind.as_str(), dv.value.as_str()), ("literal", "Anon"));
+    let dv = code.default_value.as_ref().expect("IRI default");
+    assert_eq!(
+        (dv.kind.as_str(), dv.value.as_str()),
+        ("iri", "http://example.org/draft")
+    );
+    assert!(secret.default_value.is_none());
+}
+
+#[test]
+fn presentation_flags_are_additive_stripping_them_recovers_plain() {
+    let data = g(ALICE);
+    let opts = FormOptions::default();
+    let plain = derive_form(&data, &g(FLAGGABLE_SHAPES), &iri("alice"), &opts);
+
+    // Shapes WITHOUT the statements serialize with none of the new keys
+    // (goldens separately pin the flag-free JSON byte-for-byte).
+    let json = serde_json::to_string(&plain).unwrap();
+    assert!(!json.contains("\"hidden\"") && !json.contains("\"default_value\""));
+
+    // Resetting the additive flags must recover the exact plain description:
+    // presentation flags cannot perturb widgets, constraints, values, or layout.
+    let flagged_shapes = g(&format!("{FLAGGABLE_SHAPES}{PRESENTATION_FLAGS}"));
+    let mut stripped = derive_form(&data, &flagged_shapes, &iri("alice"), &opts);
+    for field in stripped.groups.iter_mut().flat_map(|group| &mut group.fields) {
+        field.hidden = false;
+        field.default_value = None;
+        if field.label == "Code" {
+            field.editable = true; // undo dash:readOnly
+        }
+    }
+    assert_eq!(stripped, plain);
+}
+
 #[test]
 fn role_is_echoed_and_focus_without_shapes_is_all_other() {
     let opts = FormOptions {
