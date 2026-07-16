@@ -144,10 +144,9 @@ fn csv_roundtrip_empty_result_preserves_two_variable_header_and_zero_rows() {
     assert_csv_identity(&result);
 }
 
-/// More rows than the CSV reader's default batch size, so from_csv_bytes must
-/// concatenate multiple decoded batches in row order.
+/// A result far larger than any single-page decode, preserved in exact row order.
 #[test]
-fn csv_roundtrip_concatenates_multiple_reader_batches_in_row_order() {
+fn csv_roundtrip_preserves_row_order_at_size() {
     let rows: Vec<_> = (0..2500)
         .map(|n| {
             vec![Some(Term::NamedNode(
@@ -216,4 +215,111 @@ fn csv_unknown_term_kind_fails_closed() {
         error.to_string().contains("unknown RDF term kind"),
         "unexpected error: {error}"
     );
+}
+
+/// [FABLE-5] Byte-level dialect pin (the serializer is hand-rolled, so the dialect is
+/// contract, not a library default): a field is quoted iff it contains a comma, a
+/// double quote, CR, or LF; quotes are escaped by doubling; records end with LF. A
+/// mutation that stops quoting any trigger byte, stops doubling quotes, or changes the
+/// terminator fails an exact line here.
+#[test]
+fn csv_encoding_pins_rfc4180_quoting() {
+    let literal = |value: &str| vec![Some(Term::Literal(Literal::new_simple_literal(value)))];
+    let result = QueryResult {
+        vars: vec![Variable::new("x").unwrap()],
+        rows: vec![
+            literal("comma, inside"),
+            literal("he said \"hi\""),
+            literal("line\none"),
+            literal("bare\rreturn"),
+            literal("  plain unquoted  "),
+        ],
+    };
+    let text = String::from_utf8(to_csv_bytes(&result).unwrap()).unwrap();
+    let expected = concat!(
+        "x.kind,x.value,x.datatype,x.language,x.direction\n",
+        "literal,\"comma, inside\",http://www.w3.org/2001/XMLSchema#string,,\n",
+        "literal,\"he said \"\"hi\"\"\",http://www.w3.org/2001/XMLSchema#string,,\n",
+        "literal,\"line\none\",http://www.w3.org/2001/XMLSchema#string,,\n",
+        "literal,\"bare\rreturn\",http://www.w3.org/2001/XMLSchema#string,,\n",
+        "literal,  plain unquoted  ,http://www.w3.org/2001/XMLSchema#string,,\n",
+    );
+    assert_eq!(text, expected);
+}
+
+/// The parser accepts CRLF and bare-CR record terminators and a missing final
+/// terminator, not just the LF the writer emits.
+#[test]
+fn csv_reader_accepts_crlf_and_bare_cr_line_endings() {
+    let bytes = b"x.kind,x.value,x.datatype,x.language,x.direction\r\n\
+                  uri,https://example.test/a,,,\r\
+                  bnode,b1,,,";
+    let restored = from_csv_bytes(bytes).unwrap();
+    assert_eq!(restored.vars, vec![Variable::new("x").unwrap()]);
+    assert_eq!(
+        restored.rows,
+        vec![
+            vec![Some(Term::NamedNode(
+                NamedNode::new("https://example.test/a").unwrap()
+            ))],
+            vec![Some(Term::BlankNode(BlankNode::new("b1").unwrap()))],
+        ]
+    );
+}
+
+/// Quoted fields with doubled-quote escapes decode through the copying path.
+#[test]
+fn csv_quoted_fields_with_escaped_quotes_decode() {
+    let bytes = b"x.kind,x.value,x.datatype,x.language,x.direction\n\
+                  literal,\"say \"\"hi\"\", twice \"\"\"\"\",http://www.w3.org/2001/XMLSchema#string,,\n";
+    let restored = from_csv_bytes(bytes).unwrap();
+    assert_eq!(
+        restored.rows,
+        vec![vec![Some(Term::Literal(Literal::new_simple_literal(
+            "say \"hi\", twice \"\""
+        )))]]
+    );
+}
+
+#[test]
+fn csv_unterminated_quoted_field_fails_closed() {
+    let bytes = b"x.kind,x.value,x.datatype,x.language,x.direction\n\
+                  literal,\"never closed,,,\n";
+    let error = from_csv_bytes(bytes).unwrap_err();
+    assert!(
+        error.to_string().contains("unterminated quoted field"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn csv_data_after_closing_quote_fails_closed() {
+    let bytes = b"x.kind,x.value,x.datatype,x.language,x.direction\n\
+                  literal,\"closed\"junk,,,\n";
+    let error = from_csv_bytes(bytes).unwrap_err();
+    assert!(
+        error.to_string().contains("after a closing quote"),
+        "unexpected error: {error}"
+    );
+}
+
+/// A data row whose field count does not match the header contract fails closed
+/// instead of silently truncating or padding the row.
+#[test]
+fn csv_row_with_wrong_field_count_fails_closed() {
+    let bytes = b"x.kind,x.value,x.datatype,x.language,x.direction\n\
+                  uri,https://example.test/a,,\n";
+    let error = from_csv_bytes(bytes).unwrap_err();
+    assert!(
+        error.to_string().contains("has 4 fields"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn csv_non_utf8_bytes_are_rejected() {
+    let mut bytes = b"x.kind,x.value,x.datatype,x.language,x.direction\n".to_vec();
+    bytes.extend_from_slice(&[0xFF, 0xFE, b'\n']);
+    assert!(from_csv_bytes(&bytes).is_err());
+    assert!(csv_variables_from_bytes(&[0xFF, 0xFE]).is_err());
 }

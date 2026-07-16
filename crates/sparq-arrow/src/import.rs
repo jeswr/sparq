@@ -162,61 +162,77 @@ fn read_cell(
     let language = optional(children[3], row);
     let direction = optional(children[4], row);
 
-    let term =
-        match kind {
-            "uri" => {
-                require_no_metadata(column_name, row, datatype, language, direction)?;
-                Term::NamedNode(NamedNode::new(value).map_err(|error| {
-                    cell_error(column_name, row, format!("invalid IRI: {error}"))
-                })?)
-            }
-            "bnode" => {
-                require_no_metadata(column_name, row, datatype, language, direction)?;
-                Term::BlankNode(BlankNode::new(value).map_err(|error| {
-                    cell_error(
-                        column_name,
-                        row,
-                        format!("invalid blank-node label: {error}"),
-                    )
-                })?)
-            }
-            "literal" => Term::Literal(read_literal(
-                value,
-                datatype,
-                language,
-                direction,
-                column_name,
-                row,
-            )?),
-            "triple" => {
-                require_no_metadata(column_name, row, datatype, language, direction)?;
-                match value.parse::<Term>().map_err(|error| {
-                    cell_error(
-                        column_name,
-                        row,
-                        format!("invalid N-Triples triple term: {error}"),
-                    )
-                })? {
-                    term @ Term::Triple(_) => term,
-                    _ => {
-                        return Err(cell_error(
-                            column_name,
-                            row,
-                            "kind 'triple' requires an N-Triples triple term",
-                        ));
-                    }
-                }
-            }
-            other => {
-                return Err(cell_error(
+    Ok(Some(term_from_parts(
+        kind,
+        value,
+        datatype,
+        language,
+        direction,
+        column_name,
+        row,
+    )?))
+}
+
+// [FABLE-5] The single bound-term decoder: RecordBatch struct cells and the flattened
+// CSV fields both reconstruct terms through this one path, so the two decoders cannot
+// drift on kind dispatch, metadata rejection, or literal assembly.
+pub(crate) fn term_from_parts(
+    kind: &str,
+    value: &str,
+    datatype: Option<&str>,
+    language: Option<&str>,
+    direction: Option<&str>,
+    column_name: &str,
+    row: usize,
+) -> Result<Term, ArrowError> {
+    match kind {
+        "uri" => {
+            require_no_metadata(column_name, row, datatype, language, direction)?;
+            Ok(Term::NamedNode(NamedNode::new(value).map_err(|error| {
+                cell_error(column_name, row, format!("invalid IRI: {error}"))
+            })?))
+        }
+        "bnode" => {
+            require_no_metadata(column_name, row, datatype, language, direction)?;
+            Ok(Term::BlankNode(BlankNode::new(value).map_err(|error| {
+                cell_error(
                     column_name,
                     row,
-                    format!("unknown RDF term kind '{other}'"),
-                ));
+                    format!("invalid blank-node label: {error}"),
+                )
+            })?))
+        }
+        "literal" => Ok(Term::Literal(read_literal(
+            value,
+            datatype,
+            language,
+            direction,
+            column_name,
+            row,
+        )?)),
+        "triple" => {
+            require_no_metadata(column_name, row, datatype, language, direction)?;
+            match value.parse::<Term>().map_err(|error| {
+                cell_error(
+                    column_name,
+                    row,
+                    format!("invalid N-Triples triple term: {error}"),
+                )
+            })? {
+                term @ Term::Triple(_) => Ok(term),
+                _ => Err(cell_error(
+                    column_name,
+                    row,
+                    "kind 'triple' requires an N-Triples triple term",
+                )),
             }
-        };
-
-    Ok(Some(term))
+        }
+        other => Err(cell_error(
+            column_name,
+            row,
+            format!("unknown RDF term kind '{other}'"),
+        )),
+    }
 }
 
 fn string_children<'a>(
@@ -320,7 +336,8 @@ fn read_literal(
     }
 }
 
-fn cell_error(column: &str, row: usize, message: impl std::fmt::Display) -> ArrowError {
+// [FABLE-5] pub(crate): the CSV decoder reports per-cell errors in the same shape.
+pub(crate) fn cell_error(column: &str, row: usize, message: impl std::fmt::Display) -> ArrowError {
     ArrowError::invalid(format!(
         "invalid RDF term at column '{column}', row {row}: {message}"
     ))

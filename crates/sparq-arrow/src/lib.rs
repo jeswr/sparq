@@ -65,6 +65,9 @@
 //!   (`kind=literal` + explicit `xsd:string`). Every term the struct can express
 //!   round-trips losslessly; the one shape CSV cannot carry is a **zero-variable** result
 //!   (no columns), which `to_csv_bytes` rejects with an error rather than corrupting.
+//!   The RFC-4180 serializer/parser is hand-rolled over `std` (the schema is fixed, so
+//!   the feature adds **zero** dependencies); the reader decodes bound terms through the
+//!   same term decoder as `from_record_batch`, so the two readers cannot drift.
 //!   [FABLE-5]
 
 /// Struct field name: the term kind — `"uri"`, `"bnode"`, `"literal"`, or `"triple"`.
