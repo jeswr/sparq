@@ -27,6 +27,9 @@ const DEFAULT_MAX_CONNECTIONS: usize = 10_000;
 /// Default ceiling for concurrent HTTP/3 connections from one non-internal IP address.
 const DEFAULT_MAX_CONNECTIONS_PER_IP: usize = 512;
 
+/// Default ceiling for concurrently served requests on one HTTP/3 connection.
+const DEFAULT_MAX_REQUESTS_PER_CONNECTION: usize = 256;
+
 /// Connection-level QUIC receive window used by [`quic_server_config`].
 const RECEIVE_WINDOW_BYTES: u32 = 16 * 1024 * 1024;
 
@@ -53,6 +56,15 @@ pub struct H3ConnectionLimits {
     /// reverse proxy, container bridge, or conformance runner is not treated as a single public
     /// client.
     pub exempt_internal_ips: bool,
+    /// Maximum concurrently served requests on one HTTP/3 connection.
+    ///
+    /// Each connection acquires a permit from a per-connection semaphore before accepting the
+    /// next request stream, and the permit is held for the request task's whole lifetime, so a
+    /// single connection cannot fan out unbounded concurrent request tasks (stream-exhaustion
+    /// hardening). Acceptance of further request streams back-pressures until an in-flight
+    /// request completes; already-accepted requests keep progressing.
+    // [FABLE-5] sq-4rkcc: request-level bound mirroring the connection-level semaphore.
+    pub max_requests_per_connection: usize,
 }
 
 impl Default for H3ConnectionLimits {
@@ -61,6 +73,7 @@ impl Default for H3ConnectionLimits {
             max_connections: DEFAULT_MAX_CONNECTIONS,
             max_connections_per_ip: Some(DEFAULT_MAX_CONNECTIONS_PER_IP),
             exempt_internal_ips: true,
+            max_requests_per_connection: DEFAULT_MAX_REQUESTS_PER_CONNECTION,
         }
     }
 }
@@ -121,8 +134,9 @@ pub fn quic_server_config(
 /// inserted as `ConnectInfo<SocketAddr>`. Connection- and request-local protocol failures
 /// close only the affected connection or stream; the endpoint keeps accepting other peers.
 /// The default global and per-IP connection limits bound accepted connection work; internal IPs are
-/// exempt from the per-IP limit but remain subject to the global limit. On shutdown, all endpoint
-/// connections are closed and the function waits for them to drain.
+/// exempt from the per-IP limit but remain subject to the global limit, and each connection's
+/// concurrent request tasks are bounded by the default per-connection request limit. On shutdown,
+/// all endpoint connections are closed and the function waits for them to drain.
 pub async fn serve_h3(
     endpoint: quinn::Endpoint,
     router: Router,
@@ -136,7 +150,11 @@ pub async fn serve_h3(
 /// A global semaphore permit is reserved before polling `endpoint.accept()`, so connections beyond
 /// the global cap remain in Quinn's bounded incoming queue rather than creating tasks. After accept,
 /// a non-exempt peer at its per-IP cap is refused before a task is spawned. Both slots are held for
-/// the full handshake and connection lifetime and released on every exit path.
+/// the full handshake and connection lifetime and released on every exit path. Within each
+/// connection, a request-level semaphore permit is acquired before accepting the next request
+/// stream and moved into the request task, so at most
+/// [`max_requests_per_connection`](H3ConnectionLimits::max_requests_per_connection) request tasks
+/// run concurrently per connection.
 pub async fn serve_h3_with_limits(
     endpoint: quinn::Endpoint,
     router: Router,
@@ -145,6 +163,10 @@ pub async fn serve_h3_with_limits(
 ) -> io::Result<()> {
     tokio::pin!(shutdown);
     let limiter = ConnectionLimiter::new(limits);
+    // [FABLE-5] sq-4rkcc: clamp like ConnectionLimiter::new so zero cannot disable requests.
+    let max_requests_per_connection = limits
+        .max_requests_per_connection
+        .clamp(1, Semaphore::MAX_PERMITS);
 
     loop {
         let permit = tokio::select! {
@@ -180,7 +202,9 @@ pub async fn serve_h3_with_limits(
                         return;
                     };
                     let peer_addr = connection.remote_address();
-                    let _ = serve_connection(connection, router, peer_addr).await;
+                    let _ =
+                        serve_connection(connection, router, peer_addr, max_requests_per_connection)
+                            .await;
                 });
             }
         }
@@ -285,24 +309,43 @@ fn is_internal_ip(ip: IpAddr) -> bool {
     }
 }
 
+/// Serves one HTTP/3 connection, bounding its concurrent request tasks.
+///
+/// Mirroring the connection-level limiter, an owned permit from a per-connection semaphore is
+/// acquired before polling `connection.accept()` and moved into the spawned request task, where
+/// it is held for the task's whole lifetime and released only when the task completes. When
+/// `max_concurrent_requests` request tasks are in flight, acceptance of further request streams
+/// back-pressures on the permit; in-flight requests keep progressing because each is driven by
+/// its own task, so a freed permit always unblocks the accept loop (no deadlock).
+// [FABLE-5] sq-4rkcc: cap the previously unbounded per-request tokio::spawn fan-out.
 async fn serve_connection(
     connection: quinn::Connection,
     router: Router,
     peer_addr: SocketAddr,
+    max_concurrent_requests: usize,
 ) -> Result<(), h3::error::ConnectionError> {
     let mut connection = h3::server::Connection::new(h3_quinn::Connection::new(connection)).await?;
+    let request_slots = Arc::new(Semaphore::new(max_concurrent_requests));
 
-    while let Some(resolver) = connection.accept().await? {
+    loop {
+        let permit = request_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the private per-connection request semaphore is never closed");
+        let Some(resolver) = connection.accept().await? else {
+            return Ok(());
+        };
         let router = router.clone();
         tokio::spawn(async move {
+            // Hold the request slot until this task finishes, releasing it on every exit path.
+            let _permit = permit;
             let Ok((request, stream)) = resolver.resolve_request().await else {
                 return;
             };
             let _ = dispatch_request(request, stream, router, peer_addr).await;
         });
     }
-
-    Ok(())
 }
 
 async fn dispatch_request<S>(

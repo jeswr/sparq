@@ -58,9 +58,10 @@ sparq_http3::serve_h3(endpoint, router.clone(), async move {
 # Ok::<(), std::io::Error>(())
 ```
 
-The compatibility entry point is safe by default: it limits total concurrent connections and
-connections from one public IP. Internal addresses are exempt from the per-IP cap to avoid treating
-a proxy, container bridge, or conformance runner as one client, but the global cap still applies.
+The compatibility entry point is safe by default: it limits total concurrent connections,
+connections from one public IP, and concurrent requests on each connection. Internal addresses are
+exempt from the per-IP cap to avoid treating a proxy, container bridge, or conformance runner as
+one client, but the global cap still applies.
 Existing callers need no changes. To tune the caps, use the additive variant:
 
 ```rust
@@ -68,13 +69,20 @@ let limits = sparq_http3::H3ConnectionLimits {
     max_connections: 2_000,
     max_connections_per_ip: Some(128),
     exempt_internal_ips: true,
+    max_requests_per_connection: 64,
 };
 sparq_http3::serve_h3_with_limits(endpoint, router.clone(), limits, shutdown_signal).await?;
 # Ok::<(), std::io::Error>(())
 ```
 
 Set `max_connections_per_ip` to `None` only when the global cap is sufficient for the deployment.
-Zero numeric caps are clamped to one rather than disabling the listener. The bridge clones the
+Zero numeric caps are clamped to one rather than disabling the listener.
+`max_requests_per_connection` is a stream-exhaustion bound ([FABLE-5] sq-4rkcc): each connection
+acquires a semaphore permit before accepting its next request stream, and the permit is held by
+the request task until it completes, so one connection cannot fan out unbounded concurrent
+request tasks. At the cap, acceptance of further request streams on that connection back-pressures
+until an in-flight request finishes; already-running requests keep progressing, and other
+connections are unaffected. The bridge clones the
 router per connection and request, streams request and response bodies, and inserts the Quinn peer
 address as `axum::extract::ConnectInfo<SocketAddr>`.
 That extension is load-bearing for request policies keyed by the remote socket address.
