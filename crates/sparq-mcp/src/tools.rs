@@ -17,6 +17,9 @@
 //! - `void` → `sparq_introspect::Introspection::to_void` (W3C VoID N-Triples).
 //! - `validate` (feature `shacl`, OFF by default) → `sparq_shacl::validate` over
 //!   caller-supplied shapes; read-only and absent from the default tool surface.
+//! - `describe_form` (feature `shacl`, OFF by default) → `sparq_forms::derive_form`
+//!   over caller-supplied shapes for one focus node; returns the `FormDescription`
+//!   JSON verbatim. Read-only. [FABLE-5] sq-lsp7k.1.6
 //! - `ask` (feature `nlq`, OFF by default) → `crate::nlq` (server-side NL→SPARQL→execute
 //!   via `sparq-nlq`; embeds a configurable LLM call, degrades cleanly when none is
 //!   configured). [OPUS-4.8] sq-jxjgr
@@ -423,6 +426,54 @@ pub const VALIDATE: ToolSpec = ToolSpec {
     },
 };
 
+/// The `describe_form` tool (feature `shacl`): derive a shape-aware form description
+/// for one focus node of the served graph against a caller-supplied SHACL shapes
+/// graph, returning `sparq_forms::derive_form`'s `FormDescription` JSON verbatim.
+/// [FABLE-5] sq-lsp7k.1.6
+#[cfg(feature = "shacl")]
+pub const DESCRIBE_FORM: ToolSpec = ToolSpec {
+    name: "describe_form",
+    description: "Derive a shape-aware form for one focus node of the loaded RDF graph \
+                  against a caller-supplied SHACL shapes graph, returning the \
+                  sparq-forms FormDescription JSON verbatim (applicable shapes, \
+                  property groups, fields with widget choices, constraints, and \
+                  current values). Read-only: neither graph is mutated.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {
+                "focus": {
+                    "type": "string",
+                    "description": "The focus node: an IRI, or a blank-node label \
+                                    written as \"_:label\"."
+                },
+                "shapes": {
+                    "type": "string",
+                    "description": "The SHACL shapes graph, as Turtle by default."
+                },
+                "format": {
+                    "type": "string",
+                    "description": "RDF syntax for shapes (default \"turtle\"; for \
+                                    example \"ntriples\")."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["edit", "view"],
+                    "description": "\"edit\" (default) resolves editor widgets; \
+                                    \"view\" derives a read-only form."
+                },
+                "shape": {
+                    "type": "string",
+                    "description": "Optional node-shape IRI to derive against, \
+                                    instead of the first applicable shape."
+                }
+            },
+            "required": ["focus", "shapes"],
+            "additionalProperties": false
+        })
+    },
+};
+
 /// The read-only tool set, always advertised in the default build. `ask` (feature `nlq`)
 /// is appended by [`advertised`] only when a model backend is configured.
 pub const READ_ONLY: &[&ToolSpec] = &[
@@ -467,5 +518,9 @@ pub fn advertised(server: &McpServer) -> Vec<&'static ToolSpec> {
     // opt-in feature alone is the complete advertisement gate.
     #[cfg(feature = "shacl")]
     tools.push(&VALIDATE);
+    // [FABLE-5] sq-lsp7k.1.6: form derivation shares the validator's caller-supplied
+    // shapes surface, so the same opt-in feature advertises both read-only tools.
+    #[cfg(feature = "shacl")]
+    tools.push(&DESCRIBE_FORM);
     tools
 }

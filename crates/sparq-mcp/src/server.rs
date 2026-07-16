@@ -243,6 +243,8 @@ impl McpServer {
             "text_search" => self.tool_text_search(&args),
             #[cfg(feature = "shacl")]
             "validate" => self.tool_validate(&args),
+            #[cfg(feature = "shacl")]
+            "describe_form" => self.tool_describe_form(&args),
             "update" => self.tool_update(&args),
             other => {
                 return Err(RpcError::new(
@@ -540,12 +542,69 @@ impl McpServer {
         Ok(serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()))
     }
 
+    /// `describe_form` (feature `shacl`): parse the focus node + a caller-owned
+    /// shapes graph (the same parsing path as `validate`), derive the form with
+    /// `sparq_forms::derive_form` over a shared borrow of the served data, and
+    /// return its `FormDescription` JSON VERBATIM (no key reshaping — agents and
+    /// renderers consume the one canonical contract). [FABLE-5] sq-lsp7k.1.6
+    #[cfg(feature = "shacl")]
+    fn tool_describe_form(&self, args: &Value) -> Result<String, String> {
+        let focus = parse_focus_term(arg_str(args, "focus")?)?;
+        let source = arg_str(args, "shapes")?;
+        let format = args
+            .get("format")
+            .and_then(Value::as_str)
+            .unwrap_or("turtle");
+        let shapes = Graph::load_str(source, format)
+            .map_err(|error| format!("invalid SHACL shapes graph: {}", error))?;
+
+        let mut opts = sparq_forms::FormOptions::default();
+        if let Some(mode) = args.get("mode").and_then(Value::as_str) {
+            opts.mode = match mode {
+                "edit" => sparq_forms::Mode::Edit,
+                "view" => sparq_forms::Mode::View,
+                other => {
+                    // Fail closed on an unknown mode rather than silently editing.
+                    return Err(format!(
+                        "unknown mode `{}` (expected \"edit\" or \"view\")",
+                        other
+                    ));
+                }
+            };
+        }
+        if let Some(shape) = args.get("shape").and_then(Value::as_str) {
+            let iri = oxrdf::NamedNode::new(shape)
+                .map_err(|error| format!("invalid shape IRI: {}", error))?;
+            opts.shape = Some(oxrdf::Term::NamedNode(iri));
+        }
+
+        let form = sparq_forms::derive_form(self.graph(), &shapes, &focus, &opts);
+        serde_json::to_string_pretty(&form)
+            .map_err(|error| format!("form serialization failed: {}", error))
+    }
+
     /// `update`: apply a SPARQL 1.1 Update atomically (only reachable when enabled).
     fn tool_update(&mut self, args: &Value) -> Result<String, String> {
         let sparql = arg_str(args, "sparql")?;
         let budget = self.budget();
         sparq_engine::update_in_place_atomic_with_budget(&mut self.graph, sparql, &budget)?;
         Ok(format!("ok; graph now has {} triples", self.graph.len()))
+    }
+}
+
+/// Parse a `describe_form` focus argument: `_:label` denotes a blank node, anything
+/// else must be a valid IRI (literals cannot be SHACL focus nodes for a form).
+/// [FABLE-5] sq-lsp7k.1.6
+#[cfg(feature = "shacl")]
+fn parse_focus_term(focus: &str) -> Result<oxrdf::Term, String> {
+    if let Some(label) = focus.strip_prefix("_:") {
+        oxrdf::BlankNode::new(label)
+            .map(oxrdf::Term::BlankNode)
+            .map_err(|error| format!("invalid focus blank-node label: {}", error))
+    } else {
+        oxrdf::NamedNode::new(focus)
+            .map(oxrdf::Term::NamedNode)
+            .map_err(|error| format!("invalid focus IRI: {}", error))
     }
 }
 
