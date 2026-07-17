@@ -222,18 +222,58 @@ def forgive_superseded(runs: list[dict]) -> tuple[list[dict], list[dict]]:
     forgiven (a genuine failure/timed_out always gates, no matter what runs
     later), and a cancellation with NO successor still fails the gate. Call this
     over the RAW list (self-run included) so THIS gate run's own fresh `gate`
-    check-run can supersede its cancelled predecessor."""
+    check-run can supersede its cancelled predecessor.
+
+    [OPUS-4.8] sq-fmx4u.3 hardening (2026-07-17 fleet jam): for the PURE
+    change-based SELECTION pre-job (is_pure_select) the successor need only be a
+    same-normalized-name, SAME-TIER SUCCESS ANYWHERE on the SHA, not one that is
+    STRICTLY LATER. Rationale: the pure select is a deterministic function of the
+    SHA's diff (given the tier), so a same-tier same-name success PROVES that
+    selection was computed soundly — the per-instance timestamp ordering of its
+    concurrency-cancel race-loser siblings is irrelevant. Under the draft-tier +
+    review-pipeline label churn (#2537/#2546) a head SHA accretes many cancel
+    rounds whose doomed select instances can out-timestamp the winning run's
+    already-concluded select success; the strictly-later rule then left a residual
+    cancelled select that RED the gate over a provably-sound selection, escalating
+    ~20 review:pass PRs to needs:user and starving the merge train. SAFETY (per
+    the cross-provider review of PR #3417): the widening is DOUBLY scoped —
+    (a) is_pure_select ONLY (name ends with the selection phrase): a COMPOUND job
+    that carries additional gating evidence (fv-select + fv-manifest) keeps the
+    strictly-later rule, and (b) SAME TIER only: a full-tier success never erases
+    a cancelled draft-tier instance (which must stay visible to the
+    draft_selects_unsuperseded hold), and a draft-tier success never erases a
+    cancelled full-tier instance (draft evidence must never stand in for a
+    full-tier selection). Cross-tier supersession remains available ONLY via the
+    original strictly-later rule (the intended un-draft flow). Only
+    cancelled/stale are ever forgiven; a genuine `failure` select or a cancelled
+    select with NO qualifying sibling still fails the gate. Non-select legs keep
+    the strictly-later rule (a real leg's earlier stale success must never
+    forgive its later cancellation)."""
     kept: list[dict] = []
     forgiven: list[dict] = []
     for r in runs:
         if r.get("conclusion") in _SUPERSEDABLE:
-            key = normalized_name(r.get("name", ""))
+            r_name = r.get("name", "")
+            key = normalized_name(r_name)
             mine = _order_key(r)
+            pure_select = is_pure_select(r_name)
+            r_tier = is_draft_tier(r_name)
             if any(
                 o is not r
                 and normalized_name(o.get("name", "")) == key
-                and _order_key(o) > mine
                 and o.get("conclusion") not in _SUPERSEDABLE
+                and (
+                    # pure select: any SAME-TIER same-name success proves a
+                    # sound selection; everything else (non-select legs,
+                    # compound select+evidence jobs, cross-tier pairs): only a
+                    # STRICTLY-LATER re-run supersedes.
+                    (
+                        pure_select
+                        and o.get("conclusion") == "success"
+                        and is_draft_tier(o.get("name", "")) == r_tier
+                    )
+                    or _order_key(o) > mine
+                )
                 for o in runs
             ):
                 forgiven.append(r)
@@ -308,6 +348,21 @@ def is_select(name: str) -> bool:
     PRE-selection semantics (skipped is unconditionally satisfied), never a
     false RED; the wiring inspection test pins the name so it does not drift."""
     return bool(SELECT_RE.search(name.lower()))
+
+
+def is_pure_select(name: str) -> bool:
+    """[OPUS-4.8] sq-fmx4u.3: eligibility for forgive_superseded's same-name
+    same-tier any-success rule — STRICTER than is_select. Only the PURE reusable
+    change-based-selection pre-job qualifies, matched by the tier-normalized name
+    ENDING with the selection phrase; a COMPOUND job whose name merely CONTAINS
+    the phrase but carries additional gating evidence (e.g. `fv-select
+    (change-based test selection) + fv-manifest (proof inventory)`) is excluded
+    and keeps the strictly-later supersession rule. is_select stays broad for
+    selection-HEALTH detection (a cancelled compound select still REDs
+    select_ok); this predicate only gates the forgiveness widening."""
+    return normalized_name(name).lower().rstrip().endswith(
+        "(change-based test selection)"
+    )
 
 
 def is_self(run: dict, self_run_id: str) -> bool:
@@ -438,6 +493,12 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
     excluded = total - len(gating)
     # Selection pre-job health — searched over ALL runs (not just gating) so a
     # hypothetical advisory-renamed select could still never green-light a skip.
+    # NB superseded-cancelled select INSTANCES are already dropped upstream by
+    # forgive_superseded (including the deterministic-select same-name SAME-TIER
+    # success race-loser rule for the PURE select pre-job, sq-fmx4u.3
+    # hardening), so any cancelled select that SURVIVES to here has NO
+    # qualifying sibling (no strictly-later successor, and — for a pure select —
+    # no same-tier same-name success either) and rightly REDs.
     select_runs = [r for r in runs if is_select(r.get("name", ""))]
     select_ok = all(r.get("conclusion") == "success" for r in select_runs)
     skipped_ct = sum(1 for r in gating if r.get("conclusion") == "skipped")
