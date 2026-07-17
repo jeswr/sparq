@@ -228,6 +228,11 @@ pub fn nearest_filtered_costed(
 /// answer, exactly as for [`nearest_filtered_costed`]; the tie-break then reselects only the
 /// boundary tie group. Degenerate cases (`k = 0`, an empty mask, an all-zero query) return no
 /// results, the same contract as [`nearest_filtered_costed`].
+///
+/// Fail-closed like [`nearest_exact_tiebreak`](crate::ann::nearest_exact_tiebreak): a candidate
+/// term containing a blank node (whose document-local label has no cross-implementation
+/// tie-break key) is an `Err` wherever its term — rather than its score alone — decides
+/// membership: admitted into the top-k, or a member of the boundary tie group.
 pub fn nearest_filtered_costed_tiebreak(
     store: &VectorStore,
     graph: &Graph,
@@ -236,10 +241,10 @@ pub fn nearest_filtered_costed_tiebreak(
     k: usize,
     exclude: Option<Id>,
     model: &CostModel,
-) -> (Vec<(Id, f32)>, CostEstimate) {
+) -> Result<(Vec<(Id, f32)>, CostEstimate), String> {
     let est = model.decide(mask.len(), store.len(), k);
     if k == 0 {
-        return (Vec::new(), est);
+        return Ok((Vec::new(), est));
     }
     // The COMPLETE admitted ranking (`k = mask.len()` cannot truncate: at most |mask| ids are
     // admitted), so the boundary tie group is fully present whichever branch ranked it.
@@ -252,7 +257,7 @@ pub fn nearest_filtered_costed_tiebreak(
     if let Some(seed) = exclude {
         scored.retain(|&(id, _)| id != seed);
     }
-    (select_top_k_tiebreak(graph, scored, k), est)
+    Ok((select_top_k_tiebreak(graph, scored, k)?, est))
 }
 
 /// [OPUS-4.8] How many candidates an **approximate** index must over-fetch to expect `k` survivors
@@ -478,9 +483,11 @@ mod tests {
             let always_pre = CostModel { scatter_penalty: 1.0 };
             let always_post = CostModel { scatter_penalty: 1e6 };
             let (pre, pre_est) =
-                nearest_filtered_costed_tiebreak(&store, &g, &query, &mask, 2, None, &always_pre);
+                nearest_filtered_costed_tiebreak(&store, &g, &query, &mask, 2, None, &always_pre)
+                    .unwrap();
             let (post, post_est) =
-                nearest_filtered_costed_tiebreak(&store, &g, &query, &mask, 2, None, &always_post);
+                nearest_filtered_costed_tiebreak(&store, &g, &query, &mask, 2, None, &always_post)
+                    .unwrap();
             assert_eq!(pre_est.strategy, Strategy::PreFilter);
             assert_eq!(post_est.strategy, Strategy::PostFilter);
             assert_eq!(pre, post, "the branch choice must never change the answer");
@@ -505,8 +512,50 @@ mod tests {
                 1,
                 Some(top),
                 &CostModel::default(),
-            );
+            )
+            .unwrap();
             assert_eq!(terms(&g, &hits), vec![TEN.to_string()]);
+        }
+
+        /// [SONNET-4.6] (#2445 review) A blank node admitted by the mask and landing in the
+        /// boundary tie group is a fail-closed error, not a ranked candidate — its
+        /// document-local label has no cross-implementation tie-break key.
+        #[test]
+        fn masked_blank_node_in_the_tie_group_is_a_fail_closed_error() {
+            use oxrdf::BlankNode;
+            let g = Graph::load_str(
+                r#"
+                <http://ex/top> <http://ex/p> "t" .
+                <http://ex/a-tied> <http://ex/p> "a" .
+                _:tied <http://ex/p> "b" .
+                "#,
+                "ntriples",
+            )
+            .unwrap();
+            let id = |s: &str| g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap())).unwrap();
+            let bnode = g.id_of(&Term::BlankNode(BlankNode::new_unchecked("tied"))).unwrap();
+            let path = std::env::temp_dir().join(format!(
+                "sparq_vec_cost_tiebreak_bnode_{}.spqv",
+                std::process::id()
+            ));
+            let mut store = VectorStore::create(path, 2).unwrap();
+            store.put(id("http://ex/top"), &[1.0, 0.0]).unwrap(); // cos 1.0
+            store.put(id("http://ex/a-tied"), &[0.6, 0.8]).unwrap(); // cos 0.6
+            store.put(bnode, &[0.6, -0.8]).unwrap(); // cos 0.6 — tied blank node
+            let mask: IdMask =
+                [id("http://ex/top"), id("http://ex/a-tied"), bnode].into_iter().collect();
+            // k=2: one slot for the two-way 0.6 tie the blank node sits in → Err.
+            let err = nearest_filtered_costed_tiebreak(
+                &store,
+                &g,
+                &[1.0, 0.0],
+                &mask,
+                2,
+                None,
+                &CostModel::default(),
+            )
+            .unwrap_err();
+            assert!(err.contains("blank node"), "got: {}", err);
         }
 
         /// Degenerate cases keep the `nearest_filtered_costed` contract: k=0, an empty mask,
@@ -516,7 +565,8 @@ mod tests {
             let (g, store, mask) = fixture("degenerate");
             let m = CostModel::default();
             let (hits, _) =
-                nearest_filtered_costed_tiebreak(&store, &g, &[1.0, 0.0], &mask, 0, None, &m);
+                nearest_filtered_costed_tiebreak(&store, &g, &[1.0, 0.0], &mask, 0, None, &m)
+                    .unwrap();
             assert!(hits.is_empty(), "k=0 must yield no results");
             let (hits, _) = nearest_filtered_costed_tiebreak(
                 &store,
@@ -526,10 +576,12 @@ mod tests {
                 3,
                 None,
                 &m,
-            );
+            )
+            .unwrap();
             assert!(hits.is_empty(), "an empty mask must yield no results");
             let (hits, _) =
-                nearest_filtered_costed_tiebreak(&store, &g, &[0.0, 0.0], &mask, 3, None, &m);
+                nearest_filtered_costed_tiebreak(&store, &g, &[0.0, 0.0], &mask, 3, None, &m)
+                    .unwrap();
             assert!(hits.is_empty(), "an all-zero query must yield no results");
         }
     }

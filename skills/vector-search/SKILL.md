@@ -152,12 +152,14 @@ VectorStore::sibling_delta_path(&Path) -> PathBuf;  VectorStore::has_persisted_d
 
 // --- search (src/ann.rs) --- all return cosine in [-1,1], best first; zero query -> empty
 nearest_exact(&VectorStore, query: &[f32], k) -> Vec<(Id, f32)>                 // ground-truth full scan; ascending-id ties
-nearest_exact_tiebreak(&VectorStore, &Graph, query: &[f32], k, exclude: Option<Id>) -> Vec<(Id, f32)>  // [SONNET-4.6] sq-tb9p0
+nearest_exact_tiebreak(&VectorStore, &Graph, query: &[f32], k, exclude: Option<Id>) -> Result<Vec<(Id, f32)>, String>  // [SONNET-4.6] sq-tb9p0
 //   VG-TIE-1 (spec site/specs/sparql-vector-genai.typ): membership at a BOUNDARY score tie is decided by ascending
 //   Unicode-codepoint order of the candidates' canonical N-Triples serialisations (reproducible ACROSS implementations,
-//   unlike id order); keys computed only for the boundary tie group. `exclude` = seed-self-exclusion. Used by the
-//   answer-exact `vec:` mainline — exact unfiltered path AND (via nearest_filtered_costed_tiebreak, `filtered-ann`)
-//   the filtered path over the mask-admitted pool; approximate backends keep plain search (no true boundary).
+//   unlike id order); keys computed only for the boundary tie group. FAIL-CLOSED domain guard: a candidate containing a
+//   blank node (document-local label => no stable key) is Err wherever its TERM (not score alone) decides membership —
+//   admitted top-k or boundary tie group; IRIs, literals and GROUND triple terms rank. `exclude` = seed-self-exclusion.
+//   Used by the answer-exact `vec:` mainline — exact unfiltered path AND (via nearest_filtered_costed_tiebreak,
+//   `filtered-ann`) the filtered path over the mask-admitted pool; approximate backends keep plain search (no true boundary).
 # feature = "metadata-sidecar": same ranking/scores, decorated after ranking
 nearest_exact_with_meta(&VectorStore, query: &[f32], k) -> Vec<(Id, f32, Option<String>)>
 nearest_term_exact(&VectorStore, &Graph, &Term, k) -> Vec<(Term, f32)>          // UNCHECKED: stale store -> silently wrong
@@ -220,9 +222,10 @@ Strategy::{PreFilter, PostFilter}                                               
 CostEstimate { mask_len, store_len, k, prefilter_cost, postfilter_cost, strategy }   // the modelled estimate behind a decision
 postfilter_exact(&VectorStore, query: &[f32], &IdMask, k) -> Vec<(Id, f32)>      // scan WHOLE store, drop non-masked -> IDENTICAL to nearest_exact_filtered (no over-fetch boundary: full ranking)
 nearest_filtered_costed(&VectorStore, &[f32], &IdMask, k, &CostModel) -> (Vec<(Id, f32)>, CostEstimate)   // decide + run chosen branch; ascending-id ties
-nearest_filtered_costed_tiebreak(&VectorStore, &Graph, &[f32], &IdMask, k, exclude: Option<Id>, &CostModel) -> (Vec<(Id, f32)>, CostEstimate)
+nearest_filtered_costed_tiebreak(&VectorStore, &Graph, &[f32], &IdMask, k, exclude: Option<Id>, &CostModel) -> Result<(Vec<(Id, f32)>, CostEstimate), String>
 //   [SONNET-4.6] the same decide+run with VG-TIE-1 boundary-tie membership over the mask-ADMITTED pool, `exclude` (seed)
-//   dropped BEFORE the boundary is determined — what the filtered `vec:` rewrite path calls (keeps VG-FILT-2 exact)
+//   dropped BEFORE the boundary is determined — what the filtered `vec:` rewrite path calls (keeps VG-FILT-2 exact);
+//   Err = the same fail-closed blank-node domain guard as nearest_exact_tiebreak
 overfetch_target(k, mask_len, store_len) -> usize                               // ceil(k/selectivity) clamped; the FIRST fetch size for the iterative over-fetch path below (exact backend never under-fills, so it's a no-op there)
 // HEURISTIC over an ESTIMATE, not optimal: scatter_penalty is one modelled constant; pre/post return the IDENTICAL top-k either way (answer-safe)
 
@@ -547,7 +550,10 @@ literal's dimension must match the store; any other `vec:` IRI is unknown. An ab
 seed IRI yields no rows. By default the unfiltered search is the **exact** full scan
 (deterministic, answer-exact — a fine default below ~10⁵ vectors), with top-k membership at a
 boundary score tie decided by ascending N-Triples codepoint order (VG-TIE-1, sq-tb9p0) so two
-answer-exact implementations return the same top-k set on the same store.
+answer-exact implementations return the same top-k set on the same store. The rule is fail-closed
+on the embeddable domain: a candidate containing a blank node (whose N-Triples label is
+document-local, so it has no stable key) is a hard query error wherever its term — not its score
+alone — would decide membership; IRIs, literals, and ground triple terms rank normally.
 
 **Approximate `vec:` for large stores (opt-in, ALSO `approx-ann`, sq-z589).** With BOTH
 `vec-predicate` *and* `approx-ann` on, `query_vec_approx` / `prepare_vec_approx` take an extra

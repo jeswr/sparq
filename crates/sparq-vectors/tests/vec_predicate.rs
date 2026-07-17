@@ -365,6 +365,54 @@ fn boundary_score_tie_membership_is_by_ntriples_codepoint_order() {
     );
 }
 
+/// [SONNET-4.6] (#2445 review) The VG-TIE-1 embeddable-domain guard through the mainline `vec:`
+/// surface: a blank-node candidate has a document-local N-Triples label — no tie-break key that
+/// is stable across implementations — so when its term (not its score alone) would decide top-k
+/// membership, the query MUST fail closed with a hard error, never rank the label. The blank
+/// node ties an IRI at the k boundary, exactly where the key would become load-bearing.
+#[test]
+fn blank_node_candidate_at_the_boundary_is_a_hard_query_error() {
+    let g = Graph::load_str(
+        r#"
+        <http://ex/top> <http://ex/p> "t" .
+        <http://ex/a-tied> <http://ex/p> "a" .
+        _:tied <http://ex/p> "b" .
+        "#,
+        "ntriples",
+    )
+    .unwrap();
+    let id = |s: &str| {
+        g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap()))
+            .unwrap()
+    };
+    let bnode = g
+        .id_of(&Term::BlankNode(oxrdf::BlankNode::new_unchecked("tied")))
+        .unwrap();
+    let mut store = VectorStore::create(tmp_path("bnode_tie"), 2).unwrap();
+    store.put(id("http://ex/top"), &[1.0, 0.0]).unwrap(); // cos 1.0
+    store.put(id("http://ex/a-tied"), &[0.6, 0.8]).unwrap(); // cos 0.6
+    store.put(bnode, &[0.6, -0.8]).unwrap(); // cos 0.6 — tied blank node
+    // k=2: one slot for the two-way 0.6 boundary tie the blank node sits in → hard error.
+    let err = query_vec(
+        &g,
+        "PREFIX vec: <http://sparq.dev/vec#>
+         SELECT ?node WHERE { ?node vec:nearest ( \"1,0\" 2 ) }",
+        &store,
+    )
+    .unwrap_err();
+    assert!(err.contains("blank node"), "expected the fail-closed domain error, got: {err}");
+    // k=1: the unique winner is an IRI; the blank node stays strictly below the boundary and
+    // is rejected by score alone — the query succeeds.
+    let r = query_vec(
+        &g,
+        "PREFIX vec: <http://sparq.dev/vec#>
+         SELECT ?node WHERE { ?node vec:nearest ( \"1,0\" 1 ) }",
+        &store,
+    )
+    .unwrap();
+    assert_eq!(iris(&r, 0), vec!["http://ex/top".to_string()], "{r:?}");
+}
+
 /// [SONNET-4.6] (sq-tb9p0) VG-TIE-1 through the FILTERED `vec:` execution path — the branch the
 /// unfiltered tie test above cannot reach (a constrained neighbour variable returns through the
 /// cost-model'd filtered search, not `search_tied`). VG-FILT-2 makes this load-bearing: in

@@ -135,19 +135,33 @@ pub fn nearest_term_exact(
 /// (spec assertion VG-TIE-1 of `site/specs/sparql-vector-genai.typ`): when candidates tie on
 /// score at the k boundary (the k-th best and the next-best scores are equal), result-set
 /// *membership* is decided by the candidates' **canonical N-Triples serialisation**, admitted in
-/// ascending Unicode-codepoint order, until `k` results are reached. The tie-break key is fixed
-/// by the RDF term alone (an IRI serialises as `<iri>`; a literal as its quoted, escaped lexical
-/// form plus its `^^<datatype>`/`@lang` suffix), so two answer-exact implementations return the
-/// SAME top-k set on the same store — unlike [`nearest_exact`]'s ascending-id tie-break, which is
-/// deterministic within one build but not reproducible across dictionaries. UTF-8 byte order IS
-/// codepoint order, so the comparison is a plain byte compare of the serialised terms.
+/// ascending Unicode-codepoint order, until `k` results are reached. The rule is defined over
+/// terms whose key is **fixed by the RDF term alone**: the spec's mainline embeddable domain —
+/// IRIs (`<iri>`) and literals (the quoted, escaped lexical form plus the
+/// `^^<datatype>`/`@lang` suffix) — plus the ground triple terms the RDF 1.2 estate embeds
+/// (their `<<( … )>>` form is likewise pinned by the grammar). For those terms two answer-exact
+/// implementations return the SAME top-k set on the same store — unlike [`nearest_exact`]'s
+/// ascending-id tie-break, which is deterministic within one build but not reproducible across
+/// dictionaries. UTF-8 byte order IS codepoint order, so the comparison is a plain byte compare
+/// of the serialised terms.
+///
+/// **Blank-node candidates are rejected, not ranked (`Err`)**: a blank-node label is
+/// document-local per N-Triples — two equivalent stores can carry different labels for
+/// corresponding nodes — so a term containing a blank node (a blank node itself, or a non-ground
+/// triple term) has NO cross-implementation tie-break key, and admitting one would silently void
+/// the reproducibility claim above. The guard is fail-closed
+/// and applies exactly where a candidate's *term* (rather than its score alone) is load-bearing:
+/// every admitted candidate and every member of the boundary tie group. A candidate strictly
+/// below the boundary (and outside the tie group) is rejected by score comparison alone, so its
+/// term is never materialised — the guard costs O(k + tie group), never a store scan.
 ///
 /// The N-Triples keys are computed only for the boundary tie group (candidates whose score
 /// equals the k-th best), never for the whole store. Candidates strictly above the boundary are
-/// admitted unconditionally; ties strictly inside the top-k need no rule (the solution multiset
-/// is unordered). `exclude` drops one id from the candidate pool before ranking — the
-/// seed-self-exclusion of a query-by-node search (`None` for a query-by-vector search).
-/// `k = 0` and an all-zero `query` yield no results, exactly as [`nearest_exact`].
+/// admitted unconditionally (after the domain check); ties strictly inside the top-k need no
+/// rule (the solution multiset is unordered). `exclude` drops one id from the candidate pool
+/// before ranking — the seed-self-exclusion of a query-by-node search (`None` for a
+/// query-by-vector search). `k = 0` and an all-zero `query` yield no results, exactly as
+/// [`nearest_exact`].
 ///
 /// Like [`nearest_term_exact`], this does NOT verify `store` matches `graph`; run
 /// [`VectorStore::check_graph`] first when the store carries a fingerprint.
@@ -157,9 +171,9 @@ pub fn nearest_exact_tiebreak(
     query: &[f32],
     k: usize,
     exclude: Option<Id>,
-) -> Vec<(Id, f32)> {
+) -> Result<Vec<(Id, f32)>, String> {
     if k == 0 || query.iter().all(|&v| v == 0.0) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let mut scored: Vec<(Id, f32)> = store
         .iter()
@@ -170,6 +184,38 @@ pub fn nearest_exact_tiebreak(
     select_top_k_tiebreak(graph, scored, k)
 }
 
+/// [SONNET-4.6] The VG-TIE-1 embeddable-domain guard: resolves `id` and returns its [`Term`] iff
+/// its N-Triples tie-break key is fixed by the term alone — an IRI, a literal (the spec's
+/// mainline embeddable domain), or a **ground** triple term (the RDF 1.2 estate sparq
+/// additionally embeds; its `<<( … )>>` serialisation is likewise pinned by the grammar) — else
+/// the fail-closed error [`nearest_exact_tiebreak`] documents. A blank node's N-Triples label is
+/// scoped to a single document, so any term containing one (at any nesting depth) has no
+/// canonical cross-implementation tie-break key.
+fn tiebreak_domain_term(graph: &Graph, id: Id) -> Result<Term, String> {
+    fn is_ground(term: &Term) -> bool {
+        match term {
+            Term::NamedNode(_) | Term::Literal(_) => true,
+            Term::BlankNode(_) => false,
+            Term::Triple(t) => {
+                !matches!(t.subject, oxrdf::NamedOrBlankNode::BlankNode(_))
+                    && is_ground(&t.object)
+            }
+        }
+    }
+    let term = graph.dict.term(id);
+    if is_ground(&term) {
+        Ok(term)
+    } else {
+        Err(format!(
+            "vec: the answer-exact boundary tie-break (VG-TIE-1) is defined only over terms \
+             whose N-Triples key is fixed by the term alone (IRIs, literals, and ground triple \
+             terms); candidate {} contains a blank node, whose document-local label has no \
+             tie-break key that is stable across implementations; refusing to rank it",
+            term
+        ))
+    }
+}
+
 /// [SONNET-4.6] The VG-TIE-1 boundary-membership rule applied to an already
 /// score-descending-sorted **complete** candidate ranking: candidates strictly above the k
 /// boundary are admitted unconditionally; a score tie straddling the boundary is admitted in
@@ -178,36 +224,55 @@ pub fn nearest_exact_tiebreak(
 /// `nearest_filtered_costed_tiebreak` (`filtered-ann` only; the mask-admitted pool) so both
 /// apply the identical rule — the ranking must already have any seed exclusion applied, so
 /// the boundary is computed over the true candidate pool.
+///
+/// Enforces the key-stability domain fail-closed (see [`nearest_exact_tiebreak`]): every
+/// admitted candidate and every boundary-tie-group member must be an IRI, a literal, or a
+/// ground triple term, else `Err` — a term containing a blank node has no cross-implementation
+/// tie-break key, so ranking one would silently break the reproducibility contract. Candidates
+/// whose membership is decided by score alone (strictly below the boundary and outside the tie
+/// group) are not materialised or checked.
 pub(crate) fn select_top_k_tiebreak(
     graph: &Graph,
     mut scored: Vec<(Id, f32)>,
     k: usize,
-) -> Vec<(Id, f32)> {
+) -> Result<Vec<(Id, f32)>, String> {
     use std::cmp::Ordering;
     if k == 0 {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     if scored.len() <= k {
-        return scored;
+        for &(id, _) in &scored {
+            tiebreak_domain_term(graph, id)?;
+        }
+        return Ok(scored);
     }
     let boundary = scored[k - 1].1;
     if scored[k].1.total_cmp(&boundary) != Ordering::Equal {
-        // No tie straddles the k boundary: membership is already determined.
+        // No tie straddles the k boundary: membership is already determined by score — but
+        // every admitted candidate still surfaces in the answer, so the domain guard applies.
         scored.truncate(k);
-        return scored;
+        for &(id, _) in &scored {
+            tiebreak_domain_term(graph, id)?;
+        }
+        return Ok(scored);
     }
     // The tie group is the contiguous run of boundary-scored candidates [lo, hi) in the
     // score-descending order; `partition_point`'s predicates are monotone over that order.
     let lo = scored.partition_point(|&(_, s)| s.total_cmp(&boundary) == Ordering::Greater);
     let hi = scored.partition_point(|&(_, s)| s.total_cmp(&boundary) != Ordering::Less);
-    let mut tied: Vec<(Id, f32, String)> = scored[lo..hi]
-        .iter()
-        .map(|&(id, s)| (id, s, graph.dict.term(id).to_string()))
-        .collect();
+    for &(id, _) in &scored[..lo] {
+        tiebreak_domain_term(graph, id)?;
+    }
+    let mut tied = Vec::with_capacity(hi - lo);
+    for &(id, s) in &scored[lo..hi] {
+        // Every tie-group member's KEY enters the ordering (it competes for admission even if
+        // it loses), so the whole group — not just the winners — must be in-domain.
+        tied.push((id, s, tiebreak_domain_term(graph, id)?.to_string()));
+    }
     tied.sort_unstable_by(|a, b| a.2.cmp(&b.2));
     let mut out = scored[..lo].to_vec();
     out.extend(tied.into_iter().take(k - lo).map(|(id, s, _)| (id, s)));
-    out
+    Ok(out)
 }
 
 /// [OPUS-4.8] (sq-32i5) [`nearest_term_exact`] with the staleness check: returns `Err` if
@@ -650,10 +715,10 @@ mod tests {
             // k=2: `top` (1.0) is strictly above; ONE slot remains for the three 0.6-tied
             // candidates → the smallest N-Triples key `"10"^^xsd:integer` wins (id order would
             // have picked `<http://ex/z-tied>` — the lowest id — instead).
-            let hits = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 2, None);
+            let hits = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 2, None).unwrap();
             assert_eq!(iris(&g, &hits), vec!["<http://ex/top>".to_string(), TEN.to_string()]);
             // k=3: two slots for the tie group → "10" then "2"; z-tied is still excluded.
-            let hits = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 3, None);
+            let hits = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 3, None).unwrap();
             assert_eq!(
                 iris(&g, &hits),
                 vec!["<http://ex/top>".to_string(), TEN.to_string(), TWO.to_string()]
@@ -664,13 +729,16 @@ mod tests {
         fn no_boundary_tie_matches_plain_top_k_and_degenerate_cases_are_empty() {
             let (g, store) = fixture("plain");
             // k=1: the 1.0 score is unique — no boundary tie, plain top-k.
-            let hits = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 1, None);
+            let hits = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 1, None).unwrap();
             assert_eq!(iris(&g, &hits), vec!["<http://ex/top>".to_string()]);
             // k ≥ store size returns everything (all candidates admitted, no boundary).
-            assert_eq!(nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 99, None).len(), 5);
+            assert_eq!(
+                nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 99, None).unwrap().len(),
+                5
+            );
             // k=0 and the all-zero query yield no results (VG-DEG-2/3 alignment).
-            assert!(nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 0, None).is_empty());
-            assert!(nearest_exact_tiebreak(&store, &g, &[0.0, 0.0], 3, None).is_empty());
+            assert!(nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 0, None).unwrap().is_empty());
+            assert!(nearest_exact_tiebreak(&store, &g, &[0.0, 0.0], 3, None).unwrap().is_empty());
         }
 
         #[test]
@@ -678,9 +746,86 @@ mod tests {
             let (g, store) = fixture("exclude");
             let top = g.id_of(&Term::NamedNode(NamedNode::new("http://ex/top").unwrap())).unwrap();
             // With the exact-match seed excluded, k=1 lands directly on the boundary tie group.
-            let hits = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 1, Some(top));
+            let hits = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 1, Some(top)).unwrap();
             assert_eq!(iris(&g, &hits), vec![TEN.to_string()]);
             assert!(hits.iter().all(|&(id, _)| id != top), "the excluded seed must not appear");
+        }
+
+        // [SONNET-4.6] (#2445 review) The embeddable-domain guard: the VG-TIE-1 key is only
+        // stable for IRIs and literals — a blank-node label is document-local, so a blank-node
+        // candidate must be REJECTED (fail-closed `Err`), never ranked, wherever its term (not
+        // its score alone) decides membership: in the boundary tie group, admitted strictly
+        // above the boundary, or admitted because the pool is no larger than k.
+        mod blank_node_domain {
+            use super::super::super::{nearest_exact_tiebreak, VectorStore};
+            use oxrdf::{BlankNode, NamedNode, Term};
+            use sparq_core::Graph;
+
+            /// `_:tied` shares the cosine-0.6 boundary tie with an IRI; `top` is an exact
+            /// match. Blank-node labels are kept verbatim by the N-Triples loader, so the id
+            /// resolves through `Term::BlankNode`.
+            fn fixture(name: &str) -> (Graph, VectorStore) {
+                let g = Graph::load_str(
+                    r#"
+                    <http://ex/top> <http://ex/p> "t" .
+                    <http://ex/a-tied> <http://ex/p> "a" .
+                    _:tied <http://ex/p> "b" .
+                    "#,
+                    "ntriples",
+                )
+                .unwrap();
+                let iri =
+                    |s: &str| g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap())).unwrap();
+                let bnode =
+                    g.id_of(&Term::BlankNode(BlankNode::new_unchecked("tied"))).unwrap();
+                let path = std::env::temp_dir().join(format!(
+                    "sparq_vec_tiebreak_bnode_{}_{}.spqv",
+                    std::process::id(),
+                    name
+                ));
+                let mut store = VectorStore::create(path, 2).unwrap();
+                store.put(iri("http://ex/top"), &[1.0, 0.0]).unwrap(); // cos 1.0
+                store.put(iri("http://ex/a-tied"), &[0.6, 0.8]).unwrap(); // cos 0.6
+                store.put(bnode, &[0.6, -0.8]).unwrap(); // cos 0.6 — tied blank node
+                (g, store)
+            }
+
+            #[test]
+            fn blank_node_in_the_boundary_tie_group_is_a_fail_closed_error() {
+                let (g, store) = fixture("in_tie");
+                // k=2: one slot for the two-way 0.6 tie — the blank node's key would have to
+                // enter the ordering, so the call must refuse, naming the term kind.
+                let err = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 2, None).unwrap_err();
+                assert!(err.contains("_:tied") || err.contains("blank"), "got: {}", err);
+            }
+
+            #[test]
+            fn admitted_blank_node_is_a_fail_closed_error_even_without_a_tie() {
+                let (g, store) = fixture("admitted");
+                // k=3 admits everything (pool == k): the blank node would surface in the
+                // answer, so the call must refuse rather than return a document-local label.
+                let err = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 3, None).unwrap_err();
+                assert!(err.contains("blank node"), "got: {}", err);
+                // And with the blank node strictly above the boundary: make it the unique
+                // best by querying its own direction.
+                let err =
+                    nearest_exact_tiebreak(&store, &g, &[0.6, -0.8], 1, None).unwrap_err();
+                assert!(err.contains("blank node"), "got: {}", err);
+            }
+
+            #[test]
+            fn blank_node_strictly_below_the_boundary_never_becomes_load_bearing() {
+                let (g, store) = fixture("below");
+                // k=1: the unique 1.0 winner is an IRI; the blank node sits strictly below the
+                // boundary, is rejected by score alone, and must NOT trip the guard — the
+                // documented O(k + tie group) scoping.
+                let hits = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 1, None).unwrap();
+                assert_eq!(hits.len(), 1);
+                assert_eq!(
+                    g.dict.term(hits[0].0).to_string(),
+                    "<http://ex/top>".to_string()
+                );
+            }
         }
     }
 

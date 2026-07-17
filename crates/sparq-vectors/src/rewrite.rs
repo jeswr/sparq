@@ -142,17 +142,19 @@ trait UnfilteredSearch {
     fn search(&self, query: &[f32], k: usize) -> Vec<(Id, f32)>;
 
     /// [SONNET-4.6] (sq-tb9p0) Answer-exact top-`k` with the VG-TIE-1 deterministic boundary
-    /// tie-break ([`nearest_exact_tiebreak`]) and the seed already excluded, or `None` when this
-    /// backend cannot honour the rule — an APPROXIMATE backend has recall < 1 and no true
-    /// boundary to break ties at, so it keeps the plain [`search`](Self::search) path.
+    /// tie-break ([`nearest_exact_tiebreak`]) and the seed already excluded, or `Ok(None)` when
+    /// this backend cannot honour the rule — an APPROXIMATE backend has recall < 1 and no true
+    /// boundary to break ties at, so it keeps the plain [`search`](Self::search) path. `Err` is
+    /// the fail-closed embeddable-domain rejection: a blank-node candidate whose term (not its
+    /// score alone) would decide membership is a hard query error, never ranked.
     fn search_tied(
         &self,
         _query: &[f32],
         _k: usize,
         _graph: &Graph,
         _exclude: Option<Id>,
-    ) -> Option<Vec<(Id, f32)>> {
-        None
+    ) -> Result<Option<Vec<(Id, f32)>>, String> {
+        Ok(None)
     }
 }
 
@@ -172,8 +174,8 @@ impl UnfilteredSearch for ExactSearch<'_> {
         k: usize,
         graph: &Graph,
         exclude: Option<Id>,
-    ) -> Option<Vec<(Id, f32)>> {
-        Some(nearest_exact_tiebreak(self.store, graph, query, k, exclude))
+    ) -> Result<Option<Vec<(Id, f32)>>, String> {
+        nearest_exact_tiebreak(self.store, graph, query, k, exclude).map(Some)
     }
 }
 
@@ -770,13 +772,14 @@ fn run_knn(
                     req.k,
                     Some(id),
                     &CostModel::default(),
-                );
+                )?;
                 return Ok(hits);
             }
             // [SONNET-4.6] (sq-tb9p0) Answer-exact path: rank with the VG-TIE-1 boundary
             // tie-break (seed excluded before ranking, so the boundary is computed over the
-            // true candidate pool).
-            if let Some(hits) = searcher.search_tied(query, req.k, graph, Some(id)) {
+            // true candidate pool). A blank-node candidate whose term would decide
+            // membership is a fail-closed hard error (`?`), per the embeddable domain.
+            if let Some(hits) = searcher.search_tied(query, req.k, graph, Some(id))? {
                 return Ok(hits);
             }
             // Approximate backend: over-fetch by one and drop the seed itself (recall < 1 —
@@ -810,12 +813,13 @@ fn run_knn(
                     req.k,
                     None,
                     &CostModel::default(),
-                );
+                )?;
                 return Ok(hits);
             }
             // [SONNET-4.6] (sq-tb9p0) Answer-exact path with the VG-TIE-1 boundary tie-break;
-            // an approximate backend falls through to its plain search.
-            if let Some(hits) = searcher.search_tied(v, req.k, graph, None) {
+            // an approximate backend falls through to its plain search. A blank-node
+            // candidate whose term would decide membership is a fail-closed hard error (`?`).
+            if let Some(hits) = searcher.search_tied(v, req.k, graph, None)? {
                 return Ok(hits);
             }
             Ok(searcher.search(v, req.k))
