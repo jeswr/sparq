@@ -138,51 +138,94 @@ scheduled/dispatch run keep the FULL matrix, byte-identical to before.
 | `artifact-exact-equality` (wasm feature-OFF byte identity) | `vectorized-feature-off.yml` | kept iff `sparq-wasm` is in the affected closure (in-step `ci_select.py` verdict; ci-full label / selector error / full mode ⇒ run) |
 
 **The integrity invariant — a draft-tier gate result must NEVER admit a PR to the
-merge queue.** Enforcement (all in `scripts/ci_summary_gate.py`, unit-tested in
-`scripts/tests/test_ci_summary_gate.py`):
+merge queue.** The load-bearing mechanism is rule 1 (structural); rules 2–6 are
+belts (all in `scripts/ci_summary_gate.py`, unit-tested in
+`scripts/tests/test_ci_summary_gate.py`; the name/trigger wiring pinned by
+`scripts/tests/test_ci_select_wiring.py`):
 
-1. **Supersession by re-run.** Every gate-feeding workflow's `pull_request` trigger
+1. **A draft-tier run never produces the required context at all.** The
+   `ci-summary` gate job's own check-run name is **tiered**: a draft
+   `pull_request` payload renders **`gate, draft-tier`**; every other event/state
+   renders exactly `gate` — the sole context named by the ruleset's
+   `required_status_checks` rule. A draft-built head therefore carries **no
+   `gate` check-run at all**, and branch protection blocks on the *missing*
+   required check from the un-draft moment until the full-tier run's fresh
+   `gate` concludes. There is no supersession window to race: `gh pr ready &&
+   gh pr merge --auto` (the fleet's standard flow) arms and waits; GitHub event
+   latency, a *dropped* `ready_for_review` event, or an Actions outage all
+   leave the required context ABSENT — blocked — never satisfied by a
+   draft-tier result. Stale `gate, draft-tier` check-runs are tier artifacts:
+   the gate script excludes them from every sibling set (a completed draft-tier
+   verdict, green or red, is superseded by the live full-tier evaluation).
+2. **Supersession by re-run.** Every gate-feeding workflow's `pull_request` trigger
    now includes **`ready_for_review`** (the default types are only
    opened/synchronize/reopened — without this the un-draft moment would run
    *nothing* and the head would keep its draft-tier results). Un-drafting therefore
-   fires a FULL-tier run on the **same head SHA**, whose fresh `gate` check-run
-   supersedes the draft-tier one — branch protection and the merge queue read the
-   LATEST run of the required check name.
-2. **The gate knows its tier.** Each `ci-summary` run derives its tier from its own
+   fires a FULL-tier run on the **same head SHA**, which produces the first (and
+   only) `gate` check-run for that head.
+3. **The gate knows its tier.** Each `ci-summary` run derives its tier from its own
    trigger payload (`PR_DRAFT`), and the reusable `ci-select` job's check-run **name
    carries a `", draft-tier"` marker** on draft-assembled runs (name-as-contract,
    like the advisory rule).
-3. **A full-tier gate refuses a draft-tier leg set.** A full-tier `pull_request`
-   gate that finds a draft-tier-marked select with no later full-tier successor
-   treats the set as *still settling* (the ready_for_review re-runs are seconds
-   away) and, at budget exhaustion, concludes **FAILURE — "stale draft-tier run,
-   full run pending"** rather than passing over draft legs.
-4. **A draft-tier gate re-checks the PR at conclusion time.** Before emitting
+4. **A full-tier gate refuses a draft-tier leg set — per INSTANCE.** `ci.yml`,
+   `bench.yml`, `feature-matrix.yml` and `fuzz.yml` all call the same reusable
+   `ci-select` job, so a head SHA carries up to **four** draft-marked selects
+   under the IDENTICAL check-run name. A full-tier `pull_request` gate requires
+   each draft-marked instance to have its **own, distinct, strictly-later**
+   full-tier successor (greedy start-order matching) — the first workflow's
+   full-tier select can never release the hold for the other three, whose
+   full-tier runs may not have registered any check-runs yet. While any
+   instance lacks a successor the set is *still settling* (the
+   ready_for_review re-runs are expected); at budget exhaustion the verdict is
+   **FAILURE — "stale draft-tier run, full run pending"**, never a pass over
+   draft legs.
+5. **A draft-tier gate re-checks the PR at conclusion time.** Before emitting
    SUCCESS it re-reads the PR's **current** draft state from the API
    (`pull-requests: read`); if the PR was un-drafted meanwhile it concludes
    FAILURE with the same stale-draft-tier message, and an unreadable state
    fail-closes to FAILURE (a draft PR cannot merge anyway).
-5. **Superseded-cancellation forgiveness.** The ready_for_review re-run's per-PR
+6. **Superseded-cancellation forgiveness.** The ready_for_review re-run's per-PR
    concurrency groups cancel the in-flight draft-tier runs, leaving
    `cancelled` check-runs on the same SHA; the gate excuses a cancelled/stale
    check-run **only** when a later run of the same (tier-normalized) name exists —
    a genuine `failure`/`timed_out` is never forgiven, and a cancellation with no
    successor still REDs.
 
-Even in the worst race (a draft-tier gate that concluded green in the same instant
-the PR was un-drafted and enqueued), the merge queue re-runs the full check set on
-its own `merge_group` ref — which is always full-tier — before anything merges; the
-lanes deliberately absent from `merge_group` (bench's deterministic ratchet, the
-heavy recall shards) are exactly the ones the ready_for_review full-tier PR run
-re-executes, and rules 3–4 make that gate the one the queue sees.
+**Why the queue can never latch a draft-tier result.** Rule 1 is structural: the
+queue and branch protection admit a PR only on a successful check-run of the
+exact context `gate`, and no draft-tier run ever emits one. This matters more
+than it may look, because the `merge_group` run deliberately omits two lanes
+(`bench.yml`'s deterministic byte ratchet and the heavy recall shards,
+sq-6vshe.6) on the premise that their full form already ran on the PR head —
+a premise a draft-built head would otherwise break. Rules 2–6 alone would NOT
+close that: a concluded draft-tier `gate` success would remain the *latest* run
+of the required context from the un-draft moment until the ready_for_review
+`ci-summary` run registers its check-run (seconds of event latency; indefinitely
+if the event is dropped), and `gh pr ready && gh pr merge --auto` could enqueue
+inside that window. With the tiered check name the window does not exist —
+so the ready_for_review full-tier PR run (which includes both merge_group-absent
+lanes) must conclude before the queue can admit the head.
+
+The ruleset additionally carries a `code_scanning` rule (CodeQL). A draft-built
+head carries no PR CodeQL analysis (`analyze` skips on drafts), so that rule
+would *independently* block such a head — but it is an **out-of-repo,
+owner-mutable setting** and evadable in corner cases (a non-draft PR sharing the
+same head SHA supplies an analysis for the commit; the rule may be relaxed
+during a CodeQL outage), so it is recorded here as **defense-in-depth only**,
+never the load-bearing mechanism. Do not weaken rule 1 on the strength of it.
 
 **Operational notes.** `pull_request`-event CI runs are cancel-superseded per PR
 (`concurrency` groups; `bench.yml` now cancels superseded **PR** runs only — its
 push/schedule runs still never cancel, protecting the benchmark history — and
 `js.yml` gained the standard per-PR group). `merge_group` runs are never cancelled
 by these groups. **No required-check name changed** — the ruleset still requires
-exactly `ci-summary / gate`. Toggling draft state does not change what ultimately
-gates a merge; it only defers the heavy lanes to the un-draft moment.
+exactly `ci-summary / gate`, and every full-tier run still emits exactly that
+context; a draft-tier run emits the additional, deliberately **non-required**
+context `gate, draft-tier` instead (tooling reading a draft head's checks sees
+the tier verdict there, while the required `gate` context stays absent until
+un-draft — a draft PR cannot merge regardless). Toggling draft state does not
+change what ultimately gates a merge; it only defers the heavy lanes to the
+un-draft moment.
 
 ## Required reviews
 

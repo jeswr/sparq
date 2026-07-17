@@ -704,17 +704,44 @@ class TestRequiredCheckAnchor(unittest.TestCase):
         cls.cs = _load(CISUM_YML)
         cls.gate = _gate_module()
 
+    # [FABLE-5] Draft-tier CI: the exact marker expression ci-select.yml also
+    # uses — empty on every non-draft payload, ", draft-tier" on a draft one.
+    GATE_MARKER_EXPR = "${{ github.event.pull_request.draft == true && ', draft-tier' || '' }}"
+
     def test_gate_job_name_is_exactly_gate(self):
         """The branch-protection ruleset (id 17688455) requires context='gate'.
         If this name drifts the required check silently stops matching and the
-        gate weakens with no error anywhere — so pin it."""
+        gate weakens with no error anywhere — so pin it.
+
+        [FABLE-5] Draft-tier CI (GATE INTEGRITY): the name is now TIERED — the
+        job name is the literal 'gate' plus the draft-tier marker expression, so
+        * every non-draft payload (non-draft PR, merge_group, push) still
+          renders EXACTLY 'gate' (the required context, unchanged), and
+        * a draft pull_request payload renders 'gate, draft-tier' — a
+          deliberately NON-required context, so a draft-tier run can never
+          satisfy branch protection in ANY window (event latency, a dropped
+          ready_for_review event, an Actions outage: the required context is
+          simply absent until the full-tier run concludes)."""
         job = self.cs["jobs"]["gate"]
+        name = job["name"]
         self.assertEqual(
-            job["name"], "gate",
-            "ci-summary gate job name must stay exactly 'gate' — "
-            "the branch-protection ruleset anchors on context='gate' (id 17688455); "
-            "renaming breaks the required check without any CI warning",
+            name, "gate" + self.GATE_MARKER_EXPR,
+            "ci-summary gate job name must be exactly 'gate' + the draft-tier "
+            "marker expression — the ruleset anchors on context='gate' (id "
+            "17688455) for every non-draft payload, and the marker is what "
+            "keeps a draft-tier run from ever emitting that required context",
         )
+        # The non-draft rendering is the required context, byte-exact.
+        self.assertEqual(name.replace(self.GATE_MARKER_EXPR, ""), "gate")
+        # The draft rendering is the gate module's artifact name — the script
+        # excludes it from sibling sets and normalizes it back to 'gate'.
+        draft_rendered = name.replace(self.GATE_MARKER_EXPR,
+                                      self.gate.DRAFT_TIER_MARKER)
+        self.assertEqual(draft_rendered, self.gate.DRAFT_TIER_GATE_NAME)
+        self.assertTrue(self.gate.is_draft_gate_artifact(draft_rendered))
+        self.assertFalse(self.gate.is_draft_gate_artifact("gate"))
+        self.assertTrue(self.gate.is_draft_tier(draft_rendered))
+        self.assertEqual(self.gate.normalized_name(draft_rendered), "gate")
 
     def test_gate_job_has_no_job_level_conditional(self):
         """The gate must run unconditionally on every event (pull_request,
@@ -741,8 +768,10 @@ class TestRequiredCheckAnchor(unittest.TestCase):
     def test_gate_is_not_advisory_or_informational(self):
         """The gate name must never accidentally match the advisory/informational
         exclusion — that would un-gate it (its failure would stop being required).
-        Both the bare job name and the `workflow / job` display form are checked."""
-        for name in ("gate", "ci-summary / gate"):
+        Both the bare job name and the `workflow / job` display form are checked,
+        in both tier renderings."""
+        for name in ("gate", "ci-summary / gate",
+                     "gate, draft-tier", "ci-summary / gate, draft-tier"):
             self.assertFalse(
                 self.gate.is_advisory(name),
                 f"gate check name {name!r} must NOT match the advisory exclusion",
@@ -752,7 +781,8 @@ class TestRequiredCheckAnchor(unittest.TestCase):
         """The gate name must not match SELECT_RE — that would make the gate
         self-detect as a selection pre-job and add a circular verdict dependency
         (skipped gating only valid if 'gate' itself concluded success)."""
-        for name in ("gate", "ci-summary / gate"):
+        for name in ("gate", "ci-summary / gate",
+                     "gate, draft-tier", "ci-summary / gate, draft-tier"):
             self.assertFalse(
                 self.gate.is_select(name),
                 f"gate check name {name!r} must NOT match SELECT_RE",
@@ -1058,6 +1088,43 @@ class TestDraftTierWiring(unittest.TestCase):
                 self.assertIn(keep, types, f"{wf_name}: must keep the default {keep}")
 
     # ---- gate plumbing -------------------------------------------------------
+    def test_gate_check_name_is_tiered_on_draft_payloads(self):
+        """[GATE INTEGRITY] The STRUCTURAL half of the invariant: on a draft
+        payload the ci-summary gate job's own check-run is named
+        `gate, draft-tier`, so a draft-tier run never produces the required
+        `gate` context and branch protection cannot be satisfied by it in any
+        window (event latency / dropped ready_for_review / Actions outage —
+        the required context is simply ABSENT until the full-tier run
+        concludes). Full rendering pinned by TestRequiredCheckAnchor."""
+        name = self.summary["jobs"]["gate"]["name"]
+        self.assertEqual(name, "gate" + self.MARKER_EXPR)
+
+    def test_code_scanning_backstop_fed_and_documented_as_non_load_bearing(self):
+        """The live ruleset also carries a `code_scanning` rule (CodeQL). A
+        draft-built head carries no PR CodeQL analysis (analyze skips on
+        drafts), so that rule independently blocks such a head — but it is an
+        out-of-repo, owner-mutable setting and evadable (a non-draft PR sharing
+        the head SHA supplies an analysis; outage relaxation), so it must be
+        recorded as defense-in-depth ONLY and the feeding triggers must not
+        rot: push-to-main + merge_group + weekly schedule + ready_for_review."""
+        on = _on_block(self.codeql)
+        push = on.get("push") or {}
+        self.assertEqual(push.get("branches"), ["main"],
+                         "codeql.yml must keep its push-to-main analysis run")
+        self.assertIn("merge_group", on)
+        self.assertIn("schedule", on)
+        types = (on.get("pull_request") or {}).get("types", [])
+        self.assertIn("ready_for_review", types,
+                      "the un-draft moment must produce a fresh CodeQL analysis")
+        doc = (REPO_ROOT / "docs" / "branch-protection.md").read_text(encoding="utf-8")
+        self.assertIn("code_scanning", doc,
+                      "docs/branch-protection.md must record the code_scanning "
+                      "rule's role in the draft-tier design")
+        self.assertIn("defense-in-depth only", doc,
+                      "the doc must record code_scanning as defense-in-depth, "
+                      "never the load-bearing draft-tier mechanism")
+        self.assertIn("owner-mutable", doc)
+
     def test_gate_receives_tier_env_and_pr_read(self):
         perms = self.summary.get("permissions", {})
         self.assertEqual(perms.get("pull-requests"), "read",

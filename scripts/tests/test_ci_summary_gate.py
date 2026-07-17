@@ -572,6 +572,48 @@ class TestDraftTierIntegrity(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("PASSED", out)
 
+    def test_full_tier_requires_a_successor_per_draft_select_instance(self):
+        """Cross-workflow collision: ci.yml, bench.yml, feature-matrix.yml and
+        fuzz.yml all expose the IDENTICAL select check-run name, so a draft head
+        carries FOUR draft-marked select instances. The hold must release only
+        when EVERY instance has its own later full-tier successor — the first
+        workflow's full-tier select must never release the other three."""
+        drafts = [R(SELECT_DRAFT, started=f"2026-07-17T10:00:0{i}Z", rid=i)
+                  for i in range(1, 5)]
+        fulls = [R(SELECT_FULL, started=f"2026-07-17T10:05:0{i}Z", rid=10 + i)
+                 for i in range(1, 5)]
+        polls = [
+            drafts + [GREEN],              # no full re-run registered yet: hold
+            drafts + fulls[:1] + [GREEN],  # 1 of 4 registered: STILL hold
+            drafts + fulls[:3] + [GREEN],  # 3 of 4 registered: STILL hold
+            drafts + fulls + [GREEN],      # all four registered: settle + pass
+            drafts + fulls + [GREEN],
+            drafts + fulls + [GREEN],
+        ]
+        code, out = run(tiny_cfg(), polls,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"))
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+        # The per-instance hold must have been observable while 1..3 full-tier
+        # selects were registered (the collision would have released at 1).
+        self.assertIn("awaiting the full-tier re-run", out)
+
+    def test_first_full_select_must_not_release_all_draft_instances(self):
+        """REGRESSION (critic finding 2): with four draft-marked selects and only
+        ONE later full-tier select ever registering, the gate must hold and then
+        RED at budget exhaustion — never conclude success over the three
+        workflows whose full-tier runs never registered any check-runs."""
+        drafts = [R(SELECT_DRAFT, started=f"2026-07-17T10:00:0{i}Z", rid=i)
+                  for i in range(1, 5)]
+        one_full = R(SELECT_FULL, started="2026-07-17T10:05:00Z", rid=99)
+        polls = [drafts + [one_full, GREEN]]
+        code, out = run(tiny_cfg(), polls,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"))
+        self.assertEqual(code, 1)
+        self.assertIn("awaiting the full-tier re-run", out)
+        self.assertIn("stale draft-tier run, full run pending", out)
+        self.assertIn("3 draft-marked select instance(s)", out)
+
     def test_full_tier_non_pr_event_ignores_draft_selects(self):
         """merge_group/push gates never see the belt (fresh ref; no PR payload)."""
         ctx = g.TierContext(run_tier="full", event_name="merge_group")
@@ -646,6 +688,77 @@ class TestDraftTierIntegrity(unittest.TestCase):
         later_full = R(SELECT_FULL, started="2026-07-17T10:06:00Z", rid=3)
         self.assertEqual(
             g.draft_selects_unsuperseded([draft_sel, earlier_full, later_full]), [])
+
+    def test_draft_selects_unsuperseded_is_per_instance(self):
+        """One full-tier successor covers exactly ONE draft-marked instance —
+        same-named instances (the four selecting workflows) each need their own,
+        and duplicates are preserved so the caller can report counts."""
+        d1 = R(SELECT_DRAFT, started="2026-07-17T10:00:00Z", rid=1)
+        d2 = R(SELECT_DRAFT, started="2026-07-17T10:00:01Z", rid=2)
+        d3 = R(SELECT_DRAFT, started="2026-07-17T10:00:02Z", rid=3)
+        f1 = R(SELECT_FULL, started="2026-07-17T10:05:00Z", rid=11)
+        f2 = R(SELECT_FULL, started="2026-07-17T10:05:01Z", rid=12)
+        f3 = R(SELECT_FULL, started="2026-07-17T10:05:02Z", rid=13)
+        # 3 marked, 1 full => 2 instances remain unsuperseded (duplicates kept).
+        self.assertEqual(g.draft_selects_unsuperseded([d1, d2, d3, f1]),
+                         [SELECT_DRAFT, SELECT_DRAFT])
+        # 3 marked, 3 later fulls => all matched.
+        self.assertEqual(g.draft_selects_unsuperseded([d1, d2, d3, f1, f2, f3]), [])
+        # An EARLIER full can never be a successor, even when otherwise unused.
+        f_early = R(SELECT_FULL, started="2026-07-17T09:59:00Z", rid=10)
+        self.assertEqual(g.draft_selects_unsuperseded([d1, d2, f_early, f1]),
+                         [SELECT_DRAFT])
+        # Interleaved rounds pair in start order: a full between two marked
+        # instances supersedes the earlier one only.
+        d_late = R(SELECT_DRAFT, started="2026-07-17T10:06:00Z", rid=4)
+        self.assertEqual(g.draft_selects_unsuperseded([d1, f1, d_late]),
+                         [SELECT_DRAFT])
+        # started_at ties break on the check-run id (strictly-later still holds).
+        d_tie = R(SELECT_DRAFT, started="2026-07-17T10:05:00Z", rid=20)
+        f_tie = R(SELECT_FULL, started="2026-07-17T10:05:00Z", rid=21)
+        self.assertEqual(g.draft_selects_unsuperseded([d_tie, f_tie]), [])
+        self.assertEqual(
+            g.draft_selects_unsuperseded(
+                [d_tie, R(SELECT_FULL, started="2026-07-17T10:05:00Z", rid=19)]),
+            [SELECT_DRAFT])
+
+    # ---- draft-tier gate artifacts (the structural name tiering) -------------
+    def test_gate_name_constants(self):
+        """The gate's own tiered check-run name (ci-summary.yml renders
+        `gate, draft-tier` on draft payloads) — pinned against the helpers."""
+        self.assertEqual(g.GATE_CHECK_NAME, "gate")
+        self.assertEqual(g.DRAFT_TIER_GATE_NAME, "gate, draft-tier")
+        self.assertTrue(g.is_draft_gate_artifact("gate, draft-tier"))
+        self.assertFalse(g.is_draft_gate_artifact("gate"),
+                         "the full-tier gate name is NOT an artifact (a future "
+                         "sibling job literally named `gate` must keep gating)")
+        self.assertFalse(g.is_draft_gate_artifact("some gate, draft-tier"))
+        self.assertEqual(g.normalized_name(g.DRAFT_TIER_GATE_NAME), "gate")
+        self.assertTrue(g.is_draft_tier(g.DRAFT_TIER_GATE_NAME))
+        self.assertFalse(g.is_advisory(g.DRAFT_TIER_GATE_NAME))
+        self.assertFalse(g.is_select(g.DRAFT_TIER_GATE_NAME))
+
+    def test_stale_draft_gate_failure_is_excluded_not_a_leg(self):
+        """A COMPLETED draft-tier gate verdict left on the SHA is a tier
+        artifact: its FAILURE must not permanently RED the full-tier gate on
+        the same head (the live run re-derives the verdict over the real
+        legs). Non-vacuous: without the exclusion this red would gate."""
+        art = R(g.DRAFT_TIER_GATE_NAME, conclusion="failure",
+                started="2026-07-17T10:00:00Z", rid=1,
+                url="https://github.com/o/r/actions/runs/111/job/5")
+        code, out = run(tiny_cfg(), [[art, GREEN, GREEN2]])
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+
+    def test_cancelled_draft_gate_artifact_needs_no_successor(self):
+        """A cancelled `gate, draft-tier` (concurrency-cancel at un-draft) is
+        excluded as an artifact even before any successor registers — it must
+        not RED the fresh full-tier gate while the sibling set settles."""
+        art = R(g.DRAFT_TIER_GATE_NAME, conclusion="cancelled",
+                started="2026-07-17T10:00:00Z", rid=1,
+                url="https://github.com/o/r/actions/runs/111/job/5")
+        code, out = run(tiny_cfg(), [[art, GREEN]])
+        self.assertEqual(code, 0, out)
 
 
 if __name__ == "__main__":

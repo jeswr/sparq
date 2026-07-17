@@ -76,8 +76,11 @@ jobs:
     # check-run NAME — the same name-as-contract mechanism as the advisory rule —
     # and scripts/ci_summary_gate.py partitions draft-assembled from full-
     # assembled selection runs on a head SHA with it: a FULL-tier gate refuses to
-    # conclude success while a draft-tier-marked select has no full-tier
-    # successor, so a draft-tier leg set can never admit a non-draft PR to the
+    # conclude success while any draft-tier-marked select INSTANCE lacks its own
+    # later full-tier successor (per-instance because ci.yml, bench.yml,
+    # feature-matrix.yml and fuzz.yml all expose this IDENTICAL check-run name —
+    # one workflow's full-tier select must never release the hold for the
+    # others), so a draft-tier leg set can never admit a non-draft PR to the
     # merge queue. The stable phrase "change-based test selection" (the SELECT_RE
     # detection contract) is a prefix of BOTH spellings, and neither contains the
     # words "advisory"/"informational".

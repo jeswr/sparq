@@ -96,15 +96,25 @@
 # wasm-equality skipped; the crate legs stay change-scoped by ci-select) so the
 # review-fix churn of many concurrent draft worker PRs stops saturating the runner
 # pool. THE INVARIANT — a draft-tier gate result must NEVER admit a PR to the merge
-# queue — is enforced in scripts/ci_summary_gate.py: this run knows its own tier
-# from the trigger payload (PR_DRAFT below), a draft-tier run re-checks the PR's
-# CURRENT draft state via the API before any SUCCESS (un-drafted => FAILURE, "stale
-# draft-tier run, full run pending"), and a full-tier pull_request run refuses to
-# conclude over a draft-tier-assembled selection (the ci-select job name carries a
-# ", draft-tier" marker). `ready_for_review` below re-runs this gate (and every
-# tiered sibling workflow) at the un-draft moment, so a fresh FULL-tier `gate`
-# check-run supersedes the draft-tier one on the same head SHA — branch protection
-# and the merge queue read the LATEST run of the required check name. merge_group
+# queue — is STRUCTURAL: the gate job's own check-run NAME is tiered. On a draft
+# pull_request payload the job below is named `gate, draft-tier`, NOT `gate`, so a
+# draft-tier run never produces the required `gate` context at all and the
+# ruleset's required_status_checks entry ({context: "gate"}) is unsatisfiable by
+# draft-tier results. From the un-draft moment until the full-tier run's fresh
+# `gate` concludes, the required context is simply ABSENT — which branch protection
+# treats as blocking — so there is no supersession window to race: GitHub event
+# latency, a dropped ready_for_review event, or an Actions outage all leave the PR
+# blocked, never admitted (`gh pr ready && gh pr merge --auto` arms and waits).
+# scripts/ci_summary_gate.py adds defense-in-depth on top: each run knows its own
+# tier from the trigger payload (PR_DRAFT below); a draft-tier run re-checks the
+# PR's CURRENT draft state via the API before any SUCCESS (un-drafted => FAILURE,
+# "stale draft-tier run, full run pending"); a full-tier pull_request run refuses
+# to conclude while ANY draft-tier-marked ci-select INSTANCE lacks its own later
+# full-tier successor (per-instance — ci/bench/feature-matrix/fuzz all expose the
+# identical select check-run name); and stale `gate, draft-tier` check-runs are
+# excluded from every sibling set as tier artifacts. `ready_for_review` below
+# re-runs this gate (and every tiered sibling workflow) at the un-draft moment,
+# producing the first (and only) `gate` check-run on the head SHA. merge_group
 # behaviour is untouched (always full tier, on a fresh ref).
 #
 # IMPLEMENTATION (sq-90cv4). [FABLE-5] The poll loop + verdict live in
@@ -151,7 +161,14 @@ concurrency:
 
 jobs:
   gate:
-    name: gate
+    # [FABLE-5] Draft-tier CI: the check-run name is TIERED (the same marker
+    # expression ci-select.yml uses). A draft pull_request payload renders
+    # `gate, draft-tier`; every other event/state (non-draft PR, merge_group,
+    # push) renders EXACTLY `gate` — the branch-protection ruleset's required
+    # context, which a draft-tier run therefore can never satisfy (the
+    # structural half of the integrity invariant above). Pinned by
+    # scripts/tests/test_ci_select_wiring.py::TestRequiredCheckAnchor.
+    name: gate${{ github.event.pull_request.draft == true && ', draft-tier' || '' }}
     runs-on: ubuntu-latest
     # > the loop's ABSOLUTE budget: ~37 min base (unchanged from the pre-sq-90cv4
     # cap) + up to ~30 min of saturation extension + API overhead. The loop caps

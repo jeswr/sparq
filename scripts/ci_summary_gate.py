@@ -51,8 +51,19 @@
 # DRAFT-TIER INTEGRITY (bead: draft-tier CI). [FABLE-5] Draft PR heads run a REDUCED
 # leg set (coverage / bench / CodeQL / heavy shards / wasm-equality skipped — see
 # docs/branch-protection.md §Draft-tier CI); the ci-select job NAME carries the
-# ", draft-tier" marker on draft-assembled runs. THE INVARIANT: a draft-tier gate
-# result must NEVER admit a PR to the merge queue. Enforced three ways, all here:
+# ", draft-tier" marker on draft-assembled runs, and — the STRUCTURAL mechanism —
+# the ci-summary gate job's OWN check-run name is tiered the same way: a draft
+# payload emits `gate, draft-tier`, never the required `gate` context, so branch
+# protection ({context: "gate"}) is unsatisfiable by any draft-tier run and there
+# is no supersession window at the un-draft moment (the required context is simply
+# ABSENT until the full-tier run concludes). THE INVARIANT: a draft-tier gate
+# result must NEVER admit a PR to the merge queue. This script adds four belts on
+# top of the structural name tiering:
+#   * DRAFT-GATE-ARTIFACT EXCLUSION — a `gate, draft-tier` check-run left on the
+#     SHA by an earlier draft-tier gate run is an aggregator verdict over a
+#     superseded assembly, not a leg: it is excluded from every sibling set (its
+#     FAILURE must not permanently RED the full-tier gate on the same SHA, and its
+#     SUCCESS carries nothing the live evaluation does not re-derive).
 #   * SUPERSEDED-RUN FORGIVENESS — un-drafting fires ready_for_review on the SAME
 #     head SHA; per-PR concurrency then CANCELS the in-flight draft-tier runs,
 #     leaving conclusion=cancelled check-runs on the SHA the fresh full-tier gate
@@ -63,12 +74,15 @@
 #     This matches branch protection's own semantics (it reads the LATEST run of a
 #     required check name).
 #   * STALE DRAFT-TIER LEG SET — a FULL-tier pull_request gate run refuses to
-#     conclude success while any draft-tier-marked select check-run lacks a later
-#     full-tier (unmarked) same-normalized-name successor: the leg set on the SHA
-#     was assembled draft-tier and the full re-run has not registered. The loop
-#     treats that as STILL-SETTLING (the ready_for_review re-runs are seconds away);
-#     budget exhaustion in that state is a RED ("stale draft-tier run, full run
-#     pending"), never a pass over draft legs.
+#     conclude success while any draft-tier-marked select check-run INSTANCE lacks
+#     its OWN, distinct, strictly-later full-tier (unmarked) same-normalized-name
+#     successor. Per-INSTANCE matters: ci.yml, bench.yml, feature-matrix.yml and
+#     fuzz.yml all expose the IDENTICAL select check-run name, so the first
+#     workflow's full-tier select must not release the hold for the other three
+#     (whose full-tier runs may not have registered any check-runs yet). The loop
+#     treats an unmatched instance as STILL-SETTLING (the ready_for_review re-runs
+#     are seconds away); budget exhaustion in that state is a RED ("stale
+#     draft-tier run, full run pending"), never a pass over draft legs.
 #   * CONCLUSION-TIME DRAFT RE-CHECK — a DRAFT-tier gate run re-reads the PR's
 #     CURRENT draft state from the API immediately before emitting a SUCCESS
 #     verdict; if the PR is no longer a draft the gate concludes FAILURE ("stale
@@ -105,6 +119,16 @@ _PASSING = ("success", "skipped", "neutral")
 # advisory rule uses — so the gate can partition draft-assembled from full-assembled
 # selection check-runs on a head SHA without any extra API surface.
 DRAFT_TIER_MARKER = ", draft-tier"
+# [FABLE-5] Draft-tier CI: THIS aggregator's own job name is tiered the same way
+# (ci-summary.yml `gate` job): a draft-payload run emits the check-run
+# `gate, draft-tier` and NEVER the required `gate` context — the structural half
+# of the integrity invariant (branch protection's required_status_checks entry
+# {context: "gate"} cannot be satisfied by a draft-tier run at all). A
+# `gate, draft-tier` check-run left on a SHA by an earlier draft-tier gate run is
+# therefore a tier ARTIFACT, not a leg: is_draft_gate_artifact() excludes it from
+# the sibling set (see run_gate).
+GATE_CHECK_NAME = "gate"
+DRAFT_TIER_GATE_NAME = GATE_CHECK_NAME + DRAFT_TIER_MARKER
 # Conclusions a LATER same-normalized-name check-run may excuse (superseded-run
 # forgiveness). Deliberately ONLY the supersession artifacts — a genuine failure /
 # timed_out is never forgiven by a later attempt.
@@ -164,6 +188,19 @@ def is_draft_tier(name: str) -> bool:
     return DRAFT_TIER_MARKER in name
 
 
+def is_draft_gate_artifact(name: str) -> bool:
+    """Is this check-run a draft-tier gate VERDICT (`gate, draft-tier`)? Such a
+    run is an aggregator artifact of a superseded draft-tier evaluation, never a
+    leg: its FAILURE must not permanently RED the full-tier gate on the same SHA
+    (the live run re-derives the verdict over the real legs), and its SUCCESS
+    carries no information the live evaluation does not recompute. The full-tier
+    `gate` name is deliberately NOT excluded here — a future sibling job
+    literally named `gate` in another workflow must keep gating (the run-id
+    self-exclusion comment in ci-summary.yml), and cancelled `gate` predecessors
+    are handled by forgive_superseded instead."""
+    return name == DRAFT_TIER_GATE_NAME
+
+
 def _order_key(run: dict) -> tuple:
     """Later-run ordering: started_at (ISO-8601 Zulu strings compare correctly as
     text) tie-broken by the check-run id (monotonically allocated)."""
@@ -206,28 +243,55 @@ def forgive_superseded(runs: list[dict]) -> tuple[list[dict], list[dict]]:
 
 
 def draft_selects_unsuperseded(runs: list[dict]) -> list[str]:
-    """[FABLE-5] Draft-tier CI: names of draft-tier-marked selection check-runs
-    that have NO later full-tier (unmarked) successor of the same normalized name.
-    Non-empty on a full-tier pull_request gate run == the leg set on this SHA is
-    (still) draft-tier-assembled: the gate must wait for the ready_for_review
-    full re-run to register, and must never conclude success over it."""
-    selects = [r for r in runs if is_select(r.get("name", ""))]
-    out: list[str] = []
-    for r in selects:
+    """[FABLE-5] Draft-tier CI: names of draft-tier-marked selection check-run
+    INSTANCES that have no OWN, distinct, strictly-later full-tier (unmarked)
+    successor of the same normalized name — one entry per unsuperseded instance
+    (duplicates preserved so the caller can report counts). Non-empty on a
+    full-tier pull_request gate run == the leg set on this SHA is (still, at
+    least partly) draft-tier-assembled: the gate must wait for the
+    ready_for_review full re-runs to register, and must never conclude success
+    over it.
+
+    PER-INSTANCE, not per-name: ci.yml, bench.yml, feature-matrix.yml and
+    fuzz.yml all call the same reusable ci-select job, so a head SHA carries up
+    to FOUR draft-marked selects under the IDENTICAL check-run name. Matching by
+    name alone would let the FIRST workflow's full-tier select supersede ALL of
+    them, releasing the hold while the other workflows' full-tier runs may not
+    have registered any check-runs yet — their skipped/vacuous draft-tier legs
+    would then satisfy a full-tier verdict (the exact admission the invariant
+    forbids; each full-tier run that registers also registers its pending legs,
+    so demanding one successor per instance holds the gate until every selecting
+    workflow's re-run is visible). Within each normalized-name group the marked
+    and unmarked selects are therefore matched greedily in start order (the
+    earliest marked instance consumes the earliest unused strictly-later
+    unmarked one — a maximum matching for this single-key order structure).
+
+    Deliberately fail-closed: repeated draft-tier rounds on ONE SHA (e.g. a
+    ci-full label toggle while the PR was a draft) accumulate marked instances
+    that each demand a successor; a hold that cannot be satisfied REDs at budget
+    exhaustion ("stale draft-tier run, full run pending") rather than ever
+    passing over draft-assembled legs. Re-running the selecting workflows (or
+    pushing a new head) clears it."""
+    groups: dict[str, tuple[list[dict], list[dict]]] = {}
+    for r in runs:
         name = r.get("name", "")
-        if not is_draft_tier(name):
+        if not is_select(name):
             continue
-        key = normalized_name(name)
-        mine = _order_key(r)
-        superseded = any(
-            not is_draft_tier(o.get("name", ""))
-            and normalized_name(o.get("name", "")) == key
-            and _order_key(o) > mine
-            for o in selects
-        )
-        if not superseded:
-            out.append(name)
-    return sorted(set(out))
+        marked, unmarked = groups.setdefault(normalized_name(name), ([], []))
+        (marked if is_draft_tier(name) else unmarked).append(r)
+    out: list[str] = []
+    for marked, unmarked in groups.values():
+        marked.sort(key=_order_key)
+        unmarked.sort(key=_order_key)
+        fi = 0
+        for m in marked:
+            while fi < len(unmarked) and _order_key(unmarked[fi]) <= _order_key(m):
+                fi += 1
+            if fi < len(unmarked):
+                fi += 1  # this full-tier successor is consumed by instance m
+            else:
+                out.append(m.get("name", ""))
+    return sorted(out)
 
 
 def is_advisory(name: str) -> bool:
@@ -313,8 +377,9 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
 
     DRAFT-TIER INTEGRITY ([FABLE-5], see the header): with a TierContext,
       * a FULL-tier pull_request verdict REDs while any draft-tier-marked select
-        lacks a later full-tier successor (stale draft-tier leg set — the
-        ready_for_review full run has not registered on this SHA);
+        INSTANCE lacks its own later full-tier successor (stale draft-tier leg
+        set — at least one selecting workflow's ready_for_review full run has
+        not registered on this SHA);
       * a DRAFT-tier verdict that would otherwise be SUCCESS first re-reads the
         PR's CURRENT draft state from the API: no-longer-draft => FAILURE ("stale
         draft-tier run, full run pending"), and an unreadable state fail-closes
@@ -343,12 +408,21 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
     if tier_ctx and tier_ctx.run_tier == "full" and tier_ctx.event_name == "pull_request":
         stale = draft_selects_unsuperseded(runs)
         if stale:
+            counts: dict[str, int] = {}
+            for n in stale:
+                counts[n] = counts.get(n, 0) + 1
+            detail = ", ".join(
+                f"{n} ×{c}" if c > 1 else n for n, c in sorted(counts.items())
+            )
             _emit(
                 "### ci-summary: FAILED — stale draft-tier run, full run pending. The "
-                "selection on this head SHA is draft-tier-assembled "
-                f"({', '.join(stale)}) with no full-tier successor: the ready_for_review "
-                "full-tier re-run never registered/completed here. A draft-tier leg set "
-                "must never admit a non-draft PR to the merge queue "
+                "selection on this head SHA is (at least partly) draft-tier-assembled: "
+                f"{len(stale)} draft-marked select instance(s) have no OWN later "
+                f"full-tier successor ({detail}). Each selecting workflow's "
+                "ready_for_review full-tier re-run must register its own successor "
+                "(ci/bench/feature-matrix/fuzz share one select name — one full-tier "
+                "select must never release the hold for the others). A draft-tier leg "
+                "set must never admit a non-draft PR to the merge queue "
                 "(docs/branch-protection.md §Draft-tier CI).",
                 summary_path,
             )
@@ -403,8 +477,10 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
         f"### ci-summary: PASSED — all {len(gating)} gating check(s) green (or skipped/neutral); "
         f"{excluded} advisory check(s) excluded; set stable."
         + (
-            " DRAFT-TIER verdict (reduced leg set; PR draft state re-confirmed): the "
-            "full matrix re-runs at ready_for_review and its fresh gate supersedes this one."
+            " DRAFT-TIER verdict (reduced leg set; PR draft state re-confirmed). This "
+            f"check-run is `{DRAFT_TIER_GATE_NAME}`, never the required `{GATE_CHECK_NAME}` "
+            "context — it cannot satisfy branch protection; the full matrix re-runs at "
+            "ready_for_review and only its full-tier gate can."
             if tier_ctx and tier_ctx.run_tier == "draft"
             else ""
         ),
@@ -460,8 +536,17 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
         # same-normalized-name run supersedes — over the RAW list (self included)
         # so this run's own fresh `gate` check-run supersedes a cancelled
         # predecessor left on the SHA by the ready_for_review concurrency cancel.
+        # Then drop (a) this run's own check-run and (b) any `gate, draft-tier`
+        # check-run — a draft-tier gate VERDICT is a tier artifact of a
+        # superseded evaluation, never a leg (a completed draft-tier gate
+        # FAILURE on the SHA must not permanently RED the full-tier gate, and
+        # its SUCCESS never was the required context).
         kept, forgiven = forgive_superseded(raw)
-        runs = [r for r in kept if not is_self(r, cfg.self_run_id)]
+        runs = [
+            r for r in kept
+            if not is_self(r, cfg.self_run_id)
+            and not is_draft_gate_artifact(r.get("name", ""))
+        ]
         total = len(runs)
         pending = sum(1 for r in runs if r.get("status") != "completed")
         # [FABLE-5] Draft-tier CI: on a FULL-tier pull_request run, a draft-tier-
