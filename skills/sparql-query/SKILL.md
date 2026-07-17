@@ -157,7 +157,9 @@ worse in either direction). `PlanNode::to_json()` emits a hand-written JSON proj
 `PlanNode::max_q_error()` is the whole-plan worst. `SlowQueryRing::new(n)` is a bounded ring keeping the
 N worst-by-wall-time analyzed plans (`record` / `push` / `slowest` / `to_json`) for an ops slow-query
 view. Honest boundaries: only BGP nodes carry an estimate (the only operators the planner sizes);
-q-error is `None` when either side is 0; `nanos` are always 0 on wasm32.
+q-error is `None` when either side is 0; `nanos` read 0 on wasm32 (no monotonic `Instant`) unless the
+host installs a per-thread trace clock via `set_trace_clock(fn() -> u64)` — the sparq-wasm ANALYZE
+binding routes `performance.now()` through it (sq-vx7ez, #2428).
 
 ## Common recipes
 
