@@ -85,6 +85,27 @@ fn select_window_timeout_bounds_each_evaluation() {
 }
 
 #[test]
+fn select_oversized_window_timeout_is_unlimited_not_a_panic() {
+    // `now + Duration::MAX` is not representable as an `Instant`; the policy
+    // is "a timeout that can never trip is unlimited", so push/flush must
+    // evaluate normally instead of panicking on `Instant` overflow.
+    let run = |q: &mut ContinuousQuery| {
+        let mut rows = Vec::new();
+        for n in 0..3 {
+            q.push(value_triple(n), n as u64, |_| {}).unwrap();
+        }
+        q.flush(|r| rows.extend(r.rows)).unwrap();
+        rows
+    };
+    let sparql = "SELECT ?s ?v WHERE { ?s <http://ex/value> ?v }";
+    let mut plain = ContinuousQuery::register(sparql, WindowSpec::time(10, 10)).unwrap();
+    let mut oversized = ContinuousQuery::register(sparql, WindowSpec::time(10, 10))
+        .unwrap()
+        .with_window_timeout(Duration::MAX);
+    assert_eq!(run(&mut plain), run(&mut oversized));
+}
+
+#[test]
 fn construct_budget_max_rows_trips() {
     let mut q = ContinuousConstruct::register(
         "CONSTRUCT { ?s <http://ex/observed> ?v } WHERE { ?s <http://ex/value> ?v }",

@@ -196,10 +196,13 @@ impl ContinuousQuery {
     /// evaluation (builder style): at every window evaluation start the
     /// effective budget's deadline is set to `now + timeout`, so one
     /// pathological window aborts with `"query budget exceeded (timeout)"`
-    /// instead of stalling the embedder's push loop. Native only — the
-    /// engine's wall-clock deadline does not exist on `wasm32` (where
-    /// `std::time::Instant` is unusable); the row/byte/cancel limits of
-    /// [`with_budget`](Self::with_budget) stay fully portable.
+    /// instead of stalling the embedder's push loop. A `timeout` so large
+    /// that `now + timeout` is unrepresentable can never trip and is treated
+    /// as unlimited (the budget's own absolute deadline, if any, still
+    /// applies). Native only — the engine's wall-clock deadline does not
+    /// exist on `wasm32` (where `std::time::Instant` is unusable); the
+    /// row/byte/cancel limits of [`with_budget`](Self::with_budget) stay
+    /// fully portable.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_window_timeout(mut self, timeout: std::time::Duration) -> Self {
         self.budget.per_window_timeout = Some(timeout);

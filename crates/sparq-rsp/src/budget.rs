@@ -24,12 +24,17 @@ pub(crate) struct BudgetSpec {
 impl BudgetSpec {
     /// The effective [`QueryBudget`] for one window evaluation: `base`, with
     /// the deadline refreshed from `per_window_timeout` (measured from NOW,
-    /// the moment this window's evaluation starts).
+    /// the moment this window's evaluation starts). A timeout so large that
+    /// `now + timeout` is unrepresentable can never trip, so it is treated as
+    /// unlimited: `base`'s own absolute deadline (if any) is kept instead of
+    /// panicking on `Instant` overflow.
     pub fn window_budget(&self) -> QueryBudget {
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(t) = self.per_window_timeout {
             let mut b = self.base.clone();
-            b.deadline = Some(std::time::Instant::now() + t);
+            if let Some(deadline) = std::time::Instant::now().checked_add(t) {
+                b.deadline = Some(deadline);
+            }
             return b;
         }
         self.base.clone()
