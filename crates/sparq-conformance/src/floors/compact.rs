@@ -21,7 +21,10 @@
 ///   non-inline contexts, empty-RDF inputs).
 /// * NEW (sq-oy1f.27, floor **228**): the spec Compaction Algorithm over the
 ///   natively expanded document, deep-compared to the W3C EXPECTED document —
-///   measured **228 pass / 1 fail / 17 skip** of 246. The 42-case rise over the
+///   measured **228 pass / 0 fail / 18 skip** of 246 (originally 228/1/17; the
+///   one fail, `#t0038`, was reclassified an honest 1.0 SKIP by sq-uzdw7 — see
+///   below — moving 1 fail → 1 skip with the pass count and floor UNCHANGED).
+///   The 42-case rise over the
 ///   old floor is real algorithm coverage (scoped/typed contexts, `@nest`,
 ///   container maps, `@graph` containers, options forwarding), not an oracle
 ///   relaxation: the new oracle is strictly harder (document equivalence vs
@@ -29,14 +32,18 @@
 ///   (strict-ordered count = 228 — no pass relies on the comparator's
 ///   outside-`@list` array order-insensitivity).
 ///
-/// ## The 1 honest FAIL and the 17 honest SKIPs
+/// ## The 18 honest SKIPs (0 fails)
 ///
 /// * `#t0038` (`specVersion: json-ld-1.0`) expects 1.0-era compact-IRI creation
 ///   through an EXPANDED (map-valued) term definition (`body:/format`). A
 ///   REC-conformant 1.1 processor never sets the prefix flag on an expanded
-///   term — in either processing mode (`compact/p001` pins exactly that for
-///   1.0 mode) — so this expectation is unreachable; jsonld.js and pyld make
-///   the same trade. Documented FAIL below the floor, not skipped.
+///   term — in either processing mode (`compact/tp001`, a `specVersion:
+///   json-ld-1.1` case run in 1.0 processing mode, pins exactly that) — so this
+///   expectation is unreachable without breaking `#tp001`; jsonld.js and pyld
+///   make the same trade. [FABLE-5] sq-uzdw7 DECIDED: reclassified from a
+///   documented below-floor FAIL to an honest `specVersion: json-ld-1.0` SKIP,
+///   matching the flatten/fromRdf lane convention (the runner's 1.0-skip is
+///   scoped to `specVersion` only, so `#tp001` still RUNS and passes).
 /// * 17 SKIPs = the NegativeEvaluationTests: compaction raises `invalid @nest
 ///   value`, but error-code completeness across context processing, expansion,
 ///   and compaction is unverified; the negative ratchet lanes are bead

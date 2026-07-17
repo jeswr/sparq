@@ -473,8 +473,8 @@ pub const SUITES: &[Suite] = &[
     // self-reparse round-trip over the engine's RDF-first writer (sq-3uos5), which
     // measured RDF losslessness rather than the Compaction Algorithm; see the
     // side-by-side re-pin on `floors::compact`. The floor is the MEASURED pass count
-    // at the pinned revision; the one below-floor fail (t0038, 1.0-era prefixing) and
-    // the 17 negative SKIPs are documented there.
+    // at the pinned revision; the 18 honest SKIPs (17 negatives + t0038, the 1.0-era
+    // prefixing case reclassified an honest 1.0 skip by sq-uzdw7) are documented there.
     // Floor kept in lock-step by `tests/scoreboard_floors.rs`.
     Suite {
         label: "W3C JSON-LD 1.1 compact",

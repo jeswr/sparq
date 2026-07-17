@@ -616,11 +616,20 @@ fn run_expand(root: &Path, entries: &[Entry]) -> Score {
 }
 
 /// `compact`: native Compaction Algorithm vs the normative expected doc.
+/// Extra honest SKIP (per the ratchet lane, sq-uzdw7): `specVersion: json-ld-1.0`
+/// positives — `#t0038` expects 1.0-era compact-IRI creation through an EXPANDED
+/// term definition, which `#tp001` pins as NOT happening even in 1.0 processing
+/// mode; jsonld.js and pyld make the same trade. Scoped to `specVersion` ONLY
+/// (`processingMode: json-ld-1.0` cases like `#tp001` still RUN).
 fn run_compact(root: &Path, entries: &[Entry]) -> Score {
     let mut s = Score::default();
     let loader = FsLoader::new().map_prefix(SUITE_BASE, root);
     for e in entries {
-        if e.requires.is_some() || e.is_negative || is_remote(&e.input) {
+        if e.requires.is_some()
+            || e.is_negative
+            || is_remote(&e.input)
+            || e.spec_version.as_deref() == Some("json-ld-1.0")
+        {
             s.skip();
             continue;
         }

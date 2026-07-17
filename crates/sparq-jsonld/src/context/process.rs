@@ -514,7 +514,8 @@ pub(crate) fn create_term_definition(
             // processing modes, matching jsonld.js and pyld (W3C compact/p001 pins the
             // 1.0-mode half: an expanded term definition is not a prefix in 1.0 either;
             // the one suite case that presumes 1.0-era prefixing, compact/0038, is an
-            // honest FAIL for REC-conformant processors — see the compact floor doc).
+            // honest `specVersion: json-ld-1.0` SKIP in the conformance lanes,
+            // sq-uzdw7 — see the compact floor doc).
             if simple_term
                 && term.find(':').is_none()
                 && !term.contains('/')
