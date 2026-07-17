@@ -47,9 +47,11 @@ def _load_module():
 g = _load_module()
 
 
-def R(name, status="completed", conclusion="success", url=""):
+def R(name, status="completed", conclusion="success", url="", started="", rid=0):
+    # started/rid feed the draft-tier superseded-run ordering (started_at, id);
+    # pre-draft-tier tests omit them and keep their exact semantics.
     return {"name": name, "status": status, "conclusion": conclusion,
-            "details_url": url, "html_url": ""}
+            "details_url": url, "html_url": "", "started_at": started, "id": rid}
 
 
 GREEN = R("build + test")
@@ -88,9 +90,10 @@ def scripted(polls, repeat_last=True):
     return fetch
 
 
-def run(cfg, polls, depth=0):
+def run(cfg, polls, depth=0, tier_ctx=None):
     """Drive run_gate with scripted polls + a constant queue depth (None = the
-    depth API is unavailable). Returns (exit_code, captured_output)."""
+    depth API is unavailable). Returns (exit_code, captured_output). tier_ctx
+    (default None) exercises the draft-tier integrity semantics."""
     out = io.StringIO()
     fetch = scripted(polls)
 
@@ -98,7 +101,8 @@ def run(cfg, polls, depth=0):
         return depth
 
     with redirect_stdout(out):
-        code = g.run_gate(cfg, fetch, depth_fn, sleep_fn=lambda s: None)
+        code = g.run_gate(cfg, fetch, depth_fn, sleep_fn=lambda s: None,
+                          tier_ctx=tier_ctx)
     return code, out.getvalue()
 
 
@@ -461,6 +465,187 @@ class TestSubprocessRobustness(unittest.TestCase):
             code = g.run_gate(tiny_cfg(), fetch, raising_depth, sleep_fn=lambda s: None)
         self.assertEqual(code, 0)
         self.assertIn("PASSED", out.getvalue())
+
+
+SELECT_FULL = "select / select (change-based test selection)"
+SELECT_DRAFT = "select / select (change-based test selection, draft-tier)"
+
+
+def draft_ctx(fetch_pr_draft, run_tier="draft", event="pull_request", retries=3):
+    return g.TierContext(run_tier=run_tier, event_name=event,
+                         fetch_pr_draft=fetch_pr_draft, draft_check_retries=retries)
+
+
+def counting(value):
+    """fetch_pr_draft stub returning `value` (an Exception instance raises)."""
+    state = {"calls": 0}
+
+    def fetch():
+        state["calls"] += 1
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    fetch.state = state
+    return fetch
+
+
+class TestDraftTierIntegrity(unittest.TestCase):
+    """[FABLE-5] Draft-tier CI: the invariant that a draft-tier gate result can
+    NEVER admit a PR to the merge queue — conclusion-time draft re-check,
+    stale-draft-tier leg-set belt, and superseded-cancellation forgiveness."""
+
+    # ---- conclusion-time draft re-check ------------------------------------
+    def test_draft_tier_success_requires_still_draft(self):
+        fetch = counting(True)
+        code, out = run(tiny_cfg(), [[R(SELECT_DRAFT), GREEN]],
+                        tier_ctx=draft_ctx(fetch))
+        self.assertEqual(code, 0)
+        self.assertIn("DRAFT-TIER verdict", out)
+        self.assertEqual(fetch.state["calls"], 1)
+
+    def test_draft_tier_stale_on_ready_pr_fails(self):
+        """The core invariant: an all-green draft-tier run whose PR was un-drafted
+        before conclusion must RED with the supersession message."""
+        code, out = run(tiny_cfg(), [[R(SELECT_DRAFT), GREEN]],
+                        tier_ctx=draft_ctx(counting(False)))
+        self.assertEqual(code, 1)
+        self.assertIn("stale draft-tier run, full run pending", out)
+
+    def test_draft_tier_unverifiable_state_fails_closed_bounded(self):
+        fetch = counting(g.FetchError("api down"))
+        code, out = run(tiny_cfg(), [[GREEN]], tier_ctx=draft_ctx(fetch, retries=3))
+        self.assertEqual(code, 1)
+        self.assertIn("could not confirm", out)
+        self.assertEqual(fetch.state["calls"], 3, "retries must be bounded")
+
+    def test_draft_tier_no_fetcher_fails_closed(self):
+        code, out = run(tiny_cfg(), [[GREEN]], tier_ctx=draft_ctx(None))
+        self.assertEqual(code, 1)
+
+    def test_draft_tier_red_legs_skip_the_api_check(self):
+        """A failing verdict REDs regardless; the draft re-check (an API call)
+        must not even run — a RED can never be latched by the queue."""
+        fetch = counting(True)
+        code, out = run(tiny_cfg(), [[R(SELECT_DRAFT), RED]],
+                        tier_ctx=draft_ctx(fetch))
+        self.assertEqual(code, 1)
+        self.assertEqual(fetch.state["calls"], 0)
+
+    def test_draft_tier_empty_set_still_rechecks(self):
+        """The stable-empty pass path must apply the same conclusion-time
+        re-check — no bypass via an empty sibling set."""
+        code, out = run(tiny_cfg(), [[]], tier_ctx=draft_ctx(counting(False)))
+        self.assertEqual(code, 1)
+        self.assertIn("stale draft-tier run", out)
+
+    def test_full_tier_run_never_calls_the_draft_api(self):
+        fetch = counting(True)
+        code, _ = run(tiny_cfg(), [[GREEN]],
+                      tier_ctx=draft_ctx(fetch, run_tier="full"))
+        self.assertEqual(code, 0)
+        self.assertEqual(fetch.state["calls"], 0)
+
+    # ---- stale draft-tier leg-set belt (full-tier pull_request runs) --------
+    def test_full_tier_holds_then_reds_on_unsuperseded_draft_select(self):
+        """A full-tier pull_request gate over a draft-tier-assembled leg set must
+        WAIT (the ready_for_review re-run is expected), and at budget exhaustion
+        must RED — never conclude success over draft-tier legs."""
+        polls = [[R(SELECT_DRAFT, started="2026-07-17T10:00:00Z", rid=1), GREEN]]
+        code, out = run(tiny_cfg(), polls,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"))
+        self.assertEqual(code, 1)
+        self.assertIn("awaiting the full-tier re-run", out)
+        self.assertIn("stale draft-tier run, full run pending", out)
+
+    def test_full_tier_passes_once_full_select_supersedes(self):
+        draft_sel = R(SELECT_DRAFT, started="2026-07-17T10:00:00Z", rid=1)
+        full_sel = R(SELECT_FULL, started="2026-07-17T10:05:00Z", rid=2)
+        polls = [
+            [draft_sel, GREEN],                       # full re-run not registered yet
+            [draft_sel, full_sel, GREEN],             # it lands; set goes stable
+            [draft_sel, full_sel, GREEN],
+            [draft_sel, full_sel, GREEN],
+        ]
+        code, out = run(tiny_cfg(), polls,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"))
+        self.assertEqual(code, 0)
+        self.assertIn("PASSED", out)
+
+    def test_full_tier_non_pr_event_ignores_draft_selects(self):
+        """merge_group/push gates never see the belt (fresh ref; no PR payload)."""
+        ctx = g.TierContext(run_tier="full", event_name="merge_group")
+        code, _ = run(tiny_cfg(), [[R(SELECT_DRAFT), GREEN]], tier_ctx=ctx)
+        self.assertEqual(code, 0)
+
+    # ---- superseded-cancellation forgiveness --------------------------------
+    def test_superseded_cancelled_forgiven(self):
+        """A cancelled leg with a LATER same-named non-cancelled run (the
+        ready_for_review concurrency-cancel artifact) must not RED the gate —
+        tier-independent (matches branch protection's latest-run semantics)."""
+        old = R("build + test", conclusion="cancelled",
+                started="2026-07-17T10:00:00Z", rid=1)
+        new = R("build + test", started="2026-07-17T10:05:00Z", rid=2)
+        code, out = run(tiny_cfg(), [[old, new, GREEN2]])
+        self.assertEqual(code, 0)
+        self.assertIn("superseded-cancelled forgiven", out)
+
+    def test_cancelled_without_successor_still_fails(self):
+        code, _ = run(tiny_cfg(), [[R("build + test", conclusion="cancelled",
+                                      started="2026-07-17T10:00:00Z", rid=1)]])
+        self.assertEqual(code, 1)
+
+    def test_genuine_failure_never_forgiven(self):
+        """Only cancelled/stale are supersedable — a real FAILURE gates even with
+        a later same-named success (no retry-away of a red)."""
+        old = R("build + test", conclusion="failure",
+                started="2026-07-17T10:00:00Z", rid=1)
+        new = R("build + test", started="2026-07-17T10:05:00Z", rid=2)
+        code, _ = run(tiny_cfg(), [[old, new]])
+        self.assertEqual(code, 1)
+
+    def test_cancelled_draft_select_forgiven_by_full_successor(self):
+        """The draft-marked select cancelled mid-flight at un-draft has no later
+        run under its OWN name — the tier-NORMALIZED name lets the full-tier
+        select supersede it, so the select-health rule doesn't false-RED."""
+        old = R(SELECT_DRAFT, conclusion="cancelled",
+                started="2026-07-17T10:00:00Z", rid=1)
+        new = R(SELECT_FULL, started="2026-07-17T10:05:00Z", rid=2)
+        code, out = run(tiny_cfg(), [[old, new, GREEN]],
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"))
+        self.assertEqual(code, 0)
+
+    def test_cancelled_gate_predecessor_superseded_by_self(self):
+        """The old draft-tier gate run cancelled by the ready_for_review
+        concurrency group leaves a cancelled `gate` check-run on the SHA; THIS
+        run's own (self-excluded) `gate` check-run must count as its superseder."""
+        old_gate = R("gate", conclusion="cancelled",
+                     started="2026-07-17T10:00:00Z", rid=1,
+                     url="https://github.com/o/r/actions/runs/111/job/5")
+        self_gate = R("gate", status="in_progress", conclusion=None,
+                      started="2026-07-17T10:05:00Z", rid=2,
+                      url="https://github.com/o/r/actions/runs/999/job/9")
+        code, out = run(tiny_cfg(), [[old_gate, self_gate, GREEN]])
+        self.assertEqual(code, 0, out)
+
+    # ---- pure helpers -------------------------------------------------------
+    def test_marker_helpers(self):
+        self.assertTrue(g.is_draft_tier(SELECT_DRAFT))
+        self.assertFalse(g.is_draft_tier(SELECT_FULL))
+        self.assertEqual(g.normalized_name(SELECT_DRAFT), SELECT_FULL)
+        self.assertTrue(g.is_select(SELECT_DRAFT),
+                        "the draft-marked select must still satisfy SELECT_RE")
+        self.assertFalse(g.is_advisory(SELECT_DRAFT))
+
+    def test_draft_selects_unsuperseded_requires_strictly_later_full(self):
+        draft_sel = R(SELECT_DRAFT, started="2026-07-17T10:05:00Z", rid=2)
+        earlier_full = R(SELECT_FULL, started="2026-07-17T10:00:00Z", rid=1)
+        self.assertEqual(g.draft_selects_unsuperseded([draft_sel, earlier_full]),
+                         [SELECT_DRAFT],
+                         "an EARLIER full select cannot supersede a draft one")
+        later_full = R(SELECT_FULL, started="2026-07-17T10:06:00Z", rid=3)
+        self.assertEqual(
+            g.draft_selects_unsuperseded([draft_sel, earlier_full, later_full]), [])
 
 
 if __name__ == "__main__":

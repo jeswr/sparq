@@ -48,11 +48,41 @@
 # MAX_CONSEC_FETCH_FAILURES consecutive failures fail the gate. No data => no
 # verdict, so this cannot create a false pass.
 #
+# DRAFT-TIER INTEGRITY (bead: draft-tier CI). [FABLE-5] Draft PR heads run a REDUCED
+# leg set (coverage / bench / CodeQL / heavy shards / wasm-equality skipped — see
+# docs/branch-protection.md §Draft-tier CI); the ci-select job NAME carries the
+# ", draft-tier" marker on draft-assembled runs. THE INVARIANT: a draft-tier gate
+# result must NEVER admit a PR to the merge queue. Enforced three ways, all here:
+#   * SUPERSEDED-RUN FORGIVENESS — un-drafting fires ready_for_review on the SAME
+#     head SHA; per-PR concurrency then CANCELS the in-flight draft-tier runs,
+#     leaving conclusion=cancelled check-runs on the SHA the fresh full-tier gate
+#     polls. A cancelled/stale check-run is excused iff a LATER check-run with the
+#     same tier-normalized name exists (any state but cancelled/stale — this gate's
+#     own fresh `gate` run supersedes its cancelled predecessor). A cancelled run
+#     with NO successor still fails the gate; failure/timed_out are NEVER forgiven.
+#     This matches branch protection's own semantics (it reads the LATEST run of a
+#     required check name).
+#   * STALE DRAFT-TIER LEG SET — a FULL-tier pull_request gate run refuses to
+#     conclude success while any draft-tier-marked select check-run lacks a later
+#     full-tier (unmarked) same-normalized-name successor: the leg set on the SHA
+#     was assembled draft-tier and the full re-run has not registered. The loop
+#     treats that as STILL-SETTLING (the ready_for_review re-runs are seconds away);
+#     budget exhaustion in that state is a RED ("stale draft-tier run, full run
+#     pending"), never a pass over draft legs.
+#   * CONCLUSION-TIME DRAFT RE-CHECK — a DRAFT-tier gate run re-reads the PR's
+#     CURRENT draft state from the API immediately before emitting a SUCCESS
+#     verdict; if the PR is no longer a draft the gate concludes FAILURE ("stale
+#     draft-tier run, full run pending") so the queue can never latch onto a
+#     draft-tier green. API failure after retries fail-closes to RED (a draft PR
+#     cannot merge anyway, so a false RED here is cheap; a false PASS is the
+#     invariant violation).
+#
 # Exit-0 paths, exhaustively: (1) render_verdict over a stable-empty set;
 # (2) render_verdict over an all-terminal set with zero non-passing GATING checks
 # AND every change-based-selection pre-job check green (sq-fmx4u.3: `skipped` is
 # satisfied only under a successful selection; a present-but-not-success select
-# REDs outright). There is no other `return 0`.
+# REDs outright) AND the draft-tier integrity checks above pass. There is no other
+# `return 0`.
 #
 # Hermetic tests: scripts/tests/test_ci_summary_gate.py (stdlib-only unittest; no
 # network — fetchers are injected). Run: python3 scripts/tests/test_ci_summary_gate.py
@@ -69,6 +99,16 @@ from dataclasses import dataclass, field
 
 ADVISORY_RE = re.compile(r"\b(advisory|informational)\b")
 _PASSING = ("success", "skipped", "neutral")
+# [FABLE-5] draft-tier CI: the marker ci-select.yml appends to the select job name
+# on a draft-assembled run ("select (change-based test selection, draft-tier)").
+# The tier travels in the check-run NAME — the same name-as-contract mechanism the
+# advisory rule uses — so the gate can partition draft-assembled from full-assembled
+# selection check-runs on a head SHA without any extra API surface.
+DRAFT_TIER_MARKER = ", draft-tier"
+# Conclusions a LATER same-normalized-name check-run may excuse (superseded-run
+# forgiveness). Deliberately ONLY the supersession artifacts — a genuine failure /
+# timed_out is never forgiven by a later attempt.
+_SUPERSEDABLE = ("cancelled", "stale")
 # [FABLE-5] sq-fmx4u.3: the change-based test-selection pre-job (the reusable
 # .github/workflows/ci-select.yml job, called from ci.yml + feature-matrix.yml).
 # Its check-run name embeds this phrase; scripts/tests/test_ci_select_wiring.py
@@ -97,6 +137,97 @@ class Config:
 
 class FetchError(RuntimeError):
     """A poll's API fetch failed (transient or otherwise)."""
+
+
+@dataclass
+class TierContext:
+    """[FABLE-5] Draft-tier CI: which tier THIS gate run is evaluating, and how to
+    re-read the PR's live draft state at conclusion time. run_tier is computed from
+    the trigger payload (pull_request + draft == true => "draft"; every other
+    event/state => "full"). fetch_pr_draft() -> bool (current draft state), raising
+    FetchError on API failure; None when the run has no PR (push/merge_group)."""
+
+    run_tier: str = "full"  # "draft" | "full"
+    event_name: str = ""
+    fetch_pr_draft: object = None
+    draft_check_retries: int = 3
+
+
+def normalized_name(name: str) -> str:
+    """A check-run name with the draft-tier marker stripped — the identity under
+    which a draft-assembled select and its full-tier successor are the SAME leg."""
+    return name.replace(DRAFT_TIER_MARKER, "")
+
+
+def is_draft_tier(name: str) -> bool:
+    """Was this check-run produced by a draft-tier-assembled run (name marker)?"""
+    return DRAFT_TIER_MARKER in name
+
+
+def _order_key(run: dict) -> tuple:
+    """Later-run ordering: started_at (ISO-8601 Zulu strings compare correctly as
+    text) tie-broken by the check-run id (monotonically allocated)."""
+    return (run.get("started_at") or "", run.get("id") or 0)
+
+
+def forgive_superseded(runs: list[dict]) -> tuple[list[dict], list[dict]]:
+    """[FABLE-5] Draft-tier CI: drop cancelled/stale check-runs that a LATER
+    check-run with the same tier-normalized name supersedes (any status, any
+    conclusion EXCEPT cancelled/stale — an in-flight successor counts: the gate
+    then waits on it). Returns (kept, forgiven).
+
+    WHY: un-drafting fires ready_for_review on the SAME head SHA; the per-PR
+    concurrency groups cancel the in-flight draft-tier runs, leaving
+    conclusion=cancelled check-runs on the SHA that would otherwise permanently
+    RED the fresh full-tier gate. Branch protection itself honours only the
+    LATEST run of a check name, so excusing a superseded cancellation aligns the
+    gate with the enforcement layer. SAFETY: only cancelled/stale are ever
+    forgiven (a genuine failure/timed_out always gates, no matter what runs
+    later), and a cancellation with NO successor still fails the gate. Call this
+    over the RAW list (self-run included) so THIS gate run's own fresh `gate`
+    check-run can supersede its cancelled predecessor."""
+    kept: list[dict] = []
+    forgiven: list[dict] = []
+    for r in runs:
+        if r.get("conclusion") in _SUPERSEDABLE:
+            key = normalized_name(r.get("name", ""))
+            mine = _order_key(r)
+            if any(
+                o is not r
+                and normalized_name(o.get("name", "")) == key
+                and _order_key(o) > mine
+                and o.get("conclusion") not in _SUPERSEDABLE
+                for o in runs
+            ):
+                forgiven.append(r)
+                continue
+        kept.append(r)
+    return kept, forgiven
+
+
+def draft_selects_unsuperseded(runs: list[dict]) -> list[str]:
+    """[FABLE-5] Draft-tier CI: names of draft-tier-marked selection check-runs
+    that have NO later full-tier (unmarked) successor of the same normalized name.
+    Non-empty on a full-tier pull_request gate run == the leg set on this SHA is
+    (still) draft-tier-assembled: the gate must wait for the ready_for_review
+    full re-run to register, and must never conclude success over it."""
+    selects = [r for r in runs if is_select(r.get("name", ""))]
+    out: list[str] = []
+    for r in selects:
+        name = r.get("name", "")
+        if not is_draft_tier(name):
+            continue
+        key = normalized_name(name)
+        mine = _order_key(r)
+        superseded = any(
+            not is_draft_tier(o.get("name", ""))
+            and normalized_name(o.get("name", "")) == key
+            and _order_key(o) > mine
+            for o in selects
+        )
+        if not superseded:
+            out.append(name)
+    return sorted(set(out))
 
 
 def is_advisory(name: str) -> bool:
@@ -131,9 +262,66 @@ def _emit(line: str, summary_path: str = "") -> None:
             fh.write(line + "\n")
 
 
-def render_verdict(runs: list[dict], summary_path: str = "") -> int:
+def _draft_recheck(tier_ctx: TierContext | None, summary_path: str = "") -> int:
+    """[FABLE-5] Draft-tier conclusion-time re-check, applied on EVERY would-be-
+    SUCCESS path (including the stable-empty set): a DRAFT-tier run confirms the
+    PR is STILL a draft immediately before emitting success. Un-drafted => the
+    ready_for_review full-tier run supersedes this one, so conclude FAILURE
+    ("stale draft-tier run, full run pending") — the merge queue must never latch
+    a draft-tier green. An unreadable draft state (API failure after bounded
+    retries, or no fetcher wired) fail-closes to FAILURE: a draft PR cannot merge
+    regardless, so a false RED here is cheap and a false PASS is the invariant
+    violation. Returns 0 (ok to pass) or 1 (fail). Full-tier runs: always 0."""
+    if not tier_ctx or tier_ctx.run_tier != "draft":
+        return 0
+    still_draft = None
+    last_err: Exception | None = None
+    if tier_ctx.fetch_pr_draft is not None:
+        for _ in range(max(1, tier_ctx.draft_check_retries)):
+            try:
+                still_draft = tier_ctx.fetch_pr_draft()
+                break
+            except FetchError as exc:  # transient API blip: bounded retry
+                last_err = exc
+    if still_draft is None:
+        _emit(
+            "### ci-summary: FAILED — draft-tier run could not confirm the PR's "
+            f"current draft state at conclusion time (last error: {last_err}). "
+            "Fail-closed: a draft-tier result must never admit a PR to the merge "
+            "queue, so an unverifiable draft state REDs (re-run once the API "
+            "recovers; a draft PR cannot merge regardless).",
+            summary_path,
+        )
+        print("::error::ci-summary failed — draft state unverifiable on a draft-tier run.")
+        return 1
+    if still_draft is False:
+        _emit(
+            "### ci-summary: FAILED — stale draft-tier run, full run pending. This "
+            "gate run evaluated the REDUCED draft-tier leg set, but the PR is no "
+            "longer a draft: the ready_for_review full-tier run on this head SHA "
+            "supersedes this check (docs/branch-protection.md §Draft-tier CI).",
+            summary_path,
+        )
+        print("::error::ci-summary failed — stale draft-tier run on a now-ready PR.")
+        return 1
+    return 0
+
+
+def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierContext | None = None) -> int:
     """Shared by the clean-converge, graceful-timeout, and post-extension paths, so
     every path applies IDENTICAL gating semantics. Returns the process exit code.
+
+    DRAFT-TIER INTEGRITY ([FABLE-5], see the header): with a TierContext,
+      * a FULL-tier pull_request verdict REDs while any draft-tier-marked select
+        lacks a later full-tier successor (stale draft-tier leg set — the
+        ready_for_review full run has not registered on this SHA);
+      * a DRAFT-tier verdict that would otherwise be SUCCESS first re-reads the
+        PR's CURRENT draft state from the API: no-longer-draft => FAILURE ("stale
+        draft-tier run, full run pending"), and an unreadable state fail-closes
+        to FAILURE after bounded retries. A draft-tier verdict that is already a
+        FAILURE skips the re-check (a RED can never be latched by the queue).
+    Without a TierContext (tests / push / merge_group) the semantics are exactly
+    the pre-draft-tier ones.
 
     SELECTION SEMANTICS ([FABLE-5] sq-fmx4u.3, design §5.3): a `skipped`
     conclusion is satisfied ONLY when the change-based selection pre-job
@@ -149,8 +337,27 @@ def render_verdict(runs: list[dict], summary_path: str = "") -> int:
         behaviour, never a new failure mode.
     A job that FAILED still fails the gate regardless of selection — selection
     can only ever decide whether a SKIP is satisfied, never mask a failure."""
+    # [FABLE-5] Draft-tier belt: a full-tier pull_request gate must never conclude
+    # over a leg set whose selection was assembled draft-tier (checked FIRST — it
+    # invalidates the whole set, including an otherwise-green one).
+    if tier_ctx and tier_ctx.run_tier == "full" and tier_ctx.event_name == "pull_request":
+        stale = draft_selects_unsuperseded(runs)
+        if stale:
+            _emit(
+                "### ci-summary: FAILED — stale draft-tier run, full run pending. The "
+                "selection on this head SHA is draft-tier-assembled "
+                f"({', '.join(stale)}) with no full-tier successor: the ready_for_review "
+                "full-tier re-run never registered/completed here. A draft-tier leg set "
+                "must never admit a non-draft PR to the merge queue "
+                "(docs/branch-protection.md §Draft-tier CI).",
+                summary_path,
+            )
+            print("::error::ci-summary failed — stale draft-tier leg set on a non-draft head.")
+            return 1
     total = len(runs)
     if total == 0:
+        if _draft_recheck(tier_ctx, summary_path) != 0:
+            return 1
         _emit("ci-summary: no sibling checks to aggregate (stable empty set) — passing.", summary_path)
         return 0
     gating = [r for r in runs if not is_advisory(r.get("name", ""))]
@@ -190,9 +397,17 @@ def render_verdict(runs: list[dict], summary_path: str = "") -> int:
             _emit(f"- ✗ {r.get('name')}: {r.get('conclusion') or 'incomplete'}", summary_path)
         print("::error::ci-summary failed — see the non-passing gating checks above.")
         return 1
+    if _draft_recheck(tier_ctx, summary_path) != 0:
+        return 1
     _emit(
         f"### ci-summary: PASSED — all {len(gating)} gating check(s) green (or skipped/neutral); "
-        f"{excluded} advisory check(s) excluded; set stable.",
+        f"{excluded} advisory check(s) excluded; set stable."
+        + (
+            " DRAFT-TIER verdict (reduced leg set; PR draft state re-confirmed): the "
+            "full matrix re-runs at ready_for_review and its fresh gate supersedes this one."
+            if tier_ctx and tier_ctx.run_tier == "draft"
+            else ""
+        ),
         summary_path,
     )
     if select_runs:
@@ -204,11 +419,14 @@ def render_verdict(runs: list[dict], summary_path: str = "") -> int:
     return 0
 
 
-def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep) -> int:
-    """The poll loop. `fetch_runs()` -> list of {name,status,conclusion,details_url}
-    dicts (raises FetchError on API failure); `fetch_queue_depth()` -> int queued
-    workflow-run count for the repo, or None when unknown (API failure — the gate
-    then falls back to the progress signal alone). Returns the exit code."""
+def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
+             tier_ctx: TierContext | None = None) -> int:
+    """The poll loop. `fetch_runs()` -> list of {name,status,conclusion,details_url,
+    started_at,id} dicts (raises FetchError on API failure); `fetch_queue_depth()`
+    -> int queued workflow-run count for the repo, or None when unknown (API
+    failure — the gate then falls back to the progress signal alone). tier_ctx
+    carries the draft-tier integrity context (None => pre-draft-tier semantics).
+    Returns the exit code."""
     prev_names: list[str] | None = None
     stable = 0
     runs: list[dict] = []
@@ -238,25 +456,43 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep) ->
             continue
         consec_fetch_failures = 0
 
-        runs = [r for r in raw if not is_self(r, cfg.self_run_id)]
+        # [FABLE-5] Draft-tier CI: forgive cancelled/stale check-runs a later
+        # same-normalized-name run supersedes — over the RAW list (self included)
+        # so this run's own fresh `gate` check-run supersedes a cancelled
+        # predecessor left on the SHA by the ready_for_review concurrency cancel.
+        kept, forgiven = forgive_superseded(raw)
+        runs = [r for r in kept if not is_self(r, cfg.self_run_id)]
         total = len(runs)
         pending = sum(1 for r in runs if r.get("status") != "completed")
+        # [FABLE-5] Draft-tier CI: on a FULL-tier pull_request run, a draft-tier-
+        # assembled selection with no full-tier successor means the ready_for_review
+        # re-run has not registered yet — treat the set as STILL-SETTLING (hold the
+        # settle window open) instead of concluding over draft-tier legs. Budget
+        # exhaustion in this state REDs via render_verdict's stale-draft-tier belt.
+        awaiting_full = bool(
+            tier_ctx
+            and tier_ctx.run_tier == "full"
+            and tier_ctx.event_name == "pull_request"
+            and draft_selects_unsuperseded(runs)
+        )
         completed_hist.append(total - pending)
         # Settle is a POST-TERMINAL window re-armed ONLY by pending work (sq-ipkku):
         # already-terminal injections must not starve convergence.
-        stable = 0 if pending else stable + 1
+        stable = 0 if (pending or awaiting_full) else stable + 1
         names = sorted({r.get("name", "") for r in runs})
         changed = " (name set changed)" if prev_names is not None and names != prev_names else ""
         prev_names = names
+        extra = f", {len(forgiven)} superseded-cancelled forgiven" if forgiven else ""
+        extra += ", awaiting the full-tier re-run (draft-tier selection present)" if awaiting_full else ""
         print(
             f"attempt {attempt}: {total} check-run(s), {pending} running, "
-            f"all-terminal stable for {stable}/{cfg.settle_polls} poll(s){changed}",
+            f"all-terminal stable for {stable}/{cfg.settle_polls} poll(s){changed}{extra}",
             flush=True,
         )
 
         # Clean convergence: everything terminal, held for the settle, past the floor.
         if attempt >= cfg.min_polls and pending == 0 and stable >= cfg.settle_polls:
-            return render_verdict(runs, cfg.summary_path)
+            return render_verdict(runs, cfg.summary_path, tier_ctx)
 
         # ADAPTIVE SATURATION BUDGET (sq-90cv4): at/after the base budget with work
         # still pending, extend ONLY while the evidence says throughput-starvation
@@ -316,7 +552,7 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep) ->
             "(the set kept being injected into without a full quiet settle) — rendering "
             "the verdict on the final all-terminal set."
         )
-        return render_verdict(runs, cfg.summary_path)
+        return render_verdict(runs, cfg.summary_path, tier_ctx)
     print(
         f"::error::ci-summary timed out — {pending} sibling check-run(s) never finished "
         f"within the ABSOLUTE budget (base + saturation extension, sq-90cv4). The runner "
@@ -350,14 +586,44 @@ def _gh_json_lines(args: list[str]) -> list[dict]:
 
 def make_fetch_runs(repo: str, sha: str):
     def fetch() -> list[dict]:
+        # started_at + id feed the superseded-run ordering (draft-tier CI): a
+        # cancelled/stale check-run is forgiven only for a strictly LATER
+        # same-normalized-name successor.
         return _gh_json_lines(
             [
                 f"repos/{repo}/commits/{sha}/check-runs",
                 "--paginate",
                 "--jq",
-                ".check_runs[] | {name, status, conclusion, details_url, html_url}",
+                ".check_runs[] | {name, status, conclusion, details_url, html_url, started_at, id}",
             ]
         )
+
+    return fetch
+
+
+def make_fetch_pr_draft(repo: str, pr_number: str):
+    """[FABLE-5] Draft-tier CI: the conclusion-time PR draft-state reader. Returns
+    a () -> bool fetcher (True == still a draft) that raises FetchError on any
+    API/parse failure — the caller (render_verdict via _draft_recheck) bounded-
+    retries and fail-closes to RED, never to a pass."""
+
+    def fetch() -> bool:
+        try:
+            proc = subprocess.run(
+                ["gh", "api", f"repos/{repo}/pulls/{pr_number}", "--jq", ".draft"],
+                capture_output=True,
+                text=True,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            raise FetchError(f"subprocess raised: {exc}") from exc
+        if proc.returncode != 0:
+            raise FetchError(proc.stderr.strip()[:300] or f"gh api exited {proc.returncode}")
+        val = proc.stdout.strip().lower()
+        if val == "true":
+            return True
+        if val == "false":
+            return False
+        raise FetchError(f"unexpected .draft value {val!r}")
 
     return fetch
 
@@ -397,8 +663,24 @@ def main() -> int:
     if not repo or not sha or not self_run_id:
         print("::error::ci-summary: REPO, SHA and SELF_RUN_ID must all be set.")
         return 1
+    # [FABLE-5] Draft-tier CI: the tier THIS run evaluates is decided by its own
+    # trigger payload — a pull_request event with draft == true is a DRAFT-tier
+    # gate (ci-summary.yml exports the payload's draft flag + PR number). Every
+    # other event/state (push / merge_group / non-draft PR / missing payload) is
+    # FULL tier, which keeps push/merge_group semantics byte-identical.
+    event_name = os.environ.get("EVENT_NAME", "")
+    pr_draft = os.environ.get("PR_DRAFT", "").strip().lower()
+    pr_number = os.environ.get("PR_NUMBER", "").strip()
+    run_tier = "draft" if (event_name == "pull_request" and pr_draft == "true") else "full"
+    tier_ctx = TierContext(
+        run_tier=run_tier,
+        event_name=event_name,
+        fetch_pr_draft=make_fetch_pr_draft(repo, pr_number) if pr_number else None,
+    )
+    print(f"ci-summary: evaluating tier={run_tier} (event={event_name or '<unset>'}).")
     cfg = Config(self_run_id=self_run_id)
-    return run_gate(cfg, make_fetch_runs(repo, sha), make_fetch_queue_depth(repo))
+    return run_gate(cfg, make_fetch_runs(repo, sha), make_fetch_queue_depth(repo),
+                    tier_ctx=tier_ctx)
 
 
 if __name__ == "__main__":

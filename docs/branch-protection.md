@@ -105,6 +105,85 @@ From the binding/packaging workflows (when those surfaces are exercised):
 > to the required-checks list, THAT name would now need removing — but per the "select only
 > `ci-summary / gate`" rule above, it was never added.)
 
+## Draft-tier CI (reduced matrix on draft PR heads)
+
+<!-- [FABLE-5] Draft-tier CI design record (2026-07-17). Motivation: the autonomous
+     fleet keeps many draft worker PRs cycling review-fix rounds; every push ran the
+     FULL matrix, saturating the org runner pool (gates timing out as false failures,
+     the merge queue starving, the load-aware heavy shards deferring). -->
+
+CI is **tiered by the PR's draft state**. A **draft** `pull_request` head runs a
+REDUCED sibling set; a **non-draft** head, `merge_group`, `push`-to-main, and every
+scheduled/dispatch run keep the FULL matrix, byte-identical to before.
+
+**What a draft head runs:**
+
+- the **change-scoped crate legs** — the existing `ci-select` change-based selection
+  (affected reverse-dependency closure) already intersects every wide lane and the
+  opt-in feature-matrix legs with the diff, on both tiers;
+- the **cheap global gates** — clippy/fmt, MSRV, docs-quality (typos / privacy /
+  ci-scripts), supply-chain, conformance ratchets for affected crates, pr-title;
+- the **`ci-summary / gate` aggregator**, which evaluates exactly the reduced set it
+  discovers (it is discovery-based, so no expected-leg list needs maintaining).
+
+**What a draft head skips** (each re-runs at full tier before any merge is possible):
+
+| Skipped on drafts | Where | Kept when |
+|---|---|---|
+| coverage ratchet (measure + engine split + aggregate) | `ci.yml` | never on drafts (merge_group + ready_for_review re-measure) |
+| benchmarks (deterministic ratchet + PR comparison/alert comments) | `bench.yml` | never on drafts |
+| CodeQL analysis | `codeql.yml` | never on drafts (merge_group + push-main + weekly schedule + the ready_for_review run keep the `code_scanning` rule fed) |
+| heavy recall shards (`heavy-diskann`/`heavy-hnsw`) | `ci.yml` `test` | never on drafts (same demotion mechanism as their merge_group demotion) |
+| wasm bundle build | `ci.yml` `wasm` | kept iff a wasm-bundle crate is in the affected closure (the existing lane-seed guard — unchanged on both tiers) |
+| `artifact-exact-equality` (wasm feature-OFF byte identity) | `vectorized-feature-off.yml` | kept iff `sparq-wasm` is in the affected closure (in-step `ci_select.py` verdict; ci-full label / selector error / full mode ⇒ run) |
+
+**The integrity invariant — a draft-tier gate result must NEVER admit a PR to the
+merge queue.** Enforcement (all in `scripts/ci_summary_gate.py`, unit-tested in
+`scripts/tests/test_ci_summary_gate.py`):
+
+1. **Supersession by re-run.** Every gate-feeding workflow's `pull_request` trigger
+   now includes **`ready_for_review`** (the default types are only
+   opened/synchronize/reopened — without this the un-draft moment would run
+   *nothing* and the head would keep its draft-tier results). Un-drafting therefore
+   fires a FULL-tier run on the **same head SHA**, whose fresh `gate` check-run
+   supersedes the draft-tier one — branch protection and the merge queue read the
+   LATEST run of the required check name.
+2. **The gate knows its tier.** Each `ci-summary` run derives its tier from its own
+   trigger payload (`PR_DRAFT`), and the reusable `ci-select` job's check-run **name
+   carries a `", draft-tier"` marker** on draft-assembled runs (name-as-contract,
+   like the advisory rule).
+3. **A full-tier gate refuses a draft-tier leg set.** A full-tier `pull_request`
+   gate that finds a draft-tier-marked select with no later full-tier successor
+   treats the set as *still settling* (the ready_for_review re-runs are seconds
+   away) and, at budget exhaustion, concludes **FAILURE — "stale draft-tier run,
+   full run pending"** rather than passing over draft legs.
+4. **A draft-tier gate re-checks the PR at conclusion time.** Before emitting
+   SUCCESS it re-reads the PR's **current** draft state from the API
+   (`pull-requests: read`); if the PR was un-drafted meanwhile it concludes
+   FAILURE with the same stale-draft-tier message, and an unreadable state
+   fail-closes to FAILURE (a draft PR cannot merge anyway).
+5. **Superseded-cancellation forgiveness.** The ready_for_review re-run's per-PR
+   concurrency groups cancel the in-flight draft-tier runs, leaving
+   `cancelled` check-runs on the same SHA; the gate excuses a cancelled/stale
+   check-run **only** when a later run of the same (tier-normalized) name exists —
+   a genuine `failure`/`timed_out` is never forgiven, and a cancellation with no
+   successor still REDs.
+
+Even in the worst race (a draft-tier gate that concluded green in the same instant
+the PR was un-drafted and enqueued), the merge queue re-runs the full check set on
+its own `merge_group` ref — which is always full-tier — before anything merges; the
+lanes deliberately absent from `merge_group` (bench's deterministic ratchet, the
+heavy recall shards) are exactly the ones the ready_for_review full-tier PR run
+re-executes, and rules 3–4 make that gate the one the queue sees.
+
+**Operational notes.** `pull_request`-event CI runs are cancel-superseded per PR
+(`concurrency` groups; `bench.yml` now cancels superseded **PR** runs only — its
+push/schedule runs still never cancel, protecting the benchmark history — and
+`js.yml` gained the standard per-PR group). `merge_group` runs are never cancelled
+by these groups. **No required-check name changed** — the ruleset still requires
+exactly `ci-summary / gate`. Toggling draft state does not change what ultimately
+gates a merge; it only defers the heavy lanes to the un-draft moment.
+
 ## Required reviews
 
 > **Solo-maintainer reality (read this first).** sparq is a **single-maintainer,

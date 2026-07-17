@@ -28,6 +28,9 @@ name: Python bindings
 # `push: branches:[main]` trigger is KEPT for post-merge cover on every main push.
 on:
   pull_request:
+    # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
+    # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
+    types: [opened, synchronize, reopened, ready_for_review]
     # Every input the jobs read: the crate (Rust binding source + Cargo.toml + tests +
     # pyproject), the workspace manifests/lock the maturin build resolves from, the
     # sparq-arrow crate the `arrow` feature compiles in, the hash-pinned build/arrow

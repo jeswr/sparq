@@ -33,8 +33,15 @@ on:
   # commit's select runs are all green. Label events also get a PER-RUN concurrency
   # group (below), so a flip can never concurrency-cancel an in-flight run on the
   # same head SHA — those same-SHA cancellations were the actual gate poison.
+  # [FABLE-5] Draft-tier CI: + ready_for_review, so the un-draft moment re-runs the
+  # whole matrix at FULL tier on the same head SHA (coverage + heavy shards run
+  # again) and the fresh check-runs supersede the draft-tier ones — see
+  # docs/branch-protection.md §Draft-tier CI. The label-trigger guard above and the
+  # draft-tier guards below are independent and AND-compose on each affected job:
+  # a non-`ci-full` label flip stays a no-op regardless of draft state, and a draft
+  # head stays tier-reduced regardless of label events.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   # [OPUS-4.8] Merge queue: re-run the identical PR check-set on the queue's
   # merge_group ref so the required ci-summary gate finds the same siblings it finds
   # on a PR. The per-commit `coverage` job (if: event_name != 'schedule') runs here;
@@ -559,6 +566,10 @@ jobs:
           # env is the shard-kind discriminator the run script reads (it is empty on the
           # bulk shards). Passed via env — no inline `${{ }}` in the shell body.
           SHARD_FILTER: ${{ matrix.filter }}
+          # [FABLE-5] Draft-tier CI: "true" only on a DRAFT pull_request head — the
+          # heavy recall shards are ALSO demoted there (see the draft-tier guard
+          # below); every other event/state evaluates "false" and changes nothing.
+          IS_DRAFT_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
         run: |
           set -euo pipefail
           # [OPUS-4.8] sq-6vshe.6 (research/ci-structural-speedup.md §7, round 2):
@@ -585,6 +596,21 @@ jobs:
             echo "heavy shard '${{ matrix.name }}' DEMOTED off merge_group (sq-6vshe.6):"
             echo "  deterministic single-crate recall gate — no cross-PR interaction;"
             echo "  full form runs at PR level + push-to-main. Reporting success."
+            exit 0
+          fi
+          # [FABLE-5] Draft-tier CI: ALSO demote the heavy recall shards on DRAFT
+          # pull_request heads (docs/branch-protection.md §Draft-tier CI). Safe for
+          # the same reason as the merge_group demotion above — deterministic
+          # single-crate gates — plus the draft-tier invariant: un-drafting fires
+          # ready_for_review, which re-runs this job at FULL tier on the same head
+          # SHA, and a draft-tier gate result can never admit a PR to the merge
+          # queue (scripts/ci_summary_gate.py refuses it). Bulk shards are NEVER
+          # demoted (SHARD_FILTER is empty there); non-draft PRs and push-to-main
+          # keep the full form.
+          if [ "$IS_DRAFT_PR" = "true" ] && [ -n "$SHARD_FILTER" ]; then
+            echo "heavy shard '${{ matrix.name }}' DEMOTED on this DRAFT head (draft-tier CI):"
+            echo "  the full form re-runs at ready_for_review + push-to-main; a draft-tier"
+            echo "  gate result can never admit a PR to the merge queue. Reporting success."
             exit 0
           fi
           # [FABLE-5] sq-fmx4u.3 (design §5.2): single-crate shard skip guard.
@@ -2559,9 +2585,16 @@ jobs:
     # aggregator counts as satisfied). This references only github/needs contexts —
     # no `matrix.*` — so it is safe as a job-level `if:` on this matrix job. The
     # nightly full coverage backstop is `coverage-nightly` (schedule), unaffected.
+    # [FABLE-5] Draft-tier CI: coverage is SKIPPED on draft PR heads entirely (the
+    # instrumented rebuild is one of the heaviest lanes; the ready_for_review
+    # full-tier run + the merge_group run both re-measure it before any merge, and
+    # a draft-tier gate can never admit a PR — docs/branch-protection.md
+    # §Draft-tier CI). The guard is fail-open off the PR path: any non-pull_request
+    # event (push/merge_group) satisfies the first disjunct => RUN.
     needs: [changes, coverage-floors, select]
     if: >-
       github.event_name != 'schedule' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft != true) &&
       needs.changes.outputs.rust_changed == 'true' &&
       (needs.select.outputs.mode != 'selected' || needs.select.outputs.affected != '[]')
     runs-on: ubuntu-latest
@@ -2711,9 +2744,12 @@ jobs:
     # INDIVIDUAL tests, so the two >400s lib-target monster tests land on DIFFERENT runners
     # (a per-binary split would not balance).
     name: coverage engine run (partition ${{ matrix.part }}/3)
+    # [FABLE-5] Draft-tier CI: skipped on draft PR heads, same rationale + guard
+    # shape as coverage-measure above (fail-open off the PR path).
     needs: [changes, coverage-floors, select]
     if: >-
       github.event_name != 'schedule' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft != true) &&
       needs.changes.outputs.rust_changed == 'true' &&
       (needs.select.outputs.mode != 'selected' || needs.select.outputs.affected != '[]')
     runs-on: ubuntu-latest
@@ -2881,16 +2917,26 @@ jobs:
     # [FABLE-5] sq-piapk: the sparq-engine cross-runner split (run + merge) folds into this
     # single verdict alongside the non-engine shard matrix, so the ci-summary `gate` still
     # sees ONE coverage check. A skipped engine job (doc-only PR) counts as satisfied.
+    # [FABLE-5] Draft-tier CI: on a draft PR head the measure/engine jobs above are
+    # skipped, so this aggregate is skipped too (reporting `skipped`, which the
+    # gate treats as satisfied under a green selection) rather than emitting a
+    # vacuous green `coverage` success over zero measurements.
     needs: [coverage-floors, coverage-measure, coverage-engine-run, coverage-engine-merge]
     # [FABLE-5] label-trigger guard: always() bypasses the skipped-needs propagation,
     # so this verdict job must carry the guard explicitly or it would still run (as a
     # trivially-green no-op) on every non-`ci-full` label flip. Skipped is equally
     # satisfied by the gate (the commit's select runs stay green) and saves the slot.
+    # [FABLE-5] Draft-tier CI: AND-composed with the label guard (both survive) — the
+    # measure/engine jobs above are skipped on a draft PR head, so this aggregate is
+    # skipped too (`skipped` ≠ vacuous green) rather than reporting over zero
+    # measurements. A non-`ci-full` label flip stays a no-op regardless of draft
+    # state; a draft head stays coverage-skipped regardless of label events.
     if: >-
       always() && github.event_name != 'schedule' &&
       (github.event_name != 'pull_request' ||
        !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) ||
-       github.event.label.name == 'ci-full')
+       github.event.label.name == 'ci-full') &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate coverage floor + shard results

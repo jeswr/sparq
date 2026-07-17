@@ -99,8 +99,13 @@ on:
   # cheap success (a skipped select would poison the gate — ci_summary_gate.py
   # requires every selection check-run to conclude `success`). Label events also get
   # a per-run concurrency group below so a flip never cancels an in-flight run.
+  # [FABLE-5] Draft-tier CI: + ready_for_review, so the un-draft moment re-assembles
+  # the opt-in leg set at FULL tier (the select job name drops its ", draft-tier"
+  # marker) and the required gate stops honouring the draft-tier-assembled set —
+  # see docs/branch-protection.md §Draft-tier CI. Independent of the label guard
+  # above: a non-`ci-full` label flip stays a no-op regardless of draft state.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   # Merge queue: mirror the PR check-set onto the merge_group ref so the required
   # ci-summary gate finds the same legs it finds on a PR (matches ci.yml/ci-summary.yml).
   merge_group:

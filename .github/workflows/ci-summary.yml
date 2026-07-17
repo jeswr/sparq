@@ -91,6 +91,22 @@
 # (verified in bead sq-fmx4u.4). The `ci-full` PR label + the nightly cron full run
 # are the permanent backstops; CI_SELECT_MODE=shadow is the report-only rollback.
 #
+# DRAFT-TIER CI (docs/branch-protection.md §Draft-tier CI). [FABLE-5] Draft PR
+# heads run a REDUCED sibling set (coverage / bench / CodeQL / heavy shards /
+# wasm-equality skipped; the crate legs stay change-scoped by ci-select) so the
+# review-fix churn of many concurrent draft worker PRs stops saturating the runner
+# pool. THE INVARIANT — a draft-tier gate result must NEVER admit a PR to the merge
+# queue — is enforced in scripts/ci_summary_gate.py: this run knows its own tier
+# from the trigger payload (PR_DRAFT below), a draft-tier run re-checks the PR's
+# CURRENT draft state via the API before any SUCCESS (un-drafted => FAILURE, "stale
+# draft-tier run, full run pending"), and a full-tier pull_request run refuses to
+# conclude over a draft-tier-assembled selection (the ci-select job name carries a
+# ", draft-tier" marker). `ready_for_review` below re-runs this gate (and every
+# tiered sibling workflow) at the un-draft moment, so a fresh FULL-tier `gate`
+# check-run supersedes the draft-tier one on the same head SHA — branch protection
+# and the merge queue read the LATEST run of the required check name. merge_group
+# behaviour is untouched (always full tier, on a fresh ref).
+#
 # IMPLEMENTATION (sq-90cv4). [FABLE-5] The poll loop + verdict live in
 # scripts/ci_summary_gate.py (extracted from the previous inline bash so the
 # semantics are UNIT-TESTED — scripts/tests/test_ci_summary_gate.py, run as a HARD
@@ -99,7 +115,11 @@
 name: ci-summary
 
 on:
+  # [FABLE-5] Draft-tier CI: the default types PLUS ready_for_review — without it
+  # the un-draft moment would run NOTHING and the head would keep its draft-tier
+  # gate result (the exact stale-green the integrity invariant forbids).
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   # [OPUS-4.8] Merge queue: GitHub runs the required check(s) on a temporary
   # `merge_group` ref before merging. ci-summary is the SINGLE required check, so it
   # MUST run here to produce the `ci-summary / gate` check on that ref — and every
@@ -113,12 +133,15 @@ on:
 # Read-only: the gate READS check-runs + commit statuses for the head commit, plus
 # the repo's queued workflow-run count (`actions: read` — the sq-90cv4 saturation
 # signal; a permissions failure there degrades to the progress-only signal, it never
-# fails the gate by itself).
+# fails the gate by itself), plus the PR's live draft state (`pull-requests: read`
+# — the draft-tier conclusion-time re-check; a failure there fail-closes to RED,
+# never to a pass).
 permissions:
   checks: read
   statuses: read
   contents: read
   actions: read
+  pull-requests: read
 
 # One in-flight gate per PR (or per branch on push). Cancel a superseded run so a
 # new push doesn't leave a stale, slowly-timing-out gate behind.
@@ -167,4 +190,13 @@ jobs:
           # ours alone, so the exclusion is exact and collision-proof (anchored to
           # "/runs/<id>(/|$)" in the script). [OPUS-4.8]
           SELF_RUN_ID: ${{ github.run_id }}
+          # [FABLE-5] Draft-tier CI: the tier THIS run evaluates is decided by its
+          # own trigger payload — pull_request + draft == true => draft tier. The
+          # script re-checks the PR's LIVE draft state (PR_NUMBER) at conclusion
+          # time and refuses a draft-tier success on a now-ready PR ("stale
+          # draft-tier run, full run pending"). All three are empty off the PR
+          # path (push/merge_group), which the script reads as full tier.
+          EVENT_NAME: ${{ github.event_name }}
+          PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: python3 scripts/ci_summary_gate.py

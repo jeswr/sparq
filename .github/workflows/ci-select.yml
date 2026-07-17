@@ -69,7 +69,19 @@ permissions:
 
 jobs:
   select:
-    name: select (change-based test selection)
+    # [FABLE-5] Draft-tier CI (docs/branch-protection.md §Draft-tier CI): the job
+    # name APPENDS the ", draft-tier" marker when the calling run was triggered by
+    # a DRAFT pull_request (a reusable workflow sees the caller's event payload;
+    # every non-PR event evaluates the marker empty). The tier thus travels in the
+    # check-run NAME — the same name-as-contract mechanism as the advisory rule —
+    # and scripts/ci_summary_gate.py partitions draft-assembled from full-
+    # assembled selection runs on a head SHA with it: a FULL-tier gate refuses to
+    # conclude success while a draft-tier-marked select has no full-tier
+    # successor, so a draft-tier leg set can never admit a non-draft PR to the
+    # merge queue. The stable phrase "change-based test selection" (the SELECT_RE
+    # detection contract) is a prefix of BOTH spellings, and neither contains the
+    # words "advisory"/"informational".
+    name: select (change-based test selection${{ github.event.pull_request.draft == true && ', draft-tier' || '' }})
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -107,8 +119,15 @@ jobs:
           # events there is no pull_request payload, so this evaluates false and the
           # override is inert (non-PR events already resolve to full by construction).
           CI_FULL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci-full') }}
+          # [FABLE-5] Draft-tier CI: surfaced in the step summary so a human reading
+          # the run sees which tier this selection was assembled for (the machine
+          # contract is the job NAME marker above).
+          IS_DRAFT_PR: ${{ github.event.pull_request.draft == true }}
         run: |
           set -euo pipefail
+          if [ "${IS_DRAFT_PR:-}" = "true" ]; then
+            echo "**Tier: draft** — draft-tier CI (reduced sibling set; the full matrix re-runs at ready_for_review and its fresh gate supersedes this head's draft-tier results)." >> "$GITHUB_STEP_SUMMARY"
+          fi
           args=(--event "$EVENT")
           case "$EVENT" in
             pull_request|merge_group) args+=(--base "$BASE" --head "$HEAD") ;;
