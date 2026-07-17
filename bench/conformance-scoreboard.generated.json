@@ -1,0 +1,568 @@
+{
+  "description": "Machine-readable derivation of the central conformance registry (crates/sparq-conformance/src/scoreboard.rs scoreboard::SUITES): every conformance suite sparq ratchets, with its ratchet floor (may only RISE), floor basis, CI job, and runner command. Rows with is_extension=true are HONESTLY sparq-extension ratchets, NOT standards-conformance claims — their floors are in a different unit (assertions, not spec pass-counts) and are NEVER summed into totals.conformance_floor_total. Committed as bench/conformance-scoreboard.generated.json and drift-guarded: tests/scoreboard_export.rs regenerates and byte-compares, so this mirror cannot silently drift from the Rust source of truth.",
+  "schema": "sparq.conformance-scoreboard/v1",
+  "suites": [
+    {
+      "ci_job": "conformance",
+      "command": "cargo run --release -p sparq-conformance --bin sparq-conformance",
+      "family": "W3C SPARQL",
+      "floor_basis": "pass + documented divergence",
+      "is_extension": false,
+      "label": "W3C SPARQL (1.0 / 1.1 / 1.2, query+update+syntax)",
+      "note": "query/update evaluation + the four mf:*SyntaxTest* kinds",
+      "ratchet_floor": 1229,
+      "runner": {
+        "kind": "sparql-binary"
+      }
+    },
+    {
+      "ci_job": "inference-conformance",
+      "command": "cargo run --release -p sparq-conformance --bin sparq-inference-conformance",
+      "family": "W3C RDF Semantics + OWL + N3",
+      "floor_basis": "pass + documented divergence",
+      "is_extension": false,
+      "label": "Inference (rdf-mt / OWL 2 RL / N3 / entailment / rdf-turtle)",
+      "note": "reasoning suites run against sparq-reason, plus the Turtle oracle",
+      "ratchet_floor": 1967,
+      "runner": {
+        "kind": "inference-binary"
+      }
+    },
+    {
+      "ci_job": "shacl-conformance",
+      "command": "cargo test -p sparq-shacl --test w3c_core",
+      "family": "W3C SHACL",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "W3C SHACL core",
+      "note": "data-shapes sht:Validate core suite (w3c/data-shapes)",
+      "ratchet_floor": 98,
+      "runner": {
+        "crate": "sparq-shacl",
+        "kind": "crate-test",
+        "target": "w3c_core"
+      }
+    },
+    {
+      "ci_job": "shacl-conformance",
+      "command": "cargo test -p sparq-shacl --test w3c_sparql",
+      "family": "W3C SHACL",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "W3C SHACL-SPARQL",
+      "note": "sh:sparql node + property constraint sub-suites",
+      "ratchet_floor": 5,
+      "runner": {
+        "crate": "sparq-shacl",
+        "kind": "crate-test",
+        "target": "w3c_sparql"
+      }
+    },
+    {
+      "ci_job": "geo-conformance",
+      "command": "cargo test -p sparq-geo --test ogc_compliance_ratchet",
+      "family": "OGC GeoSPARQL",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "OGC GeoSPARQL topology compliance",
+      "note": "hand-curated sf/eh/rcc8 topology + WKT/GML equivalence assertions (exact DE-9IM); geof:distance is exact haversine point↔point, local equirectangular approximation extended↔extended (see sparq-geo README)",
+      "ratchet_floor": 197,
+      "runner": {
+        "crate": "sparq-geo",
+        "kind": "crate-test",
+        "target": "ogc_compliance_ratchet"
+      }
+    },
+    {
+      "ci_job": "geo-conformance",
+      "command": "cargo test -p sparq-geo --features geosparql_rewrite --test ogc_query_rewrite_ratchet",
+      "family": "OGC GeoSPARQL",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "OGC GeoSPARQL query-rewrite extension",
+      "note": "topology PROPERTY forms (geo:sf*/eh*/rcc8*) answered end-to-end via the opt-in query-rewrite extension, result-equivalent to the geof: oracle",
+      "ratchet_floor": 48,
+      "runner": {
+        "crate": "sparq-geo",
+        "feature": "geosparql_rewrite",
+        "kind": "feature-gated-crate-test",
+        "target": "ogc_query_rewrite_ratchet"
+      }
+    },
+    {
+      "ci_job": "solid-conformance",
+      "command": "cargo test -p sparq-solid --test conformance_wac",
+      "family": "Solid WAC",
+      "floor_basis": "scenario",
+      "is_extension": false,
+      "label": "Solid WAC decision parity",
+      "note": "library-level allow/deny parity over minimal per-construct WAC .acl scenarios",
+      "ratchet_floor": 13,
+      "runner": {
+        "crate": "sparq-solid",
+        "kind": "crate-test",
+        "target": "conformance_wac"
+      }
+    },
+    {
+      "ci_job": "solid-conformance",
+      "command": "cargo test -p sparq-solid --test conformance_acp",
+      "family": "Solid ACP",
+      "floor_basis": "scenario",
+      "is_extension": false,
+      "label": "Solid ACP decision parity",
+      "note": "library-level allow/deny parity over minimal per-construct ACP ACR scenarios",
+      "ratchet_floor": 13,
+      "runner": {
+        "crate": "sparq-solid",
+        "kind": "crate-test",
+        "target": "conformance_acp"
+      }
+    },
+    {
+      "ci_job": "solid-conformance",
+      "command": "cargo test -p sparq-solid --test differential_oracle",
+      "family": "Solid WAC",
+      "floor_basis": "0 divergences",
+      "is_extension": false,
+      "label": "Solid WAC differential oracle",
+      "note": "engine vs an independent reference evaluator vs the hand Expect table, over the WAC parity corpus (zero divergence)",
+      "ratchet_floor": 0,
+      "runner": {
+        "crate": "sparq-solid",
+        "kind": "crate-test",
+        "target": "differential_oracle"
+      }
+    },
+    {
+      "ci_job": "solid-conformance",
+      "command": "cargo test -p sparq-solid --test differential_oracle",
+      "family": "Solid ACP",
+      "floor_basis": "0 divergences",
+      "is_extension": false,
+      "label": "Solid ACP differential oracle",
+      "note": "engine vs an independent reference evaluator vs the hand Expect table, over the ACP parity corpus (zero divergence)",
+      "ratchet_floor": 0,
+      "runner": {
+        "crate": "sparq-solid",
+        "kind": "crate-test",
+        "target": "differential_oracle"
+      }
+    },
+    {
+      "ci_job": "jsonld-conformance",
+      "command": "cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite",
+      "family": "W3C JSON-LD",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "W3C JSON-LD 1.1 toRdf",
+      "note": "JSON-LD → RDF through the real oxjsonld parse path (jsonld feature); compact + frame + expand + flatten are all now gated lanes (html + remote-doc remain the not-implemented buckets)",
+      "ratchet_floor": 413,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "jsonld-suite",
+        "kind": "feature-gated-crate-test",
+        "target": "jsonld_suite"
+      }
+    },
+    {
+      "ci_job": "jsonld-conformance",
+      "command": "cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite",
+      "family": "W3C JSON-LD",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "W3C JSON-LD 1.1 fromRdf",
+      "note": "RDF → JSON-LD through the native sparq_jsonld::from_rdf (JSON-LD API §8.1), compared document-level against the normative expected docs plus a scoped re-parse round-trip; negatives assert exact error codes",
+      "ratchet_floor": 52,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "jsonld-suite",
+        "kind": "feature-gated-crate-test",
+        "target": "jsonld_suite"
+      }
+    },
+    {
+      "ci_job": "jsonld-conformance",
+      "command": "cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite",
+      "family": "W3C JSON-LD",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "W3C JSON-LD 1.1 compact",
+      "note": "native document-level Compaction Algorithm (sparq-jsonld), compared against the W3C EXPECTED compacted document (json_ld_equal — the normative document oracle)",
+      "ratchet_floor": 228,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "jsonld-suite",
+        "kind": "feature-gated-crate-test",
+        "target": "jsonld_suite"
+      }
+    },
+    {
+      "ci_job": "jsonld-conformance",
+      "command": "cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite",
+      "family": "W3C JSON-LD",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "W3C JSON-LD 1.1 frame",
+      "note": "RDF → framed JSON-LD through the native Framing Algorithm (serialize-rdf) over the w3c/json-ld-framing suite, compared by a re-parse RDF-equivalence to the normative expected output",
+      "ratchet_floor": 92,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "jsonld-suite",
+        "kind": "feature-gated-crate-test",
+        "target": "jsonld_suite"
+      }
+    },
+    {
+      "ci_job": "jsonld-conformance",
+      "command": "cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite",
+      "family": "W3C JSON-LD",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "W3C JSON-LD 1.1 expand",
+      "note": "native sparq_jsonld::expand() + json_ld_equal semantic-equivalence comparator (sq-kk1mq; NOT structural identity — ~18/240 passes are reordered, strict-ordered count 222; re-baseline from 247 under RDF-equivalence oracle sq-oy1f); options forwarded (base, expandContext, processingMode)",
+      "ratchet_floor": 276,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "jsonld-suite",
+        "kind": "feature-gated-crate-test",
+        "target": "jsonld_suite"
+      }
+    },
+    {
+      "ci_job": "jsonld-conformance",
+      "command": "cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite",
+      "family": "W3C JSON-LD",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "W3C JSON-LD 1.1 flatten",
+      "note": "native sparq_jsonld::flatten() (Flattening Algorithm §7.1 = expand ∘ node-map ∘ named-graph fold) + json_ld_equal document-level comparator (sq-oy1f.26; re-pin 50→46 from the RDF-writer oracle — the 4 drop is inherited native-expand gaps owned by sq-oy1f.37, not flatten bugs)",
+      "ratchet_floor": 53,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "jsonld-suite",
+        "kind": "feature-gated-crate-test",
+        "target": "jsonld_suite"
+      }
+    },
+    {
+      "ci_job": "odrl-conformance",
+      "command": "cargo test -p sparq-policy --test odrl_test_suite",
+      "family": "SolidLab ODRL",
+      "floor_basis": "scenario",
+      "is_extension": false,
+      "label": "SolidLab ODRL Test Suite",
+      "note": "library-level allow/deny parity over the SolidLab self-describing ODRL cases through sparq-policy's real evaluate() path",
+      "ratchet_floor": 67,
+      "runner": {
+        "crate": "sparq-policy",
+        "kind": "crate-test",
+        "target": "odrl_test_suite"
+      }
+    },
+    {
+      "ci_job": "inference-conformance",
+      "command": "cargo test -p sparq-conformance --features d-entail --test d_entail_suite",
+      "family": "W3C RDF Semantics",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "W3C SPARQL 1.1 D-entailment",
+      "note": "D-only sparql11/entailment tests graduated from OutOfScope to Pass through sparq-reason's opt-in Profile::D (rdfD1 typing + typed value-space equality)",
+      "ratchet_floor": 1,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "d-entail",
+        "kind": "feature-gated-crate-test",
+        "target": "d_entail_suite"
+      }
+    },
+    {
+      "ci_job": "inference-conformance",
+      "command": "cargo test -p sparq-conformance --features rif-wg-core --test rif_wg_core_suite",
+      "family": "W3C RIF",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "W3C RIF WG Core test suite",
+      "note": "the W3C RIF WG test cases (Core dialect, pinned Core_v1.22 archive) driven end-to-end through the real RIF/XML import -> validate -> closure -> conclusion oracle; an HONEST-denominator standards lane (the printed skip taxonomy is the honesty), NET-vacuity-guarded, floor = the MEASURED pass count (3 at the sq-n7y15 positional-Atom importer, rise-ready)",
+      "ratchet_floor": 3,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "rif-wg-core",
+        "kind": "feature-gated-crate-test",
+        "target": "rif_wg_core_suite"
+      }
+    },
+    {
+      "ci_job": "inference-conformance",
+      "command": "cargo test -p sparq-conformance --features d-entail --test d_entail_suite",
+      "family": "sparq extension",
+      "floor_basis": "value-space assertions (sparq EXTENSION over the D datatype map, NOT the W3C sparql11/entailment conformance count)",
+      "is_extension": true,
+      "label": "D value-space matrix (integer/decimal/boolean/binary/temporal)",
+      "note": "EXTENSION ratchet — sparq's own hand-authored D value-space matrix over the recognized datatype map (integer⊂decimal incl. 2^53+1 non-aliasing, boolean true/1, hex/base64 octet identity, facet-ill-formed negatives, decimal-vs-double + date-vs-dateTime disjoint-space negatives), driven through the REAL Profile::D value-space comparator + the materialize→answer-restriction→engine end-to-end path; tallied SEPARATELY, never faked as W3C conformance passes",
+      "ratchet_floor": 24,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "d-entail",
+        "kind": "feature-gated-crate-test",
+        "target": "d_entail_suite"
+      }
+    },
+    {
+      "ci_job": "service-federation-conformance",
+      "command": "cargo test -p sparq-conformance --features service --test service_eval_suite",
+      "family": "W3C SPARQL",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "W3C SPARQL 1.1 sparql11/service evaluation",
+      "note": "sparql11/service federated SERVICE queries run end-to-end through REAL in-process loopback endpoints (the sq-ushvx harness) + the engine's REAL ureq transport, compared to the .srx oracle",
+      "ratchet_floor": 6,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "service",
+        "kind": "feature-gated-crate-test",
+        "target": "service_eval_suite"
+      }
+    },
+    {
+      "ci_job": "service-federation-conformance",
+      "command": "cargo test -p sparq-conformance --features http-protocol --test http_protocol_suite",
+      "family": "W3C SPARQL",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "W3C SPARQL 1.1 Protocol (HTTP)",
+      "note": "SPARQL 1.1 Protocol operations (GET/POST query+update, the QUERY method, dataset overrides, SRJ/SRX/CSV/TSV negotiation, 200/400/405/406/415) over RAW HTTP against the in-process loopback server; a present-but-unsatisfiable Accept now returns 406 (Oxigraph parity, sq-406acc); the absent/*/* Accept JSON default + ASK-in-CSV are documented divergences, NOT summed into the floor",
+      "ratchet_floor": 21,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "http-protocol",
+        "kind": "feature-gated-crate-test",
+        "target": "http_protocol_suite"
+      }
+    },
+    {
+      "ci_job": "service-federation-conformance",
+      "command": "cargo test -p sparq-conformance --features federation-descriptors --test sd_gsp_suite",
+      "family": "W3C SPARQL",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "SPARQL 1.1 Service Description + Graph Store Protocol",
+      "note": "the GET /sparql (no query) Service-Description advertises exactly the formats/languages/versions/features the server genuinely implements (no over-advertising), PLUS a GET/PUT/POST/DELETE Graph-Store-Protocol round-trip (named + default graph, indirect + direct identification) verifying store state after each op; absent-graph 200-empty read is a documented divergence, NOT summed in",
+      "ratchet_floor": 39,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "federation-descriptors",
+        "kind": "feature-gated-crate-test",
+        "target": "sd_gsp_suite"
+      }
+    },
+    {
+      "ci_job": "text-oracle",
+      "command": "cargo test -p sparq-text --test bm25_oracle",
+      "family": "sparq extension",
+      "floor_basis": "score-exact assertions (sparq EXTENSION, NOT standards conformance)",
+      "is_extension": true,
+      "label": "text-search differential oracle",
+      "note": "EXTENSION ratchet — no normative full-text-over-RDF / BM25 standard exists: sparq-text's BM25 search/ranking vs a from-scratch independent reference scorer, bit-exact per-hit scores + best-first order over a fixed corpus battery",
+      "ratchet_floor": 18750,
+      "runner": {
+        "crate": "sparq-text",
+        "kind": "crate-test",
+        "target": "bm25_oracle"
+      }
+    },
+    {
+      "ci_job": "rsp-oracle",
+      "command": "cargo test -p sparq-rsp --test srbench_oracle",
+      "family": "sparq extension",
+      "floor_basis": "per-window correctness assertions (sparq EXTENSION, NOT standards conformance)",
+      "is_extension": true,
+      "label": "RSP expressivity / SRBench correctness",
+      "note": "EXTENSION ratchet — no normative RDF-Stream-Processing standard / RSP conformance suite exists (RSP-QL is a W3C-community spec; SRBench a benchmark): sparq-rsp's windowed continuous queries vs an INDEPENDENT batch-rebuild + closed-form oracle across window types / R2S operators / EvalModes / multi-window joins; documented RSP-QL gaps asserted genuinely-rejected, not faked as passes",
+      "ratchet_floor": 317,
+      "runner": {
+        "crate": "sparq-rsp",
+        "kind": "crate-test",
+        "target": "srbench_oracle"
+      }
+    },
+    {
+      "ci_job": "inference-conformance",
+      "command": "cargo test -p sparq-conformance --features rif-core --test rif_core_suite",
+      "family": "sparq extension",
+      "floor_basis": "expressivity assertions (sparq EXTENSION over the RIF-Core subset, NOT the normative W3C SPARQL-RIF conformance suite)",
+      "is_extension": true,
+      "label": "RIF-Core expressivity (monotone Horn subset)",
+      "note": "EXTENSION ratchet — sparq's own faithful expressivity battery over the RIF-CORE (monotone Horn) subset implemented by sparq-reason's rif:: front-end (frame/membership/subclass/equality, recursion, numeric/string/list builtins with range-restriction safety, monotonicity, the canonical rif01 uncle rule); the normative SPARQL-RIF Core Entailment Regime + full RIF-BLD/PRD are documented out-of-scope, asserted genuinely-rejected, never faked as passes",
+      "ratchet_floor": 73,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "rif-core",
+        "kind": "feature-gated-crate-test",
+        "target": "rif_core_suite"
+      }
+    },
+    {
+      "ci_job": "inference-conformance",
+      "command": "cargo test -p sparq-conformance --features ql-experimental --test ql_dllite_suite",
+      "family": "sparq extension",
+      "floor_basis": "sound-and-complete certain-answer cases (sparq EXTENSION over the DL-Lite_R oracle, NOT a full-OWL-2-QL-conformance claim)",
+      "is_extension": true,
+      "label": "OWL 2 QL (DL-Lite_R) certain-answer oracle",
+      "note": "EXTENSION ratchet — no runnable normative W3C OWL 2 QL certain-answer conformance suite exists (the W3C QL material is structural): sparq's own faithful DL-Lite_R certain-answer oracle (the hand-derived suite from sq-g19x0), each conjunctive query rewritten by sparq_reason_ql's REAL rewrite_production (PerfectRef ∪ tree-witness ∪ UCQ-min) and evaluated over the UNMODIFIED ABox, asserting EXACTLY the hand-derived certain answers — sound AND complete case by case; the broader pr:QL entailment-arm intensional gap stays experimental/OutOfScope, never faked as a pass",
+      "ratchet_floor": 11,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "ql-experimental",
+        "kind": "feature-gated-crate-test",
+        "target": "ql_dllite_suite"
+      }
+    },
+    {
+      "ci_job": "inference-conformance",
+      "command": "cargo test -p sparq-conformance --features ql-experimental --test ql_entailment_floor",
+      "family": "sparq extension",
+      "floor_basis": "graduated named pr:QL cases — six-condition soundness predicate (sparq EXTENSION over the QL fragment sparq rewrites, NOT an OWL 2 QL / entailment-regime conformance claim)",
+      "is_extension": true,
+      "label": "OWL 2 QL entailment-regime graduated subset",
+      "note": "EXTENSION ratchet — the pr:QL sparql11/entailment cases that pass ALL SIX graduation conditions (CQ-shape gate + intensional guard, total TBox capture, the consistency condition [zero negative axioms OR the sq-p6yb7 DL-Lite_R violation-query check proves the KB consistent], default-graph dataset, the regime-coincidence guard, and empirical result-equivalence to the W3C oracle through the REAL rewrite_production + engine), pinned as an exact named-case list; every non-graduated case is held with an exhaustive reason taxonomy (permanently-outside / pending-gate / pending-capture / pending-consistency / inconsistent-kb / pending-coincidence / oracle-divergent), never faked as a pass",
+      "ratchet_floor": 15,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "ql-experimental",
+        "kind": "feature-gated-crate-test",
+        "target": "ql_entailment_floor"
+      }
+    },
+    {
+      "ci_job": "inference-conformance",
+      "command": "cargo test -p sparq-conformance --features el-suite --test el_suite",
+      "family": "sparq extension",
+      "floor_basis": "pass — classifier + ABox realiser compute the expected outcome (sparq EXTENSION over the EL fragment implemented, NOT a full-OWL-2-EL-conformance claim)",
+      "is_extension": true,
+      "label": "OWL 2 EL classification (sparq-reason-el)",
+      "note": "EXTENSION ratchet — the W3C OWL 2 EL suite checks classification/subsumption semantics and this runner compares against what sparq-reason-el's classifier + ABox realiser compute over the EL fragment (CR1–CR6 + rbox + cdomain + abox): each premise classified through classify_graph (TBox closure) then realize_graph (ABox rows + inconsistency verdict), then consistency / inconsistency / positive- / negative-entailment via the shared bnode-homomorphism check (output-vocabulary completions: datatypes + equivalentClass + equivalentProperty); the 11 audited permanent divergences (property-chain ABox / reflexive property / annotation propagation / equivalentProperty extraction / unionOf / bottomDataProperty / FunctionalProperty) are reported separately, never faked as passes",
+      "ratchet_floor": 67,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "el-suite",
+        "kind": "feature-gated-crate-test",
+        "target": "el_suite"
+      }
+    },
+    {
+      "ci_job": "inference-conformance",
+      "command": "cargo test -p sparq-conformance --features dl-direct --test dl_suite",
+      "family": "sparq extension",
+      "floor_basis": "positive-tag membership passes, EXACT-pinned (sparq EXTENSION over the L1/L2 ALCH-fragment checker — scoped fragment, NOT full OWL 2 DL and NOT a W3C ProfileIdentificationTest conformance claim); re-pinned by sq-pbz04.4.16 (M7 singleton-intersection normalization: +27, 68 -> 95); re-pinned by sq-pbz04.4.9 (L1 datatype-map-IRI refusal: -1, 95 -> 94 — the WebOnt-I5.3-015 EL profile row whose premise carries xsd:integer/xsd:string ranges now refuses extraction and honestly abstains, was a pass under the old opaque-datatype reading)",
+      "is_extension": true,
+      "label": "OWL 2 DL profile identification (Direct arm)",
+      "note": "EXTENSION ratchet — the DIRECT-arm ProfileIdentificationTest cases whose POSITIVE test:profile tags the L2 syntactic checker reproduces through the REAL fail-closed L1 extraction + grammar walk; abstentions are never passes. The 27 singleton-intersection (M7) divergences are FIXED by sq-pbz04.4.16 (L1 normalizes a 1-ary owl:intersectionOf to its member) and now pass; the positive PROFILE_DIVERGENCES pin is empty. The EXPLICIT-NEGATIVE direction is a SEPARATE lane (sq-pbz04.4.16): the export's owl:NegativePropertyAssertion profile negations refuted where L2 can (138 after sq-zfwzq graduated three transitive-property inputs from extraction abstention: +1 refuted and +2 measured In-gap), with an honest measured In-gap (182 of 320 checkable) where axiom-grammar membership over the ALCH shadow cannot refute full-profile membership (deferred restrictions); species assertions remain unchecked (documented)",
+      "ratchet_floor": 94,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "dl-direct",
+        "kind": "feature-gated-crate-test",
+        "target": "dl_suite"
+      }
+    },
+    {
+      "ci_job": "inference-conformance",
+      "command": "cargo test -p sparq-conformance --features dl-direct --test dl_suite",
+      "family": "sparq extension",
+      "floor_basis": "definitive expected verdicts through the L4 dispatch, EXACT-pinned (sparq EXTENSION over the scoped fragment — NOT full OWL 2 DL); re-pinned by sq-pbz04.4.11 (M1 named-composite fix, net +8); re-pinned by sq-pbz04.4.12 (M4 orphan/cyclic fix: -3, 192 -> 189); re-pinned by sq-pbz04.4.13 (M2 conclusion-bnode existential-reading fix: +1, 189 -> 190); re-pinned by sq-pbz04.4.16 (M7 singleton-intersection normalization: -8, 190 -> 182 — 8 consistency cases re-route from the ALCH tableau to the RL branch and honestly abstain via the documented disjointWith divergence guard, never a wrong verdict; fail set unchanged); unchanged at 182 by sq-pbz04.4.9 (SubObjectPropertyOf conclusion encoding + L1 datatype-map-IRI refusal net to zero on the pass total, composition 97+69 -> 96+70; fail set still 5, M3/M5/M6); re-pinned by sq-zfwzq (ALCHS transitive roles: +2 consistency and +2 positive-entailment passes, 182 -> 186; composition 98+14+72+2, fail set unchanged)",
+      "is_extension": true,
+      "label": "OWL 2 Direct-Semantics consistency + entailment (scoped fragment)",
+      "note": "EXTENSION ratchet — the DIRECT-arm consistency / inconsistency / positive- / negative-entailment tests decided by the REAL sparq-reason-dl L4 dispatch (RL guarded / EL guarded / QL deferred / ALCH tableau) under a pinned deterministic count budget; fail-closed abstentions are reported, never passes, and all 5 remaining wrong-verdict divergences are pinned by name with audited mechanisms (M1 FIXED sq-pbz04.4.11; M4 FIXED sq-pbz04.4.12; M2 FIXED sq-pbz04.4.13; M7 FIXED sq-pbz04.4.16 — those rows now pass/abstain; remaining: M3/M5/M6). The default-off dl_transitive extension graduates transitive-role inputs only through the tableau whose termination and soundness argument is written in sparq-reason-dl::tableau §5a",
+      "ratchet_floor": 186,
+      "runner": {
+        "crate": "sparq-conformance",
+        "feature": "dl-direct",
+        "kind": "feature-gated-crate-test",
+        "target": "dl_suite"
+      }
+    },
+    {
+      "ci_job": "test",
+      "command": "cargo test -p sparq-conformance --test ufo_sn3_suite",
+      "family": "sparq extension",
+      "floor_basis": "expressibility assertions — answer-triple superset entailments + negative-entailment guards (sparq EXTENSION over the UFO-SN3 reference profile, NOT a UFO/gUFO/OntoUML standards-conformance claim)",
+      "is_extension": true,
+      "label": "UFO-SN3 finite-world expressibility",
+      "note": "EXTENSION ratchet — no normative UFO/gUFO conformance suite exists: sparq's own finite-world UFO-SN3 reference profile (a function-free, range-restricted, monotone N3 projection of UFO-A/B/C rigidity, identity, relators, events, dispositions, norms, and situations) driven through the REAL reason_n3 closure over committed vocab + rules + fixture cases, with per-case negative-entailment guards; the reification-node projection stands in for RDF 1.2 triple-term matching (a tracked sparq-reason gap), never faked as native support",
+      "ratchet_floor": 42,
+      "runner": {
+        "crate": "sparq-conformance",
+        "kind": "crate-test",
+        "target": "ufo_sn3_suite"
+      }
+    },
+    {
+      "ci_job": "test",
+      "command": "cargo test -p sparq-conformance --test quoted_triple_opacity",
+      "family": "sparq extension",
+      "floor_basis": "opacity assertions — quoting-never-asserts negative-entailment guards, byte-identical closure non-interference vs committed expected-answer files, and normal reifier-annotation reasoning, per profile (RDFS + OWL 2 RL); self-authored fixtures pinning the normative RDF 1.2 triple-term semantics, NOT a W3C-suite pass count",
+      "is_extension": true,
+      "label": "RDF 1.2 quoted-triple opacity (reasoning)",
+      "note": "EXTENSION ratchet — RDF 1.2 quoted/reified triples are TERMS: the lane pins that the REAL reasoning profiles never assert quoted triples (no entailment of the quoted triple nor its domain/range/subproperty/subclass consequences), that RL closures are byte-identical with or without quoted triples referring to them, and that reifier annotations reason normally; the asserting annotation form is the fixture's positive control; the feature-gated EL arm re-checks non-interference through the sparq-reason-el classifier without counting toward the floor",
+      "ratchet_floor": 84,
+      "runner": {
+        "crate": "sparq-conformance",
+        "kind": "crate-test",
+        "target": "quoted_triple_opacity"
+      }
+    },
+    {
+      "ci_job": "conformance",
+      "command": "cargo test -p sparq-conformance --test rdf_line_syntax_ratchet",
+      "family": "W3C RDF",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "W3C N-Triples syntax (rdf11 rdf-n-triples)",
+      "note": "positive+negative syntax through the REAL native chunk-parallel nt.rs path; the 10 recorded FAILs are the audited sq-w64x5 validation divergences, never summed in",
+      "ratchet_floor": 60,
+      "runner": {
+        "crate": "sparq-conformance",
+        "kind": "crate-test",
+        "target": "rdf_line_syntax_ratchet"
+      }
+    },
+    {
+      "ci_job": "conformance",
+      "command": "cargo test -p sparq-conformance --test rdf_line_syntax_ratchet",
+      "family": "W3C RDF",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "W3C N-Quads syntax (rdf11 rdf-n-quads)",
+      "note": "positive+negative syntax through the REAL chunk-parallel N-Quads dataset loader (named graphs preserved); the 11 recorded FAILs are the shared nt.rs sq-w64x5 divergences plus the graph-position IRI case",
+      "ratchet_floor": 76,
+      "runner": {
+        "crate": "sparq-conformance",
+        "kind": "crate-test",
+        "target": "rdf_line_syntax_ratchet"
+      }
+    },
+    {
+      "ci_job": "conformance",
+      "command": "cargo test -p sparq-conformance --test rdf_line_syntax_ratchet",
+      "family": "W3C RDF",
+      "floor_basis": "pass",
+      "is_extension": false,
+      "label": "W3C TriG syntax + eval (rdf11 rdf-trig)",
+      "note": "positive+negative syntax AND eval (quad-SET blank-node-bijection identity to the N-Quads expectation, graph names included) through the with-base TriG dataset loader — all 356 manifest entries pass",
+      "ratchet_floor": 356,
+      "runner": {
+        "crate": "sparq-conformance",
+        "kind": "crate-test",
+        "target": "rdf_line_syntax_ratchet"
+      }
+    }
+  ],
+  "title": "sparq conformance scoreboard",
+  "totals": {
+    "conformance_floor_total": 5313,
+    "conformance_suites": 25,
+    "extension_assertion_total": 19663,
+    "extension_suites": 11
+  }
+}
