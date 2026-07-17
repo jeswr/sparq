@@ -83,6 +83,142 @@ _FULL_TRIGGERS: list[tuple[str, str]] = [
 ]
 
 
+# --- ORCHESTRATION-ONLY carve-out (change-class layer; sq path-aware CI) ------
+# [OPUS-4.8] The broad `.github/` and `scripts/` full-run triggers above are
+# CORRECT-BY-DEFAULT but OVER-BROAD: a PR that changes ONLY orchestration/workflow
+# tooling (PR/issue/bead automation, routing, the merge-queue batchers, agent
+# config) forces the FULL Rust matrix even though NOTHING it touches is read by any
+# Rust build/test/clippy/coverage/bench/fuzz/CodeQL job. The maintainer's ask:
+# stop running the engine CI on those PRs (they dominate the drain).
+#
+# SOUNDNESS (§2 — a skip must be a PROOF of non-interference, not a guess): this is
+# a small, EXPLICIT, AUDITED ALLOWLIST of paths PROVEN inert for the Rust matrix,
+# consulted BEFORE `_trigger_match` so it is the ONLY thing that can rescue a
+# `.github/`/`scripts/` path from the full-run trigger. It is a WHITELIST, never a
+# denylist: a `.github/`/`scripts/` path NOT matched here still hits the trigger and
+# forces full (absence of proof ⇒ run). A matched path is treated exactly like an
+# ownership-map `safe = true` verdict — it contributes NO crate, so if EVERY changed
+# path is orchestration-safe the selection is mode=selected with an empty affected
+# closure and every Rust lane (incl. the bench/fuzz/wasm SEED lanes) skips.
+#
+# THE INERTNESS OBLIGATION (enforced by scripts/tests/test_ci_select.py
+# `OrchestrationSafeInertnessTests`): every entry here must be a path that NO
+# `.github/workflows/*.yml` step feeding a Rust build/test/gate ever reads, and that
+# no crate `include_str!`/`include_bytes!`/`../`-escapes to. The test greps the
+# Rust-CI workflows for a reference to each allowlisted script/dir and FAILS if one
+# is referenced (i.e. is actually Rust-CI-affecting) — so an entry can never silently
+# become unsound when a script is later wired into a gate. A pattern ending in "/" is
+# a directory prefix; otherwise an exact repo-relative path.
+#
+# NOT here (deliberately — these ARE read by the Rust matrix, so they must keep
+# triggering full): every Rust-CI script (ci_select.py, ci_summary_gate.py,
+# coverage*.py/sh, perf-gate.py, assemble-feature-matrix.py, feature-matrix-tiers.py,
+# check-*.py gates, fetch-*.sh conformance fetchers, ci-bench.sh, ci-free-disk.sh,
+# unsafe/mutants gates, sbom/vex tooling, docker-smoke.sh, wasm-deps-guard.sh, the
+# fv/formal lane scripts, and scripts/tests/* that gate the engine); the Rust-CI
+# workflow files themselves (ci.yml, feature-matrix.yml, codeql.yml, supply-chain.yml,
+# bench.yml, fuzz.yml, miri.yml, asan.yml, kani.yml, metamorph.yml,
+# vectorized-feature-off.yml, ci-select.yml, ci-summary.yml, conformance/coverage
+# lanes); `.github/feature-matrix.d/**`; `.github/codeql/**`; `.github/actions/**`.
+_ORCHESTRATION_SAFE: list[str] = [
+    # Orchestration configuration + agent harness (never compiled/tested by cargo).
+    "orchestration/",       # routing.toml + orchestration policy (the #3416 class)
+    ".claude/",             # agent definitions / skills / workflows / settings
+    ".beads/",              # the bead task DB (never read by any build/test)
+    # Orchestration-only workflow files (PR/issue/bead/merge automation — none run
+    # cargo build/test/clippy/coverage/bench/fuzz/CodeQL).
+    ".github/workflows/triage-issue.yml",
+    ".github/workflows/retriage.yml",
+    ".github/workflows/pr-backlog.yml",
+    ".github/workflows/pr-title.yml",
+    ".github/workflows/batch-merge.yml",
+    ".github/workflows/bead-autoclose.yml",
+    ".github/workflows/promote-on-approval.yml",
+    ".github/workflows/differential-update.yml",
+    ".github/workflows/kb-dump.yml",
+    ".github/workflows/pkg-ingest.yml",
+    # NOTE deliberately NOT here: selection-alarm.yml / formal-alarm.yml — they are
+    # monitors for the Rust/formal lanes (borderline), so they keep triggering full
+    # (fail-closed; the value of skipping them is negligible and the audit is cleaner).
+    # Orchestration-only scripts (PR/issue/bead/routing/dispatch automation). Each is
+    # pinned inert by the OrchestrationSafeInertnessTests grep.
+    "scripts/triage.py",
+    "scripts/retriage.py",
+    "scripts/routing-validate.py",
+    "scripts/dispatch-plan.py",
+    "scripts/bd-to-issues.py",
+    "scripts/pr-backlog.py",
+    "scripts/batch-merge.py",
+    "scripts/save-agent-log.sh",
+    "scripts/push-frontier.sh",
+]
+
+
+def _orchestration_safe_match(path: str) -> bool:
+    """[OPUS-4.8] Is `path` on the audited orchestration-only inert allowlist?
+    A "/"-suffixed entry is a directory prefix; else an exact path. Consulted
+    BEFORE _trigger_match so it is the sole rescue from a .github/scripts trigger;
+    it can only ever REMOVE a path from the full set for a proven-inert path (a
+    non-matching path still hits the trigger => full)."""
+    for entry in _ORCHESTRATION_SAFE:
+        if entry.endswith("/"):
+            if path == entry.rstrip("/") or path.startswith(entry):
+                return True
+        elif path == entry:
+            return True
+    return False
+
+
+# Change-class labels emitted for the audit trail (design: the gate renders an
+# explicit "skipped-by-class" attribution). PURELY DESCRIPTIVE of the diff — the
+# skip decision itself is still the sound mode/affected math below.
+_CLASS_ENGINE = "engine"
+_CLASS_ORCHESTRATION = "orchestration-only"
+_CLASS_DOCS = "docs-only"
+_CLASS_MIXED = "mixed"
+
+# Docs-only surfaces: pure prose/markdown that no Rust build/test reads. NOTE a
+# crate-owned README.md/*.md is deliberately NOT docs-only — it can be pulled into a
+# doctest via #[doc = include_str!(...)] (design §3.2), so it is crate-owned and
+# classified engine. AGENTS.md / skills/** feed the sparq-kb PKG tests (ownership
+# map), so they are NOT docs-only either. This set is the repo-level prose that the
+# ownership map already proves SAFE (research/**) plus top-level docs/ markdown.
+_DOCS_ONLY_PREFIXES: list[str] = [
+    "docs/",
+    "research/",
+]
+
+
+def classify_change(changed_paths: list[str]) -> str:
+    """[OPUS-4.8] Pure change-class of a diff (WHAT surfaces changed), for the audit
+    trail. Orthogonal to `mode` (HOW MUCH runs) — this only LABELS; the sound skip
+    math is unchanged. Fail-closed: any path that is neither orchestration-safe nor
+    docs-only makes the class `engine` (or `mixed` if it also has orch/docs paths),
+    so a class is never MORE permissive than the mode. Empty diff => engine (a
+    non-PR/full event carries no diff and runs everything anyway)."""
+    seen_orch = seen_docs = seen_other = False
+    for path in changed_paths:
+        path = path.strip()
+        if not path:
+            continue
+        if _orchestration_safe_match(path):
+            seen_orch = True
+        elif any(path == p.rstrip("/") or path.startswith(p) for p in _DOCS_ONLY_PREFIXES):
+            seen_docs = True
+        else:
+            seen_other = True
+    if seen_other:
+        # Any engine/unclassified path present. Pure-engine vs mixed is informational.
+        return _CLASS_MIXED if (seen_orch or seen_docs) else _CLASS_ENGINE
+    if seen_orch and seen_docs:
+        return _CLASS_MIXED
+    if seen_orch:
+        return _CLASS_ORCHESTRATION
+    if seen_docs:
+        return _CLASS_DOCS
+    return _CLASS_ENGINE
+
+
 # --- phase-2 singleton-lane -> seed crates (design §5.2; beads sq-fmx4u.6, sq-mel85)
 # [OPUS-4.8] A "lane" is a SINGLETON CI job (not a per-crate matrix leg) that
 # always exercises a FIXED set of crates: the fuzz smoke (fuzz.yml), the wasm
@@ -180,9 +316,18 @@ class Selection:
     changed_crates: list[str] = field(default_factory=list)
     file_owners: list[tuple[str, str]] = field(default_factory=list)  # (path, owner-label)
     all_members: list[str] = field(default_factory=list)
+    # [OPUS-4.8] change-class of the diff (engine|orchestration-only|docs-only|mixed):
+    # the audit-trail label for WHY the Rust lanes were (or were not) skipped. Part of
+    # the JSON contract so the gate + tooling can render "skipped-by-class: <class>".
+    change_class: str = "engine"
 
     def to_json_obj(self) -> dict:
-        return {"mode": self.mode, "reason": self.reason, "affected": self.affected}
+        return {
+            "mode": self.mode,
+            "reason": self.reason,
+            "affected": self.affected,
+            "change_class": self.change_class,
+        }
 
 
 # --- metadata model ----------------------------------------------------------
@@ -395,6 +540,7 @@ def select(
     map_entries = map_entries or []
     ws = parse_workspace(meta)
     all_members = sorted(ws.members)
+    change_class = classify_change(changed_paths)
 
     def full(reason: str) -> Selection:
         return Selection(
@@ -402,6 +548,7 @@ def select(
             reason=reason,
             affected=all_members,  # "return ALL crates" (run everything)
             all_members=all_members,
+            change_class=change_class,
         )
 
     changed_crates: set[str] = set()
@@ -410,6 +557,13 @@ def select(
     for path in changed_paths:
         path = path.strip()
         if not path:
+            continue
+        # [OPUS-4.8] ORCHESTRATION-ONLY carve-out (BEFORE the trigger check — the sole
+        # rescue from a .github/scripts full-run trigger, and only for a PROVEN-inert
+        # path). Treated exactly like a SAFE-listed path: contributes no crate, so a
+        # pure-orchestration diff selects an empty closure and every Rust lane skips.
+        if _orchestration_safe_match(path):
+            file_owners.append((path, "ORCH-SAFE"))
             continue
         trig = _trigger_match(path)
         if trig is not None:
@@ -459,7 +613,12 @@ def select(
         # on it; still surface it as changed but with an empty member set.
         reason = "changed in-repo package(s) have no member dependents"
     elif not changed_crates:
-        reason = "all changed paths are SAFE-listed or non-crate; no crate affected"
+        if change_class == _CLASS_ORCHESTRATION:
+            reason = "skipped-by-class: orchestration-only — no Rust matrix affected"
+        elif change_class == _CLASS_DOCS:
+            reason = "skipped-by-class: docs-only — no Rust matrix affected"
+        else:
+            reason = "all changed paths are SAFE-listed or non-crate; no crate affected"
     else:
         skipped = len(ws.members) - len(affected)
         reason = f"{len(affected)} of {len(ws.members)} members affected ({skipped} skippable)"
@@ -471,6 +630,7 @@ def select(
         changed_crates=sorted(changed_crates),
         file_owners=file_owners,
         all_members=all_members,
+        change_class=change_class,
     )
 
 
@@ -584,6 +744,7 @@ def shadow_wrap(sel: Selection) -> Selection:
         changed_crates=sel.changed_crates,
         file_owners=sel.file_owners,
         all_members=sel.all_members,
+        change_class=sel.change_class,
     )
 
 
@@ -599,6 +760,16 @@ def filterset(sel: Selection) -> str:
 # --- step summary + outputs --------------------------------------------------
 def render_summary(sel: Selection) -> str:
     lines = ["### CI test-selection", "", f"**Mode:** `{sel.mode}` — {sel.reason}", ""]
+    # [OPUS-4.8] Explicit change-class attribution line so the audit trail shows WHY
+    # the Rust lanes were skipped (or not). No silent skips.
+    lines.append(f"**Change-class:** `{sel.change_class}`")
+    if sel.change_class in (_CLASS_ORCHESTRATION, _CLASS_DOCS) and sel.mode == "selected":
+        lines.append(
+            f"> skipped-by-class: `{sel.change_class}` — every changed path is proven "
+            "inert for the Rust matrix, so the engine test/clippy/coverage/bench/fuzz/"
+            "opt-in-feature lanes are skipped for this PR."
+        )
+    lines.append("")
     if sel.mode == "shadow":
         lines.append(
             "**SHADOW MODE** — selection is REPORT-ONLY on this run: every job still "
@@ -627,6 +798,9 @@ def _write_outputs(sel: Selection, output_file: str | None, summary_file: str | 
             fh.write(f"mode={sel.mode}\n")
             fh.write("affected=" + json.dumps(sel.affected) + "\n")
             fh.write("filterset=" + filterset(sel) + "\n")
+            # [OPUS-4.8] change-class output for the audit trail (consumers may
+            # surface "skipped-by-class: <class>"); never a gating input.
+            fh.write(f"change_class={sel.change_class}\n")
     if summary_file:
         with open(summary_file, "a", encoding="utf-8") as fh:
             fh.write(render_summary(sel))
