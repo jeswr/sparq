@@ -155,8 +155,16 @@ const ENV_SEED_BENCH: &str = "SOLID_SERVER_SEED_BENCH";
 /// [`ENV_SEED_BENCH`] is active; like the rest of the seed it only changes seeded FIXTURE content,
 /// never request handling.
 const ENV_SEED_BENCH_OWNER: &str = "SOLID_SERVER_SEED_BENCH_OWNER";
+/// Dev/DEMO ONLY: when `1`/`true`, seed the in-memory store with the demo playground fixtures — a
+/// public-readable `/demo/` pod holding a read-only welcome document, plus an OPEN-SANDBOX
+/// `/demo/playground/` container anonymous visitors can read AND write (so a demo boot needs no
+/// Keycloak/token setup to try the server end-to-end). NEVER set against a real (SPARQ/S3) backend —
+/// the startup seed-guard fails closed like the other seed flags. Purely additive seeding — it
+/// changes no request-handling behaviour. See [`sparq_lws_core::seed::seed_demo`].
+const ENV_SEED_DEMO: &str = "SOLID_SERVER_SEED_DEMO";
 /// Dev/conformance ESCAPE HATCH: explicitly permit the dev seed flags
-/// ([`ENV_SEED_CONFORMANCE`] / [`ENV_SEED_BENCH`]) against a NON-`memory` backend. UNSET (the default)
+/// ([`ENV_SEED_CONFORMANCE`] / [`ENV_SEED_BENCH`] / [`ENV_SEED_DEMO`]) against a NON-`memory`
+/// backend. UNSET (the default)
 /// makes the startup seed-guard FAIL CLOSED when a seed flag is set on a `http`/`embedded` backend —
 /// so test fixtures can never be written into a live/durable store by accident. Set to `1`/`true`
 /// ONLY for an EPHEMERAL embedded test instance that the harness legitimately seeds (the
@@ -266,9 +274,9 @@ fn reject_durable_sparq_with_inmem_blob(
     blob_is_in_memory && sparq_backend_is_durable(backend, sparq_dir_set)
 }
 
-/// Startup guard #2 — refuse to run the dev SEED flags ([`ENV_SEED_CONFORMANCE`] / [`ENV_SEED_BENCH`])
-/// against a NON-`memory` backend, so test fixtures are never written into a live `http`/`embedded`
-/// store by accident.
+/// Startup guard #2 — refuse to run the dev SEED flags ([`ENV_SEED_CONFORMANCE`] /
+/// [`ENV_SEED_BENCH`] / [`ENV_SEED_DEMO`]) against a NON-`memory` backend, so test fixtures are
+/// never written into a live `http`/`embedded` store by accident.
 ///
 /// Fires when a seed flag is set AND the backend is not `memory` AND the explicit
 /// [`ENV_ALLOW_SEED_NONMEMORY`] override is NOT set. With the override set (an EPHEMERAL embedded test
@@ -687,18 +695,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // GUARD #2 — refuse to seed test fixtures into a NON-`memory` backend. The dev seed flags
-    // (SOLID_SERVER_SEED_CONFORMANCE / SOLID_SERVER_SEED_BENCH) now run against WHATEVER backend is
-    // selected, so without this guard they could write conformance/bench fixtures into a live
+    // (SOLID_SERVER_SEED_CONFORMANCE / SOLID_SERVER_SEED_BENCH / SOLID_SERVER_SEED_DEMO) now run
+    // against WHATEVER backend is selected, so without this guard they could write dev fixtures into a live
     // http/embedded store. Set SOLID_SERVER_ALLOW_SEED_NONMEMORY=1 to permit it ONLY for an ephemeral
     // embedded test instance (the conformance run.sh embedded leg). Seeding `memory` is always allowed.
-    let seed_requested =
-        env_flag(ENV_SEED_CONFORMANCE) || bench_seed_count(ENV_SEED_BENCH).is_some();
+    let seed_requested = env_flag(ENV_SEED_CONFORMANCE)
+        || bench_seed_count(ENV_SEED_BENCH).is_some()
+        || env_flag(ENV_SEED_DEMO);
     if reject_seed_on_nonmemory(seed_requested, &backend, env_flag(ENV_ALLOW_SEED_NONMEMORY)) {
         return Err(format!(
             "refusing to seed test fixtures into a non-memory backend (PSS_SPARQ_BACKEND={backend}): \
-             SOLID_SERVER_SEED_CONFORMANCE / SOLID_SERVER_SEED_BENCH would write dev fixtures into a \
-             live store. Unset the seed flag(s), use PSS_SPARQ_BACKEND=memory, or — ONLY for an \
-             ephemeral test instance — set SOLID_SERVER_ALLOW_SEED_NONMEMORY=1."
+             SOLID_SERVER_SEED_CONFORMANCE / SOLID_SERVER_SEED_BENCH / SOLID_SERVER_SEED_DEMO would \
+             write dev fixtures into a live store. Unset the seed flag(s), use \
+             PSS_SPARQ_BACKEND=memory, or — ONLY for an ephemeral test instance — set \
+             SOLID_SERVER_ALLOW_SEED_NONMEMORY=1."
         )
         .into());
     }
@@ -1169,6 +1179,19 @@ where
         eprintln!(
             "  SEEDED bench fixtures — DEV/BENCH ONLY: public_doc={} listing={} ({} children) private_doc={} owner={}",
             fixtures.public_doc, fixtures.listing, fixtures.child_count, fixtures.private_doc, fixtures.owner
+        );
+    }
+
+    // Dev/demo seeding (gated): the opt-in demo playground — a public-readable demo pod plus an
+    // open-sandbox container anonymous visitors can read AND write. Like the other seeds it is
+    // purely additive fixture content; it changes no request handling.
+    if env_flag(ENV_SEED_DEMO) {
+        let fixtures = sparq_lws_core::seed::seed_demo(&store, base_url)
+            .await
+            .map_err(|e| format!("demo seeding failed: {e:?}"))?;
+        eprintln!(
+            "  SEEDED demo playground — DEV/DEMO ONLY: welcome_doc={} playground={} (public read+write sandbox) owner={}",
+            fixtures.welcome_doc, fixtures.playground, fixtures.owner
         );
     }
 
