@@ -2,6 +2,10 @@
 
 > A README for coding agents. If you are an AI agent working on or with this repo, read this first.
 
+## [CONTEXT-ECONOMY] Worker-tier core available
+
+**Codex worker tier:** The worker-essential rules (sub-agent shared contract, maintenance rule, task tracking, repository hygiene) are now available in **[AGENTS-worker-core.md](AGENTS-worker-core.md)** — a ≤32 KiB subset that fits the codex `project_doc_max_bytes` cap. The full AGENTS.md (this file, ~144 KB) remains the authoritative reference for the complete contract and orchestrator documentation; every rule in the worker core is reachable via linked sections below.
+
 ## What sparq is
 
 sparq is a from-scratch **RDF triplestore and SPARQL 1.1 engine in Rust** — dictionary-encoded, six sorted permutation indexes, parallel + streaming execution, RDFS/OWL-RL/N3 inference, an out-of-core (mmap) mode with a compressed on-disk format, a WebAssembly build, and a W3C-conformant HTTP server. The engine is published across several surfaces:
