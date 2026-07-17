@@ -27,6 +27,12 @@ ROLE_BY_KIND = {"docs": "docs", "design": "research", "research": "research", "p
 ROLE_BY_TYPE = {"feature": "impl", "bug": "impl", "task": "impl", "chore": "ci",
                 "spike": "research", "epic": "impl"}
 SEC_KEYWORDS = ("zk", "mpc", "reasoner", "crypto", "auth", "e2ee")
+# [FABLE-5] UI/front-end surfaces route role:site (maintainer decision 2026-07-17: GPT-5.6 codex,
+# the original registry-dashboard builder — agent-account-registry e4098b9 — owns ALL UI work; the
+# role:site chain in orchestration/routing.toml leads with terra/codex). EXACT labels, not
+# substrings: a substring set would false-match (e.g. "gui" in "guide") and UI keywords must NOT
+# enter routing match_labels, which the arm-side security classifier unions into its keyword set.
+UI_SURFACE_LABELS = ("area:site", "area:gui", "surface:frontend", "dashboard")
 _PRIO = re.compile(r"^priority:P([0-4])$")
 
 
@@ -47,6 +53,10 @@ def _role(labels, issue_type):
     for lb in labels:
         if lb.startswith("kind:") and lb[5:] in ROLE_BY_KIND:
             return ROLE_BY_KIND[lb[5:]]
+    # [FABLE-5] UI-surface labels derive role:site (codex-led chain) before the generic type map,
+    # after kind (so kind:docs about the site stays docs) and after an explicit role:* label.
+    if any(lb in UI_SURFACE_LABELS for lb in labels):
+        return "site"
     return ROLE_BY_TYPE.get(issue_type)
 
 
@@ -123,6 +133,14 @@ def _self_test():
     # single-role invariant: a double-labelled issue is stripped to one role
     r = triage(["priority:P2", "role:impl", "role:site", "area:site"], "feature")
     chk("single-role invariant", (len([x for x in (({"role:impl", "role:site"} | r["add"]) - r["remove"]) if x.startswith("role:")]) == 1), True)
+    # [FABLE-5] UI-surface ownership: a UI-surface label derives role:site (the codex/GPT-5.6-led
+    # chain) even when the issue type would derive impl; kind (docs) and security still win.
+    chk("ui surface -> site", triage(["priority:P2", "area:site"], "feature")["role"], "site")
+    chk("gui surface -> site", triage(["priority:P2", "area:gui"], "task")["role"], "site")
+    chk("explicit impl on ui surface stays impl",
+        triage(["priority:P2", "role:impl", "area:site"], "feature")["role"], "impl")
+    chk("site docs stay docs", triage(["priority:P3", "kind:docs", "area:site"], "task")["role"], "docs")
+    chk("ui+sec -> soundness", triage(["priority:P1", "area:site", "area:sparq-zk"], "feature")["role"], "soundness")
     # [FABLE-5] no-area guard: a complete priority+role issue with NO area:* is NOT promoted to ready
     # (it would reserve the serializing __global__ partition); it parks needs:area instead.
     r = triage(["priority:P1", "role:impl"], "feature")

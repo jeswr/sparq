@@ -47,7 +47,8 @@ credential_format = "claude-oauth-token"
 [models.terra]
 provider = "openai"
 harness = "codex"
-provider_model = "TBD"                 # terra is an internal alias; maintainer sets the concrete GPT id
+provider_model = "TBD"                 # terra = the codex CLI's DEFAULT model (GPT-5.6 codex); the TBD
+                                       # sentinel is load-bearing: dispatch/worker pass NO --model flag
 credential_format = "codex-auth-json"
 
 [defaults]
@@ -71,9 +72,16 @@ role = "impl"
 model_chain = ["fable", "sonnet", "terra"]
 agent = "sparq-rust-impl"
 
+# [FABLE-5] UI/front-end ownership (maintainer decision 2026-07-17): GPT-5.6 codex (openai; alias
+# `terra`) implemented the original registry dashboard UI (jeswr/agent-account-registry e4098b9)
+# and is responsible for ALL UI/front-end work, so the site chain LEADS with terra; the previous
+# chain follows as fallback. scripts/triage.py derives role:site for UI-surface labels
+# (area:site/area:gui/surface:frontend/dashboard) so surface-labelled work lands here too.
+# Deliberately a ROLE route, not match_labels: the review lane's arm-side security classifier
+# unions ALL match_labels keywords, so UI keywords there would human-arm every UI PR.
 [[route]]
 role = "site"
-model_chain = ["fable", "sonnet", "terra"]
+model_chain = ["terra", "fable", "sonnet"]
 agent = "sparq-site"
 
 [[route]]
