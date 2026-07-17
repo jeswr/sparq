@@ -174,8 +174,8 @@ pub struct EntityTextConfig {
     /// Joins the groups' rendered pieces. Default: `". "`.
     pub separator: String,
     /// Character budget for the whole text. Pieces are appended in group order while
-    /// they fit; the piece that overflows is truncated at a char boundary and ends the
-    /// text (so the leading label survives even a tiny budget). Default: 2048 —
+    /// they fit; the piece that overflows is truncated at a word or sentence boundary
+    /// and ends the text. Default: 2048 —
     /// passage-sized, comfortably within every embedding model's window.
     pub max_chars: usize,
     /// Texts per [`Embedder::embed`] call in [`embed_entities`]. Default: 256.
@@ -254,7 +254,7 @@ fn verbalize_id(graph: &Graph, id: Id, cfg: &EntityTextConfig) -> Option<String>
         return None;
     }
     // Assemble under the char budget: whole pieces while they fit; the overflowing
-    // piece is truncated at a char boundary and ends the text.
+    // piece is truncated at a word or sentence boundary and ends the text.
     let mut out = String::new();
     for piece in pieces {
         let lead = if out.is_empty() { 0 } else { cfg.separator.chars().count() };
@@ -263,13 +263,20 @@ fn verbalize_id(graph: &Graph, id: Id, cfg: &EntityTextConfig) -> Option<String>
         if remaining == 0 {
             break;
         }
-        if !out.is_empty() {
-            out.push_str(&cfg.separator);
-        }
         if piece.chars().count() <= remaining {
+            if !out.is_empty() {
+                out.push_str(&cfg.separator);
+            }
             out.push_str(&piece);
         } else {
-            out.extend(piece.chars().take(remaining));
+            let truncated = truncate_at_word_boundary(&piece, remaining);
+            if truncated.is_empty() {
+                break;
+            }
+            if !out.is_empty() {
+                out.push_str(&cfg.separator);
+            }
+            out.push_str(&truncated);
             break;
         }
     }
@@ -278,6 +285,47 @@ fn verbalize_id(graph: &Graph, id: Id, cfg: &EntityTextConfig) -> Option<String>
     } else {
         Some(out)
     }
+}
+
+/// [GPT-5.6] Returns `s` unchanged when it fits; otherwise cuts at the last word or sentence
+/// boundary within `max_chars`. The returned string never exceeds the character budget and never
+/// ends partway through a whitespace-delimited token.
+pub(crate) fn truncate_at_word_boundary(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let mut chars = s.chars();
+    let prefix: String = chars.by_ref().take(max_chars).collect();
+    let next = chars.next();
+    let last = prefix.chars().next_back();
+
+    // A cut immediately before whitespace/punctuation, or immediately after sentence
+    // punctuation, already lands on a boundary at exactly the requested budget.
+    if next.is_some_and(is_boundary) || last.is_some_and(is_sentence_delimiter) {
+        return prefix.trim_end().to_string();
+    }
+
+    for (index, ch) in prefix.char_indices().rev() {
+        if ch.is_whitespace() {
+            return prefix[..index].trim_end().to_string();
+        }
+        if is_sentence_delimiter(ch) {
+            return prefix[..index + ch.len_utf8()].trim_end().to_string();
+        }
+    }
+    String::new()
+}
+
+fn is_boundary(ch: char) -> bool {
+    ch.is_whitespace() || is_sentence_delimiter(ch)
+}
+
+fn is_sentence_delimiter(ch: char) -> bool {
+    matches!(ch, '.' | '!' | '?')
 }
 
 /// The rendered value of one group for one entity: the first predicate (in group
@@ -487,4 +535,18 @@ pub fn embed_entities(
         }
     }
     Ok(verbalized.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_at_word_boundary;
+
+    #[test]
+    fn verbalize_truncation_uses_a_word_boundary_within_budget() {
+        // [GPT-5.6] A raw eight-character cut would produce "alpha be".
+        let truncated = truncate_at_word_boundary("alpha beta gamma", 8);
+        assert_eq!(truncated, "alpha");
+        assert!(truncated.chars().count() <= 8);
+        assert_eq!(truncate_at_word_boundary("alpha beta", 10), "alpha beta");
+    }
 }
