@@ -796,7 +796,11 @@ publisher), with **no caller-side lock and no serialisation of submitters**; ack
 record is durable. Restore publishes never fire the hook (not same-lineage — re-baseline
 explicitly). A recording failure is dropped + reported to `on_error`, never failing the
 already-published write; the log's discontinuity check then fail-closes later records rather than
-silently gapping.
+silently gapping. **Resync (`sq-r2cu1`):** `ChangeLog::rebase_to(generation)` is that explicit
+operator re-base — it appends an honest **gap record** (`ChangeRecord::rebase = true`, no changes)
+marking the uncaptured span and re-arms recording from `generation` (strictly forward-only,
+fail-closed otherwise) **without wiping the log**; a consumer replaying past the gap re-bootstraps
+(e.g. from a backup at/after that generation) instead of trusting a silently incomplete diff stream.
 
 **`GET /streams` — CDC poll endpoint (`sparq-server` feature `change-stream`, default OFF;
 `sq-2999l`, gh-906).** The HTTP poll surface over that durable log, in the Amazon-Neptune-Streams

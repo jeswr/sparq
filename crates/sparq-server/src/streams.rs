@@ -260,6 +260,7 @@ mod tests {
                     quad: quad.to_string(),
                 })
                 .collect(),
+            rebase: false,
         }
     }
 
