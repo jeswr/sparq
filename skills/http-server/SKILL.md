@@ -815,7 +815,9 @@ clamped to 10000). The JSON response flattens each commit's quad-level changes t
 per `(op, quad)` — `{ eventId: { commitNum: <seq>, opNum: <1-based> }, op: ADD|REMOVE, generation,
 commitTimestampNanos, data: { stmt: "<n-quads line>" } }` — plus a `nextSequenceNumber` continuation
 token (pass as `at=`/`after=`), `lastSequenceNumber`, `totalRecords` (commit count) and
-`hasMoreRecords`. A poll is a READ (gated by the read auth). A sequence-anchored `iteratorType` with
+`hasMoreRecords`. A `rebase_to` gap marker is rendered as one explicit `op: REBASE` record (same
+`eventId`/`generation`/`commitTimestampNanos` shape, empty `data`) so a polling consumer SEES the
+uncaptured span instead of silently replaying across it (`sq-r2cu1`). A poll is a READ (gated by the read auth). A sequence-anchored `iteratorType` with
 no anchor is a fail-closed `400` (never a silent replay-all). With the feature off the route + the
 recording hook are `#[cfg]`-stripped (byte-identical); with it on, recording rides the sequenced
 writer's group commit and does not serialise submitters. The `ChangeSink` broker trait stays a

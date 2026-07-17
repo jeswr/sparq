@@ -49,6 +49,17 @@
 //!   "hasMoreRecords": false }
 //! ```
 //!
+//! [FABLE-5] (sq-r2cu1) A re-base **gap marker** (`ChangeRecord::rebase = true` — an operator
+//! resync after an uncaptured span; carries no quad-level changes) is rendered as ONE explicit
+//! stream record with `"op": "REBASE"` and an empty `data` object, so an HTTP consumer replaying
+//! past it SEES the gap (and can re-bootstrap from a backup at/after its `generation`) instead of
+//! silently reading the uncaptured span as "no changes":
+//!
+//! ```json
+//! { "eventId": { "commitNum": 2, "opNum": 1 }, "op": "REBASE",
+//!   "generation": 5, "commitTimestampNanos": 1718000000000000000, "data": {} }
+//! ```
+//!
 //! ## OPT-IN — feature `change-stream` AND a configured log directory, both OFF by default
 //!
 //! Compiled only behind the `change-stream` cargo feature; even then the route refuses (`404`)
@@ -208,11 +219,28 @@ pub fn page(records: &[ChangeRecord], from_seq: u64, limit: usize) -> Page<'_> {
 
 /// Renders a [`Page`] to the JSON response body (the Neptune `GetRecords`-shaped document). Each
 /// commit's quad-level changes are flattened to one stream record per `(op, quad)` with a
-/// `{ commitNum, opNum }` event id. `serde_json` is already a `server`-feature dependency, so the
-/// JSON is built with the same escaping discipline the rest of the server's JSON uses.
+/// `{ commitNum, opNum }` event id; a re-base gap marker (`ChangeRecord::rebase`) is rendered
+/// as one explicit `"op": "REBASE"` record even though it carries no changes — the gap must be
+/// VISIBLE to a polling consumer, never flattened away. `serde_json` is already a
+/// `server`-feature dependency, so the JSON is built with the same escaping discipline the rest
+/// of the server's JSON uses.
 pub fn to_json(page: &Page<'_>) -> String {
     let mut records = Vec::new();
     for rec in page.records {
+        // [FABLE-5] (sq-r2cu1) A re-base gap marker has an EMPTY `changes` vector, so the
+        // per-change flattening below would emit nothing for it — the continuation token would
+        // advance past the uncaptured span without the consumer ever seeing the gap, the exact
+        // silently-wrong replay the marker exists to prevent. Emit it as one explicit record.
+        if rec.rebase {
+            records.push(serde_json::json!({
+                "eventId": { "commitNum": rec.seq, "opNum": 1 },
+                "op": "REBASE",
+                "generation": rec.generation,
+                "commitTimestampNanos": rec.timestamp_unix_nanos.to_string(),
+                "data": {},
+            }));
+            continue;
+        }
         // `opNum` is 1-based WITHIN the commit (Neptune convention), in the record's own
         // deterministic change order (inserts first, then deletes — see `ChangeRecord`).
         for (i, change) in rec.changes.iter().enumerate() {
@@ -261,6 +289,17 @@ mod tests {
                 })
                 .collect(),
             rebase: false,
+        }
+    }
+
+    /// A re-base gap marker (`ChangeRecord::rebase = true`, no changes) — see sq-r2cu1.
+    fn gap(seq: u64, generation: u64) -> ChangeRecord {
+        ChangeRecord {
+            seq,
+            generation,
+            timestamp_unix_nanos: 1_000 + seq as u128,
+            changes: Vec::new(),
+            rebase: true,
         }
     }
 
@@ -403,6 +442,67 @@ mod tests {
         assert_eq!(v["records"][1]["eventId"]["opNum"], 2);
         // The timestamp is a string (u128 does not fit a JSON number losslessly).
         assert!(r0["commitTimestampNanos"].is_string());
+    }
+
+    /// [FABLE-5] (sq-r2cu1) THE gap-visibility invariant of the HTTP surface: a re-base gap
+    /// marker sitting between ordinary commits is emitted as an explicit `REBASE` stream record
+    /// (with its seq + generation), and the continuation token only ever moves past it WITH the
+    /// gap in the rendered page — a consumer replaying `after=<nextSequenceNumber>` cannot skip
+    /// it silently. A regression that flattens the gap away (empty `changes` → zero records)
+    /// turns this red.
+    #[test]
+    fn json_emits_explicit_rebase_gap_record_between_commits() {
+        let records = vec![
+            rec(
+                1,
+                2,
+                vec![(
+                    ChangeOp::Insert,
+                    "<http://ex/s> <http://ex/p> <http://ex/o> .",
+                )],
+            ),
+            // The span (generation 2, generation 5] was NOT captured — the gap marker.
+            gap(2, 5),
+            rec(
+                3,
+                6,
+                vec![(
+                    ChangeOp::Delete,
+                    "<http://ex/x> <http://ex/p> <http://ex/y> .",
+                )],
+            ),
+        ];
+        let p = page(&records, 1, 100);
+        let body = to_json(&p);
+        let v: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        // Three commits, three stream records — the gap is NOT flattened away.
+        assert_eq!(v["totalRecords"], 3);
+        let arr = v["records"].as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0]["op"], "ADD");
+        // The gap record is explicit, carrying its own seq + the re-based generation.
+        assert_eq!(arr[1]["op"], "REBASE");
+        assert_eq!(arr[1]["eventId"]["commitNum"], 2);
+        assert_eq!(arr[1]["eventId"]["opNum"], 1);
+        assert_eq!(arr[1]["generation"], 5);
+        assert!(arr[1]["commitTimestampNanos"].is_string());
+        assert!(
+            arr[1]["data"].as_object().unwrap().is_empty(),
+            "a gap record carries no quad"
+        );
+        assert_eq!(arr[2]["op"], "REMOVE");
+        assert_eq!(v["nextSequenceNumber"], 4);
+
+        // Continuation cannot skip the gap: a page truncated JUST BEFORE the gap resumes AT
+        // the gap's seq, so the next poll's page renders the REBASE record first.
+        let p = page(&records, 1, 1);
+        assert!(p.has_more);
+        assert_eq!(p.next_seq, 2, "resume exactly at the gap record");
+        let p2 = page(&records[1..], p.next_seq, 100);
+        let v2: serde_json::Value =
+            serde_json::from_str(&to_json(&p2)).expect("valid JSON");
+        assert_eq!(v2["records"][0]["op"], "REBASE");
+        assert_eq!(v2["records"][0]["eventId"]["commitNum"], 2);
     }
 
     #[test]
