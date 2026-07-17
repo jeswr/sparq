@@ -514,8 +514,40 @@ jobs:
           SELECT_AFFECTED: ${{ needs.select.outputs.affected }}
           SELECT_FILTERSET: ${{ needs.select.outputs.filterset }}
           SHARD_CRATE: ${{ matrix.crate }}
+          # [OPUS-4.8] sq-6vshe.6 (heavy-lane placement, round 2): the two heavy
+          # recall shards are DEMOTED off the merge_group ref (see the demotion guard
+          # below). `matrix.filter` is non-empty ONLY on those two heavy shards, so this
+          # env is the shard-kind discriminator the run script reads (it is empty on the
+          # bulk shards). Passed via env — no inline `${{ }}` in the shell body.
+          SHARD_FILTER: ${{ matrix.filter }}
         run: |
           set -euo pipefail
+          # [OPUS-4.8] sq-6vshe.6 (research/ci-structural-speedup.md §7, round 2):
+          # DEMOTE the two heavy sparq-vectors recall shards (heavy-diskann/heavy-hnsw)
+          # off the merge_group ref. WHY it is SAFE (per-leg cross-PR-interaction
+          # analysis): each heavy shard runs exactly ONE deterministic, self-contained,
+          # single-crate accuracy gate ({diskann,hnsw}_recall_at_10_vs_brute_force_on_50k
+          # in crates/sparq-vectors/tests/, fixed seeds, `approx-ann` feature). Its
+          # outcome is a pure function of sparq-vectors' ANN impl + its pinned
+          # instant-distance dep — NOTHING else in the workspace. A squash-merge group
+          # re-running it on the combined tree reproduces the identical result each PR
+          # already gated, so it carries no cross-PR-interaction signal (unlike the bulk
+          # workspace-unification build+test, which stays). FULL FORM is UNCHANGED: the
+          # heavy shards still run at PR level AND on push-to-main (both force
+          # rust_changed=true and neither hits this guard), so the recall floors gate
+          # every PR + the canonical main build exactly as before. A post-merge
+          # regression is caught by the push-to-main heavy run (this same job on the
+          # `push` event) + the dedicated `heavy-recall-demoted-filer` job below, which
+          # auto-files a P1 bead + GitHub issue if a heavy shard fails on main. This ONLY
+          # affects the merge_group ref, and reports `success` (exit 0) so the ci-summary gate is
+          # satisfied (the poller discovers whatever check-runs exist; an absent-by-design
+          # sub-result never hangs it). Mirrors the selection skip idiom directly below.
+          if [ "${{ github.event_name }}" = "merge_group" ] && [ -n "$SHARD_FILTER" ]; then
+            echo "heavy shard '${{ matrix.name }}' DEMOTED off merge_group (sq-6vshe.6):"
+            echo "  deterministic single-crate recall gate — no cross-PR interaction;"
+            echo "  full form runs at PR level + push-to-main. Reporting success."
+            exit 0
+          fi
           # [FABLE-5] sq-fmx4u.3 (design §5.2): single-crate shard skip guard.
           # FAIL-CLOSED: only the exact mode 'selected' AND a non-empty SHARD_CRATE
           # AND a definite non-membership ('"<crate>"' absent from the affected
@@ -582,6 +614,99 @@ jobs:
             ./scripts/ci-free-disk.sh || true
             attempt=$((attempt + 1))
           done
+
+  # [OPUS-4.8] sq-6vshe.6 (research/ci-structural-speedup.md §7, round 2) — the
+  # DEMOTED-LANE SAFETY NET for the two heavy recall shards demoted off merge_group.
+  # The heavy shards' FULL FORM runs at PR level AND on push-to-main (in `test` above).
+  # This tiny job is the "cannot silently rot" backstop mandated by the demotion
+  # protocol (§7): if a heavy recall shard FAILS on the canonical push-to-main build —
+  # the exact regression a merge_group run no longer catches — it auto-files a P1 bead +
+  # a deduped GitHub issue naming the lane + run, via scripts/ci-file-demoted-lane-
+  # failure.py (the generic filer the fuzz demotion already uses). It runs ONLY on
+  # push-to-main failure, and files ONLY when a job named `test (load-aware shard heavy-…)`
+  # is the one that failed (a bulk-shard failure is a normal red main build, not a
+  # demoted-lane finding). It is a SEPARATE job so the write scope stays off the 5-shard
+  # `test` matrix — least-privilege, matching the fuzz/differential filer precedent.
+  heavy-recall-demoted-filer:
+    name: heavy-recall demoted-lane safety-net (push-to-main)
+    needs: [changes, test]
+    # push-to-main only, and only when `test` did not succeed. `always()` so this runs
+    # despite the failed `needs`; the body then confirms a HEAVY shard was the culprit.
+    if: >-
+      always() && github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      needs.test.result != 'success' && needs.test.result != 'skipped'
+    runs-on: ubuntu-latest
+    # Scoped write: append the bead + best-effort push (contents), file/comment the issue
+    # (issues), read this run's job list to detect which shard failed (actions).
+    permissions:
+      contents: write
+      issues: write
+      actions: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Detect a failed heavy recall shard in this run
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # List THIS workflow-run's jobs and find a FAILED heavy shard by name. The
+          # heavy shards are the only jobs named "test (load-aware shard heavy-…)".
+          failed="$(gh api --paginate "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" \
+            --jq '.jobs[] | select(.conclusion == "failure") | select(.name | test("test \\(load-aware shard heavy-")) | .name' \
+            | head -n1 || true)"
+          if [ -z "$failed" ]; then
+            echo "No heavy recall shard failed in this run (only bulk/other legs) — nothing to file."
+            echo "file=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Failed heavy shard detected: $failed"
+            echo "file=true" >> "$GITHUB_OUTPUT"
+            echo "shard_name=$failed" >> "$GITHUB_OUTPUT"
+          fi
+      - name: File the demoted-lane P1 bead + issue
+        if: steps.detect.outputs.file == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SHARD_NAME: ${{ steps.detect.outputs.shard_name }}
+        run: |
+          set -euo pipefail
+          # Self-test the filer first (hermetic; no gh, no writes) so a script regression
+          # is caught here, not silently.
+          python3 scripts/ci-file-demoted-lane-failure.py --self-test
+          python3 scripts/ci-file-demoted-lane-failure.py \
+            --lane "heavy-recall-vectors" \
+            --bead-prefix "hr" \
+            --full-form "sparq-vectors heavy recall shards on push-to-main ($SHARD_NAME)" \
+            --per-pr-form "runs at PR level; demoted off merge_group (sq-6vshe.6)" \
+            --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+      - name: Commit + push the auto-filed bead (best-effort)
+        if: steps.detect.outputs.file == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -uo pipefail
+          if git diff --quiet -- .beads/issues.jsonl; then
+            echo "no bead appended (dedupe hit) — nothing to push."
+            exit 0
+          fi
+          git config user.name "sparq-ci[bot]"
+          git config user.email "sparq-ci@users.noreply.github.com"
+          git add .beads/issues.jsonl
+          git commit -m "chore(ci): auto-file demoted heavy-recall lane failure (sq-6vshe.6). [OPUS-4.8]"
+          push_rc=0
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main || push_rc=$?
+          if [ "$push_rc" -ne 0 ]; then
+            echo "::warning title=demoted-lane bead push declined::Could not push the auto-filed bead to protected main (git push exit ${push_rc}; likely GH013 ruleset rejection). The GitHub issue filed in the previous step is the durable record; the orchestrator beads it on the next issue sweep."
+          else
+            echo "pushed the demoted-lane bead to main."
+          fi
 
   wasm:
     name: wasm build (sparq-wasm + sparq-reason-wasm + sparq-rsp-wasm + sparq-text-wasm + sparq-shacl-wasm + sparq-solid)

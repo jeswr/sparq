@@ -759,5 +759,144 @@ class TestRequiredCheckAnchor(unittest.TestCase):
             )
 
 
+class TestHeavyRecallMergeGroupDemotion(unittest.TestCase):
+    """[OPUS-4.8] sq-6vshe.6 (research/ci-structural-speedup.md §7, round 2): the two
+    heavy sparq-vectors recall shards (heavy-diskann/heavy-hnsw) are DEMOTED off the
+    merge_group ref — deterministic single-crate accuracy gates with no cross-PR
+    interaction — while the bulk workspace-unification shards (the real cross-PR value)
+    stay. Pins the guard SHAPE + the demoted-lane safety-net job so the demotion cannot
+    silently rot or over-reach.
+
+    Key safety invariants pinned here:
+      * the demotion is merge_group-ONLY (never PR, never push-to-main — the full form);
+      * it is a STEP guard, not a job `if:` (matrix context is unavailable there);
+      * the check-run NAMES are unchanged (guard reports success, not a missing leg);
+      * a heavy-shard failure on push-to-main auto-files via the demoted-lane filer;
+      * the filer's job-name detection regex matches the real heavy shard names."""
+
+    # The regex the heavy-recall-demoted-filer uses (in ci.yml) to find a FAILED heavy
+    # shard by job name. Kept in sync with the workflow's `--jq ... test("...")`.
+    _HEAVY_JOB_RE = re.compile(r"test \(load-aware shard heavy-")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ci = _load(CI_YML)
+
+    def _test_run_step(self) -> str:
+        """The `Test (nextest, shard …)` step's run body."""
+        for step in self.ci["jobs"]["test"]["steps"]:
+            if str(step.get("name", "")).startswith("Test (nextest, shard"):
+                return str(step.get("run", ""))
+        self.fail("could not find the `Test (nextest, shard …)` step in the test job")
+
+    def test_heavy_shards_demoted_off_merge_group_only(self):
+        run = self._test_run_step()
+        # The guard: merge_group AND a non-empty SHARD_FILTER (heavy shards only) -> exit 0.
+        self.assertIn('"${{ github.event_name }}" = "merge_group"', run,
+                      "heavy-recall demotion guard must key on the merge_group event")
+        self.assertIn('-n "$SHARD_FILTER"', run,
+                      "demotion guard must fire only on heavy shards (non-empty filter)")
+        # It must be an AND so it never fires on a bulk shard or a non-merge_group event.
+        self.assertRegex(
+            run,
+            r'"\$\{\{ github\.event_name \}\}" = "merge_group" \] && \[ -n "\$SHARD_FILTER"',
+            "demotion must require BOTH merge_group AND a heavy shard (AND, not OR) — "
+            "otherwise it would skip bulk shards or run on PR/push",
+        )
+        # The guard must NOT reference push / pull_request — the full form runs there.
+        # (Assert the guard line itself mentions merge_group exclusively.)
+        guard_lines = [ln for ln in run.splitlines()
+                       if "github.event_name" in ln and "SHARD_FILTER" in ln]
+        self.assertTrue(guard_lines, "expected a single-line combined event+shard guard")
+        for ln in guard_lines:
+            self.assertNotIn("push", ln,
+                             "the demotion guard must not fire on push-to-main (full form)")
+            self.assertNotIn("pull_request", ln,
+                             "the demotion guard must not fire on PRs (full form, blocking)")
+
+    def test_shard_filter_env_maps_to_matrix_filter(self):
+        """The guard reads $SHARD_FILTER; it must be populated from matrix.filter (the
+        heavy-shard discriminator — non-empty only on the two heavy shards)."""
+        for step in self.ci["jobs"]["test"]["steps"]:
+            if str(step.get("name", "")).startswith("Test (nextest, shard"):
+                env = step.get("env", {})
+                self.assertIn("SHARD_FILTER", env,
+                              "the Test step must pass SHARD_FILTER via env")
+                self.assertEqual(env["SHARD_FILTER"], "${{ matrix.filter }}",
+                                 "SHARD_FILTER must come from matrix.filter")
+                return
+        self.fail("Test step not found")
+
+    def test_heavy_shards_still_run_at_pr_and_push(self):
+        """The demotion must NOT remove the heavy shards from the matrix — they must
+        still run (full form) at PR level and on push-to-main. Confirm the matrix
+        entries are untouched and the job triggers on those events."""
+        matrix = self.ci["jobs"]["test"]["strategy"]["matrix"]["include"]
+        heavy = [e for e in matrix if str(e.get("name", "")).startswith("heavy-")]
+        self.assertEqual(
+            {e["name"] for e in heavy}, {"heavy-diskann", "heavy-hnsw"},
+            "both heavy recall shards must remain in the test matrix (demoted at "
+            "runtime on merge_group only, never removed)",
+        )
+        on = _on_block(self.ci)
+        self.assertIn("pull_request", on, "CI must run on pull_request (heavy full form)")
+        self.assertIn("push", on, "CI must run on push (heavy full form on main)")
+
+    def test_demoted_lane_filer_job_wired(self):
+        """The demotion protocol (§7) requires a full-form-failure auto-filer so the
+        demoted lane cannot silently rot. Pin the safety-net job's existence, its
+        push-to-main-only guard, its scoped write perms, and its use of the filer."""
+        job = self.ci["jobs"].get("heavy-recall-demoted-filer")
+        self.assertIsNotNone(job, "missing the heavy-recall demoted-lane safety-net job")
+        cond = str(job.get("if", ""))
+        self.assertIn("github.event_name == 'push'", cond,
+                      "safety-net must run on push-to-main only")
+        self.assertIn("refs/heads/main", cond, "safety-net must be main-only")
+        self.assertIn("needs.test.result", cond,
+                      "safety-net must gate on the test job's result")
+        needs = job.get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        self.assertIn("test", needs, "safety-net must need the test job")
+        perms = job.get("permissions", {})
+        self.assertEqual(perms.get("contents"), "write",
+                         "safety-net needs contents:write to append+push the bead")
+        self.assertEqual(perms.get("issues"), "write",
+                         "safety-net needs issues:write to file the GitHub issue")
+        self.assertEqual(perms.get("actions"), "read",
+                         "safety-net needs actions:read to inspect this run's jobs")
+        body = "\n".join(str(s.get("run", "")) for s in job.get("steps", []))
+        self.assertIn("scripts/ci-file-demoted-lane-failure.py", body,
+                      "safety-net must invoke the generic demoted-lane filer")
+        self.assertIn("--self-test", body,
+                      "safety-net must self-test the filer before using it")
+
+    def test_filer_job_name_detection_matches_real_heavy_shard_names(self):
+        """The safety-net detects a failed heavy shard by matching its JOB NAME against
+        `test \\(load-aware shard heavy-`. If a heavy shard is renamed and this regex is
+        not, the filer would silently never fire (silent rot). Pin the regex against the
+        REAL job names GitHub produces (workflow-job name template + matrix.name)."""
+        test_job_name_tmpl = self.ci["jobs"]["test"]["name"]  # "test (load-aware shard ${{ matrix.name }})"
+        matrix = self.ci["jobs"]["test"]["strategy"]["matrix"]["include"]
+        heavy_names = [e["name"] for e in matrix if str(e.get("name", "")).startswith("heavy-")]
+        for mname in heavy_names:
+            real = test_job_name_tmpl.replace("${{ matrix.name }}", mname)
+            self.assertRegex(
+                real, self._HEAVY_JOB_RE,
+                f"the filer's heavy-shard detection regex must match job name {real!r}",
+            )
+        # And it must NOT match a bulk shard or the nightly-coverage 'heavy' substring
+        # job (which carries "heavy" but is not a heavy recall shard).
+        self.assertNotRegex(
+            test_job_name_tmpl.replace("${{ matrix.name }}", "bulk 1/3"),
+            self._HEAVY_JOB_RE,
+            "the filer regex must not match bulk shards",
+        )
+        self.assertNotRegex(
+            "coverage (nightly, full incl. heavy vectors)",
+            self._HEAVY_JOB_RE,
+            "the filer regex must not match the nightly-coverage 'heavy' substring job",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
