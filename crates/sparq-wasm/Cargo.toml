@@ -41,6 +41,17 @@ sparq-shacl = { path = "../sparq-shacl", default-features = false, optional = tr
 # `wasm_bundle_bytes` baseline is byte-identical; the site/published build turns it on.
 sparq-canon = { path = "../sparq-canon", default-features = false, optional = true }
 
+# [SONNET-4.6] sq-q4apb (#2396): SHACL-to-form derivation for the hosted /app web
+# workbench, OPT-IN behind the `forms` feature (OFF by default). `sparq-forms` is
+# headless + wasm-able by construction (no GUI deps; its sparq-core/sparq-shacl deps
+# are default-features = false, so rayon never enters the wasm32 graph). The binding
+# returns `sparq_forms::FormDescription`'s serde JSON verbatim — the same contract as
+# the desktop Tauri `derive_form` command — so it pulls `serde_json` (wasm-portable,
+# not in the wasm-deps-guard forbidden set) behind the same feature. The DEFAULT lean
+# bundle links zero forms/serde code and stays byte-identical.
+sparq-forms = { path = "../sparq-forms", default-features = false, optional = true }
+serde_json = { version = "1", optional = true }
+
 # [FABLE-5] sq-586sh (#890 ask A): the stateless ODRL usage-control evaluator
 # (`sparq-policy`) compiled to wasm32, OPT-IN behind the `policy` feature (OFF by
 # default). PROBE scope: proves wasm32 compat + gives the bundle-delta measurement a
@@ -131,6 +142,14 @@ canon = ["dep:sparq-canon", "dep:getrandom02"]
 # [FABLE-5] sq-586sh: the ODRL usage-control wasm32 probe (see the sparq-policy
 # dependency note above). OFF by default; NOT enabled by the published bundle build.
 policy = ["dep:sparq-policy"]
+# [SONNET-4.6] sq-q4apb (#2396): expose sparq-forms' SHACL-to-form derivation as the
+# `Store.deriveForm(data, shapes, focus, format, optionsJson)` binding — the hosted-web
+# half of the GUI forms bridge (gui/app's forms-bridge.ts feature-detects exactly this
+# method; desktop uses the Tauri `derive_form` command instead). Returns the
+# FormDescription serde JSON verbatim so both hosts hand the frontend an identical
+# document. OFF by default so the lean `wasm_bundle_bytes` baseline is byte-identical;
+# see the sparq-forms dependency note above for the wasm32-safety rationale.
+forms = ["dep:sparq-forms", "dep:serde_json"]
 # [FABLE-5] sq-ixc3.19: expose the engine's STRUCTURED query plan (sparq-engine's
 # `explain_json::PlanNode` — the sq-u4lgr/#902 typed EXPLAIN tree) as the
 # `Store::explainPlanJson(sparql)` / `Store::explainPlanAnalyzeJson(sparql)` bindings,
