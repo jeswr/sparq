@@ -58,6 +58,9 @@ SELECT_YML = REPO_ROOT / ".github" / "workflows" / "ci-select.yml"
 GATE_PY = REPO_ROOT / "scripts" / "ci_summary_gate.py"
 CI_SELECT_PY = REPO_ROOT / "scripts" / "ci_select.py"  # [OPUS-4.8] sq-fmx4u.6
 OWNERSHIP_TOML = REPO_ROOT / "ci" / "path-ownership.toml"  # [OPUS-4.8] sq-fmx4u.6
+# [OPUS-4.8] path-aware CI audit: the merge_group changed-files gates.
+CONTAINER_SCAN_YML = REPO_ROOT / ".github" / "workflows" / "container-scan.yml"
+SUPPLY_CHAIN_YML = REPO_ROOT / ".github" / "workflows" / "supply-chain.yml"
 
 FAIL_CLOSED_DISJUNCT = "needs.select.outputs.mode != 'selected'"
 NEEDLE_RE = re.compile(
@@ -1149,6 +1152,174 @@ class TestDraftTierWiring(unittest.TestCase):
         self.assertIn("github.event.pull_request.number", str(conc.get("group", "")))
         self.assertTrue(conc.get("cancel-in-progress"),
                         "js.yml must cancel superseded PR runs")
+
+
+class TestContainerScanMergeGroupGate(unittest.TestCase):
+    """[OPUS-4.8] path-aware CI audit: container-scan.yml narrows its heavy trivy
+    image build+scan to container-relevant PRs via native `on.pull_request.paths`,
+    but GitHub IGNORES `paths` for the merge_group event, so a bare `merge_group:`
+    trigger rebuilt the full fat-LTO image + ran trivy on EVERY enqueue. The `trivy`
+    job now leads with a `detect container changes` step that diffs the queued batch
+    and skips the build+scan on a container-inert merge group (mirrors zk-toolchain's
+    proven detect pattern). Pins the SHAPE so the gate cannot silently rot or over-reach.
+
+    Invariants pinned:
+      * the trivy job still triggers on merge_group (check-run always appears → no gate hang);
+      * the detect step is FAIL-SAFE (default container=true; only merge_group can flip false);
+      * the heavy build/scan steps are STEP-gated on the detect output (not a job `if:`,
+        so the check-run name is preserved and reports success on the skip path);
+      * the merge_group path set MATCHES the pull_request paths filter (no drift)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.wf = _load(CONTAINER_SCAN_YML)
+        cls.trivy = cls.wf["jobs"]["trivy"]
+        cls.steps = cls.trivy["steps"]
+
+    def _step(self, name_prefix: str) -> dict:
+        for step in self.steps:
+            if str(step.get("name", "")).startswith(name_prefix):
+                return step
+        self.fail(f"container-scan trivy job missing a step named {name_prefix!r}")
+
+    def test_triggers_on_merge_group(self):
+        on = _on_block(self.wf)
+        self.assertIn("merge_group", on,
+                      "container-scan must trigger on merge_group so its check-run appears "
+                      "on the queue ref (ci-summary is the single required gate)")
+
+    def test_detect_step_present_and_fail_safe(self):
+        step = self._step("Detect container changes")
+        run = str(step.get("run", ""))
+        self.assertEqual(step.get("id"), "changes",
+                         "detect step must expose id=changes for the downstream if:s")
+        # Fail-safe default: container=true, and only a merge_group event can flip it false.
+        self.assertRegex(run, r"container=true",
+                         "detect step must default to the full scan (container=true)")
+        self.assertIn('"${EVENT_NAME}" = "merge_group"', run,
+                      "only the merge_group event may narrow the scan (fail-safe elsewhere)")
+        # Any diff error must fall back to the full scan.
+        self.assertIn("fail-safe", run.lower(),
+                      "detect step must document its fail-safe fallback")
+
+    def test_heavy_steps_gated_on_detect_output(self):
+        # The build + both trivy scans + the SARIF upload must all be STEP-gated on the
+        # detect output — never run on a container-inert merge group.
+        for prefix in ("Build image", "Trivy image scan (fail",
+                       "Trivy image scan (SARIF", "Upload Trivy SARIF"):
+            step = self._step(prefix)
+            cond = str(step.get("if", ""))
+            self.assertIn("steps.changes.outputs.container == 'true'", cond,
+                          f"the {prefix!r} step must be gated on the detect output")
+
+    def test_gate_is_step_not_job_level(self):
+        # A job-level `if:` would make the whole job skip and CHANGE the check-run
+        # conclusion accounting on the merge_group ref; the gate must be at STEP level so
+        # the `trivy (…)` check-run always appears and concludes SUCCESS on the skip path.
+        self.assertNotIn("container", str(self.trivy.get("if", "")),
+                         "the container gate must be a STEP guard, not a job-level if:")
+
+    def test_merge_group_path_set_matches_pr_paths_filter(self):
+        """The merge_group detect grep must cover the SAME path set as the
+        pull_request `paths:` filter — otherwise the two tiers would disagree about
+        what counts as container-relevant (drift = an unsound skip or a wasted run)."""
+        on = _on_block(self.wf)
+        pr_paths = set(on["pull_request"]["paths"])
+        run = str(self._step("Detect container changes").get("run", ""))
+        # Each PR path must be represented in the detect grep. Map the glob forms to the
+        # anchored regex fragments the detect step uses.
+        expected_fragments = {
+            "Dockerfile": "Dockerfile$",
+            ".dockerignore": r"\.dockerignore$",
+            ".trivyignore": r"\.trivyignore$",
+            ".hadolint.yaml": r"\.hadolint\.yaml$",
+            ".github/workflows/container-scan.yml": r"container-scan\.yml$",
+            "Cargo.toml": r"Cargo\.toml$",
+            "Cargo.lock": r"Cargo\.lock$",
+            "crates/**/Cargo.toml": r"crates/[^/]+/Cargo\.toml$",
+        }
+        for pr_path in pr_paths:
+            self.assertIn(pr_path, expected_fragments,
+                          f"PR path {pr_path!r} has no mapped detect-grep fragment — "
+                          "update the merge_group detect grep to match (no drift)")
+            self.assertIn(expected_fragments[pr_path], run,
+                          f"the merge_group detect grep must cover PR path {pr_path!r}")
+
+
+class TestSupplyChainMergeGroupGate(unittest.TestCase):
+    """[OPUS-4.8] path-aware CI audit: supply-chain.yml gates its cargo-deny/vet
+    step-groups on rust_changed, which was FORCED true on merge_group (paths don't
+    apply there) — so the full deny+vet ran on every enqueue. The `Decide rust_changed`
+    step now diffs the queued batch's base_sha..head_sha against the SAME `rust` path
+    set the pull_request dorny filter uses; a rust-inert merge group skips the heavy
+    deny+vet steps (SBOM stays always-on by the sq-6vshe.20 design). Pins the SHAPE.
+
+    Invariants pinned:
+      * still triggers on merge_group (check-run appears → no gate hang);
+      * the merge_group branch is FAIL-SAFE (rust=true on any diff error);
+      * every path in the pull_request dorny `rust` filter is covered by the
+        merge_group detect grep (no drift between the two tiers);
+      * the deny/vet gating steps remain rust_changed-gated (unchanged)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.wf = _load(SUPPLY_CHAIN_YML)
+        cls.job = cls.wf["jobs"]["supply-chain-gates"]
+        cls.steps = cls.job["steps"]
+
+    def _decide_run(self) -> str:
+        for step in self.steps:
+            if str(step.get("name", "")).startswith("Decide rust_changed"):
+                return str(step.get("run", ""))
+        self.fail("supply-chain missing the `Decide rust_changed` step")
+
+    def _dorny_rust_filter(self) -> list[str]:
+        for step in self.steps:
+            if str(step.get("uses", "")).startswith("dorny/paths-filter"):
+                filters = yaml.safe_load(step["with"]["filters"])
+                return list(filters["rust"])
+        self.fail("supply-chain missing the dorny rust paths-filter")
+
+    def test_triggers_on_merge_group(self):
+        self.assertIn("merge_group", _on_block(self.wf),
+                      "supply-chain must trigger on merge_group (required gate sibling)")
+
+    def test_merge_group_branch_is_fail_safe(self):
+        run = self._decide_run()
+        self.assertIn('"${EVENT_NAME}" = "merge_group"', run,
+                      "Decide step must special-case merge_group with a batch diff")
+        # Default rust=true inside the merge_group branch (fail-safe on any diff error).
+        self.assertIn("rust=true", run,
+                      "merge_group branch must default rust=true (fail-safe)")
+        self.assertIn("fail-safe", run.lower(),
+                      "merge_group branch must document + take its fail-safe fallback")
+
+    def test_merge_group_grep_covers_every_pr_rust_path(self):
+        run = self._decide_run()
+        # Map each dorny glob to the regex fragment the merge_group grep must contain.
+        glob_to_fragment = {
+            "**/*.rs": r"\.rs$",
+            "**/Cargo.toml": r"Cargo\.toml$",
+            "Cargo.lock": r"^Cargo\.lock$",
+            "rust-toolchain*": r"rust-toolchain",
+            "deny.toml": r"^deny\.toml$",
+            "supply-chain/**": r"^supply-chain/",
+            ".github/workflows/supply-chain.yml": r"supply-chain\.yml$",
+        }
+        for glob in self._dorny_rust_filter():
+            self.assertIn(glob, glob_to_fragment,
+                          f"dorny rust glob {glob!r} has no mapped merge_group grep fragment "
+                          "— update the Decide-step grep to match (no tier drift)")
+            self.assertIn(glob_to_fragment[glob], run,
+                          f"merge_group grep must cover the dorny rust glob {glob!r}")
+
+    def test_deny_and_vet_steps_remain_rust_gated(self):
+        gated = [str(s.get("name", "")) for s in self.steps
+                 if "rust_changed == 'true'" in str(s.get("if", ""))]
+        self.assertTrue(any("cargo-deny check (bans" in n for n in gated),
+                        "cargo-deny bans/sources/licenses must stay rust_changed-gated")
+        self.assertTrue(any("cargo-vet check" in n for n in gated),
+                        "cargo-vet must stay rust_changed-gated")
 
 
 if __name__ == "__main__":
