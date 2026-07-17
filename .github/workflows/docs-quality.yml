@@ -331,6 +331,15 @@ jobs:
         run: shellcheck scripts/ci-free-disk.sh scripts/tests/test_ci_free_disk.sh
       - name: Self-test ci-free-disk.sh (set -u safety + existence guards + #462 fold)
         run: bash scripts/tests/test_ci_free_disk.sh
+      # [FABLE-5] sq-6vshe.5: the cache-sizing audit once piped `gh api` JSONL into a
+      # `python3 - <<'PY'` heredoc — the heredoc occupies stdin, so every entry was
+      # discarded and the audit reported 0 bytes / OK unconditionally (PR #2521 review).
+      # The hermetic harness (PATH-shadowed `gh`, synthetic JSONL) pins that entries
+      # actually reach the Python and that the OK/PRESSURE/THRASH thresholds classify.
+      - name: shellcheck ci-cache-audit.sh + its self-test
+        run: shellcheck scripts/ci-cache-audit.sh scripts/tests/test_ci_cache_audit.sh
+      - name: Self-test ci-cache-audit.sh (entries flow through + verdict thresholds)
+        run: bash scripts/tests/test_ci_cache_audit.sh
       # [OPUS-4.8] sq-4vo9m: the per-tick disk guard (df-check + merged-worktree prune +
       # gated main-target reclaim) that stops the autonomous loop from filling the work box
       # to ENOSPC. Validated HERE (hermetic: the harness PATH-shadows df/pgrep and sandboxes

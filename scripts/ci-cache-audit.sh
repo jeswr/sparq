@@ -24,17 +24,23 @@ if [ -z "$repo" ]; then
   repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
 fi
 
-# Paginate the whole cache list (the repo can hold hundreds of entries).
+# Paginate the whole cache list (the repo can hold hundreds of entries) into a temp
+# file: the Python heredoc below occupies stdin (that's where `python3 -` reads its
+# program), so the JSONL must arrive on an explicit path, not a pipe.
+jsonl="$(mktemp)"
+trap 'rm -f "$jsonl"' EXIT
 gh api --paginate "repos/${repo}/actions/caches?per_page=100" \
-  --jq '.actions_caches[] | {key, ref, size_in_bytes, last_accessed_at}' |
-python3 - "$repo" <<'PY'
+  --jq '.actions_caches[] | {key, ref, size_in_bytes, last_accessed_at}' >"$jsonl"
+
+python3 - "$repo" "$jsonl" <<'PY'
 import json, re, sys
 from collections import defaultdict
 
 repo = sys.argv[1]
 BUDGET = 10 * 1024**3  # GitHub's per-repo Actions cache budget: 10 GiB, LRU-evicted.
 
-entries = [json.loads(line) for line in sys.stdin if line.strip()]
+with open(sys.argv[2], encoding="utf-8") as fh:
+    entries = [json.loads(line) for line in fh if line.strip()]
 
 HEXISH = re.compile(r"^[0-9a-fA-F]{8,}$")
 
