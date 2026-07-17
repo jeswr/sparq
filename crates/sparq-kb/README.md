@@ -106,7 +106,7 @@ write/merge/latency/CLI estate buys nothing (`part2_four_criterion_replacement_g
   answer was not fabricated.
 - **Citation renderer** (`query` feature, `sq-2489d.11`) — `query::citations::render_citations` renders
   `prov:wasDerivedFrom` sources as `[source]` citations; reports citation-resolution-rate (target 1.0)
-  + fabricated-count (target 0, MEASURED by the harness, not assumed).
+  + fabricated-count (target 0, MEASURED by the harness, not assumed). CLI: `pkg-query --citations`.
 
 ## 📚 Learn more
 

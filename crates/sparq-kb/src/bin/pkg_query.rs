@@ -29,6 +29,10 @@
 //! cargo run -p sparq-kb --features query --bin pkg-query -- \
 //!     --sparql 'PREFIX pkg: <https://sparq.dev/ns/pkg#> SELECT (COUNT(*) AS ?n) WHERE { ?s a pkg:Task }'
 //!
+//! # CITE — every Finding with its [source] citation + the measured citation
+//! # metrics (resolution rate / fabricated count; sq-2489d.11):
+//! cargo run -p sparq-kb --features query --bin pkg-query -- --citations
+//!
 //! # optionally materialise the RDFS/OWL-RL closure first (needs --features close):
 //! cargo run -p sparq-kb --features close --bin pkg-query -- --close owl-rl --query task-blocks --arg sq-8thu
 //!
@@ -43,6 +47,7 @@
 use oxrdf::Term;
 use sparq_core::Graph;
 use sparq_engine::QueryResult;
+use sparq_kb::query::citations::render_citations;
 use sparq_kb::query::{ask_pkg, canned, load_pkg_with_extra, nl_tool};
 
 fn usage() -> &'static str {
@@ -53,12 +58,16 @@ USAGE:
   pkg-query --list
   pkg-query --query <name> [--arg <value>] [--extra-graph <path>]… [--close rdfs|owl-rl] [--sparql-only] [--json]
   pkg-query --sparql '<SPARQL SELECT/ASK>' [--extra-graph <path>]… [--close rdfs|owl-rl] [--json]
+  pkg-query --citations [--extra-graph <path>]… [--close rdfs|owl-rl] [--sparql-only]
 
 OPTIONS:
   --list             list the canned introspect/ground queries and exit
   --query <name>     run a canned query by name (see --list)
   --arg <value>      argument for a parameterised canned query ({ARG} substitution)
   --sparql <query>   run a raw SPARQL SELECT/ASK string
+  --citations        run the finding-provenance canned query and render each
+                     Finding with its [source] citation + the citation metrics
+                     (resolution rate, fabricated count) — sq-2489d.11
   --extra-graph <p>  load an extra Turtle file alongside the PKG before querying
                      (repeatable; e.g. an FO overlay — epic sq-mztg8 Metric 1).
                      Its triples participate in --close.
@@ -97,6 +106,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut close: Option<&str> = None;
     let mut sparql_only = false;
     let mut json = false;
+    let mut citations = false;
     let mut extra_paths: Vec<&str> = Vec::new();
 
     let mut i = 0;
@@ -127,23 +137,39 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             "--sparql-only" => sparql_only = true,
             "--json" => json = true,
+            "--citations" => citations = true,
             other => return Err(format!("unknown argument `{other}`")),
         }
         i += 1;
     }
 
-    // Resolve the SPARQL to run.
-    let sparql: String = match (query_name, raw_sparql) {
-        (Some(_), Some(_)) => return Err("pass either --query or --sparql, not both".into()),
-        (None, None) => {
-            return Err("nothing to run — pass --query <name>, --sparql '<…>' or --list".into())
+    // Resolve the SPARQL to run. --citations is its own mode: it always runs the
+    // finding-provenance canned query, so it cannot be combined with --query/--sparql
+    // (and --json stays the nl_tool envelope, which has no citation fields).
+    let sparql: String = if citations {
+        if query_name.is_some() || raw_sparql.is_some() {
+            return Err("--citations runs the finding-provenance canned query; do not combine it with --query/--sparql".into());
         }
-        (Some(name), None) => {
-            let q = canned::by_name(name)
-                .ok_or_else(|| format!("no canned query named `{name}` (try --list)"))?;
-            q.render(arg)
+        if json {
+            return Err("--citations has no --json form (the NL-tool envelope carries no citation fields)".into());
         }
-        (None, Some(s)) => s.to_string(),
+        canned::FINDING_PROVENANCE.render(None)
+    } else {
+        match (query_name, raw_sparql) {
+            (Some(_), Some(_)) => return Err("pass either --query or --sparql, not both".into()),
+            (None, None) => {
+                return Err(
+                    "nothing to run — pass --query <name>, --sparql '<…>', --citations or --list"
+                        .into(),
+                )
+            }
+            (Some(name), None) => {
+                let q = canned::by_name(name)
+                    .ok_or_else(|| format!("no canned query named `{name}` (try --list)"))?;
+                q.render(arg)
+            }
+            (None, Some(s)) => s.to_string(),
+        }
     };
 
     // Surface the executed SPARQL (the design's "surface the executed SPARQL" rule).
@@ -186,6 +212,22 @@ fn run(args: &[String]) -> Result<(), String> {
             None => nl_tool::run_raw(&graph, &sparql)?,
         };
         println!("{}", envelope.to_json());
+        return Ok(());
+    }
+
+    // --citations: render each Finding with its [source] citation, then the MEASURED
+    // metrics (sq-2489d.11 / sq-pdvx7). Rendered text on stdout; metrics on stderr,
+    // mirroring the "N row(s)." convention.
+    if citations {
+        let result = ask_pkg(&graph, &sparql)?;
+        let report = render_citations(&graph, &result);
+        print!("{}", report.rendered_text);
+        eprintln!(
+            "\n{} citation(s); {} fabricated; resolution rate {:.2}.",
+            report.metrics.total_citations,
+            report.metrics.fabricated_count,
+            report.metrics.citation_resolution_rate()
+        );
         return Ok(());
     }
 
