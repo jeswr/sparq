@@ -391,6 +391,60 @@ class TestSelectionSemantics(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("selection pre-job", out)
 
+    def test_cancelled_draft_select_not_forgiven_by_full_success(self):
+        # [OPUS-4.8] cross-provider review of PR #3417, finding 1: the any-success
+        # rule is SAME-TIER only. A full-tier select success must NOT erase a
+        # later cancelled DRAFT-tier instance — that instance must stay visible
+        # (fail-closed: the draft_selects_unsuperseded hold accounts for draft
+        # instances per-instance; erasing one by a cross-tier name collision
+        # would under-count the hold). Strictly-later cross-tier supersession is
+        # a different, still-supported path (the un-draft flow).
+        runs = [R(SELECT_NAME, conclusion="success", started="2026-01-01T00:00:10Z", rid=2),
+                R(SELECT_NAME + ", draft-tier", conclusion="cancelled",
+                  started="2026-01-01T00:00:20Z", rid=3),
+                R("x", conclusion="skipped"), GREEN]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1, "a cross-tier success must not forgive a cancelled draft select")
+        self.assertIn("selection pre-job", out)
+
+    def test_cancelled_full_select_not_forgiven_by_draft_success(self):
+        # [OPUS-4.8] finding 1, other direction: a DRAFT-tier select success must
+        # never stand in for a cancelled FULL-tier selection (draft-assembled
+        # evidence never satisfies a full-tier verdict, design #2537).
+        runs = [R(SELECT_NAME + ", draft-tier", conclusion="success",
+                  started="2026-01-01T00:00:10Z", rid=2),
+                R(SELECT_NAME, conclusion="cancelled",
+                  started="2026-01-01T00:00:20Z", rid=3),
+                R("x", conclusion="skipped"), GREEN]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1, "a draft-tier success must not forgive a cancelled full-tier select")
+        self.assertIn("selection pre-job", out)
+
+    def test_cancelled_compound_select_keeps_strictly_later_rule(self):
+        # [OPUS-4.8] cross-provider review of PR #3417, finding 2: the compound
+        # fv-select + fv-manifest job CONTAINS the selection phrase but carries
+        # independent gating evidence (the proof-inventory manifest), so it is
+        # NOT a pure select and must keep the strictly-later supersession rule:
+        # an EARLIER success never forgives its later cancellation.
+        compound = "fv-select (change-based test selection) + fv-manifest (proof inventory)"
+        runs = [R(compound, conclusion="success", started="2026-01-01T00:00:10Z", rid=2),
+                R(compound, conclusion="cancelled", started="2026-01-01T00:00:20Z", rid=3),
+                R("x", conclusion="skipped"), GREEN]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1, "an earlier success must not forgive a later cancelled compound select+evidence job")
+        self.assertIn("selection pre-job", out)
+
+    def test_pure_select_detection_contract(self):
+        # is_pure_select gates ONLY the forgiveness widening: pure reusable
+        # selector names (tier-marked or not) qualify; the compound
+        # select+manifest job and non-select legs do not.
+        self.assertTrue(g.is_pure_select(SELECT_NAME))
+        self.assertTrue(g.is_pure_select(SELECT_NAME + ", draft-tier"))
+        self.assertFalse(g.is_pure_select(
+            "fv-select (change-based test selection) + fv-manifest (proof inventory)"))
+        self.assertFalse(g.is_pure_select("build + test"))
+        self.assertFalse(g.is_pure_select("gate"))
+
     def test_select_name_detection_contract(self):
         # The name-detection contract with .github/workflows/ci-select.yml (also
         # pinned cross-file by scripts/tests/test_ci_select_wiring.py).
