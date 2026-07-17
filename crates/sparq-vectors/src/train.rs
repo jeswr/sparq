@@ -60,7 +60,7 @@ use crate::structure::{
     is_embeddable, Corrupt, NegativeSampler, SamplingMode, TermScope, TypeConstraints,
 };
 use rustc_hash::FxHashMap;
-use sparq_core::dict::Id;
+use sparq_core::dict::{Id, TermParts};
 use sparq_core::Graph;
 
 /// SplitMix64 step — the same deterministic PRNG the rest of the crate uses (kept local so
@@ -286,6 +286,84 @@ impl TrainedModel {
         let rr = *self.rel_row.get(&r)?;
         let tr = *self.entity_row.get(&t)?;
         Some(self.score_rows(hr, rr, tr))
+    }
+
+    /// The **compositional STATEMENT-level encoding** of parameter rows `(h_row, r_row, t_row)` —
+    /// the per-component interaction terms of the model's own scoring product, as a `dim`-float
+    /// vector. [SONNET-4.6] sq-1e5kk (follow-up to the node-level quoted-terms visibility arm).
+    ///
+    /// Construction, per [`ModelKind`]:
+    /// - [`ModelKind::DistMult`]: `v[i] = e_h[i]·w_r[i]·e_t[i]` — the trilinear product *before*
+    ///   the final sum, so `v.iter().sum::<f32>()` recovers [`TrainedModel::score_rows`] exactly
+    ///   (same products, same summation order).
+    /// - [`ModelKind::ComplEx`]: the complex Hadamard product `e_h ∘ w_r ∘ conj(e_t)` in the
+    ///   crate's real-half-then-imaginary-half layout (`v[i] = Re_i`, `v[dim/2 + i] = Im_i`). The
+    ///   real half sums to [`TrainedModel::score_rows`] (the Hermitian score keeps only the real
+    ///   part); the imaginary half carries the direction information the scalar score discards.
+    ///
+    /// The encoding is **deterministic and derived** — no new parameters are trained, so it
+    /// inherits the trainer's bit-for-bit reproducibility. It lives in the model's **interaction
+    /// space, not entity space**: never compare it against entity rows (or store it beside them in
+    /// one index) — its only meaningful comparisons are with other statement encodings from the
+    /// same model. **No accuracy claim is made**: whether this representation helps any downstream
+    /// task is empirical, and adoption stays measurement-gated like every other axis here.
+    pub fn encode_statement_rows(&self, h_row: usize, r_row: usize, t_row: usize) -> Vec<f32> {
+        let h = self.entity_vec(h_row);
+        let r = self.rel_vec(r_row);
+        let t = self.entity_vec(t_row);
+        match self.model {
+            ModelKind::DistMult => (0..self.dim).map(|i| h[i] * r[i] * t[i]).collect(),
+            ModelKind::ComplEx => {
+                let half = self.dim / 2;
+                let mut v = vec![0.0f32; self.dim];
+                for i in 0..half {
+                    let (h_re, h_im) = (h[i], h[half + i]);
+                    let (r_re, r_im) = (r[i], r[half + i]);
+                    let (t_re, t_im) = (t[i], t[half + i]);
+                    // Real part: the identical term order `score_complex` sums, so the real half
+                    // of the encoding accumulates to the score bit-for-bit.
+                    v[i] = h_re * r_re * t_re + h_re * r_im * t_im + h_im * r_re * t_im
+                        - h_im * r_im * t_re;
+                    // Imaginary part of h·r·conj(t): Im((A + iB)(t_re − i·t_im)) = B·t_re − A·t_im
+                    // with A = Re(h·r), B = Im(h·r).
+                    v[half + i] = (h_re * r_im + h_im * r_re) * t_re
+                        - (h_re * r_re - h_im * r_im) * t_im;
+                }
+                v
+            }
+        }
+    }
+
+    /// [`TrainedModel::encode_statement_rows`] for a triple of dict-ids, or `None` if any
+    /// constituent is unknown to the model (mirrors [`TrainedModel::score`]): the head/tail need
+    /// entity rows, the predicate a relation row. A nested quoted-triple *constituent* resolves
+    /// through its own node-level entity row (present only under [`TermScope::Embeddable`]
+    /// training where it appeared as a triple endpoint) — composition is deliberately **one level
+    /// deep**, never recursive: a
+    /// statement encoding lives in interaction space and must not be re-fed as an entity vector.
+    pub fn encode_statement(&self, h: Id, r: Id, t: Id) -> Option<Vec<f32>> {
+        let hr = self.entity_row(h)?;
+        let rr = self.rel_row(r)?;
+        let tr = self.entity_row(t)?;
+        Some(self.encode_statement_rows(hr, rr, tr))
+    }
+
+    /// The compositional STATEMENT-level encoding of the RDF 1.2 **quoted-triple term** `term` —
+    /// unpack its `(s, p, o)` constituent ids from the dictionary and delegate to
+    /// [`TrainedModel::encode_statement`]. `None` if `term` is not a quoted-triple term or any
+    /// constituent is unknown to the model. [SONNET-4.6] sq-1e5kk.
+    ///
+    /// This is the compositional counterpart of the **node-level** quoted-terms path (which stays
+    /// intact and independent): under [`TermScope::Embeddable`] a quoted term gets an *opaque*
+    /// entity row ([`TrainedModel::entity_row`]); this encoder
+    /// instead composes a vector from the quoted `(s, p, o)` *content*. The two coexist — and
+    /// because the constituents are ordinary atomic terms, the statement encoding is available
+    /// even under the default `IriBlank` scope, where the quoted term itself has **no** row.
+    pub fn encode_quoted_term(&self, graph: &Graph, term: Id) -> Option<Vec<f32>> {
+        match graph.dict.term_parts(term) {
+            TermParts::Triple([h, p, t]) => self.encode_statement(h, p, t),
+            _ => None,
+        }
     }
 
     /// Mean L2 norm of the entity embeddings — a cheap **non-degeneracy** probe. A collapsed model
@@ -1014,5 +1092,113 @@ ex:alice ex:owns ex:milo .
         assert_eq!(on_report.epoch_loss, on_report2.epoch_loss);
         assert_eq!(on_model.entity_emb, on_model2.entity_emb);
         assert_eq!(on_model.rel_emb, on_model2.rel_emb);
+    }
+
+    // ---- Compositional STATEMENT-level encoder (sq-1e5kk) -------------------------------------
+
+    #[test]
+    fn statement_encoding_sums_to_the_score_for_both_models() {
+        // The load-bearing construction invariant: the encoding is the model's OWN interaction
+        // product before the final sum, so summing it (DistMult: all of it; ComplEx: the real
+        // half) must recover the scalar score — a wrong composition goes red here.
+        let c = close_for_vectorise(TTL, "turtle", Profile::Rdfs).unwrap();
+        let tc = TypeConstraints::mine(&c.graph);
+        let owns = c.graph.id_of(&iri("http://ex/owns")).unwrap();
+        let alice = c.graph.id_of(&iri("http://ex/alice")).unwrap();
+        let rex = c.graph.id_of(&iri("http://ex/rex")).unwrap();
+        let tom = c.graph.id_of(&iri("http://ex/tom")).unwrap();
+
+        for kind in [ModelKind::DistMult, ModelKind::ComplEx] {
+            let cfg = TrainConfig::small_with_model(kind, SamplingMode::TypeConstrained, 5);
+            let (model, _) = train(&c.graph, &tc, cfg);
+
+            let v = model.encode_statement(alice, owns, rex).unwrap();
+            assert_eq!(v.len(), model.dim, "{:?}: full-dim encoding", kind);
+            let score = model.score(alice, owns, rex).unwrap();
+            let summed: f32 = match kind {
+                ModelKind::DistMult => v.iter().sum(),
+                ModelKind::ComplEx => v[..model.dim / 2].iter().sum(),
+            };
+            assert!(
+                (summed - score).abs() <= 1e-5 * score.abs().max(1.0),
+                "{:?}: encoding must sum to the model score: {} vs {}",
+                kind,
+                summed,
+                score
+            );
+
+            // Compositional: changing one constituent changes the encoding.
+            let v2 = model.encode_statement(alice, owns, tom).unwrap();
+            assert_ne!(v, v2, "{:?}: the tail must change the encoding", kind);
+
+            // Unknown constituents abstain: `alice` has no RELATION row.
+            assert!(
+                model.encode_statement(alice, alice, rex).is_none(),
+                "{:?}: a non-relation predicate must yield None",
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_terms_encode_compositionally_under_both_scopes() {
+        // The statement-level encoder gives compositional access to a quoted triple's (s, p, o)
+        // content under BOTH scopes — including the default `IriBlank`, where the quoted term has
+        // no node row at all — and leaves the node-level path intact under `Embeddable`.
+        let ttl = crate::eval::synthetic_rdf12_ttl(48, 7);
+        let c = close_for_vectorise(&ttl, "ntriples", Profile::Rdfs).unwrap();
+        let g = &c.graph;
+        let tc = TypeConstraints::mine(g);
+
+        // A quoted term + its constituents (the slice reifies BASE claims, so every constituent
+        // is an already-rowed atomic term under both scopes).
+        let tt = g
+            .iter_ids()
+            .map(|[_, _, o]| o)
+            .find(|&o| matches!(g.dict.term_parts(o), TermParts::Triple(_)))
+            .expect("the rdf12 slice must carry quoted terms");
+        let TermParts::Triple([h, p, t]) = g.dict.term_parts(tt) else {
+            unreachable!()
+        };
+
+        // OFF arm (default `IriBlank`): NO node-level row, yet the statement encoding composes.
+        let (off, _) = train(g, &tc, TrainConfig::small(SamplingMode::Unconstrained, 5));
+        assert!(off.entity_row(tt).is_none(), "no node-level row OFF");
+        let v = off
+            .encode_quoted_term(g, tt)
+            .expect("statement encoding must compose from the constituents OFF");
+        assert_eq!(
+            v,
+            off.encode_statement(h, p, t).unwrap(),
+            "quoted-term encoding == the encoding of its unpacked (s, p, o)"
+        );
+        let score = off.score(h, p, t).unwrap();
+        let summed: f32 = v[..off.dim / 2].iter().sum(); // small() is ComplEx
+        assert!(
+            (summed - score).abs() <= 1e-5 * score.abs().max(1.0),
+            "real half must sum to the quoted content's score: {} vs {}",
+            summed,
+            score
+        );
+        // An atomic term is not a statement: the encoder abstains (the node-level path for
+        // atomic terms is `entity_row`/`entity_vec`, unchanged).
+        assert!(off.encode_quoted_term(g, h).is_none());
+
+        // ON arm (`Embeddable`): the node-level opaque row is INTACT and the statement-level
+        // encoding coexists as a distinct representation.
+        let mut on_cfg = TrainConfig::small(SamplingMode::Unconstrained, 5);
+        on_cfg.term_scope = TermScope::Embeddable;
+        let (on, _) = train(g, &tc, on_cfg);
+        let row = on.entity_row(tt).expect("node-level row intact ON");
+        let sv = on.encode_quoted_term(g, tt).expect("statement encoding ON");
+        assert_ne!(
+            sv.as_slice(),
+            on.entity_vec(row),
+            "statement-level encoding must be distinct from the node-level row"
+        );
+
+        // Derived, no new parameters ⇒ determinism is inherited from the trainer.
+        let (on2, _) = train(g, &tc, on_cfg);
+        assert_eq!(sv, on2.encode_quoted_term(g, tt).unwrap());
     }
 }
