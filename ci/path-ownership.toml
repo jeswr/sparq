@@ -250,6 +250,18 @@ readers = ["sparq-acbench"]
 pattern = "research/**"
 safe = true
 
+# [OPUS-4.8] path-aware CI: top-level prose docs (docs/*.md — branch-protection,
+# upstream-proposals, guides). AUDIT-PROVEN inert: no workspace crate include_str!/
+# include_bytes!/reads docs/ (the audit re-verifies every run), and docs/ is all
+# markdown (0 non-.md files). NOTE a *crate-owned* README.md/*.md is NOT covered by
+# this — it stays crate-owned (doctest include_str! risk, design §3.2); this is the
+# repo-level docs/ tree only. The docs-quality lane (markdownlint/links) is a
+# separate workflow and still runs. Lets a docs-only PR skip the bench/fuzz seed
+# lanes too (the wide ci.yml/feature-matrix legs already skip via rust_changed).
+[[map]]
+pattern = "docs/**"
+safe = true
+
 # The marketing/explanatory website (Next.js). Owns its own CI lane (pages.yml);
 # no Rust crate reads site/.
 [[map]]

@@ -314,6 +314,29 @@ class TestSelectionSemantics(unittest.TestCase):
         self.assertIn("2 skipped", out)
         self.assertIn("selection pre-job succeeded", out)
 
+    def test_orchestration_only_pr_gate_passes_with_codeql_and_engine_skipped(self):
+        # [OPUS-4.8] path-aware CI: the concrete orchestration-only PR (#3416 class —
+        # routing.toml + triage.py) sibling set. CodeQL is `skipped` (its new
+        # rust_changed guard), every engine lane + opt-in leg is `skipped` (empty
+        # affected closure), the cheap gates run green, and `select` concludes
+        # SUCCESS (mode=selected attributes the skips). The gate must render PASS —
+        # a fast green for an orchestration PR with the whole Rust matrix skipped.
+        runs = [
+            SEL_OK,
+            R("CodeQL analysis (rust)", conclusion="skipped"),
+            R("test (load-aware shard bulk 1/3)", conclusion="skipped"),
+            R("opt-in sparq-engine (paths)", conclusion="skipped"),
+            R("bench (deterministic ratchet)", conclusion="skipped"),
+            R("differential-smoke", conclusion="skipped"),
+            R("docs-quality quick-gates", conclusion="success"),
+        ]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 0)
+        self.assertIn("PASSED", out)
+        self.assertIn("selection pre-job succeeded", out)
+        # CodeQL's skip is attributed (select green), never a false RED.
+        self.assertNotIn("FAILED", out)
+
     def test_real_failure_still_fails_under_selection(self):
         # Invariant 2: selection must never mask a genuine failure.
         runs = [SEL_OK, RED, R("docs", conclusion="skipped")]
