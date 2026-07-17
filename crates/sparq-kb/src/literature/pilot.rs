@@ -25,7 +25,8 @@
 //! 4. **HONEST METRICS** — the sidecar is an append-only JSONL chain (`SidecarFile`):
 //!    each line carries `seq` + the FNV-1a hash of the previous raw line, so any
 //!    retro-edit breaks verification and further appends refuse. Metrics (grounding rate,
-//!    SHACL conformance, quarantine counts + reasons, audited precision) are recorded
+//!    SHACL conformance, quarantine counts + reasons, extractor boundary-reject counts +
+//!    reasons, audited precision) are recorded
 //!    verbatim. The committed sidecar carries **no abstract-derived text** (fail-closed
 //!    licensing: justifications stay in the LOCAL staging area only).
 //! 5. **VERDICT** — one terminal `adopt-topic | iterate | abandon` record per run;
@@ -48,7 +49,7 @@ use std::path::{Path, PathBuf};
 use serde_json::{json, Value};
 
 use super::connector::{parse_openalex_batch, SourceStub};
-use super::extract::{CandidateFinding, Extractor};
+use super::extract::{BoundaryReject, CandidateFinding, Extractor};
 use super::extract_live::build_batch_prompt;
 use super::pipeline::{
     self, current_generated_at_time, BatchCompleteness, TieredOutput, MACHINE_AGENT_IRI,
@@ -695,6 +696,7 @@ impl PilotRun {
                 m.error = Some(e.clone());
                 m.subagent_invocations = ledger.invocations_used();
                 m.prompt_bytes_total = ledger.prompt_bytes_used();
+                m.set_boundary_rejects(&extractor.boundary_rejects());
                 // Best-effort trace: if even the metrics append fails, surface the
                 // original error (the append error is secondary).
                 let _ = self.record_metrics(&m);
@@ -802,7 +804,7 @@ impl PilotRun {
         }
 
         let sc = &tiered.sidecar;
-        Ok(RunMetrics {
+        let mut m = RunMetrics {
             fetched_records: inputs.fetch.fetched_records,
             skipped_records: skipped,
             api_requests: inputs.fetch.api_requests,
@@ -810,6 +812,9 @@ impl PilotRun {
             batch_complete: completeness.is_complete(),
             subagent_invocations: invocations,
             prompt_bytes_total: ledger.prompt_bytes_used(),
+            boundary_rejects: 0,
+            boundary_reject_reasons: BTreeMap::new(),
+            boundary_rejects_detail: Vec::new(),
             candidates_total: sc.candidates_total,
             grounded: sc.grounded,
             grounding_rate: sc.grounding_rate(),
@@ -836,7 +841,11 @@ impl PilotRun {
                 .map(|d| d.display().to_string())
                 .unwrap_or_default(),
             error: None,
-        })
+        };
+        // The extractor's own defensive-boundary drops (sq-tx8v9): counted into the
+        // metrics record so the fetched→extracted honesty gap is never invisible.
+        m.set_boundary_rejects(&extractor.boundary_rejects());
+        Ok(m)
     }
 
     /// Append the `metrics` record (verbatim, append-only).
@@ -974,6 +983,16 @@ pub struct RunMetrics {
     pub subagent_invocations: usize,
     /// Total prompt bytes sent (the cost-ceiling proxy).
     pub prompt_bytes_total: usize,
+    /// Candidates the extractor REJECTED at its own defensive boundary (likely
+    /// hallucinations dropped BEFORE the pipeline — `sq-tx8v9`: counted, never silent;
+    /// `candidates_total` below counts only the survivors, so `grounding_rate` alone
+    /// cannot show these drops).
+    pub boundary_rejects: usize,
+    /// Boundary-reject reason-category → count.
+    pub boundary_reject_reasons: BTreeMap<String, usize>,
+    /// Per-boundary-reject `(source DOI, reason category)` — the "rejected + why" trace
+    /// at the extraction boundary (no justification text).
+    pub boundary_rejects_detail: Vec<(String, String)>,
     /// Candidate findings the extractor proposed.
     pub candidates_total: usize,
     /// Candidates that passed the deterministic grounding-resolver.
@@ -1019,6 +1038,9 @@ impl RunMetrics {
             batch_complete: fetch.complete && !fetch.records_capped,
             subagent_invocations: 0,
             prompt_bytes_total: 0,
+            boundary_rejects: 0,
+            boundary_reject_reasons: BTreeMap::new(),
+            boundary_rejects_detail: Vec::new(),
             candidates_total: 0,
             grounded: 0,
             grounding_rate: 0.0,
@@ -1038,6 +1060,23 @@ impl RunMetrics {
         }
     }
 
+    /// Record the extractor's defensive-boundary drops into the metrics (`sq-tx8v9`:
+    /// boundary rejects are COUNTED, never silently dropped). Only the source DOI +
+    /// stable reason category are carried — never any abstract-derived text, so the
+    /// committed sidecar stays licence-safe.
+    pub fn set_boundary_rejects(&mut self, rejects: &[BoundaryReject]) {
+        self.boundary_rejects = rejects.len();
+        let mut reasons = BTreeMap::new();
+        for r in rejects {
+            *reasons.entry(r.reason.clone()).or_insert(0) += 1;
+        }
+        self.boundary_reject_reasons = reasons;
+        self.boundary_rejects_detail = rejects
+            .iter()
+            .map(|r| (r.source_doi.clone(), r.reason.clone()))
+            .collect();
+    }
+
     /// The sidecar `metrics` record (append-only JSON; carries the structural
     /// [`UNCALIBRATED_NOTICE`]).
     pub fn to_json(&self) -> Value {
@@ -1050,6 +1089,11 @@ impl RunMetrics {
             "batch_complete": self.batch_complete,
             "subagent_invocations": self.subagent_invocations,
             "prompt_bytes_total": self.prompt_bytes_total,
+            "boundary_rejects": self.boundary_rejects,
+            "boundary_reject_reasons": self.boundary_reject_reasons,
+            "boundary_rejects_detail": self.boundary_rejects_detail.iter()
+                .map(|(doi, reason)| json!({ "source_doi": doi, "reason": reason }))
+                .collect::<Vec<_>>(),
             "candidates_total": self.candidates_total,
             "grounded": self.grounded,
             "grounding_rate": self.grounding_rate,
@@ -1834,6 +1878,11 @@ mod tests {
         // Quarantine reasons categorised, with per-candidate why.
         assert_eq!(m.quarantine_reasons.values().sum::<usize>(), 2);
         assert_eq!(m.quarantined_detail.len(), 2);
+        // A replay extractor applies no defensive boundary: zero rejects, recorded
+        // honestly (the live-extractor threading is pinned by its own test below).
+        assert_eq!(m.boundary_rejects, 0);
+        assert!(m.boundary_reject_reasons.is_empty());
+        assert!(m.boundary_rejects_detail.is_empty());
 
         // Staging artifacts exist (the dry run's ONLY artifact surface).
         for f in [
@@ -1864,6 +1913,7 @@ mod tests {
         // The metrics record is honest: verbatim fields + the structural notice.
         let metrics = &chain[1];
         assert_eq!(metrics["grounded"], 4);
+        assert_eq!(metrics["boundary_rejects"], 0);
         assert_eq!(metrics["confidence_notice"], UNCALIBRATED_NOTICE);
         assert_eq!(metrics["error"], Value::Null);
         // The committed-sidecar licensing invariant: NO abstract-derived text. Every
@@ -1871,6 +1921,63 @@ mod tests {
         let sidecar_raw = std::fs::read_to_string(run.sidecar().path()).unwrap();
         assert!(!sidecar_raw.contains("chunk-parallel"), "no abstract text in sidecar");
         assert!(!sidecar_raw.contains("zero-knowledge protocol"), "no abstract text");
+    }
+
+    #[test]
+    fn boundary_rejects_are_threaded_into_the_sidecar_metrics() {
+        // The sq-tx8v9 invariant end-to-end: an extractor's defensive-boundary drops are
+        // COUNTED (reason-tagged, no text) in the committed sidecar metrics record — the
+        // grounding_rate=1.0/quarantined=0 blind spot the first pilot iteration found.
+        let dir = tmpdir("boundary-rejects");
+        let run =
+            PilotRun::preregister(test_cfg("boundary-rejects"), dir.join("s.jsonl")).unwrap();
+        struct Rejecting(RecordedExtractor);
+        impl Extractor for Rejecting {
+            fn extract(&self, stubs: &[SourceStub]) -> Result<Vec<CandidateFinding>, String> {
+                self.0.extract(stubs)
+            }
+            fn boundary_rejects(&self) -> Vec<BoundaryReject> {
+                vec![
+                    BoundaryReject {
+                        source_doi: "10.1/a".to_string(),
+                        reason: "justification-not-anchored".to_string(),
+                    },
+                    BoundaryReject {
+                        source_doi: "10.1/b".to_string(),
+                        reason: "justification-not-anchored".to_string(),
+                    },
+                    BoundaryReject {
+                        source_doi: "10.1/c".to_string(),
+                        reason: "unknown-source".to_string(),
+                    },
+                ]
+            }
+        }
+        let ex = Rejecting(RecordedExtractor::from_fixture().unwrap());
+        let mut ledger = CapLedger::new(HardCaps::default());
+        let m = run
+            .execute_dry(&fixture_inputs(None), &ex, &mut ledger, None)
+            .unwrap();
+        assert_eq!(m.boundary_rejects, 3, "boundary drops counted, never silent");
+        assert_eq!(m.boundary_reject_reasons["justification-not-anchored"], 2);
+        assert_eq!(m.boundary_reject_reasons["unknown-source"], 1);
+        assert_eq!(m.boundary_rejects_detail.len(), 3);
+        // The counts land VERBATIM in the committed sidecar metrics record.
+        let chain = run.sidecar().chain().unwrap();
+        let metrics = &chain[1];
+        assert_eq!(metrics["boundary_rejects"], 3);
+        assert_eq!(metrics["boundary_reject_reasons"]["unknown-source"], 1);
+        assert_eq!(
+            metrics["boundary_rejects_detail"][0]["source_doi"],
+            "10.1/a"
+        );
+        assert_eq!(
+            metrics["boundary_rejects_detail"][0]["reason"],
+            "justification-not-anchored"
+        );
+        // No abstract-derived text rides along (DOIs + categories only).
+        let raw = std::fs::read_to_string(run.sidecar().path()).unwrap();
+        assert!(!raw.contains("chunk-parallel"), "no abstract text in sidecar");
     }
 
     #[test]

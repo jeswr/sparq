@@ -9,23 +9,27 @@
 //!
 //! 1. **`eval ≡ naive reference` (`family1_*`).** A random small graph and a random
 //!    query (BGP / OPTIONAL / UNION / FILTER / BIND / DISTINCT / subset projection /
-//!    ORDER BY / LIMIT) are generated; the engine's solution multiset must equal an
-//!    in-test naive nested-loop evaluator's under MULTISET semantics (§2.1 of the
-//!    comparison-model record). ORDER BY output is additionally checked for
-//!    sortedness (see family 3); ORDER BY + LIMIT without a total order is checked
-//!    as sub-multiset + cardinality (§2.2: which key-tied rows survive a slice is
-//!    implementation-defined).
+//!    ORDER BY / LIMIT / OFFSET) are generated; the engine's solution multiset must
+//!    equal an in-test naive nested-loop evaluator's under MULTISET semantics (§2.1
+//!    of the comparison-model record). ORDER BY output is additionally checked for
+//!    sortedness (see family 3); any LIMIT/OFFSET slice without a total order is
+//!    checked as sub-multiset + cardinality (§2.2: which rows survive a slice is
+//!    implementation-defined, but HOW MANY survive is not).
 //! 2. **Join-order invariance (`family2_*`).** Permuting the triple patterns of a
 //!    BGP never changes the result multiset — the planner (greedy GOO, or DPccp
 //!    under `dp-planner`) reorders for performance only.
 //! 3. **ORDER BY laws (`family3_*` + the sortedness check inside family 1).**
 //!    Over tie-free integer sort keys the engine's ASC sequence equals the oracle's
-//!    exact sort, DESC is its exact reverse, and LIMIT k is the exact k-prefix.
-//!    Over arbitrary mixed-kind keys the engine sequence must respect every pair
-//!    the SPARQL ordering defines: unbound < blank < IRI < literal, IRIs by
-//!    codepoint, numerics by value, xsd:string by codepoint, booleans false<true.
-//!    Pairs the spec leaves open (cross-literal-class, langString, bnode labels)
-//!    are deliberately unconstrained.
+//!    exact sort, DESC is its exact reverse, LIMIT k is the exact k-prefix, and
+//!    OFFSET j (with or without LIMIT) is the exact window. Over arbitrary
+//!    mixed-kind keys the engine sequence must respect the engine's DOCUMENTED
+//!    total order (`sparq_substrate::compare::compare_terms`, the Kani-proved
+//!    sq-wjl8i order): unbound < blank < IRI < literal; literals KIND-FIRST
+//!    (numeric < boolean < string < langString); IRIs / xsd:strings by codepoint;
+//!    numerics by value with NaN totalised FIRST (before -INF, equal to itself);
+//!    booleans false < true; langStrings lex-first (tag ties engine-defined,
+//!    unconstrained here — sq-ilweo promoted these arms from "unconstrained").
+//!    Only bnode-label pairs remain deliberately unconstrained.
 //!
 //! # Oracle independence
 //!
@@ -62,8 +66,28 @@
 //! * `BIND` arithmetic: int+int → canonical integer; decimal+int keeps the operand's
 //!   scale ("1.50"+1 → "2.50"); a type-error BIND leaves the variable UNBOUND and
 //!   keeps the row. Computed booleans render as `"true|false"^^xsd:boolean`.
-//! * ORDER BY: unbound < blank < IRI < literal; IRIs / xsd:strings by codepoint;
-//!   numerics by value across int/decimal/double; booleans false < true.
+//! * computed xsd:double lexicals (sq-ilweo): a double+int BIND promotes to double
+//!   and renders via the arithmetic convention (`Num::lexical` → `fmt_xsd_double`):
+//!   `NaN`/`INF`/`-INF` keep their XSD spellings; an INTEGRAL value with |v| < 1e15
+//!   prints as a PLAIN integer ("101", and -0.0 → "0"); anything else prints as the
+//!   shortest-round-trip mantissa-E-exponent form with ≥ 1 fraction digit ("2.5E0",
+//!   "2.0E-1"). The oracle re-derives this INDEPENDENTLY via the `ryu` shortest
+//!   formatter (`fmt_double_oracle`), not the engine's `format!("{:E}")` path.
+//! * xsd:double NaN (sq-ilweo): `=` on NaN is sameTerm-true for the identical
+//!   `"NaN"^^xsd:double` term (the open-world identical-terms fast path) and FALSE
+//!   against any other numeric (op:numeric-equal is undecided → known-different);
+//!   `<` `>` against a numeric constant is a TYPE ERROR (the stored-NaN numeric
+//!   cache reads back as a miss, so NaN takes the strict path, where num_compare is
+//!   undecided); ORDER BY totalises NaN FIRST — before -INF, equal to itself.
+//! * ORDER BY: unbound < blank < IRI < literal; literals KIND-FIRST per the
+//!   substrate `LiteralKind` rank (numeric < boolean < string < langString);
+//!   IRIs / xsd:strings by codepoint; numerics by value across int/decimal/double
+//!   (NaN first); booleans false < true; langStrings by lexical, tag ties
+//!   engine-defined.
+//! * OFFSET j (with optional LIMIT k) over an oracle multiset of N rows returns
+//!   exactly `min(k, max(N - j, 0))` rows, each drawn from the oracle multiset
+//!   (§2.2 cardinality-only comparison — WHICH rows survive is only pinned under a
+//!   tie-free total order, checked in family 3).
 //!
 //! # Documented generator narrowings (each carries a reason + a follow-up bead)
 //!
@@ -74,16 +98,22 @@
 //!   per SPARQL 1.1 §17.2/§17.4.2 (differential: Oxigraph errors on both) and the
 //!   engine now conforms, so `is*()` ranges over ALL in-scope vars (including
 //!   possibly-unbound OPTIONAL/UNION/BIND vars) and `STR` sees bnodes.
-//! * `?v + k` masks xsd:double literals out of the generated graph AND rewrites any
-//!   constant xsd:double in the query's own pattern positions to an integer
-//!   (`strip_const_doubles`): a computed double's rendered lexical would require
-//!   replicating the engine's float formatter inside the oracle (an independence-trap
-//!   violation), and a pattern-const double is otherwise injected into the data by
-//!   `instantiate` where a variable could match it and reach the `PlusK` var.
-//!   Widening bead sq-ilweo.
-//! * xsd:double NaN is not generated: `<` is not a total order under NaN, so the
-//!   ORDER BY law has no spec-defined expectation (substrate-level NaN ordering is
-//!   covered by sparq-substrate/tests/proptest_order_numeric.rs). ±INF IS generated.
+//! * (RESOLVED, generation re-widened — sq-ilweo [FABLE-5]) `?v + k` used to mask
+//!   xsd:double literals out of the generated graph (and strip pattern-const
+//!   doubles) because rendering a computed double would have required replicating
+//!   the engine's float formatter inside the oracle. The oracle now derives the
+//!   lexical INDEPENDENTLY (`fmt_double_oracle`, built on the `ryu` shortest
+//!   round-trip formatter — a different implementation than the std `{:E}` path the
+//!   engine uses), with the engine's computed-double rules pinned first by
+//!   `oracle_known_answer_computed_double`. Doubles now flow into every generated
+//!   graph unconditionally.
+//! * (RESOLVED, generation re-widened — sq-ilweo [FABLE-5]) xsd:double NaN used to
+//!   be excluded because `<` is not a total order under NaN. The engine's
+//!   documented NaN totalisation (substrate `compare_terms`, Kani-proved under
+//!   sq-wjl8i, comparator-level coverage in
+//!   sparq-substrate/tests/proptest_order_numeric.rs) is NaN-FIRST, so the ORDER BY
+//!   law now encodes it and NaN is generated in graphs, pattern constants, and
+//!   FILTER constants (value semantics pinned by `oracle_known_answer_nan`).
 //!
 //! # Non-vacuity (mutation-verified, see PR)
 //!
@@ -114,7 +144,7 @@ const XSD: &str = "http://www.w3.org/2001/XMLSchema#";
 
 /// A test-side RDF term. Carries exactly the information needed to (a) emit the
 /// N-Triples data / SPARQL query text and (b) evaluate the naive reference.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 enum T {
     Iri(String),
     BNode(String),
@@ -127,10 +157,30 @@ enum T {
     /// xsd:decimal as (mantissa, scale), scale ≥ 1; lexical is the canonical
     /// scaled rendering (`render_dec`).
     Dec(i128, u32),
-    /// xsd:double as (lexical form, value). Data-sourced only (never computed by a
-    /// generated BIND — see the generator-narrowing notes in the header).
+    /// xsd:double as (lexical form, value): data-sourced from the fixed pool, or
+    /// computed by a `PlusK` BIND (lexical via `fmt_double_oracle` — sq-ilweo).
     Dbl(String, f64),
     Bool(bool),
+}
+
+/// TERM identity, not value identity — the semantics of BGP matching and of the
+/// oracle's join compatibility. `Dbl` compares by LEXICAL: `"0.0E0"` and `"-0.0E0"`
+/// are DISTINCT terms even though their values compare equal, and the `"NaN"` term
+/// EQUALS itself even though `NaN != NaN` as an f64 (a derived PartialEq would make
+/// a NaN data triple fail to match its own pattern constant). Mirrors the engine's
+/// canonicalising dictionary, which interns literals by (lexical, datatype).
+impl PartialEq for T {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (T::Iri(a), T::Iri(b)) | (T::BNode(a), T::BNode(b)) | (T::Str(a), T::Str(b)) => a == b,
+            (T::Lang(a, ta), T::Lang(b, tb)) => a == b && ta == tb,
+            (T::Int(a), T::Int(b)) => a == b,
+            (T::Dec(ma, sa), T::Dec(mb, sb)) => ma == mb && sa == sb,
+            (T::Dbl(a, _), T::Dbl(b, _)) => a == b,
+            (T::Bool(a), T::Bool(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 fn render_dec(m: i128, scale: u32) -> String {
@@ -151,6 +201,56 @@ fn render_dec(m: i128, scale: u32) -> String {
     }
     s.push_str(&frac_str);
     s
+}
+
+/// INDEPENDENT re-derivation of the engine's computed-xsd:double lexical rules
+/// (`sparq_substrate`'s `fmt_xsd_double`, pinned end-to-end by
+/// `oracle_known_answer_computed_double`): specials keep their XSD spellings; an
+/// integral |v| < 1e15 prints as a plain integer; everything else prints as the
+/// shortest-round-trip mantissa-E-exponent form with ≥ 1 fraction digit.
+///
+/// Independence (the §2.3 trap, sq-ilweo): the engine's non-integral arm formats
+/// with std's `format!("{v:E}")` (Grisu-style shortest with exact fallback); this
+/// oracle instead takes the shortest-round-trip DIGITS from the `ryu` crate — a
+/// separate implementation of a provably UNIQUE output (the shortest correctly-
+/// rounded decimal) — and normalises them to the same `m.mmE±e` convention.
+fn fmt_double_oracle(v: f64) -> String {
+    if v.is_nan() {
+        return "NaN".to_string();
+    }
+    if v == f64::INFINITY {
+        return "INF".to_string();
+    }
+    if v == f64::NEG_INFINITY {
+        return "-INF".to_string();
+    }
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        return format!("{}", v as i64); // note: -0.0 prints as "0"
+    }
+    let mut buf = ryu::Buffer::new();
+    let s = buf.format_finite(v); // e.g. "2.5", "0.2", "1e16", "-101.5"
+    let (neg, s) = match s.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, s),
+    };
+    let (digits_part, exp10): (&str, i32) = match s.split_once(['e', 'E']) {
+        Some((d, e)) => (d, e.parse().expect("ryu exponent")),
+        None => (s, 0),
+    };
+    let (int_d, frac_d) = digits_part.split_once('.').unwrap_or((digits_part, ""));
+    let digits = format!("{}{}", int_d, frac_d);
+    // exponent of the LEADING KEPT digit: position of the decimal point relative to
+    // the first significant digit, plus any explicit exponent.
+    let lead_zeros = digits.len() - digits.trim_start_matches('0').len();
+    let exp = exp10 + int_d.len() as i32 - 1 - lead_zeros as i32;
+    let kept = digits.trim_start_matches('0').trim_end_matches('0');
+    let kept = if kept.is_empty() { "0" } else { kept };
+    let mantissa = if kept.len() == 1 {
+        format!("{}.0", kept)
+    } else {
+        format!("{}.{}", &kept[..1], &kept[1..])
+    };
+    format!("{}{}E{}", if neg { "-" } else { "" }, mantissa, exp)
 }
 
 impl T {
@@ -201,11 +301,14 @@ fn num_of(t: &T) -> Option<Num> {
     }
 }
 
-/// Exact value comparison on the numeric tower. int/decimal compare exactly in
+/// TOTAL value comparison on the numeric tower. int/decimal compare exactly in
 /// i128; anything involving a double converts to f64 — exact for every value this
 /// file generates (|int| ≤ 4000, decimal mantissa/10^scale is a correctly-rounded
-/// quotient of small integers, doubles come from a fixed finite pool; NaN is never
-/// generated).
+/// quotient of small integers, doubles come from a fixed finite pool + NaN). NaN is
+/// TOTALISED FIRST — before -INF, equal to itself — mirroring the engine's ORDER BY
+/// order (substrate `compare_terms`, sq-wjl8i). The RELATIONAL operators guard NaN
+/// BEFORE calling this (`eq_spec` / `cmp_int_spec`): only the total order positions
+/// NaN.
 fn num_cmp(a: &Num, b: &Num) -> std::cmp::Ordering {
     use Num::*;
     match (a, b) {
@@ -221,7 +324,14 @@ fn num_cmp(a: &Num, b: &Num) -> std::cmp::Ordering {
         _ => {
             let fx = num_f64(a);
             let fy = num_f64(b);
-            fx.partial_cmp(&fy).expect("NaN is never generated")
+            match fx.partial_cmp(&fy) {
+                Some(o) => o,
+                None => match (fx.is_nan(), fy.is_nan()) {
+                    (true, false) => std::cmp::Ordering::Less,
+                    (false, true) => std::cmp::Ordering::Greater,
+                    _ => std::cmp::Ordering::Equal,
+                },
+            }
         }
     }
 }
@@ -249,7 +359,17 @@ fn eq_spec(a: &T, b: &T) -> Result<bool, ()> {
         (Str(x), Str(y)) => Ok(x == y),
         (Bool(x), Bool(y)) => Ok(x == y),
         _ => match (num_of(a), num_of(b)) {
-            (Some(x), Some(y)) => Ok(num_cmp(&x, &y) == std::cmp::Ordering::Equal),
+            (Some(x), Some(y)) => {
+                if num_f64(&x).is_nan() || num_f64(&y).is_nan() {
+                    // NaN `=` (probe-pinned, sq-ilweo): the IDENTICAL "NaN" term is
+                    // equal via the engine's open-world sameTerm fast path; any
+                    // OTHER numeric pairing is undecided by op:numeric-equal and
+                    // therefore known-different (false, not a type error).
+                    Ok(a == b)
+                } else {
+                    Ok(num_cmp(&x, &y) == std::cmp::Ordering::Equal)
+                }
+            }
             // cross-class among {numeric, string, boolean}: type error.
             _ => Err(()),
         },
@@ -257,9 +377,15 @@ fn eq_spec(a: &T, b: &T) -> Result<bool, ()> {
 }
 
 /// SPARQL `<` / `>` of a term against an integer constant: numeric-only, anything
-/// else is a type error (probe-pinned).
+/// else is a type error (probe-pinned). A NaN operand is ALSO a type error: the
+/// stored-NaN numeric cache reads back as a miss, so the engine takes the strict
+/// comparison path, where the NaN pair is undecided (sq-ilweo).
 fn cmp_int_spec(t: &T, k: i64) -> Result<std::cmp::Ordering, ()> {
-    num_of(t).map(|n| num_cmp(&n, &Num::I(k))).ok_or(())
+    let n = num_of(t).ok_or(())?;
+    if num_f64(&n).is_nan() {
+        return Err(());
+    }
+    Ok(num_cmp(&n, &Num::I(k)))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -411,6 +537,8 @@ struct Q {
     /// (variable ∈ project, descending?)
     order: Option<(V, bool)>,
     limit: Option<usize>,
+    /// OFFSET j — compared under the §2.2 cardinality-only model (sq-ilweo).
+    offset: Option<usize>,
 }
 
 impl Q {
@@ -443,6 +571,9 @@ impl Q {
         }
         if let Some(k) = self.limit {
             s.push_str(&format!(" LIMIT {}", k));
+        }
+        if let Some(j) = self.offset {
+            s.push_str(&format!(" OFFSET {}", j));
         }
         s
     }
@@ -544,9 +675,12 @@ fn eval_bind(b: &Bind, row: &Row) -> Option<T> {
         Bind::PlusK(v, k) => match row[*v as usize].as_ref()? {
             T::Int(n) => Some(T::Int(n + k)),
             T::Dec(m, s) => Some(T::Dec(m + (*k as i128) * 10i128.pow(*s), *s)),
-            // The generator masks doubles out of the graph when a PlusK BIND is
-            // present (header note): reaching this arm means the mask is broken.
-            T::Dbl(..) => panic!("generator mask violated: PlusK over a double"),
+            // double + int promotes to double (XPath promotion); the computed
+            // lexical is re-derived independently of the engine (sq-ilweo).
+            T::Dbl(_, v) => {
+                let r = v + *k as f64;
+                Some(T::Dbl(fmt_double_oracle(r), r))
+            }
             _ => None,
         },
         Bind::LtK(v, k) => {
@@ -718,8 +852,11 @@ fn parse_rendered(s: &str) -> T {
 }
 
 /// The partial SPARQL ordering the engine's total ORDER BY order must refine:
-/// coarse ranks (unbound < blank < IRI < literal) plus within-class orders where
-/// the spec/probes define them. Returns per-class monotonicity violations.
+/// coarse ranks — unbound < blank < IRI < literal, and WITHIN literals the
+/// engine's documented KIND-FIRST rank (numeric < boolean < string < langString,
+/// the substrate `LiteralKind` order of sq-wjl8i; promoted from "unconstrained" by
+/// sq-ilweo) — plus within-kind orders where the spec/probes define them. Returns
+/// per-class monotonicity violations.
 fn check_sorted(keys: &[Option<T>], desc: bool, ctx: &str) -> Result<(), String> {
     let oriented = |o: std::cmp::Ordering| if desc { o.reverse() } else { o };
     // (a) coarse rank sequence must be monotone.
@@ -727,7 +864,10 @@ fn check_sorted(keys: &[Option<T>], desc: bool, ctx: &str) -> Result<(), String>
         None => 0u8,
         Some(T::BNode(_)) => 1,
         Some(T::Iri(_)) => 2,
-        Some(_) => 3,
+        Some(T::Int(_) | T::Dec(..) | T::Dbl(..)) => 3,
+        Some(T::Bool(_)) => 4,
+        Some(T::Str(_)) => 5,
+        Some(T::Lang(..)) => 6,
     };
     let mut prev_rank: Option<u8> = None;
     for k in keys {
@@ -764,6 +904,14 @@ fn check_sorted(keys: &[Option<T>], desc: bool, ctx: &str) -> Result<(), String>
     })?;
     check_sub("boolean", &|k| match k {
         Some(T::Bool(b)) => Some(vec![u8::from(*b)]),
+        _ => None,
+    })?;
+    // langStrings sort LEX-FIRST (probe-pinned engine extension: the strict
+    // comparator decides same-tag pairs by value and the cross-tag fallback
+    // compares the lexical only) — so the LEXICAL subsequence must be monotone;
+    // the tag on a lexical tie is engine-defined and stays unconstrained.
+    check_sub("langString-lexical", &|k| match k {
+        Some(T::Lang(s, _)) => Some(s.as_bytes().to_vec()),
         _ => None,
     })?;
     // numerics: compare by exact value — encode as a monotone-comparable check via
@@ -813,11 +961,19 @@ fn check_case(data: &[[T; 3]], q: &Q, label: &str, rows: &[Vec<Option<String>>])
             oracle
         )
     };
-    match q.limit {
-        None => prop_assert_eq!(&en_ms, &or_ms, "multiset mismatch: {}", ctx()),
-        Some(k) => {
-            prop_assert_eq!(rows.len(), k.min(or_ms.len()), "LIMIT cardinality mismatch: {}", ctx());
-            prop_assert!(is_sub_multiset(&en_ms, &or_ms), "LIMIT rows not a sub-multiset: {}", ctx());
+    match (q.offset.unwrap_or(0), q.limit) {
+        (0, None) => prop_assert_eq!(&en_ms, &or_ms, "multiset mismatch: {}", ctx()),
+        (j, l) => {
+            // §2.2 cardinality-only slice model (sq-ilweo widened to OFFSET):
+            // OFFSET drops exactly j rows (saturating), LIMIT then caps at k;
+            // WHICH rows survive is implementation-defined without a total order,
+            // but every surviving row must come from the oracle multiset.
+            let expected = {
+                let after_offset = or_ms.len().saturating_sub(j);
+                l.map_or(after_offset, |k| after_offset.min(k))
+            };
+            prop_assert_eq!(rows.len(), expected, "LIMIT/OFFSET cardinality mismatch: {}", ctx());
+            prop_assert!(is_sub_multiset(&en_ms, &or_ms), "sliced rows not a sub-multiset: {}", ctx());
         }
     }
     if let Some((v, desc)) = &q.order {
@@ -846,8 +1002,10 @@ const PRED_IRIS: [&str; 4] = ["http://ex/p0", "http://ex/p1", "http://ex/p2", "h
 const BNODE_LABELS: [&str; 3] = ["b0", "b1", "b2"];
 const STR_POOL: [&str; 6] = ["", "a", "b", "ab", "hi", "z9"];
 const LANG_TAGS: [&str; 2] = ["en", "fr"];
-/// Fixed double pool: (lexical, value). Finite values + ±INF; no NaN (header note).
-const DBL_POOL: [(&str, f64); 7] = [
+/// Fixed double pool: (lexical, value). Finite values, ±INF, AND NaN (sq-ilweo
+/// re-widened — computed-double lexicals and the NaN semantics are now modelled,
+/// see the header).
+const DBL_POOL: [(&str, f64); 9] = [
     ("0.0E0", 0.0),
     ("-0.0E0", -0.0),
     ("1.5E0", 1.5),
@@ -855,42 +1013,22 @@ const DBL_POOL: [(&str, f64); 7] = [
     ("1.0E2", 100.0),
     ("3.25E0", 3.25),
     ("INF", f64::INFINITY),
+    ("-INF", f64::NEG_INFINITY),
+    ("NaN", f64::NAN),
 ];
-const NEG_INF: (&str, f64) = ("-INF", f64::NEG_INFINITY);
 
-/// Which term families a generated graph may contain — derived from the query so
-/// the oracle never has to model an engine surface it cannot predict (header notes).
-#[derive(Clone, Copy, Debug, Default)]
-struct DataMask {
-    no_doubles: bool,
-}
-
-fn mask_of(q: &Q) -> DataMask {
-    DataMask {
-        no_doubles: matches!(q.bind, Some(Bind::PlusK(..))),
-    }
-}
-
-fn arb_literal(mask: DataMask) -> BoxedStrategy<T> {
-    let mut opts: Vec<BoxedStrategy<T>> = vec![
-        (-30i64..=30).prop_map(T::Int).boxed(),
-        prop_oneof![Just(0i64), Just(1), Just(-1), Just(1000)].prop_map(T::Int).boxed(),
-        ((-3000i128..=3000), (1u32..=2)).prop_map(|(m, s)| T::Dec(m, s)).boxed(),
-        proptest::sample::select(&STR_POOL[..]).prop_map(|s| T::Str(s.to_string())).boxed(),
+fn arb_literal() -> BoxedStrategy<T> {
+    prop_oneof![
+        (-30i64..=30).prop_map(T::Int),
+        prop_oneof![Just(0i64), Just(1), Just(-1), Just(1000)].prop_map(T::Int),
+        ((-3000i128..=3000), (1u32..=2)).prop_map(|(m, s)| T::Dec(m, s)),
+        proptest::sample::select(&STR_POOL[..]).prop_map(|s| T::Str(s.to_string())),
         (proptest::sample::select(&STR_POOL[..]), proptest::sample::select(&LANG_TAGS[..]))
-            .prop_map(|(s, t)| T::Lang(s.to_string(), t.to_string()))
-            .boxed(),
-        any::<bool>().prop_map(T::Bool).boxed(),
-    ];
-    if !mask.no_doubles {
-        opts.push(
-            proptest::sample::select(&DBL_POOL[..])
-                .prop_map(|(l, v)| T::Dbl(l.to_string(), v))
-                .boxed(),
-        );
-        opts.push(Just(T::Dbl(NEG_INF.0.to_string(), NEG_INF.1)).boxed());
-    }
-    proptest::strategy::Union::new(opts).boxed()
+            .prop_map(|(s, t)| T::Lang(s.to_string(), t.to_string())),
+        any::<bool>().prop_map(T::Bool),
+        proptest::sample::select(&DBL_POOL[..]).prop_map(|(l, v)| T::Dbl(l.to_string(), v)),
+    ]
+    .boxed()
 }
 
 fn arb_subject() -> BoxedStrategy<T> {
@@ -901,17 +1039,17 @@ fn arb_subject() -> BoxedStrategy<T> {
     .boxed()
 }
 
-fn arb_triple(mask: DataMask) -> impl Strategy<Value = [T; 3]> {
+fn arb_triple() -> impl Strategy<Value = [T; 3]> {
     (
         arb_subject(),
         proptest::sample::select(&PRED_IRIS[..]).prop_map(|p| T::Iri(p.to_string())),
-        prop_oneof![2 => arb_subject(), 3 => arb_literal(mask)],
+        prop_oneof![2 => arb_subject(), 3 => arb_literal()],
     )
         .prop_map(|(s, p, o)| [s, p, o])
 }
 
-fn arb_data(mask: DataMask, max: usize) -> impl Strategy<Value = Vec<[T; 3]>> {
-    proptest::collection::vec(arb_triple(mask), 0..=max).prop_map(dedup_data)
+fn arb_data(max: usize) -> impl Strategy<Value = Vec<[T; 3]>> {
+    proptest::collection::vec(arb_triple(), 0..=max).prop_map(dedup_data)
 }
 
 fn arb_pos_s() -> impl Strategy<Value = Pos> {
@@ -932,7 +1070,7 @@ fn arb_pos_o() -> impl Strategy<Value = Pos> {
     prop_oneof![
         4 => (0u8..=3).prop_map(Pos::Var),
         1 => proptest::sample::select(&SUBJ_IRIS[..]).prop_map(|i| Pos::Const(T::Iri(i.to_string()))),
-        2 => arb_literal(DataMask::default()).prop_map(Pos::Const),
+        2 => arb_literal().prop_map(Pos::Const),
     ]
 }
 
@@ -968,7 +1106,7 @@ fn arb_body() -> impl Strategy<Value = Body> {
 fn arb_expr_const() -> impl Strategy<Value = T> {
     prop_oneof![
         1 => proptest::sample::select(&SUBJ_IRIS[..]).prop_map(|i| T::Iri(i.to_string())),
-        3 => arb_literal(DataMask::default()),
+        3 => arb_literal(),
     ]
 }
 
@@ -1050,6 +1188,7 @@ struct QSeed {
     proj_mask: u16,
     order: Option<(u8, bool)>, // (projected-var seed, desc)
     limit: Option<usize>,
+    offset: Option<usize>,
 }
 
 fn arb_qseed() -> impl Strategy<Value = QSeed> {
@@ -1061,8 +1200,9 @@ fn arb_qseed() -> impl Strategy<Value = QSeed> {
         any::<u16>(),
         proptest::option::weighted(0.35, (any::<u8>(), any::<bool>())),
         proptest::option::weighted(0.2, 0usize..=8),
+        proptest::option::weighted(0.2, 0usize..=5),
     )
-        .prop_map(|(body, bind, filter, distinct, proj_mask, order, limit)| QSeed {
+        .prop_map(|(body, bind, filter, distinct, proj_mask, order, limit, offset)| QSeed {
             body,
             bind,
             filter,
@@ -1070,35 +1210,11 @@ fn arb_qseed() -> impl Strategy<Value = QSeed> {
             proj_mask,
             order,
             limit,
+            offset,
         })
 }
 
-/// Rewrite every constant xsd:double in the body's pattern positions to a fixed
-/// non-double integer constant. Used only under a `PlusK` bind (see `build_query`):
-/// it is the query-const complement of the `no_doubles` DataMask, closing the one
-/// path by which a double could reach the PlusK var (a const-double pattern object
-/// injected into the data and then matched by a variable). Vars are untouched, so
-/// `body.vars()` is unchanged.
-fn strip_const_doubles(body: &mut Body) {
-    fn fix(tps: &mut [Tp]) {
-        for tp in tps {
-            for p in [&mut tp.s, &mut tp.p, &mut tp.o] {
-                if matches!(p, Pos::Const(T::Dbl(..))) {
-                    *p = Pos::Const(T::Int(0));
-                }
-            }
-        }
-    }
-    match body {
-        Body::Bgp(tps) => fix(tps),
-        Body::Opt(l, r) | Body::Union(l, r) => {
-            fix(l);
-            fix(r);
-        }
-    }
-}
-
-fn build_query(mut seed: QSeed) -> Q {
+fn build_query(seed: QSeed) -> Q {
     let body_vars = seed.body.vars();
     let bind = seed.bind.map(|(form, vs, k)| {
         let v = body_vars[vs as usize % body_vars.len()];
@@ -1108,19 +1224,6 @@ fn build_query(mut seed: QSeed) -> Q {
             _ => Bind::StrLenOf(v),
         }
     });
-    // `?v + k` cannot render a computed double's lexical without replicating the
-    // engine's float formatter in the oracle (header narrowing note + bead
-    // sq-ilweo). The `no_doubles` DataMask keeps doubles out of the RANDOM graph,
-    // but a `Pos::Const(T::Dbl)` in a PATTERN object is injected verbatim into the
-    // data by `instantiate` (which copies constants unmasked) — a `?v` in another
-    // pattern on the same (s,p) can then match it and bind the PlusK var to a
-    // double, tripping the oracle's `PlusK over a double` guard. So when the bind
-    // is `PlusK`, also strip constant doubles from the body patterns: this is the
-    // query-const half of the same documented no-doubles narrowing, and it keeps
-    // the oracle independent of the engine's double formatter.
-    if matches!(bind, Some(Bind::PlusK(..))) {
-        strip_const_doubles(&mut seed.body);
-    }
     let mut scope = body_vars.clone();
     if bind.is_some() {
         scope.push(BIND_VAR);
@@ -1147,27 +1250,26 @@ fn build_query(mut seed: QSeed) -> Q {
         project,
         order,
         limit: seed.limit,
+        offset: seed.offset,
     }
 }
 
-/// Pool of subject-position terms for pattern instantiation, mask-respecting.
+/// Pool of subject-position terms for pattern instantiation.
 fn subject_pool() -> Vec<T> {
     let mut out: Vec<T> = SUBJ_IRIS.iter().map(|i| T::Iri(i.to_string())).collect();
     out.extend(BNODE_LABELS.iter().map(|b| T::BNode(b.to_string())));
     out
 }
 
-/// Pool of object-position terms for pattern instantiation, mask-respecting.
-fn object_pool(mask: DataMask) -> Vec<T> {
+/// Pool of object-position terms for pattern instantiation.
+fn object_pool() -> Vec<T> {
     let mut out = subject_pool();
     out.extend([-2i64, 0, 1, 3, 17].map(T::Int));
     out.extend([T::Dec(150, 2), T::Dec(-25, 2), T::Dec(40, 1)]);
     out.extend(STR_POOL.iter().map(|s| T::Str(s.to_string())));
     out.push(T::Lang("a".to_string(), "en".to_string()));
     out.extend([T::Bool(true), T::Bool(false)]);
-    if !mask.no_doubles {
-        out.extend(DBL_POOL.iter().map(|(l, v)| T::Dbl(l.to_string(), *v)));
-    }
+    out.extend(DBL_POOL.iter().map(|(l, v)| T::Dbl(l.to_string(), *v)));
     out
 }
 
@@ -1178,7 +1280,7 @@ fn object_pool(mask: DataMask) -> Vec<T> {
 /// Variables are classified by the strictest position they occupy: predicate
 /// position needs a predicate IRI, subject position an IRI/bnode, object-only
 /// positions may take any term.
-fn instantiate(body: &Body, seed: &[u8], mask: DataMask) -> Vec<[T; 3]> {
+fn instantiate(body: &Body, seed: &[u8]) -> Vec<[T; 3]> {
     let vars = body.vars();
     let all_tps: Vec<&Tp> = match body {
         Body::Bgp(tps) => tps.iter().collect(),
@@ -1196,7 +1298,7 @@ fn instantiate(body: &Body, seed: &[u8], mask: DataMask) -> Vec<[T; 3]> {
         class
     };
     let subj = subject_pool();
-    let obj = object_pool(mask);
+    let obj = object_pool();
     let assignment: Vec<(V, T)> = vars
         .iter()
         .enumerate()
@@ -1217,22 +1319,20 @@ fn instantiate(body: &Body, seed: &[u8], mask: DataMask) -> Vec<[T; 3]> {
     all_tps.iter().map(|tp| [resolve(&tp.s), resolve(&tp.p), resolve(&tp.o)]).collect()
 }
 
-/// A full family-1 case: the query is generated first so the graph generator can
-/// apply the query-derived masks (header narrowing notes); the graph is a blend of
-/// independent random triples and 0..=2 shared-assignment instantiations of the
-/// query's own patterns (see `instantiate`).
+/// A full family-1 case: the graph is a blend of independent random triples and
+/// 0..=2 shared-assignment instantiations of the query's own patterns (see
+/// `instantiate`).
 fn arb_case() -> impl Strategy<Value = (Vec<[T; 3]>, Q)> {
     arb_qseed().prop_map(build_query).prop_flat_map(|q| {
-        let mask = mask_of(&q);
         let nvars = q.body.vars().len();
         (
-            arb_data(mask, 14),
+            arb_data(14),
             proptest::collection::vec(proptest::collection::vec(any::<u8>(), nvars), 0..=2),
             Just(q),
         )
             .prop_map(move |(mut data, seeds, q)| {
                 for seed in &seeds {
-                    data.extend(instantiate(&q.body, seed, mask));
+                    data.extend(instantiate(&q.body, seed));
                 }
                 (dedup_data(data), q)
             })
@@ -1272,7 +1372,7 @@ fn arb_perm_case() -> impl Strategy<Value = (Vec<[T; 3]>, Vec<Tp>, Vec<Tp>, Opti
         .prop_flat_map(|tps| {
             let nvars = Body::Bgp(tps.clone()).vars().len();
             (
-                arb_data(DataMask::default(), 14),
+                arb_data(14),
                 proptest::collection::vec(proptest::collection::vec(any::<u8>(), nvars), 0..=2),
                 Just(tps.clone()),
                 Just(tps).prop_shuffle(),
@@ -1280,7 +1380,7 @@ fn arb_perm_case() -> impl Strategy<Value = (Vec<[T; 3]>, Vec<Tp>, Vec<Tp>, Opti
             )
                 .prop_map(|(mut data, seeds, tps, shuffled, fseed)| {
                     for seed in &seeds {
-                        data.extend(instantiate(&Body::Bgp(tps.clone()), seed, DataMask::default()));
+                        data.extend(instantiate(&Body::Bgp(tps.clone()), seed));
                     }
                     (dedup_data(data), tps, shuffled, fseed)
                 })
@@ -1302,7 +1402,7 @@ proptest! {
             let body = Body::Bgp(patterns);
             let vars = body.vars();
             let filter = fseed.as_ref().map(|f| build_expr(f, &vars));
-            Q { body, bind: None, filter, distinct: false, project: vars, order: None, limit: None }
+            Q { body, bind: None, filter, distinct: false, project: vars, order: None, limit: None, offset: None }
         };
         let q1 = build(tps);
         let q2 = build(shuffled);
@@ -1326,14 +1426,15 @@ proptest! {
 // Family 3: ORDER BY laws on tie-free integer keys (exact sequences)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-fn arb_orderby_case() -> impl Strategy<Value = (Vec<(usize, i64)>, usize)> {
+fn arb_orderby_case() -> impl Strategy<Value = (Vec<(usize, i64)>, usize, usize)> {
     (
         proptest::collection::btree_set(-50i64..=50, 1..=12),
         0usize..=14,
+        0usize..=14,
     )
-        .prop_map(|(vals, k)| {
+        .prop_map(|(vals, k, j)| {
             let pairs: Vec<(usize, i64)> = vals.into_iter().enumerate().collect();
-            (pairs, k)
+            (pairs, k, j)
         })
 }
 
@@ -1345,9 +1446,10 @@ proptest! {
 
     /// With pairwise-distinct integer sort keys the order is total, so exact
     /// sequence laws hold: ASC equals the oracle's sort, DESC is its exact
-    /// reverse, and `LIMIT k` is the exact k-prefix of the full ordered result.
+    /// reverse, `LIMIT k` is the exact k-prefix, `OFFSET j` is the exact j-suffix,
+    /// and `LIMIT k OFFSET j` is the exact window (sq-ilweo).
     #[test]
-    fn family3_orderby_exact_sequence_laws((pairs, k) in arb_orderby_case()) {
+    fn family3_orderby_exact_sequence_laws((pairs, k, j) in arb_orderby_case()) {
         // one triple per distinct integer value; subjects may repeat.
         let data: Vec<[T; 3]> = pairs
             .iter()
@@ -1384,6 +1486,14 @@ proptest! {
         for (label, lim) in engine_paths(&g, &format!("{} ORDER BY ?o LIMIT {}", base, k)) {
             prop_assert_eq!(&lim, &prefix, "ORDER BY + LIMIT is the exact prefix, path {}", label);
         }
+        let suffix: Vec<_> = expected_asc.iter().skip(j).cloned().collect();
+        for (label, off) in engine_paths(&g, &format!("{} ORDER BY ?o OFFSET {}", base, j)) {
+            prop_assert_eq!(&off, &suffix, "ORDER BY + OFFSET is the exact suffix, path {}", label);
+        }
+        let window: Vec<_> = expected_asc.iter().skip(j).take(k).cloned().collect();
+        for (label, win) in engine_paths(&g, &format!("{} ORDER BY ?o LIMIT {} OFFSET {}", base, k, j)) {
+            prop_assert_eq!(&win, &window, "ORDER BY + LIMIT + OFFSET is the exact window, path {}", label);
+        }
     }
 }
 
@@ -1415,6 +1525,7 @@ fn oracle_known_answer_optional() {
         project: vec![0, 1, 2],
         order: None,
         limit: None,
+        offset: None,
     };
     let expected = vec![
         vec![Some(s(0).render()), Some(s(1).render()), Some(s(2).render())],
@@ -1451,6 +1562,7 @@ fn oracle_known_answer_union_distinct_filter() {
         project: vec![0],
         order: None,
         limit: None,
+        offset: None,
     };
     let expected = vec![vec![Some(s(0).render())]];
     assert_eq!(multiset(&oracle_eval(&data, &q)), multiset(&expected), "oracle vs hand-computed");
@@ -1483,6 +1595,7 @@ fn oracle_known_answer_bind_forms() {
         project: vec![0, 1, BIND_VAR],
         order: None,
         limit: None,
+        offset: None,
     };
     for q in [mk(Bind::PlusK(1, 1)), mk(Bind::LtK(1, 42)), mk(Bind::StrLenOf(1))] {
         let oracle = oracle_eval(&data, &q);
@@ -1497,6 +1610,160 @@ fn oracle_known_answer_bind_forms() {
     assert!(cells.contains(&format!("\"42\"^^<{}integer>", XSD)), "int + 1");
     assert!(cells.contains(&format!("\"2.50\"^^<{}decimal>", XSD)), "decimal scale preserved");
     assert!(cells.contains("UNBOUND"), "type-error BIND leaves the var unbound");
+}
+
+/// Computed-double lexical rules, hand-computed (sq-ilweo — the "pin the engine's
+/// rules FIRST" half of the widening): a double + int BIND promotes to xsd:double
+/// and renders per the arithmetic convention — specials keep their XSD spellings,
+/// an integral value prints as a PLAIN integer, anything else as shortest
+/// mantissa-E-exponent with ≥ 1 fraction digit. The oracle derives every cell
+/// through `fmt_double_oracle`, so engine ≡ oracle here proves the independent
+/// formatter reproduces the engine's rules on every special/integral/fractional
+/// shape the pool can produce.
+#[test]
+fn oracle_known_answer_computed_double() {
+    let s = |i: usize| T::Iri(SUBJ_IRIS[i].to_string());
+    let p = |i: usize| T::Iri(PRED_IRIS[i].to_string());
+    let d = |lex: &str, v: f64| T::Dbl(lex.to_string(), v);
+    let data = vec![
+        [s(0), p(0), d("1.5E0", 1.5)],
+        [s(1), p(0), d("1.0E2", 100.0)],
+        [s(2), p(0), d("-2.5E0", -2.5)],
+        [s(3), p(0), d("-0.0E0", -0.0)],
+        [s(4), p(0), d("INF", f64::INFINITY)],
+        [s(5), p(0), d("NaN", f64::NAN)],
+    ];
+    let q = Q {
+        body: Body::Bgp(vec![Tp { s: Pos::Var(0), p: Pos::Const(p(0)), o: Pos::Var(1) }]),
+        bind: Some(Bind::PlusK(1, 1)),
+        filter: None,
+        distinct: false,
+        project: vec![0, 1, BIND_VAR],
+        order: None,
+        limit: None,
+        offset: None,
+    };
+    let oracle = oracle_eval(&data, &q);
+    let g = Graph::load_str(&to_ntriples(&data), "ntriples").unwrap();
+    assert_eq!(multiset(&engine_rows(&g, &q.render())), multiset(&oracle), "engine vs oracle");
+    let cells: std::collections::HashSet<String> =
+        oracle.iter().map(|r| r[2].clone().expect("computed double is bound")).collect();
+    for expect in ["2.5E0", "101", "-1.5E0", "1", "INF", "NaN"] {
+        assert!(
+            cells.contains(&format!("\"{}\"^^<{}double>", expect, XSD)),
+            "computed double cell {} missing from {:?}",
+            expect,
+            cells
+        );
+    }
+    // The single-digit-mantissa shape (-2.5 + 2 = -0.5 → "-5.0E-1", exercising the
+    // mandatory fraction digit) is reachable but RARE in generation — pin it
+    // end-to-end too.
+    let q2 = Q { bind: Some(Bind::PlusK(1, 2)), ..q };
+    let oracle2 = oracle_eval(&data, &q2);
+    assert_eq!(multiset(&engine_rows(&g, &q2.render())), multiset(&oracle2), "engine vs oracle, k=2");
+    let cells2: std::collections::HashSet<String> =
+        oracle2.iter().map(|r| r[2].clone().expect("computed double is bound")).collect();
+    assert!(
+        cells2.contains(&format!("\"-5.0E-1\"^^<{}double>", XSD)),
+        "-2.5 + 2 must render with the mandatory fraction digit: {:?}",
+        cells2
+    );
+}
+
+/// NaN value semantics, hand-computed (sq-ilweo): `=` against the NaN constant is
+/// sameTerm-TRUE for the stored NaN term and FALSE (not an error!) for any other
+/// numeric — pinned by the NEGATED filter, which keeps exactly the false rows;
+/// `<` against a numeric constant is a TYPE ERROR (not false!) — pinned by the
+/// negated filter dropping the NaN row (`!err = err`); ORDER BY totalises NaN
+/// FIRST, before -INF.
+#[test]
+fn oracle_known_answer_nan() {
+    let s = |i: usize| T::Iri(SUBJ_IRIS[i].to_string());
+    let p = |i: usize| T::Iri(PRED_IRIS[i].to_string());
+    let nan = || T::Dbl("NaN".to_string(), f64::NAN);
+    let data = vec![
+        [s(0), p(0), nan()],
+        [s(1), p(0), T::Dbl("5.0E0".to_string(), 5.0)],
+        [s(2), p(0), T::Dbl("-INF".to_string(), f64::NEG_INFINITY)],
+    ];
+    let g = Graph::load_str(&to_ntriples(&data), "ntriples").unwrap();
+    let mk = |filter: Expr| Q {
+        body: Body::Bgp(vec![Tp { s: Pos::Var(0), p: Pos::Const(p(0)), o: Pos::Var(1) }]),
+        bind: None,
+        filter: Some(filter),
+        distinct: false,
+        project: vec![0],
+        order: None,
+        limit: None,
+        offset: None,
+    };
+    let row = |i: usize| vec![Some(s(i).render())];
+    let cases: Vec<(Expr, Vec<Vec<Option<String>>>)> = vec![
+        // ?v = NaN keeps exactly the identical NaN term (sameTerm fast path).
+        (Expr::EqVC(1, nan()), vec![row(0)]),
+        // !(?v = NaN) keeps the OTHER numerics: their verdict is false, not error.
+        (Expr::Not(Box::new(Expr::EqVC(1, nan()))), vec![row(1), row(2)]),
+        // ?v < 7 drops NaN as a TYPE ERROR and keeps the comparable rows.
+        (Expr::LtVK(1, 7), vec![row(1), row(2)]),
+        // !(?v < 7) drops EVERYTHING: !err = err for NaN, !true = false for the rest.
+        (Expr::Not(Box::new(Expr::LtVK(1, 7))), vec![]),
+    ];
+    for (filter, expected) in cases {
+        let q = mk(filter);
+        assert_eq!(multiset(&oracle_eval(&data, &q)), multiset(&expected), "oracle: {}", q.render());
+        assert_eq!(multiset(&engine_rows(&g, &q.render())), multiset(&expected), "engine: {}", q.render());
+    }
+    // ORDER BY: NaN totalised FIRST — before -INF (tie-free, exact sequence).
+    let base = format!("SELECT ?o WHERE {{ ?s <{}> ?o }} ORDER BY ?o", PRED_IRIS[0]);
+    let expected_asc: Vec<Vec<Option<String>>> = [nan(), T::Dbl("-INF".to_string(), f64::NEG_INFINITY), T::Dbl("5.0E0".to_string(), 5.0)]
+        .iter()
+        .map(|t| vec![Some(t.render())])
+        .collect();
+    for (label, asc) in engine_paths(&g, &base) {
+        assert_eq!(asc, expected_asc, "NaN-first ORDER BY, path {}", label);
+    }
+}
+
+/// The literal KIND-FIRST rank and the langString lex-first order, hand-computed
+/// (sq-ilweo promoted these from "unconstrained"; the order is the substrate's
+/// documented sq-wjl8i `LiteralKind` rank): numeric < boolean < string <
+/// langString, langStrings by lexical even across different tags.
+#[test]
+fn oracle_known_answer_literal_kind_rank_and_lang_order() {
+    let s = |i: usize| T::Iri(SUBJ_IRIS[i].to_string());
+    let p = |i: usize| T::Iri(PRED_IRIS[i].to_string());
+    let objs = [
+        T::Lang("b".to_string(), "en".to_string()),
+        T::Str("z".to_string()),
+        T::Int(5),
+        T::Lang("a".to_string(), "fr".to_string()),
+        T::Bool(true),
+    ];
+    let data: Vec<[T; 3]> = objs.iter().cloned().enumerate().map(|(i, o)| [s(i), p(0), o]).collect();
+    let g = Graph::load_str(&to_ntriples(&data), "ntriples").unwrap();
+    // numeric 5 < boolean true < string "z" < lang "a"@fr < lang "b"@en (lex-first
+    // across tags) — tie-free, so the exact sequence is deterministic.
+    let expected: Vec<Vec<Option<String>>> = [&objs[2], &objs[4], &objs[1], &objs[3], &objs[0]]
+        .iter()
+        .map(|t| vec![Some(t.render())])
+        .collect();
+    let base = format!("SELECT ?o WHERE {{ ?s <{}> ?o }} ORDER BY ?o", PRED_IRIS[0]);
+    for (label, asc) in engine_paths(&g, &base) {
+        assert_eq!(asc, expected, "kind-first ASC, path {}", label);
+    }
+    let mut expected_desc = expected.clone();
+    expected_desc.reverse();
+    let desc_q = format!("SELECT ?o WHERE {{ ?s <{}> ?o }} ORDER BY DESC(?o)", PRED_IRIS[0]);
+    for (label, desc) in engine_paths(&g, &desc_q) {
+        assert_eq!(desc, expected_desc, "kind-first DESC, path {}", label);
+    }
+    // And the family-1 sortedness checker accepts exactly this order and rejects
+    // a kind-rank transposition (its own non-vacuity pin).
+    let keys: Vec<Option<T>> = [&objs[2], &objs[4], &objs[1], &objs[3], &objs[0]].iter().map(|t| Some((*t).clone())).collect();
+    assert!(check_sorted(&keys, false, "unit").is_ok());
+    let bad: Vec<Option<T>> = vec![Some(objs[1].clone()), Some(objs[2].clone())]; // string before numeric
+    assert!(check_sorted(&bad, false, "unit").is_err());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1518,8 +1785,11 @@ fn generator_diversity_floor() {
     let strategy = arb_case();
     let n = 300;
     let (mut nonempty, mut dups, mut unbound_cells, mut multi_row) = (0, 0, 0, 0);
-    let (mut bgp, mut opt, mut union, mut filt, mut bind, mut distinct, mut order, mut limit) =
-        (0, 0, 0, 0, 0, 0, 0, 0);
+    let (mut bgp, mut opt, mut union, mut filt, mut bind, mut distinct, mut order, mut limit, mut offset) =
+        (0, 0, 0, 0, 0, 0, 0, 0, 0);
+    // sq-ilweo widening floors: PlusK binds actually meeting a double in the data
+    // (the computed-double path), and graphs actually containing the NaN term.
+    let (mut plusk_dbl, mut nan_data) = (0, 0);
     for _ in 0..n {
         let (data, q) = strategy.new_tree(&mut runner).expect("gen").current();
         match q.body {
@@ -1532,6 +1802,10 @@ fn generator_diversity_floor() {
         distinct += usize::from(q.distinct);
         order += usize::from(q.order.is_some());
         limit += usize::from(q.limit.is_some());
+        offset += usize::from(q.offset.is_some());
+        let has_dbl = data.iter().any(|t| t.iter().any(|x| matches!(x, T::Dbl(..))));
+        plusk_dbl += usize::from(matches!(q.bind, Some(Bind::PlusK(..))) && has_dbl);
+        nan_data += usize::from(data.iter().any(|t| t.iter().any(|x| matches!(x, T::Dbl(lex, _) if lex == "NaN"))));
         let rows = oracle_eval(&data, &q);
         nonempty += usize::from(!rows.is_empty());
         multi_row += usize::from(rows.len() > 1);
@@ -1540,17 +1814,20 @@ fn generator_diversity_floor() {
         unbound_cells += usize::from(rows.iter().any(|r| r.iter().any(Option::is_none)));
     }
     eprintln!(
-        "diversity: nonempty={}/{} multi_row={} dups={} unbound={} shapes: bgp={} opt={} union={} filter={} bind={} distinct={} order={} limit={}",
-        nonempty, n, multi_row, dups, unbound_cells, bgp, opt, union, filt, bind, distinct, order, limit
+        "diversity: nonempty={}/{} multi_row={} dups={} unbound={} shapes: bgp={} opt={} union={} filter={} bind={} distinct={} order={} limit={} offset={} plusk_dbl={} nan_data={}",
+        nonempty, n, multi_row, dups, unbound_cells, bgp, opt, union, filt, bind, distinct, order, limit, offset, plusk_dbl, nan_data
     );
     // Conservative floors — deterministic because the seed is fixed.
     assert!(nonempty * 100 >= n * 25, "nonempty results: {}/{}", nonempty, n);
     assert!(multi_row * 100 >= n * 15, "multi-row results: {}/{}", multi_row, n);
     assert!(dups >= 5, "duplicate-containing multisets: {}", dups);
     assert!(unbound_cells >= 5, "results with unbound cells: {}", unbound_cells);
+    assert!(plusk_dbl >= 5, "PlusK-over-double cases: {}", plusk_dbl);
+    assert!(nan_data >= 5, "NaN-containing graphs: {}", nan_data);
     for (label, count) in [
         ("bgp", bgp), ("optional", opt), ("union", union), ("filter", filt),
         ("bind", bind), ("distinct", distinct), ("order", order), ("limit", limit),
+        ("offset", offset),
     ] {
         assert!(count >= 10, "query shape {} generated only {} times in {}", label, count, n);
     }
@@ -1573,11 +1850,36 @@ fn parse_rendered_roundtrips_every_generated_shape() {
         T::Dec(4000, 1),
         T::Dbl("1.5E0".to_string(), 1.5),
         T::Dbl("-INF".to_string(), f64::NEG_INFINITY),
+        // sq-ilweo widened shapes: the NaN term (T's lexical PartialEq makes this
+        // round-trip assertable) and a computed double's plain-integer lexical.
+        T::Dbl("NaN".to_string(), f64::NAN),
+        T::Dbl("101".to_string(), 101.0),
         T::Bool(true),
     ];
     for t in terms {
         assert_eq!(parse_rendered(&t.render()), t, "round-trip of {:?}", t);
     }
+}
+
+/// Pins the INDEPENDENT computed-double formatter against the engine's documented
+/// lexical rules (the end-to-end agreement is pinned by
+/// `oracle_known_answer_computed_double`): specials, plain integral (incl. -0.0 and
+/// the 1e15 boundary), and shortest scientific with a mandatory fraction digit.
+#[test]
+fn fmt_double_oracle_matches_engine_rules() {
+    assert_eq!(fmt_double_oracle(f64::NAN), "NaN");
+    assert_eq!(fmt_double_oracle(f64::INFINITY), "INF");
+    assert_eq!(fmt_double_oracle(f64::NEG_INFINITY), "-INF");
+    assert_eq!(fmt_double_oracle(0.0), "0");
+    assert_eq!(fmt_double_oracle(-0.0), "0");
+    assert_eq!(fmt_double_oracle(101.0), "101");
+    assert_eq!(fmt_double_oracle(-101.0), "-101");
+    assert_eq!(fmt_double_oracle(2.5), "2.5E0");
+    assert_eq!(fmt_double_oracle(-1.5), "-1.5E0");
+    assert_eq!(fmt_double_oracle(0.2), "2.0E-1");
+    assert_eq!(fmt_double_oracle(101.5), "1.015E2");
+    assert_eq!(fmt_double_oracle(1e15), "1.0E15");
+    assert_eq!(fmt_double_oracle(999999999999999.0), "999999999999999");
 }
 
 #[test]
@@ -1590,10 +1892,35 @@ fn check_sorted_detects_violations() {
     // unbound must come first ascending,
     let bad2 = vec![Some(T::Int(1)), None];
     assert!(check_sorted(&bad2, false, "unit").is_err());
-    // cross-class literal pairs are unconstrained in either direction,
-    let free = vec![Some(T::Str("z".to_string())), Some(T::Int(1))];
-    assert!(check_sorted(&free, false, "unit").is_ok());
-    assert!(check_sorted(&free, true, "unit").is_ok());
+    // cross-kind literal pairs follow the KIND-FIRST rank (sq-ilweo promoted from
+    // "unconstrained"): a string before a numeric violates ascending order but is
+    // exactly right descending,
+    let ranked = vec![Some(T::Str("z".to_string())), Some(T::Int(1))];
+    assert!(check_sorted(&ranked, false, "unit").is_err());
+    assert!(check_sorted(&ranked, true, "unit").is_ok());
+    // as does a boolean before a numeric,
+    let ranked2 = vec![Some(T::Bool(false)), Some(T::Int(5))];
+    assert!(check_sorted(&ranked2, false, "unit").is_err());
+    assert!(check_sorted(&ranked2, true, "unit").is_ok());
+    // langStrings order lex-first even across tags; a tag tie on equal lexicals is
+    // engine-defined (unconstrained in both directions),
+    let lang_bad = vec![
+        Some(T::Lang("b".to_string(), "en".to_string())),
+        Some(T::Lang("a".to_string(), "fr".to_string())),
+    ];
+    assert!(check_sorted(&lang_bad, false, "unit").is_err());
+    assert!(check_sorted(&lang_bad, true, "unit").is_ok());
+    let lang_tie = vec![
+        Some(T::Lang("a".to_string(), "fr".to_string())),
+        Some(T::Lang("a".to_string(), "en".to_string())),
+    ];
+    assert!(check_sorted(&lang_tie, false, "unit").is_ok());
+    assert!(check_sorted(&lang_tie, true, "unit").is_ok());
+    // NaN is totalised FIRST among numerics (sq-ilweo),
+    let nan = || Some(T::Dbl("NaN".to_string(), f64::NAN));
+    assert!(check_sorted(&[nan(), Some(T::Dbl("-INF".to_string(), f64::NEG_INFINITY))], false, "unit").is_ok());
+    assert!(check_sorted(&[Some(T::Int(-100)), nan()], false, "unit").is_err());
+    assert!(check_sorted(&[nan(), nan()], false, "unit").is_ok());
     // and value-equal cross-type numerics are a tie, not a violation.
     let tie = vec![Some(T::Dec(10, 1)), Some(T::Int(1))];
     assert!(check_sorted(&tie, false, "unit").is_ok());

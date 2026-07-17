@@ -21,8 +21,11 @@
 //!    has its confidence CLAMPED to `MACHINE_CONFIDENCE_CEILING` and any `Proven` assurance
 //!    MAPPED DOWN to `Claimed` — even if the model output claims otherwise. A candidate
 //!    whose justification is not a normalised span of its source abstract is REJECTED at the
-//!    boundary as a likely hallucination; the deterministic grounding-resolver (`ground`)
-//!    still independently re-checks every survivor — this boundary check never bypasses it.
+//!    boundary as a likely hallucination — and COUNTED (`BoundaryReject`: source DOI +
+//!    reason category, no text), never silently dropped, so the pilot's run metrics carry
+//!    the fetched→extracted honesty gap (`sq-tx8v9`); the deterministic grounding-resolver
+//!    (`ground`) still independently re-checks every survivor — this boundary check never
+//!    bypasses it.
 //! 3. **Extraction errors surface, never swallowed.** A failed sub-agent invocation, a
 //!    transcript with no JSON, or a malformed candidate is an `Err` — never an empty
 //!    success. A failed batch quarantines at the pipeline; it never silently zeroes findings.
@@ -37,12 +40,13 @@
 //!   that spawns a process, the command is CONFIGURABLE + default-unset, and it is NEVER
 //!   driven in CI.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use serde_json::Value;
 
 use super::connector::{normalise_doi, SourceStub};
-use super::extract::{CandidateFinding, Extractor};
+use super::extract::{BoundaryReject, CandidateFinding, Extractor};
 use super::ground::normalise_span;
 use super::pipeline::MACHINE_CONFIDENCE_CEILING;
 
@@ -60,15 +64,24 @@ pub trait SubagentRunner {
 /// `SubagentRunner`, and parses the transcript into candidate Findings with the defensive
 /// machine-tier caps applied at the boundary. Generic over the runner so tests drive it with
 /// a fake and production drives it with a `CommandRunner`.
+///
+/// Every candidate the boundary REJECTS is COUNTED (never silently dropped — `sq-tx8v9`):
+/// rejects accumulate across `extract` calls and are reported through
+/// [`Extractor::boundary_rejects`], which the pilot threads into the run-metrics sidecar
+/// record (source DOI + reason category only — no abstract-derived text).
 #[derive(Debug, Clone)]
 pub struct LiveExtractor<R: SubagentRunner> {
     runner: R,
+    rejects: RefCell<Vec<BoundaryReject>>,
 }
 
 impl<R: SubagentRunner> LiveExtractor<R> {
     /// Build a live extractor over an injected sub-agent runner.
     pub fn new(runner: R) -> Self {
-        Self { runner }
+        Self {
+            runner,
+            rejects: RefCell::new(Vec::new()),
+        }
     }
 }
 
@@ -82,7 +95,14 @@ impl<R: SubagentRunner> Extractor for LiveExtractor<R> {
         }
         let prompt = build_batch_prompt(stubs);
         let transcript = self.runner.run(&prompt)?;
-        parse_transcript(stubs, &transcript)
+        let (survivors, rejected) = parse_transcript(stubs, &transcript)?;
+        self.rejects.borrow_mut().extend(rejected);
+        Ok(survivors)
+    }
+
+    /// The boundary rejects accumulated across every `extract` call since construction.
+    fn boundary_rejects(&self) -> Vec<BoundaryReject> {
+        self.rejects.borrow().clone()
     }
 }
 
@@ -90,8 +110,10 @@ impl<R: SubagentRunner> Extractor for LiveExtractor<R> {
 /// exact `{ "extractions": [ … ] }` output shape (the same shape `RecordedExtractor` replays,
 /// so a live run's output is a recordable tape), the closed assurance vocabulary (the machine
 /// tier may NOT claim `Proven` — the boundary enforces it anyway), the `[0, 1]` confidence
-/// range, and the load-bearing rule that every justification MUST be a verbatim span of the
-/// abstract. Pure + deterministic — no I/O.
+/// range, the load-bearing rule that every justification MUST be a verbatim span of the
+/// abstract, and the second-iteration tightening (`sq-tx8v9`, recorded in the first
+/// iteration's sidecar verdict): extract ONLY result/conclusion-level claims, never
+/// motivation or contribution-framing sentences. Pure + deterministic — no I/O.
 pub fn build_batch_prompt(stubs: &[SourceStub]) -> String {
     let mut p = String::with_capacity(2048 + stubs.len() * 512);
     p.push_str(
@@ -108,6 +130,10 @@ pub fn build_batch_prompt(stubs: &[SourceStub]) -> String {
          - justification MUST be copied verbatim (character-for-character) from the paper's \
          abstract. Do NOT paraphrase, summarise, or invent. If the abstract does not support \
          a finding, emit an empty candidates list for that paper.\n\
+         - Extract ONLY result/conclusion-level claims (what the paper found, showed, \
+         demonstrated, or concluded). Do NOT extract motivation, background, or \
+         contribution-framing sentences (\"we propose\", \"this paper presents\", \
+         \"X is important\").\n\
          - cited_dois must each be a source_doi that appears in this batch.\n\n\
          PAPERS:\n",
     );
@@ -124,22 +150,24 @@ pub fn build_batch_prompt(stubs: &[SourceStub]) -> String {
     p
 }
 
-/// Parse a raw sub-agent transcript into candidate Findings for the batch, applying the
-/// DEFENSIVE machine-tier caps at the boundary. The transcript may wrap its JSON in prose or
-/// a fenced block; `extract_json_block` recovers the JSON object. A transcript with no JSON
-/// object, or a candidate missing a required field, is an `Err` (a failed batch is never a
-/// silent empty success).
+/// Parse a raw sub-agent transcript into `(survivors, boundary rejects)` for the batch,
+/// applying the DEFENSIVE machine-tier caps at the boundary. The transcript may wrap its
+/// JSON in prose or a fenced block; `extract_json_block` recovers the JSON object. A
+/// transcript with no JSON object, or a candidate missing a required field, is an `Err`
+/// (a failed batch is never a silent empty success).
 ///
 /// Caps applied to every parsed candidate (defence-in-depth — the pipeline's grounding stage
 /// + SHACL gate + downgrade still run):
 /// - confidence is clamped to `[0, MACHINE_CONFIDENCE_CEILING]` (a NaN becomes `0.0`);
 /// - any `Proven` assurance is mapped down to `Claimed`;
 /// - a candidate whose justification is not a normalised span of its source abstract (or
-///   whose source_doi is not in the batch) is REJECTED — dropped as a likely hallucination.
+///   whose source_doi is not in the batch) is REJECTED as a likely hallucination — and
+///   COUNTED in the returned [`BoundaryReject`] list (source DOI + reason category, no
+///   text), never silently dropped (`sq-tx8v9`).
 pub fn parse_transcript(
     stubs: &[SourceStub],
     transcript: &str,
-) -> Result<Vec<CandidateFinding>, String> {
+) -> Result<(Vec<CandidateFinding>, Vec<BoundaryReject>), String> {
     let json = extract_json_block(transcript)?;
     let root: Value =
         serde_json::from_str(json).map_err(|e| format!("live extraction JSON: {}", e))?;
@@ -155,6 +183,7 @@ pub fn parse_transcript(
     }
 
     let mut out = Vec::new();
+    let mut rejected = Vec::new();
     for entry in entries {
         let source_doi = entry
             .get("source_doi")
@@ -172,12 +201,13 @@ pub fn parse_transcript(
             })?;
         for c in candidates {
             let raw = parse_live_candidate(&source_doi, c)?;
-            if let Some(capped) = apply_defensive_caps(raw, &abstract_by_doi) {
-                out.push(capped);
+            match apply_defensive_caps(raw, &abstract_by_doi) {
+                Ok(capped) => out.push(capped),
+                Err(reject) => rejected.push(reject),
             }
         }
     }
-    Ok(out)
+    Ok((out, rejected))
 }
 
 /// Parse ONE candidate object off the live transcript. A missing/mistyped required field is
@@ -225,23 +255,34 @@ fn parse_live_candidate(source_doi: &str, c: &Value) -> Result<CandidateFinding,
 }
 
 /// Apply the DEFENSIVE machine-tier caps to a raw candidate at the extraction boundary.
-/// Returns `None` if the candidate must be REJECTED (its source is not in the batch, or its
-/// justification is not a normalised span of that source's abstract — a likely hallucination).
-/// Otherwise returns the candidate with confidence clamped to the machine ceiling and any
-/// `Proven` assurance mapped down to `Claimed`. Defence-in-depth: the pipeline's grounding
-/// stage independently re-checks every survivor (never bypassed) and the SHACL gate + emit
-/// downgrade enforce `secx:Conjectured` + the ceiling again.
+/// Returns `Err(BoundaryReject)` — the claimed source DOI plus a stable reason category,
+/// NEVER the justification text — if the candidate must be REJECTED (its source is not in
+/// the batch, or its justification is not a normalised span of that source's abstract — a
+/// likely hallucination), so the caller can COUNT the drop (`sq-tx8v9`). Otherwise returns
+/// the candidate with confidence clamped to the machine ceiling and any `Proven` assurance
+/// mapped down to `Claimed`. Defence-in-depth: the pipeline's grounding stage independently
+/// re-checks every survivor (never bypassed) and the SHACL gate + emit downgrade enforce
+/// `secx:Conjectured` + the ceiling again.
 fn apply_defensive_caps(
     mut c: CandidateFinding,
     abstract_by_doi: &HashMap<&str, &str>,
-) -> Option<CandidateFinding> {
+) -> Result<CandidateFinding, BoundaryReject> {
     // 1. REJECT a candidate whose justification is not a verbatim (normalised) span of its
-    //    source abstract, or whose source is not in the batch (cannot be anchored).
-    let abstract_text = abstract_by_doi.get(c.source_doi.as_str())?;
+    //    source abstract, or whose source is not in the batch (cannot be anchored). The
+    //    reason categories are the same stable keys the pilot's quarantine metrics use.
+    let Some(abstract_text) = abstract_by_doi.get(c.source_doi.as_str()) else {
+        return Err(BoundaryReject {
+            source_doi: c.source_doi,
+            reason: "unknown-source".to_string(),
+        });
+    };
     let hay = normalise_span(abstract_text);
     let needle = normalise_span(&c.justification);
     if needle.is_empty() || !hay.contains(&needle) {
-        return None;
+        return Err(BoundaryReject {
+            source_doi: c.source_doi,
+            reason: "justification-not-anchored".to_string(),
+        });
     }
     // 2. CLAMP confidence to the machine ceiling (also normalises an out-of-range / NaN value
     //    from the untrusted model).
@@ -254,7 +295,7 @@ fn apply_defensive_caps(
     if c.assurance.eq_ignore_ascii_case("Proven") {
         c.assurance = "Claimed".to_string();
     }
-    Some(c)
+    Ok(c)
 }
 
 /// Recover the JSON object from a raw model transcript. The sub-agent is instructed to emit
@@ -445,6 +486,14 @@ mod tests {
             "instructs the closed no-Proven vocabulary"
         );
         assert!(p.contains("VERBATIM span"), "instructs verbatim justification");
+        assert!(
+            p.contains("result/conclusion-level claims"),
+            "instructs the second-iteration tightening: results/conclusions only"
+        );
+        assert!(
+            p.contains("Do NOT extract motivation"),
+            "excludes motivation/contribution-framing sentences"
+        );
         // Every source stub appears (its content-addressed IRI + abstract).
         for s in &stubs {
             assert!(p.contains(&s.source_iri()), "prompt lists {}", s.source_iri());
@@ -476,10 +525,15 @@ mod tests {
     #[test]
     fn parse_transcript_clamps_confidence_and_downgrades_proven() {
         let stubs = stubs();
-        let cands = parse_transcript(&stubs, TRANSCRIPT).unwrap();
+        let (cands, rejects) = parse_transcript(&stubs, TRANSCRIPT).unwrap();
         // 4 raw candidates; the fabricated "machine-checked soundness theorem" (paper 2) is
         // REJECTED at the boundary (not a span) -> 3 survivors.
         assert_eq!(cands.len(), 3, "the fabricated over-claim is rejected");
+        // INVARIANT (sq-tx8v9): the boundary drop is COUNTED, reason-tagged, and carries
+        // NO justification text.
+        assert_eq!(rejects.len(), 1, "the drop is counted, never silent");
+        assert_eq!(rejects[0].reason, "justification-not-anchored");
+        assert!(!rejects[0].source_doi.is_empty());
         // INVARIANT: no survivor asserts Proven, whatever the model claimed.
         assert!(
             cands.iter().all(|c| !c.assurance.eq_ignore_ascii_case("Proven")),
@@ -528,9 +582,35 @@ mod tests {
             {"verdict":"yes","confidence":0.5,"assurance":"Conjectured",
              "justification":"exactly this","cited_dois":[]}
         ]}]}"#;
-        let cands = parse_transcript(std::slice::from_ref(&stub), json).unwrap();
+        let (cands, rejects) = parse_transcript(std::slice::from_ref(&stub), json).unwrap();
         assert_eq!(cands.len(), 1, "only the in-abstract span survives");
         assert_eq!(cands[0].justification, "exactly this");
+        // The fabricated candidate is counted with its reason (sq-tx8v9).
+        assert_eq!(rejects.len(), 1);
+        assert_eq!(rejects[0].source_doi, "10.1/x");
+        assert_eq!(rejects[0].reason, "justification-not-anchored");
+    }
+
+    #[test]
+    fn parse_transcript_counts_an_unknown_source_reject() {
+        // A candidate whose source_doi is not in the batch cannot be anchored: rejected
+        // AND counted under the `unknown-source` category.
+        let stub = SourceStub {
+            doi: "10.1/x".to_string(),
+            title: "T".to_string(),
+            abstract_text: "the abstract".to_string(),
+            year: None,
+            license: None,
+        };
+        let json = r#"{"extractions":[{"source_doi":"10.9/not-in-batch","candidates":[
+            {"verdict":"yes","confidence":0.5,"assurance":"Conjectured",
+             "justification":"the abstract","cited_dois":[]}
+        ]}]}"#;
+        let (cands, rejects) = parse_transcript(std::slice::from_ref(&stub), json).unwrap();
+        assert!(cands.is_empty());
+        assert_eq!(rejects.len(), 1);
+        assert_eq!(rejects[0].source_doi, "10.9/not-in-batch");
+        assert_eq!(rejects[0].reason, "unknown-source");
     }
 
     #[test]
@@ -547,9 +627,10 @@ mod tests {
             {"verdict":"yes","confidence":4.2,"assurance":"Conjectured",
              "justification":"an anchored span here","cited_dois":[]}
         ]}]}"#;
-        let cands = parse_transcript(std::slice::from_ref(&stub), json).unwrap();
+        let (cands, rejects) = parse_transcript(std::slice::from_ref(&stub), json).unwrap();
         assert_eq!(cands.len(), 1);
         assert_eq!(cands[0].confidence, MACHINE_CONFIDENCE_CEILING);
+        assert!(rejects.is_empty(), "a clamped survivor is not a reject");
     }
 
     #[test]
@@ -573,6 +654,13 @@ mod tests {
         let cands = ex.extract(&stubs).unwrap();
         assert_eq!(cands.len(), 3, "same 3 capped survivors as parse_transcript");
         assert!(cands.iter().all(|c| c.confidence <= MACHINE_CONFIDENCE_CEILING));
+        // The boundary reject is reported through the trait (sq-tx8v9)…
+        let rejects = ex.boundary_rejects();
+        assert_eq!(rejects.len(), 1, "the boundary drop is counted");
+        assert_eq!(rejects[0].reason, "justification-not-anchored");
+        // …and ACCUMULATES across extract calls (the pilot extracts in batches).
+        ex.extract(&stubs).unwrap();
+        assert_eq!(ex.boundary_rejects().len(), 2, "rejects accumulate per call");
     }
 
     #[test]
