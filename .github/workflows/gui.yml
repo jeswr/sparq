@@ -44,6 +44,9 @@ name: gui
 
 on:
   pull_request:
+    # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
+    # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
+    types: [opened, synchronize, reopened, ready_for_review]
     # [OPUS-4.8] The `site build + typecheck` job here consumes `site/` (its static export +
     # the bundle-wasm-esm script) and `js/` (the @jeswr/sparq source it bundles), and resolves
     # workspace deps from the root lockfile — so changes to ANY of those can break it. They were
