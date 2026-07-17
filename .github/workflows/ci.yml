@@ -741,6 +741,10 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [FABLE-5] sq-6vshe.5: explicit FAMILY key so cache-prime.yml can re-seed the
+          # wasm32 dep cache nightly (same rationale as the lint job's shared-key above).
+          shared-key: "wasm"
       - name: Build sparq-wasm for the browser target
         run: cargo build -p sparq-wasm --target wasm32-unknown-unknown
       # [OPUS-4.8] sq-yqi1 (#162): also build WITH the opt-in `shacl` feature so the
@@ -990,6 +994,15 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [FABLE-5] sq-6vshe.5: explicit FAMILY key (was the job-scoped default) so the
+          # nightly cache-prime.yml can save this family cross-workflow — `shared-key`
+          # ignores workflow/job identity, the default key does not. Needed because a
+          # rustc stable bump rekeys every cache with no repo commit; the prime re-seeds
+          # `lint` against the new compiler before the first PR of the day. One-time cold
+          # restore on the first run after this key rename. Topology rules (key schema /
+          # poisoning / sizing): see cache-prime.yml's header.
+          shared-key: "lint"
       # GATES: the whole workspace (sparq-py included) is clippy-clean under -D warnings.
       # A new warning — from new code or a Rust-stable bump that adds a lint — fails CI.
       - name: clippy (deny warnings)
