@@ -47,6 +47,14 @@ use std::path::Path;
 /// * NegativeEvaluationTests — compaction raises `invalid @nest value`, but error-code
 ///   completeness across context processing/expansion/compaction is unverified; the
 ///   negative lanes are bead sq-oy1f.31. SKIP (honest), never a counted pass.
+/// * `specVersion: json-ld-1.0` positives — the suite convention: 1.0-only tests are
+///   run by 1.0 processors (the flatten/fromRdf lanes already skip these). At the pin
+///   this is exactly `#t0038`, whose 1.0-era expectation (compact-IRI creation through
+///   an EXPANDED term definition) directly contradicts what `#tp001` pins for 1.0
+///   processing mode under the 1.1 REC — unreachable, so an honest SKIP, never a fix
+///   (decision: bead sq-uzdw7; see `floors::compact`). NOTE this matches on
+///   `specVersion` ONLY: `option.processingMode: json-ld-1.0` cases with a 1.1 (or
+///   unset) `specVersion` (`#t0075`/`#t0106`/`#tp001`) are 1.1-suite tests and RUN.
 /// * Remote `input` URL — no network.
 /// * No `expect` / no `context` member — nothing to compare / compact against.
 pub fn run_compact(root: &Path) -> Score {
@@ -67,6 +75,13 @@ pub fn run_compact(root: &Path) -> Score {
             continue;
         }
         if e.is_negative {
+            s.skip();
+            continue;
+        }
+        // JSON-LD-1.0-only positives (specVersion, NOT processingMode — see the
+        // module docs): a 1.1 processor skips them, per the fromRdf lane convention.
+        // At the pin: exactly #t0038 (bead sq-uzdw7).
+        if e.spec_version.as_deref() == Some("json-ld-1.0") {
             s.skip();
             continue;
         }

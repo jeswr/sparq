@@ -21,22 +21,29 @@
 ///   non-inline contexts, empty-RDF inputs).
 /// * NEW (sq-oy1f.27, floor **228**): the spec Compaction Algorithm over the
 ///   natively expanded document, deep-compared to the W3C EXPECTED document —
-///   measured **228 pass / 1 fail / 17 skip** of 246. The 42-case rise over the
-///   old floor is real algorithm coverage (scoped/typed contexts, `@nest`,
-///   container maps, `@graph` containers, options forwarding), not an oracle
-///   relaxation: the new oracle is strictly harder (document equivalence vs
-///   self-reparse). Passes also hold under STRICT order-sensitive JSON equality
-///   (strict-ordered count = 228 — no pass relies on the comparator's
-///   outside-`@list` array order-insensitivity).
+///   measured **228 pass / 0 fail / 18 skip** of 246 (sq-uzdw7 re-pin; the
+///   sq-oy1f.27 measurement was 228/1/17 with `#t0038` a documented below-floor
+///   FAIL, since reclassified — see below; the pass count and floor are
+///   unchanged). The 42-case rise over the old floor is real algorithm coverage
+///   (scoped/typed contexts, `@nest`, container maps, `@graph` containers,
+///   options forwarding), not an oracle relaxation: the new oracle is strictly
+///   harder (document equivalence vs self-reparse). Passes also hold under
+///   STRICT order-sensitive JSON equality (strict-ordered count = 228 — no pass
+///   relies on the comparator's outside-`@list` array order-insensitivity).
 ///
-/// ## The 1 honest FAIL and the 17 honest SKIPs
+/// ## The 18 honest SKIPs (0 fails at the pin)
 ///
-/// * `#t0038` (`specVersion: json-ld-1.0`) expects 1.0-era compact-IRI creation
-///   through an EXPANDED (map-valued) term definition (`body:/format`). A
-///   REC-conformant 1.1 processor never sets the prefix flag on an expanded
-///   term — in either processing mode (`compact/p001` pins exactly that for
-///   1.0 mode) — so this expectation is unreachable; jsonld.js and pyld make
-///   the same trade. Documented FAIL below the floor, not skipped.
+/// * `#t0038` (`specVersion: json-ld-1.0`, the ONLY 1.0-only positive at the
+///   pin) expects 1.0-era compact-IRI creation through an EXPANDED (map-valued)
+///   term definition (`body:/format`). A REC-conformant 1.1 processor never
+///   sets the prefix flag on an expanded term — in either processing mode
+///   (`compact/p001` pins exactly that for 1.0 mode, so "fixing" `#t0038`
+///   would break `#tp001`) — so this expectation is unreachable; jsonld.js and
+///   pyld make the same trade. DECISION (bead sq-uzdw7): reclassified from a
+///   documented below-floor FAIL to an honest 1.0 SKIP, adopting the
+///   flatten/fromRdf lane convention (1.0-only tests are run by 1.0
+///   processors); the skip matches `specVersion` ONLY, so the
+///   `processingMode: json-ld-1.0` cases of the 1.1 suite still RUN.
 /// * 17 SKIPs = the NegativeEvaluationTests: compaction raises `invalid @nest
 ///   value`, but error-code completeness across context processing, expansion,
 ///   and compaction is unverified; the negative ratchet lanes are bead

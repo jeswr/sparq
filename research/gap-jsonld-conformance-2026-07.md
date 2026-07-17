@@ -40,21 +40,22 @@ the BEHIND verdicts are preserved honestly. Conformance pass-rates are
 correctness counts, not performance figures — no latency/throughput numbers
 appear in this record.
 
-## 2. Measured scoreboard (runner output, 2026-07-12, pins above)
+## 2. Measured scoreboard (runner output, 2026-07-17, pins above)
 
 | operation | pass | fail | skip | total | rate (strict, skips count against) | rate over RUN tests |
 |---|---|---|---|---|---|---|
 | expand  | 276 | 0 | 109 | 385 | 71.6% | 276/276 = 100% |
-| compact | 228 | 1 | 17  | 246 | 92.6% | 228/229 = 99.5% |
+| compact | 228 | 0 | 18  | 246 | 92.6% | 228/228 = 100% |
 | flatten | 53  | 0 | 5   | 58  | 91.3% | 53/53 = 100% |
 | frame   | 92  | 0 | 0   | 92  | 100.0% | 92/92 (negatives RUN) |
 | fromRdf | 52  | 0 | 1   | 53  | 98.1% | 52/52 (negatives RUN) |
 | toRdf   | — | — | — | — | NOT IMPLEMENTED natively | see §4 |
 
-The only outright **fail** is compact `#t0038` ("Index map round-tripping", a
-JSON-LD-**1.0**-only positive the compact lane runs rather than skips — bead
-sq-uzdw7); every other sub-100% strict rate is a **skip bucket**, itemised
-below.
+There are **0 outright fails** at the pin: every sub-100% strict rate is a
+**skip bucket**, itemised below. (The 2026-07-12 snapshot had 1 fail — compact
+`#t0038`, a JSON-LD-**1.0**-only positive the compact lane RAN rather than
+skipped; bead sq-uzdw7 resolved it as an honest 1.0 skip — see the compact
+skip-bucket below and `floors::compact`.)
 The document-level oracle is the pinned sq-kk1mq comparator (key order
 insignificant; array order significant only inside `@list`; exact integral /
 f64-fallback numerics) — the same oracle the `sparq-conformance` ratchet lane
@@ -67,7 +68,14 @@ Skip-bucket composition (from the pinned manifests, no estimates):
   expander raises spec error codes but error-code COMPLETENESS is unverified,
   so the negative lane is deferred (bead sq-oy1f.31) and honestly skipped —
   never counted as passes. This bucket is the entire expand gap.
-- **compact: 17 skips = the 17 NegativeEvaluationTests** (same deferral).
+- **compact: 18 skips = 17 NegativeEvaluationTests** (same deferral) **+ the
+  one `specVersion: json-ld-1.0` positive (`#t0038`)**. sq-uzdw7 decision:
+  `#t0038`'s 1.0-era expectation (compact-IRI creation through an expanded
+  term definition) directly contradicts what `#tp001` pins for 1.0 processing
+  mode under the 1.1 REC — both cannot pass, jsonld.js/pyld make the same
+  trade — so the lane adopts the fromRdf convention (1.0-only tests are run by
+  1.0 processors) and skips on `specVersion` only; the
+  `processingMode: json-ld-1.0` cases of the 1.1 suite still run (and pass).
 - **flatten: 5 skips** = 1 negative + the JSON-LD-1.0-only positives + the
   post-flatten-compaction (`context`-member) compositions.
 - **fromRdf: 1 skip** = the one `specVersion: json-ld-1.0` case (a 1.1
@@ -84,16 +92,17 @@ loosely comparable only).
 | operation | sparq (strict) | best published peers | verdict |
 |---|---|---|---|
 | expand  | 71.6% | jsonld-cpp / JSON-LD.ex 100.0, Titanium 98.1, jsonld.js 97.3 | **BEHIND** (driver: deferred negative lane, sq-oy1f.31) |
-| compact | 92.6% | JSON-LD.ex 99.6, Titanium 98.0, jsonld.js 97.5 | **BEHIND**, narrowed from .22's stale 75.6 (floor has risen 186→228); residual = 17 negatives + `#t0038` |
+| compact | 92.6% | JSON-LD.ex 99.6, Titanium 98.0, jsonld.js 97.5 | **BEHIND**, narrowed from .22's stale 75.6 (floor has risen 186→228); residual = 17 negatives + the `#t0038` 1.0-only skip |
 | flatten | 91.3% | listed peers 100.0 | **BEHIND** (small; 5 skips) |
 | frame   | 100.0% | jsonld.js 97.8, Titanium 96.7 | **AHEAD at sparq's pin** (.22's 66.3 is stale — floor rose 61→92; denominator 92 vs report 91, loosely comparable) |
 | fromRdf | 98.1% | Titanium / Sophia 98.1 (of 52) | **PARITY** (.22 cited the then-floor 51; current measured 52/53) |
 | toRdf (native) | not implemented | jsonld-cpp 99.8, JSON-LD.ex 99.6 | **BEHIND** natively; engine-path toRdf is a separate 413/467 = 88.4% ratchet (§4) |
 
 The epic-level verdict stays **BEHIND** — honestly driven by (a) the deferred
-negative-test lanes (expand/compact/flatten), (b) native toRdf not existing
-yet, and (c) compact `#t0038` — but the .22 snapshot materially understated
-the current estate on compact and frame.
+negative-test lanes (expand/compact/flatten) and (b) native toRdf not existing
+yet — but the .22 snapshot materially understated the current estate on
+compact and frame. (The former driver (c), compact `#t0038`, is resolved: an
+honest 1.0 skip per sq-uzdw7, still counted against the strict rate.)
 
 ## 4. toRdf honesty note
 
@@ -125,7 +134,11 @@ sq-hmd7l.15/.43) or the cross-engine table script (sq-hmd7l.22).
   is the whole remaining expand gap.
 - **sq-oy1f.30** — native toRdf (Deserialization to RDF); once landed, the
   runner grows a real toRdf row.
-- **sq-uzdw7** — compact `#t0038` ("Index map round-tripping",
-  json-ld-1.0-only positive), the single outright failing test at the pin:
-  fix 1.0-mode index-map compaction or reclassify as an honest 1.0 skip
-  (filed with this record).
+- **sq-uzdw7** — RESOLVED (2026-07-17): compact `#t0038` ("Index map
+  round-tripping", json-ld-1.0-only positive), formerly the single outright
+  failing test at the pin, is reclassified as an honest 1.0 skip in BOTH the
+  ratchet lane and this runner (the fromRdf `specVersion`-only convention).
+  "Fixing" it was rejected as unreachable: its 1.0-era prefixing expectation
+  contradicts `#tp001` (a 1.1-suite test run in 1.0 processing mode), so a
+  REC-conformant processor cannot pass both. Floors unchanged (compact stays
+  228; fail 1→0, skip 17→18).
