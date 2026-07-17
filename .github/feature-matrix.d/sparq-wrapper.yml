@@ -33,6 +33,12 @@
   features: "proposed-typed-focus"
   test: true
 
+# [GPT-5.6] sq-kf56o: compile and test the five proposals in composition.
+- name: "sparq-wrapper (proposed-composition)"
+  crate: "sparq-wrapper"
+  features: "proposed-distinct,proposed-cardinality,proposed-codecs,proposed-observe,proposed-typed-focus"
+  test: true
+
 - name: "sparq-wrapper (proposed-graph-scope)"
   crate: "sparq-wrapper"
   features: "proposed-graph-scope"
