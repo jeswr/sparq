@@ -2,7 +2,7 @@
 # Upstream contributions to `KonradHoeffner/hdt`
 
 This crate WRAPS [`hdt`](https://github.com/KonradHoeffner/hdt) (MIT). This file
-tracks the two upstream gaps the sparq-hdt work originally queued against it and
+tracks the upstream gaps the sparq-hdt work has queued against it and
 their CURRENT status against `hdt` master / 0.6.x.
 
 > **Status (sq-v7be, verified 2026-06-19 against `KonradHoeffner/hdt` master):**
@@ -10,6 +10,8 @@ their CURRENT status against `hdt` master / 0.6.x.
 > - **Decode-only entry point — OPEN UPSTREAM DRAFT PR
 >   [`KonradHoeffner/hdt#124`](https://github.com/KonradHoeffner/hdt/pull/124).**
 >   See item 2.
+> - **`read_nt` stores literal lexical forms N-Triples-ESCAPED (spec says raw) —
+>   DOCUMENTED LIMITATION (sq-qalqs).** See item 3.
 
 ---
 
@@ -86,3 +88,40 @@ against the full `Hdt::read` path (retained only as the oracle,
 `load_reader_via_upstream` in `lib.rs`) on real and generated archives. If the
 upstream PR lands we can delete our vendored decoder and call the upstream entry
 point instead.
+
+---
+
+## Item 3 — `read_nt` escapes literal lexical forms in the dictionary — DOCUMENTED LIMITATION
+
+<!-- [SONNET-4.6] sq-qalqs -->
+
+**Finding (sq-qalqs, verified against `hdt` 0.4.0).** The HDT spec — and the
+hdt-cpp / hdt-java reference implementations, and sparq's own `save` encoder
+(`encode.rs::hdt_term_string`) — store a literal's lexical form **RAW** in the
+dictionary (the sections are length-delimited, so no escaping is needed). Upstream
+`FourSectDict::read_nt` (0.4, `sophia` feature) instead stores the sophia/rio
+**N-Triples-escaped term rendering** (`q.object.to_string()` after only stripping
+IRI angle brackets), so a literal containing `"` or `\` lands in the dictionary
+with literal `\"` / `\\` byte sequences. Any spec-conformant reader — sparq's
+direct decoder, sparq's upstream-backed oracle path, and hdt-cpp alike — then
+decodes a lexical form escaped one time more than the N-Triples source, i.e.
+`Hdt::read_nt -> Hdt::write -> sparq_hdt::load` disagrees with `Graph::load_str`
+on such literals. (Upstream's own `hdt_graph::auto_term` reader does not unescape
+either, so the escaped bytes round-trip verbatim *within* the upstream crate —
+the non-conformance is confined to the `read_nt` **writer**.)
+
+**Impact on sparq: test fixtures only.** `read_nt` is used solely as the
+dev-dependency fixture builder (`tests/roundtrip.rs::nt_to_hdt_bytes` and
+friends); the production write path (`save`) encodes the raw lexical form
+directly from sparq's dict and round-trips escaped literals exactly
+(`tests/write_roundtrip.rs::save_round_trips_escaped_literals_exactly`).
+Fixture N-Triples containing `\"` / `\\` (or other N-Triples escapes, e.g.
+`\n`, `\t`) will NOT match a `Graph::load_str` ground truth — keep escape-worthy
+literals out of `read_nt`-built differential fixtures, or route them through
+`save`. Same family as `read_nt`'s verbatim (non-lowercased) language tags noted
+in `tests/roundtrip.rs::hdt_load_matches_ntriples_load`.
+
+**Regression oracle:** `tests/roundtrip.rs::escaped_literal_pins_upstream_writer_as_the_mangler`
+pins the stored dictionary bytes and the exact double-escaped round-trip rendering;
+if a future `hdt` bump fixes `read_nt`, that test goes red — then delete this item
+and tighten the oracle into an exact round-trip equality. Not yet reported upstream.

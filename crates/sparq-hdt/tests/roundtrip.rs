@@ -618,6 +618,81 @@ fn pfc_dictionary_edges_translate_identically() {
     assert_direct_matches_upstream(&hdt_bytes, 5);
 }
 
+/// [SONNET-4.6] sq-qalqs — escaped-literal round-trip oracle: pins WHICH side mangles
+/// a literal containing escaped quotes / backslashes on the `Hdt::read_nt` -> `write`
+/// -> `sparq_hdt::load` fixture path, and encodes the UPSTREAM limitation exactly.
+///
+/// Finding: the WRAPPED writer is the mangler, not sparq's decode. The HDT spec (and
+/// hdt-cpp / hdt-java) stores literal lexical forms RAW in the dictionary; upstream
+/// `hdt 0.4`'s `FourSectDict::read_nt` instead stores the sophia/rio term rendering —
+/// the N-Triples-ESCAPED form (`\"` / `\\` as literal backslash sequences). A
+/// spec-conformant reader (sparq's direct decoder AND the upstream-backed oracle
+/// alike — both treat the stored bytes as raw) therefore decodes a lexical form that
+/// still carries those backslashes, i.e. the source lexical escaped ONCE more than
+/// `Graph::load_str` yields. Same family as the writer's verbatim (non-lowercased)
+/// language tags noted in `hdt_load_matches_ntriples_load`. Documented in
+/// `UPSTREAM.md` item 3; archives written by hdt-cpp/hdt-java or by sparq's own
+/// `save` (see `write_roundtrip.rs`) are NOT affected.
+#[test]
+fn escaped_literal_pins_upstream_writer_as_the_mangler() {
+    // Raw lexical form under test: he said "hi" and \ done
+    let raw = r#"he said "hi" and \ done"#;
+    // One round of N-Triples escaping (\ -> \\, " -> \").
+    let nt_escape = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let escaped = nt_escape(raw);
+    let nt = format!("<http://example.org/s> <http://example.org/p> \"{escaped}\" .\n");
+
+    // Ground truth: sparq's own N-Triples loader unescapes to the raw lexical form
+    // (its N-Triples term rendering re-escapes exactly once).
+    let from_nt = Graph::load_str(&nt, "ntriples").unwrap();
+    let want = format!("\"{escaped}\"");
+    assert_eq!(
+        triple_set(&from_nt).iter().next().unwrap()[2],
+        want,
+        "ground truth: Graph::load_str object rendering"
+    );
+
+    // (1) The WRITER is the mangler: the dictionary string `read_nt` stores is the
+    // ESCAPED rendering, not the raw lexical form the HDT spec prescribes.
+    let dir = scratch_dir();
+    let nt_path = dir.path().join("escaped.nt");
+    std::fs::write(&nt_path, &nt).unwrap();
+    let written = hdt::Hdt::read_nt(&nt_path).expect("building HDT from N-Triples");
+    let stored = written
+        .dict
+        .id_to_string(1, hdt::IdKind::Object)
+        .expect("the single object term");
+    assert_eq!(
+        stored,
+        format!("\"{escaped}\""),
+        "upstream read_nt stores the N-Triples-ESCAPED lexical form (raw per spec); \
+         if this fails with the RAW form instead, upstream fixed it — drop UPSTREAM.md \
+         item 3 and turn this test into an exact round-trip equality"
+    );
+
+    // (2) sparq's decode is NOT a second mangler: the direct decoder and the
+    // upstream-backed oracle agree byte-faithfully on the same archive…
+    let mut buf: Vec<u8> = Vec::new();
+    written.write(&mut buf).expect("serializing HDT archive");
+    let direct = sparq_hdt::load_reader(std::io::Cursor::new(buf.clone())).unwrap();
+    let upstream = sparq_hdt::load_reader_via_upstream(std::io::Cursor::new(buf)).unwrap();
+    assert_eq!(
+        triple_set(&direct),
+        triple_set(&upstream),
+        "both decode paths must agree on the same bytes (the divergence is in the writer)"
+    );
+
+    // (3) …and the round-tripped object is the source lexical escaped ONE extra
+    // time (the stored escapes survive as literal characters), NOT the ground truth.
+    let got = triple_set(&direct).iter().next().unwrap()[2].clone();
+    assert_eq!(
+        got,
+        format!("\"{}\"", nt_escape(&escaped)),
+        "round trip through the upstream writer yields the double-escaped rendering"
+    );
+    assert_ne!(got, want, "the documented mismatch against Graph::load_str");
+}
+
 // (3) REJECTION ORACLE: a CORRUPT archive must be rejected with a clean
 // `Result::Err` — never a panic, never a silently mis-decoded / partial Graph.
 //
