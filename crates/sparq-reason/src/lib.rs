@@ -40,7 +40,9 @@ mod rdfs;
 // base stays finite (termination argument in the module docs). Behind the
 // `quoted-triples` feature; when off the whole module is cfg'd out (the lean-core
 // posture, like `dtype` / `datalog`) and `Profile::OwlRl` closures are byte-identical
-// to before this module existed.
+// to before this module existed. [FABLE-5] sq-afun3 (second increment): `ReifyMode` —
+// `materialize_owl_rl_reify(…, ReifyMode::DestructureOnly)` is the STRICT-OPACITY
+// variant (reif-dtr only; inference never mints a triple term).
 #[cfg(feature = "quoted-triples")]
 mod reify;
 // [OPUS-4.8] sq-rh4gu (epic sq-pbz04) — the opt-in RIF-Core (monotone Horn) rule
@@ -63,7 +65,11 @@ pub use incremental::{
 };
 pub use n3::{reason_n3, reason_n3_proof, reason_n3_terms, N3Closure, ProofStep};
 pub use owl::{inconsistencies, materialize_owl_rl};
+#[cfg(feature = "quoted-triples")]
+pub use owl::materialize_owl_rl_reify;
 pub use rdfs::materialize_rdfs;
+#[cfg(feature = "quoted-triples")]
+pub use reify::ReifyMode;
 pub(crate) use rdfs::RdfsIndex;
 
 /// Which entailment regime to materialize.

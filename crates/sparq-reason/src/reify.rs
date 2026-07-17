@@ -65,8 +65,8 @@
 //! minted earlier in this run?" — together with the closure-membership form of
 //! restriction 1 (membership in the CURRENT set, not a pre-derivation base
 //! snapshot) this keeps [`crate::materialize`] IDEMPOTENT as documented: [`step`]
-//! is a pure function of `(dict, triples)`, so re-running materialization on its
-//! own fixpoint derives nothing new. (A base-snapshot guard would NOT be
+//! is a pure function of `(dict, triples, mode)`, so re-running materialization on
+//! its own fixpoint derives nothing new. (A base-snapshot guard would NOT be
 //! idempotent: a triple derived by, say, rdfs7 on the first call is "base" on the
 //! second call and would suddenly become quotable.)
 //!
@@ -85,9 +85,12 @@
 //!   without touching the original quotation. That is classic-vocabulary
 //!   reasoning, not substitution inside a quote; it is pinned by
 //!   `same_as_variants_arrive_only_via_the_transparent_bridge` in
-//!   tests/owl_reify.rs, and a strict-opacity mode that suppresses even the
-//!   bridge composition is a named follow-up (coordinate with the sibling
-//!   opacity-semantics PR).
+//!   tests/owl_reify.rs. For consumers that want even that composition
+//!   suppressed, [`ReifyMode::DestructureOnly`] (the STRICT-OPACITY mode, second
+//!   increment) runs reif-dtr alone: inference then never mints a triple term at
+//!   all, so no quotation — variant or otherwise — can ever be introduced by
+//!   reasoning. Drive it via [`crate::materialize_owl_rl_reify`];
+//!   [`crate::materialize_owl_rl`] keeps the full bridge.
 //! * Only the OUTER quotation is destructured — a component that is itself a
 //!   triple term stays one opaque id.
 //! * Reasoning over reifier ANNOTATIONS (`{| … |}` blocks) needs no new machinery:
@@ -96,17 +99,41 @@
 //!   adds is a deliberate, monotone projection: the DESTRUCTURED components are
 //!   transparent ordinary terms, while the triple term itself remains opaque.
 //!
-//! # First-increment scope
+//! # Increment scope
 //!
 //! One naive O(|closure|) pass per outer round, single-threaded, alternated with
 //! the batch RL core (correct, not yet fused into the semi-naive delta loop);
 //! `MaterializedOwlGraph` routes any base that mentions the reification vocabulary
 //! to its documented Fallback mode (re-materialize per mutation) rather than
-//! teaching the counting modes these rules. See the PR body for the follow-up list.
+//! teaching the counting modes these rules. See the first-increment PR body (#2135)
+//! for the follow-up list. The second increment ([FABLE-5] sq-afun3) added the
+//! strict-opacity [`ReifyMode`] surface; the strict mode is batch-only —
+//! `MaterializedOwlGraph`'s Fallback re-materialization always runs the full
+//! bridge.
 
 use crate::owl::RDF;
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{is_inline, Dict, Id, TermParts, NO_ID};
+
+/// Which of the bridge rules the reify layer runs — see the opacity section of the
+/// module docs. [FABLE-5] sq-afun3 (second increment of kern/quoted-triple-infer).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ReifyMode {
+    /// Both bridge rules (reif-dtr + reif-ctr) to their joint fixpoint — what
+    /// [`crate::materialize_owl_rl`] runs when the `quoted-triples` feature is on.
+    #[default]
+    Bridge,
+    /// STRICT OPACITY: destructure only. reif-ctr never runs, so inference never
+    /// mints a triple term — classic-reification data is never surfaced as
+    /// `rdf:reifies`, and the documented bridge composition (reif-dtr → eq-rep on
+    /// the classic vocabulary → reif-ctr) that can quote a `owl:sameAs`-variant
+    /// spelling is suppressed with it. Everything reif-dtr recovers (the classic
+    /// vocabulary over as-written quotations, `rdf:Statement` typing, annotation
+    /// reasoning) is unchanged. A strict subset of [`ReifyMode::Bridge`], so the
+    /// finite-Herbrand-base / termination / idempotency arguments hold a fortiori
+    /// (no constructor, no minting).
+    DestructureOnly,
+}
 
 /// The interned rule vocabulary. `intern` is idempotent (fixed labels only), the
 /// same discipline as [`crate::Vocab`] / `Owl::intern`.
@@ -158,14 +185,16 @@ pub(crate) fn occurs(dict: &Dict, triples: &[[Id; 3]]) -> bool {
             .any(|t| t.iter().any(|id| trigger.contains(id)))
 }
 
-/// One naive reif-dtr + reif-ctr round over the whole current closure. Appends the
-/// new triples (set semantics, deduplicated against `triples` and within the round)
-/// and returns how many were added. Driven to the joint fixpoint by
-/// [`crate::materialize_owl_rl`], which alternates one round with one RL closure —
-/// a per-round full scan is fine for a first increment because rounds are rare
-/// (each must be separated by an RL pass that derived new reify-relevant facts);
-/// the semi-naive delta form is a named follow-up.
-pub(crate) fn step(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
+/// One naive reify round over the whole current closure — reif-dtr + reif-ctr in
+/// [`ReifyMode::Bridge`], reif-dtr alone in [`ReifyMode::DestructureOnly`]. Appends
+/// the new triples (set semantics, deduplicated against `triples` and within the
+/// round) and returns how many were added. Driven to the joint fixpoint by
+/// [`crate::materialize_owl_rl`] / [`crate::materialize_owl_rl_reify`], which
+/// alternate one round with one RL closure — a per-round full scan is fine for a
+/// first increment because rounds are rare (each must be separated by an RL pass
+/// that derived new reify-relevant facts); the semi-naive delta form is a named
+/// follow-up.
+pub(crate) fn step(dict: &mut Dict, triples: &mut Vec<[Id; 3]>, mode: ReifyMode) -> usize {
     let v = ReifyVocab::intern(dict);
     let mut set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
     let mut add: Vec<[Id; 3]> = Vec::new();
@@ -173,7 +202,9 @@ pub(crate) fn step(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
     // Component values per reifier, from classic-vocabulary assertions (asserted or
     // derived). A reifier with several values per slot yields the cross product in
     // reif-ctr — the standard reading of classic reification, filtered hard by the
-    // existing-triple restriction.
+    // existing-triple restriction. Collected only in Bridge mode: DestructureOnly
+    // never runs reif-ctr, so the maps stay empty and the construct pass below is
+    // a no-op.
     let mut subj: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
     let mut pred: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
     let mut obj: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
@@ -194,16 +225,19 @@ pub(crate) fn step(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize {
                     ]);
                 }
             }
-        } else if p == v.subject {
-            subj.entry(r).or_default().push(o);
-        } else if p == v.predicate {
-            pred.entry(r).or_default().push(o);
-        } else if p == v.object {
-            obj.entry(r).or_default().push(o);
+        } else if mode == ReifyMode::Bridge {
+            if p == v.subject {
+                subj.entry(r).or_default().push(o);
+            } else if p == v.predicate {
+                pred.entry(r).or_default().push(o);
+            } else if p == v.object {
+                obj.entry(r).or_default().push(o);
+            }
         }
     }
 
-    // reif-ctr — under the finiteness restrictions (module doc) and the RDF 1.2
+    // reif-ctr (Bridge mode only — the maps are empty in DestructureOnly) — under
+    // the finiteness restrictions (module doc) and the RDF 1.2
     // well-formedness kind guards. An ill-kinded candidate satisfies no premise and
     // is skipped — never interned, so a construct can never produce a triple term
     // the dict's open-time component-kind validation would reject.
@@ -326,7 +360,7 @@ mod tests {
         let v = ReifyVocab::intern(&mut d);
         let q = tt(&mut d, "s", "p", "o");
         let mut triples = vec![[s, p, o], [r, v.reifies, q]];
-        let added = step(&mut d, &mut triples);
+        let added = step(&mut d, &mut triples, ReifyMode::Bridge);
         let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
         assert!(set.contains(&[r, v.ty, v.statement]));
         assert!(set.contains(&[r, v.subject, s]));
@@ -336,7 +370,7 @@ mod tests {
         // present, so exactly the 4 destructure conclusions are new.
         assert_eq!(added, 4);
         // Idempotent: a second round adds nothing.
-        assert_eq!(step(&mut d, &mut triples), 0);
+        assert_eq!(step(&mut d, &mut triples, ReifyMode::Bridge), 0);
     }
 
     #[test]
@@ -361,7 +395,7 @@ mod tests {
             [r2, v.predicate, p],
             [r2, v.object, o],
         ];
-        let added = step(&mut d, &mut triples);
+        let added = step(&mut d, &mut triples, ReifyMode::Bridge);
         assert_eq!(added, 1, "exactly the guarded construction fires");
         let q = tt(&mut d, "s", "p", "o");
         assert!(triples.contains(&[r, v.reifies, q]));
@@ -396,7 +430,7 @@ mod tests {
             d.term(inner),
         )))); // <<( s p <<( a q b )>> )>>
         let mut triples = vec![[r, v.reifies, outer]];
-        step(&mut d, &mut triples);
+        step(&mut d, &mut triples, ReifyMode::Bridge);
         let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
         // The quoted triple is NOT asserted (opacity)…
         assert!(
@@ -437,7 +471,7 @@ mod tests {
             [r, v.object, q],
         ];
         // Drive this rule set alone to fixpoint — it must terminate.
-        while step(&mut d, &mut triples) > 0 {}
+        while step(&mut d, &mut triples, ReifyMode::Bridge) > 0 {}
         let nested = d.lookup(&Term::Triple(Box::new(oxrdf::Triple::new(
             NamedNode::new_unchecked("http://ex/r"),
             NamedNode::new_unchecked(format!("{RDF}reifies")),
@@ -466,15 +500,15 @@ mod tests {
             [r, v.object, o],
         ];
         // Round 1: reif-ctr mints the reifies triple.
-        assert_eq!(step(&mut d, &mut triples), 1);
+        assert_eq!(step(&mut d, &mut triples, ReifyMode::Bridge), 1);
         // Round 2: reif-dtr types the reifier from the new premise; the subject/
         // predicate/object conclusions already exist. Round 3: fixpoint.
-        assert_eq!(step(&mut d, &mut triples), 1);
+        assert_eq!(step(&mut d, &mut triples, ReifyMode::Bridge), 1);
         let q = tt(&mut d, "s", "p", "o");
         assert!(triples.contains(&[r, v.reifies, q]));
         assert!(triples.contains(&[r, v.ty, v.statement]));
         assert_eq!(
-            step(&mut d, &mut triples),
+            step(&mut d, &mut triples, ReifyMode::Bridge),
             0,
             "terminates — the guarded universe is exhausted"
         );
@@ -503,11 +537,92 @@ mod tests {
             [r, v.predicate, p],
         ];
         assert_eq!(
-            step(&mut d, &mut triples),
+            step(&mut d, &mut triples, ReifyMode::Bridge),
             1,
             "only the well-kinded (s p o) combination fires"
         );
         let q = tt(&mut d, "s", "p", "o");
         assert!(triples.contains(&[r, v.reifies, q]));
+    }
+
+    /// [FABLE-5] sq-afun3: DestructureOnly recovers exactly the reif-dtr conclusions
+    /// and NEVER constructs — the fixture that fires reif-ctr once in Bridge mode
+    /// mints nothing in strict mode, and no triple term is ever interned.
+    #[test]
+    fn destructure_only_never_constructs() {
+        let mut d = Dict::default();
+        let (s, p, o, r, r2) = (
+            iri(&mut d, "s"),
+            iri(&mut d, "p"),
+            iri(&mut d, "o"),
+            iri(&mut d, "r"),
+            iri(&mut d, "r2"),
+        );
+        let v = ReifyVocab::intern(&mut d);
+        let q = tt(&mut d, "s", "p", "o");
+        let mut triples = vec![
+            [s, p, o],
+            [r, v.reifies, q], // reif-dtr premise: the strict mode still fires this
+            // A complete classic description of the EXISTING (s p o) — the exact
+            // shape reif-ctr fires on in Bridge mode (construct_mints_only_…).
+            [r2, v.subject, s],
+            [r2, v.predicate, p],
+            [r2, v.object, o],
+        ];
+        let mut strict = triples.clone();
+        while step(&mut d, &mut strict, ReifyMode::DestructureOnly) > 0 {}
+        let set: FxHashSet<[Id; 3]> = strict.iter().copied().collect();
+        // reif-dtr conclusions are unchanged…
+        assert!(set.contains(&[r, v.ty, v.statement]));
+        assert!(set.contains(&[r, v.subject, s]));
+        assert!(set.contains(&[r, v.predicate, p]));
+        assert!(set.contains(&[r, v.object, o]));
+        // …but reif-ctr never runs: r2 gains NO reifies triple in strict mode,
+        // while Bridge mode derives it from the same input.
+        assert!(
+            !set.contains(&[r2, v.reifies, q]),
+            "strict mode must not surface classic reification as rdf:reifies"
+        );
+        while step(&mut d, &mut triples, ReifyMode::Bridge) > 0 {}
+        assert!(
+            triples.contains(&[r2, v.reifies, q]),
+            "the same fixture DOES construct in Bridge mode (non-vacuity)"
+        );
+    }
+
+    /// [FABLE-5] sq-afun3: strict mode derives no quotation AT ALL — not even the
+    /// leaf-component depth-1 mint Bridge mode allows on the adversarial-cascade
+    /// shape (`r` classically describing its own asserted `(r reifies o)` triple) —
+    /// and the fixpoint still terminates and is idempotent.
+    #[test]
+    fn destructure_only_mints_nothing_on_the_adversarial_cascade() {
+        let mut d = Dict::default();
+        let (o, r) = (iri(&mut d, "o"), iri(&mut d, "r"));
+        let v = ReifyVocab::intern(&mut d);
+        let mut triples = vec![
+            // Freehand `r reifies :o` (not a triple term): dtr's premise fails, but
+            // the triple EXISTS, so Bridge's reif-ctr may quote it (all leaf).
+            [r, v.reifies, o],
+            [r, v.subject, r],
+            [r, v.predicate, v.reifies],
+            [r, v.object, o],
+        ];
+        let mut strict = triples.clone();
+        while step(&mut d, &mut strict, ReifyMode::DestructureOnly) > 0 {}
+        assert_eq!(strict.len(), 4, "strict mode derives nothing here");
+        // No quotation is minted by inference: <<( r reifies o )>> must not exist.
+        let quote = |d: &Dict| {
+            d.lookup(&Term::Triple(Box::new(oxrdf::Triple::new(
+                NamedNode::new_unchecked("http://ex/r"),
+                NamedNode::new_unchecked(format!("{RDF}reifies")),
+                Term::NamedNode(NamedNode::new_unchecked("http://ex/o")),
+            ))))
+        };
+        assert_eq!(quote(&d), NO_ID, "strict mode must never mint a triple term");
+        // Idempotent: the fixpoint is a pure function of (dict, triples, mode).
+        assert_eq!(step(&mut d, &mut strict, ReifyMode::DestructureOnly), 0);
+        // Non-vacuity: Bridge mode DOES mint the depth-1 quotation on this fixture.
+        while step(&mut d, &mut triples, ReifyMode::Bridge) > 0 {}
+        assert_ne!(quote(&d), NO_ID, "Bridge mints the depth-1 quotation");
     }
 }
