@@ -739,28 +739,69 @@ pub fn materialize_owl_rl(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> usize 
     let pre = pre_monotone(dict, triples);
     let mut added = owl_rl_closure(dict, triples);
     added += post_equivalences(dict, triples);
-    // [Kern] Quoted-triple (RDF 1.2 reifier) rules — see the `reify` module for the
-    // rule table, the finite-Herbrand-base restrictions, and the termination argument.
-    // Behind the opt-in `quoted-triples` feature (the reif-dtr/reif-ctr bridge is a
-    // deliberate, NON-normative entailment extension — off by default so plain
-    // `Profile::OwlRl` closures never change for data that happens to use the classic
-    // reification vocabulary). When ON, still occurrence-guarded (zero cost +
-    // byte-identical closure for reify-free data) and checked AFTER the main closure
-    // because RL rules can derive the trigger vocabulary. The loop ALTERNATES reify
-    // steps with the RL closure: destructured components feed the RL rules, and
-    // RL-derived triples can enable reif-ctr. Each round adds at least one triple over
-    // a finite Herbrand base, so the alternation terminates.
+    // [Kern] Quoted-triple (RDF 1.2 reifier) rules — the full bridge (reif-dtr +
+    // reif-ctr); see `reify_fixpoint` below and the `reify` module docs.
     #[cfg(feature = "quoted-triples")]
+    {
+        added += reify_fixpoint(dict, triples, crate::reify::ReifyMode::Bridge);
+    }
+    pre + added
+}
+
+/// [FABLE-5] sq-afun3 (second increment of kern/quoted-triple-infer): the OWL 2 RL
+/// (+ RDFS) closure with the quoted-triple reify layer driven in an explicit
+/// [`ReifyMode`](crate::reify::ReifyMode). [`materialize_owl_rl`] is exactly
+/// `ReifyMode::Bridge`; `ReifyMode::DestructureOnly` is the STRICT-OPACITY variant —
+/// reif-dtr recovers the classic vocabulary from as-written quotations, but reif-ctr
+/// never runs, so inference never mints a triple term (in particular the documented
+/// `owl:sameAs` bridge composition derives no variant quotation). Same in-place /
+/// return-count / idempotency contract as [`materialize_owl_rl`]. Batch-only for
+/// now: `MaterializedOwlGraph`'s Fallback re-materialization always runs the full
+/// bridge.
+#[cfg(feature = "quoted-triples")]
+pub fn materialize_owl_rl_reify(
+    dict: &mut Dict,
+    triples: &mut Vec<[Id; 3]>,
+    mode: crate::reify::ReifyMode,
+) -> usize {
+    let pre = pre_monotone(dict, triples);
+    let mut added = owl_rl_closure(dict, triples);
+    added += post_equivalences(dict, triples);
+    added += reify_fixpoint(dict, triples, mode);
+    pre + added
+}
+
+/// [Kern] Quoted-triple (RDF 1.2 reifier) rules — see the `reify` module for the
+/// rule table, the finite-Herbrand-base restrictions, and the termination argument.
+/// Behind the opt-in `quoted-triples` feature (the reif-dtr/reif-ctr bridge is a
+/// deliberate, NON-normative entailment extension — off by default so plain
+/// `Profile::OwlRl` closures never change for data that happens to use the classic
+/// reification vocabulary). When ON, still occurrence-guarded (zero cost +
+/// byte-identical closure for reify-free data) and checked AFTER the main closure
+/// because RL rules can derive the trigger vocabulary. The loop ALTERNATES reify
+/// steps with the RL closure: destructured components feed the RL rules, and
+/// RL-derived triples can enable reif-ctr. Each round adds at least one triple over
+/// a finite Herbrand base, so the alternation terminates. In
+/// `ReifyMode::DestructureOnly` the same loop runs reif-dtr alone (a strict subset —
+/// the occurrence gate stays a sound over-approximation, and the alternation is
+/// still needed because RL rules can derive `rdf:reifies` assertions reif-dtr sees).
+#[cfg(feature = "quoted-triples")]
+fn reify_fixpoint(
+    dict: &mut Dict,
+    triples: &mut Vec<[Id; 3]>,
+    mode: crate::reify::ReifyMode,
+) -> usize {
+    let mut added = 0;
     if crate::reify::occurs(dict, triples) {
         loop {
-            let n = crate::reify::step(dict, triples);
+            let n = crate::reify::step(dict, triples, mode);
             if n == 0 {
                 break;
             }
             added += n + owl_rl_closure(dict, triples) + post_equivalences(dict, triples);
         }
     }
-    pre + added
+    added
 }
 
 /// The XSD numeric-tower subsumptions (direct edges; rdfs11 closes them).

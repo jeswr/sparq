@@ -15,7 +15,9 @@ use oxrdf::{Literal, NamedNode, Term};
 use rustc_hash::FxHashSet;
 use sparq_core::dict::{Dict, Id, NO_ID};
 use sparq_core::Graph;
-use sparq_reason::{materialize_owl_rl, MaterializedOwlGraph, OwlMode};
+use sparq_reason::{
+    materialize_owl_rl, materialize_owl_rl_reify, MaterializedOwlGraph, OwlMode, ReifyMode,
+};
 
 const RDF: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 const EX: &str = "http://ex/";
@@ -285,6 +287,94 @@ fn same_as_variants_arrive_only_via_the_transparent_bridge() {
         &set,
         [id(&dict, "r"), id(&dict, "rdf:reifies"), variant],
         "r rdf:reifies <<( :al :knows :bob )>>",
+    );
+}
+
+/// [FABLE-5] sq-afun3 (second increment): STRICT OPACITY end-to-end.
+/// `materialize_owl_rl_reify(…, ReifyMode::DestructureOnly)` on the exact sameAs
+/// fixture of `same_as_variants_arrive_only_via_the_transparent_bridge`: the
+/// destructured components and the eq-rep variant TRIPLE still arrive (reif-dtr and
+/// the RL core are untouched), but the variant QUOTATION is never minted — the
+/// bridge composition the full Bridge mode allows is suppressed, and inference
+/// introduces no triple term at all.
+#[test]
+fn strict_opacity_suppresses_the_bridge_composition() {
+    let (mut dict, mut triples) = parse(
+        r#"@prefix : <http://ex/> .
+           @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+           @prefix owl: <http://www.w3.org/2002/07/owl#> .
+           :alice owl:sameAs :al .
+           :alice :knows :bob .
+           :r rdf:reifies <<( :alice :knows :bob )>> .
+        "#,
+    );
+    materialize_owl_rl_reify(&mut dict, &mut triples, ReifyMode::DestructureOnly);
+    let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+    // reif-dtr is unchanged: the as-written quotation is destructured…
+    let original = tt(&dict, "alice", "knows", "bob");
+    assert_ne!(original, NO_ID, "the as-written quotation exists (loader)");
+    assert_has(
+        &set,
+        [id(&dict, "r"), id(&dict, "rdf:reifies"), original],
+        "the as-written quotation stays",
+    );
+    assert_has(
+        &set,
+        [id(&dict, "r"), id(&dict, "rdf:subject"), id(&dict, "alice")],
+        "r rdf:subject :alice (reif-dtr still fires)",
+    );
+    // …and so is the RL core: eq-rep still derives the variant TRIPLE.
+    assert_has(
+        &set,
+        [id(&dict, "al"), id(&dict, "knows"), id(&dict, "bob")],
+        ":al :knows :bob (eq-rep)",
+    );
+    // THE strict-opacity pin: the variant QUOTATION is never minted (in Bridge
+    // mode this exact fixture constructs it — the sibling test above).
+    assert_eq!(
+        tt(&dict, "al", "knows", "bob"),
+        NO_ID,
+        "strict mode must not construct the sameAs-variant quotation"
+    );
+    // Idempotent, like the Bridge mode (the `materialize` API contract).
+    assert_eq!(
+        materialize_owl_rl_reify(&mut dict, &mut triples, ReifyMode::DestructureOnly),
+        0,
+        "strict materialization must be idempotent"
+    );
+}
+
+/// [FABLE-5] sq-afun3: in strict mode classic-reification data is never surfaced
+/// as `rdf:reifies` — the `construct_only_for_existing_triples` fixture derives no
+/// reifies triple and mints no triple term, while the destructure direction (and
+/// `rdf:Statement` typing of real reifiers) is unaffected.
+#[test]
+fn strict_opacity_never_surfaces_classic_reification() {
+    let (mut dict, mut triples) = parse(
+        r#"@prefix : <http://ex/> .
+           @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+           :alice :age :x .
+           :r rdf:subject :alice . :r rdf:predicate :age . :r rdf:object :x .
+        "#,
+    );
+    materialize_owl_rl_reify(&mut dict, &mut triples, ReifyMode::DestructureOnly);
+    let set: FxHashSet<[Id; 3]> = triples.iter().copied().collect();
+    // The triple term for the described-and-EXISTING triple is never minted…
+    assert_eq!(
+        tt(&dict, "alice", "age", "x"),
+        NO_ID,
+        "strict mode mints no triple term even for an existing triple"
+    );
+    // …and r is not typed rdf:Statement either (that conclusion is reif-dtr's,
+    // whose premise — an rdf:reifies triple — never comes into existence here).
+    assert_lacks(
+        &set,
+        [
+            id(&dict, "r"),
+            id(&dict, "rdf:type"),
+            id(&dict, "rdf:Statement"),
+        ],
+        "r a rdf:Statement",
     );
 }
 

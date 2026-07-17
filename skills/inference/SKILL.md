@@ -293,6 +293,8 @@ The loaders desugar every RDF 1.2 quotation form (`<< :s :p :o >>`, `:s :p :o ~ 
 
 **Opacity:** quotation never asserts — `:r rdf:reifies <<( :s :p :o )>>` does NOT entail `:s :p :o` — and no rule rewrites inside a triple term (`owl:sameAs` substitutes whole ids only). Reifier ANNOTATIONS are ordinary triples and get full RL reasoning without touching the quoted content.
 
+**Strict opacity (`ReifyMode`, second increment):** <!-- [FABLE-5] sq-afun3 --> the bridge COMPOSITION (destructure → eq-rep on the classic vocabulary → construct) can still quote an `owl:sameAs`-VARIANT spelling of an existing triple. `materialize_owl_rl_reify(&mut dict, &mut triples, ReifyMode::DestructureOnly)` suppresses that: reif-ctr never runs, so inference never mints a triple term at all — destructure, annotation reasoning, and the RL core are unchanged. `materialize_owl_rl` ≡ `ReifyMode::Bridge` (the full bridge). Batch-only: `MaterializedOwlGraph`'s Fallback re-materialization always runs the full bridge.
+
 **OFF by default** (the bridge is a deliberate, non-normative entailment extension): plain `Profile::OwlRl` closures are byte-identical without the feature, and occurrence-guarded even with it (reify-free data pays nothing). `MaterializedOwlGraph` routes reify-vocabulary bases to its documented Fallback mode (incremental == from-scratch parity preserved). No new `Profile` variant, no new deps.
 
 ## OWL 2 EL classification (`sparq-reason-el`, separate opt-in crate)
