@@ -116,7 +116,7 @@ single-sourced in the **Secure-SDLC policy template**
 |---|---|---|
 | Design / change-intent | Threat-model re-evaluation against B1–B5; PR-template checklist | `research/threat-model.md`; `.github/PULL_REQUEST_TEMPLATE.md` |
 | Code authoring | Secure-coding standard (input validation, `unsafe` discipline with `// SAFETY:` + register, no content/path leakage in errors/logs) | `CONTRIBUTING.md` "Secure coding"; `compliance/memsafety/unsafe-register.md` |
-| Static analysis | clippy `--all-targets -- -D warnings` (hard gate); CodeQL `security-and-quality`; code-scanning alerts kept at zero | `.github/workflows/ci.yml`, `codeql.yml` |
+| Static analysis | clippy `--all-targets -- -D warnings` (hard gate); CodeQL `security-and-quality` (advisory at merge time since 2026-07-17; code-scanning alerts triaged retroactively to zero via the daily sweep issue) | `.github/workflows/ci.yml`, `codeql.yml`, `codeql-alert-sweep.yml` |
 | Build | `--locked` release build; `cargo auditable build` embeds the dep manifest; distroless non-root container | `.github/workflows/release.yml`; `Dockerfile` |
 | Test / conformance | `cargo test --workspace`; W3C SPARQL/SHACL/inference conformance ratchets (never lowered); coverage/perf floors | `.github/workflows/ci.yml` |
 | Dynamic analysis | Miri UB lane over `sparq-core` `unsafe`; coverage-guided fuzzing of parsers + mmap loader; the B5 mmap-corruption oracle | `.github/workflows/miri.yml`, `fuzz.yml` |

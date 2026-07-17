@@ -1,0 +1,54 @@
+# [FABLE-5] Daily CodeQL alert sweep — the RETROACTIVE-triage half of the
+# 2026-07-17 "CodeQL is non-blocking" maintainer decision (merge-queue throughput).
+#
+# CodeQL no longer gates merges (codeql.yml header; scripts/ci_summary_gate.py
+# §CODEQL DEMOTION; docs/branch-protection.md §CodeQL is advisory). The
+# compensating control is this sweep: once a day it lists the repo's OPEN
+# code-scanning alerts and idempotently upserts ONE rolling issue — "CodeQL
+# alerts requiring retroactive triage" (labels: from:agent + self-improvement) —
+# listing alert numbers / rules / paths; it closes the issue when open alerts
+# reach zero. Logic lives in scripts/codeql_alert_sweep.py (pure plan(),
+# hermetically unit-tested in scripts/tests/test_codeql_alert_sweep.py, run by
+# docs-quality.yml's ci-scripts bucket).
+#
+# LEAST PRIVILEGE: reads alerts (`security-events: read`), writes only issues
+# (`issues: write`), checkout read-only. No check-run is aggregated by the
+# ci-summary gate on PR heads — this runs on schedule/dispatch only, off the
+# merge path entirely. Third-party actions pinned by full commit SHA.
+name: codeql-alert-sweep
+
+on:
+  schedule:
+    - cron: "23 5 * * *" # daily 05:23 UTC (off-peak, odd minute)
+  # Manual runs for testing / immediate re-sweep after a triage session.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-alert-sweep
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: sweep open code-scanning alerts into the rolling triage issue
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: read
+      issues: write
+    steps:
+      # Sparse checkout of only the sweep script (same pattern as ci-summary.yml).
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/codeql_alert_sweep.py
+          sparse-checkout-cone-mode: false
+      - name: Sweep alerts -> rolling issue (idempotent upsert)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: python3 scripts/codeql_alert_sweep.py

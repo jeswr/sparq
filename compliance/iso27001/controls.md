@@ -61,7 +61,7 @@ evidence) · `AUDIT-READY` = doc/substrate in repo, certificate needs an org act
 | A.5.33 | Protection of records | N/A(op) | Operator's records retention. | Operator |
 | A.5.34 | Privacy & protection of PII | AUDIT-READY | sparq processes no PII of its own; loaded-RDF PII is operator-controller. Scoped in `compliance/data-flow.md` + `compliance/dpia.md` (privacy worktree). | Operator |
 | A.5.35 | Independent review of information security | AUDIT-READY | Independent reviews exist in substance: OpenSSF Scorecard (external automated), CodeQL, the adversarial threat model + ZK soundness audit; this very engineer↔auditor loop. A *formal accredited internal-audit programme* is an org act — GAP-ISO-1. | sparq / Adopting org |
-| A.5.36 | Compliance with policies, rules & standards | IMPL | The `ci-summary.yml` aggregator is a required branch-protection gate that fails the merge if any policy lane (clippy, tests, conformance ratchets, supply-chain, CodeQL) is red. `docs/branch-protection.md`. | sparq |
+| A.5.36 | Compliance with policies, rules & standards | IMPL | The `ci-summary.yml` aggregator is a required branch-protection gate that fails the merge if any policy lane (clippy, tests, conformance ratchets, supply-chain) is red; CodeQL is advisory at merge time with retroactive alert triage (daily sweep issue). `docs/branch-protection.md`. | sparq |
 | A.5.37 | Documented operating procedures | IMPL | `AGENTS.md` (the operating procedure for working on the repo), `CONTRIBUTING.md`, `docs/branch-protection.md`, the workflows themselves are executable procedure. | sparq |
 
 ## A.6 — People controls (8)

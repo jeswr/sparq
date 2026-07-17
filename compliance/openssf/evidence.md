@@ -106,7 +106,7 @@ flag where sparq also satisfies **silver/gold**.
 ### Analysis
 - **`static_analysis`** — Met — CodeQL `security-and-quality` ([`codeql.yml`](../../.github/workflows/codeql.yml)) + clippy `-D warnings`.
 - **`static_analysis_common_vulnerabilities`** — Met — CodeQL security query suite.
-- **`static_analysis_fixed`** — Met — clippy is a hard gate (must be clean to land); CodeQL alerts treated as blocking (`docs/branch-protection.md`).
+- **`static_analysis_fixed`** — Met — clippy is a hard gate (must be clean to land); CodeQL alerts are advisory at merge time (2026-07-17) and triaged retroactively to zero via the daily alert-sweep rolling issue (`docs/branch-protection.md` §CodeQL is advisory).
 - **`static_analysis_often`** — Met — CodeQL + clippy on **every** PR + weekly cron.
 - **`dynamic_analysis`** — Met — cargo-fuzz ([`fuzz.yml`](../../.github/workflows/fuzz.yml)) + Miri ([`miri.yml`](../../.github/workflows/miri.yml)).
 - **`dynamic_analysis_unsafe`** — Met — Miri (UB/aliasing/provenance) over `sparq-core` pure-Rust unsafe + the mmap-corruption oracle + fuzz matrix over the B5 mmap sites; attested in [`compliance/memsafety/unsafe-register.md`](../memsafety/unsafe-register.md). *(Strong silver/gold evidence.)*
@@ -137,7 +137,7 @@ flag where sparq also satisfies **silver/gold**.
 - **Security-Policy** — [`SECURITY.md`](../../SECURITY.md) + [`.well-known/security.txt`](../../.well-known/security.txt).
 - **Signed-Releases** — [`release.yml`](../../.github/workflows/release.yml): `attest-build-provenance` (Sigstore SLSA) + `SHA256SUMS` + container `provenance: mode=max`.
 - **Branch-Protection** — [`docs/branch-protection.md`](../../docs/branch-protection.md) (doc-of-record; live ruleset out-of-repo). The solo-maintainer score-depression, the compensating controls, and a `gh api …/rulesets` verification procedure (with a rule-by-rule match table) are documented in its [§Solo-maintainer & the Scorecard score](../../docs/branch-protection.md#solo-maintainer--the-scorecard-code-review--branch-protection-score) (GX-OSSF-3 / sq-sto1).
-- **Code-Review** — solo-maintainer, agent-driven: there is no second human, so the live ruleset sets `required_approving_review_count: 0` (documented honestly, **not** faked with a Scorecard-discounted self-approval); the **compensating** automated review layer is Copilot code review on push + the CodeQL code-scanning gate + conversation-resolution. [`CODEOWNERS`](../../CODEOWNERS) records ownership for when a second reviewer is added. See [`docs/branch-protection.md` §Solo-maintainer](../../docs/branch-protection.md#solo-maintainer--the-scorecard-code-review--branch-protection-score).
+- **Code-Review** — solo-maintainer, agent-driven: there is no second human, so the live ruleset sets `required_approving_review_count: 0` (documented honestly, **not** faked with a Scorecard-discounted self-approval); the **compensating** automated review layer is Copilot code review on push + the per-PR CodeQL SAST run (advisory at merge time since 2026-07-17; alerts triaged retroactively via the daily sweep issue) + conversation-resolution. [`CODEOWNERS`](../../CODEOWNERS) records ownership for when a second reviewer is added. See [`docs/branch-protection.md` §Solo-maintainer](../../docs/branch-protection.md#solo-maintainer--the-scorecard-code-review--branch-protection-score).
 - **CI-Tests** — [`ci.yml`](../../.github/workflows/ci.yml) on every PR, aggregated by `ci-summary`.
 - **License** — [`LICENSE`](../../LICENSE) (MIT).
 - **Binary-Artifacts** — none committed.

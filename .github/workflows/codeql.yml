@@ -1,7 +1,24 @@
 # CodeQL SAST — static security/quality analysis for the Rust workspace.
-# Resolves the OpenSSF Scorecard `SAST` alert and is the security-quality SAST gate
-# (the `analyze` job feeds the ci-summary aggregator; CodeQL findings also land in the
-# code-scanning dashboard and the Copilot/CodeQL PR review). [OPUS-4.8]
+# Resolves the OpenSSF Scorecard `SAST` alert. ADVISORY at merge time ([FABLE-5]
+# 2026-07-17 maintainer decision, below); CodeQL findings still land in the
+# code-scanning dashboard and the Copilot/CodeQL PR review. [OPUS-4.8]
+#
+# [FABLE-5] CODEQL IS NON-BLOCKING (2026-07-17 maintainer decision — merge-queue
+# throughput). Serial CodeQL-rust runs waiting 20–40 min in merge-group gates were
+# the single heaviest drag on queue throughput, so CodeQL no longer blocks merges
+# on ANY event: the job names below carry the whole-word `advisory` token, and the
+# ci-summary aggregator (scripts/ci_summary_gate.py §CODEQL DEMOTION) additionally
+# demotes ANY check-run matching `\bcodeql\b` — belt and braces, covering even the
+# code-scanning app's own check-runs — and no longer WAITS on non-gating legs.
+# WHAT DID NOT CHANGE: CodeQL still RUNS everywhere it did (per-PR, merge_group,
+# push-to-main, weekly schedule) — visibility, the dashboard, and the Copilot/
+# CodeQL PR review are unchanged; only the blocking is removed. The #3420
+# rust-path skip (the `changes` pre-job) also stays.
+# RETROACTIVE TRIAGE: open code-scanning alerts are swept DAILY into one rolling
+# issue ("CodeQL alerts requiring retroactive triage") by
+# .github/workflows/codeql-alert-sweep.yml + scripts/codeql_alert_sweep.py.
+# TRADEOFF (explicit maintainer call): a vulnerable change can merge before its
+# alert is triaged. Policy doc: docs/branch-protection.md §CodeQL is advisory.
 #
 # Rust CodeQL is GA, so we analyse the `rust` language. We use CodeQL's buildless
 # extraction (`build-mode: none`): the Rust extractor reads the Cargo workspace +
@@ -13,6 +30,10 @@
 #
 # [FABLE-5] sq-6vshe.6 heavy-lane placement — CodeQL PLACEMENT DECISION (measured):
 # KEEP per-push (per-PR) analysis; do NOT demote to merge_group + nightly.
+# (2026-07-17 UPDATE: the paragraph below predates the non-blocking decision above.
+# Its PLACEMENT half stands — CodeQL keeps running per-PR — but its "merge_group
+# CodeQL still gates every merge / alerts-at-zero" GATING half is superseded:
+# CodeQL is now advisory everywhere and alerts are triaged retroactively.)
 # The bead's decision rule is CONDITIONAL: demote CodeQL to the merge queue + nightly
 # ONLY IF it is a post-piapk wall-time POLE. It is NOT. MEASURED per-PR / merge_group
 # wall time over 20+ recent runs is ~3.8–4.8 min (this workflow uses `build-mode: none`
@@ -70,15 +91,15 @@ jobs:
   # mirroring ci.yml's `changes` (dorny paths-filter) mechanism.
   #
   # SOUNDNESS (identical to the draft-tier skip already in effect):
-  #   * The single REQUIRED context is `ci-summary / gate`; `CodeQL analysis (rust)`
+  #   * The single REQUIRED context is `ci-summary / gate`; the CodeQL analysis leg
   #     is NOT individually required (docs/branch-protection.md §Required status
-  #     checks). When it is `skipped`, ci-summary treats a `skipped` conclusion as
-  #     NON-failing, so the gate resolves fast — the SAME behaviour as the existing
-  #     draft-head skip of this very job.
-  #   * The ruleset's `code_scanning` rule (CodeQL) is recorded as DEFENSE-IN-DEPTH
-  #     ONLY (docs/branch-protection.md §Draft-tier CI, last paragraph): a draft head
-  #     already carries no PR CodeQL analysis and the rule tolerates that absence.
-  #     A non-Rust PR is the same posture — there is genuinely no Rust to analyse.
+  #     checks) — and since 2026-07-17 it is ADVISORY outright (header above), so
+  #     a skip is doubly non-blocking.
+  #   * The live `main` ruleset carries NO `code_scanning` rule (verified
+  #     2026-07-17 via `gh api repos/sparq-org/sparq/rulesets/<id>`), so nothing
+  #     independently requires code-scanning results at merge time.
+  #     A non-Rust PR skip is sound regardless — there is genuinely no Rust to
+  #     analyse.
   #   * SAFE-BY-DEFAULT: rust_changed is forced 'true' on EVERY event except a
   #     `pull_request` (push-to-main, merge_group, weekly schedule all run CodeQL in
   #     full), and the Rust path set is broad: any *.rs / **/Cargo.toml / Cargo.lock /
@@ -86,7 +107,9 @@ jobs:
   #     the codeql wiring itself. If the diff cannot be computed, we never silently
   #     skip: off the PR path we hard-force 'true'.
   changes:
-    name: detect rust changes (codeql)
+    # ", advisory" token: non-gating by the ci-summary name rule (a failure here
+    # skips `analyze` via needs — that must not red the gate either).
+    name: detect rust changes (codeql, advisory)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -122,7 +145,11 @@ jobs:
           fi
 
   analyze:
-    name: CodeQL analysis (rust)
+    # ", advisory" token ([FABLE-5] 2026-07-17): non-gating by the ci-summary name
+    # rule; the gate neither waits on nor reds because of this leg. The analysis
+    # itself is unchanged — findings land in the code-scanning dashboard and are
+    # triaged retroactively via the daily alert sweep.
+    name: CodeQL analysis (rust, advisory)
     needs: changes
     # [FABLE-5] Draft-tier CI: SKIPPED on draft PR heads (this analysis is one of
     # the slowest per-push lanes and the fleet's draft review-fix churn re-ran it

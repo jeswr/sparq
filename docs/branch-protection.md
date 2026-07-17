@@ -49,6 +49,11 @@ jobs below; this table is a map for reviewers, **not** a list of required checks
 > those words so the aggregator treats it as non-gating automatically. Note "advisories"
 > (plural, as in `cargo-deny (advisories + …)`) does **not** match `advisory`, so that
 > supply-chain check still gates correctly.
+>
+> **CodeQL is additionally non-gating by a dedicated name rule** (whole-word
+> `codeql`, case-insensitive — see [§CodeQL is advisory](#codeql-is-advisory-retroactive-alert-triage)),
+> and the gate does **not wait** on non-gating legs at all: an in-flight
+> advisory/CodeQL check can neither red the gate nor hold the settle window open.
 
 From the **CI** workflow (`.github/workflows/ci.yml`):
 
@@ -69,7 +74,7 @@ From the security / supply-chain / SAST workflows (all now LIVE and aggregated b
 |---|---|---|
 | `cargo-deny (advisories + bans + sources + licenses)` | `.github/workflows/supply-chain.yml` | `cargo deny check bans sources licenses` (gating); advisories informational until cargo-deny ships CVSS-4.0 support (the daily `dependency-monitoring.yml` is the real advisory watchdog). |
 | `generate CycloneDX SBOM` | `.github/workflows/supply-chain.yml` | The CycloneDX SBOM artifact. |
-| `CodeQL analysis (rust)` | `.github/workflows/codeql.yml` | CodeQL SAST (`security-and-quality`) over the Rust workspace — resolves Scorecard's `SAST` check. |
+| `CodeQL analysis (rust, advisory)` | `.github/workflows/codeql.yml` | CodeQL SAST (`security-and-quality`) over the Rust workspace — resolves Scorecard's `SAST` check. **Advisory since 2026-07-17** (neither waited on nor gating — [§CodeQL is advisory](#codeql-is-advisory-retroactive-alert-triage)). |
 
 From the binding/packaging workflows (when those surfaces are exercised):
 
@@ -95,8 +100,10 @@ From the binding/packaging workflows (when those surfaces are exercised):
 > perf-tracking is moved, not lost. The weekly heavy EC2 campaign (`bench-ec2.yml` `ec2-bench`) and
 > release/dist workflows remain non-gating (release/dist fire only on tags). The **Scorecard** workflow
 > (`scorecard.yml`) re-scores posture on push to `main` and feeds the code-scanning
-> dashboard; **CodeQL** + **Scorecard** therefore both feed the gate/dashboard even
-> though only the per-commit `CodeQL analysis (rust)` check is a per-PR check-run.
+> dashboard; **CodeQL** + **Scorecard** therefore both feed the dashboard even
+> though only the per-commit `CodeQL analysis (rust, advisory)` check is a per-PR
+> check-run (and neither gates a merge — see
+> [§CodeQL is advisory](#codeql-is-advisory-retroactive-alert-triage)).
 >
 > **No branch-protection ruleset change is required for this benchmark relocation.** The live ruleset
 > requires exactly one context (`gate`), never the `bench` job by name, and the aggregator discovers the
@@ -104,6 +111,51 @@ From the binding/packaging workflows (when those surfaces are exercised):
 > deterministic ratchet needs no ruleset edit. (If the maintainer had ever added the bench job by name
 > to the required-checks list, THAT name would now need removing — but per the "select only
 > `ci-summary / gate`" rule above, it was never added.)
+
+## CodeQL is advisory (retroactive alert triage)
+
+<!-- [FABLE-5] 2026-07-17 maintainer decision (merge-queue throughput). -->
+
+**Policy (2026-07-17, explicit maintainer call): CodeQL is advisory at merge
+time; code-scanning alerts are triaged retroactively via the daily sweep issue.**
+The previous "code-scanning alerts at zero before merge" gating policy is
+**superseded**. Serial CodeQL-rust runs waiting 20–40 min in merge-group gates
+were the single heaviest drag on merge-queue throughput, and the maintainer chose
+throughput.
+
+What this means concretely:
+
+- **CodeQL still runs everywhere it did** — per-PR, `merge_group`, push-to-main,
+  and the weekly schedule. Findings still land in the code-scanning dashboard and
+  the Copilot/CodeQL PR review. Visibility is unchanged; only the *blocking* is
+  removed. The #3420 rust-path skip (no-Rust PRs skip the analysis) also stays.
+- **The gate neither reds nor waits on CodeQL, on any event.** Two mechanisms in
+  `scripts/ci_summary_gate.py` (§CODEQL DEMOTION): a whole-word `codeql` name
+  rule joins the advisory exclusion (covering the workflow's own jobs — now named
+  with the `advisory` token per convention — *and* any app-generated check-run
+  such as the code-scanning app's own `CodeQL` check), and the poll loop no
+  longer holds the settle window open for **any** non-gating leg (selection
+  pre-jobs excepted — their conclusions feed the select-health rule).
+- **Retroactive triage is the compensating control.** A daily scheduled sweep
+  ([`.github/workflows/codeql-alert-sweep.yml`](../.github/workflows/codeql-alert-sweep.yml)
+  → [`scripts/codeql_alert_sweep.py`](../scripts/codeql_alert_sweep.py),
+  least-privilege `security-events: read` + `issues: write`) lists open
+  code-scanning alerts and idempotently maintains **one rolling issue** —
+  *"CodeQL alerts requiring retroactive triage"* (labels `from:agent` +
+  `self-improvement`) — listing alert numbers/rules/paths; it updates when the
+  alert set changes and closes itself when open alerts reach zero.
+- **The live ruleset does not independently require code-scanning results.**
+  Verified 2026-07-17: the `main` ruleset carries **no `code_scanning` rule**
+  (see the verification table below), so demoting the check-run is sufficient —
+  there is no second blocking path. If such a rule is ever (re-)added in the
+  GitHub UI, it would re-block merges on alerts regardless of this repo's CI
+  config; that is an out-of-repo maintainer setting.
+
+**The tradeoff, stated honestly:** a change that introduces a vulnerability can
+now **merge before its CodeQL alert is triaged** — pre-merge alerts-at-zero is no
+longer enforced. The exposure window is bounded by the sweep cadence (daily) plus
+human triage latency on the rolling issue. This was the maintainer's explicit
+call, trading pre-merge SAST blocking for merge-queue throughput.
 
 ## Draft-tier CI (reduced matrix on draft PR heads)
 
@@ -132,7 +184,7 @@ scheduled/dispatch run keep the FULL matrix, byte-identical to before.
 |---|---|---|
 | coverage ratchet (measure + engine split + aggregate) | `ci.yml` | never on drafts (merge_group + ready_for_review re-measure) |
 | benchmarks (deterministic ratchet + PR comparison/alert comments) | `bench.yml` | never on drafts |
-| CodeQL analysis | `codeql.yml` | never on drafts (merge_group + push-main + weekly schedule + the ready_for_review run keep the `code_scanning` rule fed) |
+| CodeQL analysis | `codeql.yml` | never on drafts (merge_group + push-main + weekly schedule + the ready_for_review run keep the dashboard fed; advisory at merge time regardless — [§CodeQL is advisory](#codeql-is-advisory-retroactive-alert-triage)) |
 | heavy recall shards (`heavy-diskann`/`heavy-hnsw`) | `ci.yml` `test` | never on drafts (same demotion mechanism as their merge_group demotion) |
 | wasm bundle build | `ci.yml` `wasm` | kept iff a wasm-bundle crate is in the affected closure (the existing lane-seed guard — unchanged on both tiers) |
 | `artifact-exact-equality` (wasm feature-OFF byte identity) | `vectorized-feature-off.yml` | kept iff `sparq-wasm` is in the affected closure (in-step `ci_select.py` verdict; ci-full label / selector error / full mode ⇒ run) |
@@ -206,13 +258,11 @@ inside that window. With the tiered check name the window does not exist —
 so the ready_for_review full-tier PR run (which includes both merge_group-absent
 lanes) must conclude before the queue can admit the head.
 
-The ruleset additionally carries a `code_scanning` rule (CodeQL). A draft-built
-head carries no PR CodeQL analysis (`analyze` skips on drafts), so that rule
-would *independently* block such a head — but it is an **out-of-repo,
-owner-mutable setting** and evadable in corner cases (a non-draft PR sharing the
-same head SHA supplies an analysis for the commit; the rule may be relaxed
-during a CodeQL outage), so it is recorded here as **defense-in-depth only**,
-never the load-bearing mechanism. Do not weaken rule 1 on the strength of it.
+(Historical note: earlier revisions of this document recorded a ruleset
+`code_scanning` rule as defense-in-depth here. As verified 2026-07-17 the live
+ruleset carries **no** `code_scanning` rule, and CodeQL is advisory by policy —
+[§CodeQL is advisory](#codeql-is-advisory-retroactive-alert-triage) — so rule 1
+above is, as it always was designed to be, the load-bearing mechanism.)
 
 **Operational notes.** `pull_request`-event CI runs are cancel-superseded per PR
 (`concurrency` groups; `bench.yml` now cancels superseded **PR** runs only — its
@@ -254,13 +304,13 @@ un-draft moment.
   human approvals there is nothing to stale-dismiss; the live ruleset sets
   `dismiss_stale_reviews_on_push: false` to match. (Copilot review *does* re-run on push —
   `review_on_push: true`.)
-- **Require the automated code review** (GitHub Copilot code review + the CodeQL
-  code-scanning review). The live ruleset enables Copilot code review on push
-  (`copilot_code_review` rule, `review_on_push: true`) and treats **CodeQL code-scanning
-  alerts** as blocking via the `code_scanning` rule (`CodeQL`, `alerts_threshold:
-  errors_and_warnings`, `security_alerts_threshold: all`). The CodeQL run is also aggregated
-  by `ci-summary` as the `CodeQL analysis (rust)` check-run; the code-scanning *results*
-  rule is the complementary alert-severity gate.
+- **Require the automated code review** (GitHub Copilot code review). The live ruleset
+  enables Copilot code review on push (`copilot_code_review` rule, `review_on_push:
+  true`). **CodeQL code-scanning alerts do NOT block merges** (2026-07-17 policy —
+  [§CodeQL is advisory](#codeql-is-advisory-retroactive-alert-triage)): the live
+  ruleset carries no `code_scanning` rule, and the `CodeQL analysis (rust,
+  advisory)` check-run is excluded from the `ci-summary` gating set; alerts are
+  triaged retroactively via the daily sweep issue.
 - **Require conversation resolution before merging** — all PR review threads (human and
   bot, incl. Copilot/CodeQL) must be resolved (live ruleset `pull_request`
   `required_review_thread_resolution: true`). (Also listed under "Other settings".)
@@ -278,9 +328,12 @@ un-draft moment.
 
 ## Other settings
 
-- **Do not allow bypassing the above** — the rules apply to administrators too. The live
-  ruleset has an **empty `bypass_actors` list** and reports `current_user_can_bypass:
-  never`, so the gate is uniform (no bypass actors, including the owner).
+- **Do not allow bypassing the above** — the rules apply to administrators too. The
+  *intended* posture is an **empty `bypass_actors` list** (`current_user_can_bypass:
+  never`), so the gate is uniform (no bypass actors, including the owner). ⚠️ As
+  observed 2026-07-17 the live ruleset **drifts** from this (one `RepositoryRole`
+  bypass actor, `bypass_mode: always`) — see the drift note under
+  [§Verifying the live ruleset](#verifying-the-live-ruleset-matches-this-document).
 - **Require conversation resolution before merging** (all PR review threads resolved —
   `required_review_thread_resolution: true`).
 
@@ -378,7 +431,7 @@ alerts).
 | Missing classic signal | Compensating control (live + enforced) |
 |---|---|
 | Independent human approving review | **GitHub Copilot code review on every PR** (`copilot_code_review`, `review_on_push: true`) — an automated, independent reviewer recorded on the PR. |
-| Code-owner gate | **CodeQL code-scanning gate** (`code_scanning` rule, `CodeQL`, `errors_and_warnings`) — blocks merge on new alerts; plus the SHA-pinned clippy/test/conformance gate aggregated by `ci-summary`. |
+| Code-owner gate | The SHA-pinned clippy/test/conformance gate aggregated by `ci-summary`, plus **CodeQL SAST run on every PR with retroactive alert triage** (advisory at merge time since 2026-07-17 — [§CodeQL is advisory](#codeql-is-advisory-retroactive-alert-triage); the daily sweep issue is the alert-accountability mechanism, not a merge block). |
 | Review-thread accountability | **Conversation resolution required** (`required_review_thread_resolution: true`) — every Copilot/CodeQL thread must be resolved before merge. |
 | "Trusted committer only" | **No bypass actors** (`bypass_actors: []`, `current_user_can_bypass: never`) — the gate applies to the owner too; **squash-only** + **no force-push** + **no deletion** keep history linear and auditable. |
 
@@ -394,15 +447,14 @@ so confirm it with the GitHub API (read-only token is sufficient):
 
 ```sh
 # List rulesets on the default branch and grab the `main` ruleset id.
-gh api repos/jeswr/sparq/rulesets
+gh api repos/sparq-org/sparq/rulesets
 
 # Dump the full rule set and eyeball it against this document.
-gh api repos/jeswr/sparq/rulesets/<id> | python3 -m json.tool
+gh api repos/sparq-org/sparq/rulesets/<id> | python3 -m json.tool
 ```
 
-As verified on the date of this commit, the live `main` ruleset
-(`enforcement: active`, `bypass_actors: []`) carries exactly these rules, all of which match
-the sections above:
+As verified **2026-07-17**, the live `main` ruleset (`enforcement: active`) carries
+exactly these rules:
 
 | Live rule (`type`) | Key parameters | Doc section |
 |---|---|---|
@@ -411,8 +463,22 @@ the sections above:
 | `pull_request` | `required_approving_review_count: 0`, `require_code_owner_review: false`, `dismiss_stale_reviews_on_push: false`, `required_review_thread_resolution: true`, `allowed_merge_methods: ["squash"]` | Required reviews |
 | `required_status_checks` | one context `gate`, `strict_required_status_checks_policy: false` | Required status checks |
 | `code_quality` | `severity: all` | Required reviews |
-| `code_scanning` | `CodeQL`, `alerts_threshold: errors_and_warnings`, `security_alerts_threshold: all` | Required reviews |
 | `copilot_code_review` | `review_on_push: true`, `review_draft_pull_requests: false` | Required reviews |
+| `merge_queue` | `merge_method: SQUASH`, `grouping_strategy: ALLGREEN`, `max_entries_to_build: 3`, `max_entries_to_merge: 8`, `check_response_timeout_minutes: 60` | Omnibus batching |
+
+There is **no `code_scanning` rule** — nothing in the ruleset independently
+requires code-scanning results at merge time (consistent with
+[§CodeQL is advisory](#codeql-is-advisory-retroactive-alert-triage)). Note the
+`code_quality` rule (`severity: all`) is GitHub's separate built-in PR
+code-quality signal, not the CodeQL code-scanning alert gate.
+
+**Known drift (2026-07-17, flagged for the maintainer):** the live ruleset
+reports one bypass actor (`RepositoryRole` id 5, `bypass_mode: always`) and
+`current_user_can_bypass: always`, which contradicts the "no bypass actors"
+posture recorded under [§Other settings](#other-settings). This is an
+out-of-repo, owner-mutable setting; reconciling it (either removing the bypass
+actor or amending §Other settings) is a maintainer call this document only
+records.
 
 If a future check finds drift (e.g. a rule added or a parameter changed), update **this
 table and the matching section above in the same commit** so the doc-of-record never lags

@@ -286,6 +286,101 @@ class TestAdvisoryRule(unittest.TestCase):
         self.assertFalse(g.is_advisory("gate"))
 
 
+# [FABLE-5] CodeQL demotion (2026-07-17 maintainer decision — merge-queue
+# throughput; docs/branch-protection.md §CodeQL is advisory). The load-bearing
+# invariants, each MUTATION-SENSITIVE — re-promoting CodeQL to gating (removing
+# CODEQL_RE from is_advisory) or re-adding the wait (removing holds_gate from the
+# pending count) turns the corresponding test RED:
+#   (1) a CodeQL leg FAILURE (or absence) never reds the gate — on pull_request
+#       AND merge_group alike;
+#   (2) the gate never WAITS on an in-flight CodeQL (or any non-gating) leg;
+#   (3) selection pre-jobs are the carve-out: they hold the gate even though
+#       an advisory-renamed select stays out of the gating set (select-health
+#       must read a terminal conclusion, never an in-flight one).
+class TestCodeQLDemotion(unittest.TestCase):
+    CODEQL = "CodeQL analysis (rust, advisory)"
+
+    def test_codeql_name_rule(self):
+        # The workflow's own (renamed) jobs, the pre-rename name (a stale SHA's
+        # check-runs), and the code-scanning app's un-renameable check-run all
+        # match; unrelated gating names do not.
+        self.assertTrue(g.is_advisory(self.CODEQL))
+        self.assertTrue(g.is_advisory("CodeQL analysis (rust)"))
+        self.assertTrue(g.is_advisory("CodeQL"))
+        self.assertTrue(g.is_advisory("detect rust changes (codeql, advisory)"))
+        self.assertFalse(g.is_advisory("build + test"))
+        self.assertFalse(g.is_advisory("gate"))
+
+    def test_codeql_failure_does_not_red_the_gate(self):
+        # Invariant 1 (pull_request-shaped, no tier ctx). MUTATION: promoting
+        # CodeQL back to gating turns this red.
+        code, out = run(tiny_cfg(), [[R(self.CODEQL, conclusion="failure"), GREEN]])
+        self.assertEqual(code, 0)
+        self.assertIn("PASSED", out)
+        self.assertIn("1 advisory check(s) excluded", out)
+
+    def test_codeql_failure_does_not_red_the_merge_group_gate(self):
+        # Invariant 1 on the merge_group ref — the throughput-critical event.
+        ctx = g.TierContext(run_tier="full", event_name="merge_group")
+        code, out = run(tiny_cfg(), [[R(self.CODEQL, conclusion="failure"),
+                                      R("CodeQL", conclusion="failure"), GREEN]],
+                        tier_ctx=ctx)
+        self.assertEqual(code, 0)
+        self.assertIn("PASSED", out)
+
+    def test_codeql_timed_out_or_cancelled_does_not_red_the_gate(self):
+        for concl in ("timed_out", "cancelled", None):
+            code, _ = run(tiny_cfg(), [[R(self.CODEQL, conclusion=concl), GREEN]])
+            self.assertEqual(code, 0, f"CodeQL conclusion={concl!r} must not gate")
+
+    def test_codeql_missing_gate_still_passes(self):
+        # "missing" — a head with no CodeQL check-run at all (e.g. skipped
+        # workflow): the gate needs nothing from CodeQL.
+        code, out = run(tiny_cfg(), [[GREEN, GREEN2]])
+        self.assertEqual(code, 0)
+
+    def test_gate_does_not_wait_on_an_in_flight_codeql(self):
+        # Invariant 2: CodeQL stays in_progress on EVERY poll; the gate must
+        # converge green anyway (depth=0 so any wait would end in a hang-RED).
+        polls = [[GREEN, R(self.CODEQL, status="in_progress", conclusion=None)]]
+        code, out = run(tiny_cfg(), polls, depth=0)
+        self.assertEqual(code, 0)
+        self.assertIn("PASSED", out)
+        self.assertIn("non-gating (advisory/codeql) still running", out)
+
+    def test_gate_does_not_wait_on_an_in_flight_advisory_leg(self):
+        # The wait exclusion is the general non-gating rule, not CodeQL-special.
+        polls = [[GREEN, R("vale (prose, advisory)", status="queued", conclusion=None)]]
+        code, out = run(tiny_cfg(), polls, depth=0)
+        self.assertEqual(code, 0)
+        self.assertIn("PASSED", out)
+
+    def test_in_flight_select_still_holds_the_gate(self):
+        # Invariant 3, on the hypothetical ADVISORY-RENAMED select the verdict's
+        # select-health comment guards against (a plain-named select holds the
+        # gate via the non-advisory clause already): even advisory-named, an
+        # in-flight select must hold the gate — the verdict reads select
+        # conclusions, so rendering early would observe conclusion=None and RED.
+        # MUTATION: dropping the is_select carve-out from holds_gate reds this
+        # via the select-health rule on the first-poll verdict.
+        adv_select = "select / select (change-based test selection, advisory)"
+        polls = [
+            [R(adv_select, status="in_progress", conclusion=None), GREEN],
+            [R(adv_select), GREEN],
+        ]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0)
+        self.assertIn("PASSED", out)
+        self.assertNotIn("selection pre-job did not succeed", out)
+
+    def test_holds_gate_contract(self):
+        self.assertTrue(g.holds_gate(R("build + test")))
+        self.assertTrue(g.holds_gate(R(SELECT_NAME)))
+        self.assertFalse(g.holds_gate(R(self.CODEQL)))
+        self.assertFalse(g.holds_gate(R("CodeQL")))
+        self.assertFalse(g.holds_gate(R("vale (prose, advisory)")))
+
+
 # [FABLE-5] sq-fmx4u.3: change-based test-selection semantics (design §5.3).
 # The three load-bearing safety invariants, exactly as the bead states them:
 #   (1) skipped-not-affected + select SUCCESS      => gate SUCCESS (no hang, no RED)
@@ -323,7 +418,7 @@ class TestSelectionSemantics(unittest.TestCase):
         # a fast green for an orchestration PR with the whole Rust matrix skipped.
         runs = [
             SEL_OK,
-            R("CodeQL analysis (rust)", conclusion="skipped"),
+            R("CodeQL analysis (rust, advisory)", conclusion="skipped"),
             R("test (load-aware shard bulk 1/3)", conclusion="skipped"),
             R("opt-in sparq-engine (paths)", conclusion="skipped"),
             R("bench (deterministic ratchet)", conclusion="skipped"),

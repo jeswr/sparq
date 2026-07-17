@@ -1102,14 +1102,13 @@ class TestDraftTierWiring(unittest.TestCase):
         name = self.summary["jobs"]["gate"]["name"]
         self.assertEqual(name, "gate" + self.MARKER_EXPR)
 
-    def test_code_scanning_backstop_fed_and_documented_as_non_load_bearing(self):
-        """The live ruleset also carries a `code_scanning` rule (CodeQL). A
-        draft-built head carries no PR CodeQL analysis (analyze skips on
-        drafts), so that rule independently blocks such a head — but it is an
-        out-of-repo, owner-mutable setting and evadable (a non-draft PR sharing
-        the head SHA supplies an analysis; outage relaxation), so it must be
-        recorded as defense-in-depth ONLY and the feeding triggers must not
-        rot: push-to-main + merge_group + weekly schedule + ready_for_review."""
+    def test_codeql_keeps_running_everywhere_and_policy_documented(self):
+        """[FABLE-5] CodeQL demotion (2026-07-17): CodeQL is ADVISORY at merge
+        time — but its VISIBILITY must not rot. The feeding triggers stay:
+        push-to-main + merge_group + weekly schedule + ready_for_review (only
+        the blocking was removed, never the runs). And the doc-of-record must
+        state the new policy honestly: no live `code_scanning` rule, CodeQL
+        advisory, alerts triaged retroactively via the daily sweep."""
         on = _on_block(self.codeql)
         push = on.get("push") or {}
         self.assertEqual(push.get("branches"), ["main"],
@@ -1120,13 +1119,20 @@ class TestDraftTierWiring(unittest.TestCase):
         self.assertIn("ready_for_review", types,
                       "the un-draft moment must produce a fresh CodeQL analysis")
         doc = (REPO_ROOT / "docs" / "branch-protection.md").read_text(encoding="utf-8")
-        self.assertIn("code_scanning", doc,
-                      "docs/branch-protection.md must record the code_scanning "
-                      "rule's role in the draft-tier design")
-        self.assertIn("defense-in-depth only", doc,
-                      "the doc must record code_scanning as defense-in-depth, "
-                      "never the load-bearing draft-tier mechanism")
-        self.assertIn("owner-mutable", doc)
+        self.assertIn("no `code_scanning` rule", doc,
+                      "the doc must record that the live ruleset carries no "
+                      "code_scanning rule (verified 2026-07-17)")
+        self.assertIn("CodeQL is advisory", doc,
+                      "the doc must state the advisory-at-merge policy")
+        self.assertIn("retroactive", doc.lower(),
+                      "the doc must state the retroactive-triage mechanism")
+        self.assertIn("merge before its CodeQL alert is triaged", doc,
+                      "the doc must state the tradeoff honestly")
+        # The demotion is name-rule based: the analyze job's display name must
+        # carry the advisory token (and the gate's CODEQL_RE backstops renames).
+        self.assertIn("advisory",
+                      str(self.codeql["jobs"]["analyze"].get("name", "")).lower(),
+                      "the CodeQL analyze job name must carry the advisory token")
 
     def test_gate_receives_tier_env_and_pr_read(self):
         perms = self.summary.get("permissions", {})

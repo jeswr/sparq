@@ -564,6 +564,15 @@ jobs:
       # regression in the gate's own logic must red CI before every merge depends on it.
       - name: Self-test ci-summary gate loop (verdict semantics + adaptive saturation budget — sq-90cv4)
         run: python3 scripts/tests/test_ci_summary_gate.py
+      # [FABLE-5] CodeQL retroactive triage (2026-07-17 non-blocking decision):
+      # the daily alert sweep's pure decision logic (scripts/codeql_alert_sweep.py
+      # plan()/marker round-trip — the idempotent-upsert contract behind the
+      # rolling "CodeQL alerts requiring retroactive triage" issue) is pinned by
+      # a hermetic stdlib-unittest suite over API-shaped fixtures (NO gh, NO
+      # network). The sweep is the compensating control for CodeQL no longer
+      # gating merges — its logic regressing must red CI.
+      - name: Self-test CodeQL alert sweep (idempotent upsert + marker round-trip)
+        run: python3 scripts/tests/test_codeql_alert_sweep.py
       # [FABLE-5] sq-fmx4u.3: the change-based test-selection stack is now
       # LOAD-BEARING (the select pre-job feeds every wide lane's skip guard and
       # the ci-summary gate's skipped-only-under-successful-selection rule), so

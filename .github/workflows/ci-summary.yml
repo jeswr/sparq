@@ -72,6 +72,17 @@
 # line, and THIS name-rule is the load-bearing backstop that makes advisory failures
 # strictly non-gating regardless of how the job concludes.
 #
+# CODEQL IS NON-GATING AND NOT WAITED ON ([FABLE-5] 2026-07-17 maintainer decision —
+# merge-queue throughput; docs/branch-protection.md §CodeQL is advisory). A second
+# whole-word name rule (`\bcodeql\b`) demotes every CodeQL check-run on EVERY event
+# (pull_request AND merge_group) — the codeql.yml jobs carry the `advisory` token
+# too, but the rule also covers app-generated check-runs this repo cannot rename.
+# And the poll loop no longer WAITS on any non-gating leg (advisory or codeql;
+# selection pre-jobs excepted): a leg the verdict excludes can never change it, so
+# holding the settle window open for it was pure merge latency. CodeQL still RUNS
+# everywhere (PR/merge_group/push/schedule); open alerts are triaged RETROACTIVELY
+# via the daily codeql-alert-sweep.yml rolling issue.
+#
 # CHANGE-BASED TEST-SELECTION semantics (bead sq-fmx4u.3). [FABLE-5] The wide
 # per-crate lanes in ci.yml / feature-matrix.yml may now be SKIPPED (or, for the
 # cross-crate bulk shards, narrowed) when the `select (change-based test

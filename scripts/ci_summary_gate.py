@@ -16,11 +16,33 @@
 #   * pending = check-runs with status != "completed". The settle window is re-armed
 #     ONLY by pending work (the sq-ipkku / #997 guard): an injection of
 #     already-terminal check-runs can never starve convergence.
-#   * A verdict renders only when EVERY discovered sibling is terminal, never before
-#     the MIN_POLLS startup floor, and only after SETTLE_POLLS consecutive quiet
-#     polls. Verdict: advisory/informational-named checks (whole-word, case-
-#     insensitive) are EXCLUDED; a gating check passes iff its conclusion is
+#   * A verdict renders only when EVERY discovered GATE-HOLDING sibling is terminal,
+#     never before the MIN_POLLS startup floor, and only after SETTLE_POLLS
+#     consecutive quiet polls. Verdict: advisory/informational-named checks
+#     (whole-word, case-insensitive) and every CodeQL leg (the 2026-07-17 demotion,
+#     below) are EXCLUDED; a gating check passes iff its conclusion is
 #     success/skipped/neutral; an empty stable set passes.
+#   * NON-GATING legs are NOT WAITED ON either ([FABLE-5] CodeQL demotion,
+#     2026-07-17): a leg the verdict excludes can never change it, so holding the
+#     settle window open for it is pure merge-latency (the CodeQL-rust serial runs
+#     were the single heaviest merge-queue drag). `pending` therefore counts only
+#     gate-holding runs — every non-advisory leg PLUS any selection pre-job
+#     (is_select), advisory-named or not: the select-health rule reads select
+#     conclusions at verdict time, so a select must always be terminal first
+#     (never red-by-still-running).
+#
+# CODEQL DEMOTION (2026-07-17 maintainer decision — throughput over pre-merge SAST
+# blocking). Every CodeQL leg ("CodeQL analysis (rust)", its `detect rust changes
+# (codeql)` pre-job, and any app-generated check-run whose name carries the
+# whole word "codeql", e.g. the code-scanning app's own "CodeQL" check) is
+# NON-GATING and NOT WAITED ON, on EVERY event (pull_request AND merge_group):
+# the gate neither goes red because of a CodeQL failure nor holds the merge queue
+# for a CodeQL run. CodeQL itself keeps RUNNING everywhere it did (PR /
+# merge_group / push-to-main / weekly schedule) — only the blocking is removed;
+# open alerts are triaged RETROACTIVELY via the daily rolling-issue sweep
+# (scripts/codeql_alert_sweep.py + .github/workflows/codeql-alert-sweep.yml).
+# Tradeoff (explicit maintainer call): a vulnerable change can merge before its
+# alert is triaged. See docs/branch-protection.md §CodeQL is advisory.
 #   * Exhausting the loop budget with pending == 0 renders the REAL verdict on the
 #     final all-terminal set (the #997 graceful timeout), never a blind RED.
 #
@@ -112,6 +134,12 @@ import time
 from dataclasses import dataclass, field
 
 ADVISORY_RE = re.compile(r"\b(advisory|informational)\b")
+# [FABLE-5] CodeQL demotion (2026-07-17, header §CODEQL DEMOTION): any check-run
+# whose name contains the whole word "codeql" (case-insensitive) is non-gating.
+# A whole-word RULE, not a name list, for the same reason as the advisory rule
+# (sq-wjth) — it also covers check-runs this repo cannot rename, e.g. the
+# code-scanning app's own "CodeQL" check-run, and survives matrix renames.
+CODEQL_RE = re.compile(r"\bcodeql\b")
 _PASSING = ("success", "skipped", "neutral")
 # [FABLE-5] draft-tier CI: the marker ci-select.yml appends to the select job name
 # on a draft-assembled run ("select (change-based test selection, draft-tier)").
@@ -335,10 +363,27 @@ def draft_selects_unsuperseded(runs: list[dict]) -> list[str]:
 
 
 def is_advisory(name: str) -> bool:
-    """Whole-word advisory/informational match (sq-wjth): excludes the standalone
-    words (hyphen-/paren-/comma-delimited too) but NOT substrings — notably
-    "cargo-deny (advisories, ...)" is plural and GATES."""
-    return bool(ADVISORY_RE.search(name.lower()))
+    """Is this check-run NON-GATING? Two whole-word name rules:
+      * advisory/informational (sq-wjth): excludes the standalone words (hyphen-/
+        paren-/comma-delimited too) but NOT substrings — notably "cargo-deny
+        (advisories, ...)" is plural and GATES.
+      * codeql ([FABLE-5] 2026-07-17 demotion, header §CODEQL DEMOTION): every
+        CodeQL leg is advisory on every event — the gate must neither red nor
+        wait on CodeQL; alerts are triaged retroactively by the daily sweep."""
+    n = name.lower()
+    return bool(ADVISORY_RE.search(n) or CODEQL_RE.search(n))
+
+
+def holds_gate(run: dict) -> bool:
+    """Does the poll loop WAIT on this check-run ([FABLE-5] CodeQL demotion)?
+    Every gating leg holds the gate; a non-gating (advisory/codeql-named) leg
+    does not — its conclusion can never change the verdict, so waiting on it is
+    pure merge latency. The ONE exception: a selection pre-job (is_select) always
+    holds the gate even if advisory-named, because render_verdict reads select
+    conclusions (select-health, sq-fmx4u.3) and must never observe an in-flight
+    select as "not success"."""
+    name = run.get("name", "")
+    return (not is_advisory(name)) or is_select(name)
 
 
 def is_select(name: str) -> bool:
@@ -609,7 +654,17 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
             and not is_draft_gate_artifact(r.get("name", ""))
         ]
         total = len(runs)
-        pending = sum(1 for r in runs if r.get("status") != "completed")
+        # [FABLE-5] CodeQL demotion: only GATE-HOLDING runs (holds_gate) can hold
+        # the settle window open — an in-flight advisory/CodeQL leg is excluded
+        # from `pending`, so the gate renders its verdict without waiting on it
+        # (and render_verdict excludes it from the gating set anyway). Selects
+        # always hold the gate (select-health reads their conclusions).
+        pending = sum(
+            1 for r in runs if r.get("status") != "completed" and holds_gate(r)
+        )
+        nongating_running = (
+            sum(1 for r in runs if r.get("status") != "completed") - pending
+        )
         # [FABLE-5] Draft-tier CI: on a FULL-tier pull_request run, a draft-tier-
         # assembled selection with no full-tier successor means the ready_for_review
         # re-run has not registered yet — treat the set as STILL-SETTLING (hold the
@@ -630,8 +685,13 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
         prev_names = names
         extra = f", {len(forgiven)} superseded-cancelled forgiven" if forgiven else ""
         extra += ", awaiting the full-tier re-run (draft-tier selection present)" if awaiting_full else ""
+        if nongating_running:
+            extra += (
+                f", {nongating_running} non-gating (advisory/codeql) still running"
+                " — not waited on"
+            )
         print(
-            f"attempt {attempt}: {total} check-run(s), {pending} running, "
+            f"attempt {attempt}: {total} check-run(s), {pending} gate-holding running, "
             f"all-terminal stable for {stable}/{cfg.settle_polls} poll(s){changed}{extra}",
             flush=True,
         )

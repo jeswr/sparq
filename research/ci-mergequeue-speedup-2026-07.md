@@ -156,6 +156,10 @@ rebuild. The honest remaining deltas, in measured order:
   security gate off the queue for ~0 saving is all risk, no win — the maintainer's
   suspicion was correct for the pre-buildless era, and is honestly falsified now. The
   alerts-at-zero posture + the ruleset's code_scanning rule stay intact. **REJECTED.**
+  *(SUPERSEDED 2026-07-17: the maintainer reversed this — CodeQL is now advisory at
+  merge time on every event, alerts triaged retroactively via the daily sweep issue;
+  `docs/branch-protection.md` §CodeQL is advisory. The live ruleset also no longer
+  carries a `code_scanning` rule.)*
 - **Queue settings (maintainer ruleset edit, one-line each):**
   `max_entries_to_build` 3→5 lifts deep-queue drain capacity ×1.67; with the measured
   0/250 entry-failure rate the extra speculative builds are almost never wasted. Do this
