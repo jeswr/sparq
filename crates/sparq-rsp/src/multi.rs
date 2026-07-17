@@ -276,7 +276,8 @@ impl ContinuousMultiQuery {
     }
 
     /// [SONNET-4.6] sq-xqu: bounds the wall-clock time of EACH evaluation
-    /// tick (deadline refreshed to `now + timeout` per tick). Semantics as
+    /// tick (deadline tightened to at most `now + timeout` per tick).
+    /// Semantics as
     /// [`ContinuousQuery::with_window_timeout`](crate::ContinuousQuery::with_window_timeout);
     /// native only.
     #[cfg(not(target_arch = "wasm32"))]

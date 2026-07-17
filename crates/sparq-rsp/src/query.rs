@@ -194,9 +194,11 @@ impl ContinuousQuery {
 
     /// [SONNET-4.6] sq-xqu: bounds the wall-clock time of EACH window
     /// evaluation (builder style): at every window evaluation start the
-    /// effective budget's deadline is set to `now + timeout`, so one
-    /// pathological window aborts with `"query budget exceeded (timeout)"`
-    /// instead of stalling the embedder's push loop. A `timeout` so large
+    /// effective budget's deadline becomes the EARLIER of the budget's own
+    /// absolute deadline (if any) and `now + timeout`, so one pathological
+    /// window aborts with `"query budget exceeded (timeout)"` instead of
+    /// stalling the embedder's push loop — and a refreshed window deadline
+    /// never grants time past the absolute one. A `timeout` so large
     /// that `now + timeout` is unrepresentable can never trip and is treated
     /// as unlimited (the budget's own absolute deadline, if any, still
     /// applies). Native only — the engine's wall-clock deadline does not
@@ -368,7 +370,7 @@ impl ContinuousConstruct {
     }
 
     /// [SONNET-4.6] sq-xqu: bounds the wall-clock time of EACH window
-    /// evaluation (deadline refreshed to `now + timeout` per window).
+    /// evaluation (deadline tightened to at most `now + timeout` per window).
     /// Semantics as
     /// [`ContinuousQuery::with_window_timeout`](crate::ContinuousQuery::with_window_timeout);
     /// native only.
@@ -482,7 +484,7 @@ impl ContinuousAsk {
     }
 
     /// [SONNET-4.6] sq-xqu: bounds the wall-clock time of EACH window
-    /// evaluation (deadline refreshed to `now + timeout` per window).
+    /// evaluation (deadline tightened to at most `now + timeout` per window).
     /// Semantics as
     /// [`ContinuousQuery::with_window_timeout`](crate::ContinuousQuery::with_window_timeout);
     /// native only.

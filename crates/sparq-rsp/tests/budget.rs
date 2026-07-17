@@ -106,6 +106,54 @@ fn select_oversized_window_timeout_is_unlimited_not_a_panic() {
 }
 
 #[test]
+fn select_expired_absolute_deadline_not_extended_by_window_timeout() {
+    // An already-passed ABSOLUTE deadline must keep failing every window even
+    // when a generous per-window timeout is also set: the effective deadline
+    // is the EARLIER of the two, so the per-window refresh can never grant
+    // time past the absolute limit. `Instant::now()` taken at registration is
+    // in the past by the time the window evaluates (same determinism as the
+    // `Duration::ZERO` timeout tests: the first poll sees `now >= deadline`).
+    let expired = QueryBudget {
+        deadline: Some(std::time::Instant::now()),
+        ..QueryBudget::unlimited()
+    };
+    let mut q = ContinuousQuery::register(
+        "SELECT ?s ?v WHERE { ?s <http://ex/value> ?v }",
+        WindowSpec::time(10, 10),
+    )
+    .unwrap()
+    .with_budget(expired)
+    .with_window_timeout(Duration::from_secs(3600));
+    for n in 0..3 {
+        q.push(value_triple(n), n as u64, |_| {}).unwrap();
+    }
+    let err = q.flush(|_| panic!("absolute deadline must trip")).unwrap_err();
+    assert!(err.contains("query budget exceeded (timeout)"), "got: {}", err);
+}
+
+#[test]
+fn select_zero_window_timeout_trips_despite_generous_absolute_deadline() {
+    // The converse ordering: a far-future absolute deadline must not loosen a
+    // `Duration::ZERO` per-window timeout — the earlier (window) deadline wins.
+    let generous = QueryBudget {
+        deadline: std::time::Instant::now().checked_add(Duration::from_secs(3600)),
+        ..QueryBudget::unlimited()
+    };
+    let mut q = ContinuousQuery::register(
+        "SELECT ?s ?v WHERE { ?s <http://ex/value> ?v }",
+        WindowSpec::time(10, 10),
+    )
+    .unwrap()
+    .with_budget(generous)
+    .with_window_timeout(Duration::ZERO);
+    for n in 0..3 {
+        q.push(value_triple(n), n as u64, |_| {}).unwrap();
+    }
+    let err = q.flush(|_| panic!("window timeout must trip")).unwrap_err();
+    assert!(err.contains("query budget exceeded (timeout)"), "got: {}", err);
+}
+
+#[test]
 fn construct_budget_max_rows_trips() {
     let mut q = ContinuousConstruct::register(
         "CONSTRUCT { ?s <http://ex/observed> ?v } WHERE { ?s <http://ex/value> ?v }",
