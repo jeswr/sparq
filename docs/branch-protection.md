@@ -176,6 +176,40 @@ When a new ratchet or gate is added to a CI workflow it is covered
 automatically (no ruleset edit needed); update the informational table above so reviewers
 keep an accurate map.
 
+### Omnibus batching (merge-queue overflow)
+
+The merge queue on `main` drains individually-armed worker PRs up to its per-window cap
+(`max_entries_to_merge: 8`). When **more than 8** reviewed worker PRs (open `sparq-agent/*`
+heads carrying `review:pass` with an active auto-merge arm by `app/sparq-orchestrator`)
+are waiting at once, the scheduled/event-driven batcher
+([`scripts/batch-merge.py`](../scripts/batch-merge.py), run by
+[`.github/workflows/batch-merge.yml`](../.github/workflows/batch-merge.yml)) folds the
+overflow — everything beyond the 8 lowest-numbered PRs, at least 2 constituents — into one
+`sparq-omnibus/<utcstamp>` integration PR (fresh off `main`, sequential `--no-ff` merges;
+a conflicting constituent is skipped and stays individually armed) and arms it so a single
+queue slot lands the whole batch; the omnibus body carries `Closes #` refs for every
+constituent's issue, and once it merges the batcher closes each contained constituent PR.
+The `sparq-omnibus/` prefix (and the absence of any `review:*` label) keeps these PRs out
+of the registry's worker-review enumeration, which only admits `sparq-agent/issue-<n>-…`
+heads. The omnibus branch/PR is pushed, created and armed with a **sparq-orchestrator App
+installation token** (repo secrets `ORCHESTRATOR_APP_ID` / `ORCHESTRATOR_APP_PRIVATE_KEY`):
+a `GITHUB_TOKEN`-created PR gets its workflow events suppressed, so the required
+`ci-summary / gate` would never report on its head and the merge queue would never admit
+it (admission requires the required checks to pass *before* entry). Without those secrets
+the batcher fail-softs to hygiene-only mode (no new omnibus is created). Failure handling
+is liveness-bounded: an omnibus whose head `gate` concluded in failure or that conflicts
+with `main` is closed and its branch deleted; a young mergeable omnibus whose auto-merge
+arm was dropped (merge groups drop the arm on a failed group) is re-armed idempotently;
+and an omnibus still unmerged past the age bound (`MAX_OMNIBUS_AGE_HOURS` in the script —
+the backstop for merge-group failures, which report on the queue's synthetic ref, not the
+PR head) is closed so it can never suppress future batching. In every failure case the
+constituents remain individually armed, so the failure mode is "no worse than unbatched"
+(bisection is a tracked v2). The same workflow's `ring` job fires on every push to `main`
+and, when the `REGISTRY_RING_TOKEN` secret is configured, pokes the
+`jeswr/agent-account-registry` dispatcher so freed capacity is picked up immediately
+(fail-soft: without the secret it skips with a notice and the registry cron is the
+backstop). The batcher is **not** a required check and never runs on a PR head commit.
+
 > All third-party GitHub Actions across `.github/workflows/*.yml` are **pinned by full
 > commit SHA** (with a trailing `# vX.Y.Z` comment that Dependabot follows), resolving
 > the Scorecard `Pinned-Dependencies` alerts. The one documented nuance:
