@@ -1,0 +1,120 @@
+# [FABLE-5] PR-freshness refresher (on-main-push + 30-min cron; NON-gating). Issue #3424.
+#
+# WHY: when a fix to CI/gate code merges to `main`, every open PR keeps its stale-red
+# required `gate` (ci-summary.yml) — the verdict was computed with the OLD gate code on an
+# OLD merge ref. `gh run rerun` does NOT refresh it (a rerun re-executes the PR branch's
+# old scripts on the old merge commit). The correct refresh is the update-branch API
+# (PUT /repos/{o}/{r}/pulls/{n}/update-branch), which pushes a merge commit with current
+# `main` to the PR branch and triggers fresh pull_request CI on a rebuilt merge ref. On
+# 2026-07-17 ~17 armed review:pass PRs sat red for an hour because nothing did this
+# automatically — this workflow is the automation (Closes #3424).
+#
+# POLICY lives in scripts/pr-freshness.py (pure, self-tested — same shape as
+# scripts/pr-backlog.py): refresh an open non-draft PR iff (auto-merge armed OR
+# review:pass) AND behind main AND (`gate` red on the head OR the merge ref was never
+# gated) AND NOT review:needs-user AND NOT DIRTY (conflict PRs are reported for
+# sparq-merge-fixer). Never touches a head whose fresh CI is already queued/running.
+#
+# LOOP-SAFETY: update-branch pushes a merge commit to the PR BRANCH — that fires the PR's
+# pull_request CI but NOT another push to `main`, so the `push: main` trigger below cannot
+# recurse. CI fan-out per tick is bounded by the script's cap (6 update-branch calls/tick)
+# + a 40-min per-PR cooldown (read from the head commit's committer timestamp — an
+# update-branch merge commit IS the branch's last-update marker, so no external state).
+# Both knobs exist because of the congestion collapse ci-summary.yml documents
+# (sq-90cv4): uncapped mass CI triggering once melted the runner pool.
+#
+# TOKENS: an update-branch push made with the workflow's own GITHUB_TOKEN fires NO events
+# (GitHub suppresses Actions-token event cascades) — the fresh CI this workflow exists to
+# trigger would never run and the PR would be left gate-less. So the mutation runs ONLY
+# with the sparq-orchestrator App token (same pattern as batch-merge.yml); without the
+# App secrets the run degrades fail-soft to --report-only.
+#
+# NOT A GATE: runs on push-to-main / schedule / dispatch, never on a PR head commit, so
+# the ci-summary aggregator (which polls check-runs on PR heads) never sees it.
+name: pr-freshness
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    # Every 30 min: the backstop for gate-code merges the push trigger raced past
+    # (e.g. a PR that was still mid-CI on the push tick) and for cap-deferred PRs.
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      report_only:
+        description: "Compute + print the plan but perform NO update-branch calls"
+        required: false
+        default: "false"
+
+# Least privilege. update-branch = a push to the PR branch (contents: write) on a PR
+# resource (pull-requests: write); the policy READS check-runs (checks: read) and the
+# head's queued/in-progress workflow runs (actions: read). Nothing else.
+permissions:
+  pull-requests: write
+  contents: write
+  checks: read
+  actions: read
+
+# Never overlap (two ticks would double-spend the cap); never cancel in-flight — let a
+# push tick and the cron drain sequentially.
+concurrency:
+  group: pr-freshness
+  cancel-in-progress: false
+
+jobs:
+  # Job name deliberately WITHOUT `advisory`/`informational` (stays visible in the
+  # Actions UI); because this workflow never runs on a PR head commit it is structurally
+  # non-gating regardless.
+  freshen:
+    name: freshen stale-red PRs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      # Secrets are not readable from step `if:` expressions — mirror the id into env so
+      # the mint step can be skipped fail-soft when the App is not configured.
+      ORCHESTRATOR_APP_ID: ${{ secrets.ORCHESTRATOR_APP_ID }}
+    steps:
+      # See the TOKENS header note: without this token an update-branch push would fire
+      # no pull_request events, leaving the PR gate-less — so no-token => report-only.
+      - name: Mint the sparq-orchestrator App token (update pushes must fire CI)
+        id: app-token
+        if: env.ORCHESTRATOR_APP_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.ORCHESTRATOR_APP_ID }}
+          private-key: ${{ secrets.ORCHESTRATOR_APP_PRIVATE_KEY }}
+
+      - name: Checkout (only the policy script is needed)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            scripts/pr-freshness.py
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Self-test the policy (hermetic; gh stubbed; fail fast on a logic regression)
+        run: python3 scripts/pr-freshness.py --self-test
+
+      - name: Refresh stale-red PRs
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          HAVE_APP_TOKEN: ${{ steps.app-token.outputs.token != '' }}
+          REPO: ${{ github.repository }}
+          REPORT_ONLY: ${{ github.event.inputs.report_only || 'false' }}
+        run: |
+          set -euo pipefail
+          args=(--repo "$REPO" --summary-file "$GITHUB_STEP_SUMMARY")
+          if [ "$REPORT_ONLY" = "true" ]; then
+            args+=(--report-only)
+          fi
+          if [ "$HAVE_APP_TOKEN" != "true" ]; then
+            echo "::notice::ORCHESTRATOR_APP_ID/_PRIVATE_KEY not configured — report-only mode (a GITHUB_TOKEN update-branch push fires no pull_request events, so the fresh CI it exists to trigger would never run)."
+            args+=(--report-only)
+          fi
+          python3 scripts/pr-freshness.py "${args[@]}"
