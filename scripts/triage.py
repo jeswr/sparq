@@ -137,6 +137,8 @@ def _self_test():
     # chain) even when the issue type would derive impl; kind (docs) and security still win.
     chk("ui surface -> site", triage(["priority:P2", "area:site"], "feature")["role"], "site")
     chk("gui surface -> site", triage(["priority:P2", "area:gui"], "task")["role"], "site")
+    chk("explicit impl on ui surface stays impl",
+        triage(["priority:P2", "role:impl", "area:site"], "feature")["role"], "impl")
     chk("site docs stay docs", triage(["priority:P3", "kind:docs", "area:site"], "task")["role"], "docs")
     chk("ui+sec -> soundness", triage(["priority:P1", "area:site", "area:sparq-zk"], "feature")["role"], "soundness")
     # [FABLE-5] no-area guard: a complete priority+role issue with NO area:* is NOT promoted to ready
