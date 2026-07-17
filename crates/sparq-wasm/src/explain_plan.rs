@@ -166,7 +166,10 @@ mod tests {
         )
         .unwrap();
         let nanos = plan.nanos.expect("ANALYZE fills nanos");
-        assert!(nanos > 0 && nanos % 1_000 == 0, "host clock supplies the reading: {nanos}");
+        assert!(
+            nanos > 0 && nanos.is_multiple_of(1_000),
+            "host clock supplies the reading: {nanos}"
+        );
     }
 
     #[test]

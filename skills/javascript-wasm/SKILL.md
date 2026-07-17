@@ -321,7 +321,7 @@ contract, identical to the server's `Accept: application/x-sparq-explain+json` r
 The dry-run form populates only `estimated`; the analyze form (SELECT/ASK only) fills
 `actual` rows, `qError` = max(est/actual, actual/est), and REAL per-operator wall `nanos` —
 the binding installs `performance.now()` as the engine's trace clock ([FABLE-5] sq-vx7ez,
-#2428), so the in-tab plan explorer shows real times at the host timer's resolution
+issue #2428), so the in-tab plan explorer shows real times at the host timer's resolution
 (browsers may coarsen `performance.now()`; a tiny operator can still legitimately read 0).
 `@sparq/client` exports the matching `PlanNode` type + the `parsePlanJson` defensive parse.
 
