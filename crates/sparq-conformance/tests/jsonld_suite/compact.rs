@@ -47,14 +47,13 @@ use std::path::Path;
 /// * NegativeEvaluationTests — compaction raises `invalid @nest value`, but error-code
 ///   completeness across context processing/expansion/compaction is unverified; the
 ///   negative lanes are bead sq-oy1f.31. SKIP (honest), never a counted pass.
-/// * `specVersion: json-ld-1.0` positives — the suite convention: 1.0-only tests are
-///   run by 1.0 processors (the flatten/fromRdf lanes already skip these). At the pin
-///   this is exactly `#t0038`, whose 1.0-era expectation (compact-IRI creation through
-///   an EXPANDED term definition) directly contradicts what `#tp001` pins for 1.0
-///   processing mode under the 1.1 REC — unreachable, so an honest SKIP, never a fix
-///   (decision: bead sq-uzdw7; see `floors::compact`). NOTE this matches on
-///   `specVersion` ONLY: `option.processingMode: json-ld-1.0` cases with a 1.1 (or
-///   unset) `specVersion` (`#t0075`/`#t0106`/`#tp001`) are 1.1-suite tests and RUN.
+/// * `#t0038` — the ONE narrowly-pinned 1.0-only skip; see
+///   [`is_pinned_1_0_only_skip`] for the justification and
+///   [`t0038_skip_is_narrowly_scoped`] for the test enforcing its scope. NOT a
+///   blanket `specVersion: json-ld-1.0` skip: `option.processingMode: json-ld-1.0`
+///   cases (`#t0075`/`#t0106`/`#tp001`) RUN, and any FUTURE 1.0-only positive
+///   added at a suite-pin bump RUNS (and fails loudly) rather than being silently
+///   skipped.
 /// * Remote `input` URL — no network.
 /// * No `expect` / no `context` member — nothing to compare / compact against.
 pub fn run_compact(root: &Path) -> Score {
@@ -78,10 +77,9 @@ pub fn run_compact(root: &Path) -> Score {
             s.skip();
             continue;
         }
-        // JSON-LD-1.0-only positives (specVersion, NOT processingMode — see the
-        // module docs): a 1.1 processor skips them, per the fromRdf lane convention.
-        // At the pin: exactly #t0038 (bead sq-uzdw7).
-        if e.spec_version.as_deref() == Some("json-ld-1.0") {
+        // The ONE narrowly-pinned 1.0-only skip (#t0038) — see
+        // `is_pinned_1_0_only_skip`; scope enforced by `t0038_skip_is_narrowly_scoped`.
+        if is_pinned_1_0_only_skip(e) {
             s.skip();
             continue;
         }
@@ -195,4 +193,96 @@ pub fn run_compact(root: &Path) -> Score {
         }
     }
     s
+}
+
+/// The single narrowly-pinned 1.0-only skip: compact `#t0038` and NOTHING else
+/// (decision: bead sq-uzdw7; scope enforced by [`t0038_skip_is_narrowly_scoped`]).
+///
+/// Why this exact case is formally inapplicable to sparq (a JSON-LD 1.1 REC
+/// processor), sourceable from the pinned suite itself:
+///
+/// * The suite's `vocab.jsonld` defines `jld:specVersion` as "the JSON-LD version
+///   to which the test applies"; `#t0038` carries `specVersion: json-ld-1.0`, i.e.
+///   it targets the 2014 JSON-LD 1.0 REC's algorithms, which sparq does not
+///   implement (sparq's `ProcessingMode::JsonLd10` is the 1.1 REC's DEFINITION of
+///   1.0 processing mode, not the 1.0-REC algorithms).
+/// * Its expected document mints compact IRIs (`title:/value`, `body:/format`)
+///   from EXPANDED (map-valued) term definitions — but the 1.1 REC's IRI
+///   Compaction algorithm only considers terms whose prefix flag is true, which is
+///   never set for a map-valued term definition, in EITHER processing mode:
+///   `#tp001` ("Compact IRI will not use an expanded term definition in 1.0", a
+///   1.1-suite test run under `processingMode: json-ld-1.0`) pins exactly that, so
+///   one implementation cannot pass both. jsonld.js and pyld make the same trade.
+///
+/// The match is by exact manifest id AND its upstream `specVersion` marker, so a
+/// suite-pin bump that changes either makes the case RUN again (fail loudly)
+/// instead of extending the exception.
+fn is_pinned_1_0_only_skip(e: &Entry) -> bool {
+    e.id == "#t0038" && e.spec_version.as_deref() == Some("json-ld-1.0")
+}
+
+/// Regression pin for the scope of the `#t0038` skip (bead sq-uzdw7): exactly
+/// `#t0038` is skipped by [`is_pinned_1_0_only_skip`], the
+/// `processingMode: json-ld-1.0` positives still EXECUTE, and `#t0038` stays the
+/// only `specVersion: json-ld-1.0` positive in the manifest — so a suite-pin bump
+/// that adds another 1.0-only positive fails HERE and forces a deliberate
+/// decision rather than a silent skip.
+#[test]
+fn t0038_skip_is_narrowly_scoped() {
+    let root = suite_root();
+    if !root.exists() {
+        eprintln!(
+            "SKIP: W3C JSON-LD suite not present at {} — run scripts/fetch-jsonld-tests.sh",
+            root.display()
+        );
+        return;
+    }
+    let entries = read_manifest(&root, "compact").expect("read compact manifest");
+
+    // (a) The skip predicate matches exactly #t0038.
+    let skipped: Vec<&str> = entries
+        .iter()
+        .filter(|e| is_pinned_1_0_only_skip(e))
+        .map(|e| e.id.as_str())
+        .collect();
+    assert_eq!(
+        skipped,
+        ["#t0038"],
+        "the pinned 1.0-only skip must cover exactly #t0038"
+    );
+
+    // (b) The processingMode=json-ld-1.0 positives are NOT skipped: they clear
+    // every skip gate `run_compact` applies, so they EXECUTE the native compactor
+    // in JSON-LD 1.0 processing mode.
+    for id in ["#t0075", "#t0106", "#tp001"] {
+        let e = entries
+            .iter()
+            .find(|e| e.id == id)
+            .unwrap_or_else(|| panic!("{} missing from the pinned compact manifest", id));
+        assert!(
+            !is_pinned_1_0_only_skip(e)
+                && e.requires.is_none()
+                && !e.is_negative
+                && e.expect.is_some()
+                && e.context.is_some()
+                && !e.input.starts_with("http://")
+                && !e.input.starts_with("https://"),
+            "{} (processingMode: json-ld-1.0 lineage) must RUN, not skip",
+            id
+        );
+    }
+
+    // (c) #t0038 is the ONLY specVersion=json-ld-1.0 positive at the pin. If a
+    // suite-pin bump adds another, this assertion fires: decide it explicitly
+    // (fix, or extend the pin with its own justification) — never silently skip.
+    let one_zero_positives: Vec<&str> = entries
+        .iter()
+        .filter(|e| !e.is_negative && e.spec_version.as_deref() == Some("json-ld-1.0"))
+        .map(|e| e.id.as_str())
+        .collect();
+    assert_eq!(
+        one_zero_positives,
+        ["#t0038"],
+        "a new specVersion=json-ld-1.0 positive appeared — decide it explicitly"
+    );
 }

@@ -39,11 +39,16 @@
 ///   sets the prefix flag on an expanded term — in either processing mode
 ///   (`compact/p001` pins exactly that for 1.0 mode, so "fixing" `#t0038`
 ///   would break `#tp001`) — so this expectation is unreachable; jsonld.js and
-///   pyld make the same trade. DECISION (bead sq-uzdw7): reclassified from a
-///   documented below-floor FAIL to an honest 1.0 SKIP, adopting the
-///   flatten/fromRdf lane convention (1.0-only tests are run by 1.0
-///   processors); the skip matches `specVersion` ONLY, so the
-///   `processingMode: json-ld-1.0` cases of the 1.1 suite still RUN.
+///   pyld make the same trade, and the suite's own `vocab.jsonld` defines
+///   `specVersion` as "the JSON-LD version to which the test applies".
+///   DECISION (bead sq-uzdw7): reclassified from a documented below-floor FAIL
+///   to an honest SKIP, NARROWLY PINNED to this exact manifest id (never a
+///   blanket `specVersion: json-ld-1.0` match): the runner's
+///   `is_pinned_1_0_only_skip` matches `#t0038` alone, its
+///   `t0038_skip_is_narrowly_scoped` test enforces that scope, the
+///   `processingMode: json-ld-1.0` cases of the 1.1 suite still RUN, and any
+///   FUTURE 1.0-only positive added at a suite-pin bump RUNS (and fails the
+///   scope test) rather than being silently skipped.
 /// * 17 SKIPs = the NegativeEvaluationTests: compaction raises `invalid @nest
 ///   value`, but error-code completeness across context processing, expansion,
 ///   and compaction is unverified; the negative ratchet lanes are bead

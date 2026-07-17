@@ -73,9 +73,13 @@ Skip-bucket composition (from the pinned manifests, no estimates):
   `#t0038`'s 1.0-era expectation (compact-IRI creation through an expanded
   term definition) directly contradicts what `#tp001` pins for 1.0 processing
   mode under the 1.1 REC — both cannot pass, jsonld.js/pyld make the same
-  trade — so the lane adopts the fromRdf convention (1.0-only tests are run by
-  1.0 processors) and skips on `specVersion` only; the
-  `processingMode: json-ld-1.0` cases of the 1.1 suite still run (and pass).
+  trade, and the suite's `vocab.jsonld` defines `specVersion` as "the JSON-LD
+  version to which the test applies" — so the lane skips it, NARROWLY PINNED
+  to the exact manifest id (never a blanket `specVersion` match): the runner's
+  `t0038_skip_is_narrowly_scoped` test asserts exactly `#t0038` is skipped,
+  that the `processingMode: json-ld-1.0` cases of the 1.1 suite still run (and
+  pass), and that a future 1.0-only positive at a suite-pin bump runs rather
+  than being silently skipped.
 - **flatten: 5 skips** = 1 negative + the JSON-LD-1.0-only positives + the
   post-flatten-compaction (`context`-member) compositions.
 - **fromRdf: 1 skip** = the one `specVersion: json-ld-1.0` case (a 1.1
@@ -136,9 +140,12 @@ sq-hmd7l.15/.43) or the cross-engine table script (sq-hmd7l.22).
   runner grows a real toRdf row.
 - **sq-uzdw7** — RESOLVED (2026-07-17): compact `#t0038` ("Index map
   round-tripping", json-ld-1.0-only positive), formerly the single outright
-  failing test at the pin, is reclassified as an honest 1.0 skip in BOTH the
-  ratchet lane and this runner (the fromRdf `specVersion`-only convention).
-  "Fixing" it was rejected as unreachable: its 1.0-era prefixing expectation
-  contradicts `#tp001` (a 1.1-suite test run in 1.0 processing mode), so a
-  REC-conformant processor cannot pass both. Floors unchanged (compact stays
-  228; fail 1→0, skip 17→18).
+  failing test at the pin, is reclassified as an honest skip in BOTH the
+  ratchet lane and this runner, NARROWLY PINNED to that exact manifest id
+  (scope enforced by the ratchet lane's `t0038_skip_is_narrowly_scoped` test —
+  a blanket `specVersion: json-ld-1.0` skip was rejected in PR review so no
+  future 1.0-only positive is silently absorbed). "Fixing" it was rejected as
+  unreachable: its 1.0-era prefixing expectation contradicts `#tp001` (a
+  1.1-suite test run in 1.0 processing mode), so a REC-conformant processor
+  cannot pass both. Floors unchanged (compact stays 228; fail 1→0,
+  skip 17→18).
