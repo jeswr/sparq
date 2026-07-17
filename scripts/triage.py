@@ -31,9 +31,14 @@ def _valid_priority(labels):
 
 
 def _role(labels, issue_type):
-    # a security-surface keyword forces the soundness lane regardless of kind/type
+    # a security-surface keyword forces the soundness lane regardless of kind/type/explicit role
     if any(k in lb for lb in labels for k in SEC_KEYWORDS):
         return "soundness"
+    # [OPUS-4.8] respect an EXPLICIT single role:* label (e.g. a seeded/migrated issue that already
+    # carries its role) — deriving a second role would make resolve() reject an ambiguous role set.
+    explicit = sorted(lb[5:] for lb in labels if lb.startswith("role:"))
+    if len(explicit) == 1:
+        return explicit[0]
     for lb in labels:
         if lb.startswith("kind:") and lb[5:] in ROLE_BY_KIND:
             return ROLE_BY_KIND[lb[5:]]
@@ -50,6 +55,9 @@ def triage(labels, issue_type="task", trusted=True):
     add, remove = set(), set()
     if role:
         add.add(f"role:{role}")
+        # [OPUS-4.8] single-role invariant: strip any OTHER role:* labels so the dispatcher's
+        # resolve() never sees an ambiguous role set (a security keyword may override an explicit role).
+        remove |= {lb for lb in labels if lb.startswith("role:") and lb != f"role:{role}"}
     ready = bool(role) and _valid_priority(labels) and "needs:user" not in labels
     if ready:
         add.add("status:ready")
@@ -86,6 +94,13 @@ def _self_test():
     chk("needs:user gated", triage(["priority:P1", "kind:docs", "needs:user"], "task")["ready"], False)
     # untrusted -> no-op
     chk("untrusted no-op", triage(["priority:P1", "trust:untrusted"], "feature"), {"add": set(), "remove": set(), "ready": False, "role": None})
+    # [OPUS-4.8] respect an explicit role:* — do NOT derive a second (ambiguity broke autonomous dispatch)
+    r = triage(["priority:P2", "role:site", "area:site"], "feature")
+    chk("explicit role respected", (r["role"], "role:impl" in r["add"], any(x.startswith("role:") for x in r["remove"])),
+        ("site", False, False))
+    # single-role invariant: a double-labelled issue is stripped to one role
+    r = triage(["priority:P2", "role:impl", "role:site", "area:site"], "feature")
+    chk("single-role invariant", (len([x for x in (({"role:impl", "role:site"} | r["add"]) - r["remove"]) if x.startswith("role:")]) == 1), True)
     print("triage self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
 
