@@ -19,7 +19,9 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
@@ -85,6 +87,9 @@ test(
     const ownerWebid = 'https://id.example/alice#me';
     const baseUrl = 'http://127.0.0.1';
 
+    // Private npm cache: this file and server.test.mjs run concurrently and share the
+    // npx cache key for <packageDir>; a shared ~/.npm/_npx races on the install symlink.
+    const npmCache = await mkdtemp(join(tmpdir(), 'solid-server-npx-'));
     const child = spawn(
       'npx',
       [
@@ -103,6 +108,7 @@ test(
         cwd: repoRoot,
         detached: process.platform !== 'win32',
         stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, npm_config_cache: npmCache },
       },
     );
 
@@ -231,6 +237,7 @@ _:p solid:inserts { <${base}/doc> dc:title "Smoke-doc" . } .
       );
     } finally {
       await stopChild(child);
+      await rm(npmCache, { recursive: true, force: true });
     }
   },
 );
