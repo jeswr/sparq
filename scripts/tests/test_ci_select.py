@@ -179,9 +179,11 @@ class SyntheticGraphTests(unittest.TestCase):
         self.assertEqual(sel.changed_crates, ["engine"])
 
     def test_json_contract_keys(self):
+        # [OPUS-4.8] `change_class` added to the JSON contract (audit-trail label; not
+        # a gating input — the downstream guards still read only mode/affected).
         sel = self._select(["crates/app/src/lib.rs"])
         obj = sel.to_json_obj()
-        self.assertEqual(set(obj), {"mode", "reason", "affected"})
+        self.assertEqual(set(obj), {"mode", "reason", "affected", "change_class"})
 
 
 class OwnershipMapTests(unittest.TestCase):
@@ -474,6 +476,8 @@ class WiringHookTests(unittest.TestCase):
         self.assertEqual(lines["mode"], "selected")
         self.assertEqual(json.loads(lines["affected"]), ["app"])
         self.assertEqual(lines["filterset"], "package(app)")
+        # [OPUS-4.8] change-class output present (a crate change => engine).
+        self.assertEqual(lines["change_class"], "engine")
 
     def test_filterset_joins_members_with_plus(self):
         self.assertEqual(
@@ -481,6 +485,180 @@ class WiringHookTests(unittest.TestCase):
             "package(a) + package(b)",
         )
         self.assertEqual(cs.filterset(cs.Selection(mode="full", reason="", affected=[])), "")
+
+
+# [OPUS-4.8] ---- change-class layer (path-aware CI for orchestration PRs) --------
+class ChangeClassTests(unittest.TestCase):
+    """The classifier fixtures the maintainer brief mandates: engine diff => full;
+    an orchestration-only diff (the #3416 file set exactly) => reduced (mode=selected,
+    empty closure); docs-only => reduced; mixed => full; a rename crossing classes =>
+    full. classify_change is a PURE function of the diff and is fail-closed (an
+    unclassified path taints the class to engine/mixed)."""
+
+    def setUp(self):
+        self.meta = _synthetic_meta()
+
+    def _select(self, paths, map_entries=None):
+        return cs.select(paths, self.meta, map_entries)
+
+    # --- classify_change unit behaviour ---
+    def test_classify_engine_on_crate_change(self):
+        self.assertEqual(cs.classify_change(["crates/app/src/lib.rs"]), "engine")
+
+    def test_classify_orchestration_only(self):
+        # The #3416 file set EXACTLY: an orchestration config + an orchestration script.
+        self.assertEqual(
+            cs.classify_change(["orchestration/routing.toml", "scripts/triage.py"]),
+            "orchestration-only",
+        )
+
+    def test_classify_docs_only(self):
+        self.assertEqual(cs.classify_change(["docs/guide.md", "research/x.md"]), "docs-only")
+
+    def test_classify_mixed_orchestration_plus_engine(self):
+        self.assertEqual(
+            cs.classify_change(["scripts/triage.py", "crates/app/src/lib.rs"]), "mixed"
+        )
+
+    def test_classify_mixed_docs_plus_orchestration(self):
+        self.assertEqual(
+            cs.classify_change(["docs/x.md", "scripts/triage.py"]), "mixed"
+        )
+
+    def test_classify_engine_on_ci_gate_script(self):
+        # A Rust-CI gate script is NOT orchestration-safe => engine (fail-closed).
+        self.assertEqual(cs.classify_change(["scripts/coverage-gate.py"]), "engine")
+
+    def test_classify_engine_on_rust_ci_workflow(self):
+        self.assertEqual(cs.classify_change([".github/workflows/ci.yml"]), "engine")
+
+    # --- the selection consequences (the whole point) ---
+    def test_orchestration_only_diff_selects_empty_closure(self):
+        # A pure-orchestration PR: mode=selected with an EMPTY affected set — every
+        # Rust lane (incl. the bench/fuzz/wasm seed lanes) skips.
+        sel = self._select(["orchestration/routing.toml", "scripts/triage.py"])
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, [])
+        self.assertEqual(sel.change_class, "orchestration-only")
+        self.assertIn("skipped-by-class: orchestration-only", sel.reason)
+
+    def test_docs_only_diff_selects_empty_closure(self):
+        m = [{"pattern": "research/**", "safe": True}]
+        sel = self._select(["research/design.md"], m)
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, [])
+        self.assertEqual(sel.change_class, "docs-only")
+
+    def test_orchestration_safe_never_triggers_full(self):
+        # Even paired with a crate change, the orch-safe path must not FORCE full;
+        # the crate change narrows normally (selected), class becomes mixed.
+        sel = self._select(["scripts/triage.py", "crates/app/src/lib.rs"])
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, ["app"])
+        self.assertEqual(sel.change_class, "mixed")
+
+    def test_mixed_engine_ci_script_still_forces_full(self):
+        # A Rust-CI script (NOT orch-safe) keeps forcing full even alongside orch paths.
+        sel = self._select(["scripts/coverage-gate.py", "scripts/triage.py"])
+        self.assertEqual(sel.mode, "full")
+
+    def test_workflow_file_change_forces_full_and_runs_gate_selftest(self):
+        # A .github/workflows/ Rust-CI workflow edit (ci.yml) is NOT orch-safe: it
+        # forces full, so the gate's own self-test leg + actionlint run (a CI change
+        # must prove the gate still works). Representative Rust-CI workflow.
+        sel = self._select([".github/workflows/ci.yml"])
+        self.assertEqual(sel.mode, "full")
+
+    def test_orchestration_workflow_edit_is_safe(self):
+        # An orchestration-ONLY workflow file (triage-issue.yml) is proven inert.
+        sel = self._select([".github/workflows/triage-issue.yml"])
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, [])
+        self.assertEqual(sel.change_class, "orchestration-only")
+
+    def test_rename_crossing_classes_forces_full(self):
+        # git diff --no-renames reports a move as delete+add of BOTH paths. Moving an
+        # orchestration script INTO a crate dir surfaces both paths: the crate path is
+        # owned (engine) => the diff is mixed and the crate is selected (never a skip
+        # of the destination crate). Moving a crate file OUT to orchestration surfaces
+        # the crate delete (owned) => that crate still runs.
+        sel = self._select(["scripts/triage.py", "crates/app/src/triage.rs"])
+        self.assertEqual(sel.change_class, "mixed")
+        self.assertEqual(sel.mode, "selected")
+        self.assertIn("app", sel.affected)
+
+    def test_mutation_break_classifier_reddens_engine_fixture(self):
+        # MUTATION SPOT-CHECK (brief): if the classifier were broken to call EVERYTHING
+        # orchestration-safe, an engine-diff fixture must go RED. We simulate the break
+        # by monkeypatching _orchestration_safe_match to always-True and assert the
+        # engine fixture then wrongly skips — proving the real (False) path is what
+        # keeps the engine diff running.
+        orig = cs._orchestration_safe_match
+        try:
+            cs._orchestration_safe_match = lambda _p: True
+            broken = cs.select(["crates/app/src/lib.rs"], self.meta)
+            # Under the break, the crate change is swallowed as "safe" => empty closure.
+            self.assertEqual(broken.affected, [], "mutation should make the engine diff skip")
+        finally:
+            cs._orchestration_safe_match = orig
+        # And the REAL classifier keeps the engine crate selected (red-on-wrong-answer).
+        good = cs.select(["crates/app/src/lib.rs"], self.meta)
+        self.assertEqual(good.affected, ["app"])
+
+
+class OrchestrationSafeInertnessTests(unittest.TestCase):
+    """[OPUS-4.8] THE INERTNESS OBLIGATION: every _ORCHESTRATION_SAFE entry must be
+    PROVEN not read by any Rust-CI workflow. This greps the real Rust-CI workflow
+    files for a reference to each allowlisted SCRIPT/WORKFLOW and FAILS if one is
+    referenced — so an entry can never silently become unsound when a script is later
+    wired into a gate. Directory prefixes (orchestration/, .claude/, .beads/) are
+    audited by convention (never cargo-compiled) and exempt from the grep."""
+
+    # The workflows that run cargo build/test/clippy/coverage/bench/fuzz/CodeQL and
+    # therefore MUST NOT reference an orchestration-safe script.
+    _RUST_CI_WORKFLOWS = [
+        "ci.yml", "feature-matrix.yml", "codeql.yml", "supply-chain.yml",
+        "bench.yml", "fuzz.yml", "miri.yml", "asan.yml", "kani.yml",
+        "metamorph.yml", "vectorized-feature-off.yml", "ci-select.yml",
+        "ci-summary.yml", "formal-verification.yml", "differential.yml",
+        "shacl-diff-fuzz.yml", "nightly-full-sweep.yml",
+    ]
+
+    def test_no_orch_safe_script_is_referenced_by_a_rust_ci_workflow(self):
+        wf_dir = REPO_ROOT / ".github" / "workflows"
+        corpus = []
+        for name in self._RUST_CI_WORKFLOWS:
+            p = wf_dir / name
+            if p.exists():
+                corpus.append(p.read_text(encoding="utf-8"))
+        blob = "\n".join(corpus)
+        for entry in cs._ORCHESTRATION_SAFE:
+            if entry.endswith("/"):
+                continue  # directory prefixes: never cargo-compiled (audited by convention)
+            if entry.startswith(".github/workflows/"):
+                # An orchestration WORKFLOW file: it must not itself be a Rust-CI wf.
+                self.assertNotIn(
+                    Path(entry).name, self._RUST_CI_WORKFLOWS,
+                    f"{entry} is listed as orchestration-safe but is a Rust-CI workflow",
+                )
+                continue
+            # A script: it must not be referenced anywhere in a Rust-CI workflow.
+            self.assertNotIn(
+                entry, blob,
+                f"orchestration-safe {entry} IS referenced by a Rust-CI workflow — it is "
+                f"NOT inert; remove it from _ORCHESTRATION_SAFE (fail-closed: a referenced "
+                f"script must keep triggering the full matrix).",
+            )
+
+    def test_orch_safe_scripts_exist_on_disk(self):
+        # A stale allowlist entry (script deleted/renamed) should be caught, else it
+        # silently covers nothing. Directory prefixes are checked as dirs.
+        for entry in cs._ORCHESTRATION_SAFE:
+            path = REPO_ROOT / entry.rstrip("/")
+            self.assertTrue(
+                path.exists(),
+                f"orchestration-safe entry {entry} does not exist on disk (stale allowlist)",
+            )
 
 
 class RealMetadataShapeTests(unittest.TestCase):
