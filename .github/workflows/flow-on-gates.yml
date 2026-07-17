@@ -46,6 +46,9 @@ name: flow-on-gates
 
 on:
   pull_request:
+    # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
+    # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
+    types: [opened, synchronize, reopened, ready_for_review]
   # Required checks must also run on the merge-queue ref so ci-summary finds the
   # identical sibling set there (mirrors ci-summary.yml's merge_group handling).
   merge_group:
