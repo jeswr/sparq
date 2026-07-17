@@ -79,7 +79,17 @@ pub fn validate(data: &Graph, shapes: &Graph) -> ValidationReport {
 /// `sh:conformanceDisallows` declaration ([`ShapesModel::conformance_disallows`])
 /// when present, falling back to the default {Violation, Warning, Info} set.
 pub fn validate_with_model(data: &Graph, model: &ShapesModel) -> ValidationReport {
-    let (results, diagnostics) = eval::validate_graph(data, model);
+    let (results, mut diagnostics) = eval::validate_graph(data, model);
+    // [FABLE-5] (sq-c1v3e) Surface the parse-time ill-formed-construct records
+    // ([`ShapesModel::ill_formed`]) on the LENIENT path too, as report
+    // diagnostics — visibility without failing: each construct is still skipped
+    // and `conforms` is unaffected (diagnostics never contribute results). The
+    // strict channel keeps turning the same records into `Err(ShaclFailure)`.
+    diagnostics.extend(model.ill_formed().iter().map(|i| ShapeDiagnostic {
+        source_shape: i.node.clone(),
+        source_component: i.predicate.clone(),
+        message: i.message.clone(),
+    }));
     ValidationReport::with_diagnostics_and_disallows(
         results,
         diagnostics,

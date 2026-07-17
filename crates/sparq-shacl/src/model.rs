@@ -9,6 +9,9 @@ use sparq_core::Graph;
 
 pub const SH: &str = "http://www.w3.org/ns/shacl#";
 const RDFS_CLASS: &str = "http://www.w3.org/2000/01/rdf-schema#Class";
+/// [FABLE-5] (sq-c1v3e) The datatype the SHACL syntax rules give every
+/// count/length parameter (`sh:minCount`, `sh:maxLength`, …).
+const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 
 pub(crate) fn sh(local: &str) -> String {
     format!("{SH}{local}")
@@ -515,6 +518,23 @@ impl ShapesModel {
         // recorded as a failure (surfaced by `validate_strict`).
         m.components = discover_components(&g, &mut m.pre_binding_failures);
 
+        // [FABLE-5] (sq-c1v3e) `sh:entailment` (SHACL §1.5): a processor that does
+        // not support a declared entailment regime MUST signal a failure (§3.4).
+        // This engine supports NO entailment regime (data graphs are validated
+        // as-asserted; SHACL-AF rule inference is a separate opt-in surface), so
+        // EVERY `sh:entailment` declaration is recorded — the strict channel
+        // fails, the lenient channel validates the asserted graph as before.
+        for [s, _, o] in g.triples(None, Some(&sh("entailment")), None) {
+            m.record_ill_formed(
+                &s,
+                "entailment",
+                format!(
+                    "unsupported entailment regime {} (this processor supports none)",
+                    o
+                ),
+            );
+        }
+
         // Top-level shape discovery: explicitly typed shapes plus anything with a target.
         // [OPUS-4.8] (sq-rnkdh) `sh:ShapeClass` (SHACL 1.2) is "a class that is also a
         // node shape" — discovered as a root here so its constraints are parsed and
@@ -629,10 +649,11 @@ impl ShapesModel {
     /// (an unparsable `sh:path`, a non-integer `sh:minCount`, a malformed SHACL
     /// list, a literal where a shape or IRI is required, …). The lenient
     /// [`crate::validate`] SKIPS each such construct (unchanged policy; this only
-    /// records the skip); [`crate::validate_strict`] returns an `Err` when this is
-    /// non-empty — the W3C test-suite `sht:Failure` outcome. Empty for a
-    /// well-formed shapes graph. Detection is parse-time and construct-local; it
-    /// is NOT a full SHACL-of-SHACL syntax check (see the crate README).
+    /// records the skip) and [FABLE-5] (sq-c1v3e) surfaces each record as a
+    /// [`crate::ShapeDiagnostic`] on the report; [`crate::validate_strict`]
+    /// returns an `Err` when this is non-empty — the W3C test-suite `sht:Failure`
+    /// outcome. Empty for a well-formed shapes graph. Detection is parse-time and
+    /// construct-local; it is NOT a full SHACL-of-SHACL syntax check (README).
     pub fn ill_formed(&self) -> &[IllFormedConstruct] {
         &self.ill_formed
     }
@@ -674,6 +695,27 @@ impl ShapesModel {
                 pred,
                 format!("the value of sh:{} must be an IRI, got a literal", pred),
             ),
+        }
+    }
+
+    /// [FABLE-5] (sq-c1v3e) Syntax-rule check for the count/length parameters
+    /// (`sh:minCount` / `sh:maxCount` / `sh:minLength` / `sh:maxLength` /
+    /// `sh:minListLength` / `sh:maxListLength` / `sh:qualifiedMinCount` /
+    /// `sh:qualifiedMaxCount`): the value must be a literal with DATATYPE
+    /// `xsd:integer` and an integer lexical form — `"3"^^xsd:string` is
+    /// integer-lexical but ill-formed (bare Turtle `3` types as `xsd:integer`, so
+    /// ordinary shapes graphs — including every W3C-suite fixture — are
+    /// unaffected). A well-formed NEGATIVE (or u64-overflowing) integer stays a
+    /// silent skip. Records only; never alters what the caller builds.
+    fn check_integer_literal(&mut self, node: &Term, pred: &str, o: &Term) {
+        let well_formed = matches!(o, Term::Literal(l)
+            if l.datatype().as_str() == XSD_INTEGER && is_integer_lexical(l.value()));
+        if !well_formed {
+            self.record_ill_formed(
+                node,
+                pred,
+                format!("the value of sh:{} must be an xsd:integer-typed literal", pred),
+            );
         }
     }
 
@@ -735,13 +777,31 @@ impl ShapesModel {
                 self.ensure_shape(shapes_graph, expr);
             }
         }
-        // Parse each expression (immutable borrow) and attach the component.
-        let parsed: Vec<(usize, crate::rules::NodeExpr, bool)> = pending
-            .into_iter()
-            .filter_map(|(sid, expr, is_nbe)| {
-                crate::rules::parse_node_expr(&g, self, &expr).map(|ne| (sid, ne, is_nbe))
-            })
-            .collect();
+        // Parse each expression and attach the component. [FABLE-5] (sq-c1v3e) A
+        // structural (blank-node) node expression that does NOT build — an
+        // unsupported operator/function IRI, an ill-formed operand list, a filter
+        // shape absent from the model — was previously dropped SILENTLY; it is now
+        // recorded for the strict channel (fail-closed relative to THIS engine's
+        // node-expression coverage, like the sq-ehq4g SPARQL-parser boundary).
+        // The lenient skip is unchanged.
+        let mut parsed: Vec<(usize, crate::rules::NodeExpr, bool)> = Vec::new();
+        for (sid, expr, is_nbe) in pending {
+            let pred = if is_nbe { "nodeByExpression" } else { "expression" };
+            match crate::rules::parse_node_expr(&g, self, &expr) {
+                Some(ne) => parsed.push((sid, ne, is_nbe)),
+                None => {
+                    let shape_node = self.shapes[sid].node.clone();
+                    self.record_ill_formed(
+                        &shape_node,
+                        pred,
+                        format!(
+                            "the sh:{} node expression is unsupported or ill-formed",
+                            pred
+                        ),
+                    );
+                }
+            }
+        }
         for (sid, expr, is_nbe) in parsed {
             let idx = self.expressions.len();
             self.expressions.push(expr);
@@ -951,6 +1011,19 @@ impl ShapesModel {
                     None
                 }
             });
+        // [FABLE-5] (sq-c1v3e) A non-IRI `sh:severity` is ill-formed (syntax rule
+        // severity-nodeKind: the value is an IRI — sh:Info/Warning/Violation or a
+        // custom severity). Recorded; the shape keeps the default severity below,
+        // exactly as before.
+        for o in g.objects(node, &sh("severity")) {
+            if !matches!(o, Term::NamedNode(_)) {
+                self.record_ill_formed(
+                    node,
+                    "severity",
+                    "the value of sh:severity must be an IRI".to_string(),
+                );
+            }
+        }
         let mut shape = Shape {
             node: node.clone(),
             path,
@@ -1115,26 +1188,14 @@ impl ShapesModel {
             ("maxLength", Component::MaxLength as fn(u64) -> Component),
         ] {
             for o in g.objects(node, &sh(pred)) {
+                // [FABLE-5] (sq-11a / sq-c1v3e) Recorded when not an
+                // xsd:integer-typed integer literal; built exactly as before (a
+                // `"3"^^xsd:string` still builds the component leniently).
+                self.check_integer_literal(node, pred, &o);
                 if let Term::Literal(l) = &o {
                     if let Ok(n) = l.value().parse::<u64>() {
                         c.push(ctor(n));
-                    } else if !is_integer_lexical(l.value()) {
-                        // [FABLE-5] (sq-11a) A non-integer value is ill-formed
-                        // (syntax rule: an xsd:integer literal). A NEGATIVE (or
-                        // u64-overflowing) integer is well-formed — trivially or
-                        // never satisfiable — and stays a silent skip, as before.
-                        self.record_ill_formed(
-                            node,
-                            pred,
-                            format!("the value of sh:{} must be an integer literal", pred),
-                        );
                     }
-                } else {
-                    self.record_ill_formed(
-                        node,
-                        pred,
-                        format!("the value of sh:{} must be an integer literal", pred),
-                    );
                 }
             }
         }
@@ -1301,25 +1362,15 @@ impl ShapesModel {
             ),
         ] {
             for o in g.objects(node, &sh(pred)) {
+                // [FABLE-5] (sq-11a / sq-c1v3e) As for the count/length
+                // constraints above: recorded when not an xsd:integer-typed
+                // integer literal (a negative integer is a well-formed silent
+                // skip); built exactly as before.
+                self.check_integer_literal(node, pred, &o);
                 if let Term::Literal(l) = &o {
                     if let Ok(n) = l.value().parse::<u64>() {
                         c.push(ctor(n));
-                    } else if !is_integer_lexical(l.value()) {
-                        // [FABLE-5] (sq-11a) As for the count/length constraints
-                        // above: a non-integer is ill-formed, a negative integer
-                        // is a well-formed silent skip.
-                        self.record_ill_formed(
-                            node,
-                            pred,
-                            format!("the value of sh:{} must be an integer literal", pred),
-                        );
                     }
-                } else {
-                    self.record_ill_formed(
-                        node,
-                        pred,
-                        format!("the value of sh:{} must be an integer literal", pred),
-                    );
                 }
             }
         }
@@ -1483,18 +1534,26 @@ impl ShapesModel {
                 required,
             });
         }
-        // [FABLE-5] (sq-11a) Non-integer qualified counts are ill-formed (checked
-        // once per shape node, not per qualified shape); negative integers stay a
-        // well-formed silent skip, as for the count/length constraints above.
+        // [FABLE-5] (sq-11a / sq-c1v3e) Non-xsd:integer qualified counts are
+        // ill-formed (checked once per shape node, not per qualified shape);
+        // negative integers stay a well-formed silent skip, as for the
+        // count/length constraints above. [FABLE-5] (sq-c1v3e) A qualified count
+        // WITHOUT `sh:qualifiedValueShape` is the symmetric partial-parameter
+        // case of the sq-ehq4g rule below: the qualified-cardinality component
+        // (SHACL §4.7.5–6) is then missing its mandatory `sh:qualifiedValueShape`
+        // parameter (SHACL §2.3.2). Recorded; the count stays inert as before.
+        let qualified_shapes = g.objects(node, &sh("qualifiedValueShape"));
         for pred in ["qualifiedMinCount", "qualifiedMaxCount"] {
             if let Some(o) = g.object(node, &sh(pred)) {
-                let well_formed =
-                    matches!(&o, Term::Literal(l) if is_integer_lexical(l.value()));
-                if !well_formed {
+                self.check_integer_literal(node, pred, &o);
+                if qualified_shapes.is_empty() {
                     self.record_ill_formed(
                         node,
                         pred,
-                        format!("the value of sh:{} must be an integer literal", pred),
+                        format!(
+                            "a shape with sh:{} must also have sh:qualifiedValueShape",
+                            pred
+                        ),
                     );
                 }
             }
@@ -1505,7 +1564,6 @@ impl ShapesModel {
         // mandatory parameter, and a shape with values for SOME but not all
         // mandatory parameters of a component is ill-formed (SHACL §2.3.2).
         // Recorded once per shape node; the inert component is built as before.
-        let qualified_shapes = g.objects(node, &sh("qualifiedValueShape"));
         if !qualified_shapes.is_empty()
             && g.object(node, &sh("qualifiedMinCount")).is_none()
             && g.object(node, &sh("qualifiedMaxCount")).is_none()
@@ -1716,9 +1774,19 @@ impl ShapesModel {
         );
         // [OPUS-4.8] (sq-rnkdh) A constraint-level `sh:severity` IRI overrides the
         // shape's default severity for this constraint's results (SHACL 1.2).
+        // [FABLE-5] (sq-c1v3e) A non-IRI value is ill-formed, as at shape level;
+        // recorded, then the shape's severity is inherited exactly as before.
         let severity = match g.object(node, &sh("severity")) {
             Some(Term::NamedNode(n)) => Some(n.as_str().to_string()),
-            _ => None,
+            Some(_) => {
+                self.record_ill_formed(
+                    node,
+                    "severity",
+                    "the value of sh:severity must be an IRI".to_string(),
+                );
+                None
+            }
+            None => None,
         };
         let mut constraint = SparqlConstraint {
             node: node.clone(),

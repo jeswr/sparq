@@ -101,10 +101,19 @@ pub fn validate_with_model(data: &Graph, model: &ShapesModel) -> ValidationRepor
 // sh:sparqlExpr (on sh:sparql constraints AND on the SPARQL-based node expressions
 // of sh:targetNode/sh:values) whose text does not parse as the required query form
 // — FAIL-CLOSED relative to this engine's vendored SPARQL parser: a valid query
-// beyond the parser's coverage is also rejected strictly. Construct-local checks,
-// NOT a full SHACL-of-SHACL pass; ShaclFailure.ill_formed / ShapesModel::ill_formed()
-// carry (node, predicate, message). `validate` instead SKIPS all of the above
-// unchanged (its never-fails contract).
+// beyond the parser's coverage is also rejected strictly. (sq-c1v3e) adds: a non-IRI
+// sh:severity (shape-level AND on an sh:SPARQLConstraint node), the count/length
+// DATATYPE check (integer-lexical but non-xsd:integer-typed, e.g. "3"^^xsd:string —
+// bare Turtle 3 types as xsd:integer, so ordinary graphs are unaffected), a
+// qualified COUNT without sh:qualifiedValueShape (the symmetric partial-parameter
+// case), ANY sh:entailment declaration (no entailment regime is supported — the
+// SHACL §3.4 unsupported-regime failure), and (feature `shacl-af`) an
+// sh:expression / sh:nodeByExpression structural node expression that does not
+// build. Construct-local checks, NOT a full SHACL-of-SHACL pass;
+// ShaclFailure.ill_formed / ShapesModel::ill_formed() carry (node, predicate,
+// message). `validate` instead SKIPS all of the above unchanged (its never-fails
+// contract) and (sq-c1v3e) surfaces each record as a ShapeDiagnostic in
+// report.diagnostics (source_component = the offending SHACL predicate IRI).
 pub fn validate_strict(data: &Graph, shapes: &Graph) -> Result<ValidationReport, ShaclFailure>;
 pub fn validate_strict_with_model(data: &Graph, model: &ShapesModel)
     -> Result<ValidationReport, ShaclFailure>;
