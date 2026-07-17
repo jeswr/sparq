@@ -41,8 +41,21 @@ on:
   # EC2 lane (bench-ec2.yml `nightly-full-bench`, cron), which publishes the full at-scale
   # series to the benchmark-data branch the Pages dashboard reads. See the "Run benchmarks"
   # step guard below and bench-ec2.yml.
+  #
+  # [FABLE-5] LABEL-TRIGGER GUARD (full rationale: ci.yml's pull_request note): only
+  # the `ci-full` / `bench-full` toggles start real work off a label event. The
+  # review pipeline's review:*/status:* flips otherwise re-queued this workflow on an
+  # unchanged head SHA on every flip. The guard is AND-composed into the
+  # `dashboard-labels` and `bench` job `if:`s (the `select` pre-job must stay
+  # unconditional — the ci-summary gate REDs on any non-success selection
+  # check-run), and label events get a per-run concurrency group below.
+  # [FABLE-5] Draft-tier CI: + ready_for_review, so the un-draft moment runs the
+  # deterministic perf ratchet the draft head skipped (the `bench` job is skipped
+  # entirely on draft PR heads — see its `if:` guard + docs/branch-protection.md
+  # §Draft-tier CI). This is independent of the label guard above and AND-composes
+  # with it on the `bench` job.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   # [FABLE-5] (sq-6vshe.6, MAINTAINER-DIRECTED) merge_group REMOVED. The deterministic
   # byte-count ratchet is a pure function of the code: it already ran + hard-gated on the
   # PR head (--deterministic-only above), it re-runs on push-to-main below, and the
@@ -80,10 +93,23 @@ on:
 permissions:
   contents: read
 
-# Do NOT cancel an in-progress benchmark run (it would corrupt the stored series).
+# Do NOT cancel an in-progress benchmark run on main/schedule (it would corrupt the
+# stored series). push/schedule therefore keep cancel-in-progress false (see below).
+# [FABLE-5] label-trigger guard: labeled/unlabeled pull_request events get a PER-RUN
+# group (the run_id suffix) so a label flip is ISOLATED — it can neither cancel nor
+# replace the in-flight/pending real run in the shared per-ref group on the same head
+# SHA (a group holds at most ONE PENDING run; without isolation a flip would evict a
+# pending real run even under cancel-in-progress:false). All other events resolve to
+# the constant `-shared` suffix.
+# [FABLE-5] Draft-tier CI: pull_request runs ARE cancelled when superseded — they
+# never write history (the ratchet/history steps are push-to-main-gated below), so a
+# stale PR bench run burning a runner slot buys nothing. This AND the label guard
+# compose: a label flip sits ALONE in its per-run group, so cancel-in-progress=true
+# there is a no-op on the real run; a PR synchronize sits in `-shared` and correctly
+# supersedes its predecessor; push/schedule stay in `-shared` and are never cancelled.
 concurrency:
-  group: bench-${{ github.ref }}
-  cancel-in-progress: false
+  group: bench-${{ github.ref }}-${{ (github.event_name == 'pull_request' && contains(fromJSON('["labeled","unlabeled"]'), github.event.action)) && github.run_id || 'shared' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # [SONNET-4.6] sq-mel85 (design §5.2, phase 2b): the change-based test-selection
@@ -111,6 +137,12 @@ jobs:
   # dashboard.js, and runs the node smoke test (scripts/dashboard-smoke.js).
   dashboard-labels:
     name: dashboard labels (lint + drift)
+    # [FABLE-5] label-trigger guard (see the bench job note below): a root job with
+    # no needs — guard it directly so a non-ci-full/bench-full label flip skips it.
+    if: >-
+      github.event_name != 'pull_request' ||
+      !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) ||
+      contains(fromJSON('["ci-full","bench-full"]'), github.event.label.name)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -147,13 +179,33 @@ jobs:
     # ONLY narrow on pull_request / merge_group. That is what keeps the auto-ratchet
     # floor + benchmark-data history (both depend on every main commit being benchmarked)
     # continuous — see the push-gated history/ratchet steps below.
+    # [FABLE-5] Draft-tier CI: benchmarks are SKIPPED ENTIRELY on draft PR heads
+    # (first conjunct — fail-open off the PR path: push/schedule/dispatch satisfy
+    # `github.event_name != 'pull_request'` => the selection disjunction decides as
+    # before). This also removes the per-PR benchmark comparison comment
+    # (comment-always) + alert comment on draft heads — both are steps of THIS job.
+    # The ready_for_review full-tier run executes the deterministic ratchet before
+    # the PR can reach the merge queue; docs/branch-protection.md §Draft-tier CI.
     needs: select
+    # [FABLE-5] label-trigger guard (full rationale: ci.yml's pull_request note): the
+    # first AND-term skips this job on any labeled/unlabeled event whose label is not
+    # ci-full/bench-full — the review pipeline's label flips must not re-queue the
+    # bench suite on an unchanged head SHA (with cancel-in-progress:false a flip can
+    # still CANCEL a PENDING real run via the one-pending-slot-per-group rule).
+    # `bench-full` passes because its whole point is re-running this workflow with
+    # the well-known suites enabled (the toolchain-install step reads the label).
+    # `select` stays unguarded (required green by the gate). The second AND-term is
+    # the unchanged fail-closed selection guard.
     if: >-
-      needs.select.outputs.mode != 'selected' ||
-      contains(needs.select.outputs.affected, '"sparq-engine"') ||
-      contains(needs.select.outputs.affected, '"sparq-cli"') ||
-      contains(needs.select.outputs.affected, '"sparq-bench"') ||
-      contains(needs.select.outputs.affected, '"sparq-wasm"')
+      (github.event_name != 'pull_request' ||
+       !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) ||
+       contains(fromJSON('["ci-full","bench-full"]'), github.event.label.name)) &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft != true) &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-engine"') ||
+       contains(needs.select.outputs.affected, '"sparq-cli"') ||
+       contains(needs.select.outputs.affected, '"sparq-bench"') ||
+       contains(needs.select.outputs.affected, '"sparq-wasm"'))
     runs-on: ubuntu-latest
     # [OPUS-4.8] Job-scoped writes (least privilege; the rest of the workflow stays read-only):
     #   contents: write     — auto-ratchet commits bench/perf-baseline.json back to main and
