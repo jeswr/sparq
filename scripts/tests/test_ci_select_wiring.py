@@ -704,17 +704,44 @@ class TestRequiredCheckAnchor(unittest.TestCase):
         cls.cs = _load(CISUM_YML)
         cls.gate = _gate_module()
 
+    # [FABLE-5] Draft-tier CI: the exact marker expression ci-select.yml also
+    # uses — empty on every non-draft payload, ", draft-tier" on a draft one.
+    GATE_MARKER_EXPR = "${{ github.event.pull_request.draft == true && ', draft-tier' || '' }}"
+
     def test_gate_job_name_is_exactly_gate(self):
         """The branch-protection ruleset (id 17688455) requires context='gate'.
         If this name drifts the required check silently stops matching and the
-        gate weakens with no error anywhere — so pin it."""
+        gate weakens with no error anywhere — so pin it.
+
+        [FABLE-5] Draft-tier CI (GATE INTEGRITY): the name is now TIERED — the
+        job name is the literal 'gate' plus the draft-tier marker expression, so
+        * every non-draft payload (non-draft PR, merge_group, push) still
+          renders EXACTLY 'gate' (the required context, unchanged), and
+        * a draft pull_request payload renders 'gate, draft-tier' — a
+          deliberately NON-required context, so a draft-tier run can never
+          satisfy branch protection in ANY window (event latency, a dropped
+          ready_for_review event, an Actions outage: the required context is
+          simply absent until the full-tier run concludes)."""
         job = self.cs["jobs"]["gate"]
+        name = job["name"]
         self.assertEqual(
-            job["name"], "gate",
-            "ci-summary gate job name must stay exactly 'gate' — "
-            "the branch-protection ruleset anchors on context='gate' (id 17688455); "
-            "renaming breaks the required check without any CI warning",
+            name, "gate" + self.GATE_MARKER_EXPR,
+            "ci-summary gate job name must be exactly 'gate' + the draft-tier "
+            "marker expression — the ruleset anchors on context='gate' (id "
+            "17688455) for every non-draft payload, and the marker is what "
+            "keeps a draft-tier run from ever emitting that required context",
         )
+        # The non-draft rendering is the required context, byte-exact.
+        self.assertEqual(name.replace(self.GATE_MARKER_EXPR, ""), "gate")
+        # The draft rendering is the gate module's artifact name — the script
+        # excludes it from sibling sets and normalizes it back to 'gate'.
+        draft_rendered = name.replace(self.GATE_MARKER_EXPR,
+                                      self.gate.DRAFT_TIER_MARKER)
+        self.assertEqual(draft_rendered, self.gate.DRAFT_TIER_GATE_NAME)
+        self.assertTrue(self.gate.is_draft_gate_artifact(draft_rendered))
+        self.assertFalse(self.gate.is_draft_gate_artifact("gate"))
+        self.assertTrue(self.gate.is_draft_tier(draft_rendered))
+        self.assertEqual(self.gate.normalized_name(draft_rendered), "gate")
 
     def test_gate_job_has_no_job_level_conditional(self):
         """The gate must run unconditionally on every event (pull_request,
@@ -741,8 +768,10 @@ class TestRequiredCheckAnchor(unittest.TestCase):
     def test_gate_is_not_advisory_or_informational(self):
         """The gate name must never accidentally match the advisory/informational
         exclusion — that would un-gate it (its failure would stop being required).
-        Both the bare job name and the `workflow / job` display form are checked."""
-        for name in ("gate", "ci-summary / gate"):
+        Both the bare job name and the `workflow / job` display form are checked,
+        in both tier renderings."""
+        for name in ("gate", "ci-summary / gate",
+                     "gate, draft-tier", "ci-summary / gate, draft-tier"):
             self.assertFalse(
                 self.gate.is_advisory(name),
                 f"gate check name {name!r} must NOT match the advisory exclusion",
@@ -752,7 +781,8 @@ class TestRequiredCheckAnchor(unittest.TestCase):
         """The gate name must not match SELECT_RE — that would make the gate
         self-detect as a selection pre-job and add a circular verdict dependency
         (skipped gating only valid if 'gate' itself concluded success)."""
-        for name in ("gate", "ci-summary / gate"):
+        for name in ("gate", "ci-summary / gate",
+                     "gate, draft-tier", "ci-summary / gate, draft-tier"):
             self.assertFalse(
                 self.gate.is_select(name),
                 f"gate check name {name!r} must NOT match SELECT_RE",
@@ -896,6 +926,229 @@ class TestHeavyRecallMergeGroupDemotion(unittest.TestCase):
             self._HEAVY_JOB_RE,
             "the filer regex must not match the nightly-coverage 'heavy' substring job",
         )
+
+
+class TestDraftTierWiring(unittest.TestCase):
+    """[FABLE-5] Draft-tier CI (docs/branch-protection.md §Draft-tier CI): draft
+    PR heads run a REDUCED matrix — coverage / bench / CodeQL / heavy shards
+    skipped, the wasm-equality leg kept only when the sparq-wasm closure is
+    affected — and the un-draft moment (ready_for_review) re-runs everything at
+    FULL tier so a fresh gate supersedes the draft-tier results. Pins:
+      * the ci-select job-name draft-tier MARKER (the gate's tier detection
+        contract — scripts/ci_summary_gate.py DRAFT_TIER_MARKER);
+      * every draft skip guard's fail-open shape (`github.event_name !=
+        'pull_request' || ... draft != true`: any non-PR event RUNS — push /
+        merge_group / schedule semantics are byte-identical);
+      * ready_for_review in the pull_request types of every gate-feeding
+        workflow (without it the un-draft moment runs NOTHING and the head keeps
+        its draft-tier results — the exact stale-green the invariant forbids);
+      * the gate job's tier env plumbing (EVENT_NAME / PR_DRAFT / PR_NUMBER +
+        pull-requests: read)."""
+
+    # The fail-open draft guard: any non-pull_request event satisfies the first
+    # disjunct => RUN; only a genuinely-draft PR head can skip.
+    DRAFT_GUARD = "github.event_name != 'pull_request' || github.event.pull_request.draft != true"
+    MARKER_EXPR = "${{ github.event.pull_request.draft == true && ', draft-tier' || '' }}"
+
+    # Every gate-feeding workflow with a pull_request trigger. Advisory-only
+    # workflows (pr-title, deploy-lint, deploy-terraform-lint) are deliberately
+    # absent — the gate excludes their checks by name, so they neither gate nor
+    # feed it. bead-autoclose/flow-on react to `closed` only (not gate-feeding).
+    READY_FOR_REVIEW_WFS = [
+        "ci.yml", "feature-matrix.yml", "bench.yml", "fuzz.yml", "codeql.yml",
+        "ci-summary.yml", "vectorized-feature-off.yml", "docs-quality.yml",
+        "supply-chain.yml", "flow-on-gates.yml", "formal-verification.yml",
+        "js.yml", "gui.yml", "python.yml", "site-e2e.yml",
+        "site-e2e-foundation.yml", "site-e2e-hero.yml", "site-visual.yml",
+        "container-scan.yml", "zk-toolchain.yml",
+    ]
+
+    @classmethod
+    def setUpClass(cls):
+        wfdir = REPO_ROOT / ".github" / "workflows"
+        cls.ci = _load(CI_YML)
+        cls.bench = _load(BENCH_YML)
+        cls.sel = _load(SELECT_YML)
+        cls.codeql = _load(wfdir / "codeql.yml")
+        cls.vfo = _load(wfdir / "vectorized-feature-off.yml")
+        cls.summary = _load(wfdir / "ci-summary.yml")
+        cls.js = _load(wfdir / "js.yml")
+        cls.wfdir = wfdir
+        cls.gate = _gate_module()
+        cls.members = _workspace_members()
+
+    # ---- the tier marker (the gate's detection contract) ---------------------
+    def test_select_job_name_carries_the_draft_tier_marker(self):
+        name = self.sel["jobs"]["select"]["name"]
+        self.assertIn(self.MARKER_EXPR, name,
+                      "ci-select's job name must append the draft-tier marker on "
+                      "draft PR payloads (the gate's tier detection contract)")
+        marker = self.gate.DRAFT_TIER_MARKER
+        self.assertIn(marker, self.MARKER_EXPR,
+                      "the YAML marker literal must be the gate's DRAFT_TIER_MARKER")
+        # Both RENDERED spellings must satisfy the SELECT_RE contract, carry no
+        # advisory token, and normalize to the same identity.
+        full = name.replace(self.MARKER_EXPR, "")
+        draft = name.replace(self.MARKER_EXPR, marker)
+        for rendered in (full, draft, f"select / {full}", f"select / {draft}"):
+            self.assertTrue(self.gate.is_select(rendered), rendered)
+            self.assertFalse(self.gate.is_advisory(rendered), rendered)
+        self.assertTrue(self.gate.is_draft_tier(draft))
+        self.assertFalse(self.gate.is_draft_tier(full))
+        self.assertEqual(self.gate.normalized_name(draft), full)
+
+    # ---- draft skip guards ---------------------------------------------------
+    def test_coverage_jobs_skip_on_draft_heads(self):
+        for job_id in ("coverage-measure", "coverage-engine-run", "coverage"):
+            cond = str(self.ci["jobs"][job_id].get("if", ""))
+            self.assertIn(self.DRAFT_GUARD, cond,
+                          f"ci.yml:{job_id} must skip on draft PR heads with the "
+                          f"fail-open guard (draft-tier CI)")
+        # The final aggregate keeps always() (it must still conclude when a
+        # needed job failed on non-draft runs).
+        self.assertIn("always()", str(self.ci["jobs"]["coverage"].get("if", "")))
+
+    def test_bench_job_skips_on_draft_heads(self):
+        cond = str(self.bench["jobs"]["bench"].get("if", ""))
+        self.assertIn(self.DRAFT_GUARD, cond,
+                      "bench.yml:bench must skip entirely on draft PR heads")
+        self.assertIn(FAIL_CLOSED_DISJUNCT, cond,
+                      "the selection disjunction must survive the draft guard")
+
+    def test_codeql_analyze_skips_on_draft_heads(self):
+        cond = str(self.codeql["jobs"]["analyze"].get("if", ""))
+        self.assertIn(self.DRAFT_GUARD, cond,
+                      "codeql.yml:analyze must skip on draft PR heads")
+        on = _on_block(self.codeql)
+        self.assertIn("merge_group", on,
+                      "CodeQL must keep its merge_group run (pre-merge analysis)")
+        self.assertIn("schedule", on, "CodeQL must keep its weekly schedule")
+
+    def test_heavy_shards_also_demoted_on_draft_heads(self):
+        for step in self.ci["jobs"]["test"]["steps"]:
+            if str(step.get("name", "")).startswith("Test (nextest, shard"):
+                env = step.get("env", {})
+                self.assertIn("IS_DRAFT_PR", env,
+                              "the Test step must receive IS_DRAFT_PR via env")
+                self.assertIn("github.event.pull_request.draft == true",
+                              str(env["IS_DRAFT_PR"]))
+                run = str(step.get("run", ""))
+                self.assertIn('[ "$IS_DRAFT_PR" = "true" ] && [ -n "$SHARD_FILTER" ]',
+                              run,
+                              "draft demotion must require BOTH a draft head AND a "
+                              "heavy shard (bulk shards are never demoted)")
+                # The draft guard must be a SEPARATE guard from the merge_group
+                # one (that one is pinned merge_group-exclusive above).
+                draft_lines = [ln for ln in run.splitlines() if "IS_DRAFT_PR" in ln]
+                for ln in draft_lines:
+                    self.assertNotIn("merge_group", ln)
+                return
+        self.fail("Test step not found")
+
+    def test_vfo_draft_scope_keeps_leg_iff_wasm_closure_affected(self):
+        """artifact-exact-equality on a DRAFT head consults the SAME selector
+        (scripts/ci_select.py) in-step and skips only on a definite
+        mode=selected + sparq-wasm-not-affected verdict — every other path
+        (non-draft, ci-full label, full/shadow/error mode, selector failure)
+        leaves the paths-filter verdict (RUN, fail-closed)."""
+        self.assertIn("sparq-wasm", self.members)
+        steps = None
+        for job_id, job in self.vfo["jobs"].items():
+            for s in job.get("steps", []):
+                if s.get("id") == "changes" and "ci_select.py" in str(s.get("run", "")):
+                    steps = s
+        self.assertIsNotNone(steps, "vfo decide step must invoke scripts/ci_select.py")
+        run = str(steps["run"])
+        env = steps.get("env", {})
+        for key in ("IS_DRAFT_PR", "CI_FULL_LABEL", "BASE_SHA", "HEAD_SHA"):
+            self.assertIn(key, env, f"vfo decide step must receive {key}")
+        self.assertIn('[ "$IS_DRAFT_PR" = "true" ]', run)
+        self.assertIn('[ "$CI_FULL_LABEL" != "true" ]', run,
+                      "the ci-full label must force the full leg on drafts too")
+        self.assertIn('[ "$mode" = "selected" ]', run,
+                      "only a definite mode=selected verdict may skip (fail-closed)")
+        self.assertIn('"sparq-wasm"', run,
+                      "the needle must be the quoted sparq-wasm member name")
+        # The skip assignment must exist exactly once, inside the guarded branch.
+        self.assertEqual(run.count('rust_changed="false"'), 1)
+
+    # ---- ready_for_review coverage -------------------------------------------
+    def test_ready_for_review_wired_on_every_gate_feeding_workflow(self):
+        for wf_name in self.READY_FOR_REVIEW_WFS:
+            wf = _load(self.wfdir / wf_name)
+            pr = _on_block(wf).get("pull_request") or {}
+            self.assertIsInstance(pr, dict,
+                                  f"{wf_name}: pull_request must enumerate types "
+                                  f"(bare form lacks ready_for_review)")
+            types = pr.get("types", [])
+            self.assertIn("ready_for_review", types,
+                          f"{wf_name}: without ready_for_review the un-draft moment "
+                          f"runs nothing and the head keeps draft-tier results")
+            for keep in ("opened", "synchronize", "reopened"):
+                self.assertIn(keep, types, f"{wf_name}: must keep the default {keep}")
+
+    # ---- gate plumbing -------------------------------------------------------
+    def test_gate_check_name_is_tiered_on_draft_payloads(self):
+        """[GATE INTEGRITY] The STRUCTURAL half of the invariant: on a draft
+        payload the ci-summary gate job's own check-run is named
+        `gate, draft-tier`, so a draft-tier run never produces the required
+        `gate` context and branch protection cannot be satisfied by it in any
+        window (event latency / dropped ready_for_review / Actions outage —
+        the required context is simply ABSENT until the full-tier run
+        concludes). Full rendering pinned by TestRequiredCheckAnchor."""
+        name = self.summary["jobs"]["gate"]["name"]
+        self.assertEqual(name, "gate" + self.MARKER_EXPR)
+
+    def test_code_scanning_backstop_fed_and_documented_as_non_load_bearing(self):
+        """The live ruleset also carries a `code_scanning` rule (CodeQL). A
+        draft-built head carries no PR CodeQL analysis (analyze skips on
+        drafts), so that rule independently blocks such a head — but it is an
+        out-of-repo, owner-mutable setting and evadable (a non-draft PR sharing
+        the head SHA supplies an analysis; outage relaxation), so it must be
+        recorded as defense-in-depth ONLY and the feeding triggers must not
+        rot: push-to-main + merge_group + weekly schedule + ready_for_review."""
+        on = _on_block(self.codeql)
+        push = on.get("push") or {}
+        self.assertEqual(push.get("branches"), ["main"],
+                         "codeql.yml must keep its push-to-main analysis run")
+        self.assertIn("merge_group", on)
+        self.assertIn("schedule", on)
+        types = (on.get("pull_request") or {}).get("types", [])
+        self.assertIn("ready_for_review", types,
+                      "the un-draft moment must produce a fresh CodeQL analysis")
+        doc = (REPO_ROOT / "docs" / "branch-protection.md").read_text(encoding="utf-8")
+        self.assertIn("code_scanning", doc,
+                      "docs/branch-protection.md must record the code_scanning "
+                      "rule's role in the draft-tier design")
+        self.assertIn("defense-in-depth only", doc,
+                      "the doc must record code_scanning as defense-in-depth, "
+                      "never the load-bearing draft-tier mechanism")
+        self.assertIn("owner-mutable", doc)
+
+    def test_gate_receives_tier_env_and_pr_read(self):
+        perms = self.summary.get("permissions", {})
+        self.assertEqual(perms.get("pull-requests"), "read",
+                         "the gate needs pull-requests:read for the conclusion-time "
+                         "draft re-check")
+        step = next(s for s in self.summary["jobs"]["gate"]["steps"]
+                    if "ci_summary_gate.py" in str(s.get("run", "")))
+        env = step.get("env", {})
+        for key in ("EVENT_NAME", "PR_DRAFT", "PR_NUMBER"):
+            self.assertIn(key, env, f"gate step must export {key}")
+        self.assertIn("github.event.pull_request.draft", str(env["PR_DRAFT"]))
+
+    def test_bench_concurrency_cancels_only_pull_request(self):
+        conc = self.bench.get("concurrency", {})
+        self.assertEqual(str(conc.get("cancel-in-progress")),
+                         "${{ github.event_name == 'pull_request' }}",
+                         "bench must cancel superseded PR runs but never a "
+                         "push/schedule run (history integrity)")
+
+    def test_js_has_per_pr_concurrency(self):
+        conc = self.js.get("concurrency", {})
+        self.assertIn("github.event.pull_request.number", str(conc.get("group", "")))
+        self.assertTrue(conc.get("cancel-in-progress"),
+                        "js.yml must cancel superseded PR runs")
 
 
 if __name__ == "__main__":

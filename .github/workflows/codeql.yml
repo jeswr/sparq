@@ -37,8 +37,12 @@ name: codeql
 on:
   push:
     branches: [main]
+  # [FABLE-5] Draft-tier CI: default types + ready_for_review, so the un-draft
+  # moment runs the analysis the draft head skipped (the `analyze` job below is
+  # guarded off draft PR heads) BEFORE the PR can reach the merge queue.
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
   # [OPUS-4.8] Merge queue: CodeQL surfaces a check on PRs, so it must also run on the
   # queue's merge_group ref or the required ci-summary would wait for a sibling that
   # never appears on that ref and time out. (Bare `merge_group` — it fires on every
@@ -60,6 +64,16 @@ concurrency:
 jobs:
   analyze:
     name: CodeQL analysis (rust)
+    # [FABLE-5] Draft-tier CI: SKIPPED on draft PR heads (this analysis is one of
+    # the slowest per-push lanes and the fleet's draft review-fix churn re-ran it
+    # on every push). VERIFIED before changing: CodeQL is NOT schedule/main-only —
+    # it runs per-PR — but the pre-merge guarantee is preserved because the
+    # ready_for_review full-tier run analyses the same head SHA (types above) and
+    # the merge_group + push-to-main + weekly-schedule runs are untouched; the
+    # branch-protection `code_scanning` alert rule therefore still sees a CodeQL
+    # analysis of the head before any merge. Fail-open off the PR path: any
+    # non-pull_request event satisfies the first disjunct => RUN.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:

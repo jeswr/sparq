@@ -76,7 +76,9 @@ on:
   # budget (the budget step reads the label). Label events also get a per-run
   # concurrency group below so a flip never cancels an in-flight run.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
+    # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   # [OPUS-4.8] Merge queue: fuzz surfaces a check on PRs, so it must also run on the
   # queue's merge_group ref or the required ci-summary would wait for a sibling that
   # never appears there. The budget step below maps merge_group to the fast SMOKE
