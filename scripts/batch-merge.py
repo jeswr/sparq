@@ -36,12 +36,33 @@
 #     omnibus. Its issue closes via the omnibus's `Closes #` refs. Idempotent: closed
 #     constituents drop out of the open set; a constituent with post-omnibus commits is
 #     NOT empty and is left alone.
-#  6. FAILURE PATH (v1). An OPEN omnibus PR whose ci-summary `gate` check CONCLUDED in
-#     failure, or that is CONFLICTING vs main, is closed with a marker comment and its
-#     branch deleted. Constituents remain individually armed — no worse than before.
-#     Bisection is deliberately v2: the close comment carries the v2 marker and NOTHING
-#     else is filed (the orchestrator tracks v2 separately).
-#  7. STALE HYGIENE. Any sparq-omnibus/* remote branch with no open PR is deleted.
+#  6. FAILURE PATH (v1). An OPEN omnibus PR is closed (marker comment + branch deleted)
+#     when ANY of: (a) its ci-summary `gate` check CONCLUDED in failure — live because
+#     the omnibus is pushed/created with the sparq-orchestrator App token, so head
+#     pull_request CI fires on it like on any worker PR; (b) it is CONFLICTING vs main;
+#     (c) it is OLDER than MAX_OMNIBUS_AGE_HOURS (stamp parsed from its branch name) —
+#     the liveness backstop for every head-invisible failure mode: a merge-group `gate`
+#     failure (which reports on the queue's synthetic ref, not the PR head), a dropped
+#     auto-merge arm, or checks that never reported. Constituents remain individually
+#     armed — no worse than before. Bisection is deliberately v2: the close comment
+#     carries the v2 marker and NOTHING else is filed (the orchestrator tracks v2).
+#     A dying omnibus does NOT suppress a new batch in the same run (close-and-recreate),
+#     so one bad batch can never wedge the batcher.
+#  7. RE-ARM LIVENESS. GitHub DROPS the auto-merge arm when a merge group fails. Each
+#     run, an open, young (under the age bound), MERGEABLE omnibus with NO active arm is
+#     re-armed idempotently (`gh pr merge --auto`) — a transient queue failure gets
+#     retried; a persistent one hits the age bound and is closed.
+#  8. STALE HYGIENE. Any sparq-omnibus/* remote branch with no open PR is deleted.
+#
+# TOKENS. The omnibus branch/PR MUST be pushed + created with the sparq-orchestrator App
+# installation token: GITHUB_TOKEN-created refs/PRs get their workflow events SUPPRESSED,
+# so ci-summary would never run on the omnibus head, the required `gate` context would
+# never report, and the merge queue would never ADMIT the PR (admission requires the
+# required checks to pass on the head; merge-group evaluation happens only after
+# admission) — the PR would wedge open forever (empirically: GITHUB_TOKEN-created PR
+# #1084, zero check-runs, BLOCKED since 2026-06-21). When the App credentials are absent
+# the workflow runs this script with --hygiene-only: closure/failure/re-arm/stale legs
+# still run, but NO new omnibus is created.
 #
 # DESIGN: policy is a PURE FUNCTION plan(state) -> [Action]; an Action carries the exact
 # `gh`/`git` argv it maps to. `live` mode gathers the state via real gh/git then executes
@@ -50,9 +71,10 @@
 # asserts compare exact argv (flip any one expectation and the suite goes red).
 #
 # USAGE
-#   scripts/batch-merge.py --repo owner/repo              # live run
-#   scripts/batch-merge.py --repo owner/repo --dry-run    # print plan, no mutations
-#   scripts/batch-merge.py --self-test                    # hermetic; gh + git stubbed
+#   scripts/batch-merge.py --repo owner/repo                 # live run (App token in GH_TOKEN)
+#   scripts/batch-merge.py --repo owner/repo --dry-run       # print plan, no mutations
+#   scripts/batch-merge.py --repo owner/repo --hygiene-only  # no new omnibus (no App token)
+#   scripts/batch-merge.py --self-test                       # hermetic; gh + git stubbed
 #
 # Exit 0 on success; non-zero only on a real error or a failed self-test.
 import argparse
@@ -60,7 +82,7 @@ import json
 import re
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 PROG = "batch-merge"
@@ -70,6 +92,12 @@ PROG = "batch-merge"
 QUEUE_WINDOW = 8
 # An omnibus with a single constituent is pure overhead — require at least two.
 MIN_CONSTITUENTS = 2
+# Liveness bound: an omnibus that has not MERGED this many hours after creation has no
+# route to merge (merge-group failure / dropped arm / checks never reported — all
+# invisible on the PR head) and is closed so it cannot suppress batching indefinitely.
+# The queue drains a window well inside this bound; the value trades retry opportunity
+# (re-arm, §7) against worst-case queue churn from a persistently-failing omnibus.
+MAX_OMNIBUS_AGE_HOURS = 4
 
 OMNIBUS_PREFIX = "sparq-omnibus/"
 WORKER_BRANCH_RE = re.compile(r"^sparq-agent/")
@@ -143,7 +171,7 @@ def eligible_constituents(prs: list) -> list:
             continue
         if is_release_plz(pr) or has_excluded_label(pr):
             continue
-        if "review:pass" not in [(l or "").lower() for l in pr.get("labels", [])]:
+        if "review:pass" not in [(lbl or "").lower() for lbl in pr.get("labels", [])]:
             continue
         if not armed_by_orchestrator(pr):
             continue
@@ -159,9 +187,25 @@ def constituents_of_marker(body: str) -> list:
     return [int(x) for x in m.group(1).split(",") if x]
 
 
+def omnibus_age_hours(head_ref: str, now: datetime):
+    """Hours since the omnibus branch's creation stamp (sparq-omnibus/<utcstamp>).
+
+    None on an unparseable stamp — the caller treats that as EXPIRED (an omnibus branch
+    we cannot date must never become immortal)."""
+    stamp = head_ref[len(OMNIBUS_PREFIX):] if head_ref.startswith(OMNIBUS_PREFIX) else ""
+    try:
+        created = datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (now - created).total_seconds() / 3600.0
+
+
 def gate_concluded_failure(pr: dict) -> bool:
     """True iff the authoritative ci-summary `gate` check has CONCLUDED in failure.
 
+    Live for an omnibus because its branch/PR are pushed + created with the App token,
+    so head pull_request CI (ci-summary -> `gate`) fires on it. A merge-group failure
+    reports on the queue's synthetic ref instead — the age bound covers that mode.
     A missing / in-progress / queued gate is NOT a failure (never act on a non-terminal
     gate — same posture as pr-backlog.py)."""
     for c in pr.get("checks", []):
@@ -247,6 +291,8 @@ def close_failed_omnibus_comment(reason: str) -> str:
 #   merged_omnibus: [{number, body}]                    (merged sparq-omnibus/* PRs)
 #   empty_vs_main: {pr_number: bool}                    (branch adds nothing vs main)
 #   remote_omnibus_branches: ["sparq-omnibus/..."]      (live remote refs)
+#   batch_enabled: bool                                 (False = --hygiene-only: never
+#                                                        create a new omnibus)
 # --------------------------------------------------------------------------------------
 def plan(state: dict) -> list:
     repo = state["repo"]
@@ -268,15 +314,30 @@ def plan(state: dict) -> list:
                  "--comment", close_constituent_comment(om["number"])],
                 note=f"constituent #{num} contained in merged omnibus #{om['number']}"))
 
-    # ---- 6. failure path v1 for OPEN omnibus PRs ----
+    # ---- 6+7. failure path v1 + re-arm liveness for OPEN omnibus PRs ----
     open_omnibus = [p for p in open_prs if p.get("head_ref", "").startswith(OMNIBUS_PREFIX)]
     dying_branches = set()
     for om in open_omnibus:
+        age = omnibus_age_hours(om.get("head_ref", ""), state["now"])
         if gate_concluded_failure(om):
             reason = "its `gate` check concluded in failure"
         elif (om.get("mergeable") or "").upper() == "CONFLICTING":
             reason = "it conflicts with `main`"
+        elif age is None or age > MAX_OMNIBUS_AGE_HOURS:
+            # Liveness backstop: covers every head-invisible failure (merge-group gate
+            # failure, dropped arm, checks never reported, unparseable stamp).
+            reason = (f"it did not merge within {MAX_OMNIBUS_AGE_HOURS}h of creation "
+                      f"(no route to merge — e.g. a merge-group failure, a dropped "
+                      f"auto-merge arm, or checks that never reported)")
         else:
+            # §7 re-arm: GitHub drops the auto-merge arm when a merge group fails; a
+            # young, mergeable, UNARMED omnibus gets its arm restored idempotently so a
+            # transient queue failure is retried instead of wedging until the age bound.
+            if (om.get("mergeable") or "").upper() == "MERGEABLE" and not om.get("auto_merge"):
+                actions.append(Action(
+                    "arm", "gh",
+                    ["pr", "merge", str(om["number"]), "--repo", repo, "--auto"],
+                    note=f"re-arm open omnibus #{om['number']} (arm dropped)"))
             continue
         dying_branches.add(om["head_ref"])
         actions.append(Action(
@@ -288,7 +349,7 @@ def plan(state: dict) -> list:
             "delete-branch", "git", ["push", "origin", "--delete", om["head_ref"]],
             note=f"branch of closed omnibus #{om['number']}"))
 
-    # ---- 7. stale hygiene: sparq-omnibus/* branches with no open PR ----
+    # ---- 8. stale hygiene: sparq-omnibus/* branches with no open PR ----
     live_branches = {p["head_ref"] for p in open_omnibus}
     for br in sorted(state.get("remote_omnibus_branches", [])):
         if br in live_branches or br in dying_branches:
@@ -297,6 +358,13 @@ def plan(state: dict) -> list:
                               note="stale omnibus branch (no open PR)"))
 
     # ---- 1-4. overflow batching ----
+    if not state.get("batch_enabled", True):
+        # --hygiene-only (no App token in GH_TOKEN): a GITHUB_TOKEN-created omnibus can
+        # NEVER enter the merge queue (events suppressed -> required `gate` never
+        # reports -> no queue admission), so creating one would only wedge. The
+        # closure / failure / re-arm / stale legs above still ran.
+        log("hygiene-only mode — skipping omnibus creation (no App token)")
+        return actions
     eligible = eligible_constituents(open_prs)
     if len(eligible) <= QUEUE_WINDOW:
         log(f"eligible armed worker PRs: {len(eligible)} <= {QUEUE_WINDOW} — queue handles them (no batch)")
@@ -354,7 +422,7 @@ def run_git(argv: list, check: bool = True) -> int:
     return subprocess.run(["git"] + argv, check=check).returncode
 
 
-def gather_state(repo: str, now: datetime) -> dict:
+def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
     """Snapshot the live GitHub/git state the pure plan() consumes.
 
     Deliberately TWO-PHASE: one LIGHT list over all open PRs (a single query carrying
@@ -372,7 +440,7 @@ def gather_state(repo: str, now: datetime) -> dict:
             "head_ref": pr.get("headRefName", ""),
             "title": pr.get("title", ""),
             "author_login": (pr.get("author") or {}).get("login", ""),
-            "labels": [l["name"] for l in pr.get("labels", [])],
+            "labels": [lbl["name"] for lbl in pr.get("labels", [])],
             "is_draft": bool(pr.get("isDraft")),
             "auto_merge": ({"enabled_by": ((am.get("enabledBy") or {}).get("login", ""))}
                            if isinstance(am, dict) else None),
@@ -445,7 +513,8 @@ def gather_state(repo: str, now: datetime) -> dict:
 
     return {"repo": repo, "now": now, "open_prs": open_prs,
             "merged_omnibus": merged_omnibus, "empty_vs_main": empty_vs_main,
-            "remote_omnibus_branches": remote_omnibus_branches}
+            "remote_omnibus_branches": remote_omnibus_branches,
+            "batch_enabled": batch_enabled}
 
 
 def execute(actions: list, state: dict, dry_run: bool) -> int:
@@ -496,8 +565,9 @@ def execute(actions: list, state: dict, dry_run: bool) -> int:
                 run_gh(argv)
             except subprocess.CalledProcessError as e:
                 if act.kind == "arm":
-                    # Arm failures are loud but non-fatal: the omnibus PR exists and a
-                    # later run (or the orchestrator) can arm it.
+                    # Arm failures are loud but non-fatal: the omnibus PR exists and the
+                    # NEXT run's §7 re-arm leg restores the arm idempotently (a
+                    # persistently unarmed omnibus is closed at the §6 age bound).
                     log(f"WARNING: arming failed ({e}); omnibus left open UNARMED")
                 else:
                     raise
@@ -521,12 +591,13 @@ def _worker(num, issue, labels=("review:pass",), **kw):
     return _pr(num, f"sparq-agent/issue-{issue}-123-1", labels=labels, **kw)
 
 
-def _state(open_prs=(), merged=(), empty=None, branches=()):
+def _state(open_prs=(), merged=(), empty=None, branches=(), batch_enabled=True):
     return {"repo": "sparq-org/sparq",
             "now": datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc),
             "open_prs": list(open_prs), "merged_omnibus": list(merged),
             "empty_vs_main": dict(empty or {}),
-            "remote_omnibus_branches": list(branches)}
+            "remote_omnibus_branches": list(branches),
+            "batch_enabled": batch_enabled}
 
 
 def self_test() -> int:
@@ -595,9 +666,18 @@ def self_test() -> int:
     check("no review:* label is ever added to the omnibus",
           any("label" in " ".join(a.argv) for a in got if a.tool == "gh"), False)
 
-    # 6. An OPEN omnibus PR suppresses a second batch (still runs hygiene, no batch tail).
-    open_om = _pr(200, stamp_branch, author="app/github-actions", armed_by=None)
+    # 6. An OPEN (fresh, armed, mergeable) omnibus PR suppresses a second batch.
+    open_om = _pr(200, stamp_branch, author="app/github-actions")  # armed by orchestrator
     check("open omnibus suppresses another batch", plan(_state(open_prs=ten + [open_om])), [])
+
+    # 6b. --hygiene-only NEVER creates an omnibus (no App token: a GITHUB_TOKEN omnibus
+    #     cannot enter the merge queue), but the closure legs still run.
+    check("hygiene-only skips batching", plan(_state(open_prs=ten, batch_enabled=False)), [])
+    hygiene_merged = {"number": 310, "body": "<!-- sparq-omnibus:v1 constituents=101 -->"}
+    got = plan(_state(open_prs=[_worker(101, 901)], merged=[hygiene_merged],
+                      empty={101: True}, batch_enabled=False))
+    check("hygiene-only still closes constituents", [a.kind for a in got],
+          ["close-constituent"])
 
     # 7. CLOSURE: merged omnibus + open constituent with empty diff -> close w/ comment;
     #    non-empty constituent untouched.
@@ -612,34 +692,72 @@ def self_test() -> int:
     check("closure is idempotent (constituent already closed)",
           plan(_state(merged=[merged_om], empty={101: True})), [])
 
-    # 8. FAILURE PATH: open omnibus with a CONCLUDED gate failure -> close + delete branch;
-    #    an in-progress gate is left alone.
-    failed_om = _pr(400, "sparq-omnibus/20260716T000000Z", author="app/github-actions",
+    # 8. FAILURE PATH: open FRESH omnibus with a CONCLUDED gate failure -> close + delete
+    #    branch; an in-progress gate (armed) is left alone. (Head-gate checks exist on an
+    #    omnibus because it is pushed/created with the App token.)
+    failed_om = _pr(400, "sparq-omnibus/20260717T110000Z", author="app/github-actions",
                     armed_by=None,
                     checks=[{"name": "gate", "status": "COMPLETED", "conclusion": "FAILURE"}])
     got = plan(_state(open_prs=[failed_om],
-                      branches=["sparq-omnibus/20260716T000000Z"]))
+                      branches=["sparq-omnibus/20260717T110000Z"]))
     check("failed omnibus close+delete", [(a.kind, a.tool) for a in got],
           [("close-omnibus", "gh"), ("delete-branch", "git")])
     check("failure comment carries the v2 marker",
           "<!-- sparq-omnibus-failure:v1 bisection=v2 -->"
           in got[0].argv[got[0].argv.index("--comment") + 1], True)
     check("branch delete argv", got[1].argv,
-          ["push", "origin", "--delete", "sparq-omnibus/20260716T000000Z"])
-    running_om = _pr(401, "sparq-omnibus/20260716T010000Z", author="app/github-actions",
-                     armed_by=None,
+          ["push", "origin", "--delete", "sparq-omnibus/20260717T110000Z"])
+    running_om = _pr(401, "sparq-omnibus/20260717T113000Z", author="app/github-actions",
                      checks=[{"name": "gate", "status": "IN_PROGRESS", "conclusion": ""}])
     check("in-progress gate omnibus untouched",
           plan(_state(open_prs=[running_om],
-                      branches=["sparq-omnibus/20260716T010000Z"])), [])
-    conflict_om = _pr(402, "sparq-omnibus/20260716T020000Z", author="app/github-actions",
+                      branches=["sparq-omnibus/20260717T113000Z"])), [])
+    conflict_om = _pr(402, "sparq-omnibus/20260717T114000Z", author="app/github-actions",
                       armed_by=None, mergeable="CONFLICTING")
     got = plan(_state(open_prs=[conflict_om]))
     check("conflicting omnibus closed", [a.kind for a in got],
           ["close-omnibus", "delete-branch"])
-    unknown_om = _pr(403, "sparq-omnibus/20260716T030000Z", author="app/github-actions",
-                     armed_by=None, mergeable="UNKNOWN")
-    check("mergeable UNKNOWN never acts", plan(_state(open_prs=[unknown_om])), [])
+    unknown_om = _pr(403, "sparq-omnibus/20260717T114500Z", author="app/github-actions",
+                     mergeable="UNKNOWN")
+    check("mergeable UNKNOWN (fresh, armed) never acts",
+          plan(_state(open_prs=[unknown_om])), [])
+
+    # 8b. AGE BOUND (liveness backstop for head-invisible failures: merge-group gate
+    #     failure / dropped arm / checks never reported): an armed, MERGEABLE omnibus
+    #     with NO checks at all, older than MAX_OMNIBUS_AGE_HOURS -> close + delete;
+    #     a young one (same shape) is untouched; an unparseable stamp = expired.
+    aged_om = _pr(404, "sparq-omnibus/20260717T060000Z", author="app/github-actions")
+    got = plan(_state(open_prs=[aged_om]))
+    check("over-age omnibus closed+deleted", [a.kind for a in got],
+          ["close-omnibus", "delete-branch"])
+    check("age-close reason names the bound",
+          f"did not merge within {MAX_OMNIBUS_AGE_HOURS}h"
+          in got[0].argv[got[0].argv.index("--comment") + 1], True)
+    young_om = _pr(405, "sparq-omnibus/20260717T090000Z", author="app/github-actions")
+    check("young armed mergeable omnibus untouched", plan(_state(open_prs=[young_om])), [])
+    bad_stamp_om = _pr(406, "sparq-omnibus/not-a-stamp", author="app/github-actions")
+    check("unparseable stamp treated as expired",
+          [a.kind for a in plan(_state(open_prs=[bad_stamp_om]))],
+          ["close-omnibus", "delete-branch"])
+
+    # 8c. RE-ARM: a young, MERGEABLE omnibus whose auto-merge arm was DROPPED (merge
+    #     groups drop the arm on failure) is re-armed idempotently — and still
+    #     suppresses a second batch.
+    dropped_om = _pr(407, "sparq-omnibus/20260717T090000Z", author="app/github-actions",
+                     armed_by=None)
+    got = plan(_state(open_prs=[dropped_om]))
+    check("dropped arm re-armed", [(a.kind, a.argv) for a in got],
+          [("arm", ["pr", "merge", "407", "--repo", "sparq-org/sparq", "--auto"])])
+    got = plan(_state(open_prs=ten + [dropped_om]))
+    check("re-armed omnibus still suppresses a new batch", [a.kind for a in got], ["arm"])
+
+    # 8d. CLOSE-AND-RECREATE: a dying (over-age) omnibus does NOT suppress a new batch —
+    #     the same plan closes it AND opens the fresh one (bounded suppression).
+    got = plan(_state(open_prs=ten + [aged_om]))
+    check("dying omnibus lifts suppression (close + fresh batch in one plan)",
+          [a.kind for a in got],
+          ["close-omnibus", "delete-branch", "fetch", "create-branch",
+           "merge", "merge", "push-branch", "open-pr", "arm"])
 
     # 9. STALE HYGIENE: remote omnibus branch w/o an open PR is deleted; a branch with an
     #    open PR survives.
@@ -720,6 +838,10 @@ def main() -> int:
     ap = argparse.ArgumentParser(prog=PROG, description=__doc__)
     ap.add_argument("--repo", help="owner/name")
     ap.add_argument("--dry-run", action="store_true", help="print the plan, mutate nothing")
+    ap.add_argument("--hygiene-only", action="store_true",
+                    help="closure/failure/re-arm/stale legs only; never create a new "
+                         "omnibus (used when no App token is available — a GITHUB_TOKEN "
+                         "omnibus cannot enter the merge queue)")
     ap.add_argument("--self-test", action="store_true", help="hermetic fixtures; gh+git stubbed")
     args = ap.parse_args()
     if args.self_test:
@@ -727,7 +849,7 @@ def main() -> int:
     if not args.repo:
         ap.error("--repo is required outside --self-test")
     now = datetime.now(timezone.utc)
-    state = gather_state(args.repo, now)
+    state = gather_state(args.repo, now, batch_enabled=not args.hygiene_only)
     actions = plan(state)
     if not actions:
         log("nothing to do")

@@ -191,7 +191,18 @@ queue slot lands the whole batch; the omnibus body carries `Closes #` refs for e
 constituent's issue, and once it merges the batcher closes each contained constituent PR.
 The `sparq-omnibus/` prefix (and the absence of any `review:*` label) keeps these PRs out
 of the registry's worker-review enumeration, which only admits `sparq-agent/issue-<n>-…`
-heads. A failed or conflicting omnibus is simply closed and its branch deleted —
+heads. The omnibus branch/PR is pushed, created and armed with a **sparq-orchestrator App
+installation token** (repo secrets `ORCHESTRATOR_APP_ID` / `ORCHESTRATOR_APP_PRIVATE_KEY`):
+a `GITHUB_TOKEN`-created PR gets its workflow events suppressed, so the required
+`ci-summary / gate` would never report on its head and the merge queue would never admit
+it (admission requires the required checks to pass *before* entry). Without those secrets
+the batcher fail-softs to hygiene-only mode (no new omnibus is created). Failure handling
+is liveness-bounded: an omnibus whose head `gate` concluded in failure or that conflicts
+with `main` is closed and its branch deleted; a young mergeable omnibus whose auto-merge
+arm was dropped (merge groups drop the arm on a failed group) is re-armed idempotently;
+and an omnibus still unmerged past the age bound (`MAX_OMNIBUS_AGE_HOURS` in the script —
+the backstop for merge-group failures, which report on the queue's synthetic ref, not the
+PR head) is closed so it can never suppress future batching. In every failure case the
 constituents remain individually armed, so the failure mode is "no worse than unbatched"
 (bisection is a tracked v2). The same workflow's `ring` job fires on every push to `main`
 and, when the `REGISTRY_RING_TOKEN` secret is configured, pokes the

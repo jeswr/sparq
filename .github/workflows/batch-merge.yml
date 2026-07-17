@@ -5,9 +5,12 @@
 # the overflow into ONE sparq-omnibus/<utcstamp> integration PR (fresh off main, no-ff
 # merges; conflicting constituents are skipped and stay individually armed) and arms it —
 # the merge queue picks the strategy. It also closes constituents of MERGED omnibus PRs
-# whose branches now add nothing vs main, closes a FAILED/conflicting omnibus (v1: no
-# bisection — constituents stay individually armed), and deletes stale sparq-omnibus/*
-# branches. NO model calls; the policy is self-tested (gh + git stubbed) before it runs.
+# whose branches now add nothing vs main, closes a FAILED / conflicting / OVER-AGE
+# omnibus (the age bound is the liveness backstop for merge-group failures, which are
+# invisible on the PR head; v1: no bisection — constituents stay individually armed),
+# re-arms a young omnibus whose auto-merge arm was dropped by a failed merge group, and
+# deletes stale sparq-omnibus/* branches. NO model calls; the policy is self-tested
+# (gh + git stubbed) before it runs.
 #
 # NOT A GATE. This runs on `schedule` / `workflow_dispatch` / `workflow_run` / `push`,
 # NEVER on a PR's head commit, so `ci-summary / gate` (which polls check-runs on the PR
@@ -16,10 +19,17 @@
 # branch prefix (with NO review:* labels) keeps the omnibus PR out of the registry's
 # worker-review enumeration, which admits only ^sparq-agent/issue-<n>- heads.
 #
-# NOTE on head CI: the omnibus branch is pushed with GITHUB_TOKEN, so head-branch
-# workflows do not fire on it (GitHub suppresses GITHUB_TOKEN-triggered events). That is
-# fine here: the required `gate` is evaluated on the merge_group ref, and merge-group
-# runs are created by the merge-queue service, not by this token.
+# TOKENS (load-bearing). The omnibus branch/PR MUST be pushed + created + armed with the
+# sparq-orchestrator App installation token, NOT GITHUB_TOKEN: GitHub SUPPRESSES workflow
+# events for GITHUB_TOKEN-created refs/PRs, so ci-summary would never run on the omnibus
+# head, the required `gate` context would never report, and the merge queue would never
+# ADMIT the PR — queue admission requires the required checks to pass on the head BEFORE
+# entry; the merge_group evaluation only happens after admission. (Empirical in-repo
+# proof: the GITHUB_TOKEN-created release-plz PR #1084 — zero check-runs, BLOCKED.)
+# With the App token, head pull_request CI fires on the omnibus like on any worker PR.
+# When the App secrets (ORCHESTRATOR_APP_ID / ORCHESTRATOR_APP_PRIVATE_KEY) are absent,
+# the policy runs in --hygiene-only mode: closure / failure / re-arm / stale-branch legs
+# only, NO new omnibus (fail-soft — the queue keeps draining constituents individually).
 name: batch-merge
 
 on:
@@ -61,11 +71,28 @@ jobs:
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      # Secrets are not readable from step `if:` expressions — mirror the id into env so
+      # the mint step can be skipped fail-soft when the App is not configured.
+      ORCHESTRATOR_APP_ID: ${{ secrets.ORCHESTRATOR_APP_ID }}
     steps:
+      # See the TOKENS header note: without this App token no omnibus can ever pass its
+      # required checks or enter the merge queue, so the policy degrades to hygiene-only.
+      - name: Mint the sparq-orchestrator App token (omnibus head events must fire)
+        id: app-token
+        if: env.ORCHESTRATOR_APP_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.ORCHESTRATOR_APP_ID }}
+          private-key: ${{ secrets.ORCHESTRATOR_APP_PRIVATE_KEY }}
+
       - name: Checkout (full history — the policy builds real merge commits and pushes)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          # App token when available so the omnibus push fires pull_request CI;
+          # falls back to the (event-suppressed) workflow token for hygiene-only runs.
+          token: ${{ steps.app-token.outputs.token || github.token }}
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
@@ -77,7 +104,8 @@ jobs:
 
       - name: Run the omnibus policy
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          HAVE_APP_TOKEN: ${{ steps.app-token.outputs.token != '' }}
           REPO: ${{ github.repository }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
         run: |
@@ -87,6 +115,10 @@ jobs:
           args=(--repo "$REPO")
           if [ "$DRY_RUN" = "true" ]; then
             args+=(--dry-run)
+          fi
+          if [ "$HAVE_APP_TOKEN" != "true" ]; then
+            echo "::notice::ORCHESTRATOR_APP_ID/_PRIVATE_KEY not configured — hygiene-only mode (a GITHUB_TOKEN-created omnibus cannot pass required checks or enter the merge queue, so none is created)."
+            args+=(--hygiene-only)
           fi
           python3 scripts/batch-merge.py "${args[@]}"
 
