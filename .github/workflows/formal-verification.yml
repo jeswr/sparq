@@ -62,7 +62,9 @@ name: formal-verification
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
+    # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
+    types: [opened, synchronize, reopened, ready_for_review]
   # Merge queue: re-run the identical check-set on the queue's merge_group ref so the
   # required ci-summary gate finds the same siblings there (base_sha/head_sha of the
   # queue entry give the union-diff — same pairing ci-select.yml uses).
