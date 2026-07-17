@@ -63,8 +63,22 @@ on:
   # maps the label to `--full`, which forces the fuzz smoke to run). The default
   # types (opened/synchronize/reopened) are listed explicitly so adding the label
   # events does NOT drop `synchronize` (the push-to-PR trigger).
+  # [FABLE-5] LABEL-TRIGGER GUARD (full rationale: ci.yml's pull_request note): only
+  # the `ci-full` and `fuzz-full` toggles start real work off a label event — the
+  # review pipeline's review:*/status:* flips otherwise restarted this workflow on an
+  # unchanged head SHA and the cancelled `select` check-runs REDdened the ci-summary
+  # gate. `select` is this workflow's ONLY root, and it must stay UNCONDITIONAL (a
+  # skipped select poisons the gate — ci_summary_gate.py requires every selection
+  # check-run to conclude `success`), so the guard is AND-composed into the `fuzz` +
+  # `differential-smoke` job `if:`s instead: on a non-ci-full/fuzz-full flip the run
+  # is select-only (cheap success + two satisfied skips). `fuzz-full` must pass the
+  # guard because its whole point is re-running this workflow with the randomized
+  # budget (the budget step reads the label). Label events also get a per-run
+  # concurrency group below so a flip never cancels an in-flight run.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
+    # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   # [OPUS-4.8] Merge queue: fuzz surfaces a check on PRs, so it must also run on the
   # queue's merge_group ref or the required ci-summary would wait for a sibling that
   # never appears there. The budget step below maps merge_group to the fast SMOKE
@@ -81,7 +95,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: fuzz-${{ github.workflow }}-${{ github.ref }}
+  # [FABLE-5] label-trigger guard: labeled/unlabeled pull_request events get a
+  # PER-RUN group — a label-flip run entering the shared per-ref group would cancel
+  # the in-flight real run on the SAME head SHA (run-level cancellation precedes job
+  # `if:` evaluation), leaving cancelled check-runs that RED the ci-summary gate.
+  # All other events keep the shared per-ref group + cancel-in-progress as before.
+  group: fuzz-${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'pull_request' && contains(fromJSON('["labeled","unlabeled"]'), github.event.action)) && github.run_id || 'shared' }}
   cancel-in-progress: true
 
 env:
@@ -133,11 +152,18 @@ jobs:
     # the lane; a skipped job reports conclusion `skipped` (= satisfied) to the
     # ci-summary gate — no per-leg name is individually required (bead sq-fmx4u.4).
     needs: select
+    # [FABLE-5] label-trigger guard: the first AND-term skips this job on any
+    # labeled/unlabeled event whose label is not ci-full/fuzz-full (select, the only
+    # root here, must keep running — see the pull_request trigger note). The second
+    # AND-term is the unchanged fail-closed selection guard.
     if: >-
-      needs.select.outputs.mode != 'selected' ||
-      contains(needs.select.outputs.affected, '"sparq-core"') ||
-      contains(needs.select.outputs.affected, '"sparq-engine"') ||
-      contains(needs.select.outputs.affected, '"sparq-shacl"')
+      (github.event_name != 'pull_request' ||
+       !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) ||
+       contains(fromJSON('["ci-full","fuzz-full"]'), github.event.label.name)) &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-core"') ||
+       contains(needs.select.outputs.affected, '"sparq-engine"') ||
+       contains(needs.select.outputs.affected, '"sparq-shacl"'))
     runs-on: ubuntu-latest
     # [FABLE-5] sq-6vshe.6: the demotion auto-bead step (randomized-run finding on
     # push/nightly) files a GitHub issue + appends a P1 bead. Least-privilege, scoped
@@ -404,11 +430,17 @@ jobs:
   differential-smoke:
     name: differential smoke (sparq vs Oxigraph, fixed regression windows)
     needs: select
+    # [FABLE-5] label-trigger guard: same first AND-term as the fuzz job above (skip
+    # on non-ci-full/fuzz-full label flips; select alone runs); second AND-term is
+    # the unchanged fail-closed selection guard.
     if: >-
-      needs.select.outputs.mode != 'selected' ||
-      contains(needs.select.outputs.affected, '"sparq-core"') ||
-      contains(needs.select.outputs.affected, '"sparq-engine"') ||
-      contains(needs.select.outputs.affected, '"sparq-bench"')
+      (github.event_name != 'pull_request' ||
+       !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) ||
+       contains(fromJSON('["ci-full","fuzz-full"]'), github.event.label.name)) &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-core"') ||
+       contains(needs.select.outputs.affected, '"sparq-engine"') ||
+       contains(needs.select.outputs.affected, '"sparq-bench"'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
