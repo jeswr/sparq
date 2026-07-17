@@ -95,24 +95,24 @@ docker run --rm --name sparq-lws-core -p 127.0.0.1:3000:3000 \
     tier; the internal Store methods used by LDP/WAC are independent of it.
   - `http-sparq` (off) — the remote SPARQL-over-HTTP backend
     (`PSS_SPARQ_BACKEND=http`) for a shared-service deployment.
-  - `http3` (off, [GPT-5.6] sq-oprna.2) — when the existing TLS PEM variables
-    are configured, also serve the same hardened LDP router over HTTP/3 on UDP
-    at the resolved `SOLID_SERVER_BIND` address and port. TCP remains HTTP/2 +
-    HTTP/1.1; WebSocket notifications remain on TCP.
+  - `http3` (off, [GPT-5.6] sq-oprna.2) — with the TLS PEM variables configured,
+    also serve the same hardened LDP router over HTTP/3 on UDP at the resolved
+    `SOLID_SERVER_BIND` address+port; TCP stays HTTP/2 + HTTP/1.1 (and WS).
   - `redis-replay` (off) — a shared Redis-backed DPoP `jti` replay store for
     horizontally-scaled deployments.
+  - `odrl-authz` (off, [SONNET-4.6] sq-elg47) — the native ODRL policy gate seam
+    on the read/query path (`authz::odrl`, attached via `LdpState::set_odrl_gate`;
+    deny-overrides / permit-extends over the WAC decision, fail-closed).
 
 ## 📚 Learn more
 
 - Epic sq-gg0qq tracks the migration: bench/, conformance/, docs/, decisions/
-  remain in the source repo until their own beads land; sq-gg0qq.3 (landed)
-  promoted the EmbeddedSparqClient to the first-class default Store backend.
+  stay in the source repo until their own beads land (sq-gg0qq.3 landed).
 - Design records: `docs/` + `decisions/` in
   [jeswr/solid-server-rs](https://github.com/jeswr/solid-server-rs) (e.g.
   `decisions/0001-embed-sparq-in-process.md`, the high-throughput PoP design).
-- Related crates: [`sparq-solid`](../sparq-solid) (Solid protocol pieces inside
-  sparq), [`sparq-server`](../sparq-server) (the SPARQL HTTP endpoint this
-  server can delegate to).
+- Related crates: [`sparq-solid`](../sparq-solid) (Solid protocol pieces),
+  [`sparq-server`](../sparq-server) (the SPARQL endpoint it can delegate to).
 
 ## License
 

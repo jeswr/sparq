@@ -311,7 +311,25 @@ async fn assemble_authorized_dataset<S: Store>(
                 &plan.acls,
             )
             .await;
-        if !matches!(decision, Ok(ReadDecision::Allow(_))) {
+        let admitted = matches!(decision, Ok(ReadDecision::Allow(_)));
+        // [SONNET-4.6] sq-elg47: compose the opt-in ODRL gate per candidate graph — a Deny
+        // excludes the graph from the authorized dataset even under a static WAC grant
+        // (deny-overrides); a Permit admits a Read-required graph WAC alone would exclude
+        // (permit-extends; never the Control-gated `.acl` auxiliaries). Compiled out entirely
+        // when the `odrl-authz` feature is off; an unattached gate changes nothing.
+        #[cfg(all(feature = "odrl-authz", not(target_arch = "wasm32")))]
+        let admitted = match state.odrl_gate.as_deref() {
+            Some(gate) => {
+                use crate::authz::odrl::OdrlVerdict;
+                match gate.decide_read(&resource, token.web_id.as_deref()) {
+                    OdrlVerdict::Deny => false,
+                    OdrlVerdict::Permit if required == AccessMode::Read => true,
+                    OdrlVerdict::Permit | OdrlVerdict::NotApplicable => admitted,
+                }
+            }
+            None => admitted,
+        };
+        if !admitted {
             continue;
         }
         let Some(meta) = plan.target else {

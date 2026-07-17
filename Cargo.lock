@@ -5100,6 +5100,7 @@ dependencies = [
  "sparq-core",
  "sparq-engine",
  "sparq-http3",
+ "sparq-policy",
  "subtle",
  "thiserror 2.0.18",
  "tokio",
