@@ -11,6 +11,7 @@ Label mapping (bd -> issue):
   priority 0..4            -> priority:P{n}
   existing labels          -> passed through verbatim (area:<crate>=package, needs:*, kind:*, from:*)
   issue_type / kind:       -> role:<r> (feature/bug->impl, docs->docs, spike->research, chore->ci, ...)
+  every migrated issue     -> MIGRATION_LABEL (authenticates the `<!-- bd-id:… -->` body marker)
   dependency edges         -> `Blocked-by: #NN` body markers (resolved to native deps in --apply)
 The bead id (`sq-…`) is preserved in the issue title so existing PR-title tokens still resolve.
 """
@@ -74,6 +75,13 @@ def role_for(issue):
 # the pipeline consumes.
 _KEEP_PREFIX = ("area:", "needs:", "trust:", "kind:")
 _SEC_KEYWORDS = ("zk", "mpc", "reasoner", "crypto", "auth", "e2ee")
+
+# Migration-owned authentication label (PR #2528 review): scripts/ci-close-merged-beads.py trusts
+# a `<!-- bd-id:… -->` body marker ONLY on an issue carrying this label, because issue bodies are
+# forgeable by any GitHub user while attaching a label needs triage/write permission. Stamped on
+# EVERY migrated issue (and backfilled on a resumed --apply); keep in sync with _MIGRATION_LABEL
+# there, and never let an issue template auto-apply it.
+MIGRATION_LABEL = "bd-migration"
 _BLOCKED_ON = re.compile(r"^blocked[-:]on[-:](.+)$")
 _BLOCKED = re.compile(r"^blocked:(.+)$")
 
@@ -130,6 +138,7 @@ def issue_labels(bead):
     if isinstance(p, int) and 0 <= p <= 4:
         out.add(f"priority:P{p}")
     out.add(f"role:{role_for(bead)}")
+    out.add(MIGRATION_LABEL)  # authenticates the bd-id body marker downstream — see MIGRATION_LABEL
     if externally_gated(bead):
         out.add("needs:user")
     # [OPUS-4.8] an epic is a tracking/umbrella issue, never a dispatchable work item — mark it
@@ -232,6 +241,10 @@ def apply_migration(repo, open_ids, blockers, parents, limit=None, checkpoint="/
     created = 0
     for bid in ids:                                  # pass 1
         if bid in id_map:
+            # Resume: backfill the authentication label on a previously-migrated issue that
+            # predates MIGRATION_LABEL (idempotent — --add-label is a no-op when present).
+            _run(["gh", "issue", "edit", str(id_map[bid]), "-R", repo,
+                  "--add-label", MIGRATION_LABEL])
             continue
         id_map[bid] = _create_issue(repo, bid, open_ids[bid])
         created += 1
@@ -264,6 +277,8 @@ def _self_test():
     chk("whitelist drops free-form tags", got & {"from:agent", "effort:M", "tier:fable", "roadmap",
                                                  "federation", "noir"}, set())
     chk("adds priority+role", {"priority:P2", "role:impl"} <= got, True)
+    # every migrated issue carries the authentication label the autoclose mapping requires
+    chk("stamps the migration authentication label", MIGRATION_LABEL in got, True)
     # security keyword survives the whitelist (soundness routing depends on it downstream)
     chk("keeps security keyword", "area:sparq-zk" in issue_labels(
         {"priority": 1, "issue_type": "feature", "labels": ["area:sparq-zk", "from:x"]}), True)
