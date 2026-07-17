@@ -52,9 +52,10 @@ default = []
 # SHACL bundle carries zero rule code; CI builds the bundle BOTH with and without it.
 shacl-af = ["sparq-shacl/shacl-af"]
 # [FABLE-5] sq-01xlp: the pre-parsed `ParsedGraph` handle for repeat validation without
-# re-parse (data-graph parsing dominates the one-shot at scale-tier corpora — measured in
-# research/shacl-wasm-stateful-2026-07.md). No new deps; OFF by default so the showcase
-# artifact (and its deterministic bundle-bytes record) is unchanged. CI covers both states.
+# re-parse (a directional, non-canonical measurement found data-graph parsing dominating
+# the one-shot at scale-tier corpora — research/shacl-wasm-stateful-2026-07.md). No new
+# deps; OFF by default so the showcase artifact (and its deterministic bundle-bytes
+# record) is unchanged. CI covers every feature combination.
 stateful = []
 
 [dev-dependencies]

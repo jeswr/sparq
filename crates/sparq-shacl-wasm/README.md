@@ -58,9 +58,11 @@ const ok   = Validator.conforms(dataTurtle, shapesTurtle, "turtle", /* violation
   It is OFF by default so the standard bundle carries zero rule code; CI builds and
   tests the bundle in BOTH feature states.
 - **Repeat validation without re-parse — opt-in `stateful` feature** (sq-01xlp).
-  Data-graph parsing dominates the one-shot cost at scale-tier corpora (measured:
-  [`research/shacl-wasm-stateful-2026-07.md`](../../research/shacl-wasm-stateful-2026-07.md)),
-  so `--features stateful` adds a pre-parsed `ParsedGraph` handle:
+  A directional, NON-canonical work-box measurement found data-graph parsing coming
+  to dominate the one-shot cost as corpora grow
+  ([`research/shacl-wasm-stateful-2026-07.md`](../../research/shacl-wasm-stateful-2026-07.md);
+  canonical quiet-box evidence pending), so `--features stateful` adds a pre-parsed
+  `ParsedGraph` handle:
   `ParsedGraph.parse(text, format)` once, then `.validate(shapes)` /
   `.validateTurtle` / `.validateText` / `.conforms` per call — the same report
   surface at validate-only cost (call `.free()` when finished; handles hold wasm

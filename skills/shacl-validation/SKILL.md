@@ -27,9 +27,10 @@ default bundle so SHACL never ships on the landing page. It exposes a stateless
 (JSON report), `validateTurtle` (report-RDF in the `sh:ValidationReport` vocabulary),
 `validateText` (human-readable), and `conforms(..., violationsOnly)` (the W3C
 `sh:conforms` flag, or a violations-only gate). SHACL-AF `sh:rule` validation is behind
-its opt-in `shacl-af` feature; for repeat validation without re-parse (data-graph
-parsing dominates the one-shot at scale-tier corpora — sq-01xlp,
-`research/shacl-wasm-stateful-2026-07.md`) its opt-in `stateful` feature adds a
+its opt-in `shacl-af` feature; for repeat validation without re-parse (a directional,
+non-canonical measurement found data-graph parsing dominating the one-shot at
+scale-tier corpora — sq-01xlp, `research/shacl-wasm-stateful-2026-07.md`) its opt-in
+`stateful` feature adds a
 pre-parsed `ParsedGraph` handle — parse once, validate many times, same report
 surface. See `crates/sparq-shacl-wasm/README.md`.
 

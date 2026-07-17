@@ -1,8 +1,12 @@
 <!-- [FABLE-5] sq-01xlp decision record (follow-up from
-research/gap-shacl-wasm-2026-07.md, sq-i858h / epic sq-hmd7l). ALL timings here
-are NON-CANONICAL first reads from the shared work box, and NATIVE (x86_64) —
-wasm-representative by dependency graph, not a wasm gather. The wasm-runtime
-column rides bench/shacl-wasm/ FEATURES=stateful on the canonical wave. -->
+research/gap-shacl-wasm-2026-07.md, sq-i858h / epic sq-hmd7l). The measurement
+behind this record was a NON-CANONICAL first read on the shared work box, and
+NATIVE (x86_64) — wasm-representative by dependency graph, not a wasm gather.
+Per repo policy (no hard-coded perf numbers in markdown; work-box timings are
+non-canonical) only the qualitative shape is recorded here; quantitative
+evidence is regenerated via bench/shacl-wasm/run.sh (git-ignored envelope).
+The wasm-runtime column rides bench/shacl-wasm/ FEATURES=stateful on the
+canonical wave. -->
 
 # sparq-shacl-wasm: pre-parsed/stateful validation — measurement + decision (2026-07-17)
 
@@ -41,23 +45,21 @@ micro-ABox (`bench/shacl-wasm/data/abox.ttl`) replicated under per-replica IRI
 suffixes (violations scale linearly — counts at every scale matched the
 `expected.tsv` constants ×scale, so the runs were non-vacuous). Best-of-3,
 x86_64 shared work box, 2026-07-17. **ADVISORY / directional only — native, not
-wasm; not a quiet box. Do not cite these numbers as wasm performance.**
+wasm; not a quiet box; NON-canonical.**
 
-Data-parse share of the one-shot total (parse data + parse shapes + validate),
-per committed workload:
-
-| corpus | triples | data-parse share of one-shot |
-|---|---:|---:|
-| micro (×1) | 86 | 32–57% |
-| ×100 | 8 600 | 72–88% |
-| ×1000 (scale-tier proxy) | 86 000 | **67–88%** |
-
-At the scale-tier proxy the one-shot spends ~57 ms parsing the data document
-against ~8–28 ms validating (workload-dependent); shapes-parse is a constant
-~0.1 ms. I.e. repeat validation through the stateless surface pays a
-**~3–8× per-call penalty** over a parse-free path, and the penalty grows with
-corpus size. At micro scale the one-shot is fine (the gap record's finding
-stands). Conclusion: the stateful path is worth having, opt-in.
+The qualitative shape (concrete percentages/timings deliberately not committed
+— repo policy forbids hard-coded perf numbers in markdown, and work-box
+timings are non-canonical): at micro scale, validation is a comparable share
+of the one-shot total (parse data + parse shapes + validate), so the one-shot
+is fine and the gap record's finding stands. As the corpus is replicated
+toward the scale-tier proxy, parsing the data document comes to dominate the
+one-shot total while shapes-parse stays negligible — i.e. repeat validation
+through the stateless surface pays a multiple of the parse-free per-call cost,
+and the penalty grows with corpus size. Conclusion: the stateful path is worth
+having, opt-in. For the quantitative split, regenerate the envelope with
+`bench/shacl-wasm/run.sh` (output under the git-ignored
+`bench/shacl-wasm/results/`); the canonical quantitative record is the pending
+quiet-box wasm gather (sq-hmd7l.39/40) via the measurement seam below.
 
 ## The decision, shape, and guardrails
 
@@ -69,7 +71,7 @@ stands). Conclusion: the stateful path is worth having, opt-in.
 - **Default surface unchanged**: the showcase artifact and its deterministic
   bundle-bytes record (gap record §bundle-bytes) are untouched; CI
   builds/clippys/wasm-pack-tests every feature state (default, `shacl-af`,
-  `stateful`).
+  `stateful`, and the combined `shacl-af`+`stateful` via `--all-features`).
 - **Equivalence obligation**: native + wasm tests assert the pre-parsed report
   is byte-identical to the one-shot's over the same documents, and repeat
   validation is stable.
