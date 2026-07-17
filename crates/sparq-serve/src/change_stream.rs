@@ -876,8 +876,8 @@ fn encode_record_body(record: &ChangeRecord) -> String {
 }
 
 /// Decodes a record body produced by [`encode_record_body`]. Fail-closed on a malformed
-/// header, a missing field, a change line that does not start with a `+`/`-` tag, or a
-/// declared-vs-actual count mismatch.
+/// header, a missing field, a change line that does not start with a `+`/`-` tag, a
+/// declared-vs-actual count mismatch, or a rebase record that carries changes.
 fn decode_record_body(body: &str, path: &Path) -> Result<ChangeRecord, BackupError> {
     let mut seq: Option<u64> = None;
     let mut generation: Option<u64> = None;
@@ -968,6 +968,17 @@ fn decode_record_body(body: &str, path: &Path) -> Result<ChangeRecord, BackupErr
         return Err(BackupError::Corrupt(format!(
             "change-record count mismatch in {:?} (declared +{} -{}, found +{} -{})",
             path, declared_inserts, declared_deletes, n_ins, n_del
+        )));
+    }
+    // [FABLE-5] A rebase record is an honest GAP marker (`rebase 1`, no changes) — a
+    // syntactically valid body combining the marker with declared/attached changes would
+    // silently drop those changes on HTTP replay (`streams.rs::to_json` skips the rebase
+    // branch), so it is fail-closed corruption, not a decodable record.
+    if rebase && (declared_inserts != 0 || declared_deletes != 0 || !changes.is_empty()) {
+        return Err(BackupError::Corrupt(format!(
+            "rebase record carries changes in {:?} (declared +{} -{}; a gap marker must be \
+             empty)",
+            path, declared_inserts, declared_deletes
         )));
     }
 
@@ -2279,6 +2290,24 @@ mod tests {
         write_segment_with_body(
             &tmp,
             "seq 0\ngeneration 7\ntimestamp 5\nrebase 2\ninserts 0\ndeletes 0\n",
+        );
+        let err = err_of(ChangeLog::open(&tmp));
+        assert!(matches!(err, BackupError::Corrupt(_)), "{:?}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A correctly framed and digested body that combines the `rebase 1` gap marker with
+    /// attached changes is fail-closed corruption: the HTTP replay path skips a rebase
+    /// record's changes, so accepting such a record would silently lose them. A regression
+    /// that decoded it would replay the gap marker while dropping the change.
+    #[test]
+    fn rebase_record_with_changes_fails_closed() {
+        let tmp = scratch("rebase-changes");
+        let _ = fs::remove_dir_all(&tmp);
+        write_segment_with_body(
+            &tmp,
+            "seq 0\ngeneration 7\ntimestamp 5\nrebase 1\ninserts 1\ndeletes 0\n\
+             + <urn:s> <urn:p> <urn:o> .\n",
         );
         let err = err_of(ChangeLog::open(&tmp));
         assert!(matches!(err, BackupError::Corrupt(_)), "{:?}", err);
