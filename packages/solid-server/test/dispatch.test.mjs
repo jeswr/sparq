@@ -136,6 +136,69 @@ test('a wasm trap answers 503, frees the poisoned pod, and recycles for the next
   assert.equal(pod2.freed, true, 'free() releases the current (recycled) pod');
 });
 
+test('overlapping requests: a stale trap neither frees nor displaces the healthy replacement', async () => {
+  // Both requests start on pod A. The fast one traps first and installs pod B; the slow one
+  // then traps on the already-retired pod A — that stale trap must not invoke the factory
+  // again, must not free pod B, and pod A is freed only after its in-flight request returned.
+  let releaseSlow;
+  const slowGate = new Promise((resolve) => { releaseSlow = resolve; });
+  const podA = fakePod(async (method, url) => {
+    if (url === '/slow-trap') await slowGate;
+    throw new WebAssembly.RuntimeError('unreachable');
+  });
+  const podB = fakePod(async () => okResponse());
+  const pods = [podA, podB];
+  let makeCount = 0;
+  const { dispatch, free } = createPodDispatcher(() => { makeCount += 1; return pods.shift(); }, anonymous);
+
+  const slow = dispatch({ url: '/slow-trap' }); // in flight on pod A
+  const fast = await dispatch({ url: '/fast-trap' }); // traps, retires A, installs B
+  assert.equal(fast.status, 503);
+  assert.equal(makeCount, 2, 'the fast trap installs the replacement pod');
+  assert.equal(podA.freed, false, 'pod A is not freed while the slow request still runs on it');
+
+  releaseSlow();
+  const slowResult = await slow;
+  assert.equal(slowResult.status, 503, 'the stale trap still answers 503');
+  assert.equal(makeCount, 2, 'the stale trap does not invoke the factory again');
+  assert.equal(podB.freed, false, 'the stale trap does not free the healthy replacement');
+  assert.equal(podA.freed, true, 'pod A is freed once its last in-flight request returned');
+
+  const ok = await dispatch({ url: '/any-path' });
+  assert.equal(ok.status, 200, 'later requests are served by the replacement');
+  free();
+  assert.equal(podB.freed, true);
+});
+
+test('overlapping requests: a concurrent success completes on the retired, still-unfreed pod', async () => {
+  let releaseSlow;
+  const slowGate = new Promise((resolve) => { releaseSlow = resolve; });
+  const podA = fakePod(async (method, url) => {
+    if (url === '/slow-ok') {
+      await slowGate;
+      return okResponse('slow ok\n');
+    }
+    throw new WebAssembly.RuntimeError('unreachable');
+  });
+  const podB = fakePod(async () => okResponse());
+  const pods = [podA, podB];
+  const { dispatch, free } = createPodDispatcher(() => pods.shift(), anonymous);
+
+  const slow = dispatch({ url: '/slow-ok' }); // in flight on pod A
+  const trapped = await dispatch({ url: '/trap' }); // retires A, installs B
+  assert.equal(trapped.status, 503);
+  assert.equal(podA.freed, false, 'the retired pod stays live while a request executes on it');
+
+  releaseSlow();
+  const slowResult = await slow;
+  assert.equal(slowResult.status, 200, 'the in-flight success completes on the unfreed instance');
+  assert.equal(slowResult.body.toString(), 'slow ok\n');
+  assert.equal(podA.freed, true, 'pod A is freed after its last in-flight request completed');
+  assert.equal(podB.freed, false);
+  free();
+  assert.equal(podB.freed, true);
+});
+
 test('a failed post-trap recreation fails closed and never re-invokes the poisoned pod', async () => {
   let handled = 0;
   const pod1 = fakePod(async () => { handled += 1; throw new WebAssembly.RuntimeError('unreachable'); });
