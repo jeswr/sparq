@@ -161,10 +161,14 @@ jobs:
     #   deployments: write  — github-action-benchmark records a GitHub deployment status
     #   pull-requests: write— comment-always posts the comparison table on (same-repo) PRs;
     #                         fork PRs get a read-only token, so the action skips the comment.
+    #   issues: write       — [OPUS-4.8] the soft-zone triage step files/updates a deduped
+    #                         `bench-flake` issue instead of @-mentioning anyone (no maintainer CC).
+    #                         Guarded to the canonical repo (fork PRs get a read-only token).
     permissions:
       contents: write
       deployments: write
       pull-requests: write
+      issues: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -490,18 +494,70 @@ jobs:
           # pre-merge, not only when an alert fires. [OPUS-4.8]
           comment-always: true
           summary-always: true
-          # GitHub-hosted runners are noisy, so this action's gate only flags a *large* regression and
-          # never hard-fails: fail-on-alert stays false because this single GLOBAL switch would otherwise
-          # trip on the noisy wall-clock latencies. The TRUE hard gate is the dedicated "Hard gate" step
-          # ABOVE (scripts/perf-gate.py): the DETERMINISTIC byte counts (store/dict bytes-per-{triple,term},
-          # store_bytes_per_triple_small, wasm_bundle_bytes) are gated strictly, and the TIMING metric
-          # parse_ns_per_byte is made robust to runner noise via best-of-N re-measure (real regressions
-          # still fail). This action keeps the trend chart + alert comment for ALL metrics (including the
-          # latency trends) for human review. [OPUS-4.8]
-          alert-threshold: '150%'
+          # [OPUS-4.8] TWO-ZONE self-monitoring thresholds (noise-reduction-bench-selfmonitor;
+          # maintainer-directed). GitHub-hosted runners are noisy, so a single global switch would
+          # either trip constantly on µs-scale wall-clock jitter or be so loose it catches nothing.
+          # Instead this action now gates in TWO empirically-derived zones:
+          #   * alert-threshold: '175%'  — SOFT zone. Emits an alert COMMENT but does NOT fail the
+          #     step (comment-only for the soft band; the "Soft-zone triage" step below files/updates a
+          #     deduped `bench-flake` issue for it — NO @mention of anyone). 175% ≈ p95 run-to-run
+          #     timing swing (43.66%) + ~30pp headroom.
+          #   * fail-threshold: '200%' + fail-on-alert: true — HARD zone. A regression at/above 200%
+          #     is clearly BEYOND any observed shared-runner noise (worst observed noise swing over the
+          #     20-commit history = 185.0%), so the STEP FAILS CI. An agent must fix it.
+          # WHERE THE TIMING HARD-FAIL BITES (honest — it does NOT re-noise the per-PR gate): under
+          # sq-6vshe.6 (also maintainer-directed) the PR run is `--deterministic-only`, so on a PR this
+          # step sees ONLY the deterministic byte-count metrics (0.00% noise; already strictly gated by
+          # the "Hard gate" perf-gate.py step above — this fail-on-alert is a redundant looser backstop
+          # there and never trips on runner noise). The NOISY TIMING metrics run on push-to-main + the
+          # nightly EC2 lane, so the timing hard-fail bites THERE (a post-merge / nightly hard signal),
+          # NOT on the per-PR path — deliberately, so this change does not re-introduce the merge-queue
+          # flapping sq-6vshe.6 removed. Pre-merge timing coverage stays the nightly attribution lane
+          # (bench-ec2.yml), which files a P1 `bench-regression` issue into the dispatch frontier.
+          # DERIVATION (no hard-coded perf numbers in markdown — the numbers live here + are recomputable):
+          #   scripts/bench-thresholds.py recomputes both from the benchmark-data history; over 20
+          #   commits × 322 timing metrics (6137 adjacent-pair samples) the pooled p95 run-to-run swing
+          #   was 43.66% and the worst 185.0%; deterministic byte-count metrics are 0.00% noise. Re-run
+          #   that script and refresh these two values if the noise floor shifts.
+          # The DETERMINISTIC byte-count ratchet remains the strict, separate "Hard gate" step ABOVE
+          # (scripts/perf-gate.py) — this action's zones govern only the NOISY timing metrics.
+          # NO alert-comment-cc-users: the maintainer is never @-mentioned; soft-zone flakiness routes
+          # to a deduped issue and hard-zone timing failures block the run for an agent to fix.
+          alert-threshold: '175%'
+          fail-threshold: '200%'
           comment-on-alert: true
-          fail-on-alert: false
-          alert-comment-cc-users: '@jeswr'
+          fail-on-alert: true
+      # [OPUS-4.8] SOFT-ZONE triage (noise-reduction-bench-selfmonitor). Runs AFTER the action —
+      # `if: always()` so it still fires when the action HARD-FAILED (hard zone) above; it re-derives
+      # the two zones from the SAME thresholds and files/updates a deduped `bench-flake` GitHub issue
+      # for any SOFT-zone metric (>=175% and <200%), with NO @mention of anyone. It NEVER weakens the
+      # hard gate: the action's own fail-on-alert already failed the step for the hard zone; this step
+      # only handles the soft (possible-flakiness) band and always exits 0 (its filing is best-effort).
+      # Canonical repo only — fork PRs get a read-only token, so no issue can be filed there.
+      - name: Soft-zone triage (file a deduped bench-flake issue; no @mentions)
+        if: always() && github.repository == 'sparq-org/sparq'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ ! -f bench-results.json ]; then
+            echo "no bench-results.json (bench did not run to completion) — nothing to triage."
+            exit 0
+          fi
+          # Build the normalized comparison from THIS run's results + the previously-published point
+          # (prev-data.js fetched by the "Fetch previous benchmark series" step; absent on first run).
+          python3 scripts/bench-triage.py --mode build-comparison \
+            --results bench-results.json \
+            --prev-data-js prev-data.js \
+            --suite 'sparq engine' \
+            --out bench-comparison.json || { echo "::warning::comparison build failed (non-fatal)"; exit 0; }
+          # Thresholds MUST match the github-action-benchmark step above (derived by
+          # scripts/bench-thresholds.py from the benchmark-data history).
+          python3 scripts/bench-triage.py --mode soft \
+            --comparison bench-comparison.json \
+            --soft 175 --hard 200 \
+            --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            || echo "::warning::soft-zone triage filer failed (non-fatal)"
       # [OPUS-4.8] Seed the custom Pages dashboard onto benchmark-data IF ABSENT (or stale).
       # github-action-benchmark only writes its DEFAULT index.html when one does NOT already exist
       # (fs.stat early-return) but OVERWRITES data.js every run — so a CUSTOM dashboard committed
