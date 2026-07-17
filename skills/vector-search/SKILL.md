@@ -965,7 +965,7 @@ audit them. This is a measurement surface, not an accuracy claim.
 
 **Statement-level quoted-triple encoding is compositional and derived (sq-1e5kk).** [SONNET-4.6]
 `TrainedModel::encode_quoted_term(&graph, id)` (and the unpacked forms `encode_statement(h, r, t)` /
-`encode_statement_rows`) returns a quoted triple's per-component interaction vector composed from
+`encode_statement_rows`) returns a triple term's per-component interaction vector composed from
 its `(s, p, o)` constituents' trained rows — DistMult `h∘r∘t` (sums to the score), ComplEx
 `h∘r∘conj(t)` in real/imaginary halves (the real half sums to the score) — so the quoted *content*
 is reachable even under the default `IriBlank` scope, where the term itself has no node row. It is
