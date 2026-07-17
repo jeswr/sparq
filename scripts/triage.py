@@ -5,11 +5,16 @@
 Given an issue's labels + type, decide the labels to ADD/REMOVE and whether it is triage-complete:
   * role     — from a `kind:*` label or the bead/issue type (feature/bug->impl, docs->docs, ...).
   * priority — kept if a valid single `priority:P0..P4` is present; otherwise triage is incomplete.
-  * package  — the existing `area:<crate>` labels are the package (kept as-is); a no-package issue is
-               cross-cutting (handled by the readiness engine's global partition), not incomplete.
-  * ready    — an issue is `status:ready` iff it has a valid single priority AND a role AND is not
-               gated/untrusted. Otherwise it becomes `status:untriaged` for the retriage cron / an
-               LLM pass (a model call is only needed when role/priority cannot be derived statically).
+  * package  — the existing `area:<crate>` labels are the package (kept as-is). A NO-package issue is
+               NOT promotable: in the issue-native readiness engine a no-area issue reserves the
+               serializing `__global__` partition, so at backlog scale each no-area `status:ready`
+               issue would collapse the whole frontier behind it (audit-2026-07-17). Such an issue is
+               parked `needs:area` (a gate the readiness engine already respects + maintainer-visible)
+               until an area is assigned, then it re-triages to ready via the retriage cron.
+  * ready    — an issue is `status:ready` iff it has a valid single priority AND a role AND an
+               `area:<crate>` AND is not gated/untrusted/epic. Otherwise it becomes `status:untriaged`
+               (missing role/priority) or is `needs:area`-parked (missing area) for the retriage cron
+               / an LLM pass (a model call is only needed when role/priority cannot be derived).
 
 Fail-closed: ambiguity or missing role/priority yields `status:untriaged`, never `status:ready`.
 Pure `triage()` is unit-tested; the workflow applies the returned label delta.
@@ -58,17 +63,28 @@ def triage(labels, issue_type="task", trusted=True):
         # [OPUS-4.8] single-role invariant: strip any OTHER role:* labels so the dispatcher's
         # resolve() never sees an ambiguous role set (a security keyword may override an explicit role).
         remove |= {lb for lb in labels if lb.startswith("role:") and lb != f"role:{role}"}
+    # [FABLE-5] a no-area issue reserves the readiness engine's serializing __global__ partition, so
+    # it must NEVER auto-promote to status:ready (each one collapses the whole dispatch frontier at
+    # backlog scale — audit-2026-07-17). Park it needs:area (a gate ready-issues.py already respects,
+    # and maintainer-visible) so a human/LLM assigns a crate; then the retriage cron re-promotes it.
+    has_area = any(lb.startswith("area:") for lb in labels)
     # [OPUS-4.8] an epic is a tracking umbrella, never dispatchable — it must not gain status:ready
     # (the readiness engine also excludes kind:epic as the hard dispatch gate; this keeps the tracker
     # honest so an epic never *shows* as ready).
-    ready = (bool(role) and _valid_priority(labels) and "needs:user" not in labels
+    ready = (bool(role) and _valid_priority(labels) and has_area and "needs:user" not in labels
              and "kind:epic" not in labels)
     if ready:
         add.add("status:ready")
         remove.add("status:untriaged")
+        remove.add("needs:area")      # an area landed since a prior no-area park — clear the gate
     else:
         add.add("status:untriaged")   # fail-closed: not dispatchable until complete
         remove.add("status:ready")
+        # a triage-complete-but-no-area issue: mark WHY it is parked so it is maintainer-actionable
+        # and stays out of the frontier (needs:* is a hard gate) instead of silently reserving global.
+        if (bool(role) and _valid_priority(labels) and not has_area
+                and "kind:epic" not in labels and "needs:user" not in labels):
+            add.add("needs:area")
     return {"add": add - labels, "remove": remove & labels, "ready": ready, "role": role}
 
 
@@ -107,6 +123,18 @@ def _self_test():
     # single-role invariant: a double-labelled issue is stripped to one role
     r = triage(["priority:P2", "role:impl", "role:site", "area:site"], "feature")
     chk("single-role invariant", (len([x for x in (({"role:impl", "role:site"} | r["add"]) - r["remove"]) if x.startswith("role:")]) == 1), True)
+    # [FABLE-5] no-area guard: a complete priority+role issue with NO area:* is NOT promoted to ready
+    # (it would reserve the serializing __global__ partition); it parks needs:area instead.
+    r = triage(["priority:P1", "role:impl"], "feature")
+    chk("no-area not ready", (r["ready"], "status:ready" in r["add"]), (False, False))
+    chk("no-area parks needs:area", ("needs:area" in r["add"], "status:untriaged" in r["add"]), (True, True))
+    # an epic with no area does NOT get needs:area (it is untriaged-by-design, not area-actionable)
+    chk("epic no-area no needs:area", "needs:area" in triage(["priority:P1", "kind:epic"], "epic")["add"], False)
+    # a needs:user-gated no-area issue is not double-parked with needs:area
+    chk("gated no-area no needs:area", "needs:area" in triage(["priority:P1", "needs:user"], "task")["add"], False)
+    # once an area lands, retriage clears the needs:area gate and promotes
+    r = triage(["priority:P1", "role:impl", "area:sparq-core", "needs:area", "status:untriaged"], "feature")
+    chk("area landed -> ready + clears needs:area", (r["ready"], "needs:area" in r["remove"]), (True, True))
     print("triage self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
 
