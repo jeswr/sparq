@@ -141,15 +141,15 @@ pub fn select_sources(bgp: &Bgp, sources: &[SourceDescriptor]) -> Vec<PatternSou
         .collect()
 }
 
-/// The STATIC ordering rank of a source's declared retrieval capability: its
-/// `sret:cardinalityHint` when declared, else `u64::MAX` (undeclared sorts last,
-/// preserving the historical ascending-index order among unhinted sources via the
-/// source-index tie-break). Read only after the prune decision — never affects the
+/// The STATIC ordering rank of a source's declared retrieval capability: an explicit
+/// presence discriminator (`is_none()` — every declared hint, including `u64::MAX`,
+/// sorts before every undeclared one) then the `sret:cardinalityHint` ascending, with
+/// the historical ascending-index order among unhinted sources preserved via the
+/// source-index tie-break. Read only after the prune decision — never affects the
 /// retained-source set (the answer-safety invariant). [FABLE-5] sq-3uijg.
-fn retrieval_rank(src: &SourceDescriptor) -> u64 {
-    src.retrieval()
-        .and_then(|r| r.cardinality_hint)
-        .unwrap_or(u64::MAX)
+fn retrieval_rank(src: &SourceDescriptor) -> (bool, u64) {
+    let hint = src.retrieval().and_then(|r| r.cardinality_hint);
+    (hint.is_none(), hint.unwrap_or_default())
 }
 
 /// The HiBISCuS prune decision for one (pattern, source): `true` iff the source might
@@ -749,6 +749,32 @@ mod tests {
             order,
             vec![2, 0, 1, 3],
             "hinted ascending (5, 500) first, then unhinted in index order"
+        );
+    }
+
+    // ---- A declared `u64::MAX` hint is NOT the undeclared sentinel: the presence
+    //      discriminator (not the hint value) separates the groups, so a later-index
+    //      source declaring u64::MAX still precedes an earlier-index unhinted source.
+    #[test]
+    fn retrieval_hint_u64_max_precedes_unhinted() {
+        let srcs = [
+            knows_source("m0", 100, None),                 // unhinted, earlier index.
+            knows_source("m1", 100, Some(Some(u64::MAX))), // declared max hint.
+        ];
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri(&foaf("knows")),
+            var("o"),
+        )]);
+        let order: Vec<usize> = select_sources(&bgp, &srcs)[0]
+            .candidates
+            .iter()
+            .map(|c| c.source)
+            .collect();
+        assert_eq!(
+            order,
+            vec![1, 0],
+            "a declared u64::MAX hint sorts before every unhinted source"
         );
     }
 
