@@ -7,7 +7,11 @@ cover label changes — so an issue that lands `status:untriaged` (e.g. opened w
 was TERMINAL: even a human later adding `priority:P2` never re-ran triage. This sweep closes the
 loop the triage.py docstring already promised ("status:untriaged for the retriage cron"):
 
-  * only OPEN issues carrying `status:untriaged` are considered;
+  * OPEN issues carrying `status:untriaged` are considered, PLUS (#2474) OPEN `flow-on` issues
+    with NO `status:*` label at all — the flow-on engine used to mint follow-ups under
+    `secrets.GITHUB_TOKEN` with no routing labels, and GitHub suppresses workflow events for
+    GITHUB_TOKEN-created objects, so triage-issue.yml never saw them (flow-on.py now labels at
+    creation; this sweep converges the pre-fix backlog);
   * `trust:untrusted` is excluded (owned by promote-on-approval) and `kind:epic` is excluded
     (untriaged-by-design tracking umbrellas);
   * the author trust-gate is re-verified exactly like triage-issue.yml (the orchestrator App bot,
@@ -33,18 +37,36 @@ import triage  # noqa: E402  (same-directory static-triage module)
 DEFAULT_PRIORITY = "priority:P3"
 TRUSTED_BOT = "sparq-orchestrator[bot]"
 SKIP_LABELS = {"trust:untrusted", "kind:epic"}
+# [FABLE-5] (#2474) flow-on.yml mints follow-ups under secrets.GITHUB_TOKEN, i.e. as
+# github-actions[bot]. That login is trusted HERE only for `flow-on`-labelled issues:
+# their content comes from the checked-in rule table (scripts/flow-on-rules.toml), not
+# third-party input — this is NOT blanket [bot] trust (an arbitrary github-actions[bot]
+# issue without the flow-on label still fails the collaborator probe and is skipped).
+FLOW_ON_MINTER = "github-actions[bot]"
+FLOW_ON_LABEL = "flow-on"
+
+
+def _needs_triage(labels):
+    """status:untriaged, or (#2474) a flow-on-minted issue with NO status:* label at all —
+    the class the event triager can never see (GITHUB_TOKEN event suppression) and that the
+    old status:untriaged-only sweep missed."""
+    if "status:untriaged" in labels:
+        return True
+    return FLOW_ON_LABEL in labels and not any(lb.startswith("status:") for lb in labels)
 
 
 def plan_retriage(issues, trusted):
-    """[(number, add:sortedlist, remove:sortedlist)] for open status:untriaged issues whose author
-    passes `trusted(login)`. Only PROMOTING deltas are returned (ready==True); everything else is
-    left untouched for a human / the future LLM pass."""
+    """[(number, add:sortedlist, remove:sortedlist)] for open issues needing triage (see
+    `_needs_triage`) whose author passes `trusted(login)`. Only PROMOTING deltas are returned
+    (ready==True); everything else is left untouched for a human / the future LLM pass."""
     actions = []
     for it in issues:
         labels = {lb["name"] if isinstance(lb, dict) else lb for lb in it.get("labels", [])}
-        if "status:untriaged" not in labels or labels & SKIP_LABELS:
+        if not _needs_triage(labels) or labels & SKIP_LABELS:
             continue
-        if not trusted(str(it.get("author", ""))):
+        author = str(it.get("author", ""))
+        flow_on_minted = author == FLOW_ON_MINTER and FLOW_ON_LABEL in labels
+        if not (trusted(author) or flow_on_minted):
             continue
         add_default = not any(triage._PRIO.match(lb) for lb in labels)
         effective = labels | ({DEFAULT_PRIORITY} if add_default else set())
@@ -78,15 +100,23 @@ def _trusted_factory(repo):
     return trusted
 
 
-def _fetch_untriaged(repo):
-    r = _gh(["issue", "list", "-R", repo, "--state", "open", "--label", "status:untriaged",
-             "--limit", "500", "--json", "number,labels,author"])
-    if r.returncode != 0:
-        raise SystemExit("retriage: could not list status:untriaged issues")
-    issues = []
-    for it in json.loads(r.stdout or "[]"):
-        issues.append({"number": it.get("number"), "labels": it.get("labels") or [],
-                       "author": ((it.get("author") or {}).get("login") or "")})
+def _fetch_candidates(repo):
+    # Two label queries: parked status:untriaged issues, plus (#2474) flow-on issues —
+    # plan_retriage's _needs_triage then keeps only the label-less-status flow-on subset,
+    # so an already-routed flow-on issue is never churned. Deduped by issue number.
+    issues, seen = [], set()
+    for label in ("status:untriaged", FLOW_ON_LABEL):
+        r = _gh(["issue", "list", "-R", repo, "--state", "open", "--label", label,
+                 "--limit", "500", "--json", "number,labels,author"])
+        if r.returncode != 0:
+            raise SystemExit(f"retriage: could not list {label} issues")
+        for it in json.loads(r.stdout or "[]"):
+            num = it.get("number")
+            if num in seen:
+                continue
+            seen.add(num)
+            issues.append({"number": num, "labels": it.get("labels") or [],
+                           "author": ((it.get("author") or {}).get("login") or "")})
     return issues
 
 
@@ -122,9 +152,17 @@ def _self_test():
         iss(8, ["status:ready", "priority:P1", "role:impl"]),
         # 9: orchestrator-bot author is trusted
         iss(9, ["status:untriaged", "priority:P2", "kind:test"], author=TRUSTED_BOT),
+        # 10 (#2474): flow-on follow-up minted by github-actions[bot] with NO status:* label
+        # (the GITHUB_TOKEN event-suppression class) -> default P3 -> promotes
+        iss(10, ["flow-on", "auto", "docs"], author=FLOW_ON_MINTER),
+        # 11 (#2474): github-actions[bot] WITHOUT the flow-on label -> no blanket bot trust
+        iss(11, ["status:untriaged", "priority:P1", "kind:ci"], author=FLOW_ON_MINTER),
+        # 12 (#2474): flow-on issue already routed (has a status:*) -> out of scope, no churn
+        iss(12, ["flow-on", "auto", "status:ready", "priority:P3", "role:impl"],
+            author=FLOW_ON_MINTER),
     ]
     actions = {n: (a, r) for n, a, r in plan_retriage(fixture, trusted)}
-    chk("promoted set", sorted(actions), [1, 2, 9])
+    chk("promoted set", sorted(actions), [1, 2, 9, 10])
     chk("label-added priority promotes", actions[1],
         (["status:ready"], ["status:untriaged"]))
     chk("default P3 applied", "priority:P3" in actions[2][0], True)
@@ -132,6 +170,11 @@ def _self_test():
                                       "status:untriaged" in actions[2][1]), (True, True))
     chk("role derived for default case", any(x.startswith("role:") for x in actions[2][0]), True)
     chk("bot author promoted", actions[9][0][0].startswith(("priority", "role", "status")), True)
+    chk("flow-on statusless backlog promoted (#2474)",
+        ("status:ready" in actions[10][0], "priority:P3" in actions[10][0],
+         any(x.startswith("role:") for x in actions[10][0])), (True, True, True))
+    chk("github-actions[bot] not blanket-trusted", 11 in actions, False)
+    chk("already-routed flow-on untouched", 12 in actions, False)
     chk("ambiguous priority untouched", 3 in actions, False)
     chk("epic skipped", 4 in actions, False)
     chk("quarantine skipped", 5 in actions, False)
@@ -149,7 +192,7 @@ def main():
     args = ap.parse_args()
     if args.self_test:
         return _self_test()
-    actions = plan_retriage(_fetch_untriaged(args.repo), _trusted_factory(args.repo))
+    actions = plan_retriage(_fetch_candidates(args.repo), _trusted_factory(args.repo))
     for number, add, remove in actions:
         print(f"#{number}: +{','.join(add) or '-'} -{','.join(remove) or '-'}")
         if args.apply:

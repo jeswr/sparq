@@ -47,6 +47,14 @@
 #   title     = "..."                      # required; issue title (placeholders expanded)
 #   body      = "..."                       # required; issue body (placeholders expanded)
 #   labels    = ["extra", "labels"]         # optional; `flow-on` + `auto` are ALWAYS added
+#
+# [FABLE-5] (#2474) On top of `flow-on` + `auto` + these labels, flow-on.py appends
+# role/priority/status ROUTING labels at creation via the shared static triage pass
+# (scripts/triage.py + a default priority:P3) — GITHUB_TOKEN-created issues fire no
+# `issues: opened` event, so triage-issue.yml can never label them post-hoc. Give a
+# template a `kind:*` label (see triage.py ROLE_BY_KIND) to steer its role; without
+# one the role falls back to type `task` → `role:impl` (a security keyword such as
+# `zk` still forces `role:soundness`).
 # ---------------------------------------------------------------------------
 
 # --- New crate → benchmark + README + SKILL.md  [REMOVED — owned by gate G1] ----
@@ -89,7 +97,7 @@ when_paths = [
 [[rule.create]]
 dedup_key = "skill-sync-pr-{pr}"
 title = "docs: sync SKILL.md after public-surface change in PR #{pr}"
-labels = ["docs"]
+labels = ["docs", "kind:docs"]
 body = """
 Merged PR #{pr} ({pr_title}) changed a public surface (CLI / HTTP / Py / WASM)
 but did not touch any `skills/**/SKILL.md` in the same diff.
@@ -111,7 +119,7 @@ when_new_paths = ["bench/*/benchmarks.toml", "bench/*/run.sh"]
 [[rule.create]]
 dedup_key = "dashboard-row-{suite}"
 title = "dashboard: add a FEATURED_SUITES row for bench suite {suite}"
-labels = ["docs", "dashboard"]
+labels = ["docs", "dashboard", "kind:docs"]
 body = """
 Merged PR #{pr} ({pr_title}) added a new bench suite `bench/{suite}`.
 
@@ -136,7 +144,7 @@ when_label = "competitor-relevant"
 [[rule.create]]
 dedup_key = "gather-pr-{pr}"
 title = "gather: refresh competitor baselines after PR #{pr}"
-labels = ["bench", "gather"]
+labels = ["bench", "gather", "kind:perf"]
 body = """
 Merged PR #{pr} ({pr_title}) touched a competitor-relevant engine/store path and
 was labelled `competitor-relevant`.

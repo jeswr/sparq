@@ -296,6 +296,82 @@ class ZkCircuitGatecountTest(unittest.TestCase):
         self.assertEqual(self._zk_follow_ons(fos), [])
 
 
+class RoutingLabelsTest(unittest.TestCase):
+    """[FABLE-5] (#2474) GITHUB_TOKEN-created issues fire no `issues: opened`
+    event, so triage-issue.yml can never label a flow-on follow-up post-hoc.
+    Every minted follow-on must therefore be dispatch-ready AT CREATION: exactly
+    one `role:*`, exactly one `priority:*`, and `status:ready` — computed by the
+    shared static triage pass (scripts/triage.py) with a default priority:P3."""
+
+    def setUp(self):
+        self.rules = flow_on.load_rules(RULES)
+
+    def _all_follow_ons(self):
+        # One evaluate() per rule family so every template in the table is minted.
+        fixtures = [
+            # changed-public-feature-docs
+            dict(changed=["crates/sparq-cli/src/main.rs"], added=[], labels=[],
+                 title="add --explain flag",
+                 pub_changed={"crates/sparq-cli/src/main.rs"}),
+            # new-bench-dashboard-row
+            dict(changed=["bench/widgets/benchmarks.toml"],
+                 added=["bench/widgets/benchmarks.toml"], labels=[], title="bench",
+                 pub_changed=None),
+            # competitor-feature-gather
+            dict(changed=["crates/sparq-engine/src/exec/join.rs"], added=[],
+                 labels=["competitor-relevant"], title="joins", pub_changed=None),
+            # new-zk-circuit-gatecount
+            dict(changed=["zk/arith/Nargo.toml"], added=["zk/arith/Nargo.toml"],
+                 labels=[], title="zk arith", pub_changed=None),
+        ]
+        out = []
+        for fx in fixtures:
+            out += flow_on.evaluate(
+                self.rules, 99, fx["title"], fx["changed"], fx["added"],
+                fx["labels"], fx["pub_changed"],
+            )
+        return out
+
+    def test_every_follow_on_is_dispatch_ready_at_creation(self):
+        fos = self._all_follow_ons()
+        self.assertTrue(fos, "fixture should mint at least one follow-on per rule")
+        for fo in fos:
+            roles = [lb for lb in fo.labels if lb.startswith("role:")]
+            prios = [lb for lb in fo.labels if lb.startswith("priority:")]
+            self.assertEqual(len(roles), 1, f"{fo.rule_id}: {fo.labels}")
+            self.assertEqual(len(prios), 1, f"{fo.rule_id}: {fo.labels}")
+            self.assertIn("status:ready", fo.labels, fo.rule_id)
+            self.assertNotIn("status:untriaged", fo.labels, fo.rule_id)
+
+    def test_roles_derive_from_rule_kind_labels(self):
+        by_rule = {fo.rule_id: fo for fo in self._all_follow_ons()}
+        # kind:docs → role:docs; kind:perf → role:perf; the zk security keyword
+        # forces role:soundness; default priority:P3 everywhere (no rule sets one).
+        self.assertIn("role:docs", by_rule["changed-public-feature-docs"].labels)
+        self.assertIn("role:docs", by_rule["new-bench-dashboard-row"].labels)
+        self.assertIn("role:perf", by_rule["competitor-feature-gather"].labels)
+        self.assertIn("role:soundness", by_rule["new-zk-circuit-gatecount"].labels)
+        for fo in by_rule.values():
+            self.assertIn("priority:P3", fo.labels, fo.rule_id)
+
+    def test_dry_run_prints_routing_labels(self):
+        # The dry-run plan is how a human previews a mint — it must show that the
+        # issue will be born routed (labels line includes status:ready).
+        with tempfile.TemporaryDirectory() as td:
+            changed = Path(td) / "changed.txt"
+            changed.write_text("bench/widgets/benchmarks.toml\nbench/widgets/run.sh\n")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = flow_on.main(
+                    ["--pr", "42", "--dry-run", "--changed-files", str(changed),
+                     "--added-files", str(changed), "--title", "add widgets bench"]
+                )
+            out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("status:ready", out)
+        self.assertIn("priority:P3", out)
+
+
 class IdempotencyTest(unittest.TestCase):
     """The dedup-key marker is what open_issue_exists() searches for; verify the
     key is stable + embedded so a re-run is a no-op once the issue is open."""
