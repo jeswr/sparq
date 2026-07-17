@@ -488,7 +488,7 @@ the whole graph, never a partial extraction):
 |---|---|---|---|
 | RL (in-RL; PR1 preconditions pass; no divergence-guarded construct) | Yes (past divergence guard) | Yes (PR1-checked) | `RlPr1Preconditions`, `RlDivergenceGuard` |
 | EL (in-EL; ⊤-free TBox; no ABox; no skipped/unapplied axioms) | Yes (empty-interpretation model construction) | Never | `ElSkippedAxioms`, `ElUnappliedAxioms`, `ElTopGuard` |
-| QL (in-QL) | Never | Never | `QlConsistencyPending` (always — deferred to sq-pbz04.3.4) |
+| QL (in-QL; opt-in `dispatch_ql`, sq-fj8lj → sparq-reason-ql's `ql-consistency` checker over the raw triples) | Only past the QL crate's OWN capture accounting (`fully_captured()` ∧ `consistency_uncaptured == 0`; L2's `In` only routes, never justifies) | Yes (violation query matched — sound at any capture level by monotonicity) | `QlCaptureGap` (the QL crate's gap accounting); without `dispatch_ql`: `QlConsistencyPending` (always) |
 | ALCH (all else the L1 extractor accepted) | Yes (complete for L1 fragment) | Yes (complete for L1 fragment) | `ResourceBudget` |
 
 **L4 dispatch — entailment** (all conclusion kinds routed through the complete ALCH tableau):
