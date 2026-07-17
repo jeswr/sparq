@@ -98,7 +98,7 @@ pub mod tpf;
 /// (sq-b4fns / #1223). PURE response builder (parameter resolution + per-quad flattening +
 /// continuation maths; the async disk-poll handler is in [`http`]). Compiled ONLY behind the
 /// `change-stream` feature, and served only when [`ServerConfig::change_stream_dir`] is also set
-/// (`--change-stream <DIR>` / `SPARQ_CHANGE_STREAM`) — the same double-opt-in as [`tpf`]. The same
+/// (`--change-stream <DIR>` / `SPARQ_CHANGE_STREAM`) — the same double-opt-in as `tpf`. The same
 /// feature also records every commit to the durable log on the update path (see [`http`]). With
 /// the feature off this module + the route + the recording hook are `#[cfg]`-stripped, byte-
 /// identical to before.

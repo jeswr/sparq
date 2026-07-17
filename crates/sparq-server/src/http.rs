@@ -770,8 +770,8 @@ pub struct ServerConfig {
     /// (`ChangeLog::open` re-reads the segments), so pointing the server at an existing dir
     /// continues the same stream gaplessly.
     ///
-    /// This field exists only with the `change-stream` cargo feature (like [`tpf`](Self::tpf)
-    /// under `tpf`); a build without that feature compiles no change-stream code and pays zero
+    /// This field exists only with the `change-stream` cargo feature (like the `Self::tpf`
+    /// field under `tpf`); a build without that feature compiles no change-stream code and pays zero
     /// cost. Set by the binary's `--change-stream <DIR>` flag / `SPARQ_CHANGE_STREAM` env. At-rest
     /// encryption + cryptographic authenticity of the records are out of scope (the same boundary
     /// as the backup family); a consumer needing an authentic feed wraps its own signing.
