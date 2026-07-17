@@ -10608,16 +10608,38 @@ mod change_stream_commit_hook_tests {
 /// that runs when no relevant env vars are set) and one env-var body (covering the
 /// inner assignment branches that are otherwise dead when the env vars are absent).
 ///
-/// ISOLATION: each test uses a distinct, process-internal env var name unlikely to
-/// collide with real deployment vars or other tests. Tests clean up after themselves
-/// via `std::env::remove_var`. Running in a single-threaded test binary means the
-/// set/remove sequence is not racy with other tests in this module.
+/// ISOLATION: `std::env::{set_var,remove_var}` mutate the SINGLE process-global
+/// environment and `cargo test` runs these tests CONCURRENTLY, so every test that
+/// touches the environment holds the module-local `ENV_LOCK` (see `env_guard`) for the
+/// whole set → `from_env()` → remove critical section. That serialization — not any
+/// "single-threaded test binary" assumption — is what keeps one test's `SPARQ_*` write
+/// from leaking into another's `from_env()` read. [OPUS-4.8] sq-gum8.14.
 #[cfg(test)]
 mod from_env_tests {
     use super::{env_parse, ServerConfig};
+    use std::sync::{Mutex, MutexGuard};
+
+    // [OPUS-4.8] sq-gum8.14: `std::env::{set_var,remove_var}` mutate the SINGLE
+    // process-global environment, and `cargo test` runs the tests in this module
+    // CONCURRENTLY on multiple threads. Without serialization, one test's
+    // `set_var("SPARQ_*")` leaks into another test's `from_env()` read — which is
+    // exactly how `from_env_with_no_sparq_vars_set_...` observed `max_concurrent == 8`
+    // (the value `from_env_reads_sparq_max_concurrent` sets) instead of the default 32.
+    // Every test that touches the environment holds this lock for the WHOLE
+    // set → from_env() → remove critical section, so no concurrent test can observe a
+    // half-applied environment. (Replaces the earlier — and false — "single-threaded
+    // test binary" isolation claim in this module's doc comment.)
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_guard() -> MutexGuard<'static, ()> {
+        // Recover from a poisoned lock: a panicking test still leaves the env serialized
+        // for the next test, so the poison flag carries no unsound state here.
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn from_env_with_no_sparq_vars_set_returns_ok_with_default_values() {
+        let _env = env_guard();
         // Call from_env() in an environment where none of the SPARQ_* vars are set.
         // This covers the function's scaffolding (all `if let` condition sites) and
         // the `env_parse` function body (the fast-path that short-circuits on None).
@@ -10638,6 +10660,7 @@ mod from_env_tests {
         // This covers the `if let Some(n) = env_parse("SPARQ_MAX_RESULTS")` body branch
         // (line ~887: `cfg.max_results = (n > 0).then_some(n)`).
         // Use a scoped set/remove so other tests are not affected.
+        let _env = env_guard();
         std::env::set_var("SPARQ_MAX_RESULTS", "77");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_MAX_RESULTS");
@@ -10661,6 +10684,7 @@ mod from_env_tests {
     fn env_parse_returns_some_when_var_is_set_to_a_valid_value() {
         // `env_parse` returns Some(T) when the env var is set to a parseable value.
         let key = "_SPARQ_QCNN19_TEST_ENV_PARSE_U64_";
+        let _env = env_guard();
         std::env::set_var(key, "123");
         let result: Option<u64> = env_parse(key);
         std::env::remove_var(key);
@@ -10671,6 +10695,7 @@ mod from_env_tests {
     fn env_parse_returns_none_when_var_has_unparseable_value() {
         // `env_parse::<u64>("…")` returns None when the env var value cannot be parsed.
         let key = "_SPARQ_QCNN19_TEST_ENV_PARSE_BAD_";
+        let _env = env_guard();
         std::env::set_var(key, "not-a-number");
         let result: Option<u64> = env_parse(key);
         std::env::remove_var(key);
@@ -10689,6 +10714,7 @@ mod from_env_tests {
 
     #[test]
     fn sparq_adaptive_commit_env_zero_disables_it() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_ADAPTIVE_COMMIT", "0");
         let off = ServerConfig::from_env();
         std::env::remove_var("SPARQ_ADAPTIVE_COMMIT");
@@ -10730,6 +10756,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_query_timeout() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_QUERY_TIMEOUT", "30");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_QUERY_TIMEOUT");
@@ -10743,6 +10770,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_update_where_timeout() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_UPDATE_WHERE_TIMEOUT", "15");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_UPDATE_WHERE_TIMEOUT");
@@ -10756,6 +10784,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_header_read_timeout() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_HEADER_READ_TIMEOUT", "5");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_HEADER_READ_TIMEOUT");
@@ -10769,6 +10798,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_body_read_timeout() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_BODY_READ_TIMEOUT", "10");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_BODY_READ_TIMEOUT");
@@ -10782,6 +10812,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_max_query_rows() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_MAX_QUERY_ROWS", "500");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_MAX_QUERY_ROWS");
@@ -10795,6 +10826,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_max_query_bytes() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_MAX_QUERY_BYTES", "1048576");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_MAX_QUERY_BYTES");
@@ -10808,6 +10840,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_auth_token() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_AUTH_TOKEN", "secret-token-123");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_AUTH_TOKEN");
@@ -10821,6 +10854,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_service_allow() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_SERVICE_ALLOW", "api.example.org");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_SERVICE_ALLOW");
@@ -10833,6 +10867,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_cors_allow_origin() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_CORS_ALLOW_ORIGIN", "https://app.example.org");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_CORS_ALLOW_ORIGIN");
@@ -10845,6 +10880,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_persist_dir() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_PERSIST_DIR", "/tmp/sparq-persist-test-qcnn37");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_PERSIST_DIR");
@@ -10861,6 +10897,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_max_body_bytes() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_MAX_BODY_BYTES", "2097152");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_MAX_BODY_BYTES");
@@ -10870,6 +10907,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_max_concurrent() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_MAX_CONCURRENT", "8");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_MAX_CONCURRENT");
@@ -10879,6 +10917,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_max_subscriptions_per_conn() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_MAX_SUBSCRIPTIONS_PER_CONN", "20");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_MAX_SUBSCRIPTIONS_PER_CONN");
@@ -10891,6 +10930,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_max_subscriptions() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_MAX_SUBSCRIPTIONS", "100");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_MAX_SUBSCRIPTIONS");
@@ -10903,6 +10943,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_allow_remote() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_ALLOW_REMOTE", "1");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_ALLOW_REMOTE");
@@ -10912,6 +10953,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_log_full_requests() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_LOG_FULL_REQUESTS", "1");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_LOG_FULL_REQUESTS");
@@ -10933,6 +10975,7 @@ mod from_env_tests {
     #[cfg(feature = "facets")]
     #[test]
     fn from_env_reads_sparq_facets() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_FACETS", "1");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_FACETS");
@@ -10953,6 +10996,7 @@ mod from_env_tests {
     #[cfg(feature = "complete")]
     #[test]
     fn from_env_reads_sparq_complete() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_COMPLETE", "1");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_COMPLETE");
