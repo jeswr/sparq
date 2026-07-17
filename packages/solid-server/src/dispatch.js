@@ -79,7 +79,9 @@ function authRequestView(method, url, rawHeaders) {
  * - the {@link MAX_BODY_BYTES} request-body ceiling → the 413 response shape;
  * - trap recycle ([SONNET-4.6] sq-250si): a `WebAssembly.RuntimeError` frees the poisoned
  *   instance, constructs a fresh pod via `makePod()`, and answers 503 — a later request is
- *   never served by a poisoned instance;
+ *   never served by a poisoned instance. If the replacement `makePod()` throws, the dispatcher
+ *   fails closed: the poisoned instance is discarded anyway, later dispatches retry the
+ *   factory and answer 503 until it succeeds;
  * - copying + freeing the wasm `LwsResponse` before it is handed back;
  * - any other pod/authenticator failure → the 500 response shape.
  * A malformed dispatch call (odd `rawHeaders`, a non-buffer body) throws instead — that is a
@@ -93,13 +95,14 @@ function authRequestView(method, url, rawHeaders) {
  */
 export function createPodDispatcher(makePod, { authenticate }) {
   // `state.pod` is the live instance. On a trap it is replaced with a fresh instance so
-  // subsequent requests are not permanently served by a poisoned module.
+  // subsequent requests are not permanently served by a poisoned module. `null` means the
+  // post-trap replacement failed: no instance is live, and dispatch retries the factory.
   const state = { pod: makePod(), freed: false };
 
   const free = () => {
     if (!state.freed) {
       state.freed = true;
-      state.pod.free?.();
+      state.pod?.free?.();
     }
   };
 
@@ -121,6 +124,15 @@ export function createPodDispatcher(makePod, { authenticate }) {
       throw error;
     }
 
+    if (state.pod === null) {
+      try {
+        state.pod = makePod();
+      } catch (recreateError) {
+        console.error('[sparq-lws] failed to recreate SolidServer after trap:', recreateError);
+        return textResponse(503, 'server temporarily unavailable (wasm trap)\n');
+      }
+    }
+
     try {
       const wasmResponse = await state.pod.handleRequest(
         method,
@@ -133,8 +145,12 @@ export function createPodDispatcher(makePod, { authenticate }) {
     } catch (error) {
       if (isWasmTrap(error)) {
         console.error('[sparq-lws] wasm trap — recycling SolidServer instance:', error);
+        // Detach the poisoned instance BEFORE calling the factory: if `makePod()` throws, the
+        // freed, trapped instance must not stay reachable as `state.pod` for the next dispatch.
+        const poisoned = state.pod;
+        state.pod = null;
         try {
-          state.pod.free?.();
+          poisoned.free?.();
         } catch (_freeError) {
           // ignore errors freeing a poisoned instance
         }

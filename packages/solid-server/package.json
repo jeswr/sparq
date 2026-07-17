@@ -45,6 +45,8 @@
     }
   },
   "devDependencies": {
+    "fastify": "^5.0.0",
+    "fastify-v4": "npm:fastify@^4.28.0",
     "jose": "^5.10.0"
   },
   "repository": {

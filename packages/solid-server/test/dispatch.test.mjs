@@ -136,6 +136,42 @@ test('a wasm trap answers 503, frees the poisoned pod, and recycles for the next
   assert.equal(pod2.freed, true, 'free() releases the current (recycled) pod');
 });
 
+test('a failed post-trap recreation fails closed and never re-invokes the poisoned pod', async () => {
+  let handled = 0;
+  const pod1 = fakePod(async () => { handled += 1; throw new WebAssembly.RuntimeError('unreachable'); });
+  const pod2 = fakePod(async () => okResponse());
+  const factories = [
+    () => pod1,
+    () => { throw new Error('allocation failed'); }, // the recreation inside the trap branch
+    () => { throw new Error('allocation failed'); }, // the retry on the next dispatch
+    () => pod2,
+  ];
+  const { dispatch, free } = createPodDispatcher(() => factories.shift()(), anonymous);
+
+  const trapped = await dispatch({ url: '/trigger-trap' });
+  assert.equal(trapped.status, 503, 'the trap itself answers 503 even when recreation fails');
+  assert.equal(pod1.freed, true, 'the poisoned pod is still freed');
+
+  const unavailable = await dispatch({ url: '/while-broken' });
+  assert.equal(unavailable.status, 503, 'while the factory keeps failing, dispatch fails closed');
+  assert.equal(handled, 1, 'the freed, poisoned pod is never invoked again');
+
+  const recovered = await dispatch({ url: '/after-recovery' });
+  assert.equal(recovered.status, 200, 'dispatch recovers deterministically once the factory succeeds');
+  assert.equal(handled, 1);
+  free();
+  assert.equal(pod2.freed, true);
+});
+
+test('free() after a failed post-trap recreation is a no-op, not a crash', async () => {
+  const pod = fakePod(async () => { throw new WebAssembly.RuntimeError('unreachable'); });
+  const factories = [() => pod, () => { throw new Error('allocation failed'); }];
+  const { dispatch, free } = createPodDispatcher(() => factories.shift()(), anonymous);
+  await dispatch({ url: '/trigger-trap' });
+  free(); // no live instance — must not throw
+  await assert.rejects(() => dispatch({ url: '/late' }), /after free\(\)/);
+});
+
 test('a non-trap pod error answers 500 and does NOT recycle the instance', async () => {
   let makeCount = 0;
   const pod = fakePod(async () => { throw new Error('internal logic error'); });
