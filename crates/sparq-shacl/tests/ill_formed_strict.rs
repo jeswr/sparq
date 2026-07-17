@@ -466,7 +466,146 @@ fn unknown_node_kind_in_list_fails() {
     );
 }
 
+// ---- remaining syntax rules deferred from sq-ehq4g (sq-c1v3e) ----
+
+#[test]
+fn literal_severity_fails() {
+    // Syntax rule severity-nodeKind: the value of sh:severity is an IRI.
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ; sh:severity "high" ."#,
+        "severity",
+    );
+}
+
+#[test]
+fn literal_sparql_constraint_severity_fails() {
+    // The SHACL-1.2 constraint-level sh:severity (on the sh:SPARQLConstraint
+    // node) obeys the same rule.
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:sparql [ sh:select "SELECT $this WHERE { $this ?p ?o }" ;
+                         sh:severity "warn" ] ."#,
+        "severity",
+    );
+}
+
+#[test]
+fn string_typed_min_count_fails() {
+    // "3" is integer-LEXICAL but xsd:string-typed; the syntax rules type the
+    // counts/lengths as xsd:integer. (Bare Turtle 3 types as xsd:integer.)
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:property [ sh:path ex:p ; sh:minCount "3" ] ."#,
+        "minCount",
+    );
+}
+
+#[test]
+fn string_typed_max_list_length_fails() {
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:property [ sh:path ex:p ; sh:maxListLength "2" ] ."#,
+        "maxListLength",
+    );
+}
+
+#[test]
+fn string_typed_qualified_min_count_fails() {
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:property [ sh:path ex:p ;
+               sh:qualifiedValueShape [ sh:nodeKind sh:IRI ] ;
+               sh:qualifiedMinCount "1" ] ."#,
+        "qualifiedMinCount",
+    );
+}
+
+#[test]
+fn entailment_declaration_fails() {
+    // SHACL §3.4: an unsupported entailment regime MUST be a failure — and this
+    // processor supports none, so any sh:entailment declaration is one.
+    assert_ill_formed(
+        r#"ex:sg sh:entailment <http://www.w3.org/ns/entailment/RDFS> .
+           ex:S a sh:NodeShape ; sh:targetNode ex:n ; sh:nodeKind sh:IRI ."#,
+        "entailment",
+    );
+}
+
+#[test]
+fn qualified_min_count_without_value_shape_fails() {
+    // The symmetric partial-parameter case of sq-ehq4g: a qualified count
+    // without sh:qualifiedValueShape misses that mandatory parameter.
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:property [ sh:path ex:p ; sh:qualifiedMinCount 1 ] ."#,
+        "qualifiedMinCount",
+    );
+}
+
+#[test]
+fn qualified_max_count_without_value_shape_fails() {
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:property [ sh:path ex:p ; sh:qualifiedMaxCount 2 ] ."#,
+        "qualifiedMaxCount",
+    );
+}
+
+// ---- shacl-af: structural node expressions that do not build (sq-c1v3e) ----
+
+#[cfg(feature = "shacl-af")]
+#[test]
+fn unbuildable_expression_constraint_fails() {
+    // A blank-node (structural) sh:expression with an unregistered operator IRI
+    // was dropped silently; strict now rejects it (fail-closed relative to this
+    // engine's node-expression coverage).
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:expression [ ex:noSuchOperator ( ex:a ex:b ) ] ."#,
+        "expression",
+    );
+}
+
+#[cfg(feature = "shacl-af")]
+#[test]
+fn unbuildable_node_by_expression_fails() {
+    assert_ill_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:nodeByExpression [ ex:noSuchOperator ( ex:a ) ] ."#,
+        "nodeByExpression",
+    );
+}
+
+#[cfg(feature = "shacl-af")]
+#[test]
+fn buildable_expression_constraint_is_not_flagged() {
+    // A supported structural expression (a path expression) must not be flagged.
+    assert_well_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:expression [ sh:path ex:p ] ."#,
+    );
+}
+
 // ---- well-formed edge cases must NOT be flagged (false-positive guard) ----
+
+#[test]
+fn explicitly_typed_integer_count_is_not_flagged() {
+    // The canonical typed spelling is exactly what bare Turtle integers carry.
+    assert_well_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+             sh:property [ sh:path ex:p ; sh:minCount "1"^^xsd:integer ;
+                           sh:maxLength "5"^^xsd:integer ] ."#,
+    );
+}
+
+#[test]
+fn iri_severity_is_not_flagged() {
+    // Both a sh:* severity and a custom severity IRI are well-formed.
+    assert_well_formed(
+        r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ; sh:severity sh:Warning ;
+             sh:property [ sh:path ex:p ; sh:severity ex:MySeverity ] ."#,
+    );
+}
 
 #[test]
 fn well_formed_shapes_graphs_pass_strict() {
@@ -624,6 +763,25 @@ fn lenient_validate_still_skips_unparsable_sparql_select() {
     assert!(run_strict(shapes).is_err());
     let report = run_lenient(shapes);
     assert!(report.conforms, "lenient skip unchanged: {}", report.to_text());
+}
+
+#[test]
+fn lenient_report_surfaces_ill_formed_as_diagnostics() {
+    // (sq-c1v3e) The lenient path surfaces each ill-formed construct as a
+    // report diagnostic — visibility without failing: the skip is unchanged
+    // (the report still conforms) and `source_component` carries the offending
+    // SHACL predicate IRI, mirroring IllFormedConstruct::predicate.
+    let shapes = r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+                      sh:property [ sh:path ex:missing ; sh:minCount "three" ] ."#;
+    let report = run_lenient(shapes);
+    assert!(report.conforms, "skip unchanged: {}", report.to_text());
+    assert_eq!(report.diagnostics.len(), 1, "{}", report.to_text());
+    let d = &report.diagnostics[0];
+    assert_eq!(d.source_component, "http://www.w3.org/ns/shacl#minCount");
+    assert!(d.message.contains("integer"), "message: {}", d.message);
+    // A well-formed graph produces no diagnostics.
+    let clean = run_lenient(r#"ex:S a sh:NodeShape ; sh:targetNode ex:n ; sh:nodeKind sh:IRI ."#);
+    assert!(clean.diagnostics.is_empty());
 }
 
 #[test]

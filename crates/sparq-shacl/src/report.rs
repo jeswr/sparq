@@ -66,18 +66,22 @@ pub struct ValidationResult {
 
 /// [OPUS-4.8] (sq-lz99x) A non-fatal author-time diagnostic: a constraint the
 /// validator could not evaluate and therefore SKIPPED (the crate's lenient
-/// ill-formed-shape policy), surfaced so the skip is not silent. Currently the
-/// only producer is an uncompilable `sh:pattern` regex — the Rust `regex` crate
-/// has no lookahead/lookbehind (neither does XML Schema regex, which the W3C SHACL
-/// spec ties `sh:pattern` to), so a `(?!...)` pattern fails to compile. A
-/// diagnostic never affects `conforms`: a skipped constraint reports no
-/// violations.
+/// ill-formed-shape policy), surfaced so the skip is not silent. Two producers:
+/// an uncompilable `sh:pattern` regex — the Rust `regex` crate has no
+/// lookahead/lookbehind (neither does XML Schema regex, which the W3C SHACL
+/// spec ties `sh:pattern` to), so a `(?!...)` pattern fails to compile — and
+/// [FABLE-5] (sq-c1v3e) each parse-time **ill-formed shapes-graph construct**
+/// ([`crate::IllFormedConstruct`]), which the lenient `validate` skips and the
+/// strict channel rejects. A diagnostic never affects `conforms`: a skipped
+/// constraint reports no violations.
 #[derive(Debug, Clone)]
 pub struct ShapeDiagnostic {
     /// The shape whose constraint was skipped (`sh:sourceShape`).
     pub source_shape: Term,
     /// The constraint-component IRI of the skipped constraint (e.g.
-    /// `sh:PatternConstraintComponent`).
+    /// `sh:PatternConstraintComponent`) — or, for an ill-formed-construct
+    /// diagnostic (sq-c1v3e), the offending SHACL predicate IRI (e.g.
+    /// `sh:minCount`), mirroring [`crate::IllFormedConstruct::predicate`].
     pub source_component: String,
     /// A human-readable explanation of why the constraint was skipped.
     pub message: String,
