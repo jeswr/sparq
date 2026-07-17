@@ -46,7 +46,7 @@ From the registry's `scripts/worker-live.sh` (`run_model` / `_run_headless_harne
 CLIs pinned in `worker-prep.sh`: `@anthropic-ai/claude-code@2.1.177`,
 `@openai/codex@0.144.1`):
 
-```
+```bash
 claude -p --model X --permission-mode acceptEdits \
   --allowedTools Bash,Edit,Read,Write,Glob,Grep \
   --append-system-prompt-file .claude/agents/$agent.md \
