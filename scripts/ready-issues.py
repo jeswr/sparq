@@ -15,9 +15,10 @@ of a quarantine label. An issue is READY iff, in priority order, ALL hold:
     earlier-selected ready issue. A no-package / cross-cutting issue reserves a **global partition**
     that serializes it against ALL other work (shared lockfiles/CI/workspace configs).
 
-Truncation fails closed (an incomplete snapshot is refused). Native GitHub dependencies + cursor
-pagination are a follow-up (see FIXME); today blockers come from validated `Blocked-by: #NN` markers.
-Pure `compute_ready()` is unit-tested; the CLI wraps it over `gh issue list`.
+The snapshot uses real cursor pagination (`gh api --paginate`) with an explicit fail-closed
+ceiling; native GitHub dependencies remain a follow-up — today blockers come from validated
+`Blocked-by: #NN` markers. Pure `compute_ready()` is unit-tested; the CLI wraps it over the
+paginated fetch.
 """
 import argparse
 import json
@@ -154,19 +155,36 @@ def _self_test():
     check("packages multi", packages_of({"area:a", "area:b"}), {"a", "b"})
     check("packages none->global", packages_of({"role:impl"}), {GLOBAL})
     check("untriaged is busy", is_busy({"status:untriaged"}), True)
+    # paginated-snapshot flattening: multi-page merge, PR rows dropped, junk tolerated
+    check("flatten pages drops PRs", _flatten_pages(
+        [[{"number": 1}, {"number": 2, "pull_request": {}}], [{"number": 3}], "junk", [None]]),
+        [{"number": 1}, {"number": 3}])
     print("ready-issues self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
 
 
-def _fetch(repo, limit=1000):
+def _flatten_pages(pages):
+    """Flatten `gh api --paginate --slurp` output (a list of pages) into issues, dropping PRs
+    (REST /issues includes them, marked by the `pull_request` key). Pure — unit-tested."""
+    return [i for page in pages for i in (page if isinstance(page, list) else [])
+            if isinstance(i, dict) and "pull_request" not in i]
+
+
+def _fetch(repo, ceiling=10000):
+    """Open-issue snapshot via REAL cursor pagination (`gh api --paginate` follows Link headers),
+    replacing the old single-page `--limit 1000` fetch that FAILED CLOSED at exactly 1000 open
+    issues — the full bd migration (~900 beads on top of organic issues) crosses that. The explicit
+    ceiling still fails closed on a runaway snapshot."""
     out = subprocess.run(
-        ["gh", "issue", "list", "-R", repo, "--state", "open", "--limit", str(limit),
-         "--json", "number,labels,body,state"],
+        ["gh", "api", "--paginate", "--slurp",
+         f"repos/{repo}/issues?state=open&per_page=100"],
         capture_output=True, text=True, check=True).stdout
-    raw = json.loads(out)
-    if len(raw) >= limit:  # FIXME: replace with cursor pagination + native deps (GraphQL)
-        raise SystemExit(f"refusing: fetched {len(raw)} >= limit {limit} — snapshot may be truncated "
-                         "(fail-closed). Implement pagination before raising the limit.")
+    pages = json.loads(out or "[]")
+    raw = _flatten_pages(pages)
+    if len(raw) >= ceiling:
+        raise SystemExit(f"refusing: fetched {len(raw)} >= ceiling {ceiling} — snapshot looks "
+                         "runaway (fail-closed). Raise the ceiling deliberately if the backlog "
+                         "is really that large.")
     open_numbers = {i["number"] for i in raw}
     issues = []
     for i in raw:
