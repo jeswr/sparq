@@ -483,7 +483,12 @@ fn add_link(
 /// super-roles of derived roles also propagate — the standard RBox link-saturation. The worklist
 /// is bounded by the number of distinct `(role, x, f)` triples (each is stored at most once in
 /// `r_succ`), so the fixpoint terminates.
+// [OPUS-4.8] Each argument is a genuinely distinct saturation input (the mutable state, the
+// seed link `(r, x, f)`, three read-only indices, and the shared queue); bundling them into a
+// context struct here would obscure the CR3/CR10/CR11 seam without simplifying anything, so we
+// take the clippy-documented override for this private RBox helper rather than churn the shape.
 #[cfg(feature = "rbox")]
+#[allow(clippy::too_many_arguments)]
 fn add_link_rbox(
     sat: &mut Saturation,
     r: Role,
