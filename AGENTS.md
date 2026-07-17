@@ -483,19 +483,23 @@ shell script is `bash -n`/`shellcheck` clean and carries a `--dry-run-self-test`
 no network); the Python close-script carries a `--self-test`.
 
 - **`.github/workflows/bead-autoclose.yml` + `scripts/ci-close-merged-beads.py`**
-  (sq-84a8) — the **durable** auto-close-on-merge. On a merged PR
+  (sq-84a8; issue-native since #2475) — the **durable** auto-close-on-merge. On a merged PR
   (`pull_request: [closed]` gated on `merged == true` — the same shape as `flow-on.yml`),
-  it extracts the `sq-XXXX(.NN)` bead token(s) from the PR title + merge-commit subject,
-  closes ONLY matched beads that are currently open/in_progress/blocked (idempotent;
-  already-closed → no-op; minimal in-place edit of `.beads/issues.jsonl`), and commits the
-  result back to `main` with `[skip ci]` (least-privilege `contents: write`, the same
-  bot-commit idiom `bench.yml` uses for the perf floor). It runs AFTER merge, so it is
-  **NOT a gate** and never registers as a required check (`ci-summary / gate` polls the PR
-  head while the PR is OPEN; this workflow does not trigger on the open-PR events). It does
-  NOT install `bd` / rebuild the Dolt DB in CI — a full `bd export` round-trip churns ~1/3 of
-  the file cosmetically and would fight the orchestrator's canonical export — so it edits
-  the JSONL directly in the committed compact+ASCII style. The merge is verified against
-  the GitHub API as defense-in-depth on top of the `merged == true` event gate.
+  it extracts the `sq-XXXX(.NN)` bead token(s) from the PR title + merge-commit subject and
+  closes the **migrated GitHub issue** each bead maps to (resolved via the migration's
+  `<!-- bd-id:sq-… -->` body marker; `gh issue close --reason completed`, plain
+  `issues: write`). The original JSONL-commit-back design never persisted — the default
+  `GITHUB_TOKEN` cannot push to protected `main` (GH013 ruleset rejection, sq-roe3), and a
+  PR-based write from that token would hang forever because `GITHUB_TOKEN` events trigger
+  no workflows, so `ci-summary / gate` would never report. Epic (`kind:epic`) /
+  human-gated (`needs:*`) issues are never auto-closed; a bead with no marker-carrying
+  open issue (not yet migrated, or already closed) is a logged no-op, covered by the
+  manual `reconcile-merged-beads.sh` sweep. The script retains the minimal in-place
+  `.beads/issues.jsonl` edit mode for orchestrator use outside CI (CI passes
+  `--skip-jsonl`). It runs AFTER merge, so it is **NOT a gate** and never registers as a
+  required check (`ci-summary / gate` polls the PR head while the PR is OPEN; this
+  workflow does not trigger on the open-PR events). The merge is verified against the
+  GitHub API as defense-in-depth on top of the `merged == true` event gate.
 - **`scripts/bead-close-on-merge.sh <pr> [--apply]`** (Phase A) — the **manual** sibling of
   the bead-autoclose CI, for orchestrator use outside CI: closes the bead a PR
   maps to, but **only after verifying the merge against the API** (`gh pr view --json
