@@ -283,3 +283,152 @@ fn rdf_collection_without_vec_predicate_is_preserved() {
     .unwrap();
     assert_eq!(iris(&r, 0), vec!["http://ex/elem".to_string()], "{r:?}");
 }
+
+/// [SONNET-4.6] (sq-tb9p0) VG-GOV-3: the VG-VOC-1 unrecognised-predicate hard error states the
+/// highest `vec:` vocabulary revision this build implements, so a query written against a newer
+/// spec revision fails with the version gap named.
+#[test]
+fn unknown_vec_predicate_error_reports_the_vocabulary_revision() {
+    let (g, store) = fixture("unknown_pred_rev");
+    let err = query_vec(
+        &g,
+        "PREFIX vec: <http://sparq.dev/vec#>
+         SELECT ?node WHERE { ?node vec:teleport ( \"1,0\" 2 ) }",
+        &store,
+    )
+    .unwrap_err();
+    assert!(
+        err.contains(&format!(
+            "vocabulary revision {}",
+            sparq_vectors::vocab::VOCAB_REVISION
+        )),
+        "the VG-VOC-1 error must report the implemented vocabulary revision, got: {err}"
+    );
+}
+
+/// [SONNET-4.6] (sq-tb9p0) VG-TIE-1 through the mainline `vec:` surface: when candidates tie on
+/// score at the k boundary, top-k MEMBERSHIP is decided by ascending Unicode-codepoint order of
+/// the candidates' canonical N-Triples serialisations — reproducible across implementations,
+/// unlike the internal dictionary-id order. The tie group mixes an IRI with two inlined numeric
+/// literals, whose dict ids order NUMERICALLY (`"2"` below `"10"`, both above every IRI id) while
+/// the N-Triples keys order `"10"^^…` < `"2"^^…` < `<http://ex/z-tied>` — so an id-order
+/// tie-break would admit `z-tied` where the VG-TIE-1 rule admits `"10"^^xsd:integer`.
+#[test]
+fn boundary_score_tie_membership_is_by_ntriples_codepoint_order() {
+    let g = Graph::load_str(
+        r#"
+        <http://ex/top> <http://ex/num> "10"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        <http://ex/top> <http://ex/num> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+        <http://ex/z-tied> <http://ex/label> "z" .
+        "#,
+        "ntriples",
+    )
+    .unwrap();
+    let id = |s: &str| {
+        g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap()))
+            .unwrap()
+    };
+    let num = |n: &str| {
+        g.id_of(&Term::Literal(oxrdf::Literal::new_typed_literal(
+            n,
+            oxrdf::vocab::xsd::INTEGER,
+        )))
+        .unwrap()
+    };
+    let mut store = VectorStore::create(tmp_path("tie_break"), 2).unwrap();
+    store.put(id("http://ex/top"), &[1.0, 0.0]).unwrap(); // cos 1.0 to the query
+    store.put(id("http://ex/z-tied"), &[0.6, 0.8]).unwrap(); // cos 0.6
+    store.put(num("10"), &[0.6, -0.8]).unwrap(); // cos 0.6
+    store.put(num("2"), &[3.0, 4.0]).unwrap(); // cos 0.6 (scaled twin)
+    // k=2: one slot above the boundary (`top`), one slot for the three-way 0.6 tie — the
+    // smallest N-Triples key `"10"^^xsd:integer` must be the admitted member.
+    let r = query_vec(
+        &g,
+        "PREFIX vec: <http://sparq.dev/vec#>
+         SELECT ?node WHERE { ?node vec:nearest ( \"1,0\" 2 ) }",
+        &store,
+    )
+    .unwrap();
+    let mut got: Vec<String> = r
+        .rows
+        .iter()
+        .filter_map(|row| row[0].as_ref().map(|t| t.to_string()))
+        .collect();
+    got.sort();
+    assert_eq!(
+        got,
+        vec![
+            "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>".to_string(),
+            "<http://ex/top>".to_string()
+        ],
+        "{r:?}"
+    );
+}
+
+/// [SONNET-4.6] (sq-tb9p0) VG-MET-4 through the mainline `vec:` surface: a store whose persisted
+/// provenance declares a non-cosine metric is REJECTED by the cosine-only query surface — a hard
+/// error, not well-formed meaningless scores. Needs `spqv-provenance` to bind a provenance.
+#[cfg(feature = "spqv-provenance")]
+mod declared_metric {
+    use super::{fixture, iris, tmp_path};
+    use oxrdf::{NamedNode, Term};
+    use sparq_core::Graph;
+    use sparq_vectors::{
+        query_vec, EmbeddingMetric as Metric, EmbeddingProvenance, Normalization, VectorStore,
+    };
+
+    #[test]
+    fn non_cosine_declared_metric_is_rejected() {
+        let g = Graph::load_str(
+            "<http://ex/a> <http://ex/label> \"alpha\" .",
+            "ntriples",
+        )
+        .unwrap();
+        let id = g
+            .id_of(&Term::NamedNode(NamedNode::new("http://ex/a").unwrap()))
+            .unwrap();
+        let mut store = VectorStore::create(tmp_path("euclid_metric"), 2)
+            .unwrap()
+            .with_provenance(EmbeddingProvenance::new(
+                "m",
+                Metric::Euclidean,
+                Normalization::None,
+            ));
+        store.put(id, &[1.0, 0.0]).unwrap();
+        let err = query_vec(
+            &g,
+            "PREFIX vec: <http://sparq.dev/vec#>
+             SELECT ?node WHERE { ?node vec:nearest ( \"1,0\" 1 ) }",
+            &store,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("euclidean") && err.contains("cosine"),
+            "expected the cross-metric rejection to name both metrics, got: {err}"
+        );
+    }
+
+    #[test]
+    fn declared_cosine_metric_is_accepted() {
+        let (g, store) = fixture("cosine_metric_base");
+        // Rebind the same vectors under a declared-cosine provenance: the mainline accepts it.
+        let mut prov_store = VectorStore::create(tmp_path("cosine_metric"), 2)
+            .unwrap()
+            .with_provenance(EmbeddingProvenance::new(
+                "m",
+                Metric::Cosine,
+                Normalization::L2,
+            ));
+        for (id, v) in store.iter() {
+            prov_store.put(id, v).unwrap();
+        }
+        let r = query_vec(
+            &g,
+            "PREFIX vec: <http://sparq.dev/vec#>
+             SELECT ?node WHERE { ?node vec:nearest ( \"1,0\" 1 ) }",
+            &prov_store,
+        )
+        .unwrap();
+        assert_eq!(iris(&r, 0), vec!["http://ex/a".to_string()], "{r:?}");
+    }
+}

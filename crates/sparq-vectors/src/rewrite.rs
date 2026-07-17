@@ -78,7 +78,8 @@
 //! The store is per-graph (dictionary-local ids), so hits come from the store
 //! you pass — typically the one built against the default graph.
 
-use crate::ann::nearest_exact;
+use crate::ann::{nearest_exact, nearest_exact_tiebreak};
+use crate::spqv_provenance::Metric;
 use crate::store::VectorStore;
 use crate::vocab;
 // [OPUS-4.8] (sq-z589, epic sq-3183) The approximate backend the `*_approx` entry points search
@@ -138,6 +139,20 @@ trait UnfilteredSearch {
     /// Top-`k` `(id, cosine)` by similarity to `query`, best first (same contract as
     /// [`nearest_exact`]: all-zero query → no results).
     fn search(&self, query: &[f32], k: usize) -> Vec<(Id, f32)>;
+
+    /// [SONNET-4.6] (sq-tb9p0) Answer-exact top-`k` with the VG-TIE-1 deterministic boundary
+    /// tie-break ([`nearest_exact_tiebreak`]) and the seed already excluded, or `None` when this
+    /// backend cannot honour the rule — an APPROXIMATE backend has recall < 1 and no true
+    /// boundary to break ties at, so it keeps the plain [`search`](Self::search) path.
+    fn search_tied(
+        &self,
+        _query: &[f32],
+        _k: usize,
+        _graph: &Graph,
+        _exclude: Option<Id>,
+    ) -> Option<Vec<(Id, f32)>> {
+        None
+    }
 }
 
 /// The exact full-scan backend — preserves the pre-sq-z589 `vec:` behaviour exactly.
@@ -148,6 +163,16 @@ struct ExactSearch<'a> {
 impl UnfilteredSearch for ExactSearch<'_> {
     fn search(&self, query: &[f32], k: usize) -> Vec<(Id, f32)> {
         nearest_exact(self.store, query, k)
+    }
+
+    fn search_tied(
+        &self,
+        query: &[f32],
+        k: usize,
+        graph: &Graph,
+        exclude: Option<Id>,
+    ) -> Option<Vec<(Id, f32)>> {
+        Some(nearest_exact_tiebreak(self.store, graph, query, k, exclude))
     }
 }
 
@@ -271,6 +296,28 @@ fn prepare_with(
     // no fingerprint and are left to work as before — we only check when we can.
     if store.fingerprint().is_some() {
         store.check_graph(graph)?;
+    }
+    // [SONNET-4.6] (sq-tb9p0) VG-MET-1/VG-MET-4 (mainline): the `vec:` query surface evaluates
+    // exactly ONE metric — cosine similarity. A store whose persisted v3 provenance declares a
+    // DIFFERENT metric must be rejected, not scored: evaluating a cosine ranking over vectors
+    // embedded for another metric returns well-formed but meaningless numbers. A legacy v1/v2
+    // store (or one built without binding a provenance) declares nothing and is left to work as
+    // before — implicit cosine, exactly the pre-provenance behaviour; the strict fail-closed
+    // check for those is `VectorStore::check_provenance`. The declared NORMALIZATION regime is
+    // deliberately NOT a rejection axis on this path: the exact scan computes cosine with the
+    // norms taken at comparison time (scale-invariant), so both declared regimes (`none` / `l2`)
+    // are evaluated faithfully under the declared cosine metric and no cross-normalisation
+    // mismatch can arise here.
+    if let Some(prov) = store.provenance() {
+        if prov.metric != Metric::Cosine {
+            return Err(format!(
+                "vec: this store declares the '{}' distance metric, but the vec: query surface \
+                 evaluates cosine similarity only; refusing the cross-metric evaluation (the \
+                 scores would be well-formed but meaningless). Rebuild the store under cosine, \
+                 or rank it through a '{}'-aware code path",
+                prov.metric, prov.metric
+            ));
+        }
     }
     let query = spargebra::SparqlParser::new()
         .parse_query(sparql)
@@ -405,8 +452,14 @@ fn rewrite_bgp(
             vocab::NEAREST => reqs.push(parse_nearest(tp, &lists)?),
             vocab::SEARCH => reqs.push(parse_search(tp, &lists)?),
             _ => {
+                // [SONNET-4.6] (sq-tb9p0) VG-GOV-3: the VG-VOC-1 hard error states the highest
+                // vocabulary revision this build implements, so a query written against a NEWER
+                // spec revision's term fails with the version gap named, not just "unknown".
                 return Err(format!(
-                    "vec: unknown magic predicate <{iri}> (supported: vec:nearest, vec:search)"
+                    "vec: unknown magic predicate <{}> (supported: vec:nearest, vec:search; \
+                     this build implements vec: vocabulary revision {})",
+                    iri,
+                    vocab::VOCAB_REVISION
                 ))
             }
         }
@@ -713,7 +766,14 @@ fn run_knn(
                     .take(req.k)
                     .collect());
             }
-            // Over-fetch by one and drop the seed itself (the searcher may be exact or approximate).
+            // [SONNET-4.6] (sq-tb9p0) Answer-exact path: rank with the VG-TIE-1 boundary
+            // tie-break (seed excluded before ranking, so the boundary is computed over the
+            // true candidate pool).
+            if let Some(hits) = searcher.search_tied(query, req.k, graph, Some(id)) {
+                return Ok(hits);
+            }
+            // Approximate backend: over-fetch by one and drop the seed itself (recall < 1 —
+            // no true boundary exists to tie-break at).
             Ok(searcher
                 .search(query, req.k + 1)
                 .into_iter()
@@ -735,6 +795,11 @@ fn run_knn(
                 // identical answer either way.
                 let (hits, _est) =
                     nearest_filtered_costed(store, v, mask, req.k, &CostModel::default());
+                return Ok(hits);
+            }
+            // [SONNET-4.6] (sq-tb9p0) Answer-exact path with the VG-TIE-1 boundary tie-break;
+            // an approximate backend falls through to its plain search.
+            if let Some(hits) = searcher.search_tied(v, req.k, graph, None) {
                 return Ok(hits);
             }
             Ok(searcher.search(v, req.k))

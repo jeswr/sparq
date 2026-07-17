@@ -114,6 +114,8 @@ EmbeddingProvenance { model_id, model_version, content_version, metric: Embeddin
 EmbeddingProvenance::new(model_id, EmbeddingMetric, Normalization)   // other axes empty; set fields directly (NOT Default — metric/norm load-bearing)
 EmbeddingMetric::{Cosine, Dot, Euclidean};  Normalization::{None, L2}   // typed axes; from_tag() fail-closed on an unknown tag
 prov.compatible_with(&query_prov) -> Result<(), String>   // compatible IFF every DEFINED axis equal; reserved area EXCLUDED (KERN boundary)
+prov.to_rdf(store: NamedNodeRef, dim) -> Vec<Triple>   // [SONNET-4.6] sq-tb9p0 VG-PROV-5: the record as RDF in prov_vocab
+//   (spqvp:) terms — model/metric/normalization/dimension always; version/verbalization axes only when non-empty
 // KERN BOUNDARY: `reserved` is a versioned OPAQUE TLV — extension fields RESERVED pending the cross-implementation profile (#1746).
 //   NO encoder-version-hash / codebook-hash / D semantics defined; it round-trips byte-for-byte and does NOT gate compatibility.
 // v3 WRITE (feature = "spqv-provenance" ONLY): binding a provenance selects the v3 path; else the writer emits v2 (unchanged).
@@ -149,7 +151,12 @@ VectorStore::sibling_delta_path(&Path) -> PathBuf;  VectorStore::has_persisted_d
 //   `save_delta`/`open_with_delta` the survive-a-restart-without-compact path. On a build-phase store add==put.
 
 // --- search (src/ann.rs) --- all return cosine in [-1,1], best first; zero query -> empty
-nearest_exact(&VectorStore, query: &[f32], k) -> Vec<(Id, f32)>                 // ground-truth full scan
+nearest_exact(&VectorStore, query: &[f32], k) -> Vec<(Id, f32)>                 // ground-truth full scan; ascending-id ties
+nearest_exact_tiebreak(&VectorStore, &Graph, query: &[f32], k, exclude: Option<Id>) -> Vec<(Id, f32)>  // [SONNET-4.6] sq-tb9p0
+//   VG-TIE-1 (spec site/specs/sparql-vector-genai.typ): membership at a BOUNDARY score tie is decided by ascending
+//   Unicode-codepoint order of the candidates' canonical N-Triples serialisations (reproducible ACROSS implementations,
+//   unlike id order); keys computed only for the boundary tie group. `exclude` = seed-self-exclusion. Used by the
+//   answer-exact `vec:` mainline (exact unfiltered path); approximate backends keep plain search (no true boundary).
 # feature = "metadata-sidecar": same ranking/scores, decorated after ranking
 nearest_exact_with_meta(&VectorStore, query: &[f32], k) -> Vec<(Id, f32, Option<String>)>
 nearest_term_exact(&VectorStore, &Graph, &Term, k) -> Vec<(Term, f32)>          // UNCHECKED: stale store -> silently wrong
@@ -248,7 +255,10 @@ query_vec_with_budget(&Graph, &str, &VectorStore, &QueryBudget) -> Result<QueryR
 prepare_vec(&Graph, &str, &VectorStore) -> Result<PreparedQuery, String>          // compose with engine *_prepared entry points
 rewrite_query(Query, &Graph, &VectorStore) -> Result<Query, String>              // spargebra-algebra rewrite only
 // re-exported when the feature is on: query_prepared, PreparedQuery, QueryBudget, QueryResult (no direct sparq-engine dep needed)
-// vocab: vec::{VEC_NS, NEAREST, SEARCH}  (http://sparq.dev/vec#)  — exact-scan (nearest_exact) KNN
+// vocab: vec::{VEC_NS, NEAREST, SEARCH, VOCAB_REVISION=1}  (http://sparq.dev/vec#)  — exact-scan KNN with the VG-TIE-1
+//   boundary tie-break (nearest_exact_tiebreak); the VG-VOC-1 unknown-predicate error reports VOCAB_REVISION (VG-GOV-3)
+// [SONNET-4.6] sq-tb9p0 VG-MET-4 (mainline): prepare/query REJECT a store whose v3 provenance declares a NON-cosine
+//   metric (the vec: surface evaluates cosine only); a legacy no-provenance store keeps the implicit-cosine behaviour
 // [OPUS-4.8] sq-z589: with `approx-ann` ALSO on, the *_approx twins take a &DiskAnnIndex and run the
 //   UNFILTERED vec: k-NN through that Vamana index instead of the full scan (APPROXIMATE, recall < 1.0):
 query_vec_approx(&Graph, &str, &VectorStore, &DiskAnnIndex) -> Result<QueryResult, String>   // feature = "vec-predicate" + "approx-ann"
@@ -530,8 +540,10 @@ The argument lists `( … )` are ordinary SPARQL RDF collections (spargebra lowe
 the neighbour position(s) must be variables; `query`/`k` must be constants; the object list must
 be exactly `( query k )` and the `vec:search` subject exactly `( ?node ?score )`; a query-vector
 literal's dimension must match the store; any other `vec:` IRI is unknown. An absent/unembedded
-seed IRI yields no rows. By default the unfiltered search is the **exact** `nearest_exact` scan
-(deterministic, answer-exact — a fine default below ~10⁵ vectors).
+seed IRI yields no rows. By default the unfiltered search is the **exact** full scan
+(deterministic, answer-exact — a fine default below ~10⁵ vectors), with top-k membership at a
+boundary score tie decided by ascending N-Triples codepoint order (VG-TIE-1, sq-tb9p0) so two
+answer-exact implementations return the same top-k set on the same store.
 
 **Approximate `vec:` for large stores (opt-in, ALSO `approx-ann`, sq-z589).** With BOTH
 `vec-predicate` *and* `approx-ann` on, `query_vec_approx` / `prepare_vec_approx` take an extra

@@ -131,6 +131,66 @@ pub fn nearest_term_exact(
         .collect()
 }
 
+/// [SONNET-4.6] (sq-tb9p0) **Answer-exact top-`k` with the deterministic boundary tie-break**
+/// (spec assertion VG-TIE-1 of `site/specs/sparql-vector-genai.typ`): when candidates tie on
+/// score at the k boundary (the k-th best and the next-best scores are equal), result-set
+/// *membership* is decided by the candidates' **canonical N-Triples serialisation**, admitted in
+/// ascending Unicode-codepoint order, until `k` results are reached. The tie-break key is fixed
+/// by the RDF term alone (an IRI serialises as `<iri>`; a literal as its quoted, escaped lexical
+/// form plus its `^^<datatype>`/`@lang` suffix), so two answer-exact implementations return the
+/// SAME top-k set on the same store — unlike [`nearest_exact`]'s ascending-id tie-break, which is
+/// deterministic within one build but not reproducible across dictionaries. UTF-8 byte order IS
+/// codepoint order, so the comparison is a plain byte compare of the serialised terms.
+///
+/// The N-Triples keys are computed only for the boundary tie group (candidates whose score
+/// equals the k-th best), never for the whole store. Candidates strictly above the boundary are
+/// admitted unconditionally; ties strictly inside the top-k need no rule (the solution multiset
+/// is unordered). `exclude` drops one id from the candidate pool before ranking — the
+/// seed-self-exclusion of a query-by-node search (`None` for a query-by-vector search).
+/// `k = 0` and an all-zero `query` yield no results, exactly as [`nearest_exact`].
+///
+/// Like [`nearest_term_exact`], this does NOT verify `store` matches `graph`; run
+/// [`VectorStore::check_graph`] first when the store carries a fingerprint.
+pub fn nearest_exact_tiebreak(
+    store: &VectorStore,
+    graph: &Graph,
+    query: &[f32],
+    k: usize,
+    exclude: Option<Id>,
+) -> Vec<(Id, f32)> {
+    use std::cmp::Ordering;
+    if k == 0 || query.iter().all(|&v| v == 0.0) {
+        return Vec::new();
+    }
+    let mut scored: Vec<(Id, f32)> = store
+        .iter()
+        .filter(|&(id, _)| Some(id) != exclude)
+        .map(|(id, v)| (id, cosine(query, v)))
+        .collect();
+    scored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    if scored.len() <= k {
+        return scored;
+    }
+    let boundary = scored[k - 1].1;
+    if scored[k].1.total_cmp(&boundary) != Ordering::Equal {
+        // No tie straddles the k boundary: membership is already determined.
+        scored.truncate(k);
+        return scored;
+    }
+    // The tie group is the contiguous run of boundary-scored candidates [lo, hi) in the
+    // score-descending order; `partition_point`'s predicates are monotone over that order.
+    let lo = scored.partition_point(|&(_, s)| s.total_cmp(&boundary) == Ordering::Greater);
+    let hi = scored.partition_point(|&(_, s)| s.total_cmp(&boundary) != Ordering::Less);
+    let mut tied: Vec<(Id, f32, String)> = scored[lo..hi]
+        .iter()
+        .map(|&(id, s)| (id, s, graph.dict.term(id).to_string()))
+        .collect();
+    tied.sort_unstable_by(|a, b| a.2.cmp(&b.2));
+    let mut out = scored[..lo].to_vec();
+    out.extend(tied.into_iter().take(k - lo).map(|(id, s, _)| (id, s)));
+    out
+}
+
 /// [OPUS-4.8] (sq-32i5) [`nearest_term_exact`] with the staleness check: returns `Err` if
 /// `store` was built against a different graph generation than `graph` (which would otherwise
 /// return silently-wrong neighbours), else `Ok` with the neighbours.
@@ -509,6 +569,100 @@ mod tests {
     fn cosine_panics_on_mismatched_dims() {
         // A dim mismatch is a programming error, not a silently-truncated comparison.
         cosine(&[1.0, 0.0, 0.0], &[1.0, 0.0]);
+    }
+
+    // [SONNET-4.6] (sq-tb9p0) Direct unit gate for the VG-TIE-1 boundary tie-break: membership at
+    // a score tie on the k boundary is decided by ascending N-Triples codepoint order of the
+    // candidates' serialised terms, NOT by dictionary-id order (which is deterministic within one
+    // build but not reproducible across implementations).
+    mod tiebreak {
+        use super::super::{nearest_exact_tiebreak, VectorStore};
+        use oxrdf::{NamedNode, Term};
+        use sparq_core::Graph;
+
+        /// Three candidates tied at cosine 0.6 to the +x query (0.6/0.8-direction vectors, one
+        /// scaled to prove magnitude-invariance) plus one exact match and one far vector. The
+        /// tie group is chosen so **dictionary-id order and N-Triples key order genuinely
+        /// disagree**: the dict inlines numeric literals into a high-id numeric-order range
+        /// (`"2"` gets a LOWER id than `"10"`, and every IRI id is lower still), while the
+        /// N-Triples codepoint order is `"10"^^…` < `"2"^^…` < `<http://ex/z-tied>`. An
+        /// implementation that tie-broke by ascending id would admit `z-tied` first — the
+        /// VG-TIE-1 rule admits `"10"^^xsd:integer` — so the tests discriminate the two.
+        fn fixture(name: &str) -> (Graph, VectorStore) {
+            let g = Graph::load_str(
+                r#"
+                <http://ex/top> <http://ex/num> "10"^^<http://www.w3.org/2001/XMLSchema#integer> .
+                <http://ex/top> <http://ex/num> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+                <http://ex/z-tied> <http://ex/label> "z" .
+                <http://ex/far> <http://ex/label> "far" .
+                "#,
+                "ntriples",
+            )
+            .unwrap();
+            let id = |s: &str| g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap())).unwrap();
+            let num = |n: &str| {
+                g.id_of(&Term::Literal(oxrdf::Literal::new_typed_literal(
+                    n,
+                    oxrdf::vocab::xsd::INTEGER,
+                )))
+                .unwrap()
+            };
+            let path = std::env::temp_dir()
+                .join(format!("sparq_vec_tiebreak_{}_{}.spqv", std::process::id(), name));
+            let mut store = VectorStore::create(path, 2).unwrap();
+            store.put(id("http://ex/top"), &[1.0, 0.0]).unwrap(); // cos 1.0
+            store.put(id("http://ex/z-tied"), &[0.6, 0.8]).unwrap(); // cos 0.6
+            store.put(num("10"), &[0.6, -0.8]).unwrap(); // cos 0.6
+            store.put(num("2"), &[3.0, 4.0]).unwrap(); // cos 0.6 (scaled)
+            store.put(id("http://ex/far"), &[-1.0, 0.0]).unwrap(); // cos -1.0
+            (g, store)
+        }
+
+        const TEN: &str = "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>";
+        const TWO: &str = "\"2\"^^<http://www.w3.org/2001/XMLSchema#integer>";
+
+        fn iris(g: &Graph, hits: &[(sparq_core::dict::Id, f32)]) -> Vec<String> {
+            hits.iter().map(|&(id, _)| g.dict.term(id).to_string()).collect()
+        }
+
+        #[test]
+        fn boundary_tie_admits_ascending_ntriples_key_order() {
+            let (g, store) = fixture("boundary");
+            // k=2: `top` (1.0) is strictly above; ONE slot remains for the three 0.6-tied
+            // candidates → the smallest N-Triples key `"10"^^xsd:integer` wins (id order would
+            // have picked `<http://ex/z-tied>` — the lowest id — instead).
+            let hits = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 2, None);
+            assert_eq!(iris(&g, &hits), vec!["<http://ex/top>".to_string(), TEN.to_string()]);
+            // k=3: two slots for the tie group → "10" then "2"; z-tied is still excluded.
+            let hits = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 3, None);
+            assert_eq!(
+                iris(&g, &hits),
+                vec!["<http://ex/top>".to_string(), TEN.to_string(), TWO.to_string()]
+            );
+        }
+
+        #[test]
+        fn no_boundary_tie_matches_plain_top_k_and_degenerate_cases_are_empty() {
+            let (g, store) = fixture("plain");
+            // k=1: the 1.0 score is unique — no boundary tie, plain top-k.
+            let hits = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 1, None);
+            assert_eq!(iris(&g, &hits), vec!["<http://ex/top>".to_string()]);
+            // k ≥ store size returns everything (all candidates admitted, no boundary).
+            assert_eq!(nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 99, None).len(), 5);
+            // k=0 and the all-zero query yield no results (VG-DEG-2/3 alignment).
+            assert!(nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 0, None).is_empty());
+            assert!(nearest_exact_tiebreak(&store, &g, &[0.0, 0.0], 3, None).is_empty());
+        }
+
+        #[test]
+        fn exclude_drops_the_seed_before_ranking() {
+            let (g, store) = fixture("exclude");
+            let top = g.id_of(&Term::NamedNode(NamedNode::new("http://ex/top").unwrap())).unwrap();
+            // With the exact-match seed excluded, k=1 lands directly on the boundary tie group.
+            let hits = nearest_exact_tiebreak(&store, &g, &[1.0, 0.0], 1, Some(top));
+            assert_eq!(iris(&g, &hits), vec![TEN.to_string()]);
+            assert!(hits.iter().all(|&(id, _)| id != top), "the excluded seed must not appear");
+        }
     }
 
     // [FABLE-5] (sq-jk7w7) Peak-memory contract of `build_with`: the point set handed to the
