@@ -365,6 +365,121 @@ fn boundary_score_tie_membership_is_by_ntriples_codepoint_order() {
     );
 }
 
+/// [SONNET-4.6] (sq-tb9p0) VG-TIE-1 through the FILTERED `vec:` execution path — the branch the
+/// unfiltered tie test above cannot reach (a constrained neighbour variable returns through the
+/// cost-model'd filtered search, not `search_tied`). VG-FILT-2 makes this load-bearing: in
+/// answer-exact mode the filtered top-k MUST equal post-filtering the unfiltered (tie-broken)
+/// retrieval, so boundary-tie membership in the ADMITTED pool must follow the same N-Triples
+/// codepoint rule, with the seed excluded before the boundary is determined.
+#[cfg(feature = "filtered-ann")]
+mod filtered_boundary_tiebreak {
+    use super::tmp_path;
+    use oxrdf::{NamedNode, Term};
+    use sparq_core::Graph;
+    use sparq_vectors::{query_vec, QueryResult, VectorStore};
+
+    /// `<sel> <admits> …` marks the BGP-admitted candidates: `top` plus a three-way cosine-0.6
+    /// tie group whose dictionary-id order and N-Triples key order genuinely DISAGREE (the dict
+    /// inlines numeric literals into a high-id numeric-order range, so ids order `z-tied` <
+    /// `"2"` < `"10"` while the N-Triples keys order `"10"^^…` < `"2"^^…` < `<http://ex/z-tied>`).
+    /// `near-but-out` (cos ~0.99 — closer than the whole tie group) is NOT admitted, so the mask
+    /// genuinely restricts the pool. An id-order tie-break admits `z-tied`; VG-TIE-1 admits
+    /// `"10"^^xsd:integer` — the tests discriminate the two.
+    fn fixture(name: &str) -> (Graph, VectorStore) {
+        let g = Graph::load_str(
+            r#"
+            <http://ex/sel> <http://ex/admits> <http://ex/top> .
+            <http://ex/sel> <http://ex/admits> <http://ex/z-tied> .
+            <http://ex/sel> <http://ex/admits> "10"^^<http://www.w3.org/2001/XMLSchema#integer> .
+            <http://ex/sel> <http://ex/admits> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+            <http://ex/near-but-out> <http://ex/label> "out" .
+            "#,
+            "ntriples",
+        )
+        .unwrap();
+        let id = |s: &str| {
+            g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap()))
+                .unwrap()
+        };
+        let num = |n: &str| {
+            g.id_of(&Term::Literal(oxrdf::Literal::new_typed_literal(
+                n,
+                oxrdf::vocab::xsd::INTEGER,
+            )))
+            .unwrap()
+        };
+        let mut store = VectorStore::create(tmp_path(name), 2).unwrap();
+        store.put(id("http://ex/top"), &[1.0, 0.0]).unwrap(); // cos 1.0, admitted
+        store.put(id("http://ex/z-tied"), &[0.6, 0.8]).unwrap(); // cos 0.6, admitted
+        store.put(num("10"), &[0.6, -0.8]).unwrap(); // cos 0.6, admitted
+        store.put(num("2"), &[3.0, 4.0]).unwrap(); // cos 0.6 (scaled twin), admitted
+        store.put(id("http://ex/near-but-out"), &[0.9, 0.1]).unwrap(); // cos ~0.99, NOT admitted
+        (g, store)
+    }
+
+    fn sorted_terms(r: &QueryResult) -> Vec<String> {
+        let mut got: Vec<String> = r
+            .rows
+            .iter()
+            .filter_map(|row| row[0].as_ref().map(|t| t.to_string()))
+            .collect();
+        got.sort();
+        got
+    }
+
+    const TEN: &str = "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>";
+
+    /// Vector-query form, k=2 restricted to the admitted set: `top` is strictly above the
+    /// boundary; ONE slot remains for the three-way 0.6 tie → the smallest N-Triples key
+    /// `"10"^^xsd:integer` must be the admitted member (an id-order tie-break — the previous
+    /// filtered early-return behaviour — would have admitted `z-tied` instead), and the closer
+    /// non-admitted `near-but-out` must stay excluded by the mask.
+    #[test]
+    fn vector_query_boundary_tie_membership_is_by_ntriples_key() {
+        let (g, store) = fixture("filt_tie_vec");
+        let r = query_vec(
+            &g,
+            "PREFIX vec: <http://sparq.dev/vec#>
+             SELECT ?node WHERE {
+               <http://ex/sel> <http://ex/admits> ?node .
+               ?node vec:nearest ( \"1,0\" 2 ) .
+             }",
+            &store,
+        )
+        .unwrap();
+        assert_eq!(
+            sorted_terms(&r),
+            vec![TEN.to_string(), "<http://ex/top>".to_string()],
+            "filtered boundary-tie membership must follow the N-Triples key (VG-TIE-1) and the \
+             mask must exclude near-but-out (VG-FILT-2/3): {r:?}"
+        );
+    }
+
+    /// Node-seed form, k=1: the seed `top` sits in the mask and must leave the admitted pool
+    /// BEFORE the boundary is determined, so the boundary IS the three-way 0.6 tie and the
+    /// smallest N-Triples key `"10"^^xsd:integer` wins (the previous over-fetch-then-drop-seed
+    /// behaviour tie-broke by id and returned `z-tied`).
+    #[test]
+    fn node_seed_boundary_tie_excludes_seed_before_the_boundary() {
+        let (g, store) = fixture("filt_tie_seed");
+        let r = query_vec(
+            &g,
+            "PREFIX vec: <http://sparq.dev/vec#>
+             SELECT ?node WHERE {
+               <http://ex/sel> <http://ex/admits> ?node .
+               ?node vec:nearest ( <http://ex/top> 1 ) .
+             }",
+            &store,
+        )
+        .unwrap();
+        assert_eq!(
+            sorted_terms(&r),
+            vec![TEN.to_string()],
+            "the seed must be excluded before the boundary; the tie must break by N-Triples key: {r:?}"
+        );
+    }
+}
+
 /// [SONNET-4.6] (sq-tb9p0) VG-MET-4 through the mainline `vec:` surface: a store whose persisted
 /// provenance declares a non-cosine metric is REJECTED by the cosine-only query surface — a hard
 /// error, not well-formed meaningless scores. Needs `spqv-provenance` to bind a provenance.

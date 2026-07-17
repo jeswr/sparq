@@ -217,7 +217,8 @@ pub use filter::{nearest_exact_filtered, FilterConfig, IdMask};
 // [OPUS-4.8] (sq-7hx6) Pre-filter vs post-filter cost model — the `filtered-ann` feature only.
 #[cfg(feature = "filtered-ann")]
 pub use cost::{
-    nearest_filtered_costed, overfetch_target, postfilter_exact, CostEstimate, CostModel, Strategy,
+    nearest_filtered_costed, nearest_filtered_costed_tiebreak, overfetch_target, postfilter_exact,
+    CostEstimate, CostModel, Strategy,
 };
 // [OPUS-4.8] (sq-ip3a) Pluggable ANN backend + iterative over-fetch filtered path — `filtered-ann`
 // only. `ApproxBackend` is additionally `approx-ann` (re-exported below).

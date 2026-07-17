@@ -156,7 +156,8 @@ nearest_exact_tiebreak(&VectorStore, &Graph, query: &[f32], k, exclude: Option<I
 //   VG-TIE-1 (spec site/specs/sparql-vector-genai.typ): membership at a BOUNDARY score tie is decided by ascending
 //   Unicode-codepoint order of the candidates' canonical N-Triples serialisations (reproducible ACROSS implementations,
 //   unlike id order); keys computed only for the boundary tie group. `exclude` = seed-self-exclusion. Used by the
-//   answer-exact `vec:` mainline (exact unfiltered path); approximate backends keep plain search (no true boundary).
+//   answer-exact `vec:` mainline — exact unfiltered path AND (via nearest_filtered_costed_tiebreak, `filtered-ann`)
+//   the filtered path over the mask-admitted pool; approximate backends keep plain search (no true boundary).
 # feature = "metadata-sidecar": same ranking/scores, decorated after ranking
 nearest_exact_with_meta(&VectorStore, query: &[f32], k) -> Vec<(Id, f32, Option<String>)>
 nearest_term_exact(&VectorStore, &Graph, &Term, k) -> Vec<(Term, f32)>          // UNCHECKED: stale store -> silently wrong
@@ -218,7 +219,10 @@ impl CostModel { fn decide(mask_len, store_len, k) -> CostEstimate }            
 Strategy::{PreFilter, PostFilter}                                                // the chosen branch (assert the decision)
 CostEstimate { mask_len, store_len, k, prefilter_cost, postfilter_cost, strategy }   // the modelled estimate behind a decision
 postfilter_exact(&VectorStore, query: &[f32], &IdMask, k) -> Vec<(Id, f32)>      // scan WHOLE store, drop non-masked -> IDENTICAL to nearest_exact_filtered (no over-fetch boundary: full ranking)
-nearest_filtered_costed(&VectorStore, &[f32], &IdMask, k, &CostModel) -> (Vec<(Id, f32)>, CostEstimate)   // decide + run chosen branch
+nearest_filtered_costed(&VectorStore, &[f32], &IdMask, k, &CostModel) -> (Vec<(Id, f32)>, CostEstimate)   // decide + run chosen branch; ascending-id ties
+nearest_filtered_costed_tiebreak(&VectorStore, &Graph, &[f32], &IdMask, k, exclude: Option<Id>, &CostModel) -> (Vec<(Id, f32)>, CostEstimate)
+//   [SONNET-4.6] the same decide+run with VG-TIE-1 boundary-tie membership over the mask-ADMITTED pool, `exclude` (seed)
+//   dropped BEFORE the boundary is determined — what the filtered `vec:` rewrite path calls (keeps VG-FILT-2 exact)
 overfetch_target(k, mask_len, store_len) -> usize                               // ceil(k/selectivity) clamped; the FIRST fetch size for the iterative over-fetch path below (exact backend never under-fills, so it's a no-op there)
 // HEURISTIC over an ESTIMATE, not optimal: scatter_penalty is one modelled constant; pre/post return the IDENTICAL top-k either way (answer-safe)
 
@@ -264,7 +268,7 @@ rewrite_query(Query, &Graph, &VectorStore) -> Result<Query, String>             
 query_vec_approx(&Graph, &str, &VectorStore, &DiskAnnIndex) -> Result<QueryResult, String>   // feature = "vec-predicate" + "approx-ann"
 query_vec_approx_with_budget(&Graph, &str, &VectorStore, &DiskAnnIndex, &QueryBudget) -> Result<QueryResult, String>
 prepare_vec_approx(&Graph, &str, &VectorStore, &DiskAnnIndex) -> Result<PreparedQuery, String>
-//   The FILTERED path is unchanged (still cost-model'd nearest_filtered_costed); approx seam = unfiltered scan only.
+//   The FILTERED path is unchanged (still cost-model'd nearest_filtered_costed_tiebreak); approx seam = unfiltered scan only.
 // [OPUS-4.8] sq-36ol: with `filtered-ann` ALSO on, the BGP→IdMask a constrained `vec:` neighbour
 //   derives is CACHED across prepares, keyed by (constraining sub-BGP, graph Fingerprint). The
 //   fingerprint folds dict_len + triple_count + a content hash over the dict term SET in a
@@ -604,7 +608,10 @@ let r = query_vec(&graph,
 The mask is exactly the set the engine binds to the neighbour variable when that connected
 sub-BGP is evaluated and the neighbour variable projected, so the filtered top-k is **identical to
 post-filtering the unfiltered top-k** by that same (now transitive) constraint — and therefore a
-subset of the unfiltered result. A pattern **disconnected** from the neighbour variable (no
+subset of the unfiltered result. Boundary-score-tie membership in the admitted pool follows the
+same VG-TIE-1 N-Triples rule as the unfiltered path (`nearest_filtered_costed_tiebreak`,
+sq-tb9p0), with a node-seed excluded from the pool *before* the boundary is determined — so the
+post-filter equivalence holds exactly, ties included (VG-FILT-2 in answer-exact mode). A pattern **disconnected** from the neighbour variable (no
 shared-variable path) is excluded, so it never narrows the mask. Each `vec:` request in a BGP gets
 its **own** connected-component mask, derived independently. If the neighbour variable is
 **unconstrained** (no pattern mentions it) the search falls back to the plain unfiltered

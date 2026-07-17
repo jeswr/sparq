@@ -158,7 +158,6 @@ pub fn nearest_exact_tiebreak(
     k: usize,
     exclude: Option<Id>,
 ) -> Vec<(Id, f32)> {
-    use std::cmp::Ordering;
     if k == 0 || query.iter().all(|&v| v == 0.0) {
         return Vec::new();
     }
@@ -168,6 +167,26 @@ pub fn nearest_exact_tiebreak(
         .map(|(id, v)| (id, cosine(query, v)))
         .collect();
     scored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    select_top_k_tiebreak(graph, scored, k)
+}
+
+/// [SONNET-4.6] The VG-TIE-1 boundary-membership rule applied to an already
+/// score-descending-sorted **complete** candidate ranking: candidates strictly above the k
+/// boundary are admitted unconditionally; a score tie straddling the boundary is admitted in
+/// ascending N-Triples codepoint order until `k` results are reached. Shared by
+/// [`nearest_exact_tiebreak`] (the whole store as the pool) and the filtered
+/// `nearest_filtered_costed_tiebreak` (`filtered-ann` only; the mask-admitted pool) so both
+/// apply the identical rule — the ranking must already have any seed exclusion applied, so
+/// the boundary is computed over the true candidate pool.
+pub(crate) fn select_top_k_tiebreak(
+    graph: &Graph,
+    mut scored: Vec<(Id, f32)>,
+    k: usize,
+) -> Vec<(Id, f32)> {
+    use std::cmp::Ordering;
+    if k == 0 {
+        return Vec::new();
+    }
     if scored.len() <= k {
         return scored;
     }
