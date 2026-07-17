@@ -124,6 +124,8 @@ This repo tracks work in **beads** (`bd`, a git-native dependency-graph issue tr
 
 ## Orchestration — delegate to sub-agents + run a continuous bead loop
 
+The **autonomous self-maintenance orchestrator** (issue → dispatcher → worker → PR) runs headless in the private [`jeswr/agent-account-registry`](https://github.com/jeswr/agent-account-registry) repo; see [`research/orchestration-private-registry-worker.md`](research/orchestration-private-registry-worker.md).
+
 If you are an ORCHESTRATING agent (driving multi-step work on this repo), three standing rules:
 
 1. **Delegate every substantive task to a sub-agent in an isolated git worktree** — implementation, research, test/triage, merge-conflict resolution, doc writing, AND the heavy verification/gating of a change. The orchestrator keeps only cheap glue: sequencing, `git merge`/`push`, worktree add/remove, bead bookkeeping (`bd close`/`export`), and reading one-line gate results. Do NOT run builds, toolchain installs, CI-log spelunking, or end-to-end gate runs in the main thread when an agent can — keep the orchestrator context small. Parallelise independent agents; serialise only CPU-heavy wall-clock *measurements* (those need a quiet box).
