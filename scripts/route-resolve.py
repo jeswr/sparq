@@ -55,6 +55,8 @@ def _self_test():
     chk("impl -> fable-led", (mc[0], ag, esc), ("fable", "sparq-rust-impl", False))
     # docs -> haiku-led
     chk("docs -> haiku", resolve(["role:docs", "area:x"], doc)[0][0], "haiku")
+    # [FABLE-5] UI ownership: site -> terra-led (GPT-5.6 codex, the original dashboard builder)
+    chk("site -> terra-led", resolve(["role:site", "area:site"], doc)[0], ["terra", "fable", "sonnet"])
     # no role -> defaults (fable-led)
     chk("no role -> defaults", resolve(["area:sparq-core"], doc)[0][0], "fable")
     # review role -> opus + escalate
