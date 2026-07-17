@@ -563,9 +563,11 @@ jobs:
 
   # ---- 3. server container -> ghcr.io ----
   # Pushes ghcr.io/<owner>/sparq-server using the workflow's own GITHUB_TOKEN — ghcr needs no
-  # extra secrets. This workflow only runs on tags, so every run pushes; a maintainer who does
-  # not want container publishing can delete this job (or add `if: false`) without affecting
-  # the binaries/release jobs above.
+  # extra secrets. This workflow only runs on `v*` tag pushes and manual `workflow_dispatch`
+  # (both deliberate releasing acts — see the trigger notes at the top), so every run pushes,
+  # including dispatch-driven developer/test releases; a maintainer who does not want container
+  # publishing can delete this job (or add `if: false`) without affecting the binaries/release
+  # jobs above.
   docker:
     name: build + push container (ghcr.io)
     runs-on: ubuntu-latest
