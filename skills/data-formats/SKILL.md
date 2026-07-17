@@ -26,6 +26,8 @@ Add the dependency (HDT is a separate, native-only crate):
 [dependencies]
 sparq-core = "0.1"            # default features include `parallel` (native)
 sparq-hdt  = "0.1"            # OPTIONAL — only if you load .hdt archives
+# To filter an HDT during its SPO decode instead of building the full Graph:
+# sparq-hdt = { version = "0.1", features = ["load-filter"] }
 oxrdf      = { version = "0.3", features = ["rdf-12"] }  # for Term/NamedNode at call sites
 ```
 
@@ -180,8 +182,30 @@ pub fn fork(&self) -> Graph               // mutable structural fork (Arc-shares
 ```rust
 pub fn load(path: impl AsRef<Path>) -> Result<Graph, Error>         // sniffs .hdt.gz/.hdt.zst/.hdt.bz2
 pub fn load_reader<R: BufRead>(reader: R) -> Result<Graph, Error>   // any buffered source
+
+// [GPT-5.6] sq-lsp7k.24 — opt-in `load-filter`; None means wildcard. Filtering
+// runs during the one-shot SPO walk and only accepted triples' terms enter the
+// returned Graph. An all-None pattern is identical to load_reader.
+#[cfg(feature = "load-filter")]
+pub type TriplePattern = (
+    Option<oxrdf::NamedOrBlankNode>, // subject
+    Option<oxrdf::NamedNode>,        // predicate
+    Option<oxrdf::Term>,             // object
+);
+#[cfg(feature = "load-filter")]
+pub fn load_reader_filtered<R: BufRead>(reader: R, pattern: &TriplePattern) -> Result<Graph, Error>
+#[cfg(feature = "load-filter")]
+pub fn stats_reader_filtered<R: BufRead>(reader: R, pattern: &TriplePattern) -> Result<HdtStats, Error>
+
 pub fn header(path: impl AsRef<Path>) -> Result<Graph, Error>       // HDT header metadata as a Graph
 pub fn header_reader<R: BufRead>(reader: R) -> Result<Graph, Error>
+pub fn stats(path: impl AsRef<Path>) -> Result<HdtStats, Error>     // dictionary counts + exact triples
+pub fn stats_reader<R: BufRead>(reader: R) -> Result<HdtStats, Error>
+pub struct HdtStats {
+    pub triples: usize, pub shared: usize, pub subjects_only: usize,
+    pub objects_only: usize, pub predicates: usize,
+}
+// HdtStats also provides distinct_subjects() and distinct_objects().
 // also: load_reader_via_upstream (differential oracle), graph_from_hdt, graph_from_reader
 
 // MEASUREMENT-ONLY (bench/parse's HDT stage split — NOT a production loader):
@@ -236,7 +260,20 @@ assert_eq!(g.named.len(), 1);          // each named graph is its own sub-Graph
 ```rust
 let g    = sparq_hdt::load("dataset.hdt")?;        // .hdt / .hdt.gz / .hdt.zst / .hdt.bz2 (by magic bytes)
 let meta = sparq_hdt::header("dataset.hdt")?;      // VoID stats / provenance as a queryable Graph
-// from memory: sparq_hdt::load_reader(std::io::Cursor::new(bytes))?
+let stats = sparq_hdt::stats("dataset.hdt")?;      // exact counts without a full graph decode
+assert_eq!(stats.distinct_subjects(), stats.shared + stats.subjects_only);
+let bytes = std::fs::read("dataset.hdt")?;
+// from memory: sparq_hdt::load_reader(std::io::Cursor::new(bytes.clone()))?
+// Predicate-filtered from memory (needs `load-filter`; None is a wildcard):
+let pattern: sparq_hdt::TriplePattern = (
+    None,
+    Some(oxrdf::NamedNode::new("http://www.w3.org/2000/01/rdf-schema#label")?),
+    None,
+);
+// [GPT-5.6] sq-obhf1: count matches without constructing a result Graph/Dict.
+let label_stats = sparq_hdt::stats_reader_filtered(std::io::Cursor::new(bytes.clone()), &pattern)?;
+let labels = sparq_hdt::load_reader_filtered(std::io::Cursor::new(bytes), &pattern)?;
+assert_eq!(label_stats.triples, labels.len());
 // WRITE back (opt-in `write` feature): sparq_hdt::save(&g, "out.hdt.gz")?;
 //   (currently a temp-N-Triples round-trip through the wrapped builder — see
 //    sparq-hdt/UPSTREAM.md for the queued in-memory-builder contribution)
@@ -593,6 +630,12 @@ cargo build -p sparq-cli --features serialize-rdf
   zero code into the wasm build. Compression containers are detected by **magic bytes, not
   file extension**, so a mislabeled `.hdt` still loads; all three (`gz`/`zst`/`bz2`) decode
   in a streaming fashion.
+- **HDT triple-pattern loading is separately opt-in.** Enable `sparq-hdt`'s
+  `load-filter` feature for `TriplePattern`, `load_reader_filtered`, and
+  `stats_reader_filtered`. Both filtered operations share one resolved-pattern
+  SPO walk. The stats call counts matches without building a result graph; its
+  dictionary cardinalities remain archive-wide. The loader does not accumulate,
+  intern, or index rejected triples, so result memory follows the matches.
 - **HDT format coverage:** standard v1.0 layout only (FourSectionDictionary / Plain Front
   Coding + BitmapTriples, SPO order) as emitted by hdt-cpp / hdt-java. Exotic submission
   layouts are rejected with an error.
@@ -700,6 +743,16 @@ cargo build -p sparq-cli --features serialize-rdf
   `cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite` (self-skips if
   the gitignored suites are absent). It is registered in the central conformance scoreboard
   (`sparq-conformance-scoreboard`).
+
+- **JSON-LD comparative benchmarking lives in `bench/jsonld/`** (sq-hmd7l.15): the W3C
+  pass-rate table vs jsonld.js / titanium-json-ld's PUBLISHED results (pinned with provenance
+  in `bench/jsonld/conformance-peers.json` — sparq's compact/frame lanes use a round-trip
+  oracle, so those two rows are NOT 1:1 comparable) + an output-equality-gated
+  expand/flatten/compact/toRdf throughput harness (`bench/jsonld/run.sh --smoke|--gather`).
+  The document-level comparator + canonical-dataset helpers the ratchet AND the bench share
+  live lib-side in `sparq_conformance::jsonld_bench` (behind `jsonld-suite`); the sparq runner
+  is the `bench_jsonld` example on `sparq-conformance`. Gap record:
+  `research/gap-jsonld-2026-07.md`.
 
 ## See also
 

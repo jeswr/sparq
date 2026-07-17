@@ -8,7 +8,7 @@
 </p>
 
 A **Model Context Protocol (MCP)** server exposing a sparq RDF graph as **agent tools** —
-an **opt-in** crate. An LLM/agent can `query`, `introspect`, and read `stats` over a
+an **opt-in** crate. An LLM/agent can use `query`, `introspect`, `stats`, `classes`, `prefixes`, and `void` over a
 dataset as first-class MCP tools; SPARQL **`update` is OFF by default**. It is a thin
 wrapper over the existing engine read API (`sparq-engine` query path + `sparq-introspect`
 schema mining): nothing in the workspace depends on it, the default engine build does not
@@ -42,27 +42,26 @@ transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
 
 ## ✨ Tools
 
-- **`query`** — run a read-only SELECT/ASK; returns SPARQL 1.1 Query Results JSON.
-  Bounded by a configurable `QueryBudget` (default 30 s / 1M rows).
+- **`query`** — run a read-only SELECT/ASK; returns SPARQL 1.1 Query Results JSON. Bounded by a configurable `QueryBudget` (default 30 s / 1M rows).
 - **`construct`** — run a read-only CONSTRUCT/DESCRIBE; returns N-Triples text.
 - **`introspect`** — the effective schema the graph actually uses (classes, predicates,
-  prefixes, characteristic sets) as full JSON or a token-budgeted text summary for LLM
-  grounding — exact counts from the store indexes, no sampling.
+  prefixes, characteristic sets) as JSON or token-budgeted text; exact counts, no sampling.
 - **`shapes`** — given a class IRI, the data-grounded SHACL-style shape of that class:
   the valid predicates, their datatypes/object-kinds, observed range, and the
   cardinalities the data supports (`min_count`/`max_count` only when proven, never
   fabricated). Structured grounding so a **client** LLM can write NL→SPARQL — **no
   server-side model**. Ships in the default build.
-- **`stats`** — dataset totals (triples, distinct subjects, typed entities, class /
-  predicate / namespace counts).
+- **`stats`** — dataset totals (triples, distinct subjects, typed entities, class / predicate / namespace counts).
+- **`classes`** — list class IRIs with instance and predicate counts, largest class first. <!-- [GPT-5.6] sq-cekgj -->
+- **`prefixes`** — list detected namespace declarations and distinct IRI term counts, largest namespace first. <!-- [GPT-5.6] sq-kx5b0 -->
+- **`void`** — emit a W3C VoID dataset descriptor as N-Triples, optionally including characteristic-set statistics; `dataset` defaults to `urn:sparq:dataset`.
 - **`ask`** *(feature `nlq`, OFF by default)* — answer a natural-language question
   **server-side**: NL→SPARQL→validate→execute via `sparq-nlq`, returning the executed
-  SPARQL + the real result rows (+ in-graph citations). It embeds a **configurable** LLM
-  call — cost/quality depend on the model **you** configure (`ANTHROPIC_API_KEY`, or an
-  OpenAI-compatible `SPARQ_NLQ_ENDPOINT_URL`+`_MODEL`); no model is bundled. With no
-  backend configured it is unadvertised and a call returns a clear "not configured"
-  error — never a fabricated answer. This is an ergonomics/grounding aid (no
-  token-saving claim); the structured tools are the no-LLM default.
+  SPARQL + the real result rows (+ in-graph citations). Embeds a **configurable** LLM
+  call (`ANTHROPIC_API_KEY`, or an OpenAI-compatible `SPARQ_NLQ_ENDPOINT_URL`+`_MODEL`);
+  no model is bundled. With no backend configured it is unadvertised and a call returns
+  a clear "not configured" error — never a fabricated answer. An ergonomics/grounding
+  aid (no token-saving claim); the structured tools are the no-LLM default.
 - **`update`** *(gated, OFF by default)* — apply an atomic SPARQL 1.1 Update. Neither
   advertised in `tools/list` nor callable unless `ServerConfig::allow_update` is set.
 - **`template_list` / `template_invoke`** *(feature `templates`, OFF by default)* — named
@@ -71,6 +70,8 @@ transport (line-delimited JSON-RPC 2.0 over this process's stdin/stdout).
   template stays behind the same `allow_update` gate (sq-lsp7k.10).
 - **`text_search`** *(feature `text`, OFF by default)* — BM25 full-text search over the
   graph's string literals (`sparq-text`; lazily built, incrementally reconciled).
+- **`validate`** *(feature `shacl`, OFF by default)* — read-only validation against caller-supplied shapes; returns `{conforms, results}`, with parse failures as tool errors. [GPT-5.6] sq-lsp7k.22
+- **`describe_form`** *(feature `shacl`, OFF by default)* — derive a shape-aware form for one focus node against caller-supplied shapes via `sparq-forms`; returns the `FormDescription` JSON **verbatim** (fields, widget choices, constraints, current values). Read-only; `mode` `edit`/`view`, optional explicit `shape` IRI. [FABLE-5] sq-lsp7k.1.6
 
 **Pod mode** *(feature `solid`, OFF by default)*: `SolidMcpServer` serves a
 `sparq-solid` `PodStore` (named graph per document, WAC/ACP-authorized, bound to one
@@ -94,8 +95,7 @@ built-in authentication or authorization**: the MCP transport (stdio) is a trust
 you, the operator, establish — whoever can speak to the server has exactly the access the
 server was configured with. Run it only against a client you trust.
 
-- **Read-only by default.** A default `McpServer` advertises and accepts only
-  `query` / `construct` / `introspect` / `stats`. It **cannot mutate** the dataset.
+- **Read-only by default.** Default tools cannot mutate; the feature-gated `validate` and `describe_form` tools are read-only.
 - **`update` is a mutation surface** and is exposed **only** when you set
   `ServerConfig::allow_update = true` (or a binary's `--allow-update` flag). Turn it on
   only when the client is trusted to issue writes. There is no per-tool ACL beyond this

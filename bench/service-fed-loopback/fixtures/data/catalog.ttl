@@ -1,0 +1,6 @@
+@prefix ex: <http://example.test/federation/> .
+
+ex:p1 ex:kind ex:Book ; ex:price 10 .
+ex:p2 ex:kind ex:Book ; ex:price 20 .
+ex:p3 ex:kind ex:Game ; ex:price 30 .
+ex:p4 ex:kind ex:Book ; ex:price 40 .

@@ -208,8 +208,8 @@ Served today, **NOT covered by the v1 freeze** — may change or disappear in an
   (`crates/sparq-server/SUBSCRIPTIONS.md`).
 - `/admin/compact`, and the `backup`-feature routes `/admin/backup`, `/admin/backup/delta`,
   `/admin/restore` (and their `409` semantics).
-- All opt-in-feature routes and parameters: `/tpf` (+`brtpf`), `/shacl/validate`,
-  `/terse/transpile`, `/streams`, `/.well-known/void`, the Service-Description response on a
+- All opt-in-feature routes and parameters: `/complete`, `/tpf` (+`brtpf`),
+  `/shacl/validate`, `/terse/transpile`, `/streams`, `/.well-known/void`, the Service-Description response on a
   query-less `GET /sparql`, the `text/n3` GSP `PATCH` dialect, and the `?generation` /
   `Sparq-Generation` generation-pinning surface (default build since `sq-ci2d6`, bounded to the
   ring's concurrency-retention window; `time-travel` extends it) — its *error statuses*, where

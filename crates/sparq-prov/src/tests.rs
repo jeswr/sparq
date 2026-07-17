@@ -76,6 +76,35 @@ fn construct_derivation_emits_core_prov_shape() {
     assert!(lines.iter().any(|l| l.contains("#endedAtTime>")));
 }
 
+/// [GPT-5.6] sq-cg237: the direct accessor preserves configured order and agrees with
+/// every `prov:used` edge materialised for the derivation activity.
+#[test]
+fn construct_used_inputs_are_exposed_in_order_and_materialised() {
+    let source1 = NamedNode::new_unchecked("http://ex/source-1");
+    let source2 = NamedNode::new_unchecked("http://ex/source-2");
+    let inputs = [source1, source2];
+    let config = ProvConfig {
+        used: inputs.to_vec(),
+        clock: fixed_clock,
+        ..ProvConfig::default()
+    };
+    let derivation =
+        derive_construct(&g(), "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }", config).unwrap();
+
+    assert_eq!(derivation.used_inputs(), inputs.as_slice());
+    assert_eq!(derivation.used_inputs().len(), 2);
+
+    let activity = NamedOrBlankNode::NamedNode(derivation.activity().clone());
+    let provenance = derivation.prov_graph();
+    for input in &inputs {
+        assert!(provenance.iter().any(|triple| {
+            triple.subject == activity
+                && triple.predicate.as_str() == "http://www.w3.org/ns/prov#used"
+                && triple.object == Term::NamedNode(input.clone())
+        }));
+    }
+}
+
 #[test]
 fn prov_graph_is_valid_rdf_and_round_trips() {
     let d = derive_construct(
@@ -97,6 +126,35 @@ fn prov_graph_is_valid_rdf_and_round_trips() {
         .collect::<Result<_, _>>()
         .expect("emitted lineage must be well-formed N-Triples");
     assert_eq!(parsed.len(), d.prov_graph().len());
+}
+
+/// [GPT-5.6] sq-ijw35: the Derivation Turtle method preserves every provenance
+/// triple, and the generation edge uses the registered prefix.
+#[test]
+fn prov_turtle_round_trips_the_exact_derivation_graph() {
+    let d = derive_construct(
+        &g(),
+        "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+        cfg(),
+    )
+    .unwrap();
+
+    let turtle = d.prov_turtle();
+    assert!(
+        turtle.contains("prov:wasGeneratedBy"),
+        "expected the prefix-compacted generation predicate in {turtle}"
+    );
+
+    let parsed: Vec<_> = oxttl::TurtleParser::new()
+        .for_slice(turtle.as_bytes())
+        .collect::<Result<_, _>>()
+        .expect("emitted lineage must be well-formed Turtle");
+    let expected = d.prov_graph();
+    assert_eq!(parsed.len(), expected.len());
+    assert_eq!(
+        parsed.into_iter().collect::<HashSet<_>>(),
+        expected.into_iter().collect::<HashSet<_>>()
+    );
 }
 
 #[test]

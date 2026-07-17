@@ -39,7 +39,9 @@ pub enum ExtractError {
     /// A recognised OWL/RDF construct that carries logical meaning OUTSIDE the ALCH fragment:
     /// cardinality / qualified cardinality, nominals (`owl:oneOf`/`owl:hasValue`),
     /// `owl:hasSelf`, inverse properties (`owl:inverseOf`), property characteristics
-    /// (`owl:TransitiveProperty` / `owl:FunctionalProperty` / symmetry / reflexivity / …),
+    /// (`owl:TransitiveProperty` — recognised in-fragment instead under the opt-in
+    /// `dl_transitive` feature, [GPT-5.6] sq-zfwzq — / `owl:FunctionalProperty` / symmetry /
+    /// reflexivity / …),
     /// `owl:sameAs` / `owl:differentFrom`, property chains, keys, `owl:disjointUnionOf`,
     /// equivalent / disjoint properties, and the n-ary `owl:AllDifferent` /
     /// `owl:AllDisjoint*` / `owl:NegativePropertyAssertion` collections.
@@ -629,6 +631,18 @@ fn classify_type(
     if v.declaration_types.contains(&o) {
         return Ok(());
     }
+    // [GPT-5.6] sq-zfwzq (opt-in `dl_transitive`): `s rdf:type owl:TransitiveProperty` is an
+    // in-fragment RBox axiom — `TransitiveObjectProperty(s)`. The subject goes through the
+    // same `decode_object_property` chokepoint as every other property position (refusing
+    // literals, blank nodes, triple terms, inverse expressions, and punned IRIs), so a
+    // malformed transitivity typing is refused, never guessed. With the feature OFF this arm
+    // does not exist and the typing stays in `out_of_fragment_types` below (fail-closed).
+    #[cfg(feature = "dl_transitive")]
+    if o == v.owl_transitive_property {
+        let property = decode_object_property(dict, idx, s)?;
+        onto.axioms.push(Axiom::TransitiveObjectProperty { property });
+        return Ok(());
+    }
     // Property characteristics and n-ary collection meta-classes are logical but out of
     // fragment — refuse (they are not silently droppable).
     if let Some(name) = v.out_of_fragment_types.get(&o) {
@@ -1058,6 +1072,11 @@ struct Vocab {
     owl_object_property: Id,
     owl_datatype_property: Id,
     owl_annotation_property: Id,
+    /// `owl:TransitiveProperty` — recognised as an in-fragment axiom typing ONLY under the
+    /// opt-in `dl_transitive` feature ([GPT-5.6] sq-zfwzq); with the feature OFF it stays in
+    /// [`Vocab::out_of_fragment_types`] and is refused fail-closed, exactly as before.
+    #[cfg(feature = "dl_transitive")]
+    owl_transitive_property: Id,
 }
 
 /// OWL predicates whose presence is an out-of-fragment LOGICAL construct (design record §5).
@@ -1120,8 +1139,11 @@ const DECLARATION_TYPE_LOCALS: &[(&str, &str)] = &[
 ];
 
 /// `rdf:type` objects that are out-of-fragment meta-classes (property characteristics / n-ary
-/// collections).
+/// collections). `TransitiveProperty` is a member ONLY when the opt-in `dl_transitive`
+/// feature is OFF — with the feature ON it is an in-fragment axiom typing recognised by
+/// [`classify_type`] instead ([GPT-5.6] sq-zfwzq).
 const OUT_OF_FRAGMENT_TYPE_LOCALS: &[&str] = &[
+    #[cfg(not(feature = "dl_transitive"))]
     "TransitiveProperty",
     "FunctionalProperty",
     "InverseFunctionalProperty",
@@ -1252,6 +1274,8 @@ impl Vocab {
             owl_object_property: owl("ObjectProperty"),
             owl_datatype_property: owl("DatatypeProperty"),
             owl_annotation_property: owl("AnnotationProperty"),
+            #[cfg(feature = "dl_transitive")]
+            owl_transitive_property: owl("TransitiveProperty"),
         }
     }
 }
@@ -1411,6 +1435,17 @@ impl Index {
                         idx.punned_props.insert(s);
                     }
                     idx.annotation_props.insert(s);
+                }
+                // [GPT-5.6] sq-zfwzq (opt-in `dl_transitive`): `s a owl:TransitiveProperty`
+                // types `s` as an OBJECT property (OWL 2 RDF mapping — the typing declares an
+                // object property), with the same symmetric cross-type pun-check as the
+                // declaration arms above so the Unclassifiable verdict is order-independent.
+                #[cfg(feature = "dl_transitive")]
+                if o == v.owl_transitive_property {
+                    if idx.data_props.contains(&s) || idx.annotation_props.contains(&s) {
+                        idx.punned_props.insert(s);
+                    }
+                    idx.object_props.insert(s);
                 }
             } else if let Some(name) = v.out_of_fragment.get(&p) {
                 // An out-of-fragment predicate makes its subject an out-of-fragment class

@@ -1,0 +1,46 @@
+<https://example.org/people/ada> <http://schema.org/affiliation> _:b0 .
+<https://example.org/people/ada> <http://schema.org/birthDate> "1815-12-10"^^<http://www.w3.org/2001/XMLSchema#date> .
+<https://example.org/people/ada> <http://schema.org/knows> <https://example.org/people/charles> .
+<https://example.org/people/ada> <http://schema.org/knows> <https://example.org/people/mary> .
+<https://example.org/people/ada> <http://schema.org/name> "Ada Byron" .
+<https://example.org/people/ada> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://schema.org/Person> .
+<https://example.org/people/ada> <http://www.w3.org/2000/01/rdf-schema#label> "Ada Byron (Mathematikerin)"@de .
+<https://example.org/people/ada> <http://www.w3.org/2000/01/rdf-schema#label> "Ada Byron"@en .
+<https://example.org/people/ada> <https://example.org/vocab/authoredInOrder> _:b2 .
+<https://example.org/people/charles> <http://schema.org/birthDate> "1791-12-26"^^<http://www.w3.org/2001/XMLSchema#date> .
+<https://example.org/people/charles> <http://schema.org/jobTitle> "Engineer" .
+<https://example.org/people/charles> <http://schema.org/knows> <https://example.org/people/ada> .
+<https://example.org/people/charles> <http://schema.org/name> "Charles Babbage" .
+<https://example.org/people/charles> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://schema.org/Person> .
+<https://example.org/people/charles> <http://www.w3.org/2000/01/rdf-schema#label> "Charles Babbage"@en .
+<https://example.org/people/mary> <http://schema.org/award> "Patron's Medal" .
+<https://example.org/people/mary> <http://schema.org/award> "Victoria Gold Medal" .
+<https://example.org/people/mary> <http://schema.org/birthDate> "1780-12-26"^^<http://www.w3.org/2001/XMLSchema#date> .
+<https://example.org/people/mary> <http://schema.org/knows> <https://example.org/people/ada> .
+<https://example.org/people/mary> <http://schema.org/knows> <https://example.org/people/charles> .
+<https://example.org/people/mary> <http://schema.org/name> "Mary Somerville" .
+<https://example.org/people/mary> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://schema.org/Person> .
+<https://example.org/people/mary> <http://www.w3.org/2000/01/rdf-schema#label> "Mary Somerville (scientifique)"@fr .
+<https://example.org/people/mary> <http://www.w3.org/2000/01/rdf-schema#label> "Mary Somerville"@en .
+<https://example.org/people/notes-a> <http://schema.org/name> "Note A" .
+<https://example.org/people/notes-a> <http://schema.org/position> "1"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://example.org/people/notes-a> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://schema.org/CreativeWork> .
+<https://example.org/people/notes-b> <http://schema.org/name> "Note B" .
+<https://example.org/people/notes-b> <http://schema.org/position> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://example.org/people/notes-b> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://schema.org/CreativeWork> .
+<https://example.org/people/notes-g> <http://schema.org/about> _:b1 .
+<https://example.org/people/notes-g> <http://schema.org/name> "Note G" .
+<https://example.org/people/notes-g> <http://schema.org/position> "7"^^<http://www.w3.org/2001/XMLSchema#integer> .
+<https://example.org/people/notes-g> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://schema.org/CreativeWork> .
+_:b0 <http://schema.org/name> "Analytical Engine Society" .
+_:b0 <http://schema.org/url> <https://example.org/orgs/aes> .
+_:b0 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://schema.org/Organization> .
+_:b1 <http://schema.org/name> "Bernoulli number program" .
+_:b1 <http://schema.org/programmingLanguage> "Analytical Engine order code" .
+_:b1 <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://schema.org/SoftwareSourceCode> .
+_:b2 <http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <https://example.org/people/notes-a> .
+_:b2 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> _:b3 .
+_:b3 <http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <https://example.org/people/notes-b> .
+_:b3 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> _:b4 .
+_:b4 <http://www.w3.org/1999/02/22-rdf-syntax-ns#first> <https://example.org/people/notes-g> .
+_:b4 <http://www.w3.org/1999/02/22-rdf-syntax-ns#rest> <http://www.w3.org/1999/02/22-rdf-syntax-ns#nil> .

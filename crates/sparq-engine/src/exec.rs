@@ -69,6 +69,25 @@ pub(crate) mod budget {
     use crate::QueryBudget;
     use sparq_core::dict::Id;
     use std::cell::Cell;
+    use std::ptr::NonNull;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// Copyable view of a cancellation flag owned by the installed [`QueryBudget`].
+    ///
+    /// The [`Guard`] lifetime keeps that budget (and therefore its `Arc<AtomicBool>`)
+    /// alive until the pointer has been cleared from the thread-local state. Rayon
+    /// snapshots are consumed only by scoped parallel iterators that join before the
+    /// guard is dropped. The pointer is dereferenced only for atomic loads.
+    #[derive(Clone, Copy)]
+    struct CancelPtr(NonNull<AtomicBool>);
+
+    // SAFETY: `AtomicBool` is `Sync`; moving this shared pointer to a worker is
+    // sound because it is only dereferenced for atomic loads while `Guard` keeps
+    // the owning `Arc` alive, including across scoped rayon work.
+    unsafe impl Send for CancelPtr {}
+    // SAFETY: `AtomicBool` is `Sync`; all shared access through `CancelPtr` is an
+    // atomic load, and `Guard` keeps the allocation alive until worker joins finish.
+    unsafe impl Sync for CancelPtr {}
 
     /// Bytes one id-level binding cell occupies in a materialised `Row`. The
     /// byte-accounted cap ([OPUS-4.8] sq-s5is) costs the id-level working set as
@@ -98,6 +117,7 @@ pub(crate) mod budget {
         /// the row cap also misses. A running high-water sum, added to the working-set
         /// estimate on every check.
         extra_bytes: usize,
+        cancel: Option<CancelPtr>,
     }
 
     const OFF: Limits = Limits {
@@ -108,6 +128,7 @@ pub(crate) mod budget {
         max_bytes: usize::MAX,
         byte_width: BYTES_PER_ID,
         extra_bytes: 0,
+        cancel: None,
     };
 
     impl Limits {
@@ -140,6 +161,13 @@ pub(crate) mod budget {
             if self.deadline.is_some_and(|d| std::time::Instant::now() >= d) {
                 return true;
             }
+            if let Some(cancel) = self.cancel {
+                // SAFETY: `CancelPtr`'s invariant and the lifetime-bound `Guard`
+                // keep the `AtomicBool` alive for this scoped snapshot load.
+                if unsafe { cancel.0.as_ref() }.load(Ordering::Relaxed) {
+                    return true;
+                }
+            }
             false
         }
     }
@@ -151,19 +179,29 @@ pub(crate) mod budget {
 
     /// Clears the budget when the `*_with_budget` entry point returns (also on
     /// error/unwind, so a poisoned thread never leaks a stale budget).
-    pub(crate) struct Guard;
-    impl Drop for Guard {
+    pub(crate) struct Guard<'a> {
+        _budget: std::marker::PhantomData<&'a QueryBudget>,
+        _not_send: std::marker::PhantomData<std::rc::Rc<()>>,
+    }
+    impl Drop for Guard<'_> {
         fn drop(&mut self) {
             ACTIVE.with(|a| a.set(OFF));
             EXCEEDED.with(|e| e.set(None));
         }
     }
 
-    pub(crate) fn install(b: &QueryBudget) -> Guard {
+    pub(crate) fn install(b: &QueryBudget) -> Guard<'_> {
+        let cancel = b
+            .cancel
+            .as_ref()
+            .map(|flag| CancelPtr(NonNull::from(flag.as_ref())));
         #[cfg(not(target_arch = "wasm32"))]
-        let on = b.deadline.is_some() || b.max_rows.is_some() || b.max_bytes.is_some();
+        let on = b.deadline.is_some()
+            || b.max_rows.is_some()
+            || b.max_bytes.is_some()
+            || cancel.is_some();
         #[cfg(target_arch = "wasm32")]
-        let on = b.max_rows.is_some() || b.max_bytes.is_some();
+        let on = b.max_rows.is_some() || b.max_bytes.is_some() || cancel.is_some();
         ACTIVE.with(|a| {
             a.set(Limits {
                 on,
@@ -173,10 +211,14 @@ pub(crate) mod budget {
                 max_bytes: b.max_bytes.unwrap_or(usize::MAX),
                 byte_width: BYTES_PER_ID,
                 extra_bytes: 0,
+                cancel,
             })
         });
         EXCEEDED.with(|e| e.set(None));
-        Guard
+        Guard {
+            _budget: std::marker::PhantomData,
+            _not_send: std::marker::PhantomData,
+        }
     }
 
     /// [OPUS-4.8] (sq-s5is) Sets the per-row byte width (= `width_in_ids ×
@@ -364,6 +406,17 @@ pub(crate) mod budget {
             EXCEEDED.with(|e| e.set(Some("timeout")));
             return true;
         }
+        if let Some(cancel) = a.cancel {
+            // SAFETY: `CancelPtr`'s invariant and the lifetime-bound `Guard` keep
+            // the `AtomicBool` alive until this thread-local pointer is cleared.
+            // Relaxed is sufficient because cancellation gates control flow only;
+            // it never publishes or guards a shared query buffer. If that changes,
+            // the load/store pair must become Acquire/Release.
+            if unsafe { cancel.0.as_ref() }.load(Ordering::Relaxed) {
+                EXCEEDED.with(|e| e.set(Some("cancelled")));
+                return true;
+            }
+        }
         false
     }
 
@@ -407,6 +460,78 @@ pub(crate) mod budget {
             .unwrap_or(usize::MAX)
             .saturating_add(1);
         cap.min(a.max_rows.saturating_add(1)).min(by_bytes).min(1 << 20)
+    }
+
+    #[cfg(test)]
+    mod cancel_tests {
+        use super::*;
+        use sparq_core::Graph;
+        use std::sync::{Arc, Barrier};
+        use std::time::{Duration, Instant};
+
+        #[test]
+        fn cancel_flag_zero_vs_one_trips_both_poll_paths() {
+            let flag = Arc::new(AtomicBool::new(false));
+            let budget = QueryBudget::unlimited().with_cancel(Arc::clone(&flag));
+            let _guard = install(&budget);
+
+            assert!(!snapshot().hit(0), "false control must not trip the rayon snapshot");
+            assert_eq!(check(0), Ok(()), "false control must not trip the local poll");
+
+            flag.store(true, Ordering::Relaxed);
+            assert!(snapshot().hit(0), "true flag must trip the rayon snapshot");
+            assert_eq!(check(0), Err("query budget exceeded (cancelled)".to_owned()));
+            assert_eq!(EXCEEDED.with(Cell::get), Some("cancelled"));
+        }
+
+        #[test]
+        fn cancel_from_another_thread_stops_large_query_promptly() {
+            let mut nt = String::new();
+            for i in 0..12_000 {
+                nt.push_str(&format!("<http://ex/s{i}> <http://ex/p> <http://ex/o{i}> .\n"));
+            }
+            let graph = Graph::load_str(&nt, "ntriples").expect("test graph parses");
+            let flag = Arc::new(AtomicBool::new(false));
+            let budget = QueryBudget::unlimited().with_cancel(Arc::clone(&flag));
+            let started = Arc::new(Barrier::new(2));
+            let worker_started = Arc::clone(&started);
+
+            let worker = std::thread::spawn(move || {
+                worker_started.wait();
+                crate::query_with_budget(
+                    &graph,
+                    "SELECT ?s ?x WHERE { ?s <http://ex/p> ?o . ?x <http://ex/p> ?y }",
+                    &budget,
+                )
+                .map(|_| ())
+            });
+
+            started.wait();
+            let cancelled_at = Instant::now();
+            flag.store(true, Ordering::Relaxed);
+            let result = worker.join().expect("query worker must not panic");
+            assert_eq!(result, Err("query budget exceeded (cancelled)".to_owned()));
+            assert!(
+                cancelled_at.elapsed() < Duration::from_secs(5),
+                "cancelled query did not return within the cooperative bound"
+            );
+        }
+
+        #[test]
+        fn cancelled_query_does_not_leak_flag_into_next_query_on_same_thread() {
+            let graph = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "ntriples")
+                .expect("test graph parses");
+            let cancelled = QueryBudget::cancelled_by(Arc::new(AtomicBool::new(true)));
+            let query = "SELECT * WHERE { ?s ?p ?o }";
+
+            assert_eq!(
+                crate::query_with_budget(&graph, query, &cancelled).map(|_| ()),
+                Err("query budget exceeded (cancelled)".to_owned())
+            );
+            let clean = crate::query_with_budget(&graph, query, &QueryBudget::unlimited())
+                .expect("guard must clear the stale cancellation pointer");
+            assert_eq!(clean.len(), 1);
+        }
     }
 
 }
@@ -4755,6 +4880,22 @@ fn eval_flat_conjunctive(
         // STILL runs and does the exact refinement, so the result is unchanged — the
         // pushdown only shrinks how many rows the exact `geof:` check examines.
         if let Some(pd) = recognise_spatial(f) {
+            // [FABLE-5] (sq-lk3aw.4) EXACT-candidate pushdown first: when the provider
+            // CERTIFIES the exact indexed answer set AND every surviving row is
+            // certified, the residual `geof:` FILTER is provably an identity on `b` —
+            // skip it (the `continue`). Any other outcome keeps the residual FILTER:
+            // `Partial` already restricted the rows (the residual judges the remaining
+            // not-indexed bindings), `Declined` falls back to the superset pushdown,
+            // unchanged. Soundness argument: see `apply_spatial_pushdown_exact`.
+            #[cfg(feature = "spatial-exact-pushdown")]
+            match apply_spatial_pushdown_exact(graph, &mut b, &pd) {
+                ExactPushdown::AllCertified => continue,
+                ExactPushdown::Partial => {}
+                ExactPushdown::Declined => {
+                    apply_spatial_pushdown(graph, &mut b, &pd);
+                }
+            }
+            #[cfg(not(feature = "spatial-exact-pushdown"))]
             apply_spatial_pushdown(graph, &mut b, &pd);
         }
         #[cfg(feature = "id-filter-fastpath")]
@@ -5670,6 +5811,8 @@ pub(crate) fn split_sargable(graph: &Graph, patterns: &[TriplePattern], filters:
 const GEOF_DISTANCE: &str = "http://www.opengis.net/def/function/geosparql/distance";
 const GEOF_SF_WITHIN: &str = "http://www.opengis.net/def/function/geosparql/sfWithin";
 const GEOF_SF_INTERSECTS: &str = "http://www.opengis.net/def/function/geosparql/sfIntersects";
+#[cfg(feature = "spatial-exact-pushdown")]
+const GEOF_SF_CONTAINS: &str = "http://www.opengis.net/def/function/geosparql/sfContains";
 
 /// A recognised pushable spatial FILTER: the geometry variable to restrict, plus an
 /// OWNED description of the index query (so it outlives the borrowed algebra). The
@@ -5681,7 +5824,17 @@ struct SpatialPushdown {
 
 enum SpatialKind {
     DistanceWithin { point_wkt: String, radius: f64, unit_iri: String, inclusive: bool },
-    BboxIntersects { arg_wkt: String },
+    BboxIntersects {
+        arg_wkt: String,
+        /// [FABLE-5] (sq-lk3aw.4) `true` iff the recognised FILTER is the
+        /// WITHIN-REGION orientation — `geof:sfWithin(?g, REGION)` or its Simple
+        /// Features converse `geof:sfContains(REGION, ?g)` — the one predicate an
+        /// installed provider may certify EXACTLY via
+        /// [`SpatialProvider::candidates_exact`](crate::SpatialProvider::candidates_exact).
+        /// `false` (sfIntersects) keeps the superset + residual-FILTER path.
+        #[cfg(feature = "spatial-exact-pushdown")]
+        within_region: bool,
+    },
 }
 
 /// The `geo:wktLiteral` lexical form of a constant operand, if it is one. (The engine
@@ -5768,7 +5921,29 @@ fn recognise_spatial(e: &Expression) -> Option<SpatialPushdown> {
                 if let (Expression::Variable(v), Some(arg)) = (&cargs[0], wkt_const(&cargs[1])) {
                     return Some(SpatialPushdown {
                         geo_var: v.clone(),
-                        kind: SpatialKind::BboxIntersects { arg_wkt: arg.to_string() },
+                        kind: SpatialKind::BboxIntersects {
+                            arg_wkt: arg.to_string(),
+                            #[cfg(feature = "spatial-exact-pushdown")]
+                            within_region: iri == GEOF_SF_WITHIN,
+                        },
+                    });
+                }
+            }
+            // [FABLE-5] (sq-lk3aw.4) `geof:sfContains(REGION, ?g)` — the constant-region-
+            // FIRST operand order. Simple Features defines `contains(a, b) ⇔ within(b, a)`,
+            // so this is the SAME within-region pushdown as `sfWithin(?g, REGION)` with the
+            // operands swapped: `within(?g, REGION) ⟹ intersects(?g, REGION) ⟹ their AABBs
+            // intersect`, hence the bbox candidate superset is valid for it too. Previously
+            // this orientation was never recognised and never pushed down at all.
+            #[cfg(feature = "spatial-exact-pushdown")]
+            if iri == GEOF_SF_CONTAINS && cargs.len() == 2 {
+                if let (Some(arg), Expression::Variable(v)) = (wkt_const(&cargs[0]), &cargs[1]) {
+                    return Some(SpatialPushdown {
+                        geo_var: v.clone(),
+                        kind: SpatialKind::BboxIntersects {
+                            arg_wkt: arg.to_string(),
+                            within_region: true,
+                        },
                     });
                 }
             }
@@ -5791,7 +5966,7 @@ fn apply_spatial_pushdown(graph: &Graph, b: &mut Bindings, pd: &SpatialPushdown)
         SpatialKind::DistanceWithin { point_wkt, radius, unit_iri, inclusive } => {
             SpatialQuery::DistanceWithin { point_wkt, radius: *radius, unit_iri, inclusive: *inclusive }
         }
-        SpatialKind::BboxIntersects { arg_wkt } => SpatialQuery::BboxIntersects { arg_wkt },
+        SpatialKind::BboxIntersects { arg_wkt, .. } => SpatialQuery::BboxIntersects { arg_wkt },
     };
     let Some(cands) = idx.candidates(&query) else { return false };
     // Map the candidate TERMS to dictionary ids for an O(1) membership test on the
@@ -5836,6 +6011,102 @@ fn apply_spatial_pushdown(graph: &Graph, b: &mut Bindings, pd: &SpatialPushdown)
         })
     });
     true
+}
+
+/// [FABLE-5] (sq-lk3aw.4) Outcome of the EXACT-candidate spatial pushdown attempt.
+#[cfg(feature = "spatial-exact-pushdown")]
+enum ExactPushdown {
+    /// No exact certification happened (not the within-region shape, no provider,
+    /// unbound variable, or the provider declined): NOTHING was touched — the caller
+    /// runs the superset pushdown + residual FILTER exactly as before.
+    Declined,
+    /// Rows were restricted to `certified-exact ∪ not-indexed`, but at least one
+    /// surviving row's binding is NOT certified (outside the indexed universe): the
+    /// residual FILTER MUST still run — it is an identity on the certified rows and
+    /// the SOLE judge of the not-indexed ones.
+    Partial,
+    /// Every surviving row's binding is in the provider's certified-exact set: the
+    /// residual FILTER is provably an identity and may be skipped.
+    AllCertified,
+}
+
+/// [FABLE-5] (sq-lk3aw.4) EXACT-candidate spatial pushdown: for a recognised
+/// WITHIN-REGION FILTER (`geof:sfWithin(?g, REGION)` / `geof:sfContains(REGION, ?g)`),
+/// restrict `b`'s rows to the provider's CERTIFIED-EXACT answer set (keeping every
+/// not-indexed binding) and report whether the residual `geof:` FILTER may be skipped.
+///
+/// EXACTNESS / SOUNDNESS ARGUMENT — why skipping the residual FILTER is safe, and
+/// ONLY on [`ExactPushdown::AllCertified`]:
+///
+/// * [`SpatialProvider::candidates_exact`](crate::SpatialProvider::candidates_exact)
+///   returning `Some(v)` CERTIFIES that `v` is EXACTLY the set of INDEXED geometry
+///   bindings for which the recognised predicate evaluates to `true` — no false
+///   positives and no false negatives, but ONLY over the indexed universe
+///   ([`SpatialProvider::is_indexed`](crate::SpatialProvider::is_indexed)). The
+///   certificate says NOTHING about a binding the index never saw.
+/// * The retain below keeps a row iff its binding is (a) in the certified set — an
+///   indexed TRUE row the residual FILTER would also keep — or (b) NOT indexed — a
+///   row the certificate does not cover, kept for the residual FILTER to judge,
+///   exactly as the superset path keeps it. An indexed row NOT in the certified set
+///   is an indexed FALSE row the residual FILTER would drop: dropping it here is the
+///   same verdict, taken earlier.
+/// * If every surviving row entered via (a), the residual FILTER would keep each of
+///   them (all certified TRUE), so running it cannot change the multiset — it is an
+///   IDENTITY and skipping it is result-identical (`AllCertified`). This includes the
+///   empty relation.
+/// * If ANY surviving row entered via (b), skipping the residual FILTER could admit a
+///   false positive (a not-indexed binding that does NOT satisfy the predicate) — a
+///   SOUNDNESS bug. So the residual runs (`Partial`): an identity on the (a)-rows and
+///   the judge of the (b)-rows, keeping the result byte-identical to the post-hoc
+///   plan while the exact restriction still shrank the residual's input.
+///
+/// The certificate is trusted the same way `candidates`' superset contract is: the
+/// provider asserts its exact refinement agrees with the registered `geof:` function
+/// semantics (sparq-geo pins that equivalence in its `topology_index` tests).
+#[cfg(feature = "spatial-exact-pushdown")]
+fn apply_spatial_pushdown_exact(graph: &Graph, b: &mut Bindings, pd: &SpatialPushdown) -> ExactPushdown {
+    let SpatialKind::BboxIntersects { arg_wkt, within_region: true } = &pd.kind else {
+        return ExactPushdown::Declined;
+    };
+    let Some(col) = b.col(&pd.geo_var) else { return ExactPushdown::Declined };
+    let Some(idx) = spatial::active() else { return ExactPushdown::Declined };
+    let query = crate::SpatialExactQuery::WithinRegion { region_wkt: arg_wkt };
+    let Some(exact) = idx.candidates_exact(&query) else { return ExactPushdown::Declined };
+    // A certified term absent from the graph dict can never bind here, so dropping it
+    // keeps `exact_ids` exactly the certified answers that can appear in `b` (mirrors
+    // the superset path's `cand_ids` mapping).
+    let exact_ids: FxHashSet<Id> = exact.iter().filter_map(|t| graph.id_of(t)).collect();
+    let mut all_certified = true;
+    // Same two retain branches as `apply_spatial_pushdown` (id-level fast path when the
+    // provider vouches its id universe is fresh for THIS dict, per-row fallback
+    // otherwise), same keep verdict in both: certified (a) or not-indexed (b).
+    let dict_ptr = std::ptr::from_ref(&graph.dict) as usize;
+    if let Some(indexed) = idx.indexed_ids(dict_ptr) {
+        b.rows.retain(|row| {
+            let id = row[col];
+            if exact_ids.contains(&id) {
+                return true; // (a) certified TRUE — the residual FILTER would keep it too
+            }
+            let keep = !indexed.contains(&id); // (b) keep not-indexed for the residual FILTER
+            all_certified &= !keep;
+            keep
+        });
+    } else {
+        let mut verdict: FxHashMap<Id, bool> = FxHashMap::default();
+        b.rows.retain(|row| {
+            let id = row[col];
+            if exact_ids.contains(&id) {
+                return true;
+            }
+            let keep = *verdict.entry(id).or_insert_with(|| match term_of_id(graph, id) {
+                Some(t) => !idx.is_indexed(&t),
+                None => true, // no term (synthetic / unbound) — the index can't rule it out
+            });
+            all_certified &= !keep;
+            keep
+        });
+    }
+    if all_certified { ExactPushdown::AllCertified } else { ExactPushdown::Partial }
 }
 
 /// The graph-dictionary term for `id`, if any. (A standalone helper so the spatial
@@ -14873,7 +15144,7 @@ mod builtin_error_paths {
             },
             Row {
                 builtin: "SUBSTR (non-numeric length)",
-                valid: ("SUBSTR(\"hello\", 1, 3)", "\"hel\""),
+                valid: ("SUBSTR(\"hello\", 1, 4)", "\"hell\""),
                 type_err: "SUBSTR(\"hello\", 1, \"y\")",
                 boundary: None,
             },

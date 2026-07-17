@@ -24,6 +24,7 @@ use sparq_lws_core::ldp::handler::LdpState;
 #[cfg(not(feature = "embedded-sparq"))]
 use sparq_lws_core::store::InMemorySparqClient;
 use sparq_lws_core::store::{CompositeStore, InMemoryBlobStore};
+use sparq_lws_core::store::{InMemoryStoreLimits, SparqClient};
 use tower::ServiceExt;
 
 const TURTLE: &str =
@@ -54,8 +55,8 @@ fn backend_sparq_client() -> BackendSparqClient {
 /// the now-enforced WAC engine. Written through the store as an auxiliary `.acl` resource (built as a
 /// Turtle string — a test fixture, not production RDF construction). This mirrors the pod-root
 /// owner-default the real conformance seed (`seed_conformance`) writes per user.
-async fn seed_root_owner_acl(
-    store: &CompositeStore<BackendSparqClient, InMemoryBlobStore>,
+async fn seed_root_owner_acl<S: SparqClient>(
+    store: &CompositeStore<S, InMemoryBlobStore>,
     base_url: &str,
     owner_webid: &str,
 ) {
@@ -86,13 +87,27 @@ struct Harness {
 
 impl Harness {
     async fn new() -> Self {
+        Self::with_store(CompositeStore::new(
+            backend_sparq_client(),
+            InMemoryBlobStore::new(),
+        ))
+        .await
+    }
+
+    /// Build the real HTTP stack over a deliberately small in-memory quota.
+    async fn with_memory_limits(limits: InMemoryStoreLimits) -> Self {
+        Self::with_store(CompositeStore::in_memory_with_limits(limits)).await
+    }
+
+    async fn with_store<S: SparqClient + 'static>(
+        store: CompositeStore<S, InMemoryBlobStore>,
+    ) -> Self {
         let issuer_key = KeyKit::generate();
         let client_key = KeyKit::generate();
         let config = VerifierConfig::new(vec![common::ISSUER.to_string()], BASE_URL);
         let replay = InMemoryReplayStore::with_window(config.replay_ttl());
         let verifier = Verifier::new(config, jwks_provider(&issuer_key), replay).unwrap();
         let ctx = AuthContext::new(verifier, BASE_URL);
-        let store = CompositeStore::new(backend_sparq_client(), InMemoryBlobStore::new());
         // WAC is now ENFORCED, so the test caller (Alice, `common::WEBID`) needs an effective ACL
         // granting her access to every path these tests exercise. Seed a ROOT `.acl` granting Alice
         // Read/Write/Control on the base root AND on all descendants (`acl:default`), so every
@@ -217,6 +232,76 @@ async fn put_creates_then_get_reads_it_back() {
     );
     let bytes = to_bytes(get.into_body(), usize::MAX).await.unwrap();
     assert_eq!(&bytes[..], TURTLE.as_bytes());
+}
+
+/// [GPT-5.6] sq-r1ei8: in the core tier `/sparql` is an ordinary absent LDP
+/// resource (404), while authenticated CRUD and private-resource WAC remain live.
+/// Enabling the route mutates the first assertion to 400 (missing query), so this
+/// is a direct compiled-route witness rather than a symbol-only check.
+#[cfg(not(feature = "sparql-endpoint"))]
+#[tokio::test]
+async fn core_tier_has_no_sparql_route_but_keeps_ldp_and_wac() {
+    let h = Harness::new().await;
+    let absent = h.request("GET", "/sparql", None, Body::empty()).await;
+    assert_eq!(absent.status(), StatusCode::NOT_FOUND);
+
+    let put = h
+        .request(
+            "PUT",
+            "/core-round-trip",
+            Some("text/turtle"),
+            Body::from("<urn:core> <urn:p> \"ok\" ."),
+        )
+        .await;
+    assert_eq!(put.status(), StatusCode::CREATED);
+    let get = h
+        .request("GET", "/core-round-trip", None, Body::empty())
+        .await;
+    assert_eq!(get.status(), StatusCode::OK);
+
+    let anonymous = h
+        .unauth_request("GET", "/core-round-trip", None, Body::empty())
+        .await;
+    assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn put_flood_beyond_resource_cap_is_refused_with_507() {
+    // [GPT-5.6] The seed ACL and any implicit ancestor containers consume the same bounded store.
+    // Keep issuing unique, zero-ish-body resources until the deliberately tiny cap trips; at least
+    // one write must land first, and every later admission must fail closed as HTTP 507.
+    let limits = InMemoryStoreLimits::new(1024 * 1024, 8);
+    let h = Harness::with_memory_limits(limits).await;
+    let mut accepted = 0;
+    let mut refused = false;
+
+    for n in 0..=limits.max_resource_count {
+        let path = format!("/quota-{n}.txt");
+        let response = h
+            .request("PUT", &path, Some("text/plain"), Body::from("x"))
+            .await;
+        if response.status() == StatusCode::INSUFFICIENT_STORAGE {
+            refused = true;
+            break;
+        }
+        assert_eq!(response.status(), StatusCode::CREATED);
+        accepted += 1;
+    }
+
+    assert!(
+        accepted > 0,
+        "the test must fill a live store before refusal"
+    );
+    assert!(refused, "a unique-resource PUT flood must hit the hard cap");
+    let retry = h
+        .request(
+            "PUT",
+            "/quota-after-cap.txt",
+            Some("text/plain"),
+            Body::from("x"),
+        )
+        .await;
+    assert_eq!(retry.status(), StatusCode::INSUFFICIENT_STORAGE);
 }
 
 #[tokio::test]

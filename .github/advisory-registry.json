@@ -1,6 +1,18 @@
 {
   "_doc": "Advisory-job registry (sq-qcnn.32). [SONNET-4.6] Every job whose NAME matches the ci-summary exclusion pattern \\b(advisory|informational)\\b must have an entry here with {owner_bead, promotion_criteria, registered}. A job that intentionally runs a gate-classified script (scripts/*gate*.py) must also carry gate_script_waiver. Maintained by check-advisory-registry.py (C2/C3). See scripts/check-advisory-registry.py for the enforcement rule.",
   "jobs": {
+    "secret-literal grep (advisory)": {
+      "workflow": "deploy-terraform-lint.yml",
+      "owner_bead": "sq-sos84",
+      "promotion_criteria": "advisory while the multi-cloud Terraform deploy templates are new; promote by moving the R4 secret-literal grep into a gating deploy-lint job once the deploy surface is proven stable on main",
+      "registered": "2026-07-15"
+    },
+    "terraform validate (advisory)": {
+      "workflow": "deploy-terraform-lint.yml",
+      "owner_bead": "sq-sos84",
+      "promotion_criteria": "advisory while terraform validate runs credential-free across provider-version drift; promote by removing the (advisory) token once validate is proven stable on main across the pinned terraform_version",
+      "registered": "2026-07-15"
+    },
     "asan (mmap corruption corpus, informational)": {
       "workflow": "asan.yml",
       "owner_bead": "sq-hybl",
@@ -121,6 +133,12 @@
       "owner_bead": "sq-ymr2e.1",
       "promotion_criteria": "sq-ymr2e.12 probation bar: 50 consecutive green runs spanning at least 10 distinct PRs or two weeks, zero quarantine events (E2E-GATING-POLICY.md §3)",
       "registered": "2026-07-06"
+    },
+    "Helm lint, render, and schema validation (advisory)": {
+      "workflow": "deploy-lint.yml",
+      "owner_bead": "sq-0d744",
+      "promotion_criteria": "advisory: the helm-validate job runs on push/PR (path-filtered to deploy/**), NOT merge_group, and installs network-fetched helm+kubeconform, so it must not gate the merge queue (a missing merge_group check otherwise fails ci-summary). Promote by running it on merge_group + removing the (advisory) token once proven non-flaky on main",
+      "registered": "2026-07-15"
     }
   }
 }

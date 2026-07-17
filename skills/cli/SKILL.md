@@ -1,13 +1,13 @@
 ---
 name: cli
-description: Use when you need to drive the sparq RDF/SPARQL engine from the command line — load a Turtle/N-Triples/N-Quads/TriG (or HDT) file and run a SPARQL query, build/query memory-mapped on-disk indexes for datasets larger than RAM, materialize RDFS/OWL-RL/N3 reasoning closures, stream-ingest huge gzip/bzip2/zstd dumps, import CSV as RDF (direct mapping or R2RML), or benchmark query suites. Covers the actual `sparq-cli` subcommands, positional argument order, and cargo feature flags.
+description: Use when you need to drive the sparq RDF/SPARQL engine from the command line — load a Turtle/N-Triples/N-Quads/TriG (or HDT) file and run a SPARQL query, compare RDF triple sets, build/query memory-mapped on-disk indexes for datasets larger than RAM, materialize RDFS/OWL-RL/N3 reasoning closures, stream-ingest huge gzip/bzip2/zstd dumps, import CSV as RDF (direct mapping or R2RML), or benchmark query suites. Covers the actual `sparq-cli` subcommands, positional argument order, and cargo feature flags.
 ---
 
 # sparq-cli
 
 `sparq-cli` is the command-line front-end to the `sparq` RDF triplestore + SPARQL engine. It loads RDF files (with transparent gzip/bzip2/zstd decompression), runs SPARQL, builds and queries out-of-core memory-mapped indexes, and materializes reasoning closures (RDFS / OWL-RL / N3).
 
-**Argument style (important):** the CLI uses a hand-rolled positional parser — there is *no* clap, no `--help`, and **no GNU-style flags except `--reason`/`--proof` and `query`'s `--format`/`--count`**. The first token is the subcommand; the rest are positional and order matters. An unknown/missing subcommand prints a short usage block and exits with code 2.
+**Argument style (important):** the CLI uses a hand-rolled positional parser — there is *no* clap, no `--help`, and **no GNU-style flags except `--reason`/`--proof`, `query`'s `--format`/`--count`, and `diff`'s `--exact`**. The first token is the subcommand; the rest are positional and order matters. An unknown/missing subcommand prints a short usage block and exits with code 2.
 
 ## Quickstart
 
@@ -35,6 +35,7 @@ All invoked as `sparq-cli <subcommand> <args...>`:
   - **CONSTRUCT / DESCRIBE** → the resulting triples serialised as **N-Triples** (always; `--format` is a SELECT/ASK selector and is ignored for the graph forms).
   - `--count` restores the historical count-only output (`<n> solutions in <ms>ms` for SELECT/ASK, `<n> triples in <ms>ms` for the graph forms) — the backward-compatible escape hatch for scripts that scraped the count.
   - An unknown `--format` value is a usage error (exit 2); a query/runtime error exits 1.
+- `diff <file-a> <file-b> [--exact]` *(opt-in `diff` feature; [GPT-5.6] sq-lsp7k.28)* — auto-detect each RDF format from `.nt`, `.ttl`, `.nq`, `.trig`, or `.jsonld` (before an optional compression extension), compare the documents as triple sets, and emit a deterministic N-Triples patch. Lines prefixed by `-` form the first lexicographically sorted block; lines prefixed by `+` form the second. Exit 0 means identical sets and empty stdout; exit 1 means different sets. Named-graph names are discarded, duplicate triples collapse, and blank-node labels compare exactly as loaded. `--exact` is currently a compatibility alias for that same behavior.
 - `reason <data-file> <format> <rdfs|owl|n3> [out.nt]` — materialize the entailed closure; print closure triple count; with `out.nt`, write the full closure as N-Triples. Add `--proof` (N3 only) to print each derivation step.
 - `build <file[.gz|.bz2|.zst]> <format> <dir> [chunk_millions=16]` — EXTERNAL-MEMORY build: stream the (compressed) document straight to on-disk memory-mapped indexes via disk-backed sort/merge. For datasets whose indexes exceed RAM. `chunk_millions` sets the in-memory run size. Writes RAW perms by default; set `SPARQ_BUILD_COMPRESSED=1` to emit block-compressed (`SPQCPRM1`) perms directly from the merge tail, skipping a later `recompress` (byte-identical to build-then-recompress).
 - `save <data-file> <format> <dir> [compressed]` — load into RAM then persist the six permutation indexes to `<dir>`. Add the literal word `compressed` for block-compressed permutations.
@@ -94,6 +95,11 @@ cargo run --release -p sparq-cli -- query data.ttl turtle \
   'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'
 ```
 
+**Compare two RDF files as triple sets (requires the `diff` feature):**
+```sh
+cargo run --release -p sparq-cli --features diff -- diff old.ttl new.ttl
+```
+
 **Benchmark a query suite, JSON-serialization mode, 10 iterations:**
 ```bash
 cargo run --release -p sparq-cli -- bench data.nt ntriples ./queries 10 json
@@ -123,6 +129,7 @@ cargo run --release -p sparq-cli --features hdt-write -- \
 - **HDT is opt-in:** `--features hdt` (loader) / `--features hdt-write` (adds the `to-hdt` exporter, implies `hdt`). OFF by default partly because the wrapped `hdt` crate declares MSRV **1.87** and its decode stack is dead weight on the common paths.
 - **Tabular import is opt-in:** `--features tabular` adds the `tabular` subcommand (CSV direct mapping + the R2RML materializing subset; zero new deps). SQL-connection R2RML and R2RML joins (`rr:parentTriplesMap`) are out of scope and fail loudly.
 - **Terse transpiler is opt-in:** `--features terse` adds the `terse` subcommand (the `K:<name>` keyword layer → canonical SPARQL, verifiable JSON expansion). OFF by default; the lean `sparq-terse` build depends only on `spargebra` (already in the CLI's tree), so it adds no heavy dep. See the `terse` subcommand above and the `http-server` skill for the matching `POST /terse/transpile` endpoint.
+- **RDF diff is opt-in:** `--features diff` adds the `diff` subcommand. It uses the existing `sparq-core` load path and adds no dependency; feature-OFF builds contain no diff dispatch or implementation.
 - **In-RAM store profile (native, no feature needed; [FABLE-5] sq-7d3dj.32.2.1):** `SPARQ_STORE_PROFILE` selects the in-memory store layout on the **shared load path**, so `query` / `bench` / `reason` / `scaling` inherit it uniformly from one env var. Unset or `raw` → the default six-permutation layout, **byte-identical** to before this hook existed; `compressed` → re-encode into the block-compressed in-RAM mode (`Graph::into_compressed`: block-compressed permutations + blob dictionary) after load; **any other value is a hard error (exit 2, fail-closed)** — a typo never silently falls through to raw. Query solutions are **identical** across profiles (a memory trade, never a semantic change). **Honest scope: this reduces steady-state RESIDENT footprint only — it does NOT reduce load-time peak RSS,** because `into_compressed` builds the raw perms first and encodes from them, so the peak still includes the raw build. For a genuinely peak-bound load, use the external build (`SPARQ_BUILD_COMPRESSED=1` + `open`) instead. Measure the trade with `memstat [compressed]` (see above). Not a cargo feature — the compressed code paths are compiled unconditionally; the choice is per-workload, not per-build (see `research/compressed-memory-profile.md` §2).
 - **External-build env vars (native, `dict-spill` feature):** `SPARQ_DICT_SPILL=1` spills the term dictionary during `build` (N-Triples only) to bound peak RSS; tune with `SPARQ_DICT_SPILL_BUDGET_MB` (default ¼ RAM) and `SPARQ_DICT_SPILL_DISK_FLOOR_MB` (default 1024, aborts before filling disk). Output is byte-identical. `SPARQ_BUILD_COMPRESSED=1` makes `build` emit block-compressed (`SPQCPRM1`) perms in one pass (no later `recompress`; raw is the default, output byte-identical to build-then-recompress). Also `SPARQ_NO_PREFETCH=1` for the `bench-remap` probe.
 - **Format ↔ ingest path:** N-Triples streams block-by-block (parallel parse, no full decompressed copy in RAM); Turtle/N-Quads/TriG are buffered whole for the parallel statement-splitter. zstd decompresses much faster than bzip2 (see the `fused-decompress-parse` skill for measured numbers) — recompress `.bz2` sources once with `zstd -9 -T0` for big ingests.

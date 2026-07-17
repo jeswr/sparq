@@ -94,6 +94,16 @@ mod serialize;
 #[cfg(feature = "scs")]
 mod scs;
 
+// [SONNET-4.6] sq-q4apb (#2396): the opt-in hosted-web
+// `Store.deriveForm(data, shapes, focus, format, optionsJson)` forms bridge.
+// Behind the non-default `forms` feature so the lean bundle carries zero
+// forms/serde code; the module adds a `#[wasm_bindgen] impl Store` method that
+// calls straight through to `sparq-forms`' SHACL-to-form derivation and returns
+// the FormDescription serde JSON verbatim (the same contract as the desktop
+// Tauri `derive_form` command — gui/app's forms-bridge.ts picks one host).
+#[cfg(feature = "forms")]
+mod forms;
+
 // [OPUS-4.8] sq-1dd5t (#1047): the opt-in RDFC-1.0 `canonicalizeNQuads(nquads)` free
 // function (the @jeswr/sparq RDF/JS `Dataset` consumes it for isomorphism-aware
 // toCanonical / equals / contains). Behind the non-default `canon` feature so the lean

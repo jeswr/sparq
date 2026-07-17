@@ -6,11 +6,30 @@
 // Adapted from site/test-support/ts-loader.mjs with an added resolve hook for explicit `.ts`
 // specifiers so `node --test src/lib/foo.test.ts` works (the site uses .mjs test files that
 // import .ts sources; here the test file itself is .ts).
+//
+// (sq-1y04h) [SONNET-4.6] — Added `@sparq/client` tsconfig-path alias resolution so unit tests
+// that import helpers which re-export from `@sparq/client` can run under `node --test`. The alias
+// maps to the same source the Next.js build sees (../../packages/sparq-client/src/index.ts).
 import { access, readFile } from 'node:fs/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { resolve as resolvePath, dirname } from 'node:path';
 import ts from 'typescript';
 
+// The tsconfig.json paths alias: `@sparq/client` → `../../packages/sparq-client/src/index.ts`
+// resolved relative to the gui/app directory (import.meta.dirname of THIS loader file is
+// gui/app/test-support/, so `..` takes us to gui/app/ and `../..` to the repo root).
+const SPARQ_CLIENT_ENTRY = resolvePath(
+  dirname(fileURLToPath(import.meta.url)),
+  '../../../packages/sparq-client/src/index.ts',
+);
+
 export async function resolve(specifier, context, next) {
+  // Resolve the @sparq/client tsconfig path alias to the package's real TypeScript entry.
+  // This lets gui/app unit tests that import helpers which use @sparq/client work in Node.
+  if (specifier === '@sparq/client') {
+    return { shortCircuit: true, url: pathToFileURL(SPARQ_CLIENT_ENTRY).href };
+  }
+
   // Allow explicit `.ts` imports (relative paths or file: URLs) so the test runner can load
   // a `.ts` test file and tests can import `.ts` sources with the `.ts` extension directly.
   if (specifier.endsWith('.ts') && !specifier.endsWith('.d.ts')) {

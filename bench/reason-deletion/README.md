@@ -9,8 +9,18 @@ closure, with a **differential-correctness gate** — after the randomized seque
 incrementally-maintained closure must be set-equal to a from-scratch re-materialization
 (and ABox deltas must never have triggered a full rebuild). This is what separates real
 incremental deletion (RDFox FBF/DRed/B-F; GraphDB smooth-delete) from a demo reasoner.
-Any `incremental.rs` OPTIMIZATION found wanting here goes to a follow-up sparq-reason
-bead — this suite is bench-dir-only by design (the crate was in-flight).
+
+**Profiling verdict (`sq-6tykl.4`).** RDFox's FBF/DRed exists to bound *over-deletion*: a
+counting-free maintainer that deletes every consequence then re-derives the still-supported
+ones. sparq took the derivation-**counting** route instead — a bounded per-fact support
+count — so a retraction decrements counts and only unsupported facts leave; there is no
+over-deletion pass to bound. Measured on this suite (work-box, non-canonical), pure-ABox
+deletion is orders of magnitude cheaper than from-scratch across every tier, so **no
+FBF-style over-deletion optimization is warranted** — the counting design already avoids the
+cost FBF was invented to remove. The one residual cost axis is the *full-rebuild fallbacks*
+(TBox / guard-predicate / recursive-layer ownership-transfer deltas), tracked as follow-up
+bead `sq-6tykl.6`. The re-derivation correctness invariant itself is guarded in-crate by
+`crates/sparq-reason/tests/incremental_deletion_heavy.rs`.
 
 ## How it works
 
@@ -41,8 +51,8 @@ REASONDEL_TIERS="small medium large" bash bench/reason-deletion/run.sh   # + nig
 ## Deletion ratios
 
 The driver's batch sizes are fixed (1 / 100 / 10,000 triples), so the ratio axis comes
-from varying the base size per tier: a 10,000-triple delete batch is ~41% of the small
-tier's ABox (24,160 triples), ~8.3% of medium (120,000), ~1.7% of large (600,000). The
+from varying the base size per tier: a 10,000-triple delete batch is ~42% of the small
+tier's ABox (24,000 triples), ~8.3% of medium (120,000), ~1.7% of large (600,000). The
 envelope records `delete_ratio = delta / abox_triples` per cell. Ratios here are dataset
 geometry (fixture constants), not measured performance.
 
@@ -56,13 +66,13 @@ geometry (fixture constants), not measured performance.
   domain/range/subPropertyOf/inverseOf-typed properties) bound to the vocabulary the
   driver's TBox actually ranges over, so the closure is materially larger than the ABox
   and deletion has real re-derivation work.
-- **Pinned tier sizes:** the driver's delete-sampler excludes the six TBox *predicates*
-  but not the `[locatedIn, rdf:type, owl:TransitiveProperty]` axiom-typing triple; if
-  drawn, deleting it legitimately takes the documented rebuild path and fails the
-  no-rebuild assert. Tier unit counts are pinned to values where the fixed-seed draw
-  sequence never hits it (fully deterministic — see `expected.tsv`). The driver-side fix
-  (exclude axiom-typing triples from ABox sampling) is a sparq-reason change, tracked as
-  follow-up bead `sq-x58ow`.
+- **Round tier sizes (`sq-x58ow` fixed):** the driver's delete-sampler now mirrors
+  `MaterializedOwlGraph::triggers_rebuild` — it excludes the six TBox *predicates* AND
+  axiom-typing triples (`p == rdf:type` && an axiom-class object such as
+  `owl:TransitiveProperty`) AND occurrence-guarded ids — so no ABox delta can ever
+  spuriously take the rebuild path. Tier unit counts are therefore round (`3000`, not the
+  old draw-safe `3020`); the closure fixtures in `expected.tsv` are re-validated for the
+  new sizes.
 - **Timing scope:** delta timings are single-shot (the driver measures one batch per
   size) and machine-dependent — comparative claims belong in envelope-carrying gathers
   on a quiet box, per `bench/CATALOG.md`. The RDFox/GraphDB competitor comparison is the

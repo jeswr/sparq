@@ -11,7 +11,7 @@ Opt-in **SHACL Core + SHACL-SPARQL (`sh:sparql`)** validation over
 [`sparq_core::Graph`]s. Core constraints run at the dictionary-id level via direct,
 index-backed permutation scans (no SPARQL round-trip; terms materialise only at the
 report boundary); `sh:sparql` routes its `sh:select` through `sparq-engine`. Reports:
-`conforms` + per-result detail, `to_turtle()` (W3C vocabulary), `to_text()`.
+`conforms` + per-result detail; `to_turtle()` / `to_ntriples()` (W3C report graph), `to_json()`, and `to_text()`.
 
 Like `sparq-reason`, this crate is **isolated**: no other sparq crate depends on it, so
 the core engine and the default wasm bundle carry zero SHACL code. The browser/JS
@@ -105,15 +105,15 @@ and call `validate_with_model`. CLI: `cargo run -p sparq-shacl --example validat
 `validate_strict` returns `Err(ShaclFailure)` for an unsound SHACL-SPARQL pre-binding (`MINUS`/
 `VALUES`/`SERVICE` / a sub-`SELECT` dropping `$this` / a `BIND` re-binding it, sq-0mjfd) and for
 **ill-formed shapes-graph constructs** — the W3C-suite `sht:Failure` outcome: an unparsable
-`sh:path` or pathless property shape, a non-integer `sh:minCount`, a malformed SHACL list, a
-non-node-kind `sh:nodeKind`, `sh:qualifiedValueShape` without either count, or a PRESENT
-`sh:select`/`sh:sparqlExpr` that does not parse — **fail-closed relative to this engine's SPARQL
-parser** (a valid query beyond its coverage is also rejected strictly). Construct-local checks,
-not a full SHACL-of-SHACL pass (sq-11a, sq-ehq4g); `validate` skips all leniently. Out of scope:
+`sh:path` or pathless property shape, a non-`xsd:integer` count/length, a malformed SHACL list,
+a non-node-kind `sh:nodeKind`, a non-IRI `sh:severity`, EITHER qualified parameter without the
+other, ANY `sh:entailment` (no regime is supported, SHACL §3.4), or a PRESENT `sh:select`/
+`sh:sparqlExpr`/`shacl-af` node expression that does not build — **fail-closed relative to this
+engine's parsers** (sq-11a, sq-ehq4g, sq-c1v3e); construct-local checks, not a full
+SHACL-of-SHACL pass. `validate` skips all of these leniently, surfacing each skip in
+`report.diagnostics` (joining the sq-lz99x uncompilable-`sh:pattern` skip there). Out of scope:
 `$shapesGraph` — see `bd list -l area:sparq-shacl`. Results are **not deduplicated** across
-traversal routes (a nested shape via two parents reports twice, matching the suite), re-entrant
-recursion counts as conforming, and an **uncompilable `sh:pattern`** is **skipped** into
-`report.diagnostics` (the Rust-vs-XPath regex boundary, sq-lz99x — never fail-closed).
+traversal routes (a nested shape reports once per parent route); re-entrant recursion conforms.
 
 ## License
 

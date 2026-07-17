@@ -62,7 +62,12 @@ import { GraphView, type InferredAffordance } from "@/components/workbench/graph
 // [FABLE-5] sq-ixc3.20 — click-to-explain inferred facts: the why() proof-tree panel + the
 // canonical triple identity that gates the affordance (membership in the closure-added set).
 import { ProofPanel, type ExplainTarget } from "@/components/workbench/proof-panel";
-import { termToNT, tripleKeyOfBindings } from "@/lib/inferred-facts";
+import {
+  inferredFactsMatchingKeys,
+  termToNT,
+  tripleKeyOfBindings,
+  type InferredFact,
+} from "@/lib/inferred-facts";
 // [OPUS-4.8] sq-tp1m (#757) — the per-workspace inference (RDFS / OWL 2 RL) selector, in the
 // action row so the active entailment regime is visible + controllable while querying.
 import { InferenceControl } from "@/components/workbench/inference-control";
@@ -316,37 +321,102 @@ const TURTLE_TOKEN_CLASS: Record<TurtleToken["type"], string> = {
   plain: "",
 };
 
-/** A highlighted RDF document (pretty Turtle by default, raw N-Triples otherwise). */
-function RdfDocument({ ntriples, pretty }: { ntriples: string; pretty: boolean }) {
+/** [GPT-5.6] Highlight one RDF text fragment without changing its line/triple identity. */
+function RdfTokens({ text }: { text: string }) {
+  const tokens = React.useMemo(() => tokenizeTurtle(text), [text]);
+  return tokens.map((t, i) => {
+    const cls = TURTLE_TOKEN_CLASS[t.type];
+    return cls ? (
+      <span key={i} className={cls}>
+        {t.text}
+      </span>
+    ) : (
+      <React.Fragment key={i}>{t.text}</React.Fragment>
+    );
+  });
+}
+
+/** A highlighted pretty-Turtle document. */
+function RdfDocument({ ntriples }: { ntriples: string }) {
   const text = React.useMemo(() => {
-    if (!pretty) return ntriples;
     try {
       return prettyTurtle(ntriples);
     } catch {
       // The serialiser never throws by design, but degrade to the raw form if it ever does.
       return ntriples;
     }
-  }, [ntriples, pretty]);
-  const tokens = React.useMemo(() => tokenizeTurtle(text), [text]);
+  }, [ntriples]);
   return (
     <pre className="overflow-auto whitespace-pre p-3 font-mono text-xs">
-      {tokens.map((t, i) => {
-        const cls = TURTLE_TOKEN_CLASS[t.type];
-        return cls ? (
-          <span key={i} className={cls}>
-            {t.text}
-          </span>
-        ) : (
-          <React.Fragment key={i}>{t.text}</React.Fragment>
-        );
-      })}
+      <RdfTokens text={text} />
     </pre>
   );
 }
 
+/** [GPT-5.6] One raw result line plus its exact inferred membership, if any. */
+interface NTriplesLine {
+  text: string;
+  fact: InferredFact | null;
+}
+
+/** [GPT-5.6] Raw N-Triples keeps one statement per line, so why() can be attached precisely. */
+function RawNTriplesDocument({
+  lines,
+  onExplain,
+}: {
+  lines: readonly NTriplesLine[];
+  onExplain?: (target: ExplainTarget) => void;
+}) {
+  return (
+    <div className="min-w-max py-2 font-mono text-xs" data-ntriples-lines>
+      {lines.map(({ text, fact }, index) => (
+        <div
+          key={index}
+          className={cn(
+            "flex min-h-5 items-start gap-2 px-3",
+            fact && "border-l-2 border-primary bg-primary/5 pl-2.5",
+          )}
+          {...(fact ? { "data-inferred-line": true } : {})}
+        >
+          <pre className="min-w-0 flex-1 whitespace-pre">
+            <RdfTokens text={text} />
+          </pre>
+          {fact && onExplain ? (
+            <button
+              type="button"
+              className="sticky right-2 shrink-0 rounded border border-transparent bg-primary/10 px-1.5 py-0 text-[10px] text-primary hover:bg-primary/20"
+              onClick={() => onExplain(fact)}
+              aria-label={`Explain inferred fact: ${fact.ntriples}`}
+              title="This fact is inferred (not asserted) — see its derivation"
+              data-explain-trigger
+              data-ntriples-explain
+            >
+              why?
+            </button>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** The N-Triples / Turtle view, with a pretty-Turtle ⇄ raw-N-Triples toggle. */
-function GraphTextView({ ntriples }: { ntriples: string }) {
+function GraphTextView({
+  ntriples,
+  inferred,
+}: {
+  ntriples: string;
+  /** [GPT-5.6] Exact inferred-line membership + proof-panel opener. */
+  inferred?: InferredAffordance | null;
+}) {
   const [pretty, setPretty] = React.useState(true);
+  const lines = React.useMemo<readonly NTriplesLine[]>(() => {
+    return ntriples.split("\n").map((text) => ({
+      text,
+      fact: inferred ? (inferredFactsMatchingKeys(text, inferred.keys)[0] ?? null) : null,
+    }));
+  }, [ntriples, inferred]);
+  const hasInferredLines = lines.some((line) => line.fact !== null);
   if (!ntriples.trim()) {
     return <p className="p-3 text-sm text-muted-foreground">(empty graph)</p>;
   }
@@ -359,7 +429,9 @@ function GraphTextView({ ntriples }: { ntriples: string }) {
         ].map((opt) => (
           <button
             key={String(opt.id)}
+            type="button"
             onClick={() => setPretty(opt.id)}
+            aria-pressed={pretty === opt.id}
             className={cn(
               "rounded px-2 py-0.5 text-[11px]",
               pretty === opt.id
@@ -370,9 +442,23 @@ function GraphTextView({ ntriples }: { ntriples: string }) {
             {opt.label}
           </button>
         ))}
+        {hasInferredLines ? (
+          <span
+            className="ml-auto text-[10px] text-muted-foreground"
+            data-text-inferred-hint
+          >
+            {pretty
+              ? "Switch to N-Triples to explain inferred facts."
+              : "Marked lines are inferred — choose why? for a derivation."}
+          </span>
+        ) : null}
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        <RdfDocument ntriples={ntriples} pretty={pretty} />
+        {pretty ? (
+          <RdfDocument ntriples={ntriples} />
+        ) : (
+          <RawNTriplesDocument lines={lines} onExplain={inferred?.onExplain} />
+        )}
       </div>
     </div>
   );
@@ -415,7 +501,7 @@ function ResultBody({
 }: {
   outcome: QueryOutcome;
   view: ResultView;
-  /** [FABLE-5] sq-ixc3.20 — the inferred-fact affordance (table + graph views). */
+  /** [GPT-5.6] sq-l54uy — the inferred-fact affordance (table + graph + N-Triples views). */
   inferred?: InferredAffordance | null;
 }) {
   if (outcome.kind === "error") {
@@ -494,7 +580,7 @@ function ResultBody({
     }
     return (
       <div className="h-full" data-result-kind="graph">
-        <GraphTextView ntriples={outcome.ntriples} />
+        <GraphTextView ntriples={outcome.ntriples} inferred={inferred} />
       </div>
     );
   }

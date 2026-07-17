@@ -26,3 +26,19 @@
   crate: "sparq-geo"
   features: "geosparql_rewrite"
   test: true
+
+# [GPT-5.6] Exact DE-9IM refinement for topology-index containment scans is
+# default-OFF, and tests/topology_index.rs is compiled only with this feature.
+- name: "sparq-geo (topology_index)"
+  crate: "sparq-geo"
+  features: "topology_index"
+  test: true
+
+# [FABLE-5] sq-lsp7k: the GeoSPARQL 1.1 non-topological ACCESSOR functions
+# (geof:dimension/coordinateDimension/spatialDimension/isSimple/geometryType)
+# register into geof_registry() only under this default-OFF feature; the
+# differential + SPARQL-level accessor tests compile only with it.
+- name: "sparq-geo (geof_accessors)"
+  crate: "sparq-geo"
+  features: "geof_accessors"
+  test: true

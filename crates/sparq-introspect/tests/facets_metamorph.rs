@@ -188,6 +188,8 @@ fn absent_constraint_fails_closed_to_empty_response() {
                 types: Vec::new(),
                 predicates: Vec::new(),
                 values: Vec::new(),
+                #[cfg(feature = "numeric-facets")]
+                numeric: Vec::new(),
             }
         );
     }

@@ -1,6 +1,6 @@
-# [OPUS-4.8] sq-oy1f.23 (epic sq-oy1f) — Phase A scaffold of the document-level
-# W3C JSON-LD 1.1 pipeline (research/jsonld-1.1-design.md §3). Authored by Opus 4.8
-# (Fable unavailable; flag for re-review when Fable returns).
+# [OPUS-4.8] sq-oy1f.23 (epic sq-oy1f) originated the document-level W3C JSON-LD 1.1
+# pipeline (research/jsonld-1.1-design.md §3). Later beads implemented expansion,
+# flattening, compaction, from-RDF conversion, and framing.
 [package]
 name = "sparq-jsonld"
 version.workspace = true
@@ -13,14 +13,11 @@ keywords.workspace = true
 categories.workspace = true
 description = "Native, dependency-free W3C JSON-LD 1.1 document pipeline for sparq (Json AST + error registry + processing options + deny-by-default document loader)"
 readme = "README.md"
-# [OPUS-4.8] SCAFFOLD-PHASE STUB. The algorithms (Context Processing, Expansion,
-# Flattening, Compaction, Framing, from/to-RDF) land in beads sq-oy1f.24+; this crate
-# currently carries only the moved `Json` AST, the error-code registry, the processing
-# options, and the loader trait. `publish = false` keeps it exempt from the new-crate
-# governance gate (G1, scripts/gate-new-crate.py) bench + SKILL requirements until the
-# pipeline is real — exactly the pattern sparq-substrate uses for its own staged build-out.
-# FLIP this to publishable (and add a registered conformance benchmark + a
-# skills/<surface>/SKILL.md) in the epic's closing bead (sq-oy1f.36) once the pipeline lands.
+# [GPT-5.6] sq-ci15w — `publish = false` is the current internal-release posture, not a
+# scaffold marker: compaction and framing are implemented, and the pinned W3C framing
+# lane passes all 92 cases. `to_rdf` and the high-level `api` facade remain documented
+# placeholders. Revisit publication, governance, and benchmark registration in the
+# epic's closing bead (sq-oy1f.36); usage already lives in skills/jsonld/SKILL.md.
 publish = false
 
 # Render the README as the docs.rs front page (src/lib.rs `#![doc = include_str!(...)]`).
@@ -38,7 +35,6 @@ name = "jsonld_conformance"
 test = true
 
 # ZERO mandatory dependencies (design §3.1). The optional `http-loader` / `html`
-# features and their deps arrive with later beads (sq-oy1f.32 / sq-oy1f.33); the
-# scaffold pulls in nothing so a consumer that only needs the `Json` AST + the error
-# registry pays no dependency cost, and the wasm bundle stays lean.
+# features and their dependencies arrive with later beads (sq-oy1f.32 / sq-oy1f.33).
+# The native document algorithms remain dependency-free, and the wasm bundle stays lean.
 [dependencies]

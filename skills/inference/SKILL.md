@@ -205,41 +205,67 @@ let _entailed: Vec<[sparq_core::dict::Id;3]> = doc.closure(&mut dict)?;  // mono
 
 ## Stratified Datalog rules (opt-in `datalog` feature, `sparq_reason::datalog`)
 
-RDFox-parity track, Phase 1 (`research/stratified-datalog-rules.md`): a small native
-rule dialect with `NOT` (negation as failure), `AGGREGATE COUNT`/`SUM`/`MIN`/`MAX`/`AVG`
-atoms and a minimal
-exact-numeric `FILTER`, a **stratification checker** (programs with a recursion cycle
-through NOT/AGGREGATE are rejected loudly; class-granular for `rdf:type` atoms), and a
-non-incremental per-stratum evaluator on the shared substrate join kernels.
+RDFox-parity track (`research/stratified-datalog-rules.md`): a small native
+rule dialect with single/grouped `NOT` (negation as failure),
+`AGGREGATE COUNT`/`SUM`/`MIN`/`MAX`/`AVG` atoms (including
+`COUNT(DISTINCT ?v)`), variable predicates, and numeric `FILTER` over exact,
+float, and double values. Its **stratification checker** rejects programs with a
+recursion cycle through NOT/AGGREGATE; dependencies are class-granular for
+`rdf:type`, while variable predicates conservatively couple to every relation. It has a
+semi-naive per-stratum evaluator on the shared substrate join kernels, and
+**incrementally maintained materialization** (`MaterializedProgram`: DRed for positive
+strata, stratum-boundary rederivation for `NOT`/`AGGREGATE` strata).
 
 ```rust
-use sparq_reason::datalog::{eval, parse_program, stratify};
+use sparq_reason::datalog::{eval, parse_program, stratify, MaterializedProgram};
 
 pub fn parse_program(dict: &mut Dict, src: &str) -> Result<Program, String>;
 pub fn stratify(dict: &Dict, p: &Program) -> Result<Stratification, String>; // checker alone
 pub fn eval(dict: &mut Dict, facts: &[[Id;3]], p: &Program) -> Result<Vec<[Id;3]>, String>;
 impl Program { pub fn n_rules(&self) -> usize; }
 impl Stratification { pub fn n_strata(&self) -> usize; }
+
+// Incrementally maintained materialization (sq-4foq0). insert/delete return the
+// exact closure delta; delete of a still-derivable fact keeps it (owner changes);
+// update() is one batch: new base = (base \ deletes) ∪ inserts.
+impl MaterializedProgram {
+    pub fn new(dict: &mut Dict, facts: &[[Id;3]], p: Program) -> Result<Self, String>;
+    pub fn insert(&mut self, dict: &mut Dict, facts: &[[Id;3]]) -> usize;
+    pub fn delete(&mut self, dict: &mut Dict, facts: &[[Id;3]]) -> usize;
+    pub fn update(&mut self, dict: &mut Dict, ins: &[[Id;3]], del: &[[Id;3]]) -> (usize, usize);
+    pub fn contains(&self, f: &[Id;3]) -> bool;
+    pub fn closure(&self) -> Vec<[Id;3]>;   // a SET; also len() / is_empty()
+}
 ```
 
 ```rust
 let mut dict = Dict::new();
 let rules = parse_program(&mut dict, r#"@prefix ex: <http://ex/> .
-[?x, ex:deg, ?c] :- AGGREGATE([?x, ex:edge, ?y] ON ?x BIND COUNT(?y) AS ?c) .
+[?x, ex:deg, ?c] :- AGGREGATE([?x, ex:edge, ?y], [?y, ex:tag, ?t]
+                               ON ?x BIND COUNT(DISTINCT ?y) AS ?c) .
 [?x, a, ex:Hub]  :- [?x, ex:deg, ?c], FILTER(?c >= 3) .
-[?x, a, ex:Leaf] :- [?x, a, ex:Node], NOT [?x, a, ex:Hub] ."#)?;
+[?x, a, ex:Leaf] :- [?x, a, ex:Node],
+                     NOT { [?x, a, ex:Hub], [?x, ex:disabled, "yes"] } ."#)?;
 let closure = eval(&mut dict, &facts, &rules)?; // inputs + derivations, a SET
 ```
 
-Fragment honesty (all loud parse errors, never silent): constant predicates only;
-aggregate numeric inputs use the shared XSD numeric tower and non-numeric rows fail
-closed; `FILTER` is exact `xsd:integer`/`decimal`
-comparison, fail-closed on anything else; head/FILTER vars must be bound positively;
+Grouped absence accepts `NOT { atom, atom }` or `NOT EXISTS { atom, atom }`; atoms
+may be comma- or period-separated. The whole conjunction is tested jointly, with
+free variables existential and group-local. Legacy `NOT atom` is unchanged. Variable
+predicate atoms scan all relations; a variable head predicate emits only when its
+binding is an IRI. Aggregate numeric inputs use the shared XSD numeric tower and
+non-numeric rows fail closed; `FILTER` uses relational numeric comparison, so NaN
+also fails the row (including `!=`). Head/FILTER vars must be bound positively;
 non-`ON` aggregate-body vars are aggregate-local (name collisions rejected). `COUNT(?v)`
-counts DISTINCT body matches per group; counts mint `xsd:integer` literals. `SUM`
+counts distinct full-body matches per group; `COUNT(DISTINCT ?v)` de-duplicates the
+projected value within each group. Counts mint `xsd:integer` literals. `SUM`
 and `AVG` follow SPARQL numeric promotion (`AVG` of integers is `xsd:decimal`), while
-`MIN`/`MAX` preserve the original extremal term id. Semi-naive rounds run per stratum;
-incremental maintenance is beaded. <!-- [GPT-5.6] sq-citho -->
+`MIN`/`MAX` preserve the original extremal term id. Semi-naive rounds run per stratum.
+Incremental maintenance is differential-pinned (closure == from-scratch `eval` after
+every randomized insert/delete step) and skips strata whose input predicates did not
+change; its per-update set/index bookkeeping is O(affected visible input) — the
+incrementality win is delta-driven RULE-FIRING work (deterministic counters), not set
+ops. <!-- [GPT-5.6] sq-citho / sq-a7bmo --> <!-- [FABLE-5] sq-4foq0 -->
 
 ## D-entailment datatype typing (opt-in `d-entail` feature, `sparq_reason::dtype`)
 
@@ -267,6 +293,8 @@ The loaders desugar every RDF 1.2 quotation form (`<< :s :p :o >>`, `:s :p :o ~ 
 
 **Opacity:** quotation never asserts — `:r rdf:reifies <<( :s :p :o )>>` does NOT entail `:s :p :o` — and no rule rewrites inside a triple term (`owl:sameAs` substitutes whole ids only). Reifier ANNOTATIONS are ordinary triples and get full RL reasoning without touching the quoted content.
 
+**Strict opacity (`ReifyMode`, second increment):** <!-- [FABLE-5] sq-afun3 --> the bridge COMPOSITION (destructure → eq-rep on the classic vocabulary → construct) can still quote an `owl:sameAs`-VARIANT spelling of an existing triple. `materialize_owl_rl_reify(&mut dict, &mut triples, ReifyMode::DestructureOnly)` suppresses that: reif-ctr never runs, so inference never mints a triple term at all — destructure, annotation reasoning, and the RL core are unchanged. `materialize_owl_rl` ≡ `ReifyMode::Bridge` (the full bridge). Batch-only: `MaterializedOwlGraph`'s Fallback re-materialization always runs the full bridge.
+
 **OFF by default** (the bridge is a deliberate, non-normative entailment extension): plain `Profile::OwlRl` closures are byte-identical without the feature, and occurrence-guarded even with it (reify-free data pays nothing). `MaterializedOwlGraph` routes reify-vocabulary bases to its documented Fallback mode (incremental == from-scratch parity preserved). No new `Profile` variant, no new deps.
 
 ## OWL 2 EL classification (`sparq-reason-el`, separate opt-in crate)
@@ -290,11 +318,11 @@ let _ = h.super_classes(some_class_id);
 let _ = h.unsatisfiable_classes();      // classes forced ⊑ owl:Nothing (e.g. via disjointWith)
 ```
 
-- **Scope (default, Phase E1):** `EL+⊥` minus RBox — `rdfs:subClassOf`/`owl:equivalentClass`, `owl:intersectionOf`, `owl:someValuesFrom` restrictions, `owl:disjointWith`, `owl:Thing`/`owl:Nothing` — **plus safe nominals** (bead `sq-pbz04.2.1`): a singleton `owl:oneOf` (`{a}`) and an object-valued `owl:hasValue` (`∃r.{a}`) are basic concepts reasoned over by completion rule **CR6** (the reachability-guarded nominal merge, "Pushing the EL Envelope" IJCAI-05 — the guard is what keeps `C ⊑ {a}, D ⊑ {a} ⊬ C ⊑ D` when `D` may be empty; negative tests in `tests/nominals.rs` pin it). Every CR6 derivation is sound; completeness is claimed for the typical safe usage, NOT for every EL++ nominal interplay (unrestricted nominal interaction needs a stronger calculus — ELK line of work, KR 2012). **Self-restrictions** (bead `sq-pbz04.2.6`): `owl:hasSelf "true"^^xsd:boolean` + `owl:onProperty r` is the profile's `ObjectHasSelf` (`∃r.Self`, local reflexivity) — decoded as a self-concept atom and reasoned over by **CR-Self-1** (`X ⊑ ∃r.Self ⇒ (X,X) ∈ R(r)`) and **CR-Self-2** (`∃r.Self ⊑ D ⇒ X ⊑ D`, realised via the self-concept atom + CR1). Load-bearing side-condition: a GENERAL `(X,X)` link from `X ⊑ ∃r.X` (CR3) — whose invariant is only `X ⊑ ∃r.X`, NOT `X ⊑ ∃r.Self` — must NEVER trigger CR-Self-2; a malformed `owl:hasSelf` (non-`true`/non-boolean object, missing `owl:onProperty`) stays a counted skip (fail-closed). The default TBox classifier does NOT internalize ABox `rdf:type`/property assertions (that stays its contract in every feature state — see the opt-in `abox` feature below for assertion realisation + whole-ontology consistency). Class axioms outside the recognised fragment are **not applied** and counted in `Report::skipped_axioms` (honest, never silently misapplied). Single-threaded by default (see the opt-in `par` feature below).
+- **Scope (default, Phase E1):** `EL+⊥` minus RBox — `rdfs:subClassOf`/`owl:equivalentClass`, `owl:intersectionOf`, `owl:someValuesFrom` restrictions, `owl:disjointWith`, `owl:Thing`/`owl:Nothing` — **plus safe nominals** (bead `sq-pbz04.2.1`): a singleton `owl:oneOf` (`{a}`) and an object-valued `owl:hasValue` (`∃r.{a}`) are basic concepts reasoned over by completion rule **CR6** (the reachability-guarded nominal merge, "Pushing the EL Envelope" IJCAI-05 — the guard is what keeps `C ⊑ {a}, D ⊑ {a} ⊬ C ⊑ D` when `D` may be empty; negative tests in `tests/nominals.rs` pin it). Every CR6 derivation is sound; completeness is claimed for the typical safe usage, NOT for every EL++ nominal interplay (unrestricted nominal interaction needs a stronger calculus — ELK line of work, KR 2012). **Self-restrictions** (bead `sq-pbz04.2.6`): `owl:hasSelf "true"^^xsd:boolean` + `owl:onProperty r` is the profile's `ObjectHasSelf` (`∃r.Self`, local reflexivity) — decoded as a self-concept atom and reasoned over by **CR-Self-1** (`X ⊑ ∃r.Self ⇒ (X,X) ∈ R(r)`), **CR-Self-2** (`∃r.Self ⊑ D ⇒ X ⊑ D`, realised via the self-concept atom + CR1), and — bead `sq-8zqwb`, EL wave 2 — **CRs3, nominal reflexivity** (a SAME-NOMINAL self-link `({a},{a}) ∈ R(r)`, e.g. an asserted or derived `a r a`, reads off as `∃r.Self ∈ S({a})` — sound because a nominal denotes a singleton, so its r-successor inside itself IS itself). Load-bearing side-condition: a GENERAL `(X,X)` link from `X ⊑ ∃r.X` (CR3) — whose invariant is only `X ⊑ ∃r.X`, NOT `X ⊑ ∃r.Self` — must NEVER trigger CR-Self-2 or CRs3 (only a NOMINAL's self-link is local reflexivity); a malformed `owl:hasSelf` (non-`true`/non-boolean object, missing `owl:onProperty`) stays a counted skip (fail-closed). The default TBox classifier does NOT internalize ABox `rdf:type`/property assertions (that stays its contract in every feature state — see the opt-in `abox` feature below for assertion realisation + whole-ontology consistency). Class axioms outside the recognised fragment are **not applied** and counted in `Report::skipped_axioms` (honest, never silently misapplied). Single-threaded by default (see the opt-in `par` feature below).
 - **RBox role reasoning + lattice readoff (opt-in `rbox` feature, Phases E2/E3, beads `sq-xetf7`/`sq-pbz04.2.7`):** add `features = ["rbox"]`. Applies `rdfs:subPropertyOf` role inclusions (**CR10**) and `owl:propertyChainAxiom` + `owl:TransitiveProperty` compositions (**CR11**, incl. the SNOMED-critical right-identity `r ∘ s ⊑ s`) via a saturated role automaton, so links propagate up the role hierarchy and along chains before CR4/CR5 fire. `classify_graph` ALSO emits the **NON-REFLEXIVE told-inclusion closure** as `rdfs:subPropertyOf` triples (readoff of the already-computed `RoleBox::super_of` table — no new saturation; self-pairs excluded). `Report::emitted_role_subsumptions` counts the new triples added (told pairs already in the graph are not re-emitted; second call idempotent). **OFF by default** — zero role-automaton code in the default/wasm build; without it RBox axioms are left unapplied (roles compared for equality only). `Classifier::classify` (typed API) is unchanged.
 - **Transitive reduction → Hasse diagram (opt-in `hasse` feature, Phase E3, bead `sq-s2nob`):** add `features = ["hasse"]`. `DirectHierarchy::from_closure(&h)` reduces the *full* closure to **direct (immediate) subsumers** and collapses **equivalence cliques** (`direct_super_classes` / `representative` / `equivalent_classes`); `classify_hasse_graph(&mut dict, &mut triples)` materializes the COMPACT taxonomy — direct `rdfs:subClassOf` + `owl:equivalentClass` edges, **O(N)** on a deep chain instead of the O(N²) full closure `classify_graph` emits. The closure of the direct edges (chased through cliques) re-derives the complete relation, so it loses nothing. **OFF by default** — zero reduction code without it; the full-closure `Classifier`/`classify_graph` API is unchanged. Deterministic (rep = min dict id, sorted output) so the Hasse **edge count** is a hard assertion target; timings advisory.
 - **Concrete domains — CR7–CR9 (opt-in `cdomain` feature, bead `sq-pbz04.2.2`):** add `features = ["cdomain"]`. Faceted datatype restrictions — `owl:onDatatype` + `owl:withRestrictions` with `xsd:min/maxInclusive`/`xsd:min/maxExclusive` facets — are decided EXACTLY on the shared `sparq_substrate::numeric` value tower (`Dec` i128 fixed-point, never lossy f64) for `xsd:decimal`, `xsd:integer` and the 12 derived integer types (implicit bounds folded in, so `xsd:byte` + `minInclusive 1000` is genuinely empty; exclusive integer bounds TIGHTEN, so integer `(5, 6)` is empty while decimal `(5, 6)` is not). An **EMPTY** range is `⊑ owl:Nothing` (the clash reaches classes with an `∃p.range` obligation via CR5 → `unsatisfiable_classes()`); a **proven value-space containment** (`[5,10] ⊆ [0,20]`, integer-inside-decimal, point-in-range) threads subsumptions through data-property existentials via the ordinary CR1/CR3/CR4. Exact-numeric `DataHasValue` (`owl:hasValue 5`) and singleton `DataOneOf` (`owl:oneOf (5)`) are point ranges (`{5}`, `{5.0}` and faceted `[5,5]` unify on ONE concept). **Deferred — no verdict is EVER guessed** (stays in `skipped_axioms`): pattern/length/digit facets (an unknown facet defers the WHOLE range — ignoring it could fabricate a containment), float/double or non-numeric bases and bound values, `owl:onDataRange` (cardinality vocabulary, outside EL), `owl:datatypeComplementOf`, ill-formed bounds (`"300"^^xsd:byte`), and mixed range/class-expression nodes. Known sound incompleteness: a decimal-sorted range is not derived ⊆ an integer-sorted one (non-point cases), and a plain facet-free datatype IRI filler keeps its opaque-class treatment. **OFF by default** — zero concrete-domain code and no `sparq-substrate` dep without it; every concrete-domain occurrence is then skipped as before. `tests/cdomain.rs` pins the sat/unsat/deferral matrix with exact-closure oracles.
-- **ABox realisation + whole-ontology consistency (opt-in `abox` feature, bead `sq-pbz04.2.5`):** add `features = ["abox"]`. The additive `realize(&dict, &triples) -> Realization` / `realize_graph(&mut dict, &mut triples) -> AboxReport` entry internalizes `ClassAssertion` (`a rdf:type C` ⇒ `{a} ⊑ C`) and `ObjectPropertyAssertion` (`a p b` ⇒ `{a} ⊑ ∃p.{b}`) as SAFE-NOMINAL axioms over the CR6 machinery, then reads the saturation off: `{a} ⊑ C` (C a NAMED class, incl. `owl:Thing`) ⇒ **`a rdf:type C`**; a derived `{a} ⊑ {b}` ⇒ **`a owl:sameAs b`**; a derived `∃r.Self ∈ S({a})` (bead `sq-pbz04.2.6`, `owl:hasSelf`) ⇒ the property assertion **`a r a`** via `Realization::self_assertions()` (the WG `New-Feature-SelfRestriction-001` "Peter likes Peter"); `{a} ⊑ ⊥` (two disjoint `ClassAssertion`s, an instance of `∃owl:bottomObjectProperty.⊤` or `∃op.owl:Nothing`) or a global `⊤ ⊑ ⊥` ⇒ a whole-ontology **`is_inconsistent()`** verdict (on `Realization` and the returned `ClassHierarchy`). **Every emitted typing/sameAs/inconsistency holds in EVERY model** (soundness over completeness; the CR6 reachability side-condition is untouched — this path only READS the saturation `classify::saturate` produced). The TBox `Classifier::classify`/`classify_graph` are **byte-identical in every feature state** (they NEVER internalize assertions — so the `el-suite` conformance floor is unaffected even under `--all-features`). **Fail-closed:** data-property assertions (the `cdomain` point-range rescue is a sequenced follow-up bead) and a non-EL class expression in a `ClassAssertion` stay counted in `Report::skipped_assertions`, never guessed; an INCONSISTENT ontology realises to NOTHING (the verdict is the surface, not an everything-entailed flood). **OFF by default** — zero assertion-reasoning code without it. `src/abox.rs` pins the readoff over the WG `WebOnt-Ontology-001` / `DisjointClasses-002` / `New-Feature-BottomObjectProperty-001` / `WebOnt-Restriction-001` / `WebOnt-Thing-003` shapes.
+- **ABox realisation + whole-ontology consistency (opt-in `abox` feature, bead `sq-pbz04.2.5`):** add `features = ["abox"]`. The additive `realize(&dict, &triples) -> Realization` / `realize_graph(&mut dict, &mut triples) -> AboxReport` entry internalizes `ClassAssertion` (`a rdf:type C` ⇒ `{a} ⊑ C`) and `ObjectPropertyAssertion` (`a p b` ⇒ `{a} ⊑ ∃p.{b}`) as SAFE-NOMINAL axioms over the CR6 machinery, then reads the saturation off: `{a} ⊑ C` (C a NAMED class, incl. `owl:Thing`) ⇒ **`a rdf:type C`**; a derived `{a} ⊑ {b}` ⇒ **`a owl:sameAs b`**; a derived `∃r.Self ∈ S({a})` (bead `sq-pbz04.2.6`, `owl:hasSelf`) ⇒ the property assertion **`a r a`** via `Realization::self_assertions()` (the WG `New-Feature-SelfRestriction-001` "Peter likes Peter"; the CONVERSE — an asserted `a r a` ⇒ `Peter ∈ ∃likes.Self` typings via CRs3, the `New-Feature-SelfRestriction-002` converse shape — graduated in bead `sq-8zqwb`); `{a} ⊑ ⊥` (two disjoint `ClassAssertion`s, an instance of `∃owl:bottomObjectProperty.⊤` or `∃op.owl:Nothing`) or a global `⊤ ⊑ ⊥` ⇒ a whole-ontology **`is_inconsistent()`** verdict (on `Realization` and the returned `ClassHierarchy`). **Every emitted typing/sameAs/inconsistency holds in EVERY model** (soundness over completeness; the CR6 reachability side-condition is untouched — this path only READS the saturation `classify::saturate` produced). The TBox `Classifier::classify`/`classify_graph` are **byte-identical in every feature state** (they NEVER internalize assertions — so the `el-suite` conformance floor is unaffected even under `--all-features`). **Fail-closed:** data-property assertions (the `cdomain` point-range rescue is a sequenced follow-up bead) and a non-EL class expression in a `ClassAssertion` stay counted in `Report::skipped_assertions`, never guessed; an INCONSISTENT ontology realises to NOTHING (the verdict is the surface, not an everything-entailed flood). **OFF by default** — zero assertion-reasoning code without it. `src/abox.rs` pins the readoff over the WG `WebOnt-Ontology-001` / `DisjointClasses-002` / `New-Feature-BottomObjectProperty-001` / `WebOnt-Restriction-001` / `WebOnt-Thing-003` shapes.
 - **Parallel saturation (opt-in `par` feature, Phase E4, bead `sq-wy3i6`):** add `features = ["par"]`. `Classifier::classify_par(&dict, &triples, threads)` / `classify_graph_par(&mut dict, &mut triples, threads)` (`threads: NonZeroUsize`) run the SAME CR1–CR6 (+`rbox` CR10/CR11) rules as **deterministic bulk-synchronous rounds**: the membership frontier is partitioned across a bounded `std::thread::scope` worker pool that derives rule firings read-only against the round-start snapshot, then a sequential apply phase reuses the single-threaded `add`/`add_link` machinery. **The derived closure is IDENTICAL to the single-threaded engine at every thread count** (soundness + completeness + determinism — pinned by `tests/par_differential.rs` differentials incl. delayed-filler CR4 / CRs1-link mutation witnesses and a repeated-run determinism stress, plus the `sparq-conformance/el-suite-par` differential over the W3C EL corpus in the CI el-suite lane); emitted triples match content AND order. **OFF by default** — zero threading code without it; native targets only (do NOT enable for wasm, where `std::thread` cannot spawn — the default single-threaded path is the wasm story). No wall-clock/speedup claim is made or pinned (work-box timings are non-canonical).
 - **Keys + negative property assertions + differentFrom (also `abox`, bead `sq-pbz04.2.8`):** the `realize` / `realize_graph` readoff ALSO reasons over three more ABox mechanisms, all sound-over-complete. **`owl:hasKey(C, keys)`** merges two DISTINCT **named (IRI)** individuals BOTH derivably in `C` that share a value on **EVERY** key property (⇒ **`a owl:sameAs b`**, in `Realization::same_as()`). Object keys match a shared **nominal successor** (`{b} ∈ R(p)[{a}]`, asserted or derived); data keys a shared **literal TERM** (identical terms ⇒ identical values — sound; value-equal-but-lexically-distinct literals are an honest incompleteness pending the `cdomain` numeric tower). Firing on a **PARTIAL** match is impossible **by construction** (each key property's shared-value set must be non-empty AND intersect — the classic HasKey over-derivation trap, pinned by a negative test; e.g. `New-Feature-Keys-006`'s single-member key never fires, and the functional-property clash it needs is honestly out of fragment). **`owl:NegativePropertyAssertion`** is a whole-ontology clash (**`is_inconsistent()`**) iff the corresponding POSITIVE is asserted or DERIVED — object NPA against a nominal successor (asserted *or* derived), data NPA against an asserted `a p "v"` triple (data positives are not internalized: an honest incompleteness, never an unsound missed clash). **`owl:differentFrom`** (in `Realization::different_from()`, `realize_graph` materializes `owl:differentFrom` triples) is read off **ONLY** from a derived nominal clash (`{a} ⊓ {b} ⊑ ⊥` via a disjointness — `WebOnt-disjointWith-001`) or the SYMMETRIC closure of an asserted inequality (`WebOnt-differentFrom-001`) — never fabricated; a `sameAs`/`differentFrom` coincidence (`New-Feature-Keys-002`) is **inconsistent**. **Fail-closed:** a malformed key (non-atomic class, empty/non-IRI list) or NPA stays counted in `Report::skipped_assertions`. `src/abox.rs` pins the `Keys-001/-002/-003/-006`, both NPA-001, `differentFrom-001`, `disjointWith-001` shapes plus the partial-key negative test.
 - **Deferred EL fragment (honest incompleteness, surfaced — NOT silently wrong):** without `cdomain`, ALL concrete-domain shapes (`owl:onDataRange`/`owl:withRestrictions`/`owl:onDatatype`/`owl:datatypeComplementOf` + literal `hasValue`/`oneOf`) land in `Report::skipped_axioms`; with it, the unsupported remainder above still does. Distinct from constructs **outside EL entirely** (unionOf / complementOf / allValuesFrom / cardinality / a **multi-individual** `owl:oneOf` — the profile's `ObjectOneOf` admits exactly one individual, more is a disjunction — all skipped, but those need ALC / Horn-SHIQ, not a deferred EL slice; `owl:hasSelf` is NO LONGER here — it is in-fragment via CR-Self, bead `sq-pbz04.2.6`) and from RBox (a *gated* capability via `rbox`, not permanently deferred). Parallel saturation is the opt-in `par` feature (E4, bead `sq-wy3i6` — identical closure at every thread count). `classify_graph` (full closure) and `classify_hasse_graph` (reduced) are both available — pick by whether you want every derived subsumption or just the immediate-parent taxonomy.
@@ -366,6 +394,28 @@ termination argument rests on. HONEST BOUNDARY: verdicts are sound/complete ONLY
 ALCH fragment (named classes, ⊤/⊥, ⊓/⊔/¬, ∃/∀ over named properties, GCIs, `subPropertyOf`,
 ground ABox) — never beyond it; the implementation is not claimed worst-case optimal (ALC+GCI
 satisfiability is EXPTIME-complete).
+
+**Opt-in transitive roles (`dl_transitive` cargo feature, OFF by default, bead sq-zfwzq
+[GPT-5.6]):** extends the fragment to **ALCH + transitive roles** (Horrocks–Sattler *S with
+role hierarchies* — still NO inverses / cardinality / nominals, which stay fail-closed): L1
+recognises `owl:TransitiveProperty` as the feature-gated `Axiom::TransitiveObjectProperty`
+(instead of refusing it), L2 classifies it per the profile grammars (IN EL §2, NOT-in QL §3,
+IN RL §4), and the L3 tableau adds the **∀₊-propagation rule** (`∀R.C` at `x`, edge `x –S→ y`,
+transitive `T` with `S ⊑* T ⊑* R` ⇒ add `∀T.C` at `y`) with the termination / soundness /
+completeness argument EXTENDED AND WRITTEN OUT in `tableau.rs` module docs **§5a** (subset
+blocking is UNCHANGED — sufficient precisely because there are still no inverses; the model
+construction interprets `R^I = E(R) ∪ ⋃ E(T)⁺`). L4 dispatch routes any transitive ontology
+STRAIGHT to the tableau (the only transitivity-complete branch; the RL/EL guards also
+recognise the axiom kind fail-closed as defence in depth); a transitivity CONCLUSION in
+entailment is decided by the two-step-chain refutation encoding (`O ⊨ Trans(R)` iff
+`O ∪ {R(a,b), R(b,c), B(c), (∀R.¬B)(a)}` unsatisfiable — argued in `check.rs`). With the feature
+enabled, a declaration-free conclusion role assertion may reuse a role kind established by
+a transitivity-bearing premise; the checker adds only semantically inert declarations for
+premise-confirmed roles during conclusion extraction and never guesses an unknown predicate.
+With the feature OFF the crate compiles to exactly the pre-extension code (fail-closed refusal). The
+`sparq-conformance` `dl-direct` arm enables it, graduating the corpus's transitive
+consistency/entailment cases from abstentions to definitive verdicts (floors re-pinned with
+evidence in `tests/dl_suite.rs`).
 
 **L4 — fragment-dispatch checker + entailment-by-refutation (`check`, opt-in `dispatch`
 feature, bead sq-pbz04.4.4):** NOW BUILT. `check::DirectChecker` (constructed with `new()` or

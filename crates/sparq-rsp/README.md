@@ -55,6 +55,10 @@ q.flush(|result| { /* end-of-stream: close everything up to max ts */ })?;
 - **Continuous queries (R2R)** — `ContinuousQuery` (SELECT), `ContinuousConstruct`
   (CONSTRUCT, stream-to-stream), and `ContinuousAsk` (ASK), each parsed **once** at
   `register` into a `sparq_engine::PreparedQuery` and re-run per closed window.
+- **Closed-window aggregates** — the default-off `window-aggregate` feature adds
+  `window_aggregate(&WindowResult, var, Agg)` for deterministic
+  COUNT/SUM/AVG/MIN/MEDIAN/MAX scalar folds over emitted rows, without a clock read or
+  another query. <!-- [GPT-5.6] sq-sfle1 -->
 - **Relation-to-stream (R2S)** — `R2S::{RStream, IStream, DStream}`: full / added /
   removed rows per window, computed as multiset diffs over 64-bit row hashes.
 - **RSP-QL surface syntax + multi-window joins** — `RspqlQuery::parse` reads

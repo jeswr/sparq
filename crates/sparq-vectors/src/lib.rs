@@ -75,6 +75,19 @@ pub mod compose;
 pub mod fuse;
 pub mod import;
 pub mod labels;
+// [GPT-5.6] sq-lsp7k.25: deterministic `.spqv` v4 metadata-block codec. Private implementation;
+// the public surface is `VectorStore::{put_with_meta,meta}` + `nearest_exact_with_meta`, all behind
+// the default-OFF `metadata-sidecar` feature.
+#[cfg(feature = "metadata-sidecar")]
+mod metadata;
+// [FABLE-5] (#2251) Recall-gated ANN over raw concept vectors — `build_ann` / `knn` / `dedup`:
+// an HNSW index over caller-supplied (id, vector) pairs plus type-level dedup whose merges are
+// emitted ONLY after the index's measured recall vs an exact O(m²) ground truth clears a
+// pre-registered gate (default 0.99; fail-closed). `approx-ann` only — it rides the same opt-in
+// instant-distance backend as `VectorIndex`, so the default build carries none of it and gains
+// no new dependency. First consumer: the Kernel-of-Truth scale track (issue #2251).
+#[cfg(feature = "approx-ann")]
+pub mod dedup;
 pub mod quant;
 // [FABLE-5] sq-lhcot.1 (GenAI review gap 1; spec estate sq-rvgr2.4): the `.spqv` v3 EMBEDDING
 // PROVENANCE record (model id / model+content version / metric / normalization / verbalization
@@ -173,12 +186,20 @@ pub mod prov_vocab {
     pub const VERBALIZATION: &str = "http://sparq.dev/spqv-prov#verbalization";
 }
 
+#[cfg(feature = "metadata-sidecar")]
+pub use ann::nearest_exact_with_meta;
 pub use ann::{cosine, nearest_exact, nearest_term_exact, nearest_term_exact_checked};
 // [OPUS-4.8] (sq-ip3a) The in-RAM HNSW index is the approximate backend — `approx-ann` only
 // (the only feature pulling `instant-distance`). The default build re-exports just the exact
 // searchers above.
 #[cfg(feature = "approx-ann")]
 pub use ann::{HnswConfig, VectorIndex};
+// [FABLE-5] (#2251) The recall-gated concept-ANN + dedup surface — `approx-ann` only (`dedup.rs`).
+#[cfg(feature = "approx-ann")]
+pub use dedup::{
+    build_ann, dedup, exact_ground_truth, knn, ConceptAnnIndex, DedupPolicy, DedupReport,
+    GroundTruth,
+};
 pub use diskann::{sibling_graph_path, DiskAnnIndex, VamanaConfig, SPQG_MAGIC, SPQG_VERSION};
 pub use embed::{Embedder, HashEmbedder};
 // [OPUS-4.8] (sq-1wc1) Predicate-constrained (filtered) ANN — the `filtered-ann` feature only.

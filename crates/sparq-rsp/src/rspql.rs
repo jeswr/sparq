@@ -13,9 +13,9 @@
 //! ```text
 //! REGISTER [RSTREAM|ISTREAM|DSTREAM] <output-stream-iri> AS
 //! SELECT ...                       -- any spargebra-parseable SELECT projection
-//! FROM NAMED WINDOW <w1> ON <s1> [RANGE <dur> STEP <dur>]
-//! FROM NAMED WINDOW <w2> ON <s2> [TUMBLING RANGE <dur>]
-//! FROM NAMED WINDOW <w3> ON <s3> [SLIDING RANGE <dur> STEP <dur>]
+//! FROM NAMED WINDOW <w1> ON <s1> [RANGE <dur> STEP <dur> [T0 <dur>] [MAXDELAY <dur>]]
+//! FROM NAMED WINDOW <w2> ON <s2> [TUMBLING RANGE <dur> [T0 <dur>] [MAXDELAY <dur>]]
+//! FROM NAMED WINDOW <w3> ON <s3> [SLIDING RANGE <dur> STEP <dur> [T0 <dur>] [MAXDELAY <dur>]]
 //! WHERE {
 //!   WINDOW <w1> { ?s :p ?o }       -- a graph pattern scoped to window <w1>
 //!   WINDOW <w2> { ?s :q ?x }       -- joined with <w2>'s pattern (shared vars)
@@ -41,6 +41,9 @@
 //!   Durations are ISO-8601 (`PT10S`, `PT1M30S`, `PT2H`) or a bare integer
 //!   (logical ticks — the crate's native `u64` timestamp scale). Every window is
 //!   bound to its `<stream>` so a push routes to the windows over that stream.
+//!   With the default-off `window-origin` feature, time-window declarations may
+//!   append `T0 <dur>` and then `MAXDELAY <dur>` in that fixed order. These set
+//!   the window origin and lateness tolerance; either clause may be omitted.
 //! * **`WHERE { WINDOW <w> { … } … }`** — the window graph patterns. Each
 //!   `WINDOW <w>` is rewritten to a standard SPARQL `GRAPH <w>` pattern; the
 //!   engine then evaluates it against the per-window materialised named graph
@@ -68,10 +71,6 @@
 //!   with a clear error. (The window/stream IRIs may be written as `<…>` IRIs OR
 //!   as prefixed names — `ex:w1`, `:w1` — resolved against the body's `PREFIX` /
 //!   `BASE` declarations, so the compact W3C-example forms parse.)
-//! * **The `t0` window origin** and **`max_delay` lateness tolerance** have no
-//!   place in the standard RSP-QL surface grammar; set them afterwards on the
-//!   parsed [`WindowSpec`] via the builders if needed (the parser leaves them at
-//!   their `0` defaults).
 //! * **Stream-graph `GRAPH`** vs **`WINDOW`**: a literal `GRAPH` clause in the
 //!   `WHERE` is passed through to spargebra unchanged (it is ordinary SPARQL).
 //!   Only `WINDOW` is RSP-QL.
@@ -188,11 +187,19 @@ impl RspqlQuery {
         // would make `WINDOW <w>` ambiguous (and clash as a named-graph key).
         for (i, w) in windows.iter().enumerate() {
             if windows[..i].iter().any(|p| p.window == w.window) {
-                return Err(format!("window <{}> declared more than once", w.window.as_str()));
+                return Err(format!(
+                    "window <{}> declared more than once",
+                    w.window.as_str()
+                ));
             }
         }
         let sparql = rewrite_window_to_graph(&body)?;
-        Ok(RspqlQuery { output_stream, r2s, windows, sparql })
+        Ok(RspqlQuery {
+            output_stream,
+            r2s,
+            windows,
+            sparql,
+        })
     }
 }
 
@@ -238,7 +245,10 @@ fn parse_register<'a>(
 /// declarations and the residual SPARQL (header + WHERE) with those clauses
 /// removed. Window declarations may appear in their SPARQL-standard position
 /// (between the projection and the `WHERE`).
-fn parse_window_decls(body: &str, prefixes: &Prefixes) -> Result<(Vec<WindowDecl>, String), String> {
+fn parse_window_decls(
+    body: &str,
+    prefixes: &Prefixes,
+) -> Result<(Vec<WindowDecl>, String), String> {
     let mut windows = Vec::new();
     let mut out = String::with_capacity(body.len());
     let mut rest = body;
@@ -286,9 +296,11 @@ fn parse_one_window_decl<'a>(
 ) -> Result<(WindowDecl, &'a str), String> {
     let clause = clause.trim_start();
     if clause.starts_with('?') || clause.starts_with('$') {
-        return Err("window VARIABLES (FROM NAMED WINDOW ?w …) are not supported; \
+        return Err(
+            "window VARIABLES (FROM NAMED WINDOW ?w …) are not supported; \
                     name a concrete window IRI"
-            .into());
+                .into(),
+        );
     }
     let (window, rest) =
         take_iri(clause, prefixes).ok_or("FROM NAMED WINDOW must be followed by a window IRI")?;
@@ -297,14 +309,27 @@ fn parse_one_window_decl<'a>(
     let (stream, rest) = take_iri(rest.trim_start(), prefixes)
         .ok_or("FROM NAMED WINDOW <w> ON must be followed by a stream IRI")?;
     let (spec, rest) = parse_window_spec(rest.trim_start())?;
-    Ok((WindowDecl { window, stream, spec }, rest))
+    Ok((
+        WindowDecl {
+            window,
+            stream,
+            spec,
+        },
+        rest,
+    ))
 }
 
 /// Parses the window operator. Accepted forms (brackets optional in all cases):
 ///
-/// - `[RANGE r [STEP s]]` — W3C-community form; `STEP` defaults to `r` (tumbling).
-/// - `[TUMBLING RANGE r]` — explicit tumbling keyword; equivalent to `RANGE r`.
-/// - `[SLIDING RANGE r STEP s]` — explicit sliding keyword; `STEP` is required.
+/// - `[RANGE r [STEP s] [T0 t0] [MAXDELAY d]]` — W3C-community form; `STEP`
+///   defaults to `r` (tumbling).
+/// - `[TUMBLING RANGE r [T0 t0] [MAXDELAY d]]` — explicit tumbling keyword;
+///   equivalent to `RANGE r`.
+/// - `[SLIDING RANGE r STEP s [T0 t0] [MAXDELAY d]]` — explicit sliding
+///   keyword; `STEP` is required.
+///
+/// `T0` and `MAXDELAY` require the default-off `window-origin` feature and must
+/// occur in that order. Both use the same duration lexer as `RANGE` and `STEP`.
 ///
 /// Rejected with a clear error (fail-closed, never silently mis-parsed):
 ///
@@ -328,6 +353,20 @@ fn parse_window_spec(text: &str) -> Result<(WindowSpec, &str), String> {
     // ROWS n — count-window textual form: not supported in the surface grammar.
     // Fail closed so callers get a diagnostic, not a mis-parse.
     if keyword_prefix(text, "ROWS").is_some() {
+        #[cfg(feature = "window-origin")]
+        if let Some(after_rows) = keyword_prefix(text, "ROWS") {
+            if let Ok((_, after_count)) = take_duration_for(after_rows.trim_start(), "ROWS") {
+                let after_count = after_count.trim_start();
+                if keyword_prefix(after_count, "T0").is_some()
+                    || keyword_prefix(after_count, "MAXDELAY").is_some()
+                {
+                    return Err(
+                        "T0 and MAXDELAY apply to time windows only; they cannot be attached to a ROWS count window"
+                            .into(),
+                    );
+                }
+            }
+        }
         return Err(
             "ROWS (count) windows are not supported in the RSP-QL textual surface grammar; \
              use the programmatic `WindowSpec::count` builder instead"
@@ -347,16 +386,17 @@ fn parse_window_spec(text: &str) -> Result<(WindowSpec, &str), String> {
     // TUMBLING RANGE r — explicit tumbling keyword (step == range).
     // SLIDING RANGE r STEP s — explicit sliding keyword (STEP required).
     // [SONNET-4.6] Track both flags: explicit_tumbling lets us reject TUMBLING + STEP.
-    let (explicit_tumbling, explicit_sliding, text) = if let Some(after) = keyword_prefix(text, "TUMBLING") {
-        // TUMBLING: semantically identical to plain RANGE r (step = range).
-        // An explicit STEP is contradictory and must be rejected (see below).
-        (true, false, after.trim_start())
-    } else if let Some(after) = keyword_prefix(text, "SLIDING") {
-        // SLIDING: a STEP is mandatory — reject without it (see below).
-        (false, true, after.trim_start())
-    } else {
-        (false, false, text)
-    };
+    let (explicit_tumbling, explicit_sliding, text) =
+        if let Some(after) = keyword_prefix(text, "TUMBLING") {
+            // TUMBLING: semantically identical to plain RANGE r (step = range).
+            // An explicit STEP is contradictory and must be rejected (see below).
+            (true, false, after.trim_start())
+        } else if let Some(after) = keyword_prefix(text, "SLIDING") {
+            // SLIDING: a STEP is mandatory — reject without it (see below).
+            (false, true, after.trim_start())
+        } else {
+            (false, false, text)
+        };
 
     let rest = keyword_prefix(text, "RANGE").ok_or(
         "window declaration needs a `[RANGE <dur> [STEP <dur>]]`, \
@@ -369,26 +409,26 @@ fn parse_window_spec(text: &str) -> Result<(WindowSpec, &str), String> {
         // means step == range by definition. Reject rather than silently accepting
         // an inconsistent spec.
         if explicit_tumbling {
-            return Err(
-                "TUMBLING windows have step == range implicitly; \
+            return Err("TUMBLING windows have step == range implicitly; \
                  a STEP clause is not allowed with TUMBLING — \
                  use SLIDING RANGE <dur> STEP <dur> for an explicit step"
-                    .into(),
-            );
+                .into());
         }
         let (step, rest) = take_duration(after_step.trim_start())?;
         (WindowSpec::time(range, step), rest)
     } else if explicit_sliding {
         // SLIDING without STEP is a user error — STEP defines the slide interval.
-        return Err(
-            "SLIDING window declaration requires a STEP duration: \
+        return Err("SLIDING window declaration requires a STEP duration: \
              `SLIDING RANGE <dur> STEP <dur>`"
-                .into(),
-        );
+            .into());
     } else {
         // No STEP and not a SLIDING keyword: tumbling (step == range).
         (WindowSpec::time(range, range), rest_ws)
     };
+    // [GPT-5.6] sq-ayn0i: this call is compiled out entirely by default so the
+    // established parser's returned spec, residual text, and errors stay exact.
+    #[cfg(feature = "window-origin")]
+    let (spec, rest) = parse_window_origin_clauses(spec, rest)?;
     // Consume the matching closing bracket if we opened one.
     let rest = rest.trim_start();
     if bracketed {
@@ -399,6 +439,50 @@ fn parse_window_spec(text: &str) -> Result<(WindowSpec, &str), String> {
     } else {
         Ok((spec, rest))
     }
+}
+
+/// Parses the default-off time-window origin and lateness clauses. Clauses are
+/// optional but ordered: `T0` must precede `MAXDELAY` when both are present.
+#[cfg(feature = "window-origin")]
+fn parse_window_origin_clauses(
+    mut spec: WindowSpec,
+    rest: &str,
+) -> Result<(WindowSpec, &str), String> {
+    let mut rest = rest.trim_start();
+    let mut saw_t0 = false;
+    let mut saw_max_delay = false;
+
+    if let Some(after_t0) = keyword_prefix(rest, "T0") {
+        let (t0, after_t0) = take_duration_for(after_t0.trim_start(), "T0")?;
+        spec = spec.with_t0(t0);
+        saw_t0 = true;
+        rest = after_t0.trim_start();
+    }
+
+    if let Some(after_max_delay) = keyword_prefix(rest, "MAXDELAY") {
+        let (max_delay, after_max_delay) =
+            take_duration_for(after_max_delay.trim_start(), "MAXDELAY")?;
+        spec = spec.with_max_delay(max_delay);
+        saw_max_delay = true;
+        rest = after_max_delay.trim_start();
+    }
+
+    if keyword_prefix(rest, "T0").is_some() {
+        return Err(if saw_t0 {
+            "duplicate T0 clause in window declaration".into()
+        } else {
+            "T0 must precede MAXDELAY in a window declaration".into()
+        });
+    }
+    if keyword_prefix(rest, "MAXDELAY").is_some() {
+        return Err(if saw_max_delay {
+            "duplicate MAXDELAY clause in window declaration".into()
+        } else {
+            "MAXDELAY clause is out of order in window declaration".into()
+        });
+    }
+
+    Ok((spec, rest))
 }
 
 /// Rewrites every `WINDOW <iri>` token in the SPARQL body to `GRAPH <iri>` so
@@ -414,7 +498,10 @@ fn rewrite_window_to_graph(body: &str) -> Result<String, String> {
         // Copy IRIs (<…>) and quoted strings verbatim — a `WINDOW` substring
         // inside one is data, not a keyword.
         if b == b'<' {
-            let end = body[i..].find('>').map(|j| i + j + 1).unwrap_or(bytes.len());
+            let end = body[i..]
+                .find('>')
+                .map(|j| i + j + 1)
+                .unwrap_or(bytes.len());
             out.push_str(&body[i..end]);
             i = end;
             continue;
@@ -551,7 +638,10 @@ fn take_iri<'a>(s: &'a str, prefixes: &Prefixes) -> Option<(NamedNode, &'a str)>
     // Guard: a `:` only counts as a prefix separator if what precedes it is a
     // valid (possibly empty) prefix label, not e.g. part of a keyword.
     let prefix = &s[..colon];
-    if !prefix.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if !prefix
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         return None;
     }
     let after = &s[colon + 1..];
@@ -580,13 +670,18 @@ fn take_plain_iri(s: &str) -> Option<(String, &str)> {
 /// the stream's timestamp scale (ISO-8601 resolves to SECONDS). Returns the
 /// value and the remaining text.
 fn take_duration(s: &str) -> Result<(u64, &str), String> {
+    take_duration_for(s, "RANGE/STEP")
+}
+
+/// Shared duration-literal lexer for all window clauses.
+fn take_duration_for<'a>(s: &'a str, clause: &str) -> Result<(u64, &'a str), String> {
     let s = s.trim_start();
     let end = s
         .find(|c: char| c.is_whitespace() || c == '{' || c == ']' || c == '[')
         .unwrap_or(s.len());
     let (tok, rest) = s.split_at(end);
     if tok.is_empty() {
-        return Err("expected a duration after RANGE/STEP".into());
+        return Err(format!("expected a duration after {clause}"));
     }
     let value = parse_duration_token(tok)?;
     Ok((value, rest))
@@ -601,9 +696,9 @@ fn parse_duration_token(tok: &str) -> Result<u64, String> {
         return Ok(n);
     }
     let upper = tok.to_ascii_uppercase();
-    let body = upper
-        .strip_prefix('P')
-        .ok_or_else(|| format!("not a duration: `{tok}` (want ISO-8601 like PT10S or an integer)"))?;
+    let body = upper.strip_prefix('P').ok_or_else(|| {
+        format!("not a duration: `{tok}` (want ISO-8601 like PT10S or an integer)")
+    })?;
     // Split into the date part (before 'T') and the time part (after).
     let (date_part, time_part) = match body.split_once('T') {
         Some((d, t)) => (d, t),
@@ -617,7 +712,9 @@ fn parse_duration_token(tok: &str) -> Result<u64, String> {
         if c.is_ascii_digit() {
             num.push(c);
         } else {
-            let n: u64 = num.parse().map_err(|_| format!("bad duration component in `{tok}`"))?;
+            let n: u64 = num
+                .parse()
+                .map_err(|_| format!("bad duration component in `{tok}`"))?;
             num.clear();
             match c {
                 'D' => total += n * 86_400,
@@ -639,7 +736,9 @@ fn parse_duration_token(tok: &str) -> Result<u64, String> {
         if c.is_ascii_digit() {
             num.push(c);
         } else {
-            let n: u64 = num.parse().map_err(|_| format!("bad duration component in `{tok}`"))?;
+            let n: u64 = num
+                .parse()
+                .map_err(|_| format!("bad duration component in `{tok}`"))?;
             num.clear();
             match c {
                 'H' => total += n * 3_600,
@@ -655,3 +754,131 @@ fn parse_duration_token(tok: &str) -> Result<u64, String> {
     Ok(total)
 }
 
+#[cfg(all(test, feature = "window-origin"))]
+mod window_origin_tests {
+    use super::*;
+
+    fn query(operator: &str) -> String {
+        format!(
+            "SELECT * WHERE {{ WINDOW <http://ex/w> {{ ?s ?p ?o }} }}\n\
+             FROM NAMED WINDOW <http://ex/w> ON <http://ex/s> {operator}"
+        )
+    }
+
+    #[test]
+    fn parses_t0_and_maxdelay_exactly() {
+        let parsed = RspqlQuery::parse(&query("RANGE 10 STEP 5 T0 100 MAXDELAY 3")).unwrap();
+        assert_eq!(
+            parsed.windows[0].spec,
+            WindowSpec::time(10, 5).with_t0(100).with_max_delay(3)
+        );
+    }
+
+    #[test]
+    fn parses_t0_without_maxdelay() {
+        let parsed = RspqlQuery::parse(&query("RANGE PT10S STEP PT5S T0 PT1M")).unwrap();
+        assert_eq!(parsed.windows[0].spec, WindowSpec::time(10, 5).with_t0(60));
+    }
+
+    #[test]
+    fn parses_maxdelay_without_t0() {
+        let parsed = RspqlQuery::parse(&query("RANGE 10 STEP 5 MAXDELAY 3")).unwrap();
+        assert_eq!(
+            parsed.windows[0].spec,
+            WindowSpec::time(10, 5).with_max_delay(3)
+        );
+    }
+
+    #[test]
+    fn parses_sliding_and_bracketed_clauses() {
+        let parsed =
+            RspqlQuery::parse(&query("[SLIDING RANGE 10 STEP 5 T0 100 MAXDELAY 3]")).unwrap();
+        assert_eq!(
+            parsed.windows[0].spec,
+            WindowSpec::time(10, 5).with_t0(100).with_max_delay(3)
+        );
+    }
+
+    #[test]
+    fn declaration_without_new_clauses_is_unchanged() {
+        let parsed = RspqlQuery::parse(&query("RANGE 10 STEP 5")).unwrap();
+        assert_eq!(parsed.windows[0].spec, WindowSpec::time(10, 5));
+    }
+
+    #[test]
+    fn rejects_origin_clauses_on_rows_without_panicking() {
+        for operator in ["ROWS 10 T0 100", "ROWS 10 MAXDELAY 3"] {
+            let error = RspqlQuery::parse(&query(operator)).unwrap_err();
+            assert_eq!(
+                error,
+                "T0 and MAXDELAY apply to time windows only; they cannot be attached to a ROWS count window"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_clauses() {
+        let t0_error = RspqlQuery::parse(&query("RANGE 10 STEP 5 T0 100 T0 200")).unwrap_err();
+        assert_eq!(t0_error, "duplicate T0 clause in window declaration");
+
+        let max_delay_error =
+            RspqlQuery::parse(&query("RANGE 10 STEP 5 MAXDELAY 3 MAXDELAY 4")).unwrap_err();
+        assert_eq!(
+            max_delay_error,
+            "duplicate MAXDELAY clause in window declaration"
+        );
+    }
+
+    #[test]
+    fn rejects_reversed_clause_order() {
+        let error = RspqlQuery::parse(&query("RANGE 10 STEP 5 MAXDELAY 3 T0 100")).unwrap_err();
+        assert_eq!(error, "T0 must precede MAXDELAY in a window declaration");
+    }
+
+    #[test]
+    fn rejects_malformed_clause_durations() {
+        let t0_error = RspqlQuery::parse(&query("RANGE 10 STEP 5 T0 bogus")).unwrap_err();
+        assert!(
+            t0_error.contains("not a duration: `bogus`"),
+            "got: {t0_error}"
+        );
+
+        let max_delay_error =
+            RspqlQuery::parse(&query("RANGE 10 STEP 5 MAXDELAY PT1X")).unwrap_err();
+        assert!(
+            max_delay_error.contains("bad time-duration unit `X`"),
+            "got: {max_delay_error}"
+        );
+    }
+}
+
+#[cfg(all(test, not(feature = "window-origin")))]
+mod window_origin_default_tests {
+    use super::*;
+
+    #[test]
+    fn new_unbracketed_clauses_preserve_the_existing_residual_sparql() {
+        let query = "SELECT * WHERE { WINDOW <http://ex/w> { ?s ?p ?o } }\n\
+                     FROM NAMED WINDOW <http://ex/w> ON <http://ex/s> \
+                     RANGE 10 STEP 5 T0 100 MAXDELAY 3";
+        let parsed = RspqlQuery::parse(query).unwrap();
+        assert_eq!(parsed.windows[0].spec, WindowSpec::time(10, 5));
+        assert!(parsed.sparql.contains("T0 100 MAXDELAY 3"));
+        let downstream_error = sparq_engine::PreparedQuery::parse(&parsed.sparql).unwrap_err();
+        assert_eq!(
+            downstream_error,
+            "error at 2:8: expected one of HAVING, OFFSET, VALUES"
+        );
+    }
+
+    #[test]
+    fn bracketed_new_clauses_keep_the_existing_exact_error() {
+        let query = "SELECT * WHERE { WINDOW <http://ex/w> { ?s ?p ?o } }\n\
+                     FROM NAMED WINDOW <http://ex/w> ON <http://ex/s> \
+                     [RANGE 10 STEP 5 T0 100 MAXDELAY 3]";
+        assert_eq!(
+            RspqlQuery::parse(query).unwrap_err(),
+            "unterminated window operator: expected a closing `]`"
+        );
+    }
+}

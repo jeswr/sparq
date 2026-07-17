@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "title": "sparq Helm values",
+  "description": "[GPT-5.6] Fail-closed validation for selector, secret, TLS, identity, and replica invariants.",
+  "type": "object",
+  "required": [
+    "server",
+    "image",
+    "replicaCount",
+    "auth",
+    "lws",
+    "service",
+    "ingress",
+    "persistence",
+    "serviceAccount"
+  ],
+  "properties": {
+    "server": {
+      "type": "string",
+      "enum": ["sparq-server", "lws"]
+    },
+    "replicaCount": {
+      "type": "integer",
+      "const": 1
+    },
+    "image": {
+      "type": "object",
+      "required": ["repository", "pullPolicy", "tag"],
+      "properties": {
+        "repository": { "type": "string" },
+        "pullPolicy": {
+          "type": "string",
+          "enum": ["Always", "IfNotPresent", "Never"]
+        },
+        "tag": { "type": "string" }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "required": ["existingSecret", "tokenKey", "requireTokenForReads"],
+      "properties": {
+        "existingSecret": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "tokenKey": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^[-._a-zA-Z0-9]+$"
+        },
+        "requireTokenForReads": { "type": "boolean" }
+      }
+    },
+    "lws": {
+      "type": "object",
+      "required": ["trustedIssuer", "baseUrl", "audience"],
+      "properties": {
+        "trustedIssuer": { "type": "string" },
+        "baseUrl": { "type": "string" },
+        "audience": { "type": "string" }
+      }
+    },
+    "service": {
+      "type": "object",
+      "description": "[GPT-5.6] port is intentionally optional because Helm 3.17 treats a YAML null as absent during schema validation.",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "ClusterIP" },
+        "port": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 65535
+        }
+      }
+    },
+    "ingress": {
+      "type": "object",
+      "required": ["enabled", "ingressClassName", "annotations", "host", "path", "pathType", "tls"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "ingressClassName": { "type": "string", "const": "nginx" },
+        "annotations": { "type": "object" },
+        "host": { "type": "string" },
+        "path": { "type": "string", "minLength": 1 },
+        "pathType": {
+          "type": "string",
+          "enum": ["Exact", "Prefix", "ImplementationSpecific"]
+        },
+        "tls": {
+          "type": "object",
+          "required": ["enabled", "secretName"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "secretName": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+            }
+          }
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "required": ["enabled", "existingClaim", "storageClass", "accessMode", "size"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "existingClaim": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "storageClass": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        },
+        "accessMode": {
+          "type": "string",
+          "enum": ["ReadWriteOnce", "ReadOnlyMany", "ReadWriteMany"]
+        },
+        "size": { "type": "string", "minLength": 1 }
+      }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "required": ["create", "annotations", "name"],
+      "properties": {
+        "create": { "type": "boolean" },
+        "annotations": { "type": "object" },
+        "name": {
+          "type": "string",
+          "maxLength": 253,
+          "pattern": "^$|^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$"
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "server": { "const": "sparq-server" } },
+        "required": ["server"]
+      },
+      "then": {
+        "properties": {
+          "auth": {
+            "properties": {
+              "existingSecret": { "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "server": { "const": "lws" } },
+        "required": ["server"]
+      },
+      "then": {
+        "properties": {
+          "lws": {
+            "properties": {
+              "trustedIssuer": { "pattern": "^https://.+" },
+              "baseUrl": { "pattern": "^https://.+" }
+            }
+          },
+          "persistence": {
+            "properties": {
+              "enabled": { "const": false },
+              "existingClaim": { "maxLength": 0 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "ingress": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["ingress"]
+      },
+      "then": {
+        "properties": {
+          "ingress": {
+            "properties": {
+              "ingressClassName": { "minLength": 1 },
+              "host": { "minLength": 1 },
+              "tls": {
+                "properties": {
+                  "enabled": { "const": true },
+                  "secretName": { "minLength": 1 }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "serviceAccount": {
+            "properties": { "create": { "const": false } },
+            "required": ["create"]
+          }
+        },
+        "required": ["serviceAccount"]
+      },
+      "then": {
+        "properties": {
+          "serviceAccount": {
+            "properties": {
+              "name": { "minLength": 1 }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

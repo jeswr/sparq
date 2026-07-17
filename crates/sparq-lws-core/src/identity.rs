@@ -62,7 +62,7 @@ pub const RESERVED_HANDLES: [&str; 3] = ["identity", "livez", "readyz"];
 /// The identity-host configuration (the analogue of prod-solid-server's `PSS_IDENTITY_HOST`).
 ///
 /// Built once at boot ([`IdentityConfig::new`]) and carried into the router assembly
-/// ([`crate::app::AppState::with_identity`]). `None` (the default) keeps the serving half OFF —
+/// (`crate::app::AppState::with_identity`). `None` (the default) keeps the serving half OFF —
 /// but the LDP-surface refusal of `/.identity/**` holds regardless (flag-independent), so
 /// pre-seeded documents can never become LDP-addressable when the flag later turns on.
 #[derive(Debug, Clone, PartialEq, Eq)]

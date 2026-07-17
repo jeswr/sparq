@@ -14,3 +14,10 @@
   crate: "sparq-hdt"
   features: "write"
   test: true
+
+# [GPT-5.6] sq-lsp7k.24: the filtered-load integration suite is compiled only when
+# `load-filter` is enabled, so give the default-OFF public API a full test executor.
+- name: "sparq-hdt (load-filter)"
+  crate: "sparq-hdt"
+  features: "load-filter"
+  test: true

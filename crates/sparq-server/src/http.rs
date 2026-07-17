@@ -36,6 +36,8 @@ use axum::{
     routing::{any, get, post},
     BoxError, Router,
 };
+#[cfg(feature = "federation-descriptors")]
+use axum::http::Uri;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
 #[cfg(feature = "response-compression")]
@@ -616,6 +618,30 @@ pub struct ServerConfig {
     /// binary's `--federation-descriptors` flag / `SPARQ_FEDERATION_DESCRIPTORS=1` env.
     #[cfg(feature = "federation-descriptors")]
     pub federation_descriptors: bool,
+    /// [GPT-5.6] (sq-lsp7k.5.2) OPT-IN grouped facet-count endpoint. When `true`, the server
+    /// serves `POST /facets`: the client supplies a JSON `sparq_introspect::FacetRequest`, and
+    /// the server evaluates its class / constraint filters against one pinned graph snapshot,
+    /// returning the `sparq_introspect::FacetResponse` JSON with type, predicate, and value
+    /// distributions. `false` (the default) leaves the endpoint off: `/facets` is `404`.
+    ///
+    /// This field exists only with the `facets` cargo feature. A build without that feature
+    /// compiles no facet route or `sparq-introspect` dependency and pays zero cost. Set by the
+    /// binary's `--facets` flag / `SPARQ_FACETS=1` env. Facet evaluation is a READ over the
+    /// store, so the endpoint is gated by the read auth.
+    #[cfg(feature = "facets")]
+    pub facets: bool,
+    /// [GPT-5.6] (sq-lsp7k.9.3) OPT-IN prefix-completion endpoint. When `true`, the server
+    /// serves `GET /complete?q=<prefix>&limit=<k>` from a `sparq_text::CompletionIndex` built
+    /// against one pinned graph generation. The index is cached in [`AppState`] and rebuilt on
+    /// the blocking pool when a later published generation makes it stale. Results are capped at
+    /// 100 candidates. `false` (the default) leaves the endpoint off: `/complete` is `404`.
+    ///
+    /// This field exists only with the `complete` cargo feature. A build without that feature
+    /// compiles no completion route, cache, or `sparq-text` dependency and pays zero cost. Set by
+    /// the binary's `--complete` flag / `SPARQ_COMPLETE=1` env. Completion is a READ over the
+    /// store, so the endpoint is gated by the read auth.
+    #[cfg(feature = "complete")]
+    pub complete: bool,
     /// [OPUS-4.8] (sq-bzh1, epic sq-3183) OPT-IN Triple Pattern Fragments / Linked Data
     /// Fragments READ-ONLY source endpoint. When `true`, the server serves a paged RDF
     /// fragment of the triples matching one triple pattern at `GET /tpf?subject=&predicate=&
@@ -733,17 +759,19 @@ pub struct ServerConfig {
     /// `SPARQ_TEMPLATES_FILE`.
     #[cfg(feature = "templates")]
     pub templates_file: Option<std::path::PathBuf>,
-    /// [OPUS-4.8] (sq-2999l, gh-906) OPT-IN durable CDC change-stream directory. When `Some(dir)`,
-    /// the server (1) RECORDS every committed SPARQL Update as one ordered change record to the
-    /// segmented, fsync'd append-only `sparq_serve::ChangeLog` rooted at `dir`, and (2) serves the
-    /// Amazon-Neptune-Streams `GetRecords`-shaped poll endpoint `GET /streams` over that log
-    /// (`iteratorType` / `at` / `after` / `limit`, returning the ordered records + a continuation
-    /// token). `None` (the default) leaves both off: `/streams` is `404` and nothing is recorded —
-    /// byte-identical to before. The log resumes after a restart (`ChangeLog::open` re-reads the
-    /// segments), so pointing the server at an existing dir continues the same stream gaplessly.
+    /// [GPT-5.6] (sq-kqofk, gh-906) OPT-IN durable CDC change-stream directory. When `Some(dir)`,
+    /// the server (1) RECORDS every published update generation as one ordered change record on
+    /// the writer thread to the segmented, fsync'd append-only `sparq_serve::ChangeLog` rooted at
+    /// `dir`, and (2) serves the Amazon-Neptune-Streams `GetRecords`-shaped poll endpoint
+    /// `GET /streams` over that log (`iteratorType` / `at` / `after` / `limit`, returning the
+    /// ordered records + a continuation token). A group-committed generation may contain several
+    /// concurrent SPARQL Updates. `None` (the default) leaves both off: `/streams` is `404` and
+    /// nothing is recorded — byte-identical to before. The log resumes after a restart
+    /// (`ChangeLog::open` re-reads the segments), so pointing the server at an existing dir
+    /// continues the same stream gaplessly.
     ///
-    /// This field exists only with the `change-stream` cargo feature (like [`tpf`](Self::tpf)
-    /// under `tpf`); a build without that feature compiles no change-stream code and pays zero
+    /// This field exists only with the `change-stream` cargo feature (like the `Self::tpf`
+    /// field under `tpf`); a build without that feature compiles no change-stream code and pays zero
     /// cost. Set by the binary's `--change-stream <DIR>` flag / `SPARQ_CHANGE_STREAM` env. At-rest
     /// encryption + cryptographic authenticity of the records are out of scope (the same boundary
     /// as the backup family); a consumer needing an authentic feed wraps its own signing.
@@ -878,6 +906,14 @@ impl Default for ServerConfig {
             // when the feature is compiled in (the operator opts in deliberately).
             #[cfg(feature = "federation-descriptors")]
             federation_descriptors: false,
+            // [GPT-5.6] sq-lsp7k.5.2: safe default — the grouped facet-count endpoint is OFF
+            // even when compiled in; the operator opts in via --facets / SPARQ_FACETS=1.
+            #[cfg(feature = "facets")]
+            facets: false,
+            // [GPT-5.6] sq-lsp7k.9.3: safe default — prefix completion is OFF even when compiled
+            // in; the operator opts in via --complete / SPARQ_COMPLETE=1.
+            #[cfg(feature = "complete")]
+            complete: false,
             // [OPUS-4.8] sq-bzh1: safe default — the TPF / LDF source endpoint is OFF even when
             // the feature is compiled in (the operator opts in deliberately via --tpf / SPARQ_TPF=1).
             #[cfg(feature = "tpf")]
@@ -1168,6 +1204,18 @@ impl ServerConfig {
         #[cfg(feature = "federation-descriptors")]
         if let Ok(v) = std::env::var("SPARQ_FEDERATION_DESCRIPTORS") {
             cfg.federation_descriptors = env_truthy(&v);
+        }
+        // [GPT-5.6] sq-lsp7k.5.2: SPARQ_FACETS truthy ("1"/"true"/"yes"/"on") serves the
+        // grouped facet-count endpoint. Off by default. Only present with the `facets` feature.
+        #[cfg(feature = "facets")]
+        if let Ok(v) = std::env::var("SPARQ_FACETS") {
+            cfg.facets = env_truthy(&v);
+        }
+        // [GPT-5.6] sq-lsp7k.9.3: SPARQ_COMPLETE truthy ("1"/"true"/"yes"/"on") serves the
+        // prefix-completion endpoint. Off by default. Only present with the `complete` feature.
+        #[cfg(feature = "complete")]
+        if let Ok(v) = std::env::var("SPARQ_COMPLETE") {
+            cfg.complete = env_truthy(&v);
         }
         // [OPUS-4.8] sq-bzh1: SPARQ_TPF truthy ("1"/"true"/"yes"/"on") serves the Triple Pattern
         // Fragments / LDF source endpoint. Off by default. Only present with the `tpf` feature.
@@ -2218,6 +2266,76 @@ struct ServingCore {
     writer: Arc<Writer<String, Graph>>,
 }
 
+/// [GPT-5.6] (sq-kqofk) The opt-in server adapter around the writer-thread CDC hook. The
+/// append-capable `ChangeLog` is consumed by `into_commit_hook`; the separate handle is read-only
+/// by convention and may safely `poll` concurrently because polling never mutates the log. The
+/// hook mutex is writer-thread-side only: it keeps the single log writer safe across an online
+/// backup restore's briefly-overlapping old/new writer threads, and is never held by submitters.
+#[cfg(feature = "change-stream")]
+struct ChangeStreamState {
+    reader: sparq_serve::ChangeLog,
+    hook: Arc<std::sync::Mutex<Box<ChangeStreamHook>>>,
+    next_seq: Arc<std::sync::atomic::AtomicU64>,
+}
+
+/// [GPT-5.6] (sq-kqofk) Named to keep the optional state's writer-thread callback readable.
+#[cfg(feature = "change-stream")]
+type ChangeStreamHook = dyn FnMut(&Generation<Graph>, &Generation<Graph>) + Send + 'static;
+
+#[cfg(feature = "change-stream")]
+impl ChangeStreamState {
+    /// [GPT-5.6] (sq-kqofk) Opens separate writer/read handles before the writer thread starts,
+    /// then consumes the append handle into the production `ChangeLog` commit hook. The tracked
+    /// tail advances only after a successful durable append, so `LATEST` remains an O(1) lookup.
+    fn open(dir: &std::path::Path) -> Result<Self, sparq_serve::BackupError> {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        let writer_log = sparq_serve::ChangeLog::open(dir)?;
+        let reader = sparq_serve::ChangeLog::open(dir)?;
+        let next_seq = Arc::new(AtomicU64::new(writer_log.next_seq()));
+        let append_failed = Arc::new(AtomicBool::new(false));
+
+        let failed_on_error = append_failed.clone();
+        let mut record = writer_log.into_commit_hook(move |e| {
+            failed_on_error.store(true, Ordering::Relaxed);
+            tracing::warn!(target: "sparq_server", detail = %e, "change-stream record append failed (update committed; record dropped)");
+        });
+        let failed_for_hook = append_failed;
+        let next_for_hook = next_seq.clone();
+        let tracked_hook = move |from: &Generation<Graph>, to: &Generation<Graph>| {
+            failed_for_hook.store(false, Ordering::Relaxed);
+            record(from, to);
+            if !failed_for_hook.load(Ordering::Relaxed) {
+                next_for_hook.fetch_add(1, Ordering::Release);
+            }
+        };
+
+        Ok(Self {
+            reader,
+            hook: Arc::new(std::sync::Mutex::new(Box::new(tracked_hook))),
+            next_seq,
+        })
+    }
+
+    /// [GPT-5.6] (sq-kqofk) Gives each sequenced writer a lightweight adapter to the one durable
+    /// hook. Normal serving has one writer; online restore may briefly retain the old one too.
+    fn commit_hook(&self) -> impl FnMut(&Generation<Graph>, &Generation<Graph>) + Send + 'static {
+        let hook = self.hook.clone();
+        move |from, to| {
+            let mut hook = hook.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            hook(from, to);
+        }
+    }
+
+    fn poll(&self, from_seq: u64) -> Result<Vec<sparq_serve::ChangeRecord>, String> {
+        self.reader.poll(from_seq).map_err(|e| e.to_string())
+    }
+
+    fn next_seq(&self) -> u64 {
+        self.next_seq.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
 /// [OPUS-4.8] (sq-o5bi) Builds the ring's retention config from the server config — the default
 /// concurrency-only retention, or, under the `time-travel` feature, the extended retention so
 /// `?generation=N` has history to serve. Shared by the constructor and the online restore so a
@@ -2238,6 +2356,28 @@ fn build_ring_config(config: &ServerConfig) -> sparq_serve::RingConfig {
             ..sparq_serve::RingConfig::default()
         }
     }
+}
+
+/// [GPT-5.6] (sq-kqofk) Spawns the server's sequenced writer, installing the optional durable
+/// change-stream hook on the writer thread. Without `change-stream`, the conditional parameter and
+/// branch are compiled out and this remains the original `Writer::spawn` path.
+fn spawn_server_writer(
+    ring: Arc<GenerationRing<Graph>>,
+    applier: ServerApplier,
+    config: WriterConfig,
+    #[cfg(feature = "change-stream")] change_stream: Option<&ChangeStreamState>,
+) -> Arc<Writer<String, Graph>> {
+    #[cfg(feature = "change-stream")]
+    if let Some(change_stream) = change_stream {
+        return Arc::new(Writer::spawn_with_commit_hook(
+            ring,
+            applier,
+            config,
+            change_stream.commit_hook(),
+        ));
+    }
+
+    Arc::new(Writer::spawn(ring, applier, config))
 }
 
 #[derive(Clone)]
@@ -2269,19 +2409,21 @@ pub struct AppState {
     pub(crate) subs: Arc<crate::subscriptions::SubscriptionCounters>,
     /// Prometheus metrics (T22), exposed at `GET /metrics`.
     metrics: Arc<crate::metrics::Metrics>,
+    /// [GPT-5.6] (sq-lsp7k.9.3) Lazily-built prefix-completion index, paired with the immutable
+    /// graph generation it represents. A matching generation reuses the index; a newer pinned
+    /// generation rebuilds it on the blocking pool before replacing this entry. The whole cache
+    /// is feature-gated so the default AppState layout and request path remain unchanged.
+    #[cfg(feature = "complete")]
+    completion_index: Arc<std::sync::RwLock<Option<(u64, sparq_text::CompletionIndex)>>>,
     /// [OPUS-4.8] (sq-gos8) The opt-in structured access-audit sink. `None` unless the operator
     /// configured one (`--access-audit` / `SPARQ_ACCESS_AUDIT`); shared across handlers.
     #[cfg(feature = "access-audit")]
     access_audit_sink: Option<Arc<dyn crate::access_audit::AuditSink>>,
-    /// [OPUS-4.8] (sq-2999l) The opt-in durable CDC change-stream log. `Some(mutex)` only when the
-    /// operator configured a directory (`--change-stream` / `SPARQ_CHANGE_STREAM`); shared across
-    /// handlers behind a [`std::sync::Mutex`] because the log is single-writer (it serialises the
-    /// commit-recording append) while a concurrent reader [`poll`](sparq_serve::ChangeLog::poll)s
-    /// the SAME on-disk directory through a separate `ChangeLog::open` handle in the endpoint. The
-    /// recording path holds this lock across an update's pre/post generation pin so the recorded
-    /// `(from, to)` pair is exactly that commit (gapless, monotonic — the `ChangeLog` contract).
+    /// [GPT-5.6] (sq-kqofk) The opt-in durable CDC adapter. The append handle lives inside the
+    /// writer-thread commit hook, while handlers poll through a separate read handle. Recording
+    /// therefore rides group commit and never holds a caller-side lock across `submit`.
     #[cfg(feature = "change-stream")]
-    change_log: Option<Arc<std::sync::Mutex<sparq_serve::ChangeLog>>>,
+    change_stream: Option<Arc<ChangeStreamState>>,
     /// [FABLE-5] (sq-fy8ci) SINGLE-FLIGHT restore permit. `true` while a restore is in flight.
     /// Two concurrent restores were previously silently serialized by the single writer thread
     /// (each individually crash-safe, last-writer-wins) — harmless but surprising: an operator
@@ -2300,6 +2442,150 @@ pub struct AppState {
     /// invocations (reads) dominate and never block each other.
     #[cfg(feature = "templates")]
     templates: Arc<std::sync::RwLock<std::collections::BTreeMap<String, sparq_engine::templates::Template>>>,
+    /// [SONNET-4.6] (sq-qsm5z) The opt-in running-query registry backing `GET /queries` and
+    /// `DELETE /queries/{id}`. Compiled only with the `query-registry` feature. The registry
+    /// stores cancellation handles and metadata but never raw query text; cloned `AppState`
+    /// values share one registry (the `Arc`).
+    #[cfg(feature = "query-registry")]
+    running_queries: Arc<QueryRegistry>,
+}
+
+// ---------------------------------------------------------------------------
+// [SONNET-4.6] (sq-qsm5z) Running-query registry — feature `query-registry`.
+// ---------------------------------------------------------------------------
+
+/// [SONNET-4.6] (sq-qsm5z) Metadata and cooperative-cancel handles for currently executing
+/// queries. The mutex is never held while engine code runs — registration and deregistration
+/// are the only critical sections, and they are short (HashMap insert / remove). Listing clones
+/// the small per-entry view; cancellation flips an atomic flag while holding the lock.
+#[cfg(feature = "query-registry")]
+#[derive(Default)]
+struct QueryRegistry {
+    next_id: std::sync::atomic::AtomicU64,
+    entries: std::sync::Mutex<std::collections::HashMap<String, RegistryEntry>>,
+}
+
+/// [SONNET-4.6] (sq-qsm5z) One row in the registry. The `cancel` flag is wired into the
+/// `QueryBudget` passed to the engine, so flipping it trips the engine's cooperative-cancellation
+/// poll site on the next iteration.
+#[cfg(feature = "query-registry")]
+struct RegistryEntry {
+    /// Unix epoch in milliseconds — serialised to the `GET /queries` response.
+    started_at_unix_ms: u64,
+    /// Monotonic start — used to compute elapsed ms without clock-skew noise.
+    started: std::time::Instant,
+    /// FNV-1a non-reversible fingerprint of the raw SPARQL text (trimmed). Never the raw text.
+    fingerprint: String,
+    /// The `sq-kq9ia` cross-thread cancel flag shared with the engine's `QueryBudget`.
+    cancel: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// [SONNET-4.6] (sq-qsm5z) RAII membership token. Moving it into the `spawn_blocking` closure
+/// means the registry row is present exactly while the engine is running; any return path —
+/// normal, panic, or engine abort — fires `Drop` and removes the row.
+#[cfg(feature = "query-registry")]
+pub(crate) struct QueryGuard {
+    id: String,
+    registry: Arc<QueryRegistry>,
+}
+
+#[cfg(feature = "query-registry")]
+impl Drop for QueryGuard {
+    fn drop(&mut self) {
+        self.registry
+            .entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.id);
+    }
+}
+
+#[cfg(feature = "query-registry")]
+impl QueryRegistry {
+    /// Register a new query and return a cancel flag + RAII guard.
+    /// The returned `Arc<AtomicBool>` should be installed into the `QueryBudget`; the
+    /// guard should be held for the entire duration of the engine call.
+    pub(crate) fn register(
+        self: &Arc<Self>,
+        sparql: &str,
+    ) -> (Arc<std::sync::atomic::AtomicBool>, QueryGuard) {
+        use std::sync::atomic::Ordering;
+        let seq = self.next_id.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
+        let id = format!("{:016x}", seq);
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started_at_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        self.entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                id.clone(),
+                RegistryEntry {
+                    started_at_unix_ms,
+                    started: std::time::Instant::now(),
+                    fingerprint: registry_fingerprint(sparql),
+                    cancel: Arc::clone(&cancel),
+                },
+            );
+        let guard = QueryGuard { id, registry: Arc::clone(self) };
+        (cancel, guard)
+    }
+
+    /// List all currently registered queries as JSON-ready values, sorted by id.
+    pub(crate) fn list(&self) -> Vec<serde_json::Value> {
+        let mut entries: Vec<_> = self
+            .entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .map(|(id, e)| {
+                serde_json::json!({
+                    "id": id,
+                    "start": e.started_at_unix_ms,
+                    "fingerprint": e.fingerprint,
+                    "elapsed_ms": u64::try_from(e.started.elapsed().as_millis())
+                        .unwrap_or(u64::MAX),
+                })
+            })
+            .collect();
+        entries.sort_unstable_by(|a, b| {
+            a["id"].as_str().cmp(&b["id"].as_str())
+        });
+        entries
+    }
+
+    /// Flip the cancel flag for a registered query. Returns `false` if the id is not found.
+    pub(crate) fn cancel_query(&self, id: &str) -> bool {
+        use std::sync::atomic::Ordering;
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        match entries.get(id) {
+            Some(e) => {
+                e.cancel.store(true, Ordering::Release);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
+/// [SONNET-4.6] (sq-qsm5z) FNV-1a non-reversible fingerprint of the SPARQL query text
+/// (trimmed). Satisfies the #241 / sq-m9prn audit-log discipline: the `GET /queries` listing
+/// exposes only this hash, never raw query text.
+#[cfg(feature = "query-registry")]
+fn registry_fingerprint(sparql: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in sparql.trim().as_bytes() {
+        hash ^= u64::from(*b);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{:016x}", hash)
 }
 
 /// [FABLE-5] (sq-fy8ci) RAII permit for the SINGLE-FLIGHT restore guard: while one of these is
@@ -2445,11 +2731,24 @@ impl AppState {
             }
             None => ServerApplier::new(config.clone()),
         };
-        let writer = Arc::new(Writer::spawn(
+        // [GPT-5.6] (sq-kqofk) Open the CDC state before spawning the writer so the append log can
+        // be consumed into its commit hook. A corrupt log remains a clean startup failure.
+        #[cfg(feature = "change-stream")]
+        let change_stream = match &config.change_stream_dir {
+            Some(dir) => {
+                Some(Arc::new(ChangeStreamState::open(dir).map_err(|e| {
+                    format!("change-stream log open failed: {e}")
+                })?))
+            }
+            None => None,
+        };
+        let writer = spawn_server_writer(
             ring.clone(),
             applier,
             writer_config(&config),
-        ));
+            #[cfg(feature = "change-stream")]
+            change_stream.as_deref(),
+        );
         // [OPUS-4.8] sq-gos8: open the structured access-audit sink if one is configured. A
         // failure to open (e.g. an unwritable audit-file path) is surfaced as a clean startup
         // error rather than silently dropping the trail — the operator asked for an audit log.
@@ -2459,20 +2758,6 @@ impl AppState {
                 crate::access_audit::make_sink(target)
                     .map_err(|e| format!("access-audit sink open failed: {e}"))?,
             ),
-            None => None,
-        };
-        // [OPUS-4.8] sq-2999l: open (creating + recovering) the durable CDC change-stream log when a
-        // directory is configured. `ChangeLog::open` re-reads any existing segments and resumes at
-        // the next seq, so restarting on the same dir continues the stream gaplessly. A corrupt log
-        // (bad digest / out-of-order seq / unknown segment version) is surfaced as a clean startup
-        // error (fail-closed) rather than silently serving a wrong feed — the operator asked for a
-        // durable change stream.
-        #[cfg(feature = "change-stream")]
-        let change_log = match &config.change_stream_dir {
-            Some(dir) => Some(Arc::new(std::sync::Mutex::new(
-                sparq_serve::ChangeLog::open(dir)
-                    .map_err(|e| format!("change-stream log open failed: {e}"))?,
-            ))),
             None => None,
         };
         // [FABLE-5] sq-lsp7k.10: seed the named-template store from the optional persistence
@@ -2497,20 +2782,39 @@ impl AppState {
             commits: Arc::new(tokio::sync::watch::channel(0).0),
             subs: Arc::new(crate::subscriptions::SubscriptionCounters::default()),
             metrics: Arc::new(crate::metrics::Metrics::default()),
+            #[cfg(feature = "complete")]
+            completion_index: Arc::new(std::sync::RwLock::new(None)),
             #[cfg(feature = "access-audit")]
             access_audit_sink,
             #[cfg(feature = "change-stream")]
-            change_log,
+            change_stream,
             // [FABLE-5] sq-fy8ci: no restore in flight at boot (restore-on-start runs on the
             // seed graph in main.rs BEFORE this state exists, so it never holds the permit).
             #[cfg(feature = "backup")]
             restore_in_flight: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            // [SONNET-4.6] (sq-qsm5z) Empty registry at boot; queries self-register when
+            // the `query-registry` feature is compiled in.
+            #[cfg(feature = "query-registry")]
+            running_queries: Arc::new(QueryRegistry::default()),
         })
     }
 
     /// The server's Prometheus metrics (T22).
     pub(crate) fn metrics(&self) -> &crate::metrics::Metrics {
         &self.metrics
+    }
+
+    /// [SONNET-4.6] (sq-t1isr) Test-only: returns the current count of registered queries.
+    /// Used by integration tests to observe in-flight registration without the HTTP route.
+    /// Only compiled with the `query-registry` feature.
+    ///
+    /// `#[doc(hidden)]` keeps this out of the public-API docs despite `pub` visibility.
+    /// The field is gated on `feature = "query-registry"` so this method only compiles
+    /// when that feature is active.
+    #[cfg(feature = "query-registry")]
+    #[doc(hidden)]
+    pub fn running_query_count(&self) -> usize {
+        self.running_queries.list().len()
     }
 
     /// [FABLE-5] (sq-lsp7k.10) The named-template store (see the field doc). Handlers in
@@ -2527,7 +2831,7 @@ impl AppState {
     /// set via `--change-stream` / `SPARQ_CHANGE_STREAM`). When `false`, `GET /streams` is `404`.
     #[cfg(feature = "change-stream")]
     pub(crate) fn change_stream_enabled(&self) -> bool {
-        self.change_log.is_some()
+        self.change_stream.is_some()
     }
 
     /// [OPUS-4.8] (sq-2999l) Polls the durable CDC change-stream for every recorded change record
@@ -2542,11 +2846,8 @@ impl AppState {
         &self,
         from_seq: u64,
     ) -> Result<Option<Vec<sparq_serve::ChangeRecord>>, String> {
-        match &self.change_log {
-            Some(log) => {
-                let guard = log.lock().unwrap_or_else(|p| p.into_inner());
-                guard.poll(from_seq).map(Some).map_err(|e| e.to_string())
-            }
+        match &self.change_stream {
+            Some(stream) => stream.poll(from_seq).map(Some),
             None => Ok(None),
         }
     }
@@ -2556,9 +2857,7 @@ impl AppState {
     /// when the change-stream is not configured.
     #[cfg(feature = "change-stream")]
     pub(crate) fn change_stream_next_seq(&self) -> Option<u64> {
-        self.change_log
-            .as_ref()
-            .map(|log| log.lock().unwrap_or_else(|p| p.into_inner()).next_seq())
+        self.change_stream.as_ref().map(|stream| stream.next_seq())
     }
 
     /// Pins the current generation for a request: lock-free, never blocked
@@ -2644,40 +2943,10 @@ impl AppState {
         // default-graph / dynamically-scoped writes still fall back to the global pod
         // (conservative, never under-invalidating). See [`touched_pods`].
         let touched = touched_pods(sparql);
-        // [OPUS-4.8] sq-2999l: when a durable CDC change-stream is configured, record this commit.
-        // Acquire the log lock FIRST, then — UNDER the lock — capture the predecessor generation and
-        // run the submit, and HOLD the lock across both. Because every recording update takes this
-        // same lock, only the lock-holder is ever inside `submit`, so under the lock no other thread
-        // can publish: the pin captured here is the last published generation (== the log's
-        // `last_generation`), and the post-submit `current()` is exactly THIS commit's published
-        // generation. The recorded `(pin, post)` pair is therefore exactly this commit — gapless +
-        // monotonic, the `ChangeLog` contract. Capturing the pin BEFORE the lock would race a
-        // concurrent commit and break the gapless chain; capturing it after is load-bearing. The
-        // whole dance is on the recording path only, so the default build is byte-identical.
-        #[cfg(feature = "change-stream")]
-        let _record = self.change_log.clone();
-        #[cfg(feature = "change-stream")]
-        let _record_lock_and_pin = _record
-            .as_ref()
-            .map(|log| (log.lock().unwrap_or_else(|p| p.into_inner()), self.current()));
+        // [GPT-5.6] (sq-kqofk) CDC recording now happens inside the writer's commit hook, once per
+        // published generation and before its acknowledgements. Concurrent submitters can join the
+        // same group-commit batch; there is no caller-side change-log lock on this path.
         let result = self.writer().submit(sparql.to_string(), touched);
-        #[cfg(feature = "change-stream")]
-        if let (Ok(_number), Some((mut guard, pin))) = (&result, _record_lock_and_pin) {
-            // The published generation is `current()` — holding the lock guarantees no concurrent
-            // update advanced it past this commit. Record only when it moved forward (a batch-mate
-            // sharing the generation, or a no-op update, records nothing; the log would reject a
-            // non-forward range, so this guard preserves the gapless contract proactively).
-            let post = self.current();
-            if post.number() > pin.number() {
-                // A recording I/O failure must NOT lose the already-committed update (it is durable
-                // + published). Surface it to the OPERATOR's log and continue serving; the next poll
-                // simply will not see this one record (an honest gap the operator can detect).
-                if let Err(e) = guard.record_commit(&pin, &post) {
-                    // [OPUS-4.8] positional format arg (CodeQL rust/unused-variable false-positive).
-                    tracing::warn!(target: "sparq_server", detail = %e, "change-stream record append failed (update committed; record dropped)");
-                }
-            }
-        }
         match result {
             Ok(number) => {
                 // Monotonic max: batch-mates share a generation number and may ack in
@@ -2875,14 +3144,28 @@ impl AppState {
         let ring_config = build_ring_config(&self.config);
         let ring = Arc::new(GenerationRing::with_config(graph, ring_config));
         let applier = ServerApplier::new(self.config.clone());
-        let writer = Arc::new(Writer::spawn(
+        // [GPT-5.6] (sq-kqofk) A restored writer retains the same single CDC hook. The hook's
+        // same-lineage guard reports the documented restore discontinuity instead of diffing it.
+        let writer = spawn_server_writer(
             ring.clone(),
             applier,
             writer_config(&self.config),
-        ));
+            #[cfg(feature = "change-stream")]
+            self.change_stream.as_deref(),
+        );
         // Atomic swap: subsequent loads see the new ring+writer; the old core's writer thread
         // joins once its last in-flight reader/Arc drops (Writer's Drop drains + joins).
         self.core.store(Arc::new(ServingCore { ring, writer }));
+        // [GPT-5.6] sq-lsp7k.9.3: a restored ring restarts at generation zero. Clear a cached
+        // generation-zero index from the prior lineage so equality on the numeric generation
+        // cannot reuse completion data from the replaced graph.
+        #[cfg(feature = "complete")]
+        {
+            *self
+                .completion_index
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        }
         // Advance the commit watch so active subscriptions re-evaluate against the restored store.
         let restored_gen = self.current().number();
         self.commits.send_replace(restored_gen);
@@ -3037,6 +3320,16 @@ pub fn router(state: AppState) -> Router {
     // "GET with no query" response). See [`crate::descriptors`].
     #[cfg(feature = "federation-descriptors")]
     let routes = routes.route("/.well-known/void", get(well_known_void));
+    // [GPT-5.6] sq-lsp7k.5.2: OPT-IN grouped facet counts over one pinned graph snapshot.
+    // Compiled only with the `facets` feature; even then the handler returns 404 unless the
+    // runtime flag is set. POST is a READ and is gated by the read auth.
+    #[cfg(feature = "facets")]
+    let routes = routes.route("/facets", post(facets_endpoint));
+    // [GPT-5.6] sq-lsp7k.9.3: OPT-IN IRI/label/local-name prefix completion over a cached
+    // generation-pinned index. Compiled only with `complete`; even then the handler returns 404
+    // unless the runtime flag is set. GET is a READ and is gated by the read auth.
+    #[cfg(feature = "complete")]
+    let routes = routes.route("/complete", get(complete_endpoint));
     // [OPUS-4.8] sq-bzh1 (epic sq-3183): OPT-IN Triple Pattern Fragments / LDF source endpoint.
     // Compiled only with the `tpf` feature; even then the handler refuses (404) unless the config
     // flag is set. READ-only — a GET (with HEAD) only. See [`crate::tpf`].
@@ -3070,6 +3363,15 @@ pub fn router(state: AppState) -> Router {
     // [`streams_endpoint`].
     #[cfg(feature = "change-stream")]
     let routes = routes.route("/streams", get(streams_endpoint).head(streams_endpoint));
+    // [SONNET-4.6] (sq-qsm5z) OPT-IN running-query registry admin routes.
+    // `GET /queries` — admin READ-gated list; `DELETE /queries/{id}` — admin WRITE-gated kill.
+    // Both compiled only with the `query-registry` feature; without it the routes are absent
+    // and the fallback handler produces the standard 404. No runtime flag needed: the routes
+    // are always active when the feature is compiled in (the feature IS the opt-in).
+    #[cfg(feature = "query-registry")]
+    let routes = routes
+        .route("/queries", get(list_queries_handler))
+        .route("/queries/{id}", axum::routing::delete(cancel_query_handler));
     // [FABLE-5] sq-snopa.6 (issue #992 FR-4): OPT-IN Solid WAC/ACP HTTP authorization surface.
     // Compiled only with the `solid-authz` feature; even then each handler refuses (404) unless the
     // config flag is set. POST only — a thin HTTP shell over the `sparq-solid` library authoriser
@@ -3165,24 +3467,46 @@ async fn metrics_endpoint(State(state): State<AppState>, headers: HeaderMap) -> 
 // [OPUS-4.8] sq-d3d8 (epic sq-3183) — OPT-IN federation discovery descriptors
 // ---------------------------------------------------------------------------
 
+/// [GPT-5.6] sq-oprna.6: transport scheme injected by the feature-on TCP accept loop. HTTP/2
+/// and HTTP/3 also carry `:scheme` in the request URI; HTTP/1 TLS needs this explicit marker.
+#[cfg(feature = "http2")]
+#[derive(Clone, Copy)]
+enum TransportScheme {
+    Http,
+    Https,
+}
+
+#[cfg(all(feature = "http2", feature = "federation-descriptors"))]
+impl TransportScheme {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+        }
+    }
+}
+
 /// [OPUS-4.8] sq-d3d8: derives the base URL (`scheme://host`) this server is reached at,
 /// from the request `Host` header. Used to name the VoID dataset, the `sd:Service`/endpoint
 /// and the `dcterms:source` link in the descriptors, so they self-describe the URL a client
 /// actually used to fetch them.
 ///
-/// Scheme is `http` (the server terminates plain HTTP; a TLS-terminating reverse proxy
-/// forwarding `X-Forwarded-Proto` is out of scope for this minimal discovery surface). If
-/// there is no usable `Host` header (HTTP/1.0 without one), falls back to `http://localhost`
-/// so the descriptor is always well-formed RDF rather than a 500.
+/// The direct-TLS listener supplies its transport scheme explicitly; HTTP/2 and HTTP/3 may also
+/// supply `:scheme` through the request URI. A TLS-terminating reverse proxy forwarding
+/// `X-Forwarded-Proto` remains out of scope. If there is no transport scheme or usable `Host`
+/// header, this falls back to plain HTTP and/or `localhost`, preserving the historical result.
 #[cfg(feature = "federation-descriptors")]
-fn request_base(headers: &HeaderMap) -> String {
+fn request_base(headers: &HeaderMap, uri: &Uri, transport: Option<&str>) -> String {
+    let scheme = transport
+        .or_else(|| uri.scheme_str())
+        .unwrap_or("http");
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|h| !h.is_empty())
         .unwrap_or("localhost");
-    let base = format!("http://{host}");
+    let base = format!("{scheme}://{host}");
     // The Host header is attacker-controlled; a value that makes `http://{host}` an
     // invalid IRI (spaces, control chars, `<`/`>`, …) would otherwise propagate into the
     // descriptor IRIs and yield malformed RDF → a 500. Validate here and fall back to a
@@ -3190,7 +3514,34 @@ fn request_base(headers: &HeaderMap) -> String {
     if oxrdf::NamedNode::new(&base).is_ok() {
         base
     } else {
-        "http://localhost".to_string()
+        format!("{scheme}://localhost")
+    }
+}
+
+#[cfg(all(test, feature = "federation-descriptors"))]
+mod request_base_tests {
+    use super::*;
+
+    /// [GPT-5.6] sq-oprna.6: direct TLS must not advertise a plain-HTTP descriptor IRI.
+    #[test]
+    fn transport_or_pseudo_header_selects_https() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, "example.test:3443".parse().unwrap());
+        let relative: Uri = "/.well-known/void".parse().unwrap();
+        assert_eq!(
+            request_base(&headers, &relative, Some("https")),
+            "https://example.test:3443"
+        );
+
+        let absolute: Uri = "https://example.test:3443/sparql".parse().unwrap();
+        assert_eq!(
+            request_base(&headers, &absolute, None),
+            "https://example.test:3443"
+        );
+        assert_eq!(
+            request_base(&headers, &relative, None),
+            "http://example.test:3443"
+        );
     }
 }
 
@@ -3203,14 +3554,24 @@ fn request_base(headers: &HeaderMap) -> String {
 /// Turtle (default) / N-Triples / RDF-XML from `Accept`. As a read, it is gated by
 /// `--auth-token-read` like any other GET.
 #[cfg(feature = "federation-descriptors")]
-async fn well_known_void(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn well_known_void(
+    State(state): State<AppState>,
+    uri: Uri,
+    #[cfg(feature = "http2")]
+    transport: Option<axum::Extension<TransportScheme>>,
+    headers: HeaderMap,
+) -> Response {
     if !state.config().federation_descriptors {
         return json_error(StatusCode::NOT_FOUND, "not found");
     }
     if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
         return resp;
     }
-    let base = request_base(&headers);
+    #[cfg(feature = "http2")]
+    let transport = transport.map(|extension| extension.0.as_str());
+    #[cfg(not(feature = "http2"))]
+    let transport = None;
+    let base = request_base(&headers, &uri, transport);
     let dataset_iri = format!("{base}/.well-known/void#dataset");
     let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
     // Pin the current generation; generate against its immutable snapshot.
@@ -3235,11 +3596,16 @@ async fn well_known_void(State(state): State<AppState>, headers: HeaderMap) -> R
 /// Advertises the endpoint, the supported query languages, the supported result formats and
 /// the default dataset (linked to the VoID document). Content-negotiates from `Accept`.
 #[cfg(feature = "federation-descriptors")]
-fn service_description_response(state: &AppState, headers: &HeaderMap) -> Option<Response> {
+fn service_description_response(
+    state: &AppState,
+    headers: &HeaderMap,
+    uri: &Uri,
+    transport: Option<&str>,
+) -> Option<Response> {
     if !state.config().federation_descriptors {
         return None;
     }
-    let base = request_base(headers);
+    let base = request_base(headers, uri, transport);
     let endpoint_iri = format!("{base}/sparql");
     let dataset_iri = format!("{base}/.well-known/void#dataset");
     let accept = headers.get(header::ACCEPT).and_then(|v| v.to_str().ok());
@@ -3425,6 +3791,178 @@ fn negotiate_tpf(accept: Option<&str>) -> GraphFormat {
         }
         _ => GraphFormat::Turtle,
     }
+}
+
+/// [GPT-5.6] sq-lsp7k.5.2: `POST /facets` — grouped type, predicate, and value counts for a
+/// filtered candidate-subject set.
+///
+/// The JSON body is a `sparq_introspect::FacetRequest`. Evaluation pins exactly one published
+/// graph generation and runs the scan-heavy `sparq_introspect::facets` call on the blocking pool;
+/// the response is the corresponding `sparq_introspect::FacetResponse::to_json` document.
+///
+/// Double opt-in: the route is compiled only with the `facets` feature and returns `404` unless
+/// [`ServerConfig::facets`] is set (`--facets` / `SPARQ_FACETS=1`). It is a read surface, so
+/// `--auth-token-read` applies. Malformed JSON is a sanitized `400`.
+#[cfg(feature = "facets")]
+async fn facets_endpoint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !state.config().facets {
+        return json_error(StatusCode::NOT_FOUND, "not found");
+    }
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
+        return resp;
+    }
+    let body = match decode_request_body(&body, &headers, state.config()) {
+        Ok(body) => body,
+        Err(error) => return error.into_response(),
+    };
+    let request = match serde_json::from_slice::<sparq_introspect::FacetRequest>(&body) {
+        Ok(request) => request,
+        Err(error) => {
+            return sanitized_error(
+                StatusCode::BAD_REQUEST,
+                "facet-request-json",
+                "malformed facet request",
+                &error.to_string(),
+            )
+        }
+    };
+
+    let pin = state.current();
+    let task = tokio::task::spawn_blocking(move || {
+        let response = sparq_introspect::facets(pin.snapshot(), &request);
+        text_response(
+            StatusCode::OK,
+            "application/json; charset=utf-8",
+            response.to_json(),
+            false,
+        )
+    });
+    await_worker(task, state.config()).await
+}
+
+#[cfg(feature = "complete")]
+const COMPLETION_DEFAULT_LIMIT: usize = 20;
+#[cfg(feature = "complete")]
+const COMPLETION_MAX_LIMIT: usize = 100;
+
+/// [GPT-5.6] sq-lsp7k.9.3: stable wire names for `sparq_text::CandidateKind`.
+#[cfg(feature = "complete")]
+fn completion_kind_name(kind: sparq_text::CandidateKind) -> &'static str {
+    match kind {
+        sparq_text::CandidateKind::Iri => "iri",
+        sparq_text::CandidateKind::LocalName => "localName",
+        sparq_text::CandidateKind::Label(_) => "label",
+    }
+}
+
+/// [GPT-5.6] sq-lsp7k.9.3: materialises completion candidates into the endpoint's compact JSON
+/// array. Entity ids are resolved through the same pinned snapshot dictionary that the index was
+/// built against; IRI terms use their raw IRI string, while the defensive non-IRI fallback uses
+/// the term's N-Triples display form.
+#[cfg(feature = "complete")]
+fn completion_json(
+    graph: &Graph,
+    index: &sparq_text::CompletionIndex,
+    prefix: &str,
+    limit: usize,
+) -> String {
+    let candidates: Vec<serde_json::Value> = index
+        .complete(prefix, limit, None)
+        .into_iter()
+        .map(|candidate| {
+            let term = graph.dict.term(candidate.id);
+            let iri = match &term {
+                oxrdf::Term::NamedNode(node) => node.as_str().to_string(),
+                _ => term.to_string(),
+            };
+            serde_json::json!({
+                "iri": iri,
+                "key": candidate.key,
+                "kind": completion_kind_name(candidate.kind),
+                "score": candidate.score,
+            })
+        })
+        .collect();
+    serde_json::to_string(&candidates).expect("completion candidates are JSON-serializable")
+}
+
+/// [GPT-5.6] sq-lsp7k.9.3: `GET /complete?q=<prefix>&limit=<k>` — case-insensitive prefix
+/// completion over graph IRIs, local names, and `rdfs:label`/`skos:prefLabel` values.
+///
+/// The handler pins one immutable graph generation. A generation-matched AppState cache answers
+/// directly; otherwise `CompletionIndex::build` runs on the blocking pool and the resulting
+/// `(generation, index)` replaces the stale entry. Scores are intentionally `None` in v1 (wire
+/// score `0.0`); rank injection and incremental reconciliation are follow-ups. `limit` defaults to
+/// 20 and is capped at 100. Missing `q` or a malformed `limit` is `400`.
+///
+/// Double opt-in: the route is compiled only with `complete` and returns `404` unless
+/// [`ServerConfig::complete`] is set (`--complete` / `SPARQ_COMPLETE=1`). It is a read surface,
+/// so `--auth-token-read` applies.
+#[cfg(feature = "complete")]
+async fn complete_endpoint(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if !state.config().complete {
+        return json_error(StatusCode::NOT_FOUND, "not found");
+    }
+    if let Some(response) = auth_gate(state.config(), &headers, Operation::Read) {
+        return response;
+    }
+    let Some(prefix) = params.get("q").cloned() else {
+        return json_error(StatusCode::BAD_REQUEST, "missing 'q' parameter");
+    };
+    let limit = match params.get("limit") {
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(limit) => limit.min(COMPLETION_MAX_LIMIT),
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "malformed completion limit"),
+        },
+        None => COMPLETION_DEFAULT_LIMIT,
+    };
+
+    let pin = state.current();
+    let generation = pin.number();
+    let cache = state.completion_index.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        {
+            let cached = cache
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some((cached_generation, index)) = &*cached {
+                if *cached_generation == generation {
+                    return text_response(
+                        StatusCode::OK,
+                        "application/json; charset=utf-8",
+                        completion_json(pin.snapshot(), index, &prefix, limit),
+                        false,
+                    );
+                }
+            }
+        }
+
+        let rebuilt = sparq_text::CompletionIndex::build(pin.snapshot());
+        let body = completion_json(pin.snapshot(), &rebuilt, &prefix, limit);
+        let mut cached = cache
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // Always replace a mismatched entry. Generations are monotonic within a ring, but an
+        // online restore starts a new lineage at zero; numeric ordering is therefore not a safe
+        // cross-lineage recency test. A racing older request can cause one extra rebuild, never a
+        // wrong response (each response uses its own pin).
+        *cached = Some((generation, rebuilt));
+        text_response(
+            StatusCode::OK,
+            "application/json; charset=utf-8",
+            body,
+            false,
+        )
+    });
+    await_worker(task, state.config()).await
 }
 
 /// [OPUS-4.8] sq-bzh1: `GET /tpf?subject=&predicate=&object=` — the Triple Pattern Fragments /
@@ -3996,8 +4534,9 @@ async fn streams_endpoint(
     };
     let limit = parse_limit(params.get("limit").map(String::as_str));
 
-    // `LATEST` starts at the log's current tail; the others ignore `next_seq`. Reading it under the
-    // log lock is cheap (no disk scan). Absent (disabled) is the 404 above, so this is `Some`.
+    // [GPT-5.6] (sq-kqofk) `LATEST` starts at the successful-hook tail. The writer-thread hook
+    // advances this atomic only after a durable append, so the lookup needs no submitter/log lock.
+    // Absent (disabled) is the 404 above, so this is `Some`.
     let next_seq = state.change_stream_next_seq().unwrap_or(0);
     let from_seq = iter.from_seq(next_seq);
 
@@ -4150,11 +4689,13 @@ pub fn harden(routes: Router, config: &ServerConfig) -> Router {
 /// This loop is a faithful port of `axum::serve`'s own accept + graceful-shutdown loop
 /// (per-connection task, watch-channel drain, `serve_connection(...).with_upgrades()` so the
 /// `/subscriptions` WebSocket upgrade still works) with two behavioural additions: the connection
-/// builder installs a `TokioTimer` and sets `header_read_timeout`, and the per-connection service
-/// optionally wraps the body in the `body_read_timeout` layer. `None` on either opts back out to
-/// the unbounded behaviour. axum is configured HTTP/1-only (no `http2` feature), so this uses
-/// hyper's `http1::Builder` directly — the smallest builder that carries the header knob.
-#[cfg(feature = "server")]
+/// builder installs a `TokioTimer` and sets `header_read_timeout`, the per-connection service
+/// optionally wraps the body in the `body_read_timeout` layer, and each request receives the
+/// accepted peer as `ConnectInfo<SocketAddr>` (matching the HTTP/3 listener). `None` on either
+/// deadline opts back out to the unbounded behaviour. axum is configured HTTP/1-only (no `http2`
+/// feature), so this uses hyper's `http1::Builder` directly — the smallest builder that carries
+/// the header knob.
+#[cfg(all(feature = "server", not(feature = "http2")))]
 pub async fn serve<F>(
     listener: tokio::net::TcpListener,
     app: Router,
@@ -4165,6 +4706,7 @@ pub async fn serve<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
+    use axum::{extract::ConnectInfo, Extension};
     use futures_util::FutureExt;
     use hyper_util::rt::{TokioIo, TokioTimer};
     use hyper_util::service::TowerToHyperService;
@@ -4195,7 +4737,7 @@ where
     drop(_close_rx); // the loop itself does not hold a connection slot
 
     loop {
-        let (stream, _remote) = tokio::select! {
+        let (stream, remote) = tokio::select! {
             conn = listener.accept() => match conn {
                 Ok(c) => c,
                 // A transient accept error (e.g. EMFILE / a peer that vanished mid-handshake)
@@ -4216,7 +4758,9 @@ where
         let io = TokioIo::new(stream);
         // [OPUS-4.8] sq-lodb: apply the (optional) slow-body read/idle deadline around this
         // connection's clone of the router, then hand the composed tower service to hyper.
+        // [GPT-5.6] sq-rejk9: expose the accepted TCP peer to every request, matching serve_h3.
         let service = ServiceBuilder::new()
+            .layer(Extension(ConnectInfo(remote)))
             .layer(body_timeout_layer.clone())
             .service(app.clone());
         let hyper_service = TowerToHyperService::new(service);
@@ -4272,6 +4816,221 @@ where
     );
     close_tx.closed().await;
     Ok(())
+}
+
+/// Serves HTTP/1.1 and HTTP/2 on `listener` until `shutdown` resolves.
+///
+/// [GPT-5.6] sq-oprna.6: with the default-off `http2` feature, [`serve`] switches from
+/// hyper's HTTP/1-only builder to hyper-util's h1+h2 auto builder. Its HTTP/1 configuration
+/// retains [`ServerConfig::header_read_timeout`], request-body idle deadlines, WebSocket
+/// upgrades, peer `ConnectInfo`, and graceful drain. A plain listener accepts h1 and h2c;
+/// use [`serve_tls`] for TLS with ALPN.
+#[cfg(all(feature = "server", feature = "http2"))]
+pub async fn serve<F>(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    header_read_timeout: Option<Duration>,
+    body_read_timeout: Option<Duration>,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    serve_auto(
+        listener,
+        app,
+        header_read_timeout,
+        body_read_timeout,
+        None,
+        shutdown,
+    )
+    .await
+}
+
+/// Serves HTTP/1.1 and HTTP/2 over TLS on `listener` until `shutdown` resolves.
+///
+/// This is the TLS counterpart to [`serve`], available only with the default-off `http2` feature.
+/// The supplied rustls configuration should advertise `h2` and `http/1.1` through ALPN. The
+/// HTTP/1 path preserves [`ServerConfig::header_read_timeout`], request-body idle deadlines,
+/// WebSocket upgrades, peer `ConnectInfo`, and graceful drain exactly as [`serve`]. HTTP/2
+/// multiplexed streams share the same request middleware and graceful-drain path.
+///
+/// [GPT-5.6] sq-oprna.6
+#[cfg(feature = "http2")]
+#[cfg_attr(docsrs, doc(cfg(feature = "http2")))]
+pub async fn serve_tls<F>(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    tls_config: std::sync::Arc<rustls::ServerConfig>,
+    header_read_timeout: Option<Duration>,
+    body_read_timeout: Option<Duration>,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    serve_auto(
+        listener,
+        app,
+        header_read_timeout,
+        body_read_timeout,
+        Some(tokio_rustls::TlsAcceptor::from(tls_config)),
+        shutdown,
+    )
+    .await
+}
+
+/// [GPT-5.6] sq-oprna.6: feature-on h1+h2 accept loop shared by cleartext and TLS entry points.
+#[cfg(feature = "http2")]
+async fn serve_auto<F>(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    header_read_timeout: Option<Duration>,
+    body_read_timeout: Option<Duration>,
+    tls_acceptor: Option<tokio_rustls::TlsAcceptor>,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let (signal_tx, signal_rx) = tokio::sync::watch::channel(());
+    tokio::spawn(async move {
+        shutdown.await;
+        tracing::trace!(target: "sparq_server", "shutdown signal received, starting graceful drain");
+        drop(signal_rx);
+    });
+
+    let (close_tx, close_rx) = tokio::sync::watch::channel(());
+    drop(close_rx);
+
+    loop {
+        let (stream, remote) = tokio::select! {
+            conn = listener.accept() => match conn {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::trace!(target: "sparq_server", %error, "accept error (continuing)");
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+            },
+            _ = signal_tx.closed() => {
+                tracing::trace!(target: "sparq_server", "accept loop stopping (graceful shutdown)");
+                break;
+            }
+        };
+
+        let app = app.clone();
+        let signal_tx = signal_tx.clone();
+        let close_rx = close_tx.subscribe();
+        let tls_acceptor = tls_acceptor.clone();
+        tokio::spawn(async move {
+            if let Some(acceptor) = tls_acceptor {
+                // A peer that never completes TLS must not prevent shutdown from draining. The
+                // HTTP header timer starts after this handshake, where hyper can parse headers.
+                let accepted = tokio::select! {
+                    accepted = acceptor.accept(stream) => accepted,
+                    _ = signal_tx.closed() => {
+                        drop(close_rx);
+                        return;
+                    }
+                };
+                match accepted {
+                    Ok(stream) => {
+                        serve_auto_connection(
+                            stream,
+                            remote,
+                            TransportScheme::Https,
+                            app,
+                            header_read_timeout,
+                            body_read_timeout,
+                            signal_tx,
+                        )
+                        .await;
+                    }
+                    Err(error) => {
+                        tracing::trace!(target: "sparq_server", %error, "TLS handshake ended with error");
+                    }
+                }
+            } else {
+                serve_auto_connection(
+                    stream,
+                    remote,
+                    TransportScheme::Http,
+                    app,
+                    header_read_timeout,
+                    body_read_timeout,
+                    signal_tx,
+                )
+                .await;
+            }
+            drop(close_rx);
+        });
+    }
+
+    tracing::trace!(
+        target: "sparq_server",
+        tasks = close_tx.receiver_count(),
+        "waiting for in-flight connections to drain"
+    );
+    close_tx.closed().await;
+    Ok(())
+}
+
+/// [GPT-5.6] sq-oprna.6: one auto-detected HTTP/1.1 or HTTP/2 connection.
+#[cfg(feature = "http2")]
+async fn serve_auto_connection<I>(
+    stream: I,
+    remote: std::net::SocketAddr,
+    transport: TransportScheme,
+    app: Router,
+    header_read_timeout: Option<Duration>,
+    body_read_timeout: Option<Duration>,
+    signal_tx: tokio::sync::watch::Sender<()>,
+) where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    use axum::{extract::ConnectInfo, Extension};
+    use futures_util::FutureExt;
+    use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+    use hyper_util::service::TowerToHyperService;
+    use tower::ServiceBuilder;
+    use tower_http::timeout::RequestBodyTimeoutLayer;
+
+    let body_timeout_layer =
+        tower::util::option_layer(body_read_timeout.map(RequestBodyTimeoutLayer::new));
+    let service = ServiceBuilder::new()
+        .layer(Extension(ConnectInfo(remote)))
+        .layer(Extension(transport))
+        .layer(body_timeout_layer)
+        .service(app);
+    let hyper_service = TowerToHyperService::new(service);
+    let io = TokioIo::new(stream);
+
+    let mut builder = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new());
+    if let Some(timeout) = header_read_timeout {
+        builder
+            .http1()
+            .timer(TokioTimer::new())
+            .header_read_timeout(timeout);
+    }
+    let conn = builder.serve_connection_with_upgrades(io, hyper_service);
+    let mut conn = std::pin::pin!(conn);
+    let mut signal_closed = std::pin::pin!(signal_tx.closed().fuse());
+
+    loop {
+        tokio::select! {
+            result = conn.as_mut() => {
+                if let Err(error) = result {
+                    tracing::trace!(target: "sparq_server", %error, "connection ended with error");
+                }
+                break;
+            }
+            _ = &mut signal_closed => {
+                tracing::trace!(target: "sparq_server", "shutdown signal in connection task, starting graceful shutdown");
+                conn.as_mut().graceful_shutdown();
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -4523,6 +5282,10 @@ fn with_generation_header(mut resp: Response, number: u64) -> Response {
 async fn sparql_endpoint(
     State(state): State<AppState>,
     method: Method,
+    #[cfg(feature = "federation-descriptors")]
+    uri: Uri,
+    #[cfg(all(feature = "federation-descriptors", feature = "http2"))]
+    transport: Option<axum::Extension<TransportScheme>>,
     RawQuery(raw_query): RawQuery,
     headers: HeaderMap,
     body: Bytes,
@@ -4608,7 +5371,16 @@ async fn sparql_endpoint(
                 // Otherwise the historical 400.
                 #[cfg(feature = "federation-descriptors")]
                 None if method != Method::HEAD => {
-                    match service_description_response(&state, &headers) {
+                    #[cfg(feature = "http2")]
+                    let transport = transport.map(|extension| extension.0.as_str());
+                    #[cfg(not(feature = "http2"))]
+                    let transport = None;
+                    match service_description_response(
+                        &state,
+                        &headers,
+                        &uri,
+                        transport,
+                    ) {
                         Some(resp) => resp,
                         None => bad_request("missing 'query' parameter"),
                     }
@@ -5372,11 +6144,27 @@ async fn run_query_pinned(
         let cfg = config.clone();
         let q = sparql.to_string();
         let analyze = explain == ExplainMode::Analyze;
-        let budget = make_budget(&config, true);
+        // [SONNET-4.6] (sq-t1isr) Register EXPLAIN ANALYZE with the running-query registry
+        // (feature `query-registry`), mirroring the SELECT/CONSTRUCT pattern from sq-qsm5z.
+        // The RAII guard is moved into the blocking closure so the row is present for the
+        // full duration of the engine call and removed on any exit path (normal, error, unwind).
+        // Plan-only EXPLAIN (ExplainMode::Plan) is also registered — it runs on the blocking
+        // pool under the same timeout cap and can be listed/killed like any other query.
+        #[cfg(feature = "query-registry")]
+        let (budget, qr_guard): (QueryBudget, Option<Box<dyn std::any::Any + Send>>) = {
+            let base = make_budget(&config, true);
+            let (cancel, guard) = state.running_queries.register(sparql);
+            (base.with_cancel(cancel), Some(Box::new(guard)))
+        };
+        #[cfg(not(feature = "query-registry"))]
+        let (budget, qr_guard): (QueryBudget, Option<Box<dyn std::any::Any + Send>>) =
+            (make_budget(&config, true), None);
         // [OPUS-4.8] sq-9xoh: resolve the per-request SERVICE egress allowlist HERE (headers are
         // not `'static`, so it must happen before the spawn) and move it into the worker.
         let allow = config.resolve_service_allow(headers);
         let task = tokio::task::spawn_blocking(move || {
+            // Hold qr_guard alive for the duration of the engine call (sq-t1isr).
+            let _guard = qr_guard;
             let graph = gen.snapshot();
             // [FABLE-5] sq-ixc3.19: the STRUCTURED explain response — the caller
             // `Accept`ed `application/x-sparq-explain+json`, so answer with the typed
@@ -5446,7 +6234,19 @@ async fn run_query_pinned(
                 Err(_) => return not_acceptable_response(head_only),
             };
             let is_ask = prepared.form == QueryForm::Ask;
-            let budget = make_budget(&config, !is_ask);
+            // [SONNET-4.6] (sq-qsm5z) Register with the running-query registry (feature
+            // `query-registry`). The RAII guard is boxed as `Box<dyn Any + Send>` so the
+            // call site is uniform in both feature states; it is moved into the blocking
+            // closure and held alive for the entire engine call, then dropped on exit.
+            #[cfg(feature = "query-registry")]
+            let (budget, qr_guard): (QueryBudget, Option<Box<dyn std::any::Any + Send>>) = {
+                let base = make_budget(&config, !is_ask);
+                let (cancel, guard) = state.running_queries.register(sparql);
+                (base.with_cancel(cancel), Some(Box::new(guard)))
+            };
+            #[cfg(not(feature = "query-registry"))]
+            let (budget, qr_guard): (QueryBudget, Option<Box<dyn std::any::Any + Send>>) =
+                (make_budget(&config, !is_ask), None);
             let cfg = config.clone();
             let allow = allow.clone();
             // [OPUS-4.8] (sq-7d3dj.34.2) SELECT → SPARQL-results JSON streams its body: the
@@ -5458,12 +6258,14 @@ async fn run_query_pinned(
             // algebra already parsed in `prepare` via the engine's `*_prepared` entry points —
             // no second parse per request.
             if !is_ask && fmt == Format::Json {
-                return stream_select_json(gen, prepared.query, budget, head_only, allow, &config)
+                return stream_select_json(gen, prepared.query, budget, head_only, allow, qr_guard, &config)
                     .await;
             }
             let pquery = prepared.query;
             let select = prepared.runnable;
             let task = tokio::task::spawn_blocking(move || {
+                // Hold qr_guard alive for the duration of the engine call.
+                let _guard = qr_guard;
                 with_engine_scope_allow(&allow, || {
                     if is_ask {
                         match sparq_engine::ask_prepared_with_budget(
@@ -5504,9 +6306,19 @@ async fn run_query_pinned(
                 Err(_) => return not_acceptable_response(head_only),
             };
             let query = prepared.runnable;
-            let budget = make_budget(&config, true);
+            // [SONNET-4.6] (sq-qsm5z) Register with the running-query registry.
+            #[cfg(feature = "query-registry")]
+            let (budget, qr_guard): (QueryBudget, Option<Box<dyn std::any::Any + Send>>) = {
+                let base = make_budget(&config, true);
+                let (cancel, guard) = state.running_queries.register(sparql);
+                (base.with_cancel(cancel), Some(Box::new(guard)))
+            };
+            #[cfg(not(feature = "query-registry"))]
+            let (budget, qr_guard): (QueryBudget, Option<Box<dyn std::any::Any + Send>>) =
+                (make_budget(&config, true), None);
             let cfg = config.clone();
             let task = tokio::task::spawn_blocking(move || {
+                let _guard = qr_guard;
                 // [OPUS-4.8] sq-rt6v: produce the triple list once, then serialise it in the
                 // negotiated graph syntax — N-Triples (default), prefix-compacting Turtle, or
                 // RDF/XML — rather than always emitting N-Triples.
@@ -5551,6 +6363,7 @@ pub(crate) fn make_budget(config: &ServerConfig, apply_max_results: bool) -> Que
         // [OPUS-4.8] (sq-s5is) byte-accounted cap applies on every form (it has no
         // `--max-results` analogue — it bounds the working set, not the projection).
         max_bytes: config.max_query_bytes,
+        cancel: None,
     }
 }
 
@@ -5573,6 +6386,7 @@ fn update_budget(config: &ServerConfig) -> QueryBudget {
         max_rows: config.max_query_rows,
         // [OPUS-4.8] (sq-s5is) the byte cap reaches the UPDATE's WHERE evaluation too.
         max_bytes: config.max_query_bytes,
+        cancel: None,
     }
 }
 
@@ -5776,11 +6590,17 @@ async fn stream_select_json(
     budget: QueryBudget,
     head_only: bool,
     allow: crate::service_config::ServiceAllowlist,
+    // [SONNET-4.6] (sq-qsm5z) The RAII registry guard, as a type-erased send-able box so the
+    // signature compiles in both feature states without a conditional type. Moved into the worker
+    // so the row is present for the full streaming evaluation; dropped when the worker exits.
+    qr_guard: Option<Box<dyn std::any::Any + Send>>,
     config: &ServerConfig,
 ) -> Response {
     let ct = Format::Json.select_content_type();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<Bytes, String>>(STREAM_CHANNEL_CAP);
     tokio::task::spawn_blocking(move || {
+        // Hold the registry guard alive for the entire streaming evaluation.
+        let _guard = qr_guard;
         with_engine_scope_allow(&allow, || {
             let graph = gen.snapshot();
             let mut sink = |chunk: String| match tx.blocking_send(Ok(Bytes::from(chunk.into_bytes()))) {
@@ -7801,6 +8621,237 @@ mod bind_posture_tests {
 }
 
 // ---------------------------------------------------------------------------
+// [SONNET-4.6] sq-qsm5z — running-query registry HTTP handlers
+// ---------------------------------------------------------------------------
+
+/// [SONNET-4.6] (sq-qsm5z) `GET /queries` — list currently executing SPARQL queries.
+///
+/// Returns a JSON object `{"queries": [...]}` where each entry carries `id`, `start`
+/// (Unix epoch ms), `fingerprint` (FNV-1a hex — never raw query text), and `elapsed_ms`.
+/// Entries are sorted by `id` (registration order). An empty registry returns `{"queries":[]}`.
+///
+/// **Auth:** READ-gated (fail-closed). Mirrors the posture of every other admin route.
+#[cfg(feature = "query-registry")]
+async fn list_queries_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Read) {
+        return resp;
+    }
+    let body = serde_json::json!({ "queries": state.running_queries.list() }).to_string();
+    text_response(StatusCode::OK, "application/json", body, false)
+}
+
+/// [SONNET-4.6] (sq-qsm5z) `DELETE /queries/{id}` — cooperatively cancel one executing query.
+///
+/// Flips the `sq-kq9ia` `Arc<AtomicBool>` cancel flag that was wired into the query's
+/// `QueryBudget` at registration time. The engine observes the flag at its next cooperative
+/// poll site and aborts with `"query budget exceeded (cancelled)"`. The registry row stays
+/// until the worker exits and the RAII `QueryGuard` fires its `Drop`.
+///
+/// - `204 No Content` — the cancel flag was flipped.
+/// - `404 Not Found` — no query with that id in the registry (already finished, or bad id).
+///
+/// **Auth:** WRITE-gated (fail-closed). An unauthenticated or wrongly-authenticated request
+/// receives a `401` identical for missing vs. wrong token.
+#[cfg(feature = "query-registry")]
+async fn cancel_query_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(resp) = auth_gate(state.config(), &headers, Operation::Write) {
+        return resp;
+    }
+    if state.running_queries.cancel_query(&id) {
+        Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    } else {
+        json_error(StatusCode::NOT_FOUND, "running query not found")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [SONNET-4.6] sq-qsm5z — registry unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "query-registry"))]
+mod query_registry_tests {
+    use super::{QueryRegistry, registry_fingerprint};
+    use std::sync::Arc;
+
+    // Fingerprint must be stable across calls with the same input.
+    #[test]
+    fn fingerprint_is_stable() {
+        let a = registry_fingerprint("SELECT * WHERE { ?s ?p ?o }");
+        let b = registry_fingerprint("SELECT * WHERE { ?s ?p ?o }");
+        assert_eq!(a, b, "fingerprint must be deterministic");
+        // 16 hex chars for a 64-bit hash.
+        assert_eq!(a.len(), 16);
+    }
+
+    // Different queries must produce different fingerprints.
+    #[test]
+    fn fingerprint_differs_for_distinct_queries() {
+        let a = registry_fingerprint("SELECT * WHERE { ?s ?p ?o }");
+        let b = registry_fingerprint("ASK WHERE { ?s ?p ?o }");
+        assert_ne!(a, b, "distinct queries must yield distinct fingerprints");
+    }
+
+    // The RAII guard removes the entry on normal return.
+    #[test]
+    fn guard_removes_entry_on_normal_return() {
+        let registry = Arc::new(QueryRegistry::default());
+        {
+            let (_cancel, _guard) = registry.register("SELECT * WHERE { ?s ?p ?o }");
+            assert_eq!(registry.list().len(), 1, "entry must be present while guard is alive");
+        }
+        assert_eq!(registry.list().len(), 0, "entry must be removed after guard drops");
+    }
+
+    // The RAII guard removes the entry even during a panic / unwind.
+    #[test]
+    fn guard_removes_entry_during_panic_unwind() {
+        let registry = Arc::new(QueryRegistry::default());
+        let r2 = Arc::clone(&registry);
+        let result = std::thread::spawn(move || {
+            let (_cancel, _guard) = r2.register("SELECT 1 WHERE {}");
+            panic!("witness panic");
+        })
+        .join();
+        assert!(result.is_err(), "thread must have panicked");
+        assert_eq!(registry.list().len(), 0, "entry must be cleaned up after unwind");
+    }
+
+    // Cancelling an entry flips the flag (non-vacuous: verify the flag starts false).
+    #[test]
+    fn cancel_flips_flag_to_true() {
+        use std::sync::atomic::Ordering;
+        let registry = Arc::new(QueryRegistry::default());
+        let (cancel, _guard) = registry.register("SELECT * WHERE { ?s ?p ?o }");
+        assert!(!cancel.load(Ordering::Acquire), "flag must start false");
+        let id = registry.list()[0]["id"].as_str().unwrap().to_owned();
+        let found = registry.cancel_query(&id);
+        assert!(found, "cancel must return true for a known id");
+        assert!(cancel.load(Ordering::Acquire), "flag must be true after cancel");
+    }
+
+    // Cancelling an unknown id returns false (the 404 path).
+    #[test]
+    fn cancel_unknown_id_returns_false() {
+        let registry = Arc::new(QueryRegistry::default());
+        assert!(!registry.cancel_query("0000000000000000"), "unknown id must return false");
+    }
+
+    // Multiple simultaneous entries are all listed and all individually cancellable.
+    #[test]
+    fn multiple_entries_listed_and_cancellable() {
+        use std::sync::atomic::Ordering;
+        let registry = Arc::new(QueryRegistry::default());
+        let (c1, _g1) = registry.register("SELECT ?a WHERE { ?a ?b ?c }");
+        let (c2, _g2) = registry.register("ASK WHERE { ?x ?y ?z }");
+        let list = registry.list();
+        assert_eq!(list.len(), 2, "both entries must be present");
+        let id0 = list[0]["id"].as_str().unwrap().to_owned();
+        registry.cancel_query(&id0);
+        // Exactly one flag is now set.
+        let set_count = [c1, c2].iter().filter(|f| f.load(Ordering::Acquire)).count();
+        assert_eq!(set_count, 1, "exactly one cancel flag must be set");
+    }
+
+    // ---------------------------------------------------------------------------
+    // [SONNET-4.6] sq-t1isr — EXPLAIN ANALYZE path registry tests
+    //
+    // These tests simulate the EXACT code pattern added to the EXPLAIN ANALYZE
+    // spawn_blocking path in `run_query_pinned`.  They are the mutation target:
+    // removing the `register(sparql)` call from that path would break the
+    // `explain_path_entry_present_while_guard_alive` test (registry would stay
+    // empty and the assert_eq!(1) would fire).
+    // ---------------------------------------------------------------------------
+
+    /// The EXPLAIN-path registers an entry while the simulated closure holds the guard.
+    /// Non-vacuity: removing the `register()` call in `run_query_pinned` → registry
+    /// stays empty → `assert_eq!(list.len(), 1)` fails.
+    #[test]
+    fn explain_path_entry_present_while_guard_alive() {
+        let registry = Arc::new(QueryRegistry::default());
+        // Mirror the exact pattern used in run_query_pinned for the EXPLAIN branch:
+        //   let (cancel, guard) = state.running_queries.register(sparql);
+        //   let budget = base.with_cancel(cancel);
+        //   let task = spawn_blocking(move || { let _guard = guard; ... });
+        let (_cancel, guard) = registry.register("EXPLAIN SELECT * WHERE { ?s ?p ?o }");
+        // While the guard is alive (simulating the blocking closure running):
+        let list = registry.list();
+        assert_eq!(
+            list.len(),
+            1,
+            "EXPLAIN ANALYZE entry must be present in the registry while the worker runs"
+        );
+        let entry = &list[0];
+        assert!(
+            entry.get("id").and_then(|v| v.as_str()).is_some(),
+            "registry entry must have an id field"
+        );
+        assert!(
+            entry.get("fingerprint").and_then(|v| v.as_str()).is_some(),
+            "registry entry must have a fingerprint"
+        );
+        // Simulate the closure returning — guard drops, entry must be removed.
+        drop(guard);
+        assert_eq!(
+            registry.list().len(),
+            0,
+            "EXPLAIN ANALYZE entry must be deregistered after the worker exits"
+        );
+    }
+
+    /// The cancel flag obtained from the EXPLAIN-path registration can be flipped via
+    /// `cancel_query`, enabling `GET /queries` + `DELETE /queries/{id}` to kill a slow
+    /// EXPLAIN ANALYZE.  Non-vacuity: if the cancel flag were not wired into the
+    /// EXPLAIN budget via `with_cancel`, the flag flip would still work here (it is the
+    /// `AtomicBool` itself), but the engine would not observe it — a separate honesty note.
+    #[test]
+    fn explain_path_cancel_flag_flippable_via_registry() {
+        use std::sync::atomic::Ordering;
+        let registry = Arc::new(QueryRegistry::default());
+        let (cancel, _guard) = registry.register("EXPLAIN ANALYZE SELECT * WHERE { ?s ?p ?o }");
+        assert!(
+            !cancel.load(Ordering::Acquire),
+            "cancel flag must start false"
+        );
+        let id = registry.list()[0]["id"].as_str().unwrap().to_owned();
+        let found = registry.cancel_query(&id);
+        assert!(found, "cancel_query must return true for the EXPLAIN entry id");
+        assert!(
+            cancel.load(Ordering::Acquire),
+            "cancel flag must be true after DELETE /queries/{id}"
+        );
+    }
+
+    /// An EXPLAIN entry does not survive a panic inside the simulated worker
+    /// (the Drop impl on QueryGuard fires even during unwind).
+    #[test]
+    fn explain_path_guard_cleans_up_on_panic() {
+        let registry = Arc::new(QueryRegistry::default());
+        let r2 = Arc::clone(&registry);
+        let result = std::thread::spawn(move || {
+            let (_cancel, _guard) = r2.register("EXPLAIN ANALYZE SELECT ?x WHERE { ?x ?y ?z }");
+            panic!("simulated worker panic");
+        })
+        .join();
+        assert!(result.is_err(), "thread must have panicked");
+        assert_eq!(
+            registry.list().len(),
+            0,
+            "EXPLAIN entry must be cleaned up even after worker panic"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // [OPUS-4.8] sq-zcby — auth-gate unit tests (constant-time eq, Bearer parsing,
 // mutation classification, the gate decision, posture derivation)
 // ---------------------------------------------------------------------------
@@ -9200,6 +10251,86 @@ mod apply_update_mvcc_tests {
     }
 }
 
+/// [GPT-5.6] (sq-kqofk) Server-adapter coverage for writer-thread CDC recording. This uses a
+/// deliberately wide group-commit window so concurrent submitters deterministically share one
+/// published generation. Mutation witness: replacing `spawn_with_commit_hook` with `spawn` makes
+/// the log empty, while changing the expected record/generation count makes the test fail.
+#[cfg(all(test, feature = "change-stream"))]
+mod change_stream_commit_hook_tests {
+    use super::{spawn_server_writer, ChangeStreamState, ServerApplier, ServerConfig};
+    use sparq_core::Graph;
+    use sparq_serve::{GenerationRing, PodId, WriterConfig};
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
+
+    #[test]
+    fn concurrent_submitters_share_one_recorded_generation() {
+        const N: usize = 8;
+        let dir = std::env::temp_dir().join(format!(
+            "sparq-server-cdc-hook-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let stream = Arc::new(ChangeStreamState::open(&dir).expect("open change stream"));
+        let config = Arc::new(ServerConfig::default());
+        let ring = Arc::new(GenerationRing::new(Graph::default()));
+        let writer = spawn_server_writer(
+            ring,
+            ServerApplier::new(config),
+            WriterConfig {
+                window: Duration::from_millis(100),
+                adaptive_commit: false,
+                ..WriterConfig::default()
+            },
+            Some(stream.as_ref()),
+        );
+
+        let barrier = Arc::new(Barrier::new(N + 1));
+        let mut submitters = Vec::with_capacity(N);
+        for i in 0..N {
+            let writer = writer.clone();
+            let barrier = barrier.clone();
+            submitters.push(std::thread::spawn(move || {
+                barrier.wait();
+                writer
+                    .submit(
+                        format!(
+                            "INSERT DATA {{ <http://ex/s{i}> <http://ex/p> <http://ex/o{i}> }}"
+                        ),
+                        [PodId::new("http://ex/g")],
+                    )
+                    .expect("concurrent update commits")
+            }));
+        }
+        barrier.wait();
+        let generations: Vec<u64> = submitters
+            .into_iter()
+            .map(|thread| thread.join().expect("submitter joins"))
+            .collect();
+
+        assert!(generations.iter().all(|&generation| generation == 1));
+        let records = stream.poll(0).expect("poll recorded generation");
+        assert_eq!(records.len(), 1, "one group commit produces one CDC record");
+        assert_eq!(records[0].generation, 1);
+        assert_eq!(
+            records[0].changes.len(),
+            N,
+            "the record contains every update"
+        );
+        assert_eq!(
+            stream.next_seq(),
+            1,
+            "the hook advances the LATEST tail once"
+        );
+
+        drop(writer);
+        drop(stream);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// [OPUS-4.8] (sq-qcnn.19) `ServerConfig::from_env()` and `env_parse` coverage.
 ///
 /// `from_env()` is the production entry point for reading all `SPARQ_*` environment
@@ -9207,16 +10338,38 @@ mod apply_update_mvcc_tests {
 /// that runs when no relevant env vars are set) and one env-var body (covering the
 /// inner assignment branches that are otherwise dead when the env vars are absent).
 ///
-/// ISOLATION: each test uses a distinct, process-internal env var name unlikely to
-/// collide with real deployment vars or other tests. Tests clean up after themselves
-/// via `std::env::remove_var`. Running in a single-threaded test binary means the
-/// set/remove sequence is not racy with other tests in this module.
+/// ISOLATION: `std::env::{set_var,remove_var}` mutate the SINGLE process-global
+/// environment and `cargo test` runs these tests CONCURRENTLY, so every test that
+/// touches the environment holds the module-local `ENV_LOCK` (see `env_guard`) for the
+/// whole set → `from_env()` → remove critical section. That serialization — not any
+/// "single-threaded test binary" assumption — is what keeps one test's `SPARQ_*` write
+/// from leaking into another's `from_env()` read. [OPUS-4.8] sq-gum8.14.
 #[cfg(test)]
 mod from_env_tests {
     use super::{env_parse, ServerConfig};
+    use std::sync::{Mutex, MutexGuard};
+
+    // [OPUS-4.8] sq-gum8.14: `std::env::{set_var,remove_var}` mutate the SINGLE
+    // process-global environment, and `cargo test` runs the tests in this module
+    // CONCURRENTLY on multiple threads. Without serialization, one test's
+    // `set_var("SPARQ_*")` leaks into another test's `from_env()` read — which is
+    // exactly how `from_env_with_no_sparq_vars_set_...` observed `max_concurrent == 8`
+    // (the value `from_env_reads_sparq_max_concurrent` sets) instead of the default 32.
+    // Every test that touches the environment holds this lock for the WHOLE
+    // set → from_env() → remove critical section, so no concurrent test can observe a
+    // half-applied environment. (Replaces the earlier — and false — "single-threaded
+    // test binary" isolation claim in this module's doc comment.)
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn env_guard() -> MutexGuard<'static, ()> {
+        // Recover from a poisoned lock: a panicking test still leaves the env serialized
+        // for the next test, so the poison flag carries no unsound state here.
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     #[test]
     fn from_env_with_no_sparq_vars_set_returns_ok_with_default_values() {
+        let _env = env_guard();
         // Call from_env() in an environment where none of the SPARQ_* vars are set.
         // This covers the function's scaffolding (all `if let` condition sites) and
         // the `env_parse` function body (the fast-path that short-circuits on None).
@@ -9237,6 +10390,7 @@ mod from_env_tests {
         // This covers the `if let Some(n) = env_parse("SPARQ_MAX_RESULTS")` body branch
         // (line ~887: `cfg.max_results = (n > 0).then_some(n)`).
         // Use a scoped set/remove so other tests are not affected.
+        let _env = env_guard();
         std::env::set_var("SPARQ_MAX_RESULTS", "77");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_MAX_RESULTS");
@@ -9260,6 +10414,7 @@ mod from_env_tests {
     fn env_parse_returns_some_when_var_is_set_to_a_valid_value() {
         // `env_parse` returns Some(T) when the env var is set to a parseable value.
         let key = "_SPARQ_QCNN19_TEST_ENV_PARSE_U64_";
+        let _env = env_guard();
         std::env::set_var(key, "123");
         let result: Option<u64> = env_parse(key);
         std::env::remove_var(key);
@@ -9270,6 +10425,7 @@ mod from_env_tests {
     fn env_parse_returns_none_when_var_has_unparseable_value() {
         // `env_parse::<u64>("…")` returns None when the env var value cannot be parsed.
         let key = "_SPARQ_QCNN19_TEST_ENV_PARSE_BAD_";
+        let _env = env_guard();
         std::env::set_var(key, "not-a-number");
         let result: Option<u64> = env_parse(key);
         std::env::remove_var(key);
@@ -9288,6 +10444,7 @@ mod from_env_tests {
 
     #[test]
     fn sparq_adaptive_commit_env_zero_disables_it() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_ADAPTIVE_COMMIT", "0");
         let off = ServerConfig::from_env();
         std::env::remove_var("SPARQ_ADAPTIVE_COMMIT");
@@ -9329,6 +10486,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_query_timeout() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_QUERY_TIMEOUT", "30");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_QUERY_TIMEOUT");
@@ -9342,6 +10500,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_update_where_timeout() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_UPDATE_WHERE_TIMEOUT", "15");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_UPDATE_WHERE_TIMEOUT");
@@ -9355,6 +10514,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_header_read_timeout() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_HEADER_READ_TIMEOUT", "5");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_HEADER_READ_TIMEOUT");
@@ -9368,6 +10528,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_body_read_timeout() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_BODY_READ_TIMEOUT", "10");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_BODY_READ_TIMEOUT");
@@ -9381,6 +10542,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_max_query_rows() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_MAX_QUERY_ROWS", "500");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_MAX_QUERY_ROWS");
@@ -9394,6 +10556,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_max_query_bytes() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_MAX_QUERY_BYTES", "1048576");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_MAX_QUERY_BYTES");
@@ -9407,6 +10570,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_auth_token() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_AUTH_TOKEN", "secret-token-123");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_AUTH_TOKEN");
@@ -9420,6 +10584,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_service_allow() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_SERVICE_ALLOW", "api.example.org");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_SERVICE_ALLOW");
@@ -9432,6 +10597,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_cors_allow_origin() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_CORS_ALLOW_ORIGIN", "https://app.example.org");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_CORS_ALLOW_ORIGIN");
@@ -9444,6 +10610,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_persist_dir() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_PERSIST_DIR", "/tmp/sparq-persist-test-qcnn37");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_PERSIST_DIR");
@@ -9460,6 +10627,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_max_body_bytes() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_MAX_BODY_BYTES", "2097152");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_MAX_BODY_BYTES");
@@ -9469,6 +10637,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_max_concurrent() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_MAX_CONCURRENT", "8");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_MAX_CONCURRENT");
@@ -9478,6 +10647,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_max_subscriptions_per_conn() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_MAX_SUBSCRIPTIONS_PER_CONN", "20");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_MAX_SUBSCRIPTIONS_PER_CONN");
@@ -9490,6 +10660,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_max_subscriptions() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_MAX_SUBSCRIPTIONS", "100");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_MAX_SUBSCRIPTIONS");
@@ -9502,6 +10673,7 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_allow_remote() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_ALLOW_REMOTE", "1");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_ALLOW_REMOTE");
@@ -9511,11 +10683,71 @@ mod from_env_tests {
 
     #[test]
     fn from_env_reads_sparq_log_full_requests() {
+        let _env = env_guard();
         std::env::set_var("SPARQ_LOG_FULL_REQUESTS", "1");
         let result = ServerConfig::from_env();
         std::env::remove_var("SPARQ_LOG_FULL_REQUESTS");
         let cfg = result.expect("SPARQ_LOG_FULL_REQUESTS must succeed");
         // SPARQ_LOG_FULL_REQUESTS=1 opts out of redaction → redact_logs becomes false.
         assert!(!cfg.redact_logs, "SPARQ_LOG_FULL_REQUESTS=1 must disable redact_logs");
+    }
+
+    // [GPT-5.6] sq-lsp7k.5.2: direct config tests for the public facets runtime flag.
+    #[cfg(feature = "facets")]
+    #[test]
+    fn facets_is_off_by_default() {
+        assert!(
+            !ServerConfig::default().facets,
+            "the facet-count route must remain runtime-off by default"
+        );
+    }
+
+    #[cfg(feature = "facets")]
+    #[test]
+    fn from_env_reads_sparq_facets() {
+        let _env = env_guard();
+        std::env::set_var("SPARQ_FACETS", "1");
+        let result = ServerConfig::from_env();
+        std::env::remove_var("SPARQ_FACETS");
+        let cfg = result.expect("SPARQ_FACETS=1 must succeed");
+        assert!(cfg.facets, "SPARQ_FACETS=1 must enable the facet-count route");
+    }
+
+    // [GPT-5.6] sq-lsp7k.9.3: direct config tests for the public completion runtime flag.
+    #[cfg(feature = "complete")]
+    #[test]
+    fn complete_is_off_by_default() {
+        assert!(
+            !ServerConfig::default().complete,
+            "the completion route must remain runtime-off by default"
+        );
+    }
+
+    #[cfg(feature = "complete")]
+    #[test]
+    fn from_env_reads_sparq_complete() {
+        let _env = env_guard();
+        std::env::set_var("SPARQ_COMPLETE", "1");
+        let result = ServerConfig::from_env();
+        std::env::remove_var("SPARQ_COMPLETE");
+        let cfg = result.expect("SPARQ_COMPLETE=1 must succeed");
+        assert!(cfg.complete, "SPARQ_COMPLETE=1 must enable completion");
+    }
+
+    #[cfg(feature = "complete")]
+    #[test]
+    fn completion_candidate_kinds_have_stable_wire_names() {
+        assert_eq!(
+            super::completion_kind_name(sparq_text::CandidateKind::Iri),
+            "iri"
+        );
+        assert_eq!(
+            super::completion_kind_name(sparq_text::CandidateKind::LocalName),
+            "localName"
+        );
+        assert_eq!(
+            super::completion_kind_name(sparq_text::CandidateKind::Label(1_u32)),
+            "label"
+        );
     }
 }

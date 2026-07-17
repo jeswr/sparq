@@ -84,6 +84,15 @@ use sparq_shacl::validate;
 mod gen;
 use gen::{Rng, Scenario};
 
+/// [GPT-5.6] (sq-qvqk7) The explicit element type must keep string-literal picks
+/// sized on rustc 1.88 while preserving the selected value.
+#[test]
+fn rng_string_pick_has_sized_elements() {
+    let mut rng = Rng::new(0);
+    let picked: &str = rng.pick::<&str>(&["typed"]);
+    assert_eq!(picked, "typed");
+}
+
 // ---------------------------------------------------------------------------
 // Reference engine: a report-cli adapter (sq-eifd "report-cli" kind).
 // ---------------------------------------------------------------------------

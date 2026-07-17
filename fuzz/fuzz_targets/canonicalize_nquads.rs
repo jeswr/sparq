@@ -20,7 +20,9 @@
 // inputs). DISTINCT, not raw: an RDF dataset is a SET of quads, so RDFC-1.0
 // canonicalization correctly deduplicates a repeated input line — the randomized
 // lane caught the earlier raw-count assert on exactly that (a duplicated quad,
-// 5 parsed -> 4 canonical; sq-t8z0r / GH #1903). Distinct counts ARE preserved:
+// 5 parsed -> 4 canonical; sq-t8z0r / GH #1903). The exact follow-up reproducer
+// from run 29152138161 is pinned in the seed corpus by sq-40apk. [GPT-5.6]
+// Distinct counts ARE preserved:
 // canonical blank-node relabelling is injective, so distinct quads stay distinct.
 //
 // INVARIANT: any input must produce `Ok(...)` or a clean `Err(...)` — never a panic,

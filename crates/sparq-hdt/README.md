@@ -15,6 +15,15 @@ let graph = sparq_hdt::load("dataset.hdt")?;   // .hdt.gz sniffed + decompressed
 let meta  = sparq_hdt::header("dataset.hdt")?; // the HDT header (VoID stats, provenance) as a Graph
 // query them like any other sparq graph
 
+// filtered loading (opt-in `load-filter` feature): None means wildcard
+# #[cfg(feature = "load-filter")]
+# {
+let predicate = oxrdf::NamedNode::new_unchecked("http://www.w3.org/2000/01/rdf-schema#label");
+let pattern: sparq_hdt::TriplePattern = (None, Some(predicate), None);
+let reader = std::io::BufReader::new(std::fs::File::open("dataset.hdt")?);
+let _labels = sparq_hdt::load_reader_filtered(reader, &pattern)?;
+# }
+
 // writing (opt-in `write` feature): Graph -> .hdt (honours .gz/.zst/.bz2 by extension)
 # #[cfg(feature = "write")]
 # {
@@ -56,6 +65,11 @@ export direction over `save` (sq-8ju74).
 - **Header access**: `header()` / `header_reader()` decode just the dataset
   metadata triples (the "H" in HDT) into a queryable `Graph` without touching
   the dictionary/triples sections.
+- **Filtered loading and stats** (opt-in `load-filter` feature, [GPT-5.6]
+  sq-lsp7k.24 / sq-obhf1): `load_reader_filtered(reader, &pattern)` loads matches;
+  `stats_reader_filtered(reader, &pattern)` counts them without constructing a
+  result graph. Both filter during the one-shot SPO walk; an all-wildcard pattern
+  is identical to the corresponding unfiltered operation.
 - **Writing** (opt-in `write` feature): `save(&graph, path)` serialises a `Graph` to a
   standard-layout `.hdt` (or `.hdt.gz`/`.hdt.zst`/`.hdt.bz2`, chosen by the output
   extension), encoding the HDT sections **directly** from sparq's in-memory dictionary +

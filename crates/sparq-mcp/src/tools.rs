@@ -12,6 +12,14 @@
 //!   cardinality constraints for one class IRI; structured grounding for a client LLM —
 //!   no server-side model). [OPUS-4.8] sq-zak4f
 //! - `stats` → graph triple count + introspection totals.
+//! - `classes` → per-class instance and predicate counts.
+//! - `prefixes` → namespace declarations + per-namespace distinct-IRI term counts.
+//! - `void` → `sparq_introspect::Introspection::to_void` (W3C VoID N-Triples).
+//! - `validate` (feature `shacl`, OFF by default) → `sparq_shacl::validate` over
+//!   caller-supplied shapes; read-only and absent from the default tool surface.
+//! - `describe_form` (feature `shacl`, OFF by default) → `sparq_forms::derive_form`
+//!   over caller-supplied shapes for one focus node; returns the `FormDescription`
+//!   JSON verbatim. Read-only. [FABLE-5] sq-lsp7k.1.6
 //! - `ask` (feature `nlq`, OFF by default) → `crate::nlq` (server-side NL→SPARQL→execute
 //!   via `sparq-nlq`; embeds a configurable LLM call, degrades cleanly when none is
 //!   configured). [OPUS-4.8] sq-jxjgr
@@ -165,6 +173,66 @@ pub const STATS: ToolSpec = ToolSpec {
         json!({
             "type": "object",
             "properties": {},
+            "additionalProperties": false
+        })
+    },
+};
+
+/// [GPT-5.6] sq-cekgj: class profiles ranked by instance count.
+pub const CLASSES: ToolSpec = ToolSpec {
+    name: "classes",
+    description: "Return the classes detected in the loaded graph: each class IRI, its \
+                  instance count, and the number of predicates used by its instances, \
+                  sorted by instance count descending then class IRI ascending. Also \
+                  returns the total number of classes as distinct_classes. No LLM is \
+                  involved.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        })
+    },
+};
+
+/// [GPT-5.6] sq-kx5b0: namespace declarations ranked by distinct-IRI term count.
+pub const PREFIXES: ToolSpec = ToolSpec {
+    name: "prefixes",
+    description: "Return namespace declarations detected in the loaded graph: each known \
+                  prefix, its namespace IRI, and its distinct IRI term count, sorted by \
+                  term count descending. Also returns the total number of distinct \
+                  namespaces as distinct_prefixes. No LLM is involved.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false
+        })
+    },
+};
+
+/// [GPT-5.6] sq-2kkym: the `void` tool, a W3C VoID dataset descriptor in N-Triples.
+pub const VOID: ToolSpec = ToolSpec {
+    name: "void",
+    description: "Return a W3C VoID dataset descriptor as N-Triples: exact dataset \
+                  totals plus class and property partitions. The optional dataset IRI \
+                  defaults to urn:sparq:dataset; characteristic_sets=true appends \
+                  sparq's characteristic-set statistics for federated planning.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {
+                "dataset": {
+                    "type": "string",
+                    "description": "IRI naming the described dataset (default \
+                                    \"urn:sparq:dataset\")."
+                },
+                "characteristic_sets": {
+                    "type": "boolean",
+                    "description": "Append characteristic-set statistics when true \
+                                    (default false)."
+                }
+            },
             "additionalProperties": false
         })
     },
@@ -328,9 +396,96 @@ pub const TEXT_SEARCH: ToolSpec = ToolSpec {
     },
 };
 
+/// The `validate` tool (feature `shacl`): validate the served graph against a
+/// caller-supplied SHACL shapes graph without mutating either graph. [GPT-5.6]
+#[cfg(feature = "shacl")]
+pub const VALIDATE: ToolSpec = ToolSpec {
+    name: "validate",
+    description: "Validate the loaded RDF graph against a caller-supplied SHACL shapes \
+                  graph. Returns JSON containing conforms and the disallowed-severity \
+                  validation results (focusNode, path, severity, message). The shapes \
+                  string is parsed independently and this tool never mutates the loaded \
+                  graph.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {
+                "shapes": {
+                    "type": "string",
+                    "description": "The SHACL shapes graph, as Turtle by default."
+                },
+                "format": {
+                    "type": "string",
+                    "description": "RDF syntax for shapes (default \"turtle\"; for \
+                                    example \"ntriples\")."
+                }
+            },
+            "required": ["shapes"],
+            "additionalProperties": false
+        })
+    },
+};
+
+/// The `describe_form` tool (feature `shacl`): derive a shape-aware form description
+/// for one focus node of the served graph against a caller-supplied SHACL shapes
+/// graph, returning `sparq_forms::derive_form`'s `FormDescription` JSON verbatim.
+/// [FABLE-5] sq-lsp7k.1.6
+#[cfg(feature = "shacl")]
+pub const DESCRIBE_FORM: ToolSpec = ToolSpec {
+    name: "describe_form",
+    description: "Derive a shape-aware form for one focus node of the loaded RDF graph \
+                  against a caller-supplied SHACL shapes graph, returning the \
+                  sparq-forms FormDescription JSON verbatim (applicable shapes, \
+                  property groups, fields with widget choices, constraints, and \
+                  current values). Read-only: neither graph is mutated.",
+    input_schema: || {
+        json!({
+            "type": "object",
+            "properties": {
+                "focus": {
+                    "type": "string",
+                    "description": "The focus node: an IRI, or a blank-node label \
+                                    written as \"_:label\"."
+                },
+                "shapes": {
+                    "type": "string",
+                    "description": "The SHACL shapes graph, as Turtle by default."
+                },
+                "format": {
+                    "type": "string",
+                    "description": "RDF syntax for shapes (default \"turtle\"; for \
+                                    example \"ntriples\")."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["edit", "view"],
+                    "description": "\"edit\" (default) resolves editor widgets; \
+                                    \"view\" derives a read-only form."
+                },
+                "shape": {
+                    "type": "string",
+                    "description": "Optional node-shape IRI to derive against, \
+                                    instead of the first applicable shape."
+                }
+            },
+            "required": ["focus", "shapes"],
+            "additionalProperties": false
+        })
+    },
+};
+
 /// The read-only tool set, always advertised in the default build. `ask` (feature `nlq`)
 /// is appended by [`advertised`] only when a model backend is configured.
-pub const READ_ONLY: &[&ToolSpec] = &[&QUERY, &CONSTRUCT, &INTROSPECT, &SHAPES, &STATS];
+pub const READ_ONLY: &[&ToolSpec] = &[
+    &QUERY,
+    &CONSTRUCT,
+    &INTROSPECT,
+    &SHAPES,
+    &STATS,
+    &CLASSES,
+    &PREFIXES,
+    &VOID,
+];
 
 /// The full list of tools this server advertises, given its config — `UPDATE` is
 /// appended only when [`McpServer`] was built with update enabled, and `ask` (feature
@@ -359,5 +514,13 @@ pub fn advertised(server: &McpServer) -> Vec<&'static ToolSpec> {
     // from the loaded graph), so the feature alone advertises it.
     #[cfg(feature = "text")]
     tools.push(&TEXT_SEARCH);
+    // [GPT-5.6] sq-lsp7k.22: validation is self-contained and read-only, so the
+    // opt-in feature alone is the complete advertisement gate.
+    #[cfg(feature = "shacl")]
+    tools.push(&VALIDATE);
+    // [FABLE-5] sq-lsp7k.1.6: form derivation shares the validator's caller-supplied
+    // shapes surface, so the same opt-in feature advertises both read-only tools.
+    #[cfg(feature = "shacl")]
+    tools.push(&DESCRIBE_FORM);
     tools
 }

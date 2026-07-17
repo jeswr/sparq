@@ -102,7 +102,103 @@ Other named exports from `@jeswr/sparq`: `DataFactory` (RDF/JS factory: `namedNo
 
 Raw wasm `Store` (from `../wasm/sparq_wasm.js`, re-exported as `WasmStore` internally) — use only when you need CONSTRUCT/DESCRIBE, batch cursors, or **query-plan introspection**. Methods return SPARQL-JSON / N-Triples / plan-text **strings**, not RDF/JS terms: `Store.load/loadDataset/loadCompressed(text, format)`, `Store.loadBytes(bytes, format)` / `Store.loadBytesWithBase(bytes, format, base)` (ingest a `Uint8Array` directly, `bytes-ingest` bundle only — see below), `.query(sparql)`, `.queryChunks(sparql)`, `.queryCursor(sparql, batchSize)`, `.queryQuads(sparql)` (CONSTRUCT/DESCRIBE -> N-Triples), `.queryQuadsChunks(sparql, batchSize)`, `.count`, `.ask`, `.askWithMaxRows(sparql, maxRows)`, `.explain(sparql)`, `.explainAnalyze(sparql)`, `.validate(data, shapes, format)` (SHACL report as a JSON **string**, shacl bundle only), `.serialize(format, pretty, indent, abbreviate, prefixes?)` (the store's contents as a Turtle / TriG / JSON-LD **string**, serialize-rdf bundle only — see below), `.parseShaclCompact(text, base?)` (SHACL Compact Syntax → the shapes graph as a Turtle **string**, scs bundle only — see below), `.update`, `.updateInPlace`, `.applyDelta(inserts, deletes)`, `.size`, `.heapBytes()`.
 
+### Solid server wasm adapter (host integration)
+
+The dedicated `sparq-lws-wasm` crate is the opt-in request adapter for a Solid-server wasm host; it
+is separate from the `@jeswr/sparq` RDF/JS store package. It owns the real axum LDP routes and WAC
+evaluator over `CompositeStore<InMemorySparqClient, InMemoryBlobStore>`, while excluding the native
+listener, Tokio runtime, TLS/PoP/notifications, live OIDC verifier, and non-memory backends.
+
+Build and stage it with
+`npm --workspace @jeswr/solid-server run build:lws-wasm`; use `build:lws-wasm-core` for the named
+core tier. [GPT-5.6] The full build enables `sparq-lws-wasm/sparql-endpoint`; the core command leaves
+that feature off, so the core wasm omits the route and query-engine dependency graph. Construct
+`SolidServer` with the pod base URL and the WebID that owns its provisioned root ACL, then call the
+Promise-returning
+`handleRequest(method, path, headers, body, authenticatedWebid)`. Header arguments and response
+headers are flat name/value arrays. Omit `authenticatedWebid` for a public request.
+
+```js
+const owner = "https://id.example/alice#me";
+const pod = new SolidServer("https://pod.example", owner);
+const response = await pod.handleRequest(
+  "PUT", "/card", ["content-type", "text/turtle"], turtleBytes, owner,
+);
+```
+
+The host MUST complete OIDC validation before supplying an authenticated WebID; the constructor's
+owner parameter only provisions WAC and is not authentication. Do not enable or stub
+`solid-oidc-verifier` inside wasm: its pinned crypto backend is native-only.
+
+[GPT-5.6] The full tier's `/sparql` is query-only SPARQL 1.1 Protocol: GET uses the `query`
+parameter; POST accepts `application/sparql-query` or form encoding. SELECT/ASK return
+`application/sparql-results+json`; CONSTRUCT returns `application/n-triples`; DESCRIBE and UPDATE
+are refused in v1. Each request walks authoritative `ldp:contains`, applies the same per-resource
+WAC read decision as LDP GET, and gives the engine only admitted RDF. Each resource is a named graph
+at its canonical IRI, the standing default graph is empty, and
+`FROM <http://www.w3.org/ns/solid/sparql#union-default-graph>` opts into the admitted union.
+Unreadable, malformed, or indeterminate resources are excluded. Assembly is currently O(pod) per
+query; the endpoint does not yet retain a cross-request dataset cache. Within one server instance,
+assembly and evaluation hold a shared read barrier while LDP mutations take its write side, so a
+query cannot combine resources from an interleaved LDP write.
+
+[GPT-5.6] The in-memory Solid store is bounded by default: its physical blob map admits at most
+64 MiB in aggregate and 4,096 stored entries, and its metadata map independently admits at most
+4,096 indexed resources. Physical usage includes unreferenced blob versions awaiting reconciliation,
+so repeated overwrites cannot bypass the ceiling. A PUT/POST that would exceed either limit fails
+closed with HTTP 507; deleting a current blob releases its bytes and entry slot. Rust embedders can
+configure both ceilings with `InMemoryStoreLimits::new(max_total_bytes, max_resource_count)` and
+`CompositeStore::in_memory_with_limits(limits)`, then inspect the concrete store's `usage()` and
+`quota()` views. The current JS `SolidServer` constructor uses the bounded Rust defaults and does not
+yet expose per-instance limit options.
+
+[GPT-5.6] `@jeswr/solid-server` supplies the local Node host. Install and run it with
+`npx @jeswr/solid-server --port 3000 --base-url http://127.0.0.1:3000 --owner-webid
+https://id.example/alice#me`, or import `startSolidServer({ port, baseUrl, ownerWebid })`; it resolves
+to a listening Node `http.Server` with an async `closeAsync()` helper. The listener binds
+`127.0.0.1`, owns one wasm pod for its lifetime, and preserves repeated request/response headers.
+It defaults to deliberately unauthenticated fixed-owner mode: every caller acts as `ownerWebid`.
+For the opt-in Node authentication path, call
+`startSolidServer({ port, baseUrl, ownerWebid, oidc: true })`. The host then requires and verifies a
+Solid-OIDC access token plus request-bound DPoP proof with `@solid/access-token-verifier` before
+passing the resolved WebID into wasm; missing, invalid, expired, replayed, bearer-only, or ambiguous
+credentials pass no WebID and WAC treats them as anonymous. `ownerWebid` provisions the root ACL but
+is not proof of identity in this mode. `baseUrl` must be the public request origin used in each DPoP
+proof because the host binds the proof to the reconstructed request URL. The verifier dereferences
+WebID and issuer/JWKS documents.
+Use the package only for local development, do not expose it as a production server, and expect all
+data to disappear on shutdown. TLS termination, persistent storage, and notifications remain
+absent; OIDC verification runs in Node, not wasm.
+
+[SONNET-4.6] **Trap recovery (sq-250si).** The wasm artifact uses `panic=abort` (release profile):
+a Rust panic or allocation failure at the wasm32 linear-memory ceiling lowers to an `unreachable`
+trap that the host sees as `WebAssembly.RuntimeError`. Before the abort fires, a `console_error_panic_hook`
+installed at module init emits the panic message to `console.error`. The Node host catches the
+`WebAssembly.RuntimeError`, frees the poisoned `SolidServer`, constructs a fresh instance (state
+loss is acceptable for the ephemeral dev server), and returns HTTP 503 for the triggering request.
+The next request is served by the new instance — a single trap no longer bricks the server process
+indefinitely. The `attachTrapRecoveryHandler` and `isWasmTrap` helpers are exported from
+`@jeswr/solid-server/src/trap-recovery.js` for testing without a real wasm binary.
+
 ## Common recipes
+
+**Decompress a browser dataset before loading it (`@sparq/client`).** The shared site/GUI client
+selects gzip, ZIP, zstd, or bzip2 by payload magic first and filename extension second. gzip and
+ZIP use native browser streams; zstd and bzip2 are separate lazy chunks fetched only when invoked.
+
+```ts
+import { decompressDatasetBytes } from '@sparq/client';
+
+const compressed = new Uint8Array(await file.arrayBuffer());
+const { bytes, innerName, codec } = await decompressDatasetBytes(compressed, file.name);
+const rdfText = new TextDecoder().decode(bytes);
+// Route rdfText using innerName (for example, "dataset.nt") and record codec if useful.
+```
+
+ZIP selects the first RDF-looking STORED or DEFLATE member and reports its member name. Encrypted
+ZIP, ZIP64, unsupported ZIP methods, zstd dictionary frames, and malformed streams reject rather
+than returning undecoded bytes. Browser gzip follows `DecompressionStream` semantics; do not rely
+on it to concatenate multiple gzip members.
 
 **Stream a large SELECT without holding the whole result.** One solution at a time, from ~64 KiB wasm-boundary chunks; `break` frees the cursor.
 
@@ -280,6 +376,7 @@ const store = Store.load('<a> <b> <c> .', 'ntriples');
 - **`Store.parseShaclCompact` needs the `scs` bundle feature.** The published `@jeswr/sparq` bundle is built with `--features shacl,jsonld,serialize-rdf,scs` (the js `build:wasm` script), so `parseShaclCompact(...)` works out of the box. The `scs` feature implies `shacl` + `serialize-rdf` (it REUSES the `serialize` engine writer to emit the shapes Turtle — no second serialiser) and forwards to `sparq-shacl/scs` (a hand-rolled parser, **no new dependency**). The **lean default bundle** (`build:wasm:lean` / `cargo build -p sparq-wasm` with no `--features`) omits it, so the lean `.wasm` is unchanged; on the lean bundle the `parseShaclCompact` method is absent. (Raw `Store` only for now; the playground "Compact → shapes" input mode and any typed `SparqStore` wrapper are tracked separately.)
 - **ODRL policy evaluation is an EXPERIMENTAL probe, NOT in the published bundle ([FABLE-5] sq-586sh, #890 ask A).** The opt-in `policy` cargo feature compiles `sparq-policy`'s stateless ODRL evaluator to wasm32 and exposes two probe free functions on the raw wasm surface — `policyEvaluate(policyRdf, format, action, target?, party?)` → decision JSON (`{allow, matchedRules, unmetConstraints}`, fail-closed: malformed policy throws, unmatched/empty policy denies) and `policyConflicts(policyRdf, format)` → static conflict/admissibility JSON. `build:wasm` does **not** enable it: the full JS API (per-dimension audit statuses, per-duty status, purpose/party taxonomies) awaits a maintainer public-contract decision (the sq-586sh report issue). The stateful `count-enforcement` feature is deliberately not forwarded (no cross-tab atomicity in a browser). See `usage-control-policy` for the evaluator semantics.
 - **Byte-ingest (`Store.loadBytes` / `loadBytesWithBase`) needs the `bytes-ingest` bundle feature ([FABLE-5] sq-3ul2n.3).** The opt-in `bytes-ingest` cargo feature exposes `Store.loadBytes(bytes, format)` and `Store.loadBytesWithBase(bytes, format, base)`, which take the `Uint8Array` you already hold (e.g. `new Uint8Array(await response.arrayBuffer())`) and feed it to the SAME parse path as `load`/`loadWithBase`, skipping the UTF-16 JS-string round-trip. The result is byte-for-byte the store `Store.load(new TextDecoder().decode(bytes), format)` builds (equal size + probe-query JSON). Invalid UTF-8 is rejected **fail-closed** with a catchable `JsError` (RDF text formats are all UTF-8) — never a panic or lossy decode, the same error surface as a malformed document to `load`. ZERO new dependencies. OFF by default so the lean `wasm_bundle_bytes` baseline is byte-identical; the published bundle turns it on (the js `build:wasm` wiring is tracked separately, sq-3ul2n.5). On a bundle without the feature the `loadBytes` methods are absent.
+- **SHACL-to-form derivation (`Store.deriveForm`) needs the `forms` bundle feature ([SONNET-4.6] sq-q4apb, #2396).** The opt-in `forms` cargo feature compiles `sparq-forms`' derivation to wasm32 and exposes `Store.deriveForm(data, shapes, focus, format, optionsJson)` on the raw wasm surface — the hosted-web half of the GUI forms bridge (`gui/app`'s `forms-bridge.ts` feature-detects exactly this method; desktop uses the Tauri `derive_form` command instead, and the adapter never falls through between hosts). Stateless one-shot: `data`/`shapes` are serialized workspace snapshots in `format` (named graphs preserved dataset-style; the workbench sends N-Quads), `focus` is an absolute IRI or `_:label`, `optionsJson` is the snake_case `{"mode":"edit"|"view","shape"?:iri-or-_:label}` object. Returns the `FormDescription` serde JSON **string** verbatim — byte-identical to the desktop bridge for the same inputs; `JSON.parse` it, never reconstruct keys/groups/widgets. Malformed graphs/focus/options throw a `JsError`; there is no demo-data fallback. OFF by default (the lean `wasm_bundle_bytes` baseline is byte-identical) and not yet enabled by `build:wasm` (the hosted /app bundle wiring is tracked separately). On a bundle without the feature the method is absent. See the `shacl-forms` skill for the derivation semantics.
 - **`options.dataset` is not combinable with `options.compressed`** — there is no compressed dataset loader yet (the constructor throws). `compact-index` (3 permutations, ~half the memory) is auto-selected for wasm32 regardless; `compressed` adds block compression on top.
 - **`size` / `heapBytes` report the DEFAULT graph only.** For dataset totals use `countQuads()` (its graph wildcard spans named graphs).
 - **Mutation is overlay-based.** `update()` / `applyDelta()` write through an append-only delta overlay: the dictionary only grows, and deletes are tombstones until the wasm store is reloaded. Blank nodes in `applyDelta`/`removeQuads` are matched **by label** (so bnode triples can be retracted — impossible via SPARQL `DELETE DATA`).

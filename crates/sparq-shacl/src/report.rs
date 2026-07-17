@@ -1,5 +1,6 @@
-//! Validation reports: the result structs, the report RDF graph (as Turtle, per
-//! the SHACL results vocabulary) and a human-readable text rendering.
+//! Validation reports: the result structs, the report RDF graph (as Turtle or
+//! N-Triples, per the SHACL results vocabulary), deterministic JSON and a
+//! human-readable text rendering.
 
 use crate::model::SH;
 use crate::path::Path;
@@ -65,18 +66,22 @@ pub struct ValidationResult {
 
 /// [OPUS-4.8] (sq-lz99x) A non-fatal author-time diagnostic: a constraint the
 /// validator could not evaluate and therefore SKIPPED (the crate's lenient
-/// ill-formed-shape policy), surfaced so the skip is not silent. Currently the
-/// only producer is an uncompilable `sh:pattern` regex — the Rust `regex` crate
-/// has no lookahead/lookbehind (neither does XML Schema regex, which the W3C SHACL
-/// spec ties `sh:pattern` to), so a `(?!...)` pattern fails to compile. A
-/// diagnostic never affects `conforms`: a skipped constraint reports no
-/// violations.
+/// ill-formed-shape policy), surfaced so the skip is not silent. Two producers:
+/// an uncompilable `sh:pattern` regex — the Rust `regex` crate has no
+/// lookahead/lookbehind (neither does XML Schema regex, which the W3C SHACL
+/// spec ties `sh:pattern` to), so a `(?!...)` pattern fails to compile — and
+/// [FABLE-5] (sq-c1v3e) each parse-time **ill-formed shapes-graph construct**
+/// ([`crate::IllFormedConstruct`]), which the lenient `validate` skips and the
+/// strict channel rejects. A diagnostic never affects `conforms`: a skipped
+/// constraint reports no violations.
 #[derive(Debug, Clone)]
 pub struct ShapeDiagnostic {
     /// The shape whose constraint was skipped (`sh:sourceShape`).
     pub source_shape: Term,
     /// The constraint-component IRI of the skipped constraint (e.g.
-    /// `sh:PatternConstraintComponent`).
+    /// `sh:PatternConstraintComponent`) — or, for an ill-formed-construct
+    /// diagnostic (sq-c1v3e), the offending SHACL predicate IRI (e.g.
+    /// `sh:minCount`), mirroring [`crate::IllFormedConstruct::predicate`].
     pub source_component: String,
     /// A human-readable explanation of why the constraint was skipped.
     pub message: String,
@@ -184,6 +189,28 @@ impl ValidationReport {
         out
     }
 
+    /// The report RDF graph serialised as one N-Triples statement per line.
+    ///
+    /// This emits the same validation-report graph as [`to_turtle`](Self::to_turtle),
+    /// including nested `sh:detail` results.
+    pub fn to_ntriples(&self) -> String {
+        // [GPT-5.6] (sq-qcuhh) Keep the Turtle renderer as the single report-graph
+        // construction path, then use oxttl for complete N-Triples term escaping.
+        let turtle = self.to_turtle();
+        let triples = oxttl::TurtleParser::new().for_slice(turtle.as_bytes());
+        let mut serializer = oxttl::NTriplesSerializer::new().low_level();
+        let mut out = Vec::new();
+
+        for triple in triples {
+            let triple = triple.expect("ValidationReport::to_turtle must emit valid Turtle");
+            serializer
+                .serialize_triple(triple.as_ref(), &mut out)
+                .expect("serialising N-Triples into memory must succeed");
+        }
+
+        String::from_utf8(out).expect("N-Triples output must be valid UTF-8")
+    }
+
     /// A human-readable rendering of the report.
     pub fn to_text(&self) -> String {
         let mut out = if self.conforms {
@@ -236,6 +263,131 @@ impl ValidationReport {
             let _ = writeln!(out, "    {}", d.message);
         }
         out
+    }
+
+    /// A deterministic JSON rendering of the report for machine consumers.
+    ///
+    /// Object keys have a stable order, validation results retain their report
+    /// order, and absent paths, values, and diagnostics are omitted.
+    pub fn to_json(&self) -> String {
+        let mut out = String::from("{\n");
+        let _ = write!(out, "  \"conforms\": {},\n  \"results\": [", self.conforms);
+
+        if self.results.is_empty() {
+            out.push(']');
+        } else {
+            out.push('\n');
+            for (index, result) in self.results.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(",\n");
+                }
+                let _ = writeln!(out, "    {{");
+                let _ = writeln!(
+                    out,
+                    "      \"focusNode\": \"{}\",",
+                    escape_json(&term_to_json_string(&result.focus_node))
+                );
+                if let Some(path) = &result.path {
+                    let _ = writeln!(
+                        out,
+                        "      \"resultPath\": \"{}\",",
+                        escape_json(&path.to_turtle())
+                    );
+                }
+                if let Some(value) = &result.value {
+                    let _ = writeln!(
+                        out,
+                        "      \"value\": \"{}\",",
+                        escape_json(&term_to_json_string(value))
+                    );
+                }
+                let _ = writeln!(
+                    out,
+                    "      \"sourceShape\": \"{}\",",
+                    escape_json(&term_to_json_string(&result.source_shape))
+                );
+                let _ = writeln!(
+                    out,
+                    "      \"sourceConstraintComponent\": \"{}\",",
+                    escape_json(&result.source_component)
+                );
+                let _ = writeln!(
+                    out,
+                    "      \"severity\": \"{}\",",
+                    escape_json(&result.severity)
+                );
+                let message = match result.messages.first() {
+                    Some(Term::Literal(literal)) => literal.value(),
+                    _ => &result.default_message,
+                };
+                let _ = write!(
+                    out,
+                    "      \"resultMessage\": \"{}\"\n    }}",
+                    escape_json(message)
+                );
+            }
+            out.push_str("\n  ]");
+        }
+
+        if !self.diagnostics.is_empty() {
+            out.push_str(",\n  \"diagnostics\": [\n");
+            for (index, diagnostic) in self.diagnostics.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(",\n");
+                }
+                let _ = writeln!(out, "    {{");
+                let _ = writeln!(
+                    out,
+                    "      \"sourceShape\": \"{}\",",
+                    escape_json(&term_to_json_string(&diagnostic.source_shape))
+                );
+                let _ = writeln!(
+                    out,
+                    "      \"sourceConstraintComponent\": \"{}\",",
+                    escape_json(&diagnostic.source_component)
+                );
+                let _ = write!(
+                    out,
+                    "      \"message\": \"{}\"\n    }}",
+                    escape_json(&diagnostic.message)
+                );
+            }
+            out.push_str("\n  ]");
+        }
+
+        out.push_str("\n}");
+        out
+    }
+}
+
+/// Returns a JSON-safe string body without surrounding quotes.
+fn escape_json(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\u{08}' => escaped.push_str("\\b"),
+            '\u{0C}' => escaped.push_str("\\f"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            control if control.is_control() => {
+                let _ = write!(escaped, "\\u{:04X}", control as u32);
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+/// Returns the report string representation for an RDF term.
+fn term_to_json_string(term: &Term) -> String {
+    match term {
+        Term::NamedNode(node) => node.as_str().to_string(),
+        Term::BlankNode(node) => format!("_:{}", node.as_str()),
+        Term::Literal(literal) => literal.to_string(),
+        Term::Triple(_) => term.to_string(),
     }
 }
 
@@ -300,7 +452,7 @@ impl ValidationResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxrdf::{Literal, NamedNode, Term};
+    use oxrdf::{BlankNode, Literal, NamedNode, Term, Triple};
 
     const EX: &str = "http://example.org/";
 
@@ -354,6 +506,162 @@ mod tests {
         assert!(!ttl.contains("sh:result"));
         parse_report(&ttl);
         assert_eq!(r.to_text(), "Conforms: data graph satisfies all shapes.\n");
+    }
+
+    #[test]
+    fn conforming_report_json_is_pinned() {
+        let report = ValidationReport::new(vec![]);
+
+        assert_eq!(
+            report.to_json(),
+            "{\n  \"conforms\": true,\n  \"results\": []\n}"
+        );
+    }
+
+    #[test]
+    fn json_result_is_pinned_with_fixed_key_order() {
+        let report = ValidationReport::new(vec![result(
+            iri(&format!("{EX}alice")),
+            Some(Path::Predicate(format!("{EX}age"))),
+            Some(lit("thirty")),
+            "MinCountConstraintComponent",
+            "Violation",
+            vec![lit("age is required")],
+        )]);
+
+        assert_eq!(
+            report.to_json(),
+            concat!(
+                "{\n",
+                "  \"conforms\": false,\n",
+                "  \"results\": [\n",
+                "    {\n",
+                "      \"focusNode\": \"http://example.org/alice\",\n",
+                "      \"resultPath\": \"<http://example.org/age>\",\n",
+                "      \"value\": \"\\\"thirty\\\"\",\n",
+                "      \"sourceShape\": \"http://example.org/Shape\",\n",
+                "      \"sourceConstraintComponent\": ",
+                "\"http://www.w3.org/ns/shacl#MinCountConstraintComponent\",\n",
+                "      \"severity\": \"http://www.w3.org/ns/shacl#Violation\",\n",
+                "      \"resultMessage\": \"age is required\"\n",
+                "    }\n",
+                "  ]\n",
+                "}"
+            )
+        );
+    }
+
+    #[test]
+    fn json_omits_absent_path_value_and_diagnostics() {
+        let report = ValidationReport::new(vec![result(
+            iri(&format!("{EX}bob")),
+            None,
+            None,
+            "MinCountConstraintComponent",
+            "Violation",
+            vec![],
+        )]);
+        let json = report.to_json();
+
+        assert!(!json.contains("resultPath"), "{json}");
+        assert!(!json.contains("\"value\""), "{json}");
+        assert!(!json.contains("diagnostics"), "{json}");
+        assert!(json.contains("\"resultMessage\": \"generated default\""));
+    }
+
+    #[test]
+    fn json_escapes_messages_and_term_strings() {
+        let report = ValidationReport::new(vec![result(
+            iri(&format!("{EX}alice")),
+            None,
+            None,
+            "NodeConstraintComponent",
+            "Violation",
+            vec![lit("quoted \"line\"\nnext")],
+        )]);
+        let json = report.to_json();
+
+        assert!(
+            json.contains(r#""resultMessage": "quoted \"line\"\nnext""#),
+            "{json}"
+        );
+        assert!(!json.contains("quoted \"line\"\nnext"));
+        assert_eq!(escape_json("\\\t\u{1}"), "\\\\\\t\\u0001");
+        assert_eq!(
+            term_to_json_string(&Term::NamedNode(NamedNode::new_unchecked(
+                "http://example.org/node"
+            ))),
+            "http://example.org/node"
+        );
+        assert_eq!(
+            term_to_json_string(&Term::BlankNode(BlankNode::new_unchecked("node"))),
+            "_:node"
+        );
+        assert_eq!(term_to_json_string(&lit("literal")), r#""literal""#);
+        assert_eq!(
+            term_to_json_string(&Term::Triple(Box::new(Triple::new(
+                NamedNode::new_unchecked("http://example.org/subject"),
+                NamedNode::new_unchecked("http://example.org/predicate"),
+                Literal::new_simple_literal("object"),
+            )))),
+            r#"<<( <http://example.org/subject> <http://example.org/predicate> "object" )>>"#
+        );
+    }
+
+    #[test]
+    fn json_preserves_result_order() {
+        let first = result(
+            iri(&format!("{EX}first")),
+            None,
+            None,
+            "MinCountConstraintComponent",
+            "Violation",
+            vec![],
+        );
+        let second = result(
+            iri(&format!("{EX}second")),
+            None,
+            None,
+            "MaxCountConstraintComponent",
+            "Violation",
+            vec![],
+        );
+
+        let forward = ValidationReport::new(vec![first.clone(), second.clone()]).to_json();
+        let reversed = ValidationReport::new(vec![second, first]).to_json();
+        assert_ne!(forward, reversed);
+        assert!(forward.find("first").unwrap() < forward.find("second").unwrap());
+    }
+
+    #[test]
+    fn json_emits_diagnostics_in_fixed_shape() {
+        let report = ValidationReport {
+            conforms: true,
+            results: Vec::new(),
+            diagnostics: vec![ShapeDiagnostic {
+                source_shape: iri(&format!("{EX}Shape")),
+                source_component: format!("{SH}PatternConstraintComponent"),
+                message: "pattern did not compile".into(),
+            }],
+        };
+
+        assert_eq!(
+            report.to_json(),
+            concat!(
+                "{\n",
+                "  \"conforms\": true,\n",
+                "  \"results\": [],\n",
+                "  \"diagnostics\": [\n",
+                "    {\n",
+                "      \"sourceShape\": \"http://example.org/Shape\",\n",
+                "      \"sourceConstraintComponent\": ",
+                "\"http://www.w3.org/ns/shacl#PatternConstraintComponent\",\n",
+                "      \"message\": \"pattern did not compile\"\n",
+                "    }\n",
+                "  ]\n",
+                "}"
+            )
+        );
     }
 
     #[test]
@@ -437,6 +745,81 @@ mod tests {
             .filter(|t| t.predicate.as_str().ends_with("#result"))
             .count();
         assert_eq!(n_results, 2, "{ttl}");
+    }
+
+    // [GPT-5.6] (sq-qcuhh) Value-pinned direct coverage for the public N-Triples
+    // serializer: two violations must remain two report links and conformity must
+    // be the boolean false in the emitted report graph.
+    #[test]
+    fn ntriples_emits_two_result_nonconforming_report_graph() {
+        let report = ValidationReport::new(vec![
+            result(
+                iri(&format!("{EX}alice")),
+                None,
+                None,
+                "MinCountConstraintComponent",
+                "Violation",
+                vec![],
+            ),
+            result(
+                iri(&format!("{EX}bob")),
+                Some(Path::Predicate(format!("{EX}age"))),
+                Some(lit("thirty")),
+                "DatatypeConstraintComponent",
+                "Violation",
+                vec![],
+            ),
+        ]);
+
+        assert!(!report.conforms);
+        assert_eq!(report.results.len(), 2);
+        let nt = report.to_ntriples();
+        assert!(
+            nt.lines()
+                .filter(|line| !line.trim().is_empty())
+                .all(|line| line.trim_end().ends_with(" .")),
+            "{nt}"
+        );
+
+        let triples = oxttl::NTriplesParser::new()
+            .for_slice(nt.as_bytes())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap_or_else(|error| panic!("report N-Triples does not parse: {error}\n{nt}"));
+        let report_type = format!("{SH}ValidationReport");
+        let report_nodes: Vec<_> = triples
+            .iter()
+            .filter(|triple| {
+                triple.predicate.as_str() == "http://www.w3.org/1999/02/22-rdf-syntax-ns#type"
+                    && matches!(&triple.object, Term::NamedNode(node) if node.as_str() == report_type)
+            })
+            .map(|triple| triple.subject.clone())
+            .collect();
+        assert_eq!(report_nodes.len(), 1, "{nt}");
+        let report_node = &report_nodes[0];
+
+        let conforms: Vec<_> = triples
+            .iter()
+            .filter(|triple| {
+                &triple.subject == report_node
+                    && triple.predicate.as_str() == format!("{SH}conforms")
+            })
+            .collect();
+        assert_eq!(conforms.len(), 1, "{nt}");
+        assert!(
+            matches!(&conforms[0].object, Term::Literal(literal) if literal.value() == "false"),
+            "{nt}"
+        );
+        assert_eq!(
+            triples
+                .iter()
+                .filter(|triple| {
+                    &triple.subject == report_node
+                        && triple.predicate.as_str() == format!("{SH}result")
+                })
+                .count(),
+            2,
+            "{nt}"
+        );
     }
 
     #[test]

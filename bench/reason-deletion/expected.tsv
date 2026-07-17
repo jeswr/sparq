@@ -5,13 +5,12 @@
 # abox_triples = units*8 (generator-drift gate). Closure columns are the incremental
 # closure sizes; the driver already asserts each equals the from-scratch closure, so
 # pinning them here pins BOTH maintenance and batch materialization.
-# UNIT COUNTS ARE PINNED (3020, not 3000): the driver's delete-sampler excludes only the
-# six TBox PREDICATES, so on the fixpoint workload it can draw the single
-# [locatedIn, rdf:type, owl:TransitiveProperty] axiom-typing triple, which legitimately
-# triggers the documented rebuild path and fails the "ABox deltas must not rebuild"
-# assert. Tier sizes are chosen so the fixed-seed draw sequence never hits it
-# (deterministic; re-validate with run.sh if the driver or generator changes).
-# Driver-side fix tracked as follow-up bead sq-x58ow — see README.md.
-small	3020	24160	42662	48734	49348
+# [OPUS-4.8] sq-x58ow FIXED (parent sq-6tykl.4): the driver's delete-sampler now mirrors
+# `MaterializedOwlGraph::triggers_rebuild` — it excludes the six TBox predicates AND
+# axiom-typing triples (`p == rdf:type` && axiom-class object, e.g.
+# [locatedIn, rdf:type, owl:TransitiveProperty]) AND occurrence-guarded ids — so no ABox
+# delta can spuriously take the rebuild path. Tier unit counts are now ROUND (3000, not the
+# old draw-safe 3020); re-validate with run.sh if the driver or generator changes.
+small	3000	24000	42382	48414	49028
 medium	15000	120000	211792	241824	242438
 large	75000	600000	1058842	1208874	1209488

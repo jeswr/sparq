@@ -1094,7 +1094,8 @@ pub const SUITES: &[Suite] = &[
     },
     // [FABLE-5] sq-pbz04.4.5 (epic sq-pbz04.4) — the OWL 2 DIRECT-SEMANTICS arm's two
     // ratchets (runner: `inference::dl_suite` + the crate-local `tests/dl_suite.rs`,
-    // behind the opt-in `dl-direct` feature → `sparq-reason-dl/dispatch`). HONESTLY
+    // behind the opt-in `dl-direct` feature → `sparq-reason-dl/dispatch` + the default-off
+    // `sparq-reason-dl/dl_transitive` extension). HONESTLY
     // tallied as sparq EXTENSION rows over the SCOPED FRAGMENT the layered
     // `sparq-reason-dl` checker implements — **scoped fragment, NOT full OWL 2 DL** —
     // and never folded into the standards-conformance total. TRI-STATE accounting
@@ -1136,9 +1137,9 @@ pub const SUITES: &[Suite] = &[
                normalizes a 1-ary owl:intersectionOf to its member) and now pass; the \
                positive PROFILE_DIVERGENCES pin is empty. The EXPLICIT-NEGATIVE direction is \
                a SEPARATE lane (sq-pbz04.4.16): the export's owl:NegativePropertyAssertion \
-               profile negations refuted where L2 can (137 after sq-pbz04.4.9's L1 \
-               datatype-map-IRI refusal moved 2 datatype rows out of the checkable set), with \
-               an honest measured In-gap (180 of 317 checkable) where axiom-grammar membership \
+               profile negations refuted where L2 can (138 after sq-zfwzq graduated three \
+               transitive-property inputs from extraction abstention: +1 refuted and +2 \
+               measured In-gap), with an honest measured In-gap (182 of 320 checkable) where axiom-grammar membership \
                over the ALCH shadow cannot refute full-profile membership (deferred \
                restrictions); species assertions remain unchecked (documented)",
     },
@@ -1151,7 +1152,7 @@ pub const SUITES: &[Suite] = &[
             feature: "dl-direct",
         },
         ci_job: "inference-conformance",
-        ratchet_floor: 182,
+        ratchet_floor: 186,
         floor_basis: "definitive expected verdicts through the L4 dispatch, EXACT-pinned \
                       (sparq EXTENSION over the scoped fragment — NOT full OWL 2 DL); \
                       re-pinned by sq-pbz04.4.11 (M1 named-composite fix, net +8); \
@@ -1163,7 +1164,9 @@ pub const SUITES: &[Suite] = &[
                       disjointWith divergence guard, never a wrong verdict; fail set unchanged); \
                       unchanged at 182 by sq-pbz04.4.9 (SubObjectPropertyOf conclusion encoding \
                       + L1 datatype-map-IRI refusal net to zero on the pass total, composition \
-                      97+69 -> 96+70; fail set still 5, M3/M5/M6)",
+                      97+69 -> 96+70; fail set still 5, M3/M5/M6); re-pinned by sq-zfwzq \
+                      (ALCHS transitive roles: +2 consistency and +2 positive-entailment \
+                      passes, 182 -> 186; composition 98+14+72+2, fail set unchanged)",
         note: "EXTENSION ratchet — the DIRECT-arm consistency / inconsistency / positive- / \
                negative-entailment tests decided by the REAL sparq-reason-dl L4 dispatch \
                (RL guarded / EL guarded / QL deferred / ALCH tableau) under a pinned \
@@ -1171,7 +1174,9 @@ pub const SUITES: &[Suite] = &[
                passes, and all 5 remaining wrong-verdict divergences are pinned by name \
                with audited mechanisms (M1 FIXED sq-pbz04.4.11; M4 FIXED sq-pbz04.4.12; \
                M2 FIXED sq-pbz04.4.13; M7 FIXED sq-pbz04.4.16 — those rows now pass/abstain; \
-               remaining: M3/M5/M6)",
+               remaining: M3/M5/M6). The default-off dl_transitive extension graduates \
+               transitive-role inputs only through the tableau whose termination and \
+               soundness argument is written in sparq-reason-dl::tableau §5a",
     },
     // [FABLE-5] the UFO-SN3 finite-world expressibility ratchet (runner lives
     // crate-local in `sparq-conformance/tests/ufo_sn3_suite.rs`, UNGATED — it calls
@@ -1393,4 +1398,166 @@ pub fn render_scoreboard() -> String {
             .join("\n")
     );
     md
+}
+
+/// Render the registry as the MACHINE-READABLE JSON scoreboard — the exact
+/// content of the committed `bench/conformance-scoreboard.generated.json`
+/// artifact (sq-gum8.14), so conformance-class paper-evidence bindings can
+/// reference suite rows / ratchet floors by json-pointer instead of a Rust
+/// source anchor.
+///
+/// A pure DERIVATION of [`SUITES`]: same rows, same floors, same totals-split
+/// (standards-conformance vs the `sparq extension` rows, which are NEVER summed
+/// into the conformance total — the same honesty rule [`render_scoreboard`]
+/// applies). Deliberately DETERMINISTIC: no timestamps, commit hashes, or other
+/// provenance, and every object's keys are emitted in sorted (alphabetical)
+/// order, so regenerating at the same source state is byte-identical — the
+/// property the drift-guard test (`tests/scoreboard_export.rs`) enforces by
+/// byte-comparing the committed artifact against a fresh render.
+///
+/// Regenerate the committed artifact from the repo root with:
+///
+/// ```text
+/// cargo run -p sparq-conformance --bin sparq-conformance-scoreboard -- \
+///   --report /tmp/conformance-scoreboard.md \
+///   --json bench/conformance-scoreboard.generated.json
+/// ```
+pub fn scoreboard_json() -> String {
+    use serde_json::{json, Value};
+
+    // NB: every `json!` object below writes its keys in ALPHABETICAL order on
+    // purpose. serde_json's default map is a BTreeMap (sorted keys), but its
+    // opt-in `preserve_order` feature — which cargo feature-unification could
+    // switch on from anywhere in a build graph — preserves insertion order
+    // instead. Alphabetical insertion makes the two modes byte-identical, so
+    // the committed artifact can never flap on an unrelated dependency change.
+    let runner_json = |r: Runner| -> Value {
+        match r {
+            Runner::SparqlBinary => json!({ "kind": "sparql-binary" }),
+            Runner::InferenceBinary => json!({ "kind": "inference-binary" }),
+            Runner::CrateTest { krate, target } => json!({
+                "crate": krate,
+                "kind": "crate-test",
+                "target": target,
+            }),
+            Runner::FeatureGatedCrateTest { krate, target, feature } => json!({
+                "crate": krate,
+                "feature": feature,
+                "kind": "feature-gated-crate-test",
+                "target": target,
+            }),
+        }
+    };
+
+    let is_extension = |s: &Suite| s.family == "sparq extension";
+    let suites: Vec<Value> = SUITES
+        .iter()
+        .map(|s| {
+            json!({
+                "ci_job": s.ci_job,
+                "command": s.runner.command(),
+                "family": s.family,
+                "floor_basis": s.floor_basis,
+                "is_extension": is_extension(s),
+                "label": s.label,
+                "note": s.note,
+                "ratchet_floor": s.ratchet_floor,
+                "runner": runner_json(s.runner),
+            })
+        })
+        .collect();
+
+    let conformance_floor_total: usize =
+        SUITES.iter().filter(|s| !is_extension(s)).map(|s| s.ratchet_floor).sum();
+    let conformance_suites = SUITES.iter().filter(|s| !is_extension(s)).count();
+    let extension_assertion_total: usize =
+        SUITES.iter().filter(|s| is_extension(s)).map(|s| s.ratchet_floor).sum();
+    let extension_suites = SUITES.iter().filter(|s| is_extension(s)).count();
+
+    let doc = json!({
+        "description": "Machine-readable derivation of the central conformance \
+                        registry (crates/sparq-conformance/src/scoreboard.rs \
+                        scoreboard::SUITES): every conformance suite sparq \
+                        ratchets, with its ratchet floor (may only RISE), floor \
+                        basis, CI job, and runner command. Rows with \
+                        is_extension=true are HONESTLY sparq-extension ratchets, \
+                        NOT standards-conformance claims — their floors are in a \
+                        different unit (assertions, not spec pass-counts) and are \
+                        NEVER summed into totals.conformance_floor_total. \
+                        Committed as bench/conformance-scoreboard.generated.json \
+                        and drift-guarded: tests/scoreboard_export.rs regenerates \
+                        and byte-compares, so this mirror cannot silently drift \
+                        from the Rust source of truth.",
+        "schema": "sparq.conformance-scoreboard/v1",
+        "suites": suites,
+        "title": "sparq conformance scoreboard",
+        "totals": {
+            "conformance_floor_total": conformance_floor_total,
+            "conformance_suites": conformance_suites,
+            "extension_assertion_total": extension_assertion_total,
+            "extension_suites": extension_suites,
+        },
+    });
+    let mut out = serde_json::to_string_pretty(&doc).expect("scoreboard JSON serialises");
+    out.push('\n');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Direct unit test for [`scoreboard_json`]: the export is valid JSON,
+    /// carries EVERY registry row verbatim (label / floor / command, in
+    /// registry order), and its totals reproduce an independent fold over
+    /// [`SUITES`] with the extension rows split out — the same honesty rule
+    /// `render_scoreboard` applies.
+    #[test]
+    fn scoreboard_json_mirrors_the_registry() {
+        let out = scoreboard_json();
+        assert!(out.ends_with('\n'), "artifact ends with a trailing newline");
+
+        let doc: serde_json::Value = serde_json::from_str(&out).expect("export is valid JSON");
+        assert_eq!(doc["schema"], "sparq.conformance-scoreboard/v1");
+
+        let rows = doc["suites"].as_array().expect("suites is an array");
+        assert_eq!(rows.len(), SUITES.len(), "one JSON row per registry row");
+        for (row, s) in rows.iter().zip(SUITES) {
+            assert_eq!(row["label"], s.label);
+            assert_eq!(row["family"], s.family);
+            assert_eq!(row["ci_job"], s.ci_job);
+            assert_eq!(row["floor_basis"], s.floor_basis);
+            assert_eq!(row["note"], s.note);
+            assert_eq!(row["command"], s.runner.command());
+            assert_eq!(
+                row["ratchet_floor"].as_u64().expect("floor is an integer") as usize,
+                s.ratchet_floor
+            );
+            assert_eq!(
+                row["is_extension"].as_bool().expect("is_extension is a bool"),
+                s.family == "sparq extension"
+            );
+        }
+
+        // Totals: independent fold, extension rows never summed into the
+        // conformance total.
+        let ext: usize = SUITES
+            .iter()
+            .filter(|s| s.family == "sparq extension")
+            .map(|s| s.ratchet_floor)
+            .sum();
+        let conf: usize = SUITES
+            .iter()
+            .filter(|s| s.family != "sparq extension")
+            .map(|s| s.ratchet_floor)
+            .sum();
+        let totals = &doc["totals"];
+        assert_eq!(totals["conformance_floor_total"].as_u64().unwrap() as usize, conf);
+        assert_eq!(totals["extension_assertion_total"].as_u64().unwrap() as usize, ext);
+        assert_eq!(
+            totals["conformance_suites"].as_u64().unwrap() as usize
+                + totals["extension_suites"].as_u64().unwrap() as usize,
+            SUITES.len()
+        );
+    }
 }

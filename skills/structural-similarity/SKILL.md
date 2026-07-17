@@ -1,6 +1,6 @@
 ---
 name: structural-similarity
-description: "Training-free structural entity similarity over a sparq RDF graph with the opt-in sparq-sim crate: build an entity's (direction, predicate, neighbor) signature straight from the store's permutation indexes, score predicate-IDF-weighted Jaccard similarity between two entities, and retrieve the top-k most-similar entities (most_similar) via index-driven candidate generation — no embeddings, no model, no training, correct under incremental updates. Use when adding co-citation / shared-context similarity, predicate-profile (role) similarity, entity/relation linking, or the structural half of a hybrid (structural + text-vector) retrieval over a sparq Graph."
+description: "Training-free structural entity similarity over a sparq RDF graph with the opt-in sparq-sim crate: build an entity's (direction, predicate, neighbor) signature straight from the store's permutation indexes, score weighted Jaccard, Dice, or overlap similarity between two entities, and retrieve the top-k most-similar entities (most_similar) via index-driven candidate generation — no embeddings, no model, no training, correct under incremental updates. Use when adding co-citation / shared-context similarity, predicate-profile (role) similarity, entity/relation linking, or the structural half of a hybrid (structural + text-vector) retrieval over a sparq Graph."
 license: MIT
 metadata:
   version: "0.1.0"
@@ -23,12 +23,12 @@ engine build does not compile it.
 
 ## Quickstart
 
-`crates/sparq-sim/Cargo.toml` (it consumes `sparq-core`; no cargo features of its own):
+`crates/sparq-sim/Cargo.toml` (omit `features` for the original one-hop-only build):
 
 ```toml
 [dependencies]
 sparq-core = { path = "../sparq-core" }
-sparq-sim  = { path = "../sparq-sim" }
+sparq-sim  = { path = "../sparq-sim", features = ["multi-hop"] }
 oxrdf = "*"   # for oxrdf::{NamedNode, Term}
 ```
 
@@ -36,7 +36,7 @@ Score similarity and retrieve nearest entities:
 
 ```rust
 use sparq_core::Graph;
-use sparq_sim::{Sim, SimConfig, SignatureMode, weighted_jaccard};
+use sparq_sim::{dice_coefficient, overlap_coefficient, Sim};
 use oxrdf::{NamedNode, Term};
 
 # fn main() -> Result<(), String> {
@@ -52,7 +52,10 @@ let top10 = sim.most_similar(&a, 10);        // Vec<(Term, f64)>, best first, se
 // Build a signature once and reuse it (probe with an arbitrary signature):
 let sig = sim.signature(&a).unwrap();        // Option<Signature>
 let by_sig = sim.similar_by_signature(&sig, 10);
-let _ = (score, top10, by_sig);
+let other_sig = sim.signature(&b).unwrap();
+let dice = dice_coefficient(&sig, &other_sig);
+let overlap = overlap_coefficient(&sig, &other_sig);
+let _ = (score, top10, by_sig, dice, overlap);
 # Ok(()) }
 ```
 
@@ -69,6 +72,20 @@ let _ = (score, top10, by_sig);
   pre-built signature (cache signatures across many queries).
 - `weighted_jaccard(&sig_a, &sig_b) -> f64` — free function for callers that cache
   signatures themselves.
+- `dice_coefficient(&sig_a, &sig_b) -> f64` — weighted Sorensen-Dice coefficient;
+  returns `0` when both signatures have zero total weight.
+- `overlap_coefficient(&sig_a, &sig_b) -> f64` — weighted
+  Szymkiewicz-Simpson coefficient; returns `0` when either signature has zero total
+  weight.
+- `sim.explain_similarity(&a, &b) -> Vec<SharedElement>` (default-off `explain` Cargo
+  feature) — the decoded shared signature elements behind a `similarity` /
+  `most_similar` score, for reasoning UX ("WHY are these two similar"). Each
+  `SharedElement` carries `direction: Direction` (`Out`/`In`), `predicate: Term`,
+  `neighbor: Option<Term>` (`None` in `Predicates` mode), and `weight: f64` =
+  `min(w_a, w_b)`, the element's contribution to the weighted-Jaccard NUMERATOR — so
+  `Σ weight / (total_a + total_b − Σ weight)` reconstructs the exact score. Ordered
+  weight-descending (strongest evidence first), then predicate/neighbor/direction id
+  ascending; deterministic. Empty for absent terms or disjoint signatures.
 
 ### Configuration (`SimConfig`)
 
@@ -90,11 +107,17 @@ let _ = (score, top10, by_sig);
   fewer than `k` results (entities whose elements all point at degree-1 neighbors),
   fill the remaining slots with `Predicates`-style role matches, ranked below every
   exactly-scored result. `false` restores strict v1 (neighbor evidence only).
+- `depth` (default `1`, available with the default-off `multi-hop` Cargo feature) — the
+  maximum breadth-first structural-neighborhood depth. First-hop elements retain their
+  original weight; hop `h` is attenuated by `0.5^(h - 1)`. A value of `0` is treated as
+  `1`. Expansion order is deterministic, and the nearest path supplies an element's
+  weight when several paths reach it.
 
 ## How it works (cost)
 
 - **Signature** — one SPO range scan (outgoing) + one OSP/OPS range scan (incoming),
-  cost `O(log n + degree(e))`.
+  cost `O(log n + degree(e))` at the default depth. With `multi-hop`, the same scans run
+  breadth-first for each reachable frontier through `SimConfig::depth`.
 - **`most_similar(a, k)`** — candidate generation *through the indexes, not a full
   scan*: each signature element's co-owners are one contiguous index range (POS for
   outgoing `(p, n)`, SPO for incoming). Candidates accumulate shared-element weight (an
@@ -143,9 +166,11 @@ reward. See the [`vector-search`](../vector-search/SKILL.md) skill for `fuse_sco
   (or the default graph) explicitly; the quads are not merged for you.
 
 _(status: Verified against `crates/sparq-sim/src/lib.rs` + README and the crate's tests
-(13 unit tests in `src/lib.rs`; 1 integration test `tests/olympics.rs` that skips when
-the fixture is absent) on branch `feat-skill-drift-catchup` (2026-06-16). Workspace
-v0.1.0, opt-in (GenAI phase 1, `research/genai-design.md`), zero `unsafe`
+on 2026-07-16 [FABLE-5] for sq-lsp7k (added the default-off `explain` feature:
+`Sim::explain_similarity` + `SharedElement`/`Direction`, with a differential test that
+the returned weights reconstruct the exact similarity score and a multi-hop min-weight
+witness); previously 2026-07-12 [GPT-5.6] for sq-da2bz.
+Workspace v0.1.0, opt-in (GenAI phase 1, `research/genai-design.md`), zero `unsafe`
 (`#![forbid(unsafe_code)]`). Measured quality/latency gates (same-class precision@10;
 `Predicates`-mode class-separation AUC; `most_similar(k=10)` latency) are enforced by
 the `olympics_eval` example — run it for the (non-canonical) numbers rather than baking

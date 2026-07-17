@@ -57,12 +57,13 @@ import {
 // query engine pays nothing until a workspace turns inference on.
 import { loadReasoner, modeToProfile, type WasmReasoner } from "@/lib/reason-wasm";
 // [FABLE-5] sq-ixc3.20 — canonical triple identity for the inferred-fact affordance (the
-// entailed-key set the results views consult) + the shared N-Triples term writer (moved out
+// entailed fact cache the results views consult) + the shared N-Triples term writer (moved out
 // of this file so the click-to-explain path and the snapshot writer share ONE writer).
 import {
-  entailedKeysFromClosure,
+  entailedFactsFromClosure,
   termToNT,
   tripleKeysOfNTriples,
+  type InferredFact,
 } from "@/lib/inferred-facts";
 
 /**
@@ -90,6 +91,12 @@ export interface GraphSummary {
   graph: string | null;
   /** Triple/quad count in this graph. */
   count: number;
+}
+
+/** [GPT-5.6] sq-3eukz — one subject resource selectable as a Forms focus node. */
+export interface FormResource {
+  kind: "iri" | "bnode";
+  value: string;
 }
 
 /**
@@ -356,6 +363,23 @@ export interface EngineContextValue {
   /** True when the native loader IPC is available (inside the Tauri desktop shell). */
   nativeLoaderAvailable: boolean;
   /**
+   * [GPT-5.6] sq-3eukz — enumerate focus-node candidates from the active live store without
+   * routing an internal picker refresh through the user-visible query-run metrics.
+   */
+  listFormResources: () => FormResource[];
+  /**
+   * [GPT-5.6] sq-3eukz — invoke the optional sparq-wasm `Store.deriveForm` method against the
+   * live runtime. Returns `null` when that feature-detected method is absent; otherwise returns
+   * the host's snake_case FormDescription JSON (or throws its derivation error).
+   */
+  wasmDeriveForm: (
+    data: string,
+    shapes: string,
+    focus: string,
+    format: string,
+    optionsJson: string,
+  ) => string | null;
+  /**
    * [OPUS-4.8] sq-tp1m (#757) — the active per-workspace INFERENCE regime (query-time entailment).
    * `"off"` runs plain SPARQL; `"rdfs"` / `"owl-rl"` forward-chain the deductive closure (via the
    * real `sparq-reason` W-reason bundle) so a query matches entailed triples too. This is the
@@ -382,6 +406,12 @@ export interface EngineContextValue {
    * carry the "inferred" affordance. Recomputed with the closure (same cache discipline).
    */
   entailedTripleKeys: () => ReadonlySet<string> | null;
+  /**
+   * [GPT-5.6] The same exact closure-added set as {@link entailedTripleKeys}, retained in the
+   * N-Triples term spelling accepted by {@link explainWhy}. Used by the Inference tool's fact
+   * browser; guarded by the same active closure cache key, so stale facts are never exposed.
+   */
+  entailedTripleFacts: () => readonly InferredFact[] | null;
   /**
    * [FABLE-5] sq-ixc3.20 — ONE derivation ("why?") of the triple `(s, p, o)` under the
    * ACTIVE inference regime, as `sparq-reason`'s proof-tree JSON (parse with
@@ -522,6 +552,11 @@ function fnv1aHash(s: string): number {
 // graphs are folded exactly as the RDFS/OWL-RL reasoner folds them).
 const ALL_TRIPLES_QUERY =
   "SELECT DISTINCT ?s ?p ?o WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }";
+
+// [GPT-5.6] sq-3eukz — subjects in either the default or a named graph are the live workspace's
+// focus-resource candidates. Literal objects are intentionally not candidates for SHACL focus.
+const FORM_RESOURCES_QUERY =
+  "SELECT DISTINCT ?resource WHERE { { ?resource ?p ?o } UNION { GRAPH ?g { ?resource ?p ?o } } } ORDER BY ?resource LIMIT 200";
 
 /**
  * [sq-glo5r] Serialise the whole dataset as N-TRIPLES, folding named graphs into the default
@@ -667,11 +702,15 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   // changes (warm / import / update) so a stale closure is rebuilt automatically.
   const reasonedStoreRef = React.useRef<WasmStore | null>(null);
   const reasonedKeyRef = React.useRef<string | null>(null);
-  // [FABLE-5] sq-ixc3.20 — the canonical keys of the triples the ACTIVE closure ADDED
+  // [GPT-5.6] sq-l54uy — the canonical keys + displayable facts the ACTIVE closure ADDED
   // (closure − base), computed alongside the closure build and cached under the SAME
   // `mode:epoch[:rulesHash]` key so it can never describe a different store than
   // `reasonedStoreRef` (the guard in `entailedTripleKeys` checks the key, not just presence).
-  const entailedKeysRef = React.useRef<{ key: string; keys: Set<string> } | null>(null);
+  const entailedCacheRef = React.useRef<{
+    key: string;
+    keys: Set<string>;
+    facts: InferredFact[];
+  } | null>(null);
   // [OPUS-4.8] sq-tp1m — the SINGLE-FLIGHT slot for an in-flight closure build, keyed by the
   // same `mode:epoch`. Overlapping callers (the applyInferenceMode effect + a run(), or two
   // run()s) that request the same key while the first materialisation is still awaiting share
@@ -741,7 +780,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       reasonedStoreRef.current = null;
       reasonedKeyRef.current = null;
       reasonedBuildRef.current = null;
-      entailedKeysRef.current = null;
+      entailedCacheRef.current = null;
       storeEpochRef.current += 1;
       setStoreEpoch(storeEpochRef.current);
       const { size, graphs: gs } = summariseGraphs(store);
@@ -876,7 +915,10 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
           const reasoned = Store.load(closure || " ", "ntriples");
           // [FABLE-5] sq-ixc3.20 — the derived lines ARE the entailed set for N3 mode;
           // reduce them to canonical keys for the inferred-fact affordance.
-          entailedKeysRef.current = { key, keys: tripleKeysOfNTriples(derived) };
+          // [GPT-5.6] Retain the same exact derived set as explainable N-Triples facts for the
+          // Inference tool browser. An empty base is correct because reasonN3 returns additions.
+          const entailed = entailedFactsFromClosure(derived, new Set<string>());
+          entailedCacheRef.current = { key, ...entailed };
           reasonedStoreRef.current = reasoned;
           reasonedKeyRef.current = key;
           return reasoned;
@@ -912,10 +954,10 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
         // [FABLE-5] sq-ixc3.20 — entailed = closure − base at CANONICAL key level (the two
         // texts come from different writers — Rust vs the JS termToNT — so identity is the
         // decoded key, never the raw line; see @/lib/inferred-facts).
-        entailedKeysRef.current = {
-          key,
-          keys: entailedKeysFromClosure(closure, tripleKeysOfNTriples(snapshot)),
-        };
+        // [GPT-5.6] Compute closure-minus-base once, retaining both membership keys and the
+        // exact N-Triples terms needed by the entailed-facts browser and why() panel.
+        const entailed = entailedFactsFromClosure(closure, tripleKeysOfNTriples(snapshot));
+        entailedCacheRef.current = { key, ...entailed };
         reasonedStoreRef.current = reasoned;
         reasonedKeyRef.current = key;
         return reasoned;
@@ -942,7 +984,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       if (mode === "off") {
         reasonedStoreRef.current = null;
         reasonedKeyRef.current = null;
-        entailedKeysRef.current = null;
+        entailedCacheRef.current = null;
         setInferenceStatus({ kind: "off" });
         return;
       }
@@ -982,7 +1024,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
         if (gen !== inferenceGenRef.current) return;
         reasonedStoreRef.current = null;
         reasonedKeyRef.current = null;
-        entailedKeysRef.current = null;
+        entailedCacheRef.current = null;
         setInferenceStatus({
           kind: "error",
           message: err instanceof Error ? err.message : String(err),
@@ -1011,9 +1053,17 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
   // The key guard makes staleness impossible: the set is only handed out while it describes
   // exactly the closure `run()` queries against (same `mode:epoch[:rulesHash]` key).
   const entailedTripleKeys = React.useCallback((): ReadonlySet<string> | null => {
-    const cached = entailedKeysRef.current;
+    const cached = entailedCacheRef.current;
     if (!cached || cached.key !== reasonedKeyRef.current) return null;
     return cached.keys;
+  }, []);
+
+  // [GPT-5.6] Displayable/provable facts for the ACTIVE closure, with the identical stale-key
+  // guard as entailedTripleKeys. The cached array is immutable by convention to consumers.
+  const entailedTripleFacts = React.useCallback((): readonly InferredFact[] | null => {
+    const cached = entailedCacheRef.current;
+    if (!cached || cached.key !== reasonedKeyRef.current) return null;
+    return cached.facts;
   }, []);
 
   // [FABLE-5] sq-ixc3.20 — one witness derivation of a clicked triple under the active
@@ -1418,6 +1468,50 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     return storeToNQuads(store);
   }, []);
 
+  // [GPT-5.6] sq-3eukz — picker resources come directly from the current store so every store
+  // epoch (including workspace hydration) can synchronously replace the candidate list.
+  const listFormResources = React.useCallback((): FormResource[] => {
+    const store = storeRef.current;
+    if (!store) return [];
+    const parsed = JSON.parse(store.query(FORM_RESOURCES_QUERY)) as SparqlResults;
+    const resources: FormResource[] = [];
+    for (const binding of parsed.results?.bindings ?? []) {
+      const term = binding["resource"];
+      if (term?.type === "uri") resources.push({ kind: "iri", value: term.value });
+      if (term?.type === "bnode") resources.push({ kind: "bnode", value: term.value });
+    }
+    return resources;
+  }, []);
+
+  // [GPT-5.6] sq-3eukz — structural feature detection keeps the GUI independently buildable
+  // until the opt-in wasm forms binding lands. Preserve the receiver when invoking wasm-bindgen.
+  const wasmDeriveForm = React.useCallback(
+    (
+      data: string,
+      shapes: string,
+      focus: string,
+      format: string,
+      optionsJson: string,
+    ): string | null => {
+      const store = storeRef.current;
+      if (!store) return null;
+      const derive = (
+        store as unknown as {
+          deriveForm?: (
+            data: string,
+            shapes: string,
+            focus: string,
+            format: string,
+            optionsJson: string,
+          ) => string;
+        }
+      ).deriveForm;
+      if (typeof derive !== "function") return null;
+      return derive.call(store, data, shapes, focus, format, optionsJson);
+    },
+    [],
+  );
+
   // [OPUS-4.8] sq-ixc3.13 — whether the native loader IPC is reachable (inside the Tauri shell).
   // Computed once on mount (the runtime never changes mid-session) so the status bar / drawer can
   // label the loader honestly without re-detecting on every render.
@@ -1450,6 +1544,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       exportStore,
       importRdf,
       nativeLoaderAvailable,
+      listFormResources,
+      wasmDeriveForm,
       snapshotStore,
       storeEpoch,
       hydrateFromSnapshot,
@@ -1457,6 +1553,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       inferenceStatus,
       setInferenceMode,
       entailedTripleKeys,
+      entailedTripleFacts,
       explainWhy,
       setN3Rules,
       setServiceAllowlist,
@@ -1477,6 +1574,8 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       exportStore,
       importRdf,
       nativeLoaderAvailable,
+      listFormResources,
+      wasmDeriveForm,
       snapshotStore,
       storeEpoch,
       hydrateFromSnapshot,
@@ -1484,6 +1583,7 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
       inferenceStatus,
       setInferenceMode,
       entailedTripleKeys,
+      entailedTripleFacts,
       explainWhy,
       setN3Rules,
       setServiceAllowlist,

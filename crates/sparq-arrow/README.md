@@ -4,17 +4,25 @@
 > Projects a SPARQL `SELECT` result (`sparq_engine::QueryResult`) into an Arrow
 > `RecordBatch` so query results flow into the dataframe / analytics / ML ecosystem
 > (Polars, DuckDB, pandas) without a CSV round-trip. Issue #910, bead `sq-v78l4`.
+>
+> [GPT-5.6] Bead `sq-lsp7k.16` adds the checked inverse, `from_record_batch`.
+> [GPT-5.6] Bead `sq-lsp7k.21` adds Parquet byte serialization over that same schema.
+> [GPT-5.6] Beads `sq-r3cab` and `sq-ksxa2` add Arrow IPC bytes and schema-only readers.
+> [GPT-5.6] Bead `sq-kix7x` adds a metadata-only Parquet row-count reader.
+> [FABLE-5] Bead `sq-lsp7k` adds flattened CSV bytes (hand-rolled RFC 4180, zero new deps).
 
-**Opt-in / lean-core by construction.** This is a separate leaf crate, and the export
-itself sits behind the `arrow` feature (OFF by default). The `arrow-*` dependency
+**Opt-in / lean-core by construction.** This is a separate leaf crate, and Arrow
+import/export sits behind the `arrow` feature (OFF by default). The `arrow-*` dependency
 closure NEVER enters `sparq-core` / `sparq-engine` / the wasm bundle; nothing in the
-workspace default build depends on it. The default build of *this* crate pulls no Arrow
-code at all — only the dependency-free field-name constants and the schema docs.
+workspace default build depends on it. Parquet, IPC, and CSV byte serialization are
+additional opt-in layers (`parquet` / `ipc` / `csv`, each implying `arrow`). The default
+build of *this* crate pulls no Arrow container code — only the dependency-free
+field-name constants and the schema docs.
 
 ## 🚀 Quickstart
 
 ```rust,ignore
-use sparq_arrow::to_record_batch;
+use sparq_arrow::{from_record_batch, to_record_batch};
 use sparq_engine::{query, QueryResult};
 use sparq_core::Graph;
 
@@ -25,11 +33,44 @@ let result: QueryResult = query(&graph, "SELECT ?s ?o WHERE { ?s ?p ?o }")?;
 let batch = to_record_batch(&result)?;       // needs --features arrow
 assert_eq!(batch.num_columns(), 2);          // ?s, ?o
 assert_eq!(batch.schema().field(0).name(), "s");
+let restored = from_record_batch(&batch)?;
+assert_eq!(restored.vars, result.vars);
+assert_eq!(restored.rows, result.rows);
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 `cargo add sparq-arrow --features arrow` (or, in this workspace,
 `cargo build -p sparq-arrow --features arrow`).
+
+To serialize the same term-struct batch as an in-memory Parquet file, enable the
+default-OFF `parquet` feature:
+
+```rust,ignore
+use sparq_arrow::{
+    from_parquet_bytes, parquet_row_count_from_bytes, parquet_variables_from_bytes,
+    to_parquet_bytes,
+};
+
+let bytes = to_parquet_bytes(&result)?;
+assert_eq!(parquet_variables_from_bytes(&bytes)?, result.vars);
+assert_eq!(parquet_row_count_from_bytes(&bytes)?, result.rows.len());
+let restored = from_parquet_bytes(&bytes)?;
+assert_eq!(restored.vars, result.vars);
+assert_eq!(restored.rows, result.rows);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Use `cargo add sparq-arrow --features parquet` (or
+`cargo build -p sparq-arrow --features parquet`); `parquet` implies `arrow`.
+
+For an Arrow IPC stream instead, enable the default-OFF `ipc` feature and call
+`to_ipc_bytes(&result)` / `from_ipc_bytes(&bytes)`; `ipc_variables_from_bytes(&bytes)`
+reads only its schema, which is the same term-struct schema with empty-result variables
+preserved. For CSV, enable the default-OFF `csv` feature and call `to_csv_bytes` /
+`from_csv_bytes` (`csv_variables_from_bytes` reads only the header row): each
+variable's term struct flattens to five `var.field` columns, an unbound cell is five
+empty fields (still distinct from a bound empty literal), and the RFC-4180
+serializer/parser is hand-rolled over `std`, so the feature adds zero dependencies.
 
 ## ✨ The RDF-term → Arrow mapping
 
@@ -48,6 +89,15 @@ one column of `Struct<kind, value, datatype, language, direction>` (all nullable
 
 An **unbound** binding is a `null` struct slot — distinct from a bound empty-string
 literal. `term_schema(&vars)` builds the schema without materialising rows.
+`from_record_batch(&batch)` validates that exact schema and reconstructs the variables,
+row order, unbound cells, and RDF terms. Invalid variable names, schemas, kinds, IRIs,
+blank-node labels, language tags, directions, triple terms, or incompatible literal
+metadata return `ArrowError`; they never panic or silently select a fallback term kind.
+`to_parquet_bytes` / `to_ipc_bytes` / `to_csv_bytes` wrap this exact projection in
+checked containers whose importers validate it before decoding; empty results keep
+their variables, and the schema-only `*_variables_from_bytes` readers (plus
+`parquet_row_count_from_bytes`) decode no rows. CSV alone cannot carry a zero-variable
+result — `to_csv_bytes` rejects it honestly rather than writing unreadable rows.
 
 ## 📚 Honest boundary / caveats
 
@@ -61,11 +111,9 @@ literal. `term_schema(&vars)` builds the schema without materialising rows.
 - **Triple terms are stringified** to N-Triples in `value` (`kind = "triple"`), not
   exploded into nested struct fields.
 - This is a **projection for transport**, not a canonical RDF serialisation: the Arrow
-  batch is not itself an RDF document (round-tripping from the five fields is trivial).
-- **Python binding.** Issue #910 frames a `sparq-py` `Graph.query_arrow() ->
-  pyarrow.Table` over this export; that PyO3 binding lives in the opt-in `arrow` feature
-  of `sparq-py` (bead `sq-lt1ml`) — it reuses `to_record_batch` here and bridges the
-  batch to pyarrow through the Arrow C Data Interface. No performance numbers are claimed.
+  batch and its Parquet / IPC / CSV containers are not RDF documents. Each importer is
+  a checked inverse of its corresponding exporter.
+- **Python binding.** `sparq-py`'s opt-in `arrow` feature exposes `Graph.query_arrow() -> pyarrow.Table` over `to_record_batch` via the Arrow C Data Interface.
 
 ## License
 

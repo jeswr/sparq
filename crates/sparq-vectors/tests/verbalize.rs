@@ -5,8 +5,8 @@
 use oxrdf::{NamedNode, Term};
 use sparq_core::Graph;
 use sparq_vectors::{
-    embed_entities, verbalize, Embedder, EntityTextConfig, HashEmbedder, ObjectKind,
-    PropertyGroup, VectorStore,
+    embed_entities, label_predicates, nearest_term_exact, verbalize, Embedder, EntityTextConfig,
+    HashEmbedder, ObjectKind, PropertyGroup, VectorStore,
 };
 
 const TTL: &str = r#"
@@ -138,9 +138,81 @@ fn char_budget_truncates_but_keeps_the_label() {
     };
     assert_eq!(verbalize(&g, &ex("bolt"), &cfg).unwrap(), "Usain Bolt. a athlete");
 
-    // Mid-piece overflow: the overflowing piece is truncated at a char boundary.
+    // Mid-piece overflow: back off rather than cutting the second word.
     cfg.max_chars = 8;
-    assert_eq!(verbalize(&g, &ex("bolt"), &cfg).unwrap(), "Usain Bo");
+    assert_eq!(verbalize(&g, &ex("bolt"), &cfg).unwrap(), "Usain");
+}
+
+#[test]
+fn verbalize_precision_at_k_fixture_is_not_worse_than_labels_only() {
+    // [GPT-5.6] Fixture-scale demonstration only: HashEmbedder is lexical and this is not a
+    // benchmark or a general retrieval-quality claim. The richer passages disambiguate two equal
+    // labels using their type and description.
+    const RANKING_TTL: &str = r#"
+@prefix rdfs:   <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix schema: <http://schema.org/> .
+@prefix ex:     <http://example.org/> .
+
+ex:query rdfs:label "Mercury" ;
+    a ex:Planet ;
+    schema:description "orbiting planet astronomy" .
+ex:a-ambiguous rdfs:label "Mercury" ;
+    a ex:ChemicalElement ;
+    schema:description "liquid metal chemistry" .
+ex:z-correct rdfs:label "Mercury" ;
+    a ex:Planet ;
+    schema:description "orbiting planet astronomy" .
+"#;
+
+    let graph = Graph::load_str(RANKING_TTL, "turtle").unwrap();
+    let query = ex("query");
+    let correct = ex("z-correct");
+    let ambiguous = ex("a-ambiguous");
+    let ambiguous_id = graph.id_of(&ambiguous).unwrap();
+    let correct_id = graph.id_of(&correct).unwrap();
+    assert!(
+        ambiguous_id < correct_id,
+        "the labels-only cosine tie must prefer the ambiguous fixture id ({ambiguous_id} < {correct_id})"
+    );
+
+    let embedder = HashEmbedder::new(64);
+    let suffix = std::process::id();
+    let full_path =
+        std::env::temp_dir().join(format!("sparq-vectors-full-precision-{suffix}.spqv"));
+    let labels_path =
+        std::env::temp_dir().join(format!("sparq-vectors-label-precision-{suffix}.spqv"));
+
+    let mut full_store = VectorStore::create(&full_path, embedder.dim()).unwrap();
+    embed_entities(
+        &graph,
+        &mut full_store,
+        &embedder,
+        &EntityTextConfig::default(),
+    )
+    .unwrap();
+    full_store.finalize().unwrap();
+
+    let labels_cfg = EntityTextConfig::labels_only(label_predicates(), 256);
+    let mut labels_store = VectorStore::create(&labels_path, embedder.dim()).unwrap();
+    embed_entities(&graph, &mut labels_store, &embedder, &labels_cfg).unwrap();
+    labels_store.finalize().unwrap();
+
+    let full_hits = nearest_term_exact(&full_store, &graph, &query, 1);
+    let labels_hits = nearest_term_exact(&labels_store, &graph, &query, 1);
+    let precision_at_one =
+        |hits: &[(Term, f32)]| usize::from(hits.first().map(|h| &h.0) == Some(&correct));
+    let full_precision = precision_at_one(&full_hits);
+    let labels_precision = precision_at_one(&labels_hits);
+
+    assert_eq!(full_hits.first().map(|h| &h.0), Some(&correct));
+    assert_eq!(labels_hits.first().map(|h| &h.0), Some(&ambiguous));
+    assert!(
+        full_precision >= labels_precision,
+        "fixture precision@1: verbalize={full_precision}, labels_only={labels_precision}"
+    );
+
+    let _ = std::fs::remove_file(full_path);
+    let _ = std::fs::remove_file(labels_path);
 }
 
 #[test]

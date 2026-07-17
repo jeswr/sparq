@@ -31,7 +31,7 @@ publish = false
 # WGSL source targets Vulkan/DX12/WebGPU. wgpu 29's MSRV is 1.83, below the
 # workspace floor (1.88), so the bump does NOT raise the workspace MSRV.
 wgpu = "30"
-pollster = "0.4"
+pollster = "1.0"
 bytemuck = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

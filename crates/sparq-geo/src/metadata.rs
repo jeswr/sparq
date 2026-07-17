@@ -99,6 +99,64 @@ pub fn topological_dimension(g: &Geometry<f64>) -> Option<u8> {
     }
 }
 
+/// `geo:coordinateDimension` as a standalone pure fn: measurements per
+/// coordinate — always 2 in this 2-D Simple-Features profile, `None` for the
+/// empty geometry (same rule as [`GeoGeometry::metadata`]'s field; the
+/// `geof_accessors` differential tests pin the correspondence). [FABLE-5]
+/// sq-lsp7k
+#[cfg(feature = "geof_accessors")]
+pub fn coordinate_dimension(g: &Geometry<f64>) -> Option<u8> {
+    (!g.is_empty()).then_some(2)
+}
+
+/// `geo:spatialDimension` as a standalone pure fn: SPATIAL measurements per
+/// coordinate (excludes the M measure) — always 2 here, `None` for the empty
+/// geometry (same rule as [`GeoGeometry::metadata`]'s field; the
+/// `geof_accessors` differential tests pin the correspondence). [FABLE-5]
+/// sq-lsp7k
+#[cfg(feature = "geof_accessors")]
+pub fn spatial_dimension(g: &Geometry<f64>) -> Option<u8> {
+    (!g.is_empty()).then_some(2)
+}
+
+/// The OGC Simple Features geometry-class IRI (`sf:Point`, `sf:LineString`, …)
+/// of a parsed geometry — the value the opt-in `geof:geometryType` accessor
+/// returns. [FABLE-5] sq-lsp7k
+///
+/// `None` — mapped by the registry to an honest `GeoError::Unsupported`
+/// expression error, never a fabricated IRI — for:
+///
+/// * an **EMPTY** geometry: geo-types canonicalises empties (`POINT EMPTY`
+///   parses to an empty `MultiPoint` — there is no empty point), so the
+///   AUTHORED class of an empty literal is unrecoverable from the parsed
+///   representation and any answer would be a guess;
+/// * a **`GEOMETRYCOLLECTION`**: conservatively unmapped in this profile
+///   (the accessor targets the instantiable simple-features classes).
+///
+/// The geo-types-only variants map to their exact simple-features class: a
+/// `Line` IS a two-point `sf:LineString`; `Rect` / `Triangle` ARE
+/// `sf:Polygon`s (none of the three is producible by this crate's WKT/GML
+/// parsers, so the registry path never sees them).
+#[cfg(feature = "geof_accessors")]
+pub fn sf_geometry_type(g: &Geometry<f64>) -> Option<&'static str> {
+    if g.is_empty() {
+        return None;
+    }
+    match g {
+        Geometry::Point(_) => Some("http://www.opengis.net/ont/sf#Point"),
+        Geometry::Line(_) | Geometry::LineString(_) => {
+            Some("http://www.opengis.net/ont/sf#LineString")
+        }
+        Geometry::Polygon(_) | Geometry::Rect(_) | Geometry::Triangle(_) => {
+            Some("http://www.opengis.net/ont/sf#Polygon")
+        }
+        Geometry::MultiPoint(_) => Some("http://www.opengis.net/ont/sf#MultiPoint"),
+        Geometry::MultiLineString(_) => Some("http://www.opengis.net/ont/sf#MultiLineString"),
+        Geometry::MultiPolygon(_) => Some("http://www.opengis.net/ont/sf#MultiPolygon"),
+        Geometry::GeometryCollection(_) => None,
+    }
+}
+
 /// `geo:isSimple` (OGC SFA "Simple"): whether the geometry has no anomalous
 /// geometric points such as self-intersection or self-tangency. [OPUS-4.8]
 ///
@@ -391,6 +449,78 @@ mod tests {
         // [OPUS-4.8] sq-9g58 coverage: linestring_is_simple's `< 2 points`
         // early-return arm. An EMPTY linestring has no vertices and is simple.
         assert!(meta("LINESTRING EMPTY").is_simple);
+    }
+
+    // ---- the standalone `geof_accessors` pure fns (sq-lsp7k) [FABLE-5] ----
+
+    #[cfg(feature = "geof_accessors")]
+    #[test]
+    fn standalone_coordinate_dimension_matches_metadata_field() {
+        for (lex, expected) in [
+            ("POINT(1 2)", Some(2)),
+            ("LINESTRING(0 0, 1 1)", Some(2)),
+            ("POINT EMPTY", None),
+            ("GEOMETRYCOLLECTION EMPTY", None),
+        ] {
+            let g = parse_wkt_literal(lex).unwrap();
+            assert_eq!(coordinate_dimension(&g.geometry), expected, "coordinate_dimension({lex})");
+            // Single-source pin: the standalone fn IS the metadata() field.
+            assert_eq!(coordinate_dimension(&g.geometry), g.metadata().coordinate_dimension);
+        }
+    }
+
+    #[cfg(feature = "geof_accessors")]
+    #[test]
+    fn standalone_spatial_dimension_matches_metadata_field() {
+        for (lex, expected) in [
+            ("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", Some(2)),
+            ("MULTIPOINT((0 0),(1 1))", Some(2)),
+            ("LINESTRING EMPTY", None),
+        ] {
+            let g = parse_wkt_literal(lex).unwrap();
+            assert_eq!(spatial_dimension(&g.geometry), expected, "spatial_dimension({lex})");
+            assert_eq!(spatial_dimension(&g.geometry), g.metadata().spatial_dimension);
+        }
+    }
+
+    #[cfg(feature = "geof_accessors")]
+    #[test]
+    fn sf_geometry_type_maps_each_parsed_class_and_declines_undefined() {
+        const SF: &str = "http://www.opengis.net/ont/sf#";
+        for (lex, expected) in [
+            ("POINT(1 2)", Some("Point")),
+            ("LINESTRING(0 0, 1 1)", Some("LineString")),
+            ("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", Some("Polygon")),
+            ("MULTIPOINT((0 0),(1 1))", Some("MultiPoint")),
+            ("MULTILINESTRING((0 0, 1 1),(2 2, 3 3))", Some("MultiLineString")),
+            ("MULTIPOLYGON(((0 0,1 0,1 1,0 1,0 0)))", Some("MultiPolygon")),
+            // No fabricated class: collections are unmapped, and an empty
+            // literal's authored class is unrecoverable (POINT EMPTY parses
+            // to an empty MultiPoint), so both decline with None.
+            ("GEOMETRYCOLLECTION(POINT(0 0), POLYGON((0 0,1 0,1 1,0 1,0 0)))", None),
+            ("POINT EMPTY", None),
+            ("POLYGON EMPTY", None),
+            ("GEOMETRYCOLLECTION EMPTY", None),
+        ] {
+            assert_eq!(
+                sf_geometry_type(&parse_wkt_literal(lex).unwrap().geometry),
+                expected.map(|c| format!("{SF}{c}")).as_deref(),
+                "sf_geometry_type({lex})"
+            );
+        }
+        // The geo-types-only variants (never produced by the WKT/GML parsers)
+        // map to their exact simple-features class.
+        use geo_types::{coord, Line, Rect, Triangle};
+        let line = Geometry::Line(Line::new(coord! {x: 0., y: 0.}, coord! {x: 1., y: 1.}));
+        assert_eq!(sf_geometry_type(&line), Some("http://www.opengis.net/ont/sf#LineString"));
+        let rect = Geometry::Rect(Rect::new(coord! {x: 0., y: 0.}, coord! {x: 1., y: 1.}));
+        assert_eq!(sf_geometry_type(&rect), Some("http://www.opengis.net/ont/sf#Polygon"));
+        let tri = Geometry::Triangle(Triangle::new(
+            coord! {x: 0., y: 0.},
+            coord! {x: 1., y: 0.},
+            coord! {x: 0., y: 1.},
+        ));
+        assert_eq!(sf_geometry_type(&tri), Some("http://www.opengis.net/ont/sf#Polygon"));
     }
 
     #[test]

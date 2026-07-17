@@ -88,6 +88,24 @@ pub fn nearest_exact(store: &VectorStore, query: &[f32], k: usize) -> Vec<(Id, f
     scored
 }
 
+/// Exact cosine top-`k` with each hit's opaque metadata tag attached.
+///
+/// Ranking is delegated to [`nearest_exact`] and is therefore identical, including its ascending-id
+/// tie-break. Metadata only decorates the completed ranking and never filters or reorders it. IDs
+/// written with [`VectorStore::put`] return `None`; IDs written with
+/// [`VectorStore::put_with_meta`] return the tag byte-for-byte as a `String`.
+#[cfg(feature = "metadata-sidecar")]
+pub fn nearest_exact_with_meta(
+    store: &VectorStore,
+    query: &[f32],
+    k: usize,
+) -> Vec<(Id, f32, Option<String>)> {
+    nearest_exact(store, query, k)
+        .into_iter()
+        .map(|(id, score)| (id, score, store.meta(id).map(str::to_owned)))
+        .collect()
+}
+
 /// Like [`nearest_exact`] but query-by-term: resolves `term` through the graph's
 /// dictionary, looks its vector up in the store, excludes the term itself from the
 /// results and maps neighbor ids back to [`Term`]s. Empty if the term is absent from
@@ -205,7 +223,10 @@ impl HnswConfig {
 /// build speed and determinism are unchanged.
 #[cfg(feature = "approx-ann")]
 #[derive(Clone)]
-struct NPoint(Arc<[f32]>);
+// [FABLE-5] (#2251) `pub(crate)`: the recall-gated concept-dedup module (`dedup.rs`, same
+// `approx-ann` feature) builds its HNSW over the identical Arc-backed normalised point type so
+// exact/HNSW/concept scores all stay directly comparable — not exported outside the crate.
+pub(crate) struct NPoint(pub(crate) Arc<[f32]>);
 
 #[cfg(feature = "approx-ann")]
 impl Point for NPoint {
@@ -227,7 +248,7 @@ impl Point for NPoint {
 /// never zero ([`VectorStore::put`] rejects them), so `None` only arises for queries.
 /// [FABLE-5] (sq-jk7w7) Returns the shared-ownership `Arc<[f32]>` form [`NPoint`] wraps.
 #[cfg(feature = "approx-ann")]
-fn normalized(v: &[f32]) -> Option<Arc<[f32]>> {
+pub(crate) fn normalized(v: &[f32]) -> Option<Arc<[f32]>> {
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     (norm > 0.0).then(|| v.iter().map(|x| x / norm).collect())
 }

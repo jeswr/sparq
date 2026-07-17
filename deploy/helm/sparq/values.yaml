@@ -1,0 +1,191 @@
+# sparq Helm chart values
+# [OPUS-4.8] sq-0d744 — cloud-deploy epic sq-3vjdr, §3.5
+#
+# SECURE DEFAULTS (R1/R2/R4/R8/R9):
+#   - sparq-server is open-by-default at the IMAGE layer. This chart enforces auth at
+#     the TEMPLATE layer: auth.existingSecret MUST name an existing
+#     k8s Secret. No token literal may appear here. See R9 note in deploy/helm/README.md.
+#   - readOnlyRootFilesystem: true + non-root securityContext by default (R8).
+#   - TLS at the Ingress via cert-manager (R3).
+#   - Secret referenced, never inlined (R4).
+
+# ---------------------------------------------------------------------------
+# Server selector
+# ---------------------------------------------------------------------------
+# server: "sparq-server" → SPARQL endpoint, port 3030, health GET /health
+# server: "lws"          → Solid/LWS server, port 3000, health GET /livez + /readyz
+#                          NOTE: lws values below are marked "(activates once sq-lmz40 ships)"
+#                          because the ghcr.io/sparq-org/sparq-lws-core image is not yet
+#                          published. Set server: lws once sq-lmz40 merges and the image
+#                          is available.
+server: sparq-server
+
+# ---------------------------------------------------------------------------
+# Image
+# ---------------------------------------------------------------------------
+image:
+  # [GPT-5.6] Empty selects the canonical repository for the server selector:
+  # sparq-server -> ghcr.io/sparq-org/sparq-server
+  # lws          -> ghcr.io/sparq-org/sparq-lws-core
+  # Set this only to use a fork or private registry.
+  repository: ""
+  # [GPT-5.6] appVersion defaults to "latest", so always re-resolve it on pod start.
+  # Use IfNotPresent only together with a pinned, immutable release tag.
+  pullPolicy: Always
+  # tag defaults to chart appVersion; override with --set image.tag=v0.5.0
+  tag: ""
+
+imagePullSecrets: []
+
+# ---------------------------------------------------------------------------
+# Replica count
+# [GPT-5.6] Both servers are pinned to one replica. sparq-server has one writable
+# in-memory store per pod. The planned canonical LWS image lacks redis-replay, and
+# the current LWS runtime has no shared durable blob store, so Redis alone cannot
+# make its data path safe to scale out.
+# ---------------------------------------------------------------------------
+replicaCount: 1
+
+# ---------------------------------------------------------------------------
+# Auth (R1 / R4) — token referenced from an EXISTING k8s Secret, NEVER inlined
+# ---------------------------------------------------------------------------
+auth:
+  # Name of an existing k8s Secret that holds the auth token.
+  # The Secret MUST contain a key named by auth.tokenKey.
+  # Create with:
+  #   kubectl create secret generic sparq-auth-token \
+  #     --from-literal=SPARQ_AUTH_TOKEN=$(openssl rand -hex 32)
+  existingSecret: ""      # REQUIRED for sparq-server. Set to the Secret name.
+  tokenKey: SPARQ_AUTH_TOKEN
+
+  # If true, also gate READ requests with the same token (SPARQ_AUTH_TOKEN_READ=1).
+  # Default false: writes gated, reads open (QLever-style).
+  requireTokenForReads: false
+
+# ---------------------------------------------------------------------------
+# sparq-server specific config (ignored when server=lws)
+# ---------------------------------------------------------------------------
+sparqServer:
+  # Env vars injected into the container. All are optional; see Dockerfile + http.rs.
+  # SPARQ_AUTH_TOKEN is NOT here — it comes from auth.existingSecret (R4).
+  corsAllowOrigin: ""           # SPARQ_CORS_ALLOW_ORIGIN
+  maxBodyBytes: ""              # SPARQ_MAX_BODY_BYTES
+  maxConcurrent: ""             # SPARQ_MAX_CONCURRENT
+  queryTimeout: ""              # SPARQ_QUERY_TIMEOUT (e.g. "30s")
+  serviceAllow: ""              # SPARQ_SERVICE_ALLOW (comma-sep allowlist for SERVICE federation)
+  accessAudit: ""               # SPARQ_ACCESS_AUDIT ("1" to enable)
+  # Data volume: mount a PV at /data and pass the dataset path as extraArgs.
+  # Example: extraArgs: ["--format", "turtle", "/data/dataset.ttl"]
+  extraArgs: []
+
+# ---------------------------------------------------------------------------
+# LWS / sparq-lws-core config (ignored when server=sparq-server)
+# ACTIVATES ONCE sq-lmz40 SHIPS (image not yet published).
+# ---------------------------------------------------------------------------
+lws:
+  # REQUIRED for any production LWS deploy. LWS cannot start without a trusted OIDC IdP.
+  # Set to your OIDC provider URL (e.g. https://solidcommunity.net).
+  trustedIssuer: ""             # SOLID_SERVER_TRUSTED_ISSUER — REQUIRED for lws
+  # REQUIRED: the public https:// base URL at which this LWS instance is reachable.
+  baseUrl: ""                   # SOLID_SERVER_BASE_URL — REQUIRED for lws
+  audience: ""                  # SOLID_SERVER_AUDIENCE (defaults to baseUrl in the server)
+
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
+service:
+  # [GPT-5.6] Fixed to ClusterIP so the Service cannot bypass the TLS-enforcing Ingress.
+  type: ClusterIP
+  # Port exposed on the Service (cluster-internal).
+  # Defaults to the server's container port: 3030 (sparq-server) or 3000 (lws).
+  # Override only if you need a non-standard port on the Service object.
+  port: null
+
+# ---------------------------------------------------------------------------
+# Ingress (R3 — TLS at the edge)
+# ---------------------------------------------------------------------------
+ingress:
+  enabled: false
+  # [GPT-5.6] The built-in Ingress is for ingress-nginx because the chart enforces
+  # HTTPS redirects with ingress-nginx annotations. For another controller, keep
+  # this Ingress disabled and supply a controller-specific HTTPS-only route.
+  ingressClassName: nginx
+  annotations: {}
+    # To provision a TLS cert via cert-manager:
+    # cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  # Hostname for the Ingress rule (required when ingress.enabled=true).
+  host: ""
+  # path: "/"
+  path: /
+  pathType: Prefix
+  tls:
+    # [GPT-5.6] Both fields become mandatory when ingress.enabled=true.
+    enabled: false
+    # secretName: sparq-tls  (cert-manager will populate this)
+    secretName: ""
+
+# ---------------------------------------------------------------------------
+# Resource requests and limits (R8 context: right-size to avoid privilege escalation)
+# These are intentional conservative defaults; tune for your workload.
+# ---------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: "100m"
+    memory: "256Mi"
+  limits:
+    cpu: "2000m"
+    memory: "2Gi"
+
+# ---------------------------------------------------------------------------
+# Persistent volume for the dataset (/data) — sparq-server only
+# ---------------------------------------------------------------------------
+persistence:
+  enabled: false
+  # Set enabled=true and name a pre-provisioned PVC here, or leave empty to create one.
+  existingClaim: ""
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 10Gi
+
+# ---------------------------------------------------------------------------
+# Service account (R5 — minimal, no cluster-admin)
+# ---------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  annotations: {}
+  # Required when create=false; the pod token still remains disabled.
+  name: ""
+
+# ---------------------------------------------------------------------------
+# Pod-level settings
+# ---------------------------------------------------------------------------
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ---------------------------------------------------------------------------
+# Startup / liveness / readiness probes (R7 — parameterised per server)
+# These are defaults; the _helpers.tpl picks the right path per server selector.
+# Override only if you have unusual probe requirements.
+# ---------------------------------------------------------------------------
+startupProbe:
+  # [GPT-5.6] Prevent large initial dataset loads from being killed by liveness checks.
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 30
+
+livenessProbe:
+  # path is set by _helpers.tpl based on .Values.server
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  # path is set by _helpers.tpl based on .Values.server
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3

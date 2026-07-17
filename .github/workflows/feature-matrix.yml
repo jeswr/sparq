@@ -90,8 +90,22 @@ on:
   # label re-evaluates change-based selection for the opt-in leg set as well (the
   # `setup` assembler filters legs by the selection outputs). Default types are
   # listed explicitly so adding the label events does not drop `synchronize`.
+  # [FABLE-5] LABEL-TRIGGER GUARD (full rationale: ci.yml's pull_request note): only
+  # the `ci-full` toggle starts real work off a label event — the review pipeline's
+  # review:*/status:* flips otherwise restarted this workflow on an unchanged head
+  # SHA, and the concurrency-cancelled `select` check-runs REDdened the ci-summary
+  # gate. The guard is the job-level `if:` on the root `changes` job (everything else
+  # needs:-chains from it); the `select` pre-job stays UNCONDITIONAL and runs to a
+  # cheap success (a skipped select would poison the gate — ci_summary_gate.py
+  # requires every selection check-run to conclude `success`). Label events also get
+  # a per-run concurrency group below so a flip never cancels an in-flight run.
+  # [FABLE-5] Draft-tier CI: + ready_for_review, so the un-draft moment re-assembles
+  # the opt-in leg set at FULL tier (the select job name drops its ", draft-tier"
+  # marker) and the required gate stops honouring the draft-tier-assembled set —
+  # see docs/branch-protection.md §Draft-tier CI. Independent of the label guard
+  # above: a non-`ci-full` label flip stays a no-op regardless of draft state.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   # Merge queue: mirror the PR check-set onto the merge_group ref so the required
   # ci-summary gate finds the same legs it finds on a PR (matches ci.yml/ci-summary.yml).
   merge_group:
@@ -100,7 +114,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: feature-matrix-${{ github.workflow }}-${{ github.ref }}
+  # [FABLE-5] label-trigger guard: labeled/unlabeled pull_request events get a
+  # PER-RUN group — a label-flip run entering the shared per-ref group would cancel
+  # the in-flight real run on the SAME head SHA (run-level cancellation precedes job
+  # `if:` evaluation), leaving cancelled check-runs that RED the ci-summary gate.
+  # All other events keep the shared per-ref group + cancel-in-progress as before.
+  group: feature-matrix-${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'pull_request' && contains(fromJSON('["labeled","unlabeled"]'), github.event.action)) && github.run_id || 'shared' }}
   cancel-in-progress: true
 
 env:
@@ -123,6 +142,15 @@ jobs:
   # runs ALWAYS compile the full feature matrix — only a purely non-Rust PR diff skips.
   changes:
     name: detect rust changes (feature-matrix)
+    # [FABLE-5] label-trigger guard (see the pull_request trigger note): a
+    # labeled/unlabeled event for any label other than `ci-full` skips this root job,
+    # and with it every needs:-dependent (setup/opt-in legs/check-tier/no-default-
+    # features lanes/fedclient-boundary). The `select` pre-job deliberately stays
+    # unguarded (its success is required by the gate on every trigger).
+    if: >-
+      github.event_name != 'pull_request' ||
+      !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) ||
+      github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -502,6 +530,58 @@ jobs:
             cargo clippy -p "${crate}" --features "${features}" -- -D warnings
             echo "::endgroup::"
           done
+
+  # [GPT-5.6] sq-r1ei8: the opt-in fragment matrix can only add Cargo features,
+  # so it cannot express the core tier of a default-on feature. This dedicated
+  # lane gates the exact pure-Solid build: `/sparql` and the query-engine normal
+  # dependencies are absent, while the feature-off LDP CRUD + WAC test remains
+  # executable. The sibling fragment leg covers the explicit full-tier spelling.
+  lws-core-no-sparql-endpoint:
+    needs: [changes, select]
+    if: >-
+      needs.changes.outputs.rust_changed == 'true' &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-lws-core"'))
+    name: sparq-lws-core pure Solid (--no-default-features)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: feature-matrix-sparq-lws-core-no-default-features
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Fetch dependencies (retry transient crates.io fetch)
+        run: |
+          set -euo pipefail
+          n=0
+          until cargo fetch --locked; do
+            n=$((n+1))
+            if [ "$n" -ge 3 ]; then
+              echo "::error::cargo fetch failed after $n attempts (registry outage?)" >&2
+              exit 1
+            fi
+            echo "cargo fetch attempt $n failed; retrying in 10s..." >&2
+            sleep 10
+          done
+      - name: Build core tier (--no-default-features)
+        run: cargo build -p sparq-lws-core --no-default-features
+      - name: Test core tier — route absence plus LDP CRUD and WAC
+        run: cargo test -p sparq-lws-core --no-default-features
+      - name: Assert endpoint-only dependencies are absent from the core tier
+        run: |
+          set -euo pipefail
+          if cargo tree -p sparq-lws-core --no-default-features --edges normal | grep -Eq 'async-lock v|spargebra v|sparq-(core|engine) v'; then
+            echo "::error::SPARQL endpoint dependency leaked into the pure Solid tier" >&2
+            exit 1
+          fi
+      - name: Clippy core tier (--all-targets -D warnings)
+        run: cargo clippy -p sparq-lws-core --no-default-features --all-targets -- -D warnings
 
   # [OPUS-4.8] sq-1b390: THE pure-serialiser-library build of sparq-server — i.e. the crate
   # with `--no-default-features` (the `server` async HTTP stack OFF), the contract a consumer

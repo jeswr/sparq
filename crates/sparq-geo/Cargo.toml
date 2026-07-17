@@ -52,11 +52,26 @@ rustdoc-args = ["--cfg", "docsrs"]
 # `topology_index` (opt-in, OFF by default): exact DE-9IM refinement for constant-region
 # containment scans. The R-tree first finds the AABB superset, then a prepared constant
 # region filters it to the exact winning geometry literals. [GPT-5.6] sq-jrdds
+# `geof_accessors` (opt-in, OFF by default): registers the GeoSPARQL 1.1 non-topological
+# ACCESSOR query functions — geof:dimension / coordinateDimension / spatialDimension
+# (xsd:integer), geof:isSimple (xsd:boolean), geof:geometryType (the OGC sf: geometry-class
+# IRI as xsd:anyURI) — into `geof_registry()`, delegating to the existing metadata.rs pure
+# fns. OFF by default so the default registry byte-set is unchanged; a value the metadata
+# layer leaves undefined (an EMPTY geometry's dimensions / sf: class, a
+# GEOMETRYCOLLECTION's sf: class) is an honest GeoError::Unsupported-mapped expression
+# error, never a fabricated integer/boolean. Implies `engine` (registration happens in
+# the registry). [FABLE-5] sq-lsp7k
 default = ["engine"]
 engine = ["dep:sparq-engine", "dep:spargebra"]
+geof_accessors = ["engine"]
 geosparql_rewrite = ["engine"]
 reproject = ["dep:proj4rs"]
-topology_index = []
+# [FABLE-5] (sq-lk3aw.4) topology_index also lights the ENGINE's exact-candidate seam
+# (weak feature: only when the optional sparq-engine dep is in the graph), so
+# `GeoIndexProvider::candidates_exact` can certify the exact set and the engine can
+# skip the residual DE-9IM FILTER for certified rows. Without `engine`, the pure
+# geometry library gets the index-level refinement only.
+topology_index = ["sparq-engine?/spatial-exact-pushdown"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io

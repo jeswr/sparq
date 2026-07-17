@@ -162,6 +162,8 @@ fn naive_facets(graph: &Graph, req: &FacetRequest) -> FacetResponse {
         types,
         predicates,
         values,
+        #[cfg(feature = "numeric-facets")]
+        numeric: Vec::new(),
     }
 }
 

@@ -72,10 +72,10 @@ let r = query_text(&graph, r#"
 
 ## ✨ Features
 
-- **`text:` magic predicates** — `text:matches` (AND), `text:matchesAny` (OR),
-  `text:phrase` (adjacency), `text:near` (proximity/slop, relevance-ranked) with the
+- **`text:` magic predicates** — `text:matches` (AND), `text:matchesAny` (OR), `text:phrase` (adjacency), `text:near` (proximity/slop, relevance-ranked) with the
   `text:slop N` and `text:score ?s` companions. The query string must be a **constant**
   literal, the match subject a variable, and an unknown `text:` IRI is a hard error.
+- **Opt-in fuzzy search** — the default-OFF `fuzzy` feature adds `TextIndex::fuzzy(term, max_distance)` and `text:fuzzy`, backed by bounded deletion-neighbour candidates and exact Levenshtein verification (default one, hard cap two). [GPT-5.6] sq-lsp7k.14
 - **BM25 ranking, exact-token semantics** — UAX #29 word segmentation + Unicode
   lowercasing; **no stemming, no stopword list, no diacritic folding** (`café` ≠ `cafe`)
   — language-neutral by design. Only plain / `xsd:string` / language-tagged literals are
@@ -87,8 +87,8 @@ let r = query_text(&graph, r#"
 - **IRI and label completion** — `CompletionIndex::build(&graph)` indexes IRIs, local
   names, `rdfs:label`, and `skos:prefLabel`. `complete(prefix, k, scores)` does
   deterministic case-insensitive matching with caller-injected scores; no fuzzy matching.
-- **Opt-in phrase positions** — the cheap default (`TextIndex::build`) stores **no**
-  positions (8 B per token/doc pair); `build_with_positions` enables `phrase` /
+- **Index metrics / phrase positions** — `len`, `token_count`, and `total_postings` count documents, distinct tokens, and token/document posting pairs. The cheap default (`TextIndex::build`) stores **no**
+  positions (8 B per pair); `build_with_positions` enables `phrase` /
   `phrase_near`. A phrase query against a positionless index is a **hard query error**
   (the bare `phrase()` method panics) — only callers that need it pay for it.
 - **Incremental upkeep** — `apply_delta` indexes newly inserted string literals

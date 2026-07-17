@@ -1,0 +1,10 @@
+# Feature-matrix fragment for `sparq-reason-dl`.
+#
+# [GPT-5.6] sq-zfwzq: `dl_transitive` is default-OFF and gates the structural
+# `owl:TransitiveProperty` axiom, the ALCHS ∀₊ rule, and its oracle/blocking tests.
+# Compose it with `dispatch` so this leg also executes the feature-gated
+# DirectChecker consistency/entailment path rather than compiling those tests empty.
+- name: "sparq-reason-dl (dl_transitive — ALCHS transitive-role tableau)"
+  crate: "sparq-reason-dl"
+  features: "dispatch,dl_transitive"
+  test: true

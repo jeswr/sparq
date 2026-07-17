@@ -1,11 +1,11 @@
 ---
 name: streaming-rsp
-description: Use when running continuous/standing SPARQL over a live RDF triple stream with the sparq engine — sliding/tumbling time windows (RANGE/STEP), count (ROWS) windows, opt-in gap-triggered session windows, RSTREAM/ISTREAM/DSTREAM output, RSP-QL surface syntax (REGISTER STREAM, FROM NAMED WINDOW ... ON ... RANGE/STEP), and multi-window joins (WINDOW <w1>{} JOIN WINDOW <w2>{}). Covers the sparq-rsp crate's ContinuousQuery / ContinuousConstruct / ContinuousAsk / ContinuousMultiQuery / RspqlQuery / WindowSpec.
+description: Use when running continuous/standing SPARQL over a live RDF triple stream with the sparq engine — sliding/tumbling time windows (RANGE/STEP), count (ROWS) windows, opt-in textual T0/MAXDELAY clauses, opt-in gap-triggered session windows, opt-in closed-window scalar aggregates, RSTREAM/ISTREAM/DSTREAM output, RSP-QL surface syntax (REGISTER STREAM, FROM NAMED WINDOW ... ON ... RANGE/STEP), and multi-window joins (WINDOW <w1>{} JOIN WINDOW <w2>{}). Covers the sparq-rsp crate's ContinuousQuery / ContinuousConstruct / ContinuousAsk / ContinuousMultiQuery / RspqlQuery / WindowSpec / window_aggregate.
 ---
 
 # sparq-streaming-rsp
 
-`sparq-rsp` runs **windowed continuous SPARQL** (RSP-QL-style RDF Stream Processing) over a stream of `(triple, timestamp)` elements, as a deterministic **synchronous library** — no async runtime, no wall clock, no service. You push timestamped triples; it closes windows on a watermark and fires your callback once per closed window with the SELECT / CONSTRUCT / ASK result. It is a fully isolated, opt-in crate: nothing else in the workspace depends on it, and the core engine and the **lean** `sparq-wasm` bundle carry zero streaming code (streaming ships as a *separate*, lazy-loaded `sparq-rsp-wasm` bundle — see below). Time/count windows are the default surface; gap-triggered session windows require the default-off `session_windows` cargo feature.
+`sparq-rsp` runs **windowed continuous SPARQL** (RSP-QL-style RDF Stream Processing) over a stream of `(triple, timestamp)` elements, as a deterministic **synchronous library** — no async runtime, no wall clock, no service. You push timestamped triples; it closes windows on a watermark and fires your callback once per closed window with the SELECT / CONSTRUCT / ASK result. It is a fully isolated, opt-in crate: nothing else in the workspace depends on it, and the core engine and the **lean** `sparq-wasm` bundle carry zero streaming code (streaming ships as a *separate*, lazy-loaded `sparq-rsp-wasm` bundle — see below). Time/count windows are the default surface; textual window origins and lateness tolerances require the default-off `window-origin` cargo feature, while gap-triggered session windows require `session_windows`.
 
 ## Quickstart
 
@@ -13,7 +13,7 @@ description: Use when running continuous/standing SPARQL over a live RDF triple 
 
 ```toml
 [dependencies]
-sparq-rsp = { path = "../sparq/crates/sparq-rsp" } # add features = ["session_windows"] for sessions
+sparq-rsp = { path = "../sparq/crates/sparq-rsp" } # features: session_windows, window-aggregate, window-origin
 oxrdf = { version = "0.3", features = ["rdf-12"] } # the term model (Term/NamedNode/Literal)
 ```
 
@@ -89,6 +89,10 @@ ContinuousQuery::register(sparql: &str, spec: WindowSpec) -> Result<ContinuousQu
   .flush(on_result: impl FnMut(WindowResult)) -> Result<(), String>
   .late_dropped() -> u64            // arrivals dropped because every covering window had closed
 
+// --- Optional closed-window scalar fold (feature = "window-aggregate") ---
+enum Agg { Count, Sum, Avg, Min, Median, Max } // [GPT-5.6] sq-sfle1
+window_aggregate(window: &WindowResult, var: &str, aggregate: Agg) -> Option<f64>
+
 // --- Continuous CONSTRUCT: GraphResult { start, end, triples: Vec<Triple> } (stream->stream) ---
 ContinuousConstruct::register(sparql: &str, spec: WindowSpec) -> Result<_, String>
   .with_r2s / .with_mode / .push(.., FnMut(GraphResult)) / .flush / .late_dropped
@@ -107,6 +111,7 @@ ContinuousMultiQuery::register(rspql_text: &str) -> Result<ContinuousMultiQuery,
   .window_iris() -> Vec<&NamedNode>   .output_stream() -> Option<&NamedNode>   .r2s() -> R2S
 
 // --- Low-level S2R only (no query): WindowedStream<[Term;3]>, Window { start, end, triples } ---
+TripleStream::new().push(triple, ts).push_item(item).push_batch(items)  // batch preserves iterator order
 WindowedStream::empty(spec) / ::new(stream: TripleStream, spec)
   .push(triple, ts)  .take_closed() -> Vec<Window>  .flush() -> Vec<Window>  .late_dropped()
 ```
@@ -143,6 +148,14 @@ cargo feature, then use `WindowSpec::session(10)`. Events at `t` and `t + 9`
 share a session; events at `t` and `t + 10` start separate sessions. The gap is
 measured in the stream's application-supplied `u64` timestamp ticks, never wall
 clock, and reported bounds are inclusive `[first_event_ts, last_event_ts]`.
+
+**Fold an emitted SELECT window to a scalar:** enable `window-aggregate`, then call
+`window_aggregate(&result, "v", Agg::Sum)`. `Count` includes every emitted row,
+even when `v` is unbound or non-numeric. `Sum`/`Avg`/`Min`/`Median`/`Max` use
+well-formed XSD numeric literal bindings only. `Median` returns the middle numeric
+binding after sorting, or the arithmetic mean of the two middle bindings for an even
+count. An unknown projected variable returns `None`; an empty numeric input returns
+`Some(0.0)` for `Sum` and `None` for `Avg`/`Min`/`Median`/`Max`.
 
 **CONSTRUCT to transform a stream into another stream (each window -> a graph):**
 
@@ -184,18 +197,29 @@ q.flush(|_| {})?;
 # Ok::<(), String>(())
 ```
 
+With the default-off `window-origin` feature, a time-window declaration may
+append `T0 <duration>` and then `MAXDELAY <duration>` in that fixed order:
+
+```text
+FROM NAMED WINDOW <http://ex/w1> ON <http://ex/temp> RANGE 10 STEP 5 T0 100 MAXDELAY 3
+```
+
+Both clauses accept the same ISO-8601 or bare-integer duration literals as
+`RANGE` and `STEP`. `T0` changes the window origin; `MAXDELAY` sets the
+event-time lateness tolerance. Either clause may be omitted.
+
 **Just want windows, no SPARQL?** Use `WindowedStream` directly: `let mut ws = WindowedStream::empty(WindowSpec::time(10,10)); ws.push(t, ts); for w in ws.take_closed() { /* w.start, w.end, w.triples */ }`.
 
 ## Gotchas / feature flags / prerequisites
 
-- **No async and no clock.** Timestamps are **application-supplied `u64`s** (logical ticks, epoch millis, sequence numbers — your scale); the engine never reads the wall clock. Time advances only through pushed timestamps. A quiet stream closes nothing until the next push or `flush()`. The only cargo feature is default-off `session_windows`; time/count behaviour is unchanged without it.
+- **No async and no clock.** Timestamps are **application-supplied `u64`s** (logical ticks, epoch millis, sequence numbers — your scale); the engine never reads the wall clock. Time advances only through pushed timestamps. A quiet stream closes nothing until the next push or `flush()`. Default-off features are `session_windows`, `window-aggregate`, and `window-origin`; time/count behaviour and the established textual parser are unchanged without them.
 - **Window bounds depend on the window type.** Time windows are half-open `[start, end)`: `RANGE 10 STEP 10` gives `[0,10) [10,20) …` (a triple at `ts=10` is in `[10,20)` only). `step < range` ⇒ overlapping (sliding) windows; `step > range` leaves uncovered gaps. Count and session windows report inclusive `[first.ts, last.ts]` content bounds. For sessions, a consecutive gap `< gap` extends the run and a gap `>= gap` splits it.
 - **Watermark + lateness.** A window closes when `max_ts_seen − max_delay` reaches its `end`. `with_max_delay(d)` is the out-of-order tolerance (default 0 = close at first sight of a newer-window triple). An arrival whose *every* covering window has already closed is dropped and counted in `late_dropped()`. `flush()` ignores `max_delay` and closes everything up to the last timestamp seen.
 - **Empty windows are reported** (evaluated + delivered) when the watermark jumps a gap — DSTREAM needs to observe results disappear. Windows wholly closed before the first arrival's watermark are skipped (a stream starting at `ts=10⁹` won't replay a billion empties).
 - **Materialisation is set-semantic:** a window is an RDF *graph*, so the same triple at several timestamps within one window counts once. CONSTRUCT results are triple sets (exact set-diff for I/DSTREAM); SELECT results are multisets diffed by 64-bit `FxHasher` row hashes (a hash collision could theoretically suppress a diff — accepted as vanishingly unlikely).
 - **`register` rejects the wrong query form:** `ContinuousQuery` requires SELECT, `ContinuousConstruct` requires CONSTRUCT, `ContinuousAsk` requires ASK. Errors come back as `Err(String)` at registration. `push`/`flush` errors are engine evaluation errors.
 - **`with_mode` must precede the first push** (switching mode resets stream state). Default `EvalMode::PersistentDict` wins every measured scenario and bounds dictionary memory to the *live* window vocabulary via refcount-exact compaction. `Rebuild` bounds memory to one window. `Delta` keeps one live graph evolved by per-slide deltas (kept for huge-window / cheap-eval cases; never the benchmark winner); the consecutive-window diff itself runs on the shared eval substrate (`sparq-substrate` `join::delta::DeltaTable`, id-level, monomorphic — the previous window's build table persists across slides so it is never re-hashed). [FABLE-5] sq-2n1q3.4 `Snapshot` is `Delta` plus a cheap `O(overlay)` **immutable point-in-time** `Graph::snapshot` per closed window — a logically-independent, `Send + Sync` view the engine (or your callback) can retain or publish across windows, where `Delta`'s live `&Graph` borrow cannot. Results are identical across all four modes.
-- **RSP-QL parser scope (`RspqlQuery::parse` / `ContinuousMultiQuery`):** parses `REGISTER [STREAM|RSTREAM|ISTREAM|DSTREAM] <out> AS`, `FROM NAMED WINDOW <w> ON <s> [RANGE <dur> [STEP <dur>]]` (tumbling when STEP omitted), and `WINDOW <w> { … }` (rewritten to `GRAPH <w> { … }`). Durations are ISO-8601 (`PT10S`, `PT1M30S`, `PT2H`, `P1D`; **seconds resolution**, years/months/weeks rejected) or bare integers (logical ticks). IRIs may be `<…>` or prefixed names resolved against the body's `PREFIX`/`BASE`. **Scoped out** (use the programmatic `WindowSpec` instead): window *variables* (`WINDOW ?w`), `ROWS` count windows, session windows, the `t0`/`max_delay` parameters, and relative `NOW-PT…TO…` bounds. `ContinuousMultiQuery` requires ≥2 windows (use `ContinuousQuery` for one); 3 or more windows work — each gets its own S2R state on the shared synchronized clock. RSTREAM/ISTREAM/DSTREAM are all supported: `REGISTER ISTREAM <out> AS` emits per-tick added rows; `REGISTER DSTREAM <out> AS` emits per-tick removed rows (multiset diff against the previous tick's full join result). [SONNET-4.6] sq-2n1q3.3
+- **RSP-QL parser scope (`RspqlQuery::parse` / `ContinuousMultiQuery`):** parses `REGISTER [STREAM|RSTREAM|ISTREAM|DSTREAM] <out> AS`, `FROM NAMED WINDOW <w> ON <s> [RANGE <dur> [STEP <dur>] [T0 <dur>] [MAXDELAY <dur>]]` (tumbling when STEP omitted), and `WINDOW <w> { … }` (rewritten to `GRAPH <w> { … }`). The `T0`/`MAXDELAY` clauses require `window-origin`; they are optional, ordered, and time-window-only. Durations are ISO-8601 (`PT10S`, `PT1M30S`, `PT2H`, `P1D`; **seconds resolution**, years/months/weeks rejected) or bare integers (logical ticks). IRIs may be `<…>` or prefixed names resolved against the body's `PREFIX`/`BASE`. **Scoped out** (use the programmatic `WindowSpec` instead): window *variables* (`WINDOW ?w`), `ROWS` count windows, session windows, and relative `NOW-PT…TO…` bounds. `ContinuousMultiQuery` requires ≥2 windows (use `ContinuousQuery` for one); 3 or more windows work — each gets its own S2R state on the shared synchronized clock. RSTREAM/ISTREAM/DSTREAM are all supported: `REGISTER ISTREAM <out> AS` emits per-tick added rows; `REGISTER DSTREAM <out> AS` emits per-tick removed rows (multiset diff against the previous tick's full join result). [SONNET-4.6] sq-2n1q3.3
 - **Term model is `oxrdf`** (`oxrdf::Term`/`NamedNode`/`Literal`); stream elements are `[Term; 3]`. Add `oxrdf` with `features = ["rdf-12"]` to match the workspace.
 
 ## Conformance / correctness ratchet (honest scope)

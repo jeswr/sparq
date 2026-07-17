@@ -48,3 +48,11 @@
   crate: "sparq-nlq"
   features: "nlq-endpoint"
   test: true
+
+# [GPT-5.6] sq-kufo1: policy accessors are compiled and tested only under the
+# existing default-off `query-policy` feature. This leg executes the exhaustive
+# SELECT/ASK/CONSTRUCT/DESCRIBE result-form checks and the update-policy checks.
+- name: "sparq-nlq (query-policy — parsed algebra policy + result-form classification)"
+  crate: "sparq-nlq"
+  features: "query-policy"
+  test: true

@@ -9,6 +9,8 @@
 //   (b) GRAPH view: a CONSTRUCT of the same closure renders the inferred edges dashed with
 //       the legend, and clicking an inferred edge opens the same panel. Turning inference
 //       Off removes every affordance (asserted-only results carry nothing to explain).
+//   (c) [GPT-5.6] The standalone Graph tool, raw N-Triples result lines, and the Inference
+//       tool's entailed-facts browser expose the same exact click-to-explain contract.
 //
 // NON-VACUOUS by design: the gating Playwright lane (gui.yml) BUILDS the W-reason bundle
 // (npm run build:reason-wasm, `--features explain`) before exporting the app, so `why()` is
@@ -20,6 +22,8 @@
 //   [data-inferred-row]           — a table row whose s/p/o the closure ADDED
 //   [data-entailed-edge]          — an inferred (dashed, clickable) GRAPH edge
 //   [data-graph-inferred-legend]  — the graph view's inferred-edge legend strip
+//   [data-inferred-line] / [data-ntriples-explain] — raw inferred result line + why?
+//   [data-entailed-facts-browser] / [data-entailed-fact] — closure-additions browser
 //   [data-proof-panel] / [data-proof-node] / [data-proof-rule=…] / [data-proof-note]
 //   [data-proof-triple] / [data-proof-full-triple] / [data-proof-close]
 //
@@ -201,5 +205,85 @@ test.describe("why-proof-tree", () => {
     await expect(page.locator("[data-entailed-edge]")).toHaveCount(0);
     await runQuery(page, SELECT_ALL, '[data-result-view="table"]');
     await expect(page.locator("[data-explain-trigger]")).toHaveCount(0);
+  });
+
+  test("(c) Graph tool, N-Triples lines, and entailed-facts browser explain exact additions", async ({
+    page,
+  }) => {
+    // [GPT-5.6] One multi-step closure drives all three newly-covered surfaces.
+    await importPasteReplace(page, CHAIN_TTL);
+    const inferencePanel = await selectRdfsReady(page);
+
+    // Inference tool: browse closure additions only; asserted rex a Dog is absent, while
+    // inferred rex a Animal is present and opens a real proof.
+    const browser = inferencePanel.locator("[data-entailed-facts-browser]");
+    await expect(browser).toBeVisible();
+    const entailedFacts = browser.locator("[data-entailed-fact]");
+    await expect
+      .poll(async () => await entailedFacts.count(), { timeout: 10_000 })
+      .toBeGreaterThanOrEqual(2);
+    await expect(
+      entailedFacts.filter({ hasText: "rex" }).filter({ hasText: "Dog" }),
+    ).toHaveCount(0);
+    const browserAnimal = entailedFacts
+      .filter({ hasText: "rex" })
+      .filter({ hasText: "Animal" });
+    await expect(browserAnimal).toHaveCount(1);
+    await browserAnimal.locator("[data-entailed-fact-explain]").click();
+    let proof = page.locator("[data-proof-panel]");
+    await expect(
+      proof.locator('[data-proof-node][data-proof-rule="asserted"]').first(),
+    ).toBeVisible({ timeout: 30_000 });
+    await proof.locator("[data-proof-close]").click();
+
+    // Standalone Graph tool: its own run result receives the inferred-edge prop and hosts the
+    // same proof overlay (the original follow-up's one-prop wiring gap).
+    await page.locator('[data-tool="graph-view"]').click();
+    const graphTool = page.locator('[data-tool-panel="graph-view"]');
+    await expect(graphTool).toBeVisible();
+    await fillReactTextarea(page, "#graph-view-query", CONSTRUCT_REX);
+    await graphTool.getByRole("button", { name: "Run", exact: true }).click();
+    await expect(graphTool.locator("[data-graph-inferred-legend]")).toBeVisible({
+      timeout: 60_000,
+    });
+    const toolEdges = graphTool.locator("[data-entailed-edge]");
+    await expect
+      .poll(async () => await toolEdges.count(), { timeout: 10_000 })
+      .toBeGreaterThanOrEqual(2);
+    await toolEdges.first().click();
+    proof = graphTool.locator("[data-proof-panel]");
+    await expect(
+      proof.locator('[data-proof-node][data-proof-rule="asserted"]').first(),
+    ).toBeVisible({ timeout: 30_000 });
+    await proof.locator("[data-proof-close]").click();
+
+    // Query text view: raw N-Triples preserves the one-line-one-fact identity. Inferred lines
+    // are marked and explainable; the asserted rex a Dog line has neither marker nor button.
+    // The Query tool remembers its selected result tab; wait for the graph result itself rather
+    // than a table-view-only wrapper before switching explicitly to the text view.
+    await runQuery(page, CONSTRUCT_REX, '[data-tab="query"] [data-result-view="graph"]');
+    await page.getByRole("button", { name: "N-Triples / Turtle", exact: true }).click();
+    await page.getByRole("button", { name: "N-Triples", exact: true }).click();
+    const raw = page.locator("[data-ntriples-lines]");
+    await expect(raw).toBeVisible();
+    const inferredLines = raw.locator("[data-inferred-line]");
+    await expect
+      .poll(async () => await inferredLines.count(), { timeout: 10_000 })
+      .toBeGreaterThanOrEqual(2);
+    const assertedLine = raw
+      .locator(":scope > div")
+      .filter({ hasText: "rex" })
+      .filter({ hasText: "Dog" });
+    await expect(assertedLine).toHaveCount(1);
+    await expect(assertedLine.locator("[data-ntriples-explain]")).toHaveCount(0);
+    const rawAnimal = inferredLines
+      .filter({ hasText: "rex" })
+      .filter({ hasText: "Animal" });
+    await expect(rawAnimal).toHaveCount(1);
+    await rawAnimal.locator("[data-ntriples-explain]").click();
+    proof = page.locator('[data-tab="query"] [data-proof-panel]');
+    await expect(
+      proof.locator('[data-proof-node][data-proof-rule="asserted"]').first(),
+    ).toBeVisible({ timeout: 30_000 });
   });
 });

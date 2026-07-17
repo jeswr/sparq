@@ -23,6 +23,10 @@
 
 pub mod acl;
 pub mod mode;
+// The opt-in ODRL policy gate seam on the read/query path (`odrl-authz`, sq-elg47) — see the
+// module's own docs. Native-only: the wasm request core keeps the policy layer out.
+#[cfg(all(feature = "odrl-authz", not(target_arch = "wasm32")))]
+pub mod odrl;
 pub mod wac;
 pub mod wac_allow;
 

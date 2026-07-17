@@ -52,7 +52,9 @@ use crate::ldp::patch::{
 };
 use crate::ldp::range::{self, RangeOutcome};
 use crate::ldp::target::{parse_target, LdpTarget};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::notifications::ws::link_headers;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::notifications::{ActivityType, NotificationHub};
 use crate::store::{DeleteOutcome, Resource, ResourceMeta, Store};
 
@@ -137,10 +139,17 @@ fn unchecked_const_iri(iri: &str) -> NamedNode {
 /// Shared state for the LDP handlers: the store + the server's public base URL + the notification hub.
 ///
 /// The hub is the SINGLE emit seam: after a successful mutation the handler calls
-/// [`NotificationHub::notify`] (the only notification coupling in the write path — no handler
+/// `NotificationHub::notify` (the only notification coupling in the write path — no handler
 /// refactor). The hub is cheap to clone (an `Arc` inside) and shared with the notification routes.
 pub struct LdpState<S: Store> {
     pub store: S,
+    /// [GPT-5.6] sq-r1ei8: request-local snapshot barrier shared by LDP writes
+    /// and the optional SPARQL endpoint. Queries hold a read guard while they
+    /// assemble and evaluate; every mutation holds a write guard, so one server
+    /// instance cannot expose a dataset assembled across an interleaved write.
+    /// Compiled out with `sparql-endpoint`, including its dependency.
+    #[cfg(feature = "sparql-endpoint")]
+    sparql_snapshot: async_lock::RwLock<()>,
     /// The server's public base URL. PRIVATE on purpose: [`discovery_link_values`] is a cache derived
     /// from it at construction, so a post-construction mutation of `base_url` would desync the two
     /// (the cached discovery `Link` headers would advertise the OLD storage-description URL while
@@ -149,9 +158,10 @@ pub struct LdpState<S: Store> {
     /// cache atomically. Internal `self.base_url` reads within this module are fine (the field stays
     /// in scope of the impl).
     base_url: String,
+    #[cfg(not(target_arch = "wasm32"))]
     pub notifications: NotificationHub,
     /// The `WWW-Authenticate` challenge to emit on a 401 for an anonymous request to a resource that
-    /// requires authentication. Populated from the [`AuthContext`](crate::auth::AuthContext) at router
+    /// requires authentication. Populated from the `AuthContext` at router
     /// assembly ([`AppState::new`](crate::app::AppState::new)) so the LDP layer can answer 401 +
     /// challenge WITHOUT a handle to the verifier; a default Bearer/DPoP challenge is used if unset.
     pub www_authenticate: String,
@@ -162,6 +172,12 @@ pub struct LdpState<S: Store> {
     /// `SOLID_SERVER_ACL_CACHE_CAPACITY=0` ([`AclCache::disabled`]) yields byte-identical pre-cache
     /// behaviour. Configured at router assembly via [`set_acl_cache`](Self::set_acl_cache).
     pub acl_cache: AclCache,
+    /// [SONNET-4.6] sq-elg47: the opt-in ODRL policy gate consulted AFTER the WAC decision on the
+    /// read/query path (deny-overrides, permit-extends — see [`crate::authz::odrl`]). `None` (the
+    /// default) is behaviour-identical to the feature being off; attached at router assembly via
+    /// [`set_odrl_gate`](Self::set_odrl_gate).
+    #[cfg(all(feature = "odrl-authz", not(target_arch = "wasm32")))]
+    pub odrl_gate: Option<std::sync::Arc<dyn crate::authz::odrl::OdrlGate>>,
     /// The notification-discovery `Link` header VALUES (`describedby` + `solid:storageDescription`,
     /// both → the storage-description doc), PRECOMPUTED ONCE from `base_url` at construction.
     ///
@@ -182,6 +198,7 @@ pub struct LdpState<S: Store> {
 /// `add_discovery_links` formatting EXACTLY (`<{target}>; rel="{rel}"` per `link_headers` pair,
 /// skipping any value that cannot be header-encoded), so the emitted lines are byte-identical — only
 /// computed once per server instead of once per request.
+#[cfg(not(target_arch = "wasm32"))]
 fn build_discovery_link_values(base_url: &str) -> Vec<HeaderValue> {
     link_headers(base_url)
         .into_iter()
@@ -189,6 +206,11 @@ fn build_discovery_link_values(base_url: &str) -> Vec<HeaderValue> {
             HeaderValue::from_str(&format!("<{target}>; rel=\"{rel}\"")).ok()
         })
         .collect()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn build_discovery_link_values(_base_url: &str) -> Vec<HeaderValue> {
+    Vec::new()
 }
 
 /// The fallback `WWW-Authenticate` challenge used when no verifier-derived one was injected (e.g. a
@@ -199,11 +221,29 @@ const DEFAULT_WWW_AUTHENTICATE: &str = "DPoP error=\"invalid_token\", scope=\"we
 impl<S: Store> LdpState<S> {
     /// Build an LDP state with a fresh, isolated notification hub.
     pub fn new(store: S, base_url: impl Into<String>) -> Self {
-        Self::with_hub(store, base_url, NotificationHub::new())
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self::with_hub(store, base_url, NotificationHub::new())
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let base_url = base_url.into();
+            let discovery_link_values = build_discovery_link_values(&base_url);
+            Self {
+                store,
+                #[cfg(feature = "sparql-endpoint")]
+                sparql_snapshot: async_lock::RwLock::new(()),
+                base_url,
+                www_authenticate: DEFAULT_WWW_AUTHENTICATE.to_string(),
+                acl_cache: AclCache::new(crate::acl_cache::DEFAULT_ACL_CACHE_CAPACITY),
+                discovery_link_values,
+            }
+        }
     }
 
     /// Build an LDP state sharing an EXISTING notification hub (so the LDP emit path and the
     /// notification receive routes register against the same registry).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn with_hub(store: S, base_url: impl Into<String>, notifications: NotificationHub) -> Self {
         let base_url = base_url.into();
         // Precompute the request-invariant discovery `Link` values ONCE from `base_url` (see the
@@ -211,12 +251,16 @@ impl<S: Store> LdpState<S> {
         let discovery_link_values = build_discovery_link_values(&base_url);
         Self {
             store,
+            #[cfg(feature = "sparql-endpoint")]
+            sparql_snapshot: async_lock::RwLock::new(()),
             base_url,
             notifications,
             www_authenticate: DEFAULT_WWW_AUTHENTICATE.to_string(),
             // Default-on: the ACL cache is enabled at the default capacity. `main.rs` overrides this
             // from `SOLID_SERVER_ACL_CACHE_CAPACITY` at router assembly (`=0` ⇒ disabled).
             acl_cache: AclCache::new(crate::acl_cache::DEFAULT_ACL_CACHE_CAPACITY),
+            #[cfg(feature = "odrl-authz")]
+            odrl_gate: None,
             discovery_link_values,
         }
     }
@@ -234,10 +278,31 @@ impl<S: Store> LdpState<S> {
         self.acl_cache = acl_cache;
     }
 
+    /// [SONNET-4.6] sq-elg47: attach the ODRL read/query gate (router assembly / embedder seam).
+    /// The default (no gate) is behaviour-identical to the `odrl-authz` feature being off.
+    #[cfg(all(feature = "odrl-authz", not(target_arch = "wasm32")))]
+    pub fn set_odrl_gate(&mut self, gate: std::sync::Arc<dyn crate::authz::odrl::OdrlGate>) {
+        self.odrl_gate = Some(gate);
+    }
+
     /// The server's public base URL. The read accessor for the (now-private) `base_url` field — used
     /// by router assembly ([`AppState`](crate::app)) and any external consumer.
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Hold the server-local dataset stable while the SPARQL handler assembles
+    /// and evaluates a query. LDP reads do not need the barrier: their existing
+    /// per-resource read plan is already internally consistent.
+    #[cfg(feature = "sparql-endpoint")]
+    pub(crate) async fn sparql_snapshot_read(&self) -> async_lock::RwLockReadGuard<'_, ()> {
+        self.sparql_snapshot.read().await
+    }
+
+    /// Serialize an LDP mutation against in-flight SPARQL dataset snapshots.
+    #[cfg(feature = "sparql-endpoint")]
+    async fn sparql_snapshot_write(&self) -> async_lock::RwLockWriteGuard<'_, ()> {
+        self.sparql_snapshot.write().await
     }
 
     /// Replace the base URL, REBUILDING the derived discovery-link cache so the two never desync.
@@ -330,7 +395,7 @@ impl<S: Store> LdpState<S> {
         let candidates = wac.read_plan_candidates(&target.iri);
         let acl_iris: Vec<String> = candidates.iter().map(|c| c.acl.clone()).collect();
         let plan = self.store.read_plan(&target.iri, &acl_iris).await?;
-        match wac
+        let decision = wac
             .authorize_read_planned(
                 required,
                 token.web_id.as_deref(),
@@ -338,11 +403,59 @@ impl<S: Store> LdpState<S> {
                 &candidates,
                 &plan.acls,
             )
-            .await?
-        {
+            .await?;
+        // [SONNET-4.6] sq-elg47: compose the opt-in ODRL gate's verdict AFTER the WAC decision
+        // (deny-overrides, permit-extends — see `crate::authz::odrl`). Compiled out entirely when
+        // the `odrl-authz` feature is off; an unattached gate leaves the decision untouched.
+        #[cfg(all(feature = "odrl-authz", not(target_arch = "wasm32")))]
+        let decision =
+            self.compose_odrl_read(&target.iri, required, token.web_id.as_deref(), decision);
+        match decision {
             ReadDecision::Allow(perms) => Ok((perms, plan.target)),
             ReadDecision::Unauthenticated => Err(self.unauthenticated()),
             ReadDecision::Forbidden => Err(ServerError::Forbidden),
+        }
+    }
+
+    /// [SONNET-4.6] sq-elg47: compose the attached ODRL gate's verdict with the WAC read decision
+    /// for `target_iri` — deny-overrides (a [`OdrlVerdict::Deny`](crate::authz::odrl::OdrlVerdict)
+    /// beats any static WAC grant, keeping the 401-vs-403 split on `web_id`), permit-extends (a
+    /// `Permit` admits the read even where WAC grants nothing, ONLY when the required mode is
+    /// `Read` — it never widens the `.acl`⇒Control requirement; the resulting advertisement is
+    /// read-scoped, `user=read` with no public modes — the fail-closed direction, matching the
+    /// server ODRL lane's read-scoped advertisement rule). `NotApplicable` — or no gate attached —
+    /// leaves the WAC decision unchanged.
+    #[cfg(all(feature = "odrl-authz", not(target_arch = "wasm32")))]
+    fn compose_odrl_read(
+        &self,
+        target_iri: &str,
+        required: AccessMode,
+        web_id: Option<&str>,
+        wac: ReadDecision,
+    ) -> ReadDecision {
+        use crate::authz::odrl::OdrlVerdict;
+        let Some(gate) = self.odrl_gate.as_deref() else {
+            return wac;
+        };
+        match gate.decide_read(target_iri, web_id) {
+            OdrlVerdict::NotApplicable => wac,
+            OdrlVerdict::Deny => {
+                if web_id.is_none() {
+                    ReadDecision::Unauthenticated
+                } else {
+                    ReadDecision::Forbidden
+                }
+            }
+            OdrlVerdict::Permit => match wac {
+                allowed @ ReadDecision::Allow(_) => allowed,
+                _ if required == AccessMode::Read => {
+                    ReadDecision::Allow(crate::authz::EffectivePermissions {
+                        user: [AccessMode::Read].into_iter().collect(),
+                        public: std::collections::BTreeSet::new(),
+                    })
+                }
+                denied => denied,
+            },
         }
     }
 
@@ -977,6 +1090,8 @@ pub async fn put_handler<S: Store>(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ServerError> {
+    #[cfg(feature = "sparql-endpoint")]
+    let _snapshot_guard = state.sparql_snapshot_write().await;
     let target = parse_target(&state.base_url, uri.path())?;
 
     // WAC for PUT — EXISTENCE-NON-DISCLOSURE (decisions/0003): a PUT requires `acl:Write` on the
@@ -1081,20 +1196,23 @@ pub async fn put_handler<S: Store>(
     // `write`, with NO `ldp:contains` edge added to the parent above). So even on a CREATE its parent
     // membership did NOT change: pass `None` for the emit parent so the hub does NOT derive a spurious
     // container-membership `Add` for a resource the container does not actually contain.
-    let activity = if existed {
-        ActivityType::Update
-    } else {
-        ActivityType::Create
-    };
-    let emit_parent = if existed || crate::authz::is_acl_resource(&target.iri) {
-        None
-    } else {
-        parent.clone()
-    };
-    state
-        .notifications
-        .notify(&target.iri, activity, emit_parent.as_deref())
-        .await;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let activity = if existed {
+            ActivityType::Update
+        } else {
+            ActivityType::Create
+        };
+        let emit_parent = if existed || crate::authz::is_acl_resource(&target.iri) {
+            None
+        } else {
+            parent.clone()
+        };
+        state
+            .notifications
+            .notify(&target.iri, activity, emit_parent.as_deref())
+            .await;
+    }
 
     // A PUT to an `.acl` resource changed the access rules: invalidate the cached parse so the NEXT
     // read resolves against the new ACL immediately (belt-and-braces over the etag gate; see
@@ -1116,6 +1234,8 @@ pub async fn post_handler<S: Store>(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ServerError> {
+    #[cfg(feature = "sparql-endpoint")]
+    let _snapshot_guard = state.sparql_snapshot_write().await;
     let container = parse_target(&state.base_url, uri.path())?;
     // WAC: a POST to a container requires `acl:Append` on the container (a writer also satisfies it).
     // Anonymous ⇒ 401, authenticated-but-unauthorized ⇒ 403. Authorize BEFORE the container-shape /
@@ -1248,6 +1368,7 @@ pub async fn post_handler<S: Store>(
 
     // EMIT: a POST always CREATES the child and GROWS the container's membership — Create on the child
     // + a derived Add on the container (the hub fans both from this one call).
+    #[cfg(not(target_arch = "wasm32"))]
     state
         .notifications
         .notify(&child_iri, ActivityType::Create, Some(&container.iri))
@@ -1280,6 +1401,8 @@ pub async fn delete_handler<S: Store>(
     uri: axum::http::Uri,
     headers: HeaderMap,
 ) -> Result<Response, ServerError> {
+    #[cfg(feature = "sparql-endpoint")]
+    let _snapshot_guard = state.sparql_snapshot_write().await;
     let target = parse_target(&state.base_url, uri.path())?;
 
     // WAC for DELETE (Solid WAC write-access matrix). Authorize BEFORE the existence check so an
@@ -1365,6 +1488,7 @@ pub async fn delete_handler<S: Store>(
             DeleteOutcome::Deleted => {
                 // EMIT only on an actual delete: Delete on the container + a derived Remove on its
                 // parent (membership shrank). NotEmpty/NotFound deleted nothing ⇒ no notification.
+                #[cfg(not(target_arch = "wasm32"))]
                 state
                     .notifications
                     .notify(&target.iri, ActivityType::Delete, parent.as_deref())
@@ -1384,6 +1508,7 @@ pub async fn delete_handler<S: Store>(
         // now report it absent and the walk inherits — invalidating frees the slot at once).
         state.invalidate_acl_if_acl(&target.iri);
         // EMIT: Delete on the resource + a derived Remove on its parent container.
+        #[cfg(not(target_arch = "wasm32"))]
         state
             .notifications
             .notify(&target.iri, ActivityType::Delete, parent.as_deref())
@@ -1407,6 +1532,8 @@ pub async fn patch_handler<S: Store>(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ServerError> {
+    #[cfg(feature = "sparql-endpoint")]
+    let _snapshot_guard = state.sparql_snapshot_write().await;
     let target = parse_target(&state.base_url, uri.path())?;
 
     // Select the PATCH language from the Content-Type (ABSENT ⇒ 400, unsupported ⇒ 415) and parse the
@@ -1597,20 +1724,23 @@ pub async fn patch_handler<S: Store>(
     // a plain `write`, adding NO `ldp:contains` edge to the parent). So its parent membership did NOT
     // change even on a create: pass `None` for the emit parent so the hub does NOT derive a spurious
     // container-membership `Add` for a resource the container does not actually contain.
-    let activity = if existed {
-        ActivityType::Update
-    } else {
-        ActivityType::Create
-    };
-    let emit_parent = if existed || crate::authz::is_acl_resource(&target.iri) {
-        None
-    } else {
-        parent.clone()
-    };
-    state
-        .notifications
-        .notify(&target.iri, activity, emit_parent.as_deref())
-        .await;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let activity = if existed {
+            ActivityType::Update
+        } else {
+            ActivityType::Create
+        };
+        let emit_parent = if existed || crate::authz::is_acl_resource(&target.iri) {
+            None
+        } else {
+            parent.clone()
+        };
+        state
+            .notifications
+            .notify(&target.iri, activity, emit_parent.as_deref())
+            .await;
+    }
 
     // A PATCH to an `.acl` resource edited the access rules: invalidate the cached parse so the NEXT
     // read resolves against the patched ACL immediately.
@@ -2094,13 +2224,13 @@ async fn generate_unique<S: Store>(
     as_container: bool,
 ) -> Result<String, ServerError> {
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::UNIX_EPOCH;
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let prefix = stem.unwrap_or("resource");
     let suffix = if as_container { "/" } else { "" };
     // Seed with a coarse timestamp so names are unique across process restarts too.
-    let seed = SystemTime::now()
+    let seed = crate::clock::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
@@ -2275,6 +2405,32 @@ mod tests {
             iri: iri.to_string(),
             is_container: iri.ends_with('/'),
         }
+    }
+
+    #[cfg(feature = "sparql-endpoint")]
+    #[tokio::test]
+    async fn sparql_snapshot_read_guard_blocks_an_ldp_write_guard() {
+        // [GPT-5.6] sq-r1ei8 mutation witness: replacing the shared barrier
+        // with independent guards lets this writer finish during the snapshot.
+        let store = CompositeStore::new(InMemorySparqClient::new(), InMemoryBlobStore::new());
+        let state = Arc::new(LdpState::new(store, "https://pod.example"));
+        let read = state.sparql_snapshot_read().await;
+        let writer_state = Arc::clone(&state);
+        let mut writer = tokio::spawn(async move {
+            let _write = writer_state.sparql_snapshot_write().await;
+        });
+
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut writer)
+                .await
+                .is_err(),
+            "an LDP mutation must wait until the query snapshot is released"
+        );
+        drop(read);
+        tokio::time::timeout(std::time::Duration::from_secs(1), writer)
+            .await
+            .expect("writer resumes after the snapshot")
+            .expect("writer task completes");
     }
 
     fn link_values(headers: &HeaderMap) -> Vec<String> {

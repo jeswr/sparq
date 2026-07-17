@@ -68,8 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 The CLI, HTTP server, Python (`sparq-rdf` on PyPI — `import sparq`), and JS/WASM
-(`@jeswr/sparq`) mirror the same surface. Per-surface how-tos live in the
-[usage skills](skills/SKILL.md).
+(`@jeswr/sparq`) mirror the same surface. [GPT-5.6] The separate
+`@jeswr/solid-server` package hosts the Solid/LDP wasm adapter for loopback-only
+local development. Per-surface how-tos live in the [usage skills](skills/SKILL.md).
 
 ## ✨ Features
 
@@ -145,7 +146,8 @@ standard it implements.
   [Graph Store HTTP Protocol](https://www.w3.org/TR/sparql11-http-rdf-update/)
   [HTTP server](skills/http-server/SKILL.md), a WebAssembly /
   [JavaScript build](skills/javascript-wasm/SKILL.md), and a
-  [Python package](skills/python/SKILL.md).
+  [Python package](skills/python/SKILL.md), plus a
+  [Kubernetes Helm deployment](skills/helm-deploy/SKILL.md). <!-- [GPT-5.6] -->
 <!-- ANCHOR_END: interfaces -->
 
 > Agent skills — how to use sparq from Claude Code and other AI agents — are

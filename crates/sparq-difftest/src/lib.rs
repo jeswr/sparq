@@ -51,6 +51,15 @@
 //! fail-closed-asymmetry comparator ([`decision`]) shared by the trust/WAC/ODRL differential
 //! tests (a structural check, not a soundness proof).
 //!
+//! # Admission-decision overlap boundary
+//!
+//! [GPT-5.6] Admission-decision comparisons deliberately do not validate or reconcile a
+//! producer's contradictory `allow ∩ deny` outcome. In particular, a reference/baseline tuple
+//! present in both sets counts as already allowed for the structural
+//! `candidate.allow \ baseline.allow` check, so that overlap can mask a deny-to-allow escalation.
+//! Rejecting or normalising contradictory outcomes belongs to the producing policy harness and
+//! is a documented non-goal of this engine-independent comparator.
+//!
 //! Deliberately **not** here (separate DAG nodes / beads): blank-node isomorphism across oracles
 //! (`sq-qcnn.7`), wiring these comparators into the fuzz harness (`sq-qcnn.5`), the query/data
 //! generator extension (`sq-qcnn.6`), and the pluggable second-oracle adapter (`sq-qcnn.8`).
@@ -62,7 +71,9 @@ pub mod numeric;
 pub mod temporal;
 pub mod term;
 
-pub use decision::{decision_diff, fail_closed_asymmetry, DecisionDiff, DecisionOutcome};
+pub use decision::{
+    decision_diff, fail_closed_asymmetry, Baseline, Candidate, DecisionDiff, DecisionOutcome,
+};
 pub use json::{parse_results_json, QueryResults, Solution};
 pub use multiset::{multiset_equal, order_by_equal};
 pub use numeric::{canonical_double_string, numeric_equal, parse_numeric, NumericValue};

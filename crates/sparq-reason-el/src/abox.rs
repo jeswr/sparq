@@ -11,6 +11,9 @@
 //   {a} ⊑ C   (C a NAMED class, incl. owl:Thing)  ⇒  `a rdf:type C`
 //   {a} ⊑ {b} (a derived nominal subsumption)      ⇒  `a owl:sameAs b`
 //   ∃r.Self ∈ S({a})  (owl:hasSelf, sq-pbz04.2.6)  ⇒  `a r a`   (the CR-Self self-loop readoff)
+//   (the CONVERSE — an asserted/derived same-nominal self-link `a r a` ⇒ `∃r.Self ∈ S({a})` —
+//   is the [FABLE-5] sq-8zqwb saturation rule CRs3 in `classify.rs`, so `∃r.Self ⊑ D` typings
+//   realise off a raw self-loop; the WG `New-Feature-SelfRestriction-002` converse shape)
 //   {a} ⊑ ⊥   OR  ⊤ ⊑ ⊥                            ⇒  a whole-ontology `inconsistent` verdict
 //
 // [OPUS-4.8] sq-pbz04.2.8 (E4) — three more ABox mechanisms read off the SAME saturation, all
@@ -859,15 +862,15 @@ mod tests {
         );
     }
 
-    // --- New-Feature-SelfRestriction-002 (converse): honest incompleteness boundary. -----------
-    // The corpus -002 conclusion types Peter INTO ∃likes.Self from `Peter likes Peter`. That is
-    // the CONVERSE of CR-Self-1 (a raw self-link ⇒ the ∃r.Self concept) — a nominal-only readoff
-    // that is a documented follow-up (captured in this PR's notes), NOT one of the two E2 rules. This
-    // pins the load-bearing soundness invariant: the general self-link `(peter,peter) ∈ R(likes)`
-    // that `Peter likes Peter` creates must NOT be treated as ∃likes.Self, so `∃likes.Self ⊑
-    // SelfLover` must NOT (yet) fire — no derivation without a positive rule premise.
+    // --- New-Feature-SelfRestriction-002 (converse): the nominal-reflexivity readoff. ----------
+    // [FABLE-5] sq-8zqwb (EL wave-2): `Peter likes Peter` internalizes as the SAME-NOMINAL
+    // self-link `({Peter},{Peter}) ∈ R(likes)`, which CRs3 reads off as `∃likes.Self ∈
+    // S({Peter})` — so `∃likes.Self ⊑ SelfLover` fires via CR1 AND the self-loop realises.
+    // GRADUATES the honest-boundary fixture sq-pbz04.2.6 pinned here (deferred from #1681).
+    // SOUND because a nominal is a singleton: Peter's likes-successor inside {Peter} is Peter
+    // himself, so `(Peter,Peter) ∈ likes` holds in every model — exactly `Peter ∈ ∃likes.Self`.
     #[test]
-    fn self_restriction_002_converse_is_not_over_derived() {
+    fn self_restriction_002_converse_nominal_reflexivity_readoff() {
         let ttl = format!(
             "{PRE}
              @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
@@ -878,13 +881,76 @@ mod tests {
         let (dict, triples) = parse(&ttl);
         let r = realize(&dict, &triples);
         assert!(!r.is_inconsistent(), "a self-loving individual is consistent");
-        let (peter, self_lover) = (iri(&dict, "http://ex/Peter"), iri(&dict, "http://ex/SelfLover"));
-        assert!(
-            !r.type_assertions().contains(&(peter, self_lover)),
-            "the raw self-link is NOT ∃likes.Self — CRs2 must not fire without a positive premise"
+        let (peter, likes, self_lover) = (
+            iri(&dict, "http://ex/Peter"),
+            iri(&dict, "http://ex/likes"),
+            iri(&dict, "http://ex/SelfLover"),
         );
-        // And the asserted OPA is never mistaken for a hasSelf readoff.
-        assert!(r.self_assertions().is_empty(), "no ∃r.Self concept exists in S({{Peter}})");
+        assert!(
+            r.type_assertions().contains(&(peter, self_lover)),
+            "Peter likes Peter ⊨ Peter ∈ ∃likes.Self ⊑ SelfLover (the CRs3 converse readoff)"
+        );
+        assert!(
+            r.self_assertions().contains(&(peter, likes)),
+            "∃likes.Self ∈ S({{Peter}}) also reads off the (already-asserted) self-loop"
+        );
+    }
+
+    // --- The CRs3 nominal guard is load-bearing: a GENERAL self-link must NOT read off. --------
+    // [FABLE-5] sq-8zqwb: `C ⊑ ∃likes.C` creates the NON-nominal link (C,C) ∈ R(likes), whose
+    // invariant is only `C ⊑ ∃likes.C` — each member of C has SOME likes-successor in C, not
+    // necessarily itself — so a member of C must NOT be typed into ∃likes.Self.
+    #[test]
+    fn general_class_self_link_is_not_nominal_reflexivity() {
+        let ttl = format!(
+            "{PRE}
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             [ a owl:Restriction ; owl:onProperty :likes ; owl:hasSelf \"true\"^^xsd:boolean ]
+                 rdfs:subClassOf :SelfLover .
+             :C rdfs:subClassOf
+                 [ a owl:Restriction ; owl:onProperty :likes ; owl:someValuesFrom :C ] .
+             :x a :C ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(!r.is_inconsistent());
+        let (x, self_lover) = (iri(&dict, "http://ex/x"), iri(&dict, "http://ex/SelfLover"));
+        assert!(
+            !r.type_assertions().contains(&(x, self_lover)),
+            "a general (C,C) link is not local reflexivity — CRs3 must not fire off it"
+        );
+        assert!(r.self_assertions().is_empty(), "no fabricated self-loop for x");
+    }
+
+    // --- CRs3 fires on a DERIVED same-nominal self-link too (owl:hasValue, no asserted OPA). ---
+    // [FABLE-5] sq-8zqwb: `{a} ⊑ ∃p.{a}` via `owl:hasValue :a` derives the self-link without any
+    // asserted `a p a` triple — still local reflexivity on the singleton {a}, so `∃p.Self ⊑ D`
+    // fires and the self-loop `a p a` reads off as a NEW realised assertion.
+    #[test]
+    fn derived_nominal_self_link_reads_off_self() {
+        let ttl = format!(
+            "{PRE}
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             [ a owl:Restriction ; owl:onProperty :p ; owl:hasSelf \"true\"^^xsd:boolean ]
+                 rdfs:subClassOf :D .
+             :a a [ a owl:Restriction ; owl:onProperty :p ; owl:hasValue :a ] ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let r = realize(&dict, &triples);
+        assert!(!r.is_inconsistent());
+        let (a, p, d) = (
+            iri(&dict, "http://ex/a"),
+            iri(&dict, "http://ex/p"),
+            iri(&dict, "http://ex/D"),
+        );
+        assert!(
+            r.type_assertions().contains(&(a, d)),
+            "derived {{a}} ⊑ ∃p.{{a}} ⊨ a ∈ ∃p.Self ⊑ D"
+        );
+        assert!(
+            r.self_assertions().contains(&(a, p)),
+            "the derived self-link reads off the realised self-loop a p a"
+        );
     }
 
     // ======================================================================================

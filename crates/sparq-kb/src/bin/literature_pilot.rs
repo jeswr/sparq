@@ -297,9 +297,11 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     };
 
     println!(
-        "dry run complete: fetched={} candidates={} grounded={} (rate {:.4}) quarantined={} \
+        "dry run complete: fetched={} boundary_rejects={} candidates={} grounded={} \
+         (rate {:.4}) quarantined={} \
          shacl_checked={} shacl_conforms={:?} machine={} restricted={} sample={} staging={}",
         metrics.fetched_records,
+        metrics.boundary_rejects,
         metrics.candidates_total,
         metrics.grounded,
         metrics.grounding_rate,

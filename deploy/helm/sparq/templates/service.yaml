@@ -1,0 +1,21 @@
+# Service for the sparq pod
+# [OPUS-4.8] sq-0d744
+# [GPT-5.6] R9: sparq-server is open-by-default at the image layer; this chart
+# gates it with SPARQ_AUTH_TOKEN from an existing Secret. Do not remove that wiring.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sparq.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sparq.labels" . | nindent 4 }}
+spec:
+  # [GPT-5.6] R3/R6: prevent a LoadBalancer/NodePort from bypassing Ingress TLS.
+  type: ClusterIP
+  ports:
+    - port: {{ include "sparq.servicePort" . }}
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "sparq.selectorLabels" . | nindent 4 }}

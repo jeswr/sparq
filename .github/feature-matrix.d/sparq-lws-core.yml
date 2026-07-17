@@ -20,6 +20,14 @@
   features: "embedded-sparq"
   test: true
 
+# [GPT-5.6] sq-r1ei8: explicit compile/test coverage for the default-on full
+# tier. The complementary core tier cannot be expressed by this additive matrix;
+# `feature-matrix.yml` gates it in a dedicated `--no-default-features` job.
+- name: "sparq-lws-core (sparql-endpoint)"
+  crate: "sparq-lws-core"
+  features: "sparql-endpoint"
+  test: true
+
 # The live REMOTE SPARQL-over-HTTP backend (src/store/http.rs), opt-in `http-sparq`
 # since sq-gg0qq.3 (in-workspace builds bind the engine in-process instead).
 # tests/http_sparq_client.rs is entirely feature-gated on it; without this leg the
@@ -27,6 +35,14 @@
 - name: "sparq-lws-core (http-sparq)"
   crate: "sparq-lws-core"
   features: "http-sparq"
+  test: true
+
+# [GPT-5.6] sq-oprna.2: the encrypted HTTP/3 listener over the same hardened
+# LDP router. The feature-gated integration test drives real TLS TCP + QUIC
+# sockets, response parity, and peer ConnectInfo-backed rate limiting.
+- name: "sparq-lws-core (http3)"
+  crate: "sparq-lws-core"
+  features: "http3"
   test: true
 
 # The distributed Redis-backed DPoP-`jti` replay store (src/redis_replay.rs).
@@ -37,4 +53,12 @@
 - name: "sparq-lws-core (redis-replay)"
   crate: "sparq-lws-core"
   features: "redis-replay"
+  test: true
+
+# The wasm request-handling core: real axum routing, LDP handlers, WAC, and in-memory storage with
+# native listener/runtime/crypto/network dependencies excluded by target cfg. The feature-gated
+# dependency-boundary test proves those exclusions against the wasm32 normal dependency graph.
+- name: "sparq-lws-core (wasm)"
+  crate: "sparq-lws-core"
+  features: "wasm"
   test: true

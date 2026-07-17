@@ -7,6 +7,8 @@
 
 use oxrdf::{NamedNode, Term};
 use rustc_hash::FxHashMap;
+#[cfg(feature = "multi-hop")]
+use rustc_hash::FxHashSet;
 use sparq_core::dict::{self, Id, NO_ID};
 use sparq_core::store::Pattern;
 use sparq_core::Graph;
@@ -50,6 +52,12 @@ pub struct SimConfig {
     /// exactly-scored result and scored by the predicate-profile Jaccard. `false`
     /// restores the strict v1 behaviour (only neighbor-level evidence is returned).
     pub profile_fallback: bool,
+    /// Maximum structural-neighborhood depth. The default `1` preserves the original
+    /// adjacent-triple signature exactly. Values greater than `1` expand breadth-first,
+    /// retaining first-hop elements at full weight and attenuating hop `h` by
+    /// `0.5^(h - 1)`. A value of `0` is treated as `1`.
+    #[cfg(feature = "multi-hop")]
+    pub depth: usize,
 }
 
 impl Default for SimConfig {
@@ -60,9 +68,15 @@ impl Default for SimConfig {
             exclude_predicates: Vec::new(),
             max_pair_frequency: 10_000,
             profile_fallback: true,
+            #[cfg(feature = "multi-hop")]
+            depth: 1,
         }
     }
 }
+
+/// Fixed per-hop attenuation used by the `multi-hop` feature.
+#[cfg(feature = "multi-hop")]
+const MULTI_HOP_ATTENUATION: f64 = 0.5;
 
 /// Edge direction within a signature element (outgoing: the entity is the subject;
 /// incoming: the entity is the object). Direction is part of the element — "directs
@@ -109,6 +123,8 @@ pub struct Sim<'g> {
     excluded: Vec<Id>,
     max_pair_frequency: usize,
     profile_fallback: bool,
+    #[cfg(feature = "multi-hop")]
+    depth: usize,
     /// |G| as f64, the IDF numerator.
     n_triples: f64,
 }
@@ -135,6 +151,8 @@ impl<'g> Sim<'g> {
             excluded,
             max_pair_frequency: cfg.max_pair_frequency,
             profile_fallback: cfg.profile_fallback,
+            #[cfg(feature = "multi-hop")]
+            depth: cfg.depth.max(1),
             n_triples: graph.len().max(1) as f64,
         }
     }
@@ -169,6 +187,17 @@ impl<'g> Sim<'g> {
     }
 
     fn signature_of_id_mode(&self, id: Id, keep_neighbor: bool) -> Signature {
+        #[cfg(feature = "multi-hop")]
+        if self.depth > 1 {
+            return self.expanded_signature_of_id_mode(id, keep_neighbor);
+        }
+
+        self.one_hop_signature_of_id_mode(id, keep_neighbor)
+    }
+
+    /// The original depth-1 implementation stays on its own path so the default feature
+    /// state and `depth = 1` retain byte-identical floating-point operations and ordering.
+    fn one_hop_signature_of_id_mode(&self, id: Id, keep_neighbor: bool) -> Signature {
         let mut elems: Vec<(u8, Id, Id)> = Vec::new();
         // Outgoing: (id, p, o) — one contiguous SPO range.
         let scan = self.graph.store.scan(&[Some(id), None, None]);
@@ -191,6 +220,74 @@ impl<'g> Sim<'g> {
         let weights: Vec<f64> = elems.iter().map(|&(_, p, _)| self.weight(p)).collect();
         let total = weights.iter().sum();
         Signature { elems, weights, total }
+    }
+
+    /// Breadth-first expansion for the opt-in `multi-hop` feature. Each layer scans in
+    /// canonical id order; previously visited nodes are not reintroduced by backtracking.
+    /// When several paths produce one element, the nearest (largest) weight wins.
+    #[cfg(feature = "multi-hop")]
+    fn expanded_signature_of_id_mode(&self, id: Id, keep_neighbor: bool) -> Signature {
+        let mut element_weights: FxHashMap<(u8, Id, Id), f64> = FxHashMap::default();
+        let mut visited: FxHashSet<Id> = FxHashSet::default();
+        visited.insert(id);
+        let mut frontier = vec![id];
+        let mut attenuation = 1.0;
+
+        for hop in 1..=self.depth {
+            let mut next_frontier = Vec::new();
+            for center in frontier {
+                let outgoing = self.graph.store.scan(&[Some(center), None, None]);
+                for row in outgoing.rows.iter() {
+                    let [_, p, neighbor] = outgoing.to_spo(row);
+                    if !self.is_excluded(p) && (hop == 1 || !visited.contains(&neighbor)) {
+                        let elem = (OUT, p, if keep_neighbor { neighbor } else { NO_ID });
+                        let weight = self.weight(p) * attenuation;
+                        element_weights
+                            .entry(elem)
+                            .and_modify(|current| *current = current.max(weight))
+                            .or_insert(weight);
+                    }
+                    if !self.is_excluded(p) && !visited.contains(&neighbor) {
+                        next_frontier.push(neighbor);
+                    }
+                }
+
+                let incoming = self.graph.store.scan(&[None, None, Some(center)]);
+                for row in incoming.rows.iter() {
+                    let [neighbor, p, _] = incoming.to_spo(row);
+                    if !self.is_excluded(p) && (hop == 1 || !visited.contains(&neighbor)) {
+                        let elem = (IN, p, if keep_neighbor { neighbor } else { NO_ID });
+                        let weight = self.weight(p) * attenuation;
+                        element_weights
+                            .entry(elem)
+                            .and_modify(|current| *current = current.max(weight))
+                            .or_insert(weight);
+                    }
+                    if !self.is_excluded(p) && !visited.contains(&neighbor) {
+                        next_frontier.push(neighbor);
+                    }
+                }
+            }
+
+            if next_frontier.is_empty() {
+                break;
+            }
+            next_frontier.sort_unstable();
+            next_frontier.dedup();
+            visited.extend(next_frontier.iter().copied());
+            frontier = next_frontier;
+            attenuation *= MULTI_HOP_ATTENUATION;
+        }
+
+        let mut weighted: Vec<((u8, Id, Id), f64)> = element_weights.into_iter().collect();
+        weighted.sort_unstable_by_key(|&(elem, _)| elem);
+        let (elems, weights): (Vec<_>, Vec<_>) = weighted.into_iter().unzip();
+        let total = weights.iter().sum();
+        Signature {
+            elems,
+            weights,
+            total,
+        }
     }
 
     /// Weighted Jaccard similarity of two terms' structural signatures, in `[0, 1]`:
@@ -390,6 +487,26 @@ impl<'g> Sim<'g> {
     /// `(direction, predicate)` elements (neighbor = [`NO_ID`]), weighted like
     /// a [`SignatureMode::Predicates`] signature.
     fn profile_of(&self, sig: &Signature) -> Signature {
+        #[cfg(feature = "multi-hop")]
+        if self.depth > 1 {
+            let mut role_weights: FxHashMap<(u8, Id, Id), f64> = FxHashMap::default();
+            for (&(direction, predicate, _), &weight) in sig.elems.iter().zip(&sig.weights) {
+                role_weights
+                    .entry((direction, predicate, NO_ID))
+                    .and_modify(|current| *current = current.max(weight))
+                    .or_insert(weight);
+            }
+            let mut weighted: Vec<((u8, Id, Id), f64)> = role_weights.into_iter().collect();
+            weighted.sort_unstable_by_key(|&(elem, _)| elem);
+            let (elems, weights): (Vec<_>, Vec<_>) = weighted.into_iter().unzip();
+            let total = weights.iter().sum();
+            return Signature {
+                elems,
+                weights,
+                total,
+            };
+        }
+
         let mut elems: Vec<(u8, Id, Id)> =
             sig.elems.iter().map(|&(d, p, _)| (d, p, NO_ID)).collect();
         elems.sort_unstable();
@@ -414,11 +531,44 @@ impl<'g> Sim<'g> {
     }
 }
 
-/// Weighted Jaccard of two prebuilt signatures — `Σ w over A∩B / Σ w over A∪B` by a
+/// Weighted Jaccard of two prebuilt signatures — `Σ min(wA, wB) / Σ max(wA, wB)` by a
 /// single merge of the two sorted element lists; 0 when the union is empty. The
 /// signature-level counterpart of [`Sim::similarity`], for callers that cache
 /// signatures (e.g. all-pairs evaluation).
 pub fn weighted_jaccard(a: &Signature, b: &Signature) -> f64 {
+    let inter = weighted_intersection(a, b);
+    let union = a.total + b.total - inter;
+    if union <= 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
+/// Weighted Sorensen-Dice coefficient of two prebuilt signatures:
+/// `2 * Σ min(wA, wB) / (Σ wA + Σ wB)`. Returns 0 when both totals are 0.
+pub fn dice_coefficient(a: &Signature, b: &Signature) -> f64 {
+    let denom = a.total + b.total;
+    if denom <= 0.0 {
+        0.0
+    } else {
+        2.0 * weighted_intersection(a, b) / denom
+    }
+}
+
+/// Weighted overlap (Szymkiewicz-Simpson) coefficient of two prebuilt signatures:
+/// `Σ min(wA, wB) / min(Σ wA, Σ wB)`. Returns 0 when either total is 0.
+pub fn overlap_coefficient(a: &Signature, b: &Signature) -> f64 {
+    let min_total = a.total.min(b.total);
+    if min_total <= 0.0 {
+        0.0
+    } else {
+        weighted_intersection(a, b) / min_total
+    }
+}
+
+// [GPT-5.6] sq-da2bz: share the canonical sorted merge across signature metrics.
+fn weighted_intersection(a: &Signature, b: &Signature) -> f64 {
     let mut inter = 0.0;
     let (mut i, mut j) = (0, 0);
     while i < a.elems.len() && j < b.elems.len() {
@@ -426,17 +576,96 @@ pub fn weighted_jaccard(a: &Signature, b: &Signature) -> f64 {
             std::cmp::Ordering::Less => i += 1,
             std::cmp::Ordering::Greater => j += 1,
             std::cmp::Ordering::Equal => {
-                inter += a.weights[i];
+                inter += a.weights[i].min(b.weights[j]);
                 i += 1;
                 j += 1;
             }
         }
     }
-    let union = a.total + b.total - inter;
-    if union <= 0.0 {
-        0.0
-    } else {
-        inter / union
+    inter
+}
+
+/// Edge direction of a [`SharedElement`], relative to the FIRST argument of
+/// [`Sim::explain_similarity`]: whether the entity participates in the shared element as
+/// the triple's subject (`Out`) or object (`In`) — the same in/out split
+/// [`SignatureMode`] signatures record (direction is part of the element: "directs
+/// films" and "is directed by" are different roles). [FABLE-5]
+#[cfg(feature = "explain")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Direction {
+    /// Outgoing — `entity --predicate--> neighbor`.
+    Out,
+    /// Incoming — `neighbor --predicate--> entity`.
+    In,
+}
+
+/// One signature element two entities have in COMMON — the decoded reason behind a
+/// [`Sim::similarity`] / [`Sim::most_similar`] score, returned by
+/// [`Sim::explain_similarity`]. [FABLE-5]
+#[cfg(feature = "explain")]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedElement {
+    /// The element's edge direction (see [`Direction`]).
+    pub direction: Direction,
+    /// The shared predicate, decoded from the graph's dictionary.
+    pub predicate: Term,
+    /// The shared neighbor, decoded from the graph's dictionary. `None` in
+    /// [`SignatureMode::Predicates`] (a predicate-profile element has no neighbor).
+    pub neighbor: Option<Term>,
+    /// This element's contribution to the weighted-Jaccard NUMERATOR:
+    /// `min(weight_a, weight_b)` — the two weights only differ under the `multi-hop`
+    /// feature's hop attenuation; at depth 1 both equal the predicate's IDF weight.
+    pub weight: f64,
+}
+
+#[cfg(feature = "explain")]
+impl Sim<'_> {
+    /// The shared signature elements behind [`similarity`](Self::similarity)`(a, b)` —
+    /// the weighted-Jaccard intersection, decoded to terms so a UI or agent can show
+    /// WHY two entities scored similar.
+    ///
+    /// The returned weights sum to exactly the intersection weight the score's
+    /// numerator uses: with `Σ` that sum and `|A|`/`|B|` the two signatures'
+    /// [`total_weight`](Signature::total_weight)s, `Σ / (|A| + |B| − Σ)` reconstructs
+    /// [`similarity`](Self::similarity)`(a, b)`. Every element is present in BOTH
+    /// signatures.
+    ///
+    /// Deterministic order, strongest evidence first: weight descending, then
+    /// predicate / neighbor / direction id ascending. Empty when either term is absent
+    /// from the graph or the signatures share nothing. Cost: two signature builds +
+    /// one sorted merge (the same shape [`similarity`](Self::similarity) pays).
+    pub fn explain_similarity(&self, a: &Term, b: &Term) -> Vec<SharedElement> {
+        let (Some(a), Some(b)) = (self.graph.id_of(a), self.graph.id_of(b)) else {
+            return Vec::new();
+        };
+        let sa = self.signature_of_id(a);
+        let sb = self.signature_of_id(b);
+        // The same sorted merge as `weighted_intersection`, keeping the elements.
+        let mut shared: Vec<((u8, Id, Id), f64)> = Vec::new();
+        let (mut i, mut j) = (0, 0);
+        while i < sa.elems.len() && j < sb.elems.len() {
+            match sa.elems[i].cmp(&sb.elems[j]) {
+                std::cmp::Ordering::Less => i += 1,
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    shared.push((sa.elems[i], sa.weights[i].min(sb.weights[j])));
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        shared.sort_unstable_by(|&((da, pa, na), wa), &((db, pb, nb), wb)| {
+            wb.total_cmp(&wa).then_with(|| (pa, na, da).cmp(&(pb, nb, db)))
+        });
+        shared
+            .into_iter()
+            .map(|((dir, p, n), w)| SharedElement {
+                direction: if dir == OUT { Direction::Out } else { Direction::In },
+                predicate: self.graph.dict.term(p),
+                neighbor: (n != NO_ID).then(|| self.graph.dict.term(n)),
+                weight: w,
+            })
+            .collect()
     }
 }
 
@@ -455,6 +684,148 @@ mod tests {
 
     fn unweighted(g: &Graph) -> Sim<'_> {
         Sim::with_config(g, SimConfig { idf: false, ..SimConfig::default() })
+    }
+
+    fn explicit_signature(entries: &[((u8, Id, Id), f64)]) -> Signature {
+        let mut entries = entries.to_vec();
+        entries.sort_unstable_by_key(|&(elem, _)| elem);
+        let total = entries.iter().map(|(_, weight)| weight).sum();
+        let (elems, weights) = entries.into_iter().unzip();
+        Signature {
+            elems,
+            weights,
+            total,
+        }
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn signature_coefficients_identical_are_one() {
+        let sig = explicit_signature(&[((OUT, 10, 100), 1.5), ((IN, 20, 200), 2.5)]);
+
+        assert_close(dice_coefficient(&sig, &sig), 1.0);
+        assert_close(overlap_coefficient(&sig, &sig), 1.0);
+    }
+
+    #[test]
+    fn signature_coefficients_disjoint_are_zero() {
+        let a = explicit_signature(&[((OUT, 10, 100), 2.0)]);
+        let b = explicit_signature(&[((IN, 20, 200), 3.0)]);
+
+        assert_eq!(dice_coefficient(&a, &b), 0.0);
+        assert_eq!(overlap_coefficient(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn signature_coefficients_partial_overlap_are_weighted_and_symmetric() {
+        // A totals 3; B totals 4; their shared element contributes min(2, 1) = 1.
+        let a = explicit_signature(&[((OUT, 10, 100), 2.0), ((OUT, 20, 200), 1.0)]);
+        let b = explicit_signature(&[((OUT, 10, 100), 1.0), ((IN, 30, 300), 3.0)]);
+        let dice = dice_coefficient(&a, &b);
+        let overlap = overlap_coefficient(&a, &b);
+        let jaccard = weighted_jaccard(&a, &b);
+
+        assert_close(dice, 2.0 / 7.0);
+        assert_close(overlap, 1.0 / 3.0);
+        assert_close(jaccard, 1.0 / 6.0);
+        assert!(dice > jaccard, "Dice need not be at most Jaccard");
+        assert!(overlap >= jaccard);
+        assert!(jaccard >= 0.0);
+        assert_close(dice_coefficient(&b, &a), dice);
+        assert_close(overlap_coefficient(&b, &a), overlap);
+    }
+
+    #[test]
+    fn signature_coefficients_with_empty_signature_are_zero_and_finite() {
+        let empty = explicit_signature(&[]);
+        let nonempty = explicit_signature(&[((OUT, 10, 100), 2.0)]);
+
+        for value in [
+            dice_coefficient(&empty, &nonempty),
+            dice_coefficient(&nonempty, &empty),
+            overlap_coefficient(&empty, &nonempty),
+            overlap_coefficient(&nonempty, &empty),
+        ] {
+            assert_eq!(value, 0.0);
+            assert!(!value.is_nan());
+        }
+    }
+
+    #[cfg(feature = "multi-hop")]
+    fn multi_hop_unweighted(g: &Graph, depth: usize) -> Sim<'_> {
+        Sim::with_config(
+            g,
+            SimConfig {
+                idf: false,
+                depth,
+                profile_fallback: false,
+                ..SimConfig::default()
+            },
+        )
+    }
+
+    #[cfg(feature = "multi-hop")]
+    #[test]
+    fn default_depth_pins_original_signature_and_similarity() {
+        let g = graph(":a :p :b . :twin :p :b . :b :q :c .");
+        let sim = Sim::with_config(
+            &g,
+            SimConfig {
+                idf: false,
+                profile_fallback: false,
+                ..SimConfig::default()
+            },
+        );
+        let p = g.id_of(&iri("p")).unwrap();
+        let b = g.id_of(&iri("b")).unwrap();
+        let signature = sim.signature(&iri("a")).unwrap();
+
+        assert_eq!(signature.elems, vec![(OUT, p, b)]);
+        assert_eq!(signature.weights, vec![1.0]);
+        assert_eq!(signature.total_weight(), 1.0);
+        assert_eq!(sim.similarity(&iri("a"), &iri("twin")), 1.0);
+    }
+
+    #[cfg(feature = "multi-hop")]
+    #[test]
+    fn depth_two_chain_has_exact_attenuated_signature() {
+        let g = graph(":a :p :b . :b :q :c .");
+        let sim = multi_hop_unweighted(&g, 2);
+        let mut expected = vec![
+            (
+                (
+                    OUT,
+                    g.id_of(&iri("p")).unwrap(),
+                    g.id_of(&iri("b")).unwrap(),
+                ),
+                1.0,
+            ),
+            (
+                (
+                    OUT,
+                    g.id_of(&iri("q")).unwrap(),
+                    g.id_of(&iri("c")).unwrap(),
+                ),
+                0.5,
+            ),
+        ];
+        expected.sort_unstable_by_key(|&(elem, _)| elem);
+        let signature = sim.signature(&iri("a")).unwrap();
+        let actual: Vec<_> = signature
+            .elems
+            .iter()
+            .copied()
+            .zip(signature.weights.iter().copied())
+            .collect();
+
+        assert_eq!(actual, expected);
+        assert_eq!(signature.total_weight(), 1.5);
     }
 
     #[test]
@@ -753,5 +1124,205 @@ mod tests {
             }
         }
         wins / (pos.len() as f64 * neg.len() as f64)
+    }
+
+    // [FABLE-5] sq-lsp7k: the `explain` feature's explanation-surface tests.
+
+    /// Re-encode a decoded [`SharedElement`] to the private signature tuple, for
+    /// membership checks against `Signature::elems`.
+    #[cfg(feature = "explain")]
+    fn encode(g: &Graph, e: &SharedElement) -> (u8, Id, Id) {
+        let d = match e.direction {
+            Direction::Out => OUT,
+            Direction::In => IN,
+        };
+        let p = g.id_of(&e.predicate).unwrap();
+        let n = e.neighbor.as_ref().map_or(NO_ID, |t| g.id_of(t).unwrap());
+        (d, p, n)
+    }
+
+    /// Hand-computed exact outputs (single shared element, so no ordering freedom):
+    /// any mutation of direction, predicate, neighbor, or weight goes red.
+    #[cfg(feature = "explain")]
+    #[test]
+    fn explain_similarity_hand_computed_exact() {
+        // Same graph as `plain_jaccard_hand_computed`: the ONLY shared element is
+        // (out, knows, eve); unweighted, so its weight is exactly 1.0.
+        let g = graph(":alice :knows :bob, :eve ; :worksAt :acme . :dave :knows :eve ; :plays :chess .");
+        let sim = unweighted(&g);
+        let expected = vec![SharedElement {
+            direction: Direction::Out,
+            predicate: iri("knows"),
+            neighbor: Some(iri("eve")),
+            weight: 1.0,
+        }];
+        assert_eq!(sim.explain_similarity(&iri("alice"), &iri("dave")), expected);
+        assert_eq!(sim.explain_similarity(&iri("dave"), &iri("alice")), expected);
+        // Σ / (|A| + |B| − Σ) = 1 / (3 + 2 − 1) reconstructs the 0.25 score exactly.
+        assert_eq!(sim.similarity(&iri("alice"), &iri("dave")), 0.25);
+        assert_eq!(1.0 / (3.0 + 2.0 - 1.0), 0.25);
+
+        // Incoming-only shared context: a and b share ONLY x's incoming :p edges.
+        let g = graph(":x :p :a . :x :p :b .");
+        let sim = unweighted(&g);
+        let ex = sim.explain_similarity(&iri("a"), &iri("b"));
+        assert_eq!(
+            ex,
+            vec![SharedElement {
+                direction: Direction::In,
+                predicate: iri("p"),
+                neighbor: Some(iri("x")),
+                weight: 1.0,
+            }]
+        );
+        assert_eq!(sim.similarity(&iri("a"), &iri("b")), 1.0); // 1 / (1 + 1 − 1)
+    }
+
+    /// The load-bearing differential: for every pair, Σ(explain weights) plugged into
+    /// Σ / (|A| + |B| − Σ) reconstructs `similarity(a, b)` EXACTLY (IDF weights on),
+    /// every returned element is present in BOTH signatures, and the element count
+    /// equals the true intersection size (no unique-to-one or missing element).
+    #[cfg(feature = "explain")]
+    #[test]
+    fn explain_similarity_weights_reconstruct_score() {
+        let g = graph(
+            ":alice :knows :bob, :eve ; :worksAt :acme .
+             :carol :knows :bob, :eve ; :worksAt :acme .
+             :dave :knows :eve ; :plays :chess .
+             :far :plays :go .",
+        );
+        let sim = Sim::new(&g); // IDF weighting on — weights differ per predicate
+        let pairs = [
+            ("alice", "carol", 3), // identical signatures
+            ("alice", "dave", 1),  // partial overlap
+            ("alice", "far", 0),   // disjoint
+            ("dave", "far", 0),    // same predicate, different neighbor: disjoint
+        ];
+        for (a, b, expected_len) in pairs {
+            let (ta, tb) = (iri(a), iri(b));
+            let ex = sim.explain_similarity(&ta, &tb);
+            assert_eq!(ex.len(), expected_len, "{a} vs {b}");
+            // Symmetric: same shared set, same min-weights, same deterministic order.
+            assert_eq!(ex, sim.explain_similarity(&tb, &ta), "{a} vs {b}");
+            let (sa, sb) = (sim.signature(&ta).unwrap(), sim.signature(&tb).unwrap());
+            // Every element genuinely present in BOTH signatures …
+            for e in &ex {
+                let t = encode(&g, e);
+                assert!(sa.elems.binary_search(&t).is_ok(), "{t:?} not in sig({a})");
+                assert!(sb.elems.binary_search(&t).is_ok(), "{t:?} not in sig({b})");
+                assert!(e.weight > 0.0);
+            }
+            // … and NO true intersection element missing.
+            let inter = sa.elems.iter().filter(|e| sb.elems.binary_search(e).is_ok()).count();
+            assert_eq!(ex.len(), inter, "{a} vs {b}");
+            // Σ(explain) reconstructs the exact weighted-Jaccard score.
+            let sigma: f64 = ex.iter().map(|e| e.weight).sum();
+            let score = sim.similarity(&ta, &tb);
+            if sigma == 0.0 {
+                assert_eq!(score, 0.0, "{a} vs {b}");
+            } else {
+                assert_close(sigma / (sa.total_weight() + sb.total_weight() - sigma), score);
+            }
+        }
+        // Non-vacuity anchors: the overlapping pairs really scored.
+        assert_eq!(sim.similarity(&iri("alice"), &iri("carol")), 1.0);
+        assert!(sim.similarity(&iri("alice"), &iri("dave")) > 0.0);
+    }
+
+    /// Deterministic ordering: weight DESCENDING first (the rare, higher-IDF predicate
+    /// beats the common one even with a larger dictionary id), then ids ASCENDING on ties.
+    #[cfg(feature = "explain")]
+    #[test]
+    fn explain_similarity_orders_weight_desc_then_ids_asc() {
+        let g = graph(
+            ":a :common :c1 ; :rare :r1 . :b :common :c1 ; :rare :r1 .
+             :f0 :common :x0 . :f1 :common :x1 . :f2 :common :x2 .",
+        );
+        let sim = Sim::new(&g); // freq(common)=5 > freq(rare)=2 → w(rare) > w(common)
+        let ex = sim.explain_similarity(&iri("a"), &iri("b"));
+        assert_eq!(ex.len(), 2);
+        assert_eq!(ex[0].predicate, iri("rare"));
+        assert_eq!(ex[1].predicate, iri("common"));
+        assert!(ex[0].weight > ex[1].weight);
+
+        // Equal weights (same predicate): neighbor id ascending breaks the tie.
+        let g = graph(":a :p :n1, :n2 . :b :p :n1, :n2 .");
+        let sim = unweighted(&g);
+        let ex = sim.explain_similarity(&iri("a"), &iri("b"));
+        assert!(ex.iter().all(|e| e.weight == 1.0));
+        let (n1, n2) = (g.id_of(&iri("n1")).unwrap(), g.id_of(&iri("n2")).unwrap());
+        let expected = if n1 < n2 {
+            vec![Some(iri("n1")), Some(iri("n2"))]
+        } else {
+            vec![Some(iri("n2")), Some(iri("n1"))]
+        };
+        let got: Vec<Option<Term>> = ex.iter().map(|e| e.neighbor.clone()).collect();
+        assert_eq!(got, expected);
+    }
+
+    /// [`SignatureMode::Predicates`] elements have no neighbor: `neighbor` is `None`,
+    /// and the reconstruction identity holds against that mode's similarity.
+    #[cfg(feature = "explain")]
+    #[test]
+    fn explain_similarity_predicates_mode_has_no_neighbor() {
+        let g = graph(":a :knows :x ; :worksAt :acme . :b :knows :y ; :worksAt :corp .");
+        let sim = Sim::with_config(
+            &g,
+            SimConfig { mode: SignatureMode::Predicates, idf: false, ..SimConfig::default() },
+        );
+        let ex = sim.explain_similarity(&iri("a"), &iri("b"));
+        assert_eq!(ex.len(), 2, "shared roles: knows + worksAt");
+        assert!(ex.iter().all(|e| e.neighbor.is_none()));
+        let preds: Vec<&Term> = ex.iter().map(|e| &e.predicate).collect();
+        assert!(preds.contains(&&iri("knows")) && preds.contains(&&iri("worksAt")));
+        let sigma: f64 = ex.iter().map(|e| e.weight).sum();
+        assert_eq!(sigma / (2.0 + 2.0 - sigma), 1.0);
+        assert_eq!(sim.similarity(&iri("a"), &iri("b")), 1.0);
+    }
+
+    /// Absent terms and empty intersections explain to an empty Vec; self-similarity
+    /// explains to the full signature and reconstructs 1.
+    #[cfg(feature = "explain")]
+    #[test]
+    fn explain_similarity_absent_disjoint_and_self() {
+        let g = graph(":a :p :x . :b :q :y .");
+        let sim = unweighted(&g);
+        assert!(sim.explain_similarity(&iri("a"), &iri("missing")).is_empty());
+        assert!(sim.explain_similarity(&iri("missing"), &iri("a")).is_empty());
+        assert!(sim.explain_similarity(&iri("a"), &iri("b")).is_empty());
+        let ex = sim.explain_similarity(&iri("a"), &iri("a"));
+        assert_eq!(ex.len(), sim.signature(&iri("a")).unwrap().len());
+        let sigma: f64 = ex.iter().map(|e| e.weight).sum();
+        let total = sim.signature(&iri("a")).unwrap().total_weight();
+        assert_eq!(sigma / (total + total - sigma), 1.0);
+    }
+
+    /// Under multi-hop attenuation the two signatures can weight one shared element
+    /// DIFFERENTLY (nearest hop wins per side); the explanation must carry
+    /// `min(w_a, w_b)` — exactly the score's numerator term — so the reconstruction
+    /// stays exact. A `min → max` mutation goes red here (at depth 1 the weights
+    /// coincide, so only this differential can catch it).
+    #[cfg(all(feature = "explain", feature = "multi-hop"))]
+    #[test]
+    fn explain_similarity_multi_hop_uses_min_weight() {
+        // a reaches (out, q, c) at hop 2 (weight 0.5); x has it at hop 1 (weight 1.0).
+        let g = graph(":a :p :b . :b :q :c . :x :q :c .");
+        let sim = multi_hop_unweighted(&g, 2);
+        let ex = sim.explain_similarity(&iri("a"), &iri("x"));
+        assert_eq!(
+            ex,
+            vec![SharedElement {
+                direction: Direction::Out,
+                predicate: iri("q"),
+                neighbor: Some(iri("c")),
+                weight: 0.5,
+            }]
+        );
+        let ta = sim.signature(&iri("a")).unwrap().total_weight();
+        let tx = sim.signature(&iri("x")).unwrap().total_weight();
+        let sigma: f64 = ex.iter().map(|e| e.weight).sum();
+        let score = sim.similarity(&iri("a"), &iri("x"));
+        assert_eq!(sigma / (ta + tx - sigma), score);
+        assert_close(score, 0.2); // 0.5 / (1.5 + 1.5 − 0.5)
     }
 }

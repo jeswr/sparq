@@ -25,6 +25,9 @@
 //! for the config-shape decision (PEM paths, both-or-neither validation, ACME noted as a future seam).
 //! Both serve paths share the same `SOLID_SERVER_BIND` resolution (hostname:port accepted, not only a
 //! numeric `SocketAddr`) and the same Ctrl-C graceful-drain behaviour.
+//! With the default-off `http3` feature and TLS configured, the binary additionally binds an HTTP/3
+//! QUIC listener on the same resolved address and port over UDP. The existing TCP ALPN contract stays
+//! exactly `[h2, http/1.1]`; only the cloned QUIC configuration advertises `h3`.
 //!
 //! ## Still seamed (not in this slice)
 //! - The live SPARQ HTTP client + the `object_store`-backed blob store (the binary still boots the
@@ -37,6 +40,31 @@
 //! This is a behaviour-NEUTRAL perf lever — it only changes which allocator backs `alloc`/`dealloc`,
 //! not any server logic. See the `Cargo.toml` dependency comment for the trust-surface delta (a
 //! vendored-C `*-sys` crate compiled at build time) and why mimalloc over jemalloc (musl page-size).
+
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    use sparq_lws_core::ldp::handler::LdpState;
+    use sparq_lws_core::store::{CompositeStore, InMemoryBlobStore, InMemorySparqClient};
+    use sparq_lws_core::{build_router, AppState};
+
+    let store = CompositeStore::new(InMemorySparqClient::new(), InMemoryBlobStore::new());
+    let state = AppState::new(LdpState::new(store, "http://localhost"));
+    let _router = build_router(state);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+mod reconcile_runtime;
+
+#[cfg(not(target_arch = "wasm32"))]
+macro_rules! native_main {
+    ($($item:item)*) => {
+        $($item)*
+    };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[rustfmt::skip]
+native_main! {
 
 /// Process-wide allocator. mimalloc replaces the default libc allocator on the hot alloc/dealloc
 /// path. Declared at the TOP of the binary so it is the allocator from the first allocation onward.
@@ -70,6 +98,10 @@ use sparq_lws_core::store::{
 };
 use sparq_lws_core::tls::{self, TlsMode};
 use sparq_lws_core::transport::{ConnectionLimiter, TransportConfig};
+
+use crate::reconcile_runtime::{
+    reconcile_interval_from_env, spawn_periodic_if_configured, SharedStore,
+};
 
 // --- Environment configuration keys ----------------------------------------------------------------
 const ENV_BASE_URL: &str = "SOLID_SERVER_BASE_URL";
@@ -123,8 +155,16 @@ const ENV_SEED_BENCH: &str = "SOLID_SERVER_SEED_BENCH";
 /// [`ENV_SEED_BENCH`] is active; like the rest of the seed it only changes seeded FIXTURE content,
 /// never request handling.
 const ENV_SEED_BENCH_OWNER: &str = "SOLID_SERVER_SEED_BENCH_OWNER";
+/// Dev/DEMO ONLY: when `1`/`true`, seed the in-memory store with the demo playground fixtures — a
+/// public-readable `/demo/` pod holding a read-only welcome document, plus an OPEN-SANDBOX
+/// `/demo/playground/` container anonymous visitors can read AND write (so a demo boot needs no
+/// Keycloak/token setup to try the server end-to-end). NEVER set against a real (SPARQ/S3) backend —
+/// the startup seed-guard fails closed like the other seed flags. Purely additive seeding — it
+/// changes no request-handling behaviour. See [`sparq_lws_core::seed::seed_demo`].
+const ENV_SEED_DEMO: &str = "SOLID_SERVER_SEED_DEMO";
 /// Dev/conformance ESCAPE HATCH: explicitly permit the dev seed flags
-/// ([`ENV_SEED_CONFORMANCE`] / [`ENV_SEED_BENCH`]) against a NON-`memory` backend. UNSET (the default)
+/// ([`ENV_SEED_CONFORMANCE`] / [`ENV_SEED_BENCH`] / [`ENV_SEED_DEMO`]) against a NON-`memory`
+/// backend. UNSET (the default)
 /// makes the startup seed-guard FAIL CLOSED when a seed flag is set on a `http`/`embedded` backend —
 /// so test fixtures can never be written into a live/durable store by accident. Set to `1`/`true`
 /// ONLY for an EPHEMERAL embedded test instance that the harness legitimately seeds (the
@@ -234,9 +274,9 @@ fn reject_durable_sparq_with_inmem_blob(
     blob_is_in_memory && sparq_backend_is_durable(backend, sparq_dir_set)
 }
 
-/// Startup guard #2 — refuse to run the dev SEED flags ([`ENV_SEED_CONFORMANCE`] / [`ENV_SEED_BENCH`])
-/// against a NON-`memory` backend, so test fixtures are never written into a live `http`/`embedded`
-/// store by accident.
+/// Startup guard #2 — refuse to run the dev SEED flags ([`ENV_SEED_CONFORMANCE`] /
+/// [`ENV_SEED_BENCH`] / [`ENV_SEED_DEMO`]) against a NON-`memory` backend, so test fixtures are
+/// never written into a live `http`/`embedded` store by accident.
 ///
 /// Fires when a seed flag is set AND the backend is not `memory` AND the explicit
 /// [`ENV_ALLOW_SEED_NONMEMORY`] override is NOT set. With the override set (an EPHEMERAL embedded test
@@ -244,6 +284,22 @@ fn reject_durable_sparq_with_inmem_blob(
 /// Seeding the `memory` backend is ALWAYS allowed (it is the seed target by construction).
 fn reject_seed_on_nonmemory(seed_requested: bool, backend: &str, allow_override: bool) -> bool {
     seed_requested && backend != "memory" && !allow_override
+}
+
+/// [GPT-5.6] Build the opt-in QUIC endpoint from a CLONE of the existing TCP rustls config.
+///
+/// The clone is load-bearing: the TCP endpoint must keep advertising exactly `h2` + `http/1.1`,
+/// while QUIC advertises only the protocol it can actually serve (`h3`). Binding UDP to the TCP
+/// listener's resolved address gives both transports the same host/port without a second config key.
+#[cfg(feature = "http3")]
+fn bind_http3_endpoint(
+    tcp_tls: &axum_server::tls_rustls::RustlsConfig,
+    udp_addr: std::net::SocketAddr,
+) -> Result<quinn::Endpoint, Box<dyn std::error::Error>> {
+    let mut quic_tls = (*tcp_tls.get_inner()).clone();
+    quic_tls.alpn_protocols = vec![b"h3".to_vec()];
+    let quic = sparq_http3::quic_server_config(quic_tls)?;
+    Ok(quinn::Endpoint::server(quic, udp_addr)?)
 }
 
 #[tokio::main]
@@ -639,32 +695,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // GUARD #2 — refuse to seed test fixtures into a NON-`memory` backend. The dev seed flags
-    // (SOLID_SERVER_SEED_CONFORMANCE / SOLID_SERVER_SEED_BENCH) now run against WHATEVER backend is
-    // selected, so without this guard they could write conformance/bench fixtures into a live
+    // (SOLID_SERVER_SEED_CONFORMANCE / SOLID_SERVER_SEED_BENCH / SOLID_SERVER_SEED_DEMO) now run
+    // against WHATEVER backend is selected, so without this guard they could write dev fixtures into a live
     // http/embedded store. Set SOLID_SERVER_ALLOW_SEED_NONMEMORY=1 to permit it ONLY for an ephemeral
     // embedded test instance (the conformance run.sh embedded leg). Seeding `memory` is always allowed.
-    let seed_requested =
-        env_flag(ENV_SEED_CONFORMANCE) || bench_seed_count(ENV_SEED_BENCH).is_some();
+    let seed_requested = env_flag(ENV_SEED_CONFORMANCE)
+        || bench_seed_count(ENV_SEED_BENCH).is_some()
+        || env_flag(ENV_SEED_DEMO);
     if reject_seed_on_nonmemory(seed_requested, &backend, env_flag(ENV_ALLOW_SEED_NONMEMORY)) {
         return Err(format!(
             "refusing to seed test fixtures into a non-memory backend (PSS_SPARQ_BACKEND={backend}): \
-             SOLID_SERVER_SEED_CONFORMANCE / SOLID_SERVER_SEED_BENCH would write dev fixtures into a \
-             live store. Unset the seed flag(s), use PSS_SPARQ_BACKEND=memory, or — ONLY for an \
-             ephemeral test instance — set SOLID_SERVER_ALLOW_SEED_NONMEMORY=1."
+             SOLID_SERVER_SEED_CONFORMANCE / SOLID_SERVER_SEED_BENCH / SOLID_SERVER_SEED_DEMO would \
+             write dev fixtures into a live store. Unset the seed flag(s), use \
+             PSS_SPARQ_BACKEND=memory, or — ONLY for an ephemeral test instance — set \
+             SOLID_SERVER_ALLOW_SEED_NONMEMORY=1."
         )
         .into());
     }
 
-    let app = match backend.as_str() {
+    // [GPT-5.6] Each backend arm returns its router plus at most ONE boot-owned reconciler task.
+    // Crucially, the OFF path keeps the original direct backend construction (no Arc allocation or
+    // indirection); only an explicitly-present interval selects shared handles for request path + sweep.
+    let reconcile_interval = reconcile_interval_from_env()?;
+    let (app, reconcile_task) = match backend.as_str() {
         "memory" => {
             eprintln!("  STORAGE: SPARQ backend = MEMORY (in-memory double — boot-without-SPARQ; the conformance/test default).");
-            let store = CompositeStore::with_body_cache(
+            build_app_for_backend(
                 InMemorySparqClient::new(),
                 InMemoryBlobStore::new(),
-                body_cache_from_env(),
-            );
-            build_app_for_store(
-                store,
+                reconcile_interval,
                 &base_url,
                 &issuer,
                 jwks_cache_ttl,
@@ -682,13 +741,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
             })?;
             eprintln!("  STORAGE: SPARQ backend = HTTP (live SPARQL endpoint {endpoint}).");
-            let store = CompositeStore::with_body_cache(
+            build_app_for_backend(
                 HttpSparqClient::new(endpoint),
                 InMemoryBlobStore::new(),
-                body_cache_from_env(),
-            );
-            build_app_for_store(
-                store,
+                reconcile_interval,
                 &base_url,
                 &issuer,
                 jwks_cache_ttl,
@@ -719,13 +775,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map_err(|e| format!("failed to init the embedded SPARQ graph: {e}"))?
                 }
             };
-            let store = CompositeStore::with_body_cache(
+            build_app_for_backend(
                 sparq,
                 InMemoryBlobStore::new(),
-                body_cache_from_env(),
-            );
-            build_app_for_store(
-                store,
+                reconcile_interval,
                 &base_url,
                 &issuer,
                 jwks_cache_ttl,
@@ -838,6 +891,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // existing `std::net::TcpListener` (so no second, parse-restricted bind).
         Some(config) => {
             let tokio_listener = tokio::net::TcpListener::bind(&bind).await?;
+            #[cfg(feature = "http3")]
+            let http3_addr = tokio_listener.local_addr()?;
+
+            // [GPT-5.6] The h3 listener gets a clone of the ONE already-assembled, hardened router.
+            // `serve_h3` injects the Quinn peer as `ConnectInfo<SocketAddr>` before dispatch, so the
+            // OUTERMOST pre-crypto rate limiter sees the real source instead of failing open to auth.
+            // Endpoint construction happens before the TCP listener is handed off: a UDP bind/config
+            // failure aborts startup rather than silently serving only the unadvertised TCP subset.
+            #[cfg(feature = "http3")]
+            let (app, http3_server) = {
+                let endpoint = bind_http3_endpoint(&config, http3_addr)?;
+                let bound_addr = endpoint.local_addr()?;
+                // [GPT-5.6] sq-oprna.4: an Alt-Svc promise is created only after UDP bind succeeds,
+                // and names the endpoint's actual port. The unlayered clone remains the h3 router.
+                let h3_app = app.clone();
+                let tcp_app = app.layer(sparq_http3::alt_svc_layer(bound_addr.port()));
+                eprintln!(
+                    "  HTTP/3: QUIC listener ACTIVE on udp://{bound_addr} (ALPN h3; shared LDP router; \
+                     WebSocket extended CONNECT is out of scope)."
+                );
+                let server = tokio::spawn(sparq_http3::serve_h3(
+                    endpoint,
+                    h3_app,
+                    shutdown_signal(),
+                ));
+                (tcp_app, server)
+            };
+
             // axum-server wants a blocking `std::net::TcpListener`; converting the tokio one keeps the
             // resolved address (and avoids re-binding through the numeric-only `SocketAddr` path).
             let std_listener = tokio_listener.into_std()?;
@@ -924,6 +1005,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                     .await?;
             }
+
+            // Both listener shutdown futures observe the same process signal. Await the UDP task so
+            // its endpoint closes and drains QUIC connections before the process exits normally.
+            #[cfg(feature = "http3")]
+            http3_server.await??;
         }
         // Plain TCP (dev/test behaviour). Graceful shutdown on Ctrl-C.
         //
@@ -955,7 +1041,69 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         }
     }
+    // The runtime would cancel this task on process exit, but abort explicitly after the listener
+    // drains so the task's ownership/lifetime stays bounded to the server boot that created it.
+    if let Some(task) = reconcile_task {
+        task.abort();
+    }
     Ok(())
+}
+
+/// Build one selected backend in one of two shapes: the original direct store when reconciliation is
+/// OFF, or shared handles owned by both the request path and one periodic task when it is ON. Keeping
+/// the branch here makes the default path allocation- and indirection-identical to the pre-wiring boot.
+#[allow(clippy::too_many_arguments)]
+async fn build_app_for_backend<S, B, J, R>(
+    sparq: S,
+    blob: B,
+    reconcile_interval: Option<Duration>,
+    base_url: &str,
+    issuer: &str,
+    jwks_cache_ttl: Duration,
+    auth: AuthContext<J, R>,
+    overload_config: OverloadConfig,
+    identity: Option<IdentityConfig>,
+) -> Result<(axum::Router, Option<tokio::task::JoinHandle<()>>), Box<dyn std::error::Error>>
+where
+    S: sparq_lws_core::store::SparqClient + 'static,
+    B: sparq_lws_core::store::BlobStore + 'static,
+    J: JwksProvider + Send + Sync + 'static,
+    R: ReplayStore + Send + Sync + 'static,
+{
+    if reconcile_interval.is_some() {
+        let sparq = SharedStore::new(sparq);
+        let blob = SharedStore::new(blob);
+        let store = CompositeStore::with_body_cache(
+            sparq.clone(),
+            blob.clone(),
+            body_cache_from_env(),
+        );
+        let app = build_app_for_store(
+            store,
+            base_url,
+            issuer,
+            jwks_cache_ttl,
+            auth,
+            overload_config,
+            identity,
+        )
+        .await?;
+        let task = spawn_periodic_if_configured(sparq, blob, reconcile_interval);
+        Ok((app, task))
+    } else {
+        let store = CompositeStore::with_body_cache(sparq, blob, body_cache_from_env());
+        let app = build_app_for_store(
+            store,
+            base_url,
+            issuer,
+            jwks_cache_ttl,
+            auth,
+            overload_config,
+            identity,
+        )
+        .await?;
+        Ok((app, None))
+    }
 }
 
 /// Build the application router for a chosen, already-constructed [`Store`] backend — the SAME
@@ -1031,6 +1179,19 @@ where
         eprintln!(
             "  SEEDED bench fixtures — DEV/BENCH ONLY: public_doc={} listing={} ({} children) private_doc={} owner={}",
             fixtures.public_doc, fixtures.listing, fixtures.child_count, fixtures.private_doc, fixtures.owner
+        );
+    }
+
+    // Dev/demo seeding (gated): the opt-in demo playground — a public-readable demo pod plus an
+    // open-sandbox container anonymous visitors can read AND write. Like the other seeds it is
+    // purely additive fixture content; it changes no request handling.
+    if env_flag(ENV_SEED_DEMO) {
+        let fixtures = sparq_lws_core::seed::seed_demo(&store, base_url)
+            .await
+            .map_err(|e| format!("demo seeding failed: {e:?}"))?;
+        eprintln!(
+            "  SEEDED demo playground — DEV/DEMO ONLY: welcome_doc={} playground={} (public read+write sandbox) owner={}",
+            fixtures.welcome_doc, fixtures.playground, fixtures.owner
         );
     }
 
@@ -1264,6 +1425,39 @@ async fn shutdown_signal() {
 mod tests {
     use super::*;
 
+    /// [GPT-5.6] sq-oprna.2: the QUIC endpoint must gain `h3` without mutating the TCP ALPN list.
+    /// A missing `h3` mutation is rejected by `sparq_http3::quic_server_config`; mutating the shared
+    /// config instead of its clone makes the second assertion fail.
+    #[cfg(feature = "http3")]
+    #[tokio::test]
+    async fn http3_endpoint_preserves_tcp_alpn() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let mode = TlsMode::Tls {
+            cert_path: concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/test-cert.pem").into(),
+            key_path: concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/test-key.pem").into(),
+        };
+        let tcp_tls = tls::build_rustls_config(&mode, false)
+            .await
+            .expect("build fixture TLS config")
+            .expect("TLS mode yields a config");
+        let tcp_alpn = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        assert_eq!(tcp_tls.get_inner().alpn_protocols, tcp_alpn);
+
+        let endpoint = bind_http3_endpoint(
+            &tcp_tls,
+            "127.0.0.1:0".parse().expect("loopback socket address"),
+        )
+        .expect("bind HTTP/3 endpoint from cloned TLS config");
+        assert_eq!(
+            tcp_tls.get_inner().alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            "building QUIC must not add h3 to the TCP ALPN list"
+        );
+
+        endpoint.close(quinn::VarInt::from_u32(0), b"test complete");
+        endpoint.wait_idle().await;
+    }
+
     /// Set `key` to `val` (or remove it when `None`), run `f`, then restore the prior value. Each
     /// test uses a UNIQUE key so concurrent test threads never read the same process-global env var.
     fn with_env(key: &str, val: Option<&str>, f: impl FnOnce()) {
@@ -1477,4 +1671,6 @@ mod tests {
             Some(5_000_000)
         );
     }
+}
+
 }

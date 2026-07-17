@@ -127,6 +127,11 @@ fn normalize_form(form: &mut FormDescription, names: &mut std::collections::Hash
                 normalize_ref(n, names);
             }
             normalize_constraints(&mut f.constraints, names);
+            // sh:defaultValue may (degenerately) be a blank node — keep the
+            // deterministic-label contract. [FABLE] sq-lsp7k.1.5
+            if let Some(dv) = &mut f.default_value {
+                normalize_ref(dv, names);
+            }
             for v in &mut f.values {
                 normalize_ref(&mut v.term, names);
                 if let Some(nested) = &mut v.nested {
@@ -382,12 +387,18 @@ fn build_field(
         })
         .collect();
 
+    // ---- dash presentation flags (additive; absent statements leave the ----
+    // ---- description exactly as before). [FABLE] sq-lsp7k.1.5           ----
+    let hidden = bool_object(shapes, &prop.node, &dash("hidden"));
+    let read_only = bool_object(shapes, &prop.node, &dash("readOnly"));
+    let default_value = shapes
+        .object(&prop.node, &sh("defaultValue"))
+        .map(|t| TermRef::from_term(&t));
+
     let label = field_label(shapes, prop, path);
     FormField {
         property_shape: Some(TermRef::from_term(&prop.node)),
-        path: path
-            .to_sparql_property_path()
-            .unwrap_or_else(|| path.to_turtle()),
+        path: render_path(path),
         inverse: matches!(path, Path::Inverse(_)),
         label,
         description: literal_object(shapes, &prop.node, &sh("description")).or_else(|| {
@@ -396,10 +407,14 @@ fn build_field(
         order: order_of(shapes, &prop.node),
         required: constraints.min_count.is_some_and(|c| c >= 1),
         multi: constraints.max_count != Some(1),
-        editable: opts.mode == Mode::Edit,
+        // dash:readOnly true forces read-only even in edit mode. [FABLE]
+        editable: opts.mode == Mode::Edit && !read_only,
+        hidden,
+        default_value,
         widget,
         values,
         constraints,
+        validation: Vec::new(),
     }
 }
 
@@ -454,6 +469,8 @@ fn other_fields(
                 required: false,
                 multi: true,
                 editable: false, // off-shape triples are ALWAYS read-only
+                hidden: false,      // presentation flags live on property shapes
+                default_value: None, // [FABLE] sq-lsp7k.1.5
                 widget: WidgetChoice {
                     editor: None,
                     viewer: viewer_res.selected.clone(),
@@ -470,6 +487,7 @@ fn other_fields(
                     })
                     .collect(),
                 constraints,
+                validation: Vec::new(),
             }
         })
         .collect()
@@ -568,6 +586,11 @@ fn field_label(shapes: &GraphView, prop: &Shape, path: &Path) -> String {
             return local_name(n.as_str()).to_string();
         }
     }
+    render_path(path)
+}
+
+/// [GPT-5.6] Canonical field/result key for a parsed SHACL property path.
+pub(crate) fn render_path(path: &Path) -> String {
     path.to_sparql_property_path()
         .unwrap_or_else(|| path.to_turtle())
 }
@@ -582,7 +605,7 @@ fn predicate_term(path: &Path) -> Option<Term> {
 }
 
 /// Deterministic literal pick: no-language first, then by tag, then by value.
-fn pick_literal(terms: Vec<Term>) -> Option<String> {
+pub(crate) fn pick_literal(terms: Vec<Term>) -> Option<String> {
     let mut lits: Vec<(bool, String, String)> = terms
         .into_iter()
         .filter_map(|t| match t {
@@ -600,6 +623,12 @@ fn pick_literal(terms: Vec<Term>) -> Option<String> {
 
 fn literal_object(g: &GraphView, node: &Term, pred: &str) -> Option<String> {
     pick_literal(g.objects(node, pred))
+}
+
+/// `true` iff the node declares `<pred> true` (lexical `true`, matching the
+/// `dash:singleLine` handling in `constraints_of`). [FABLE-5] sq-lsp7k.1.5
+fn bool_object(g: &GraphView, node: &Term, pred: &str) -> bool {
+    literal_object(g, node, pred).is_some_and(|v| v == "true")
 }
 
 fn iri_object(g: &GraphView, node: &Term, pred: &str) -> Option<String> {

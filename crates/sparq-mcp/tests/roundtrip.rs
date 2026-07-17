@@ -1,8 +1,8 @@
 //! [OPUS-4.8] (sq-0z43i, gh #909) Real MCP round-trip over an in-memory store:
 //! initialize → tools/list → tools/call. Exercises the actual dispatch core
 //! (`McpServer::handle_message`) — no mock bypasses the engine; `query` runs through
-//! the real `sparq-engine` query path and `introspect`/`stats` through the real
-//! `sparq-introspect` schema miner. The load-bearing invariants asserted here:
+//! the real `sparq-engine` query path and `introspect`/`stats`/`classes`/`prefixes`
+//! through the real `sparq-introspect` schema miner. The load-bearing invariants asserted here:
 //!   - read-only by DEFAULT: `update` is absent from `tools/list` and a `tools/call`
 //!     for it is refused (fail-closed mutation surface);
 //!   - with update enabled, `update` is advertised AND actually mutates the graph,
@@ -19,8 +19,33 @@ ex:alice rdf:type ex:Person ; ex:name "Alice" ; ex:knows ex:bob .
 ex:bob   rdf:type ex:Person ; ex:name "Bob" .
 "#;
 
+// [GPT-5.6] sq-kx5b0: three distinct schema.org IRIs and one FOAF IRI give the
+// `prefixes` tool a mutation-witnessed ordering/count fixture.
+const PREFIXES_TTL: &str = r#"@prefix schema: <https://schema.org/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+schema:alice schema:knows schema:bob ; foaf:name "Alice" .
+"#;
+
+// [GPT-5.6] sq-cekgj: two classes with unequal populations and predicate profiles give
+// the `classes` tool mutation-witnessed ordering and count assertions.
+const CLASSES_TTL: &str = r#"@prefix ex: <http://ex/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+ex:a1 rdf:type ex:A ; ex:p "one" ; ex:q ex:o .
+ex:a2 rdf:type ex:A ; ex:p "two" .
+ex:a3 rdf:type ex:A .
+ex:b1 rdf:type ex:B ; ex:p "three" .
+"#;
+
 fn graph() -> Graph {
     Graph::load_str(TTL, "turtle").expect("load turtle")
+}
+
+fn prefixes_graph() -> Graph {
+    Graph::load_str(PREFIXES_TTL, "turtle").expect("load prefixes turtle")
+}
+
+fn classes_graph() -> Graph {
+    Graph::load_str(CLASSES_TTL, "turtle").expect("load classes turtle")
 }
 
 /// Parse a server response line into JSON.
@@ -69,6 +94,16 @@ fn read_only_server_lists_read_tools_only() {
     assert!(names.contains(&"introspect"));
     assert!(names.contains(&"shapes"));
     assert!(names.contains(&"stats"));
+    assert!(names.contains(&"classes"));
+    assert!(names.contains(&"prefixes"));
+    assert!(names.contains(&"void"));
+    // [GPT-5.6] sq-lsp7k.22: the validator dependency and tool stay opt-in.
+    #[cfg(not(feature = "shacl"))]
+    assert!(!names.contains(&"validate"));
+    // [FABLE-5] sq-lsp7k.1.6: form derivation shares the same opt-in gate — absent
+    // from the default (feature-off) tool surface.
+    #[cfg(not(feature = "shacl"))]
+    assert!(!names.contains(&"describe_form"));
     assert!(!names.contains(&"update"), "update must NOT be advertised by default");
     // The NL `ask` tool is feature-gated AND backend-gated: never advertised in the
     // default build (the `nlq` feature is off here).
@@ -178,6 +213,113 @@ fn introspect_and_stats_reflect_the_graph() {
     );
     let summary = ix["result"]["content"][0]["text"].as_str().unwrap();
     assert!(summary.contains("Schema summary"), "got: {}", summary);
+}
+
+#[test]
+fn prefixes_tool_lists_namespaces_by_descending_term_count() {
+    let mut server = McpServer::new(prefixes_graph());
+    let response = call(
+        &mut server,
+        r#"{"jsonrpc":"2.0","id":18,"method":"tools/call","params":{"name":"prefixes","arguments":{}}}"#,
+    );
+    let result = &response["result"];
+    assert_eq!(result["isError"], false, "{response}");
+    let payload: Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+
+    assert_eq!(payload["distinct_prefixes"], 2);
+    let prefixes = payload["prefixes"].as_array().unwrap();
+    assert_eq!(prefixes.len(), 2);
+    assert_eq!(prefixes[0]["prefix"], "schema");
+    assert_eq!(prefixes[0]["namespace"], "https://schema.org/");
+    assert_eq!(prefixes[0]["term_count"], 3);
+    assert_eq!(prefixes[1]["prefix"], "foaf");
+    assert_eq!(prefixes[1]["namespace"], "http://xmlns.com/foaf/0.1/");
+    assert_eq!(prefixes[1]["term_count"], 1);
+}
+
+#[test]
+fn classes_tool_lists_profiles_by_descending_instance_count() {
+    let mut server = McpServer::new(classes_graph());
+    let response = call(
+        &mut server,
+        r#"{"jsonrpc":"2.0","id":19,"method":"tools/call","params":{"name":"classes","arguments":{}}}"#,
+    );
+    let result = &response["result"];
+    assert_eq!(result["isError"], false, "{response}");
+    let payload: Value =
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
+
+    assert_eq!(payload["distinct_classes"], 2);
+    let classes = payload["classes"].as_array().unwrap();
+    assert_eq!(classes.len(), 2);
+    assert_eq!(classes[0]["class"], "http://ex/A");
+    assert_eq!(classes[0]["instances"], 3);
+    // ClassProfile predicates include rdf:type alongside the two descriptive predicates.
+    assert_eq!(classes[0]["predicate_count"], 3);
+    assert_eq!(classes[1]["class"], "http://ex/B");
+    assert_eq!(classes[1]["instances"], 1);
+    assert_eq!(classes[1]["predicate_count"], 2);
+}
+
+#[test]
+fn void_tool_emits_dataset_descriptor() {
+    let mut server = McpServer::new(graph());
+    let descriptor = call(
+        &mut server,
+        r#"{"jsonrpc":"2.0","id":15,"method":"tools/call","params":{"name":"void","arguments":{"dataset":"http://example.org/ds"}}}"#,
+    );
+    let result = &descriptor["result"];
+    assert_eq!(result["isError"], false, "{descriptor}");
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains(
+            "<http://example.org/ds> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://rdfs.org/ns/void#Dataset> ."
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "<http://example.org/ds> <http://rdfs.org/ns/void#triples> \"5\"^^<http://www.w3.org/2001/XMLSchema#integer> ."
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("<http://rdfs.org/ns/void#class> <http://ex/Person>"),
+        "{text}"
+    );
+}
+
+#[test]
+fn void_tool_defaults_dataset_iri_and_optionally_emits_characteristic_sets() {
+    let mut server = McpServer::new(graph());
+    let default_descriptor = call(
+        &mut server,
+        r#"{"jsonrpc":"2.0","id":16,"method":"tools/call","params":{"name":"void","arguments":{}}}"#,
+    );
+    let default_text = default_descriptor["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(
+        default_text.contains(
+            "<urn:sparq:dataset> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://rdfs.org/ns/void#Dataset> ."
+        ),
+        "{default_text}"
+    );
+    assert!(
+        !default_text.contains("http://sparq.dev/ns/cs#characteristicSet"),
+        "bare VoID must omit characteristic-set statistics: {default_text}"
+    );
+
+    let with_cs = call(
+        &mut server,
+        r#"{"jsonrpc":"2.0","id":17,"method":"tools/call","params":{"name":"void","arguments":{"characteristic_sets":true}}}"#,
+    );
+    let with_cs_text = with_cs["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        with_cs_text.contains("http://sparq.dev/ns/cs#characteristicSet"),
+        "{with_cs_text}"
+    );
 }
 
 #[test]

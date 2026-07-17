@@ -20,6 +20,23 @@
   features: "federation-descriptors,service,time-travel,geo,test-seams"
   test: true
 
+# [GPT-5.6] sq-lsp7k.5.2: the default-OFF grouped facet-count endpoint (`POST /facets`).
+# The route, `ServerConfig::facets` field, env arm, handler, `sparq-introspect` dependency, two
+# direct config tests, and `tests/facets.rs` end-to-end suite are all cfg-gated, so this dedicated
+# leg compiles, clippies, and executes the real double-opt-in/read-auth/snapshot-count surface.
+- name: "sparq-server (facets — POST /facets grouped counts)"
+  crate: "sparq-server"
+  features: "facets"
+  test: true
+
+# [GPT-5.6] sq-lsp7k.9.3: the default-OFF prefix-completion endpoint (`GET /complete`). The
+# route, config/env flag, AppState generation cache, pure-index sparq-text dependency, direct
+# config tests, and `tests/complete.rs` stale-generation end-to-end witness are all cfg-gated.
+- name: "sparq-server (complete — GET /complete prefix completion)"
+  crate: "sparq-server"
+  features: "complete"
+  test: true
+
 # [OPUS-4.8] sq-21kp: the OPT-IN per-query access audit log (CDMC CD-2 /
 # ISO 27001 A.8.15 / EU CRA logging) — exercises tests/audit_log.rs, which is
 # `#![cfg(feature = "audit-log")]` and so never ran under the default build.
@@ -86,6 +103,20 @@
 - name: "sparq-server (response-compression)"
   crate: "sparq-server"
   features: "response-compression"
+  test: true
+
+# [GPT-5.6] sq-oprna.6: the default-off h1+h2 auto-builder TCP path, including real TLS/ALPN
+# negotiation, HTTP/1.1 fallback, and the inherited slow-loris header deadline integration test.
+- name: "sparq-server (http2)"
+  crate: "sparq-server"
+  features: "http2"
+  test: true
+
+# [GPT-5.6] sq-oprna.3: encrypted HTTP/3 over a second UDP listener, including the
+# real cross-protocol SPARQL serialization parity integration test.
+- name: "sparq-server (http3)"
+  crate: "sparq-server"
+  features: "http3"
   test: true
 
 # [OPUS-4.8] sq-2999l (gh-906): the OPT-IN CDC change-stream poll endpoint (`GET /streams`) in the
@@ -193,4 +224,23 @@
 - name: "sparq-server (templates — named parameterized template REST surface)"
   crate: "sparq-server"
   features: "templates"
+  test: true
+
+# [SONNET-4.6] sq-qsm5z: the OPT-IN running-query registry (`GET /queries` list +
+# `DELETE /queries/{id}` cooperative cancel). The `QueryRegistry` struct, `QueryGuard` RAII
+# type, `registry_fingerprint` helper, `list_queries_handler` + `cancel_query_handler` handlers,
+# the `AppState::running_queries` field, the route mounts, and the in-module
+# `query_registry_tests` unit tests are ALL `#[cfg(feature = "query-registry")]`, so the
+# DEFAULT build never compiled, clippy'd or tested this code. This leg builds it, runs
+# `clippy --all-targets -D warnings` with the feature ON (the real gate), and runs the
+# crate's unit tests — which now include 10 gated `query_registry_tests` (fingerprint
+# stability + distinctness, RAII guard cleanup on normal return, RAII guard cleanup on unwind,
+# cancel flips the flag to true, cancel unknown id returns false, multiple entries listed and
+# individually cancellable; plus sq-t1isr EXPLAIN-path tests: entry present while guard alive,
+# cancel flag flippable, guard cleans up on panic). `query-registry` pulls only `server` (no
+# new dependency). Zero cost when feature is OFF: no `AppState` fields, no routes, byte-identical
+# to before. sq-t1isr ([SONNET-4.6]) wires the SAME registration into the EXPLAIN ANALYZE path.
+- name: "sparq-server (query-registry — GET /queries list + DELETE /queries/{id} cancel)"
+  crate: "sparq-server"
+  features: "query-registry"
   test: true

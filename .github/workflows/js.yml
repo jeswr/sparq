@@ -26,6 +26,9 @@ name: js
 
 on:
   pull_request:
+    # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
+    # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
+    types: [opened, synchronize, reopened, ready_for_review]
     # The surfaces that can affect the js build/test: the js package itself, the npm
     # workspace members + root lockfile/manifest it installs from (the #953 root install),
     # every sparq-*-wasm crate the build compiles (sparq-wasm + reason/rsp/shacl/text-wasm),
@@ -45,6 +48,14 @@ on:
 # build/test job only reads the repo; grant nothing more. Jobs needing writes opt in per-job.
 permissions:
   contents: read
+
+# [FABLE-5] Draft-tier CI: per-PR concurrency so a superseded push's heavy
+# wasm-pack build stops burning a runner slot (same pattern as docs-quality/gui/
+# site-*). No merge_group trigger exists here, so this can never cancel a
+# merge_group run.
+concurrency:
+  group: js-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   js:
@@ -117,6 +128,22 @@ jobs:
         working-directory: packages/eyereasoner-compat
         run: |
           npm run build
+          npm test
+          npm run check:package
+
+      # [OPUS-4.8] sq-6xasp.11 (epic sq-6xasp): the @jeswr/solid-server package — a local-dev
+      # Solid/LDP pod backed by the sparq-lws wasm handler. Build the wasm bundle
+      # (crates/sparq-lws-wasm, matched by the `crates/sparq-*-wasm/**` paths filter above) with
+      # the same wasm-pack installed earlier in this job, then run the package's node:test suite
+      # (http/auth/server/oidc, including the npx spin-up round-trip in server.test.mjs). The wasm
+      # build MUST precede `npm test`: src/index.js statically imports ../wasm/sparq_lws_wasm.js,
+      # so server.test.mjs / oidc.test.mjs (which `import { startSolidServer } from '../src/index.js'`)
+      # fail module resolution without the built wasm/ tree. [GPT-5.6] sq-hcy7c also checks the
+      # exact dry-run tarball file list so neither the allowlist nor the artifact can regress.
+      - name: solid-server package (build wasm + node:test + package guardrail)
+        working-directory: packages/solid-server
+        run: |
+          npm run build:lws-wasm
           npm test
           npm run check:package
 

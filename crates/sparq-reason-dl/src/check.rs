@@ -18,6 +18,14 @@
 //! | 4 | ALCH (everything else L1 extracted) | the L3 tableau | complete for the fragment | complete for the fragment | [`UnknownReason::ResourceBudget`] |
 //! | — | extraction failed | none | never | never | [`UnknownReason::OutOfFragment`] |
 //!
+//! **Opt-in transitive roles ([GPT-5.6] sq-zfwzq, feature `dl_transitive`):** an ontology
+//! declaring `owl:TransitiveProperty` (the feature-gated `TransitiveObjectProperty` axiom
+//! kind) routes STRAIGHT to the ALCH+S tableau before the profile dispatch — the only
+//! branch whose soundness/completeness argument covers transitivity (tableau module docs
+//! §5a). The RL/EL guards below also recognise the axiom kind fail-closed (defence in
+//! depth). With the feature OFF, extraction refuses transitivity before dispatch, exactly
+//! as before.
+//!
 //! The first branch whose profile test matches OWNS the verdict — an abstaining branch does
 //! NOT fall through (the record specifies dispatch-in-order; a tableau fallback for
 //! guard-abstained RL/EL/QL inputs is possible future work, recorded as such, not silently
@@ -100,6 +108,21 @@
 //!   holds because its `∀`-rule fires modulo the role hierarchy (`System::is_subrole`,
 //!   reflexive-transitive), so the `R`-edge `a → b` is seen by `∀S` exactly when
 //!   `O ⊢ R ⊑* S`. All three additions stay inside the L1 fragment.
+//! - `TransitiveObjectProperty(R)` (opt-in `dl_transitive`, [GPT-5.6] sq-zfwzq) —
+//!   `O ∪ {R(a,b), R(b,c), B(c), (∀R.¬B)(a)}` with `a`, `b`, `c` FRESH individuals and
+//!   `B` a FRESH class name: the two-step-chain lift of the fresh-class trick. Sound AND
+//!   complete: if `O ⊨ Trans(R)`, then in any model of the union `Rᴵ` is transitive, so
+//!   `(a,b), (b,c) ∈ R` give `(a,c) ∈ R` — `a ∈ ∀R.¬B` forces `c ∈ ¬B`, clashing with
+//!   `B(c)`: the union is inconsistent. Conversely a model `I` of `O` in which `Rᴵ` is
+//!   NOT transitive has a witness chain `(u,v), (v,w) ∈ Rᴵ` with `(u,w) ∉ Rᴵ`; extend it
+//!   via `aᴵ = u`, `bᴵ = v`, `cᴵ = w`, `Bᴵ = {w}` (`a`/`b`/`c`/`B` occur nowhere in `O`;
+//!   `(u,w) ∉ Rᴵ` means no `R`-successor of `u` is `w`, the sole member of `B`, so
+//!   `(∀R.¬B)(a)` holds) — non-entailment yields consistency. All four additions stay
+//!   inside the feature-extended L1 fragment, and the tableau deciding them is the
+//!   §5a-argued ALCH+S calculus (sound and complete for that fragment), so the reduction
+//!   is exact however `O` happens to entail the transitivity — e.g. a declared `Trans(R)`
+//!   (the ∀₊-rule carries `∀R.¬B` down the `a → b → c` chain to the clash at `c`), a
+//!   declared-transitive equivalent role, or an `R` forced empty by `⊤ ⊑ ∀R.⊥`.
 //!
 //! `Entailed` needs every conclusion axiom's refutation(s) unsatisfiable; a single
 //! definitively-satisfiable refutation is `NotEntailed` (sound because the tableau is
@@ -125,6 +148,18 @@
 //! free-existential root — abstains fail-closed ([`UnknownReason::ConclusionAnonymousIndividual`]),
 //! NEVER a skolem-constant `NotEntailed`.
 //!
+//! **Declaration-free conclusion roles ([GPT-5.6] sq-zfwzq).** OWL declarations have no
+//! Direct-Semantics consequences, and W3C conclusion documents commonly omit an
+//! `owl:ObjectProperty` declaration for a role already typed by the premise. In the
+//! `dl_transitive` extension, L1 deliberately refuses an otherwise-ambiguous RDF predicate,
+//! so entailment augments the conclusion's extraction input with declarations for **only**
+//! named object properties already proved to be roles by a fully-extracted premise that
+//! declares transitivity. This is semantics-preserving (the added declarations carry no
+//! logical content), never guesses an unknown predicate's kind, is discarded after extraction,
+//! and leaves the pre-feature ALCH entailment boundary unchanged. It is load-bearing for the
+//! DIRECT transitive-chain entailment cases, whose conclusion is just the composed role
+//! assertion.
+//!
 //! # Honest boundary
 //!
 //! This module never claims completeness beyond the argued fragment: the only complete
@@ -136,6 +171,7 @@ use crate::extract::extract;
 use crate::model::{Axiom, ClassExpression, ObjectPropertyExpression, Ontology};
 use crate::profile::profiles;
 use crate::tableau::{self, Budget, ExhaustedBudget};
+use oxrdf::{NamedNode, Term as OTerm};
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{is_inline, Dict, Id, TermParts};
 use sparq_reason::{inconsistencies, materialize, Profile};
@@ -191,9 +227,11 @@ pub enum UnknownReason {
     ResourceBudget(ExhaustedBudget),
     /// Entailment only: the conclusion-axiom kind has no argued refutation encoding.
     /// Every axiom kind the L1 model can currently express HAS an argued encoding
-    /// (`SubObjectPropertyOf` gained one under sq-pbz04.4.9), so this reason is not
-    /// produced today — it is RETAINED fail-closed for future model growth (a new axiom
-    /// kind abstains here until its encoding is argued in the design record). [FABLE-5]
+    /// (`SubObjectPropertyOf` gained one under sq-pbz04.4.9; the opt-in
+    /// `TransitiveObjectProperty` kind gained the two-step-chain lift under sq-zfwzq), so
+    /// this reason is not produced today — it is RETAINED fail-closed for future model
+    /// growth (a new axiom kind abstains here until its encoding is argued in the design
+    /// record). [GPT-5.6]
     UnencodedConclusion(String),
     /// Entailment only: the CONCLUSION ontology mentions a blank-node individual in a shape
     /// that does NOT roll up into a tree-shaped existential class assertion (it is shared
@@ -346,6 +384,27 @@ impl DirectChecker {
                 }
             }
         };
+        // [GPT-5.6] sq-zfwzq (opt-in `dl_transitive`): an ontology declaring a TRANSITIVE
+        // role routes STRAIGHT to the ALCH+S tableau — the only branch whose soundness /
+        // completeness argument covers transitivity (tableau module docs §5a). Although a
+        // transitive ontology can be syntactically in-RL/in-EL, the RL rule set's documented
+        // divergences implicate transitivity ("no clash" would not certify consistency) and
+        // the EL classifier does not apply the axiom kind — both branches would abstain
+        // (their guards below keep that fail-closed as defence in depth), so per the
+        // record's "definitive verdicts only from a complete branch" rule the tableau owns
+        // the verdict. With the feature OFF this arm does not exist (extraction refuses
+        // `owl:TransitiveProperty` before dispatch).
+        #[cfg(feature = "dl_transitive")]
+        if onto
+            .axioms()
+            .iter()
+            .any(|a| matches!(a, Axiom::TransitiveObjectProperty { .. }))
+        {
+            return ConsistencyOutcome {
+                verdict: tableau_consistency(&onto, self.budget),
+                branch: Branch::AlchTableau,
+            };
+        }
         let ps = profiles(&onto);
         if ps.rl.is_in() {
             return rl_branch(dict, triples, &onto);
@@ -390,7 +449,35 @@ impl DirectChecker {
             Ok(onto) => onto,
             Err(e) => return unknown_extraction(format!("premise: {}", e)),
         };
-        let concl = match extract(dict, conclusion) {
+        // [GPT-5.6] sq-zfwzq: declarations have no Direct-Semantics import. Seed the
+        // conclusion extraction with declarations for premise-confirmed roles so a bare
+        // conclusion role assertion is classifiable without weakening L1 globally.
+        let mut conclusion_for_extraction = conclusion.to_vec();
+        let mut premise_roles = FxHashSet::default();
+        #[cfg(feature = "dl_transitive")]
+        if prem
+            .axioms()
+            .iter()
+            .any(|axiom| matches!(axiom, Axiom::TransitiveObjectProperty { .. }))
+        {
+            collect_role_ids(&prem, &mut premise_roles);
+        }
+        let conclusion_predicates: FxHashSet<Id> =
+            conclusion.iter().map(|triple| triple[1]).collect();
+        if !premise_roles.is_empty() {
+            let rdf_type = dict.intern(&OTerm::NamedNode(NamedNode::new_unchecked(
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+            )));
+            let object_property = dict.intern(&OTerm::NamedNode(NamedNode::new_unchecked(
+                "http://www.w3.org/2002/07/owl#ObjectProperty",
+            )));
+            for role in premise_roles {
+                if conclusion_predicates.contains(&role) {
+                    conclusion_for_extraction.push([role, rdf_type, object_property]);
+                }
+            }
+        }
+        let concl = match extract(dict, &conclusion_for_extraction) {
             Ok(onto) => onto,
             Err(e) => return unknown_extraction(format!("conclusion: {}", e)),
         };
@@ -485,6 +572,60 @@ enum AxiomVerdict {
     Unknown(UnknownReason),
 }
 
+/// Collect every named object property whose role kind is established by a fully-extracted
+/// premise model. Used only to add semantically inert declarations to conclusion extraction.
+fn collect_role_ids(onto: &Ontology, into: &mut FxHashSet<Id>) {
+    for axiom in onto.axioms() {
+        match axiom {
+            Axiom::SubClassOf { sub, sup } => {
+                collect_role_ids_in_ce(sub, into);
+                collect_role_ids_in_ce(sup, into);
+            }
+            Axiom::EquivalentClasses(left, right) | Axiom::DisjointClasses(left, right) => {
+                collect_role_ids_in_ce(left, into);
+                collect_role_ids_in_ce(right, into);
+            }
+            Axiom::SubObjectPropertyOf { sub, sup } => {
+                into.extend([sub.named(), sup.named()]);
+            }
+            Axiom::ObjectPropertyDomain { property, domain } => {
+                into.insert(property.named());
+                collect_role_ids_in_ce(domain, into);
+            }
+            Axiom::ObjectPropertyRange { property, range } => {
+                into.insert(property.named());
+                collect_role_ids_in_ce(range, into);
+            }
+            Axiom::ClassAssertion { class, .. } => collect_role_ids_in_ce(class, into),
+            Axiom::ObjectPropertyAssertion { property, .. } => {
+                into.insert(property.named());
+            }
+            #[cfg(feature = "dl_transitive")]
+            Axiom::TransitiveObjectProperty { property } => {
+                into.insert(property.named());
+            }
+        }
+    }
+}
+
+fn collect_role_ids_in_ce(class: &ClassExpression, into: &mut FxHashSet<Id>) {
+    match class {
+        ClassExpression::ObjectIntersectionOf(members)
+        | ClassExpression::ObjectUnionOf(members) => {
+            for member in members {
+                collect_role_ids_in_ce(member, into);
+            }
+        }
+        ClassExpression::ObjectComplementOf(inner) => collect_role_ids_in_ce(inner, into),
+        ClassExpression::ObjectSomeValuesFrom(property, filler)
+        | ClassExpression::ObjectAllValuesFrom(property, filler) => {
+            into.insert(property.named());
+            collect_role_ids_in_ce(filler, into);
+        }
+        ClassExpression::Class(_) | ClassExpression::Thing | ClassExpression::Nothing => {}
+    }
+}
+
 // -------------------------------------------------------------------------------------------
 // RL branch
 // -------------------------------------------------------------------------------------------
@@ -543,6 +684,11 @@ fn pr1_punning_violation(onto: &Ontology) -> Option<String> {
                 properties.insert(property.named());
                 individuals.extend([*source, *target]);
             }
+            // [GPT-5.6] sq-zfwzq: a transitivity declaration uses its subject as a property.
+            #[cfg(feature = "dl_transitive")]
+            Axiom::TransitiveObjectProperty { property } => {
+                properties.insert(property.named());
+            }
             Axiom::SubClassOf { .. }
             | Axiom::EquivalentClasses(_, _)
             | Axiom::DisjointClasses(_, _) => {}
@@ -581,6 +727,17 @@ fn pr1_punning_violation(onto: &Ontology) -> Option<String> {
 /// construct the model touches, or `None` when "no clash" may soundly read as consistent.
 fn rl_divergence_guard(onto: &Ontology) -> Option<String> {
     for axiom in onto.axioms() {
+        // [GPT-5.6] sq-zfwzq: the documented RL divergences implicate transitivity, so "no
+        // clash" must not certify consistency here. Defence in depth only — dispatch routes
+        // transitive ontologies to the ALCH+S tableau BEFORE this branch can match.
+        #[cfg(feature = "dl_transitive")]
+        if matches!(axiom, Axiom::TransitiveObjectProperty { .. }) {
+            return Some(
+                "owl:TransitiveProperty (implicated by the documented RL rule-set \
+                 divergences on property chains/transitivity)"
+                    .to_string(),
+            );
+        }
         if matches!(axiom, Axiom::DisjointClasses(_, _)) {
             return Some(
                 "owl:disjointWith (implicated by DOCUMENTED_DIVERGENCES \
@@ -605,6 +762,8 @@ fn axiom_ces(axiom: &Axiom) -> Vec<&ClassExpression> {
         Axiom::ObjectPropertyRange { range, .. } => vec![range],
         Axiom::ClassAssertion { class, .. } => vec![class],
         Axiom::SubObjectPropertyOf { .. } | Axiom::ObjectPropertyAssertion { .. } => Vec::new(),
+        #[cfg(feature = "dl_transitive")]
+        Axiom::TransitiveObjectProperty { .. } => Vec::new(),
     }
 }
 
@@ -672,6 +831,10 @@ fn el_unapplied_kind(onto: &Ontology) -> Option<String> {
         Axiom::ObjectPropertyRange { .. } => Some("ObjectPropertyRange".to_string()),
         Axiom::ClassAssertion { .. } => Some("ClassAssertion".to_string()),
         Axiom::ObjectPropertyAssertion { .. } => Some("ObjectPropertyAssertion".to_string()),
+        // [GPT-5.6] sq-zfwzq: the EL classifier does not apply transitivity — abstain
+        // (defence in depth; dispatch routes transitive ontologies to the tableau first).
+        #[cfg(feature = "dl_transitive")]
+        Axiom::TransitiveObjectProperty { .. } => Some("TransitiveObjectProperty".to_string()),
     })
 }
 
@@ -769,6 +932,10 @@ fn collect_ids(onto: &Ontology, into: &mut FxHashSet<Id>) {
                 target,
             } => {
                 into.extend([property.named(), *source, *target]);
+            }
+            #[cfg(feature = "dl_transitive")]
+            Axiom::TransitiveObjectProperty { property } => {
+                into.insert(property.named());
             }
             Axiom::SubClassOf { .. }
             | Axiom::EquivalentClasses(_, _)
@@ -869,6 +1036,43 @@ fn refutation_checks(conclusion: &Axiom, fresh: &mut FreshNames) -> Option<Vec<V
                 Axiom::ClassAssertion {
                     class: ClassExpression::only(
                         sup.named(),
+                        ClassExpression::ObjectComplementOf(Box::new(ClassExpression::Class(
+                            witness,
+                        ))),
+                    ),
+                    individual: a,
+                },
+            ]])
+        }
+        // The two-step-chain lift of the fresh-class trick for a TRANSITIVITY conclusion
+        // (module docs; [GPT-5.6] sq-zfwzq — sound AND complete): `O ⊨ Trans(R)` iff
+        // `O ∪ {R(a,b), R(b,c), B(c), (∀R.¬B)(a)}` is unsatisfiable, with `a`/`b`/`c`/`B`
+        // fresh. A non-transitive witness chain `(u,v), (v,w) ∈ Rᴵ, (u,w) ∉ Rᴵ` in some
+        // model of `O` is exactly what keeps the union satisfiable (`B = {w}`).
+        #[cfg(feature = "dl_transitive")]
+        Axiom::TransitiveObjectProperty { property } => {
+            let a = fresh.mint();
+            let b = fresh.mint();
+            let c = fresh.mint();
+            let witness = fresh.mint();
+            Some(vec![vec![
+                Axiom::ObjectPropertyAssertion {
+                    property: property.clone(),
+                    source: a,
+                    target: b,
+                },
+                Axiom::ObjectPropertyAssertion {
+                    property: property.clone(),
+                    source: b,
+                    target: c,
+                },
+                Axiom::ClassAssertion {
+                    class: ClassExpression::Class(witness),
+                    individual: c,
+                },
+                Axiom::ClassAssertion {
+                    class: ClassExpression::only(
+                        property.named(),
                         ClassExpression::ObjectComplementOf(Box::new(ClassExpression::Class(
                             witness,
                         ))),
@@ -1099,4 +1303,62 @@ fn roll_bnode(
         1 => members.pop().expect("len checked == 1"),
         _ => ClassExpression::ObjectIntersectionOf(members),
     })
+}
+
+// -------------------------------------------------------------------------------------------
+// Direct unit tests for the transitive defence-in-depth guards ([GPT-5.6] sq-zfwzq).
+// The dispatch routes transitive ontologies to the tableau BEFORE the RL/EL branches, so
+// these private guard arms are unreachable end-to-end BY DESIGN — they exist so a future
+// dispatch change cannot silently hand a transitive ontology to an incomplete branch. The
+// tests pin that contract directly (the integration suite covers the routed path).
+// -------------------------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "dl_transitive"))]
+mod transitive_guard_tests {
+    use super::*;
+    use crate::model::ObjectPropertyExpression as OPE;
+
+    fn transitive_onto() -> Ontology {
+        Ontology {
+            axioms: vec![Axiom::TransitiveObjectProperty {
+                property: OPE::ObjectProperty(10),
+            }],
+        }
+    }
+
+    #[test]
+    fn rl_divergence_guard_abstains_on_transitivity() {
+        let msg = rl_divergence_guard(&transitive_onto())
+            .expect("the RL guard must implicate transitivity");
+        assert!(msg.contains("TransitiveProperty"), "got {}", msg);
+    }
+
+    #[test]
+    fn el_unapplied_kind_flags_transitivity() {
+        assert_eq!(
+            el_unapplied_kind(&transitive_onto()).as_deref(),
+            Some("TransitiveObjectProperty")
+        );
+    }
+
+    #[test]
+    fn pr1_scan_counts_transitive_property_as_property_use() {
+        // The property id 10 is ALSO used as a class: the PR1 punning scan must see the
+        // overlap through the TransitiveObjectProperty arm.
+        let onto = Ontology {
+            axioms: vec![
+                Axiom::TransitiveObjectProperty {
+                    property: OPE::ObjectProperty(10),
+                },
+                Axiom::SubClassOf {
+                    sub: ClassExpression::Class(10),
+                    sup: ClassExpression::Thing,
+                },
+            ],
+        };
+        assert!(
+            pr1_punning_violation(&onto).is_some(),
+            "class/property punning through the transitivity axiom must be seen"
+        );
+    }
 }

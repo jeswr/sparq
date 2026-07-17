@@ -24,9 +24,19 @@
 # On PRs the lane runs only when something that affects the image changed (Dockerfile, the
 # build sources via Cargo manifests, the allowlist/lint configs, or this workflow) so an
 # unrelated docs/test PR does not pay the image build — but it ALWAYS runs on push-to-main,
-# merge_group, schedule, and manual dispatch. Because ci-summary only aggregates checks that
+# schedule, and manual dispatch. Because ci-summary only aggregates checks that
 # actually register on a given ref, a PR that does not touch these paths simply has no
 # container-scan check to wait on (it is not a missing-required-check hang).
+#
+# [OPUS-4.8] MERGE-GROUP (path-aware CI audit, sq path-aware CI): GitHub ignores `paths` for
+# the merge_group event, so the workflow triggers on every enqueue. Rather than rebuild + scan
+# the full fat-LTO image on every merge (the maintainer's merge-queue-heaviness complaint), the
+# heavy `trivy` job now leads with a `detect container changes` step that diffs the queued
+# batch's base_sha..head_sha against the SAME container path set as the PR filter; the build +
+# scan steps skip (job still concludes SUCCESS — non-failing to ci-summary) when no
+# container-relevant path is in the batch. The `trivy (…)` check-run still ALWAYS appears on the
+# merge_group ref (fast green on the skip path), so the required gate never hangs on an absent
+# sibling. Fail-safe: any diff error runs the full build+scan. See the step comment.
 #
 # Third-party actions are pinned by full commit SHA (supply-chain hardening; Scorecard
 # PinnedDependencies); the trailing `# vX.Y.Z` is what Dependabot follows to bump the pin.
@@ -36,6 +46,9 @@ on:
   push:
     branches: [main]
   pull_request:
+    # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
+    # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "Dockerfile"
       - ".dockerignore"
@@ -92,11 +105,79 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # [OPUS-4.8] MERGE-GROUP changed-files gate (path-aware CI audit, sq path-aware CI).
+      # The `pull_request` trigger above already narrows this heavy trivy image build+scan
+      # to container-relevant PRs via native `on.pull_request.paths`. But GitHub IGNORES
+      # `paths`/`paths-ignore` for the `merge_group` event, so a BARE `merge_group:` trigger
+      # would rebuild the full fat-LTO release image + run trivy on EVERY enqueue — even when
+      # the queued batch touches no Dockerfile/base-image/dependency path — dragging the
+      # serialized merge queue (the maintainer's exact merge-queue-heaviness complaint).
+      # Mirroring zk-toolchain.yml's proven `detect zk changes` pattern: the job ALWAYS runs
+      # (so the `trivy (…)` check-run ALWAYS appears on the merge_group ref and ci-summary —
+      # the single required gate — never hangs waiting for an absent sibling), but this cheap
+      # leading step diffs the queued batch's base_sha..head_sha and the heavy build+scan
+      # steps below are gated `if: steps.changes.outputs.container == 'true'`:
+      #   • container paths changed in the batch → full build+scan runs and GATES (posture kept),
+      #   • no container paths changed           → heavy steps skip → FAST GREEN check-run with
+      #     the identical name, matching the paths-gated PR posture.
+      # For every NON-merge_group event the step short-circuits to container=true, so the
+      # paths-filtered pull_request / push / schedule / dispatch behaviour is UNCHANGED
+      # (those events only trigger this workflow when container paths changed in the first
+      # place, except the weekly base-image re-scan, which must run in full). SAFE-BY-DEFAULT:
+      # any fetch/diff error leaves container=true (full scan), so a skip is always a proof.
+      # The path set is the SAME as the `on.pull_request.paths` filter above.
+      - name: Detect container changes (merge_group changed-files gate)
+        id: changes
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          # Default: run the full build+scan (fail-safe — see step comment).
+          container=true
+          if [ "${EVENT_NAME}" = "merge_group" ]; then
+            container=false
+            # The default checkout is shallow, so the base may be absent. Best-effort fetch;
+            # on any fetch/diff error we leave container=true via the fallbacks below.
+            ok=true
+            git fetch --no-tags --quiet origin "${MG_BASE_SHA}" "${MG_HEAD_SHA}" 2>/dev/null \
+              || git fetch --no-tags --quiet origin "${MG_BASE_SHA}" 2>/dev/null \
+              || ok=false
+            git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null || ok=false
+            git cat-file -e "${MG_HEAD_SHA}^{commit}" 2>/dev/null || ok=false
+            if [ "${ok}" = "true" ]; then
+              changed="$(git diff --name-only "${MG_BASE_SHA}" "${MG_HEAD_SHA}")"
+              echo "Changed files in queued batch (${MG_BASE_SHA}..${MG_HEAD_SHA}):"
+              printf '%s\n' "${changed}"
+              # Container-relevant paths — the SAME set as the pull_request paths filter:
+              # the Dockerfile + its ignore/lint/vuln-allowlist configs, this workflow,
+              # and the manifests that change what the image resolves + installs
+              # (root Cargo.toml/Cargo.lock + any crate manifest).
+              if printf '%s\n' "${changed}" | grep -Eq \
+                '^(Dockerfile$|\.dockerignore$|\.trivyignore$|\.hadolint\.yaml$|\.github/workflows/container-scan\.yml$|Cargo\.toml$|Cargo\.lock$|crates/[^/]+/Cargo\.toml$)'; then
+                container=true
+              else
+                container=false
+              fi
+            else
+              echo "::warning::could not resolve merge_group base/head SHAs for the diff — running the full image build + scan (fail-safe)."
+              container=true
+            fi
+          fi
+          echo "container=${container}" >> "$GITHUB_OUTPUT"
+          if [ "${container}" = "true" ]; then
+            echo "Container-relevant paths changed (or non-merge_group / fail-safe) — building + scanning the image."
+          else
+            echo "No container-relevant paths in this merge_group batch — fast-passing (image build + scan skipped, check stays green)."
+          fi
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+        if: steps.changes.outputs.container == 'true'
       # Build the image LOCALLY (load into the runner's docker) so trivy scans the exact
       # artifact this repo would publish. Cached to GHA — the slow fat-LTO release build is
       # a cache hit on unchanged sources. (Mirrors release.yml's smoke-build step.)
       - name: Build image (load locally)
+        if: steps.changes.outputs.container == 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
@@ -112,6 +193,7 @@ jobs:
       #                       the SARIF run below for triage, not used as a merge blocker).
       #   trivyignores     => .trivyignore allowlist for triaged/accepted CVEs.
       - name: Trivy image scan (fail on fixable HIGH/CRITICAL)
+        if: steps.changes.outputs.container == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: sparq-server:scan
@@ -126,7 +208,10 @@ jobs:
       # never fails the job (the gating decision is the table pass above); it includes
       # unfixed findings too so the Security tab shows the full picture for triage.
       - name: Trivy image scan (SARIF for code-scanning)
-        if: always()
+        # always() so a FAILED gating scan still uploads its SARIF — but only when the image
+        # was actually built (container==true); on the merge_group skip path there is no
+        # image to scan and nothing to upload.
+        if: always() && steps.changes.outputs.container == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: sparq-server:scan
@@ -138,8 +223,8 @@ jobs:
           vuln-type: os,library
           trivyignores: .trivyignore
       - name: Upload Trivy SARIF to code-scanning
-        if: always()
-        uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4.36.3
+        if: always() && steps.changes.outputs.container == 'true'
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
         with:
           sarif_file: trivy-results.sarif
           category: trivy-container

@@ -20,6 +20,10 @@ rustdoc-args = ["--cfg", "docsrs"]
 default = []
 proposed-distinct = []
 proposed-cardinality = []
+proposed-codecs = []
+proposed-observe = []
+# [GPT-5.6] sq-1rg2q.6: read-many/write-one named-graph views (rdfjs/wrapper #95).
+proposed-graph-scope = []
 # [FABLE-5] sq-1rg2q.2: typed focus kinds + bound node factories (rdfjs/wrapper #83-#87).
 proposed-typed-focus = []
 

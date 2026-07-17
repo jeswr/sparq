@@ -2,9 +2,8 @@
 # sparq-sim
 
 **Training-free structural entity similarity** for the sparq RDF engine — an **opt-in**
-crate (GenAI phase 1) that computes similarity straight from the store's existing
-permutation indexes. No embeddings, no models, no network, no extra state: the indexes
-ARE the feature store, so similarity stays correct under incremental updates for free.
+crate that computes similarity straight from existing permutation indexes. No embeddings,
+models, network, or extra state: the indexes stay the feature store under graph updates.
 
 ## 🚀 Quickstart
 
@@ -17,6 +16,7 @@ let sim = Sim::with_config(&graph, SimConfig {    // or configure:
     idf: true,
     exclude_predicates: vec![rdf_type],           // e.g. when rdf:type is ground truth
     max_pair_frequency: 10_000,                   // hub cap (the approximation knob)
+    ..SimConfig::default()
 });
 
 sim.similarity(&a, &b);                  // weighted Jaccard in [0, 1]
@@ -31,6 +31,11 @@ weighted_jaccard(&sig_a, &sig_b);        // for callers that cache signatures
 - **Structural signature** — an entity's signature is its set of
   `(direction, predicate, neighbor)` pairs (outgoing from one SPO range scan, incoming
   from one OSP/OPS scan), cost `O(log n + degree)`.
+- **Opt-in multi-hop expansion** — the default-off `multi-hop` feature + `SimConfig::depth > 1`:
+  deterministic breadth-first expansion; hop `h` weights attenuated by `0.5^(h - 1)`.
+- **Opt-in explanation** — the default-off `explain` feature adds `explain_similarity(&a, &b)`:
+  the shared signature elements (direction, predicate Term, neighbor Term, weight) behind a
+  score, strongest evidence first; the weights sum to the exact weighted-Jaccard numerator.
 - **IDF-weighted Jaccard** — `w(e) = 1 + ln(|G| / freq(pred))`, frequencies from the
   store's existing planner stats, so sharing a rare predicate counts for more than
   sharing `rdf:type`.
@@ -44,9 +49,8 @@ weighted_jaccard(&sig_a, &sig_b);        // for callers that cache signatures
   context** (same team, same games), the mode candidate generation is built around.
   `Predicates`: similar = **used the same way** (predicate profile / role similarity).
 - **Neighbor-sparse profile fallback** (`SimConfig::profile_fallback`, default on) — for
-  classes where every entity names a unique neighbor (no two share concrete context), the
-  fallback fills starved slots with role-profile matches, recovering near-full precision
-  for a small per-query latency cost.
+  classes where every entity names a unique neighbor, fill starved result slots with
+  role-profile matches ranked below exact neighbor matches.
 - **Hybrid search with text vectors** — structural similarity knows how entities are
   *connected*, not what their labels *mean*. The opt-in
   [`sparq-vectors`](../sparq-vectors) crate covers the text side and ships dependency-free
@@ -102,10 +106,6 @@ concrete neighbor and tie at 0 — by design: that mode measures shared context,
 membership. Role similarity is the `Predicates` mode's job (near-perfect separation). The
 ranking task the crate is built for — `most_similar` retrieving same-class entities — is
 measured by precision@10, high across every class.
-
-Tests: 13 unit (Jaccard math, symmetry, direction, IDF ordering, exclusions, mode
-semantics, hub-cap, neighbor-sparse fallback, AUC gate) plus 1 integration
-(`tests/olympics.rs`, skip-if-absent at 1.78M scale).
 
 ## 📚 Learn more
 

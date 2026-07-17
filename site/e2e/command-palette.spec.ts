@@ -102,6 +102,27 @@ test("clicking a result row navigates to its surface", async ({ page }) => {
   expect(new URL(page.url()).pathname).toContain("/showcase/zk-car-hire");
 });
 
+test("finds every built native capability", async ({ page }) => {
+  // [GPT-5.6] sq-vw3ax.15 — these entries derive from GROUPS, so this proves the shared IA
+  // source reaches Cmd-K as promised. An expected-title mutation fails the visible-row check.
+  const titles = [
+    "Graph analytics",
+    "RDFC-1.0 canonicalization",
+    "PROV-O lineage",
+    "Arrow export",
+    "MCP server",
+  ];
+
+  await page.keyboard.press(`${MOD}+KeyK`);
+  const dialog = palette(page);
+  const input = dialog.getByPlaceholder("Search surfaces, pages, actions…");
+
+  for (const title of titles) {
+    await input.fill(title);
+    await expect(dialog.getByText(title, { exact: true })).toBeVisible();
+  }
+});
+
 // ── palette → /app hard-navigation guard (regression) ──────────────────────────────────────────
 //
 // [FABLE-5] sq-vw3ax.11.1 — /app is served in production by a SEPARATE Next.js build (gui/app)

@@ -3,7 +3,7 @@
 //! `.spqv` vector store, asserting the expected neighbours. [OPUS-4.8]
 #![cfg(feature = "vec-predicate")]
 
-use oxrdf::{NamedNode, Term};
+use oxrdf::{NamedNode, Term, Triple};
 use sparq_core::Graph;
 use sparq_vectors::{query_vec, QueryResult, VectorStore};
 
@@ -123,6 +123,45 @@ fn nearest_joins_to_surrounding_bgp() {
         vec!["beta".to_string(), "epsilon".to_string()],
         "{r:?}"
     );
+}
+
+/// [GPT-5.6] sq-1ijoc: RDF 1.2 ground triple terms returned by vector search
+/// must survive the rewrite's inline VALUES table, including nested terms.
+#[test]
+fn nearest_returns_nested_ground_triple_term() {
+    let g = Graph::load_str(
+        r#"
+        <http://ex/r> <http://ex/reifies> <<( <http://ex/s> <http://ex/p> <<( <http://ex/a> <http://ex/q> <http://ex/o> )>> )>> .
+        "#,
+        "ntriples",
+    )
+    .unwrap();
+    let named = |iri: &str| NamedNode::new(iri).unwrap();
+    let inner = Term::Triple(Box::new(Triple::new(
+        named("http://ex/a"),
+        named("http://ex/q"),
+        named("http://ex/o"),
+    )));
+    let expected = Term::Triple(Box::new(Triple::new(
+        named("http://ex/s"),
+        named("http://ex/p"),
+        inner,
+    )));
+    let triple_id = g
+        .id_of(&expected)
+        .expect("fixture triple term must be dictionary encoded");
+    let mut store = VectorStore::create(tmp_path("triple_term"), 2).unwrap();
+    store.put(triple_id, &[1.0, 0.0]).unwrap();
+
+    let r = query_vec(
+        &g,
+        "PREFIX vec: <http://sparq.dev/vec#>
+         SELECT ?node WHERE { ?node vec:nearest ( \"1,0\" 1 ) }",
+        &store,
+    )
+    .unwrap();
+
+    assert_eq!(r.rows, vec![vec![Some(expected)]], "{r:?}");
 }
 
 #[test]

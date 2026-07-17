@@ -714,7 +714,29 @@ enum AgentMapping {
 /// `isNoneOf`, or a numeric/dateTime operand under `isNoneOf` (the evaluator never
 /// satisfies those — `set_negation_representable` — so persisting an exception for
 /// them would widen access). Any one such constraint forces the whole rule one-shot.
+///
+/// **Unmappable (→ stay one-shot): a COMPOUND `odrl:LogicalConstraint`** ([OPUS-4.8]
+/// sq-izzak — WIDENING FIX). A rule that carries ANY `odrl:and`/`odrl:or`/`odrl:xone`
+/// (`rule.logical_constraints`) has no faithful single-head ACP analogue and MUST stay
+/// one-shot, even when it has ZERO atomic constraints. A grant head is a UNION of
+/// `auth:agent` allows, so: an `odrl:and` of recipient constraints is an INTERSECTION
+/// (folding it as a union widens — wrong direction); an `odrl:or` may mix a recipient
+/// operand with a non-recipient dimension (time/purpose) that has no head analogue; and
+/// `odrl:xone` (exactly-one) has no ACP analogue at all. Over-approximating any compound
+/// agent-restriction into the head would grant unlisted/anonymous agents — the very
+/// widening this classification prevents. Before this fix the loop below examined only
+/// `rule.constraints`, so a rule whose ONLY restriction was a compound constraint mapped
+/// `Faithful` with an EMPTY recipient set → an `auth:Public` head (the compound
+/// restriction silently DROPPED). Fail-closed: any `logical_constraints` forces the whole
+/// rule to the one-shot path ([`materialize_permission`]/[`materialize_prohibition`]),
+/// whose evaluator DOES enforce the compound constraint (frozen) — never dropping it.
 fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
+    // [OPUS-4.8] sq-izzak: a rule carrying any compound `odrl:LogicalConstraint` has no
+    // faithful ACP-condition head — stay one-shot so the compound restriction is enforced
+    // (frozen) rather than silently dropped by folding an empty recipient set to public.
+    if !rule.logical_constraints.is_empty() {
+        return AgentMapping::Unmappable;
+    }
     let mut agents: Vec<String> = Vec::new();
     let mut except: Vec<String> = Vec::new();
     let mut window = TimeWindow::default();
@@ -872,8 +894,11 @@ fn recipient_principal_allowed(p: &str) -> bool {
 /// re-checked by [`crate::AuthIndex::accessible`]: a session whose agent is the
 /// recipient is granted; any other agent (or anonymous) is denied — **without**
 /// re-running the ODRL evaluator. A recipient *set* emits one grant per member (the
-/// auth view unions the allows). When the rule has NO recipient constraint, the grant
-/// head is `auth:Public` (any session) — only valid because the action/target/duties
+/// auth view unions the allows). When the rule has NO recipient constraint but carries
+/// an `odrl:assignee` PROPERTY, the grant head is scoped to that one assignee ([OPUS-4.8]
+/// sq-9n1q4 — a bare-assignee rule grants ONLY the assignee, never `auth:Public`). Only
+/// when the rule has NO recipient constraint AND NO assignee is the grant head
+/// `auth:Public` (any session) — legitimately public because the action/target/duties
 /// were already satisfied at materialization.
 ///
 /// # Fail-closed
@@ -1131,11 +1156,35 @@ pub fn materialize_prohibition_conditional(
 }
 
 /// The principal-space `auth:agent` heads for a faithful recipient set, dropping any
-/// reserved-encoded recipient. An empty recipient list means the rule had NO agent
-/// restriction → a single `auth:Public` head (any session matches).
-fn condition_agents(_rule: &Rule, recipients: &[String]) -> Vec<String> {
+/// reserved-encoded recipient.
+///
+/// When the recipient CONSTRAINT set is empty, the rule's `odrl:assignee` PROPERTY (a
+/// distinct field on [`Rule`], not an `odrl:recipient`/`odrl:assignee` *constraint*
+/// block) still scopes the rule to a single party: fold it in as the sole head so a
+/// bare-assignee rule grants/denies ONLY that assignee. [OPUS-4.8] sq-9n1q4 — WIDENING
+/// FIX: this slot previously ignored `rule.assignee` and defaulted an empty set to
+/// `auth:Public`, so a permission scoped to one assignee granted EVERYONE (incl.
+/// anonymous) and the prohibition dual over-denied everyone. The assignee is normalised
+/// and reserved-encoding-filtered exactly like a recipient (so an all-reserved assignee
+/// yields an empty set, which the callers already treat as fail-closed).
+///
+/// Only when there is NO recipient constraint AND NO assignee does the head fall back to
+/// a single `auth:Public` head (any session matches) — a legitimately public rule whose
+/// action/target/duties were already satisfied at materialization.
+fn condition_agents(rule: &Rule, recipients: &[String]) -> Vec<String> {
     if recipients.is_empty() {
-        return vec![PUBLIC.to_owned()];
+        // [OPUS-4.8] sq-9n1q4: a bare `odrl:assignee` PROPERTY scopes the head to that
+        // one party — it is NOT an unrestricted (auth:Public) rule.
+        match &rule.assignee {
+            Some(assignee) if recipient_principal_allowed(assignee) => {
+                return vec![normalise_recipient_principal(assignee)];
+            }
+            // An all-reserved-encoded assignee → empty head → the caller fails closed
+            // (an empty grant/deny head is never widened to auth:Public here).
+            Some(_) => return Vec::new(),
+            // No recipient AND no assignee → legitimately public.
+            None => return vec![PUBLIC.to_owned()],
+        }
     }
     recipients
         .iter()

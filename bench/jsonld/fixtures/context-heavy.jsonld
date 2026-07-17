@@ -1,0 +1,386 @@
+{
+  "@context": {
+    "@vocab": "http://schema.org/",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+    "ex": "https://example.org/vocab/",
+    "id": "@id",
+    "type": "@type",
+    "term00": {
+      "@id": "https://example.org/vocab/term00",
+      "@type": "xsd:integer"
+    },
+    "term01": {
+      "@id": "https://example.org/vocab/term01",
+      "@type": "@id"
+    },
+    "term02": {
+      "@id": "https://example.org/vocab/term02",
+      "@container": "@set"
+    },
+    "term03": "https://example.org/vocab/term03",
+    "term04": {
+      "@id": "https://example.org/vocab/term04",
+      "@type": "xsd:integer"
+    },
+    "term05": {
+      "@id": "https://example.org/vocab/term05",
+      "@type": "@id"
+    },
+    "term06": {
+      "@id": "https://example.org/vocab/term06",
+      "@container": "@set"
+    },
+    "term07": "https://example.org/vocab/term07",
+    "term08": {
+      "@id": "https://example.org/vocab/term08",
+      "@type": "xsd:integer"
+    },
+    "term09": {
+      "@id": "https://example.org/vocab/term09",
+      "@type": "@id"
+    },
+    "term10": {
+      "@id": "https://example.org/vocab/term10",
+      "@container": "@set"
+    },
+    "term11": "https://example.org/vocab/term11",
+    "term12": {
+      "@id": "https://example.org/vocab/term12",
+      "@type": "xsd:integer"
+    },
+    "term13": {
+      "@id": "https://example.org/vocab/term13",
+      "@type": "@id"
+    },
+    "term14": {
+      "@id": "https://example.org/vocab/term14",
+      "@container": "@set"
+    },
+    "term15": "https://example.org/vocab/term15",
+    "term16": {
+      "@id": "https://example.org/vocab/term16",
+      "@type": "xsd:integer"
+    },
+    "term17": {
+      "@id": "https://example.org/vocab/term17",
+      "@type": "@id"
+    },
+    "term18": {
+      "@id": "https://example.org/vocab/term18",
+      "@container": "@set"
+    },
+    "term19": "https://example.org/vocab/term19",
+    "term20": {
+      "@id": "https://example.org/vocab/term20",
+      "@type": "xsd:integer"
+    },
+    "term21": {
+      "@id": "https://example.org/vocab/term21",
+      "@type": "@id"
+    },
+    "term22": {
+      "@id": "https://example.org/vocab/term22",
+      "@container": "@set"
+    },
+    "term23": "https://example.org/vocab/term23",
+    "term24": {
+      "@id": "https://example.org/vocab/term24",
+      "@type": "xsd:integer"
+    },
+    "term25": {
+      "@id": "https://example.org/vocab/term25",
+      "@type": "@id"
+    },
+    "term26": {
+      "@id": "https://example.org/vocab/term26",
+      "@container": "@set"
+    },
+    "term27": "https://example.org/vocab/term27",
+    "term28": {
+      "@id": "https://example.org/vocab/term28",
+      "@type": "xsd:integer"
+    },
+    "term29": {
+      "@id": "https://example.org/vocab/term29",
+      "@type": "@id"
+    },
+    "term30": {
+      "@id": "https://example.org/vocab/term30",
+      "@container": "@set"
+    },
+    "term31": "https://example.org/vocab/term31",
+    "term32": {
+      "@id": "https://example.org/vocab/term32",
+      "@type": "xsd:integer"
+    },
+    "term33": {
+      "@id": "https://example.org/vocab/term33",
+      "@type": "@id"
+    },
+    "term34": {
+      "@id": "https://example.org/vocab/term34",
+      "@container": "@set"
+    },
+    "term35": "https://example.org/vocab/term35",
+    "term36": {
+      "@id": "https://example.org/vocab/term36",
+      "@type": "xsd:integer"
+    },
+    "term37": {
+      "@id": "https://example.org/vocab/term37",
+      "@type": "@id"
+    },
+    "term38": {
+      "@id": "https://example.org/vocab/term38",
+      "@container": "@set"
+    },
+    "term39": "https://example.org/vocab/term39",
+    "term40": {
+      "@id": "https://example.org/vocab/term40",
+      "@type": "xsd:integer"
+    },
+    "term41": {
+      "@id": "https://example.org/vocab/term41",
+      "@type": "@id"
+    },
+    "term42": {
+      "@id": "https://example.org/vocab/term42",
+      "@container": "@set"
+    },
+    "term43": "https://example.org/vocab/term43",
+    "term44": {
+      "@id": "https://example.org/vocab/term44",
+      "@type": "xsd:integer"
+    },
+    "term45": {
+      "@id": "https://example.org/vocab/term45",
+      "@type": "@id"
+    },
+    "term46": {
+      "@id": "https://example.org/vocab/term46",
+      "@container": "@set"
+    },
+    "term47": "https://example.org/vocab/term47",
+    "term48": {
+      "@id": "https://example.org/vocab/term48",
+      "@type": "xsd:integer"
+    },
+    "term49": {
+      "@id": "https://example.org/vocab/term49",
+      "@type": "@id"
+    },
+    "term50": {
+      "@id": "https://example.org/vocab/term50",
+      "@container": "@set"
+    },
+    "term51": "https://example.org/vocab/term51",
+    "term52": {
+      "@id": "https://example.org/vocab/term52",
+      "@type": "xsd:integer"
+    },
+    "term53": {
+      "@id": "https://example.org/vocab/term53",
+      "@type": "@id"
+    },
+    "term54": {
+      "@id": "https://example.org/vocab/term54",
+      "@container": "@set"
+    },
+    "term55": "https://example.org/vocab/term55",
+    "term56": {
+      "@id": "https://example.org/vocab/term56",
+      "@type": "xsd:integer"
+    },
+    "term57": {
+      "@id": "https://example.org/vocab/term57",
+      "@type": "@id"
+    },
+    "term58": {
+      "@id": "https://example.org/vocab/term58",
+      "@container": "@set"
+    },
+    "term59": "https://example.org/vocab/term59",
+    "term60": {
+      "@id": "https://example.org/vocab/term60",
+      "@type": "xsd:integer"
+    },
+    "term61": {
+      "@id": "https://example.org/vocab/term61",
+      "@type": "@id"
+    },
+    "term62": {
+      "@id": "https://example.org/vocab/term62",
+      "@container": "@set"
+    },
+    "term63": "https://example.org/vocab/term63",
+    "term64": {
+      "@id": "https://example.org/vocab/term64",
+      "@type": "xsd:integer"
+    },
+    "term65": {
+      "@id": "https://example.org/vocab/term65",
+      "@type": "@id"
+    },
+    "term66": {
+      "@id": "https://example.org/vocab/term66",
+      "@container": "@set"
+    },
+    "term67": "https://example.org/vocab/term67",
+    "term68": {
+      "@id": "https://example.org/vocab/term68",
+      "@type": "xsd:integer"
+    },
+    "term69": {
+      "@id": "https://example.org/vocab/term69",
+      "@type": "@id"
+    },
+    "term70": {
+      "@id": "https://example.org/vocab/term70",
+      "@container": "@set"
+    },
+    "term71": "https://example.org/vocab/term71",
+    "term72": {
+      "@id": "https://example.org/vocab/term72",
+      "@type": "xsd:integer"
+    },
+    "term73": {
+      "@id": "https://example.org/vocab/term73",
+      "@type": "@id"
+    },
+    "term74": {
+      "@id": "https://example.org/vocab/term74",
+      "@container": "@set"
+    },
+    "term75": "https://example.org/vocab/term75",
+    "term76": {
+      "@id": "https://example.org/vocab/term76",
+      "@type": "xsd:integer"
+    },
+    "term77": {
+      "@id": "https://example.org/vocab/term77",
+      "@type": "@id"
+    },
+    "term78": {
+      "@id": "https://example.org/vocab/term78",
+      "@container": "@set"
+    },
+    "term79": "https://example.org/vocab/term79",
+    "term80": {
+      "@id": "https://example.org/vocab/term80",
+      "@type": "xsd:integer"
+    },
+    "term81": {
+      "@id": "https://example.org/vocab/term81",
+      "@type": "@id"
+    },
+    "term82": {
+      "@id": "https://example.org/vocab/term82",
+      "@container": "@set"
+    },
+    "term83": "https://example.org/vocab/term83",
+    "term84": {
+      "@id": "https://example.org/vocab/term84",
+      "@type": "xsd:integer"
+    },
+    "term85": {
+      "@id": "https://example.org/vocab/term85",
+      "@type": "@id"
+    },
+    "term86": {
+      "@id": "https://example.org/vocab/term86",
+      "@container": "@set"
+    },
+    "term87": "https://example.org/vocab/term87",
+    "term88": {
+      "@id": "https://example.org/vocab/term88",
+      "@type": "xsd:integer"
+    },
+    "term89": {
+      "@id": "https://example.org/vocab/term89",
+      "@type": "@id"
+    },
+    "term90": {
+      "@id": "https://example.org/vocab/term90",
+      "@container": "@set"
+    },
+    "term91": "https://example.org/vocab/term91",
+    "term92": {
+      "@id": "https://example.org/vocab/term92",
+      "@type": "xsd:integer"
+    },
+    "term93": {
+      "@id": "https://example.org/vocab/term93",
+      "@type": "@id"
+    },
+    "term94": {
+      "@id": "https://example.org/vocab/term94",
+      "@container": "@set"
+    },
+    "term95": "https://example.org/vocab/term95",
+    "department": {
+      "@id": "https://example.org/vocab/department",
+      "@context": {
+        "headcount": {
+          "@id": "https://example.org/vocab/headcount",
+          "@type": "xsd:integer"
+        },
+        "lead": {
+          "@id": "https://example.org/vocab/lead",
+          "@type": "@id"
+        }
+      }
+    },
+    "byRegion": {
+      "@id": "https://example.org/vocab/byRegion",
+      "@container": "@index"
+    },
+    "slogan": {
+      "@id": "https://example.org/vocab/slogan",
+      "@container": "@language"
+    }
+  },
+  "id": "https://example.org/org/acme",
+  "type": "Organization",
+  "name": "ACME Analytics",
+  "slogan": {
+    "en": "Numbers that matter",
+    "de": "Zahlen, die zaehlen",
+    "fr": "Des chiffres qui comptent"
+  },
+  "byRegion": {
+    "emea": {
+      "id": "https://example.org/org/acme/emea",
+      "name": "ACME EMEA"
+    },
+    "apac": {
+      "id": "https://example.org/org/acme/apac",
+      "name": "ACME APAC"
+    }
+  },
+  "department": [
+    {
+      "id": "https://example.org/org/acme/research",
+      "name": "Research",
+      "headcount": "42",
+      "lead": "https://example.org/people/ada"
+    },
+    {
+      "id": "https://example.org/org/acme/platform",
+      "name": "Platform",
+      "headcount": "17",
+      "lead": "https://example.org/people/mary"
+    }
+  ],
+  "term00": "100",
+  "term08": "108",
+  "term16": "116",
+  "term24": "124",
+  "term32": "132",
+  "term40": "140",
+  "term48": "148",
+  "term56": "156",
+  "term64": "164",
+  "term72": "172",
+  "term80": "180",
+  "term88": "188"
+}

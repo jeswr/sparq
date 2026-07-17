@@ -1,0 +1,7 @@
+@prefix ex: <http://example.test/federation/> .
+
+ex:r1 ex:about ex:p1 ; ex:score 5 .
+ex:r2 ex:about ex:p1 ; ex:score 4 .
+ex:r3 ex:about ex:p2 ; ex:score 3 .
+ex:r4 ex:about ex:p3 ; ex:score 5 .
+ex:r5 ex:about ex:p4 ; ex:score 2 .

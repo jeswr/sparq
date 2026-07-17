@@ -98,7 +98,7 @@ pub mod tpf;
 /// (sq-b4fns / #1223). PURE response builder (parameter resolution + per-quad flattening +
 /// continuation maths; the async disk-poll handler is in [`http`]). Compiled ONLY behind the
 /// `change-stream` feature, and served only when [`ServerConfig::change_stream_dir`] is also set
-/// (`--change-stream <DIR>` / `SPARQ_CHANGE_STREAM`) — the same double-opt-in as [`tpf`]. The same
+/// (`--change-stream <DIR>` / `SPARQ_CHANGE_STREAM`) — the same double-opt-in as `tpf`. The same
 /// feature also records every commit to the durable log on the update path (see [`http`]). With
 /// the feature off this module + the route + the recording hook are `#[cfg]`-stripped, byte-
 /// identical to before.
@@ -160,6 +160,11 @@ pub use http::{
     bind_posture, harden, router, serve, AppState, AuthPosture, BindPosture, PinnedGen,
     ServerConfig, GLOBAL_POD,
 }; // [OPUS-4.8] sq-o4qf: bind_posture / BindPosture for the bind gate; sq-zcby: AuthPosture folds the --auth-token gate into it; sq-2gqr: serve = the accept loop with the slow-loris header-read deadline
+
+/// [GPT-5.6] sq-oprna.6: TLS h1+h2 accept loop, opt-in with the `http2` feature.
+#[cfg(feature = "http2")]
+#[cfg_attr(docsrs, doc(cfg(feature = "http2")))]
+pub use http::serve_tls;
 
 /// [GPT-5.6] Loaded shapes wrapper for opt-in SHACL transaction guard mode.
 #[cfg(feature = "shacl")]

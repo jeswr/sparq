@@ -1,6 +1,6 @@
 ---
 name: http-server
-description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST (plus the query-only HTTP QUERY method, w3c/sparql-protocol#40, for Oxigraph interop), content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML/JSON-LD — JSON-LD via the default-on jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + default-on JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, and generation-pinned snapshot reads (a Sparq-Generation header + ?generation=N pin in the DEFAULT build, bounded to the ring's concurrency-retention window; opt-in time-travel widens it). Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
+description: Run or point an agent at a sparq SPARQL 1.1 Protocol HTTP endpoint (sparq-server) — /sparql query+update over GET/POST (plus the query-only HTTP QUERY method, w3c/sparql-protocol#40, for Oxigraph interop), content negotiation (SELECT/ASK JSON/XML/CSV/TSV; CONSTRUCT/DESCRIBE + Graph Store N-Triples/prefix-Turtle/RDF-XML/JSON-LD — JSON-LD via the default-on jsonld feature), Graph Store read AND write (PUT/POST/DELETE/PATCH on graph resources, RDF/XML + default-on JSON-LD bodies accepted, atomic SPARQL-Update + opt-in Solid N3-Patch on PATCH), EXPLAIN, Prometheus /metrics, WebSocket + SSE subscriptions, opt-in grouped facet counts and prefix completion, and generation-pinned snapshot reads (a Sparq-Generation header + ?generation=N pin in the DEFAULT build, bounded to the ring's concurrency-retention window; opt-in time-travel widens it). Use when starting the server, querying/updating a running endpoint, choosing Accept/Content-Type, or embedding the axum router.
 ---
 
 # sparq-http-server
@@ -11,7 +11,7 @@ with `--persist DIR` (updates WAL-fsync'd, survive a restart with no rebuild; se
 "Durability" gotcha). It implements the **SPARQL 1.1 Protocol** (`query` + `update` at
 `/sparql`) and the **Graph Store HTTP Protocol** (read + write), with `Accept`-driven
 content negotiation, hardening guards, Prometheus `/metrics`, WebSocket + SSE subscriptions,
-and opt-in time-travel + GeoSPARQL.
+and opt-in grouped facet counts, prefix completion, time-travel, and GeoSPARQL.
 
 Build with the default-off `response-compression` feature to negotiate gzip or zstd for outbound
 result bodies from `Accept-Encoding`. Compression is transport-transparent and streaming; SSE
@@ -36,6 +36,39 @@ cargo run -p sparq-server
 # (e.g. 0.0.0.0) is REFUSED unless --allow-remote / SPARQ_ALLOW_REMOTE=1 (no auth — see below).
 cargo run -p sparq-server -- --addr 0.0.0.0:8080 --allow-remote --format ntriples data.nt
 ```
+
+Opt-in HTTP/2 switches the TCP listener from its default HTTP/1.1-only builder to the
+hyper-util h1+h2 auto builder. With no certificate flags it accepts HTTP/1.1 and cleartext h2c;
+supplying both PEM paths enables TLS 1.3 with ALPN `h2,http/1.1`:
+
+```sh
+cargo run -p sparq-server --features http2 -- data.ttl \
+  --tls-cert ./cert.pem --tls-key ./key.pem
+```
+
+The PEM flags are a pair: supplying only one fails startup. Omitting both preserves plain HTTP.
+The HTTP/1 slow-loris header deadline, body idle deadline, peer `ConnectInfo`, graceful drain, and
+WebSocket upgrade remain on the same bespoke serve path; HTTP/2 uses the same router and request
+middleware. [GPT-5.6] sq-oprna.6
+
+Opt-in HTTP/3 adds an encrypted QUIC/UDP listener beside the unchanged plain-HTTP TCP
+listener. The two listeners dispatch through the same router; the UDP address defaults to
+`--addr` and can be overridden independently:
+
+```sh
+cargo run -p sparq-server --features http3 -- data.ttl \
+  --http3 --http3-addr 127.0.0.1:3443 \
+  --tls-cert ./cert.pem --tls-key ./key.pem
+```
+
+Both PEM paths are required when `--http3` is set, and malformed or mismatched material
+fails startup. QUIC is mandatorily encrypted. With `http3` alone the TCP listener remains plain
+HTTP for proxy/backward compatibility; with `--features http2,http3` the same PEM pair also
+secures TCP and negotiates h2/h1 through ALPN. The pre-1.0 h3 stack is contained behind the
+default-off feature. `/subscriptions` WebSockets remain HTTP/1.1-only; clients must fall back because
+HTTP/3 extended CONNECT is not implemented. Once the UDP endpoint has bound, every plain-HTTP TCP
+response advertises its live port as `Alt-Svc: h3=":<port>"; ma=86400`; no header is emitted when
+`--http3` is absent or startup cannot bind the QUIC listener. [GPT-5.6] sq-oprna.4
 
 > **Security: optional Bearer-token write gate; loopback by default.** With no token
 > configured, every endpoint is unauthenticated (the back-compat default). Set
@@ -146,7 +179,10 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
 
 - `fn router(state: AppState) -> axum::Router` — builds the hardened endpoint router
   (`/sparql`, `/sparql/graph`, `/graphs/*path`, `/subscriptions`, `/subscriptions/sse`,
-  `/health`, `/metrics`). [OPUS-4.8] sq-bxog: `/subscriptions/sse` is the SSE transport.
+  `/health`, `/metrics`, plus feature-gated routes such as `/facets` and `/complete`). [OPUS-4.8] sq-bxog:
+  `/subscriptions/sse` is the SSE transport. [GPT-5.6] sq-lsp7k.5.2: `/facets` needs the
+  `facets` build feature and the runtime `ServerConfig::facets` flag. [GPT-5.6] sq-lsp7k.9.3:
+  `/complete` similarly needs the `complete` feature and `ServerConfig::complete`.
 - `AppState::new(graph: Graph) -> AppState` — default `ServerConfig`.
 - `AppState::with_config(graph: Graph, config: ServerConfig) -> AppState`.
 - `AppState::current(&self) -> PinnedGen` — lock-free pin of the current immutable
@@ -171,7 +207,7 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   max_query_bytes: Option<usize>,
   max_decompress_ratio: usize, max_subscriptions: usize, max_subscriptions_per_conn: usize,
   verbose: bool, redact_logs: bool, allow_remote: bool, auth_token: Option<String>, auth_token_read: bool,
-  service_allow: ServiceAllowlist, /* + time_travel_* under feature, + audit_log under audit-log feature */ }` with
+  service_allow: ServiceAllowlist, /* + time_travel_* / facets / complete under their features, + audit_log under audit-log feature */ }` with
   `ServerConfig::default()` and `ServerConfig::from_env()`.
   (`update_where_timeout` = separate, typically-SHORTER writer-side WHERE deadline for SPARQL
   UPDATE that bounds writer-queue **head-of-line blocking** from a slow update — `None` =
@@ -217,7 +253,15 @@ Library surface re-exported from `sparq_server` (behind the default `server` fea
   never installs a timer, so hyper's header-read deadline is inert there and a slow-loris client
   holds a connection (and a `concurrency_limit` slot) open indefinitely; and even with that fixed, a
   complete-header client can still dribble the BODY to hold the slot — `body_read_timeout` closes
-  that complementary hole. Pass `None` on either to opt back out of that guard.
+  that complementary hole. Pass `None` on either to opt back out of that guard. With the
+  default-off `http2` feature this same function uses hyper-util's h1+h2 auto builder (h2c on a
+  plain listener) and retains the timer on the builder's HTTP/1 configuration.
+- `async fn serve_tls(listener: tokio::net::TcpListener, app: axum::Router, tls_config:
+  Arc<rustls::ServerConfig>, header_read_timeout: Option<Duration>, body_read_timeout:
+  Option<Duration>, shutdown: impl Future<Output=()>) -> std::io::Result<()>` (**`http2` feature
+  only**) — TLS counterpart to `serve`; the binary supplies a TLS-1.3 config advertising
+  `h2,http/1.1` via ALPN. It shares the auto-builder connection body, middleware, timeout hooks,
+  peer `ConnectInfo`, and graceful drain with the cleartext feature-on path. [GPT-5.6] sq-oprna.6
 - Re-exports for cache layers/tests: `PinnedGen`, `GLOBAL_POD: &str`
   (`"urn:sparq:pod:global"`), and `sparq_serve::{Epoch, PodEpochs, PodId}`.
 - **Response-bytes result cache** (opt-in, `sparq-serve`'s `result-cache` feature,
@@ -757,9 +801,10 @@ silently gapping.
 **`GET /streams` — CDC poll endpoint (`sparq-server` feature `change-stream`, default OFF;
 `sq-2999l`, gh-906).** The HTTP poll surface over that durable log, in the Amazon-Neptune-Streams
 `GetRecords` shape. Configure a log directory (`--change-stream DIR` / `SPARQ_CHANGE_STREAM`,
-`ServerConfig::change_stream_dir`) and the server (1) RECORDS every committed SPARQL Update as one
-ordered change record on the update path, and (2) serves `GET /streams` over it (the route is `404`
-unless the directory is set — the same double-opt-in as `/tpf`). Parameters: `iteratorType`
+`ServerConfig::change_stream_dir`) and the server (1) RECORDS every published group-commit
+generation as one ordered change record on the writer thread (possibly containing several
+concurrent SPARQL Updates; [GPT-5.6] `sq-kqofk`), and (2) serves `GET /streams` over it (the route
+is `404` unless the directory is set — the same double-opt-in as `/tpf`). Parameters: `iteratorType`
 (`TRIM_HORIZON` = replay all, the default; `AT_SEQUENCE_NUMBER` + `at=N`; `AFTER_SEQUENCE_NUMBER` +
 `after=N`, the resume case; `LATEST` = tail only) and `limit` (max commits per page, default 100,
 clamped to 10000). The JSON response flattens each commit's quad-level changes to one stream record
@@ -768,8 +813,37 @@ commitTimestampNanos, data: { stmt: "<n-quads line>" } }` — plus a `nextSequen
 token (pass as `at=`/`after=`), `lastSequenceNumber`, `totalRecords` (commit count) and
 `hasMoreRecords`. A poll is a READ (gated by the read auth). A sequence-anchored `iteratorType` with
 no anchor is a fail-closed `400` (never a silent replay-all). With the feature off the route + the
-recording hook are `#[cfg]`-stripped (byte-identical); recording serialises updates only while the
-stream is on. The `ChangeSink` broker trait stays a separate later opt-in (`sq-l6zks`).
+recording hook are `#[cfg]`-stripped (byte-identical); with it on, recording rides the sequenced
+writer's group commit and does not serialise submitters. The `ChangeSink` broker trait stays a
+separate later opt-in (`sq-l6zks`).
+
+**`GET /queries` + `DELETE /queries/{id}` — running-query registry (`sparq-server` feature
+`query-registry`, default OFF; sq-qsm5z, [SONNET-4.6]).** An opt-in in-memory registry of
+currently executing SPARQL queries, providing GraphDB query-monitoring and kill parity.
+
+- **`GET /queries`** — READ-gated (fail-closed). Returns `{"queries":[…]}` where each entry
+  carries `id` (opaque hex), `start` (Unix epoch ms), `fingerprint` (FNV-1a hex — a
+  NON-REVERSIBLE hash of the trimmed query text, never raw text per the #241 / sq-m9prn
+  audit-log posture), and `elapsed_ms`. Sorted by `id` (registration order).
+- **`DELETE /queries/{id}`** — WRITE-gated (fail-closed). Cooperatively cancels the named
+  query by flipping the `sq-kq9ia` `Arc<AtomicBool>` cancel flag wired into its `QueryBudget`.
+  The engine observes it at the next poll site and aborts. Returns `204 No Content` on success;
+  `404` if the id is not found (already finished or bad id).
+- **RAII lifetime**: each executing SELECT/ASK/CONSTRUCT/DESCRIBE/**EXPLAIN (plan + analyze)**
+  registers on start and deregisters on completion, error, or panic — the entry is always cleaned
+  up. (EXPLAIN ANALYZE wiring added in sq-t1isr, [SONNET-4.6].)
+- **Fingerprint-only**: the `GET /queries` listing NEVER exposes raw query text; only the
+  non-reversible fingerprint is visible, satisfying the audit-log discipline.
+- **Zero cost when feature is OFF**: no `AppState` fields, no routes; byte-identical to before.
+
+```sh
+# (--features query-registry required at build time)
+# List running queries:
+curl -H 'Authorization: Bearer <TOKEN>' http://127.0.0.1:3030/queries
+
+# Cancel a query by id:
+curl -X DELETE -H 'Authorization: Bearer <TOKEN>' http://127.0.0.1:3030/queries/0000000000000001
+```
 
 GSP **writes** translate into a server-minted SPARQL Update (`DROP`/`CLEAR` + `INSERT
 DATA`) and submit through the SAME sequenced group-commit writer the
@@ -805,11 +879,14 @@ resource applies an atomic modify to the addressed graph, with two body dialects
   feature-on adds NO new crate. Success → `204`. `PATCH` is a WRITE, gated by `--auth-token` like an
   UPDATE.
 
-**5b. Container (ghcr.io).** Published on every release tag (`ghcr.io/jeswr/sparq-server`,
-distroless). The image sets `SPARQ_ALLOW_REMOTE=1` so the `0.0.0.0` bind it needs (loopback
-is unreachable through Docker's port map) boots out of the box — running the container is the
-operator's explicit choice to publish a surface. **This default has NO auth.** Because every
-`SPARQ_*` var is read from the environment, secure it with `-e` (no flag wiring):
+**5b. Container (ghcr.io).** Published on every `vX.Y.Z` release tag as a distroless OCI image
+index at `ghcr.io/jeswr/sparq-server`, with `linux/amd64` and `linux/arm64` runtime images.
+[GPT-5.6] `sq-fvzi6`: each release publishes `:X.Y.Z` (pin this for reproducible deployments),
+`:X.Y` (tracks the newest patch in that minor line), and `:latest` (tracks the newest release);
+an omitted tag selects `:latest`. The image sets `SPARQ_ALLOW_REMOTE=1` so the `0.0.0.0` bind it
+needs (loopback is unreachable through Docker's port map) boots out of the box — running the
+container is the operator's explicit choice to publish a surface. **This default has NO auth.**
+Because every `SPARQ_*` var is read from the environment, secure it with `-e` (no flag wiring):
 
 ```sh
 docker run --rm -p 3030:3030 ghcr.io/jeswr/sparq-server                       # empty graph, no auth
@@ -910,6 +987,59 @@ cargo run -p sparq-server --features federation-descriptors -- data.ttl --federa
 curl http://127.0.0.1:3030/.well-known/void                         # VoID + scs: char-set stats (Turtle by default)
 curl -H 'Accept: application/n-triples' http://127.0.0.1:3030/sparql # Service Description (no query)
 ```
+
+**5c-bis. Grouped facet counts (OPT-IN, [GPT-5.6] `sq-lsp7k.5.2`; feature `facets`).**
+`POST /facets` evaluates one `sparq_introspect::FacetRequest` against a pinned store snapshot and
+returns its `FacetResponse` JSON: candidate-subject count plus ranked type, predicate, and requested
+object-value distributions. `class` is an optional `rdf:type` class IRI; every `constraints` pair is
+`[predicate IRI, object N-Triples term]` and the pairs are AND-combined; `facet_predicates: null`
+requests values for every candidate predicate; `top_k` bounds every retained distribution.
+
+```sh
+cargo run -p sparq-server --features facets -- data.ttl --facets
+curl -X POST -H 'Content-Type: application/json' http://127.0.0.1:3030/facets -d '{
+  "class":"http://ex/Person",
+  "constraints":[["http://ex/status","<http://ex/active>"]],
+  "facet_predicates":["http://ex/tag"],
+  "top_k":10
+}'
+```
+
+The response is `200 application/json`; malformed JSON is a sanitized `400`. The scan runs on the
+blocking pool and holds one immutable generation pin for the whole evaluation. The endpoint is a
+READ, so `--auth-token-read` gates it. It is double opt-in and OFF by default: the `facets` cargo
+feature compiles the route + `sparq-introspect` dependency, and `--facets` / `SPARQ_FACETS=1`
+serves it. Feature on but flag off gives `404`; feature off compiles no route or dependency.
+
+**5c-ter. IRI/label prefix completion (OPT-IN, [GPT-5.6] `sq-lsp7k.9.3`; feature
+`complete`).** `GET /complete?q=<prefix>&limit=<k>` returns case-insensitive prefix matches from
+complete IRI strings, IRI local names, and literal `rdfs:label` / `skos:prefLabel` values. `q` is
+required (missing → `400`); `limit` defaults to 20 and is capped at 100. The response is a JSON
+array in deterministic rank/key/id/source order:
+
+```json
+[
+  {"iri":"http://ex/alice","key":"alice","kind":"localName","score":0.0},
+  {"iri":"http://ex/alice","key":"alice","kind":"label","score":0.0}
+]
+```
+
+`kind` is `iri`, `localName`, or `label`. One entity may appear more than once when multiple keys
+or sources match. v1 passes no external rank scores, so `score` is `0.0`; PageRank-backed ranking
+is a separate composition step. The server pins one immutable generation, lazily builds its
+`CompletionIndex` on the blocking pool, caches it in `AppState`, and rebuilds when a later update
+publishes a different generation. Thus a successful update is visible to the next completion
+request without serving stale candidates.
+
+```sh
+cargo run -p sparq-server --features complete -- data.ttl --complete
+curl -G http://127.0.0.1:3030/complete --data-urlencode 'q=ali' --data-urlencode 'limit=10'
+```
+
+The endpoint is a READ, so `--auth-token-read` gates it. It is double opt-in and OFF by default:
+the `complete` cargo feature compiles the route and the pure-index `sparq-text` dependency
+(`default-features = false`), while `--complete` / `SPARQ_COMPLETE=1` serves it. Feature on but
+flag off gives `404`; feature off compiles no route, cache, or text dependency.
 
 **5d. Triple Pattern Fragments / LDF source endpoint (OPT-IN, `sq-bzh1`).** A server can expose
 itself as a low-cost [Linked Data Fragments](http://linkeddatafragments.org/) /
@@ -1218,6 +1348,8 @@ env overrides the default.
 | `--time-travel-generations N` | `SPARQ_TIME_TRAVEL_GENERATIONS` | `16` | (feature) retained generations |
 | `--time-travel-max-age SECS` | `SPARQ_TIME_TRAVEL_MAX_AGE` | off | (feature) age-out window |
 | `--federation-descriptors` | `SPARQ_FEDERATION_DESCRIPTORS` | off | (feature `federation-descriptors`) serve a VoID at `/.well-known/void` + a SPARQL Service Description on `GET /sparql` with no query — see "Federation discovery" |
+| `--facets` | `SPARQ_FACETS` | off | (feature `facets`) serve `POST /facets` grouped type/predicate/value counts over a pinned snapshot; read-gated — see "Grouped facet counts" ([GPT-5.6] sq-lsp7k.5.2) |
+| `--complete` | `SPARQ_COMPLETE` | off | (feature `complete`) serve `GET /complete?q=<prefix>&limit=<k>` IRI/local-name/label prefix completion from a generation-cached index; read-gated — see "IRI/label prefix completion" ([GPT-5.6] sq-lsp7k.9.3) |
 | `--tpf` | `SPARQ_TPF` | off | (feature `tpf`) serve a Triple Pattern Fragments / LDF source endpoint at `GET /tpf?subject=&predicate=&object=` (paged, full Hydra paging incl. `first`/`last`, read-only); same flag also serves brTPF bind-restricted fragments (`values` param / `POST` body) when built with the `brtpf` feature — see "Triple Pattern Fragments" |
 | `--shacl` | `SPARQ_SHACL` | off | (feature `shacl`) serve the SHACL validate endpoint `POST /shacl/validate` — POST a shapes graph, the server validates its loaded data graph against it; JSON report (default) or W3C report Turtle (`Accept: text/turtle`); read-only — see "SHACL validation endpoint" |
 | `--shacl-guard` | `SPARQ_SHACL_GUARD` | off | (feature `shacl`) reject non-conforming UPDATE/GSP post-states with `422` + JSON validation report; store unchanged |
@@ -1316,7 +1448,7 @@ quota:
 
 Library callers set these on `ServerConfig` (`query_timeout`, `max_query_rows`,
 `max_query_bytes`, `max_decompress_ratio`, `service_allow`). Embedders driving the engine
-directly thread a `sparq_engine::QueryBudget { deadline, max_rows, max_bytes }` into
+directly thread a `sparq_engine::QueryBudget { deadline, max_rows, max_bytes, ..QueryBudget::unlimited() }` into
 `*_with_budget` query entry points and `update_in_place_with_budget`, and wrap calls in
 `sparq_engine::with_service_egress_policy(strict, [host], || …)`.
 
@@ -1548,8 +1680,12 @@ identities and resource IRIs by design (see the privacy-boundary note above).
   `500`. `federation-descriptors` (default **off**, `sq-d3d8`) pulls the light
   `sparq-introspect` crate and serves the OPT-IN VoID + Service-Description discovery
   endpoints (still gated at runtime by `--federation-descriptors`; see "Federation
-  discovery"). Run feature tests: `cargo test -p sparq-server --features time-travel` /
-  `--features geo` / `--features federation-descriptors`.
+  discovery"). `facets` (default **off**, [GPT-5.6] `sq-lsp7k.5.2`) uses the same light
+  `sparq-introspect` dependency for `POST /facets`, still gated at runtime by `--facets`.
+  `complete` (default **off**, [GPT-5.6] `sq-lsp7k.9.3`) pulls `sparq-text` with its default
+  features disabled and serves `GET /complete`, still gated at runtime by `--complete`.
+  Run feature tests: `cargo test -p sparq-server --features time-travel` / `--features geo` /
+  `--features federation-descriptors` / `--features facets` / `--features complete`.
 - **Named graphs are real (since conformance round 3).** The engine stores the FULL dataset
   — default graph + named graphs — so `GRAPH <g> { … }` / `GRAPH ?g { … }` evaluate, and a
   GSP graph resource (`?graph=<iri>` or the direct request URI) addresses a genuine named

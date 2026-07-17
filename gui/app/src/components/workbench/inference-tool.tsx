@@ -26,9 +26,11 @@ import { useWorkspace } from "@/lib/workspace-context";
 import { INFERENCE_MODE_META } from "@/lib/reason-wasm";
 import { toolById, TIER_META } from "@/data/tools";
 import { InferenceControl } from "@/components/workbench/inference-control";
+import { ProofPanel, type ExplainTarget } from "@/components/workbench/proof-panel";
 import { WorkbenchTurtleEditor } from "@/components/workbench/turtle-editor";
 import { Dropzone } from "@/components/workbench/dropzone";
 import type { IngestResult } from "@/lib/file-ingest";
+import type { InferredFact } from "@/lib/inferred-facts";
 
 /** One labelled measured count in the stats strip. */
 function Stat({ label, value }: { label: string; value: number }) {
@@ -234,15 +236,107 @@ function N3RulesPanel() {
   );
 }
 
+const ENTAILED_FACT_PAGE_SIZE = 50;
+
+/** [GPT-5.6] Browse the exact closure-added set and open why() on any retained fact. */
+function EntailedFactsBrowser({
+  facts,
+  onExplain,
+}: {
+  facts: readonly InferredFact[];
+  onExplain: (target: ExplainTarget) => void;
+}) {
+  const [visibleCount, setVisibleCount] = React.useState(ENTAILED_FACT_PAGE_SIZE);
+
+  React.useEffect(() => {
+    setVisibleCount(ENTAILED_FACT_PAGE_SIZE);
+  }, [facts]);
+
+  const visibleFacts = facts.slice(0, visibleCount);
+  return (
+    <section className="space-y-2" data-entailed-facts-browser>
+      <div className="flex items-baseline justify-between gap-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Entailed facts
+        </h3>
+        <span className="text-[11px] text-muted-foreground">
+          {facts.length.toLocaleString()} closure additions
+        </span>
+      </div>
+      {facts.length === 0 ? (
+        <p className="rounded-md border bg-background p-3 text-xs text-muted-foreground">
+          This regime added no facts over the asserted store.
+        </p>
+      ) : (
+        <div className="overflow-hidden rounded-md border bg-background">
+          <ol className="max-h-72 divide-y overflow-auto" aria-label="Entailed facts">
+            {visibleFacts.map((fact) => (
+              <li
+                key={fact.key}
+                className="flex items-start gap-2 px-3 py-1.5"
+                data-entailed-fact
+              >
+                <code
+                  className="min-w-0 flex-1 overflow-x-auto whitespace-nowrap text-[11px]"
+                  title={fact.ntriples}
+                >
+                  {fact.ntriples}
+                </code>
+                <button
+                  type="button"
+                  className="shrink-0 rounded border border-transparent bg-primary/10 px-1.5 py-0 font-mono text-[10px] text-primary hover:bg-primary/20"
+                  onClick={() => onExplain(fact)}
+                  aria-label={`Explain inferred fact: ${fact.ntriples}`}
+                  title="Explain this inferred fact"
+                  data-entailed-fact-explain
+                >
+                  why?
+                </button>
+              </li>
+            ))}
+          </ol>
+          {visibleFacts.length < facts.length ? (
+            <div className="border-t px-3 py-2">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setVisibleCount((count) => count + ENTAILED_FACT_PAGE_SIZE)}
+                data-entailed-facts-more
+              >
+                Show more
+              </Button>
+            </div>
+          ) : null}
+        </div>
+      )}
+      <p className="text-[11px] text-muted-foreground">
+        Closure additions only — asserted facts are excluded. Choose why? to inspect one witness
+        derivation.
+      </p>
+    </section>
+  );
+}
+
 export function InferenceTool() {
-  const { inferenceStatus, status } = useEngine();
+  const { inferenceStatus, status, entailedTripleFacts } = useEngine();
   const { inference } = useWorkspace();
+  // [GPT-5.6] The status object is the reactive signal that a new exact closure cache is ready.
+  const entailedFacts = React.useMemo(
+    () => (inferenceStatus.kind === "ready" ? (entailedTripleFacts() ?? []) : []),
+    [inferenceStatus, entailedTripleFacts],
+  );
+  const [explainTarget, setExplainTarget] = React.useState<ExplainTarget | null>(null);
+
+  React.useEffect(() => {
+    setExplainTarget(null);
+  }, [inference]);
   const tool = toolById("inference");
   const tier = tool ? TIER_META[tool.tier] : null;
   const modeMeta = INFERENCE_MODE_META[inference];
 
   return (
-    <div className="h-full overflow-auto">
+    <div className="relative h-full overflow-auto">
       <div className="mx-auto max-w-2xl space-y-5 p-6">
         {/* Header. */}
         <div className="space-y-1">
@@ -313,6 +407,11 @@ export function InferenceTool() {
           </p>
         )}
 
+        {/* [GPT-5.6] RDFox-style browser over the exact closure-minus-base set. */}
+        {inferenceStatus.kind === "ready" ? (
+          <EntailedFactsBrowser facts={entailedFacts} onExplain={setExplainTarget} />
+        ) : null}
+
         {/* Honest caveats. */}
         <div className="space-y-1.5 rounded-md border bg-muted/30 p-3 text-xs text-muted-foreground">
           <div className="flex items-center gap-1.5 font-medium text-foreground">
@@ -340,6 +439,9 @@ export function InferenceTool() {
           </div>
         </div>
       </div>
+      {explainTarget ? (
+        <ProofPanel target={explainTarget} onClose={() => setExplainTarget(null)} />
+      ) : null}
     </div>
   );
 }

@@ -578,6 +578,23 @@ impl GeoIndex {
         hits
     }
 
+    /// Convenience: [`within_distance`](Self::within_distance) from a wktLiteral
+    /// point lexical form. [GPT-5.6] sq-bif.19
+    pub fn within_distance_wkt(
+        &self,
+        center_wkt: &str,
+        meters: f64,
+        limit: Option<usize>,
+    ) -> Result<Vec<(&Term, f64)>, crate::GeoError> {
+        let center = crate::parse_wkt_literal(center_wkt)?;
+        let geo_types::Geometry::Point(center) = center.geometry else {
+            return Err(crate::GeoError::Unsupported(
+                "within_distance_wkt center must be a Point geometry".to_string(),
+            ));
+        };
+        Ok(self.within_distance(center, meters, limit))
+    }
+
     /// The `k` entities nearest to `center` (great-circle metres, nearest
     /// first). Exact under the same metric as
     /// [`within_distance`](Self::within_distance): an

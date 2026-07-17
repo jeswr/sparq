@@ -1,0 +1,37 @@
+# [SONNET-4.6] sq-dwame — Railway config for sparq-server.
+# [GPT-5.6] Post-hoc hardening: real Dockerfile source and one-replica deployment.
+#
+# SECURE-DEFAULTS NOTICE (R1/R9):
+# The sparq-server image is open-by-default (bakes SPARQ_ALLOW_REMOTE=1, no auth at the
+# image layer). This template enforces auth ON at the template layer via SPARQ_AUTH_TOKEN.
+# Set the token via Railway's variable dashboard or CLI — NEVER inline a literal secret
+# in this file (R4). Unauthenticated writes return 401.
+#
+# Set the required secret before deploying:
+#   railway variables set SPARQ_AUTH_TOKEN="$(openssl rand -hex 32)"
+#
+# Auto-HTTPS (R3): Railway provides automatic TLS on its *.up.railway.app domain and on
+# custom domains — plaintext HTTP is redirected to HTTPS by Railway's edge.
+
+[build]
+  # The adjacent one-line Dockerfile consumes the canonical prebuilt GHCR image.
+  builder = "DOCKERFILE"
+  dockerfilePath = "Dockerfile"
+
+[deploy]
+  numReplicas = 1                  # single writer: in-memory replicas would diverge
+  healthcheckPath = "/health"   # R7: health-check path for sparq-server
+  healthcheckTimeout = 30       # seconds before Railway marks the deploy unhealthy
+  restartPolicyType = "ON_FAILURE"
+  restartPolicyMaxRetries = 3
+
+# Variables required in Railway dashboard (R4 — never put literal values here):
+#
+#   SPARQ_AUTH_TOKEN   = <strong random token>        [REQUIRED — enforces R1/R2]
+#   PORT               = 3030                         [Railway injects $PORT; set to 3030]
+#   SPARQ_AUTH_TOKEN_READ = 1                         [gate reads as well as writes]
+#
+# Optional tuning variables (set in dashboard as needed):
+#   SPARQ_CORS_ALLOW_ORIGIN = "https://…"  # restrict CORS to your front-end origin
+#   SPARQ_MAX_CONCURRENT   = "16"
+#   SPARQ_QUERY_TIMEOUT    = "30"

@@ -230,6 +230,30 @@ export async function nativeOdrlPreview(args: {
 }
 
 /**
+ * [GPT-5.6] sq-3eukz — derive a complete snake_case FormDescription through the optional
+ * desktop `derive_form` command. The frontend sends the same live-workspace snapshot as both
+ * `dataset` and `shapes`; mode/shape changes invoke this command again instead of reshaping JSON.
+ * Returns `null` only outside Tauri, where the hosted-web adapter probes sparq-wasm instead.
+ */
+export async function nativeDeriveForm(args: {
+  dataset: string;
+  shapes: string;
+  format: string;
+  focus: string;
+  mode: string;
+  shape?: string;
+}): Promise<string | null> {
+  const invoke = tauriInvoke();
+  if (!invoke) return null;
+  return invoke<string>("derive_form", args);
+}
+
+/** True when the runtime exposes the Tauri invocation adapter used by `derive_form`. */
+export function hasNativeForms(): boolean {
+  return tauriInvoke() !== null;
+}
+
+/**
  * [OPUS-4.8] sq-cno90 (#820 follow-up) — probe the REAL on-disk byte size of the
  * `$APPLOCALDATA/workspaces` tree through the native `disk_usage` command, or `null` outside the
  * desktop shell (the web target has no native FS — the status bar falls back to the snapshot-bytes

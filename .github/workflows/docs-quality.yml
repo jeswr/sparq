@@ -103,6 +103,9 @@ name: docs-quality
 
 on:
   pull_request:
+    # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
+    # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
+    types: [opened, synchronize, reopened, ready_for_review]
   # [OPUS-4.8] Merge queue: docs-quality surfaces checks on PRs (some gating, some
   # advisory/informational which ci-summary excludes), so it must also run on the
   # queue's merge_group ref or the required ci-summary would wait for siblings that
@@ -151,11 +154,11 @@ jobs:
         # Consumers here: skill-frontmatter + the ci-scripts selection-wiring inspection.
         run: pip install --require-hashes -r .github/requirements/docs-quality.txt
       - name: Install typos
-        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: typos@1.47.2
       - name: Install lychee (for the site-links self-test)
-        uses: taiki-e/install-action@4684b8405694ae9dd42c9f39ba901a70ae83f4a3 # v2.82.9
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: lychee@0.23.0
 
@@ -192,7 +195,7 @@ jobs:
 
       # ---- former job: internal-links (lychee --offline) ----
       - name: "internal-links (lychee --offline: relative links + anchors)"
-        uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2.8.0
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
           # --offline → no network (deterministic); --include-fragments validates
           # #heading anchors. fail=true makes broken internal links a HARD failure.
@@ -722,7 +725,7 @@ jobs:
 
       # ---- former job: external-links (lychee online, advisory) ----
       - name: external-links (lychee online; dead http(s) links — network-flaky → advisory)
-        uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411 # v2.8.0
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
           args: >-
             --no-progress

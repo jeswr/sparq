@@ -1,14 +1,15 @@
 ---
 name: shacl-validation
-description: "Validate RDF data against SHACL shapes with the sparq engine: SHACL Core constraints (class, datatype incl. the SHACL-1.2 disjunctive list form, cardinality, ranges, paths, logical, node/property, qualified, closed incl. sh:ByTypes, in/hasValue, the SHACL-1.2 list constraints sh:memberShape / sh:uniqueMembers / sh:min+maxListLength / sh:uniqueValuesFor, and the SHACL-1.2 value constraints sh:subsetOf / sh:someValue / sh:singleLine / sh:rootClass with path-valued sh:equals/disjoint/lessThan comparands and severity-threshold sh:conforms), SHACL-SPARQL sh:sparql constraints (§5.2), and custom SPARQL-based constraint components (sh:ConstraintComponent, §6) — then read the conformance/violations validation report (W3C report vocabulary as Turtle or human text). Also runs opt-in SHACL Advanced Features (SHACL-AF) rules — sh:rule (sh:TripleRule + sh:SPARQLRule) — to INFER triples (feature `shacl-af`). Use when an agent needs to check whether a sparq_core::Graph conforms to shapes, run shape validation, produce a SHACL validation report, or apply SHACL rules to infer/expand a graph in Rust."
+description: "Validate RDF data against SHACL shapes with the sparq engine: SHACL Core constraints (class, datatype incl. the SHACL-1.2 disjunctive list form, cardinality, ranges, paths, logical, node/property, qualified, closed incl. sh:ByTypes, in/hasValue, the SHACL-1.2 list constraints sh:memberShape / sh:uniqueMembers / sh:min+maxListLength / sh:uniqueValuesFor, and the SHACL-1.2 value constraints sh:subsetOf / sh:someValue / sh:singleLine / sh:rootClass with path-valued sh:equals/disjoint/lessThan comparands and severity-threshold sh:conforms), SHACL-SPARQL sh:sparql constraints (§5.2), and custom SPARQL-based constraint components (sh:ConstraintComponent, §6) — then read the conformance/violations validation report as N-Triples, deterministic JSON, W3C report-vocabulary Turtle, or human text. Also runs opt-in SHACL Advanced Features (SHACL-AF) rules — sh:rule (sh:TripleRule + sh:SPARQLRule) — to INFER triples (feature `shacl-af`). Use when an agent needs to check whether a sparq_core::Graph conforms to shapes, run shape validation, produce a SHACL validation report, or apply SHACL rules to infer/expand a graph in Rust."
 ---
 
 # sparq-shacl-validation
 
 Validate a data `Graph` against a shapes `Graph` and get back a `ValidationReport`
-(conformance flag + per-violation results, renderable as W3C-vocabulary Turtle or
-plain text). Covers the full SHACL Core component set, SHACL-SPARQL (`sh:sparql`,
-§5.2), and custom SPARQL-based constraint components (`sh:ConstraintComponent`, §6).
+(conformance flag + per-violation results, renderable as N-Triples, deterministic
+JSON, W3C-vocabulary Turtle, or plain text). Covers the full SHACL Core component set,
+SHACL-SPARQL (`sh:sparql`, §5.2), and custom SPARQL-based constraint components
+(`sh:ConstraintComponent`, §6).
 
 `sparq-shacl` is an **opt-in** crate: depending on it is what turns on SHACL. It is
 NOT a dependency of any other sparq crate by default, so the core engine and the
@@ -60,6 +61,8 @@ assert!(!report.conforms);                 // sh:conforms = false
 assert_eq!(report.results.len(), 1);       // one DatatypeConstraintComponent violation
 eprintln!("{}", report.to_text());         // human-readable
 println!("{}", report.to_turtle());        // W3C sh:ValidationReport graph
+println!("{}", report.to_ntriples());      // same graph, one N-Triples statement per line
+println!("{}", report.to_json());          // deterministic machine-readable object
 ```
 
 CLI-style end-to-end run via the bundled example (exits 0 iff the data conforms):
@@ -98,10 +101,19 @@ pub fn validate_with_model(data: &Graph, model: &ShapesModel) -> ValidationRepor
 // sh:sparqlExpr (on sh:sparql constraints AND on the SPARQL-based node expressions
 // of sh:targetNode/sh:values) whose text does not parse as the required query form
 // — FAIL-CLOSED relative to this engine's vendored SPARQL parser: a valid query
-// beyond the parser's coverage is also rejected strictly. Construct-local checks,
-// NOT a full SHACL-of-SHACL pass; ShaclFailure.ill_formed / ShapesModel::ill_formed()
-// carry (node, predicate, message). `validate` instead SKIPS all of the above
-// unchanged (its never-fails contract).
+// beyond the parser's coverage is also rejected strictly. (sq-c1v3e) adds: a non-IRI
+// sh:severity (shape-level AND on an sh:SPARQLConstraint node), the count/length
+// DATATYPE check (integer-lexical but non-xsd:integer-typed, e.g. "3"^^xsd:string —
+// bare Turtle 3 types as xsd:integer, so ordinary graphs are unaffected), a
+// qualified COUNT without sh:qualifiedValueShape (the symmetric partial-parameter
+// case), ANY sh:entailment declaration (no entailment regime is supported — the
+// SHACL §3.4 unsupported-regime failure), and (feature `shacl-af`) an
+// sh:expression / sh:nodeByExpression structural node expression that does not
+// build. Construct-local checks, NOT a full SHACL-of-SHACL pass;
+// ShaclFailure.ill_formed / ShapesModel::ill_formed() carry (node, predicate,
+// message). `validate` instead SKIPS all of the above unchanged (its never-fails
+// contract) and (sq-c1v3e) surfaces each record as a ShapeDiagnostic in
+// report.diagnostics (source_component = the offending SHACL predicate IRI).
 pub fn validate_strict(data: &Graph, shapes: &Graph) -> Result<ValidationReport, ShaclFailure>;
 pub fn validate_strict_with_model(data: &Graph, model: &ShapesModel)
     -> Result<ValidationReport, ShaclFailure>;
@@ -189,7 +201,9 @@ pub fn conforms_with_disallowed(&self, disallowed: &[&str]) -> bool;  // custom 
 pub fn results_with_severity<'a>(&'a self, severity: &'a str)         // full IRI, e.g. ".../shacl#Warning"
     -> impl Iterator<Item = &'a ValidationResult>;
 pub fn to_turtle(&self) -> String;          // W3C report vocabulary (valid, round-trippable Turtle)
+pub fn to_ntriples(&self) -> String;        // same report graph, one N-Triples statement per line
 pub fn to_text(&self) -> String;            // human-readable summary
+pub fn to_json(&self) -> String;            // deterministic JSON; fixed keys and result order
 ```
 
 `ValidationResult` (`sparq_shacl::ValidationResult`) — all fields public:

@@ -32,9 +32,10 @@
 //! ## API shape
 //!
 //! - Dataset level (the general case): [`canonicalize`] / [`canonicalize_quads`]
-//!   take quads and return the canonical N-Quads `String`; [`issued_identifiers`]
-//!   / [`issue_quads`] return the canonical blank-node issuer map (input label
-//!   → `c14nN`).
+//!   take quads and return the canonical N-Quads `String`;
+//!   [`digest_quads_with`] returns a caller-selected digest of those exact
+//!   canonical bytes; [`issued_identifiers`] / [`issue_quads`] return the
+//!   canonical blank-node issuer map (input label → `c14nN`).
 //! - Single graph (a default-graph-only dataset): [`canonicalize_triples`] /
 //!   [`canonicalize_graph_content`] return a [`CanonicalGraph`] (the sorted
 //!   canonical N-Quads lines + the re-parsed canonical triples), which is what
@@ -147,10 +148,10 @@ pub use rdf12::{
 };
 
 /// The hash-function trait RDFC-1.0 is parameterized over (`digest::Digest`),
-/// re-exported so callers of [`canonicalize_quads_with`] / [`issue_quads_with`]
-/// can name a hasher (e.g. `sha2::Sha256`, `sha2::Sha384`) without taking a
-/// direct `digest` dependency. The spec default is SHA-256
-/// ([`canonicalize_quads`]).
+/// re-exported so callers of [`canonicalize_quads_with`], [`digest_quads_with`],
+/// or [`issue_quads_with`] can name a hasher (e.g. `sha2::Sha256`,
+/// `sha2::Sha384`) without taking a direct `digest` dependency. The spec
+/// default is SHA-256 ([`canonicalize_quads`]).
 pub use digest::Digest;
 
 /// The crate-wide bound on RDF 1.2 triple-term **nesting depth**.
@@ -309,6 +310,19 @@ pub fn canonicalize_quads_with<D: Digest>(dataset: &[Quad]) -> Result<String, Ca
     let opts = rdf_canon::CanonicalizationOptions::default();
     rdf_canon::canonicalize_quads_with::<D>(&quads02, &opts)
         .map_err(|e| CanonError::Canonicalization(e.to_string()))
+}
+
+/// Returns the digest bytes of the exact canonical N-Quads document produced
+/// by [`canonicalize_quads`].
+///
+/// `D` selects only the final digest algorithm; canonicalization retains the
+/// RDFC-1.0 default hash profile. Every canonical byte is hashed, including the
+/// final trailing newline when the dataset is non-empty. [GPT-5.6] sq-ddws7.
+pub fn digest_quads_with<D: Digest>(dataset: &[Quad]) -> Result<Vec<u8>, CanonError> {
+    let c = canonicalize_quads(dataset)?;
+    let mut h = D::new();
+    h.update(c.as_bytes());
+    Ok(h.finalize().to_vec())
 }
 
 /// Like [`issue_quads`] but parameterized over the RDFC-1.0 hash function `D`.

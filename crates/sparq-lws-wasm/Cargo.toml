@@ -1,0 +1,44 @@
+[package]
+name = "sparq-lws-wasm"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The host build intentionally has no request-core dependencies. Building this dedicated crate for
+# wasm32 is the opt-in: it does not add Solid-server code to sparq-core, sparq-engine, or sparq-wasm.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+axum = { version = "0.8", default-features = false }
+# [SONNET-4.6] sq-250si: emit a diagnostic to console.error on panic (panic=abort in release
+# lowers to an unreachable trap — this hook fires in dev/debug builds where unwinding is
+# available, giving the host a readable message before the trap). One line of glue over wasm-bindgen;
+# no new transitive crates (wasm-bindgen is already in the tree).
+console_error_panic_hook = "0.1"
+futures-executor = "0.3"
+http = "1"
+oxrdf.workspace = true
+sparq-lws-core = { path = "../sparq-lws-core", default-features = false, features = ["wasm"] }
+tower = { version = "0.5", features = ["util"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+
+# sparq-lws-core uses both generations: 0.2 for blob-key entropy and 0.3 through oxrdf.
+getrandom02 = { package = "getrandom", version = "0.2", features = ["js"] }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[features]
+default = []
+# [GPT-5.6] sq-r1ei8: the npm full-tier selector. The default-off adapter
+# remains the byte-stable core Solid artifact; the package's full build enables
+# this passthrough explicitly.
+sparql-endpoint = ["sparq-lws-core/sparql-endpoint"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-Oz"]

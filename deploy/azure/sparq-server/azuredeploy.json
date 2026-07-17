@@ -1,0 +1,355 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.45.15.27210",
+      "templateHash": "5973716727936043057"
+    },
+    "gpt56Review": "[GPT-5.6] Corrected by the stronger-tier IaC security review.",
+    "securityNotice": "sparq-server is open-by-default at the image layer; this template gates it with a Key Vault token. Do not remove the token wiring."
+  },
+  "parameters": {
+    "environmentName": {
+      "type": "string",
+      "defaultValue": "sparq-server-env",
+      "metadata": {
+        "description": "Container Apps Environment name — created by this template."
+      }
+    },
+    "containerAppName": {
+      "type": "string",
+      "defaultValue": "sparq-server",
+      "metadata": {
+        "description": "Container App name."
+      }
+    },
+    "keyVaultName": {
+      "type": "string",
+      "defaultValue": "[format('sparq-{0}', uniqueString(subscription().id, resourceGroup().id, parameters('containerAppName')))]",
+      "minLength": 3,
+      "maxLength": 24,
+      "metadata": {
+        "description": "Dedicated Key Vault name. The default is stable and globally unique for this deployment."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Azure region to deploy into."
+      }
+    },
+    "imageRef": {
+      "type": "string",
+      "defaultValue": "ghcr.io/sparq-org/sparq-server:latest",
+      "metadata": {
+        "description": "  Full image reference (registry/image:tag).\nDefaults to the canonical GHCR image. Pin a specific version in production\n(e.g. ghcr.io/sparq-org/sparq-server:0.1.0).\n"
+      }
+    },
+    "healthPath": {
+      "type": "string",
+      "defaultValue": "/health",
+      "minLength": 1,
+      "metadata": {
+        "description": "HTTP path used by startup, liveness, and readiness probes (R7)."
+      }
+    },
+    "authToken": {
+      "type": "securestring",
+      "minLength": 32,
+      "metadata": {
+        "description": "  SPARQ_AUTH_TOKEN bearer value.\nREQUIRED — a strong random secret (e.g. openssl rand -hex 32).\nStored in the dedicated Key Vault; never logged or exposed in template outputs. (R1/R4)\n"
+      }
+    },
+    "minReplicas": {
+      "type": "int",
+      "defaultValue": 1,
+      "minValue": 1,
+      "maxValue": 1,
+      "metadata": {
+        "description": "Minimum replica count. Pinned to 1 for the single-writer in-memory server; raise only after wiring a shared persistent backing store."
+      }
+    },
+    "maxReplicas": {
+      "type": "int",
+      "defaultValue": 1,
+      "minValue": 1,
+      "maxValue": 1,
+      "metadata": {
+        "description": "Maximum replica count. Pinned to 1 for the single-writer in-memory server; raise only after wiring a shared persistent backing store."
+      }
+    },
+    "authTokenRead": {
+      "type": "string",
+      "defaultValue": "",
+      "allowedValues": [
+        "",
+        "1"
+      ],
+      "metadata": {
+        "description": "  Set to \"1\" to also require the auth token for read (SELECT/CONSTRUCT) queries.\nLeave empty to allow unauthenticated reads while gating writes.\n"
+      }
+    },
+    "corsAllowOrigin": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Value for SPARQ_CORS_ALLOW_ORIGIN (e.g. https://example.com). Leave empty to disable."
+      }
+    },
+    "maxConcurrent": {
+      "type": "int",
+      "defaultValue": 16,
+      "minValue": 1,
+      "maxValue": 256,
+      "metadata": {
+        "description": "Maximum concurrent SPARQL query workers (SPARQ_MAX_CONCURRENT)."
+      }
+    },
+    "queryTimeoutSeconds": {
+      "type": "int",
+      "defaultValue": 30,
+      "minValue": 5,
+      "maxValue": 300,
+      "metadata": {
+        "description": "Per-query timeout in seconds (SPARQ_QUERY_TIMEOUT)."
+      }
+    },
+    "cpuCores": {
+      "type": "string",
+      "defaultValue": "0.5",
+      "allowedValues": [
+        "0.25",
+        "0.5",
+        "0.75",
+        "1.0",
+        "1.25",
+        "1.5",
+        "1.75",
+        "2.0"
+      ],
+      "metadata": {
+        "description": "CPU allocation per replica. Memory is derived to keep a valid Container Apps consumption profile."
+      }
+    }
+  },
+  "variables": {
+    "memoryByCpu": {
+      "0.25": "0.5Gi",
+      "0.5": "1Gi",
+      "0.75": "1.5Gi",
+      "1.0": "2Gi",
+      "1.25": "2.5Gi",
+      "1.5": "3Gi",
+      "1.75": "3.5Gi",
+      "2.0": "4Gi"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+      "apiVersion": "2023-01-31",
+      "name": "[format('{0}-identity', parameters('containerAppName'))]",
+      "location": "[parameters('location')]"
+    },
+    {
+      "type": "Microsoft.KeyVault/vaults",
+      "apiVersion": "2023-07-01",
+      "name": "[parameters('keyVaultName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "tenantId": "[tenant().tenantId]",
+        "sku": {
+          "family": "A",
+          "name": "standard"
+        },
+        "accessPolicies": [
+          {
+            "tenantId": "[tenant().tenantId]",
+            "objectId": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), '2023-01-31').principalId]",
+            "permissions": {
+              "certificates": [],
+              "keys": [],
+              "secrets": [
+                "get"
+              ],
+              "storage": []
+            }
+          }
+        ],
+        "enableRbacAuthorization": false,
+        "enablePurgeProtection": false,
+        "enableSoftDelete": true,
+        "enabledForDeployment": false,
+        "enabledForDiskEncryption": false,
+        "enabledForTemplateDeployment": false,
+        "publicNetworkAccess": "Enabled",
+        "softDeleteRetentionInDays": 7,
+        "networkAcls": {
+          "bypass": "None",
+          "defaultAction": "Allow",
+          "ipRules": [],
+          "virtualNetworkRules": []
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName')))]"
+      ]
+    },
+    {
+      "type": "Microsoft.KeyVault/vaults/secrets",
+      "apiVersion": "2023-07-01",
+      "name": "[format('{0}/{1}', parameters('keyVaultName'), 'sparq-auth-token')]",
+      "properties": {
+        "attributes": {
+          "enabled": true
+        },
+        "contentType": "SPARQ bearer token",
+        "value": "[parameters('authToken')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.OperationalInsights/workspaces",
+      "apiVersion": "2022-10-01",
+      "name": "[take(format('{0}-logs', parameters('environmentName')), 63)]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "sku": {
+          "name": "PerGB2018"
+        },
+        "retentionInDays": 30
+      }
+    },
+    {
+      "type": "Microsoft.App/managedEnvironments",
+      "apiVersion": "2024-03-01",
+      "name": "[parameters('environmentName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "appLogsConfiguration": {
+          "destination": "log-analytics",
+          "logAnalyticsConfiguration": {
+            "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', take(format('{0}-logs', parameters('environmentName')), 63)), '2022-10-01').customerId]",
+            "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', take(format('{0}-logs', parameters('environmentName')), 63)), '2022-10-01').primarySharedKey]"
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.OperationalInsights/workspaces', take(format('{0}-logs', parameters('environmentName')), 63))]"
+      ]
+    },
+    {
+      "type": "Microsoft.App/containerApps",
+      "apiVersion": "2024-03-01",
+      "name": "[parameters('containerAppName')]",
+      "location": "[parameters('location')]",
+      "identity": {
+        "type": "UserAssigned",
+        "userAssignedIdentities": {
+          "[format('{0}', resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))))]": {}
+        }
+      },
+      "properties": {
+        "environmentId": "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
+        "configuration": {
+          "activeRevisionsMode": "Single",
+          "secrets": [
+            {
+              "name": "sparq-auth-token",
+              "identity": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName')))]",
+              "keyVaultUrl": "[format('{0}secrets/{1}', reference(resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName')), '2023-07-01').vaultUri, 'sparq-auth-token')]"
+            }
+          ],
+          "ingress": {
+            "external": true,
+            "targetPort": 3030,
+            "transport": "http",
+            "allowInsecure": false
+          }
+        },
+        "template": {
+          "containers": [
+            {
+              "name": "sparq-server",
+              "image": "[parameters('imageRef')]",
+              "resources": {
+                "cpu": "[json(parameters('cpuCores'))]",
+                "memory": "[variables('memoryByCpu')[parameters('cpuCores')]]"
+              },
+              "env": "[concat(createArray(createObject('name', 'SPARQ_AUTH_TOKEN', 'secretRef', 'sparq-auth-token'), createObject('name', 'SPARQ_MAX_CONCURRENT', 'value', string(parameters('maxConcurrent'))), createObject('name', 'SPARQ_QUERY_TIMEOUT', 'value', string(parameters('queryTimeoutSeconds')))), if(equals(parameters('authTokenRead'), '1'), createArray(createObject('name', 'SPARQ_AUTH_TOKEN_READ', 'value', '1')), createArray()), if(not(empty(parameters('corsAllowOrigin'))), createArray(createObject('name', 'SPARQ_CORS_ALLOW_ORIGIN', 'value', parameters('corsAllowOrigin'))), createArray()))]",
+              "probes": [
+                {
+                  "type": "Liveness",
+                  "httpGet": {
+                    "path": "[parameters('healthPath')]",
+                    "port": 3030
+                  },
+                  "initialDelaySeconds": 10,
+                  "periodSeconds": 30,
+                  "failureThreshold": 3
+                },
+                {
+                  "type": "Readiness",
+                  "httpGet": {
+                    "path": "[parameters('healthPath')]",
+                    "port": 3030
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 10,
+                  "failureThreshold": 3
+                },
+                {
+                  "type": "Startup",
+                  "httpGet": {
+                    "path": "[parameters('healthPath')]",
+                    "port": 3030
+                  },
+                  "initialDelaySeconds": 5,
+                  "periodSeconds": 6,
+                  "failureThreshold": 10
+                }
+              ]
+            }
+          ],
+          "scale": {
+            "minReplicas": "[parameters('minReplicas')]",
+            "maxReplicas": "[parameters('maxReplicas')]"
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.KeyVault/vaults/secrets', parameters('keyVaultName'), 'sparq-auth-token')]",
+        "[resourceId('Microsoft.App/managedEnvironments', parameters('environmentName'))]",
+        "[resourceId('Microsoft.KeyVault/vaults', parameters('keyVaultName'))]",
+        "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName')))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "fqdn": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.App/containerApps', parameters('containerAppName')), '2024-03-01').configuration.ingress.fqdn]"
+    },
+    "sparqlEndpoint": {
+      "type": "string",
+      "value": "[format('https://{0}/sparql', reference(resourceId('Microsoft.App/containerApps', parameters('containerAppName')), '2024-03-01').configuration.ingress.fqdn)]"
+    },
+    "keyVaultName": {
+      "type": "string",
+      "value": "[parameters('keyVaultName')]"
+    },
+    "managedIdentityClientId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), '2023-01-31').clientId]"
+    },
+    "managedIdentityPrincipalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('{0}-identity', parameters('containerAppName'))), '2023-01-31').principalId]"
+    }
+  }
+}

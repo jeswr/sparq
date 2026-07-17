@@ -187,6 +187,36 @@ fn save_empty_graph() {
     assert!(reloaded.is_empty());
 }
 
+/// [SONNET-4.6] sq-qalqs: literals with escaped quotes / backslashes round-trip
+/// EXACTLY through sparq's OWN writer. `save` (encode.rs) stores the lexical form
+/// RAW in the dictionary as the HDT spec prescribes — unlike the upstream crate's
+/// `Hdt::read_nt` fixture-builder, which stores the N-Triples-ESCAPED rendering and
+/// therefore mangles such literals (pinned by `roundtrip.rs::
+/// escaped_literal_pins_upstream_writer_as_the_mangler`; documented in UPSTREAM.md
+/// item 3). This proves the limitation is confined to the upstream writer.
+#[test]
+fn save_round_trips_escaped_literals_exactly() {
+    // Raw lexical forms: he said "hi" and \ done  /  trailing quote " (langtagged).
+    let nt = "<http://example.org/s> <http://example.org/p> \"he said \\\"hi\\\" and \\\\ done\" .\n\
+              <http://example.org/s> <http://example.org/q> \"trailing quote \\\"\"@en .\n";
+    let original = Graph::load_str(nt, "ntriples").unwrap();
+    let dir = scratch_dir();
+    let path = dir.path().join("escaped.hdt");
+    sparq_hdt::save(&original, &path).expect("saving escaped-literal graph");
+
+    let reloaded = sparq_hdt::load(&path).expect("loading the saved .hdt");
+    assert_eq!(
+        triple_set(&reloaded),
+        triple_set(&original),
+        "save -> load must preserve escaped-literal lexical forms exactly",
+    );
+    // The saved archive is spec-conformant: the upstream-backed oracle reads the
+    // same terms from the same bytes.
+    let bytes = std::fs::read(&path).unwrap();
+    let upstream = sparq_hdt::load_reader_via_upstream(std::io::Cursor::new(bytes)).unwrap();
+    assert_eq!(triple_set(&upstream), triple_set(&original));
+}
+
 /// [OPUS-4.8] sq-bif: `save` MUST fail closed on a graph carrying an RDF 1.2 triple
 /// term (`<<( s p o )>>`). Standard HDT's dictionary has no quoted-triple representation,
 /// so `hdt_term_string` returns `Error::Term` rather than silently emitting a malformed /

@@ -77,7 +77,7 @@
 use crate::encode::{numeric_value, route, temporal_value, Encoder};
 use crate::store::VectorStore;
 use crate::units::{normalise, QuantityKind, QUDT_UNIT_NS};
-use crate::verbalize::{verbalize, EntityTextConfig};
+use crate::verbalize::{truncate_at_word_boundary, verbalize, EntityTextConfig};
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{self, Id, TermParts};
 use sparq_core::Graph;
@@ -368,14 +368,11 @@ fn local_name(iri: &str) -> String {
     }
 }
 
-/// Truncate `s` at a char boundary to at most `max` chars (the same budget discipline as
-/// [`verbalize`]).
+/// Truncate `s` at a word or sentence boundary to at most `max` chars (the same budget discipline
+/// as [`verbalize`]).
 fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        s.chars().take(max).collect()
-    }
+    // [GPT-5.6] Share the exact boundary policy with entity verbalization.
+    truncate_at_word_boundary(s, max)
 }
 
 // ---- subgraph modality ------------------------------------------------------------------------

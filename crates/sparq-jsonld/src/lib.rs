@@ -35,12 +35,19 @@
 //! - [`flatten`](mod@flatten) — the document-level **Flattening Algorithm** (bead
 //!   `sq-oy1f.26`, §7.1): [`flatten::flatten`] expands, node-maps, folds named graphs under
 //!   `@graph`, sorts by `@id`, and drops empty nodes, returning the flattened expanded form.
-//!   (Post-flatten compaction against a caller context composes the document-level
-//!   Compaction Algorithm — its own bead `sq-oy1f.27`.)
+//! - [`compact`] — the document-level **Compaction Algorithm** + Value Compaction (bead
+//!   `sq-oy1f.27`), including scoped contexts, container reshaping, keyword aliasing, and
+//!   the `compactArrays` / `compactToRelative` / `ordered` options.
+//! - [`from_rdf`] — **Deserialize RDF as JSON-LD** (bead `sq-oy1f.28`), converting the
+//!   crate-local RDF dataset model into an expanded document, including native types,
+//!   direction handling, JSON literals, and RDF-list reconstruction.
+//! - [`frame`] — the document-level **Framing Algorithm** (beads `sq-oy1f.27` / `.29`),
+//!   including frame matching, value patterns, embedding, defaults, named graphs, and
+//!   framing-specific validation. Its pinned W3C framing lane passes all 92 cases.
 //!
-//! The remaining algorithm modules ([`compact`], [`frame`], [`from_rdf`], [`to_rdf`],
-//! [`api`]) are **stubs**: they carry the spec references and the public shape only, filled
-//! by the dependency-ordered follow-on beads. Nothing panics: the crate is `todo!()`-free.
+//! [GPT-5.6] (`sq-ci15w`) Only [`to_rdf`] and [`api`] remain documented stubs. The
+//! implemented pipeline is `todo!()`-free; remote loading and HTML extraction remain
+//! separate, opt-in follow-on capabilities.
 
 // Real, shipped surfaces.
 pub mod context;
@@ -49,7 +56,8 @@ pub mod json;
 pub mod loader;
 pub mod options;
 
-// Algorithm scaffolds — spec references + public shape only (filled by later beads).
+// Document-level algorithms. `to_rdf` and `api` retain their documented placeholder
+// surfaces; expansion, flattening, compaction, framing, and from-RDF are implemented.
 pub mod api;
 pub mod compact;
 pub mod expand;
@@ -65,6 +73,6 @@ pub use error::{JsonLdError, JsonLdErrorCode};
 pub use expand::expand;
 pub use flatten::{flatten, flatten_expanded};
 pub use json::{Json, JsonParseError};
-pub use node_map::{generate_node_map, BlankNodeIssuer, GraphMap, NodeMap};
 pub use loader::{DocumentLoader, FsLoader, NoopLoader, RemoteDocument};
+pub use node_map::{generate_node_map, BlankNodeIssuer, GraphMap, NodeMap};
 pub use options::{EmbedFlag, JsonLdOptions, ProcessingMode, RdfDirection};

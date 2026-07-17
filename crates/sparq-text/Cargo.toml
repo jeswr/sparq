@@ -47,6 +47,12 @@ default = ["engine", "parallel", "engine-builtins"]
 engine = ["dep:sparq-engine", "dep:spargebra"]
 engine-builtins = ["engine", "sparq-engine/regex", "sparq-engine/digest"]
 parallel = ["dep:rayon", "sparq-core/parallel", "sparq-engine?/parallel"]
+# [GPT-5.6] sq-lsp7k.14: bounded typo-tolerant lookup. OFF by default so the
+# ordinary index, native dependency graph, and lean wasm bundle pay nothing.
+fuzzy = []
+# [GPT-5.6] sq-lsp7k.19: literal snippet extraction and match highlighting.
+# OFF by default so ordinary index/search builds carry no highlighting code.
+highlight = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
