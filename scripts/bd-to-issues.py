@@ -66,9 +66,24 @@ def role_for(issue):
     return ROLE_BY_TYPE.get(issue.get("issue_type", "task"), "impl")
 
 
+# [OPUS-4.8] Only PIPELINE-RELEVANT labels cross into GitHub. bd carries ~200 free-form tags
+# (from:*, effort:*, tier:*, roadmap, one-off topic tags) that triage/readiness/dispatch NEVER read.
+# Passing them through would (a) force creating ~200 junk repo labels and (b) risk a LABEL-LESS issue:
+# `gh issue create` fails on the first unknown label and the fallback drops ALL labels, so triage
+# cannot derive priority → the issue is stuck untriaged. Keep only what the pipeline consumes.
+_KEEP_PREFIX = ("area:", "needs:", "trust:", "kind:")
+_SEC_KEYWORDS = ("zk", "mpc", "reasoner", "crypto", "auth", "e2ee")
+
+
+def _pipeline_relevant(lb):
+    """A label triage/readiness/dispatch actually reads: an area:/needs:/trust:/kind: label, or one
+    carrying a security keyword so triage's soundness routing survives even without an area:/kind:."""
+    return lb.startswith(_KEEP_PREFIX) or any(k in lb for k in _SEC_KEYWORDS)
+
+
 def issue_labels(bead):
     labels = [lb["name"] if isinstance(lb, dict) else lb for lb in bead.get("labels", [])]
-    out = set(labels)
+    out = {lb for lb in labels if _pipeline_relevant(lb)}   # whitelist — drop free-form bd tags
     p = bead.get("priority")
     if isinstance(p, int) and 0 <= p <= 4:
         out.add(f"priority:P{p}")
@@ -166,13 +181,46 @@ def apply_migration(repo, open_ids, blockers, parents, limit=None, checkpoint="/
     return id_map, created
 
 
+def _self_test():
+    ok = True
+
+    def chk(n, got, want):
+        nonlocal ok
+        good = got == want
+        ok = ok and good
+        print(f"  {'ok  ' if good else 'FAIL'} {n}: {got} (want {want})")
+
+    # whitelist: keep area:/kind:/needs:/trust: + security-keyword labels; DROP free-form bd tags
+    bead = {"priority": 2, "issue_type": "feature", "labels": [
+        "area:sparq-core", "kind:test", "needs:user", "from:agent", "effort:M",
+        "tier:fable", "roadmap", "federation", "noir"]}
+    got = set(issue_labels(bead))
+    chk("whitelist keeps pipeline labels", {"area:sparq-core", "kind:test", "needs:user"} <= got, True)
+    chk("whitelist drops free-form tags", got & {"from:agent", "effort:M", "tier:fable", "roadmap",
+                                                 "federation", "noir"}, set())
+    chk("adds priority+role", {"priority:P2", "role:impl"} <= got, True)
+    # security keyword survives the whitelist (soundness routing depends on it downstream)
+    chk("keeps security keyword", "area:sparq-zk" in issue_labels(
+        {"priority": 1, "issue_type": "feature", "labels": ["area:sparq-zk", "from:x"]}), True)
+    # epic gets kind:epic
+    chk("epic tagged", "kind:epic" in issue_labels(
+        {"priority": 1, "issue_type": "epic", "labels": ["area:x"]}), True)
+    print("bd-to-issues self-test", "PASSED" if ok else "FAILED")
+    return 0 if ok else 1
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default="sparq-org/sparq")
     ap.add_argument("--apply", action="store_true", help="actually create issues (bulk!) — held for go-ahead")
     ap.add_argument("--limit", type=int, help="migrate only the first N open beads (for testing)")
+    ap.add_argument("--only", help="comma-separated bd-ids to migrate (curated pilot subset; ignores --limit)")
     ap.add_argument("--export-file", help="read bd export from a file instead of running bd")
+    ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
+
+    if args.self_test:
+        return _self_test()
 
     if args.export_file:
         lines = open(args.export_file, encoding="utf-8").read().splitlines()
@@ -180,6 +228,12 @@ def main():
         lines = subprocess.run(["bd", "export"], capture_output=True, text=True, check=True).stdout.splitlines()
     issues, edges = parse_export(lines)
     open_ids, blockers, parents = plan(issues, edges)
+    if args.only:  # curated subset — keep only the named bd-ids (blockers/parents stay scoped to them)
+        keep = {x.strip() for x in args.only.split(",") if x.strip()}
+        missing = keep - set(open_ids)
+        if missing:
+            print(f"warning: --only ids not in the open set (skipped): {sorted(missing)}")
+        open_ids = {k: v for k, v in open_ids.items() if k in keep}
 
     # --- summary (always) ---
     from collections import Counter
