@@ -102,9 +102,10 @@ pub struct CharSet {
 /// This is **advisory planner metadata only** — a STATIC hint the planner may use to
 /// order source selection. A wrong or absent value can reorder which sources are
 /// contacted first, but can **never** change the set of triples that answers a BGP
-/// (the same discipline as the answer-safe cardinality estimators). This bead only
-/// defines and round-trips the field; `selection.rs` consumes it in a follow-up
-/// (sq-lhcot) and must uphold the same invariant.
+/// (the same discipline as the answer-safe cardinality estimators). sq-222my defined
+/// and round-tripped the field; `selection.rs` now consumes it as a static
+/// candidate-ordering hint ([FABLE-5] sq-3uijg) and upholds the same invariant —
+/// membership and estimates never read it.
 ///
 /// Served under the [`RETRIEVAL_NS`] vocab next to the VoID partitions:
 ///

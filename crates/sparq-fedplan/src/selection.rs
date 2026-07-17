@@ -45,9 +45,22 @@
 //! preserved. Bound subject/object positions divide the predicate's triple count by its
 //! distinct-subject / distinct-object count respectively (CostFed's selectivity buckets).
 //!
+//! ## RetrievalCapability ordering hint (advisory only)
+//!
+//! A source's declared [`RetrievalCapability`] (`sret:` vocab, sq-222my) is consumed
+//! here as a **static ordering hint**: retained candidates whose capability declares a
+//! retrieval endpoint (vector or text) sort ahead of the rest, ascending by their
+//! declared `cardinalityHint` (absent hint last among them), with ascending source
+//! index as the final tie-break — so a hint-free selection keeps the plain index
+//! order. The hint is read only *after* [`can_contribute`] has decided membership and
+//! never by [`estimate_cardinality`], so a wrong or absent value may reorder a
+//! pattern's candidates but can **never** change the retained source set or any
+//! estimate — proven by the differential
+//! `retrieval_hint_never_changes_selected_source_sets` test below. [FABLE-5] sq-3uijg.
+//!
 //! [OPUS-4.8] sq-a35t.
 
-use crate::descriptor::SourceDescriptor;
+use crate::descriptor::{RetrievalCapability, SourceDescriptor};
 use crate::pattern::{Bgp, Term, TriplePattern};
 
 const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
@@ -66,7 +79,11 @@ pub struct SourceCandidate {
 pub struct PatternSources {
     /// Index of the pattern within the BGP.
     pub pattern: usize,
-    /// Retained sources, ascending by source index (deterministic).
+    /// Retained sources, ordered by the advisory [`RetrievalCapability`] rank (declared
+    /// retrieval endpoints first, smaller `cardinalityHint` earlier), ties broken by
+    /// ascending source index — deterministic, and plain ascending source index when no
+    /// source declares a capability. Ordering only: membership and estimates are
+    /// hint-independent. [FABLE-5] sq-3uijg.
     pub candidates: Vec<SourceCandidate>,
 }
 
@@ -91,7 +108,10 @@ impl PatternSources {
 /// Returns, per pattern, the retained sources and their CostFed cardinality estimates.
 /// **Recall-safe** (see the module docs): a source is pruned for a pattern only when
 /// the descriptor proves it cannot contribute. Deterministic: candidates are ordered by
-/// source index.
+/// the advisory [`RetrievalCapability`] rank (see the module docs — declared retrieval
+/// endpoints first), ties broken by source index; plain source-index order when no
+/// source declares a capability. The hint reorders only — it never changes the
+/// retained set or an estimate ([FABLE-5] sq-3uijg).
 pub fn select_sources(bgp: &Bgp, sources: &[SourceDescriptor]) -> Vec<PatternSources> {
     bgp.patterns
         .iter()
@@ -106,15 +126,44 @@ pub fn select_sources(bgp: &Bgp, sources: &[SourceDescriptor]) -> Vec<PatternSou
                     });
                 }
             }
-            // Already in ascending source-index order (enumeration order); explicit for
-            // determinism guarantees if the loop ever changes.
-            candidates.sort_by_key(|c| c.source);
+            // Ordering (ADVISORY only, [FABLE-5] sq-3uijg): the declared
+            // RetrievalCapability may pull a retained source earlier; the final
+            // source-index tie-break keeps a hint-free selection in the historical
+            // ascending-index order. Membership and the estimates above were decided
+            // before this sort and never read the capability (answer-safety).
+            candidates.sort_by_key(|c| (retrieval_rank(&sources[c.source]), c.source));
             PatternSources {
                 pattern: pi,
                 candidates,
             }
         })
         .collect()
+}
+
+/// Advisory candidate-ordering rank from a source's declared [`RetrievalCapability`]
+/// ([FABLE-5] sq-3uijg — the sq-222my follow-up). Lower sorts earlier:
+///
+/// * `(0, k)` — the capability declares a retrieval endpoint (vector or text): a
+///   dedicated, bounded-top-k retrieval endpoint is the cheapest first probe. `k` is
+///   the declared `cardinalityHint` (more selective endpoint first), `u64::MAX` when
+///   absent (declared-but-unsized endpoints go last within this tier).
+/// * `(1, MAX)` — no capability, or a capability declaring NEITHER endpoint (no usable
+///   ordering signal): the tier keeps plain source-index order via the caller's
+///   tie-break.
+///
+/// **Answer-safe by construction**: computed only for sources [`can_contribute`]
+/// already retained, and read by neither [`can_contribute`] nor
+/// [`estimate_cardinality`] — a wrong or absent hint reorders a pattern's candidates
+/// but can never change the retained set or an estimate.
+fn retrieval_rank(src: &SourceDescriptor) -> (u8, u64) {
+    match src.retrieval() {
+        Some(RetrievalCapability {
+            vector,
+            text,
+            cardinality_hint,
+        }) if *vector || *text => (0, cardinality_hint.unwrap_or(u64::MAX)),
+        _ => (1, u64::MAX),
+    }
 }
 
 /// The HiBISCuS prune decision for one (pattern, source): `true` iff the source might
@@ -204,7 +253,9 @@ fn estimate_cardinality(tp: &TriplePattern, src: &SourceDescriptor) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::descriptor::{CharSet, ClassPartition, PredPartition, SourceId};
+    use crate::descriptor::{
+        CharSet, ClassPartition, PredPartition, RetrievalCapability, SourceId,
+    };
     use crate::pattern::Var;
 
     fn iri(s: &str) -> Term {
@@ -642,6 +693,135 @@ mod tests {
             1,
             "a variable class object must keep the source (no bound class to prove absent)"
         );
+    }
+
+    // ============================================================================
+    // [FABLE-5] sq-3uijg — the RetrievalCapability STATIC ordering hint (follow-up to
+    // sq-222my / epic sq-lhcot): a declared retrieval endpoint pulls a retained source
+    // earlier in the candidate ordering, and NOTHING else — the retained set and every
+    // estimate are hint-independent (answer-safety, differential-tested below).
+    // ============================================================================
+
+    fn retrieval(vector: bool, text: bool, hint: Option<u64>) -> RetrievalCapability {
+        RetrievalCapability {
+            vector,
+            text,
+            cardinality_hint: hint,
+        }
+    }
+
+    // ---- The advisory ordering itself: declared endpoints first (smaller declared
+    //      cardinalityHint earlier, absent hint last among them), then the unhinted tier
+    //      in plain index order. A capability declaring NEITHER endpoint carries no
+    //      usable signal and stays in the unhinted tier.
+    #[test]
+    fn retrieval_hint_orders_declared_endpoints_first() {
+        let mk = |id: &str, cap: Option<RetrievalCapability>| {
+            let mut b = SourceDescriptor::builder(SourceId::new(id))
+                .predicate(pred(&foaf("knows"), 100, 50, 50));
+            if let Some(c) = cap {
+                b = b.retrieval(c);
+            }
+            b.build()
+        };
+        let sources = [
+            mk("s0", None),                                       // unhinted.
+            mk("s1", Some(retrieval(false, true, None))),         // endpoint, no k.
+            mk("s2", Some(retrieval(true, false, Some(10)))),     // endpoint, k=10.
+            mk("s3", Some(retrieval(true, false, Some(1000)))),   // endpoint, k=1000.
+            mk("s4", Some(retrieval(false, false, Some(5)))),     // NO endpoint ⇒ inert.
+        ];
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri(&foaf("knows")),
+            var("o"),
+        )]);
+        let sel = select_sources(&bgp, &sources);
+        let order: Vec<usize> = sel[0].candidates.iter().map(|c| c.source).collect();
+        assert_eq!(
+            order,
+            vec![2, 3, 1, 0, 4],
+            "declared endpoints first (ascending k, absent k last), then index order"
+        );
+    }
+
+    // ---- The bead's inherited INVARIANT, differentially: selection WITH hints vs
+    //      WITHOUT hints yields IDENTICAL per-pattern (source, estimate) SETS — a wrong
+    //      or absent hint may reorder candidates but can NEVER change membership or an
+    //      estimate. The hinted run includes a wildly-wrong k=1 on the biggest source
+    //      and a capability on a source that cannot contribute (the hint must not
+    //      rescue it from the predicate prune).
+    #[test]
+    fn retrieval_hint_never_changes_selected_source_sets() {
+        let build = |with_hints: bool| -> Vec<SourceDescriptor> {
+            let caps: [Option<RetrievalCapability>; 3] = [
+                None,                                  // big source: no capability.
+                Some(retrieval(true, true, Some(1))),  // lying k=1 on the SMALL source.
+                Some(retrieval(true, false, Some(3))), // hint on a NON-contributor.
+            ];
+            let bases = [
+                SourceDescriptor::builder(SourceId::new("big"))
+                    .total_triples(10_000)
+                    .predicate(pred(&foaf("knows"), 5000, 1000, 900)),
+                SourceDescriptor::builder(SourceId::new("small"))
+                    .total_triples(100)
+                    .predicate(pred(&foaf("knows"), 50, 25, 20))
+                    .predicate(pred(&foaf("name"), 50, 50, 45)),
+                SourceDescriptor::builder(SourceId::new("other"))
+                    .total_triples(10)
+                    .predicate(pred("http://ex/unrelated", 10, 10, 10)),
+            ];
+            bases
+                .into_iter()
+                .zip(caps)
+                .map(|(b, cap)| match cap {
+                    Some(c) if with_hints => b.retrieval(c).build(),
+                    _ => b.build(),
+                })
+                .collect()
+        };
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri(&foaf("knows")), var("o")),
+            TriplePattern::new(var("o"), iri(&foaf("name")), var("n")),
+        ]);
+        let with = select_sources(&bgp, &build(true));
+        let without = select_sources(&bgp, &build(false));
+        let set = |ps: &PatternSources| {
+            let mut v: Vec<(usize, u64)> = ps
+                .candidates
+                .iter()
+                .map(|c| (c.source, c.estimated_cardinality.to_bits()))
+                .collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(with.len(), without.len());
+        for (w, wo) in with.iter().zip(&without) {
+            assert_eq!(
+                set(w),
+                set(wo),
+                "pattern {}: the hint changed the retained source set or an estimate",
+                w.pattern
+            );
+        }
+        // The hinted non-contributor stays pruned for BOTH patterns: a hint never
+        // rescues a source the capability evidence excluded.
+        for sel in [&with, &without] {
+            for ps in sel.iter() {
+                assert!(
+                    ps.candidates.iter().all(|c| c.source != 2),
+                    "a retrieval hint must not add a pruned source"
+                );
+            }
+        }
+        // Ordering IS allowed to differ — and does here: on pattern 0 (where both
+        // contribute) the (lying) k=1 hint pulls the small source ahead of the big one
+        // in the hinted run only. Same SET, different order — exactly the contract.
+        let order = |ps: &PatternSources| -> Vec<usize> {
+            ps.candidates.iter().map(|c| c.source).collect()
+        };
+        assert_eq!(order(&with[0]), vec![1, 0], "hinted endpoint first");
+        assert_eq!(order(&without[0]), vec![0, 1], "index order without hints");
     }
 
     // ---- Per-pattern independence: in a multi-pattern BGP the selection is computed
