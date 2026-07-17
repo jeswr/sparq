@@ -8,8 +8,9 @@
 //! 1. `--citations` succeeds, selects the `FINDING_PROVENANCE` canned query
 //!    (executed SPARQL surfaced on stderr), prints rendered `[source]` citations
 //!    on stdout and the measured metric summary on stderr.
-//! 2. `--citations --json` and `--citations --query/--sparql …` are rejected
-//!    with a non-zero exit, per the documented incompatibilities.
+//! 2. `--citations --json`, `--citations --query/--sparql …` and
+//!    `--citations --arg …` are rejected with a non-zero exit, per the
+//!    documented incompatibilities.
 //! 3. `--citations --sparql-only` prints the executed SPARQL without running it.
 //!
 //! [FABLE-5] 🤖 SPARQ agent — pins the CLI mode contract for the citation renderer.
@@ -105,6 +106,22 @@ fn citations_rejects_query_and_sparql_modes() {
             extra[0]
         );
     }
+}
+
+/// `--citations --arg <value>` must be rejected: the finding-provenance query is
+/// unparameterised, so a passed argument would otherwise be silently discarded.
+#[test]
+fn citations_rejects_arg() {
+    let out = pkg_query(&["--citations", "--arg", "sq-8thu"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "--citations --arg must exit non-zero; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("takes no --arg"),
+        "rejection must explain that --citations is unparameterised: {stderr}"
+    );
 }
 
 /// `--citations --sparql-only` surfaces the executed SPARQL without running it:

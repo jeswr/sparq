@@ -67,7 +67,8 @@ OPTIONS:
   --sparql <query>   run a raw SPARQL SELECT/ASK string
   --citations        run the finding-provenance canned query and render each
                      Finding with its [source] citation + the citation metrics
-                     (resolution rate, fabricated count) — sq-2489d.11
+                     (resolution rate, fabricated count) — sq-2489d.11; not
+                     combinable with --query/--sparql/--arg/--json
   --extra-graph <p>  load an extra Turtle file alongside the PKG before querying
                      (repeatable; e.g. an FO overlay — epic sq-mztg8 Metric 1).
                      Its triples participate in --close.
@@ -144,14 +145,21 @@ fn run(args: &[String]) -> Result<(), String> {
     }
 
     // Resolve the SPARQL to run. --citations is its own mode: it always runs the
-    // finding-provenance canned query, so it cannot be combined with --query/--sparql
-    // (and --json stays the nl_tool envelope, which has no citation fields).
+    // (unparameterised) finding-provenance canned query, so it cannot be combined with
+    // --query/--sparql/--arg (and --json stays the nl_tool envelope, which has no
+    // citation fields).
     let sparql: String = if citations {
         if query_name.is_some() || raw_sparql.is_some() {
             return Err("--citations runs the finding-provenance canned query; do not combine it with --query/--sparql".into());
         }
         if json {
             return Err("--citations has no --json form (the NL-tool envelope carries no citation fields)".into());
+        }
+        if arg.is_some() {
+            return Err(
+                "--citations takes no --arg (the finding-provenance query is unparameterised)"
+                    .into(),
+            );
         }
         canned::FINDING_PROVENANCE.render(None)
     } else {
