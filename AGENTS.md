@@ -484,7 +484,9 @@ no network); the Python close-script carries a `--self-test`.
 
 - **`.github/workflows/bead-autoclose.yml` + `scripts/ci-close-merged-beads.py`**
   (sq-84a8; issue-native since #2475) — the **durable** auto-close-on-merge. On a merged PR
-  (`pull_request: [closed]` gated on `merged == true` — the same shape as `flow-on.yml`),
+  (`pull_request_target: [closed]` gated on `merged == true` — base-repo context so the
+  `issues: write` token survives fork PRs; safe because the job checks out pinned `main`
+  and never executes PR-controlled code),
   it extracts the `sq-XXXX(.NN)` bead token(s) from the PR title + merge-commit subject and
   closes the **migrated GitHub issue** each bead maps to (resolved via the migration's
   `<!-- bd-id:sq-… -->` body marker; `gh issue close --reason completed`, plain
