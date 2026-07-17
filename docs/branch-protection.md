@@ -176,6 +176,29 @@ When a new ratchet or gate is added to a CI workflow it is covered
 automatically (no ruleset edit needed); update the informational table above so reviewers
 keep an accurate map.
 
+### Omnibus batching (merge-queue overflow)
+
+The merge queue on `main` drains individually-armed worker PRs up to its per-window cap
+(`max_entries_to_merge: 8`). When **more than 8** reviewed worker PRs (open `sparq-agent/*`
+heads carrying `review:pass` with an active auto-merge arm by `app/sparq-orchestrator`)
+are waiting at once, the scheduled/event-driven batcher
+([`scripts/batch-merge.py`](../scripts/batch-merge.py), run by
+[`.github/workflows/batch-merge.yml`](../.github/workflows/batch-merge.yml)) folds the
+overflow — everything beyond the 8 lowest-numbered PRs, at least 2 constituents — into one
+`sparq-omnibus/<utcstamp>` integration PR (fresh off `main`, sequential `--no-ff` merges;
+a conflicting constituent is skipped and stays individually armed) and arms it so a single
+queue slot lands the whole batch; the omnibus body carries `Closes #` refs for every
+constituent's issue, and once it merges the batcher closes each contained constituent PR.
+The `sparq-omnibus/` prefix (and the absence of any `review:*` label) keeps these PRs out
+of the registry's worker-review enumeration, which only admits `sparq-agent/issue-<n>-…`
+heads. A failed or conflicting omnibus is simply closed and its branch deleted —
+constituents remain individually armed, so the failure mode is "no worse than unbatched"
+(bisection is a tracked v2). The same workflow's `ring` job fires on every push to `main`
+and, when the `REGISTRY_RING_TOKEN` secret is configured, pokes the
+`jeswr/agent-account-registry` dispatcher so freed capacity is picked up immediately
+(fail-soft: without the secret it skips with a notice and the registry cron is the
+backstop). The batcher is **not** a required check and never runs on a PR head commit.
+
 > All third-party GitHub Actions across `.github/workflows/*.yml` are **pinned by full
 > commit SHA** (with a trailing `# vX.Y.Z` comment that Dependabot follows), resolving
 > the Scorecard `Pinned-Dependencies` alerts. The one documented nuance:
