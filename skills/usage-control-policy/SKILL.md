@@ -435,5 +435,6 @@ self-skips cleanly when the fetched dir is absent. Run:
 
 - Crate README: [`crates/sparq-policy/README.md`](../../crates/sparq-policy/README.md)
 - Design record: `research/feature-research-odrl-policy.md` (epic sq-3183)
+- Enforcement consumers: `sparq-server`'s opt-in `/authz/*` ODRL lane and `sparq-lws-core`'s opt-in read/query gate seam (`authz::odrl`, `LdpState::set_odrl_gate` — deny-overrides / permit-extends over WAC), both behind an `odrl-authz` feature ([SONNET-4.6] sq-elg47)
 - Sibling access-control skill: [`skills/http-server`](../http-server/SKILL.md) (Solid WAC/ACP via `sparq-solid`)
 - W3C [ODRL Information Model 2.2](https://www.w3.org/TR/odrl-model/) · [Formal Semantics](https://w3c.github.io/odrl/formal-semantics/)

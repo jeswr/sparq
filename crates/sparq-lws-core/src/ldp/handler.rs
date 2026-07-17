@@ -172,6 +172,12 @@ pub struct LdpState<S: Store> {
     /// `SOLID_SERVER_ACL_CACHE_CAPACITY=0` ([`AclCache::disabled`]) yields byte-identical pre-cache
     /// behaviour. Configured at router assembly via [`set_acl_cache`](Self::set_acl_cache).
     pub acl_cache: AclCache,
+    /// [SONNET-4.6] sq-elg47: the opt-in ODRL policy gate consulted AFTER the WAC decision on the
+    /// read/query path (deny-overrides, permit-extends — see [`crate::authz::odrl`]). `None` (the
+    /// default) is behaviour-identical to the feature being off; attached at router assembly via
+    /// [`set_odrl_gate`](Self::set_odrl_gate).
+    #[cfg(all(feature = "odrl-authz", not(target_arch = "wasm32")))]
+    pub odrl_gate: Option<std::sync::Arc<dyn crate::authz::odrl::OdrlGate>>,
     /// The notification-discovery `Link` header VALUES (`describedby` + `solid:storageDescription`,
     /// both → the storage-description doc), PRECOMPUTED ONCE from `base_url` at construction.
     ///
@@ -253,6 +259,8 @@ impl<S: Store> LdpState<S> {
             // Default-on: the ACL cache is enabled at the default capacity. `main.rs` overrides this
             // from `SOLID_SERVER_ACL_CACHE_CAPACITY` at router assembly (`=0` ⇒ disabled).
             acl_cache: AclCache::new(crate::acl_cache::DEFAULT_ACL_CACHE_CAPACITY),
+            #[cfg(feature = "odrl-authz")]
+            odrl_gate: None,
             discovery_link_values,
         }
     }
@@ -268,6 +276,13 @@ impl<S: Store> LdpState<S> {
     /// capacity / disable it). The default constructors already enable it at the default capacity.
     pub fn set_acl_cache(&mut self, acl_cache: AclCache) {
         self.acl_cache = acl_cache;
+    }
+
+    /// [SONNET-4.6] sq-elg47: attach the ODRL read/query gate (router assembly / embedder seam).
+    /// The default (no gate) is behaviour-identical to the `odrl-authz` feature being off.
+    #[cfg(all(feature = "odrl-authz", not(target_arch = "wasm32")))]
+    pub fn set_odrl_gate(&mut self, gate: std::sync::Arc<dyn crate::authz::odrl::OdrlGate>) {
+        self.odrl_gate = Some(gate);
     }
 
     /// The server's public base URL. The read accessor for the (now-private) `base_url` field — used
@@ -380,7 +395,7 @@ impl<S: Store> LdpState<S> {
         let candidates = wac.read_plan_candidates(&target.iri);
         let acl_iris: Vec<String> = candidates.iter().map(|c| c.acl.clone()).collect();
         let plan = self.store.read_plan(&target.iri, &acl_iris).await?;
-        match wac
+        let decision = wac
             .authorize_read_planned(
                 required,
                 token.web_id.as_deref(),
@@ -388,11 +403,59 @@ impl<S: Store> LdpState<S> {
                 &candidates,
                 &plan.acls,
             )
-            .await?
-        {
+            .await?;
+        // [SONNET-4.6] sq-elg47: compose the opt-in ODRL gate's verdict AFTER the WAC decision
+        // (deny-overrides, permit-extends — see `crate::authz::odrl`). Compiled out entirely when
+        // the `odrl-authz` feature is off; an unattached gate leaves the decision untouched.
+        #[cfg(all(feature = "odrl-authz", not(target_arch = "wasm32")))]
+        let decision =
+            self.compose_odrl_read(&target.iri, required, token.web_id.as_deref(), decision);
+        match decision {
             ReadDecision::Allow(perms) => Ok((perms, plan.target)),
             ReadDecision::Unauthenticated => Err(self.unauthenticated()),
             ReadDecision::Forbidden => Err(ServerError::Forbidden),
+        }
+    }
+
+    /// [SONNET-4.6] sq-elg47: compose the attached ODRL gate's verdict with the WAC read decision
+    /// for `target_iri` — deny-overrides (a [`OdrlVerdict::Deny`](crate::authz::odrl::OdrlVerdict)
+    /// beats any static WAC grant, keeping the 401-vs-403 split on `web_id`), permit-extends (a
+    /// `Permit` admits the read even where WAC grants nothing, ONLY when the required mode is
+    /// `Read` — it never widens the `.acl`⇒Control requirement; the resulting advertisement is
+    /// read-scoped, `user=read` with no public modes — the fail-closed direction, matching the
+    /// server ODRL lane's read-scoped advertisement rule). `NotApplicable` — or no gate attached —
+    /// leaves the WAC decision unchanged.
+    #[cfg(all(feature = "odrl-authz", not(target_arch = "wasm32")))]
+    fn compose_odrl_read(
+        &self,
+        target_iri: &str,
+        required: AccessMode,
+        web_id: Option<&str>,
+        wac: ReadDecision,
+    ) -> ReadDecision {
+        use crate::authz::odrl::OdrlVerdict;
+        let Some(gate) = self.odrl_gate.as_deref() else {
+            return wac;
+        };
+        match gate.decide_read(target_iri, web_id) {
+            OdrlVerdict::NotApplicable => wac,
+            OdrlVerdict::Deny => {
+                if web_id.is_none() {
+                    ReadDecision::Unauthenticated
+                } else {
+                    ReadDecision::Forbidden
+                }
+            }
+            OdrlVerdict::Permit => match wac {
+                allowed @ ReadDecision::Allow(_) => allowed,
+                _ if required == AccessMode::Read => {
+                    ReadDecision::Allow(crate::authz::EffectivePermissions {
+                        user: [AccessMode::Read].into_iter().collect(),
+                        public: std::collections::BTreeSet::new(),
+                    })
+                }
+                denied => denied,
+            },
         }
     }
 
