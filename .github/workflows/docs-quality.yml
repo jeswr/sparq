@@ -180,7 +180,7 @@ jobs:
           # dirs to land exactly on the same set markdownlint's config globs (49 files).
           git ls-files '*.md' \
             ':!:research/**' ':!:zk/**' ':!:bench/**' ':!:js/**' \
-            ':!:.beads/**' ':!:.claude/**' ':!:.github/**' \
+            ':!:.claude/**' ':!:.github/**' \
             ':!:vendor/**' ':!:**/vendor/**' | sort -u > /tmp/doc-md.txt
           echo "Scanning $(wc -l < /tmp/doc-md.txt) markdown file(s) for typos:"
           typos --file-list /tmp/doc-md.txt
@@ -361,19 +361,6 @@ jobs:
         run: bash scripts/worktree-gc.sh --dry-run-self-test
       - name: Self-test worktree-gc.sh (completed-reclaim opt-in + workflow-only + in-use guard, end-to-end)
         run: bash scripts/tests/test_worktree_gc_completed.sh
-      # [OPUS-4.8] sq-13uyp: the per-tick merged-bead reconcile sweep — closes bd-OPEN beads
-      # whose fix already MERGED so they stop wasting frontier dispatches (it COMPLEMENTS
-      # push-frontier's open-PR exclusion, sq-7mwun). Its correctness rests on a conservative
-      # EXACT-token match (the `sq-ixc3.1` must-NOT-match-`sq-ixc3.11` guard) and a
-      # never-auto-close gate for epics / umbrella-parents / needs:user beads — a regression in
-      # either would mass-close or mis-close real backlog, so both the pure self-test AND the
-      # end-to-end harness run HARD here, before the sweep is trusted.
-      - name: shellcheck reconcile-merged-beads.sh + its self-test
-        run: shellcheck scripts/reconcile-merged-beads.sh scripts/tests/test_reconcile_merged_beads.sh
-      - name: Self-test reconcile-merged-beads.sh (boundary match + gating, hermetic)
-        run: bash scripts/reconcile-merged-beads.sh --dry-run-self-test
-      - name: Self-test reconcile-merged-beads.sh (exact-match + gating + apply/idempotency, end-to-end)
-        run: bash scripts/tests/test_reconcile_merged_beads.sh
       # [OPUS-4.8] sq-neq8: hermetic self-test of the coverage-ratchet gate's PURE logic
       # (max-remeasure aggregation sq-x4jy + floor-monotonicity sq-neq8) so a regression in
       # the gate ITSELF is caught here, before the gate is trusted to guard real coverage.

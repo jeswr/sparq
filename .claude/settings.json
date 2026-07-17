@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/bd-session-context.sh",
+            "command": "bash scripts/session-context.sh",
             "timeout": 15
           }
         ]

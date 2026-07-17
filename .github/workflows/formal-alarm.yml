@@ -10,8 +10,8 @@
 # older than `max_verdict_age_hours` (48h = two missed nightly verdicts) REDs this run and
 # files ONE deduped, self-identified SPARQ-agent issue (label `formal-alarm`, keyed by a
 # `<!-- formal-alarm-key: … -->` body marker — the selection-alarm/flow-on idempotency
-# mechanism). The orchestrator reconciles alarm issues into beads out-of-band (we never
-# touch `bd`/`.beads` in CI — same rule as flow-on.yml / selection-alarm.yml).
+# mechanism). GitHub issues are the sole tracker (beads was retired 2026-07-17) — the
+# alarm issue IS the tracked finding (same posture as flow-on.yml / selection-alarm.yml).
 #
 # NOT A GATE (same posture as selection-alarm.yml): scheduled on main, files issues,
 # blocks NO merge. Its job name carries no advisory/informational token, but it never

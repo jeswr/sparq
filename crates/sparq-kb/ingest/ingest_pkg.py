@@ -304,7 +304,11 @@ def project_skills(skills_dir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--beads", required=True)
+    # OPTIONAL since the 2026-07-17 bd->issues cutover: `.beads/issues.jsonl` no longer
+    # exists (GitHub issues are the sole tracker). When --beads is omitted or the file is
+    # absent, the pkg:Task projection is simply skipped. Projecting the issue tracker into
+    # the PKG is a follow-up (issue-native project_tasks).
+    ap.add_argument("--beads", default=None)
     ap.add_argument("--skills-dir", required=True)
     ap.add_argument("--findings", default=None,
                     help="LEGACY: a pre-rendered findings .ttl to append verbatim "
@@ -339,7 +343,12 @@ def main():
         '"hand-authored tier -- the human-curated PKG (ingest_pkg.py projector output)"@en .\n'
     )
     parts = [header, PREFIXES, tier_stamp, "\n# === Tasks (mechanical bd projection) ===\n"]
-    bead_lines, bstats = project_beads(args.beads)
+    # Post-cutover the bd tracker is gone; skip the Task projection when there is no beads file.
+    if args.beads and os.path.exists(args.beads):
+        bead_lines, bstats = project_beads(args.beads)
+    else:
+        bead_lines, bstats = [], {"tasks": 0, "deps_emitted": 0, "stale_excluded": 0,
+                                  "stale": [], "research_docs": 0, "spec_links": 0}
     parts.extend(bead_lines)
     parts.append("\n\n# === Sources + Techniques (skills front-matter parse) ===\n")
     skill_lines, sstats = project_skills(args.skills_dir)

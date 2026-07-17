@@ -9,9 +9,8 @@
 # and opens/updates idempotent `drift` + `auto` GitHub issues for each item.
 #
 # This is NOT a PR gate: it runs on a schedule (and on-demand), never on a
-# pull_request, and never blocks a merge. It only files follow-on issues; the
-# orchestrator reconciles them into beads out-of-band (we do NOT touch
-# `bd` / `.beads/` in CI).
+# pull_request, and never blocks a merge. It only files follow-on issues, which
+# are the sole tracker's tracked unit of work (beads was retired 2026-07-17).
 name: drift-scan
 
 on:

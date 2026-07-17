@@ -7,7 +7,6 @@ on:
       - 'crates/sparq-kb/ingest/**'
       - 'crates/sparq-kb/ontology/**'
       - 'crates/sparq-kb/shapes/**'
-      - '.beads/**'
       - 'skills/**'
   workflow_dispatch: {}
 
@@ -36,7 +35,6 @@ jobs:
       - name: Run ingest
         run: |
           python3 crates/sparq-kb/ingest/ingest_pkg.py \
-              --beads .beads/issues.jsonl \
               --skills-dir skills \
               --findings-yamlld crates/sparq-kb/ingest/agents-findings.yaml.ld \
               --out crates/sparq-kb/ingest/pkg-instances.ttl

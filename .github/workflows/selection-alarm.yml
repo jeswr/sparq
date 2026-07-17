@@ -6,9 +6,9 @@
 # change-based selection (scripts/ci_select.py) SKIPPED in the PRs landed since
 # the last green nightly. Any intersection is prima-facie a selection soundness
 # bug (design §2) — scripts/ci_selection_alarm.py files a self-identified SPARQ
-# agent GitHub issue naming the offending job(s) + the suspect PRs. The
-# orchestrator reconciles those issues into P1 beads (we never touch `bd`/`.beads`
-# in CI — same rule as flow-on.yml).
+# agent GitHub issue naming the offending job(s) + the suspect PRs. GitHub issues
+# are the sole tracker (beads was retired 2026-07-17) — the alarm issue (label it
+# priority:P1) IS the tracked finding (same rule as flow-on.yml).
 #
 # NOT A GATE (design §6.1 "fail-open"): this runs AFTER the nightly completes via
 # `workflow_run`, files issues, and blocks NO merge. Its name carries no
