@@ -278,9 +278,11 @@ impl TypeConstraints {
 /// **What the ON arm does and does not buy:** a quoted term is embedded as a *node* — its
 /// `rdf:reifies` edge(s) and hub-sharing (two reifiers of the same claim share one content-
 /// addressed quoted-term node) become graph structure the trainer sees. The term's *compositional*
-/// `(s, p, o)` content stays opaque (a deterministic/learned statement encoder is a separate,
-/// measurement-gated follow-up). **No accuracy claim is made** — the switch exists so the
-/// quoted-term-visibility axis is measurable at all ([`crate::eval::run_quoted_ablation`]).
+/// `(s, p, o)` content stays opaque to the *trainer*; the deterministic statement-level encoding
+/// derived from a trained model is `TrainedModel::encode_quoted_term` (sq-1e5kk), a separate
+/// representation whose adoption stays measurement-gated. **No accuracy claim is made** — the
+/// switch exists so the quoted-term-visibility axis is measurable at all
+/// ([`crate::eval::run_quoted_ablation`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TermScope {
     /// Named + blank nodes only — the ablation **OFF** baseline (and the default). Reduces

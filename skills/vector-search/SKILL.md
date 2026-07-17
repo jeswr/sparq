@@ -963,6 +963,17 @@ membership and the ranking pool remain atomic in both arms, so the comparison ch
 visibility. `synthetic_rdf12_parts` exposes the generated fixture partitions when a caller needs to
 audit them. This is a measurement surface, not an accuracy claim.
 
+**Statement-level quoted-triple encoding is compositional and derived (sq-1e5kk).** [SONNET-4.6]
+`TrainedModel::encode_quoted_term(&graph, id)` (and the unpacked forms `encode_statement(h, r, t)` /
+`encode_statement_rows`) returns a triple term's per-component interaction vector composed from
+its `(s, p, o)` constituents' trained rows — DistMult `h∘r∘t` (sums to the score), ComplEx
+`h∘r∘conj(t)` in real/imaginary halves (the real half sums to the score) — so the quoted *content*
+is reachable even under the default `IriBlank` scope, where the term itself has no node row. It is
+deterministic and derived (no new parameters, one level deep, never recursive), it lives in the
+model's **interaction space** (never compare it against entity rows or store it beside them), and it
+leaves the node-level opaque-row path above intact. No accuracy claim — adopting either
+representation stays measurement-gated.
+
 ### 14b. Provenance-weighting `w(t)` — weight training by PROV-O/DQV quality (opt-in, feature = `structure`; measurement under `kge`)
 
 <!-- [OPUS-4.8] sq-2489d.4 (epic sq-2489d, GenAI-KB Phase 4; design research/provenance-driven-genai-kb.md §USE-1 / §5 Phase 4). -->

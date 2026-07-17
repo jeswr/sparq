@@ -1617,8 +1617,9 @@ impl Rdf12Parts {
 /// node*: this slice buys the trainer **structural** visibility only — `rdf:reifies` edges and
 /// content-addressed hub sharing (`sparq-core` interns triple terms by their component ids, so
 /// two reifiers of the same claim share ONE quoted-term node) — **not** compositional access to
-/// the quoted `(s, p, o)` content (a statement encoder is a separate, measurement-gated
-/// follow-up). Under [`TermScope::Embeddable`], `src ←assertedBy− stmt −reifies→ tt ←reifies−
+/// the quoted `(s, p, o)` content (that is the separate, derived statement-level encoder
+/// [`crate::train::TrainedModel::encode_quoted_term`], whose adoption stays measurement-gated).
+/// Under [`TermScope::Embeddable`], `src ←assertedBy− stmt −reifies→ tt ←reifies−
 /// stmt′ −assertedBy→ src′` paths connect sources through shared-claim hubs; whether that lifts
 /// the pre-registered target is exactly what the ablation measures — **no lift is promised, and
 /// a synthetic win does not extrapolate off-corpus**.
