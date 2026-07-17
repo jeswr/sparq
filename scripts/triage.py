@@ -58,7 +58,11 @@ def triage(labels, issue_type="task", trusted=True):
         # [OPUS-4.8] single-role invariant: strip any OTHER role:* labels so the dispatcher's
         # resolve() never sees an ambiguous role set (a security keyword may override an explicit role).
         remove |= {lb for lb in labels if lb.startswith("role:") and lb != f"role:{role}"}
-    ready = bool(role) and _valid_priority(labels) and "needs:user" not in labels
+    # [OPUS-4.8] an epic is a tracking umbrella, never dispatchable — it must not gain status:ready
+    # (the readiness engine also excludes kind:epic as the hard dispatch gate; this keeps the tracker
+    # honest so an epic never *shows* as ready).
+    ready = (bool(role) and _valid_priority(labels) and "needs:user" not in labels
+             and "kind:epic" not in labels)
     if ready:
         add.add("status:ready")
         remove.add("status:untriaged")
@@ -98,6 +102,8 @@ def _self_test():
     r = triage(["priority:P2", "role:site", "area:site"], "feature")
     chk("explicit role respected", (r["role"], "role:impl" in r["add"], any(x.startswith("role:") for x in r["remove"])),
         ("site", False, False))
+    # [OPUS-4.8] an epic is never dispatchable, even with a full priority+role label-set
+    chk("epic not ready", triage(["priority:P1", "role:impl", "kind:epic"], "epic")["ready"], False)
     # single-role invariant: a double-labelled issue is stripped to one role
     r = triage(["priority:P2", "role:impl", "role:site", "area:site"], "feature")
     chk("single-role invariant", (len([x for x in (({"role:impl", "role:site"} | r["add"]) - r["remove"]) if x.startswith("role:")]) == 1), True)

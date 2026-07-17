@@ -27,6 +27,9 @@ import sys
 
 GATE_LABELS = ("needs:", "trust:untrusted")
 BUSY_STATUS = {"status:in-progress", "status:blocked", "status:deferred", "status:untriaged"}
+# [OPUS-4.8] an epic is a tracking umbrella (its children are the work) — never dispatchable, even
+# with a full ready label-set + zero blockers. Excluded here so a worker never "implements" an epic.
+NON_DISPATCHABLE = "kind:epic"
 GLOBAL = "__global__"  # the cross-cutting partition (serializes against everything)
 _PRIO = re.compile(r"^priority:P([0-4])$")   # only P0..P4 are valid
 _PKG = re.compile(r"^area:(.+)$")
@@ -78,6 +81,8 @@ def compute_ready(issues, in_progress_packages=None):
         L = labels_of(it)
         if "status:ready" not in L:          # positive attestation required
             continue
+        if NON_DISPATCHABLE in L:            # epics are tracking umbrellas, not work items
+            continue
         if is_gated(L) or is_busy(L):
             continue
         p = valid_priority(L)
@@ -120,6 +125,7 @@ def _self_test():
         iss(10, R + ["priority:P1", "area:sparq-fedplan", "status:in-progress"]),# in-progress fedplan
         iss(11, R + ["priority:P4"]),                                            # no package -> global
         iss(12, R + ["priority:P1", "area:sparq-hdt"]),                          # hdt (free)
+        iss(13, R + ["priority:P0", "area:sparq-text", "kind:epic"]),            # epic -> excluded
     ]
     ok = True
 
@@ -131,10 +137,12 @@ def _self_test():
 
     ready = compute_ready(F)
     # eligible: 1,2,3,12 (+11 global). 4 gated, 5 blocked, 6 closed, 7 untrusted, 8 no-ready,
-    # 9 ambiguous-prio, 10 in-progress. Order by prio: #2(P0 core) -> #3(P1 engine) -> #12(P1 hdt)
-    # -> #11(P4 global). core taken by #2 so #1(P2 core) excluded. #11 global: only selectable if
-    # nothing taken -> excluded (core/engine/hdt already taken).
+    # 9 ambiguous-prio, 10 in-progress, 13 epic (kind:epic → excluded despite a P0 ready label-set).
+    # Order by prio: #2(P0 core) -> #3(P1 engine) -> #12(P1 hdt) -> #11(P4 global). core taken by #2
+    # so #1(P2 core) excluded. #11 global: only selectable if nothing taken -> excluded.
     check("ready order", [i["number"] for i in ready], [2, 3, 12])
+    # a P0 epic with an otherwise-perfect ready label-set must NOT dispatch (tracking umbrella):
+    check("epic excluded", 13 in [i["number"] for i in ready], False)
     # a lone global issue with an empty board is selectable:
     check("lone global", [i["number"] for i in compute_ready([iss(11, R + ["priority:P4"])])], [11])
     # global blocks everything else:

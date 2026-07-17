@@ -73,6 +73,12 @@ def issue_labels(bead):
     if isinstance(p, int) and 0 <= p <= 4:
         out.add(f"priority:P{p}")
     out.add(f"role:{role_for(bead)}")
+    # [OPUS-4.8] an epic is a tracking/umbrella issue, never a dispatchable work item — mark it
+    # `kind:epic` so the readiness engine excludes it (else a worker would try to "implement" the
+    # epic itself, producing a garbage PR). 57 of the 893 open beads are epics, 41 at P1 — they would
+    # otherwise be selected FIRST by priority. Enforcement is in ready-issues.py; this is the signal.
+    if str(bead.get("issue_type", "")).lower() == "epic":
+        out.add("kind:epic")
     return sorted(out)
 
 
