@@ -354,6 +354,43 @@ class TestSelectionSemantics(unittest.TestCase):
         code, _ = run(tiny_cfg(), [runs])
         self.assertEqual(code, 1)
 
+    def test_cancelled_select_forgiven_by_same_name_success(self):
+        # [OPUS-4.8] sq-fmx4u.3 hardening: the 2026-07-17 fleet jam. Under the
+        # draft-tier + review-pipeline label churn a head SHA accretes many
+        # concurrency-cancel rounds; a doomed select INSTANCE (cancelled) can
+        # out-timestamp the winning run's already-concluded select SUCCESS, so
+        # forgive_superseded's strictly-later rule leaves a residual cancelled
+        # select. A same-normalized-name SUCCESS on the SHA proves the selection
+        # was computed soundly (select is a deterministic pure pre-job over the
+        # diff), so the gate must NOT RED over a provably-sound selection.
+        runs = [R(SELECT_NAME, conclusion="success", started="2026-01-01T00:00:10Z", rid=2),
+                R(SELECT_NAME, conclusion="cancelled", started="2026-01-01T00:00:20Z", rid=3),
+                R("W3C conformance", conclusion="skipped"),
+                GREEN]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 0, "a cancelled select superseded by a same-name success must not RED")
+        self.assertIn("PASSED", out)
+
+    def test_cancelled_select_with_no_success_still_reds(self):
+        # The forgiveness is narrow: a cancelled select with NO successful
+        # same-name sibling is still an unobservable selection and REDs.
+        runs = [R(SELECT_NAME, conclusion="cancelled"),
+                R("x", conclusion="skipped"), GREEN]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1)
+        self.assertIn("selection pre-job", out)
+
+    def test_failure_select_reds_even_with_a_success_sibling(self):
+        # Only cancelled/stale race losers are forgiven — a genuine `failure`
+        # select still REDs regardless of any success sibling (a real selection
+        # failure is never masked by a concurrency winner).
+        runs = [R(SELECT_NAME, conclusion="success"),
+                R(SELECT_NAME, conclusion="failure"),
+                R("x", conclusion="skipped"), GREEN]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1)
+        self.assertIn("selection pre-job", out)
+
     def test_select_name_detection_contract(self):
         # The name-detection contract with .github/workflows/ci-select.yml (also
         # pinned cross-file by scripts/tests/test_ci_select_wiring.py).

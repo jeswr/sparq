@@ -222,18 +222,41 @@ def forgive_superseded(runs: list[dict]) -> tuple[list[dict], list[dict]]:
     forgiven (a genuine failure/timed_out always gates, no matter what runs
     later), and a cancellation with NO successor still fails the gate. Call this
     over the RAW list (self-run included) so THIS gate run's own fresh `gate`
-    check-run can supersede its cancelled predecessor."""
+    check-run can supersede its cancelled predecessor.
+
+    [OPUS-4.8] sq-fmx4u.3 hardening (2026-07-17 fleet jam): for the change-based
+    SELECTION pre-job (is_select) the successor need only be a same-normalized-name
+    SUCCESS ANYWHERE on the SHA, not one that is STRICTLY LATER. Rationale: select
+    is a deterministic pure function of the SHA's diff, so a single same-name
+    success PROVES the selection was computed soundly — the per-instance timestamp
+    ordering of its concurrency-cancel race-loser siblings is irrelevant. Under the
+    draft-tier + review-pipeline label churn (#2537/#2546) a head SHA accretes many
+    cancel rounds whose doomed select instances can out-timestamp the winning run's
+    already-concluded select success; the strictly-later rule then left a residual
+    cancelled select that RED the gate over a provably-sound selection, escalating
+    ~20 review:pass PRs to needs:user and starving the merge train. SAFETY is
+    unchanged: this widening is scoped to select ONLY (an idempotent pre-job, never
+    a leg that produces test evidence), only cancelled/stale are ever forgiven, and
+    a genuine `failure` select or a cancelled select with NO successful same-name
+    sibling still fails the gate. Non-select legs keep the strictly-later rule (a
+    real leg's earlier stale success must never forgive its later cancellation)."""
     kept: list[dict] = []
     forgiven: list[dict] = []
     for r in runs:
         if r.get("conclusion") in _SUPERSEDABLE:
             key = normalized_name(r.get("name", ""))
             mine = _order_key(r)
+            select_leg = is_select(r.get("name", ""))
             if any(
                 o is not r
                 and normalized_name(o.get("name", "")) == key
-                and _order_key(o) > mine
                 and o.get("conclusion") not in _SUPERSEDABLE
+                and (
+                    # select: ANY same-name success proves a sound selection;
+                    # every other leg: only a STRICTLY-LATER re-run supersedes.
+                    (select_leg and o.get("conclusion") == "success")
+                    or _order_key(o) > mine
+                )
                 for o in runs
             ):
                 forgiven.append(r)
@@ -438,6 +461,10 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
     excluded = total - len(gating)
     # Selection pre-job health — searched over ALL runs (not just gating) so a
     # hypothetical advisory-renamed select could still never green-light a skip.
+    # NB superseded-cancelled select INSTANCES are already dropped upstream by
+    # forgive_superseded (including the deterministic-select same-name-success
+    # race-loser rule, sq-fmx4u.3 hardening), so any cancelled select that
+    # SURVIVES to here has NO successful same-name sibling and rightly REDs.
     select_runs = [r for r in runs if is_select(r.get("name", ""))]
     select_ok = all(r.get("conclusion") == "success" for r in select_runs)
     skipped_ct = sum(1 for r in gating if r.get("conclusion") == "skipped")
