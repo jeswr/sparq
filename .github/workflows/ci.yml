@@ -1231,6 +1231,15 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
+    env:
+      # Clear the workflow-level -fuse-ld=lld for THIS job only: the floor
+      # toolchain (1.88) does not supply rustc's ld.lld shim path the way the
+      # current preinstalled stable does, and the runner image ships no lld —
+      # so on 1.88 the flag dies deterministically ("collect2: cannot find
+      # 'ld'", 3/3 on this PR once the gate stopped being vacuous). Plain GNU
+      # ld is fine here: this lane is `cargo check` (only build scripts and
+      # proc-macros link) and its meaning is the VERSION floor, not link speed.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Rust (pinned MSRV toolchain 1.88)
