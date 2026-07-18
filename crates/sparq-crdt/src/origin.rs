@@ -185,6 +185,19 @@ impl Replica {
     /// the delta must be well formed, and a delta dot already known under a
     /// *different* quad is rejected.
     ///
+    /// The reuse scan consults only the live store because that is the whole
+    /// enforceable surface: normative state (`CRDT-STATE-1`) is `(store,
+    /// context)`, so once a quad's dots are removed the dot-to-quad
+    /// association survives nowhere a receiver could consult. That loses no
+    /// safety — a removed dot stays in the causal context, and `CRDT-JOIN-1`
+    /// drops any store dot the receiving side's context already contains, so
+    /// a delta reusing a removed dot under another quad joins as a no-op and
+    /// can never make the forged quad visible (see
+    /// `apply_absorbs_reused_removed_dot_without_reviving_it`). The context
+    /// tombstone survives snapshots and compaction (`CRDT-JOURNAL-2`,
+    /// `CRDT-CTX-1`), so the same protection holds after catch-up. Full
+    /// no-reuse is the *origin's* durable-counter obligation (`CRDT-DOT-1`).
+    ///
     /// # Errors
     ///
     /// Returns a description of the violated invariant; local state is then
@@ -330,6 +343,35 @@ mod tests {
         let before = peer.state().clone();
         assert!(peer.apply(&forged).is_err());
         assert_eq!(*peer.state(), before); // fail closed: state unchanged
+    }
+
+    #[test]
+    fn apply_absorbs_reused_removed_dot_without_reviving_it() {
+        // Historical counterpart of the live-reuse rejection above: after an
+        // observed removal the dot-to-quad association is gone from the store,
+        // so the CRDT-WIRE-4 scan cannot reject the reuse — but the dot stays
+        // in the causal context, which CRDT-JOIN-1 treats as a tombstone, so
+        // the forged add joins as a no-op and never becomes visible.
+        let mut r = Replica::new(1);
+        let env = r.execute(&Op::InsertData(vec![q(1, 1)]));
+        let removal = r.execute(&Op::DeleteData(vec![q(1, 1)]));
+        let mut peer = Replica::new(2);
+        peer.apply(&env.to_delta()).unwrap();
+        peer.apply(&removal.to_delta()).unwrap();
+        assert!(!peer.state().is_visible(&q(1, 1)));
+        // Forge a delta reusing the removed dot under another quad.
+        let forged = Delta::from_parts(
+            std::collections::BTreeMap::from([(
+                q(7, 7),
+                std::collections::BTreeSet::from([env.adds[0].1]),
+            )]),
+            CausalContext::from_dots([env.adds[0].1]),
+        );
+        let before = peer.state().clone();
+        peer.apply(&forged).unwrap();
+        assert!(!peer.state().is_visible(&q(7, 7))); // tombstoned, not revived
+        assert_eq!(*peer.state(), before); // no-op join: state unchanged
+        peer.state().check_invariants().unwrap();
     }
 
     #[test]
