@@ -57,20 +57,38 @@
 #         exempt from the one-open-omnibus rule below); a singleton CHILD is legal —
 #         MIN_CONSTITUENTS applies to ROOT creation only, and a singleton child is
 #         exactly how a culprit gets isolated.
-#       * exactly 1 survivor: THE CULPRIT. It is NOT closed. It is disarmed
-#         (`gh pr merge --disable-auto`) + commented; it gets NO terminal label, because
-#         disarmed + gate-failure is precisely the state the registry's ci-fix dispatch
-#         admission keys on. The parent omnibus closes as in v1.
+#       * exactly 1 survivor AND the parent's head `gate` CONCLUDED in strict FAILURE:
+#         THE CULPRIT. It is NOT closed. It is commented (machine marker
+#         `sparq-omnibus-culprit:v1`), converted to DRAFT (`gh pr ready --undo`) and
+#         disarmed — in THAT order (crash safety, 6b). Draft + unarmed + review:pass is
+#         the registry's `stranded` posture, which escalates loudly to a human
+#         (needs:user). The culprit's OWN head gate stays green — head CI does not
+#         re-run when main advances, and the failure evidence lived on the now-closed
+#         child-omnibus head — so a gate-keyed ci-fix admission can never see it;
+#         stranded IS the guaranteed-closure handoff. The parent omnibus closes as in
+#         v1.
+#       * exactly 1 survivor on a NON-verdict failure (age-expiry, or a gate that
+#         concluded cancelled / timed_out): the survivor is INNOCENT until a gate
+#         convicts it — those modes are infra-shaped (queue starvation, a
+#         human-cancelled run, an authed-outage where checks never report), and under a
+#         sustained outage the bisection cascade would otherwise serially disarm the
+#         ENTIRE armed backlog, one singleton leaf at a time. v1 close only; the
+#         survivor stays individually armed (v1 graceful degradation: the queue lands
+#         or fails it on its own signal).
 #       * 0 survivors: plain close (everything already landed elsewhere).
 #       * depth >= DEPTH_CAP with >=2 survivors: v1 fallback — close, constituents stay
 #         individually armed, loud log, no same-run root rebuild.
 #     A CONFLICTING omnibus is NOT a constituent fault (main moved under it): v1 close
 #     only, never bisection — the standard close-and-recreate below rebuilds a fresh
-#     root off current main. In --hygiene-only, children cannot be created (no App
-#     token, see TOKENS), so a bisectable parent v1-closes instead; the culprit path
-#     (disarm + comment) still runs. A dying omnibus does NOT suppress a new ROOT in
-#     the same run (close-and-recreate), but freshly spawned children DO — one omnibus
-#     TREE at a time, so one bad batch can never wedge the batcher.
+#     root off current main. If the open-PR listing saturated its fetch limit
+#     (open_list_truncated), constituent liveness is unreliable — absence from the
+#     list must never convict anything — so every survivor census degrades to a v1
+#     close (no bisection, no quarantine) for that run. In --hygiene-only, children
+#     cannot be created (no App token, see TOKENS), so a bisectable parent v1-closes
+#     instead; the culprit path (comment + draft + disarm) still runs. A dying omnibus
+#     does NOT suppress a new ROOT in the same run (close-and-recreate), but freshly
+#     spawned children DO — one omnibus TREE at a time, so one bad batch can never
+#     wedge the batcher.
 #  6b. CRASH SAFETY (by construction). Batching never closes or disarms a constituent
 #     except the isolated culprit; an omnibus is an integration COPY of individually
 #     armed PRs. If a run dies between closing a failed parent and creating its
@@ -78,7 +96,14 @@
 #     the next cron builds a fresh root — no state is lost, nothing wedges. Partial
 #     child creation self-heals the same way: an orphan child is a normal open omnibus
 #     (it merges or re-enters this failure path), and the missing sibling's
-#     constituents stay individually armed and re-batch once the tree drains.
+#     constituents stay individually armed and re-batch once the tree drains. The
+#     culprit mutation order (comment -> draft -> disarm) is load-bearing: a crash or
+#     raised gh failure after only the comment leaves the culprit ARMED, so the next
+#     run re-isolates it and repeats the sequence idempotently (a duplicate comment is
+#     harmless); once the draft conversion lands, GitHub itself drops the auto-merge
+#     arm, so the terminal stranded posture is already reached even if the explicit
+#     disarm never runs. No cut point can leave a disarmed-but-unmarked PR — the arm
+#     is only ever stripped AFTER the durable breadcrumb exists.
 #  7. RE-ARM LIVENESS. GitHub DROPS the auto-merge arm when a merge group fails. Each
 #     run, an open, young (under the age bound), MERGEABLE omnibus with NO active arm is
 #     re-armed idempotently (`gh pr merge --auto`) — a transient queue failure gets
@@ -137,6 +162,17 @@ MAX_OMNIBUS_AGE_HOURS = 4
 # to a v1 close (constituents stay individually armed) instead of splitting further.
 # 2^8 = 256 constituents of headroom — far beyond any realistic armed backlog.
 DEPTH_CAP = 8
+# A CONCLUDED `gate` in any of these states makes an omnibus FAILING (close/bisect).
+# Only the strict "failure" verdict may CONVICT a singleton survivor (rule 6):
+# "cancelled" (a human-cancelled run) and "timed_out" (runner starvation) are
+# infra-shaped — the same class as age-expiry — and must never disarm a lone
+# constituent.
+GATE_FAILING_CONCLUSIONS = ("failure", "timed_out", "cancelled")
+# Open-PR listing fetch bound. If the listing SATURATES this limit it may be truncated:
+# a live constituent absent from a truncated list must never be classified as
+# closed/merged (that census feeds DESTRUCTIVE decisions — quarantine picks "the one
+# survivor"), so plan() degrades every bisection decision to a v1 close for that run.
+OPEN_PR_LIST_LIMIT = 1000
 
 OMNIBUS_PREFIX = "sparq-omnibus/"
 WORKER_BRANCH_RE = re.compile(r"^sparq-agent/")
@@ -258,22 +294,25 @@ def omnibus_age_hours(head_ref: str, now: datetime):
     return (now - created).total_seconds() / 3600.0
 
 
-def gate_concluded_failure(pr: dict) -> bool:
-    """True iff the authoritative ci-summary `gate` check has CONCLUDED in failure.
+def gate_conclusion(pr: dict):
+    """The FAILING conclusion of the authoritative ci-summary `gate` check ("failure" /
+    "timed_out" / "cancelled"), or None when the gate is missing, non-terminal, or green.
 
     Live for an omnibus because its branch/PR are pushed + created with the App token,
     so head pull_request CI (ci-summary -> `gate`) fires on it. A merge-group failure
     reports on the queue's synthetic ref instead — the age bound covers that mode.
     A missing / in-progress / queued gate is NOT a failure (never act on a non-terminal
-    gate — same posture as pr-backlog.py)."""
+    gate — same posture as pr-backlog.py). The caller distinguishes the strict
+    "failure" verdict (may convict a singleton) from the infra-shaped cancelled /
+    timed_out (close/bisect only — see GATE_FAILING_CONCLUSIONS)."""
     for c in pr.get("checks", []):
         if (c.get("name") or "").strip().lower() != "gate":
             continue
-        if (c.get("status") or "").lower() == "completed" and (
-            c.get("conclusion") or ""
-        ).lower() in ("failure", "timed_out", "cancelled"):
-            return True
-    return False
+        if (c.get("status") or "").lower() == "completed":
+            concl = (c.get("conclusion") or "").lower()
+            if concl in GATE_FAILING_CONCLUSIONS:
+                return concl
+    return None
 
 
 # --------------------------------------------------------------------------------------
@@ -378,12 +417,23 @@ def bisect_close_comment(reason: str, child_a: str, child_b: str) -> str:
 
 
 def quarantine_comment(parent_num: int, reason: str) -> str:
+    # The handoff contract is the registry's `stranded` posture (draft + unarmed +
+    # review:pass -> loud needs:user escalation), NOT its ci-fix admission: ci-fix
+    # keys on a CONCLUDED gate failure on the culprit's OWN current head, but head CI
+    # does not re-run when main advances and the failure evidence lived on the
+    # (now-closed) child-omnibus head — a quarantined culprit's own gate is green, so
+    # a gate-keyed admission can never see it. The trailing machine marker is the
+    # durable breadcrumb any enumerator can key on.
     return (
         f"{SELF_ID} — bisection isolated this PR as the sole surviving constituent of "
         f"omnibus PR #{parent_num}, which failed ({reason}). This PR is the presumptive "
-        f"CULPRIT: its auto-merge arm has been disabled, and the PR itself stays open. "
-        f"The registry's ci-fix dispatch path owns it from here — the disarmed + "
-        f"gate-failure state is exactly what that admission keys on."
+        f"CULPRIT: it is converted to DRAFT and its auto-merge arm is disabled; the PR "
+        f"itself stays open. Draft + unarmed + review:pass is the registry's `stranded` "
+        f"posture, which escalates to a human (needs:user) — this PR's own head gate is "
+        f"still green (head CI does not re-run when `main` advances; the failing "
+        f"evidence lived on the now-closed child omnibus), so the stranded escalation "
+        f"is the guaranteed-closure path.\n\n"
+        f"<!-- sparq-omnibus-culprit:v1 parent={parent_num} reason=gate-failure -->"
     )
 
 
@@ -433,6 +483,10 @@ def creation_actions(repo: str, branch: str, constituents: list, depth: int = 0,
 #   remote_omnibus_branches: ["sparq-omnibus/..."]      (live remote refs)
 #   batch_enabled: bool                                 (False = --hygiene-only: never
 #                                                        create a new omnibus)
+#   open_list_truncated: bool                           (open-PR listing saturated its
+#                                                        fetch limit: survivor censuses
+#                                                        are unreliable — degrade every
+#                                                        bisection decision to v1 close)
 # --------------------------------------------------------------------------------------
 def plan(state: dict) -> list:
     repo = state["repo"]
@@ -463,6 +517,7 @@ def plan(state: dict) -> list:
     suppress_root = False      # depth-cap fallback: no same-run rebuild of a doomed root
     quarantined = set()        # disarmed culprits — never re-batched into a new root
     can_create = state.get("batch_enabled", True)
+    truncated = state.get("open_list_truncated", False)
     empty_vs_main = state.get("empty_vs_main", {})
 
     def _survivor(num: int) -> bool:
@@ -477,9 +532,17 @@ def plan(state: dict) -> list:
     for om in open_omnibus:
         age = omnibus_age_hours(om.get("head_ref", ""), state["now"])
         bisectable = False
-        if gate_concluded_failure(om):
-            reason = "its `gate` check concluded in failure"
+        # Only a strict, CONCLUDED head-gate FAILURE may CONVICT a singleton survivor
+        # (quarantine). cancelled / timed_out / age-expiry are infra-shaped (a
+        # human-cancelled run, runner starvation, checks that never reported): they
+        # still close/bisect, but must never disarm a lone constituent — under a
+        # sustained outage that cascade would serially disarm the entire armed backlog.
+        culpable = False
+        gate_c = gate_conclusion(om)
+        if gate_c is not None:
+            reason = f"its `gate` check concluded in {gate_c}"
             bisectable = True
+            culpable = gate_c == "failure"
         elif (om.get("mergeable") or "").upper() == "CONFLICTING":
             # NOT a constituent fault (main moved under the omnibus): v1 close only, no
             # bisection — close-and-recreate rebuilds a fresh root off current main.
@@ -504,6 +567,15 @@ def plan(state: dict) -> list:
         dying_branches.add(om["head_ref"])
         nums, depth = parse_marker(om.get("body", ""))
         survivors = [n for n in nums if _survivor(n)] if bisectable else []
+        if survivors and truncated:
+            # A live constituent absent from a TRUNCATED listing would be miscounted
+            # as dead — and this census feeds destructive decisions (which halves to
+            # build, which lone PR to convict). Degrade to the always-safe v1 close.
+            log(f"open-PR listing saturated its fetch limit ({OPEN_PR_LIST_LIMIT}): "
+                f"survivor census for omnibus #{om['number']} is unreliable — v1 close "
+                f"instead of bisection/quarantine (constituents stay individually "
+                f"armed)")
+            survivors = []
         if len(survivors) >= 2 and depth >= DEPTH_CAP:
             log(f"DEPTH CAP: omnibus #{om['number']} failed at depth {depth} >= "
                 f"{DEPTH_CAP} with {len(survivors)} survivors — v1 fallback (close; "
@@ -538,23 +610,47 @@ def plan(state: dict) -> list:
                     depth=depth + 1, parent=om["number"], min_ok=1)
             children_spawned = True
             continue
+        if len(survivors) == 1 and not culpable:
+            # NON-verdict failure (age-expiry / gate cancelled / timed_out) of a
+            # singleton: the sole survivor is INNOCENT until a gate convicts it —
+            # these are infra/starvation modes, not evidence of broken code. v1
+            # graceful degradation: close the parent, leave the survivor individually
+            # armed so the queue lands or fails it on its own signal.
+            log(f"sole survivor PR #{survivors[0]} of omnibus #{om['number']} "
+                f"(depth {depth}) NOT quarantined: {reason} is not a concluded "
+                f"head-gate FAILURE verdict — v1 close, survivor stays armed")
+            survivors = []
         if len(survivors) == 1:
             culprit = survivors[0]
             quarantined.add(culprit)
-            log(f"QUARANTINE: omnibus #{om['number']} (depth {depth}) failed with sole "
-                f"survivor PR #{culprit} — disarming it (NOT closing); the registry "
-                f"ci-fix path owns it now")
-            actions.append(Action(
-                "disarm", "gh",
-                ["pr", "merge", str(culprit), "--repo", repo, "--disable-auto"],
-                note=f"culprit #{culprit} isolated by failed omnibus #{om['number']}"))
+            log(f"QUARANTINE: omnibus #{om['number']} (depth {depth}) failed its head "
+                f"gate with sole survivor PR #{culprit} — comment + draft + disarm "
+                f"(NOT closing); the registry's stranded escalation owns it now")
+            # Ordering is load-bearing (crash safety, 6b): comment FIRST — a crash or
+            # raised gh failure after it leaves the culprit ARMED, so the next run
+            # re-isolates it and the repeat is idempotent. Then DRAFT: GitHub drops
+            # the auto-merge arm on draft conversion, so the terminal stranded
+            # posture (draft + unarmed) is reached even if the explicit disarm below
+            # never runs. The belt-and-braces disarm goes LAST (non-fatal in
+            # execute(): the arm is usually already gone). No cut point can leave a
+            # disarmed-but-unmarked PR.
             actions.append(Action(
                 "comment", "gh",
                 ["pr", "comment", str(culprit), "--repo", repo,
                  "--body", quarantine_comment(om["number"], reason)],
                 note=f"culprit #{culprit} quarantine notice"))
-            # No terminal labels — disarmed + gate-failure is the ci-fix admission key.
-            # Fall through: the parent closes exactly as in v1.
+            actions.append(Action(
+                "draft", "gh",
+                ["pr", "ready", str(culprit), "--repo", repo, "--undo"],
+                note=f"culprit #{culprit} -> draft (registry stranded posture)"))
+            actions.append(Action(
+                "disarm", "gh",
+                ["pr", "merge", str(culprit), "--repo", repo, "--disable-auto"],
+                note=f"culprit #{culprit} isolated by failed omnibus #{om['number']}"))
+            # No labels are added here: draft + unarmed IS the registry's stranded
+            # posture (its enumerator keys on the draft state, not on anything the
+            # batcher could apply), and the comment's machine marker is the durable
+            # breadcrumb. Fall through: the parent closes exactly as in v1.
         actions.append(Action(
             "close-omnibus", "gh",
             ["pr", "close", str(om["number"]), "--repo", repo,
@@ -628,12 +724,19 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
     """Snapshot the live GitHub/git state the pure plan() consumes.
 
     Deliberately TWO-PHASE: one LIGHT list over all open PRs (a single query carrying
-    body+statusCheckRollup for 200 PRs overloads the GraphQL stream), then targeted
-    per-PR views only where the policy needs the heavy fields (open omnibus PRs and the
-    overflow candidates)."""
+    body+statusCheckRollup for hundreds of PRs overloads the GraphQL stream), then
+    targeted per-PR views only where the policy needs the heavy fields (open omnibus PRs
+    and the overflow candidates). A listing that SATURATES OPEN_PR_LIST_LIMIT may be
+    truncated — constituent liveness would then be unreliable — so the snapshot carries
+    open_list_truncated and plan() degrades every bisection decision to a v1 close."""
     fields = "number,headRefName,title,author,labels,isDraft,autoMergeRequest"
     raw = json.loads(run_gh(["pr", "list", "--repo", repo, "--state", "open",
-                             "--limit", "200", "--json", fields]))
+                             "--limit", str(OPEN_PR_LIST_LIMIT), "--json", fields]))
+    open_list_truncated = len(raw) >= OPEN_PR_LIST_LIMIT
+    if open_list_truncated:
+        log(f"WARNING: open-PR listing returned {len(raw)} >= its --limit "
+            f"{OPEN_PR_LIST_LIMIT} — possibly truncated; survivor censuses are "
+            f"unreliable, so this run's bisection decisions all degrade to v1 closes")
     open_prs = []
     for pr in raw:
         am = pr.get("autoMergeRequest")
@@ -721,7 +824,8 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
     return {"repo": repo, "now": now, "open_prs": open_prs,
             "merged_omnibus": merged_omnibus, "empty_vs_main": empty_vs_main,
             "remote_omnibus_branches": remote_omnibus_branches,
-            "batch_enabled": batch_enabled}
+            "batch_enabled": batch_enabled,
+            "open_list_truncated": open_list_truncated}
 
 
 def execute(actions: list, state: dict, dry_run: bool) -> int:
@@ -811,13 +915,15 @@ def _worker(num, issue, labels=("review:pass",), **kw):
     return _pr(num, f"sparq-agent/issue-{issue}-123-1", labels=labels, **kw)
 
 
-def _state(open_prs=(), merged=(), empty=None, branches=(), batch_enabled=True):
+def _state(open_prs=(), merged=(), empty=None, branches=(), batch_enabled=True,
+           truncated=False):
     return {"repo": "sparq-org/sparq",
             "now": datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc),
             "open_prs": list(open_prs), "merged_omnibus": list(merged),
             "empty_vs_main": dict(empty or {}),
             "remote_omnibus_branches": list(branches),
-            "batch_enabled": batch_enabled}
+            "batch_enabled": batch_enabled,
+            "open_list_truncated": truncated}
 
 
 def self_test() -> int:
@@ -1063,21 +1169,30 @@ def self_test() -> int:
     check("(b) child pushes allow a singleton (min_ok=1)",
           [a.min_ok for a in got if a.kind == "push-branch"], [1, 1])
 
-    # B-c. Failing SINGLETON child -> THE CULPRIT: disarm + comment; parent closed;
-    #      the culprit PR itself is NOT closed and gains no labels.
+    # B-c. Failing SINGLETON child -> THE CULPRIT: comment (with machine marker), then
+    #      convert to draft, then disarm — in THAT order (crash safety: the arm is only
+    #      stripped after the durable breadcrumb exists, and the draft conversion drops
+    #      the arm platform-side anyway); parent closed; the culprit PR itself is NOT
+    #      closed and gains no labels.
     culprit = _worker(221, 941)
     parent1 = _pr(530, "sparq-omnibus/20260717T110000Z", author="app/github-actions",
                   armed_by=None, checks=gate_fail,
                   body="<!-- sparq-omnibus:v2 constituents=221 depth=3 -->")
     got = plan(_state(open_prs=[culprit, parent1]))
-    check("(c) culprit quarantine plan", [a.kind for a in got],
-          ["disarm", "comment", "close-omnibus", "delete-branch"])
-    check("(c) culprit disarm argv", got[0].argv,
-          ["pr", "merge", "221", "--repo", "sparq-org/sparq", "--disable-auto"])
-    qc = _body_of(got[1])
+    check("(c) culprit quarantine plan (comment BEFORE draft+disarm)",
+          [a.kind for a in got],
+          ["comment", "draft", "disarm", "close-omnibus", "delete-branch"])
+    qc = _body_of(got[0])
     check("(c) quarantine comment self-IDs", qc.startswith(SELF_ID), True)
     check("(c) quarantine comment names the failed omnibus", "#530" in qc, True)
-    check("(c) quarantine comment hands off to registry ci-fix", "ci-fix" in qc, True)
+    check("(c) quarantine comment carries the machine marker",
+          "<!-- sparq-omnibus-culprit:v1 parent=530 reason=gate-failure -->" in qc, True)
+    check("(c) quarantine comment hands off to the registry stranded escalation",
+          "stranded" in qc, True)
+    check("(c) culprit converted to draft (stranded posture)", got[1].argv,
+          ["pr", "ready", "221", "--repo", "sparq-org/sparq", "--undo"])
+    check("(c) culprit disarm argv", got[2].argv,
+          ["pr", "merge", "221", "--repo", "sparq-org/sparq", "--disable-auto"])
     check("(c) culprit PR is NOT closed",
           any(a.argv[:3] == ["pr", "close", "221"] for a in got), False)
     check("(c) no labels are added anywhere",
@@ -1088,10 +1203,61 @@ def self_test() -> int:
     got = plan(_state(open_prs=[culprit, parent1] + others))
     check("(c2) quarantine + fresh root over the remaining eligible",
           [a.kind for a in got],
-          ["disarm", "comment", "close-omnibus", "delete-branch"] + creation_kinds(2))
+          ["comment", "draft", "disarm", "close-omnibus", "delete-branch"]
+          + creation_kinds(2))
     root_body = _body_of([a for a in got if a.kind == "open-pr"][0])
     check("(c2) the culprit is NOT re-batched into the fresh root",
           "<!-- sparq-omnibus:v2 constituents=222,223 depth=0 -->" in root_body, True)
+
+    # B-c3. CONVICTION GATING: only a strict `gate` FAILURE conclusion convicts a
+    #       singleton. cancelled / timed_out (a human-cancelled run, runner starvation)
+    #       and age-expiry (queue congestion, checks that never reported — outage
+    #       modes) v1-close the parent and leave the sole survivor individually armed:
+    #       under a sustained outage every singleton leaf would otherwise serially
+    #       disarm the entire armed backlog. (These conclusions still BISECT at >=2
+    #       survivors — B-a4 — the gating is only about convicting ONE PR without a
+    #       hard verdict.)
+    for concl in ("CANCELLED", "TIMED_OUT"):
+        soft = _pr(530, "sparq-omnibus/20260717T110000Z", author="app/github-actions",
+                   armed_by=None,
+                   checks=[{"name": "gate", "status": "COMPLETED", "conclusion": concl}],
+                   body="<!-- sparq-omnibus:v2 constituents=221 depth=3 -->")
+        got = plan(_state(open_prs=[culprit, soft]))
+        check(f"(c3) {concl.lower()} singleton: v1 close only — survivor stays armed",
+              [a.kind for a in got], ["close-omnibus", "delete-branch"])
+    aged_child = _pr(531, "sparq-omnibus/20260717T060000Z-p530a",
+                     author="app/github-actions",
+                     body="<!-- sparq-omnibus:v2 constituents=221 depth=3 -->")
+    got = plan(_state(open_prs=[culprit, aged_child]))
+    check("(c3) age-expired singleton: v1 close only — survivor stays armed",
+          [a.kind for a in got], ["close-omnibus", "delete-branch"])
+    check("(c3) age-expired singleton: no comment/draft/disarm on the survivor",
+          any(a.kind in ("comment", "draft", "disarm") for a in got), False)
+
+    # B-a4. EVERY failing gate conclusion (failure / timed_out / cancelled) is
+    #       BISECTABLE — pins the full GATE_FAILING_CONCLUSIONS tuple (a mutant that
+    #       narrowed gate_conclusion to failure-only once survived the whole suite).
+    for concl in ("FAILURE", "TIMED_OUT", "CANCELLED"):
+        p = _pr(505, "sparq-omnibus/20260717T110000Z", author="app/github-actions",
+                armed_by=None,
+                checks=[{"name": "gate", "status": "COMPLETED", "conclusion": concl}],
+                body="<!-- sparq-omnibus:v2 constituents=109,110 depth=0 -->")
+        got = plan(_state(open_prs=two + [p]))
+        check(f"(a4) gate {concl.lower()}: 2 survivors bisect into singleton children",
+              [a.kind for a in got],
+              ["close-omnibus", "delete-branch"] + creation_kinds(1) + creation_kinds(1))
+
+    # B-g. OPEN-PR LIST TRUNCATION: when gather_state's listing saturated its limit,
+    #      constituent liveness is unreliable — absence from the list must NOT convict
+    #      anything. A failing parent v1-closes (no bisection, no quarantine); root
+    #      batching over the VISIBLE eligible set is still safe (a subset batches).
+    got = plan(_state(open_prs=[culprit, parent1], truncated=True))
+    check("(g) truncated listing: singleton gate-failure does NOT quarantine",
+          [a.kind for a in got], ["close-omnibus", "delete-branch"])
+    got = plan(_state(open_prs=six + [parent6], truncated=True))
+    check("(g) truncated listing: bisectable parent v1-closes; visible eligible re-root",
+          [a.kind for a in got],
+          ["close-omnibus", "delete-branch"] + creation_kinds(6))
 
     # B-d. CONFLICTING omnibus: NOT a constituent fault -> v1 close, NO children, no
     #      disarm; close-and-recreate then rebuilds a fresh ROOT (depth 0) off current
