@@ -12,9 +12,9 @@
 # Fields: name (required -> check-run name), crate (required), features (required,
 # non-empty comma list), test (bool — run `cargo test` for the leg).
 
-# [SONNET-4.6] sq-uz0 (#3405): shapes-graph assembly — the `imports` module
+# [FABLE-5] sq-uz0 (#3405): shapes-graph assembly — the `imports` module
 # (sparq-shacl/src/imports.rs: sh:shapesGraph discovery + transitive owl:imports
-# closure, W3C SHACL §1.4) and its acceptance tests (tests/imports.rs, whole-file
+# closure, W3C SHACL §§3.1/3.3 (shapes-graph)) and its acceptance tests (tests/imports.rs, whole-file
 # `#[cfg(feature = "imports")]`) are entirely feature-gated, so without this leg
 # they would run in NO gating CI. clippy --all-targets -D warnings with `imports`
 # ON plus the crate's tests. Zero new deps: pure traversal over GraphView + Dict.

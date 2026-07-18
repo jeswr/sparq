@@ -164,13 +164,13 @@ graph as a Turtle string, behind `sparq-wasm`'s non-default `scs` feature; see t
 `javascript-wasm` skill for the JS API.
 
 **Shapes-graph assembly: `sh:shapesGraph` + `owl:imports`** *(opt-in feature
-`imports`, sq-uz0)* — W3C SHACL §1.4 shapes-graph *discovery and union*, so
+`imports`, sq-uz0)* — W3C SHACL §§3.1/3.3 (shapes-graph) shapes-graph *discovery and union*, so
 callers no longer hand-assemble the shapes graph. Dereferencing an IRI to a
 document stays a caller concern (the engine never touches the network): you
 supply a loader callback, the library owns the traversal, the per-IRI dedupe /
 cycle guard, the RDF-merge discipline (each loaded document's blank nodes are
 standardised apart so labels reused across documents never collapse), and the
-final deduplicated union:
+final deduplicated union: Note the graph IRIs handed to your loader originate from (possibly untrusted) input data — a network-dereferencing loader should allowlist hosts/schemes.
 
 ```rust
 // The union of every graph the data graph references via sh:shapesGraph, plus

@@ -1,5 +1,5 @@
-//! [SONNET-4.6] (sq-uz0) Acceptance tests for the opt-in `imports` feature:
-//! shapes-graph ASSEMBLY per W3C SHACL §1.4 — `sh:shapesGraph` discovery in the
+//! [FABLE-5] (sq-uz0) Acceptance tests for the opt-in `imports` feature:
+//! shapes-graph ASSEMBLY per W3C SHACL §§3.1/3.3 (shapes-graph) — `sh:shapesGraph` discovery in the
 //! data graph plus the transitive, cycle-guarded `owl:imports` closure of every
 //! referenced shapes document. Dereferencing an IRI to a document is the
 //! caller's loader callback (this engine is offline by design); the traversal,
@@ -87,7 +87,7 @@ fn resolves_sh_shapes_graph_reference() {
     // The assembled shapes graph contains the referenced document…
     let paths = result_paths(&data, &res.shapes);
     assert_eq!(paths, vec![format!("{}name", EX)]);
-    // …but NOT the data graph's own triples (§1.4 unions only the referenced graphs).
+    // …but NOT the data graph's own triples (the shapes-graph union covers only the referenced graphs).
     let v = GraphView::new(&res.shapes);
     assert!(
         !v.contains(
@@ -152,7 +152,10 @@ fn unresolvable_iris_are_recorded_not_fatal() {
     assert_eq!(res.resolved, vec![format!("{}g1", EX)]);
     assert_eq!(res.unresolved, vec![format!("{}missing", EX)]);
     // The graphs that DID resolve still validate.
-    assert_eq!(result_paths(&data, &res.shapes), vec![format!("{}name", EX)]);
+    assert_eq!(
+        result_paths(&data, &res.shapes),
+        vec![format!("{}name", EX)]
+    );
 }
 
 #[test]
@@ -164,7 +167,11 @@ fn loader_errors_propagate() {
     "#);
     let err = resolve_shapes_graph(&data, |_: &str| Err::<Option<Graph>, _>("boom".into()))
         .expect_err("loader error propagates");
-    assert!(err.contains("http://example.org/g1"), "names the IRI: {}", err);
+    assert!(
+        err.contains("http://example.org/g1"),
+        "names the IRI: {}",
+        err
+    );
     assert!(err.contains("boom"), "carries the loader error: {}", err);
 }
 
@@ -207,7 +214,11 @@ fn duplicate_references_dereference_once() {
     let res = resolve_shapes_graph(&data, map_loader(&docs, &mut calls)).expect("resolves");
 
     assert_eq!(res.resolved, vec![format!("{}g1", EX)]);
-    assert_eq!(calls, vec![format!("{}g1", EX)], "deduplicated before loading");
+    assert_eq!(
+        calls,
+        vec![format!("{}g1", EX)],
+        "deduplicated before loading"
+    );
 }
 
 #[test]

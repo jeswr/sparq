@@ -1,4 +1,4 @@
-//! [SONNET-4.6] (sq-uz0) Shapes-graph ASSEMBLY (W3C SHACL §1.4): `sh:shapesGraph`
+//! [FABLE-5] (sq-uz0) Shapes-graph ASSEMBLY (W3C SHACL §§3.1/3.3 (shapes-graph)): `sh:shapesGraph`
 //! discovery in the data graph plus the transitive, cycle-guarded `owl:imports`
 //! closure of every referenced shapes document, unioned into one shapes
 //! [`Graph`].
@@ -46,7 +46,7 @@ impl std::fmt::Debug for ShapesGraphResolution {
     }
 }
 
-/// Assembles the shapes graph a data graph points at (W3C SHACL §1.4): the
+/// Assembles the shapes graph a data graph points at (W3C SHACL §§3.1/3.3 (shapes-graph)): the
 /// union of every graph an `sh:shapesGraph` triple in `data` references, plus
 /// the transitive `owl:imports` closure of each loaded document. The data
 /// graph's own triples are NOT included. Pass the result's

@@ -67,8 +67,8 @@ shacl-af = []
 # bundles) carry no parser code when off. See the crate README and
 # `skills/shacl-validation/SKILL.md`.
 scs = []
-# [SONNET-4.6] sq-uz0 (#3405): sh:shapesGraph / owl:imports shapes-graph ASSEMBLY
-# (W3C SHACL §1.4) — discovers the data graph's `sh:shapesGraph` references and
+# [FABLE-5] sq-uz0 (#3405): sh:shapesGraph / owl:imports shapes-graph ASSEMBLY
+# (W3C SHACL §§3.1/3.3 (shapes-graph)) — discovers the data graph's `sh:shapesGraph` references and
 # unions them with their transitive, cycle-guarded `owl:imports` closure via a
 # caller-supplied IRI → Graph loader (the engine itself never dereferences the
 # network). OPT-IN: a pure-traversal module over `GraphView` + `Dict` the crate
