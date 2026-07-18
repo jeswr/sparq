@@ -82,8 +82,15 @@ jobs:
           # Do not leave the default GITHUB_TOKEN in the local git config; release-plz uses
           # its own `token:` input for forge operations (release-plz docs recommendation).
           persist-credentials: false
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       # [OPUS-4.8] sq-v286.4: official release-plz action, SHA-pinned (code-scanning=0;
       # the repo SHA-pins ALL actions). v0.5.130 — pin verified to peel to this commit via
       # `gh api repos/release-plz/action/git/tags/<annotated> --jq .object.sha`.
@@ -114,8 +121,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       # [OPUS-4.8] sq-v286.11 — crates.io TRUSTED-PUBLISHING FLIP (continued). When flipping
       # `publish = true`, release-plz runs `cargo publish` BEFORE tagging and needs a crates.io
       # credential in CARGO_REGISTRY_TOKEN. crates.io Trusted Publishing (GA 2025-07, RFC 3691)

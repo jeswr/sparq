@@ -335,8 +335,15 @@ jobs:
       attestations: write # write the attestation to the repo's attestation store
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       # Package every publishable crate (publish = false crates are skipped by cargo package
       # when run per-package; we package the workspace and collect the resulting .crate files).
       # --no-verify avoids a full from-scratch compile of every crate on the runner; the bytes
