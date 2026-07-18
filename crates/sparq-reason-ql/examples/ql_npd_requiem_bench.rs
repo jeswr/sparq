@@ -23,11 +23,13 @@
 //! identity homomorphism — including query-only predicates absent from the TBox and
 //! multi-atom shared-variable joins — and because frozen terms are disjoint across
 //! disjuncts, a minimisation that drops a NON-subsumed disjunct changes the result set
-//! (the classical canonical-database containment argument for UCQs). CAVEAT: a disjunct
-//! under a re-applied FILTER/VALUES modifier (the B3/B4 pass-through) is populated but its
-//! frozen bindings may still fail the modifier, so `--abox` real data remains the stronger
-//! regime. A disagreement aborts the run (exit 1) — it is an unsoundness signal, never
-//! papered over with a plausible timing.
+//! (the classical canonical-database containment argument for UCQs). Witness mode is
+//! FAIL-CLOSED on modifiers: a query whose original/raw/minimised tree carries a
+//! re-applied FILTER or VALUES (the B3/B4 pass-through) gets NO witness — the modifier
+//! could reject every frozen binding, leaving BOTH UCQs empty and the gate vacuously
+//! agreed — and is reported per-row as `needs-abox` with NO timing row; such queries are
+//! only timed under `--abox` real data. A disagreement aborts the run (exit 1) — it is
+//! an unsoundness signal, never papered over with a plausible timing.
 //!
 //! `--smoke` is the hermetic acceptance path (no network, no files): NPD/Requiem-shaped
 //! fixtures with HAND-VERIFIED closed-form minimised-UCQ sizes and pinned certain-answer
@@ -267,23 +269,32 @@ fn load_triples(path: &str) -> Vec<Triple> {
 
 /// Collect every BGP (CQ disjunct body) in a query's pattern tree. The shapes that can
 /// occur here are exactly what the fail-closed CQ gate admits and what the emitter
-/// produces: BGPs under a `Union` fold, wrapped in `Project`/`Distinct`/`Reduced`/`Slice`,
-/// with the B3/B4 pass-through re-applying `Filter` and `Join`-with-`Values` around a
-/// branch. Anything else is fail-closed: PANIC rather than synthesise a witness that
-/// silently under-populates the data (use `--abox` for such suites).
-fn collect_bgps<'a>(pattern: &'a GraphPattern, out: &mut Vec<&'a [TriplePattern]>) {
+/// produces: BGPs under a `Union` fold, wrapped in `Project`/`Distinct`/`Reduced`/`Slice`.
+/// A re-applied `Filter` or `Values` modifier (the B3/B4 pass-through) is REFUSED
+/// (`Err` naming the modifier): freezing ignores modifier semantics, so the modifier
+/// could reject every frozen binding, leaving BOTH the raw and the minimised UCQ empty
+/// and the equivalence gate vacuously agreed — such queries need `--abox` real data.
+/// Any other shape means the gate/emitter produced something unexpected: PANIC rather
+/// than synthesise a witness that silently under-populates the data.
+fn collect_bgps<'a>(
+    pattern: &'a GraphPattern,
+    out: &mut Vec<&'a [TriplePattern]>,
+) -> Result<(), &'static str> {
     match pattern {
-        GraphPattern::Bgp { patterns } => out.push(patterns),
-        GraphPattern::Union { left, right } | GraphPattern::Join { left, right } => {
-            collect_bgps(left, out);
-            collect_bgps(right, out);
+        GraphPattern::Bgp { patterns } => {
+            out.push(patterns);
+            Ok(())
         }
-        GraphPattern::Filter { inner, .. }
-        | GraphPattern::Project { inner, .. }
+        GraphPattern::Union { left, right } | GraphPattern::Join { left, right } => {
+            collect_bgps(left, out)?;
+            collect_bgps(right, out)
+        }
+        GraphPattern::Filter { .. } => Err("FILTER"),
+        GraphPattern::Values { .. } => Err("VALUES"),
+        GraphPattern::Project { inner, .. }
         | GraphPattern::Distinct { inner }
         | GraphPattern::Reduced { inner }
         | GraphPattern::Slice { inner, .. } => collect_bgps(inner, out),
-        GraphPattern::Values { .. } => {} // constant bindings — contributes no triples
         other => panic!(
             "witness ABox synthesis: unsupported pattern shape {:?} — run with --abox",
             other
@@ -307,12 +318,15 @@ fn query_pattern(q: &Query) -> &GraphPattern {
 /// disjoint across disjuncts, so a kept disjunct produces a dropped disjunct D's frozen
 /// head tuple only via a homomorphism into D's instance, i.e. only when D was genuinely
 /// subsumed: a minimisation that drops a non-subsumed disjunct changes the result set
-/// (the canonical-database containment argument). Regression-tested below.
-fn witness_abox(queries: &[&Query]) -> Graph {
+/// (the canonical-database containment argument). FAIL-CLOSED: `Err` (naming the
+/// modifier) if any query carries a FILTER or VALUES modifier, whose semantics freezing
+/// ignores — the caller must fall back to `--abox` real data rather than accept a
+/// possibly-vacuous agreement. Regression-tested below.
+fn witness_abox(queries: &[&Query]) -> Result<Graph, &'static str> {
     let mut nt = String::new();
     for (qi, q) in queries.iter().enumerate() {
         let mut bgps: Vec<&[TriplePattern]> = Vec::new();
-        collect_bgps(query_pattern(q), &mut bgps);
+        collect_bgps(query_pattern(q), &mut bgps)?;
         for (di, bgp) in bgps.iter().enumerate() {
             // One fresh constant per (query, disjunct, kind, name) — shared variables
             // within a disjunct freeze to the SAME constant, so joins are satisfied.
@@ -341,7 +355,7 @@ fn witness_abox(queries: &[&Query]) -> Graph {
             }
         }
     }
-    Graph::load_str(&nt, "ntriples").expect("witness ABox must load")
+    Ok(Graph::load_str(&nt, "ntriples").expect("witness ABox must load"))
 }
 
 fn run_gather(suite: &str, tbox_path: &str, queries_dir: &str, abox_path: Option<&str>) {
@@ -373,14 +387,17 @@ fn run_gather(suite: &str, tbox_path: &str, queries_dir: &str, abox_path: Option
         tbox.len(),
         query_files.len(),
         data_label,
-        abox_path
-            .unwrap_or("per-query frozen canonical instances of the original/raw/minimised UCQ disjuncts")
+        abox_path.unwrap_or(
+            "per-query frozen canonical instances of the original/raw/minimised UCQ disjuncts; \
+             FILTER/VALUES queries fail closed to needs-abox (no timing row)"
+        )
     );
     println!("# regime: *_rewrite_ms = rewriter-phase only (in-process rewrite/rewrite_production);");
     println!("#         exec_ms = minimised-UCQ execution over the loaded data; e2e_ms = rewrite+execute (comparable to an end-to-end competitor column)");
     println!("suite\tcase\tstatus\traw_disjuncts\tmin_disjuncts\tskipped_axioms\traw_rewrite_ms\tmin_rewrite_ms\tequivalence\tanswers\texec_ms\te2e_ms");
 
-    let (mut in_scope, mut out_of_scope, mut parse_errors) = (0usize, 0usize, 0usize);
+    let (mut in_scope, mut out_of_scope, mut needs_abox, mut parse_errors) =
+        (0usize, 0usize, 0usize, 0usize);
     for path in &query_files {
         let id = path.file_stem().and_then(|s| s.to_str()).unwrap_or("query");
         let text = std::fs::read_to_string(path)
@@ -423,13 +440,26 @@ fn run_gather(suite: &str, tbox_path: &str, queries_dir: &str, abox_path: Option
         // Without --abox the data is the PER-QUERY witness: the frozen canonical instances
         // of every disjunct of the original, raw, and minimised queries, so the differential
         // is per-disjunct non-vacuous even for predicates that never occur in the TBox.
+        // FAIL-CLOSED: a FILTER/VALUES modifier anywhere in the original/raw/minimised
+        // tree refuses witness mode (the modifier could reject every frozen binding and
+        // make the agreement vacuous) — the query gets a needs-abox row and NO timings.
         let witness;
         let data: &Graph = match &real_abox {
             Some(g) => g,
-            None => {
-                witness = witness_abox(&[&query, &raw.query, &minimised.query]);
-                &witness
-            }
+            None => match witness_abox(&[&query, &raw.query, &minimised.query]) {
+                Ok(g) => {
+                    witness = g;
+                    &witness
+                }
+                Err(modifier) => {
+                    needs_abox += 1;
+                    println!(
+                        "{}\t{}\tneeds-abox: {} present — witness mode fails closed (frozen bindings could fail the modifier, gate would be vacuous); rerun with --abox\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA\tNA",
+                        suite, id, modifier
+                    );
+                    continue;
+                }
+            },
         };
         let answers = assert_ucq_equivalence(data, &raw.query, &minimised.query, id);
 
@@ -461,10 +491,11 @@ fn run_gather(suite: &str, tbox_path: &str, queries_dir: &str, abox_path: Option
         );
     }
     println!(
-        "# summary suite {}: {} in-scope, {} out-of-scope (fail-closed CQ gate), {} parse-errors of {} queries",
+        "# summary suite {}: {} in-scope, {} out-of-scope (fail-closed CQ gate), {} needs-abox (witness mode refused: FILTER/VALUES), {} parse-errors of {} queries",
         suite,
         in_scope,
         out_of_scope,
+        needs_abox,
         parse_errors,
         query_files.len()
     );
@@ -511,6 +542,19 @@ mod tests {
     /// A sound minimisation of [`RAW_UCQ`] (same UCQ, disjuncts reordered).
     const EQUIV_UCQ: &str = "SELECT DISTINCT ?x WHERE { \
         { ?x :label \"w\" } UNION { ?x :headOf ?d . ?d :partOf ?u } }";
+    /// [`RAW_UCQ`] under a distinguished-variable FILTER (the B3 pass-through shape the
+    /// emitter produces). No frozen witness IRI can ever equal `:alice`, so the filter
+    /// rejects EVERY frozen binding.
+    const FILTERED_RAW_UCQ: &str = "SELECT DISTINCT ?x WHERE { \
+        { { ?x :headOf ?d . ?d :partOf ?u } UNION { ?x :label \"w\" } } FILTER(?x = :alice) }";
+    /// A deliberately WRONG minimisation of [`FILTERED_RAW_UCQ`]: the non-subsumed join
+    /// disjunct is dropped, under the same FILTER.
+    const FILTERED_WRONG_MIN_UCQ: &str =
+        "SELECT DISTINCT ?x WHERE { { ?x :label \"w\" } FILTER(?x = :alice) }";
+    /// [`RAW_UCQ`] joined with a VALUES block (the B4 pass-through shape): the bound
+    /// constant can never equal a frozen witness IRI.
+    const VALUES_RAW_UCQ: &str = "SELECT DISTINCT ?x WHERE { \
+        { { ?x :headOf ?d . ?d :partOf ?u } UNION { ?x :label \"w\" } } VALUES ?x { :alice } }";
 
     /// The PRE-FIX witness construction, reproduced literally for the TBox
     /// `:Manager rdfs:subClassOf :Employee .`: one rdf:type assertion per TBox class. The
@@ -543,7 +587,7 @@ mod tests {
     fn frozen_instance_witness_detects_wrongly_dropped_join_disjunct() {
         let raw = parse_query(RAW_UCQ);
         let wrong = parse_query(WRONG_MIN_UCQ);
-        let data = witness_abox(&[&raw, &wrong]);
+        let data = witness_abox(&[&raw, &wrong]).expect("modifier-free UCQs must synthesise");
         let (_, raw_rows) = eval_rows(&data, &raw);
         let (_, wrong_rows) = eval_rows(&data, &wrong);
         assert!(
@@ -566,8 +610,49 @@ mod tests {
     fn frozen_instance_witness_agrees_for_equivalent_ucqs() {
         let raw = parse_query(RAW_UCQ);
         let equiv = parse_query(EQUIV_UCQ);
-        let data = witness_abox(&[&raw, &equiv]);
+        let data = witness_abox(&[&raw, &equiv]).expect("modifier-free UCQs must synthesise");
         let answers = assert_ucq_equivalence(&data, &raw, &equiv, "equivalent-ucqs");
         assert!(answers > 0, "the agreement must be over a non-empty row set");
+    }
+
+    /// The vacuity a modifier-blind witness has under FILTER: reproduce the pre-fix path
+    /// (freeze the BGPs, ignore the modifier) by synthesising from the modifier-FREE
+    /// skeletons — identical BGPs, so identical frozen instances — then evaluate the
+    /// FILTERed queries over it. The filter rejects every frozen binding, so the raw UCQ
+    /// AND a wrongly-minimised UCQ (non-subsumed join disjunct dropped) BOTH come back
+    /// empty: the gate would agree without detecting the drop. This is the vacuous
+    /// agreement witness mode now refuses.
+    #[test]
+    fn modifier_blind_witness_is_vacuous_under_filter() {
+        let data = witness_abox(&[&parse_query(RAW_UCQ), &parse_query(WRONG_MIN_UCQ)])
+            .expect("modifier-free skeletons must synthesise");
+        let (_, raw_rows) = eval_rows(&data, &parse_query(FILTERED_RAW_UCQ));
+        let (_, wrong_rows) = eval_rows(&data, &parse_query(FILTERED_WRONG_MIN_UCQ));
+        assert!(
+            raw_rows.is_empty() && wrong_rows.is_empty(),
+            "the FILTER rejects every frozen binding: raw and wrongly-minimised UCQs are \
+             both empty, so an equivalence check over this witness would pass vacuously"
+        );
+    }
+
+    /// The revised path REFUSES witness mode for FILTER- and VALUES-carrying queries
+    /// (fail-closed): `witness_abox` returns `Err` naming the modifier, and `run_gather`
+    /// emits a `needs-abox` row with NO timings instead of a vacuously-gated timing row.
+    #[test]
+    fn witness_mode_refuses_filter_and_values_queries() {
+        let err = witness_abox(&[&parse_query(FILTERED_RAW_UCQ)])
+            .map(|_| ())
+            .expect_err("a FILTER anywhere in the tree must refuse witness synthesis");
+        assert_eq!(err, "FILTER");
+        let err = witness_abox(&[&parse_query(VALUES_RAW_UCQ)])
+            .map(|_| ())
+            .expect_err("a VALUES block anywhere in the tree must refuse witness synthesis");
+        assert_eq!(err, "VALUES");
+        // The refusal covers the whole query LIST: one modifier-carrying query poisons
+        // the witness even when the others are plain UCQs.
+        let err = witness_abox(&[&parse_query(RAW_UCQ), &parse_query(FILTERED_WRONG_MIN_UCQ)])
+            .map(|_| ())
+            .expect_err("a single modifier-carrying query in the list must refuse synthesis");
+        assert_eq!(err, "FILTER");
     }
 }

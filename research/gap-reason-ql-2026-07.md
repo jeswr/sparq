@@ -71,9 +71,11 @@ No timing row exists without a passed result-set agreement check:
   Every disjunct — query-only predicates and multi-atom joins included — matches at least
   its own instance, and because frozen terms are disjoint across disjuncts, dropping a
   non-subsumed disjunct changes the result set (the canonical-database containment
-  argument; regression-tested in the example). Caveat: a disjunct under a re-applied
-  FILTER/VALUES modifier is populated but the modifier may reject the frozen bindings, so
-  `--abox` real data remains the stronger regime.
+  argument; regression-tested in the example). Witness mode is FAIL-CLOSED on modifiers:
+  a query whose original/raw/minimised tree carries a re-applied FILTER/VALUES (the
+  B3/B4 pass-through) is reported per-row as `needs-abox` with NO timing row — the
+  modifier could reject every frozen binding and make the agreement vacuous — so such
+  queries are only timed under `--abox` real data (regression-tested in the example).
 - **Cross-engine (same-data regime only):** per-query answer counts from both engines are
   recorded in the envelope (`cross_engine_counts_agree`); neither engine is ground truth —
   a disagreement is recorded and investigated, never adjusted.

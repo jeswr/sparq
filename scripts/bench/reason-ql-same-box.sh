@@ -22,9 +22,12 @@
 # PER-QUERY witness ABox — the frozen canonical instances of every disjunct of the
 # original/raw/minimised queries — or --abox real data) and ABORTS on any
 # result-set disagreement — no timing row exists without the equivalence check having
-# passed. Cross-engine (sparq vs Ontop) per-query answer COUNTS are recorded and compared
-# in the envelope when both sides ran over the same data (counts_agree per query; a
-# disagreement is recorded and investigated, NEVER silently adjusted).
+# passed. Witness mode is FAIL-CLOSED on FILTER/VALUES modifiers (freezing ignores their
+# semantics, so the check could agree vacuously): such queries get a needs-abox row with
+# NO timings and are only timed under --abox real data. Cross-engine (sparq vs Ontop)
+# per-query answer COUNTS are recorded and compared in the envelope when both sides ran
+# over the same data (counts_agree per query; a disagreement is recorded and
+# investigated, NEVER silently adjusted).
 #
 # --smoke  (ONLY=sparq): the fast, hermetic ACCEPTANCE path — build + run the sparq example
 #          on embedded NPD/Requiem-shaped fixtures with hand-verified closed-form UCQ sizes.
