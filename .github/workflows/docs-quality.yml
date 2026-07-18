@@ -658,6 +658,22 @@ jobs:
         run: python3 scripts/check-advisory-registry.py --self-test
       - name: "Enforce advisory-job registry + gate-intent placement (C2/C3) — GATING"
         run: python3 scripts/check-advisory-registry.py
+      # [OPUS-4.8] sparq-org/sparq#3475: the fast-fix ring's ONLY privileged
+      # capability is the cross-repo REGISTRY_RING_TOKEN doorbell. Because a
+      # `workflow_run` workflow is ALSO delivered for fork / cross-repo triggering
+      # runs (and workflow_run grants secret access even when the triggering run
+      # lacked secrets), the ring MUST fail-closed on
+      #   github.event.workflow_run.head_repository.full_name == github.repository
+      # at the job level, with same-repo+same-head-SHA defense in depth in the
+      # head_sha->PR resolution and a live head_repo/head_sha re-check before the
+      # dispatch. This structural guard-presence check goes RED if any of those is
+      # removed (self-test proves it with three negative fixtures: fork run,
+      # same-SHA collision, stale head). Needs PyYAML — installed in the shared
+      # setup above with the other workflow-lint self-tests.
+      - name: Self-test the fast-fix ring cross-repo guard (#3475 negative fixtures)
+        run: python3 scripts/check-fast-fix-ring-guard.py --self-test
+      - name: "Enforce the fast-fix ring fail-closed cross-repo guard (#3475) — GATING"
+        run: python3 scripts/check-fast-fix-ring-guard.py
 
   # ----------------------------- ADVISORY -----------------------------
   # [FABLE-5] sq-6vshe.20: the three former advisory jobs as step-groups on ONE
