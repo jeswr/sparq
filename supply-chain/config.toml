@@ -33,10 +33,26 @@ criteria = "safe-to-deploy"
 version = "1.1.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.anstream]]
+version = "1.0.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.anstyle]]
 version = "1.0.14"
-criteria = "safe-to-run"
-notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+criteria = "safe-to-deploy"
+notes = "hdt 0.7.3 runtime dependency; no trusted audit available upstream [SONNET-4.6]"
+
+[[exemptions.anstyle-parse]]
+version = "1.0.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.anstyle-query]]
+version = "1.1.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.anstyle-wincon]]
+version = "3.0.11"
+criteria = "safe-to-deploy"
 
 [[exemptions.anyhow]]
 version = "1.0.102"
@@ -185,12 +201,24 @@ criteria = "safe-to-deploy"
 version = "0.4.10"
 criteria = "safe-to-deploy"
 
+[[exemptions.bincode]]
+version = "1.3.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.binout]]
+version = "0.3.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.bit-set]]
 version = "0.10.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.bitflags]]
 version = "2.13.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.bitset-core]]
+version = "0.1.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.blake3]]
@@ -239,21 +267,33 @@ criteria = "safe-to-deploy"
 
 [[exemptions.clap]]
 version = "4.6.1"
-criteria = "safe-to-run"
-notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+criteria = "safe-to-deploy"
+notes = "hdt 0.7.3 runtime dependency; no trusted audit available upstream [SONNET-4.6]"
 
 [[exemptions.clap_builder]]
 version = "4.6.0"
-criteria = "safe-to-run"
-notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+criteria = "safe-to-deploy"
+notes = "hdt 0.7.3 runtime dependency; no trusted audit available upstream [SONNET-4.6]"
+
+[[exemptions.clap_derive]]
+version = "4.6.1"
+criteria = "safe-to-deploy"
 
 [[exemptions.clap_lex]]
 version = "1.1.0"
-criteria = "safe-to-run"
-notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+criteria = "safe-to-deploy"
+notes = "hdt 0.7.3 runtime dependency; no trusted audit available upstream [SONNET-4.6]"
 
 [[exemptions.cmake]]
 version = "0.1.58"
+criteria = "safe-to-deploy"
+
+[[exemptions.co_sort]]
+version = "0.2.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.colorchoice]]
+version = "1.0.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.combine]]
@@ -417,6 +457,10 @@ criteria = "safe-to-deploy"
 version = "1.0.5"
 criteria = "safe-to-deploy"
 
+[[exemptions.dyn_size_of]]
+version = "0.4.5"
+criteria = "safe-to-deploy"
+
 [[exemptions.earcut]]
 version = "0.4.5"
 criteria = "safe-to-deploy"
@@ -447,6 +491,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.enum-ordinalize-derive]]
 version = "4.3.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.env_filter]]
+version = "2.0.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.env_logger]]
+version = "0.11.11"
 criteria = "safe-to-deploy"
 
 [[exemptions.event-listener]]
@@ -494,6 +546,10 @@ criteria = "safe-to-deploy"
 version = "1.3.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.fsum]]
+version = "0.1.3"
+criteria = "safe-to-deploy"
+
 [[exemptions.futures]]
 version = "0.3.32"
 criteria = "safe-to-deploy"
@@ -532,6 +588,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.generic-array]]
 version = "0.14.7"
+criteria = "safe-to-deploy"
+
+[[exemptions.generic-tests]]
+version = "0.1.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.geo]]
@@ -607,7 +667,7 @@ version = "0.14.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.hdt]]
-version = "0.4.0"
+version = "0.7.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.heapless]]
@@ -763,6 +823,10 @@ criteria = "safe-to-deploy"
 version = "2.12.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.is_terminal_polyfill]]
+version = "1.70.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.itertools]]
 version = "0.14.0"
 criteria = "safe-to-deploy"
@@ -876,6 +940,14 @@ criteria = "safe-to-deploy"
 version = "0.11.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.mem_dbg]]
+version = "0.3.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.mem_dbg-derive]]
+version = "0.2.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.memchr]]
 version = "2.8.2"
 criteria = "safe-to-deploy"
@@ -899,6 +971,10 @@ criteria = "safe-to-run"
 [[exemptions.minimal-lexical]]
 version = "0.2.1"
 criteria = "safe-to-run"
+
+[[exemptions.minimum_redundancy]]
+version = "0.3.3"
+criteria = "safe-to-deploy"
 
 [[exemptions.mio]]
 version = "1.2.1"
@@ -983,6 +1059,10 @@ criteria = "safe-to-run"
 
 [[exemptions.once_cell]]
 version = "1.21.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.once_cell_polyfill]]
+version = "1.70.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.openssl-probe]]
@@ -1213,6 +1293,10 @@ criteria = "safe-to-deploy"
 version = "0.3.15"
 criteria = "safe-to-deploy"
 
+[[exemptions.qwt]]
+version = "0.4.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.r-efi]]
 version = "5.3.0"
 criteria = "safe-to-deploy"
@@ -1406,6 +1490,10 @@ version = "0.3.6"
 criteria = "safe-to-deploy"
 notes = "Opt-in sparq-arrow Parquet dependency closure; explicit review backlog exemption for PR #2196 [GPT-5.6]"
 
+[[exemptions.serde-big-array]]
+version = "0.5.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.serde_json]]
 version = "1.0.150"
 criteria = "safe-to-deploy"
@@ -1544,6 +1632,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.stable_deref_trait]]
 version = "1.2.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.strsim]]
+version = "0.11.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.sucds]]
@@ -1705,6 +1797,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.utf8-zero]]
 version = "0.8.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.utf8parse]]
+version = "0.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.uuid]]
