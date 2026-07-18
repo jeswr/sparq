@@ -71,6 +71,16 @@ From the security / supply-chain / SAST workflows (all now LIVE and aggregated b
 | `generate CycloneDX SBOM` | `.github/workflows/supply-chain.yml` | The CycloneDX SBOM artifact. |
 | `CodeQL analysis (rust)` | `.github/workflows/codeql.yml` | CodeQL SAST (`security-and-quality`) over the Rust workspace — resolves Scorecard's `SAST` check. |
 
+> **CodeQL is currently OPERATIONALLY DISABLED (2026-07-18).** The rows and later
+> sections below that describe `CodeQL analysis (rust)` as a live, gating per-PR
+> check-run reflect the *ruleset's* intent, but the `codeql.yml` workflow is disabled
+> via `gh workflow disable` (Actions workflow state `disabled_manually`): the file is
+> retained on `main` with live triggers, but GitHub schedules no run, so no CodeQL
+> check-run is produced on any event and it neither runs nor gates today. Open PR
+> #3427 owns the successor policy (an advisory / retroactive posture) and the file's
+> triggers are left untouched here to avoid colliding with it. Read every "CodeQL …
+> gates" statement in this document against this note. (See *Merge-queue subset* below.)
+
 From the binding/packaging workflows (when those surfaces are exercised):
 
 | Job name | Workflow | What it gates |
@@ -112,7 +122,14 @@ From the binding/packaging workflows (when those surfaces are exercised):
 
 The `merge_group` ref does **not** run an identical check-set to a PR. By explicit
 maintainer direction (2026-07-18) the merge queue runs only the **PR-relevant subset**
-of lanes, and — by a separate maintainer direction — **CodeQL is disabled repo-wide**.
+of lanes, and — by a separate maintainer direction — **CodeQL is operationally
+disabled**: the `.github/workflows/codeql.yml` FILE is retained on `main` with live
+`pull_request`/`push`/`schedule` triggers, but the workflow itself was disabled via
+`gh workflow disable` (Actions workflow state `disabled_manually`), so GitHub does not
+schedule it on any event — no CodeQL check-run is produced, so it neither runs nor
+gates. (This is an inert-file state, not an edit to the triggers; open PR #3427 owns
+the codeql.yml successor policy — an advisory / retroactive posture — so the file's
+triggers are left untouched here to avoid colliding with it.)
 Heavy or independent lanes that already ran and gated on the PR head dropped their
 `merge_group` trigger because the queue re-run added wall-clock per enqueue with no new
 signal: currently `formal-verification.yml` (Kani proofs), `fuzz.yml` (corpus replay),
@@ -150,8 +167,12 @@ and shared-runner contention.
      the merge queue starving, the load-aware heavy shards deferring). -->
 
 CI is **tiered by the PR's draft state**. A **draft** `pull_request` head runs a
-REDUCED sibling set; a **non-draft** head, `merge_group`, `push`-to-main, and every
-scheduled/dispatch run keep the FULL matrix, byte-identical to before.
+REDUCED sibling set; a **non-draft** `pull_request` head, `push`-to-main, and every
+scheduled/dispatch run keep the FULL matrix, byte-identical to before. (`merge_group`
+is a SEPARATE axis: it always runs at FULL tier — never draft-tier — but it runs the
+maintainer-directed **PR-relevant subset** documented in *Merge-queue subset* above —
+several heavy lanes and CodeQL do not trigger there — not a byte-identical copy of the
+PR check-set.)
 
 **What a draft head runs:**
 

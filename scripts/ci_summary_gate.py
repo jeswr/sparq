@@ -165,6 +165,27 @@ _SUPERSEDABLE = ("cancelled", "stale")
 # pins the workflow job name against this regex so the two cannot drift apart.
 SELECT_RE = re.compile(r"change-based test selection")
 
+# [FABLE-5] PR #3511 review finding 1 (HIGH): STRUCTURAL AWAIT of the trusted
+# feature-matrix reporter. The privileged reporter runs in the separate,
+# default-branch-owned .github/workflows/feature-matrix-report.yml on a
+# workflow_run event, so it posts its `feature-matrix report` summary check-run
+# a little AFTER feature-matrix's group jobs finish. A CRASHED or merely DELAYED
+# reporter could otherwise be missed: ci-summary could conclude green over the
+# group jobs' own successes in the two-poll settle window BEFORE the reporter's
+# check-run ever landed, so a reporter that FAILED to post its verdict (e.g. an
+# artifact-completeness violation it detected, or a token error) would race past
+# the required gate. The fix makes the reporter check STRUCTURALLY REQUIRED
+# whenever the feature-matrix produced legs for this head — the robust,
+# reporter-timing-INDEPENDENT signal that legs were selected is the presence of
+# an `opt-in group (…)` check-run: the group jobs run on THIS (PR/merge_group)
+# event under `if: rust_changed == 'true' && legs != '0'` and post their OWN
+# conclusions directly on the head SHA (no privileged token, so ci-summary always
+# sees them). Their presence therefore PROVES the reporter must post
+# `feature-matrix report`; its absence keeps the gate polling (still-settling)
+# until the loop's own timeout, then FAILS CLOSED — never a conclude-by-timing.
+FM_GROUP_PREFIX = "opt-in group ("
+FM_REPORT_NAME = "feature-matrix report"
+
 
 @dataclass
 class Config:
@@ -400,6 +421,67 @@ def is_self(run: dict, self_run_id: str) -> bool:
     return bool(re.search(rf"/runs/{re.escape(self_run_id)}(/|$)", url))
 
 
+def is_fm_group(name: str) -> bool:
+    """[FABLE-5] PR #3511 finding 1: is this an `opt-in group (…)` check-run? These
+    are the feature-matrix GROUP jobs — they run on the PR/merge_group event only
+    when the setup job assembled >=1 leg (rust_changed && legs != '0') and post
+    their own conclusions directly on the head SHA (no privileged token), so their
+    PRESENCE is the robust, reporter-timing-independent proof that legs were
+    selected and the trusted `feature-matrix report` reporter must post its
+    verdict for this head."""
+    return name.startswith(FM_GROUP_PREFIX)
+
+
+def is_fm_report(name: str) -> bool:
+    """[FABLE-5] PR #3511 finding 1: the trusted reporter's summary check-run
+    (`feature-matrix report`, posted from the default-branch-owned
+    feature-matrix-report.yml). Its terminal-success is the verdict ci-summary
+    must structurally await whenever `opt-in group (…)` legs ran."""
+    return name == FM_REPORT_NAME
+
+
+def fm_report_status(runs: list[dict]) -> str:
+    """[FABLE-5] PR #3511 finding 1 (HIGH): the reporter-await status over the
+    (already forgiveness-filtered, self-excluded) sibling set. Returns one of:
+
+      * "n/a"     — no `opt-in group (…)` check-run on this head, so the
+                    feature-matrix produced no legs for it and NO reporter is
+                    expected (a doc-only PR, a fully change-selected-out matrix,
+                    or a merge_group that skipped the lane). No requirement.
+      * "ok"      — legs ran AND a terminal-SUCCESS `feature-matrix report`
+                    check-run is present: the reporter posted its green verdict.
+      * "failed"  — legs ran AND the reporter's check-run is terminal but NOT
+                    success (crashed / completeness-violation / POST error). The
+                    caller REDs. (Such a check also fails the normal gating-set
+                    render on its own — this is belt-and-braces so the reporter
+                    requirement is explicit and cannot be silently dropped.)
+      * "pending" — legs ran but the `feature-matrix report` check-run is either
+                    ABSENT (the reporter's workflow_run has not landed it yet, or
+                    crashed before posting) or present-but-not-terminal. The gate
+                    must keep polling (still-settling); budget exhaustion in this
+                    state FAILS CLOSED via render_verdict's reporter belt — never
+                    a conclude-by-timing over the group jobs' bare successes.
+
+    SAFETY: a reporter that FAILED to post (delayed / crashed) is indistinguishable
+    from one that has not posted YET, and both map to "pending" — the fail-CLOSED
+    direction. A same-SHA fork PR whose reporter is fork-denied (cannot POST with a
+    read-only token) will hold here to timeout and RED; that is acceptable — a fork
+    PR is not auto-merged into the queue and fail-closed is the safe posture the
+    finding demands."""
+    group_present = any(is_fm_group(r.get("name", "")) for r in runs)
+    if not group_present:
+        return "n/a"
+    reports = [r for r in runs if is_fm_report(r.get("name", ""))]
+    if not reports:
+        return "pending"  # legs ran; reporter verdict not on the head SHA yet
+    # If ANY report check is non-terminal, keep waiting; if all terminal, judge them.
+    if any(r.get("status") != "completed" for r in reports):
+        return "pending"
+    if all(r.get("conclusion") == "success" for r in reports):
+        return "ok"
+    return "failed"
+
+
 def _emit(line: str, summary_path: str = "") -> None:
     print(line, flush=True)
     if summary_path:
@@ -509,6 +591,43 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
             )
             print("::error::ci-summary failed — stale draft-tier leg set on a non-draft head.")
             return 1
+    # [FABLE-5] PR #3511 finding 1 (HIGH): STRUCTURAL AWAIT of the trusted
+    # feature-matrix reporter. If `opt-in group (…)` legs ran for this head, the
+    # `feature-matrix report` summary check MUST be present and terminal-SUCCESS
+    # before the gate can conclude green. This is reached only on a would-CONCLUDE
+    # render (clean settle or budget-exhaustion timeout), so a "pending" here at
+    # RENDER time is FAIL-CLOSED, never a conclude-by-timing: the poll loop holds
+    # the settle window open while the report is missing/pending (report_pending),
+    # and a render still finding it unresolved means the reporter never landed
+    # within the loop's own timeout. A "failed" reporter (crashed / completeness
+    # violation) REDs here too (belt-and-braces: its own check-run also fails the
+    # gating-set render below). Checked BEFORE the empty-set / normal-render paths
+    # so a group set that is otherwise all-green cannot pass over an absent verdict.
+    fm = fm_report_status(runs)
+    if fm != "n/a" and fm != "ok":
+        if fm == "failed":
+            _emit(
+                "### ci-summary: FAILED — the trusted `feature-matrix report` reporter "
+                "concluded a NON-SUCCESS verdict (crashed / artifact-completeness "
+                "violation / check-run POST error). The feature-matrix legs ran (an "
+                "`opt-in group (…)` check-run is present on this head), so the reporter's "
+                "verdict is required and it failed (fail-closed, PR #3511 finding 1).",
+                summary_path,
+            )
+            print("::error::ci-summary failed — the feature-matrix reporter concluded non-success.")
+        else:
+            _emit(
+                "### ci-summary: FAILED — the trusted `feature-matrix report` reporter "
+                "verdict never landed on this head SHA within the gate's budget. The "
+                "feature-matrix legs ran (an `opt-in group (…)` check-run is present), so "
+                "its `feature-matrix report` summary check-run is STRUCTURALLY REQUIRED — "
+                "a delayed or crashed reporter must never race past the gate. Fail-closed "
+                "(PR #3511 finding 1): re-run the feature-matrix-report workflow (or push "
+                "a new head) so the reporter posts its verdict.",
+                summary_path,
+            )
+            print("::error::ci-summary failed — the feature-matrix reporter verdict is missing (fail-closed).")
+        return 1
     total = len(runs)
     if total == 0:
         if _draft_recheck(tier_ctx, summary_path) != 0:
@@ -684,15 +803,26 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
             and tier_ctx.event_name == "pull_request"
             and draft_selects_unsuperseded(runs)
         )
+        # [FABLE-5] PR #3511 finding 1 (HIGH): STRUCTURAL AWAIT of the trusted
+        # feature-matrix reporter. When `opt-in group (…)` legs ran for this head
+        # but the `feature-matrix report` verdict has not yet landed as a
+        # terminal-SUCCESS check-run (absent — reporter's workflow_run not in yet
+        # or crashed pre-post — or present-but-not-terminal), treat the set as
+        # STILL-SETTLING and hold the settle window open, exactly like a
+        # draft-tier awaiting_full. A "failed" reporter does NOT hold (it is
+        # terminal and must conclude RED). Budget exhaustion while still awaiting
+        # FAILS CLOSED via render_verdict's reporter belt — never conclude-by-timing.
+        awaiting_report = fm_report_status(runs) == "pending"
         completed_hist.append(total - pending)
         # Settle is a POST-TERMINAL window re-armed ONLY by pending work (sq-ipkku):
         # already-terminal injections must not starve convergence.
-        stable = 0 if (pending or awaiting_full) else stable + 1
+        stable = 0 if (pending or awaiting_full or awaiting_report) else stable + 1
         names = sorted({r.get("name", "") for r in runs})
         changed = " (name set changed)" if prev_names is not None and names != prev_names else ""
         prev_names = names
         extra = f", {len(forgiven)} superseded-cancelled forgiven" if forgiven else ""
         extra += ", awaiting the full-tier re-run (draft-tier selection present)" if awaiting_full else ""
+        extra += ", awaiting the feature-matrix reporter verdict" if awaiting_report else ""
         print(
             f"attempt {attempt}: {total} check-run(s), {pending} running, "
             f"all-terminal stable for {stable}/{cfg.settle_polls} poll(s){changed}{extra}",
@@ -708,7 +838,9 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
         # the normal settle path below, byte-identical to before. The first
         # observation arms a grace re-poll (immediate, no sleep — dodges an API
         # read race); the red fires when a fresh fetch re-observes the same set.
-        if pending or awaiting_full:
+        # awaiting_report is included so a real failing leg still fails FAST while
+        # the gate is (correctly) holding for the reporter verdict.
+        if pending or awaiting_full or awaiting_report:
             ff = failfast_failures(runs)
             if ff:
                 key = tuple(sorted((r.get("name", ""), r.get("id") or 0) for r in ff))

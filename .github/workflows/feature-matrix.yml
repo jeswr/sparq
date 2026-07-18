@@ -213,6 +213,13 @@ jobs:
               # still run setup (its self-test gates there) + the grouped execution
               # + the reporter. Wiring pinned by test_feature_matrix_assemble.py.
               - 'scripts/run-feature-matrix-group.py'
+              # [FABLE-5] PR #3511 review round-3 finding 2: the PRIVILEGED reporter
+              # workflow is the trust-boundary half of finding 1. A PR changing ONLY
+              # .github/workflows/feature-matrix-report.yml would otherwise skip setup,
+              # so its dedicated trusted-boundary self-tests (run in setup) never run —
+              # a change to the privileged reporter must re-run them. Wiring pinned by
+              # test_feature_matrix_assemble.py.
+              - '.github/workflows/feature-matrix-report.yml'
               # [FABLE-5] PR #3511 review finding 4: the assembler/runner self-test is
               # the mechanized guard for the gate-critical leg-name contract AND the
               # trusted-boundary wiring. A test-only edit that WEAKENS it must still

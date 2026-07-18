@@ -901,6 +901,9 @@ class TestGroupedWorkflowWiring(unittest.TestCase):
             "scripts/tests/test_feature_matrix_assemble.py",
             ".github/feature-matrix.d/**",
             ".github/workflows/feature-matrix.yml",
+            # round-3 finding 2: a PR changing ONLY the PRIVILEGED reporter workflow
+            # must still run setup so the trusted-boundary self-tests fire.
+            ".github/workflows/feature-matrix-report.yml",
         ):
             self.assertIn(
                 path, rust,
