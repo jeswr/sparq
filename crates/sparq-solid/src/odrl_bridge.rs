@@ -2140,6 +2140,17 @@ pub(crate) mod count {
 /// valid IRI (embedded `>`, quote, whitespace, …) is an `Err`, never an
 /// interpolated triple.
 ///
+/// Parsing alone does NOT make caller facts trusted: strict Turtle can still
+/// *assert* engine-owned ground facts — an `auth:*` grant triple, an internal
+/// `odrlx:` derivation (`atomicSat`/`prohibMatches`/`mode`/…), a `string:`/
+/// `log:` builtin fact, facts about the reserved `<urn:odrl-req>` request
+/// subject, or a fresh `a odrl:Request`-typed subject the grant rules would
+/// bind `?req` to — which the strata would forward into the closure as if the
+/// engine had derived them. So the parsed policy is additionally
+/// vocabulary-checked: any triple whose subject/predicate/object is a
+/// reserved/engine-owned IRI term is an `Err` and nothing is materialized
+/// (see the crate-internal `validate_policy_for_n3`).
+///
 /// # Canonical dateTime subset
 ///
 /// The strata compare `xsd:dateTime` values lexically (`string:notGreaterThan`),
@@ -2154,7 +2165,10 @@ pub(crate) mod count {
 /// # Errors
 ///
 /// Returns `Err` — materializing NOTHING — when `policy_ttl` is not strict
-/// Turtle, an `xsd:dateTime` lexical form is outside the canonical UTC subset,
+/// Turtle, a policy triple mentions a reserved/engine-owned IRI term (the
+/// `https://sparq.dev/ns/` vocabulary, the reasoner's `swap` builtin
+/// namespaces, `<urn:odrl-req>`, or the `odrl:Request` class), an
+/// `xsd:dateTime` lexical form is outside the canonical UTC subset,
 /// a prohibition is outside the supported stateless scope, a rule carries more
 /// than one logical constraint, a request field is not a valid IRI, or the N3
 /// reasoner rejects the assembled source in any stratum.
@@ -2287,8 +2301,33 @@ fn objects_of<'a>(
     triples.iter().filter(move |t| &t[0] == subject && is_named(&t[1], predicate)).map(|t| &t[2])
 }
 
+/// Engine-owned IRI prefixes/terms a caller-supplied policy may never mention as
+/// an actual RDF term (any position). The policy is UNTRUSTED data, but the N3
+/// strata forward every input fact into the closure, and closure extraction /
+/// rule bodies trust these vocabularies as engine-derived — so a caller
+/// asserting them would cross the trust boundary (inject an `auth:*` grant,
+/// fake an `odrlx:` derivation like `atomicSat`/`prohibMatches`/`mode`, assert
+/// a `string:`/`log:` builtin result, or steer the rules with facts about the
+/// reserved request subject). `https://sparq.dev/ns/` covers ALL sparq-internal
+/// vocabularies at once (`auth#`, `odrlx#`, `solidx#`, `odrl-spike#`, and any
+/// future one) rather than enumerating them.
+const RESERVED_IRI_PREFIXES: [&str; 2] =
+    ["https://sparq.dev/ns/", "http://www.w3.org/2000/10/swap/"];
+
+/// The reserved request subject IRI `serialize_request_n3` emits — the ONLY
+/// legitimate source of request facts on the N3 path.
+const REQUEST_IRI: &str = "urn:odrl-req";
+
 /// Fail-closed input validation for the N3 path, over the PARSED policy terms:
 ///
+/// 0. no triple may mention a reserved/engine-owned IRI term in ANY position —
+///    a prefix of [`RESERVED_IRI_PREFIXES`], the reserved [`REQUEST_IRI`]
+///    request subject, or the `odrl:Request` class (the grant/deny rules bind
+///    `?req` to ANY `a odrl:Request`-typed node, so a caller-minted request
+///    would be matched exactly like the real one). Parsing/escaping stops
+///    source-syntax injection but does not make untrusted RDF facts trusted;
+///    this rule is what keeps caller assertions out of the engine-owned fact
+///    space (see the docs on [`RESERVED_IRI_PREFIXES`]);
 /// 1. every `xsd:dateTime` literal must be in the canonical UTC lexical subset
 ///    ([`canonical_utc_datetime`]) — the strata compare dateTimes lexically,
 ///    which is value-correct only there;
@@ -2311,6 +2350,26 @@ fn objects_of<'a>(
 ///    access. (On a PERMISSION an out-of-scope construct merely never grants —
 ///    already fail-closed — so permissions are not scope-guarded.)
 fn validate_policy_for_n3(triples: &[[Term; 3]]) -> Result<(), String> {
+    let request_class = format!("{}Request", ODRL_NS);
+    for t in triples {
+        for term in t {
+            let Term::NamedNode(n) = term else { continue };
+            let iri = n.as_str();
+            if RESERVED_IRI_PREFIXES.iter().any(|p| iri.starts_with(p))
+                || iri == REQUEST_IRI
+                || iri == request_class
+            {
+                return Err(format!(
+                    "policy mentions the reserved/engine-owned term <{}>: a \
+                     caller-supplied policy is untrusted data and may not assert \
+                     auth-view grants, internal odrlx: derivations, reasoner \
+                     builtin facts, facts about the reserved request subject, or \
+                     request-typed subjects — refusing (fail-closed)",
+                    iri
+                ));
+            }
+        }
+    }
     for t in triples {
         if let Term::Literal(l) = &t[2] {
             if l.datatype().as_str() == XSD_DATETIME_IRI && !canonical_utc_datetime(l.value()) {

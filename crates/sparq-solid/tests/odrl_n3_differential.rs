@@ -18,6 +18,10 @@
 //! The `inj*` tests are adversarial: policy/request content carrying N3 implication
 //! rules, source-terminating quotes/newlines, and `>`-bearing IRIs must either be
 //! rejected outright or end up inert (escaped) — never derive `auth:*` triples.
+//! Beyond source syntax, STRICT-Turtle policies asserting engine-owned GROUND FACTS
+//! (a direct `auth:*` grant, internal `odrlx:` derivations, facts about the reserved
+//! `<urn:odrl-req>` subject, a caller-minted `a odrl:Request` node) must be `Err` —
+//! parsing does not make untrusted RDF facts trusted (inj5–inj8).
 //!
 //! Gated on the default-OFF `odrl-bridge` feature (requires sparq-policy).
 #![cfg(feature = "odrl-bridge")]
@@ -496,4 +500,98 @@ fn inj4_malicious_request_action_rejected() {
     let mut graph = Graph::new();
     assert!(materialize_odrl_n3(&mut graph, POL_B1, &req).is_err(), "INJ4: malformed action IRI must be rejected");
     assert!(graph.named.is_empty(), "INJ4: nothing may be materialized");
+}
+
+// ── inj5–inj8: STRICT-Turtle assertion of engine-owned facts. Parsing/escaping
+// stops source-syntax injection; these guard the other half of the trust
+// boundary — a syntactically valid policy asserting engine-owned GROUND FACTS
+// the strata would forward into the closure as if the engine derived them.
+// Every case must Err and materialize nothing (unchanged graph).
+
+#[test]
+fn inj5_direct_auth_triple_in_valid_turtle_rejected() {
+    // mallory holds NO permission, but the policy directly asserts the auth-view
+    // grant triple; forwarded uncheck it would be extracted from the final
+    // closure as a trusted grant
+    let evil = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/inj5> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ] .
+<urn:mallory> <https://sparq.dev/ns/auth#read> <urn:t/1> ."#;
+    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:mallory");
+    let mut graph = Graph::new();
+    let out = materialize_odrl_n3(&mut graph, evil, &req);
+    assert!(out.is_err(), "INJ5: asserted auth:* fact must be rejected");
+    assert!(graph.named.is_empty(), "INJ5: nothing may be materialized");
+}
+
+#[test]
+fn inj6_internal_odrlx_derivation_facts_rejected() {
+    // faking the internal derivation vocabulary: odrlx:atomicSat would mark an
+    // UNSATISFIED constraint satisfied (mallory is not the eq-recipient), and
+    // odrlx:mode would mint a new action→mode mapping — both widen
+    let fake_sat = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix odrlx: <https://sparq.dev/ns/odrlx#> .
+<urn:pol/inj6> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:mallory> ;
+    odrl:constraint _:c ] .
+_:c odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;
+    odrl:rightOperand <urn:alice> .
+_:c odrlx:atomicSat <urn:odrl-req> ."#;
+    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:mallory");
+    let mut graph = Graph::new();
+    assert!(
+        materialize_odrl_n3(&mut graph, fake_sat, &req).is_err(),
+        "INJ6: asserted odrlx:atomicSat must be rejected"
+    );
+    assert!(graph.named.is_empty(), "INJ6: nothing may be materialized");
+
+    // asserting odrlx:prohibMatches (the deny-side internal fact) is just as
+    // reserved — no caller fact may live in the odrlx: namespace at all
+    let fake_prohib = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix odrlx: <https://sparq.dev/ns/odrlx#> .
+<urn:pol/inj6b> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ] .
+<urn:pol/inj6b> odrlx:prohibMatches <urn:odrl-req> ."#;
+    let req_alice = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:alice");
+    let mut graph_b = Graph::new();
+    assert!(
+        materialize_odrl_n3(&mut graph_b, fake_prohib, &req_alice).is_err(),
+        "INJ6: asserted odrlx:prohibMatches must be rejected"
+    );
+    assert!(graph_b.named.is_empty(), "INJ6: nothing may be materialized");
+}
+
+#[test]
+fn inj7_reserved_request_subject_facts_rejected() {
+    // facts about <urn:odrl-req> would merge with the engine-serialized request
+    // node and steer the rules (here: retargeting the request's assignee)
+    let evil = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/inj7> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:mallory> ] .
+<urn:odrl-req> odrl:assignee <urn:mallory> ."#;
+    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:alice");
+    let mut graph = Graph::new();
+    assert!(
+        materialize_odrl_n3(&mut graph, evil, &req).is_err(),
+        "INJ7: facts about the reserved request IRI must be rejected"
+    );
+    assert!(graph.named.is_empty(), "INJ7: nothing may be materialized");
+}
+
+#[test]
+fn inj8_caller_minted_request_typed_subject_rejected() {
+    // the grant rules bind ?req to ANY `a odrl:Request` node, so a caller-minted
+    // request-shaped subject would be matched exactly like the real request
+    let evil = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/inj8> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:mallory> ] .
+<urn:fake-req> a odrl:Request ; odrl:action odrl:read ;
+    odrl:target <urn:t/1> ; odrl:assignee <urn:mallory> ."#;
+    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:alice");
+    let mut graph = Graph::new();
+    assert!(
+        materialize_odrl_n3(&mut graph, evil, &req).is_err(),
+        "INJ8: a caller-minted odrl:Request-typed subject must be rejected"
+    );
+    assert!(graph.named.is_empty(), "INJ8: nothing may be materialized");
 }
