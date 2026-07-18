@@ -22,10 +22,16 @@
 #     (parsed by scripts/bench/extract-console-envelopes.sh).
 #
 # SENTINEL PROTOCOL: /root/GATHER_DONE = validated canonical success (every cut has
-# a valid-JSON envelope for BOTH engines); /root/GATHER_FAILED = the gather itself
-# reports partial/failed (canonical=false in gather-meta.json). On GATHER_FAILED —
-# or no sentinel at all — this launcher still pulls logs + partial envelopes, then
-# EXITS NONZERO, so a failed gather can never be mistaken for a canonical run.
+# a valid-JSON envelope for BOTH engines AND gather-meta.json re-parsed with
+# canonical=true; the gather touches the sentinel BEFORE logging 'gather complete',
+# so the console marker implies the sentinel). /root/GATHER_FAILED = the gather
+# itself reports partial/failed (canonical=false in gather-meta.json). Launcher
+# success ADDITIONALLY requires the recovered gather-meta.json (SSH-pulled or
+# console-recovered) to parse with canonical=true + status=complete — a DONE signal
+# alone never certifies a run whose success artifacts were not durably produced.
+# On GATHER_FAILED — or no sentinel, or no canonical provenance — this launcher
+# still pulls logs + partial envelopes, then EXITS NONZERO, so a failed gather can
+# never be mistaken for a canonical run.
 #
 # Usage:  AWS_PROFILE=pss scripts/bench/canonical-beir-bench.sh [<branch>]
 #   env: REGION ITYPE BEIR_CUTS BEIR_K WATCHDOG_S EBS_GB RESULTS_LOCAL
@@ -59,6 +65,7 @@ log() { printf '[canonical-beir %s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 die() { printf '[canonical-beir] ERROR: %s\n' "$*" >&2; exit 1; }
 
 command -v aws >/dev/null || die "aws CLI not found"
+command -v python3 >/dev/null || die "python3 not found (verifies the recovered gather-meta.json)"
 mkdir -p "$RESULTS_LOCAL"
 
 WORK="$(mktemp -d)"
@@ -219,13 +226,28 @@ if [ -s "$RESULTS_LOCAL/GATHER_FAILED.txt" ]; then FAILED=1; else rm -f "$RESULT
 
 log "envelopes in $RESULTS_LOCAL/competitor-results:"
 ls -la "$RESULTS_LOCAL"/competitor-results/*.json 2>/dev/null >&2 || log "  (none yet)"
-if [ "$DONE" = 1 ] && [ "$FAILED" = 0 ]; then
-  log "done; cleanup trap terminates $INSTANCE_ID + deletes keypair/SG"
+
+# Canonical success requires the RECOVERED provenance artifact, not just a DONE
+# signal: gather-meta.json (SSH-pulled or console-recovered above) must re-parse
+# with canonical=true + status=complete. Console text / sentinel observation alone
+# never certifies a run whose success artifacts were not durably produced.
+META_CANONICAL=0
+if python3 -c 'import json, sys
+m = json.load(open(sys.argv[1]))
+sys.exit(0 if (m.get("canonical") is True and m.get("status") == "complete") else 1)' \
+    "$RESULTS_LOCAL/competitor-results/gather-meta.json" 2>/dev/null; then
+  META_CANONICAL=1
+fi
+
+if [ "$DONE" = 1 ] && [ "$FAILED" = 0 ] && [ "$META_CANONICAL" = 1 ]; then
+  log "done (sentinel + canonical=true gather-meta.json recovered); cleanup trap terminates $INSTANCE_ID + deletes keypair/SG"
 else
   # Surface the honest NOT-canonical outcome WITHOUT losing logs/results (all
-  # pulled above): a failed/partial/sentinel-less gather exits nonzero.
+  # pulled above): a failed/partial/sentinel-less/provenance-less gather exits nonzero.
   if [ "$FAILED" = 1 ]; then
     log "gather reported FAILURE — partial/failed, NOT canonical (see GATHER_FAILED.txt + gather.log.tail; gather-meta.json carries canonical=false)"
+  elif [ "$DONE" = 1 ]; then
+    log "DONE was signalled but no gather-meta.json with canonical=true/status=complete was recovered — NOT canonical (durable provenance is a success prerequisite)"
   else
     log "NOTE: sentinel not observed — see $RESULTS_LOCAL/GATHER_STEP.txt for the last step"
   fi

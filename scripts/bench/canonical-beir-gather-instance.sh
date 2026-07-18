@@ -25,7 +25,12 @@
 #
 # SENTINEL PROTOCOL (machine-enforced honesty): /root/GATHER_DONE is written ONLY
 # after every requested cut has a VALID-JSON envelope for BOTH engines (the
-# lucene-anserini oracle AND sparq-text). A failed provision / build / cut instead
+# lucene-anserini oracle AND sparq-text) AND gather-meta.json has been durably
+# written + independently re-parsed with canonical=true — provenance is a
+# canonical-success ARTIFACT, not a best-effort side channel. GATHER_DONE is
+# touched BEFORE the 'gather complete' console marker, so the console text can
+# never appear without the sentinel on disk (the launcher accepts that text as
+# success when SSH is dead). A failed provision / build / cut / meta write instead
 # writes /root/GATHER_FAILED (+ gather-meta.json canonical=false, status
 # partial|failed) and exits nonzero — so an empty or partial gather can never look
 # like a completed canonical run at the launcher protocol level. NEVER shuts the
@@ -183,11 +188,12 @@ fi
 CANONICAL_PY=False; [ "$GATHER_STATUS" = "complete" ] && CANONICAL_PY=True
 step "outcome validation: status=$GATHER_STATUS valid_envelopes=$VALID_ENVELOPES${FAILURES:+ missing:$FAILURES}"
 
-# ---- 5. box provenance for the §4 transcription --------------------------------------
+# ---- 5. box provenance for the §4 transcription (a CANONICAL-SUCCESS artifact) -------
 step "write gather-meta.json"
 IID="$(TOK=$(curl -s -m 3 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null); \
   curl -s -m 3 -H "X-aws-ec2-metadata-token: $TOK" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || true)"
-python3 - "$RESULTS_DIR/gather-meta.json" <<META || step "WARN: gather-meta.json write failed"
+META_OK=0
+python3 - "$RESULTS_DIR/gather-meta.json" <<META && META_OK=1
 import json, subprocess, sys, datetime
 def sh(c):
     try: return subprocess.run(c, shell=True, capture_output=True, text=True, timeout=30).stdout.strip()
@@ -205,6 +211,23 @@ json.dump({
     "beir": sh("python3 -m pip show beir 2>/dev/null | grep ^Version:"),
 }, open(sys.argv[1], "w"), indent=1)
 META
+# Durable-provenance gate: independently re-parse what actually landed on disk and
+# demand it carries the validated status. A run whose provenance record is missing,
+# truncated, or stale can never be canonical — demote it (complete -> partial) so
+# the sentinel branch below writes GATHER_FAILED and exits nonzero instead of
+# laundering the write failure into success.
+if [ "$META_OK" = 1 ]; then
+  python3 -c 'import json, sys
+m = json.load(open(sys.argv[1]))
+assert m["status"] == sys.argv[2]
+assert m["canonical"] is (sys.argv[2] == "complete")' \
+    "$RESULTS_DIR/gather-meta.json" "$GATHER_STATUS" 2>/dev/null || META_OK=0
+fi
+if [ "$META_OK" != 1 ]; then
+  FAILURES="$FAILURES meta:gather-meta.json-write-or-reparse-failed"
+  [ "$GATHER_STATUS" = "complete" ] && GATHER_STATUS="partial"
+  step "WARN: gather-meta.json write/re-parse FAILED — no durable provenance, demoted to status=$GATHER_STATUS (NOT canonical)"
+fi
 
 # ---- 6. console-output backstop + sentinel protocol ----------------------------------
 # The envelope dump runs in EVERY outcome — partial evidence must stay recoverable
@@ -218,10 +241,18 @@ for f in "$RESULTS_DIR"/*.json; do
   echo "===ENVELOPE-END==="
 done
 df -h / >&2
-if [ "$GATHER_STATUS" = "complete" ]; then
+if [ "$GATHER_STATUS" = "complete" ] && touch "$SENTINEL_DIR/GATHER_DONE"; then
+  # Sentinel BEFORE the console marker: the launcher accepts the console text
+  # 'gather complete' as success when SSH is dead, so that text must be impossible
+  # to emit unless GATHER_DONE is already durably on disk — a crash (or a failed
+  # touch) between the two must read as failure, never success.
   step "gather complete"
-  touch "$SENTINEL_DIR/GATHER_DONE"
 else
+  if [ "$GATHER_STATUS" = "complete" ]; then
+    # Validation passed but the success sentinel could not be written — without it
+    # the launcher protocol cannot certify the run, so it is NOT canonical.
+    GATHER_STATUS="partial"; FAILURES="$FAILURES sentinel:GATHER_DONE-touch-failed"
+  fi
   # Distinct FAILURE sentinel + nonzero exit: the launcher surfaces partial/failed
   # instead of treating the run as canonical. Honest NOT-RUN, a re-run action —
   # never a sparq win by omission.

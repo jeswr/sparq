@@ -10,8 +10,12 @@
 # DISTINCT /root/GATHER_FAILED sentinel, canonical=false + status partial|failed,
 # and exit nonzero, so the launcher can machine-distinguish an honest NOT-RUN from
 # a completed canonical gather. This harness pins exactly that, covering TOTAL
-# failure, PARTIAL output, invalid-JSON envelopes, and the success path (including
-# console-recovery of the emitted envelopes via extract-console-envelopes.sh).
+# failure, PARTIAL output, invalid-JSON envelopes, the success path (including
+# console-recovery of the emitted envelopes via extract-console-envelopes.sh),
+# a FORCED gather-meta.json write failure (provenance is a canonical-success
+# prerequisite — round 2), and a failed GATHER_DONE touch (the console
+# 'gather complete' marker the launcher accepts as success must be impossible
+# to emit unless the sentinel is already on disk — round 2).
 #
 # HERMETIC: the script under test is copied into a scratch repo tree whose
 # scripts/gather-competitors.sh is a scenario stub; apt-get/java/cargo/curl and the
@@ -26,6 +30,7 @@ SCRIPT="$ROOT/scripts/bench/canonical-beir-gather-instance.sh"
 EXTRACT="$ROOT/scripts/bench/extract-console-envelopes.sh"
 [ -f "$SCRIPT" ] || { echo "FATAL: $SCRIPT not found"; exit 2; }
 REAL_PY="$(command -v python3)" || { echo "FATAL: python3 required"; exit 2; }
+REAL_TOUCH="$(command -v touch)" || { echo "FATAL: touch required"; exit 2; }
 
 pass=0; fail=0
 ok()  { pass=$((pass + 1)); }
@@ -59,6 +64,13 @@ printf '#!/usr/bin/env bash\necho "stub openjdk 21"\nexit 0\n' > "$BIN/java"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$BIN/curl"
 printf '#!/usr/bin/env bash\nexit "${STUB_CARGO_RC:-0}"\n' > "$BIN/cargo"
 cp "$BIN/cargo" "$CARGOHOME/bin/cargo"   # the script prepends $CARGO_HOME/bin later
+# touch shadow: fail on demand (case 6 forces the GATHER_DONE touch to fail);
+# execs the real touch otherwise so the success path still creates the sentinel.
+cat > "$BIN/touch" <<TSTUB
+#!/usr/bin/env bash
+[ "\${STUB_TOUCH_RC:-0}" != 0 ] && exit "\$STUB_TOUCH_RC"
+exec "$REAL_TOUCH" "\$@"
+TSTUB
 # python3 shadow: block `-m venv` (the script then falls back to the pre-made fake
 # venv, or honestly fails provisioning when there is none); exec the real python3
 # for everything else (JSON validation + gather-meta.json need it).
@@ -82,7 +94,7 @@ exec "$REAL_PY" "\$@"
 PYSTUB
 chmod +x "$REPO/scripts/gather-competitors.sh" "$BIN"/* "$CARGOHOME/bin/cargo" "$SANDBOX/venv-python3"
 
-run_gather() {  # run_gather <provision:yes|no> <cargo_rc> <gc_mode> <logfile> -> echoes rc
+run_gather() {  # run_gather <provision:yes|no> <cargo_rc> <gc_mode> <logfile> [pre-cmd] -> echoes rc
   local provision="$1" cargo_rc="$2" mode="$3" logf="$4" rc
   rm -rf "$SBROOT" "$VENVDIR" "$RESULTS" "$SANDBOX/beir-data"
   mkdir -p "$SBROOT" "$SANDBOX/beir-data"
@@ -90,11 +102,12 @@ run_gather() {  # run_gather <provision:yes|no> <cargo_rc> <gc_mode> <logfile> -
     mkdir -p "$VENVDIR/bin"
     cp "$SANDBOX/venv-python3" "$VENVDIR/bin/python3"
   fi
+  if [ -n "${5:-}" ]; then eval "$5"; fi   # per-case sabotage hook (runs after the reset)
   set +e
   env HOME="$SANDBOX/home" PATH="$BIN:$PATH" CARGO_HOME="$CARGOHOME" \
       SENTINEL_DIR="$SBROOT" BEIR_VENV_DIR="$VENVDIR" BEIR_DATA_DIR="$SANDBOX/beir-data" \
       BEIR_CUTS="scifact" BEIR_K=100 \
-      STUB_GC_MODE="$mode" STUB_CARGO_RC="$cargo_rc" \
+      STUB_GC_MODE="$mode" STUB_CARGO_RC="$cargo_rc" STUB_TOUCH_RC="${STUB_TOUCH_RC:-0}" \
       bash "$REPO/scripts/bench/canonical-beir-gather-instance.sh" > "$logf" 2>&1
   rc=$?
   set -e
@@ -157,7 +170,30 @@ else
   bad "extractor $EXTRACT missing"
 fi
 
+# ---- 5. META WRITE FAILURE: envelopes all valid but gather-meta.json cannot be ------
+# written (pre-made as a directory) → provenance is a canonical-success prerequisite,
+# so the run must demote to partial: GATHER_FAILED, no GATHER_DONE, nonzero, and the
+# console must NOT carry the 'gather complete' marker the launcher accepts as DONE.
+rc="$(run_gather yes 0 both "$SANDBOX/s5.log" 'mkdir -p "$RESULTS/gather-meta.json"')"
+[ "$rc" != 0 ] && ok || bad "meta-write failure must exit nonzero (got rc=$rc)"
+[ ! -e "$SBROOT/GATHER_DONE" ] && ok || bad "meta-write failure must NOT emit GATHER_DONE"
+grep -q "meta:gather-meta.json" "$SBROOT/GATHER_FAILED" 2>/dev/null && ok || bad "GATHER_FAILED must name the failed gather-meta.json write"
+grep -q "status=partial" "$SBROOT/GATHER_FAILED" 2>/dev/null && ok || bad "meta-write failure must demote the run to status=partial"
+grep -qa "STEP.*gather complete" "$SANDBOX/s5.log" && bad "meta-write-failure log must not say 'gather complete' (launcher greps for it)" || ok
+grep -qa "gather FAILED" "$SANDBOX/s5.log" && ok || bad "meta-write-failure log must say 'gather FAILED'"
+
+# ---- 6. GATHER_DONE TOUCH FAILURE: validation passes but the success sentinel ------
+# cannot be written → the console 'gather complete' marker must never appear (it is
+# emitted only AFTER a successful touch), so a launcher trusting console text can
+# never report success without the sentinel durably on disk.
+rc="$(STUB_TOUCH_RC=1 run_gather yes 0 both "$SANDBOX/s6.log")"
+[ "$rc" != 0 ] && ok || bad "GATHER_DONE touch failure must exit nonzero (got rc=$rc)"
+[ ! -e "$SBROOT/GATHER_DONE" ] && ok || bad "failed touch must not leave a GATHER_DONE sentinel"
+grep -qa "STEP.*gather complete" "$SANDBOX/s6.log" && bad "touch-failure log must not say 'gather complete' without GATHER_DONE on disk" || ok
+grep -q "sentinel:GATHER_DONE-touch-failed" "$SBROOT/GATHER_FAILED" 2>/dev/null && ok || bad "GATHER_FAILED must name the failed GATHER_DONE touch"
+grep -qa "gather FAILED" "$SANDBOX/s6.log" && ok || bad "touch-failure log must say 'gather FAILED'"
+
 echo ""
 echo "test_beir_gather_sentinel: ${pass} passed, ${fail} failed."
 [ "$fail" -eq 0 ] || exit 1
-echo "test_beir_gather_sentinel: OK — failed/partial/invalid gathers never emit GATHER_DONE; success validates + round-trips."
+echo "test_beir_gather_sentinel: OK — failed/partial/invalid/provenance-less gathers never emit GATHER_DONE or the console success marker; success validates + round-trips."
