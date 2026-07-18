@@ -157,6 +157,25 @@ nightly = true
 pr_gate = true
 
 [[suite]]
+id = "substrate-merge-join-equivalence"
+name = "sparq-substrate (merge-join equivalence)"
+crate = "sparq-substrate"
+features = "--features join"
+harnesses = [
+  "merge_join_equals_nested_loop_reference",
+  "merge_join_extra_shared_equals_nested_loop_reference",
+  "domain_merge_join_dup_key_multimatch_survives_the_bound",
+]
+# join.rs imports the Row/Key aliases + Id from rows.rs (representation only, no logic),
+# so a rows.rs change re-obligates the equivalence proofs too.
+proves = [
+  "crates/sparq-substrate/src/join.rs",
+  "crates/sparq-substrate/src/rows.rs",
+]
+nightly = true
+pr_gate = true
+
+[[suite]]
 id = "wac-oracle-escalation-corpus"
 name = "sparq-wac-oracle (.acl escalation corpus domain coverage)"
 crate = "sparq-wac-oracle"

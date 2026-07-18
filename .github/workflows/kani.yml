@@ -254,6 +254,19 @@ jobs:
               witness_mixed_tier_collapse_now_exact
               witness_numeric_vs_string_now_ranked_by_kind
               witness_nan_now_totalised_first
+          # [FABLE-5] sq-3dyje.10: proof-program wave B-3 — bounded merge-join ≡ nested-loop
+          # reference over the sparq-substrate join kernel (research/testing-strategy-
+          # assessment-2026-07.md §7.2), plus the mandatory §5.1 domain-coverage self-check
+          # (dup-key multi-match witness survival). Bounds: ≤3 two-column rows per side, ids
+          # in 0..=2, unwind 12 — solves in seconds-to-minutes per harness (measured locally,
+          # non-canonical; see the suite entry in ci/formal-verification.toml).
+          - name: "sparq-substrate (merge-join equivalence)"
+            crate: sparq-substrate
+            features: "--features join"
+            harnesses: >-
+              merge_join_equals_nested_loop_reference
+              merge_join_extra_shared_equals_nested_loop_reference
+              domain_merge_join_dup_key_multimatch_survives_the_bound
           # [FABLE-5] sq-39kps: domain-coverage self-check for the wac-oracle POST-Slug
           # `.acl` escalation corpus — pins that the static CORPUS genuinely contains a
           # surviving escalation (exact-image asserts + a kani::cover! witness), so a

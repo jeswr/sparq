@@ -1998,3 +1998,189 @@ mod tests {
         assert_eq!(static_out, delta_out, "delta and static single-column joins must agree under the fast path");
     }
 }
+
+// ---- Kani bounded proofs: merge-join == nested-loop reference (sq-3dyje.10) --------------
+//
+// Proof-program wave B-3 (research/mechanized-proof-program.md §6 "plausible next wave";
+// mandated by research/testing-strategy-assessment-2026-07.md §7.2): a bounded model-checked
+// proof that [`merge_join`] — the sorted-merge kernel above — produces EXACTLY what the
+// obviously-correct naive nested-loop join produces, on every input in a small symbolic
+// domain. This is a HARNESS-ONLY addition: the runtime kernels above are byte-unchanged.
+//
+// TIER + BOUNDS (never plain "proved"): **PROVED (bounded)** — for ALL pairs of relations of
+// up to `MAX_ROWS = 3` two-column rows per side, every id in `0..=MAX_ID = 2`, each side
+// sorted (nondecreasing, duplicates allowed) on its key column, with the key on a DIFFERENT
+// column index per side (left col 0, right col 1 — so the `lk`/`rk` indexing generality is
+// in-domain), both with and without an `extra_shared` filter pair, under
+// `#[kani::unwind(12)]` (the longest concrete loop is the <= 9-element output-vector
+// comparison; 12 leaves margin for iterator adapters). Larger relations, wider rows and
+// wider id domains are OUT of the proved domain — the runtime unit tests + the engine
+// differential/conformance suites remain the tier of record there.
+//
+// WHY SEQUENCE (not just multiset) EQUALITY: on key-sorted inputs the merge kernel's
+// emission order — key groups in ascending key order, left-major x right-minor within a
+// group — coincides with the nested-loop's left-major scan order, because each left row's
+// matches form one contiguous sorted right-side run. `assert_eq!` on the output vectors
+// therefore both IMPLIES the multiset claim and pins the deterministic emission order the
+// engine's byte-identity ratchets rely on.
+//
+// NOT modelled (stated bounds, not oversights): a non-[`NoBudget`] budget (truncation is a
+// caller policy, not part of the equivalence claim), multi-pair `extra_shared` (one pair
+// exercises the filter loop's all()-semantics; the loop body is pair-independent), and rows
+// wider than 2 columns (column indexing is exercised by the asymmetric lk=0/rk=1 layout).
+//
+// MUTATION SPOT-CHECK (verified red, then reverted, on this workstation — see the PR body):
+// flipping the `extra_shared.iter().all(..)` guard in [`merge_join`] to `.any(..)` turns
+// every no-extra-pair match into a non-emission, and `merge_join_equals_nested_loop_reference`
+// goes RED with a concrete counterexample. A harness that cannot fail launders confidence.
+//
+// DOMAIN-COVERAGE SELF-CHECK (mandatory, §5.1 of the proof program — the sq-sqtk2.1
+// assume(false)-pruning class is the threat): `domain_merge_join_dup_key_multimatch_survives_
+// the_bound` pins the generator constants by plain assert (no symbolic loop, so it cannot
+// itself be pruned) AND proves via `kani::cover!` that a MAXIMAL interesting input — both
+// sides full-length, a dup-key pair on each side sharing one key (>= 4 combined rows out of
+// one key group) plus a second key group — genuinely survives the unwind bound, and that the
+// `extra_shared` filter strictly rejects on some reachable input (the filtered harness is not
+// vacuously equal to the unfiltered one).
+//
+// RUN:  cargo kani -p sparq-substrate --features join --harness <name>
+// (Wired: ci/formal-verification.toml `substrate-merge-join-equivalence` + the kani.yml
+// nightly matrix; under normal build/clippy/test this module is stripped — the `kani` cfg
+// is registered in this crate's Cargo.toml `[lints.rust]`.)
+#[cfg(kani)]
+mod kani_proofs {
+    use super::{merge_join, NoBudget};
+    use crate::rows::{Id, Row};
+
+    /// Max rows per side. 3 admits a dup-key pair PLUS a distinct second key group on one
+    /// side — the smallest bound where multi-match emission and group advance coexist.
+    const MAX_ROWS: usize = 3;
+    /// Ids (keys and payloads) are drawn from `0..=MAX_ID`. 3 values force key collisions
+    /// into reach at 3 rows while keeping the solver state space tiny.
+    const MAX_ID: Id = 2;
+
+    /// A symbolic relation of up to [`MAX_ROWS`] two-column rows, nondecreasing (duplicates
+    /// allowed — load-bearing for the multi-match case) on the key column `key_col`; the
+    /// other column holds an unconstrained payload id. `key_col` is concrete at each call
+    /// site, so the column shuffle folds away.
+    fn any_sorted_rows(key_col: usize) -> Vec<Row> {
+        let n: usize = kani::any();
+        kani::assume(n <= MAX_ROWS);
+        let mut rows: Vec<Row> = Vec::new();
+        let mut prev: Id = 0;
+        for i in 0..n {
+            let key: Id = kani::any();
+            kani::assume(key <= MAX_ID);
+            kani::assume(i == 0 || key >= prev);
+            prev = key;
+            let payload: Id = kani::any();
+            kani::assume(payload <= MAX_ID);
+            let (c0, c1) = if key_col == 0 { (key, payload) } else { (payload, key) };
+            let mut row = Row::new();
+            row.push(c0);
+            row.push(c1);
+            rows.push(row);
+        }
+        rows
+    }
+
+    /// The obviously-correct reference: scan every (left, right) pair, emit the combined
+    /// row for every key-equal pair that passes the `extra_shared` agreement filter —
+    /// SPARQL equi-join semantics stated directly, with no merge/ordering cleverness.
+    fn nested_loop_join(
+        left: &[Row],
+        lk: usize,
+        right: &[Row],
+        rk: usize,
+        extra_shared: &[(usize, usize)],
+        right_only: &[usize],
+    ) -> Vec<Row> {
+        let mut out = Vec::new();
+        for lrow in left {
+            for rrow in right {
+                if lrow[lk] == rrow[rk]
+                    && extra_shared.iter().all(|&(lc, rc)| lrow[lc] == rrow[rc])
+                {
+                    let mut row = lrow.clone();
+                    for &rc in right_only {
+                        row.push(rrow[rc]);
+                    }
+                    out.push(row);
+                }
+            }
+        }
+        out
+    }
+
+    /// PROVED (bounded): [`merge_join`] with no `extra_shared` pairs equals the nested-loop
+    /// reference — same rows, same order — on every in-domain sorted input pair. The right
+    /// key deliberately lives at column 1 (payload at 0) so the `lk`/`rk` indexing is
+    /// asymmetric, and `right_only = [0]` appends the right payload to each match.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn merge_join_equals_nested_loop_reference() {
+        let left = any_sorted_rows(0);
+        let right = any_sorted_rows(1);
+        let mut out = Vec::new();
+        merge_join(&left, 0, &right, 1, &[], &[0], &NoBudget, &mut out);
+        let reference = nested_loop_join(&left, 0, &right, 1, &[], &[0]);
+        assert_eq!(out, reference, "merge_join must equal the nested-loop reference");
+    }
+
+    /// PROVED (bounded): same equivalence with one `extra_shared` pair — the left payload
+    /// (col 1) must agree with the right payload (col 0) — so the repeated-shared-variable
+    /// agreement filter inside the key-group emit loop is inside the proved domain.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn merge_join_extra_shared_equals_nested_loop_reference() {
+        let left = any_sorted_rows(0);
+        let right = any_sorted_rows(1);
+        let mut out = Vec::new();
+        merge_join(&left, 0, &right, 1, &[(1, 0)], &[0], &NoBudget, &mut out);
+        let reference = nested_loop_join(&left, 0, &right, 1, &[(1, 0)], &[0]);
+        assert_eq!(out, reference, "merge_join with extra_shared must equal the reference");
+    }
+
+    /// Domain-coverage self-check (proof-program §5.1, MANDATORY — the sq-sqtk2.1
+    /// assume(false)-pruning guard): the mutation spot-check alone cannot detect a bound
+    /// that silently empties the domain of its interesting inputs, so this harness proves
+    /// they genuinely survive.
+    ///
+    /// (a) Exact-domain pinning — plain asserts over the generator CONSTANTS (no symbolic
+    ///     loop, so this leg cannot itself be pruned): the bounds admit a dup-key pair plus
+    ///     a distinct second key on one side.
+    /// (b) Witness survival — `kani::cover!` that a MAXIMAL interesting input is REACHABLE
+    ///     under this suite's own unwind bound: both sides full-length, a dup-key pair on
+    ///     each side sharing one key (so one key group multi-match-emits >= 4 rows) and a
+    ///     second left key group (so the group-advance arm runs in the same witness); plus
+    ///     a second cover that the `extra_shared` filter strictly rejects on some reachable
+    ///     input. If a future re-scope prunes these, the covers go UNSATISFIABLE and this
+    ///     harness goes RED.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn domain_merge_join_dup_key_multimatch_survives_the_bound() {
+        // (a) Exact-domain pinning over the constants.
+        assert!(MAX_ROWS >= 3, "domain must admit a dup-key pair plus a second key group");
+        assert!(MAX_ID >= 1, "domain must admit two distinct key values");
+
+        let left = any_sorted_rows(0);
+        let right = any_sorted_rows(1);
+        let mut plain = Vec::new();
+        merge_join(&left, 0, &right, 1, &[], &[0], &NoBudget, &mut plain);
+        let mut filtered = Vec::new();
+        merge_join(&left, 0, &right, 1, &[(1, 0)], &[0], &NoBudget, &mut filtered);
+
+        // (b) Witness survival: the maximal multi-match dup-key input is reachable.
+        kani::cover!(
+            left.len() == MAX_ROWS
+                && right.len() == MAX_ROWS
+                && left[0][0] == left[1][0]
+                && right[0][1] == right[1][1]
+                && left[0][0] == right[0][1]
+                && left[2][0] != left[0][0]
+                && plain.len() >= 4
+        );
+        // The extra_shared filter genuinely rejects somewhere in-domain.
+        kani::cover!(filtered.len() < plain.len());
+    }
+}
