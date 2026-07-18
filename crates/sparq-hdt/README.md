@@ -41,15 +41,14 @@ export direction over `save` (sq-8ju74).
 
 ## ✨ Features
 
-- Wraps the maintained [`hdt`](https://crates.io/crates/hdt) crate
-  (KonradHoeffner/hdt, MIT) for the binary decode rather than reimplementing the
-  format (Plain/Log64 sequences, Plain-Front-Coded dictionary sections,
-  BitmapTriples).
-- **Format coverage**: the standard HDT v1.0 layout produced by hdt-cpp / hdt-java
-  / the `hdt` crate — `FourSectionDictionary` (PFC) + `BitmapTriples`, SPO order.
-  Exotic layouts from the W3C member submission that no mainstream tool emits
-  (triples lists, alternate dictionary implementations) are rejected with an error
-  by the wrapped reader.
+- **Direct decoder is the default binary ingest**: `load` / `load_reader` (and the
+  filtered/stats variants) decode the HDT sections locally (`src/decode.rs`) in a one-shot
+  SPO scan; the maintained [`hdt`](https://crates.io/crates/hdt) crate (KonradHoeffner/hdt, MIT)
+  remains the upstream-backed oracle/auxiliary path (`graph_from_hdt`, `write`-feature writers).
+- **Format coverage**: the standard HDT v1.0 layout produced by hdt-cpp / hdt-java /
+  the `hdt` crate — `FourSectionDictionary` (PFC) + `BitmapTriples`, SPO order. Exotic
+  layouts from the W3C member submission that no mainstream tool emits (triples lists,
+  alternate dictionary implementations) are rejected with an error by the direct decoder.
 - **Translation is id-level and single-pass**: each distinct HDT dictionary id is
   decompressed once, interned into the sparq dictionary, and memoized in a flat
   per-section table (shared-section terms are translated once even when used as
