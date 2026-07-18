@@ -208,6 +208,11 @@ research/change-based-test-selection.md, present the decision, recommend KEEP-se
 Not worth extending selection to: conformance ratchets (44–76 s each, parallel,
 never the pole), container-scan (3.6 m, parallel), codeql language-scoping (security
 gate, 3.8 m, the code_scanning ruleset expects analyses — small win, real risk).
+*(2026-07-17 supersession note on the codeql rationale: CodeQL is now ADVISORY at
+merge and the live ruleset carries no `code_scanning` rule — see
+`docs/branch-protection.md` §CodeQL is advisory. The "not worth extending selection"
+conclusion stands a fortiori; only the "security gate / ruleset expects analyses"
+premise is stale.)*
 
 ### 3.5 Lever 5 — benchmarks → nightly EC2 (sibling lane; cross-reference only)
 

@@ -18,7 +18,9 @@ branch-protection status on `main` ([`docs/branch-protection.md`](docs/branch-pr
 it polls **every other check-run on the same commit** — build + tests, `clippy -D warnings`,
 the conformance / coverage / unsafe-count ratchets, the opt-in feature matrix, supply-chain,
 and the docs-honesty gates — and passes only when none failed. (One deliberate exception:
-**CodeQL is advisory at merge** — it runs on every PR but the gate neither waits on nor reds
+**CodeQL is advisory at merge** — it runs on every eligible PR (non-draft heads whose diff
+touches Rust; skipped analyses are backfilled at ready-for-review and by the
+merge-group/push-to-main/weekly runs) but the gate neither waits on nor reds
 because of it; its alerts are triaged retroactively, see §11.) So:
 
 1. Open any merged PR (or the latest commit on `main`) and look at its **checks list** —

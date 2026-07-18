@@ -155,10 +155,12 @@ and the W3C conformance + performance/coverage ratchets (never lowered). `cargo 
 to be flipped to a hard gate once the one-time `cargo fmt --all` reformat lands; format your
 code anyway.
 Security-specific lanes also run: **CodeQL** SAST
-([`codeql.yml`](./.github/workflows/codeql.yml), `security-and-quality` queries), **miri**,
-**fuzz**, **supply-chain**, and the **OpenSSF Scorecard** analysis
+([`codeql.yml`](./.github/workflows/codeql.yml), `security-and-quality` queries —
+**advisory at merge** since 2026-07-17; its alerts are triaged retroactively via the
+daily sweep issue, see [`docs/branch-protection.md`](./docs/branch-protection.md)),
+**miri**, **fuzz**, **supply-chain**, and the **OpenSSF Scorecard** analysis
 ([`scorecard.yml`](./.github/workflows/scorecard.yml)). The aggregate `ci-summary` check
-gates the merge.
+gates the merge (it neither waits on nor reds because of the advisory CodeQL legs).
 
 ### Reporting a vulnerability you find while contributing
 
@@ -171,7 +173,8 @@ jesse@jeswr.org). The machine-readable pointer is
 
 The above maps onto the NIST SSDF practices: a documented secure-coding standard and threat
 model (PW.1 — this section plus [`SECURITY.md`](./SECURITY.md) and the threat model),
-review and analysis before merge (PW.7/PW.8 — code review, CodeQL, clippy, miri, fuzz),
+review and analysis before merge (PW.7/PW.8 — code review, clippy, miri, fuzz gating
+pre-merge; CodeQL SAST advisory at merge, with retroactive alert triage),
 supply-chain provenance (PW.4/PS.3 — cargo-deny, SBOM), and coordinated vulnerability
 handling (RV — the disclosure policy and `security.txt`). Follow the PR conventions in
 `AGENTS.md` (small, reviewed, all review comments resolved before merge).

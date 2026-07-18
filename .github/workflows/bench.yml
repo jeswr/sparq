@@ -69,7 +69,8 @@ on:
   # the siblings that DO run there — it never waits on a check that was never scheduled
   # (the branch-protection required set is the single `gate` context, NOT this job by name;
   # see docs/branch-protection.md). Correctness checks (build/test/clippy/conformance/
-  # coverage/CodeQL/supply-chain) all still run on merge_group and still gate.
+  # coverage/supply-chain) all still run on merge_group and still gate; CodeQL also
+  # still runs there but is ADVISORY at merge (2026-07-17 decision — codeql.yml header).
   workflow_dispatch:
   # [SONNET-4.6] sq-mel85 (design §6.1): the nightly FULL-RUN BACKSTOP for change-based
   # selection. bench.yml previously had NO schedule trigger, so a PR that selection-

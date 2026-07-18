@@ -240,8 +240,12 @@ export default function AssurancePage() {
           status on <Code>main</Code> — it polls{" "}
           <strong className="text-foreground">every other check-run on the same commit</strong>{" "}
           (build + tests, <Code>clippy -D warnings</Code>, the conformance / coverage /
-          unsafe-count ratchets, the opt-in feature matrix, supply-chain and CodeQL, and
-          the docs-honesty gates) and passes only when none failed.
+          unsafe-count ratchets, the opt-in feature matrix, supply-chain, and the
+          docs-honesty gates) and passes only when none failed. One deliberate
+          exception: CodeQL SAST is <strong className="text-foreground">advisory at
+          merge</strong> — it still runs and feeds the code-scanning dashboard, but the
+          gate neither waits on nor fails because of it; its alerts are triaged
+          retroactively via a daily sweep.
         </p>
         <ol className="space-y-3 text-sm text-muted-foreground">
           <li className="flex gap-3">

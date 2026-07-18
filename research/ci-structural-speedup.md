@@ -257,7 +257,10 @@ parallel now.
 1. **The engine split** (`sq-6vshe.4`) — the one genuinely big architectural call; Phase 0
    RFC + steer issue is the decision package.
 2. **CodeQL placement** (`sq-6vshe.6c`) — security-posture change even though merge-gating
-   is preserved.
+   is preserved. *(2026-07-17: superseded — the maintainer later demoted CodeQL to
+   advisory at merge on every event, so merge-gating is NOT preserved; alerts are
+   triaged retroactively. See `docs/branch-protection.md` §CodeQL is advisory and the
+   supersession note in §7 above.)*
 3. **sccache S3 backend** (`sq-6vshe.5`) — new bucket + OIDC role (established pattern,
    small spend); proceed-and-document.
 

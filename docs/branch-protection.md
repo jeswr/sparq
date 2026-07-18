@@ -419,8 +419,11 @@ this document (procedure below).
   "no second human" values (`0` / `false` / `false`, see [§Required reviews](#required-reviews)),
   so those particular sub-signals do not earn points even though the *substantive*
   protections (no force-push, no deletion, squash-only linear history, conversation
-  resolution, advisory per-PR CodeQL SAST with retroactive alert triage, no bypass
-  actors, a required CI aggregator) are all present and enforced.
+  resolution, advisory CodeQL SAST with retroactive alert triage, a required CI
+  aggregator) are all present and enforced. The intended **no-bypass-actors** posture
+  is currently in **drift** — the live ruleset reports one bypass actor, pending
+  maintainer reconciliation (see the Known-drift note under
+  [§Verifying the live ruleset](#verifying-the-live-ruleset-matches-this-document)).
 
 These are **inherent to the operating model**, not fixable code changes — consistent with
 the disposition recorded in `compliance/openssf/gap-register.md` (the Scorecard SARIF is no
@@ -432,9 +435,9 @@ alerts).
 | Missing classic signal | Compensating control (live + enforced) |
 |---|---|
 | Independent human approving review | **GitHub Copilot code review on every PR** (`copilot_code_review`, `review_on_push: true`) — an automated, independent reviewer recorded on the PR. |
-| Code-owner gate | The SHA-pinned clippy/test/conformance gate aggregated by `ci-summary`, plus **CodeQL SAST run on every PR with retroactive alert triage** (advisory at merge time since 2026-07-17 — [§CodeQL is advisory](#codeql-is-advisory-retroactive-alert-triage); the daily sweep issue is the alert-accountability mechanism, not a merge block). |
+| Code-owner gate | The SHA-pinned clippy/test/conformance gate aggregated by `ci-summary`, plus **CodeQL SAST run on every eligible (non-draft, Rust-changing) PR with retroactive alert triage** (advisory at merge time since 2026-07-17 — [§CodeQL is advisory](#codeql-is-advisory-retroactive-alert-triage); the daily sweep issue is the alert-accountability mechanism, not a merge block). |
 | Review-thread accountability | **Conversation resolution required** (`required_review_thread_resolution: true`) — every Copilot/CodeQL thread must be resolved before merge. |
-| "Trusted committer only" | **No bypass actors** (`bypass_actors: []`, `current_user_can_bypass: never`) — the gate applies to the owner too; **squash-only** + **no force-push** + **no deletion** keep history linear and auditable. |
+| "Trusted committer only" | **No bypass actors** is the *intended* posture (`bypass_actors: []`, `current_user_can_bypass: never`, so the gate applies to the owner too) — ⚠️ **currently in drift**: the live ruleset reports one bypass actor (see the Known-drift note under [§Verifying the live ruleset](#verifying-the-live-ruleset-matches-this-document)), pending maintainer reconciliation. **Squash-only** + **no force-push** + **no deletion** keep history linear and auditable (these ARE live). |
 
 The agent operating discipline (`AGENTS.md`) adds a *process* layer on top: changes land via
 PR (never direct push), and an out-of-band Codex/roborev review pass is run before arming a

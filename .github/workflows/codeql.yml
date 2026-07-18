@@ -64,10 +64,11 @@ on:
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
-  # [OPUS-4.8] Merge queue: CodeQL surfaces a check on PRs, so it must also run on the
-  # queue's merge_group ref or the required ci-summary would wait for a sibling that
-  # never appears on that ref and time out. (Bare `merge_group` — it fires on every
-  # enqueue against the base branch.)
+  # [FABLE-5] Merge queue: kept so the exact merged tree still gets an advisory analysis
+  # feeding the dashboard (visibility only — since the 2026-07-17 demotion the
+  # ci-summary aggregator neither waits on nor reds because of CodeQL legs, so
+  # this trigger is no longer needed to unblock the gate). (Bare `merge_group` —
+  # it fires on every enqueue against the base branch.)
   merge_group:
   # Weekly cadence so the latest CodeQL query packs are re-run against an otherwise
   # quiet default branch (catches newly-published queries on unchanged code).
@@ -153,13 +154,13 @@ jobs:
     needs: changes
     # [FABLE-5] Draft-tier CI: SKIPPED on draft PR heads (this analysis is one of
     # the slowest per-push lanes and the fleet's draft review-fix churn re-ran it
-    # on every push). VERIFIED before changing: CodeQL is NOT schedule/main-only —
-    # it runs per-PR — but the pre-merge guarantee is preserved because the
-    # ready_for_review full-tier run analyses the same head SHA (types above) and
-    # the merge_group + push-to-main + weekly-schedule runs are untouched; the
-    # branch-protection `code_scanning` alert rule therefore still sees a CodeQL
-    # analysis of the head before any merge. Fail-open off the PR path: any
-    # non-pull_request event satisfies the first disjunct => RUN.
+    # on every push). A draft head still gets analysed before merge in practice:
+    # the ready_for_review full-tier run analyses the same head SHA (types above)
+    # and the merge_group + push-to-main + weekly-schedule runs are untouched —
+    # but that analysis is ADVISORY (header above): nothing blocks a merge on it
+    # (the live ruleset has no `code_scanning` rule; see the `changes` job note),
+    # and its alerts are triaged retroactively via the daily sweep. Fail-open off
+    # the PR path: any non-pull_request event satisfies the first disjunct => RUN.
     # [OPUS-4.8] path-aware CI: ALSO skipped when the PR diff touches no Rust
     # (needs.changes.outputs.rust_changed == 'false') — nothing for CodeQL to
     # analyse. rust_changed is forced 'true' off the PR path (see `changes`), so
