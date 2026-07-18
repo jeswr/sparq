@@ -69,9 +69,9 @@ def _self_test():
     # impl + a security surface (area:sparq-zk) -> security rule wins over role -> Opus, escalate
     mc, ag, esc = resolve(["role:impl", "area:sparq-zk"], doc)
     chk("impl+zk -> opus/escalate", (mc, ag, esc), (["opus"], "sparq-reviewer", True))
-    # plain impl -> Fable-led chain
+    # plain impl -> sol-led chain (maintainer directive 2026-07-18)
     mc, ag, esc = resolve(["role:impl", "area:sparq-core"], doc)
-    chk("impl -> fable-led", (mc[0], ag, esc), ("fable", "sparq-rust-impl", False))
+    chk("impl -> sol-led", (mc, ag, esc), (["sol", "fable", "opus"], "sparq-rust-impl", False))
     # docs -> haiku-led
     chk("docs -> haiku", resolve(["role:docs", "area:x"], doc)[0][0], "haiku")
     # [FABLE-5] UI ownership: site -> terra-led (GPT-5.6 codex, the original dashboard builder)
@@ -80,10 +80,12 @@ def _self_test():
     # FRONTIER-ONLY chain — no sub-frontier model (sonnet/haiku) anywhere in it, so exhaustion
     # DEFERS at the registry claim step (retried next tick) instead of degrading tier.
     mc, ag, esc = resolve(["role:ci", "area:ci"], doc)
-    chk("ci -> frontier-only fable-first", (mc, ag, esc), (["fable", "sol"], "sparq-ci-infra", False))
+    chk("ci -> frontier-only sol-first", (mc, ag, esc), (["sol", "fable"], "sparq-ci-infra", False))
     chk("ci chain has no sub-frontier tier", sorted(set(mc) & {"sonnet", "haiku"}), [])
-    # no role -> defaults (fable-led)
-    chk("no role -> defaults", resolve(["area:sparq-core"], doc)[0][0], "fable")
+    # no role -> defaults (sol-led, 2026-07-18)
+    chk("no role -> defaults", resolve(["area:sparq-core"], doc)[0][0], "sol")
+    # perf -> sol-led with the fable/opus fallbacks (new order pinned)
+    chk("perf -> sol-led", resolve(["role:perf", "area:sparq-engine"], doc)[0], ["sol", "fable", "opus"])
     # review role -> opus + escalate
     chk("review -> opus/escalate", resolve(["role:review"], doc)[1:], ("sparq-reviewer", True))
     print("route-resolve self-test", "PASSED" if ok else "FAILED")

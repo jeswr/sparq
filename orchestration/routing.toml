@@ -82,10 +82,10 @@ agent = "sparq-reviewer"
 escalate = true                        # consumed by dispatch: on chain-exhaustion, label needs:user
 
 # ---------------------------------------------------------------------------------------------------
-# ROLE ROUTES. Fable is the primary code-writer (maintainer doctrine); terra (GPT) is the
-# cross-provider implementation fallback so an Anthropic outage does not stall implementation.
-# Implementation chains lead with sol (maintainer directive 2026-07-18, credit abundance; cross-provider
-# review flips automatically, so sol-authored implementation still receives Anthropic review).
+# ROLE ROUTES. Implementation chains LEAD WITH SOL (maintainer directive 2026-07-18: credit
+# abundance; capability order opus < luna < fable < sol). Fable is the anthropic-side fallback,
+# so an OpenAI outage does not stall implementation. Cross-provider review flips automatically:
+# sol-authored implementation receives Anthropic review, and vice versa.
 [[route]]
 role = "impl"
 model_chain = ["sol", "fable", "opus"]
