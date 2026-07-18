@@ -112,8 +112,9 @@ cargo run --release -p sparq-hdt --example bench_load -- --json /tmp/hdt.json
 
 - Skill: `skills/hdt-format/SKILL.md`
 - Perf dashboard: <https://sparq.jeswr.org/dev/bench>
-- Not yet supported / open work: `bd list -l area:sparq-hdt` (the decode-only ingest fast
-  path; upstream notes in `UPSTREAM.md`).
+- Not yet supported / open work: `bd list -l area:sparq-hdt`. (The decode-only ingest fast
+  path itself already ships as the default `load` path; what remains open is upstream
+  adoption of a decode-only entry point — status in `UPSTREAM.md` item 2.)
 
 ## License
 

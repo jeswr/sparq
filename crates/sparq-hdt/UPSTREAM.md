@@ -7,9 +7,11 @@ their CURRENT status against `hdt` master / 0.7.x.
 
 > **Status (sq-v7be, verified 2026-06-19 against `KonradHoeffner/hdt` master):**
 > - **Builder gap — OBVIATED (no upstream change needed from us).** See item 1.
-> - **Decode-only entry point — OPEN UPSTREAM DRAFT PR
->   [`KonradHoeffner/hdt#124`](https://github.com/KonradHoeffner/hdt/pull/124).**
->   See item 2.
+> - **Decode-only entry point — STILL OPEN on the released line ([FABLE-5] sq-fkj,
+>   re-verified 2026-07-18 against the published `hdt` 0.7.3 source, the version
+>   sparq now pins): no release through 0.7.3 ships one. Upstream DRAFT PR
+>   [`KonradHoeffner/hdt#124`](https://github.com/KonradHoeffner/hdt/pull/124)
+>   remains the tracked path.** See item 2.
 > - **`read_nt` stores literal lexical forms N-Triples-ESCAPED (spec says raw) —
 >   DOCUMENTED LIMITATION (sq-qalqs).** See item 3.
 
@@ -57,10 +59,21 @@ required for the write path; this item is closed (tracked under landed bead
 authored by `@jeswr`. It is **jeswr-review-gated** — not yet marked ready for
 maintainer review — so it is not merged. Tracking bead: `sq-fkj`.
 
+> **Re-verified against the released line ([FABLE-5] sq-fkj, 2026-07-18).** With
+> sparq now pinning `hdt` 0.7 (the sq-2l1 bump), the gap was re-checked against the
+> published **0.7.3** crate source: no decode-only entry point has shipped in any
+> release through 0.7.3. `Hdt::read` still reaches `TriplesBitmap::read_sect` →
+> `TriplesBitmap::new`, which eagerly builds the query-only index structures below.
+> The 0.6 `sucds`→`qwt` swap changed the backing library (`WaveletMatrix<Rank9Sel>`
+> → `QWT512`, `Rank9Sel` bitmaps → `RSNarrow`), not the eager build itself. Item
+> stays open pending the upstream PR; the local cost is already avoided because
+> sparq's direct decoder (below) is the default load path.
+
 **What it adds.** `Hdt::read` eagerly calls `TriplesBitmap::new`, which builds —
-purely to serve triple-pattern / object / predicate QUERIES — a `WaveletMatrix`,
-a per-object `Vec<Vec<u32>>`, a `sort_by_cached_key`, and an OP-index
-(`CompactVector` + `Rank9Sel` bitmap). A consumer doing a one-shot bulk load (read
+purely to serve triple-pattern / object / predicate QUERIES — a wavelet matrix
+over `sequence_y` (`QWT512` on 0.7.x), a full sort of per-object entries
+(`build_op_index_from_entries`), and an OP-index (a compact position sequence + an
+`RSNarrow` rank/select bitmap). A consumer doing a one-shot bulk load (read
 every triple once, in SPO order, into its own store) never issues those queries, so
 all of that is built and immediately dropped — a large, cache-hostile cost on
 ingest. The PR adds a decode-only entry point that reads the dictionary +
