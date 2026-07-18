@@ -3,7 +3,7 @@
 
 This crate WRAPS [`hdt`](https://github.com/KonradHoeffner/hdt) (MIT). This file
 tracks the upstream gaps the sparq-hdt work has queued against it and
-their CURRENT status against `hdt` master / 0.6.x.
+their CURRENT status against `hdt` master / 0.7.x.
 
 > **Status (sq-v7be, verified 2026-06-19 against `KonradHoeffner/hdt` master):**
 > - **Builder gap — OBVIATED (no upstream change needed from us).** See item 1.
@@ -41,15 +41,11 @@ round-trip (the `save` path — `crates/sparq-hdt/src/write.rs` — and the
 required for the write path; this item is closed (tracked under landed bead
 `sq-ashy`).
 
-> **Caveat — sparq is still pinned to `hdt` 0.4.** On the wrapped crate's **0.4**
-> line these section builders are reachable only via the experimental `sophia`
-> feature, so sparq-hdt's `write` cargo-feature still turns it on
-> (`Cargo.toml: write = ["hdt/sophia"]`); the `sophia`-free reachability described
-> above is the situation on `hdt` **master / 0.6**. The 0.4 → 0.6 bump is itself
-> blocked (the 0.6 path pulls `qwt`, whose default `prefetch` feature needs nightly
-> on aarch64) — tracked by `sq-2l1` / `sq-th5i`. So the *upstream contribution* is
-> obviated (we never need to file it), but sparq keeps paying the `sophia` gate for
-> writes until that dependency bump lands.
+> **Dependency status ([GPT-5] sq-2l1).** sparq now uses `hdt` 0.7 and enables its
+> narrower `nt` feature for N-Triples fixture generation. The upstream `sophia`
+> adapter is no longer part of sparq-hdt's read or write dependency graph. This
+> became portable on stable aarch64 when `hdt` moved to `qwt` 0.4, whose prefetch
+> path uses stable inline assembly.
 
 ---
 
