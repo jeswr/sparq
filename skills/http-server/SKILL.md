@@ -796,7 +796,25 @@ publisher), with **no caller-side lock and no serialisation of submitters**; ack
 record is durable. Restore publishes never fire the hook (not same-lineage — re-baseline
 explicitly). A recording failure is dropped + reported to `on_error`, never failing the
 already-published write; the log's discontinuity check then fail-closes later records rather than
-silently gapping.
+silently gapping. **Resync (`sq-r2cu1`):** `ChangeLog::rebase_to(generation)` is that explicit
+operator re-base — it appends an honest **gap record** (`ChangeRecord::rebase = true`, no changes)
+marking the uncaptured span and re-arms recording from `generation` (strictly forward-only,
+fail-closed otherwise) **without wiping the log**; a consumer replaying past the gap re-bootstraps
+(e.g. from a backup at/after that generation) instead of trusting a silently incomplete diff stream.
+On a RUNNING recorder, `ChangeLog::into_commit_hook_with_control` yields a `ChangeStreamControl`
+that runs the resync on the LIVE log (serialized with the hook — no stop/re-open), and
+`rebase_to_new_lineage` is the post-restore variant for a REPLACED lineage whose generation
+numbering restarted (gh-2436).
+
+**`POST /admin/change-stream/rebase` — operator resync of the running server's tracked log
+(`sparq-server` feature `change-stream`; gh-2436).** WRITE/admin-gated, POST-only, same
+double-opt-in `404` as `/streams`. Empty body = re-baseline to the writer's CURRENT generation
+(the dropped-record resync); JSON fields `generation` (explicit target) and `newLineage: true`
+(AFTER `/admin/restore` — the restored ring restarts at generation 0, so the same-lineage
+forward-only check would reject it forever). `200` returns the gap record (`seq`/`generation`/
+`rebase` + `nextSequenceNumber`); a non-forward same-lineage target is a `409`; an unknown body
+field is a fail-closed `400`. `GET /streams` renders the gap as ONE explicit `"op": "REBASE"`
+marker entry (no `data`) — never silently flattened away.
 
 **`GET /streams` — CDC poll endpoint (`sparq-server` feature `change-stream`, default OFF;
 `sq-2999l`, gh-906).** The HTTP poll surface over that durable log, in the Amazon-Neptune-Streams

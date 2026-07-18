@@ -68,10 +68,11 @@
 //! picks, the returned top-`k` is identical (asserted in the tests), so a mis-estimate costs only
 //! throughput, never correctness.
 
-use crate::ann::nearest_exact;
+use crate::ann::{nearest_exact, select_top_k_tiebreak};
 use crate::filter::{nearest_exact_filtered, IdMask};
 use crate::store::VectorStore;
 use sparq_core::dict::Id;
+use sparq_core::Graph;
 
 /// Tuning for the [pre-filter ↔ post-filter](self) decision. Separate from
 /// [`FilterConfig`](crate::filter::FilterConfig) (which tunes the *pre-filter ↔ filtered-traversal*
@@ -208,6 +209,55 @@ pub fn nearest_filtered_costed(
         Strategy::PostFilter => postfilter_exact(store, query, mask, k),
     };
     (hits, est)
+}
+
+/// [SONNET-4.6] **Cost-model-driven filtered top-`k` with the VG-TIE-1 boundary tie-break** —
+/// [`nearest_filtered_costed`] upgraded to the answer-exact mode contract of
+/// `site/specs/sparql-vector-genai.typ`: result-set *membership* at a score tie on the k boundary
+/// is decided by ascending Unicode-codepoint order of the tied candidates' canonical N-Triples
+/// serialisations (the same rule as [`nearest_exact_tiebreak`](crate::ann::nearest_exact_tiebreak)),
+/// computed over the **mask-admitted candidate pool** with `exclude` (the seed of a query-by-node
+/// search; `None` for a query-by-vector search) dropped **before** the boundary is determined.
+/// This keeps VG-FILT-2 exact in answer-exact mode: the filtered top-k equals post-filtering the
+/// unfiltered tie-broken retrieval by the same mask, because both sides apply the identical
+/// membership rule to the identical admitted pool.
+///
+/// Both cost-model branches rank the **complete** admitted pool — pre-filter scans the mask,
+/// post-filter scans the whole store and drops non-members; the two complete rankings are
+/// byte-identical (see [`postfilter_exact`]) — so the strategy choice is never observable in the
+/// answer, exactly as for [`nearest_filtered_costed`]; the tie-break then reselects only the
+/// boundary tie group. Degenerate cases (`k = 0`, an empty mask, an all-zero query) return no
+/// results, the same contract as [`nearest_filtered_costed`].
+///
+/// Fail-closed like [`nearest_exact_tiebreak`](crate::ann::nearest_exact_tiebreak): a candidate
+/// term containing a blank node (whose document-local label has no cross-implementation
+/// tie-break key) is an `Err` wherever its term — rather than its score alone — decides
+/// membership: admitted into the top-k, or a member of the boundary tie group.
+pub fn nearest_filtered_costed_tiebreak(
+    store: &VectorStore,
+    graph: &Graph,
+    query: &[f32],
+    mask: &IdMask,
+    k: usize,
+    exclude: Option<Id>,
+    model: &CostModel,
+) -> Result<(Vec<(Id, f32)>, CostEstimate), String> {
+    let est = model.decide(mask.len(), store.len(), k);
+    if k == 0 {
+        return Ok((Vec::new(), est));
+    }
+    // The COMPLETE admitted ranking (`k = mask.len()` cannot truncate: at most |mask| ids are
+    // admitted), so the boundary tie group is fully present whichever branch ranked it.
+    let mut scored = match est.strategy {
+        Strategy::PreFilter => nearest_exact_filtered(store, query, mask, mask.len()),
+        Strategy::PostFilter => postfilter_exact(store, query, mask, mask.len()),
+    };
+    // Seed exclusion BEFORE the boundary is determined, so the boundary is computed over the
+    // true candidate pool — matching the unfiltered `nearest_exact_tiebreak` contract.
+    if let Some(seed) = exclude {
+        scored.retain(|&(id, _)| id != seed);
+    }
+    Ok((select_top_k_tiebreak(graph, scored, k)?, est))
 }
 
 /// [OPUS-4.8] How many candidates an **approximate** index must over-fetch to expect `k` survivors
@@ -367,6 +417,173 @@ mod tests {
         // never below k, never above store.
         assert_eq!(overfetch_target(5, 1, 10), 10); // 5/(1/10)=50, clamped to store_len 10
         assert_eq!(overfetch_target(5, 0, 1000), 5); // empty mask guard
+    }
+
+    // [SONNET-4.6] Direct unit gate for `nearest_filtered_costed_tiebreak`: VG-TIE-1 boundary
+    // membership over the mask-ADMITTED pool (seed excluded before the boundary), identical from
+    // both cost-model branches. The tie group mixes an IRI with two inlined numeric literals so
+    // dictionary-id order and N-Triples codepoint order genuinely disagree (see the ann.rs
+    // tiebreak fixture): id order would admit `<http://ex/z-tied>`, the VG-TIE-1 rule admits
+    // `"10"^^xsd:integer`.
+    mod filtered_tiebreak {
+        use super::super::{nearest_filtered_costed_tiebreak, CostModel, IdMask, Strategy};
+        use crate::store::VectorStore;
+        use oxrdf::{NamedNode, Term};
+        use sparq_core::Graph;
+
+        fn fixture(name: &str) -> (Graph, VectorStore, IdMask) {
+            let g = Graph::load_str(
+                r#"
+                <http://ex/top> <http://ex/num> "10"^^<http://www.w3.org/2001/XMLSchema#integer> .
+                <http://ex/top> <http://ex/num> "2"^^<http://www.w3.org/2001/XMLSchema#integer> .
+                <http://ex/z-tied> <http://ex/label> "z" .
+                <http://ex/out> <http://ex/label> "out" .
+                "#,
+                "ntriples",
+            )
+            .unwrap();
+            let id = |s: &str| g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap())).unwrap();
+            let num = |n: &str| {
+                g.id_of(&Term::Literal(oxrdf::Literal::new_typed_literal(
+                    n,
+                    oxrdf::vocab::xsd::INTEGER,
+                )))
+                .unwrap()
+            };
+            let path = std::env::temp_dir().join(format!(
+                "sparq_vec_cost_tiebreak_{}_{name}.spqv",
+                std::process::id()
+            ));
+            let mut store = VectorStore::create(path, 2).unwrap();
+            store.put(id("http://ex/top"), &[1.0, 0.0]).unwrap(); // cos 1.0, admitted
+            store.put(id("http://ex/z-tied"), &[0.6, 0.8]).unwrap(); // cos 0.6, admitted
+            store.put(num("10"), &[0.6, -0.8]).unwrap(); // cos 0.6, admitted
+            store.put(num("2"), &[3.0, 4.0]).unwrap(); // cos 0.6 (scaled), admitted
+            store.put(id("http://ex/out"), &[0.9, 0.1]).unwrap(); // cos ~0.99 but NOT admitted
+            let mask: IdMask =
+                [id("http://ex/top"), id("http://ex/z-tied"), num("10"), num("2")]
+                    .into_iter()
+                    .collect();
+            (g, store, mask)
+        }
+
+        fn terms(g: &Graph, hits: &[(sparq_core::dict::Id, f32)]) -> Vec<String> {
+            hits.iter().map(|&(id, _)| g.dict.term(id).to_string()).collect()
+        }
+
+        const TEN: &str = "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>";
+
+        /// k=2 over the admitted pool: `top` (1.0) plus ONE slot for the three-way 0.6 tie —
+        /// the smallest N-Triples key `"10"^^xsd:integer` wins, from BOTH cost-model branches;
+        /// the closer non-admitted `out` never appears (VG-FILT-3).
+        #[test]
+        fn boundary_tie_membership_by_ntriples_key_from_both_branches() {
+            let (g, store, mask) = fixture("both_branches");
+            let query = [1.0f32, 0.0];
+            let always_pre = CostModel { scatter_penalty: 1.0 };
+            let always_post = CostModel { scatter_penalty: 1e6 };
+            let (pre, pre_est) =
+                nearest_filtered_costed_tiebreak(&store, &g, &query, &mask, 2, None, &always_pre)
+                    .unwrap();
+            let (post, post_est) =
+                nearest_filtered_costed_tiebreak(&store, &g, &query, &mask, 2, None, &always_post)
+                    .unwrap();
+            assert_eq!(pre_est.strategy, Strategy::PreFilter);
+            assert_eq!(post_est.strategy, Strategy::PostFilter);
+            assert_eq!(pre, post, "the branch choice must never change the answer");
+            assert_eq!(
+                terms(&g, &pre),
+                vec!["<http://ex/top>".to_string(), TEN.to_string()],
+                "boundary membership must follow the N-Triples key, not id order"
+            );
+        }
+
+        /// The seed is dropped from the admitted pool BEFORE the boundary is determined: with
+        /// `top` excluded, k=1 lands directly on the three-way tie → `"10"^^xsd:integer`.
+        #[test]
+        fn seed_excluded_before_the_boundary() {
+            let (g, store, mask) = fixture("seed_excluded");
+            let top = g.id_of(&Term::NamedNode(NamedNode::new("http://ex/top").unwrap())).unwrap();
+            let (hits, _est) = nearest_filtered_costed_tiebreak(
+                &store,
+                &g,
+                &[1.0, 0.0],
+                &mask,
+                1,
+                Some(top),
+                &CostModel::default(),
+            )
+            .unwrap();
+            assert_eq!(terms(&g, &hits), vec![TEN.to_string()]);
+        }
+
+        /// [SONNET-4.6] (#2445 review) A blank node admitted by the mask and landing in the
+        /// boundary tie group is a fail-closed error, not a ranked candidate — its
+        /// document-local label has no cross-implementation tie-break key.
+        #[test]
+        fn masked_blank_node_in_the_tie_group_is_a_fail_closed_error() {
+            use oxrdf::BlankNode;
+            let g = Graph::load_str(
+                r#"
+                <http://ex/top> <http://ex/p> "t" .
+                <http://ex/a-tied> <http://ex/p> "a" .
+                _:tied <http://ex/p> "b" .
+                "#,
+                "ntriples",
+            )
+            .unwrap();
+            let id = |s: &str| g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap())).unwrap();
+            let bnode = g.id_of(&Term::BlankNode(BlankNode::new_unchecked("tied"))).unwrap();
+            let path = std::env::temp_dir().join(format!(
+                "sparq_vec_cost_tiebreak_bnode_{}.spqv",
+                std::process::id()
+            ));
+            let mut store = VectorStore::create(path, 2).unwrap();
+            store.put(id("http://ex/top"), &[1.0, 0.0]).unwrap(); // cos 1.0
+            store.put(id("http://ex/a-tied"), &[0.6, 0.8]).unwrap(); // cos 0.6
+            store.put(bnode, &[0.6, -0.8]).unwrap(); // cos 0.6 — tied blank node
+            let mask: IdMask =
+                [id("http://ex/top"), id("http://ex/a-tied"), bnode].into_iter().collect();
+            // k=2: one slot for the two-way 0.6 tie the blank node sits in → Err.
+            let err = nearest_filtered_costed_tiebreak(
+                &store,
+                &g,
+                &[1.0, 0.0],
+                &mask,
+                2,
+                None,
+                &CostModel::default(),
+            )
+            .unwrap_err();
+            assert!(err.contains("blank node"), "got: {}", err);
+        }
+
+        /// Degenerate cases keep the `nearest_filtered_costed` contract: k=0, an empty mask,
+        /// and an all-zero query all yield no results.
+        #[test]
+        fn degenerate_cases_are_empty() {
+            let (g, store, mask) = fixture("degenerate");
+            let m = CostModel::default();
+            let (hits, _) =
+                nearest_filtered_costed_tiebreak(&store, &g, &[1.0, 0.0], &mask, 0, None, &m)
+                    .unwrap();
+            assert!(hits.is_empty(), "k=0 must yield no results");
+            let (hits, _) = nearest_filtered_costed_tiebreak(
+                &store,
+                &g,
+                &[1.0, 0.0],
+                &IdMask::new(),
+                3,
+                None,
+                &m,
+            )
+            .unwrap();
+            assert!(hits.is_empty(), "an empty mask must yield no results");
+            let (hits, _) =
+                nearest_filtered_costed_tiebreak(&store, &g, &[0.0, 0.0], &mask, 3, None, &m)
+                    .unwrap();
+            assert!(hits.is_empty(), "an all-zero query must yield no results");
+        }
     }
 
     /// Sanity: the post-filter never returns an id outside the mask, and respects best-first order.

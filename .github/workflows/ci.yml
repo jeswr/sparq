@@ -13,8 +13,35 @@ on:
   # label re-evaluates the change-based selection (ci-select.yml maps the label to
   # `--full`). The default types (opened/synchronize/reopened) are listed explicitly
   # so adding the label events does NOT drop `synchronize` (the push-to-PR trigger).
+  # [FABLE-5] LABEL-TRIGGER GUARD: only the `ci-full` toggle may start real work off
+  # these label events. The autonomous review pipeline flips review:*/status:* labels
+  # several times per round on ~20 open PRs, and before this guard EVERY flip
+  # restarted this whole workflow on an unchanged head SHA (measured 2026-07-17: one
+  # PR head accumulated 4 generations / 12 concurrency-cancelled runs with zero
+  # pushes), and the cancelled `select` check-runs left on that SHA then REDdened the
+  # required ci-summary gate ("the selection pre-job must conclude success", e.g.
+  # PR #2530). The guard is a job-level `if:` on the root jobs (`changes`,
+  # `unsafe-register`, and the always()-composed `coverage` verdict job): a
+  # labeled/unlabeled pull_request event whose label is not `ci-full` skips them, and
+  # the whole needs:-graph skips with them — a cheap no-op run instead of a restart.
+  # The `select` pre-job is the DELIBERATE exception: it stays unconditional (no
+  # if/needs — pinned by scripts/tests/test_ci_select_wiring.py) and just runs to a
+  # cheap SUCCESS, because scripts/ci_summary_gate.py REDs outright on any
+  # "change-based test selection" check-run whose conclusion is not `success` — a
+  # SKIPPED select would poison the gate exactly like a cancelled one. Skipped
+  # non-select jobs are safe: the gate counts `skipped` as satisfied while the
+  # commit's select runs are all green. Label events also get a PER-RUN concurrency
+  # group (below), so a flip can never concurrency-cancel an in-flight run on the
+  # same head SHA — those same-SHA cancellations were the actual gate poison.
+  # [FABLE-5] Draft-tier CI: + ready_for_review, so the un-draft moment re-runs the
+  # whole matrix at FULL tier on the same head SHA (coverage + heavy shards run
+  # again) and the fresh check-runs supersede the draft-tier ones — see
+  # docs/branch-protection.md §Draft-tier CI. The label-trigger guard above and the
+  # draft-tier guards below are independent and AND-compose on each affected job:
+  # a non-`ci-full` label flip stays a no-op regardless of draft state, and a draft
+  # head stays tier-reduced regardless of label events.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   # [OPUS-4.8] Merge queue: re-run the identical PR check-set on the queue's
   # merge_group ref so the required ci-summary gate finds the same siblings it finds
   # on a PR. The per-commit `coverage` job (if: event_name != 'schedule') runs here;
@@ -48,7 +75,15 @@ concurrency:
   # them. PR / push / merge_group runs keep the per-ref group + cancel-in-progress so a
   # superseded build still auto-cancels to save CI minutes (unchanged behaviour for them —
   # they resolve to the constant `-shared` suffix).
-  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.run_id || 'shared' }}
+  # [FABLE-5] label-trigger guard: labeled/unlabeled pull_request events ALSO get a
+  # per-run group. A label-flip run entering the shared per-ref group would cancel the
+  # in-flight real run on the SAME head SHA (cancellation happens at run level, before
+  # job `if:` guards evaluate), leaving cancelled check-runs that RED the ci-summary
+  # gate. Isolated, a non-`ci-full` flip is a guarded no-op run and a `ci-full` toggle
+  # runs the full matrix WITHOUT killing the superseded selected run mid-flight (both
+  # conclude green; the gate aggregates the union). Non-label PR/push/merge_group runs
+  # keep the shared group + cancel-in-progress exactly as before.
+  group: ci-${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && contains(fromJSON('["labeled","unlabeled"]'), github.event.action))) && github.run_id || 'shared' }}
   cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
 
 env:
@@ -96,16 +131,45 @@ jobs:
   #     (`conclusion != "success" and != "skipped" and != "neutral"` is the only thing it
   #     fails on), so the gate goes green fast. Fast doc/lint siblings (docs-quality, etc.)
   #     still run and still gate.
-  # SAFE-BY-DEFAULT: rust_changed is forced 'true' on EVERY event except `pull_request`.
-  # On `push` to main (the canonical build), `merge_group` (the merge queue re-runs the
-  # whole set), `schedule`, and `workflow_dispatch` the full matrix ALWAYS runs — only a
-  # PR diff that is purely non-Rust is ever allowed to skip. The Rust path set is broad on
+  # SAFE-BY-DEFAULT: rust_changed is forced 'true' on `push` to main (the canonical
+  # build), `schedule`, and `workflow_dispatch` — the full matrix ALWAYS runs there. On
+  # `pull_request` only a diff that is purely non-Rust skips. The Rust path set is broad on
   # purpose: any `*.rs`, any `Cargo.toml`, `Cargo.lock`, the `rust-toolchain*` pin, OR this
   # workflow file itself (so editing a Rust job here re-runs that job). If the diff cannot
   # be computed for any reason, the filter's absence of a match defaults to NOT skipping
-  # only because we hard-force 'true' off the PR path — i.e. we never silently skip Rust.
+  # only because we hard-force 'true' off the PR/merge_group path — we never silently skip.
+  #
+  # [FABLE-5] MERGE-GROUP CHANGE-CLASS GATE (path-aware CI; extends #3420/#3421 to this
+  # rust_changed layer). merge_group used to hard-force rust_changed=true, so even a
+  # docs-only/orchestration-only queued batch (the observed #2533 class) paid the
+  # rust_changed-only lanes (lint / msrv / geiger / docker-smoke / coverage-floors) on
+  # every enqueue — the select-conjunct lanes already skip via the batch-diff selection
+  # (ci-select.yml passes merge_group.base_sha/head_sha). The decide step below now
+  # resolves the SAME batch diff (the #3421 fetch pattern) and classifies it with
+  # `scripts/ci_select.py --classify-only` — the IDENTICAL `classify_change()` path the
+  # `select` pre-job runs on this event, so the two layers cannot disagree on a resolved
+  # diff (no duplicated path lists; ci_select.py stays the single source of truth).
+  # Class docs-only/orchestration-only => rust_changed=false + docker_changed=false
+  # (sound: every path in the dorny `rust`/`docker` filter sets classifies `engine`, so
+  # those classes PROVE both filters would be false — same trust model as the PR-level
+  # gate, a pure function of the authoritative diff). Any OTHER class, an unresolvable
+  # SHA pair, or ANY classifier error => true/true (fail-safe = full run, cost never
+  # soundness). Gate accounting: the skipped legs report `skipped` and the required
+  # ci-summary gate attributes them to the (green, same-diff) `select` pre-job —
+  # attributed skips, never missing legs (scripts/ci_summary_gate.py, sq-fmx4u.3).
+  # NOT gated by-class here: vectorized-feature-off.yml stays FULL on merge groups on
+  # purpose — the feature-OFF wasm byte-drift class only manifests on merged bundles
+  # (the documented #3421 unsound-skip exception).
   changes:
     name: detect rust changes
+    # [FABLE-5] label-trigger guard (see the pull_request trigger note): a
+    # labeled/unlabeled event for any label other than `ci-full` must not restart the
+    # matrix on an unchanged head SHA — skipping this root job skips every
+    # needs:-dependent below it. All other events pass the first two disjuncts.
+    if: >-
+      github.event_name != 'pull_request' ||
+      !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) ||
+      github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -119,9 +183,10 @@ jobs:
       docker_changed: ${{ steps.decide.outputs.docker_changed }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      # Only run the path filter on pull_request; on every other event we force-run the
-      # full matrix (see decide step), so the filter's result is irrelevant there and we
-      # skip it to avoid the unreliable push/merge_group base-diff.
+      # Only run the path filter on pull_request: merge_group gets the batch-diff
+      # change-class gate in the decide step below (dorny's push/merge_group base-diff is
+      # unreliable; the merge_group event payload's base_sha/head_sha pair is not), and
+      # every other event force-runs the full matrix, so the filter is irrelevant there.
       - uses: dorny/paths-filter@7b450fff21473bca461d4b92ce414b9d0420d706 # v4.0.2
         id: filter
         if: github.event_name == 'pull_request'
@@ -157,17 +222,57 @@ jobs:
               - '.github/workflows/ci.yml'
       - name: Decide rust_changed (safe-by-default off the PR path)
         id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            # push / merge_group / schedule / workflow_dispatch -> always run the full matrix.
-            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
-            echo "docker_changed=true" >> "$GITHUB_OUTPUT"
-            echo "event=${{ github.event_name }} -> forcing rust_changed=true + docker_changed=true (full matrix)"
-          else
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
             echo "rust_changed=${{ steps.filter.outputs.rust }}" >> "$GITHUB_OUTPUT"
             echo "docker_changed=${{ steps.filter.outputs.docker }}" >> "$GITHUB_OUTPUT"
             echo "pull_request -> paths-filter says rust=${{ steps.filter.outputs.rust }} docker=${{ steps.filter.outputs.docker }}"
+          elif [ "${EVENT_NAME}" = "merge_group" ]; then
+            # [FABLE-5] MERGE-GROUP CHANGE-CLASS GATE (see the job header note): diff the
+            # queued batch (base_sha...head_sha, the #3421 fetch pattern) and classify it
+            # via scripts/ci_select.py --classify-only — the same classify_change() the
+            # `select` pre-job runs on this event. docs-only/orchestration-only batch =>
+            # skip the rust_changed/docker_changed lanes; ANY other class, an unknown
+            # token, an unresolvable SHA pair, or a classifier error => full (fail-safe).
+            rust=true
+            docker=true
+            ok=true
+            # --depth=2147483647 (git's INFINITE_DEPTH; --unshallow that is also
+            # valid on a complete repo): this job's checkout is depth-1, and the
+            # classifier's three-dot diff needs the merge-base — a shallow SHA
+            # fetch leaves both commits PRESENT (the cat-file guards pass) but
+            # unconnected, so `git diff base...head` dies with "no merge base"
+            # and the fail-safe would silently force class=engine on EVERY
+            # batch, reducing this whole gate to a no-op. Same rationale as
+            # ci-select.yml's fetch-depth: 0 checkout.
+            git fetch --no-tags --quiet --depth=2147483647 origin "${MG_BASE_SHA}" "${MG_HEAD_SHA}" 2>/dev/null \
+              || git fetch --no-tags --quiet --depth=2147483647 origin "${MG_BASE_SHA}" 2>/dev/null \
+              || ok=false
+            git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null || ok=false
+            git cat-file -e "${MG_HEAD_SHA}^{commit}" 2>/dev/null || ok=false
+            if [ "${ok}" = "true" ]; then
+              cls="$(python3 scripts/ci_select.py --classify-only --event merge_group \
+                       --base "${MG_BASE_SHA}" --head "${MG_HEAD_SHA}")" || cls=engine
+              case "${cls}" in
+                docs-only|orchestration-only) rust=false; docker=false ;;
+                *) rust=true; docker=true ;;
+              esac
+            else
+              echo "::warning::could not resolve merge_group base/head SHAs for the batch diff — running the full matrix (fail-safe)."
+            fi
+            echo "rust_changed=${rust}" >> "$GITHUB_OUTPUT"
+            echo "docker_changed=${docker}" >> "$GITHUB_OUTPUT"
+            echo "merge_group -> change_class=${cls:-<unresolved>} rust_changed=${rust} docker_changed=${docker}"
+          else
+            # push / schedule / workflow_dispatch -> always run the full matrix.
+            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
+            echo "docker_changed=true" >> "$GITHUB_OUTPUT"
+            echo "event=${EVENT_NAME} -> forcing rust_changed=true + docker_changed=true (full matrix)"
           fi
 
   # [FABLE-5] sq-fmx4u.3: change-based test-selection pre-job (reusable — see the
@@ -178,7 +283,10 @@ jobs:
   # (never skip) via the filterset output. UNCONDITIONAL (no needs/if): the
   # ci-summary gate REQUIRES every selection check-run to conclude success before
   # any skipped sibling counts as satisfied, so this job must exist and be green
-  # on every run — including doc-only PRs where `changes` skips the Rust matrix.
+  # on every run — including doc-only PRs where `changes` skips the Rust matrix,
+  # AND the label-trigger-guard no-op runs (a guarded/skipped select would conclude
+  # `skipped` ≠ `success` and RED the gate on the whole head SHA; its cheap success
+  # IS the no-op — do NOT add the guard here).
   # Relationship to `changes` (dorny paths-filter) is layered, both directions
   # preserved: rust_changed==false skips a lane regardless of selection (the
   # existing doc-PR fast path), and selection can only skip WITHIN
@@ -520,6 +628,10 @@ jobs:
           # env is the shard-kind discriminator the run script reads (it is empty on the
           # bulk shards). Passed via env — no inline `${{ }}` in the shell body.
           SHARD_FILTER: ${{ matrix.filter }}
+          # [FABLE-5] Draft-tier CI: "true" only on a DRAFT pull_request head — the
+          # heavy recall shards are ALSO demoted there (see the draft-tier guard
+          # below); every other event/state evaluates "false" and changes nothing.
+          IS_DRAFT_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
         run: |
           set -euo pipefail
           # [OPUS-4.8] sq-6vshe.6 (research/ci-structural-speedup.md §7, round 2):
@@ -546,6 +658,21 @@ jobs:
             echo "heavy shard '${{ matrix.name }}' DEMOTED off merge_group (sq-6vshe.6):"
             echo "  deterministic single-crate recall gate — no cross-PR interaction;"
             echo "  full form runs at PR level + push-to-main. Reporting success."
+            exit 0
+          fi
+          # [FABLE-5] Draft-tier CI: ALSO demote the heavy recall shards on DRAFT
+          # pull_request heads (docs/branch-protection.md §Draft-tier CI). Safe for
+          # the same reason as the merge_group demotion above — deterministic
+          # single-crate gates — plus the draft-tier invariant: un-drafting fires
+          # ready_for_review, which re-runs this job at FULL tier on the same head
+          # SHA, and a draft-tier gate result can never admit a PR to the merge
+          # queue (scripts/ci_summary_gate.py refuses it). Bulk shards are NEVER
+          # demoted (SHARD_FILTER is empty there); non-draft PRs and push-to-main
+          # keep the full form.
+          if [ "$IS_DRAFT_PR" = "true" ] && [ -n "$SHARD_FILTER" ]; then
+            echo "heavy shard '${{ matrix.name }}' DEMOTED on this DRAFT head (draft-tier CI):"
+            echo "  the full form re-runs at ready_for_review + push-to-main; a draft-tier"
+            echo "  gate result can never admit a PR to the merge queue. Reporting success."
             exit 0
           fi
           # [FABLE-5] sq-fmx4u.3 (design §5.2): single-crate shard skip guard.
@@ -2533,9 +2660,16 @@ jobs:
     # aggregator counts as satisfied). This references only github/needs contexts —
     # no `matrix.*` — so it is safe as a job-level `if:` on this matrix job. The
     # nightly full coverage backstop is `coverage-nightly` (schedule), unaffected.
+    # [FABLE-5] Draft-tier CI: coverage is SKIPPED on draft PR heads entirely (the
+    # instrumented rebuild is one of the heaviest lanes; the ready_for_review
+    # full-tier run + the merge_group run both re-measure it before any merge, and
+    # a draft-tier gate can never admit a PR — docs/branch-protection.md
+    # §Draft-tier CI). The guard is fail-open off the PR path: any non-pull_request
+    # event (push/merge_group) satisfies the first disjunct => RUN.
     needs: [changes, coverage-floors, select]
     if: >-
       github.event_name != 'schedule' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft != true) &&
       needs.changes.outputs.rust_changed == 'true' &&
       (needs.select.outputs.mode != 'selected' || needs.select.outputs.affected != '[]')
     runs-on: ubuntu-latest
@@ -2685,9 +2819,12 @@ jobs:
     # INDIVIDUAL tests, so the two >400s lib-target monster tests land on DIFFERENT runners
     # (a per-binary split would not balance).
     name: coverage engine run (partition ${{ matrix.part }}/3)
+    # [FABLE-5] Draft-tier CI: skipped on draft PR heads, same rationale + guard
+    # shape as coverage-measure above (fail-open off the PR path).
     needs: [changes, coverage-floors, select]
     if: >-
       github.event_name != 'schedule' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft != true) &&
       needs.changes.outputs.rust_changed == 'true' &&
       (needs.select.outputs.mode != 'selected' || needs.select.outputs.affected != '[]')
     runs-on: ubuntu-latest
@@ -2855,8 +2992,26 @@ jobs:
     # [FABLE-5] sq-piapk: the sparq-engine cross-runner split (run + merge) folds into this
     # single verdict alongside the non-engine shard matrix, so the ci-summary `gate` still
     # sees ONE coverage check. A skipped engine job (doc-only PR) counts as satisfied.
+    # [FABLE-5] Draft-tier CI: on a draft PR head the measure/engine jobs above are
+    # skipped, so this aggregate is skipped too (reporting `skipped`, which the
+    # gate treats as satisfied under a green selection) rather than emitting a
+    # vacuous green `coverage` success over zero measurements.
     needs: [coverage-floors, coverage-measure, coverage-engine-run, coverage-engine-merge]
-    if: ${{ always() && github.event_name != 'schedule' }}
+    # [FABLE-5] label-trigger guard: always() bypasses the skipped-needs propagation,
+    # so this verdict job must carry the guard explicitly or it would still run (as a
+    # trivially-green no-op) on every non-`ci-full` label flip. Skipped is equally
+    # satisfied by the gate (the commit's select runs stay green) and saves the slot.
+    # [FABLE-5] Draft-tier CI: AND-composed with the label guard (both survive) — the
+    # measure/engine jobs above are skipped on a draft PR head, so this aggregate is
+    # skipped too (`skipped` ≠ vacuous green) rather than reporting over zero
+    # measurements. A non-`ci-full` label flip stays a no-op regardless of draft
+    # state; a draft head stays coverage-skipped regardless of label events.
+    if: >-
+      always() && github.event_name != 'schedule' &&
+      (github.event_name != 'pull_request' ||
+       !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) ||
+       github.event.label.name == 'ci-full') &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft != true)
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate coverage floor + shard results
@@ -3258,6 +3413,12 @@ jobs:
     # is too heavy/flaky for a gating lane (hence its `|| true`); the deterministic
     # scan is what we actually ratchet. Python-only ⇒ seconds, no toolchain.
     name: unsafe-register (count ratchet)
+    # [FABLE-5] label-trigger guard (see the pull_request trigger note): a root job
+    # with no needs — guard it directly so a non-`ci-full` label flip skips it too.
+    if: >-
+      github.event_name != 'pull_request' ||
+      !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) ||
+      github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
