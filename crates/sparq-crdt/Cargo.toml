@@ -1,0 +1,22 @@
+# [FABLE-5] sq-tag1q.7.4 — executable formal MODEL + convergence verification harness
+# for the SPARQL-CRDT proposal (site/specs/sparql-crdt.typ, sq-tag1q.4).
+#
+# DEV-ONLY, publish = false: this is NOT the production SPARQL-CRDT implementation
+# (the rest of epic sq-tag1q.7 lands that later, and must be differentially tested
+# against this model). Zero runtime deps; nothing in the workspace depends on this
+# crate, so sparq-core / sparq-engine and every default build path are untouched
+# (opt-in crate architecture).
+[package]
+name = "sparq-crdt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Executable formal model, bounded model checker, and generated-schedule convergence harness for the SPARQL-CRDT proposal (sq-tag1q.7.4)."
+readme = "README.md"
+
+[dev-dependencies]
+# DEV/TEST-ONLY — covered by the workspace-wide dev-only proptest supply-chain
+# exemption (sq-3dyje program); already used by sparq-core, sparq-canon, sparq-algos.
+proptest = "1"
