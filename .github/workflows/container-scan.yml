@@ -58,10 +58,14 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "crates/**/Cargo.toml"
-  # Merge queue: ci-summary is the single required check and runs on the merge_group ref;
-  # the gating jobs here must also run there or the queue would wait for a sibling that
-  # never appears. (Same reasoning as supply-chain.yml.)
-  merge_group:
+  # [FABLE-5] (2026-07-18 maintainer directive, merge-queue subset) merge_group
+  # REMOVED: the image scan already ran + gated on any container-relevant PR (paths
+  # filter above), re-runs on every push-to-main (post-merge detection), and the
+  # weekly schedule catches CVEs disclosed between changes. The polling `ci-summary
+  # / gate` never waits on a check that was never scheduled (bench.yml sq-6vshe.6
+  # rationale; the old "queue would wait" comment was stale pre-polling doctrine).
+  # The trivy job's `detect container changes` step stays — it short-circuits to a
+  # full scan on every remaining event.
   # Weekly re-scan of the (unchanged) base image so a CVE disclosed between PRs — that now
   # has a fix — is surfaced even when nobody touches the Dockerfile.
   schedule:

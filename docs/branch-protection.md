@@ -132,7 +132,7 @@ scheduled/dispatch run keep the FULL matrix, byte-identical to before.
 |---|---|---|
 | coverage ratchet (measure + engine split + aggregate) | `ci.yml` | never on drafts (merge_group + ready_for_review re-measure) |
 | benchmarks (deterministic ratchet + PR comparison/alert comments) | `bench.yml` | never on drafts |
-| CodeQL analysis | `codeql.yml` | never on drafts (merge_group + push-main + weekly schedule + the ready_for_review run keep the `code_scanning` rule fed) |
+| CodeQL analysis | `codeql.yml` | never on drafts (push-main + weekly schedule + the ready_for_review run keep the `code_scanning` rule fed; merge_group was removed by the 2026-07-18 merge-queue-subset directive — the queue runs only the fast PR-relevant lanes, with heavy/independent lanes on push-to-main + their crons) |
 | heavy recall shards (`heavy-diskann`/`heavy-hnsw`) | `ci.yml` `test` | never on drafts (same demotion mechanism as their merge_group demotion) |
 | wasm bundle build | `ci.yml` `wasm` | kept iff a wasm-bundle crate is in the affected closure (the existing lane-seed guard — unchanged on both tiers) |
 | `artifact-exact-equality` (wasm feature-OFF byte identity) | `vectorized-feature-off.yml` | kept iff `sparq-wasm` is in the affected closure (in-step `ci_select.py` verdict; ci-full label / selector error / full mode ⇒ run) |

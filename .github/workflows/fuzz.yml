@@ -79,19 +79,15 @@ on:
     # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
     # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
     types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
-  # [OPUS-4.8] Merge queue: fuzz surfaces a check on PRs, so it must also run on the
-  # queue's merge_group ref or the required ci-summary would wait for a sibling that
-  # never appears there. The budget step below maps merge_group to the fast SMOKE
-  # budget (same as pull_request) — a pre-merge gate wants quick coverage, not the
-  # nightly soak. github.ref in the concurrency group is the unique merge_group ref.
-  # [FABLE-5] MERGE-GROUP CHANGE-CLASS (path-aware CI audit): this workflow needs NO
-  # extra rust_changed-style layer — both heavy jobs below are already gated on the
-  # `select` pre-job's seed closures, and ci-select.yml passes the merge_group event's
-  # base_sha/head_sha, so the selection IS the batch diff. A docs-only/orchestration-
-  # only queued batch classifies to an empty affected closure (classify_change +
-  # SAFE/orch-safe paths in scripts/ci_select.py) and both jobs skip as ATTRIBUTED
-  # skips (select green); an engine/mixed/unresolvable batch runs them (fail-closed).
-  merge_group:
+  # [FABLE-5] (2026-07-18 maintainer directive, merge-queue subset) merge_group
+  # REMOVED: the deterministic corpus-replay already ran + gated on the PR head
+  # (select-scoped), the push-to-main run above re-replays post-merge (batch-merge/
+  # bisection is the recovery net), and the daily schedule runs the real randomized
+  # soak. Even the queue's smoke tier paid a full nightly-toolchain + fuzz-target
+  # compile per enqueue for a replay that is a pure function of code already gated
+  # on the PR. The polling `ci-summary / gate` never waits on a check that was
+  # never scheduled (bench.yml sq-6vshe.6 rationale; the old "would wait" comment
+  # was stale pre-polling doctrine).
   workflow_dispatch:
   # Daily heavy tier. 04:23 UTC (offset from ci.yml's 03:17 coverage cron so the two
   # heavy nightly lanes do not contend for the same runner window).
@@ -454,10 +450,15 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable via toolchain input
-        with:
-          toolchain: stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
