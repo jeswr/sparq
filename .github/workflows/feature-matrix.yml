@@ -31,6 +31,15 @@
 # assemble.py` asserts it is byte-identical to the pre-split static list, so the gate
 # aggregator + branch protection keep recognising every required leg.
 #
+# [FABLE-5] GROUPED RUNNERS (CI-economy, maintainer directive 2026-07-18): the legs no
+# longer map 1:1 onto runner jobs. The assembler's `--grouped` mode bin-packs them
+# (same-crate legs clustered; per-leg cost = the fragment's optional `weight:` field,
+# defaulting to a crate-source-size heuristic; each group targets <5 min of warm-cache
+# work) and `opt-in-features` runs ONE JOB PER GROUP. The gate-critical per-leg
+# `opt-in <name>` check-runs are emitted from INSIDE the group job via the Checks API
+# (scripts/run-feature-matrix-group.py) — names byte-identical, so the aggregator,
+# branch protection and the golden self-test contract are all unchanged.
+#
 # GUARD — THE RULE THAT KEEPS THIS LANE HONEST (sq-vya1). A test module/file behind
 # `#[cfg(feature = "X")]` / `#![cfg(feature = "X")]` for a DEFAULT-OFF feature is compiled
 # EMPTY by ci.yml's `cargo nextest archive --workspace --all-targets` (it passes NO
@@ -333,11 +342,15 @@ jobs:
           SELECT_AFFECTED: ${{ needs.select.outputs.affected }}
         run: |
           set -euo pipefail
-          MATRIX="$(python3 scripts/assemble-feature-matrix.py --event "${{ github.event_name }}" --select-mode "${SELECT_MODE:-}" --affected "${SELECT_AFFECTED:-}")"
+          # [FABLE-5] CI-economy: --grouped emits ONE matrix entry per bin-packed
+          # GROUP of legs (see the opt-in-features job note); `legs` is the TOTAL
+          # leg count across groups, so the skip-on-zero contract is unchanged.
+          MATRIX="$(python3 scripts/assemble-feature-matrix.py --grouped --event "${{ github.event_name }}" --select-mode "${SELECT_MODE:-}" --affected "${SELECT_AFFECTED:-}")"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          LEGS="$(echo "$MATRIX" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["include"]))')"
+          LEGS="$(echo "$MATRIX" | python3 -c 'import json,sys; m=json.load(sys.stdin)["include"]; print(sum(g["count"] for g in m))')"
+          NGROUPS="$(echo "$MATRIX" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["include"]))')"
           echo "legs=$LEGS" >> "$GITHUB_OUTPUT"
-          echo "Assembled $LEGS opt-in leg(s) (select mode: ${SELECT_MODE:-<unset>}, event ${{ github.event_name }}). Full leg-name set:"
+          echo "Assembled $LEGS opt-in leg(s) into $NGROUPS group(s) (select mode: ${SELECT_MODE:-<unset>}, event ${{ github.event_name }}). Full leg-name set:"
           python3 scripts/assemble-feature-matrix.py --names
       - name: Loud failure attribution — the opt-in matrix was NOT generated
         # [FABLE-5] sq-2wo5t: when THIS job fails (golden leg-name drift after adding
@@ -382,57 +395,65 @@ jobs:
     # != '0' => run; and if `setup` itself failed, this job skips via `needs`
     # while the gate REDs on setup's failure.
     if: needs.changes.outputs.rust_changed == 'true' && needs.setup.outputs.legs != '0'
-    # One matrix leg per crate + opt-in feature(group). Coexisting opt-in features of a
-    # single crate are combined into ONE `--features a,b,c` leg (e.g. the sparq-server
-    # federation/persistence/test seams) so the crate is compiled once per leg, not once
-    # per feature. fail-fast:false so one broken feature shows the full picture, not just
-    # the first to break. Each leg: build -> (test, where offline tests exist) -> clippy
-    # --all-targets -D warnings, on the SAME stable toolchain ci.yml's gates use.
+    # [FABLE-5] CI-economy GROUPED LEGS (maintainer directive 2026-07-18). The matrix
+    # is ONE ENTRY PER BIN-PACKED GROUP of legs (assembler --grouped; same-crate legs
+    # clustered, each group targeting <5 min of warm-cache work) instead of one runner
+    # per leg — 159 legs used to mean 159 runners each paying checkout + toolchain +
+    # cache-restore + the dependency compile.
     #
-    # [OPUS-4.8] sq-ibrze: the matrix is now ASSEMBLED dynamically by the `setup` job from
-    # the per-crate fragment files (`.github/feature-matrix.d/<crate>.yml`) — see the
-    # STRUCTURE note in this file's header. The emitted check-run NAME is `opt-in
-    # ${{ matrix.name }}`, BYTE-IDENTICAL to the previous static list (proven by
-    # scripts/tests/test_feature_matrix_assemble.py). To add a leg, edit ONLY the relevant
-    # crate fragment — do NOT reintroduce a static `include:` list here.
-    name: opt-in ${{ matrix.name }}
+    # NAME CONTRACT PRESERVED: the gate-critical `opt-in <name>` check-run for EVERY
+    # leg is still emitted, byte-identical (proven against the golden snapshot by
+    # scripts/tests/test_feature_matrix_assemble.py) — scripts/run-feature-matrix-
+    # group.py creates each leg's check-run via the Checks API (`checks: write`
+    # below) as the leg finishes, always terminal (`status: completed`, so the
+    # polling ci-summary gate can never be held pending by one; late terminal
+    # arrivals are safe per its sq-ipkku semantics). A failed leg does not stop the
+    # group (the old fail-fast: false), and the group job then FAILS LOUDLY naming
+    # exactly which legs failed. On a read-only token (fork PR) the per-leg POST
+    # degrades to a warning and the group job's own conclusion remains the gating
+    # signal — requiredness flows through `ci-summary / gate`, never through any
+    # individual leg name (sq-fmx4u.4).
+    #
+    # [OPUS-4.8] sq-ibrze (unchanged): legs are ASSEMBLED from the per-crate fragment
+    # files (`.github/feature-matrix.d/<crate>.yml`). To add a leg, edit ONLY the
+    # relevant crate fragment — do NOT reintroduce a static `include:` list here.
+    name: opt-in group (${{ matrix.group }})
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Per-leg `opt-in <name>` check-run emission (see the NAME CONTRACT note).
+      checks: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: clippy
+      - name: Rust (preinstalled stable + clippy)
+        # [FABLE-5] CI-economy: the ubuntu runner image ships a rustup stable
+        # toolchain (with the default profile, incl. clippy). dtolnay/rust-toolchain
+        # runs `rustup toolchain install stable`, which re-downloads the whole
+        # toolchain whenever the image lags the newest release. `component add` is a
+        # no-op when the component is already present — never a toolchain download.
+        run: |
+          rustup default stable
+          rustup component add clippy
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-4.8] sq-3sbrr — PER-CRATE (not per-leg) cache key + save-only-on-main.
-          # WHY: rust-cache stores the DEPENDENCY build only (never sparq's own crates —
-          # they recompile per leg regardless, see ci.yml's build-once note), so the prior
-          # per-leg `…-${{ matrix.crate }}-${{ matrix.features }}` key produced 68
-          # near-identical dependency caches (one per matrix leg). At ~0.2 GB each that is
-          # ~14 GB of demand against the repo's 10 GB Actions-cache budget, so GitHub
-          # LRU-evicted them AND the ci.yml caches (test-workspace / coverage / lint /
-          # wasm) on essentially every run — caching was present but self-defeating and
-          # most jobs restored COLD (recompiling the ~131 s dep floor from scratch).
-          # Keying by CRATE collapses the 68 legs to ONE dependency cache per crate (the
-          # 15 sparq-engine legs now share a single warm dep dir); cargo fingerprinting
-          # still recompiles each feature-varying crate itself, so there is no
-          # stale-artifact risk (the rust-cache key already embeds Cargo.lock + the rustc
-          # version + Cargo.toml hashes). `save-if` makes PR and ephemeral merge_group
-          # runs RESTORE-ONLY so they stop writing branch-scoped caches that churn the
-          # shared budget; the post-merge push-to-main run is what seeds/refreshes them.
-          shared-key: feature-matrix-${{ matrix.crate }}
+          # [OPUS-4.8] sq-3sbrr — PER-CRATE cache key + save-only-on-main, unchanged
+          # in strategy: rust-cache stores the DEPENDENCY build only, so keying by
+          # the group's DOMINANT crate (groups are same-crate-clustered by the
+          # assembler precisely so this key stays meaningful) keeps ONE dependency
+          # cache per crate instead of one per leg — the demand that used to blow
+          # the repo's 10 GB Actions-cache budget and LRU-evict everything. Grouping
+          # REDUCES total demand further (38-ish groups vs 159 leg jobs restoring).
+          # `save-if` keeps PR and ephemeral merge_group runs RESTORE-ONLY; the
+          # post-merge push-to-main run seeds/refreshes the caches.
+          shared-key: feature-matrix-${{ matrix.cache_crate }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch dependencies (retry transient crates.io fetch)
-        # [OPUS-4.8] sq-hhxc: these `opt-in <crate>` legs were failing ~8s in with exit 101
-        # — i.e. in EARLY SETUP (registry resolve/fetch), BEFORE any real compile (8s is far
-        # too short to build) — on PRs that don't touch the crate (#721/#724). The transient
-        # crates.io fetch that `cargo build` does up front (before compiling) is the flake.
-        # Pull it out into a dedicated, bounded shell retry so the registry hiccup is
-        # absorbed here and the subsequent build resolves from the warm cache. Fails only if
+        # [OPUS-4.8] sq-hhxc: transient crates.io fetch flake absorbed by a bounded
+        # retry so the per-leg builds resolve from the warm cache. Fails only if
         # all 3 attempts fail (a genuine outage). No new GitHub Action dependency.
         run: |
           set -euo pipefail
@@ -446,27 +467,21 @@ jobs:
             echo "cargo fetch attempt $n failed; retrying in 10s..." >&2
             sleep 10
           done
-      - name: Build (-p ${{ matrix.crate }} --features ${{ matrix.features }})
-        # [OPUS-4.8] sq-hhxc: bounded shell retry as a safety net — with the cache warmed by
-        # the fetch step above this normally compiles offline, but retry guards any residual
-        # transient network touch during resolution (fail only if all attempts fail).
-        run: |
-          set -euo pipefail
-          n=0
-          until cargo build -p ${{ matrix.crate }} --features ${{ matrix.features }}; do
-            n=$((n+1))
-            if [ "$n" -ge 3 ]; then
-              echo "::error::cargo build failed after $n attempts" >&2
-              exit 1
-            fi
-            echo "cargo build attempt $n failed; retrying in 10s..." >&2
-            sleep 10
-          done
-      - name: Test (-p ${{ matrix.crate }} --features ${{ matrix.features }})
-        if: matrix.test
-        run: cargo test -p ${{ matrix.crate }} --features ${{ matrix.features }}
-      - name: Clippy (--all-targets -D warnings)
-        run: cargo clippy -p ${{ matrix.crate }} --features ${{ matrix.features }} --all-targets -- -D warnings
+      - name: Run the group's legs (build -> test -> clippy; per-leg check-runs)
+        # Each leg: build (bounded sq-hhxc retry) -> test (where the fragment says
+        # so) -> clippy --all-targets -D warnings — the exact step set of the old
+        # per-leg job, then its `opt-in <name>` check-run is POSTed terminally.
+        env:
+          GROUP_LEGS: ${{ matrix.legs }}
+          GROUP_NAME: ${{ matrix.group }}
+          REPO: ${{ github.repository }}
+          # Same head-commit selection as ci-summary's discovery (PR head sha on
+          # pull_request; github.sha on merge_group/push), so the per-leg
+          # check-runs land on exactly the commit the gate polls.
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 scripts/run-feature-matrix-group.py
 
   # [SONNET-4.6] sq-ldg8c: T1 CHECK TIER — compile+clippy (NO test run) for the opt-in legs a
   # fragment has DEMOTED with `tier: check`. Design: research/feature-matrix-pyramid.md §3/§5.
@@ -528,11 +543,13 @@ jobs:
           N="$(echo "$CHECK" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["include"]))')"
           echo "legs=$N" >> "$GITHUB_OUTPUT"
           echo "check-tier shard '${{ matrix.shard }}': $N demoted leg(s) (event ${{ github.event_name }}, select ${SELECT_MODE:-<unset>})"
-      - name: Install Rust (stable)
+      - name: Rust (preinstalled stable + clippy)
         if: steps.legs.outputs.legs != '0'
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: clippy
+        # [FABLE-5] CI-economy: preinstalled runner-image stable (see the
+        # opt-in-features note) — `component add` is a no-op when present.
+        run: |
+          rustup default stable
+          rustup component add clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         if: steps.legs.outputs.legs != '0'
         with:
@@ -593,10 +610,12 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: clippy
+      - name: Rust (preinstalled stable + clippy)
+        # [FABLE-5] CI-economy: preinstalled runner-image stable (see the
+        # opt-in-features note) — `component add` is a no-op when present.
+        run: |
+          rustup default stable
+          rustup component add clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: feature-matrix-sparq-lws-core-no-default-features
@@ -657,10 +676,12 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: clippy
+      - name: Rust (preinstalled stable + clippy)
+        # [FABLE-5] CI-economy: preinstalled runner-image stable (see the
+        # opt-in-features note) — `component add` is a no-op when present.
+        run: |
+          rustup default stable
+          rustup component add clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: feature-matrix-sparq-server-no-default-features
@@ -717,10 +738,12 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: clippy
+      - name: Rust (preinstalled stable + clippy)
+        # [FABLE-5] CI-economy: preinstalled runner-image stable (see the
+        # opt-in-features note) — `component add` is a no-op when present.
+        run: |
+          rustup default stable
+          rustup component add clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: feature-matrix-sparq-geo-no-default-features
@@ -773,8 +796,10 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy: preinstalled runner-image stable (see the
+        # opt-in-features note); no extra component needed here.
+        run: rustup default stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: fedclient-boundary

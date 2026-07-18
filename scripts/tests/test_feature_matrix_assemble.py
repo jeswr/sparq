@@ -613,5 +613,288 @@ class TestAssembleFailureAnnotation(unittest.TestCase):
             self.assertIn("feature-matrix-legnames.golden.txt", summary_text)
 
 
+# [FABLE-5] CI-economy grouping (maintainer directive 2026-07-18): the per-leg matrix
+# is bin-packed into grouped runner jobs (assembler --grouped) and the gate-critical
+# `opt-in <name>` check-runs are emitted per leg from INSIDE the group job by
+# scripts/run-feature-matrix-group.py. THE load-bearing invariant: grouping is a pure
+# PARTITION of the (selection/tier-filtered) leg set — no leg dropped, none duplicated,
+# no name changed — so the golden name contract is untouched.
+class TestGrouping(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_assembler()
+        cls.legs = cls.mod.load_legs()
+
+    def test_grouping_partitions_the_full_leg_set(self):
+        groups = self.mod.group_legs(self.legs)
+        flat = [leg["name"] for g in groups for leg in g["legs"]]
+        self.assertEqual(sorted(flat), sorted(leg["name"] for leg in self.legs),
+                         "grouping must partition the leg set exactly (no drop/dup)")
+        self.assertEqual(len(flat), len(set(flat)), "no leg may appear twice")
+
+    def test_group_capacity_respected_for_multi_leg_groups(self):
+        # A single leg heavier than the capacity may stand alone; any MULTI-leg
+        # group must fit the capacity (the <5 min wall-time target).
+        for g in self.mod.group_legs(self.legs):
+            if g["count"] > 1:
+                self.assertLessEqual(
+                    g["weight"], self.mod.GROUP_CAPACITY,
+                    f"group {g['group']} exceeds the capacity with multiple legs")
+
+    def test_grouping_is_deterministic(self):
+        a = self.mod.group_legs(self.legs)
+        b = self.mod.group_legs(self.legs)
+        self.assertEqual(a, b, "grouping must be deterministic run-to-run")
+
+    def test_groups_are_meaningfully_fewer_than_legs(self):
+        groups = self.mod.group_legs(self.legs)
+        self.assertLess(len(groups), len(self.legs) / 2,
+                        "grouping must collapse the runner count substantially — "
+                        "one-leg-per-group would defeat the CI-economy directive")
+
+    def test_grouped_main_output_shape(self):
+        obj = _run_main_json(self.mod, ["--grouped", "--event", "pull_request"])
+        self.assertIn("include", obj)
+        total = 0
+        for g in obj["include"]:
+            self.assertEqual(set(g.keys()), {"group", "cache_crate", "count", "legs"})
+            inner = json.loads(g["legs"])  # legs is a JSON-encoded STRING (matrix scalar)
+            self.assertEqual(len(inner), g["count"])
+            total += g["count"]
+            for leg in inner:
+                self.assertEqual(set(leg.keys()), {"name", "crate", "features", "test"})
+        self.assertEqual(total, len(self.legs))
+
+    def test_grouped_composes_with_selection(self):
+        obj = _run_main_json(self.mod, [
+            "--grouped", "--event", "pull_request",
+            "--select-mode", "selected", "--affected", "[]"])
+        self.assertEqual(obj["include"], [],
+                         "an empty affected closure must assemble ZERO groups")
+        crates = sorted({leg["crate"] for leg in self.legs})
+        keep = crates[0]
+        obj = _run_main_json(self.mod, [
+            "--grouped", "--event", "pull_request",
+            "--select-mode", "selected", "--affected", json.dumps([keep])])
+        inner = [leg for g in obj["include"] for leg in json.loads(g["legs"])]
+        self.assertTrue(inner)
+        self.assertEqual({leg["crate"] for leg in inner}, {keep})
+
+    def test_explicit_weight_overrides_heuristic(self):
+        leg = dict(self.legs[0])
+        leg["weight"] = 7.5
+        self.assertEqual(self.mod.leg_weight(leg), 7.5)
+        leg["weight"] = None
+        self.assertGreater(self.mod.leg_weight(leg), 0)
+
+    def test_single_overweight_leg_gets_its_own_group(self):
+        legs = [
+            {"name": "huge", "crate": "c1", "features": "f", "test": True,
+             "weight": self.mod.GROUP_CAPACITY * 3},
+            {"name": "tiny", "crate": "c2", "features": "f", "test": True,
+             "weight": 0.1},
+        ]
+        groups = self.mod.group_legs(legs)
+        huge = [g for g in groups if any(l["name"] == "huge" for l in g["legs"])]
+        self.assertEqual(len(huge), 1)
+        self.assertEqual(huge[0]["count"], 1,
+                         "an over-capacity leg must stand alone, never merged")
+
+    def test_same_crate_legs_cluster_before_packing(self):
+        # Two crates, each with legs that fit one bin: no group may interleave
+        # them while a same-crate leg still fits — target-dir reuse is the point.
+        legs = []
+        for crate in ("ca", "cb"):
+            for i in range(3):
+                legs.append({"name": f"{crate}-{i}", "crate": crate,
+                             "features": "f", "test": True, "weight": 1.0})
+        for g in self.mod.group_legs(legs):
+            self.assertEqual(len({leg["crate"] for leg in g["legs"]}), 1,
+                             "fitting same-crate chunks must not be split across "
+                             "crates when each crate fits a bin alone")
+
+
+class TestWeightFieldValidation(unittest.TestCase):
+    """load_legs() accepts the optional `weight` key and hard-errors on malformed
+    values (a bad weight must never silently skew the packing)."""
+
+    def setUp(self):
+        self.mod = _load_assembler()
+        self._tmp = tempfile.TemporaryDirectory()
+        self._dir = Path(self._tmp.name)
+        self._orig = self.mod.FRAGMENT_DIR
+        self.mod.FRAGMENT_DIR = str(self._dir)
+
+    def tearDown(self):
+        self.mod.FRAGMENT_DIR = self._orig
+        self._tmp.cleanup()
+
+    def _write(self, body):
+        (self._dir / "frag.yml").write_text(body, encoding="utf-8")
+
+    _BASE = (
+        "- name: demo\n"
+        "  crate: sparq-core\n"
+        "  features: jsonld\n"
+        "  test: true\n"
+    )
+
+    def test_missing_weight_defaults_to_heuristic(self):
+        self._write(self._BASE)
+        legs = self.mod.load_legs()
+        self.assertIsNone(legs[0]["weight"])
+        self.assertGreater(self.mod.leg_weight(legs[0]), 0)
+
+    def test_explicit_positive_weight_is_accepted(self):
+        for value in ("2", "0.5", "10.25"):
+            self._write(self._BASE + f"  weight: {value}\n")
+            legs = self.mod.load_legs()
+            self.assertEqual(legs[0]["weight"], float(value))
+
+    def test_malformed_weight_errors(self):
+        for bad in ("0", "-1", "abc", "true", ".nan", ".inf", "[1]"):
+            self._write(self._BASE + f"  weight: {bad}\n")
+            with self.assertRaises(SystemExit) as cm:
+                self.mod.load_legs()
+            self.assertNotEqual(cm.exception.code, 0, f"weight: {bad} must error")
+
+
+class TestGroupedWorkflowWiring(unittest.TestCase):
+    """Pins the grouped-runner wiring in feature-matrix.yml: the matrix is assembled
+    with --grouped, the group job emits the per-leg check-runs via
+    scripts/run-feature-matrix-group.py, and it holds the checks: write permission
+    that emission needs (without it every leg's name would silently vanish from the
+    gate's discovery set on same-repo PRs)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import yaml  # noqa: PLC0415
+
+        cls.text = WORKFLOW.read_text(encoding="utf-8")
+        cls.wf = yaml.safe_load(cls.text)
+        cls.job = cls.wf["jobs"]["opt-in-features"]
+
+    def test_assemble_step_uses_grouped_mode(self):
+        self.assertIn("assemble-feature-matrix.py --grouped", self.text)
+
+    def test_group_job_runs_the_group_runner_script(self):
+        runs = [s.get("run", "") for s in self.job["steps"]]
+        self.assertTrue(any("run-feature-matrix-group.py" in r for r in runs),
+                        "the group job must run scripts/run-feature-matrix-group.py")
+
+    def test_group_job_has_checks_write(self):
+        self.assertEqual(self.job.get("permissions", {}).get("checks"), "write",
+                         "per-leg check-run emission needs checks: write")
+
+    def test_group_job_name_is_not_advisory(self):
+        self.assertNotRegex(str(self.job.get("name", "")), ADVISORY_RE,
+                            "the group job itself must GATE")
+
+    def test_group_job_passes_head_sha_and_legs(self):
+        env = {}
+        for s in self.job["steps"]:
+            env.update(s.get("env", {}) or {})
+        for key in ("GROUP_LEGS", "GROUP_NAME", "HEAD_SHA", "REPO", "GH_TOKEN"):
+            self.assertIn(key, env, f"group runner step must set {key}")
+
+
+class TestGroupRunner(unittest.TestCase):
+    """Executes scripts/run-feature-matrix-group.py with stubbed cargo/gh binaries
+    (FMG_CARGO / FMG_GH): a failing leg must NOT stop the group, every leg must get
+    its terminal `opt-in <name>` check-run POST, and the group must exit non-zero
+    naming the failed leg."""
+
+    RUNNER = REPO_ROOT / "scripts" / "run-feature-matrix-group.py"
+
+    def _run(self, legs, fail_on="", gh_rc="0"):
+        import subprocess  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            cargo_log = tmpdir / "cargo.log"
+            gh_log = tmpdir / "gh.log"
+            summary = tmpdir / "summary.md"
+            cargo = tmpdir / "cargo-stub"
+            cargo.write_text(
+                "#!/bin/bash\n"
+                f"echo \"$@\" >> {cargo_log}\n"
+                "case \" $* \" in *\" ${FAIL_ON:-__none__} \"*) exit 1;; esac\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            gh = tmpdir / "gh-stub"
+            gh.write_text(
+                "#!/bin/bash\n"
+                f"cat >> {gh_log}\n"
+                f"echo >> {gh_log}\n"
+                "exit ${GH_RC:-0}\n",
+                encoding="utf-8",
+            )
+            cargo.chmod(0o755)
+            gh.chmod(0o755)
+            summary.touch()
+            proc = subprocess.run(
+                [sys.executable, str(self.RUNNER)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env={
+                    "PATH": "/usr/bin:/bin",
+                    "FMG_CARGO": str(cargo),
+                    "FMG_GH": str(gh),
+                    "FAIL_ON": fail_on,
+                    "GH_RC": gh_rc,
+                    "GROUP_LEGS": json.dumps(legs),
+                    "GROUP_NAME": "g01 test-group",
+                    "REPO": "example/repo",
+                    "HEAD_SHA": "deadbeef",
+                    "DETAILS_URL": "https://example.invalid/run/1",
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                },
+            )
+            gh_calls = [json.loads(l) for l in gh_log.read_text().splitlines() if l.strip()] if gh_log.exists() else []
+            return proc, gh_calls, summary.read_text(encoding="utf-8")
+
+    LEGS = [
+        {"name": "alpha (f1)", "crate": "alpha", "features": "f1", "test": True},
+        {"name": "beta (f2)", "crate": "beta", "features": "f2", "test": False},
+    ]
+
+    def test_all_green_posts_a_success_check_run_per_leg(self):
+        proc, gh_calls, _ = self._run(self.LEGS)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual([c["name"] for c in gh_calls],
+                         ["opt-in alpha (f1)", "opt-in beta (f2)"],
+                         "every leg must get its byte-identical `opt-in <name>` run")
+        for c in gh_calls:
+            self.assertEqual(c["status"], "completed",
+                             "check-runs must be TERMINAL (a pending one could "
+                             "hold the polling ci-summary gate)")
+            self.assertEqual(c["conclusion"], "success")
+            self.assertEqual(c["head_sha"], "deadbeef")
+
+    def test_failing_leg_continues_reports_and_reds_the_group(self):
+        proc, gh_calls, summary = self._run(self.LEGS, fail_on="f1")
+        self.assertEqual(proc.returncode, 1, "a failed leg must RED the group")
+        # The failure names the exact leg, loudly.
+        self.assertIn("opt-in alpha (f1)", proc.stdout)
+        self.assertIn("::error", proc.stdout)
+        # The group kept going: BOTH legs report check-runs (fail-fast: false).
+        self.assertEqual([c["conclusion"] for c in gh_calls],
+                         ["failure", "success"])
+        self.assertIn("alpha (f1)", summary)
+
+    def test_untested_leg_skips_cargo_test(self):
+        proc, gh_calls, _ = self._run([self.LEGS[1]])
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(gh_calls[0]["conclusion"], "success")
+
+    def test_gh_failure_degrades_to_warning_never_fatal(self):
+        proc, _gh_calls, _ = self._run(self.LEGS, gh_rc="1")
+        self.assertEqual(proc.returncode, 0,
+                         "a read-only token must not fail a green group")
+        self.assertIn("::warning", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
