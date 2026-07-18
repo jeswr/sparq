@@ -1,0 +1,210 @@
+# feature-matrix-report — the TRUSTED, DEFAULT-BRANCH-OWNED reporter for the grouped
+# opt-in feature-matrix legs (PR #3511 review, CRITICAL finding 1). [FABLE-5] 🤖 SPARQ agent.
+#
+# WHY THIS IS ITS OWN `workflow_run` WORKFLOW (the security fix):
+# feature-matrix.yml's group jobs execute PR-controlled code (cargo build scripts,
+# proc macros, tests, clippy, the whole third-party build-time graph). The per-leg
+# `opt-in <name>` gate-critical check-runs must be POSTED with a `checks: write`
+# token. Posting them from a job that ALSO checks out the PR head and runs the PR's
+# copy of scripts/assemble-feature-matrix.py + scripts/run-feature-matrix-group.py is
+# the pwn-requests anti-pattern (GitHub Security Lab): a PR could EDIT either script
+# (or the workflow) to forge `gate` or other sibling check-runs with that token.
+#
+# The secure pattern is `workflow_run`: this workflow runs ONLY after feature-matrix
+# has completed, and GitHub ALWAYS executes the copy of THIS file — and of the scripts
+# it runs — that lives on the DEFAULT BRANCH, never the PR head's copy. A PR that edits
+# feature-matrix-report.yml or the reporter scripts on its branch changes NOTHING about
+# the run that fires for it; only a change merged to main (through review + branch
+# protection) takes effect. The privileged `checks: write` token is therefore never
+# reachable from PR-head-controlled content.
+#
+# WHAT IT DOES: downloads the triggering feature-matrix run's artifacts (by run-id),
+# treats every artifact STRICTLY AS DATA (parse + hostile-input validate, never
+# execute), and posts the per-leg `opt-in <name>` check-runs plus one head-SHA
+# `feature-matrix report` summary check-run onto the PR/merge_group head commit that
+# ci-summary polls. scripts/run-feature-matrix-group.py --report is the engine; it
+# constructs every check-run NAME reporter-side (`opt-in <name>`), resolves leg
+# names/metadata against the run's SELECTED-matrix artifact (finding 2), and FAILS
+# CLOSED unless the observed legs match the selected set EXACTLY.
+#
+# TRUST BOUNDARY (do NOT weaken any of these):
+#  * HEAD SHA is attacker-influenced on fork PRs (it comes from an artifact the setup
+#    job wrote while running PR-controlled assembler code). This workflow validates the
+#    artifact's recorded head SHA BYTE-FOR-BYTE against github.event.workflow_run.head_sha
+#    (SERVER-supplied, unforgeable) before any POST, and passes only the validated value
+#    through `env:` — never interpolating an artifact string into a `run:` shell.
+#  * The SELECTED-matrix artifact is also PR-influenced; that is acceptable for the
+#    completeness comparison (see run-feature-matrix-group.py's COMPLETENESS note): a
+#    forged smaller/larger set only drops/manufactures per-leg checks, while the
+#    UNFORGEABLE coarse gate is the group jobs' OWN conclusions on the PR head.
+#  * FORK-PR fork-denial tolerance (finding 3) is EVENT-GATED: FMG_FORK_PR is set from
+#    the server-supplied workflow_run.event + head_repository, NOT from the API error
+#    string, so a permission failure on a push / merge_group / same-repo PR is a hard
+#    failure (a real auth regression), never a benign fork denial.
+#
+# GATING: the reporter's `feature-matrix report` summary check-run NAME is free of the
+# words advisory/informational, so once discovered on the head SHA it GATES via
+# `ci-summary / gate` — a reporter failure (completeness violation / unexpected POST
+# error) blocks the merge (fail-closed). Because the reporter runs on a workflow_run
+# event it lands its check-runs a little AFTER the group jobs finish; ci-summary is
+# still polling on the slower siblings (CodeQL/coverage) in the common case and
+# discovers them. The ALWAYS-gating coarse signal (independent of reporter timing) is
+# the group jobs' own conclusions, which run on the PR/merge_group event and are
+# discovered directly by ci-summary (requiredness flows through `ci-summary / gate`,
+# never a per-leg name — sq-fmx4u.4).
+#
+# §ADVERSARIAL (self-check, PR #3511 review finding 1):
+#  (1) Can PR-head content influence the privileged job? NO. workflow_run always loads
+#      THIS file AND the reporter scripts from the default branch; the job's checkout
+#      pulls default-branch code (github.sha of the DEFAULT branch on a workflow_run),
+#      not the PR head. Artifacts are the ONLY PR-influenced input and are consumed
+#      strictly as validated data. No ${{ github.event.workflow_run.* }} value is
+#      expanded inside a `run:` body — all pass through `env:` and are quoted.
+#  (2) Can a fork PR forge the head SHA to annotate an unrelated commit? NO. The
+#      recorded head SHA is compared against github.event.workflow_run.head_sha
+#      (server-supplied) and the job skips on mismatch — the reporter only ever
+#      annotates the exact commit the triggering run ran on.
+#  (3) Can a malicious group job hide a failed leg by dropping it from the results?
+#      NO (finding 2). The reporter fails closed unless the observed legs EQUAL the
+#      selected set exactly; a dropped leg is a completeness violation => red summary
+#      check. (And the group job's own red conclusion already gates independently.)
+#  (4) workflow_run recursion — can this workflow trigger itself? NO. It triggers ONLY
+#      on completion of the workflow named `feature-matrix`; it is not itself named
+#      `feature-matrix` and emits no feature-matrix run.
+name: feature-matrix-report
+
+on:
+  # Fire after feature-matrix completes. `workflow_run.workflows` keys on the
+  # workflow NAME (`feature-matrix`). GitHub always executes the default-branch copy
+  # of this file — the whole point of the finding-1 fix.
+  workflow_run:
+    workflows: ["feature-matrix"]
+    types: [completed]
+
+# Read-only default; the reporter job opts in to the ONE write it needs.
+permissions:
+  contents: read
+
+# One in-flight reporter per triggering feature-matrix run.
+concurrency:
+  group: feature-matrix-report-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    name: feature-matrix per-leg report
+    # Only report for a feature-matrix run that actually produced legs. workflow_run
+    # fires for fork/cross-repo runs too; those are handled inside (FMG_FORK_PR event
+    # gating) — we do NOT gate the job off head_repository here because a fork PR's
+    # legs still deserve their (possibly fork-denied) attribution attempt, and the
+    # server-supplied head_sha validation + event gating make it safe.
+    if: >-
+      github.event.workflow_run.conclusion != 'skipped' &&
+      github.event.workflow_run.conclusion != 'cancelled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # The single privileged capability: emit the per-leg + summary check-runs.
+      checks: write
+    steps:
+      # Checkout is the DEFAULT-BRANCH copy (workflow_run runs on the default branch),
+      # so scripts/run-feature-matrix-group.py + scripts/assemble-feature-matrix.py are
+      # the reviewed, committed versions — never the PR head's. persist-credentials:
+      # false is belt-and-braces (the script authenticates via GH_TOKEN in env).
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      # Two SEPARATE downloads so FMG_RESULTS_DIR contains ONLY the per-leg results
+      # files — the metadata/selected artifacts must never be scanned as results.
+      # run-id + github-token pulls artifacts from the SPECIFIC feature-matrix run
+      # that triggered this reporter (workflow_run artifacts are otherwise not in
+      # this run's own scope). A missing pattern is not an error (v4+), so a run that
+      # assembled zero legs simply yields empty dirs — handled below.
+      - name: Download the per-leg results artifacts (by run-id)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: feature-matrix-results-*
+          path: fmg-results
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Download the selected-matrix + metadata artifacts (by run-id)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: feature-matrix-{selected,metadata}
+          path: fmg-meta
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - name: Validate head SHA against the server-supplied trigger, then report
+        env:
+          # ONLY the per-leg results live here (the reporter scans this recursively).
+          FMG_RESULTS_DIR: fmg-results
+          # The metadata + selected-matrix artifacts (never scanned as results).
+          FMG_META_DIR: fmg-meta
+          # SERVER-supplied, unforgeable — the ground truth the artifact's recorded
+          # head SHA must match. Passed through env (never interpolated into a shell).
+          TRIGGER_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          TRIGGER_EVENT: ${{ github.event.workflow_run.event }}
+          TRIGGER_HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          REPO: ${{ github.repository }}
+          GROUP_JOBS_RESULT: ${{ github.event.workflow_run.conclusion }}
+          GH_TOKEN: ${{ github.token }}
+          DETAILS_URL: ${{ github.event.workflow_run.html_url }}
+          # CORRELATION (PR #3511 review finding 2 — same-SHA stale-report race):
+          # the TRIGGERING feature-matrix run id. Server-supplied + unforgeable; the
+          # reporter embeds it as the `feature-matrix report` check's external_id so
+          # ci_summary_gate.py binds the verdict to THIS group run and ignores a stale
+          # same-SHA report from an earlier feature-matrix run (feature-matrix reruns
+          # on ready_for_review / label events against the same head SHA).
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+
+          META="${FMG_META_DIR}/feature-matrix-metadata/metadata.json"
+          SELECTED="${FMG_META_DIR}/feature-matrix-selected/selected-matrix.json"
+          if [ ! -f "${META}" ] || [ ! -f "${SELECTED}" ]; then
+            # NO-OP (green, no check posted). Two legitimate cases produce no grouped
+            # metadata/selected artifacts:
+            #  (1) BOOTSTRAP WINDOW: this reporter is on `main` AHEAD of the grouped
+            #      feature-matrix (PR #3511). main's current feature-matrix uses the
+            #      pre-grouping per-leg format and uploads NO metadata/selected
+            #      artifacts, so every triggered reporter run lands here and exits
+            #      cleanly WITHOUT posting a (misleading) success check-run. Once
+            #      #3511's grouped format merges, real artifacts appear and the reporter
+            #      begins posting. It NEVER posts for a run it cannot fully attribute.
+            #  (2) ZERO-LEG runs (path-filter skip / empty selection) upload no metadata
+            #      either; there is likewise nothing to gate.
+            # A `::notice::` (not `::error::`): this is an expected no-op, not a failure,
+            # so the reporter job stays green with no spurious error annotation.
+            echo "::notice::no grouped feature-matrix metadata/selected artifacts on this run (bootstrap window before PR #3511's grouped format lands, or a zero-leg run) — nothing to report; posting no check-run."
+            exit 0
+          fi
+
+          # --- HEAD-SHA TRUST GATE (finding 1) -------------------------------------
+          # The artifact's recorded head SHA is attacker-influenced; the SERVER value
+          # is not. Parse the SHA out of the JSON with python (as DATA — the artifact
+          # string is never interpolated into a shell command).
+          ART_HEAD_SHA="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["head_sha"])' "${META}")"
+          if [ "${ART_HEAD_SHA}" != "${TRIGGER_HEAD_SHA}" ]; then
+            echo "::error::artifact head SHA (${ART_HEAD_SHA}) does not match the server-supplied workflow_run.head_sha (${TRIGGER_HEAD_SHA}) — refusing to post check-runs on a possibly-spoofed commit."
+            exit 1
+          fi
+
+          # --- FORK-PR event gate (finding 3) --------------------------------------
+          # Tolerate a check-run POST permission denial ONLY on a fork PR — decided
+          # from SERVER fields, not the API error string.
+          FORK_PR=false
+          if [ "${TRIGGER_EVENT}" = "pull_request" ] && [ "${TRIGGER_HEAD_REPO}" != "${REPO}" ]; then
+            FORK_PR=true
+          fi
+
+          # --- Report (the reporter engine treats artifacts strictly as data) ------
+          # FMG_RESULTS_DIR / GROUP_JOBS_RESULT / REPO / DETAILS_URL / GH_TOKEN come
+          # from the step `env:`. The remaining three are the validated values.
+          FMG_VALID_LEGS_FILE="${SELECTED}" \
+          HEAD_SHA="${TRIGGER_HEAD_SHA}" \
+          FMG_FORK_PR="${FORK_PR}" \
+          python3 scripts/run-feature-matrix-group.py --report
