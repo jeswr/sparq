@@ -17,6 +17,18 @@
 # (`bd create`) before any rerun — NEVER time past a disagreement. A sparq abstention
 # yields agreement=n/a for sparq (abstentions cannot agree or disagree).
 #
+# TIMING BOUNDARY (one comparable scope for every engine): consistency_s is the
+# END-TO-END wall time of ONE CLI process per engine per ontology — process start →
+# exit — measured by this wrapper with the same clock for all three columns. So sparq's
+# binary startup + input read + parse + extract → profile → tableau are INSIDE its
+# timing, exactly as JVM startup + ontology load + reasoning are inside HermiT's and
+# Openllet's. ore_bench's self-reported extract_s/check_s are recorded ONLY as a
+# sparq-internal breakdown, never as the comparison metric, and the wrapper asserts
+# process wall >= extract_s + check_s so the selected field provably sits at the outer
+# boundary. Known residual caveat (recorded in every envelope): sparq parses
+# riot-converted N-Triples while the JVM CLIs parse the original OWL file; the riot
+# conversion itself runs outside every engine's timing.
+#
 # --smoke  the fast, hermetic ACCEPTANCE path — build + run the sparq example on the
 #          VENDORED ORE-style fixtures (crates/sparq-reason-dl/examples/data/ore_smoke_*),
 #          asserting their pinned verdicts. NO downloads, NO JVM, NO network.
@@ -116,7 +128,8 @@ if want sparq && [ ! -x "$JENA_HOME/bin/riot" ]; then
 fi
 RIOT="$JENA_HOME/bin/riot"
 
-# Seconds-since-epoch wall clock for the JVM columns (their CLIs print no machine time).
+# Seconds-since-epoch wall clock — the ONE timing source for every engine column
+# (process start → exit), so all three consistency_s values share the same boundary.
 now_s() { python3 -c 'import time;print(f"{time.time():.6f}")'; }
 
 N=0
@@ -128,7 +141,10 @@ while IFS= read -r OWL; do
   OWL_SHA="$(sha256sum "$OWL" | cut -d' ' -f1)"
 
   # -- 1a. sparq: verdict (+ profile row) printed BEFORE timing -----------------
-  SPARQ_ROW=""; SPARQ_VERDICT=""; SPARQ_S=""
+  # consistency_s = end-to-end process wall around the ore_bench invocation (same
+  # boundary as the JVM columns); extract_s/check_s from ore_bench stdout are kept
+  # ONLY as a sparq-internal breakdown.
+  SPARQ_ROW=""; SPARQ_VERDICT=""; SPARQ_S=""; SPARQ_EXTRACT_S=""; SPARQ_CHECK_S=""
   if want sparq; then
     NT="$GATHER/$ONT.nt"
     case "$OWL" in
@@ -138,10 +154,20 @@ while IFS= read -r OWL; do
     esac
     if [ -n "$NT" ]; then
       log "sparq: consistency $ONT (cap ${TIMEOUT_S}s)"
+      START="$(now_s)"
       if timeout "$TIMEOUT_S" "$SPARQ_BIN" "$NT" ntriples > "$GATHER/$ONT.sparq.out" 2>&1; then
+        END="$(now_s)"; SPARQ_S="$(python3 -c "print(f'{$END-$START:.6f}')")"
         SPARQ_ROW="$(cat "$GATHER/$ONT.sparq.out")"
         SPARQ_VERDICT="$(sed -n 's/.* verdict=\([^ ]*\).*/\1/p' "$GATHER/$ONT.sparq.out" | head -1)"
-        SPARQ_S="$(sed -n 's/.*check_s=\([0-9.]*\).*/\1/p' "$GATHER/$ONT.sparq.out" | head -1)"
+        SPARQ_EXTRACT_S="$(sed -n 's/.*extract_s=\([0-9.]*\).*/\1/p' "$GATHER/$ONT.sparq.out" | head -1)"
+        SPARQ_CHECK_S="$(sed -n 's/.*check_s=\([0-9.]*\).*/\1/p' "$GATHER/$ONT.sparq.out" | head -1)"
+        # Boundary assertion: the selected metric must be the OUTER process wall — it
+        # can never undercut the tool's own internal phase sum. A violation means the
+        # wrapper is timing the wrong field; abort rather than emit a bogus envelope.
+        if [ -n "$SPARQ_EXTRACT_S" ] && [ -n "$SPARQ_CHECK_S" ]; then
+          python3 -c "import sys; sys.exit(0 if float('$SPARQ_S') >= float('$SPARQ_EXTRACT_S') + float('$SPARQ_CHECK_S') else 1)" \
+            || { log "TIMING-BOUNDARY VIOLATION on $ONT: process wall ${SPARQ_S}s < internal extract_s+check_s — consistency_s is not the end-to-end boundary; aborting"; exit 3; }
+        fi
       else
         log "sparq FAILED/timeout on $ONT"; SPARQ_ROW="ERROR: timeout/failure"
       fi
@@ -206,10 +232,14 @@ while IFS= read -r OWL; do
     log "ACTION REQUIRED: file a bug bead (bd create) referencing this envelope before rerunning."
   fi
   if [ "$AGREE" != "true" ]; then
-    # No timing row without verdict agreement — null every engine timing.
-    SPARQ_S=""; HERMIT_S=""; OPENLLET_S=""
+    # No timing row without verdict agreement — null every engine timing (the
+    # sparq-internal breakdown included: an untrusted row gets no timings at all).
+    SPARQ_S=""; SPARQ_EXTRACT_S=""; SPARQ_CHECK_S=""; HERMIT_S=""; OPENLLET_S=""
   fi
-  case "$SPARQ_VERDICT" in consistent|inconsistent) ;; *) SPARQ_S="" ;; esac
+  case "$SPARQ_VERDICT" in
+    consistent|inconsistent) ;;
+    *) SPARQ_S=""; SPARQ_EXTRACT_S=""; SPARQ_CHECK_S="" ;;
+  esac
 
   # -- 3. envelope ---------------------------------------------------------------
   TS="$(python3 -c 'import time;print(time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))')"
@@ -217,6 +247,7 @@ while IFS= read -r OWL; do
   CANONICAL="$CANONICAL" ONT="$ONT" OWL_SHA="$OWL_SHA" GIT_COMMIT="$GIT_COMMIT" \
   ONLY="$ONLY" TIMEOUT_S="$TIMEOUT_S" OUT="$OUT" AGREE="$AGREE" \
   SPARQ_ROW="$SPARQ_ROW" SPARQ_VERDICT="$SPARQ_VERDICT" SPARQ_S="$SPARQ_S" \
+  SPARQ_EXTRACT_S="$SPARQ_EXTRACT_S" SPARQ_CHECK_S="$SPARQ_CHECK_S" \
   HERMIT_ROW="$HERMIT_ROW" HERMIT_VERDICT="$HERMIT_VERDICT" HERMIT_S="$HERMIT_S" \
   OPENLLET_ROW="$OPENLLET_ROW" OPENLLET_VERDICT="$OPENLLET_VERDICT" OPENLLET_S="$OPENLLET_S" \
   python3 - <<'PYEOF'
@@ -236,10 +267,21 @@ def engine(key, mode):
 
 engines = {}
 if "sparq" in only:
-    engines["sparq"] = engine("SPARQ", "in-process (examples/ore_bench GATHER: parse once, "
-                              "extract → profile → ALCH tableau); scoped ALCH — abstains "
+    engines["sparq"] = engine("SPARQ", "one-shot CLI (examples/ore_bench GATHER): "
+                              "consistency_s is end-to-end process wall — spawn → exit, "
+                              "so binary startup + N-Triples read/parse + extract → "
+                              "profile → ALCH tableau are all inside it, matching the "
+                              "JVM CLI boundary; scoped ALCH — abstains "
                               "unknown(out-of-fragment) outside the fragment")
     engines["sparq"]["version"] = os.environ["GIT_COMMIT"]
+    engines["sparq"]["internal_breakdown_s"] = {
+        "extract_s": os.environ["SPARQ_EXTRACT_S"] or None,
+        "check_s": os.environ["SPARQ_CHECK_S"] or None,
+        "note": ("sparq-internal phase timings self-reported by ore_bench — a breakdown "
+                 "of consistency_s, NOT comparable to the other engine columns; the "
+                 "cross-engine metric is consistency_s (end-to-end process wall) for "
+                 "every engine, asserted >= extract_s + check_s by the wrapper"),
+    }
 if "hermit" in only:
     engines["hermit"] = engine("HERMIT", "HermiT CLI -k (full OWL 2 DL; LGPL-3.0 — note the "
                                "licensing caveat before publishing numbers)")
@@ -264,10 +306,16 @@ envelope = {
     "suite": "reason-dl-ore",
     "ontology": os.environ["ONT"],
     "ontology_sha256": os.environ["OWL_SHA"],
-    "metric": ("ontology CONSISTENCY verdict (consistent/inconsistent) + consistency wall time. "
-               "sparq-reason-dl is a SCOPED ALCH tableau, not full OWL 2 DL: out-of-fragment "
-               "ontologies record verdict=unknown(out-of-fragment) — an honest abstention, "
-               "never a verdict and never a timing row"),
+    "metric": ("ontology CONSISTENCY verdict (consistent/inconsistent) + end-to-end "
+               "consistency wall time. TIMING BOUNDARY: consistency_s is ONE full CLI "
+               "process per engine per ontology (process start → exit, wrapper-clocked), "
+               "so engine startup (native or JVM) and ontology load/parse sit INSIDE "
+               "every engine's timing. Residual input caveat: sparq parses riot-converted "
+               "N-Triples while HermiT/Openllet parse the original OWL file; the riot "
+               "conversion runs outside every engine's timing. sparq-reason-dl is a "
+               "SCOPED ALCH tableau, not full OWL 2 DL: out-of-fragment ontologies record "
+               "verdict=unknown(out-of-fragment) — an honest abstention, never a verdict "
+               "and never a timing row"),
     "verdict_before_timing": {
         "sparq_verdict": os.environ["SPARQ_VERDICT"] or None,
         "hermit_verdict": os.environ["HERMIT_VERDICT"] or None,

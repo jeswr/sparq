@@ -44,6 +44,18 @@ second (Phase 2), and fills the registry stub in.
 The comparison metric is the **ontology consistency verdict**
 (`consistent`/`inconsistent`) — the ORE competition's consistency task — plus wall time.
 
+**One timing boundary for every engine.** `consistency_s` is the **end-to-end wall time
+of one CLI process per engine per ontology** (process start → exit), clocked by the
+wrapper with the same clock for all three columns: sparq's binary startup + input
+read/parse + extract → profile → tableau count exactly as JVM startup + ontology load +
+reasoning count for HermiT/Openllet. `ore_bench`'s self-reported `extract_s`/`check_s`
+are recorded only as a sparq-internal *breakdown* of that wall time (envelope field
+`internal_breakdown_s`), never as the comparison metric, and the wrapper **asserts**
+process wall ≥ `extract_s` + `check_s` — aborting on violation — so the selected timing
+field provably sits at the outer boundary. Residual caveat, recorded in every envelope:
+sparq parses riot-converted N-Triples while the JVM CLIs parse the original OWL file;
+the riot conversion itself runs outside every engine's timing.
+
 **NO timing row without verdict agreement.** For every ontology each engine's verdict is
 recorded and cross-checked **before** any timing is trusted; a timing row is emitted only
 when at least two engines return a *definitive* verdict and all definitive verdicts
@@ -65,7 +77,8 @@ gets a timing entry.
   the pinned verdicts on the **vendored ORE-style subset** still hold (§3).
 - **GATHER** (`<path> [format]`): one ontology per invocation, printing
   `verdict= profile_el= profile_ql= profile_rl= axioms=` **before** `extract_s=`/`check_s=`
-  so the wrapper can enforce §1 structurally. No assertions — real-corpus verdicts are
+  so the wrapper can enforce §1 structurally. `extract_s`/`check_s` are the sparq-internal
+  phase breakdown only — the cross-engine metric is the wrapper-clocked process wall (§1). No assertions — real-corpus verdicts are
   cross-checked by the wrapper, never baked in. Verdicts run under the tableau's
   deterministic count budget (`ORE_BENCH_MAX_NODES` / `ORE_BENCH_MAX_RULE_APPS`);
   exhaustion prints `unknown(budget:…)`, an abstention, never a verdict.
@@ -100,9 +113,10 @@ reasoners' own CLIs, no committed Java):
   auto-downloaded, hosting has moved over the years — see `bench/competitors.json`)
   is walked up to `ORE_MAX_ONTOLOGIES` files (capped LOUDLY, never silently). Per
   ontology: riot converts OWL→NT for sparq; HermiT runs `-k` (consistency); Openllet
-  runs `consistency`. Verdicts are normalised, cross-checked per §1, and one envelope
-  per ontology lands in `OUT_DIR` with `verdict_before_timing` recorded ahead of the
-  engine rows. Jar paths come from `HERMIT_JAR` / `OPENLLET_JAR` (pinned at gather
+  runs `consistency`. Every engine — sparq's `ore_bench` included — is timed as one
+  full CLI process (the §1 boundary). Verdicts are normalised, cross-checked per §1,
+  and one envelope per ontology lands in `OUT_DIR` with `verdict_before_timing`
+  recorded ahead of the engine rows. Jar paths come from `HERMIT_JAR` / `OPENLLET_JAR` (pinned at gather
   time; recorded in the envelope; missing jars record an honest ERROR row).
 
 ## 5. What is pinned vs deferred

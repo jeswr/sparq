@@ -27,7 +27,10 @@
 //!     extract_s=… check_s=…` — NO assertion. The VERDICT fields come before the timing
 //!     fields so scripts/bench/reason-dl-same-box.sh can enforce the sq-hmd7l.10
 //!     invariant: NO timing row without a verdict-agreement check vs HermiT/Openllet;
-//!     a disagreement is a correctness finding, never timed past.
+//!     a disagreement is a correctness finding, never timed past. `extract_s`/`check_s`
+//!     are the sparq-INTERNAL phase breakdown only — the cross-engine metric is the
+//!     wrapper's end-to-end process wall clock around this invocation, the same
+//!     boundary it applies to the JVM CLIs (startup + parse + reasoning included).
 //!
 //! Verdicts are produced under a DETERMINISTIC count budget (no wall-clock budgets);
 //! gather runs may raise it via ORE_BENCH_MAX_NODES / ORE_BENCH_MAX_RULE_APPS. Budget
