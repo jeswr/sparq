@@ -1,0 +1,299 @@
+#!/usr/bin/env bash
+# [FABLE-5] sq-hmd7l.10 (epic sq-hmd7l) — same-box OWL DL CONSISTENCY comparison:
+# sparq-reason-dl (scoped ALCH tableau) vs HermiT and Openllet (full OWL 2 DL tableau
+# reasoners) on ORE (OWL Reasoner Evaluation) competition corpus ontologies, emitting one
+# competitor-results ENVELOPE per ontology. Mirrors scripts/bench/reason-el-same-box.sh.
+#
+# HONEST FRAMING (research/gap-reason-dl-2026-07.md). sparq-reason-dl is a scoped ALCH
+# profile-checker/tableau, NOT a full OWL 2 DL reasoner: on real ORE corpora it is
+# EXPECTED to abstain (verdict=unknown(out-of-fragment)) on every ontology outside ALCH.
+# An abstention is recorded as an abstention — never as a verdict, never as a timing row.
+#
+# VERDICT-BEFORE-TIMING (the sq-hmd7l.10 INVARIANT — stricter than the reason-el count
+# flag). Every engine's CONSISTENCY VERDICT is recorded and cross-checked FIRST; a timing
+# row is emitted ONLY when at least two engines returned a definitive verdict AND all
+# definitive verdicts AGREE. A disagreement is a CORRECTNESS FINDING: the envelope records
+# verdicts_agree=false with timings NULLED, and the operator must file a bug bead
+# (`bd create`) before any rerun — NEVER time past a disagreement. A sparq abstention
+# yields agreement=n/a for sparq (abstentions cannot agree or disagree).
+#
+# --smoke  the fast, hermetic ACCEPTANCE path — build + run the sparq example on the
+#          VENDORED ORE-style fixtures (crates/sparq-reason-dl/examples/data/ore_smoke_*),
+#          asserting their pinned verdicts. NO downloads, NO JVM, NO network.
+#              bash scripts/bench/reason-dl-same-box.sh --smoke
+#
+# FULL MODE (gather; needs a JRE + riot for OWL→NT + a local ORE corpus):
+#              ORE_CORPUS_DIR=/path/to/ore-owl-files bash scripts/bench/reason-dl-same-box.sh
+#              ONLY="sparq openllet" ORE_CORPUS_DIR=… bash scripts/bench/reason-dl-same-box.sh
+#
+# The ORE 2014/2015 corpora are NOT auto-downloaded (multi-GB; hosting has moved over the
+# years — see the ORE dataset repository / Zenodo mirrors referenced from
+# bench/competitors.json `hermit-openllet`). Point ORE_CORPUS_DIR at a directory of
+# .owl/.ttl/.nt ontology files; each file becomes one envelope.
+#
+# TUNABLES (env; all have safe defaults):
+#   ORE_CORPUS_DIR   REQUIRED in full mode: dir of ontology files (.owl/.rdf/.ttl/.nt)
+#   ORE_MAX_ONTOLOGIES  cap on corpus files processed this run     (default 25)
+#   ONLY             engine subset of "sparq hermit openllet"      (default all three)
+#   OUT_DIR          envelope dir (default /tmp/reason-dl-same-box-results; a canonical
+#                    run points this at bench/canonical-competitor-results/<date>/)
+#   CANONICAL        1 = dedicated quiet-box run                   (default 0: NON-canonical)
+#   TIMEOUT_S        per-engine consistency cap, seconds           (default 600)
+#   HERMIT_JAR       path to HermiT.jar         (LGPL-3.0; NOT auto-downloaded)
+#   OPENLLET_JAR     path to openllet-cli jar   (Apache-2.0; NOT auto-downloaded — get it
+#                    from https://github.com/Galigator/openllet/releases; prefer Openllet
+#                    for publishable numbers per bench/competitors.json licensing note)
+#   JENA_VERSION     apache-jena for `riot` OWL→NT                 (default 5.4.0)
+#   JENA_HOME        jena dist root (auto-downloaded to /tmp if unset)
+#
+# Reasoner jars + corpora are gather-only deps — NOT committed (engines + big corpora stay
+# out of git per AGENTS.md). Delete when done:  rm -rf /tmp/reason-dl-gather /tmp/jena-riot
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(cd "$HERE/../.." && pwd)"
+cd "$ROOT"
+
+ONLY="${ONLY:-sparq hermit openllet}"
+OUT_DIR="${OUT_DIR:-/tmp/reason-dl-same-box-results}"
+CANONICAL="${CANONICAL:-0}"
+TIMEOUT_S="${TIMEOUT_S:-600}"
+ORE_MAX_ONTOLOGIES="${ORE_MAX_ONTOLOGIES:-25}"
+JENA_VERSION="${JENA_VERSION:-5.4.0}"
+JENA_HOME="${JENA_HOME:-/tmp/jena-riot/apache-jena-$JENA_VERSION}"
+
+log() { printf '[reason-dl-same-box] %s\n' "$*" >&2; }
+want() { [[ " $ONLY " == *" $1 "* ]]; }
+
+# ---- --smoke: the hermetic, sparq-only acceptance path -----------------------
+if [[ "${1:-}" == "--smoke" ]]; then
+  log "SMOKE: sparq-only, pinned vendored ORE-style fixtures (no network/JVM)"
+  cargo build --release -p sparq-reason-dl --example ore_bench
+  "$ROOT/target/release/examples/ore_bench" --smoke
+  log "SMOKE OK"
+  exit 0
+fi
+
+# ---- full mode ---------------------------------------------------------------
+ORE_CORPUS_DIR="${ORE_CORPUS_DIR:-}"
+if [ -z "$ORE_CORPUS_DIR" ] || [ ! -d "$ORE_CORPUS_DIR" ]; then
+  log "ORE_CORPUS_DIR is unset or not a directory — full mode needs a local ORE corpus"
+  log "(the ORE 2014/2015 corpora are gather-only downloads; see the header). Aborting."
+  exit 2
+fi
+
+mkdir -p "$OUT_DIR"
+GATHER="/tmp/reason-dl-gather"
+mkdir -p "$GATHER"
+GIT_COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+
+# ---- 0. engines --------------------------------------------------------------
+SPARQ_BIN="$ROOT/target/release/examples/ore_bench"
+if want sparq; then
+  log "building sparq ore_bench example"
+  cargo build --release -p sparq-reason-dl --example ore_bench
+fi
+
+HERMIT_JAR="${HERMIT_JAR:-}"
+if want hermit && [ ! -f "$HERMIT_JAR" ]; then
+  log "HERMIT_JAR unset/missing — HermiT columns will record an honest ERROR"
+  log "(HermiT is LGPL-3.0: download it yourself from https://github.com/owlcs/HermiT"
+  log " and note the licensing caveat in bench/competitors.json before publishing numbers)"
+fi
+OPENLLET_JAR="${OPENLLET_JAR:-}"
+if want openllet && [ ! -f "$OPENLLET_JAR" ]; then
+  log "OPENLLET_JAR unset/missing — Openllet columns will record an honest ERROR"
+  log "(download openllet-cli from https://github.com/Galigator/openllet/releases)"
+fi
+
+# riot (Apache Jena) converts each OWL ontology → N-Triples for sparq's parser.
+if want sparq && [ ! -x "$JENA_HOME/bin/riot" ]; then
+  log "downloading apache-jena $JENA_VERSION to /tmp/jena-riot (for riot OWL→NT, gather-only)"
+  mkdir -p /tmp/jena-riot
+  curl -sSL -o "/tmp/jena-riot/apache-jena-$JENA_VERSION.tar.gz" \
+    "https://archive.apache.org/dist/jena/binaries/apache-jena-$JENA_VERSION.tar.gz"
+  tar xzf "/tmp/jena-riot/apache-jena-$JENA_VERSION.tar.gz" -C /tmp/jena-riot
+fi
+RIOT="$JENA_HOME/bin/riot"
+
+# Seconds-since-epoch wall clock for the JVM columns (their CLIs print no machine time).
+now_s() { python3 -c 'import time;print(f"{time.time():.6f}")'; }
+
+N=0
+while IFS= read -r OWL; do
+  [ "$N" -ge "$ORE_MAX_ONTOLOGIES" ] && { log "ORE_MAX_ONTOLOGIES=$ORE_MAX_ONTOLOGIES reached — stopping (cap logged, not silent)"; break; }
+  N=$((N + 1))
+  ONT="$(basename "$OWL")"
+  log "=== ontology $N: $ONT ==="
+  OWL_SHA="$(sha256sum "$OWL" | cut -d' ' -f1)"
+
+  # -- 1a. sparq: verdict (+ profile row) printed BEFORE timing -----------------
+  SPARQ_ROW=""; SPARQ_VERDICT=""; SPARQ_S=""
+  if want sparq; then
+    NT="$GATHER/$ONT.nt"
+    case "$OWL" in
+      *.nt) NT="$OWL" ;;
+      *) [ -f "$NT" ] || "$RIOT" --output=ntriples "$OWL" > "$NT" 2>"$GATHER/$ONT.riot.err" \
+           || { log "riot conversion failed (see $GATHER/$ONT.riot.err)"; NT=""; } ;;
+    esac
+    if [ -n "$NT" ]; then
+      log "sparq: consistency $ONT (cap ${TIMEOUT_S}s)"
+      if timeout "$TIMEOUT_S" "$SPARQ_BIN" "$NT" ntriples > "$GATHER/$ONT.sparq.out" 2>&1; then
+        SPARQ_ROW="$(cat "$GATHER/$ONT.sparq.out")"
+        SPARQ_VERDICT="$(sed -n 's/.* verdict=\([^ ]*\).*/\1/p' "$GATHER/$ONT.sparq.out" | head -1)"
+        SPARQ_S="$(sed -n 's/.*check_s=\([0-9.]*\).*/\1/p' "$GATHER/$ONT.sparq.out" | head -1)"
+      else
+        log "sparq FAILED/timeout on $ONT"; SPARQ_ROW="ERROR: timeout/failure"
+      fi
+    else
+      SPARQ_ROW="ERROR: riot conversion failed"
+    fi
+  fi
+
+  # -- 1b. HermiT: CLI consistency (-k) -----------------------------------------
+  HERMIT_ROW=""; HERMIT_VERDICT=""; HERMIT_S=""
+  if want hermit && [ -f "$HERMIT_JAR" ]; then
+    log "hermit: consistency $ONT (cap ${TIMEOUT_S}s)"
+    START="$(now_s)"
+    if timeout "$TIMEOUT_S" java -jar "$HERMIT_JAR" -k "file://$OWL" \
+        > "$GATHER/$ONT.hermit.out" 2>&1; then
+      END="$(now_s)"; HERMIT_S="$(python3 -c "print(f'{$END-$START:.6f}')")"
+      HERMIT_ROW="$(cat "$GATHER/$ONT.hermit.out")"
+      if grep -qi 'true\|is consistent' "$GATHER/$ONT.hermit.out"; then HERMIT_VERDICT="consistent"
+      elif grep -qi 'false\|is inconsistent' "$GATHER/$ONT.hermit.out"; then HERMIT_VERDICT="inconsistent"
+      fi
+    else
+      log "hermit FAILED/timeout on $ONT"; HERMIT_ROW="ERROR: timeout/failure"
+    fi
+  elif want hermit; then
+    HERMIT_ROW="ERROR: HERMIT_JAR unavailable"
+  fi
+
+  # -- 1c. Openllet: CLI consistency --------------------------------------------
+  OPENLLET_ROW=""; OPENLLET_VERDICT=""; OPENLLET_S=""
+  if want openllet && [ -f "$OPENLLET_JAR" ]; then
+    log "openllet: consistency $ONT (cap ${TIMEOUT_S}s)"
+    START="$(now_s)"
+    if timeout "$TIMEOUT_S" java -jar "$OPENLLET_JAR" consistency "$OWL" \
+        > "$GATHER/$ONT.openllet.out" 2>&1; then
+      END="$(now_s)"; OPENLLET_S="$(python3 -c "print(f'{$END-$START:.6f}')")"
+      OPENLLET_ROW="$(cat "$GATHER/$ONT.openllet.out")"
+      if grep -qi 'inconsistent' "$GATHER/$ONT.openllet.out"; then OPENLLET_VERDICT="inconsistent"
+      elif grep -qi 'consistent' "$GATHER/$ONT.openllet.out"; then OPENLLET_VERDICT="consistent"
+      fi
+    else
+      log "openllet FAILED/timeout on $ONT"; OPENLLET_ROW="ERROR: timeout/failure"
+    fi
+  elif want openllet; then
+    OPENLLET_ROW="ERROR: OPENLLET_JAR unavailable"
+  fi
+
+  # -- 2. VERDICT-BEFORE-TIMING cross-check (the sq-hmd7l.10 invariant) ---------
+  # Definitive = "consistent"/"inconsistent". sparq's unknown(...) abstentions are
+  # honest non-answers: excluded from agreement, and they null sparq's timing.
+  AGREE="n/a"; DEFINITIVE=""
+  for V in "$SPARQ_VERDICT" "$HERMIT_VERDICT" "$OPENLLET_VERDICT"; do
+    case "$V" in consistent|inconsistent) DEFINITIVE="$DEFINITIVE $V" ;; esac
+  done
+  NDEF="$(echo "$DEFINITIVE" | wc -w)"
+  NUNIQ="$(echo "$DEFINITIVE" | tr ' ' '\n' | sed '/^$/d' | sort -u | wc -l)"
+  if [ "$NDEF" -ge 2 ]; then
+    if [ "$NUNIQ" -eq 1 ]; then AGREE="true"; else AGREE="false"; fi
+  fi
+  log "$ONT verdicts — sparq=${SPARQ_VERDICT:-none} hermit=${HERMIT_VERDICT:-none} openllet=${OPENLLET_VERDICT:-none} agree=$AGREE"
+  if [ "$AGREE" = "false" ]; then
+    log "DISAGREEMENT: correctness finding — timings NULLED in the envelope."
+    log "ACTION REQUIRED: file a bug bead (bd create) referencing this envelope before rerunning."
+  fi
+  if [ "$AGREE" != "true" ]; then
+    # No timing row without verdict agreement — null every engine timing.
+    SPARQ_S=""; HERMIT_S=""; OPENLLET_S=""
+  fi
+  case "$SPARQ_VERDICT" in consistent|inconsistent) ;; *) SPARQ_S="" ;; esac
+
+  # -- 3. envelope ---------------------------------------------------------------
+  TS="$(python3 -c 'import time;print(time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))')"
+  OUT="$OUT_DIR/reason-dl-${ONT%.*}-${TS}.json"
+  CANONICAL="$CANONICAL" ONT="$ONT" OWL_SHA="$OWL_SHA" GIT_COMMIT="$GIT_COMMIT" \
+  ONLY="$ONLY" TIMEOUT_S="$TIMEOUT_S" OUT="$OUT" AGREE="$AGREE" \
+  SPARQ_ROW="$SPARQ_ROW" SPARQ_VERDICT="$SPARQ_VERDICT" SPARQ_S="$SPARQ_S" \
+  HERMIT_ROW="$HERMIT_ROW" HERMIT_VERDICT="$HERMIT_VERDICT" HERMIT_S="$HERMIT_S" \
+  OPENLLET_ROW="$OPENLLET_ROW" OPENLLET_VERDICT="$OPENLLET_VERDICT" OPENLLET_S="$OPENLLET_S" \
+  python3 - <<'PYEOF'
+import json, os, platform
+
+canonical = os.environ["CANONICAL"] == "1"
+only = os.environ["ONLY"].split()
+agree = os.environ["AGREE"]
+
+def engine(key, mode):
+    return {
+        "verdict": os.environ[f"{key}_VERDICT"] or None,
+        "consistency_s": os.environ[f"{key}_S"] or None,
+        "mode": mode,
+        "raw": os.environ[f"{key}_ROW"][:2000],
+    }
+
+engines = {}
+if "sparq" in only:
+    engines["sparq"] = engine("SPARQ", "in-process (examples/ore_bench GATHER: parse once, "
+                              "extract → profile → ALCH tableau); scoped ALCH — abstains "
+                              "unknown(out-of-fragment) outside the fragment")
+    engines["sparq"]["version"] = os.environ["GIT_COMMIT"]
+if "hermit" in only:
+    engines["hermit"] = engine("HERMIT", "HermiT CLI -k (full OWL 2 DL; LGPL-3.0 — note the "
+                               "licensing caveat before publishing numbers)")
+if "openllet" in only:
+    engines["openllet"] = engine("OPENLLET", "openllet-cli consistency (full OWL 2 DL, Apache-2.0)")
+
+note = (
+    "CANONICAL: dedicated quiet box, one engine active at a time, SAME ontology file."
+    if canonical else
+    "NON-canonical FIRST READ: shared work box (not a dedicated quiet instance). Timings are "
+    "directional only — do NOT bake into docs/dashboards. The harness "
+    "(scripts/bench/reason-dl-same-box.sh) is the durable deliverable; rerun CANONICAL=1 on a "
+    "dedicated EC2 box for citable numbers."
+)
+
+envelope = {
+    "gather": "reason-dl-same-box-comparison",
+    "wave": "reason-dl ORE baseline (sq-hmd7l.10)",
+    "canonical": canonical,
+    "canonical_note": note,
+    "git_commit": os.environ["GIT_COMMIT"],
+    "suite": "reason-dl-ore",
+    "ontology": os.environ["ONT"],
+    "ontology_sha256": os.environ["OWL_SHA"],
+    "metric": ("ontology CONSISTENCY verdict (consistent/inconsistent) + consistency wall time. "
+               "sparq-reason-dl is a SCOPED ALCH tableau, not full OWL 2 DL: out-of-fragment "
+               "ontologies record verdict=unknown(out-of-fragment) — an honest abstention, "
+               "never a verdict and never a timing row"),
+    "verdict_before_timing": {
+        "sparq_verdict": os.environ["SPARQ_VERDICT"] or None,
+        "hermit_verdict": os.environ["HERMIT_VERDICT"] or None,
+        "openllet_verdict": os.environ["OPENLLET_VERDICT"] or None,
+        "verdicts_agree": agree,
+        "policy": ("NO timing row without verdict agreement (>=2 definitive verdicts, all equal). "
+                   "A disagreement is a CORRECTNESS FINDING: timings are nulled and a bug bead "
+                   "must be filed before rerunning — never time past it. Abstentions "
+                   "(unknown(...)) are excluded from agreement; verdicts_agree=n/a means fewer "
+                   "than two definitive verdicts."),
+    },
+    "engines": engines,
+    "env": {
+        "host": platform.node(),
+        "machine": platform.machine(),
+        "os": platform.platform(),
+        "timeout_s": int(os.environ["TIMEOUT_S"]),
+    },
+}
+with open(os.environ["OUT"], "w") as fh:
+    json.dump(envelope, fh, indent=2)
+    fh.write("\n")
+print(os.environ["OUT"])
+PYEOF
+  log "envelope: $OUT"
+done < <(find "$ORE_CORPUS_DIR" -maxdepth 2 -type f \
+           \( -name '*.owl' -o -name '*.rdf' -o -name '*.ttl' -o -name '*.nt' \) | sort)
+
+log "done. Gather deps live under /tmp/reason-dl-gather + /tmp/jena-riot (delete when finished)."

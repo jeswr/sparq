@@ -1862,19 +1862,20 @@ featured    = false  # registry stub; implementing bead sq-hmd7l.9
 status      = "planning"
 
 # [SONNET-4.6] sq-hmd7l.10 — OWL DL tableau harness + HermiT/Openllet columns
+# [FABLE-5] sq-hmd7l.10 — harness implemented: sparq-side ORE example + same-box wrapper.
 [[benchmark]]
 id          = "reason-dl-ore"
 name        = "OWL DL tableau harness (ORE corpora) + HermiT / Openllet columns"
 category    = "inference"
-measures    = "OWL DL classification / consistency wall time + classification verdict on the ORE (OWL Reasoner Evaluation) corpora vs HermiT / Openllet; classification verdict oracle before timing"
-invoke      = "TBD — implementing bead sq-hmd7l.10"
-source      = "TBD — bench/reason-dl-ore/; scripts/bench-adapters/ (Openllet adapter)"
-dataset     = "TBD — ORE ontology corpus (sha256-pinned; available from the ORE dataset repository)"
+measures    = "OWL DL CONSISTENCY verdict + consistency wall time on ORE (OWL Reasoner Evaluation) corpus ontologies vs HermiT / Openllet, plus EL/QL/RL profile-membership rows; verdict oracle BEFORE timing (no timing row without verdict agreement; a disagreement is a correctness finding — timings nulled + bug bead). HONEST SCOPE: sparq-reason-dl is a scoped ALCH tableau, not full OWL 2 DL — out-of-fragment ontologies record an unknown(out-of-fragment) abstention, never a verdict or timing"
+invoke      = "bash scripts/bench/reason-dl-same-box.sh --smoke   # hermetic exit-0 acceptance path (vendored ORE-style fixtures, pinned verdicts). Full mode: ORE_CORPUS_DIR=/path/to/ore-owl-files [ONLY=\"sparq openllet\"] bash scripts/bench/reason-dl-same-box.sh. Non-canonical on the work box; canonical run is a future quiet-box wave"
+source      = "crates/sparq-reason-dl/examples/ore_bench.rs (+ examples/data/ore_smoke_*.ttl vendored fixtures); scripts/bench/reason-dl-same-box.sh (HermiT `-k` + openllet-cli `consistency` CLI adapters, gather-only jars)"
+dataset     = "vendored hand-authored ORE-style smoke subset (committed, pinned verdicts); real ORE 2014/2015 corpora are gather-only downloads via ORE_CORPUS_DIR (sha256 recorded per ontology in each envelope at gather time)"
 quiet_box_sensitive = true
-pinning     = "TBD — ORE corpus sha256 + Openllet jar pinned version at gather time"
-records_to  = "TBD — bench/competitor-results/openllet-reason-dl-<UTC>.json (git-ignored); research/gap-reason-dl-2026-07.md"
-featured    = false  # registry stub; implementing bead sq-hmd7l.10
-status      = "planning"
+pinning     = "smoke verdicts + EL/QL/RL memberships pinned as assertions in examples/ore_bench.rs; ORE corpus file sha256 + HermiT/Openllet jar versions recorded in the envelope at gather time (prefer Openllet, Apache-2.0, for publishable numbers — HermiT is LGPL-3.0)"
+records_to  = "OUT_DIR envelopes, default /tmp/reason-dl-same-box-results/reason-dl-<ont>-<UTC>.json (git-ignored); research/gap-reason-dl-2026-07.md (methodology; NON-canonical)"
+featured    = false  # harness implemented (sq-hmd7l.10); canonical quiet-box numbers still pending
+status      = "implemented"
 
 # [SONNET-4.6] sq-hmd7l.7 — materialization same-box comparison vs Jena / VLog / Nemo
 # [FABLE-5] sq-hmd7l.30/.31 — VLog + Nemo columns wired with VALIDATED OWL-RL/RDFS encodings.
