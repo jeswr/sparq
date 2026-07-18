@@ -107,10 +107,15 @@ perf record -e cycles:u $LBR -o "$BOLTDIR/cli.perf.data" -- bash -c "
 " >/dev/null 2>&1
 
 SERVER_PID=""
+PERF_PID=""
+stop_perf() {
+  # SIGINT is perf record's normal stop signal: it flushes perf.data and exits.
+  [ -n "$PERF_PID" ] && { kill -INT "$PERF_PID" 2>/dev/null || true; wait "$PERF_PID" 2>/dev/null || true; PERF_PID=""; }
+}
 stop_server() {
   [ -n "$SERVER_PID" ] && { kill -TERM "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""; }
 }
-trap stop_server EXIT
+trap 'stop_perf; stop_server' EXIT
 
 if [ "${PGO_SKIP_SERVE:-0}" != 1 ]; then
   log "perf-profiling the sparq-server binary..."
@@ -121,12 +126,20 @@ if [ "${PGO_SKIP_SERVE:-0}" != 1 ]; then
     kill -0 "$SERVER_PID" 2>/dev/null || die "server exited before healthy"
     sleep 0.25
   done
-  # -p attaches to the server; the driver command bounds the recording window.
+  # Bounded attach lifecycle: perf attaches in the background, the driver runs on
+  # its own, then perf is interrupted and waited on BEFORE the server stops.
+  # (Combining `-p PID` with a workload command would keep perf following the
+  # still-alive server after the driver exits — no reliable termination.)
   # shellcheck disable=SC2086
-  perf record -e cycles:u $LBR -p "$SERVER_PID" -o "$BOLTDIR/server.perf.data" -- \
-    python3 "$HERE/serve_driver.py" --port "$PGO_PORT" --queries-dir "$ROOT/bench/watdiv/queries" --mode train --repeat 5 \
+  perf record -e cycles:u $LBR -p "$SERVER_PID" -o "$BOLTDIR/server.perf.data" >/dev/null 2>&1 &
+  PERF_PID=$!
+  sleep 1   # let perf finish attaching before generating load
+  kill -0 "$PERF_PID" 2>/dev/null || { PERF_PID=""; die "perf record failed to attach to the server"; }
+  python3 "$HERE/serve_driver.py" --port "$PGO_PORT" --queries-dir "$ROOT/bench/watdiv/queries" --mode train --repeat 5 \
     >/dev/null 2>&1
+  stop_perf
   stop_server
+  [ -s "$BOLTDIR/server.perf.data" ] || die "server perf.data is empty — the attached recording captured nothing"
 fi
 
 # ---- 3. perf2bolt + llvm-bolt ------------------------------------------------------------

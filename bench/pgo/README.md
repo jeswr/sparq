@@ -38,7 +38,7 @@ in the `run.sh` header.
 | merge | `llvm-profdata merge` | the rustup `llvm-tools` component (LLVM-matched) |
 | use | same profile + `-Cprofile-use` | third target dir |
 | measure | identical workloads on baseline vs PGO | queries: engine-internal min-of-`ITERS` (contention-robust); ingest: best wall-clock of `INGEST_ITERS`; serve: best-of-batches req/s + p50/p99 |
-| report | `report.py` → `REPORT.md` + `summary.json` | per-query delta table, per-suite + overall geomean, **hard correctness differential** (row counts and serve response bytes must be identical across variants — exit 1 otherwise), and the BOLT verdict |
+| report | `report.py` → `REPORT.md` + `summary.json` | per-query delta table, per-suite + overall geomean, **hard correctness differential** (every variant must carry every baseline suite with an identical query-name set, and row counts + serve response bytes must be identical — exit 1 and no `summary.json` otherwise; tested by `test_report.py`), and the BOLT verdict |
 
 `bolt.sh` (optional) re-links the PGO build with `--emit-relocs`, profiles it
 with `perf record` (LBR when available, `perf2bolt -nl` fallback), runs
@@ -54,7 +54,9 @@ cleanly (exit 2) where `llvm-bolt`/`perf` are unavailable.
   the report and labels it; adoption claims gate on the canonical quiet-box
   re-measure bead. Never copy numbers from a shared box into docs.
 - The correctness differential is a gate: a PGO/BOLT build that changes any
-  query's row count or the serve byte total fails the report.
+  query's row count or the serve byte total fails the report, as does a variant
+  with missing/extra suites or queries (no silent intersection); a failed report
+  removes `summary.json` so `bolt.sh` can never gate on stale numbers.
 - Corpora are the pinned deterministic generators already in-tree
   (`bench/{watdiv,sp2b,bsbm}/gen.sh`); this harness adds no new datasets.
 

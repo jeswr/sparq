@@ -58,6 +58,35 @@ def read_variant(root: Path, label: str):
     return v
 
 
+def structure_mismatches(base_label, base, variant_labels, data):
+    # The hard differential requires identical result SHAPE, not just agreement on
+    # the intersection: a truncated variant (missing suites/queries) or a padded one
+    # (extra queries) must fail loudly instead of silently biasing the geomean.
+    # (serve.json/ingest.txt presence stays soft — PGO_SKIP_SERVE=1 is a documented
+    # cli-only flow; the serve byte differential applies whenever both are present.)
+    problems = []
+    for lab in variant_labels:
+        for suite in SUITES:
+            b, vs = base["suites"][suite], data[lab]["suites"][suite]
+            if b is None and vs is None:
+                continue
+            if vs is None:
+                problems.append(f"{lab}/{suite}: suite missing from variant (baseline has it)")
+                continue
+            if b is None:
+                problems.append(
+                    f"{lab}/{suite}: suite present in variant but missing from baseline {base_label}"
+                )
+                continue
+            missing = sorted(set(b) - set(vs))
+            extra = sorted(set(vs) - set(b))
+            if missing:
+                problems.append(f"{lab}/{suite}: queries missing vs baseline: {', '.join(missing)}")
+            if extra:
+                problems.append(f"{lab}/{suite}: extra queries vs baseline: {', '.join(extra)}")
+    return problems
+
+
 def speedup_pct(base, new):
     return (base / new - 1.0) * 100.0
 
@@ -76,6 +105,34 @@ def main():
     labels = [base_label] + variant_labels
     data = {lab: read_variant(root, lab) for lab in labels}
     base = data[base_label]
+
+    structural = structure_mismatches(base_label, base, variant_labels, data)
+    if structural:
+        # Fail BEFORE computing any delta: a shape mismatch means every geomean
+        # would be gate-worthy-looking but biased. Also drop any stale summary.json
+        # so bolt.sh cannot gate on a previous run's numbers.
+        (root / "summary.json").unlink(missing_ok=True)
+        report = "\n".join(
+            [
+                "# PGO evaluation — A/B report (sq-98w7z.4)",
+                "",
+                "## CORRECTNESS FAILURE (result-set shape)",
+                "",
+                "No deltas computed: every variant must carry every baseline suite with",
+                "an identical query-name set before any comparison is meaningful.",
+                "",
+            ]
+            + [f"- {m}" for m in structural]
+        ) + "\n"
+        (root / "REPORT.md").write_text(report)
+        print(report)
+        print(
+            "[report] FATAL: variant/baseline result sets differ in shape — no deltas computed:",
+            file=sys.stderr,
+        )
+        for m in structural:
+            print(f"  {m}", file=sys.stderr)
+        sys.exit(1)
 
     mismatches = []
     lines = []
@@ -110,10 +167,9 @@ def main():
         for q in sorted(b):
             row = f"| {q} | {b[q][0]} | {b[q][1]:.1f} |"
             for lab in variant_labels:
+                # structure_mismatches() already guaranteed vs exists with the
+                # exact baseline query set — no silent intersection here.
                 vs = data[lab]["suites"][suite]
-                if vs is None or q not in vs:
-                    row += " – | – |"
-                    continue
                 if vs[q][0] != b[q][0]:
                     mismatches.append(
                         f"{lab}/{suite}/{q}: rows {vs[q][0]} != baseline {b[q][0]}"
@@ -122,9 +178,7 @@ def main():
             lines.append(row)
         for lab in variant_labels:
             vs = data[lab]["suites"][suite]
-            if vs is None:
-                continue
-            gm = geomean_speedup([(b[q][1], vs[q][1]) for q in b if q in vs])
+            gm = geomean_speedup([(b[q][1], vs[q][1]) for q in b])
             summary["variants"].setdefault(lab, {})[f"{suite}_geomean_pct"] = round(gm, 2)
             lines.append("")
             lines.append(f"**{suite} geomean speedup ({lab} vs {base_label}): {gm:+.2f}%**")
@@ -172,8 +226,8 @@ def main():
         pairs = []
         for suite in SUITES:
             b, vs = base["suites"][suite], data[lab]["suites"][suite]
-            if b and vs:
-                pairs += [(b[q][1], vs[q][1]) for q in b if q in vs]
+            if b:
+                pairs += [(b[q][1], vs[q][1]) for q in b]
         gm = geomean_speedup(pairs)
         summary["variants"].setdefault(lab, {})["query_geomean_pct"] = round(gm, 2)
         lines.append(f"- **{lab}: overall query geomean {gm:+.2f}%** vs {base_label}")
@@ -195,15 +249,19 @@ def main():
 
     report = "\n".join(lines) + "\n"
     (root / "REPORT.md").write_text(report)
-    (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(report)
-    print(f"[report] wrote {root / 'REPORT.md'} + summary.json", file=sys.stderr)
 
     if mismatches:
+        # No summary.json on failure (and drop any stale one): bolt.sh gates on its
+        # geomean, and a failed differential must never leave a gate-usable number.
+        (root / "summary.json").unlink(missing_ok=True)
         print("[report] FATAL: correctness differential failed — an optimized build changed results:", file=sys.stderr)
         for m in mismatches:
             print(f"  {m}", file=sys.stderr)
         sys.exit(1)
+
+    (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print(f"[report] wrote {root / 'REPORT.md'} + summary.json", file=sys.stderr)
 
 
 if __name__ == "__main__":
