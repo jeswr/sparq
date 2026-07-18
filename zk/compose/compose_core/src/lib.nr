@@ -33,5 +33,10 @@ pub mod join;
 // research/zksparql-fragment-extension.md sec 4 (depth D a compile-time constant
 // per member, disclosed by the VK identity; mechanism (a) on #1591).
 pub mod path;
+// [OPUS-4.8] sq-rsd3v.2 (#2614): in-circuit RDFS derivation relation (ZK over
+// HIDDEN antecedents -- design row A1). Research-grade, NOT externally audited
+// (sq-qhy4); the in-circuit relation only -- the off-circuit ProofTree->slot
+// witness mapper + a compiled bin-package monomorphisation are follow-ups.
+pub mod derivation;
 
 mod tests;
