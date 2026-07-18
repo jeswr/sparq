@@ -84,6 +84,13 @@ jobs:
         with:
           app-id: ${{ secrets.ORCHESTRATOR_APP_ID }}
           private-key: ${{ secrets.ORCHESTRATOR_APP_PRIVATE_KEY }}
+          # Without permission-* inputs the minted token carries EVERY permission the
+          # App installation has; scope it to exactly what the refresh needs (mirror of
+          # the workflow-level `permissions` block above).
+          permission-actions: read
+          permission-checks: read
+          permission-contents: write
+          permission-pull-requests: write
 
       - name: Checkout (only the policy script is needed)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

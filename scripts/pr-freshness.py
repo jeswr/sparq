@@ -15,7 +15,10 @@
 # POLICY (issue #3424)
 # --------------------
 # A PR is refreshed iff ALL of:
-#   (a) it is OPEN, NON-draft, and (auto-merge is armed OR it carries label `review:pass`);
+#   (a) it is OPEN, NON-draft, targets `main` (update-branch merges the PR's BASE branch,
+#       so for a stacked PR the behind-main compare is meaningless and the call could
+#       only 422 or merge the wrong branch), and (auto-merge is armed OR it carries
+#       label `review:pass`);
 #   (b) its branch is BEHIND main (compare(head...main).ahead_by > 0);
 #   (c) the latest `gate` check-run on its head CONCLUDED red (failure/cancelled/timed_out/
 #       action_required/startup_failure/stale) OR the head has NO `gate` check-run at all
@@ -59,7 +62,9 @@
 #   scripts/pr-freshness.py --repo owner/repo --report-only  # print plan, no gh mutations
 #   scripts/pr-freshness.py --self-test                      # hermetic; gh stubbed
 #
-# Exit 0 on success; non-zero only on a real error or a failed self-test.
+# Exit 0 on success; non-zero on a real error, a failed self-test, or any unexpected
+# (non-head-race) update-branch failure in live mode — a broken/underscoped token must
+# turn the workflow red, never report "applied" while updating nothing.
 import argparse
 import json
 import re
@@ -116,8 +121,9 @@ class Action:
 
 def update_argv(repo: str, number: int, head_sha: str) -> list:
     # expected_head_sha: if the head moved between observation and this call, GitHub
-    # answers 422 instead of updating a branch we never assessed. The runner treats a
-    # per-PR gh failure as a warning, so a lost race degrades to "caught next tick".
+    # answers 422 instead of updating a branch we never assessed. apply() classifies
+    # that specific race as a warning ("caught next tick"); any other failure — auth,
+    # permissions, validation, rate limits — fails the run (see apply()).
     return ["api", "-X", "PUT", f"repos/{repo}/pulls/{number}/update-branch",
             "-f", f"expected_head_sha={head_sha}"]
 
@@ -125,6 +131,7 @@ def update_argv(repo: str, number: int, head_sha: str) -> list:
 # --------------------------------------------------------------------------------------
 # THE POLICY (pure). Each pr dict carries:
 #   number:int  is_draft:bool  labels:[str]  armed:bool  merge_state:str  head_sha:str
+#   base_ref:str
 # and, for PRs that survive the cheap guards (enriched live only for those):
 #   behind_by:int  gate:'failure'|'success'|'pending'|'missing'
 #   active_runs:int  head_committed_at:iso-str
@@ -151,6 +158,13 @@ def plan(prs, repo, now, cap=MAX_UPDATES_PER_TICK):
         if (pr.get("merge_state") or "").upper() == "DIRTY":
             actions.append(Action("dirty", num,
                                   "merge conflict — needs sparq-merge-fixer, not update-branch"))
+            continue
+        # update-branch merges the PR's BASE branch, not `main` — a stacked PR (base !=
+        # main) must never qualify: its behind-MAIN measurement is meaningless and the
+        # call would only burn the per-tick cap on 422s / merge the wrong branch.
+        base = pr.get("base_ref") or ""
+        if base != "main":
+            actions.append(Action("skip", num, f"base {base or '?'} is not main"))
             continue
 
         # (b) behind main.
@@ -203,10 +217,10 @@ def _gh_json(argv):
     return json.loads(out)
 
 
-def collect_prs(repo):
-    prs = _gh_json([
+def collect_prs(repo, gh_json=_gh_json):
+    prs = gh_json([
         "pr", "list", "--repo", repo, "--state", "open", "--limit", "200",
-        "--json", "number,isDraft,labels,autoMergeRequest,mergeStateStatus,headRefOid",
+        "--json", "number,isDraft,labels,autoMergeRequest,mergeStateStatus,headRefOid,baseRefName",
     ])
     norm = []
     for p in prs:
@@ -217,6 +231,7 @@ def collect_prs(repo):
             "armed": p.get("autoMergeRequest") is not None,
             "merge_state": p.get("mergeStateStatus", ""),
             "head_sha": p.get("headRefOid", ""),
+            "base_ref": p.get("baseRefName", ""),
         })
     return norm
 
@@ -227,24 +242,25 @@ def _cheaply_eligible(pr) -> bool:
     return (not pr.get("is_draft")
             and BLOCK_LABEL not in labels
             and (pr.get("armed") or ARMED_LABEL in labels)
-            and (pr.get("merge_state") or "").upper() != "DIRTY")
+            and (pr.get("merge_state") or "").upper() != "DIRTY"
+            and (pr.get("base_ref") or "") == "main")
 
 
-def enrich(repo, pr):
+def enrich(repo, pr, gh_json=_gh_json):
     """3 API calls: behind-ness + head-commit time (one compare), gate check, active runs."""
     sha = pr["head_sha"]
 
     # compare(head...main): ahead_by == commits main has that head lacks (= behind-ness),
     # and base_commit == the head commit itself, carrying the committer timestamp the
     # cooldown reads. One call, two signals.
-    cmp_ = _gh_json(["api", f"repos/{repo}/compare/{sha}...main"])
+    cmp_ = gh_json(["api", f"repos/{repo}/compare/{sha}...main"])
     pr["behind_by"] = int(cmp_.get("ahead_by") or 0)
     pr["head_committed_at"] = (((cmp_.get("base_commit") or {}).get("commit") or {})
                                .get("committer") or {}).get("date")
 
     # Latest check-run named exactly `gate` on the head (draft-tier runs render a
     # different name, `gate, draft-tier`, and drafts are excluded anyway).
-    checks = _gh_json(["api", f"repos/{repo}/commits/{sha}/check-runs?per_page=100"])
+    checks = gh_json(["api", f"repos/{repo}/commits/{sha}/check-runs?per_page=100"])
     gates = sorted((c for c in checks.get("check_runs", [])
                     if (c.get("name") or "").strip().lower() == "gate"),
                    key=lambda c: c.get("started_at") or "")
@@ -260,9 +276,14 @@ def enrich(repo, pr):
                           else "success" if concl in _GATE_GREEN
                           else "pending")
 
-    runs = _gh_json(["api", f"repos/{repo}/actions/runs?head_sha={sha}&per_page=30"])
+    # ANY status other than `completed` counts as active — the API also surfaces
+    # `requested` and `pending` before a run is queued, and a head in any pre-completion
+    # state may already be recomputing the verdict. Over-counting merely defers the PR
+    # one tick (fail-safe); under-counting churns a converging head — the exact race
+    # this guard exists to prevent.
+    runs = gh_json(["api", f"repos/{repo}/actions/runs?head_sha={sha}&per_page=30"])
     pr["active_runs"] = sum(1 for r in runs.get("workflow_runs", [])
-                            if r.get("status") in ("queued", "in_progress", "waiting"))
+                            if (r.get("status") or "").lower() != "completed")
     return pr
 
 
@@ -287,7 +308,43 @@ def render_summary(actions) -> str:
 
 
 def real_gh(argv) -> None:
-    subprocess.run(["gh"] + argv, check=True)
+    # capture_output so a failure carries the HTTP status/message for apply()'s
+    # benign-race vs real-failure classification.
+    subprocess.run(["gh"] + argv, check=True, capture_output=True, text=True)
+
+
+def _is_head_race(err: subprocess.CalledProcessError) -> bool:
+    """True iff the failure is the benign expected_head_sha race (the head moved between
+    observation and the PUT) — the ONLY failure that may stay a warning. A 422 is NOT
+    proof of that race (it also covers validation and secondary-rate-limit failures), so
+    this matches GitHub's specific race message; anything else is an unexpected failure."""
+    text = f"{getattr(err, 'stdout', '') or ''}\n{getattr(err, 'stderr', '') or ''}".lower()
+    return "http 422" in text and "expected head sha" in text
+
+
+def apply(actions, gh):
+    """Run the update argvs through gh. A per-PR failure never aborts the remaining PRs,
+    but only the expected_head_sha race is benign — every other failure (auth, token
+    permissions, validation, rate limits) is counted so main() can fail the run: a broken
+    token must not leave the workflow green while updating nothing.
+    Returns (applied, races, failures)."""
+    applied = races = failures = 0
+    for a in actions:
+        if not a.argv:
+            continue
+        try:
+            a.run(gh)
+            applied += 1
+        except subprocess.CalledProcessError as e:
+            if _is_head_race(e):
+                races += 1
+                log(f"WARNING: PR #{a.pr} lost the expected_head_sha race — "
+                    "self-heals next tick; continuing.")
+            else:
+                failures += 1
+                detail = (getattr(e, "stderr", "") or getattr(e, "stdout", "") or str(e)).strip()
+                log(f"ERROR: update-branch failed for PR #{a.pr}: {detail} — continuing.")
+    return applied, races, failures
 
 
 def main() -> int:
@@ -325,14 +382,13 @@ def main() -> int:
         log("--report-only: no gh mutations performed.")
         return 0
 
-    for a in actions:
-        try:
-            a.run(real_gh)
-        except subprocess.CalledProcessError as e:
-            # A 422 here is a lost expected_head_sha race or an already-updated branch —
-            # both self-heal on the next tick. Never fail the whole run for one PR.
-            log(f"WARNING: update-branch failed for PR #{a.pr}: {e} — continuing.")
-    log(f"applied {sum(1 for a in actions if a.argv)} update-branch call(s).")
+    applied, races, failures = apply(actions, real_gh)
+    log(f"update-branch: {applied} applied, {races} lost head race(s), "
+        f"{failures} unexpected failure(s).")
+    if failures:
+        log("ERROR: unexpected update-branch failure(s) above — failing the run so a "
+            "broken token/permission set cannot stay green while updating nothing.")
+        return 1
     return 0
 
 
@@ -363,7 +419,7 @@ def self_test() -> int:
     def fx(number, **over):
         """Baseline: fully eligible for update. Each fixture flips exactly one field."""
         base = {"number": number, "is_draft": False, "labels": [], "armed": True,
-                "merge_state": "BLOCKED", "head_sha": f"sha{number}",
+                "merge_state": "BLOCKED", "head_sha": f"sha{number}", "base_ref": "main",
                 "behind_by": 5, "gate": "failure", "active_runs": 0,
                 "head_committed_at": ago(120)}
         base.update(over)
@@ -382,6 +438,7 @@ def self_test() -> int:
         fx(10, merge_state="DIRTY"),                          # (d) conflict -> dirty report
         fx(11, is_draft=True),                                # (a) draft -> skip
         fx(12, gate="missing"),                               # (c) no run on merge ref -> UPDATE
+        fx(13, base_ref="feature/stack-base"),                # (a) stacked PR -> skip
     ]
     # Cap fixtures: 9 more fully-eligible PRs; with the 3 updates above, only 6 total
     # may update and the rest must be explicit "truncated" skips.
@@ -417,6 +474,8 @@ def self_test() -> int:
     check("DIRTY #10 -> dirty report, no argv",
           kind(10) == "dirty" and not by_pr[10].argv and "merge-fixer" in reason(10))
     check("draft #11 -> skip", kind(11) == "skip" and reason(11) == "draft")
+    check("stacked (base != main) #13 -> skip",
+          kind(13) == "skip" and "base feature/stack-base is not main" in reason(13))
 
     # Cap: 12 eligible in total (1, 9, 12, 100..108) but only 6 update; the other 6 are
     # explicit truncated skips (never silent).
@@ -449,6 +508,158 @@ def self_test() -> int:
     check("summary is a markdown table", "| PR | action | reason |" in summary)
     check("summary lists DIRTY PRs for the merge-fixer",
           "sparq-merge-fixer" in summary and "#10" in summary)
+
+    # ----------------------------------------------------------------------------------
+    # apply(): a per-PR failure never aborts the batch, the expected_head_sha race is
+    # the ONLY benign failure, and anything else is counted so main() exits non-zero
+    # (a broken token must not stay green while updating nothing).
+    # ----------------------------------------------------------------------------------
+    apply_acts = [Action("update", 1, "t", update_argv(repo, 1, "s1")),
+                  Action("update", 2, "t", update_argv(repo, 2, "s2")),
+                  Action("update", 3, "t", update_argv(repo, 3, "s3")),
+                  Action("skip", 4, "no argv — must not be attempted")]
+    attempted = []
+
+    def gh_mixed(argv):
+        attempted.append(argv)
+        if "/pulls/2/" in argv[3]:
+            raise subprocess.CalledProcessError(
+                1, argv, output="",
+                stderr="gh: expected head sha didn't match current head ref. (HTTP 422)")
+        if "/pulls/3/" in argv[3]:
+            raise subprocess.CalledProcessError(
+                1, argv, output="",
+                stderr="gh: Resource not accessible by integration (HTTP 403)")
+
+    applied_n, races_n, failures_n = apply(apply_acts, gh_mixed)
+    check("apply: ok/race/failure classified as (1, 1, 1)",
+          (applied_n, races_n, failures_n) == (1, 1, 1))
+    check("apply: continues past failures (all 3 update argvs attempted)",
+          len(attempted) == 3)
+    ok_applied, ok_races, ok_failures = apply(apply_acts[:1], lambda argv: None)
+    check("apply: clean run counts only real successes",
+          (ok_applied, ok_races, ok_failures) == (1, 0, 0))
+    check("head-race classifier: 422 alone is NOT benign (validation/rate-limit 422s "
+          "must fail the run)",
+          not _is_head_race(subprocess.CalledProcessError(
+              1, ["gh"], output="", stderr="gh: Validation Failed (HTTP 422)")))
+
+    # ----------------------------------------------------------------------------------
+    # Raw-API-boundary tests: drive collect_prs() -> _cheaply_eligible() -> enrich()
+    # -> plan() from RAW gh JSON (gh stubbed), so mutations to the normalization, base
+    # selection, ahead_by wiring, gate classification, or run-status counting go red —
+    # not just mutations to plan() over pre-normalized fixtures.
+    # ----------------------------------------------------------------------------------
+    raw_pr_list = [
+        # armed via label (case-insensitive), red gate, behind -> must reach `update`.
+        {"number": 21, "isDraft": False, "labels": [{"name": "Review:Pass"}],
+         "autoMergeRequest": None, "mergeStateStatus": "BLOCKED",
+         "headRefOid": "sha21", "baseRefName": "main"},
+        # armed via autoMergeRequest, gate missing, but nonterminal runs on the head.
+        {"number": 22, "isDraft": False, "labels": [], "autoMergeRequest": {"enabledAt": "x"},
+         "mergeStateStatus": "BEHIND", "headRefOid": "sha22", "baseRefName": "main"},
+        # stacked PR: base != main — must be rejected before spending enrichment calls.
+        {"number": 23, "isDraft": False, "labels": [], "autoMergeRequest": {"enabledAt": "x"},
+         "mergeStateStatus": "BLOCKED", "headRefOid": "sha23", "baseRefName": "release/stack"},
+    ]
+    compare_by_sha = {
+        "sha21": {"ahead_by": 4,
+                  "base_commit": {"commit": {"committer": {"date": ago(120)}}}},
+        "sha22": {"ahead_by": 3,
+                  "base_commit": {"commit": {"committer": {"date": ago(120)}}}},
+        "sha24": {"ahead_by": 1,
+                  "base_commit": {"commit": {"committer": {"date": ago(120)}}}},
+        "sha25": {"ahead_by": 1,
+                  "base_commit": {"commit": {"committer": {"date": ago(120)}}}},
+    }
+    checkruns_by_sha = {
+        # Older gate green, newer gate red, plus a non-gate run: latest-by-started_at
+        # must win and non-gate names must be ignored.
+        "sha21": {"check_runs": [
+            {"name": "clippy", "status": "completed", "conclusion": "success",
+             "started_at": ago(90)},
+            {"name": "gate", "status": "completed", "conclusion": "success",
+             "started_at": ago(200)},
+            {"name": "gate", "status": "completed", "conclusion": "failure",
+             "started_at": ago(100)},
+        ]},
+        "sha22": {"check_runs": [
+            {"name": "clippy", "status": "completed", "conclusion": "success",
+             "started_at": ago(90)},
+        ]},
+        # Name matching is strip()+case-insensitive; `cancelled` is a red conclusion.
+        "sha25": {"check_runs": [
+            {"name": "GATE ", "status": "completed", "conclusion": "cancelled",
+             "started_at": ago(100)},
+        ]},
+        # A gate that has not completed is `pending`, whatever its conclusion field says.
+        "sha24": {"check_runs": [
+            {"name": "gate", "status": "in_progress", "conclusion": None,
+             "started_at": ago(5)},
+        ]},
+    }
+    runs_by_sha = {
+        "sha21": {"workflow_runs": [{"status": "completed"}]},
+        # `requested` and `pending` are nonterminal — both MUST count as active
+        # (reverting to a queued/in_progress/waiting allowlist turns this red).
+        "sha22": {"workflow_runs": [{"status": "requested"}, {"status": "pending"},
+                                    {"status": "completed"}]},
+        "sha24": {"workflow_runs": []},
+        "sha25": {"workflow_runs": []},
+    }
+    enrich_calls = []
+
+    def stub_gh_json(argv):
+        if argv[:2] == ["pr", "list"]:
+            return raw_pr_list
+        path = argv[1]
+        if "/compare/" in path:
+            sha = path.split("/compare/")[1].split("...")[0]
+            enrich_calls.append(sha)
+            return compare_by_sha[sha]
+        if "check-runs" in path:
+            return checkruns_by_sha[path.split("/commits/")[1].split("/")[0]]
+        if "actions/runs" in path:
+            return runs_by_sha[path.split("head_sha=")[1].split("&")[0]]
+        raise AssertionError(f"unexpected gh argv in stub: {argv}")
+
+    norm = collect_prs(repo, gh_json=stub_gh_json)
+    by_num = {p["number"]: p for p in norm}
+    check("collect_prs: armed derived from autoMergeRequest",
+          not by_num[21]["armed"] and by_num[22]["armed"])
+    check("collect_prs: label names flattened", by_num[21]["labels"] == ["Review:Pass"])
+    check("collect_prs: baseRefName normalized to base_ref",
+          by_num[22]["base_ref"] == "main" and by_num[23]["base_ref"] == "release/stack")
+    check("cheap-eligible: label-armed and automerge-armed main PRs pass",
+          _cheaply_eligible(by_num[21]) and _cheaply_eligible(by_num[22]))
+    check("cheap-eligible: stacked (base != main) PR rejected before enrichment",
+          not _cheaply_eligible(by_num[23]))
+
+    enriched = [enrich(repo, p, gh_json=stub_gh_json) if _cheaply_eligible(p) else p
+                for p in norm]
+    check("enrich: stacked PR spent zero API calls", "sha23" not in enrich_calls)
+    check("enrich: behind_by wired from compare.ahead_by", by_num[21]["behind_by"] == 4)
+    check("enrich: cooldown timestamp from compare.base_commit committer date",
+          by_num[21]["head_committed_at"] == ago(120))
+    check("enrich: latest gate check-run wins, non-gate names ignored",
+          by_num[21]["gate"] == "failure")
+    check("enrich: no gate check-run -> missing", by_num[22]["gate"] == "missing")
+    check("enrich: requested/pending runs count as active",
+          by_num[22]["active_runs"] == 2)
+    p24 = enrich(repo, {"head_sha": "sha24"}, gh_json=stub_gh_json)
+    check("enrich: non-completed gate -> pending", p24["gate"] == "pending")
+    p25 = enrich(repo, {"head_sha": "sha25"}, gh_json=stub_gh_json)
+    check("enrich: 'GATE ' matches (strip+casefold) and cancelled is red",
+          p25["gate"] == "failure")
+
+    raw_actions = {a.pr: a for a in plan(enriched, repo, now)}
+    check("raw path: #21 (behind + red gate) -> update with pinned head sha",
+          raw_actions[21].kind == "update"
+          and "expected_head_sha=sha21" in raw_actions[21].argv)
+    check("raw path: #22 skipped for nonterminal runs on head",
+          raw_actions[22].kind == "skip" and "runs on head" in raw_actions[22].reason)
+    check("raw path: #23 skipped for non-main base",
+          raw_actions[23].kind == "skip" and "is not main" in raw_actions[23].reason)
 
     print()
     if fails == 0:
