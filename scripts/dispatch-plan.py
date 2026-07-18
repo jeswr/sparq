@@ -173,6 +173,16 @@ def _self_test():
     chk("docs -> haiku", row["model_chain"][0], "haiku")
     chk("docs -> sparq-docs", row["agent"], "sparq-docs")
 
+    # --- Fixture: a ci/infra issue → frontier-only chain (standing rule 2026-07-17) --------------
+    # No sub-frontier model (sonnet/haiku) in the plan row's chain: the registry claim step can
+    # only serve a frontier account or DEFER the item to the next tick — degradation to a cheaper
+    # authoring tier is impossible by construction (see routing-validate's frontier-floor check).
+    ci = compute_ready([iss(8, R + ["priority:P1", "role:ci", "area:ci"])])
+    row = plan_dispatch(ci, doc)[0]
+    chk("ci -> frontier-only row", (row["role"], row["model_chain"], row["agent"], row["escalate"]),
+        ("ci", ["fable", "sol"], "sparq-ci-infra", False))
+    chk("ci row has no sub-frontier tier", sorted(set(row["model_chain"]) & {"sonnet", "haiku"}), [])
+
     # --- Fixture: package-conflict pair → only the higher-priority one is planned ----------------
     pair = compute_ready([
         iss(4, R + ["priority:P2", "role:impl", "area:sparq-engine"]),   # lower priority

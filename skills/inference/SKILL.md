@@ -84,6 +84,10 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str)
     -> Result<(Vec<[Id;3]>, Vec<ProofStep>), String>;          // EYE --proof analogue
 pub fn reason_n3_terms(src: &str, base: Option<&str>) -> Result<N3Closure, String>; // term-level, no Dict
 pub fn reason_n3_terms_with_resolver(src, base, resolver: Option<&Resolver>) -> Result<N3Closure, String>;
+pub fn reason_n3_stratified(dict: &mut Dict, strata: &[&str])   // stratum-by-stratum closure; carries
+    -> Result<StratifiedN3Closure, String>;  // each closure in memory (no re-serialize); the sound
+    // driver for the non-monotonic ops (store-scoped log:notIncludes, log:collectAllIn/forAllIn);
+    // per-stratum blank scope. Fields: facts (final interned closure), strata_facts (sizes).
 
 // Incremental closure maintenance (closure stays == from-scratch materialize on the current base).
 pub struct MaterializedGraph;     // RDFS;     mutations are dictionary-free
@@ -488,7 +492,7 @@ the whole graph, never a partial extraction):
 |---|---|---|---|
 | RL (in-RL; PR1 preconditions pass; no divergence-guarded construct) | Yes (past divergence guard) | Yes (PR1-checked) | `RlPr1Preconditions`, `RlDivergenceGuard` |
 | EL (in-EL; ⊤-free TBox; no ABox; no skipped/unapplied axioms) | Yes (empty-interpretation model construction) | Never | `ElSkippedAxioms`, `ElUnappliedAxioms`, `ElTopGuard` |
-| QL (in-QL) | Never | Never | `QlConsistencyPending` (always — deferred to sq-pbz04.3.4) |
+| QL (in-QL; opt-in `dispatch_ql`, sq-fj8lj → sparq-reason-ql's `ql-consistency` checker over the raw triples) | Only past the QL crate's OWN capture accounting (`fully_captured()` ∧ `consistency_uncaptured == 0`; L2's `In` only routes, never justifies) | Yes (violation query matched — sound at any capture level by monotonicity) | `QlCaptureGap` (the QL crate's gap accounting); without `dispatch_ql`: `QlConsistencyPending` (always) |
 | ALCH (all else the L1 extractor accepted) | Yes (complete for L1 fragment) | Yes (complete for L1 fragment) | `ResourceBudget` |
 
 **L4 dispatch — entailment** (all conclusion kinds routed through the complete ALCH tableau):

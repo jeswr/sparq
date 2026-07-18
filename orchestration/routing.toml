@@ -47,12 +47,29 @@ credential_format = "claude-oauth-token"
 [models.terra]
 provider = "openai"
 harness = "codex"
-provider_model = "TBD"                 # terra = the codex CLI's DEFAULT model (GPT-5.6 codex); the TBD
+provider_model = ""                    # EMPTY = omit --model (codex CLI default). The literal "TBD" placeholder
+                                       # reached `codex exec --model TBD` in every terra fleet worker -> API 400 /
+                                       # no-tool-call fallback (2026-07-18). Never ship a placeholder id here.
                                        # sentinel is load-bearing: dispatch/worker pass NO --model flag
+credential_format = "codex-auth-json"
+[models.sol]
+provider = "openai"
+harness = "codex"
+provider_model = "gpt-5.6-sol"         # Cross-provider REVIEW model (maintainer 2026-07-18): the registry
+                                       # REVIEW_CHAIN routes reviews of anthropic-authored CONTENT to
+                                       # `sol`. Distinct alias from `terra` (a different GPT model); id
+                                       # probed working on the worker account type 2026-07-18.
+credential_format = "codex-auth-json"
+[models.luna]
+provider = "openai"
+harness = "codex"
+provider_model = "gpt-5.6-luna"        # Second tier of the unified fix ladder opus<luna<fable<sol
+                                       # (maintainer 2026-07-18) + sol's review fallback; id probed
+                                       # working on the worker account type 2026-07-18.
 credential_format = "codex-auth-json"
 
 [defaults]
-model_chain = ["fable", "sonnet", "terra"]
+model_chain = ["fable", "sol", "opus"]
 agent = "sparq-rust-impl"
 
 # ---------------------------------------------------------------------------------------------------
@@ -69,7 +86,7 @@ escalate = true                        # consumed by dispatch: on chain-exhausti
 # cross-provider implementation fallback so an Anthropic outage does not stall implementation.
 [[route]]
 role = "impl"
-model_chain = ["fable", "sonnet", "terra"]
+model_chain = ["fable", "sol", "opus"]
 agent = "sparq-rust-impl"
 
 # [FABLE-5] UI/front-end ownership (maintainer decision 2026-07-17): GPT-5.6 codex (openai; alias
@@ -81,12 +98,27 @@ agent = "sparq-rust-impl"
 # unions ALL match_labels keywords, so UI keywords there would human-arm every UI PR.
 [[route]]
 role = "site"
-model_chain = ["terra", "fable", "sonnet"]
+model_chain = ["sol", "fable", "opus"]
 agent = "sparq-site"
 
+# [FABLE-5] STANDING RULE — frontier-tier CI/infrastructure authorship (maintainer decision
+# 2026-07-17; same standing-rule pattern as the UI→codex route above, PR #3416): ALL CI/
+# infrastructure work — .github/workflows, gate aggregators, orchestration/ + dispatch scripts,
+# the self-draining pipeline itself — is authored by a FRONTIER-tier model only: fable (Claude
+# Fable) or terra (GPT-5.6 sol / codex). Cheaper tiers (sonnet/haiku) no longer author infra;
+# cross-provider review is unchanged (whichever provider's frontier writes, the other reviews).
+# The chain is deliberately FRONTIER-ONLY rather than floor-pinned: the routing schema has no
+# floor/pin marker (the fix-floor pin lives in the registry's review loop, not here), and
+# chain-exhaustion at the registry's claim step already DEFERS the item (no eligible account →
+# no claim → retried next tick) instead of degrading below the chain. NOT `escalate = true`:
+# that flips a starved item to needs:user (human); this rule wants defer+retry.
+# scripts/triage.py derives role:ci for infra-surface labels (area:ci/area:ci-fragments/
+# area:orchestration/area:workflows/area:release) so surface-labelled infra work lands here.
+# Security overlap: the match_labels overrides above still WIN over this route (opus + human
+# escalation) — where role:ci and a security surface overlap, the security lane is correct.
 [[route]]
 role = "ci"
-model_chain = ["fable", "sonnet", "terra"]   # cross-provider fallback (was Anthropic-only)
+model_chain = ["fable", "sol"]
 agent = "sparq-ci-infra"
 
 [[route]]
@@ -99,9 +131,12 @@ role = "research"
 model_chain = ["fable", "opus"]
 agent = "sparq-researcher"
 
+# docs-only cheap tiers (maintainer 2026-07-18): sonnet AND terra appear in THIS chain and
+# nowhere else — scripts/route-resolve.py validate_routing() REJECTS any table naming either
+# outside role=docs.
 [[route]]
 role = "docs"
-model_chain = ["haiku", "fable"]
+model_chain = ["haiku", "sonnet", "terra", "fable"]
 agent = "sparq-docs"
 
 # Review / soundness: Opus only; escalate to human on unavailability (do NOT fall to a weaker model).

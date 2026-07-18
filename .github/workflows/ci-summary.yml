@@ -117,6 +117,39 @@
 # producing the first (and only) `gate` check-run on the head SHA. merge_group
 # behaviour is untouched (always full tier, on a fresh ref).
 #
+# FAIL-FAST + FAST-FIX RING (2026-07-17 maintainer directive). [FABLE-5]
+# (1) FAIL-FAST: while polling, the moment any GATING leg has CONCLUDED failure the
+# gate REDs immediately instead of waiting for every other leg — a genuine `failure`
+# is never forgiven by any later state (only cancelled/stale are supersedable), so
+# every eventual render REDs anyway; the wait was pure latency on the verdict. A red
+# PR learns its fate in roughly the time of its fastest failing leg (~2-4 min for
+# clippy/fmt/test-compile classes) instead of the full sibling wall-clock (~30-40
+# min). Soundness guards live in scripts/ci_summary_gate.py §FAIL-FAST: the mid-poll
+# scan runs over the SAME forgiveness-filtered set the final render judges (a
+# cancelled-then-rerun leg or race-loser select can never fire it), advisory legs
+# never fire it, a red leg with a same-name rerun already in flight stands down, and
+# one immediate grace re-poll must re-observe the failure before the red is emitted.
+# (2) FAST-FIX RING: when this gate REDs on a pull_request run for a PIPELINE-OWNED
+# PR (armed for auto-merge, or labeled review:pass / review:changes; never drafts or
+# review:needs-user / needs:user holds), the fast-fix ring rings the
+# jeswr/agent-account-registry dispatcher (the same REGISTRY_RING_TOKEN doorbell
+# batch-merge.yml's ring job uses) so its repair sweep enumerates the red PR NOW
+# instead of on the next cron tick. The registry's ci-fix admission is derived from
+# the PR's GATE STATE (its PLAN snapshots per-PR CI status), so ringing is
+# sufficient; deliberately NO needs:ci-fix label fallback — the registry enumerator
+# treats needs:* PR labels as HUMAN-owned holds that EXCLUDE a PR from the repair
+# loop, so a label would do the opposite of triggering a fix. Without the token
+# (fork PR head / secret unconfigured) the ring skips with a notice and the registry
+# cron remains the backstop. The ring LIVES IN ITS OWN WORKFLOW,
+# .github/workflows/fast-fix-ring.yml, triggered via `workflow_run` on ci-summary's
+# completion — NOT as a job in this file. That placement is a SECURITY REQUIREMENT
+# (sparq-org/sparq#3474): the ring holds the cross-repo REGISTRY_RING_TOKEN, and a
+# `pull_request`-triggered workflow takes its definition from the PR HEAD where
+# same-repo agent branches receive repository secrets, so a job here could be edited
+# by a PR to exfiltrate the token. `workflow_run` always runs the default-branch copy
+# of the file, isolated from PR-head content — see that file's header for the full
+# threat model + adversarial self-check.
+#
 # IMPLEMENTATION (sq-90cv4). [FABLE-5] The poll loop + verdict live in
 # scripts/ci_summary_gate.py (extracted from the previous inline bash so the
 # semantics are UNIT-TESTED — scripts/tests/test_ci_summary_gate.py, run as a HARD

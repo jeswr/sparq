@@ -1322,5 +1322,134 @@ class TestSupplyChainMergeGroupGate(unittest.TestCase):
                         "cargo-vet must stay rust_changed-gated")
 
 
+class TestMergeGroupChangeClassGate(unittest.TestCase):
+    """[FABLE-5] merge-group change-class gate (extends #3420/#3421 to the
+    rust_changed layer): the ci.yml + feature-matrix.yml `changes` decide steps
+    classify the queued batch's diff via `scripts/ci_select.py --classify-only`
+    instead of hard-forcing rust_changed=true on merge_group, so a docs-only/
+    orchestration-only batch skips the rust_changed-only lanes (lint / msrv /
+    geiger / docker-smoke / coverage-floors; feature-matrix setup / check-tier /
+    fedclient-boundary) with ATTRIBUTED skips. Pins the SHAPE:
+      * the merge_group branch exists and is FAIL-SAFE (defaults true, the #3421
+        fetch guard, `|| cls=engine` on the classifier invocation);
+      * classification is DELEGATED to scripts/ci_select.py (single source of
+        truth) — no duplicated grep path list in the step;
+      * the skip-class set is EXACTLY {docs-only, orchestration-only}, spelled
+        with the classifier module's own tokens (engine/mixed/unknown => full);
+      * ci.yml's docker_changed is class-gated the same way;
+      * fuzz.yml needs no such layer (its heavy jobs are select-gated and
+        ci-select passes the merge_group SHA pair) and bench.yml has no
+        merge_group trigger at all (pinned elsewhere) — this layer must NOT
+        creep into them as a redundant/conflicting second gate."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ci = _load(CI_YML)
+        cls.fm = _load(FM_YML)
+        cls.fuzz = _load(FUZZ_YML)
+        cls.select_mod = _ci_select_module()
+
+    def _decide(self, wf, wf_name):
+        for step in wf["jobs"]["changes"]["steps"]:
+            if str(step.get("name", "")).startswith("Decide rust_changed"):
+                return step
+        self.fail(f"{wf_name} missing the `Decide rust_changed` step")
+
+    def _both(self):
+        return (("ci.yml", self._decide(self.ci, "ci.yml")),
+                ("feature-matrix.yml", self._decide(self.fm, "feature-matrix.yml")))
+
+    def test_merge_group_branch_present_and_fail_safe(self):
+        for wf_name, step in self._both():
+            run = str(step.get("run", ""))
+            self.assertIn('"${EVENT_NAME}" = "merge_group"', run,
+                          f"{wf_name}: decide step must special-case merge_group")
+            self.assertIn("rust=true", run,
+                          f"{wf_name}: merge_group branch must default rust=true (fail-safe)")
+            self.assertIn("|| cls=engine", run,
+                          f"{wf_name}: a classifier invocation failure must fall back to "
+                          "cls=engine (fail-safe => full run)")
+            self.assertIn("git cat-file -e", run,
+                          f"{wf_name}: the #3421 SHA-resolution guard must precede the diff")
+            self.assertIn("fail-safe", run.lower(),
+                          f"{wf_name}: the fail-safe fallback must be documented + taken")
+            # The event payload SHA pair must feed the step (the authoritative diff).
+            env = step.get("env", {}) or {}
+            self.assertEqual(str(env.get("MG_BASE_SHA", "")),
+                             "${{ github.event.merge_group.base_sha }}", wf_name)
+            self.assertEqual(str(env.get("MG_HEAD_SHA", "")),
+                             "${{ github.event.merge_group.head_sha }}", wf_name)
+
+    def test_batch_diff_fetch_deepens_the_shallow_checkout(self):
+        # The `changes` job checks out at the default depth 1. A plain SHA fetch
+        # leaves base_sha/head_sha PRESENT but unconnected (both cat-file guards
+        # pass), and the classifier's three-dot diff then dies with "no merge
+        # base" — the fail-safe would force class=engine on EVERY batch,
+        # silently reducing the whole gate to a no-op. Every fetch in the
+        # merge_group branch must therefore deepen to full history
+        # (--depth=2147483647 == --unshallow, but valid on complete repos too —
+        # the same merge-base rationale as ci-select.yml's fetch-depth: 0).
+        for wf_name, step in self._both():
+            run = str(step.get("run", ""))
+            fetches = [ln for ln in run.splitlines() if "git fetch" in ln]
+            self.assertTrue(fetches, f"{wf_name}: merge_group branch must fetch the SHA pair")
+            for ln in fetches:
+                self.assertIn(
+                    "--depth=2147483647", ln,
+                    f"{wf_name}: every batch-diff fetch must deepen the shallow "
+                    f"checkout or the three-dot diff has no merge base "
+                    f"(permanent fail-safe => the gate never skips): {ln.strip()!r}")
+
+    def test_classification_is_delegated_not_duplicated(self):
+        for wf_name, step in self._both():
+            run = str(step.get("run", ""))
+            self.assertIn("scripts/ci_select.py --classify-only", run,
+                          f"{wf_name}: the merge_group branch must invoke the classifier "
+                          "(scripts/ci_select.py --classify-only), the single source of truth")
+            self.assertNotIn("grep -Eq", run,
+                             f"{wf_name}: the merge_group branch must NOT re-encode the "
+                             "class path sets as a grep — no duplicated path lists")
+
+    def test_skip_class_set_is_exactly_docs_and_orchestration(self):
+        # The case-arm must skip on EXACTLY the two proven-inert classes, spelled
+        # with the classifier module's own tokens; the wildcard arm must force the
+        # full run (engine/mixed/any unknown token => rust=true).
+        docs = self.select_mod._CLASS_DOCS
+        orch = self.select_mod._CLASS_ORCHESTRATION
+        self.assertEqual((docs, orch), ("docs-only", "orchestration-only"),
+                         "classifier tokens drifted — update the workflow case-arms in "
+                         "lock-step (they match on these literal strings)")
+        for wf_name, step in self._both():
+            run = str(step.get("run", ""))
+            self.assertIn(f"{docs}|{orch}) rust=false", run,
+                          f"{wf_name}: the skip case-arm must cover exactly {docs}|{orch}")
+            self.assertIn("*) rust=true", run,
+                          f"{wf_name}: the wildcard arm must force the full run")
+            self.assertNotIn("mixed) rust=false", run, wf_name)
+            self.assertNotIn("engine) rust=false", run, wf_name)
+
+    def test_ci_docker_changed_is_class_gated_with_rust(self):
+        run = str(self._decide(self.ci, "ci.yml").get("run", ""))
+        self.assertIn("rust=false; docker=false", run,
+                      "ci.yml: docker_changed must be class-gated alongside rust_changed "
+                      "(every docker-filter path classifies engine, so the skip is sound)")
+
+    def test_classify_only_flag_exists_and_fails_safe_in_the_selector(self):
+        # The wired flag must exist in the selector CLI and carry the documented
+        # fail-safe (this is the cross-file contract the case-arm relies on).
+        text = CI_SELECT_PY.read_text(encoding="utf-8")
+        self.assertIn("--classify-only", text)
+        self.assertTrue(hasattr(self.select_mod, "_classify_only_main"),
+                        "ci_select.py must expose the classify-only entry point")
+
+    def test_fuzz_has_no_redundant_rust_changed_layer(self):
+        # fuzz.yml's merge-group class gating IS the select pre-job (batch-diff
+        # selection, seed-closure guards) — adding a second rust_changed layer
+        # there would be redundant and could only disagree on transient errors.
+        self.assertNotIn("changes", self.fuzz["jobs"],
+                         "fuzz.yml grew a `changes` job — its merge-group gating is the "
+                         "select pre-job; keep one gate, not two")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
