@@ -569,9 +569,32 @@ fn extend_named_graph(graph: &mut Graph, name: &str, additions: &[[Term; 3]]) {
     install_triples(graph, name, terms);
 }
 
+/// Reset the `<urn:sparq:auth>` enforcement view to exactly `terms`, PRESERVING the
+/// named graph's presence when `terms` is empty and the view already exists. The view's
+/// PRESENCE is the "materialized" marker: `AclIndex::build` reports a retryable
+/// [`crate::AclStatus::Unloaded`] (a 503 at the server) when it is absent, and the
+/// static materializer deliberately installs an EMPTY view for a closure that grants
+/// nothing — a definitive "materialized, no grants" deny (403). Routing this reset
+/// through the plain [`install_triples`] (which drops an empty graph) silently turned
+/// that definitive deny into a retryable `Unloaded` on every post-materialize ledger
+/// reconcile (sq-37f1a). A store whose view was never materialized (graph absent AND
+/// empty baseline) stays absent — the reset must not invent the marker either.
+fn reset_auth_view(graph: &mut Graph, terms: Vec<[Term; 3]>) {
+    if terms.is_empty() {
+        let g_name = Term::NamedNode(NamedNode::new_unchecked(AUTH_GRAPH));
+        if let Some(slot) = graph.named.iter_mut().find(|(n, _)| *n == g_name) {
+            slot.1 = Graph::from_parts(Dict::new(), Vec::new());
+        }
+        return;
+    }
+    install_triples(graph, AUTH_GRAPH, terms);
+}
+
 /// Replace `name`'s sub-graph with exactly `terms` (re-interned into a fresh dict).
 /// When `terms` is empty the named graph is removed entirely (fail-closed: no empty
 /// shell left behind that a reader could otherwise treat as an existing-but-empty view).
+/// NOT for the `<urn:sparq:auth>` view's baseline reset — that must keep an existing
+/// empty view present (see [`reset_auth_view`]).
 fn install_triples(graph: &mut Graph, name: &str, terms: Vec<[Term; 3]>) {
     let g_name = Term::NamedNode(NamedNode::new_unchecked(name));
     if terms.is_empty() {
@@ -1590,7 +1613,7 @@ impl BridgeLedger {
         // 1. Reset the enforcement view to the captured static baseline, and clear ALL
         //    bridged provenance — nothing bridged survives unless an entry re-emits it.
         let baseline = self.static_baseline.clone().unwrap_or_default();
-        install_triples(graph, AUTH_GRAPH, baseline);
+        reset_auth_view(graph, baseline);
         install_triples(graph, AUTH_BRIDGED_GRAPH, Vec::new());
 
         // 2. Replay each entry; keep only those that still materialize something. A
