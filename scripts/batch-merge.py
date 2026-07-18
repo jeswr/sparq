@@ -28,7 +28,10 @@
 #     constituent is SKIPPED (it stays individually armed) and recorded in the PR body.
 #     If fewer than MIN_CONSTITUENTS merge cleanly the branch is deleted and no PR opens.
 #  4. ONE PR. Title `omnibus: <n> reviewed worker PRs`; body = SPARQ-agent self-ID +
-#     machine marker (constituent PR numbers) + constituent table (PR, issue, crate) +
+#     machine marker (constituent PR numbers, each PINNED to the exact head OID the
+#     omnibus merged — `<num>@<oid>` — so later causality is judged against the
+#     revision actually tested, never the mutable branch) + constituent table (PR,
+#     issue, crate) +
 #     one `Closes #<issue>` line per constituent target issue. The PR is armed with
 #     `gh pr merge --auto` (strategy is chosen by the merge queue). The sparq-omnibus/
 #     prefix keeps it OUT of the worker review loop: the registry's enumerator
@@ -66,8 +69,16 @@
 #             expire the singleton leaves and flood the queue) — and NO same-run
 #             root rebuild; a new root waits out ROOT_COOLDOWN_HOURS (below).
 #     Bisection (case ii only): CAUSAL = the failing omnibus's marker constituents
-#     whose code is IN the failed head and not cleanly excluded — the only clean
-#     exclusion is positive evidence the code already LANDED (empty vs main).
+#     whose code is IN the failed head and not cleanly excluded — REVISION-EXACT:
+#     the only clean exclusion is positive evidence the PINNED revision the omnibus
+#     merged already LANDED (empty vs main, valid only while the constituent's
+#     current head still IS the pinned oid). A constituent whose branch DRIFTED
+#     (force-push / revert) is NEVER silently excluded — the old, code-bearing
+#     revision is still in the failed head and may be the culprit; and a DRIFTED
+#     sole survivor is never convicted on the parent's verdict (the evidence is
+#     against the pinned head, not the current one) — it gets a fresh singleton
+#     RE-TEST child pinning its CURRENT head instead. Legacy number-only markers
+#     (no pins) keep pre-pin semantics and age out within MAX_OMNIBUS_AGE_HOURS.
 #     SURVIVORS = the CAUSAL constituents that are also still OPEN PRs, still
 #     armed-eligible (per-PR re-check of rule 1). ELIGIBILITY IS NOT CAUSALITY: a
 #     constituent that became draft/unarmed/relabeled/closed WITHOUT landing still
@@ -81,7 +92,12 @@
 #         MIN_CONSTITUENTS applies to ROOT creation only, and a singleton child is
 #         exactly how a culprit gets isolated.
 #       * exactly 1 survivor, the parent's head `gate` CONCLUDED in strict FAILURE,
-#         AND the CAUSAL set is exactly that survivor: THE CULPRIT. It is NOT closed. It is commented (machine marker
+#         the CAUSAL set is exactly that survivor, AND its current head still IS the
+#         pinned revision the parent merged: THE CULPRIT. Immediately before the
+#         mutation executes, the convicting evidence (same parent head SHA +
+#         concluded gate FAILURE + definitive MERGEABLE) is REVALIDATED live; if it
+#         drifted, the whole quarantine group is skipped this run (re-evaluated next
+#         run on fresh data). It is NOT closed. It is commented (machine marker
 #         `sparq-omnibus-culprit:v1`), converted to DRAFT (`gh pr ready --undo`) and
 #         disarmed — in THAT order (crash safety, 6b). Draft + unarmed + review:pass is
 #         the registry's `stranded` posture, which escalates loudly to a human
@@ -182,6 +198,7 @@
 # Exit 0 on success; non-zero only on a real error or a failed self-test.
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -233,11 +250,13 @@ WORKER_BRANCH_RE = re.compile(r"^sparq-agent/")
 WORKER_ISSUE_RE = re.compile(r"^sparq-agent/issue-([1-9][0-9]*)-")
 ORCHESTRATOR_APP = "sparq-orchestrator"
 # Machine markers embedded in every omnibus PR body; closure + bisection key on them.
-# New bodies always write v2 (with a bisection depth); v1 bodies (pre-bisection) still
-# parse, with depth=0 implied.
+# New bodies always write v2 with a bisection depth AND a per-constituent pinned head
+# OID (`<num>@<oid>` — the exact revision the omnibus merged, making causality
+# revision-exact). Older markers still parse: v2 number-only entries carry no pin;
+# v1 bodies (pre-bisection) imply depth=0 and no pins.
 MARKER_V1_RE = re.compile(r"<!--\s*sparq-omnibus:v1\s+constituents=([0-9,]+)\s*-->")
 MARKER_V2_RE = re.compile(
-    r"<!--\s*sparq-omnibus:v2\s+constituents=([0-9,]+)\s+depth=([0-9]+)\s*-->")
+    r"<!--\s*sparq-omnibus:v2\s+constituents=([0-9a-f@,]+)\s+depth=([0-9]+)\s*-->")
 # Leading UTC creation stamp of an omnibus branch name (children carry a suffix).
 STAMP_RE = re.compile(r"^([0-9]{8}T[0-9]{6}Z)")
 
@@ -334,17 +353,29 @@ def eligible_constituents(prs: list) -> list:
 
 
 def parse_marker(body: str):
-    """(constituent PR numbers, bisection depth) from an omnibus body marker.
+    """(constituent PR numbers, bisection depth, {number: pinned head oid}) from an
+    omnibus body marker.
 
-    Parses BOTH marker generations: v2 carries an explicit depth; a v1 marker implies
-    depth=0 (a pre-bisection root). ([], 0) when no marker is present."""
+    Parses BOTH v2 entry generations — revision-exact `<num>@<oid>` (the oid is the
+    constituent HEAD the omnibus actually merged; causality compares against IT,
+    never the mutable branch) and legacy number-only (no pin) — plus v1 markers
+    (depth=0, no pins). ([], 0, {}) when no marker is present."""
     m = MARKER_V2_RE.search(body or "")
     if m:
-        return [int(x) for x in m.group(1).split(",") if x], int(m.group(2))
+        nums, pins = [], {}
+        for tok in m.group(1).split(","):
+            num_s, _, oid = tok.partition("@")
+            if not num_s.isdigit():
+                continue
+            num = int(num_s)
+            nums.append(num)
+            if oid:
+                pins[num] = oid.lower()
+        return nums, int(m.group(2)), pins
     m = MARKER_V1_RE.search(body or "")
     if m:
-        return [int(x) for x in m.group(1).split(",") if x], 0
-    return [], 0
+        return [int(x) for x in m.group(1).split(",") if x], 0, {}
+    return [], 0, {}
 
 
 def constituents_of_marker(body: str) -> list:
@@ -406,6 +437,14 @@ class Action:
     min_ok: int = MIN_CONSTITUENTS
     depth: int = 0
     parent: int = 0
+    # Culpable-mutation guard: the quarantine group (comment / draft / disarm and its
+    # parent close + delete) re-verifies its convicting evidence LIVE immediately
+    # before executing (revalidate_culpable): same omnibus head SHA (guard_head_oid),
+    # gate still concluded FAILURE, mergeability still definitively MERGEABLE. If the
+    # evidence drifted, every action guarded by that omnibus is skipped this run.
+    # guard_pr=0 = unguarded.
+    guard_pr: int = 0
+    guard_head_oid: str = ""
 
 
 def omnibus_branch(now: datetime, suffix: str = "") -> str:
@@ -422,8 +461,13 @@ def omnibus_title(n: int, depth: int = 0) -> str:
 
 def omnibus_body(constituents: list, skipped: list, depth: int = 0, parent: int = 0) -> str:
     """The omnibus PR body: self-ID, v2 machine marker (constituents + bisection depth),
-    constituent table, parent PR reference (children only), Closes lines."""
-    nums = ",".join(str(p["number"]) for p in constituents)
+    constituent table, parent PR reference (children only), Closes lines. Each marker
+    entry pins the constituent's head OID (`<num>@<oid>`) — the exact revision the
+    omnibus merges — so causality stays revision-exact after branch mutation; a
+    constituent with no known head oid degrades to a legacy number-only entry."""
+    nums = ",".join(
+        f"{p['number']}@{p['head_oid']}" if p.get("head_oid") else str(p["number"])
+        for p in constituents)
     if depth == 0:
         intro = (
             f"{SELF_ID} — omnibus batcher (`scripts/batch-merge.py`). This PR batches ALL "
@@ -507,6 +551,25 @@ def retest_close_comment(reason: str, child: str, survivor: int, blockers: list)
     )
 
 
+def drift_retest_close_comment(reason: str, child: str, survivor: int,
+                               pinned: str, current: str) -> str:
+    """Parent-close comment for the REVISION-DRIFT singleton re-test: the sole
+    survivor's branch no longer points at the pinned revision this omnibus merged
+    (force-push / revert), so the failure is evidence against the OLD head only —
+    the untested current head is never convicted on it."""
+    return (
+        f"{SELF_ID} — closing this omnibus: {reason}. NOT convicting sole surviving "
+        f"constituent #{survivor}: its branch has MOVED since this omnibus was "
+        f"created (merged revision `{(pinned or 'unknown')[:12]}`, current head "
+        f"`{(current or 'unknown')[:12]}`), so the failure is evidence against the "
+        f"old revision only. RE-TESTING instead: fresh singleton child omnibus "
+        f"`{child}` carries #{survivor} at its CURRENT head — a failure there is "
+        f"sound evidence against it alone. Every constituent PR remains "
+        f"individually armed throughout.\n\n"
+        f"<!-- sparq-omnibus-failure:v1 bisection=v2 -->"
+    )
+
+
 def quarantine_comment(parent_num: int, reason: str) -> str:
     # The handoff contract is the registry's `stranded` posture (draft + unarmed +
     # review:pass -> loud needs:user escalation), NOT its ci-fix admission: ci-fix
@@ -541,11 +604,17 @@ def creation_actions(repo: str, branch: str, constituents: list, depth: int = 0,
                ["checkout", "-B", branch, "origin/main"], note=branch),
     ]
     for p in constituents:
+        # Merge the PINNED head OID — the revision the body marker records — not the
+        # mutable branch name: what the omnibus tests is exactly what causality later
+        # judges. The fetch above makes the branch tip reachable; if the branch moved
+        # in between, the pinned oid may be unreachable and the merge fails, which is
+        # handled as a conflict-skip (the constituent stays individually armed).
+        target = p.get("head_oid") or f"origin/{p['head_ref']}"
         acts.append(Action(
             "merge", "git",
             ["merge", "--no-ff", "--no-edit", "-m",
              f"omnibus: merge PR #{p['number']} ({p['head_ref']})",
-             f"origin/{p['head_ref']}"],
+             target],
             may_conflict=True, constituent=p["number"],
             note=f"constituent #{p['number']}"))
     acts.append(Action("push-branch", "git", ["push", "origin", branch], note=branch,
@@ -567,9 +636,12 @@ def creation_actions(repo: str, branch: str, constituents: list, depth: int = 0,
 # The pure policy. `state` is a plain-dict snapshot:
 #   repo: "owner/name"
 #   now:  aware UTC datetime
-#   open_prs: [{number, head_ref, title, author_login, labels[], is_draft,
+#   open_prs: [{number, head_ref, head_oid, title, author_login, labels[], is_draft,
 #               auto_merge{enabled_by}|None, files[], body, checks[], mergeable,
-#               is_cross_repository}]   (is_cross_repository: fork-head marker — an
+#               is_cross_repository}]   (head_oid: current head SHA — pinned into new
+#                                        omnibus markers and compared against a marker's
+#                                        pinned oid to detect branch drift;
+#                                        is_cross_repository: fork-head marker — an
 #                                        omnibus record additionally requires it to
 #                                        be explicitly False, see is_trusted_omnibus)
 #   merged_omnibus: [{number, body}]                    (merged sparq-omnibus/* PRs)
@@ -712,16 +784,33 @@ def plan(state: dict) -> list:
                     note=f"re-arm open omnibus #{om['number']} (arm dropped)"))
             continue
         dying_branches.add(om["head_ref"])
-        nums, depth = parse_marker(om.get("body", ""))
-        # CAUSALITY (distinct from eligibility): the set that can be blamed for this
-        # failed head is the marker constituents whose CODE IS IN IT and is not
-        # cleanly excluded. The ONLY clean exclusion is positive evidence the code
-        # already landed on main (empty_vs_main True — it merged through a
-        # gate-green path). A constituent that merely became INELIGIBLE — drafted,
-        # disarmed, relabeled, closed unmerged, or simply absent from the open
-        # listing without an emptiness proof — still has its code in the failed
-        # head and may be the actual culprit.
-        causal = [n for n in nums if not empty_vs_main.get(n, False)] if bisectable else []
+        nums, depth, pins = parse_marker(om.get("body", ""))
+        # CAUSALITY (distinct from eligibility) — REVISION-EXACT: the set that can be
+        # blamed for this failed head is the marker constituents whose PINNED
+        # revision (`<num>@<oid>`, the head the omnibus actually merged) is IN it
+        # and is not cleanly excluded. The ONLY clean exclusion is positive evidence
+        # the MERGED revision already landed on main: empty_vs_main is measured on
+        # the CURRENT branch, so it only speaks for the pinned revision while the
+        # current head still IS the pinned oid. A constituent whose branch DRIFTED
+        # (force-push / revert) is NEVER silently excluded — the old, code-bearing
+        # revision is still in the failed head and may be the actual culprit. A
+        # constituent that merely became INELIGIBLE — drafted, disarmed, relabeled,
+        # closed unmerged, or simply absent from the open listing without an
+        # emptiness proof — likewise stays causal. A legacy number-only marker
+        # entry carries no pin: drift is unverifiable there, so current-branch
+        # emptiness is the best available evidence (pre-pin behaviour; such
+        # omnibuses age out within MAX_OMNIBUS_AGE_HOURS).
+
+        def _cleanly_excluded(num: int) -> bool:
+            if not empty_vs_main.get(num, False):
+                return False  # no landing evidence at all
+            pin = pins.get(num)
+            if pin is None:
+                return True   # legacy number-only entry: no pin to verify against
+            cur = ((open_by_num.get(num) or {}).get("head_oid") or "").lower()
+            return bool(cur) and cur == pin
+
+        causal = [n for n in nums if not _cleanly_excluded(n)] if bisectable else []
         survivors = [n for n in causal if _survivor(n)]
         if survivors and truncated:
             # A live constituent absent from a TRUNCATED listing would be miscounted
@@ -776,52 +865,71 @@ def plan(state: dict) -> list:
                 f"(depth {depth}) NOT quarantined: {reason} is not a concluded "
                 f"head-gate FAILURE verdict — v1 close, survivor stays armed")
             survivors = []
-        if len(survivors) == 1 and len(causal) > 1:
-            # ELIGIBILITY IS NOT CAUSALITY: another marker constituent's code is
-            # still in the failed head (it became ineligible / closed WITHOUT
-            # landing), so the parent's gate failure cannot convict the lone
-            # still-eligible survivor — the unremoved sibling may be the culprit.
-            # Get FRESH evidence instead: a singleton RE-TEST child carrying only
-            # the survivor, off current main — if THAT fails, its causal set is
-            # exactly {survivor} and conviction is sound. When no child can be
-            # created (hygiene-only / depth cap), take the non-culpable v1 close:
-            # never quarantine on ambiguous causality.
-            blockers = sorted(n for n in causal if n != survivors[0])
-            if not can_create or depth >= DEPTH_CAP:
-                log(f"AMBIGUOUS CAUSALITY: omnibus #{om['number']} (depth {depth}) "
-                    f"failed with sole eligible survivor PR #{survivors[0]}, but "
-                    f"code-bearing ineligible sibling(s) {blockers} are still in "
-                    f"the failed head and no re-test child can be created "
-                    f"(hygiene-only or depth cap) — v1 close, survivor stays armed")
-                if depth >= DEPTH_CAP:
-                    suppress_root = True  # same damper as the >=2 depth-cap fallback
-                survivors = []
-            else:
-                child = omnibus_branch(state["now"], f"-p{om['number']}a")
-                log(f"AMBIGUOUS CAUSALITY: omnibus #{om['number']} (depth {depth}) "
-                    f"failed with sole eligible survivor PR #{survivors[0]}, but "
-                    f"code-bearing ineligible sibling(s) {blockers} are still in "
-                    f"the failed head — singleton RE-TEST child {child} instead of "
-                    f"conviction (never quarantine on ambiguous causality)")
-                actions.append(Action(
-                    "close-omnibus", "gh",
-                    ["pr", "close", str(om["number"]), "--repo", repo,
-                     "--comment", retest_close_comment(reason, child, survivors[0],
-                                                       blockers)],
-                    note=f"omnibus #{om['number']}: {reason} — ambiguous causality, "
-                         f"re-testing #{survivors[0]}"))
-                actions.append(Action(
-                    "delete-branch", "git",
-                    ["push", "origin", "--delete", om["head_ref"]],
-                    note=f"branch of closed omnibus #{om['number']}"))
-                actions += creation_actions(
-                    repo, child, [open_by_num[survivors[0]]],
-                    depth=depth + 1, parent=om["number"], min_ok=1)
-                children_spawned = True
-                continue
+        if len(survivors) == 1:
+            # Two distinct ways a sole-survivor conviction can be UNSOUND — both get
+            # fresh evidence (a singleton RE-TEST child) instead of a quarantine:
+            #  * ELIGIBILITY IS NOT CAUSALITY (blockers): another marker
+            #    constituent's code is still in the failed head (it became
+            #    ineligible / closed WITHOUT landing), so the parent's gate failure
+            #    cannot convict the lone still-eligible survivor — the unremoved
+            #    sibling may be the culprit.
+            #  * REVISION DRIFT: the survivor's branch no longer points at the
+            #    pinned revision the parent merged (force-push / revert), so the
+            #    failure is evidence against the OLD head only — convicting would
+            #    quarantine untested code. The re-test child pins the CURRENT head.
+            # If THAT child fails, its causal set is exactly {survivor} at its
+            # pinned revision and conviction is sound. When no child can be created
+            # (hygiene-only / depth cap), take the non-culpable v1 close: never
+            # quarantine on ambiguous causality or a drifted revision.
+            sole = survivors[0]
+            blockers = sorted(n for n in causal if n != sole)
+            pin = pins.get(sole)
+            cur_oid = ((open_by_num.get(sole) or {}).get("head_oid") or "").lower()
+            drifted = pin is not None and cur_oid != pin
+            why = (f"code-bearing ineligible sibling(s) {blockers} are still in "
+                   f"the failed head" if blockers
+                   else f"its branch drifted off the pinned revision "
+                        f"{pin!r} (current {cur_oid or 'unknown'!r})")
+            if blockers or drifted:
+                if not can_create or depth >= DEPTH_CAP:
+                    log(f"UNSOUND CONVICTION: omnibus #{om['number']} (depth {depth}) "
+                        f"failed with sole eligible survivor PR #{sole}, but {why}, "
+                        f"and no re-test child can be created (hygiene-only or "
+                        f"depth cap) — v1 close, survivor stays armed")
+                    if depth >= DEPTH_CAP:
+                        suppress_root = True  # same damper as the >=2 depth-cap fallback
+                    survivors = []
+                else:
+                    child = omnibus_branch(state["now"], f"-p{om['number']}a")
+                    log(f"UNSOUND CONVICTION: omnibus #{om['number']} (depth {depth}) "
+                        f"failed with sole eligible survivor PR #{sole}, but {why} — "
+                        f"singleton RE-TEST child {child} instead of conviction "
+                        f"(never quarantine on ambiguous causality or a drifted "
+                        f"revision)")
+                    comment = (retest_close_comment(reason, child, sole, blockers)
+                               if blockers else
+                               drift_retest_close_comment(reason, child, sole,
+                                                          pin, cur_oid))
+                    actions.append(Action(
+                        "close-omnibus", "gh",
+                        ["pr", "close", str(om["number"]), "--repo", repo,
+                         "--comment", comment],
+                        note=f"omnibus #{om['number']}: {reason} — unsound "
+                             f"conviction, re-testing #{sole}"))
+                    actions.append(Action(
+                        "delete-branch", "git",
+                        ["push", "origin", "--delete", om["head_ref"]],
+                        note=f"branch of closed omnibus #{om['number']}"))
+                    actions += creation_actions(
+                        repo, child, [open_by_num[sole]],
+                        depth=depth + 1, parent=om["number"], min_ok=1)
+                    children_spawned = True
+                    continue
+        convicting = False
         if len(survivors) == 1:
             culprit = survivors[0]
             quarantined.add(culprit)
+            convicting = True
             log(f"QUARANTINE: omnibus #{om['number']} (depth {depth}) failed its head "
                 f"gate with sole survivor PR #{culprit} — comment + draft + disarm "
                 f"(NOT closing); the registry's stranded escalation owns it now")
@@ -833,31 +941,44 @@ def plan(state: dict) -> list:
             # never runs. The belt-and-braces disarm goes LAST (non-fatal in
             # execute(): the arm is usually already gone). No cut point can leave a
             # disarmed-but-unmarked PR.
+            # The whole quarantine group (and the parent's close/delete below) is
+            # GUARDED: execute() re-verifies the convicting evidence live — same
+            # parent head SHA, gate still concluded FAILURE, still definitively
+            # MERGEABLE — immediately before the first culpable mutation, and skips
+            # the group this run if the snapshot went stale (main advanced,
+            # mergeability drifted). Nothing culpable ever runs on cached evidence.
+            g_pr, g_oid = om["number"], (om.get("head_oid") or "")
             actions.append(Action(
                 "comment", "gh",
                 ["pr", "comment", str(culprit), "--repo", repo,
                  "--body", quarantine_comment(om["number"], reason)],
-                note=f"culprit #{culprit} quarantine notice"))
+                note=f"culprit #{culprit} quarantine notice",
+                guard_pr=g_pr, guard_head_oid=g_oid))
             actions.append(Action(
                 "draft", "gh",
                 ["pr", "ready", str(culprit), "--repo", repo, "--undo"],
-                note=f"culprit #{culprit} -> draft (registry stranded posture)"))
+                note=f"culprit #{culprit} -> draft (registry stranded posture)",
+                guard_pr=g_pr, guard_head_oid=g_oid))
             actions.append(Action(
                 "disarm", "gh",
                 ["pr", "merge", str(culprit), "--repo", repo, "--disable-auto"],
-                note=f"culprit #{culprit} isolated by failed omnibus #{om['number']}"))
+                note=f"culprit #{culprit} isolated by failed omnibus #{om['number']}",
+                guard_pr=g_pr, guard_head_oid=g_oid))
             # No labels are added here: draft + unarmed IS the registry's stranded
             # posture (its enumerator keys on the draft state, not on anything the
             # batcher could apply), and the comment's machine marker is the durable
             # breadcrumb. Fall through: the parent closes exactly as in v1.
+        g_pr, g_oid = (om["number"], (om.get("head_oid") or "")) if convicting else (0, "")
         actions.append(Action(
             "close-omnibus", "gh",
             ["pr", "close", str(om["number"]), "--repo", repo,
              "--comment", close_failed_omnibus_comment(reason)],
-            note=f"omnibus #{om['number']}: {reason}"))
+            note=f"omnibus #{om['number']}: {reason}",
+            guard_pr=g_pr, guard_head_oid=g_oid))
         actions.append(Action(
             "delete-branch", "git", ["push", "origin", "--delete", om["head_ref"]],
-            note=f"branch of closed omnibus #{om['number']}"))
+            note=f"branch of closed omnibus #{om['number']}",
+            guard_pr=g_pr, guard_head_oid=g_oid))
 
     # ---- 8. stale hygiene: sparq-omnibus/* branches with no open PR ----
     if truncated:
@@ -873,7 +994,12 @@ def plan(state: dict) -> list:
         # Branch protection deliberately covers UNTRUSTED prefixed PRs too: a spoofed
         # PR is never CLASSIFIED as an omnibus (above), but deleting a same-repo
         # branch out from under ANY open PR is destructive — leave it to a human.
-        live_branches = {p["head_ref"] for p in prefixed_open}
+        # SAME-REPOSITORY heads only, though: a fork PR's head branch lives in the
+        # FORK, so an origin branch that merely shares its name is unrelated to that
+        # PR — protecting it would let a fork PR suppress origin hygiene forever.
+        # Unknown provenance (is_cross_repository missing) still protects.
+        live_branches = {p["head_ref"] for p in prefixed_open
+                        if p.get("is_cross_repository") is not True}
         for br in sorted(state.get("remote_omnibus_branches", [])):
             if br in live_branches or br in dying_branches:
                 continue
@@ -970,6 +1096,31 @@ def run_git_out(argv: list, check: bool = True) -> str:
                           capture_output=True, text=True).stdout
 
 
+def revalidate_culpable(repo: str, num: int, expect_head_oid: str) -> bool:
+    """LIVE re-check, immediately before a culpable mutation (the quarantine group),
+    that the convicting evidence the plan was computed from still holds: the failed
+    omnibus's head SHA is unchanged, its `gate` still concludes in strict FAILURE,
+    and its mergeability is still definitively MERGEABLE. The plan's snapshot can go
+    stale between gather and execute (main advances -> mergeability flips to
+    UNKNOWN/CONFLICTING); a draft/disarm must never run on cached evidence. Any
+    drift, fetch failure, or unparseable response returns False — the caller skips
+    the mutation this run and the next run re-evaluates on fresh data."""
+    try:
+        heavy = json.loads(run_gh(["pr", "view", str(num), "--repo", repo,
+                                   "--json", "headRefOid,mergeable,statusCheckRollup"]))
+    except (subprocess.CalledProcessError, ValueError):
+        return False  # cannot re-verify -> never mutate on stale evidence
+    if expect_head_oid and \
+            (heavy.get("headRefOid") or "").lower() != expect_head_oid.lower():
+        return False  # the head the plan judged is not the head that exists now
+    if (heavy.get("mergeable") or "").upper() != "MERGEABLE":
+        return False  # no longer definitive — a conflict must never implicate anyone
+    checks = [{"name": c.get("name", ""), "status": c.get("status", ""),
+               "conclusion": c.get("conclusion", "")}
+              for c in (heavy.get("statusCheckRollup") or []) if isinstance(c, dict)]
+    return gate_conclusion({"checks": checks}) == "failure"
+
+
 def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
     """Snapshot the live GitHub/git state the pure plan() consumes.
 
@@ -980,8 +1131,8 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
     truncated — constituent liveness would then be unreliable — so the snapshot carries
     open_list_truncated and plan() degrades every bisection decision to a v1 close AND
     suppresses stale-branch deletion + new-root creation (fail-safe)."""
-    fields = ("number,headRefName,title,author,labels,isDraft,autoMergeRequest,"
-              "isCrossRepository")
+    fields = ("number,headRefName,headRefOid,title,author,labels,isDraft,"
+              "autoMergeRequest,isCrossRepository")
     raw = json.loads(run_gh(["pr", "list", "--repo", repo, "--state", "open",
                              "--limit", str(OPEN_PR_LIST_LIMIT), "--json", fields]))
     open_list_truncated = len(raw) >= OPEN_PR_LIST_LIMIT
@@ -996,6 +1147,7 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
         open_prs.append({
             "number": pr["number"],
             "head_ref": pr.get("headRefName", ""),
+            "head_oid": (pr.get("headRefOid") or "").lower(),
             "title": pr.get("title", ""),
             "author_login": (pr.get("author") or {}).get("login", ""),
             "labels": [lbl["name"] for lbl in pr.get("labels", [])],
@@ -1119,12 +1271,30 @@ def execute(actions: list, state: dict, dry_run: bool) -> int:
     seg_branch = None          # branch of the creation segment being executed
     seg_survivors, seg_skipped = [], []
     seg_aborted = False
+    guard_ok: dict = {}        # one live revalidation per guarded omnibus, cached
     for act in actions:
         if act.kind == "create-branch":
             seg_branch, seg_survivors, seg_skipped = act.note, [], []
             seg_aborted = False
         if seg_aborted and act.kind in ("merge", "push-branch", "open-pr", "arm"):
             continue
+        if act.guard_pr and not dry_run:
+            # Culpable-mutation guard (quarantine group): revalidate the convicting
+            # evidence LIVE before the first guarded action; a stale verdict skips
+            # the whole group this run (re-evaluated next run on fresh data).
+            ok = guard_ok.get(act.guard_pr)
+            if ok is None:
+                ok = revalidate_culpable(state["repo"], act.guard_pr,
+                                         act.guard_head_oid)
+                guard_ok[act.guard_pr] = ok
+                if not ok:
+                    log(f"culpable-mutation guard: omnibus #{act.guard_pr}'s "
+                        f"convicting evidence (same head SHA + concluded gate "
+                        f"FAILURE + definitive MERGEABLE) no longer reproduces "
+                        f"live — skipping its quarantine/close group this run "
+                        f"(re-evaluated next run)")
+            if not ok:
+                continue
         argv = list(act.argv)
         if act.kind == "push-branch" and seg_branch and not dry_run \
                 and len(seg_survivors) < act.min_ok:
@@ -1193,14 +1363,25 @@ def execute(actions: list, state: dict, dry_run: bool) -> int:
 # Self-test: hermetic fixtures, gh + git stubbed (plan() is pure — nothing to stub away —
 # and the asserts pin exact argv so any policy drift flips the suite red).
 # --------------------------------------------------------------------------------------
+def _oid(num) -> str:
+    """Deterministic fixture head OID for PR <num> (40 lowercase hex chars)."""
+    return f"{num:040x}"
+
+
+def _pins(*nums) -> str:
+    """Fixture marker constituent list with each PR pinned at its fixture OID."""
+    return ",".join(f"{n}@{_oid(n)}" for n in nums)
+
+
 def _pr(num, head, labels=(), armed_by=ORCHESTRATOR_APP, draft=False, author="worker[bot]",
         title="feat: x", files=(), body="", checks=(), mergeable="MERGEABLE",
-        cross=False):
+        cross=False, oid=None):
     return {"number": num, "head_ref": head, "title": title, "author_login": author,
             "labels": list(labels), "is_draft": draft,
             "auto_merge": ({"enabled_by": f"app/{armed_by}"} if armed_by else None),
             "files": list(files), "body": body, "checks": list(checks),
-            "mergeable": mergeable, "is_cross_repository": cross}
+            "mergeable": mergeable, "is_cross_repository": cross,
+            "head_oid": _oid(num) if oid is None else oid}
 
 
 def _worker(num, issue, labels=("review:pass",), **kw):
@@ -1274,7 +1455,7 @@ def self_test() -> int:
     check("first merge is lowest number", got[2].argv,
           ["merge", "--no-ff", "--no-edit", "-m",
            "omnibus: merge PR #109 (sparq-agent/issue-909-123-1)",
-           "origin/sparq-agent/issue-909-123-1"])
+           _oid(109)])
     check("merges flagged conflict-skippable", [a.may_conflict for a in got[2:4]],
           [True, True])
     check("push argv", got[4].argv, ["push", "origin", stamp_branch])
@@ -1282,8 +1463,9 @@ def self_test() -> int:
     check("PR title counts constituents", got[5].argv[got[5].argv.index("--title") + 1],
           "omnibus: 2 reviewed worker PRs")
     body = _body_of(got[5])
-    check("body carries the v2 marker at depth 0",
-          "<!-- sparq-omnibus:v2 constituents=109,110 depth=0 -->" in body, True)
+    check("body carries the v2 marker at depth 0 with pinned head oids",
+          f"<!-- sparq-omnibus:v2 constituents={_pins(109, 110)} depth=0 -->" in body,
+          True)
     check("body self-IDs as SPARQ agent", body.startswith(SELF_ID), True)
     check("body closes both issues",
           ("Closes #909" in body, "Closes #910" in body), (True, True))
@@ -1299,9 +1481,9 @@ def self_test() -> int:
     check("nine-batch title carries the count",
           got[-2].argv[got[-2].argv.index("--title") + 1],
           "omnibus: 9 reviewed worker PRs")
-    check("nine-batch marker lists all nine ascending",
-          "<!-- sparq-omnibus:v2 constituents=100,101,102,103,104,105,106,107,108 "
-          "depth=0 -->" in _body_of(got[-2]), True)
+    check("nine-batch marker lists all nine ascending (pinned)",
+          f"<!-- sparq-omnibus:v2 constituents={_pins(*range(100, 109))} "
+          f"depth=0 -->" in _body_of(got[-2]), True)
 
     # 4. An OPEN (fresh, armed, mergeable) omnibus PR suppresses a new ROOT.
     open_om = _pr(200, stamp_branch, author="app/sparq-orchestrator")  # armed by orchestrator
@@ -1413,9 +1595,11 @@ def self_test() -> int:
     opens = [a for a in got if a.kind == "open-pr"]
     body_a, body_b = _body_of(opens[0]), _body_of(opens[1])
     check("(a) child A marker: first half, ascending, depth=1",
-          "<!-- sparq-omnibus:v2 constituents=201,202,203 depth=1 -->" in body_a, True)
+          f"<!-- sparq-omnibus:v2 constituents={_pins(201, 202, 203)} depth=1 -->"
+          in body_a, True)
     check("(a) child B marker: second half, ascending, depth=1",
-          "<!-- sparq-omnibus:v2 constituents=204,205,206 depth=1 -->" in body_b, True)
+          f"<!-- sparq-omnibus:v2 constituents={_pins(204, 205, 206)} depth=1 -->"
+          in body_b, True)
     check("(a) child bodies reference the failed parent PR",
           ("#500" in body_a, "#500" in body_b), (True, True))
     check("(a) child titles carry count + depth",
@@ -1457,8 +1641,8 @@ def self_test() -> int:
           ["close-omnibus", "delete-branch"] + creation_kinds(1) + creation_kinds(1))
     bodies = [_body_of(a) for a in got if a.kind == "open-pr"]
     check("(b) singleton child markers at depth=2",
-          ("<!-- sparq-omnibus:v2 constituents=211 depth=2 -->" in bodies[0],
-           "<!-- sparq-omnibus:v2 constituents=212 depth=2 -->" in bodies[1]),
+          (f"<!-- sparq-omnibus:v2 constituents={_pins(211)} depth=2 -->" in bodies[0],
+           f"<!-- sparq-omnibus:v2 constituents={_pins(212)} depth=2 -->" in bodies[1]),
           (True, True))
     check("(b) child pushes allow a singleton (min_ok=1)",
           [a.min_ok for a in got if a.kind == "push-branch"], [1, 1])
@@ -1501,7 +1685,8 @@ def self_test() -> int:
           + creation_kinds(2))
     root_body = _body_of([a for a in got if a.kind == "open-pr"][0])
     check("(c2) the culprit is NOT re-batched into the fresh root",
-          "<!-- sparq-omnibus:v2 constituents=222,223 depth=0 -->" in root_body, True)
+          f"<!-- sparq-omnibus:v2 constituents={_pins(222, 223)} depth=0 -->"
+          in root_body, True)
 
     # B-c3. CONVICTION GATING: only a strict `gate` FAILURE conclusion convicts a
     #       singleton. cancelled / timed_out (a human-cancelled run, runner starvation)
@@ -1613,7 +1798,8 @@ def self_test() -> int:
     check("(d) no disarm on a conflict", any(a.kind == "disarm" for a in got), False)
     root_body = _body_of([a for a in got if a.kind == "open-pr"][0])
     check("(d) rebuild is a ROOT (depth 0), not a child",
-          "<!-- sparq-omnibus:v2 constituents=109,110 depth=0 -->" in root_body, True)
+          f"<!-- sparq-omnibus:v2 constituents={_pins(109, 110)} depth=0 -->"
+          in root_body, True)
 
     # B-d2. COMBINED STATE (conflict + STALE failed gate): mergeability is checked
     #       FIRST. A CONFLICTING omnibus whose head ALSO carries an OLD concluded gate
@@ -1658,8 +1844,8 @@ def self_test() -> int:
           ["close-omnibus", "delete-branch"] + creation_kinds(1) + creation_kinds(1))
     bodies = [_body_of(a) for a in got if a.kind == "open-pr"]
     check("(f) children carry only the true survivors",
-          ("<!-- sparq-omnibus:v2 constituents=604 depth=1 -->" in bodies[0],
-           "<!-- sparq-omnibus:v2 constituents=605 depth=1 -->" in bodies[1]),
+          (f"<!-- sparq-omnibus:v2 constituents={_pins(604)} depth=1 -->" in bodies[0],
+           f"<!-- sparq-omnibus:v2 constituents={_pins(605)} depth=1 -->" in bodies[1]),
           (True, True))
 
     # B-h. RE-RUN IDEMPOTENCE: children already open (parent closed, so it is absent
@@ -1696,12 +1882,28 @@ def self_test() -> int:
               [a.kind for a in got], creation_kinds(3))
         check(f"(s) spoofed omnibus ({tag}): the constituent it names is batched, "
               f"not drafted",
-              "<!-- sparq-omnibus:v2 constituents=221,222,223 depth=0 -->"
+              f"<!-- sparq-omnibus:v2 constituents={_pins(221, 222, 223)} depth=0 -->"
               in _body_of([a for a in got if a.kind == "open-pr"][0]), True)
     got = plan(_state(open_prs=[spoof_author],
                       branches=["sparq-omnibus/20260717T113000Z"]))
     check("(s) branch under an open (even spoofed) PR is still protected from "
           "stale deletion", got, [])
+    # B-s2. FORK-HEAD STALE PROTECTION (same-repository heads only): a fork PR's head
+    #       branch lives in the FORK, so an origin branch merely sharing its name is
+    #       unrelated — it is still deleted as stale; a fork PR must not be able to
+    #       suppress origin hygiene. Unknown provenance still protects
+    #       (destructive-safe).
+    got = plan(_state(open_prs=[spoof_fork],
+                      branches=["sparq-omnibus/20260717T113000Z"]))
+    check("(s2) fork-head spoof does NOT protect the unrelated origin branch",
+          [(a.kind, a.argv) for a in got],
+          [("delete-branch",
+            ["push", "origin", "--delete", "sparq-omnibus/20260717T113000Z"])])
+    unknown_prov = dict(spoof_author)
+    unknown_prov["is_cross_repository"] = None
+    check("(s2) unknown provenance still protects the branch",
+          plan(_state(open_prs=[unknown_prov],
+                      branches=["sparq-omnibus/20260717T113000Z"])), [])
 
     # B-x. ELIGIBILITY IS NOT CAUSALITY: marker {221, 225}; 225 became DRAFT
     #      (ineligible) WITHOUT landing — its code is still in the failed head, so
@@ -1720,7 +1922,7 @@ def self_test() -> int:
           any(a.kind in ("comment", "draft", "disarm") for a in got), False)
     retest_open = [a for a in got if a.kind == "open-pr"][0]
     check("(x) re-test child carries ONLY the eligible survivor, depth+1",
-          "<!-- sparq-omnibus:v2 constituents=221 depth=3 -->"
+          f"<!-- sparq-omnibus:v2 constituents={_pins(221)} depth=3 -->"
           in _body_of(retest_open), True)
     check("(x) re-test child branch is a -p<parent>a child of the failed omnibus",
           [a.argv for a in got if a.kind == "create-branch"],
@@ -1754,6 +1956,91 @@ def self_test() -> int:
     got = plan(_state(open_prs=[culprit, lingering, amb_capped] + others))
     check("(x5) depth-cap ambiguity: v1 close, no re-test, no same-run rebuild",
           [a.kind for a in got], ["close-omnibus", "delete-branch"])
+
+    # B-z. REVISION-EXACT CAUSALITY (oid pins): causality is judged against the
+    #      revision the omnibus MERGED (the marker's <num>@<oid> pin), never the
+    #      mutable branch a constituent can force-push/revert after the fact.
+    check("(z0) parse_marker reads pinned + legacy number-only entries",
+          parse_marker("<!-- sparq-omnibus:v2 constituents=221@abc123,225 depth=2 -->"),
+          ([221, 225], 2, {221: "abc123"}))
+    check("(z0) v1 marker parses with no pins",
+          parse_marker("<!-- sparq-omnibus:v1 constituents=101,102 -->"),
+          ([101, 102], 0, {}))
+
+    # (z1) REVERTED SIBLING NEVER CONVICTS — the terminal wrong-conviction wedge:
+    #      the marker pins {221@oid, 225@oid}; 225 then force-push-REVERTED (current
+    #      head drifted off its pin AND its branch is now empty vs main). Judging
+    #      the CURRENT branch would cleanly exclude 225 and wrongly CONVICT 221;
+    #      revision-exact causality keeps 225's merged revision causal (a drifted
+    #      constituent is never silently excluded), so 221 gets a singleton RE-TEST
+    #      child instead of a quarantine.
+    reverted = _worker(225, 945, oid="f" * 40)   # current head != pinned oid
+    parent_rev = _pr(590, "sparq-omnibus/20260717T110000Z",
+                     author="app/sparq-orchestrator", armed_by=None, checks=gate_fail,
+                     body=f"<!-- sparq-omnibus:v2 constituents={_pins(221, 225)} "
+                          f"depth=2 -->")
+    got = plan(_state(open_prs=[culprit, reverted, parent_rev], empty={225: True}))
+    check("(z1) drifted+empty sibling: re-test child, NEVER a conviction",
+          [a.kind for a in got],
+          ["close-omnibus", "delete-branch"] + creation_kinds(1))
+    check("(z1) no comment/draft/disarm reaches any constituent",
+          any(a.kind in ("comment", "draft", "disarm") for a in got), False)
+    check("(z1) re-test child pins the survivor's current head at depth+1",
+          f"<!-- sparq-omnibus:v2 constituents={_pins(221)} depth=3 -->"
+          in _body_of([a for a in got if a.kind == "open-pr"][0]), True)
+    check("(z1) close comment names the drift-blocked sibling",
+          "#225" in _comment_of(got[0]), True)
+
+    # (z2) SAME sibling, NOT drifted (current head == pin), empty vs main: cleanly
+    #      excluded — its MERGED revision landed — so the causal set collapses to
+    #      the survivor and the sound conviction still runs. Complement of z1:
+    #      flipping the pin comparison reds exactly one of the two.
+    landed = _worker(225, 945)   # current head == pinned oid
+    got = plan(_state(open_prs=[culprit, landed, parent_rev], empty={225: True}))
+    check("(z2) pin-verified landed sibling cleanly excluded: conviction runs",
+          [a.kind for a in got],
+          ["comment", "draft", "disarm", "close-omnibus", "delete-branch"])
+
+    # (z3) DRIFTED SOLE SURVIVOR: the singleton marker pins 221 at a DIFFERENT oid
+    #      than its current head (force-pushed since the child was created) — the
+    #      failure is evidence against the OLD revision only: fresh singleton
+    #      re-test pinning the CURRENT head, never a conviction of untested code.
+    drift_parent = _pr(591, "sparq-omnibus/20260717T110000Z",
+                       author="app/sparq-orchestrator", armed_by=None, checks=gate_fail,
+                       body=f"<!-- sparq-omnibus:v2 constituents=221@{'a' * 40} "
+                            f"depth=3 -->")
+    got = plan(_state(open_prs=[culprit, drift_parent]))
+    check("(z3) drifted sole survivor: re-test child, no conviction",
+          [a.kind for a in got],
+          ["close-omnibus", "delete-branch"] + creation_kinds(1))
+    check("(z3) no comment/draft/disarm on the drifted survivor",
+          any(a.kind in ("comment", "draft", "disarm") for a in got), False)
+    check("(z3) re-test child pins the CURRENT head",
+          f"<!-- sparq-omnibus:v2 constituents={_pins(221)} depth=4 -->"
+          in _body_of([a for a in got if a.kind == "open-pr"][0]), True)
+    check("(z3) close comment records the pinned + current revisions",
+          ("a" * 12 in _comment_of(got[0]), _oid(221)[:12] in _comment_of(got[0])),
+          (True, True))
+    # (z3b) hygiene-only drift: no re-test child can be created -> the non-culpable
+    #       v1 close; the survivor stays armed (never quarantine a drifted revision).
+    got = plan(_state(open_prs=[culprit, drift_parent], batch_enabled=False))
+    check("(z3b) hygiene-only drift: v1 close only, survivor stays armed",
+          [a.kind for a in got], ["close-omnibus", "delete-branch"])
+    check("(z3b) survivor untouched",
+          any(a.kind in ("comment", "draft", "disarm") for a in got), False)
+
+    # (z4) PINNED SINGLETON, NOT drifted (current head == pin): the pin verifies and
+    #      the sound conviction still runs — revision-exactness never blocks a
+    #      justified quarantine.
+    pinned_parent = _pr(592, "sparq-omnibus/20260717T110000Z",
+                        author="app/sparq-orchestrator", armed_by=None,
+                        checks=gate_fail,
+                        body=f"<!-- sparq-omnibus:v2 constituents={_pins(221)} "
+                             f"depth=3 -->")
+    got = plan(_state(open_prs=[culprit, pinned_parent]))
+    check("(z4) pin-verified singleton: conviction runs",
+          [a.kind for a in got],
+          ["comment", "draft", "disarm", "close-omnibus", "delete-branch"])
 
     # B-y. INDETERMINATE MERGEABILITY: after main advances GitHub reports UNKNOWN
     #      before resolving (possibly to CONFLICTING). A gate FAILURE without a
@@ -1806,7 +2093,7 @@ def self_test() -> int:
     acts = plan(st)
     calls = []
 
-    conflict_target = "origin/sparq-agent/issue-910-123-1"
+    conflict_target = _oid(110)  # merges target the pinned head oid now
 
     def stub_git(argv, check=True):
         calls.append(("git", list(argv)))
@@ -1830,7 +2117,8 @@ def self_test() -> int:
     check("one PR opened after conflict", len(opened), 1)
     tbody = opened[0][1][opened[0][1].index("--body") + 1]
     check("re-templated marker drops the conflicted constituent",
-          "<!-- sparq-omnibus:v2 constituents=109,111 depth=0 -->" in tbody, True)
+          f"<!-- sparq-omnibus:v2 constituents={_pins(109, 111)} depth=0 -->" in tbody,
+          True)
     check("re-templated body records the skip",
           "Skipped (merge conflict — still individually armed): #110" in tbody, True)
     check("re-templated title", opened[0][1][opened[0][1].index("--title") + 1],
@@ -1868,8 +2156,7 @@ def self_test() -> int:
 
     def stub_git_conflict_211(argv, check=True):
         calls.append(("git", list(argv)))
-        return 1 if (argv[:1] == ["merge"]
-                     and "origin/sparq-agent/issue-931-123-1" in argv) else 0
+        return 1 if (argv[:1] == ["merge"] and _oid(211) in argv) else 0
 
     run_git, run_gh = stub_git_conflict_211, stub_gh
     try:
@@ -1881,7 +2168,7 @@ def self_test() -> int:
     opened = [c for c in calls if c[0] == "gh" and c[1][:2] == ["pr", "create"]]
     check("segmented: only the clean child opens a PR", len(opened), 1)
     check("segmented: the clean child keeps its own marker",
-          "<!-- sparq-omnibus:v2 constituents=212 depth=2 -->"
+          f"<!-- sparq-omnibus:v2 constituents={_pins(212)} depth=2 -->"
           in opened[0][1][opened[0][1].index("--body") + 1], True)
     check("segmented: aborted child branch deleted locally",
           ("git", ["branch", "-D", child_a2]) in calls, True)
@@ -1936,6 +2223,7 @@ def self_test() -> int:
     def fake_open(n):
         return [{"number": 10_000 + i,
                  "headRefName": f"sparq-agent/issue-{10_000 + i}-1-1",
+                 "headRefOid": _oid(10_000 + i).upper(),  # gather must lowercase
                  "title": "feat: x", "author": {"login": "worker[bot]"},
                  "labels": [], "isDraft": False, "autoMergeRequest": None,
                  "isCrossRepository": False} for i in range(n)]
@@ -1971,6 +2259,7 @@ def self_test() -> int:
 
         calls.clear()
         spoof_open = {"number": 901, "headRefName": "sparq-omnibus/20260717T110000Z",
+                      "headRefOid": _oid(901),
                       "title": "omnibus: totally real", "author": {"login": "mallory"},
                       "labels": [], "isDraft": False, "autoMergeRequest": None,
                       "isCrossRepository": True}
@@ -2011,8 +2300,97 @@ def self_test() -> int:
         check("(14f) isCrossRepository is wired into the snapshot",
               [p["is_cross_repository"] for p in st["open_prs"]
                if p["number"] == 901], [True])
+        check("(14g) headRefOid is wired into the snapshot, lowercased",
+              [p["head_oid"] for p in st["open_prs"]
+               if p["number"] == 10_000], [_oid(10_000)])
     finally:
         run_git, run_gh, run_git_out = real_git, real_gh, real_git_out
+
+    # 16. CULPABLE-MUTATION GUARD (definitive mergeability revalidated LIVE):
+    #     execute() re-verifies the convicting evidence on the parent omnibus — same
+    #     head SHA + gate still concluded FAILURE + still definitively MERGEABLE —
+    #     immediately before the quarantine group runs, and SKIPS the whole group
+    #     (comment / draft / disarm / parent close / branch delete) when the plan's
+    #     snapshot went stale. Removing the guard reds every drifted case below.
+    st = _state(open_prs=[culprit, parent1])
+    acts = plan(st)
+    check("(16) the whole quarantine group is guarded by the parent omnibus",
+          [(a.kind, a.guard_pr) for a in acts],
+          [("comment", 530), ("draft", 530), ("disarm", 530),
+           ("close-omnibus", 530), ("delete-branch", 530)])
+    check("(16) the guard pins the parent head oid the plan judged",
+          {a.guard_head_oid for a in acts}, {_oid(530)})
+
+    def stub_git_ok(argv, check=True):
+        calls.append(("git", list(argv)))
+        return 0
+
+    def make_stub_gh_view(payload):
+        def stub(argv, capture=True):
+            calls.append(("gh", list(argv)))
+            if argv[:2] == ["pr", "view"]:
+                if isinstance(payload, Exception):
+                    raise payload
+                return json.dumps(payload)
+            return ""
+        return stub
+
+    live_ok = {"headRefOid": _oid(530), "mergeable": "MERGEABLE",
+               "statusCheckRollup": [{"name": "gate", "status": "COMPLETED",
+                                      "conclusion": "FAILURE"}]}
+    for tag, payload in (
+        ("mergeability drifted to UNKNOWN", {**live_ok, "mergeable": "UNKNOWN"}),
+        ("mergeability drifted to CONFLICTING",
+         {**live_ok, "mergeable": "CONFLICTING"}),
+        ("head SHA moved", {**live_ok, "headRefOid": "b" * 40}),
+        ("gate no longer failing", {**live_ok, "statusCheckRollup": []}),
+        ("revalidation fetch fails",
+         subprocess.CalledProcessError(1, ["gh", "pr", "view"])),
+    ):
+        calls.clear()
+        run_git, run_gh = stub_git_ok, make_stub_gh_view(payload)
+        try:
+            execute(acts, st, dry_run=False)
+        finally:
+            run_git, run_gh = real_git, real_gh
+        check(f"(16) stale evidence ({tag}): revalidated against the parent",
+              any(c[0] == "gh" and c[1][:3] == ["pr", "view", "530"]
+                  for c in calls), True)
+        check(f"(16) stale evidence ({tag}): NO culpable mutation executes",
+              [c for c in calls
+               if c[0] == "gh" and c[1][:2] in (["pr", "comment"], ["pr", "ready"],
+                                                ["pr", "merge"], ["pr", "close"])],
+              [])
+        check(f"(16) stale evidence ({tag}): parent branch NOT deleted either",
+              any(c[0] == "git" and c[1][:3] == ["push", "origin", "--delete"]
+                  for c in calls), False)
+    calls.clear()
+    run_git, run_gh = stub_git_ok, make_stub_gh_view(live_ok)
+    try:
+        execute(acts, st, dry_run=False)
+    finally:
+        run_git, run_gh = real_git, real_gh
+    check("(16) live evidence still holds: quarantine group executes in order",
+          [c[1][:2] for c in calls if c[0] == "gh" and c[1][:2] != ["pr", "view"]],
+          [["pr", "comment"], ["pr", "ready"], ["pr", "merge"], ["pr", "close"]])
+    check("(16) revalidation runs ONCE per omnibus (cached across the group)",
+          len([c for c in calls if c[0] == "gh" and c[1][:2] == ["pr", "view"]]), 1)
+
+    # 17. WORKFLOW WIRING (least-privilege App token): the mint step must scope the
+    #     App installation token to exactly the workflow's GITHUB_TOKEN permission
+    #     block — contents + pull-requests, write — and nothing broader (an
+    #     unscoped mint inherits EVERY permission the App installation has).
+    yml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                            ".github", "workflows", "batch-merge.yml")
+    with open(yml_path, encoding="utf-8") as fh:
+        yml = fh.read()
+    check("(17) app token scoped to contents: write",
+          "permission-contents: write" in yml, True)
+    check("(17) app token scoped to pull-requests: write",
+          "permission-pull-requests: write" in yml, True)
+    check("(17) no broader permission-* grant is minted",
+          sorted(set(re.findall(r"permission-[a-z-]+(?=:)", yml))),
+          ["permission-contents", "permission-pull-requests"])
 
     if failures:
         for f in failures:
