@@ -162,7 +162,6 @@ Relevant supported features (verified in `mod.rs`/`parser.rs`):
   (`string:encodeForUri`). Remaining by design: backward-rule depth is bounded (we use
   forward rules only). <!-- [FABLE-5] sq-jwsp -->
 
-
 `reason_n3(dict, src)` is single-graph (facts are term-triples). The materializer therefore
 *assembles* the reasoning input from the relevant named graphs + synthesized facts (§4.2) —
 the named-graph structure is reflected into facts (`solidx:ownAcl`, `solidx:inDoc`, …)
