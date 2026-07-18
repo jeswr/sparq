@@ -1379,24 +1379,35 @@ mod idfast_tests {
     }
 
     /// Validates twice — id fast path ON then OFF — asserting (a) the fast path
-    /// fired at least `min_walks` id-level value walks (anti-vacuity), (b) the
-    /// forced-off run fired NONE (the toggle works), and (c) the two reports are
+    /// fired at least `min_walks` id-level value walks and `min_ext` extended
+    /// id-level surface checks (sq-j9hls — anti-vacuity), (b) the forced-off run
+    /// fired NONE of either (the toggle works), and (c) the two reports are
     /// byte-identical including order (`Debug` covers every field of every
     /// result, recursively through `sh:detail`).
-    fn assert_identical_reports(data: &Graph, shapes: &Graph, min_walks: u64) {
-        let before = eval::idfast_walks();
+    fn assert_identical_reports(data: &Graph, shapes: &Graph, min_walks: u64, min_ext: u64) {
+        let (walks_before, ext_before) = (eval::idfast_walks(), eval::idfast_ext_checks());
         let fast = validate(data, shapes);
-        let walks = eval::idfast_walks() - before;
+        let walks = eval::idfast_walks() - walks_before;
+        let ext = eval::idfast_ext_checks() - ext_before;
         assert!(
             walks >= min_walks,
             "id fast path fired {walks} id walks, expected >= {min_walks} (vacuous differential)"
         );
-        let before = eval::idfast_walks();
+        assert!(
+            ext >= min_ext,
+            "extended id surfaces fired {ext} checks, expected >= {min_ext} (vacuous differential)"
+        );
+        let (walks_before, ext_before) = (eval::idfast_walks(), eval::idfast_ext_checks());
         let slow = eval::with_id_fastpath_disabled(|| validate(data, shapes));
         assert_eq!(
             eval::idfast_walks(),
-            before,
+            walks_before,
             "with_id_fastpath_disabled failed: the forced run still took id walks"
+        );
+        assert_eq!(
+            eval::idfast_ext_checks(),
+            ext_before,
+            "with_id_fastpath_disabled failed: the forced run still took extended id checks"
         );
         assert_eq!(fast.conforms, slow.conforms, "conforms diverged");
         assert_eq!(
@@ -1431,7 +1442,7 @@ mod idfast_tests {
         "#);
         let r = validate(&data, &shapes);
         assert!(!r.conforms, "fixture must produce violations to compare");
-        assert_identical_reports(&data, &shapes, 4);
+        assert_identical_reports(&data, &shapes, 4, 1);
     }
 
     /// Every path form (predicate / inverse / sequence / alternative /
@@ -1463,7 +1474,7 @@ mod idfast_tests {
         "#);
         let r = validate(&data, &shapes);
         assert!(!r.conforms, "fixture must produce violations to compare");
-        assert_identical_reports(&data, &shapes, 8);
+        assert_identical_reports(&data, &shapes, 8, 1);
     }
 
     /// A cyclic `sh:node` reference: the recursion guard treats re-entry as
@@ -1483,7 +1494,7 @@ mod idfast_tests {
         "#);
         let r = validate(&data, &shapes);
         assert!(!r.conforms, "fixture must produce violations to compare");
-        assert_identical_reports(&data, &shapes, 3);
+        assert_identical_reports(&data, &shapes, 3, 1);
     }
 
     /// A `sh:targetNode` focus ABSENT from the data graph: no id resolves, so the
@@ -1502,6 +1513,97 @@ mod idfast_tests {
             !r.conforms,
             "the ghost focus itself flows through the zeroOrOne path and violates xsd:integer"
         );
-        assert_identical_reports(&data, &shapes, 0);
+        assert_identical_reports(&data, &shapes, 0, 0);
+    }
+
+    /// [FABLE-5] (sq-j9hls) `sh:class` / `sh:class (list)` instance checks and
+    /// `sh:closed` on the extended id routes: a subclass-closure hit, a typeless
+    /// node, a literal value, a class ABSENT from the data dictionary (every
+    /// value violates on both routes), a `sh:targetClass` enumeration through
+    /// the subclass closure, node-shape `sh:class` (Term-form values under a
+    /// resolved focus id), and a closed node shape with `sh:ignoredProperties`
+    /// plus disallowed-predicate violations.
+    #[test]
+    fn idfast_class_and_closed_report_equivalent() {
+        let data = g(r#"
+            ex:Employee <http://www.w3.org/2000/01/rdf-schema#subClassOf> ex:Person .
+            ex:alice a ex:Employee ; ex:worksFor ex:acme ; ex:name "Alice" ;
+                     ex:hobby "chess" .
+            ex:bob a ex:Robot ; ex:worksFor ex:acme ; ex:name "Bob" .
+            ex:carol ex:worksFor ex:ghostOrg ; ex:name "Carol" .
+            ex:acme a ex:Org .
+            ex:dan a ex:Person ; ex:knows ex:acme , "lit" , ex:nobody ; ex:name "Dan" .
+        "#);
+        let shapes = g(r#"
+            ex:PersonShape a sh:NodeShape ; sh:targetClass ex:Person ;
+              sh:closed true ; sh:ignoredProperties ( rdf:type ex:knows ) ;
+              sh:property [ sh:path ex:worksFor ; sh:class ex:Org ] ;
+              sh:property [ sh:path ex:name ; sh:minCount 1 ] .
+            ex:WorkerShape a sh:NodeShape ; sh:targetSubjectsOf ex:worksFor ;
+              sh:class ex:Person ;
+              sh:property [ sh:path ex:worksFor ; sh:class ex:Absent ] .
+            ex:KnowsShape a sh:NodeShape ; sh:targetSubjectsOf ex:knows ;
+              sh:property [ sh:path ex:knows ; sh:class ( ex:Person ex:Org ) ] .
+        "#);
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "fixture must produce violations to compare");
+        assert_identical_reports(&data, &shapes, 2, 4);
+    }
+
+    /// [FABLE-5] (sq-j9hls) The comparand-path components on the extended id
+    /// routes: `sh:equals` (both missing directions), `sh:disjoint` (shared
+    /// value + an absent comparand predicate), `sh:lessThan(OrEquals)` (violating
+    /// pairs + a non-comparable pair; the comparand walk is id-level, the pair
+    /// comparison stays term-level), `sh:subsetOf`, and an INVERSE comparand
+    /// path exercising the compiled non-predicate form.
+    #[test]
+    fn idfast_comparand_paths_report_equivalent() {
+        let data = g(r#"
+            ex:a ex:p 1 , 2 ; ex:q 2 , 3 ; ex:r 1 ; ex:below 5 ; ex:sub 1 , 4 .
+            ex:b ex:p ex:x ; ex:q ex:x ; ex:below "abc" ; ex:sub ex:x .
+            ex:z ex:emp ex:a .
+        "#);
+        let shapes = g(r#"
+            ex:Cmp a sh:NodeShape ; sh:targetSubjectsOf ex:p ;
+              sh:property [ sh:path ex:p ; sh:equals ex:q ] ;
+              sh:property [ sh:path ex:p ; sh:disjoint ex:r ] ;
+              sh:property [ sh:path ex:p ; sh:disjoint ex:absent ] ;
+              sh:property [ sh:path ex:below ; sh:lessThan ex:p ] ;
+              sh:property [ sh:path ex:below ; sh:lessThanOrEquals ex:q ] ;
+              sh:property [ sh:path ex:sub ; sh:subsetOf ex:q ] ;
+              sh:property [ sh:path ex:p ; sh:equals [ sh:inversePath ex:emp ] ] .
+        "#);
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "fixture must produce violations to compare");
+        assert_identical_reports(&data, &shapes, 7, 10);
+    }
+
+    /// [FABLE-5] (sq-j9hls) `sh:hasValue` / `sh:in` / `sh:uniqueLang` on the
+    /// extended id routes: exact (id-equality) membership hits, a VALUE-equal
+    /// literal that is not term-equal (`5` vs `"5.0"^^xsd:decimal` — the
+    /// literal-only materialising branch), a required value over an empty value
+    /// set, and uniqueLang duplicates including a case-insensitive language pair
+    /// (keys computed from the stored slot, zero materialisation).
+    #[test]
+    fn idfast_value_enumerations_report_equivalent() {
+        let data = g(r#"
+            ex:s1 ex:status "active" ; ex:tag ex:red ; ex:score 5 ;
+                  ex:label "one"@en , "two"@en , "drei"@de .
+            ex:s2 ex:status "retired" ; ex:tag ex:blue ; ex:score "5.0"^^xsd:decimal ;
+                  ex:label "a"@fr , "b"@FR .
+        "#);
+        let shapes = g(r#"
+            ex:E a sh:NodeShape ; sh:targetSubjectsOf ex:status ;
+              sh:property [ sh:path ex:status ; sh:in ( "active" "dormant" ) ] ;
+              sh:property [ sh:path ex:tag ; sh:in ( ex:red ex:green ) ] ;
+              sh:property [ sh:path ex:score ; sh:in ( 5 ) ] ;
+              sh:property [ sh:path ex:score ; sh:hasValue 5 ] ;
+              sh:property [ sh:path ex:tag ; sh:hasValue ex:red ] ;
+              sh:property [ sh:path ex:missing ; sh:hasValue ex:red ] ;
+              sh:property [ sh:path ex:label ; sh:uniqueLang true ] .
+        "#);
+        let r = validate(&data, &shapes);
+        assert!(!r.conforms, "fixture must produce violations to compare");
+        assert_identical_reports(&data, &shapes, 7, 10);
     }
 }
