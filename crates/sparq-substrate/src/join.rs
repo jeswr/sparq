@@ -2037,11 +2037,14 @@ mod tests {
 // DOMAIN-COVERAGE SELF-CHECK (mandatory, §5.1 of the proof program — the sq-sqtk2.1
 // assume(false)-pruning class is the threat): `domain_merge_join_dup_key_multimatch_survives_
 // the_bound` pins the generator constants by plain assert (no symbolic loop, so it cannot
-// itself be pruned) AND proves via `kani::cover!` that a MAXIMAL interesting input — both
-// sides full-length, a dup-key pair on each side sharing one key (>= 4 combined rows out of
-// one key group) plus a second key group — genuinely survives the unwind bound, and that the
-// `extra_shared` filter strictly rejects on some reachable input (the filtered harness is not
-// vacuously equal to the unfiltered one).
+// itself be pruned) AND runs a CONCRETE maximal interesting input — both sides full-length,
+// a dup-key pair on each side sharing one key (4 rows out of one key group) plus a second
+// key group, with the `extra_shared` filter strictly rejecting — under this suite's own
+// unwind bound, pinning the exact outputs with ordinary MERGE-BLOCKING assertions.
+// `kani::cover!` restates the witness over the SYMBOLIC generator as a supplementary
+// reachability report ONLY: an UNSATISFIABLE cover does NOT fail the `cargo kani` verdict
+// (the summary counts failed checks, not unsatisfied covers), so the asserts, never the
+// covers, are what gate.
 //
 // RUN:  cargo kani -p sparq-substrate --features join --harness <name>
 // (Wired: ci/formal-verification.toml `substrate-merge-join-equivalence` + the kani.yml
@@ -2141,21 +2144,42 @@ mod kani_proofs {
         assert_eq!(out, reference, "merge_join with extra_shared must equal the reference");
     }
 
+    /// A concrete two-column row, for the merge-blocking concrete-witness leg.
+    fn row2(c0: Id, c1: Id) -> Row {
+        let mut row = Row::new();
+        row.push(c0);
+        row.push(c1);
+        row
+    }
+
+    /// A concrete three-column row — the shape of an emitted join row (2 left cols +
+    /// 1 appended right payload).
+    fn row3(c0: Id, c1: Id, c2: Id) -> Row {
+        let mut row = row2(c0, c1);
+        row.push(c2);
+        row
+    }
+
     /// Domain-coverage self-check (proof-program §5.1, MANDATORY — the sq-sqtk2.1
     /// assume(false)-pruning guard): the mutation spot-check alone cannot detect a bound
-    /// that silently empties the domain of its interesting inputs, so this harness proves
-    /// they genuinely survive.
+    /// that silently empties the domain of its interesting inputs, so this harness pins
+    /// them with assertions that fail the proof if they break.
     ///
     /// (a) Exact-domain pinning — plain asserts over the generator CONSTANTS (no symbolic
     ///     loop, so this leg cannot itself be pruned): the bounds admit a dup-key pair plus
     ///     a distinct second key on one side.
-    /// (b) Witness survival — `kani::cover!` that a MAXIMAL interesting input is REACHABLE
-    ///     under this suite's own unwind bound: both sides full-length, a dup-key pair on
-    ///     each side sharing one key (so one key group multi-match-emits >= 4 rows) and a
-    ///     second left key group (so the group-advance arm runs in the same witness); plus
-    ///     a second cover that the `extra_shared` filter strictly rejects on some reachable
-    ///     input. If a future re-scope prunes these, the covers go UNSATISFIABLE and this
-    ///     harness goes RED.
+    /// (b) Witness execution (MERGE-BLOCKING) — a CONCRETE maximal interesting input,
+    ///     asserted to satisfy the same constraints [`any_sorted_rows`] imposes, runs
+    ///     through [`merge_join`] under this suite's own unwind bound with ordinary
+    ///     assertions on the EXACT outputs: the shared key group multi-match-emits 4 rows
+    ///     in left-major order, the second left key group takes the group-advance arm
+    ///     without emitting, and the `extra_shared` filter strictly rejects 3 of the 4
+    ///     matches. These are safety checks — any regression turns the harness RED.
+    /// (c) Symbolic covers (supplementary ONLY) — `kani::cover!` restates the witness
+    ///     shape over the SYMBOLIC generator as a reachability report. A plain cover
+    ///     that goes UNSATISFIABLE does NOT fail the `cargo kani` verdict, so the covers
+    ///     cannot gate; leg (b) is the gate, and an unsatisfied cover in the nightly
+    ///     report is the drift signal that the symbolic domain was re-scoped.
     #[kani::proof]
     #[kani::unwind(12)]
     fn domain_merge_join_dup_key_multimatch_survives_the_bound() {
@@ -2163,24 +2187,52 @@ mod kani_proofs {
         assert!(MAX_ROWS >= 3, "domain must admit a dup-key pair plus a second key group");
         assert!(MAX_ID >= 1, "domain must admit two distinct key values");
 
-        let left = any_sorted_rows(0);
-        let right = any_sorted_rows(1);
+        // (b) Concrete maximal witness. Keys: left col 0 = [0, 0, 1]; right col 1 =
+        // [0, 0, 2]. In-domain by construction, and asserted against the same
+        // constraints `any_sorted_rows` imposes (row count, id bounds, nondecreasing
+        // keys) so the witness cannot silently drift outside the symbolic domain the
+        // equivalence proofs quantify over.
+        let left = vec![row2(0, 1), row2(0, 2), row2(1, 0)];
+        let right = vec![row2(2, 0), row2(0, 0), row2(1, 2)];
+        assert!(left.len() == MAX_ROWS && right.len() == MAX_ROWS);
+        assert!(left.iter().chain(right.iter()).all(|r| r[0] <= MAX_ID && r[1] <= MAX_ID));
+        assert!(left[0][0] <= left[1][0] && left[1][0] <= left[2][0]);
+        assert!(right[0][1] <= right[1][1] && right[1][1] <= right[2][1]);
+
         let mut plain = Vec::new();
         merge_join(&left, 0, &right, 1, &[], &[0], &NoBudget, &mut plain);
+        // The shared key group (key 0: 2 left rows x 2 right rows) multi-match-emits
+        // exactly 4 rows in left-major x right-minor order; left key 1 finds no right
+        // partner, so the group-advance arm runs in the same witness without emitting.
+        let expected =
+            vec![row3(0, 1, 2), row3(0, 1, 0), row3(0, 2, 2), row3(0, 2, 0)];
+        assert_eq!(plain, expected, "dup-key multi-match + group advance must emit these rows");
+
         let mut filtered = Vec::new();
         merge_join(&left, 0, &right, 1, &[(1, 0)], &[0], &NoBudget, &mut filtered);
+        // The extra_shared (left col 1 == right col 0) filter strictly rejects 3 of the
+        // 4 key matches — only left [0,2] x right [2,0] agrees — so the filtered proof
+        // is not vacuously equal to the unfiltered one.
+        assert_eq!(filtered, vec![row3(0, 2, 2)], "extra_shared must strictly reject in-domain");
 
-        // (b) Witness survival: the maximal multi-match dup-key input is reachable.
+        // (c) Supplementary symbolic covers — reachability reports, NOT gates (an
+        // UNSATISFIABLE cover does not fail the verdict): the same witness shape is
+        // still reachable in the SYMBOLIC generator domain under this unwind bound.
+        let sym_left = any_sorted_rows(0);
+        let sym_right = any_sorted_rows(1);
+        let mut sym_plain = Vec::new();
+        merge_join(&sym_left, 0, &sym_right, 1, &[], &[0], &NoBudget, &mut sym_plain);
+        let mut sym_filtered = Vec::new();
+        merge_join(&sym_left, 0, &sym_right, 1, &[(1, 0)], &[0], &NoBudget, &mut sym_filtered);
         kani::cover!(
-            left.len() == MAX_ROWS
-                && right.len() == MAX_ROWS
-                && left[0][0] == left[1][0]
-                && right[0][1] == right[1][1]
-                && left[0][0] == right[0][1]
-                && left[2][0] != left[0][0]
-                && plain.len() >= 4
+            sym_left.len() == MAX_ROWS
+                && sym_right.len() == MAX_ROWS
+                && sym_left[0][0] == sym_left[1][0]
+                && sym_right[0][1] == sym_right[1][1]
+                && sym_left[0][0] == sym_right[0][1]
+                && sym_left[2][0] != sym_left[0][0]
+                && sym_plain.len() >= 4
         );
-        // The extra_shared filter genuinely rejects somewhere in-domain.
-        kani::cover!(filtered.len() < plain.len());
+        kani::cover!(sym_filtered.len() < sym_plain.len());
     }
 }
