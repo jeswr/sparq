@@ -1033,7 +1033,7 @@ jobs:
       # [GPT-5.2-CODEX] sq-139hh: compilation cannot detect wasm-only runtime traps. Drive the
       # owned `.spqv` + `.spqg` readers and both exact and DiskANN search in Node's wasm runtime.
       - name: Headless wasm tests (sparq-vectors owned-byte readers, wasm-pack test --node)
-        run: wasm-pack test --node crates/sparq-vectors
+        run: wasm-pack test --node crates/sparq-vectors --test wasm
 
   # NOTE: sparq-py's pytest suite (incl. the new test_parity.py result-parity +
   # panic-surface tests) is run by the dedicated `python.yml` workflow ("Python
