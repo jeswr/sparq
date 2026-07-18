@@ -23,48 +23,79 @@
 # that guard LOUD in review.
 #
 # =============================================================================
-# STRATEGY — CANONICAL GOLDEN MATCH (not predicate parsing)
+# STRATEGY — PIN THE WHOLE TOKEN-CONSUMING JOB + ASSERT EXACTLY ONE CONSUMER
 # =============================================================================
-# Rounds 1–3 of adversarial review proved that a predicate-PARSING validator cannot
-# win: for every "reject a top-level ||" rule there is a `(A && B && guard || true)`
-# paren-wrap; for every "the guard regex is present" rule there is a `!(guard)`
-# negation; for every "both needles are present" G3 substring rule there is a
-# conjunction→disjunction `repo OR SHA` swap (both needles survive) or a
-# predicate-moved-into-a-comment. Parsing a moving target is a losing regress.
+# Rounds 1–4 of adversarial review proved that both a predicate-PARSING validator AND
+# a fragment-EXTRACTING golden-match lose to a moving target:
 #
-# So this checker does NOT parse the security meaning of the condition. It pins the
-# EXACT, KNOWN-GOOD CANONICAL TEXT of each security-load-bearing fragment and requires
-# the workflow's ACTUAL (normalized) fragment to be BYTE-EQUAL to that golden:
+#   * A parser cannot win: for every "reject a top-level ||" rule there is a
+#     `(A && B && guard || true)` paren-wrap; for every "the guard regex is present"
+#     rule there is a `!(guard)` negation; for every "both needles present" G3 rule
+#     there is a conjunction→disjunction `repo OR SHA` swap (both needles survive).
 #
-#   G1  the ring job's full `if:` condition, whitespace-normalized, must EXACTLY
-#       equal GOLDEN_IF. Any OR-wrap, negation, operand swap, reorder, or extra
-#       clause changes the normalized text ⇒ mismatch ⇒ RED. You cannot smuggle a
-#       `|| true`, a `!(...)`, or `(... || true)` past an exact-string comparison.
-#   G2  the privileged token/dispatch step lives INSIDE that one guarded job, and no
-#       OTHER job's normalized `if:` differs from GOLDEN_IF while touching the token.
-#   G3  the head_sha->PR resolution `select(...)` jq filter, normalized, must EXACTLY
-#       equal GOLDEN_SELECT (a CONJUNCTION of the fork-repo predicate AND the exact
-#       ${HEAD_SHA} predicate AND state==open — a `repo OR SHA` swap changes the text
-#       ⇒ RED); and the two live fail-closed guard blocks — each a
-#       `if <!= test>; then … exit 0; fi` skeleton — normalized, must EXACTLY equal
-#       their goldens (an inversion to `==` or a moved-to-comment predicate changes
-#       the executable skeleton ⇒ RED), and each must appear BEFORE the dispatch.
+#   * A FRAGMENT golden-match (rounds 1–3) still leaked, because it pinned only the
+#     EXTRACTED pieces (the `if:`, the `select(...)`, the guard skeletons) and validated
+#     only the FIRST token-consuming job. Codex round 4 found two residual holes:
+#       (a) anything the extractor did NOT cover could still be weakened — an inline
+#           `: # select(...)` demotion, an uncalled-function move of the guards, an
+#           alt dispatch spelling `gh workflow run -R ... dispatch.yml` — because those
+#           edits live OUTSIDE the extracted fragments, so the fragments still matched.
+#       (b) a SECOND privileged job carrying the same golden `if:` but NO SHA/repo
+#           defenses passed, because only the first token consumer was validated.
 #
-# WHY EXACT-MATCH IS STRICTLY STRONGER than the predicate parser it replaces: the
-# adversary's whole bypass class works by producing text that is SEMANTICALLY unsafe
-# but PARSES to the same predicate-presence signal. Against a canonical golden there is
-# no such gap: any text that differs from the known-good form — safe or unsafe — reds.
-# The tradeoff is deliberate: a LEGITIMATE refactor of the guard (rename ${REPO},
-# restructure the select, reword a skip message) will red too, and the fix is to
-# UPDATE THE GOLDEN IN THE SAME PR. That is the CORRECT fail-safe direction — a human /
-# reviewer sees the golden change and re-confirms the guard is still sound, rather than
-# a weakening sliding through on a predicate technicality. (§ headers/echo-message
-# wording that is NOT security-load-bearing is normalized away so pure prose edits do
-# not force a golden bump; see _canon_guard_block.)
+# Codex round 4 gave the terminal design in its own words: "Pin the COMPLETE
+# token-consuming job, not extracted fragments" and "Require EXACTLY ONE privileged
+# job/path or apply the complete canonical validation to every token consumer."
+#
+# So this checker does exactly that:
+#
+#   J1  PIN THE WHOLE JOB. Parse the workflow YAML, find every job whose steps
+#       reference `secrets.REGISTRY_RING_TOKEN`, canonicalize the ONE token-consuming
+#       job's ENTIRE definition (the whole job mapping: `if:`, `permissions:`, every
+#       step's `env`, `name`, and the EXACT `run:` body — including the
+#       `gh workflow run dispatch.yml` line, the fallback `select(...)`, and BOTH live
+#       `!=` guard blocks) into a normalized, deterministic form (JSON, keys sorted)
+#       and require BYTE-EQUALITY to the stored GOLDEN_JOB. Because the COMPLETE job is
+#       pinned there is NOTHING left to weaken: no fragment to extract-and-dodge, no
+#       predicate to demote to a comment (the comment is INSIDE the pinned run body, so
+#       moving a predicate into it changes the run body), no guards to move into an
+#       uncalled function (that changes the run body too), no alt dispatch spelling
+#       (that changes the run body too), no operand swap, no negation, no OR-wrap. ANY
+#       edit to that job — security-relevant or not — changes the normalized job and REDs.
+#
+#   J2  EXACTLY ONE TOKEN CONSUMER. Count the jobs that reference
+#       `secrets.REGISTRY_RING_TOKEN` anywhere in their steps; require the count == 1
+#       and that the single consumer is the golden job. A SECOND privileged job (codex
+#       round-4 finding #b) makes the count 2 and REDs — there is no un-validated path
+#       to the token.
+#
+# WHY THIS IS TERMINAL (provably immune to the fragment/demotion/duplication class):
+#   - The whole-job pin means the checker's "attack surface" is the ENTIRE job text,
+#     not a chosen subset. The round-1..4 bypasses ALL work by mutating job text that a
+#     narrower rule did not look at; here there is no text the rule does not look at.
+#   - Exactly-one-consumer means there is no second, un-pinned path to the token.
+#   Together: the set of edits that (a) reach the token and (b) pass the checker is
+#   EXACTLY {edits that leave the whole job byte-identical} = {no change to the job}.
+#   A weakening is, by definition, a change to the job, so it cannot pass. The only way
+#   to change the job AND pass is to update GOLDEN_JOB in the SAME PR — which is the
+#   intended human review checkpoint (a reviewer sees the golden move and re-confirms
+#   the guard is still sound), the CORRECT fail-safe direction.
+#
+# The GOLDEN_JOB below is the pretty-printed (indent=2, keys sorted) canonical JSON of
+# the known-good `ring` job. It is human-readable ON PURPOSE — it IS the job content, so
+# a reviewer can read exactly what is pinned. Regenerate after an intentional refactor:
+#     python3 -c "import yaml,json; \
+#       d=yaml.safe_load(open('.github/workflows/fast-fix-ring.yml')); \
+#       print(json.dumps(d['jobs']['ring'],sort_keys=True,ensure_ascii=False,indent=2))"
+# and paste the output between the GOLDEN_JOB delimiters, IN THE SAME PR as the workflow
+# change, so the golden bump is the review checkpoint.
 #
 # NEGATIVE COVERAGE (--self-test, hermetic — no gh/git/network): the live workflow
-# passes, and each of the round-1/2/3 bypasses, applied as a SURGICAL mutation to a
-# copy of the real workflow, goes RED. See _self_test for the mutation→red table.
+# passes, and EACH round-1..4 bypass — including codex round-4's inline-comment
+# demotion, uncalled-function move, alt dispatch spelling, AND a second privileged
+# token-consuming job — is applied as a SURGICAL mutation to a PHYSICAL COPY of the real
+# workflow and run through the LIVE `--root` path, and goes RED; the unmutated copy
+# passes. See _self_test for the mutation→red table.
 #
 # Usage:
 #   check-fast-fix-ring-guard.py              # check the live workflow (default)
@@ -77,286 +108,151 @@
 from __future__ import annotations
 
 import argparse
-import re
+import difflib
+import json
 import sys
+import tempfile
 from pathlib import Path
 
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-WORKFLOW = REPO_ROOT / ".github" / "workflows" / "fast-fix-ring.yml"
+WORKFLOW_REL = Path(".github") / "workflows" / "fast-fix-ring.yml"
+WORKFLOW = REPO_ROOT / WORKFLOW_REL
 
-RING_TOKEN = "REGISTRY_RING_TOKEN"
-DISPATCH_MARKER = "agent-account-registry"
-# The exact command that fires the cross-repo doorbell — G3 checks the guards
-# come BEFORE this in the run body.
-DISPATCH_CMD = "gh workflow run dispatch.yml"
-
-# =============================================================================
-# GOLDEN CANONICAL FORMS
-# =============================================================================
-# These are the known-good, security-load-bearing fragments of
-# .github/workflows/fast-fix-ring.yml. The checker normalizes the workflow's actual
-# fragment (collapse whitespace; for guard blocks, strip the non-load-bearing echo
-# message) and requires EXACT EQUALITY. If the guard is legitimately refactored, bump
-# the matching golden IN THE SAME PR — that is the intended review checkpoint.
-
-# G1: the ring job's full `if:` condition, whitespace-collapsed. Three ANDed clauses;
-# the third is the #3475 fail-closed head_repository guard. Exact-match, so an OR-wrap
-# `(... || true)`, a `!(...)` negation, an operand swap, a reorder, or any extra
-# clause all differ from this string and RED.
-GOLDEN_IF = (
-    "github.event.workflow_run.conclusion == 'failure' "
-    "&& github.event.workflow_run.event == 'pull_request' "
-    "&& github.event.workflow_run.head_repository.full_name == github.repository"
-)
-
-# G3(a): the head_sha->PR fallback jq `select(...)` filter, normalized (whitespace
-# collapsed). A CONJUNCTION (`and`) of the fork-repo predicate, the exact-${HEAD_SHA}
-# predicate, and state==open. A `repo OR SHA` disjunction, a dropped predicate, or a
-# constant-swapped SHA all change this string and RED. (In the YAML-parsed run body
-# the workflow's `\\"` source escapes render as a single backslash-quote `\"`.)
-GOLDEN_SELECT = (
-    'select(.head.repo.full_name == \\"${REPO}\\" '
-    'and .head.sha == \\"${HEAD_SHA}\\" '
-    'and .state == \\"open\\")'
-)
-
-# G3(b): the two live fail-closed re-check guard blocks, reduced to their EXECUTABLE
-# skeleton (the `if [ <test> ]; then` line + the `exit 0` fail-closed body), with the
-# non-load-bearing echo message removed. Each must be a `!=` (fail-closed: mismatch =>
-# skip) compare and must `exit 0`. An inversion to `==`, a dropped predicate, or a
-# predicate that survives ONLY in a comment changes the executable skeleton and REDs.
-GOLDEN_LIVE_REPO_GUARD = (
-    'if [ "$(jq -r \'.head_repo\' <<<"$state")" != "${REPO}" ]; then '
-    "exit 0 fi"
-)
-GOLDEN_LIVE_SHA_GUARD = (
-    'if [ "$(jq -r \'.head_sha\' <<<"$state")" != "${HEAD_SHA}" ]; then '
-    "exit 0 fi"
-)
+# The privileged secret whose every consumer must be the one pinned golden job.
+RING_TOKEN_SECRET = "secrets.REGISTRY_RING_TOKEN"
 
 
 class Offence(Exception):
     pass
 
 
-def _canon(s: str) -> str:
-    """Whitespace-collapse: any run of whitespace (incl. newlines) => one space,
-    stripped. Used for the `if:` condition and the jq select filter, where only
-    whitespace/line-fold differences are non-load-bearing."""
-    return " ".join(s.split())
+# =============================================================================
+# GOLDEN_JOB — the complete, known-good `ring` job, canonical JSON (keys sorted,
+# indent=2). This is the ENTIRE token-consuming job: `if:`, `permissions:`, and the
+# one step's `env` + `name` + full `run:` body (the select(...), both live `!=`
+# guards, and the `gh workflow run dispatch.yml` doorbell are all inside it). The
+# checker re-derives this exact canonical form from the workflow and requires
+# BYTE-EQUALITY. To refactor the guard legitimately, regenerate this block IN THE SAME
+# PR (see the header one-liner) — that golden bump is the review checkpoint.
+# =============================================================================
+GOLDEN_JOB = r"""{
+  "if": "github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_repository.full_name == github.repository",
+  "name": "fast-fix ring (advisory)",
+  "permissions": {
+    "pull-requests": "read"
+  },
+  "runs-on": "ubuntu-latest",
+  "steps": [
+    {
+      "env": {
+        "GH_TOKEN": "${{ github.token }}",
+        "HEAD_SHA": "${{ github.event.workflow_run.head_sha }}",
+        "REGISTRY_RING_TOKEN": "${{ secrets.REGISTRY_RING_TOKEN }}",
+        "REPO": "${{ github.repository }}",
+        "RUN_PR_NUMBER": "${{ (github.event.workflow_run.pull_requests[0] != null) && github.event.workflow_run.pull_requests[0].number || '' }}"
+      },
+      "name": "Resolve the PR for the failed run and ring the registry dispatcher",
+      "run": "set -euo pipefail\n\n# --- Derive the PR number, SAME-REPO only (spoof guard #2 / deputy #3) ---\n# The top-level job `if:` already fail-closed on\n# head_repository.full_name == github.repository, so a fork/cross-repo run\n# never reaches this step. The head_sha->PR fallback below adds a SECOND,\n# independent barrier (defense in depth against a same-SHA collision):\n# every resolved PR must be BOTH same-repo AND pinned to the failing run's\n# exact head SHA before any dispatch.\nPR_NUMBER=\"${RUN_PR_NUMBER}\"\nif [ -z \"${PR_NUMBER}\" ]; then\n  # pull_requests is empty for fork PRs and can be empty for same-repo PRs\n  # whose association GitHub hasn't attached to the run; look the PR up by\n  # the failing run's head SHA, but ONLY accept a pull whose head repo is\n  # THIS repo AND whose head SHA is EXACTLY this run's head SHA (a fork PR,\n  # or an internal PR that merely shares this commit but points its head at\n  # a different SHA, is filtered out and the job skips).\n  if ! pulls=\"$(gh api \"repos/${REPO}/commits/${HEAD_SHA}/pulls\" \\\n      --jq \"[.[] | select(.head.repo.full_name == \\\"${REPO}\\\" and .head.sha == \\\"${HEAD_SHA}\\\" and .state == \\\"open\\\")] | .[0].number // empty\")\"; then\n    echo \"::notice::could not look up a PR for the failed run's head SHA — skipping (the registry cron is the backstop).\"\n    exit 0\n  fi\n  PR_NUMBER=\"${pulls}\"\nfi\nif [ -z \"${PR_NUMBER}\" ]; then\n  echo \"no same-repo PR is associated with the failed run's head SHA (fork PR, or the run was not a same-repo PR) — nothing to ring; skipping.\"\n  exit 0\nfi\n\n# --- Live PR state — labels/arming churn between the trigger and here ---\n# (ported from the former ci-summary fix-ring job; head_repo/head_sha now\n# re-read for the #3475 defense-in-depth check below.)\nif ! state=\"$(gh api \"repos/${REPO}/pulls/${PR_NUMBER}\" \\\n    --jq '{draft: .draft, armed: (.auto_merge != null), head_repo: .head.repo.full_name, head_sha: .head.sha, labels: [.labels[].name]}')\"; then\n  echo \"::notice::could not read live PR state — skipping the ring (the registry cron is the backstop).\"\n  exit 0\nfi\n# Defense in depth (#3475): the resolved PR must belong to THIS repo AND\n# its head must still be the failing run's exact SHA. This closes any\n# residual same-SHA-collision window in either resolution path (the\n# workflow_run.pull_requests[0] association OR the pulls-at-SHA lookup)\n# before the privileged doorbell fires.\nif [ \"$(jq -r '.head_repo' <<<\"$state\")\" != \"${REPO}\" ]; then\n  echo \"resolved PR #${PR_NUMBER} head repo is not ${REPO} (fork / cross-repo collision) — skipping.\"\n  exit 0\nfi\nif [ \"$(jq -r '.head_sha' <<<\"$state\")\" != \"${HEAD_SHA}\" ]; then\n  echo \"resolved PR #${PR_NUMBER} head SHA no longer matches the failing run's head SHA (stale head / same-SHA collision) — skipping.\"\n  exit 0\nfi\nhas() { jq -e --arg l \"$1\" '.labels | index($l) != null' <<<\"$state\" >/dev/null; }\nif [ \"$(jq -r '.draft' <<<\"$state\")\" = \"true\" ]; then\n  echo \"PR re-drafted since the trigger — not pipeline-owned for fast-fix; skipping.\"\n  exit 0\nfi\nif has \"review:needs-user\" || has \"needs:user\"; then\n  echo \"human-owned hold (review:needs-user / needs:user) — the repair loop must not pick this PR up; skipping.\"\n  exit 0\nfi\nif [ \"$(jq -r '.armed' <<<\"$state\")\" != \"true\" ] && ! has \"review:pass\" && ! has \"review:changes\"; then\n  echo \"PR is neither armed nor in the review pipeline (review:pass / review:changes) — skipping.\"\n  exit 0\nfi\nif [ -z \"${REGISTRY_RING_TOKEN}\" ]; then\n  # NO needs:ci-fix label fallback, deliberately: the registry PLAN\n  # derives ci-fix admission from the PR's gate STATE and treats\n  # needs:* PR labels as human-owned holds that EXCLUDE the PR from\n  # the repair enumeration — a label here would suppress the fix.\n  echo \"::notice::REGISTRY_RING_TOKEN unavailable (secret unconfigured) — cannot ring; the registry cron (every ~10 min) is the backstop.\"\n  exit 0\nfi\nGH_TOKEN=\"${REGISTRY_RING_TOKEN}\" gh workflow run dispatch.yml -R jeswr/agent-account-registry\necho \"rang jeswr/agent-account-registry dispatch for PR #${PR_NUMBER} — the repair sweep runs now instead of on the next cron tick.\"\n"
+    }
+  ],
+  "timeout-minutes": 5
+}"""
 
 
-def _strip_shell_comments(body: str) -> str:
-    """Drop full-line shell comments so a `select(...)` (or any predicate) demoted to
-    a `# ...` comment is NOT mistaken for the executable filter. Only whole-line
-    comments are stripped (a leading `#` after optional whitespace); we do not attempt
-    to strip trailing inline comments, which would require full shell tokenization and
-    is unnecessary — the executable predicates in this workflow are never followed by
-    an inline `#`."""
-    return "\n".join(
-        line for line in body.splitlines() if not line.lstrip().startswith("#")
-    )
+def canonical_job(job: dict) -> str:
+    """Deterministic, whole-job canonical form: JSON with keys sorted and indent=2.
+    Pins EVERY field of the job (if/permissions/env/name and the exact run body).
+    Nothing is extracted or dropped, so there is no fragment to weaken and no comment,
+    uncalled function, alt spelling, or second predicate that lives outside the pinned
+    text."""
+    return json.dumps(job, sort_keys=True, ensure_ascii=False, indent=2)
 
 
-def _extract_select(body: str) -> str | None:
-    """Return the whitespace-normalized `select( ... )` jq filter from the EXECUTABLE
-    run body (shell comments stripped), or None if absent. Balanced-paren scan so
-    nested `()` inside the filter are kept. Stripping comments first means a fork-repo
-    predicate demoted into a `#`-comment is not read as the live filter."""
-    body = _strip_shell_comments(body)
-    idx = body.find("select(")
-    if idx < 0:
-        return None
-    start = idx + len("select(")
-    depth = 1
-    i = start
-    while i < len(body) and depth > 0:
-        c = body[i]
-        if c == "(":
-            depth += 1
-        elif c == ")":
-            depth -= 1
-        i += 1
-    if depth != 0:
-        return None
-    return _canon("select(" + body[start : i - 1] + ")")
-
-
-def _canon_guard_block(body: str, jq_field: str) -> str | None:
-    """Extract the live re-check guard block keyed on `jq_field` (`.head_repo` /
-    `.head_sha`) and reduce it to its EXECUTABLE, load-bearing skeleton:
-    the `if [ … ]; then` test line + the fail-closed `exit 0`, joined by single
-    spaces, with the (non-security) echo message line dropped.
-
-    Returns None if no `if` line referencing that field is present. Because the
-    skeleton keeps the `!=`/`==` operator and the compared operands but drops prose,
-    an inversion, a dropped operand, or a predicate that survives only as a `#`
-    comment all change (or empty) the skeleton and fail the golden match, while a
-    reworded skip message does not force a golden bump."""
-    lines = body.splitlines()
-    start = None
-    for i, line in enumerate(lines):
-        st = line.strip()
-        if st.startswith("if [") and jq_field in st and st.endswith("then"):
-            start = i
-            break
-    if start is None:
-        return None
-    # Walk to the matching `fi`, keeping only the load-bearing statements.
-    kept: list[str] = []
-    for j in range(start, len(lines)):
-        st = lines[j].strip()
-        if not st or st.startswith("#"):
-            continue
-        if st.startswith("echo "):
-            # non-load-bearing skip message
-            continue
-        kept.append(st)
-        if st == "fi":
-            break
-    else:
-        return None
-    return _canon(" ".join(kept))
-
-
-def _load(text: str) -> dict:
-    doc = yaml.safe_load(text)
-    if not isinstance(doc, dict):
-        raise Offence("workflow is not a YAML mapping")
-    return doc
-
-
-def _ring_job(doc: dict) -> tuple[str, dict]:
-    jobs = doc.get("jobs")
-    if not isinstance(jobs, dict):
-        raise Offence("workflow has no `jobs:` mapping")
-    # The ring job is the one that references the token / dispatch. Locate by content
-    # so a rename cannot hide the token.
+def _token_consumers(jobs: dict) -> list[str]:
+    """Every job id whose serialized definition references secrets.REGISTRY_RING_TOKEN.
+    Located by CONTENT (not job name) so a rename cannot hide a token consumer, and via
+    the parsed job (not a raw grep of the file) so a token reference demoted into a
+    `#`-comment in a run body still counts — that comment is part of the parsed run
+    string."""
+    out = []
     for jid, job in jobs.items():
-        blob = yaml.safe_dump(job)
-        if RING_TOKEN in blob or DISPATCH_MARKER in blob:
-            return (jid, job)
-    raise Offence(
-        f"no job references {RING_TOKEN}/{DISPATCH_MARKER} — cannot locate the ring job"
-    )
+        blob = yaml.safe_dump(job, sort_keys=True, allow_unicode=True)
+        if RING_TOKEN_SECRET in blob:
+            out.append(jid)
+    return out
 
 
 def check_doc(text: str) -> list[str]:
-    """Return a list of offence strings; empty == clean. Canonical golden match."""
+    """Return a list of offence strings; empty == clean. Whole-job pin (J1) + exactly
+    one token consumer (J2)."""
     offences: list[str] = []
-    doc = _load(text)
-    jobs = doc.get("jobs", {})
-    ring_id, ring = _ring_job(doc)
+    doc = yaml.safe_load(text)
+    if not isinstance(doc, dict):
+        raise Offence("workflow is not a YAML mapping")
+    jobs = doc.get("jobs")
+    if not isinstance(jobs, dict):
+        raise Offence("workflow has no `jobs:` mapping")
 
-    # ---- G1: the ring job `if:` must EXACTLY equal the golden condition ----
-    cond = ring.get("if")
-    if not isinstance(cond, str) or not cond.strip():
-        offences.append(f"G1: ring job `{ring_id}` has no `if:` guard at all")
-    else:
-        cond_flat = _canon(cond)
-        if cond_flat != GOLDEN_IF:
-            offences.append(
-                f"G1: ring job `{ring_id}` `if:` does not match the canonical golden "
-                f"guard. Any change — an OR-wrap `(... || true)`, a `!(...)` negation, "
-                f"an operand swap, a reorder, or an added clause — reds here because the "
-                f"normalized text differs from the known-good condition. If this is a "
-                f"legitimate refactor, update GOLDEN_IF in this PR.\n"
-                f"       expected: {GOLDEN_IF!r}\n"
-                f"       actual:   {cond_flat!r}"
-            )
-
-    # ---- G2: the token step is INSIDE the guarded ring job; no OTHER job uses it ----
-    ring_blob = yaml.safe_dump(ring)
-    if RING_TOKEN not in ring_blob:
+    # ---- J2: EXACTLY ONE job may consume the ring token ----
+    consumers = _token_consumers(jobs)
+    if len(consumers) == 0:
         offences.append(
-            f"G2: the guarded ring job `{ring_id}` does not reference {RING_TOKEN} — "
-            f"the token step is not gated behind the head_repository guard"
+            f"J2: no job references {RING_TOKEN_SECRET} — the token-consuming job is "
+            f"missing or the secret reference was renamed; cannot pin the guarded job"
         )
-    for jid, job in jobs.items():
-        if jid == ring_id:
-            continue
-        blob = yaml.safe_dump(job)
-        if RING_TOKEN in blob or DISPATCH_MARKER in blob:
-            jcond = job.get("if")
-            jflat = _canon(jcond) if isinstance(jcond, str) else ""
-            if jflat != GOLDEN_IF:
-                offences.append(
-                    f"G2: job `{jid}` also references the ring token/dispatch but its "
-                    f"`if:` is not the canonical golden guard — a second path to the "
-                    f"token that is not fail-closed on head_repository"
-                )
+        # Nothing to pin; the missing consumer is the whole finding.
+        return offences
+    if len(consumers) > 1:
+        offences.append(
+            f"J2: {len(consumers)} jobs reference {RING_TOKEN_SECRET} "
+            f"({', '.join(consumers)}) — there must be EXACTLY ONE token-consuming job "
+            f"so the whole-job pin covers every path to the token. A second privileged "
+            f"job is a second, un-pinned path to the secret and REDs here."
+        )
+        # Fall through to J1 so the reviewer also sees any whole-job drift; the count
+        # offence alone already fails the check.
 
-    # ---- G3: the resolution + live-state guards must match their goldens ----
-    run_bodies = []
-    for step in ring.get("steps", []) or []:
-        if isinstance(step, dict) and isinstance(step.get("run"), str):
-            run_bodies.append(step["run"])
-    body = "\n".join(run_bodies)
-    if not body:
-        offences.append(f"G3: ring job `{ring_id}` has no `run:` body to inspect")
-    else:
-        # (a) head_sha->PR fallback: the executable `select(...)` filter must EXACTLY
-        #     equal the golden conjunction. A `repo OR SHA` swap, a dropped predicate,
-        #     or a constant-swapped SHA all change this string and RED. (A predicate
-        #     retained only in a comment does not appear in the parsed jq filter, so
-        #     the select still differs from the golden.)
-        sel = _extract_select(body)
-        if sel is None:
-            offences.append(
-                "G3: the head_sha->PR resolution `select(...)` jq filter is MISSING — "
-                "the fork-repo AND exact-${HEAD_SHA} conjunction cannot be verified"
+    # ---- J1: the ONE token-consuming job, whole, must equal GOLDEN_JOB byte-exact ----
+    matched_golden = [jid for jid in consumers if canonical_job(jobs[jid]) == GOLDEN_JOB]
+    if not matched_golden:
+        # Diff against the first consumer (the most likely intended job) for review.
+        target = consumers[0]
+        actual = canonical_job(jobs[target])
+        diff = "\n".join(
+            difflib.unified_diff(
+                GOLDEN_JOB.splitlines(),
+                actual.splitlines(),
+                fromfile="GOLDEN_JOB",
+                tofile=f"jobs.{target} (actual)",
+                lineterm="",
             )
-        elif sel != GOLDEN_SELECT:
-            offences.append(
-                "G3: the head_sha->PR resolution `select(...)` does not match the "
-                "canonical golden filter. It must be the CONJUNCTION "
-                "`head.repo.full_name == ${REPO} AND head.sha == ${HEAD_SHA} AND "
-                "state == open` — a `repo OR SHA` disjunction, a dropped predicate, or "
-                "a constant-swapped SHA all differ from the golden and red. If this is "
-                "a legitimate refactor, update GOLDEN_SELECT in this PR.\n"
-                f"       expected: {GOLDEN_SELECT!r}\n"
-                f"       actual:   {sel!r}"
-            )
-
-        # (b) live-state defense in depth: each fail-closed `!=` guard block must
-        #     match its golden EXECUTABLE skeleton, and precede the dispatch. An
-        #     inversion to `==`, a dropped operand, or a predicate demoted to a
-        #     comment changes (or empties) the skeleton and reds.
-        for label, jq_field, golden in (
-            ("head_repo", ".head_repo", GOLDEN_LIVE_REPO_GUARD),
-            ("head_sha", ".head_sha", GOLDEN_LIVE_SHA_GUARD),
-        ):
-            block = _canon_guard_block(body, jq_field)
-            if block is None:
-                offences.append(
-                    f"G3: the live-PR-state {label} re-check `if` block is MISSING — "
-                    f"the fail-closed `!=` guard was dropped (or its predicate now "
-                    f"survives only in a comment, which does not execute)"
-                )
-                continue
-            if block != golden:
-                offences.append(
-                    f"G3: the live-PR-state {label} re-check does not match the "
-                    f"canonical golden guard. It must be the FAIL-CLOSED `!=` compare "
-                    f"that `exit 0`s on mismatch — an inversion to `==`, a dropped "
-                    f"operand, or a comment-only predicate all differ from the golden "
-                    f"and red. If this is a legitimate refactor, update the golden in "
-                    f"this PR.\n"
-                    f"       expected: {golden!r}\n"
-                    f"       actual:   {block!r}"
-                )
-            # Ordering: the guard block must appear BEFORE the privileged dispatch.
-            pos = body.find(f"if [ \"$(jq -r '{jq_field}'")
-            disp = body.find(DISPATCH_CMD)
-            if pos >= 0 and disp >= 0 and pos > disp:
-                offences.append(
-                    f"G3: the live-PR-state {label} `!=` guard appears AFTER the "
-                    f"`{DISPATCH_CMD}` doorbell — the guard must gate BEFORE the dispatch"
-                )
+        )
+        offences.append(
+            f"J1: the token-consuming job `{target}` does not match the canonical "
+            f"GOLDEN_JOB byte-for-byte. The WHOLE job is pinned, so ANY edit — an "
+            f"OR-wrap / negation / operand swap in `if:`, a demoted-to-comment "
+            f"predicate, an uncalled-function move of the guards, an alt dispatch "
+            f"spelling, a dropped `select(...)` conjunct, an inverted `!=` guard, a "
+            f"changed permission — reds here. If this is a LEGITIMATE refactor, "
+            f"regenerate GOLDEN_JOB in this PR (see the header one-liner); that golden "
+            f"bump is the review checkpoint.\n"
+            f"       --- unified diff (GOLDEN_JOB vs actual) ---\n{diff}"
+        )
 
     return offences
+
+
+def check_root(root: Path) -> list[str]:
+    """Live path used by both the default run and every --self-test fixture: read the
+    workflow from `root` and check it. The self-test mutates a PHYSICAL COPY of the
+    real workflow on disk and calls THIS, so the fixtures exercise the exact code path
+    that runs in CI."""
+    wf = root / WORKFLOW_REL
+    if not wf.exists():
+        raise Offence(f"{wf} not found")
+    return check_doc(wf.read_text(encoding="utf-8"))
 
 
 # --------------------------------------------------------------------------- #
@@ -367,9 +263,20 @@ def _self_test() -> int:
     text = WORKFLOW.read_text(encoding="utf-8")
     failures = 0
 
+    def _run_on(mutated: str) -> list[str]:
+        """Write the (mutated) workflow into a throwaway repo-root tree and run the
+        LIVE --root path over it, so every fixture goes through check_root/check_doc
+        exactly as CI does."""
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            wf = root / WORKFLOW_REL
+            wf.parent.mkdir(parents=True, exist_ok=True)
+            wf.write_text(mutated, encoding="utf-8")
+            return check_root(root)
+
     def expect_clean(label: str, t: str) -> None:
         nonlocal failures
-        offs = check_doc(t)
+        offs = _run_on(t)
         if offs:
             failures += 1
             print(f"  [FAIL] {label}: expected CLEAN but got offences:")
@@ -384,7 +291,7 @@ def _self_test() -> int:
             failures += 1
             print(f"  [FAIL] {label}: MUTATION DID NOT APPLY (fixture == live workflow)")
             return
-        offs = check_doc(t)
+        offs = _run_on(t)
         if not any(needle in o for o in offs):
             failures += 1
             print(
@@ -393,67 +300,65 @@ def _self_test() -> int:
         else:
             print(f"  [ok]   {label}: correctly RED ({needle})")
 
-    # 0) the real, live workflow must be clean.
-    expect_clean("live workflow", text)
+    # 0) the real, live workflow (physical copy) must be clean.
+    expect_clean("live workflow (physical copy via --root)", text)
 
-    # --- round-1 fixtures: a guard is REMOVED ---
+    # --- round-1 fixtures: a guard is REMOVED (whole-job pin => J1) ---
 
-    # 1) FORK RUN: remove the head_repository guard from the job `if:`. => G1.
-    no_guard = re.sub(
-        r"\n\s*&&\s*github\.event\.workflow_run\.head_repository\.full_name\s*==\s*github\.repository",
+    # 1) FORK RUN: remove the head_repository guard from the job `if:`.
+    no_guard = text.replace(
+        "\n      && github.event.workflow_run.head_repository.full_name == github.repository",
         "",
-        text,
+        1,
     )
-    expect_red("R1 fork run (head_repository guard removed)", no_guard, "G1")
+    expect_red("R1 fork run (head_repository guard removed)", no_guard, "J1")
 
-    # 2) SAME-SHA collision: drop the `.head.sha ==` filter from the fallback. => G3.
+    # 2) SAME-SHA collision: drop the `.head.sha ==` filter from the fallback select.
     no_sha_filter = text.replace(
-        'and .head.sha == \\"${HEAD_SHA}\\" and .state', "and .state"
+        'and .head.sha == \\"${HEAD_SHA}\\" and .state', "and .state", 1
     )
-    expect_red("R1 same-SHA collision (head.sha filter removed)", no_sha_filter, "G3")
+    expect_red("R1 same-SHA collision (head.sha filter removed)", no_sha_filter, "J1")
 
-    # 3) STALE-HEAD: remove the live head_sha re-check block before dispatch. => G3.
-    no_live_recheck = re.sub(
-        r'head_sha: \.head\.sha, ', "", text
-    )
-    no_live_recheck = re.sub(
-        r"          if \[ \"\$\(jq -r '\.head_sha' <<<\"\$state\"\)\" != \"\$\{HEAD_SHA\}\" \]; then\n"
-        r".*?\n            exit 0\n          fi\n",
+    # 3) STALE-HEAD: remove the live head_sha re-check block before dispatch.
+    no_live_recheck = text.replace(
+        '          if [ "$(jq -r \'.head_sha\' <<<"$state")" != "${HEAD_SHA}" ]; then\n'
+        '            echo "resolved PR #${PR_NUMBER} head SHA no longer matches the failing run\'s head SHA (stale head / same-SHA collision) — skipping."\n'
+        "            exit 0\n"
+        "          fi\n",
         "",
-        no_live_recheck,
-        flags=re.DOTALL,
+        1,
     )
-    expect_red("R1 stale-head (live head_sha re-check removed)", no_live_recheck, "G3")
+    expect_red("R1 stale-head (live head_sha re-check removed)", no_live_recheck, "J1")
 
-    # --- round-2 fixtures: predicate-parser was too loose ---
+    # --- round-2 fixtures: predicate-parser was too loose (whole-job pin => J1) ---
 
-    # 4) TOP-LEVEL `|| true` appended to the if (bare, depth-0). => G1.
+    # 4) TOP-LEVEL `|| true` appended to the if (bare, depth-0).
     or_bypass = text.replace(
         "&& github.event.workflow_run.head_repository.full_name == github.repository\n",
         "&& github.event.workflow_run.head_repository.full_name == github.repository\n"
         "      || true\n",
         1,
     )
-    expect_red("R2 top-level `|| true` bypass appended", or_bypass, "G1")
+    expect_red("R2 top-level `|| true` bypass appended", or_bypass, "J1")
 
-    # 5) fork-repo predicate removed from the fallback `select(...)`. => G3.
+    # 5) fork-repo predicate removed from the fallback `select(...)`.
     no_repo_predicate = text.replace(
         'select(.head.repo.full_name == \\"${REPO}\\" and .head.sha == \\"${HEAD_SHA}\\" '
         'and .state == \\"open\\")',
         'select(.head.sha == \\"${HEAD_SHA}\\" and .state == \\"open\\")',
         1,
     )
-    expect_red("R2 fallback fork-repo predicate removed", no_repo_predicate, "G3")
+    expect_red("R2 fallback fork-repo predicate removed", no_repo_predicate, "J1")
 
-    # 6) .head.sha compared to a CONSTANT instead of ${HEAD_SHA}. => G3.
+    # 6) .head.sha compared to a CONSTANT instead of ${HEAD_SHA}.
     sha_constant = text.replace(
         '.head.sha == \\"${HEAD_SHA}\\" and .state',
         '.head.sha == \\"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\\" and .state',
         1,
     )
-    expect_red("R2 fallback head.sha compared to a constant", sha_constant, "G3")
+    expect_red("R2 fallback head.sha compared to a constant", sha_constant, "J1")
 
-    # 7) live `!=` guards inverted to `==` (fail-open). => G3.
+    # 7) live `!=` guards inverted to `==` (fail-open).
     inverted_guards = text.replace(
         'if [ "$(jq -r \'.head_repo\' <<<"$state")" != "${REPO}" ]; then',
         'if [ "$(jq -r \'.head_repo\' <<<"$state")" == "${REPO}" ]; then',
@@ -463,13 +368,11 @@ def _self_test() -> int:
         'if [ "$(jq -r \'.head_sha\' <<<"$state")" == "${HEAD_SHA}" ]; then',
         1,
     )
-    expect_red("R2 live `!=` guards inverted to `==` (fail-open)", inverted_guards, "G3")
+    expect_red("R2 live `!=` guards inverted to `==` (fail-open)", inverted_guards, "J1")
 
-    # --- round-3 fixtures: the exact bypasses codex demonstrated against the parser ---
+    # --- round-3 fixtures: bypasses codex demonstrated against the PARSER ---
 
-    # 8) [R3] PARENTHESIZED OR-WRAP of the whole condition: actionlint-valid,
-    #    (failure && event && head_repo == repo || true). The old paren-depth
-    #    scanner treated a `||` inside parens as safe. Golden exact-match reds.
+    # 8) [R3] PARENTHESIZED OR-WRAP of the whole condition (actionlint-valid).
     paren_or_wrap = text.replace(
         "    if: >-\n"
         "      github.event.workflow_run.conclusion == 'failure'\n"
@@ -482,31 +385,27 @@ def _self_test() -> int:
         "      || true)\n",
         1,
     )
-    expect_red("R3 parenthesized `(... || true)` OR-wrap of the whole if", paren_or_wrap, "G1")
+    expect_red("R3 parenthesized `(... || true)` OR-wrap of the whole if", paren_or_wrap, "J1")
 
-    # 9) [R3] NEGATED equality `!(head_repo == repo)`: passed the old presence regex.
-    #    Golden exact-match reds (text differs).
+    # 9) [R3] NEGATED equality `!(head_repo == repo)`.
     negated_guard = text.replace(
         "&& github.event.workflow_run.head_repository.full_name == github.repository",
         "&& !(github.event.workflow_run.head_repository.full_name == github.repository)",
         1,
     )
-    expect_red("R3 negated `!(head_repo == repo)` guard", negated_guard, "G1")
+    expect_red("R3 negated `!(head_repo == repo)` guard", negated_guard, "J1")
 
-    # 10) [R3] G3 CONJUNCTION->DISJUNCTION: `repo AND sha` -> `repo OR sha` in the
-    #     fallback select. Both exact needles survived the old substring test.
-    #     Golden exact-match reds (`and`->`or` changes the normalized filter).
+    # 10) [R3] G3 CONJUNCTION->DISJUNCTION: `repo AND sha` -> `repo OR sha` in select.
     or_conjunction = text.replace(
         '.head.repo.full_name == \\"${REPO}\\" and .head.sha == \\"${HEAD_SHA}\\"',
         '.head.repo.full_name == \\"${REPO}\\" or .head.sha == \\"${HEAD_SHA}\\"',
         1,
     )
-    expect_red("R3 fallback conjunction->disjunction (repo OR sha)", or_conjunction, "G3")
+    expect_red("R3 fallback conjunction->disjunction (repo OR sha)", or_conjunction, "J1")
 
     # 11) [R3] PREDICATE MOVED TO A COMMENT: the executable select drops the fork-repo
-    #     predicate but a `#`-comment line retains the needle text. The old substring
-    #     test matched the comment. The golden matches the PARSED filter only, so the
-    #     executable select differs and reds.
+    #     predicate but a `#`-comment retains the needle text. The whole-job pin
+    #     includes the run body verbatim (comment + weakened select), so it REDs.
     predicate_in_comment = text.replace(
         '            if ! pulls="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/pulls" \\\n'
         '                --jq "[.[] | select(.head.repo.full_name == \\"${REPO}\\" and .head.sha == \\"${HEAD_SHA}\\" and .state == \\"open\\")] | .[0].number // empty")"; then\n',
@@ -515,32 +414,103 @@ def _self_test() -> int:
         '                --jq "[.[] | select(.head.sha == \\"${HEAD_SHA}\\" and .state == \\"open\\")] | .[0].number // empty")"; then\n',
         1,
     )
-    expect_red("R3 fork-repo predicate demoted to a comment (select drops it)", predicate_in_comment, "G3")
+    expect_red("R3 fork-repo predicate demoted to a comment (select drops it)", predicate_in_comment, "J1")
 
-    # 12) [R3] INVERTED LIVE GUARD accompanied by a comment-only expected needle: the
-    #     executable `!=` is flipped to `==` while a `#`-comment carries the `!=` text.
-    #     The old substring test found the `!=` in the comment. The golden matches the
-    #     executable skeleton (comments stripped), so the inversion reds.
+    # 12) [R3] INVERTED LIVE GUARD accompanied by a comment-only expected needle.
     inverted_with_comment = text.replace(
         '          if [ "$(jq -r \'.head_repo\' <<<"$state")" != "${REPO}" ]; then\n',
         '          # if [ "$(jq -r \'.head_repo\' <<<"$state")" != "${REPO}" ]; then\n'
         '          if [ "$(jq -r \'.head_repo\' <<<"$state")" == "${REPO}" ]; then\n',
         1,
     )
-    expect_red("R3 live guard inverted with comment-only `!=` needle", inverted_with_comment, "G3")
+    expect_red("R3 live guard inverted with comment-only `!=` needle", inverted_with_comment, "J1")
+
+    # --- round-4 fixtures: codex's residual fragment/duplication holes ---
+
+    # 13) [R4] INLINE-COMMENT DEMOTION of the select via a `: # select(...)` no-op:
+    #     append `: # <golden select>` after weakening the live select. A fragment
+    #     extractor that stripped only WHOLE-LINE comments (or matched the needle text
+    #     anywhere) could be fooled; the whole-job pin includes the entire run body so
+    #     any such edit REDs.
+    inline_comment_demotion = text.replace(
+        '                --jq "[.[] | select(.head.repo.full_name == \\"${REPO}\\" and .head.sha == \\"${HEAD_SHA}\\" and .state == \\"open\\")] | .[0].number // empty")"; then\n',
+        '                --jq "[.[] | select(.head.sha == \\"${HEAD_SHA}\\" and .state == \\"open\\")] | .[0].number // empty")"; then : # select(.head.repo.full_name == \\"${REPO}\\" and .head.sha == \\"${HEAD_SHA}\\" and .state == \\"open\\")\n',
+        1,
+    )
+    expect_red("R4 inline `: # select(...)` demotion (weakened live filter)", inline_comment_demotion, "J1")
+
+    # 14) [R4] GUARDS MOVED TO AN UNCALLED FUNCTION: wrap both live `!=` guards in a
+    #     `_dead_guards() { ... }` that is never called, so the needle text survives
+    #     but no guard executes before dispatch. Whole-job pin REDs (run body changed).
+    moved_to_uncalled_fn = text.replace(
+        '          if [ "$(jq -r \'.head_repo\' <<<"$state")" != "${REPO}" ]; then\n'
+        '            echo "resolved PR #${PR_NUMBER} head repo is not ${REPO} (fork / cross-repo collision) — skipping."\n'
+        "            exit 0\n"
+        "          fi\n"
+        '          if [ "$(jq -r \'.head_sha\' <<<"$state")" != "${HEAD_SHA}" ]; then\n'
+        '            echo "resolved PR #${PR_NUMBER} head SHA no longer matches the failing run\'s head SHA (stale head / same-SHA collision) — skipping."\n'
+        "            exit 0\n"
+        "          fi\n",
+        "          _dead_guards() {\n"
+        '          if [ "$(jq -r \'.head_repo\' <<<"$state")" != "${REPO}" ]; then\n'
+        "            exit 0\n"
+        "          fi\n"
+        '          if [ "$(jq -r \'.head_sha\' <<<"$state")" != "${HEAD_SHA}" ]; then\n'
+        "            exit 0\n"
+        "          fi\n"
+        "          }\n",
+        1,
+    )
+    expect_red("R4 live guards moved into an uncalled function", moved_to_uncalled_fn, "J1")
+
+    # 15) [R4] ALT DISPATCH SPELLING: `gh workflow run -R <repo> dispatch.yml` (flag
+    #     before the workflow file) instead of the golden `gh workflow run dispatch.yml
+    #     -R <repo>`. A checker that pinned only the exact golden dispatch string could
+    #     miss this reordering; the whole-job pin REDs on any run-body change.
+    alt_dispatch_spelling = text.replace(
+        "GH_TOKEN=\"${REGISTRY_RING_TOKEN}\" gh workflow run dispatch.yml -R jeswr/agent-account-registry",
+        "GH_TOKEN=\"${REGISTRY_RING_TOKEN}\" gh workflow run -R jeswr/agent-account-registry dispatch.yml",
+        1,
+    )
+    expect_red("R4 alt dispatch spelling (gh workflow run -R ... dispatch.yml)", alt_dispatch_spelling, "J1")
+
+    # 16) [R4] SECOND PRIVILEGED TOKEN-CONSUMING JOB: add a second job that consumes
+    #     secrets.REGISTRY_RING_TOKEN with the SAME golden `if:` but NO SHA/repo
+    #     defenses. The exactly-one-consumer count REDs (J2). We insert it right after
+    #     the `jobs:` line so the parse yields two consumers.
+    second_job = text.replace(
+        "jobs:\n",
+        "jobs:\n"
+        "  ring_evil:\n"
+        "    name: second ring (bypass)\n"
+        "    if: >-\n"
+        "      github.event.workflow_run.conclusion == 'failure'\n"
+        "      && github.event.workflow_run.event == 'pull_request'\n"
+        "      && github.event.workflow_run.head_repository.full_name == github.repository\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - name: second unguarded ring\n"
+        "        env:\n"
+        "          REGISTRY_RING_TOKEN: ${{ secrets.REGISTRY_RING_TOKEN }}\n"
+        "        run: |\n"
+        "          GH_TOKEN=\"${REGISTRY_RING_TOKEN}\" gh workflow run dispatch.yml -R jeswr/agent-account-registry\n",
+        1,
+    )
+    expect_red("R4 second privileged token-consuming job", second_job, "J2")
 
     if failures:
         print(f"\nSELF-TEST FAILED: {failures} case(s) did not behave as expected.")
         return 1
     print(
-        "\nSELF-TEST PASSED: live workflow clean + all round-1/2/3 negative fixtures RED "
-        "(canonical golden match)."
+        "\nSELF-TEST PASSED: live workflow clean + all round-1..4 negative fixtures RED "
+        "(whole-job pin J1 + exactly-one-consumer J2, each verified through the live "
+        "--root path against a physically-mutated workflow copy)."
     )
     return 0
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = argparse.ArgumentParser(description="fast-fix-ring cross-repo guard checker")
     ap.add_argument("--root", type=Path, default=None, help="repo root override")
     ap.add_argument(
         "--self-test", action="store_true", help="run hermetic negative fixtures"
@@ -550,15 +520,9 @@ def main() -> int:
     if args.self_test:
         return _self_test()
 
-    wf = WORKFLOW
-    if args.root is not None:
-        wf = args.root / ".github" / "workflows" / "fast-fix-ring.yml"
-    if not wf.exists():
-        print(f"error: {wf} not found", file=sys.stderr)
-        return 1
-
+    root = args.root if args.root is not None else REPO_ROOT
     try:
-        offences = check_doc(wf.read_text(encoding="utf-8"))
+        offences = check_root(root)
     except Offence as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

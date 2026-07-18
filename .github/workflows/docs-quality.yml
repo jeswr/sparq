@@ -666,10 +666,15 @@ jobs:
       #   github.event.workflow_run.head_repository.full_name == github.repository
       # at the job level, with same-repo+same-head-SHA defense in depth in the
       # head_sha->PR resolution and a live head_repo/head_sha re-check before the
-      # dispatch. This structural guard-presence check goes RED if any of those is
-      # removed (self-test proves it with three negative fixtures: fork run,
-      # same-SHA collision, stale head). Needs PyYAML — installed in the shared
-      # setup above with the other workflow-lint self-tests.
+      # dispatch. This REGRESSION checker PINS THE WHOLE token-consuming job byte-exact
+      # (canonical JSON of the `ring` job — if/permissions/env/run body all included)
+      # and asserts EXACTLY ONE job consumes secrets.REGISTRY_RING_TOKEN, so ANY edit to
+      # the guard (OR-wrap, negation, operand swap, demoted-to-comment predicate,
+      # uncalled-function move, alt dispatch spelling, dropped select conjunct, inverted
+      # `!=`, changed permission, dispatch-target swap) OR a second privileged job goes
+      # RED (self-test proves it with the full round-1..4 mutation table via the live
+      # --root path). Needs PyYAML — installed in the shared setup above with the other
+      # workflow-lint self-tests.
       - name: Self-test the fast-fix ring cross-repo guard (#3475 negative fixtures)
         run: python3 scripts/check-fast-fix-ring-guard.py --self-test
       - name: "Enforce the fast-fix ring fail-closed cross-repo guard (#3475) — GATING"
