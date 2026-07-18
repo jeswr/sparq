@@ -1,16 +1,23 @@
 //! [SONNET-4.6] sq-zgbso.2 — Rust-vs-N3 decision differential for the stateless ODRL core.
 //!
-//! Asserts that the three-stratum N3 rule set (`rules/odrl-{a,b,c}.n3`) produces
+//! Asserts that the four-stratum N3 rule set (`rules/odrl-{a,b,c,d}.n3`) produces
 //! EXACTLY the same `auth:*` triple set as `materialize_policy` for every case in the
 //! corpus. Both sides must also equal an independently-stated expected set so that a
 //! both-wrong agreement cannot pass.
 //!
 //! Supported scope (bead sq-zgbso.2):
 //! - Unconstrained permissions and prohibitions
-//! - `odrl:dateTime` lteq / gteq constraints
+//! - `odrl:dateTime` lteq / gteq constraints (canonical UTC lexical forms only —
+//!   every other lexical form is REJECTED fail-closed, see the `dt*` tests)
 //! - `odrl:recipient` eq / neq constraints
 //! - `odrl:or` logical constraint combinator
 //! - `odrl:and` logical constraint combinator
+//! - Constrained prohibitions over the same atomic/or/and scope (deny-overrides;
+//!   out-of-scope prohibition constructs are REFUSED, never silently ignored)
+//!
+//! The `inj*` tests are adversarial: policy/request content carrying N3 implication
+//! rules, source-terminating quotes/newlines, and `>`-bearing IRIs must either be
+//! rejected outright or end up inert (escaped) — never derive `auth:*` triples.
 //!
 //! Gated on the default-OFF `odrl-bridge` feature (requires sparq-policy).
 #![cfg(feature = "odrl-bridge")]
@@ -256,4 +263,237 @@ fn d4_and_lc_both_satisfied_grant() {
 fn d5_and_lc_one_unsatisfied_no_grant() {
     // c1 (gteq 2026-01-01) satisfied, c2 (recipient eq bob) not satisfied for alice → and not satisfied → no grant
     assert_case("D5", POL_D5, "read", "urn:alice", Some("2026-07-18T00:00:00Z"), &[]);
+}
+
+// ── Constrained prohibitions (deny window ends 2026-12-31) ───────────────────
+
+const POL_E1: &str = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:pol/e1> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ;
+    odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ;
+                      odrl:rightOperand "2026-12-31T00:00:00Z"^^xsd:dateTime ] ] ."#;
+
+// matching permission + the same constrained prohibition: deny-overrides inside the window
+const POL_E2: &str = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:pol/e2> a odrl:Set ;
+    odrl:permission  [ odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ] ;
+    odrl:prohibition [ odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ;
+        odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ;
+                          odrl:rightOperand "2026-12-31T00:00:00Z"^^xsd:dateTime ] ] ."#;
+
+// prohibition with an odrl:and LC: deny only inside [2026-01-01, 2026-12-31]
+const POL_E3: &str = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:pol/e3> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ;
+    odrl:constraint _:lc ] .
+_:lc a odrl:LogicalConstraint ; odrl:and _:c1 , _:c2 .
+_:c1 odrl:leftOperand odrl:dateTime ; odrl:operator odrl:gteq ;
+     odrl:rightOperand "2026-01-01T00:00:00Z"^^xsd:dateTime .
+_:c2 odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ;
+     odrl:rightOperand "2026-12-31T00:00:00Z"^^xsd:dateTime ."#;
+
+// prohibition with an odrl:or LC: c1 = dateTime lteq 2025-01-01 (past), c2 = recipient eq alice
+const POL_E4: &str = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:pol/e4> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ;
+    odrl:constraint _:lc ] .
+_:lc a odrl:LogicalConstraint ; odrl:or _:c1 , _:c2 .
+_:c1 odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ;
+     odrl:rightOperand "2025-01-01T00:00:00Z"^^xsd:dateTime .
+_:c2 odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;
+     odrl:rightOperand <urn:bob> ."#;
+
+#[test]
+fn e1_constrained_prohibition_satisfied_deny() {
+    // inside the window → the constrained prohibition matches → deny
+    assert_case("E1", POL_E1, "read", "urn:alice", Some("2026-07-18T00:00:00Z"), &[("urn:alice", "denyRead", "urn:t/1")]);
+}
+
+#[test]
+fn e2_constrained_prohibition_lapsed_no_deny() {
+    // past the window → the constraint is unsatisfied → no deny, nothing else matches
+    assert_case("E2", POL_E1, "read", "urn:alice", Some("2027-06-01T00:00:00Z"), &[]);
+}
+
+#[test]
+fn e3_constrained_prohibition_overrides_matching_permission() {
+    // inside the window BOTH the permission and the constrained prohibition match:
+    // deny-overrides — the deny is emitted and the grant is suppressed
+    assert_case("E3", POL_E2, "read", "urn:alice", Some("2026-07-18T00:00:00Z"), &[("urn:alice", "denyRead", "urn:t/1")]);
+}
+
+#[test]
+fn e4_lapsed_prohibition_re_exposes_permission() {
+    // past the window the prohibition no longer carves the request out → grant only
+    assert_case("E4", POL_E2, "read", "urn:alice", Some("2027-06-01T00:00:00Z"), &[("urn:alice", "read", "urn:t/1")]);
+}
+
+#[test]
+fn e5_and_lc_prohibition_inside_window_deny() {
+    assert_case("E5", POL_E3, "read", "urn:alice", Some("2026-07-18T00:00:00Z"), &[("urn:alice", "denyRead", "urn:t/1")]);
+}
+
+#[test]
+fn e6_and_lc_prohibition_outside_window_no_deny() {
+    // before the gteq floor → the odrl:and LC is unsatisfied → no deny
+    assert_case("E6", POL_E3, "read", "urn:alice", Some("2025-06-01T00:00:00Z"), &[]);
+}
+
+#[test]
+fn e7_or_lc_prohibition_sub_satisfied_deny() {
+    // bob: the recipient-eq-bob sub is satisfied... but the prohibition assignee is
+    // alice, so bob is not carved out; alice at a PAST lteq bound is not either.
+    assert_case("E7a", POL_E4, "read", "urn:alice", Some("2026-07-18T00:00:00Z"), &[]);
+    // alice INSIDE the lteq bound: the or-LC is satisfied via c1 → deny
+    assert_case("E7b", POL_E4, "read", "urn:alice", Some("2024-06-01T00:00:00Z"), &[("urn:alice", "denyRead", "urn:t/1")]);
+}
+
+#[test]
+fn e9_use_umbrella_prohibition_refused() {
+    // the Rust evaluator's use-umbrella denies any non-transfer action; the N3
+    // strata match actions exactly, so a use-prohibition must REFUSE, not vanish
+    let pol = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/e9> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:use ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ] ."#;
+    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:alice");
+    let mut graph = Graph::new();
+    assert!(materialize_odrl_n3(&mut graph, pol, &req).is_err(), "E9: use-umbrella prohibition must refuse");
+    assert!(graph.named.is_empty(), "E9: nothing may be materialized");
+}
+
+#[test]
+fn e10_duty_carrying_permission_refused() {
+    // the N3 strata do not check duty discharge; the Rust evaluator denies an
+    // undischarged duty — granting regardless would widen, so the N3 path refuses
+    let pol = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/e10> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ;
+    odrl:duty [ odrl:action odrl:attribute ] ] ."#;
+    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:alice");
+    let mut graph = Graph::new();
+    assert!(materialize_odrl_n3(&mut graph, pol, &req).is_err(), "E10: duty-carrying policy must refuse");
+    assert!(graph.named.is_empty(), "E10: nothing may be materialized");
+}
+
+#[test]
+fn e8_out_of_scope_prohibition_constraint_refused() {
+    // an odrl:purpose prohibition constraint is OUTSIDE the N3 stratum scope; the
+    // Rust evaluator could satisfy it, so the N3 path must REFUSE, not ignore it
+    let pol = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/e8> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ;
+    odrl:constraint [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+                      odrl:rightOperand <urn:marketing> ] ] ."#;
+    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:alice");
+    let mut graph = Graph::new();
+    assert!(materialize_odrl_n3(&mut graph, pol, &req).is_err(), "E8: out-of-scope prohibition constraint must refuse");
+    assert!(graph.named.is_empty(), "E8: nothing may be materialized");
+}
+
+// ── Canonical dateTime subset (lexical comparison soundness) ─────────────────
+
+fn assert_n3_rejects(label: &str, policy: &str, at: Option<&str>) {
+    let mut req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:alice");
+    if let Some(t) = at {
+        req = req.at(t);
+    }
+    let mut graph = Graph::new();
+    assert!(materialize_odrl_n3(&mut graph, policy, &req).is_err(), "{}: must be rejected fail-closed", label);
+    assert!(graph.named.is_empty(), "{}: nothing may be materialized", label);
+}
+
+#[test]
+fn dt1_request_time_with_offset_rejected() {
+    // an equivalent instant in a different lexical form (offset) defeats the
+    // strata's lexicographic comparison → rejected before reasoning
+    assert_n3_rejects("DT1", POL_A1, Some("2026-07-18T02:00:00+02:00"));
+}
+
+#[test]
+fn dt2_request_time_fractional_seconds_rejected() {
+    assert_n3_rejects("DT2", POL_A1, Some("2026-07-18T00:00:00.500Z"));
+}
+
+#[test]
+fn dt3_request_time_hour_24_rejected() {
+    // XSD maps 24:00:00 onto the NEXT day's midnight — lexicographically misordered
+    assert_n3_rejects("DT3", POL_A1, Some("2026-07-18T24:00:00Z"));
+}
+
+#[test]
+fn dt4_policy_bound_with_offset_rejected() {
+    let pol = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:pol/dt4> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ;
+    odrl:constraint [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ;
+                      odrl:rightOperand "2026-12-31T01:00:00+01:00"^^xsd:dateTime ] ] ."#;
+    assert_n3_rejects("DT4", pol, Some("2026-07-18T00:00:00Z"));
+}
+
+// ── Adversarial injection (blocker finding: executable N3 in caller input) ───
+
+#[test]
+fn inj1_n3_implication_rule_in_policy_rejected() {
+    // an N3 rule deriving an auth:* grant directly is NOT Turtle → strict parse Err
+    let evil = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+{ ?s ?p ?o . } => { <urn:mallory> <https://sparq.dev/ns/auth#read> <urn:t/1> . } ."#;
+    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:mallory");
+    let mut graph = Graph::new();
+    assert!(materialize_odrl_n3(&mut graph, evil, &req).is_err(), "INJ1: N3 rule must be rejected");
+    assert!(graph.named.is_empty(), "INJ1: nothing may be materialized");
+}
+
+#[test]
+fn inj2_hostile_literal_is_inert_after_reserialization() {
+    // Turtle-VALID policy whose literal smuggles quotes, newlines, a fake auth
+    // triple, and an N3 rule. After strict parse + escaped re-serialization the
+    // payload stays inside the literal — mallory derives nothing.
+    let pol = r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/inj> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:t/1> ; odrl:assignee <urn:alice> ] .
+<urn:pol/inj> <urn:note> "\" .\n<urn:mallory> <https://sparq.dev/ns/auth#read> <urn:t/1> .\n{ ?a ?b ?c . } => { ?a <https://sparq.dev/ns/auth#read> <urn:t/1> . } . \\" ."#;
+    // mallory holds no permission: were the payload executable, the injected rule /
+    // triple would grant it read — assert nothing materializes
+    let req = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:mallory");
+    let mut graph = Graph::new();
+    let out = materialize_odrl_n3(&mut graph, pol, &req).expect("INJ2: hostile literal still parses");
+    assert!(!out.granted && !out.prohibited, "INJ2: payload must be inert");
+    assert!(graph.named.is_empty(), "INJ2: nothing may be materialized");
+    // the legitimate permission in the same policy still works
+    let req_alice = Request::new(format!("{}read", ODRL)).on(TARGET).by("urn:alice");
+    let mut graph_alice = Graph::new();
+    let out_alice = materialize_odrl_n3(&mut graph_alice, pol, &req_alice).expect("INJ2: alice path parses");
+    assert_eq!(
+        out_alice.grant_triple,
+        Some(("urn:alice".to_owned(), format!("{}read", AUTH_NS), "urn:t/1".to_owned())),
+        "INJ2: only alice's legitimate grant materializes"
+    );
+    assert!(out_alice.deny_triple.is_none(), "INJ2: no injected deny");
+}
+
+#[test]
+fn inj3_malicious_request_party_rejected() {
+    // a party smuggling IRI-terminating '>' plus its own triple must be an Err
+    // (NamedNode validation), never an interpolated fact
+    let req = Request::new(format!("{}read", ODRL))
+        .on(TARGET)
+        .by("urn:eve> <https://sparq.dev/ns/auth#read> <urn:t/1> . <urn:x");
+    let mut graph = Graph::new();
+    assert!(materialize_odrl_n3(&mut graph, POL_B1, &req).is_err(), "INJ3: malformed party IRI must be rejected");
+    assert!(graph.named.is_empty(), "INJ3: nothing may be materialized");
+}
+
+#[test]
+fn inj4_malicious_request_action_rejected() {
+    let req = Request::new("http://www.w3.org/ns/odrl/2/read> <urn:p> <urn:o")
+        .on(TARGET)
+        .by("urn:alice");
+    let mut graph = Graph::new();
+    assert!(materialize_odrl_n3(&mut graph, POL_B1, &req).is_err(), "INJ4: malformed action IRI must be rejected");
+    assert!(graph.named.is_empty(), "INJ4: nothing may be materialized");
 }

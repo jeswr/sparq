@@ -2,12 +2,16 @@
 # Input: the serialized closure of stratum A (action facts + atomicSat + lcSat(or)).
 #
 # NAF in this stratum is over stratum A's COMPLETE atomicSat set (safe by stratification):
-#   - odrlx:andSubUnsat  — odrl:and LC has an unsatisfied sub-constraint
-#   - odrlx:anyPermConstrUnsat — permission has an unsatisfied atomic constraint
+#   - odrlx:andSubUnsat — odrl:and LC has an unsatisfied sub-constraint
+#   - odrlx:anyRuleConstrUnsat — a RULE (permission OR prohibition — any subject
+#     carrying odrl:constraint) has an unsatisfied atomic constraint
 #
 # Also derives (positive, no NAF on derived facts):
-#   - odrlx:prohibMatches  — unconstrained prohibition matches the request
-#   - auth:deny* triples   — denial emit for matched prohibitions
+#   - odrlx:prohibMatches — UNCONSTRAINED prohibition matches the request
+#   - auth:deny* triples  — denial emit for matched unconstrained prohibitions
+# (CONSTRAINED prohibitions match in stratum C, which needs this stratum's complete
+#  anyRuleConstrUnsat; the grant rules live in stratum D so their NAF sees the
+#  complete prohibMatches.)
 
 @prefix odrl:  <http://www.w3.org/ns/odrl/2/> .
 @prefix auth:  <https://sparq.dev/ns/auth#> .
@@ -21,13 +25,15 @@
   ?S log:notIncludes { ?c odrlx:atomicSat ?req } . }
 => { ?lc odrlx:andSubUnsat ?req } .
 
-# ── permission: any atomic constraint that is unsatisfied ────────────────────
+# ── rule (permission OR prohibition): any unsatisfied atomic constraint ───────
 # Only atomic constraints are checked here (they carry odrl:leftOperand; LCs do not).
+# ?rule binds ANY subject carrying odrl:constraint — permissions and prohibitions
+# alike — so both stratum C (prohibition match) and stratum D (grants) NAF over it.
 # NAF is over stratum A's atomicSat (complete before this stratum).
-{ ?perm odrl:constraint ?c . ?c odrl:leftOperand ?lo .
+{ ?rule odrl:constraint ?c . ?c odrl:leftOperand ?lo .
   ?req a odrl:Request .
   ?S log:notIncludes { ?c odrlx:atomicSat ?req } . }
-=> { ?perm odrlx:anyPermConstrUnsat ?req } .
+=> { ?rule odrlx:anyRuleConstrUnsat ?req } .
 
 # ── prohibition match + deny emission (unconstrained prohibitions only) ───────
 # An unconstrained prohibition (no odrl:constraint) is matched by checking only

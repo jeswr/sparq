@@ -3,10 +3,12 @@
 # odrl:or logical-constraint satisfaction (odrlx:lcSat). No NAF on derived facts;
 # all derivations here are monotone and safe in the first stratum.
 #
-# Stratification (3 strata, WAC/ACP pattern):
+# Stratification (4 strata, WAC/ACP pattern):
 #   A (this file): action facts + atomicSat + lcSat(or)
-#   B (odrl-b.n3): andSubUnsat + anyPermConstrUnsat + prohibMatches + deny emission
-#   C (odrl-c.n3): lcSat(and) + permission grant emission
+#   B (odrl-b.n3): andSubUnsat + anyRuleConstrUnsat + unconstrained prohibMatches
+#                  + deny emission for unconstrained prohibitions
+#   C (odrl-c.n3): lcSat(and) + CONSTRAINED prohibMatches + deny emission
+#   D (odrl-d.n3): permission grant emission (NAF over the now-complete prohibMatches)
 #
 # odrlx: predicates are sparq-internal derivation facts; never exposed in auth view.
 
@@ -41,7 +43,12 @@ odrl:write   odrlx:denyMode auth:denyWrite .
 # ── atomic constraint satisfaction ───────────────────────────────────────────
 
 # dateTime lteq: request time ≤ upper bound.
-# Lexicographic comparison is correct for ISO 8601 UTC strings (same length, Z suffix).
+# Lexicographic comparison equals XSD dateTime VALUE comparison ONLY on the canonical
+# UTC subset YYYY-MM-DDTHH:MM:SSZ (fixed length, no offset, no fractional seconds,
+# hour ≤ 23). The Rust driver (materialize_odrl_n3) validates every xsd:dateTime
+# lexical form — policy right-operands AND the request time — against that subset and
+# REJECTS the whole policy otherwise (fail-closed), so these string:* comparisons are
+# never applied to offset/fractional/equivalent-instant forms they would mis-order.
 { ?c odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ; odrl:rightOperand ?deadline .
   ?req a odrl:Request ; odrl:dateTime ?now .
   ?now string:notGreaterThan ?deadline . }
