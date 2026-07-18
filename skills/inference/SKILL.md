@@ -84,6 +84,10 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str)
     -> Result<(Vec<[Id;3]>, Vec<ProofStep>), String>;          // EYE --proof analogue
 pub fn reason_n3_terms(src: &str, base: Option<&str>) -> Result<N3Closure, String>; // term-level, no Dict
 pub fn reason_n3_terms_with_resolver(src, base, resolver: Option<&Resolver>) -> Result<N3Closure, String>;
+pub fn reason_n3_stratified(dict: &mut Dict, strata: &[&str])   // stratum-by-stratum closure; carries
+    -> Result<StratifiedN3Closure, String>;  // each closure in memory (no re-serialize); the sound
+    // driver for the non-monotonic ops (store-scoped log:notIncludes, log:collectAllIn/forAllIn);
+    // per-stratum blank scope. Fields: facts (final interned closure), strata_facts (sizes).
 
 // Incremental closure maintenance (closure stays == from-scratch materialize on the current base).
 pub struct MaterializedGraph;     // RDFS;     mutations are dictionary-free
