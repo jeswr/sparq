@@ -25,6 +25,7 @@ use crate::ids::{BranchId, CapId, Epoch, RepoId, Secret32, TopicId};
 use crate::sign::{PublicVerifyingKey, SecretSigningKey, PUBLIC_KEY_LEN, SIGNATURE_LEN};
 use crate::suite::{check_suite, SUITE_V0};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 /// One of the three separated authorities (§4.2). The set carried by a
 /// capability is canonicalized to this order (`read < publish < admin`) with no
@@ -326,7 +327,13 @@ impl PublicGrant {
         }
         let suite = suite.ok_or(Error::Schema("missing suite"))?;
         check_suite(&suite)?;
-        let authority = canon_authorities(authority.ok_or(Error::Schema("missing authority"))?);
+        // The wire authority array must ALREADY be canonical (sorted, deduplicated):
+        // normalizing here would accept multiple byte encodings of one logical
+        // grant, breaking the bytes-level contract behind cap_id / admin_sig.
+        let authority = authority.ok_or(Error::Schema("missing authority"))?;
+        if authority != canon_authorities(authority.clone()) {
+            return Err(Error::NonCanonical("authority array not sorted/deduplicated"));
+        }
         let validity = validity.ok_or(Error::Schema("missing validity"))?;
         if validity.not_before > validity.not_after {
             return Err(Error::Schema("validity not_before > not_after"));
@@ -383,7 +390,10 @@ pub struct Capability {
 impl Capability {
     /// Validate the read/publish/admin **separation** invariants (§4.2, §8.2):
     /// * a publisher private key and an admin private key are never combined;
-    /// * `publish` authority ⟺ a publisher key pair is present;
+    /// * `publish` authority ⟺ a publisher key pair is present, and the secret
+    ///   key actually derives the grant's `publisher_pub` (so the key the
+    ///   bearer signs with is the key the admin-signed grant / broker
+    ///   registration binds);
     /// * `admin` authority ⟺ an admin private key is present;
     /// * `read` authority ⟺ a read secret is present.
     pub fn validate(&self) -> Result<()> {
@@ -400,6 +410,14 @@ impl Capability {
             != (self.publisher_sk.is_some() && self.grant.publisher_pub.is_some())
         {
             return Err(Error::Separation("publish authority <-> publisher key mismatch"));
+        }
+        if let (Some(sk), Some(pk)) = (&self.publisher_sk, &self.grant.publisher_pub) {
+            let derived = SecretSigningKey::from_seed(*sk).public().to_bytes();
+            if !bool::from(derived.as_slice().ct_eq(pk.as_slice())) {
+                return Err(Error::Separation(
+                    "publisher secret does not derive the granted publisher_pub",
+                ));
+            }
         }
         if auth.contains(&Authority::Admin) != self.admin_sk.is_some() {
             return Err(Error::Separation("admin authority <-> admin key mismatch"));
@@ -632,5 +650,57 @@ pub fn base_grant(
         publisher_pub: None,
         parent_grant_id: None,
         admin_sig: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Encode a sample grant whose authority array carries exactly `tokens`,
+    /// bypassing the canonicalization the honest encoder applies.
+    fn grant_bytes_with_authority_tokens(tokens: &[&str]) -> Vec<u8> {
+        let mut g = base_grant(
+            RepoId::from_bytes([1u8; 32]),
+            BranchId::from_bytes([2u8; 32]),
+            Epoch(7),
+            TopicId::from_bytes([3u8; 32]),
+            Validity { not_before: 100, not_after: 200 },
+            vec!["wss://broker.example".to_string()],
+        );
+        g.authority = vec![Authority::Read];
+        let mut entries = g.signing_entries();
+        let auth = enc_array(&tokens.iter().map(|t| enc_text(t)).collect::<Vec<_>>());
+        for e in &mut entries {
+            if e.0 == K_AUTHORITY {
+                e.1 = auth.clone();
+            }
+        }
+        enc_map(entries)
+    }
+
+    #[test]
+    fn decode_rejects_out_of_order_authority_array() {
+        let bytes = grant_bytes_with_authority_tokens(&["publish", "read"]);
+        assert!(matches!(
+            PublicGrant::decode(&bytes, Limits::default()),
+            Err(Error::NonCanonical(_))
+        ));
+    }
+
+    #[test]
+    fn decode_rejects_duplicate_authority_array() {
+        let bytes = grant_bytes_with_authority_tokens(&["read", "read"]);
+        assert!(matches!(
+            PublicGrant::decode(&bytes, Limits::default()),
+            Err(Error::NonCanonical(_))
+        ));
+    }
+
+    #[test]
+    fn decode_accepts_canonical_authority_array() {
+        let bytes = grant_bytes_with_authority_tokens(&["read"]);
+        let g = PublicGrant::decode(&bytes, Limits::default()).unwrap();
+        assert_eq!(g.authority, vec![Authority::Read]);
     }
 }

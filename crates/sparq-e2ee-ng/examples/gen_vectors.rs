@@ -95,7 +95,8 @@ fn main() {
         &recipient.public(),
         b"K_read",
         b"purpose:cap",
-    );
+    )
+    .unwrap();
     println!("WRAPPED_SECRET = {}", hex::encode(w.encode()));
 
     // secret-bearing capability

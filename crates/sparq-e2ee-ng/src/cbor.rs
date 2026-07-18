@@ -400,9 +400,32 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Helper for decoding an integer-keyed struct-map: enforces canonical strictly
-/// ascending positive keys, rejects duplicates, skips negative extension keys,
-/// and rejects unknown mandatory (positive) keys.
+/// Encoded byte length of a shortest-form integer key head with argument `arg`
+/// (the initial byte plus 0/1/2/4/8 argument bytes).
+fn int_key_len(arg: u64) -> usize {
+    if arg <= 23 {
+        1
+    } else if arg <= u8::MAX as u64 {
+        2
+    } else if arg <= u16::MAX as u64 {
+        3
+    } else if arg <= u32::MAX as u64 {
+        5
+    } else {
+        9
+    }
+}
+
+/// Helper for decoding an integer-keyed struct-map: enforces the RFC 8949 core
+/// deterministic key order over **all** keys (extension keys included), rejects
+/// duplicates, skips negative extension keys, and rejects unknown mandatory
+/// (positive) keys.
+///
+/// Canonical order compares encoded-key length first, then the encoded bytes
+/// lexicographically. For shortest-form integer keys that is exactly the tuple
+/// `(encoded length, major type, argument)` ascending — so a same-length
+/// positive key (major type 0) sorts *before* a negative key (major type 1):
+/// `0x01` (+1) precedes `0x20` (-1), but `0x20` (-1) precedes `0x18 0x18` (+24).
 ///
 /// `handle` is called once per recognized positive key to decode its value; it
 /// returns `true` if the key was recognized (and it consumed the value) and
@@ -413,25 +436,28 @@ where
     F: FnMut(&mut Reader<'_>, u64) -> Result<bool>,
 {
     let n = r.map_header()?;
-    let mut last: Option<u64> = None; // last positive key seen (canonical order)
+    let mut last: Option<(usize, u8, u64)> = None; // canonical rank of last key
     for _ in 0..n {
-        match r.map_key()? {
+        let key = r.map_key()?;
+        let rank = match key {
+            Key::Uint(a) => (int_key_len(a), MAJOR_UINT, a),
+            Key::Nint(a) => (int_key_len(a), MAJOR_NINT, a),
+        };
+        if let Some(prev) = last {
+            if rank <= prev {
+                return Err(Error::NonCanonical("map keys not strictly ascending"));
+            }
+        }
+        last = Some(rank);
+        match key {
             Key::Uint(k) => {
-                if let Some(prev) = last {
-                    if k <= prev {
-                        return Err(Error::NonCanonical("map keys not strictly ascending"));
-                    }
-                }
-                last = Some(k);
                 if !handle(r, k)? {
                     return Err(Error::Schema("unknown mandatory field"));
                 }
             }
             Key::Nint(_) => {
-                // Extension key: ignored per §8.1. Note negative keys sort
-                // before positive keys in canonical order, so they must precede
-                // any positive key; we do not enforce that ordering strictly
-                // here since they carry no semantics, but we do skip the value.
+                // Extension key: its value is ignored per §8.1, but its position
+                // and uniqueness are still canonical-order checked above.
                 r.skip_value()?;
             }
         }

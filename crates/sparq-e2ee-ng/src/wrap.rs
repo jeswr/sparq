@@ -9,6 +9,8 @@
 //! domain-separated [`crate::keyschedule::wrap_key`] (binding both public keys),
 //! and the payload is AEAD-sealed under that key. Only the recipient's private
 //! key recovers it. Forward secrecy is per-message via the ephemeral key.
+//! Both seal and open reject a non-contributory (low-order-point) exchange
+//! before key derivation, so the wrap key always depends on both keys.
 
 use crate::cbor::{enc_bytes, enc_map, enc_uint, read_struct_map, Limits, Reader};
 use crate::error::{Error, Result};
@@ -125,8 +127,14 @@ impl WrappedSecret {
 }
 
 /// Wrap `plaintext` to `recipient`, binding `aad` (e.g. a purpose label). Draws
-/// a fresh ephemeral key and nonce from the OS CSPRNG.
-pub fn wrap(recipient: &RecipientPublicKey, plaintext: &[u8], aad: &[u8]) -> WrappedSecret {
+/// a fresh ephemeral key and nonce from the OS CSPRNG. Fails closed with
+/// [`Error::BadKey`] if `recipient` is a low-order point (the exchange would be
+/// non-contributory: the "shared" secret would not depend on our ephemeral key).
+pub fn wrap(
+    recipient: &RecipientPublicKey,
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<WrappedSecret> {
     let mut eph_seed = [0u8; 32];
     OsRng.fill_bytes(&mut eph_seed);
     let mut nonce = [0u8; AEAD_NONCE_LEN];
@@ -135,33 +143,42 @@ pub fn wrap(recipient: &RecipientPublicKey, plaintext: &[u8], aad: &[u8]) -> Wra
 }
 
 /// Wrap with caller-supplied ephemeral seed + nonce. Deterministic — the path
-/// test vectors exercise. Production code uses [`wrap`].
+/// test vectors exercise. Production code uses [`wrap`]. Fails closed on a
+/// low-order (non-contributory) recipient key.
 pub fn wrap_with(
     eph_seed: [u8; 32],
     nonce: [u8; AEAD_NONCE_LEN],
     recipient: &RecipientPublicKey,
     plaintext: &[u8],
     aad: &[u8],
-) -> WrappedSecret {
+) -> Result<WrappedSecret> {
     let eph_sk = StaticSecret::from(eph_seed);
     let eph_pub = PublicKey::from(&eph_sk);
     let recipient_pk = PublicKey::from(recipient.0);
     let shared = eph_sk.diffie_hellman(&recipient_pk);
+    if !shared.was_contributory() {
+        return Err(Error::BadKey("non-contributory X25519 recipient key"));
+    }
     let wk = wrap_key(shared.as_bytes(), &recipient.0, eph_pub.as_bytes());
     let ct = aead_seal(&wk, &nonce, aad, plaintext);
-    WrappedSecret {
+    Ok(WrappedSecret {
         ephemeral_pub: eph_pub.to_bytes(),
         nonce,
         ciphertext: ct,
-    }
+    })
 }
 
 /// Unwrap a [`WrappedSecret`] with the recipient's private key. Fails closed on
-/// a wrong key, tampered ciphertext, or wrong `aad`.
+/// a wrong key, tampered ciphertext, wrong `aad`, or a low-order ephemeral key
+/// (a non-contributory exchange would derive the wrap key from public context
+/// alone, so it is rejected before any key derivation).
 pub fn unwrap(sk: &RecipientSecretKey, wrapped: &WrappedSecret, aad: &[u8]) -> Result<Vec<u8>> {
     let eph_pub = PublicKey::from(wrapped.ephemeral_pub);
     let recipient_pub = sk.public();
     let shared = sk.inner.diffie_hellman(&eph_pub);
+    if !shared.was_contributory() {
+        return Err(Error::Decrypt);
+    }
     let wk = wrap_key(shared.as_bytes(), &recipient_pub.0, &wrapped.ephemeral_pub);
     aead_open(&wk, &wrapped.nonce, aad, &wrapped.ciphertext)
 }

@@ -16,7 +16,9 @@ use sparq_e2ee_ng::ids::{
 };
 use sparq_e2ee_ng::sign::SecretSigningKey;
 use sparq_e2ee_ng::suite::AEAD_NONCE_LEN;
-use sparq_e2ee_ng::wrap::{unwrap, wrap, wrap_with, RecipientSecretKey, WrappedSecret};
+use sparq_e2ee_ng::wrap::{
+    unwrap, wrap, wrap_with, RecipientPublicKey, RecipientSecretKey, WrappedSecret,
+};
 
 fn lim() -> Limits {
     Limits::default()
@@ -93,15 +95,15 @@ fn cbor_enforces_limits() {
 #[test]
 fn cbor_negative_extension_key_is_skipped() {
     // A map with one positive field (1 -> 9) and one negative extension key
-    // (-1 -> "ext") must decode, ignoring the extension.
+    // (-1 -> "ext") must decode, ignoring the extension. RFC 8949 canonical
+    // order is by encoded key bytes, so uint 1 (0x01) precedes -1 (0x20).
     let mut w = Writer::new();
-    // map(2): key 1 -> 9, key -1 (nint 0) -> text "ext"
-    // Negative keys sort before positive in canonical order; write manually.
+    // map(2): key 1 -> 9, then key -1 (nint 0) -> text "ext"
     w.raw(&[0xa2]); // map of 2
-    w.raw(&[0x20]); // nint 0 == -1
-    w.text("ext");
     w.uint(1);
     w.uint(9);
+    w.raw(&[0x20]); // nint 0 == -1
+    w.text("ext");
     let bytes = w.into_bytes();
     let mut r = Reader::new(&bytes, lim());
     let mut got = None;
@@ -115,6 +117,39 @@ fn cbor_negative_extension_key_is_skipped() {
     })
     .unwrap();
     assert_eq!(got, Some(9));
+}
+
+#[test]
+fn cbor_rejects_negative_key_before_same_length_positive() {
+    // Encoded-byte order puts uint 1 (0x01) before -1 (0x20); supplying -1
+    // first is non-canonical and must be rejected.
+    let mut w = Writer::new();
+    w.raw(&[0xa2]); // map of 2
+    w.raw(&[0x20]); // nint 0 == -1
+    w.text("ext");
+    w.uint(1);
+    w.uint(9);
+    let bytes = w.into_bytes();
+    let mut r = Reader::new(&bytes, lim());
+    let res = sparq_e2ee_ng::cbor::read_struct_map(&mut r, |r, _| {
+        r.uint()?;
+        Ok(true)
+    });
+    assert!(matches!(res, Err(Error::NonCanonical(_))));
+}
+
+#[test]
+fn cbor_rejects_duplicate_negative_keys() {
+    let mut w = Writer::new();
+    w.raw(&[0xa2]); // map of 2
+    w.raw(&[0x20]); // nint 0 == -1
+    w.text("a");
+    w.raw(&[0x20]); // -1 again: duplicate extension key
+    w.text("b");
+    let bytes = w.into_bytes();
+    let mut r = Reader::new(&bytes, lim());
+    let res = sparq_e2ee_ng::cbor::read_struct_map(&mut r, |_, _| Ok(true));
+    assert!(matches!(res, Err(Error::NonCanonical(_))));
 }
 
 // ============================================================================
@@ -137,7 +172,7 @@ fn sign_verify_roundtrip_and_tamper() {
 #[test]
 fn wrap_unwrap_roundtrip() {
     let recipient = RecipientSecretKey::from_bytes([5u8; 32]);
-    let w = wrap(&recipient.public(), b"K_read-secret-bytes", b"purpose:cap");
+    let w = wrap(&recipient.public(), b"K_read-secret-bytes", b"purpose:cap").unwrap();
     let pt = unwrap(&recipient, &w, b"purpose:cap").unwrap();
     assert_eq!(pt, b"K_read-secret-bytes");
 }
@@ -145,7 +180,7 @@ fn wrap_unwrap_roundtrip() {
 #[test]
 fn wrap_wrong_aad_fails_closed() {
     let recipient = RecipientSecretKey::from_bytes([6u8; 32]);
-    let w = wrap(&recipient.public(), b"secret", b"aad-A");
+    let w = wrap(&recipient.public(), b"secret", b"aad-A").unwrap();
     assert!(matches!(unwrap(&recipient, &w, b"aad-B"), Err(Error::Decrypt)));
 }
 
@@ -153,8 +188,30 @@ fn wrap_wrong_aad_fails_closed() {
 fn wrap_wrong_recipient_fails_closed() {
     let recipient = RecipientSecretKey::from_bytes([7u8; 32]);
     let attacker = RecipientSecretKey::from_bytes([8u8; 32]);
-    let w = wrap(&recipient.public(), b"secret", b"aad");
+    let w = wrap(&recipient.public(), b"secret", b"aad").unwrap();
     assert!(matches!(unwrap(&attacker, &w, b"aad"), Err(Error::Decrypt)));
+}
+
+#[test]
+fn wrap_rejects_low_order_recipient_key() {
+    // The all-zero u-coordinate is a low-order point: X25519 against it yields
+    // the all-zero shared secret regardless of the ephemeral key, so sealing
+    // must fail closed rather than derive a key from public context only.
+    let low_order = RecipientPublicKey([0u8; 32]);
+    assert!(matches!(wrap(&low_order, b"secret", b"aad"), Err(Error::BadKey(_))));
+    assert!(matches!(
+        wrap_with([11u8; 32], [12u8; AEAD_NONCE_LEN], &low_order, b"secret", b"aad"),
+        Err(Error::BadKey(_))
+    ));
+}
+
+#[test]
+fn unwrap_rejects_low_order_ephemeral_key() {
+    // An attacker-supplied low-order ephemeral key must fail closed on open.
+    let recipient = RecipientSecretKey::from_bytes([5u8; 32]);
+    let good = wrap(&recipient.public(), b"secret", b"aad").unwrap();
+    let forged = WrappedSecret { ephemeral_pub: [0u8; 32], ..good };
+    assert!(matches!(unwrap(&recipient, &forged, b"aad"), Err(Error::Decrypt)));
 }
 
 #[test]
@@ -166,7 +223,8 @@ fn wrapped_secret_encode_decode_roundtrip() {
         &recipient.public(),
         b"payload",
         b"aad",
-    );
+    )
+    .unwrap();
     let bytes = w.encode();
     let w2 = WrappedSecret::decode(&bytes, lim()).unwrap();
     assert_eq!(w, w2);
@@ -208,6 +266,20 @@ fn publisher_and_admin_keys_never_combined() {
     };
     cap.grant.authority = vec![Authority::Publish, Authority::Admin];
     assert!(matches!(cap.validate(), Err(Error::Separation(_))));
+}
+
+#[test]
+fn publisher_secret_must_match_signed_publisher_pub() {
+    let key_a = SecretSigningKey::from_seed([2u8; 32]);
+    let key_b = SecretSigningKey::from_seed([4u8; 32]);
+    let mut cap = Capability::new_write(sample_grant(), Secret32([9u8; 32]), &key_a).unwrap();
+    // The bearer secret signs under key A, but the grant binds key B's public
+    // key: validation must reject the split identity.
+    cap.grant.publisher_pub = Some(key_b.public().to_bytes());
+    assert!(matches!(cap.validate(), Err(Error::Separation(_))));
+    // The mismatch is also caught on the decode path (decode_secret validates).
+    let bytes = cap.encode_secret();
+    assert!(matches!(Capability::decode_secret(&bytes, lim()), Err(Error::Separation(_))));
 }
 
 #[test]

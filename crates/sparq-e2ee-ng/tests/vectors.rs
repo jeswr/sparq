@@ -148,7 +148,8 @@ fn vector_wrapped_secret_unwraps() {
         &recipient.public(),
         b"K_read",
         b"purpose:cap",
-    );
+    )
+    .unwrap();
     let bytes = w.encode();
     let decoded = WrappedSecret::decode(&bytes, Limits::default()).unwrap();
     assert_eq!(decoded.encode(), bytes);
