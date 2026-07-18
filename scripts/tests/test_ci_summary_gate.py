@@ -183,6 +183,121 @@ class TestSettleAndGracefulTimeout(unittest.TestCase):
         self.assertIn("FAILED", out)
 
 
+class TestFailFast(unittest.TestCase):
+    """[FABLE-5] Fail-fast on a concluded gating failure (2026-07-17 maintainer
+    directive): the gate REDs the moment a gating leg's failure is confirmed by
+    the grace re-poll, instead of waiting out every other sibling — WITHOUT ever
+    firing on a superseded/forgiven run, an in-flight rerun's predecessor, or an
+    advisory leg. Each guard's mutation is caught: dropping fail-fast breaks the
+    immediacy assertions; dropping a guard turns a must-pass scenario red."""
+
+    def test_gating_failure_with_others_pending_reds_immediately(self):
+        # (i) One concluded gating failure + siblings still pending => FAILURE at
+        # the grace-confirm poll (attempt 2), not after the pending legs settle.
+        # Mutation coverage: without fail-fast these polls run to the base budget
+        # and red as a "genuine hang" — the fail-fast marker + the poll-count
+        # assertions below then fail.
+        code, out = run(tiny_cfg(), [[RED, PENDING]])
+        self.assertEqual(code, 1)
+        self.assertIn("FAILED (fail-fast)", out)
+        self.assertIn("clippy", out)
+        self.assertIn("attempt 2", out)
+        self.assertNotIn("attempt 3", out, "the red must land at the grace-confirm poll")
+        self.assertNotIn("genuine hang", out)
+
+    def test_failed_leg_with_inflight_same_name_rerun_does_not_fail_fast(self):
+        # (ii) A red leg whose same-name rerun is already IN PROGRESS must NOT
+        # fail-fast — the gate waits on the rerun (which wins: the check-runs
+        # listing returns the latest attempt, so the old failure drops out).
+        # Mutation coverage: without the in-flight guard the identical failure
+        # is observed on polls 1+2 and the gate REDs before the rerun lands.
+        failed = R("clippy", conclusion="failure", started="2026-07-17T10:00:00Z", rid=1)
+        rerun = R("clippy", status="in_progress", conclusion=None,
+                  started="2026-07-17T10:05:00Z", rid=2)
+        rerun_green = R("clippy", started="2026-07-17T10:05:00Z", rid=2)
+        polls = [
+            [failed, rerun, PENDING],
+            [failed, rerun, PENDING],
+            [rerun_green, R("coverage")],
+        ]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+        self.assertNotIn("fail-fast", out)
+
+    def test_cancelled_race_loser_select_mid_poll_does_not_fail_fast(self):
+        # (iii) A concurrency-cancel race-loser select observed MID-POLL (siblings
+        # still pending) must not fail-fast the gate: forgive_superseded drops it
+        # upstream of the fail-fast scan (same-tier same-name success, the
+        # sq-fmx4u.3 pure-select rule), and a cancelled conclusion is not
+        # `failure` in any case. The eventual verdict is the real (green) one.
+        sel_win = R(SELECT_NAME, conclusion="success",
+                    started="2026-07-17T10:00:10Z", rid=2)
+        sel_lost = R(SELECT_NAME, conclusion="cancelled",
+                     started="2026-07-17T10:00:20Z", rid=3)
+        polls = [
+            [sel_win, sel_lost, PENDING],
+            [sel_win, sel_lost, R("coverage")],
+        ]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+        self.assertNotIn("fail-fast", out)
+
+    def test_cancelled_leg_awaiting_rerun_does_not_fail_fast(self):
+        # (iii-b) spec guard (a): a cancelled-then-rerun leg mid-poll — cancelled
+        # is never a fail-fast trigger, the successor supersedes it, gate greens.
+        old = R("build + test", conclusion="cancelled",
+                started="2026-07-17T10:00:00Z", rid=1)
+        new_running = R("build + test", status="in_progress", conclusion=None,
+                        started="2026-07-17T10:05:00Z", rid=2)
+        new_green = R("build + test", started="2026-07-17T10:05:00Z", rid=2)
+        polls = [[old, PENDING], [old, new_running, PENDING], [old, new_green, R("coverage")]]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("fail-fast", out)
+
+    def test_advisory_failure_mid_poll_does_not_fail_fast(self):
+        # (iv) An advisory leg's failure while siblings are pending must neither
+        # fail-fast nor gate at all (sq-wjth) — the verdict stays green.
+        adv = R("vale (prose, advisory)", conclusion="failure")
+        polls = [[adv, PENDING], [adv, R("coverage")]]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+        self.assertNotIn("fail-fast", out)
+
+    def test_grace_repoll_dodges_a_transient_failure_read(self):
+        # The grace re-poll: a failure observed ONCE that a fresh fetch does not
+        # re-observe (an API read race) must not red the gate.
+        polls = [
+            [RED, PENDING],                 # racy read: clippy "failure"
+            [GREEN2, PENDING],              # fresh fetch: clippy is green
+            [GREEN2, R("coverage")],
+        ]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+        self.assertIn("grace re-poll", out)
+        self.assertNotIn("FAILED (fail-fast)", out)
+
+    def test_all_terminal_failure_keeps_the_normal_render_path(self):
+        # pending == 0 => fail-fast stands down and the classic settle + full
+        # render_verdict path (with its richer message) is byte-identical.
+        code, out = run(tiny_cfg(), [[GREEN, RED]])
+        self.assertEqual(code, 1)
+        self.assertIn("non-passing gating check(s)", out)
+        self.assertNotIn("fail-fast", out)
+
+    def test_fail_fast_never_turns_a_verdict_green(self):
+        # Exit-0 invariant: fail-fast is an exit-1-only path — a green set with
+        # pending work must still settle normally and pass.
+        polls = [[GREEN, PENDING], [GREEN, R("coverage")]]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0)
+        self.assertNotIn("fail-fast", out)
+
+
 class TestAdaptiveSaturationBudget(unittest.TestCase):
     """sq-90cv4: saturation extends, hangs RED, real verdicts are untouched."""
 

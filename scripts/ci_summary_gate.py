@@ -48,6 +48,31 @@
 # MAX_CONSEC_FETCH_FAILURES consecutive failures fail the gate. No data => no
 # verdict, so this cannot create a false pass.
 #
+# FAIL-FAST ON A CONCLUDED GATING FAILURE (2026-07-17 maintainer directive).
+# [FABLE-5] Mid-poll, if any GATING leg has CONCLUDED failure, the gate REDs NOW
+# instead of waiting for every other sibling to finish: a genuine `failure` is
+# never forgiven by any later state (forgive_superseded excuses only
+# cancelled/stale), so every future render over any superset of this sibling set
+# REDs anyway — the remaining wait is pure latency on the red verdict (and on the
+# fast-fix trigger it fires, ci-summary.yml `fix-ring`). Soundness guards, each
+# reusing the FINAL render's own classification (failfast_failures):
+#   * the candidate set is the SAME post-forgive_superseded / post-self-exclusion
+#     / post-draft-gate-artifact set the final render sees — a cancelled-then-
+#     rerun leg or a concurrency race-loser select can never fire it (cancelled
+#     is not failure, and forgiven runs are dropped upstream);
+#   * advisory/informational legs never fire it (the same is_advisory predicate
+#     render_verdict excludes by);
+#   * a red leg with a same-tier-normalized-name run still IN PROGRESS (a rerun
+#     already underway on the SHA) stands down — the gate keeps waiting on the
+#     rerun exactly as before;
+#   * the verdict fires only after ONE immediate grace re-poll re-observes the
+#     identical concluded-failure set (name+id), dodging API read races; and
+#   * it fires only while siblings are still outstanding (pending, or the
+#     awaiting-full draft-tier hold) — an all-terminal set renders through the
+#     normal settle path, byte-identical to before.
+# Fail-fast is an exit-1-only path: it can never conclude success, so every
+# exit-0 invariant below is untouched.
+#
 # DRAFT-TIER INTEGRITY (bead: draft-tier CI). [FABLE-5] Draft PR heads run a REDUCED
 # leg set (coverage / bench / CodeQL / heavy shards / wasm-equality skipped — see
 # docs/branch-protection.md §Draft-tier CI); the ci-select job NAME carries the
@@ -91,7 +116,8 @@
 #     cannot merge anyway, so a false RED here is cheap; a false PASS is the
 #     invariant violation).
 #
-# Exit-0 paths, exhaustively: (1) render_verdict over a stable-empty set;
+# Exit-0 paths, exhaustively (fail-fast adds NO exit-0 path — it only ever
+# returns 1): (1) render_verdict over a stable-empty set;
 # (2) render_verdict over an all-terminal set with zero non-passing GATING checks
 # AND every change-based-selection pre-job check green (sq-fmx4u.3: `skipped` is
 # satisfied only under a successful selection; a present-but-not-success select
@@ -556,6 +582,39 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
     return 0
 
 
+def failfast_failures(runs: list[dict]) -> list[dict]:
+    """[FABLE-5] Fail-fast (2026-07-17 directive, header §FAIL-FAST): the GATING
+    legs whose CONCLUDED failure already decides the verdict. `runs` must be the
+    poll loop's post-forgive_superseded, post-self-exclusion, post-draft-gate-
+    artifact sibling set — i.e. EXACTLY the set render_verdict would judge — so
+    this helper inherits the final render's supersession/forgiveness
+    classification instead of reimplementing it (a forgiven race-loser is
+    already gone; a surviving cancelled/stale run is not `failure` and never
+    fires this). A leg qualifies iff it is completed with conclusion=failure,
+    is not advisory (the same is_advisory predicate the verdict excludes by),
+    and no same-tier-normalized-name run on the SHA is still in flight (a rerun
+    already underway must be allowed to finish — the gate keeps waiting on it,
+    exactly as the settle loop always has). `timed_out`/`cancelled`/`stale`
+    conclusions deliberately do NOT qualify: only an unambiguous `failure`
+    fails fast; everything else waits for the full render."""
+    inflight = {
+        normalized_name(r.get("name", ""))
+        for r in runs
+        if r.get("status") != "completed"
+    }
+    out: list[dict] = []
+    for r in runs:
+        if r.get("status") != "completed" or r.get("conclusion") != "failure":
+            continue
+        name = r.get("name", "")
+        if is_advisory(name):
+            continue
+        if normalized_name(name) in inflight:
+            continue
+        out.append(r)
+    return out
+
+
 def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
              tier_ctx: TierContext | None = None) -> int:
     """The poll loop. `fetch_runs()` -> list of {name,status,conclusion,details_url,
@@ -571,6 +630,10 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
     completed_hist: list[int] = []
     consec_fetch_failures = 0
     extension_started = False
+    # Fail-fast grace state: the (name, id) key set of concluded gating failures
+    # observed on the PREVIOUS poll — the red fires only when a fresh re-poll
+    # re-observes the identical set (header §FAIL-FAST).
+    ff_suspect: tuple | None = None
 
     attempt = 0
     while attempt < cfg.max_total_polls:
@@ -635,6 +698,43 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
             f"all-terminal stable for {stable}/{cfg.settle_polls} poll(s){changed}{extra}",
             flush=True,
         )
+
+        # [FABLE-5] FAIL-FAST (header §FAIL-FAST): a concluded gating failure in
+        # the (already forgiveness-filtered) sibling set decides the verdict now
+        # — a genuine `failure` is never forgiven, so every later render REDs
+        # anyway; waiting out the remaining legs only delays the red and the
+        # fast-fix trigger behind it. Applies only while siblings are still
+        # outstanding (pending / awaiting_full): an all-terminal set renders via
+        # the normal settle path below, byte-identical to before. The first
+        # observation arms a grace re-poll (immediate, no sleep — dodges an API
+        # read race); the red fires when a fresh fetch re-observes the same set.
+        if pending or awaiting_full:
+            ff = failfast_failures(runs)
+            if ff:
+                key = tuple(sorted((r.get("name", ""), r.get("id") or 0) for r in ff))
+                if key == ff_suspect:
+                    _emit(
+                        f"### ci-summary: FAILED (fail-fast) — {len(ff)} gating "
+                        f"check(s) concluded failure while {pending} sibling(s) "
+                        f"were still running; no later state can turn this verdict "
+                        f"green (a genuine failure is never forgiven), so the gate "
+                        f"REDs now instead of waiting out the remaining legs.",
+                        cfg.summary_path,
+                    )
+                    for r in ff:
+                        _emit(f"- ✗ {r.get('name')}: failure", cfg.summary_path)
+                    print(
+                        "::error::ci-summary failed fast — a gating check concluded "
+                        "failure; the remaining siblings were not waited on."
+                    )
+                    return 1
+                ff_suspect = key
+                print(
+                    f"  fail-fast: {len(ff)} concluded gating failure(s) observed — "
+                    f"immediate grace re-poll to confirm before concluding."
+                )
+                continue  # no sleep: the grace re-poll is deliberately immediate
+            ff_suspect = None
 
         # Clean convergence: everything terminal, held for the settle, past the floor.
         if attempt >= cfg.min_polls and pending == 0 and stable >= cfg.settle_polls:
