@@ -70,19 +70,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [FABLE-5] CI-economy (2026-07-18 directive 2b): this wasm lane compiles
+          # the same sparq-wasm dependency stack as the other js/pages/gui/site wasm
+          # lanes — ONE shared dependency cache across them keeps demand inside the
+          # 10 GB Actions-cache budget (sq-3sbrr doctrine: save on push-to-main
+          # only, so PR runs are restore-only and never churn the shared budget).
+          shared-key: site-wasm
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
 
-      # Cache Cargo artefacts keyed on Cargo.lock so a same-tree rebuild skips compilation.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ${{ github.workspace }}/target
-          key: site-e2e-hero-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: site-e2e-hero-wasm-${{ runner.os }}-
+      # [FABLE-5] PR #3511 review finding 5: redundant second cargo cache REMOVED —
+      # the Swatinem/rust-cache above (shared-key: site-wasm) already caches
+      # ~/.cargo/registry + ~/.cargo/git + the workspace target/ across the js/pages/
+      # gui/site wasm lanes, restore-only off main. The former PR-scoped
+      # `actions/cache` (site-e2e-hero-wasm-…-hashFiles(Cargo.lock)) covered the same
+      # paths and only churned the shared 10 GB Actions-cache budget. (The Playwright
+      # browser cache below is a DIFFERENT path — ~/.cache/ms-playwright — and stays.)
 
       # Build the lean wasm bundle (wasm-pack → crates/sparq-wasm/pkg → js/wasm/).
       # Run from js/ (one level above site/) so the relative Cargo.toml path is correct.

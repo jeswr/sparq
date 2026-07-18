@@ -37,6 +37,9 @@ redirect
 export-state/
 export-state.json
 
+# Auto-import marker (size/mtime of issues.jsonl at last import — per-machine)
+.auto-import-issues.jsonl
+
 # Ephemeral store (SQLite - wisps/molecules, intentionally not versioned)
 ephemeral.sqlite3
 ephemeral.sqlite3-journal

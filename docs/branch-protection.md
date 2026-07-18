@@ -63,13 +63,24 @@ From the **CI** workflow (`.github/workflows/ci.yml`):
 | `coverage ratchet + test-presence gate (per-crate)` | The per-crate line-coverage floor + the test-presence gate. |
 | `wasm build (sparq-wasm)` | The `wasm32-unknown-unknown` build, the wasm-deps guard, and `wasm-pack test --node`. |
 
-From the security / supply-chain / SAST workflows (all now LIVE and aggregated by the gate):
+From the security / supply-chain / SAST workflows (aggregated by the gate; all LIVE except
+CodeQL, which is operationally disabled via manual workflow-disable — see the OPERATIONALLY DISABLED note):
 
 | Job name | Workflow | What it gates |
 |---|---|---|
 | `cargo-deny (advisories + bans + sources + licenses)` | `.github/workflows/supply-chain.yml` | `cargo deny check bans sources licenses` (gating); advisories informational until cargo-deny ships CVSS-4.0 support (the daily `dependency-monitoring.yml` is the real advisory watchdog). |
 | `generate CycloneDX SBOM` | `.github/workflows/supply-chain.yml` | The CycloneDX SBOM artifact. |
 | `CodeQL analysis (rust)` | `.github/workflows/codeql.yml` | CodeQL SAST (`security-and-quality`) over the Rust workspace — resolves Scorecard's `SAST` check. |
+
+> **CodeQL is currently OPERATIONALLY DISABLED (2026-07-18).** The rows and later
+> sections below that describe `CodeQL analysis (rust)` as a live, gating per-PR
+> check-run reflect the *ruleset's* intent, but the `codeql.yml` workflow is disabled
+> via `gh workflow disable` (Actions workflow state `disabled_manually`): the file is
+> retained on `main` with live triggers, but GitHub schedules no run, so no CodeQL
+> check-run is produced on any event and it neither runs nor gates today. Open PR
+> #3427 owns the successor policy (an advisory / retroactive posture) and the file's
+> triggers are left untouched here to avoid colliding with it. Read every "CodeQL …
+> gates" statement in this document against this note. (See *Merge-queue subset* below.)
 
 From the binding/packaging workflows (when those surfaces are exercised):
 
@@ -94,9 +105,13 @@ From the binding/packaging workflows (when those surfaces are exercised):
 > publishes the full at-scale series to the `benchmark-data` branch the Pages dashboard reads — the
 > perf-tracking is moved, not lost. The weekly heavy EC2 campaign (`bench-ec2.yml` `ec2-bench`) and
 > release/dist workflows remain non-gating (release/dist fire only on tags). The **Scorecard** workflow
-> (`scorecard.yml`) re-scores posture on push to `main` and feeds the code-scanning
-> dashboard; **CodeQL** + **Scorecard** therefore both feed the gate/dashboard even
-> though only the per-commit `CodeQL analysis (rust)` check is a per-PR check-run.
+> (`scorecard.yml`) re-scores posture on push to `main` and feeds the public OpenSSF
+> dashboard/badge (its SARIF upload to GitHub code-scanning is disabled and the job has
+> no `security-events: write` — see the Scorecard note later in this document); with
+> **CodeQL** operationally disabled (manual workflow-disable — see the OPERATIONALLY
+> DISABLED note), the only current GitHub code-scanning feeders are the Trivy
+> SARIF uploads (`container-scan.yml` on PR/main/schedule; `release.yml` for
+> released images) and no `CodeQL analysis (rust)` per-PR check-run is produced.
 >
 > **No branch-protection ruleset change is required for this benchmark relocation.** The live ruleset
 > requires exactly one context (`gate`), never the `bench` job by name, and the aggregator discovers the
@@ -104,6 +119,52 @@ From the binding/packaging workflows (when those surfaces are exercised):
 > deterministic ratchet needs no ruleset edit. (If the maintainer had ever added the bench job by name
 > to the required-checks list, THAT name would now need removing — but per the "select only
 > `ci-summary / gate`" rule above, it was never added.)
+
+### Merge-queue subset — the maintainer-directed risk posture (2026-07-18)
+
+<!-- [FABLE-5] PR #3511 review finding 6: this records the DECISION so a future
+     reviewer sees the reduced merge_group check-set is deliberate, not an accident. -->
+
+The `merge_group` ref does **not** run an identical check-set to a PR. By explicit
+maintainer direction (2026-07-18) the merge queue runs only the **PR-relevant subset**
+of lanes, and — by a separate maintainer direction — **CodeQL is operationally
+disabled**: the `.github/workflows/codeql.yml` FILE is retained on `main`
+BYTE-IDENTICAL to before, with its full trigger set
+(`pull_request`/`push`/`merge_group`/`schedule`) UNTOUCHED, but the workflow itself was
+disabled via `gh workflow disable` (Actions workflow state `disabled_manually`), so
+GitHub does not schedule it on any event — no CodeQL check-run is produced on ANY
+trigger, so it neither runs nor gates. (This is an inert-file state, NOT an edit to the
+triggers — this PR does not modify codeql.yml at all; open PR #3427 owns the codeql.yml
+successor policy — an advisory / retroactive posture — so the file's triggers are left
+untouched here to avoid colliding with it.)
+Heavy or independent lanes that already ran and gated on the PR head dropped their
+`merge_group` trigger because the queue re-run added wall-clock per enqueue with no new
+signal: currently `formal-verification.yml` (Kani proofs), `fuzz.yml` (corpus replay),
+and `bench.yml` (noisy timing suites; the deterministic ratchet is guarded separately).
+This is a **decision, not a defect**.
+
+Why it stays sound:
+
+- The gate polls whatever sibling check-runs actually exist on the ref and requires only
+  the single `gate` context — a lane absent from `merge_group` is *never scheduled*, so
+  it is never "expected but missing" and the gate never hangs on it.
+- Every subset lane still runs and gates on the **PR head** (and the draft→ready-for-review
+  re-run), so a real break is caught **before** admission for the code that changed.
+- The **safety net for a lane the queue skips is POST-MERGE detection**: each such lane
+  runs on `push`-to-`main`, backed by `nightly-full-sweep.yml` and the
+  `formal-alarm.yml` / selection-alarm liveness monitors. A break that only a queued
+  *combination* of PRs could produce is therefore detected on `main`, then recovered by
+  **revert / fix-forward**.
+- **There is no bisection.** `batch-merge.yml` explicitly states bisection is a v1
+  unimplemented item; the recovery mechanism is revert/fix-forward plus the age-bound
+  liveness backstop, not automated bisection of a failed batch. (Workflow comments that
+  previously called batch-merge "the bisection recovery net" were corrected in PR #3511
+  finding 6b to say post-merge detection + revert/fix-forward.)
+
+The residual risk this accepts: a defect that manifests only in a *specific queued
+combination* of PRs (not on any single PR head) reaches `main` and is caught post-merge
+rather than pre-merge. The maintainer accepted this trade against per-enqueue wall-clock
+and shared-runner contention.
 
 ## Draft-tier CI (reduced matrix on draft PR heads)
 
@@ -113,8 +174,13 @@ From the binding/packaging workflows (when those surfaces are exercised):
      the merge queue starving, the load-aware heavy shards deferring). -->
 
 CI is **tiered by the PR's draft state**. A **draft** `pull_request` head runs a
-REDUCED sibling set; a **non-draft** head, `merge_group`, `push`-to-main, and every
-scheduled/dispatch run keep the FULL matrix, byte-identical to before.
+REDUCED sibling set; a **non-draft** `pull_request` head, `push`-to-main, and every
+scheduled/dispatch run keep the FULL matrix, byte-identical to before. (`merge_group`
+is a SEPARATE axis: it always runs at FULL tier — never draft-tier — but it runs the
+maintainer-directed **PR-relevant subset** documented in *Merge-queue subset* above —
+several heavy lanes do not trigger there, and CodeQL (though its trigger set still
+lists `merge_group`, byte-identical to main) is operationally disabled and so produces
+no check-run there either — not a byte-identical copy of the PR check-set.)
 
 **What a draft head runs:**
 
@@ -132,7 +198,7 @@ scheduled/dispatch run keep the FULL matrix, byte-identical to before.
 |---|---|---|
 | coverage ratchet (measure + engine split + aggregate) | `ci.yml` | never on drafts (merge_group + ready_for_review re-measure) |
 | benchmarks (deterministic ratchet + PR comparison/alert comments) | `bench.yml` | never on drafts |
-| CodeQL analysis | `codeql.yml` | never on drafts (merge_group + push-main + weekly schedule + the ready_for_review run keep the `code_scanning` rule fed) |
+| CodeQL analysis | `codeql.yml` | never on drafts (push-main + weekly schedule + merge_group + the ready_for_review run keep the `code_scanning` rule fed *when the workflow is enabled*; codeql.yml is byte-identical to `main` — its triggers, including merge_group, are untouched by this PR — but the workflow is currently operationally disabled (`disabled_manually`), so no CodeQL check-run is produced on any trigger today; open PR #3427 owns the successor policy) |
 | heavy recall shards (`heavy-diskann`/`heavy-hnsw`) | `ci.yml` `test` | never on drafts (same demotion mechanism as their merge_group demotion) |
 | wasm bundle build | `ci.yml` `wasm` | kept iff a wasm-bundle crate is in the affected closure (the existing lane-seed guard — unchanged on both tiers) |
 | `artifact-exact-equality` (wasm feature-OFF byte identity) | `vectorized-feature-off.yml` | kept iff `sparq-wasm` is in the affected closure (in-step `ci_select.py` verdict; ci-full label / selector error / full mode ⇒ run) |
@@ -206,13 +272,16 @@ inside that window. With the tiered check name the window does not exist —
 so the ready_for_review full-tier PR run (which includes both merge_group-absent
 lanes) must conclude before the queue can admit the head.
 
-The ruleset additionally carries a `code_scanning` rule (CodeQL). A draft-built
-head carries no PR CodeQL analysis (`analyze` skips on drafts), so that rule
-would *independently* block such a head — but it is an **out-of-repo,
-owner-mutable setting** and evadable in corner cases (a non-draft PR sharing the
-same head SHA supplies an analysis for the commit; the rule may be relaxed
-during a CodeQL outage), so it is recorded here as **defense-in-depth only**,
-never the load-bearing mechanism. Do not weaken rule 1 on the strength of it.
+The ruleset additionally carries a `code_scanning` rule (CodeQL). While CodeQL
+is operationally disabled (manual workflow-disable — see the OPERATIONALLY DISABLED note) no
+analyses are produced, so this rule currently exerts **no** blocking pressure.
+If CodeQL is re-enabled: a draft-built head carries no PR CodeQL analysis
+(`analyze` skips on drafts), so the rule would *independently* block such a head
+— but it is an **out-of-repo, owner-mutable setting** and evadable in corner
+cases (a non-draft PR sharing the same head SHA supplies an analysis for the
+commit; the rule may be relaxed during a CodeQL outage), so it is recorded here
+as **defense-in-depth only**, never the load-bearing mechanism. Do not weaken
+rule 1 on the strength of it.
 
 **Operational notes.** `pull_request`-event CI runs are cancel-superseded per PR
 (`concurrency` groups; `bench.yml` now cancels superseded **PR** runs only — its

@@ -47,11 +47,15 @@ def _load_module():
 g = _load_module()
 
 
-def R(name, status="completed", conclusion="success", url="", started="", rid=0):
+def R(name, status="completed", conclusion="success", url="", started="", rid=0,
+      external_id=""):
     # started/rid feed the draft-tier superseded-run ordering (started_at, id);
     # pre-draft-tier tests omit them and keep their exact semantics.
+    # external_id carries the finding-2 reporter correlation token (the triggering
+    # feature-matrix run id); pre-finding-2 tests omit it (empty => no correlation).
     return {"name": name, "status": status, "conclusion": conclusion,
-            "details_url": url, "html_url": "", "started_at": started, "id": rid}
+            "details_url": url, "html_url": "", "started_at": started, "id": rid,
+            "external_id": external_id}
 
 
 GREEN = R("build + test")
@@ -1076,6 +1080,230 @@ class TestMergeGroupChangeClassAccounting(unittest.TestCase):
         code, out = run(tiny_cfg(), [runs])
         self.assertEqual(code, 1, out)
         self.assertIn("FAILED", out)
+
+
+FM_GROUP = R("opt-in group (sparq-engine 1/2)")          # a group job's own conclusion
+FM_GROUP2 = R("opt-in group (sparq-server 1/1)")
+FM_REPORT_OK = R("feature-matrix report")                 # reporter posted green
+FM_REPORT_FAIL = R("feature-matrix report", conclusion="failure")
+FM_REPORT_PENDING = R("feature-matrix report", status="in_progress", conclusion=None)
+
+
+class TestFeatureMatrixReporterAwait(unittest.TestCase):
+    """[FABLE-5] PR #3511 finding 1 (HIGH): ci-summary must STRUCTURALLY await the
+    trusted feature-matrix reporter. When `opt-in group (…)` legs ran for this head
+    (the reporter-timing-independent proof that legs were selected), the
+    `feature-matrix report` summary check-run MUST exist and be terminal-SUCCESS
+    before the gate can conclude green; a delayed/crashed reporter must never race
+    past the gate — absence keeps the gate polling and FAILS CLOSED at timeout."""
+
+    # ---- pure predicates ----------------------------------------------------
+    def test_predicate_contract(self):
+        self.assertTrue(g.is_fm_group("opt-in group (sparq-engine 1/2)"))
+        self.assertFalse(g.is_fm_group("opt-in sparq-engine (paths)"),
+                         "a per-LEG `opt-in <name>` check is not a group job")
+        self.assertFalse(g.is_fm_group("feature-matrix report"))
+        self.assertTrue(g.is_fm_report("feature-matrix report"))
+        self.assertFalse(g.is_fm_report("feature-matrix report (extra)"))
+        # Neither is advisory-excluded (both gate/participate normally).
+        self.assertFalse(g.is_advisory("opt-in group (sparq-engine 1/2)"))
+        self.assertFalse(g.is_advisory("feature-matrix report"))
+
+    def test_status_helper(self):
+        self.assertEqual(g.fm_report_status([GREEN, GREEN2]), "n/a")
+        self.assertEqual(g.fm_report_status([FM_GROUP, GREEN]), "pending")
+        self.assertEqual(g.fm_report_status([FM_GROUP, FM_REPORT_PENDING]), "pending")
+        self.assertEqual(g.fm_report_status([FM_GROUP, FM_REPORT_OK]), "ok")
+        self.assertEqual(g.fm_report_status([FM_GROUP, FM_REPORT_FAIL]), "failed")
+
+    # ---- present-success => green ------------------------------------------
+    def test_reporter_present_success_passes(self):
+        code, out = run(tiny_cfg(), [[FM_GROUP, FM_GROUP2, FM_REPORT_OK, GREEN]])
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+
+    def test_no_group_jobs_needs_no_reporter(self):
+        """A doc-only PR (or a fully change-selected-out matrix / a merge_group
+        that skipped the lane) has NO `opt-in group (…)` check-run, so no reporter
+        is expected — the gate must not invent a requirement and false-RED."""
+        code, out = run(tiny_cfg(), [[GREEN, GREEN2]])
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+
+    # ---- crashed reporter (failure conclusion) => gate fails ----------------
+    def test_reporter_failure_reds(self):
+        code, out = run(tiny_cfg(), [[FM_GROUP, FM_REPORT_FAIL, GREEN]])
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAILED", out)
+        # The dedicated reporter belt names the reporter (belt-and-braces on top of
+        # the normal gating-set render, which would also RED the failed check).
+        self.assertIn("feature-matrix report", out)
+
+    # ---- absent reporter => not concludable; fail-closed at timeout ---------
+    def test_absent_reporter_never_concludes_green_holds_then_reds(self):
+        """The core finding: group legs green, but the reporter's check-run NEVER
+        lands. The gate must NOT conclude green in the settle window (it holds,
+        still-settling), and at budget exhaustion FAILS CLOSED — never a
+        conclude-by-timing over the group jobs' bare successes."""
+        # Every poll: group jobs terminal-green, but NO `feature-matrix report`.
+        code, out = run(tiny_cfg(), [[FM_GROUP, GREEN]])
+        self.assertEqual(code, 1, out)
+        self.assertIn("awaiting the feature-matrix reporter verdict", out)
+        self.assertIn("reporter verdict never landed", out)
+        self.assertNotIn("PASSED", out)
+
+    def test_absent_reporter_holds_settle_window_open(self):
+        """Non-vacuity: the SAME green group set WITH the reporter present passes
+        immediately, proving the RED above is caused by the missing reporter, not
+        by an unrelated hang."""
+        code, out = run(tiny_cfg(), [[FM_GROUP, FM_REPORT_OK, GREEN]])
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+
+    def test_reporter_lands_late_then_passes(self):
+        """The realistic race: the reporter (workflow_run) posts its verdict a few
+        polls AFTER the group jobs finish. The gate holds until it lands, then the
+        settle completes and it passes — the whole point of the structural await."""
+        polls = [
+            [FM_GROUP, GREEN],                    # groups done; reporter not in yet
+            [FM_GROUP, GREEN],                    # still awaiting
+            [FM_GROUP, FM_REPORT_OK, GREEN],      # reporter verdict lands
+            [FM_GROUP, FM_REPORT_OK, GREEN],      # settle
+            [FM_GROUP, FM_REPORT_OK, GREEN],
+        ]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0, out)
+        self.assertIn("awaiting the feature-matrix reporter verdict", out)
+        self.assertIn("PASSED", out)
+
+    def test_reporter_pending_nonterminal_holds(self):
+        """A present-but-in-progress reporter check must also hold (not conclude)."""
+        polls = [
+            [FM_GROUP, FM_REPORT_PENDING, GREEN],           # reporter in flight
+            [FM_GROUP, FM_REPORT_PENDING, GREEN],
+            [FM_GROUP, FM_REPORT_OK, GREEN],                # it finishes green
+            [FM_GROUP, FM_REPORT_OK, GREEN],
+            [FM_GROUP, FM_REPORT_OK, GREEN],
+        ]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+
+    def test_failing_leg_still_fails_fast_while_awaiting_reporter(self):
+        """A genuine failing gating leg must still fail FAST even while the gate
+        is (correctly) holding for a not-yet-landed reporter verdict — the
+        reporter await never masks a real failure."""
+        polls = [
+            [FM_GROUP, RED],   # group present (await armed) + a red leg, no reporter
+            [FM_GROUP, RED],   # grace re-poll re-observes the same failure
+        ]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 1, out)
+        self.assertIn("fail-fast", out)
+
+
+# --- PR #3511 finding 2 (HIGH): same-SHA stale-report correlation ---------------
+# feature-matrix reruns on the SAME head SHA (ready_for_review / label events), so a
+# STALE `feature-matrix report` (success) from an EARLIER run can sit on the commit
+# while the CURRENT run's reporter is delayed/crashed. The fix binds each report to
+# its triggering feature-matrix run id (external_id) and requires it to equal the
+# CURRENT `opt-in group (…)` run id (max `/actions/runs/<id>` across the group checks).
+def _grp(run_id, name="opt-in group (sparq-engine 1/2)"):
+    return R(name, url=f"https://github.com/o/r/actions/runs/{run_id}/job/7")
+
+
+def _rep(run_id, conclusion="success", status="completed"):
+    return R("feature-matrix report", status=status, conclusion=conclusion,
+             external_id=str(run_id))
+
+
+class TestFeatureMatrixReporterCorrelation(unittest.TestCase):
+    """[FABLE-5] PR #3511 finding 2 (HIGH): a `feature-matrix report` verdict must
+    correlate to the CURRENT feature-matrix run — a stale same-SHA report from an
+    earlier run can never satisfy the reporter-await for a fresh group run."""
+
+    def test_group_run_id_extraction_takes_the_latest(self):
+        # Two group runs on the same SHA (stale 111, fresh 222); the max wins.
+        runs = [_grp("111"), _grp("222", "opt-in group (sparq-server 1/1)"), GREEN]
+        self.assertEqual(g.fm_group_run_id(runs), "222")
+        # No parseable url => "" (graceful degradation, never a crash).
+        self.assertEqual(g.fm_group_run_id([FM_GROUP, GREEN]), "")
+        # html_url fallback when details_url is absent.
+        hurl = {"name": "opt-in group (x 1/1)", "status": "completed",
+                "conclusion": "success", "details_url": "",
+                "html_url": "https://github.com/o/r/actions/runs/333/job/1"}
+        self.assertEqual(g.fm_group_run_id([hurl]), "333")
+
+    def test_matching_run_success_is_ok(self):
+        runs = [_grp("222"), _rep("222"), GREEN]
+        self.assertEqual(g.fm_report_status(runs), "ok")
+
+    def test_matching_run_failure_is_failed(self):
+        runs = [_grp("222"), _rep("222", conclusion="failure"), GREEN]
+        self.assertEqual(g.fm_report_status(runs), "failed")
+
+    def test_duplicate_run_same_sha_stale_success_still_awaiting(self):
+        """THE CORE RACE: the fresh group run is 222, but the only report on the SHA
+        is the STALE run 111's green verdict. Its external_id (111) != current run id
+        (222), so it is IGNORED — the gate is still awaiting the CURRENT run's
+        reporter, NOT satisfied by the stale success."""
+        runs = [_grp("222"), _rep("111"), GREEN]  # stale success masquerading
+        self.assertEqual(g.fm_report_status(runs), "pending")
+
+    def test_stale_plus_fresh_uses_fresh_verdict(self):
+        # Stale 111 success sits alongside the fresh 222 report; the fresh one is
+        # judged. Fresh green => ok; fresh red => failed (stale success cannot save).
+        self.assertEqual(
+            g.fm_report_status([_grp("222"), _rep("111"), _rep("222"), GREEN]), "ok")
+        self.assertEqual(
+            g.fm_report_status(
+                [_grp("222"), _rep("111"), _rep("222", conclusion="failure"), GREEN]),
+            "failed")
+
+    def test_fresh_pending_alongside_stale_success_holds(self):
+        # Stale 111 is green but the CURRENT 222 reporter is still in flight => hold.
+        runs = [_grp("222"), _rep("111"),
+                _rep("222", status="in_progress", conclusion=None), GREEN]
+        self.assertEqual(g.fm_report_status(runs), "pending")
+
+    def test_no_external_id_falls_back_to_any_report(self):
+        # Legacy reporter (no external_id) + resolvable group run id: degrade to the
+        # pre-finding-2 any-report match (never a false RED). FM_REPORT_OK has no
+        # external_id; the group has a run id.
+        runs = [_grp("222"), FM_REPORT_OK, GREEN]
+        self.assertEqual(g.fm_report_status(runs), "ok")
+
+    def test_unresolvable_group_run_id_falls_back_to_any_report(self):
+        # Group check has no parseable run id (FM_GROUP has empty url) but the report
+        # carries an external_id: with no current run id to bind to, degrade to
+        # any-report matching rather than hang forever.
+        runs = [FM_GROUP, _rep("999"), GREEN]
+        self.assertEqual(g.fm_report_status(runs), "ok")
+
+    def test_stale_success_gate_holds_then_reds_end_to_end(self):
+        """End-to-end through the poll loop: every poll has the fresh group run (222)
+        green + only the STALE run 111's green report. The gate must NOT conclude on
+        the stale success — it holds, then FAILS CLOSED at budget exhaustion."""
+        code, out = run(tiny_cfg(), [[_grp("222"), _rep("111"), GREEN]])
+        self.assertEqual(code, 1, out)
+        self.assertIn("awaiting the feature-matrix reporter verdict", out)
+        self.assertIn("reporter verdict never landed", out)
+
+    def test_fresh_report_lands_after_stale_then_passes_end_to_end(self):
+        """The realistic recovery: a stale green report sits from run 111, then the
+        CURRENT run 222's reporter posts its own green verdict; the gate correlates,
+        settles on the fresh verdict, and passes."""
+        polls = [
+            [_grp("222"), _rep("111"), GREEN],                 # only stale => holding
+            [_grp("222"), _rep("111"), GREEN],                 # still awaiting fresh
+            [_grp("222"), _rep("111"), _rep("222"), GREEN],    # fresh verdict lands
+            [_grp("222"), _rep("111"), _rep("222"), GREEN],    # settle
+            [_grp("222"), _rep("111"), _rep("222"), GREEN],
+        ]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0, out)
+        self.assertIn("awaiting the feature-matrix reporter verdict", out)
+        self.assertIn("PASSED", out)
 
 
 if __name__ == "__main__":

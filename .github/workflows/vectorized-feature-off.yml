@@ -133,9 +133,16 @@ jobs:
       # ---- former job: feature-resolution (vectorized OFF guard) ----
       # Leg 1: checks cargo metadata (no build required) that `vectorized` is absent
       # from the resolved default feature set of sparq-engine and sparq-wasm.
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
         if: steps.changes.outputs.rust_changed == 'true'
-
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - name: Dump cargo metadata (default features, no build)
         if: steps.changes.outputs.rust_changed == 'true'
         run: cargo metadata --format-version 1 > metadata.json

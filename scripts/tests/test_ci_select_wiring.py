@@ -371,9 +371,16 @@ class TestPhase2LaneScoping(unittest.TestCase):
     def test_fuzz_runs_on_schedule_backstop(self):
         # The nightly heavy fuzz soak is the full-matrix backstop: a schedule event
         # carries no PR diff => selector mode=full => the fail-closed disjunct RUNS.
+        # [FABLE-5] (2026-07-18 maintainer directive, merge-queue subset): merge_group
+        # is REMOVED — the deterministic replay already gated the PR head, push-to-main
+        # re-replays post-merge, and the nightly soak is the backstop. The polling
+        # ci-summary gate never waits on a check that was never scheduled.
         on = _on_block(self.fuzz)
         self.assertIn("schedule", on, "fuzz.yml must keep its nightly schedule backstop")
-        self.assertIn("merge_group", on, "fuzz.yml must run on merge_group for the gate")
+        self.assertIn("push", on, "fuzz.yml must keep its push-to-main post-merge replay")
+        self.assertNotIn("merge_group", on,
+                         "fuzz.yml must NOT run on merge_group (2026-07-18 merge-queue "
+                         "subset directive: PR head + push-to-main + nightly cover it)")
 
     # ---- differential-smoke lane (fuzz.yml) — [FABLE-5] sq-0iqzw --------------------
     def test_differential_smoke_job_guarded_by_its_seed_closure(self):
@@ -1023,8 +1030,16 @@ class TestDraftTierWiring(unittest.TestCase):
         self.assertIn(self.DRAFT_GUARD, cond,
                       "codeql.yml:analyze must skip on draft PR heads")
         on = _on_block(self.codeql)
+        # [FABLE-5] PR #3511 finding 3: codeql.yml is byte-identical to origin/main —
+        # its triggers (incl. merge_group) are UNTOUCHED by this PR. The workflow is
+        # instead operationally disabled via `gh workflow disable` (state
+        # disabled_manually), so it produces no check-run on ANY event regardless of
+        # its trigger list; open PR #3427 owns the codeql successor policy. Keeping the
+        # trigger set intact avoids the docs/branch-protection.md contradiction (an
+        # earlier round removed merge_group here while the docs claimed it untouched).
         self.assertIn("merge_group", on,
-                      "CodeQL must keep its merge_group run (pre-merge analysis)")
+                      "CodeQL keeps its merge_group trigger (byte-identical to main; "
+                      "operationally disabled, so it produces no check-run anyway)")
         self.assertIn("schedule", on, "CodeQL must keep its weekly schedule")
 
     def test_heavy_shards_also_demoted_on_draft_heads(self):
@@ -1109,12 +1124,12 @@ class TestDraftTierWiring(unittest.TestCase):
         out-of-repo, owner-mutable setting and evadable (a non-draft PR sharing
         the head SHA supplies an analysis; outage relaxation), so it must be
         recorded as defense-in-depth ONLY and the feeding triggers must not
-        rot: push-to-main + merge_group + weekly schedule + ready_for_review."""
+        rot: push-to-main + weekly schedule + ready_for_review (merge_group was
+        removed by the 2026-07-18 merge-queue-subset directive)."""
         on = _on_block(self.codeql)
         push = on.get("push") or {}
         self.assertEqual(push.get("branches"), ["main"],
                          "codeql.yml must keep its push-to-main analysis run")
-        self.assertIn("merge_group", on)
         self.assertIn("schedule", on)
         types = (on.get("pull_request") or {}).get("types", [])
         self.assertIn("ready_for_review", types,
@@ -1162,9 +1177,12 @@ class TestContainerScanMergeGroupGate(unittest.TestCase):
     job now leads with a `detect container changes` step that diffs the queued batch
     and skips the build+scan on a container-inert merge group (mirrors zk-toolchain's
     proven detect pattern). Pins the SHAPE so the gate cannot silently rot or over-reach.
+    [FABLE-5] (2026-07-18 merge-queue subset): the merge_group TRIGGER is now removed
+    (first test below pins its absence); the detect machinery stays as the fail-safe
+    short-circuit on every remaining event and as the cheap revert path.
 
     Invariants pinned:
-      * the trivy job still triggers on merge_group (check-run always appears → no gate hang);
+      * the workflow does NOT trigger on merge_group (2026-07-18 directive);
       * the detect step is FAIL-SAFE (default container=true; only merge_group can flip false);
       * the heavy build/scan steps are STEP-gated on the detect output (not a job `if:`,
         so the check-run name is preserved and reports success on the skip path);
@@ -1182,11 +1200,16 @@ class TestContainerScanMergeGroupGate(unittest.TestCase):
                 return step
         self.fail(f"container-scan trivy job missing a step named {name_prefix!r}")
 
-    def test_triggers_on_merge_group(self):
+    def test_does_not_trigger_on_merge_group(self):
+        # [FABLE-5] (2026-07-18 merge-queue subset): merge_group removed — coverage
+        # lives at the paths-filtered PR head + push-to-main + the weekly re-scan.
+        # The detect-step machinery below stays (short-circuits to a full scan on
+        # every remaining event; cheap revert path).
         on = _on_block(self.wf)
-        self.assertIn("merge_group", on,
-                      "container-scan must trigger on merge_group so its check-run appears "
-                      "on the queue ref (ci-summary is the single required gate)")
+        self.assertNotIn("merge_group", on,
+                         "container-scan must NOT trigger on merge_group "
+                         "(2026-07-18 merge-queue-subset directive)")
+        self.assertIn("schedule", on, "the weekly re-scan backstop must stay")
 
     def test_detect_step_present_and_fail_safe(self):
         step = self._step("Detect container changes")
@@ -1253,9 +1276,12 @@ class TestSupplyChainMergeGroupGate(unittest.TestCase):
     step now diffs the queued batch's base_sha..head_sha against the SAME `rust` path
     set the pull_request dorny filter uses; a rust-inert merge group skips the heavy
     deny+vet steps (SBOM stays always-on by the sq-6vshe.20 design). Pins the SHAPE.
+    [FABLE-5] (2026-07-18 merge-queue subset): the merge_group TRIGGER is now removed
+    (first test below pins its absence); the Decide-step merge_group branch stays as
+    dead-but-fail-safe code and the cheap revert path.
 
     Invariants pinned:
-      * still triggers on merge_group (check-run appears → no gate hang);
+      * does NOT trigger on merge_group (2026-07-18 directive);
       * the merge_group branch is FAIL-SAFE (rust=true on any diff error);
       * every path in the pull_request dorny `rust` filter is covered by the
         merge_group detect grep (no drift between the two tiers);
@@ -1280,9 +1306,15 @@ class TestSupplyChainMergeGroupGate(unittest.TestCase):
                 return list(filters["rust"])
         self.fail("supply-chain missing the dorny rust paths-filter")
 
-    def test_triggers_on_merge_group(self):
-        self.assertIn("merge_group", _on_block(self.wf),
-                      "supply-chain must trigger on merge_group (required gate sibling)")
+    def test_does_not_trigger_on_merge_group(self):
+        # [FABLE-5] (2026-07-18 merge-queue subset): merge_group removed — coverage
+        # lives at the PR head + push-to-main + dependency-monitoring's weekly cron.
+        on = _on_block(self.wf)
+        self.assertNotIn("merge_group", on,
+                         "supply-chain must NOT trigger on merge_group "
+                         "(2026-07-18 merge-queue-subset directive)")
+        self.assertEqual((on.get("push") or {}).get("branches"), ["main"],
+                         "the push-to-main post-merge run must stay")
 
     def test_merge_group_branch_is_fail_safe(self):
         run = self._decide_run()
