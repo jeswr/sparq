@@ -237,3 +237,35 @@ fn stratified_blank_scope_is_per_stratum() {
     assert_ne!(thing.0, other.0, "carried _:b must stay distinct from stratum-2's _:b");
     assert_eq!(c.len(), 2, "exactly the two typing triples; got {:?}", c);
 }
+
+#[test]
+fn stratified_carried_blank_survives_a_colliding_source_label() {
+    // Regression: stratum 2's source explicitly uses `_:__st0_b` — the exact
+    // label a FIXED `__st0_` carry rename would give stratum 1's `_:b`. The
+    // carried node must be renamed into a namespace proven absent from the
+    // stratum's own labels, keeping the two subjects distinct.
+    let (c, _) = strat_closure(&[
+        "@prefix : <http://ex/> .\n_:b a :Thing .",
+        "@prefix : <http://ex/> .\n_:__st0_b a :Other .",
+    ]);
+    let thing = c.iter().find(|(_, _, o)| o == &iri("Thing")).expect("Thing triple");
+    let other = c.iter().find(|(_, _, o)| o == &iri("Other")).expect("Other triple");
+    assert_ne!(thing.0, other.0, "carried _:b captured by stratum-2's _:__st0_b; got {:?}", c);
+    assert_eq!(c.len(), 2, "exactly the two typing triples; got {:?}", c);
+}
+
+#[test]
+fn stratified_carried_existential_survives_a_colliding_source_label() {
+    // The same collision, against a MINTED rule existential: stratum 1 derives
+    // `:a :q _:e` with `_:e` skolemized to `__sk1_e`, and stratum 2's source
+    // uses `_:__st0___sk1_e` — the label a fixed rename would have carried it
+    // as. The carried existential must remain a distinct node.
+    let (c, _) = strat_closure(&[
+        "@prefix : <http://ex/> .\n:a :p :b .\n{ ?x :p ?y } => { ?x :q _:e } .",
+        "@prefix : <http://ex/> .\n_:__st0___sk1_e a :Other .",
+    ]);
+    let minted =
+        c.iter().find(|(s, p, _)| s == &iri("a") && p == &iri("q")).expect("minted :q triple");
+    let other = c.iter().find(|(_, _, o)| o == &iri("Other")).expect("Other triple");
+    assert_ne!(minted.2, other.0, "carried existential captured by stratum-2's label; got {:?}", c);
+}

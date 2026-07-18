@@ -291,37 +291,90 @@ pub fn reason_n3_stratified(
     let mut strata_facts = Vec::with_capacity(strata.len());
     for (i, src) in strata.iter().enumerate() {
         let mut parsed = parser::parse(src)?;
+        if !carried.is_empty() {
+            // Rename carried blanks (input blanks and minted `__sk…` rule
+            // existentials) apart from this stratum's own labels. The prefix
+            // is chosen fresh against every blank label the stratum's source
+            // actually uses, so even a literal `_:__st0_b` in the source
+            // cannot capture a carried node, and `__st…` never collides with
+            // the `__sk…` labels this stratum's closure mints (whose counter
+            // restarts). One uniform injective rename preserves co-reference
+            // within the carried closure.
+            let prefix = fresh_carry_prefix(&parsed);
+            for t in &mut carried {
+                *t = stratum_blanks(t, &prefix);
+            }
+        }
         parsed.facts.append(&mut carried);
         let (f, _steps) = run_closure(parsed, None, None, StepMode::None);
         strata_facts.push(f.all.len());
         if i + 1 < strata.len() {
-            // Rename carried blanks apart from the next stratum's own labels
-            // (and its `__sk…` rule existentials, whose counter restarts).
-            carried = f.all.iter().map(|t| stratum_blanks(t, i)).collect();
+            carried = f.all.iter().cloned().collect();
         }
         facts = f;
     }
     Ok(StratifiedN3Closure { facts: intern_closure(dict, &facts, &[])?.0, strata_facts })
 }
 
-/// `t` with every blank label pushed into stratum `i`'s carried namespace
-/// (recursing into lists, formulae, and quoted triples) — the per-stratum
-/// document scope of [`reason_n3_stratified`].
-fn stratum_blanks(t: &[Term; 3], i: usize) -> [Term; 3] {
-    fn go(t: &Term, i: usize) -> Term {
+/// The smallest `__st{k}_` prefix that no blank label anywhere in `parsed`
+/// (facts and rule premises/conclusions alike, recursing through lists,
+/// formulae, and quoted triples) starts with. Renaming a carried label `l`
+/// to `__st{k}_{l}` therefore yields a label proven absent from the
+/// stratum's source — and one that can never collide with the `__sk…`
+/// labels [`run_closure`] mints for rule existentials.
+fn fresh_carry_prefix(parsed: &parser::Parsed) -> String {
+    fn labels<'a>(t: &'a Term, out: &mut FxHashSet<&'a str>) {
         match t {
-            Term::Blank(l) => Term::Blank(format!("__st{}_{}", i, l)),
-            Term::List(ms) => Term::List(ms.iter().map(|m| go(m, i)).collect()),
+            Term::Blank(l) => {
+                out.insert(l.as_str());
+            }
+            Term::List(ms) => ms.iter().for_each(|m| labels(m, out)),
+            Term::Formula(ts) => {
+                ts.iter().for_each(|r| r.iter().for_each(|m| labels(m, out)));
+            }
+            Term::Triple(tr) => tr.iter().for_each(|m| labels(m, out)),
+            _ => {}
+        }
+    }
+    let mut seen: FxHashSet<&str> = FxHashSet::default();
+    let rule_terms = parsed
+        .rules
+        .iter()
+        .chain(&parsed.backward_rules)
+        .flat_map(|r| r.premise.iter().chain(&r.conclusion));
+    for t in parsed.facts.iter().chain(rule_terms) {
+        t.iter().for_each(|m| labels(m, &mut seen));
+    }
+    let mut k = 0usize;
+    loop {
+        let prefix = format!("__st{}_", k);
+        if !seen.iter().any(|l| l.starts_with(&prefix)) {
+            return prefix;
+        }
+        k += 1;
+    }
+}
+
+/// `t` with every blank label pushed into the carried namespace `prefix`
+/// (recursing into lists, formulae, and quoted triples) — the per-stratum
+/// document scope of [`reason_n3_stratified`]. `prefix` comes from
+/// [`fresh_carry_prefix`]; prefixing is injective, so co-reference among
+/// carried blanks is preserved.
+fn stratum_blanks(t: &[Term; 3], prefix: &str) -> [Term; 3] {
+    fn go(t: &Term, p: &str) -> Term {
+        match t {
+            Term::Blank(l) => Term::Blank(format!("{}{}", p, l)),
+            Term::List(ms) => Term::List(ms.iter().map(|m| go(m, p)).collect()),
             Term::Formula(ts) => Term::Formula(
-                ts.iter().map(|r| [go(&r[0], i), go(&r[1], i), go(&r[2], i)]).collect(),
+                ts.iter().map(|r| [go(&r[0], p), go(&r[1], p), go(&r[2], p)]).collect(),
             ),
             Term::Triple(tr) => {
-                Term::Triple(Box::new([go(&tr[0], i), go(&tr[1], i), go(&tr[2], i)]))
+                Term::Triple(Box::new([go(&tr[0], p), go(&tr[1], p), go(&tr[2], p)]))
             }
             _ => t.clone(),
         }
     }
-    [go(&t[0], i), go(&t[1], i), go(&t[2], i)]
+    [go(&t[0], prefix), go(&t[1], prefix), go(&t[2], prefix)]
 }
 
 /// TERM-level closure + full derivation steps `(conclusion, rule index, premises)` —
