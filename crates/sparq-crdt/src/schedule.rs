@@ -33,7 +33,10 @@ pub enum Step {
         envelopes: Vec<usize>,
     },
     /// Full state/snapshot synchronisation: join replica `from`'s complete
-    /// state into replica `to` (`CRDT-JOURNAL-2` snapshot catch-up).
+    /// state — *and its durable provenance journal* — into replica `to`
+    /// (`CRDT-JOURNAL-2` snapshot catch-up). Carrying provenance keeps the
+    /// `CRDT-WIRE-4` reuse check enforceable for dots the snapshot has already
+    /// retired from its live store.
     SnapshotSync {
         /// Index of the replica providing the snapshot.
         from: usize,
@@ -78,8 +81,8 @@ pub fn run_schedule(
                 replica_mut(replicas, *to)?.apply(&joined)?;
             }
             Step::SnapshotSync { from, to } => {
-                let snapshot = replica_mut(replicas, *from)?.state().clone();
-                replica_mut(replicas, *to)?.apply(&snapshot)?;
+                let snapshot = replica_mut(replicas, *from)?.snapshot();
+                replica_mut(replicas, *to)?.apply_snapshot(&snapshot)?;
             }
             Step::Compact { at } => {
                 let replica = replica_mut(replicas, *at)?;
@@ -174,6 +177,7 @@ fn replica_mut(replicas: &mut [Replica], i: usize) -> Result<&mut Replica, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::context::CausalContext;
     use crate::origin::Op;
     use crate::state::{GraphKey, Quad};
 
@@ -207,6 +211,28 @@ mod tests {
         deliver_all(&mut replicas, &envelopes, &[2, 0, 1]).unwrap();
         assert_converged(&replicas).unwrap();
         assert_eq!(replicas[0].state().visible(), std::collections::BTreeSet::from([q(1)]));
+    }
+
+    #[test]
+    fn snapshot_sync_step_preserves_wire4_provenance() {
+        // CRDT-WIRE-4 through a generated SnapshotSync (CRDT-JOURNAL-2): a dot
+        // added then removed at replica 0, snapshot-synced to a fresh replica 1,
+        // must leave replica 1 still able to reject a forged reuse of the retired
+        // dot — the catch-up cannot silently lose the validation journal.
+        let mut src = Replica::new(0);
+        let envs = src.execute_request(&[Op::InsertData(vec![q(1)]), Op::DeleteData(vec![q(1)])]);
+        let d = envs[0].adds[0].1;
+        let mut replicas = vec![src, Replica::new(1)];
+        run_schedule(&mut replicas, &[], &[Step::SnapshotSync { from: 0, to: 1 }]).unwrap();
+        assert!(!replicas[1].state().is_visible(&q(1)));
+
+        let forged = Delta::from_parts(
+            std::collections::BTreeMap::from([(q(7), std::collections::BTreeSet::from([d]))]),
+            CausalContext::from_dots([d]),
+        );
+        let before = replicas[1].state().clone();
+        assert!(replicas[1].apply(&forged).is_err()); // snapshot-delivered provenance rejects reuse
+        assert_eq!(*replicas[1].state(), before); // fail closed
     }
 
     #[test]

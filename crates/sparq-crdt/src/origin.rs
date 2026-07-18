@@ -81,6 +81,22 @@ impl Envelope {
     }
 }
 
+/// A transferable full-state snapshot for `CRDT-JOURNAL-2` catch-up: the
+/// replica `state` *plus* the durable dot-to-quad provenance journal.
+///
+/// Shipping the state alone is unsound: a dot added and then removed before the
+/// snapshot is retired from `state.store()` (it survives only in the causal
+/// context), so a receiver reconstructing provenance from `store()` would never
+/// learn that historical dot's quad and would then accept a later delta reusing
+/// it under a different quad. Carrying `provenance` keeps the `CRDT-WIRE-4`
+/// reuse check enforceable for the full lifetime of every observed dot across
+/// the snapshot recovery path, matching `Replica::apply`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Snapshot {
+    state: State,
+    provenance: BTreeMap<Dot, Quad>,
+}
+
 /// One model replica: a durable dot-counter lineage (`CRDT-DOT-1`), a journal
 /// sequence, and replica state. It acts as both origin-evaluator and replica
 /// conformance role.
@@ -237,6 +253,63 @@ impl Replica {
         self.state = next;
         Ok(())
     }
+
+    /// Export a full snapshot (state + durable provenance journal) for
+    /// `CRDT-JOURNAL-2` snapshot catch-up. Unlike a bare `state()` clone, the
+    /// bundle carries the dot-to-quad provenance of dots already retired from
+    /// the live store, so the receiver can keep enforcing `CRDT-WIRE-4`.
+    #[must_use]
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            state: self.state.clone(),
+            provenance: self.dot_provenance.clone(),
+        }
+    }
+
+    /// Admit a full snapshot (replica role, `CRDT-JOURNAL-2` catch-up),
+    /// merging both the state and the provenance journal fail-closed.
+    ///
+    /// The incoming provenance is validated against local knowledge first: any
+    /// dot the snapshot attributes to a quad that conflicts with a locally live
+    /// or locally historical association is rejected before any mutation
+    /// (`CRDT-WIRE-4`). Only once the snapshot's own state delta is admitted are
+    /// the provenance entries — including those of dots the snapshot has already
+    /// retired from its live store — merged, so snapshot recovery cannot
+    /// silently drop the validation journal.
+    ///
+    /// # Errors
+    ///
+    /// Returns a description of the violated invariant; local state and
+    /// provenance are then unchanged (fail closed).
+    pub fn apply_snapshot(&mut self, snapshot: &Snapshot) -> Result<(), String> {
+        for (d, q) in &snapshot.provenance {
+            for (local_q, local_dots) in self.state.store() {
+                if local_q != q && local_dots.contains(d) {
+                    return Err(format!(
+                        "CRDT-WIRE-4: snapshot dot {:?} attributed to {:?} conflicts with local live {:?}",
+                        d, q, local_q
+                    ));
+                }
+            }
+            if let Some(prev_q) = self.dot_provenance.get(d) {
+                if prev_q != q {
+                    return Err(format!(
+                        "CRDT-WIRE-4: snapshot dot {:?} attributed to {:?} conflicts with local historical {:?}",
+                        d, q, prev_q
+                    ));
+                }
+            }
+        }
+        // Admit the state delta (validates and merges the live-store dots).
+        self.apply(&snapshot.state)?;
+        // Merge the durable provenance, including dots already retired from the
+        // snapshot's live store. Conflicts were rejected above, so or_insert is
+        // safe and keeps the earliest local attribution authoritative.
+        for (&d, &q) in &snapshot.provenance {
+            self.dot_provenance.entry(d).or_insert(q);
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -386,6 +459,65 @@ mod tests {
         assert!(peer.apply(&forged).is_err()); // fail closed: rejected by provenance journal
         assert_eq!(*peer.state(), before); // state unchanged
         peer.state().check_invariants().unwrap();
+    }
+
+    #[test]
+    fn snapshot_catch_up_carries_provenance_and_rejects_retired_dot_reuse() {
+        // CRDT-WIRE-4 through the CRDT-JOURNAL-2 snapshot recovery path: a dot
+        // added then removed at the source is retired from its live store, yet
+        // its provenance must travel with the snapshot so a fresh replica caught
+        // up by snapshot still rejects a forged reuse under a different quad.
+        let mut src = Replica::new(1);
+        let env = src.execute(&Op::InsertData(vec![q(1, 1)]));
+        src.execute(&Op::DeleteData(vec![q(1, 1)]));
+        let d = env.adds[0].1;
+
+        let mut fresh = Replica::new(2);
+        fresh.apply_snapshot(&src.snapshot()).unwrap();
+        assert!(!fresh.state().is_visible(&q(1, 1)));
+        // The snapshot's own live/removed denotation is reproduced.
+        assert_eq!(*fresh.state(), *src.state());
+
+        let forged = Delta::from_parts(
+            std::collections::BTreeMap::from([(q(7, 7), std::collections::BTreeSet::from([d]))]),
+            CausalContext::from_dots([d]),
+        );
+        let before = fresh.state().clone();
+        assert!(fresh.apply(&forged).is_err()); // provenance carried by snapshot → rejected
+        assert_eq!(*fresh.state(), before); // fail closed: state unchanged
+        fresh.state().check_invariants().unwrap();
+    }
+
+    #[test]
+    fn apply_snapshot_rejects_conflicting_provenance_fail_closed() {
+        // Two replicas sharing a lineage id mint the same dot value under
+        // different quads (a modelled provenance forgery). A receiver that has
+        // learnt the dot under q(1,1) must reject a snapshot attributing it to
+        // q(2,2), leaving state and provenance untouched.
+        let mut x = Replica::new(1);
+        let ex = x.execute(&Op::InsertData(vec![q(1, 1)]));
+        let mut y = Replica::new(1);
+        y.execute(&Op::InsertData(vec![q(2, 2)]));
+        assert_eq!(ex.adds[0].1, Dot::new(1, 1));
+
+        let mut recv = Replica::new(9);
+        recv.apply(&ex.to_delta()).unwrap();
+        let before = recv.clone();
+        assert!(recv.apply_snapshot(&y.snapshot()).is_err());
+        assert_eq!(recv, before); // fail closed: neither state nor provenance mutated
+    }
+
+    #[test]
+    fn snapshot_round_trips_a_live_and_removed_state() {
+        let mut src = Replica::new(3);
+        src.execute(&Op::InsertData(vec![q(1, 1)]));
+        src.execute(&Op::InsertData(vec![q(2, 2)]));
+        src.execute(&Op::DeleteData(vec![q(2, 2)]));
+        let mut fresh = Replica::new(4);
+        fresh.apply_snapshot(&src.snapshot()).unwrap();
+        assert!(fresh.state().is_visible(&q(1, 1)));
+        assert!(!fresh.state().is_visible(&q(2, 2)));
+        assert_eq!(fresh.snapshot(), src.snapshot()); // export/import fixpoint
     }
 
     #[test]
