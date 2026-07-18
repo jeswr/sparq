@@ -90,6 +90,11 @@ pub struct Replica {
     next_counter: Counter,
     next_sequence: u64,
     state: State,
+    /// Durable dot-to-quad provenance journal: records the quad under which each
+    /// dot was first observed, including dots removed from the live store.
+    /// Consulted by `apply` to enforce `CRDT-WIRE-4` for historically-known dots
+    /// whose quad entries have since been retired from `state.store()`.
+    dot_provenance: BTreeMap<Dot, Quad>,
 }
 
 impl Replica {
@@ -101,6 +106,7 @@ impl Replica {
             next_counter: 1,
             next_sequence: 1,
             state: State::bottom(),
+            dot_provenance: BTreeMap::new(),
         }
     }
 
@@ -159,6 +165,9 @@ impl Replica {
         };
         self.next_sequence += 1;
         self.state = self.state.join(&envelope.to_delta());
+        for &(q, d) in &envelope.adds {
+            self.dot_provenance.entry(d).or_insert(q);
+        }
         envelope
     }
 
@@ -185,18 +194,12 @@ impl Replica {
     /// the delta must be well formed, and a delta dot already known under a
     /// *different* quad is rejected.
     ///
-    /// The reuse scan consults only the live store because that is the whole
-    /// enforceable surface: normative state (`CRDT-STATE-1`) is `(store,
-    /// context)`, so once a quad's dots are removed the dot-to-quad
-    /// association survives nowhere a receiver could consult. That loses no
-    /// safety — a removed dot stays in the causal context, and `CRDT-JOIN-1`
-    /// drops any store dot the receiving side's context already contains, so
-    /// a delta reusing a removed dot under another quad joins as a no-op and
-    /// can never make the forged quad visible (see
-    /// `apply_absorbs_reused_removed_dot_without_reviving_it`). The context
-    /// tombstone survives snapshots and compaction (`CRDT-JOURNAL-2`,
-    /// `CRDT-CTX-1`), so the same protection holds after catch-up. Full
-    /// no-reuse is the *origin's* durable-counter obligation (`CRDT-DOT-1`).
+    /// The reuse scan checks both the live store and `dot_provenance`. The live
+    /// store catches conflicts while the original quad is still present; the
+    /// provenance journal extends that enforcement to dots retired by a subsequent
+    /// removal. Together they implement the CRDT-WIRE-4 MUST for the full
+    /// lifetime of every observed dot. Full no-reuse at the *origin* side is
+    /// separately enforced by the durable-counter obligation (`CRDT-DOT-1`).
     ///
     /// # Errors
     ///
@@ -214,10 +217,23 @@ impl Replica {
                         ));
                     }
                 }
+                if let Some(prev_q) = self.dot_provenance.get(d) {
+                    if prev_q != q {
+                        return Err(format!(
+                            "CRDT-WIRE-4: dot {:?} historically known under {:?}, delta asserts {:?}",
+                            d, prev_q, q
+                        ));
+                    }
+                }
             }
         }
         let next = self.state.join(delta);
         next.check_invariants()?;
+        for (q, dots) in delta.store() {
+            for &d in dots {
+                self.dot_provenance.entry(d).or_insert(*q);
+            }
+        }
         self.state = next;
         Ok(())
     }
@@ -346,12 +362,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_absorbs_reused_removed_dot_without_reviving_it() {
-        // Historical counterpart of the live-reuse rejection above: after an
-        // observed removal the dot-to-quad association is gone from the store,
-        // so the CRDT-WIRE-4 scan cannot reject the reuse — but the dot stays
-        // in the causal context, which CRDT-JOIN-1 treats as a tombstone, so
-        // the forged add joins as a no-op and never becomes visible.
+    fn apply_rejects_reused_dot_from_historical_removal() {
+        // CRDT-WIRE-4: the receiver MUST reject a delta that reuses a dot under
+        // a different quad even after the original quad has been removed. The
+        // dot_provenance journal retains the association after store retirement,
+        // so the check is enforced for the full lifetime of every observed dot.
         let mut r = Replica::new(1);
         let env = r.execute(&Op::InsertData(vec![q(1, 1)]));
         let removal = r.execute(&Op::DeleteData(vec![q(1, 1)]));
@@ -368,9 +383,8 @@ mod tests {
             CausalContext::from_dots([env.adds[0].1]),
         );
         let before = peer.state().clone();
-        peer.apply(&forged).unwrap();
-        assert!(!peer.state().is_visible(&q(7, 7))); // tombstoned, not revived
-        assert_eq!(*peer.state(), before); // no-op join: state unchanged
+        assert!(peer.apply(&forged).is_err()); // fail closed: rejected by provenance journal
+        assert_eq!(*peer.state(), before); // state unchanged
         peer.state().check_invariants().unwrap();
     }
 
