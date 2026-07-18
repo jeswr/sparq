@@ -572,6 +572,30 @@ impl Capability {
     pub fn admin_key(&self) -> Option<SecretSigningKey> {
         self.admin_sk.map(SecretSigningKey::from_seed)
     }
+
+    /// Overwrite the raw private-key seeds in place. `read_secret` is a
+    /// [`Secret32`] and zeroizes via its own `Drop`; these two fields are bare
+    /// `[u8; 32]` seeds, so [`Drop`] routes through here to give the whole
+    /// capability the same secret-memory hygiene.
+    fn zeroize_secrets(&mut self) {
+        use zeroize::Zeroize;
+        if let Some(sk) = self.publisher_sk.as_mut() {
+            sk.zeroize();
+        }
+        if let Some(sk) = self.admin_sk.as_mut() {
+            sk.zeroize();
+        }
+    }
+}
+
+/// Zero the raw private-key seed bytes when a capability is dropped, so a decoded
+/// or constructed write/admin capability does not leave `sk_publish` / `sk_admin`
+/// in freed memory (Cargo.toml secret-memory hygiene). `read_secret` is a
+/// [`Secret32`] and already zeroizes itself.
+impl Drop for Capability {
+    fn drop(&mut self) {
+        self.zeroize_secrets();
+    }
 }
 
 /// Delegate a **new** public grant from `parent`, narrowing constraints, and
@@ -709,6 +733,34 @@ mod tests {
         let bytes = grant_bytes_with_authority_tokens(&["read"]);
         let g = PublicGrant::decode(&bytes, Limits::default()).unwrap();
         assert_eq!(g.authority, vec![Authority::Read]);
+    }
+
+    /// The `Drop` path must overwrite the raw private-key seeds. Observed via the
+    /// same `zeroize_secrets` routine `Drop` calls, so a future field change that
+    /// silently drops the guarantee fails here. `read_secret` is a `Secret32` and
+    /// zeroizes through its own `Drop`.
+    #[test]
+    fn drop_zeroizes_private_key_seeds() {
+        let base = base_grant(
+            RepoId::from_bytes([1u8; 32]),
+            BranchId::from_bytes([2u8; 32]),
+            Epoch(7),
+            TopicId::from_bytes([3u8; 32]),
+            Validity { not_before: 100, not_after: 200 },
+            vec!["wss://broker.example".to_string()],
+        );
+
+        let publisher = SecretSigningKey::from_seed([7u8; 32]);
+        let mut write = Capability::new_write(base.clone(), Secret32([9u8; 32]), &publisher).unwrap();
+        assert_eq!(write.publisher_sk, Some([7u8; 32]));
+        write.zeroize_secrets();
+        assert_eq!(write.publisher_sk, Some([0u8; 32]));
+
+        let admin = SecretSigningKey::from_seed([5u8; 32]);
+        let mut admin_cap = Capability::new_admin(base, &admin).unwrap();
+        assert_eq!(admin_cap.admin_sk, Some([5u8; 32]));
+        admin_cap.zeroize_secrets();
+        assert_eq!(admin_cap.admin_sk, Some([0u8; 32]));
     }
 
     /// A read-only grant carrying a publisher_pub violates the
