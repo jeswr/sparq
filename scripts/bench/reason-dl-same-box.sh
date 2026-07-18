@@ -49,6 +49,8 @@
 #   ONLY             engine subset of "sparq hermit openllet"      (default all three)
 #   OUT_DIR          envelope dir (default /tmp/reason-dl-same-box-results; a canonical
 #                    run points this at bench/canonical-competitor-results/<date>/)
+#   GATHER           scratch dir for converted NT + raw engine output
+#                    (default /tmp/reason-dl-gather)
 #   CANONICAL        1 = dedicated quiet-box run                   (default 0: NON-canonical)
 #   TIMEOUT_S        per-engine consistency cap, seconds           (default 600)
 #   HERMIT_JAR       path to HermiT.jar         (LGPL-3.0; NOT auto-downloaded)
@@ -94,8 +96,10 @@ if [ -z "$ORE_CORPUS_DIR" ] || [ ! -d "$ORE_CORPUS_DIR" ]; then
   exit 2
 fi
 
+CORPUS_ROOT="${ORE_CORPUS_DIR%/}"
+
 mkdir -p "$OUT_DIR"
-GATHER="/tmp/reason-dl-gather"
+GATHER="${GATHER:-/tmp/reason-dl-gather}"
 mkdir -p "$GATHER"
 GIT_COMMIT="$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
@@ -136,9 +140,16 @@ N=0
 while IFS= read -r OWL; do
   [ "$N" -ge "$ORE_MAX_ONTOLOGIES" ] && { log "ORE_MAX_ONTOLOGIES=$ORE_MAX_ONTOLOGIES reached — stopping (cap logged, not silent)"; break; }
   N=$((N + 1))
-  ONT="$(basename "$OWL")"
-  log "=== ontology $N: $ONT ==="
+  # Collision-resistant per-input key: the walk admits subdirectories, so two corpus
+  # files may share a basename (a/foo.owl vs b/foo.owl). Every derived artifact —
+  # converted NT, riot stderr, raw per-engine .out, envelope filename — is keyed by
+  # the corpus-RELATIVE path plus a 12-hex SHA-256 prefix of the file content, so the
+  # [ -f "$NT" ] conversion cache can only ever hit for byte-identical content at the
+  # same relative path, and no later row can overwrite an earlier one.
+  REL="${OWL#"$CORPUS_ROOT"/}"
   OWL_SHA="$(sha256sum "$OWL" | cut -d' ' -f1)"
+  KEY="$(printf '%s' "${REL%.*}" | tr -c 'A-Za-z0-9._-' '_')-${OWL_SHA:0:12}"
+  log "=== ontology $N: $REL ==="
 
   # -- 1a. sparq: verdict (+ profile row) printed BEFORE timing -----------------
   # consistency_s = end-to-end process wall around the ore_bench invocation (same
@@ -146,30 +157,30 @@ while IFS= read -r OWL; do
   # ONLY as a sparq-internal breakdown.
   SPARQ_ROW=""; SPARQ_VERDICT=""; SPARQ_S=""; SPARQ_EXTRACT_S=""; SPARQ_CHECK_S=""
   if want sparq; then
-    NT="$GATHER/$ONT.nt"
+    NT="$GATHER/$KEY.nt"
     case "$OWL" in
       *.nt) NT="$OWL" ;;
-      *) [ -f "$NT" ] || "$RIOT" --output=ntriples "$OWL" > "$NT" 2>"$GATHER/$ONT.riot.err" \
-           || { log "riot conversion failed (see $GATHER/$ONT.riot.err)"; NT=""; } ;;
+      *) [ -f "$NT" ] || "$RIOT" --output=ntriples "$OWL" > "$NT" 2>"$GATHER/$KEY.riot.err" \
+           || { log "riot conversion failed (see $GATHER/$KEY.riot.err)"; NT=""; } ;;
     esac
     if [ -n "$NT" ]; then
-      log "sparq: consistency $ONT (cap ${TIMEOUT_S}s)"
+      log "sparq: consistency $REL (cap ${TIMEOUT_S}s)"
       START="$(now_s)"
-      if timeout "$TIMEOUT_S" "$SPARQ_BIN" "$NT" ntriples > "$GATHER/$ONT.sparq.out" 2>&1; then
+      if timeout "$TIMEOUT_S" "$SPARQ_BIN" "$NT" ntriples > "$GATHER/$KEY.sparq.out" 2>&1; then
         END="$(now_s)"; SPARQ_S="$(python3 -c "print(f'{$END-$START:.6f}')")"
-        SPARQ_ROW="$(cat "$GATHER/$ONT.sparq.out")"
-        SPARQ_VERDICT="$(sed -n 's/.* verdict=\([^ ]*\).*/\1/p' "$GATHER/$ONT.sparq.out" | head -1)"
-        SPARQ_EXTRACT_S="$(sed -n 's/.*extract_s=\([0-9.]*\).*/\1/p' "$GATHER/$ONT.sparq.out" | head -1)"
-        SPARQ_CHECK_S="$(sed -n 's/.*check_s=\([0-9.]*\).*/\1/p' "$GATHER/$ONT.sparq.out" | head -1)"
+        SPARQ_ROW="$(cat "$GATHER/$KEY.sparq.out")"
+        SPARQ_VERDICT="$(sed -n 's/.* verdict=\([^ ]*\).*/\1/p' "$GATHER/$KEY.sparq.out" | head -1)"
+        SPARQ_EXTRACT_S="$(sed -n 's/.*extract_s=\([0-9.]*\).*/\1/p' "$GATHER/$KEY.sparq.out" | head -1)"
+        SPARQ_CHECK_S="$(sed -n 's/.*check_s=\([0-9.]*\).*/\1/p' "$GATHER/$KEY.sparq.out" | head -1)"
         # Boundary assertion: the selected metric must be the OUTER process wall — it
         # can never undercut the tool's own internal phase sum. A violation means the
         # wrapper is timing the wrong field; abort rather than emit a bogus envelope.
         if [ -n "$SPARQ_EXTRACT_S" ] && [ -n "$SPARQ_CHECK_S" ]; then
           python3 -c "import sys; sys.exit(0 if float('$SPARQ_S') >= float('$SPARQ_EXTRACT_S') + float('$SPARQ_CHECK_S') else 1)" \
-            || { log "TIMING-BOUNDARY VIOLATION on $ONT: process wall ${SPARQ_S}s < internal extract_s+check_s — consistency_s is not the end-to-end boundary; aborting"; exit 3; }
+            || { log "TIMING-BOUNDARY VIOLATION on $REL: process wall ${SPARQ_S}s < internal extract_s+check_s — consistency_s is not the end-to-end boundary; aborting"; exit 3; }
         fi
       else
-        log "sparq FAILED/timeout on $ONT"; SPARQ_ROW="ERROR: timeout/failure"
+        log "sparq FAILED/timeout on $REL"; SPARQ_ROW="ERROR: timeout/failure"
       fi
     else
       SPARQ_ROW="ERROR: riot conversion failed"
@@ -179,17 +190,17 @@ while IFS= read -r OWL; do
   # -- 1b. HermiT: CLI consistency (-k) -----------------------------------------
   HERMIT_ROW=""; HERMIT_VERDICT=""; HERMIT_S=""
   if want hermit && [ -f "$HERMIT_JAR" ]; then
-    log "hermit: consistency $ONT (cap ${TIMEOUT_S}s)"
+    log "hermit: consistency $REL (cap ${TIMEOUT_S}s)"
     START="$(now_s)"
     if timeout "$TIMEOUT_S" java -jar "$HERMIT_JAR" -k "file://$OWL" \
-        > "$GATHER/$ONT.hermit.out" 2>&1; then
+        > "$GATHER/$KEY.hermit.out" 2>&1; then
       END="$(now_s)"; HERMIT_S="$(python3 -c "print(f'{$END-$START:.6f}')")"
-      HERMIT_ROW="$(cat "$GATHER/$ONT.hermit.out")"
-      if grep -qi 'true\|is consistent' "$GATHER/$ONT.hermit.out"; then HERMIT_VERDICT="consistent"
-      elif grep -qi 'false\|is inconsistent' "$GATHER/$ONT.hermit.out"; then HERMIT_VERDICT="inconsistent"
+      HERMIT_ROW="$(cat "$GATHER/$KEY.hermit.out")"
+      if grep -qi 'true\|is consistent' "$GATHER/$KEY.hermit.out"; then HERMIT_VERDICT="consistent"
+      elif grep -qi 'false\|is inconsistent' "$GATHER/$KEY.hermit.out"; then HERMIT_VERDICT="inconsistent"
       fi
     else
-      log "hermit FAILED/timeout on $ONT"; HERMIT_ROW="ERROR: timeout/failure"
+      log "hermit FAILED/timeout on $REL"; HERMIT_ROW="ERROR: timeout/failure"
     fi
   elif want hermit; then
     HERMIT_ROW="ERROR: HERMIT_JAR unavailable"
@@ -198,17 +209,17 @@ while IFS= read -r OWL; do
   # -- 1c. Openllet: CLI consistency --------------------------------------------
   OPENLLET_ROW=""; OPENLLET_VERDICT=""; OPENLLET_S=""
   if want openllet && [ -f "$OPENLLET_JAR" ]; then
-    log "openllet: consistency $ONT (cap ${TIMEOUT_S}s)"
+    log "openllet: consistency $REL (cap ${TIMEOUT_S}s)"
     START="$(now_s)"
     if timeout "$TIMEOUT_S" java -jar "$OPENLLET_JAR" consistency "$OWL" \
-        > "$GATHER/$ONT.openllet.out" 2>&1; then
+        > "$GATHER/$KEY.openllet.out" 2>&1; then
       END="$(now_s)"; OPENLLET_S="$(python3 -c "print(f'{$END-$START:.6f}')")"
-      OPENLLET_ROW="$(cat "$GATHER/$ONT.openllet.out")"
-      if grep -qi 'inconsistent' "$GATHER/$ONT.openllet.out"; then OPENLLET_VERDICT="inconsistent"
-      elif grep -qi 'consistent' "$GATHER/$ONT.openllet.out"; then OPENLLET_VERDICT="consistent"
+      OPENLLET_ROW="$(cat "$GATHER/$KEY.openllet.out")"
+      if grep -qi 'inconsistent' "$GATHER/$KEY.openllet.out"; then OPENLLET_VERDICT="inconsistent"
+      elif grep -qi 'consistent' "$GATHER/$KEY.openllet.out"; then OPENLLET_VERDICT="consistent"
       fi
     else
-      log "openllet FAILED/timeout on $ONT"; OPENLLET_ROW="ERROR: timeout/failure"
+      log "openllet FAILED/timeout on $REL"; OPENLLET_ROW="ERROR: timeout/failure"
     fi
   elif want openllet; then
     OPENLLET_ROW="ERROR: OPENLLET_JAR unavailable"
@@ -226,7 +237,7 @@ while IFS= read -r OWL; do
   if [ "$NDEF" -ge 2 ]; then
     if [ "$NUNIQ" -eq 1 ]; then AGREE="true"; else AGREE="false"; fi
   fi
-  log "$ONT verdicts — sparq=${SPARQ_VERDICT:-none} hermit=${HERMIT_VERDICT:-none} openllet=${OPENLLET_VERDICT:-none} agree=$AGREE"
+  log "$REL verdicts — sparq=${SPARQ_VERDICT:-none} hermit=${HERMIT_VERDICT:-none} openllet=${OPENLLET_VERDICT:-none} agree=$AGREE"
   if [ "$AGREE" = "false" ]; then
     log "DISAGREEMENT: correctness finding — timings NULLED in the envelope."
     log "ACTION REQUIRED: file a bug bead (bd create) referencing this envelope before rerunning."
@@ -243,8 +254,8 @@ while IFS= read -r OWL; do
 
   # -- 3. envelope ---------------------------------------------------------------
   TS="$(python3 -c 'import time;print(time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()))')"
-  OUT="$OUT_DIR/reason-dl-${ONT%.*}-${TS}.json"
-  CANONICAL="$CANONICAL" ONT="$ONT" OWL_SHA="$OWL_SHA" GIT_COMMIT="$GIT_COMMIT" \
+  OUT="$OUT_DIR/reason-dl-${KEY}-${TS}.json"
+  CANONICAL="$CANONICAL" ONT="$REL" OWL_SHA="$OWL_SHA" GIT_COMMIT="$GIT_COMMIT" \
   ONLY="$ONLY" TIMEOUT_S="$TIMEOUT_S" OUT="$OUT" AGREE="$AGREE" \
   SPARQ_ROW="$SPARQ_ROW" SPARQ_VERDICT="$SPARQ_VERDICT" SPARQ_S="$SPARQ_S" \
   SPARQ_EXTRACT_S="$SPARQ_EXTRACT_S" SPARQ_CHECK_S="$SPARQ_CHECK_S" \
