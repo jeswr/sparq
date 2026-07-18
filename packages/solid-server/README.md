@@ -75,6 +75,31 @@ Options may also come from `SPARQ_SOLID_PORT` (or `PORT`),
 reuses one wasm pod, so writes remain visible until shutdown. `ownerWebid`
 provisions the root WAC policy; in OIDC mode it is not an authentication claim.
 
+### Bring your own transport
+
+`createSolidPod({ baseUrl, ownerWebid, oidc })` resolves to the same pod behind a
+transport-agnostic dispatcher, with no listener attached. `dispatch({ method, url,
+rawHeaders, body })` resolves to `{ status, headers, body }` and owns the whole host
+contract — the 2 MiB body ceiling (413), wasm-trap recycle (503, never a poisoned
+instance), response copy + free, and repeated headers preserved flat in both
+directions. Call `pod.free()` when done.
+
+For apps already on [Fastify](https://fastify.dev/) (an optional peer dependency),
+register the first-party plugin — it mounts the pod as a catch-all route, keeps
+body bytes unparsed for wasm, and maps the body-limit error to the host 413 shape:
+
+```js
+import Fastify from 'fastify';
+import { solidPod } from '@jeswr/solid-server/fastify';
+
+const fastify = Fastify();
+await fastify.register(solidPod, { baseUrl, ownerWebid });
+```
+
+Do not add `@fastify/cors` in front of the pod: the wasm router owns CORS. The
+building blocks (`SolidServer` from the root or the `./wasm` subpath, plus the
+header/body helpers) are exported for assembling other hosts downstream.
+
 See the [JavaScript/Wasm usage skill](../../skills/javascript-wasm/SKILL.md)
 for the raw request adapter and host contract.
 

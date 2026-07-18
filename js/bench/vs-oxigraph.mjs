@@ -56,7 +56,7 @@ console.log(`dataset: ${N.toLocaleString()} triples (${(nt.length / 1e6).toFixed
   const store = await SparqStore.fromString(nt, 'ntriples');
   console.log(`  ${'load N-Triples'.padEnd(28)} ${(performance.now() - t0).toFixed(1).padStart(8)} ms  (${store.size} triples)`);
   for (const [label, q] of Object.entries(QUERIES)) {
-    bench(label, () => store.queryBindings(q).length);
+    bench(label, () => store.query(q).length);
   }
   bench('count (no materialise)', () => store.count(QUERIES['full scan (count rows)']));
   console.log(`  heapBytes ≈ ${(store.heapBytes() / 1e6).toFixed(1)} MB\n`);
