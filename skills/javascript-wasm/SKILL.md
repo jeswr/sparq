@@ -14,19 +14,24 @@ Use `SparqStore` (the high-level wrapper) by default — it covers SELECT/ASK (`
 ```js
 import { SparqStore, DataFactory as DF } from '@jeswr/sparq';
 
-// init() runs lazily on first construction; nothing else to await.
+// init() runs lazily on first construction.
 const store = await SparqStore.fromString(`
   @prefix ex: <http://ex/> .
   ex:alice ex:name "Alice" ; ex:knows ex:bob .
   ex:bob   ex:name "Bob"@en .
 `, 'turtle'); // 'turtle' (default) | 'ntriples' | 'nquads' | 'trig' | 'jsonld'
 
-// SELECT -> RDF/JS Bindings[]
-for (const row of store.queryBindings(
+// SELECT -> asynchronous RDF/JS ResultStream<Bindings>
+const bindings = await store.queryBindings(
   'PREFIX ex: <http://ex/> SELECT ?s ?name WHERE { ?s ex:name ?name }',
-)) {
-  console.log(row.get('s').value, '->', row.get('name').value);
-}
+);
+await new Promise((resolve, reject) => {
+  bindings.on('error', reject);
+  bindings.on('end', resolve);
+  bindings.on('data', (row) => {
+    console.log(row.get('s').value, '->', row.get('name').value);
+  });
+});
 
 // ASK -> boolean (native early-exit at first solution)
 store.queryBoolean('PREFIX ex: <http://ex/> ASK { ex:alice ex:knows ex:bob }'); // true
@@ -65,7 +70,7 @@ interface SparqStoreOptions { compressed?: boolean; dataset?: boolean; baseIri?:
 get size(): number                                  // deduped triples in the DEFAULT graph
 heapBytes(): number                                 // rough wasm-side footprint
 query(sparql): Bindings[] | boolean                 // dispatches: SELECT->Bindings[], ASK->boolean
-queryBindings(sparql): Bindings[]                    // SELECT -> one Bindings per solution
+queryBindings(sparql, context?): Promise<ResultStream<Bindings>> // SELECT -> RDF/JS event stream
 querySolutions(sparql): Map<string, Term>[]          // SELECT -> OXIGRAPH-shaped: array of plain Map (drop-in for oxigraph Store.query)
 querySolutionsStream(sparql): Generator<Map<string,Term>> // streaming querySolutions
 queryBoolean(sparql): boolean                        // ASK (native path; rejects non-ASK)
@@ -243,7 +248,14 @@ store.countQuads(null, DF.namedNode('http://ex/name'));      // -> 2 (no materia
 ```js
 const store = await SparqStore.empty();
 store.update('INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } }');
-store.queryBindings('SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }'); // [{ g: http://ex/g }]
+const graphBindings = await store.queryBindings('SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
+await new Promise((resolve, reject) => {
+  graphBindings.on('error', reject);
+  graphBindings.on('end', resolve);
+  graphBindings.on('data', (row) => {
+    console.log(row.get('g').value); // http://ex/g
+  });
+});
 ```
 
 **Resolve relative IRIs against a base ([OPUS-4.8] sq-f66jz / #1115).** Pass `{ baseIri }` to `fromString` (or raw `Store.loadWithBase(text, format, base)`) for a document fetched from a URL (or a shapes graph / manifest) that carries relative IRIs and no `@base`. A document-level `@base` still overrides it; line-based formats ignore it; an invalid base throws. Not combinable with `dataset` / `compressed`.
@@ -266,7 +278,14 @@ store.applyDelta(insertQuads, deleteQuads); // deletes applied first, then inser
 
 ```js
 const ds = await SparqStore.fromString(nquads, 'nquads', { dataset: true });
-ds.queryBindings('SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } }');
+const namedBindings = await ds.queryBindings('SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } }');
+await new Promise((resolve, reject) => {
+  namedBindings.on('error', reject);
+  namedBindings.on('end', resolve);
+  namedBindings.on('data', (row) => {
+    console.log(row.get('g').value, row.get('s').value);
+  });
+});
 ds.update('INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> "o" } }');
 ds.match(null, null, null, DF.namedNode('http://ex/g')); // graph-aware
 ```
