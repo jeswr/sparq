@@ -438,6 +438,74 @@ mod tests {
         }
     }
 
+    /// Minimal Turtle-aware tokenizer for the drift guards below: drops `#`
+    /// comments (outside `<…>` IRIs and `"…"` literals), splits on whitespace,
+    /// and emits `[ ] ( ) ; ,` as their own tokens — so a predicate and its
+    /// object are ADJACENT tokens regardless of line breaks, indentation, or
+    /// interleaved comments. NOT a Turtle parser (no long strings, no escapes
+    /// beyond `\"`); just enough to make the scan formatting-independent.
+    fn turtle_tokens(src: &str) -> Vec<&str> {
+        let bytes = src.as_bytes();
+        let mut tokens = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                c if c.is_ascii_whitespace() => i += 1,
+                b'#' => {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                b'<' => {
+                    let start = i;
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'>' {
+                        i += 1;
+                    }
+                    i = (i + 1).min(bytes.len());
+                    tokens.push(&src[start..i]);
+                }
+                b'"' => {
+                    let start = i;
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        i += if bytes[i] == b'\\' { 2 } else { 1 };
+                    }
+                    i = (i + 1).min(bytes.len());
+                    tokens.push(&src[start..i]);
+                }
+                b'[' | b']' | b'(' | b')' | b';' | b',' => {
+                    tokens.push(&src[i..i + 1]);
+                    i += 1;
+                }
+                _ => {
+                    let start = i;
+                    while i < bytes.len()
+                        && !bytes[i].is_ascii_whitespace()
+                        && !matches!(bytes[i], b'#' | b'[' | b']' | b'(' | b')' | b';' | b',')
+                    {
+                        i += 1;
+                    }
+                    tokens.push(&src[start..i]);
+                }
+            }
+        }
+        tokens
+    }
+
+    /// The object token of every `secx:property` assertion in `src`, in order.
+    /// Token-based (see [`turtle_tokens`]), so `secx:property\n  # note\n  secx:X`
+    /// is found exactly like the single-line form, and a commented-out
+    /// annotation is NOT.
+    fn secx_property_objects(src: &str) -> Vec<&str> {
+        let tokens = turtle_tokens(src);
+        tokens
+            .windows(2)
+            .filter(|pair| pair[0] == "secx:property")
+            .map(|pair| pair[1])
+            .collect()
+    }
+
     /// Cross-crate dimension-IRI drift guard (sq-mgxz8): every `secx:property
     /// secx:*` dimension IRI in `sparq-zk/ontologies/secprop-methods.ttl` must be
     /// one of: a policy `DIM_*` local name (in `SECPROP_LEFT_OPERANDS`), a known
@@ -458,18 +526,19 @@ mod tests {
             .collect();
 
         let mut found = 0usize;
-        let mut remaining = METHODS;
-        while let Some(pos) = remaining.find("secx:property secx:") {
-            let after = &remaining[pos + "secx:property secx:".len()..];
-            let local = after
-                .split(|c: char| !c.is_alphanumeric())
-                .next()
-                .unwrap_or("");
-            // Advance before assertions so the loop always terminates.
-            remaining = &remaining[pos + 1..];
-            if local.is_empty() {
-                continue;
-            }
+        for object in secx_property_objects(METHODS) {
+            // A non-`secx:` object (e.g. the full-IRI form) must fail LOUDLY,
+            // not fall out of the scan: silent skips are exactly the drift this
+            // guard exists to catch.
+            let local = object.strip_prefix("secx:").unwrap_or_else(|| {
+                panic!(
+                    "secprop-methods.ttl has a `secx:property` object `{}` that is \
+                     not in `secx:LocalName` prefix form — this drift guard only \
+                     understands prefixed dimension IRIs (sq-mgxz8); either keep \
+                     the annotation graph in prefix form or extend the guard",
+                    object,
+                )
+            });
             found += 1;
 
             if policy_dim_locals.contains(local) || VENDORED_SEC_PROP_DIMS.contains(&local) {
@@ -494,6 +563,39 @@ mod tests {
             found > 0,
             "no `secx:property secx:*` dimension values found in secprop-methods.ttl — \
              the methods TTL format may have changed, breaking this drift guard (sq-mgxz8)",
+        );
+    }
+
+    /// Regression (PR #3440 review): the drift-guard scan must be Turtle-
+    /// formatting-independent. A reformatted annotation with the object on its
+    /// own line behind a comment — plus a typo'd dimension name — MUST still be
+    /// surfaced to the validation loop; the old exact-text `secx:property secx:`
+    /// scan silently skipped it.
+    #[test]
+    fn secx_property_scan_survives_multiline_and_comment_formatting() {
+        let ttl = "[ secx:property # the dimension\n      secx:TypoDim ;\n\
+                   secx:level secx:Sound ] .\n\
+                   [ secx:property secx:Soundness ; secx:level secx:Sound ] .";
+        assert_eq!(
+            secx_property_objects(ttl),
+            vec!["secx:TypoDim", "secx:Soundness"],
+            "a multiline/commented `secx:property` annotation must be found by \
+             the scan exactly like the single-line form (sq-mgxz8)",
+        );
+    }
+
+    /// Regression (PR #3440 review): a commented-out annotation is NOT a
+    /// dimension assertion and must not be counted by the scan.
+    #[test]
+    fn secx_property_scan_ignores_comments_and_iris() {
+        let ttl = "# [ secx:property secx:CommentedOut ] .\n\
+                   <http://example.org/x#secx:property> a secx:Thing .\n\
+                   [ secx:property secx:Real ] .";
+        assert_eq!(
+            secx_property_objects(ttl),
+            vec!["secx:Real"],
+            "commented-out annotations and IRI-internal text must not count as \
+             `secx:property` assertions (sq-mgxz8)",
         );
     }
 }
