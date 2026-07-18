@@ -40,16 +40,29 @@
 #     omnibus. Its issue closes via the omnibus's `Closes #` refs. Idempotent: closed
 #     constituents drop out of the open set; a constituent with post-omnibus commits is
 #     NOT empty and is left alone.
-#  6. FAILURE PATH (v2: recursive bisection). An OPEN omnibus is FAILING when (a) its
-#     ci-summary `gate` check CONCLUDED in failure — live because the omnibus is
-#     pushed/created with the sparq-orchestrator App token, so head pull_request CI
-#     fires on it like on any worker PR — or (b) it is OLDER than MAX_OMNIBUS_AGE_HOURS
-#     (stamp parsed from its branch name) — the liveness backstop for every
-#     head-invisible failure mode: a merge-group `gate` failure (which reports on the
-#     queue's synthetic ref, not the PR head), a dropped auto-merge arm, or checks that
-#     never reported. SURVIVORS = the failing omnibus's marker constituents that are
-#     still OPEN PRs, still armed-eligible (per-PR re-check of rule 1) and NOT already
-#     empty vs main. Then:
+#  6. FAILURE PATH (v2: recursive bisection). Open-omnibus triage is ORDERED,
+#     most-exculpatory first — a conflict must NEVER implicate constituents:
+#       (i)   CONFLICTING with main, checked FIRST — even when a concluded gate
+#             failure is ALSO present (main moved under the omnibus, so that verdict
+#             was evidence against a stale base, not against any constituent): v1
+#             close only — never bisection, never quarantine; close-and-recreate
+#             rebuilds a fresh root off current main in the same run.
+#       (ii)  head `gate` CONCLUDED in strict FAILURE — live because the omnibus is
+#             pushed/created with the sparq-orchestrator App token, so head
+#             pull_request CI fires on it like on any worker PR. This is the ONLY
+#             constituent-fault signal: the omnibus BISECTS (below).
+#       (iii) head `gate` concluded cancelled / timed_out, OR the omnibus is OLDER
+#             than MAX_OMNIBUS_AGE_HOURS (stamp parsed from its branch name — the
+#             liveness backstop for every head-invisible failure mode: a merge-group
+#             `gate` failure on the queue's synthetic ref, a dropped auto-merge arm,
+#             checks that never reported). INFRA-shaped, NOT a code verdict: v1
+#             close only — never bisection (under a sustained outage the split
+#             cascade would double the node count every pass, 2->4->8->16, then
+#             expire the singleton leaves and flood the queue) — and NO same-run
+#             root rebuild; a new root waits out ROOT_COOLDOWN_HOURS (below).
+#     Bisection (case ii only): SURVIVORS = the failing omnibus's marker constituents
+#     that are still OPEN PRs, still armed-eligible (per-PR re-check of rule 1) and
+#     NOT already empty vs main. Then:
 #       * >=2 survivors, depth < DEPTH_CAP: close the parent (the comment NAMES both
 #         child branches) + delete its branch, and create TWO child omnibuses (first /
 #         second half of the survivors, ascending order preserved) at depth+1 with the
@@ -67,28 +80,34 @@
 #         child-omnibus head — so a gate-keyed ci-fix admission can never see it;
 #         stranded IS the guaranteed-closure handoff. The parent omnibus closes as in
 #         v1.
-#       * exactly 1 survivor on a NON-verdict failure (age-expiry, or a gate that
-#         concluded cancelled / timed_out): the survivor is INNOCENT until a gate
-#         convicts it — those modes are infra-shaped (queue starvation, a
-#         human-cancelled run, an authed-outage where checks never report), and under a
-#         sustained outage the bisection cascade would otherwise serially disarm the
-#         ENTIRE armed backlog, one singleton leaf at a time. v1 close only; the
-#         survivor stays individually armed (v1 graceful degradation: the queue lands
-#         or fails it on its own signal).
+#       * exactly 1 survivor on a NON-verdict failure: unreachable by construction
+#         since only case (ii) computes survivors at all, but kept as an in-code
+#         belt-and-braces guard — if bisectability is ever widened again, a survivor
+#         must still only be CONVICTED by a strict concluded head-gate FAILURE
+#         (v1 close; survivor stays individually armed).
 #       * 0 survivors: plain close (everything already landed elsewhere).
 #       * depth >= DEPTH_CAP with >=2 survivors: v1 fallback — close, constituents stay
 #         individually armed, loud log, no same-run root rebuild.
-#     A CONFLICTING omnibus is NOT a constituent fault (main moved under it): v1 close
-#     only, never bisection — the standard close-and-recreate below rebuilds a fresh
-#     root off current main. If the open-PR listing saturated its fetch limit
-#     (open_list_truncated), constituent liveness is unreliable — absence from the
-#     list must never convict anything — so every survivor census degrades to a v1
-#     close (no bisection, no quarantine) for that run. In --hygiene-only, children
-#     cannot be created (no App token, see TOKENS), so a bisectable parent v1-closes
-#     instead; the culprit path (comment + draft + disarm) still runs. A dying omnibus
-#     does NOT suppress a new ROOT in the same run (close-and-recreate), but freshly
-#     spawned children DO — one omnibus TREE at a time, so one bad batch can never
-#     wedge the batcher.
+#     TRUNCATED LISTING (open_list_truncated: the open-PR listing saturated its fetch
+#     limit): incomplete data must never drive a destructive act. Absence from the
+#     list must never convict anything, so every survivor census degrades to a v1
+#     close (no bisection, no quarantine); an omitted LIVE omnibus would also be
+#     misclassified as stale and a new root would break the one-tree guarantee, so
+#     stale-branch deletion (rule 8) AND new-root creation are BOTH suppressed for
+#     that run (fail-safe: do nothing destructive, retry on complete data).
+#     ROOT COOLDOWN (durable, cross-run; the infra-flood backstop): the batcher is
+#     stateless, so the cooldown state is read back from GitHub's closed-PR record —
+#     any sparq-omnibus PR closed UNMERGED within the last ROOT_COOLDOWN_HOURS
+#     suppresses new-ROOT creation. Combined with (iii)'s no-same-run-rebuild, a
+#     persistently failing environment converges to at most ~one root per
+#     (MAX_OMNIBUS_AGE_HOURS + ROOT_COOLDOWN_HOURS) instead of a rebuild flood.
+#     Bisection CHILDREN are exempt (the cooldown damps re-rooting, never culprit
+#     isolation). In --hygiene-only, children cannot be created (no App token, see
+#     TOKENS), so a bisectable parent v1-closes instead; the culprit path (comment +
+#     draft + disarm) still runs. A dying CONFLICTING or bisected omnibus does NOT
+#     suppress a new ROOT in the same run (close-and-recreate), but an infra-closed
+#     one does, and freshly spawned children always do — one omnibus TREE at a time,
+#     so one bad batch can never wedge the batcher.
 #  6b. CRASH SAFETY (by construction). Batching never closes or disarms a constituent
 #     except the isolated culprit; an omnibus is an integration COPY of individually
 #     armed PRs. If a run dies between closing a failed parent and creating its
@@ -108,7 +127,11 @@
 #     run, an open, young (under the age bound), MERGEABLE omnibus with NO active arm is
 #     re-armed idempotently (`gh pr merge --auto`) — a transient queue failure gets
 #     retried; a persistent one hits the age bound and is closed.
-#  8. STALE HYGIENE. Any sparq-omnibus/* remote branch with no open PR is deleted.
+#  8. STALE HYGIENE. Any sparq-omnibus/* remote branch with no open PR is deleted —
+#     SKIPPED entirely when the open-PR listing may be truncated (rule 6: an omitted
+#     live omnibus must not lose its branch). Branch deletion is BEST-EFFORT
+#     everywhere (an already-deleted branch is success; a persistent delete failure
+#     logs loudly but never blocks the child/root creation planned after it).
 #
 # TOKENS. The omnibus branch/PR MUST be pushed + created with the sparq-orchestrator App
 # installation token: GITHUB_TOKEN-created refs/PRs get their workflow events SUPPRESSED,
@@ -162,12 +185,18 @@ MAX_OMNIBUS_AGE_HOURS = 4
 # to a v1 close (constituents stay individually armed) instead of splitting further.
 # 2^8 = 256 constituents of headroom — far beyond any realistic armed backlog.
 DEPTH_CAP = 8
-# A CONCLUDED `gate` in any of these states makes an omnibus FAILING (close/bisect).
-# Only the strict "failure" verdict may CONVICT a singleton survivor (rule 6):
-# "cancelled" (a human-cancelled run) and "timed_out" (runner starvation) are
-# infra-shaped — the same class as age-expiry — and must never disarm a lone
-# constituent.
+# A CONCLUDED `gate` in any of these states closes an omnibus, but ONLY the strict
+# "failure" verdict is a constituent-fault signal (rule 6): it alone may BISECT, and
+# it alone may CONVICT a singleton survivor. "cancelled" (a human-cancelled run) and
+# "timed_out" (runner starvation) are infra-shaped — the same class as age-expiry —
+# and take the v1-close path: never bisection, never a disarmed constituent.
 GATE_FAILING_CONCLUSIONS = ("failure", "timed_out", "cancelled")
+# Root-creation cooldown (rule 6, infra-flood backstop): while ANY sparq-omnibus PR
+# was closed UNMERGED within this many hours, no new ROOT is created. Durable across
+# runs (read back from GitHub's closed-PR record — the batcher itself is stateless);
+# bisection children are exempt. Constituents stay individually armed throughout, so
+# the cooldown costs only batching throughput, never loses work.
+ROOT_COOLDOWN_HOURS = 2
 # Open-PR listing fetch bound. If the listing SATURATES this limit it may be truncated:
 # a live constituent absent from a truncated list must never be classified as
 # closed/merged (that census feeds DESTRUCTIVE decisions — quarantine picks "the one
@@ -303,8 +332,8 @@ def gate_conclusion(pr: dict):
     reports on the queue's synthetic ref instead — the age bound covers that mode.
     A missing / in-progress / queued gate is NOT a failure (never act on a non-terminal
     gate — same posture as pr-backlog.py). The caller distinguishes the strict
-    "failure" verdict (may convict a singleton) from the infra-shaped cancelled /
-    timed_out (close/bisect only — see GATE_FAILING_CONCLUSIONS)."""
+    "failure" verdict (the ONLY bisect/convict signal) from the infra-shaped
+    cancelled / timed_out (v1 close only — see GATE_FAILING_CONCLUSIONS)."""
     for c in pr.get("checks", []):
         if (c.get("name") or "").strip().lower() != "gate":
             continue
@@ -486,7 +515,12 @@ def creation_actions(repo: str, branch: str, constituents: list, depth: int = 0,
 #   open_list_truncated: bool                           (open-PR listing saturated its
 #                                                        fetch limit: survivor censuses
 #                                                        are unreliable — degrade every
-#                                                        bisection decision to v1 close)
+#                                                        bisection decision to v1 close,
+#                                                        and suppress stale-branch
+#                                                        deletion + new-root creation)
+#   recent_omnibus_closures: [datetime]                 (closedAt of sparq-omnibus PRs
+#                                                        closed UNMERGED — the durable
+#                                                        ROOT_COOLDOWN_HOURS record)
 # --------------------------------------------------------------------------------------
 def plan(state: dict) -> list:
     repo = state["repo"]
@@ -515,6 +549,7 @@ def plan(state: dict) -> list:
     dying_branches = set()
     children_spawned = False   # freshly planned children block a new ROOT this run
     suppress_root = False      # depth-cap fallback: no same-run rebuild of a doomed root
+    infra_closed = False       # an infra-shaped close this run: no same-run root rebuild
     quarantined = set()        # disarmed culprits — never re-batched into a new root
     can_create = state.get("batch_enabled", True)
     truncated = state.get("open_list_truncated", False)
@@ -532,28 +567,39 @@ def plan(state: dict) -> list:
     for om in open_omnibus:
         age = omnibus_age_hours(om.get("head_ref", ""), state["now"])
         bisectable = False
-        # Only a strict, CONCLUDED head-gate FAILURE may CONVICT a singleton survivor
-        # (quarantine). cancelled / timed_out / age-expiry are infra-shaped (a
-        # human-cancelled run, runner starvation, checks that never reported): they
-        # still close/bisect, but must never disarm a lone constituent — under a
-        # sustained outage that cascade would serially disarm the entire armed backlog.
+        # Only a strict, CONCLUDED head-gate FAILURE is a constituent-fault signal:
+        # it alone BISECTS, and it alone may CONVICT a singleton survivor
+        # (quarantine). Everything else — a conflict, a cancelled / timed_out gate,
+        # age-expiry — v1-closes without ever implicating a constituent.
         culpable = False
         gate_c = gate_conclusion(om)
-        if gate_c is not None:
+        if (om.get("mergeable") or "").upper() == "CONFLICTING":
+            # Checked FIRST — BEFORE any gate verdict. Main moved under the omnibus,
+            # so even a concluded gate FAILURE on this head was evidence against a
+            # stale base, not against any constituent: v1 close only, no bisection,
+            # no quarantine — close-and-recreate rebuilds a fresh root off current
+            # main. Conflicts must NEVER implicate constituents.
+            reason = "it conflicts with `main`"
+        elif gate_c == "failure":
             reason = f"its `gate` check concluded in {gate_c}"
             bisectable = True
-            culpable = gate_c == "failure"
-        elif (om.get("mergeable") or "").upper() == "CONFLICTING":
-            # NOT a constituent fault (main moved under the omnibus): v1 close only, no
-            # bisection — close-and-recreate rebuilds a fresh root off current main.
-            reason = "it conflicts with `main`"
+            culpable = True
+        elif gate_c is not None:
+            # cancelled / timed_out: infra-shaped (a human-cancelled run, runner
+            # starvation), NOT a code verdict — v1 close only, never bisection
+            # (splitting on an outage doubles the node count every pass), and the
+            # infra flag below suppresses a same-run root rebuild.
+            reason = (f"its `gate` check concluded in {gate_c} (infra-shaped — "
+                      f"not a verdict against any constituent)")
+            infra_closed = True
         elif age is None or age > MAX_OMNIBUS_AGE_HOURS:
             # Liveness backstop: covers every head-invisible failure (merge-group gate
-            # failure, dropped arm, checks never reported, unparseable stamp).
+            # failure, dropped arm, checks never reported, unparseable stamp). Also
+            # infra-shaped: v1 close only, never bisection, no same-run rebuild.
             reason = (f"it did not merge within {MAX_OMNIBUS_AGE_HOURS}h of creation "
                       f"(no route to merge — e.g. a merge-group failure, a dropped "
                       f"auto-merge arm, or checks that never reported)")
-            bisectable = True
+            infra_closed = True
         else:
             # §7 re-arm: GitHub drops the auto-merge arm when a merge group fails; a
             # young, mergeable, UNARMED omnibus gets its arm restored idempotently so a
@@ -611,11 +657,11 @@ def plan(state: dict) -> list:
             children_spawned = True
             continue
         if len(survivors) == 1 and not culpable:
-            # NON-verdict failure (age-expiry / gate cancelled / timed_out) of a
-            # singleton: the sole survivor is INNOCENT until a gate convicts it —
-            # these are infra/starvation modes, not evidence of broken code. v1
-            # graceful degradation: close the parent, leave the survivor individually
-            # armed so the queue lands or fails it on its own signal.
+            # Belt-and-braces conviction gate. Unreachable by construction today
+            # (survivors are only computed when bisectable, and bisectable implies a
+            # strict gate FAILURE) — kept so that if bisectability is ever widened
+            # again, a sole survivor still can only be quarantined by a concluded
+            # head-gate FAILURE verdict, never by an infra-shaped mode.
             log(f"sole survivor PR #{survivors[0]} of omnibus #{om['number']} "
                 f"(depth {depth}) NOT quarantined: {reason} is not a concluded "
                 f"head-gate FAILURE verdict — v1 close, survivor stays armed")
@@ -661,12 +707,23 @@ def plan(state: dict) -> list:
             note=f"branch of closed omnibus #{om['number']}"))
 
     # ---- 8. stale hygiene: sparq-omnibus/* branches with no open PR ----
-    live_branches = {p["head_ref"] for p in open_omnibus}
-    for br in sorted(state.get("remote_omnibus_branches", [])):
-        if br in live_branches or br in dying_branches:
-            continue
-        actions.append(Action("delete-branch", "git", ["push", "origin", "--delete", br],
-                              note="stale omnibus branch (no open PR)"))
+    if truncated:
+        # A truncated listing can OMIT a live omnibus PR: its branch would look
+        # stale here and be DELETED out from under an open PR — and the one-tree
+        # check below would then also open a duplicate root. Fail-safe: nothing
+        # destructive on incomplete data; a later run with a complete listing
+        # does the hygiene.
+        log(f"open-PR listing saturated its fetch limit ({OPEN_PR_LIST_LIMIT}): "
+            f"a live omnibus may be missing from it — skipping stale-branch "
+            f"deletion this run (fail-safe)")
+    else:
+        live_branches = {p["head_ref"] for p in open_omnibus}
+        for br in sorted(state.get("remote_omnibus_branches", [])):
+            if br in live_branches or br in dying_branches:
+                continue
+            actions.append(Action("delete-branch", "git",
+                                  ["push", "origin", "--delete", br],
+                                  note="stale omnibus branch (no open PR)"))
 
     # ---- 1-4. root batching (v2: batch EVERYTHING eligible) ----
     if not can_create:
@@ -675,6 +732,14 @@ def plan(state: dict) -> list:
         # reports -> no queue admission), so creating one would only wedge. The
         # closure / failure / re-arm / stale legs above still ran.
         log("hygiene-only mode — skipping omnibus creation (no App token)")
+        return actions
+    if truncated:
+        # The one-open-tree check below reads the SAME truncated listing: a live
+        # omnibus omitted from it would not suppress a new root, breaking the
+        # one-tree guarantee. Fail-safe: no new root on incomplete data.
+        log(f"open-PR listing saturated its fetch limit ({OPEN_PR_LIST_LIMIT}): "
+            f"a live omnibus may be invisible, so the one-tree guarantee cannot be "
+            f"verified — not opening a new root this run (fail-safe)")
         return actions
     eligible = eligible_constituents(open_prs)
     # QUEUE_RESERVE (0) eligible PRs stay individually queued; the rest — everything —
@@ -696,6 +761,28 @@ def plan(state: dict) -> list:
         return actions
     if children_spawned or suppress_root:
         log("bisection children spawned / depth-cap fallback this run — no new root")
+        return actions
+    if infra_closed:
+        # An omnibus died this run for an infra-shaped reason (cancelled / timed_out
+        # gate, age-expiry). Rebuilding a root immediately would retry the exact
+        # same environment that just failed — under a sustained outage that is the
+        # close-and-rebuild flood. The constituents stay individually armed; a new
+        # root waits out the cooldown below.
+        log(f"an omnibus closed for an infra-shaped reason this run — no same-run "
+            f"root rebuild (a new root waits out ROOT_COOLDOWN_HOURS="
+            f"{ROOT_COOLDOWN_HOURS}h)")
+        return actions
+    recent = [t for t in state.get("recent_omnibus_closures", [])
+              if t is not None
+              and (state["now"] - t).total_seconds() / 3600.0 < ROOT_COOLDOWN_HOURS]
+    if recent:
+        # Durable cross-run damping (the batcher is stateless — this reads GitHub's
+        # closed-PR record): a recently failure-closed omnibus means the environment
+        # was churning; do not re-root until the cooldown elapses. Bisection
+        # children were planned above and are deliberately exempt.
+        log(f"root-creation cooldown: {len(recent)} omnibus failure-close(s) within "
+            f"the last {ROOT_COOLDOWN_HOURS}h — not opening a new root (damps the "
+            f"close-and-rebuild flood; constituents stay individually armed)")
         return actions
 
     branch = omnibus_branch(state["now"])
@@ -728,7 +815,8 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
     targeted per-PR views only where the policy needs the heavy fields (open omnibus PRs
     and the overflow candidates). A listing that SATURATES OPEN_PR_LIST_LIMIT may be
     truncated — constituent liveness would then be unreliable — so the snapshot carries
-    open_list_truncated and plan() degrades every bisection decision to a v1 close."""
+    open_list_truncated and plan() degrades every bisection decision to a v1 close AND
+    suppresses stale-branch deletion + new-root creation (fail-safe)."""
     fields = "number,headRefName,title,author,labels,isDraft,autoMergeRequest"
     raw = json.loads(run_gh(["pr", "list", "--repo", repo, "--state", "open",
                              "--limit", str(OPEN_PR_LIST_LIMIT), "--json", fields]))
@@ -736,7 +824,8 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
     if open_list_truncated:
         log(f"WARNING: open-PR listing returned {len(raw)} >= its --limit "
             f"{OPEN_PR_LIST_LIMIT} — possibly truncated; survivor censuses are "
-            f"unreliable, so this run's bisection decisions all degrade to v1 closes")
+            f"unreliable, so this run degrades bisection to v1 closes and suppresses "
+            f"stale-branch deletion + new-root creation")
     open_prs = []
     for pr in raw:
         am = pr.get("autoMergeRequest")
@@ -783,6 +872,22 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
                       for m in merged
                       if m.get("headRefName", "").startswith(OMNIBUS_PREFIX)]
 
+    # ROOT_COOLDOWN_HOURS record (rule 6): omnibus PRs closed UNMERGED recently.
+    # GitHub's closed-PR list is the stateless batcher's only durable cross-run
+    # memory; "closed" includes merged PRs, so filter on a null mergedAt.
+    closed = json.loads(run_gh(["pr", "list", "--repo", repo, "--state", "closed",
+                                "--limit", "30", "--search", "head:sparq-omnibus/",
+                                "--json", "number,headRefName,closedAt,mergedAt"]))
+    recent_omnibus_closures = []
+    for c in closed:
+        if not c.get("headRefName", "").startswith(OMNIBUS_PREFIX) or c.get("mergedAt"):
+            continue
+        try:
+            recent_omnibus_closures.append(
+                datetime.fromisoformat((c.get("closedAt") or "").replace("Z", "+00:00")))
+        except ValueError:
+            continue  # undatable close: cannot feed a time-window decision
+
     # Emptiness test: merging the constituent branch into main yields main's own tree
     # <=> the branch adds nothing. (A plain two/three-dot diff is wrong here: after the
     # omnibus SQUASHES onto main the constituent's merge-base is stale, so its three-dot
@@ -825,7 +930,8 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
             "merged_omnibus": merged_omnibus, "empty_vs_main": empty_vs_main,
             "remote_omnibus_branches": remote_omnibus_branches,
             "batch_enabled": batch_enabled,
-            "open_list_truncated": open_list_truncated}
+            "open_list_truncated": open_list_truncated,
+            "recent_omnibus_closures": recent_omnibus_closures}
 
 
 def execute(actions: list, state: dict, dry_run: bool) -> int:
@@ -878,6 +984,17 @@ def execute(actions: list, state: dict, dry_run: bool) -> int:
                     run_git(["merge", "--abort"], check=False)
                     seg_skipped.append(act.constituent)
                     log(f"constituent #{act.constituent} conflicts — skipped (stays armed)")
+            elif act.kind == "delete-branch":
+                # Best-effort, like arm/disarm: an already-deleted branch (remote
+                # ref not found) IS the target state, and a transient delete
+                # failure must never wedge the run — the child / replacement-root
+                # creation segments planned AFTER this action still have to
+                # execute, and §8 stale hygiene retries the delete next run.
+                if run_git(argv, check=False) != 0:
+                    log(f"WARNING: delete-branch failed"
+                        + (f" [{act.note}]" if act.note else "")
+                        + " — non-fatal (already deleted, or retried by the next "
+                          "run's stale hygiene); continuing")
             else:
                 run_git(argv)
         else:
@@ -916,14 +1033,15 @@ def _worker(num, issue, labels=("review:pass",), **kw):
 
 
 def _state(open_prs=(), merged=(), empty=None, branches=(), batch_enabled=True,
-           truncated=False):
+           truncated=False, recent_closures=()):
     return {"repo": "sparq-org/sparq",
             "now": datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc),
             "open_prs": list(open_prs), "merged_omnibus": list(merged),
             "empty_vs_main": dict(empty or {}),
             "remote_omnibus_branches": list(branches),
             "batch_enabled": batch_enabled,
-            "open_list_truncated": truncated}
+            "open_list_truncated": truncated,
+            "recent_omnibus_closures": list(recent_closures)}
 
 
 def self_test() -> int:
@@ -1090,12 +1208,13 @@ def self_test() -> int:
     got = plan(_state(open_prs=two + [dropped_om]))
     check("re-armed omnibus still suppresses a new root", [a.kind for a in got], ["arm"])
 
-    # 6d. CLOSE-AND-RECREATE: a dying markerless (0-survivor) omnibus does NOT suppress
-    #     a new root — the same plan closes it AND opens the fresh root.
+    # 6d. INFRA CLOSE = NO SAME-RUN REBUILD: an age-expired omnibus closes for an
+    #     infra-shaped reason, so the still-eligible pair does NOT get a fresh root in
+    #     the same plan (the close-and-rebuild flood damper; the CONFLICT path B-d is
+    #     the close-and-recreate that DOES rebuild same-run).
     got = plan(_state(open_prs=two + [aged_om]))
-    check("dying omnibus lifts suppression (close + fresh root in one plan)",
-          [a.kind for a in got],
-          ["close-omnibus", "delete-branch"] + creation_kinds(2))
+    check("infra (age-expiry) close suppresses the same-run root rebuild",
+          [a.kind for a in got], ["close-omnibus", "delete-branch"])
 
     # ---------------------------- BISECTION v2 ----------------------------
     # B-a. Failing SIX-constituent omnibus (v1 marker: depth=0 implied) -> close parent
@@ -1141,14 +1260,14 @@ def self_test() -> int:
     check("(a2) hygiene-only: bisectable parent v1-closes, no children",
           [a.kind for a in got], ["close-omnibus", "delete-branch"])
 
-    # B-a3. an OVER-AGE omnibus with survivors bisects too (age is a failure signal,
-    #       not just hygiene).
+    # B-a3. an OVER-AGE omnibus NEVER bisects — age-expiry is infra-shaped (outage /
+    #       starvation / head-invisible modes), not a verdict against any constituent:
+    #       v1 close only, survivors untouched, no children, no same-run rebuild.
     aged_parent = _pr(510, "sparq-omnibus/20260717T060000Z", author="app/github-actions",
                       body="<!-- sparq-omnibus:v2 constituents=109,110 depth=0 -->")
     got = plan(_state(open_prs=two + [aged_parent]))
-    check("(a3) over-age omnibus bisects (2 survivors -> singleton children)",
-          [a.kind for a in got],
-          ["close-omnibus", "delete-branch"] + creation_kinds(1) + creation_kinds(1))
+    check("(a3) over-age omnibus: v1 close only — no bisection, no rebuild",
+          [a.kind for a in got], ["close-omnibus", "delete-branch"])
 
     # B-b. Failing TWO-constituent omnibus -> two SINGLETON children (allowed: a
     #      singleton CHILD is how the culprit gets isolated — MIN_CONSTITUENTS applies
@@ -1214,9 +1333,8 @@ def self_test() -> int:
     #       and age-expiry (queue congestion, checks that never reported — outage
     #       modes) v1-close the parent and leave the sole survivor individually armed:
     #       under a sustained outage every singleton leaf would otherwise serially
-    #       disarm the entire armed backlog. (These conclusions still BISECT at >=2
-    #       survivors — B-a4 — the gating is only about convicting ONE PR without a
-    #       hard verdict.)
+    #       disarm the entire armed backlog. (These conclusions never bisect at ANY
+    #       survivor count either — B-a4.)
     for concl in ("CANCELLED", "TIMED_OUT"):
         soft = _pr(530, "sparq-omnibus/20260717T110000Z", author="app/github-actions",
                    armed_by=None,
@@ -1234,30 +1352,77 @@ def self_test() -> int:
     check("(c3) age-expired singleton: no comment/draft/disarm on the survivor",
           any(a.kind in ("comment", "draft", "disarm") for a in got), False)
 
-    # B-a4. EVERY failing gate conclusion (failure / timed_out / cancelled) is
-    #       BISECTABLE — pins the full GATE_FAILING_CONCLUSIONS tuple (a mutant that
-    #       narrowed gate_conclusion to failure-only once survived the whole suite).
-    for concl in ("FAILURE", "TIMED_OUT", "CANCELLED"):
+    # B-a4. BISECTION GATING + the 16-PR INFRA-FAILURE SIM: ONLY a strict `gate`
+    #       FAILURE conclusion bisects. cancelled / timed_out (and age-expiry, a3)
+    #       are infra-shaped: a 16-constituent root under a sustained outage must
+    #       produce ZERO new omnibus nodes — no 2->4->8->16 split cascade, no
+    #       quarantine, and no same-run depth-0 rebuild (the queue-flood mode) —
+    #       just a v1 close; all 16 constituents stay individually armed. It also
+    #       pins that cancelled / timed_out still CLOSE the omnibus at all (a
+    #       mutant narrowing GATE_FAILING_CONCLUSIONS to failure-only would leave
+    #       it open until the age bound).
+    sixteen = [_worker(700 + i, 9700 + i) for i in range(16)]
+    nums16 = ",".join(str(700 + i) for i in range(16))
+    for concl in ("CANCELLED", "TIMED_OUT"):
         p = _pr(505, "sparq-omnibus/20260717T110000Z", author="app/github-actions",
                 armed_by=None,
                 checks=[{"name": "gate", "status": "COMPLETED", "conclusion": concl}],
-                body="<!-- sparq-omnibus:v2 constituents=109,110 depth=0 -->")
-        got = plan(_state(open_prs=two + [p]))
-        check(f"(a4) gate {concl.lower()}: 2 survivors bisect into singleton children",
-              [a.kind for a in got],
-              ["close-omnibus", "delete-branch"] + creation_kinds(1) + creation_kinds(1))
+                body=f"<!-- sparq-omnibus:v2 constituents={nums16} depth=0 -->")
+        got = plan(_state(open_prs=sixteen + [p]))
+        check(f"(a4) 16-PR sim, gate {concl.lower()}: v1 close only — zero new nodes",
+              [a.kind for a in got], ["close-omnibus", "delete-branch"])
+        check(f"(a4) 16-PR sim, gate {concl.lower()}: no constituent is implicated",
+              any(a.kind in ("comment", "draft", "disarm", "create-branch")
+                  for a in got), False)
+    aged16 = _pr(506, "sparq-omnibus/20260717T060000Z", author="app/github-actions",
+                 body=f"<!-- sparq-omnibus:v2 constituents={nums16} depth=0 -->")
+    got = plan(_state(open_prs=sixteen + [aged16]))
+    check("(a4) 16-PR sim, age-expiry: v1 close only — zero new nodes",
+          [a.kind for a in got], ["close-omnibus", "delete-branch"])
+    hard16 = _pr(507, "sparq-omnibus/20260717T110000Z", author="app/github-actions",
+                 armed_by=None, checks=gate_fail,
+                 body=f"<!-- sparq-omnibus:v2 constituents={nums16} depth=0 -->")
+    got = plan(_state(open_prs=sixteen + [hard16]))
+    check("(a4) 16-PR strict gate FAILURE still bisects into two 8-child halves",
+          [a.kind for a in got],
+          ["close-omnibus", "delete-branch"] + creation_kinds(8) + creation_kinds(8))
+
+    # B-j. ROOT COOLDOWN (durable, cross-run): any sparq-omnibus PR closed UNMERGED
+    #      within ROOT_COOLDOWN_HOURS suppresses a NEW ROOT — the infra-flood
+    #      backstop survives the batcher's statelessness via GitHub's closed-PR
+    #      record. An older closure does not suppress, and bisection children are
+    #      exempt (the cooldown damps re-rooting, never culprit isolation).
+    fresh_close = [datetime(2026, 7, 17, 11, 30, 0, tzinfo=timezone.utc)]  # 0.5h ago
+    stale_close = [datetime(2026, 7, 17, 8, 0, 0, tzinfo=timezone.utc)]    # 4h ago
+    check("(j) recent failure-close: cooldown suppresses the new root",
+          plan(_state(open_prs=two, recent_closures=fresh_close)), [])
+    check("(j) cooldown elapsed: root creation resumes",
+          [a.kind for a in plan(_state(open_prs=two, recent_closures=stale_close))],
+          creation_kinds(2))
+    got = plan(_state(open_prs=six + [parent6], recent_closures=fresh_close))
+    check("(j) cooldown never blocks bisection children",
+          [a.kind for a in got],
+          ["close-omnibus", "delete-branch"] + creation_kinds(3) + creation_kinds(3))
 
     # B-g. OPEN-PR LIST TRUNCATION: when gather_state's listing saturated its limit,
     #      constituent liveness is unreliable — absence from the list must NOT convict
-    #      anything. A failing parent v1-closes (no bisection, no quarantine); root
-    #      batching over the VISIBLE eligible set is still safe (a subset batches).
+    #      anything, and an omitted LIVE omnibus breaks the one-tree check. A failing
+    #      parent v1-closes (no bisection, no quarantine) — closing/deleting a VISIBLE
+    #      dying omnibus is still safe — but no new root opens on incomplete data.
     got = plan(_state(open_prs=[culprit, parent1], truncated=True))
     check("(g) truncated listing: singleton gate-failure does NOT quarantine",
           [a.kind for a in got], ["close-omnibus", "delete-branch"])
     got = plan(_state(open_prs=six + [parent6], truncated=True))
-    check("(g) truncated listing: bisectable parent v1-closes; visible eligible re-root",
-          [a.kind for a in got],
-          ["close-omnibus", "delete-branch"] + creation_kinds(6))
+    check("(g) truncated listing: bisectable parent v1-closes; NO re-root either",
+          [a.kind for a in got], ["close-omnibus", "delete-branch"])
+    # B-g2. TRUNCATION IS FAIL-SAFE for the one-tree guarantee: a live omnibus OMITTED
+    #       from the truncated list leaves its remote branch looking stale — that
+    #       branch must NOT be deleted, and no new root may open over the invisible
+    #       tree. Nothing destructive happens on incomplete data.
+    got = plan(_state(open_prs=two, branches=["sparq-omnibus/20260717T100000Z"],
+                      truncated=True))
+    check("(g2) truncated: no stale-branch delete, no new root — nothing destructive",
+          got, [])
 
     # B-d. CONFLICTING omnibus: NOT a constituent fault -> v1 close, NO children, no
     #      disarm; close-and-recreate then rebuilds a fresh ROOT (depth 0) off current
@@ -1274,6 +1439,24 @@ def self_test() -> int:
     root_body = _body_of([a for a in got if a.kind == "open-pr"][0])
     check("(d) rebuild is a ROOT (depth 0), not a child",
           "<!-- sparq-omnibus:v2 constituents=109,110 depth=0 -->" in root_body, True)
+
+    # B-d2. COMBINED STATE (conflict + STALE failed gate): mergeability is checked
+    #       FIRST. A CONFLICTING omnibus whose head ALSO carries an OLD concluded gate
+    #       FAILURE (evidence against a stale base — main moved under it) takes the
+    #       conflict path: v1 close only, NO bisection, NO quarantine — its singleton
+    #       marker constituent is untouched and stays individually armed. Conflicts
+    #       must NEVER implicate constituents.
+    conflict_stale = _pr(545, "sparq-omnibus/20260717T110000Z",
+                         author="app/github-actions", armed_by=None,
+                         mergeable="CONFLICTING", checks=gate_fail,
+                         body="<!-- sparq-omnibus:v2 constituents=221 depth=3 -->")
+    got = plan(_state(open_prs=[culprit, conflict_stale]))
+    check("(d2) conflicting + stale failed gate: close only — constituent untouched",
+          [a.kind for a in got], ["close-omnibus", "delete-branch"])
+    check("(d2) the close reason is the CONFLICT, not the stale gate verdict",
+          "conflicts with `main`" in _comment_of(got[0]), True)
+    check("(d2) no comment/draft/disarm ever reaches the constituent",
+          any(a.kind in ("comment", "draft", "disarm") for a in got), False)
 
     # B-e. DEPTH CAP: a failing omnibus at depth DEPTH_CAP with >=2 survivors -> v1
     #      fallback: close only, NO children, NO same-run rebuild, constituents
@@ -1418,6 +1601,38 @@ def self_test() -> int:
              and "--auto" in c[1]]
     check("segmented: only child B armed", armed,
           [("gh", ["pr", "merge", child_b2, "--repo", "sparq-org/sparq", "--auto"])])
+
+    # 13. EXECUTE: remote branch deletion is BEST-EFFORT — a failing
+    #     `git push --delete` (perms flake, ref already gone) must NOT abort the run:
+    #     the child segments planned AFTER the delete still execute (push / open /
+    #     arm), so a persistently failing delete can never wedge the state machine at
+    #     the same action run after run. The stub RAISES when the delete is invoked
+    #     with check=True, so reverting the best-effort handling crashes this test.
+    st = _state(open_prs=pair + [parent2])
+    acts = plan(st)
+    calls.clear()
+
+    def stub_git_delete_fails(argv, check=True):
+        calls.append(("git", list(argv)))
+        if argv[:3] == ["push", "origin", "--delete"]:
+            if check:
+                raise subprocess.CalledProcessError(1, ["git"] + argv)
+            return 1
+        return 0
+
+    run_git, run_gh = stub_git_delete_fails, stub_gh
+    try:
+        execute(acts, st, dry_run=False)
+    finally:
+        run_git, run_gh = real_git, real_gh
+    check("delete-failure: the parent-branch delete was attempted",
+          any(c[0] == "git" and c[1][:3] == ["push", "origin", "--delete"]
+              for c in calls), True)
+    opened = [c for c in calls if c[0] == "gh" and c[1][:2] == ["pr", "create"]]
+    check("delete-failure: BOTH child segments still open their PRs", len(opened), 2)
+    armed = [c for c in calls if c[0] == "gh" and c[1][:2] == ["pr", "merge"]
+             and "--auto" in c[1]]
+    check("delete-failure: both children still armed", len(armed), 2)
 
     if failures:
         for f in failures:

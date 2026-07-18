@@ -1,15 +1,25 @@
-# Omnibus merge-queue overflow batcher (scheduled / event-driven; NON-gating).
+# Omnibus merge-queue batcher, v2 (scheduled / event-driven; NON-gating).
 #
-# WHAT: when MORE than the merge queue's window (8) of reviewed, orchestrator-armed
-# sparq-agent/* worker PRs are waiting, the pure policy in scripts/batch-merge.py batches
-# the overflow into ONE sparq-omnibus/<utcstamp> integration PR (fresh off main, no-ff
-# merges; conflicting constituents are skipped and stay individually armed) and arms it —
-# the merge queue picks the strategy. It also closes constituents of MERGED omnibus PRs
-# whose branches now add nothing vs main, closes a FAILED / conflicting / OVER-AGE
-# omnibus (the age bound is the liveness backstop for merge-group failures, which are
-# invisible on the PR head; v1: no bisection — constituents stay individually armed),
-# re-arms a young omnibus whose auto-merge arm was dropped by a failed merge group, and
-# deletes stale sparq-omnibus/* branches. NO model calls; the policy is self-tested
+# WHAT: the pure policy in scripts/batch-merge.py batches ALL reviewed,
+# orchestrator-armed sparq-agent/* worker PRs (2 or more; no size cap — one omnibus is
+# ONE merge-queue entry however many constituents it carries) into ONE
+# sparq-omnibus/<utcstamp> integration PR (fresh off main, no-ff merges; conflicting
+# constituents are skipped and stay individually armed) and arms it — the merge queue
+# picks the strategy. It also closes constituents of MERGED omnibus PRs whose branches
+# now add nothing vs main, re-arms a young omnibus whose auto-merge arm was dropped by
+# a failed merge group, and deletes stale sparq-omnibus/* branches. Failure triage is
+# ordered, most-exculpatory first: a CONFLICTING omnibus (main moved under it) v1-closes
+# and is rebuilt fresh off main — a conflict never implicates constituents; ONLY a
+# strict concluded head-`gate` FAILURE recursively BISECTS the omnibus (halve-and-land,
+# to DEPTH_CAP) until the culprit is isolated, commented, drafted and disarmed (the
+# registry's `stranded` handoff); an infra-shaped ending (gate cancelled / timed_out,
+# or the MAX_OMNIBUS_AGE_HOURS liveness bound for head-invisible failures) v1-closes
+# WITHOUT bisection, and new-ROOT creation then waits out a durable
+# generation/cooldown backstop (ROOT_COOLDOWN_HOURS, read from GitHub's closed-PR
+# record) so a persistent outage can never flood the queue with rebuilt roots.
+# Constituents stay individually armed through every path — nothing is ever lost. A
+# possibly-truncated open-PR listing is fail-safe: no bisection, no stale-branch
+# deletion, no new root on incomplete data. NO model calls; the policy is self-tested
 # (gh + git stubbed) before it runs.
 #
 # NOT A GATE. This runs on `schedule` / `workflow_dispatch` / `workflow_run` / `push`,
