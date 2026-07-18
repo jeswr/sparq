@@ -338,9 +338,11 @@ impl PublicGrant {
         if validity.not_before > validity.not_after {
             return Err(Error::Schema("validity not_before > not_after"));
         }
-        // If publish is granted, a publisher public key must be present.
-        if authority.contains(&Authority::Publish) && publisher_pub.is_none() {
-            return Err(Error::Separation("publish authority without publisher key"));
+        // The publisher public key is present iff publish is granted: a grant
+        // without publish authority must not carry (and have authenticated) an
+        // unrelated publisher key.
+        if authority.contains(&Authority::Publish) != publisher_pub.is_some() {
+            return Err(Error::Separation("publisher key presence must match publish authority"));
         }
         Ok(PublicGrant {
             repo: repo.ok_or(Error::Schema("missing repo"))?,
@@ -406,10 +408,15 @@ impl Capability {
         if auth.contains(&Authority::Read) != self.read_secret.is_some() {
             return Err(Error::Separation("read authority <-> read secret mismatch"));
         }
-        if auth.contains(&Authority::Publish)
-            != (self.publisher_sk.is_some() && self.grant.publisher_pub.is_some())
-        {
-            return Err(Error::Separation("publish authority <-> publisher key mismatch"));
+        // Check the secret and public halves independently, so a non-publish
+        // capability carrying only one of them (e.g. a stray publisher_pub) is
+        // still rejected.
+        let publish = auth.contains(&Authority::Publish);
+        if publish != self.publisher_sk.is_some() {
+            return Err(Error::Separation("publish authority <-> publisher secret mismatch"));
+        }
+        if publish != self.grant.publisher_pub.is_some() {
+            return Err(Error::Separation("publish authority <-> publisher_pub mismatch"));
         }
         if let (Some(sk), Some(pk)) = (&self.publisher_sk, &self.grant.publisher_pub) {
             let derived = SecretSigningKey::from_seed(*sk).public().to_bytes();
@@ -702,5 +709,53 @@ mod tests {
         let bytes = grant_bytes_with_authority_tokens(&["read"]);
         let g = PublicGrant::decode(&bytes, Limits::default()).unwrap();
         assert_eq!(g.authority, vec![Authority::Read]);
+    }
+
+    /// A read-only grant carrying a publisher_pub violates the
+    /// `publisher_pub iff publish` invariant on public decode.
+    #[test]
+    fn public_decode_rejects_publisher_pub_without_publish() {
+        let mut g = base_grant(
+            RepoId::from_bytes([1u8; 32]),
+            BranchId::from_bytes([2u8; 32]),
+            Epoch(7),
+            TopicId::from_bytes([3u8; 32]),
+            Validity { not_before: 100, not_after: 200 },
+            vec!["wss://broker.example".to_string()],
+        );
+        g.authority = vec![Authority::Read];
+        g.publisher_pub = Some([4u8; PUBLIC_KEY_LEN]);
+        assert!(matches!(
+            PublicGrant::decode(&g.encode(), Limits::default()),
+            Err(Error::Separation(_))
+        ));
+    }
+
+    /// Same reverse mismatch through the secret-bearing decode path: a read
+    /// capability whose grant smuggles a publisher_pub (no publisher_sk).
+    #[test]
+    fn secret_decode_rejects_publisher_pub_without_publish() {
+        let mut g = base_grant(
+            RepoId::from_bytes([1u8; 32]),
+            BranchId::from_bytes([2u8; 32]),
+            Epoch(7),
+            TopicId::from_bytes([3u8; 32]),
+            Validity { not_before: 100, not_after: 200 },
+            vec!["wss://broker.example".to_string()],
+        );
+        g.authority = vec![Authority::Read];
+        g.publisher_pub = Some([4u8; PUBLIC_KEY_LEN]);
+        let cap = Capability {
+            grant: g,
+            read_secret: Some(Secret32([9u8; 32])),
+            publisher_sk: None,
+            admin_sk: None,
+        };
+        assert!(matches!(
+            Capability::decode_secret(&cap.encode_secret(), Limits::default()),
+            Err(Error::Separation(_))
+        ));
+        // validate() itself must also catch it, independent of decoding.
+        assert!(matches!(cap.validate(), Err(Error::Separation(_))));
     }
 }

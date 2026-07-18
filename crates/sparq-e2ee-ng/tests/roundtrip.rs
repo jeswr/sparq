@@ -152,6 +152,50 @@ fn cbor_rejects_duplicate_negative_keys() {
     assert!(matches!(res, Err(Error::NonCanonical(_))));
 }
 
+/// Build a struct map `{1: 9, -1: <ext_value>}` whose extension value is the
+/// raw bytes `ext_value`, and decode it through the real `read_struct_map`
+/// extension-skipping path.
+fn decode_with_extension_value(ext_value: &[u8]) -> Result<(), Error> {
+    let mut w = Writer::new();
+    w.raw(&[0xa2]); // map of 2
+    w.uint(1);
+    w.uint(9);
+    w.raw(&[0x20]); // nint 0 == -1
+    w.raw(ext_value);
+    let bytes = w.into_bytes();
+    let mut r = Reader::new(&bytes, lim());
+    sparq_e2ee_ng::cbor::read_struct_map(&mut r, |r, k| {
+        if k == 1 {
+            r.uint()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    })?;
+    r.finish()
+}
+
+#[test]
+fn cbor_skipped_extension_map_must_be_canonical() {
+    // A canonical nested map {1: 0, 2: 0} as the extension value is fine.
+    decode_with_extension_value(&[0xa2, 0x01, 0x00, 0x02, 0x00]).unwrap();
+    // Reverse key order {2: 0, 1: 0} inside the skipped value is non-canonical.
+    assert!(matches!(
+        decode_with_extension_value(&[0xa2, 0x02, 0x00, 0x01, 0x00]),
+        Err(Error::NonCanonical(_))
+    ));
+    // Duplicate keys {1: 0, 1: 0} inside the skipped value are rejected too.
+    assert!(matches!(
+        decode_with_extension_value(&[0xa2, 0x01, 0x00, 0x01, 0x00]),
+        Err(Error::NonCanonical(_))
+    ));
+    // A non-integer (text) key inside the skipped value is outside the profile.
+    assert!(matches!(
+        decode_with_extension_value(&[0xa1, 0x61, 0x61, 0x00]), // {"a": 0}
+        Err(Error::Schema(_))
+    ));
+}
+
 // ============================================================================
 // Signatures
 // ============================================================================

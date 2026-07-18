@@ -355,7 +355,11 @@ impl<'a> Reader<'a> {
 
     /// Skip exactly one CBOR item (used to discard an extension value), bounded
     /// by the depth limit. Only the supported subset is skippable; anything else
-    /// is malformed.
+    /// is malformed. Skipped content is still held to the deterministic-encoding
+    /// rules (`head` enforces shortest-form/definite lengths, and nested maps
+    /// get the same integer-key + canonical-order + no-duplicate checks as
+    /// decoded maps), so an ignored extension value cannot smuggle
+    /// non-canonical bytes past a decoder that validates the full input.
     pub fn skip_value(&mut self) -> Result<()> {
         self.skip_value_depth(0)
     }
@@ -389,8 +393,23 @@ impl<'a> Reader<'a> {
                 if n > self.limits.max_map_len {
                     return Err(Error::LimitExceeded("map too many entries"));
                 }
+                // Keys in a skipped map are held to the same rules as decoded
+                // maps: integer-only, strictly ascending canonical rank
+                // (encoded length first, then major type, then argument), no
+                // duplicates.
+                let mut last: Option<(usize, u8, u64)> = None;
                 for _ in 0..n {
-                    self.skip_value_depth(depth + 1)?; // key
+                    let (kmajor, karg) = self.head()?;
+                    if kmajor != MAJOR_UINT && kmajor != MAJOR_NINT {
+                        return Err(Error::Schema("map key must be an integer"));
+                    }
+                    let rank = (int_key_len(karg), kmajor, karg);
+                    if let Some(prev) = last {
+                        if rank <= prev {
+                            return Err(Error::NonCanonical("map keys not strictly ascending"));
+                        }
+                    }
+                    last = Some(rank);
                     self.skip_value_depth(depth + 1)?; // value
                 }
                 Ok(())
@@ -456,8 +475,9 @@ where
                 }
             }
             Key::Nint(_) => {
-                // Extension key: its value is ignored per §8.1, but its position
-                // and uniqueness are still canonical-order checked above.
+                // Extension key: its value is discarded per §8.1, but the key's
+                // position/uniqueness are checked above and the skipped value
+                // itself is still canonical-validated by `skip_value`.
                 r.skip_value()?;
             }
         }
