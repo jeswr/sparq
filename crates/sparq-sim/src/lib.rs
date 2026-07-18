@@ -28,6 +28,27 @@ pub enum SignatureMode {
     Predicates,
 }
 
+/// T-box expansion data for the `tbox` feature: the transitive closure of
+/// `rdfs:subClassOf` and `rdfs:subPropertyOf` extracted from the graph itself,
+/// plus the id of `rdf:type`. Built once in [`Sim::with_config`]. [SONNET-4.6] sq-181
+#[cfg(feature = "tbox")]
+struct TboxExpander {
+    /// ID of `rdf:type` in this graph; `NO_ID` when absent (no type expansions).
+    rdf_type: Id,
+    /// `class → all transitively-reachable superclasses` (rdfs:subClassOf closure).
+    subclass_up: FxHashMap<Id, Vec<Id>>,
+    /// `property → all transitively-reachable superproperties` (rdfs:subPropertyOf closure).
+    subprop_up: FxHashMap<Id, Vec<Id>>,
+}
+
+/// Sorted IRI local-name index for the lexical fallback tier (`lexical` feature).
+/// Holds `(local_name, id)` pairs sorted ascending by local name, covering IRI
+/// entities only. Built once in [`Sim::with_config`]. [SONNET-4.6] sq-181
+#[cfg(feature = "lexical")]
+struct LexicalIndex {
+    sorted: Vec<(Box<str>, Id)>,
+}
+
 /// Configuration for a [`Sim`] instance.
 #[derive(Clone, Debug)]
 pub struct SimConfig {
@@ -52,6 +73,20 @@ pub struct SimConfig {
     /// exactly-scored result and scored by the predicate-profile Jaccard. `false`
     /// restores the strict v1 behaviour (only neighbor-level evidence is returned).
     pub profile_fallback: bool,
+    /// T-box-aware signature expansion (default `true`, available with the `tbox`
+    /// Cargo feature): expand `rdf:type` elements with inferred superclass entries
+    /// from the graph's own `rdfs:subClassOf` closure, and every predicate element
+    /// with its `rdfs:subPropertyOf` superproperties. Inferred entries contribute at
+    /// `original_weight × 0.5`. Builds the closure once in [`Sim::with_config`].
+    #[cfg(feature = "tbox")]
+    pub tbox_aware: bool,
+    /// Lexical fallback tier (default `true`, available with the `lexical` Cargo
+    /// feature): after structural- and profile-fallback candidates are exhausted,
+    /// fill remaining slots with entities whose IRI local name has high trigram-Jaccard
+    /// similarity to the query entity's local name. Ranked below all other tiers.
+    /// Only fires for [`Sim::most_similar`] (not [`Sim::similar_by_signature`]).
+    #[cfg(feature = "lexical")]
+    pub lexical_fallback: bool,
     /// Maximum structural-neighborhood depth. The default `1` preserves the original
     /// adjacent-triple signature exactly. Values greater than `1` expand breadth-first,
     /// retaining first-hop elements at full weight and attenuating hop `h` by
@@ -68,6 +103,10 @@ impl Default for SimConfig {
             exclude_predicates: Vec::new(),
             max_pair_frequency: 10_000,
             profile_fallback: true,
+            #[cfg(feature = "tbox")]
+            tbox_aware: true,
+            #[cfg(feature = "lexical")]
+            lexical_fallback: true,
             #[cfg(feature = "multi-hop")]
             depth: 1,
         }
@@ -77,6 +116,20 @@ impl Default for SimConfig {
 /// Fixed per-hop attenuation used by the `multi-hop` feature.
 #[cfg(feature = "multi-hop")]
 const MULTI_HOP_ATTENUATION: f64 = 0.5;
+
+/// Fixed weight attenuation for T-box-inferred signature elements. An element derived
+/// one step up the rdfs:subClassOf / rdfs:subPropertyOf hierarchy contributes at
+/// `original_weight × TBOX_ATTENUATION`. [SONNET-4.6] sq-181
+#[cfg(feature = "tbox")]
+const TBOX_ATTENUATION: f64 = 0.5;
+
+/// Standard RDF/RDFS vocabulary IRI strings used by the `tbox` feature. [SONNET-4.6] sq-181
+#[cfg(feature = "tbox")]
+const RDF_TYPE_IRI: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+#[cfg(feature = "tbox")]
+const RDFS_SUBCLASS_OF_IRI: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+#[cfg(feature = "tbox")]
+const RDFS_SUBPROPERTY_OF_IRI: &str = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf";
 
 /// Edge direction within a signature element (outgoing: the entity is the subject;
 /// incoming: the entity is the object). Direction is part of the element — "directs
@@ -123,6 +176,10 @@ pub struct Sim<'g> {
     excluded: Vec<Id>,
     max_pair_frequency: usize,
     profile_fallback: bool,
+    #[cfg(feature = "tbox")]
+    tbox: Option<TboxExpander>,
+    #[cfg(feature = "lexical")]
+    lexical_idx: Option<LexicalIndex>,
     #[cfg(feature = "multi-hop")]
     depth: usize,
     /// |G| as f64, the IDF numerator.
@@ -151,6 +208,10 @@ impl<'g> Sim<'g> {
             excluded,
             max_pair_frequency: cfg.max_pair_frequency,
             profile_fallback: cfg.profile_fallback,
+            #[cfg(feature = "tbox")]
+            tbox: if cfg.tbox_aware { Some(build_tbox_expander(graph)) } else { None },
+            #[cfg(feature = "lexical")]
+            lexical_idx: if cfg.lexical_fallback { Some(build_lexical_index(graph)) } else { None },
             #[cfg(feature = "multi-hop")]
             depth: cfg.depth.max(1),
             n_triples: graph.len().max(1) as f64,
@@ -183,7 +244,14 @@ impl<'g> Sim<'g> {
     }
 
     fn signature_of_id(&self, id: Id) -> Signature {
-        self.signature_of_id_mode(id, self.mode == SignatureMode::PredicateNeighbor)
+        let sig = self.signature_of_id_mode(id, self.mode == SignatureMode::PredicateNeighbor);
+        #[cfg(feature = "tbox")]
+        let sig = if self.tbox.is_some() {
+            self.tbox_expand_signature(sig, self.mode == SignatureMode::PredicateNeighbor)
+        } else {
+            sig
+        };
+        sig
     }
 
     fn signature_of_id_mode(&self, id: Id, keep_neighbor: bool) -> Signature {
@@ -407,6 +475,15 @@ impl<'g> Sim<'g> {
         {
             self.fill_profile_fallback(sig, k, exclude, &mut scored);
         }
+        // 5. Lexical fallback (opt-in `lexical` feature): after structural and profile
+        // fallbacks, fill remaining slots from the sorted IRI local-name index using
+        // trigram-Jaccard similarity. Only fires for `most_similar` (exclude.is_some()).
+        // `lexical_idx.is_some()` is equivalent to `cfg.lexical_fallback` at build time.
+        // [SONNET-4.6] sq-181
+        #[cfg(feature = "lexical")]
+        if self.lexical_idx.is_some() && exclude.is_some() && scored.len() < k {
+            self.fill_lexical_fallback(k, exclude, &mut scored);
+        }
         scored.into_iter().map(|(c, s)| (self.graph.dict.term(c), s)).collect()
     }
 
@@ -529,7 +606,257 @@ impl<'g> Sim<'g> {
             dict::TermParts::Iri { .. } | dict::TermParts::Blank(_)
         )
     }
+
+    /// Lexical fallback tier (`lexical` feature): fill remaining `k - scored.len()` slots
+    /// with IRI entities whose local name has high trigram-Jaccard similarity to the query
+    /// entity's local name. Only fires when `exclude = Some(query_id)`. [SONNET-4.6] sq-181
+    #[cfg(feature = "lexical")]
+    fn fill_lexical_fallback(
+        &self,
+        k: usize,
+        exclude: Option<Id>,
+        scored: &mut Vec<(Id, f64)>,
+    ) {
+        let Some(lexical) = &self.lexical_idx else { return };
+        let Some(query_id) = exclude else { return };
+
+        let query_key: Option<String> = {
+            let parts = self.graph.dict.term_parts(query_id);
+            lexical_key_of(&parts)
+        };
+        let Some(query_key) = query_key else { return };
+
+        let have: rustc_hash::FxHashSet<Id> = scored.iter().map(|&(c, _)| c).collect();
+        let remaining = k - scored.len();
+
+        // Prefix range: use the first min(3, len) bytes of the query key for a focused scan.
+        let prefix_len = query_key.len().min(3);
+        let prefix = &query_key[..prefix_len];
+        let start = lexical.sorted.partition_point(|(k, _)| k.as_ref() < prefix);
+        let end =
+            start + lexical.sorted[start..].partition_point(|(k, _)| k.starts_with(prefix));
+
+        let mut fb: Vec<(Id, f64)> = lexical.sorted[start..end]
+            .iter()
+            .filter_map(|(key, id)| {
+                if Some(*id) == exclude || have.contains(id) || !self.is_entity(*id) {
+                    return None;
+                }
+                let s = trigram_jaccard(&query_key, key);
+                if s > 0.0 { Some((*id, s)) } else { None }
+            })
+            .collect();
+
+        fb.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        fb.truncate(remaining);
+        scored.extend(fb);
+    }
 }
+
+/// T-box-aware signature expansion methods (`tbox` feature). [SONNET-4.6] sq-181
+#[cfg(feature = "tbox")]
+impl<'g> Sim<'g> {
+    /// Expand `sig` with elements inferred from the T-box hierarchy:
+    /// - `(OUT, rdf:type, C)` → add `(OUT, rdf:type, Ci)` for each transitive superclass Ci.
+    /// - `(dir, P, N)` → add `(dir, Pi, N)` for each transitive superproperty Pi of P.
+    /// Inferred elements receive `original_weight × TBOX_ATTENUATION`. When an inferred
+    /// element duplicates a direct element the direct weight (higher) wins. [SONNET-4.6] sq-181
+    fn tbox_expand_signature(&self, sig: Signature, keep_neighbor: bool) -> Signature {
+        let Some(tbox) = &self.tbox else { return sig; };
+
+        let n_base = sig.elems.len();
+        let mut new_elems: Vec<(u8, Id, Id)> = Vec::new();
+        let mut new_weights: Vec<f64> = Vec::new();
+
+        for i in 0..n_base {
+            let (dir, p, nbr) = sig.elems[i];
+            let base_w = sig.weights[i];
+
+            // Expand via rdfs:subPropertyOf: add (dir, sp, nbr) for each superproperty sp.
+            if let Some(superprops) = tbox.subprop_up.get(&p) {
+                for &sp in superprops {
+                    let e = (dir, sp, nbr);
+                    if sig.elems.binary_search(&e).is_err() && !new_elems.contains(&e) {
+                        new_elems.push(e);
+                        new_weights.push(base_w * TBOX_ATTENUATION);
+                    }
+                }
+            }
+
+            // Expand via rdfs:subClassOf: add (OUT, rdf:type, sc) for each superclass sc.
+            // Only when keep_neighbor = true (PredicateNeighbor mode) and p = rdf:type.
+            if keep_neighbor
+                && dir == OUT
+                && p == tbox.rdf_type
+                && tbox.rdf_type != NO_ID
+            {
+                if let Some(superclasses) = tbox.subclass_up.get(&nbr) {
+                    for &sc in superclasses {
+                        let e = (OUT, tbox.rdf_type, sc);
+                        if sig.elems.binary_search(&e).is_err() && !new_elems.contains(&e) {
+                            new_elems.push(e);
+                            new_weights.push(base_w * TBOX_ATTENUATION);
+                        }
+                    }
+                }
+            }
+        }
+
+        if new_elems.is_empty() {
+            return sig;
+        }
+
+        // Merge originals + inferred; sort by element key; dedup keeping MAX weight.
+        let mut merged: Vec<((u8, Id, Id), f64)> = sig
+            .elems
+            .iter()
+            .copied()
+            .zip(sig.weights.iter().copied())
+            .chain(new_elems.into_iter().zip(new_weights.into_iter()))
+            .collect();
+        merged.sort_unstable_by_key(|&(e, _)| e);
+
+        let mut deduped: Vec<((u8, Id, Id), f64)> = Vec::with_capacity(merged.len());
+        for (e, w) in merged {
+            if let Some(last) = deduped.last_mut() {
+                if last.0 == e {
+                    last.1 = last.1.max(w);
+                    continue;
+                }
+            }
+            deduped.push((e, w));
+        }
+
+        let (elems, weights): (Vec<_>, Vec<_>) = deduped.into_iter().unzip();
+        let total = weights.iter().sum();
+        Signature { elems, weights, total }
+    }
+}
+
+// ---- T-box helpers (`tbox` feature) -----------------------------------------------
+
+/// Build the `TboxExpander` for a graph: scan for `rdfs:subClassOf` /
+/// `rdfs:subPropertyOf` triples, compute their transitive closures, and record
+/// the `rdf:type` id. [SONNET-4.6] sq-181
+#[cfg(feature = "tbox")]
+fn build_tbox_expander(graph: &Graph) -> TboxExpander {
+    let rdf_type = graph
+        .id_of(&Term::NamedNode(NamedNode::new_unchecked(RDF_TYPE_IRI)))
+        .unwrap_or(NO_ID);
+
+    let mut sc_direct: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    if let Some(sc_id) =
+        graph.id_of(&Term::NamedNode(NamedNode::new_unchecked(RDFS_SUBCLASS_OF_IRI)))
+    {
+        let scan = graph.store.scan(&[None, Some(sc_id), None]);
+        for row in scan.rows.iter() {
+            let [s, _, o] = scan.to_spo(row);
+            sc_direct.entry(s).or_default().push(o);
+        }
+    }
+
+    let mut sp_direct: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    if let Some(sp_id) =
+        graph.id_of(&Term::NamedNode(NamedNode::new_unchecked(RDFS_SUBPROPERTY_OF_IRI)))
+    {
+        let scan = graph.store.scan(&[None, Some(sp_id), None]);
+        for row in scan.rows.iter() {
+            let [s, _, o] = scan.to_spo(row);
+            sp_direct.entry(s).or_default().push(o);
+        }
+    }
+
+    TboxExpander {
+        rdf_type,
+        subclass_up: tbox_transitive_closure(&sc_direct),
+        subprop_up: tbox_transitive_closure(&sp_direct),
+    }
+}
+
+/// BFS transitive closure: `node → all reachable successors` in a directed graph
+/// given as `node → direct successors`. [SONNET-4.6] sq-181
+#[cfg(feature = "tbox")]
+fn tbox_transitive_closure(
+    direct: &FxHashMap<Id, Vec<Id>>,
+) -> FxHashMap<Id, Vec<Id>> {
+    let mut closure: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    for (&start, _) in direct {
+        let mut seen: rustc_hash::FxHashSet<Id> = rustc_hash::FxHashSet::default();
+        let mut stack: Vec<Id> = direct.get(&start).cloned().unwrap_or_default();
+        while let Some(n) = stack.pop() {
+            if seen.insert(n) {
+                if let Some(succ) = direct.get(&n) {
+                    stack.extend(succ.iter().copied());
+                }
+            }
+        }
+        if !seen.is_empty() {
+            closure.insert(start, seen.into_iter().collect());
+        }
+    }
+    closure
+}
+
+// ---- Lexical-tier helpers (`lexical` feature) -------------------------------------
+
+/// Build the sorted `(local_name, id)` lexical index for all IRI entities in
+/// `graph`. [SONNET-4.6] sq-181
+#[cfg(feature = "lexical")]
+fn build_lexical_index(graph: &Graph) -> LexicalIndex {
+    let mut entries: Vec<(Box<str>, Id)> = graph
+        .dict
+        .iter()
+        .filter_map(|(id, parts)| {
+            if dict::is_inline(id) {
+                return None;
+            }
+            let key = lexical_key_of(&parts)?;
+            Some((key.into_boxed_str(), id))
+        })
+        .collect();
+    entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    LexicalIndex { sorted: entries }
+}
+
+/// Extract the lexical sort key for a term: the IRI local name (suffix) for IRI
+/// terms, or the literal value string for literals. `None` for blank nodes, triple
+/// terms, or empty keys. [SONNET-4.6] sq-181
+#[cfg(feature = "lexical")]
+fn lexical_key_of(parts: &dict::TermParts<'_>) -> Option<String> {
+    match parts {
+        dict::TermParts::Iri { suffix, .. } if !suffix.is_empty() => Some((*suffix).to_owned()),
+        dict::TermParts::Iri { prefix, .. } if !prefix.is_empty() => Some((*prefix).to_owned()),
+        dict::TermParts::Lit { value, .. } if !value.is_empty() => Some((*value).to_owned()),
+        _ => None,
+    }
+}
+
+/// Character-trigram Jaccard similarity of two strings: `|tri(a) ∩ tri(b)| / |tri(a) ∪ tri(b)|`.
+/// Falls back to a longest-common-byte-prefix ratio for strings shorter than 3 bytes.
+/// Returns `1.0` for two identical empty strings. [SONNET-4.6] sq-181
+#[cfg(feature = "lexical")]
+fn trigram_jaccard(a: &str, b: &str) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 1.0;
+    }
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let min_len = a.len().min(b.len());
+    if min_len < 3 {
+        let lcp = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
+        return lcp as f64 / a.len().max(b.len()) as f64;
+    }
+    let ta: rustc_hash::FxHashSet<[u8; 3]> =
+        a.as_bytes().windows(3).map(|w| [w[0], w[1], w[2]]).collect();
+    let tb: rustc_hash::FxHashSet<[u8; 3]> =
+        b.as_bytes().windows(3).map(|w| [w[0], w[1], w[2]]).collect();
+    let inter = ta.iter().filter(|t| tb.contains(*t)).count();
+    let union = ta.len() + tb.len() - inter;
+    if union == 0 { 1.0 } else { inter as f64 / union as f64 }
+}
+
+// ---- Signature metric free functions -------------------------------------------
 
 /// Weighted Jaccard of two prebuilt signatures — `Σ min(wA, wB) / Σ max(wA, wB)` by a
 /// single merge of the two sorted element lists; 0 when the union is empty. The
@@ -1324,5 +1651,176 @@ mod tests {
         let score = sim.similarity(&iri("a"), &iri("x"));
         assert_eq!(sigma / (ta + tx - sigma), score);
         assert_close(score, 0.2); // 0.5 / (1.5 + 1.5 − 0.5)
+    }
+
+    // ---- tbox feature tests -------------------------------------------------------
+
+    /// T-box-aware signature of `:alice rdf:type :Professor`; `:Professor rdfs:subClassOf :Person`
+    /// must include the inferred `(OUT, rdf:type, :Person)` element at 0.5× the direct weight.
+    /// [SONNET-4.6] sq-181
+    #[cfg(feature = "tbox")]
+    #[test]
+    fn tbox_signature_expands_supertype() {
+        let g = graph(
+            ":alice rdf:type :Professor .
+             :Professor <http://www.w3.org/2000/01/rdf-schema#subClassOf> :Person .",
+        );
+        let tbox_sim = Sim::with_config(
+            &g,
+            SimConfig { idf: false, tbox_aware: true, ..SimConfig::default() },
+        );
+        let sig = tbox_sim.signature(&iri("alice")).unwrap();
+        let rdf_type_id = g
+            .id_of(&Term::NamedNode(
+                NamedNode::new("http://www.w3.org/1999/02/22-rdf-syntax-ns#type").unwrap(),
+            ))
+            .expect("rdf:type must be in the graph");
+        let person_id = g.id_of(&iri("Person")).expect(":Person must be in the graph");
+        let professor_id = g.id_of(&iri("Professor")).expect(":Professor must be in the graph");
+        // Direct type element present.
+        assert!(sig.elems.contains(&(OUT, rdf_type_id, professor_id)), "direct type missing");
+        // Inferred supertype element present.
+        assert!(sig.elems.contains(&(OUT, rdf_type_id, person_id)), "inferred supertype missing");
+        // Inferred element has attenuated weight (0.5 × direct weight = 0.5 × 1.0 = 0.5).
+        let pos = sig
+            .elems
+            .iter()
+            .position(|&e| e == (OUT, rdf_type_id, person_id))
+            .unwrap();
+        assert!((sig.weights[pos] - 0.5).abs() < 1e-12, "inferred weight should be 0.5");
+    }
+
+    /// Without T-box, alice (Professor) and bob (Person) share no structural element.
+    /// With T-box, alice's inferred `(OUT, rdf:type, :Person)` matches bob's direct
+    /// `(OUT, rdf:type, :Person)` — non-zero similarity. [SONNET-4.6] sq-181
+    #[cfg(feature = "tbox")]
+    #[test]
+    fn tbox_awareness_creates_cross_subclass_similarity() {
+        let g = graph(
+            ":alice rdf:type :Professor .
+             :bob   rdf:type :Person .
+             :Professor <http://www.w3.org/2000/01/rdf-schema#subClassOf> :Person .",
+        );
+        let plain = Sim::with_config(
+            &g,
+            SimConfig { idf: false, tbox_aware: false, ..SimConfig::default() },
+        );
+        let tbox_sim = Sim::with_config(
+            &g,
+            SimConfig { idf: false, tbox_aware: true, ..SimConfig::default() },
+        );
+        assert_eq!(
+            plain.similarity(&iri("alice"), &iri("bob")),
+            0.0,
+            "without T-box there is no shared element"
+        );
+        assert!(
+            tbox_sim.similarity(&iri("alice"), &iri("bob")) > 0.0,
+            "with T-box the inferred supertype bridges the gap"
+        );
+    }
+
+    /// T-box with no subClassOf / subPropertyOf triples is a no-op — signatures are
+    /// identical to the plain (tbox_aware = false) mode. [SONNET-4.6] sq-181
+    #[cfg(feature = "tbox")]
+    #[test]
+    fn tbox_noop_when_no_hierarchy() {
+        let g = graph(":a :p :b . :c :p :b .");
+        let plain = Sim::with_config(
+            &g,
+            SimConfig { idf: false, tbox_aware: false, ..SimConfig::default() },
+        );
+        let tbox_sim = Sim::with_config(
+            &g,
+            SimConfig { idf: false, tbox_aware: true, ..SimConfig::default() },
+        );
+        let sa_plain = plain.signature(&iri("a")).unwrap();
+        let sa_tbox = tbox_sim.signature(&iri("a")).unwrap();
+        assert_eq!(sa_plain.elems, sa_tbox.elems, "elements must be identical without hierarchy");
+        assert_eq!(sa_plain.weights, sa_tbox.weights, "weights must be identical without hierarchy");
+    }
+
+    // ---- lexical feature tests ----------------------------------------------------
+
+    /// `trigram_jaccard` sanity: identical strings → 1, disjoint → 0, partial → (0,1).
+    /// [SONNET-4.6] sq-181
+    #[cfg(feature = "lexical")]
+    #[test]
+    fn trigram_jaccard_basic() {
+        assert_close(trigram_jaccard("alice", "alice"), 1.0);
+        assert_eq!(trigram_jaccard("abc", "xyz"), 0.0);
+        let partial = trigram_jaccard("alice_smith", "alice_jones");
+        assert!(partial > 0.0 && partial < 1.0, "partial overlap: {partial}");
+        assert!(partial > trigram_jaccard("alice_smith", "bob_jones"),
+                "alice_smith closer to alice_jones than to bob_jones");
+        // Short-string fallback
+        assert_close(trigram_jaccard("ab", "ab"), 1.0);
+        assert_eq!(trigram_jaccard("ab", "cd"), 0.0);
+    }
+
+    /// Lexical fallback finds entities with similar IRI local names even when
+    /// structural (and profile) candidate generation yields nothing. [SONNET-4.6] sq-181
+    #[cfg(feature = "lexical")]
+    #[test]
+    fn lexical_fallback_finds_similar_local_names() {
+        // Three entities with completely disjoint structural signatures (unique predicates)
+        // but sharing a local-name prefix. Profile fallback is disabled.
+        let g = graph(
+            ":alice_smith :uniq1 :x1 .
+             :alice_jones :uniq2 :x2 .
+             :bob_clark   :uniq3 :x3 .",
+        );
+        let sim_with = Sim::with_config(
+            &g,
+            SimConfig {
+                idf: false,
+                profile_fallback: false,
+                lexical_fallback: true,
+                ..SimConfig::default()
+            },
+        );
+        let sim_without = Sim::with_config(
+            &g,
+            SimConfig {
+                idf: false,
+                profile_fallback: false,
+                lexical_fallback: false,
+                ..SimConfig::default()
+            },
+        );
+        // Without lexical fallback: no candidates at all (disjoint structure + no profile).
+        assert!(
+            sim_without.most_similar(&iri("alice_smith"), 5).is_empty(),
+            "no structural or profile candidates"
+        );
+        // With lexical fallback: alice_jones must appear (shares prefix "ali").
+        let top = sim_with.most_similar(&iri("alice_smith"), 5);
+        let names: Vec<String> = top.iter().map(|(t, _)| t.to_string()).collect();
+        assert!(
+            names.contains(&"<http://ex.org/alice_jones>".to_string()),
+            "lexical tier must find alice_jones; got: {names:?}"
+        );
+        // alice_smith itself must not appear in its own results.
+        assert!(!names.contains(&"<http://ex.org/alice_smith>".to_string()), "self must be excluded");
+    }
+
+    /// `lexical_fallback` ranks BELOW structural exact results. [SONNET-4.6] sq-181
+    #[cfg(feature = "lexical")]
+    #[test]
+    fn lexical_fallback_ranks_below_structural_results() {
+        // :a and :twin share a structural neighbor; :alice_a has a similar local name.
+        let g = graph(
+            ":a :knows :bob .
+             :twin :knows :bob .
+             :alice_a :other :x .",
+        );
+        let sim = Sim::with_config(
+            &g,
+            SimConfig { idf: false, lexical_fallback: true, ..SimConfig::default() },
+        );
+        let top = sim.most_similar(&iri("a"), 5);
+        // :twin must appear before any lexical candidate.
+        let names: Vec<String> = top.iter().map(|(t, _)| t.to_string()).collect();
+        assert_eq!(names[0], "<http://ex.org/twin>", "structural match must lead; got {names:?}");
     }
 }
