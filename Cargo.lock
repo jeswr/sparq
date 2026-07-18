@@ -5565,6 +5565,7 @@ dependencies = [
  "sparq-reason",
  "sparq-shacl",
  "sparq-sim",
+ "wasm-bindgen-test",
 ]
 
 [[package]]
