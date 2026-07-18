@@ -47,7 +47,7 @@ credential_format = "claude-oauth-token"
 [models.terra]
 provider = "openai"
 harness = "codex"
-provider_model = ""                    # EMPTY = omit --model (codex CLI default). The literal "TBD" placeholder
+provider_model = "gpt-5.6-sol"  # maintainer 2026-07-18: GPT-5.6 sol for reviews (terra=review model for anthropic-authored PRs)
                                        # reached `codex exec --model TBD` in every terra fleet worker -> API 400 /
                                        # no-tool-call fallback (2026-07-18). Never ship a placeholder id here.
                                        # sentinel is load-bearing: dispatch/worker pass NO --model flag
