@@ -131,7 +131,7 @@
 # one immediate grace re-poll must re-observe the failure before the red is emitted.
 # (2) FAST-FIX RING: when this gate REDs on a pull_request run for a PIPELINE-OWNED
 # PR (armed for auto-merge, or labeled review:pass / review:changes; never drafts or
-# review:needs-user / needs:user holds), the `fix-ring` job below rings the
+# review:needs-user / needs:user holds), the fast-fix ring rings the
 # jeswr/agent-account-registry dispatcher (the same REGISTRY_RING_TOKEN doorbell
 # batch-merge.yml's ring job uses) so its repair sweep enumerates the red PR NOW
 # instead of on the next cron tick. The registry's ci-fix admission is derived from
@@ -139,10 +139,16 @@
 # sufficient; deliberately NO needs:ci-fix label fallback — the registry enumerator
 # treats needs:* PR labels as HUMAN-owned holds that EXCLUDE a PR from the repair
 # loop, so a label would do the opposite of triggering a fix. Without the token
-# (fork PR head / secret unconfigured) the job skips with a notice and the registry
-# cron remains the backstop. The job name carries "advisory" so its own check-run
-# can never gate a future run on the same SHA, and it runs with a read-only token —
-# the doorbell token is the only write capability and it is scoped to the registry.
+# (fork PR head / secret unconfigured) the ring skips with a notice and the registry
+# cron remains the backstop. The ring LIVES IN ITS OWN WORKFLOW,
+# .github/workflows/fast-fix-ring.yml, triggered via `workflow_run` on ci-summary's
+# completion — NOT as a job in this file. That placement is a SECURITY REQUIREMENT
+# (sparq-org/sparq#3474): the ring holds the cross-repo REGISTRY_RING_TOKEN, and a
+# `pull_request`-triggered workflow takes its definition from the PR HEAD where
+# same-repo agent branches receive repository secrets, so a job here could be edited
+# by a PR to exfiltrate the token. `workflow_run` always runs the default-branch copy
+# of the file, isolated from PR-head content — see that file's header for the full
+# threat model + adversarial self-check.
 #
 # IMPLEMENTATION (sq-90cv4). [FABLE-5] The poll loop + verdict live in
 # scripts/ci_summary_gate.py (extracted from the previous inline bash so the
@@ -244,63 +250,3 @@ jobs:
           PR_DRAFT: ${{ github.event.pull_request.draft }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: python3 scripts/ci_summary_gate.py
-
-  # FAST-FIX RING (header §FAIL-FAST + FAST-FIX RING). A red gate on a
-  # pipeline-owned PR wakes the registry repair loop immediately. Least
-  # privilege: the job's own token is pull-requests:read only (it reads the
-  # PR's LIVE labels/arm/draft state — the trigger payload's snapshot goes
-  # stale across the poll window); the only write capability is the
-  # REGISTRY_RING_TOKEN doorbell, absent on fork heads (fail-soft skip — the
-  # registry cron is the backstop). "advisory" in the name keeps this job's
-  # check-run structurally non-gating for any future gate run on the same SHA
-  # (sq-wjth rule), and `failure()` excludes cancelled (superseded) gate runs.
-  fix-ring:
-    name: fast-fix ring (advisory)
-    needs: gate
-    if: >-
-      failure()
-      && github.event_name == 'pull_request'
-      && github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      pull-requests: read
-    steps:
-      - name: Ring the registry dispatcher for an immediate repair sweep
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REGISTRY_RING_TOKEN: ${{ secrets.REGISTRY_RING_TOKEN }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          # Live PR state — labels/arming churn between the trigger payload and
-          # a gate verdict that can be many minutes later.
-          if ! state="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
-              --jq '{draft: .draft, armed: (.auto_merge != null), labels: [.labels[].name]}')"; then
-            echo "::notice::could not read live PR state — skipping the ring (the registry cron is the backstop)."
-            exit 0
-          fi
-          has() { jq -e --arg l "$1" '.labels | index($l) != null' <<<"$state" >/dev/null; }
-          if [ "$(jq -r '.draft' <<<"$state")" = "true" ]; then
-            echo "PR re-drafted since the trigger — not pipeline-owned for fast-fix; skipping."
-            exit 0
-          fi
-          if has "review:needs-user" || has "needs:user"; then
-            echo "human-owned hold (review:needs-user / needs:user) — the repair loop must not pick this PR up; skipping."
-            exit 0
-          fi
-          if [ "$(jq -r '.armed' <<<"$state")" != "true" ] && ! has "review:pass" && ! has "review:changes"; then
-            echo "PR is neither armed nor in the review pipeline (review:pass / review:changes) — skipping."
-            exit 0
-          fi
-          if [ -z "${REGISTRY_RING_TOKEN}" ]; then
-            # NO needs:ci-fix label fallback, deliberately: the registry PLAN
-            # derives ci-fix admission from the PR's gate STATE and treats
-            # needs:* PR labels as human-owned holds that EXCLUDE the PR from
-            # the repair enumeration — a label here would suppress the fix.
-            echo "::notice::REGISTRY_RING_TOKEN unavailable (fork head or secret unconfigured) — cannot ring; the registry cron (every ~10 min) is the backstop."
-            exit 0
-          fi
-          GH_TOKEN="${REGISTRY_RING_TOKEN}" gh workflow run dispatch.yml -R jeswr/agent-account-registry
-          echo "rang jeswr/agent-account-registry dispatch — the repair sweep runs now instead of on the next cron tick."
