@@ -267,34 +267,50 @@ fn load_triples(path: &str) -> Vec<Triple> {
     }
 }
 
-/// Collect every BGP (CQ disjunct body) in a query's pattern tree. The shapes that can
-/// occur here are exactly what the fail-closed CQ gate admits and what the emitter
-/// produces: BGPs under a `Union` fold, wrapped in `Project`/`Distinct`/`Reduced`/`Slice`.
-/// A re-applied `Filter` or `Values` modifier (the B3/B4 pass-through) is REFUSED
-/// (`Err` naming the modifier): freezing ignores modifier semantics, so the modifier
-/// could reject every frozen binding, leaving BOTH the raw and the minimised UCQ empty
-/// and the equivalence gate vacuously agreed — such queries need `--abox` real data.
-/// Any other shape means the gate/emitter produced something unexpected: PANIC rather
-/// than synthesise a witness that silently under-populates the data.
-fn collect_bgps<'a>(
-    pattern: &'a GraphPattern,
-    out: &mut Vec<&'a [TriplePattern]>,
-) -> Result<(), &'static str> {
+/// Collect the CQ disjuncts (conjunctive bodies) of a query's pattern tree in DISJUNCTIVE
+/// NORMAL FORM. Each returned entry is ONE disjunct's BGP; the witness freezes each with a
+/// distinct namespace. `Union` yields ALTERNATIVES (its children's disjuncts concatenated).
+/// `Join` yields the CONJUNCTION — the cross product of its children's disjuncts, each pair
+/// merged into a single BGP (join distributes over union: `(A ∪ B) ⋈ C = (A ⋈ C) ∪ (B ⋈ C)`).
+/// This is load-bearing: a variable SHARED ACROSS A JOIN (e.g. `{ { {?x :p ?d} UNION {…} }
+/// {?d :q ?u} }`, which survives as a `Join` node because a `Union` branch cannot fold into
+/// the adjacent BGP) must land in ONE disjunct so it freezes to a SINGLE constant — treating
+/// `Join` like `Union` would freeze the shared variable to two different IRIs, empty the
+/// joined CQ over the witness, and make the equivalence gate vacuous on that path. A re-applied `Filter` or `Values`
+/// modifier (the B3/B4 pass-through) is REFUSED (`Err` naming the modifier): freezing ignores
+/// modifier semantics, so the modifier could reject every frozen binding, leaving BOTH the
+/// raw and the minimised UCQ empty and the equivalence gate vacuously agreed — such queries
+/// need `--abox` real data. Any other shape means the gate/emitter produced something
+/// unexpected: PANIC rather than synthesise a witness that silently under-populates the data.
+fn collect_bgps(pattern: &GraphPattern) -> Result<Vec<Vec<TriplePattern>>, &'static str> {
     match pattern {
-        GraphPattern::Bgp { patterns } => {
-            out.push(patterns);
-            Ok(())
+        GraphPattern::Bgp { patterns } => Ok(vec![patterns.clone()]),
+        GraphPattern::Union { left, right } => {
+            let mut out = collect_bgps(left)?;
+            out.extend(collect_bgps(right)?);
+            Ok(out)
         }
-        GraphPattern::Union { left, right } | GraphPattern::Join { left, right } => {
-            collect_bgps(left, out)?;
-            collect_bgps(right, out)
+        GraphPattern::Join { left, right } => {
+            let l = collect_bgps(left)?;
+            let r = collect_bgps(right)?;
+            // Conjunction of two UCQs: every (left-disjunct, right-disjunct) pair merged
+            // into one BGP, so variables shared across the join freeze consistently.
+            let mut out = Vec::with_capacity(l.len().saturating_mul(r.len()));
+            for dl in &l {
+                for dr in &r {
+                    let mut merged = dl.clone();
+                    merged.extend(dr.iter().cloned());
+                    out.push(merged);
+                }
+            }
+            Ok(out)
         }
         GraphPattern::Filter { .. } => Err("FILTER"),
         GraphPattern::Values { .. } => Err("VALUES"),
         GraphPattern::Project { inner, .. }
         | GraphPattern::Distinct { inner }
         | GraphPattern::Reduced { inner }
-        | GraphPattern::Slice { inner, .. } => collect_bgps(inner, out),
+        | GraphPattern::Slice { inner, .. } => collect_bgps(inner),
         other => panic!(
             "witness ABox synthesis: unsupported pattern shape {:?} — run with --abox",
             other
@@ -325,8 +341,7 @@ fn query_pattern(q: &Query) -> &GraphPattern {
 fn witness_abox(queries: &[&Query]) -> Result<Graph, &'static str> {
     let mut nt = String::new();
     for (qi, q) in queries.iter().enumerate() {
-        let mut bgps: Vec<&[TriplePattern]> = Vec::new();
-        collect_bgps(query_pattern(q), &mut bgps)?;
+        let bgps = collect_bgps(query_pattern(q))?;
         for (di, bgp) in bgps.iter().enumerate() {
             // One fresh constant per (query, disjunct, kind, name) — shared variables
             // within a disjunct freeze to the SAME constant, so joins are satisfied.
@@ -555,6 +570,32 @@ mod tests {
     /// constant can never equal a frozen witness IRI.
     const VALUES_RAW_UCQ: &str = "SELECT DISTINCT ?x WHERE { \
         { { ?x :headOf ?d . ?d :partOf ?u } UNION { ?x :label \"w\" } } VALUES ?x { :alice } }";
+    /// A raw UCQ that survives as a real `Join(Union, Bgp)` — spargebra folds ADJACENT BGPs
+    /// into one BGP, so a genuine `Join` node needs a non-mergeable branch (here a `Union`).
+    /// `?d` is shared ACROSS the join; in DNF this is two CQ disjuncts, `headOf(x,d) ∧
+    /// partOf(d,u)` and `chairOf(x,d) ∧ partOf(d,u)`. Frozen like `Union` (each atom its own
+    /// disjunct), `?d` would freeze to different IRIs and neither joined CQ would match.
+    const JOIN_RAW_UCQ: &str = "SELECT DISTINCT ?x WHERE { \
+        { { ?x :headOf ?d } UNION { ?x :chairOf ?d } } { ?d :partOf ?u } }";
+    /// A deliberately WRONG minimisation of [`JOIN_RAW_UCQ`]: the non-subsumed `headOf` join
+    /// disjunct is dropped, keeping only `chairOf(x,d) ∧ partOf(d,u)`.
+    const JOIN_WRONG_MIN_UCQ: &str = "SELECT DISTINCT ?x WHERE { \
+        { ?x :chairOf ?d } { ?d :partOf ?u } }";
+
+    /// True iff the pattern tree contains a `Join` node (the shape the regression exercises).
+    fn query_has_join(p: &GraphPattern) -> bool {
+        match p {
+            GraphPattern::Join { .. } => true,
+            GraphPattern::Union { left, right } => {
+                query_has_join(left) || query_has_join(right)
+            }
+            GraphPattern::Project { inner, .. }
+            | GraphPattern::Distinct { inner }
+            | GraphPattern::Reduced { inner }
+            | GraphPattern::Slice { inner, .. } => query_has_join(inner),
+            _ => false,
+        }
+    }
 
     /// The PRE-FIX witness construction, reproduced literally for the TBox
     /// `:Manager rdfs:subClassOf :Employee .`: one rdf:type assertion per TBox class. The
@@ -654,5 +695,32 @@ mod tests {
             .map(|_| ())
             .expect_err("a single modifier-carrying query in the list must refuse synthesis");
         assert_eq!(err, "FILTER");
+    }
+
+    /// A `Join(Bgp, Bgp)` sharing a variable across the join must freeze that variable to a
+    /// SINGLE constant: the conjunction is one CQ, not two disjuncts. The join disjunct then
+    /// matches its own frozen instance, so the witness is non-empty and DETECTS a wrongly
+    /// dropped non-subsumed join disjunct — instead of the vacuous agreement that treating
+    /// `Join` like `Union` produced (`?d` frozen to two IRIs → the joined CQ empty on both
+    /// sides). Pins the regression for the admitted nested-group Join path.
+    #[test]
+    fn frozen_instance_witness_handles_join_shared_variable() {
+        let raw = parse_query(JOIN_RAW_UCQ);
+        assert!(
+            query_has_join(query_pattern(&raw)),
+            "fixture must exercise the Join path (nested groups should parse as Join)"
+        );
+        let wrong = parse_query(JOIN_WRONG_MIN_UCQ);
+        let data = witness_abox(&[&raw, &wrong]).expect("modifier-free UCQs must synthesise");
+        let (_, raw_rows) = eval_rows(&data, &raw);
+        let (_, wrong_rows) = eval_rows(&data, &wrong);
+        assert!(
+            !raw_rows.is_empty(),
+            "the shared-variable join disjunct must match its own frozen instance"
+        );
+        assert_ne!(
+            raw_rows, wrong_rows,
+            "dropping the non-subsumed join disjunct must surface as a result-set mismatch"
+        );
     }
 }
