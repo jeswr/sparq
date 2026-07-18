@@ -2541,18 +2541,104 @@ impl<'a> Validator<'a> {
 /// turned into a leading inline `(?...)` group. Shared by [`Validator::regex_for`]
 /// (compile + match) and [`Validator::note_pattern_skipped`] (recompute the error)
 /// so both see byte-identical input.
+///
+/// [FABLE-5] (sq-8ro) XPath-regex divergences from the Rust `regex` crate are
+/// translated here: the XPath F&O `q` flag (literal-pattern mode — only `i` keeps
+/// its effect alongside it, mirroring the engine's `build_regex`), and the
+/// XPath/XSD `\i` / `\I` / `\c` / `\C` name-character classes (see
+/// [`translate_xpath_escapes`]).
 fn compose_pattern(source: &str, flags: Option<&str>) -> String {
+    let flags = flags.unwrap_or("");
+    if flags.contains('q') {
+        // Literal-pattern mode: every pattern character matches itself, which
+        // also suppresses the other flags' metacharacters — per XPath, only `i`
+        // is combinable with `q`.
+        let escaped = regex::escape(source);
+        return if flags.contains('i') {
+            format!("(?i){}", escaped)
+        } else {
+            escaped
+        };
+    }
+    let source = translate_xpath_escapes(source);
     let mut inline = String::new();
-    for f in flags.unwrap_or("").chars() {
+    for f in flags.chars() {
         if matches!(f, 'i' | 'm' | 's' | 'x' | 'U') {
             inline.push(f);
         }
     }
     if inline.is_empty() {
-        source.to_string()
+        source
     } else {
         format!("(?{inline}){source}")
     }
+}
+
+/// XML 1.0 `NameStartChar` as a Rust-regex character-class BODY (no brackets).
+macro_rules! xml_name_start_char {
+    () => {
+        concat!(
+            r":A-Z_a-z\x{C0}-\x{D6}\x{D8}-\x{F6}\x{F8}-\x{2FF}\x{370}-\x{37D}",
+            r"\x{37F}-\x{1FFF}\x{200C}-\x{200D}\x{2070}-\x{218F}\x{2C00}-\x{2FEF}",
+            r"\x{3001}-\x{D7FF}\x{F900}-\x{FDCF}\x{FDF0}-\x{FFFD}\x{10000}-\x{EFFFF}"
+        )
+    };
+}
+const XML_NAME_START_CHAR: &str = xml_name_start_char!();
+/// XML 1.0 `NameChar` (`NameStartChar` plus `-` `.` digits #xB7 combining marks).
+const XML_NAME_CHAR: &str = concat!(
+    xml_name_start_char!(),
+    r"\-.0-9\x{B7}\x{300}-\x{36F}\x{203F}-\x{2040}"
+);
+
+/// [FABLE-5] (sq-8ro) Translates the XPath/XSD multi-character escapes the Rust
+/// `regex` crate does not recognise — `\i` (XML `NameStartChar`), `\c` (XML
+/// `NameChar`) and their complements `\I` / `\C` — into bracketed character
+/// classes. The replacement is a bracketed class even INSIDE `[...]`: the Rust
+/// regex syntax accepts nested classes, so `[\c!]` becomes `[[…]!]` with the
+/// correct union (and `[^\i]` the correct complement-of-union) semantics. Every
+/// other escape pair passes through untouched, so `\\i` stays a literal
+/// backslash + `i` and constructs the Rust engine genuinely lacks (look-around)
+/// still land on the sq-lz99x skip-with-diagnostic path.
+fn translate_xpath_escapes(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('i') => {
+                out.push('[');
+                out.push_str(XML_NAME_START_CHAR);
+                out.push(']');
+            }
+            Some('I') => {
+                out.push_str("[^");
+                out.push_str(XML_NAME_START_CHAR);
+                out.push(']');
+            }
+            Some('c') => {
+                out.push('[');
+                out.push_str(XML_NAME_CHAR);
+                out.push(']');
+            }
+            Some('C') => {
+                out.push_str("[^");
+                out.push_str(XML_NAME_CHAR);
+                out.push(']');
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            // A trailing lone backslash: pass through (an invalid regex either
+            // way — it takes the skip-with-diagnostic path).
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// [OPUS-4.8] (sq-f8gu) The DISTINCT members of `members` that appear more than
