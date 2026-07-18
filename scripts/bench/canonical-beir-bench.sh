@@ -18,7 +18,14 @@
 #   * EXIT trap: terminate instance (waits), delete ephemeral keypair + security group.
 #   * REFUSES to touch the protected prod/dev instances.
 #   * results are ALSO cat'd to the console log by the instance script, so
-#     `aws ec2 get-console-output` recovers the envelopes even with no SSH pull.
+#     `aws ec2 get-console-output` recovers the envelopes even with no SSH pull
+#     (parsed by scripts/bench/extract-console-envelopes.sh).
+#
+# SENTINEL PROTOCOL: /root/GATHER_DONE = validated canonical success (every cut has
+# a valid-JSON envelope for BOTH engines); /root/GATHER_FAILED = the gather itself
+# reports partial/failed (canonical=false in gather-meta.json). On GATHER_FAILED —
+# or no sentinel at all — this launcher still pulls logs + partial envelopes, then
+# EXITS NONZERO, so a failed gather can never be mistaken for a canonical run.
 #
 # Usage:  AWS_PROFILE=pss scripts/bench/canonical-beir-bench.sh [<branch>]
 #   env: REGION ITYPE BEIR_CUTS BEIR_K WATCHDOG_S EBS_GB RESULTS_LOCAL
@@ -45,6 +52,8 @@ EBS_GB="${EBS_GB:-100}"
 RESULTS_LOCAL="${RESULTS_LOCAL:-$HOME/sparq-bench-results/canonical-$(date -u +%Y-%m-%d)-beir}"
 
 PROD_INSTANCE="i-090531b4ede8f2d3f"; DEV_INSTANCE="i-00f76802f345b6b77"
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 log() { printf '[canonical-beir %s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 die() { printf '[canonical-beir] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -159,8 +168,8 @@ SSH_UP=0
 for i in $(seq 1 40); do ssh $SSHO "ubuntu@$IP" true 2>/dev/null && { log "ssh up"; SSH_UP=1; break; }; sleep 10; done
 [ "$SSH_UP" = 1 ] || die "sshd never reachable on $IP — aborting (cleanup terminates)"
 
-log "polling for /root/GATHER_DONE (deadline ${POLL_DEADLINE_S}s, < ${WATCHDOG_S}s watchdog)…"
-DONE=0; i=0; POLL_START=$(date +%s)
+log "polling for /root/GATHER_DONE|GATHER_FAILED (deadline ${POLL_DEADLINE_S}s, < ${WATCHDOG_S}s watchdog)…"
+DONE=0; FAILED=0; i=0; POLL_START=$(date +%s)
 while :; do
   ELAPSED=$(( $(date +%s) - POLL_START ))
   [ "$ELAPSED" -ge "$POLL_DEADLINE_S" ] && { log "poll deadline reached without sentinel — giving up (cleanup terminates)"; break; }
@@ -170,6 +179,9 @@ while :; do
   ssh $SSHO "ubuntu@$IP" "sudo tar -C /root/sparq/bench -cf - competitor-results 2>/dev/null" 2>/dev/null | tar -C "$RESULTS_LOCAL" -xf - 2>/dev/null || true
   if ssh $SSHO "ubuntu@$IP" "sudo test -f /root/GATHER_DONE" 2>/dev/null; then
     log "[$i / ${ELAPSED}s] sentinel present — final pull"; DONE=1; break
+  fi
+  if ssh $SSHO "ubuntu@$IP" "sudo test -f /root/GATHER_FAILED" 2>/dev/null; then
+    log "[$i / ${ELAPSED}s] FAILURE sentinel present — gather partial/failed (NOT canonical); pulling what exists"; FAILED=1; break
   fi
   STATE=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo unknown)
   # PRIMARY telemetry: the serial console (the gather tees every STEP there). The
@@ -182,28 +194,41 @@ while :; do
   if grep -qa 'STEP.*gather complete' "$RESULTS_LOCAL/console.txt" 2>/dev/null; then
     log "[$i / ${ELAPSED}s] 'gather complete' on console — recovering envelopes from console"; DONE=1; break
   fi
+  if grep -qa 'STEP.*gather FAILED' "$RESULTS_LOCAL/console.txt" 2>/dev/null; then
+    log "[$i / ${ELAPSED}s] 'gather FAILED' on console — partial/failed (NOT canonical); recovering what exists"; FAILED=1; break
+  fi
   [ "$STATE" = "terminated" ] && { log "instance terminated before sentinel — results may be partial"; break; }
 done
 
 # Recover the envelopes from the serial console (authoritative when SSH failed): each
-# envelope was cat'd between ===ENVELOPE-BEGIN <name>=== / ===ENVELOPE-END=== markers.
+# envelope was cat'd between ===ENVELOPE-BEGIN <name>=== / ===ENVELOPE-END=== markers
+# (no space before the closing ===). The shared fixture-tested extractor strips that
+# delimiter + CRs and allowlists the recovered basenames.
 aws ec2 get-console-output --region "$REGION" --instance-id "$INSTANCE_ID" --output text > "$RESULTS_LOCAL/console.txt" 2>/dev/null || true
 if grep -qa 'ENVELOPE-BEGIN' "$RESULTS_LOCAL/console.txt" 2>/dev/null; then
   log "extracting envelopes from serial console → $RESULTS_LOCAL/competitor-results/"
-  mkdir -p "$RESULTS_LOCAL/competitor-results"
-  awk '
-    /===ENVELOPE-BEGIN /   { name=$2; f="'"$RESULTS_LOCAL"'/competitor-results/" name; capturing=1; next }
-    /===ENVELOPE-END===/   { capturing=0; close(f); next }
-    capturing               { print > f }
-  ' "$RESULTS_LOCAL/console.txt" 2>/dev/null || true
+  bash "$HERE/extract-console-envelopes.sh" "$RESULTS_LOCAL/console.txt" "$RESULTS_LOCAL/competitor-results" || true
 fi
 
 log "final result pull"
 ssh $SSHO "ubuntu@$IP" "sudo tar -C /root/sparq/bench -cf - competitor-results 2>/dev/null" 2>/dev/null | tar -C "$RESULTS_LOCAL" -xf - 2>/dev/null || true
 ssh $SSHO "ubuntu@$IP" "sudo cat /root/GATHER_STEP 2>/dev/null" > "$RESULTS_LOCAL/GATHER_STEP.txt" 2>/dev/null || true
 ssh $SSHO "ubuntu@$IP" "sudo tail -800 /var/log/gather.log 2>/dev/null" > "$RESULTS_LOCAL/gather.log.tail" 2>/dev/null || true
+ssh $SSHO "ubuntu@$IP" "sudo cat /root/GATHER_FAILED 2>/dev/null" > "$RESULTS_LOCAL/GATHER_FAILED.txt" 2>/dev/null || true
+if [ -s "$RESULTS_LOCAL/GATHER_FAILED.txt" ]; then FAILED=1; else rm -f "$RESULTS_LOCAL/GATHER_FAILED.txt"; fi
 
 log "envelopes in $RESULTS_LOCAL/competitor-results:"
 ls -la "$RESULTS_LOCAL"/competitor-results/*.json 2>/dev/null >&2 || log "  (none yet)"
-[ "$DONE" = 1 ] || log "NOTE: sentinel not observed — see $RESULTS_LOCAL/GATHER_STEP.txt for the last step"
-log "done; cleanup trap terminates $INSTANCE_ID + deletes keypair/SG"
+if [ "$DONE" = 1 ] && [ "$FAILED" = 0 ]; then
+  log "done; cleanup trap terminates $INSTANCE_ID + deletes keypair/SG"
+else
+  # Surface the honest NOT-canonical outcome WITHOUT losing logs/results (all
+  # pulled above): a failed/partial/sentinel-less gather exits nonzero.
+  if [ "$FAILED" = 1 ]; then
+    log "gather reported FAILURE — partial/failed, NOT canonical (see GATHER_FAILED.txt + gather.log.tail; gather-meta.json carries canonical=false)"
+  else
+    log "NOTE: sentinel not observed — see $RESULTS_LOCAL/GATHER_STEP.txt for the last step"
+  fi
+  log "exiting nonzero (NOT a canonical gather); cleanup trap terminates $INSTANCE_ID + deletes keypair/SG"
+  exit 1
+fi

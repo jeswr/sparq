@@ -21,9 +21,16 @@
 # scripts/gather-competitors.sh) + $RESULTS_DIR/gather-meta.json (box provenance).
 # Every envelope is ALSO cat'd into the gather log between ===ENVELOPE-BEGIN/END===
 # markers so `aws ec2 get-console-output` can recover results even if the SSH pull
-# path dies (envelopes are a few KB). Writes /root/GATHER_DONE when everything is on
-# disk. NEVER shuts the box down — the launcher terminates it (its user-data watchdog
-# is the orphan-proof backstop).
+# path dies (envelopes are a few KB; recovered by scripts/bench/extract-console-envelopes.sh).
+#
+# SENTINEL PROTOCOL (machine-enforced honesty): /root/GATHER_DONE is written ONLY
+# after every requested cut has a VALID-JSON envelope for BOTH engines (the
+# lucene-anserini oracle AND sparq-text). A failed provision / build / cut instead
+# writes /root/GATHER_FAILED (+ gather-meta.json canonical=false, status
+# partial|failed) and exits nonzero — so an empty or partial gather can never look
+# like a completed canonical run at the launcher protocol level. NEVER shuts the
+# box down — the launcher terminates it (its user-data watchdog is the orphan-proof
+# backstop).
 #
 # Env knobs (all defaulted):
 #   BEIR_CUTS="scifact"   space-separated BEIR cuts (scifact | trec-covid)
@@ -31,6 +38,8 @@
 #   BEIR_DATA_DIR=/root/beir-data   download cache for the BEIR cuts
 #   PYSERINI_PIN= / BEIR_PIN=       optional pip version pins (e.g. "==1.2.0");
 #                                   resolved versions are ALWAYS logged for provenance
+#   BEIR_VENV_DIR=/root/beir-venv / SENTINEL_DIR=/root   overridden ONLY by the
+#                                   hermetic self-test (test_beir_gather_sentinel.sh)
 set -uo pipefail   # NOT -e: one failed cut/provision step must never kill the gather
 
 # [FABLE-5] DEFINE HOME/USER/LOGNAME BEFORE ANYTHING ELSE — cloud-init's root
@@ -62,9 +71,13 @@ BEIR_DATA_DIR="${BEIR_DATA_DIR:-/root/beir-data}"
 PYSERINI_PIN="${PYSERINI_PIN:-}"
 BEIR_PIN="${BEIR_PIN:-}"
 RESULTS_DIR="$ROOT/bench/competitor-results"   # fixed by scripts/gather-competitors.sh
-VENV="/root/beir-venv"
+VENV="${BEIR_VENV_DIR:-/root/beir-venv}"
+# Sentinels (GATHER_STEP/GATHER_DONE/GATHER_FAILED) live in /root on the real box —
+# that path is what the launcher polls over SSH. Overridable ONLY so the hermetic
+# self-test (scripts/tests/test_beir_gather_sentinel.sh) can run unprivileged.
+SENTINEL_DIR="${SENTINEL_DIR:-/root}"
 
-step() { echo "[STEP $(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a /root/GATHER_STEP >&2; }
+step() { echo "[STEP $(date -u +%Y-%m-%dT%H:%M:%SZ)] $*" | tee -a "$SENTINEL_DIR/GATHER_STEP" >&2; }
 
 mkdir -p "$RESULTS_DIR" "$BEIR_DATA_DIR"
 step "canonical BEIR gather start: cuts='$BEIR_CUTS' k=$BEIR_K commit=$(git rev-parse --short HEAD 2>/dev/null || echo '?')"
@@ -108,7 +121,7 @@ if ! command -v cargo >/dev/null 2>&1; then
   step "rustup install"
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal || true
 fi
-export PATH="/root/.cargo/bin:$HOME/.cargo/bin:$PATH"
+export PATH="$CARGO_HOME/bin:/root/.cargo/bin:$HOME/.cargo/bin:$PATH"
 . /root/.cargo/env 2>/dev/null || . "$HOME/.cargo/env" 2>/dev/null || true
 
 step "build sparq-text beir_text example (release)"
@@ -132,7 +145,45 @@ for cut in $BEIR_CUTS; do
   fi
 done
 
-# ---- 4. box provenance for the §4 transcription --------------------------------------
+# ---- 4. machine-enforced outcome validation (per cut, BOTH engines) ------------------
+# The §4 comparison needs, for EVERY requested cut, a valid-JSON envelope from BOTH
+# engines: lucene-anserini (the oracle) AND sparq-text. The sentinel protocol below
+# is gated on this validation, so a run where pyserini cannot import, sparq-text
+# cannot build, or a cut dies is DISTINGUISHABLE from a completed canonical gather
+# — the WARN-and-continue steps above only keep the box alive to collect whatever
+# partial evidence exists; they never launder it into success.
+valid_envelope() {  # valid_envelope <prefix> → 0 iff ≥1 $RESULTS_DIR/<prefix>-*.json parses as JSON
+  local f
+  for f in "$RESULTS_DIR/$1"-*.json; do
+    [ -f "$f" ] || continue
+    python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$f" 2>/dev/null && return 0
+  done
+  return 1
+}
+FAILURES=""
+VALID_ENVELOPES=0
+[ "$PROVISIONED" = 1 ] || FAILURES="$FAILURES provision:pyserini-beir"
+[ -n "$SPARQ_TEXT_BEIR" ] || FAILURES="$FAILURES build:beir_text"
+for cut in $BEIR_CUTS; do
+  for engine in lucene-anserini sparq-text; do
+    if valid_envelope "${engine}-beir-ir-${cut}"; then
+      VALID_ENVELOPES=$((VALID_ENVELOPES + 1))
+    else
+      FAILURES="$FAILURES cut:${cut}:${engine}:envelope-missing-or-invalid"
+    fi
+  done
+done
+if [ -z "$FAILURES" ]; then
+  GATHER_STATUS="complete"
+elif [ "$VALID_ENVELOPES" -gt 0 ]; then
+  GATHER_STATUS="partial"
+else
+  GATHER_STATUS="failed"
+fi
+CANONICAL_PY=False; [ "$GATHER_STATUS" = "complete" ] && CANONICAL_PY=True
+step "outcome validation: status=$GATHER_STATUS valid_envelopes=$VALID_ENVELOPES${FAILURES:+ missing:$FAILURES}"
+
+# ---- 5. box provenance for the §4 transcription --------------------------------------
 step "write gather-meta.json"
 IID="$(TOK=$(curl -s -m 3 -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' 2>/dev/null); \
   curl -s -m 3 -H "X-aws-ec2-metadata-token: $TOK" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || true)"
@@ -142,7 +193,9 @@ def sh(c):
     try: return subprocess.run(c, shell=True, capture_output=True, text=True, timeout=30).stdout.strip()
     except Exception: return ""
 json.dump({
-    "canonical": True, "axis": "fts-beir-ir-quality", "bead": "sq-tvzyi",
+    "canonical": ${CANONICAL_PY}, "status": "${GATHER_STATUS}",
+    "missing": "${FAILURES}".split(),
+    "axis": "fts-beir-ir-quality", "bead": "sq-tvzyi",
     "utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "instance_id": "${IID}" or "unknown",
     "commit": sh("git rev-parse HEAD"),
@@ -153,7 +206,9 @@ json.dump({
 }, open(sys.argv[1], "w"), indent=1)
 META
 
-# ---- 5. console-output backstop + sentinel -------------------------------------------
+# ---- 6. console-output backstop + sentinel protocol ----------------------------------
+# The envelope dump runs in EVERY outcome — partial evidence must stay recoverable
+# from the serial console (scripts/bench/extract-console-envelopes.sh parses it).
 step "envelopes in $RESULTS_DIR:"
 ls -la "$RESULTS_DIR" >&2 || true
 for f in "$RESULTS_DIR"/*.json; do
@@ -163,5 +218,17 @@ for f in "$RESULTS_DIR"/*.json; do
   echo "===ENVELOPE-END==="
 done
 df -h / >&2
-step "gather complete"
-touch /root/GATHER_DONE
+if [ "$GATHER_STATUS" = "complete" ]; then
+  step "gather complete"
+  touch "$SENTINEL_DIR/GATHER_DONE"
+else
+  # Distinct FAILURE sentinel + nonzero exit: the launcher surfaces partial/failed
+  # instead of treating the run as canonical. Honest NOT-RUN, a re-run action —
+  # never a sparq win by omission.
+  {
+    echo "status=$GATHER_STATUS"
+    for miss in $FAILURES; do echo "missing $miss"; done
+  } > "$SENTINEL_DIR/GATHER_FAILED"
+  step "gather FAILED (status=$GATHER_STATUS) — NOT canonical; missing:$FAILURES"
+  exit 1
+fi

@@ -374,6 +374,17 @@ jobs:
         run: bash scripts/reconcile-merged-beads.sh --dry-run-self-test
       - name: Self-test reconcile-merged-beads.sh (exact-match + gating + apply/idempotency, end-to-end)
         run: bash scripts/tests/test_reconcile_merged_beads.sh
+      # [FABLE-5] PR #3488 review: the canonical BEIR gather's honesty must be
+      # MACHINE-enforced, not narrative — a failed/partial/invalid gather must never
+      # emit the GATHER_DONE success sentinel or canonical=true, and the serial-console
+      # envelope extractor must recover exact *.json basenames (the `name=$2` awk kept
+      # the trailing ===, so recovered files missed the launcher's *.json listing).
+      # Both harnesses are hermetic: scratch-dir fixtures + PATH-shadowed
+      # apt-get/cargo/java/curl/python3-venv stubs — no AWS, no network, no /root.
+      - name: Self-test BEIR gather sentinel protocol (failed/partial never GATHER_DONE)
+        run: bash scripts/tests/test_beir_gather_sentinel.sh
+      - name: Self-test console envelope extractor (exact names + CRLF + allowlist)
+        run: bash scripts/tests/test_extract_console_envelopes.sh
       # [OPUS-4.8] sq-neq8: hermetic self-test of the coverage-ratchet gate's PURE logic
       # (max-remeasure aggregation sq-x4jy + floor-monotonicity sq-neq8) so a regression in
       # the gate ITSELF is caught here, before the gate is trusted to guard real coverage.
