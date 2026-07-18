@@ -1822,44 +1822,6 @@ fn reemit_deny(graph: &mut Graph, request: &Request) -> BridgeOutcome {
     }
 }
 
-#[cfg(test)]
-mod set_tighter_tests {
-    //! [OPUS-4.8] sq-0q7n — `set_tighter` keeps the instant-tightest window bound when
-    //! two same-side `odrl:dateTime` constraints intersect. The pre-fix lexical `<`/`>`
-    //! picked the wrong bound for mixed timezone offsets (a fail-open: a wider persisted
-    //! window than the constraints allow). These pin the offset-aware behavior.
-    use super::set_tighter;
-
-    #[test]
-    fn upper_bound_keeps_earlier_instant_across_offsets() {
-        // Two notAfter bounds: 12:00Z (= 12:00Z) and 13:00+02:00 (= 11:00Z). The EARLIER
-        // instant is the offset form (11:00Z); lexically "12…Z" < "13…+02:00" so the OLD
-        // code wrongly kept 12:00Z (later instant → wider window).
-        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
-        set_tighter(&mut slot, "2026-06-16T13:00:00+02:00", /*keep_earlier=*/ true);
-        assert_eq!(slot.as_deref(), Some("2026-06-16T13:00:00+02:00"), "kept earlier instant");
-    }
-
-    #[test]
-    fn lower_bound_keeps_later_instant_across_offsets() {
-        // Two notBefore bounds: 12:00Z and 09:00-02:00 (= 11:00Z). The LATER instant is
-        // 12:00Z; lexically "09…-02:00" < "12…Z" — verify the tighter (later) is kept.
-        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
-        set_tighter(&mut slot, "2026-06-16T09:00:00-02:00", /*keep_earlier=*/ false);
-        assert_eq!(slot.as_deref(), Some("2026-06-16T12:00:00Z"), "kept later instant");
-        // And a genuinely-later offset bound DOES replace.
-        set_tighter(&mut slot, "2026-06-16T16:00:00+02:00", /*keep_earlier=*/ false); // = 14:00Z
-        assert_eq!(slot.as_deref(), Some("2026-06-16T16:00:00+02:00"), "later instant wins");
-    }
-
-    #[test]
-    fn unparseable_candidate_never_widens() {
-        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
-        set_tighter(&mut slot, "not-a-date", true);
-        assert_eq!(slot.as_deref(), Some("2026-06-16T12:00:00Z"), "malformed never replaces");
-    }
-}
-
 // ============================================================================
 // [OPUS-4.8] sq-58mh — STATEFUL `odrl:count` enforcement wired THROUGH the bridge so a
 // bridged grant SELF-RETRACTS on exhaustion (the sq-zi5w follow-up).
@@ -2565,4 +2527,42 @@ fn closure_ids_to_n3(dict: &Dict, closure: &[[sparq_core::dict::Id; 3]]) -> Stri
         let _ = writeln!(out, "{} {} {} .", dict.term(t[0]), dict.term(t[1]), dict.term(t[2]));
     }
     out
+}
+
+#[cfg(test)]
+mod set_tighter_tests {
+    //! [OPUS-4.8] sq-0q7n — `set_tighter` keeps the instant-tightest window bound when
+    //! two same-side `odrl:dateTime` constraints intersect. The pre-fix lexical `<`/`>`
+    //! picked the wrong bound for mixed timezone offsets (a fail-open: a wider persisted
+    //! window than the constraints allow). These pin the offset-aware behavior.
+    use super::set_tighter;
+
+    #[test]
+    fn upper_bound_keeps_earlier_instant_across_offsets() {
+        // Two notAfter bounds: 12:00Z (= 12:00Z) and 13:00+02:00 (= 11:00Z). The EARLIER
+        // instant is the offset form (11:00Z); lexically "12…Z" < "13…+02:00" so the OLD
+        // code wrongly kept 12:00Z (later instant → wider window).
+        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
+        set_tighter(&mut slot, "2026-06-16T13:00:00+02:00", /*keep_earlier=*/ true);
+        assert_eq!(slot.as_deref(), Some("2026-06-16T13:00:00+02:00"), "kept earlier instant");
+    }
+
+    #[test]
+    fn lower_bound_keeps_later_instant_across_offsets() {
+        // Two notBefore bounds: 12:00Z and 09:00-02:00 (= 11:00Z). The LATER instant is
+        // 12:00Z; lexically "09…-02:00" < "12…Z" — verify the tighter (later) is kept.
+        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
+        set_tighter(&mut slot, "2026-06-16T09:00:00-02:00", /*keep_earlier=*/ false);
+        assert_eq!(slot.as_deref(), Some("2026-06-16T12:00:00Z"), "kept later instant");
+        // And a genuinely-later offset bound DOES replace.
+        set_tighter(&mut slot, "2026-06-16T16:00:00+02:00", /*keep_earlier=*/ false); // = 14:00Z
+        assert_eq!(slot.as_deref(), Some("2026-06-16T16:00:00+02:00"), "later instant wins");
+    }
+
+    #[test]
+    fn unparseable_candidate_never_widens() {
+        let mut slot = Some("2026-06-16T12:00:00Z".to_owned());
+        set_tighter(&mut slot, "not-a-date", true);
+        assert_eq!(slot.as_deref(), Some("2026-06-16T12:00:00Z"), "malformed never replaces");
+    }
 }

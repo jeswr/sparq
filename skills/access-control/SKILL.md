@@ -310,6 +310,21 @@ Materialize the authorization view from the access-control documents, then enfor
   assignee, never an over-broad public deny). Only a rule with **no** recipient constraint AND
   **no** assignee grants `auth:Public`. Mapping
   table in the [`usage-control-policy`](../usage-control-policy/SKILL.md) skill.
+- `odrl_bridge::materialize_odrl_n3(&mut Graph, policy_ttl: &str, &Request) -> Result<BridgeOutcome, String>`
+  — **opt-in** (`odrl-bridge`; [SONNET-4.6] sq-zgbso.2): an alternative materialization path that
+  runs the stateless ODRL core as **four stratified `reason_n3` calls** (`rules/odrl-{a,b,c,d}.n3`),
+  mirroring the WAC/ACP N3-stratification pattern instead of the Rust evaluator. Decision-equivalent
+  to `materialize_policy` for the supported stateless scope — permissions AND prohibitions over
+  `odrl:dateTime` `lteq`/`gteq`, `odrl:recipient` `eq`/`neq`, and `odrl:or`/`odrl:and`
+  combinators (≤1 logical constraint/rule). **Fail-closed & injection-safe**: `policy_ttl` is parsed
+  **strictly as Turtle** (N3 `=>` rules and every Turtle-extension are a syntax `Err`) and only the
+  validated ground terms are re-serialized into the reasoner input, so a crafted policy cannot smuggle
+  rules or derive `auth:*` directly; a triple mentioning a reserved/engine-owned IRI term, a
+  non-canonical `xsd:dateTime` lexical form (only `YYYY-MM-DDTHH:MM:SSZ` compares correctly
+  lexically), an out-of-scope **prohibition** construct (which the Rust evaluator might satisfy —
+  silently ignoring it would drop a deny and WIDEN access), or an invalid request-field IRI all return
+  `Err` and materialize **nothing**. Grants/denies land in `<urn:sparq:auth>` +
+  `<urn:sparq:auth-bridged>` exactly as the Rust bridge writes them.
 - `store.refresh_odrl_grant(&Policy, &Request, BridgeKind)` / `refresh_odrl_grants()` —
   **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-dpk4): re-evaluate **bridged** ODRL grants when
   the policy changes and **retract** the ones that no longer hold (a withdrawn permission, a
