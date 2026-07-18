@@ -501,6 +501,33 @@ test("an id-less refusal error is attributed to the oldest in-flight subscribe o
   assert.equal(good.closed, 0);
 });
 
+test("an error with an unknown/stale id is unrouted and never consumes a pending subscribe", () => {
+  const unrouted = [];
+  const socket = openSubscriptionSocket(
+    WS_CONFIG,
+    { onUnrouted: (e) => unrouted.push(e) },
+    { webSocketImpl: FakeWebSocket },
+  );
+  const ws = FakeWebSocket.last;
+  ws.open();
+  const a = recordingHandlers();
+  socket.subscribe(SELECT, a.handlers); // in flight — its ack has not arrived yet
+
+  // A stale id (e.g. an unsubscribe answered after the server already terminated that
+  // subscription) matches neither `closing` nor `active`: it must NOT be treated as the
+  // pending subscribe's refusal.
+  ws.message({ error: { message: "unknown subscription id", id: 99 } });
+  assert.equal(unrouted.length, 1, "the stale-id error is reported as unrouted");
+  assert.equal(unrouted[0].kind, "error");
+  assert.equal(a.events.length, 0, "the pending subscribe saw nothing");
+  assert.equal(a.closed, 0, "…and was not closed");
+
+  // The subsequent ack still belongs to that pending subscribe.
+  ws.message({ subscribed: { id: 1 } });
+  assert.equal(a.events[0].kind, "subscribed");
+  assert.equal(a.events[0].ack.id, 1);
+});
+
 test("a terminating error with an id closes just that subscription; the socket stays up", () => {
   const socketHandlers = { closed: 0 };
   const socket = openSubscriptionSocket(

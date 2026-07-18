@@ -276,6 +276,10 @@ export function openSubscriptionSocket(
       case "error": {
         const id = event.error.id;
         if (id !== undefined) {
+          // An id-bearing error routes ONLY by its id — never into the FIFO refusal path.
+          // A stale id can reach us (an `unsubscribe` racing a server-side termination
+          // answers `error` for an id already gone); consuming a pending subscribe for it
+          // would misattribute that subscribe's later ack.
           if (closing.delete(id)) return; // failure answering an unsubscribe we already reported closed
           const entry = active.get(id);
           if (entry) {
@@ -284,8 +288,10 @@ export function openSubscriptionSocket(
             active.delete(id);
             entry.handlers.onEvent(event);
             entry.handlers.onClose?.();
-            return;
+          } else {
+            handlers.onUnrouted?.(event);
           }
+          return;
         }
         // An id-less error while a subscribe is in flight is that subscribe's refusal
         // (the server answers each subscribe, in order, before reading the next frame).
