@@ -179,7 +179,7 @@ _(status: Verified against `crates/sparq-sim/src/lib.rs` + README and the crate'
 on 2026-07-18 [SONNET-4.6] for sq-181 v1.1 (added default-off `tbox` feature: T-box-aware
 signatures via `rdfs:subClassOf`/`rdfs:subPropertyOf` transitive closure, `TBOX_ATTENUATION=0.5`;
 and default-off `lexical` feature: sorted IRI local-name index + trigram-Jaccard tertiary
-fallback in `most_similar`; both behind `SimConfig::tbox_aware`/`lexical_fallback`; 6 new tests
+fallback in `most_similar`; both behind `SimConfig::tbox_aware`/`lexical_fallback`; 8 new tests
 green in both feature states); previously 2026-07-16 [FABLE-5] for sq-lsp7k (added the
 default-off `explain` feature: `Sim::explain_similarity` + `SharedElement`/`Direction`);
 previously 2026-07-12 [GPT-5.6] for sq-da2bz.

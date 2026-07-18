@@ -609,7 +609,11 @@ impl<'g> Sim<'g> {
 
     /// Lexical fallback tier (`lexical` feature): fill remaining `k - scored.len()` slots
     /// with IRI entities whose local name has high trigram-Jaccard similarity to the query
-    /// entity's local name. Only fires when `exclude = Some(query_id)`. [SONNET-4.6] sq-181
+    /// entity's local name. Scans the FULL index — trigram overlap does not imply a shared
+    /// prefix (`xalice` shares `ali`/`lic`/`ice` with `alice`), so a prefix-bounded scan
+    /// would silently narrow the documented metric; the O(index) cost only arises when the
+    /// structural and profile tiers have already starved. Only fires when
+    /// `exclude = Some(query_id)`. [SONNET-4.6] sq-181
     #[cfg(feature = "lexical")]
     fn fill_lexical_fallback(
         &self,
@@ -629,14 +633,8 @@ impl<'g> Sim<'g> {
         let have: rustc_hash::FxHashSet<Id> = scored.iter().map(|&(c, _)| c).collect();
         let remaining = k - scored.len();
 
-        // Prefix range: use the first min(3, len) bytes of the query key for a focused scan.
-        let prefix_len = query_key.len().min(3);
-        let prefix = &query_key[..prefix_len];
-        let start = lexical.sorted.partition_point(|(k, _)| k.as_ref() < prefix);
-        let end =
-            start + lexical.sorted[start..].partition_point(|(k, _)| k.starts_with(prefix));
-
-        let mut fb: Vec<(Id, f64)> = lexical.sorted[start..end]
+        let mut fb: Vec<(Id, f64)> = lexical
+            .sorted
             .iter()
             .filter_map(|(key, id)| {
                 if Some(*id) == exclude || have.contains(id) || !self.is_entity(*id) {
@@ -1335,10 +1333,13 @@ mod tests {
             ":e1 :inSport :s1 . :e2 :inSport :s1 .
              :e3 :inSport :s2 . :e4 :inSport :s3 .",
         );
-        let strict = Sim::with_config(
-            &g,
-            SimConfig { idf: false, profile_fallback: false, ..SimConfig::default() },
-        );
+        // Pin the STRUCTURAL starvation invariant: the lexical tier (when compiled in)
+        // would legitimately fill slots here (`s2`/`s3` are lexically close to `s1`),
+        // so it is disabled along with the profile fallback.
+        let strict_cfg = SimConfig { idf: false, profile_fallback: false, ..SimConfig::default() };
+        #[cfg(feature = "lexical")]
+        let strict_cfg = SimConfig { lexical_fallback: false, ..strict_cfg };
+        let strict = Sim::with_config(&g, strict_cfg);
         assert!(
             strict.most_similar(&iri("s1"), 5).is_empty(),
             "v1 starvation: no shared (predicate, neighbor) element"
@@ -1822,5 +1823,66 @@ mod tests {
         // :twin must appear before any lexical candidate.
         let names: Vec<String> = top.iter().map(|(t, _)| t.to_string()).collect();
         assert_eq!(names[0], "<http://ex.org/twin>", "structural match must lead; got {names:?}");
+    }
+
+    /// Trigram overlap does not require a shared prefix: `xalice` shares the
+    /// `ali`/`lic`/`ice` trigrams with `alice` despite a different first byte, so the
+    /// lexical tier must return it (a prefix-bounded candidate scan would miss it).
+    /// [SONNET-4.6] sq-181
+    #[cfg(feature = "lexical")]
+    #[test]
+    fn lexical_fallback_matches_across_different_prefixes() {
+        let g = graph(
+            ":alice  :uniq1 :x1 .
+             :xalice :uniq2 :x2 .
+             :zzz_unrelated :uniq3 :x3 .",
+        );
+        let sim = Sim::with_config(
+            &g,
+            SimConfig {
+                idf: false,
+                profile_fallback: false,
+                lexical_fallback: true,
+                ..SimConfig::default()
+            },
+        );
+        let top = sim.most_similar(&iri("alice"), 5);
+        let names: Vec<String> = top.iter().map(|(t, _)| t.to_string()).collect();
+        assert!(
+            names.contains(&"<http://ex.org/xalice>".to_string()),
+            "positive-Jaccard match with a different prefix must be found; got: {names:?}"
+        );
+        // Zero trigram overlap → not a candidate.
+        assert!(
+            !names.contains(&"<http://ex.org/zzz_unrelated>".to_string()),
+            "zero-Jaccard key must not appear; got: {names:?}"
+        );
+    }
+
+    /// The lexical tier must not panic on non-ASCII local names. In `abécédaire`,
+    /// byte offset 3 falls inside the two-byte `é`, so any byte-offset string slice
+    /// of the query key would panic. [SONNET-4.6] sq-181
+    #[cfg(feature = "lexical")]
+    #[test]
+    fn lexical_fallback_handles_multibyte_local_names() {
+        let g = graph(
+            "<http://ex.org/abécédaire> :uniq1 :x1 .
+             <http://ex.org/abécédé>    :uniq2 :x2 .",
+        );
+        let sim = Sim::with_config(
+            &g,
+            SimConfig {
+                idf: false,
+                profile_fallback: false,
+                lexical_fallback: true,
+                ..SimConfig::default()
+            },
+        );
+        let top = sim.most_similar(&iri("abécédaire"), 5);
+        let names: Vec<String> = top.iter().map(|(t, _)| t.to_string()).collect();
+        assert!(
+            names.contains(&"<http://ex.org/abécédé>".to_string()),
+            "non-ASCII trigram match must be found; got: {names:?}"
+        );
     }
 }
