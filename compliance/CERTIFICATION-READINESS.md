@@ -36,7 +36,8 @@ These are re-runnable, file-or-test-cited, and gating in CI — sparq can stand 
 - `#![forbid(unsafe_code)]` across 31/36 crates; the concentrated `sparq-core` unsafe surface (mmap /
   dict-spill / SIMD = boundary **B5**) is enumerated, per-site justified, **count-ratcheted as a
   merge gate**, and covered by Miri + a corruption oracle + cargo-fuzz. (memsafety, SIGN-OFF)
-- CodeQL SAST (gating), clippy `-D warnings` (gating), cargo-deny advisories/bans/licenses/sources
+- CodeQL SAST (advisory at merge since 2026-07-17; alerts triaged retroactively via the daily
+  `codeql-alert-sweep.yml` issue), clippy `-D warnings` (gating), cargo-deny advisories/bans/licenses/sources
   **PR-gate** (GX-1 closed via #210), CycloneDX SBOM + VEX, OpenSSF Scorecard (published).
 - SLSA **Build L2** provenance + buildkit `provenance: mode=max` + SHA256SUMS + cargo-auditable on the
   official release archives and the ghcr container; SHA-pinned actions; distroless non-root image with

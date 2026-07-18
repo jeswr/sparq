@@ -286,8 +286,9 @@ un-draft moment.
 > `require_code_owner_review`) would **deadlock** the merge train — there is no second human
 > to approve. The **live ruleset therefore sets `required_approving_review_count: 0` and
 > `require_code_owner_review: false` deliberately**, and substitutes a *bot/automated*
-> review layer (Copilot code review on push + CodeQL code-scanning gate + the `ci-summary`
-> aggregator + conversation-resolution) for the missing second human. This is the same
+> review layer (Copilot code review on push + per-PR CodeQL SAST — advisory at merge with
+> retroactive alert triage, [§CodeQL is advisory](#codeql-is-advisory-retroactive-alert-triage) —
+> + the `ci-summary` aggregator + conversation-resolution) for the missing second human. This is the same
 > reality OpenSSF Scorecard's `Code-Review` / `Branch-Protection` checks score down — see
 > [§Solo-maintainer & the Scorecard score](#solo-maintainer--the-scorecard-code-review--branch-protection-score)
 > below; the settings here are written to match **what is actually enforced**, not an
@@ -418,8 +419,8 @@ this document (procedure below).
   "no second human" values (`0` / `false` / `false`, see [§Required reviews](#required-reviews)),
   so those particular sub-signals do not earn points even though the *substantive*
   protections (no force-push, no deletion, squash-only linear history, conversation
-  resolution, CodeQL alert gate, no bypass actors, a required CI aggregator) are all
-  present and enforced.
+  resolution, advisory per-PR CodeQL SAST with retroactive alert triage, no bypass
+  actors, a required CI aggregator) are all present and enforced.
 
 These are **inherent to the operating model**, not fixable code changes — consistent with
 the disposition recorded in `compliance/openssf/gap-register.md` (the Scorecard SARIF is no
@@ -470,7 +471,8 @@ There is **no `code_scanning` rule** — nothing in the ruleset independently
 requires code-scanning results at merge time (consistent with
 [§CodeQL is advisory](#codeql-is-advisory-retroactive-alert-triage)). Note the
 `code_quality` rule (`severity: all`) is GitHub's separate built-in PR
-code-quality signal, not the CodeQL code-scanning alert gate.
+code-quality signal, not a CodeQL code-scanning requirement (no such
+requirement exists — CodeQL is advisory at merge).
 
 **Known drift (2026-07-17, flagged for the maintainer):** the live ruleset
 reports one bypass actor (`RepositoryRole` id 5, `bypass_mode: always`) and

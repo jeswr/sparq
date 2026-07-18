@@ -23,7 +23,7 @@ commercialising party) — the CRA manufacturer/steward distinction is in [`READ
 
 | Req | Requirement (paraphrased) | Status | Evidence | Owner |
 |---|---|---|---|---|
-| I.1 | Designed, developed, produced so as to ensure an appropriate level of cybersecurity based on the risks. | implemented & verified | STRIDE threat model with documented boundaries B1–B5 (`research/threat-model.md`); secure-SDLC gate stack (clippy `-D warnings`, CodeQL SAST, Miri, fuzz — `.github/workflows/{ci,codeql,miri,fuzz}.yml`); secure-coding standard (`CONTRIBUTING.md` §"unsafe policy"/"Input validation"). | sparq |
+| I.1 | Designed, developed, produced so as to ensure an appropriate level of cybersecurity based on the risks. | implemented & verified | STRIDE threat model with documented boundaries B1–B5 (`research/threat-model.md`); secure-SDLC control stack (clippy `-D warnings` gating; CodeQL SAST advisory at merge with retroactive alert triage; Miri; fuzz — `.github/workflows/{ci,codeql,miri,fuzz}.yml`); secure-coding standard (`CONTRIBUTING.md` §"unsafe policy"/"Input validation"). | sparq |
 | I.2 | Made available **without known exploitable vulnerabilities**. | implemented & verified | PR-time **gating** `cargo deny check advisories` (un-degraded, sq-toze.2) — `.github/workflows/supply-chain.yml#audit`; `deny.toml [advisories] yanked = "deny"` + fail-closed ignore policy (only two justified `unmaintained` informational advisories, each VEX-documented + bead-tracked); daily watchdog defence-in-depth `.github/workflows/dependency-monitoring.yml`. The claim rests on the **real advisory gate**, not aspiration. | sparq |
 
 ### (2) Security properties (a)–(j)

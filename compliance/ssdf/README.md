@@ -29,7 +29,8 @@ deploying organization can lift into its own attestation — not a pending exter
 ## Scope — what's in, what's the operator's job
 
 **In scope (the producer = sparq project):**
-- The secure-SDLC *gates* — clippy `-D warnings`, CodeQL SAST, `cargo test`/conformance
+- The secure-SDLC *controls* — clippy `-D warnings`, CodeQL SAST (advisory at merge;
+  retroactive alert triage), `cargo test`/conformance
   ratchets, Miri, fuzz, the unsafe-count ratchet, cargo-deny advisories/bans/sources/
   licenses (gating), cargo-vet, the CycloneDX SBOM + VEX, SLSA build provenance, and the
   `ci-summary / gate` aggregator.

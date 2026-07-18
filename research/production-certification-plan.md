@@ -92,7 +92,9 @@ re-propose existing controls**. Legend: **P0** blocks a perfect score on a high-
 needed for a perfect score; **P2** raises maturity / nice-to-have.
 
 ### Already done — DO NOT re-propose (cite as evidence)
-clippy `-D warnings` (gating), CodeQL SAST (gating), OpenSSF Scorecard (`scorecard.yml`, published),
+clippy `-D warnings` (gating), CodeQL SAST (gating when this was written; advisory-at-merge with
+retroactive daily alert triage since 2026-07-17 — `docs/branch-protection.md` §CodeQL is advisory),
+OpenSSF Scorecard (`scorecard.yml`, published),
 cargo-deny bans/sources/licenses (gating), CycloneDX SBOM *in CI as artifact*, cargo-fuzz (PR smoke +
 nightly), Miri lane (nightly, `sparq-core`), SLSA `attest-build-provenance` + buildkit `provenance:
 mode=max` + SHA256SUMS on release, distroless non-root SHA-pinned `Dockerfile` + docker-smoke gate,

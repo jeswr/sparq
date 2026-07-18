@@ -75,7 +75,7 @@ gap (see [`gap-register.md`](./gap-register.md)).
 | A.5.5 | Contact with authorities | N/A(op) | Operator owns for their deployment | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.5.6 | Contact with special interest groups | IMPL | OpenSSF Scorecard published; RustSec/GHSA/CodeQL participation | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.5.7 | Threat intelligence | IMPL | Daily `dependency-monitoring.yml`; Dependabot; CodeQL | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
-| A.5.8 | Information security in project management | IMPL | CI gate stack (`ci.yml`, `codeql.yml`, `supply-chain.yml`, `miri.yml`, `fuzz.yml`, `scorecard.yml`, `ci-summary.yml`); threat model | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
+| A.5.8 | Information security in project management | IMPL | CI control stack (`ci.yml`, `codeql.yml` advisory-at-merge, `supply-chain.yml`, `miri.yml`, `fuzz.yml`, `scorecard.yml`, `ci-summary.yml` gate); threat model | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.5.9 | Inventory of information & associated assets | AUDIT-READY | CycloneDX SBOM per build; crate list; threat-model §Assets. Operator data inventory is the operator's | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.5.10 | Acceptable use of information & assets | N/A(op) | Operator policy for deployed instance + data | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
 | A.5.11 | Return of assets | N/A(op) | People/asset-return; no employees | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` | `<FILL-IN>` |
