@@ -117,6 +117,7 @@ opt-in sparq-server (solid-authz-trust — stateless trust-graph /authz/decide e
 opt-in sparq-server (templates — named parameterized template REST surface)
 opt-in sparq-server (terse)
 opt-in sparq-server (tpf)
+opt-in sparq-shacl (imports)
 opt-in sparq-shacl (scs)
 opt-in sparq-shacl (shacl-af)
 opt-in sparq-sim (explain)

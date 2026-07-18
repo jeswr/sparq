@@ -5,6 +5,12 @@
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 mod eval;
+// [SONNET-4.6] (sq-uz0) sh:shapesGraph / owl:imports shapes-graph ASSEMBLY
+// (W3C SHACL §1.4) — OPT-IN behind the `imports` cargo feature so the base
+// validation path carries zero assembly code when off. Zero new dependencies:
+// a pure traversal over `GraphView` + `Dict` the crate already uses.
+#[cfg(feature = "imports")]
+pub mod imports;
 pub mod model;
 pub mod path;
 mod report;
@@ -36,6 +42,10 @@ pub use report::{
 // [OPUS-4.8] (sq-v0b8) SHACL Compact Syntax parser public surface (feature `scs`).
 #[cfg(feature = "scs")]
 pub use scs::{parse as parse_scs, parse_to_graph as parse_scs_to_graph, ScsError, DEFAULT_BASE};
+
+// [SONNET-4.6] (sq-uz0) Shapes-graph assembly public surface (feature `imports`).
+#[cfg(feature = "imports")]
+pub use imports::{resolve_imports, resolve_shapes_graph, ShapesGraphResolution};
 
 // [OPUS-4.8] SHACL-AF rules + node-expression public surface (feature `shacl-af`).
 #[cfg(feature = "shacl-af")]
