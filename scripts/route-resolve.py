@@ -15,8 +15,27 @@ except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib
 
 
+def validate_routing(doc):
+    """Structural invariants a routing table must satisfy before ANY resolution — enforced in
+    resolve() so a violating table fails LOUDLY at PLAN time instead of silently routing.
+    Maintainer rule 2026-07-18: the cheap tiers `sonnet` and `terra` author NOTHING but docs —
+    they may appear only in the model_chain of a route whose role == "docs" (never in defaults,
+    a match_labels security rule, or any other role's chain)."""
+    docs_only = {"sonnet", "terra"}
+    offenders = []
+    if docs_only & set(doc.get("defaults", {}).get("model_chain", [])):
+        offenders.append("defaults")
+    for r in doc.get("route", []):
+        if docs_only & set(r.get("model_chain", [])) and r.get("role") != "docs":
+            offenders.append(r.get("role") or ",".join(r.get("match_labels", [])) or "<unnamed>")
+    if offenders:
+        raise ValueError("routing violates the docs-only rule for sonnet/terra (maintainer "
+                         "2026-07-18) in: " + "; ".join(offenders))
+
+
 def resolve(labels, doc):
     """Return (model_chain, agent, escalate). `labels`: iterable of the issue's labels."""
+    validate_routing(doc)
     labels = set(labels)
 
     def role_of(lbs):
@@ -56,12 +75,12 @@ def _self_test():
     # docs -> haiku-led
     chk("docs -> haiku", resolve(["role:docs", "area:x"], doc)[0][0], "haiku")
     # [FABLE-5] UI ownership: site -> terra-led (GPT-5.6 codex, the original dashboard builder)
-    chk("site -> terra-led", resolve(["role:site", "area:site"], doc)[0], ["terra", "fable", "sonnet"])
+    chk("site -> sol-led (GPT owns UI; terra is docs-only)", resolve(["role:site", "area:site"], doc)[0], ["sol", "fable", "opus"])
     # [FABLE-5] frontier-tier infra authorship (standing rule 2026-07-17): ci -> fable-first,
     # FRONTIER-ONLY chain — no sub-frontier model (sonnet/haiku) anywhere in it, so exhaustion
     # DEFERS at the registry claim step (retried next tick) instead of degrading tier.
     mc, ag, esc = resolve(["role:ci", "area:ci"], doc)
-    chk("ci -> frontier-only fable-first", (mc, ag, esc), (["fable", "terra"], "sparq-ci-infra", False))
+    chk("ci -> frontier-only fable-first", (mc, ag, esc), (["fable", "sol"], "sparq-ci-infra", False))
     chk("ci chain has no sub-frontier tier", sorted(set(mc) & {"sonnet", "haiku"}), [])
     # no role -> defaults (fable-led)
     chk("no role -> defaults", resolve(["area:sparq-core"], doc)[0][0], "fable")

@@ -55,15 +55,21 @@ credential_format = "codex-auth-json"
 [models.sol]
 provider = "openai"
 harness = "codex"
-provider_model = "gpt-5.6-sol"         # THE cross-provider REVIEW model (maintainer 2026-07-18): the
-                                       # registry REVIEW_CHAIN routes reviews of anthropic-authored PRs
-                                       # to `sol`. Distinct alias from `terra` (a different GPT model,
-                                       # which stays the openai IMPL/fix alias); id probed working on
-                                       # the worker account type 2026-07-18.
+provider_model = "gpt-5.6-sol"         # Cross-provider REVIEW model (maintainer 2026-07-18): the registry
+                                       # REVIEW_CHAIN routes reviews of anthropic-authored CONTENT to
+                                       # `sol`. Distinct alias from `terra` (a different GPT model); id
+                                       # probed working on the worker account type 2026-07-18.
+credential_format = "codex-auth-json"
+[models.luna]
+provider = "openai"
+harness = "codex"
+provider_model = "gpt-5.6-luna"        # Second tier of the unified fix ladder opus<luna<fable<sol
+                                       # (maintainer 2026-07-18) + sol's review fallback; id probed
+                                       # working on the worker account type 2026-07-18.
 credential_format = "codex-auth-json"
 
 [defaults]
-model_chain = ["fable", "sonnet", "terra"]
+model_chain = ["fable", "sol", "opus"]
 agent = "sparq-rust-impl"
 
 # ---------------------------------------------------------------------------------------------------
@@ -80,7 +86,7 @@ escalate = true                        # consumed by dispatch: on chain-exhausti
 # cross-provider implementation fallback so an Anthropic outage does not stall implementation.
 [[route]]
 role = "impl"
-model_chain = ["fable", "sonnet", "terra"]
+model_chain = ["fable", "sol", "opus"]
 agent = "sparq-rust-impl"
 
 # [FABLE-5] UI/front-end ownership (maintainer decision 2026-07-17): GPT-5.6 codex (openai; alias
@@ -92,7 +98,7 @@ agent = "sparq-rust-impl"
 # unions ALL match_labels keywords, so UI keywords there would human-arm every UI PR.
 [[route]]
 role = "site"
-model_chain = ["terra", "fable", "sonnet"]
+model_chain = ["sol", "fable", "opus"]
 agent = "sparq-site"
 
 # [FABLE-5] STANDING RULE — frontier-tier CI/infrastructure authorship (maintainer decision
@@ -112,7 +118,7 @@ agent = "sparq-site"
 # escalation) — where role:ci and a security surface overlap, the security lane is correct.
 [[route]]
 role = "ci"
-model_chain = ["fable", "terra"]
+model_chain = ["fable", "sol"]
 agent = "sparq-ci-infra"
 
 [[route]]
@@ -125,9 +131,12 @@ role = "research"
 model_chain = ["fable", "opus"]
 agent = "sparq-researcher"
 
+# docs-only cheap tiers (maintainer 2026-07-18): sonnet AND terra appear in THIS chain and
+# nowhere else — scripts/route-resolve.py validate_routing() REJECTS any table naming either
+# outside role=docs.
 [[route]]
 role = "docs"
-model_chain = ["haiku", "fable"]
+model_chain = ["haiku", "sonnet", "terra", "fable"]
 agent = "sparq-docs"
 
 # Review / soundness: Opus only; escalate to human on unavailability (do NOT fall to a weaker model).
