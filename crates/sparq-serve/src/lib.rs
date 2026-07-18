@@ -103,10 +103,17 @@ pub use backup_delta::{
 // [FABLE-5] (sq-n9s4d) `RetentionPolicy`/`RetentionReport` are the retention/truncation
 // surface: `ChangeLog::apply_retention` drops whole old segments by consumer-ack (hard
 // safety bound) / age / total-size pressure; `ChangeLog::first_seq` is the trim horizon.
+// [FABLE-5] (sq-r2cu1) `ChangeLog::rebase_to` is the explicit operator resync for a BROKEN
+// stream (a dropped record / a `Writer::restore` fail-closes every later `record_commit`):
+// it appends an honest gap record (`ChangeRecord::rebase`) and re-arms recording without
+// wiping the log.
+// [FABLE-5] (gh-2436) `ChangeStreamControl` (from `ChangeLog::into_commit_hook_with_control`)
+// runs that resync on a RUNNING recorder — no stop/re-open; `rebase_to_new_lineage` is the
+// post-restore variant for a replaced lineage whose generation numbering restarted.
 #[cfg(feature = "change-stream")]
 pub use change_stream::{
-    Change, ChangeLog, ChangeLogConfig, ChangeOp, ChangeRecord, RetentionPolicy,
-    RetentionReport, DEFAULT_SEGMENT_TARGET_BYTES, SEGMENT_MAGIC,
+    Change, ChangeLog, ChangeLogConfig, ChangeOp, ChangeRecord, ChangeStreamControl,
+    RetentionPolicy, RetentionReport, DEFAULT_SEGMENT_TARGET_BYTES, SEGMENT_MAGIC,
 };
 #[cfg(all(feature = "change-stream", not(feature = "backup")))]
 pub use backup::BackupError;

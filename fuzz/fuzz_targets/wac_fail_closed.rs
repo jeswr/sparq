@@ -76,7 +76,7 @@ fn harvest_agents(text: &str, cap: usize) -> Vec<String> {
 fn harvest_resources(graph: &Graph, text: &str, cap: usize) -> Vec<String> {
     let mut resources: Vec<String> = Vec::new();
     let push = |r: String, out: &mut Vec<String>| {
-        if !out.iter().any(|x| *x == r) {
+        if !out.contains(&r) {
             out.push(r);
         }
     };
@@ -158,10 +158,7 @@ fuzz_target!(|data: &[u8]| {
                 .filter(|l| Graph::load_dataset(l, "nquads").is_ok())
                 .flat_map(|l| [l, "\n"])
                 .collect();
-            match Graph::load_dataset(&salvaged, "nquads") {
-                Ok(g) => g,
-                Err(_) => Graph::default(),
-            }
+            Graph::load_dataset(&salvaged, "nquads").unwrap_or_default()
         }
     };
 

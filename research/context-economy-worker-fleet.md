@@ -149,9 +149,10 @@ container has **no `gh` binary** and the brief forbids GitHub APIs, so *if* agen
 execute in fresh-HOME non-interactive `claude -p`, every cargo/git/test Bash call pays
 an Opus round-trip to conclude "not applicable". At 30–100 Bash calls per
 implementation run that is ~100–400k Opus input tokens of pure overhead per worker
-(estimate) — which would dwarf everything else in this record. **Whether the hook fires
-headless is UNVERIFIED** (folder-trust/hook-approval gating may skip it); §5 pilot E is
-the verify-first canary. The fix is trivial either way (command-hook prefilter on the
+(estimate) — which would dwarf everything else in this record. **RESOLVED 2026-07-17:
+the §5 pilot E canary found the hook does NOT fire in fresh-HOME headless runs with the
+committed settings — but only via a fragile config interaction; see the pilot E RESULT
+in §5.** The fix is trivial either way (command-hook prefilter on the
 arming pattern, or a worker-mode settings override in the container). The `SessionStart`
 bd hook provably no-ops in-container (`bd` not installed; script exits 0).
 
@@ -428,6 +429,29 @@ except P0: stub repo + a counting command hook + the committed agent hook;
 agent hook present in settings. If agent hooks fire headless: fix immediately (no
 threshold — it is pure overhead); re-run one baseline batch afterwards so pilots A–D
 measure against the fixed floor.
+
+**Pilot E RESULT (2026-07-17, audit fix wave).** Ran fresh-HOME headless `claude -p`
+probes (worker-shaped: isolated `$HOME` + copied credential, cwd at a checkout root,
+`--allowedTools Bash`, haiku main model). Findings:
+1. With the **committed sparq `settings.json` as-is**, the `sparq-perf-reviewer` agent
+   hook does **NOT** fire on Bash calls (two independent probes: no Opus/no second
+   model in `modelUsage`, no `hook_started` events for PreToolUse, seconds-scale total
+   duration) — workers are NOT currently paying the per-Bash Opus overhead feared in
+   §1.5. The `SessionStart` bd hook DOES fire.
+2. **Do not conclude agent hooks are inert headless**: in a synthetic project with a
+   minimal `PreToolUse` config, BOTH the command hook and a test agent hook fired in
+   the same fresh-HOME headless mode (the hook agent showed up as a second model in
+   `modelUsage`), and stripping the `SessionStart` entry from a copy of the sparq
+   config also un-suppressed its PreToolUse hooks. The suppression is a
+   config-interaction effect, not a headless guarantee — a future settings.json edit
+   could silently start billing Opus per Bash call.
+3. When the agent hook did fire in probes, its `model: "opus"` pin was **not honored**
+   (the hook agent ran on a haiku snapshot id) — the worst-case Opus overhead estimate
+   in §1.5 may overstate the price even in the firing configuration.
+Action: the matcher fix (command-hook prefilter on the `gh pr merge --auto` arming
+pattern, or a worker-mode settings override) is still the right hardening so the
+outcome stops depending on an undocumented interaction; tracked as a sparq-side
+follow-up issue (dedupe marker: audit-2026-07-17).
 
 **Sequencing**: P0 → E → A → {B, D in parallel, separate accounts} → C. Every pilot's
 results land in `bench/` (the sanctioned home for measured numbers) with a one-line

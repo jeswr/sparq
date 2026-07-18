@@ -78,7 +78,8 @@
 //! The store is per-graph (dictionary-local ids), so hits come from the store
 //! you pass — typically the one built against the default graph.
 
-use crate::ann::nearest_exact;
+use crate::ann::{nearest_exact, nearest_exact_tiebreak};
+use crate::spqv_provenance::Metric;
 use crate::store::VectorStore;
 use crate::vocab;
 // [OPUS-4.8] (sq-z589, epic sq-3183) The approximate backend the `*_approx` entry points search
@@ -100,12 +101,12 @@ use sparq_engine::{PreparedQuery, QueryBudget, QueryResult};
 // patterns carve out the eligible graph nodes (the candidate id-set), and the k-NN
 // search is restricted to that set — correct (and, for a selective constraint, faster)
 // than post-filtering the unfiltered neighbours. This needs the `filtered-ann` API
-// (`IdMask` + the cost-model `nearest_filtered_costed`, sq-7hx6, which picks pre-filter
-// vs post-filter by selectivity — identical answer either way), so the whole
+// (`IdMask` + the cost-model `nearest_filtered_costed_tiebreak`, sq-7hx6, which picks
+// pre-filter vs post-filter by selectivity — identical answer either way), so the whole
 // derive-and-filter path is additionally gated on `filtered-ann`; with that feature off
 // the `vec:` predicate behaves EXACTLY as before (plain unfiltered `nearest_exact`).
 #[cfg(feature = "filtered-ann")]
-use crate::cost::{nearest_filtered_costed, CostModel};
+use crate::cost::{nearest_filtered_costed_tiebreak, CostModel};
 #[cfg(feature = "filtered-ann")]
 use crate::filter::IdMask;
 // [OPUS-4.8] (sq-36ol, epic sq-3183) The derived-mask cache: a `vec:` predicate that shares its
@@ -133,11 +134,28 @@ const RDF_NIL: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#nil";
 ///   APPROXIMATE (recall < 1.0 — see [`crate::ann`]/[`crate::diskann`]), for large `.spqv` stores
 ///   where the full scan is the bottleneck. NEVER claimed as exact: the index can miss a true
 ///   neighbour. The FILTERED `vec:` path (when `filtered-ann` composes in) is unchanged — it still
-///   goes through the cost-model'd `nearest_filtered_costed`; this seam is only the unfiltered scan.
+///   goes through the cost-model'd, VG-TIE-1 tie-broken `nearest_filtered_costed_tiebreak`; this
+///   seam is only the unfiltered scan.
 trait UnfilteredSearch {
     /// Top-`k` `(id, cosine)` by similarity to `query`, best first (same contract as
     /// [`nearest_exact`]: all-zero query → no results).
     fn search(&self, query: &[f32], k: usize) -> Vec<(Id, f32)>;
+
+    /// [SONNET-4.6] (sq-tb9p0) Answer-exact top-`k` with the VG-TIE-1 deterministic boundary
+    /// tie-break ([`nearest_exact_tiebreak`]) and the seed already excluded, or `Ok(None)` when
+    /// this backend cannot honour the rule — an APPROXIMATE backend has recall < 1 and no true
+    /// boundary to break ties at, so it keeps the plain [`search`](Self::search) path. `Err` is
+    /// the fail-closed embeddable-domain rejection: a blank-node candidate whose term (not its
+    /// score alone) would decide membership is a hard query error, never ranked.
+    fn search_tied(
+        &self,
+        _query: &[f32],
+        _k: usize,
+        _graph: &Graph,
+        _exclude: Option<Id>,
+    ) -> Result<Option<Vec<(Id, f32)>>, String> {
+        Ok(None)
+    }
 }
 
 /// The exact full-scan backend — preserves the pre-sq-z589 `vec:` behaviour exactly.
@@ -148,6 +166,16 @@ struct ExactSearch<'a> {
 impl UnfilteredSearch for ExactSearch<'_> {
     fn search(&self, query: &[f32], k: usize) -> Vec<(Id, f32)> {
         nearest_exact(self.store, query, k)
+    }
+
+    fn search_tied(
+        &self,
+        query: &[f32],
+        k: usize,
+        graph: &Graph,
+        exclude: Option<Id>,
+    ) -> Result<Option<Vec<(Id, f32)>>, String> {
+        nearest_exact_tiebreak(self.store, graph, query, k, exclude).map(Some)
     }
 }
 
@@ -271,6 +299,28 @@ fn prepare_with(
     // no fingerprint and are left to work as before — we only check when we can.
     if store.fingerprint().is_some() {
         store.check_graph(graph)?;
+    }
+    // [SONNET-4.6] (sq-tb9p0) VG-MET-1/VG-MET-4 (mainline): the `vec:` query surface evaluates
+    // exactly ONE metric — cosine similarity. A store whose persisted v3 provenance declares a
+    // DIFFERENT metric must be rejected, not scored: evaluating a cosine ranking over vectors
+    // embedded for another metric returns well-formed but meaningless numbers. A legacy v1/v2
+    // store (or one built without binding a provenance) declares nothing and is left to work as
+    // before — implicit cosine, exactly the pre-provenance behaviour; the strict fail-closed
+    // check for those is `VectorStore::check_provenance`. The declared NORMALIZATION regime is
+    // deliberately NOT a rejection axis on this path: the exact scan computes cosine with the
+    // norms taken at comparison time (scale-invariant), so both declared regimes (`none` / `l2`)
+    // are evaluated faithfully under the declared cosine metric and no cross-normalisation
+    // mismatch can arise here.
+    if let Some(prov) = store.provenance() {
+        if prov.metric != Metric::Cosine {
+            return Err(format!(
+                "vec: this store declares the '{}' distance metric, but the vec: query surface \
+                 evaluates cosine similarity only; refusing the cross-metric evaluation (the \
+                 scores would be well-formed but meaningless). Rebuild the store under cosine, \
+                 or rank it through a '{}'-aware code path",
+                prov.metric, prov.metric
+            ));
+        }
     }
     let query = spargebra::SparqlParser::new()
         .parse_query(sparql)
@@ -405,8 +455,14 @@ fn rewrite_bgp(
             vocab::NEAREST => reqs.push(parse_nearest(tp, &lists)?),
             vocab::SEARCH => reqs.push(parse_search(tp, &lists)?),
             _ => {
+                // [SONNET-4.6] (sq-tb9p0) VG-GOV-3: the VG-VOC-1 hard error states the highest
+                // vocabulary revision this build implements, so a query written against a NEWER
+                // spec revision's term fails with the version gap named, not just "unknown".
                 return Err(format!(
-                    "vec: unknown magic predicate <{iri}> (supported: vec:nearest, vec:search)"
+                    "vec: unknown magic predicate <{}> (supported: vec:nearest, vec:search; \
+                     this build implements vec: vocabulary revision {})",
+                    iri,
+                    vocab::VOCAB_REVISION
                 ))
             }
         }
@@ -672,9 +728,11 @@ fn term_to_ground(t: Term) -> Option<GroundTerm> {
 /// BGP's surviving ordinary patterns; if any of them constrain `req.node`, the search
 /// is restricted to the candidate id-set those patterns admit (filtered ANN) instead
 /// of scanning the whole store and joining afterwards — and that filtered path goes through the
-/// cost-model'd `nearest_filtered_costed`, INDEPENDENT of `searcher` (the approximate seam is only
-/// the unfiltered scan; the filtered story stays exactly as sq-bvmd/sq-7hx6 left it). When no
-/// pattern constrains the neighbour variable — or with `filtered-ann` off — `searcher` runs.
+/// cost-model'd `nearest_filtered_costed_tiebreak`, INDEPENDENT of `searcher` (the approximate
+/// seam is only the unfiltered scan; the filtered path is always answer-exact and applies the
+/// same VG-TIE-1 boundary rule as the unfiltered exact path, with the seed excluded before the
+/// boundary is determined — sq-bvmd/sq-7hx6 + sq-tb9p0). When no pattern constrains the
+/// neighbour variable — or with `filtered-ann` off — `searcher` runs.
 fn run_knn(
     req: &KnnReq,
     graph: &Graph,
@@ -698,22 +756,34 @@ fn run_knn(
             };
             #[cfg(feature = "filtered-ann")]
             if let Some(mask) = &mask {
-                // Filtered: search only BGP-admitted candidates. Over-fetch by one so
-                // dropping the seed (if it satisfies the constraint and so sits in the
-                // mask) still leaves up to k neighbours, matching the unfiltered form.
-                // [OPUS-4.8] (sq-7hx6) The cost model picks pre-filter (scan the mask) vs
-                // post-filter (scan the whole store + drop non-members) by the mask's
-                // selectivity; BOTH branches return the identical top-(k+1), so the seed
-                // drop and the final answer are unchanged either way.
-                let (hits, _est) =
-                    nearest_filtered_costed(store, query, mask, req.k + 1, &CostModel::default());
-                return Ok(hits
-                    .into_iter()
-                    .filter(|&(n, _)| n != id)
-                    .take(req.k)
-                    .collect());
+                // Filtered: search only BGP-admitted candidates, with the seed excluded
+                // from the pool BEFORE the k boundary is determined and boundary-tie
+                // membership decided by the VG-TIE-1 N-Triples rule — so the filtered
+                // answer equals post-filtering the unfiltered tie-broken retrieval
+                // (VG-FILT-2 in answer-exact mode). [OPUS-4.8] (sq-7hx6) The cost model
+                // picks pre-filter (scan the mask) vs post-filter (scan the whole store +
+                // drop non-members) by the mask's selectivity; BOTH branches return the
+                // identical answer either way.
+                let (hits, _est) = nearest_filtered_costed_tiebreak(
+                    store,
+                    graph,
+                    query,
+                    mask,
+                    req.k,
+                    Some(id),
+                    &CostModel::default(),
+                )?;
+                return Ok(hits);
             }
-            // Over-fetch by one and drop the seed itself (the searcher may be exact or approximate).
+            // [SONNET-4.6] (sq-tb9p0) Answer-exact path: rank with the VG-TIE-1 boundary
+            // tie-break (seed excluded before ranking, so the boundary is computed over the
+            // true candidate pool). A blank-node candidate whose term would decide
+            // membership is a fail-closed hard error (`?`), per the embeddable domain.
+            if let Some(hits) = searcher.search_tied(query, req.k, graph, Some(id))? {
+                return Ok(hits);
+            }
+            // Approximate backend: over-fetch by one and drop the seed itself (recall < 1 —
+            // no true boundary exists to tie-break at).
             Ok(searcher
                 .search(query, req.k + 1)
                 .into_iter()
@@ -731,10 +801,25 @@ fn run_knn(
             }
             #[cfg(feature = "filtered-ann")]
             if let Some(mask) = &mask {
-                // [OPUS-4.8] (sq-7hx6) Cost-model choice of pre-filter vs post-filter;
-                // identical answer either way.
-                let (hits, _est) =
-                    nearest_filtered_costed(store, v, mask, req.k, &CostModel::default());
+                // [OPUS-4.8] (sq-7hx6) Cost-model choice of pre-filter vs post-filter —
+                // identical answer either way — with boundary-tie membership decided by
+                // the VG-TIE-1 N-Triples rule over the admitted pool (no seed to exclude
+                // in the query-by-vector form).
+                let (hits, _est) = nearest_filtered_costed_tiebreak(
+                    store,
+                    graph,
+                    v,
+                    mask,
+                    req.k,
+                    None,
+                    &CostModel::default(),
+                )?;
+                return Ok(hits);
+            }
+            // [SONNET-4.6] (sq-tb9p0) Answer-exact path with the VG-TIE-1 boundary tie-break;
+            // an approximate backend falls through to its plain search. A blank-node
+            // candidate whose term would decide membership is a fail-closed hard error (`?`).
+            if let Some(hits) = searcher.search_tied(v, req.k, graph, None)? {
                 return Ok(hits);
             }
             Ok(searcher.search(v, req.k))

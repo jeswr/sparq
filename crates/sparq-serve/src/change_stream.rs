@@ -62,6 +62,19 @@
 //!   validates each record's framing + digest (fail-closed on a torn tail — a half-written
 //!   trailing record is truncated, not silently replayed), and resumes appending at the next
 //!   seq. [`ChangeLog::poll`] streams records from any `from_seq` onward.
+//! - **Re-baseline (honest gap).** [FABLE-5] (sq-r2cu1) A BROKEN stream — a dropped record
+//!   after a recording I/O failure (see [`into_commit_hook`](ChangeLog::into_commit_hook)'s
+//!   error policy), or a `Writer::restore` (new lineage; the commit hook deliberately never
+//!   fires) — fail-closes every later [`record_commit`](ChangeLog::record_commit) via the
+//!   discontinuity check. [`ChangeLog::rebase_to`] is the explicit operator resync: it
+//!   appends a **gap record** ([`ChangeRecord::rebase`] `= true`, no changes) honestly
+//!   marking the uncaptured span and re-arms recording from the given generation — the log
+//!   is never wiped, and a consumer replaying past the gap record KNOWS the stream is not a
+//!   complete diff history there (re-bootstrap from a backup at or after the gap's
+//!   generation, then resume). [FABLE-5] (gh-2436) On a RUNNING recorder, rebase through
+//!   [`ChangeLog::into_commit_hook_with_control`]'s [`ChangeStreamControl`] (no stop /
+//!   re-open needed); for a restore that REPLACED the lineage (generation numbering
+//!   restarted), use [`ChangeLog::rebase_to_new_lineage`].
 //!
 //! ## Fail-closed, same digest family as backup
 //!
@@ -74,6 +87,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sparq_core::Graph;
@@ -148,6 +162,14 @@ pub struct ChangeRecord {
     pub timestamp_unix_nanos: u128,
     /// The quad-level changes of this commit (inserts first, then deletes — each sorted).
     pub changes: Vec<Change>,
+    /// [FABLE-5] (sq-r2cu1) `true` iff this record is an operator **re-base marker** — an
+    /// HONEST GAP in the stream ([`ChangeLog::rebase_to`]), not a commit diff. The changes
+    /// between the PREVIOUS record's generation and this record's [`generation`](Self::generation)
+    /// were NOT captured (a dropped record after a recording failure, or a `Writer::restore`
+    /// that replaced the lineage); `changes` is empty. A consumer that needs a complete view
+    /// must re-bootstrap (e.g. from a backup at or after this generation) before resuming
+    /// past this record — replaying the gap as "no changes" would be silently wrong.
+    pub rebase: bool,
 }
 
 impl ChangeRecord {
@@ -528,6 +550,85 @@ impl ChangeLog {
             generation: to.number(),
             timestamp_unix_nanos,
             changes,
+            rebase: false,
+        };
+
+        self.append(&record)?;
+        self.next_seq = record.seq + 1;
+        self.last_generation = Some(record.generation);
+        Ok(record)
+    }
+
+    /// [FABLE-5] (sq-r2cu1) **Explicit operator re-base** — the resync primitive for a
+    /// BROKEN stream. Once a record is dropped (a recording I/O failure inside
+    /// [`into_commit_hook`](Self::into_commit_hook)) or a `Writer::restore` replaces the
+    /// lineage (the hook deliberately never fires for a restore publish),
+    /// [`last_generation`](Self::last_generation) stops matching the writer's next commit
+    /// and the discontinuity check fail-closes EVERY later
+    /// [`record_commit`](Self::record_commit). This appends an honest **gap record**
+    /// ([`ChangeRecord::rebase`] `= true`, empty changes, `generation` = the new baseline)
+    /// and re-arms recording: the next `record_commit` must start `from` exactly
+    /// `generation`. The log is never wiped — everything already recorded stays replayable,
+    /// and a consumer replaying past the gap record knows the span
+    /// `(previous generation, generation]` was NOT captured (re-bootstrap from a
+    /// [`backup`](crate::backup) at or after `generation`, then resume).
+    ///
+    /// `generation` is the generation the stream re-baselines TO — typically the ring's
+    /// CURRENT generation number at the moment the operator resyncs (the next commits will
+    /// chain forward from it). Fail-closed ([`BackupError::Format`], nothing appended) when
+    /// the stream would not move forward: `generation` must be strictly greater than the
+    /// last recorded generation (an equal generation means the stream is not broken there —
+    /// `record_commit` already chains — so a "re-base" to it is operator error, not a gap).
+    /// On an EMPTY log this sets the stream's explicit starting baseline.
+    ///
+    /// Single-writer discipline: call this on THE append handle. If the log has been
+    /// consumed into a commit hook ([`into_commit_hook`](Self::into_commit_hook)), use
+    /// [`into_commit_hook_with_control`](Self::into_commit_hook_with_control) instead — its
+    /// control handle rebases the LIVE log, serialized with the recorder — or stop the
+    /// recorder and re-open the directory (a second concurrent append handle is outside
+    /// the single-writer contract).
+    pub fn rebase_to(&mut self, generation: u64) -> Result<ChangeRecord, BackupError> {
+        if let Some(last) = self.last_generation {
+            if generation <= last {
+                return Err(BackupError::Format(format!(
+                    "rebase must move the stream forward: last recorded generation {} >= \
+                     rebase generation {}",
+                    last, generation
+                )));
+            }
+        }
+        self.append_gap(generation)
+    }
+
+    /// [FABLE-5] (gh-2436) [`rebase_to`](Self::rebase_to) for a **replaced writer lineage**
+    /// whose generation numbering RESTARTED — the post-restore resync. sparq-server's online
+    /// restore installs a fresh ring that restarts at generation 0, so the new baseline is
+    /// typically NOT strictly greater than the last recorded generation and the same-lineage
+    /// forward-only check in [`rebase_to`](Self::rebase_to) would reject it forever. This
+    /// variant appends the same honest gap record with NO forward check: the caller asserts
+    /// the lineage (and thus the numbering) was replaced. Record `seq`s still advance
+    /// monotonically — only the `generation` column may restart, exactly as it did
+    /// server-side. On a same-lineage stream prefer [`rebase_to`](Self::rebase_to): its
+    /// forward-only check catches an operator re-basing into already-recorded history.
+    pub fn rebase_to_new_lineage(&mut self, generation: u64) -> Result<ChangeRecord, BackupError> {
+        self.append_gap(generation)
+    }
+
+    /// Appends the honest **gap record** (`rebase = true`, empty changes) that re-arms
+    /// recording from `generation` — shared by [`rebase_to`](Self::rebase_to) (forward-only,
+    /// same lineage) and [`rebase_to_new_lineage`](Self::rebase_to_new_lineage) (numbering
+    /// restarted).
+    fn append_gap(&mut self, generation: u64) -> Result<ChangeRecord, BackupError> {
+        let timestamp_unix_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let record = ChangeRecord {
+            seq: self.next_seq,
+            generation,
+            timestamp_unix_nanos,
+            changes: Vec::new(),
+            rebase: true,
         };
 
         self.append(&record)?;
@@ -616,7 +717,10 @@ impl ChangeLog {
     /// over the gap — `on_error` keeps firing, never a quietly incomplete stream.
     /// Re-baselining a broken stream (as after a [`Writer::restore`](crate::Writer::restore),
     /// which also breaks lineage and deliberately never fires the hook) is a separate,
-    /// explicit operator action.
+    /// explicit operator action: stop the recorder, re-open the log directory, and
+    /// [`rebase_to`](Self::rebase_to) the writer's current generation (sq-r2cu1) — the gap
+    /// record marks the uncaptured span honestly and recording resumes without wiping
+    /// the log.
     ///
     /// The hook performs the append + fsync on the writer thread, adding one record
     /// write per generation to write-ack latency (amortised across the whole batch).
@@ -632,6 +736,67 @@ impl ChangeLog {
                 on_error(&e);
             }
         }
+    }
+
+    /// [FABLE-5] (gh-2436) [`into_commit_hook`](Self::into_commit_hook) plus an **operator
+    /// control handle** over the SAME live log. Plain `into_commit_hook` consumes the append
+    /// handle into the hook closure, so re-baselining a broken stream on a running server
+    /// used to require stopping the recorder and re-opening the directory offline. Here the
+    /// log instead lives behind one shared mutex: the returned hook locks it per recorded
+    /// commit (uncontended in the single-writer steady state — the cost is noise next to
+    /// the per-record fsync), and the returned [`ChangeStreamControl`] locks it to run
+    /// [`rebase_to`](Self::rebase_to) / [`rebase_to_new_lineage`](Self::rebase_to_new_lineage)
+    /// WITHOUT stopping the recorder. Same hook semantics and error policy as
+    /// `into_commit_hook` otherwise.
+    pub fn into_commit_hook_with_control<E>(
+        self,
+        mut on_error: E,
+    ) -> (
+        impl FnMut(&Generation<Graph>, &Generation<Graph>) + Send,
+        ChangeStreamControl,
+    )
+    where
+        E: FnMut(&BackupError) + Send,
+    {
+        let log = Arc::new(Mutex::new(self));
+        let hook_log = Arc::clone(&log);
+        let hook = move |from: &Generation<Graph>, to: &Generation<Graph>| {
+            let mut log = hook_log.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Err(e) = log.record_commit(from, to) {
+                on_error(&e);
+            }
+        };
+        (hook, ChangeStreamControl { log })
+    }
+}
+
+/// [FABLE-5] (gh-2436) Cloneable operator control handle over a [`ChangeLog`] that has been
+/// consumed into a live commit hook via
+/// [`into_commit_hook_with_control`](ChangeLog::into_commit_hook_with_control). Every call
+/// is serialized with the recording hook on the shared log mutex, so the single-writer
+/// append discipline holds without stopping the recorder. A rebase that loses the race with
+/// an in-flight commit stays honest either way: the commit either chains from the new
+/// baseline or is dropped fail-closed (reported to the hook's `on_error`), never silently
+/// mis-diffed — retry the rebase if the stream is still broken.
+#[derive(Clone)]
+pub struct ChangeStreamControl {
+    log: Arc<Mutex<ChangeLog>>,
+}
+
+impl ChangeStreamControl {
+    /// [`ChangeLog::rebase_to`] on the live log — the same-lineage, forward-only resync.
+    pub fn rebase_to(&self, generation: u64) -> Result<ChangeRecord, BackupError> {
+        self.lock().rebase_to(generation)
+    }
+
+    /// [`ChangeLog::rebase_to_new_lineage`] on the live log — the post-restore resync for a
+    /// replaced lineage whose generation numbering restarted.
+    pub fn rebase_to_new_lineage(&self, generation: u64) -> Result<ChangeRecord, BackupError> {
+        self.lock().rebase_to_new_lineage(generation)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ChangeLog> {
+        self.log.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -780,6 +945,13 @@ fn encode_record_body(record: &ChangeRecord) -> String {
     s.push_str(&format!("seq {}\n", record.seq));
     s.push_str(&format!("generation {}\n", record.generation));
     s.push_str(&format!("timestamp {}\n", record.timestamp_unix_nanos));
+    // [FABLE-5] (sq-r2cu1) The re-base gap marker is an OPTIONAL header line, emitted only
+    // when set — every pre-rebase record body (and its digest) stays byte-identical, and a
+    // reader that predates the marker fails closed on the unknown key rather than replaying
+    // a gap record as an ordinary empty commit.
+    if record.rebase {
+        s.push_str("rebase 1\n");
+    }
     s.push_str(&format!("inserts {}\n", ins));
     s.push_str(&format!("deletes {}\n", del));
     for c in &record.changes {
@@ -800,6 +972,7 @@ fn decode_record_body(body: &str, path: &Path) -> Result<ChangeRecord, BackupErr
     let mut timestamp: Option<u128> = None;
     let mut declared_inserts: Option<usize> = None;
     let mut declared_deletes: Option<usize> = None;
+    let mut rebase = false;
 
     let mut change_lines: Vec<&str> = Vec::new();
     let mut in_changes = false;
@@ -812,6 +985,21 @@ fn decode_record_body(body: &str, path: &Path) -> Result<ChangeRecord, BackupErr
                 "seq" => seq = Some(parse_num(val, "seq", path)?),
                 "generation" => generation = Some(parse_num(val, "generation", path)?),
                 "timestamp" => timestamp = Some(parse_u128(val, "timestamp", path)?),
+                // [FABLE-5] (sq-r2cu1) Optional re-base gap marker (absent = ordinary
+                // commit record). Only the exact values `1`/`0` decode — anything else is
+                // fail-closed corruption, never a silent default.
+                "rebase" => {
+                    rebase = match val {
+                        "1" => true,
+                        "0" => false,
+                        _ => {
+                            return Err(BackupError::Corrupt(format!(
+                                "invalid `rebase` value {:?} in {:?}",
+                                val, path
+                            )))
+                        }
+                    }
+                }
                 "inserts" => declared_inserts = Some(parse_usize(val, "inserts", path)?),
                 "deletes" => {
                     declared_deletes = Some(parse_usize(val, "deletes", path)?);
@@ -876,6 +1064,7 @@ fn decode_record_body(body: &str, path: &Path) -> Result<ChangeRecord, BackupErr
         generation,
         timestamp_unix_nanos: timestamp,
         changes,
+        rebase,
     })
 }
 
@@ -1492,6 +1681,7 @@ mod tests {
                     quad: "<http://ex/x> <http://ex/y> <http://ex/z> .".to_string(),
                 },
             ],
+            rebase: false,
         };
         let tmp = scratch("wellformed");
         let _ = fs::remove_dir_all(&tmp);
@@ -1976,6 +2166,339 @@ mod tests {
         let rec = reopened.record_commit(&g5, &g6).expect("extend");
         assert_eq!(rec.seq, 5);
         assert_eq!(reopened.poll(3).expect("poll").len(), 3);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // [FABLE-5] (sq-r2cu1) Re-baseline / resync coverage: the explicit operator
+    // primitive that resumes a broken stream (dropped record / Writer::restore)
+    // without wiping the log, via an honest gap record.
+    // -----------------------------------------------------------------------
+
+    /// THE acceptance invariant (sq-r2cu1): after a dropped record, `record_commit`
+    /// fail-closes every later append (the broken-stream state), `rebase_to` appends an
+    /// honest gap record, and recording resumes gapless from the new baseline — with the
+    /// full pre-gap history still replayable. A regression that let `record_commit`
+    /// succeed across the gap (discontinuity check weakened), or that made `rebase_to`
+    /// wipe/skip existing records, turns this red.
+    #[test]
+    fn rebase_resumes_broken_stream_with_honest_gap() {
+        let tmp = scratch("rebase");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with("<http://ex/c> <http://ex/p> <http://ex/d> .\n"),
+            [],
+        );
+        let g3 = ring.publish(
+            graph_with(
+                "<http://ex/c> <http://ex/p> <http://ex/d> .\n\
+                 <http://ex/e> <http://ex/p> <http://ex/f> .\n",
+            ),
+            [],
+        );
+
+        let mut log = ChangeLog::open(&tmp).expect("open");
+        log.record_commit(&g0, &g1).expect("0->1");
+        // The g1->g2 record is DROPPED (simulating the commit hook's recording I/O
+        // failure): last_generation stays at 1, so EVERY later commit fail-closes.
+        let err = err_of(log.record_commit(&g2, &g3));
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+        assert_eq!(log.next_seq(), 1, "the broken stream appends nothing");
+
+        // Explicit operator resync: re-base to the writer's current generation (2, the
+        // predecessor of the next commit that will be recorded).
+        let gap = log.rebase_to(g2.number()).expect("rebase");
+        assert_eq!(gap.seq, 1, "the gap record extends the stream, no wipe");
+        assert_eq!(gap.generation, 2);
+        assert!(gap.rebase, "the gap record is honestly marked");
+        assert!(gap.changes.is_empty(), "a gap record carries no diff");
+        assert_eq!(log.last_generation(), Some(2), "recording re-armed");
+
+        // Recording resumes gapless from the new baseline.
+        let rec = log.record_commit(&g2, &g3).expect("record after rebase");
+        assert_eq!((rec.seq, rec.generation), (2, 3));
+        assert!(!rec.rebase);
+
+        // The whole stream — pre-gap history, the gap marker, post-gap records — replays.
+        let all = log.poll(0).expect("poll");
+        assert_eq!(all.len(), 3);
+        assert_eq!(
+            all.iter().map(|r| (r.seq, r.generation, r.rebase)).collect::<Vec<_>>(),
+            vec![(0, 1, false), (1, 2, true), (2, 3, false)]
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A re-based stream survives a restart: `open` recovers the gap record (its `rebase`
+    /// flag round-trips through the on-disk body) and the resumed seq/generation counters
+    /// chain from the gap's baseline. A regression that dropped the `rebase` header on
+    /// encode, defaulted it on decode, or re-anchored `last_generation` elsewhere turns
+    /// this red.
+    #[test]
+    fn rebase_survives_restart() {
+        let tmp = scratch("rebase-restart");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with("<http://ex/c> <http://ex/p> <http://ex/d> .\n"),
+            [],
+        );
+        {
+            let mut log = ChangeLog::open(&tmp).expect("open");
+            log.record_commit(&g0, &g1).expect("0->1");
+            log.rebase_to(g2.number()).expect("rebase"); // g1->g2 was lost
+        }
+
+        let mut reopened = ChangeLog::open(&tmp).expect("reopen");
+        assert_eq!(reopened.next_seq(), 2);
+        assert_eq!(
+            reopened.last_generation(),
+            Some(2),
+            "the recovered baseline is the gap record's generation"
+        );
+        let all = reopened.poll(0).expect("poll");
+        assert!(!all[0].rebase);
+        assert!(all[1].rebase, "the gap marker round-trips through disk");
+
+        // The stream extends past the restart, chaining from the recovered baseline.
+        let g3 = ring.publish(
+            graph_with("<http://ex/e> <http://ex/p> <http://ex/f> .\n"),
+            [],
+        );
+        let rec = reopened.record_commit(&g2, &g3).expect("extend");
+        assert_eq!((rec.seq, rec.generation), (2, 3));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A re-base that does not move the stream FORWARD is rejected fail-closed and appends
+    /// nothing — both backwards (below the last recorded generation) and to the last
+    /// recorded generation itself (the stream is not broken there; `record_commit` already
+    /// chains). A regression that allowed `<=` would let an operator script silently
+    /// rewrite the baseline into already-recorded history.
+    #[test]
+    fn rebase_rejects_non_forward() {
+        let tmp = scratch("rebase-nf");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with("<http://ex/c> <http://ex/p> <http://ex/d> .\n"),
+            [],
+        );
+        let mut log = ChangeLog::open(&tmp).expect("open");
+        log.record_commit(&g0, &g1).expect("0->1");
+        log.record_commit(&g1, &g2).expect("1->2");
+
+        let err = err_of(log.rebase_to(1)); // backwards
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+        let err = err_of(log.rebase_to(2)); // equal: not a gap
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+        assert_eq!(log.next_seq(), 2, "nothing appended");
+        assert_eq!(log.last_generation(), Some(2), "baseline unchanged");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// On an EMPTY log, `rebase_to` sets an explicit starting baseline: the first
+    /// `record_commit` must then chain from exactly that generation (whereas a fresh,
+    /// never-rebased log accepts any starting `from`).
+    #[test]
+    fn rebase_on_empty_log_sets_baseline() {
+        let tmp = scratch("rebase-empty");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with("<http://ex/c> <http://ex/p> <http://ex/d> .\n"),
+            [],
+        );
+        let mut log = ChangeLog::open(&tmp).expect("open");
+        let gap = log.rebase_to(g1.number()).expect("baseline");
+        assert_eq!((gap.seq, gap.generation), (0, 1));
+        // A commit not starting from the declared baseline is discontinuous.
+        let err = err_of(log.record_commit(&g0, &g2));
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+        // The chained commit records.
+        let rec = log.record_commit(&g1, &g2).expect("1->2");
+        assert_eq!((rec.seq, rec.generation), (1, 2));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A gap record's body round-trips exactly through encode/decode (the positive control
+    /// for the `rebase` header line), and a garbled `rebase` value is fail-closed
+    /// corruption — never silently defaulted.
+    #[test]
+    fn rebase_record_roundtrips_and_bad_value_fails_closed() {
+        let rec = ChangeRecord {
+            seq: 0,
+            generation: 7,
+            timestamp_unix_nanos: 5,
+            changes: Vec::new(),
+            rebase: true,
+        };
+        let tmp = scratch("rebase-rt");
+        let _ = fs::remove_dir_all(&tmp);
+        write_segment_with_body(&tmp, &encode_record_body(&rec));
+        let reopened = ChangeLog::open(&tmp).expect("a gap record must decode");
+        assert_eq!(reopened.poll(0).expect("poll"), vec![rec]);
+        assert_eq!(reopened.last_generation(), Some(7));
+        let _ = fs::remove_dir_all(&tmp);
+
+        let tmp = scratch("rebase-bad");
+        let _ = fs::remove_dir_all(&tmp);
+        write_segment_with_body(
+            &tmp,
+            "seq 0\ngeneration 7\ntimestamp 5\nrebase 2\ninserts 0\ndeletes 0\n",
+        );
+        let err = err_of(ChangeLog::open(&tmp));
+        assert!(matches!(err, BackupError::Corrupt(_)), "{:?}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // [FABLE-5] (gh-2436) Operator surface on a RUNNING recorder: the control handle from
+    // `into_commit_hook_with_control` rebases the live log without stopping the recorder.
+    // -----------------------------------------------------------------------
+
+    /// THE acceptance invariant (gh-2436): with the append handle consumed into a LIVE
+    /// commit hook, `ChangeStreamControl::rebase_to` resyncs a broken stream in place —
+    /// no stop, no directory re-open — and the hook then resumes recording gapless from
+    /// the new baseline. A regression that made the control a second, unserialized append
+    /// handle (interleaved appends), or that lost the hook's error policy, turns this red.
+    #[test]
+    fn control_rebases_a_live_hook_without_stopping_the_recorder() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let tmp = scratch("control-rebase");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with("<http://ex/c> <http://ex/p> <http://ex/d> .\n"),
+            [],
+        );
+        let g3 = ring.publish(
+            graph_with(
+                "<http://ex/c> <http://ex/p> <http://ex/d> .\n\
+                 <http://ex/e> <http://ex/p> <http://ex/f> .\n",
+            ),
+            [],
+        );
+
+        let log = ChangeLog::open(&tmp).expect("open");
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let dropped_in_hook = dropped.clone();
+        let (mut hook, control) = log.into_commit_hook_with_control(move |_e| {
+            dropped_in_hook.fetch_add(1, Ordering::SeqCst);
+        });
+
+        hook(&g0, &g1); // recorded: seq 0, generation 1
+        hook(&g2, &g3); // the g1->g2 record was never made: discontinuity, dropped
+        assert_eq!(dropped.load(Ordering::SeqCst), 1, "the broken append is reported");
+
+        // Operator resync THROUGH THE CONTROL, with the hook still armed.
+        let gap = control.rebase_to(g2.number()).expect("live rebase");
+        assert_eq!((gap.seq, gap.generation, gap.rebase), (1, 2, true));
+
+        // The same still-armed hook resumes recording gapless from the new baseline.
+        hook(&g2, &g3); // recorded: seq 2, generation 3
+        assert_eq!(dropped.load(Ordering::SeqCst), 1, "no further drops");
+
+        drop(hook);
+        let reopened = ChangeLog::open(&tmp).expect("reopen");
+        let all = reopened.poll(0).expect("poll");
+        assert_eq!(
+            all.iter()
+                .map(|r| (r.seq, r.generation, r.rebase))
+                .collect::<Vec<_>>(),
+            vec![(0, 1, false), (1, 2, true), (2, 3, false)]
+        );
+        drop(reopened);
+
+        // The post-restore variant is exposed on the control too: a restarted numbering
+        // (generation 0 after generation 3) is accepted only through the explicit
+        // new-lineage path.
+        assert!(control.rebase_to(0).is_err(), "same-lineage stays forward-only");
+        let gap = control
+            .rebase_to_new_lineage(0)
+            .expect("lineage rebase via the control");
+        assert_eq!((gap.seq, gap.generation, gap.rebase), (3, 0, true));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// `rebase_to_new_lineage` accepts a baseline that does NOT move the generation column
+    /// forward — the post-restore case where the writer lineage was replaced and its
+    /// numbering restarted (sparq-server's online restore installs a ring that restarts at
+    /// generation 0). The forward-only `rebase_to` must keep rejecting the same target, and
+    /// the next commit must chain from the restarted baseline.
+    #[test]
+    fn rebase_to_new_lineage_accepts_a_restarted_numbering() {
+        let tmp = scratch("rebase-lineage");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with("<http://ex/c> <http://ex/p> <http://ex/d> .\n"),
+            [],
+        );
+        let mut log = ChangeLog::open(&tmp).expect("open");
+        log.record_commit(&g0, &g1).expect("0->1");
+        log.record_commit(&g1, &g2).expect("1->2");
+
+        // A restore replaced the lineage: the NEW ring restarts at generation 0.
+        let restored: GenerationRing<Graph> =
+            GenerationRing::new(graph_with("<http://ex/r> <http://ex/p> <http://ex/s> .\n"));
+        let r0 = restored.current();
+        let r1 = restored.publish(
+            graph_with(
+                "<http://ex/r> <http://ex/p> <http://ex/s> .\n\
+                 <http://ex/t> <http://ex/p> <http://ex/u> .\n",
+            ),
+            [],
+        );
+
+        // Same-lineage rebase is (correctly) fail-closed: 0 does not move gen 2 forward.
+        let err = err_of(log.rebase_to(r0.number()));
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+
+        // The explicit new-lineage rebase accepts the restarted baseline.
+        let gap = log.rebase_to_new_lineage(r0.number()).expect("lineage rebase");
+        assert_eq!((gap.seq, gap.generation, gap.rebase), (2, 0, true));
+        assert_eq!(log.last_generation(), Some(0), "baseline restarted");
+
+        // Recording chains from the restarted numbering; seqs stay monotonic.
+        let rec = log.record_commit(&r0, &r1).expect("record on the new lineage");
+        assert_eq!((rec.seq, rec.generation), (3, 1));
+
+        let reopened = ChangeLog::open(&tmp).expect("reopen");
+        assert_eq!(reopened.next_seq(), 4);
+        assert_eq!(reopened.last_generation(), Some(1));
         let _ = fs::remove_dir_all(&tmp);
     }
 }

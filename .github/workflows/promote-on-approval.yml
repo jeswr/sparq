@@ -1,7 +1,8 @@
 # [OPUS-4.8] Trust promotion (review S3). GitHub Actions has NO reaction trigger, so this cron polls
 # quarantined (trust:untrusted) issues and promotes any that a maintainer has 👍-approved AFTER the
-# issue's last edit (revision-bound — an edit-after-approval re-quarantines). Uses the tested pure
-# cores scripts/promote.py + scripts/triage.py.
+# issue's last edit (revision-bound — an UNTRUSTED-sender edit after approval re-quarantines, with an
+# explicit revert notice; a trusted sender's edit does not, see triage-issue.yml / #2476). Uses the
+# tested pure cores scripts/promote.py + scripts/triage.py.
 name: promote-on-approval
 on:
   schedule:

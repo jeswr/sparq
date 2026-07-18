@@ -68,7 +68,9 @@ docker run --rm --name sparq-lws-core -p 127.0.0.1:3000:3000 \
 ## ✨ Features
 
 - **LDP surface** — containers + RDF/non-RDF resources, Turtle / JSON-LD content
-  negotiation (oxrdf/oxttl/oxjsonld), conditional requests, `Content-Range` reads.
+  negotiation (oxrdf/oxttl/oxjsonld) honouring the JSON-LD `profile` parameter
+  (expanded / compacted forms echoed in `Content-Type`; compaction is local and
+  context-free — nothing fetched), conditional requests, `Content-Range` reads.
 - **Access control** — WAC (`acl:`) evaluated against the SPARQ-authoritative
   store, with an ACL decision cache; public-read fast path.
 - **WAC-scoped query endpoint** — [GPT-5.6] default-on, query-only
@@ -109,12 +111,10 @@ docker run --rm --name sparq-lws-core -p 127.0.0.1:3000:3000 \
 - Epic sq-gg0qq tracks the migration: bench/, conformance/, docs/, decisions/
   stay in the source repo until their own beads land (sq-gg0qq.3 landed).
 - Design records: `docs/` + `decisions/` in
-  [jeswr/solid-server-rs](https://github.com/jeswr/solid-server-rs) (e.g.
-  `decisions/0001-embed-sparq-in-process.md`, the high-throughput PoP design).
+  [jeswr/solid-server-rs](https://github.com/jeswr/solid-server-rs).
 - Related crates: [`sparq-solid`](../sparq-solid) (Solid protocol pieces),
   [`sparq-server`](../sparq-server) (the SPARQL endpoint it can delegate to).
 
 ## License
 
-MIT OR Apache-2.0 (preserved from the source repository — see LICENSE-MIT and
-LICENSE-APACHE in this directory).
+MIT OR Apache-2.0 — see LICENSE-MIT and LICENSE-APACHE in this directory.
