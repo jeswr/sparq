@@ -55,6 +55,14 @@ def _self_test():
     chk("impl -> fable-led", (mc[0], ag, esc), ("fable", "sparq-rust-impl", False))
     # docs -> haiku-led
     chk("docs -> haiku", resolve(["role:docs", "area:x"], doc)[0][0], "haiku")
+    # [FABLE-5] UI ownership: site -> terra-led (GPT-5.6 codex, the original dashboard builder)
+    chk("site -> terra-led", resolve(["role:site", "area:site"], doc)[0], ["terra", "fable", "sonnet"])
+    # [FABLE-5] frontier-tier infra authorship (standing rule 2026-07-17): ci -> fable-first,
+    # FRONTIER-ONLY chain — no sub-frontier model (sonnet/haiku) anywhere in it, so exhaustion
+    # DEFERS at the registry claim step (retried next tick) instead of degrading tier.
+    mc, ag, esc = resolve(["role:ci", "area:ci"], doc)
+    chk("ci -> frontier-only fable-first", (mc, ag, esc), (["fable", "terra"], "sparq-ci-infra", False))
+    chk("ci chain has no sub-frontier tier", sorted(set(mc) & {"sonnet", "haiku"}), [])
     # no role -> defaults (fable-led)
     chk("no role -> defaults", resolve(["area:sparq-core"], doc)[0][0], "fable")
     # review role -> opus + escalate

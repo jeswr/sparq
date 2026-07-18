@@ -190,7 +190,31 @@ class TestSelectionFiltering(unittest.TestCase):
     def test_selected_with_empty_affected_yields_zero_legs(self):
         # Legitimate: a provably-empty closure => no legs; the workflow's `legs`
         # count output then SKIPS the matrix job (never an empty-matrix error).
+        # [OPUS-4.8] This IS the orchestration-only / docs-only change-class outcome:
+        # ci_select.py returns mode=selected + affected=[] for a diff that touches no
+        # Rust (e.g. routing.toml + triage.py), so the whole opt-in feature matrix is
+        # correctly assembled to ZERO legs (skipped-by-class) without any missing
+        # required check — the gate discovers the reduced set by polling.
         self.assertEqual(self._filter("selected", "[]"), [])
+
+    def test_change_class_adds_no_legs_full_golden_set_preserved(self):
+        # [OPUS-4.8] The change-class layer is a SELECTION refinement (ci_select.py),
+        # not a fragment change: the assembler's FULL leg set (the gate-name golden
+        # contract) must be byte-identical to the committed golden snapshot. If the
+        # change-class work ever accidentally added/renamed a leg, this fails.
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        argv = sys.argv
+        try:
+            sys.argv = ["assemble", "--names"]
+            with redirect_stdout(buf):
+                self.mod.main()
+        finally:
+            sys.argv = argv
+        emitted = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+        golden = [ln for ln in GOLDEN.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        self.assertEqual(sorted(emitted), sorted(golden))
 
     def test_shadow_full_and_unset_modes_keep_all(self):
         for mode in ("shadow", "full", "", None, "SELECTED", "enforce"):
@@ -271,6 +295,51 @@ def _synth_legs():
         {"name": "c", "crate": "sparq-kb", "features": "f3", "test": False, "tier": "check"},
         {"name": "d", "crate": "sparq-engine", "features": "f4", "test": True, "tier": "test"},
     ]
+
+
+class TestMergeGroupClassAccounting(unittest.TestCase):
+    """[FABLE-5] merge-group change-class (extends #3420/#3421): the expected
+    per-class opt-in leg set for a MERGE-GROUP event, via the same composed
+    tier+selection path the workflow's assemble step runs. A docs-only/
+    orchestration-only queued batch (select emits mode=selected + affected=[]
+    over the batch diff) assembles ZERO legs — the `legs` output then skips the
+    matrix job, an attributed skip, never a missing required check. An engine
+    batch keeps its affected legs; an unresolvable batch (select fail-safe to
+    mode=full) keeps the FULL merge-group leg set."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = _load_assembler()
+        cls.legs = cls.mod.load_legs()
+
+    def _assemble(self, select_mode, affected):
+        tiered = self.mod.filter_legs_by_tier(self.legs, "merge_group", "test")
+        return self.mod.filter_legs_by_selection(tiered, select_mode, affected)
+
+    def test_docs_only_batch_assembles_zero_legs(self):
+        # The #2533-shaped docs-only batch: classify_change => docs-only, the
+        # select pre-job => selected + empty closure => zero opt-in legs on the
+        # merge_group ref. (Identical outcome for orchestration-only.)
+        self.assertEqual(self._assemble("selected", "[]"), [])
+
+    def test_engine_batch_keeps_its_affected_legs(self):
+        # An engine batch narrows to the affected closure exactly as on a PR —
+        # class gating never removes a leg the selection would keep.
+        crates = sorted({leg["crate"] for leg in self.legs})
+        keep = crates[0]
+        got = self._assemble("selected", json.dumps([keep]))
+        self.assertTrue(got, "an engine batch must keep its affected legs")
+        self.assertEqual({leg["crate"] for leg in got}, {keep})
+
+    def test_unresolvable_batch_fails_safe_to_full_merge_group_set(self):
+        # Any classify/select resolution error => mode=full => the FULL
+        # merge-group leg set (fail-safe = cost, never soundness). A classifier
+        # mutated back to always-full lands every batch here — visible as the
+        # RED docs-only fixtures in test_ci_select.py, and as this full set
+        # re-appearing on docs-only groups in the live audit trail.
+        full = self._assemble("full", "[]")
+        tiered = self.mod.filter_legs_by_tier(self.legs, "merge_group", "test")
+        self.assertEqual(full, tiered)
 
 
 class TestTierFiltering(unittest.TestCase):

@@ -64,8 +64,7 @@ fuzz_target!(|data: &[u8]| {
         // The DISTINCT quad count must be preserved across canonicalization.
         debug_assert_eq!(
             input_quads, canon_quads,
-            "distinct quad count changed after canonicalization: {} -> {}",
-            input_quads, canon_quads
+            "distinct quad count changed after canonicalization: {input_quads} -> {canon_quads}"
         );
     }
     // Err (parse error or poison-graph limit) is a clean outcome, not a finding.
