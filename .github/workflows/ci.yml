@@ -1233,19 +1233,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Rust (preinstalled stable)
-        # [FABLE-5] CI-economy (2026-07-18 directive): preinstalled runner-image
-        # stable, like every other stable lane (see the `lint` job's note).
-        # HONESTY NOTE (discovered during this audit; bead filed): the previous
-        # step here was the SHA-pinned action with a trailing `# 1.88` comment but
-        # NO `toolchain:` input — and the action's default at that SHA is
-        # `stable`, so this job has been checking on LATEST STABLE, not 1.88 (the
-        # "pin" the sq-qmth doc block above refers to never functionally
-        # existed). This step PRESERVES that actual behaviour; installing a real
-        # `toolchain: "1.88"` is a separate, deliberately-reviewed change because
-        # it could turn a long-vacuous gate red on unrelated PRs.
+      - name: Rust (pinned MSRV toolchain 1.88)
+        # [FABLE-5] PR #3511 review finding 4: this gate was VACUOUS — the
+        # pre-existing step was the SHA-pinned action with a trailing `# 1.88`
+        # comment but NO `toolchain:` input (the action's default is `stable`),
+        # so the "MSRV check" had been compiling on LATEST STABLE all along; the
+        # first CI-economy pass preserved that broken behaviour. FIXED: install
+        # the declared floor toolchain and check ON it, so the floor is a checked
+        # invariant again (this lane's entire meaning IS the version — it is the
+        # one stable-family lane that must never ride the runner image's rolling
+        # preinstalled stable). `--profile minimal` = rustc+cargo only; no clippy
+        # or docs run on the floor toolchain. COMPILER POLICY, explicit: every
+        # other stable lane deliberately uses the image's preinstalled stable
+        # (rolling; may briefly lag a fresh release during runner-image rollout —
+        # an accepted CI-economy tradeoff, see the `lint` job's note), while THIS
+        # lane pins the exact floor. Keep the pin == root Cargo.toml
+        # rust-version (sq-qmth).
         run: |
-          rustup default stable
+          rustup toolchain install 1.88 --profile minimal --no-self-update
+          rustup default 1.88
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: cargo check on the declared MSRV

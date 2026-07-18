@@ -36,9 +36,15 @@
 # (same-crate legs clustered; per-leg cost = the fragment's optional `weight:` field,
 # defaulting to a crate-source-size heuristic; each group targets <5 min of warm-cache
 # work) and `opt-in-features` runs ONE JOB PER GROUP. The gate-critical per-leg
-# `opt-in <name>` check-runs are emitted from INSIDE the group job via the Checks API
-# (scripts/run-feature-matrix-group.py) — names byte-identical, so the aggregator,
-# branch protection and the golden self-test contract are all unchanged.
+# `opt-in <name>` check-runs are still emitted, byte-identical — but across a TRUSTED
+# BOUNDARY (PR #3511 review): the group job executes PR-controlled code (build
+# scripts/proc macros/tests) UNPRIVILEGED (contents: read, persist-credentials: false,
+# no token in the environment) and writes per-leg outcomes to an ARTIFACT; the
+# separate `report-legs` job (which runs no PR build code) downloads the artifacts,
+# validates them hostile-input-style against the assembled leg set, and posts the
+# check-runs with its `checks: write` token (scripts/run-feature-matrix-group.py
+# --report). Names byte-identical, so the aggregator, branch protection and the
+# golden self-test contract are all unchanged.
 #
 # GUARD — THE RULE THAT KEEPS THIS LANE HONEST (sq-vya1). A test module/file behind
 # `#[cfg(feature = "X")]` / `#![cfg(feature = "X")]` for a DEFAULT-OFF feature is compiled
@@ -195,6 +201,11 @@ jobs:
               # leg actually builds+tests — even on an otherwise non-Rust PR.
               - '.github/feature-matrix.d/**'
               - 'scripts/assemble-feature-matrix.py'
+              # [FABLE-5] PR #3511 review finding 2: the grouped-runner engine is as
+              # load-bearing as the assembler — a PR changing ONLY this script must
+              # still run setup (its self-test gates there) + the grouped execution
+              # + the reporter. Wiring pinned by test_feature_matrix_assemble.py.
+              - 'scripts/run-feature-matrix-group.py'
       - name: Decide rust_changed (safe-by-default off the PR path)
         id: decide
         env:
@@ -403,16 +414,20 @@ jobs:
     #
     # NAME CONTRACT PRESERVED: the gate-critical `opt-in <name>` check-run for EVERY
     # leg is still emitted, byte-identical (proven against the golden snapshot by
-    # scripts/tests/test_feature_matrix_assemble.py) — scripts/run-feature-matrix-
-    # group.py creates each leg's check-run via the Checks API (`checks: write`
-    # below) as the leg finishes, always terminal (`status: completed`, so the
-    # polling ci-summary gate can never be held pending by one; late terminal
-    # arrivals are safe per its sq-ipkku semantics). A failed leg does not stop the
-    # group (the old fail-fast: false), and the group job then FAILS LOUDLY naming
-    # exactly which legs failed. On a read-only token (fork PR) the per-leg POST
-    # degrades to a warning and the group job's own conclusion remains the gating
-    # signal — requiredness flows through `ci-summary / gate`, never through any
-    # individual leg name (sq-fmx4u.4).
+    # scripts/tests/test_feature_matrix_assemble.py) — but NOT from this job. THIS
+    # JOB IS DELIBERATELY UNPRIVILEGED (PR #3511 review, critical finding): it
+    # executes PR-controlled code — cargo build scripts, proc macros, tests, clippy
+    # lints, plus the whole third-party dependency graph's build-time code — so it
+    # must NEVER hold a `checks: write` token (malicious build code could forge
+    # arbitrary check runs, incl. gate-critical sibling names) nor persisted git
+    # credentials. It runs scripts/run-feature-matrix-group.py with NO token in the
+    # environment and writes each leg's outcome to a results file, uploaded below as
+    # an artifact for the separate TRUSTED `report-legs` job (which executes no PR
+    # build code, validates the artifact hostile-input-style, and posts the per-leg
+    # check-runs). A failed leg does not stop the group (the old fail-fast: false),
+    # and the group job then FAILS LOUDLY naming exactly which legs failed — this
+    # job's own conclusion is a required gating signal via `ci-summary / gate`
+    # regardless of any check-run posting (sq-fmx4u.4).
     #
     # [OPUS-4.8] sq-ibrze (unchanged): legs are ASSEMBLED from the per-crate fragment
     # files (`.github/feature-matrix.d/<crate>.yml`). To add a leg, edit ONLY the
@@ -421,13 +436,15 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Per-leg `opt-in <name>` check-run emission (see the NAME CONTRACT note).
-      checks: write
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # PR-controlled build code runs in this job — never leave it the
+          # persisted GITHUB_TOKEN in .git/config (PR #3511 review).
+          persist-credentials: false
       - name: Rust (preinstalled stable + clippy)
         # [FABLE-5] CI-economy: the ubuntu runner image ships a rustup stable
         # toolchain (with the default profile, incl. clippy). dtolnay/rust-toolchain
@@ -467,13 +484,79 @@ jobs:
             echo "cargo fetch attempt $n failed; retrying in 10s..." >&2
             sleep 10
           done
-      - name: Run the group's legs (build -> test -> clippy; per-leg check-runs)
+      - name: Run the group's legs (build -> test -> clippy; results to artifact)
         # Each leg: build (bounded sq-hhxc retry) -> test (where the fragment says
         # so) -> clippy --all-targets -D warnings — the exact step set of the old
-        # per-leg job, then its `opt-in <name>` check-run is POSTed terminally.
+        # per-leg job. NO token here (see the job note): outcomes go to the
+        # results file; the trusted `report-legs` job posts the check-runs.
         env:
           GROUP_LEGS: ${{ matrix.legs }}
           GROUP_NAME: ${{ matrix.group }}
+          FMG_RESULTS: fmg-results/results.json
+        run: python3 scripts/run-feature-matrix-group.py
+      - name: Upload per-leg results for the trusted reporter
+        # `!cancelled()`: a group with FAILED legs must still ship its results so
+        # the reporter posts the red per-leg check-runs. `overwrite: true` keeps
+        # re-runs of failed jobs working (v4+ artifacts are otherwise immutable
+        # within a run). The artifact name is unique per matrix entry.
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: feature-matrix-results-${{ strategy.job-index }}
+          path: fmg-results/results.json
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true
+
+  # [FABLE-5] TRUSTED REPORTER (PR #3511 review, critical finding): the ONLY job in
+  # this workflow that holds `checks: write`, and it executes NO PR-controlled build
+  # code — no cargo, no build scripts, no proc macros. It downloads the group jobs'
+  # results artifacts and posts the gate-critical per-leg `opt-in <name>` check-runs.
+  # The artifacts crossed the trust boundary (they were written inside jobs running
+  # arbitrary PR build code), so scripts/run-feature-matrix-group.py --report
+  # validates them HOSTILE-INPUT-STYLE: strict schema, leg names resolved against
+  # the assembled leg set (generated here by the committed assembler — never
+  # PR-supplied free text), failed_step from a fixed enum, duplicate names refused,
+  # and the `opt-in ` check-run prefix constructed reporter-side. Check-run POSTs
+  # FAIL CLOSED on unexpected Checks API errors (auth/outage/rate-limit/malformed);
+  # only the deterministic fork-PR read-only-token denial degrades to a warning
+  # (finding 3). The job NAME is free of "advisory"/"informational", so the required
+  # `ci-summary / gate` aggregator auto-discovers it — a reporter failure blocks the
+  # merge, which is exactly the fail-closed contract.
+  report-legs:
+    needs: [changes, setup, opt-in-features]
+    # `!cancelled()`: run even when a group job FAILED (its red legs still need
+    # their check-runs). Skip when setup failed/skipped or assembled zero legs.
+    if: >-
+      !cancelled() &&
+      needs.changes.outputs.rust_changed == 'true' &&
+      needs.setup.result == 'success' &&
+      needs.setup.outputs.legs != '0'
+    name: feature-matrix per-leg report
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Per-leg `opt-in <name>` check-run emission — the trusted side of the split.
+      checks: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML
+        # Same hash-pinned closure as the setup job (the assembler needs PyYAML).
+        run: pip install --require-hashes -r .github/requirements/docs-quality.txt
+      - name: Download the group results artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: feature-matrix-results-*
+          path: fmg-results
+      - name: Validate results + post per-leg check-runs (fail closed)
+        env:
+          FMG_RESULTS_DIR: fmg-results
+          FMG_VALID_LEGS_FILE: fmg-valid-legs.json
           REPO: ${{ github.repository }}
           # Same head-commit selection as ci-summary's discovery (PR head sha on
           # pull_request; github.sha on merge_group/push), so the per-leg
@@ -481,7 +564,15 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           GH_TOKEN: ${{ github.token }}
           DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: python3 scripts/run-feature-matrix-group.py
+          # 'success' with zero results artifacts is an inconsistency the reporter
+          # refuses (it would silently drop every per-leg check-run).
+          GROUP_JOBS_RESULT: ${{ needs.opt-in-features.result }}
+        run: |
+          set -euo pipefail
+          # The assembled leg set is the reporter's ground truth for names +
+          # crate/features — artifact-supplied text never reaches a check-run.
+          python3 scripts/assemble-feature-matrix.py > fmg-valid-legs.json
+          python3 scripts/run-feature-matrix-group.py --report
 
   # [SONNET-4.6] sq-ldg8c: T1 CHECK TIER — compile+clippy (NO test run) for the opt-in legs a
   # fragment has DEMOTED with `tier: check`. Design: research/feature-matrix-pyramid.md §3/§5.
@@ -610,6 +701,9 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Cargo build-time code runs here — no persisted token (PR #3511 review).
+          persist-credentials: false
       - name: Rust (preinstalled stable + clippy)
         # [FABLE-5] CI-economy: preinstalled runner-image stable (see the
         # opt-in-features note) — `component add` is a no-op when present.
@@ -676,6 +770,9 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Cargo build-time code runs here — no persisted token (PR #3511 review).
+          persist-credentials: false
       - name: Rust (preinstalled stable + clippy)
         # [FABLE-5] CI-economy: preinstalled runner-image stable (see the
         # opt-in-features note) — `component add` is a no-op when present.
@@ -738,6 +835,9 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Cargo build-time code runs here — no persisted token (PR #3511 review).
+          persist-credentials: false
       - name: Rust (preinstalled stable + clippy)
         # [FABLE-5] CI-economy: preinstalled runner-image stable (see the
         # opt-in-features note) — `component add` is a no-op when present.
@@ -796,6 +896,9 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          # Cargo build-time code runs here — no persisted token (PR #3511 review).
+          persist-credentials: false
       - name: Rust (preinstalled stable)
         # [FABLE-5] CI-economy: preinstalled runner-image stable (see the
         # opt-in-features note); no extra component needed here.

@@ -13,8 +13,9 @@
 #
 # Hermetic: imports the assembler module + reads the committed fragments + golden file
 # on disk (committed files, not git/network state), so the run is deterministic. NO
-# network; the only subprocess is a local `bash` run of the workflow's failure-
-# attribution script (TestAssembleFailureAnnotation, sq-2wo5t) — still offline.
+# network; the only subprocesses are local runs of the workflow's failure-attribution
+# script (TestAssembleFailureAnnotation, sq-2wo5t) and of the group runner/reporter
+# with stubbed cargo/gh binaries (TestGroupRunner/TestGroupReporter) — still offline.
 #
 # Run:  python3 scripts/tests/test_feature_matrix_assemble.py
 # (stdlib + the same PyYAML the assembler needs; no pytest required — also
@@ -760,11 +761,15 @@ class TestWeightFieldValidation(unittest.TestCase):
 
 
 class TestGroupedWorkflowWiring(unittest.TestCase):
-    """Pins the grouped-runner wiring in feature-matrix.yml: the matrix is assembled
-    with --grouped, the group job emits the per-leg check-runs via
-    scripts/run-feature-matrix-group.py, and it holds the checks: write permission
-    that emission needs (without it every leg's name would silently vanish from the
-    gate's discovery set on same-repo PRs)."""
+    """Pins the grouped-runner wiring in feature-matrix.yml ACROSS THE TRUSTED
+    BOUNDARY (PR #3511 review, critical finding): the matrix is assembled with
+    --grouped; the UNPRIVILEGED group job (contents: read only, no persisted
+    credentials, NO token in its environment — it executes PR-controlled cargo
+    build scripts/proc macros) runs scripts/run-feature-matrix-group.py and
+    uploads the per-leg results as an artifact; the separate TRUSTED
+    `report-legs` job (checks: write, executes no PR build code) downloads the
+    artifacts, regenerates the assembled leg set as ground truth, and posts the
+    gate-critical per-leg check-runs via --report."""
 
     @classmethod
     def setUpClass(cls):
@@ -773,6 +778,7 @@ class TestGroupedWorkflowWiring(unittest.TestCase):
         cls.text = WORKFLOW.read_text(encoding="utf-8")
         cls.wf = yaml.safe_load(cls.text)
         cls.job = cls.wf["jobs"]["opt-in-features"]
+        cls.report = cls.wf["jobs"]["report-legs"]
 
     def test_assemble_step_uses_grouped_mode(self):
         self.assertIn("assemble-feature-matrix.py --grouped", self.text)
@@ -782,38 +788,144 @@ class TestGroupedWorkflowWiring(unittest.TestCase):
         self.assertTrue(any("run-feature-matrix-group.py" in r for r in runs),
                         "the group job must run scripts/run-feature-matrix-group.py")
 
-    def test_group_job_has_checks_write(self):
-        self.assertEqual(self.job.get("permissions", {}).get("checks"), "write",
-                         "per-leg check-run emission needs checks: write")
+    # ---- the trusted boundary itself (do NOT weaken any of these) ----------------
+    def test_group_job_is_unprivileged(self):
+        self.assertEqual(
+            self.job.get("permissions"), {"contents": "read"},
+            "the group job executes PR-controlled build code and must hold ONLY "
+            "contents: read — a checks: write token here lets malicious build "
+            "scripts/proc macros forge arbitrary check runs (PR #3511 review)")
 
-    def test_group_job_name_is_not_advisory(self):
-        self.assertNotRegex(str(self.job.get("name", "")), ADVISORY_RE,
-                            "the group job itself must GATE")
+    def test_group_job_checkout_does_not_persist_credentials(self):
+        checkouts = [s for s in self.job["steps"]
+                     if "actions/checkout" in str(s.get("uses", ""))]
+        self.assertTrue(checkouts, "the group job must check out the repo")
+        for s in checkouts:
+            self.assertIs(
+                (s.get("with") or {}).get("persist-credentials"), False,
+                "the group job's checkout must set persist-credentials: false — "
+                "PR-controlled build code must never find a token in .git/config")
 
-    def test_group_job_passes_head_sha_and_legs(self):
+    def test_group_job_env_has_no_token(self):
         env = {}
         for s in self.job["steps"]:
             env.update(s.get("env", {}) or {})
-        for key in ("GROUP_LEGS", "GROUP_NAME", "HEAD_SHA", "REPO", "GH_TOKEN"):
+        for key in ("GH_TOKEN", "GITHUB_TOKEN"):
+            self.assertNotIn(key, env,
+                             f"the group job must not export {key} while running "
+                             "PR-controlled cargo code")
+        for key in ("GROUP_LEGS", "GROUP_NAME", "FMG_RESULTS"):
             self.assertIn(key, env, f"group runner step must set {key}")
+
+    def test_no_cargo_running_job_holds_checks_write(self):
+        """Workflow-wide sweep: any job that executes cargo (i.e. PR-controlled
+        build-time code) must never hold checks: write nor export a token."""
+        for job_id, job in self.wf["jobs"].items():
+            steps = job.get("steps") or []
+            runs = " ".join(str(s.get("run", "") or "") for s in steps)
+            if "cargo" not in runs:
+                continue
+            self.assertNotEqual(
+                (job.get("permissions") or {}).get("checks"), "write",
+                f"job {job_id!r} executes cargo and must not hold checks: write")
+            env = {}
+            for s in steps:
+                env.update(s.get("env", {}) or {})
+            self.assertNotIn("GH_TOKEN", env,
+                             f"job {job_id!r} executes cargo and must not export GH_TOKEN")
+
+    def test_group_job_uploads_results_artifact(self):
+        uploads = [s for s in self.job["steps"]
+                   if "actions/upload-artifact" in str(s.get("uses", ""))]
+        self.assertEqual(len(uploads), 1,
+                         "the group job must upload exactly one results artifact")
+        step = uploads[0]
+        self.assertIn("feature-matrix-results-", str(step["with"]["name"]))
+        self.assertIn("!cancelled()", str(step.get("if", "")),
+                      "a group with FAILED legs must still ship its results so the "
+                      "reporter posts the red per-leg check-runs")
+
+    # ---- the trusted reporter side -----------------------------------------------
+    def test_report_job_holds_checks_write_and_runs_no_cargo(self):
+        self.assertEqual((self.report.get("permissions") or {}).get("checks"),
+                         "write", "the reporter is the ONE checks: write holder")
+        runs = " ".join(str(s.get("run", "") or "") for s in self.report["steps"])
+        self.assertNotIn("cargo", runs,
+                         "the trusted reporter must execute no PR build code")
+        self.assertIn("run-feature-matrix-group.py --report", runs)
+        self.assertIn("assemble-feature-matrix.py", runs,
+                      "the reporter must regenerate the assembled leg set as its "
+                      "ground truth (leg names are never taken from the artifact "
+                      "as free text)")
+
+    def test_report_job_downloads_the_results_artifacts(self):
+        downloads = [s for s in self.report["steps"]
+                     if "actions/download-artifact" in str(s.get("uses", ""))]
+        self.assertEqual(len(downloads), 1)
+        self.assertEqual(downloads[0]["with"]["pattern"], "feature-matrix-results-*")
+
+    def test_report_job_runs_even_when_groups_fail(self):
+        cond = str(self.report.get("if", ""))
+        self.assertIn("!cancelled()", cond,
+                      "the reporter must run when a group job FAILED (red legs "
+                      "still need their check-runs)")
+        self.assertIn("needs.setup.outputs.legs != '0'", cond)
+        self.assertIn("needs.setup.result == 'success'", cond)
+
+    def test_report_job_env(self):
+        env = {}
+        for s in self.report["steps"]:
+            env.update(s.get("env", {}) or {})
+        for key in ("FMG_RESULTS_DIR", "FMG_VALID_LEGS_FILE", "REPO", "HEAD_SHA",
+                    "GH_TOKEN", "GROUP_JOBS_RESULT"):
+            self.assertIn(key, env, f"reporter step must set {key}")
+
+    def test_job_names_are_not_advisory(self):
+        for job in (self.job, self.report):
+            self.assertNotRegex(str(job.get("name", "")), ADVISORY_RE,
+                                "both sides of the split must GATE — a red "
+                                "reporter is the fail-closed enforcement")
+
+    # ---- PR #3511 review finding 2: the runner script triggers its own gate ------
+    def test_rust_path_filter_covers_the_matrix_scripts(self):
+        import yaml  # noqa: PLC0415
+
+        steps = self.wf["jobs"]["changes"]["steps"]
+        flt = [s for s in steps if "dorny/paths-filter" in str(s.get("uses", ""))]
+        self.assertEqual(len(flt), 1)
+        filters = yaml.safe_load(flt[0]["with"]["filters"])
+        rust = filters["rust"]
+        for path in (
+            "scripts/assemble-feature-matrix.py",
+            "scripts/run-feature-matrix-group.py",
+            ".github/feature-matrix.d/**",
+            ".github/workflows/feature-matrix.yml",
+        ):
+            self.assertIn(
+                path, rust,
+                f"the rust path filter must include {path!r} — a PR changing only "
+                "it must still run setup (self-test), the grouped execution and "
+                "the reporter (PR #3511 review finding 2)")
 
 
 class TestGroupRunner(unittest.TestCase):
-    """Executes scripts/run-feature-matrix-group.py with stubbed cargo/gh binaries
-    (FMG_CARGO / FMG_GH): a failing leg must NOT stop the group, every leg must get
-    its terminal `opt-in <name>` check-run POST, and the group must exit non-zero
-    naming the failed leg."""
+    """Executes scripts/run-feature-matrix-group.py (EXECUTION mode) with a stubbed
+    cargo binary (FMG_CARGO): a failing leg must NOT stop the group, every leg's
+    outcome must land in the results file for the trusted reporter, the group must
+    exit non-zero naming the failed leg — and the mode must need NO GitHub token
+    and make NO API call (the trusted-boundary contract, PR #3511 review)."""
 
     RUNNER = REPO_ROOT / "scripts" / "run-feature-matrix-group.py"
+    SCHEMA = "feature-matrix-group-results/v1"
 
-    def _run(self, legs, fail_on="", gh_rc="0"):
+    def _run(self, legs, fail_on="", with_results_env=True):
         import subprocess  # noqa: PLC0415
 
         with tempfile.TemporaryDirectory() as tmp:
             tmpdir = Path(tmp)
             cargo_log = tmpdir / "cargo.log"
-            gh_log = tmpdir / "gh.log"
             summary = tmpdir / "summary.md"
+            results = tmpdir / "fmg" / "results.json"
             cargo = tmpdir / "cargo-stub"
             cargo.write_text(
                 "#!/bin/bash\n"
@@ -822,78 +934,302 @@ class TestGroupRunner(unittest.TestCase):
                 "exit 0\n",
                 encoding="utf-8",
             )
-            gh = tmpdir / "gh-stub"
-            gh.write_text(
-                "#!/bin/bash\n"
-                f"cat >> {gh_log}\n"
-                f"echo >> {gh_log}\n"
-                "exit ${GH_RC:-0}\n",
-                encoding="utf-8",
-            )
             cargo.chmod(0o755)
-            gh.chmod(0o755)
             summary.touch()
+            # Deliberately NO GH_TOKEN / gh stub in the environment: execution
+            # mode must never need or touch a token (trusted-boundary contract).
+            env = {
+                "PATH": "/usr/bin:/bin",
+                "FMG_CARGO": str(cargo),
+                "FAIL_ON": fail_on,
+                "GROUP_LEGS": json.dumps(legs),
+                "GROUP_NAME": "g01 test-group",
+                "GITHUB_STEP_SUMMARY": str(summary),
+            }
+            if with_results_env:
+                env["FMG_RESULTS"] = str(results)
             proc = subprocess.run(
                 [sys.executable, str(self.RUNNER)],
                 capture_output=True,
                 text=True,
                 timeout=60,
-                env={
-                    "PATH": "/usr/bin:/bin",
-                    "FMG_CARGO": str(cargo),
-                    "FMG_GH": str(gh),
-                    "FAIL_ON": fail_on,
-                    "GH_RC": gh_rc,
-                    "GROUP_LEGS": json.dumps(legs),
-                    "GROUP_NAME": "g01 test-group",
-                    "REPO": "example/repo",
-                    "HEAD_SHA": "deadbeef",
-                    "DETAILS_URL": "https://example.invalid/run/1",
-                    "GITHUB_STEP_SUMMARY": str(summary),
-                },
+                env=env,
             )
-            gh_calls = [json.loads(l) for l in gh_log.read_text().splitlines() if l.strip()] if gh_log.exists() else []
-            return proc, gh_calls, summary.read_text(encoding="utf-8")
+            results_obj = (
+                json.loads(results.read_text(encoding="utf-8"))
+                if results.exists()
+                else None
+            )
+            cargo_lines = (
+                cargo_log.read_text(encoding="utf-8").splitlines()
+                if cargo_log.exists()
+                else []
+            )
+            return proc, results_obj, summary.read_text(encoding="utf-8"), cargo_lines
 
     LEGS = [
         {"name": "alpha (f1)", "crate": "alpha", "features": "f1", "test": True},
         {"name": "beta (f2)", "crate": "beta", "features": "f2", "test": False},
     ]
 
-    def test_all_green_posts_a_success_check_run_per_leg(self):
-        proc, gh_calls, _ = self._run(self.LEGS)
+    def test_all_green_writes_a_success_result_per_leg(self):
+        proc, results, _, _ = self._run(self.LEGS)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertEqual([c["name"] for c in gh_calls],
-                         ["opt-in alpha (f1)", "opt-in beta (f2)"],
-                         "every leg must get its byte-identical `opt-in <name>` run")
-        for c in gh_calls:
-            self.assertEqual(c["status"], "completed",
-                             "check-runs must be TERMINAL (a pending one could "
-                             "hold the polling ci-summary gate)")
-            self.assertEqual(c["conclusion"], "success")
-            self.assertEqual(c["head_sha"], "deadbeef")
+        self.assertEqual(results["schema"], self.SCHEMA)
+        self.assertEqual(results["group"], "g01 test-group")
+        self.assertEqual(
+            results["results"],
+            [{"name": "alpha (f1)", "failed_step": None},
+             {"name": "beta (f2)", "failed_step": None}],
+            "every leg's outcome must land in the results file for the reporter")
 
     def test_failing_leg_continues_reports_and_reds_the_group(self):
-        proc, gh_calls, summary = self._run(self.LEGS, fail_on="f1")
+        proc, results, summary, _ = self._run(self.LEGS, fail_on="f1")
         self.assertEqual(proc.returncode, 1, "a failed leg must RED the group")
         # The failure names the exact leg, loudly.
         self.assertIn("opt-in alpha (f1)", proc.stdout)
         self.assertIn("::error", proc.stdout)
-        # The group kept going: BOTH legs report check-runs (fail-fast: false).
-        self.assertEqual([c["conclusion"] for c in gh_calls],
-                         ["failure", "success"])
+        # The group kept going: BOTH legs land in the results (fail-fast: false).
+        self.assertEqual(
+            results["results"],
+            [{"name": "alpha (f1)", "failed_step": "build"},
+             {"name": "beta (f2)", "failed_step": None}])
         self.assertIn("alpha (f1)", summary)
 
     def test_untested_leg_skips_cargo_test(self):
-        proc, gh_calls, _ = self._run([self.LEGS[1]])
+        proc, results, _, cargo_lines = self._run([self.LEGS[1]])
         self.assertEqual(proc.returncode, 0)
-        self.assertEqual(gh_calls[0]["conclusion"], "success")
+        self.assertEqual(results["results"][0]["failed_step"], None)
+        self.assertFalse(any(line.startswith("test ") for line in cargo_lines),
+                         "an untested leg must not invoke `cargo test`")
 
-    def test_gh_failure_degrades_to_warning_never_fatal(self):
-        proc, _gh_calls, _ = self._run(self.LEGS, gh_rc="1")
+    def test_missing_results_env_is_fatal(self):
+        # Without FMG_RESULTS the reporter would have nothing to post from —
+        # every leg name would silently vanish from the gate's discovery set.
+        proc, _, _, cargo_lines = self._run(self.LEGS, with_results_env=False)
+        self.assertEqual(proc.returncode, 2)
+        self.assertEqual(cargo_lines, [], "must refuse to run any leg without it")
+
+    def test_execution_mode_makes_no_github_api_call(self):
+        # No gh binary exists on the stub PATH; a mode that shelled out to gh
+        # would crash. Green run == no API call was attempted.
+        proc, _, _, _ = self._run(self.LEGS)
+        self.assertEqual(proc.returncode, 0)
+        self.assertNotIn("check-run", proc.stdout,
+                         "execution mode must not attempt check-run emission")
+
+
+class TestGroupReporter(unittest.TestCase):
+    """Executes scripts/run-feature-matrix-group.py --report (the TRUSTED side of
+    the split) with a stubbed gh binary. The artifact files it consumes were
+    written inside jobs that ran arbitrary PR-controlled build code, so the
+    load-bearing properties are: HOSTILE-INPUT validation (leg names must resolve
+    in the assembled leg set — never PR-supplied free text; strict schema;
+    duplicate names refused), and FAIL-CLOSED posting (only the deterministic
+    fork-PR read-only-token denial degrades to a warning; every other Checks API
+    failure reds the reporter job — PR #3511 review finding 3)."""
+
+    RUNNER = REPO_ROOT / "scripts" / "run-feature-matrix-group.py"
+    SCHEMA = "feature-matrix-group-results/v1"
+    FORK_DENIAL = "gh: Resource not accessible by integration (HTTP 403)"
+
+    VALID = {"include": [
+        {"name": "alpha (f1)", "crate": "alpha", "features": "f1", "test": True},
+        {"name": "beta (f2)", "crate": "beta", "features": "f2", "test": False},
+    ]}
+
+    def _result_file(self, entries, group="g01 alpha", schema=None):
+        return {"schema": schema or self.SCHEMA, "group": group, "results": entries}
+
+    def _run_report(self, files, gh_rc="0", gh_stderr="", valid=None,
+                    group_jobs_result="failure", raw_files=None, drop_env=()):
+        import subprocess  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            results_dir = tmpdir / "fmg-results"
+            for i, obj in enumerate(files):
+                sub = results_dir / f"feature-matrix-results-{i}"
+                sub.mkdir(parents=True)
+                (sub / "results.json").write_text(
+                    json.dumps(obj), encoding="utf-8")
+            for i, raw in enumerate(raw_files or []):
+                sub = results_dir / f"raw-{i}"
+                sub.mkdir(parents=True)
+                (sub / "results.json").write_text(raw, encoding="utf-8")
+            results_dir.mkdir(parents=True, exist_ok=True)
+            valid_file = tmpdir / "valid-legs.json"
+            valid_file.write_text(json.dumps(valid or self.VALID), encoding="utf-8")
+            gh_log = tmpdir / "gh.log"
+            gh = tmpdir / "gh-stub"
+            gh.write_text(
+                "#!/bin/bash\n"
+                f"cat >> {gh_log}\n"
+                f"echo >> {gh_log}\n"
+                "if [ -n \"${GH_STDERR:-}\" ]; then echo \"$GH_STDERR\" >&2; fi\n"
+                "exit ${GH_RC:-0}\n",
+                encoding="utf-8",
+            )
+            gh.chmod(0o755)
+            env = {
+                "PATH": "/usr/bin:/bin",
+                "FMG_GH": str(gh),
+                "GH_RC": gh_rc,
+                "GH_STDERR": gh_stderr,
+                "FMG_RESULTS_DIR": str(results_dir),
+                "FMG_VALID_LEGS_FILE": str(valid_file),
+                "REPO": "example/repo",
+                "HEAD_SHA": "deadbeef",
+                "DETAILS_URL": "https://example.invalid/run/1",
+                "GROUP_JOBS_RESULT": group_jobs_result,
+                "FMG_RETRY_SLEEP": "0",
+            }
+            for key in drop_env:
+                env.pop(key, None)
+            proc = subprocess.run(
+                [sys.executable, str(self.RUNNER), "--report"],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=env,
+            )
+            gh_calls = (
+                [json.loads(l) for l in gh_log.read_text().splitlines() if l.strip()]
+                if gh_log.exists()
+                else []
+            )
+            return proc, gh_calls
+
+    def test_valid_results_post_terminal_check_runs(self):
+        proc, gh_calls = self._run_report([
+            self._result_file([{"name": "alpha (f1)", "failed_step": "clippy"}]),
+            self._result_file([{"name": "beta (f2)", "failed_step": None}],
+                              group="g02 beta"),
+        ], group_jobs_result="success")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual([c["name"] for c in gh_calls],
+                         ["opt-in alpha (f1)", "opt-in beta (f2)"],
+                         "every leg must get its byte-identical `opt-in <name>` run")
+        self.assertEqual([c["conclusion"] for c in gh_calls],
+                         ["failure", "success"])
+        for c in gh_calls:
+            self.assertEqual(c["status"], "completed",
+                             "check-runs must be TERMINAL (a pending one could "
+                             "hold the polling ci-summary gate)")
+            self.assertEqual(c["head_sha"], "deadbeef")
+            self.assertTrue(c["name"].startswith("opt-in "),
+                            "the reporter constructs the opt-in prefix itself")
+        # Summary metadata comes from the ASSEMBLED set, not the artifact.
+        self.assertIn("-p alpha --features f1", gh_calls[0]["output"]["summary"])
+
+    def test_unassembled_leg_name_is_refused_and_nothing_posts(self):
+        # THE forgery test: an artifact naming a non-assembled leg — e.g. trying
+        # to spoof the required gate context — must fail validation before any
+        # POST happens (never PR-supplied free text).
+        for forged in ("ci-summary / gate", "gate", "alpha (f1) ", "totally-new"):
+            proc, gh_calls = self._run_report([
+                self._result_file([{"name": forged, "failed_step": None}]),
+            ])
+            self.assertEqual(proc.returncode, 1, f"forged name {forged!r} must fail")
+            self.assertEqual(gh_calls, [], "no POST may happen on a forged artifact")
+
+    def test_malformed_artifacts_fail_closed_without_posting(self):
+        cases = [
+            # not JSON at all
+            {"raw_files": ["not json {"]},
+            # wrong schema tag
+            {"files": [self._result_file(
+                [{"name": "alpha (f1)", "failed_step": None}], schema="v0")]},
+            # extra top-level key
+            {"raw_files": [json.dumps({"schema": self.SCHEMA, "group": "g01 a",
+                                       "results": [], "extra": 1})]},
+            # entry with extra keys
+            {"files": [self._result_file(
+                [{"name": "alpha (f1)", "failed_step": None, "summary": "pwn"}])]},
+            # failed_step outside the enum
+            {"files": [self._result_file(
+                [{"name": "alpha (f1)", "failed_step": "pwned"}])]},
+            # hostile group id (annotation/markdown injection shape)
+            {"files": [self._result_file(
+                [{"name": "alpha (f1)", "failed_step": None}],
+                group="x\n::error::pwn")]},
+            # empty results list
+            {"files": [self._result_file([])]},
+        ]
+        for case in cases:
+            proc, gh_calls = self._run_report(case.get("files", []),
+                                              raw_files=case.get("raw_files"))
+            self.assertEqual(proc.returncode, 1, f"case {case!r} must fail closed")
+            self.assertEqual(gh_calls, [], f"case {case!r} must not POST anything")
+
+    def test_duplicate_leg_across_artifacts_is_refused(self):
+        # Duplicate sibling check-runs are the latest-run-confusion attack the
+        # split exists to prevent — refuse them from the honest side too.
+        proc, gh_calls = self._run_report([
+            self._result_file([{"name": "alpha (f1)", "failed_step": None}]),
+            self._result_file([{"name": "alpha (f1)", "failed_step": "build"}],
+                              group="g02 alpha"),
+        ])
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(gh_calls, [])
+
+    def test_fork_token_denial_degrades_to_warning(self):
+        # The ONE expected, tolerable API failure: a fork PR's read-only token.
+        proc, gh_calls = self._run_report(
+            [self._result_file([{"name": "alpha (f1)", "failed_step": None}])],
+            gh_rc="1", gh_stderr=self.FORK_DENIAL, group_jobs_result="success")
         self.assertEqual(proc.returncode, 0,
-                         "a read-only token must not fail a green group")
+                         "fork-token denial must not fail the reporter — the "
+                         "group jobs' own conclusions remain the gating signal")
         self.assertIn("::warning", proc.stdout)
+        self.assertEqual(len(gh_calls), 1, "deterministic denial is not retried")
+
+    def test_unexpected_api_failure_fails_closed_after_retries(self):
+        # Auth regression / outage / rate limit / malformed request => the
+        # reporter job REDs (finding 3) — never a silent warning.
+        proc, gh_calls = self._run_report(
+            [self._result_file([{"name": "alpha (f1)", "failed_step": None}])],
+            gh_rc="1", gh_stderr="HTTP 502 Bad Gateway", group_jobs_result="success")
+        self.assertEqual(proc.returncode, 1,
+                         "an unexpected Checks API failure must fail the reporter")
+        self.assertEqual(len(gh_calls), 3, "bounded retry before failing closed")
+        self.assertIn("::error", proc.stderr)
+
+    def test_zero_artifacts_with_successful_groups_is_an_inconsistency(self):
+        proc, _ = self._run_report([], group_jobs_result="success")
+        self.assertEqual(proc.returncode, 1,
+                         "green groups + zero artifacts would silently drop every "
+                         "per-leg check-run — must fail")
+        proc, _ = self._run_report([], group_jobs_result="failure")
+        self.assertEqual(proc.returncode, 0,
+                         "failed groups gate via ci-summary; nothing to report")
+        self.assertIn("::warning", proc.stdout)
+
+    def test_missing_reporter_env_is_fatal(self):
+        for key in ("FMG_RESULTS_DIR", "FMG_VALID_LEGS_FILE", "REPO", "HEAD_SHA"):
+            proc, gh_calls = self._run_report(
+                [self._result_file([{"name": "alpha (f1)", "failed_step": None}])],
+                drop_env=(key,))
+            self.assertEqual(proc.returncode, 2, f"missing {key} must be fatal")
+            self.assertEqual(gh_calls, [])
+
+    def test_real_assembled_legs_pass_reporter_validation(self):
+        """End-to-end coherence: EXECUTION-mode output for real assembled legs
+        must validate on the REPORT side against the real assembler output —
+        pins the schema the two halves share across the trust boundary."""
+        mod = _load_assembler()
+        legs = mod.load_legs()
+        first = {"name": legs[0]["name"], "failed_step": None}
+        valid = {"include": [
+            {"name": leg["name"], "crate": leg["crate"],
+             "features": leg["features"], "test": leg["test"]}
+            for leg in legs
+        ]}
+        proc, gh_calls = self._run_report(
+            [self._result_file([first], group="g01 real")],
+            valid=valid, group_jobs_result="success")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(gh_calls[0]["name"], f"opt-in {legs[0]['name']}")
 
 
 if __name__ == "__main__":
