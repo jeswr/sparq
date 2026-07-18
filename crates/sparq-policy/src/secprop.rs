@@ -364,4 +364,136 @@ mod tests {
             "the profile TTL must state it asserts no security property of any method",
         );
     }
+
+    // ── cross-crate dimension-IRI drift guards (sq-mgxz8) ────────────────────
+    //
+    // Three crates independently declare `secx:` dimension IRIs as `const &str`
+    // data with no crate-dependency edge between them:
+    //   (1) THIS file — the `DIM_*` constants in `SECPROP_LEFT_OPERANDS`
+    //   (2) `sparq-trust/src/secprop.rs` — the full `SECX_*` vocabulary
+    //   (3) `sparq-zk/ontologies/secprop-methods.ttl` — the per-method annotation
+    //       graph (`secx:property secx:Foo` triples)
+    //
+    // Each has its own per-crate TTL↔Rust drift test, but a typo in ONE crate's
+    // dimension IRI would NOT be caught against the others. These two tests fill
+    // that gap without adding a crate-dependency edge: they use `include_str!`
+    // (a compile-time file read) to compare across crate boundaries.
+    //
+    // `sec-prop:` VENDORED DIMS: `PostQuantumForgery`, `PostQuantumSnooping`, and
+    // `SignatureTypeLeakage` are original vendored class IRIs from the ZKP-SPARQL
+    // paper (`vocab/sec-prop.yaml.ld`). They appear under the same `secx:` namespace
+    // and are USED as dimension IRIs throughout the estate, but `secprop-ext.ttl`
+    // does NOT re-declare them as subjects (the non-forking design §4.1 keeps only
+    // the LEVELS there). They are exempted from the subject-declaration check and
+    // receive a namespace check only.
+
+    /// Local names of `sec-prop:` property IRIs that are VENDORED from the original
+    /// ZKP-SPARQL vocabulary and therefore NOT re-declared as new `secx:X a …`
+    /// subjects in `secprop-ext.ttl`. Their levels are added in the extension file
+    /// but their own class IRIs are kept in the original vocabulary.
+    const VENDORED_SEC_PROP_DIMS: &[&str] = &[
+        "PostQuantumForgery",
+        "PostQuantumSnooping",
+        "SignatureTypeLeakage",
+    ];
+
+    /// Cross-crate dimension-IRI drift guard (sq-mgxz8): every `DIM_*` in
+    /// `SECPROP_LEFT_OPERANDS` must be declared as a `secx:LocalName` subject in
+    /// the canonical `secprop-ext.ttl` owned by `sparq-trust`, UNLESS its local
+    /// name is in `VENDORED_SEC_PROP_DIMS` (vendored class IRIs that are exempt
+    /// from the subject-declaration check — see comment block above). Uses
+    /// `include_str!` — a compile-time read, NOT a crate-dependency edge.
+    #[test]
+    fn policy_dim_iris_are_in_trust_vocab_or_vendored() {
+        const TRUST_VOCAB: &str =
+            include_str!("../../sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl");
+
+        for (_, dim) in SECPROP_LEFT_OPERANDS {
+            let dim_local = dim
+                .strip_prefix(SECX_NS)
+                .expect("dimension is in the secx: namespace");
+
+            if VENDORED_SEC_PROP_DIMS.contains(&dim_local) {
+                // Vendored class IRI: only the namespace can be checked here
+                // (the class declaration is in sec-prop.yaml.ld, not secprop-ext.ttl).
+                assert!(
+                    dim.starts_with(SECX_NS),
+                    "vendored dimension `secx:{}` must be in the secx: namespace",
+                    dim_local,
+                );
+                continue;
+            }
+
+            // Extension term: must be declared as `secx:LocalName a …` in the
+            // trust-crate vocabulary so a rename in the ext TTL is caught here.
+            let decl = format!("secx:{} ", dim_local);
+            assert!(
+                TRUST_VOCAB.contains(&decl),
+                "dimension `secx:{}` in SECPROP_LEFT_OPERANDS is not declared as a \
+                 subject in sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl — \
+                 IRI drift between the policy constants and the trust vocabulary \
+                 (sq-mgxz8); check for a rename or a missing declaration",
+                dim_local,
+            );
+        }
+    }
+
+    /// Cross-crate dimension-IRI drift guard (sq-mgxz8): every `secx:property
+    /// secx:*` dimension IRI in `sparq-zk/ontologies/secprop-methods.ttl` must be
+    /// one of: a policy `DIM_*` local name (in `SECPROP_LEFT_OPERANDS`), a known
+    /// vendored dimension (`VENDORED_SEC_PROP_DIMS`), or a `secx:LocalName` subject
+    /// declared in `secprop-ext.ttl`. A typo or rename in the annotation graph's
+    /// dimension IRI fails at least one condition. Uses `include_str!` — no crate
+    /// edge.
+    #[test]
+    fn methods_ttl_dims_are_policy_or_trust_vocab_or_vendored() {
+        const TRUST_VOCAB: &str =
+            include_str!("../../sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl");
+        const METHODS: &str =
+            include_str!("../../sparq-zk/ontologies/secprop-methods.ttl");
+
+        let policy_dim_locals: std::collections::HashSet<&str> = SECPROP_LEFT_OPERANDS
+            .iter()
+            .filter_map(|(_, dim)| dim.strip_prefix(SECX_NS))
+            .collect();
+
+        let mut found = 0usize;
+        let mut remaining = METHODS;
+        while let Some(pos) = remaining.find("secx:property secx:") {
+            let after = &remaining[pos + "secx:property secx:".len()..];
+            let local = after
+                .split(|c: char| !c.is_alphanumeric())
+                .next()
+                .unwrap_or("");
+            // Advance before assertions so the loop always terminates.
+            remaining = &remaining[pos + 1..];
+            if local.is_empty() {
+                continue;
+            }
+            found += 1;
+
+            if policy_dim_locals.contains(local) || VENDORED_SEC_PROP_DIMS.contains(&local) {
+                continue;
+            }
+
+            // Not a policy dimension and not a known vendored one: must be declared
+            // in the extension vocab to be a verifiable term, not an undetected typo.
+            let decl = format!("secx:{} ", local);
+            assert!(
+                TRUST_VOCAB.contains(&decl),
+                "secprop-methods.ttl uses `secx:property secx:{}` but this IRI is \
+                 neither a policy dimension (SECPROP_LEFT_OPERANDS), a known vendored \
+                 sec-prop: dimension (VENDORED_SEC_PROP_DIMS), nor declared as a subject \
+                 in sparq-trust's secprop-ext.ttl — possible IRI drift or undeclared \
+                 term (sq-mgxz8); if this is intentional, add it to VENDORED_SEC_PROP_DIMS",
+                local,
+            );
+        }
+
+        assert!(
+            found > 0,
+            "no `secx:property secx:*` dimension values found in secprop-methods.ttl — \
+             the methods TTL format may have changed, breaking this drift guard (sq-mgxz8)",
+        );
+    }
 }
