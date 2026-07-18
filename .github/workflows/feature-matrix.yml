@@ -37,14 +37,21 @@
 # defaulting to a crate-source-size heuristic; each group targets <5 min of warm-cache
 # work) and `opt-in-features` runs ONE JOB PER GROUP. The gate-critical per-leg
 # `opt-in <name>` check-runs are still emitted, byte-identical — but across a TRUSTED
-# BOUNDARY (PR #3511 review): the group job executes PR-controlled code (build
-# scripts/proc macros/tests) UNPRIVILEGED (contents: read, persist-credentials: false,
-# no token in the environment) and writes per-leg outcomes to an ARTIFACT; the
-# separate `report-legs` job (which runs no PR build code) downloads the artifacts,
-# validates them hostile-input-style against the assembled leg set, and posts the
-# check-runs with its `checks: write` token (scripts/run-feature-matrix-group.py
-# --report). Names byte-identical, so the aggregator, branch protection and the
-# golden self-test contract are all unchanged.
+# BOUNDARY (PR #3511 review, finding 1): the group job executes PR-controlled code
+# (build scripts/proc macros/tests) UNPRIVILEGED (contents: read, persist-credentials:
+# false, no token in the environment) and writes per-leg outcomes to an ARTIFACT.
+# The reporter is NOT a job here — it lives in the separate, DEFAULT-BRANCH-owned
+# .github/workflows/feature-matrix-report.yml, triggered by `workflow_run` on this
+# workflow's completion, so GitHub always runs the reviewed default-branch copy of the
+# reporter workflow AND of scripts/run-feature-matrix-group.py — a PR cannot edit
+# either to forge check-runs with the `checks: write` token (the pwn-requests fix).
+# The reporter downloads THIS run's artifacts (per-leg results + the SELECTED-matrix
+# and metadata this workflow's `setup` job uploads), validates them hostile-input-
+# style against the selected leg set, validates the recorded head SHA against the
+# server-supplied workflow_run.head_sha, and posts the check-runs. Names byte-
+# identical, so the aggregator, branch protection and the golden self-test contract
+# are all unchanged; the group jobs' OWN conclusions remain the always-gating coarse
+# signal on the PR head, independent of reporter timing.
 #
 # GUARD — THE RULE THAT KEEPS THIS LANE HONEST (sq-vya1). A test module/file behind
 # `#[cfg(feature = "X")]` / `#![cfg(feature = "X")]` for a DEFAULT-OFF feature is compiled
@@ -206,6 +213,12 @@ jobs:
               # still run setup (its self-test gates there) + the grouped execution
               # + the reporter. Wiring pinned by test_feature_matrix_assemble.py.
               - 'scripts/run-feature-matrix-group.py'
+              # [FABLE-5] PR #3511 review finding 4: the assembler/runner self-test is
+              # the mechanized guard for the gate-critical leg-name contract AND the
+              # trusted-boundary wiring. A test-only edit that WEAKENS it must still
+              # re-run the setup self-test (which runs this file) — otherwise a PR
+              # could gut the guard while skipping the very job that enforces it.
+              - 'scripts/tests/test_feature_matrix_assemble.py'
       - name: Decide rust_changed (safe-by-default off the PR path)
         id: decide
         env:
@@ -363,6 +376,46 @@ jobs:
           echo "legs=$LEGS" >> "$GITHUB_OUTPUT"
           echo "Assembled $LEGS opt-in leg(s) into $NGROUPS group(s) (select mode: ${SELECT_MODE:-<unset>}, event ${{ github.event_name }}). Full leg-name set:"
           python3 scripts/assemble-feature-matrix.py --names
+      - name: Emit the SELECTED leg set + metadata for the trusted reporter
+        # [FABLE-5] PR #3511 review findings 1+2: the reporter runs in the separate,
+        # default-branch-owned feature-matrix-report.yml (workflow_run) so it never
+        # executes PR-controlled code with `checks: write`. It needs (a) the EXACT
+        # legs this run should produce — the UNGROUPED selected set (same --event/
+        # --select-mode/--affected filters as the grouped matrix, so byte-identical
+        # legs) — as its completeness ground truth (finding 2), and (b) the head SHA
+        # + originating event as metadata so it can validate the SHA against the
+        # server-supplied workflow_run.head_sha (finding 1). This step runs PR-
+        # controlled assembler code, so it holds NO token and NO checks:write — the
+        # artifact is DATA the trusted reporter validates hostile-input-style.
+        if: needs.changes.outputs.rust_changed == 'true'
+        env:
+          SELECT_MODE: ${{ needs.select.outputs.mode }}
+          SELECT_AFFECTED: ${{ needs.select.outputs.affected }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p fmg-selected fmg-metadata
+          python3 scripts/assemble-feature-matrix.py \
+            --event "${EVENT_NAME}" --select-mode "${SELECT_MODE:-}" \
+            --affected "${SELECT_AFFECTED:-}" > fmg-selected/selected-matrix.json
+          python3 -c 'import json,os; json.dump({"head_sha": os.environ["HEAD_SHA"], "event": os.environ["EVENT_NAME"]}, open("fmg-metadata/metadata.json","w"))'
+      - name: Upload the selected-matrix artifact (reporter completeness ground truth)
+        if: needs.changes.outputs.rust_changed == 'true' && steps.assemble.outputs.legs != '0'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: feature-matrix-selected
+          path: fmg-selected/selected-matrix.json
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload the run metadata artifact (head SHA + event for the reporter)
+        if: needs.changes.outputs.rust_changed == 'true' && steps.assemble.outputs.legs != '0'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: feature-matrix-metadata
+          path: fmg-metadata/metadata.json
+          retention-days: 1
+          if-no-files-found: error
       - name: Loud failure attribution — the opt-in matrix was NOT generated
         # [FABLE-5] sq-2wo5t: when THIS job fails (golden leg-name drift after adding
         # a new opt-in leg, the C1 structural guard, the tier ratchet, or a malformed
@@ -422,9 +475,10 @@ jobs:
     # arbitrary check runs, incl. gate-critical sibling names) nor persisted git
     # credentials. It runs scripts/run-feature-matrix-group.py with NO token in the
     # environment and writes each leg's outcome to a results file, uploaded below as
-    # an artifact for the separate TRUSTED `report-legs` job (which executes no PR
-    # build code, validates the artifact hostile-input-style, and posts the per-leg
-    # check-runs). A failed leg does not stop the group (the old fail-fast: false),
+    # an artifact for the separate, DEFAULT-BRANCH-owned reporter workflow
+    # (feature-matrix-report.yml, workflow_run — see finding 1 in this file's header),
+    # which executes no PR build code, validates the artifact hostile-input-style, and
+    # posts the per-leg check-runs. A failed leg does not stop the group (the old fail-fast: false),
     # and the group job then FAILS LOUDLY naming exactly which legs failed — this
     # job's own conclusion is a required gating signal via `ci-summary / gate`
     # regardless of any check-run posting (sq-fmx4u.4).
@@ -488,7 +542,8 @@ jobs:
         # Each leg: build (bounded sq-hhxc retry) -> test (where the fragment says
         # so) -> clippy --all-targets -D warnings — the exact step set of the old
         # per-leg job. NO token here (see the job note): outcomes go to the
-        # results file; the trusted `report-legs` job posts the check-runs.
+        # results file; the trusted default-branch reporter workflow posts the
+        # check-runs (feature-matrix-report.yml, workflow_run — finding 1).
         env:
           GROUP_LEGS: ${{ matrix.legs }}
           GROUP_NAME: ${{ matrix.group }}
@@ -508,71 +563,23 @@ jobs:
           if-no-files-found: error
           overwrite: true
 
-  # [FABLE-5] TRUSTED REPORTER (PR #3511 review, critical finding): the ONLY job in
-  # this workflow that holds `checks: write`, and it executes NO PR-controlled build
-  # code — no cargo, no build scripts, no proc macros. It downloads the group jobs'
-  # results artifacts and posts the gate-critical per-leg `opt-in <name>` check-runs.
-  # The artifacts crossed the trust boundary (they were written inside jobs running
-  # arbitrary PR build code), so scripts/run-feature-matrix-group.py --report
-  # validates them HOSTILE-INPUT-STYLE: strict schema, leg names resolved against
-  # the assembled leg set (generated here by the committed assembler — never
-  # PR-supplied free text), failed_step from a fixed enum, duplicate names refused,
-  # and the `opt-in ` check-run prefix constructed reporter-side. Check-run POSTs
-  # FAIL CLOSED on unexpected Checks API errors (auth/outage/rate-limit/malformed);
-  # only the deterministic fork-PR read-only-token denial degrades to a warning
-  # (finding 3). The job NAME is free of "advisory"/"informational", so the required
-  # `ci-summary / gate` aggregator auto-discovers it — a reporter failure blocks the
-  # merge, which is exactly the fail-closed contract.
-  report-legs:
-    needs: [changes, setup, opt-in-features]
-    # `!cancelled()`: run even when a group job FAILED (its red legs still need
-    # their check-runs). Skip when setup failed/skipped or assembled zero legs.
-    if: >-
-      !cancelled() &&
-      needs.changes.outputs.rust_changed == 'true' &&
-      needs.setup.result == 'success' &&
-      needs.setup.outputs.legs != '0'
-    name: feature-matrix per-leg report
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      # Per-leg `opt-in <name>` check-run emission — the trusted side of the split.
-      checks: write
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: "3.12"
-      - name: Install PyYAML
-        # Same hash-pinned closure as the setup job (the assembler needs PyYAML).
-        run: pip install --require-hashes -r .github/requirements/docs-quality.txt
-      - name: Download the group results artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          pattern: feature-matrix-results-*
-          path: fmg-results
-      - name: Validate results + post per-leg check-runs (fail closed)
-        env:
-          FMG_RESULTS_DIR: fmg-results
-          FMG_VALID_LEGS_FILE: fmg-valid-legs.json
-          REPO: ${{ github.repository }}
-          # Same head-commit selection as ci-summary's discovery (PR head sha on
-          # pull_request; github.sha on merge_group/push), so the per-leg
-          # check-runs land on exactly the commit the gate polls.
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          GH_TOKEN: ${{ github.token }}
-          DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          # 'success' with zero results artifacts is an inconsistency the reporter
-          # refuses (it would silently drop every per-leg check-run).
-          GROUP_JOBS_RESULT: ${{ needs.opt-in-features.result }}
-        run: |
-          set -euo pipefail
-          # The assembled leg set is the reporter's ground truth for names +
-          # crate/features — artifact-supplied text never reaches a check-run.
-          python3 scripts/assemble-feature-matrix.py > fmg-valid-legs.json
-          python3 scripts/run-feature-matrix-group.py --report
+  # [FABLE-5] PR #3511 review, CRITICAL finding 1: the per-leg `opt-in <name>`
+  # check-run reporter is NO LONGER a job in this PR-triggered workflow. It moved to
+  # the separate, DEFAULT-BRANCH-owned .github/workflows/feature-matrix-report.yml,
+  # triggered by `workflow_run` on this workflow's completion. Rationale: the reporter
+  # is the only holder of `checks: write`, and a `checks: write` job that checks out
+  # the PR head and runs the PR's copy of scripts/{assemble-feature-matrix,run-feature-
+  # matrix-group}.py is the pwn-requests anti-pattern — a PR could edit either script
+  # to forge `gate` or sibling check-runs. `workflow_run` always runs the default-
+  # branch copy of the reporter workflow AND those scripts, isolated from PR-head
+  # content; it downloads THIS run's artifacts (results + the selected-matrix +
+  # metadata this workflow uploads), treats them strictly as validated DATA, validates
+  # the recorded head SHA against the server-supplied workflow_run.head_sha, and posts
+  # the per-leg + `feature-matrix report` summary check-runs onto the head commit.
+  # See feature-matrix-report.yml for the full threat model + adversarial self-check.
+  # The ALWAYS-gating coarse signal is unchanged: the opt-in-features group jobs run
+  # on THIS (PR/merge_group) event, so their own conclusions are discovered directly
+  # by ci-summary regardless of reporter timing (sq-fmx4u.4).
 
   # [SONNET-4.6] sq-ldg8c: T1 CHECK TIER — compile+clippy (NO test run) for the opt-in legs a
   # fragment has DEMOTED with `tier: check`. Design: research/feature-matrix-pyramid.md §3/§5.

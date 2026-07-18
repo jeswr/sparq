@@ -37,6 +37,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 ASSEMBLER = REPO_ROOT / "scripts" / "assemble-feature-matrix.py"
 GOLDEN = Path(__file__).resolve().parent / "feature-matrix-legnames.golden.txt"
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "feature-matrix.yml"
+# [FABLE-5] PR #3511 review finding 1: the trusted reporter now lives in its own
+# default-branch-owned workflow_run workflow (never PR-head-controlled code).
+REPORT_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "feature-matrix-report.yml"
 FRAGMENT_DIR = REPO_ROOT / ".github" / "feature-matrix.d"
 
 # The exact exclusion rule ci-summary.yml applies (\b(advisory|informational)\b,
@@ -762,14 +765,15 @@ class TestWeightFieldValidation(unittest.TestCase):
 
 class TestGroupedWorkflowWiring(unittest.TestCase):
     """Pins the grouped-runner wiring in feature-matrix.yml ACROSS THE TRUSTED
-    BOUNDARY (PR #3511 review, critical finding): the matrix is assembled with
+    BOUNDARY (PR #3511 review, CRITICAL finding 1): the matrix is assembled with
     --grouped; the UNPRIVILEGED group job (contents: read only, no persisted
     credentials, NO token in its environment — it executes PR-controlled cargo
-    build scripts/proc macros) runs scripts/run-feature-matrix-group.py and
-    uploads the per-leg results as an artifact; the separate TRUSTED
-    `report-legs` job (checks: write, executes no PR build code) downloads the
-    artifacts, regenerates the assembled leg set as ground truth, and posts the
-    gate-critical per-leg check-runs via --report."""
+    build scripts/proc macros) runs scripts/run-feature-matrix-group.py and uploads
+    the per-leg results as an artifact. The reporter is NOT a job in this
+    PR-triggered workflow — it lives in the separate default-branch-owned
+    feature-matrix-report.yml (TestReportWorkflowTrustBoundary). CRUCIALLY: NO job in
+    feature-matrix.yml may hold checks: write (a PR-head-checked-out job that holds it
+    and runs the matrix scripts is the pwn-requests hole this PR closes)."""
 
     @classmethod
     def setUpClass(cls):
@@ -778,7 +782,7 @@ class TestGroupedWorkflowWiring(unittest.TestCase):
         cls.text = WORKFLOW.read_text(encoding="utf-8")
         cls.wf = yaml.safe_load(cls.text)
         cls.job = cls.wf["jobs"]["opt-in-features"]
-        cls.report = cls.wf["jobs"]["report-legs"]
+        cls.setup = cls.wf["jobs"]["setup"]
 
     def test_assemble_step_uses_grouped_mode(self):
         self.assertIn("assemble-feature-matrix.py --grouped", self.text)
@@ -817,7 +821,20 @@ class TestGroupedWorkflowWiring(unittest.TestCase):
         for key in ("GROUP_LEGS", "GROUP_NAME", "FMG_RESULTS"):
             self.assertIn(key, env, f"group runner step must set {key}")
 
-    def test_no_cargo_running_job_holds_checks_write(self):
+    def test_NO_job_in_the_pr_workflow_holds_checks_write(self):
+        """THE finding-1 invariant: this workflow is PR/merge_group-triggered, so
+        every job runs from the (possibly PR-head) merge ref. NONE may hold
+        checks: write — the reporter (the only checks: write holder) moved to the
+        default-branch-owned feature-matrix-report.yml so a PR cannot edit a script
+        it runs to forge check-runs."""
+        for job_id, job in self.wf["jobs"].items():
+            self.assertNotEqual(
+                (job.get("permissions") or {}).get("checks"), "write",
+                f"job {job_id!r} holds checks: write in the PR-triggered "
+                "feature-matrix.yml — that is the pwn-requests hole PR #3511 closes; "
+                "the reporter must live in feature-matrix-report.yml (workflow_run)")
+
+    def test_no_cargo_running_job_holds_checks_write_or_token(self):
         """Workflow-wide sweep: any job that executes cargo (i.e. PR-controlled
         build-time code) must never hold checks: write nor export a token."""
         for job_id, job in self.wf["jobs"].items():
@@ -845,49 +862,31 @@ class TestGroupedWorkflowWiring(unittest.TestCase):
                       "a group with FAILED legs must still ship its results so the "
                       "reporter posts the red per-leg check-runs")
 
-    # ---- the trusted reporter side -----------------------------------------------
-    def test_report_job_holds_checks_write_and_runs_no_cargo(self):
-        self.assertEqual((self.report.get("permissions") or {}).get("checks"),
-                         "write", "the reporter is the ONE checks: write holder")
-        runs = " ".join(str(s.get("run", "") or "") for s in self.report["steps"])
-        self.assertNotIn("cargo", runs,
-                         "the trusted reporter must execute no PR build code")
-        self.assertIn("run-feature-matrix-group.py --report", runs)
-        self.assertIn("assemble-feature-matrix.py", runs,
-                      "the reporter must regenerate the assembled leg set as its "
-                      "ground truth (leg names are never taken from the artifact "
-                      "as free text)")
-
-    def test_report_job_downloads_the_results_artifacts(self):
-        downloads = [s for s in self.report["steps"]
-                     if "actions/download-artifact" in str(s.get("uses", ""))]
-        self.assertEqual(len(downloads), 1)
-        self.assertEqual(downloads[0]["with"]["pattern"], "feature-matrix-results-*")
-
-    def test_report_job_runs_even_when_groups_fail(self):
-        cond = str(self.report.get("if", ""))
-        self.assertIn("!cancelled()", cond,
-                      "the reporter must run when a group job FAILED (red legs "
-                      "still need their check-runs)")
-        self.assertIn("needs.setup.outputs.legs != '0'", cond)
-        self.assertIn("needs.setup.result == 'success'", cond)
-
-    def test_report_job_env(self):
-        env = {}
-        for s in self.report["steps"]:
-            env.update(s.get("env", {}) or {})
-        for key in ("FMG_RESULTS_DIR", "FMG_VALID_LEGS_FILE", "REPO", "HEAD_SHA",
-                    "GH_TOKEN", "GROUP_JOBS_RESULT"):
-            self.assertIn(key, env, f"reporter step must set {key}")
+    # ---- the setup job feeds the trusted reporter its ground truth ---------------
+    def test_setup_uploads_selected_matrix_and_metadata(self):
+        """Finding 2: the reporter's completeness ground truth is the run's OWN
+        selected leg set (a default-branch re-assemble would not know a leg the PR
+        adds). Finding 1: the metadata artifact carries the head SHA the reporter
+        validates against the server-supplied workflow_run.head_sha. The setup job
+        runs PR-controlled assembler code, so it must hold NO checks: write / token
+        — the artifact is DATA the trusted reporter validates."""
+        uploads = [s for s in self.setup["steps"]
+                   if "actions/upload-artifact" in str(s.get("uses", ""))]
+        names = {str((s.get("with") or {}).get("name", "")) for s in uploads}
+        self.assertIn("feature-matrix-selected", names,
+                      "setup must upload the selected-matrix artifact")
+        self.assertIn("feature-matrix-metadata", names,
+                      "setup must upload the head-SHA metadata artifact")
+        self.assertNotEqual((self.setup.get("permissions") or {}).get("checks"),
+                            "write", "setup runs PR-controlled assembler code")
 
     def test_job_names_are_not_advisory(self):
-        for job in (self.job, self.report):
+        for job in (self.job, self.setup):
             self.assertNotRegex(str(job.get("name", "")), ADVISORY_RE,
-                                "both sides of the split must GATE — a red "
-                                "reporter is the fail-closed enforcement")
+                                "the group + setup jobs must GATE")
 
-    # ---- PR #3511 review finding 2: the runner script triggers its own gate ------
-    def test_rust_path_filter_covers_the_matrix_scripts(self):
+    # ---- PR #3511 review finding 4: the test path triggers the setup self-test ---
+    def test_rust_path_filter_covers_the_matrix_scripts_and_tests(self):
         import yaml  # noqa: PLC0415
 
         steps = self.wf["jobs"]["changes"]["steps"]
@@ -898,6 +897,8 @@ class TestGroupedWorkflowWiring(unittest.TestCase):
         for path in (
             "scripts/assemble-feature-matrix.py",
             "scripts/run-feature-matrix-group.py",
+            # finding 4: a test-only weakening must still run the setup self-test.
+            "scripts/tests/test_feature_matrix_assemble.py",
             ".github/feature-matrix.d/**",
             ".github/workflows/feature-matrix.yml",
         ):
@@ -905,7 +906,80 @@ class TestGroupedWorkflowWiring(unittest.TestCase):
                 path, rust,
                 f"the rust path filter must include {path!r} — a PR changing only "
                 "it must still run setup (self-test), the grouped execution and "
-                "the reporter (PR #3511 review finding 2)")
+                "the reporter (PR #3511 review findings 2 + 4)")
+
+
+class TestReportWorkflowTrustBoundary(unittest.TestCase):
+    """Pins the DEFAULT-BRANCH-owned reporter workflow (PR #3511 review finding 1):
+    feature-matrix-report.yml is triggered by workflow_run on feature-matrix, so
+    GitHub always runs its (and the reporter scripts') default-branch copy — a PR
+    cannot edit them to forge check-runs. It holds checks: write, runs no cargo,
+    downloads the triggering run's artifacts, validates the head SHA against the
+    server-supplied workflow_run.head_sha, and reports via --report."""
+
+    @classmethod
+    def setUpClass(cls):
+        import yaml  # noqa: PLC0415
+
+        cls.text = REPORT_WORKFLOW.read_text(encoding="utf-8")
+        cls.wf = yaml.safe_load(cls.text)
+        # yaml parses the bare `on:` key as boolean True — handle both spellings.
+        cls.on = cls.wf.get("on", cls.wf.get(True))
+        cls.job = cls.wf["jobs"]["report"]
+
+    def test_triggered_by_workflow_run_on_feature_matrix(self):
+        wr = self.on["workflow_run"]
+        self.assertEqual(wr["workflows"], ["feature-matrix"],
+                         "must fire only on the feature-matrix workflow's completion")
+        self.assertIn("completed", wr["types"])
+
+    def test_no_pull_request_trigger(self):
+        # A pull_request trigger would take the workflow definition from the PR head
+        # — exactly the trust hole workflow_run avoids.
+        self.assertNotIn("pull_request", self.on,
+                         "the reporter must NOT be pull_request-triggered")
+
+    def test_reporter_holds_checks_write_and_runs_no_cargo(self):
+        self.assertEqual((self.job.get("permissions") or {}).get("checks"), "write",
+                         "the reporter is the sole checks: write holder")
+        runs = " ".join(str(s.get("run", "") or "") for s in self.job["steps"])
+        self.assertNotIn("cargo", runs,
+                         "the trusted reporter must execute no PR build code")
+        self.assertIn("run-feature-matrix-group.py --report", runs)
+
+    def test_reporter_downloads_by_run_id(self):
+        downloads = [s for s in self.job["steps"]
+                     if "actions/download-artifact" in str(s.get("uses", ""))]
+        self.assertTrue(downloads, "the reporter must download the run's artifacts")
+        patterns = {str((s.get("with") or {}).get("pattern", "")) for s in downloads}
+        self.assertIn("feature-matrix-results-*", patterns)
+        for s in downloads:
+            with_ = s.get("with") or {}
+            self.assertIn("run-id", with_,
+                          "download must target the TRIGGERING run by run-id")
+            self.assertIn("github-token", with_)
+
+    def test_reporter_validates_head_sha_against_server_value(self):
+        # The head SHA is attacker-influenced (from an artifact); it must be checked
+        # against github.event.workflow_run.head_sha (server-supplied).
+        self.assertIn("workflow_run.head_sha", self.text,
+                      "the reporter must compare the artifact head SHA against the "
+                      "server-supplied workflow_run.head_sha (finding 1)")
+        runs = " ".join(str(s.get("run", "") or "") for s in self.job["steps"])
+        self.assertIn("TRIGGER_HEAD_SHA", runs,
+                      "the validated head SHA must flow through env, not string "
+                      "interpolation")
+
+    def test_reporter_sets_fork_pr_from_server_event_fields(self):
+        # Finding 3: fork tolerance is event-gated, from server fields.
+        self.assertIn("workflow_run.event", self.text)
+        self.assertIn("workflow_run.head_repository.full_name", self.text)
+        runs = " ".join(str(s.get("run", "") or "") for s in self.job["steps"])
+        self.assertIn("FMG_FORK_PR", runs)
+
+    def test_reporter_job_name_gates(self):
+        self.assertNotRegex(str(self.job.get("name", "")), ADVISORY_RE,
+                            "the reporter's summary check must GATE")
 
 
 class TestGroupRunner(unittest.TestCase):
@@ -1032,17 +1106,28 @@ class TestGroupReporter(unittest.TestCase):
     RUNNER = REPO_ROOT / "scripts" / "run-feature-matrix-group.py"
     SCHEMA = "feature-matrix-group-results/v1"
     FORK_DENIAL = "gh: Resource not accessible by integration (HTTP 403)"
+    SUMMARY_NAME = "feature-matrix report"
 
     VALID = {"include": [
         {"name": "alpha (f1)", "crate": "alpha", "features": "f1", "test": True},
         {"name": "beta (f2)", "crate": "beta", "features": "f2", "test": False},
     ]}
 
+    @classmethod
+    def _leg_calls(cls, gh_calls):
+        """The per-leg `opt-in <name>` POSTs only (excludes the head-SHA summary)."""
+        return [c for c in gh_calls if c["name"] != cls.SUMMARY_NAME]
+
+    @classmethod
+    def _summary_calls(cls, gh_calls):
+        return [c for c in gh_calls if c["name"] == cls.SUMMARY_NAME]
+
     def _result_file(self, entries, group="g01 alpha", schema=None):
         return {"schema": schema or self.SCHEMA, "group": group, "results": entries}
 
     def _run_report(self, files, gh_rc="0", gh_stderr="", valid=None,
-                    group_jobs_result="failure", raw_files=None, drop_env=()):
+                    group_jobs_result="failure", raw_files=None, drop_env=(),
+                    fork_pr="false"):
         import subprocess  # noqa: PLC0415
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1083,6 +1168,7 @@ class TestGroupReporter(unittest.TestCase):
                 "DETAILS_URL": "https://example.invalid/run/1",
                 "GROUP_JOBS_RESULT": group_jobs_result,
                 "FMG_RETRY_SLEEP": "0",
+                "FMG_FORK_PR": fork_pr,
             }
             for key in drop_env:
                 env.pop(key, None)
@@ -1101,26 +1187,35 @@ class TestGroupReporter(unittest.TestCase):
             return proc, gh_calls
 
     def test_valid_results_post_terminal_check_runs(self):
+        # The two-leg VALID set is COMPLETE here (both legs observed), so the
+        # completeness check passes and the reporter greens.
         proc, gh_calls = self._run_report([
             self._result_file([{"name": "alpha (f1)", "failed_step": "clippy"}]),
             self._result_file([{"name": "beta (f2)", "failed_step": None}],
                               group="g02 beta"),
         ], group_jobs_result="success")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertEqual([c["name"] for c in gh_calls],
+        legs = self._leg_calls(gh_calls)
+        self.assertEqual([c["name"] for c in legs],
                          ["opt-in alpha (f1)", "opt-in beta (f2)"],
                          "every leg must get its byte-identical `opt-in <name>` run")
-        self.assertEqual([c["conclusion"] for c in gh_calls],
+        self.assertEqual([c["conclusion"] for c in legs],
                          ["failure", "success"])
         for c in gh_calls:
             self.assertEqual(c["status"], "completed",
                              "check-runs must be TERMINAL (a pending one could "
                              "hold the polling ci-summary gate)")
             self.assertEqual(c["head_sha"], "deadbeef")
+        for c in legs:
             self.assertTrue(c["name"].startswith("opt-in "),
                             "the reporter constructs the opt-in prefix itself")
-        # Summary metadata comes from the ASSEMBLED set, not the artifact.
-        self.assertIn("-p alpha --features f1", gh_calls[0]["output"]["summary"])
+        # Summary metadata comes from the SELECTED set, not the artifact.
+        self.assertIn("-p alpha --features f1", legs[0]["output"]["summary"])
+        # The head-SHA summary check-run gates the reporter's own verdict (finding 1).
+        summary = self._summary_calls(gh_calls)
+        self.assertEqual(len(summary), 1, "exactly one head-SHA summary check")
+        self.assertEqual(summary[0]["conclusion"], "success")
+        self.assertEqual(summary[0]["head_sha"], "deadbeef")
 
     def test_unassembled_leg_name_is_refused_and_nothing_posts(self):
         # THE forgery test: an artifact naming a non-assembled leg — e.g. trying
@@ -1131,7 +1226,13 @@ class TestGroupReporter(unittest.TestCase):
                 self._result_file([{"name": forged, "failed_step": None}]),
             ])
             self.assertEqual(proc.returncode, 1, f"forged name {forged!r} must fail")
-            self.assertEqual(gh_calls, [], "no POST may happen on a forged artifact")
+            self.assertEqual(self._leg_calls(gh_calls), [],
+                             "no per-leg POST may happen on a forged artifact")
+            # A forged name is a superset/mismatch — the reporter constructs NO
+            # `opt-in <forged>` context; only a failing summary check may appear.
+            for c in gh_calls:
+                self.assertEqual(c["name"], self.SUMMARY_NAME)
+                self.assertEqual(c["conclusion"], "failure")
 
     def test_malformed_artifacts_fail_closed_without_posting(self):
         cases = [
@@ -1160,7 +1261,8 @@ class TestGroupReporter(unittest.TestCase):
             proc, gh_calls = self._run_report(case.get("files", []),
                                               raw_files=case.get("raw_files"))
             self.assertEqual(proc.returncode, 1, f"case {case!r} must fail closed")
-            self.assertEqual(gh_calls, [], f"case {case!r} must not POST anything")
+            self.assertEqual(self._leg_calls(gh_calls), [],
+                             f"case {case!r} must not POST any per-leg check-run")
 
     def test_duplicate_leg_across_artifacts_is_refused(self):
         # Duplicate sibling check-runs are the latest-run-confusion attack the
@@ -1171,29 +1273,75 @@ class TestGroupReporter(unittest.TestCase):
                               group="g02 alpha"),
         ])
         self.assertEqual(proc.returncode, 1)
-        self.assertEqual(gh_calls, [])
+        self.assertEqual(self._leg_calls(gh_calls), [])
 
-    def test_fork_token_denial_degrades_to_warning(self):
-        # The ONE expected, tolerable API failure: a fork PR's read-only token.
+    # A single-leg valid set so completeness (finding 2) is satisfied and these
+    # tests isolate the POST-failure semantics (finding 3).
+    VALID_ONE = {"include": [
+        {"name": "alpha (f1)", "crate": "alpha", "features": "f1", "test": True},
+    ]}
+
+    def test_fork_token_denial_degrades_to_warning_ONLY_when_fork_pr(self):
+        # Finding 3 (EVENT-GATED): the fork-PR read-only-token denial degrades to a
+        # warning ONLY when FMG_FORK_PR=true (server-derived). The group jobs' own
+        # conclusions remain the gating signal.
         proc, gh_calls = self._run_report(
             [self._result_file([{"name": "alpha (f1)", "failed_step": None}])],
-            gh_rc="1", gh_stderr=self.FORK_DENIAL, group_jobs_result="success")
+            gh_rc="1", gh_stderr=self.FORK_DENIAL, group_jobs_result="success",
+            valid=self.VALID_ONE, fork_pr="true")
         self.assertEqual(proc.returncode, 0,
-                         "fork-token denial must not fail the reporter — the "
-                         "group jobs' own conclusions remain the gating signal")
+                         "on a FORK PR, a read-only-token denial must not fail the "
+                         "reporter — the group jobs' own conclusions gate")
         self.assertIn("::warning", proc.stdout)
-        self.assertEqual(len(gh_calls), 1, "deterministic denial is not retried")
+        # per-leg denial + summary denial, each deterministic (not retried).
+        self.assertEqual(len(self._leg_calls(gh_calls)), 1,
+                         "deterministic denial is not retried")
+
+    def test_fork_denial_string_on_a_non_fork_run_fails_closed(self):
+        # Finding 3: the IDENTICAL "Resource not accessible by integration" error on
+        # a push / merge_group / same-repo PR (FMG_FORK_PR=false) is a REAL auth
+        # regression and must FAIL CLOSED — the old event-blind logic wrongly
+        # tolerated it.
+        proc, gh_calls = self._run_report(
+            [self._result_file([{"name": "alpha (f1)", "failed_step": None}])],
+            gh_rc="1", gh_stderr=self.FORK_DENIAL, group_jobs_result="success",
+            valid=self.VALID_ONE, fork_pr="false")
+        self.assertEqual(proc.returncode, 1,
+                         "the fork-denial string on a NON-fork run must fail closed "
+                         "(a real auth regression, finding 3)")
+        self.assertIn("::error", proc.stderr)
 
     def test_unexpected_api_failure_fails_closed_after_retries(self):
         # Auth regression / outage / rate limit / malformed request => the
         # reporter job REDs (finding 3) — never a silent warning.
         proc, gh_calls = self._run_report(
             [self._result_file([{"name": "alpha (f1)", "failed_step": None}])],
-            gh_rc="1", gh_stderr="HTTP 502 Bad Gateway", group_jobs_result="success")
+            gh_rc="1", gh_stderr="HTTP 502 Bad Gateway", group_jobs_result="success",
+            valid=self.VALID_ONE)
         self.assertEqual(proc.returncode, 1,
                          "an unexpected Checks API failure must fail the reporter")
-        self.assertEqual(len(gh_calls), 3, "bounded retry before failing closed")
+        # The per-leg POST retries 3x (bounded) before failing closed.
+        self.assertEqual(len(self._leg_calls(gh_calls)), 3,
+                         "bounded retry before failing closed")
         self.assertIn("::error", proc.stderr)
+
+    def test_incomplete_results_fail_closed(self):
+        # Finding 2: the observed leg set must EQUAL the selected set exactly. Here
+        # the selected set has alpha + beta but only alpha is reported (a malicious
+        # group job could omit a failed leg while exiting 0) — the reporter must
+        # fail closed with a red summary check and post no phantom for the missing.
+        proc, gh_calls = self._run_report(
+            [self._result_file([{"name": "alpha (f1)", "failed_step": None}])],
+            group_jobs_result="success")
+        self.assertEqual(proc.returncode, 1,
+                         "a missing selected leg is a completeness violation")
+        summary = self._summary_calls(gh_calls)
+        self.assertEqual(len(summary), 1)
+        self.assertEqual(summary[0]["conclusion"], "failure")
+        self.assertIn("completeness", summary[0]["output"]["summary"].lower())
+        # The honest observed leg (alpha) is still posted for attribution.
+        self.assertEqual([c["name"] for c in self._leg_calls(gh_calls)],
+                         ["opt-in alpha (f1)"])
 
     def test_zero_artifacts_with_successful_groups_is_an_inconsistency(self):
         proc, _ = self._run_report([], group_jobs_result="success")
@@ -1216,20 +1364,24 @@ class TestGroupReporter(unittest.TestCase):
     def test_real_assembled_legs_pass_reporter_validation(self):
         """End-to-end coherence: EXECUTION-mode output for real assembled legs
         must validate on the REPORT side against the real assembler output —
-        pins the schema the two halves share across the trust boundary."""
+        pins the schema the two halves share across the trust boundary. Reports
+        the FULL leg set so completeness (finding 2) is satisfied."""
         mod = _load_assembler()
         legs = mod.load_legs()
-        first = {"name": legs[0]["name"], "failed_step": None}
+        entries = [{"name": leg["name"], "failed_step": None} for leg in legs]
         valid = {"include": [
             {"name": leg["name"], "crate": leg["crate"],
              "features": leg["features"], "test": leg["test"]}
             for leg in legs
         ]}
         proc, gh_calls = self._run_report(
-            [self._result_file([first], group="g01 real")],
+            [self._result_file(entries, group="g01 real")],
             valid=valid, group_jobs_result="success")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertEqual(gh_calls[0]["name"], f"opt-in {legs[0]['name']}")
+        leg_calls = self._leg_calls(gh_calls)
+        self.assertEqual({c["name"] for c in leg_calls},
+                         {f"opt-in {leg['name']}" for leg in legs})
+        self.assertEqual(len(self._summary_calls(gh_calls)), 1)
 
 
 if __name__ == "__main__":

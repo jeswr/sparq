@@ -10,27 +10,54 @@
 # legs recompile only the crate itself, never the dependency stack.
 #
 # TRUSTED-BOUNDARY SPLIT (PR #3511 review — do NOT recombine the two modes into one
-# privileged job). The group job EXECUTES PR-controlled code: cargo build scripts,
-# proc macros, tests and clippy lints all run arbitrary code from the PR head (and
-# from the entire third-party dependency graph). A `checks: write` token in that
-# job's environment lets malicious build-time code forge arbitrary check runs —
-# including duplicate gate-critical sibling names, or an attempt at the sole
-# required `ci-summary / gate` context. Therefore:
+# privileged job, and do NOT run REPORT mode from a PR-checked-out workflow). The
+# group job EXECUTES PR-controlled code: cargo build scripts, proc macros, tests and
+# clippy lints all run arbitrary code from the PR head (and from the entire
+# third-party dependency graph). A `checks: write` token in that job's environment
+# lets malicious build-time code forge arbitrary check runs — including duplicate
+# gate-critical sibling names, or an attempt at the sole required `ci-summary / gate`
+# context. AND a `checks: write` job that CHECKS OUT the PR head and runs THIS
+# script (or the assembler) is just as dangerous: the PR could edit the script to
+# forge check runs (the pwn-requests pattern). Therefore:
 #   * EXECUTION MODE (default; runs in the UNPRIVILEGED group job — contents: read,
 #     persist-credentials: false, NO GH_TOKEN): runs the legs and writes the per-leg
 #     outcomes to a results JSON file (FMG_RESULTS), which the workflow uploads as
 #     an artifact. This mode performs NO GitHub API call and needs NO token.
-#   * REPORT MODE (--report; runs in the separate `report-legs` job, which executes
-#     NO PR-controlled build code and holds `checks: write`): downloads the group
-#     artifacts, validates them HOSTILE-INPUT-STYLE (the artifact crossed the trust
-#     boundary — every field is attacker-controlled by construction), and posts the
-#     per-leg check-runs. Leg names must resolve against the assembled leg set
-#     (FMG_VALID_LEGS_FILE, produced in the reporter job by running the committed
-#     assembler) — never PR-supplied free text — and the emitted check-run name is
-#     built HERE as `opt-in <name>`, so no artifact can ever name a non-`opt-in`
-#     context. crate/features in the check-run summary are taken from the assembled
-#     set, not the artifact. Any schema violation FAILS the reporter job (which is
-#     itself a required, non-advisory check).
+#   * REPORT MODE (--report; runs in the SEPARATE default-branch-owned reporter
+#     workflow feature-matrix-report.yml, triggered by `workflow_run` on
+#     feature-matrix's completion. GitHub ALWAYS executes the default-branch copy of
+#     that workflow AND of this script — never the PR head's copy — so no PR can edit
+#     the reporter to forge check runs. It executes NO PR-controlled build code and
+#     holds `checks: write`. It downloads the triggering run's artifacts (by run-id)
+#     and validates them HOSTILE-INPUT-STYLE (they crossed the trust boundary — every
+#     field is attacker-controlled by construction). The check-run NAME is built HERE
+#     as `opt-in <name>`, so no artifact can ever name a non-`opt-in` context.
+#     Leg names must resolve against the SELECTED leg set (FMG_VALID_LEGS_FILE — the
+#     setup job's selected-matrix artifact; see the COMPLETENESS note). crate/features
+#     in the check-run summary are taken from that set, not the artifact. Any schema
+#     violation FAILS the reporter job (itself a required, non-advisory check via the
+#     head-SHA summary check-run it posts).
+#
+# HEAD-SHA TRUST (PR #3511 review finding 1): the reporter posts check-runs onto the
+# commit named by HEAD_SHA. On a fork PR the head SHA + event metadata read from an
+# artifact are attacker-influenced, so the reporter WORKFLOW validates HEAD_SHA byte-
+# for-byte against github.event.workflow_run.head_sha (server-supplied, unforgeable)
+# BEFORE invoking this script, and passes only the validated value through env. This
+# script never interpolates any artifact string into a shell (env indirection only).
+#
+# COMPLETENESS (PR #3511 review finding 2): FMG_VALID_LEGS_FILE is the setup job's
+# SELECTED-matrix artifact (the exact legs this run should have produced), NOT a
+# re-run of the default-branch assembler — a PR that adds a new opt-in leg would be
+# unknown to the default-branch assembler, so the ground truth must be the run's own
+# selected set. That artifact IS PR-influenced (the setup job runs PR-controlled
+# assembler code), and that is ACCEPTABLE for the completeness comparison: forging a
+# SMALLER selected set only DROPS required per-leg checks, and the UNFORGEABLE coarse
+# gate is the group jobs' OWN conclusions (on the PR head, discovered by ci-summary),
+# which a dropped/failed leg still reds; forging a LARGER set only manufactures extra
+# legs the group jobs never ran, which the exact-match check below flags as MISSING.
+# The reporter therefore FAILS CLOSED (posts a failing summary check-run, exits
+# nonzero) unless the observed leg-name set matches the selected set EXACTLY — no
+# subset, no superset, no duplicates.
 #
 # NAME CONTRACT (do NOT relax — the same contract the assembler's header pins): the
 # check-run NAME for every leg is `opt-in <name>`, BYTE-IDENTICAL to the name the
@@ -50,14 +77,21 @@
 # <name>` check-run (posted by the reporter) for precise attribution.
 #
 # REPORTER FAILURE SEMANTICS — FAIL CLOSED (PR #3511 review finding 3): a Checks API
-# POST failure is only tolerable when it is the EXPECTED fork-PR degradation (a
-# read-only GITHUB_TOKEN cannot create check-runs; GitHub answers "Resource not
-# accessible by integration"). That case degrades to a ::warning and the group jobs'
-# own conclusions remain the (coarser) gating signal — requiredness flows through
-# `ci-summary / gate`, never through any individual leg name (sq-fmx4u.4). EVERY
-# OTHER failure (auth regression, outage, rate limit, malformed request) gets a
-# bounded retry and then FAILS the reporter job: the per-leg check contract this PR
-# claims to preserve must never silently evaporate into warnings.
+# POST failure ("Resource not accessible by integration") is only tolerable when it
+# is the EXPECTED fork-PR degradation. That case is now EVENT-GATED, not error-string-
+# gated: the reporter degrades to a ::warning ONLY when FMG_FORK_PR=true, which the
+# reporter workflow sets from SERVER-SUPPLIED fields (workflow_run.event ==
+# 'pull_request' AND workflow_run.head_repository.full_name != github.repository).
+# On a push / merge_group / SAME-REPO PR run the identical error is a HARD failure —
+# there it signals a real auth/permission regression, never a benign fork denial. In
+# the fork case the group jobs' own conclusions remain the (coarser) gating signal —
+# requiredness flows through `ci-summary / gate`, never through any individual leg
+# name (sq-fmx4u.4). EVERY OTHER failure (auth regression, outage, rate limit,
+# malformed request) gets a bounded retry and then FAILS the reporter job: the
+# per-leg check contract this PR claims to preserve must never silently evaporate
+# into warnings. With the workflow_run reporter always holding a writable token,
+# the fork-denial path is a rare edge (a fork PR whose head SHA the base repo cannot
+# annotate); it is retained defensively but no longer masks base-repo auth failures.
 #
 # Env (EXECUTION mode):
 #   GROUP_LEGS   (required) JSON array of {name, crate, features, test}
@@ -68,11 +102,19 @@
 #
 # Env (REPORT mode, --report):
 #   FMG_RESULTS_DIR      (required) dir scanned recursively for the group *.json files
-#   FMG_VALID_LEGS_FILE  (required) assembler default-output JSON ({"include": [...]})
+#   FMG_VALID_LEGS_FILE  (required) the SELECTED-matrix artifact ({"include": [...]}),
+#                        the exact leg set this run should have produced (setup job)
 #   REPO / HEAD_SHA      (required) owner/repo + commit for the Checks API POSTs
+#                        (HEAD_SHA is validated against workflow_run.head_sha in the
+#                        reporter workflow BEFORE this script runs)
+#   FMG_FORK_PR          (optional) 'true' iff this is a fork-PR workflow_run
+#                        (event==pull_request AND head repo != base repo). ONLY then
+#                        does a "Resource not accessible by integration" POST failure
+#                        degrade to a warning; everywhere else it FAILS CLOSED.
 #   DETAILS_URL          (optional) workflow-run URL embedded in each check-run
-#   GROUP_JOBS_RESULT    (optional) needs.opt-in-features.result — 'success' with zero
-#                        result files is an inconsistency and fails the reporter
+#   GROUP_JOBS_RESULT    (optional) the triggering opt-in-features result — 'success'
+#                        with zero result files is an inconsistency and fails the
+#                        reporter
 #   FMG_GH               (tests only) stub binary for gh
 #   FMG_RETRY_SLEEP      (tests only) seconds between unexpected-failure retries
 
@@ -94,9 +136,16 @@ VALID_STEPS = ("build", "test", "clippy")
 # embedded in check-run summary text. The assembler emits `gNN <crate>`.
 GROUP_NAME_RE = re.compile(r"^[A-Za-z0-9 ._()-]{1,64}$")
 POST_ATTEMPTS = 3
-# The ONE expected, tolerable Checks API failure: a fork PR's read-only
-# GITHUB_TOKEN (GitHub's fixed wording for an integration-token permission miss).
+# GitHub's fixed wording for an integration-token permission miss. Tolerated ONLY
+# when the reporter workflow proved this is a fork-PR workflow_run (FMG_FORK_PR);
+# everywhere else the same error is a real auth regression and fails closed
+# (PR #3511 review finding 3 — event-gated, not error-string-gated).
 FORK_DENIAL_MARKER = "Resource not accessible by integration"
+# The head-SHA summary check-run the reporter posts so ci-summary can DISCOVER the
+# reporter's own verdict on the PR head (the reporter runs on a workflow_run event,
+# off the head commit, so without this its pass/fail would be invisible to the gate).
+# NAME is free of the words advisory/informational => it GATES.
+REPORT_SUMMARY_NAME = "feature-matrix report"
 
 
 def run(cmd):
@@ -309,10 +358,10 @@ def validate_results_file(path, valid_legs, seen_names):
     return out
 
 
-def post_check_run(repo, head_sha, name, group, leg, failed_step, details_url):
+def post_check_run(repo, head_sha, name, group, leg, failed_step, details_url, fork_pr):
     """POST one terminal `opt-in <name>` check-run. Returns 'ok', 'fork-denied'
-    (the expected read-only-token degradation) or 'failed' (unexpected — the
-    caller fails the reporter job: fail CLOSED)."""
+    (the EXPECTED read-only-token degradation — accepted ONLY when fork_pr is True)
+    or 'failed' (unexpected — the caller fails the reporter job: fail CLOSED)."""
     check_name = f"opt-in {name}"
     if failed_step is None:
         conclusion, title = "success", "leg passed"
@@ -349,9 +398,12 @@ def post_check_run(repo, head_sha, name, group, leg, failed_step, details_url):
         if proc.returncode == 0:
             return "ok"
         err = proc.stderr.decode("utf-8", "replace").strip()
-        if FORK_DENIAL_MARKER in err:
-            # Deterministic, EXPECTED: a fork PR's read-only token. The group
-            # job's own conclusion remains the (coarser) gating signal.
+        if FORK_DENIAL_MARKER in err and fork_pr:
+            # EVENT-GATED (finding 3): tolerated ONLY on a fork-PR workflow_run,
+            # where the base repo genuinely may not annotate the fork's head. The
+            # group job's own conclusion remains the (coarser) gating signal. On a
+            # push / merge_group / same-repo PR the SAME error falls through to the
+            # fail-closed path below (a real auth regression, never a benign denial).
             print(
                 f"::warning::could not create check-run {check_name!r}: read-only "
                 "token (fork PR) — the group job's own conclusion remains the "
@@ -367,13 +419,77 @@ def post_check_run(repo, head_sha, name, group, leg, failed_step, details_url):
                 flush=True,
             )
             time.sleep(retry_sleep)
+    reason = (
+        "This is not a fork-PR workflow_run (FMG_FORK_PR!=true), so a permission "
+        "denial here is a real auth regression"
+        if (FORK_DENIAL_MARKER in err and not fork_pr)
+        else "This is not the fork-PR read-only degradation"
+    )
     _report_error(
         f"check-run POST for {check_name!r} failed after {POST_ATTEMPTS} attempts "
         f"with an UNEXPECTED error ({err.splitlines()[-1] if err else 'unknown error'}). "
-        "This is not the fork-PR read-only degradation — failing CLOSED so the "
-        "preserved per-leg check contract never silently evaporates."
+        f"{reason} — failing CLOSED so the preserved per-leg check contract never "
+        "silently evaporates."
     )
     return "failed"
+
+
+def post_summary_check(repo, head_sha, conclusion, title, summary, details_url, fork_pr):
+    """POST the head-SHA `feature-matrix report` summary check-run so ci-summary can
+    DISCOVER the reporter's verdict on the PR head (the reporter runs on a
+    workflow_run event, off the head commit). Returns 'ok' / 'fork-denied' /
+    'failed' with the same event-gated fork tolerance as post_check_run."""
+    payload = {
+        "name": REPORT_SUMMARY_NAME,
+        "head_sha": head_sha,
+        "status": "completed",
+        "conclusion": conclusion,
+        "output": {"title": title, "summary": summary},
+    }
+    if details_url:
+        payload["details_url"] = details_url
+    retry_sleep = float(os.environ.get("FMG_RETRY_SLEEP", "5"))
+    err = ""
+    for attempt in range(1, POST_ATTEMPTS + 1):
+        proc = subprocess.run(
+            [GH, "api", f"repos/{repo}/check-runs", "--method", "POST", "--input", "-"],
+            input=json.dumps(payload).encode("utf-8"),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        if proc.returncode == 0:
+            return "ok"
+        err = proc.stderr.decode("utf-8", "replace").strip()
+        if FORK_DENIAL_MARKER in err and fork_pr:
+            print(
+                f"::warning::could not create the {REPORT_SUMMARY_NAME!r} summary "
+                "check (fork PR read-only token) — the group jobs' own conclusions "
+                "remain the gating signal",
+                flush=True,
+            )
+            return "fork-denied"
+        if attempt < POST_ATTEMPTS:
+            time.sleep(retry_sleep)
+    _report_error(
+        f"summary check-run {REPORT_SUMMARY_NAME!r} POST failed after {POST_ATTEMPTS} "
+        f"attempts ({err.splitlines()[-1] if err else 'unknown error'})."
+    )
+    return "failed"
+
+
+def _emit_summary_and_return(repo, head_sha, details_url, fork_pr, ok, title, summary, rc):
+    """Post the head-SHA `feature-matrix report` summary check-run reflecting the
+    reporter's verdict, then return `rc`. A summary-POST failure is itself a
+    fail-closed condition (unless fork-denied), so it can only WORSEN rc, never
+    improve it — a red verdict never becomes green because its summary landed."""
+    conclusion = "success" if ok else "failure"
+    outcome = post_summary_check(
+        repo, head_sha, conclusion, title, summary, details_url, fork_pr
+    )
+    if outcome == "failed":
+        # Could not record the verdict on the head SHA — fail closed regardless.
+        return 1
+    return rc
 
 
 def report_main():
@@ -385,50 +501,113 @@ def report_main():
         _report_error("--report needs FMG_RESULTS_DIR, FMG_VALID_LEGS_FILE, REPO and HEAD_SHA")
         return 2
     details_url = os.environ.get("DETAILS_URL", "")
+    # EVENT-GATED fork tolerance (finding 3): the reporter workflow sets FMG_FORK_PR
+    # from server-supplied fields; only then is a permission-denied POST benign.
+    fork_pr = os.environ.get("FMG_FORK_PR", "").lower() == "true"
+    # The SELECTED leg set = the exact ground truth this run should have produced
+    # (finding 2). It is the setup job's selected-matrix artifact, NOT a default-
+    # branch re-assemble (which would not know a leg the PR adds).
     valid_legs = load_valid_legs(valid_legs_file)
     if valid_legs is None:
         return 2
     files = sorted(glob.glob(os.path.join(results_dir, "**", "*.json"), recursive=True))
     if not files:
         if os.environ.get("GROUP_JOBS_RESULT", "") == "success":
-            _report_error(
+            msg = (
                 "the group jobs report success but produced ZERO results artifacts — "
                 "an inconsistency that would silently drop every per-leg check-run"
             )
-            return 1
+            _report_error(msg)
+            return _emit_summary_and_return(
+                repo, head_sha, details_url, fork_pr, False,
+                "no results despite green groups", msg, 1)
         print(
             "::warning::no group results artifacts found (group jobs did not "
             "succeed) — nothing to report; the failed/skipped group jobs gate via "
             "ci-summary",
             flush=True,
         )
-        return 0
+        # The group jobs' own (non-success) conclusions gate; record a neutral-ish
+        # summary so the reporter's verdict is visible but non-blocking here.
+        return _emit_summary_and_return(
+            repo, head_sha, details_url, fork_pr, True,
+            "no results to report",
+            "the group jobs did not succeed, so there are no per-leg results to "
+            "post; the failed/skipped group jobs gate via ci-summary.", 0)
     seen_names = {}
     all_results = []
     for path in files:
         validated = validate_results_file(path, valid_legs, seen_names)
         if validated is None:
-            return 1
+            return _emit_summary_and_return(
+                repo, head_sha, details_url, fork_pr, False,
+                "malformed group results artifact",
+                f"a group results artifact under {results_dir} failed hostile-input "
+                "validation (schema / leg-name / duplicate). See the reporter log.", 1)
         all_results.extend(validated)
-    fork_denied = failed = 0
-    for name, group, failed_step in all_results:
-        outcome = post_check_run(
-            repo, head_sha, name, group, valid_legs[name], failed_step, details_url
+
+    # COMPLETENESS (finding 2): the observed leg-name set must equal the SELECTED
+    # set EXACTLY — no subset (a lost/hidden leg), no superset (already refused by
+    # validate_results_file, which rejects names not in valid_legs), no duplicates
+    # (already refused via seen_names). Here we catch the remaining case: a leg the
+    # selected set requires that NO artifact reported. A malicious group job that
+    # exited 0 while omitting a failed leg is caught here even though its own
+    # conclusion lied.
+    observed = {name for name, _group, _step in all_results}
+    expected = set(valid_legs.keys())
+    missing = sorted(expected - observed)
+    if missing:
+        msg = (
+            f"artifact completeness violation: {len(missing)} selected leg(s) have "
+            f"no result and were dropped from the per-leg checks: "
+            + "; ".join(f"opt-in {n}" for n in missing[:20])
+            + (" …" if len(missing) > 20 else "")
         )
-        if outcome == "fork-denied":
-            fork_denied += 1
-        elif outcome == "failed":
-            failed += 1
-    posted = len(all_results) - fork_denied - failed
+        _report_error(msg)
+        # Still post the legs we DID observe (their check-runs are honest), then
+        # fail closed on the incompleteness via the summary check.
+        _post_all(repo, head_sha, all_results, valid_legs, details_url, fork_pr)
+        return _emit_summary_and_return(
+            repo, head_sha, details_url, fork_pr, False,
+            "incomplete per-leg results", msg, 1)
+
+    fork_denied, failed, posted = _post_all(
+        repo, head_sha, all_results, valid_legs, details_url, fork_pr
+    )
     print(
         f"reporter: {posted} check-run(s) posted, {fork_denied} fork-denied, "
         f"{failed} failed, across {len(files)} group artifact(s)",
         flush=True,
     )
     if failed:
-        _report_error(f"{failed} per-leg check-run POST(s) failed unexpectedly — failing closed")
-        return 1
-    return 0
+        msg = f"{failed} per-leg check-run POST(s) failed unexpectedly — failing closed"
+        _report_error(msg)
+        return _emit_summary_and_return(
+            repo, head_sha, details_url, fork_pr, False,
+            "per-leg check-run POST failed", msg, 1)
+    return _emit_summary_and_return(
+        repo, head_sha, details_url, fork_pr, True,
+        "all per-leg checks posted",
+        f"posted {posted} per-leg `opt-in <name>` check-run(s) matching the selected "
+        f"leg set exactly ({fork_denied} fork-denied). The group jobs' own "
+        "conclusions remain the coarse gating signal.", 0)
+
+
+def _post_all(repo, head_sha, all_results, valid_legs, details_url, fork_pr):
+    """POST every observed leg's `opt-in <name>` check-run. Returns
+    (fork_denied, failed, posted)."""
+    fork_denied = failed = 0
+    for name, group, failed_step in all_results:
+        outcome = post_check_run(
+            repo, head_sha, name, group, valid_legs[name], failed_step,
+            details_url, fork_pr,
+        )
+        if outcome == "fork-denied":
+            fork_denied += 1
+        elif outcome == "failed":
+            failed += 1
+    posted = len(all_results) - fork_denied - failed
+    return fork_denied, failed, posted
 
 
 if __name__ == "__main__":

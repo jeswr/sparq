@@ -115,14 +115,12 @@ jobs:
         with:
           node-version: 22
 
-      - name: Cache cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: pages-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      # [FABLE-5] PR #3511 review finding 5: redundant second cargo cache REMOVED —
+      # the Swatinem/rust-cache above (shared-key: site-wasm) already caches
+      # ~/.cargo/registry + ~/.cargo/git + target/ across the js/pages/gui/site wasm
+      # lanes, restore-only off main. The former PR-scoped `actions/cache`
+      # (pages-wasm-…-hashFiles(Cargo.lock)) covered the same paths and only churned
+      # the shared 10 GB Actions-cache budget with a duplicate PR-scoped copy.
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked

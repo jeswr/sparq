@@ -83,14 +83,14 @@ jobs:
         with:
           node-version: 22
 
-      - name: Cache cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: js-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      # [FABLE-5] PR #3511 review finding 5: the redundant second cargo cache was
+      # REMOVED. The Swatinem/rust-cache above (shared-key: site-wasm) already caches
+      # ~/.cargo/registry + ~/.cargo/git + the workspace target/ across every js/pages/
+      # gui/site wasm lane, restore-only off main. The former `actions/cache` here
+      # covered the SAME paths under a PR-scoped key (js-wasm-…-hashFiles(Cargo.lock)),
+      # so it saved a duplicate, PR-scoped copy on every PR run — churning the shared
+      # 10 GB Actions-cache budget the economy work exists to protect. One shared
+      # dependency cache, not two, is the goal.
 
       # wasm-pack BEFORE `npm ci`: the package's `prepare` lifecycle (sq-bkag git-pin
       # build) runs on `npm ci` and needs wasm-pack on PATH to compile the wasm engine.

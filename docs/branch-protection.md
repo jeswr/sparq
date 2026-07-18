@@ -105,6 +105,43 @@ From the binding/packaging workflows (when those surfaces are exercised):
 > to the required-checks list, THAT name would now need removing — but per the "select only
 > `ci-summary / gate`" rule above, it was never added.)
 
+### Merge-queue subset — the maintainer-directed risk posture (2026-07-18)
+
+<!-- [FABLE-5] PR #3511 review finding 6: this records the DECISION so a future
+     reviewer sees the reduced merge_group check-set is deliberate, not an accident. -->
+
+The `merge_group` ref does **not** run an identical check-set to a PR. By explicit
+maintainer direction (2026-07-18) the merge queue runs only the **PR-relevant subset**
+of lanes, and — by a separate maintainer direction — **CodeQL is disabled repo-wide**.
+Heavy or independent lanes that already ran and gated on the PR head dropped their
+`merge_group` trigger because the queue re-run added wall-clock per enqueue with no new
+signal: currently `formal-verification.yml` (Kani proofs), `fuzz.yml` (corpus replay),
+and `bench.yml` (noisy timing suites; the deterministic ratchet is guarded separately).
+This is a **decision, not a defect**.
+
+Why it stays sound:
+
+- The gate polls whatever sibling check-runs actually exist on the ref and requires only
+  the single `gate` context — a lane absent from `merge_group` is *never scheduled*, so
+  it is never "expected but missing" and the gate never hangs on it.
+- Every subset lane still runs and gates on the **PR head** (and the draft→ready-for-review
+  re-run), so a real break is caught **before** admission for the code that changed.
+- The **safety net for a lane the queue skips is POST-MERGE detection**: each such lane
+  runs on `push`-to-`main`, backed by `nightly-full-sweep.yml` and the
+  `formal-alarm.yml` / selection-alarm liveness monitors. A break that only a queued
+  *combination* of PRs could produce is therefore detected on `main`, then recovered by
+  **revert / fix-forward**.
+- **There is no bisection.** `batch-merge.yml` explicitly states bisection is a v1
+  unimplemented item; the recovery mechanism is revert/fix-forward plus the age-bound
+  liveness backstop, not automated bisection of a failed batch. (Workflow comments that
+  previously called batch-merge "the bisection recovery net" were corrected in PR #3511
+  finding 6b to say post-merge detection + revert/fix-forward.)
+
+The residual risk this accepts: a defect that manifests only in a *specific queued
+combination* of PRs (not on any single PR head) reaches `main` and is caught post-merge
+rather than pre-merge. The maintainer accepted this trade against per-enqueue wall-clock
+and shared-runner contention.
+
 ## Draft-tier CI (reduced matrix on draft PR heads)
 
 <!-- [FABLE-5] Draft-tier CI design record (2026-07-17). Motivation: the autonomous

@@ -145,14 +145,12 @@ jobs:
         with:
           node-version: 22
 
-      - name: Cache cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: gui-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      # [FABLE-5] PR #3511 review finding 5: redundant second cargo cache REMOVED —
+      # the Swatinem/rust-cache above (shared-key: site-wasm) already caches
+      # ~/.cargo/registry + ~/.cargo/git + target/ across the js/pages/gui/site wasm
+      # lanes, restore-only off main. The former PR-scoped `actions/cache`
+      # (gui-wasm-…-hashFiles(Cargo.lock)) covered the same paths and only churned
+      # the shared 10 GB Actions-cache budget with a duplicate PR-scoped copy.
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
@@ -229,14 +227,12 @@ jobs:
         with:
           node-version: 22
 
-      - name: Cache cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: gui-app-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      # [FABLE-5] PR #3511 review finding 5: redundant second cargo cache REMOVED —
+      # the Swatinem/rust-cache above (shared-key: site-wasm) already caches
+      # ~/.cargo/registry + ~/.cargo/git + target/ across the js/pages/gui/site wasm
+      # lanes, restore-only off main. The former PR-scoped `actions/cache`
+      # (gui-app-wasm-…-hashFiles(Cargo.lock)) covered the same paths and only churned
+      # the shared 10 GB Actions-cache budget with a duplicate PR-scoped copy.
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
@@ -350,14 +346,12 @@ jobs:
         with:
           node-version: 22
 
-      - name: Cache cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: gui-mock-ipc-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      # [FABLE-5] PR #3511 review finding 5: redundant second cargo cache REMOVED —
+      # the Swatinem/rust-cache above (shared-key: site-wasm) already caches
+      # ~/.cargo/registry + ~/.cargo/git + target/ across the js/pages/gui/site wasm
+      # lanes, restore-only off main. The former PR-scoped `actions/cache`
+      # (gui-mock-ipc-wasm-…-hashFiles(Cargo.lock)) covered the same paths and only
+      # churned the shared 10 GB Actions-cache budget with a duplicate PR-scoped copy.
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
@@ -596,13 +590,17 @@ jobs:
         with:
           node-version: 22
 
-      - name: Cache cargo (gui e2e)
+      # [FABLE-5] PR #3511 review finding 5: the ~/.cargo/registry + ~/.cargo/git
+      # paths were DROPPED from this cache — the Swatinem/rust-cache above (shared-key:
+      # site-wasm) already caches them across the wasm lanes. Only gui/src-tauri/target
+      # is KEPT here: it is the SEPARATE Tauri-native build dir (its own
+      # gui/src-tauri/Cargo.lock, not the workspace target/ rust-cache covers), so
+      # this folds in exactly the one path rust-cache misses without the redundant
+      # PR-scoped registry/git duplicate.
+      - name: Cache cargo (gui e2e — tauri native target only)
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            gui/src-tauri/target
+          path: gui/src-tauri/target
           key: gui-e2e-${{ runner.os }}-${{ hashFiles('gui/src-tauri/Cargo.lock', 'Cargo.lock') }}
 
       - name: Install wasm-pack
@@ -739,13 +737,14 @@ jobs:
         with:
           node-version: 22
 
-      - name: Cache cargo (gui probe)
+      # [FABLE-5] PR #3511 review finding 5: ~/.cargo/registry + ~/.cargo/git DROPPED
+      # (the Swatinem/rust-cache above with shared-key: site-wasm covers them). Only
+      # the SEPARATE Tauri-native gui/src-tauri/target dir is KEPT — the one path
+      # rust-cache misses — dropping the redundant PR-scoped registry/git duplicate.
+      - name: Cache cargo (gui probe — tauri native target only)
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            gui/src-tauri/target
+          path: gui/src-tauri/target
           key: gui-e2e-probe-${{ runner.os }}-${{ hashFiles('gui/src-tauri/Cargo.lock', 'Cargo.lock') }}
 
       - name: Install wasm-pack

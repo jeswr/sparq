@@ -69,9 +69,13 @@ on:
   # REMOVED, push-to-main ADDED: the Kani proofs already ran + gated on the PR head;
   # the queue re-run added wall-clock to every enqueue without new signal. Coverage
   # now lives at: PR head (this pull_request trigger, unchanged) + push-to-main
-  # below (post-merge detection; batch-merge/bisection is the recovery net) + the
-  # nightly-full-sweep backstop (formal-alarm.yml alarms if it goes silent). The
-  # polling `ci-summary / gate` never waits on a check that was never scheduled.
+  # below (POST-MERGE DETECTION on main; a break is recovered by revert / fix-forward
+  # — batch-merge.yml's failure handling does NOT bisect, that is explicitly a v1
+  # unimplemented item) + the nightly-full-sweep backstop (formal-alarm.yml alarms if
+  # it goes silent). The polling `ci-summary / gate` never waits on a check that was
+  # never scheduled. [FABLE-5] PR #3511 review finding 6b: honesty fix — the earlier
+  # "batch-merge/bisection is the recovery net" wording implied a bisection mechanism
+  # that batch-merge.yml states it does not have.
   push:
     branches: [main]
 

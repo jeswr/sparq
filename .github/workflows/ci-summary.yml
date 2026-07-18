@@ -165,10 +165,27 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
   # [OPUS-4.8] Merge queue: GitHub runs the required check(s) on a temporary
   # `merge_group` ref before merging. ci-summary is the SINGLE required check, so it
-  # MUST run here to produce the `ci-summary / gate` check on that ref — and every
-  # sibling workflow it aggregates (ci/bench/codeql/docs-quality/supply-chain) also
-  # triggers on merge_group, so the discovery below finds the identical check-set it
-  # finds on a PR. Without this the queue would hang forever waiting for the check.
+  # MUST run here to produce the `ci-summary / gate` check on that ref. Without this
+  # the queue would hang forever waiting for the check.
+  #
+  # [FABLE-5] TIERED / SUBSET MERGE-QUEUE CHECK-SET (2026-07-18 maintainer directive —
+  # honesty fix, PR #3511 review finding 6a). The queue does NOT run an identical
+  # check-set to a PR. By explicit maintainer direction the merge_group runs only the
+  # PR-RELEVANT SUBSET: several heavy siblings dropped their `merge_group` trigger
+  # because they already ran + gated on the PR head and the queue re-run added
+  # wall-clock per enqueue with NO new signal — notably formal-verification.yml and
+  # fuzz.yml (both now PR-head + post-merge-push only), and CodeQL, which is DISABLED
+  # repo-wide by separate maintainer direction. The gate stays sound because it POLLS
+  # whatever sibling check-runs actually exist on the ref (it never hard-codes a
+  # required list): a sibling that does not trigger on merge_group is simply absent
+  # (never "expected but missing"), and a docs/orchestration-only queued batch further
+  # narrows the Rust lanes via the merge-group change-class gate (ci.yml/feature-
+  # matrix.yml `changes` jobs). The SAFETY NET for a lane the queue skips is the
+  # POST-MERGE push-to-main run of that lane (+ the nightly-full-sweep backstop and
+  # the formal-/selection-alarm liveness monitors) — detection-after-merge with
+  # revert / fix-forward, deliberately traded against per-enqueue wall-clock. This is
+  # a maintainer-directed RISK POSTURE, not an accident; see docs/branch-protection.md
+  # and each lane's header for the per-lane rationale.
   merge_group:
   push:
     branches: [main]
