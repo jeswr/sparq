@@ -138,6 +138,19 @@ else
   step "WARN: beir_text build FAILED — the sparq-text side of the comparison cannot run; the oracle-only gather still records Lucene/Anserini (a re-run action for the sparq column)"
 fi
 
+# ---- 2b. isolate THIS invocation's output (reject stale prefix-matching envelopes) ---
+# RESULTS_DIR is shared, git-ignored, and is NEVER cleared between runs, so a PRIOR
+# run's <engine>-beir-ir-<cut>-*.json would otherwise satisfy the outcome validation
+# below even when THIS gather produced nothing — a re-run whose gather died would be
+# certified canonical on stale evidence. Snapshot the pre-existing envelope paths and
+# treat them as NOT-produced-by-this-run: valid_envelope only accepts a file absent
+# from this list. Non-destructive (other axes may share the box) — we reject stale
+# paths rather than clearing the directory.
+PRE_EXISTING="$(mktemp)"
+trap 'rm -f "$PRE_EXISTING"' EXIT
+for f in "$RESULTS_DIR"/*.json; do [ -f "$f" ] && printf '%s\n' "$f"; done > "$PRE_EXISTING"
+step "pre-existing envelopes recorded as stale (rejected): $(wc -l < "$PRE_EXISTING" | tr -d ' ')"
+
 # ---- 3. the gather, per cut (recipe sq-1fz0: one shared scorer, same cut + qrels) ----
 for cut in $BEIR_CUTS; do
   step "gather-competitors.sh --run --only lucene-anserini (cut=$cut k=$BEIR_K)"
@@ -157,11 +170,40 @@ done
 # cannot build, or a cut dies is DISTINGUISHABLE from a completed canonical gather
 # — the WARN-and-continue steps above only keep the box alive to collect whatever
 # partial evidence exists; they never launder it into success.
-valid_envelope() {  # valid_envelope <prefix> → 0 iff ≥1 $RESULTS_DIR/<prefix>-*.json parses as JSON
-  local f
-  for f in "$RESULTS_DIR/$1"-*.json; do
+# valid_envelope <engine> <cut> → 0 iff THIS run produced ≥1 well-formed, correctly
+# identified envelope for <engine> on <cut>. A file that merely parses as JSON is NOT
+# enough (that let `{}` or a stale prefix-matching file certify success): it must be
+# ABSENT from the pre-run snapshot (produced by this invocation, not a prior one),
+# carry the exact engine + `beir-ir-<cut>` suite identity, and expose FINITE
+# Recall@100 / nDCG@10 deficit values under result.deficits_milli — the scored
+# evidence the §4 comparison actually needs. This is what makes GATHER_DONE certify
+# the claimed measurements rather than any JSON that happens to sit in RESULTS_DIR.
+valid_envelope() {
+  local engine="$1" cut="$2" f
+  for f in "$RESULTS_DIR/${engine}-beir-ir-${cut}"-*.json; do
     [ -f "$f" ] || continue
-    python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$f" 2>/dev/null && return 0
+    grep -qxF "$f" "$PRE_EXISTING" 2>/dev/null && continue   # stale: predates this run
+    python3 - "$f" "$engine" "beir-ir-${cut}" <<'PY' 2>/dev/null && return 0
+import json, math, sys
+path, want_engine, want_suite = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    d = json.load(open(path))
+except Exception:
+    sys.exit(1)
+if not isinstance(d, dict) or d.get("engine") != want_engine or d.get("suite") != want_suite:
+    sys.exit(1)
+r = d.get("result")
+if not isinstance(r, dict):
+    sys.exit(1)
+dm = r.get("deficits_milli")
+if not isinstance(dm, dict):
+    sys.exit(1)
+for key in ("recall_at_100", "ndcg_at_10"):
+    v = dm.get(key)
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        sys.exit(1)
+sys.exit(0)
+PY
   done
   return 1
 }
@@ -171,7 +213,7 @@ VALID_ENVELOPES=0
 [ -n "$SPARQ_TEXT_BEIR" ] || FAILURES="$FAILURES build:beir_text"
 for cut in $BEIR_CUTS; do
   for engine in lucene-anserini sparq-text; do
-    if valid_envelope "${engine}-beir-ir-${cut}"; then
+    if valid_envelope "$engine" "$cut"; then
       VALID_ENVELOPES=$((VALID_ENVELOPES + 1))
     else
       FAILURES="$FAILURES cut:${cut}:${engine}:envelope-missing-or-invalid"

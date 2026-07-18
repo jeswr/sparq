@@ -9,13 +9,19 @@
 # engines (lucene-anserini oracle AND sparq-text). Anything less must write the
 # DISTINCT /root/GATHER_FAILED sentinel, canonical=false + status partial|failed,
 # and exit nonzero, so the launcher can machine-distinguish an honest NOT-RUN from
-# a completed canonical gather. This harness pins exactly that, covering TOTAL
-# failure, PARTIAL output, invalid-JSON envelopes, the success path (including
-# console-recovery of the emitted envelopes via extract-console-envelopes.sh),
+# a completed canonical gather. A "valid" envelope is NOT merely one that parses as
+# JSON: it must be produced by THIS run (not a stale prefix-matching file from a
+# prior gather), carry the exact engine + beir-ir-<cut> identity, and expose finite
+# Recall@100/nDCG@10 deficits — else empty/wrong/stale JSON could certify a run
+# without the claimed scored evidence (round 3). This harness pins exactly that,
+# covering TOTAL failure, PARTIAL output, invalid-JSON envelopes, the success path
+# (including console-recovery of the emitted envelopes via extract-console-envelopes.sh),
 # a FORCED gather-meta.json write failure (provenance is a canonical-success
-# prerequisite — round 2), and a failed GATHER_DONE touch (the console
-# 'gather complete' marker the launcher accepts as success must be impossible
-# to emit unless the sentinel is already on disk — round 2).
+# prerequisite — round 2), a failed GATHER_DONE touch (the console 'gather complete'
+# marker the launcher accepts as success must be impossible to emit unless the
+# sentinel is already on disk — round 2), and — round 3 — empty `{}`, wrong-engine,
+# wrong-cut, and stale prefix-matching envelopes all correctly rejected while
+# realistic scored envelopes pass.
 #
 # HERMETIC: the script under test is copied into a scratch repo tree whose
 # scripts/gather-competitors.sh is a scenario stub; apt-get/java/cargo/curl and the
@@ -48,13 +54,24 @@ cp "$SCRIPT" "$REPO/scripts/bench/"
 cat > "$REPO/scripts/gather-competitors.sh" <<'STUB'
 #!/usr/bin/env bash
 out="bench/competitor-results"; mkdir -p "$out"; stamp="20260101T000000Z"
-lucene() { printf '{"engine": "lucene-anserini", "suite": "beir-ir-%s", "values": {}}\n' "$BEIR_CUT" > "$out/lucene-anserini-beir-ir-${BEIR_CUT}-${stamp}.json"; }
-sparq()  { printf '{"engine": "sparq-text", "suite": "beir-ir-%s", "values": {}}\n'     "$BEIR_CUT" > "$out/sparq-text-beir-ir-${BEIR_CUT}-${stamp}.json"; }
+lf="$out/lucene-anserini-beir-ir-${BEIR_CUT}-${stamp}.json"
+sf="$out/sparq-text-beir-ir-${BEIR_CUT}-${stamp}.json"
+# A REALISTIC scored envelope: the same shape write_result + beir_deficits_json emit —
+# top-level engine/suite identity + result.deficits_milli{recall_at_100,ndcg_at_10}.
+envfile() {  # envfile <engine> <suite> <recall_milli> <ndcg_milli> <path>
+  printf '{"engine":"%s","suite":"%s","version":"stub","env":{},"result":{"engine":"%s","deficits_milli":{"recall_at_100":%s,"ndcg_at_10":%s}}}\n' \
+    "$1" "$2" "$1" "$3" "$4" > "$5"
+}
+lucene() { envfile "lucene-anserini" "beir-ir-${BEIR_CUT}" 8 15 "$lf"; }
+sparq()  { envfile "sparq-text"      "beir-ir-${BEIR_CUT}" 21 40 "$sf"; }
 case "${STUB_GC_MODE:-fail}" in
   fail)           exit 1 ;;                    # total failure: nothing written
   lucene-only)    lucene; exit 1 ;;            # sparq-text half died mid-gather
-  invalid-lucene) printf '{truncated' > "$out/lucene-anserini-beir-ir-${BEIR_CUT}-${stamp}.json"; sparq; exit 0 ;;
+  invalid-lucene) printf '{truncated' > "$lf"; sparq; exit 0 ;;
   both)           lucene; sparq; exit 0 ;;
+  empty)          printf '{}\n' > "$lf"; printf '{}\n' > "$sf"; exit 0 ;;                    # parses, no scored evidence
+  wrong-engine)   envfile "sparq-text" "beir-ir-${BEIR_CUT}" 8 15 "$lf"; sparq; exit 0 ;;    # lucene slot, wrong engine id
+  wrong-cut)      envfile "lucene-anserini" "beir-ir-nfcorpus" 8 15 "$lf"; sparq; exit 0 ;;  # lucene slot, wrong cut/suite
 esac
 STUB
 
@@ -192,6 +209,38 @@ rc="$(STUB_TOUCH_RC=1 run_gather yes 0 both "$SANDBOX/s6.log")"
 grep -qa "STEP.*gather complete" "$SANDBOX/s6.log" && bad "touch-failure log must not say 'gather complete' without GATHER_DONE on disk" || ok
 grep -q "sentinel:GATHER_DONE-touch-failed" "$SBROOT/GATHER_FAILED" 2>/dev/null && ok || bad "GATHER_FAILED must name the failed GATHER_DONE touch"
 grep -qa "gather FAILED" "$SANDBOX/s6.log" && ok || bad "touch-failure log must say 'gather FAILED'"
+
+# ---- 7. EMPTY-BUT-PARSING envelopes: `{}` for both engines → no scored evidence, so
+# neither validates → failed, nonzero, no GATHER_DONE (an envelope must carry the
+# claimed Recall@100/nDCG@10 deficits, not merely parse as JSON).
+rc="$(run_gather yes 0 empty "$SANDBOX/s7.log")"
+[ "$rc" != 0 ] && ok || bad "empty {} envelopes must exit nonzero (got rc=$rc)"
+[ ! -e "$SBROOT/GATHER_DONE" ] && ok || bad "empty {} envelopes must NOT emit GATHER_DONE"
+check_meta "empty envelopes" "failed" "false"
+
+# ---- 8. WRONG-IDENTITY envelopes: the lucene slot carries the wrong engine id (8a)
+# or the wrong beir-ir cut/suite (8b) → that engine fails identity, so the run is
+# partial (only sparq-text valid), never canonical.
+rc="$(run_gather yes 0 wrong-engine "$SANDBOX/s8a.log")"
+[ "$rc" != 0 ] && ok || bad "wrong-engine envelope must exit nonzero (got rc=$rc)"
+grep -q "cut:scifact:lucene-anserini" "$SBROOT/GATHER_FAILED" 2>/dev/null && ok || bad "GATHER_FAILED must name the wrong-engine lucene envelope"
+check_meta "wrong engine" "partial" "false"
+rc="$(run_gather yes 0 wrong-cut "$SANDBOX/s8b.log")"
+[ "$rc" != 0 ] && ok || bad "wrong-cut envelope must exit nonzero (got rc=$rc)"
+grep -q "cut:scifact:lucene-anserini" "$SBROOT/GATHER_FAILED" 2>/dev/null && ok || bad "GATHER_FAILED must name the wrong-cut lucene envelope"
+check_meta "wrong cut" "partial" "false"
+
+# ---- 9. STALE prefix-matching envelopes: valid-looking envelopes from a PRIOR run are
+# already on disk, but THIS gather produces nothing (fail mode). The pre-run snapshot
+# must reject them, so the run is failed — a re-run whose gather died can never be
+# certified canonical by reusing stale evidence.
+stale='mkdir -p "$RESULTS"
+printf "%s\n" "{\"engine\":\"lucene-anserini\",\"suite\":\"beir-ir-scifact\",\"result\":{\"engine\":\"lucene-anserini\",\"deficits_milli\":{\"recall_at_100\":8,\"ndcg_at_10\":15}}}" > "$RESULTS/lucene-anserini-beir-ir-scifact-20259901T000000Z.json"
+printf "%s\n" "{\"engine\":\"sparq-text\",\"suite\":\"beir-ir-scifact\",\"result\":{\"engine\":\"sparq-text\",\"deficits_milli\":{\"recall_at_100\":21,\"ndcg_at_10\":40}}}" > "$RESULTS/sparq-text-beir-ir-scifact-20259901T000000Z.json"'
+rc="$(run_gather yes 0 fail "$SANDBOX/s9.log" "$stale")"
+[ "$rc" != 0 ] && ok || bad "stale pre-existing envelopes must not certify a failed gather (got rc=$rc)"
+[ ! -e "$SBROOT/GATHER_DONE" ] && ok || bad "stale envelopes must NOT emit GATHER_DONE"
+check_meta "stale reuse" "failed" "false"
 
 echo ""
 echo "test_beir_gather_sentinel: ${pass} passed, ${fail} failed."
