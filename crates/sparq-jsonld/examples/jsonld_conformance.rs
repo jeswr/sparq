@@ -616,11 +616,23 @@ fn run_expand(root: &Path, entries: &[Entry]) -> Score {
 }
 
 /// `compact`: native Compaction Algorithm vs the normative expected doc.
+/// ONE narrowly-pinned honest SKIP (bead sq-uzdw7): exactly `#t0038`, whose
+/// `specVersion: json-ld-1.0` expectation (compact-IRI creation through an
+/// expanded term definition) contradicts what `#tp001` pins for 1.0 processing
+/// mode under the 1.1 REC — one implementation cannot pass both. The pin is by
+/// exact manifest id (NOT a blanket `specVersion` match, mirroring the ratchet
+/// lane's `is_pinned_1_0_only_skip` + its scope test): `processingMode:
+/// json-ld-1.0` cases still RUN, and a future 1.0-only positive at a suite-pin
+/// bump RUNS rather than being silently skipped.
 fn run_compact(root: &Path, entries: &[Entry]) -> Score {
     let mut s = Score::default();
     let loader = FsLoader::new().map_prefix(SUITE_BASE, root);
     for e in entries {
-        if e.requires.is_some() || e.is_negative || is_remote(&e.input) {
+        if e.requires.is_some()
+            || e.is_negative
+            || is_remote(&e.input)
+            || (e.id == "#t0038" && e.spec_version.as_deref() == Some("json-ld-1.0"))
+        {
             s.skip();
             continue;
         }

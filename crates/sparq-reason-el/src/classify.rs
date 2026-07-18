@@ -13,6 +13,7 @@
 //   CR6    {a} ∈ S(X) ∩ S(Y),  X ⇝_R Y     ⇒  S(X) := S(X) ∪ S(Y)
 //   CRs1   ∃r.Self ∈ S(X)                  ⇒  (X,X) ∈ R(r)                       [sq-pbz04.2.6]
 //   CRs2   (X,X) ∈ R(r),  ∃r.Self ⊑ D ∈ T  ⇒  D ∈ S(X)   (self-concept atom + CR1; see below)
+//   CRs3   (X,X) ∈ R(r),  X a NOMINAL {a}  ⇒  ∃r.Self ∈ S(X)                     [sq-8zqwb]
 //
 // [OPUS-4.8] sq-pbz04.2.6 — the two EL++ self-restriction (`owl:hasSelf` / `ObjectHasSelf`)
 // completion rules. `∃r.Self` (the LOCAL reflexivity concept `{x | (x,x) ∈ r}`) is extracted as
@@ -26,6 +27,18 @@
 // R-link — a general self-link from CR3 (`X ⊑ ∃r.X`, whose invariant is only `X ⊑ ∃r.X`, NOT
 // `X ⊑ ∃r.Self`) must NEVER trigger CRs2. CRs1 IS sound to add to the ordinary link set because
 // `X ⊑ ∃r.Self ⟹ X ⊑ ∃r.X` (the self-successor is X itself), so the R-invariant holds.
+//
+// [FABLE-5] sq-8zqwb (EL wave-2) — CRs3, the NOMINAL-REFLEXIVITY converse of CRs1: a SAME-NOMINAL
+// self-link `({a},{a}) ∈ R(r)` (e.g. the internalized assertion `a r a`, asserted OR derived)
+// reads off as `∃r.Self ∈ S({a})`. SOUND because a nominal denotes a singleton: the R-invariant
+// gives `T ⊨ {a} ⊑ ∃r.{a}`, so a^I's r-successor inside `{a^I}` IS a^I itself — `(a^I,a^I) ∈ r^I`,
+// which is exactly `a^I ∈ (∃r.Self)^I`, i.e. `T ⊨ {a} ⊑ ∃r.Self`. The nominal guard is
+// load-bearing: for a GENERAL X the CRs2 side-condition above stands unchanged (each member of X
+// has SOME r-successor in X, not necessarily itself). Implemented at the single link chokepoint
+// (`add_link`), so asserted, derived, and (under `rbox`) role-closed self-links all fire it in
+// BOTH engines; on a hasSelf-free ontology the `∃r.Self` lookup is `None` and nothing changes.
+// Graduates the WG `New-Feature-SelfRestriction-002` converse shape ("Peter likes Peter ⊨ Peter
+// ∈ ∃likes.Self") that sq-pbz04.2.6 pinned as an honest boundary (deferred from #1681).
 //
 // CR4 is the load-bearing existential-traversal rule that OWL 2 RL lacks (spike §1.2): it is
 // the only rule that reasons THROUGH an r-successor, and it is why running `--reason owl` over
@@ -231,9 +244,9 @@ fn saturate_inner(
             if let Some(links) = ix.exists.get(&d) {
                 for &(r, f) in links {
                     #[cfg(feature = "rbox")]
-                    add_link_rbox(&mut sat, r, x, f, &ix, role_box, &mut queue);
+                    add_link_rbox(&mut sat, r, x, f, &ix, names, role_box, &mut queue);
                     #[cfg(not(feature = "rbox"))]
-                    add_link(&mut sat, r, x, f, &ix, &mut queue);
+                    add_link(&mut sat, r, x, f, &ix, names, &mut queue);
                 }
             }
             // CRs1 (sq-pbz04.2.6): the self-restriction concept `∃r.Self` just entered S(X) —
@@ -246,9 +259,9 @@ fn saturate_inner(
             if has_self {
                 if let Some(r) = names.self_role(d) {
                     #[cfg(feature = "rbox")]
-                    add_link_rbox(&mut sat, r, x, x, &ix, role_box, &mut queue);
+                    add_link_rbox(&mut sat, r, x, x, &ix, names, role_box, &mut queue);
                     #[cfg(not(feature = "rbox"))]
-                    add_link(&mut sat, r, x, x, &ix, &mut queue);
+                    add_link(&mut sat, r, x, x, &ix, names, &mut queue);
                 }
             }
             // CR4 / CR5 with the new membership `D ∈ S(X)` as the trigger, where X is the
@@ -407,14 +420,18 @@ fn add(set: &mut FxHashSet<Concept>, x: Concept, e: Concept, queue: &mut Vec<(Co
 
 /// Adds the existential link `(x, f) ∈ R(r)` and fires the link-triggered half of CR4/CR5:
 /// for the NEW link, every `D ∈ S(f)` with an axiom `∃r.D ⊑ E` yields `E ∈ S(x)`, and a
-/// pre-existing `⊥ ∈ S(f)` yields `⊥ ∈ S(x)` (CR5). Returns `true` iff the link was new (so the
-/// `rbox` caller can decide whether to close it under CR10/CR11).
+/// pre-existing `⊥ ∈ S(f)` yields `⊥ ∈ S(x)` (CR5). Also fires CRs3 ([FABLE-5] sq-8zqwb): a
+/// SAME-NOMINAL self-link `({a},{a}) ∈ R(r)` adds `∃r.Self` to `S({a})` — this is the single
+/// chokepoint every link insertion (CR3, CRs1, the `rbox` closure, and the `par` apply phase)
+/// flows through, so asserted, derived, and role-closed self-links all read off. Returns `true`
+/// iff the link was new (so the `rbox` caller can decide whether to close it under CR10/CR11).
 fn add_link(
     sat: &mut Saturation,
     r: Role,
     x: Concept,
     f: Concept,
     ix: &AxiomIndex,
+    names: &Names,
     queue: &mut Vec<(Concept, Concept)>,
 ) -> bool {
     let succ = sat.r_succ.entry(r).or_default().entry(x).or_default();
@@ -427,6 +444,16 @@ fn add_link(
         .entry(f)
         .or_default()
         .insert(x);
+
+    // CRs3 ([FABLE-5] sq-8zqwb): a same-nominal self-link is LOCAL reflexivity — `({a},{a}) ∈
+    // R(r)` puts `∃r.Self` into S({a}). Sound because `{a}` is a singleton (see the module doc);
+    // the nominal guard is load-bearing (a general `(X,X)` link from `X ⊑ ∃r.X` must NOT fire).
+    // On a hasSelf-free ontology `self_concept_of` is `None` and the branch is dead.
+    if x == f && names.is_nominal(x) {
+        if let Some(sc) = names.self_concept_of(r) {
+            add(&mut sat.s[x as usize], x, sc, queue);
+        }
+    }
 
     // CR4 for the new link: scan S(f) for fillers D with an `∃r.D ⊑ E` axiom.
     let s_f: Vec<Concept> = sat.s[f as usize].iter().copied().collect();
@@ -456,20 +483,26 @@ fn add_link(
 /// super-roles of derived roles also propagate — the standard RBox link-saturation. The worklist
 /// is bounded by the number of distinct `(role, x, f)` triples (each is stored at most once in
 /// `r_succ`), so the fixpoint terminates.
+// [OPUS-4.8] Each argument is a genuinely distinct saturation input (the mutable state, the
+// seed link `(r, x, f)`, three read-only indices, and the shared queue); bundling them into a
+// context struct here would obscure the CR3/CR10/CR11 seam without simplifying anything, so we
+// take the clippy-documented override for this private RBox helper rather than churn the shape.
 #[cfg(feature = "rbox")]
+#[allow(clippy::too_many_arguments)]
 fn add_link_rbox(
     sat: &mut Saturation,
     r: Role,
     x: Concept,
     f: Concept,
     ix: &AxiomIndex,
+    names: &Names,
     role_box: &RoleBox,
     queue: &mut Vec<(Concept, Concept)>,
 ) {
     // Each work item is a link to STORE (already at its exact role). Seed with the CR3 link.
     let mut links: Vec<(Role, Concept, Concept)> = vec![(r, x, f)];
     while let Some((lr, lx, lf)) = links.pop() {
-        if !add_link(sat, lr, lx, lf, ix, queue) {
+        if !add_link(sat, lr, lx, lf, ix, names, queue) {
             continue; // link already present — its consequences were already enqueued.
         }
         // CR10: propagate to every strict super-role of `lr` (super_roles includes lr itself).
@@ -660,9 +693,9 @@ fn saturate_par_inner(
                 }
                 for (r, x, f) in chunk.links {
                     #[cfg(feature = "rbox")]
-                    add_link_rbox(&mut sat, r, x, f, &ix, role_box, &mut queue);
+                    add_link_rbox(&mut sat, r, x, f, &ix, names, role_box, &mut queue);
                     #[cfg(not(feature = "rbox"))]
-                    add_link(&mut sat, r, x, f, &ix, &mut queue);
+                    add_link(&mut sat, r, x, f, &ix, names, &mut queue);
                 }
             }
         }
@@ -759,7 +792,9 @@ fn derive_chunk(
             }
         }
         // CRs1: `∃r.Self` entered S(X) ⇒ the reflexive link (X, X) ∈ R(r). (CRs2 is CR1 on
-        // the `Sub(self_r, D)` axiom, exactly as in the sequential engine.)
+        // the `Sub(self_r, D)` axiom, and CRs3 — the sq-8zqwb nominal-reflexivity converse —
+        // is link-triggered, firing inside `add_link` during the SEQUENTIAL apply phase,
+        // exactly as in the sequential engine.)
         if has_self {
             if let Some(r) = names.self_role(d) {
                 out.links.push((r, x, x));

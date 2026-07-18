@@ -55,6 +55,9 @@ on:
     - cron: "23 4 * * *"
   workflow_dispatch:
   pull_request:
+    # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
+    # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "crates/sparq-zk/**"
       - "crates/sparq-zk-compose/**"
