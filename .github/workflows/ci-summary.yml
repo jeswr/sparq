@@ -117,6 +117,33 @@
 # producing the first (and only) `gate` check-run on the head SHA. merge_group
 # behaviour is untouched (always full tier, on a fresh ref).
 #
+# FAIL-FAST + FAST-FIX RING (2026-07-17 maintainer directive). [FABLE-5]
+# (1) FAIL-FAST: while polling, the moment any GATING leg has CONCLUDED failure the
+# gate REDs immediately instead of waiting for every other leg — a genuine `failure`
+# is never forgiven by any later state (only cancelled/stale are supersedable), so
+# every eventual render REDs anyway; the wait was pure latency on the verdict. A red
+# PR learns its fate in roughly the time of its fastest failing leg (~2-4 min for
+# clippy/fmt/test-compile classes) instead of the full sibling wall-clock (~30-40
+# min). Soundness guards live in scripts/ci_summary_gate.py §FAIL-FAST: the mid-poll
+# scan runs over the SAME forgiveness-filtered set the final render judges (a
+# cancelled-then-rerun leg or race-loser select can never fire it), advisory legs
+# never fire it, a red leg with a same-name rerun already in flight stands down, and
+# one immediate grace re-poll must re-observe the failure before the red is emitted.
+# (2) FAST-FIX RING: when this gate REDs on a pull_request run for a PIPELINE-OWNED
+# PR (armed for auto-merge, or labeled review:pass / review:changes; never drafts or
+# review:needs-user / needs:user holds), the `fix-ring` job below rings the
+# jeswr/agent-account-registry dispatcher (the same REGISTRY_RING_TOKEN doorbell
+# batch-merge.yml's ring job uses) so its repair sweep enumerates the red PR NOW
+# instead of on the next cron tick. The registry's ci-fix admission is derived from
+# the PR's GATE STATE (its PLAN snapshots per-PR CI status), so ringing is
+# sufficient; deliberately NO needs:ci-fix label fallback — the registry enumerator
+# treats needs:* PR labels as HUMAN-owned holds that EXCLUDE a PR from the repair
+# loop, so a label would do the opposite of triggering a fix. Without the token
+# (fork PR head / secret unconfigured) the job skips with a notice and the registry
+# cron remains the backstop. The job name carries "advisory" so its own check-run
+# can never gate a future run on the same SHA, and it runs with a read-only token —
+# the doorbell token is the only write capability and it is scoped to the registry.
+#
 # IMPLEMENTATION (sq-90cv4). [FABLE-5] The poll loop + verdict live in
 # scripts/ci_summary_gate.py (extracted from the previous inline bash so the
 # semantics are UNIT-TESTED — scripts/tests/test_ci_summary_gate.py, run as a HARD
@@ -217,3 +244,63 @@ jobs:
           PR_DRAFT: ${{ github.event.pull_request.draft }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: python3 scripts/ci_summary_gate.py
+
+  # FAST-FIX RING (header §FAIL-FAST + FAST-FIX RING). A red gate on a
+  # pipeline-owned PR wakes the registry repair loop immediately. Least
+  # privilege: the job's own token is pull-requests:read only (it reads the
+  # PR's LIVE labels/arm/draft state — the trigger payload's snapshot goes
+  # stale across the poll window); the only write capability is the
+  # REGISTRY_RING_TOKEN doorbell, absent on fork heads (fail-soft skip — the
+  # registry cron is the backstop). "advisory" in the name keeps this job's
+  # check-run structurally non-gating for any future gate run on the same SHA
+  # (sq-wjth rule), and `failure()` excludes cancelled (superseded) gate runs.
+  fix-ring:
+    name: fast-fix ring (advisory)
+    needs: gate
+    if: >-
+      failure()
+      && github.event_name == 'pull_request'
+      && github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Ring the registry dispatcher for an immediate repair sweep
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REGISTRY_RING_TOKEN: ${{ secrets.REGISTRY_RING_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          # Live PR state — labels/arming churn between the trigger payload and
+          # a gate verdict that can be many minutes later.
+          if ! state="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
+              --jq '{draft: .draft, armed: (.auto_merge != null), labels: [.labels[].name]}')"; then
+            echo "::notice::could not read live PR state — skipping the ring (the registry cron is the backstop)."
+            exit 0
+          fi
+          has() { jq -e --arg l "$1" '.labels | index($l) != null' <<<"$state" >/dev/null; }
+          if [ "$(jq -r '.draft' <<<"$state")" = "true" ]; then
+            echo "PR re-drafted since the trigger — not pipeline-owned for fast-fix; skipping."
+            exit 0
+          fi
+          if has "review:needs-user" || has "needs:user"; then
+            echo "human-owned hold (review:needs-user / needs:user) — the repair loop must not pick this PR up; skipping."
+            exit 0
+          fi
+          if [ "$(jq -r '.armed' <<<"$state")" != "true" ] && ! has "review:pass" && ! has "review:changes"; then
+            echo "PR is neither armed nor in the review pipeline (review:pass / review:changes) — skipping."
+            exit 0
+          fi
+          if [ -z "${REGISTRY_RING_TOKEN}" ]; then
+            # NO needs:ci-fix label fallback, deliberately: the registry PLAN
+            # derives ci-fix admission from the PR's gate STATE and treats
+            # needs:* PR labels as human-owned holds that EXCLUDE the PR from
+            # the repair enumeration — a label here would suppress the fix.
+            echo "::notice::REGISTRY_RING_TOKEN unavailable (fork head or secret unconfigured) — cannot ring; the registry cron (every ~10 min) is the backstop."
+            exit 0
+          fi
+          GH_TOKEN="${REGISTRY_RING_TOKEN}" gh workflow run dispatch.yml -R jeswr/agent-account-registry
+          echo "rang jeswr/agent-account-registry dispatch — the repair sweep runs now instead of on the next cron tick."

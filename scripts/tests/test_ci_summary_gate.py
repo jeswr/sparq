@@ -183,6 +183,121 @@ class TestSettleAndGracefulTimeout(unittest.TestCase):
         self.assertIn("FAILED", out)
 
 
+class TestFailFast(unittest.TestCase):
+    """[FABLE-5] Fail-fast on a concluded gating failure (2026-07-17 maintainer
+    directive): the gate REDs the moment a gating leg's failure is confirmed by
+    the grace re-poll, instead of waiting out every other sibling — WITHOUT ever
+    firing on a superseded/forgiven run, an in-flight rerun's predecessor, or an
+    advisory leg. Each guard's mutation is caught: dropping fail-fast breaks the
+    immediacy assertions; dropping a guard turns a must-pass scenario red."""
+
+    def test_gating_failure_with_others_pending_reds_immediately(self):
+        # (i) One concluded gating failure + siblings still pending => FAILURE at
+        # the grace-confirm poll (attempt 2), not after the pending legs settle.
+        # Mutation coverage: without fail-fast these polls run to the base budget
+        # and red as a "genuine hang" — the fail-fast marker + the poll-count
+        # assertions below then fail.
+        code, out = run(tiny_cfg(), [[RED, PENDING]])
+        self.assertEqual(code, 1)
+        self.assertIn("FAILED (fail-fast)", out)
+        self.assertIn("clippy", out)
+        self.assertIn("attempt 2", out)
+        self.assertNotIn("attempt 3", out, "the red must land at the grace-confirm poll")
+        self.assertNotIn("genuine hang", out)
+
+    def test_failed_leg_with_inflight_same_name_rerun_does_not_fail_fast(self):
+        # (ii) A red leg whose same-name rerun is already IN PROGRESS must NOT
+        # fail-fast — the gate waits on the rerun (which wins: the check-runs
+        # listing returns the latest attempt, so the old failure drops out).
+        # Mutation coverage: without the in-flight guard the identical failure
+        # is observed on polls 1+2 and the gate REDs before the rerun lands.
+        failed = R("clippy", conclusion="failure", started="2026-07-17T10:00:00Z", rid=1)
+        rerun = R("clippy", status="in_progress", conclusion=None,
+                  started="2026-07-17T10:05:00Z", rid=2)
+        rerun_green = R("clippy", started="2026-07-17T10:05:00Z", rid=2)
+        polls = [
+            [failed, rerun, PENDING],
+            [failed, rerun, PENDING],
+            [rerun_green, R("coverage")],
+        ]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+        self.assertNotIn("fail-fast", out)
+
+    def test_cancelled_race_loser_select_mid_poll_does_not_fail_fast(self):
+        # (iii) A concurrency-cancel race-loser select observed MID-POLL (siblings
+        # still pending) must not fail-fast the gate: forgive_superseded drops it
+        # upstream of the fail-fast scan (same-tier same-name success, the
+        # sq-fmx4u.3 pure-select rule), and a cancelled conclusion is not
+        # `failure` in any case. The eventual verdict is the real (green) one.
+        sel_win = R(SELECT_NAME, conclusion="success",
+                    started="2026-07-17T10:00:10Z", rid=2)
+        sel_lost = R(SELECT_NAME, conclusion="cancelled",
+                     started="2026-07-17T10:00:20Z", rid=3)
+        polls = [
+            [sel_win, sel_lost, PENDING],
+            [sel_win, sel_lost, R("coverage")],
+        ]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+        self.assertNotIn("fail-fast", out)
+
+    def test_cancelled_leg_awaiting_rerun_does_not_fail_fast(self):
+        # (iii-b) spec guard (a): a cancelled-then-rerun leg mid-poll — cancelled
+        # is never a fail-fast trigger, the successor supersedes it, gate greens.
+        old = R("build + test", conclusion="cancelled",
+                started="2026-07-17T10:00:00Z", rid=1)
+        new_running = R("build + test", status="in_progress", conclusion=None,
+                        started="2026-07-17T10:05:00Z", rid=2)
+        new_green = R("build + test", started="2026-07-17T10:05:00Z", rid=2)
+        polls = [[old, PENDING], [old, new_running, PENDING], [old, new_green, R("coverage")]]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("fail-fast", out)
+
+    def test_advisory_failure_mid_poll_does_not_fail_fast(self):
+        # (iv) An advisory leg's failure while siblings are pending must neither
+        # fail-fast nor gate at all (sq-wjth) — the verdict stays green.
+        adv = R("vale (prose, advisory)", conclusion="failure")
+        polls = [[adv, PENDING], [adv, R("coverage")]]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+        self.assertNotIn("fail-fast", out)
+
+    def test_grace_repoll_dodges_a_transient_failure_read(self):
+        # The grace re-poll: a failure observed ONCE that a fresh fetch does not
+        # re-observe (an API read race) must not red the gate.
+        polls = [
+            [RED, PENDING],                 # racy read: clippy "failure"
+            [GREEN2, PENDING],              # fresh fetch: clippy is green
+            [GREEN2, R("coverage")],
+        ]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+        self.assertIn("grace re-poll", out)
+        self.assertNotIn("FAILED (fail-fast)", out)
+
+    def test_all_terminal_failure_keeps_the_normal_render_path(self):
+        # pending == 0 => fail-fast stands down and the classic settle + full
+        # render_verdict path (with its richer message) is byte-identical.
+        code, out = run(tiny_cfg(), [[GREEN, RED]])
+        self.assertEqual(code, 1)
+        self.assertIn("non-passing gating check(s)", out)
+        self.assertNotIn("fail-fast", out)
+
+    def test_fail_fast_never_turns_a_verdict_green(self):
+        # Exit-0 invariant: fail-fast is an exit-1-only path — a green set with
+        # pending work must still settle normally and pass.
+        polls = [[GREEN, PENDING], [GREEN, R("coverage")]]
+        code, out = run(tiny_cfg(), polls)
+        self.assertEqual(code, 0)
+        self.assertNotIn("fail-fast", out)
+
+
 class TestAdaptiveSaturationBudget(unittest.TestCase):
     """sq-90cv4: saturation extends, hangs RED, real verdicts are untouched."""
 
@@ -873,6 +988,94 @@ class TestDraftTierIntegrity(unittest.TestCase):
                 url="https://github.com/o/r/actions/runs/111/job/5")
         code, out = run(tiny_cfg(), [[art, GREEN]])
         self.assertEqual(code, 0, out)
+
+
+class TestMergeGroupChangeClassAccounting(unittest.TestCase):
+    """[FABLE-5] merge-group change-class gate (extends #3420/#3421): the expected
+    per-class leg accounting for a MERGE-GROUP sibling set. On a docs-only/
+    orchestration-only queued batch the rust_changed layer (ci.yml lint/msrv/
+    geiger/docker-smoke/coverage-floors + feature-matrix setup/check-tier/
+    fedclient-boundary) now SKIPS alongside the select-gated engine legs; every
+    such leg still registers a check-run with conclusion `skipped` — an
+    ATTRIBUTED skip under the green same-diff `select` pre-job — and the gate
+    renders PASS. The fail-closed half: those same skips with a non-success
+    select are UNATTRIBUTABLE and must RED (an engine batch could only see its
+    legs skipped through a select that did not soundly conclude — the classify
+    step and the select job compute the same classify_change over the same
+    base_sha...head_sha, so on any resolved diff they cannot disagree)."""
+
+    # The #2533-shaped docs-only merge-group batch: what the queue's merge_group
+    # ref shows after this change — every engine-lane check-run PRESENT (never
+    # missing) with conclusion `skipped`, cheap prose gates green, select green.
+    _DOCS_ONLY_GROUP_SKIPS = [
+        # ci.yml select-conjunct legs (already skipped via the batch-diff selection):
+        "test (load-aware shard bulk 1/3)",
+        "build + archive test binaries (+ doctests once)",
+        "W3C SPARQL 1.1 conformance (ratchet)",
+        # ci.yml rust_changed-only legs (NEWLY class-gated on merge_group):
+        "lint (fmt + clippy + doc)",
+        "MSRV build (workspace)",
+        "cargo-geiger unsafe audit",
+        "docker image smoke (bind posture + /health)",
+        # feature-matrix.yml rust_changed-only legs (NEWLY class-gated):
+        "assemble feature matrix",
+        "feature-matrix check-tier (engine)",
+        "fedclient dependency-boundary guard",
+        "opt-in sparq-engine (paths)",
+        # fuzz.yml (already select-gated on the batch diff):
+        "cargo-fuzz (parsers + mmap loader, bounded)",
+        "differential smoke (sparq vs Oxigraph, fixed regression windows)",
+    ]
+
+    def _group_runs(self, select_run):
+        runs = [select_run]
+        runs += [R(n, conclusion="skipped") for n in self._DOCS_ONLY_GROUP_SKIPS]
+        runs += [
+            R("docs-quality quick-gates"),
+            R("supply-chain gates (deny + vet + SBOM + VEX + OpenSSF + js-sbom)"),
+            # Deliberately FULL on merge groups (the documented #3421 unsound-skip
+            # exception): wasm feature-OFF byte-equality on the MERGED bundle.
+            R("vectorized wasm feature-OFF equality"),
+        ]
+        return runs
+
+    def test_docs_only_merge_group_passes_with_attributed_skips(self):
+        # The headline fixture: class=docs-only batch => gate PASS, every engine
+        # leg an attributed skip, nothing missing. (No tier_ctx: merge_group runs
+        # use the pre-draft-tier semantics, as in production.)
+        runs = self._group_runs(SEL_OK)
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+        self.assertIn(f"{len(self._DOCS_ONLY_GROUP_SKIPS)} skipped", out)
+        self.assertIn("selection pre-job succeeded", out)
+        self.assertNotIn("FAILED", out)
+
+    def test_same_skips_with_failed_select_red(self):
+        # Fail-closed: the identical skip set under a FAILED select is
+        # unattributable => RED. This is what stops an engine batch from merging
+        # on skipped legs — its legs can only skip through the select/classify
+        # pair, and a select that did not conclude success reds the whole set.
+        runs = self._group_runs(R(SELECT_NAME, conclusion="failure"))
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1, out)
+        self.assertIn("cannot be attributed to a sound selection", out)
+
+    def test_same_skips_with_missing_select_conclusion_red(self):
+        # A cancelled (unsuperseded) select is equally unattributable => RED.
+        runs = self._group_runs(R(SELECT_NAME, conclusion="cancelled"))
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1, out)
+
+    def test_engine_leg_failure_never_masked_by_class_skips(self):
+        # A genuinely failing sibling on the merge_group ref (e.g. the always-on
+        # supply-chain SBOM steps, or a lane the class kept running) still REDs
+        # the gate regardless of how many class-attributed skips surround it.
+        runs = self._group_runs(SEL_OK) + [R("vectorized wasm feature-OFF equality (run)",
+                                             conclusion="failure")]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAILED", out)
 
 
 if __name__ == "__main__":

@@ -13,7 +13,11 @@
 //! The Solid read path is hardened via [`negotiate_accept_with_profile`]: q-values, the JSON-LD
 //! `profile` parameter (expanded vs compacted, surfaced in [`NegotiatedFormat`]), and an `Accept`
 //! naming no producible type degrading to `text/turtle` (the Solid default) instead of a 406.
-//! Still M2-next: N-Triples/N-Quads/N3 read formats.
+//! An honoured profile is wired through the read handlers (sq-10ty4): the response `Content-Type`
+//! echoes it ([`NegotiatedFormat::content_type`]) and [`serialize_triples_negotiated`] emits the
+//! requested document form — `expanded` byte-identically (the serialiser's default output IS the
+//! expanded form), `compacted` via a local context-free compaction step that keeps the SSRF
+//! posture (nothing is ever fetched). Still M2-next: N-Triples/N-Quads/N3 read formats.
 
 use oxjsonld::{JsonLdParser, JsonLdSerializer};
 use oxrdf::{GraphNameRef, QuadRef, Triple};
@@ -148,6 +152,119 @@ pub fn serialize_triples(format: RdfFormat, triples: &[Triple]) -> Result<Vec<u8
     }
 }
 
+/// Serialise a triple set into the negotiated format AND document form, returning the bytes.
+///
+/// Same as [`serialize_triples`] for Turtle and for JSON-LD with no honoured profile — the
+/// serialiser's default output (a top-level array of node objects, full IRIs, no `@context`) is
+/// ALREADY the [expanded document form](https://www.w3.org/TR/json-ld11/#expanded-document-form),
+/// so the `expanded` profile is honoured byte-identically. The `compacted` profile applies
+/// `compact_jsonld`, the local (context-free) compaction step — no context is used or fetched,
+/// preserving the local-only no-remote-context SSRF posture.
+pub fn serialize_triples_negotiated(
+    negotiated: NegotiatedFormat,
+    triples: &[Triple],
+) -> Result<Vec<u8>, ServerError> {
+    let bytes = serialize_triples(negotiated.format, triples)?;
+    match (negotiated.format, negotiated.jsonld_profile) {
+        (RdfFormat::JsonLd, Some(JsonLdProfileParam::Compacted)) => compact_jsonld(&bytes),
+        _ => Ok(bytes),
+    }
+}
+
+/// Compact the serialiser's own expanded JSON-LD output with an EMPTY context — the JSON-LD 1.1
+/// compaction of the document against no context, scoped to the shape [`serialize_triples`]
+/// produces (a top-level array of flat node objects whose non-`@id` values are arrays of node
+/// references / value objects; no `@list`, no nesting, no named graphs — the serialiser emits
+/// none of those for a default-graph triple set):
+///
+/// - a single-element property array collapses to its (compacted) single value;
+/// - a value object holding ONLY `@value` collapses to the bare scalar (there is no default
+///   language, so a plain string never needs its object kept); one carrying `@type` / `@language`
+///   (/ `@direction`) keeps its object — those entries must survive;
+/// - a node reference (`{"@id": …}`) stays an object (an empty context maps no term to `@id`);
+/// - a single top-level node object becomes the document itself, an empty document becomes `{}`,
+///   and multiple node objects wrap in `{"@graph": […]}` — the `JsonLdProcessor.compact` API's
+///   top-level rule.
+///
+/// Purely local structural rewriting over our own serialiser's bytes: no context document exists,
+/// so nothing can be fetched (the SSRF posture is preserved by construction). Key order follows
+/// `serde_json`'s deterministic map, so equal inputs give equal bytes (the ETag contract).
+fn compact_jsonld(bytes: &[u8]) -> Result<Vec<u8>, ServerError> {
+    let doc: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| ServerError::Storage(format!("json-ld compaction parse: {e}")))?;
+    // The serialiser's context-free output is always a top-level array; anything else means the
+    // input was not ours — fail loudly rather than mislabel a non-compacted body.
+    let serde_json::Value::Array(nodes) = doc else {
+        return Err(ServerError::Storage(
+            "json-ld compaction: unexpected serialiser output shape".into(),
+        ));
+    };
+    let mut compacted: Vec<serde_json::Value> = nodes.into_iter().map(compact_node).collect();
+    let out = match compacted.len() {
+        0 => serde_json::Value::Object(serde_json::Map::new()),
+        1 => compacted.pop().unwrap_or_default(),
+        _ => {
+            let mut map = serde_json::Map::with_capacity(1);
+            map.insert("@graph".into(), serde_json::Value::Array(compacted));
+            serde_json::Value::Object(map)
+        }
+    };
+    serde_json::to_vec(&out)
+        .map_err(|e| ServerError::Storage(format!("json-ld compaction serialise: {e}")))
+}
+
+/// Compact one node object: every entry except `@id` (whose value is a plain string) is a
+/// property whose array value compacts per the rules on [`compact_jsonld`].
+fn compact_node(node: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(map) = node else {
+        // Not a node object — never produced by our serialiser; pass through unchanged.
+        return node;
+    };
+    let compacted = map
+        .into_iter()
+        .map(|(key, value)| {
+            let value = if key == "@id" {
+                value
+            } else {
+                compact_property_values(value)
+            };
+            (key, value)
+        })
+        .collect();
+    serde_json::Value::Object(compacted)
+}
+
+/// Compact a property's expanded value array: each member value-compacts (a lone-`@value` object
+/// to its bare scalar), and a single-member array collapses to that member (`compactArrays`).
+fn compact_property_values(value: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Array(members) = value else {
+        return compact_value(value);
+    };
+    let mut members: Vec<serde_json::Value> = members.into_iter().map(compact_value).collect();
+    if members.len() == 1 {
+        members.pop().unwrap_or_default()
+    } else {
+        serde_json::Value::Array(members)
+    }
+}
+
+/// Value-compact one expanded object: a value object holding ONLY `@value` becomes the bare
+/// scalar; everything else (a `@type`/`@language`-carrying value object, a node reference) is
+/// kept as-is.
+fn compact_value(value: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(map) = value else {
+        return value;
+    };
+    if map.len() == 1 && map.contains_key("@value") {
+        return map
+            .into_iter()
+            .next()
+            .map(|(_, v)| v)
+            .unwrap_or_default();
+    }
+    serde_json::Value::Object(map)
+}
+
 /// A JSON-LD document form requested via the `Accept` header's `profile` media-type parameter
 /// ([JSON-LD 1.1 IANA registration](https://www.w3.org/TR/json-ld11/#iana-considerations)).
 ///
@@ -163,6 +280,16 @@ pub enum JsonLdProfileParam {
 }
 
 impl JsonLdProfileParam {
+    /// The canonical profile IRI (the JSON-LD 1.1 IANA registration), via
+    /// [`oxjsonld::JsonLdProfile::iri`] so the spelling stays pinned to the vendored JSON-LD
+    /// implementation. Used to echo the honoured profile back in the response `Content-Type`.
+    pub fn iri(self) -> &'static str {
+        match self {
+            Self::Expanded => oxjsonld::JsonLdProfile::Expanded.iri(),
+            Self::Compacted => oxjsonld::JsonLdProfile::Compacted.iri(),
+        }
+    }
+
     /// Extract the first honoured document form from a `profile` parameter VALUE (the part after
     /// `profile=`), deterministically.
     ///
@@ -194,10 +321,53 @@ pub struct NegotiatedFormat {
     /// The JSON-LD document form the client asked for, when [`Self::format`] is
     /// [`RdfFormat::JsonLd`] and an explicit `application/ld+json` range carried one. `None`
     /// otherwise (including a JSON-LD choice reached via an `application/*` / `*/*` wildcard —
-    /// wildcard ranges carry no honoured profile). The serialiser currently emits the streaming
-    /// (expanded-compatible) document form regardless; this field lets the handler echo the
-    /// selected profile and honour `compacted` output once the serialiser can produce it.
+    /// wildcard ranges carry no honoured profile). An honoured profile is echoed back in the
+    /// response `Content-Type` ([`Self::content_type`]) and drives the document form
+    /// ([`serialize_triples_negotiated`]): the serialiser's default output IS the expanded form,
+    /// and `compacted` applies the local (context-free, nothing-fetched) compaction step.
     pub jsonld_profile: Option<JsonLdProfileParam>,
+}
+
+impl NegotiatedFormat {
+    /// The response `Content-Type` value: the negotiated media type, with the honoured JSON-LD
+    /// `profile` parameter echoed back (quoted, the canonical IRI) per the JSON-LD 1.1 IANA
+    /// registration — so a client can see which document form the server actually honoured.
+    pub fn content_type(&self) -> String {
+        match self.jsonld_profile {
+            Some(profile) => format!(
+                "{};profile=\"{}\"",
+                self.format.media_type(),
+                profile.iri()
+            ),
+            None => self.format.media_type().to_string(),
+        }
+    }
+
+    /// Whether the stored bytes of a resource stored in `stored` format ARE this negotiation's
+    /// representation (the verbatim fast path): same format AND no honoured JSON-LD profile. Any
+    /// honoured profile forces a re-serialisation even for a stored-JSON-LD resource — the stored
+    /// bytes are whatever document form the client originally wrote, so serving them under a
+    /// `profile`-carrying `Content-Type` would be dishonest. The single shared rule keeps the body
+    /// path ([`serialize_triples_negotiated`] callers) and the validator path in agreement.
+    pub fn serves_stored_verbatim(&self, stored: RdfFormat) -> bool {
+        self.format == stored && self.jsonld_profile.is_none()
+    }
+
+    /// The short, `+`-free `+<variant>` ETag suffix token for this negotiated representation
+    /// (consumed by `conditional::variant_etag`; shared by the LDP and identity read paths so a
+    /// variant tag is derived identically on both surfaces).
+    ///
+    /// The suffix is profile-variant-specific exactly when the BYTES differ: `compacted` output
+    /// differs from the default serialisation ⇒ a distinct token, while `expanded` output is
+    /// byte-identical to it (the serialiser's default output IS the expanded document form —
+    /// [`serialize_triples_negotiated`]) ⇒ the same token as plain JSON-LD.
+    pub fn variant_suffix(&self) -> &'static str {
+        match (self.format, self.jsonld_profile) {
+            (RdfFormat::Turtle, _) => "ttl",
+            (RdfFormat::JsonLd, Some(JsonLdProfileParam::Compacted)) => "jsonld-c",
+            (RdfFormat::JsonLd, _) => "jsonld",
+        }
+    }
 }
 
 /// Negotiate the response RDF format from an `Accept` header against the formats this server can
@@ -496,6 +666,55 @@ mod tests {
         let jsonld = serialize_triples(RdfFormat::JsonLd, &triples).unwrap();
         let reparsed = parse_to_triples(RdfFormat::JsonLd, &jsonld, IRI).unwrap();
         assert_eq!(reparsed, triples);
+    }
+
+    /// The negotiated outcome for an explicit `application/ld+json` range carrying `profile`.
+    fn jsonld_with_profile(profile_iri: &str) -> NegotiatedFormat {
+        negotiate_accept_with_profile(
+            Some(&format!("application/ld+json;profile=\"{profile_iri}\"")),
+            RdfFormat::Turtle,
+        )
+        .expect("acceptable")
+    }
+
+    #[test]
+    fn profile_iris_come_from_the_vendored_implementation() {
+        assert_eq!(
+            JsonLdProfileParam::Expanded.iri(),
+            "http://www.w3.org/ns/json-ld#expanded"
+        );
+        assert_eq!(
+            JsonLdProfileParam::Compacted.iri(),
+            "http://www.w3.org/ns/json-ld#compacted"
+        );
+    }
+
+    #[test]
+    fn serves_stored_verbatim_only_without_an_honoured_profile() {
+        let plain = negotiate_accept_with_profile(Some("application/ld+json"), RdfFormat::JsonLd)
+            .expect("acceptable");
+        assert!(plain.serves_stored_verbatim(RdfFormat::JsonLd));
+        assert!(!plain.serves_stored_verbatim(RdfFormat::Turtle));
+        // An honoured profile always re-serialises, even from a stored-JSON-LD resource.
+        let compacted = jsonld_with_profile("http://www.w3.org/ns/json-ld#compacted");
+        assert!(!compacted.serves_stored_verbatim(RdfFormat::JsonLd));
+        let expanded = jsonld_with_profile("http://www.w3.org/ns/json-ld#expanded");
+        assert!(!expanded.serves_stored_verbatim(RdfFormat::JsonLd));
+    }
+
+    #[test]
+    fn compacting_an_empty_document_yields_the_empty_object() {
+        let compacted = jsonld_with_profile("http://www.w3.org/ns/json-ld#compacted");
+        let bytes = serialize_triples_negotiated(compacted, &[]).unwrap();
+        assert_eq!(bytes, b"{}");
+    }
+
+    #[test]
+    fn compaction_rejects_a_non_array_document_shape() {
+        // Defensive: the serialiser's context-free output is always a top-level array; anything
+        // else must fail loudly rather than be mislabelled as compacted.
+        assert!(compact_jsonld(b"{\"@graph\":[]}").is_err());
+        assert!(compact_jsonld(b"not json").is_err());
     }
 
     #[test]

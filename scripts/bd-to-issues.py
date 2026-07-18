@@ -11,6 +11,7 @@ Label mapping (bd -> issue):
   priority 0..4            -> priority:P{n}
   existing labels          -> passed through verbatim (area:<crate>=package, needs:*, kind:*, from:*)
   issue_type / kind:       -> role:<r> (feature/bug->impl, docs->docs, spike->research, chore->ci, ...)
+  every migrated issue     -> MIGRATION_LABEL (authenticates the `<!-- bd-id:… -->` body marker)
   dependency edges         -> `Blocked-by: #NN` body markers (resolved to native deps in --apply)
 The bead id (`sq-…`) is preserved in the issue title so existing PR-title tokens still resolve.
 """
@@ -74,6 +75,15 @@ def role_for(issue):
 # the pipeline consumes.
 _KEEP_PREFIX = ("area:", "needs:", "trust:", "kind:")
 _SEC_KEYWORDS = ("zk", "mpc", "reasoner", "crypto", "auth", "e2ee")
+
+# Migration-owned authentication label (PR #2528 review): scripts/ci-close-merged-beads.py trusts
+# a `<!-- bd-id:… -->` body marker ONLY on an issue carrying this label, because issue bodies are
+# forgeable by any GitHub user while attaching a label needs triage/write permission. Stamped on
+# EVERY migrated issue; a resumed --apply backfills it ONLY onto issues with migration-owned
+# provenance (recorded in the trusted checkpoint — see resolve_resume_map), never onto arbitrary
+# body-marker matches. Keep in sync with _MIGRATION_LABEL there, and never let an issue template
+# auto-apply it.
+MIGRATION_LABEL = "bd-migration"
 _BLOCKED_ON = re.compile(r"^blocked[-:]on[-:](.+)$")
 _BLOCKED = re.compile(r"^blocked:(.+)$")
 
@@ -130,6 +140,7 @@ def issue_labels(bead):
     if isinstance(p, int) and 0 <= p <= 4:
         out.add(f"priority:P{p}")
     out.add(f"role:{role_for(bead)}")
+    out.add(MIGRATION_LABEL)  # authenticates the bd-id body marker downstream — see MIGRATION_LABEL
     if externally_gated(bead):
         out.add("needs:user")
     # [OPUS-4.8] an epic is a tracking/umbrella issue, never a dispatchable work item — mark it
@@ -168,15 +179,48 @@ def _run(args, check=True):
 
 
 def fetch_bd_map(repo):
-    """{bd-id: issue_number} from existing issues carrying a `<!-- bd-id:... -->` marker (resume)."""
+    """(trusted, unverified) {bd-id: issue_number} maps from existing issues carrying a
+    `<!-- bd-id:... -->` marker (resume). trusted = the issue ALSO carries MIGRATION_LABEL
+    (attaching one needs triage/write permission); unverified = marker-only — could be a
+    pre-label legacy migration OR an attacker decoy, so never trusted on its own
+    (see resolve_resume_map, PR #2528 review round 2)."""
     out = _run(["gh", "issue", "list", "-R", repo, "--state", "all", "--limit", "10000",
-                "--json", "number,body"]).stdout
-    m = {}
+                "--json", "number,body,labels"]).stdout
+    trusted, unverified = {}, {}
     for it in json.loads(out or "[]"):
         mm = re.search(r"<!--\s*bd-id:(\S+?)\s*-->", it.get("body") or "")
-        if mm:
-            m[mm.group(1)] = it["number"]
-    return m
+        if not mm:
+            continue
+        labels = {lb["name"] if isinstance(lb, dict) else lb for lb in it.get("labels") or []}
+        (trusted if MIGRATION_LABEL in labels else unverified)[mm.group(1)] = it["number"]
+    return trusted, unverified
+
+
+def resolve_resume_map(trusted, unverified, checkpoint_map):
+    """Pure resume resolution (PR #2528 review round 2). A body marker alone is FORGEABLE: an
+    unprivileged user can pre-create a decoy issue carrying a target `<!-- bd-id:… -->` marker,
+    and a resume path that accepted it would (a) never create the real issue and (b) stamp the
+    authentication label onto attacker content — after which ci-close-merged-beads.py would
+    trust and close the decoy. So an existing issue is accepted as already-migrated ONLY on
+    migration-owned provenance: it already carries MIGRATION_LABEL, or its exact
+    (bd-id, issue_number) pair is recorded in the trusted on-disk checkpoint this migration
+    wrote. A marker-only issue with neither is returned as `unverifiable` and the caller FAILS
+    CLOSED (no label, no mapping, no create) for operator review.
+
+    Returns (id_map, backfill, unverifiable): id_map = accepted {bd-id: number}; backfill = the
+    subset needing MIGRATION_LABEL stamped (checkpoint-verified but not yet labeled);
+    unverifiable = marker-only {bd-id: number} matches with no provenance."""
+    id_map = dict(trusted)
+    backfill, unverifiable = {}, {}
+    for bid, num in unverified.items():
+        if bid in id_map:
+            continue  # an authenticated issue exists; the marker-only copy is a decoy/dup — inert
+        if checkpoint_map.get(bid) == num:
+            id_map[bid] = num
+            backfill[bid] = num
+        else:
+            unverifiable[bid] = num
+    return id_map, backfill, unverifiable
 
 
 def _body(bead, bid):
@@ -225,13 +269,34 @@ def _ensure_marker(repo, num, marker):
 def apply_migration(repo, open_ids, blockers, parents, limit=None, checkpoint="/tmp/bd-migration-map.json"):
     """Resumable: pass 1 upserts issues by bd-id marker (checkpointing the map); pass 2 idempotently
     adds Blocked-by:/Parent: markers. Re-running creates nothing new."""
-    id_map = fetch_bd_map(repo)
+    trusted, unverified = fetch_bd_map(repo)
+    try:
+        ckpt = json.load(open(checkpoint, encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        ckpt = {}
+    id_map, backfill, unverifiable = resolve_resume_map(trusted, unverified, ckpt)
     ids = list(open_ids)[: limit] if limit else list(open_ids)
+    # Fail closed (PR #2528 review round 2): a marker-only issue with NO migration provenance
+    # (not labeled, not in the trusted checkpoint) may be an attacker decoy pre-created to
+    # capture a bd-id. Refuse to label it, map to it, OR create a competing issue — stop for
+    # operator review instead.
+    bad = {b: n for b, n in unverifiable.items() if b in set(ids)}
+    if bad:
+        raise SystemExit(
+            f"refusing --apply: {len(bad)} existing issue(s) carry a bd-id body marker but have "
+            f"NO migration provenance (no '{MIGRATION_LABEL}' label, not in the checkpoint) — "
+            f"possible decoys; review + label or close them manually: "
+            f"{sorted((b, '#' + str(n)) for b, n in bad.items())[:10]}")
     # Pre-flight: the FULL label set exists before the first create (fail-loud, item 10).
     ensure_labels(repo, {l for bid in ids for l in issue_labels(open_ids[bid])})
     created = 0
     for bid in ids:                                  # pass 1
         if bid in id_map:
+            if bid in backfill:
+                # Resume: backfill the authentication label — ONLY on a checkpoint-verified
+                # issue this migration created before MIGRATION_LABEL existed (idempotent).
+                _run(["gh", "issue", "edit", str(id_map[bid]), "-R", repo,
+                      "--add-label", MIGRATION_LABEL])
             continue
         id_map[bid] = _create_issue(repo, bid, open_ids[bid])
         created += 1
@@ -264,6 +329,8 @@ def _self_test():
     chk("whitelist drops free-form tags", got & {"from:agent", "effort:M", "tier:fable", "roadmap",
                                                  "federation", "noir"}, set())
     chk("adds priority+role", {"priority:P2", "role:impl"} <= got, True)
+    # every migrated issue carries the authentication label the autoclose mapping requires
+    chk("stamps the migration authentication label", MIGRATION_LABEL in got, True)
     # security keyword survives the whitelist (soundness routing depends on it downstream)
     chk("keeps security keyword", "area:sparq-zk" in issue_labels(
         {"priority": 1, "issue_type": "feature", "labels": ["area:sparq-zk", "from:x"]}), True)
@@ -292,6 +359,25 @@ def _self_test():
     chk("plain feature not gated", externally_gated(
         {"id": "sq-a", "title": "feat(core): add a parser fast-path",
          "description": "speed up ingest"}), False)
+    # Resume provenance (PR #2528 review round 2): an attacker-authored body-only marker that
+    # PRECEDES migration must be neither label-backfilled nor accepted as the canonical mapping —
+    # it surfaces as unverifiable and apply_migration fails closed for operator review.
+    idm, bf, unv = resolve_resume_map({}, {"sq-target": 7}, {})
+    chk("pre-migration decoy is not accepted as the mapping", "sq-target" in idm, False)
+    chk("pre-migration decoy is never label-backfilled", bf, {})
+    chk("pre-migration decoy surfaces as unverifiable (fail closed)", unv, {"sq-target": 7})
+    # A decoy alongside the real labeled issue is inert: the labeled issue wins, no backfill.
+    idm, bf, unv = resolve_resume_map({"sq-real": 5}, {"sq-real": 6}, {})
+    chk("labeled issue is canonical; shadowing decoy is inert",
+        (idm, bf, unv), ({"sq-real": 5}, {}, {}))
+    # Checkpoint provenance: a pre-label legacy issue THIS migration created resumes + backfills…
+    idm, bf, unv = resolve_resume_map({}, {"sq-legacy": 9}, {"sq-legacy": 9})
+    chk("checkpoint-verified legacy issue resumes and backfills",
+        (idm, bf, unv), ({"sq-legacy": 9}, {"sq-legacy": 9}, {}))
+    # …but only on an EXACT (bd-id, number) match — a different issue number is unverifiable.
+    idm, bf, unv = resolve_resume_map({}, {"sq-legacy": 9}, {"sq-legacy": 8})
+    chk("checkpoint number mismatch stays unverifiable", (idm, bf, unv),
+        ({}, {}, {"sq-legacy": 9}))
     print("bd-to-issues self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
 
