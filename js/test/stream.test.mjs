@@ -185,6 +185,10 @@ test('queryBindings accepts only the supported default RDF/JS query context', as
     /not supported/,
   );
   await assert.rejects(
+    store.queryBindings('SELECT ?s WHERE { ?s ?p ?o }', { sources: [] }),
+    /context\.sources.*not supported/,
+  );
+  await assert.rejects(
     store.queryBindings('SELECT ?s WHERE { ?s ?p ?o }', {
       queryFormat: { language: 'sparql', version: '1.2' },
     }),

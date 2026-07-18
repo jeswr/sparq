@@ -293,14 +293,18 @@ export class SparqStore implements RDF.StringSparqlQueryable<RDF.BindingsResultS
    * `data` listener starts flowing; `pause()` / `resume()` provide backpressure, `read()` pulls
    * one row manually, and terminal failures are delivered through `error` without a following
    * `end`. `destroy()` deterministically frees a paused/abandoned cursor. Use {@link query} when
-   * a synchronous materialised array is more convenient. The optional RDF/JS context accepts
-   * the default SPARQL 1.1 query format; base IRIs, query timestamps, and format extensions are
-   * rejected because the wasm cursor cannot apply them.
+   * a synchronous materialised array is more convenient. The optional RDF/JS context accepts the
+   * default SPARQL 1.1 query format; sources, base IRIs, query timestamps, and format extensions
+   * are rejected because the wasm cursor cannot apply them.
    */
   async queryBindings(
     sparql: string,
     context?: RDF.QueryStringContext,
   ): Promise<SparqResultStream<Bindings>> {
+    // [GPT-5.6] #3429: reject on presence so an explicitly empty source override is not ignored.
+    if (context?.sources !== undefined) {
+      throw new Error('queryBindings context.sources is not supported');
+    }
     if (context?.baseIRI !== undefined || context?.queryTimestamp !== undefined) {
       throw new Error('queryBindings context.baseIRI and context.queryTimestamp are not supported');
     }
