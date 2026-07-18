@@ -151,10 +151,16 @@ def _self_test():
         # 8: not untriaged at all -> out of scope
         iss(8, ["status:ready", "priority:P1", "role:impl"]),
         # 9: orchestrator-bot author is trusted
-        iss(9, ["status:untriaged", "priority:P2", "kind:test"], author=TRUSTED_BOT),
+        # [OPUS-4.8] (#2474 CI-fix) area:sparq-core so triage can reach status:ready — a no-area
+        # issue fail-closes to needs:area (it would reserve the serializing __global__ partition),
+        # so promotion REQUIRES an area, exactly as a real minted follow-on now carries one.
+        iss(9, ["status:untriaged", "priority:P2", "kind:test", "area:sparq-core"], author=TRUSTED_BOT),
         # 10 (#2474): flow-on follow-up minted by github-actions[bot] with NO status:* label
-        # (the GITHUB_TOKEN event-suppression class) -> default P3 -> promotes
-        iss(10, ["flow-on", "auto", "docs"], author=FLOW_ON_MINTER),
+        # (the GITHUB_TOKEN event-suppression class) -> default P3 -> promotes.
+        # [OPUS-4.8] (#2474 CI-fix) carries area:docs, matching how flow-on-rules.toml now mints
+        # every follow-on with an area:<crate> (a no-area issue can never reach status:ready —
+        # triage fail-closes it to needs:area to keep it out of the __global__ partition).
+        iss(10, ["flow-on", "auto", "docs", "area:docs"], author=FLOW_ON_MINTER),
         # 11 (#2474): github-actions[bot] WITHOUT the flow-on label -> no blanket bot trust
         iss(11, ["status:untriaged", "priority:P1", "kind:ci"], author=FLOW_ON_MINTER),
         # 12 (#2474): flow-on issue already routed (has a status:*) -> out of scope, no churn
