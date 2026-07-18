@@ -5,6 +5,12 @@
 #![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
 
 mod eval;
+// [FABLE-5] (sq-uz0) sh:shapesGraph / owl:imports shapes-graph ASSEMBLY
+// (W3C SHACL §§3.1/3.3 (shapes-graph)) — OPT-IN behind the `imports` cargo feature so the base
+// validation path carries zero assembly code when off. Zero new dependencies:
+// a pure traversal over `GraphView` + `Dict` the crate already uses.
+#[cfg(feature = "imports")]
+pub mod imports;
 pub mod model;
 pub mod path;
 mod report;
@@ -36,6 +42,10 @@ pub use report::{
 // [OPUS-4.8] (sq-v0b8) SHACL Compact Syntax parser public surface (feature `scs`).
 #[cfg(feature = "scs")]
 pub use scs::{parse as parse_scs, parse_to_graph as parse_scs_to_graph, ScsError, DEFAULT_BASE};
+
+// [FABLE-5] (sq-uz0) Shapes-graph assembly public surface (feature `imports`).
+#[cfg(feature = "imports")]
+pub use imports::{resolve_imports, resolve_shapes_graph, ShapesGraphResolution};
 
 // [OPUS-4.8] SHACL-AF rules + node-expression public surface (feature `shacl-af`).
 #[cfg(feature = "shacl-af")]
@@ -161,7 +171,11 @@ impl std::fmt::Display for ShaclFailure {
         if let Some(first) = self.pre_binding.first() {
             write!(f, " — e.g. {}: {}", first.node, first.message)?;
         } else if let Some(first) = self.ill_formed.first() {
-            write!(f, " — e.g. {} at {}: {}", first.predicate, first.node, first.message)?;
+            write!(
+                f,
+                " — e.g. {} at {}: {}",
+                first.predicate, first.node, first.message
+            )?;
         }
         Ok(())
     }
@@ -336,7 +350,10 @@ mod tests {
         let r = validate(&graph, &graph);
         assert_eq!(r.results.len(), 1, "one Warning result expected");
         // Only sh:Violation is disallowed, so the Warning result still conforms.
-        assert!(r.conforms, "Warning result must conform under the custom set");
+        assert!(
+            r.conforms,
+            "Warning result must conform under the custom set"
+        );
         // Without the override (default set) the same Warning would NOT conform.
         let g2 = g.replace("sh:conformanceDisallows sh:Violation", "");
         let graph2 = Graph::load_str(&g2, "turtle").unwrap();
@@ -379,10 +396,9 @@ mod tests {
         let graph = Graph::load_str(g, "turtle").unwrap();
         let r = validate(&graph, &graph);
         assert!(!r.conforms, "reifier (q=false) must fail q in (true)");
-        assert!(r
-            .results
-            .iter()
-            .any(|res| res.source_component.ends_with("ReifierShapeConstraintComponent")));
+        assert!(r.results.iter().any(|res| res
+            .source_component
+            .ends_with("ReifierShapeConstraintComponent")));
     }
 
     /// [OPUS-4.8] (sq-0mjfd) `sh:uniqueLang` distinguishes base direction: two
@@ -455,7 +471,11 @@ mod tests {
         // Three ex:Person instances are the focus nodes; ex:Robot is not targeted.
         assert_eq!(count_focus_nodes(&data, &model), 3);
         // A graph with no instances of the targeted class selects zero focus nodes.
-        let empty = Graph::load_str("@prefix ex: <http://example.org/> . ex:x a ex:Other .", "turtle").unwrap();
+        let empty = Graph::load_str(
+            "@prefix ex: <http://example.org/> . ex:x a ex:Other .",
+            "turtle",
+        )
+        .unwrap();
         assert_eq!(count_focus_nodes(&empty, &model), 0);
     }
 
@@ -631,7 +651,11 @@ mod tests {
         assert!(!r.conforms, "{}", r.to_text());
         assert_eq!(r.results.len(), 1, "{}", r.to_text());
         // The constraint-level sh:severity overrode the shape's default Violation.
-        assert!(r.results[0].severity.ends_with("Warning"), "{}", r.to_text());
+        assert!(
+            r.results[0].severity.ends_with("Warning"),
+            "{}",
+            r.to_text()
+        );
     }
 
     /// The Turtle rendering must itself be valid Turtle.
@@ -691,8 +715,16 @@ mod tests {
         assert!(!r.conforms);
         assert_eq!(r.results.len(), 1);
         assert!(r.conforms_violations_only());
-        assert_eq!(r.results_with_severity("http://www.w3.org/ns/shacl#Warning").count(), 1);
-        assert_eq!(r.results_with_severity("http://www.w3.org/ns/shacl#Violation").count(), 0);
+        assert_eq!(
+            r.results_with_severity("http://www.w3.org/ns/shacl#Warning")
+                .count(),
+            1
+        );
+        assert_eq!(
+            r.results_with_severity("http://www.w3.org/ns/shacl#Violation")
+                .count(),
+            0
+        );
         // Default severity is sh:Violation: both notions of conformance fail.
         let r = validate(&data, &shapes("sh:Violation"));
         assert!(!r.conforms);
@@ -700,7 +732,10 @@ mod tests {
         // A sh:Debug result is below the default threshold: conforms is true even
         // though a result is reported (the violations-only toggle agrees).
         let r = validate(&data, &shapes("sh:Debug"));
-        assert!(r.conforms, "Debug result must not break default conformance");
+        assert!(
+            r.conforms,
+            "Debug result must not break default conformance"
+        );
         assert_eq!(r.results.len(), 1);
         assert!(r.conforms_violations_only());
         // Conforming data conforms under both.
@@ -810,7 +845,11 @@ mod tests {
         // The point of the test is that this returns at all (no stack overflow). The cycle is
         // treated as conforming, and no constraint forces a violation.
         let r = validate(&data, &shapes);
-        assert!(r.conforms, "cyclic sh:property must terminate and conform: {}", r.to_text());
+        assert!(
+            r.conforms,
+            "cyclic sh:property must terminate and conform: {}",
+            r.to_text()
+        );
     }
 
     // [OPUS-4.8] Regression for review 1616 (implicit class shape discovery): a node that is an
@@ -841,7 +880,11 @@ mod tests {
         )
         .unwrap();
         let r = validate(&data, &shapes);
-        assert!(!r.conforms, "implicit class shape must validate its instances: {}", r.to_text());
+        assert!(
+            !r.conforms,
+            "implicit class shape must validate its instances: {}",
+            r.to_text()
+        );
         assert!(r
             .results
             .iter()
@@ -958,9 +1001,7 @@ mod tests {
         );
         assert_eq!(
             res.source_shape,
-            oxrdf::Term::NamedNode(
-                oxrdf::NamedNode::new("http://example.org/TestShape").unwrap()
-            ),
+            oxrdf::Term::NamedNode(oxrdf::NamedNode::new("http://example.org/TestShape").unwrap()),
             "sh:sourceShape must remain the shape node"
         );
         assert_ne!(
@@ -1062,7 +1103,11 @@ mod tests {
         for i in 0..60 {
             // Even i => age negative (violates the sh:sparql); every 7th also lacks a
             // name (violates the core minCount) — exercising mixed components/foci.
-            let age = if i % 2 == 0 { -(i as i64) - 1 } else { i as i64 };
+            let age = if i % 2 == 0 {
+                -(i as i64) - 1
+            } else {
+                i as i64
+            };
             data.push_str(&format!("ex:n{} a ex:Person ; ex:age {} .\n", i, age));
             if i % 7 != 0 {
                 data.push_str(&format!("ex:n{} ex:name \"n{}\" .\n", i, i));
@@ -1135,7 +1180,10 @@ mod tests {
         const N: usize = 2000;
         let mut data = String::from("@prefix ex: <http://example.org/> .\n");
         for i in 0..N {
-            data.push_str(&format!("ex:s{} a ex:Student ; ex:takesCourse ex:c{} .\n", i, i));
+            data.push_str(&format!(
+                "ex:s{} a ex:Student ; ex:takesCourse ex:c{} .\n",
+                i, i
+            ));
             // Half the courses are graduate courses → half the students violate.
             if i % 2 == 0 {
                 data.push_str(&format!("ex:c{} a ex:GraduateCourse .\n", i));
@@ -1250,12 +1298,14 @@ mod expression_tests {
         // A node expression that DOES evaluate to { true } conforms — here a
         // `shnex:exists` over an existing path value.
         let data = g("ex:i a ex:C ; ex:p ex:v .");
-        let shapes = g(
-            "ex:C a rdfs:Class, sh:NodeShape ; \
-             sh:expression [ shnex:exists [ sh:path ex:p ] ] .",
-        );
+        let shapes = g("ex:C a rdfs:Class, sh:NodeShape ; \
+             sh:expression [ shnex:exists [ sh:path ex:p ] ] .");
         let r = validate(&data, &shapes);
-        assert!(r.conforms, "exists ex:p => true => conforms: {}", r.to_text());
+        assert!(
+            r.conforms,
+            "exists ex:p => true => conforms: {}",
+            r.to_text()
+        );
     }
 
     #[test]
@@ -1263,12 +1313,10 @@ mod expression_tests {
         // `sh:expression` on a property shape applies per path value node; here the
         // value (5) satisfies a matchAll-over-minInclusive-3 ⇒ exists ⇒ true.
         let data = g("ex:i a ex:C ; ex:age 5 .");
-        let shapes = g(
-            "ex:C a rdfs:Class, sh:NodeShape ; \
+        let shapes = g("ex:C a rdfs:Class, sh:NodeShape ; \
              sh:property [ sh:path ex:age ; \
                sh:expression [ shnex:exists [ shnex:nodes [ shnex:var \"focusNode\" ] ; \
-                 shnex:matchAll [ sh:minInclusive 3 ] ] ] ] .",
-        );
+                 shnex:matchAll [ sh:minInclusive 3 ] ] ] ] .");
         let r = validate(&data, &shapes);
         assert!(
             r.conforms,
@@ -1288,12 +1336,10 @@ mod expression_tests {
         // assignee lacks the required `ex:email`, so it does NOT conform => one
         // violation with the value node and component IRI.
         let data = g("ex:issue a ex:Issue ; ex:assignedTo ex:anon . ex:anon a ex:Person .");
-        let shapes = g(
-            "ex:AssignedToShape a sh:NodeShape ; \
+        let shapes = g("ex:AssignedToShape a sh:NodeShape ; \
                sh:property [ sh:path ex:email ; sh:minCount 1 ] . \
              ex:Issue a rdfs:Class, sh:NodeShape ; \
-               sh:property [ sh:path ex:assignedTo ; sh:nodeByExpression ex:AssignedToShape ] .",
-        );
+               sh:property [ sh:path ex:assignedTo ; sh:nodeByExpression ex:AssignedToShape ] .");
         let r = validate(&data, &shapes);
         assert!(!r.conforms, "{}", r.to_text());
         assert!(
@@ -1311,16 +1357,12 @@ mod expression_tests {
     fn node_by_expression_conforming_value_passes() {
         // The same constraint, but the assignee carries the required email, so it
         // conforms to the computed node shape and there is no violation.
-        let data = g(
-            "ex:issue a ex:Issue ; ex:assignedTo ex:jane . \
-             ex:jane a ex:Person ; ex:email \"jane@ex.org\" .",
-        );
-        let shapes = g(
-            "ex:AssignedToShape a sh:NodeShape ; \
+        let data = g("ex:issue a ex:Issue ; ex:assignedTo ex:jane . \
+             ex:jane a ex:Person ; ex:email \"jane@ex.org\" .");
+        let shapes = g("ex:AssignedToShape a sh:NodeShape ; \
                sh:property [ sh:path ex:email ; sh:minCount 1 ] . \
              ex:Issue a rdfs:Class, sh:NodeShape ; \
-               sh:property [ sh:path ex:assignedTo ; sh:nodeByExpression ex:AssignedToShape ] .",
-        );
+               sh:property [ sh:path ex:assignedTo ; sh:nodeByExpression ex:AssignedToShape ] .");
         let r = validate(&data, &shapes);
         assert!(
             r.conforms,
@@ -1339,13 +1381,11 @@ mod expression_tests {
             "ex:obs a ex:Observation ; ex:value -1 ; ex:hasShape ex:RangeShape . \
              ex:s a ex:DataShape ; ex:item ex:obs .",
         );
-        let shapes = g(
-            "ex:RangeShape a sh:NodeShape ; \
+        let shapes = g("ex:RangeShape a sh:NodeShape ; \
                sh:property [ sh:path ex:value ; sh:minInclusive 0 ] . \
              ex:DataShape a rdfs:Class, sh:NodeShape ; \
                sh:property [ sh:path ex:item ; \
-                 sh:nodeByExpression [ sh:path ex:hasShape ] ] .",
-        );
+                 sh:nodeByExpression [ sh:path ex:hasShape ] ] .");
         let r = validate(&data, &shapes);
         assert!(!r.conforms, "value -1 < 0 must violate: {}", r.to_text());
         assert!(
