@@ -180,7 +180,7 @@ def _self_test():
     ci = compute_ready([iss(8, R + ["priority:P1", "role:ci", "area:ci"])])
     row = plan_dispatch(ci, doc)[0]
     chk("ci -> frontier-only row", (row["role"], row["model_chain"], row["agent"], row["escalate"]),
-        ("ci", ["fable", "terra"], "sparq-ci-infra", False))
+        ("ci", ["fable", "sol"], "sparq-ci-infra", False))
     chk("ci row has no sub-frontier tier", sorted(set(row["model_chain"]) & {"sonnet", "haiku"}), [])
 
     # --- Fixture: package-conflict pair → only the higher-priority one is planned ----------------
