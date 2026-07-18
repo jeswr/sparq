@@ -105,10 +105,12 @@ From the binding/packaging workflows (when those surfaces are exercised):
 > publishes the full at-scale series to the `benchmark-data` branch the Pages dashboard reads — the
 > perf-tracking is moved, not lost. The weekly heavy EC2 campaign (`bench-ec2.yml` `ec2-bench`) and
 > release/dist workflows remain non-gating (release/dist fire only on tags). The **Scorecard** workflow
-> (`scorecard.yml`) re-scores posture on push to `main` and feeds the code-scanning
-> dashboard; **CodeQL** would feed it the same way, but is operationally disabled
-> (manual workflow-disable — see the OPERATIONALLY DISABLED note), so Scorecard is currently the
-> only feeder and no `CodeQL analysis (rust)` per-PR check-run is produced.
+> (`scorecard.yml`) re-scores posture on push to `main` and feeds the public OpenSSF
+> dashboard/badge (its SARIF upload to GitHub code-scanning is disabled and the job has
+> no `security-events: write` — see the Scorecard note later in this document); with
+> **CodeQL** operationally disabled (manual workflow-disable — see the OPERATIONALLY
+> DISABLED note), nothing currently feeds GitHub code-scanning and no
+> `CodeQL analysis (rust)` per-PR check-run is produced.
 >
 > **No branch-protection ruleset change is required for this benchmark relocation.** The live ruleset
 > requires exactly one context (`gate`), never the `bench` job by name, and the aggregator discovers the
