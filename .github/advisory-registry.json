@@ -141,9 +141,9 @@
    "registered": "2026-07-15"
   },
   "fast-fix ring (advisory)": {
-   "workflow": "ci-summary.yml",
+   "workflow": "fast-fix-ring.yml",
    "owner_bead": "sq-6vshe",
-   "promotion_criteria": "advisory while the fail-fast fix-agent ring is proving out: the ring only notifies the registry doorbell after a gating-leg failure and must never gate the PR itself; promote (or fold into the gate job) once ring-triggered fixes have run reliably for a few weeks",
+   "promotion_criteria": "not promotable to a gate: the ring runs post-hoc via workflow_run (on ci-summary completion), never on a PR/merge_group head commit, so it produces no gating check-run by design (sparq-org/sparq#3474 moved it here so the REGISTRY_RING_TOKEN doorbell is unreachable from PR-head content); it only notifies the registry doorbell after a gating-leg failure and must never gate a PR",
    "registered": "2026-07-18"
   }
  }

@@ -1,0 +1,171 @@
+# fast-fix-ring — the FAST-FIX RING, moved OFF the PR-head trust boundary
+# (sparq-org/sparq#3474, HIGH). [OPUS-4.8] 🤖 SPARQ agent.
+#
+# WHY THIS IS ITS OWN `workflow_run` WORKFLOW (the security fix):
+# The ring's only privileged capability is the cross-repo `REGISTRY_RING_TOKEN`
+# doorbell (it dispatches jeswr/agent-account-registry). Previously the ring lived
+# as the `fix-ring` job INSIDE ci-summary.yml, which triggers on `pull_request`.
+# For a `pull_request` event GitHub takes the WORKFLOW DEFINITION from the PR HEAD,
+# and same-repo agent branches (sparq-agent/*) are granted repository secrets — so a
+# malicious or compromised agent PR that merely EDITED ci-summary.yml could read and
+# exfiltrate REGISTRY_RING_TOKEN. That is issue #3474.
+#
+# The secure pattern is `workflow_run`: this workflow runs ONLY after ci-summary has
+# completed, GitHub ALWAYS executes the copy of THIS file that lives on the DEFAULT
+# BRANCH (never the PR head's copy), and the job runs privileged but ISOLATED from any
+# PR-head content — the run does not (and must not) check out or execute anything from
+# the head SHA. A PR that edits this file on its branch changes NOTHING about the run
+# that fires for it; only a change merged to the default branch takes effect (and that
+# passes through review + branch protection). REGISTRY_RING_TOKEN is therefore no
+# longer reachable from PR-head-controlled content. See §ADVERSARIAL below.
+#
+# WHAT IT DOES (unchanged behaviour, ported verbatim from the old fix-ring job): when
+# the ci-summary `gate` REDs on a pull_request run for a PIPELINE-OWNED PR (armed for
+# auto-merge, or labeled review:pass / review:changes; never drafts or the human-owned
+# review:needs-user / needs:user holds), ring the registry dispatcher so its repair
+# sweep enumerates the red PR NOW instead of on the next ~10-min cron tick. The
+# registry's ci-fix admission is derived from the PR's GATE STATE (its PLAN snapshots
+# per-PR CI status), so ringing is sufficient; deliberately NO needs:ci-fix label
+# fallback — the registry enumerator treats needs:* PR labels as HUMAN-owned holds that
+# EXCLUDE a PR from the repair loop, so a label would do the OPPOSITE of triggering a
+# fix. Without the token (fork PR head / secret unconfigured) the job fail-softs with a
+# notice and the registry cron remains the backstop.
+#
+# ADVISORY / NON-GATING (unchanged). This workflow is a SIDE EFFECT of a red gate, not
+# part of the gate. It runs via `workflow_run` on a PAST run's completion, so it
+# produces NO check-run on any PR / merge_group head commit and is therefore NOT on the
+# `ci-summary / gate` poll set — it can never become a required check and can never
+# affect a merge (same non-gating argument selection-alarm.yml relies on). The job name
+# retains the "advisory" token for continuity with the advisory-registry entry
+# (.github/advisory-registry.json, key "fast-fix ring (advisory)") and the sq-wjth
+# exclusion rule, even though the workflow_run placement already makes it structurally
+# non-gating.
+#
+# All third-party actions (none are used here — the job is pure `gh api`) would be
+# SHA-pinned per the Scorecard posture. This workflow deliberately performs NO checkout.
+#
+# §ADVERSARIAL (self-check answers recorded for #3474):
+#  (1) Can PR-head content still influence the privileged job? NO. workflow_run always
+#      loads THIS file from the default branch; the job never checks out or executes
+#      head content, and reads only server-side API state (labels/draft/arm) by PR
+#      NUMBER. There is no `run` step that interpolates untrusted PR text into the
+#      shell, and no ${{ github.event.workflow_run.* }} value is expanded inside a
+#      `run:` script (all are passed through `env:` and quoted) — no script injection.
+#  (2) Does the head_sha -> PR lookup admit a spoofed cross-repo PR? NO. The lookup is
+#      constrained to the SAME repository: it takes the workflow_run.pull_requests entry
+#      (which GitHub populates ONLY for same-repo PRs) first, and its `gh api
+#      .../commits/<sha>/pulls` fallback filters to pulls whose head.repo.full_name ==
+#      this repo. A fork PR (pull_requests empty AND no same-repo PR at that SHA) is
+#      SKIPPED — fork heads have no secrets and cannot ring anyway.
+#  (3) Confused-deputy — could the ring fire for a PR the failing run didn't belong to?
+#      NO. The PR is bound to the failing run's OWN head SHA
+#      (github.event.workflow_run.head_sha) — either via that run's pull_requests list
+#      or the same-repo pulls-at-SHA lookup — so the ring always targets the PR whose CI
+#      actually failed. The live-state re-read is by that same resolved PR number.
+#  (4) workflow_run recursion — can this workflow trigger itself? NO. It triggers ONLY
+#      on completion of the workflow named `ci-summary`; it is not itself named
+#      `ci-summary` and it emits no ci-summary run. It also gates on
+#      workflow_run.event == 'pull_request', and this workflow has no pull_request
+#      trigger, so nothing it does can re-enter it.
+name: fast-fix-ring
+
+on:
+  # Fire after ci-summary completes. ci-summary's `name:` is exactly `ci-summary`,
+  # and `workflow_run.workflows` keys on that workflow NAME. The job `if:` below
+  # narrows to a FAILED pull_request run; workflow_run always executes the
+  # default-branch copy of this file (the whole point of the #3474 fix).
+  workflow_run:
+    workflows: ["ci-summary"]
+    types: [completed]
+
+# The job's own GITHUB_TOKEN needs only to READ the PR's live labels/draft/arm state.
+# The one WRITE capability is the cross-repo REGISTRY_RING_TOKEN doorbell, which is a
+# SEPARATE token consumed inside the step — not a permission of this GITHUB_TOKEN.
+permissions:
+  contents: read
+
+# One in-flight ring per triggering ci-summary run.
+concurrency:
+  group: fast-fix-ring-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  ring:
+    name: fast-fix ring (advisory)
+    # Only a FAILED ci-summary run that fired from a pull_request. `workflow_run`
+    # exposes the triggering run's own conclusion + originating event; a
+    # push/merge_group ci-summary failure is NOT a PR and cannot ring. `failure`
+    # excludes cancelled/superseded gate runs, matching the old `failure()` guard.
+    if: >-
+      github.event.workflow_run.conclusion == 'failure'
+      && github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: read
+    steps:
+      - name: Resolve the PR for the failed run and ring the registry dispatcher
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REGISTRY_RING_TOKEN: ${{ secrets.REGISTRY_RING_TOKEN }}
+          REPO: ${{ github.repository }}
+          # The failing run's OWN head SHA — binds the ring to the PR whose CI
+          # actually failed (confused-deputy guard #3). Passed through env (never
+          # interpolated into the script body) so no PR-controlled value can inject.
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          # Same-repo PRs GitHub already associated with the triggering run. Empty
+          # for fork PRs (which have no secrets and cannot ring anyway).
+          RUN_PR_NUMBER: ${{ (github.event.workflow_run.pull_requests[0] != null) && github.event.workflow_run.pull_requests[0].number || '' }}
+        run: |
+          set -euo pipefail
+
+          # --- Derive the PR number, SAME-REPO only (spoof guard #2 / deputy #3) ---
+          PR_NUMBER="${RUN_PR_NUMBER}"
+          if [ -z "${PR_NUMBER}" ]; then
+            # pull_requests is empty for fork PRs and can be empty for same-repo PRs
+            # whose association GitHub hasn't attached to the run; look the PR up by
+            # the failing run's head SHA, but ONLY accept a pull whose head repo is
+            # THIS repo (a fork PR — or a spoofed cross-repo PR at the same SHA —
+            # is filtered out and the job skips).
+            if ! pulls="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/pulls" \
+                --jq "[.[] | select(.head.repo.full_name == \"${REPO}\" and .state == \"open\")] | .[0].number // empty")"; then
+              echo "::notice::could not look up a PR for the failed run's head SHA — skipping (the registry cron is the backstop)."
+              exit 0
+            fi
+            PR_NUMBER="${pulls}"
+          fi
+          if [ -z "${PR_NUMBER}" ]; then
+            echo "no same-repo PR is associated with the failed run's head SHA (fork PR, or the run was not a same-repo PR) — nothing to ring; skipping."
+            exit 0
+          fi
+
+          # --- Live PR state — labels/arming churn between the trigger and here ---
+          # (ported verbatim from the former ci-summary fix-ring job.)
+          if ! state="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" \
+              --jq '{draft: .draft, armed: (.auto_merge != null), labels: [.labels[].name]}')"; then
+            echo "::notice::could not read live PR state — skipping the ring (the registry cron is the backstop)."
+            exit 0
+          fi
+          has() { jq -e --arg l "$1" '.labels | index($l) != null' <<<"$state" >/dev/null; }
+          if [ "$(jq -r '.draft' <<<"$state")" = "true" ]; then
+            echo "PR re-drafted since the trigger — not pipeline-owned for fast-fix; skipping."
+            exit 0
+          fi
+          if has "review:needs-user" || has "needs:user"; then
+            echo "human-owned hold (review:needs-user / needs:user) — the repair loop must not pick this PR up; skipping."
+            exit 0
+          fi
+          if [ "$(jq -r '.armed' <<<"$state")" != "true" ] && ! has "review:pass" && ! has "review:changes"; then
+            echo "PR is neither armed nor in the review pipeline (review:pass / review:changes) — skipping."
+            exit 0
+          fi
+          if [ -z "${REGISTRY_RING_TOKEN}" ]; then
+            # NO needs:ci-fix label fallback, deliberately: the registry PLAN
+            # derives ci-fix admission from the PR's gate STATE and treats
+            # needs:* PR labels as human-owned holds that EXCLUDE the PR from
+            # the repair enumeration — a label here would suppress the fix.
+            echo "::notice::REGISTRY_RING_TOKEN unavailable (fork head or secret unconfigured) — cannot ring; the registry cron (every ~10 min) is the backstop."
+            exit 0
+          fi
+          GH_TOKEN="${REGISTRY_RING_TOKEN}" gh workflow run dispatch.yml -R jeswr/agent-account-registry
+          echo "rang jeswr/agent-account-registry dispatch for PR #${PR_NUMBER} — the repair sweep runs now instead of on the next cron tick."
