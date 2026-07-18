@@ -4,7 +4,20 @@
 # `owl:TransitiveProperty` axiom, the ALCHS ∀₊ rule, and its oracle/blocking tests.
 # Compose it with `dispatch` so this leg also executes the feature-gated
 # DirectChecker consistency/entailment path rather than compiling those tests empty.
+# This leg (dispatch WITHOUT dispatch_ql) also keeps the deferred QL arm
+# (`QlConsistencyPending` + its test) executing in CI. [FABLE-5] sq-fj8lj
 - name: "sparq-reason-dl (dl_transitive — ALCHS transitive-role tableau)"
   crate: "sparq-reason-dl"
   features: "dispatch,dl_transitive"
+  test: true
+
+# [FABLE-5] sq-fj8lj: `dispatch_ql` graduates the QL dispatch branch — it delegates to
+# sparq-reason-ql's `ql-consistency` DL-Lite_R checker (sq-p6yb7) instead of abstaining
+# `QlConsistencyPending`. Composed with `dl_transitive` (matching the leg above, and so
+# clippy's `-D warnings` sees no dl_transitive-only dead code) — this leg is the ONLY
+# executor of the graduated branch + its `dispatch_ql` tests outside the (heavier)
+# sparq-conformance `dl-direct` lane.
+- name: "sparq-reason-dl (dispatch_ql — graduated DL-Lite_R QL consistency branch)"
+  crate: "sparq-reason-dl"
+  features: "dispatch,dl_transitive,dispatch_ql"
   test: true
