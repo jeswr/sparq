@@ -635,6 +635,13 @@ SHACL-spec-correct conforms/violations).
   `regex` crate's error), so the skip is not silent. Earlier this wrongly flagged
   EVERY value. To express a "must NOT start with X" check, use a POSITIVE-match
   `sh:sparql` `REGEX(?str, "^\\s*(TODO|...)")` constraint (flag when it matches) instead.
+- **XPath-regex divergences are translated, not passed through (sq-8ro).** `sh:pattern`
+  is matched by the Rust `regex` crate, but the XPath/XSD constructs it lacks are
+  translated first (`eval.rs::compose_pattern`): the `q` flag in `sh:flags` gives XPath
+  F&O literal-pattern mode (only `i` combines with it, matching the engine's SPARQL
+  `REGEX`), and `\i` / `\I` / `\c` / `\C` (XML NameStartChar / NameChar classes and
+  complements) expand to explicit character classes — including inside `[...]`, via
+  nested classes. Look-around remains genuinely unsupported → the sq-lz99x skip path.
 - **Results are NOT deduplicated** across traversal routes / component occurrences — a
   nested shape reached via two parents reports twice (intentional, matches the suite).
 - **Recursion is treated as conforming.** Re-entering the same (focus, shape) pair
