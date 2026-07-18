@@ -242,8 +242,16 @@ jobs:
             rust=true
             docker=true
             ok=true
-            git fetch --no-tags --quiet origin "${MG_BASE_SHA}" "${MG_HEAD_SHA}" 2>/dev/null \
-              || git fetch --no-tags --quiet origin "${MG_BASE_SHA}" 2>/dev/null \
+            # --depth=2147483647 (git's INFINITE_DEPTH; --unshallow that is also
+            # valid on a complete repo): this job's checkout is depth-1, and the
+            # classifier's three-dot diff needs the merge-base — a shallow SHA
+            # fetch leaves both commits PRESENT (the cat-file guards pass) but
+            # unconnected, so `git diff base...head` dies with "no merge base"
+            # and the fail-safe would silently force class=engine on EVERY
+            # batch, reducing this whole gate to a no-op. Same rationale as
+            # ci-select.yml's fetch-depth: 0 checkout.
+            git fetch --no-tags --quiet --depth=2147483647 origin "${MG_BASE_SHA}" "${MG_HEAD_SHA}" 2>/dev/null \
+              || git fetch --no-tags --quiet --depth=2147483647 origin "${MG_BASE_SHA}" 2>/dev/null \
               || ok=false
             git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null || ok=false
             git cat-file -e "${MG_HEAD_SHA}^{commit}" 2>/dev/null || ok=false

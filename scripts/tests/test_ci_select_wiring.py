@@ -1380,6 +1380,26 @@ class TestMergeGroupChangeClassGate(unittest.TestCase):
             self.assertEqual(str(env.get("MG_HEAD_SHA", "")),
                              "${{ github.event.merge_group.head_sha }}", wf_name)
 
+    def test_batch_diff_fetch_deepens_the_shallow_checkout(self):
+        # The `changes` job checks out at the default depth 1. A plain SHA fetch
+        # leaves base_sha/head_sha PRESENT but unconnected (both cat-file guards
+        # pass), and the classifier's three-dot diff then dies with "no merge
+        # base" — the fail-safe would force class=engine on EVERY batch,
+        # silently reducing the whole gate to a no-op. Every fetch in the
+        # merge_group branch must therefore deepen to full history
+        # (--depth=2147483647 == --unshallow, but valid on complete repos too —
+        # the same merge-base rationale as ci-select.yml's fetch-depth: 0).
+        for wf_name, step in self._both():
+            run = str(step.get("run", ""))
+            fetches = [ln for ln in run.splitlines() if "git fetch" in ln]
+            self.assertTrue(fetches, f"{wf_name}: merge_group branch must fetch the SHA pair")
+            for ln in fetches:
+                self.assertIn(
+                    "--depth=2147483647", ln,
+                    f"{wf_name}: every batch-diff fetch must deepen the shallow "
+                    f"checkout or the three-dot diff has no merge base "
+                    f"(permanent fail-safe => the gate never skips): {ln.strip()!r}")
+
     def test_classification_is_delegated_not_duplicated(self):
         for wf_name, step in self._both():
             run = str(step.get("run", ""))

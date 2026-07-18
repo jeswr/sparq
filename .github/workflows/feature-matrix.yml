@@ -205,8 +205,13 @@ jobs:
             # (fail-safe).
             rust=true
             ok=true
-            git fetch --no-tags --quiet origin "${MG_BASE_SHA}" "${MG_HEAD_SHA}" 2>/dev/null \
-              || git fetch --no-tags --quiet origin "${MG_BASE_SHA}" 2>/dev/null \
+            # --depth=2147483647 (--unshallow, valid on complete repos too): the
+            # depth-1 checkout leaves the three-dot diff with no merge-base — a
+            # shallow SHA fetch passes the cat-file guards yet the diff dies, so
+            # the fail-safe would force class=engine on EVERY batch (silent
+            # no-op gate). Full rationale: ci.yml's decide step.
+            git fetch --no-tags --quiet --depth=2147483647 origin "${MG_BASE_SHA}" "${MG_HEAD_SHA}" 2>/dev/null \
+              || git fetch --no-tags --quiet --depth=2147483647 origin "${MG_BASE_SHA}" 2>/dev/null \
               || ok=false
             git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null || ok=false
             git cat-file -e "${MG_HEAD_SHA}^{commit}" 2>/dev/null || ok=false
