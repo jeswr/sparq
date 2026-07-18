@@ -39,6 +39,14 @@ struct TboxExpander {
     subclass_up: FxHashMap<Id, Vec<Id>>,
     /// `property → all transitively-reachable superproperties` (rdfs:subPropertyOf closure).
     subprop_up: FxHashMap<Id, Vec<Id>>,
+    /// `class → all transitive subclasses` — the reverse closure, needed for SOUND
+    /// candidate generation: entities entail an inferred `(rdf:type, C)` element via
+    /// triples typing them with any subclass of C. [FABLE-5]
+    subclass_down: FxHashMap<Id, Vec<Id>>,
+    /// `property → all transitive subproperties` — the reverse closure, needed for
+    /// SOUND candidate generation: entities entail an inferred `(dir, P, N)` element
+    /// via triples under any subproperty of P. [FABLE-5]
+    subprop_down: FxHashMap<Id, Vec<Id>>,
 }
 
 /// Sorted IRI local-name index for the lexical fallback tier (`lexical` feature).
@@ -77,7 +85,10 @@ pub struct SimConfig {
     /// Cargo feature): expand `rdf:type` elements with inferred superclass entries
     /// from the graph's own `rdfs:subClassOf` closure, and every predicate element
     /// with its `rdfs:subPropertyOf` superproperties. Inferred entries contribute at
-    /// `original_weight × 0.5`. Builds the closure once in [`Sim::with_config`].
+    /// `original_weight × 0.5`. `most_similar` candidate generation scans the reverse
+    /// (subclass / subproperty) closure of inferred elements, so entities sharing only
+    /// an inferred element — e.g. sibling subproperties of a common superproperty —
+    /// are still retrieved. Builds both closures once in [`Sim::with_config`].
     #[cfg(feature = "tbox")]
     pub tbox_aware: bool,
     /// Lexical fallback tier (default `true`, available with the `lexical` Cargo
@@ -427,15 +438,64 @@ impl<'g> Sim<'g> {
             // The candidates sharing this element are one contiguous range; which
             // pattern (and which row column holds the candidate) depends on the
             // direction and mode.
-            let (pattern, sorted_by): (Pattern, usize) = match (self.mode, dir) {
-                // Who else has (p, n) outgoing? subjects of (?, p, n) — POS range.
-                (SignatureMode::PredicateNeighbor, OUT) => ([None, Some(p), Some(n)], 0),
-                // Who else has (p, n) incoming? objects of (n, p, ?) — SPO range.
-                (SignatureMode::PredicateNeighbor, _) => ([Some(n), Some(p), None], 2),
-                // Predicate-profile mode: every subject / object of p's block.
-                (SignatureMode::Predicates, OUT) => ([None, Some(p), None], 0),
-                (SignatureMode::Predicates, _) => ([None, Some(p), None], 2),
+            let pattern_for = |cp: Id, cn: Id| -> (Pattern, usize) {
+                match (self.mode, dir) {
+                    // Who else has (p, n) outgoing? subjects of (?, p, n) — POS range.
+                    (SignatureMode::PredicateNeighbor, OUT) => ([None, Some(cp), Some(cn)], 0),
+                    // Who else has (p, n) incoming? objects of (n, p, ?) — SPO range.
+                    (SignatureMode::PredicateNeighbor, _) => ([Some(cn), Some(cp), None], 2),
+                    // Predicate-profile mode: every subject / object of p's block.
+                    (SignatureMode::Predicates, OUT) => ([None, Some(cp), None], 0),
+                    (SignatureMode::Predicates, _) => ([None, Some(cp), None], 2),
+                }
             };
+            let (pattern, sorted_by) = pattern_for(p, n);
+            // T-box-aware generation: an INFERRED element (superproperty, or a
+            // superclass neighbor of rdf:type) can have zero direct triples — other
+            // entities entail it only via triples under a transitive SUBproperty of
+            // `p` (or typing them with a transitive SUBclass of `n`). Scanning just
+            // the direct pattern would miss those candidates even though re-scoring
+            // gives them a positive similarity, so when the element has a non-empty
+            // down-closure every concrete pattern is scanned, deduping candidates
+            // across scans so each receives this element's weight exactly once.
+            // The hub cap applies per concrete pattern (same documented
+            // approximation as the direct path). [FABLE-5]
+            #[cfg(feature = "tbox")]
+            if let Some(tbox) = &self.tbox {
+                let sub_preds: &[Id] =
+                    tbox.subprop_down.get(&p).map(Vec::as_slice).unwrap_or_default();
+                let is_type_elem = self.mode == SignatureMode::PredicateNeighbor
+                    && dir == OUT
+                    && p == tbox.rdf_type
+                    && tbox.rdf_type != NO_ID;
+                let sub_classes: &[Id] = if is_type_elem {
+                    tbox.subclass_down.get(&n).map(Vec::as_slice).unwrap_or_default()
+                } else {
+                    &[]
+                };
+                if !sub_preds.is_empty() || !sub_classes.is_empty() {
+                    let mut seen: rustc_hash::FxHashSet<Id> = rustc_hash::FxHashSet::default();
+                    for &cp in std::iter::once(&p).chain(sub_preds) {
+                        for &cn in std::iter::once(&n).chain(sub_classes) {
+                            let (pattern, sorted_by) = pattern_for(cp, cn);
+                            if self.graph.store.estimate(&pattern) > self.max_pair_frequency {
+                                continue; // hub pattern: skipped (documented approximation)
+                            }
+                            let scan = self.graph.store.scan_sorted(&pattern, sorted_by);
+                            for row in scan.rows.iter() {
+                                let cand = scan.to_spo(row)[sorted_by];
+                                if Some(cand) == exclude || !self.is_entity(cand) {
+                                    continue;
+                                }
+                                if seen.insert(cand) {
+                                    *acc.entry(cand).or_insert(0.0) += w;
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+            }
             if self.graph.store.estimate(&pattern) > self.max_pair_frequency {
                 continue; // hub element: skipped (documented approximation)
             }
@@ -768,7 +828,22 @@ fn build_tbox_expander(graph: &Graph) -> TboxExpander {
         rdf_type,
         subclass_up: tbox_transitive_closure(&sc_direct),
         subprop_up: tbox_transitive_closure(&sp_direct),
+        subclass_down: tbox_transitive_closure(&tbox_invert(&sc_direct)),
+        subprop_down: tbox_transitive_closure(&tbox_invert(&sp_direct)),
     }
+}
+
+/// Reverse a `node → direct successors` edge map (`successor → direct predecessors`),
+/// so the same closure walk produces the DOWN closures. [FABLE-5]
+#[cfg(feature = "tbox")]
+fn tbox_invert(direct: &FxHashMap<Id, Vec<Id>>) -> FxHashMap<Id, Vec<Id>> {
+    let mut inverted: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    for (&sub, supers) in direct {
+        for &sup in supers {
+            inverted.entry(sup).or_default().push(sub);
+        }
+    }
+    inverted
 }
 
 /// BFS transitive closure: `node → all reachable successors` in a directed graph
@@ -829,9 +904,11 @@ fn lexical_key_of(parts: &dict::TermParts<'_>) -> Option<String> {
     }
 }
 
-/// Character-trigram Jaccard similarity of two strings: `|tri(a) ∩ tri(b)| / |tri(a) ∪ tri(b)|`.
-/// Falls back to a longest-common-byte-prefix ratio for strings shorter than 3 bytes.
-/// Returns `1.0` for two identical empty strings. [SONNET-4.6] sq-181
+/// Character-trigram Jaccard similarity of two strings: `|tri(a) ∩ tri(b)| / |tri(a) ∪ tri(b)|`,
+/// with trigrams built over `char`s — a multi-byte character occupies ONE trigram
+/// position, never split across its UTF-8 bytes. Falls back to a longest-common-prefix
+/// ratio over characters for strings shorter than 3 characters. Returns `1.0` for two
+/// identical empty strings. [SONNET-4.6] sq-181 · char-trigram fix [FABLE-5]
 #[cfg(feature = "lexical")]
 fn trigram_jaccard(a: &str, b: &str) -> f64 {
     if a.is_empty() && b.is_empty() {
@@ -840,15 +917,16 @@ fn trigram_jaccard(a: &str, b: &str) -> f64 {
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
-    let min_len = a.len().min(b.len());
-    if min_len < 3 {
-        let lcp = a.bytes().zip(b.bytes()).take_while(|(x, y)| x == y).count();
-        return lcp as f64 / a.len().max(b.len()) as f64;
+    let ca: Vec<char> = a.chars().collect();
+    let cb: Vec<char> = b.chars().collect();
+    if ca.len().min(cb.len()) < 3 {
+        let lcp = ca.iter().zip(cb.iter()).take_while(|(x, y)| x == y).count();
+        return lcp as f64 / ca.len().max(cb.len()) as f64;
     }
-    let ta: rustc_hash::FxHashSet<[u8; 3]> =
-        a.as_bytes().windows(3).map(|w| [w[0], w[1], w[2]]).collect();
-    let tb: rustc_hash::FxHashSet<[u8; 3]> =
-        b.as_bytes().windows(3).map(|w| [w[0], w[1], w[2]]).collect();
+    let ta: rustc_hash::FxHashSet<[char; 3]> =
+        ca.windows(3).map(|w| [w[0], w[1], w[2]]).collect();
+    let tb: rustc_hash::FxHashSet<[char; 3]> =
+        cb.windows(3).map(|w| [w[0], w[1], w[2]]).collect();
     let inter = ta.iter().filter(|t| tb.contains(*t)).count();
     let union = ta.len() + tb.len() - inter;
     if union == 0 { 1.0 } else { inter as f64 / union as f64 }
@@ -1741,6 +1819,46 @@ mod tests {
         assert_eq!(sa_plain.weights, sa_tbox.weights, "weights must be identical without hierarchy");
     }
 
+    /// Sibling-subproperty RETRIEVAL: `:a :p1 :n` and `:b :p2 :n` share ONLY the
+    /// T-box-inferred `(OUT, :p, :n)` element (`:p1`, `:p2` ⊑ `:p`); no triple uses
+    /// `:p` directly, so candidate generation must scan the subproperty down-closure
+    /// of the inferred element — a direct-pattern scan finds nothing. All fallback
+    /// tiers are disabled so the test cannot pass vacuously. [FABLE-5]
+    #[cfg(feature = "tbox")]
+    #[test]
+    fn tbox_most_similar_finds_sibling_subproperty_entities() {
+        let g = graph(
+            ":p1 <http://www.w3.org/2000/01/rdf-schema#subPropertyOf> :p .
+             :p2 <http://www.w3.org/2000/01/rdf-schema#subPropertyOf> :p .
+             :a :p1 :n .
+             :b :p2 :n .",
+        );
+        let mut cfg = SimConfig { idf: false, profile_fallback: false, ..SimConfig::default() };
+        #[cfg(feature = "lexical")]
+        {
+            cfg.lexical_fallback = false;
+        }
+        // Without T-box awareness (and no fallbacks) :b is unreachable from :a.
+        let plain = Sim::with_config(&g, SimConfig { tbox_aware: false, ..cfg.clone() });
+        assert!(
+            plain.most_similar(&iri("a"), 5).is_empty(),
+            "without T-box, :a and :b share no element"
+        );
+        let tbox_sim = Sim::with_config(&g, cfg);
+        // Direct similarity is positive via the shared inferred (:p, :n) element …
+        let pairwise = tbox_sim.similarity(&iri("a"), &iri("b"));
+        assert!(pairwise > 0.0, "expanded signatures must share (:p, :n)");
+        // … and RETRIEVAL must agree: :b is only generated by scanning (?, :p2, :n)
+        // from the down-closure of the inferred element.
+        let top = tbox_sim.most_similar(&iri("a"), 5);
+        let b_score = top
+            .iter()
+            .find(|(t, _)| t.to_string() == "<http://ex.org/b>")
+            .map(|&(_, s)| s)
+            .expect("sibling-subproperty entity :b must be retrieved");
+        assert_eq!(b_score, pairwise, "retrieval score must equal the pairwise score");
+    }
+
     // ---- lexical feature tests ----------------------------------------------------
 
     /// `trigram_jaccard` sanity: identical strings → 1, disjoint → 0, partial → (0,1).
@@ -1757,6 +1875,23 @@ mod tests {
         // Short-string fallback
         assert_close(trigram_jaccard("ab", "ab"), 1.0);
         assert_eq!(trigram_jaccard("ab", "cd"), 0.0);
+    }
+
+    /// `trigram_jaccard` operates on CHARACTER trigrams, not UTF-8 bytes: a
+    /// multi-byte character is one trigram position, and the short-string gate
+    /// counts characters. Every expected value here differs from what byte-window
+    /// trigrams would produce. [FABLE-5]
+    #[cfg(feature = "lexical")]
+    #[test]
+    fn trigram_jaccard_uses_character_trigrams() {
+        // Char trigrams: {hél, éll, llo} vs {hal, all, llo} → 1/5. Byte windows
+        // would split the two-byte `é` into 4-vs-3 trigrams sharing one → 1/6.
+        assert_close(trigram_jaccard("héllo", "hallo"), 0.2);
+        // Two CHARACTERS (six bytes) take the short-string LCP path: 1 shared
+        // leading char / 2 → 0.5. Byte windows would score 1/7 via trigrams.
+        assert_close(trigram_jaccard("日本", "日中"), 0.5);
+        // Identical two-char non-ASCII strings → 1.0 via the char LCP path.
+        assert_close(trigram_jaccard("日本", "日本"), 1.0);
     }
 
     /// Lexical fallback finds entities with similar IRI local names even when
