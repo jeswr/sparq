@@ -253,7 +253,10 @@ The five public entry points, in contract order:
    `trustx:requiresValidStatusAt`, a non-UTC `xsd:dateTime`, a malformed `did:` issuer,
    or a `TR` naming **no trust mode** (neither `trustx:trustsIssuer` nor
    `trustx:trustsFramework` — such a document admits nothing and is refused up front,
-   never evaluated vacuously).
+   never evaluated vacuously). `trustx:question` is an **opaque label** at this layer:
+   it is parsed for presence and IRI-ness but never resolved or compared against the
+   query, so the question↔query association is a caller-owned trust boundary (envelope
+   authentication / trusted question resolution — see the module's honest-scope docs).
 2. **`rewrite_query(&envelope)`** — the §3.1 normative reference rewrite `Q → Q'`: each
    of `Q`'s triple patterns is wrapped in a `GRAPH ?g { … }` over the holder's
    attestation bundles and conjoined with issuer-membership (mode 1), positive

@@ -9,7 +9,7 @@
 //! freshness scheme). This module:
 //!
 //! 1. **parses the envelope** ([`parse_envelope`]) — fail-closed on a missing /
-//!    duplicated requirements node, a missing question binding, a missing status
+//!    duplicated requirements node, a missing question IRI, a missing status
 //!    instant, a malformed `did:` issuer (validated through the [`crate::did`]
 //!    binding layer), or a requirements document with **no trust mode** (which
 //!    would admit nothing and is refused up front rather than silently evaluated);
@@ -72,7 +72,16 @@
 //! what the holder disclosed (design §7.3). The `trustx:methodPolicy` pre-check
 //! is IRI-bound to `TR` (a [`MethodPrecheck`] for a different policy is
 //! refused), but resolving the named IRI into the policy's constraints remains
-//! caller-owned — see the [`MethodPrecheck`] trust boundary. Framework trust is **anchored, not
+//! caller-owned — see the [`MethodPrecheck`] trust boundary. `trustx:question`
+//! is an **opaque label, not an enforced binding**: parsing checks that `TR`
+//! names exactly one question IRI, but nothing at this layer resolves or
+//! compares that IRI against `Q` (there is no canonical question-IRI → query
+//! resolution or digest scheme to check it against), so a `TR` authored for one
+//! question paired with a different supported query is accepted here. Verifying
+//! that `Q` *is* the named question — e.g. a signature over the whole
+//! `(Q, TR, nonce)` envelope, or a trusted publication resolving the question
+//! IRI to a canonical query — is caller-owned, exactly like the
+//! [`MethodPrecheck`] resolution (design §7.7). Framework trust is **anchored, not
 //! proven** (§7.2). No ZK claim is made here; the ZK realisation is bead
 //! `sq-6syab.5` on `sparq-zk-compose`, and the sparq ZK estate remains
 //! internally re-audited with **external accredited-cryptographer sign-off
@@ -130,7 +139,7 @@ pub enum ExpressionError {
     /// The requirements graph declares more than one `trustx:TrustRequirements`
     /// node — v1 carries exactly one (OR composes *within* it, design D2).
     MultipleRequirements,
-    /// The requirements node has no (or a non-IRI) `trustx:question` binding.
+    /// The requirements node has no (or a non-IRI) `trustx:question` value.
     MissingQuestion,
     /// The requirements node has no `trustx:requiresValidStatusAt` instant —
     /// without *t* there is no status check to conjoin.
@@ -200,7 +209,7 @@ impl fmt::Display for ExpressionError {
             Self::MultipleRequirements => {
                 write!(f, "more than one trustx:TrustRequirements node (v1 carries exactly one)")
             }
-            Self::MissingQuestion => write!(f, "missing or non-IRI trustx:question binding"),
+            Self::MissingQuestion => write!(f, "missing or non-IRI trustx:question value"),
             Self::MissingValidStatusAt => {
                 write!(f, "missing trustx:requiresValidStatusAt instant")
             }
@@ -276,7 +285,11 @@ pub struct TrustEnvelope {
 /// syntax).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustRequirements {
-    /// The `trustx:question` IRI binding `TR` to `Q`.
+    /// The `trustx:question` IRI — an **opaque label** naming the question
+    /// `TR` was authored for. Parse-time checks presence and IRI-ness only;
+    /// this layer never resolves or compares it against `Q`, so the
+    /// question↔query association is a caller-owned trust boundary (see the
+    /// module docs' honest scope).
     pub question: NamedNode,
     /// **Mode 1** (enumerated parties): the issuer identities whose attributed
     /// statements are admissible. `did:` IRIs are syntax-validated through
@@ -1344,6 +1357,37 @@ mod tests {
         assert_eq!(
             parse_envelope(ASK_AGE, &no_t, "n"),
             Err(ExpressionError::MissingValidStatusAt)
+        );
+    }
+
+    #[test]
+    fn question_iri_is_an_opaque_label_never_compared_with_the_query() {
+        // The DOCUMENTED trust boundary (module docs, honest scope): the
+        // question IRI names the question TR was authored for, but nothing at
+        // this layer resolves or verifies it against Q — a TR minted for
+        // `urn:q1` paired with a DIFFERENT supported query still parses,
+        // evaluates, and re-checks. Verifying that Q is the named question
+        // (envelope authentication / trusted question resolution) is
+        // caller-owned; if an in-band binding is ever enforced, this test must
+        // flip to a rejection.
+        let tr = tr_triples(&[ISS_X], &[], None, None); // question = urn:q1
+        let q = format!("ASK {{ <urn:jesse> <{}> ?name }}", FOAF_NAME);
+        let env = parse_envelope(&q, &tr, "n").expect("unrelated query accepted");
+        assert_eq!(env.requirements.question.as_str(), "urn:q1");
+
+        let mut d = String::new();
+        d.push_str(&format!("<urn:b1> <{}> <{}> .\n", PROV_WAS_ATTRIBUTED_TO, ISS_X));
+        d.push_str(&status_lines("urn:b1", "urn:st1", "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z"));
+        d.push_str(&format!(
+            "GRAPH <urn:b1> {{ <urn:jesse> <{}> \"Jesse\" . }}\n",
+            FOAF_NAME
+        ));
+        let holder = Graph::load_dataset(&d, "trig").expect("fixture parses");
+        let out = evaluate_contract(&env, &holder, None).expect("evaluates");
+        assert_eq!(out.answer, ContractAnswer::Boolean(true));
+        assert_eq!(
+            verify_response(&env, &out.response).expect("re-checks"),
+            ContractAnswer::Boolean(true)
         );
     }
 
