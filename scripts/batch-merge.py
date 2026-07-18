@@ -47,10 +47,15 @@
 #             was evidence against a stale base, not against any constituent): v1
 #             close only — never bisection, never quarantine; close-and-recreate
 #             rebuilds a fresh root off current main in the same run.
-#       (ii)  head `gate` CONCLUDED in strict FAILURE — live because the omnibus is
-#             pushed/created with the sparq-orchestrator App token, so head
-#             pull_request CI fires on it like on any worker PR. This is the ONLY
-#             constituent-fault signal: the omnibus BISECTS (below).
+#       (ii)  head `gate` CONCLUDED in strict FAILURE on a DEFINITIVELY MERGEABLE
+#             head — live because the omnibus is pushed/created with the
+#             sparq-orchestrator App token, so head pull_request CI fires on it like
+#             on any worker PR. This is the ONLY constituent-fault signal: the
+#             omnibus BISECTS (below). Mergeability UNKNOWN/unreported is NOT
+#             definitive (after main advances GitHub reports UNKNOWN before
+#             resolving — possibly to CONFLICTING, which must never implicate
+#             anyone): the omnibus WAITS untouched that run; only the age-expiry
+#             NON-culpable close may act on a persistently-unresolved omnibus.
 #       (iii) head `gate` concluded cancelled / timed_out, OR the omnibus is OLDER
 #             than MAX_OMNIBUS_AGE_HOURS (stamp parsed from its branch name — the
 #             liveness backstop for every head-invisible failure mode: a merge-group
@@ -60,9 +65,14 @@
 #             cascade would double the node count every pass, 2->4->8->16, then
 #             expire the singleton leaves and flood the queue) — and NO same-run
 #             root rebuild; a new root waits out ROOT_COOLDOWN_HOURS (below).
-#     Bisection (case ii only): SURVIVORS = the failing omnibus's marker constituents
-#     that are still OPEN PRs, still armed-eligible (per-PR re-check of rule 1) and
-#     NOT already empty vs main. Then:
+#     Bisection (case ii only): CAUSAL = the failing omnibus's marker constituents
+#     whose code is IN the failed head and not cleanly excluded — the only clean
+#     exclusion is positive evidence the code already LANDED (empty vs main).
+#     SURVIVORS = the CAUSAL constituents that are also still OPEN PRs, still
+#     armed-eligible (per-PR re-check of rule 1). ELIGIBILITY IS NOT CAUSALITY: a
+#     constituent that became draft/unarmed/relabeled/closed WITHOUT landing still
+#     has its code in the failed head — it may be the actual culprit, so it BLOCKS
+#     single-survivor conviction (below) even though it cannot be re-batched. Then:
 #       * >=2 survivors, depth < DEPTH_CAP: close the parent (the comment NAMES both
 #         child branches) + delete its branch, and create TWO child omnibuses (first /
 #         second half of the survivors, ascending order preserved) at depth+1 with the
@@ -70,8 +80,8 @@
 #         exempt from the one-open-omnibus rule below); a singleton CHILD is legal —
 #         MIN_CONSTITUENTS applies to ROOT creation only, and a singleton child is
 #         exactly how a culprit gets isolated.
-#       * exactly 1 survivor AND the parent's head `gate` CONCLUDED in strict FAILURE:
-#         THE CULPRIT. It is NOT closed. It is commented (machine marker
+#       * exactly 1 survivor, the parent's head `gate` CONCLUDED in strict FAILURE,
+#         AND the CAUSAL set is exactly that survivor: THE CULPRIT. It is NOT closed. It is commented (machine marker
 #         `sparq-omnibus-culprit:v1`), converted to DRAFT (`gh pr ready --undo`) and
 #         disarmed — in THAT order (crash safety, 6b). Draft + unarmed + review:pass is
 #         the registry's `stranded` posture, which escalates loudly to a human
@@ -80,6 +90,12 @@
 #         child-omnibus head — so a gate-keyed ci-fix admission can never see it;
 #         stranded IS the guaranteed-closure handoff. The parent omnibus closes as in
 #         v1.
+#       * exactly 1 survivor but a LARGER causal set (a code-bearing sibling became
+#         ineligible without landing): conviction is UNSOUND — the parent closes and
+#         a fresh singleton RE-TEST child carrying only the survivor is created off
+#         current main (its failure IS sound evidence). When no child can be created
+#         (hygiene-only, depth cap, truncated census) the non-culpable v1 close runs
+#         instead: never quarantine on ambiguous causality.
 #       * exactly 1 survivor on a NON-verdict failure: unreachable by construction
 #         since only case (ii) computes survivors at all, but kept as an in-code
 #         belt-and-braces guard — if bisectability is ever widened again, a survivor
@@ -132,6 +148,14 @@
 #     live omnibus must not lose its branch). Branch deletion is BEST-EFFORT
 #     everywhere (an already-deleted branch is success; a persistent delete failure
 #     logs loudly but never blocks the child/root creation planned after it).
+#  9. PROVENANCE. A PR is classified as an omnibus RECORD — for the open (close /
+#     bisect / quarantine / root-suppression), merged (constituent closure), cooldown
+#     and stale-branch legs alike — ONLY when its head is SAME-REPOSITORY and its
+#     author is the orchestrator App (the pipeline's trusted identity,
+#     sparq-orchestrator[bot]). A fork or non-App PR with a spoofed sparq-omnibus/
+#     prefix is ignored with a loud log: it can never draft/disarm a constituent nor
+#     wedge root creation. Its branch (if same-repo) is still protected from stale
+#     deletion while the PR is open — deleting under ANY open PR is destructive.
 #
 # TOKENS. The omnibus branch/PR MUST be pushed + created with the sparq-orchestrator App
 # installation token: GITHUB_TOKEN-created refs/PRs get their workflow events SUPPRESSED,
@@ -225,8 +249,10 @@ def log(msg: str) -> None:
 
 
 def author_handle(login: str) -> str:
-    # gh reports app authors either as "app/<name>" or bare — normalise.
-    return (login or "").split("/")[-1].lower()
+    # gh reports app authors as "app/<name>", "<name>[bot]" (REST-shaped, the form
+    # retriage.py's TRUSTED_BOT pins) or bare — normalise all three to "<name>".
+    h = (login or "").split("/")[-1].lower()
+    return h[: -len("[bot]")] if h.endswith("[bot]") else h
 
 
 def is_release_plz(pr: dict) -> bool:
@@ -250,6 +276,24 @@ def armed_by_orchestrator(pr: dict) -> bool:
     if not isinstance(am, dict):
         return False
     return author_handle(str(am.get("enabled_by", ""))) == ORCHESTRATOR_APP
+
+
+def is_trusted_omnibus(pr: dict) -> bool:
+    """True iff this PR may be CLASSIFIED as an omnibus record at all.
+
+    Three provenance legs, ALL required — the same same-repo + App-identity trust the
+    rest of the pipeline applies (retriage.py's TRUSTED_BOT / the enumerator's
+    same-repo head rule): (1) the sparq-omnibus/ head prefix, (2) a SAME-REPOSITORY
+    head (is_cross_repository must be explicitly False — a fork can name its branch
+    anything), (3) orchestrator-App authorship (the only identity that ever creates an
+    omnibus, see TOKENS). A fork or non-App PR with a spoofed sparq-omnibus/ prefix
+    must NEVER drive any omnibus classification — open (close / bisect / QUARANTINE /
+    root-suppression), merged (constituent closure), cooldown, or stale-branch —
+    because that would let an outsider draft/disarm innocent constituents or wedge
+    root creation."""
+    return (pr.get("head_ref", "").startswith(OMNIBUS_PREFIX)
+            and pr.get("is_cross_repository") is False
+            and author_handle(pr.get("author_login", "")) == ORCHESTRATOR_APP)
 
 
 def issue_of(pr: dict):
@@ -445,6 +489,24 @@ def bisect_close_comment(reason: str, child_a: str, child_b: str) -> str:
     )
 
 
+def retest_close_comment(reason: str, child: str, survivor: int, blockers: list) -> str:
+    """Parent-close comment for the AMBIGUOUS-CAUSALITY singleton re-test: conviction
+    on the parent's verdict is impossible while a sibling's code is still in the
+    failed head, so the sole eligible survivor gets a fresh singleton child instead."""
+    sibs = ", ".join(f"#{n}" for n in sorted(blockers))
+    return (
+        f"{SELF_ID} — closing this omnibus: {reason}. NOT convicting sole still-"
+        f"eligible constituent #{survivor}: sibling constituent(s) {sibs} are no "
+        f"longer eligible (drafted / disarmed / relabeled / closed unmerged) but "
+        f"their code is STILL in this failed head, so the failure cannot be pinned "
+        f"on #{survivor}. RE-TESTING instead: fresh singleton child omnibus "
+        f"`{child}` carries ONLY #{survivor} — a failure there is sound evidence "
+        f"against it alone. Every constituent PR remains individually armed "
+        f"throughout.\n\n"
+        f"<!-- sparq-omnibus-failure:v1 bisection=v2 -->"
+    )
+
+
 def quarantine_comment(parent_num: int, reason: str) -> str:
     # The handoff contract is the registry's `stranded` posture (draft + unarmed +
     # review:pass -> loud needs:user escalation), NOT its ci-fix admission: ci-fix
@@ -506,7 +568,10 @@ def creation_actions(repo: str, branch: str, constituents: list, depth: int = 0,
 #   repo: "owner/name"
 #   now:  aware UTC datetime
 #   open_prs: [{number, head_ref, title, author_login, labels[], is_draft,
-#               auto_merge{enabled_by}|None, files[], body, checks[], mergeable}]
+#               auto_merge{enabled_by}|None, files[], body, checks[], mergeable,
+#               is_cross_repository}]   (is_cross_repository: fork-head marker — an
+#                                        omnibus record additionally requires it to
+#                                        be explicitly False, see is_trusted_omnibus)
 #   merged_omnibus: [{number, body}]                    (merged sparq-omnibus/* PRs)
 #   empty_vs_main: {pr_number: bool}                    (branch adds nothing vs main)
 #   remote_omnibus_branches: ["sparq-omnibus/..."]      (live remote refs)
@@ -545,7 +610,19 @@ def plan(state: dict) -> list:
                 note=f"constituent #{num} contained in merged omnibus #{om['number']}"))
 
     # ---- 6+7. failure path v2 (recursive bisection) + re-arm liveness ----
-    open_omnibus = [p for p in open_prs if p.get("head_ref", "").startswith(OMNIBUS_PREFIX)]
+    # PROVENANCE GATE (impersonation guard): only a trusted omnibus — same-repo head
+    # + orchestrator-App author — is CLASSIFIED as one. A spoofed sparq-omnibus/
+    # prefix from a fork or non-App author is ignored entirely: it never closes,
+    # never bisects, never quarantines a constituent, and never suppresses a new
+    # root (an outsider must not be able to wedge the batcher by opening a fork PR).
+    prefixed_open = [p for p in open_prs
+                     if p.get("head_ref", "").startswith(OMNIBUS_PREFIX)]
+    open_omnibus = [p for p in prefixed_open if is_trusted_omnibus(p)]
+    for p in prefixed_open:
+        if not is_trusted_omnibus(p):
+            log(f"WARNING: PR #{p['number']} spoofs the omnibus branch prefix "
+                f"({p.get('head_ref', '')}) but is not a same-repository "
+                f"orchestrator-App PR — never classified as an omnibus (ignored)")
     dying_branches = set()
     children_spawned = False   # freshly planned children block a new ROOT this run
     suppress_root = False      # depth-cap fallback: no same-run rebuild of a doomed root
@@ -556,7 +633,8 @@ def plan(state: dict) -> list:
     empty_vs_main = state.get("empty_vs_main", {})
 
     def _survivor(num: int) -> bool:
-        # A marker constituent survives into a child iff it is still an OPEN PR, still
+        # RE-BATCH eligibility (NOT causality — see _causal below): a marker
+        # constituent survives into a child iff it is still an OPEN PR, still
         # armed-eligible (the same per-PR test as root eligibility), and NOT already
         # empty vs main. Unknown emptiness counts as content: an accidentally-empty
         # child merges harmlessly, whereas dropping live work would not.
@@ -566,24 +644,47 @@ def plan(state: dict) -> list:
 
     for om in open_omnibus:
         age = omnibus_age_hours(om.get("head_ref", ""), state["now"])
+        expired = age is None or age > MAX_OMNIBUS_AGE_HOURS
         bisectable = False
-        # Only a strict, CONCLUDED head-gate FAILURE is a constituent-fault signal:
-        # it alone BISECTS, and it alone may CONVICT a singleton survivor
-        # (quarantine). Everything else — a conflict, a cancelled / timed_out gate,
-        # age-expiry — v1-closes without ever implicating a constituent.
+        # Only a strict, CONCLUDED head-gate FAILURE on a DEFINITIVELY MERGEABLE
+        # head is a constituent-fault signal: it alone BISECTS, and it alone may
+        # CONVICT a singleton survivor (quarantine). Everything else — a conflict,
+        # an UNRESOLVED (UNKNOWN/unreported) mergeability, a cancelled / timed_out
+        # gate, age-expiry — v1-closes (or waits) without implicating a constituent.
         culpable = False
         gate_c = gate_conclusion(om)
-        if (om.get("mergeable") or "").upper() == "CONFLICTING":
+        mergeable = (om.get("mergeable") or "").upper()
+        if mergeable == "CONFLICTING":
             # Checked FIRST — BEFORE any gate verdict. Main moved under the omnibus,
             # so even a concluded gate FAILURE on this head was evidence against a
             # stale base, not against any constituent: v1 close only, no bisection,
             # no quarantine — close-and-recreate rebuilds a fresh root off current
             # main. Conflicts must NEVER implicate constituents.
             reason = "it conflicts with `main`"
-        elif gate_c == "failure":
+        elif gate_c == "failure" and mergeable == "MERGEABLE":
             reason = f"its `gate` check concluded in {gate_c}"
             bisectable = True
             culpable = True
+        elif gate_c == "failure":
+            # INDETERMINATE mergeability (UNKNOWN / null / unreported): when main
+            # advances, GitHub reports UNKNOWN before resolving — possibly to
+            # CONFLICTING, and a conflict must NEVER implicate constituents, so a
+            # gate failure without a DEFINITIVE MERGEABLE verdict must not either.
+            # WAIT (no action this run; the still-open omnibus keeps suppressing a
+            # new root); only the age-expiry NON-culpable close may act on a
+            # persistently-unresolved omnibus.
+            if expired:
+                reason = (f"it did not merge within {MAX_OMNIBUS_AGE_HOURS}h of "
+                          f"creation and its mergeability never became definitive "
+                          f"(a gate failure on an unresolved base is not evidence "
+                          f"against any constituent)")
+                infra_closed = True
+            else:
+                log(f"omnibus #{om['number']}: gate concluded in failure but "
+                    f"mergeability is {om.get('mergeable') or 'unreported'!r} — "
+                    f"NOT definitive (main may have moved under it); waiting, no "
+                    f"constituent may be implicated on indeterminate mergeability")
+                continue
         elif gate_c is not None:
             # cancelled / timed_out: infra-shaped (a human-cancelled run, runner
             # starvation), NOT a code verdict — v1 close only, never bisection
@@ -592,7 +693,7 @@ def plan(state: dict) -> list:
             reason = (f"its `gate` check concluded in {gate_c} (infra-shaped — "
                       f"not a verdict against any constituent)")
             infra_closed = True
-        elif age is None or age > MAX_OMNIBUS_AGE_HOURS:
+        elif expired:
             # Liveness backstop: covers every head-invisible failure (merge-group gate
             # failure, dropped arm, checks never reported, unparseable stamp). Also
             # infra-shaped: v1 close only, never bisection, no same-run rebuild.
@@ -612,7 +713,16 @@ def plan(state: dict) -> list:
             continue
         dying_branches.add(om["head_ref"])
         nums, depth = parse_marker(om.get("body", ""))
-        survivors = [n for n in nums if _survivor(n)] if bisectable else []
+        # CAUSALITY (distinct from eligibility): the set that can be blamed for this
+        # failed head is the marker constituents whose CODE IS IN IT and is not
+        # cleanly excluded. The ONLY clean exclusion is positive evidence the code
+        # already landed on main (empty_vs_main True — it merged through a
+        # gate-green path). A constituent that merely became INELIGIBLE — drafted,
+        # disarmed, relabeled, closed unmerged, or simply absent from the open
+        # listing without an emptiness proof — still has its code in the failed
+        # head and may be the actual culprit.
+        causal = [n for n in nums if not empty_vs_main.get(n, False)] if bisectable else []
+        survivors = [n for n in causal if _survivor(n)]
         if survivors and truncated:
             # A live constituent absent from a TRUNCATED listing would be miscounted
             # as dead — and this census feeds destructive decisions (which halves to
@@ -666,6 +776,49 @@ def plan(state: dict) -> list:
                 f"(depth {depth}) NOT quarantined: {reason} is not a concluded "
                 f"head-gate FAILURE verdict — v1 close, survivor stays armed")
             survivors = []
+        if len(survivors) == 1 and len(causal) > 1:
+            # ELIGIBILITY IS NOT CAUSALITY: another marker constituent's code is
+            # still in the failed head (it became ineligible / closed WITHOUT
+            # landing), so the parent's gate failure cannot convict the lone
+            # still-eligible survivor — the unremoved sibling may be the culprit.
+            # Get FRESH evidence instead: a singleton RE-TEST child carrying only
+            # the survivor, off current main — if THAT fails, its causal set is
+            # exactly {survivor} and conviction is sound. When no child can be
+            # created (hygiene-only / depth cap), take the non-culpable v1 close:
+            # never quarantine on ambiguous causality.
+            blockers = sorted(n for n in causal if n != survivors[0])
+            if not can_create or depth >= DEPTH_CAP:
+                log(f"AMBIGUOUS CAUSALITY: omnibus #{om['number']} (depth {depth}) "
+                    f"failed with sole eligible survivor PR #{survivors[0]}, but "
+                    f"code-bearing ineligible sibling(s) {blockers} are still in "
+                    f"the failed head and no re-test child can be created "
+                    f"(hygiene-only or depth cap) — v1 close, survivor stays armed")
+                if depth >= DEPTH_CAP:
+                    suppress_root = True  # same damper as the >=2 depth-cap fallback
+                survivors = []
+            else:
+                child = omnibus_branch(state["now"], f"-p{om['number']}a")
+                log(f"AMBIGUOUS CAUSALITY: omnibus #{om['number']} (depth {depth}) "
+                    f"failed with sole eligible survivor PR #{survivors[0]}, but "
+                    f"code-bearing ineligible sibling(s) {blockers} are still in "
+                    f"the failed head — singleton RE-TEST child {child} instead of "
+                    f"conviction (never quarantine on ambiguous causality)")
+                actions.append(Action(
+                    "close-omnibus", "gh",
+                    ["pr", "close", str(om["number"]), "--repo", repo,
+                     "--comment", retest_close_comment(reason, child, survivors[0],
+                                                       blockers)],
+                    note=f"omnibus #{om['number']}: {reason} — ambiguous causality, "
+                         f"re-testing #{survivors[0]}"))
+                actions.append(Action(
+                    "delete-branch", "git",
+                    ["push", "origin", "--delete", om["head_ref"]],
+                    note=f"branch of closed omnibus #{om['number']}"))
+                actions += creation_actions(
+                    repo, child, [open_by_num[survivors[0]]],
+                    depth=depth + 1, parent=om["number"], min_ok=1)
+                children_spawned = True
+                continue
         if len(survivors) == 1:
             culprit = survivors[0]
             quarantined.add(culprit)
@@ -717,7 +870,10 @@ def plan(state: dict) -> list:
             f"a live omnibus may be missing from it — skipping stale-branch "
             f"deletion this run (fail-safe)")
     else:
-        live_branches = {p["head_ref"] for p in open_omnibus}
+        # Branch protection deliberately covers UNTRUSTED prefixed PRs too: a spoofed
+        # PR is never CLASSIFIED as an omnibus (above), but deleting a same-repo
+        # branch out from under ANY open PR is destructive — leave it to a human.
+        live_branches = {p["head_ref"] for p in prefixed_open}
         for br in sorted(state.get("remote_omnibus_branches", [])):
             if br in live_branches or br in dying_branches:
                 continue
@@ -807,6 +963,13 @@ def run_git(argv: list, check: bool = True) -> int:
     return subprocess.run(["git"] + argv, check=check).returncode
 
 
+def run_git_out(argv: list, check: bool = True) -> str:
+    """Capture-output git (merge-tree / rev-parse / ls-remote) — a separate seam from
+    run_git so --self-test can stub EVERY subprocess gather_state touches."""
+    return subprocess.run(["git"] + argv, check=check,
+                          capture_output=True, text=True).stdout
+
+
 def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
     """Snapshot the live GitHub/git state the pure plan() consumes.
 
@@ -817,7 +980,8 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
     truncated — constituent liveness would then be unreliable — so the snapshot carries
     open_list_truncated and plan() degrades every bisection decision to a v1 close AND
     suppresses stale-branch deletion + new-root creation (fail-safe)."""
-    fields = "number,headRefName,title,author,labels,isDraft,autoMergeRequest"
+    fields = ("number,headRefName,title,author,labels,isDraft,autoMergeRequest,"
+              "isCrossRepository")
     raw = json.loads(run_gh(["pr", "list", "--repo", repo, "--state", "open",
                              "--limit", str(OPEN_PR_LIST_LIMIT), "--json", fields]))
     open_list_truncated = len(raw) >= OPEN_PR_LIST_LIMIT
@@ -838,13 +1002,17 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
             "is_draft": bool(pr.get("isDraft")),
             "auto_merge": ({"enabled_by": ((am.get("enabledBy") or {}).get("login", ""))}
                            if isinstance(am, dict) else None),
+            "is_cross_repository": bool(pr.get("isCrossRepository")),
             "files": [],  # filled below only for overflow candidates (keeps API calls low)
             "body": "",
-            "mergeable": "",   # filled below for omnibus PRs only
-            "checks": [],      # filled below for omnibus PRs only
+            "mergeable": "",   # filled below for TRUSTED omnibus PRs only
+            "checks": [],      # filled below for TRUSTED omnibus PRs only
         })
     for p in open_prs:
-        if not p["head_ref"].startswith(OMNIBUS_PREFIX):
+        # Heavy fields only for TRUSTED omnibus PRs: a spoofed prefix (fork /
+        # non-App author) is never classified as an omnibus, so its body/marker
+        # must never feed closure, bisection, or the emptiness census.
+        if not is_trusted_omnibus(p):
             continue
         try:
             heavy = json.loads(run_gh(["pr", "view", str(p["number"]), "--repo", repo,
@@ -865,22 +1033,33 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
         except subprocess.CalledProcessError:
             p["files"] = []  # crate column degrades to label/em-dash — non-fatal
 
+    def _rec(raw_pr: dict) -> dict:
+        # Minimal record shape for the is_trusted_omnibus provenance check.
+        return {"head_ref": raw_pr.get("headRefName", ""),
+                "author_login": ((raw_pr.get("author") or {}).get("login", "")),
+                "is_cross_repository": bool(raw_pr.get("isCrossRepository"))}
+
+    # MERGED omnibus records (rule 5 closure) carry the same provenance gate: a
+    # spoofed sparq-omnibus/ PR that somehow merged must never close constituents.
     merged = json.loads(run_gh(["pr", "list", "--repo", repo, "--state", "merged",
                                 "--limit", "50", "--search", "head:sparq-omnibus/",
-                                "--json", "number,headRefName,body"]))
+                                "--json",
+                                "number,headRefName,body,author,isCrossRepository"]))
     merged_omnibus = [{"number": m["number"], "body": m.get("body", "")}
-                      for m in merged
-                      if m.get("headRefName", "").startswith(OMNIBUS_PREFIX)]
+                      for m in merged if is_trusted_omnibus(_rec(m))]
 
     # ROOT_COOLDOWN_HOURS record (rule 6): omnibus PRs closed UNMERGED recently.
     # GitHub's closed-PR list is the stateless batcher's only durable cross-run
-    # memory; "closed" includes merged PRs, so filter on a null mergedAt.
+    # memory; "closed" includes merged PRs, so filter on a null mergedAt. Same
+    # provenance gate: an outsider closing spoofed fork PRs must not be able to
+    # suppress root creation indefinitely.
     closed = json.loads(run_gh(["pr", "list", "--repo", repo, "--state", "closed",
                                 "--limit", "30", "--search", "head:sparq-omnibus/",
-                                "--json", "number,headRefName,closedAt,mergedAt"]))
+                                "--json", "number,headRefName,closedAt,mergedAt,"
+                                "author,isCrossRepository"]))
     recent_omnibus_closures = []
     for c in closed:
-        if not c.get("headRefName", "").startswith(OMNIBUS_PREFIX) or c.get("mergedAt"):
+        if not is_trusted_omnibus(_rec(c)) or c.get("mergedAt"):
             continue
         try:
             recent_omnibus_closures.append(
@@ -895,8 +1074,7 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
     # the constituents of MERGED omnibus PRs (closure, rule 5) AND of OPEN omnibus PRs
     # (the bisection survivor filter, rule 6, must exclude already-landed constituents).
     marker_bodies = ([om["body"] for om in merged_omnibus]
-                     + [p["body"] for p in open_prs
-                        if p["head_ref"].startswith(OMNIBUS_PREFIX)])
+                     + [p["body"] for p in open_prs if is_trusted_omnibus(p)])
     run_git(["fetch", "origin", "main"])
     empty_vs_main: dict = {}
     open_by_num = {p["number"]: p for p in open_prs}
@@ -910,19 +1088,15 @@ def gather_state(repo: str, now: datetime, batch_enabled: bool = True) -> dict:
                 empty_vs_main[num] = False  # unfetchable head: unknown never closes
                 continue
             try:
-                merged_tree = subprocess.run(
-                    ["git", "merge-tree", "--write-tree", "origin/main",
-                     f"origin/{branch}"],
-                    capture_output=True, text=True).stdout.strip().splitlines()
-                main_tree = subprocess.run(
-                    ["git", "rev-parse", "origin/main^{tree}"],
-                    check=True, capture_output=True, text=True).stdout.strip()
+                merged_tree = run_git_out(
+                    ["merge-tree", "--write-tree", "origin/main", f"origin/{branch}"],
+                    check=False).strip().splitlines()
+                main_tree = run_git_out(["rev-parse", "origin/main^{tree}"]).strip()
                 empty_vs_main[num] = bool(merged_tree) and merged_tree[0] == main_tree
             except (subprocess.CalledProcessError, IndexError):
                 empty_vs_main[num] = False
 
-    ls = subprocess.run(["git", "ls-remote", "origin", f"refs/heads/{OMNIBUS_PREFIX}*"],
-                        check=True, capture_output=True, text=True).stdout
+    ls = run_git_out(["ls-remote", "origin", f"refs/heads/{OMNIBUS_PREFIX}*"])
     remote_omnibus_branches = [line.split("refs/heads/", 1)[1]
                                for line in ls.strip().splitlines() if "refs/heads/" in line]
 
@@ -991,7 +1165,7 @@ def execute(actions: list, state: dict, dry_run: bool) -> int:
                 # creation segments planned AFTER this action still have to
                 # execute, and §8 stale hygiene retries the delete next run.
                 if run_git(argv, check=False) != 0:
-                    log(f"WARNING: delete-branch failed"
+                    log("WARNING: delete-branch failed"
                         + (f" [{act.note}]" if act.note else "")
                         + " — non-fatal (already deleted, or retried by the next "
                           "run's stale hygiene); continuing")
@@ -1020,12 +1194,13 @@ def execute(actions: list, state: dict, dry_run: bool) -> int:
 # and the asserts pin exact argv so any policy drift flips the suite red).
 # --------------------------------------------------------------------------------------
 def _pr(num, head, labels=(), armed_by=ORCHESTRATOR_APP, draft=False, author="worker[bot]",
-        title="feat: x", files=(), body="", checks=(), mergeable="MERGEABLE"):
+        title="feat: x", files=(), body="", checks=(), mergeable="MERGEABLE",
+        cross=False):
     return {"number": num, "head_ref": head, "title": title, "author_login": author,
             "labels": list(labels), "is_draft": draft,
             "auto_merge": ({"enabled_by": f"app/{armed_by}"} if armed_by else None),
             "files": list(files), "body": body, "checks": list(checks),
-            "mergeable": mergeable}
+            "mergeable": mergeable, "is_cross_repository": cross}
 
 
 def _worker(num, issue, labels=("review:pass",), **kw):
@@ -1129,7 +1304,7 @@ def self_test() -> int:
           "depth=0 -->" in _body_of(got[-2]), True)
 
     # 4. An OPEN (fresh, armed, mergeable) omnibus PR suppresses a new ROOT.
-    open_om = _pr(200, stamp_branch, author="app/github-actions")  # armed by orchestrator
+    open_om = _pr(200, stamp_branch, author="app/sparq-orchestrator")  # armed by orchestrator
     check("open omnibus suppresses a new root", plan(_state(open_prs=two + [open_om])), [])
 
     # 4b. --hygiene-only NEVER creates an omnibus (no App token: a GITHUB_TOKEN omnibus
@@ -1160,7 +1335,7 @@ def self_test() -> int:
     #    survivors -> plain close + delete branch; an in-progress gate (armed) is left
     #    alone; mergeable UNKNOWN never acts. (Head-gate checks exist on an omnibus
     #    because it is pushed/created with the App token.)
-    failed_om = _pr(400, "sparq-omnibus/20260717T110000Z", author="app/github-actions",
+    failed_om = _pr(400, "sparq-omnibus/20260717T110000Z", author="app/sparq-orchestrator",
                     armed_by=None, checks=gate_fail)
     got = plan(_state(open_prs=[failed_om],
                       branches=["sparq-omnibus/20260717T110000Z"]))
@@ -1170,12 +1345,12 @@ def self_test() -> int:
           "<!-- sparq-omnibus-failure:v1 bisection=v2 -->" in _comment_of(got[0]), True)
     check("branch delete argv", got[1].argv,
           ["push", "origin", "--delete", "sparq-omnibus/20260717T110000Z"])
-    running_om = _pr(401, "sparq-omnibus/20260717T113000Z", author="app/github-actions",
+    running_om = _pr(401, "sparq-omnibus/20260717T113000Z", author="app/sparq-orchestrator",
                      checks=[{"name": "gate", "status": "IN_PROGRESS", "conclusion": ""}])
     check("in-progress gate omnibus untouched",
           plan(_state(open_prs=[running_om],
                       branches=["sparq-omnibus/20260717T113000Z"])), [])
-    unknown_om = _pr(403, "sparq-omnibus/20260717T114500Z", author="app/github-actions",
+    unknown_om = _pr(403, "sparq-omnibus/20260717T114500Z", author="app/sparq-orchestrator",
                      mergeable="UNKNOWN")
     check("mergeable UNKNOWN (fresh, armed) never acts",
           plan(_state(open_prs=[unknown_om])), [])
@@ -1184,15 +1359,15 @@ def self_test() -> int:
     #     failure / dropped arm / checks never reported): an armed, MERGEABLE omnibus
     #     with NO checks at all, older than MAX_OMNIBUS_AGE_HOURS -> close + delete;
     #     a young one (same shape) is untouched; an unparseable stamp = expired.
-    aged_om = _pr(404, "sparq-omnibus/20260717T060000Z", author="app/github-actions")
+    aged_om = _pr(404, "sparq-omnibus/20260717T060000Z", author="app/sparq-orchestrator")
     got = plan(_state(open_prs=[aged_om]))
     check("over-age omnibus closed+deleted", [a.kind for a in got],
           ["close-omnibus", "delete-branch"])
     check("age-close reason names the bound",
           f"did not merge within {MAX_OMNIBUS_AGE_HOURS}h" in _comment_of(got[0]), True)
-    young_om = _pr(405, "sparq-omnibus/20260717T090000Z", author="app/github-actions")
+    young_om = _pr(405, "sparq-omnibus/20260717T090000Z", author="app/sparq-orchestrator")
     check("young armed mergeable omnibus untouched", plan(_state(open_prs=[young_om])), [])
-    bad_stamp_om = _pr(406, "sparq-omnibus/not-a-stamp", author="app/github-actions")
+    bad_stamp_om = _pr(406, "sparq-omnibus/not-a-stamp", author="app/sparq-orchestrator")
     check("unparseable stamp treated as expired",
           [a.kind for a in plan(_state(open_prs=[bad_stamp_om]))],
           ["close-omnibus", "delete-branch"])
@@ -1200,7 +1375,7 @@ def self_test() -> int:
     # 6c. RE-ARM: a young, MERGEABLE omnibus whose auto-merge arm was DROPPED (merge
     #     groups drop the arm on failure) is re-armed idempotently — and still
     #     suppresses a new root.
-    dropped_om = _pr(407, "sparq-omnibus/20260717T090000Z", author="app/github-actions",
+    dropped_om = _pr(407, "sparq-omnibus/20260717T090000Z", author="app/sparq-orchestrator",
                      armed_by=None)
     got = plan(_state(open_prs=[dropped_om]))
     check("dropped arm re-armed", [(a.kind, a.argv) for a in got],
@@ -1221,7 +1396,7 @@ def self_test() -> int:
     #      + delete branch + TWO 3-constituent children at depth=1, both armed; the
     #      (still-eligible) constituents do NOT also get a new root in the same run.
     six = [_worker(200 + i, 920 + i) for i in range(1, 7)]  # 201..206
-    parent6 = _pr(500, "sparq-omnibus/20260717T110000Z", author="app/github-actions",
+    parent6 = _pr(500, "sparq-omnibus/20260717T110000Z", author="app/sparq-orchestrator",
                   armed_by=None, checks=gate_fail,
                   body="<!-- sparq-omnibus:v1 constituents=201,202,203,204,205,206 -->")
     got = plan(_state(open_prs=six + [parent6]))
@@ -1263,7 +1438,7 @@ def self_test() -> int:
     # B-a3. an OVER-AGE omnibus NEVER bisects — age-expiry is infra-shaped (outage /
     #       starvation / head-invisible modes), not a verdict against any constituent:
     #       v1 close only, survivors untouched, no children, no same-run rebuild.
-    aged_parent = _pr(510, "sparq-omnibus/20260717T060000Z", author="app/github-actions",
+    aged_parent = _pr(510, "sparq-omnibus/20260717T060000Z", author="app/sparq-orchestrator",
                       body="<!-- sparq-omnibus:v2 constituents=109,110 depth=0 -->")
     got = plan(_state(open_prs=two + [aged_parent]))
     check("(a3) over-age omnibus: v1 close only — no bisection, no rebuild",
@@ -1273,7 +1448,7 @@ def self_test() -> int:
     #      singleton CHILD is how the culprit gets isolated — MIN_CONSTITUENTS applies
     #      to ROOT creation only), each pushable at min_ok=1.
     pair = [_worker(211, 931), _worker(212, 932)]
-    parent2 = _pr(520, "sparq-omnibus/20260717T110000Z", author="app/github-actions",
+    parent2 = _pr(520, "sparq-omnibus/20260717T110000Z", author="app/sparq-orchestrator",
                   armed_by=None, checks=gate_fail,
                   body="<!-- sparq-omnibus:v2 constituents=211,212 depth=1 -->")
     got = plan(_state(open_prs=pair + [parent2]))
@@ -1294,7 +1469,7 @@ def self_test() -> int:
     #      the arm platform-side anyway); parent closed; the culprit PR itself is NOT
     #      closed and gains no labels.
     culprit = _worker(221, 941)
-    parent1 = _pr(530, "sparq-omnibus/20260717T110000Z", author="app/github-actions",
+    parent1 = _pr(530, "sparq-omnibus/20260717T110000Z", author="app/sparq-orchestrator",
                   armed_by=None, checks=gate_fail,
                   body="<!-- sparq-omnibus:v2 constituents=221 depth=3 -->")
     got = plan(_state(open_prs=[culprit, parent1]))
@@ -1336,7 +1511,7 @@ def self_test() -> int:
     #       disarm the entire armed backlog. (These conclusions never bisect at ANY
     #       survivor count either — B-a4.)
     for concl in ("CANCELLED", "TIMED_OUT"):
-        soft = _pr(530, "sparq-omnibus/20260717T110000Z", author="app/github-actions",
+        soft = _pr(530, "sparq-omnibus/20260717T110000Z", author="app/sparq-orchestrator",
                    armed_by=None,
                    checks=[{"name": "gate", "status": "COMPLETED", "conclusion": concl}],
                    body="<!-- sparq-omnibus:v2 constituents=221 depth=3 -->")
@@ -1344,7 +1519,7 @@ def self_test() -> int:
         check(f"(c3) {concl.lower()} singleton: v1 close only — survivor stays armed",
               [a.kind for a in got], ["close-omnibus", "delete-branch"])
     aged_child = _pr(531, "sparq-omnibus/20260717T060000Z-p530a",
-                     author="app/github-actions",
+                     author="app/sparq-orchestrator",
                      body="<!-- sparq-omnibus:v2 constituents=221 depth=3 -->")
     got = plan(_state(open_prs=[culprit, aged_child]))
     check("(c3) age-expired singleton: v1 close only — survivor stays armed",
@@ -1364,7 +1539,7 @@ def self_test() -> int:
     sixteen = [_worker(700 + i, 9700 + i) for i in range(16)]
     nums16 = ",".join(str(700 + i) for i in range(16))
     for concl in ("CANCELLED", "TIMED_OUT"):
-        p = _pr(505, "sparq-omnibus/20260717T110000Z", author="app/github-actions",
+        p = _pr(505, "sparq-omnibus/20260717T110000Z", author="app/sparq-orchestrator",
                 armed_by=None,
                 checks=[{"name": "gate", "status": "COMPLETED", "conclusion": concl}],
                 body=f"<!-- sparq-omnibus:v2 constituents={nums16} depth=0 -->")
@@ -1374,12 +1549,12 @@ def self_test() -> int:
         check(f"(a4) 16-PR sim, gate {concl.lower()}: no constituent is implicated",
               any(a.kind in ("comment", "draft", "disarm", "create-branch")
                   for a in got), False)
-    aged16 = _pr(506, "sparq-omnibus/20260717T060000Z", author="app/github-actions",
+    aged16 = _pr(506, "sparq-omnibus/20260717T060000Z", author="app/sparq-orchestrator",
                  body=f"<!-- sparq-omnibus:v2 constituents={nums16} depth=0 -->")
     got = plan(_state(open_prs=sixteen + [aged16]))
     check("(a4) 16-PR sim, age-expiry: v1 close only — zero new nodes",
           [a.kind for a in got], ["close-omnibus", "delete-branch"])
-    hard16 = _pr(507, "sparq-omnibus/20260717T110000Z", author="app/github-actions",
+    hard16 = _pr(507, "sparq-omnibus/20260717T110000Z", author="app/sparq-orchestrator",
                  armed_by=None, checks=gate_fail,
                  body=f"<!-- sparq-omnibus:v2 constituents={nums16} depth=0 -->")
     got = plan(_state(open_prs=sixteen + [hard16]))
@@ -1428,7 +1603,7 @@ def self_test() -> int:
     #      disarm; close-and-recreate then rebuilds a fresh ROOT (depth 0) off current
     #      main from the still-armed constituents.
     conflict_parent = _pr(540, "sparq-omnibus/20260717T110000Z",
-                          author="app/github-actions", armed_by=None,
+                          author="app/sparq-orchestrator", armed_by=None,
                           mergeable="CONFLICTING",
                           body="<!-- sparq-omnibus:v2 constituents=109,110 depth=0 -->")
     got = plan(_state(open_prs=two + [conflict_parent]))
@@ -1447,7 +1622,7 @@ def self_test() -> int:
     #       marker constituent is untouched and stays individually armed. Conflicts
     #       must NEVER implicate constituents.
     conflict_stale = _pr(545, "sparq-omnibus/20260717T110000Z",
-                         author="app/github-actions", armed_by=None,
+                         author="app/sparq-orchestrator", armed_by=None,
                          mergeable="CONFLICTING", checks=gate_fail,
                          body="<!-- sparq-omnibus:v2 constituents=221 depth=3 -->")
     got = plan(_state(open_prs=[culprit, conflict_stale]))
@@ -1461,7 +1636,7 @@ def self_test() -> int:
     # B-e. DEPTH CAP: a failing omnibus at depth DEPTH_CAP with >=2 survivors -> v1
     #      fallback: close only, NO children, NO same-run rebuild, constituents
     #      untouched (still individually armed).
-    capped = _pr(550, "sparq-omnibus/20260717T110000Z", author="app/github-actions",
+    capped = _pr(550, "sparq-omnibus/20260717T110000Z", author="app/sparq-orchestrator",
                  armed_by=None, checks=gate_fail,
                  body=f"<!-- sparq-omnibus:v2 constituents=109,110 depth={DEPTH_CAP} -->")
     got = plan(_state(open_prs=two + [capped]))
@@ -1471,7 +1646,7 @@ def self_test() -> int:
     # B-f. SURVIVOR FILTERING: merged-meanwhile (601, absent from the open set),
     #      no-longer-armed (602) and already-empty-vs-main (603) constituents are
     #      excluded; the two real survivors (604, 605) become the children.
-    parent_f = _pr(560, "sparq-omnibus/20260717T110000Z", author="app/github-actions",
+    parent_f = _pr(560, "sparq-omnibus/20260717T110000Z", author="app/sparq-orchestrator",
                    armed_by=None, checks=gate_fail,
                    body="<!-- sparq-omnibus:v2 constituents=601,602,603,604,605 depth=0 -->")
     got = plan(_state(
@@ -1490,14 +1665,131 @@ def self_test() -> int:
     # B-h. RE-RUN IDEMPOTENCE: children already open (parent closed, so it is absent
     #      from the open set) -> nothing new is planned: no duplicate children, no new
     #      root, live child branches kept.
-    kids = [_pr(570, "sparq-omnibus/20260717T115000Z-p560a", author="app/github-actions",
+    kids = [_pr(570, "sparq-omnibus/20260717T115000Z-p560a", author="app/sparq-orchestrator",
                 body="<!-- sparq-omnibus:v2 constituents=604 depth=1 -->"),
-            _pr(571, "sparq-omnibus/20260717T115000Z-p560b", author="app/github-actions",
+            _pr(571, "sparq-omnibus/20260717T115000Z-p560b", author="app/sparq-orchestrator",
                 body="<!-- sparq-omnibus:v2 constituents=605 depth=1 -->")]
     check("(h) existing children (parent closed): re-run plans no duplicates",
           plan(_state(open_prs=[_worker(604, 964), _worker(605, 965)] + kids,
                       branches=["sparq-omnibus/20260717T115000Z-p560a",
                                 "sparq-omnibus/20260717T115000Z-p560b"])), [])
+
+    # B-s. PROVENANCE / IMPERSONATION: a PR spoofing the sparq-omnibus/ prefix from a
+    #      FORK head (cross-repo) or from a NON-App author is NEVER classified as an
+    #      omnibus. Even carrying a concluded gate FAILURE + a singleton marker it
+    #      must not quarantine (or otherwise touch) the named constituent, must not
+    #      be closed/bisected itself, and must not suppress the root over the real
+    #      eligible PRs.
+    spoof_fork = _pr(600, "sparq-omnibus/20260717T113000Z",
+                     author="app/sparq-orchestrator", armed_by=None, checks=gate_fail,
+                     cross=True,
+                     body="<!-- sparq-omnibus:v2 constituents=221 depth=3 -->")
+    spoof_author = _pr(600, "sparq-omnibus/20260717T113000Z", author="mallory",
+                       armed_by=None, checks=gate_fail,
+                       body="<!-- sparq-omnibus:v2 constituents=221 depth=3 -->")
+    for spoof, tag in ((spoof_fork, "fork head"), (spoof_author, "non-App author")):
+        got = plan(_state(open_prs=[culprit, spoof] + others))
+        check(f"(s) spoofed omnibus ({tag}) never quarantines/closes/bisects",
+              any(a.kind in ("comment", "draft", "disarm", "close-omnibus")
+                  for a in got), False)
+        check(f"(s) spoofed omnibus ({tag}) does not suppress the root",
+              [a.kind for a in got], creation_kinds(3))
+        check(f"(s) spoofed omnibus ({tag}): the constituent it names is batched, "
+              f"not drafted",
+              "<!-- sparq-omnibus:v2 constituents=221,222,223 depth=0 -->"
+              in _body_of([a for a in got if a.kind == "open-pr"][0]), True)
+    got = plan(_state(open_prs=[spoof_author],
+                      branches=["sparq-omnibus/20260717T113000Z"]))
+    check("(s) branch under an open (even spoofed) PR is still protected from "
+          "stale deletion", got, [])
+
+    # B-x. ELIGIBILITY IS NOT CAUSALITY: marker {221, 225}; 225 became DRAFT
+    #      (ineligible) WITHOUT landing — its code is still in the failed head, so
+    #      the lone eligible survivor 221 must NOT be convicted on the parent's
+    #      verdict. Instead: close the parent and create ONE singleton RE-TEST child
+    #      carrying only 221 (fresh evidence off current main).
+    lingering = _worker(225, 945, draft=True)
+    parent_amb = _pr(535, "sparq-omnibus/20260717T110000Z",
+                     author="app/sparq-orchestrator", armed_by=None, checks=gate_fail,
+                     body="<!-- sparq-omnibus:v2 constituents=221,225 depth=2 -->")
+    got = plan(_state(open_prs=[culprit, lingering, parent_amb]))
+    check("(x) ambiguous causality: close + ONE singleton re-test child, NO conviction",
+          [a.kind for a in got],
+          ["close-omnibus", "delete-branch"] + creation_kinds(1))
+    check("(x) no comment/draft/disarm ever reaches a constituent",
+          any(a.kind in ("comment", "draft", "disarm") for a in got), False)
+    retest_open = [a for a in got if a.kind == "open-pr"][0]
+    check("(x) re-test child carries ONLY the eligible survivor, depth+1",
+          "<!-- sparq-omnibus:v2 constituents=221 depth=3 -->"
+          in _body_of(retest_open), True)
+    check("(x) re-test child branch is a -p<parent>a child of the failed omnibus",
+          [a.argv for a in got if a.kind == "create-branch"],
+          [["checkout", "-B", "sparq-omnibus/20260717T120000Z-p535a", "origin/main"]])
+    check("(x) close comment names the code-bearing blocker sibling",
+          "#225" in _comment_of(got[0]), True)
+    check("(x) close comment names the re-test child branch",
+          "sparq-omnibus/20260717T120000Z-p535a" in _comment_of(got[0]), True)
+    # B-x2. Same when the sibling is ABSENT from the open set (closed unmerged — no
+    #       emptiness proof exists): its code may still be the culprit.
+    got = plan(_state(open_prs=[culprit, parent_amb]))
+    check("(x2) closed-unmerged sibling still blocks conviction (re-test instead)",
+          [a.kind for a in got],
+          ["close-omnibus", "delete-branch"] + creation_kinds(1))
+    # B-x3. A sibling PROVEN landed (empty vs main) IS cleanly excluded: the causal
+    #       set collapses to the survivor and the sound conviction path still runs.
+    got = plan(_state(open_prs=[culprit, lingering, parent_amb], empty={225: True}))
+    check("(x3) landed sibling cleanly excluded: conviction still runs",
+          [a.kind for a in got],
+          ["comment", "draft", "disarm", "close-omnibus", "delete-branch"])
+    # B-x4. Ambiguity with no way to create a re-test child (hygiene-only) or at the
+    #       depth cap: the NON-culpable close — never a quarantine, and at the cap
+    #       no same-run root rebuild either.
+    got = plan(_state(open_prs=[culprit, lingering, parent_amb], batch_enabled=False))
+    check("(x4) hygiene-only ambiguity: v1 close, survivor stays armed",
+          [a.kind for a in got], ["close-omnibus", "delete-branch"])
+    amb_capped = _pr(536, "sparq-omnibus/20260717T110000Z",
+                     author="app/sparq-orchestrator", armed_by=None, checks=gate_fail,
+                     body=f"<!-- sparq-omnibus:v2 constituents=221,225 "
+                          f"depth={DEPTH_CAP} -->")
+    got = plan(_state(open_prs=[culprit, lingering, amb_capped] + others))
+    check("(x5) depth-cap ambiguity: v1 close, no re-test, no same-run rebuild",
+          [a.kind for a in got], ["close-omnibus", "delete-branch"])
+
+    # B-y. INDETERMINATE MERGEABILITY: after main advances GitHub reports UNKNOWN
+    #      before resolving (possibly to CONFLICTING). A gate FAILURE without a
+    #      DEFINITIVE MERGEABLE verdict must implicate NOBODY and do NOTHING this
+    #      run — no quarantine, no bisection, no close — while the still-open
+    #      omnibus keeps suppressing a new root.
+    for mstate in ("UNKNOWN", ""):
+        limbo = _pr(537, "sparq-omnibus/20260717T110000Z",
+                    author="app/sparq-orchestrator", armed_by=None, checks=gate_fail,
+                    mergeable=mstate,
+                    body="<!-- sparq-omnibus:v2 constituents=221 depth=3 -->")
+        check(f"(y) gate failure + mergeable {mstate or 'unreported'!r}: no action",
+              plan(_state(open_prs=[culprit, limbo])), [])
+        check(f"(y) gate failure + mergeable {mstate or 'unreported'!r} still "
+              f"suppresses a new root",
+              plan(_state(open_prs=[culprit, limbo] + others)), [])
+    limbo6 = _pr(538, "sparq-omnibus/20260717T110000Z",
+                 author="app/sparq-orchestrator", armed_by=None, checks=gate_fail,
+                 mergeable="UNKNOWN",
+                 body="<!-- sparq-omnibus:v2 constituents=201,202,203,204,205,206 -->")
+    check("(y) gate failure + UNKNOWN never bisects either",
+          plan(_state(open_prs=six + [limbo6])), [])
+    # B-y2. Only the age-expiry NON-culpable close may act on a persistently-
+    #       unresolved omnibus — close + delete, nobody implicated.
+    limbo_aged = _pr(539, "sparq-omnibus/20260717T060000Z",
+                     author="app/sparq-orchestrator", armed_by=None, checks=gate_fail,
+                     mergeable="UNKNOWN",
+                     body="<!-- sparq-omnibus:v2 constituents=221 depth=3 -->")
+    got = plan(_state(open_prs=[culprit, limbo_aged]))
+    check("(y2) persistently-unresolved + expired: non-culpable close only",
+          [a.kind for a in got], ["close-omnibus", "delete-branch"])
+    check("(y2) the close reason records the unresolved mergeability",
+          "mergeability never became definitive" in _comment_of(got[0]), True)
+    check("(y2) no constituent implicated, no children",
+          any(a.kind in ("comment", "draft", "disarm", "create-branch")
+              for a in got), False)
 
     # 9. STALE HYGIENE: remote omnibus branch w/o an open PR is deleted; a branch with an
     #    open PR survives.
@@ -1524,8 +1816,8 @@ def self_test() -> int:
         calls.append(("gh", list(argv)))
         return ""
 
-    global run_git, run_gh
-    real_git, real_gh = run_git, run_gh
+    global run_git, run_gh, run_git_out
+    real_git, real_gh, real_git_out = run_git, run_gh, run_git_out
     run_git, run_gh = stub_git, stub_gh
     try:
         execute(acts, st, dry_run=False)
@@ -1633,6 +1925,94 @@ def self_test() -> int:
     armed = [c for c in calls if c[0] == "gh" and c[1][:2] == ["pr", "merge"]
              and "--auto" in c[1]]
     check("delete-failure: both children still armed", len(armed), 2)
+
+    # 14. GATHER_STATE boundary (wiring, not just plan()): stub gh + git at the
+    #     run_gh / run_git / run_git_out seams and assert gather_state itself
+    #     (a) SETS open_list_truncated when the open listing saturates its limit,
+    #     (b) CAPTURES unmerged-close cooldown timestamps from the closed-PR record,
+    #     (c) drops spoofed (fork / non-App) omnibus records from the merged +
+    #     cooldown sets and never heavy-fetches them. Mutating gather_state to skip
+    #     saturation detection or discard closure timestamps reds these directly.
+    def fake_open(n):
+        return [{"number": 10_000 + i,
+                 "headRefName": f"sparq-agent/issue-{10_000 + i}-1-1",
+                 "title": "feat: x", "author": {"login": "worker[bot]"},
+                 "labels": [], "isDraft": False, "autoMergeRequest": None,
+                 "isCrossRepository": False} for i in range(n)]
+
+    gh_payloads = {}
+
+    def stub_gh_gather(argv, capture=True):
+        calls.append(("gh", list(argv)))
+        if argv[:2] == ["pr", "list"]:
+            return json.dumps(gh_payloads[argv[argv.index("--state") + 1]])
+        if argv[:2] == ["pr", "view"]:
+            return json.dumps({"body": "", "mergeable": "MERGEABLE",
+                               "statusCheckRollup": [], "files": []})
+        raise AssertionError(f"unexpected gh argv in gather_state: {argv}")
+
+    def stub_git_gather(argv, check=True):
+        calls.append(("git", list(argv)))
+        return 0
+
+    def stub_git_out_gather(argv, check=True):
+        calls.append(("git", list(argv)))
+        return ""  # ls-remote: no remote omnibus branches
+
+    now_fixed = datetime(2026, 7, 17, 12, 0, 0, tzinfo=timezone.utc)
+    run_git, run_gh, run_git_out = stub_git_gather, stub_gh_gather, stub_git_out_gather
+    try:
+        calls.clear()
+        gh_payloads = {"open": fake_open(OPEN_PR_LIST_LIMIT), "merged": [],
+                       "closed": []}
+        st = gather_state("sparq-org/sparq", now_fixed)
+        check("(14a) saturated open listing SETS open_list_truncated",
+              st["open_list_truncated"], True)
+
+        calls.clear()
+        spoof_open = {"number": 901, "headRefName": "sparq-omnibus/20260717T110000Z",
+                      "title": "omnibus: totally real", "author": {"login": "mallory"},
+                      "labels": [], "isDraft": False, "autoMergeRequest": None,
+                      "isCrossRepository": True}
+        gh_payloads = {
+            "open": fake_open(3) + [spoof_open],
+            "merged": [
+                {"number": 800, "headRefName": "sparq-omnibus/20260717T010000Z",
+                 "body": "<!-- sparq-omnibus:v2 constituents=1 depth=0 -->",
+                 "author": {"login": "app/sparq-orchestrator"},
+                 "isCrossRepository": False},
+                {"number": 801, "headRefName": "sparq-omnibus/20260717T010500Z",
+                 "body": "<!-- sparq-omnibus:v2 constituents=2 depth=0 -->",
+                 "author": {"login": "mallory"}, "isCrossRepository": True}],
+            "closed": [
+                {"number": 810, "headRefName": "sparq-omnibus/20260717T090000Z",
+                 "closedAt": "2026-07-17T11:00:00Z", "mergedAt": None,
+                 "author": {"login": "sparq-orchestrator[bot]"},
+                 "isCrossRepository": False},
+                {"number": 811, "headRefName": "sparq-omnibus/20260717T080000Z",
+                 "closedAt": "2026-07-17T10:00:00Z",
+                 "mergedAt": "2026-07-17T10:05:00Z",
+                 "author": {"login": "app/sparq-orchestrator"},
+                 "isCrossRepository": False},
+                {"number": 812, "headRefName": "sparq-omnibus/20260717T070000Z",
+                 "closedAt": "2026-07-17T11:30:00Z", "mergedAt": None,
+                 "author": {"login": "mallory"}, "isCrossRepository": False}]}
+        st = gather_state("sparq-org/sparq", now_fixed)
+        check("(14b) unsaturated open listing: not truncated",
+              st["open_list_truncated"], False)
+        check("(14c) cooldown CAPTURES the unmerged App close; drops merged + spoofed",
+              st["recent_omnibus_closures"],
+              [datetime(2026, 7, 17, 11, 0, 0, tzinfo=timezone.utc)])
+        check("(14d) merged-omnibus set drops the fork/non-App spoof",
+              [m["number"] for m in st["merged_omnibus"]], [800])
+        check("(14e) spoofed open omnibus is never heavy-fetched",
+              any(c[0] == "gh" and c[1][:3] == ["pr", "view", "901"] for c in calls),
+              False)
+        check("(14f) isCrossRepository is wired into the snapshot",
+              [p["is_cross_repository"] for p in st["open_prs"]
+               if p["number"] == 901], [True])
+    finally:
+        run_git, run_gh, run_git_out = real_git, real_gh, real_git_out
 
     if failures:
         for f in failures:
