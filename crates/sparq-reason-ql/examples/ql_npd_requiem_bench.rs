@@ -723,4 +723,76 @@ mod tests {
             "dropping the non-subsumed join disjunct must surface as a result-set mismatch"
         );
     }
+
+    /// Drive the whole `--smoke` harness (`run_smoke` + `parse_tbox_ttl` + `ms` + every
+    /// `SMOKE_CASE` closed-form / answer-count assertion) as a hermetic regression, so the
+    /// smoke leg's pins are checked on every `cargo test` — not only when the example is
+    /// invoked as a binary. A panic in any smoke assertion fails this test.
+    #[test]
+    fn smoke_harness_runs_all_closed_forms() {
+        run_smoke();
+    }
+
+    /// Drive the gather harness end to end over temp fixtures in BOTH data regimes —
+    /// witness mode (no `--abox`) and real-`--abox` mode — exercising `run_gather`,
+    /// `load_triples` (Turtle and N-Triples branches), and the in-scope / out-of-scope /
+    /// parse-error row paths. This keeps the gather leg regression-tested rather than
+    /// dead-at-test-time; the smoke path above covers the closed-form correctness pins.
+    #[test]
+    fn gather_harness_runs_witness_and_abox_modes() {
+        let dir = std::env::temp_dir().join(format!("ql_npd_requiem_gather_{}", std::process::id()));
+        let qdir = dir.join("queries");
+        std::fs::create_dir_all(&qdir).expect("temp queries dir must create");
+
+        // In-scope class query (witness mode proceeds; UCQ has no re-applied modifier).
+        std::fs::write(
+            qdir.join("in_scope.rq"),
+            format!("{}SELECT DISTINCT ?x WHERE {{ ?x a :Employee }}", SPARQL_PREFIXES),
+        )
+        .expect("in-scope query must write");
+        // OPTIONAL is out of the fail-closed CQ gate — `rewrite` rejects it (out-of-scope row).
+        std::fs::write(
+            qdir.join("out_of_scope.rq"),
+            format!(
+                "{}SELECT DISTINCT ?x WHERE {{ ?x a :Employee OPTIONAL {{ ?x a :Manager }} }}",
+                SPARQL_PREFIXES
+            ),
+        )
+        .expect("out-of-scope query must write");
+        // Unparseable text drives the parse-error row.
+        std::fs::write(qdir.join("bad.rq"), "this is not sparql").expect("bad query must write");
+
+        // Witness mode: Turtle TBox exercises the Turtle branch of `load_triples`.
+        let tbox_ttl = dir.join("tbox.ttl");
+        std::fs::write(
+            &tbox_ttl,
+            format!("{}:Manager rdfs:subClassOf :Employee .", TURTLE_PREFIXES),
+        )
+        .expect("Turtle TBox must write");
+        run_gather("temp-witness", tbox_ttl.to_str().unwrap(), qdir.to_str().unwrap(), None);
+
+        // Real-ABox mode: N-Triples TBox + ABox exercise the N-Triples branch of
+        // `load_triples` and the `Some(real_abox)` execution path in `run_gather`.
+        let tbox_nt = dir.join("tbox.nt");
+        std::fs::write(
+            &tbox_nt,
+            "<http://ex/Manager> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://ex/Employee> .\n",
+        )
+        .expect("N-Triples TBox must write");
+        let abox_nt = dir.join("abox.nt");
+        std::fs::write(
+            &abox_nt,
+            "<http://ex/m1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Manager> .\n\
+             <http://ex/e1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Employee> .\n",
+        )
+        .expect("N-Triples ABox must write");
+        run_gather(
+            "temp-abox",
+            tbox_nt.to_str().unwrap(),
+            qdir.to_str().unwrap(),
+            Some(abox_nt.to_str().unwrap()),
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
