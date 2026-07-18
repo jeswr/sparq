@@ -93,3 +93,10 @@ required-features = ["experimental"]
 [[example]]
 name = "ql_endtoend_bench"
 required-features = ["experimental"]
+
+# [SONNET-4.6] sq-hmd7l.9: the sparq leg of the NPD/Requiem rewriting comparison vs Ontop
+# (scripts/bench/reason-ql-same-box.sh). Calls the gated `rewrite`/`rewrite_production` API,
+# so `required-features` keeps the default (feature-less) `cargo build --all-targets` green.
+[[example]]
+name = "ql_npd_requiem_bench"
+required-features = ["experimental"]
