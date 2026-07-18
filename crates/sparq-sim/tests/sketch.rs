@@ -199,6 +199,32 @@ fn randomized_differential_scores_equal_exact_similarity() {
     }
 }
 
+/// A huge `k` must not overflow the `4k` candidate budget (debug panic / release
+/// wrap-to-tiny-budget): `k = usize::MAX` on a small graph returns every
+/// positive-score candidate, best-first with exact scores.
+#[test]
+fn huge_k_does_not_overflow_candidate_budget() {
+    let g = graph(
+        ":a :knows :bob, :eve ; :worksAt :acme .
+         :twin :knows :bob, :eve ; :worksAt :acme .
+         :half :knows :bob ; :worksAt :other .
+         :far :plays :chess .",
+    );
+    let sim = unweighted(&g);
+    // rows = 1 → every shared component makes a candidate, so recall is not the variable.
+    let idx = sim.sketch_index(SketchConfig { bands: 128, ..SketchConfig::default() });
+    let top = idx.most_similar(&iri("a"), usize::MAX);
+    let names: Vec<String> = top.iter().map(|(t, _)| t.to_string()).collect();
+    assert_eq!(
+        names,
+        ["<http://ex.org/twin>", "<http://ex.org/half>"],
+        "all positive-score candidates, best-first"
+    );
+    for (t, s) in &top {
+        assert_eq!(*s, sim.similarity(&iri("a"), t), "inexact score for {t}");
+    }
+}
+
 /// Config normalization: `bands > num_hashes` clamps (rows ≥ 1) instead of panicking,
 /// and a non-dividing `bands` leaves the remainder components estimate-only — twins
 /// are still guaranteed found in both shapes.

@@ -900,7 +900,7 @@ impl SketchIndex<'_, '_> {
             .map(|s| (s, self.matching_fraction(sketch, self.sketch_of(s))))
             .collect();
         ranked.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        ranked.truncate((4 * k).max(64));
+        ranked.truncate(k.saturating_mul(4).max(64));
         // 3. … and re-score them exactly against the full weighted signature.
         let sig = self.sim.signature_of_id(id);
         let mut scored: Vec<(Id, f64)> = ranked
