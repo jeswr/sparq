@@ -570,17 +570,23 @@ fn extend_named_graph(graph: &mut Graph, name: &str, additions: &[[Term; 3]]) {
 }
 
 /// Reset the `<urn:sparq:auth>` enforcement view to exactly `terms`, PRESERVING the
-/// named graph's presence when `terms` is empty and the view already exists. The view's
-/// PRESENCE is the "materialized" marker: `AclIndex::build` reports a retryable
+/// named graph's presence when `terms` is empty, the view already exists, AND
+/// `preserve_empty_marker` says a static materialization actually produced it. The
+/// view's PRESENCE is the "materialized" marker: `AclIndex::build` reports a retryable
 /// [`crate::AclStatus::Unloaded`] (a 503 at the server) when it is absent, and the
 /// static materializer deliberately installs an EMPTY view for a closure that grants
 /// nothing — a definitive "materialized, no grants" deny (403). Routing this reset
 /// through the plain [`install_triples`] (which drops an empty graph) silently turned
 /// that definitive deny into a retryable `Unloaded` on every post-materialize ledger
-/// reconcile (sq-37f1a). A store whose view was never materialized (graph absent AND
-/// empty baseline) stays absent — the reset must not invent the marker either.
-fn reset_auth_view(graph: &mut Graph, terms: Vec<[Term; 3]>) {
-    if terms.is_empty() {
+/// reconcile (sq-37f1a). The converse must not happen either — the reset must not
+/// INVENT the marker: a bridged grant creates the view without any static
+/// materialization, so the graph's current presence alone cannot distinguish
+/// "statically materialized, no grants" from "bridged-only, all grants retracted".
+/// `preserve_empty_marker` (whether a static baseline was ever captured —
+/// `BridgeLedger::static_baseline.is_some()`) carries that distinction: when `false`,
+/// an empty reset REMOVES the view and the store returns to `Unloaded`.
+fn reset_auth_view(graph: &mut Graph, terms: Vec<[Term; 3]>, preserve_empty_marker: bool) {
+    if terms.is_empty() && preserve_empty_marker {
         let g_name = Term::NamedNode(NamedNode::new_unchecked(AUTH_GRAPH));
         if let Some(slot) = graph.named.iter_mut().find(|(n, _)| *n == g_name) {
             slot.1 = Graph::from_parts(Dict::new(), Vec::new());
@@ -1600,8 +1606,10 @@ impl BridgeLedger {
     ///
     /// # Fail-closed
     ///
-    /// - The view is first reset to the static baseline (or empty if none captured) and
-    ///   the provenance graph cleared, so NO stale bridged triple can survive unless an
+    /// - The view is first reset to the static baseline (or REMOVED if none was ever
+    ///   captured — a bridged-only store returns to the retryable, view-absent
+    ///   [`crate::AclStatus::Unloaded`] state when every entry retracts) and the
+    ///   provenance graph cleared, so NO stale bridged triple can survive unless an
     ///   entry re-emits it.
     /// - Each entry is replayed through its original `materialize_*` function, which
     ///   re-runs the fail-closed ODRL evaluation: a withdrawn permission, a lapsed time
@@ -1612,8 +1620,13 @@ impl BridgeLedger {
     pub fn refresh(&mut self, graph: &mut Graph) -> usize {
         // 1. Reset the enforcement view to the captured static baseline, and clear ALL
         //    bridged provenance — nothing bridged survives unless an entry re-emits it.
+        //    `None` vs `Some(empty)` matters: only a CAPTURED (static) baseline may keep
+        //    an empty view present as the "materialized" marker — a bridged-only store
+        //    (baseline never captured) whose entries all retract must return to the
+        //    view-absent `Unloaded` state, not fake a definitive empty-view deny.
+        let preserve_empty_marker = self.static_baseline.is_some();
         let baseline = self.static_baseline.clone().unwrap_or_default();
-        reset_auth_view(graph, baseline);
+        reset_auth_view(graph, baseline, preserve_empty_marker);
         install_triples(graph, AUTH_BRIDGED_GRAPH, Vec::new());
 
         // 2. Replay each entry; keep only those that still materialize something. A

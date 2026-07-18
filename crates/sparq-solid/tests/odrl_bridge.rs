@@ -2863,3 +2863,36 @@ fn refresh_does_not_invent_the_materialized_marker() {
         "never-materialized stays a retryable Unloaded — refresh must not fake the marker"
     );
 }
+
+// 23. Nor may the marker survive via a BRIDGED-ONLY grant: without any static
+//     materialization the bridged grant alone creates `<urn:sparq:auth>`, so the
+//     graph's presence at refresh-time does NOT mean a static closure was computed.
+//     Once the grant is withdrawn and replay emits nothing, the view must go ABSENT
+//     again (`static_baseline` was never captured) — the status returns to a
+//     retryable `Unloaded`, never an invented "materialized, no grants" Resolved deny.
+#[test]
+fn bridged_only_retraction_returns_to_unloaded() {
+    let mut store = PodStore::new(pod_with_grantless_acl());
+    // NO static materialize_* call — the baseline is never captured; the bridged
+    // grant is what creates the auth view.
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission(&read_policy(), &req).granted);
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
+    assert!(store.decide(&alice, N1, Mode::Read).allow, "bridged grant is live");
+
+    // The policy WITHDRAWS the permission → refresh replays it to nothing.
+    let (matched, retracted) =
+        store.refresh_odrl_grant(&empty_policy(), &req, BridgeKind::Permission);
+    assert!(matched, "the tracked grant slot matched");
+    assert_eq!(retracted, 1, "the withdrawn grant was retracted");
+
+    let d = store.decide(&alice, N1, Mode::Read);
+    assert!(!d.allow, "fail-closed: deny");
+    assert_eq!(
+        d.status,
+        sparq_solid::AclStatus::Unloaded,
+        "a never-statically-materialized store returns to retryable Unloaded once its \
+         only bridged grant retracts — refresh must not preserve an empty view no \
+         static baseline was ever captured for"
+    );
+}
