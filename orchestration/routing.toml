@@ -69,7 +69,7 @@ provider_model = "gpt-5.6-luna"        # Second tier of the unified fix ladder o
 credential_format = "codex-auth-json"
 
 [defaults]
-model_chain = ["fable", "sol", "opus"]
+model_chain = ["sol", "fable", "opus"]
 agent = "sparq-rust-impl"
 
 # ---------------------------------------------------------------------------------------------------
@@ -84,9 +84,11 @@ escalate = true                        # consumed by dispatch: on chain-exhausti
 # ---------------------------------------------------------------------------------------------------
 # ROLE ROUTES. Fable is the primary code-writer (maintainer doctrine); terra (GPT) is the
 # cross-provider implementation fallback so an Anthropic outage does not stall implementation.
+# Implementation chains lead with sol (maintainer directive 2026-07-18, credit abundance; cross-provider
+# review flips automatically, so sol-authored implementation still receives Anthropic review).
 [[route]]
 role = "impl"
-model_chain = ["fable", "sol", "opus"]
+model_chain = ["sol", "fable", "opus"]
 agent = "sparq-rust-impl"
 
 # [FABLE-5] UI/front-end ownership (maintainer decision 2026-07-17): GPT-5.6 codex (openai; alias
@@ -118,12 +120,12 @@ agent = "sparq-site"
 # escalation) — where role:ci and a security surface overlap, the security lane is correct.
 [[route]]
 role = "ci"
-model_chain = ["fable", "sol"]
+model_chain = ["sol", "fable"]
 agent = "sparq-ci-infra"
 
 [[route]]
 role = "perf"
-model_chain = ["fable", "opus"]
+model_chain = ["sol", "fable", "opus"]
 agent = "sparq-perf-engineer"
 
 [[route]]
