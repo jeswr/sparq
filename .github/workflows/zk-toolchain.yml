@@ -326,8 +326,8 @@ jobs:
       # normal ci.yml lanes have no nargo/bb, so it self-skips there, and the ignored-suite
       # step below runs `-- --ignored`, which SKIPS every non-ignored test. Net result before
       # this step: `gate_count_regression` ran in NO CI lane, so its baselines went silently
-      # stale (the sq-25mgo deep-underflow fix grew filter_f64 +16.7% / filter_value_dl_f64
-      # +8.3% — far past the 3% tolerance — and nothing tripped, sq-3kd2g.2). This step runs
+      # stale (the sq-25mgo deep-underflow fix grew filter_f64 and filter_value_dl_f64 well
+      # past the checked-in regression tolerance and nothing tripped, sq-3kd2g.2). This step runs
       # the non-ignored tests in the `gate_count` and `sparql_catalog` binaries WITH the
       # toolchain on PATH, so an intentional circuit change must re-baseline in the SAME PR.
       # Cheap: compile + `bb gates` only, no proving. (`sparql_catalog` needs no toolchain but
