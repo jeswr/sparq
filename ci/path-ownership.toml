@@ -216,9 +216,22 @@ crates = ["sparq-conformance"]
 # vocab (crates/sparq-zk/src/secprop.rs) to assert the two crates' sec-prop IRIs
 # agree. sparq-trust DEPENDS ON sparq-zk (crates/sparq-trust/Cargo.toml), so a
 # sparq-zk -> sparq-trust dep would be a cycle: additional-readers instead.
+# [FABLE-5] sq-mgxz8 (PR #3440): sparq-policy's cross-crate dimension-IRI drift
+# guards (crates/sparq-policy/src/secprop.rs #[cfg(test)]) also include_str! this
+# vocab; the no-crate-edge choice is deliberate (the lean policy crate must not
+# grow a sparq-trust/sparq-zk edge just for a compile-time drift test), so the
+# monotone readers union attributes the read instead.
 [[map]]
 pattern = "crates/sparq-trust/ontologies/zkp-sparql/**"
-readers = ["sparq-zk", "sparq-trust"]
+readers = ["sparq-zk", "sparq-trust", "sparq-policy"]
+
+# [FABLE-5] sq-mgxz8 (PR #3440): sparq-policy's drift guard also include_str!s
+# sparq-zk's per-method secprop annotation graph (secprop-methods.ttl) to catch
+# a dimension-IRI typo/rename across the estate. Same rationale as above — no
+# crate edge for a compile-time drift test; additional-readers instead.
+[[map]]
+pattern = "crates/sparq-zk/ontologies/**"
+readers = ["sparq-policy"]
 
 # sparq-reason's compiled-vs-interpreted N3 equivalence + incremental tests read
 # sparq-solid's WAC/ACP/ODRL-spike rule corpus READ-ONLY from ../sparq-solid/rules
