@@ -4,7 +4,14 @@
 > test environment for the sparq Solid/LWS server (`crates/sparq-lws-core`) with a bundled
 > throwaway IdP. `[FABLE]`
 >
-> **Status: designed-only.** Nothing here is implemented or deployed. This is a THROWAWAY
+> **Status: ratified, mostly designed-only.** The three judgment calls in this record (§0
+> seed flag, §0/§5 no per-visitor isolation, §2 CSS + two services) were surfaced post-hoc
+> via proceed-and-document issue #2329; the steering window closed with no maintainer
+> redirect, so they stand as written — including the §6 bundled-IdP-over-fallback trade.
+> Since this record merged, a `SOLID_SERVER_SEED_DEMO` flag has landed on main (PR #2403,
+> target issue #2393) with a DIFFERENT, local-demo contract than §3.2 — see the §3.2
+> divergence note; bead B is now an alignment bead. Nothing else (manifests, compat smoke,
+> site section, deploy) is implemented or deployed. This is a THROWAWAY
 > demo design: **its auth is throwaway, not production identity**, and the LWS server itself
 > boots with an "EXPERIMENTAL parallel track" banner (`main.rs`). Every claim below is either
 > verified against origin/main / upstream source (cited) or explicitly marked
@@ -49,8 +56,9 @@ grants `acl:AuthenticatedAgent` Read/Write/Append (no Control) and the public Re
 consequence is stated plainly: **v1 visitors share one playground and are NOT isolated from
 each other by WAC** — they are only isolated from *anonymous* writers. True per-visitor pods
 require the runtime-provisioning seam (a real LWS feature) and are explicitly out of scope
-(§6). This correction, and the two other judgment calls in this record, are surfaced to the
-maintainer via a proceed-and-document issue.
+(§6). This correction, and the two other judgment calls in this record, were surfaced to the
+maintainer via proceed-and-document issue #2329; the steering window closed with no
+redirect, so all three decisions stand.
 
 > On "no dev escape hatches": the demo manifests still ban `SOLID_SERVER_ALLOW_LOOPBACK`,
 > `SOLID_SERVER_SEED_CONFORMANCE`, `SOLID_SERVER_SEED_BENCH`, and
@@ -209,6 +217,21 @@ Opt-in `SOLID_SERVER_SEED_DEMO=1`, following the existing seed architecture (`sr
   — fail-closed against ever seeding a durable store;
 - unset ⇒ byte-identical server behaviour (the feature-off-by-default invariant).
 
+> **Divergence on current main (post-record; found while closing #2329).** PR #2403 (target
+> issue #2393) shipped a `SOLID_SERVER_SEED_DEMO` flag with a different, LOCAL-demo contract:
+> a public-readable `/demo/` pod plus an **anonymous** read+write open sandbox at
+> `/demo/playground/` (`foaf:Agent` gets `acl:Read`+`acl:Write` via `acl:accessTo` +
+> `acl:default`; owner-only `acl:Control`) so a local boot is usable with no IdP at all
+> (`seed.rs` `seed_demo`, `main.rs` `ENV_SEED_DEMO`). The seed-guard #2 and off-by-default
+> invariants above DO hold for it. What does not hold is the write posture: it is fine for a
+> local no-IdP boot, but behind a public URL an anonymous-writable container drops the only
+> write friction this design relies on (registration, §4) and contradicts §3.1's "anonymous
+> writes stay rejected" (and the §5 item-2 isolation-from-anonymous-writers claim).
+> **Bead B is therefore an alignment bead, not greenfield:** bring the flag's public-demo
+> posture to the `acl:AuthenticatedAgent` R/W/A + public-Read, no-Control contract above
+> (or split the local anonymous sandbox onto its own dev flag) BEFORE any manifest (bead A)
+> sets `SOLID_SERVER_SEED_DEMO`.
+
 ### 3.3 Wipe-on-idle — what "free" actually buys
 
 In-memory everything (LWS store + replay store; CSS accounts + keys) + scale-to-zero means an
@@ -298,7 +321,7 @@ seeded-read-only having spent only B+C.
 
 | # | Bead | Surface (file-area) | Tier | Invariant | Acceptance |
 |---|---|---|---|---|---|
-| B | feat(lws-core): opt-in demo playground seed `SOLID_SERVER_SEED_DEMO` | `crates/sparq-lws-core/**` (seed.rs, main.rs, README, tests) | sonnet | off-by-default byte-identical; memory-backend-only via seed-guard; ACL grants AuthenticatedAgent R/W/A + public Read, NO Control | `cargo test -p sparq-lws-core demo_seed` (authed PUT 201 / anon PUT 401 / anon GET README 200 / authed ACL write denied / flag-off ⇒ no playground) |
+| B | feat(lws-core): align the shipped `SOLID_SERVER_SEED_DEMO` seed to the §3.2 public-demo ACL contract (see the §3.2 divergence note) | `crates/sparq-lws-core/**` (seed.rs, main.rs, README, tests) | sonnet | off-by-default byte-identical; memory-backend-only via seed-guard; ACL grants AuthenticatedAgent R/W/A + public Read, NO Control | `cargo test -p sparq-lws-core demo_seed` (authed PUT 201 / anon PUT 401 / anon GET README 200 / authed ACL write denied / flag-off ⇒ no playground) |
 | A | deploy(demo): Cloud Run manifests for LWS demo + CSS IdP | `deploy/demo/` root (yamls, README.md, check.sh) — excludes `compat/` | sonnet | fail-closed demo posture: forbidden env absent, required env present, min 0 / max 1, no secret literals | `bash deploy/demo/check.sh` |
 | C | test(demo): CSS↔LWS Solid-OIDC compatibility smoke | `deploy/demo/compat/**` (docker-compose, smoke.sh) | sonnet | non-vacuous proof of the §1 pairing on REAL CSS-minted DPoP tokens (goes red on aud/typ/webid/bidirectional drift); loopback allowed in this local harness ONLY | `bash deploy/demo/compat/smoke.sh` |
 | D | site(deploy): demo section — link + honest banner | `site/src/app/deploy/**` | haiku | static export green; banner states §5 items 1-2, 6 plainly; no perf numbers | site lint + typecheck + static export |

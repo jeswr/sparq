@@ -43,7 +43,7 @@
     "build": "npm run build:wasm && npm run build:ts",
     "typecheck": "tsc --noEmit",
     "typecheck:conformance": "tsc --noEmit -p tsconfig.conformance.json",
-    "test": "node --test \"test/*.test.mjs\"",
+    "test": "node --test",
     "bench": "node bench/vs-oxigraph.mjs",
     "check:package": "node guardrails/check-package.mjs",
     "prepack:skills": "rm -rf skills AGENTS.md && cp -R ../skills skills && cp ../AGENTS.md AGENTS.md",

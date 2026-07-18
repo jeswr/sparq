@@ -2,7 +2,9 @@
 import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { spawn } from 'node:child_process';
-import { dirname, resolve } from 'node:path';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
@@ -74,6 +76,10 @@ test('startSolidServer boots a loopback listener', { timeout: 30_000 }, async ()
 });
 
 test('npx boots, keeps one pod, round-trips Turtle, and enforces WAC', { timeout: 60_000 }, async () => {
+  // Private npm cache: test files run concurrently, and this file and smoke.test.mjs
+  // both `npx --package <packageDir>` — the same npx cache key. Sharing ~/.npm/_npx
+  // makes the two npm installs race on the same symlink (EEXIST on cold CI caches).
+  const npmCache = await mkdtemp(join(tmpdir(), 'solid-server-npx-'));
   const child = spawn(
     'npx',
     [
@@ -92,6 +98,7 @@ test('npx boots, keeps one pod, round-trips Turtle, and enforces WAC', { timeout
       cwd: repoRoot,
       detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, npm_config_cache: npmCache },
     },
   );
 
@@ -138,5 +145,6 @@ test('npx boots, keeps one pod, round-trips Turtle, and enforces WAC', { timeout
     assert.equal(denied.status, 403);
   } finally {
     await stopChild(child);
+    await rm(npmCache, { recursive: true, force: true });
   }
 });
