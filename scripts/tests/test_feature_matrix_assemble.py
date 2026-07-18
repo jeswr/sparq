@@ -973,6 +973,21 @@ class TestReportWorkflowTrustBoundary(unittest.TestCase):
                       "the validated head SHA must flow through env, not string "
                       "interpolation")
 
+    def test_reporter_wires_trigger_run_id_from_server_value(self):
+        # Finding 2: the summary check's external_id correlation token is the
+        # TRIGGERING feature-matrix run id — from github.event.workflow_run.id
+        # (server-supplied), not any artifact. Pin the env wiring so it cannot drift
+        # to an artifact-derived (attacker-influenced) value.
+        report_step = next(
+            s for s in self.job["steps"]
+            if "run-feature-matrix-group.py --report" in str(s.get("run", "") or "")
+        )
+        env = report_step.get("env") or {}
+        self.assertIn("TRIGGER_RUN_ID", env,
+                      "the reporter must pass the triggering run id for correlation")
+        self.assertIn("workflow_run.id", str(env["TRIGGER_RUN_ID"]),
+                      "TRIGGER_RUN_ID must be the server-supplied workflow_run.id")
+
     def test_reporter_sets_fork_pr_from_server_event_fields(self):
         # Finding 3: fork tolerance is event-gated, from server fields.
         self.assertIn("workflow_run.event", self.text)
@@ -1130,7 +1145,7 @@ class TestGroupReporter(unittest.TestCase):
 
     def _run_report(self, files, gh_rc="0", gh_stderr="", valid=None,
                     group_jobs_result="failure", raw_files=None, drop_env=(),
-                    fork_pr="false"):
+                    fork_pr="false", trigger_run_id="424242"):
         import subprocess  # noqa: PLC0415
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1172,9 +1187,14 @@ class TestGroupReporter(unittest.TestCase):
                 "GROUP_JOBS_RESULT": group_jobs_result,
                 "FMG_RETRY_SLEEP": "0",
                 "FMG_FORK_PR": fork_pr,
+                # finding 2: the triggering feature-matrix run id, embedded as the
+                # summary check-run's external_id for the gate's stale-report defence.
+                "TRIGGER_RUN_ID": trigger_run_id,
             }
             for key in drop_env:
                 env.pop(key, None)
+            if trigger_run_id == "":
+                env.pop("TRIGGER_RUN_ID", None)
             proc = subprocess.run(
                 [sys.executable, str(self.RUNNER), "--report"],
                 capture_output=True,
@@ -1219,6 +1239,11 @@ class TestGroupReporter(unittest.TestCase):
         self.assertEqual(len(summary), 1, "exactly one head-SHA summary check")
         self.assertEqual(summary[0]["conclusion"], "success")
         self.assertEqual(summary[0]["head_sha"], "deadbeef")
+        # finding 2: the summary carries the triggering feature-matrix run id as its
+        # external_id, so ci_summary_gate.py can correlate it to the current group run
+        # and reject a stale same-SHA report from an earlier run.
+        self.assertEqual(summary[0]["external_id"], "424242",
+                         "the report must embed TRIGGER_RUN_ID as external_id")
 
     def test_unassembled_leg_name_is_refused_and_nothing_posts(self):
         # THE forgery test: an artifact naming a non-assembled leg — e.g. trying
@@ -1345,6 +1370,39 @@ class TestGroupReporter(unittest.TestCase):
         # The honest observed leg (alpha) is still posted for attribution.
         self.assertEqual([c["name"] for c in self._leg_calls(gh_calls)],
                          ["opt-in alpha (f1)"])
+
+    def test_external_id_correlation_token_on_every_summary_path(self):
+        """Finding 2: whichever verdict the reporter reaches, the head-SHA summary
+        check-run must carry the triggering feature-matrix run id as its external_id
+        (the gate's stale-report correlation token). Checks both a green and a
+        fail-closed path, and that a DIFFERENT trigger id propagates verbatim."""
+        # green complete path
+        proc, gh_calls = self._run_report([
+            self._result_file([{"name": "alpha (f1)", "failed_step": None}]),
+            self._result_file([{"name": "beta (f2)", "failed_step": None}],
+                              group="g02 beta"),
+        ], group_jobs_result="success", trigger_run_id="777")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self._summary_calls(gh_calls)[0]["external_id"], "777")
+        # fail-closed (incomplete) path still stamps the token
+        proc, gh_calls = self._run_report(
+            [self._result_file([{"name": "alpha (f1)", "failed_step": None}])],
+            group_jobs_result="success", trigger_run_id="888")
+        self.assertEqual(proc.returncode, 1)
+        self.assertEqual(self._summary_calls(gh_calls)[0]["external_id"], "888")
+
+    def test_absent_trigger_run_id_omits_external_id(self):
+        """Backward-compat: with no TRIGGER_RUN_ID (e.g. a bootstrap run) the summary
+        check carries NO external_id key — the gate then degrades to any-report
+        matching rather than binding to a token that was never set."""
+        proc, gh_calls = self._run_report([
+            self._result_file([{"name": "alpha (f1)", "failed_step": None}]),
+            self._result_file([{"name": "beta (f2)", "failed_step": None}],
+                              group="g02 beta"),
+        ], group_jobs_result="success", trigger_run_id="")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("external_id", self._summary_calls(gh_calls)[0],
+                         "no TRIGGER_RUN_ID => no external_id key on the summary")
 
     def test_zero_artifacts_with_successful_groups_is_an_inconsistency(self):
         proc, _ = self._run_report([], group_jobs_result="success")

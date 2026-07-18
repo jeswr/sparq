@@ -1030,10 +1030,16 @@ class TestDraftTierWiring(unittest.TestCase):
         self.assertIn(self.DRAFT_GUARD, cond,
                       "codeql.yml:analyze must skip on draft PR heads")
         on = _on_block(self.codeql)
-        # [FABLE-5] (2026-07-18 merge-queue subset): merge_group removed — PR head +
-        # push-to-main + weekly schedule carry the analysis coverage.
-        self.assertNotIn("merge_group", on,
-                         "CodeQL must NOT run on merge_group (2026-07-18 directive)")
+        # [FABLE-5] PR #3511 finding 3: codeql.yml is byte-identical to origin/main —
+        # its triggers (incl. merge_group) are UNTOUCHED by this PR. The workflow is
+        # instead operationally disabled via `gh workflow disable` (state
+        # disabled_manually), so it produces no check-run on ANY event regardless of
+        # its trigger list; open PR #3427 owns the codeql successor policy. Keeping the
+        # trigger set intact avoids the docs/branch-protection.md contradiction (an
+        # earlier round removed merge_group here while the docs claimed it untouched).
+        self.assertIn("merge_group", on,
+                      "CodeQL keeps its merge_group trigger (byte-identical to main; "
+                      "operationally disabled, so it produces no check-run anyway)")
         self.assertIn("schedule", on, "CodeQL must keep its weekly schedule")
 
     def test_heavy_shards_also_demoted_on_draft_heads(self):

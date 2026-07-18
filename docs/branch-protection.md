@@ -123,13 +123,15 @@ From the binding/packaging workflows (when those surfaces are exercised):
 The `merge_group` ref does **not** run an identical check-set to a PR. By explicit
 maintainer direction (2026-07-18) the merge queue runs only the **PR-relevant subset**
 of lanes, and — by a separate maintainer direction — **CodeQL is operationally
-disabled**: the `.github/workflows/codeql.yml` FILE is retained on `main` with live
-`pull_request`/`push`/`schedule` triggers, but the workflow itself was disabled via
-`gh workflow disable` (Actions workflow state `disabled_manually`), so GitHub does not
-schedule it on any event — no CodeQL check-run is produced, so it neither runs nor
-gates. (This is an inert-file state, not an edit to the triggers; open PR #3427 owns
-the codeql.yml successor policy — an advisory / retroactive posture — so the file's
-triggers are left untouched here to avoid colliding with it.)
+disabled**: the `.github/workflows/codeql.yml` FILE is retained on `main`
+BYTE-IDENTICAL to before, with its full trigger set
+(`pull_request`/`push`/`merge_group`/`schedule`) UNTOUCHED, but the workflow itself was
+disabled via `gh workflow disable` (Actions workflow state `disabled_manually`), so
+GitHub does not schedule it on any event — no CodeQL check-run is produced on ANY
+trigger, so it neither runs nor gates. (This is an inert-file state, NOT an edit to the
+triggers — this PR does not modify codeql.yml at all; open PR #3427 owns the codeql.yml
+successor policy — an advisory / retroactive posture — so the file's triggers are left
+untouched here to avoid colliding with it.)
 Heavy or independent lanes that already ran and gated on the PR head dropped their
 `merge_group` trigger because the queue re-run added wall-clock per enqueue with no new
 signal: currently `formal-verification.yml` (Kani proofs), `fuzz.yml` (corpus replay),
@@ -171,8 +173,9 @@ REDUCED sibling set; a **non-draft** `pull_request` head, `push`-to-main, and ev
 scheduled/dispatch run keep the FULL matrix, byte-identical to before. (`merge_group`
 is a SEPARATE axis: it always runs at FULL tier — never draft-tier — but it runs the
 maintainer-directed **PR-relevant subset** documented in *Merge-queue subset* above —
-several heavy lanes and CodeQL do not trigger there — not a byte-identical copy of the
-PR check-set.)
+several heavy lanes do not trigger there, and CodeQL (though its trigger set still
+lists `merge_group`, byte-identical to main) is operationally disabled and so produces
+no check-run there either — not a byte-identical copy of the PR check-set.)
 
 **What a draft head runs:**
 
@@ -190,7 +193,7 @@ PR check-set.)
 |---|---|---|
 | coverage ratchet (measure + engine split + aggregate) | `ci.yml` | never on drafts (merge_group + ready_for_review re-measure) |
 | benchmarks (deterministic ratchet + PR comparison/alert comments) | `bench.yml` | never on drafts |
-| CodeQL analysis | `codeql.yml` | never on drafts (push-main + weekly schedule + the ready_for_review run keep the `code_scanning` rule fed; merge_group was removed by the 2026-07-18 merge-queue-subset directive — the queue runs only the fast PR-relevant lanes, with heavy/independent lanes on push-to-main + their crons) |
+| CodeQL analysis | `codeql.yml` | never on drafts (push-main + weekly schedule + merge_group + the ready_for_review run keep the `code_scanning` rule fed *when the workflow is enabled*; codeql.yml is byte-identical to `main` — its triggers, including merge_group, are untouched by this PR — but the workflow is currently operationally disabled (`disabled_manually`), so no CodeQL check-run is produced on any trigger today; open PR #3427 owns the successor policy) |
 | heavy recall shards (`heavy-diskann`/`heavy-hnsw`) | `ci.yml` `test` | never on drafts (same demotion mechanism as their merge_group demotion) |
 | wasm bundle build | `ci.yml` `wasm` | kept iff a wasm-bundle crate is in the affected closure (the existing lane-seed guard — unchanged on both tiers) |
 | `artifact-exact-equality` (wasm feature-OFF byte identity) | `vectorized-feature-off.yml` | kept iff `sparq-wasm` is in the affected closure (in-step `ci_select.py` verdict; ci-full label / selector error / full mode ⇒ run) |

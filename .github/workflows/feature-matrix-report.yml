@@ -153,15 +153,33 @@ jobs:
           GROUP_JOBS_RESULT: ${{ github.event.workflow_run.conclusion }}
           GH_TOKEN: ${{ github.token }}
           DETAILS_URL: ${{ github.event.workflow_run.html_url }}
+          # CORRELATION (PR #3511 review finding 2 — same-SHA stale-report race):
+          # the TRIGGERING feature-matrix run id. Server-supplied + unforgeable; the
+          # reporter embeds it as the `feature-matrix report` check's external_id so
+          # ci_summary_gate.py binds the verdict to THIS group run and ignores a stale
+          # same-SHA report from an earlier feature-matrix run (feature-matrix reruns
+          # on ready_for_review / label events against the same head SHA).
+          TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
         run: |
           set -euo pipefail
 
           META="${FMG_META_DIR}/feature-matrix-metadata/metadata.json"
           SELECTED="${FMG_META_DIR}/feature-matrix-selected/selected-matrix.json"
           if [ ! -f "${META}" ] || [ ! -f "${SELECTED}" ]; then
-            echo "::error::the metadata or selected-matrix artifact is missing — the setup job did not produce it (or the run assembled zero legs); nothing to report."
-            # A feature-matrix run that assembled zero legs (path-filter skip / empty
-            # selection) uploads no metadata; there is nothing to gate here.
+            # NO-OP (green, no check posted). Two legitimate cases produce no grouped
+            # metadata/selected artifacts:
+            #  (1) BOOTSTRAP WINDOW: this reporter is on `main` AHEAD of the grouped
+            #      feature-matrix (PR #3511). main's current feature-matrix uses the
+            #      pre-grouping per-leg format and uploads NO metadata/selected
+            #      artifacts, so every triggered reporter run lands here and exits
+            #      cleanly WITHOUT posting a (misleading) success check-run. Once
+            #      #3511's grouped format merges, real artifacts appear and the reporter
+            #      begins posting. It NEVER posts for a run it cannot fully attribute.
+            #  (2) ZERO-LEG runs (path-filter skip / empty selection) upload no metadata
+            #      either; there is likewise nothing to gate.
+            # A `::notice::` (not `::error::`): this is an expected no-op, not a failure,
+            # so the reporter job stays green with no spurious error annotation.
+            echo "::notice::no grouped feature-matrix metadata/selected artifacts on this run (bootstrap window before PR #3511's grouped format lands, or a zero-leg run) — nothing to report; posting no check-run."
             exit 0
           fi
 

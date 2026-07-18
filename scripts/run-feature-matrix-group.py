@@ -112,6 +112,13 @@
 #                        does a "Resource not accessible by integration" POST failure
 #                        degrade to a warning; everywhere else it FAILS CLOSED.
 #   DETAILS_URL          (optional) workflow-run URL embedded in each check-run
+#   TRIGGER_RUN_ID       (optional but SET in prod) the TRIGGERING feature-matrix
+#                        run id (github.event.workflow_run.id — server-supplied,
+#                        unforgeable). Embedded VERBATIM as the `feature-matrix
+#                        report` check-run's `external_id` so ci_summary_gate.py can
+#                        CORRELATE the verdict to the current group run and ignore a
+#                        stale same-SHA report from an earlier feature-matrix run
+#                        (PR #3511 review finding 2 — same-SHA stale-report race).
 #   GROUP_JOBS_RESULT    (optional) the triggering opt-in-features result — 'success'
 #                        with zero result files is an inconsistency and fails the
 #                        reporter
@@ -434,11 +441,19 @@ def post_check_run(repo, head_sha, name, group, leg, failed_step, details_url, f
     return "failed"
 
 
-def post_summary_check(repo, head_sha, conclusion, title, summary, details_url, fork_pr):
+def post_summary_check(repo, head_sha, conclusion, title, summary, details_url, fork_pr, trigger_run_id=""):
     """POST the head-SHA `feature-matrix report` summary check-run so ci-summary can
     DISCOVER the reporter's verdict on the PR head (the reporter runs on a
     workflow_run event, off the head commit). Returns 'ok' / 'fork-denied' /
-    'failed' with the same event-gated fork tolerance as post_check_run."""
+    'failed' with the same event-gated fork tolerance as post_check_run.
+
+    CORRELATION (PR #3511 review finding 2): the check's `external_id` is set to the
+    TRIGGERING feature-matrix run id. That id comes from github.event.workflow_run.id
+    (server-supplied, unforgeable — not any PR-influenced artifact) and is the SAME id
+    the current `opt-in group (…)` check-runs carry in their details_url. The gate
+    correlates the two so a STALE same-SHA report (from an earlier feature-matrix run —
+    feature-matrix reruns on ready_for_review / labels against the same head) can never
+    satisfy the reporter-await for a FRESH group run."""
     payload = {
         "name": REPORT_SUMMARY_NAME,
         "head_sha": head_sha,
@@ -446,6 +461,10 @@ def post_summary_check(repo, head_sha, conclusion, title, summary, details_url, 
         "conclusion": conclusion,
         "output": {"title": title, "summary": summary},
     }
+    if trigger_run_id:
+        # The gate parses this back out and requires it to equal the latest
+        # `opt-in group (…)` run id (extracted from those checks' details_url).
+        payload["external_id"] = str(trigger_run_id)
     if details_url:
         payload["details_url"] = details_url
     retry_sleep = float(os.environ.get("FMG_RETRY_SLEEP", "5"))
@@ -477,14 +496,15 @@ def post_summary_check(repo, head_sha, conclusion, title, summary, details_url, 
     return "failed"
 
 
-def _emit_summary_and_return(repo, head_sha, details_url, fork_pr, ok, title, summary, rc):
+def _emit_summary_and_return(repo, head_sha, details_url, fork_pr, ok, title, summary, rc, trigger_run_id=""):
     """Post the head-SHA `feature-matrix report` summary check-run reflecting the
     reporter's verdict, then return `rc`. A summary-POST failure is itself a
     fail-closed condition (unless fork-denied), so it can only WORSEN rc, never
-    improve it — a red verdict never becomes green because its summary landed."""
+    improve it — a red verdict never becomes green because its summary landed.
+    trigger_run_id is threaded to post_summary_check for the finding-2 correlation."""
     conclusion = "success" if ok else "failure"
     outcome = post_summary_check(
-        repo, head_sha, conclusion, title, summary, details_url, fork_pr
+        repo, head_sha, conclusion, title, summary, details_url, fork_pr, trigger_run_id
     )
     if outcome == "failed":
         # Could not record the verdict on the head SHA — fail closed regardless.
@@ -501,6 +521,10 @@ def report_main():
         _report_error("--report needs FMG_RESULTS_DIR, FMG_VALID_LEGS_FILE, REPO and HEAD_SHA")
         return 2
     details_url = os.environ.get("DETAILS_URL", "")
+    # CORRELATION (finding 2): the TRIGGERING feature-matrix run id, embedded as the
+    # summary check-run's external_id so the gate can bind the verdict to THIS group
+    # run and reject a stale same-SHA report from an earlier feature-matrix run.
+    trigger_run_id = os.environ.get("TRIGGER_RUN_ID", "").strip()
     # EVENT-GATED fork tolerance (finding 3): the reporter workflow sets FMG_FORK_PR
     # from server-supplied fields; only then is a permission-denied POST benign.
     fork_pr = os.environ.get("FMG_FORK_PR", "").lower() == "true"
@@ -520,7 +544,7 @@ def report_main():
             _report_error(msg)
             return _emit_summary_and_return(
                 repo, head_sha, details_url, fork_pr, False,
-                "no results despite green groups", msg, 1)
+                "no results despite green groups", msg, 1, trigger_run_id)
         print(
             "::warning::no group results artifacts found (group jobs did not "
             "succeed) — nothing to report; the failed/skipped group jobs gate via "
@@ -533,7 +557,7 @@ def report_main():
             repo, head_sha, details_url, fork_pr, True,
             "no results to report",
             "the group jobs did not succeed, so there are no per-leg results to "
-            "post; the failed/skipped group jobs gate via ci-summary.", 0)
+            "post; the failed/skipped group jobs gate via ci-summary.", 0, trigger_run_id)
     seen_names = {}
     all_results = []
     for path in files:
@@ -543,7 +567,8 @@ def report_main():
                 repo, head_sha, details_url, fork_pr, False,
                 "malformed group results artifact",
                 f"a group results artifact under {results_dir} failed hostile-input "
-                "validation (schema / leg-name / duplicate). See the reporter log.", 1)
+                "validation (schema / leg-name / duplicate). See the reporter log.", 1,
+                trigger_run_id)
         all_results.extend(validated)
 
     # COMPLETENESS (finding 2): the observed leg-name set must equal the SELECTED
@@ -569,7 +594,7 @@ def report_main():
         _post_all(repo, head_sha, all_results, valid_legs, details_url, fork_pr)
         return _emit_summary_and_return(
             repo, head_sha, details_url, fork_pr, False,
-            "incomplete per-leg results", msg, 1)
+            "incomplete per-leg results", msg, 1, trigger_run_id)
 
     fork_denied, failed, posted = _post_all(
         repo, head_sha, all_results, valid_legs, details_url, fork_pr
@@ -584,13 +609,13 @@ def report_main():
         _report_error(msg)
         return _emit_summary_and_return(
             repo, head_sha, details_url, fork_pr, False,
-            "per-leg check-run POST failed", msg, 1)
+            "per-leg check-run POST failed", msg, 1, trigger_run_id)
     return _emit_summary_and_return(
         repo, head_sha, details_url, fork_pr, True,
         "all per-leg checks posted",
         f"posted {posted} per-leg `opt-in <name>` check-run(s) matching the selected "
         f"leg set exactly ({fork_denied} fork-denied). The group jobs' own "
-        "conclusions remain the coarse gating signal.", 0)
+        "conclusions remain the coarse gating signal.", 0, trigger_run_id)
 
 
 def _post_all(repo, head_sha, all_results, valid_legs, details_url, fork_pr):

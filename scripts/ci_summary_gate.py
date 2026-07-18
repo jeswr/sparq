@@ -185,6 +185,14 @@ SELECT_RE = re.compile(r"change-based test selection")
 # until the loop's own timeout, then FAILS CLOSED — never a conclude-by-timing.
 FM_GROUP_PREFIX = "opt-in group ("
 FM_REPORT_NAME = "feature-matrix report"
+# [FABLE-5] PR #3511 finding 2 (same-SHA stale-report race): an `opt-in group (…)`
+# check-run is an Actions JOB check-run of the feature-matrix run, so its details_url
+# is `…/actions/runs/<FM_RUN_ID>/job/<job_id>` — the SAME run id the trusted reporter
+# receives as github.event.workflow_run.id and embeds as the report's external_id.
+# This extracts <FM_RUN_ID> from that url so the report can be correlated to the
+# CURRENT group run (feature-matrix reruns on the same head on ready_for_review /
+# label events, so several group runs — hence several reports — can share a head SHA).
+RUNS_URL_RE = re.compile(r"/actions/runs/(\d+)(?:/|$)")
 
 
 @dataclass
@@ -440,27 +448,66 @@ def is_fm_report(name: str) -> bool:
     return name == FM_REPORT_NAME
 
 
+def fm_group_run_id(runs: list[dict]) -> str:
+    """[FABLE-5] PR #3511 finding 2: the CURRENT feature-matrix run id, extracted as
+    the MAXIMUM `/actions/runs/<id>` seen across the `opt-in group (…)` check-runs'
+    details_url. GitHub Actions run ids are monotonically ascending, so the max is the
+    LATEST feature-matrix run on this head — the one whose reporter verdict the gate
+    must await. (On a same-SHA rerun — ready_for_review / label — the commit carries
+    group check-runs from BOTH the stale and the fresh run; the fresh run's id is the
+    larger.) Returns "" if no group check carries a parseable run id (then the
+    correlation degrades to the pre-finding-2 any-report behaviour — never a false
+    RED, and the stale-report race is only reachable on a same-SHA rerun anyway)."""
+    best = ""
+    for r in runs:
+        if not is_fm_group(r.get("name", "")):
+            continue
+        url = r.get("details_url") or r.get("html_url") or ""
+        m = RUNS_URL_RE.search(url)
+        if m:
+            rid = m.group(1)
+            # Numeric max (ids are ints of possibly-different width); compare as ints.
+            if best == "" or int(rid) > int(best):
+                best = rid
+    return best
+
+
 def fm_report_status(runs: list[dict]) -> str:
-    """[FABLE-5] PR #3511 finding 1 (HIGH): the reporter-await status over the
-    (already forgiveness-filtered, self-excluded) sibling set. Returns one of:
+    """[FABLE-5] PR #3511 finding 1 (HIGH) + finding 2 (HIGH, correlation): the
+    reporter-await status over the (already forgiveness-filtered, self-excluded)
+    sibling set. Returns one of:
 
       * "n/a"     — no `opt-in group (…)` check-run on this head, so the
                     feature-matrix produced no legs for it and NO reporter is
                     expected (a doc-only PR, a fully change-selected-out matrix,
                     or a merge_group that skipped the lane). No requirement.
       * "ok"      — legs ran AND a terminal-SUCCESS `feature-matrix report`
-                    check-run is present: the reporter posted its green verdict.
-      * "failed"  — legs ran AND the reporter's check-run is terminal but NOT
-                    success (crashed / completeness-violation / POST error). The
-                    caller REDs. (Such a check also fails the normal gating-set
+                    check-run FOR THE CURRENT GROUP RUN is present: the reporter
+                    posted its green verdict.
+      * "failed"  — legs ran AND the CURRENT run's reporter check-run is terminal
+                    but NOT success (crashed / completeness-violation / POST error).
+                    The caller REDs. (Such a check also fails the normal gating-set
                     render on its own — this is belt-and-braces so the reporter
                     requirement is explicit and cannot be silently dropped.)
-      * "pending" — legs ran but the `feature-matrix report` check-run is either
-                    ABSENT (the reporter's workflow_run has not landed it yet, or
+      * "pending" — legs ran but the CURRENT run's `feature-matrix report` check-run
+                    is either ABSENT (its workflow_run has not landed it yet, or
                     crashed before posting) or present-but-not-terminal. The gate
                     must keep polling (still-settling); budget exhaustion in this
                     state FAILS CLOSED via render_verdict's reporter belt — never
                     a conclude-by-timing over the group jobs' bare successes.
+
+    CORRELATION (finding 2 — same-SHA stale-report race): feature-matrix reruns on the
+    SAME head SHA (ready_for_review / label events), so a STALE report from an earlier
+    run can sit on the commit while the CURRENT run's reporter is delayed/crashed. Each
+    reporter embeds its TRIGGERING feature-matrix run id as the report's external_id
+    (server-supplied, unforgeable); the CURRENT group run's id is fm_group_run_id(runs)
+    (max `/actions/runs/<id>` across the group checks). Only a report whose external_id
+    equals that id counts — a stale report (older run id) is IGNORED, so it can never
+    satisfy the hold for a fresh group run. When the current group run id is
+    unresolvable (no parseable url — not expected in prod) OR no report carries an
+    external_id (legacy reporter), we fall back to matching ANY report: a graceful
+    degradation to the pre-finding-2 behaviour that is never a false RED and only
+    weakens the stale-race defence, which is unreachable absent a same-SHA rerun.
 
     SAFETY: a reporter that FAILED to post (delayed / crashed) is indistinguishable
     from one that has not posted YET, and both map to "pending" — the fail-CLOSED
@@ -474,7 +521,19 @@ def fm_report_status(runs: list[dict]) -> str:
     reports = [r for r in runs if is_fm_report(r.get("name", ""))]
     if not reports:
         return "pending"  # legs ran; reporter verdict not on the head SHA yet
-    # If ANY report check is non-terminal, keep waiting; if all terminal, judge them.
+    # CORRELATION: bind the verdict to the CURRENT group run. Prefer the report(s)
+    # whose external_id equals the current group run id; ignore stale reports.
+    current_run_id = fm_group_run_id(runs)
+    any_report_has_extid = any((r.get("external_id") or "") for r in reports)
+    if current_run_id and any_report_has_extid:
+        matched = [r for r in reports if (r.get("external_id") or "") == current_run_id]
+        if not matched:
+            # Every report on this SHA is for an OLDER feature-matrix run (or carries
+            # no external_id). The current run's verdict has not landed — keep waiting
+            # (fail-closed on budget exhaustion). A stale success can never green us.
+            return "pending"
+        reports = matched
+    # If ANY (current-run) report check is non-terminal, keep waiting; else judge them.
     if any(r.get("status") != "completed" for r in reports):
         return "pending"
     if all(r.get("conclusion") == "success" for r in reports):
@@ -972,7 +1031,11 @@ def make_fetch_runs(repo: str, sha: str):
                 f"repos/{repo}/commits/{sha}/check-runs",
                 "--paginate",
                 "--jq",
-                ".check_runs[] | {name, status, conclusion, details_url, html_url, started_at, id}",
+                # external_id carries the reporter's finding-2 correlation token (the
+                # triggering feature-matrix run id) so fm_report_status can bind a
+                # `feature-matrix report` verdict to the CURRENT `opt-in group (…)`
+                # run and reject a stale same-SHA report from an earlier run.
+                ".check_runs[] | {name, status, conclusion, details_url, html_url, started_at, id, external_id}",
             ]
         )
 
