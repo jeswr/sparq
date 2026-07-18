@@ -211,6 +211,40 @@ fn duplicate_references_dereference_once() {
 }
 
 #[test]
+fn seed_blank_labels_cannot_collide_with_renamed_import_labels() {
+    // The seed's property shape is labelled `_:i0_b0` — exactly the label a
+    // naive ordinal-prefix rename gives the first imported document's `_:b0`.
+    // If the two collapsed into one node, the merged shape would carry two
+    // sh:path values (ill-formed: only one survives parsing), so one of the
+    // two violations would silently vanish from the report.
+    let seed = ttl(r#"
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix sh: <http://www.w3.org/ns/shacl#> .
+        @prefix ex: <http://example.org/> .
+        ex:seed owl:imports ex:g2 .
+        ex:NameShape a sh:NodeShape ;
+          sh:targetClass ex:Person ;
+          sh:property _:i0_b0 .
+        _:i0_b0 sh:path ex:name ; sh:minCount 1 .
+    "#);
+    let data = ttl(r#"
+        @prefix ex: <http://example.org/> .
+        ex:bob a ex:Person .
+    "#);
+    let docs = HashMap::from([("http://example.org/g2", AGE_SHAPES)]);
+    let mut calls = Vec::new();
+    let res = resolve_imports(&seed, map_loader(&docs, &mut calls)).expect("resolves");
+
+    assert_eq!(res.resolved, vec![format!("{}g2", EX)]);
+    let paths = result_paths(&data, &res.shapes);
+    assert_eq!(
+        paths,
+        vec![format!("{}age", EX), format!("{}name", EX)],
+        "the seed's _:i0_b0 and the import's renamed _:b0 must stay distinct shapes"
+    );
+}
+
+#[test]
 fn resolve_imports_unions_seed_with_closure() {
     // The caller already HAS a shapes graph; only its owl:imports closure is
     // assembled on top (the seed's own triples are included, labels intact).

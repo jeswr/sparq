@@ -85,7 +85,8 @@ fn iri_objects(g: &Graph, pred: &str) -> Vec<String> {
 
 /// Breadth-first assembly: dequeue an IRI (at most once — the cycle guard),
 /// load it, enqueue its `owl:imports`, and union its triples with each loaded
-/// document's blank nodes standardised apart (ordinal-prefixed labels).
+/// document's blank nodes standardised apart (ordinal-prefixed labels, under a
+/// marker proven disjoint from every seed label — see [`disjoint_marker`]).
 fn assemble<F>(
     seed: Option<&Graph>,
     queue: Vec<String>,
@@ -97,9 +98,16 @@ where
     let mut dict = Dict::new();
     let mut triples: Vec<[Id; 3]> = Vec::new();
     let mut seen_rows: FxHashSet<[Id; 3]> = FxHashSet::default();
+    let mut seed_labels: FxHashSet<String> = FxHashSet::default();
     if let Some(g) = seed {
+        for terms in GraphView::new(g).triples(None, None, None) {
+            for t in &terms {
+                collect_blank_labels(t, &mut seed_labels);
+            }
+        }
         add_graph(g, None, &mut dict, &mut triples, &mut seen_rows);
     }
+    let marker = disjoint_marker(&seed_labels);
 
     let mut queue = queue;
     let mut visited: FxHashSet<String> = FxHashSet::default();
@@ -117,7 +125,13 @@ where
             Ok(None) => unresolved.push(iri),
             Ok(Some(g)) => {
                 queue.extend(iri_objects(&g, OWL_IMPORTS));
-                add_graph(&g, Some(resolved.len()), &mut dict, &mut triples, &mut seen_rows);
+                add_graph(
+                    &g,
+                    Some((&marker, resolved.len())),
+                    &mut dict,
+                    &mut triples,
+                    &mut seen_rows,
+                );
                 resolved.push(iri);
             }
         }
@@ -130,21 +144,21 @@ where
 }
 
 /// Interns every triple of `g` into the union under construction, dropping
-/// exact duplicates. `ord: Some(n)` standardises the document's blank nodes
-/// apart by prefixing labels with the document ordinal; `None` (the
-/// [`resolve_imports`] seed) keeps labels intact.
+/// exact duplicates. `rename: Some((marker, n))` standardises the document's
+/// blank nodes apart by prefixing labels with the marker and document ordinal;
+/// `None` (the [`resolve_imports`] seed) keeps labels intact.
 fn add_graph(
     g: &Graph,
-    ord: Option<usize>,
+    rename: Option<(&str, usize)>,
     dict: &mut Dict,
     out: &mut Vec<[Id; 3]>,
     seen_rows: &mut FxHashSet<[Id; 3]>,
 ) {
     for [s, p, o] in GraphView::new(g).triples(None, None, None) {
         let row = [
-            intern(dict, s, ord),
-            intern(dict, p, ord),
-            intern(dict, o, ord),
+            intern(dict, s, rename),
+            intern(dict, p, rename),
+            intern(dict, o, rename),
         ];
         if seen_rows.insert(row) {
             out.push(row);
@@ -152,36 +166,78 @@ fn add_graph(
     }
 }
 
-fn intern(dict: &mut Dict, t: Term, ord: Option<usize>) -> Id {
-    match ord {
+fn intern(dict: &mut Dict, t: Term, rename: Option<(&str, usize)>) -> Id {
+    match rename {
         None => dict.intern(&t),
-        Some(n) => dict.intern(&rename_blanks(t, n)),
+        Some((marker, n)) => dict.intern(&rename_blanks(t, marker, n)),
     }
 }
 
-/// Rewrites every blank node in `t` (including inside RDF-1.2 triple terms) to
-/// an ordinal-prefixed label, so blank nodes from different documents can never
-/// collide in the union (an RDF *merge*, not a plain union).
-fn rename_blanks(t: Term, ord: usize) -> Term {
+/// Records every blank-node label in `t` (including inside RDF-1.2 triple
+/// terms), so [`disjoint_marker`] can prove the rename namespace apart from
+/// the seed's labels.
+fn collect_blank_labels(t: &Term, out: &mut FxHashSet<String>) {
     match t {
-        Term::BlankNode(b) => Term::BlankNode(renamed(&b, ord)),
+        Term::BlankNode(b) => {
+            out.insert(b.as_str().to_owned());
+        }
+        Term::Triple(tr) => {
+            if let NamedOrBlankNode::BlankNode(b) = &tr.subject {
+                out.insert(b.as_str().to_owned());
+            }
+            collect_blank_labels(&tr.object, out);
+        }
+        _ => {}
+    }
+}
+
+/// The shortest `i`, `ii`, `iii`, … marker such that no seed blank-node label
+/// has the shape `<marker><digits>_…` — exactly the shape [`renamed`] emits.
+/// This keeps every renamed label provably disjoint from the seed's intact
+/// labels: without it, a seed that already contains `_:i0_b0` would collapse
+/// with the first document's renamed `_:b0`, silently merging unrelated nodes.
+fn disjoint_marker(seed_labels: &FxHashSet<String>) -> String {
+    let mut marker = String::from("i");
+    while seed_labels.iter().any(|l| ordinal_shaped(l, &marker)) {
+        marker.push('i');
+    }
+    marker
+}
+
+/// Whether `label` has the `<marker><digits>_…` shape a renamed label takes.
+fn ordinal_shaped(label: &str, marker: &str) -> bool {
+    label
+        .strip_prefix(marker)
+        .and_then(|rest| rest.split_once('_'))
+        .is_some_and(|(ord, _)| !ord.is_empty() && ord.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// Rewrites every blank node in `t` (including inside RDF-1.2 triple terms) to
+/// a marker+ordinal-prefixed label, so blank nodes from different documents —
+/// and, via [`disjoint_marker`], from the seed — can never collide in the
+/// union (an RDF *merge*, not a plain union).
+fn rename_blanks(t: Term, marker: &str, ord: usize) -> Term {
+    match t {
+        Term::BlankNode(b) => Term::BlankNode(renamed(&b, marker, ord)),
         Term::Triple(tr) => {
             let subject = match tr.subject {
-                NamedOrBlankNode::BlankNode(b) => NamedOrBlankNode::BlankNode(renamed(&b, ord)),
+                NamedOrBlankNode::BlankNode(b) => {
+                    NamedOrBlankNode::BlankNode(renamed(&b, marker, ord))
+                }
                 s => s,
             };
             Term::Triple(Box::new(Triple::new(
                 subject,
                 tr.predicate.clone(),
-                rename_blanks(tr.object.clone(), ord),
+                rename_blanks(tr.object.clone(), marker, ord),
             )))
         }
         other => other,
     }
 }
 
-fn renamed(b: &BlankNode, ord: usize) -> BlankNode {
-    // A valid blank-node label prefixed with `i<ord>_` stays a valid label
+fn renamed(b: &BlankNode, marker: &str, ord: usize) -> BlankNode {
+    // A valid blank-node label prefixed with `i…i<ord>_` stays a valid label
     // (ASCII alphanumerics + underscore), so unchecked construction is safe.
-    BlankNode::new_unchecked(format!("i{}_{}", ord, b.as_str()))
+    BlankNode::new_unchecked(format!("{}{}_{}", marker, ord, b.as_str()))
 }
