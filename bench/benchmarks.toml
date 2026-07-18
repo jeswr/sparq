@@ -1907,20 +1907,24 @@ records_to  = "Phase 1: stdout only (no file). Phase 2: bench/competitor-results
 featured    = false  # quality comparison at matched model/budget, not a throughput dashboard card; HONESTY: sparq-kge is in-store KGE over dict-encoded ids, not a standalone KGE training library
 status      = "implemented"  # Phase 1 (published-only) implemented; Phase 2 is sq-hmd7l.37
 
-# [SONNET-4.6] sq-hmd7l.24 — RIF NOT-COMPARABLE verdict + conformance runner
+# [SONNET-4.6] sq-hmd7l.24 — RIF NOT-COMPARABLE verdict + conformance runner.
+# [FABLE-5] sq-hmd7l.24 implemented: CONFORMANCE-ONLY axis (no runnable open-source RIF
+# peer exists — fuxi dead, Jena dropped RIF, RIFle unmaintained, RDFox consumes datalog
+# not RIF; research/gap-rif-2026-07.md codifies the verdict). NO wall-clock is emitted;
+# perf of RIF-translated rules is the materialization axis (sq-hmd7l.7).
 [[benchmark]]
 id          = "rif-conformance"
 name        = "RIF conformance — W3C RIF suite pass-rate runner (NOT-COMPARABLE verdict)"
 category    = "conformance"
-measures    = "W3C RIF Core + BLD test-suite pass-rate (pass/fail counts; NOT a throughput measure); backs the 'only maintained open-source RIF consumer' claim; failures listed, never rounded up"
-invoke      = "TBD — implementing bead sq-hmd7l.24"
-source      = "TBD — bench/rif-conformance/; W3C RIF test suite fetched at gather time"
-dataset     = "TBD — W3C RIF Core + BLD test suite (sha256-pinned or commit-pinned)"
+measures    = "W3C RIF test-suite pass-rate with per-dialect breakdown (pass/fail/skip counts + the named skip taxonomy — the denominator's honesty; NOT a throughput measure); backs the 'only maintained open-source RIF consumer' claim; failures listed one by one, never rounded up. --smoke HARD self-asserts EXACT per-case verdicts (pinned SKIPs included) vs bench/rif/expected.tsv on the vendored sparq-AUTHORED subset (exit 1 on drift)"
+invoke      = "bash bench/rif/run.sh --smoke   # self-asserting vendored subset\nscripts/fetch-inference-suites.sh && bash bench/rif/run.sh   # full per-dialect pass-rate over the fetched W3C archive (graceful skip, exit 0, when absent)"
+source      = "bench/rif/{run.sh,expected.tsv,suite/,README.md}; crates/sparq-reason/examples/rif_conformance.rs (--features rif-xml; oracle is a condensed restatement of crates/sparq-conformance/tests/rif_wg_core_suite.rs, cross-run for tally parity); research/gap-rif-2026-07.md"
+dataset     = "smoke: vendored sparq-AUTHORED cases in bench/rif/suite (W3C archive taxonomy; the real W3C RIF files carry NO redistribution license — even a subset is a prohibited derivative, see scripts/fetch-inference-suites.sh). full: the FETCHED W3C archive under tests/w3c/rif-core/ (gitignored; Core_v1.22 today, further dialect archives surface as their own breakdown rows when fetched)"
 quiet_box_sensitive = false  # pass-rate is deterministic (correctness, not wall-clock)
-pinning     = "TBD — W3C RIF test-suite commit sha256"
-records_to  = "TBD — bench/rif-conformance/results.tsv (pass/fail counts); NOT a perf number"
-featured    = false  # registry stub; implementing bead sq-hmd7l.24. NOT-COMPARABLE perf verdict
-status      = "planning"
+pinning     = "smoke: bench/rif/expected.tsv (exact per-case verdicts) + the committed suite/ fixtures. full: the Core_v1.22.zip sha256 pinned in scripts/fetch-inference-suites.sh. The rise-only pass-count RATCHET is RIF_WG_CORE_FLOOR in crates/sparq-conformance/tests/rif_wg_core_suite.rs (this runner emits the rate, the lane owns the floor)"
+records_to  = "stdout (self-asserting smoke); full mode tees to bench/rif/results.tsv (gitignored — pass/fail counts, NOT a perf number, never committed to markdown)"
+featured    = false  # NOT-COMPARABLE perf verdict: conformance-only arm, no head-to-head capability claim
+status      = "ok"
 
 # [FABLE-5] sq-lsp7k.1.1 — sparq-forms derivation micro-bench: the cost of one
 # shape→FormDescription derivation (shape selection + field enumeration + DASH
