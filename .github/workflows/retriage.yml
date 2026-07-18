@@ -3,6 +3,9 @@
 # so an issue missing a priority at open time (or fixed later by label) never became ready. This
 # sweep re-runs the SAME static triage over parked untriaged issues by trusted authors, applying a
 # default priority:P3 only when NO priority label exists (ambiguity still parks for a human).
+# [FABLE-5] (#2474) It ALSO sweeps open `flow-on` issues with no status:* label at all: flow-on
+# follow-ups are minted under GITHUB_TOKEN, whose issue events GitHub suppresses, so the event
+# triager never saw them (flow-on.py now routes at creation; this converges the pre-fix backlog).
 name: retriage
 on:
   workflow_dispatch:

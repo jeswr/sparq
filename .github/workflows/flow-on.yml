@@ -6,6 +6,13 @@
 # `flow-on` + `auto`, idempotent) for each triggered follow-on. The orchestrator
 # reconciles those issues into beads — we do NOT touch `bd` / `.beads/` in CI.
 #
+# [FABLE-5] (#2474) flow-on.py ALSO applies role/priority/status routing labels at
+# creation (via the shared scripts/triage.py static pass): issues created under
+# `secrets.GITHUB_TOKEN` fire no `issues: opened` event (GitHub's recursion
+# guard), so triage-issue.yml can never label them post-hoc — unrouted, they were
+# invisible to the dispatch frontier. The retriage cron sweeps the pre-fix
+# label-less backlog.
+#
 # This is NOT a gate: it never blocks a merge (it runs AFTER merge) and the job
 # name carries no `advisory`/`informational` token so it stays visible. It only
 # mints follow-on issues.
