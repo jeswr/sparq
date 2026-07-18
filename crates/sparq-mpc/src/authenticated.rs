@@ -455,10 +455,17 @@ pub fn auth_add_constant(
 /// This is the reusable form of the flatmate cumulative-salary use case: the SUM
 /// is a pure linear function, so under Shamir it is **zero communication rounds**,
 /// and because [`auth_add`] carries the MAC on BOTH components (`α·(x+y) = α·x +
-/// α·y`) the aggregate stays authenticated for FREE — the "malicious comes free in
-/// honest majority" property for linear circuits (design §2.3). No new
-/// interaction over the unauthenticated aggregate; only the MAC sharing is
-/// additionally maintained.
+/// α·y`) the MAC relation is preserved for FREE — the "malicious comes free in
+/// honest majority" property for linear circuits (design §2.3) — for
+/// same-session, honestly formed inputs. No new interaction over the
+/// unauthenticated aggregate; only the MAC sharing is additionally maintained.
+///
+/// **This helper only propagates MAC shares — it never invokes the batched
+/// `mac_check` (§2.5) itself.** Tamper detection requires the CALLER to include
+/// the result in a successful `mac_check` before opening or otherwise relying on
+/// it. And as everywhere on this chain, the malicious-with-abort security claim
+/// is research-grade: internally re-audited, but EXTERNAL accredited-cryptographer
+/// sign-off is PENDING `sq-qhy4`.
 ///
 /// All addends must be authenticated under the SAME session key `α` and shared on
 /// the identical party-point set (as [`auth_add`] requires). An empty input is a
