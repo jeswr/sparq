@@ -6,6 +6,11 @@
 // driven over an injected `fetch`. These cover the pure, framework-free logic the
 // subscriptions VIEW relies on. Run via `npm run test:unit`.
 //
+// [FABLE-5] sq-140b adds the MULTIPLEXED WebSocket transport suite (`ws-subscriptions.ts`):
+// the ws(s) URL derivation, the `bearer.<token>` subprotocol auth channel, and the
+// many-subscriptions-per-socket routing (ordered acks, id-routed notifications, refusal
+// attribution, per-handle unsubscribe, socket close) driven over an injected WebSocket.
+//
 // Imported by RELATIVE path (not the `@sparq/client` alias) so the build-free ts-loader
 // resolves it without a custom alias resolver — exactly like endpoint.test.mjs.
 import { test } from "node:test";
@@ -22,6 +27,12 @@ import {
   liveResults,
   openSubscription,
 } from "../../packages/sparq-client/src/subscriptions.ts";
+// [FABLE-5] sq-140b — the multiplexed WebSocket transport of the same surface: one socket,
+// many subscriptions, `subscribe`/`unsubscribe` frames, `bearer.<token>` subprotocol auth.
+import {
+  buildSubscriptionSocketUrl,
+  openSubscriptionSocket,
+} from "../../packages/sparq-client/src/ws-subscriptions.ts";
 
 // --- buildSubscriptionUrl ---------------------------------------------------
 
@@ -90,6 +101,12 @@ test("parseSubscriptionData yields 'unknown' for junk, never throws", () => {
   assert.equal(parseSubscriptionData("not json").kind, "unknown");
   assert.equal(parseSubscriptionData(`{"surprise":1}`).kind, "unknown");
   assert.equal(parseSubscriptionData("42").kind, "unknown");
+});
+
+test("parseSubscriptionData tags the WS-only unsubscribed ack (sq-140b)", () => {
+  const ev = parseSubscriptionData(`{"unsubscribed":{"id":3}}`);
+  assert.equal(ev.kind, "unsubscribed");
+  assert.equal(ev.id, 3);
 });
 
 // --- splitSseFrames + frameData (the wire framing) --------------------------
@@ -314,4 +331,290 @@ test("openSubscription fails closed on an invalid endpoint URL", async () => {
     handle.close();
   });
   assert.match(closedError, /valid absolute endpoint URL/);
+});
+
+// --- [FABLE-5] sq-140b: the multiplexed WebSocket transport ------------------
+
+// --- buildSubscriptionSocketUrl ---
+
+test("buildSubscriptionSocketUrl rewrites a trailing /sparql to ws://…/subscriptions", () => {
+  assert.equal(
+    buildSubscriptionSocketUrl({ url: "http://127.0.0.1:3030/sparql" }),
+    "ws://127.0.0.1:3030/subscriptions",
+  );
+});
+
+test("buildSubscriptionSocketUrl maps https to wss and strips any query string", () => {
+  assert.equal(
+    buildSubscriptionSocketUrl({ url: "https://data.example.org/sparql?x=1" }),
+    "wss://data.example.org/subscriptions",
+  );
+});
+
+test("buildSubscriptionSocketUrl mounts at the origin root when the path is not /sparql", () => {
+  assert.equal(
+    buildSubscriptionSocketUrl({ url: "http://localhost:3030/" }),
+    "ws://localhost:3030/subscriptions",
+  );
+});
+
+test("buildSubscriptionSocketUrl returns null for an invalid endpoint URL", () => {
+  assert.equal(buildSubscriptionSocketUrl({ url: "nope" }), null);
+  assert.equal(buildSubscriptionSocketUrl({ url: "" }), null);
+});
+
+// --- openSubscriptionSocket (the multiplexed lifecycle over an injected WebSocket) ---
+
+/** A scriptable stand-in for the platform WebSocket (the transport's WebSocketLike slice). */
+class FakeWebSocket {
+  static last = null;
+  constructor(url, protocols) {
+    this.url = url;
+    this.protocols = protocols;
+    this.sent = []; // parsed JSON frames the client sent
+    this.closeCalls = 0;
+    this.onopen = null;
+    this.onmessage = null;
+    this.onerror = null;
+    this.onclose = null;
+    FakeWebSocket.last = this;
+  }
+  send(data) {
+    this.sent.push(JSON.parse(data));
+  }
+  close() {
+    this.closeCalls += 1;
+    // Mirror the platform: the close event fires after a client-side close().
+    this.onclose?.({ code: 1000, wasClean: true });
+  }
+  // Test drivers (server side of the wire):
+  open() {
+    this.onopen?.();
+  }
+  message(obj) {
+    this.onmessage?.({ data: JSON.stringify(obj) });
+  }
+  fail(code = 1006) {
+    this.onerror?.();
+    this.onclose?.({ code, wasClean: false });
+  }
+}
+
+/** A recording per-subscription handler set. */
+function recordingHandlers() {
+  const rec = { events: [], opened: 0, closed: 0, closeError: undefined };
+  rec.handlers = {
+    onOpen: () => (rec.opened += 1),
+    onEvent: (e) => rec.events.push(e),
+    onClose: (err) => {
+      rec.closed += 1;
+      rec.closeError = err;
+    },
+  };
+  return rec;
+}
+
+const WS_CONFIG = { url: "http://127.0.0.1:3030/sparql", token: "s3cret" };
+const SELECT = "SELECT ?s WHERE { ?s ?p ?o }";
+
+function wsNotification(id, seq, values) {
+  return {
+    notification: {
+      id,
+      sequence: seq,
+      addedResults: {
+        head: { vars: ["s"] },
+        results: { bindings: values.map((v) => ({ s: { type: "uri", value: v } })) },
+      },
+      removedResults: { head: { vars: ["s"] }, results: { bindings: [] } },
+    },
+  };
+}
+
+test("openSubscriptionSocket offers the bearer subprotocol and multiplexes two subscriptions by id", () => {
+  const socket = openSubscriptionSocket(
+    WS_CONFIG,
+    {},
+    { webSocketImpl: FakeWebSocket },
+  );
+  const ws = FakeWebSocket.last;
+  assert.equal(ws.url, "ws://127.0.0.1:3030/subscriptions");
+  assert.deepEqual(ws.protocols, ["bearer.s3cret"], "the token travels ONLY as bearer.<token>");
+
+  // Both subscribes are requested before the handshake completes: queued, then flushed.
+  const a = recordingHandlers();
+  const b = recordingHandlers();
+  socket.subscribe(SELECT, a.handlers, { alias: "  ages  " });
+  socket.subscribe(SELECT, b.handlers);
+  assert.equal(ws.sent.length, 0, "nothing is sent before the socket opens");
+
+  ws.open();
+  assert.equal(ws.sent.length, 2);
+  assert.deepEqual(ws.sent[0], { subscribe: { query: SELECT, alias: "ages" } });
+  assert.deepEqual(ws.sent[1], { subscribe: { query: SELECT } });
+  assert.equal(a.opened, 1);
+  assert.equal(b.opened, 1);
+
+  // Acks answer in order: first ack → a, second → b.
+  ws.message({ subscribed: { id: 1, alias: "ages" } });
+  ws.message({ subscribed: { id: 2 } });
+  assert.equal(a.events[0].kind, "subscribed");
+  assert.equal(a.events[0].ack.id, 1);
+  assert.equal(b.events[0].ack.id, 2);
+
+  // Live frames route by id, on ONE socket.
+  ws.message(wsNotification(2, 0, ["http://b"]));
+  ws.message(wsNotification(1, 0, ["http://a"]));
+  assert.equal(a.events[1].notification.id, 1);
+  assert.equal(b.events[1].notification.id, 2);
+  assert.equal(a.events.length, 2);
+  assert.equal(b.events.length, 2);
+});
+
+test("openSubscriptionSocket does not offer a subprotocol when no token is configured", () => {
+  openSubscriptionSocket(
+    { url: "http://127.0.0.1:3030/sparql" },
+    {},
+    { webSocketImpl: FakeWebSocket },
+  );
+  assert.deepEqual(FakeWebSocket.last.protocols, []);
+});
+
+test("an id-less refusal error is attributed to the oldest in-flight subscribe only", () => {
+  const socket = openSubscriptionSocket(WS_CONFIG, {}, { webSocketImpl: FakeWebSocket });
+  const ws = FakeWebSocket.last;
+  ws.open();
+  const bad = recordingHandlers();
+  const good = recordingHandlers();
+  socket.subscribe("ASK { ?s ?p ?o }", bad.handlers);
+  socket.subscribe(SELECT, good.handlers);
+
+  // The server answers each subscribe in order: refusal for the ASK, ack for the SELECT.
+  ws.message({ error: { message: "only SELECT queries can be subscribed" } });
+  ws.message({ subscribed: { id: 1 } });
+
+  assert.equal(bad.events.length, 1);
+  assert.equal(bad.events[0].kind, "error");
+  assert.equal(bad.closed, 1, "the refused subscription closes");
+  assert.equal(bad.closeError, undefined, "…cleanly (the error came via onEvent, as on SSE)");
+  assert.equal(good.events[0].kind, "subscribed", "the later subscribe is unaffected");
+  assert.equal(good.closed, 0);
+});
+
+test("a terminating error with an id closes just that subscription; the socket stays up", () => {
+  const socketHandlers = { closed: 0 };
+  const socket = openSubscriptionSocket(
+    WS_CONFIG,
+    { onClose: () => (socketHandlers.closed += 1) },
+    { webSocketImpl: FakeWebSocket },
+  );
+  const ws = FakeWebSocket.last;
+  ws.open();
+  const a = recordingHandlers();
+  const b = recordingHandlers();
+  socket.subscribe(SELECT, a.handlers);
+  socket.subscribe(SELECT, b.handlers);
+  ws.message({ subscribed: { id: 1 } });
+  ws.message({ subscribed: { id: 2 } });
+
+  ws.message({ error: { message: "re-evaluation failed, subscription terminated: timeout", id: 1 } });
+  assert.equal(a.events.at(-1).kind, "error");
+  assert.equal(a.closed, 1);
+  assert.equal(b.closed, 0, "the sibling subscription lives on");
+  assert.equal(socketHandlers.closed, 0, "the socket itself stays open");
+
+  // The dead id no longer routes.
+  ws.message(wsNotification(1, 1, ["http://zombie"]));
+  assert.equal(a.events.at(-1).kind, "error", "no further events after the terminating error");
+});
+
+test("closing one handle sends unsubscribe, swallows the ack, and leaves the socket open", () => {
+  const unrouted = [];
+  const socket = openSubscriptionSocket(
+    WS_CONFIG,
+    { onUnrouted: (e) => unrouted.push(e) },
+    { webSocketImpl: FakeWebSocket },
+  );
+  const ws = FakeWebSocket.last;
+  ws.open();
+  const a = recordingHandlers();
+  const b = recordingHandlers();
+  const handleA = socket.subscribe(SELECT, a.handlers);
+  socket.subscribe(SELECT, b.handlers);
+  ws.message({ subscribed: { id: 1 } });
+  ws.message({ subscribed: { id: 2 } });
+
+  handleA.close();
+  assert.deepEqual(ws.sent.at(-1), { unsubscribe: { id: 1 } });
+  assert.equal(a.closed, 1);
+  ws.message({ unsubscribed: { id: 1 } });
+  assert.equal(unrouted.length, 0, "the expected unsubscribed ack is swallowed, not noise");
+  assert.equal(ws.closeCalls, 0, "the socket stays up for the sibling");
+
+  // Closing the same handle again is a no-op (no double onClose, no second frame).
+  handleA.close();
+  assert.equal(a.closed, 1);
+  assert.deepEqual(ws.sent.at(-1), { unsubscribe: { id: 1 } });
+});
+
+test("socket.close() ends every subscription cleanly", () => {
+  let socketErr = "unset";
+  const socket = openSubscriptionSocket(
+    WS_CONFIG,
+    { onClose: (err) => (socketErr = err) },
+    { webSocketImpl: FakeWebSocket },
+  );
+  const ws = FakeWebSocket.last;
+  ws.open();
+  const a = recordingHandlers();
+  socket.subscribe(SELECT, a.handlers);
+  ws.message({ subscribed: { id: 1 } });
+
+  socket.close();
+  assert.equal(ws.closeCalls, 1);
+  assert.equal(a.closed, 1);
+  assert.equal(a.closeError, undefined, "a client-initiated close is clean");
+  assert.equal(socketErr, undefined);
+
+  // A subscribe after close fails closed.
+  const late = recordingHandlers();
+  socket.subscribe(SELECT, late.handlers);
+  assert.equal(late.closed, 1);
+  assert.match(late.closeError, /closed/);
+});
+
+test("a handshake failure surfaces the honest possible-causes message to every waiting subscription", () => {
+  let socketErr;
+  const socket = openSubscriptionSocket(
+    WS_CONFIG,
+    { onClose: (err) => (socketErr = err) },
+    { webSocketImpl: FakeWebSocket },
+  );
+  const ws = FakeWebSocket.last;
+  const a = recordingHandlers();
+  socket.subscribe(SELECT, a.handlers); // queued — the handshake never completes
+  ws.fail(1006);
+
+  assert.match(socketErr, /handshake failed/);
+  assert.match(socketErr, /401/, "names the token refusal possibility");
+  assert.match(socketErr, /mixed content/, "names the ws:// -from-https possibility");
+  assert.equal(a.closed, 1);
+  assert.equal(a.closeError, socketErr);
+  assert.equal(a.opened, 0, "the queued subscribe never claimed to open");
+});
+
+test("openSubscriptionSocket fails closed on an invalid endpoint URL", () => {
+  let socketErr;
+  const socket = openSubscriptionSocket(
+    { url: "nope" },
+    { onClose: (err) => (socketErr = err) },
+    { webSocketImpl: FakeWebSocket },
+  );
+  assert.match(socketErr, /valid absolute endpoint URL/);
+  const a = recordingHandlers();
+  const handle = socket.subscribe(SELECT, a.handlers);
+  assert.equal(a.closed, 1);
+  assert.match(a.closeError, /valid absolute endpoint URL/);
+  handle.close(); // dead handle — must not throw
+  socket.close();
 });

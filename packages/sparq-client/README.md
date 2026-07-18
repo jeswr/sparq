@@ -70,6 +70,21 @@ copy is the **single source of truth**, kept byte-identical to a fresh wasm buil
   renders a live row exactly like a queried one. It reuses endpoint mode's `EndpointConfig` +
   bearer posture verbatim, runs the SAME `connectionSafetyWarnings` classifier, and **bypasses no
   server gate** (the SSE read surface is gated by `--auth-token-read` exactly as `/sparql` GET).
+- **Multiplexed WebSocket subscriptions** (`src/ws-subscriptions.ts`, `sq-140b`): the OTHER
+  transport of the same server surface — ONE `/subscriptions` WebSocket carrying **many**
+  subscriptions via the server's `{"subscribe":{…}}` / `{"unsubscribe":{"id"}}` frames, so a GUI
+  holding several live views pays one connection. `openSubscriptionSocket(config, handlers?)`
+  opens the socket (`buildSubscriptionSocketUrl`: `http`→`ws`, `https`→`wss`, `/sparql` →
+  `/subscriptions`); its `subscribe(query, handlers, {alias?})` returns a per-subscription handle
+  whose `close()` unsubscribes just that subscription. The bearer token is offered ONLY as the
+  `bearer.<token>` subprotocol (`wsSubprotocols`) the server's `ws_auth_gate` validates for a
+  browser upgrade — never in the URL. Frames are the SAME SEPA envelopes as SSE
+  (`parseSubscriptionData` / `applyNotification` reused verbatim; `unsubscribed` is the one
+  WS-only kind); refusals and terminating errors surface per subscription as
+  `onEvent({kind:"error"})` then `onClose()`, exactly the SSE order, so one handler drives both
+  transports. Runs the SAME `connectionSafetyWarnings` classifier and **bypasses no server
+  gate**; a failed handshake is reported with an honest LIST of possible causes (the browser
+  hides the real one — no fabricated single diagnosis).
 - **Server health / capabilities** (`src/server-health.ts`, `sq-he72`): reads the connected
   server's OPERATIONAL surface, reusing the SAME `EndpointConfig` + bearer posture.
   `fetchServerHealth(config)` reads `/health`, the Prometheus `/metrics`, the opt-in VoID

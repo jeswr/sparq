@@ -782,6 +782,24 @@ export {
 } from "./subscriptions.js";
 
 // ---------------------------------------------------------------------------
+// [FABLE-5] sq-140b — live subscriptions, the MULTIPLEXED WebSocket transport of the same
+// `/subscriptions` surface: ONE socket carries many subscriptions via the server's
+// `subscribe` / `unsubscribe` frames, with the bearer token offered only as the
+// `bearer.<token>` subprotocol (`wsSubprotocols`) the server's `ws_auth_gate` validates.
+// Speaks the SAME SEPA envelopes as the SSE transport (`parseSubscriptionData` and the
+// `applyNotification` reducers are reused verbatim); bypasses no server gate.
+// ---------------------------------------------------------------------------
+
+export {
+  type SubscriptionSocket,
+  type SubscriptionSocketHandlers,
+  type WebSocketCtor,
+  type WebSocketLike,
+  buildSubscriptionSocketUrl,
+  openSubscriptionSocket,
+} from "./ws-subscriptions.js";
+
+// ---------------------------------------------------------------------------
 // [OPUS-4.8] sq-he72 — server health / capabilities: read the connected server's
 // operational surface (`/health`, the Prometheus `/metrics`, and the opt-in VoID / SPARQL
 // Service Description). Reuses the SAME `EndpointConfig` + bearer posture as the query client;
