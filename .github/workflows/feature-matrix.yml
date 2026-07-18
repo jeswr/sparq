@@ -138,8 +138,19 @@ jobs:
   # The opt-in feature matrix only compiles/tests Rust, so a doc-only PR can skip it while
   # the required ci-summary gate still resolves SUCCESS (the aggregator treats the skipped
   # leg's `skipped` conclusion as non-failing). SAFE-BY-DEFAULT: rust_changed is forced
-  # 'true' on every event except `pull_request`, so the canonical push/merge_group/manual
-  # runs ALWAYS compile the full feature matrix — only a purely non-Rust PR diff skips.
+  # 'true' on push/schedule/workflow_dispatch, so the canonical push/manual runs ALWAYS
+  # compile the full feature matrix — only a purely non-Rust PR diff skips.
+  # [FABLE-5] MERGE-GROUP CHANGE-CLASS GATE (extends #3420/#3421 to this layer; full
+  # doctrine: ci.yml's `changes` job header). merge_group used to hard-force
+  # rust_changed=true, so a docs-only/orchestration-only queued batch still paid this
+  # workflow's rust_changed-only jobs (setup / check-tier / fedclient-boundary) on every
+  # enqueue. The decide step now diffs the queued batch (base_sha...head_sha, the #3421
+  # fetch pattern) and classifies it with `scripts/ci_select.py --classify-only` — the
+  # SAME classify_change() the `select` pre-job runs on this event (no duplicated path
+  # lists). docs-only/orchestration-only => rust_changed=false; any other class, an
+  # unresolvable SHA pair, or any classifier error => true (fail-safe = full run). The
+  # skipped legs report `skipped` and the required ci-summary gate attributes them to
+  # the green same-diff `select` pre-job (attributed skips, never missing legs).
   changes:
     name: detect rust changes (feature-matrix)
     # [FABLE-5] label-trigger guard (see the pull_request trigger note): a
@@ -177,14 +188,48 @@ jobs:
               - 'scripts/assemble-feature-matrix.py'
       - name: Decide rust_changed (safe-by-default off the PR path)
         id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
-            echo "event=${{ github.event_name }} -> forcing rust_changed=true (full feature matrix)"
-          else
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
             echo "rust_changed=${{ steps.filter.outputs.rust }}" >> "$GITHUB_OUTPUT"
             echo "pull_request -> paths-filter says rust=${{ steps.filter.outputs.rust }}"
+          elif [ "${EVENT_NAME}" = "merge_group" ]; then
+            # [FABLE-5] MERGE-GROUP CHANGE-CLASS GATE (see the job header note): diff the
+            # queued batch (#3421 fetch pattern) and classify via scripts/ci_select.py
+            # --classify-only. docs-only/orchestration-only batch => skip; any other
+            # class, unknown token, unresolvable SHAs, or classifier error => full
+            # (fail-safe).
+            rust=true
+            ok=true
+            # --depth=2147483647 (--unshallow, valid on complete repos too): the
+            # depth-1 checkout leaves the three-dot diff with no merge-base — a
+            # shallow SHA fetch passes the cat-file guards yet the diff dies, so
+            # the fail-safe would force class=engine on EVERY batch (silent
+            # no-op gate). Full rationale: ci.yml's decide step.
+            git fetch --no-tags --quiet --depth=2147483647 origin "${MG_BASE_SHA}" "${MG_HEAD_SHA}" 2>/dev/null \
+              || git fetch --no-tags --quiet --depth=2147483647 origin "${MG_BASE_SHA}" 2>/dev/null \
+              || ok=false
+            git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null || ok=false
+            git cat-file -e "${MG_HEAD_SHA}^{commit}" 2>/dev/null || ok=false
+            if [ "${ok}" = "true" ]; then
+              cls="$(python3 scripts/ci_select.py --classify-only --event merge_group \
+                       --base "${MG_BASE_SHA}" --head "${MG_HEAD_SHA}")" || cls=engine
+              case "${cls}" in
+                docs-only|orchestration-only) rust=false ;;
+                *) rust=true ;;
+              esac
+            else
+              echo "::warning::could not resolve merge_group base/head SHAs for the batch diff — running the full feature matrix (fail-safe)."
+            fi
+            echo "rust_changed=${rust}" >> "$GITHUB_OUTPUT"
+            echo "merge_group -> change_class=${cls:-<unresolved>} rust_changed=${rust}"
+          else
+            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
+            echo "event=${EVENT_NAME} -> forcing rust_changed=true (full feature matrix)"
           fi
 
   # [FABLE-5] sq-fmx4u.3: change-based test-selection pre-job (reusable — doctrine
