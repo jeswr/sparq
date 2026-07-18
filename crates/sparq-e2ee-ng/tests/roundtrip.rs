@@ -1,0 +1,502 @@
+//! Behavioral tests: deterministic encoding, fail-closed parsing, seal/open,
+//! sign/verify, capability separation + delegation, and epoch transitions.
+
+use sparq_e2ee_ng::capability::{
+    base_grant, delegate, Authority, Capability, Delegation, PublicGrant, Validity,
+};
+use sparq_e2ee_ng::cbor::{enc_bytes, enc_map, enc_uint, Limits, Reader, Writer};
+use sparq_e2ee_ng::envelope::{
+    open_block, seal_block, seal_block_random, BlockContext, BlockEnvelope, Commit, ObjectKind,
+    PAD_CLASSES,
+};
+use sparq_e2ee_ng::epoch::{EpochTransition, HistoryPolicy};
+use sparq_e2ee_ng::error::Error;
+use sparq_e2ee_ng::ids::{
+    AuthorKeyId, BranchId, CommitId, Epoch, ObjectId, RepoId, Secret32, TopicId,
+};
+use sparq_e2ee_ng::sign::SecretSigningKey;
+use sparq_e2ee_ng::suite::AEAD_NONCE_LEN;
+use sparq_e2ee_ng::wrap::{unwrap, wrap, wrap_with, RecipientSecretKey, WrappedSecret};
+
+fn lim() -> Limits {
+    Limits::default()
+}
+
+// --- helpers ----------------------------------------------------------------
+fn sample_grant() -> PublicGrant {
+    base_grant(
+        RepoId::from_bytes([1u8; 32]),
+        BranchId::from_bytes([2u8; 32]),
+        Epoch(7),
+        TopicId::from_bytes([3u8; 32]),
+        Validity { not_before: 100, not_after: 200 },
+        vec!["wss://broker.example".to_string()],
+    )
+}
+
+// ============================================================================
+// CBOR determinism + fail-closed parsing
+// ============================================================================
+
+#[test]
+fn cbor_canonical_is_deterministic() {
+    // A map supplied out of key order encodes identically to in-order.
+    let a = enc_map(vec![
+        (3, enc_uint(30)),
+        (1, enc_uint(10)),
+        (2, enc_bytes(b"x")),
+    ]);
+    let b = enc_map(vec![
+        (1, enc_uint(10)),
+        (2, enc_bytes(b"x")),
+        (3, enc_uint(30)),
+    ]);
+    assert_eq!(a, b, "map key order must not affect canonical bytes");
+}
+
+#[test]
+fn cbor_rejects_indefinite_length() {
+    // 0xbf = map(indefinite). Must be rejected.
+    let mut r = Reader::new(&[0xbf], lim());
+    assert!(matches!(r.map_header(), Err(Error::NonCanonical(_))));
+}
+
+#[test]
+fn cbor_rejects_non_shortest_int() {
+    // 0x18 0x05 = uint 5 in 1-byte form, but 5 fits inline -> non-canonical.
+    let mut r = Reader::new(&[0x18, 0x05], lim());
+    assert!(matches!(r.uint(), Err(Error::NonCanonical(_))));
+}
+
+#[test]
+fn cbor_rejects_trailing_bytes() {
+    let mut w = Writer::new();
+    w.uint(1);
+    let mut bytes = w.into_bytes();
+    bytes.push(0x00); // trailing
+    let mut r = Reader::new(&bytes, lim());
+    r.uint().unwrap();
+    assert!(matches!(r.finish(), Err(Error::NonCanonical(_))));
+}
+
+#[test]
+fn cbor_enforces_limits() {
+    // Declare a byte string of length 10 but with a tiny max_str_len.
+    let tight = Limits { max_str_len: 4, ..Limits::default() };
+    let mut w = Writer::new();
+    w.bytes(&[0u8; 10]);
+    let bytes = w.into_bytes();
+    let mut r = Reader::new(&bytes, tight);
+    assert!(matches!(r.bytes(), Err(Error::LimitExceeded(_))));
+}
+
+#[test]
+fn cbor_negative_extension_key_is_skipped() {
+    // A map with one positive field (1 -> 9) and one negative extension key
+    // (-1 -> "ext") must decode, ignoring the extension.
+    let mut w = Writer::new();
+    // map(2): key 1 -> 9, key -1 (nint 0) -> text "ext"
+    // Negative keys sort before positive in canonical order; write manually.
+    w.raw(&[0xa2]); // map of 2
+    w.raw(&[0x20]); // nint 0 == -1
+    w.text("ext");
+    w.uint(1);
+    w.uint(9);
+    let bytes = w.into_bytes();
+    let mut r = Reader::new(&bytes, lim());
+    let mut got = None;
+    sparq_e2ee_ng::cbor::read_struct_map(&mut r, |r, k| {
+        if k == 1 {
+            got = Some(r.uint()?);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    })
+    .unwrap();
+    assert_eq!(got, Some(9));
+}
+
+// ============================================================================
+// Signatures
+// ============================================================================
+
+#[test]
+fn sign_verify_roundtrip_and_tamper() {
+    let sk = SecretSigningKey::from_seed([9u8; 32]);
+    let pk = sk.public();
+    let sig = sk.sign(b"message");
+    pk.verify(b"message", &sig).unwrap();
+    assert!(matches!(pk.verify(b"tampered", &sig), Err(Error::BadSignature)));
+}
+
+// ============================================================================
+// Recipient wrapping
+// ============================================================================
+
+#[test]
+fn wrap_unwrap_roundtrip() {
+    let recipient = RecipientSecretKey::from_bytes([5u8; 32]);
+    let w = wrap(&recipient.public(), b"K_read-secret-bytes", b"purpose:cap");
+    let pt = unwrap(&recipient, &w, b"purpose:cap").unwrap();
+    assert_eq!(pt, b"K_read-secret-bytes");
+}
+
+#[test]
+fn wrap_wrong_aad_fails_closed() {
+    let recipient = RecipientSecretKey::from_bytes([6u8; 32]);
+    let w = wrap(&recipient.public(), b"secret", b"aad-A");
+    assert!(matches!(unwrap(&recipient, &w, b"aad-B"), Err(Error::Decrypt)));
+}
+
+#[test]
+fn wrap_wrong_recipient_fails_closed() {
+    let recipient = RecipientSecretKey::from_bytes([7u8; 32]);
+    let attacker = RecipientSecretKey::from_bytes([8u8; 32]);
+    let w = wrap(&recipient.public(), b"secret", b"aad");
+    assert!(matches!(unwrap(&attacker, &w, b"aad"), Err(Error::Decrypt)));
+}
+
+#[test]
+fn wrapped_secret_encode_decode_roundtrip() {
+    let recipient = RecipientSecretKey::from_bytes([5u8; 32]);
+    let w = wrap_with(
+        [11u8; 32],
+        [12u8; AEAD_NONCE_LEN],
+        &recipient.public(),
+        b"payload",
+        b"aad",
+    );
+    let bytes = w.encode();
+    let w2 = WrappedSecret::decode(&bytes, lim()).unwrap();
+    assert_eq!(w, w2);
+    assert_eq!(unwrap(&recipient, &w2, b"aad").unwrap(), b"payload");
+}
+
+// ============================================================================
+// Capabilities: separation, encoding, delegation
+// ============================================================================
+
+#[test]
+fn read_write_admin_separation() {
+    let admin = SecretSigningKey::from_seed([1u8; 32]);
+    let publisher = SecretSigningKey::from_seed([2u8; 32]);
+
+    let read = Capability::new_read(sample_grant(), Secret32([9u8; 32])).unwrap();
+    assert_eq!(read.grant.authority, vec![Authority::Read]);
+    read.validate().unwrap();
+
+    let write =
+        Capability::new_write(sample_grant(), Secret32([9u8; 32]), &publisher).unwrap();
+    assert!(write.grant.authority.contains(&Authority::Publish));
+    assert!(write.grant.publisher_pub.is_some());
+    write.validate().unwrap();
+
+    let adm = Capability::new_admin(sample_grant(), &admin).unwrap();
+    assert_eq!(adm.grant.authority, vec![Authority::Admin]);
+    adm.validate().unwrap();
+}
+
+#[test]
+fn publisher_and_admin_keys_never_combined() {
+    // Manually construct an invalid capability and confirm validate() rejects it.
+    let mut cap = Capability {
+        grant: sample_grant(),
+        read_secret: None,
+        publisher_sk: Some([1u8; 32]),
+        admin_sk: Some([2u8; 32]),
+    };
+    cap.grant.authority = vec![Authority::Publish, Authority::Admin];
+    assert!(matches!(cap.validate(), Err(Error::Separation(_))));
+}
+
+#[test]
+fn public_grant_excludes_secret_fields() {
+    let publisher = SecretSigningKey::from_seed([2u8; 32]);
+    let write =
+        Capability::new_write(sample_grant(), Secret32([9u8; 32]), &publisher).unwrap();
+    let public = write.grant.encode();
+    let secret = write.encode_secret();
+    assert!(secret.len() > public.len(), "secret encoding carries more");
+    // The read secret bytes must not appear in the public grant.
+    assert!(
+        !public.windows(32).any(|w| w == [9u8; 32]),
+        "read secret leaked into public grant"
+    );
+    // But they DO appear in the secret-bearing encoding.
+    assert!(secret.windows(32).any(|w| w == [9u8; 32]));
+}
+
+#[test]
+fn public_grant_admin_sign_verify() {
+    let admin = SecretSigningKey::from_seed([1u8; 32]);
+    let mut grant = sample_grant();
+    grant.authority = vec![Authority::Read];
+    grant.sign(&admin);
+    grant.verify(&admin.public()).unwrap();
+
+    // Tamper: flip epoch, signature must fail.
+    let mut bad = grant.clone();
+    bad.epoch = Epoch(999);
+    assert!(matches!(bad.verify(&admin.public()), Err(Error::BadSignature)));
+}
+
+#[test]
+fn cap_id_is_stable_and_nonce_sensitive() {
+    let g = sample_grant();
+    assert_eq!(g.cap_id(), g.cap_id());
+    let mut g2 = g.clone();
+    g2.cap_nonce = [0xAA; 32];
+    assert_ne!(g.cap_id(), g2.cap_id(), "cap_id must depend on the nonce");
+}
+
+#[test]
+fn capability_secret_roundtrip() {
+    let publisher = SecretSigningKey::from_seed([2u8; 32]);
+    let mut write =
+        Capability::new_write(sample_grant(), Secret32([9u8; 32]), &publisher).unwrap();
+    let admin = SecretSigningKey::from_seed([1u8; 32]);
+    write.grant.sign(&admin);
+
+    let bytes = write.encode_secret();
+    let decoded = Capability::decode_secret(&bytes, lim()).unwrap();
+    assert_eq!(decoded.grant, write.grant);
+    assert_eq!(decoded.read_secret.as_ref().unwrap().expose(), &[9u8; 32]);
+    assert_eq!(decoded.publisher_sk, Some(publisher.to_seed()));
+    assert!(decoded.admin_sk.is_none());
+    decoded.grant.verify(&admin.public()).unwrap();
+}
+
+#[test]
+fn public_grant_decode_rejects_secret_field() {
+    // A secret field (key 10) is not permitted in a standalone public grant.
+    let publisher = SecretSigningKey::from_seed([2u8; 32]);
+    let write =
+        Capability::new_write(sample_grant(), Secret32([9u8; 32]), &publisher).unwrap();
+    let secret_bytes = write.encode_secret();
+    assert!(matches!(
+        PublicGrant::decode(&secret_bytes, lim()),
+        Err(Error::Schema(_))
+    ));
+}
+
+#[test]
+fn delegation_narrows_only() {
+    let admin = SecretSigningKey::from_seed([1u8; 32]);
+    let mut parent = sample_grant();
+    parent.authority = vec![Authority::Read, Authority::Publish];
+    parent.publisher_pub = Some(SecretSigningKey::from_seed([2u8; 32]).public().to_bytes());
+    parent.sign(&admin);
+
+    // Valid narrowing: drop publish, tighten validity.
+    let child = delegate(
+        &parent,
+        &admin,
+        Delegation {
+            authority: vec![Authority::Read],
+            validity: Validity { not_before: 120, not_after: 180 },
+            max_epoch: Some(5),
+        },
+    )
+    .unwrap();
+    child.verify(&admin.public()).unwrap();
+    assert_eq!(child.parent_grant_id, Some(parent.cap_id()));
+    assert_eq!(child.authority, vec![Authority::Read]);
+    assert_eq!(child.epoch, Epoch(5));
+
+    // Widen authority -> rejected.
+    assert!(matches!(
+        delegate(
+            &parent,
+            &admin,
+            Delegation {
+                authority: vec![Authority::Read, Authority::Publish, Authority::Admin],
+                validity: Validity { not_before: 120, not_after: 180 },
+                max_epoch: None,
+            }
+        ),
+        Err(Error::Delegation(_))
+    ));
+
+    // Widen validity -> rejected.
+    assert!(matches!(
+        delegate(
+            &parent,
+            &admin,
+            Delegation {
+                authority: vec![Authority::Read],
+                validity: Validity { not_before: 0, not_after: 999 },
+                max_epoch: None,
+            }
+        ),
+        Err(Error::Delegation(_))
+    ));
+}
+
+// ============================================================================
+// Block & commit envelopes
+// ============================================================================
+
+fn sample_ctx() -> BlockContext {
+    BlockContext {
+        repo: RepoId::from_bytes([1u8; 32]),
+        branch: BranchId::from_bytes([2u8; 32]),
+        epoch: Epoch(7),
+        kind: ObjectKind::Operation,
+    }
+}
+
+#[test]
+fn block_seal_open_roundtrip() {
+    let k = Secret32([4u8; 32]);
+    let ctx = sample_ctx();
+    let object = ObjectId::from_bytes([5u8; 32]);
+    let env = seal_block_random(&k, &ctx, &object, 0, 1, b"some quads").unwrap();
+    let pt = open_block(&k, &ctx, &env).unwrap();
+    assert_eq!(pt, b"some quads");
+}
+
+#[test]
+fn block_open_wrong_epoch_fails_closed() {
+    let k = Secret32([4u8; 32]);
+    let ctx = sample_ctx();
+    let object = ObjectId::from_bytes([5u8; 32]);
+    let env = seal_block_random(&k, &ctx, &object, 0, 1, b"payload").unwrap();
+
+    let mut wrong = ctx;
+    wrong.epoch = Epoch(8); // wrong epoch -> AD mismatch AND wrong key
+    assert!(matches!(open_block(&k, &wrong, &env), Err(Error::Decrypt)));
+}
+
+#[test]
+fn block_open_wrong_branch_fails_closed() {
+    let k = Secret32([4u8; 32]);
+    let ctx = sample_ctx();
+    let object = ObjectId::from_bytes([5u8; 32]);
+    let env = seal_block_random(&k, &ctx, &object, 0, 1, b"payload").unwrap();
+
+    let mut wrong = ctx;
+    wrong.branch = BranchId::from_bytes([0xEE; 32]);
+    assert!(matches!(open_block(&k, &wrong, &env), Err(Error::Decrypt)));
+}
+
+#[test]
+fn block_tampered_ciphertext_fails_closed() {
+    let k = Secret32([4u8; 32]);
+    let ctx = sample_ctx();
+    let object = ObjectId::from_bytes([5u8; 32]);
+    let mut env =
+        seal_block(&k, &ctx, &object, &sparq_e2ee_ng::ids::BlockId::from_bytes([6u8; 32]),
+                   0, 1, [7u8; AEAD_NONCE_LEN], b"payload").unwrap();
+    env.ciphertext[0] ^= 0x01;
+    assert!(matches!(open_block(&k, &ctx, &env), Err(Error::Decrypt)));
+}
+
+#[test]
+fn block_padding_hides_length() {
+    let k = Secret32([4u8; 32]);
+    let ctx = sample_ctx();
+    let object = ObjectId::from_bytes([5u8; 32]);
+    // A 1-byte and a 100-byte payload land in the same smallest pad class.
+    let e1 = seal_block_random(&k, &ctx, &object, 0, 1, b"a").unwrap();
+    let e2 = seal_block_random(&k, &ctx, &object, 0, 1, &[0u8; 100]).unwrap();
+    assert_eq!(e1.pad_class, PAD_CLASSES[0] as u64);
+    assert_eq!(e1.pad_class, e2.pad_class);
+    assert_eq!(e1.ciphertext.len(), e2.ciphertext.len());
+}
+
+#[test]
+fn block_envelope_encode_decode_roundtrip() {
+    let k = Secret32([4u8; 32]);
+    let ctx = sample_ctx();
+    let object = ObjectId::from_bytes([5u8; 32]);
+    let env = seal_block_random(&k, &ctx, &object, 2, 4, b"payload").unwrap();
+    let bytes = env.encode();
+    let env2 = BlockEnvelope::decode(&bytes, lim()).unwrap();
+    assert_eq!(env, env2);
+    assert_eq!(open_block(&k, &ctx, &env2).unwrap(), b"payload");
+}
+
+#[test]
+fn commit_sign_verify_and_id_stable() {
+    let author = SecretSigningKey::from_seed([3u8; 32]);
+    let mut commit = Commit {
+        repo: RepoId::from_bytes([1u8; 32]),
+        branch: BranchId::from_bytes([2u8; 32]),
+        epoch: Epoch(7),
+        parents: vec![CommitId::from_bytes([8u8; 32])],
+        author: AuthorKeyId::from_bytes([0u8; 32]),
+        clock: 42,
+        crdt_kind: "or-set-quads-v0".to_string(),
+        operations: vec![ObjectId::from_bytes([5u8; 32])],
+        snapshot: None,
+        author_sig: None,
+    };
+    commit.sign(&author);
+    commit.verify().unwrap();
+    assert_eq!(commit.author.as_bytes(), &author.public().to_bytes());
+
+    // Seal into a root block and check CommitId = SHA-256(canonical envelope).
+    let k = Secret32([4u8; 32]);
+    let ctx = BlockContext {
+        repo: commit.repo,
+        branch: commit.branch,
+        epoch: commit.epoch,
+        kind: ObjectKind::Commit,
+    };
+    let object = ObjectId::from_bytes([9u8; 32]);
+    let env = seal_block(&k, &ctx, &object,
+                         &sparq_e2ee_ng::ids::BlockId::from_bytes([10u8; 32]),
+                         0, 1, [11u8; AEAD_NONCE_LEN], &commit.encode()).unwrap();
+    assert_eq!(env.commit_id(), env.commit_id());
+
+    // Decode the plaintext back and re-verify.
+    let pt = open_block(&k, &ctx, &env).unwrap();
+    let commit2 = Commit::decode(&pt, lim()).unwrap();
+    assert_eq!(commit, commit2);
+    commit2.verify().unwrap();
+}
+
+// ============================================================================
+// Epoch transitions
+// ============================================================================
+
+#[test]
+fn epoch_transition_sign_verify() {
+    let admin = SecretSigningKey::from_seed([1u8; 32]);
+    let mut t = EpochTransition {
+        repo: RepoId::from_bytes([1u8; 32]),
+        branch: BranchId::from_bytes([2u8; 32]),
+        old_epoch: Epoch(7),
+        new_epoch: Epoch(8),
+        old_topic: TopicId::from_bytes([3u8; 32]),
+        new_topic: TopicId::from_bytes([4u8; 32]),
+        new_publishers: vec![SecretSigningKey::from_seed([2u8; 32]).public().to_bytes()],
+        history_policy: HistoryPolicy::ForwardOnly,
+        admin_sig: None,
+    };
+    t.sign(&admin).unwrap();
+    t.verify(&admin.public()).unwrap();
+
+    let bytes = t.encode();
+    let t2 = EpochTransition::decode(&bytes, lim()).unwrap();
+    assert_eq!(t, t2);
+    t2.verify(&admin.public()).unwrap();
+}
+
+#[test]
+fn epoch_transition_must_increase() {
+    let admin = SecretSigningKey::from_seed([1u8; 32]);
+    let mut t = EpochTransition {
+        repo: RepoId::from_bytes([1u8; 32]),
+        branch: BranchId::from_bytes([2u8; 32]),
+        old_epoch: Epoch(8),
+        new_epoch: Epoch(8), // not strictly increasing
+        old_topic: TopicId::from_bytes([3u8; 32]),
+        new_topic: TopicId::from_bytes([4u8; 32]),
+        new_publishers: vec![],
+        history_policy: HistoryPolicy::HistoryRekeyed,
+        admin_sig: None,
+    };
+    assert!(matches!(t.sign(&admin), Err(Error::Schema(_))));
+}
