@@ -63,7 +63,8 @@ From the **CI** workflow (`.github/workflows/ci.yml`):
 | `coverage ratchet + test-presence gate (per-crate)` | The per-crate line-coverage floor + the test-presence gate. |
 | `wasm build (sparq-wasm)` | The `wasm32-unknown-unknown` build, the wasm-deps guard, and `wasm-pack test --node`. |
 
-From the security / supply-chain / SAST workflows (all now LIVE and aggregated by the gate):
+From the security / supply-chain / SAST workflows (aggregated by the gate; all LIVE except
+CodeQL, which is operationally disabled via manual workflow-disable — see the OPERATIONALLY DISABLED note):
 
 | Job name | Workflow | What it gates |
 |---|---|---|
@@ -105,8 +106,9 @@ From the binding/packaging workflows (when those surfaces are exercised):
 > perf-tracking is moved, not lost. The weekly heavy EC2 campaign (`bench-ec2.yml` `ec2-bench`) and
 > release/dist workflows remain non-gating (release/dist fire only on tags). The **Scorecard** workflow
 > (`scorecard.yml`) re-scores posture on push to `main` and feeds the code-scanning
-> dashboard; **CodeQL** + **Scorecard** therefore both feed the gate/dashboard even
-> though only the per-commit `CodeQL analysis (rust)` check is a per-PR check-run.
+> dashboard; **CodeQL** would feed it the same way, but is operationally disabled
+> (manual workflow-disable — see the OPERATIONALLY DISABLED note), so Scorecard is currently the
+> only feeder and no `CodeQL analysis (rust)` per-PR check-run is produced.
 >
 > **No branch-protection ruleset change is required for this benchmark relocation.** The live ruleset
 > requires exactly one context (`gate`), never the `bench` job by name, and the aggregator discovers the
@@ -267,13 +269,16 @@ inside that window. With the tiered check name the window does not exist —
 so the ready_for_review full-tier PR run (which includes both merge_group-absent
 lanes) must conclude before the queue can admit the head.
 
-The ruleset additionally carries a `code_scanning` rule (CodeQL). A draft-built
-head carries no PR CodeQL analysis (`analyze` skips on drafts), so that rule
-would *independently* block such a head — but it is an **out-of-repo,
-owner-mutable setting** and evadable in corner cases (a non-draft PR sharing the
-same head SHA supplies an analysis for the commit; the rule may be relaxed
-during a CodeQL outage), so it is recorded here as **defense-in-depth only**,
-never the load-bearing mechanism. Do not weaken rule 1 on the strength of it.
+The ruleset additionally carries a `code_scanning` rule (CodeQL). While CodeQL
+is operationally disabled (manual workflow-disable — see the OPERATIONALLY DISABLED note) no
+analyses are produced, so this rule currently exerts **no** blocking pressure.
+If CodeQL is re-enabled: a draft-built head carries no PR CodeQL analysis
+(`analyze` skips on drafts), so the rule would *independently* block such a head
+— but it is an **out-of-repo, owner-mutable setting** and evadable in corner
+cases (a non-draft PR sharing the same head SHA supplies an analysis for the
+commit; the rule may be relaxed during a CodeQL outage), so it is recorded here
+as **defense-in-depth only**, never the load-bearing mechanism. Do not weaken
+rule 1 on the strength of it.
 
 **Operational notes.** `pull_request`-event CI runs are cancel-superseded per PR
 (`concurrency` groups; `bench.yml` now cancels superseded **PR** runs only — its

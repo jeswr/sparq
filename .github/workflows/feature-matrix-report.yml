@@ -105,6 +105,10 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+      # Cross-run artifact download (actions/download-artifact with run-id) needs
+      # actions: read — unspecified permissions default to none and the download
+      # would fail, deadlocking the structural reporter await (sol review on #3522).
+      actions: read
       # The single privileged capability: emit the per-leg + summary check-runs.
       checks: write
     steps:
