@@ -120,6 +120,12 @@ use sparq_policy::{
     conflict_admissibility, evaluate, matched_prohibition, prohibition_status, Operator, Policy,
     ProhibitionStatus, Request, Rule, Value,
 };
+use sparq_reason::reason_n3;
+use std::fmt::Write as _;
+
+const ODRL_A: &str = include_str!("../rules/odrl-a.n3");
+const ODRL_B: &str = include_str!("../rules/odrl-b.n3");
+const ODRL_C: &str = include_str!("../rules/odrl-c.n3");
 
 /// The ODRL namespace prefix (`odrl:`), re-exported for caller convenience.
 pub const ODRL_NS: &str = sparq_policy::ODRL_NS;
@@ -2093,4 +2099,130 @@ pub(crate) mod count {
         }
         out
     }
+}
+
+// ============================================================================
+// [SONNET-4.6] sq-zgbso.2 — N3-stratum ODRL bridge.
+// Runs the stateless ODRL core as three stratified reason_n3 calls
+// (rules/odrl-{a,b,c}.n3), mirroring the WAC/ACP stratification pattern.
+// Decision-equivalent to the one-shot Rust bridge for the supported constraint
+// types (dateTime lteq/gteq, recipient eq/neq, odrl:or, odrl:and).
+// ============================================================================
+
+/// Materialize an ODRL policy's auth-view triples via three stratified N3 rule
+/// strata (`rules/odrl-{a,b,c}.n3`), installing the result into the dataset's
+/// `<urn:sparq:auth>` and `<urn:sparq:auth-bridged>` views exactly as the
+/// one-shot Rust bridge does.
+///
+/// Decision-equivalent to [`materialize_policy`] for the supported stateless
+/// constraint types: `odrl:dateTime` lteq/gteq windows, `odrl:recipient`
+/// eq/neq, and `odrl:or`/`odrl:and` logical constraint combinators over those
+/// atomic types. Unmapped/unsupported constructs produce NO grant (fail-closed).
+///
+/// The `policy_ttl` argument is the raw Turtle text of the ODRL policy (the
+/// same string the Rust path parses). The request is serialized to N3 using the
+/// `<urn:odrl-req>` IRI and `odrl:dateTime` for the temporal evidence value.
+///
+/// # Errors
+///
+/// Returns `Err` if the N3 reasoner rejects the assembled source in any stratum.
+pub fn materialize_odrl_n3(
+    graph: &mut Graph,
+    policy_ttl: &str,
+    request: &Request,
+) -> Result<BridgeOutcome, String> {
+    let req_n3 = serialize_request_n3(request);
+
+    // Stratum A: action facts + atomicSat + lcSat(or)
+    let src_a = format!(
+        "@prefix odrl: <http://www.w3.org/ns/odrl/2/> .\n\
+         @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n\
+         {policy_ttl}\n{req_n3}\n{ODRL_A}"
+    );
+    let mut dict_a = Dict::new();
+    let closure_a = reason_n3(&mut dict_a, &src_a)?;
+    let f_a = closure_ids_to_n3(&dict_a, &closure_a);
+
+    // Stratum B: andSubUnsat + anyPermConstrUnsat + prohibMatches + deny triples
+    let src_b = format!("{f_a}\n{ODRL_B}");
+    let mut dict_b = Dict::new();
+    let closure_b = reason_n3(&mut dict_b, &src_b)?;
+    let f_b = closure_ids_to_n3(&dict_b, &closure_b);
+
+    // Stratum C: lcSat(and) + permission grant triples
+    let src_c = format!("{f_b}\n{ODRL_C}");
+    let mut dict_c = Dict::new();
+    let closure_c = reason_n3(&mut dict_c, &src_c)?;
+
+    // Extract auth:* triples from the final closure.
+    let mut new_triples: Vec<[Term; 3]> = Vec::new();
+    let mut grant_triple: Option<(String, String, String)> = None;
+    let mut deny_triple: Option<(String, String, String)> = None;
+
+    for t in &closure_c {
+        let Term::NamedNode(p) = dict_c.term(t[1]) else { continue };
+        let p_str = p.as_str();
+        if !p_str.starts_with(AUTH_NS) {
+            continue;
+        }
+        let Term::NamedNode(s) = dict_c.term(t[0]) else { continue };
+        let Term::NamedNode(o) = dict_c.term(t[2]) else { continue };
+        let triple = [
+            Term::NamedNode(NamedNode::new_unchecked(s.as_str())),
+            Term::NamedNode(NamedNode::new_unchecked(p_str)),
+            Term::NamedNode(NamedNode::new_unchecked(o.as_str())),
+        ];
+        let local = p_str.strip_prefix(AUTH_NS).unwrap_or("");
+        if local.starts_with("deny") {
+            deny_triple = Some((s.as_str().to_owned(), p_str.to_owned(), o.as_str().to_owned()));
+        } else {
+            grant_triple = Some((s.as_str().to_owned(), p_str.to_owned(), o.as_str().to_owned()));
+        }
+        new_triples.push(triple);
+    }
+
+    if !new_triples.is_empty() {
+        append_bridged_triples(graph, &new_triples);
+    }
+
+    let emitted = new_triples;
+    Ok(BridgeOutcome {
+        granted: grant_triple.is_some(),
+        prohibited: deny_triple.is_some(),
+        grant_triple,
+        deny_triple,
+        emitted,
+        ..BridgeOutcome::default()
+    })
+}
+
+/// Serialize a `Request` as an N3 Turtle fragment using `<urn:odrl-req>` as the IRI.
+fn serialize_request_n3(req: &Request) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "<urn:odrl-req> a <http://www.w3.org/ns/odrl/2/Request> ;");
+    let _ = writeln!(out, "    <http://www.w3.org/ns/odrl/2/action> <{}> ;", req.action);
+    if let Some(target) = &req.target {
+        let _ = writeln!(out, "    <http://www.w3.org/ns/odrl/2/target> <{}> ;", target);
+    }
+    if let Some(party) = &req.party {
+        let _ = writeln!(out, "    <http://www.w3.org/ns/odrl/2/assignee> <{}> ;", party);
+    }
+    if let Some(v) = req.request_time() {
+        let _ = writeln!(
+            out,
+            "    <http://www.w3.org/ns/odrl/2/dateTime> \"{}\"^^<http://www.w3.org/2001/XMLSchema#dateTime> ;",
+            v.as_str()
+        );
+    }
+    let _ = writeln!(out, "    .");
+    out
+}
+
+/// Re-serialize a reasoning closure as N3 ground facts for the next stratum.
+fn closure_ids_to_n3(dict: &Dict, closure: &[[sparq_core::dict::Id; 3]]) -> String {
+    let mut out = String::with_capacity(closure.len() * 64);
+    for t in closure {
+        let _ = writeln!(out, "{} {} {} .", dict.term(t[0]), dict.term(t[1]), dict.term(t[2]));
+    }
+    out
 }

@@ -1,0 +1,41 @@
+# [SONNET-4.6] sq-zgbso.2 — ODRL stateless core: stratum B.
+# Input: the serialized closure of stratum A (action facts + atomicSat + lcSat(or)).
+#
+# NAF in this stratum is over stratum A's COMPLETE atomicSat set (safe by stratification):
+#   - odrlx:andSubUnsat  — odrl:and LC has an unsatisfied sub-constraint
+#   - odrlx:anyPermConstrUnsat — permission has an unsatisfied atomic constraint
+#
+# Also derives (positive, no NAF on derived facts):
+#   - odrlx:prohibMatches  — unconstrained prohibition matches the request
+#   - auth:deny* triples   — denial emit for matched prohibitions
+
+@prefix odrl:  <http://www.w3.org/ns/odrl/2/> .
+@prefix auth:  <https://sparq.dev/ns/auth#> .
+@prefix odrlx: <https://sparq.dev/ns/odrlx#> .
+@prefix log:   <http://www.w3.org/2000/10/swap/log#> .
+
+# ── odrl:and logical constraint: unsatisfied sub-constraint witness ───────────
+# NAF is over stratum A's atomicSat, which is complete before this stratum runs.
+{ ?lc odrl:and ?c .
+  ?req a odrl:Request .
+  ?S log:notIncludes { ?c odrlx:atomicSat ?req } . }
+=> { ?lc odrlx:andSubUnsat ?req } .
+
+# ── permission: any atomic constraint that is unsatisfied ────────────────────
+# Only atomic constraints are checked here (they carry odrl:leftOperand; LCs do not).
+# NAF is over stratum A's atomicSat (complete before this stratum).
+{ ?perm odrl:constraint ?c . ?c odrl:leftOperand ?lo .
+  ?req a odrl:Request .
+  ?S log:notIncludes { ?c odrlx:atomicSat ?req } . }
+=> { ?perm odrlx:anyPermConstrUnsat ?req } .
+
+# ── prohibition match + deny emission (unconstrained prohibitions only) ───────
+# An unconstrained prohibition (no odrl:constraint) is matched by checking only
+# action / target / assignee against the request. NAF is over the INPUT predicate
+# odrl:constraint, which is complete before any stratum (input-level negation).
+{ ?pol odrl:prohibition ?proh .
+  ?proh odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party .
+  ?act odrlx:denyMode ?denyMode .
+  ?req a odrl:Request ; odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party .
+  ?S log:notIncludes { ?proh odrl:constraint ?anyc } . }
+=> { ?proh odrlx:prohibMatches ?req . ?party ?denyMode ?tgt . } .
