@@ -84,6 +84,13 @@ on:
   # never appears there. The budget step below maps merge_group to the fast SMOKE
   # budget (same as pull_request) — a pre-merge gate wants quick coverage, not the
   # nightly soak. github.ref in the concurrency group is the unique merge_group ref.
+  # [FABLE-5] MERGE-GROUP CHANGE-CLASS (path-aware CI audit): this workflow needs NO
+  # extra rust_changed-style layer — both heavy jobs below are already gated on the
+  # `select` pre-job's seed closures, and ci-select.yml passes the merge_group event's
+  # base_sha/head_sha, so the selection IS the batch diff. A docs-only/orchestration-
+  # only queued batch classifies to an empty affected closure (classify_change +
+  # SAFE/orch-safe paths in scripts/ci_select.py) and both jobs skip as ATTRIBUTED
+  # skips (select green); an engine/mixed/unresolvable batch runs them (fail-closed).
   merge_group:
   workflow_dispatch:
   # Daily heavy tier. 04:23 UTC (offset from ci.yml's 03:17 coverage cron so the two

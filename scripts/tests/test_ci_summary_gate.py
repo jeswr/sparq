@@ -875,5 +875,93 @@ class TestDraftTierIntegrity(unittest.TestCase):
         self.assertEqual(code, 0, out)
 
 
+class TestMergeGroupChangeClassAccounting(unittest.TestCase):
+    """[FABLE-5] merge-group change-class gate (extends #3420/#3421): the expected
+    per-class leg accounting for a MERGE-GROUP sibling set. On a docs-only/
+    orchestration-only queued batch the rust_changed layer (ci.yml lint/msrv/
+    geiger/docker-smoke/coverage-floors + feature-matrix setup/check-tier/
+    fedclient-boundary) now SKIPS alongside the select-gated engine legs; every
+    such leg still registers a check-run with conclusion `skipped` — an
+    ATTRIBUTED skip under the green same-diff `select` pre-job — and the gate
+    renders PASS. The fail-closed half: those same skips with a non-success
+    select are UNATTRIBUTABLE and must RED (an engine batch could only see its
+    legs skipped through a select that did not soundly conclude — the classify
+    step and the select job compute the same classify_change over the same
+    base_sha...head_sha, so on any resolved diff they cannot disagree)."""
+
+    # The #2533-shaped docs-only merge-group batch: what the queue's merge_group
+    # ref shows after this change — every engine-lane check-run PRESENT (never
+    # missing) with conclusion `skipped`, cheap prose gates green, select green.
+    _DOCS_ONLY_GROUP_SKIPS = [
+        # ci.yml select-conjunct legs (already skipped via the batch-diff selection):
+        "test (load-aware shard bulk 1/3)",
+        "build + archive test binaries (+ doctests once)",
+        "W3C SPARQL 1.1 conformance (ratchet)",
+        # ci.yml rust_changed-only legs (NEWLY class-gated on merge_group):
+        "lint (fmt + clippy + doc)",
+        "MSRV build (workspace)",
+        "cargo-geiger unsafe audit",
+        "docker image smoke (bind posture + /health)",
+        # feature-matrix.yml rust_changed-only legs (NEWLY class-gated):
+        "assemble feature matrix",
+        "feature-matrix check-tier (engine)",
+        "fedclient dependency-boundary guard",
+        "opt-in sparq-engine (paths)",
+        # fuzz.yml (already select-gated on the batch diff):
+        "cargo-fuzz (parsers + mmap loader, bounded)",
+        "differential smoke (sparq vs Oxigraph, fixed regression windows)",
+    ]
+
+    def _group_runs(self, select_run):
+        runs = [select_run]
+        runs += [R(n, conclusion="skipped") for n in self._DOCS_ONLY_GROUP_SKIPS]
+        runs += [
+            R("docs-quality quick-gates"),
+            R("supply-chain gates (deny + vet + SBOM + VEX + OpenSSF + js-sbom)"),
+            # Deliberately FULL on merge groups (the documented #3421 unsound-skip
+            # exception): wasm feature-OFF byte-equality on the MERGED bundle.
+            R("vectorized wasm feature-OFF equality"),
+        ]
+        return runs
+
+    def test_docs_only_merge_group_passes_with_attributed_skips(self):
+        # The headline fixture: class=docs-only batch => gate PASS, every engine
+        # leg an attributed skip, nothing missing. (No tier_ctx: merge_group runs
+        # use the pre-draft-tier semantics, as in production.)
+        runs = self._group_runs(SEL_OK)
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+        self.assertIn(f"{len(self._DOCS_ONLY_GROUP_SKIPS)} skipped", out)
+        self.assertIn("selection pre-job succeeded", out)
+        self.assertNotIn("FAILED", out)
+
+    def test_same_skips_with_failed_select_red(self):
+        # Fail-closed: the identical skip set under a FAILED select is
+        # unattributable => RED. This is what stops an engine batch from merging
+        # on skipped legs — its legs can only skip through the select/classify
+        # pair, and a select that did not conclude success reds the whole set.
+        runs = self._group_runs(R(SELECT_NAME, conclusion="failure"))
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1, out)
+        self.assertIn("cannot be attributed to a sound selection", out)
+
+    def test_same_skips_with_missing_select_conclusion_red(self):
+        # A cancelled (unsuperseded) select is equally unattributable => RED.
+        runs = self._group_runs(R(SELECT_NAME, conclusion="cancelled"))
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1, out)
+
+    def test_engine_leg_failure_never_masked_by_class_skips(self):
+        # A genuinely failing sibling on the merge_group ref (e.g. the always-on
+        # supply-chain SBOM steps, or a lane the class kept running) still REDs
+        # the gate regardless of how many class-attributed skips surround it.
+        runs = self._group_runs(SEL_OK) + [R("vectorized wasm feature-OFF equality (run)",
+                                             conclusion="failure")]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAILED", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -806,6 +806,61 @@ def _write_outputs(sel: Selection, output_file: str | None, summary_file: str | 
             fh.write(render_summary(sel))
 
 
+# --- classify-only mode (merge-group change-class gating; #3420/#3421 follow-up)
+def _classify_only_main(args: argparse.Namespace, output_file: str | None,
+                        summary_file: str | None) -> int:
+    """[FABLE-5] merge-group change-class: compute ONLY `classify_change` over the
+    diff — no cargo metadata, no toolchain, no ownership map — so the cheap
+    workflow `changes` pre-jobs (ci.yml / feature-matrix.yml) can class-gate their
+    `rust_changed` output on the MERGE-GROUP batch diff without duplicating the
+    orchestration-safe / docs-only path lists (this file stays the single source
+    of truth). Contract with the workflow step:
+
+      * stdout is EXACTLY ONE line: the class token
+        (engine|orchestration-only|docs-only|mixed) — the shell consumer `case`s
+        on it and treats ANY unrecognised value as engine (run everything);
+      * `change_class=<class>` is appended to --output-file/$GITHUB_OUTPUT and a
+        one-line attribution to the step summary (audit trail, never gating);
+      * FAIL-SAFE (design §4.3, the #3421 posture): --full, any event other than
+        pull_request/merge_group, a missing base, an unresolvable diff, or ANY
+        internal error => class `engine`, exit 0 — the consumer then runs the
+        full matrix (cost, never soundness).
+    """
+    change_class = _CLASS_ENGINE
+    reason = ""
+    try:
+        if args.full:
+            reason = "forced full run (ci-full override) => class engine"
+        elif args.event not in ("pull_request", "merge_group"):
+            reason = f"{args.event} event: no PR/batch diff => class engine"
+        else:
+            if args.changed_file:
+                with open(args.changed_file, encoding="utf-8") as fh:
+                    changed = [ln for ln in fh.read().splitlines() if ln.strip()]
+            else:
+                if not args.base:
+                    raise SelectorError("--base is required for a diff-based classify")
+                repo_root = _resolve_repo_root(args.repo_root)
+                changed = git_changed_paths(args.base, args.head, repo_root)
+            change_class = classify_change(changed)
+            reason = f"classified {len(changed)} changed path(s)"
+    except Exception as exc:  # fail-safe boundary: ANY error => engine (full run)
+        change_class = _CLASS_ENGINE
+        reason = f"classifier error, failing safe to class engine (full run): {exc}"
+
+    print(change_class)
+    try:
+        if output_file:
+            with open(output_file, "a", encoding="utf-8") as fh:
+                fh.write(f"change_class={change_class}\n")
+        if summary_file:
+            with open(summary_file, "a", encoding="utf-8") as fh:
+                fh.write(f"**Change-class (classify-only):** `{change_class}` — {reason}\n")
+    except OSError:
+        pass  # never let an output/summary write break the fail-safe contract
+    return 0
+
+
 # --- main --------------------------------------------------------------------
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Change-based CI test-selection (design §3).")
@@ -815,6 +870,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--shadow", action="store_true",
                    help="report-only rollout mode (design §6.4): compute + report the "
                         "selection but emit mode=shadow so no downstream guard skips")
+    p.add_argument("--classify-only", action="store_true",
+                   help="emit ONLY the change-class token (no cargo metadata / selection): "
+                        "the cheap merge-group class gate for the workflow `changes` "
+                        "pre-jobs; fail-safe to `engine` on any error")
     p.add_argument("--base", help="base SHA/ref for the three-dot diff")
     p.add_argument("--head", default="HEAD", help="head SHA/ref (default HEAD)")
     p.add_argument("--changed-file", help="hermetic: newline-delimited changed paths")
@@ -839,6 +898,11 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     summary_file = args.summary_file or os.environ.get("GITHUB_STEP_SUMMARY")
     output_file = args.output_file or os.environ.get("GITHUB_OUTPUT")
+
+    # [FABLE-5] merge-group change-class gating: the cheap classify-only entry
+    # point (no cargo metadata). Everything below is the full selector.
+    if args.classify_only:
+        return _classify_only_main(args, output_file, summary_file)
 
     try:
         repo_root = _resolve_repo_root(args.repo_root)
