@@ -125,7 +125,7 @@ Recurring invariant shorthands used below:
 | `src/store.rs:80` | mut slice reinterpret | `words` is u32-aligned, holds ≥ `len` bytes; region exclusively owned | `AlignedBytes` over-allocates to a word boundary; `copy_from_slice` fills it. |
 | `src/store.rs:88` | slice reinterpret (read) | u32-aligned, ≥ `len` initialised bytes | reads the bytes copied in above; base ≥ 4-byte aligned by construction. |
 | `src/store.rs:190` | `Mmap::map` | own-for-lifetime | read-only map of a `.spqv` file; then `open_validated` bounds every offset. **B5**. |
-| `src/store.rs:348` | slice reinterpret (write) | f32 has no invalid bit patterns; `align(f32) ≥ align(u8)` | f32→LE bytes for write; big-endian targets rejected at create/open. |
+| `src/store.rs:348` | slice reinterpret (write) | f32 has no invalid bit patterns; `align(f32) ≥ align(u8)` | f32→LE bytes for write; big-endian targets are rejected by the writer. The reader validates all LE structure before swapping only dense f32 words into aligned owned storage. |
 | `src/store.rs:488` | slice reinterpret (read) | `start` is a multiple of 4 ⇒ f32-aligned; range validated in `open` | the backing is u32-aligned (review 1874 fixed a UB align bug here); f32 accepts any bit pattern. **B5**. |
 | `src/store.rs:611` | slice reinterpret (write) | f32 no invalid patterns; align ok | f32→LE bytes for write. |
 | `src/diskann.rs:395` | slice reinterpret (read) | f32 no invalid patterns; align ok | f32→LE bytes; LE target asserted; borrows `b.vectors`. |

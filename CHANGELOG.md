@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `sparq-vectors` can open canonical little-endian `.spqv` stores on big-endian hosts by
+  validating the file and byte-swapping its dense f32 region into aligned owned storage; `.spqv`
+  writers and the `.spqg` reader/writer remain little-endian-host only.
+
 ## [0.1.0] - 2026-06-13
 
 First release: an experimental, from-scratch RDF triplestore and SPARQL engine in Rust
