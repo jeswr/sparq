@@ -25,11 +25,11 @@ cargo test -p sparq-lws-core --no-default-features
 SOLID_SERVER_RECONCILE_INTERVAL_SECS=3600 cargo run -p sparq-lws-core
 ```
 
-The binary is configured entirely by `SOLID_SERVER_*` / `PSS_*` environment
-variables (bind address, TLS PEM paths, backend selection, seeding) — see the
+The binary is configured entirely by `SOLID_SERVER_*` / `PSS_*` env variables
+(bind address, TLS PEM paths, backend selection, seeding — incl. the opt-in
+`SOLID_SERVER_SEED_DEMO` public-demo playground, memory-backend only) — see the
 module docs on `src/main.rs`. `SOLID_SERVER_RECONCILE_INTERVAL_SECS` is unset by
-default; a positive integer enables one periodic sweep using the unchanged
-one-hour orphan grace period. Invalid or zero values fail boot.
+default; a positive integer enables one periodic orphan sweep (unchanged one-hour grace period); invalid or zero fails boot.
 
 ## 📦 Native container image
 

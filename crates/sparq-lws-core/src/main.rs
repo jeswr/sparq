@@ -155,12 +155,13 @@ const ENV_SEED_BENCH: &str = "SOLID_SERVER_SEED_BENCH";
 /// [`ENV_SEED_BENCH`] is active; like the rest of the seed it only changes seeded FIXTURE content,
 /// never request handling.
 const ENV_SEED_BENCH_OWNER: &str = "SOLID_SERVER_SEED_BENCH_OWNER";
-/// Dev/DEMO ONLY: when `1`/`true`, seed the in-memory store with the demo playground fixtures — a
-/// public-readable `/demo/` pod holding a read-only welcome document, plus an OPEN-SANDBOX
-/// `/demo/playground/` container anonymous visitors can read AND write (so a demo boot needs no
-/// Keycloak/token setup to try the server end-to-end). NEVER set against a real (SPARQ/S3) backend —
-/// the startup seed-guard fails closed like the other seed flags. Purely additive seeding — it
-/// changes no request-handling behaviour. See [`sparq_lws_core::seed::seed_demo`].
+/// DEMO ONLY (the §3.2 public-demo posture of `research/lws-demo-architecture.md`): when `1`/`true`,
+/// seed the in-memory store with the demo playground fixtures — a shared root-level `/playground/`
+/// container any AUTHENTICATED agent can Read/Write/Append (anonymous visitors read-only; nobody has
+/// `acl:Control`, so the ACL cannot be rewritten over HTTP), plus a public-read `/README` Turtle
+/// document carrying the ephemeral-demo banner. NEVER set against a real (SPARQ/S3) backend — the
+/// startup seed-guard fails closed like the other seed flags. Purely additive seeding — it changes
+/// no request-handling behaviour. See [`sparq_lws_core::seed::seed_demo`].
 const ENV_SEED_DEMO: &str = "SOLID_SERVER_SEED_DEMO";
 /// Dev/conformance ESCAPE HATCH: explicitly permit the dev seed flags
 /// ([`ENV_SEED_CONFORMANCE`] / [`ENV_SEED_BENCH`] / [`ENV_SEED_DEMO`]) against a NON-`memory`
@@ -1182,16 +1183,17 @@ where
         );
     }
 
-    // Dev/demo seeding (gated): the opt-in demo playground — a public-readable demo pod plus an
-    // open-sandbox container anonymous visitors can read AND write. Like the other seeds it is
+    // Demo seeding (gated): the opt-in §3.2 demo playground — a shared root-level container any
+    // AUTHENTICATED agent can read/write/append (anonymous visitors read-only; nobody has Control)
+    // plus a public-read /README carrying the ephemeral-demo banner. Like the other seeds it is
     // purely additive fixture content; it changes no request handling.
     if env_flag(ENV_SEED_DEMO) {
         let fixtures = sparq_lws_core::seed::seed_demo(&store, base_url)
             .await
             .map_err(|e| format!("demo seeding failed: {e:?}"))?;
         eprintln!(
-            "  SEEDED demo playground — DEV/DEMO ONLY: welcome_doc={} playground={} (public read+write sandbox) owner={}",
-            fixtures.welcome_doc, fixtures.playground, fixtures.owner
+            "  SEEDED demo playground — DEMO ONLY: playground={} (authenticated read+write+append, public read, no Control) readme={}",
+            fixtures.playground, fixtures.readme
         );
     }
 
