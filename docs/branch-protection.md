@@ -109,8 +109,9 @@ From the binding/packaging workflows (when those surfaces are exercised):
 > dashboard/badge (its SARIF upload to GitHub code-scanning is disabled and the job has
 > no `security-events: write` — see the Scorecard note later in this document); with
 > **CodeQL** operationally disabled (manual workflow-disable — see the OPERATIONALLY
-> DISABLED note), nothing currently feeds GitHub code-scanning and no
-> `CodeQL analysis (rust)` per-PR check-run is produced.
+> DISABLED note), the only current GitHub code-scanning feeders are the Trivy
+> SARIF uploads (`container-scan.yml` on PR/main/schedule; `release.yml` for
+> released images) and no `CodeQL analysis (rust)` per-PR check-run is produced.
 >
 > **No branch-protection ruleset change is required for this benchmark relocation.** The live ruleset
 > requires exactly one context (`gate`), never the `bench` job by name, and the aggregator discovers the
