@@ -1,58 +1,70 @@
 #!/usr/bin/env python3
-# [OPUS-4.8] sparq-org/sparq#3475 — fail-closed regression guard for the fast-fix
+# [OPUS-4.8] sparq-org/sparq#3475 — fail-closed REGRESSION guard for the fast-fix
 # ring's cross-repo trust boundary. 🤖 SPARQ agent. Authored by Opus 4.8 (Fable
 # routed off security surfaces by design; flag for re-review when Fable returns).
 #
-# WHAT THIS PROVES (about .github/workflows/fast-fix-ring.yml):
-#   The ring's ONLY privileged capability is the cross-repo REGISTRY_RING_TOKEN
-#   doorbell. A `workflow_run` workflow is ALSO delivered for fork / cross-repo
-#   triggering runs, and `workflow_run` grants secret access even when the
-#   triggering run itself lacked secrets. So guarding only on
-#   conclusion=='failure' && event=='pull_request' is INSUFFICIENT: the
-#   head_sha->PR fallback could misattribute a fork run whose head commit collides
-#   with an internal PR's SHA to that pipeline-owned internal PR and fire the
-#   doorbell (#3475, BLOCKING).
+# =============================================================================
+# THREAT MODEL — read this first; it fixes the bar this checker is judged against
+# =============================================================================
+# This script is a REGRESSION DETECTOR. Its job is to catch an ACCIDENTAL or an
+# agent-introduced WEAKENING of the fast-fix ring's cross-repo trust guard when a
+# change touches `.github/workflows/fast-fix-ring.yml` — a change that a HUMAN then
+# ARMS (workflow edits are human-armed per repo policy). It is NOT, and cannot be, a
+# defense against an actor who ALREADY HAS repo-write and DELIBERATELY edits the
+# workflow to exfiltrate the secret: such an actor could weaken the guard AND update
+# this checker's golden in the same commit, or exfiltrate REGISTRY_RING_TOKEN by many
+# other means (a brand-new workflow, a different job, an exfiltrating step). Defending
+# against a malicious committer is OUT OF SCOPE here and is handled elsewhere —
+# branch protection, required human review of `.github/workflows/**` changes, and the
+# LIVE security control itself, which is the workflow's own
+#     github.event.workflow_run.head_repository.full_name == github.repository
+# job guard plus the SHA/repo defense-in-depth. THIS script does not enforce security
+# at runtime; the WORKFLOW does. This script only makes an accidental regression to
+# that guard LOUD in review.
 #
-#   The FAIL-CLOSED fix is a top-level job guard
-#       github.event.workflow_run.head_repository.full_name == github.repository
-#   so a fork / spoofed cross-repo run NEVER reaches the token step, plus defense
-#   in depth in the head_sha->PR resolution (same-repo AND same-head-SHA) and a
-#   re-check of the resolved PR's live head_repo/head_sha before dispatch.
+# =============================================================================
+# STRATEGY — CANONICAL GOLDEN MATCH (not predicate parsing)
+# =============================================================================
+# Rounds 1–3 of adversarial review proved that a predicate-PARSING validator cannot
+# win: for every "reject a top-level ||" rule there is a `(A && B && guard || true)`
+# paren-wrap; for every "the guard regex is present" rule there is a `!(guard)`
+# negation; for every "both needles are present" G3 substring rule there is a
+# conjunction→disjunction `repo OR SHA` swap (both needles survive) or a
+# predicate-moved-into-a-comment. Parsing a moving target is a losing regress.
 #
-# The three checks below are diff-visible: if the head_repository guard is removed
-# from the job `if:`, or the token step stops being gated behind that job, or the
-# SHA-pin defense-in-depth is dropped, this script RED-fails.
+# So this checker does NOT parse the security meaning of the condition. It pins the
+# EXACT, KNOWN-GOOD CANONICAL TEXT of each security-load-bearing fragment and requires
+# the workflow's ACTUAL (normalized) fragment to be BYTE-EQUAL to that golden:
 #
-#   G1  the `ring` job `if:` contains the fail-closed
-#       head_repository.full_name == github.repository condition, AND-only: the
-#       expression STRUCTURE must have NO top-level `||` (a `|| true` or any
-#       depth-0 OR branch would satisfy the condition without the guard). Parsed,
-#       not substring-tested for `&&` — the real condition contains `&&`.
-#   G2  the step that consumes REGISTRY_RING_TOKEN / dispatches the registry lives
-#       INSIDE the guarded `ring` job (so the guard actually gates the token) and
-#       there is no OTHER job that references REGISTRY_RING_TOKEN without the guard.
-#   G3  the head_sha->PR resolution `select(...)` filters on BOTH the exact fork-repo
-#       predicate (head.repo.full_name == ${REPO}) AND head.sha == ${HEAD_SHA} (the
-#       failing run's own SHA, not a constant), and the live-state read re-checks
-#       head_repo + head_sha with FAIL-CLOSED `!=` guards that `exit 0` on mismatch
-#       BEFORE the dispatch. Operands are matched EXACTLY (semantic, not substring)
-#       so dropping the repo predicate, swapping the SHA operand for a constant, or
-#       inverting a guard from `!=` to `==` each RED-fails.
+#   G1  the ring job's full `if:` condition, whitespace-normalized, must EXACTLY
+#       equal GOLDEN_IF. Any OR-wrap, negation, operand swap, reorder, or extra
+#       clause changes the normalized text ⇒ mismatch ⇒ RED. You cannot smuggle a
+#       `|| true`, a `!(...)`, or `(... || true)` past an exact-string comparison.
+#   G2  the privileged token/dispatch step lives INSIDE that one guarded job, and no
+#       OTHER job's normalized `if:` differs from GOLDEN_IF while touching the token.
+#   G3  the head_sha->PR resolution `select(...)` jq filter, normalized, must EXACTLY
+#       equal GOLDEN_SELECT (a CONJUNCTION of the fork-repo predicate AND the exact
+#       ${HEAD_SHA} predicate AND state==open — a `repo OR SHA` swap changes the text
+#       ⇒ RED); and the two live fail-closed guard blocks — each a
+#       `if <!= test>; then … exit 0; fi` skeleton — normalized, must EXACTLY equal
+#       their goldens (an inversion to `==` or a moved-to-comment predicate changes
+#       the executable skeleton ⇒ RED), and each must appear BEFORE the dispatch.
 #
-# NEGATIVE COVERAGE (--self-test, hermetic — no gh/git/network):
-#   * fork run (head_repository guard removed)       => G1 (guard present).
-#   * top-level `|| true` bypass appended to the if  => G1 (AND-only, no fail-open OR).
-#   * same-SHA internal-vs-fork collision            => G3 (head.sha filter rejects).
-#   * stale-head (PR head moved off the run's SHA)   => G3 (live head_sha re-check).
-#   * fork-repo predicate removed from the fallback  => G3 (fork PR could resolve).
-#   * head.sha compared to a CONSTANT not ${HEAD_SHA}=> G3 (SHA-bind bypass).
-#   * live `!=` guards inverted to `==` (fail-open)  => G3 (fail-closed inversion).
-#   Each fixture is the real workflow with a SURGICAL mutation applied; the check
-#   must go RED on every one, proving it is not vacuous. The last four fixtures
-#   target the round-2 gaps: G1 previously rejected an OR only when NO `&&` was
-#   present (the real if has `&&`, so a `|| true` bypass read clean), and G3
-#   substring-matched, so dropping the fork-repo predicate, comparing to a
-#   constant, or inverting the live guards all passed.
+# WHY EXACT-MATCH IS STRICTLY STRONGER than the predicate parser it replaces: the
+# adversary's whole bypass class works by producing text that is SEMANTICALLY unsafe
+# but PARSES to the same predicate-presence signal. Against a canonical golden there is
+# no such gap: any text that differs from the known-good form — safe or unsafe — reds.
+# The tradeoff is deliberate: a LEGITIMATE refactor of the guard (rename ${REPO},
+# restructure the select, reword a skip message) will red too, and the fix is to
+# UPDATE THE GOLDEN IN THE SAME PR. That is the CORRECT fail-safe direction — a human /
+# reviewer sees the golden change and re-confirms the guard is still sound, rather than
+# a weakening sliding through on a predicate technicality. (§ headers/echo-message
+# wording that is NOT security-load-bearing is normalized away so pure prose edits do
+# not force a golden bump; see _canon_guard_block.)
+#
+# NEGATIVE COVERAGE (--self-test, hermetic — no gh/git/network): the live workflow
+# passes, and each of the round-1/2/3 bypasses, applied as a SURGICAL mutation to a
+# copy of the real workflow, goes RED. See _self_test for the mutation→red table.
 #
 # Usage:
 #   check-fast-fix-ring-guard.py              # check the live workflow (default)
@@ -74,80 +86,139 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = REPO_ROOT / ".github" / "workflows" / "fast-fix-ring.yml"
 
-# The fail-closed head_repository guard, matched tolerant of whitespace but NOT of
-# the operands: it must compare workflow_run.head_repository.full_name to
-# github.repository. (== only; a `!=` or an `||` context is caught by G1's AND check.)
-HEAD_REPO_GUARD_RE = re.compile(
-    r"github\.event\.workflow_run\.head_repository\.full_name\s*==\s*github\.repository"
-)
-
-# The privileged token / dispatch markers.
 RING_TOKEN = "REGISTRY_RING_TOKEN"
 DISPATCH_MARKER = "agent-account-registry"
 # The exact command that fires the cross-repo doorbell — G3 checks the guards
 # come BEFORE this in the run body.
 DISPATCH_CMD = "gh workflow run dispatch.yml"
 
-# --- G3 EXACT predicates in the (YAML-parsed) run body -----------------------
-# These are matched EXACTLY (operands included), not by loose substring, so that
-# a mutation which (a) drops the fork-repo predicate, (b) compares .head.sha to a
-# constant instead of ${HEAD_SHA}, or (c) inverts a live fail-closed guard from
-# `!=` to `==`, each produces a RED. In the parsed run string the workflow's
-# `\\"` source escapes render as a single backslash-quote (`\"`).
-#
-# 1) head_sha->PR fallback: the `select(...)` must filter on BOTH the fork-repo
-#    predicate AND the exact-SHA predicate bound to ${HEAD_SHA}.
-G3_FALLBACK_REPO_PREDICATE = r'.head.repo.full_name == \"${REPO}\"'
-G3_FALLBACK_SHA_PREDICATE = r'.head.sha == \"${HEAD_SHA}\"'
-# 2) live-state defense in depth: each guard must be a FAIL-CLOSED `!=` compare
-#    (repo != this repo => skip; head_sha != run's SHA => skip). An inversion to
-#    `==` (fire only when they DON'T match) is caught because the `!=` form is gone.
-G3_LIVE_REPO_GUARD = '.head_repo\' <<<"$state")" != "${REPO}"'
-G3_LIVE_SHA_GUARD = '.head_sha\' <<<"$state")" != "${HEAD_SHA}"'
+# =============================================================================
+# GOLDEN CANONICAL FORMS
+# =============================================================================
+# These are the known-good, security-load-bearing fragments of
+# .github/workflows/fast-fix-ring.yml. The checker normalizes the workflow's actual
+# fragment (collapse whitespace; for guard blocks, strip the non-load-bearing echo
+# message) and requires EXACT EQUALITY. If the guard is legitimately refactored, bump
+# the matching golden IN THE SAME PR — that is the intended review checkpoint.
+
+# G1: the ring job's full `if:` condition, whitespace-collapsed. Three ANDed clauses;
+# the third is the #3475 fail-closed head_repository guard. Exact-match, so an OR-wrap
+# `(... || true)`, a `!(...)` negation, an operand swap, a reorder, or any extra
+# clause all differ from this string and RED.
+GOLDEN_IF = (
+    "github.event.workflow_run.conclusion == 'failure' "
+    "&& github.event.workflow_run.event == 'pull_request' "
+    "&& github.event.workflow_run.head_repository.full_name == github.repository"
+)
+
+# G3(a): the head_sha->PR fallback jq `select(...)` filter, normalized (whitespace
+# collapsed). A CONJUNCTION (`and`) of the fork-repo predicate, the exact-${HEAD_SHA}
+# predicate, and state==open. A `repo OR SHA` disjunction, a dropped predicate, or a
+# constant-swapped SHA all change this string and RED. (In the YAML-parsed run body
+# the workflow's `\\"` source escapes render as a single backslash-quote `\"`.)
+GOLDEN_SELECT = (
+    'select(.head.repo.full_name == \\"${REPO}\\" '
+    'and .head.sha == \\"${HEAD_SHA}\\" '
+    'and .state == \\"open\\")'
+)
+
+# G3(b): the two live fail-closed re-check guard blocks, reduced to their EXECUTABLE
+# skeleton (the `if [ <test> ]; then` line + the `exit 0` fail-closed body), with the
+# non-load-bearing echo message removed. Each must be a `!=` (fail-closed: mismatch =>
+# skip) compare and must `exit 0`. An inversion to `==`, a dropped predicate, or a
+# predicate that survives ONLY in a comment changes the executable skeleton and REDs.
+GOLDEN_LIVE_REPO_GUARD = (
+    'if [ "$(jq -r \'.head_repo\' <<<"$state")" != "${REPO}" ]; then '
+    "exit 0 fi"
+)
+GOLDEN_LIVE_SHA_GUARD = (
+    'if [ "$(jq -r \'.head_sha\' <<<"$state")" != "${HEAD_SHA}" ]; then '
+    "exit 0 fi"
+)
 
 
 class Offence(Exception):
     pass
 
 
-def _has_top_level_or(expr: str) -> bool:
-    """True iff `expr` contains a `||` at parenthesis-nesting depth 0.
+def _canon(s: str) -> str:
+    """Whitespace-collapse: any run of whitespace (incl. newlines) => one space,
+    stripped. Used for the `if:` condition and the jq select filter, where only
+    whitespace/line-fold differences are non-load-bearing."""
+    return " ".join(s.split())
 
-    A top-level `||` makes the whole condition satisfiable by an alternative
-    branch, which would neuter the AND-chained head_repository guard (e.g. a
-    trailing `|| true`). We must parse the expression STRUCTURE, not substring-
-    test for `&&`: the real condition already contains `&&`, so the old
-    `"||" in cond and "&&" not in cond` heuristic reported a top-level bypass
-    clean. `||` inside a parenthesised sub-expression is fine (it does not gate
-    the whole condition); only a depth-0 `||` is fail-open.
-    """
-    depth = 0
-    i = 0
-    n = len(expr)
-    quote = ""  # current string-literal delimiter, "" when not inside one
-    while i < n:
-        c = expr[i]
-        if quote:
-            # Inside a single- or double-quoted literal: only the matching quote
-            # ends it (GitHub expression literals don't use backslash escapes;
-            # a doubled quote is an escaped quote — skip it).
-            if c == quote:
-                if i + 1 < n and expr[i + 1] == quote:
-                    i += 1  # escaped quote
-                else:
-                    quote = ""
-        elif c in ("'", '"'):
-            quote = c
-        elif c == "(":
+
+def _strip_shell_comments(body: str) -> str:
+    """Drop full-line shell comments so a `select(...)` (or any predicate) demoted to
+    a `# ...` comment is NOT mistaken for the executable filter. Only whole-line
+    comments are stripped (a leading `#` after optional whitespace); we do not attempt
+    to strip trailing inline comments, which would require full shell tokenization and
+    is unnecessary — the executable predicates in this workflow are never followed by
+    an inline `#`."""
+    return "\n".join(
+        line for line in body.splitlines() if not line.lstrip().startswith("#")
+    )
+
+
+def _extract_select(body: str) -> str | None:
+    """Return the whitespace-normalized `select( ... )` jq filter from the EXECUTABLE
+    run body (shell comments stripped), or None if absent. Balanced-paren scan so
+    nested `()` inside the filter are kept. Stripping comments first means a fork-repo
+    predicate demoted into a `#`-comment is not read as the live filter."""
+    body = _strip_shell_comments(body)
+    idx = body.find("select(")
+    if idx < 0:
+        return None
+    start = idx + len("select(")
+    depth = 1
+    i = start
+    while i < len(body) and depth > 0:
+        c = body[i]
+        if c == "(":
             depth += 1
         elif c == ")":
-            depth = max(0, depth - 1)
-        elif c == "|" and i + 1 < n and expr[i + 1] == "|":
-            if depth == 0:
-                return True
-            i += 1  # consume the second '|'
+            depth -= 1
         i += 1
-    return False
+    if depth != 0:
+        return None
+    return _canon("select(" + body[start : i - 1] + ")")
+
+
+def _canon_guard_block(body: str, jq_field: str) -> str | None:
+    """Extract the live re-check guard block keyed on `jq_field` (`.head_repo` /
+    `.head_sha`) and reduce it to its EXECUTABLE, load-bearing skeleton:
+    the `if [ … ]; then` test line + the fail-closed `exit 0`, joined by single
+    spaces, with the (non-security) echo message line dropped.
+
+    Returns None if no `if` line referencing that field is present. Because the
+    skeleton keeps the `!=`/`==` operator and the compared operands but drops prose,
+    an inversion, a dropped operand, or a predicate that survives only as a `#`
+    comment all change (or empty) the skeleton and fail the golden match, while a
+    reworded skip message does not force a golden bump."""
+    lines = body.splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        st = line.strip()
+        if st.startswith("if [") and jq_field in st and st.endswith("then"):
+            start = i
+            break
+    if start is None:
+        return None
+    # Walk to the matching `fi`, keeping only the load-bearing statements.
+    kept: list[str] = []
+    for j in range(start, len(lines)):
+        st = lines[j].strip()
+        if not st or st.startswith("#"):
+            continue
+        if st.startswith("echo "):
+            # non-load-bearing skip message
+            continue
+        kept.append(st)
+        if st == "fi":
+            break
+    else:
+        return None
+    return _canon(" ".join(kept))
 
 
 def _load(text: str) -> dict:
@@ -161,54 +232,42 @@ def _ring_job(doc: dict) -> tuple[str, dict]:
     jobs = doc.get("jobs")
     if not isinstance(jobs, dict):
         raise Offence("workflow has no `jobs:` mapping")
-    # The ring job is the one that references the token / dispatch. Prefer the id
-    # `ring`, but locate by content so a rename can't hide the token.
-    ring = None
+    # The ring job is the one that references the token / dispatch. Locate by content
+    # so a rename cannot hide the token.
     for jid, job in jobs.items():
         blob = yaml.safe_dump(job)
         if RING_TOKEN in blob or DISPATCH_MARKER in blob:
-            ring = (jid, job)
-            break
-    if ring is None:
-        raise Offence(
-            f"no job references {RING_TOKEN}/{DISPATCH_MARKER} — cannot locate the ring job"
-        )
-    return ring
+            return (jid, job)
+    raise Offence(
+        f"no job references {RING_TOKEN}/{DISPATCH_MARKER} — cannot locate the ring job"
+    )
 
 
 def check_doc(text: str) -> list[str]:
-    """Return a list of offence strings; empty == clean."""
+    """Return a list of offence strings; empty == clean. Canonical golden match."""
     offences: list[str] = []
     doc = _load(text)
     jobs = doc.get("jobs", {})
     ring_id, ring = _ring_job(doc)
 
-    # ---- G1: the ring job `if:` carries the fail-closed head_repository guard ----
+    # ---- G1: the ring job `if:` must EXACTLY equal the golden condition ----
     cond = ring.get("if")
     if not isinstance(cond, str) or not cond.strip():
         offences.append(f"G1: ring job `{ring_id}` has no `if:` guard at all")
     else:
-        cond_flat = " ".join(cond.split())
-        if not HEAD_REPO_GUARD_RE.search(cond_flat):
+        cond_flat = _canon(cond)
+        if cond_flat != GOLDEN_IF:
             offences.append(
-                f"G1: ring job `{ring_id}` `if:` is MISSING the fail-closed "
-                f"`workflow_run.head_repository.full_name == github.repository` guard "
-                f"(a fork / same-SHA cross-repo run could reach the token step) — got: {cond_flat!r}"
-            )
-        elif _has_top_level_or(cond_flat):
-            # The guard must be ANDed into the condition. A top-level `||`
-            # (e.g. a trailing `|| true`, or `... || github.actor == 'x'`) makes
-            # the whole condition satisfiable by an alternative branch, which
-            # neuters the head_repository guard — REJECT it regardless of whether
-            # a `&&` is also present. (A `||` nested inside parentheses does not
-            # gate the whole condition and is allowed.)
-            offences.append(
-                f"G1: ring job `{ring_id}` `if:` has a top-level `||` — the "
-                f"head_repository guard must be ANDed (no fail-open OR branch) so "
-                f"it is fail-closed; got: {cond_flat!r}"
+                f"G1: ring job `{ring_id}` `if:` does not match the canonical golden "
+                f"guard. Any change — an OR-wrap `(... || true)`, a `!(...)` negation, "
+                f"an operand swap, a reorder, or an added clause — reds here because the "
+                f"normalized text differs from the known-good condition. If this is a "
+                f"legitimate refactor, update GOLDEN_IF in this PR.\n"
+                f"       expected: {GOLDEN_IF!r}\n"
+                f"       actual:   {cond_flat!r}"
             )
 
-    # ---- G2: the token step lives INSIDE the guarded ring job; no OTHER job uses it ----
+    # ---- G2: the token step is INSIDE the guarded ring job; no OTHER job uses it ----
     ring_blob = yaml.safe_dump(ring)
     if RING_TOKEN not in ring_blob:
         offences.append(
@@ -221,15 +280,15 @@ def check_doc(text: str) -> list[str]:
         blob = yaml.safe_dump(job)
         if RING_TOKEN in blob or DISPATCH_MARKER in blob:
             jcond = job.get("if")
-            jflat = " ".join(jcond.split()) if isinstance(jcond, str) else ""
-            if not HEAD_REPO_GUARD_RE.search(jflat):
+            jflat = _canon(jcond) if isinstance(jcond, str) else ""
+            if jflat != GOLDEN_IF:
                 offences.append(
-                    f"G2: job `{jid}` also references the ring token/dispatch but is "
-                    f"NOT behind the head_repository guard — a second unguarded path to the token"
+                    f"G2: job `{jid}` also references the ring token/dispatch but its "
+                    f"`if:` is not the canonical golden guard — a second path to the "
+                    f"token that is not fail-closed on head_repository"
                 )
 
-    # ---- G3: SHA/repo defense in depth in the resolution + live-state bash ----
-    # Gather the ring job's run-step bodies.
+    # ---- G3: the resolution + live-state guards must match their goldens ----
     run_bodies = []
     for step in ring.get("steps", []) or []:
         if isinstance(step, dict) and isinstance(step.get("run"), str):
@@ -238,52 +297,60 @@ def check_doc(text: str) -> list[str]:
     if not body:
         offences.append(f"G3: ring job `{ring_id}` has no `run:` body to inspect")
     else:
-        # Semantic (not substring) matching: each predicate is matched WITH its
-        # operands, so a mutation that drops the fork-repo predicate, swaps the
-        # SHA operand for a constant, or inverts a live guard from `!=` to `==`
-        # each produces a RED.
-        #
-        # (a) head_sha->PR fallback: fork-repo predicate must be present.
-        if G3_FALLBACK_REPO_PREDICATE not in body:
+        # (a) head_sha->PR fallback: the executable `select(...)` filter must EXACTLY
+        #     equal the golden conjunction. A `repo OR SHA` swap, a dropped predicate,
+        #     or a constant-swapped SHA all change this string and RED. (A predicate
+        #     retained only in a comment does not appear in the parsed jq filter, so
+        #     the select still differs from the golden.)
+        sel = _extract_select(body)
+        if sel is None:
             offences.append(
-                "G3: the head_sha->PR resolution `select(...)` is MISSING the fork-repo "
-                f"predicate `{G3_FALLBACK_REPO_PREDICATE}` — a fork PR sharing the run's "
-                "head SHA could resolve to the pipeline (same-repo constraint dropped)"
+                "G3: the head_sha->PR resolution `select(...)` jq filter is MISSING — "
+                "the fork-repo AND exact-${HEAD_SHA} conjunction cannot be verified"
             )
-        # (b) head_sha->PR fallback: SHA predicate must compare to ${HEAD_SHA},
-        #     NOT a constant. Matching the exact operand catches a constant swap.
-        if G3_FALLBACK_SHA_PREDICATE not in body:
+        elif sel != GOLDEN_SELECT:
             offences.append(
-                "G3: the head_sha->PR resolution `select(...)` does not pin "
-                f"`{G3_FALLBACK_SHA_PREDICATE}` — the head.sha filter must compare to the "
-                "failing run's ${HEAD_SHA} (not a constant/other value), else the same-SHA-"
-                "collision defense in depth is bypassed"
+                "G3: the head_sha->PR resolution `select(...)` does not match the "
+                "canonical golden filter. It must be the CONJUNCTION "
+                "`head.repo.full_name == ${REPO} AND head.sha == ${HEAD_SHA} AND "
+                "state == open` — a `repo OR SHA` disjunction, a dropped predicate, or "
+                "a constant-swapped SHA all differ from the golden and red. If this is "
+                "a legitimate refactor, update GOLDEN_SELECT in this PR.\n"
+                f"       expected: {GOLDEN_SELECT!r}\n"
+                f"       actual:   {sel!r}"
             )
-        # (c) live-state defense in depth: BOTH guards must be the FAIL-CLOSED
-        #     `!=` form (mismatch => skip). An inversion to `==` removes the `!=`
-        #     spelling and is caught here; each guard must also precede dispatch.
-        for label, needle in (
-            ("head_repo", G3_LIVE_REPO_GUARD),
-            ("head_sha", G3_LIVE_SHA_GUARD),
+
+        # (b) live-state defense in depth: each fail-closed `!=` guard block must
+        #     match its golden EXECUTABLE skeleton, and precede the dispatch. An
+        #     inversion to `==`, a dropped operand, or a predicate demoted to a
+        #     comment changes (or empties) the skeleton and reds.
+        for label, jq_field, golden in (
+            ("head_repo", ".head_repo", GOLDEN_LIVE_REPO_GUARD),
+            ("head_sha", ".head_sha", GOLDEN_LIVE_SHA_GUARD),
         ):
-            pos = body.find(needle)
-            if pos < 0:
+            block = _canon_guard_block(body, jq_field)
+            if block is None:
                 offences.append(
-                    f"G3: the live-PR-state {label} re-check is MISSING its fail-closed "
-                    f"`{needle}` guard — either the guard was dropped or inverted from `!=` "
-                    "to `==` (which would fire ONLY on a mismatch — fail-OPEN)"
+                    f"G3: the live-PR-state {label} re-check `if` block is MISSING — "
+                    f"the fail-closed `!=` guard was dropped (or its predicate now "
+                    f"survives only in a comment, which does not execute)"
                 )
                 continue
-            # The guard block must skip (exit 0) on mismatch, and run before the
-            # privileged dispatch command.
-            block_tail = body[pos : pos + 400]
-            if "exit 0" not in block_tail:
+            if block != golden:
                 offences.append(
-                    f"G3: the live-PR-state {label} `!=` guard does not `exit 0` on "
-                    "mismatch — it must fail-closed (skip the dispatch), not fall through"
+                    f"G3: the live-PR-state {label} re-check does not match the "
+                    f"canonical golden guard. It must be the FAIL-CLOSED `!=` compare "
+                    f"that `exit 0`s on mismatch — an inversion to `==`, a dropped "
+                    f"operand, or a comment-only predicate all differ from the golden "
+                    f"and red. If this is a legitimate refactor, update the golden in "
+                    f"this PR.\n"
+                    f"       expected: {golden!r}\n"
+                    f"       actual:   {block!r}"
                 )
+            # Ordering: the guard block must appear BEFORE the privileged dispatch.
+            pos = body.find(f"if [ \"$(jq -r '{jq_field}'")
             disp = body.find(DISPATCH_CMD)
-            if disp >= 0 and pos > disp:
+            if pos >= 0 and disp >= 0 and pos > disp:
                 offences.append(
                     f"G3: the live-PR-state {label} `!=` guard appears AFTER the "
                     f"`{DISPATCH_CMD}` doorbell — the guard must gate BEFORE the dispatch"
@@ -298,7 +365,6 @@ def check_doc(text: str) -> list[str]:
 
 def _self_test() -> int:
     text = WORKFLOW.read_text(encoding="utf-8")
-
     failures = 0
 
     def expect_clean(label: str, t: str) -> None:
@@ -314,6 +380,10 @@ def _self_test() -> int:
 
     def expect_red(label: str, t: str, needle: str) -> None:
         nonlocal failures
+        if t == text:
+            failures += 1
+            print(f"  [FAIL] {label}: MUTATION DID NOT APPLY (fixture == live workflow)")
+            return
         offs = check_doc(t)
         if not any(needle in o for o in offs):
             failures += 1
@@ -326,32 +396,23 @@ def _self_test() -> int:
     # 0) the real, live workflow must be clean.
     expect_clean("live workflow", text)
 
-    # 1) FORK RUN: remove the head_repository guard from the job `if:`. A fork /
-    #    cross-repo run whose head SHA collides with an internal PR would no longer
-    #    be rejected at the job level. => G1 must RED.
+    # --- round-1 fixtures: a guard is REMOVED ---
+
+    # 1) FORK RUN: remove the head_repository guard from the job `if:`. => G1.
     no_guard = re.sub(
         r"\n\s*&&\s*github\.event\.workflow_run\.head_repository\.full_name\s*==\s*github\.repository",
         "",
         text,
     )
-    assert no_guard != text, "fixture-1 did not remove the guard — check the regex"
-    expect_red("fork run (head_repository guard removed)", no_guard, "G1")
+    expect_red("R1 fork run (head_repository guard removed)", no_guard, "G1")
 
-    # 2) SAME-SHA internal-vs-fork collision: drop the `.head.sha ==` filter from the
-    #    head_sha->PR resolution. A fork commit that shares an internal PR's SHA could
-    #    resolve to the internal PR via the pulls-at-SHA lookup. => G3 must RED.
+    # 2) SAME-SHA collision: drop the `.head.sha ==` filter from the fallback. => G3.
     no_sha_filter = text.replace(
         'and .head.sha == \\"${HEAD_SHA}\\" and .state', "and .state"
     )
-    assert no_sha_filter != text, "fixture-2 did not remove the head.sha filter"
-    expect_red(
-        "same-SHA collision (head.sha filter removed)", no_sha_filter, "G3"
-    )
+    expect_red("R1 same-SHA collision (head.sha filter removed)", no_sha_filter, "G3")
 
-    # 3) STALE-HEAD: remove the live-state head_sha re-check before dispatch. A PR
-    #    whose head moved off the run's SHA between the trigger and here would still
-    #    ring. => G3 must RED (the live re-check needle is gone).
-    #    Remove BOTH the head_sha field from the jq projection AND the guard block.
+    # 3) STALE-HEAD: remove the live head_sha re-check block before dispatch. => G3.
     no_live_recheck = re.sub(
         r'head_sha: \.head\.sha, ', "", text
     )
@@ -362,53 +423,37 @@ def _self_test() -> int:
         no_live_recheck,
         flags=re.DOTALL,
     )
-    assert no_live_recheck != text, "fixture-3 did not remove the live head_sha re-check"
-    expect_red("stale-head (live head_sha re-check removed)", no_live_recheck, "G3")
+    expect_red("R1 stale-head (live head_sha re-check removed)", no_live_recheck, "G3")
 
-    # --- round-2 findings: the checker was too loose; these four fixtures pin it ---
+    # --- round-2 fixtures: predicate-parser was too loose ---
 
-    # 4) [G1 finding] TOP-LEVEL `|| true` BYPASS. The real if already contains `&&`,
-    #    so the old `"||" in cond and "&&" not in cond` heuristic read a trailing
-    #    `|| true` clean — which makes the whole condition true regardless of the
-    #    head_repository guard. Append a depth-0 `|| true`. => G1 must RED.
+    # 4) TOP-LEVEL `|| true` appended to the if (bare, depth-0). => G1.
     or_bypass = text.replace(
         "&& github.event.workflow_run.head_repository.full_name == github.repository\n",
         "&& github.event.workflow_run.head_repository.full_name == github.repository\n"
         "      || true\n",
         1,
     )
-    assert or_bypass != text, "fixture-4 did not append the `|| true` bypass"
-    expect_red("top-level `|| true` bypass appended", or_bypass, "G1")
+    expect_red("R2 top-level `|| true` bypass appended", or_bypass, "G1")
 
-    # 5) [G3 finding] REMOVE THE FORK-REPO PREDICATE from the head_sha->PR fallback
-    #    `select(...)`. Without `head.repo.full_name == ${REPO}` a fork PR sharing the
-    #    run's head SHA can resolve to the pipeline. The old `.head.repo.full_name`
-    #    substring test also matched the live-state jq projection, so it passed. => G3.
+    # 5) fork-repo predicate removed from the fallback `select(...)`. => G3.
     no_repo_predicate = text.replace(
         'select(.head.repo.full_name == \\"${REPO}\\" and .head.sha == \\"${HEAD_SHA}\\" '
         'and .state == \\"open\\")',
         'select(.head.sha == \\"${HEAD_SHA}\\" and .state == \\"open\\")',
         1,
     )
-    assert no_repo_predicate != text, "fixture-5 did not remove the fork-repo predicate"
-    expect_red("fallback fork-repo predicate removed", no_repo_predicate, "G3")
+    expect_red("R2 fallback fork-repo predicate removed", no_repo_predicate, "G3")
 
-    # 6) [G3 finding] COMPARE .head.sha TO A CONSTANT instead of ${HEAD_SHA}. The old
-    #    `.head.sha ==` substring test ignored the operand, so binding the filter to a
-    #    fixed value (which never matches the real run SHA / breaks the SHA binding)
-    #    passed. => G3 must RED.
+    # 6) .head.sha compared to a CONSTANT instead of ${HEAD_SHA}. => G3.
     sha_constant = text.replace(
         '.head.sha == \\"${HEAD_SHA}\\" and .state',
         '.head.sha == \\"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\\" and .state',
         1,
     )
-    assert sha_constant != text, "fixture-6 did not swap the head.sha operand"
-    expect_red("fallback head.sha compared to a constant", sha_constant, "G3")
+    expect_red("R2 fallback head.sha compared to a constant", sha_constant, "G3")
 
-    # 7) [G3 finding] INVERT THE LIVE `!=` GUARDS TO `==` (fail-OPEN: the guard would
-    #    now `exit 0` only when the repo/SHA MATCH, ringing on every mismatch/collision
-    #    instead). The old `head_repo`/`head_sha` and `jq -r '.head_repo'` substring
-    #    tests were still present after the flip, so it passed. => G3 must RED.
+    # 7) live `!=` guards inverted to `==` (fail-open). => G3.
     inverted_guards = text.replace(
         'if [ "$(jq -r \'.head_repo\' <<<"$state")" != "${REPO}" ]; then',
         'if [ "$(jq -r \'.head_repo\' <<<"$state")" == "${REPO}" ]; then',
@@ -418,13 +463,79 @@ def _self_test() -> int:
         'if [ "$(jq -r \'.head_sha\' <<<"$state")" == "${HEAD_SHA}" ]; then',
         1,
     )
-    assert inverted_guards != text, "fixture-7 did not invert the live guards"
-    expect_red("live `!=` guards inverted to `==` (fail-open)", inverted_guards, "G3")
+    expect_red("R2 live `!=` guards inverted to `==` (fail-open)", inverted_guards, "G3")
+
+    # --- round-3 fixtures: the exact bypasses codex demonstrated against the parser ---
+
+    # 8) [R3] PARENTHESIZED OR-WRAP of the whole condition: actionlint-valid,
+    #    (failure && event && head_repo == repo || true). The old paren-depth
+    #    scanner treated a `||` inside parens as safe. Golden exact-match reds.
+    paren_or_wrap = text.replace(
+        "    if: >-\n"
+        "      github.event.workflow_run.conclusion == 'failure'\n"
+        "      && github.event.workflow_run.event == 'pull_request'\n"
+        "      && github.event.workflow_run.head_repository.full_name == github.repository\n",
+        "    if: >-\n"
+        "      (github.event.workflow_run.conclusion == 'failure'\n"
+        "      && github.event.workflow_run.event == 'pull_request'\n"
+        "      && github.event.workflow_run.head_repository.full_name == github.repository\n"
+        "      || true)\n",
+        1,
+    )
+    expect_red("R3 parenthesized `(... || true)` OR-wrap of the whole if", paren_or_wrap, "G1")
+
+    # 9) [R3] NEGATED equality `!(head_repo == repo)`: passed the old presence regex.
+    #    Golden exact-match reds (text differs).
+    negated_guard = text.replace(
+        "&& github.event.workflow_run.head_repository.full_name == github.repository",
+        "&& !(github.event.workflow_run.head_repository.full_name == github.repository)",
+        1,
+    )
+    expect_red("R3 negated `!(head_repo == repo)` guard", negated_guard, "G1")
+
+    # 10) [R3] G3 CONJUNCTION->DISJUNCTION: `repo AND sha` -> `repo OR sha` in the
+    #     fallback select. Both exact needles survived the old substring test.
+    #     Golden exact-match reds (`and`->`or` changes the normalized filter).
+    or_conjunction = text.replace(
+        '.head.repo.full_name == \\"${REPO}\\" and .head.sha == \\"${HEAD_SHA}\\"',
+        '.head.repo.full_name == \\"${REPO}\\" or .head.sha == \\"${HEAD_SHA}\\"',
+        1,
+    )
+    expect_red("R3 fallback conjunction->disjunction (repo OR sha)", or_conjunction, "G3")
+
+    # 11) [R3] PREDICATE MOVED TO A COMMENT: the executable select drops the fork-repo
+    #     predicate but a `#`-comment line retains the needle text. The old substring
+    #     test matched the comment. The golden matches the PARSED filter only, so the
+    #     executable select differs and reds.
+    predicate_in_comment = text.replace(
+        '            if ! pulls="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/pulls" \\\n'
+        '                --jq "[.[] | select(.head.repo.full_name == \\"${REPO}\\" and .head.sha == \\"${HEAD_SHA}\\" and .state == \\"open\\")] | .[0].number // empty")"; then\n',
+        '            # select(.head.repo.full_name == \\"${REPO}\\" and .head.sha == \\"${HEAD_SHA}\\" and .state == \\"open\\")\n'
+        '            if ! pulls="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/pulls" \\\n'
+        '                --jq "[.[] | select(.head.sha == \\"${HEAD_SHA}\\" and .state == \\"open\\")] | .[0].number // empty")"; then\n',
+        1,
+    )
+    expect_red("R3 fork-repo predicate demoted to a comment (select drops it)", predicate_in_comment, "G3")
+
+    # 12) [R3] INVERTED LIVE GUARD accompanied by a comment-only expected needle: the
+    #     executable `!=` is flipped to `==` while a `#`-comment carries the `!=` text.
+    #     The old substring test found the `!=` in the comment. The golden matches the
+    #     executable skeleton (comments stripped), so the inversion reds.
+    inverted_with_comment = text.replace(
+        '          if [ "$(jq -r \'.head_repo\' <<<"$state")" != "${REPO}" ]; then\n',
+        '          # if [ "$(jq -r \'.head_repo\' <<<"$state")" != "${REPO}" ]; then\n'
+        '          if [ "$(jq -r \'.head_repo\' <<<"$state")" == "${REPO}" ]; then\n',
+        1,
+    )
+    expect_red("R3 live guard inverted with comment-only `!=` needle", inverted_with_comment, "G3")
 
     if failures:
         print(f"\nSELF-TEST FAILED: {failures} case(s) did not behave as expected.")
         return 1
-    print("\nSELF-TEST PASSED: guard present + all seven negative fixtures RED.")
+    print(
+        "\nSELF-TEST PASSED: live workflow clean + all round-1/2/3 negative fixtures RED "
+        "(canonical golden match)."
+    )
     return 0
 
 
