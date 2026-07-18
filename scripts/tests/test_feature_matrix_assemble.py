@@ -190,7 +190,31 @@ class TestSelectionFiltering(unittest.TestCase):
     def test_selected_with_empty_affected_yields_zero_legs(self):
         # Legitimate: a provably-empty closure => no legs; the workflow's `legs`
         # count output then SKIPS the matrix job (never an empty-matrix error).
+        # [OPUS-4.8] This IS the orchestration-only / docs-only change-class outcome:
+        # ci_select.py returns mode=selected + affected=[] for a diff that touches no
+        # Rust (e.g. routing.toml + triage.py), so the whole opt-in feature matrix is
+        # correctly assembled to ZERO legs (skipped-by-class) without any missing
+        # required check — the gate discovers the reduced set by polling.
         self.assertEqual(self._filter("selected", "[]"), [])
+
+    def test_change_class_adds_no_legs_full_golden_set_preserved(self):
+        # [OPUS-4.8] The change-class layer is a SELECTION refinement (ci_select.py),
+        # not a fragment change: the assembler's FULL leg set (the gate-name golden
+        # contract) must be byte-identical to the committed golden snapshot. If the
+        # change-class work ever accidentally added/renamed a leg, this fails.
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        argv = sys.argv
+        try:
+            sys.argv = ["assemble", "--names"]
+            with redirect_stdout(buf):
+                self.mod.main()
+        finally:
+            sys.argv = argv
+        emitted = [ln for ln in buf.getvalue().splitlines() if ln.strip()]
+        golden = [ln for ln in GOLDEN.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        self.assertEqual(sorted(emitted), sorted(golden))
 
     def test_shadow_full_and_unset_modes_keep_all(self):
         for mode in ("shadow", "full", "", None, "SELECTED", "enforce"):

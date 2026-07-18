@@ -4,9 +4,23 @@ import { readFile } from 'node:fs/promises';
 
 import initWasm, { SolidServer } from '../wasm/sparq_lws_wasm.js';
 import { createOidcAuthenticator } from './auth.js';
+import { createPodDispatcher } from './dispatch.js';
 import { attachTrapRecoveryHandler, isWasmTrap } from './trap-recovery.js';
 
 export { attachTrapRecoveryHandler, isWasmTrap };
+// [FABLE-5] #2323: the host building blocks, so framework/browser hosts can be assembled
+// downstream without vendor-patching the tarball. `SolidServer` is the raw wasm pod class
+// (construct only after wasm init — `createSolidPod` handles init for Node callers; browser
+// hosts should import the `./wasm` subpath and run its own init with fetched bytes).
+export { createPodDispatcher, SolidServer };
+export {
+  MAX_BODY_BYTES,
+  RequestBodyTooLargeError,
+  copyWasmResponse,
+  flattenRequestHeaders,
+  readRequestBody,
+  writeNodeResponse,
+} from './http.js';
 
 const DEFAULT_PORT = 3000;
 const DEFAULT_OWNER_WEBID = 'https://example.invalid/profile/card#me';
@@ -78,6 +92,40 @@ function normalizeOidc(value) {
  * next request is served by the new instance — a single trap no longer bricks the process
  * indefinitely. Trap events are logged to `console.error`.
  */
+/**
+ * Create one in-memory wasm Solid pod behind a transport-agnostic dispatcher, without any
+ * listener attached — for hosts that already own a transport (the `./fastify` plugin, an
+ * embedded harness, a service-worker `fetch` handler bundled for Node).
+ *
+ * [FABLE-5] #2323: `dispatch({ method, url, rawHeaders, body })` resolves to
+ * `{ status, headers, body }` and owns the whole host contract — the 2 MiB body ceiling (413),
+ * trap recycle (503, a later request is never served by a poisoned instance), wasm-response
+ * copy + free, and repeated-header preservation in both directions. `url` is the origin-form
+ * request target including any query string; `rawHeaders` are flat name/value pairs. Call
+ * `pod.free()` when done — the pod holds wasm linear memory until then.
+ *
+ * `baseUrl` is required: with no listener there is no port to derive it from, and OIDC DPoP
+ * proofs bind to it. `ownerWebid`/`oidc` behave exactly as in `startSolidServer` — the default
+ * fixed-owner mode is deliberately not authentication.
+ */
+export async function createSolidPod(options = {}) {
+  if (options.baseUrl === undefined) {
+    throw new TypeError('baseUrl is required (there is no listener port to derive it from)');
+  }
+  const baseUrl = normalizeBaseUrl(options.baseUrl, DEFAULT_PORT);
+  const ownerWebid = normalizeOwnerWebid(options.ownerWebid);
+  const oidc = normalizeOidc(options.oidc);
+
+  await init();
+
+  const authenticate = oidc ? createOidcAuthenticator(baseUrl) : async () => ownerWebid;
+  const { dispatch, free } = createPodDispatcher(
+    () => new SolidServer(baseUrl, ownerWebid),
+    { authenticate },
+  );
+  return { baseUrl, dispatch, free, ownerWebid };
+}
+
 export async function startSolidServer(options = {}) {
   const port = normalizePort(options.port);
   const baseUrl = normalizeBaseUrl(options.baseUrl, port);

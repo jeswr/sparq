@@ -4,7 +4,8 @@
 //!
 //! ## What this module is
 //!
-//! A PURE (no async, no HTTP types) builder — like [`crate::tpf`] / [`crate::descriptors`] — that
+//! A PURE (no async, no HTTP types) builder — like `crate::tpf` / `crate::descriptors` (both
+//! behind their own features, hence not intra-doc-linked) — that
 //! (1) parses the `GetRecords` query parameters (`iteratorType` / `at` / `after` / `limit`) into a
 //! resolved start offset + bound, and (2) given the polled, ordered slice of
 //! [`sparq_serve::ChangeRecord`]s, renders the JSON response body (the ordered change records plus a
@@ -62,7 +63,7 @@ use sparq_serve::{ChangeOp, ChangeRecord};
 
 /// The default page size — the maximum number of change records (commits) one poll returns when
 /// the request does not set `limit`. A bounded page is the whole point of a poll API; 100 mirrors
-/// the conventional default of a record-batch poll (and the TPF page default in [`crate::tpf`]).
+/// the conventional default of a record-batch poll (and the TPF page default in `crate::tpf`).
 pub const DEFAULT_LIMIT: usize = 100;
 
 /// The hard ceiling on `limit` — a request asking for more is clamped to this. Bounds the

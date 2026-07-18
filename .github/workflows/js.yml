@@ -26,6 +26,9 @@ name: js
 
 on:
   pull_request:
+    # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
+    # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
+    types: [opened, synchronize, reopened, ready_for_review]
     # The surfaces that can affect the js build/test: the js package itself, the npm
     # workspace members + root lockfile/manifest it installs from (the #953 root install),
     # every sparq-*-wasm crate the build compiles (sparq-wasm + reason/rsp/shacl/text-wasm),
@@ -45,6 +48,14 @@ on:
 # build/test job only reads the repo; grant nothing more. Jobs needing writes opt in per-job.
 permissions:
   contents: read
+
+# [FABLE-5] Draft-tier CI: per-PR concurrency so a superseded push's heavy
+# wasm-pack build stops burning a runner slot (same pattern as docs-quality/gui/
+# site-*). No merge_group trigger exists here, so this can never cancel a
+# merge_group run.
+concurrency:
+  group: js-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   js:

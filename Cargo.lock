@@ -4856,6 +4856,7 @@ dependencies = [
  "rayon",
  "regex",
  "rustc-hash 2.1.3",
+ "ryu",
  "serde_json",
  "sha1 0.11.0",
  "sha2 0.11.0",
