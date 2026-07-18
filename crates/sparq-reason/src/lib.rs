@@ -63,7 +63,10 @@ pub use explain::{ExplainOpts, ProofNode, ProofTree};
 pub use incremental::{
     MaterializedGraph, MaterializedN3Graph, MaterializedOwlGraph, N3Mode, OwlMode,
 };
-pub use n3::{reason_n3, reason_n3_proof, reason_n3_terms, N3Closure, ProofStep};
+pub use n3::{
+    reason_n3, reason_n3_proof, reason_n3_stratified, reason_n3_terms, N3Closure, ProofStep,
+    StratifiedN3Closure,
+};
 pub use owl::{inconsistencies, materialize_owl_rl};
 #[cfg(feature = "quoted-triples")]
 pub use owl::materialize_owl_rl_reify;
