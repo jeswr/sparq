@@ -14,10 +14,10 @@ import {
   SparqlJsonRowsParser,
   termFromSparqlJson,
   termToNT,
-  type SparqlJsonResults,
   type SparqlJsonTerm,
 } from './sparql.js';
 import { SparqSource } from './source.js';
+import { asResultStream, ResultStream, type SparqResultStream } from './result-stream.js';
 import { DataFactory, Quad, Variable } from './terms.js';
 import { init, WasmStore } from './wasm.js';
 
@@ -152,7 +152,7 @@ function position(term: MatchTerm, variable: string): { sparql: string; fixed: R
   return { sparql: termToNT(term), fixed: term };
 }
 
-export class SparqStore {
+export class SparqStore implements RDF.StringSparqlQueryable<RDF.BindingsResultSupport> {
   #inner: WasmStore;
 
   private constructor(inner: WasmStore) {
@@ -284,14 +284,36 @@ export class SparqStore {
   query(sparql: string): Bindings[] | boolean {
     const form = detectQueryForm(sparql)?.form;
     if (form === 'ASK') return this.queryBoolean(sparql);
-    return this.queryBindings(sparql);
+    return [...this.queryBindingsStream(sparql)];
   }
 
-  /** Runs a SELECT query, returning one RDF/JS `Bindings` per solution. */
-  queryBindings(sparql: string): Bindings[] {
-    const json = JSON.parse(this.#inner.query(sparql)) as SparqlJsonResults;
-    const rows = json.results?.bindings ?? [];
-    return rows.map(bindingsFromRow);
+  /**
+   * [GPT-5] sq-7lk — RDF/JS `StringSparqlQueryable.queryBindings`: resolves to a lazy
+   * `ResultStream<Bindings>` backed by {@link queryBindingsStream}'s wasm cursor. Adding a
+   * `data` listener starts flowing; `pause()` / `resume()` provide backpressure, `read()` pulls
+   * one row manually, and terminal failures are delivered through `error` without a following
+   * `end`. `destroy()` deterministically frees a paused/abandoned cursor. Use {@link query} when
+   * a synchronous materialised array is more convenient. The optional RDF/JS context accepts
+   * the default SPARQL 1.1 query format; base IRIs, query timestamps, and format extensions are
+   * rejected because the wasm cursor cannot apply them.
+   */
+  async queryBindings(
+    sparql: string,
+    context?: RDF.QueryStringContext,
+  ): Promise<SparqResultStream<Bindings>> {
+    if (context?.baseIRI !== undefined || context?.queryTimestamp !== undefined) {
+      throw new Error('queryBindings context.baseIRI and context.queryTimestamp are not supported');
+    }
+    const format = context?.queryFormat;
+    if (
+      format &&
+      (format.language.toLowerCase() !== 'sparql' ||
+        format.version !== '1.1' ||
+        (format.extensions?.length ?? 0) > 0)
+    ) {
+      throw new Error('queryBindings context.queryFormat must be unextended SPARQL 1.1');
+    }
+    return asResultStream(new ResultStream(() => this.queryBindingsStream(sparql)));
   }
 
   /**
@@ -300,13 +322,13 @@ export class SparqStore {
    * `Term` values — exactly what Oxigraph's `Store.query` yields for a SELECT, so Oxigraph code
    * (`for (const binding of store.querySolutions(q)) binding.get("s").value`) ports unchanged.
    *
-   * It is a thin O(n) re-view of {@link queryBindings}'s RDF/JS `Bindings` (one `Map` allocation
-   * per solution, no extra wasm round-trip), so the engine's SPARQL-JSON path — not a second
-   * code path — stays the single source of truth. Prefer {@link queryBindings} for an RDF/JS
-   * pipeline (richer immutable `Bindings`); use this for drop-in Oxigraph migration.
+   * It is a thin O(n) re-view of {@link queryBindingsStream}'s RDF/JS `Bindings` (one `Map`
+   * allocation per solution, no extra wasm round-trip), so the cursor path — not a second query
+   * implementation — stays the single source of truth. Prefer {@link queryBindings} for an
+   * RDF/JS event-stream pipeline; use this for synchronous Oxigraph migration.
    */
   querySolutions(sparql: string): Map<string, RDF.Term>[] {
-    return this.queryBindings(sparql).map((b) => b.toMap());
+    return [...this.queryBindingsStream(sparql)].map((b) => b.toMap());
   }
 
   /**

@@ -52,7 +52,7 @@ test('querySolutionsStream yields Oxigraph-shaped Maps lazily', async () => {
 
 test('Bindings.toMap bridges RDF/JS Bindings to the Oxigraph Map shape', async () => {
   const store = await SparqStore.fromString(TTL, 'turtle');
-  const [b] = store.queryBindings('PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n } LIMIT 1');
+  const [b] = store.query('PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n } LIMIT 1');
   // RDF/JS Bindings: .get accepts a string already; iteration yields [Variable, Term]
   const [[variable]] = [...b];
   assert.equal(variable.termType, 'Variable', 'Bindings iteration keeps RDF/JS Variable keys');
@@ -64,10 +64,10 @@ test('Bindings.toMap bridges RDF/JS Bindings to the Oxigraph Map shape', async (
   store.free();
 });
 
-test('Bindings.toMap and querySolutions agree term-for-term with queryBindings', async () => {
+test('Bindings.toMap and querySolutions agree term-for-term with materialised query()', async () => {
   const store = await SparqStore.fromString(TTL, 'turtle');
   const q = 'PREFIX ex: <http://ex/> SELECT ?s ?n WHERE { ?s ex:name ?n } ORDER BY ?n';
-  const bindings = store.queryBindings(q);
+  const bindings = store.query(q);
   const sols = store.querySolutions(q);
   assert.equal(bindings.length, sols.length);
   for (let i = 0; i < bindings.length; i++) {
