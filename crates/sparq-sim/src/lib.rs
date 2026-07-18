@@ -1833,11 +1833,9 @@ mod tests {
              :a :p1 :n .
              :b :p2 :n .",
         );
-        let mut cfg = SimConfig { idf: false, profile_fallback: false, ..SimConfig::default() };
+        let cfg = SimConfig { idf: false, profile_fallback: false, ..SimConfig::default() };
         #[cfg(feature = "lexical")]
-        {
-            cfg.lexical_fallback = false;
-        }
+        let cfg = SimConfig { lexical_fallback: false, ..cfg };
         // Without T-box awareness (and no fallbacks) :b is unreachable from :a.
         let plain = Sim::with_config(&g, SimConfig { tbox_aware: false, ..cfg.clone() });
         assert!(
