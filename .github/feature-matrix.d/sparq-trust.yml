@@ -213,7 +213,7 @@
 # the §3.1 normative reference rewrite Q→Q', sparq-engine evaluation over the
 # holder's attested named-graph dataset, the RDF 1.2 reifier + named-graph/PROV-O
 # provenance-encoded response, the independent verifier re-check, and the
-# status-list bridge `mint_status_attestation`) + its 40 in-module unit tests are
+# status-list bridge `mint_status_attestation`) + its 41 in-module unit tests are
 # behind the default-OFF `expression` feature, so ci.yml's default-feature `nextest
 # archive` (no `--features`) compiles them EMPTY and runs ZERO of them — the
 # silent-skip gap (#1171) this leg closes. `expression` enables `framework-vocab` +
@@ -227,7 +227,7 @@
 # certification) ⇒ no binding AND an empty response; a stripped-provenance response
 # fails the independent Q'-over-R re-check; a non-Live status verdict can never mint
 # a positive attestation. Verified locally: `cargo test -p sparq-trust --features
-# expression expression` runs the 40 unit tests; build/test green in default and
+# expression expression` runs the 41 unit tests; build/test green in default and
 # feature-ON states, rustdoc `--all-features -D warnings` clean.
 - name: "sparq-trust (expression — holder-side trust-expression contract evaluation)"
   crate: "sparq-trust"

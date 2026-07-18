@@ -69,7 +69,10 @@
 //!
 //! This is the CLEAR path: the verifier re-checks admissibility over `R` but
 //! must trust the underlying attestations' signatures and the completeness of
-//! what the holder disclosed (design §7.3). Framework trust is **anchored, not
+//! what the holder disclosed (design §7.3). The `trustx:methodPolicy` pre-check
+//! is IRI-bound to `TR` (a [`MethodPrecheck`] for a different policy is
+//! refused), but resolving the named IRI into the policy's constraints remains
+//! caller-owned — see the [`MethodPrecheck`] trust boundary. Framework trust is **anchored, not
 //! proven** (§7.2). No ZK claim is made here; the ZK realisation is bead
 //! `sq-6syab.5` on `sparq-zk-compose`, and the sparq ZK estate remains
 //! internally re-audited with **external accredited-cryptographer sign-off
@@ -158,6 +161,15 @@ pub enum ExpressionError {
     /// `TR` names a `trustx:methodPolicy` but no [`MethodPrecheck`] data was
     /// supplied — fail-closed: the policy cannot be silently skipped.
     MethodPolicyWithoutPrecheck,
+    /// The supplied [`MethodPrecheck`] resolves a DIFFERENT policy IRI than the
+    /// `trustx:methodPolicy` named by `TR` — fail-closed: the named policy can
+    /// never be silently substituted with a weaker one.
+    MethodPolicyMismatch {
+        /// The policy IRI `TR` names.
+        required: String,
+        /// The policy IRI the supplied pre-check data resolves.
+        supplied: String,
+    },
     /// The ODRL method pre-check ran and the presented method does NOT satisfy
     /// the policy (the unsatisfied constraint IRIs are carried).
     MethodNotAdmissible(Vec<String>),
@@ -213,6 +225,11 @@ impl fmt::Display for ExpressionError {
             Self::MethodPolicyWithoutPrecheck => write!(
                 f,
                 "TR names a trustx:methodPolicy but no method pre-check data was supplied"
+            ),
+            Self::MethodPolicyMismatch { required, supplied } => write!(
+                f,
+                "method pre-check resolves policy {} but TR names trustx:methodPolicy {}",
+                supplied, required
             ),
             Self::MethodNotAdmissible(unsat) => write!(
                 f,
@@ -285,13 +302,32 @@ pub struct TrustRequirements {
 }
 
 /// The caller-resolved inputs for the optional `trustx:methodPolicy` ODRL
-/// pre-check — the four arguments the existing
-/// [`crate::admissibility::admissible`] reduction takes. The holder resolves
-/// the policy IRI named in `TR` into these (the policy constraints as N3, the
-/// presented method's secprop annotations) and [`evaluate_contract`] runs the
-/// UNCHANGED reduction — reuse, not restatement, of the sq-0dksu machinery.
+/// pre-check — the policy IRI the data resolves plus the four arguments the
+/// existing [`crate::admissibility::admissible`] reduction takes. The holder
+/// resolves the policy IRI named in `TR` into these (the policy constraints as
+/// N3, the presented method's secprop annotations) and [`evaluate_contract`]
+/// runs the UNCHANGED reduction — reuse, not restatement, of the sq-0dksu
+/// machinery.
+///
+/// ## Trust boundary (read before relying on the pre-check)
+///
+/// [`evaluate_contract`] BINDS the pre-check to `TR`: [`Self::policy`] must
+/// equal the `trustx:methodPolicy` IRI the envelope names, else the whole
+/// evaluation is refused ([`ExpressionError::MethodPolicyMismatch`]) — a
+/// pre-check resolved for a different (e.g. weaker) policy can never be
+/// substituted. What remains **caller-owned** is the *resolution itself*:
+/// nothing here authenticates that [`Self::policy_n3`] /
+/// [`Self::constraint_iris`] are the faithful dereference of that IRI. The
+/// caller must resolve the named policy from a source it trusts (and the
+/// verifier's own re-check of the method-policy axis is out of scope for the
+/// clear-path [`verify_response`], which re-checks the data-admissibility axis
+/// only).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodPrecheck<'a> {
+    /// The IRI of the policy this pre-check data resolves. MUST equal the
+    /// `trustx:methodPolicy` IRI named by `TR` (checked fail-closed by
+    /// [`evaluate_contract`]).
+    pub policy: &'a str,
     /// The presented proof method's IRI (for the clear path, the method
     /// describing clear disclosure).
     pub method: &'a str,
@@ -932,9 +968,11 @@ fn answer_over(shape: &Shape, q_prime: &str, graph: &Graph) -> Result<ContractAn
 /// Evaluate the contract on the holder side (clear path): the optional
 /// `trustx:methodPolicy` ODRL pre-check (through the EXISTING
 /// [`crate::admissibility::admissible`] reduction — fail-closed: a named policy
-/// with no [`MethodPrecheck`] data, or a non-admissible method, refuses the
-/// whole evaluation), then `Q'` over the holder's attested dataset, then the
-/// provenance-encoded response.
+/// with no [`MethodPrecheck`] data, a pre-check resolving a DIFFERENT policy
+/// IRI than `TR` names, or a non-admissible method, refuses the whole
+/// evaluation; the resolution of the named IRI into the pre-check data remains
+/// caller-owned — see the [`MethodPrecheck`] trust boundary), then `Q'` over
+/// the holder's attested dataset, then the provenance-encoded response.
 ///
 /// `holder` is the holder's attested dataset: **one named graph per
 /// attestation bundle** (the credential's claim triples), with attribution
@@ -950,8 +988,16 @@ pub fn evaluate_contract(
     precheck: Option<&MethodPrecheck<'_>>,
 ) -> Result<ContractOutcome, ExpressionError> {
     // D5: the method-policy axis is consulted BEFORE any evaluation.
-    if envelope.requirements.method_policy.is_some() {
+    if let Some(required) = &envelope.requirements.method_policy {
         let pc = precheck.ok_or(ExpressionError::MethodPolicyWithoutPrecheck)?;
+        // Bind the pre-check to the policy TR names: data resolved for a
+        // different (weaker) policy is refused, never silently accepted.
+        if pc.policy != required.as_str() {
+            return Err(ExpressionError::MethodPolicyMismatch {
+                required: required.as_str().to_string(),
+                supplied: pc.policy.to_string(),
+            });
+        }
         let verdict =
             crate::admissibility::admissible(pc.method, pc.constraint_iris, pc.policy_n3, pc.annotations)
                 .map_err(ExpressionError::Admissibility)?;
@@ -1690,6 +1736,7 @@ mod tests {
         .expect("parses");
         let holder = holder_mode1(ISS_X, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
         let pc = MethodPrecheck {
+            policy: "urn:policy1",
             method: METHOD_M1,
             constraint_iris: &[CONSTRAINT_CROSS],
             policy_n3: POLICY_CROSS,
@@ -1703,6 +1750,34 @@ mod tests {
     }
 
     #[test]
+    fn method_policy_precheck_for_a_different_policy_is_refused() {
+        // TR names policy A; the supplied pre-check resolves policy B — data
+        // that would be ADMISSIBLE under B. Fail-closed: the named policy can
+        // never be substituted with a weaker one the holder picked.
+        let env = parse_envelope(
+            ASK_AGE,
+            &tr_triples(&[ISS_X], &[], None, Some("urn:policyA")),
+            "n",
+        )
+        .expect("parses");
+        let holder = holder_mode1(ISS_X, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
+        let pc = MethodPrecheck {
+            policy: "urn:policyB",
+            method: METHOD_M1,
+            constraint_iris: &[CONSTRAINT_PER],
+            policy_n3: POLICY_PER,
+            annotations: M1_ANNOTATIONS,
+        };
+        assert_eq!(
+            evaluate_contract(&env, &holder, Some(&pc)),
+            Err(ExpressionError::MethodPolicyMismatch {
+                required: "urn:policyA".to_string(),
+                supplied: "urn:policyB".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn method_policy_admissible_method_proceeds_to_evaluation() {
         let env = parse_envelope(
             ASK_AGE,
@@ -1712,6 +1787,7 @@ mod tests {
         .expect("parses");
         let holder = holder_mode1(ISS_X, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
         let pc = MethodPrecheck {
+            policy: "urn:policy1",
             method: METHOD_M1,
             constraint_iris: &[CONSTRAINT_PER],
             policy_n3: POLICY_PER,
