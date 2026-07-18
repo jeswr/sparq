@@ -56,7 +56,12 @@ name: vectorized-feature-off
 on:
   push:
     branches: [main]
+  # [FABLE-5] Draft-tier CI: default types + ready_for_review (the un-draft moment
+  # must re-run the wasm-equality leg a draft head may have scoped out) +
+  # labeled/unlabeled (the `ci-full` label toggle must re-evaluate the draft-tier
+  # scope decision in the artifact-exact-equality decide step below).
   pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   merge_group:
 
 permissions:
@@ -239,14 +244,63 @@ jobs:
               - 'bench/feature-off-declarations/**'
       - name: Decide rust_changed (safe-by-default off the PR path)
         id: changes
+        # [FABLE-5] Draft-tier CI (docs/branch-protection.md §Draft-tier CI): on a
+        # DRAFT PR head this heavy wasm double-build runs ONLY when the diff can
+        # affect the feature-OFF sparq-wasm bundle bytes. Path prefixes cannot
+        # decide that (a sparq-core edit changes the bundle), so the step invokes
+        # the SAME selector the select pre-jobs use (scripts/ci_select.py — stdlib
+        # + the preinstalled cargo; checkout above is fetch-depth 0, so the
+        # base...head merge-base resolves) and keeps the leg iff `sparq-wasm` is in
+        # the affected reverse-dependency closure. FAIL-CLOSED on every edge: a
+        # non-draft PR, the ci-full label, mode != selected (incl. every selector
+        # error — ci_select.py exits 0 with mode=full on ANY internal failure), or
+        # an unparsable output all leave rust_changed as the paths-filter verdict
+        # (RUN). Done in-step rather than a `needs: select` job so the non-draft
+        # long pole keeps its early start (sq-6vshe.20). The un-draft moment
+        # re-runs this leg at full tier (ready_for_review in `types` above); a
+        # draft-tier gate result can never admit a PR to the merge queue
+        # (scripts/ci_summary_gate.py).
+        env:
+          IS_DRAFT_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft == true }}
+          CI_FULL_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'ci-full') }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CARGO_NET_RETRY: "10"
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" != "pull_request" ]; then
             echo "rust_changed=true" >> "$GITHUB_OUTPUT"
             echo "event=${{ github.event_name }} -> forcing rust_changed=true (full gate)"
           else
-            echo "rust_changed=${{ steps.filter.outputs.rust }}" >> "$GITHUB_OUTPUT"
-            echo "pull_request -> paths-filter says rust=${{ steps.filter.outputs.rust }}"
+            rust_changed="${{ steps.filter.outputs.rust }}"
+            if [ "$rust_changed" = "true" ] && [ "$IS_DRAFT_PR" = "true" ] && [ "$CI_FULL_LABEL" != "true" ]; then
+              # Draft-tier scope: keep the leg iff sparq-wasm is in the affected
+              # closure. Any failure of this block leaves rust_changed=true (RUN).
+              sel_out="$(mktemp)"
+              if python3 scripts/ci_select.py --event pull_request \
+                   --base "$BASE_SHA" --head "$HEAD_SHA" \
+                   --output-file "$sel_out" --summary-file /dev/null >/dev/null 2>&1; then
+                mode="$(sed -n 's/^mode=//p' "$sel_out" | tail -n1)"
+                affected="$(sed -n 's/^affected=//p' "$sel_out" | tail -n1)"
+                if [ "$mode" = "selected" ]; then
+                  case "$affected" in
+                    *'"sparq-wasm"'*)
+                      echo "draft-tier scope: sparq-wasm IS in the affected closure -> leg runs" ;;
+                    *)
+                      rust_changed="false"
+                      echo "draft-tier scope: sparq-wasm NOT in the affected closure -> leg" \
+                           "skipped on this DRAFT head (full form re-runs at ready_for_review" \
+                           "+ merge_group; the gate refuses draft-tier admission)" ;;
+                  esac
+                else
+                  echo "draft-tier scope: selector mode='${mode:-<empty>}' (not 'selected') -> fail-closed, leg runs"
+                fi
+              else
+                echo "draft-tier scope: selector invocation failed -> fail-closed, leg runs"
+              fi
+            fi
+            echo "rust_changed=$rust_changed" >> "$GITHUB_OUTPUT"
+            echo "pull_request -> paths-filter says rust=${{ steps.filter.outputs.rust }}, final rust_changed=$rust_changed (draft=${IS_DRAFT_PR})"
           fi
 
       # ---- the heavy leg (unchanged, behind the rust_changed step-if) ----

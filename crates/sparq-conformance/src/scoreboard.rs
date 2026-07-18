@@ -473,8 +473,9 @@ pub const SUITES: &[Suite] = &[
     // self-reparse round-trip over the engine's RDF-first writer (sq-3uos5), which
     // measured RDF losslessness rather than the Compaction Algorithm; see the
     // side-by-side re-pin on `floors::compact`. The floor is the MEASURED pass count
-    // at the pinned revision; the one below-floor fail (t0038, 1.0-era prefixing) and
-    // the 17 negative SKIPs are documented there.
+    // at the pinned revision; the 18 SKIPs (17 negatives + t0038, the 1.0-only
+    // positive reclassified from a below-floor fail per sq-uzdw7 — narrowly id-pinned,
+    // scope enforced by the runner's t0038_skip_is_narrowly_scoped) are documented there.
     // Floor kept in lock-step by `tests/scoreboard_floors.rs`.
     Suite {
         label: "W3C JSON-LD 1.1 compact",
@@ -1398,4 +1399,166 @@ pub fn render_scoreboard() -> String {
             .join("\n")
     );
     md
+}
+
+/// Render the registry as the MACHINE-READABLE JSON scoreboard — the exact
+/// content of the committed `bench/conformance-scoreboard.generated.json`
+/// artifact (sq-gum8.14), so conformance-class paper-evidence bindings can
+/// reference suite rows / ratchet floors by json-pointer instead of a Rust
+/// source anchor.
+///
+/// A pure DERIVATION of [`SUITES`]: same rows, same floors, same totals-split
+/// (standards-conformance vs the `sparq extension` rows, which are NEVER summed
+/// into the conformance total — the same honesty rule [`render_scoreboard`]
+/// applies). Deliberately DETERMINISTIC: no timestamps, commit hashes, or other
+/// provenance, and every object's keys are emitted in sorted (alphabetical)
+/// order, so regenerating at the same source state is byte-identical — the
+/// property the drift-guard test (`tests/scoreboard_export.rs`) enforces by
+/// byte-comparing the committed artifact against a fresh render.
+///
+/// Regenerate the committed artifact from the repo root with:
+///
+/// ```text
+/// cargo run -p sparq-conformance --bin sparq-conformance-scoreboard -- \
+///   --report /tmp/conformance-scoreboard.md \
+///   --json bench/conformance-scoreboard.generated.json
+/// ```
+pub fn scoreboard_json() -> String {
+    use serde_json::{json, Value};
+
+    // NB: every `json!` object below writes its keys in ALPHABETICAL order on
+    // purpose. serde_json's default map is a BTreeMap (sorted keys), but its
+    // opt-in `preserve_order` feature — which cargo feature-unification could
+    // switch on from anywhere in a build graph — preserves insertion order
+    // instead. Alphabetical insertion makes the two modes byte-identical, so
+    // the committed artifact can never flap on an unrelated dependency change.
+    let runner_json = |r: Runner| -> Value {
+        match r {
+            Runner::SparqlBinary => json!({ "kind": "sparql-binary" }),
+            Runner::InferenceBinary => json!({ "kind": "inference-binary" }),
+            Runner::CrateTest { krate, target } => json!({
+                "crate": krate,
+                "kind": "crate-test",
+                "target": target,
+            }),
+            Runner::FeatureGatedCrateTest { krate, target, feature } => json!({
+                "crate": krate,
+                "feature": feature,
+                "kind": "feature-gated-crate-test",
+                "target": target,
+            }),
+        }
+    };
+
+    let is_extension = |s: &Suite| s.family == "sparq extension";
+    let suites: Vec<Value> = SUITES
+        .iter()
+        .map(|s| {
+            json!({
+                "ci_job": s.ci_job,
+                "command": s.runner.command(),
+                "family": s.family,
+                "floor_basis": s.floor_basis,
+                "is_extension": is_extension(s),
+                "label": s.label,
+                "note": s.note,
+                "ratchet_floor": s.ratchet_floor,
+                "runner": runner_json(s.runner),
+            })
+        })
+        .collect();
+
+    let conformance_floor_total: usize =
+        SUITES.iter().filter(|s| !is_extension(s)).map(|s| s.ratchet_floor).sum();
+    let conformance_suites = SUITES.iter().filter(|s| !is_extension(s)).count();
+    let extension_assertion_total: usize =
+        SUITES.iter().filter(|s| is_extension(s)).map(|s| s.ratchet_floor).sum();
+    let extension_suites = SUITES.iter().filter(|s| is_extension(s)).count();
+
+    let doc = json!({
+        "description": "Machine-readable derivation of the central conformance \
+                        registry (crates/sparq-conformance/src/scoreboard.rs \
+                        scoreboard::SUITES): every conformance suite sparq \
+                        ratchets, with its ratchet floor (may only RISE), floor \
+                        basis, CI job, and runner command. Rows with \
+                        is_extension=true are HONESTLY sparq-extension ratchets, \
+                        NOT standards-conformance claims — their floors are in a \
+                        different unit (assertions, not spec pass-counts) and are \
+                        NEVER summed into totals.conformance_floor_total. \
+                        Committed as bench/conformance-scoreboard.generated.json \
+                        and drift-guarded: tests/scoreboard_export.rs regenerates \
+                        and byte-compares, so this mirror cannot silently drift \
+                        from the Rust source of truth.",
+        "schema": "sparq.conformance-scoreboard/v1",
+        "suites": suites,
+        "title": "sparq conformance scoreboard",
+        "totals": {
+            "conformance_floor_total": conformance_floor_total,
+            "conformance_suites": conformance_suites,
+            "extension_assertion_total": extension_assertion_total,
+            "extension_suites": extension_suites,
+        },
+    });
+    let mut out = serde_json::to_string_pretty(&doc).expect("scoreboard JSON serialises");
+    out.push('\n');
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Direct unit test for [`scoreboard_json`]: the export is valid JSON,
+    /// carries EVERY registry row verbatim (label / floor / command, in
+    /// registry order), and its totals reproduce an independent fold over
+    /// [`SUITES`] with the extension rows split out — the same honesty rule
+    /// `render_scoreboard` applies.
+    #[test]
+    fn scoreboard_json_mirrors_the_registry() {
+        let out = scoreboard_json();
+        assert!(out.ends_with('\n'), "artifact ends with a trailing newline");
+
+        let doc: serde_json::Value = serde_json::from_str(&out).expect("export is valid JSON");
+        assert_eq!(doc["schema"], "sparq.conformance-scoreboard/v1");
+
+        let rows = doc["suites"].as_array().expect("suites is an array");
+        assert_eq!(rows.len(), SUITES.len(), "one JSON row per registry row");
+        for (row, s) in rows.iter().zip(SUITES) {
+            assert_eq!(row["label"], s.label);
+            assert_eq!(row["family"], s.family);
+            assert_eq!(row["ci_job"], s.ci_job);
+            assert_eq!(row["floor_basis"], s.floor_basis);
+            assert_eq!(row["note"], s.note);
+            assert_eq!(row["command"], s.runner.command());
+            assert_eq!(
+                row["ratchet_floor"].as_u64().expect("floor is an integer") as usize,
+                s.ratchet_floor
+            );
+            assert_eq!(
+                row["is_extension"].as_bool().expect("is_extension is a bool"),
+                s.family == "sparq extension"
+            );
+        }
+
+        // Totals: independent fold, extension rows never summed into the
+        // conformance total.
+        let ext: usize = SUITES
+            .iter()
+            .filter(|s| s.family == "sparq extension")
+            .map(|s| s.ratchet_floor)
+            .sum();
+        let conf: usize = SUITES
+            .iter()
+            .filter(|s| s.family != "sparq extension")
+            .map(|s| s.ratchet_floor)
+            .sum();
+        let totals = &doc["totals"];
+        assert_eq!(totals["conformance_floor_total"].as_u64().unwrap() as usize, conf);
+        assert_eq!(totals["extension_assertion_total"].as_u64().unwrap() as usize, ext);
+        assert_eq!(
+            totals["conformance_suites"].as_u64().unwrap() as usize
+                + totals["extension_suites"].as_u64().unwrap() as usize,
+            SUITES.len()
+        );
+    }
 }
