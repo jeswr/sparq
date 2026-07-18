@@ -65,10 +65,15 @@ No timing row exists without a passed result-set agreement check:
 - **In-engine (always):** `ql_npd_requiem_bench` executes the raw PerfectRef UCQ and the
   minimised production UCQ over the same data and requires result-**set** equality
   (minimisation must never change answers); a disagreement aborts the run. Without real
-  data the check runs over a deterministic **witness ABox** synthesised from the TBox
-  vocabulary (one assertion per named class/property), so every predicate the rewriting
-  can reach is populated and the differential is non-vacuous; with `--abox` it runs over
-  the real data (stronger).
+  data the check runs over a deterministic **per-query witness ABox**: the frozen
+  canonical instances of every CQ disjunct of the original, raw, and minimised queries
+  (variables/blank nodes frozen to fresh per-disjunct IRIs; IRI/literal constants kept).
+  Every disjunct — query-only predicates and multi-atom joins included — matches at least
+  its own instance, and because frozen terms are disjoint across disjuncts, dropping a
+  non-subsumed disjunct changes the result set (the canonical-database containment
+  argument; regression-tested in the example). Caveat: a disjunct under a re-applied
+  FILTER/VALUES modifier is populated but the modifier may reject the frozen bindings, so
+  `--abox` real data remains the stronger regime.
 - **Cross-engine (same-data regime only):** per-query answer counts from both engines are
   recorded in the envelope (`cross_engine_counts_agree`); neither engine is ground truth —
   a disagreement is recorded and investigated, never adjusted.

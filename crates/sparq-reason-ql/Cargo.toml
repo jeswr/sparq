@@ -97,6 +97,12 @@ required-features = ["experimental"]
 # [SONNET-4.6] sq-hmd7l.9: the sparq leg of the NPD/Requiem rewriting comparison vs Ontop
 # (scripts/bench/reason-ql-same-box.sh). Calls the gated `rewrite`/`rewrite_production` API,
 # so `required-features` keeps the default (feature-less) `cargo build --all-targets` green.
+# `test = true` (the sparq-jsonld `jsonld_conformance` precedent) so the witness-gate
+# regression tests run under `cargo test --features experimental`: the per-disjunct
+# frozen-instance witness must populate query-only predicates + multi-atom joins and must
+# detect a wrongly-dropped UCQ disjunct (the gate is non-vacuous by construction, not by
+# TBox-vocabulary coincidence).
 [[example]]
 name = "ql_npd_requiem_bench"
 required-features = ["experimental"]
+test = true

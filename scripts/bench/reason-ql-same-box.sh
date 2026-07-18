@@ -19,7 +19,8 @@
 #
 # UCQ-EQUIVALENCE BEFORE TIMING. The sparq example (ql_npd_requiem_bench) executes the raw
 # PerfectRef UCQ and the minimised production UCQ over the same data (a deterministic
-# witness ABox synthesised from the TBox vocabulary, or --abox real data) and ABORTS on any
+# PER-QUERY witness ABox — the frozen canonical instances of every disjunct of the
+# original/raw/minimised queries — or --abox real data) and ABORTS on any
 # result-set disagreement — no timing row exists without the equivalence check having
 # passed. Cross-engine (sparq vs Ontop) per-query answer COUNTS are recorded and compared
 # in the envelope when both sides ran over the same data (counts_agree per query; a

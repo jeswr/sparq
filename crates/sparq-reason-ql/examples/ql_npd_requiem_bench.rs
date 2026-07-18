@@ -16,10 +16,17 @@
 //! timing row is printed for a query, the RAW PerfectRef UCQ (`rewrite`) and the MINIMISED
 //! production UCQ (`rewrite_production`) are BOTH executed over the same data and their
 //! result SETS must agree — containment minimisation must never change answers. In gather
-//! mode without `--abox` the data is a deterministic WITNESS ABox synthesised from the
-//! TBox vocabulary (one witness assertion per named class/property), so every predicate the
-//! rewriting can touch is populated; with `--abox` the agreement runs over the real data
-//! (stronger). A disagreement aborts the run (exit 1) — it is an unsoundness signal, never
+//! mode without `--abox` the data is a deterministic PER-QUERY WITNESS ABox: the frozen
+//! canonical instance of every CQ disjunct of the original query, the raw UCQ, and the
+//! minimised UCQ (variables/blank nodes frozen to fresh per-disjunct IRIs; IRI and literal
+//! constants kept as-is). Every disjunct matches at least its own frozen instance via the
+//! identity homomorphism — including query-only predicates absent from the TBox and
+//! multi-atom shared-variable joins — and because frozen terms are disjoint across
+//! disjuncts, a minimisation that drops a NON-subsumed disjunct changes the result set
+//! (the classical canonical-database containment argument for UCQs). CAVEAT: a disjunct
+//! under a re-applied FILTER/VALUES modifier (the B3/B4 pass-through) is populated but its
+//! frozen bindings may still fail the modifier, so `--abox` real data remains the stronger
+//! regime. A disagreement aborts the run (exit 1) — it is an unsoundness signal, never
 //! papered over with a plausible timing.
 //!
 //! `--smoke` is the hermetic acceptance path (no network, no files): NPD/Requiem-shaped
@@ -31,23 +38,14 @@
 //! REPORTED per-row as `out-of-scope`, not errors: on the real NPD query mix that count is
 //! itself an honest datum about rewriter coverage.
 
-use oxrdf::{NamedOrBlankNode, Term, Triple};
+use oxrdf::Triple;
+use spargebra::algebra::GraphPattern;
+use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
 use spargebra::{Query, SparqlParser};
 use sparq_core::Graph;
 use sparq_reason_ql::{rewrite, rewrite_production};
-use std::collections::BTreeSet;
 use std::time::Instant;
 
-const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-const RDFS_SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
-const RDFS_SUB_PROPERTY_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf";
-const RDFS_DOMAIN: &str = "http://www.w3.org/2000/01/rdf-schema#domain";
-const RDFS_RANGE: &str = "http://www.w3.org/2000/01/rdf-schema#range";
-const OWL_INVERSE_OF: &str = "http://www.w3.org/2002/07/owl#inverseOf";
-const OWL_ON_PROPERTY: &str = "http://www.w3.org/2002/07/owl#onProperty";
-const OWL_CLASS: &str = "http://www.w3.org/2002/07/owl#Class";
-const OWL_OBJECT_PROPERTY: &str = "http://www.w3.org/2002/07/owl#ObjectProperty";
-const OWL_DATATYPE_PROPERTY: &str = "http://www.w3.org/2002/07/owl#DatatypeProperty";
 /// Witness-ABox namespace — disjoint from any real suite vocabulary.
 const WITNESS: &str = "http://sparq.dev/bench/ql-witness#";
 
@@ -267,83 +265,94 @@ fn load_triples(path: &str) -> Vec<Triple> {
     }
 }
 
-fn named(iri: &str) -> bool {
-    // Skip the built-in vocabularies — witnesses for owl:Thing etc. would be noise.
-    !(iri.starts_with("http://www.w3.org/2002/07/owl#")
-        || iri.starts_with("http://www.w3.org/2000/01/rdf-schema#")
-        || iri.starts_with("http://www.w3.org/1999/02/22-rdf-syntax-ns#")
-        || iri.starts_with("http://www.w3.org/2001/XMLSchema#"))
+/// Collect every BGP (CQ disjunct body) in a query's pattern tree. The shapes that can
+/// occur here are exactly what the fail-closed CQ gate admits and what the emitter
+/// produces: BGPs under a `Union` fold, wrapped in `Project`/`Distinct`/`Reduced`/`Slice`,
+/// with the B3/B4 pass-through re-applying `Filter` and `Join`-with-`Values` around a
+/// branch. Anything else is fail-closed: PANIC rather than synthesise a witness that
+/// silently under-populates the data (use `--abox` for such suites).
+fn collect_bgps<'a>(pattern: &'a GraphPattern, out: &mut Vec<&'a [TriplePattern]>) {
+    match pattern {
+        GraphPattern::Bgp { patterns } => out.push(patterns),
+        GraphPattern::Union { left, right } | GraphPattern::Join { left, right } => {
+            collect_bgps(left, out);
+            collect_bgps(right, out);
+        }
+        GraphPattern::Filter { inner, .. }
+        | GraphPattern::Project { inner, .. }
+        | GraphPattern::Distinct { inner }
+        | GraphPattern::Reduced { inner }
+        | GraphPattern::Slice { inner, .. } => collect_bgps(inner, out),
+        GraphPattern::Values { .. } => {} // constant bindings — contributes no triples
+        other => panic!(
+            "witness ABox synthesis: unsupported pattern shape {:?} — run with --abox",
+            other
+        ),
+    }
 }
 
-/// Synthesise the deterministic WITNESS ABox: one assertion per named class / property in
-/// the TBox vocabulary, so every predicate PerfectRef can rewrite into is populated and the
-/// raw-vs-minimised result-set agreement is a non-vacuous differential.
-fn witness_abox(tbox: &[Triple]) -> Graph {
-    let mut classes: BTreeSet<String> = BTreeSet::new();
-    let mut props: BTreeSet<String> = BTreeSet::new();
-    let mut dt_props: BTreeSet<String> = BTreeSet::new();
-    for t in tbox {
-        let s = match &t.subject {
-            NamedOrBlankNode::NamedNode(n) => Some(n.as_str().to_owned()),
-            _ => None,
-        };
-        let o = match &t.object {
-            Term::NamedNode(n) => Some(n.as_str().to_owned()),
-            _ => None,
-        };
-        match t.predicate.as_str() {
-            RDFS_SUB_CLASS_OF => {
-                classes.extend(s.into_iter().chain(o).filter(|i| named(i)));
-            }
-            RDFS_SUB_PROPERTY_OF | OWL_INVERSE_OF => {
-                props.extend(s.into_iter().chain(o).filter(|i| named(i)));
-            }
-            RDFS_DOMAIN | RDFS_RANGE => {
-                props.extend(s.into_iter().filter(|i| named(i)));
-                classes.extend(o.into_iter().filter(|i| named(i)));
-            }
-            OWL_ON_PROPERTY => {
-                props.extend(o.into_iter().filter(|i| named(i)));
-            }
-            RDF_TYPE => match o.as_deref() {
-                Some(OWL_CLASS) => classes.extend(s.into_iter().filter(|i| named(i))),
-                Some(OWL_OBJECT_PROPERTY) => props.extend(s.into_iter().filter(|i| named(i))),
-                Some(OWL_DATATYPE_PROPERTY) => dt_props.extend(s.into_iter().filter(|i| named(i))),
-                _ => {}
-            },
-            _ => {}
-        }
+fn query_pattern(q: &Query) -> &GraphPattern {
+    match q {
+        Query::Select { pattern, .. } | Query::Ask { pattern, .. } => pattern,
+        _ => panic!("witness ABox synthesis: expected a SELECT/ASK query"),
     }
+}
+
+/// Synthesise the deterministic PER-QUERY WITNESS ABox for one equivalence check: the
+/// union of the FROZEN CANONICAL INSTANCES of every CQ disjunct of every given query
+/// (original, raw UCQ, minimised UCQ). Freezing maps each variable / blank node to a
+/// fresh per-disjunct witness IRI and keeps IRI/literal constants as-is, so every
+/// disjunct — query-only predicates and multi-atom shared-variable joins included —
+/// matches at least its own instance (the identity homomorphism). Frozen terms are
+/// disjoint across disjuncts, so a kept disjunct produces a dropped disjunct D's frozen
+/// head tuple only via a homomorphism into D's instance, i.e. only when D was genuinely
+/// subsumed: a minimisation that drops a non-subsumed disjunct changes the result set
+/// (the canonical-database containment argument). Regression-tested below.
+fn witness_abox(queries: &[&Query]) -> Graph {
     let mut nt = String::new();
-    for (i, c) in classes.iter().enumerate() {
-        nt.push_str(&format!("<{}ci{}> <{}> <{}> .\n", WITNESS, i, RDF_TYPE, c));
-    }
-    for (i, p) in props.iter().enumerate() {
-        if dt_props.contains(p) {
-            continue;
+    for (qi, q) in queries.iter().enumerate() {
+        let mut bgps: Vec<&[TriplePattern]> = Vec::new();
+        collect_bgps(query_pattern(q), &mut bgps);
+        for (di, bgp) in bgps.iter().enumerate() {
+            // One fresh constant per (query, disjunct, kind, name) — shared variables
+            // within a disjunct freeze to the SAME constant, so joins are satisfied.
+            let frozen = |kind: &str, name: &str| {
+                format!("<{}q{}d{}{}{}>", WITNESS, qi, di, kind, name)
+            };
+            for tp in bgp.iter() {
+                let s = match &tp.subject {
+                    TermPattern::NamedNode(n) => format!("<{}>", n.as_str()),
+                    TermPattern::BlankNode(b) => frozen("b", b.as_str()),
+                    TermPattern::Variable(v) => frozen("v", v.as_str()),
+                    other => panic!("witness ABox: unsupported subject pattern {:?}", other),
+                };
+                let p = match &tp.predicate {
+                    NamedNodePattern::NamedNode(n) => format!("<{}>", n.as_str()),
+                    NamedNodePattern::Variable(v) => frozen("p", v.as_str()),
+                };
+                let o = match &tp.object {
+                    TermPattern::NamedNode(n) => format!("<{}>", n.as_str()),
+                    TermPattern::Literal(l) => l.to_string(), // canonical N-Triples form
+                    TermPattern::BlankNode(b) => frozen("b", b.as_str()),
+                    TermPattern::Variable(v) => frozen("v", v.as_str()),
+                    other => panic!("witness ABox: unsupported object pattern {:?}", other),
+                };
+                nt.push_str(&format!("{} {} {} .\n", s, p, o));
+            }
         }
-        nt.push_str(&format!("<{}ps{}> <{}> <{}po{}> .\n", WITNESS, i, p, WITNESS, i));
-    }
-    for (i, p) in dt_props.iter().enumerate() {
-        nt.push_str(&format!("<{}ds{}> <{}> \"w{}\" .\n", WITNESS, i, p, i));
     }
     Graph::load_str(&nt, "ntriples").expect("witness ABox must load")
 }
 
 fn run_gather(suite: &str, tbox_path: &str, queries_dir: &str, abox_path: Option<&str>) {
     let tbox = load_triples(tbox_path);
-    let (data, data_label) = match abox_path {
-        Some(p) => {
-            let text = std::fs::read_to_string(p)
-                .unwrap_or_else(|e| panic!("cannot read ABox {}: {}", p, e));
-            let fmt = if p.ends_with(".nt") || p.ends_with(".ntriples") { "ntriples" } else { "turtle" };
-            (
-                Graph::load_str(&text, fmt).unwrap_or_else(|e| panic!("ABox {} load: {}", p, e)),
-                "abox",
-            )
-        }
-        None => (witness_abox(&tbox), "witness-abox"),
-    };
+    let real_abox: Option<Graph> = abox_path.map(|p| {
+        let text = std::fs::read_to_string(p)
+            .unwrap_or_else(|e| panic!("cannot read ABox {}: {}", p, e));
+        let fmt = if p.ends_with(".nt") || p.ends_with(".ntriples") { "ntriples" } else { "turtle" };
+        Graph::load_str(&text, fmt).unwrap_or_else(|e| panic!("ABox {} load: {}", p, e))
+    });
+    let data_label = if real_abox.is_some() { "abox" } else { "witness-abox" };
 
     let mut query_files: Vec<std::path::PathBuf> = std::fs::read_dir(queries_dir)
         .unwrap_or_else(|e| panic!("cannot read queries dir {}: {}", queries_dir, e))
@@ -364,7 +373,8 @@ fn run_gather(suite: &str, tbox_path: &str, queries_dir: &str, abox_path: Option
         tbox.len(),
         query_files.len(),
         data_label,
-        abox_path.unwrap_or("synthesised from the TBox vocabulary")
+        abox_path
+            .unwrap_or("per-query frozen canonical instances of the original/raw/minimised UCQ disjuncts")
     );
     println!("# regime: *_rewrite_ms = rewriter-phase only (in-process rewrite/rewrite_production);");
     println!("#         exec_ms = minimised-UCQ execution over the loaded data; e2e_ms = rewrite+execute (comparable to an end-to-end competitor column)");
@@ -410,16 +420,27 @@ fn run_gather(suite: &str, tbox_path: &str, queries_dir: &str, abox_path: Option
         let min_ms = ms(t_min);
 
         // UCQ-equivalence sanity check BEFORE the timing row (the sq-hmd7l.9 invariant).
-        let answers = assert_ucq_equivalence(&data, &raw.query, &minimised.query, id);
+        // Without --abox the data is the PER-QUERY witness: the frozen canonical instances
+        // of every disjunct of the original, raw, and minimised queries, so the differential
+        // is per-disjunct non-vacuous even for predicates that never occur in the TBox.
+        let witness;
+        let data: &Graph = match &real_abox {
+            Some(g) => g,
+            None => {
+                witness = witness_abox(&[&query, &raw.query, &minimised.query]);
+                &witness
+            }
+        };
+        let answers = assert_ucq_equivalence(data, &raw.query, &minimised.query, id);
 
         // End-to-end leg (rewrite + execute), labelled; execution-only measured separately.
         let t_exec = Instant::now();
-        let _ = sparq_engine::count(&data, &minimised.query.to_string())
+        let _ = sparq_engine::count(data, &minimised.query.to_string())
             .unwrap_or_else(|e| panic!("{}: minimised UCQ execution failed: {}", id, e));
         let exec_ms = ms(t_exec);
         let t_e2e = Instant::now();
         let e2e = rewrite_production(&query, &tbox).expect("second rewrite must succeed");
-        let _ = sparq_engine::count(&data, &e2e.query.to_string())
+        let _ = sparq_engine::count(data, &e2e.query.to_string())
             .unwrap_or_else(|e| panic!("{}: e2e execution failed: {}", id, e));
         let e2e_ms = ms(t_e2e);
 
@@ -467,5 +488,86 @@ fn main() {
             );
             std::process::exit(2);
         }
+    }
+}
+
+// =========================================================================================
+// Witness-gate regression tests (run by `cargo test -p sparq-reason-ql --features
+// experimental` — the [[example]] entry sets `test = true`). They pin the vacuity the old
+// TBox-vocabulary witness had for query-only predicates + multi-atom joins, and prove the
+// frozen-instance witness both populates every disjunct and DETECTS a wrongly-dropped one.
+// =========================================================================================
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A raw UCQ whose predicates occur ONLY in the query (never in any TBox): a multi-atom
+    /// shared-variable join disjunct, plus a literal-object disjunct.
+    const RAW_UCQ: &str = "SELECT DISTINCT ?x WHERE { \
+        { ?x :headOf ?d . ?d :partOf ?u } UNION { ?x :label \"w\" } }";
+    /// A deliberately WRONG minimisation of [`RAW_UCQ`]: the non-subsumed join disjunct is
+    /// dropped, so the two queries are semantically different.
+    const WRONG_MIN_UCQ: &str = "SELECT DISTINCT ?x WHERE { ?x :label \"w\" }";
+    /// A sound minimisation of [`RAW_UCQ`] (same UCQ, disjuncts reordered).
+    const EQUIV_UCQ: &str = "SELECT DISTINCT ?x WHERE { \
+        { ?x :label \"w\" } UNION { ?x :headOf ?d . ?d :partOf ?u } }";
+
+    /// The PRE-FIX witness construction, reproduced literally for the TBox
+    /// `:Manager rdfs:subClassOf :Employee .`: one rdf:type assertion per TBox class. The
+    /// query-only predicates above receive no data from it, so BOTH the raw and the wrongly
+    /// minimised UCQ evaluate to the empty set and the old gate agreed VACUOUSLY — the
+    /// defect this regression pins.
+    #[test]
+    fn tbox_vocabulary_witness_was_vacuous_for_query_only_predicates() {
+        let data = Graph::load_str(
+            "<http://sparq.dev/bench/ql-witness#ci0> \
+             <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Employee> .\n\
+             <http://sparq.dev/bench/ql-witness#ci1> \
+             <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://ex/Manager> .\n",
+            "ntriples",
+        )
+        .expect("old-style witness must load");
+        let (_, raw_rows) = eval_rows(&data, &parse_query(RAW_UCQ));
+        let (_, wrong_rows) = eval_rows(&data, &parse_query(WRONG_MIN_UCQ));
+        assert!(
+            raw_rows.is_empty() && wrong_rows.is_empty(),
+            "TBox-vocabulary witness leaves query-only predicates empty on both sides — \
+             the vacuous agreement the per-query frozen-instance witness replaces"
+        );
+    }
+
+    /// The frozen-instance witness populates the join disjunct (query-only predicates,
+    /// shared-variable structure) AND the literal-object disjunct, and the equivalence gate
+    /// DETECTS the dropped non-subsumed disjunct as a result-set mismatch.
+    #[test]
+    fn frozen_instance_witness_detects_wrongly_dropped_join_disjunct() {
+        let raw = parse_query(RAW_UCQ);
+        let wrong = parse_query(WRONG_MIN_UCQ);
+        let data = witness_abox(&[&raw, &wrong]);
+        let (_, raw_rows) = eval_rows(&data, &raw);
+        let (_, wrong_rows) = eval_rows(&data, &wrong);
+        assert!(
+            !raw_rows.is_empty(),
+            "every raw disjunct must match its own frozen instance"
+        );
+        assert!(
+            !wrong_rows.is_empty(),
+            "the literal-object disjunct must match its own frozen instance"
+        );
+        assert_ne!(
+            raw_rows, wrong_rows,
+            "dropping a non-subsumed disjunct must surface as a result-set mismatch"
+        );
+    }
+
+    /// A sound minimisation (equivalent UCQ, reordered disjuncts) still agrees over the
+    /// frozen-instance witness, with a non-empty (non-vacuous) agreed row set.
+    #[test]
+    fn frozen_instance_witness_agrees_for_equivalent_ucqs() {
+        let raw = parse_query(RAW_UCQ);
+        let equiv = parse_query(EQUIV_UCQ);
+        let data = witness_abox(&[&raw, &equiv]);
+        let answers = assert_ucq_equivalence(&data, &raw, &equiv, "equivalent-ucqs");
+        assert!(answers > 0, "the agreement must be over a non-empty row set");
     }
 }
