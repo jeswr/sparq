@@ -141,14 +141,19 @@ while IFS= read -r OWL; do
   [ "$N" -ge "$ORE_MAX_ONTOLOGIES" ] && { log "ORE_MAX_ONTOLOGIES=$ORE_MAX_ONTOLOGIES reached — stopping (cap logged, not silent)"; break; }
   N=$((N + 1))
   # Collision-resistant per-input key: the walk admits subdirectories, so two corpus
-  # files may share a basename (a/foo.owl vs b/foo.owl). Every derived artifact —
-  # converted NT, riot stderr, raw per-engine .out, envelope filename — is keyed by
-  # the corpus-RELATIVE path plus a 12-hex SHA-256 prefix of the file content, so the
-  # [ -f "$NT" ] conversion cache can only ever hit for byte-identical content at the
-  # same relative path, and no later row can overwrite an earlier one.
+  # files may share a basename (a/foo.owl vs b/foo.owl), and the human-readable stem is
+  # produced by a LOSSY sanitization (tr) that can ALIAS distinct paths — a/foo.owl and
+  # a_foo.owl both sanitize to "a_foo". So the key does NOT rely on the sanitized stem
+  # for uniqueness: it binds a 12-hex SHA-256 prefix of the corpus-RELATIVE PATH AND a
+  # 12-hex SHA-256 prefix of the file CONTENT (the sanitized stem is a readable label
+  # only). Every derived artifact — converted NT, riot stderr, raw per-engine .out,
+  # envelope filename — carries this key, so the [ -f "$NT" ] conversion cache can only
+  # ever hit for byte-identical content at the SAME relative path, and no later row can
+  # overwrite an earlier one (even when two distinct paths sanitize to the same stem).
   REL="${OWL#"$CORPUS_ROOT"/}"
   OWL_SHA="$(sha256sum "$OWL" | cut -d' ' -f1)"
-  KEY="$(printf '%s' "${REL%.*}" | tr -c 'A-Za-z0-9._-' '_')-${OWL_SHA:0:12}"
+  REL_SHA="$(printf '%s' "$REL" | sha256sum | cut -d' ' -f1)"
+  KEY="$(printf '%s' "${REL%.*}" | tr -c 'A-Za-z0-9._-' '_')-p${REL_SHA:0:12}-${OWL_SHA:0:12}"
   log "=== ontology $N: $REL ==="
 
   # -- 1a. sparq: verdict (+ profile row) printed BEFORE timing -----------------

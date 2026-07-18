@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# [FABLE-5] Hermetic self-test for scripts/bench/reason-dl-same-box.sh per-input
+# [SONNET-4.6] Hermetic self-test for scripts/bench/reason-dl-same-box.sh per-input
 # keying (PR #3479 review): the corpus walk admits subdirectories, so two corpus
-# files may share a basename (a/foo.owl vs b/foo.owl). Every derived artifact —
-# converted NT, raw per-engine output, envelope filename — must be keyed by the
-# corpus-relative path + a content-SHA prefix, so:
+# files may share a basename (a/foo.owl vs b/foo.owl), AND the lossy sanitized stem can
+# alias distinct paths (a/foo.owl and a_foo.owl both sanitize to "a_foo") — so a purely
+# content-SHA'd, stem-based key collides for byte-identical inputs. Every derived artifact —
+# converted NT, raw per-engine output, envelope filename — must be keyed by the exact
+# corpus-relative path (path-SHA) + a content-SHA prefix, so:
 #   1. each same-basename ontology is CONVERTED INDEPENDENTLY (no [ -f "$NT" ]
 #      cache hit on a stale basename-derived path), and
 #   2. each produces a DISTINCT envelope whose ontology_sha256 is the SHA-256 of
@@ -37,7 +39,7 @@ REPO="${SANDBOX}/repo"
 BIN="${SANDBOX}/bin"
 CORPUS="${SANDBOX}/corpus"
 mkdir -p "${REPO}/scripts/bench" "${REPO}/target/release/examples" "$BIN" \
-  "${SANDBOX}/jena/bin" "${CORPUS}/a" "${CORPUS}/b"
+  "${SANDBOX}/jena/bin" "${CORPUS}/a" "${CORPUS}/b" "${CORPUS}/x"
 cp "$SRC" "${REPO}/scripts/bench/reason-dl-same-box.sh"
 
 # No-op cargo stub — the full-mode `cargo build` must not touch the real workspace.
@@ -69,6 +71,16 @@ printf '<urn:b> <urn:p> <urn:ob> .\n' > "${CORPUS}/b/foo.owl"
 SHA_A="$(sha256sum "${CORPUS}/a/foo.owl" | cut -d' ' -f1)"
 SHA_B="$(sha256sum "${CORPUS}/b/foo.owl" | cut -d' ' -f1)"
 
+# Two DISTINCT paths whose LOSSY sanitized stems COLLIDE (x/bar.owl and x_bar.owl both
+# sanitize to "x_bar") AND whose contents are BYTE-IDENTICAL (so the content-SHA suffix
+# alone cannot tell them apart). Only a path-bound key keeps them distinct — this is the
+# regression the sanitized-stem key silently dropped.
+printf '<urn:same> <urn:p> <urn:o> .\n' > "${CORPUS}/x/bar.owl"
+printf '<urn:same> <urn:p> <urn:o> .\n' > "${CORPUS}/x_bar.owl"
+SHA_XSUB="$(sha256sum "${CORPUS}/x/bar.owl" | cut -d' ' -f1)"
+SHA_XTOP="$(sha256sum "${CORPUS}/x_bar.owl" | cut -d' ' -f1)"
+[ "$SHA_XSUB" = "$SHA_XTOP" ] || { echo "FATAL: collision fixtures must have identical content"; exit 2; }
+
 OUT_DIR="${SANDBOX}/out"
 GATHER="${SANDBOX}/gather"
 if ! PATH="${BIN}:${PATH}" \
@@ -84,23 +96,24 @@ fi
 # 1. INDEPENDENT CONVERSION — riot invoked once per input, on BOTH files (the
 #    second same-basename file must not reuse the first file's cached NT).
 # --------------------------------------------------------------------------- #
-if [ "$(wc -l < "$RIOT_LOG")" -eq 2 ]; then note_pass; else
-  note_fail "riot invoked $(wc -l < "$RIOT_LOG") time(s), wanted 2 (cache collision reused a conversion)"; fi
-if grep -qx "${CORPUS}/a/foo.owl" "$RIOT_LOG" && grep -qx "${CORPUS}/b/foo.owl" "$RIOT_LOG"; then
+if [ "$(wc -l < "$RIOT_LOG")" -eq 4 ]; then note_pass; else
+  note_fail "riot invoked $(wc -l < "$RIOT_LOG") time(s), wanted 4 (cache collision reused a conversion)"; fi
+if grep -qx "${CORPUS}/a/foo.owl" "$RIOT_LOG" && grep -qx "${CORPUS}/b/foo.owl" "$RIOT_LOG" \
+   && grep -qx "${CORPUS}/x/bar.owl" "$RIOT_LOG" && grep -qx "${CORPUS}/x_bar.owl" "$RIOT_LOG"; then
   note_pass
 else
-  note_fail "riot did not convert both same-basename inputs (log: $(tr '\n' ' ' < "$RIOT_LOG"))"
+  note_fail "riot did not convert all four inputs incl. the stem-collision pair (log: $(tr '\n' ' ' < "$RIOT_LOG"))"
 fi
-if [ "$(find "$GATHER" -name '*.nt' | wc -l)" -eq 2 ]; then note_pass; else
-  note_fail "expected 2 distinct converted .nt files in GATHER, found $(find "$GATHER" -name '*.nt' | wc -l)"; fi
+if [ "$(find "$GATHER" -name '*.nt' | wc -l)" -eq 4 ]; then note_pass; else
+  note_fail "expected 4 distinct converted .nt files in GATHER, found $(find "$GATHER" -name '*.nt' | wc -l)"; fi
 
 # --------------------------------------------------------------------------- #
 # 2. DISTINCT ENVELOPES — one per input (a name collision would overwrite,
 #    leaving only one file), each tied to ITS OWN source SHA-256.
 # --------------------------------------------------------------------------- #
 ENV_COUNT="$(find "$OUT_DIR" -name '*.json' | wc -l)"
-if [ "$ENV_COUNT" -eq 2 ]; then note_pass; else
-  note_fail "expected 2 envelopes, found ${ENV_COUNT} (name collision overwrote a row?)"; fi
+if [ "$ENV_COUNT" -eq 4 ]; then note_pass; else
+  note_fail "expected 4 envelopes, found ${ENV_COUNT} (name collision overwrote a row?)"; fi
 
 check_envelope() {  # check_envelope <corpus-relative ontology> <expected sha256>
   OUT_DIR="$OUT_DIR" WANT_ONT="$1" WANT_SHA="$2" python3 - <<'PYEOF'
@@ -115,7 +128,10 @@ for path in glob.glob(os.path.join(os.environ["OUT_DIR"], "*.json")):
 sys.exit(2)
 PYEOF
 }
-for pair in "a/foo.owl:$SHA_A" "b/foo.owl:$SHA_B"; do
+# The last two pairs are the sanitize-collision case: distinct relative paths but
+# byte-identical content, so each envelope must be identified by its OWN relative path
+# (not merged) even though they share ontology_sha256.
+for pair in "a/foo.owl:$SHA_A" "b/foo.owl:$SHA_B" "x/bar.owl:$SHA_XSUB" "x_bar.owl:$SHA_XTOP"; do
   ont="${pair%%:*}"; sha="${pair##*:}"
   set +e; check_envelope "$ont" "$sha"; rc=$?; set -e
   case "$rc" in
