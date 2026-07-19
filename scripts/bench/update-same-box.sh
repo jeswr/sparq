@@ -252,6 +252,7 @@ fi
 # ---- 5. Run the workload through compare.py ----------------------------------
 COMPARE_JSON="${TMP}/compare-out.json"
 COMPARE_LOG="${TMP}/compare.log"
+COMPARE_EXIT=0
 
 if [[ "${#COMPARE_ARGS[@]}" -gt 0 ]]; then
   if [[ "${SPARQ_STATUS}" != "ok" ]]; then
@@ -260,15 +261,24 @@ if [[ "${#COMPARE_ARGS[@]}" -gt 0 ]]; then
     COMPARE_ARGS+=(--sparq "")
   fi
   log "running compare.py: iters=${ITERS}, engines=[${COMPARE_ARGS[*]}]"
-  if ! timeout "${TIMEOUT_S}" \
+  set +e
+  timeout "${TIMEOUT_S}" \
       python3 "${ROOT}/bench/pss-update-set/compare.py" \
       "${ITERS}" "${COMPARE_ARGS[@]}" \
       --json-out "${COMPARE_JSON}" \
-      > "${COMPARE_LOG}" 2>&1; then
+      > "${COMPARE_LOG}" 2>&1
+  COMPARE_EXIT=$?
+  set -e
+  if [[ "${COMPARE_EXIT}" -ne 0 ]]; then
     log "compare.py exited non-zero or timed out (see ${COMPARE_LOG})"
-    # write a minimal stub so the envelope assembly succeeds
-    printf '{"latency_ms":{},"throughput_s":{},"state_count":{},"state_agree":null,"parity_gate":"error","parity_note":"compare.py failed"}\n' \
-      > "${COMPARE_JSON}"
+    # [SONNET-4.6] A parity-gate failure is measured output: compare.py writes its
+    # complete JSON summary before exiting non-zero. Preserve that summary and use
+    # the stub only for a crash/timeout that left no valid machine-readable result.
+    if ! python3 -c 'import json, sys; json.load(open(sys.argv[1], encoding="utf-8"))' \
+        "${COMPARE_JSON}" >/dev/null 2>&1; then
+      printf '{"latency_ms":{},"throughput_s":{},"state_count":{},"state_agree":null,"parity_gate":"error","parity_note":"compare.py failed"}\n' \
+        > "${COMPARE_JSON}"
+    fi
   fi
   cat "${COMPARE_LOG}" >&2
 else
@@ -405,3 +415,4 @@ print(out_path)
 PYEOF
 
 log "envelope: ${OUT}"
+exit "${COMPARE_EXIT}"
