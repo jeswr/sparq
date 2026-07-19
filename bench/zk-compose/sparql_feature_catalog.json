@@ -7,9 +7,9 @@
   "high_gate_threshold": 17416,
   "summary": {
     "total_queries": 26,
-    "covered": 15,
+    "covered": 14,
     "partial": 4,
-    "gaps": 7,
+    "gaps": 8,
     "high_gate_flagged": [
       "Q01_bgp_single_pattern",
       "Q02_bgp_multi_pattern",
@@ -282,27 +282,11 @@
     "Q16_path_zero_or_one": {
       "feature": "Property path ? (zero-or-one)",
       "sparql": "SELECT ?o WHERE { ?s :p? ?o }",
-      "zk_members": [
-        "path_reach_d2_k1_n16",
-        "path_reach_d4_k1_n16",
-        "path_reach_d4_k2_n16",
-        "path_reach_d8_k1_n16"
-      ],
-      "circuit_size": 8322,
-      "status": "covered",
-      "flag": null,
-      "bounded": true,
-      "circuit_size_per_member": {
-        "path_reach_d2_k1_n16": 5156,
-        "path_reach_d4_k1_n16": 5497,
-        "path_reach_d4_k2_n16": 8322,
-        "path_reach_d8_k1_n16": 6180
-      },
-      "circuit_size_range": [
-        5156,
-        8322
-      ],
-      "note": "ACCEPTED by the fragment gate; maps to the bounded path_reach family (opt-in `extended-fragment`). p? is pinned to depth bound 1 (PathClosure::fixed_k) with the zero-length case (endpoint equality + an occurrence witness). EXISTENCE-ONLY bounded statement (design \u00a74); internally re-audited, external cryptographer sign-off pending (sq-qhy4) \u2014 NOT a proven soundness claim."
+      "zk_members": [],
+      "circuit_size": null,
+      "status": "NO ZK CIRCUIT YET (gap)",
+      "flag": "NO_ZK_CIRCUIT_YET",
+      "note": "ACCEPTED by the fragment gate, but NO compiled member proves it today, so it is not covered. p? has a FIXED depth bound of 1 (PathClosure::ZeroOrOne.fixed_k() == 1), and the dispatcher rejects any bound member whose d != 1 (FragmentDispatchError::PathDepthExceedsClosure) so a deeper chain cannot masquerade as p?. Every compiled path_reach member is d>=2 ((2,1,16),(4,1,16),(4,2,16),(8,1,16)) \u2014 there is no d=1 member \u2014 so an accepted p? query can bind none of them. Needs a snapshotted d=1 path_reach member before it can be covered; p+/p* (Q17/Q18) are unaffected because their closures have no fixed depth (fixed_k() == None)."
     },
     "Q17_path_one_or_more": {
       "feature": "Property path + (one-or-more, transitive closure)",

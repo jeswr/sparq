@@ -290,20 +290,18 @@ fn catalog_spans_required_features() {
         );
     }
 
-    // The property-path closures (?/+/*) are now ACCEPTED by the extended
+    // The UNBOUNDED-depth closures `+`/`*` are now ACCEPTED by the extended
     // fragment gate (fragment_query) and dispatch to the bounded
     // `path_reach_d{d}_k{k}_n{n}` family (sq-3kd2g.6, opt-in `extended-fragment`).
     // They are covered ONLY in the BOUNDED, existence-only sense (design §4: the
     // depth bound is a public input) — so each must be `covered`, carry the
     // `bounded` honesty flag, and name only `path_reach_*` members joined from the
-    // regression-gated snapshot. This is the anti-drift guard for the flip side of
-    // §1's Q13/Q14 finding: a closure must never be labelled a flat unbounded
-    // `covered`, nor left a stale GAP now that the gate accepts it.
-    for id in [
-        "Q16_path_zero_or_one",
-        "Q17_path_one_or_more",
-        "Q18_path_zero_or_more",
-    ] {
+    // regression-gated snapshot. Their closures have NO fixed depth
+    // (`PathClosure::{OneOrMore,ZeroOrMore}.fixed_k() == None`), so any compiled
+    // `d>=2` member satisfies the dispatcher. This is the anti-drift guard for the
+    // flip side of §1's Q13/Q14 finding: a closure must never be labelled a flat
+    // unbounded `covered`, nor left a stale GAP now that the gate accepts it.
+    for id in ["Q17_path_one_or_more", "Q18_path_zero_or_more"] {
         let q = &catalog.queries[id];
         assert!(
             q.is_covered(),
@@ -322,6 +320,35 @@ fn catalog_spans_required_features() {
             "{id}: bounded path closure must name only path_reach_* members, found {:?}",
             q.zk_members
         );
+    }
+
+    // `p?` (Q16, ZeroOrOne) is a FIXED-depth closure: the dispatcher pins it to
+    // depth bound 1 (`PathClosure::ZeroOrOne.fixed_k() == 1`) and rejects any bound
+    // member whose `d != 1` (`FragmentDispatchError::PathDepthExceedsClosure`) so a
+    // deeper chain cannot masquerade as `p?`. Every compiled `path_reach` member is
+    // `d>=2` — there is NO `d=1` member — so an accepted `p?` query can bind none of
+    // them and it is NOT covered today. It stays an honest GAP until a `d=1` member
+    // is compiled and snapshotted. The invariant this pins: `p?` may be marked
+    // covered ONLY if it names a `path_reach_d1_*` member (guarding against a
+    // regression that re-lists the deeper members and re-claims coverage).
+    {
+        let q = &catalog.queries["Q16_path_zero_or_one"];
+        if q.is_covered() {
+            assert!(
+                q.zk_members.iter().any(|m| m.starts_with("path_reach_d1_")),
+                "Q16 (p?) is a fixed depth-1 closure: it may be `covered` only when it \
+                 names a d=1 member (path_reach_d1_*), else the dispatcher rejects every \
+                 listed member as PathDepthExceedsClosure. Found {:?}",
+                q.zk_members
+            );
+        } else {
+            assert!(
+                q.is_gap() && q.zk_members.is_empty(),
+                "Q16 (p?): with no compiled d=1 member it must be an honest GAP with no \
+                 listed members, found status/members {:?}",
+                q.zk_members
+            );
+        }
     }
 
     // The constructs the gate REJECTS fail-closed (OUT-by-design or not-yet-built)

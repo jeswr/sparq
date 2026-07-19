@@ -255,10 +255,9 @@ CATALOG: list[dict] = [
         "id": "Q16_path_zero_or_one",
         "feature": "Property path ? (zero-or-one)",
         "sparql": "SELECT ?o WHERE { ?s :p? ?o }",
-        "zk_members": PATH_REACH_MEMBERS,
-        "status": STATUS_COVERED,
-        "bounded": True,
-        "note": "ACCEPTED by the fragment gate; maps to the bounded path_reach family (opt-in `extended-fragment`). p? is pinned to depth bound 1 (PathClosure::fixed_k) with the zero-length case (endpoint equality + an occurrence witness). EXISTENCE-ONLY bounded statement (design §4); internally re-audited, external cryptographer sign-off pending (sq-qhy4) — NOT a proven soundness claim.",
+        "zk_members": [],
+        "status": STATUS_GAP,
+        "note": "ACCEPTED by the fragment gate, but NO compiled member proves it today, so it is not covered. p? has a FIXED depth bound of 1 (PathClosure::ZeroOrOne.fixed_k() == 1), and the dispatcher rejects any bound member whose d != 1 (FragmentDispatchError::PathDepthExceedsClosure) so a deeper chain cannot masquerade as p?. Every compiled path_reach member is d>=2 ((2,1,16),(4,1,16),(4,2,16),(8,1,16)) — there is no d=1 member — so an accepted p? query can bind none of them. Needs a snapshotted d=1 path_reach member before it can be covered; p+/p* (Q17/Q18) are unaffected because their closures have no fixed depth (fixed_k() == None).",
     },
     {
         "id": "Q17_path_one_or_more",
