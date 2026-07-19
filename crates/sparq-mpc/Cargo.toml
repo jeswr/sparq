@@ -43,6 +43,18 @@ publish = false
 # The feature name is the warning: turning it on opts into insecure randomness.
 insecure-test-rng = []
 
+# [OPUS-4.8] sq-dz10l (Phase 6; epic sq-0dksu): the per-protocol
+# security-properties annotation graph (`secprop` module) — the machine-readable,
+# honest encoding of "sparq-mpc is semi-honest only" (design record
+# research/security-properties-ontology-design.md §5c). OFF by default: a normal
+# `sparq-mpc` build is byte-unchanged and the `secprop` module is compiled out.
+# Pulls in the `oxttl` Turtle parser (the same one the rest of the workspace uses)
+# ONLY when enabled. The `secx:` vocabulary is owned by sparq-trust; sparq-mpc does
+# NOT depend on it (the module declares the IRIs locally and pins them to the
+# canonical `secprop-ext.ttl` via `include_str!` — a compile-time read, not a
+# crate edge).
+secprop-annotations = ["dep:oxttl"]
+
 [dependencies]
 # The single-holder query engine. The MPC layer's whole point is to MINIMISE
 # data sharing: each holder evaluates a query fragment over ITS OWN graphs
@@ -95,3 +107,10 @@ subtle = "2"
 # fold into the 61-bit Mersenne field. Pinned to the same 0.11 line sparq-engine
 # uses so the workspace resolves a single `sha2`/`digest` version.
 sha2 = "0.11"
+
+# [OPUS-4.8] sq-dz10l — OPTIONAL, `secprop-annotations` feature only. The oxigraph
+# Turtle parser used to read the per-protocol annotation graph
+# (`ontologies/secprop-mpc.ttl`). Same `oxttl` the rest of the workspace uses; a
+# default `sparq-mpc` build (feature off) does not compile it, so the crate's
+# native-only / lean-default posture is intact.
+oxttl = { workspace = true, optional = true }

@@ -1,0 +1,155 @@
+# secprop-mpc.ttl — the sparq-mpc PER-PROTOCOL security-properties annotation graph.
+#
+# [OPUS-4.8] sq-dz10l (Phase 6; epic sq-0dksu; design record
+# research/security-properties-ontology-design.md §5c). 🤖 SPARQ agent —
+# security-properties ontology. Written while Fable unavailable; flag for
+# re-review when Fable returns.
+#
+# WHAT THIS IS. The machine-readable, honest encoding of "sparq-mpc is
+# semi-honest only" — the §5c analogue of the sparq-zk per-method graph
+# (crates/sparq-zk/ontologies/secprop-methods.ttl, Phase 3). Each sparq-mpc
+# PROTOCOL is a subject under the minted `mpc:` namespace
+# (https://sparq.dev/ns/mpc#, mirroring `zk:`), and each `secx:hasProperty` is a
+# reified (property, level, assurance, audit-status, assumption) claim expressed
+# with the `secx:` extension vocabulary
+# (crates/sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl, Phase 1). The
+# LOAD-BEARING encoding is the `secx:assumption` axis: the honest-majority /
+# semi-honest preconditions are recorded IN THE DATA, so an ODRL preference that
+# forbids reliance on `secx:SemiHonest` (i.e. requires malicious-security) or on
+# `secx:HonestMajority` (i.e. requires dishonest-majority tolerance) mechanically
+# EXCLUDES the matching protocols via the Phase 2/5 admissibility ruleset — not
+# just in prose (design §5c, §7.5).
+#
+# WHAT IT IS NOT. It RECORDS claims + their epistemic basis; it is NOT a proof of
+# any property. sparq-mpc's cryptography is research-grade and NOT externally
+# audited (bead sq-qhy4; CR-G1/CR-G4 of compliance/cryptoreview/gap-register.md),
+# and it is NOT FIPS-validated (no FIPS/CMVP claim; compliance/cryptoreview/
+# fips-posture.md). Every POSITIVE soundness claim here is therefore
+# `secx:Claimed` + `secx:ExternalSignOffPending` — never `secx:Proven` — exactly
+# the §5a honesty rule the sparq-zk graph follows.
+#
+# THE TWO-SIDED ASSUMPTION ENCODING (the honesty mechanism).
+#   1. EVERY sparq-mpc protocol assumes an HONEST MAJORITY. v1 is honest-majority
+#      by design (backend.rs: Q2 resolved = honest-majority; the Shamir
+#      `t = ⌊(n-1)/2⌋` threshold, and the malicious twins need `n >= 2t+1`). So
+#      every block carries `secx:assumption secx:HonestMajority`. A preference
+#      requiring security under a DISHONEST majority (up to n-1 corruptions)
+#      forbids that assumption and excludes the WHOLE estate — honest: sparq-mpc
+#      has no dishonest-majority backend (backend.rs stubs it as a different
+#      construction).
+#   2. The SEMI-HONEST protocols additionally carry `secx:assumption
+#      secx:SemiHonest`. These are the ones whose `SecurityDescriptor.adversary`
+#      is `AdversaryModel::SemiHonest` — pinned to the crate's own per-operator
+#      descriptor by the `semi_honest_annotation_matches_backend_descriptor` test
+#      in crates/sparq-mpc/src/secprop.rs so the annotation cannot silently
+#      over-claim malicious security. The MALICIOUS-with-abort twins
+#      (`crate::auth_compare`, `crate::auth_disclose`) do NOT carry
+#      `secx:SemiHonest`: a "requires malicious-security" preference forbids
+#      `secx:SemiHonest` and excludes the semi-honest set while ADMITTING the
+#      malicious twins — the honest binary the assumption axis encodes.
+#
+# COMPLETENESS. Every protocol IRI the Rust `secprop` module declares
+# (`MPC_PROTOCOL_IRIS`) has an annotation block here — the machine-readable
+# analogue of the sparq-zk "every production-selectable scheme has a block" gate
+# (enforced by `completeness_violations`).
+
+@prefix mpc:  <https://sparq.dev/ns/mpc#> .
+@prefix secx: <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+# ════════════════════════════════════════════════════════════════════════════
+# SEMI-HONEST, honest-majority protocols — carry BOTH secx:HonestMajority AND
+# secx:SemiHonest. `SecurityDescriptor.adversary == AdversaryModel::SemiHonest`
+# for each (the RS-redundancy robustness the aggregate carries is on the OUTPUT-
+# GUARANTEE axis, NOT the adversary axis — backend.rs `shamir_degree_recon`
+# still reports a SEMI-HONEST adversary), so labelling them semi-honest is the
+# honest read of the crate's own descriptor.
+# ════════════════════════════════════════════════════════════════════════════
+
+# mpc:secure-aggregate-v1 — the secure cumulative-sum aggregate (SUM/COUNT):
+# free local degree-`t` share-addition, reconstructed once
+# (OperatorClass::LinearAggregate; crate::shamir). Semi-honest among cooperating
+# holders; the RS-checked reconstruct adds a detect/correct OUTPUT guarantee but
+# does not change the adversary model (backend.rs).
+mpc:secure-aggregate-v1
+  rdfs:comment "Honest-majority Shamir secure cumulative-sum aggregate (SUM/COUNT). Semi-honest adversary model (OperatorClass::LinearAggregate)."@en-GB ;
+  secx:hasProperty
+    [ secx:property secx:Soundness ; secx:level secx:Sound ;
+      secx:assurance secx:Claimed ; secx:auditStatus secx:ExternalSignOffPending ;
+      secx:assumption secx:HonestMajority , secx:SemiHonest ;
+      secx:auditEvidence <https://github.com/jeswr/sparq/blob/main/compliance/cryptoreview/gap-register.md> ] .
+
+# mpc:hidden-value-join-v1 — the hidden-value join over a PRIVATE key via the
+# secret-shared equality test: opens a degree-`2t` product
+# (OperatorClass::EqualityJoin; crate::join::HiddenValueJoin). At the
+# honest-majority `n = 2t+1` the degree-`2t` open has ZERO RS redundancy, so it
+# is semi-honest-only there (backend.rs).
+mpc:hidden-value-join-v1
+  rdfs:comment "Honest-majority hidden-value equi-join over a private key via secret-shared equality. Semi-honest adversary model (OperatorClass::EqualityJoin)."@en-GB ;
+  secx:hasProperty
+    [ secx:property secx:Soundness ; secx:level secx:Sound ;
+      secx:assurance secx:Claimed ; secx:auditStatus secx:ExternalSignOffPending ;
+      secx:assumption secx:HonestMajority , secx:SemiHonest ;
+      secx:auditEvidence <https://github.com/jeswr/sparq/blob/main/compliance/cryptoreview/gap-register.md> ] .
+
+# mpc:secure-comparison-v1 — the secret-shared greater-than / threshold that
+# opens ONLY the verdict bit (OperatorClass::Comparison; crate::compare). The
+# per-step degree reduction re-shares with no in-protocol integrity check, so
+# the WHOLE chain is honest-majority semi-honest-only (backend.rs, shamir.rs:
+# operator_descriptor Comparison arm).
+mpc:secure-comparison-v1
+  rdfs:comment "Honest-majority secret-shared greater-than / threshold, verdict-only disclosure. Semi-honest adversary model (OperatorClass::Comparison)."@en-GB ;
+  secx:hasProperty
+    [ secx:property secx:Soundness ; secx:level secx:Sound ;
+      secx:assurance secx:Claimed ; secx:auditStatus secx:ExternalSignOffPending ;
+      secx:assumption secx:HonestMajority , secx:SemiHonest ;
+      secx:auditEvidence <https://github.com/jeswr/sparq/blob/main/compliance/cryptoreview/gap-register.md> ] .
+
+# mpc:hidden-property-path-v1 — the HIDDEN-intermediate fixed exactly-`k`
+# property-path chain (crate::hidden_path): each hop is a never-opened
+# secret-shared `secure_equal_to_bit`, the `k` hops AND-chained via
+# `mul_shares_raw` + `degree_reduce`. It reduces to the same semi-honest
+# secret-shared equality primitive as the hidden-value join, so it is
+# honest-majority semi-honest-only (module docs).
+mpc:hidden-property-path-v1
+  rdfs:comment "Honest-majority hidden-intermediate exactly-k property-path chain over secret-shared equality. Semi-honest adversary model (reduces to the crate::compare / EqualityJoin equality primitive)."@en-GB ;
+  secx:hasProperty
+    [ secx:property secx:Soundness ; secx:level secx:Sound ;
+      secx:assurance secx:Claimed ; secx:auditStatus secx:ExternalSignOffPending ;
+      secx:assumption secx:HonestMajority , secx:SemiHonest ;
+      secx:auditEvidence <https://github.com/jeswr/sparq/blob/main/compliance/cryptoreview/gap-register.md> ] .
+
+# ════════════════════════════════════════════════════════════════════════════
+# MALICIOUS-with-abort, honest-majority protocols — carry secx:HonestMajority
+# but DELIBERATELY NOT secx:SemiHonest. `SecurityDescriptor.adversary ==
+# AdversaryModel::Malicious` (an IT-MAC is carried through the whole chain and
+# MAC-checked before any open, so a tamper aborts fail-closed). Present so the
+# graph is HONEST that not all of sparq-mpc is semi-honest, and so the exclusion
+# test has a positive control: a "requires malicious-security" preference
+# (forbid secx:SemiHonest) must ADMIT these while excluding the semi-honest set.
+# ════════════════════════════════════════════════════════════════════════════
+
+# mpc:auth-comparison-v1 — the malicious-secure (honest-majority, with-abort)
+# twin of the secure comparison: IT-MAC-carried decompose+compare chain, verdict
+# MAC-checked BEFORE it is opened (crate::auth_compare::malicious_greater_than /
+# malicious_threshold). Needs `n >= 2t+1` (honest majority).
+mpc:auth-comparison-v1
+  rdfs:comment "Honest-majority MALICIOUS-with-abort secure comparison (IT-MAC-carried, verdict MAC-checked before open). NOT semi-honest (crate::auth_compare)."@en-GB ;
+  secx:hasProperty
+    [ secx:property secx:Soundness ; secx:level secx:Sound ;
+      secx:assurance secx:Claimed ; secx:auditStatus secx:ExternalSignOffPending ;
+      secx:assumption secx:HonestMajority ;
+      secx:auditEvidence <https://github.com/jeswr/sparq/blob/main/compliance/cryptoreview/gap-register.md> ] .
+
+# mpc:auth-disclose-v1 — the malicious-secure (honest-majority, with-abort)
+# threshold disclosure over an EXISTING secret-shared sum: the three
+# decomposition opens (a², c = sum + r, verdict) are each routed through the
+# batched IT-MAC check, so a tamper on any aborts fail-closed
+# (crate::auth_disclose::malicious_disclose_threshold_verdict). Needs `n >= 2t+1`.
+mpc:auth-disclose-v1
+  rdfs:comment "Honest-majority MALICIOUS-with-abort threshold disclosure over an existing secret-shared sum (all three decomposition opens MAC-checked). NOT semi-honest (crate::auth_disclose)."@en-GB ;
+  secx:hasProperty
+    [ secx:property secx:Soundness ; secx:level secx:Sound ;
+      secx:assurance secx:Claimed ; secx:auditStatus secx:ExternalSignOffPending ;
+      secx:assumption secx:HonestMajority ;
+      secx:auditEvidence <https://github.com/jeswr/sparq/blob/main/compliance/cryptoreview/gap-register.md> ] .

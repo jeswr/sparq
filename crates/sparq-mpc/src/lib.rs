@@ -220,6 +220,14 @@ pub mod randomness;
 // shares when redundancy is present. Closes malicious-security gap (D) at the
 // Shamir layer (parent bead sq-uu0u). See the module docs for the threat model.
 pub mod robust;
+// [OPUS-4.8] sq-dz10l (Phase 6; epic sq-0dksu): the per-protocol
+// security-properties annotation graph — the machine-readable, honest encoding of
+// "sparq-mpc is semi-honest only" (design record
+// research/security-properties-ontology-design.md §5c). Behind the default-OFF
+// `secprop-annotations` cargo feature so the lean default build is byte-unchanged
+// and the module (plus its `oxttl` dep) is compiled out. See the module docs.
+#[cfg(feature = "secprop-annotations")]
+pub mod secprop;
 pub mod shamir;
 // [OPUS-4.8] sq-18lk: oblivious shuffle (Waksman/Benes net) + sort (Batcher
 // odd-even mergesort) substrate over Shamir Fp — the keystone hidden-regime primitive
