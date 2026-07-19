@@ -1,0 +1,66 @@
+# [SONNET-4.6] sq-qcnn.30 — bounded mutation feedback for code changed by a PR.
+# This workflow is deliberately separate from ci.yml. Its job NAME contains the whole
+# word "advisory", so ci-summary excludes it, and both job/step failure are tolerated.
+name: Changed-code mutation review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "**/*.rs"
+      - "**/Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/mutants-diff.yml"
+      - "scripts/mutants-diff.sh"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutants-diff-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  mutants-diff:
+    name: changed-code mutation review (advisory)
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 45
+    env:
+      # These are workload limits, not performance claims. The first deterministic
+      # shard contains no more than this many in-diff mutants; each mutant test run
+      # has the timeout below, and the job wall clock is bounded above as well.
+      MUTANTS_DIFF_CAP: 12
+      MUTANTS_DIFF_TIMEOUT_SECONDS: 120
+    steps:
+      - name: Check out the PR head and merge-base history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@v2
+      - name: Install pinned cargo-mutants
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853
+        with:
+          # 25.3.1 supports --in-diff (available since 23.11.1).
+          tool: cargo-mutants@25.3.1
+      - name: Build PR merge-base diff
+        run: |
+          base=$(git merge-base "${{ github.event.pull_request.base.sha }}" HEAD)
+          git diff --find-renames "$base" HEAD -- '*.rs' > mutants-pr.diff
+      - name: Run bounded in-diff mutants (advisory)
+        id: mutants
+        continue-on-error: true
+        run: ./scripts/mutants-diff.sh mutants-pr.diff
+      - name: Preserve mutation details
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-diff-${{ github.event.pull_request.number }}
+          path: mutants.out/
+          if-no-files-found: ignore
+          retention-days: 7

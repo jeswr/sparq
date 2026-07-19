@@ -1,6 +1,12 @@
 {
  "_doc": "Advisory-job registry (sq-qcnn.32). [SONNET-4.6] Every job whose NAME matches the ci-summary exclusion pattern \\b(advisory|informational)\\b must have an entry here with {owner_bead, promotion_criteria, registered}. A job that intentionally runs a gate-classified script (scripts/*gate*.py) must also carry gate_script_waiver. Maintained by check-advisory-registry.py (C2/C3). See scripts/check-advisory-registry.py for the enforcement rule.",
  "jobs": {
+  "changed-code mutation review (advisory)": {
+   "workflow": "mutants-diff.yml",
+   "owner_bead": "sq-qcnn.30",
+   "promotion_criteria": "promote only after the lane is stable across observed PRs, its runtime remains within the documented workload budget, and a reviewed allowlist mechanism exists for provably equivalent surviving mutants",
+   "registered": "2026-07-19"
+  },
   "secret-literal grep (advisory)": {
    "workflow": "deploy-terraform-lint.yml",
    "owner_bead": "sq-sos84",
