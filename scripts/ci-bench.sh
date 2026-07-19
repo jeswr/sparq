@@ -1062,10 +1062,10 @@ if rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; 
   fi
 fi
 
-# [OPUS-4.8] (sq-7d3dj.14) wasm_opt_bundle_bytes — TREND-ONLY shipped size after wasm-opt -Oz.
+# [SONNET-4.6] (sq-3ul2n.7) wasm_opt_bundle_bytes — TREND-ONLY main-bundle size after wasm-opt -O3.
 # The raw wasm_bundle_bytes above is the HARD-GATED deterministic ratchet (scripts/perf-gate.py,
-# 2% band). This companion series emits the post-wasm-opt -Oz size (the "shipped" artifact after
-# the same wasm-bindgen/wasm-opt pass that `wasm-pack build` runs for the published npm bundle).
+# 2% band). This companion series emits the post-wasm-opt -O3 size, matching the explicit
+# post-build optimization used for the published main npm bundle.
 # The ~10% gap between the two is name-section and producer metadata that browsers strip at load
 # time — real bundle-size wins from the optimisation program show up here while the raw gate stays
 # bit-identical. TREND-ONLY: scripts/perf-gate.py is intentionally UNTOUCHED. The wasm-opt version
@@ -1075,7 +1075,7 @@ if command -v wasm-opt >/dev/null 2>&1 && [ -n "${WASM_BIN:-}" ] && [ -f "${WASM
   WASM_OPT_VER="$(wasm-opt --version 2>&1 | head -1 || echo 'unknown')"
   echo "note: wasm-opt version for wasm_opt_bundle_bytes: $WASM_OPT_VER" >&2
   WASM_OPT_OUT="$TMP/opt.wasm"
-  if wasm-opt -Oz --strip-debug --strip-producers "$WASM_BIN" -o "$WASM_OPT_OUT" 2>/dev/null; then
+  if wasm-opt -O3 --strip-debug --strip-producers "$WASM_BIN" -o "$WASM_OPT_OUT" 2>/dev/null; then
     add wasm_opt_bundle_bytes bytes "$(wc -c < "$WASM_OPT_OUT" | tr -d ' ')"
   fi
 fi

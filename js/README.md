@@ -88,6 +88,14 @@ MiB, +~1.0 MiB / +85%, before gzip). If you do not need validation and bundle
 size matters, build the lean variant — `npm run build:wasm:lean` — which omits
 SHACL entirely (`SparqStore.validate` then throws a clear error if called).
 
+The build requires Binaryen's `wasm-opt` on `PATH`. It disables wasm-pack's
+implicit optimization and applies an explicit `-O3` pass to the main and lean
+engine bundles, where query execution is the priority. The independently built,
+lazy-loaded reason, RSP, SHACL, and text bundles use size-first `-Oz` instead;
+their download and compilation cost is paid when the corresponding surface is
+opened. These are post-build passes: the raw `wasm_bundle_bytes` Cargo-artifact
+ratchet remains unchanged.
+
 ## Usage
 
 ```js
