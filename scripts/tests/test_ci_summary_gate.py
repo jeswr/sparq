@@ -1337,5 +1337,93 @@ class TestFeatureMatrixReporterCorrelation(unittest.TestCase):
         self.assertIn("PASSED", out)
 
 
+# --- Fix round 3 (fable): latest-run-relative presence -------------------------
+# Same-SHA zero-leg rerun (ready_for_review / label) leaves an OLDER real group run's
+# check-runs on the commit alongside a NEWER zero-leg skeleton run. Keying presence
+# off ANY real group (the old run's) while keying the run id off the newer skeleton
+# deadlocked the gate: current_run_id = the skeleton's id, no report ever carries it
+# (zero-leg posts none), matched=[] => "pending" => timeout RED. FIX: presence AND the
+# reporter requirement are decided relative to the LATEST feature-matrix run.
+def _skel(run_id="", conclusion="skipped"):
+    """The zero-leg skeleton check-run (unexpanded placeholder + server-set skipped),
+    optionally carrying its own run id url (it is a check-run of that run)."""
+    url = f"https://github.com/o/r/actions/runs/{run_id}/job/1" if run_id else ""
+    return R("opt-in group (${{ matrix.group }})", conclusion=conclusion, url=url)
+
+
+class TestLatestRunRelativePresence(unittest.TestCase):
+    """[FABLE-5] fix round 3: a same-SHA zero-leg rerun must CONCLUDE (n/a), not
+    deadlock awaiting a reporter the zero-leg run correctly never posts."""
+
+    def test_a_mixed_old_real_plus_new_skeleton_is_na(self):
+        """(a) THE DEADLOCK: an OLD real group run (111) + its report(111) sit on the
+        SHA next to a NEWER zero-leg skeleton run (222). The latest run (222) is
+        zero-leg, so NO reporter is expected — the gate must conclude n/a, NOT await
+        run 222's absent report and time out RED."""
+        runs = [_grp("111"), _rep("111"), _skel("222")]
+        # current run id is the newer skeleton's (222) — the very shape that deadlocked.
+        self.assertEqual(g.fm_group_run_id(runs), "222")
+        self.assertEqual(g.fm_report_status(runs), "n/a")
+
+    def test_a_end_to_end_concludes_without_awaiting(self):
+        """(a) end-to-end: the mixed old-real + new-skeleton head PASSES immediately
+        (no reporter await), never RED-on-timeout."""
+        code, out = run(tiny_cfg(), [[_grp("111"), _rep("111"), _skel("222"), GREEN]])
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+        self.assertNotIn("reporter verdict never landed", out)
+
+    def test_b_old_skeleton_plus_new_real_awaits_new_reporter(self):
+        """(b) reversed order: an OLD zero-leg skeleton (111) sits next to the NEWER
+        real run (222). The latest run has real legs => require ITS reporter. Absent
+        => pending; present with external_id == 222 => ok; a stale-only 111 report
+        (there is none here) could never satisfy it."""
+        pending = [_skel("111"), _grp("222"), GREEN]
+        self.assertEqual(g.fm_group_run_id(pending), "222")
+        self.assertEqual(g.fm_report_status(pending), "pending")
+        ok = [_skel("111"), _grp("222"), _rep("222"), GREEN]
+        self.assertEqual(g.fm_report_status(ok), "ok")
+        # A report only for the OLD run id does NOT satisfy the latest real run.
+        stale_only = [_skel("111"), _grp("222"), _rep("111"), GREEN]
+        self.assertEqual(g.fm_report_status(stale_only), "pending")
+
+    def test_c_isolated_skeleton_is_na(self):
+        """(c) existing invariant preserved: an isolated zero-leg skeleton (with OR
+        without a locating url) requires no reporter."""
+        self.assertEqual(g.fm_report_status([_skel()]), "n/a")
+        self.assertEqual(g.fm_report_status([_skel("222")]), "n/a")
+
+    def test_d_forged_placeholder_success_is_latest_still_requires_reporter(self):
+        """(d) SECURITY (r2 carried forward): a REAL successful group whose PR-controlled
+        name embeds the `${{` placeholder counts as REAL for the run it belongs to. When
+        it is the LATEST run, the reporter is STILL required — it must not drop the
+        requirement by masquerading as the zero-leg skeleton (which needs a server-set
+        `skipped`, not `success`)."""
+        forged = R("opt-in group (g01 ${{ attacker)", conclusion="success",
+                   url="https://github.com/o/r/actions/runs/222/job/3")
+        self.assertTrue(g.is_real_fm_group(forged))
+        # Latest run 222 is this forged-but-real group => require reporter.
+        self.assertEqual(g.fm_report_status([forged, GREEN]), "pending")
+        # Its reporter, correlated to 222, satisfies it.
+        self.assertEqual(g.fm_report_status([forged, _rep("222"), GREEN]), "ok")
+        # A zero-leg skeleton on an OLDER run (111) does not drop the requirement.
+        self.assertEqual(g.fm_report_status([_skel("111"), forged, GREEN]), "pending")
+
+    def test_e_real_group_unparseable_url_fails_closed(self):
+        """(e) fail-closed semantics: a REAL group check with NO parseable run id means
+        real legs ran on a run we cannot identify — we must NOT declare the latest run
+        zero-leg. The reporter requirement is kept (degrading to any-report correlation),
+        never n/a. FM_GROUP has an empty url; alone it holds pending, and it must keep
+        the requirement even when a NEWER skeleton carries a parseable id."""
+        # Real group, no url => pending (require reporter), never n/a.
+        self.assertEqual(g.fm_report_status([FM_GROUP, GREEN]), "pending")
+        # A real-unparseable group is NOT masked away by a parseable skeleton: the
+        # skeleton (222) would otherwise be "the latest run" and look zero-leg, but the
+        # unparseable real leg forbids that n/a — fail closed to require the reporter.
+        self.assertEqual(g.fm_report_status([FM_GROUP, _skel("222"), GREEN]), "pending")
+        # With any legacy report present it degrades to any-report (never a false RED).
+        self.assertEqual(g.fm_report_status([FM_GROUP, FM_REPORT_OK, GREEN]), "ok")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

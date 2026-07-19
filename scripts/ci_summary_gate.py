@@ -476,24 +476,36 @@ def is_fm_report(name: str) -> bool:
     return name == FM_REPORT_NAME
 
 
+def fm_run_id_of(run: dict) -> str:
+    """The feature-matrix Actions run id a group check-run belongs to, parsed from
+    its `/actions/runs/<id>` url (details_url, else html_url). "" when the url has no
+    parseable run id (a group check that carries no locating url). Used to bucket
+    group checks by the run they belong to so presence and correlation are decided
+    relative to the LATEST run — including the zero-leg skeleton, which is itself a
+    check-run of that run and so carries its run id."""
+    url = run.get("details_url") or run.get("html_url") or ""
+    m = RUNS_URL_RE.search(url)
+    return m.group(1) if m else ""
+
+
 def fm_group_run_id(runs: list[dict]) -> str:
     """[FABLE-5] PR #3511 finding 2: the CURRENT feature-matrix run id, extracted as
     the MAXIMUM `/actions/runs/<id>` seen across the `opt-in group (…)` check-runs'
-    details_url. GitHub Actions run ids are monotonically ascending, so the max is the
-    LATEST feature-matrix run on this head — the one whose reporter verdict the gate
-    must await. (On a same-SHA rerun — ready_for_review / label — the commit carries
-    group check-runs from BOTH the stale and the fresh run; the fresh run's id is the
-    larger.) Returns "" if no group check carries a parseable run id (then the
-    correlation degrades to the pre-finding-2 any-report behaviour — never a false
-    RED, and the stale-report race is only reachable on a same-SHA rerun anyway)."""
+    details_url — name-only (is_fm_group), so the zero-leg skeleton (a check-run of
+    the current run) is INCLUDED. GitHub Actions run ids are monotonically ascending,
+    so the max is the LATEST feature-matrix run on this head — the one whose reporter
+    verdict the gate must await (or, when that run is zero-leg, the one that proves no
+    reporter is expected; see fm_report_status). On a same-SHA rerun (ready_for_review
+    / label) the commit carries group check-runs from BOTH the stale and the fresh run;
+    the fresh run's id is the larger. Returns "" if no group check carries a parseable
+    run id (then correlation degrades to the pre-finding-2 any-report behaviour — never
+    a false RED, and the stale-report race is only reachable on a same-SHA rerun)."""
     best = ""
     for r in runs:
         if not is_fm_group(r.get("name", "")):
             continue
-        url = r.get("details_url") or r.get("html_url") or ""
-        m = RUNS_URL_RE.search(url)
-        if m:
-            rid = m.group(1)
+        rid = fm_run_id_of(r)
+        if rid:
             # Numeric max (ids are ints of possibly-different width); compare as ints.
             if best == "" or int(rid) > int(best):
                 best = rid
@@ -505,10 +517,15 @@ def fm_report_status(runs: list[dict]) -> str:
     reporter-await status over the (already forgiveness-filtered, self-excluded)
     sibling set. Returns one of:
 
-      * "n/a"     — no `opt-in group (…)` check-run on this head, so the
-                    feature-matrix produced no legs for it and NO reporter is
-                    expected (a doc-only PR, a fully change-selected-out matrix,
-                    or a merge_group that skipped the lane). No requirement.
+      * "n/a"     — the LATEST feature-matrix run on this head produced NO legs, so
+                    NO reporter is expected. Two shapes: (1) no `opt-in group (…)`
+                    check-run at all — a doc-only PR, a fully change-selected-out
+                    matrix, or a merge_group that skipped the lane; (2) the latest
+                    run posted ONLY the zero-leg skeleton (unexpanded placeholder,
+                    server-set skipped) — no real leg ran, so the reporter correctly
+                    posts nothing. Presence is LATEST-RUN-RELATIVE (finding, r3): an
+                    OLDER real group run's leftover check on a same-SHA rerun does
+                    NOT resurrect the requirement when the current run is zero-leg.
       * "ok"      — legs ran AND a terminal-SUCCESS `feature-matrix report`
                     check-run FOR THE CURRENT GROUP RUN is present: the reporter
                     posted its green verdict.
@@ -543,15 +560,42 @@ def fm_report_status(runs: list[dict]) -> str:
     read-only token) will hold here to timeout and RED; that is acceptable — a fork
     PR is not auto-merged into the queue and fail-closed is the safe posture the
     finding demands."""
-    group_present = any(is_real_fm_group(r) for r in runs)
-    if not group_present:
-        return "n/a"
+    # PRESENCE is decided relative to the LATEST feature-matrix run (finding, r3).
+    # A same-SHA rerun (ready_for_review / label) leaves an OLDER real group run's
+    # check-runs on the commit alongside a NEWER zero-leg skeleton run; keying
+    # presence off ANY real group (the old run's) while keying the run id off the
+    # newer skeleton deadlocked the gate — it awaited a reporter the zero-leg run
+    # correctly never posts. So: bucket the group checks by the run they belong to
+    # and judge the presence + reporter requirement of the LATEST run only.
+    group_checks = [r for r in runs if is_fm_group(r.get("name", ""))]
+    if not group_checks:
+        return "n/a"  # no feature-matrix legs on this head at all
+    real_groups = [r for r in group_checks if is_real_fm_group(r)]
+    if not real_groups:
+        return "n/a"  # only zero-leg skeleton(s) anywhere — no real leg ever ran
+    current_run_id = fm_group_run_id(runs)  # max run id across ALL group checks
+    # Can we bucket by run id? Only if a latest run id resolved AND every REAL group
+    # carries a parseable run id — otherwise a real leg of an UNKNOWN (possibly newer)
+    # run may exist, so we cannot safely declare the latest run zero-leg. In that
+    # fail-CLOSED case we keep the reporter requirement (real legs ran somewhere) and
+    # let current_run_id (possibly "") drive the graceful any-report degradation below.
+    real_unparseable = any(not fm_run_id_of(r) for r in real_groups)
+    if current_run_id and not real_unparseable:
+        latest_run_checks = [r for r in group_checks
+                             if fm_run_id_of(r) == current_run_id]
+        if not any(is_real_fm_group(r) for r in latest_run_checks):
+            # The LATEST run posted only the zero-leg skeleton — no leg ran, no
+            # reporter is expected. (A stale OLDER real run's leftover check does not
+            # matter; its own reporter, if any, is not what this head awaits.)
+            return "n/a"
+        # else: the latest run DID run real legs (a forged placeholder name with a
+        # server-set NON-skipped conclusion still counts as real — security, r2) —
+        # require its reporter, correlated to current_run_id.
     reports = [r for r in runs if is_fm_report(r.get("name", ""))]
     if not reports:
         return "pending"  # legs ran; reporter verdict not on the head SHA yet
     # CORRELATION: bind the verdict to the CURRENT group run. Prefer the report(s)
     # whose external_id equals the current group run id; ignore stale reports.
-    current_run_id = fm_group_run_id(runs)
     any_report_has_extid = any((r.get("external_id") or "") for r in reports)
     if current_run_id and any_report_has_extid:
         matched = [r for r in reports if (r.get("external_id") or "") == current_run_id]
