@@ -41,8 +41,10 @@
 //!   by the landed P5 comparator ([`crate::compare::secure_greater_than_shared`], a
 //!   secret verdict that is NEVER opened) and a **secret-bit-gated arithmetic
 //!   conditional swap** `x' = x + b·(y−x)` (one secure multiplication per carried
-//!   field element per switch). Nothing is opened during the sort; the payload
-//!   columns ride through the swaps as secret shares. This is the P6 sort the
+//!   field element per switch). The only openings during the sort are the comparator's
+//!   per-compare masked Rabbit decompositions (`c = x + r mod p`, near-uniform /
+//!   statistically hiding at `≤ 2^{-61}` each — see the leakage statement); the verdict
+//!   and the payload columns ride through the swaps as never-opened secret shares. This is the P6 sort the
 //!   HIDDEN-key regime needs (the disclosed-key sort `sort_with_keys` was already
 //!   sound — sq-18lk).
 //! - [`sort_merge_semi_anti`] — the **semi-join and anti-join** (`MINUS` / `EXISTS` /
@@ -69,14 +71,33 @@
 //!
 //! ## Privacy / leakage statement (empirical-honesty rule — state it loudly)
 //!
-//! - **The join KEY is never reconstructed.** The comparator and the adjacency-
-//!   equality both keep their verdict secret-shared (bit-decomposition, never
-//!   opened); the conditional swap opens nothing. `≤ t` colluding parties' views are
-//!   independent of every key (Shamir hiding).
+//! - **The join KEY is never reconstructed — but the hiding is STATISTICAL, not
+//!   information-theoretic.** The comparator and the adjacency-equality keep their
+//!   VERDICT secret-shared (never opened) and the conditional swap opens nothing —
+//!   HOWEVER each comparison/equality bit-decomposes its operands via the Rabbit path
+//!   ([`crate::compare`]'s `secure_bit_decompose_rabbit`), whose ONE opening is a
+//!   masked `c = (x + r) mod p` under a full-field mask `r` no party knows. That `c`
+//!   is *near-uniform*, not perfectly uniform: it sits a statistical distance
+//!   `≤ 2^{-61}` from uniform (the `p = 2^61 − 1` field-size floor — see the "Hiding"
+//!   note on `secure_bit_decompose_rabbit`), so each opening leaks at most a `2^{-61}`
+//!   advantage about its operand — NOT the perfect per-key independence a categorical
+//!   "Shamir hiding" would assert. Each comparison / equality does this per operand
+//!   TWICE: the masked decomposition open `c = x + r mod p`, and the in-protocol
+//!   Rabbit range proof's masked zero-test open (`verify_value_in_range_rabbit`), each
+//!   a `≤ 2^{-61}`-hiding open. **Composition:** one `sort_merge_semi_anti` therefore
+//!   performs `Θ(|compare-exchanges| + n)` masked openings — a small constant per sort
+//!   compare-exchange (`|compare-exchanges| = O(n log² n)`) and per adjacency equality
+//!   (`n − 1` of them) — so by the standard hybrid / union-bound argument the total
+//!   advantage to any `≤ t`-collusion composes to `≤ O(n log² n) · 2^{-61}`,
+//!   cryptographically negligible for every realistic `n` but a *statistical* bound
+//!   that must be composed, not a per-opening independence. (The Shamir SHARINGS of
+//!   the keys are themselves perfectly `t`-private; the residual floor is the masked
+//!   OPENINGS the comparator performs, not the sharings.)
 //! - **The sorted-key ORDER is never revealed.** The final result is emitted through
 //!   an oblivious [`crate::oblivious::shuffle`], so the position a revealed row came
 //!   from — hence the key order — is destroyed before anything opens.
-//! - **What IS revealed** (the result, and only the result): for each kept L row, its
+//! - **What IS revealed** (the result — plus the negligible masked-opening statistical
+//!   floor noted above): for each kept L row, its
 //!   *payload id* (which L row it is) is opened — that is the semi-/anti-join output
 //!   the authorised recipient is entitled to. The number of kept rows (the result
 //!   size) is learned by the recipient after filtering dummies, exactly as every
@@ -379,8 +400,12 @@ pub fn sort_merge_semi_anti(
 /// ([`SortingNetwork`], sq-18lk), each compare-exchange decided by the landed secure
 /// comparator ([`secure_greater_than_shared`], a NEVER-opened secret verdict) and
 /// applied by a **secret-bit-gated arithmetic conditional swap**. Returns the sorted
-/// sharings — nothing is opened, so the caller holds a re-ordered secret column whose
-/// order is independent of anything a `≤ t` collusion sees.
+/// sharings — the sorted VALUES are never opened; the only openings are the
+/// comparator's per-compare masked Rabbit decompositions (`c = x + r mod p`,
+/// near-uniform / statistically hiding at `≤ 2^{-61}` each, composing over the
+/// `O(n log² n)` gates — see the module leakage statement), so the caller holds a
+/// re-ordered secret column whose order is STATISTICALLY hidden (not
+/// information-theoretically independent) from any `≤ t` collusion.
 ///
 /// This is exposed for the composed operators (and their differential tests) that
 /// need only the sort — DISTINCT-over-hidden, ORDER BY, MIN/MAX, the sort-merge
@@ -677,6 +702,249 @@ mod tests {
             )
             .unwrap();
             assert_eq!(multiset(&res.rows), expected, "seed {seed}: multiset changed");
+        }
+    }
+
+    // ---- real randomized differential + mutation (non-vacuity) check -------------
+
+    /// Deterministic SplitMix64 — a per-index-seeded PRNG so the differential is
+    /// *generated* (many lengths / seeds / key multisets) yet fully reproducible, with
+    /// no `Math::random`-style nondeterminism (harness convention: vary by seed index).
+    fn splitmix64(state: &mut u64) -> u64 {
+        *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = *state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Generate one L/R key-multiset layout for `seed`, deliberately spanning the
+    /// coverage the hand-picked layouts miss: arbitrary lengths (incl. empty sides),
+    /// heavy duplicate/collision domains (small key space → fan-out groups + shared
+    /// keys), AND keys near the supported upper bound `2^60 − 1` (max Rabbit width).
+    fn generate_layout(seed: u64) -> (Vec<u64>, Vec<u64>) {
+        let mut s = seed.wrapping_mul(0x2545_F491_4F6C_DD1D).wrapping_add(1);
+        let ll = (splitmix64(&mut s) % 7) as usize; // 0..=6 (empty L reachable)
+        let rr = (splitmix64(&mut s) % 7) as usize; // 0..=6 (empty R reachable)
+        let key = |s: &mut u64| -> u64 {
+            let r = splitmix64(s);
+            match r % 5 {
+                // Tiny domain → many duplicates / shared keys across sides.
+                0 | 1 => r % 4,
+                2 => r % 12,
+                // Near the supported upper bound (exercises full 60-bit Rabbit width).
+                3 => (COMPARE_MAX_EXCLUSIVE - 1) - (r % 3),
+                _ => r % 40,
+            }
+        };
+        let lk: Vec<u64> = (0..ll).map(|_| key(&mut s)).collect();
+        let rk: Vec<u64> = (0..rr).map(|_| key(&mut s)).collect();
+        (lk, rk)
+    }
+
+    /// A REAL generated randomized differential: for many generated layouts (varying
+    /// lengths, seeds, duplicate/collision patterns, empty sides, and upper-bound
+    /// values), the actual `sort_merge_semi_anti` output MUST equal the plaintext
+    /// oracle for BOTH kinds and several party counts. This is the coverage the six
+    /// fixed layouts do not provide.
+    #[test]
+    fn real_randomised_differential_generated() {
+        let mut ran = 0usize;
+        for seed in 0..24u64 {
+            let (lk, rk) = generate_layout(seed);
+            let left: Vec<(Fp, Vec<Option<Term>>)> = lk
+                .iter()
+                .enumerate()
+                .map(|(i, &k)| (Fp::new(k), vec![lit(&format!("L{i}"))]))
+                .collect();
+            let right: Vec<Fp> = rk.iter().map(|&k| Fp::new(k)).collect();
+            // Party count varies with the seed (both honest-majority sizes exercised).
+            let parties = if seed % 4 == 0 { 5 } else { 3 };
+            let backend = ShamirBackend::new_seeded(parties, 900 + seed).unwrap();
+            for kind in [SortMergeJoinKind::Semi, SortMergeJoinKind::Anti] {
+                let (res, _) =
+                    sort_merge_semi_anti(&backend, &left, &right, vec![var("x")], kind).unwrap();
+                assert_eq!(
+                    multiset(&res.rows),
+                    plaintext_expected(&left, &right, kind),
+                    "seed {seed} parties {parties} kind {kind:?} \
+                     (L={lk:?} R={rk:?}): sort-merge != plaintext oracle"
+                );
+                ran += 1;
+            }
+        }
+        assert!(ran >= 40, "expected a broad generated sweep, ran only {ran}");
+    }
+
+    /// The named corruption points of the novel sort/scan, injected into a cleartext
+    /// MODEL of the exact pipeline so a mutation test can prove the oracle differential
+    /// is NON-VACUOUS (it goes red on a wrong answer) without threading `cfg(test)`
+    /// fault hooks through the secret-shared crypto core.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Mutation {
+        /// No corruption — must reproduce the production output and the oracle.
+        None,
+        /// Emit R rows instead of L rows (the `is_l AND cond` selector gated wrong).
+        Selector,
+        /// The adjacency-equality bit is stuck at 0 (equal keys never seen as a run).
+        AdjacencyEquality,
+        /// Only the forward OR pass runs (the backward scan direction is dropped).
+        ScanDirection,
+        /// The oblivious sort's compare-exchanges never fire (swap decision corrupted),
+        /// so equal keys across the L/R boundary are no longer adjacent.
+        SwapDecision,
+    }
+
+    /// Cleartext model of the EXACT sort-merge pipeline (tagged union → oblivious sort
+    /// by key → adjacency equalities → forward/backward OR scan → `is_l AND cond`
+    /// selector), returning the kept-L-payload multiset. `Mutation::None` mirrors the
+    /// secret-shared implementation step-for-step; the other variants corrupt one named
+    /// step. Validated equal to the production output on every generated input by
+    /// [`model_matches_production`], so it is a faithful stand-in for the mutation test.
+    fn sort_merge_model(
+        left: &[(Fp, Vec<Option<Term>>)],
+        right_keys: &[Fp],
+        kind: SortMergeJoinKind,
+        mutation: Mutation,
+    ) -> Vec<String> {
+        // Tagged union: (key, is_l, pid).
+        let mut rows: Vec<(u64, bool, usize)> = Vec::new();
+        for (i, (k, _)) in left.iter().enumerate() {
+            rows.push((k.value(), true, i));
+        }
+        for k in right_keys {
+            rows.push((k.value(), false, 0));
+        }
+        // (1) oblivious sort by key ascending — unless the swap decisions are corrupted.
+        if mutation != Mutation::SwapDecision {
+            rows.sort_by_key(|&(k, _, _)| k);
+        }
+        let n = rows.len();
+        // (2) adjacency equalities eq[k] = key_k == key_{k+1}.
+        let eq: Vec<bool> = (0..n.saturating_sub(1))
+            .map(|k| match mutation {
+                Mutation::AdjacencyEquality => false,
+                _ => rows[k].0 == rows[k + 1].0,
+            })
+            .collect();
+        let is_r: Vec<bool> = rows.iter().map(|&(_, is_l, _)| !is_l).collect();
+        // (3) backward + forward OR passes (broadcast "an R shares my run").
+        let mut b_r = vec![false; n];
+        let mut f_r = vec![false; n];
+        if n > 0 {
+            b_r[n - 1] = is_r[n - 1];
+            for k in (0..n - 1).rev() {
+                b_r[k] = is_r[k] || (eq[k] && b_r[k + 1]);
+            }
+            f_r[0] = is_r[0];
+            for k in 1..n {
+                f_r[k] = is_r[k] || (eq[k - 1] && f_r[k - 1]);
+            }
+        }
+        // (4) selector: keep iff is_l AND the semi/anti condition on "any R in my run".
+        let mut out: Vec<String> = Vec::new();
+        for k in 0..n {
+            let (_, is_l, pid) = rows[k];
+            let any_r = match mutation {
+                // Drop the backward pass: an L before its R match is no longer seen.
+                Mutation::ScanDirection => f_r[k],
+                _ => b_r[k] || f_r[k],
+            };
+            let cond = match kind {
+                SortMergeJoinKind::Semi => any_r,
+                SortMergeJoinKind::Anti => !any_r,
+            };
+            // The `is_l AND cond` gate — corrupted to gate on is_r under Selector.
+            let gate = match mutation {
+                Mutation::Selector => !is_l,
+                _ => is_l,
+            };
+            if gate && cond {
+                out.push(format!("{:?}", left[pid].1));
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// The cleartext model is faithful: with NO mutation it equals BOTH the plaintext
+    /// oracle AND the real secret-shared `sort_merge_semi_anti` output on every
+    /// generated input — so mutating the model is a valid proxy for corrupting the
+    /// production sort/scan.
+    #[test]
+    fn model_matches_production() {
+        for seed in 0..16u64 {
+            let (lk, rk) = generate_layout(seed);
+            let left: Vec<(Fp, Vec<Option<Term>>)> = lk
+                .iter()
+                .enumerate()
+                .map(|(i, &k)| (Fp::new(k), vec![lit(&format!("L{i}"))]))
+                .collect();
+            let right: Vec<Fp> = rk.iter().map(|&k| Fp::new(k)).collect();
+            let backend = ShamirBackend::new_seeded(3, 800 + seed).unwrap();
+            for kind in [SortMergeJoinKind::Semi, SortMergeJoinKind::Anti] {
+                let oracle = plaintext_expected(&left, &right, kind);
+                assert_eq!(
+                    sort_merge_model(&left, &right, kind, Mutation::None),
+                    oracle,
+                    "seed {seed} kind {kind:?}: model(None) != oracle"
+                );
+                let (res, _) =
+                    sort_merge_semi_anti(&backend, &left, &right, vec![var("x")], kind).unwrap();
+                assert_eq!(
+                    multiset(&res.rows),
+                    oracle,
+                    "seed {seed} kind {kind:?}: production != oracle"
+                );
+            }
+        }
+    }
+
+    /// Mutation / non-vacuity check: each named corruption of the sort/scan (a wrong
+    /// selector, a stuck adjacency equality, a dropped scan direction, a corrupted
+    /// swap decision) MUST make the pipeline disagree with the plaintext oracle on at
+    /// least one generated input — i.e. the differential provably turns RED on a
+    /// deliberately wrong answer. Because the unmutated model is validated equal to the
+    /// production output ([`model_matches_production`]), a real corruption of any of
+    /// these steps would likewise make `sort_merge_semi_anti` fail the oracle.
+    #[test]
+    fn mutations_turn_the_oracle_differential_red() {
+        let mutations = [
+            Mutation::Selector,
+            Mutation::AdjacencyEquality,
+            Mutation::ScanDirection,
+            Mutation::SwapDecision,
+        ];
+        for &mutation in &mutations {
+            let mut caught = false;
+            'search: for seed in 0..64u64 {
+                let (lk, rk) = generate_layout(seed);
+                let left: Vec<(Fp, Vec<Option<Term>>)> = lk
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &k)| (Fp::new(k), vec![lit(&format!("L{i}"))]))
+                    .collect();
+                let right: Vec<Fp> = rk.iter().map(|&k| Fp::new(k)).collect();
+                for kind in [SortMergeJoinKind::Semi, SortMergeJoinKind::Anti] {
+                    let oracle = plaintext_expected(&left, &right, kind);
+                    // Sanity: the SAME harness with no mutation still matches (so the
+                    // divergence below is due to the mutation, not the input).
+                    assert_eq!(
+                        sort_merge_model(&left, &right, kind, Mutation::None),
+                        oracle,
+                        "unmutated model diverged — bad control for {mutation:?}"
+                    );
+                    if sort_merge_model(&left, &right, kind, mutation) != oracle {
+                        caught = true;
+                        break 'search;
+                    }
+                }
+            }
+            assert!(
+                caught,
+                "{mutation:?}: oracle differential did NOT go red on any generated \
+                 input — the test would be vacuous against this corruption"
+            );
         }
     }
 
