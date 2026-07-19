@@ -56,6 +56,20 @@ use std::cmp::Ordering;
 #[path = "eqjoin.rs"]
 mod eqjoin;
 
+// [FABLE-5] (sq-7d3dj.34.2.3) Streaming SELECT-JSON pipeline v1 (M1, seed-lex order
+// contract — research/lazy-pull-incremental-emission.md §5.1 as amended by
+// sq-7d3dj.34.2.7): classifier + block driver over the emit sink, hooked into
+// `eval_select_json_emit` after the single-pattern fast path. Declared as a CHILD
+// module of `exec` (via `#[path]`; the file lives at `src/stream_pipeline.rs`, the
+// design record's reserved name) so it reuses the private evaluation machinery —
+// `Bindings`, the GOO planner helpers, `scan_to_bindings`, `apply_filter`, the query
+// budget — without widening any item's visibility (the `eqjoin` precedent above).
+// Always compiled (no cargo feature, §8.5); admission is fail-closed at run time and
+// the `stream_pipeline_testing` lib surface toggles it per thread. `pub(crate)` so
+// lib.rs can re-export the testing hooks.
+#[path = "stream_pipeline.rs"]
+pub(crate) mod stream_pipeline;
+
 // ---- Cooperative query budget (T15 server hardening) -------------------------
 //
 // A thread-local, cooperatively-checked budget installed by the
@@ -2496,7 +2510,12 @@ pub fn eval_select_json_chunks(graph: &Graph, pattern: &GraphPattern, flush: Opt
 ///
 /// The concatenation of the chunks handed to `emit` is **byte-identical** to
 /// [`eval_select_json`]/[`eval_select_json_chunks`] for the same `flush`; only the chunk
-/// *boundaries* may differ (the byte-identity contract is over the concatenation). A
+/// *boundaries* may differ (the byte-identity contract is over the concatenation) — the
+/// streaming-pipeline hook below classifies independently of `flush`, so every front door
+/// of this core agrees. [FABLE-5] (sq-7d3dj.34.2.3) NOTE the row ORDER of an admitted
+/// bind-join chain is the documented deterministic seed-lex order, which may differ from
+/// the retired fully-buffered order (`stream_pipeline` module docs / design record §5.1);
+/// solution content is per-shape equivalent. A
 /// cooperative budget (row / byte cap or deadline) that trips is surfaced by the caller's
 /// `budget::check` as an `Err` exactly as before — but note that on the streaming path
 /// early chunks may already have been flushed when the trip is detected (the server maps a
@@ -2510,6 +2529,16 @@ pub fn eval_select_json_emit(
     // Streaming fast paths — no Bindings materialised at all.
     if single_pattern_scan_json_emit(graph, pattern, flush, emit).is_some() {
         budget::check(0)?; // sticky: the streaming loop may have stopped mid-scan
+        return Ok(());
+    }
+    // [FABLE-5] (sq-7d3dj.34.2.3) Streaming pipeline v1: classified seed+bind-join
+    // chains stream block-by-block in the documented seed-lex order (design record
+    // §5.1) — first solutions are emitted before the join completes. Fail-closed:
+    // any unadmitted shape returns `None` and the buffered path below runs
+    // unchanged. Classification ignores `flush`, so all front doors of this emit
+    // core keep byte-identical concatenations for the same query.
+    if stream_pipeline::try_stream_json_emit(graph, pattern, flush, emit)?.is_some() {
+        budget::check(0)?; // sticky: the driver may have stopped mid-block
         return Ok(());
     }
     let mut local = LocalVocab::default();

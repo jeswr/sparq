@@ -1,25 +1,38 @@
-//! [FABLE-5] sq-7d3dj.34.2.2 — differential streaming-equivalence harness for the
-//! SELECT-JSON emit core (`exec::eval_select_json_emit`).
+//! [FABLE-5] sq-7d3dj.34.2.2 + sq-7d3dj.34.2.3 — differential streaming-equivalence
+//! harness for the SELECT-JSON emit core (`exec::eval_select_json_emit`) and the
+//! streaming pipeline's §5.1 per-shape suites.
 //!
-//! 🤖 SPARQ agent — this is the design record's §10 B2 deliverable
-//! (`research/lazy-pull-incremental-emission.md`): the load-bearing safety net for the
-//! whole lazy-pull / incremental-emission program (sq-7d3dj.34.2). Every later child
-//! bead (the classifier + block driver of .3/.4/.5) is admitted ONLY if it keeps the
-//! §8.1 invariant — **the CONCATENATION of the chunks handed to `eval_select_json_emit`
-//! is BYTE-IDENTICAL to the buffered `eval_select_json`** for the same query. This
-//! harness pins that invariant NOW, before the streaming path exists, so a regression
-//! that alters a single response byte goes red.
+//! 🤖 SPARQ agent — the design record's §10 B2 deliverable
+//! (`research/lazy-pull-incremental-emission.md`), EXTENDED by `.2.3` per the amended
+//! §5.1 contract (decision `sq-7d3dj.34.2.7`). The harness now carries TWO layers:
 //!
-//! ## What this asserts, and why byte-level
+//! 1. **The original byte-diff suite** (below) — the CONCATENATION of the chunks
+//!    handed to `eval_select_json_emit` is BYTE-IDENTICAL to the single-string
+//!    `query_json` for the same query, across every front door. This holds for ALL
+//!    shapes (the streaming pipeline classifies independently of `flush`, so the
+//!    front doors always agree with each other), and for fallback/buffered shapes it
+//!    also pins the historical buffered bytes.
+//! 2. **The §5.1 suites** (`sect_5_1` module at the bottom) — for shapes the
+//!    streaming pipeline ADMITS (seed + bind-join chains), the emitted order is the
+//!    deterministic seed-lex order, permitted to differ from the retired buffered
+//!    order; verification is per-shape SOLUTION equivalence vs the toggled-off
+//!    buffered path (set under DISTINCT, multiset otherwise, sub-multiset + count
+//!    under Slice), double-run byte-identity (determinism), a fallback-shape
+//!    path-taken assertion, a perturbed-SOLUTION mutation witness, and the
+//!    first-emit-before-eval-complete probe. MULTI-BLOCK NON-VACUITY: the fixtures
+//!    force the tiny testing ramp so a join value's seed rows PROVABLY straddle a
+//!    block boundary (the sq-7d3dj.34.2.7 counterexample class), and one fixture
+//!    exceeds the default 4096-row first block.
+//!
+//! ## What the byte-diff layer asserts, and why byte-level
 //!
 //! The `#1745` API contract (`eval_select_json_emit` rustdoc) is: *the concatenation of
 //! the chunks is byte-identical to `eval_select_json`/`eval_select_json_chunks` for the
-//! same `flush`; only the chunk boundaries may differ.* The invariant is therefore
-//! **byte-level and order-sensitive, NOT multiset**: two results with the same set of
-//! solutions but a different serialised order (or different whitespace / escaping / value
-//! formatting) are a FAILURE, because a streaming HTTP consumer sees the raw bytes and
-//! parses them positionally. A multiset check would silently pass an order-shuffling
-//! bug — exactly the class of bug the M1 mode (§5) exists to forbid.
+//! same `flush`; only the chunk boundaries may differ.* That invariant is
+//! **byte-level and order-sensitive, NOT multiset**: two front doors emitting the same
+//! set of solutions in a different serialised order (or different whitespace / escaping /
+//! value formatting) are a FAILURE, because a streaming HTTP consumer sees the raw bytes
+//! and parses them positionally.
 //!
 //! ## How the private emit core is reached (real path, not a mock)
 //!
@@ -357,4 +370,367 @@ fn mutation_witness_a_perturbed_expected_byte_goes_red() {
     // THE ASSERTION UNDER TEST: comparing the true emit-concat to the perturbed
     // expectation MUST fail — the harness's byte-level equality is non-vacuous.
     assert_eq!(got, perturbed, "MUTATION WITNESS: perturbed byte must differ from the true emit-concat");
+}
+
+// ═══ §5.1 suites (sq-7d3dj.34.2.3) — the amended seed-lex order contract ═══════
+//
+// [FABLE-5] For shapes the streaming pipeline ADMITS, verification is per-shape
+// SOLUTION equivalence vs the toggled-off buffered path, NOT a byte-diff (design
+// record §5.1, decision sq-7d3dj.34.2.7). The fixtures are selective-seed fan-out
+// graphs: the seed pattern is much smaller than 1/8 of the fan-out pattern's
+// cardinality, so the GOO replay predicts a bind join and the classifier admits.
+mod sect_5_1 {
+    use super::PFX;
+    use sparq_core::Graph;
+    use sparq_engine::stream_pipeline_testing as spt;
+    use sparq_engine::{query_json, query_json_stream_with_budget, QueryBudget};
+    use std::collections::HashMap;
+
+    /// Selective-seed fan-out fixture. `n_seed` seed triples `s_i ex:seed k_(i mod
+    /// n_keys)`; each referenced key `k` has `fan` triples `k ex:val v`; `ballast`
+    /// extra `ex:val` triples on UNREFERENCED subjects inflate the fan-out pattern's
+    /// cardinality estimate (the bind-join admission inequality reads TOTAL predicate
+    /// cardinality) without inflating the join result. Result rows = `n_seed × fan`.
+    fn fanout_graph(n_seed: usize, n_keys: usize, fan: usize, ballast: usize) -> Graph {
+        let mut nt = String::new();
+        for i in 0..n_seed {
+            nt.push_str(&format!("<http://ex/s/{}> <http://ex/seed> <http://ex/k/{}> .\n", i, i % n_keys));
+        }
+        for k in 0..n_keys {
+            for j in 0..fan {
+                nt.push_str(&format!("<http://ex/k/{}> <http://ex/val> <http://ex/v/{}_{}> .\n", k, k, j));
+            }
+        }
+        for b in 0..ballast {
+            nt.push_str(&format!("<http://ex/kb/{}> <http://ex/val> <http://ex/vb/{}> .\n", b, b));
+        }
+        Graph::load_str(&nt, "ntriples").expect("load fan-out graph")
+    }
+
+    /// The buffered reference: the SAME query with the streaming pipeline forced OFF
+    /// on this thread — the historical buffered path.
+    fn buffered(g: &Graph, q: &str) -> String {
+        let prev = spt::set_enabled(false);
+        let out = query_json(g, q).expect("buffered reference query error");
+        spt::set_enabled(prev);
+        out
+    }
+
+    /// The streamed document (live-sink front door) plus the per-query stats
+    /// `(fired, blocks_run, seed_rows_processed, seed_rows_total)`.
+    fn streamed(g: &Graph, q: &str) -> (String, (bool, usize, usize, usize)) {
+        spt::reset_stats();
+        let mut out = String::new();
+        query_json_stream_with_budget(g, q, &QueryBudget::unlimited(), |c| {
+            out.push_str(&c);
+            std::ops::ControlFlow::Continue(())
+        })
+        .expect("streamed query error");
+        (out, spt::stats())
+    }
+
+    /// Parses a SPARQL-results document into its solution list, each solution
+    /// canonicalised to a string (serde_json object keys serialise in sorted order,
+    /// so equal solutions canonicalise identically). Panics on invalid JSON — every
+    /// caller therefore also asserts document validity.
+    fn solutions(doc: &str) -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_str(doc).expect("response must be valid JSON");
+        v["results"]["bindings"]
+            .as_array()
+            .expect("results.bindings must be an array")
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// The solution MULTISET: the canonicalised solutions, sorted.
+    fn multiset(doc: &str) -> Vec<String> {
+        let mut s = solutions(doc);
+        s.sort();
+        s
+    }
+
+    /// The head's projected-variable list (order-sensitive — head equality is part
+    /// of every §5.1 contract).
+    fn head_vars(doc: &str) -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_str(doc).expect("response must be valid JSON");
+        v["head"]["vars"]
+            .as_array()
+            .expect("head.vars must be an array")
+            .iter()
+            .map(|x| x.as_str().expect("var name").to_string())
+            .collect()
+    }
+
+    /// `true` when `sub` is a sub-multiset of `sup` (every solution occurs at most
+    /// as often as in `sup`).
+    fn is_sub_multiset(sub: &[String], sup: &[String]) -> bool {
+        let mut counts: HashMap<&str, i64> = HashMap::new();
+        for s in sup {
+            *counts.entry(s.as_str()).or_insert(0) += 1;
+        }
+        sub.iter().all(|s| {
+            let c = counts.entry(s.as_str()).or_insert(0);
+            *c -= 1;
+            *c >= 0
+        })
+    }
+
+    /// RAII ramp override so a panicking assertion cannot leak the tiny testing ramp
+    /// into a later query on this thread.
+    struct RampGuard((usize, usize));
+    impl RampGuard {
+        fn set(first: usize, max: usize) -> Self {
+            RampGuard(spt::set_block_ramp(first, max))
+        }
+    }
+    impl Drop for RampGuard {
+        fn drop(&mut self) {
+            spt::set_block_ramp(self.0 .0, self.0 .1);
+        }
+    }
+
+    /// The M1 bind-chain query over the fan-out fixture.
+    fn chain_query() -> String {
+        format!("{PFX}SELECT ?s ?v WHERE {{ ?s ex:seed ?k . ?k ex:val ?v }}")
+    }
+
+    /// (b) non-slice non-distinct → solution-MULTISET equality, on a TESTING-RAMP
+    /// (first = 8) fixture where one join value's seed rows PROVABLY straddle a block
+    /// boundary: 45 seed rows over 5 keys = 9 rows per key > the 8-row first block,
+    /// so whichever key occupies the first block's rows continues into block 2
+    /// (contiguously under the seed's ?k-sorted scan; interleaved every 5 rows under
+    /// any other permutation — it straddles either way). Stats assert ≥ 2 blocks ran
+    /// AND the streamed path was taken (multi-block non-vacuity — the 4000-row B2
+    /// corpus fits one default block and masked the .2.7 bug).
+    #[test]
+    fn multiset_equality_with_block_boundary_straddle_testing_ramp() {
+        let _ramp = RampGuard::set(8, 16);
+        // est(seed) = 45; est(?k ex:val ?v) = 5×30 + 1000 = 1150 > 8×45 → bind join.
+        let g = fanout_graph(45, 5, 30, 1000);
+        let q = chain_query();
+
+        let (got, (fired, blocks, _, seed_total)) = streamed(&g, &q);
+        assert!(fired, "the streamed path must be taken for the admitted bind chain");
+        assert!(blocks >= 2, "multi-block non-vacuity: expected >= 2 blocks, ran {blocks}");
+        assert_eq!(seed_total, 45, "seed row count");
+
+        let reference = buffered(&g, &q);
+        assert_eq!(head_vars(&got), head_vars(&reference), "head must be identical");
+        let (ms_got, ms_ref) = (multiset(&got), multiset(&reference));
+        assert_eq!(ms_got.len(), 45 * 30, "expected n_seed x fan solutions");
+        assert_eq!(ms_got, ms_ref, "streamed solutions must be MULTISET-equal to buffered");
+    }
+
+    /// (b) over a UNION of streamable branches (branch-sequential drivers).
+    #[test]
+    fn union_of_bind_chains_multiset_equality() {
+        let _ramp = RampGuard::set(8, 16);
+        let g = fanout_graph(45, 5, 30, 1000);
+        let q = format!(
+            "{PFX}SELECT ?x ?v WHERE {{ \
+             {{ ?x ex:seed ?k . ?k ex:val ?v }} UNION {{ ?x ex:val ?v }} }}"
+        );
+        let (got, (fired, ..)) = streamed(&g, &q);
+        assert!(fired, "the streamed path must be taken for the union of admitted branches");
+        let reference = buffered(&g, &q);
+        assert_eq!(head_vars(&got), head_vars(&reference));
+        assert_eq!(multiset(&got), multiset(&reference), "union solutions must be MULTISET-equal");
+    }
+
+    /// (a) DISTINCT shapes → solution-SET equality + head + valid JSON. The
+    /// projection is multi-variable (a single-variable DISTINCT belongs to the #1747
+    /// skip-scan and is declined). First-seen dedup must also make the streamed
+    /// output itself duplicate-free.
+    #[test]
+    fn distinct_set_equality() {
+        let _ramp = RampGuard::set(8, 16);
+        let g = fanout_graph(45, 5, 30, 1000);
+        let q = format!("{PFX}SELECT DISTINCT ?k ?v WHERE {{ ?s ex:seed ?k . ?k ex:val ?v }}");
+
+        let (got, (fired, blocks, ..)) = streamed(&g, &q);
+        assert!(fired, "the streamed path must be taken");
+        assert!(blocks >= 2, "the DISTINCT suite must also cross a block boundary");
+        let reference = buffered(&g, &q);
+        assert_eq!(head_vars(&got), head_vars(&reference));
+
+        let sols = solutions(&got);
+        let set_got: std::collections::BTreeSet<String> = sols.iter().cloned().collect();
+        assert_eq!(sols.len(), set_got.len(), "streamed DISTINCT output must be duplicate-free");
+        let set_ref: std::collections::BTreeSet<String> = solutions(&reference).into_iter().collect();
+        assert_eq!(set_got, set_ref, "streamed DISTINCT solutions must be SET-equal to buffered");
+        assert_eq!(set_got.len(), 5 * 30, "expected n_keys x fan distinct solutions");
+    }
+
+    /// (c) Slice → the streamed solutions are a SUB-MULTISET of the UN-sliced
+    /// buffered result with the buffered sliced count. Under a different legal order
+    /// LIMIT legitimately selects different rows, so bag-equality against the sliced
+    /// buffered output would be a false invariant.
+    #[test]
+    fn slice_is_sub_multiset_of_unsliced_with_buffered_count() {
+        let _ramp = RampGuard::set(8, 16);
+        let g = fanout_graph(45, 5, 30, 1000);
+        let unsliced = chain_query();
+        let sliced = format!("{} LIMIT 100 OFFSET 7", unsliced);
+
+        let (got, (fired, ..)) = streamed(&g, &sliced);
+        assert!(fired, "the streamed path must be taken for the sliced chain");
+        let sub = multiset(&got);
+        let sup = multiset(&buffered(&g, &unsliced));
+        let buffered_sliced_count = solutions(&buffered(&g, &sliced)).len();
+        assert_eq!(sub.len(), buffered_sliced_count, "streamed slice must have the buffered sliced count");
+        assert_eq!(sub.len(), 100, "sanity: OFFSET 7 LIMIT 100 of 1350 rows");
+        assert!(is_sub_multiset(&sub, &sup), "streamed slice must be a sub-multiset of the un-sliced buffered result");
+    }
+
+    /// (d) determinism — the streamed path run twice is byte-identical to itself
+    /// (§5.1: the seed-lex order is deterministic, unlike a hash-bucket order).
+    #[test]
+    fn streamed_double_run_is_byte_identical_to_itself() {
+        let _ramp = RampGuard::set(8, 16);
+        let g = fanout_graph(45, 5, 30, 1000);
+        for q in [chain_query(), format!("{PFX}SELECT DISTINCT ?k ?v WHERE {{ ?s ex:seed ?k . ?k ex:val ?v }}")] {
+            let (run1, (fired, ..)) = streamed(&g, &q);
+            let (run2, _) = streamed(&g, &q);
+            assert!(fired, "determinism suite must exercise the streamed path");
+            assert_eq!(run1, run2, "streamed emission must be deterministic (double-run byte-identical): {q}");
+        }
+    }
+
+    /// Default-ramp fixture with seed > 4096 rows (STREAM_BLOCK_FIRST), so the
+    /// PRODUCTION ramp constants also demonstrably multi-block. est(seed) = 4500;
+    /// est(?k ex:val ?v) = 100×2 + 40000 = 40200 > 8×4500 → bind join admitted.
+    #[test]
+    fn default_ramp_seed_over_first_block_multiset_equality() {
+        // No ramp override: production constants (4096 doubling to 65536).
+        let g = fanout_graph(4500, 100, 2, 40_000);
+        let q = chain_query();
+        let (got, (fired, blocks, _, seed_total)) = streamed(&g, &q);
+        assert!(fired, "the streamed path must be taken under the default ramp");
+        assert_eq!(seed_total, 4500);
+        assert!(blocks >= 2, "a 4500-row seed must span >= 2 default-ramp blocks, ran {blocks}");
+        assert_eq!(multiset(&got), multiset(&buffered(&g, &q)), "default-ramp multiset equality");
+    }
+
+    /// The TTFS probe: an emitted chunk is observed WHILE processed seed rows <
+    /// total seed rows — i.e. first solutions leave the engine before the join (or
+    /// even the seed scan) completes. The 8-row first block fans out to 1600 rows
+    /// (> 64 KiB of JSON, the public entry points' flush threshold), so the first
+    /// chunk is handed to the sink during block 1 of 4+.
+    #[test]
+    fn first_emit_observed_before_seed_scan_complete() {
+        let _ramp = RampGuard::set(8, 16);
+        let g = fanout_graph(45, 5, 200, 2000);
+        let q = chain_query();
+        spt::reset_stats();
+        let mut first_chunk_stats: Option<(bool, usize, usize, usize)> = None;
+        let mut chunks = 0usize;
+        query_json_stream_with_budget(&g, &q, &QueryBudget::unlimited(), |_c| {
+            if first_chunk_stats.is_none() {
+                first_chunk_stats = Some(spt::stats());
+            }
+            chunks += 1;
+            std::ops::ControlFlow::Continue(())
+        })
+        .expect("probe query error");
+        let (fired, _, processed, total) = first_chunk_stats.expect("at least one chunk must be emitted");
+        assert!(fired, "the probe must exercise the streamed path");
+        assert!(chunks >= 2, "the probe corpus must be genuinely multi-chunk (got {chunks})");
+        assert!(
+            processed < total,
+            "first emit must be observed BEFORE the seed scan completes (processed {processed} of {total})"
+        );
+    }
+
+    /// (e) fallback shapes → the buffered path is taken (testing-stats assertion,
+    /// not assumption) and stays byte-identical to the pipeline-disabled reference.
+    #[test]
+    fn fallback_shapes_take_buffered_path_byte_identical() {
+        let g = fanout_graph(45, 5, 30, 1000);
+        let cases = [
+            // ORDER BY: a pipeline breaker at the top — never admitted (v1).
+            format!("{PFX}SELECT ?s ?v WHERE {{ ?s ex:seed ?k . ?k ex:val ?v }} ORDER BY ?v ?s"),
+            // OPTIONAL: not a flattenable conjunction.
+            format!("{PFX}SELECT ?s ?v WHERE {{ ?s ex:seed ?k OPTIONAL {{ ?k ex:val ?v }} }}"),
+            // Two connecting variables: the GOO replay predicts a hash step (M1
+            // admits single-variable bind joins only).
+            format!("{PFX}SELECT ?a ?k WHERE {{ ?a ex:seed ?k . ?a ex:val ?k }}"),
+            // Cyclic (triangle) BGP: routed to the WCOJ plan, never the binary chain.
+            format!("{PFX}SELECT ?a ?b WHERE {{ ?a ex:seed ?k . ?a ex:seed ?b . ?b ex:val ?k }}"),
+            // Equal-cardinality patterns: the bind-join inequality (8x) fails, so a
+            // hash/merge step is predicted — the q04 class stays buffered until M2.
+            format!("{PFX}SELECT DISTINCT ?k ?v WHERE {{ ?s ex:val ?k . ?s ex:val ?v }}"),
+        ];
+        for q in &cases {
+            let (got, (fired, blocks, ..)) = streamed(&g, q);
+            assert!(!fired, "fallback shape must NOT take the streamed path: {q}");
+            assert_eq!(blocks, 0, "fallback shape must run zero stream blocks: {q}");
+            let reference = buffered(&g, q);
+            assert_eq!(got, reference, "fallback shape must stay byte-identical to the buffered path: {q}");
+        }
+    }
+
+    /// Admitted-shape edges: a provably-absent constant (unsatisfiable branch) and
+    /// `LIMIT 0` both emit the empty document byte-identically to the buffered path.
+    #[test]
+    fn unsat_branch_and_limit_zero_emit_empty_document() {
+        let _ramp = RampGuard::set(8, 16);
+        let g = fanout_graph(45, 5, 30, 1000);
+        for q in [
+            // ex:nope is absent from the dictionary → the branch is unsatisfiable.
+            format!("{PFX}SELECT ?s ?v WHERE {{ ?s ex:seed ?k . ?k ex:nope ?v }}"),
+            format!("{} LIMIT 0", chain_query()),
+        ] {
+            let (got, _) = streamed(&g, &q);
+            assert!(solutions(&got).is_empty(), "expected zero solutions: {q}");
+            assert_eq!(got, buffered(&g, &q), "empty document must be byte-identical to buffered: {q}");
+        }
+    }
+
+    /// `ControlFlow::Break` from the sink (the HTTP client disconnected) aborts the
+    /// driver cleanly: no error, and the remaining chunks are abandoned (the
+    /// document is left unterminated — the server's truncation floor).
+    #[test]
+    fn sink_break_aborts_streamed_driver() {
+        let _ramp = RampGuard::set(8, 16);
+        let g = fanout_graph(45, 5, 200, 2000);
+        spt::reset_stats();
+        let mut got = String::new();
+        let mut chunks = 0usize;
+        query_json_stream_with_budget(&g, &chain_query(), &QueryBudget::unlimited(), |c| {
+            got.push_str(&c);
+            chunks += 1;
+            std::ops::ControlFlow::Break(())
+        })
+        .expect("a sink Break is a clean early stop, not an error");
+        let (fired, ..) = spt::stats();
+        assert!(fired, "the Break probe must exercise the streamed path");
+        assert_eq!(chunks, 1, "no further chunk may follow the Break");
+        assert!(!got.ends_with("]}}"), "the aborted stream must be left unterminated");
+    }
+
+    /// SOLUTION MUTATION WITNESS (the .2.3 acceptance's non-vacuity check): perturb
+    /// one SOLUTION of the expected multiset and assert the multiset check goes RED —
+    /// proving empirically that the §5.1 solution-equivalence suites can catch a
+    /// wrong/missing solution (not just a wrong byte). `#[should_panic]` inverts it.
+    #[test]
+    #[should_panic(expected = "SOLUTION MUTATION WITNESS")]
+    fn perturbed_solution_goes_red_under_multiset_check() {
+        let _ramp = RampGuard::set(8, 16);
+        let g = fanout_graph(45, 5, 30, 1000);
+        let q = chain_query();
+        let (got, (fired, ..)) = streamed(&g, &q);
+        assert!(fired, "pre-condition: the streamed path must be taken");
+        let ms_got = multiset(&got);
+        let mut ms_expected = multiset(&buffered(&g, &q));
+        // Sanity: unperturbed they ARE equal, so the failure below is caused ONLY by
+        // the deliberate solution perturbation.
+        assert_eq!(ms_got, ms_expected, "pre-condition: unperturbed multisets must match");
+        // Perturb exactly one SOLUTION: swap a real binding for one that cannot occur.
+        ms_expected[0] = "{\"s\":{\"type\":\"uri\",\"value\":\"http://ex/PERTURBED\"}}".to_string();
+        ms_expected.sort();
+        assert_ne!(ms_got, ms_expected, "internal: the perturbation must change the multiset");
+        // THE ASSERTION UNDER TEST: the multiset equality MUST fail.
+        assert_eq!(ms_got, ms_expected, "SOLUTION MUTATION WITNESS: perturbed solution must differ");
+    }
 }

@@ -193,6 +193,41 @@ pub mod distinct_pushdown_testing {
     }
 }
 
+/// Test/measurement hooks for the streaming SELECT-JSON pipeline (bead
+/// sq-7d3dj.34.2.3, design record `research/lazy-pull-incremental-emission.md` §5.1):
+/// toggle the classified seed-lex streaming path, override its seed-block ramp so the
+/// differential harness can force multi-block runs on small corpora, and read which
+/// path ran plus its block/seed progress (readable MID-STREAM from an emit sink — the
+/// first-emit-before-eval-complete probe). NOT part of the stable query API. [FABLE-5]
+#[doc(hidden)]
+pub mod stream_pipeline_testing {
+    /// Enables/disables the streaming pipeline on the current thread (default on),
+    /// returning the previous value — `false` forces the buffered path, the
+    /// differential harness's reference.
+    pub fn set_enabled(v: bool) -> bool {
+        crate::exec::stream_pipeline::testing::set_enabled(v)
+    }
+
+    /// Overrides the `(first, max)` seed-block ramp on the current thread (defaults
+    /// `STREAM_BLOCK_FIRST` = 4096 doubling to `STREAM_BLOCK_MAX` = 65536), returning
+    /// the previous pair. Tests force tiny blocks (e.g. `(8, 16)`) so a small corpus
+    /// provably spans multiple blocks.
+    pub fn set_block_ramp(first: usize, max: usize) -> (usize, usize) {
+        crate::exec::stream_pipeline::testing::set_block_ramp(first, max)
+    }
+
+    /// Clears the per-query streaming statistics.
+    pub fn reset_stats() {
+        crate::exec::stream_pipeline::testing::reset_stats()
+    }
+
+    /// `(fired, blocks_run, seed_rows_processed, seed_rows_total)` since the last
+    /// [`reset_stats`].
+    pub fn stats() -> (bool, usize, usize, usize) {
+        crate::exec::stream_pipeline::testing::stats()
+    }
+}
+
 /// Test-only surface for the OPT-IN characteristic-set anchor-incidence prune (bead
 /// `sq-jnb1e`, the `cs-anchor-incidence` feature): toggle the prune and read whether it fired
 /// plus how many candidate predicates it eliminated, so the differential acceptance test can
@@ -1100,9 +1135,33 @@ pub fn query_json_chunks_with_budget(graph: &Graph, sparql: &str, budget: &Query
 ///
 /// [OPUS-4.8] (sq-7d3dj.34.2) This is the TTFB-streaming entry point: the server sinks each
 /// chunk straight onto the HTTP socket, so the results header + early solutions are written
-/// before the whole result is serialised — and, for the single-pattern scan fast path,
-/// before the scan even finishes. The concatenation of the chunks handed to `sink` is
-/// **byte-identical** to [`query_json_with_budget`] for the same query and budget.
+/// before the whole result is serialised — for the single-pattern scan fast path before the
+/// scan even finishes, and for classified bind-join chains ([FABLE-5] sq-7d3dj.34.2.3, the
+/// streaming pipeline) before the join completes.
+///
+/// # Emission-order contract (two modes)
+///
+/// Per the design record `research/lazy-pull-incremental-emission.md` §5.1 (decision
+/// `sq-7d3dj.34.2.7`), the solution order of the emitted document is:
+///
+/// * **Byte-identical (structural):** every shape OUTSIDE the streaming pipeline's
+///   classifier — the buffered general path and the single-pattern scan fast path — is
+///   emitted exactly as before: the concatenation of the chunks handed to `sink` is
+///   byte-identical to [`query_json_with_budget`]'s historical buffered output.
+/// * **Deterministic-relaxed (admitted bind-join chains):** a classified
+///   `[LIMIT/OFFSET] [DISTINCT] SELECT` over a seed+bind-join BGP/UNION chain is emitted in
+///   the documented **seed-lex order** — seed blocks in seed-scan order, seed rows in order
+///   within a block, each row's matches contiguous in match-scan order — which is
+///   deterministic (a re-run is byte-identical to itself) but MAY differ from the retired
+///   fully-buffered order. The solutions are per-shape equivalent to the buffered result:
+///   set-equal under `DISTINCT`, multiset-equal otherwise, and under `LIMIT`/`OFFSET` a
+///   sub-multiset of the un-sliced buffered result with the buffered sliced count. Admitted
+///   shapes never include `ORDER BY` (a SPARQL solution multiset carries no order guarantee
+///   without it).
+///
+/// The classification is independent of the chunking, so this entry point,
+/// [`query_json_chunks_with_budget`] and [`query_json_with_budget`] always agree
+/// byte-for-byte WITH EACH OTHER for the same query and budget.
 ///
 /// `sink` returns [`std::ops::ControlFlow::Break`] to stop early (the consumer went away —
 /// e.g. the HTTP client disconnected); the engine then abandons the remaining work. A
@@ -1110,7 +1169,9 @@ pub fn query_json_chunks_with_budget(graph: &Graph, sparql: &str, budget: &Query
 /// as on the buffered path, but note that on this streaming path some chunks may already
 /// have been handed to `sink` (and flushed to the socket) when the trip is detected — a
 /// post-first-byte trip cannot change the already-sent HTTP status, so the caller truncates
-/// the body (see the server's `stream_select_json`).
+/// the body (see the server's `stream_select_json`). A trip may truncate a DIFFERENT
+/// solution prefix on the streamed vs the buffered path (seed-lex vs buffered order); both
+/// surface as a truncated body / `Err`, never a clean short 200.
 pub fn query_json_stream_with_budget(
     graph: &Graph,
     sparql: &str,
@@ -1127,7 +1188,10 @@ pub fn query_json_stream_with_budget(
 /// algebra straight here, so the streamed SELECT-JSON body is produced without the engine
 /// re-parsing the query string — the per-request parse is paid exactly once, not twice. The
 /// concatenation of the chunks handed to `sink` is byte-identical to
-/// [`query_json_stream_with_budget`] for the same query and budget.
+/// [`query_json_stream_with_budget`] for the same query and budget, and inherits its
+/// two-mode emission-order contract ([FABLE-5] sq-7d3dj.34.2.3): byte-identical to the
+/// buffered path where structural, deterministic seed-lex order for admitted bind-join
+/// chains (design record `research/lazy-pull-incremental-emission.md` §5.1).
 pub fn query_json_stream_prepared_with_budget(
     graph: &Graph,
     prepared: &PreparedQuery,
