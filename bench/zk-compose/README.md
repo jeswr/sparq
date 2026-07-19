@@ -100,7 +100,8 @@ snapshot) and then re-run the catalog generator to re-join the new numbers.
 
 `bb_gates_matrix.json` is the maintainer-requested (#769) **comparison surface**:
 for every `(commitment-method, circuit)` **configuration** it records whether the
-pair is **legal** (provable) and — per circuit — its ultra_honk `bb-gates`
+pair is **legal** (dispatch-compatible — see the load-bearing caveat below) and —
+per circuit — its ultra_honk `bb-gates`
 `circuit_size`. So the maintainer can compare the three commitment methods head to
 head: e.g. the `string-canonical` blake3-token integer FILTER lane
 (`filter_int_d2`) against the `dual-leaf` **value lane** (`filter_value_dl_int`) it
@@ -119,6 +120,16 @@ hand-typed that could drift:
   value handle (`dual-leaf` / the `value-only` research dial); string-lane members
   (scan, join, path, revoke, issuer, holder, the blake3-token `filter_*` lanes) are
   legal against `string-canonical` / `dual-leaf` but not `value-only`.
+
+**`legal: true` means DISPATCH-COMPATIBLE, not end-to-end provable today.** It says
+the `(method, circuit)` pair is *admitted* by the resolver rule — nothing more. It
+does **not** assert the configuration can currently be committed, proved, and
+verified end to end: the `dual-leaf` host-leaf encoding (sq-j506) is **not yet
+implemented**, and `resolve_circuit` is **not yet wired into `verify_manifest`**. So
+a `legal: true` cell records design-level (structural) legality under the still-
+unwired resolver, not an operational provable path — a distinction that is
+load-bearing on a ZK surface. Only `string-canonical` is implemented end-to-end
+today.
 
 An **illegal** cell carries `legal: false` + the fail-closed `reason` and NO
 per-cell gate number (the config does not exist, so it has no cost); the circuit's
