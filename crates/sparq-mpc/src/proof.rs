@@ -55,6 +55,19 @@
 //!
 //! Accordingly every method here returns [`MpcError::NotYetImplemented`] naming
 //! the gate. No method fakes a signature, a commitment opening, or a proof.
+//!
+//! ## M4-v1 prerequisites already split out (sq-34ml)
+//!
+//! Two BUILDABLE, non-research pieces of the verifier-side-attestation interim
+//! (sq-f7bu) are implemented crypto-free in [`crate::federated`] so they need not
+//! wait on the Q1 spike: the explicit OUT-OF-CIRCUIT freshness/replay binding
+//! (audit #4 — [`crate::federated::FreshnessBinding`]) and the federated /
+//! multi-source public-input layout spanning all holders' commitments/rows/
+//! attribution ([`crate::federated::reconstruct_federated_public_inputs`], each
+//! source segment byte-identical to the single-source audit-#1 layout). They lay
+//! out and bind public inputs and derive the message the out-of-circuit signature
+//! must cover; they do NOT verify a signature or emit a proof — that stays gated
+//! here.
 
 use crate::backend::MpcBackend;
 use crate::join::JoinPlan;

@@ -201,6 +201,16 @@ pub mod term_encode;
 // explicit. Composes EXISTING primitives only; proof.prove stays the honest stub.
 pub mod pipeline;
 pub mod proof;
+// [OPUS-4.8] sq-34ml: M4-v1 prerequisites — the explicit OUT-OF-CIRCUIT
+// freshness/replay binding (audit #4) + the federated/multi-source public-input
+// layout spanning all holders' commitments/rows/attribution (audit #1/#8), each
+// source segment byte-identical to the single-source
+// `sparq-zk-compose::verifier::reconstruct_public_inputs`. Scoping + out-of-circuit
+// binding ONLY — no signature gadget, no proof (those stay the `proof.rs` stubs,
+// gated on the ZK foundation + Q1). Split out of the M4 SPIKE (sq-bjl) so the
+// verifier-side-attestation interim (sq-f7bu) can progress. See the module docs +
+// research/mpc-m4-distributed-sig-feasibility.md §2/§4.
+pub mod federated;
 // [OPUS-4.8] sq-it50: the owned ChaCha20 CSPRNG backing SecureRng — private
 // implementation detail (not a public API), so its key schedule can be
 // ZeroizeOnDrop-scrubbed (which ecosystem rand_chacha cannot do from our side).
@@ -357,6 +367,11 @@ pub use pipeline::{
     OperatorRouting, Routing,
 };
 pub use proof::{Attestation, CollaborativeProof, ProofStatement};
+// [OPUS-4.8] sq-34ml: the M4-v1 freshness/replay binding + federated public-input
+// layout surface (out-of-circuit binding only; the attestation/proof stay stubbed).
+pub use federated::{
+    reconstruct_federated_public_inputs, FreshnessBinding, SourceSegment, Word, FRESHNESS_DOMAIN,
+};
 // [OPUS-4.8] sq-jnkm: the oblivious set-returning output path surface.
 pub use oblivious_join::{
     oblivious_join_output, oblivious_set_output, oblivious_set_output_hidden_keys, Candidate,
