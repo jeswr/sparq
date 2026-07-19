@@ -29,7 +29,6 @@ import { rovingTabIndex, useRovingTablist } from "@/lib/use-roving-tablist";
 import { SparqlEditor } from "@/components/sparql-editor";
 import { RdfEditor } from "@/components/rdf-editor";
 import { ResultCell } from "@/components/repl-result-cells";
-import { ResultGraphView } from "@/components/repl-graph-view";
 import { deriveGraph } from "@/lib/result-graph";
 import {
   loadSparq,
@@ -47,6 +46,16 @@ import {
   HERO_PREVIEW_ROWS,
 } from "@/data/hero-sample";
 import { withBasePath } from "@/lib/base-path";
+
+// [review #3601] The node-link SVG renderer loads through a LITERAL dynamic import() only when the
+// visitor actually switches to the Graph view — it must not sit in this (already-lazy) hero chunk
+// for the majority who never open Graph (site policy: rarely-used net-new frontend code loads on
+// the invocation path). The CHEAP eligibility check that decides whether to even offer the toggle
+// stays synchronous — it is `deriveGraph` (imported above, ~pure, dependency-free), not this
+// component — so the Table | Graph toggle still appears the instant a result is graph-shaped.
+const ResultGraphView = React.lazy(() =>
+  import("@/components/repl-graph-view").then((m) => ({ default: m.ResultGraphView })),
+);
 
 const XSD = "http://www.w3.org/2001/XMLSchema#";
 const NUMERIC_XSD = new Set(
@@ -457,7 +466,18 @@ export function HeroQueryRunner() {
             <PreviewTable />
           ) : results ? (
             showGraph ? (
-              <ResultGraphView results={results} />
+              // Suspense boundary for the lazily-imported renderer; the chunk is small and local,
+              // so the fallback is only briefly visible on the first Graph switch.
+              <React.Suspense
+                fallback={
+                  <div className="flex items-center justify-center gap-2 px-3 py-10 text-xs text-muted-foreground">
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                    Loading graph view…
+                  </div>
+                }
+              >
+                <ResultGraphView results={results} />
+              </React.Suspense>
             ) : (
               <ResultsTable results={results} dimmed={running || phase === "error"} />
             )

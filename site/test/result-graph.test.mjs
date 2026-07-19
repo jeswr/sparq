@@ -177,6 +177,36 @@ test("deriveGraph: literals with the same value but different datatype are disti
   assert.equal(g.nodes.length, 3);
 });
 
+test("deriveGraph: delimiter-containing lexical/datatype fields keep terms distinct (no key collision)", () => {
+  // Regression: the term identity key must be INJECTIVE. It once concatenated (value, datatype,
+  // lang) with a single-character delimiter, so a delimiter INSIDE one field could forge another
+  // term's key and merge two genuinely distinct literals into one node. The injective structural
+  // encoding must keep them apart under both attack shapes. The NUL char is built at runtime via
+  // fromCharCode so this SOURCE stays plain text (no raw NUL byte). Each case is
+  // [value_a, datatype_a, value_b, datatype_b], chosen so a and b collide if their fields are
+  // joined by the named single-character delimiter:
+  const NUL = String.fromCharCode(0);
+  const cases = [
+    [`a${NUL}b`, "c", "a", `b${NUL}c`], // collides under a raw-NUL join
+    ["a b", "c", "a", "b c"], // collides under a space join
+  ];
+  for (const [av, adt, bv, bdt] of cases) {
+    const g = deriveGraph({
+      head: { vars: ["s", "v"] },
+      results: {
+        bindings: [
+          { s: { type: "uri", value: "http://ex/a" }, v: { type: "literal", value: av, datatype: adt } },
+          { s: { type: "uri", value: "http://ex/a" }, v: { type: "literal", value: bv, datatype: bdt } },
+        ],
+      },
+    });
+    assert.ok(g, "the resource-linking result yields a graph");
+    // http://ex/a (shared) + two DISTINCT literals = 3 nodes. A key collision would merge to 2.
+    assert.equal(g.nodes.length, 3, "delimiter-containing fields must not collide into one node");
+    assert.equal(g.edges.length, 2, "each distinct literal keeps its own edge from the shared subject");
+  }
+});
+
 test("deriveGraph: more than MAX_GRAPH_NODES distinct terms is capped and flagged truncated", () => {
   // Build a star: one hub linked to (MAX + 10) distinct leaves. Distinct terms = hub + leaves.
   const leaves = MAX_GRAPH_NODES + 10;
