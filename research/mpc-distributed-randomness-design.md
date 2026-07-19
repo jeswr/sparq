@@ -77,7 +77,7 @@ here; `sq-qhy4` external sign-off remains pending for the whole crate.
 The load-bearing correctness invariant of the hidden-value join is the **nonzero-mask**
 guarantee of `secure_equal` / `secure_equal_to_bit`:
 
-```
+```text
 d = a − b            (secret-shared key difference)
 m = d · r            (r a secret-shared random mask)
 open(m):  m == 0  ⇔  d == 0  ⇔  a == b
