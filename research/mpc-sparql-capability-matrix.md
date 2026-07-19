@@ -547,8 +547,9 @@ track an ε budget) — NOT information-theoretic.
   the default. The danger operator is **equality** (and any operator that opens a value
   mid-computation): `secure_equal` OPENS a masked product mid-pipeline; naive sequential
   composition does not justify this, and per coZK eprint 2025/1026 proving/computing on an
-  inconsistent witness can LEAK honest inputs. A UC/composition design record is itself a gap
-  (see §7).
+  inconsistent witness can LEAK honest inputs. The composition/UC posture is recorded in
+  [`mpc-composition-uc-posture.md`](./mpc-composition-uc-posture.md) (sq-wj4k) — the open is
+  justified only against the bit-leaking `F_join` carried downstream.
 - **Robustness vs network.** Round-per-depth Shamir (sparq's family) degrades on WAN; the
   comparison/sort operators (O(log p) / O(log²n) rounds) are the WAN pain points. The
   constant-round answer (Rabbit/DGK for comparison; BMR garbled for deep Boolean) is a
