@@ -89,6 +89,12 @@ SELECT/ASK entry points (each has `_prepared`, `_with_budget`, and `_view` varia
 - `query_json_stream_with_budget(&Graph, &str, &QueryBudget, sink)` (+ the
   `query_json_stream_prepared_with_budget` no-re-parse variant over a `PreparedQuery`) —
   emits each JSON chunk to `sink` AS produced (TTFB streaming; the HTTP server's read path).
+  Two-mode emission-order contract (design record `research/lazy-pull-incremental-emission.md`
+  §5.1): the buffered general path and the single-pattern scan fast path stay **byte-identical**
+  to `query_json`; a classified `[LIMIT/OFFSET] [DISTINCT] SELECT` over a seed+bind-join chain
+  streams in **deterministic seed-lex order** — set-equal under `DISTINCT`, multiset-equal
+  otherwise, a same-count sub-multiset under `LIMIT`/`OFFSET` — which is per-shape equivalent to
+  the buffered result but may differ in solution order (admitted shapes never include `ORDER BY`).
 - `ask(&Graph, &str) -> Result<bool, String>` — requires an ASK query.
 - `count(&Graph, &str) -> Result<usize, String>` — solution count without materialising terms.
 
