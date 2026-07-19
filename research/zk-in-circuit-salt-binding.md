@@ -50,33 +50,64 @@ by making the salt provably load-bearing inside the proof itself.
 
 ## 3. Proposed in-circuit design (fix (b))
 
-Constrain each blank-node slot's encoding to be derived from a per-graph salt and a raw
-label digest, both witnessed, with the salt bound as a public input the verifier
-reconstructs from the issuer-attested value.
+Recompute every active term-position encoding in-circuit from a witnessed type code
+plus a witnessed `h_s` payload digest, deriving the blank-node branch from the type
+code, with the per-graph salt bound as a public input the verifier reconstructs from
+the issuer-attested value. Two properties are load-bearing and drive the layout:
 
-### 3.1 New witnesses (private) per slot
-- `is_bnode[g][i] : bool` — slot term is a blank node. Constrained consistent with the
-  existing type discipline (the encoding's `TYPE_CODE_BLANK_NODE` layer).
-- `label_digest[g][i] : Field` — `blake3(canonical_label)` truncated to 248 bits
-  (`field_from_hash_bytes`), the same `h_s` output the module already treats as a
-  witness for every term type (`encode.rs:16-24`: "the circuits must recompute `h_2`
-  layers only; `h_s` outputs are witnesses").
+1. **No free selector.** `TYPE_CODE_BLANK_NODE` lives *inside* the Poseidon layer of
+   `enc` (`encode.rs:56-59`) — the circuit sees only the already-hashed field element,
+   so there is no independently-bound type value to check a witnessed `is_bnode` bool
+   against. A free private selector would let a malicious prover declare
+   `is_bnode = false` for a blank-node encoding and skip the salt relation entirely.
+   The bnode branch must therefore be **derived from a constrained type code** whose
+   binding comes from recomputing `enc` itself (§3.3).
+2. **Per term position, not per triple slot.** The scan witness is
+   `enc[g][i][0..3]` — one encoding per subject/predicate/object position
+   (`scan.nr:92`). A triple can hold blank nodes in more than one position (subject
+   AND object) simultaneously, so selectors and digests are indexed `[g][i][j]` for
+   `j in 0..3`, never per slot.
+
+### 3.1 New witnesses (private) per term position `j in 0..3`
+- `type_code[g][i][j] : Field` — the term's type code, constrained to the allowed
+  domain `{TYPE_CODE_IRI, TYPE_CODE_LITERAL, TYPE_CODE_BLANK_NODE}` for active slots
+  (`(t-1)(t-2)(t-3) = 0` with the `encode.rs:33-35` constants). The bnode selector is
+  *derived* — `is_bnode := (type_code[g][i][j] == TYPE_CODE_BLANK_NODE)` — not
+  witnessed as an independent bool (property 1 above).
+- `payload_digest[g][i][j] : Field` — the `h_s` (Blake3) digest feeding the term's
+  outer `h2` layer, truncated to 248 bits (`field_from_hash_bytes`): `blake3(IRI)` /
+  `blake3(canonical N-Triples token)` for IRIs/literals, `blake3(canonical_label)`
+  for blank nodes — the same `h_s`-outputs-are-witnesses discipline the module
+  already fixes (`encode.rs:16-24`: "the circuits must recompute `h_2` layers only;
+  `h_s` outputs are witnesses").
 
 ### 3.2 New public input per graph
 - `salt[g] : Field` — the per-graph RDFC10 salt. Public so the verifier byte-binds it
   (same discipline as `commitments[g]`/`attribution[g]`).
 
-### 3.3 New in-circuit constraint (only for bnode slots)
-For every slot `i` in graph `g` with `is_bnode[g][i]`:
+### 3.3 New in-circuit constraint (every active term position — non-bypassable)
+For every graph `g`, slot `i`, and term position `j in 0..3`:
 ```
-inner   = h2(salt[g], label_digest[g][i])
-enc_bn  = h2(BLANK_NODE, inner)
-assert enc[g][i][pos] == enc_bn        // pos = the term position that is the bnode
+active = (i < counts[g])
+t      = type_code[g][i][j]
+d      = payload_digest[g][i][j]
+assert !active | ((t - IRI) * (t - LITERAL) * (t - BLANK_NODE) == 0)   // domain
+is_bn  = (t == BLANK_NODE)                       // DERIVED from t, never free
+salted = h2(salt[g], d)
+inner  = if is_bn { salted } else { d }          // mux; both arms computed
+assert !active | (enc[g][i][j] == h2(t, inner))  // full recompute binds t AND d
 ```
-Non-bnode positions keep the existing witness-encoding treatment (IRIs/literals are
-salt-independent, so no change). `h2`/`h3` are the existing Poseidon2 gadgets
-(`crate::hashes`), already cross-tested bit-identical to the Rust `poseidon2::hash`
-(`crates/sparq-zk/tests/poseidon2_noir_cross.rs`), so no new hash surface is introduced.
+The recompute covers **all** term types, not only bnode positions: IRIs/literals no
+longer supply `enc` directly — their `h_s` digest becomes the witness and the circuit
+recomputes `enc = h2(type, digest)`, exactly the `encode.rs` layering. This is what
+makes the selector non-bypassable: a real blank-node encoding is
+`h2(BLANK_NODE, h2(salt, label_digest))`, so claiming `t = IRI` for it requires a `d`
+with `h2(IRI, d) == enc` — a Poseidon2 second preimage. Padding / inactive slots
+(`i >= counts[g]`) are gated out by `active` and stay unconstrained under the new
+relation, matching their exclusion from `commit_fold` today. `h2`/`h3` are the
+existing Poseidon2 gadgets (`crate::hashes`), already cross-tested bit-identical to
+the Rust `poseidon2::hash` (`crates/sparq-zk/tests/poseidon2_noir_cross.rs`), so no
+new hash surface is introduced.
 
 ### 3.4 Public-input layout + verifier reconstruction
 - Append `salt[g]` (K field words, declaration order) to the scan member's public-input
@@ -98,17 +129,30 @@ These are the reason this cannot land without `nargo`/`bb`:
    VK / `derive_id` circuit-id fixture for those members must be regenerated.
 2. **Re-anchor `crates/sparq-zk-compose/tests/gate_count_snapshot.json`** — the added
    Poseidon2 layers raise the gate count; capture the new `bb gates` figure (do not
-   hand-edit; run the tool). Expect a modest per-bnode-slot increase (two `h2` calls per
-   constrained slot); size it with `bb gates` before claiming any number.
-3. **Differential test (result-equivalence):** for random graphs with blank nodes,
-   assert the in-circuit `enc_bn` equals the off-circuit `encode_term` output for the
-   same `(salt, label)` — the circuit must reproduce `encode.rs:56-59` exactly.
-4. **Forge test (goes RED on the attack):** a prover that supplies a bnode `enc` NOT
-   equal to `h2(BLANK_NODE, h2(salt_g, label_digest))` — i.e. a cross-graph
-   correlation handle built by reusing another graph's salted leaf — must now FAIL the
-   in-circuit assertion (today it passes the circuit and is only caught, if at all, by
-   the outer uniqueness gate). Add to the audit-#9 row of the forge-and-verify MAP
-   (sq-1gir) alongside the existing `SaltReused` reject.
+   hand-edit; run the tool). The recompute is per **term position for every active
+   slot** (two `h2` calls per position — the salted candidate plus the outer
+   recompute — i.e. six per triple slot), not per bnode slot only; size it with
+   `bb gates` before claiming any number, and if the K·N·6 `h2` budget proves too
+   heavy, that is an escalation back to the architect, not a license to reintroduce
+   a free selector.
+3. **Differential test (result-equivalence):** for random graphs with blank nodes —
+   including triples holding blank nodes in subject AND object simultaneously —
+   assert the in-circuit recompute equals the off-circuit `encode_term` output for
+   every term position and `(salt, label)` — the circuit must reproduce
+   `encode.rs:46-62` exactly.
+4. **Forge tests (go RED on the attack):**
+   - *Wrong salted leaf:* a prover that supplies a bnode `enc` NOT equal to
+     `h2(BLANK_NODE, h2(salt_g, label_digest))` — i.e. a cross-graph correlation
+     handle built by reusing another graph's salted leaf — must FAIL the in-circuit
+     assertion (today it passes the circuit and is only caught, if at all, by the
+     outer uniqueness gate).
+   - *Selector-forcing bypass:* a prover that supplies a genuine blank-node encoding
+     but witnesses `type_code = TYPE_CODE_IRI` (forcing the derived `is_bnode`
+     false) must FAIL witness generation / proving — satisfying the recompute would
+     require a Poseidon2 second preimage. This is the attack a free `is_bnode` bool
+     would have admitted; the test pins that the derived-selector design closes it.
+   - Add both to the audit-#9 row of the forge-and-verify MAP (sq-1gir) alongside
+     the existing `SaltReused` reject.
 5. **Real-bb e2e** in the toolchain-gated CI lane (`.github/workflows/zk-toolchain.yml`)
    proving a non-revoked credential still VERIFIES with the new public input present.
 
