@@ -12,6 +12,7 @@ import {
   circularLayout,
   MAX_GRAPH_NODES,
 } from "../src/lib/result-graph.ts";
+import { isGraphShaped } from "../src/lib/result-graph-shape.ts";
 
 const XSD = "http://www.w3.org/2001/XMLSchema#";
 
@@ -226,6 +227,67 @@ test("deriveGraph: more than MAX_GRAPH_NODES distinct terms is capped and flagge
   const ids = new Set(g.nodes.map((n) => n.id));
   for (const e of g.edges) {
     assert.ok(ids.has(e.source) && ids.has(e.target));
+  }
+});
+
+// [review #3601] The cheap eligibility predicate the hero uses to decide whether to OFFER the Graph
+// toggle — WITHOUT eagerly running the full deriveGraph node/edge construction for every result.
+// Its whole contract is that it must AGREE with `deriveGraph(...) !== null` (deriveGraph now uses it
+// as its precondition gate), so the toggle never appears for a result that would draw no graph.
+test("isGraphShaped: agrees with deriveGraph!==null across the derivation fixtures", () => {
+  const noPair = {
+    head: { vars: ["s", "o"] },
+    results: {
+      bindings: [
+        { s: { type: "uri", value: "http://ex/a" } },
+        { o: { type: "uri", value: "http://ex/b" } },
+      ],
+    },
+  };
+  const selfRef = {
+    head: { vars: ["a", "b"] },
+    results: {
+      bindings: [
+        { a: { type: "uri", value: "http://ex/same" }, b: { type: "uri", value: "http://ex/same" } },
+      ],
+    },
+  };
+  const aggregate = {
+    head: { vars: ["name", "total"] },
+    results: {
+      bindings: [
+        { name: { type: "literal", value: "Ada" }, total: { type: "literal", value: "7300", datatype: `${XSD}integer` } },
+      ],
+    },
+  };
+  const optionalMid = {
+    head: { vars: ["s", "p", "o"] },
+    results: {
+      bindings: [{ s: { type: "uri", value: "http://ex/s" }, o: { type: "uri", value: "http://ex/o" } }],
+    },
+  };
+  const singleCol = {
+    head: { vars: ["s"] },
+    results: { bindings: [{ s: { type: "uri", value: "http://ex/a" } }] },
+  };
+  const empty = { head: { vars: ["s", "o"] }, results: { bindings: [] } };
+
+  // Graph-shaped ⇒ true; not graph-shaped ⇒ false — and it must MATCH deriveGraph in every case.
+  for (const [label, r, expected] of [
+    ["WROTE (resource→resource)", WROTE, true],
+    ["optional middle column", optionalMid, true],
+    ["no adjacent bound pair", noPair, false],
+    ["self-reference only", selfRef, false],
+    ["pure literal aggregate", aggregate, false],
+    ["single column", singleCol, false],
+    ["empty result", empty, false],
+  ]) {
+    assert.equal(isGraphShaped(r), expected, `${label}: isGraphShaped`);
+    assert.equal(
+      isGraphShaped(r),
+      deriveGraph(r) !== null,
+      `${label}: isGraphShaped must agree with deriveGraph!==null`,
+    );
   }
 });
 

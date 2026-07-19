@@ -15,6 +15,7 @@
 
 import type { SparqlResults, SparqlTerm } from "./sparq-wasm";
 import { curie } from "./curie";
+import { isGraphShaped } from "./result-graph-shape";
 
 /** The most nodes the compact node-link view draws; beyond this the caller shows a truncation note. */
 export const MAX_GRAPH_NODES = 24;
@@ -74,9 +75,11 @@ function nodeLabel(t: SparqlTerm): string {
  * the same graph (and the same layout downstream).
  */
 export function deriveGraph(results: SparqlResults): ResultGraph | null {
+  // Precondition gate — the SAME cheap predicate the hero uses to decide whether to offer the
+  // toggle, so the two can never disagree about what is "graph-shaped" (see result-graph-shape.ts).
+  if (!isGraphShaped(results)) return null;
   const vars = results.head?.vars ?? [];
   const rows = results.results?.bindings ?? [];
-  if (vars.length < 2 || rows.length === 0) return null;
 
   const nodes = new Map<string, GraphNode>();
   const allKeys = new Set<string>(); // distinct-term count INCLUDING terms dropped past the cap

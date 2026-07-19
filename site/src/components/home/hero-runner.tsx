@@ -29,7 +29,7 @@ import { rovingTabIndex, useRovingTablist } from "@/lib/use-roving-tablist";
 import { SparqlEditor } from "@/components/sparql-editor";
 import { RdfEditor } from "@/components/rdf-editor";
 import { ResultCell } from "@/components/repl-result-cells";
-import { deriveGraph } from "@/lib/result-graph";
+import { isGraphShaped } from "@/lib/result-graph-shape";
 import {
   loadSparq,
   loadIntoStore,
@@ -47,12 +47,15 @@ import {
 } from "@/data/hero-sample";
 import { withBasePath } from "@/lib/base-path";
 
-// [review #3601] The node-link SVG renderer loads through a LITERAL dynamic import() only when the
-// visitor actually switches to the Graph view — it must not sit in this (already-lazy) hero chunk
-// for the majority who never open Graph (site policy: rarely-used net-new frontend code loads on
-// the invocation path). The CHEAP eligibility check that decides whether to even offer the toggle
-// stays synchronous — it is `deriveGraph` (imported above, ~pure, dependency-free), not this
-// component — so the Table | Graph toggle still appears the instant a result is graph-shaped.
+// [review #3601] The node-link SVG renderer AND the full node/edge derivation (deriveGraph, which
+// repl-graph-view imports) load through a LITERAL dynamic import() only when the visitor actually
+// switches to the Graph view — neither may sit in this (already-lazy) hero chunk for the majority
+// who never open Graph (site policy: rarely-used net-new frontend code loads on the invocation
+// path). The CHEAP eligibility check that decides whether to even OFFER the toggle stays
+// synchronous — it is `isGraphShaped` (imported above), an allocation-free scan that mirrors
+// deriveGraph's decline conditions WITHOUT building the node/edge maps — so the Table | Graph
+// toggle still appears the instant a result is graph-shaped, without eagerly running the full
+// derivation for every result.
 const ResultGraphView = React.lazy(() =>
   import("@/components/repl-graph-view").then((m) => ({ default: m.ResultGraphView })),
 );
@@ -212,8 +215,8 @@ export function HeroQueryRunner() {
   const [error, setError] = React.useState<string | null>(null);
   const [engineReady, setEngineReady] = React.useState(false);
   // [OPUS-4.8] sq-vw3ax.10 — result view: the typed Table (default) or the node-link Graph. The
-  // Graph toggle only appears when the LIVE result is entity-relationship shaped (deriveGraph is
-  // non-null); a non-graph result silently falls back to the table, so a stale "graph" choice can
+  // Graph toggle only appears when the LIVE result is entity-relationship shaped (isGraphShaped is
+  // true); a non-graph result silently falls back to the table, so a stale "graph" choice can
   // never render an empty picture.
   const [resultView, setResultView] = React.useState<"table" | "graph">("table");
 
@@ -301,12 +304,14 @@ export function HeroQueryRunner() {
 
   const running = phase === "running";
   const rowCount = results?.results?.bindings?.length ?? 0;
-  // The node-link Graph view is offered only when the settled result is genuinely graph-shaped.
-  const graphResult = React.useMemo(
-    () => (results ? deriveGraph(results) : null),
-    [results],
+  // The node-link Graph view is offered only when the settled result is genuinely graph-shaped. We
+  // run only the CHEAP eligibility predicate here (isGraphShaped) — never the full node/edge
+  // derivation — so the majority who never open Graph don't pay for it; deriveGraph + the SVG
+  // renderer load lazily (ResultGraphView) the first time a visitor actually switches to Graph.
+  const graphAvailable = React.useMemo(
+    () => phase === "done" && results !== null && isGraphShaped(results),
+    [phase, results],
   );
-  const graphAvailable = phase === "done" && graphResult !== null;
   const showGraph = resultView === "graph" && graphAvailable;
 
   return (
