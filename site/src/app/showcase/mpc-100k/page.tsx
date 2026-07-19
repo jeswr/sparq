@@ -20,7 +20,7 @@ export const metadata: Metadata = {
     "Four flatmates learn only whether their combined income clears a £100k threshold — no salary, and not even the exact total, is revealed. A faithful in-tab illustration of the sparq-mpc secure-threshold protocol — not the hardened crate, and not a proof of correctness.",
 };
 
-const REPO_URL = "https://github.com/jeswr/sparq";
+const REPO_URL = "https://github.com/sparq-org/sparq";
 
 export default function MpcFlagshipPage() {
   return (
