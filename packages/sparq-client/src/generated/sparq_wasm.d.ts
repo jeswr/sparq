@@ -524,6 +524,8 @@ export interface InitOutput {
     readonly store_explainPlanJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly store_heapBytes: (a: number) => number;
     readonly store_load: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly store_loadBytes: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly store_loadBytesWithBase: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly store_loadCompressed: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly store_loadDataset: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly store_loadWithBase: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
