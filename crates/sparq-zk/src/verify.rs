@@ -589,7 +589,17 @@ pub fn extract_expr(e: &Expression) -> Result<ExprTree, VerifyError> {
             let mut args = Vec::with_capacity(1 + list.len());
             args.push(extract_expr(a)?);
             for item in list {
-                args.push(extract_expr(item)?);
+                // §5.1: IN is membership against a CONSTANT list only — the
+                // proof construction enumerates constant candidates. A
+                // variable or operator node on the RHS is outside the estate.
+                match item {
+                    E::NamedNode(_) | E::Literal(_) => args.push(extract_expr(item)?),
+                    other => {
+                        return Err(VerifyError::UnsupportedFragment(format!(
+                            "non-constant IN list item {other:?} (§5.1: IN takes a constant list)"
+                        )));
+                    }
+                }
             }
             Ok(ExprTree::Node { op: ExprOp::In, args })
         }
@@ -757,11 +767,24 @@ fn extract_regex_like(op: ExprOp, args: &[Expression]) -> Result<ExprTree, Verif
     Ok(ExprTree::Node { op, args: out })
 }
 
-/// The lexical value of a constant string literal expression, else `None`.
-/// Used to vet REGEX/REPLACE pattern/replacement/flags constancy.
+/// xsd:string datatype IRI — the only literal category `const_string` accepts.
+const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
+
+/// The lexical value of a constant STRING literal expression — a simple
+/// literal or an explicit `xsd:string` typed literal (oxrdf normalizes the
+/// two to the same value) — else `None`. Used to vet REGEX/REPLACE
+/// pattern/replacement/flags constancy. A typed non-string literal (numeric,
+/// boolean, date/time, …) or a language-tagged string is NOT a valid
+/// pattern/flags/replacement operand for the bounded string-matching circuit
+/// semantics and fails closed, per the SPARQL contract that these arguments
+/// are simple literals.
 fn const_string(e: &Expression) -> Option<String> {
     match e {
-        Expression::Literal(l) => Some(l.value().to_string()),
+        Expression::Literal(l)
+            if l.language().is_none() && l.datatype().as_str() == XSD_STRING =>
+        {
+            Some(l.value().to_string())
+        }
         _ => None,
     }
 }
@@ -813,8 +836,11 @@ fn collect_expr_leaf_vars(tree: &ExprTree, out: &mut BTreeSet<String>) {
 
 /// Re-derive every FILTER condition and BIND (`Extend`) target expression tree
 /// from the query text alone (an independent `spargebra` parse), in query
-/// order, FAIL-CLOSED on any expression or structural form outside the §5.1 IN
-/// set. The neutral trees are what the compose verifier (`sq-3kd2g.9`) binds a
+/// EVALUATION order — inner-first over the algebra (a later FILTER/BIND nests
+/// OUTSIDE an earlier one in spargebra, and a group's FILTERs apply at group
+/// end per the SPARQL translation), left-to-right across joins — so a BIND
+/// target is always emitted before any obligation that consumes it.
+/// FAIL-CLOSED on any expression or structural form outside the §5.1 IN set. The neutral trees are what the compose verifier (`sq-3kd2g.9`) binds a
 /// node-per-operator sub-proof estate against; this is the query side only.
 ///
 /// This is a SEPARATE entry point from `fragment_filters` (the stage-1
@@ -843,16 +869,22 @@ fn collect_expr_obligations_gp(
 ) -> Result<(), VerifyError> {
     match gp {
         GraphPattern::Bgp { .. } => Ok(()),
+        // Spargebra nests LATER operations OUTSIDE earlier ones (a FILTER
+        // over a BIND parses as `Filter { inner: Extend { .. } }`), so
+        // evaluation order = inner-first: traverse the inner pattern BEFORE
+        // appending the enclosing obligation.
         GraphPattern::Filter { expr, inner } => {
+            collect_expr_obligations_gp(inner, out)?;
             out.push(ExprObligation::Filter(extract_expr(expr)?));
-            collect_expr_obligations_gp(inner, out)
+            Ok(())
         }
         GraphPattern::Extend { inner, variable, expression } => {
+            collect_expr_obligations_gp(inner, out)?;
             out.push(ExprObligation::Bind {
                 target: variable.as_str().to_string(),
                 expr: extract_expr(expression)?,
             });
-            collect_expr_obligations_gp(inner, out)
+            Ok(())
         }
         GraphPattern::Join { left, right } => {
             collect_expr_obligations_gp(left, out)?;
@@ -2423,6 +2455,20 @@ mod tests {
                 format!("?a IN ({}, {})", xi(1), xi(2)),
                 en(ExprOp::In, vec![evar("a"), cint(1), cint(2)]),
             ),
+            // IN constant list with an IRI item.
+            (
+                format!("?a IN (<http://ex/x>, {})", xi(2)),
+                en(
+                    ExprOp::In,
+                    vec![
+                        evar("a"),
+                        ExprTree::Const(oxrdf::Term::NamedNode(
+                            oxrdf::NamedNode::new("http://ex/x").unwrap(),
+                        )),
+                        cint(2),
+                    ],
+                ),
+            ),
             // NOT IN stays `Not(In)`.
             (
                 format!("?a NOT IN ({})", xi(1)),
@@ -2493,6 +2539,12 @@ mod tests {
                 "REGEX(?a, \"abc\", \"\")".into(),
                 en(ExprOp::Regex, vec![evar("a"), cstr("abc")]),
             ),
+            // An explicit `xsd:string` typed pattern is the same accepted
+            // string category as a simple literal (oxrdf normalizes them).
+            (
+                format!("REGEX(?a, \"abc\"^^<{XSD_STRING}>)"),
+                en(ExprOp::Regex, vec![evar("a"), cstr("abc")]),
+            ),
             // Bounded REPLACE (literal pattern + constant replacement) nested
             // in an equality.
             (
@@ -2523,6 +2575,36 @@ mod tests {
                 target: "u".into(),
                 expr: en(ExprOp::UCase, vec![evar("a")]),
             }]
+        );
+    }
+
+    #[test]
+    fn expr_obligations_are_in_evaluation_order() {
+        // BIND(?u), BIND(?n over ?u), FILTER(?n): spargebra nests each later
+        // step OUTSIDE the earlier one (`Filter { Extend(n) { Extend(u) {
+        // Bgp }}}`), so a pre-order emission would reverse the chain. The
+        // extractor must emit evaluation order — each BIND target before
+        // every obligation that consumes it.
+        let q = format!(
+            "SELECT * WHERE {{ ?s <http://ex/p> ?a \
+             BIND(UCASE(?a) AS ?u) \
+             BIND(STRLEN(?u) AS ?n) \
+             FILTER(?n > \"3\"^^<{XSD_INTEGER}>) }}"
+        );
+        let obs = fragment_expr_trees(&q).unwrap();
+        assert_eq!(
+            obs,
+            vec![
+                ExprObligation::Bind {
+                    target: "u".into(),
+                    expr: en(ExprOp::UCase, vec![evar("a")]),
+                },
+                ExprObligation::Bind {
+                    target: "n".into(),
+                    expr: en(ExprOp::StrLen, vec![evar("u")]),
+                },
+                ExprObligation::Filter(en(ExprOp::Gt, vec![evar("n"), cint(3)])),
+            ]
         );
     }
 
@@ -2558,6 +2640,19 @@ mod tests {
         rejects_filter("?a = UUID()");
         rejects_filter("?a = STRUUID()");
         rejects_filter("isBlank(BNODE())");
+
+        // IN with a non-constant RHS item (§5.1: constant list only).
+        rejects_filter("?a IN (?b)"); // variable item
+        rejects_filter(
+            "?a IN (\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>, ?c + \"1\"^^<http://www.w3.org/2001/XMLSchema#integer>)",
+        ); // computed item
+
+        // REGEX/REPLACE constant operands must be STRING literals — a typed
+        // non-string literal or a language-tagged string fails closed.
+        rejects_filter("REGEX(?a, 123)"); // numeric pattern
+        rejects_filter("REGEX(?a, \"abc\"@en)"); // language-tagged pattern
+        rejects_filter("REGEX(?a, \"abc\", true)"); // non-string flags
+        rejects_filter("REPLACE(?a, \"ab\", 12) = \"x\""); // non-string replacement
 
         // Full REGEX beyond the bounded literal/anchored subset.
         rejects_filter("REGEX(?a, \"a.c\")"); // metacharacter `.`
