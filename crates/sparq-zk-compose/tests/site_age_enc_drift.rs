@@ -186,12 +186,17 @@ fn capture_manifest_operand_enc_matches_native_encoder() {
     let map_hex = parse_age_operand_enc(&ts)
         .into_iter()
         .find(|(age, _)| *age == captured_age)
-        .map(|(_, hex)| hex);
-    if let Some(map_hex) = map_hex {
-        assert_eq!(
-            operand_enc, map_hex,
-            "capture-zk-manifest.mjs OPERAND_ENC and AGE_OPERAND_ENC[{captured_age}] disagree — \
-             the captured and live-proving anchors must be identical (sq-1s2.4)"
-        );
-    }
+        .map(|(_, hex)| hex)
+        .unwrap_or_else(|| {
+            panic!(
+                "AGE_OPERAND_ENC has no entry for CAPTURED_AGE {captured_age} — the captured \
+                 manifest proves an age the live prover cannot; add {captured_age} to \
+                 AGE_OPERAND_ENC in site/src/lib/zk-prover.ts (sq-1s2.4)"
+            )
+        });
+    assert_eq!(
+        operand_enc, map_hex,
+        "capture-zk-manifest.mjs OPERAND_ENC and AGE_OPERAND_ENC[{captured_age}] disagree — \
+         the captured and live-proving anchors must be identical (sq-1s2.4)"
+    );
 }
