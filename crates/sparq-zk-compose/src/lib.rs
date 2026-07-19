@@ -33,6 +33,12 @@ pub mod driver;
 // [OPUS-4.8] sq-xqfg (HolderPoP T5): in-circuit holder-PoK host-side wiring (B2).
 pub mod holder;
 pub mod issuer;
+// [OPUS-4.8] sq-rsd3v.1: the single-use NULLIFIER primitive (in-circuit
+// Poseidon2([ZKSIG_NF, hsk, epoch]) bound to holder possession) + verifier-side
+// per-epoch double-spend seen-set gate. OPT-IN behind `zk-nullifier` (OFF by
+// default); NEW in-circuit soundness surface, NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "zk-nullifier")]
+pub mod nullifier;
 pub mod manifest;
 pub mod revocation;
 pub mod toml;
@@ -84,6 +90,13 @@ pub use holder::{holder_pok_prover_toml, holder_pok_witness, HolderPokWitness};
 pub use holder::{
     holder_set_membership_witness, holder_set_membership_witness_sparse, holder_set_prover_toml,
     holder_set_root, holder_set_root_sparse, HolderSetWitness,
+};
+// [OPUS-4.8] sq-rsd3v.1: single-use nullifier host helpers + the verifier-side
+// per-epoch double-spend gate (`SeenNullifiers`, blanket-impl over any `SeenNonces`
+// store). Opt-in (`zk-nullifier`), NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "zk-nullifier")]
+pub use nullifier::{
+    nullifier_prover_toml, nullifier_seen_key, nullifier_witness, NullifierWitness, SeenNullifiers,
 };
 // [OPUS-4.8] audit #4: verifier-issued nonce + single-use store.
 // [OPUS-4.8] sq-aih: FileSeenNonces is the DURABLE (restart-surviving) store;
