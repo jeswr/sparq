@@ -5,7 +5,9 @@
 #
 # Builds bench/zk-compose/bb_gates_matrix.json — the maintainer-requested (#769)
 # comparison surface: for every (commitment-method, circuit) CONFIGURATION, is the
-# pair LEGAL (provable), and — for the circuit — what is its ultra_honk bb-gates
+# pair LEGAL (dispatch-compatible under the unwired resolver rule — NOT a claim the
+# config is wired end-to-end and provable today; see the caveat below), and — for
+# the circuit — what is its ultra_honk bb-gates
 # `circuit_size`. So the maintainer can compare, e.g., the string-canonical
 # blake3-token FILTER lane (filter_int = 17,416 gates) against the dual-leaf
 # value lane (filter_value_dl_int = 3,033 gates) it unlocks, and see exactly which
@@ -20,7 +22,8 @@
 #     and sparql_catalog.py use. A gate number is NEVER written here.
 #   * The LEGALITY axis ((method, circuit) legal/illegal) mirrors the FAIL-CLOSED
 #     dispatch rule of crates/sparq-zk-compose/src/dispatch.rs (`resolve_circuit`,
-#     sq-cfmv) — the single source of truth for which pairs are provable. The
+#     sq-cfmv) — the single source of truth for which pairs the resolver
+#     structurally admits. The
 #     committed JSON is cross-checked against BOTH the snapshot AND (under the
 #     `dual-leaf` feature) the real `resolve_circuit` resolver by the Rust gate
 #     crates/sparq-zk-compose/tests/bb_gates_matrix.rs, so a divergence is a hard
@@ -39,6 +42,15 @@
 #     against `value-only` (which dropped the lexical handle).
 #
 # HONESTY is load-bearing:
+#   * `legal: true` means DISPATCH-COMPATIBLE, NOT end-to-end provable today. A
+#     legal cell records that the (method, circuit) pair is *admitted* by the
+#     resolver rule — design-level (structural) legality — and nothing more. It
+#     does NOT assert the config can currently be committed, proved, and verified
+#     end to end: the `dual-leaf` host-leaf encoding (sq-j506) is NOT yet
+#     implemented, and `resolve_circuit` is NOT yet wired into `verify_manifest`.
+#     Only `string-canonical` is implemented end-to-end today. This is the SAME
+#     structural, unwired meaning the README honesty note and the Rust gate's
+#     doc-comment (crates/sparq-zk-compose/tests/bb_gates_matrix.rs) use.
 #   * NON-CANONICAL. bb-gates are measured on the work-box; they are a comparison
 #     tool, NOT a canonical performance number (AGENTS.md; the bead: "NON-canonical
 #     on work-box"). The circuit_size values here are exactly the snapshot's.
@@ -79,6 +91,14 @@ SNAPSHOT_JSON = os.path.normpath(
 # (never production); it is included so the matrix is the COMPLETE (method x
 # circuit) surface the maintainer compares, exactly as dispatch.rs's exhaustive
 # legality sweep covers it under the `commitment-value-only` feature.
+#
+# `production_selectable` is narrowly ENUM/REGISTRY selectability: whether the
+# method is a non-research member of the `CommitmentMethod` enum / `ZK_SCHEME_*`
+# registry that a production config is allowed to name — NOT a claim it is
+# operationally usable end-to-end today. `dual-leaf` is registry-selectable but its
+# host-leaf encoding (sq-j506) is unimplemented and `resolve_circuit` is not wired
+# into `verify_manifest`, so it is not yet an operational path (see the header
+# HONESTY note); `value-only` is a research dial and never selectable in production.
 METHODS = [
     {
         "key": "string-canonical",
