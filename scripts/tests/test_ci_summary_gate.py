@@ -1098,6 +1098,26 @@ class TestFeatureMatrixReporterAwait(unittest.TestCase):
     past the gate — absence keeps the gate polling and FAILS CLOSED at timeout."""
 
     # ---- pure predicates ----------------------------------------------------
+    def test_zero_leg_skeleton_placeholder_is_not_group_presence(self):
+        """The unexpanded `${{ matrix.group }}` skeleton (zero-leg run, skipped) must
+        NOT trigger the reporter requirement — production incident PR #3524: every
+        docs/config-only PR timed out RED awaiting a verdict the reporter correctly
+        never posts on a zero-leg run."""
+        runs = [
+            {"name": "opt-in group (${{ matrix.group }})", "status": "completed",
+             "conclusion": "skipped", "details_url": ""},
+        ]
+        self.assertFalse(g.is_fm_group(runs[0]["name"]))
+        self.assertEqual(g.fm_report_status(runs), "n/a")
+
+    def test_real_group_name_still_counts(self):
+        runs = [
+            {"name": "opt-in group (g01 sparq-engine)", "status": "completed",
+             "conclusion": "success", "details_url": "https://github.com/o/r/actions/runs/123/job/9"},
+        ]
+        self.assertTrue(g.is_fm_group(runs[0]["name"]))
+        self.assertEqual(g.fm_report_status(runs), "pending")
+
     def test_predicate_contract(self):
         self.assertTrue(g.is_fm_group("opt-in group (sparq-engine 1/2)"))
         self.assertFalse(g.is_fm_group("opt-in sparq-engine (paths)"),

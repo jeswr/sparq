@@ -436,8 +436,17 @@ def is_fm_group(name: str) -> bool:
     their own conclusions directly on the head SHA (no privileged token), so their
     PRESENCE is the robust, reporter-timing-independent proof that legs were
     selected and the trusted `feature-matrix report` reporter must post its
-    verdict for this head."""
-    return name.startswith(FM_GROUP_PREFIX)
+    verdict for this head.
+
+    ZERO-LEG SKELETON (production incident, PR #3524 2026-07-19): when the setup
+    job selects ZERO legs the skipped matrix job still posts ONE skeleton
+    check-run named with the UNEXPANDED placeholder — literally
+    `opt-in group (${{ matrix.group }})`, conclusion=skipped. That is proof legs
+    did NOT run; counting it as group presence made every docs/config-only PR
+    await a reporter verdict the reporter correctly never posts (zero-leg no-op)
+    and time out RED after the full gate budget. A REAL group check has an
+    expanded name (no `${{`)."""
+    return name.startswith(FM_GROUP_PREFIX) and "${{" not in name
 
 
 def is_fm_report(name: str) -> bool:
