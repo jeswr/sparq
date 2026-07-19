@@ -89,7 +89,7 @@ flag where sparq also satisfies **silver/gold**.
 - **`tests_documented_added`** — Met — PR template checklist ties changes to the post-batch re-evaluation table; ratchets enforce non-regression.
 - **`warnings`** — Met — clippy lints enabled.
 - **`warnings_fixed`** — Met — clippy `-D warnings` is a **hard gate** (`ci.yml`), so no warnings can land.
-- **`warnings_strict`** — Met — `cargo clippy --workspace --all-targets -- -D warnings` (full-workspace, all-targets) is the **hard gate** ([`ci.yml`](../../.github/workflows/ci.yml) `clippy (gate) + fmt (non-blocking)` job). *(This is the gold-level strict-warnings posture; the criterion rests on the clippy hard-gate. `cargo fmt --all --check` runs **informationally**, not gating — pending the deferred one-time `cargo fmt --all` reformat, per `ci.yml` header — so it is not cited as enforcing the criterion.)*
+- **`warnings_strict`** — Met — `cargo clippy --workspace --all-targets -- -D warnings` (full-workspace, all-targets) is a **hard gate** in [`ci.yml`](../../.github/workflows/ci.yml)'s `fmt + clippy (gate)` job. The same job also hard-gates `cargo fmt --all --check`. [SONNET-4.6]
 
 ### Security
 - **`crypto_published`** — Met w/scope — sparq's *delivery* crypto is Sigstore/SLSA build-provenance (a published, standard scheme) over release assets ([`release.yml`](../../.github/workflows/release.yml)). **No claim is made about the `sparq-zk*`/`sparq-mpc` research scaffolds** (remediated but **externally unaudited — internal re-audit only, external sign-off PENDING `sq-qhy4`, no production guarantee**; `SECURITY.md`). [OPUS-4.8]
