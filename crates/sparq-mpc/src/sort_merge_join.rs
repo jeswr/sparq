@@ -163,6 +163,27 @@ pub struct SortMergeCost {
 /// the MODELLED [`SortMergeCost`].
 pub type SortMergeOutput = (PartialResult, SortMergeCost);
 
+/// A test-only fault injected at ONE named decision point of the REAL secret-shared
+/// [`sort_merge_semi_anti`] fast path, so a mutation test can prove the production
+/// oracle differential is non-vacuous by corrupting the production wiring itself
+/// (not merely a cleartext model of it). In non-test builds only [`ProdFault::None`]
+/// is ever constructed — the public entry point hard-codes it — so the other variants
+/// are dead there (annotated), and every branch below folds to the honest path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
+enum ProdFault {
+    /// No corruption — the honest production path.
+    None,
+    /// Gate the keep-selector on `is_r` instead of `is_l` (emit R rows, not L rows).
+    Selector,
+    /// Force every adjacency-equality bit to a secret 0 (equal keys never seen as a run).
+    AdjacencyEquality,
+    /// Drop the backward OR pass (an L row before its R match is no longer seen).
+    ScanDirection,
+    /// Force every oblivious-sort swap bit to a secret 0 (keys never become adjacent).
+    SwapDecision,
+}
+
 /// A secret-shared union row as it travels through the oblivious sort: the join
 /// KEY, a `1{is L-side}` flag, and the L-side PAYLOAD ID (which L row it is), each a
 /// full degree-`t` sharing. All three ride through the conditional swaps together so
@@ -202,6 +223,25 @@ pub fn sort_merge_semi_anti(
     right_keys: &[Fp],
     out_vars: Vec<Variable>,
     kind: SortMergeJoinKind,
+) -> Result<SortMergeOutput, MpcError> {
+    // The public entry point is always the honest path; the fault-injected variant is
+    // exercised ONLY by the in-crate mutation test that proves this differential is
+    // non-vacuous against the REAL secret-shared wiring.
+    sort_merge_semi_anti_faulted(backend, left, right_keys, out_vars, kind, ProdFault::None)
+}
+
+/// [`sort_merge_semi_anti`] with a test-only [`ProdFault`] injected at one named
+/// production decision point. `ProdFault::None` is the honest path — identical to what
+/// the public wrapper computes; the non-`None` variants corrupt the REAL secret-shared
+/// sort/scan/selector so a mutation test can assert the production output diverges from
+/// the plaintext oracle (see `production_fast_path_mutations_diverge_from_oracle`).
+fn sort_merge_semi_anti_faulted(
+    backend: &ShamirBackend,
+    left: &[(Fp, Vec<Option<Term>>)],
+    right_keys: &[Fp],
+    out_vars: Vec<Variable>,
+    kind: SortMergeJoinKind,
+    fault: ProdFault,
 ) -> Result<SortMergeOutput, MpcError> {
     let payload_arity = out_vars.len();
     // Validate payload arity + key range up front (fail closed before any protocol
@@ -256,7 +296,13 @@ pub fn sort_merge_semi_anti(
     for &(i, j) in net.compare_exchanges() {
         // Swap iff key_i > key_j (sort ascending) — a NEVER-opened secret verdict.
         let (lo, hi) = (i.min(j), i.max(j));
-        let swap_bit = secure_greater_than_shared(&mut dealer, backend, &rows[lo].key, &rows[hi].key)?;
+        let mut swap_bit =
+            secure_greater_than_shared(&mut dealer, backend, &rows[lo].key, &rows[hi].key)?;
+        if fault == ProdFault::SwapDecision {
+            // Corrupt the swap decision to a stuck secret 0: no rows ever swap, so equal
+            // keys across the L/R boundary never become adjacent (the sort is defeated).
+            swap_bit = dealer.share(Fp::zero());
+        }
         conditional_swap(&mut dealer, &mut rows, lo, hi, &swap_bit)?;
     }
 
@@ -269,12 +315,13 @@ pub fn sort_merge_semi_anti(
     // Adjacent-key equalities eq[k] = [key_k == key_{k+1}] (secret), for k in 0..n-1.
     let mut eq: Vec<Vec<Share>> = Vec::with_capacity(n.saturating_sub(1));
     for k in 0..n.saturating_sub(1) {
-        eq.push(secure_equal_to_bit_shared(
-            &mut dealer,
-            backend,
-            &rows[k].key,
-            &rows[k + 1].key,
-        )?);
+        let mut e = secure_equal_to_bit_shared(&mut dealer, backend, &rows[k].key, &rows[k + 1].key)?;
+        if fault == ProdFault::AdjacencyEquality {
+            // Corrupt the adjacency-equality bit to a stuck secret 0: equal keys are
+            // never recognised as a run, so no L row ever sees an R in its group.
+            e = dealer.share(Fp::zero());
+        }
+        eq.push(e);
         scan_mults += 1; // equal_to_bit_from_bits multiplications, modelled per call
     }
     // is_r[k] = 1 - is_l[k] (local).
@@ -309,8 +356,15 @@ pub fn sort_merge_semi_anti(
     let mut selectors: Vec<Vec<Share>> = Vec::with_capacity(n);
     for k in 0..n {
         // any_r[k] = b_r[k] OR f_r[k].
-        let any_r = secure_or(&mut dealer, &b_r[k], &f_r[k])?;
+        let any_r_full = secure_or(&mut dealer, &b_r[k], &f_r[k])?;
         scan_mults += 1;
+        let any_r = if fault == ProdFault::ScanDirection {
+            // Drop the backward pass: an L row positioned before its matching R in the
+            // sorted run no longer sees that R.
+            f_r[k].clone()
+        } else {
+            any_r_full
+        };
         let cond = match kind {
             SortMergeJoinKind::Semi => any_r,
             // NOT any_r = 1 - any_r (local).
@@ -318,8 +372,14 @@ pub fn sort_merge_semi_anti(
                 shamir::add_constant(&shamir::scale(&any_r, Fp::one().neg()), Fp::one())
             }
         };
-        // selector = is_l AND cond (one secure mult).
-        selectors.push(secure_mul(&mut dealer, &rows[k].is_l, &cond)?);
+        // selector = is_l AND cond (one secure mult) — corrupted to gate on is_r under
+        // the Selector fault (emit R rows instead of L rows).
+        let gate = if fault == ProdFault::Selector {
+            &is_r[k]
+        } else {
+            &rows[k].is_l
+        };
+        selectors.push(secure_mul(&mut dealer, gate, &cond)?);
         scan_mults += 1;
     }
 
@@ -900,13 +960,88 @@ mod tests {
         }
     }
 
-    /// Mutation / non-vacuity check: each named corruption of the sort/scan (a wrong
+    /// PRIMARY non-vacuity check — mutates the REAL secret-shared fast path.
+    ///
+    /// Each named corruption is injected into `sort_merge_semi_anti` ITSELF (via the
+    /// test-only [`ProdFault`] seam wired through the production sort/scan/selector),
+    /// then the ACTUAL secret-shared output is run against the plaintext oracle. Every
+    /// fault MUST make the production differential go red — diverge from the oracle (or
+    /// trip a fail-closed error) — on at least one generated witness input, for at least
+    /// one party count and kind. This proves the harness catches a deliberately wrong
+    /// answer from the production MPC path, not merely from a cleartext model of it
+    /// (the concern the model-only [`mutations_turn_the_oracle_differential_red`] check
+    /// alone does not close). The unmutated production path is asserted to still match
+    /// the oracle on the same input, so the divergence is due to the fault, not the data.
+    #[test]
+    fn production_fast_path_mutations_diverge_from_oracle() {
+        let faults = [
+            ProdFault::Selector,
+            ProdFault::AdjacencyEquality,
+            ProdFault::ScanDirection,
+            ProdFault::SwapDecision,
+        ];
+        for &fault in &faults {
+            let mut caught = false;
+            'search: for seed in 0..64u64 {
+                let (lk, rk) = generate_layout(seed);
+                let left: Vec<(Fp, Vec<Option<Term>>)> = lk
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &k)| (Fp::new(k), vec![lit(&format!("L{i}"))]))
+                    .collect();
+                let right: Vec<Fp> = rk.iter().map(|&k| Fp::new(k)).collect();
+                for parties in [3usize, 5] {
+                    let backend = ShamirBackend::new_seeded(parties, 1300 + seed).unwrap();
+                    for kind in [SortMergeJoinKind::Semi, SortMergeJoinKind::Anti] {
+                        let oracle = plaintext_expected(&left, &right, kind);
+                        // Control: the UNMUTATED production path still matches the oracle
+                        // on this exact input, so any divergence below is the fault's doing.
+                        let (honest, _) =
+                            sort_merge_semi_anti(&backend, &left, &right, vec![var("x")], kind)
+                                .unwrap();
+                        assert_eq!(
+                            multiset(&honest.rows),
+                            oracle,
+                            "unmutated production diverged — bad control for {fault:?}"
+                        );
+                        // The fault-injected REAL path must diverge (wrong multiset) or
+                        // fail closed (a corrupted intermediate trips a guard) — either is
+                        // the differential going red on a deliberately wrong production run.
+                        let diverged = match sort_merge_semi_anti_faulted(
+                            &backend,
+                            &left,
+                            &right,
+                            vec![var("x")],
+                            kind,
+                            fault,
+                        ) {
+                            Ok((res, _)) => multiset(&res.rows) != oracle,
+                            Err(_) => true,
+                        };
+                        if diverged {
+                            caught = true;
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            assert!(
+                caught,
+                "{fault:?}: the PRODUCTION fast path did not diverge from the oracle on any \
+                 generated input — the differential would be vacuous against this real corruption"
+            );
+        }
+    }
+
+    /// Supplemental non-vacuity check on the cleartext MODEL (kept alongside the
+    /// primary [`production_fast_path_mutations_diverge_from_oracle`], which mutates the
+    /// real secret-shared path): each named corruption of the sort/scan (a wrong
     /// selector, a stuck adjacency equality, a dropped scan direction, a corrupted
-    /// swap decision) MUST make the pipeline disagree with the plaintext oracle on at
-    /// least one generated input — i.e. the differential provably turns RED on a
-    /// deliberately wrong answer. Because the unmutated model is validated equal to the
-    /// production output ([`model_matches_production`]), a real corruption of any of
-    /// these steps would likewise make `sort_merge_semi_anti` fail the oracle.
+    /// swap decision) MUST make the model pipeline disagree with the plaintext oracle on
+    /// at least one generated input. Because the unmutated model is validated equal to
+    /// the production output ([`model_matches_production`]), this documents the same
+    /// mutations at the readable model level; it does NOT substitute for mutating the
+    /// production path.
     #[test]
     fn mutations_turn_the_oracle_differential_red() {
         let mutations = [
