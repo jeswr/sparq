@@ -238,6 +238,16 @@ pub mod oblivious;
 // secret keys WITHOUT opening it is honestly gated on secure-compare
 // (sq-rrz4/sq-dvuc). See the module docs for the residual-leakage statement.
 pub mod oblivious_join;
+// [OPUS-4.8] sq-shk5: differential-privacy output-cardinality mode + per-relying-
+// party epsilon-budget tracking (ShrinkWrap/SAQE/Doquet-style) for SET-returning
+// hidden joins. Pads the released cardinality to `true_count + nonneg (eps,delta)
+// noise` (a data-DEPENDENT, DP-noised bound) instead of the catastrophic worst-case
+// |L|.|R| — cheaper, at the honest cost of an (eps,delta) cardinality leak that
+// COMPOSES over queries (tracked per relying party, fails closed). Builds on the
+// sq-jnkm oblivious output transform. NOT information-theoretic; noise drawn
+// centrally in-simulation (distributed noise generation is the residual gate). See
+// the module docs for the sound-today vs gated split.
+pub mod dp_output;
 // [OPUS-4.8] sq-tg6b: the NETWORK tier of the MPC benchmark matrix. `transport`
 // is the REAL multi-process loopback transport (Tier 2) — each party is its own
 // PROCESS exchanging the actual protocol messages over a socket, so wall-clock
@@ -361,6 +371,11 @@ pub use proof::{Attestation, CollaborativeProof, ProofStatement};
 pub use oblivious_join::{
     oblivious_join_output, oblivious_set_output, oblivious_set_output_hidden_keys, Candidate,
     MatchBit, ObliviousOutput, ObliviousOutputCost, OutputSlot,
+};
+// [OPUS-4.8] sq-shk5: the DP output-cardinality + epsilon-budget surface.
+pub use dp_output::{
+    dp_oblivious_set_output_hidden_keys, dp_release_result_rows, BudgetLedger, DpCardinality,
+    DpParams, PrivacyBudget, MAX_DP_SHIFT,
 };
 pub use rng::{MpcRng, SecureRng};
 // [OPUS-4.8] sq-yyro: the dealer-less correlated-randomness seam surface.
