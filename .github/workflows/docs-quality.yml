@@ -448,6 +448,18 @@ jobs:
         run: shellcheck scripts/check-site-links.sh scripts/tests/test_check_site_links.sh
       - name: Self-test check-site-links.sh (basePath remap + broken-link teeth)
         run: bash scripts/tests/test_check_site_links.sh
+      # [SONNET-4.6] sq-vw3ax.11.3: the fail-closed release alias contract check
+      # (scripts/check-release-aliases.sh) runs on the RELEASE path (release.yml), where a
+      # silently shrunken extraction would only surface after a bad release shipped. Its
+      # hermetic self-test therefore runs HERE on every PR: it pins the golden alias contract
+      # extracted from the real /download component (so an intentional alias change must
+      # update the golden in the same PR), the release-blocking teeth, and — PR #3528 review —
+      # that every partial-extraction mutation (reformat / key rename / pattern-key drift)
+      # exits 2 instead of approving a reduced contract.
+      - name: shellcheck check-release-aliases.sh + its self-test
+        run: shellcheck scripts/check-release-aliases.sh scripts/tests/test_check_release_aliases.sh
+      - name: Self-test check-release-aliases.sh (golden contract + partial-extraction teeth)
+        run: bash scripts/tests/test_check_release_aliases.sh
       # [OPUS-4.8] sq-mkza: end-to-end proof that BOTH honesty gates now cover the
       # paper-factory `.typ` sources (site/papers/**/*.typ) — the highest-stakes
       # OUTWARD surface. Before sq-mkza a hard-coded perf ratio or an unqualified
