@@ -1,0 +1,219 @@
+// [OPUS-4.8] sq-vw3ax.10 — unit tests for the PURE node-link derivation behind the /try Graph view
+// (src/lib/result-graph.ts). These cover the shape the SVG renderer draws: distinct-term nodes,
+// per-row adjacent-column edges, the entity-relationship gate that makes it the complement of the
+// aggregate mini-viz, and the deterministic circular layout. The query SEMANTICS are proven by the
+// Rust engine tests; here we only test the JS derivation over the SPARQL-1.1-JSON the binding
+// returns. Run via `npm run test:unit`.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  deriveGraph,
+  circularLayout,
+  MAX_GRAPH_NODES,
+} from "../src/lib/result-graph.ts";
+
+const XSD = "http://www.w3.org/2001/XMLSchema#";
+
+// A resource-linking SELECT: three developers who each `:wrote` a component — the classic
+// entity-relationship shape the Graph view is for.
+const WROTE = {
+  head: { vars: ["dev", "component"] },
+  results: {
+    bindings: [
+      {
+        dev: { type: "uri", value: "http://sparq.dev/demo/ada" },
+        component: { type: "uri", value: "http://sparq.dev/demo/parser" },
+      },
+      {
+        dev: { type: "uri", value: "http://sparq.dev/demo/ada" },
+        component: { type: "uri", value: "http://sparq.dev/demo/planner" },
+      },
+      {
+        dev: { type: "uri", value: "http://sparq.dev/demo/grace" },
+        component: { type: "uri", value: "http://sparq.dev/demo/optimizer" },
+      },
+    ],
+  },
+};
+
+test("deriveGraph: distinct terms become nodes, adjacent bound columns become edges", () => {
+  const g = deriveGraph(WROTE);
+  assert.ok(g, "a resource-linking result yields a graph");
+  // ada, parser, planner, grace, optimizer = 5 distinct terms (ada is shared across two rows).
+  assert.equal(g.nodes.length, 5);
+  assert.equal(g.edges.length, 3);
+  // The shared `ada` node merges (it is NOT duplicated), which is the whole point of a graph.
+  const ada = g.nodes.filter((n) => n.term.value.endsWith("/ada"));
+  assert.equal(ada.length, 1);
+  // Every edge is labelled by the target column's variable and is a real row co-occurrence.
+  for (const e of g.edges) {
+    assert.equal(e.label, "component");
+    assert.equal(e.count, 1);
+  }
+});
+
+test("deriveGraph: nodes are CURIE-labelled but keep the raw term", () => {
+  const g = deriveGraph(WROTE);
+  const ada = g.nodes.find((n) => n.term.value.endsWith("/ada"));
+  // The demo namespace is not one of the well-known prefixes, so it is NOT abbreviated — but a
+  // foaf/rdf/xsd IRI would be. The raw value is always preserved for tooltips/export.
+  assert.equal(ada.kind, "uri");
+  assert.equal(ada.term.value, "http://sparq.dev/demo/ada");
+});
+
+test("deriveGraph: a repeated (source,target,label) edge counts occurrences instead of duplicating", () => {
+  const dup = {
+    head: { vars: ["a", "b"] },
+    results: {
+      bindings: [
+        { a: { type: "uri", value: "http://ex/x" }, b: { type: "uri", value: "http://ex/y" } },
+        { a: { type: "uri", value: "http://ex/x" }, b: { type: "uri", value: "http://ex/y" } },
+      ],
+    },
+  };
+  const g = deriveGraph(dup);
+  assert.equal(g.nodes.length, 2);
+  assert.equal(g.edges.length, 1);
+  assert.equal(g.edges[0].count, 2);
+});
+
+test("deriveGraph: a pure label→number aggregate has no resource node, so it draws no graph", () => {
+  // `?name (SUM(?loc) AS ?total)` — two literal columns. The mini-viz charts this; the graph view
+  // must decline (returns null) so the same rows are never rendered two ways.
+  const aggregate = {
+    head: { vars: ["name", "total"] },
+    results: {
+      bindings: [
+        {
+          name: { type: "literal", value: "Ada" },
+          total: { type: "literal", value: "7300", datatype: `${XSD}integer` },
+        },
+        {
+          name: { type: "literal", value: "Grace" },
+          total: { type: "literal", value: "5300", datatype: `${XSD}integer` },
+        },
+      ],
+    },
+  };
+  assert.equal(deriveGraph(aggregate), null);
+});
+
+test("deriveGraph: needs ≥2 columns, ≥1 row, and ≥1 edge", () => {
+  assert.equal(
+    deriveGraph({ head: { vars: ["s"] }, results: { bindings: [{ s: { type: "uri", value: "http://ex/a" } }] } }),
+    null,
+    "a single-column result is not a graph",
+  );
+  assert.equal(
+    deriveGraph({ head: { vars: ["s", "o"] }, results: { bindings: [] } }),
+    null,
+    "an empty result is not a graph",
+  );
+  // Two columns but every row binds only one of them → no adjacent bound pair → no edge → null.
+  const noPair = {
+    head: { vars: ["s", "o"] },
+    results: {
+      bindings: [
+        { s: { type: "uri", value: "http://ex/a" } },
+        { o: { type: "uri", value: "http://ex/b" } },
+      ],
+    },
+  };
+  assert.equal(deriveGraph(noPair), null);
+});
+
+test("deriveGraph: an unbound middle column does not break the chain", () => {
+  // `?s ?p ?o` where ?p is unbound in the row: s and o are still adjacent BOUND columns, so the
+  // edge s→o is drawn (labelled by ?o) rather than the row being dropped.
+  const optionalMid = {
+    head: { vars: ["s", "p", "o"] },
+    results: {
+      bindings: [
+        {
+          s: { type: "uri", value: "http://ex/s" },
+          o: { type: "uri", value: "http://ex/o" },
+        },
+      ],
+    },
+  };
+  const g = deriveGraph(optionalMid);
+  assert.ok(g);
+  assert.equal(g.edges.length, 1);
+  assert.equal(g.edges[0].label, "o");
+});
+
+test("deriveGraph: a row binding two columns to the SAME term draws no self-loop", () => {
+  const selfRef = {
+    head: { vars: ["a", "b"] },
+    results: {
+      bindings: [
+        { a: { type: "uri", value: "http://ex/same" }, b: { type: "uri", value: "http://ex/same" } },
+      ],
+    },
+  };
+  // The only pair is a self-relationship, so there is no edge → the result is not graph-shaped.
+  assert.equal(deriveGraph(selfRef), null);
+});
+
+test("deriveGraph: literals with the same value but different datatype are distinct nodes", () => {
+  const g = deriveGraph({
+    head: { vars: ["s", "v"] },
+    results: {
+      bindings: [
+        {
+          s: { type: "uri", value: "http://ex/a" },
+          v: { type: "literal", value: "5", datatype: `${XSD}integer` },
+        },
+        {
+          s: { type: "uri", value: "http://ex/a" },
+          v: { type: "literal", value: "5" },
+        },
+      ],
+    },
+  });
+  assert.ok(g);
+  // http://ex/a (shared) + "5"^^integer + "5" (plain) = 3 distinct nodes.
+  assert.equal(g.nodes.length, 3);
+});
+
+test("deriveGraph: more than MAX_GRAPH_NODES distinct terms is capped and flagged truncated", () => {
+  // Build a star: one hub linked to (MAX + 10) distinct leaves. Distinct terms = hub + leaves.
+  const leaves = MAX_GRAPH_NODES + 10;
+  const bindings = [];
+  for (let i = 0; i < leaves; i++) {
+    bindings.push({
+      hub: { type: "uri", value: "http://ex/hub" },
+      leaf: { type: "uri", value: `http://ex/leaf/${i}` },
+    });
+  }
+  const g = deriveGraph({ head: { vars: ["hub", "leaf"] }, results: { bindings } });
+  assert.ok(g);
+  assert.equal(g.nodes.length, MAX_GRAPH_NODES, "node set is capped");
+  assert.equal(g.truncated, true);
+  assert.equal(g.totalNodes, leaves + 1, "totalNodes counts every distinct term seen, pre-cap");
+  // No edge may reference a dropped node.
+  const ids = new Set(g.nodes.map((n) => n.id));
+  for (const e of g.edges) {
+    assert.ok(ids.has(e.source) && ids.has(e.target));
+  }
+});
+
+test("circularLayout: deterministic, centred, inside the box", () => {
+  const pts = circularLayout(4, 620, 380, 96);
+  assert.equal(pts.length, 4);
+  // First node sits at the top (x = centre, y < centre).
+  assert.ok(Math.abs(pts[0].x - 310) < 1e-6);
+  assert.ok(pts[0].y < 190);
+  // Deterministic: same inputs → identical output.
+  assert.deepEqual(circularLayout(4, 620, 380, 96), pts);
+  // Every point lies within the box.
+  for (const p of pts) {
+    assert.ok(p.x >= 0 && p.x <= 620 && p.y >= 0 && p.y <= 380);
+  }
+});
+
+test("circularLayout: degenerate sizes are safe (single node centred, zero nodes empty)", () => {
+  assert.deepEqual(circularLayout(1, 620, 380, 96), [{ x: 310, y: 190 }]);
+  assert.deepEqual(circularLayout(0, 620, 380, 96), []);
+});

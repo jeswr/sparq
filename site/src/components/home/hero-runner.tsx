@@ -29,6 +29,8 @@ import { rovingTabIndex, useRovingTablist } from "@/lib/use-roving-tablist";
 import { SparqlEditor } from "@/components/sparql-editor";
 import { RdfEditor } from "@/components/rdf-editor";
 import { ResultCell } from "@/components/repl-result-cells";
+import { ResultGraphView } from "@/components/repl-graph-view";
+import { deriveGraph } from "@/lib/result-graph";
 import {
   loadSparq,
   loadIntoStore,
@@ -200,6 +202,11 @@ export function HeroQueryRunner() {
   const [triples, setTriples] = React.useState<number | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [engineReady, setEngineReady] = React.useState(false);
+  // [OPUS-4.8] sq-vw3ax.10 — result view: the typed Table (default) or the node-link Graph. The
+  // Graph toggle only appears when the LIVE result is entity-relationship shaped (deriveGraph is
+  // non-null); a non-graph result silently falls back to the table, so a stale "graph" choice can
+  // never render an empty picture.
+  const [resultView, setResultView] = React.useState<"table" | "graph">("table");
 
   // WARM-UP 1: pre-warm on this lazy chunk's hydration, on the next browser-idle slot so it never
   // competes with paint. Cancelled on unmount if it has not fired yet.
@@ -285,6 +292,13 @@ export function HeroQueryRunner() {
 
   const running = phase === "running";
   const rowCount = results?.results?.bindings?.length ?? 0;
+  // The node-link Graph view is offered only when the settled result is genuinely graph-shaped.
+  const graphResult = React.useMemo(
+    () => (results ? deriveGraph(results) : null),
+    [results],
+  );
+  const graphAvailable = phase === "done" && graphResult !== null;
+  const showGraph = resultView === "graph" && graphAvailable;
 
   return (
     <div
@@ -409,13 +423,44 @@ export function HeroQueryRunner() {
         </div>
       )}
 
+      {/* View toggle: Table (default) | Graph — only when the live result is graph-shaped.
+          [OPUS-4.8] sq-vw3ax.10 — the node-link view for non-aggregate SELECT results, the
+          surviving home of the removed /try Graph view (the /app workbench is the other). */}
+      {graphAvailable && (
+        <div className="flex items-center gap-1 border-t bg-muted/15 px-3 py-1.5">
+          <span className="mr-1 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+            view
+          </span>
+          {(["table", "graph"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              aria-pressed={resultView === v}
+              onClick={() => setResultView(v)}
+              className={cn(
+                "rounded-md px-2.5 py-0.5 text-xs font-medium capitalize transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+                resultView === v
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {v}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Results area. */}
       <div className="relative border-t bg-background/40" data-hero-results>
         <div className="overflow-x-auto">
           {phase === "idle" ? (
             <PreviewTable />
           ) : results ? (
-            <ResultsTable results={results} dimmed={running || phase === "error"} />
+            showGraph ? (
+              <ResultGraphView results={results} />
+            ) : (
+              <ResultsTable results={results} dimmed={running || phase === "error"} />
+            )
           ) : (
             <PreviewTable />
           )}
