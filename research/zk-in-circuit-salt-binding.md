@@ -87,7 +87,7 @@ the issuer-attested value. Two properties are load-bearing and drive the layout:
 
 ### 3.3 New in-circuit constraint (every active term position — non-bypassable)
 For every graph `g`, slot `i`, and term position `j in 0..3`:
-```
+```text
 active = (i < counts[g])
 t      = type_code[g][i][j]
 d      = payload_digest[g][i][j]
