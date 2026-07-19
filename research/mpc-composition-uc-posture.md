@@ -1,6 +1,7 @@
 <!-- [OPUS-4.8] MPC composition / UC posture design record for sparq-mpc: the standalone/UC
-statement the architecture (a composition) currently lacks — justify the mid-protocol
-`secure_equal` open; honest-majority UC-without-setup (Canetti FOCS'01) as the argument for the
+statement the architecture (a composition) currently lacks — the masked-opening leakage lemma for
+the mid-protocol `secure_equal` open; honest-majority UC without a CRS/PKI, GIVEN the UC theorems'
+communication-model resources (Canetti FOCS'01), as the design-target argument for the
 default; carry the coZK 2025/1026 composition-security caveat on the collaborative-proof layer.
 Design-for-review (no code, doc-only), Opus 4.8 (Fable unavailable) — re-review when Fable
 returns. Date: 2026-07-19. Bead sq-wj4k (parent #2629 → epic sq-pwr). -->
@@ -36,20 +37,28 @@ named as a gap ([`mpc-security-models-and-benchmarks.md`](./mpc-security-models-
   malicious-with-abort. That doc raises the *per-operator adversary tier*; **this** doc is orthogonal —
   it is about *how the operators compose*, at whatever tier each is realized.
 - [`mpc-distributed-randomness-design.md`](./mpc-distributed-randomness-design.md) — which already
-  cites Canetti UC-without-setup for honest majority (FOCS'01) for the randomness beacon; **this** doc
-  makes that citation load-bearing for the *whole pipeline's* default trust model.
+  cites Canetti honest-majority UC (FOCS'01) for the randomness beacon; **this** doc states the
+  *conditional* version of that argument for the *whole pipeline's* default trust model, including
+  the communication-model assumptions the citation carries (§1).
 
 **One-line posture (stated up front, not over-claimed):** sparq-mpc's default —
-**honest-majority Shamir, semi-honest today** — is a defensible *composition* choice because
-honest-majority protocols admit **UC security without any setup assumption** (Canetti, FOCS'01), so
-the pieces compose without importing a CRS/PKI trust root; the one mid-protocol reveal that naive
-sequential composition does **not** automatically justify (`secure_equal`'s open) is justified
-**only** by modeling the reveal explicitly in the ideal functionality every downstream stage composes
-against; and the collaborative-proof stage inherits a **composition-security obligation** (validate
-the extended witness before proving, per coZK 2025/1026) that is **named but not yet encoded** — so
-that stage stays fail-closed (`NotYetImplemented`) and no composed soundness claim may be made until
-`sq-qhy4` (external audit) lands. **Nothing here is a production security claim; this is the design
-posture, not a proof of security.**
+**honest-majority Shamir, semi-honest today** — is a defensible *composition-minded design target*
+because honest-majority protocols can achieve **UC security without a CRS or PKI** (Canetti, FOCS'01)
+*given* the communication resources those theorems assume (ideal authenticated — and, for the
+information-theoretic protocols, private — channels; broadcast where the protocol requires it; the
+UC session/scheduling model), so a future networked realization need not import a CRS/PKI trust
+root. Today's code is an in-process, single-session simulation with none of those resources, so the
+composition statement is **conditional**: *if* each stage is realized as a distributed protocol and
+proven standalone-secure under a precisely defined communication and corruption model, *then*
+sequential modular composition carries the pieces into the whole. What is established now is
+narrower: the one mid-protocol reveal (`secure_equal`'s open) is covered by a **masked-opening
+distribution lemma** — the honestly-computed opened value is perfectly simulatable from the equality
+bit alone (§3) — which is the ingredient the eventual stage simulator needs, **not** a realization
+of `F_join`; and the collaborative-proof stage inherits a **composition-security obligation**
+(validate the extended witness before proving, per coZK 2025/1026) that is **named but not yet
+encoded** — so that stage stays fail-closed (`NotYetImplemented`) and no composed soundness claim
+may be made until `sq-qhy4` (external audit) lands. **Nothing here is a production security claim;
+this is the design posture, not a proof of security.**
 
 ---
 
@@ -94,34 +103,52 @@ or when run alongside other sessions. Two composition frameworks bound this:
   UC is what sparq would *want* the day the in-process sim becomes a real networked protocol running
   concurrently with other federation queries. The pivotal result for the default:
 
-> **Honest-majority protocols achieve UC security WITHOUT any setup assumption** (Canetti FOCS'01;
-> Canetti–Lindell–Ostrovsky–Sahai STOC'02 for the `n ≥ 3`, `t < n/2` regime). Dishonest-majority UC
-> is IMPOSSIBLE in the plain model and requires setup (a CRS / PKI / correlated randomness).
+> **Honest-majority protocols (`n ≥ 3`, `t < n/2`) achieve UC security without a CRS or PKI**
+> (Canetti FOCS'01; Canetti–Lindell–Ostrovsky–Sahai STOC'02) — but NOT "without any assumptions":
+> the theorems are stated relative to a communication model the protocol receives as ideal
+> resources — authenticated (and, for the information-theoretic constructions, private/secure)
+> point-to-point channels, a broadcast channel where the protocol/threshold requires one, and the
+> UC framework's session-identifier and adversarial-scheduling conventions. Dishonest-majority UC
+> additionally requires *cryptographic* setup (a CRS / PKI / correlated randomness) even given
+> those communication resources.
 
 **This is the composition argument FOR the honest-majority default.** Choosing HM is not only a
-threshold choice — it is the choice that lets the whole pipeline aspire to UC-without-setup, i.e. to
-compose *without* importing an external trust root (a CRS ceremony or PKI) into the TCB. A
-dishonest-majority backend (the truthfully-refused `sq-j5ok` slot) would drag setup back in. So the
-default is composition-justified, and this record is the place that says so on the record.
+threshold choice — it is the choice that lets a future networked pipeline aspire to UC *without a
+CRS/PKI trust root*, modulo the communication resources above, which that realization must actually
+provide or instantiate. Today's in-process sim has no channels, authentication, broadcast, session
+identifiers, or concurrency model at all (§0), so the cited result cannot be applied to it as-is. A
+dishonest-majority backend (the truthfully-refused `sq-j5ok` slot) would drag cryptographic setup
+back in even given those channels. So the default is composition-*motivated*, and this record is the
+place that says so on the record.
 
-**Which flavor sparq claims today:** the honest, minimal claim is **sequential modular composition of
-standalone-secure semi-honest sub-protocols** — because the artifact is an in-process, single-session,
-straight-line sim, sequential composition is *exactly* the theorem that applies, and it is achievable
-now. UC-without-setup is the **target** the HM default keeps reachable, not a claim on today's code
-(no networked concurrent protocol exists to be UC-secure). Stating more would be overclaim.
+**Which flavor sparq claims today: none unconditionally.** The artifact is an in-process,
+single-session, straight-line sim in which one central driver executes every party's steps. That
+means there are no per-party adversarial views to define, and the sharing / multiplication /
+reconstruction / all-pairs-join stages do not exist as *distributed protocols* that could be
+standalone-secure — a centrally-driven simulation is not itself a standalone-secure protocol. The
+honest statement is therefore **conditional**: *if* each stage is realized as a distributed protocol
+and proven standalone-secure — with a precisely defined communication model, corruption model,
+per-party views, and simulators — *then* sequential modular composition (the weakest theorem,
+matching the straight-line single-session shape) carries them into the composed pipeline.
+UC-without-CRS is the further **target** the HM default keeps reachable, not a claim on today's code
+(no networked concurrent protocol exists to be UC-secure). What is actually established today is the
+§3 masked-opening distribution lemma. Stating more would be overclaim.
 
 ---
 
 ## 2. The composition obligations, per stage
 
 For each stage: the ideal functionality it must realize, the standalone result that applies, and the
-**residual obligation** the composition imposes.
+**residual obligation** the composition imposes. The "standalone result" column records what a
+*distributed realization* of the stage could invoke; per §1, none of these stages currently exists as
+a distributed protocol with defined adversarial views, so the table states obligations and applicable
+results, **not** established realizations.
 
 | Stage | Ideal functionality `F` | Standalone result | Composition obligation (residual) |
 |-------|-------------------------|-------------------|-----------------------------------|
 | 1 Holder eval | `F_local`: emit a fragment result over the party's own graph | trivial (local computation, no interaction) | outputs feeding stage 2/3 must be exactly what `F_local` defines — no side-channel from engine timing (out of model) |
-| 2 Share | `F_share`: distribute a `t`-of-`n` sharing | Shamir is perfectly private for any `t` shares (Shamir'79); standalone-secure semi-honest | randomness must be a CSPRNG (`rng.rs`, `SecureRng::from_os`) — a deterministic PRNG breaks privacy; `insecure-test-rng` off by default |
-| 3 Join | `F_join`: output the join, **leaking the match bit per pair** (L2) | semi-honest secure IF the opened `m` is simulatable from the match bit (§3) | **the leak MUST be in `F_join`** — the downstream aggregate composes against a functionality that *already leaked the match structure*; a `LeakageProfile` should surface it |
+| 2 Share | `F_share`: distribute a `t`-of-`n` sharing | Shamir secrecy: any `t` shares are independent of the secret (Shamir'79); a distributed dealing protocol + view simulation is future work | randomness must be a CSPRNG (`rng.rs`, `SecureRng::from_os`) — a deterministic PRNG breaks privacy; `insecure-test-rng` off by default |
+| 3 Join | `F_join`: output the join, **leaking the match bit per pair** (L2) | masked-opening lemma: the honest opened `m` is simulatable from the match bit (§3); realization of `F_join` pending a distributed protocol + simulator | **the leak MUST be in `F_join`** — the downstream aggregate composes against a functionality that *already leaked the match structure*; a `LeakageProfile` should surface it |
 | 4 Aggregate | `F_sum`: threshold sum, open nothing | linear ops are local & perfectly private (no interaction) | none new (zero-round); but any *chained* multiplication (degree reduction) adds an open → re-enters §3's obligation |
 | 5 Reconstruct | `F_open`: open the DISCLOSED result only | threshold open is the intended output | the reconstructed value must be a *function of the ideal outputs*, not of intermediate shares |
 | 6 Proof | `F_prove`: prove correct evaluation, leak nothing about honest witnesses | **UNBUILT + coZK-gated (§4)** | **validate the extended witness before proving** (2025/1026) — the unfilled composition obligation |
@@ -153,9 +180,15 @@ per pair. Then:
   a perfect simulation;
 - when `a = b`: `d = 0` ⇒ `m = 0` deterministically — the simulator holding "equal" outputs `0`.
 
-Hence the open reveals **only the match bit**, and `secure_equal` **standalone-realizes** the
-bit-leaking `F_join` (semi-honest). The mid-protocol open is *justified* — **conditional on the
-composition using the bit-leaking functionality downstream.** Two obligations fall out, both already
+Hence — **as a masked-opening distribution/leakage lemma** — the honestly-computed opened value `m`,
+conditioned on the equality bit, is perfectly simulatable from that bit alone: the open adds nothing
+beyond the bit in an honest execution. **This lemma is NOT a proof that `secure_equal` realizes the
+bit-leaking `F_join`.** A realization claim would further require defining the real distributed
+protocol — per-party adversarial views for the sharing, the masked multiplication, and the
+reconstruction, over a stated communication and corruption model — and exhibiting a simulator for a
+corrupted party's *entire view*, not just the opened value; none of that exists for the current
+in-process sim, where one central driver plays every party (§1). The lemma is the ingredient that
+eventual simulator would use to handle the open. Two obligations fall out, both already
 partly encoded:
 
 1. **The leak must be carried, not hidden.** `secure_equal_leaks_full_bipartite_match_graph`
@@ -173,8 +206,11 @@ partly encoded:
    §8 step 5) so the open MAC-checks before revealing — the SPDZ discipline of *check-then-open* is
    itself a composition-safety mechanism.
 
-**Bottom line for §3:** the open is composition-justified **as scoped** (semi-honest, bit-leaking
-`F_join`, checked open), and this is honest to state; it is **not** justified against a malicious opener
+**Bottom line for §3:** what is established is the **leakage characterization** — for honest
+executions the open reveals nothing beyond the per-pair match bit (the lemma above), so the
+bit-leaking `F_join` is the right functionality for downstream stages to compose against. Full
+composition *justification* of the open remains conditional on §1's realization proofs (distributed
+protocol + views + simulators); and the open is **not** safe against a malicious opener
 at minimal `n` without the authenticated-open upgrade. Operators that open NO value mid-chain (e.g. the
 bounded-path design's no-mid-chain-open property,
 [`mpc-bounded-property-path-design.md`](./mpc-bounded-property-path-design.md)) sidestep this obligation
@@ -216,10 +252,10 @@ LIVE privacy-claims gate; any ZK/MPC soundness statement stays research-grade / 
 
 | Question | Result / posture | Applies to sparq how |
 |----------|------------------|----------------------|
-| Does the straight-line pipeline compose? | **Sequential modular composition** (Canetti J.Crypto'00; Goldreich) | YES for the in-process single-session sim, **iff** each open is in its stage's `F` (§2, §3) |
-| Why is honest-majority the default? | **UC WITHOUT setup for honest majority** (Canetti FOCS'01; CLOS STOC'02) | the composition argument FOR HM — composes without a CRS/PKI trust root; DM would need setup (`sq-j5ok` refused) |
-| Is the `secure_equal` open OK? | **Yes as scoped** — opens only the match bit; standalone-realizes the bit-leaking `F_join` (§3) | conditional on carrying leak L2 downstream + a checked open; NOT malicious-safe at minimal `n` without IT-MACs |
-| Concurrent / networked composition? | **UC (FOCS'01)** is the target framework | ASPIRATIONAL — no networked concurrent protocol exists yet; do not claim UC on today's sim |
+| Does the straight-line pipeline compose? | **Sequential modular composition** (Canetti J.Crypto'00; Goldreich) | **CONDITIONAL** — applies once each stage is realized as a distributed protocol proven standalone-secure under a stated communication/corruption model, with each open in its stage's `F` (§1–§3); NOT established for the in-process sim |
+| Why is honest-majority the default? | **UC without a CRS/PKI for honest majority, GIVEN ideal authenticated/private channels (+ broadcast where required)** (Canetti FOCS'01; CLOS STOC'02) | keeps a no-CRS/PKI trust root reachable for a future networked realization; DM would need cryptographic setup even given those channels (`sq-j5ok` refused) |
+| Is the `secure_equal` open OK? | **Masked-opening distribution lemma** — the honest opened value is simulatable from the match bit (§3); realization of the bit-leaking `F_join` pending a distributed protocol + simulator | leak L2 must be carried downstream + a checked open; NOT malicious-safe at minimal `n` without IT-MACs |
+| Concurrent / networked composition? | **UC (FOCS'01)** is the target framework, with its communication-model assumptions (§1) | ASPIRATIONAL — no networked concurrent protocol exists yet; do not claim UC on today's sim |
 | Collaborative proof composition? | **coZK 2025/1026** — validate extended witness before proving | OBLIGATION named, NOT encoded; stage stays `NotYetImplemented`; gated by `sq-qhy4` |
 | Malicious-with-abort composition | check-then-open (SPDZ/IT-MAC) is a composition-safety mechanism | the [`mpc-malicious-security-design.md`](./mpc-malicious-security-design.md) upgrade closes the §3 checked-open hole |
 
@@ -227,8 +263,11 @@ LIVE privacy-claims gate; any ZK/MPC soundness statement stays research-grade / 
 
 ## 6. Non-goals, honesty caveats, and follow-ups
 
-- **This is a posture record, not a proof.** No formal UC simulator is constructed here; the record
-  states *which* theorems apply and *what obligations* each imposes. A machine-checkable or
+- **This is a posture record, not a proof.** No formal simulator is constructed here — neither UC
+  nor standalone: no per-party adversarial views are defined for the sharing / multiplication /
+  reconstruction / join stages (the sim is centrally driven), and the only distribution argument
+  made is the §3 masked-opening lemma. The record states *which* theorems would apply to a future
+  distributed realization and *what obligations* each imposes. A machine-checkable or
   paper-grade composition proof is a heavier, separate, audit-gated deliverable — and any UC/composition
   soundness statement inherits the `sq-qhy4` external-audit gate.
 - **In-process sim ≠ networked protocol.** Everything about concurrent/UC composition is aspirational
@@ -251,7 +290,8 @@ LIVE privacy-claims gate; any ZK/MPC soundness statement stays research-grade / 
 
 Canetti, *Security and Composition of Multiparty Cryptographic Protocols*, J. Cryptology 2000 (sequential
 modular composition). Canetti, *Universally Composable Security: A New Paradigm for Cryptographic
-Protocols*, FOCS'01 (UC; honest-majority UC-without-setup). Canetti–Lindell–Ostrovsky–Sahai, *Universally
+Protocols*, FOCS'01 (UC; honest-majority UC without a CRS/PKI, given the framework's communication
+resources — §1). Canetti–Lindell–Ostrovsky–Sahai, *Universally
 Composable Two-Party and Multi-Party Secure Computation*, STOC'02. Goldreich, *Foundations of Cryptography
 Vol. 2*, §7 (modular composition). Shamir, *How to Share a Secret*, CACM 1979. Garg–Goel–Jain–Roberts–Sekar,
 *Malicious Security in Collaborative zk-SNARKs: More than Meets the Eye*, eprint 2025/1026 (CRYPTO'25).
