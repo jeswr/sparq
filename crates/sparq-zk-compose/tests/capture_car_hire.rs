@@ -11,6 +11,9 @@
 //
 // The real prove -> capture round-trip is `#[ignore]`-free but TOOLCHAIN-GATED
 // (skips cleanly without nargo + bb), mirroring `e2e.rs::full_prove_verify_filter_int_d1`.
+// A runtime early return is NOT coverage of the real seam: set `SPARQ_ZK_REQUIRE_TOOLCHAIN=1`
+// in a toolchain-equipped CI lane to turn a missing toolchain into a HARD FAILURE, so that
+// lane provably exercises the native path (see `require_toolchain` below).
 
 use sparq_zk_compose::build::{build_filter_int, encode_int_literal};
 use sparq_zk_compose::capture::{CapturedCarHireManifest, CapturedSubProof};
@@ -29,6 +32,18 @@ fn toolchain_available() -> bool {
     on_path("nargo") && on_path("bb")
 }
 
+/// When `SPARQ_ZK_REQUIRE_TOOLCHAIN` is set (to a non-empty value), a MISSING nargo/bb
+/// toolchain is a HARD FAILURE rather than a clean skip — so a toolchain-equipped CI lane
+/// provably EXERCISES the native `CircuitProver -> capture` seam instead of silently
+/// early-returning and being reported as "passing". Default CI leaves it unset: the
+/// lightweight synthetic packaging tests in `capture.rs` provide the toolchain-free cover,
+/// and this native round-trip skips cleanly. See the module header + PR #3588 review r1.
+const REQUIRE_TOOLCHAIN_ENV: &str = "SPARQ_ZK_REQUIRE_TOOLCHAIN";
+
+fn require_toolchain() -> bool {
+    std::env::var_os(REQUIRE_TOOLCHAIN_ENV).is_some_and(|v| !v.is_empty() && v != "0")
+}
+
 fn scratch(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("sparq_zk_capture_{name}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -44,7 +59,16 @@ fn scratch(name: &str) -> std::path::PathBuf {
 #[test]
 fn native_filter_proof_captures_into_manifest() {
     if !toolchain_available() {
-        eprintln!("nargo/bb absent; skipping native capture round-trip");
+        assert!(
+            !require_toolchain(),
+            "{REQUIRE_TOOLCHAIN_ENV} is set, but nargo+bb are not both on PATH — the native \
+             CircuitProver -> capture seam was NOT exercised. A toolchain-equipped CI lane must \
+             fail here rather than pass on an early return; install the toolchain or unset the var."
+        );
+        eprintln!(
+            "nargo/bb absent; skipping native capture round-trip \
+             (set {REQUIRE_TOOLCHAIN_ENV}=1 to require it in a toolchain-equipped lane)"
+        );
         return;
     }
     // 5 < 10 is true — the same minimal, known-satisfiable member the e2e suite proves.

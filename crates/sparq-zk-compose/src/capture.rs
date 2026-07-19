@@ -274,4 +274,67 @@ mod tests {
         assert_eq!(v["subProofs"].as_array().unwrap().len(), 2);
         assert_eq!(v["subProofs"][0]["proof"].as_array().unwrap().len(), 3);
     }
+
+    // ---- Browser-consumer CONTRACT ----------------------------------------------------
+    // The mirror below is a faithful, field-for-field copy of the TypeScript interfaces
+    // the browser fallback deserializes into (`CapturedManifest` / `CapturedSubProof` in
+    // `site/src/lib/zk-prover.ts`). `deny_unknown_fields` + `deny_unknown_fields` on both
+    // makes deserialization FAIL if the crate ever emits an extra/renamed key or drops
+    // one — i.e. this is a real "deserialize through the consumer schema" contract, not a
+    // substring check. If you change either side, change BOTH (and the fixture + the
+    // `capture-zk-manifest.mjs` generator) in the same PR.
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct BrowserSubProof {
+        #[allow(dead_code)]
+        member: String,
+        #[allow(dead_code)]
+        relation: String,
+        #[allow(dead_code)]
+        proof: Vec<u8>,
+        #[serde(rename = "publicInputs")]
+        #[allow(dead_code)]
+        public_inputs: Vec<String>,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct BrowserManifest {
+        #[serde(rename = "type")]
+        #[allow(dead_code)]
+        type_: String,
+        #[allow(dead_code)]
+        note: String,
+        #[serde(rename = "capturedAt")]
+        #[allow(dead_code)]
+        captured_at: String,
+        #[serde(rename = "subProofs")]
+        sub_proofs: Vec<BrowserSubProof>,
+    }
+
+    /// The serialized manifest deserializes CLEANLY into a `deny_unknown_fields` mirror of
+    /// the browser consumer's `CapturedManifest` — the exact schema `zk-prover.ts` reads.
+    /// This is the contract the old substring test could not enforce: an extra, missing,
+    /// or renamed key here is a hard deserialize error, catching browser-incompatibility
+    /// at crate-test time instead of in the field.
+    #[test]
+    fn serialized_manifest_matches_browser_consumer_schema() {
+        let sp = CapturedSubProof {
+            member: "filter_int_d2".into(),
+            relation: "age >= 25 over a hidden integer age".into(),
+            proof: vec![1, 2, 3, 4],
+            public_inputs: vec![field_to_hex(&Fr::from(25u64))],
+        };
+        let m = CapturedCarHireManifest::new("2026-07-19", vec![sp]);
+        let json = m.to_pretty_json();
+
+        let parsed: BrowserManifest =
+            serde_json::from_str(&json).expect("crate output must deserialize as the browser schema");
+        assert_eq!(parsed.sub_proofs.len(), 1);
+
+        // And the old singular key the browser USED to require must NOT be emitted — that
+        // was exactly the incompatibility (plural `subProofs` vs singular `subProof`).
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v.get("subProof").is_none(), "must not emit the legacy singular key");
+        assert!(v.get("circuit").is_none(), "the browser no longer reads `circuit`");
+    }
 }
