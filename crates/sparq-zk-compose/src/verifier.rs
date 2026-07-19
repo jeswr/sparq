@@ -150,6 +150,92 @@ use sparq_zk::verify::{branch_obligations, fragment_query, SlotPattern};
 use std::collections::BTreeSet;
 use std::path::Path;
 
+/// The CERTIFIED SCOPE of a trusted issuer (spec `research/trust-expression-spec.md`
+/// §3.4 `trustx:scope`) — what the framework's published certification attests the
+/// issuer is *certified to issue* (sq-6syab.5, mode 2). This is the machine-checkable
+/// handle for the §3.4 scope-conformance obligation ("issuers only issued what they
+/// are certified to issue"): every contributing attested statement's predicate must
+/// fall inside its issuer's certified scope.
+///
+/// # Trust-anchored, NOT cryptographically proven (honest framing, §7.2)
+/// A `CertifiedScope` is a relying-party trust anchor, registered on a [`KeySet`]
+/// entry ([`KeySet::with_certified_scope`]) — the verifier derives it OUT OF BAND
+/// from the framework's published certification attestations (mode 2 "derive `K`
+/// from framework certifications"), exactly as `K` itself and the
+/// [`RevocationPolicy`] snapshots are external inputs, never prover-supplied JSON.
+/// The scope-conformance check therefore constrains what the *verifier accepts* and,
+/// via the published certification, what the issuer was *authorized* to issue; it is
+/// a trust-anchored delegation claim, NOT a cryptographic guarantee about everything
+/// the issuer ever did. It matches this specification and is FAIL-CLOSED; it makes NO
+/// soundness/privacy claim (the in-circuit "prove the disclosed/derived claims fall
+/// inside a certified scope without disclosing more" upgrade is the genuinely-new,
+/// unbuilt ZK work — deferred, `sq-qhy4` open; MPC semi-honest only).
+///
+/// # Fail-closed
+/// Registering a scope for an issuer OPTS THAT ISSUER IN to per-predicate scope
+/// binding. Once opted in, the check is fail-closed: a contributing statement whose
+/// predicate is not inside the certified predicate set — or a predicate that cannot
+/// be decided (an unparseable encoding, a hidden-issuer commitment whose signer key
+/// is undisclosed, or a scan drawing from two issuers with DIFFERENT scopes so the
+/// per-statement source is undecidable from disclosed data) — is REJECTED. An issuer
+/// with NO registered scope is simply not scope-constrained (the check is a
+/// per-issuer opt-in policy layer, mirroring `KeySet::hidden_issuer_depth`).
+// [OPUS-4.8] sq-6syab.5: certification-scope trust anchor (matches-spec / fail-closed;
+// NOT externally audited, sq-qhy4). Written while Fable 5 unavailable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CertifiedScope {
+    /// `trustx:AnyServiceScope` (§3.4 (i)) — service-level certification: the issuer
+    /// is certified to issue ANY claim type. No per-predicate constraint is applied
+    /// (registering it records the certification without narrowing the predicates).
+    Any,
+    /// A certified PREDICATE SET (§3.4 (iii), the machine-checkable scope handle): the
+    /// canonical term-encodings ([`field_to_hex`]) of the predicates the issuer is
+    /// certified to issue. A contributing statement whose predicate encoding is not in
+    /// this set is OUTSIDE the certified scope => REJECT (fail-closed). An EMPTY set
+    /// certifies the issuer for NO predicate (every statement rejects) — fail-closed,
+    /// never an accept-all.
+    Predicates(BTreeSet<String>),
+}
+
+impl CertifiedScope {
+    /// A `trustx:AnyServiceScope` certification (§3.4 (i)): no per-predicate
+    /// constraint.
+    pub fn any() -> Self {
+        CertifiedScope::Any
+    }
+
+    /// A certified predicate set from the predicates' term encodings (§3.4 (iii)).
+    /// Each encoding is normalized to its canonical [`field_to_hex`] form (so
+    /// `0x`-padding differences do not slip a predicate past the membership check),
+    /// exactly as the scan's `pattern_const_enc` / `rows` slots are compared. An
+    /// UNPARSEABLE encoding is DROPPED — it can never match a proof-bound predicate,
+    /// so dropping it only NARROWS the accepted set (fail-closed), never widens it.
+    /// The relying party derives these encodings the same way the prover does
+    /// ([`sparq_zk::encode::encode_term`] over the predicate IRI + the graph salt is
+    /// salt-independent for a `NamedNode` predicate).
+    pub fn predicates<I, S>(encodings: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let set = encodings
+            .into_iter()
+            .filter_map(|e| FieldHex(e.as_ref().to_string()).to_field().map(|f| field_to_hex(&f)))
+            .collect();
+        CertifiedScope::Predicates(set)
+    }
+
+    /// Whether a proof-bound predicate encoding (a scan slot's field element) is
+    /// inside this certified scope. `Any` admits everything; `Predicates(s)` admits
+    /// only members of `s` (an empty `s` admits nothing — fail-closed).
+    fn allows_predicate_enc(&self, enc: &Fr) -> bool {
+        match self {
+            CertifiedScope::Any => true,
+            CertifiedScope::Predicates(set) => set.contains(&field_to_hex(enc)),
+        }
+    }
+}
+
 /// The relying party's EXTERNALLY-anchored trusted issuer key-set `K` — the
 /// soundness fix for audit #3 codex finding #1.
 ///
@@ -184,6 +270,18 @@ pub struct KeySet {
     /// member the prover used.
     // [OPUS-4.8] sq-z9l: opt-in hidden-issuer verification depth.
     hidden_issuer_depth: Option<u32>,
+    /// OPTIONAL per-issuer CERTIFIED SCOPE (sq-6syab.5, spec §3.4 `trustx:scope`),
+    /// keyed by normalized issuer-key hex. Registered by
+    /// [`Self::with_certified_scope`] from the framework's published certification
+    /// (mode 2). When non-empty, the verifier runs the fail-closed
+    /// certification-scope gate (`bind_certification_scope`): every contributing
+    /// attested statement's predicate must fall inside its issuer's certified scope.
+    /// EMPTY => the scope gate is inactive (byte-identical to the pre-sq-6syab.5
+    /// behaviour) — scope binding is a per-issuer opt-in policy layer, mirroring
+    /// `hidden_issuer_depth`.
+    // [OPUS-4.8] sq-6syab.5: certification-scope trust anchor (matches-spec /
+    // fail-closed; NOT externally audited, sq-qhy4).
+    certified_scopes: std::collections::BTreeMap<String, CertifiedScope>,
 }
 
 impl KeySet {
@@ -191,7 +289,11 @@ impl KeySet {
     /// then rejected (fail closed). Useful as the explicit "no source is
     /// authoritative" policy and as a test default.
     pub fn empty() -> Self {
-        KeySet { keys: BTreeSet::new(), hidden_issuer_depth: None }
+        KeySet {
+            keys: BTreeSet::new(),
+            hidden_issuer_depth: None,
+            certified_scopes: std::collections::BTreeMap::new(),
+        }
     }
 
     /// Build a trust anchor from the relying party's trusted issuer public keys
@@ -209,7 +311,11 @@ impl KeySet {
             .into_iter()
             .filter_map(|h| public_key_from_hex(h.as_ref()).map(|_| normalize_hex(h.as_ref())))
             .collect();
-        KeySet { keys, hidden_issuer_depth: None }
+        KeySet {
+            keys,
+            hidden_issuer_depth: None,
+            certified_scopes: std::collections::BTreeMap::new(),
+        }
     }
 
     /// Enable the HIDDEN-ISSUER attestation path (sq-z9l) at Merkle depth `depth`
@@ -223,6 +329,38 @@ impl KeySet {
     pub fn with_hidden_issuer_depth(mut self, depth: u32) -> Self {
         self.hidden_issuer_depth = Some(depth);
         self
+    }
+
+    /// Register the CERTIFIED SCOPE of a trusted issuer (sq-6syab.5, spec §3.4
+    /// `trustx:scope`, mode 2), builder style — the relying party's out-of-band view
+    /// of what the framework's published certification authorizes `issuer_key_hex` to
+    /// issue. This OPTS THAT ISSUER IN to the fail-closed certification-scope gate
+    /// (`bind_certification_scope`): thereafter every contributing attested statement
+    /// over a commitment this issuer signed must have a predicate inside `scope`. The
+    /// key is normalized; registering a scope for a key not (yet) in `K` is harmless
+    /// (no accepted attestation can use an untrusted key — `bind_issuer_attestations`
+    /// rejects it first). Issuers with NO registered scope are unconstrained (the gate
+    /// is a per-issuer opt-in policy layer). Re-registering replaces the prior scope.
+    ///
+    /// Trust-anchored, NOT cryptographically proven — see [`CertifiedScope`]. NOT
+    /// externally audited (sq-qhy4); no soundness/privacy claim.
+    // [OPUS-4.8] sq-6syab.5.
+    pub fn with_certified_scope(mut self, issuer_key_hex: &str, scope: CertifiedScope) -> Self {
+        self.certified_scopes.insert(normalize_hex(issuer_key_hex), scope);
+        self
+    }
+
+    /// The certified scope registered for `issuer_key_hex` (any case / optional
+    /// `0x`), or `None` if the issuer is not scope-constrained (sq-6syab.5).
+    fn certified_scope(&self, issuer_key_hex: &str) -> Option<&CertifiedScope> {
+        self.certified_scopes.get(&normalize_hex(issuer_key_hex))
+    }
+
+    /// Whether the relying party registered ANY certified scope — i.e. whether the
+    /// fail-closed certification-scope gate is active (sq-6syab.5). `false` =>
+    /// `bind_certification_scope` is a no-op (byte-identical legacy behaviour).
+    fn scope_binding_active(&self) -> bool {
+        !self.certified_scopes.is_empty()
     }
 
     /// The hidden-issuer Merkle depth, if the relying party enabled the path.
@@ -1524,6 +1662,29 @@ pub enum CheckError {
     /// N-way join is unproven — rejected fail-closed. `edge` is the first chained
     /// edge whose commitment diverges from the chain's first edge.
     JoinCommitmentChainMismatch { edge: usize },
+    /// [OPUS-4.8] sq-6syab.5 (certification-scope binding, spec §3.4): a
+    /// contributing attested statement's predicate is OUTSIDE the certified scope of
+    /// the issuer that signed the committed graph it was drawn from — the
+    /// "issuers only issued what they are certified to issue" obligation. The
+    /// predicate is proof-bound (a `Scan` `pattern_const_enc`/`rows` slot or a
+    /// `PathReach` `pred_enc`, byte-bound into the bb public inputs), and the scope
+    /// is the relying party's external [`CertifiedScope`] trust anchor. Rejected
+    /// fail-closed. Trust-anchored, NOT a cryptographic guarantee (sq-qhy4 open); no
+    /// soundness/privacy claim. `proof` is the offending sub-proof index; `predicate`
+    /// is the disclosed predicate encoding.
+    CertificationScopeViolation { proof: usize, predicate: String },
+    /// [OPUS-4.8] sq-6syab.5: certification-scope binding is ACTIVE (the relying
+    /// party registered ≥1 [`CertifiedScope`]) but the sub-proof's scope conformance
+    /// cannot be soundly decided from the disclosed data — a contributing committed
+    /// graph HIDES its issuer (a hidden-issuer-covered commitment, so the certified
+    /// scope cannot be looked up by key), OR the sub-proof draws from a MIX of
+    /// scope-restricted and other issuers / two DIFFERENT restricted scopes, so the
+    /// per-statement source (hence the scope it must satisfy) is ambiguous under the
+    /// per-graph (not per-row) attribution. Rejected fail-closed. The in-circuit
+    /// scope proof + per-row attribution that would resolve these is the genuinely
+    /// NEW, UNBUILT zk work (deferred, sq-qhy4); until then this composition is
+    /// refused rather than under-checked. `proof` is the sub-proof index.
+    CertificationScopeUndecidable { proof: usize },
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
     /// [OPUS-4.8] sq-h732x: the FAIL-CLOSED extended-fragment structural routing
@@ -1877,6 +2038,14 @@ impl std::fmt::Display for CheckError {
             CheckError::JoinCommitmentChainMismatch { edge } => write!(
                 f,
                 "join edge {edge}: an N-way join chain over a shared variable carries differing join_commitments across its pairwise join_eq proofs (sq-r2s8 §2.4: every hop of a multi-way join must bind the SAME hiding commitment so the join value composes transitively — distinct commitments leave the N-way join unproven, fail-closed)"
+            ),
+            CheckError::CertificationScopeViolation { proof, predicate } => write!(
+                f,
+                "sub-proof {proof}: a contributing attested statement's predicate ({predicate}) is OUTSIDE its issuer's certified scope (sq-6syab.5 §3.4 scope-conformance: issuers only issued what they are certified to issue — fail-closed; trust-anchored, not a cryptographic guarantee, sq-qhy4)"
+            ),
+            CheckError::CertificationScopeUndecidable { proof } => write!(
+                f,
+                "sub-proof {proof}: certification-scope conformance cannot be decided from the disclosed data (sq-6syab.5: a contributing commitment hides its issuer, or the sub-proof mixes scope-restricted and other issuers / differing scopes so the per-statement source is ambiguous under per-graph attribution) — refused fail-closed (the in-circuit scope proof + per-row attribution that would resolve it is deferred, sq-qhy4)"
             ),
             CheckError::Driver(e) => write!(f, "{e}"),
             #[cfg(feature = "extended-fragment")]
@@ -2318,6 +2487,19 @@ fn prefilter_manifest_structure_impl(
     let hidden_covered = hidden_issuer_covered_commitments(manifest, trusted_key_set);
     bind_issuer_attestations(manifest, trusted_key_set, &hidden_covered)?;
 
+    // --- Stage 2d′: certification-SCOPE binding (sq-6syab.5, spec §3.4). ---
+    // OPT-IN, fail-closed: when the relying party registered ≥1 issuer certified
+    // scope (mode 2 — derived out of band from the framework's published
+    // certifications), every contributing attested statement's predicate must fall
+    // inside the certified scope of the issuer that signed the committed graph it was
+    // drawn from ("issuers only issued what they are certified to issue"). Runs after
+    // bind_issuer_attestations so the commitment→issuer-key mapping it relies on is
+    // already validated (key ∈ external K, signature verified). Query-INDEPENDENT, so
+    // it runs identically in both stage-1 regimes. When no scope is registered this
+    // is a no-op (byte-identical to the pre-sq-6syab.5 behaviour). Trust-anchored,
+    // NOT a cryptographic guarantee (sq-qhy4 open) — no soundness/privacy claim.
+    bind_certification_scope(manifest, trusted_key_set)?;
+
     // --- Stage 2f: revocation / freshness (audit #12). ---
     // The status reference is now issuer-bound (stage 2d); check the credential's
     // status bit is UNSET in the disclosed snapshot and the snapshot version is
@@ -2680,6 +2862,170 @@ fn bind_issuer_attestations(
         }
     }
     Ok(())
+}
+
+/// Stage 2d′: certification-SCOPE binding (sq-6syab.5, spec
+/// `research/trust-expression-spec.md` §3.4, mode 2). For every sub-proof that
+/// draws attested triples (a `Scan`, and under the extended fragment a `PathReach`),
+/// require every CONTRIBUTING attested statement's predicate to fall inside the
+/// CERTIFIED SCOPE of the issuer that signed the committed graph it was drawn from —
+/// the §3.4 scope-conformance obligation ("issuers only issued what they are
+/// certified to issue"). The scope is the relying party's external [`CertifiedScope`]
+/// trust anchor, registered per issuer key on the [`KeySet`] ([`KeySet::with_certified_scope`]);
+/// the predicate is a PROOF-BOUND disclosed encoding (a `Scan` `pattern_const_enc`
+/// slot / `rows` slot, or a `PathReach` `pred_enc`, all byte-bound into the bb public
+/// inputs by the audit-#1 reconstruction), so this ties a proof-bound predicate to an
+/// externally-anchored certified scope.
+///
+/// # OPT-IN, and PRECONDITION
+/// A no-op unless the relying party registered ≥1 certified scope
+/// ([`KeySet::scope_binding_active`]) — so the default build / every pre-sq-6syab.5
+/// manifest is byte-identical. Runs AFTER [`bind_issuer_attestations`], which has
+/// already validated every scan/path commitment's issuer key ∈ the external `K`; so
+/// a contributing commitment with NO clear attestation here is (necessarily)
+/// hidden-issuer-covered.
+///
+/// # Fail-closed decision (honest boundary)
+/// The disclosed per-graph `attribution` says WHICH committed graphs contributed, but
+/// NOT which graph each disclosed statement came from. So scope conformance is
+/// enforced only where it is soundly decidable, and REFUSED (never under-checked)
+/// otherwise:
+/// - a contributing commitment whose issuer is HIDDEN (hidden-issuer-covered) => the
+///   certified scope cannot be looked up by key => [`CheckError::CertificationScopeUndecidable`];
+/// - a MIX of scope-restricted + other issuers, or two DIFFERENT restricted scopes,
+///   across the contributing graphs => the per-statement source is ambiguous =>
+///   `CertificationScopeUndecidable`;
+/// - exactly ONE restricted scope `S` covering EVERY contributing graph => every
+///   disclosed contributing predicate must be inside `S`, else
+///   [`CheckError::CertificationScopeViolation`];
+/// - no contributing graph is scope-restricted => unconstrained (skip).
+///
+/// The in-circuit scope proof + per-row attribution that would lift the undecidable
+/// cases is the genuinely NEW, UNBUILT zk work (§3.5) — deferred, `sq-qhy4` open. This
+/// gate matches the spec and is fail-closed; it makes NO soundness/privacy claim.
+// [OPUS-4.8] sq-6syab.5. Written while Fable 5 unavailable — re-review when Fable returns.
+fn bind_certification_scope(
+    manifest: &ProofManifest,
+    trusted_key_set: &KeySet,
+) -> Result<(), CheckError> {
+    if !trusted_key_set.scope_binding_active() {
+        return Ok(());
+    }
+    for (pi, sp) in manifest.sub_proofs.iter().enumerate() {
+        // Only sub-proofs that draw attested triples carry a contributing statement
+        // to scope-check; filters / join_eq / revocation proofs do not.
+        let (commitments, attribution): (&[FieldHex], &[bool]) = match &sp.inputs {
+            ProofInputs::Scan { commitments, attribution, .. } => (commitments, attribution),
+            #[cfg(feature = "extended-fragment")]
+            ProofInputs::PathReach { commitments, attribution, .. } => (commitments, attribution),
+            _ => continue,
+        };
+
+        // Resolve the governing certified scope from the CONTRIBUTING committed
+        // graphs (attribution[g] == true). See the fn docs for the fail-closed cases.
+        let mut governing: Option<&CertifiedScope> = None;
+        let mut n_contrib = 0usize;
+        let mut n_restricted = 0usize;
+        let mut undecidable = false;
+        for (g, c) in commitments.iter().enumerate() {
+            if !attribution.get(g).copied().unwrap_or(false) {
+                continue;
+            }
+            n_contrib += 1;
+            let c_field = c.to_field();
+            let att = manifest.commitment_attestations.iter().find(|a| {
+                a.commitment.to_field().is_some() && a.commitment.to_field() == c_field
+            });
+            let Some(att) = att else {
+                // No clear attestation ⇒ hidden-issuer-covered (bind_issuer_attestations
+                // already accepted the manifest): the signer key is undisclosed, so its
+                // certified scope cannot be looked up. Undecidable, fail-closed.
+                undecidable = true;
+                continue;
+            };
+            match trusted_key_set.certified_scope(&att.issuer_public_key) {
+                // Unrestricted issuer (no scope, or an explicit AnyServiceScope):
+                // imposes no per-predicate constraint.
+                None | Some(CertifiedScope::Any) => {}
+                Some(scope) => {
+                    n_restricted += 1;
+                    match governing {
+                        None => governing = Some(scope),
+                        Some(prev) if prev == scope => {}
+                        // ≥2 DISTINCT restricted scopes over the contributing graphs.
+                        Some(_) => undecidable = true,
+                    }
+                }
+            }
+        }
+
+        let Some(scope) = governing else {
+            // No restricted scope governs. But if a contributing graph HID its issuer
+            // while scope binding is active, that hidden issuer could be a restricted
+            // one presenting an out-of-scope statement — refuse fail-closed.
+            if undecidable {
+                return Err(CheckError::CertificationScopeUndecidable { proof: pi });
+            }
+            continue;
+        };
+        // A single restricted scope governs soundly ONLY when it covers EVERY
+        // contributing graph and none was hidden — otherwise a disclosed statement
+        // might come from an ungoverned (or hidden) graph and the per-graph
+        // attribution cannot attribute it. Refuse fail-closed.
+        if undecidable || n_restricted != n_contrib {
+            return Err(CheckError::CertificationScopeUndecidable { proof: pi });
+        }
+
+        // Enforce: every disclosed contributing predicate falls inside `scope`.
+        match &sp.inputs {
+            ProofInputs::Scan { pattern_is_const, pattern_const_enc, rows, row_count, .. } => {
+                // (a) A constant predicate slot pins the predicate for the whole
+                // pattern — covers the existence case with no disclosed variable rows.
+                if pattern_is_const[1] {
+                    check_predicate_in_scope(scope, &pattern_const_enc[1], pi)?;
+                }
+                // (b) Every ACTIVE disclosed row's predicate (slot 1): the actual
+                // matched statements. Rows carry the real triple encoding regardless
+                // of slot constancy (`crate::build::build_scan`), so slot 1 is always
+                // the matched statement's predicate.
+                let active = (*row_count as usize).min(rows.len());
+                for row in rows.iter().take(active) {
+                    check_predicate_in_scope(scope, &row[1], pi)?;
+                }
+            }
+            #[cfg(feature = "extended-fragment")]
+            ProofInputs::PathReach { pred_enc, .. } => {
+                // The single constant predicate every chain triple carries.
+                check_predicate_in_scope(scope, pred_enc, pi)?;
+            }
+            _ => unreachable!("scope check is only reached for Scan / PathReach"),
+        }
+    }
+    Ok(())
+}
+
+/// Fail-closed membership check for one disclosed predicate encoding against a
+/// governing [`CertifiedScope`] (sq-6syab.5). An UNPARSEABLE predicate encoding is
+/// rejected (never silently skipped), and a predicate outside a
+/// [`CertifiedScope::Predicates`] set is a [`CheckError::CertificationScopeViolation`].
+// [OPUS-4.8] sq-6syab.5.
+fn check_predicate_in_scope(
+    scope: &CertifiedScope,
+    predicate: &FieldHex,
+    proof: usize,
+) -> Result<(), CheckError> {
+    let in_scope = predicate
+        .to_field()
+        .map(|p| scope.allows_predicate_enc(&p))
+        .unwrap_or(false);
+    if in_scope {
+        Ok(())
+    } else {
+        Err(CheckError::CertificationScopeViolation {
+            proof,
+            predicate: predicate.0.clone(),
+        })
+    }
 }
 
 /// The set of commitment-hex keys (canonical `field_to_hex`) for which a CLEAR
@@ -7607,6 +7953,321 @@ mod tests {
             "an unattested flat scan must be refused identically in both feature states"
         );
     }
+
+    // === sq-6syab.5: certification-SCOPE binding gate (bind_certification_scope). ===
+    // Direct-gate tests (no bb): the same fail-closed stage 2d′ verify_manifest runs.
+    // OPT-IN — a no-op unless the relying party registered a CertifiedScope.
+
+    fn issuer_pk(seed: u64) -> String {
+        sparq_zk::sig::public_key_to_hex(&sparq_zk::sig::SecretKey::from_seed(seed).public_key())
+    }
+
+    /// A single-graph scan over `commit` with a CONSTANT predicate slot `pred_hex`
+    /// and the given disclosed rows; attribution = [true] (the graph contributes).
+    fn scope_scan(commit: Fr, pred_hex: &str, rows: Vec<[FieldHex; 3]>) -> ProofInputs {
+        let row_count = rows.len() as u32;
+        ProofInputs::Scan {
+            id: CircuitId::Scan { k: 1, n: 16, r: 4 },
+            commitments: vec![FieldHex::from_field(&commit)],
+            pattern_is_const: [false, true, false],
+            pattern_const_enc: [fh("0x0"), fh(pred_hex), fh("0x0")],
+            rows,
+            row_count,
+            attribution: vec![true],
+        }
+    }
+
+    /// A scan sub-proof + its attestations wrapped in a minimal manifest.
+    fn scope_manifest(
+        inputs: ProofInputs,
+        attestations: Vec<crate::manifest::CommitmentAttestation>,
+    ) -> ProofManifest {
+        let mut m = minimal_manifest("SELECT * WHERE { ?s <http://ex/p> ?o }");
+        m.sub_proofs = vec![crate::manifest::SubProof { inputs, proof_hex: String::new() }];
+        m.commitment_attestations = attestations;
+        m.revocation = Some(test_revocation());
+        m
+    }
+
+    #[test]
+    fn scope_gate_is_a_noop_when_no_scope_is_registered() {
+        // Opt-in: an ordinary KeySet (no registered scope) leaves the gate inactive,
+        // so an otherwise-out-of-scope predicate is NOT constrained — byte-identical
+        // to the pre-sq-6syab.5 behaviour.
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let commit = Fr::from(100u64);
+        let m = scope_manifest(
+            scope_scan(commit, "0xdead", vec![]),
+            vec![test_attestation(commit, Fr::from(7u64), &sk)],
+        );
+        assert!(bind_certification_scope(&m, &k).is_ok());
+    }
+
+    #[test]
+    fn scope_conformant_constant_predicate_passes() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let pk = sparq_zk::sig::public_key_to_hex(&sk.public_key());
+        let k = KeySet::from_hex_keys([pk.clone()])
+            .with_certified_scope(&pk, CertifiedScope::predicates(["0x2a"]));
+        let commit = Fr::from(100u64);
+        let m = scope_manifest(
+            scope_scan(commit, "0x2a", vec![]),
+            vec![test_attestation(commit, Fr::from(7u64), &sk)],
+        );
+        assert!(
+            bind_certification_scope(&m, &k).is_ok(),
+            "a predicate inside the issuer's certified scope must pass"
+        );
+    }
+
+    #[test]
+    fn scope_violation_constant_predicate_rejected() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let pk = sparq_zk::sig::public_key_to_hex(&sk.public_key());
+        // Issuer certified ONLY for 0xaa, but the scan discloses predicate 0xbb.
+        let k = KeySet::from_hex_keys([pk.clone()])
+            .with_certified_scope(&pk, CertifiedScope::predicates(["0xaa"]));
+        let commit = Fr::from(100u64);
+        let m = scope_manifest(
+            scope_scan(commit, "0xbb", vec![]),
+            vec![test_attestation(commit, Fr::from(7u64), &sk)],
+        );
+        assert!(
+            matches!(
+                bind_certification_scope(&m, &k),
+                Err(CheckError::CertificationScopeViolation { proof: 0, .. })
+            ),
+            "a predicate OUTSIDE the certified scope must be refused fail-closed"
+        );
+    }
+
+    #[test]
+    fn any_service_scope_imposes_no_predicate_constraint() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let pk = sparq_zk::sig::public_key_to_hex(&sk.public_key());
+        let k = KeySet::from_hex_keys([pk.clone()])
+            .with_certified_scope(&pk, CertifiedScope::any());
+        let commit = Fr::from(100u64);
+        let m = scope_manifest(
+            scope_scan(commit, "0xdead", vec![]),
+            vec![test_attestation(commit, Fr::from(7u64), &sk)],
+        );
+        assert!(
+            bind_certification_scope(&m, &k).is_ok(),
+            "AnyServiceScope (§3.4 (i)) certifies the issuer for any predicate"
+        );
+    }
+
+    #[test]
+    fn scope_registered_for_a_different_issuer_leaves_this_one_unconstrained() {
+        // Scope binding is per-issuer opt-in: registering a scope for issuer 2 does
+        // NOT constrain issuer 1's statements (issuer 1 has no registered scope).
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let pk1 = sparq_zk::sig::public_key_to_hex(&sk.public_key());
+        let k = KeySet::from_hex_keys([pk1, issuer_pk(2)])
+            .with_certified_scope(&issuer_pk(2), CertifiedScope::predicates(["0xaa"]));
+        let commit = Fr::from(100u64);
+        let m = scope_manifest(
+            scope_scan(commit, "0xbb", vec![]),
+            vec![test_attestation(commit, Fr::from(7u64), &sk)],
+        );
+        assert!(bind_certification_scope(&m, &k).is_ok());
+    }
+
+    #[test]
+    fn empty_predicate_scope_rejects_every_statement() {
+        // An EMPTY certified predicate set certifies the issuer for NO predicate —
+        // fail-closed, never an accept-all.
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let pk = sparq_zk::sig::public_key_to_hex(&sk.public_key());
+        let k = KeySet::from_hex_keys([pk.clone()])
+            .with_certified_scope(&pk, CertifiedScope::predicates(Vec::<&str>::new()));
+        let commit = Fr::from(100u64);
+        let m = scope_manifest(
+            scope_scan(commit, "0x2a", vec![]),
+            vec![test_attestation(commit, Fr::from(7u64), &sk)],
+        );
+        assert!(matches!(
+            bind_certification_scope(&m, &k),
+            Err(CheckError::CertificationScopeViolation { proof: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn scope_checks_every_disclosed_row_predicate() {
+        // A VARIABLE predicate slot: the disclosed rows carry the real matched
+        // predicate at slot 1, and every ACTIVE row must be in scope.
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let pk = sparq_zk::sig::public_key_to_hex(&sk.public_key());
+        let k = KeySet::from_hex_keys([pk.clone()])
+            .with_certified_scope(&pk, CertifiedScope::predicates(["0xaa"]));
+        let commit = Fr::from(100u64);
+        // Variable predicate slot; one in-scope row.
+        let ok_scan = ProofInputs::Scan {
+            id: CircuitId::Scan { k: 1, n: 16, r: 4 },
+            commitments: vec![FieldHex::from_field(&commit)],
+            pattern_is_const: [false, false, false],
+            pattern_const_enc: [fh("0x0"), fh("0x0"), fh("0x0")],
+            rows: vec![[fh("0x1"), fh("0xaa"), fh("0x2")]],
+            row_count: 1,
+            attribution: vec![true],
+        };
+        let m = scope_manifest(ok_scan, vec![test_attestation(commit, Fr::from(7u64), &sk)]);
+        assert!(bind_certification_scope(&m, &k).is_ok());
+
+        // A second row with an OUT-OF-scope predicate must be refused.
+        let bad_scan = ProofInputs::Scan {
+            id: CircuitId::Scan { k: 1, n: 16, r: 4 },
+            commitments: vec![FieldHex::from_field(&commit)],
+            pattern_is_const: [false, false, false],
+            pattern_const_enc: [fh("0x0"), fh("0x0"), fh("0x0")],
+            rows: vec![[fh("0x1"), fh("0xaa"), fh("0x2")], [fh("0x3"), fh("0xbb"), fh("0x4")]],
+            row_count: 2,
+            attribution: vec![true],
+        };
+        let m2 = scope_manifest(bad_scan, vec![test_attestation(commit, Fr::from(7u64), &sk)]);
+        assert!(matches!(
+            bind_certification_scope(&m2, &k),
+            Err(CheckError::CertificationScopeViolation { proof: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn a_hidden_issuer_contributing_commitment_is_undecidable_when_scope_active() {
+        // Scope binding active, but a CONTRIBUTING commitment carries NO clear
+        // attestation (in the real pipeline it is hidden-issuer-covered, so its signer
+        // key — hence its certified scope — is undisclosed). Fail-closed: undecidable.
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let pk = sparq_zk::sig::public_key_to_hex(&sk.public_key());
+        let k = KeySet::from_hex_keys([pk.clone()])
+            .with_certified_scope(&pk, CertifiedScope::predicates(["0xaa"]));
+        let commit = Fr::from(100u64);
+        // No attestation for `commit`.
+        let m = scope_manifest(scope_scan(commit, "0xaa", vec![]), vec![]);
+        assert!(matches!(
+            bind_certification_scope(&m, &k),
+            Err(CheckError::CertificationScopeUndecidable { proof: 0 })
+        ));
+    }
+
+    #[test]
+    fn a_mix_of_restricted_and_unrestricted_issuers_is_undecidable() {
+        // A k=2 scan drawing from a scope-restricted issuer (1) AND an unrestricted
+        // issuer (2): the per-graph attribution cannot attribute a disclosed row to
+        // its source, so scope conformance is undecidable — fail-closed.
+        let sk1 = sparq_zk::sig::SecretKey::from_seed(1);
+        let sk2 = sparq_zk::sig::SecretKey::from_seed(2);
+        let pk1 = sparq_zk::sig::public_key_to_hex(&sk1.public_key());
+        let k = KeySet::from_hex_keys([pk1.clone(), issuer_pk(2)])
+            .with_certified_scope(&pk1, CertifiedScope::predicates(["0xaa"]));
+        let (c0, c1) = (Fr::from(100u64), Fr::from(200u64));
+        let scan = ProofInputs::Scan {
+            id: CircuitId::Scan { k: 2, n: 16, r: 4 },
+            commitments: vec![FieldHex::from_field(&c0), FieldHex::from_field(&c1)],
+            pattern_is_const: [false, true, false],
+            pattern_const_enc: [fh("0x0"), fh("0xaa"), fh("0x0")],
+            rows: vec![],
+            row_count: 0,
+            attribution: vec![true, true],
+        };
+        let m = scope_manifest(
+            scan,
+            vec![
+                test_attestation(c0, Fr::from(7u64), &sk1),
+                test_attestation(c1, Fr::from(9u64), &sk2),
+            ],
+        );
+        assert!(matches!(
+            bind_certification_scope(&m, &k),
+            Err(CheckError::CertificationScopeUndecidable { proof: 0 })
+        ));
+    }
+
+    #[test]
+    fn two_distinct_restricted_scopes_are_undecidable() {
+        let sk1 = sparq_zk::sig::SecretKey::from_seed(1);
+        let sk2 = sparq_zk::sig::SecretKey::from_seed(2);
+        let pk1 = sparq_zk::sig::public_key_to_hex(&sk1.public_key());
+        let pk2 = sparq_zk::sig::public_key_to_hex(&sk2.public_key());
+        let k = KeySet::from_hex_keys([pk1.clone(), pk2.clone()])
+            .with_certified_scope(&pk1, CertifiedScope::predicates(["0xaa"]))
+            .with_certified_scope(&pk2, CertifiedScope::predicates(["0xbb"]));
+        let (c0, c1) = (Fr::from(100u64), Fr::from(200u64));
+        let scan = ProofInputs::Scan {
+            id: CircuitId::Scan { k: 2, n: 16, r: 4 },
+            commitments: vec![FieldHex::from_field(&c0), FieldHex::from_field(&c1)],
+            pattern_is_const: [false, true, false],
+            pattern_const_enc: [fh("0x0"), fh("0xaa"), fh("0x0")],
+            rows: vec![],
+            row_count: 0,
+            attribution: vec![true, true],
+        };
+        let m = scope_manifest(
+            scan,
+            vec![
+                test_attestation(c0, Fr::from(7u64), &sk1),
+                test_attestation(c1, Fr::from(9u64), &sk2),
+            ],
+        );
+        assert!(matches!(
+            bind_certification_scope(&m, &k),
+            Err(CheckError::CertificationScopeUndecidable { proof: 0 })
+        ));
+    }
+
+    #[test]
+    fn multi_graph_single_shared_scope_is_enforced_precisely() {
+        // Two graphs, SAME issuer, SAME certified scope: decidable — every disclosed
+        // predicate must be in that one scope. In-scope passes; out-of-scope refuses.
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let pk = sparq_zk::sig::public_key_to_hex(&sk.public_key());
+        let k = KeySet::from_hex_keys([pk.clone()])
+            .with_certified_scope(&pk, CertifiedScope::predicates(["0xaa"]));
+        let (c0, c1) = (Fr::from(100u64), Fr::from(200u64));
+        let mk = |pred: &str| ProofInputs::Scan {
+            id: CircuitId::Scan { k: 2, n: 16, r: 4 },
+            commitments: vec![FieldHex::from_field(&c0), FieldHex::from_field(&c1)],
+            pattern_is_const: [false, true, false],
+            pattern_const_enc: [fh("0x0"), fh(pred), fh("0x0")],
+            rows: vec![],
+            row_count: 0,
+            attribution: vec![true, true],
+        };
+        let atts = || {
+            vec![
+                test_attestation(c0, Fr::from(7u64), &sk),
+                test_attestation(c1, Fr::from(9u64), &sk),
+            ]
+        };
+        assert!(bind_certification_scope(&scope_manifest(mk("0xaa"), atts()), &k).is_ok());
+        assert!(matches!(
+            bind_certification_scope(&scope_manifest(mk("0xcc"), atts()), &k),
+            Err(CheckError::CertificationScopeViolation { proof: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn a_non_contributing_restricted_graph_does_not_constrain() {
+        // attribution = [false]: the scan draws NO triple from the (restricted) graph,
+        // so there is no contributing statement to scope-check — unconstrained.
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let pk = sparq_zk::sig::public_key_to_hex(&sk.public_key());
+        let k = KeySet::from_hex_keys([pk.clone()])
+            .with_certified_scope(&pk, CertifiedScope::predicates(["0xaa"]));
+        let commit = Fr::from(100u64);
+        let scan = ProofInputs::Scan {
+            id: CircuitId::Scan { k: 1, n: 16, r: 4 },
+            commitments: vec![FieldHex::from_field(&commit)],
+            pattern_is_const: [false, true, false],
+            pattern_const_enc: [fh("0x0"), fh("0xbb"), fh("0x0")],
+            rows: vec![],
+            row_count: 0,
+            attribution: vec![false],
+        };
+        let m = scope_manifest(scan, vec![test_attestation(commit, Fr::from(7u64), &sk)]);
+        assert!(bind_certification_scope(&m, &k).is_ok());
+    }
 }
 
 // [OPUS-4.8] sq-3kd2g.6: FAIL-CLOSED wave-1 fragment DISPATCH tests — the
@@ -9105,6 +9766,37 @@ mod fragment_dispatch_tests {
         assert!(
             matches!(err, CheckError::UnattestedCommitment { proof: 0, .. }),
             "an unattested PATH commitment must be refused at the issuer gate, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bind_certification_scope_binds_a_path_predicate() {
+        // sq-6syab.5: a PathReach discloses its single chain predicate as `pred_enc`
+        // (0x11 in `path_with_commit`). Certification-scope binding checks it against
+        // the issuer's certified scope: in-scope passes, out-of-scope refuses.
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let pk = sparq_zk::sig::public_key_to_hex(&sk.public_key());
+        let commit = Fr::from(100u64);
+        let atts = vec![test_attestation(commit, Fr::from(7u64), &sk)];
+
+        let mut m = base_manifest(PLUS, vec![sub(path_with_commit(commit))]);
+        m.commitment_attestations = atts.clone();
+        m.revocation = Some(test_revocation());
+
+        // Certified for 0x11 (the path predicate) => passes.
+        let k_ok = KeySet::from_hex_keys([pk.clone()])
+            .with_certified_scope(&pk, CertifiedScope::predicates(["0x11"]));
+        assert!(bind_certification_scope(&m, &k_ok).is_ok());
+
+        // Certified for a DIFFERENT predicate => the path predicate is out of scope.
+        let k_bad = KeySet::from_hex_keys([pk.clone()])
+            .with_certified_scope(&pk, CertifiedScope::predicates(["0x22"]));
+        assert!(
+            matches!(
+                bind_certification_scope(&m, &k_bad),
+                Err(CheckError::CertificationScopeViolation { proof: 0, .. })
+            ),
+            "an out-of-scope PATH predicate must be refused fail-closed"
         );
     }
 

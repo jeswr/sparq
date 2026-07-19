@@ -60,6 +60,11 @@ pub use dispatch::{resolve_circuit, resolve_circuit_for_scheme, DispatchError};
 #[cfg(feature = "extended-fragment")]
 pub use verifier::{dispatch_fragment, verify_fragment_manifest, FragmentDispatchError};
 pub use verifier::EntailmentPolicy;
+// [OPUS-4.8] sq-6syab.5: the certification-scope trust anchor (spec §3.4 `trustx:scope`,
+// mode 2). Registered per issuer on `verifier::KeySet::with_certified_scope`; enforced
+// by the fail-closed `bind_certification_scope` gate. Matches-spec / fail-closed only —
+// NOT externally audited (sq-qhy4); no soundness/privacy claim.
+pub use verifier::CertifiedScope;
 // [OPUS-4.8] sq-3e5 + sq-h2v: hidden-index revocation host helpers.
 pub use revocation::{merkle_root, merkle_witness, revoke_prover_toml, MerkleWitness};
 // [OPUS-4.8] sq-z9l: hidden-issuer-attestation host helpers (in-circuit

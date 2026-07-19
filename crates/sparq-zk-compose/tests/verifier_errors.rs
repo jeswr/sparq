@@ -99,6 +99,15 @@ fn check_error_display_covers_structural_reject_reasons() {
         &CheckError::JoinCommitmentChainMismatch { edge: 6 },
         &["join edge", "6", "N-way"],
     );
+    // sq-6syab.5: certification-scope binding reasons.
+    assert_display_carries(
+        &CheckError::CertificationScopeViolation { proof: 0, predicate: "0xaa".into() },
+        &["0xaa", "scope", "sq-6syab.5"],
+    );
+    assert_display_carries(
+        &CheckError::CertificationScopeUndecidable { proof: 1 },
+        &["1", "scope", "sq-6syab.5"],
+    );
 }
 
 #[test]
