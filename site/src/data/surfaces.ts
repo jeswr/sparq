@@ -29,6 +29,7 @@ import {
   Code2,
   Info,
   Waypoints,
+  FileLock2,
 } from "lucide-react";
 
 /** Live-execution tier — drives the honesty badge colour + label. */
@@ -242,7 +243,7 @@ export const GROUPS: SurfaceGroup[] = [
     id: "reason-validate",
     label: "Reason & validate",
     description:
-      "Derive, trace, and validate RDF — RDFS / OWL 2 RL / N3 closure, PROV-O lineage, and SHACL.",
+      "Derive, trace, validate, and govern RDF — RDFS / OWL 2 RL / N3 closure, PROV-O lineage, SHACL, and ODRL usage-control policy decisions.",
     surfaces: [
       {
         slug: "inference",
@@ -276,6 +277,22 @@ export const GROUPS: SurfaceGroup[] = [
           readme: "https://github.com/jeswr/sparq/tree/main/crates/sparq-prov",
           skill: "https://github.com/jeswr/sparq/blob/main/skills/prov-lineage/SKILL.md",
         },
+      },
+      {
+        slug: "policy",
+        href: "/surface/policy",
+        title: "ODRL usage control",
+        blurb:
+          "W3C ODRL 2.2 permission / prohibition / duty → fail-closed Permit / Deny, with purpose / recipient / dateTime / count constraints and deny-overrides.",
+        // [OPUS-4.8] sq-vw3ax.14: walkthrough tier. sparq-policy is an OPT-IN native crate
+        // (publish = false, dependency-of-nothing; `evaluate` is pure Rust, no I/O) that the
+        // lean wasm bundles never carry, and the static Pages site has no backend — so the
+        // honest surface REPLAYS the real evaluate() decision for each (policy, request) pair
+        // (each verdict pinned by a named crate test; src/lib/policy.ts), not a live in-tab run.
+        // A live evaluator would need a dedicated sparq-policy wasm bundle (a separate spike).
+        tier: "walkthrough",
+        icon: FileLock2,
+        built: true,
       },
     ],
   },
