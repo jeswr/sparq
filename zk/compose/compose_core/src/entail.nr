@@ -8,8 +8,8 @@
 //! DISCLOSED scan base: an antecedent is accepted iff it byte-equals a disclosed
 //! scan row (or an earlier derived triple). So an entailed presentation must
 //! DISCLOSE every antecedent triple, defeating privacy for inference-bearing
-//! presentations (the §5 inference goal). This relation removes that disclosure:
-//! it proves a derived triple follows by ONE RDFS rule application from
+//! presentations (the section-5 inference goal). This relation removes that
+//! disclosure: it proves a derived triple follows by ONE RDFS rule application from
 //! antecedents that are members of the COMMITTED graph -- WITHOUT disclosing the
 //! antecedents -- bound to the SAME per-graph commitments the scan sub-proofs
 //! carry.
@@ -38,9 +38,10 @@
 //!   completeness-under-entailment proof is a SEPARATE, UNBUILT deliverable and
 //!   is NOT claimed here.
 //! - DISCLOSED-BASE MEMBERSHIP: an antecedent is grounded by membership in a
-//!   committed graph (the asserted base ⊆ closure). An antecedent that is itself
-//!   only entailed (in the closure but not the asserted base) is NOT provable by
-//!   this relation -- fail-closed, exactly like the host `bind_entailment`.
+//!   committed graph (the asserted base is a subset of the closure). An
+//!   antecedent that is itself only entailed (in the closure but not the
+//!   asserted base) is NOT provable by this relation -- fail-closed, exactly
+//!   like the host `bind_entailment`.
 //! - v1 RULES: the two binary RDFS rules `rdfs9` (subClassOf-into-type) and
 //!   `rdfs7` (subPropertyOf), the same pair `EntailmentRule` ships. Both have
 //!   exactly two antecedents, so `antecedents` is fixed arity 2.
@@ -57,8 +58,8 @@ use crate::hashes::{commit_fold, h3};
 
 /// RDFS rule selector -- the PUBLIC `rule` input value. Mirrors
 /// `crate::manifest`/`crate::derivation::EntailmentRule` ordering.
-pub global RULE_RDFS9_SUBCLASS_TYPE: u32 = 0; // (x type c1),(c1 subClassOf c2) ⊢ (x type c2)
-pub global RULE_RDFS7_SUBPROPERTY: u32 = 1; //  (p1 subPropertyOf p2),(x p1 y) ⊢ (x p2 y)
+pub global RULE_RDFS9_SUBCLASS_TYPE: u32 = 0; // (x type c1),(c1 subClassOf c2) |- (x type c2)
+pub global RULE_RDFS7_SUBPROPERTY: u32 = 1; //  (p1 subPropertyOf p2),(x p1 y) |- (x p2 y)
 
 /// The generic single-step RDFS entailment relation; each
 /// `entail_rdfs_k{K}_n{N}` bin package is one monomorphisation. See the module
@@ -119,7 +120,7 @@ pub fn entail_step_check<let K: u32, let N: u32>(
     let is7 = rule == RULE_RDFS7_SUBPROPERTY;
     assert(is9 | is7, "unknown entailment rule");
 
-    // rdfs9: a0=(x, type, c1), a1=(c1, subClassOf, c2) ⊢ derived=(x, type, c2).
+    // rdfs9: a0=(x, type, c1), a1=(c1, subClassOf, c2) |- derived=(x, type, c2).
     let rdfs9_ok = (a0[1] == rdf_type)
         & (a1[1] == rdfs_subclassof)
         & (a0[2] == a1[0]) //          shared class c1
@@ -127,7 +128,7 @@ pub fn entail_step_check<let K: u32, let N: u32>(
         & (derived[1] == rdf_type)
         & (derived[2] == a1[2]); //    c2
 
-    // rdfs7: a0=(p1, subPropertyOf, p2), a1=(x, p1, y) ⊢ derived=(x, p2, y).
+    // rdfs7: a0=(p1, subPropertyOf, p2), a1=(x, p1, y) |- derived=(x, p2, y).
     let rdfs7_ok = (a0[1] == rdfs_subpropertyof)
         & (a0[0] == a1[1]) //          shared property p1
         & (derived[0] == a1[0]) //     x
