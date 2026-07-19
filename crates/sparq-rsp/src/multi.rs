@@ -59,7 +59,7 @@
 //! every tick, exactly as in `ContinuousQuery`.
 //!
 //! * **ISTREAM** — each tick emits the rows that APPEARED relative to the
-//!   previous tick (`cur ∖ prev`, multiset hash diff).
+//!   previous tick (`cur ∖ prev`, exact term-level multiset difference).
 //! * **DSTREAM** — each tick emits the rows that DISAPPEARED (`prev ∖ cur`).
 //!
 //! The `REGISTER ISTREAM <out> AS` / `REGISTER DSTREAM <out> AS` RSP-QL header
@@ -189,8 +189,6 @@ pub struct ContinuousMultiQuery {
     /// [SONNET-4.6] sq-2n1q3.3: previous tick's FULL join result rows — the
     /// ISTREAM/DSTREAM diff base. Empty and unused when `r2s == RStream`.
     prev_rows: Vec<Vec<Option<Term>>>,
-    /// Row hashes of `prev_rows` (computed once; reused for the multiset diff).
-    prev_hashes: Vec<u64>,
 }
 
 impl ContinuousMultiQuery {
@@ -254,7 +252,6 @@ impl ContinuousMultiQuery {
             // first tick fires (the first window diffs against the empty multiset,
             // so it emits everything for ISTREAM and nothing for DSTREAM).
             prev_rows: Vec::new(),
-            prev_hashes: Vec::new(),
         })
     }
 
@@ -388,10 +385,10 @@ impl ContinuousMultiQuery {
         let rows = match self.r2s {
             R2S::RStream => result.rows,
             R2S::IStream | R2S::DStream => {
-                diff_rows(self.r2s, result.rows, &mut self.prev_rows, &mut self.prev_hashes)
+                diff_rows(self.r2s, result.rows, &mut self.prev_rows)
             }
         };
-        // For RSTREAM we skip updating prev_rows / prev_hashes — they are never
+        // For RSTREAM we skip updating prev_rows — it is never
         // read, and keeping them empty avoids a pointless clone. [SONNET-4.6]
         // The reported bounds: the tick's span is the join boundary. We report
         // [start, end) where end = tick and start = the min snapshot start, so
