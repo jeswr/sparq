@@ -92,6 +92,29 @@ nature. There is deliberately **no CI lane**: this is a measurement harness,
 run on demand (the timing benches were moved off the PR path in #1895 for the
 same reason).
 
+### Node instantiation attribution (`sq-3ul2n.10`)
+
+<!-- [SONNET-4.6] The attribution deliberately avoids committing advisory
+     work-box timing values; the result envelopes retain those observations. -->
+
+The Node outlier belongs to the **host/glue instantiation boundary**, not to
+wasm compilation or sparq query execution. `node-baseline.mjs` completes the
+disk read and `WebAssembly.compile`, then imports both generated glue modules,
+before starting `instantiate_wasm`. The timed call therefore contains only
+wasm-bindgen's import-table construction, V8's instantiation of the already
+compiled module, and wasm-bindgen finalisation (including
+`__wbindgen_start`). No `TextDecoder` result marshalling occurs on this path.
+
+The current wasm-bindgen API does not expose those three internal steps, so
+the existing envelope cannot honestly assign the residual delta more finely
+between generated glue and V8-on-Node's instantiate/start work. A
+`--target nodejs` build changes module loading and byte acquisition, but uses
+the same wasm module, imports, and start function; it is consequently not a
+fix for the isolated post-compile phase and is not a substitute artifact for
+the shipped `--target web` package. Verdict: **wontfix in sparq** unless a
+minimal wasm-bindgen/V8 reproducer separates the residual further; no engine
+or binding change is justified by this one-time, host-owned cost.
+
 ## Cross-LIBRARY comparison layer (sq-hmd7l.17)
 
 `compare.mjs` reuses this harness's workload module + static server to
