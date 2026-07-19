@@ -425,6 +425,10 @@ an issuance invariant, value identity ≡ term identity for hooked datatypes, an
 leaf could collapse back to a value-first single leaf (§7). Until such a conformance
 mechanism exists and is relied upon, **the value-FILTER lane over an adversarial issuer
 is sound only under the explicit honest-issuer-for-value assumption named in §5.2.**
+The conformance mechanism itself is **designed at proposal grade** in
+`research/zk-canonical-form-issuance.md` (sq-mtv7) — what a "conforming issuer" is, how
+conformance is expressed/attested/checked, the bounded sense in which it restores
+INV-VL, and the leaf-collapse payoff (§7 below).
 
 ## 6. The host-side same-leaf co-binding at ingest (issuer-desync fix)
 
@@ -676,7 +680,10 @@ link, not duplicate: **sq-j506** (numeric lane in `encode`/`commit`), **sq-mslu*
    invariant and lets the leaf collapse back to the single value-first leaf (drop the
    carried lexical hash). Second one-time recommit. Audit-gated. This is the named
    precondition for relying on the value lane against an adversarial issuer, not merely a
-   roadmap nicety.
+   roadmap nicety. **The DESIGN half is now scoped in
+   `research/zk-canonical-form-issuance.md` (sq-mtv7 / #3286); the implement half —
+   the `secx:conformsTo` vocabulary, the attestation binding, and the fail-closed
+   relying-party gate — is the audit-gated follow-on, dependent on sq-j506.**
 
 Suggested ordering / deps: **1** (register first) → **2** → **3** (depends on 2) → **4**
 (depends on 3) → **5** (depends on 4 + this draft's resolution). 2/3 are audit-gated
