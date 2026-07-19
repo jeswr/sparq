@@ -530,8 +530,10 @@ impl HolderBindingPolicy {
 ///
 /// # Honest scope
 /// Accepting `Rdfs`/`Owl` here means "I accept a derivation re-checked against the
-/// disclosed base"; it does NOT (yet) mean an in-circuit closure proof (deferred —
-/// see the `derivation` module docs). A relying party that requires
+/// disclosed base"; it does NOT (yet) mean an in-circuit closure proof. The
+/// in-circuit single-step relation exists (`compose_core::entail`, sq-g91d,
+/// research-grade / NOT-yet-sound sq-qhy4) but is not yet wired into this policy —
+/// see the `derivation` module docs. A relying party that requires
 /// cryptographic-strength inference keeps the `Simple`-only default.
 // [OPUS-4.8] sq-314: entailment-regime policy (external, fail-closed).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4740,13 +4742,19 @@ fn encode_iri_hex(iri: &str) -> Option<FieldHex> {
 /// each step may only ground on STRICTLY EARLIER steps (a forward-chained
 /// derivation), so there are no cyclic self-justifications.
 ///
-/// # Honest scope (what is NOT proved here — deferred)
-/// Grounding ties antecedents to the DISCLOSED base; it does NOT (yet) prove in
-/// zero-knowledge that an undisclosed antecedent is in the committed graph's
-/// closure. An antecedent that is neither disclosed nor chained to a disclosed
-/// triple is REJECTED (not assumed). The full in-circuit RDFS/OWL-RL closure proof
-/// is the inference-circuit deliverable; this stage makes the regime claim
+/// # Honest scope (what is NOT proved HERE — this host re-check)
+/// Grounding ties antecedents to the DISCLOSED base; THIS host path does NOT
+/// prove in zero-knowledge that an undisclosed antecedent is in the committed
+/// graph's closure. An antecedent that is neither disclosed nor chained to a
+/// disclosed triple is REJECTED (not assumed). This stage makes the regime claim
 /// non-vacuous and auditable over the disclosed-base fragment, fail-closed.
+///
+/// The in-circuit single-step privacy upgrade now exists as a research-grade Noir
+/// relation (`zk/compose/compose_core::entail`, sq-g91d — undisclosed antecedents
+/// proven members of the committed graph); it is NOT-yet-sound (sq-qhy4) and NOT
+/// yet wired into this verifier (no compiled member / manifest variant / dispatch
+/// arm), so until that follow-up lands this path stays disclosed-base only. See
+/// the `crate::derivation` module docs.
 // [OPUS-4.8] sq-314: entailment regime + derivation steps, end-to-end.
 fn bind_entailment(
     manifest: &ProofManifest,

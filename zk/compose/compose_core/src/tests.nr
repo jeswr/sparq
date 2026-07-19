@@ -1876,3 +1876,196 @@ fn path_rejects_padding_row_forged_dst_in_last_slot() {
         commitments, P, NA, ND, false, 3, PATH_ATTR, 1, [NB, GARBAGE, ND], counts, enc,
     );
 }
+
+// ---------------------------------------------------------------------------
+// [FABLE-5] sq-g91d: in-circuit RDFS single-step entailment (entail_step_check).
+// Proves a derived triple's UNDISCLOSED antecedents are members of the committed
+// graph (the privacy upgrade for the Rdfs/Owl regimes over the host disclosed-
+// base re-check `bind_entailment`). Accept + one should_fail per rejection clause
+// (noir-testing convention). The committed graph's commitment is computed IN the
+// test from the same witnessed leaves, so the vectors are self-consistent with
+// the `commit_fold`/`h3` cross-vectors asserted at the top of this module.
+// NOT-yet-sound (sq-qhy4); no soundness property is asserted as achieved.
+// ---------------------------------------------------------------------------
+
+use crate::entail::{entail_step_check, RULE_RDFS7_SUBPROPERTY, RULE_RDFS9_SUBCLASS_TYPE};
+
+// Public schema-vocabulary encodings (stand-ins; the real verifier pins these to
+// the true rdf:type / rdfs:subClassOf / rdfs:subPropertyOf IRI encodings).
+global E_TYPE: Field = 1001;
+global E_SUBCLASS: Field = 1002;
+global E_SUBPROP: Field = 1003;
+
+// rdfs9 individuals/classes: x=(10) type c1=(20) subClassOf c2=(30).
+global E_X: Field = 10;
+global E_C1: Field = 20;
+global E_C2: Field = 30;
+
+// A committed graph (N=8, count=2) holding EXACTLY the two rdfs9 antecedents
+// (x type c1) and (c1 subClassOf c2), padded with zero rows. The commitment is
+// recomputed from these leaves, so `entail_step_check`'s step-1 recompute matches.
+fn rdfs9_graph() -> ([[[Field; 3]; 8]; 1], [u32; 1], [Field; 1]) {
+    let mut enc: [[[Field; 3]; 8]; 1] = [[[0; 3]; 8]; 1];
+    enc[0][0] = [E_X, E_TYPE, E_C1]; //      (x type c1)
+    enc[0][1] = [E_C1, E_SUBCLASS, E_C2]; // (c1 subClassOf c2)
+    let counts: [u32; 1] = [2];
+    let mut leaves: [Field; 8] = [0; 8];
+    for i in 0..8 {
+        leaves[i] = h3(enc[0][i][0], enc[0][i][1], enc[0][i][2]);
+    }
+    let commitments: [Field; 1] = [commit_fold(leaves, 2)];
+    (enc, counts, commitments)
+}
+
+// (EN0) ACCEPT rdfs9: derived (x type c2) is proved from the two COMMITTED,
+// UNDISCLOSED antecedents. Only `derived` (and the public schema encodings) is
+// disclosed; the antecedents are private witnesses.
+#[test]
+fn entail_rdfs9_accepts_committed_antecedents() {
+    let (enc, counts, commitments) = rdfs9_graph();
+    entail_step_check::<1, 8>(
+        commitments,
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2], // derived (x type c2)
+        [true],
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        counts,
+        enc,
+    );
+}
+
+// (EN1) ACCEPT rdfs7: (p1 subPropertyOf p2),(x p1 y) ⊢ (x p2 y), antecedents
+// committed + undisclosed. A distinct committed graph so the rule branch is
+// exercised end to end.
+#[test]
+fn entail_rdfs7_accepts_committed_antecedents() {
+    // p1=40, p2=50, subj=11, obj=12.
+    let mut enc: [[[Field; 3]; 8]; 1] = [[[0; 3]; 8]; 1];
+    enc[0][0] = [40, E_SUBPROP, 50]; // (p1 subPropertyOf p2)
+    enc[0][1] = [11, 40, 12]; //        (x p1 y)
+    let counts: [u32; 1] = [2];
+    let mut leaves: [Field; 8] = [0; 8];
+    for i in 0..8 {
+        leaves[i] = h3(enc[0][i][0], enc[0][i][1], enc[0][i][2]);
+    }
+    let commitments: [Field; 1] = [commit_fold(leaves, 2)];
+    entail_step_check::<1, 8>(
+        commitments,
+        RULE_RDFS7_SUBPROPERTY,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [11, 50, 12], // derived (x p2 y)
+        [true],
+        [[40, E_SUBPROP, 50], [11, 40, 12]],
+        counts,
+        enc,
+    );
+}
+
+// (EN2) REJECT malformed rule instance: the derived object does not match the
+// rule's consequent (derived (x type 999) instead of (x type c2)), so the
+// well-formedness disjunct fails though both antecedents ARE committed (isolating
+// the shape clause from the membership clause).
+#[test(should_fail_with = "derivation step is not a valid instance of its rule")]
+fn entail_rejects_malformed_consequent() {
+    let (enc, counts, commitments) = rdfs9_graph();
+    entail_step_check::<1, 8>(
+        commitments,
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, 999], // wrong consequent object
+        [true],
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        counts,
+        enc,
+    );
+}
+
+// (EN3) REJECT ungrounded antecedent: an antecedent that is NOT a member of the
+// committed graph. The graph commits only (x type c1) + (c1 subClassOf c2); the
+// prover swaps a0 for (x type c9) (well-formed shape with c1:=c9, c2 stays), so
+// the shape holds but (x type c9) is not committed -- the membership clause fires.
+#[test(should_fail_with = "antecedent not a member of any committed graph")]
+fn entail_rejects_ungrounded_antecedent() {
+    // Commit (x type c9) is ABSENT: graph holds (x type c1),(c1 subClassOf c2).
+    // Present antecedents (x type C9),(C9 subClassOf c2) ⊢ (x type c2): well-formed
+    // (shared class C9), but neither antecedent under C9 is committed.
+    let (enc, counts, commitments) = rdfs9_graph();
+    entail_step_check::<1, 8>(
+        commitments,
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2],
+        [true],
+        [[E_X, E_TYPE, 900], [900, E_SUBCLASS, E_C2]], // uncommitted shared class 900
+        counts,
+        enc,
+    );
+}
+
+// (EN4) REJECT commitment mismatch: a wrong public commitment cannot be
+// recomputed from the witnessed leaves (the step-1 bind that ties the antecedent
+// membership to the SCAN commitments).
+#[test(should_fail_with = "graph commitment mismatch")]
+fn entail_rejects_commitment_mismatch() {
+    let (enc, counts, commitments) = rdfs9_graph();
+    entail_step_check::<1, 8>(
+        [commitments[0] + 1], // tampered commitment
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2],
+        [true],
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        counts,
+        enc,
+    );
+}
+
+// (EN5) REJECT unknown rule: a `rule` selector outside {0, 1}.
+#[test(should_fail_with = "unknown entailment rule")]
+fn entail_rejects_unknown_rule() {
+    let (enc, counts, commitments) = rdfs9_graph();
+    entail_step_check::<1, 8>(
+        commitments,
+        5, // not a registered rule
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2],
+        [true],
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        counts,
+        enc,
+    );
+}
+
+// (EN6) REJECT attribution understated: both antecedents live in graph 0, so the
+// true attribution is [true]; declaring [false] hides the contributing graph.
+#[test(should_fail_with = "attribution does not match the proved source graphs")]
+fn entail_rejects_attribution_understated() {
+    let (enc, counts, commitments) = rdfs9_graph();
+    entail_step_check::<1, 8>(
+        commitments,
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2],
+        [false], // understated
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        counts,
+        enc,
+    );
+}
+
+// (EN7) REJECT graph size exceeds bucket: a count above the compiled slot bound N.
+#[test(should_fail_with = "graph size exceeds circuit bucket")]
+fn entail_rejects_count_over_bucket() {
+    let (enc, _counts, commitments) = rdfs9_graph();
+    entail_step_check::<1, 8>(
+        commitments,
+        RULE_RDFS9_SUBCLASS_TYPE,
+        E_TYPE, E_SUBCLASS, E_SUBPROP,
+        [E_X, E_TYPE, E_C2],
+        [true],
+        [[E_X, E_TYPE, E_C1], [E_C1, E_SUBCLASS, E_C2]],
+        [9], // 9 > N=8
+        enc,
+    );
+}

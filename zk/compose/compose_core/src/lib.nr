@@ -33,5 +33,11 @@ pub mod join;
 // research/zksparql-fragment-extension.md sec 4 (depth D a compile-time constant
 // per member, disclosed by the VK identity; mechanism (a) on #1591).
 pub mod path;
+// [FABLE-5] sq-g91d: in-circuit RDFS single-step entailment -- proves a derived
+// triple's UNDISCLOSED antecedents are members of the committed graph (the
+// privacy upgrade for the Rdfs/Owl regimes over the host disclosed-base re-check
+// `bind_entailment`). Single-step / disclosed-base scope; NOT-yet-sound
+// (sq-qhy4). Compiled bin member + verifier wiring are follow-ups.
+pub mod entail;
 
 mod tests;
