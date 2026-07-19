@@ -33,10 +33,14 @@
 //! [`draw_nonzero_fp`](crate::shamir::ShamirDealer::draw_nonzero_fp); under a
 //! semi-honest PRSS/coin-toss source `r` is uniform + unknown but **NOT defended
 //! against an ACTIVE adversary** — enforcing `r ≠ 0` against a malicious
-//! contributor needs the IT-MAC'd open (`mpc-malicious-security-design.md`,
-//! sq-km34.*) or a distributed nonzero zero-test-and-redraw. That defense is a
-//! FOLLOW-ON bead; [`DistributedRandomness::shared_nonzero_mask`] is documented
-//! semi-honest-only until it lands.
+//! contributor needs a *biasing-resistant* joint generation plus a distributed
+//! nonzero zero-test-and-redraw, with the test's opens IT-MAC-authenticated
+//! (`mpc-malicious-security-design.md`, sq-km34.*) so a tampered share aborts. An
+//! IT-MAC on the final open **alone does NOT suffice**: it authenticates that `m`
+//! equals `[d · r]`, not that `r ≠ 0`, so a correctly-authenticated `r = 0` still
+//! opens `m = 0` and flips the verdict. That defense is a FOLLOW-ON bead;
+//! [`DistributedRandomness::shared_nonzero_mask`] is documented semi-honest-only
+//! until it lands.
 //!
 //! ## Status — seam only, no fake crypto
 //!
@@ -104,39 +108,97 @@ impl RandomnessModel {
 /// comparison / oblivious-shuffle callers compose onto it unmodified. This is the
 /// randomness analogue of the [`crate::backend::MpcBackend`] primitive seam.
 ///
+/// ## Method contracts are STRUCTURAL; security is a [`RandomnessModel`] property
+///
+/// The methods below promise only what **every** implementor delivers — a
+/// well-formed degree-`t` sharing of the stated value. The security guarantees a
+/// federation actually cares about (that *no `≤ t` parties know* a mask; that an
+/// input sharing is *VSS-verified* against a malicious holder) are **not** part of
+/// any method's contract, because the sole implementor today ([`ShamirDealer`], a
+/// simulation) does not satisfy them — a generic caller must never infer them from
+/// the trait. Those guarantees are instead governed by
+/// [`randomness_model`](Self::randomness_model), and production callers gate on
+/// [`require_deployable`](Self::require_deployable) so a non-deployable source is
+/// refused fail-closed rather than silently trusted.
+///
 /// See `research/mpc-distributed-randomness-design.md` for the full design and
 /// the follow-on implementation beads.
 pub trait DistributedRandomness {
     /// Honest self-description of which regime is producing the randomness — so a
     /// caller can refuse a non-`deployable()` source in production (fail toward
     /// the operator) rather than silently run the simulation as if it were a
-    /// federation.
+    /// federation. This is where the mask-secrecy / dealer-less-VSS guarantees the
+    /// per-method contracts deliberately omit actually live.
     fn randomness_model(&self) -> RandomnessModel;
 
-    /// A fresh degree-`t` sharing of a **uniform** mask that no `≤ t` parties
-    /// know. Used wherever the protocol needs correlated randomness whose value
-    /// is irrelevant as long as it is uniform and secret (e.g. blinding a value
-    /// before an open, degree-reduction re-sharing randomness).
+    /// Fail-closed production gate: `Ok(())` iff this source's
+    /// [`randomness_model`](Self::randomness_model) is
+    /// [`deployable`](RandomnessModel::deployable) to a real federation, else
+    /// [`MpcError::NoBackendSatisfies`]. Production call sites draw through this
+    /// instead of trusting the concrete type, so a non-deployable simulation
+    /// source (e.g. [`ShamirDealer`]) is REFUSED rather than silently used as if it
+    /// were a federation. The security properties the per-method docs relocate to
+    /// the model (mask secrecy, dealer-less-VSS verification) hold exactly when
+    /// this returns `Ok`. Provided as a default so every implementor inherits the
+    /// same fail-closed check.
+    fn require_deployable(&self) -> Result<(), MpcError> {
+        let model = self.randomness_model();
+        if model.deployable() {
+            Ok(())
+        } else {
+            Err(MpcError::NoBackendSatisfies {
+                requirement: format!(
+                    "dealer-less (deployable) correlated-randomness source; got {:?}",
+                    model
+                ),
+                considered: 1,
+            })
+        }
+    }
+
+    /// A fresh degree-`t` sharing of a **uniform** mask. Used wherever the
+    /// protocol needs correlated randomness whose value is irrelevant as long as
+    /// it is uniform (e.g. blinding a value before an open, degree-reduction
+    /// re-sharing randomness).
+    ///
+    /// **Structural contract only.** Every implementor returns a well-formed
+    /// degree-`t` sharing of a uniform value. Whether *no `≤ t` parties know* that
+    /// mask is a [`randomness_model`](Self::randomness_model) property, NOT part of
+    /// this method's contract: a [`RandomnessModel::TrustedDealerSim`] source draws
+    /// — and therefore knows — every mask; only a `deployable()` (dealer-less)
+    /// model guarantees party-secrecy. A caller that needs secrecy MUST gate on
+    /// [`require_deployable`](Self::require_deployable).
     fn shared_mask(&mut self) -> Result<Vec<Share>, MpcError>;
 
     /// A fresh degree-`t` sharing of a uniform **nonzero** mask `r` — the
-    /// equality-test mask (see the module `r = 0` threat note). The nonzero
-    /// guarantee is the whole correctness of `secure_equal`.
+    /// equality-test mask (see the module `r = 0` threat note). The nonzero value
+    /// is the whole correctness of `secure_equal`, and (unlike secrecy) IS part of
+    /// this method's structural contract: every implementor returns `r ≠ 0`.
     ///
-    /// **Semi-honest only.** A semi-honest dealer-less source yields a uniform,
-    /// party-unknown `r`, but does NOT defend `r = 0` against an *active*
-    /// adversary that biases its contribution; that needs the IT-MAC'd open or a
-    /// distributed nonzero zero-test (a follow-on bead). The current
+    /// **Secrecy + active-adversary caveats are model properties.** As with
+    /// [`shared_mask`](Self::shared_mask), whether *no `≤ t` parties know* `r` is a
+    /// [`randomness_model`](Self::randomness_model) property, not guaranteed here.
+    /// And even a `deployable()` **semi-honest** dealer-less source yields a
+    /// uniform, party-unknown `r` but does NOT defend `r = 0` against an *active*
+    /// adversary that biases its contribution: that needs a biasing-resistant joint
+    /// generation plus an authenticated distributed nonzero zero-test (a follow-on
+    /// bead) — an IT-MAC on the open alone does not prove `r ≠ 0`. The current
     /// single-dealer impl is honest because the one dealer draws `r` nonzero.
     fn shared_nonzero_mask(&mut self) -> Result<Vec<Share>, MpcError>;
 
-    /// A degree-`t` sharing of a holder's **own** `secret`. In a real deployment
-    /// this is **dealer-less VSS**: the holder is the dealer of its own input and
-    /// the other parties verify the sharing is a consistent degree-`t`
-    /// polynomial (aborting on a cheater — the input-side twin of
-    /// [`crate::robust`]'s output-side robustness). In the semi-honest
-    /// simulation it is a plain sharing (the holder is assumed to share
-    /// correctly).
+    /// A degree-`t` sharing of a holder's **own** `secret`.
+    ///
+    /// **Structural contract only.** Every implementor returns a degree-`t`
+    /// sharing that reconstructs to `secret`. Whether that sharing is *verified* —
+    /// **dealer-less VSS**, so a malicious holder cannot distribute an inconsistent
+    /// polynomial that reconstructs to different values for different quorums — is a
+    /// [`randomness_model`](Self::randomness_model) property, NOT guaranteed by this
+    /// method. The [`RandomnessModel::TrustedDealerSim`] implementor performs an
+    /// UNCHECKED plain sharing (the holder is assumed to share correctly); a
+    /// `deployable()` model verifies the shares lie on one consistent degree-`t`
+    /// polynomial and aborts on a cheater — the input-side twin of
+    /// [`crate::robust`]'s output-side robustness. A caller that needs that
+    /// guarantee MUST gate on [`require_deployable`](Self::require_deployable).
     fn vss_own_input(&mut self, secret: Fp) -> Result<Vec<Share>, MpcError>;
 }
 
@@ -225,15 +287,52 @@ mod tests {
 
     #[test]
     fn shared_nonzero_mask_never_shares_zero() {
-        // The r = 0 threat: the equality mask must be nonzero. Reconstruct the
-        // sharing and assert the secret is never zero across many draws.
+        // The r = 0 threat: the equality mask must be nonzero. Draw many
+        // SUCCESSIVE masks from ONE dealer — a fresh `dealer()` re-seeds the
+        // deterministic test RNG, so re-minting it each iteration would re-test the
+        // same first mask 1,000 times — and assert each reconstructs nonzero.
         let backend = ShamirBackend::new_seeded(5, 7).expect("n >= 2");
+        let mut dealer = backend.dealer();
         for _ in 0..1_000 {
-            let mut dealer = backend.dealer();
             let shares = dealer.shared_nonzero_mask().expect("nonzero mask");
             let r = backend.reconstruct(&shares).expect("reconstruct");
             assert_ne!(r, Fp::zero(), "equality mask must never be r = 0");
         }
+    }
+
+    /// A test-only **deployable** stub reporting a dealer-less model, so the
+    /// `require_deployable` `Ok` branch is exercised. It ships NO dealer-less
+    /// crypto — the randomness methods are unused here and honestly stubbed.
+    struct DeployableStub;
+    impl DistributedRandomness for DeployableStub {
+        fn randomness_model(&self) -> RandomnessModel {
+            RandomnessModel::Prss
+        }
+        fn shared_mask(&mut self) -> Result<Vec<Share>, MpcError> {
+            Err(MpcError::not_yet("PRSS shared_mask", "sq-yyro follow-on"))
+        }
+        fn shared_nonzero_mask(&mut self) -> Result<Vec<Share>, MpcError> {
+            Err(MpcError::not_yet(
+                "PRSS shared_nonzero_mask",
+                "sq-yyro follow-on",
+            ))
+        }
+        fn vss_own_input(&mut self, _secret: Fp) -> Result<Vec<Share>, MpcError> {
+            Err(MpcError::not_yet("dealer-less VSS", "sq-yyro follow-on"))
+        }
+    }
+
+    #[test]
+    fn require_deployable_refuses_the_simulation_and_accepts_a_dealer_less_source() {
+        // The single-dealer SIMULATION must be refused fail-closed in production —
+        // it is the whole point of relocating secrecy to the model.
+        let dealer = seeded_dealer();
+        assert!(matches!(
+            dealer.require_deployable(),
+            Err(MpcError::NoBackendSatisfies { .. })
+        ));
+        // A dealer-less (deployable) model passes the production gate.
+        assert!(DeployableStub.require_deployable().is_ok());
     }
 
     #[test]

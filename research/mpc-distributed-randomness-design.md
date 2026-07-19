@@ -97,26 +97,41 @@ that **no single party controls it**.
   ACTIVE adversary.** A malicious party that contributes to the mask can bias its contribution so
   the combined `r` lands on `0` (or on any chosen value), unless the generation is *verified*.
 - **Therefore the `r = 0` defense is an axis-1 (adversary) property, not an axis-3 (threshold)
-  one.** It belongs with the malicious tier: the mask must be produced with a check that the
-  combined value is nonzero, or the open of `m` must be MAC-checked so a tampered mask aborts.
-  The two honest constructions:
-  1. **Nonzero re-draw with a distributed zero-test.** Generate `[r]` (PRSS/coin-toss), run the
-     existing square-protocol / MAC'd zero-test on `[r]`, and *abort-and-redraw* if `r = 0`. The
-     `1/p ≈ 2^−61` zero probability makes at most one redraw overwhelmingly likely. Semi-honest:
-     the zero-test itself must be sound (it is the same `open(d·r)` shape — circular unless the
-     *test* mask is trusted, so in the semi-honest tier this reduces to "one honest contributor").
-  2. **MAC-checked open (malicious-with-abort).** Carry an IT-MAC on `[r]` and on `[m] = [d·r]`
-     (the `mpc-malicious-security-design.md` layer); MAC-check `m` **before** acting on the
-     verdict. A forced `r = 0` (or any tamper) fails the MAC check and aborts fail-closed at the
-     minimal `n = 2t+1`. This is the *only* construction that actually defends `r = 0` against an
-     active adversary, and it is why the seam's `shared_nonzero_mask` is documented as
-     semi-honest-only until the IT-MAC path (sq-km34.*) backs it.
+  one.** It belongs with the malicious tier, and it must actually **establish that the combined
+  value is nonzero**: the mask must be produced so that (a) no single party can steer the combined
+  `r` and (b) `r ≠ 0` is *verified* by a distributed zero-test, with the opens of that test
+  authenticated so a tampered share aborts. MAC-checking the final `open(m)` **alone is not
+  sufficient** — an IT-MAC authenticates only that the opened `m` equals the shared `[d·r]`, not
+  that `r ≠ 0`, so a *correctly-authenticated* `r = 0` still opens `m = 0` and flips the verdict.
+  The construction therefore has two composed parts:
+  1. **Nonzero establishment: biasing-resistant generation + a distributed zero-test with abort
+     (this is what defends `r = 0`).** Generate `[r]` with a *biasing-resistant* joint protocol
+     (commit-before-open coin-toss, or PRSS) so no party can force the combined value — then
+     `r = 0` occurs only with the uniform `1/p ≈ 2^−61` probability — and run a distributed
+     zero-test on `[r]` (the existing square-protocol / a nonzero check), *aborting-and-redrawing*
+     if `r = 0`. The negligible zero probability makes at most one redraw overwhelmingly likely.
+     For the zero-test to be sound against an active adversary its opens must themselves be
+     authenticated (part 2); in the pure semi-honest tier its soundness reduces to "one honest
+     contributor".
+  2. **IT-MAC authentication (necessary to make part 1 sound — NOT a nonzero proof by itself).**
+     Carry an IT-MAC on `[r]`, on the inputs, and on `[m] = [d·r]` (the
+     `mpc-malicious-security-design.md` layer) and MAC-check every open before acting on it. This
+     is what makes part 1's zero-test — and the final `open(m)` — sound: a party that *tampers*
+     with a share/opening (a value not matching its authenticated `α·x` MAC) is caught and the
+     protocol aborts fail-closed at the minimal `n = 2t+1`. What it does **not** do on its own is
+     prove `r ≠ 0`: if a malicious contributor biases *generation* so `[r]` is a
+     correctly-authenticated sharing of `0`, then `[m] = [d·r] = [0]` opens to `0` with a perfectly
+     valid MAC and the equality verdict still flips. Nonzeroness is established by part 1; the
+     IT-MAC layer authenticates that machinery, it does not replace it. This is why the seam's
+     `shared_nonzero_mask` stays semi-honest-only until BOTH the biasing-resistant generation and
+     the authenticated zero-test (sq-km34.*) land.
 
 **Honesty consequence for the seam.** The single-dealer `shared_nonzero_mask` is honest *only*
 because the one dealer is honest; a PRSS/coin-toss `shared_nonzero_mask` is honest-majority
 **semi-honest** and does **not** defend `r = 0` against a malicious contributor. The seam must
-therefore report its adversary tier, and the malicious defense is explicitly the IT-MAC bead, not
-this record.
+therefore report its adversary tier, and the malicious defense — biasing-resistant generation plus
+an authenticated distributed nonzero zero-test, *built on* the IT-MAC layer (not the IT-MAC'd open
+alone) — is a follow-on bead, not this record.
 
 ---
 
@@ -220,7 +235,9 @@ The seam is a single new module carrying:
   - `shared_mask() -> Result<Vec<Share>, MpcError>` — a fresh degree-`t` sharing of a uniform
     mask **no `≤ t` parties know**.
   - `shared_nonzero_mask() -> Result<Vec<Share>, MpcError>` — the equality-test mask; **`r ≠ 0`**
-    (the §1 threat). Documented semi-honest-only until the IT-MAC path backs it.
+    (the §1 threat). Documented semi-honest-only until the nonzero-establishment path
+    (biasing-resistant generation + an authenticated distributed zero-test, §1) backs it — an
+    IT-MAC on the open alone does not prove `r ≠ 0`.
   - `vss_own_input(secret) -> Result<Vec<Share>, MpcError>` — a holder shares its OWN input
     (dealer-less VSS in a real deployment; a plain sharing in the semi-honest simulation).
 - **`enum RandomnessModel { TrustedDealerSim, Prss, HonestMajorityCoinToss }`** — with
@@ -252,9 +269,11 @@ same trait — swapped in by `RandomnessModel`, never by concrete type.
    joint randomness; `CoinTossRandomness: DistributedRandomness`.
 3. **Dealer-less honest-majority VSS** for `vss_own_input` in the malicious tier (pairwise
    consistency / Feldman), composing with `crate::robust` on the output side.
-4. **`r = 0` active defense**: MAC-checked mask open (IT-MAC, `mpc-malicious-security-design.md`
-   sq-km34.*) OR distributed nonzero zero-test-and-redraw, promoting `shared_nonzero_mask` from
-   semi-honest-only to malicious-with-abort.
+4. **`r = 0` active defense**: biasing-resistant joint generation **plus** a distributed nonzero
+   zero-test-and-redraw whose opens are IT-MAC-authenticated (`mpc-malicious-security-design.md`
+   sq-km34.*) — the two composed (§1), NOT a MAC-checked open alone, which authenticates that `m`
+   equals `[d·r]` but not that `r ≠ 0`. Promotes `shared_nonzero_mask` from semi-honest-only to
+   malicious-with-abort.
 5. **Wire the callers** (`secure_equal`, `degree_reduce`, oblivious-shuffle control bits) to draw
    through `&mut dyn DistributedRandomness` instead of the inherent dealer methods, so the
    dealer-less source is selectable end-to-end.
