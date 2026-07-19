@@ -18,6 +18,9 @@
 //     prohibition in the caveat;
 //   * every verdict cites an odrl_eval.rs provenance handle AND every caveat matches one
 //     of eval.rs's documented output shapes (so a fabricated free-text caveat fails);
+//   * every constraint caveat's (rule, left, operator, right) anchors to the scenario's
+//     OWN Turtle constraint — eval.rs prints the POLICY's operands, never the request's
+//     supplied value — so an operand substitution fails, not just a malformed shape;
 //   * requestLine renders a faithful, compilable-shape Request builder line.
 // Run via `npm run test:unit`.
 import { test } from "node:test";
@@ -116,6 +119,53 @@ test("every verdict cites provenance and every caveat is an eval.rs output shape
       }
     }
   }
+});
+
+// eval.rs formats a constraint caveat from the POLICY's own parsed constraint —
+// `rule {id} constraint ({c.left} {c.operator:?} {c.right}) unsatisfied` — so every
+// operand in the caveat must be the policy's, NEVER the request's supplied value (a
+// purpose-mismatch deny names the policy's bound, not the offending purpose). This
+// test parses each constraint caveat and anchors all four parts to the scenario's own
+// Turtle, so an operand substitution (the round-2 fabrication failure mode) fails the
+// gate — shape alone cannot catch it.
+const CONSTRAINT_CAVEAT = /^rule (<[^>]+>) constraint \((\S+) (\S+) (.+)\) unsatisfied$/;
+
+test("every constraint caveat's operands anchor to the policy's own constraint", () => {
+  let anchored = 0;
+  for (const s of SCENARIOS) {
+    // Collapse the Turtle's alignment whitespace so `predicate object` pairs match.
+    const flat = s.turtle.replace(/\s+/g, " ");
+    for (const v of s.variants) {
+      for (const u of v.decision.unmet) {
+        const m = CONSTRAINT_CAVEAT.exec(u);
+        if (!m) continue; // prohibition/duty/logical caveats are anchored elsewhere
+        anchored++;
+        const [, ruleId, left, op, right] = m;
+        assert.ok(flat.includes(ruleId), `${s.id}/${v.id}: caveat rule ${ruleId} in the policy`);
+        // left operand: eval.rs prints the full IRI; the Turtle uses the odrl: prefix.
+        const leftTtl = left.startsWith(ODRL_NS) ? `odrl:${left.slice(ODRL_NS.length)}` : left;
+        assert.ok(
+          flat.includes(`odrl:leftOperand ${leftTtl}`),
+          `${s.id}/${v.id}: caveat left ${left} is the policy's leftOperand`,
+        );
+        // operator: the Debug variant name maps to the odrl term by lowercasing the
+        // first letter (Eq→eq, Lteq→lteq, IsPartOf→isPartOf).
+        assert.ok(
+          flat.includes(`odrl:operator odrl:${op[0].toLowerCase()}${op.slice(1)}`),
+          `${s.id}/${v.id}: caveat operator ${op} is the policy's operator`,
+        );
+        // right operand: eval.rs prints the POLICY's rightOperand (Value's Display —
+        // an IRI as <iri>, a string/dateTime as its quoted lexical form), which must
+        // appear verbatim as the Turtle's rightOperand. A request-supplied value
+        // (e.g. <urn:purpose/marketing>) is not in the policy, so it fails here.
+        assert.ok(
+          flat.includes(`odrl:rightOperand ${right}`),
+          `${s.id}/${v.id}: caveat right ${right} is the policy's rightOperand, not the request's value`,
+        );
+      }
+    }
+  }
+  assert.ok(anchored >= 4, `the anchor gate actually ran (${anchored} constraint caveats)`);
 });
 
 // Expand a display token to the full IRI the Rust API uses (mirrors expandIri in

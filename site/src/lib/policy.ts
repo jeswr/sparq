@@ -39,8 +39,11 @@
 //     trace to the cited test and its strings to the eval.rs output format.
 //     `site/test/policy.test.mjs` pins the internal consistency (allow ⇔ a matched rule
 //     and no unmet caveat) AND that every caveat matches one of eval.rs's documented
-//     output shapes, so silent drift into a fabricated string fails the unit gate — but
-//     that gate checks SHAPE, not that eval.rs produced this exact string for this input.
+//     output shapes AND that every constraint caveat's (rule, left, operator, right)
+//     anchors to the scenario's OWN Turtle constraint — eval.rs prints the POLICY's
+//     operands verbatim, never the request's supplied value — so a fabricated string or
+//     an operand substitution fails the unit gate. The gate still cannot re-run the Rust
+//     evaluator, so it is anchoring + shape, not full evaluator equivalence.
 //
 //   * SCOPE — single-node only. The federated-disclosure / ODRL→MPC composition (per-node
 //     ODRL driving the disclosed-vs-hidden split; a Duty → ZK proof obligation) is
@@ -255,7 +258,10 @@ export const SCENARIOS: PolicyScenario[] = [
           allow: false,
           matched: [],
           unmet: [
-            "rule <urn:rule/use-research> constraint (http://www.w3.org/ns/odrl/2/purpose Eq <urn:purpose/marketing>) unsatisfied",
+            // The evaluator formats the POLICY constraint's right operand (`c.right`,
+            // eval.rs), not the request's supplied value — so a purpose-mismatch deny
+            // still names the policy's bound <urn:purpose/research>.
+            "rule <urn:rule/use-research> constraint (http://www.w3.org/ns/odrl/2/purpose Eq <urn:purpose/research>) unsatisfied",
           ],
         },
         test: T("purpose_mismatch_denies"),
