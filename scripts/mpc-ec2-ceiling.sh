@@ -33,10 +33,13 @@
 #   + detached  (sleep WATCHDOG_SECS; shutdown -h now)  (no deps, arms immediately)
 #   + systemd-run --on-active=WATCHDOG_SECS shutdown    (survives the shell exiting)
 #   + a df watchdog                                     (shutdown if disk fills)
-# The user-data writes results + a /root/MPC_CEILING_DONE sentinel then STOPS (it
-# does NOT eagerly shut down — the orchestrator pulls results off the
-# DeleteOnTermination volume while the box is still alive, then terminates it
-# explicitly, so a shutdown race can never lose results). Tag purpose=sparq-bench.
+# The user-data is FAIL-CLOSED (set -euo pipefail): a setup/clone/build failure —
+# or a sweep where EVERY cell failed — writes /root/MPC_CEILING_FAILED and never
+# the DONE sentinel, so a broken run can never read as complete. On success it
+# writes results + a /root/MPC_CEILING_DONE sentinel then STOPS (it does NOT
+# eagerly shut down — the orchestrator pulls results off the DeleteOnTermination
+# volume while the box is still alive, then terminates it explicitly, so a
+# shutdown race can never lose results). Tag purpose=sparq-bench.
 #
 # SAFETY. Operates ONLY on the ONE instance it launches; NEVER touches prod
 # (i-090531b4ede8f2d3f) or the dev/work box. On exit — success, error, or Ctrl-C —
@@ -48,7 +51,10 @@
 #   scripts/mpc-ec2-ceiling.sh --self-test        # hermetic; asserts the rails, no aws
 #
 # Env overrides (all bounded): MPC_PARTIES="7 9 11", MPC_ROWS="100 1000 10000",
-#   MPC_ITYPE, WATCHDOG_SECS, DF_MIN_MB. Rows above ROWS_MAX are refused.
+#   MPC_ITYPE, WATCHDOG_SECS, DF_MIN_MB. Rows above ROWS_MAX are refused. The
+#   branch and every override interpolated into the root-run user-data are
+#   charset/bounds-validated up front (injection-shaped values are refused before
+#   any aws call — see validate_inputs / validate_branch).
 set -euo pipefail
 
 PROG="mpc-ec2-ceiling"
@@ -71,8 +77,48 @@ validate_rows() {
     case "$r" in
       ''|*[!0-9]*) die "row count '$r' is not a positive integer" ;;
     esac
+    [ "$r" -ge 1 ] || die "row count must be >= 1"
     [ "$r" -le "$ROWS_MAX" ] || die "row count $r exceeds ROWS_MAX=$ROWS_MAX — refusing to extrapolate past the ceiling (design record §5.3)"
   done
+}
+
+# EVERY value interpolated into the root-run user-data is validated below against a
+# strict charset + bounds, and refused BEFORE any aws call. The user-data is a
+# root-run cloud-init script, so an unvalidated branch or env value would be a
+# root command injection on the instance (quote breakout / heredoc termination).
+readonly PARTIES_MAX=99                      # driver spawns N party procs; bound it
+readonly WATCHDOG_SECS_MAX=86400             # the box may never outlive 24h
+readonly DF_MIN_MB_MAX=1048576               # 1 TiB floor already exceeds the 30 GB volume
+
+validate_pos_int() { # <name> <value> <min> <max>
+  case "$2" in
+    ''|*[!0-9]*) die "$1 '$2' is not a positive integer" ;;
+  esac
+  { [ "$2" -ge "$3" ] && [ "$2" -le "$4" ]; } || die "$1 $2 out of bounds [$3, $4]"
+}
+
+validate_parties() {
+  local n
+  for n in $PARTIES; do
+    validate_pos_int "party count" "$n" 2 "$PARTIES_MAX"
+  done
+}
+
+# Conservative git ref charset — [A-Za-z0-9._/-] only, no leading '-' or '.', no
+# '..'. Deliberately stricter than git itself: the value must be inert inside the
+# double-quoted context of the generated user-data, so quotes, \$, backticks,
+# backslashes, whitespace, and newlines can never pass.
+validate_branch() {
+  case "$1" in
+    ''|-*|.*|*..*|*[!A-Za-z0-9._/-]*) die "branch '$1' is not a conservative git ref ([A-Za-z0-9._/-] only, no leading '-'/'.',  no '..')" ;;
+  esac
+}
+
+validate_inputs() {
+  validate_rows
+  validate_parties
+  validate_pos_int "WATCHDOG_SECS" "$WATCHDOG_SECS" 60 "$WATCHDOG_SECS_MAX"
+  validate_pos_int "DF_MIN_MB" "$DF_MIN_MB" 1 "$DF_MIN_MB_MAX"
 }
 
 # Emit the runnable (viable-regime) cell list "N ROWS" — the cartesian product,
@@ -89,26 +135,37 @@ ceiling_cells() {
 # --- the on-instance run script (the netem-shaped sweep) --------------------------------
 # Built as a string so the hermetic self-test can assert its safety rails are present
 # without launching anything. `\$` escapes defer expansion to the instance shell;
-# $PROFILE/$WATCHDOG_SECS/$DF_MIN_MB/the cell list are expanded HERE (this host).
+# $PROFILE/$WATCHDOG_SECS/$DF_MIN_MB/the cell list are expanded HERE (this host) —
+# every host-expanded value is charset/bounds-validated by validate_inputs /
+# validate_branch first, so nothing interpolated can break out of the script.
 build_userdata() {
   local repo="$1" branch="$2" cells="$3"
   cat <<UD
 #!/bin/bash
-set -x
-exec > >(tee /var/log/mpc-ceiling.log) 2>&1
-# Orphan-proof self-terminate — TWO independent hard caps from DIFFERENT subsystems
-# so a single failure can't leave the box running (mirrors gather-ec2.sh):
-( sleep $WATCHDOG_SECS; shutdown -h now ) &
-systemd-run --on-active=$WATCHDOG_SECS /sbin/shutdown -h now || true
-# df watchdog — the third mechanism: if the root volume free space drops below the
-# floor at any point, self-terminate rather than wedge on a full disk.
-( while true; do
-    FREE_MB=\$(df -Pm / | awk 'NR==2{print \$4}')
-    if [ "\${FREE_MB:-0}" -lt $DF_MIN_MB ]; then
-      echo "DF-WATCHDOG: free \${FREE_MB}MB < ${DF_MIN_MB}MB floor — self-terminating"; shutdown -h now; break
-    fi
-    sleep 60
-  done ) &
+# Fail CLOSED: any setup/clone/build failure aborts the run and surfaces as a
+# distinct MPC_CEILING_FAILED sentinel — never as an apparently-complete run.
+# Per-cell benchmark failures are the ONE narrowly-handled exception (each recorded
+# honestly as a cell-failed JSON); if EVERY cell fails, the run also fails closed.
+set -euxo pipefail
+RUN_ROOT="\${MPC_CEILING_ROOT:-/root}"                       # test seam (hermetic self-test
+LOG_FILE="\${MPC_CEILING_LOG:-/var/log/mpc-ceiling.log}"     #  redirects these; prod = /root)
+exec > >(tee "\$LOG_FILE") 2>&1
+trap 'rc=\$?; if [ "\$rc" -ne 0 ] && [ ! -f "\$RUN_ROOT/MPC_CEILING_DONE" ] && [ ! -f "\$RUN_ROOT/MPC_CEILING_FAILED" ]; then echo "setup/build failed rc=\$rc" > "\$RUN_ROOT/MPC_CEILING_FAILED"; sync; fi' EXIT
+if [ -z "\${MPC_CEILING_TEST:-}" ]; then
+  # Orphan-proof self-terminate — TWO independent hard caps from DIFFERENT subsystems
+  # so a single failure can't leave the box running (mirrors gather-ec2.sh):
+  ( sleep $WATCHDOG_SECS; shutdown -h now ) &
+  systemd-run --on-active=$WATCHDOG_SECS /sbin/shutdown -h now || true
+  # df watchdog — the third mechanism: if the root volume free space drops below the
+  # floor at any point, self-terminate rather than wedge on a full disk.
+  ( while true; do
+      FREE_MB=\$(df -Pm / | awk 'NR==2{print \$4}')
+      if [ "\${FREE_MB:-0}" -lt $DF_MIN_MB ]; then
+        echo "DF-WATCHDOG: free \${FREE_MB}MB < ${DF_MIN_MB}MB floor — self-terminating"; shutdown -h now; break
+      fi
+      sleep 60
+    done ) &
+fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -117,9 +174,9 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profil
 export PATH="/root/.cargo/bin:\$PATH"
 . /root/.cargo/env || true
 for _ in \$(seq 1 30); do command -v cargo >/dev/null 2>&1 && break; sleep 2; done
-command -v cargo || echo "WARN: cargo still not on PATH"
+command -v cargo >/dev/null 2>&1 || { echo "FATAL: cargo not on PATH after rustup install"; exit 1; }
 
-cd /root
+cd "\$RUN_ROOT"
 git clone -q "$repo" sparq
 cd sparq
 git fetch -q origin "$branch"
@@ -130,7 +187,7 @@ echo "MPC_CEILING_SHA=\$SHA"
 # Build the driver + party binary once (mpc-netem.sh reuses them per cell).
 cargo build -q -p sparq-mpc --features insecure-test-rng --examples
 
-RESULTS=/root/mpc-ceiling-results
+RESULTS="\$RUN_ROOT/mpc-ceiling-results"
 mkdir -p "\$RESULTS"
 META="\$RESULTS/run-meta.json"
 # Honest run metadata: what regime this IS, and the regimes it deliberately did NOT
@@ -155,24 +212,38 @@ META_EOF
 # Sweep the viable-regime cells under the LAN netem profile. mpc-netem.sh applies
 # the qdisc (needs CAP_NET_ADMIN — present here as root), runs the driver, clears.
 # Each cell's JSON is captured verbatim (measured wall-clock + bytes + rounds).
+TOTAL_CELLS=0
+FAILED_CELLS=0
 while read -r N ROWS_N; do
   [ -n "\$N" ] || continue
+  TOTAL_CELLS=\$((TOTAL_CELLS + 1))
   echo "=== cell N=\$N rows=\$ROWS_N profile=$PROFILE (\$((ROWS_N * ROWS_N)) secure_equal opens) ==="
   CELL="\$RESULTS/join-N\${N}-rows\${ROWS_N}-$PROFILE.json"
   if bash scripts/mpc-netem.sh run join "\$N" "\$ROWS_N" "$PROFILE" > "\$CELL" 2>>"\$RESULTS/cells.log"; then
     cat "\$CELL"
   else
+    # The ONE narrowly-handled failure: a single cell may fail (e.g. the 10^8-open
+    # ceiling probe) and is recorded honestly; setup/build failures never get here.
     echo "{\"status\":\"cell-failed\",\"parties\":\$N,\"rows\":\$ROWS_N,\"profile\":\"$PROFILE\"}" > "\$CELL"
     echo "cell N=\$N rows=\$ROWS_N FAILED (see cells.log)"
+    FAILED_CELLS=\$((FAILED_CELLS + 1))
   fi
-  rm -rf /tmp/* 2>/dev/null || true    # /tmp cleanup between cells (disk hygiene)
+  if [ -z "\${MPC_CEILING_TEST:-}" ]; then rm -rf /tmp/* 2>/dev/null || true; fi  # /tmp cleanup between cells (disk hygiene)
 done <<CELLS
 $cells
 CELLS
 
 ls -la "\$RESULTS" || true
-# sentinel LAST — the orchestrator waits for it, pulls, then terminates.
-echo "\$SHA" > /root/MPC_CEILING_DONE
+if [ "\$TOTAL_CELLS" -eq 0 ] || [ "\$FAILED_CELLS" -eq "\$TOTAL_CELLS" ]; then
+  # Every cell failed (or none ran) → environment/driver breakage, not a ceiling
+  # measurement. Fail closed: FAILED sentinel, never DONE.
+  echo "all \$TOTAL_CELLS cells failed" > "\$RUN_ROOT/MPC_CEILING_FAILED"
+  sync
+  exit 1
+fi
+# sentinel LAST — written ONLY after setup+build succeeded and every cell reached an
+# explicit terminal state; the orchestrator waits for it, pulls, then terminates.
+echo "\$SHA" > "\$RUN_ROOT/MPC_CEILING_DONE"
 sync
 # Do NOT shut down here — the watchdogs are the only auto-terminate (orphan backstop).
 UD
@@ -199,6 +270,39 @@ self_test() {
     _check "rows > ROWS_MAX refused" "refused" "refused"
   fi
 
+  # Injection-shaped launcher inputs are refused BEFORE any aws call: every value
+  # interpolated into the root-run user-data must be inert (quotes, newlines,
+  # heredoc terminators, and shell metacharacters must all die in validation).
+  _refused() { # <label> <cmd...> — the command is expected to die
+    local label="$1"; shift
+    if ( "$@" ) 2>/dev/null; then _check "$label" "accepted" "refused"
+    else _check "$label" "refused" "refused"; fi
+  }
+  _with_parties()  { PARTIES="$1"; validate_parties; }
+  _with_watchdog() { WATCHDOG_SECS="$1"; validate_inputs; }
+  _with_dfmin()    { DF_MIN_MB="$1"; validate_inputs; }
+  _with_rows()     { ROWS="$1"; validate_rows; }
+  ( validate_inputs ) && _check "default env inputs accepted" "0" "0"
+  ( validate_branch "feature/x.y-z1" ) && _check "plain branch ref accepted" "0" "0"
+  _refused "branch: embedded quote"           validate_branch 'main"; touch /tmp/pwn; "'
+  _refused "branch: command substitution"     validate_branch 'main$(id)'
+  _refused "branch: backtick"                 validate_branch 'main`id`'
+  _refused "branch: whitespace"               validate_branch 'main branch'
+  _refused "branch: newline"                  validate_branch "$(printf 'main\nCELLS')"
+  _refused "branch: heredoc terminator UD"    validate_branch "$(printf 'main\nUD')"
+  _refused "branch: leading dash"             validate_branch '-oProxyCommand=x'
+  _refused "branch: dotdot"                   validate_branch 'a..b'
+  _refused "branch: empty"                    validate_branch ''
+  _refused "parties: heredoc terminator"      _with_parties '7 CELLS'
+  _refused "parties: shell metacharacters"    _with_parties '7; shutdown -h now'
+  _refused "parties: newline injection"       _with_parties "$(printf '7\nUD')"
+  _refused "parties: below minimum"           _with_parties '1'
+  _refused "parties: above PARTIES_MAX"       _with_parties "$((PARTIES_MAX + 1))"
+  _refused "watchdog: shell metacharacters"   _with_watchdog '60; rm -rf /'
+  _refused "watchdog: above 24h cap"          _with_watchdog "$((WATCHDOG_SECS_MAX + 1))"
+  _refused "df floor: command substitution"   _with_dfmin '$(reboot)'
+  _refused "rows: zero"                       _with_rows '0'
+
   # The matrix is exactly the specced {7,9,11} × {100,1000,10000} product.
   local cells; cells="$(ceiling_cells)"
   _check "cell count == 9"          "$(printf '%s\n' "$cells" | grep -c .)" "9"
@@ -216,6 +320,53 @@ self_test() {
   _grep "no-data: wan-at-scale"         "$ud" "wan-at-scale"
   _grep "sentinel written last"         "$ud" "MPC_CEILING_DONE"
   _grep "does NOT eagerly shut down"    "$ud" "watchdogs are the only auto-terminate"
+  _grep "fail-closed shell options"     "$ud" "set -euxo pipefail"
+  _grep "distinct failure sentinel"     "$ud" "MPC_CEILING_FAILED"
+
+  # Fail-closed hermetic runs (stubbed commands; no aws, no network, no root): a
+  # clone failure, a build failure, and an all-cells-failed sweep must each exit
+  # non-zero with NO MPC_CEILING_DONE and a distinct MPC_CEILING_FAILED — a broken
+  # setup can never masquerade as a completed ceiling run.
+  _failclosed() { # <label> <git_mode ok|fail> <cargo_mode ok|fail>
+    local label="$1" git_mode="$2" cargo_mode="$3"
+    local tdir c rc=0
+    tdir="$(mktemp -d)"
+    mkdir -p "$tdir/bin" "$tdir/root"
+    for c in apt-get curl shutdown systemd-run; do
+      printf '#!/bin/sh\nexit 0\n' > "$tdir/bin/$c"
+    done
+    if [ "$git_mode" = fail ]; then
+      printf '#!/bin/sh\nexit 1\n' > "$tdir/bin/git"
+    else
+      cat > "$tdir/bin/git" <<'GIT_STUB'
+#!/bin/sh
+if [ "$1" = clone ]; then
+  for d in "$@"; do :; done   # last arg = target dir
+  mkdir -p "$d"
+elif [ "$1" = rev-parse ]; then
+  echo stub1234
+fi
+exit 0
+GIT_STUB
+    fi
+    if [ "$cargo_mode" = fail ]; then printf '#!/bin/sh\nexit 1\n' > "$tdir/bin/cargo"
+    else printf '#!/bin/sh\nexit 0\n' > "$tdir/bin/cargo"; fi
+    chmod +x "$tdir/bin/"*
+    build_userdata "https://example/repo.git" "main" "7 100" > "$tdir/ud.sh"
+    ( cd "$tdir/root" && PATH="$tdir/bin:$PATH" MPC_CEILING_TEST=1 \
+        MPC_CEILING_ROOT="$tdir/root" MPC_CEILING_LOG="$tdir/ud.log" \
+        bash "$tdir/ud.sh" ) >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -ne 0 ]; then _check "$label: exits non-zero" "nonzero" "nonzero"
+    else _check "$label: exits non-zero" "zero" "nonzero"; fi
+    if [ -f "$tdir/root/MPC_CEILING_DONE" ]; then _check "$label: no DONE sentinel" "present" "absent"
+    else _check "$label: no DONE sentinel" "absent" "absent"; fi
+    if [ -f "$tdir/root/MPC_CEILING_FAILED" ]; then _check "$label: FAILED sentinel written" "present" "present"
+    else _check "$label: FAILED sentinel written" "absent" "present"; fi
+    rm -rf "$tdir"
+  }
+  _failclosed "fail-closed: git clone failure"  fail ok
+  _failclosed "fail-closed: cargo build failure" ok  fail
+  _failclosed "fail-closed: every cell failed"   ok  ok
 
   echo
   if [ "$fails" -eq 0 ]; then log "self-test PASSED"; return 0; fi
@@ -238,7 +389,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RESULTS_DIR="$ROOT/bench/mpc-ceiling-results"
 
-validate_rows
+# Refuse anything injection-shaped BEFORE any aws call — these values are
+# interpolated into the root-run user-data.
+validate_branch "$BRANCH"
+validate_inputs
 CELLS="$(ceiling_cells)"
 
 command -v aws >/dev/null 2>&1 || die "aws CLI not found — this launcher needs it (try --self-test for the hermetic rail check)"
@@ -312,6 +466,10 @@ for i in $(seq 1 120); do
   if ssh $SSHO "ubuntu@$IP" "sudo test -f /root/MPC_CEILING_DONE" 2>/dev/null; then
     log "  [$i] sentinel present — pulling results"
     DONE=1; break
+  fi
+  if ssh $SSHO "ubuntu@$IP" "sudo test -f /root/MPC_CEILING_FAILED" 2>/dev/null; then
+    log "  [$i] FAILED sentinel present — setup/build/sweep failed on-instance (fail-closed; no results to trust)"
+    break
   fi
   STATE=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo unknown)
   log "  [$i] state=$STATE; waiting for sentinel"
