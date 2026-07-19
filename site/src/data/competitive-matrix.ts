@@ -12,8 +12,12 @@
 //     dashboard and never inlines a figure.
 //   * Competitor marks are their PUBLISHED capabilities/claims as surveyed in the
 //     design record, not measured by us.
-//   * Every PARTIAL / GAP row that names future work carries the governing bead id
-//     so the row links to its tracker issue (build-in-public).
+//   * A PARTIAL / GAP row that names TRACKED future work carries its governing bead id
+//     so the row links to its tracker issue (build-in-public); a few explicitly-deferred
+//     items are not yet beaded and say so in the note ("deferred" / "not beaded"). The
+//     data test test/competitive-matrix.test.mjs enforces this — every such row either
+//     carries a bead or openly flags itself untracked — so the copy and the data cannot
+//     silently drift apart.
 //   * The ZK/MPC row stays caveated: the estate is research-grade, the v1 verifier is
 //     pending external audit (sq-qhy4) and sparq-mpc is honest-majority semi-honest
 //     only — no settled privacy/soundness property is claimed.
@@ -44,7 +48,11 @@ export interface MatrixRow {
   tierLabel?: string;
   /** The honest one-line framing of sparq's standing. */
   note: string;
-  /** Governing tracker beads — rendered as build-in-public links on PARTIAL/GAP rows. */
+  /**
+   * Governing tracker beads — rendered as build-in-public links. Optional: a PARTIAL/GAP
+   * row that names future work carries its bead(s) here when the work is TRACKED; a few
+   * explicitly-deferred items are not yet beaded and instead flag that in `note`.
+   */
   beads?: string[];
 }
 

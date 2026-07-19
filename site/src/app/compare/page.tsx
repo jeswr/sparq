@@ -8,11 +8,12 @@
 // benchmark dashboard and never inlines a figure.
 //
 // The page is a pure renderer over data/competitive-matrix.ts (a faithful
-// transcription of research/competitive-feature-analysis-2026-07.md §1). Each
-// PARTIAL/GAP row that names future work links to its governing tracker bead
-// (build-in-public), resolved via a GitHub issues search on the bead id — issues
-// carry a `bd-id:` marker, so this stays correct without a hand-maintained
-// bead→issue-number map.
+// transcription of research/competitive-feature-analysis-2026-07.md §1). A PARTIAL/GAP
+// row that names TRACKED future work links to its governing bead (build-in-public),
+// resolved via a GitHub issues search on the bead id — issues carry a `bd-id:` marker,
+// so this stays correct without a hand-maintained bead→issue-number map. A few
+// explicitly-deferred items are not yet beaded and say so in the note; the invariant is
+// enforced by test/competitive-matrix.test.mjs.
 //
 // Nav: Cmd-K only (a TOP_PAGES entry in command-palette.tsx), like /assurance,
 // /dogfooding and /genai-retrieval — the slim top bar stays at its fixed size.
@@ -192,9 +193,10 @@ export default function ComparePage() {
           ). Competitor marks are their <em>published</em> capabilities as surveyed
           there — <span className="whitespace-nowrap">✓ = has it</span>,{" "}
           <span className="whitespace-nowrap">~ = partial or dated</span>,{" "}
-          <span className="whitespace-nowrap">— = lacks it</span>. Each PARTIAL/GAP row
-          that names future work links to its governing tracker bead, so this page is a
-          build-in-public roadmap as much as a comparison.
+          <span className="whitespace-nowrap">— = lacks it</span>. Where a PARTIAL/GAP
+          row names <em>tracked</em> future work it links to its governing bead, so this
+          page is a build-in-public roadmap as much as a comparison; a few
+          explicitly-deferred items are not yet beaded and say so.
         </p>
       </section>
 
