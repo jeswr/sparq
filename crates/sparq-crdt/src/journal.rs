@@ -18,11 +18,16 @@
 //! are the exact canonical envelope bytes; append is acknowledged only after
 //! the record is written and fdatasync'd (`CRDT-UPD-1` step 5 durability).
 //!
-//! **Crash recovery**: on open, records are scanned in order; a *torn tail*
-//! (a final record whose declared bytes run past end-of-file or whose
-//! checksum fails) is truncated away — it was never acknowledged. A checksum
-//! failure that is **not** the final record is real corruption and fails
-//! closed with [`CrdtError::CorruptJournal`]; nothing is guessed.
+//! **Crash recovery**: on open, records are scanned in order; a *torn tail* —
+//! a *structurally* incomplete final frame, whose frame header is partial or
+//! whose declared payload runs past end-of-file — is truncated away, because a
+//! crash mid-append leaves exactly that and the record was never acknowledged.
+//! A checksum failure on any structurally-complete frame, **including the final
+//! one**, is treated as real corruption and fails closed with
+//! [`CrdtError::CorruptJournal`]: a full-length record whose checksum does not
+//! match cannot be distinguished from an acknowledged, fdatasync'd append that
+//! later suffered bit corruption, so it is never silently discarded. EOF
+//! position is not a commit marker; nothing is guessed.
 //!
 //! A [`Snapshot`] carries dataset id, membership epoch, the complete data
 //! causal context, the live dot store, the journal (envelope-identity)
@@ -87,8 +92,10 @@ struct ScannedRecord<'b> {
 }
 
 /// Scans `buf` into records. Returns the records, the offset after the last
-/// valid record, and whether a torn tail must be truncated. A checksum or
-/// framing failure before the final record fails closed.
+/// valid record, and whether a *torn tail* — a structurally incomplete final
+/// frame (a partial frame header, or a payload declared to run past EOF) —
+/// must be truncated. A checksum mismatch on any structurally-complete frame,
+/// including the final one, is real corruption and fails closed.
 fn scan_records(buf: &[u8]) -> Result<(Vec<ScannedRecord<'_>>, u64, bool), CrdtError> {
     let mut records = Vec::new();
     let mut off: u64 = 0;
@@ -118,12 +125,15 @@ fn scan_records(buf: &[u8]) -> Result<(Vec<ScannedRecord<'_>>, u64, bool), CrdtE
         hasher.update(payload);
         let digest: [u8; 32] = hasher.finalize().into();
         if digest[..] != buf[head + 5..head + 37] {
-            if record_end == len {
-                return Ok((records, off, true)); // torn tail: final record garbled
-            }
+            // A structurally-complete frame with a bad checksum is corruption,
+            // even at EOF: a full-length final record is indistinguishable from
+            // an acknowledged, fdatasync'd append whose bytes were later
+            // corrupted, so truncating it would silently roll the frontier back
+            // past acknowledged data. EOF position is not a commit marker; only
+            // a *structurally* incomplete tail (handled above) is a torn append.
             return Err(CrdtError::CorruptJournal {
                 offset: off,
-                reason: "record checksum mismatch before end of file".into(),
+                reason: "record checksum mismatch".into(),
             });
         }
         records.push(ScannedRecord {
@@ -965,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn garbled_final_record_is_truncated_but_midfile_corruption_fails_closed() {
+    fn checksum_mismatch_fails_closed_for_final_and_midfile_records() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("crdt.log");
         {
@@ -974,15 +984,22 @@ mod tests {
             journal.append(&envelope(2)).unwrap();
         }
         let intact = std::fs::read(&path).unwrap();
-        // Flip one payload byte of the FINAL record: torn tail, truncated.
+        // Flip one payload byte of the FINAL, fully-written record. Its frame is
+        // structurally complete (all declared bytes present), so this is
+        // indistinguishable from bit corruption of an acknowledged, fdatasync'd
+        // append. It must fail closed rather than silently truncate and roll the
+        // frontier back past acknowledged data. A genuine torn append is instead
+        // a structurally incomplete tail — covered by torn_tail_is_truncated_on_recovery.
         let mut tail_garbled = intact.clone();
         let last = tail_garbled.len() - 1;
         tail_garbled[last] ^= 0x01;
         std::fs::write(&path, &tail_garbled).unwrap();
-        let journal = Journal::open(&path, admission(), Limits::default()).unwrap();
-        assert_eq!(journal.len(), 1);
+        assert!(matches!(
+            Journal::open(&path, admission(), Limits::default()),
+            Err(CrdtError::CorruptJournal { .. })
+        ));
         // Flip one byte in the FIRST envelope record (not the final record):
-        // real corruption, fails closed.
+        // also real corruption, also fails closed.
         let header_len = frame(
             REC_HEADER,
             &encode_journal_header(&admission(), &CausalSummary::new()),
