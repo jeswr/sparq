@@ -51,7 +51,7 @@
 #   scripts/mpc-ec2-ceiling.sh --self-test        # hermetic; asserts the rails, no aws
 #
 # Env overrides (all bounded): MPC_PARTIES="7 9 11", MPC_ROWS="100 1000 10000",
-#   MPC_ITYPE, WATCHDOG_SECS, DF_MIN_MB. Rows above ROWS_MAX are refused. The
+#   MPC_ITYPE, WATCHDOG_SECS, DF_MIN_MB, POLL_GRACE_SECS. Rows above ROWS_MAX are refused. The
 #   branch and every override interpolated into the root-run user-data are
 #   charset/bounds-validated up front (injection-shaped values are refused before
 #   any aws call — see validate_inputs / validate_branch).
@@ -68,6 +68,25 @@ ROWS="${MPC_ROWS:-100 1000 10000}"           # rows/party for the hidden-value j
 PROFILE="lan"                                # honest-majority, LAN — the ONLY viable regime
 WATCHDOG_SECS="${WATCHDOG_SECS:-14400}"      # 4h hard cap (10^8 opens can take tens of minutes)
 DF_MIN_MB="${DF_MIN_MB:-1024}"               # abort+terminate if free space drops below this
+readonly POLL_INTERVAL_SECS=30               # launcher sentinel-poll cadence
+POLL_GRACE_SECS="${POLL_GRACE_SECS:-1800}"   # launcher headroom beyond the in-box watchdog (boot/apt/rustup)
+
+# The launcher's wait budget is DERIVED from the in-box watchdog: it must never be
+# the shorter deadline, or a healthy multi-hour sweep gets killed by the launcher's
+# EXIT trap before the box can write DONE. Kept as a function so the self-test can
+# assert the lifetime relationship (budget >= watchdog + grace) hermetically.
+poll_attempts() {
+  echo $(( (WATCHDOG_SECS + POLL_GRACE_SECS + POLL_INTERVAL_SECS - 1) / POLL_INTERVAL_SECS ))
+}
+
+# Final launcher outcome — success ONLY when the DONE sentinel was observed AND the
+# result archive was transferred+extracted. Everything else (FAILED sentinel, no
+# sentinel, early termination, tar failure) fails closed with a non-zero exit, so
+# automation can never mistake a missing/broken artifact for a completed run.
+# Factored so the self-test can assert the truth table without aws/ssh.
+launcher_outcome() { # <done 0|1> <pulled 0|1>
+  [ "$1" = 1 ] && [ "$2" = 1 ]
+}
 
 # Validate the row cap up front (in BOTH real-run and self-test paths) so a runaway
 # scale can never reach the instance. Never extrapolate past the ceiling.
@@ -119,6 +138,7 @@ validate_inputs() {
   validate_parties
   validate_pos_int "WATCHDOG_SECS" "$WATCHDOG_SECS" 60 "$WATCHDOG_SECS_MAX"
   validate_pos_int "DF_MIN_MB" "$DF_MIN_MB" 1 "$DF_MIN_MB_MAX"
+  validate_pos_int "POLL_GRACE_SECS" "$POLL_GRACE_SECS" 60 21600
 }
 
 # Emit the runnable (viable-regime) cell list "N ROWS" — the cartesian product,
@@ -303,6 +323,32 @@ self_test() {
   _refused "df floor: command substitution"   _with_dfmin '$(reboot)'
   _refused "rows: zero"                       _with_rows '0'
 
+  # Launcher lifetime covers the in-box watchdog: the poll budget is DERIVED from
+  # WATCHDOG_SECS (+ bounded startup grace), so the launcher can never be the
+  # shorter deadline that kills a healthy multi-hour sweep before DONE is written.
+  _budget_covers() { # <label> <watchdog_secs> <grace_secs>
+    local label="$1" budget want
+    budget=$( ( WATCHDOG_SECS="$2"; POLL_GRACE_SECS="$3"; echo $(( $(poll_attempts) * POLL_INTERVAL_SECS )) ) )
+    want=$(( $2 + $3 ))
+    if [ "$budget" -ge "$want" ]; then _check "$label" "covered" "covered"
+    else _check "$label" "budget ${budget}s < ${want}s" "covered"; fi
+  }
+  _budget_covers "poll budget covers current watchdog+grace" "$WATCHDOG_SECS" "$POLL_GRACE_SECS"
+  _budget_covers "poll budget covers the 4h default watchdog" 14400 1800
+  _budget_covers "poll budget covers the 24h max watchdog"    "$WATCHDOG_SECS_MAX" 1800
+
+  # Fail-closed launcher outcome: success ONLY when DONE was observed AND the
+  # result archive transferred+extracted; every other combination exits non-zero.
+  _outcome() { # <label> <done> <pulled> <want ok|fail>
+    local got
+    if launcher_outcome "$2" "$3"; then got=ok; else got=fail; fi
+    _check "$1" "$got" "$4"
+  }
+  _outcome "outcome: DONE + results pulled -> success" 1 1 ok
+  _outcome "outcome: DONE but pull failed -> fail"     1 0 fail
+  _outcome "outcome: no DONE sentinel -> fail"         0 1 fail
+  _outcome "outcome: neither -> fail"                  0 0 fail
+
   # The matrix is exactly the specced {7,9,11} × {100,1000,10000} product.
   local cells; cells="$(ceiling_cells)"
   _check "cell count == 9"          "$(printf '%s\n' "$cells" | grep -c .)" "9"
@@ -459,10 +505,11 @@ for i in $(seq 1 40); do ssh $SSHO "ubuntu@$IP" true 2>/dev/null && { log "ssh u
 [ "$SSH_UP" = 1 ] || die "sshd never became reachable on $IP after 40 attempts — aborting (cleanup trap terminates $INSTANCE_ID)"
 
 mkdir -p "$RESULTS_DIR"
-log "polling for /root/MPC_CEILING_DONE (build + the 10^8-open ceiling cell can take tens of minutes)…"
+POLL_ATTEMPTS="$(poll_attempts)"
+log "polling for /root/MPC_CEILING_DONE every ${POLL_INTERVAL_SECS}s for up to $((POLL_ATTEMPTS * POLL_INTERVAL_SECS))s (covers the ${WATCHDOG_SECS}s in-box watchdog + ${POLL_GRACE_SECS}s startup grace)…"
 DONE=0
-for i in $(seq 1 120); do
-  sleep 30
+for i in $(seq 1 "$POLL_ATTEMPTS"); do
+  sleep "$POLL_INTERVAL_SECS"
   if ssh $SSHO "ubuntu@$IP" "sudo test -f /root/MPC_CEILING_DONE" 2>/dev/null; then
     log "  [$i] sentinel present — pulling results"
     DONE=1; break
@@ -476,13 +523,24 @@ for i in $(seq 1 120); do
   [ "$STATE" = "terminated" ] && { log "  instance terminated before sentinel — results may be lost"; break; }
 done
 
+PULLED=0
 if [ "$DONE" = 1 ]; then
-  ssh $SSHO "ubuntu@$IP" "sudo tar -C /root -cf - mpc-ceiling-results 2>/dev/null" | tar -C "$ROOT/bench" -xf - 2>/dev/null \
-    && log "pulled ceiling results into $RESULTS_DIR (git-ignored):" || log "tar pull failed"
-  for f in "$RESULTS_DIR"/*.json; do [ -f "$f" ] || continue; echo "--- $(basename "$f") ---"; cat "$f"; echo; done
+  if ssh $SSHO "ubuntu@$IP" "sudo tar -C /root -cf - mpc-ceiling-results 2>/dev/null" | tar -C "$ROOT/bench" -xf -; then
+    PULLED=1
+    log "pulled ceiling results into $RESULTS_DIR (git-ignored):"
+    for f in "$RESULTS_DIR"/*.json; do [ -f "$f" ] || continue; echo "--- $(basename "$f") ---"; cat "$f"; echo; done
+  else
+    log "tar pull/extract FAILED — DONE was observed but the result archive did not transfer"
+  fi
 else
+  # Best-effort diagnostics only — the run is already a failure at this point.
   log "NO sentinel — pulling /var/log/mpc-ceiling.log for diagnosis"
   ssh $SSHO "ubuntu@$IP" "sudo tail -160 /var/log/mpc-ceiling.log 2>/dev/null" >&2 || true
 fi
 
+# Fail CLOSED at the launcher boundary: exit non-zero unless DONE was observed AND
+# the result archive landed locally, so automation can never treat a failed or
+# missing benchmark artifact as a successful ceiling run.
+launcher_outcome "$DONE" "$PULLED" \
+  || die "ceiling run NOT confirmed (done=$DONE pulled=$PULLED) — failing closed; cleanup trap terminates $INSTANCE_ID"
 log "done; cleanup trap terminates $INSTANCE_ID, deletes keypair/SG, and runs orphan-check"
