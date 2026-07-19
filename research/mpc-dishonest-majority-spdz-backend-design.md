@@ -147,9 +147,17 @@ sharing and different multiplication engine — that is the whole AXIS-3 move.
 - **Multiplication — Beaver's trick, consuming ONE authenticated triple per gate.** With a
   preprocessed authenticated triple `([[a]],[[b]],[[c]])`, `c = a·b`: open `ε = x−a` and `ρ = y−b`
   (both masked by fresh, input-independent preprocessed randomness, so they leak nothing), then
-  `[[z]] = [[c]] + ε·[[y]] + ρ·[[x]] + ε·ρ` — all **linear** post-opening, so the MAC is carried
-  for free and the two openings are themselves MAC-checked. Every product **consumes one triple**;
-  this is the resource the offline phase manufactures.
+  `[[z]] = [[c]] + ε·[[b]] + ρ·[[a]] + ε·ρ` — all **linear** post-opening (the `ε·ρ` term is a
+  public constant, added by the party-indexed public-constant convention), so the MAC is carried
+  for free and the two openings are themselves MAC-checked. The identity checks out:
+  `c + ε·b + ρ·a + ε·ρ = ab + (x−a)·b + (y−b)·a + (x−a)(y−b)
+  = ab + (xb − ab) + (ya − ab) + (xy − xb − ay + ab) = x·y`. Concretely over `F_7` with
+  `x=3, y=5, a=1, b=2, c=2`: `ε=2, ρ=3`, and `2 + 2·2 + 3·1 + 2·3 = 15 ≡ 1 = 3·5 (mod 7)`. ✓
+  (NOTE: the prior record `mpc-malicious-security-design.md` §2.4 route (b) writes the erroneous form
+  `[[w]] + ε·[[y]] + ρ·[[x]] + ε·ρ`, which double-counts the cross terms and does NOT expand to
+  `x·y` — it needs `−ε·ρ` to be correct in that variable choice. This record supersedes it;
+  reconciling the prior record is captured as a follow-up.) Every product **consumes one
+  triple**; this is the resource the offline phase manufactures.
 - **MAC-check before open (the catch-everything step).** Just before `reconstruct_disclosed`
   reveals any value (the equality verdict, the aggregate sum, the comparison boolean), run the
   SPDZ batched random-challenge `MAC-Check`: draw public `χ_j` *after* shares are fixed, form the
@@ -278,9 +286,22 @@ information-theoretically PQ, the offline route's crypto may or may not be, and 
 layer is classically-broken today. Report each:
 
 ```rust
-/// PQ status of ONE cryptographic component. NotApplicable = the component is not
-/// present in this backend (e.g. no attestation layer). DESIGN SKETCH — not built.
-pub enum PqStatus { PostQuantum, ClassicalOnly, NotApplicable }
+/// PQ status of ONE cryptographic component. DESIGN SKETCH — not built.
+pub enum PqStatus {
+    /// The COMPLETE concrete stack for this component has an established PQ posture
+    /// (information-theoretic, or symmetric-key-only, or an audited PQ instantiation).
+    /// Reserved: a component whose posture depends on an unresolved sub-primitive
+    /// choice must use `Conditional`, never this.
+    PostQuantum,
+    /// Known classically-secure-only under a quantum adversary (e.g. EdDSA/Groth16).
+    ClassicalOnly,
+    /// The posture is route/instantiation-dependent and UNRESOLVED for this backend;
+    /// carries the dependency so the conditional claim stays machine-readable
+    /// without collapsing to an unconditional one.
+    Conditional { depends_on: &'static str },
+    /// The component is not present in this backend (e.g. no attestation layer).
+    NotApplicable,
+}
 
 pub struct PqPosture {
     /// The secret-sharing core. Shamir/additive over F_p is information-theoretic ⇒ PostQuantum.
@@ -289,9 +310,17 @@ pub struct PqPosture {
     pub integrity: PqStatus,
     /// The masking CSPRNG. ChaCha20 ⇒ PostQuantum (symmetric).
     pub masking: PqStatus,
-    /// The OFFLINE preprocessing crypto. MASCOT OT-extension ⇒ PostQuantum-plausible
-    /// (base-OT dependent); Overdrive BGV-AHE ⇒ PostQuantum-plausible (lattice). None
-    /// for a no-offline backend ⇒ NotApplicable.
+    /// The OFFLINE preprocessing crypto. MASCOT OT-extension ⇒
+    /// Conditional { depends_on: "base-OT instantiation" }; Overdrive BGV-AHE ⇒
+    /// Conditional { depends_on: "BGV parameters + ZK proofs of plaintext knowledge" }.
+    /// PostQuantum here is reserved for a backend whose complete concrete
+    /// preprocessing stack (base OTs / AHE params / proof components included) has an
+    /// established PQ posture. No-offline backend ⇒ NotApplicable. The in-process
+    /// simulation implements NO wire cryptography (a local dealer stands in for the
+    /// offline protocol) ⇒ it must report
+    /// Conditional { depends_on: "unimplemented wire preprocessing (in-process dealer \
+    /// simulation — posture undetermined until a real MASCOT/Overdrive offline exists)" },
+    /// never PostQuantum.
     pub preprocessing: PqStatus,
     /// The attestation / collaborative-proof layer. EdDSA/BBS+/Pedersen/Groth16 are
     /// pre-quantum ⇒ ClassicalOnly (no PQ collaborative-zkSNARK exists today).
@@ -300,8 +329,10 @@ pub struct PqPosture {
 ```
 
 Honest headline this field encodes for a DM backend: **PQ confidentiality + integrity in the MPC
-core; PQ-plausible-but-route-dependent preprocessing; classical attestation** — never a single
-"PQ: yes/no" that would lie about one of the five components.
+core; route-dependent preprocessing reported as `Conditional` with its dependency named;
+classical attestation** — never a single "PQ: yes/no" that would lie about one of the five
+components, and never an unconditional `PostQuantum` standing in for an unresolved conditional
+posture.
 
 ### 3.3 `trusted_setup: TrustedSetup` — **per component**
 
