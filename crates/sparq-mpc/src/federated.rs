@@ -54,9 +54,21 @@
 //! `sparq-zk-compose::verifier::reconstruct_public_inputs`. `sparq-mpc` is
 //! deliberately dependency-light and does NOT depend on `sparq-zk-compose` (which
 //! pulls the heavy bb / arkworks estate), so the layout is *mirrored* here rather
-//! than shared, and the `scan_segment_matches_single_source_layout` test pins the
-//! exact bytes of the documented `scan_k{k}_n{n}_r{r}` layout. If the verifier's
-//! reconstruction changes, that test is the tripwire; keep the two in lockstep.
+//! than shared.
+//!
+//! **Honesty note on drift detection.** The
+//! `scan_segment_matches_single_source_layout` test pins the exact bytes of the
+//! documented `scan_k{k}_n{n}_r{r}` layout, built independently field-by-field —
+//! so it catches an accidental change to THIS crate's mirror (a reordered,
+//! dropped, or re-encoded field in `SourceSegment::encode`). It is NOT a
+//! cross-crate drift detector: it neither calls `reconstruct_public_inputs` nor
+//! pins that crate's authoritative real-bb fixture, so a change to the AUTHORITATIVE
+//! verifier layout (field order, padding, integer encoding, an added/removed
+//! field) leaves it green. Until a genuine lockstep gate exists — a
+//! dependency-light shared layout crate consumed by both sides, or a pinned
+//! real-bb conformance fixture fed through both implementations under a repo gate
+//! — the mirror is kept in step by MANUAL review against the verifier, not by
+//! this test. That conformance gate is tracked as follow-up work.
 
 use crate::partial::{HolderId, MpcError};
 use sha2::{Digest, Sha512};
@@ -267,22 +279,51 @@ impl FreshnessBinding {
 
     /// The message the OUT-OF-CIRCUIT issuer-signature check MUST cover so a
     /// `(federated statement, proof, signature)` triple cannot be (a) replayed
-    /// under a different verifier nonce, or (b) lifted onto a different federated
-    /// statement: a domain-separated SHA-512 digest (truncated to 32 bytes) over
+    /// under a different verifier nonce, (b) lifted onto a different federated
+    /// statement, or (c) have its holder-to-segment assignment silently swapped:
+    /// a domain-separated SHA-512 digest (truncated to 32 bytes) over
     ///
-    /// `FRESHNESS_DOMAIN ‖ len(session_id) ‖ session_id ‖ challenge ‖ federated_public_inputs`.
+    /// `FRESHNESS_DOMAIN ‖ len(session_id) ‖ session_id ‖ challenge ‖ holder_block ‖ federated_public_inputs`
+    ///
+    /// where `holder_block` is `count ‖ (len(holder_id) ‖ holder_id)*` over
+    /// `holders` in the SAME canonical order used to build
+    /// `federated_public_inputs`.
+    ///
+    /// **Why `holders` is bound here and not in the public-input vector.** Each
+    /// source segment is byte-identical to that source's single-source layout,
+    /// which carries NO holder identifier, so `federated_public_inputs` is
+    /// deliberately holder-anonymous: two holders whose segments are byte-identical
+    /// produce the same public-input bytes, and reordering them would not change
+    /// those bytes. Canonical holder identity + order is therefore part of the
+    /// SIGNED statement, folded in HERE (audit: multi-source attestation must bind
+    /// which party attested which segment). Swapping, relabelling, or reordering a
+    /// holder changes `holder_block` and hence the signed digest.
     ///
     /// Everything before the variable-length `federated_public_inputs` is either
-    /// fixed-width (the domain tag is a fixed constant, `challenge` is 32 bytes)
-    /// or explicitly length-prefixed (`session_id`), so the encoding is
-    /// unambiguous. `federated_public_inputs` is the output of
+    /// fixed-width (the domain tag is a fixed constant, `challenge` is 32 bytes),
+    /// explicitly length-prefixed (`session_id`, and every holder id), or
+    /// count-prefixed (`holders`), so the encoding is unambiguous and the trailing
+    /// `federated_public_inputs` is the output of
     /// [`reconstruct_federated_public_inputs`] for this same binding.
-    pub fn out_of_circuit_message(&self, federated_public_inputs: &[u8]) -> [u8; 32] {
+    pub fn out_of_circuit_message(
+        &self,
+        holders: &[HolderId],
+        federated_public_inputs: &[u8],
+    ) -> [u8; 32] {
         let mut h = Sha512::new();
         h.update(FRESHNESS_DOMAIN);
         h.update((self.session_id.len() as u64).to_be_bytes());
         h.update(&self.session_id);
         h.update(self.challenge);
+        // Canonical holder order + identity (length-framed, count-prefixed): the
+        // public-input vector is holder-anonymous, so holder-to-position binding
+        // lives in the signed message. See the method doc.
+        h.update((holders.len() as u64).to_be_bytes());
+        for holder in holders {
+            let id = holder.as_str().as_bytes();
+            h.update((id.len() as u64).to_be_bytes());
+            h.update(id);
+        }
         h.update(federated_public_inputs);
         let digest = h.finalize();
         let mut out = [0u8; 32];
@@ -302,7 +343,16 @@ impl FreshnessBinding {
 /// and fails the byte compare. This function binds the order it is given — it
 /// does NOT sort — so the choice is explicit and auditable rather than an
 /// implicit surprise. It also rejects an empty federation (there is nothing to
-/// attest) and any segment whose shape violates the single-source invariants.
+/// attest), a **duplicate holder** (one segment per holder), and any segment
+/// whose shape violates the single-source invariants.
+///
+/// **Holder identity is NOT in this vector.** Each segment is byte-identical to
+/// that source's single-source layout (which carries no holder id), so the
+/// returned bytes are holder-anonymous — for byte-identical segments, reordering
+/// the holders does not change them. Holder-to-position IDENTITY is bound in the
+/// SIGNED message ([`FreshnessBinding::out_of_circuit_message`], which takes the
+/// same ordered `holders`), so pass the holder list in this same canonical order
+/// when computing that message.
 pub fn reconstruct_federated_public_inputs(
     binding: &FreshnessBinding,
     sources: &[SourceSegment],
@@ -312,6 +362,19 @@ pub fn reconstruct_federated_public_inputs(
             "federated public-input layout needs >= 1 source (empty federation attests nothing)"
                 .into(),
         ));
+    }
+    // One segment per holder: the federation spans DISTINCT holders, and the
+    // out-of-circuit signed message binds holder identity by position
+    // ([`FreshnessBinding::out_of_circuit_message`]). Duplicate holder IDs would
+    // attest the same party twice under one canonical order, so reject them
+    // fail-closed rather than silently accepting an ambiguous holder set.
+    for (i, s) in sources.iter().enumerate() {
+        if sources[..i].iter().any(|p| p.holder == s.holder) {
+            return Err(MpcError::Protocol(format!(
+                "federated public-input layout: duplicate holder {} (one segment per holder)",
+                s.holder
+            )));
+        }
     }
     let mut out = Vec::with_capacity(sources.iter().map(SourceSegment::encoded_len).sum());
     for s in sources {
@@ -346,9 +409,13 @@ mod tests {
     }
 
     /// The exact documented `scan_k{k}_n{n}_r{r}` layout, byte-for-byte, for a
-    /// k=1, r=2 segment with one real row + one pad row — pinning that this
-    /// crate's mirror equals `reconstruct_public_inputs`'s emitted bytes (the
-    /// "byte-compared unchanged" invariant; drift tripwire).
+    /// k=1, r=2 segment with one real row + one pad row. The expected vector is
+    /// built independently field-by-field, so this pins THIS crate's mirror
+    /// against the documented layout and catches an accidental local regression
+    /// in `SourceSegment::encode`. It does NOT compare against
+    /// `sparq-zk-compose::verifier::reconstruct_public_inputs` (not a dependency
+    /// here), so on its own it cannot detect drift in the authoritative verifier —
+    /// see the module-level "Cross-crate layout obligation" honesty note.
     #[test]
     fn scan_segment_matches_single_source_layout() {
         let binding = FreshnessBinding::new(word(0x11), b"session-1".to_vec());
@@ -456,10 +523,11 @@ mod tests {
 
         // The public inputs already differ (field 0 = N), and so does the bound
         // out-of-circuit message the signature must cover.
+        let holders = [seg0.holder.clone()];
         assert_ne!(pi_old, pi_new);
         assert_ne!(
-            b_old.out_of_circuit_message(&pi_old),
-            b_new.out_of_circuit_message(&pi_new),
+            b_old.out_of_circuit_message(&holders, &pi_old),
+            b_new.out_of_circuit_message(&holders, &pi_new),
             "a fresh nonce must change the out-of-circuit signed message (anti-replay)"
         );
     }
@@ -476,18 +544,82 @@ mod tests {
         let pi_a = reconstruct_federated_public_inputs(&binding, std::slice::from_ref(&a)).unwrap();
         let pi_b = reconstruct_federated_public_inputs(&binding, std::slice::from_ref(&b)).unwrap();
 
+        let holders_a = [a.holder.clone()];
+        let holders_b = [b.holder.clone()];
         // Different statement, same binding -> different message.
         assert_ne!(
-            binding.out_of_circuit_message(&pi_a),
-            binding.out_of_circuit_message(&pi_b),
+            binding.out_of_circuit_message(&holders_a, &pi_a),
+            binding.out_of_circuit_message(&holders_b, &pi_b),
             "a different federated statement must change the bound message"
         );
         // Same statement, different session id -> different message.
         assert_ne!(
-            binding.out_of_circuit_message(&pi_a),
-            other_session.out_of_circuit_message(&pi_a),
+            binding.out_of_circuit_message(&holders_a, &pi_a),
+            other_session.out_of_circuit_message(&holders_a, &pi_a),
             "a different session id must change the bound message"
         );
+    }
+
+    /// Holder IDENTITY is bound in the signed out-of-circuit message even when the
+    /// public-input vector cannot distinguish the holders: two DISTINCT holders
+    /// whose segments are byte-identical yield the same holder-anonymous
+    /// `federated_public_inputs`, yet swapping their canonical order changes the
+    /// signed message (so a multi-source attestation binds which party attested
+    /// which segment, closing the "swap byte-identical holders" gap).
+    #[test]
+    fn holder_identity_is_bound_in_signed_message() {
+        let binding = FreshnessBinding::new(word(0x11), b"sess".to_vec());
+        let alice = seg("alice", 0xAA, vec![true], 1);
+        // Bob's segment is BYTE-IDENTICAL to Alice's — only the holder differs.
+        let bob = SourceSegment {
+            holder: HolderId::new("bob"),
+            ..alice.clone()
+        };
+
+        let pi_ab =
+            reconstruct_federated_public_inputs(&binding, &[alice.clone(), bob.clone()]).unwrap();
+        let pi_ba =
+            reconstruct_federated_public_inputs(&binding, &[bob.clone(), alice.clone()]).unwrap();
+        // The public-input vector is holder-anonymous: identical segments in either
+        // order produce identical bytes. This is exactly why the holder binding
+        // cannot live in this vector.
+        assert_eq!(
+            pi_ab, pi_ba,
+            "byte-identical segments make the public-input vector holder-anonymous"
+        );
+
+        // ...but the SIGNED out-of-circuit message binds the canonical holder
+        // order + identity, so swapping the holder assignment changes what the
+        // signature covers.
+        let holders_ab = [alice.holder.clone(), bob.holder.clone()];
+        let holders_ba = [bob.holder.clone(), alice.holder.clone()];
+        assert_ne!(
+            binding.out_of_circuit_message(&holders_ab, &pi_ab),
+            binding.out_of_circuit_message(&holders_ba, &pi_ba),
+            "swapping the holder assignment must change the signed message"
+        );
+        // Relabelling a single holder (same segments, same order) also changes it.
+        let holders_relabelled = [HolderId::new("carol"), bob.holder.clone()];
+        assert_ne!(
+            binding.out_of_circuit_message(&holders_ab, &pi_ab),
+            binding.out_of_circuit_message(&holders_relabelled, &pi_ab),
+            "relabelling a holder must change the signed message"
+        );
+    }
+
+    /// One segment per holder: a duplicate holder id fails closed rather than
+    /// attesting the same party twice under one canonical order.
+    #[test]
+    fn duplicate_holder_is_refused() {
+        let binding = FreshnessBinding::new(word(0x11), vec![]);
+        let a1 = seg("alice", 0xAA, vec![true], 1);
+        // Same holder id, different segment bytes.
+        let a2 = seg("alice", 0xBB, vec![false], 1);
+        let err = reconstruct_federated_public_inputs(&binding, &[a1, a2]).unwrap_err();
+        match err {
+            MpcError::Protocol(m) => assert!(m.contains("duplicate holder"), "got: {m}"),
+            other => panic!("expected Protocol, got {other:?}"),
+        }
     }
 
     /// `uint_word` matches the verifier's right-aligned BE `push_uint`.
