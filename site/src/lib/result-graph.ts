@@ -15,10 +15,11 @@
 
 import type { SparqlResults, SparqlTerm } from "./sparq-wasm";
 import { curie } from "./curie";
-import { isGraphShaped } from "./result-graph-shape";
+import { isGraphShaped, termKey, MAX_GRAPH_NODES } from "./result-graph-shape";
 
-/** The most nodes the compact node-link view draws; beyond this the caller shows a truncation note. */
-export const MAX_GRAPH_NODES = 24;
+// Re-exported for the renderer/tests; it LIVES in result-graph-shape.ts (the light hero-chunk
+// module) because the eligibility predicate replays the same cap to stay exact.
+export { MAX_GRAPH_NODES };
 
 export type NodeKind = "uri" | "literal" | "bnode";
 
@@ -54,13 +55,6 @@ export interface ResultGraph {
   totalNodes: number;
 }
 
-/** A stable identity key for a term: same lexical value but different datatype/lang ⇒ different node. */
-function termKey(t: SparqlTerm): string {
-  const dt = t.type === "literal" ? (t.datatype ?? "") : "";
-  const lang = t.type === "literal" ? (t["xml:lang"] ?? "") : "";
-  return JSON.stringify([t.type, t.value, dt, lang]);
-}
-
 /** The human-facing node label for a term (display only; raw value stays on `node.term`). */
 function nodeLabel(t: SparqlTerm): string {
   if (t.type === "uri") return curie(t.value);
@@ -76,7 +70,10 @@ function nodeLabel(t: SparqlTerm): string {
  */
 export function deriveGraph(results: SparqlResults): ResultGraph | null {
   // Precondition gate — the SAME cheap predicate the hero uses to decide whether to offer the
-  // toggle, so the two can never disagree about what is "graph-shaped" (see result-graph-shape.ts).
+  // toggle. It exactly replays this function's capped admission (shared termKey + MAX_GRAPH_NODES,
+  // same scan order), so the two can never disagree about what is "graph-shaped" — including at the
+  // cap boundary (see result-graph-shape.ts). The edge/resource checks below are therefore
+  // defensive only.
   if (!isGraphShaped(results)) return null;
   const vars = results.head?.vars ?? [];
   const rows = results.results?.bindings ?? [];

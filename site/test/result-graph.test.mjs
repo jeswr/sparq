@@ -218,8 +218,10 @@ test("deriveGraph: more than MAX_GRAPH_NODES distinct terms is capped and flagge
       leaf: { type: "uri", value: `http://ex/leaf/${i}` },
     });
   }
-  const g = deriveGraph({ head: { vars: ["hub", "leaf"] }, results: { bindings } });
+  const star = { head: { vars: ["hub", "leaf"] }, results: { bindings } };
+  const g = deriveGraph(star);
   assert.ok(g);
+  assert.equal(isGraphShaped(star), true, "the capped predicate agrees the star is drawable");
   assert.equal(g.nodes.length, MAX_GRAPH_NODES, "node set is capped");
   assert.equal(g.truncated, true);
   assert.equal(g.totalNodes, leaves + 1, "totalNodes counts every distinct term seen, pre-cap");
@@ -230,10 +232,50 @@ test("deriveGraph: more than MAX_GRAPH_NODES distinct terms is capped and flagge
   }
 });
 
+// [review #3601] Regression for the cap-boundary disagreement: a result can bind MAX_GRAPH_NODES
+// distinct terms FIRST (here via single-bound rows, which produce no edges), so its ONLY qualifying
+// edge sits between two cap-EXCLUDED terms that deriveGraph drops. The old uncapped predicate said
+// "graph-shaped", the derivation returned null, and the hero offered a Graph toggle that rendered
+// blank. The predicate now replays the cap, so BOTH must decline this result.
+test("isGraphShaped/deriveGraph: an edge only between cap-excluded terms is NOT graph-shaped", () => {
+  const bindings = [];
+  // MAX_GRAPH_NODES distinct resources, each in a single-bound row → cap fills with edge-less nodes.
+  for (let i = 0; i < MAX_GRAPH_NODES; i++) {
+    bindings.push({ s: { type: "uri", value: `http://ex/filler/${i}` } });
+  }
+  // The only adjacent bound pair — both terms are NEW, so both fall past the cap and are dropped.
+  bindings.push({
+    s: { type: "uri", value: "http://ex/late/a" },
+    o: { type: "uri", value: "http://ex/late/b" },
+  });
+  const r = { head: { vars: ["s", "o"] }, results: { bindings } };
+  assert.equal(isGraphShaped(r), false, "the only edge is undrawable, so no Graph toggle");
+  assert.equal(deriveGraph(r), null, "derivation agrees: nothing to draw");
+});
+
+test("isGraphShaped/deriveGraph: a post-cap edge whose endpoints WERE admitted still draws", () => {
+  // Same shape, but the late edge reuses two already-admitted terms — drawable, so both say yes,
+  // and the derived graph is non-empty (the toggle never offers a blank picture).
+  const bindings = [];
+  for (let i = 0; i < MAX_GRAPH_NODES; i++) {
+    bindings.push({ s: { type: "uri", value: `http://ex/filler/${i}` } });
+  }
+  bindings.push({
+    s: { type: "uri", value: "http://ex/filler/0" },
+    o: { type: "uri", value: "http://ex/filler/1" },
+  });
+  const r = { head: { vars: ["s", "o"] }, results: { bindings } };
+  assert.equal(isGraphShaped(r), true);
+  const g = deriveGraph(r);
+  assert.ok(g, "an admitted-endpoint edge keeps the result drawable");
+  assert.ok(g.edges.length > 0, "whenever the toggle is offered, the graph has edges");
+});
+
 // [review #3601] The cheap eligibility predicate the hero uses to decide whether to OFFER the Graph
 // toggle — WITHOUT eagerly running the full deriveGraph node/edge construction for every result.
-// Its whole contract is that it must AGREE with `deriveGraph(...) !== null` (deriveGraph now uses it
-// as its precondition gate), so the toggle never appears for a result that would draw no graph.
+// Its whole contract is that it must AGREE with `deriveGraph(...) !== null` (deriveGraph uses it as
+// its precondition gate, and the predicate exactly replays the MAX_GRAPH_NODES admission cap), so
+// the toggle never appears for a result that would draw no or an empty graph.
 test("isGraphShaped: agrees with deriveGraph!==null across the derivation fixtures", () => {
   const noPair = {
     head: { vars: ["s", "o"] },

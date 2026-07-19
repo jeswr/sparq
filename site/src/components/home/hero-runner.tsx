@@ -52,10 +52,10 @@ import { withBasePath } from "@/lib/base-path";
 // switches to the Graph view — neither may sit in this (already-lazy) hero chunk for the majority
 // who never open Graph (site policy: rarely-used net-new frontend code loads on the invocation
 // path). The CHEAP eligibility check that decides whether to even OFFER the toggle stays
-// synchronous — it is `isGraphShaped` (imported above), an allocation-free scan that mirrors
-// deriveGraph's decline conditions WITHOUT building the node/edge maps — so the Table | Graph
-// toggle still appears the instant a result is graph-shaped, without eagerly running the full
-// derivation for every result.
+// synchronous — it is `isGraphShaped` (imported above), a cheap capped scan that exactly models
+// deriveGraph's decline conditions (including the MAX_GRAPH_NODES cap) WITHOUT building the
+// node/edge maps — so the Table | Graph toggle still appears the instant a result is graph-shaped,
+// without eagerly running the full derivation for every result.
 const ResultGraphView = React.lazy(() =>
   import("@/components/repl-graph-view").then((m) => ({ default: m.ResultGraphView })),
 );
