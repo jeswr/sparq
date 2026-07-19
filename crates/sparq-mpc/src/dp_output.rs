@@ -20,9 +20,11 @@
 //! **differentially-private noised cardinality** — `B = true_count + nonneg_noise`
 //! — is order-of-magnitude cheaper: you reveal only `≈ true_count + O(1/ε)` slots
 //! instead of the worst case. The price is that `B` is now **data-DEPENDENT**, so
-//! its value leaks an **(ε, δ)-differentially-private view of the true result
-//! cardinality**. This module implements that trade + the ε-budget that composes
-//! over repeated queries.
+//! its value leaks a noised view of the true result cardinality that this module
+//! **calibrates to an (ε, δ)-DP target**. This module implements that trade + the
+//! ε-budget that composes over repeated queries — but see the HONESTY section
+//! below: the implementation does NOT claim an achieved, certified (ε, δ)-DP
+//! guarantee.
 //!
 //! ## HONESTY — what the DP guarantee is, and (loudly) what it is NOT
 //!
@@ -35,10 +37,14 @@
 //!   statistical **(ε, δ)** guarantee in exchange for cost. The released bound `B`
 //!   leaks that the query ran AND a noised size; over repeated queries the leak
 //!   **composes** and MUST be tracked against a budget (this module's [`PrivacyBudget`]).
-//! - **What DP protects here:** the *value of the released slot count `B`* is an
-//!   (ε, δ)-DP function of the true match count `m` (sensitivity = one input row
-//!   changes `m` by ≤ 1). Two neighbouring databases produce `B` distributions
-//!   within `e^ε` (up to the `δ` clamp event). It does NOT make dummies
+//! - **What DP is meant to protect here:** the *value of the released slot count
+//!   `B`* is calibrated so that, in exact arithmetic, it is an (ε, δ)-DP function
+//!   of the true match count `m` under the neighbouring-input model the CALLER
+//!   fixes via `sensitivity` (see the Sensitivity section — for a join,
+//!   sensitivity is generally NOT 1). Two neighbouring inputs — inputs whose true
+//!   counts differ by at most `sensitivity` — then produce `B` distributions
+//!   within `e^ε` of each other up to the accounted `δ` failure events (the clamp
+//!   and the tail truncation, δ/2 each). It does NOT make dummies
 //!   indistinguishable from real rows to an authorized recipient who filters tagged
 //!   dummies — that recipient still learns `m` exactly, inherent to a
 //!   set-returning result and UNCHANGED from the base transform (see
@@ -55,19 +61,45 @@
 //!   hardened DP sampler — floating-point DP samplers have known precision
 //!   side-channels (Mironov, CCS'12, "On Significance of the Least Significant
 //!   Bits"); a deployment needs an exact discrete sampler (Canonne–Kamath–Steinke).
+//!   **For that reason this module does NOT claim an achieved (ε, δ)-DP
+//!   guarantee.** The mechanism is *calibrated to the (ε, δ) target* with the two
+//!   discrete failure events explicitly accounted (clamp ≤ δ/2, `K_CAP` tail
+//!   truncation ≤ δ/2, both enforced fail-closed at [`DpParams::new`]), but the
+//!   floating-point sampling error itself is UNquantified until the exact discrete
+//!   sampler lands. Treat the release as a noised bound with a DP *design target*,
+//!   not a certified DP release. `[FABLE-5]`
 //!
-//! ## The mechanism (sound as scoped)
+//! ## Sensitivity is the caller's obligation (a join is generally NOT `Δ = 1`)
+//!
+//! `sensitivity` (`Δ`) must upper-bound how much the true result count `m` can
+//! change between two neighbouring inputs under the caller's neighbouring-input
+//! definition (add/remove one input row, unless the caller defines otherwise).
+//! For a plain count over ONE relation that is 1. **For a join it is NOT**: one
+//! added input row produces as many output rows as it has join partners on the
+//! other side — even for SET output — so the row-level sensitivity of an
+//! unrestricted join is the maximum join degree (fan-out), which is data-dependent
+//! and unbounded in general. A caller MUST either (a) enforce a contribution/
+//! degree bound on the inputs and pass that bound as `Δ`, or (b) pass a public
+//! conservative bound for the query shape (e.g. `|R|` for `L ⋈ R` under
+//! one-added-row-in-`L` neighbouring). Passing `Δ = 1` for an unrestricted join
+//! under-noises the release and voids the ε target (witness test:
+//! `join_fanout_sensitivity_witness`). `[FABLE-5]`
+//!
+//! ## The mechanism (calibration, stated in exact arithmetic)
 //!
 //! For sensitivity `Δ` and privacy loss `ε`, let `α = exp(−ε/Δ)`. The **two-sided
 //! geometric mechanism** (discrete Laplace; Ghosh–Roughgarden–Sundararajan) releases
-//! `m + G` with `Pr[G = k] = (1−α)/(1+α) · α^{|k|}`, which is **ε-DP** for an
-//! integer count. To make the released count **non-negative** (and so never truncate
-//! a real match), we add a deterministic **shift** `Γ` and clamp at the true count:
-//! `B = m + max(0, Γ + G)`. `Γ` is the smallest integer with `Pr[G ≤ −Γ] ≤ δ`, so
-//! the clamp is active with probability ≤ `δ` — exactly the `δ` of the **(ε, δ)**
-//! guarantee (the standard ShrinkWrap analysis). Because `max(0, Γ + G) ≥ 0`, we
-//! always have `B ≥ m`: **every real match is revealed; the crate's never-truncate
-//! rule is preserved.**
+//! `m + G` with `Pr[G = k] = (1−α)/(1+α) · α^{|k|}`, which is **ε-DP for an
+//! integer count in exact arithmetic**. To make the released count **non-negative**
+//! (and so never truncate a real match), we add a deterministic **shift** `Γ` and
+//! clamp at the true count: `B = m + max(0, Γ + G)`. `Γ` is the smallest integer
+//! with `Pr[G ≤ −Γ] ≤ δ/2`, so the clamp is active with probability ≤ `δ/2`; the
+//! probability that either geometric draw of a release is altered by the `K_CAP`
+//! safety clamp is separately enforced ≤ `δ/2` at construction. Together the two
+//! accounted failure events fit the stated `δ` (the ShrinkWrap-style analysis).
+//! What remains UNaccounted is the floating-point sampler error itself — see the
+//! HONESTY section. Because `max(0, Γ + G) ≥ 0`, we always have `B ≥ m`: **every
+//! real match is revealed; the crate's never-truncate rule is preserved.**
 //!
 //! ## Cost
 //!
@@ -95,21 +127,30 @@ type ResultRow = Vec<Option<Term>>;
 /// practical output-cardinality release. `[OPUS-4.8]`
 pub const MAX_DP_SHIFT: u64 = 1 << 16;
 
-/// Safety clamp on a single geometric draw `K`. The two-sided geometric's tail is
-/// `Pr[K > k] = α^{k+1}`, so with a shift bounded by [`MAX_DP_SHIFT`] (which floors
-/// how small `ε` can be) the probability of hitting `2^20` is utterly negligible for
-/// any admissible `(ε, δ)`; the clamp exists only so a pathological CSPRNG draw
-/// cannot request an unbounded allocation. Its bias is negligible and is stated
-/// here, not hidden. `[OPUS-4.8]`
+/// Safety clamp on a single geometric draw `K`, so a pathological CSPRNG draw
+/// cannot request an unbounded allocation. Truncating the geometric's tail
+/// (`Pr[K > k] = α^{k+1}`) is a REAL distortion of the mechanism, and across the
+/// accepted `(ε, δ)` space it is NOT automatically negligible ([`MAX_DP_SHIFT`]
+/// alone does not floor `ε/Δ` when `δ` is large). The per-release truncation
+/// probability — two draws, union bound, `2·α^{K_CAP+1}` — is therefore enforced
+/// `≤ δ/2` at [`DpParams::new`]: parameters whose tail mass does not fit that half
+/// of the failure budget are REJECTED fail-closed, so the accounted `δ` explicitly
+/// covers the clamp event. `[FABLE-5]`
 const K_CAP: u64 = 1 << 20;
 
 /// Differential-privacy parameters for one output-cardinality release: the privacy
-/// loss `ε`, the failure probability `δ`, and the query **sensitivity** (how much
-/// the true result count can change when one input row is added/removed — `1` for a
-/// standard set-returning join).
+/// loss `ε`, the failure probability `δ`, and the query **sensitivity** `Δ` — an
+/// upper bound, supplied AND enforced by the caller, on how much the true result
+/// count can change between neighbouring inputs. `1` is correct for a count over
+/// one relation under add/remove-one-row neighbouring; **for a join it is generally
+/// NOT `1`** — one added input row can match many rows on the other side, so `Δ`
+/// must come from an enforced contribution/degree bound or a public worst-case
+/// bound for the query shape (see the module's Sensitivity section).
 ///
-/// Constructed via [`DpParams::new`], which validates the ranges and that the
-/// implied non-negative shift is practical ([`MAX_DP_SHIFT`]).
+/// Constructed via [`DpParams::new`], which validates the ranges, that the sampler
+/// base `α` is strictly representable inside `(0, 1)`, that the implied
+/// non-negative shift is practical ([`MAX_DP_SHIFT`]), and that the `K_CAP`
+/// tail-truncation mass fits its `δ/2` budget.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DpParams {
     epsilon: f64,
@@ -121,9 +162,14 @@ impl DpParams {
     /// Build validated DP parameters. Fails closed ([`MpcError::Protocol`]) if:
     /// `ε` is not finite/positive; `δ` is not in `(0, 1)` (a non-negative,
     /// never-truncating release needs `δ > 0` — the clamp event; pure `ε`-DP cannot
-    /// bound the count below without it); `sensitivity` is `0`; or the implied shift
-    /// `Γ` exceeds [`MAX_DP_SHIFT`] (the requested privacy is too strict to pad to
-    /// practically — a too-small `ε`/`δ`).
+    /// bound the count below without it); `sensitivity` is `0`; the sampler base
+    /// `α = exp(−ε/Δ)` is not STRICTLY inside `(0, 1)` in `f64` (a too-extreme
+    /// ratio rounds it to `1.0` — which would silently collapse the sampler into a
+    /// deterministic, privacy-free release — or underflows it to `0.0`); the
+    /// implied shift `Γ` exceeds [`MAX_DP_SHIFT`] (the requested privacy is too
+    /// strict to pad to practically — a too-small `ε`/`δ`); or the `K_CAP`
+    /// tail-truncation mass `2·α^{K_CAP+1}` exceeds its `δ/2` budget (the capped
+    /// sampler cannot honestly account the requested `(ε, δ)`).
     pub fn new(epsilon: f64, delta: f64, sensitivity: u64) -> Result<Self, MpcError> {
         if !epsilon.is_finite() || epsilon <= 0.0 {
             return Err(MpcError::Protocol(format!(
@@ -148,12 +194,46 @@ impl DpParams {
             delta,
             sensitivity,
         };
+        // The sampler base must be STRICTLY representable inside (0, 1) in f64. A
+        // tiny eps/sensitivity ratio rounds exp(-eps/sensitivity) to exactly 1.0,
+        // which makes both log-denominators zero and collapses the "noise" into a
+        // DETERMINISTIC release (no privacy at all); a huge ratio underflows the
+        // base to 0.0 and degenerates the formulas. Both are rejected fail-closed.
+        // (alpha cannot be NaN: exp of a finite negative ratio is finite or 0.)
+        let alpha = p.alpha();
+        if alpha <= 0.0 || alpha >= 1.0 {
+            return Err(MpcError::Protocol(format!(
+                "DpParams: alpha = exp(-epsilon/sensitivity) must be strictly inside \
+                 (0, 1) in f64, got {alpha} (epsilon={epsilon}, sensitivity=\
+                 {sensitivity}); the ratio is too extreme for the sampler — refusing \
+                 fail-closed rather than releasing degenerate noise"
+            )));
+        }
         let shift = p.shift();
         if shift > MAX_DP_SHIFT {
             return Err(MpcError::Protocol(format!(
                 "DpParams: (epsilon={epsilon}, delta={delta}, sensitivity={sensitivity}) \
                  implies a DP shift {shift} > MAX_DP_SHIFT {MAX_DP_SHIFT}; the requested \
                  privacy is too strict to pad to a practical output cardinality"
+            )));
+        }
+        // The K_CAP clamp truncates each geometric draw's tail with probability
+        // alpha^(K_CAP+1); over the two draws of one release the union bound is
+        // 2*alpha^(K_CAP+1). That distortion is charged against the delta/2
+        // truncation half of the failure budget (the clamp event the shift is
+        // calibrated to takes the other delta/2). If it does not fit, refuse
+        // fail-closed rather than release with an unaccounted tail. Computed as
+        // exp(-(eps/sens)*(K_CAP+1)) — mathematically identical, better precision
+        // than powi for alpha near 1.
+        let truncation_mass =
+            2.0 * (-(epsilon / sensitivity as f64) * (K_CAP as f64 + 1.0)).exp();
+        if truncation_mass > delta / 2.0 {
+            return Err(MpcError::Protocol(format!(
+                "DpParams: the K_CAP={K_CAP} geometric-tail truncation mass \
+                 {truncation_mass} exceeds its delta/2 budget {} (epsilon={epsilon}, \
+                 delta={delta}, sensitivity={sensitivity}); the requested privacy is \
+                 too strict for the capped sampler — refusing fail-closed",
+                delta / 2.0
             )));
         }
         Ok(p)
@@ -180,23 +260,27 @@ impl DpParams {
     }
 
     /// The deterministic non-negative shift `Γ`: the smallest integer `≥ 1` with
-    /// `Pr[G ≤ −Γ] = α^Γ / (1 + α) ≤ δ`. This is the value the clamp `max(0, Γ + G)`
-    /// centres on so the released count stays `≥` the true count with probability
-    /// `≥ 1 − δ`; the residual `≤ δ` clamp event is the `δ` of the (ε, δ) guarantee.
+    /// `Pr[G ≤ −Γ] = α^Γ / (1 + α) ≤ δ/2`. This is the value the clamp
+    /// `max(0, Γ + G)` centres on, so the clamp fires with probability `≤ δ/2` —
+    /// the clamp half of the accounted failure budget (the other `δ/2` covers the
+    /// `K_CAP` tail truncation, enforced at [`DpParams::new`]).
     ///
     /// Pure function of the parameters (no randomness) — exposed so a caller / test
     /// can size the expected padding a query will pay before running it.
     pub fn shift(&self) -> u64 {
         let alpha = self.alpha();
-        // Solve alpha^Gamma / (1+alpha) <= delta  =>  Gamma >= ln(delta*(1+alpha)) / ln(alpha).
-        // ln(alpha) < 0, and delta*(1+alpha) < 1 in the admissible range, so the ratio
-        // is positive. A huge/near-1 alpha (tiny epsilon) makes it large — clamped by
-        // MAX_DP_SHIFT at construction.
-        let numer = (self.delta * (1.0 + alpha)).ln();
+        // Solve alpha^Gamma / (1+alpha) <= delta/2
+        //   =>  Gamma >= ln((delta/2)*(1+alpha)) / ln(alpha).
+        // For validated params alpha is strictly inside (0, 1) (ln(alpha) finite
+        // and < 0) and (delta/2)*(1+alpha) < 1 (delta < 1, alpha < 1), so the ratio
+        // is finite and positive. A near-1 alpha (tiny epsilon) makes it large —
+        // clamped by MAX_DP_SHIFT at construction.
+        let numer = (self.delta / 2.0 * (1.0 + alpha)).ln();
         let denom = alpha.ln();
         let raw = numer / denom;
         if !raw.is_finite() {
-            // Degenerate (e.g. delta*(1+alpha) >= 1): the smallest valid shift is 1.
+            // Unreachable for constructor-validated params (alpha is strictly
+            // inside (0, 1)); kept as a defensive floor.
             return 1;
         }
         (raw.ceil().max(1.0)) as u64
@@ -213,8 +297,9 @@ impl DpParams {
 pub struct DpCardinality {
     /// The true number of real result rows `m` (simulation oracle — never public).
     pub true_count: usize,
-    /// The revealed, DP-noised slot count `B = true_count + noise` (PUBLIC). This is
-    /// the (ε, δ)-DP release of the cardinality.
+    /// The revealed, DP-noised slot count `B = true_count + noise` (PUBLIC) —
+    /// calibrated to the (ε, δ) target, NOT a certified DP release (see the module
+    /// HONESTY section: floating-point sampler, pending exact discrete sampler).
     pub revealed_bound: usize,
     /// The non-negative extra dummies `B − true_count = max(0, Γ + G)` (`≥ 0`, so a
     /// real match is never truncated).
@@ -379,7 +464,8 @@ fn sample_nonneg_noise(dealer: &mut ShamirDealer, params: &DpParams) -> u64 {
 }
 
 /// One geometric draw `K = floor(ln(U) / ln(α))`, `U ~ Uniform(0, 1]`, clamped to
-/// [`K_CAP`] (negligible-probability safety clamp — see its docs).
+/// `K_CAP` (the truncation event is charged against its `δ/2` budget at
+/// [`DpParams::new`] — see the `K_CAP` docs).
 fn geometric_draw(dealer: &mut ShamirDealer, alpha: f64) -> u64 {
     // U in (0, 1]: (v + 1) / (P + 1), v uniform in [0, P). Never 0 (avoids ln(0)).
     let v = dealer.draw_fp().value();
@@ -399,15 +485,21 @@ fn geometric_draw(dealer: &mut ShamirDealer, alpha: f64) -> u64 {
 /// or a prior sound oblivious path), pad them with `ν = max(0, Γ + G)` **non-negative
 /// DP-noise dummy slots** to a released bound `B = |matched_rows| + ν`, then run the
 /// oblivious output transform ([`crate::oblivious_join::oblivious_set_output`]) so the
-/// `B` revealed slots are oblivious-shuffled. The released `B` is an **(ε, δ)-DP**
-/// view of the true result cardinality.
+/// `B` revealed slots are oblivious-shuffled. The released `B` is a DP-noised view
+/// of the true result cardinality, **calibrated to the (ε, δ) target** (NOT a
+/// certified DP claim — see the module HONESTY section; and the target is only
+/// meaningful if `params.sensitivity()` really bounds the neighbouring-input count
+/// change — for a join it is generally NOT 1, see the module Sensitivity section).
 ///
-/// ## Charge-then-release ordering (fail-closed)
+/// ## Budget ordering: pre-authorize → validate → release → commit (fail-closed)
 ///
-/// The `budget` is charged FIRST (sequential composition). If the charge fails the
-/// query does **no** crypto and reveals nothing — an over-budget query is refused
-/// before any cardinality leaks. Because the `(ε, δ)` cost is fixed by `params`
-/// (data-independent), charging up front is correct.
+/// The `budget` is PRE-AUTHORIZED first: if the fixed, data-independent `(ε, δ)`
+/// cost does not fit, the query does **no** crypto and reveals nothing — an
+/// over-budget query is refused before any cardinality leaks. The charge is
+/// COMMITTED only after the release has succeeded, so a request that fails
+/// validation (row arity), bound construction (overflow) or the oblivious
+/// transform consumes NO budget — no release, no spend (an invalid request cannot
+/// be used to drain a relying party's budget).
 ///
 /// ## Why this is sound today (and what is gated)
 ///
@@ -428,10 +520,16 @@ pub fn dp_release_result_rows(
     params: &DpParams,
     budget: &mut PrivacyBudget,
 ) -> Result<(ObliviousOutput, DpCardinality), MpcError> {
-    // Fail closed on the budget BEFORE any reveal.
-    budget.charge(params)?;
+    // Pre-authorize the (data-independent) charge: fail closed BEFORE any work if
+    // the budget cannot afford it. `PrivacyBudget` is `Copy`, so probing a scratch
+    // copy leaves the real budget untouched until the release succeeds.
+    {
+        let mut probe = *budget;
+        probe.charge(params)?;
+    }
 
-    // Validate the row schema up front (the recipient relies on a uniform arity).
+    // Validate the row schema before anything is spent or drawn (the recipient
+    // relies on a uniform arity).
     for (k, row) in matched_rows.iter().enumerate() {
         if row.len() != payload_arity {
             return Err(MpcError::Protocol(format!(
@@ -462,6 +560,11 @@ pub fn dp_release_result_rows(
         .collect();
 
     let output = oblivious_set_output(backend, &candidates, payload_arity, bound)?;
+
+    // Commit the pre-authorized charge only now that the release has succeeded —
+    // every failure path above returned WITHOUT spending. We hold the exclusive
+    // borrow and the identical charge passed the probe, so this cannot fail.
+    budget.charge(params)?;
 
     let card = DpCardinality {
         true_count,
@@ -558,6 +661,113 @@ mod tests {
         );
     }
 
+    /// Boundary (review finding): an ε so small that `α = exp(−ε/Δ)` rounds to
+    /// exactly `1.0` in f64 used to be ACCEPTED whenever δ kept the shift small —
+    /// and then collapsed the sampler into a DETERMINISTIC release (`B = m + 1`
+    /// always: zero log-denominators — no privacy at all). It must be rejected
+    /// fail-closed at construction, for every δ.
+    #[test]
+    fn tiny_epsilon_alpha_collapse_is_rejected() {
+        for delta in [0.9, 0.5, 1e-6] {
+            let err = DpParams::new(1e-18, delta, 1).unwrap_err();
+            assert!(
+                matches!(err, MpcError::Protocol(ref m) if m.contains("alpha")),
+                "delta={delta}: expected the strict-alpha rejection, got {err:?}"
+            );
+        }
+        // The collapse is driven by the RATIO ε/Δ, so a huge sensitivity with a
+        // moderate ε is the same degenerate case.
+        assert!(
+            DpParams::new(1e-3, 0.5, u64::MAX).is_err(),
+            "eps/sensitivity ratio that rounds alpha to 1.0 must be rejected"
+        );
+    }
+
+    /// Boundary: a huge ε/Δ underflows `α` to `0.0`, degenerating the formulas —
+    /// rejected fail-closed rather than silently producing meaningless noise.
+    #[test]
+    fn huge_epsilon_alpha_underflow_is_rejected() {
+        let err = DpParams::new(1e4, 1e-6, 1).unwrap_err();
+        assert!(matches!(err, MpcError::Protocol(m) if m.contains("alpha")));
+    }
+
+    /// Boundary (review finding): parameters whose `K_CAP` tail-truncation mass
+    /// does not fit its δ/2 budget are rejected even when the shift is small. A
+    /// large δ used to mask this: `MAX_DP_SHIFT` alone does not floor ε/Δ there,
+    /// and the truncated tail was a non-negligible, unaccounted distortion.
+    #[test]
+    fn unaccounted_truncation_tail_is_rejected() {
+        // alpha is strictly < 1 and the implied shift (~2e4) fits MAX_DP_SHIFT,
+        // but the tail mass 2·α^(K_CAP+1) ≈ 1.2 far exceeds δ/2.
+        let err = DpParams::new(5e-7, 0.99, 1).unwrap_err();
+        assert!(
+            matches!(err, MpcError::Protocol(ref m) if m.contains("truncation")),
+            "expected the tail-truncation rejection, got {err:?}"
+        );
+    }
+
+    /// Boundary: at the strictest ACCEPTED parameters (shift near [`MAX_DP_SHIFT`],
+    /// tail accounted) the sampler still produces genuinely random noise — the
+    /// release is not deterministic near the acceptance boundary.
+    #[test]
+    fn smallest_accepted_epsilon_still_noises() {
+        let params = DpParams::new(2.2e-4, 1e-6, 1).unwrap();
+        assert!(
+            params.shift() <= MAX_DP_SHIFT && params.shift() > MAX_DP_SHIFT / 2,
+            "test premise: shift {} should sit near the cap {MAX_DP_SHIFT}",
+            params.shift()
+        );
+        let mut seen = std::collections::HashSet::new();
+        for seed in 0..16u64 {
+            let backend = ShamirBackend::new_seeded(3, 40_000 + seed).unwrap();
+            let mut dealer = backend.dealer();
+            seen.insert(sample_nonneg_noise(&mut dealer, &params));
+        }
+        assert!(
+            seen.len() > 1,
+            "noise never varied across 16 seeds at the acceptance boundary — the \
+             sampler has collapsed"
+        );
+    }
+
+    // ---- Sensitivity: a join's row-level sensitivity is generally NOT 1 --------
+
+    /// Witness (review finding): for a join, adding ONE input row changes the
+    /// output count by the number of rows it matches on the other side — here 4,
+    /// not 1 — even for SET output. A caller passing `sensitivity = 1` for this
+    /// shape under-noises the release ~4×; the supplied Δ must bound the join
+    /// degree (or the caller must enforce a contribution bound). Pins the module
+    /// documentation's Sensitivity section.
+    #[test]
+    fn join_fanout_sensitivity_witness() {
+        // L ⋈ R on a key column; R holds 4 rows with key "k". The neighbouring
+        // inputs differ by the single L row carrying key "k".
+        let right_keys = ["k", "k", "k", "k", "other"];
+        let join_count = |left: &[&str]| -> usize {
+            left.iter()
+                .map(|lk| right_keys.iter().filter(|rk| *rk == lk).count())
+                .sum()
+        };
+        let without = join_count(&["a"]);
+        let with = join_count(&["a", "k"]);
+        assert_eq!(
+            with - without,
+            4,
+            "one added input row changed the join's output count by 4, not 1"
+        );
+        // The honest parameterization for this shape carries Δ ≥ 4 — and pays for
+        // it with a correspondingly larger shift (more noise/padding) than the
+        // under-noised Δ = 1 it must not use.
+        let under = DpParams::new(1.0, 1e-6, 1).unwrap();
+        let honest = DpParams::new(1.0, 1e-6, 4).unwrap();
+        assert!(
+            honest.shift() > under.shift(),
+            "Δ=4 must pad more than the (wrong-for-a-join) Δ=1: {} vs {}",
+            honest.shift(),
+            under.shift()
+        );
+    }
+
     /// Larger ε (weaker privacy) ⇒ smaller shift (less padding); the shift is a pure
     /// function of the parameters.
     #[test]
@@ -644,17 +854,34 @@ mod tests {
         assert_eq!(card.true_count, 0);
         assert_eq!(reals(&slots), 0, "no real rows");
         assert_eq!(slots.len(), card.revealed_bound);
+        assert!(
+            budget.spent_epsilon() > 0.99,
+            "a SUCCESSFUL release must commit the charge (spent {})",
+            budget.spent_epsilon()
+        );
     }
 
-    /// A row whose arity disagrees with `payload_arity` is refused (uniform schema).
+    /// A row whose arity disagrees with `payload_arity` is refused (uniform schema)
+    /// — and (review finding) the invalid request consumes NO budget: the charge is
+    /// committed only when a release actually happens.
     #[test]
-    fn wrong_arity_row_is_rejected() {
+    fn wrong_arity_row_is_rejected_and_burns_no_budget() {
         let params = DpParams::new(1.0, 1e-6, 1).unwrap();
         let backend = ShamirBackend::new_seeded(3, 1).unwrap();
         let mut budget = PrivacyBudget::new(10.0, 1.0).unwrap();
         let data = vec![vec![lit("a"), lit("b")]]; // arity 2
         let err = dp_release_result_rows(&backend, &data, 1, &params, &mut budget).unwrap_err();
         assert!(matches!(err, MpcError::Protocol(m) if m.contains("arity")));
+        assert_eq!(
+            budget.spent_epsilon(),
+            0.0,
+            "a request that released nothing must not spend epsilon"
+        );
+        assert_eq!(
+            budget.spent_delta(),
+            0.0,
+            "a request that released nothing must not spend delta"
+        );
     }
 
     // ---- Budget: sequential composition + fail-closed --------------------------
@@ -758,8 +985,8 @@ mod tests {
 
     // ---- Statistical sanity: the clamp (delta) event is rare -------------------
 
-    /// The shift is calibrated so `Pr[Γ + G < 0]` (the clamp/δ event, where the
-    /// released bound would fall back to exactly the true count) is ≤ δ. With δ = 0.05
+    /// The shift is calibrated so `Pr[Γ + G < 0]` (the clamp event, where the
+    /// released bound would fall back to exactly the true count) is ≤ δ/2. With δ = 0.05
     /// and a modest sample we should see the clamp fire only a small fraction of the
     /// time — a coarse empirical check that the shift is sized right, not a proof.
     #[test]

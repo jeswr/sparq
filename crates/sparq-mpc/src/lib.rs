@@ -240,10 +240,13 @@ pub mod oblivious;
 pub mod oblivious_join;
 // [OPUS-4.8] sq-shk5: differential-privacy output-cardinality mode + per-relying-
 // party epsilon-budget tracking (ShrinkWrap/SAQE/Doquet-style) for SET-returning
-// hidden joins. Pads the released cardinality to `true_count + nonneg (eps,delta)
-// noise` (a data-DEPENDENT, DP-noised bound) instead of the catastrophic worst-case
-// |L|.|R| — cheaper, at the honest cost of an (eps,delta) cardinality leak that
-// COMPOSES over queries (tracked per relying party, fails closed). Builds on the
+// hidden joins. Pads the released cardinality to `true_count + nonneg noise`
+// calibrated to an (eps,delta)-DP TARGET (a data-DEPENDENT, DP-noised bound — NOT a
+// certified/achieved DP guarantee; see the module HONESTY docs) instead of the
+// catastrophic worst-case |L|.|R| — cheaper, at the honest cost of a cardinality
+// leak that COMPOSES over queries (tracked per relying party, fails closed; the
+// caller-supplied sensitivity must bound the neighbouring-input count change — for
+// a join that is the join degree, generally NOT 1). Builds on the
 // sq-jnkm oblivious output transform. NOT information-theoretic; noise drawn
 // centrally in-simulation (distributed noise generation is the residual gate). See
 // the module docs for the sound-today vs gated split.
