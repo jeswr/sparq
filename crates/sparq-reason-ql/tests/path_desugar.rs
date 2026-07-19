@@ -64,7 +64,11 @@ fn var_name(t: &TermPattern) -> Option<String> {
 fn alternation_accepted_as_two_branch_ucq() {
     // `?x :p1|:p2 ?y` desugars to a 2-branch UCQ (branch multiplication into the B1 machinery).
     let ucq = as_ucq(&q(&format!("{PRE} SELECT ?x ?y WHERE {{ ?x :p1|:p2 ?y }}"))).expect("UCQ");
-    assert_eq!(ucq.branches.len(), 2, "alternation must produce two UCQ branches");
+    assert_eq!(
+        ucq.branches.len(),
+        2,
+        "alternation must produce two UCQ branches"
+    );
     let preds: Vec<String> = ucq
         .branches
         .iter()
@@ -79,8 +83,15 @@ fn alternation_accepted_as_two_branch_ucq() {
 
 #[test]
 fn alternation_three_way_accepted() {
-    let ucq = as_ucq(&q(&format!("{PRE} SELECT ?x ?y WHERE {{ ?x :p1|:p2|:p3 ?y }}"))).expect("UCQ");
-    assert_eq!(ucq.branches.len(), 3, "three-way alternation → three branches");
+    let ucq = as_ucq(&q(&format!(
+        "{PRE} SELECT ?x ?y WHERE {{ ?x :p1|:p2|:p3 ?y }}"
+    )))
+    .expect("UCQ");
+    assert_eq!(
+        ucq.branches.len(),
+        3,
+        "three-way alternation → three branches"
+    );
 }
 
 #[test]
@@ -98,7 +109,10 @@ fn alternation_rejected_by_as_conjunctive_query() {
 fn nested_alternation_of_sequence_uses_fresh_nondistinguished_intermediate() {
     // `(:a/:b)|:c`: branch 0 is the desugared sequence (2 atoms sharing a fresh intermediate),
     // branch 1 is the single `:c` atom.
-    let ucq = as_ucq(&q(&format!("{PRE} SELECT ?x ?y WHERE {{ ?x (:a/:b)|:c ?y }}"))).expect("UCQ");
+    let ucq = as_ucq(&q(&format!(
+        "{PRE} SELECT ?x ?y WHERE {{ ?x (:a/:b)|:c ?y }}"
+    )))
+    .expect("UCQ");
     assert_eq!(ucq.branches.len(), 2);
 
     let seq_branch = ucq
@@ -121,7 +135,10 @@ fn nested_alternation_of_sequence_uses_fresh_nondistinguished_intermediate() {
     assert_eq!(pred_iri(b_atom), "http://ex/b");
     let mid_obj = var_name(&a_atom.object).expect("sequence intermediate is a variable");
     let mid_subj = var_name(&b_atom.subject).expect("sequence intermediate is a variable");
-    assert_eq!(mid_obj, mid_subj, "the two sequence atoms must SHARE the intermediate var");
+    assert_eq!(
+        mid_obj, mid_subj,
+        "the two sequence atoms must SHARE the intermediate var"
+    );
 
     let distinguished: Vec<String> = seq_branch
         .distinguished
@@ -142,7 +159,10 @@ fn nested_alternation_of_sequence_uses_fresh_nondistinguished_intermediate() {
 #[test]
 fn inverse_in_alternation_arm_swaps_subject_object() {
     // `?x ^:p1|:p2 ?y` → branch 0 = `?y :p1 ?x` (swapped), branch 1 = `?x :p2 ?y`.
-    let ucq = as_ucq(&q(&format!("{PRE} SELECT ?x ?y WHERE {{ ?x ^:p1|:p2 ?y }}"))).expect("UCQ");
+    let ucq = as_ucq(&q(&format!(
+        "{PRE} SELECT ?x ?y WHERE {{ ?x ^:p1|:p2 ?y }}"
+    )))
+    .expect("UCQ");
     assert_eq!(ucq.branches.len(), 2);
     let inv = ucq
         .branches
@@ -183,45 +203,73 @@ fn top_level_inverse_still_accepted_no_double_translation() {
 #[test]
 fn one_or_more_rejected() {
     let r = reject_reason(&format!("{PRE} SELECT ?x ?y WHERE {{ ?x :r+ ?y }}"));
-    assert!(r.contains("property path") && r.contains("fail-closed"), "got: {}", r);
+    assert!(
+        r.contains("property path") && r.contains("fail-closed"),
+        "got: {}",
+        r
+    );
 }
 
 #[test]
 fn zero_or_more_rejected() {
     let r = reject_reason(&format!("{PRE} SELECT ?x ?y WHERE {{ ?x :r* ?y }}"));
-    assert!(r.contains("property path") && r.contains("fail-closed"), "got: {}", r);
+    assert!(
+        r.contains("property path") && r.contains("fail-closed"),
+        "got: {}",
+        r
+    );
 }
 
 #[test]
 fn zero_or_one_rejected() {
     let r = reject_reason(&format!("{PRE} SELECT ?x ?y WHERE {{ ?x :r? ?y }}"));
-    assert!(r.contains("property path") && r.contains("fail-closed"), "got: {}", r);
+    assert!(
+        r.contains("property path") && r.contains("fail-closed"),
+        "got: {}",
+        r
+    );
 }
 
 #[test]
 fn negated_property_set_rejected() {
     let r = reject_reason(&format!("{PRE} SELECT ?x ?y WHERE {{ ?x !:r ?y }}"));
-    assert!(r.contains("negated property set") && r.contains("fail-closed"), "got: {}", r);
+    assert!(
+        r.contains("negated property set") && r.contains("fail-closed"),
+        "got: {}",
+        r
+    );
 }
 
 #[test]
 fn alternation_with_recursive_arm_rejected() {
     // Fail-closed must dominate: an alternation with ONE recursive arm rejects the whole query.
     let r = reject_reason(&format!("{PRE} SELECT ?x ?y WHERE {{ ?x :p|(:r+) ?y }}"));
-    assert!(r.contains("property path") && r.contains("fail-closed"), "got: {}", r);
+    assert!(
+        r.contains("property path") && r.contains("fail-closed"),
+        "got: {}",
+        r
+    );
 }
 
 #[test]
 fn sequence_with_recursive_arm_rejected() {
     let r = reject_reason(&format!("{PRE} SELECT ?x ?y WHERE {{ ?x :p/(:r+) ?y }}"));
-    assert!(r.contains("property path") && r.contains("fail-closed"), "got: {}", r);
+    assert!(
+        r.contains("property path") && r.contains("fail-closed"),
+        "got: {}",
+        r
+    );
 }
 
 #[test]
 fn recursive_inside_inverse_rejected() {
     // `^(:r+)` — reverse of a recursive path is still recursive; reject fail-closed.
     let r = reject_reason(&format!("{PRE} SELECT ?x ?y WHERE {{ ?x ^(:r+) ?y }}"));
-    assert!(r.contains("property path") && r.contains("fail-closed"), "got: {}", r);
+    assert!(
+        r.contains("property path") && r.contains("fail-closed"),
+        "got: {}",
+        r
+    );
 }
 
 // =============================================================================
@@ -244,8 +292,8 @@ fn path_desugar_oracle_skipped_without_experimental() {
 mod gated {
     use super::*;
     use oxrdf::Triple;
-    use sparq_reason_ql::rewrite;
     use spargebra::algebra::GraphPattern;
+    use sparq_reason_ql::rewrite;
     use std::collections::{BTreeMap, BTreeSet};
     use std::str::FromStr;
 
@@ -365,8 +413,10 @@ mod gated {
                 sols
             }
             GraphPattern::Project { inner, variables } => {
-                let keep: BTreeSet<String> =
-                    variables.iter().map(|v| format!("?{}", v.as_str())).collect();
+                let keep: BTreeSet<String> = variables
+                    .iter()
+                    .map(|v| format!("?{}", v.as_str()))
+                    .collect();
                 eval(inner, data)
                     .into_iter()
                     .map(|sol| sol.into_iter().filter(|(k, _)| keep.contains(k)).collect())
@@ -389,9 +439,12 @@ mod gated {
     fn projection(query: &Query) -> Vec<String> {
         fn find(gp: &GraphPattern) -> Option<Vec<String>> {
             match gp {
-                GraphPattern::Project { variables, .. } => {
-                    Some(variables.iter().map(|v| format!("?{}", v.as_str())).collect())
-                }
+                GraphPattern::Project { variables, .. } => Some(
+                    variables
+                        .iter()
+                        .map(|v| format!("?{}", v.as_str()))
+                        .collect(),
+                ),
                 GraphPattern::Distinct { inner }
                 | GraphPattern::Reduced { inner }
                 | GraphPattern::Slice { inner, .. } => find(inner),
@@ -425,7 +478,9 @@ mod gated {
     // A fixture TBox with a role inclusion, so the rewrite is NON-trivial (PerfectRef fires on
     // the desugared branches, not just an identity copy): `:sub rdfs:subPropertyOf :p1`.
     fn fixture_tbox() -> Vec<Triple> {
-        nt(&["<http://ex/sub> <http://www.w3.org/2000/01/rdf-schema#subPropertyOf> <http://ex/p1> ."])
+        nt(&[
+            "<http://ex/sub> <http://www.w3.org/2000/01/rdf-schema#subPropertyOf> <http://ex/p1> .",
+        ])
     }
 
     // A fixture ABox exercising every path form.
@@ -541,7 +596,9 @@ mod gated {
     fn ask_over_alternation_result_equivalent() {
         // ASK form: `ASK { ?x :p1|:p2 ?y }` is true iff some p1/p2 (or sub) edge exists.
         let path = q(&format!("{PRE} ASK {{ ?x :p1|:p2 ?y }}"));
-        let hand = q(&format!("{PRE} ASK {{ {{ ?x :p1 ?y }} UNION {{ ?x :p2 ?y }} }}"));
+        let hand = q(&format!(
+            "{PRE} ASK {{ {{ ?x :p1 ?y }} UNION {{ ?x :p2 ?y }} }}"
+        ));
         let tb = fixture_tbox();
         let ab = fixture_abox();
         let rp = rewrite(&path, &tb).unwrap();
@@ -549,7 +606,10 @@ mod gated {
         // ASK answer = non-empty solution set.
         let ansp = !eval(top_pattern(&rp.query), &triples_as_strings(&ab)).is_empty();
         let ansh = !eval(top_pattern(&rh.query), &triples_as_strings(&ab)).is_empty();
-        assert!(ansp && ansh, "both ASK forms must be TRUE over the fixture ABox");
+        assert!(
+            ansp && ansh,
+            "both ASK forms must be TRUE over the fixture ABox"
+        );
     }
 
     #[test]
@@ -560,7 +620,9 @@ mod gated {
         // rejected fail-closed here). Acceptance + structure are pinned here; the full
         // result-equivalence oracle (with a FILTER-capable evaluator) is in
         // tests/branch_aware_emit.rs. [OPUS-4.8] sq-sg542
-        let query = q(&format!("{PRE} SELECT ?x WHERE {{ ?x :p1|:p2 ?y FILTER(?x != :Bad) }}"));
+        let query = q(&format!(
+            "{PRE} SELECT ?x WHERE {{ ?x :p1|:p2 ?y FILTER(?x != :Bad) }}"
+        ));
         let r = rewrite(&query, &fixture_tbox()).expect("alternation + FILTER must now rewrite");
         assert!(
             r.query.to_string().to_uppercase().contains("FILTER"),

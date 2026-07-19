@@ -14,7 +14,9 @@ use std::path::PathBuf;
 pub const BASE: &str = "urn:x-base:default";
 
 pub fn fixture_dir(sub: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(sub)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(sub)
 }
 
 /// Sorted fixture stems (`*.shaclc`) in a fixtures subdirectory.
@@ -80,7 +82,12 @@ fn subj(t: &Triple) -> Term {
 }
 
 fn triple_key(t: &Triple, bmap: Option<&BTreeMap<String, String>>) -> String {
-    format!("{} <{}> {}", term_key(&subj(t), bmap), t.predicate.as_str(), term_key(&t.object, bmap))
+    format!(
+        "{} <{}> {}",
+        term_key(&subj(t), bmap),
+        t.predicate.as_str(),
+        term_key(&t.object, bmap)
+    )
 }
 
 fn collect_bnodes_term(t: &Term, out: &mut BTreeSet<String>) {
@@ -121,7 +128,12 @@ fn signature(triples: &[Triple], b: &str) -> String {
     parts.join("\n")
 }
 
-fn same_multiset(a: &[Triple], b: &[Triple], ma: Option<&BTreeMap<String, String>>, mb: Option<&BTreeMap<String, String>>) -> bool {
+fn same_multiset(
+    a: &[Triple],
+    b: &[Triple],
+    ma: Option<&BTreeMap<String, String>>,
+    mb: Option<&BTreeMap<String, String>>,
+) -> bool {
     let mut ka: Vec<String> = a.iter().map(|t| triple_key(t, ma)).collect();
     let mut kb: Vec<String> = b.iter().map(|t| triple_key(t, mb)).collect();
     ka.sort();
@@ -145,7 +157,11 @@ pub fn is_isomorphic(a: &[Triple], b: &[Triple]) -> bool {
     let mut cands: Vec<(String, Vec<String>)> = Vec::new();
     for x in &ba {
         let sx = signature(a, x);
-        let c: Vec<String> = bb.iter().filter(|y| signature(b, y) == sx).cloned().collect();
+        let c: Vec<String> = bb
+            .iter()
+            .filter(|y| signature(b, y) == sx)
+            .cloned()
+            .collect();
         if c.is_empty() {
             return false;
         }

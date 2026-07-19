@@ -99,7 +99,11 @@ async fn query_method_direct_body_json() {
         "application/sparql-results+json"
     );
     let body = resp.text().await.unwrap();
-    assert_eq!(json_row_count(&body), 3, "three subjects have ex:age: {body}");
+    assert_eq!(
+        json_row_count(&body),
+        3,
+        "three subjects have ex:age: {body}"
+    );
 }
 
 /// A `Content-Type` with parameters (`; charset=utf-8`) still matches — the server strips
@@ -302,8 +306,14 @@ async fn query_method_default_graph_uri_from_url() {
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
     assert_eq!(json_row_count(&body), 1);
-    assert!(body.contains("http://ex/in_g1"), "expected g1's triple: {body}");
-    assert!(!body.contains("in_default"), "store default graph must drop out: {body}");
+    assert!(
+        body.contains("http://ex/in_g1"),
+        "expected g1's triple: {body}"
+    );
+    assert!(
+        !body.contains("in_default"),
+        "store default graph must drop out: {body}"
+    );
 }
 
 /// The dataset params are read from the URL query string even for the url-encoded FORM body

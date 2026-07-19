@@ -104,7 +104,10 @@ fn get_varint_checked(buf: &[u8], pos: &mut usize) -> Option<u64> {
 enum Blocks {
     Owned(Vec<u8>),
     #[cfg(feature = "mmap")]
-    Mapped { map: memmap2::Mmap, off: usize },
+    Mapped {
+        map: memmap2::Mmap,
+        off: usize,
+    },
 }
 
 impl Blocks {
@@ -565,7 +568,12 @@ impl CompressedPerm {
     /// the lazy out-of-core mode.
     #[cfg(feature = "mmap")]
     pub fn from_mmap(map: memmap2::Mmap) -> std::io::Result<Self> {
-        let bad = |m: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("compressed perm: {m}"));
+        let bad = |m: &str| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("compressed perm: {m}"),
+            )
+        };
         let b: &[u8] = &map;
         if b.len() < 32 {
             return Err(bad("missing FILE_MAGIC header"));
@@ -599,10 +607,17 @@ impl CompressedPerm {
         // `n_blocks` is bounded by the actual file length. This also caps the
         // `Vec::with_capacity` below, so a hostile `n_blocks` cannot trigger a huge alloc.
         let n_blocks = usize::try_from(n_blocks).map_err(|_| bad("n_blocks exceeds usize"))?;
-        let blocks_len = usize::try_from(blocks_len).map_err(|_| bad("blocks_len exceeds usize"))?;
-        let dir_bytes = n_blocks.checked_mul(16).ok_or_else(|| bad("directory size overflows"))?;
-        let dir_end = dir_bytes.checked_add(32).ok_or_else(|| bad("directory end overflows"))?;
-        let total = dir_end.checked_add(blocks_len).ok_or_else(|| bad("file size overflows"))?;
+        let blocks_len =
+            usize::try_from(blocks_len).map_err(|_| bad("blocks_len exceeds usize"))?;
+        let dir_bytes = n_blocks
+            .checked_mul(16)
+            .ok_or_else(|| bad("directory size overflows"))?;
+        let dir_end = dir_bytes
+            .checked_add(32)
+            .ok_or_else(|| bad("directory end overflows"))?;
+        let total = dir_end
+            .checked_add(blocks_len)
+            .ok_or_else(|| bad("file size overflows"))?;
         if b.len() != total {
             return Err(bad("length does not match header"));
         }
@@ -616,7 +631,9 @@ impl CompressedPerm {
             // proves the block at each offset decodes fully in-bounds.
             let off = rd32(e + 12);
             if off as usize >= blocks_len {
-                return Err(bad("a directory block offset is past the end of the block stream"));
+                return Err(bad(
+                    "a directory block offset is past the end of the block stream",
+                ));
             }
             dir.push(([rd32(e), rd32(e + 4), rd32(e + 8)], off));
         }
@@ -656,12 +673,17 @@ impl CompressedPerm {
         let mut total_rows: usize = 0;
         for &(_, off) in &self.dir {
             let mut pos = off as usize;
-            self.validate_one_block(buf, &mut pos).map(|rows| total_rows += rows).ok_or_else(|| {
-                "a compressed block is truncated or has a malformed varint".to_string()
-            })?;
+            self.validate_one_block(buf, &mut pos)
+                .map(|rows| total_rows += rows)
+                .ok_or_else(|| {
+                    "a compressed block is truncated or has a malformed varint".to_string()
+                })?;
         }
         if total_rows != self.len {
-            return Err(format!("decoded {total_rows} rows but header declares {}", self.len));
+            return Err(format!(
+                "decoded {total_rows} rows but header declares {}",
+                self.len
+            ));
         }
         Ok(())
     }
@@ -712,7 +734,10 @@ impl CompressedPerm {
         // [OPUS-4.8] sq-wihld — the OPT-IN per-block Bloom directory (when built) is resident
         // heap; count it so `heap_bytes` stays honest for the memory-budget paths.
         #[cfg(feature = "block-bloom")]
-        let bloom = self.bloom.as_ref().map_or(0, block_bloom::BlockBloomDir::heap_bytes);
+        let bloom = self
+            .bloom
+            .as_ref()
+            .map_or(0, block_bloom::BlockBloomDir::heap_bytes);
         #[cfg(not(feature = "block-bloom"))]
         let bloom = 0;
         self.dir.capacity() * std::mem::size_of::<([Id; 3], u32)>() + stream + bloom
@@ -749,12 +774,24 @@ impl CompressedPerm {
             let cur = if d0 == 0 {
                 let d1 = get_varint(buf, &mut pos) as Id;
                 if d1 == 0 {
-                    [prev[0], prev[1], prev[2].wrapping_add(get_varint(buf, &mut pos) as Id)]
+                    [
+                        prev[0],
+                        prev[1],
+                        prev[2].wrapping_add(get_varint(buf, &mut pos) as Id),
+                    ]
                 } else {
-                    [prev[0], prev[1].wrapping_add(d1), get_varint(buf, &mut pos) as Id]
+                    [
+                        prev[0],
+                        prev[1].wrapping_add(d1),
+                        get_varint(buf, &mut pos) as Id,
+                    ]
                 }
             } else {
-                [prev[0].wrapping_add(d0), get_varint(buf, &mut pos) as Id, get_varint(buf, &mut pos) as Id]
+                [
+                    prev[0].wrapping_add(d0),
+                    get_varint(buf, &mut pos) as Id,
+                    get_varint(buf, &mut pos) as Id,
+                ]
             };
             out.push(cur);
             prev = cur;
@@ -785,7 +822,11 @@ impl CompressedPerm {
             let cur = if d0 == 0 {
                 let d1 = get_varint(buf, &mut pos) as Id;
                 if d1 == 0 {
-                    [prev[0], prev[1], prev[2].wrapping_add(get_varint(buf, &mut pos) as Id)]
+                    [
+                        prev[0],
+                        prev[1],
+                        prev[2].wrapping_add(get_varint(buf, &mut pos) as Id),
+                    ]
                 } else {
                     // Invert the frame-of-reference: absolute col2 = first_col2 + signed offset.
                     let off2 = get_zigzag_varint(buf, &mut pos);
@@ -793,7 +834,11 @@ impl CompressedPerm {
                     [prev[0], prev[1].wrapping_add(d1), abs]
                 }
             } else {
-                [prev[0].wrapping_add(d0), get_varint(buf, &mut pos) as Id, get_varint(buf, &mut pos) as Id]
+                [
+                    prev[0].wrapping_add(d0),
+                    get_varint(buf, &mut pos) as Id,
+                    get_varint(buf, &mut pos) as Id,
+                ]
             };
             out.push(cur);
             prev = cur;
@@ -817,8 +862,15 @@ impl CompressedPerm {
         if self.dir.is_empty() || lo > hi {
             return 0;
         }
-        let first = self.dir.partition_point(|&(k, _)| k <= lo).saturating_sub(1);
-        let last = self.dir.partition_point(|&(k, _)| k <= hi).saturating_sub(1).max(first);
+        let first = self
+            .dir
+            .partition_point(|&(k, _)| k <= lo)
+            .saturating_sub(1);
+        let last = self
+            .dir
+            .partition_point(|&(k, _)| k <= hi)
+            .saturating_sub(1)
+            .max(first);
         let mut buf = Vec::with_capacity(BLOCK);
         self.decode_block_at(self.dir[first].1 as usize, &mut buf);
         if first == last {
@@ -843,9 +895,15 @@ impl CompressedPerm {
         }
         // First block whose first-key could contain `lo`: the last block with first-key
         // <= lo (a key in [lo,hi] could start partway into that block).
-        let first = self.dir.partition_point(|&(k, _)| k <= lo).saturating_sub(1);
+        let first = self
+            .dir
+            .partition_point(|&(k, _)| k <= lo)
+            .saturating_sub(1);
         // Last block whose first-key <= hi (blocks after it are entirely > hi).
-        let last = self.dir.partition_point(|&(k, _)| k <= hi).saturating_sub(1);
+        let last = self
+            .dir
+            .partition_point(|&(k, _)| k <= hi)
+            .saturating_sub(1);
         let last = last.max(first);
 
         // [OPUS-4.8] sq-wihld — when the LEADING column is equality-bound (`lo[0] == hi[0]`,
@@ -901,11 +959,23 @@ impl CompressedPerm {
         if self.dir.is_empty() {
             return (0, 0);
         }
-        let first = self.dir.partition_point(|&(k, _)| k <= lo).saturating_sub(1);
-        let last = self.dir.partition_point(|&(k, _)| k <= hi).saturating_sub(1).max(first);
+        let first = self
+            .dir
+            .partition_point(|&(k, _)| k <= lo)
+            .saturating_sub(1);
+        let last = self
+            .dir
+            .partition_point(|&(k, _)| k <= hi)
+            .saturating_sub(1)
+            .max(first);
         let candidates = last - first + 1;
-        let bloom = self.bloom.as_ref().expect("bloom_skip_stats requires a built filter");
-        let skipped = (first..=last).filter(|&b| !bloom.maybe_contains(b, key)).count();
+        let bloom = self
+            .bloom
+            .as_ref()
+            .expect("bloom_skip_stats requires a built filter");
+        let skipped = (first..=last)
+            .filter(|&b| !bloom.maybe_contains(b, key))
+            .count();
         (candidates, skipped)
     }
 }
@@ -1015,7 +1085,10 @@ impl CompressedPermWriter {
             Format::V1 => encode_block(&self.cur, &mut self.scratch),
             Format::V2 => encode_block_v2(&self.cur, &mut self.scratch),
         }
-        let body = self.body.as_mut().expect("body present until finish() consumes the writer");
+        let body = self
+            .body
+            .as_mut()
+            .expect("body present until finish() consumes the writer");
         std::io::Write::write_all(body, &self.scratch)?;
         self.blocks_len += self.scratch.len() as u64;
         self.cur.clear();
@@ -1036,7 +1109,10 @@ impl CompressedPermWriter {
         // Flush and CLOSE the block write handle before re-opening it for reading (portable;
         // avoids a concurrent write+read handle to the same file). `take()` drops the inner
         // `File` here rather than at end of scope.
-        let mut body = self.body.take().expect("body present until finish() consumes the writer");
+        let mut body = self
+            .body
+            .take()
+            .expect("body present until finish() consumes the writer");
         std::io::Write::flush(&mut body)?;
         drop(body);
         if self.len == 0 {
@@ -1133,7 +1209,13 @@ mod byte_attribution {
 
     impl FieldBytes {
         fn total(&self) -> u64 {
-            self.count + self.first_row_abs + self.reset_d0 + self.reset_d1 + self.d0 + self.d1 + self.d2
+            self.count
+                + self.first_row_abs
+                + self.reset_d0
+                + self.reset_d1
+                + self.d0
+                + self.d1
+                + self.d2
         }
 
         fn add(&mut self, o: &FieldBytes) {
@@ -1244,8 +1326,10 @@ mod byte_attribution {
     /// Sorts a copy of `triples` into `perm`'s column order (the exact rows
     /// `from_triples_compressed` would hand `CompressedPerm::encode` for that permutation).
     fn perm_rows(triples: &[[Id; 3]], order: [usize; 3]) -> Vec<[Id; 3]> {
-        let mut rows: Vec<[Id; 3]> =
-            triples.iter().map(|t| [t[order[0]], t[order[1]], t[order[2]]]).collect();
+        let mut rows: Vec<[Id; 3]> = triples
+            .iter()
+            .map(|t| [t[order[0]], t[order[1]], t[order[2]]])
+            .collect();
         rows.sort_unstable();
         rows.dedup();
         rows
@@ -1307,18 +1391,33 @@ mod byte_attribution {
             ("5M-term", 50_000_000, 5_000_000),
         ];
 
-        println!("\n===== sq-7d3dj.32.2.4 per-field byte attribution (NON-canonical work-box) =====");
+        println!(
+            "\n===== sq-7d3dj.32.2.4 per-field byte attribution (NON-canonical work-box) ====="
+        );
         for (label, want_triples, n_terms) in regimes {
             let triples = synth_watdiv(want_triples, n_terms, 0x5EED);
             let n = triples.len() as f64;
             let bits = (64 - (n_terms).leading_zeros()) as usize;
             println!(
                 "\n--- regime {} : {} distinct triples, {} terms (~{} term-space bits) ---",
-                label, triples.len(), n_terms, bits
+                label,
+                triples.len(),
+                n_terms,
+                bits
             );
             println!(
                 "{:<5} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>10} {:>9}",
-                "perm", "count", "first", "reset_d0", "reset_d1", "d0", "d1", "d2", "dir", "blk_tot", "B/triple"
+                "perm",
+                "count",
+                "first",
+                "reset_d0",
+                "reset_d1",
+                "d0",
+                "d1",
+                "d2",
+                "dir",
+                "blk_tot",
+                "B/triple"
             );
 
             let mut agg = FieldBytes::default();
@@ -1331,7 +1430,17 @@ mod byte_attribution {
                 let bpt = (blk_tot + dir) as f64 / rows.len().max(1) as f64;
                 println!(
                     "{:<5} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>10} {:>9.3}",
-                    name, fb.count, fb.first_row_abs, fb.reset_d0, fb.reset_d1, fb.d0, fb.d1, fb.d2, dir, blk_tot, bpt
+                    name,
+                    fb.count,
+                    fb.first_row_abs,
+                    fb.reset_d0,
+                    fb.reset_d1,
+                    fb.d0,
+                    fb.d1,
+                    fb.d2,
+                    dir,
+                    blk_tot,
+                    bpt
                 );
                 agg.add(&fb);
                 agg_dir += dir;
@@ -1412,8 +1521,14 @@ mod byte_attribution {
         const N: usize = 4_000_000;
         println!("\n===== sq-7d3dj.32.2.4 H1/H2/H3 discriminator (NON-canonical work-box) =====");
 
-        println!("\n--- Sweep A: fixed {} triples, vary term-space bits (SKEWED ids) ---", N);
-        println!("{:<10} {:>6} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>10}", "terms", "bits", "reset_d0", "reset_d1", "d0", "d1", "d2", "first", "B/triple");
+        println!(
+            "\n--- Sweep A: fixed {} triples, vary term-space bits (SKEWED ids) ---",
+            N
+        );
+        println!(
+            "{:<10} {:>6} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>10}",
+            "terms", "bits", "reset_d0", "reset_d1", "d0", "d1", "d2", "first", "B/triple"
+        );
         for &n_terms in &[250_000u64, 500_000, 1_000_000, 2_000_000, 4_000_000] {
             let triples = synth_watdiv(N, n_terms, 0xC0FFEE);
             let n = triples.len().max(1) as f64;
@@ -1422,12 +1537,26 @@ mod byte_attribution {
             let pt = |b: u64| b as f64 / n;
             println!(
                 "{:<10} {:>6} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>10.3}",
-                n_terms, bits, pt(agg.reset_d0), pt(agg.reset_d1), pt(agg.d0), pt(agg.d1), pt(agg.d2), pt(agg.first_row_abs), pt(agg.total() + dir)
+                n_terms,
+                bits,
+                pt(agg.reset_d0),
+                pt(agg.reset_d1),
+                pt(agg.d0),
+                pt(agg.d1),
+                pt(agg.d2),
+                pt(agg.first_row_abs),
+                pt(agg.total() + dir)
             );
         }
 
-        println!("\n--- Sweep B: fixed {} triples, 4M terms, SKEWED vs UNIFORM ids ---", N);
-        println!("{:<10} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>10}", "assign", "reset_d0", "reset_d1", "d0", "d1", "d2", "first", "B/triple");
+        println!(
+            "\n--- Sweep B: fixed {} triples, 4M terms, SKEWED vs UNIFORM ids ---",
+            N
+        );
+        println!(
+            "{:<10} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>10}",
+            "assign", "reset_d0", "reset_d1", "d0", "d1", "d2", "first", "B/triple"
+        );
         for (label, triples) in [
             ("skewed", synth_watdiv(N, 4_000_000, 0xC0FFEE)),
             ("uniform", synth_uniform(N, 4_000_000, 0xC0FFEE)),
@@ -1437,7 +1566,14 @@ mod byte_attribution {
             let pt = |b: u64| b as f64 / n;
             println!(
                 "{:<10} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>9.3} {:>10.3}",
-                label, pt(agg.reset_d0), pt(agg.reset_d1), pt(agg.d0), pt(agg.d1), pt(agg.d2), pt(agg.first_row_abs), pt(agg.total() + dir)
+                label,
+                pt(agg.reset_d0),
+                pt(agg.reset_d1),
+                pt(agg.d0),
+                pt(agg.d1),
+                pt(agg.d2),
+                pt(agg.first_row_abs),
+                pt(agg.total() + dir)
             );
         }
         println!("\n===== end discriminator =====\n");
@@ -1502,7 +1638,11 @@ mod tests {
             (rows[rows.len() - 1], rows[rows.len() - 1]),
         ];
         for &(lo, hi) in cases {
-            assert_eq!(c.range(lo, hi), raw_range(lo, hi), "range mismatch for {lo:?}..={hi:?}");
+            assert_eq!(
+                c.range(lo, hi),
+                raw_range(lo, hi),
+                "range mismatch for {lo:?}..={hi:?}"
+            );
         }
     }
 
@@ -1518,7 +1658,10 @@ mod tests {
     fn count_range_equals_materialised_range_len() {
         let rows = sample(5000);
         let c = CompressedPerm::encode(&rows);
-        assert!(rows.len() > 3 * BLOCK, "need several blocks to exercise the interior arithmetic");
+        assert!(
+            rows.len() > 3 * BLOCK,
+            "need several blocks to exercise the interior arithmetic"
+        );
 
         // Reference count: the length of the materialised range (itself proven correct above).
         let want = |lo: [Id; 3], hi: [Id; 3]| -> usize { c.range(lo, hi).len() };
@@ -1542,18 +1685,34 @@ mod tests {
             (rows[BLOCK - 1], rows[BLOCK]),
         ];
         for &(lo, hi) in cases {
-            assert_eq!(c.count_range(lo, hi), want(lo, hi), "count_range != range().len() for {lo:?}..={hi:?}");
+            assert_eq!(
+                c.count_range(lo, hi),
+                want(lo, hi),
+                "count_range != range().len() for {lo:?}..={hi:?}"
+            );
         }
 
         // An inverted range (lo > hi) and an empty permutation both count 0.
-        assert_eq!(c.count_range([10, 0, 0], [1, 0, 0]), 0, "inverted range counts 0");
+        assert_eq!(
+            c.count_range([10, 0, 0], [1, 0, 0]),
+            0,
+            "inverted range counts 0"
+        );
         let empty = CompressedPerm::encode(&[]);
-        assert_eq!(empty.count_range([Id::MIN; 3], [Id::MAX; 3]), 0, "empty perm counts 0");
+        assert_eq!(
+            empty.count_range([Id::MIN; 3], [Id::MAX; 3]),
+            0,
+            "empty perm counts 0"
+        );
 
         // Every single-row range over the whole permutation counts exactly 1 (each row is
         // present once), which independently pins the boundary-block partition_point logic.
         for &r in &rows {
-            assert_eq!(c.count_range(r, r), 1, "each present row counts exactly once: {r:?}");
+            assert_eq!(
+                c.count_range(r, r),
+                1,
+                "each present row counts exactly once: {r:?}"
+            );
         }
     }
 
@@ -1581,17 +1740,27 @@ mod tests {
             // The block side file must be cleaned up by finish() in every case.
             let mut side = out.as_os_str().to_owned();
             side.push(".blocks");
-            assert!(!std::path::Path::new(&side).exists(), "block side file leaked at n={n}");
+            assert!(
+                !std::path::Path::new(&side).exists(),
+                "block side file leaked at n={n}"
+            );
 
             if rows.is_empty() {
-                assert!(got.is_empty(), "empty perm must be a zero-byte file, got {} bytes", got.len());
+                assert!(
+                    got.is_empty(),
+                    "empty perm must be a zero-byte file, got {} bytes",
+                    got.len()
+                );
                 continue;
             }
 
             // Reference: in-RAM encode then write_to a byte buffer — must match exactly.
             let mut want = Vec::new();
             CompressedPerm::encode(&rows).write_to(&mut want).unwrap();
-            assert_eq!(got, want, "stream vs encode+write_to byte mismatch at n={n}");
+            assert_eq!(
+                got, want,
+                "stream vs encode+write_to byte mismatch at n={n}"
+            );
 
             // And it must round-trip back through from_mmap to the same rows.
             let f = std::fs::File::open(&out).unwrap();
@@ -1648,12 +1817,18 @@ mod tests {
     #[test]
     fn bloom_range_equals_binary_search_and_skips_blocks() {
         let rows = high_ndv_sample(8000);
-        assert!(rows.len() > 4 * BLOCK, "need many blocks to exercise overlap + skipping");
+        assert!(
+            rows.len() > 4 * BLOCK,
+            "need many blocks to exercise overlap + skipping"
+        );
         let c = CompressedPerm::encode(&rows);
 
         // The density gate must admit this high-NDV leading column, or the skip path is never
         // reached and the test is vacuous.
-        assert!(c.has_bloom(), "high-NDV leading column should get a Bloom directory");
+        assert!(
+            c.has_bloom(),
+            "high-NDV leading column should get a Bloom directory"
+        );
 
         // Feature-OFF oracle: a raw binary-search range over the sorted rows (no Bloom).
         let raw_range = |lo: [Id; 3], hi: [Id; 3]| -> Vec<[Id; 3]> {
@@ -1673,20 +1848,31 @@ mod tests {
         for &k in &present {
             let lo = [k, Id::MIN, Id::MIN];
             let hi = [k, Id::MAX, Id::MAX];
-            assert_eq!(c.range(lo, hi), raw_range(lo, hi), "present key {k} range mismatch");
+            assert_eq!(
+                c.range(lo, hi),
+                raw_range(lo, hi),
+                "present key {k} range mismatch"
+            );
             let (cand, skip) = c.bloom_skip_stats(k);
             total_candidates += cand;
             total_skipped += skip;
             // A present key must NEVER be skipped in the block(s) that hold it: the materialised
             // range is non-empty, so at least one candidate block survived the filter.
-            assert!(cand > skip, "present key {k} had all candidate blocks skipped");
+            assert!(
+                cand > skip,
+                "present key {k} had all candidate blocks skipped"
+            );
         }
         // Absent keys interleaved through and beyond the domain: results are empty, and these
         // are where the Bloom earns its keep (definite-absent → skip without decode).
         for k in (1..=max_present + 16).step_by(7) {
             let lo = [k, Id::MIN, Id::MIN];
             let hi = [k, Id::MAX, Id::MAX];
-            assert_eq!(c.range(lo, hi), raw_range(lo, hi), "absent/odd key {k} range mismatch");
+            assert_eq!(
+                c.range(lo, hi),
+                raw_range(lo, hi),
+                "absent/odd key {k} range mismatch"
+            );
         }
 
         // The optimisation must do REAL work on this high-NDV column: across the present keys
@@ -1726,7 +1912,11 @@ mod tests {
             ([Id::MAX, 0, 0], [Id::MIN, 0, 0]),
         ];
         for &(lo, hi) in cases {
-            assert_eq!(c.range(lo, hi), raw_range(lo, hi), "non-equality shape {lo:?}..={hi:?}");
+            assert_eq!(
+                c.range(lo, hi),
+                raw_range(lo, hi),
+                "non-equality shape {lo:?}..={hi:?}"
+            );
         }
     }
 
@@ -1785,12 +1975,19 @@ mod tests {
             // write_to picks the SPQCPRM2 magic (file_magic V2 arm) then from_mmap auto-detects it.
             let mut bytes = Vec::new();
             c.write_to(&mut bytes).unwrap();
-            assert_eq!(&bytes[..8], &FILE_MAGIC_V2, "V2 write_to must emit SPQCPRM2 magic at n={n}");
+            assert_eq!(
+                &bytes[..8],
+                &FILE_MAGIC_V2,
+                "V2 write_to must emit SPQCPRM2 magic at n={n}"
+            );
             let dir = std::env::temp_dir().join(format!(
                 "sparq-v2reader-{}-{}-{}",
                 std::process::id(),
                 n,
-                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
             ));
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join("perm.bin");
@@ -1799,8 +1996,16 @@ mod tests {
             // SAFETY: we own and just wrote this file; nothing else mutates it during the test.
             let map = unsafe { memmap2::Mmap::map(&file).unwrap() };
             let opened = CompressedPerm::from_mmap(map).unwrap();
-            assert_eq!(opened.format, Format::V2, "from_mmap must auto-detect V2 at n={n}");
-            assert_eq!(opened.decode_all(), rows, "V2 mmap decode diverged at n={n}");
+            assert_eq!(
+                opened.format,
+                Format::V2,
+                "from_mmap must auto-detect V2 at n={n}"
+            );
+            assert_eq!(
+                opened.decode_all(),
+                rows,
+                "V2 mmap decode diverged at n={n}"
+            );
             std::fs::remove_dir_all(&dir).ok();
         }
     }
@@ -1848,13 +2053,21 @@ mod tests {
             let c = CompressedPerm::encode_v2(&rows);
             assert_eq!(c.len(), rows.len(), "v2 len mismatch at n={n}");
             assert_eq!(c.decode_all(), rows, "v2 decode_all mismatch at n={n}");
-            assert_eq!(c.format, Format::V2, "encode_v2 must produce a V2 perm at n={n}");
+            assert_eq!(
+                c.format,
+                Format::V2,
+                "encode_v2 must produce a V2 perm at n={n}"
+            );
         }
         // Also round-trip the existing clustered/sparse `sample` shape so the FoR is proven on
         // BOTH object distributions (clustered AND sparse), not just its favourable case.
         for &n in &[0usize, 1, 129, 5000] {
             let rows = sample(n);
-            assert_eq!(CompressedPerm::encode_v2(&rows).decode_all(), rows, "v2 roundtrip on sample n={n}");
+            assert_eq!(
+                CompressedPerm::encode_v2(&rows).decode_all(),
+                rows,
+                "v2 roundtrip on sample n={n}"
+            );
         }
     }
 
@@ -1870,7 +2083,11 @@ mod tests {
             let rows = clustered_col2_sample(n);
             let v1 = CompressedPerm::encode(&rows);
             let v2 = CompressedPerm::encode_v2(&rows);
-            assert_eq!(v1.decode_all(), v2.decode_all(), "v1/v2 decode divergence at n={n}");
+            assert_eq!(
+                v1.decode_all(),
+                v2.decode_all(),
+                "v1/v2 decode divergence at n={n}"
+            );
             assert_eq!(v1.decode_all(), rows, "v1 decode != input at n={n}");
             assert_eq!(v2.decode_all(), rows, "v2 decode != input at n={n}");
         }
@@ -1884,7 +2101,10 @@ mod tests {
             encode_block(chunk, &mut b1);
             encode_block_v2(chunk, &mut b2);
         }
-        assert_ne!(b1, b2, "v1 and v2 block streams identical — the reset_d1 FoR path never fired");
+        assert_ne!(
+            b1, b2,
+            "v1 and v2 block streams identical — the reset_d1 FoR path never fired"
+        );
     }
 
     /// [FABLE-5] sq-7d3dj.32.2.6 — a V2 perm's `range` must return EXACTLY the raw binary-search
@@ -1902,14 +2122,24 @@ mod tests {
         };
         let cases: &[([Id; 3], [Id; 3])] = &[
             ([Id::MIN; 3], [Id::MAX; 3]),
-            ([rows[rows.len() / 4][0], Id::MIN, Id::MIN], [rows[rows.len() / 4][0], Id::MAX, Id::MAX]),
-            ([99_999_999, Id::MIN, Id::MIN], [99_999_999, Id::MAX, Id::MAX]),
+            (
+                [rows[rows.len() / 4][0], Id::MIN, Id::MIN],
+                [rows[rows.len() / 4][0], Id::MAX, Id::MAX],
+            ),
+            (
+                [99_999_999, Id::MIN, Id::MIN],
+                [99_999_999, Id::MAX, Id::MAX],
+            ),
             (rows[0], rows[0]),
             (rows[rows.len() / 2], rows[rows.len() / 2]),
             (rows[rows.len() - 1], rows[rows.len() - 1]),
         ];
         for &(lo, hi) in cases {
-            assert_eq!(c.range(lo, hi), raw_range(lo, hi), "v2 range mismatch for {lo:?}..={hi:?}");
+            assert_eq!(
+                c.range(lo, hi),
+                raw_range(lo, hi),
+                "v2 range mismatch for {lo:?}..={hi:?}"
+            );
         }
     }
 
@@ -1919,13 +2149,35 @@ mod tests {
     #[cfg(feature = "spqcprm2")]
     #[test]
     fn zigzag_varint_roundtrips() {
-        let cases = [0i64, 1, -1, 2, -2, 127, -128, 300, -300, i32::MAX as i64, i32::MIN as i64, i64::MAX, i64::MIN];
+        let cases = [
+            0i64,
+            1,
+            -1,
+            2,
+            -2,
+            127,
+            -128,
+            300,
+            -300,
+            i32::MAX as i64,
+            i32::MIN as i64,
+            i64::MAX,
+            i64::MIN,
+        ];
         for &x in &cases {
             let mut buf = Vec::new();
             put_zigzag_varint(&mut buf, x);
             let mut pos = 0;
-            assert_eq!(get_zigzag_varint(&buf, &mut pos), x, "zigzag roundtrip failed for {x}");
-            assert_eq!(pos, buf.len(), "zigzag reader did not consume all bytes for {x}");
+            assert_eq!(
+                get_zigzag_varint(&buf, &mut pos),
+                x,
+                "zigzag roundtrip failed for {x}"
+            );
+            assert_eq!(
+                pos,
+                buf.len(),
+                "zigzag reader did not consume all bytes for {x}"
+            );
         }
     }
 
@@ -1952,7 +2204,10 @@ mod tests {
             "sparq-spqcprm2-mig-{}-{}-{}",
             std::process::id(),
             n,
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(&p).unwrap();
         p
@@ -1979,17 +2234,37 @@ mod tests {
             }
             // On disk the file MUST start with the V2 magic, never the V1 magic.
             let head = std::fs::read(&path).unwrap();
-            assert_eq!(&head[..8], &FILE_MAGIC_V2, "V2 write_to must emit the SPQCPRM2 magic (n={n})");
-            assert_ne!(&head[..8], &FILE_MAGIC, "V2 file must not carry the V1 magic (n={n})");
+            assert_eq!(
+                &head[..8],
+                &FILE_MAGIC_V2,
+                "V2 write_to must emit the SPQCPRM2 magic (n={n})"
+            );
+            assert_ne!(
+                &head[..8],
+                &FILE_MAGIC,
+                "V2 file must not carry the V1 magic (n={n})"
+            );
             // Re-open through the real mmap loader; it must auto-detect V2 and decode identically.
             let file = std::fs::File::open(&path).unwrap();
             // SAFETY: we own and just wrote this file; nothing else mutates it during the test.
             let map = unsafe { memmap2::Mmap::map(&file).unwrap() };
             let opened = CompressedPerm::from_mmap(map).unwrap();
-            assert_eq!(opened.format, Format::V2, "from_mmap must auto-detect V2 (n={n})");
-            assert_eq!(opened.decode_all(), rows, "V2 write→open→decode diverged (n={n})");
+            assert_eq!(
+                opened.format,
+                Format::V2,
+                "from_mmap must auto-detect V2 (n={n})"
+            );
+            assert_eq!(
+                opened.decode_all(),
+                rows,
+                "V2 write→open→decode diverged (n={n})"
+            );
             // Full random-access parity too.
-            assert_eq!(opened.range([Id::MIN; 3], [Id::MAX; 3]), rows, "V2 opened range diverged (n={n})");
+            assert_eq!(
+                opened.range([Id::MIN; 3], [Id::MAX; 3]),
+                rows,
+                "V2 opened range diverged (n={n})"
+            );
             std::fs::remove_dir_all(&dir).ok();
         }
     }
@@ -2010,13 +2285,21 @@ mod tests {
             assert_eq!(c.format, Format::V1);
             let mut bytes = Vec::new();
             c.write_to(&mut bytes).unwrap();
-            assert_eq!(&bytes[..8], &FILE_MAGIC, "V1 write_to must emit the SPQCPRM1 magic (n={n})");
+            assert_eq!(
+                &bytes[..8],
+                &FILE_MAGIC,
+                "V1 write_to must emit the SPQCPRM1 magic (n={n})"
+            );
             std::fs::write(&path, &bytes).unwrap();
             let file = std::fs::File::open(&path).unwrap();
             // SAFETY: we own and just wrote this file; nothing else mutates it during the test.
             let map = unsafe { memmap2::Mmap::map(&file).unwrap() };
             let opened = CompressedPerm::from_mmap(map).unwrap();
-            assert_eq!(opened.format, Format::V1, "a SPQCPRM1 file must open as V1 (n={n})");
+            assert_eq!(
+                opened.format,
+                Format::V1,
+                "a SPQCPRM1 file must open as V1 (n={n})"
+            );
             assert_eq!(opened.decode_all(), rows, "V1 decode diverged (n={n})");
             std::fs::remove_dir_all(&dir).ok();
         }
@@ -2041,9 +2324,14 @@ mod tests {
             w.finish(&streamed).unwrap();
             // In-RAM V2 reference bytes.
             let mut want = Vec::new();
-            CompressedPerm::encode_v2(&rows).write_to(&mut want).unwrap();
+            CompressedPerm::encode_v2(&rows)
+                .write_to(&mut want)
+                .unwrap();
             let got = std::fs::read(&streamed).unwrap();
-            assert_eq!(got, want, "streamed V2 bytes differ from encode_v2().write_to (n={n})");
+            assert_eq!(
+                got, want,
+                "streamed V2 bytes differ from encode_v2().write_to (n={n})"
+            );
             assert_eq!(&got[..8], &FILE_MAGIC_V2, "streamed V2 magic wrong (n={n})");
             std::fs::remove_dir_all(&dir).ok();
         }
@@ -2057,17 +2345,33 @@ mod tests {
     fn emit_format_config_gate_selects_v2() {
         let rows = clustered_col2_sample(500);
         // DEFAULT: no override, no env ⇒ V1.
-        assert_eq!(CompressedPerm::encode_emit(&rows).format, Format::V1, "default emit must be V1");
+        assert_eq!(
+            CompressedPerm::encode_emit(&rows).format,
+            Format::V1,
+            "default emit must be V1"
+        );
         // Opt in on this thread ⇒ V2, then restore.
         with_emit_format(EmitFormat::V2, || {
-            assert_eq!(CompressedPerm::encode_emit(&rows).format, Format::V2, "gate did not select V2");
+            assert_eq!(
+                CompressedPerm::encode_emit(&rows).format,
+                Format::V2,
+                "gate did not select V2"
+            );
             assert_eq!(emit_format(), Format::V2);
         });
         // Restored after the scope.
-        assert_eq!(CompressedPerm::encode_emit(&rows).format, Format::V1, "emit override leaked past scope");
+        assert_eq!(
+            CompressedPerm::encode_emit(&rows).format,
+            Format::V1,
+            "emit override leaked past scope"
+        );
         // The V2-emitted perm still round-trips to the exact rows.
         with_emit_format(EmitFormat::V2, || {
-            assert_eq!(CompressedPerm::encode_emit(&rows).decode_all(), rows, "V2 emit lost data");
+            assert_eq!(
+                CompressedPerm::encode_emit(&rows).decode_all(),
+                rows,
+                "V2 emit lost data"
+            );
         });
     }
 
@@ -2103,7 +2407,10 @@ mod tests {
                 // SAFETY: we own and just wrote this file; nothing else mutates it during the test.
                 let map = unsafe { memmap2::Mmap::map(&file).unwrap() };
                 let res = CompressedPerm::from_mmap(map);
-                assert!(res.is_err(), "corrupt magic @byte{i}^{xor:#x} silently accepted (must be a loud Err)");
+                assert!(
+                    res.is_err(),
+                    "corrupt magic @byte{i}^{xor:#x} silently accepted (must be a loud Err)"
+                );
             }
         }
 
@@ -2124,7 +2431,10 @@ mod tests {
         if let Ok(opened) = CompressedPerm::from_mmap(map) {
             assert_eq!(opened.format, Format::V2, "swapped magic must open as V2");
             let decoded = opened.decode_all();
-            assert_ne!(decoded, rows, "a V1 stream read as V2 must NOT decode to the same rows (reset_d1 present)");
+            assert_ne!(
+                decoded, rows,
+                "a V1 stream read as V2 must NOT decode to the same rows (reset_d1 present)"
+            );
         }
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -2139,17 +2449,25 @@ mod tests {
     #[ignore = "spike measurement: run explicitly with --ignored --nocapture (allocates hundreds of MB)"]
     fn v2_measure_bytes_per_triple() {
         let orders: [(&str, [usize; 3]); 6] = [
-            ("SPO", [0, 1, 2]), ("SOP", [0, 2, 1]), ("PSO", [1, 0, 2]),
-            ("POS", [1, 2, 0]), ("OSP", [2, 0, 1]), ("OPS", [2, 1, 0]),
+            ("SPO", [0, 1, 2]),
+            ("SOP", [0, 2, 1]),
+            ("PSO", [1, 0, 2]),
+            ("POS", [1, 2, 0]),
+            ("OSP", [2, 0, 1]),
+            ("OPS", [2, 1, 0]),
         ];
-        println!("\n===== sq-7d3dj.32.2.6 SPQCPRM1 vs SPQCPRM2 B/triple (NON-canonical work-box) =====");
+        println!(
+            "\n===== sq-7d3dj.32.2.6 SPQCPRM1 vs SPQCPRM2 B/triple (NON-canonical work-box) ====="
+        );
         for &n in &[1_000_000usize, 10_000_000] {
             let triples = clustered_col2_sample(n);
             let n_tri = triples.len().max(1) as f64;
             let (mut v1_bytes, mut v2_bytes) = (0u64, 0u64);
             for (_, order) in orders {
-                let mut rows: Vec<[Id; 3]> =
-                    triples.iter().map(|t| [t[order[0]], t[order[1]], t[order[2]]]).collect();
+                let mut rows: Vec<[Id; 3]> = triples
+                    .iter()
+                    .map(|t| [t[order[0]], t[order[1]], t[order[2]]])
+                    .collect();
                 rows.sort_unstable();
                 rows.dedup();
                 for chunk in rows.chunks(BLOCK) {

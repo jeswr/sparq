@@ -463,7 +463,7 @@ fn rewrite_bgp(
                      this build implements vec: vocabulary revision {})",
                     iri,
                     vocab::VOCAB_REVISION
-                ))
+                ));
             }
         }
     }

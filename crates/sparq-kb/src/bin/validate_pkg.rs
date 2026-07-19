@@ -22,7 +22,10 @@ fn main() {
     {
         let args: Vec<String> = env::args().collect();
         if args.len() < 2 {
-            eprintln!("usage: {} <ttl-file>", args.first().unwrap_or(&"validate-pkg".to_string()));
+            eprintln!(
+                "usage: {} <ttl-file>",
+                args.first().unwrap_or(&"validate-pkg".to_string())
+            );
             process::exit(1);
         }
 

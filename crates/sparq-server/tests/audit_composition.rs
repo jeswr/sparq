@@ -63,7 +63,8 @@ struct FieldVisitor<'a>(&'a mut HashMap<String, String>);
 
 impl Visit for FieldVisitor<'_> {
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.0.insert(field.name().to_string(), format!("{:?}", value));
+        self.0
+            .insert(field.name().to_string(), format!("{:?}", value));
     }
     fn record_str(&mut self, field: &Field, value: &str) {
         self.0.insert(field.name().to_string(), value.to_string());
@@ -158,8 +159,7 @@ async fn audit_log_and_access_audit_compose_consistently() {
         access_audit: Some(SinkTarget::File(audit_path.clone())),
         ..ServerConfig::default()
     };
-    let graph =
-        Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "ntriples").unwrap();
+    let graph = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "ntriples").unwrap();
     let app = router(AppState::with_config(graph, config));
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -196,7 +196,10 @@ async fn audit_log_and_access_audit_compose_consistently() {
     // "what was attempted" across the audit estate). Both must be non-empty.
     let log_fp = sparq_server::audit::query_fingerprint(SELECT);
     let aa_fp = sparq_server::access_audit::fingerprint(SELECT);
-    assert!(!log_fp.is_empty() && !aa_fp.is_empty(), "fingerprints are non-empty");
+    assert!(
+        !log_fp.is_empty() && !aa_fp.is_empty(),
+        "fingerprints are non-empty"
+    );
     assert_eq!(
         log_fp, aa_fp,
         "the two audit sinks must agree on the query fingerprint for the same query",
@@ -247,29 +250,58 @@ async fn audit_log_and_access_audit_compose_consistently() {
 
     // ---- CROSS-SINK AGREEMENT (the composition invariant) for the ALLOWED request ----
     assert_eq!(log_allowed.get("op"), "query");
-    assert_eq!(aa_allowed["action"], "query", "both sinks classify the read as a query");
+    assert_eq!(
+        aa_allowed["action"], "query",
+        "both sinks classify the read as a query"
+    );
     assert_eq!(log_allowed.get("status"), "200");
-    assert_eq!(aa_allowed["status"], 200, "both sinks record the enforced 200");
+    assert_eq!(
+        aa_allowed["status"], 200,
+        "both sinks record the enforced 200"
+    );
     assert_eq!(
         log_allowed.get("fingerprint"),
         aa_allowed["fingerprint"].as_str().unwrap(),
         "the allowed record's fingerprint must match across the two sinks",
     );
-    assert_eq!(log_allowed.get("fingerprint"), log_fp, "the SELECT's fingerprint");
+    assert_eq!(
+        log_allowed.get("fingerprint"),
+        log_fp,
+        "the SELECT's fingerprint"
+    );
     // Both sinks resolve the authed identity to the SAME token fingerprint, never the raw token.
     let log_actor = log_allowed.get("requester");
     let aa_actor = aa_allowed["actor"].as_str().unwrap();
-    assert!(log_actor.starts_with("token:"), "audit-log: token-fingerprint identity");
-    assert!(aa_actor.starts_with("token:"), "access-audit: token-fingerprint actor");
-    assert_eq!(log_actor, aa_actor, "both sinks agree on the authed actor identity");
-    assert!(!log_actor.contains(TOKEN) && !aa_actor.contains(TOKEN), "never the raw token");
+    assert!(
+        log_actor.starts_with("token:"),
+        "audit-log: token-fingerprint identity"
+    );
+    assert!(
+        aa_actor.starts_with("token:"),
+        "access-audit: token-fingerprint actor"
+    );
+    assert_eq!(
+        log_actor, aa_actor,
+        "both sinks agree on the authed actor identity"
+    );
+    assert!(
+        !log_actor.contains(TOKEN) && !aa_actor.contains(TOKEN),
+        "never the raw token"
+    );
 
     // ---- CROSS-SINK AGREEMENT for the DENIED request ----
     assert_eq!(log_denied.get("op"), "query");
     assert_eq!(aa_denied["action"], "query");
     assert_eq!(log_denied.get("status"), "401");
-    assert_eq!(aa_denied["status"], 401, "both sinks record the enforced 401");
-    assert_eq!(log_denied.get("requester"), "anonymous", "audit-log: anonymous");
+    assert_eq!(
+        aa_denied["status"], 401,
+        "both sinks record the enforced 401"
+    );
+    assert_eq!(
+        log_denied.get("requester"),
+        "anonymous",
+        "audit-log: anonymous"
+    );
     assert_eq!(aa_denied["actor"], "anonymous", "access-audit: anonymous");
     // The fingerprint of the attempted query is still recorded in BOTH on denial (operator sees
     // WHAT was attempted) — and it matches.

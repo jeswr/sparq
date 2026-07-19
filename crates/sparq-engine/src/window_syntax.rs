@@ -155,14 +155,24 @@ type OverSpec = (Vec<String>, Vec<OrderKey>, Option<WindowFrame>);
 enum WinFunc {
     Rank(RankFunc),
     /// A windowed aggregate `AGG(?of)`; the `?of` argument is a bare variable name.
-    Agg { agg: AggFunc, of: String },
+    Agg {
+        agg: AggFunc,
+        of: String,
+    },
     /// `LAG(?of[, n[, default]])` / `LEAD(…)` — the `?of` argument is a bare
     /// variable name, `offset` defaults to `1`, `default` is an optional constant
     /// RDF term (an unbound result when out of partition and no default is given).
     /// sq-hqhc.
-    Offset { lead: bool, of: String, offset: u64, default: Option<Term> },
+    Offset {
+        lead: bool,
+        of: String,
+        offset: u64,
+        default: Option<Term>,
+    },
     /// `NTILE(n)` — split the ordered partition into `n` near-equal buckets. sq-hqhc.
-    Ntile { buckets: u64 },
+    Ntile {
+        buckets: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,19 +259,38 @@ pub fn query_over_with_budget(
     for item in &plan.windows {
         let function = match &item.func {
             WinFunc::Rank(r) => r.to_window_function(),
-            WinFunc::Agg { agg, of } => {
-                WindowFunction::Aggregate { agg: agg.to_window_aggregate(), of: var(of)? }
-            }
-            WinFunc::Offset { lead: false, of, offset, default } => {
-                WindowFunction::Lag { of: var(of)?, offset: *offset, default: default.clone() }
-            }
-            WinFunc::Offset { lead: true, of, offset, default } => {
-                WindowFunction::Lead { of: var(of)?, offset: *offset, default: default.clone() }
-            }
+            WinFunc::Agg { agg, of } => WindowFunction::Aggregate {
+                agg: agg.to_window_aggregate(),
+                of: var(of)?,
+            },
+            WinFunc::Offset {
+                lead: false,
+                of,
+                offset,
+                default,
+            } => WindowFunction::Lag {
+                of: var(of)?,
+                offset: *offset,
+                default: default.clone(),
+            },
+            WinFunc::Offset {
+                lead: true,
+                of,
+                offset,
+                default,
+            } => WindowFunction::Lead {
+                of: var(of)?,
+                offset: *offset,
+                default: default.clone(),
+            },
             WinFunc::Ntile { buckets } => WindowFunction::Ntile { buckets: *buckets },
         };
         let spec = WindowSpec {
-            partition_by: item.partition_by.iter().map(|v| var(v)).collect::<Result<_, _>>()?,
+            partition_by: item
+                .partition_by
+                .iter()
+                .map(|v| var(v))
+                .collect::<Result<_, _>>()?,
             order_by: item
                 .order_by
                 .iter()
@@ -273,7 +302,10 @@ pub fn query_over_with_budget(
                             "inline OVER: internal error — unresolved ORDER BY expression".into(),
                         );
                     };
-                    Ok(SortKey { var: var(v)?, descending: key.descending })
+                    Ok(SortKey {
+                        var: var(v)?,
+                        descending: key.descending,
+                    })
                 })
                 .collect::<Result<_, String>>()?,
             function,
@@ -340,8 +372,9 @@ fn extract_windows(sparql: &str) -> Result<Option<RewritePlan>, String> {
     // optional DISTINCT/REDUCED) and the WHERE clause / the `{` that opens it.
     let (sel_start, proj_start) = find_select_projection_start(sparql)
         .ok_or("inline OVER: could not locate the SELECT projection")?;
-    let proj_end = find_projection_end(sparql, proj_start)
-        .ok_or("inline OVER: could not locate the end of the SELECT projection (missing WHERE/{)")?;
+    let proj_end = find_projection_end(sparql, proj_start).ok_or(
+        "inline OVER: could not locate the end of the SELECT projection (missing WHERE/{)",
+    )?;
 
     let projection = &sparql[proj_start..proj_end];
     let items = split_projection_items(projection)?;
@@ -434,7 +467,9 @@ fn extract_windows(sparql: &str) -> Result<Option<RewritePlan>, String> {
         inner_proj.insert(0, "*".to_string());
     } else {
         for h in &helper_vars {
-            let already = rewritten_items.iter().any(|it| projection_item_mentions_output(it, h));
+            let already = rewritten_items
+                .iter()
+                .any(|it| projection_item_mentions_output(it, h));
             if !already {
                 inner_proj.push(format!("?{h}"));
             }
@@ -453,7 +488,11 @@ fn extract_windows(sparql: &str) -> Result<Option<RewritePlan>, String> {
     let output_vars = if select_star { Vec::new() } else { output_vars };
 
     let _ = sel_start; // retained for clarity / future diagnostics
-    Ok(Some(RewritePlan { rewritten, windows, output_vars }))
+    Ok(Some(RewritePlan {
+        rewritten,
+        windows,
+        output_vars,
+    }))
 }
 
 /// Parses one trimmed projection item as a window expression, or `Ok(None)` if it
@@ -488,7 +527,9 @@ fn parse_window_item(item: &str, named: &NamedWindows) -> Result<Option<WindowIt
             .iter()
             .find(|(n, _)| *n == name)
             .map(|(_, spec)| spec.clone())
-            .ok_or_else(|| format!("inline OVER: window name {name:?} is not defined by any WINDOW clause"))?,
+            .ok_or_else(|| {
+                format!("inline OVER: window name {name:?} is not defined by any WINDOW clause")
+            })?,
     };
     // A frame is only meaningful on an aggregate; reject it on a ranking or offset
     // function so a typo is a clear error rather than silently ignored.
@@ -497,14 +538,22 @@ fn parse_window_item(item: &str, named: &NamedWindows) -> Result<Option<WindowIt
             "inline OVER: a window frame (ROWS/RANGE) is only valid on a windowed aggregate, not a ranking or offset (LAG/LEAD/NTILE) function".into(),
         );
     }
-    Ok(Some(WindowItem { func, partition_by, order_by, frame, out: alias }))
+    Ok(Some(WindowItem {
+        func,
+        partition_by,
+        order_by,
+        frame,
+        out: alias,
+    }))
 }
 
 /// Parses a window function head `FN ( args )` into a [`WinFunc`]: a ranking
 /// function (`ROW_NUMBER`/`RANK`/`DENSE_RANK` with empty `()`), or a windowed
 /// aggregate (`COUNT`/`SUM`/`AVG`/`MIN`/`MAX` of a single `?var`). sq-imj8.
 fn parse_window_func(head: &str) -> Result<WinFunc, String> {
-    let lp = head.find('(').ok_or("inline OVER: window function call needs '(...)'")?;
+    let lp = head
+        .find('(')
+        .ok_or("inline OVER: window function call needs '(...)'")?;
     let fname = head[..lp].trim();
     let args = head[lp..].trim();
     if let Some(rank) = RankFunc::parse(fname) {
@@ -518,11 +567,14 @@ fn parse_window_func(head: &str) -> Result<WinFunc, String> {
     if let Some(agg) = AggFunc::parse(fname) {
         // args := ( ?var ) — a single bare variable. DISTINCT and expression
         // arguments are not supported inline (use the programmatic API).
-        let arg_inner = strip_outer_parens(args)
-            .ok_or_else(|| format!("inline OVER: aggregate {fname} needs a parenthesised argument '( ?var )'"))?;
+        let arg_inner = strip_outer_parens(args).ok_or_else(|| {
+            format!("inline OVER: aggregate {fname} needs a parenthesised argument '( ?var )'")
+        })?;
         let arg = arg_inner.trim();
         if arg.is_empty() {
-            return Err(format!("inline OVER: aggregate {fname} needs a single ?var argument (got '()')"));
+            return Err(format!(
+                "inline OVER: aggregate {fname} needs a single ?var argument (got '()')"
+            ));
         }
         if arg.to_ascii_uppercase().starts_with("DISTINCT") {
             return Err(format!(
@@ -561,15 +613,25 @@ fn parse_window_func(head: &str) -> Result<WinFunc, String> {
 /// `1`); an optional third arg is a constant RDF term used when the source row falls
 /// outside the partition. sq-hqhc. [OPUS-4.8]
 fn parse_offset_func(fname: &str, lead: bool, args: &str) -> Result<WinFunc, String> {
-    let arg_inner = strip_outer_parens(args)
-        .ok_or_else(|| format!("inline OVER: {fname} needs a parenthesised argument list '( ?var[, n[, default]] )'"))?;
-    let pieces: Vec<String> =
-        split_top_level_commas(arg_inner).into_iter().map(|s| s.trim().to_string()).collect();
+    let arg_inner = strip_outer_parens(args).ok_or_else(|| {
+        format!(
+            "inline OVER: {fname} needs a parenthesised argument list '( ?var[, n[, default]] )'"
+        )
+    })?;
+    let pieces: Vec<String> = split_top_level_commas(arg_inner)
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .collect();
     if pieces.is_empty() || pieces[0].is_empty() {
-        return Err(format!("inline OVER: {fname} needs a ?var first argument (got '()')"));
+        return Err(format!(
+            "inline OVER: {fname} needs a ?var first argument (got '()')"
+        ));
     }
     if pieces.len() > 3 {
-        return Err(format!("inline OVER: {fname} takes at most 3 args (?var, offset, default), got {}", pieces.len()));
+        return Err(format!(
+            "inline OVER: {fname} takes at most 3 args (?var, offset, default), got {}",
+            pieces.len()
+        ));
     }
     let of = parse_single_var(&pieces[0]).map_err(|_| {
         format!("inline OVER: {fname}'s first argument must be a single ?var (an expression argument is not supported inline); got {:?}", pieces[0])
@@ -577,7 +639,9 @@ fn parse_offset_func(fname: &str, lead: bool, args: &str) -> Result<WinFunc, Str
     let offset: u64 = match pieces.get(1) {
         None => 1,
         Some(s) => s.parse().map_err(|_| {
-            format!("inline OVER: {fname}'s offset (2nd arg) must be a non-negative integer, got {s:?}")
+            format!(
+                "inline OVER: {fname}'s offset (2nd arg) must be a non-negative integer, got {s:?}"
+            )
         })?,
     };
     let default: Option<Term> = match pieces.get(2) {
@@ -586,7 +650,12 @@ fn parse_offset_func(fname: &str, lead: bool, args: &str) -> Result<WinFunc, Str
             format!("inline OVER: {fname}'s default (3rd arg) must be a constant RDF term ({e}); got {s:?}")
         })?),
     };
-    Ok(WinFunc::Offset { lead, of, offset, default })
+    Ok(WinFunc::Offset {
+        lead,
+        of,
+        offset,
+        default,
+    })
 }
 
 /// Parses a constant RDF term literal as it appears in an `OVER(…)` argument: an
@@ -628,7 +697,10 @@ fn parse_constant_term(s: &str) -> Result<Term, String> {
         }
         if let Some(dt) = tail.strip_prefix("^^") {
             let dt = dt.trim();
-            let iri = dt.strip_prefix('<').and_then(|r| r.strip_suffix('>')).ok_or("datatype must be an <IRI>")?;
+            let iri = dt
+                .strip_prefix('<')
+                .and_then(|r| r.strip_suffix('>'))
+                .ok_or("datatype must be an <IRI>")?;
             let nn = NamedNode::new(iri).map_err(|e| format!("invalid datatype IRI: {e}"))?;
             return Ok(Term::Literal(Literal::new_typed_literal(value, nn)));
         }
@@ -644,9 +716,15 @@ fn parse_constant_term(s: &str) -> Result<Term, String> {
         } else {
             "http://www.w3.org/2001/XMLSchema#decimal"
         };
-        return Ok(Term::Literal(Literal::new_typed_literal(s, NamedNode::new_unchecked(dt))));
+        return Ok(Term::Literal(Literal::new_typed_literal(
+            s,
+            NamedNode::new_unchecked(dt),
+        )));
     }
-    Err("not a recognised constant (numeric, \"string\"[@lang|^^<dt>], true/false, or <IRI>)".into())
+    Err(
+        "not a recognised constant (numeric, \"string\"[@lang|^^<dt>], true/false, or <IRI>)"
+            .into(),
+    )
 }
 
 /// The operand of an `OVER`: either an INLINE `( … )` spec body, or a NAMED window
@@ -664,9 +742,12 @@ fn split_over_operand_and_alias(s: &str) -> Result<(OverOperand, String), String
     let s = s.trim();
     let (operand, tail) = if s.starts_with('(') {
         // Inline `( spec )`: split off the balanced spec then the trailing alias.
-        let close = matching_paren(s, 0)
-            .ok_or("inline OVER: unbalanced parentheses in OVER ( … )")?;
-        (OverOperand::Inline(s[1..close].to_string()), s[close + 1..].trim())
+        let close =
+            matching_paren(s, 0).ok_or("inline OVER: unbalanced parentheses in OVER ( … )")?;
+        (
+            OverOperand::Inline(s[1..close].to_string()),
+            s[close + 1..].trim(),
+        )
     } else {
         // Bare window NAME: the name runs up to the first whitespace; the rest is the
         // `AS ?out` alias.
@@ -691,7 +772,9 @@ fn split_over_operand_and_alias(s: &str) -> Result<(OverOperand, String), String
         .ok_or("inline OVER: `AS` must be followed by an output variable ?out")?;
     let out = out.trim();
     if out.is_empty() || !out.chars().all(is_varname_char) {
-        return Err(format!("inline OVER: invalid output variable {after_as:?} after AS"));
+        return Err(format!(
+            "inline OVER: invalid output variable {after_as:?} after AS"
+        ));
     }
     Ok((operand, out.to_string()))
 }
@@ -744,14 +827,17 @@ fn parse_window_definitions(body: &str) -> Result<NamedWindows, String> {
             continue;
         }
         // `<name> AS ( … )`.
-        let as_pos = find_keyword(def, "AS")
-            .ok_or_else(|| format!("inline OVER: WINDOW definition must be `<name> AS ( … )`, got {def:?}"))?;
+        let as_pos = find_keyword(def, "AS").ok_or_else(|| {
+            format!("inline OVER: WINDOW definition must be `<name> AS ( … )`, got {def:?}")
+        })?;
         let name = def[..as_pos].trim();
         if name.is_empty() || !name.chars().all(is_varname_char) {
             return Err(format!("inline OVER: invalid WINDOW name {name:?}"));
         }
         if out.iter().any(|(n, _)| n == name) {
-            return Err(format!("inline OVER: WINDOW name {name:?} is defined more than once"));
+            return Err(format!(
+                "inline OVER: WINDOW name {name:?} is defined more than once"
+            ));
         }
         let after = def[as_pos + 2..].trim();
         let spec_body = strip_outer_parens(after)
@@ -852,11 +938,17 @@ fn parse_over_spec(spec: &str) -> Result<OverSpec, String> {
     // ORDER BY segment runs from after `ORDER BY` to the frame keyword (or end).
     if let Some(o) = order_kw {
         let after_up = &spec_up[o..];
-        let by = after_up.find("BY").ok_or("inline OVER: ORDER must be followed by BY")?;
+        let by = after_up
+            .find("BY")
+            .ok_or("inline OVER: ORDER must be followed by BY")?;
         let seg_start = o + by + 2;
         let seg_end = match frame_kw {
             Some(f) if f > seg_start => f,
-            Some(_) => return Err("inline OVER: a window frame (ROWS/RANGE) must come after ORDER BY".into()),
+            Some(_) => {
+                return Err(
+                    "inline OVER: a window frame (ROWS/RANGE) must come after ORDER BY".into(),
+                )
+            }
             None => spec.len(),
         };
         order_by = parse_order_list(&spec[seg_start..seg_end])?;
@@ -891,7 +983,9 @@ fn parse_frame(s: &str) -> Result<WindowFrame, String> {
     } else if let Some(r) = up.strip_prefix("RANGE") {
         (FrameUnit::Range, &s[s.len() - r.len()..])
     } else {
-        return Err(format!("inline OVER: expected ROWS or RANGE in window frame, got {s:?}"));
+        return Err(format!(
+            "inline OVER: expected ROWS or RANGE in window frame, got {s:?}"
+        ));
     };
     let rest = rest.trim();
     let rest_up = rest.to_ascii_uppercase();
@@ -952,11 +1046,16 @@ fn parse_single_var(tok: &str) -> Result<String, String> {
 /// Parses a whitespace/comma-separated list of `?var` into bare names.
 fn parse_var_list(s: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
-    for tok in s.split([',', ' ', '\t', '\n', '\r']).filter(|t| !t.is_empty()) {
+    for tok in s
+        .split([',', ' ', '\t', '\n', '\r'])
+        .filter(|t| !t.is_empty())
+    {
         let name = tok
             .strip_prefix('?')
             .or_else(|| tok.strip_prefix('$'))
-            .ok_or_else(|| format!("inline OVER: expected a ?variable in PARTITION BY, got {tok:?}"))?;
+            .ok_or_else(|| {
+                format!("inline OVER: expected a ?variable in PARTITION BY, got {tok:?}")
+            })?;
         if name.is_empty() || !name.chars().all(is_varname_char) {
             return Err(format!("inline OVER: invalid variable {tok:?}"));
         }
@@ -992,7 +1091,10 @@ fn parse_one_order_key(key: &str) -> Result<OrderKey, String> {
         if up.starts_with(kw) {
             let after = key[kw.len()..].trim_start();
             if let Some(inner) = strip_outer_parens(after) {
-                return Ok(OrderKey { sort: classify_sort(inner.trim())?, descending });
+                return Ok(OrderKey {
+                    sort: classify_sort(inner.trim())?,
+                    descending,
+                });
             }
             // A `?v ASC` / `?v DESC` trailing-keyword form whose VAR happens to
             // start with the letters `asc`/`desc` is handled by the trailing-keyword
@@ -1002,10 +1104,16 @@ fn parse_one_order_key(key: &str) -> Result<OrderKey, String> {
     // Trailing-keyword form: `<key>` | `<key> ASC` | `<key> DESC`, where `<key>` is
     // a bare var or a parenthesised expression (which may itself contain spaces).
     if let Some((body, descending)) = split_trailing_direction(key)? {
-        return Ok(OrderKey { sort: classify_sort(body.trim())?, descending });
+        return Ok(OrderKey {
+            sort: classify_sort(body.trim())?,
+            descending,
+        });
     }
     // No direction keyword: the whole key is the sort body, ascending.
-    Ok(OrderKey { sort: classify_sort(key.trim())?, descending: false })
+    Ok(OrderKey {
+        sort: classify_sort(key.trim())?,
+        descending: false,
+    })
 }
 
 /// Splits an optional trailing ` ASC` / ` DESC` direction keyword off a sort key,
@@ -1176,8 +1284,8 @@ fn split_projection_items(proj: &str) -> Result<Vec<String>, String> {
             break;
         }
         if bytes[i] == b'(' {
-            let close =
-                matching_paren(proj, i).ok_or("inline OVER: unbalanced '(' in SELECT projection")?;
+            let close = matching_paren(proj, i)
+                .ok_or("inline OVER: unbalanced '(' in SELECT projection")?;
             items.push(proj[i..=close].to_string());
             i = close + 1;
         } else {
@@ -1278,13 +1386,17 @@ fn projection_item_output_var(item: &str) -> Result<String, String> {
             }
         }
     }
-    Err(format!("inline OVER: cannot determine the output variable of projection item {item:?}"))
+    Err(format!(
+        "inline OVER: cannot determine the output variable of projection item {item:?}"
+    ))
 }
 
 /// `true` if a non-window projection item's OUTPUT var equals `name` (so a helper
 /// var need not be re-projected).
 fn projection_item_mentions_output(item: &str, name: &str) -> bool {
-    projection_item_output_var(item).map(|v| v == name).unwrap_or(false)
+    projection_item_output_var(item)
+        .map(|v| v == name)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1302,23 +1414,36 @@ mod tests {
     }
 
     fn cell(r: &QueryResult, row: usize, col: usize) -> String {
-        r.rows[row][col].as_ref().map(|t| t.to_string()).unwrap_or_default()
+        r.rows[row][col]
+            .as_ref()
+            .map(|t| t.to_string())
+            .unwrap_or_default()
     }
 
     // ---- unit tests on the rewriter ----
 
     #[test]
     fn detects_no_over_returns_none() {
-        assert!(extract_windows("SELECT ?s WHERE { ?s ?p ?o }").unwrap().is_none());
+        assert!(extract_windows("SELECT ?s WHERE { ?s ?p ?o }")
+            .unwrap()
+            .is_none());
         // `?over` must NOT trip the keyword scan.
-        assert!(extract_windows("SELECT ?over WHERE { ?over ?p ?o }").unwrap().is_none());
+        assert!(extract_windows("SELECT ?over WHERE { ?over ?p ?o }")
+            .unwrap()
+            .is_none());
     }
 
     fn var_key(name: &str, descending: bool) -> OrderKey {
-        OrderKey { sort: Sort::Var(name.to_string()), descending }
+        OrderKey {
+            sort: Sort::Var(name.to_string()),
+            descending,
+        }
     }
     fn expr_key(expr: &str, descending: bool) -> OrderKey {
-        OrderKey { sort: Sort::Expr(expr.to_string()), descending }
+        OrderKey {
+            sort: Sort::Expr(expr.to_string()),
+            descending,
+        }
     }
     /// `parse_window_item` with no named WINDOW definitions (the common unit-test case).
     fn pwi(item: &str) -> Result<Option<WindowItem>, String> {
@@ -1393,7 +1518,10 @@ mod tests {
         let w = pwi("(RANK() OVER (ORDER BY ?dept, DESC(?a + ?b)) AS ?r)")
             .unwrap()
             .unwrap();
-        assert_eq!(w.order_by, vec![var_key("dept", false), expr_key("?a + ?b", true)]);
+        assert_eq!(
+            w.order_by,
+            vec![var_key("dept", false), expr_key("?a + ?b", true)]
+        );
     }
 
     #[test]
@@ -1412,7 +1540,10 @@ mod tests {
             plan.rewritten
         );
         // The window now orders on the helper var, not the raw expression.
-        assert_eq!(plan.windows[0].order_by, vec![var_key("__win_orderkey0", false)]);
+        assert_eq!(
+            plan.windows[0].order_by,
+            vec![var_key("__win_orderkey0", false)]
+        );
         // The helper is not a user-named output column.
         assert_eq!(plan.output_vars, vec!["emp".to_string(), "rn".to_string()]);
     }
@@ -1421,8 +1552,16 @@ mod tests {
     fn parses_windowed_aggregate_item() {
         // sq-imj8: a windowed aggregate `SUM(?sales) OVER (PARTITION BY ?dept)` now
         // parses to a WinFunc::Agg carrying the argument variable.
-        let w = pwi("(SUM(?sales) OVER (PARTITION BY ?dept) AS ?t)").unwrap().unwrap();
-        assert_eq!(w.func, WinFunc::Agg { agg: AggFunc::Sum, of: "sales".to_string() });
+        let w = pwi("(SUM(?sales) OVER (PARTITION BY ?dept) AS ?t)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            w.func,
+            WinFunc::Agg {
+                agg: AggFunc::Sum,
+                of: "sales".to_string()
+            }
+        );
         assert_eq!(w.partition_by, vec!["dept".to_string()]);
         assert!(w.frame.is_none());
         // COUNT/AVG/MIN/MAX likewise.
@@ -1433,7 +1572,13 @@ mod tests {
             ("(MAX(?s) OVER () AS ?x)", AggFunc::Max),
         ] {
             let w = pwi(src).unwrap().unwrap();
-            assert_eq!(w.func, WinFunc::Agg { agg, of: "s".to_string() });
+            assert_eq!(
+                w.func,
+                WinFunc::Agg {
+                    agg,
+                    of: "s".to_string()
+                }
+            );
         }
     }
 
@@ -1462,19 +1607,48 @@ mod tests {
     #[test]
     fn parses_lag_lead_ntile_items() {
         // LAG(?x): default offset 1, no default value.
-        let lag = pwi("(LAG(?sales) OVER (ORDER BY ?sales) AS ?prev)").unwrap().unwrap();
-        assert_eq!(lag.func, WinFunc::Offset { lead: false, of: "sales".into(), offset: 1, default: None });
+        let lag = pwi("(LAG(?sales) OVER (ORDER BY ?sales) AS ?prev)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            lag.func,
+            WinFunc::Offset {
+                lead: false,
+                of: "sales".into(),
+                offset: 1,
+                default: None
+            }
+        );
         // LEAD(?x, 2): explicit offset, no default.
-        let lead = pwi("(LEAD(?sales, 2) OVER (ORDER BY ?sales) AS ?n)").unwrap().unwrap();
-        assert_eq!(lead.func, WinFunc::Offset { lead: true, of: "sales".into(), offset: 2, default: None });
+        let lead = pwi("(LEAD(?sales, 2) OVER (ORDER BY ?sales) AS ?n)")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            lead.func,
+            WinFunc::Offset {
+                lead: true,
+                of: "sales".into(),
+                offset: 2,
+                default: None
+            }
+        );
         // LAG(?x, 1, 0): a constant integer default.
-        let dflt = pwi("(LAG(?sales, 1, 0) OVER (ORDER BY ?sales) AS ?p)").unwrap().unwrap();
+        let dflt = pwi("(LAG(?sales, 1, 0) OVER (ORDER BY ?sales) AS ?p)")
+            .unwrap()
+            .unwrap();
         assert_eq!(
             dflt.func,
-            WinFunc::Offset { lead: false, of: "sales".into(), offset: 1, default: Some(Term::Literal(oxrdf::Literal::from(0))) }
+            WinFunc::Offset {
+                lead: false,
+                of: "sales".into(),
+                offset: 1,
+                default: Some(Term::Literal(oxrdf::Literal::from(0)))
+            }
         );
         // NTILE(4): a bucket count.
-        let nt = pwi("(NTILE(4) OVER (ORDER BY ?sales) AS ?q)").unwrap().unwrap();
+        let nt = pwi("(NTILE(4) OVER (ORDER BY ?sales) AS ?q)")
+            .unwrap()
+            .unwrap();
         assert_eq!(nt.func, WinFunc::Ntile { buckets: 4 });
     }
 
@@ -1493,15 +1667,25 @@ mod tests {
     #[test]
     fn parses_lag_string_iri_defaults() {
         // A quoted-string default.
-        let s = pwi("(LAG(?n, 1, \"none\") OVER (ORDER BY ?n) AS ?p)").unwrap().unwrap();
+        let s = pwi("(LAG(?n, 1, \"none\") OVER (ORDER BY ?n) AS ?p)")
+            .unwrap()
+            .unwrap();
         match s.func {
-            WinFunc::Offset { default: Some(Term::Literal(l)), .. } => assert_eq!(l.value(), "none"),
+            WinFunc::Offset {
+                default: Some(Term::Literal(l)),
+                ..
+            } => assert_eq!(l.value(), "none"),
             other => panic!("{other:?}"),
         }
         // An <IRI> default.
-        let i = pwi("(LEAD(?n, 1, <http://ex/x>) OVER (ORDER BY ?n) AS ?p)").unwrap().unwrap();
+        let i = pwi("(LEAD(?n, 1, <http://ex/x>) OVER (ORDER BY ?n) AS ?p)")
+            .unwrap()
+            .unwrap();
         match i.func {
-            WinFunc::Offset { default: Some(Term::NamedNode(n)), .. } => assert_eq!(n.as_str(), "http://ex/x"),
+            WinFunc::Offset {
+                default: Some(Term::NamedNode(n)),
+                ..
+            } => assert_eq!(n.as_str(), "http://ex/x"),
             other => panic!("{other:?}"),
         }
     }
@@ -1516,15 +1700,23 @@ mod tests {
         )
         .unwrap();
         // The WINDOW clause is stripped from the tail the engine sees.
-        assert!(!tail_no_window.to_ascii_uppercase().contains("WINDOW"), "{tail_no_window}");
-        assert!(tail_no_window.contains("ORDER BY ?s"), "ORDER BY kept: {tail_no_window}");
+        assert!(
+            !tail_no_window.to_ascii_uppercase().contains("WINDOW"),
+            "{tail_no_window}"
+        );
+        assert!(
+            tail_no_window.contains("ORDER BY ?s"),
+            "ORDER BY kept: {tail_no_window}"
+        );
         assert_eq!(named.len(), 1);
         assert_eq!(named[0].0, "w");
         assert_eq!(named[0].1 .0, vec!["dept".to_string()]); // partition_by
         assert_eq!(named[0].1 .1, vec![var_key("sales", true)]); // order_by
 
         // `RANK() OVER w` resolves the named window.
-        let w = parse_window_item("(RANK() OVER w AS ?r)", &named).unwrap().unwrap();
+        let w = parse_window_item("(RANK() OVER w AS ?r)", &named)
+            .unwrap()
+            .unwrap();
         assert_eq!(w.func, WinFunc::Rank(RankFunc::Rank));
         assert_eq!(w.partition_by, vec!["dept".to_string()]);
         assert_eq!(w.order_by, vec![var_key("sales", true)]);
@@ -1546,7 +1738,10 @@ mod tests {
             WHERE { ?emp ex:dept ?dept ; ex:sales ?sales } ORDER BY ?dept DESC(?sales) ?emp";
         let r = query_over(&g(), q).unwrap();
         // Columns: emp, dept, sales, rn.
-        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "dept", "sales", "rn"]);
+        assert_eq!(
+            r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+            ["emp", "dept", "sales", "rn"]
+        );
         // eng (30,30,20) desc → rn 1,2,3 (a,b tie at 30, broken by ?emp asc); sales (10) → rn 1.
         // Row order by ORDER BY ?dept DESC(?sales) ?emp: sales/d first (dept "sales" > "eng" lexically? IRIs).
         // Be order-agnostic: collect (dept,sales,rn) and check the multiset of rn per dept.
@@ -1554,8 +1749,16 @@ mod tests {
         let mut sales_rns: Vec<i64> = Vec::new();
         for row in &r.rows {
             let dept = row[1].as_ref().unwrap().to_string();
-            let rn: i64 = row[3].as_ref().unwrap().to_string().trim_matches('"').split('"').next().unwrap()
-                .parse().unwrap_or_else(|_| literal_int(&row[3]));
+            let rn: i64 = row[3]
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .trim_matches('"')
+                .split('"')
+                .next()
+                .unwrap()
+                .parse()
+                .unwrap_or_else(|_| literal_int(&row[3]));
             if dept.contains("/eng") {
                 eng_rns.push(rn);
             } else {
@@ -1621,7 +1824,10 @@ mod tests {
             SELECT ?emp (RANK() OVER (ORDER BY DESC(?sales)) AS ?r) \
             WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
         let r = query_over(&g(), q).unwrap();
-        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "r"]);
+        assert_eq!(
+            r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+            ["emp", "r"]
+        );
         // Single partition (no PARTITION BY): 30,30,20,10 → ranks 1,1,3,4.
         let mut ranks: Vec<i64> = r.rows.iter().map(|row| literal_int(&row[1])).collect();
         ranks.sort();
@@ -1644,7 +1850,10 @@ mod tests {
         // A query with no OVER goes straight through the ordinary engine.
         let q = "PREFIX ex: <http://ex/> SELECT ?emp WHERE { ?emp ex:dept ?d }";
         let r = query_over(&g(), q).unwrap();
-        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp"]);
+        assert_eq!(
+            r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+            ["emp"]
+        );
         assert_eq!(r.rows.len(), 4);
     }
 
@@ -1656,7 +1865,10 @@ mod tests {
                 (DENSE_RANK() OVER (PARTITION BY ?dept ORDER BY DESC(?sales)) AS ?dr) \
             WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
         let r = query_over(&g(), q).unwrap();
-        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "rn", "dr"]);
+        assert_eq!(
+            r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+            ["emp", "rn", "dr"]
+        );
         let _ = cell(&r, 0, 1);
     }
 
@@ -1679,7 +1891,10 @@ mod tests {
             SELECT ?emp ?dept (SUM(?sales) OVER (PARTITION BY ?dept) AS ?total) \
             WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
         let r = query_over(&g(), q).unwrap();
-        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "dept", "total"]);
+        assert_eq!(
+            r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+            ["emp", "dept", "total"]
+        );
         // eng total = 30+30+20 = 80; sales total = 10.
         for row in &r.rows {
             let dept = row[1].as_ref().unwrap().to_string();
@@ -1711,14 +1926,20 @@ mod tests {
         assert_eq!(eng(&query_over(&g(), &mk("COUNT")).unwrap()), 3); // 3 eng rows
         assert_eq!(eng(&query_over(&g(), &mk("MIN")).unwrap()), 20); // min eng sales
         assert_eq!(eng(&query_over(&g(), &mk("MAX")).unwrap()), 30); // max eng sales
-        // AVG eng = (30+30+20)/3 = 26.666… → a non-integer double.
+                                                                     // AVG eng = (30+30+20)/3 = 26.666… → a non-integer double.
         let avg = query_over(&g(), &mk("AVG")).unwrap();
         let v: f64 = avg
             .rows
             .iter()
             .find(|row| row[1].as_ref().unwrap().to_string().contains("/eng"))
             .and_then(|row| row[2].as_ref())
-            .map(|t| if let oxrdf::Term::Literal(l) = t { l.value().parse().unwrap() } else { panic!() })
+            .map(|t| {
+                if let oxrdf::Term::Literal(l) = t {
+                    l.value().parse().unwrap()
+                } else {
+                    panic!()
+                }
+            })
             .unwrap();
         assert!((v - 80.0 / 3.0).abs() < 1e-9, "AVG was {v}");
     }
@@ -1732,16 +1953,22 @@ mod tests {
                    (SUM(?sales) OVER (ORDER BY ?sales ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ?run) \
             WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
         let r = query_over(&g(), q).unwrap();
-        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "sales", "run"]);
+        assert_eq!(
+            r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+            ["emp", "sales", "run"]
+        );
         // Ordered by sales asc: 10, 20, 30, 30. Running sums: 10, 30, 60, 90.
         // The final (largest-sales) row's running total is the grand total 90.
-        let mut by_sales: Vec<(i64, i64)> =
-            r.rows.iter().map(|row| (literal_int(&row[1]), literal_int(&row[2]))).collect();
+        let mut by_sales: Vec<(i64, i64)> = r
+            .rows
+            .iter()
+            .map(|row| (literal_int(&row[1]), literal_int(&row[2])))
+            .collect();
         by_sales.sort();
         // The row with sales=10 has run=10; both sales=30 rows have run=90 (tie at the
         // end is by physical position so both reach the running total only at the last).
         assert_eq!(by_sales[0], (10, 10)); // first
-        // grand total appears as the max running value.
+                                           // grand total appears as the max running value.
         let max_run = by_sales.iter().map(|&(_, run)| run).max().unwrap();
         assert_eq!(max_run, 90);
     }
@@ -1802,7 +2029,10 @@ mod tests {
             SELECT ?emp (SUM(?sales) OVER (PARTITION BY ?dept) AS ?t) \
             WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
         let r = query_over(&g(), q).unwrap();
-        assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "t"]);
+        assert_eq!(
+            r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+            ["emp", "t"]
+        );
         assert_eq!(r.rows.len(), 4);
     }
 }

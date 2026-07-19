@@ -345,17 +345,18 @@ mod tests {
         let query = [1.0f32, 0.0];
         // A few masks of different selectivity, including ones smaller than k.
         for ids in [
-            vec![1u32, 5, 9, 13, 33],           // selective, scattered
-            (1u32..=64).step_by(2).collect(),   // ~half
-            (1u32..=64).collect(),              // full
-            vec![2u32, 4],                      // smaller than k=5
+            vec![1u32, 5, 9, 13, 33],         // selective, scattered
+            (1u32..=64).step_by(2).collect(), // ~half
+            (1u32..=64).collect(),            // full
+            vec![2u32, 4],                    // smaller than k=5
         ] {
             let mask: IdMask = ids.into_iter().collect();
             for k in [1usize, 3, 5, 10] {
                 let pre = nearest_exact_filtered(&store, &query, &mask, k);
                 let post = postfilter_exact(&store, &query, &mask, k);
                 assert_eq!(
-                    pre, post,
+                    pre,
+                    post,
                     "pre/post-filter must be identical (mask_len={}, k={k})",
                     mask.len()
                 );
@@ -442,7 +443,10 @@ mod tests {
                 "ntriples",
             )
             .unwrap();
-            let id = |s: &str| g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap())).unwrap();
+            let id = |s: &str| {
+                g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap()))
+                    .unwrap()
+            };
             let num = |n: &str| {
                 g.id_of(&Term::Literal(oxrdf::Literal::new_typed_literal(
                     n,
@@ -460,15 +464,21 @@ mod tests {
             store.put(num("10"), &[0.6, -0.8]).unwrap(); // cos 0.6, admitted
             store.put(num("2"), &[3.0, 4.0]).unwrap(); // cos 0.6 (scaled), admitted
             store.put(id("http://ex/out"), &[0.9, 0.1]).unwrap(); // cos ~0.99 but NOT admitted
-            let mask: IdMask =
-                [id("http://ex/top"), id("http://ex/z-tied"), num("10"), num("2")]
-                    .into_iter()
-                    .collect();
+            let mask: IdMask = [
+                id("http://ex/top"),
+                id("http://ex/z-tied"),
+                num("10"),
+                num("2"),
+            ]
+            .into_iter()
+            .collect();
             (g, store, mask)
         }
 
         fn terms(g: &Graph, hits: &[(sparq_core::dict::Id, f32)]) -> Vec<String> {
-            hits.iter().map(|&(id, _)| g.dict.term(id).to_string()).collect()
+            hits.iter()
+                .map(|&(id, _)| g.dict.term(id).to_string())
+                .collect()
         }
 
         const TEN: &str = "\"10\"^^<http://www.w3.org/2001/XMLSchema#integer>";
@@ -480,8 +490,12 @@ mod tests {
         fn boundary_tie_membership_by_ntriples_key_from_both_branches() {
             let (g, store, mask) = fixture("both_branches");
             let query = [1.0f32, 0.0];
-            let always_pre = CostModel { scatter_penalty: 1.0 };
-            let always_post = CostModel { scatter_penalty: 1e6 };
+            let always_pre = CostModel {
+                scatter_penalty: 1.0,
+            };
+            let always_post = CostModel {
+                scatter_penalty: 1e6,
+            };
             let (pre, pre_est) =
                 nearest_filtered_costed_tiebreak(&store, &g, &query, &mask, 2, None, &always_pre)
                     .unwrap();
@@ -503,7 +517,9 @@ mod tests {
         #[test]
         fn seed_excluded_before_the_boundary() {
             let (g, store, mask) = fixture("seed_excluded");
-            let top = g.id_of(&Term::NamedNode(NamedNode::new("http://ex/top").unwrap())).unwrap();
+            let top = g
+                .id_of(&Term::NamedNode(NamedNode::new("http://ex/top").unwrap()))
+                .unwrap();
             let (hits, _est) = nearest_filtered_costed_tiebreak(
                 &store,
                 &g,
@@ -532,8 +548,13 @@ mod tests {
                 "ntriples",
             )
             .unwrap();
-            let id = |s: &str| g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap())).unwrap();
-            let bnode = g.id_of(&Term::BlankNode(BlankNode::new_unchecked("tied"))).unwrap();
+            let id = |s: &str| {
+                g.id_of(&Term::NamedNode(NamedNode::new(s).unwrap()))
+                    .unwrap()
+            };
+            let bnode = g
+                .id_of(&Term::BlankNode(BlankNode::new_unchecked("tied")))
+                .unwrap();
             let path = std::env::temp_dir().join(format!(
                 "sparq_vec_cost_tiebreak_bnode_{}.spqv",
                 std::process::id()
@@ -542,8 +563,9 @@ mod tests {
             store.put(id("http://ex/top"), &[1.0, 0.0]).unwrap(); // cos 1.0
             store.put(id("http://ex/a-tied"), &[0.6, 0.8]).unwrap(); // cos 0.6
             store.put(bnode, &[0.6, -0.8]).unwrap(); // cos 0.6 — tied blank node
-            let mask: IdMask =
-                [id("http://ex/top"), id("http://ex/a-tied"), bnode].into_iter().collect();
+            let mask: IdMask = [id("http://ex/top"), id("http://ex/a-tied"), bnode]
+                .into_iter()
+                .collect();
             // k=2: one slot for the two-way 0.6 tie the blank node sits in → Err.
             let err = nearest_filtered_costed_tiebreak(
                 &store,
@@ -594,7 +616,10 @@ mod tests {
         let mask: IdMask = vec![3u32, 7, 11, 19].into_iter().collect();
         let hits = postfilter_exact(&store, &query, &mask, 10);
         for &(id, _) in &hits {
-            assert!(mask.contains(id), "post-filter returned an unmasked id {id}");
+            assert!(
+                mask.contains(id),
+                "post-filter returned an unmasked id {id}"
+            );
         }
         // Scores are non-increasing (best-first).
         for w in hits.windows(2) {

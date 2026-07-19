@@ -1934,7 +1934,7 @@ mod tests {
         assert!(g.is_allowed_port("127.0.0.1", 8053));
         assert!(g.is_allowed_port("127.0.0.1", 65535));
         assert!(!g.is_allowed_port("127.0.0.2", 80)); // different host still rejected
-        // The host-level convenience query stays true for the bare host (any port).
+                                                      // The host-level convenience query stays true for the bare host (any port).
         assert!(g.is_allowed("127.0.0.1"));
     }
 
@@ -1973,12 +1973,18 @@ mod tests {
         // widening the allowlist. (port-0 overflow `:99999`, trailing colon `:`, non-numeric.)
         for entry in ["127.0.0.1:99999", "127.0.0.1:", "127.0.0.1:http"] {
             let g = EgressGuard::deny_private().allow_host(entry);
-            assert!(!g.is_allowed_port("127.0.0.1", 80), "{entry} widened port 80");
+            assert!(
+                !g.is_allowed_port("127.0.0.1", 80),
+                "{entry} widened port 80"
+            );
             assert!(
                 !g.is_allowed_port("127.0.0.1", 65535),
                 "{entry} widened port 65535"
             );
-            assert!(!g.is_allowed("127.0.0.1"), "{entry} widened host-level query");
+            assert!(
+                !g.is_allowed("127.0.0.1"),
+                "{entry} widened host-level query"
+            );
         }
     }
 
@@ -1993,7 +1999,8 @@ mod tests {
             "127.0.0.1"
         );
         assert!(matches!(
-            g.check_endpoint("http://127.0.0.1:8080/sparql").unwrap_err(),
+            g.check_endpoint("http://127.0.0.1:8080/sparql")
+                .unwrap_err(),
             FedError::EgressRefused(_)
         ));
         // The scheme default (80) is also refused — only :8053 is open.
@@ -2016,8 +2023,11 @@ mod tests {
         );
         assert_eq!(ep_ok.execute(&SubQuery::new("ASK {}")).unwrap(), body);
 
-        let ep_bad =
-            Endpoint::with_guard("http://127.0.0.1:9999/sparql", Box::new(PanicTransport), guard);
+        let ep_bad = Endpoint::with_guard(
+            "http://127.0.0.1:9999/sparql",
+            Box::new(PanicTransport),
+            guard,
+        );
         assert!(matches!(
             ep_bad.execute(&SubQuery::new("ASK {}")).unwrap_err(),
             FedError::EgressRefused(_)
@@ -2775,7 +2785,11 @@ mod tests {
             "hydra:first/last are NOT pagination cursors — only hydra:next/nextPage are"
         );
         assert_eq!(page.total_items, 42, "hydra:totalItems drives the count");
-        assert_eq!(page.triples.len(), 1, "exactly the one matching data triple");
+        assert_eq!(
+            page.triples.len(),
+            1,
+            "exactly the one matching data triple"
+        );
         assert_eq!(
             page.triples[0],
             FragTriple::new(
@@ -2821,9 +2835,7 @@ mod tests {
             ),
         ];
         for (control_triple, arm) in cases {
-            let body = format!(
-                "{control_triple}<http://ex/a> <http://ex/p> <http://ex/b> .\n"
-            );
+            let body = format!("{control_triple}<http://ex/a> <http://ex/p> <http://ex/b> .\n");
             let page = parse_fragment_body(&body, &pattern).expect("well-formed fragment parses");
             assert_eq!(
                 page.triples.len(),
@@ -2878,7 +2890,9 @@ mod tests {
         let void_only =
             "<http://frag> <http://rdfs.org/ns/void#triples> \"77\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n";
         assert_eq!(
-            parse_fragment_body(void_only, &pattern).unwrap().total_items,
+            parse_fragment_body(void_only, &pattern)
+                .unwrap()
+                .total_items,
             77,
             "void:triples must drive the count (kills the void== →!= survivor)"
         );

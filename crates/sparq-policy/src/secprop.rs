@@ -517,8 +517,7 @@ mod tests {
     fn methods_ttl_dims_are_policy_or_trust_vocab_or_vendored() {
         const TRUST_VOCAB: &str =
             include_str!("../../sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl");
-        const METHODS: &str =
-            include_str!("../../sparq-zk/ontologies/secprop-methods.ttl");
+        const METHODS: &str = include_str!("../../sparq-zk/ontologies/secprop-methods.ttl");
 
         let policy_dim_locals: std::collections::HashSet<&str> = SECPROP_LEFT_OPERANDS
             .iter()

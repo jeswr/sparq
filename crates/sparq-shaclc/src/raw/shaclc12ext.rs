@@ -126,7 +126,9 @@ fn cp_at(b: &[u8], p: usize) -> (u32, usize) {
         ((u32::from(x & 0x1F) << 6) | u32::from(b[p + 1] & 0x3F), 2)
     } else if x < 0xF0 {
         (
-            (u32::from(x & 0x0F) << 12) | (u32::from(b[p + 1] & 0x3F) << 6) | u32::from(b[p + 2] & 0x3F),
+            (u32::from(x & 0x0F) << 12)
+                | (u32::from(b[p + 1] & 0x3F) << 6)
+                | u32::from(b[p + 2] & 0x3F),
             3,
         )
     } else {
@@ -248,10 +250,13 @@ fn esc_u_char(out: &mut String, c: char) {
 }
 
 fn esc_iri(s: &str) -> Cow<'_, str> {
-    if !s
-        .bytes()
-        .any(|c| c <= 0x20 || matches!(c, b'<' | b'>' | b'"' | b'{' | b'}' | b'|' | b'^' | b'`' | b'\\'))
-    {
+    if !s.bytes().any(|c| {
+        c <= 0x20
+            || matches!(
+                c,
+                b'<' | b'>' | b'"' | b'{' | b'}' | b'|' | b'^' | b'`' | b'\\'
+            )
+    }) {
         return Cow::Borrowed(s);
     }
     let mut out = String::with_capacity(s.len() + 8);
@@ -299,7 +304,11 @@ fn esc_str_long(s: &str) -> String {
 
 fn remove_dot_segments(path: &str) -> Cow<'_, str> {
     if path.is_empty()
-        || (!path.contains("./") && !path.ends_with("/.") && !path.ends_with("/..") && path != "." && path != "..")
+        || (!path.contains("./")
+            && !path.ends_with("/.")
+            && !path.ends_with("/..")
+            && path != "."
+            && path != "..")
     {
         return Cow::Borrowed(path);
     }
@@ -462,21 +471,26 @@ fn resolve_iri<'a>(base: &str, rel: &'a str) -> Cow<'a, str> {
         return Cow::Borrowed(rel); // no base declared: keep as-is
     }
     let (b_scheme, b_auth, b_path, b_query, _) = uri_split(base);
-    let (authority, path, query): (Option<&str>, Cow<'_, str>, Option<&str>) = if let Some(a) = r_auth {
-        (Some(a), remove_dot_segments(r_path), r_query)
-    } else if r_path.is_empty() {
-        (b_auth, Cow::Borrowed(b_path), r_query.or(b_query))
-    } else if r_path.starts_with('/') {
-        (b_auth, remove_dot_segments(r_path), r_query)
-    } else {
-        let base_path: Cow<'_, str> = if b_auth.is_some() && b_path.is_empty() {
-            Cow::Borrowed("/")
+    let (authority, path, query): (Option<&str>, Cow<'_, str>, Option<&str>) =
+        if let Some(a) = r_auth {
+            (Some(a), remove_dot_segments(r_path), r_query)
+        } else if r_path.is_empty() {
+            (b_auth, Cow::Borrowed(b_path), r_query.or(b_query))
+        } else if r_path.starts_with('/') {
+            (b_auth, remove_dot_segments(r_path), r_query)
         } else {
-            Cow::Borrowed(&b_path[..b_path.rfind('/').map_or(0, |k| k + 1)])
+            let base_path: Cow<'_, str> = if b_auth.is_some() && b_path.is_empty() {
+                Cow::Borrowed("/")
+            } else {
+                Cow::Borrowed(&b_path[..b_path.rfind('/').map_or(0, |k| k + 1)])
+            };
+            let merged = format!("{base_path}{r_path}");
+            (
+                b_auth,
+                Cow::Owned(remove_dot_segments(&merged).into_owned()),
+                r_query,
+            )
         };
-        let merged = format!("{base_path}{r_path}");
-        (b_auth, Cow::Owned(remove_dot_segments(&merged).into_owned()), r_query)
-    };
     Cow::Owned(rebuild(b_scheme, authority, &path, query, r_frag))
 }
 
@@ -512,13 +526,14 @@ fn nn(v: Cow<'_, str>) -> Term {
 
 /// Expand a prefixed name. `require boundPrefix(...)` ran before this.
 fn expand_pn(prefixes: &HashMap<String, Rc<str>>, pfx: &str, local: &str) -> Term {
-    let ns = prefixes.get(pfx).expect("prefix bound (checked by require)");
+    let ns = prefixes
+        .get(pfx)
+        .expect("prefix bound (checked by require)");
     let mut s = String::with_capacity(ns.len() + local.len());
     s.push_str(ns);
     s.push_str(local);
     Term::NamedNode(Rc::from(s))
 }
-
 
 /* ---- token kinds ---- */
 const T_EOF: u16 = 0;
@@ -607,14 +622,122 @@ const T_LIT_68: u16 = 82; // 'true'
 const T_LIT_69: u16 = 83; // 'false'
 const T_LIT_70: u16 = 84; // 'a'
 const T_LIT_71: u16 = 85; // ','
-static TOKEN_NAMES: [&str; 86] = ["<eof>", "IRIREF", "PNAME_NS", "PNAME_LN", "ATPNAME_NS", "ATPNAME_LN", "LANG_DIR", "INTEGER", "DECIMAL", "DOUBLE", "STRING_LITERAL_QUOTE", "STRING_LITERAL_SINGLE_QUOTE", "STRING_LITERAL_LONG_QUOTE", "STRING_LITERAL_LONG_SINGLE_QUOTE", "'BASE'", "'IMPORTS'", "'PREFIX'", "'shape'", "'shapeClass'", "'->'", "'{'", "'}'", "'.'", "'|'", "'!'", "'='", "'targetNode'", "'targetObjectsOf'", "'targetSubjectsOf'", "'deactivated'", "'severity'", "'message'", "'class'", "'datatype'", "'nodeKind'", "'minExclusive'", "'minInclusive'", "'maxExclusive'", "'maxInclusive'", "'minLength'", "'maxLength'", "'pattern'", "'flags'", "'languageIn'", "'uniqueLang'", "'equals'", "'disjoint'", "'lessThan'", "'lessThanOrEquals'", "'qualifiedValueShape'", "'qualifiedMinCount'", "'qualifiedMaxCount'", "'qualifiedValueShapesDisjoint'", "'closed'", "'ignoredProperties'", "'hasValue'", "'in'", "'reifierShape'", "'reificationRequired'", "'['", "'..'", "']'", "'*'", "'BlankNode'", "'IRI'", "'Literal'", "'BlankNodeOrIRI'", "'BlankNodeOrLiteral'", "'IRIOrLiteral'", "'TripleTerm'", "'@'", "'%'", "';'", "'/'", "'^'", "'?'", "'+'", "'('", "')'", "'<<('", "')>>'", "'^^'", "'true'", "'false'", "'a'", "','"];
+static TOKEN_NAMES: [&str; 86] = [
+    "<eof>",
+    "IRIREF",
+    "PNAME_NS",
+    "PNAME_LN",
+    "ATPNAME_NS",
+    "ATPNAME_LN",
+    "LANG_DIR",
+    "INTEGER",
+    "DECIMAL",
+    "DOUBLE",
+    "STRING_LITERAL_QUOTE",
+    "STRING_LITERAL_SINGLE_QUOTE",
+    "STRING_LITERAL_LONG_QUOTE",
+    "STRING_LITERAL_LONG_SINGLE_QUOTE",
+    "'BASE'",
+    "'IMPORTS'",
+    "'PREFIX'",
+    "'shape'",
+    "'shapeClass'",
+    "'->'",
+    "'{'",
+    "'}'",
+    "'.'",
+    "'|'",
+    "'!'",
+    "'='",
+    "'targetNode'",
+    "'targetObjectsOf'",
+    "'targetSubjectsOf'",
+    "'deactivated'",
+    "'severity'",
+    "'message'",
+    "'class'",
+    "'datatype'",
+    "'nodeKind'",
+    "'minExclusive'",
+    "'minInclusive'",
+    "'maxExclusive'",
+    "'maxInclusive'",
+    "'minLength'",
+    "'maxLength'",
+    "'pattern'",
+    "'flags'",
+    "'languageIn'",
+    "'uniqueLang'",
+    "'equals'",
+    "'disjoint'",
+    "'lessThan'",
+    "'lessThanOrEquals'",
+    "'qualifiedValueShape'",
+    "'qualifiedMinCount'",
+    "'qualifiedMaxCount'",
+    "'qualifiedValueShapesDisjoint'",
+    "'closed'",
+    "'ignoredProperties'",
+    "'hasValue'",
+    "'in'",
+    "'reifierShape'",
+    "'reificationRequired'",
+    "'['",
+    "'..'",
+    "']'",
+    "'*'",
+    "'BlankNode'",
+    "'IRI'",
+    "'Literal'",
+    "'BlankNodeOrIRI'",
+    "'BlankNodeOrLiteral'",
+    "'IRIOrLiteral'",
+    "'TripleTerm'",
+    "'@'",
+    "'%'",
+    "';'",
+    "'/'",
+    "'^'",
+    "'?'",
+    "'+'",
+    "'('",
+    "')'",
+    "'<<('",
+    "')>>'",
+    "'^^'",
+    "'true'",
+    "'false'",
+    "'a'",
+    "','",
+];
 
 /* ---- oracle decision sets (@oracle declarations) ---- */
 /// `@oracle xsdDatatype` — declared finite decision set (19 IRIs), compiled
 /// to a static match (parse-mode reading of spec §4.3 clause 7).
 fn or_xsdDatatype(t: &Term) -> bool {
     match t {
-        Term::NamedNode(v) => matches!(v.as_ref(), "http://www.w3.org/2001/XMLSchema#integer" | "http://www.w3.org/2001/XMLSchema#decimal" | "http://www.w3.org/2001/XMLSchema#float" | "http://www.w3.org/2001/XMLSchema#double" | "http://www.w3.org/2001/XMLSchema#string" | "http://www.w3.org/2001/XMLSchema#boolean" | "http://www.w3.org/2001/XMLSchema#dateTime" | "http://www.w3.org/2001/XMLSchema#nonPositiveInteger" | "http://www.w3.org/2001/XMLSchema#negativeInteger" | "http://www.w3.org/2001/XMLSchema#long" | "http://www.w3.org/2001/XMLSchema#int" | "http://www.w3.org/2001/XMLSchema#short" | "http://www.w3.org/2001/XMLSchema#byte" | "http://www.w3.org/2001/XMLSchema#nonNegativeInteger" | "http://www.w3.org/2001/XMLSchema#unsignedLong" | "http://www.w3.org/2001/XMLSchema#unsignedShort" | "http://www.w3.org/2001/XMLSchema#unsignedByte" | "http://www.w3.org/2001/XMLSchema#positiveInteger" | "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"),
+        Term::NamedNode(v) => matches!(
+            v.as_ref(),
+            "http://www.w3.org/2001/XMLSchema#integer"
+                | "http://www.w3.org/2001/XMLSchema#decimal"
+                | "http://www.w3.org/2001/XMLSchema#float"
+                | "http://www.w3.org/2001/XMLSchema#double"
+                | "http://www.w3.org/2001/XMLSchema#string"
+                | "http://www.w3.org/2001/XMLSchema#boolean"
+                | "http://www.w3.org/2001/XMLSchema#dateTime"
+                | "http://www.w3.org/2001/XMLSchema#nonPositiveInteger"
+                | "http://www.w3.org/2001/XMLSchema#negativeInteger"
+                | "http://www.w3.org/2001/XMLSchema#long"
+                | "http://www.w3.org/2001/XMLSchema#int"
+                | "http://www.w3.org/2001/XMLSchema#short"
+                | "http://www.w3.org/2001/XMLSchema#byte"
+                | "http://www.w3.org/2001/XMLSchema#nonNegativeInteger"
+                | "http://www.w3.org/2001/XMLSchema#unsignedLong"
+                | "http://www.w3.org/2001/XMLSchema#unsignedShort"
+                | "http://www.w3.org/2001/XMLSchema#unsignedByte"
+                | "http://www.w3.org/2001/XMLSchema#positiveInteger"
+                | "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString"
+        ),
         _ => false,
     }
 }
@@ -630,56 +753,204 @@ const FS_5: u128 = 0x1ca0000800000000003f8e; // { T_DECIMAL, T_DOUBLE, T_INTEGER
 // ---- charset predicates & token matchers (generated) ----
 #[inline]
 fn in_cs0(c: u32) -> bool {
-    (c <= 32) || (c == 34) || (c == 60) || (c == 62) || (c == 92) || (c == 94) || (c == 96) || (c >= 123 && c <= 125)
+    (c <= 32)
+        || (c == 34)
+        || (c == 60)
+        || (c == 62)
+        || (c == 92)
+        || (c == 94)
+        || (c == 96)
+        || (c >= 123 && c <= 125)
 }
 
 fn f_UCHAR(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let len = inp.len();
     let mut p = i;
     let mut fail = false;
-    { let sv = p;
-if p + 2 > len { fl.hit_end = true; fail = true; } else if inp[p] == 92 && inp[p + 1] == 117 { p += 2; } else { fail = true; }
-if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) { p += 1; } else { fail = true; } }
-}
-if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) { p += 1; } else { fail = true; } }
-}
-if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) { p += 1; } else { fail = true; } }
-}
-if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) { p += 1; } else { fail = true; } }
-}
-if fail { p = sv; fail = false;
-if p + 2 > len { fl.hit_end = true; fail = true; } else if inp[p] == 92 && inp[p + 1] == 85 { p += 2; } else { fail = true; }
-if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) { p += 1; } else { fail = true; } }
-}
-if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) { p += 1; } else { fail = true; } }
-}
-if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) { p += 1; } else { fail = true; } }
-}
-if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) { p += 1; } else { fail = true; } }
-}
-if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) { p += 1; } else { fail = true; } }
-}
-if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) { p += 1; } else { fail = true; } }
-}
-if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) { p += 1; } else { fail = true; } }
-}
-if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) { p += 1; } else { fail = true; } }
-}
-}
-}
-    if fail { -1 } else { p as isize }
+    {
+        let sv = p;
+        if p + 2 > len {
+            fl.hit_end = true;
+            fail = true;
+        } else if inp[p] == 92 && inp[p + 1] == 117 {
+            p += 2;
+        } else {
+            fail = true;
+        }
+        if !fail {
+            if p >= len {
+                fl.hit_end = true;
+                fail = true;
+            } else {
+                let c = u32::from(inp[p]);
+                if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) {
+                    p += 1;
+                } else {
+                    fail = true;
+                }
+            }
+        }
+        if !fail {
+            if p >= len {
+                fl.hit_end = true;
+                fail = true;
+            } else {
+                let c = u32::from(inp[p]);
+                if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) {
+                    p += 1;
+                } else {
+                    fail = true;
+                }
+            }
+        }
+        if !fail {
+            if p >= len {
+                fl.hit_end = true;
+                fail = true;
+            } else {
+                let c = u32::from(inp[p]);
+                if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) {
+                    p += 1;
+                } else {
+                    fail = true;
+                }
+            }
+        }
+        if !fail {
+            if p >= len {
+                fl.hit_end = true;
+                fail = true;
+            } else {
+                let c = u32::from(inp[p]);
+                if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) {
+                    p += 1;
+                } else {
+                    fail = true;
+                }
+            }
+        }
+        if fail {
+            p = sv;
+            fail = false;
+            if p + 2 > len {
+                fl.hit_end = true;
+                fail = true;
+            } else if inp[p] == 92 && inp[p + 1] == 85 {
+                p += 2;
+            } else {
+                fail = true;
+            }
+            if !fail {
+                if p >= len {
+                    fl.hit_end = true;
+                    fail = true;
+                } else {
+                    let c = u32::from(inp[p]);
+                    if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) {
+                        p += 1;
+                    } else {
+                        fail = true;
+                    }
+                }
+            }
+            if !fail {
+                if p >= len {
+                    fl.hit_end = true;
+                    fail = true;
+                } else {
+                    let c = u32::from(inp[p]);
+                    if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) {
+                        p += 1;
+                    } else {
+                        fail = true;
+                    }
+                }
+            }
+            if !fail {
+                if p >= len {
+                    fl.hit_end = true;
+                    fail = true;
+                } else {
+                    let c = u32::from(inp[p]);
+                    if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) {
+                        p += 1;
+                    } else {
+                        fail = true;
+                    }
+                }
+            }
+            if !fail {
+                if p >= len {
+                    fl.hit_end = true;
+                    fail = true;
+                } else {
+                    let c = u32::from(inp[p]);
+                    if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) {
+                        p += 1;
+                    } else {
+                        fail = true;
+                    }
+                }
+            }
+            if !fail {
+                if p >= len {
+                    fl.hit_end = true;
+                    fail = true;
+                } else {
+                    let c = u32::from(inp[p]);
+                    if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) {
+                        p += 1;
+                    } else {
+                        fail = true;
+                    }
+                }
+            }
+            if !fail {
+                if p >= len {
+                    fl.hit_end = true;
+                    fail = true;
+                } else {
+                    let c = u32::from(inp[p]);
+                    if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) {
+                        p += 1;
+                    } else {
+                        fail = true;
+                    }
+                }
+            }
+            if !fail {
+                if p >= len {
+                    fl.hit_end = true;
+                    fail = true;
+                } else {
+                    let c = u32::from(inp[p]);
+                    if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) {
+                        p += 1;
+                    } else {
+                        fail = true;
+                    }
+                }
+            }
+            if !fail {
+                if p >= len {
+                    fl.hit_end = true;
+                    fail = true;
+                } else {
+                    let c = u32::from(inp[p]);
+                    if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) {
+                        p += 1;
+                    } else {
+                        fail = true;
+                    }
+                }
+            }
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_IRIREF(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -687,151 +958,469 @@ fn m_IRIREF(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 60 { p += 1; } else { fail = true; }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 60 {
+        p += 1;
+    } else {
+        fail = true;
+    }
     if !fail {
-'s0: loop { if p >= len { fl.hit_end = true; break; }
-  let c = u32::from(inp[p]); let w = 1;
-  if !(in_cs0(c)) { p += w; continue 's0; }
-  { let e = f_UCHAR(inp, p, fl); if e >= 0 { p = e as usize; fl.m_esc = true; continue 's0; } }
-  break; }
-}
+        's0: loop {
+            if p >= len {
+                fl.hit_end = true;
+                break;
+            }
+            let c = u32::from(inp[p]);
+            let w = 1;
+            if !(in_cs0(c)) {
+                p += w;
+                continue 's0;
+            }
+            {
+                let e = f_UCHAR(inp, p, fl);
+                if e >= 0 {
+                    p = e as usize;
+                    fl.m_esc = true;
+                    continue 's0;
+                }
+            }
+            break;
+        }
+    }
     if !fail {
-if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 62 { p += 1; } else { fail = true; }
-}
-    if fail { -1 } else { p as isize }
+        if p + 1 > len {
+            fl.hit_end = true;
+            fail = true;
+        } else if inp[p] == 62 {
+            p += 1;
+        } else {
+            fail = true;
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 #[inline]
 fn in_pn_chars_base1(c: u32) -> bool {
-    (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 192 && c <= 214) || (c >= 216 && c <= 246) || (c >= 248 && c <= 767) || (c >= 880 && c <= 893) || (c >= 895 && c <= 8191) || (c >= 8204 && c <= 8205) || (c >= 8304 && c <= 8591) || (c >= 11264 && c <= 12271) || (c >= 12289 && c <= 64975) || (c >= 65008 && c <= 65533) || (c >= 65536 && c <= 983039)
+    (c >= 65 && c <= 90)
+        || (c >= 97 && c <= 122)
+        || (c >= 192 && c <= 214)
+        || (c >= 216 && c <= 246)
+        || (c >= 248 && c <= 767)
+        || (c >= 880 && c <= 893)
+        || (c >= 895 && c <= 8191)
+        || (c >= 8204 && c <= 8205)
+        || (c >= 8304 && c <= 8591)
+        || (c >= 11264 && c <= 12271)
+        || (c >= 12289 && c <= 64975)
+        || (c >= 65008 && c <= 65533)
+        || (c >= 65536 && c <= 983039)
 }
 
 #[inline]
 fn in_pn_chars2(c: u32) -> bool {
-    (c == 45) || (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c == 95) || (c >= 97 && c <= 122) || (c == 183) || (c >= 192 && c <= 214) || (c >= 216 && c <= 246) || (c >= 248 && c <= 893) || (c >= 895 && c <= 8191) || (c >= 8204 && c <= 8205) || (c >= 8255 && c <= 8256) || (c >= 8304 && c <= 8591) || (c >= 11264 && c <= 12271) || (c >= 12289 && c <= 64975) || (c >= 65008 && c <= 65533) || (c >= 65536 && c <= 983039)
+    (c == 45)
+        || (c >= 48 && c <= 57)
+        || (c >= 65 && c <= 90)
+        || (c == 95)
+        || (c >= 97 && c <= 122)
+        || (c == 183)
+        || (c >= 192 && c <= 214)
+        || (c >= 216 && c <= 246)
+        || (c >= 248 && c <= 893)
+        || (c >= 895 && c <= 8191)
+        || (c >= 8204 && c <= 8205)
+        || (c >= 8255 && c <= 8256)
+        || (c >= 8304 && c <= 8591)
+        || (c >= 11264 && c <= 12271)
+        || (c >= 12289 && c <= 64975)
+        || (c >= 65008 && c <= 65533)
+        || (c >= 65536 && c <= 983039)
 }
 
 fn f_PN_PREFIX(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let len = inp.len();
     let mut p = i;
     let mut fail = false;
-    if p >= len { fl.hit_end = true; fail = true; } else { let (c, w) = cp_at(inp, p); if in_pn_chars_base1(c) { p += w; } else { fail = true; } }
+    if p >= len {
+        fl.hit_end = true;
+        fail = true;
+    } else {
+        let (c, w) = cp_at(inp, p);
+        if in_pn_chars_base1(c) {
+            p += w;
+        } else {
+            fail = true;
+        }
+    }
     if !fail {
-{ let sv = p;
-{ let mut lg: isize = -1;
-'t1: loop { if p >= len { fl.hit_end = true; break; }
-  let (c, w) = cp_at(inp, p);
-  if in_pn_chars2(c) { p += w; lg = p as isize; continue 't1; }
-  if c == 46 { p += w; continue 't1; }
-  break; }
-if lg < 0 { fail = true; } else { p = lg as usize; } }
-if fail { p = sv; fail = false; } }
-}
-    if fail { -1 } else { p as isize }
+        {
+            let sv = p;
+            {
+                let mut lg: isize = -1;
+                't1: loop {
+                    if p >= len {
+                        fl.hit_end = true;
+                        break;
+                    }
+                    let (c, w) = cp_at(inp, p);
+                    if in_pn_chars2(c) {
+                        p += w;
+                        lg = p as isize;
+                        continue 't1;
+                    }
+                    if c == 46 {
+                        p += w;
+                        continue 't1;
+                    }
+                    break;
+                }
+                if lg < 0 {
+                    fail = true;
+                } else {
+                    p = lg as usize;
+                }
+            }
+            if fail {
+                p = sv;
+                fail = false;
+            }
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn f_PNAME_NS(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let len = inp.len();
     let mut p = i;
     let mut fail = false;
-    { let sv = p;
-{ let e = f_PN_PREFIX(inp, p, fl); if e < 0 { fail = true; } else { p = e as usize; } }
-if fail { p = sv; fail = false; } }
+    {
+        let sv = p;
+        {
+            let e = f_PN_PREFIX(inp, p, fl);
+            if e < 0 {
+                fail = true;
+            } else {
+                p = e as usize;
+            }
+        }
+        if fail {
+            p = sv;
+            fail = false;
+        }
+    }
     if !fail {
-if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 58 { p += 1; } else { fail = true; }
-}
-    if fail { -1 } else { p as isize }
+        if p + 1 > len {
+            fl.hit_end = true;
+            fail = true;
+        } else if inp[p] == 58 {
+            p += 1;
+        } else {
+            fail = true;
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 #[inline]
 fn in_pn_chars_u3(c: u32) -> bool {
-    (c >= 65 && c <= 90) || (c == 95) || (c >= 97 && c <= 122) || (c >= 192 && c <= 214) || (c >= 216 && c <= 246) || (c >= 248 && c <= 767) || (c >= 880 && c <= 893) || (c >= 895 && c <= 8191) || (c >= 8204 && c <= 8205) || (c >= 8304 && c <= 8591) || (c >= 11264 && c <= 12271) || (c >= 12289 && c <= 64975) || (c >= 65008 && c <= 65533) || (c >= 65536 && c <= 983039)
+    (c >= 65 && c <= 90)
+        || (c == 95)
+        || (c >= 97 && c <= 122)
+        || (c >= 192 && c <= 214)
+        || (c >= 216 && c <= 246)
+        || (c >= 248 && c <= 767)
+        || (c >= 880 && c <= 893)
+        || (c >= 895 && c <= 8191)
+        || (c >= 8204 && c <= 8205)
+        || (c >= 8304 && c <= 8591)
+        || (c >= 11264 && c <= 12271)
+        || (c >= 12289 && c <= 64975)
+        || (c >= 65008 && c <= 65533)
+        || (c >= 65536 && c <= 983039)
 }
 
 fn f_PERCENT(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let len = inp.len();
     let mut p = i;
     let mut fail = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 37 { p += 1; } else { fail = true; }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 37 {
+        p += 1;
+    } else {
+        fail = true;
+    }
     if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) { p += 1; } else { fail = true; } }
-}
+        if p >= len {
+            fl.hit_end = true;
+            fail = true;
+        } else {
+            let c = u32::from(inp[p]);
+            if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) {
+                p += 1;
+            } else {
+                fail = true;
+            }
+        }
+    }
     if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) { p += 1; } else { fail = true; } }
-}
-    if fail { -1 } else { p as isize }
+        if p >= len {
+            fl.hit_end = true;
+            fail = true;
+        } else {
+            let c = u32::from(inp[p]);
+            if (c >= 48 && c <= 57) || (c >= 65 && c <= 70) || (c >= 97 && c <= 102) {
+                p += 1;
+            } else {
+                fail = true;
+            }
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 #[inline]
 fn in_cs4(c: u32) -> bool {
-    (c == 33) || (c >= 35 && c <= 47) || (c == 59) || (c == 61) || (c >= 63 && c <= 64) || (c == 95) || (c == 126)
+    (c == 33)
+        || (c >= 35 && c <= 47)
+        || (c == 59)
+        || (c == 61)
+        || (c >= 63 && c <= 64)
+        || (c == 95)
+        || (c == 126)
 }
 
 fn f_PN_LOCAL_ESC(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let len = inp.len();
     let mut p = i;
     let mut fail = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 92 { p += 1; } else { fail = true; }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 92 {
+        p += 1;
+    } else {
+        fail = true;
+    }
     if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if in_cs4(c) { p += 1; } else { fail = true; } }
-}
-    if fail { -1 } else { p as isize }
+        if p >= len {
+            fl.hit_end = true;
+            fail = true;
+        } else {
+            let c = u32::from(inp[p]);
+            if in_cs4(c) {
+                p += 1;
+            } else {
+                fail = true;
+            }
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn f_PLX(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
-    { let sv = p;
-{ let e = f_PERCENT(inp, p, fl); if e < 0 { fail = true; } else { p = e as usize; fl.m_esc = true; } }
-if fail { p = sv; fail = false;
-{ let e = f_PN_LOCAL_ESC(inp, p, fl); if e < 0 { fail = true; } else { p = e as usize; fl.m_esc = true; } }
-}
-}
-    if fail { -1 } else { p as isize }
+    {
+        let sv = p;
+        {
+            let e = f_PERCENT(inp, p, fl);
+            if e < 0 {
+                fail = true;
+            } else {
+                p = e as usize;
+                fl.m_esc = true;
+            }
+        }
+        if fail {
+            p = sv;
+            fail = false;
+            {
+                let e = f_PN_LOCAL_ESC(inp, p, fl);
+                if e < 0 {
+                    fail = true;
+                } else {
+                    p = e as usize;
+                    fl.m_esc = true;
+                }
+            }
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn f_PN_LOCAL(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let len = inp.len();
     let mut p = i;
     let mut fail = false;
-    { let sv = p;
-if p >= len { fl.hit_end = true; fail = true; } else { let (c, w) = cp_at(inp, p); if in_pn_chars_u3(c) { p += w; } else { fail = true; } }
-if fail { p = sv; fail = false;
-if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 58 { p += 1; } else { fail = true; }
-if fail { p = sv; fail = false;
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if c >= 48 && c <= 57 { p += 1; } else { fail = true; } }
-if fail { p = sv; fail = false;
-{ let e = f_PLX(inp, p, fl); if e < 0 { fail = true; } else { p = e as usize; fl.m_esc = true; } }
-}
-}
-}
-}
+    {
+        let sv = p;
+        if p >= len {
+            fl.hit_end = true;
+            fail = true;
+        } else {
+            let (c, w) = cp_at(inp, p);
+            if in_pn_chars_u3(c) {
+                p += w;
+            } else {
+                fail = true;
+            }
+        }
+        if fail {
+            p = sv;
+            fail = false;
+            if p + 1 > len {
+                fl.hit_end = true;
+                fail = true;
+            } else if inp[p] == 58 {
+                p += 1;
+            } else {
+                fail = true;
+            }
+            if fail {
+                p = sv;
+                fail = false;
+                if p >= len {
+                    fl.hit_end = true;
+                    fail = true;
+                } else {
+                    let c = u32::from(inp[p]);
+                    if c >= 48 && c <= 57 {
+                        p += 1;
+                    } else {
+                        fail = true;
+                    }
+                }
+                if fail {
+                    p = sv;
+                    fail = false;
+                    {
+                        let e = f_PLX(inp, p, fl);
+                        if e < 0 {
+                            fail = true;
+                        } else {
+                            p = e as usize;
+                            fl.m_esc = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
     if !fail {
-{ let sv = p;
-{ let mut lg: isize = -1;
-'t2: loop { if p >= len { fl.hit_end = true; break; }
-  let (c, w) = cp_at(inp, p);
-  if in_pn_chars2(c) { p += w; lg = p as isize; continue 't2; }
-  if c == 46 { p += w; continue 't2; }
-  if c == 58 { p += w; lg = p as isize; continue 't2; }
-  { let e = f_PLX(inp, p, fl); if e >= 0 { p = e as usize; fl.m_esc = true; lg = p as isize; continue 't2; } }
-  break; }
-if lg < 0 { fail = true; } else { p = lg as usize; } }
-if fail { p = sv; fail = false; } }
-}
-    if fail { -1 } else { p as isize }
+        {
+            let sv = p;
+            {
+                let mut lg: isize = -1;
+                't2: loop {
+                    if p >= len {
+                        fl.hit_end = true;
+                        break;
+                    }
+                    let (c, w) = cp_at(inp, p);
+                    if in_pn_chars2(c) {
+                        p += w;
+                        lg = p as isize;
+                        continue 't2;
+                    }
+                    if c == 46 {
+                        p += w;
+                        continue 't2;
+                    }
+                    if c == 58 {
+                        p += w;
+                        lg = p as isize;
+                        continue 't2;
+                    }
+                    {
+                        let e = f_PLX(inp, p, fl);
+                        if e >= 0 {
+                            p = e as usize;
+                            fl.m_esc = true;
+                            lg = p as isize;
+                            continue 't2;
+                        }
+                    }
+                    break;
+                }
+                if lg < 0 {
+                    fail = true;
+                } else {
+                    p = lg as usize;
+                }
+            }
+            if fail {
+                p = sv;
+                fail = false;
+            }
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_PNAME_LN(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
-    fl.m_esc = false; fl.m0 = -1;
-    { let e = f_PNAME_NS(inp, p, fl); if e < 0 { fail = true; } else { p = e as usize; } }
-if !fail { fl.m0 = p as isize; }
+    fl.m_esc = false;
+    fl.m0 = -1;
+    {
+        let e = f_PNAME_NS(inp, p, fl);
+        if e < 0 {
+            fail = true;
+        } else {
+            p = e as usize;
+        }
+    }
     if !fail {
-{ let e = f_PN_LOCAL(inp, p, fl); if e < 0 { fail = true; } else { p = e as usize; } }
-}
-    if fail { -1 } else { p as isize }
+        fl.m0 = p as isize;
+    }
+    if !fail {
+        {
+            let e = f_PN_LOCAL(inp, p, fl);
+            if e < 0 {
+                fail = true;
+            } else {
+                p = e as usize;
+            }
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_ATPNAME_NS(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -839,70 +1428,227 @@ fn m_ATPNAME_NS(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 64 { p += 1; } else { fail = true; }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 64 {
+        p += 1;
+    } else {
+        fail = true;
+    }
     if !fail {
-{ let sv = p;
-{ let e = f_PN_PREFIX(inp, p, fl); if e < 0 { fail = true; } else { p = e as usize; } }
-if fail { p = sv; fail = false; } }
-}
+        {
+            let sv = p;
+            {
+                let e = f_PN_PREFIX(inp, p, fl);
+                if e < 0 {
+                    fail = true;
+                } else {
+                    p = e as usize;
+                }
+            }
+            if fail {
+                p = sv;
+                fail = false;
+            }
+        }
+    }
     if !fail {
-if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 58 { p += 1; } else { fail = true; }
-}
-    if fail { -1 } else { p as isize }
+        if p + 1 > len {
+            fl.hit_end = true;
+            fail = true;
+        } else if inp[p] == 58 {
+            p += 1;
+        } else {
+            fail = true;
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_ATPNAME_LN(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let len = inp.len();
     let mut p = i;
     let mut fail = false;
-    fl.m_esc = false; fl.m0 = -1;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 64 { p += 1; } else { fail = true; }
+    fl.m_esc = false;
+    fl.m0 = -1;
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 64 {
+        p += 1;
+    } else {
+        fail = true;
+    }
     if !fail {
-{ let e = f_PNAME_NS(inp, p, fl); if e < 0 { fail = true; } else { p = e as usize; } }
-if !fail { fl.m0 = p as isize; }
-}
+        {
+            let e = f_PNAME_NS(inp, p, fl);
+            if e < 0 {
+                fail = true;
+            } else {
+                p = e as usize;
+            }
+        }
+        if !fail {
+            fl.m0 = p as isize;
+        }
+    }
     if !fail {
-{ let e = f_PN_LOCAL(inp, p, fl); if e < 0 { fail = true; } else { p = e as usize; } }
-}
-    if fail { -1 } else { p as isize }
+        {
+            let e = f_PN_LOCAL(inp, p, fl);
+            if e < 0 {
+                fail = true;
+            } else {
+                p = e as usize;
+            }
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LANG_DIR(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let len = inp.len();
     let mut p = i;
     let mut fail = false;
-    fl.m_esc = false; fl.m_d = -1;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 64 { p += 1; } else { fail = true; }
+    fl.m_esc = false;
+    fl.m_d = -1;
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 64 {
+        p += 1;
+    } else {
+        fail = true;
+    }
     if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) { p += 1; } else { fail = true; } }
-if !fail {
-loop { if p >= len { fl.hit_end = true; break; } let c = u32::from(inp[p]); if !((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) { break; } p += 1; }
-}
-}
+        if p >= len {
+            fl.hit_end = true;
+            fail = true;
+        } else {
+            let c = u32::from(inp[p]);
+            if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) {
+                p += 1;
+            } else {
+                fail = true;
+            }
+        }
+        if !fail {
+            loop {
+                if p >= len {
+                    fl.hit_end = true;
+                    break;
+                }
+                let c = u32::from(inp[p]);
+                if !((c >= 65 && c <= 90) || (c >= 97 && c <= 122)) {
+                    break;
+                }
+                p += 1;
+            }
+        }
+    }
     if !fail {
-loop { let sv = p;
-if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 45 { p += 1; } else { fail = true; }
-if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) { p += 1; } else { fail = true; } }
-if !fail {
-loop { if p >= len { fl.hit_end = true; break; } let c = u32::from(inp[p]); if !((c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)) { break; } p += 1; }
-}
-}
-if fail { p = sv; fail = false; break; }
-if p == sv { break; } }
-}
-    if !fail { let sv = p;
-if p + 2 > len { fl.hit_end = true; fail = true; } else if inp[p] == 45 && inp[p + 1] == 45 { p += 2; } else { fail = true; }
-if !fail {
-{ let sv = p;
-if p + 3 > len { fl.hit_end = true; fail = true; } else if inp[p] == 108 && inp[p + 1] == 116 && inp[p + 2] == 114 { p += 3; } else { fail = true; }
-if fail { p = sv; fail = false;
-if p + 3 > len { fl.hit_end = true; fail = true; } else if inp[p] == 114 && inp[p + 1] == 116 && inp[p + 2] == 108 { p += 3; } else { fail = true; }
-}
-}
-}
-if fail { p = sv; fail = false; } else { fl.m_d = sv as isize; } }
-    if fail { -1 } else { p as isize }
+        loop {
+            let sv = p;
+            if p + 1 > len {
+                fl.hit_end = true;
+                fail = true;
+            } else if inp[p] == 45 {
+                p += 1;
+            } else {
+                fail = true;
+            }
+            if !fail {
+                if p >= len {
+                    fl.hit_end = true;
+                    fail = true;
+                } else {
+                    let c = u32::from(inp[p]);
+                    if (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) {
+                        p += 1;
+                    } else {
+                        fail = true;
+                    }
+                }
+                if !fail {
+                    loop {
+                        if p >= len {
+                            fl.hit_end = true;
+                            break;
+                        }
+                        let c = u32::from(inp[p]);
+                        if !((c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122))
+                        {
+                            break;
+                        }
+                        p += 1;
+                    }
+                }
+            }
+            if fail {
+                p = sv;
+                fail = false;
+                break;
+            }
+            if p == sv {
+                break;
+            }
+        }
+    }
+    if !fail {
+        let sv = p;
+        if p + 2 > len {
+            fl.hit_end = true;
+            fail = true;
+        } else if inp[p] == 45 && inp[p + 1] == 45 {
+            p += 2;
+        } else {
+            fail = true;
+        }
+        if !fail {
+            {
+                let sv = p;
+                if p + 3 > len {
+                    fl.hit_end = true;
+                    fail = true;
+                } else if inp[p] == 108 && inp[p + 1] == 116 && inp[p + 2] == 114 {
+                    p += 3;
+                } else {
+                    fail = true;
+                }
+                if fail {
+                    p = sv;
+                    fail = false;
+                    if p + 3 > len {
+                        fl.hit_end = true;
+                        fail = true;
+                    } else if inp[p] == 114 && inp[p + 1] == 116 && inp[p + 2] == 108 {
+                        p += 3;
+                    } else {
+                        fail = true;
+                    }
+                }
+            }
+        }
+        if fail {
+            p = sv;
+            fail = false;
+        } else {
+            fl.m_d = sv as isize;
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_INTEGER(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -910,16 +1656,55 @@ fn m_INTEGER(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    { let sv = p;
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c == 43) || (c == 45) { p += 1; } else { fail = true; } }
-if fail { p = sv; fail = false; } }
+    {
+        let sv = p;
+        if p >= len {
+            fl.hit_end = true;
+            fail = true;
+        } else {
+            let c = u32::from(inp[p]);
+            if (c == 43) || (c == 45) {
+                p += 1;
+            } else {
+                fail = true;
+            }
+        }
+        if fail {
+            p = sv;
+            fail = false;
+        }
+    }
     if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if c >= 48 && c <= 57 { p += 1; } else { fail = true; } }
-if !fail {
-loop { if p >= len { fl.hit_end = true; break; } let c = u32::from(inp[p]); if !(c >= 48 && c <= 57) { break; } p += 1; }
-}
-}
-    if fail { -1 } else { p as isize }
+        if p >= len {
+            fl.hit_end = true;
+            fail = true;
+        } else {
+            let c = u32::from(inp[p]);
+            if c >= 48 && c <= 57 {
+                p += 1;
+            } else {
+                fail = true;
+            }
+        }
+        if !fail {
+            loop {
+                if p >= len {
+                    fl.hit_end = true;
+                    break;
+                }
+                let c = u32::from(inp[p]);
+                if !(c >= 48 && c <= 57) {
+                    break;
+                }
+                p += 1;
+            }
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_DECIMAL(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -927,41 +1712,146 @@ fn m_DECIMAL(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    { let sv = p;
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c == 43) || (c == 45) { p += 1; } else { fail = true; } }
-if fail { p = sv; fail = false; } }
+    {
+        let sv = p;
+        if p >= len {
+            fl.hit_end = true;
+            fail = true;
+        } else {
+            let c = u32::from(inp[p]);
+            if (c == 43) || (c == 45) {
+                p += 1;
+            } else {
+                fail = true;
+            }
+        }
+        if fail {
+            p = sv;
+            fail = false;
+        }
+    }
     if !fail {
-loop { if p >= len { fl.hit_end = true; break; } let c = u32::from(inp[p]); if !(c >= 48 && c <= 57) { break; } p += 1; }
-}
+        loop {
+            if p >= len {
+                fl.hit_end = true;
+                break;
+            }
+            let c = u32::from(inp[p]);
+            if !(c >= 48 && c <= 57) {
+                break;
+            }
+            p += 1;
+        }
+    }
     if !fail {
-if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 46 { p += 1; } else { fail = true; }
-}
+        if p + 1 > len {
+            fl.hit_end = true;
+            fail = true;
+        } else if inp[p] == 46 {
+            p += 1;
+        } else {
+            fail = true;
+        }
+    }
     if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if c >= 48 && c <= 57 { p += 1; } else { fail = true; } }
-if !fail {
-loop { if p >= len { fl.hit_end = true; break; } let c = u32::from(inp[p]); if !(c >= 48 && c <= 57) { break; } p += 1; }
-}
-}
-    if fail { -1 } else { p as isize }
+        if p >= len {
+            fl.hit_end = true;
+            fail = true;
+        } else {
+            let c = u32::from(inp[p]);
+            if c >= 48 && c <= 57 {
+                p += 1;
+            } else {
+                fail = true;
+            }
+        }
+        if !fail {
+            loop {
+                if p >= len {
+                    fl.hit_end = true;
+                    break;
+                }
+                let c = u32::from(inp[p]);
+                if !(c >= 48 && c <= 57) {
+                    break;
+                }
+                p += 1;
+            }
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn f_EXPONENT(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let len = inp.len();
     let mut p = i;
     let mut fail = false;
-    if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c == 69) || (c == 101) { p += 1; } else { fail = true; } }
+    if p >= len {
+        fl.hit_end = true;
+        fail = true;
+    } else {
+        let c = u32::from(inp[p]);
+        if (c == 69) || (c == 101) {
+            p += 1;
+        } else {
+            fail = true;
+        }
+    }
     if !fail {
-{ let sv = p;
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c == 43) || (c == 45) { p += 1; } else { fail = true; } }
-if fail { p = sv; fail = false; } }
-}
+        {
+            let sv = p;
+            if p >= len {
+                fl.hit_end = true;
+                fail = true;
+            } else {
+                let c = u32::from(inp[p]);
+                if (c == 43) || (c == 45) {
+                    p += 1;
+                } else {
+                    fail = true;
+                }
+            }
+            if fail {
+                p = sv;
+                fail = false;
+            }
+        }
+    }
     if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if c >= 48 && c <= 57 { p += 1; } else { fail = true; } }
-if !fail {
-loop { if p >= len { fl.hit_end = true; break; } let c = u32::from(inp[p]); if !(c >= 48 && c <= 57) { break; } p += 1; }
-}
-}
-    if fail { -1 } else { p as isize }
+        if p >= len {
+            fl.hit_end = true;
+            fail = true;
+        } else {
+            let c = u32::from(inp[p]);
+            if c >= 48 && c <= 57 {
+                p += 1;
+            } else {
+                fail = true;
+            }
+        }
+        if !fail {
+            loop {
+                if p >= len {
+                    fl.hit_end = true;
+                    break;
+                }
+                let c = u32::from(inp[p]);
+                if !(c >= 48 && c <= 57) {
+                    break;
+                }
+                p += 1;
+            }
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_DOUBLE(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -969,64 +1859,221 @@ fn m_DOUBLE(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    { let sv = p;
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c == 43) || (c == 45) { p += 1; } else { fail = true; } }
-if fail { p = sv; fail = false; } }
+    {
+        let sv = p;
+        if p >= len {
+            fl.hit_end = true;
+            fail = true;
+        } else {
+            let c = u32::from(inp[p]);
+            if (c == 43) || (c == 45) {
+                p += 1;
+            } else {
+                fail = true;
+            }
+        }
+        if fail {
+            p = sv;
+            fail = false;
+        }
+    }
     if !fail {
-{ let sv = p;
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if c >= 48 && c <= 57 { p += 1; } else { fail = true; } }
-if !fail {
-loop { if p >= len { fl.hit_end = true; break; } let c = u32::from(inp[p]); if !(c >= 48 && c <= 57) { break; } p += 1; }
-}
-if !fail {
-if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 46 { p += 1; } else { fail = true; }
-}
-if !fail {
-loop { if p >= len { fl.hit_end = true; break; } let c = u32::from(inp[p]); if !(c >= 48 && c <= 57) { break; } p += 1; }
-}
-if !fail {
-{ let e = f_EXPONENT(inp, p, fl); if e < 0 { fail = true; } else { p = e as usize; } }
-}
-if fail { p = sv; fail = false;
-if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 46 { p += 1; } else { fail = true; }
-if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if c >= 48 && c <= 57 { p += 1; } else { fail = true; } }
-if !fail {
-loop { if p >= len { fl.hit_end = true; break; } let c = u32::from(inp[p]); if !(c >= 48 && c <= 57) { break; } p += 1; }
-}
-}
-if !fail {
-{ let e = f_EXPONENT(inp, p, fl); if e < 0 { fail = true; } else { p = e as usize; } }
-}
-if fail { p = sv; fail = false;
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if c >= 48 && c <= 57 { p += 1; } else { fail = true; } }
-if !fail {
-loop { if p >= len { fl.hit_end = true; break; } let c = u32::from(inp[p]); if !(c >= 48 && c <= 57) { break; } p += 1; }
-}
-if !fail {
-{ let e = f_EXPONENT(inp, p, fl); if e < 0 { fail = true; } else { p = e as usize; } }
-}
-}
-}
-}
-}
-    if fail { -1 } else { p as isize }
+        {
+            let sv = p;
+            if p >= len {
+                fl.hit_end = true;
+                fail = true;
+            } else {
+                let c = u32::from(inp[p]);
+                if c >= 48 && c <= 57 {
+                    p += 1;
+                } else {
+                    fail = true;
+                }
+            }
+            if !fail {
+                loop {
+                    if p >= len {
+                        fl.hit_end = true;
+                        break;
+                    }
+                    let c = u32::from(inp[p]);
+                    if !(c >= 48 && c <= 57) {
+                        break;
+                    }
+                    p += 1;
+                }
+            }
+            if !fail {
+                if p + 1 > len {
+                    fl.hit_end = true;
+                    fail = true;
+                } else if inp[p] == 46 {
+                    p += 1;
+                } else {
+                    fail = true;
+                }
+            }
+            if !fail {
+                loop {
+                    if p >= len {
+                        fl.hit_end = true;
+                        break;
+                    }
+                    let c = u32::from(inp[p]);
+                    if !(c >= 48 && c <= 57) {
+                        break;
+                    }
+                    p += 1;
+                }
+            }
+            if !fail {
+                {
+                    let e = f_EXPONENT(inp, p, fl);
+                    if e < 0 {
+                        fail = true;
+                    } else {
+                        p = e as usize;
+                    }
+                }
+            }
+            if fail {
+                p = sv;
+                fail = false;
+                if p + 1 > len {
+                    fl.hit_end = true;
+                    fail = true;
+                } else if inp[p] == 46 {
+                    p += 1;
+                } else {
+                    fail = true;
+                }
+                if !fail {
+                    if p >= len {
+                        fl.hit_end = true;
+                        fail = true;
+                    } else {
+                        let c = u32::from(inp[p]);
+                        if c >= 48 && c <= 57 {
+                            p += 1;
+                        } else {
+                            fail = true;
+                        }
+                    }
+                    if !fail {
+                        loop {
+                            if p >= len {
+                                fl.hit_end = true;
+                                break;
+                            }
+                            let c = u32::from(inp[p]);
+                            if !(c >= 48 && c <= 57) {
+                                break;
+                            }
+                            p += 1;
+                        }
+                    }
+                }
+                if !fail {
+                    {
+                        let e = f_EXPONENT(inp, p, fl);
+                        if e < 0 {
+                            fail = true;
+                        } else {
+                            p = e as usize;
+                        }
+                    }
+                }
+                if fail {
+                    p = sv;
+                    fail = false;
+                    if p >= len {
+                        fl.hit_end = true;
+                        fail = true;
+                    } else {
+                        let c = u32::from(inp[p]);
+                        if c >= 48 && c <= 57 {
+                            p += 1;
+                        } else {
+                            fail = true;
+                        }
+                    }
+                    if !fail {
+                        loop {
+                            if p >= len {
+                                fl.hit_end = true;
+                                break;
+                            }
+                            let c = u32::from(inp[p]);
+                            if !(c >= 48 && c <= 57) {
+                                break;
+                            }
+                            p += 1;
+                        }
+                    }
+                    if !fail {
+                        {
+                            let e = f_EXPONENT(inp, p, fl);
+                            if e < 0 {
+                                fail = true;
+                            } else {
+                                p = e as usize;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 #[inline]
 fn in_cs5(c: u32) -> bool {
-    (c == 34) || (c == 39) || (c == 92) || (c == 98) || (c == 102) || (c == 110) || (c == 114) || (c == 116)
+    (c == 34)
+        || (c == 39)
+        || (c == 92)
+        || (c == 98)
+        || (c == 102)
+        || (c == 110)
+        || (c == 114)
+        || (c == 116)
 }
 
 fn f_ECHAR(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let len = inp.len();
     let mut p = i;
     let mut fail = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 92 { p += 1; } else { fail = true; }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 92 {
+        p += 1;
+    } else {
+        fail = true;
+    }
     if !fail {
-if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if in_cs5(c) { p += 1; } else { fail = true; } }
-}
-    if fail { -1 } else { p as isize }
+        if p >= len {
+            fl.hit_end = true;
+            fail = true;
+        } else {
+            let c = u32::from(inp[p]);
+            if in_cs5(c) {
+                p += 1;
+            } else {
+                fail = true;
+            }
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_STRING_LITERAL_QUOTE(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1034,19 +2081,60 @@ fn m_STRING_LITERAL_QUOTE(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 34 { p += 1; } else { fail = true; }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 34 {
+        p += 1;
+    } else {
+        fail = true;
+    }
     if !fail {
-'s3: loop { if p >= len { fl.hit_end = true; break; }
-  let c = u32::from(inp[p]); let w = 1;
-  if !((c == 10) || (c == 13) || (c == 34) || (c == 92)) { p += w; continue 's3; }
-  { let e = f_ECHAR(inp, p, fl); if e >= 0 { p = e as usize; fl.m_esc = true; continue 's3; } }
-  { let e = f_UCHAR(inp, p, fl); if e >= 0 { p = e as usize; fl.m_esc = true; continue 's3; } }
-  break; }
-}
+        's3: loop {
+            if p >= len {
+                fl.hit_end = true;
+                break;
+            }
+            let c = u32::from(inp[p]);
+            let w = 1;
+            if !((c == 10) || (c == 13) || (c == 34) || (c == 92)) {
+                p += w;
+                continue 's3;
+            }
+            {
+                let e = f_ECHAR(inp, p, fl);
+                if e >= 0 {
+                    p = e as usize;
+                    fl.m_esc = true;
+                    continue 's3;
+                }
+            }
+            {
+                let e = f_UCHAR(inp, p, fl);
+                if e >= 0 {
+                    p = e as usize;
+                    fl.m_esc = true;
+                    continue 's3;
+                }
+            }
+            break;
+        }
+    }
     if !fail {
-if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 34 { p += 1; } else { fail = true; }
-}
-    if fail { -1 } else { p as isize }
+        if p + 1 > len {
+            fl.hit_end = true;
+            fail = true;
+        } else if inp[p] == 34 {
+            p += 1;
+        } else {
+            fail = true;
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_STRING_LITERAL_SINGLE_QUOTE(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1054,19 +2142,60 @@ fn m_STRING_LITERAL_SINGLE_QUOTE(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 39 { p += 1; } else { fail = true; }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 39 {
+        p += 1;
+    } else {
+        fail = true;
+    }
     if !fail {
-'s4: loop { if p >= len { fl.hit_end = true; break; }
-  let c = u32::from(inp[p]); let w = 1;
-  if !((c == 10) || (c == 13) || (c == 39) || (c == 92)) { p += w; continue 's4; }
-  { let e = f_ECHAR(inp, p, fl); if e >= 0 { p = e as usize; fl.m_esc = true; continue 's4; } }
-  { let e = f_UCHAR(inp, p, fl); if e >= 0 { p = e as usize; fl.m_esc = true; continue 's4; } }
-  break; }
-}
+        's4: loop {
+            if p >= len {
+                fl.hit_end = true;
+                break;
+            }
+            let c = u32::from(inp[p]);
+            let w = 1;
+            if !((c == 10) || (c == 13) || (c == 39) || (c == 92)) {
+                p += w;
+                continue 's4;
+            }
+            {
+                let e = f_ECHAR(inp, p, fl);
+                if e >= 0 {
+                    p = e as usize;
+                    fl.m_esc = true;
+                    continue 's4;
+                }
+            }
+            {
+                let e = f_UCHAR(inp, p, fl);
+                if e >= 0 {
+                    p = e as usize;
+                    fl.m_esc = true;
+                    continue 's4;
+                }
+            }
+            break;
+        }
+    }
     if !fail {
-if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 39 { p += 1; } else { fail = true; }
-}
-    if fail { -1 } else { p as isize }
+        if p + 1 > len {
+            fl.hit_end = true;
+            fail = true;
+        } else if inp[p] == 39 {
+            p += 1;
+        } else {
+            fail = true;
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_STRING_LITERAL_LONG_QUOTE(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1074,25 +2203,57 @@ fn m_STRING_LITERAL_LONG_QUOTE(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 3 > len { fl.hit_end = true; fail = true; } else if inp[p] == 34 && inp[p + 1] == 34 && inp[p + 2] == 34 { p += 3; } else { fail = true; }
-    if !fail { let mut done = false;
-loop {
-    if p >= len { fl.hit_end = true; break; }
-    let c = inp[p];
-    if u32::from(c) == 34 {
-        if p + 2 < len {
-            if u32::from(inp[p + 1]) == 34 && u32::from(inp[p + 2]) == 34 { p += 3; done = true; break; }
-            p += 1;
-        } else { fl.hit_end = true; break; }
-    } else if c == 92 {
-        let mut e = f_ECHAR(inp, p, fl);
-        if e < 0 { e = f_UCHAR(inp, p, fl); }
-        if e < 0 { break; }
-        fl.m_esc = true; p = e as usize;
-    } else { p += 1; }
-}
-if !done { fail = true; } }
-    if fail { -1 } else { p as isize }
+    if p + 3 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 34 && inp[p + 1] == 34 && inp[p + 2] == 34 {
+        p += 3;
+    } else {
+        fail = true;
+    }
+    if !fail {
+        let mut done = false;
+        loop {
+            if p >= len {
+                fl.hit_end = true;
+                break;
+            }
+            let c = inp[p];
+            if u32::from(c) == 34 {
+                if p + 2 < len {
+                    if u32::from(inp[p + 1]) == 34 && u32::from(inp[p + 2]) == 34 {
+                        p += 3;
+                        done = true;
+                        break;
+                    }
+                    p += 1;
+                } else {
+                    fl.hit_end = true;
+                    break;
+                }
+            } else if c == 92 {
+                let mut e = f_ECHAR(inp, p, fl);
+                if e < 0 {
+                    e = f_UCHAR(inp, p, fl);
+                }
+                if e < 0 {
+                    break;
+                }
+                fl.m_esc = true;
+                p = e as usize;
+            } else {
+                p += 1;
+            }
+        }
+        if !done {
+            fail = true;
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_STRING_LITERAL_LONG_SINGLE_QUOTE(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1100,25 +2261,57 @@ fn m_STRING_LITERAL_LONG_SINGLE_QUOTE(inp: &[u8], i: usize, fl: &mut Fl) -> isiz
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 3 > len { fl.hit_end = true; fail = true; } else if inp[p] == 39 && inp[p + 1] == 39 && inp[p + 2] == 39 { p += 3; } else { fail = true; }
-    if !fail { let mut done = false;
-loop {
-    if p >= len { fl.hit_end = true; break; }
-    let c = inp[p];
-    if u32::from(c) == 39 {
-        if p + 2 < len {
-            if u32::from(inp[p + 1]) == 39 && u32::from(inp[p + 2]) == 39 { p += 3; done = true; break; }
-            p += 1;
-        } else { fl.hit_end = true; break; }
-    } else if c == 92 {
-        let mut e = f_ECHAR(inp, p, fl);
-        if e < 0 { e = f_UCHAR(inp, p, fl); }
-        if e < 0 { break; }
-        fl.m_esc = true; p = e as usize;
-    } else { p += 1; }
-}
-if !done { fail = true; } }
-    if fail { -1 } else { p as isize }
+    if p + 3 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 39 && inp[p + 1] == 39 && inp[p + 2] == 39 {
+        p += 3;
+    } else {
+        fail = true;
+    }
+    if !fail {
+        let mut done = false;
+        loop {
+            if p >= len {
+                fl.hit_end = true;
+                break;
+            }
+            let c = inp[p];
+            if u32::from(c) == 39 {
+                if p + 2 < len {
+                    if u32::from(inp[p + 1]) == 39 && u32::from(inp[p + 2]) == 39 {
+                        p += 3;
+                        done = true;
+                        break;
+                    }
+                    p += 1;
+                } else {
+                    fl.hit_end = true;
+                    break;
+                }
+            } else if c == 92 {
+                let mut e = f_ECHAR(inp, p, fl);
+                if e < 0 {
+                    e = f_UCHAR(inp, p, fl);
+                }
+                if e < 0 {
+                    break;
+                }
+                fl.m_esc = true;
+                p = e as usize;
+            } else {
+                p += 1;
+            }
+        }
+        if !done {
+            fail = true;
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_0(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1126,8 +2319,19 @@ fn m_LIT_0(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 4 > len { fl.hit_end = true; fail = true; } else if inp[p] == 66 && inp[p + 1] == 65 && inp[p + 2] == 83 && inp[p + 3] == 69 { p += 4; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 4 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 66 && inp[p + 1] == 65 && inp[p + 2] == 83 && inp[p + 3] == 69 {
+        p += 4;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_1(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1135,8 +2339,26 @@ fn m_LIT_1(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 7 > len { fl.hit_end = true; fail = true; } else if inp[p] == 73 && inp[p + 1] == 77 && inp[p + 2] == 80 && inp[p + 3] == 79 && inp[p + 4] == 82 && inp[p + 5] == 84 && inp[p + 6] == 83 { p += 7; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 7 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 73
+        && inp[p + 1] == 77
+        && inp[p + 2] == 80
+        && inp[p + 3] == 79
+        && inp[p + 4] == 82
+        && inp[p + 5] == 84
+        && inp[p + 6] == 83
+    {
+        p += 7;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_2(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1144,8 +2366,25 @@ fn m_LIT_2(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 6 > len { fl.hit_end = true; fail = true; } else if inp[p] == 80 && inp[p + 1] == 82 && inp[p + 2] == 69 && inp[p + 3] == 70 && inp[p + 4] == 73 && inp[p + 5] == 88 { p += 6; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 6 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 80
+        && inp[p + 1] == 82
+        && inp[p + 2] == 69
+        && inp[p + 3] == 70
+        && inp[p + 4] == 73
+        && inp[p + 5] == 88
+    {
+        p += 6;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_3(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1153,8 +2392,24 @@ fn m_LIT_3(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 5 > len { fl.hit_end = true; fail = true; } else if inp[p] == 115 && inp[p + 1] == 104 && inp[p + 2] == 97 && inp[p + 3] == 112 && inp[p + 4] == 101 { p += 5; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 5 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 115
+        && inp[p + 1] == 104
+        && inp[p + 2] == 97
+        && inp[p + 3] == 112
+        && inp[p + 4] == 101
+    {
+        p += 5;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_4(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1162,8 +2417,29 @@ fn m_LIT_4(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 10 > len { fl.hit_end = true; fail = true; } else if inp[p] == 115 && inp[p + 1] == 104 && inp[p + 2] == 97 && inp[p + 3] == 112 && inp[p + 4] == 101 && inp[p + 5] == 67 && inp[p + 6] == 108 && inp[p + 7] == 97 && inp[p + 8] == 115 && inp[p + 9] == 115 { p += 10; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 10 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 115
+        && inp[p + 1] == 104
+        && inp[p + 2] == 97
+        && inp[p + 3] == 112
+        && inp[p + 4] == 101
+        && inp[p + 5] == 67
+        && inp[p + 6] == 108
+        && inp[p + 7] == 97
+        && inp[p + 8] == 115
+        && inp[p + 9] == 115
+    {
+        p += 10;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_5(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1171,8 +2447,19 @@ fn m_LIT_5(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 2 > len { fl.hit_end = true; fail = true; } else if inp[p] == 45 && inp[p + 1] == 62 { p += 2; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 2 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 45 && inp[p + 1] == 62 {
+        p += 2;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_6(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1180,8 +2467,19 @@ fn m_LIT_6(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 123 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 123 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_7(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1189,8 +2487,19 @@ fn m_LIT_7(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 125 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 125 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_8(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1198,8 +2507,19 @@ fn m_LIT_8(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 46 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 46 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_9(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1207,8 +2527,19 @@ fn m_LIT_9(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 124 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 124 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_10(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1216,8 +2547,19 @@ fn m_LIT_10(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 33 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 33 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_11(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1225,8 +2567,19 @@ fn m_LIT_11(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 61 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 61 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_12(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1234,8 +2587,29 @@ fn m_LIT_12(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 10 > len { fl.hit_end = true; fail = true; } else if inp[p] == 116 && inp[p + 1] == 97 && inp[p + 2] == 114 && inp[p + 3] == 103 && inp[p + 4] == 101 && inp[p + 5] == 116 && inp[p + 6] == 78 && inp[p + 7] == 111 && inp[p + 8] == 100 && inp[p + 9] == 101 { p += 10; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 10 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 116
+        && inp[p + 1] == 97
+        && inp[p + 2] == 114
+        && inp[p + 3] == 103
+        && inp[p + 4] == 101
+        && inp[p + 5] == 116
+        && inp[p + 6] == 78
+        && inp[p + 7] == 111
+        && inp[p + 8] == 100
+        && inp[p + 9] == 101
+    {
+        p += 10;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_13(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1243,8 +2617,34 @@ fn m_LIT_13(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 15 > len { fl.hit_end = true; fail = true; } else if inp[p] == 116 && inp[p + 1] == 97 && inp[p + 2] == 114 && inp[p + 3] == 103 && inp[p + 4] == 101 && inp[p + 5] == 116 && inp[p + 6] == 79 && inp[p + 7] == 98 && inp[p + 8] == 106 && inp[p + 9] == 101 && inp[p + 10] == 99 && inp[p + 11] == 116 && inp[p + 12] == 115 && inp[p + 13] == 79 && inp[p + 14] == 102 { p += 15; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 15 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 116
+        && inp[p + 1] == 97
+        && inp[p + 2] == 114
+        && inp[p + 3] == 103
+        && inp[p + 4] == 101
+        && inp[p + 5] == 116
+        && inp[p + 6] == 79
+        && inp[p + 7] == 98
+        && inp[p + 8] == 106
+        && inp[p + 9] == 101
+        && inp[p + 10] == 99
+        && inp[p + 11] == 116
+        && inp[p + 12] == 115
+        && inp[p + 13] == 79
+        && inp[p + 14] == 102
+    {
+        p += 15;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_14(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1252,8 +2652,35 @@ fn m_LIT_14(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 16 > len { fl.hit_end = true; fail = true; } else if inp[p] == 116 && inp[p + 1] == 97 && inp[p + 2] == 114 && inp[p + 3] == 103 && inp[p + 4] == 101 && inp[p + 5] == 116 && inp[p + 6] == 83 && inp[p + 7] == 117 && inp[p + 8] == 98 && inp[p + 9] == 106 && inp[p + 10] == 101 && inp[p + 11] == 99 && inp[p + 12] == 116 && inp[p + 13] == 115 && inp[p + 14] == 79 && inp[p + 15] == 102 { p += 16; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 16 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 116
+        && inp[p + 1] == 97
+        && inp[p + 2] == 114
+        && inp[p + 3] == 103
+        && inp[p + 4] == 101
+        && inp[p + 5] == 116
+        && inp[p + 6] == 83
+        && inp[p + 7] == 117
+        && inp[p + 8] == 98
+        && inp[p + 9] == 106
+        && inp[p + 10] == 101
+        && inp[p + 11] == 99
+        && inp[p + 12] == 116
+        && inp[p + 13] == 115
+        && inp[p + 14] == 79
+        && inp[p + 15] == 102
+    {
+        p += 16;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_15(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1261,8 +2688,30 @@ fn m_LIT_15(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 11 > len { fl.hit_end = true; fail = true; } else if inp[p] == 100 && inp[p + 1] == 101 && inp[p + 2] == 97 && inp[p + 3] == 99 && inp[p + 4] == 116 && inp[p + 5] == 105 && inp[p + 6] == 118 && inp[p + 7] == 97 && inp[p + 8] == 116 && inp[p + 9] == 101 && inp[p + 10] == 100 { p += 11; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 11 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 100
+        && inp[p + 1] == 101
+        && inp[p + 2] == 97
+        && inp[p + 3] == 99
+        && inp[p + 4] == 116
+        && inp[p + 5] == 105
+        && inp[p + 6] == 118
+        && inp[p + 7] == 97
+        && inp[p + 8] == 116
+        && inp[p + 9] == 101
+        && inp[p + 10] == 100
+    {
+        p += 11;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_16(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1270,8 +2719,27 @@ fn m_LIT_16(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 8 > len { fl.hit_end = true; fail = true; } else if inp[p] == 115 && inp[p + 1] == 101 && inp[p + 2] == 118 && inp[p + 3] == 101 && inp[p + 4] == 114 && inp[p + 5] == 105 && inp[p + 6] == 116 && inp[p + 7] == 121 { p += 8; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 8 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 115
+        && inp[p + 1] == 101
+        && inp[p + 2] == 118
+        && inp[p + 3] == 101
+        && inp[p + 4] == 114
+        && inp[p + 5] == 105
+        && inp[p + 6] == 116
+        && inp[p + 7] == 121
+    {
+        p += 8;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_17(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1279,8 +2747,26 @@ fn m_LIT_17(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 7 > len { fl.hit_end = true; fail = true; } else if inp[p] == 109 && inp[p + 1] == 101 && inp[p + 2] == 115 && inp[p + 3] == 115 && inp[p + 4] == 97 && inp[p + 5] == 103 && inp[p + 6] == 101 { p += 7; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 7 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 109
+        && inp[p + 1] == 101
+        && inp[p + 2] == 115
+        && inp[p + 3] == 115
+        && inp[p + 4] == 97
+        && inp[p + 5] == 103
+        && inp[p + 6] == 101
+    {
+        p += 7;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_18(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1288,8 +2774,24 @@ fn m_LIT_18(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 5 > len { fl.hit_end = true; fail = true; } else if inp[p] == 99 && inp[p + 1] == 108 && inp[p + 2] == 97 && inp[p + 3] == 115 && inp[p + 4] == 115 { p += 5; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 5 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 99
+        && inp[p + 1] == 108
+        && inp[p + 2] == 97
+        && inp[p + 3] == 115
+        && inp[p + 4] == 115
+    {
+        p += 5;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_19(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1297,8 +2799,27 @@ fn m_LIT_19(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 8 > len { fl.hit_end = true; fail = true; } else if inp[p] == 100 && inp[p + 1] == 97 && inp[p + 2] == 116 && inp[p + 3] == 97 && inp[p + 4] == 116 && inp[p + 5] == 121 && inp[p + 6] == 112 && inp[p + 7] == 101 { p += 8; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 8 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 100
+        && inp[p + 1] == 97
+        && inp[p + 2] == 116
+        && inp[p + 3] == 97
+        && inp[p + 4] == 116
+        && inp[p + 5] == 121
+        && inp[p + 6] == 112
+        && inp[p + 7] == 101
+    {
+        p += 8;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_20(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1306,8 +2827,27 @@ fn m_LIT_20(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 8 > len { fl.hit_end = true; fail = true; } else if inp[p] == 110 && inp[p + 1] == 111 && inp[p + 2] == 100 && inp[p + 3] == 101 && inp[p + 4] == 75 && inp[p + 5] == 105 && inp[p + 6] == 110 && inp[p + 7] == 100 { p += 8; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 8 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 110
+        && inp[p + 1] == 111
+        && inp[p + 2] == 100
+        && inp[p + 3] == 101
+        && inp[p + 4] == 75
+        && inp[p + 5] == 105
+        && inp[p + 6] == 110
+        && inp[p + 7] == 100
+    {
+        p += 8;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_21(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1315,8 +2855,31 @@ fn m_LIT_21(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 12 > len { fl.hit_end = true; fail = true; } else if inp[p] == 109 && inp[p + 1] == 105 && inp[p + 2] == 110 && inp[p + 3] == 69 && inp[p + 4] == 120 && inp[p + 5] == 99 && inp[p + 6] == 108 && inp[p + 7] == 117 && inp[p + 8] == 115 && inp[p + 9] == 105 && inp[p + 10] == 118 && inp[p + 11] == 101 { p += 12; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 12 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 109
+        && inp[p + 1] == 105
+        && inp[p + 2] == 110
+        && inp[p + 3] == 69
+        && inp[p + 4] == 120
+        && inp[p + 5] == 99
+        && inp[p + 6] == 108
+        && inp[p + 7] == 117
+        && inp[p + 8] == 115
+        && inp[p + 9] == 105
+        && inp[p + 10] == 118
+        && inp[p + 11] == 101
+    {
+        p += 12;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_22(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1324,8 +2887,31 @@ fn m_LIT_22(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 12 > len { fl.hit_end = true; fail = true; } else if inp[p] == 109 && inp[p + 1] == 105 && inp[p + 2] == 110 && inp[p + 3] == 73 && inp[p + 4] == 110 && inp[p + 5] == 99 && inp[p + 6] == 108 && inp[p + 7] == 117 && inp[p + 8] == 115 && inp[p + 9] == 105 && inp[p + 10] == 118 && inp[p + 11] == 101 { p += 12; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 12 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 109
+        && inp[p + 1] == 105
+        && inp[p + 2] == 110
+        && inp[p + 3] == 73
+        && inp[p + 4] == 110
+        && inp[p + 5] == 99
+        && inp[p + 6] == 108
+        && inp[p + 7] == 117
+        && inp[p + 8] == 115
+        && inp[p + 9] == 105
+        && inp[p + 10] == 118
+        && inp[p + 11] == 101
+    {
+        p += 12;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_23(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1333,8 +2919,31 @@ fn m_LIT_23(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 12 > len { fl.hit_end = true; fail = true; } else if inp[p] == 109 && inp[p + 1] == 97 && inp[p + 2] == 120 && inp[p + 3] == 69 && inp[p + 4] == 120 && inp[p + 5] == 99 && inp[p + 6] == 108 && inp[p + 7] == 117 && inp[p + 8] == 115 && inp[p + 9] == 105 && inp[p + 10] == 118 && inp[p + 11] == 101 { p += 12; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 12 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 109
+        && inp[p + 1] == 97
+        && inp[p + 2] == 120
+        && inp[p + 3] == 69
+        && inp[p + 4] == 120
+        && inp[p + 5] == 99
+        && inp[p + 6] == 108
+        && inp[p + 7] == 117
+        && inp[p + 8] == 115
+        && inp[p + 9] == 105
+        && inp[p + 10] == 118
+        && inp[p + 11] == 101
+    {
+        p += 12;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_24(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1342,8 +2951,31 @@ fn m_LIT_24(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 12 > len { fl.hit_end = true; fail = true; } else if inp[p] == 109 && inp[p + 1] == 97 && inp[p + 2] == 120 && inp[p + 3] == 73 && inp[p + 4] == 110 && inp[p + 5] == 99 && inp[p + 6] == 108 && inp[p + 7] == 117 && inp[p + 8] == 115 && inp[p + 9] == 105 && inp[p + 10] == 118 && inp[p + 11] == 101 { p += 12; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 12 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 109
+        && inp[p + 1] == 97
+        && inp[p + 2] == 120
+        && inp[p + 3] == 73
+        && inp[p + 4] == 110
+        && inp[p + 5] == 99
+        && inp[p + 6] == 108
+        && inp[p + 7] == 117
+        && inp[p + 8] == 115
+        && inp[p + 9] == 105
+        && inp[p + 10] == 118
+        && inp[p + 11] == 101
+    {
+        p += 12;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_25(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1351,8 +2983,28 @@ fn m_LIT_25(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 9 > len { fl.hit_end = true; fail = true; } else if inp[p] == 109 && inp[p + 1] == 105 && inp[p + 2] == 110 && inp[p + 3] == 76 && inp[p + 4] == 101 && inp[p + 5] == 110 && inp[p + 6] == 103 && inp[p + 7] == 116 && inp[p + 8] == 104 { p += 9; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 9 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 109
+        && inp[p + 1] == 105
+        && inp[p + 2] == 110
+        && inp[p + 3] == 76
+        && inp[p + 4] == 101
+        && inp[p + 5] == 110
+        && inp[p + 6] == 103
+        && inp[p + 7] == 116
+        && inp[p + 8] == 104
+    {
+        p += 9;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_26(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1360,8 +3012,28 @@ fn m_LIT_26(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 9 > len { fl.hit_end = true; fail = true; } else if inp[p] == 109 && inp[p + 1] == 97 && inp[p + 2] == 120 && inp[p + 3] == 76 && inp[p + 4] == 101 && inp[p + 5] == 110 && inp[p + 6] == 103 && inp[p + 7] == 116 && inp[p + 8] == 104 { p += 9; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 9 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 109
+        && inp[p + 1] == 97
+        && inp[p + 2] == 120
+        && inp[p + 3] == 76
+        && inp[p + 4] == 101
+        && inp[p + 5] == 110
+        && inp[p + 6] == 103
+        && inp[p + 7] == 116
+        && inp[p + 8] == 104
+    {
+        p += 9;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_27(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1369,8 +3041,26 @@ fn m_LIT_27(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 7 > len { fl.hit_end = true; fail = true; } else if inp[p] == 112 && inp[p + 1] == 97 && inp[p + 2] == 116 && inp[p + 3] == 116 && inp[p + 4] == 101 && inp[p + 5] == 114 && inp[p + 6] == 110 { p += 7; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 7 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 112
+        && inp[p + 1] == 97
+        && inp[p + 2] == 116
+        && inp[p + 3] == 116
+        && inp[p + 4] == 101
+        && inp[p + 5] == 114
+        && inp[p + 6] == 110
+    {
+        p += 7;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_28(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1378,8 +3068,24 @@ fn m_LIT_28(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 5 > len { fl.hit_end = true; fail = true; } else if inp[p] == 102 && inp[p + 1] == 108 && inp[p + 2] == 97 && inp[p + 3] == 103 && inp[p + 4] == 115 { p += 5; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 5 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 102
+        && inp[p + 1] == 108
+        && inp[p + 2] == 97
+        && inp[p + 3] == 103
+        && inp[p + 4] == 115
+    {
+        p += 5;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_29(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1387,8 +3093,29 @@ fn m_LIT_29(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 10 > len { fl.hit_end = true; fail = true; } else if inp[p] == 108 && inp[p + 1] == 97 && inp[p + 2] == 110 && inp[p + 3] == 103 && inp[p + 4] == 117 && inp[p + 5] == 97 && inp[p + 6] == 103 && inp[p + 7] == 101 && inp[p + 8] == 73 && inp[p + 9] == 110 { p += 10; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 10 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 108
+        && inp[p + 1] == 97
+        && inp[p + 2] == 110
+        && inp[p + 3] == 103
+        && inp[p + 4] == 117
+        && inp[p + 5] == 97
+        && inp[p + 6] == 103
+        && inp[p + 7] == 101
+        && inp[p + 8] == 73
+        && inp[p + 9] == 110
+    {
+        p += 10;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_30(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1396,8 +3123,29 @@ fn m_LIT_30(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 10 > len { fl.hit_end = true; fail = true; } else if inp[p] == 117 && inp[p + 1] == 110 && inp[p + 2] == 105 && inp[p + 3] == 113 && inp[p + 4] == 117 && inp[p + 5] == 101 && inp[p + 6] == 76 && inp[p + 7] == 97 && inp[p + 8] == 110 && inp[p + 9] == 103 { p += 10; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 10 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 117
+        && inp[p + 1] == 110
+        && inp[p + 2] == 105
+        && inp[p + 3] == 113
+        && inp[p + 4] == 117
+        && inp[p + 5] == 101
+        && inp[p + 6] == 76
+        && inp[p + 7] == 97
+        && inp[p + 8] == 110
+        && inp[p + 9] == 103
+    {
+        p += 10;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_31(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1405,8 +3153,25 @@ fn m_LIT_31(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 6 > len { fl.hit_end = true; fail = true; } else if inp[p] == 101 && inp[p + 1] == 113 && inp[p + 2] == 117 && inp[p + 3] == 97 && inp[p + 4] == 108 && inp[p + 5] == 115 { p += 6; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 6 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 101
+        && inp[p + 1] == 113
+        && inp[p + 2] == 117
+        && inp[p + 3] == 97
+        && inp[p + 4] == 108
+        && inp[p + 5] == 115
+    {
+        p += 6;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_32(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1414,8 +3179,27 @@ fn m_LIT_32(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 8 > len { fl.hit_end = true; fail = true; } else if inp[p] == 100 && inp[p + 1] == 105 && inp[p + 2] == 115 && inp[p + 3] == 106 && inp[p + 4] == 111 && inp[p + 5] == 105 && inp[p + 6] == 110 && inp[p + 7] == 116 { p += 8; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 8 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 100
+        && inp[p + 1] == 105
+        && inp[p + 2] == 115
+        && inp[p + 3] == 106
+        && inp[p + 4] == 111
+        && inp[p + 5] == 105
+        && inp[p + 6] == 110
+        && inp[p + 7] == 116
+    {
+        p += 8;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_33(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1423,8 +3207,27 @@ fn m_LIT_33(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 8 > len { fl.hit_end = true; fail = true; } else if inp[p] == 108 && inp[p + 1] == 101 && inp[p + 2] == 115 && inp[p + 3] == 115 && inp[p + 4] == 84 && inp[p + 5] == 104 && inp[p + 6] == 97 && inp[p + 7] == 110 { p += 8; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 8 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 108
+        && inp[p + 1] == 101
+        && inp[p + 2] == 115
+        && inp[p + 3] == 115
+        && inp[p + 4] == 84
+        && inp[p + 5] == 104
+        && inp[p + 6] == 97
+        && inp[p + 7] == 110
+    {
+        p += 8;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_34(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1432,8 +3235,35 @@ fn m_LIT_34(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 16 > len { fl.hit_end = true; fail = true; } else if inp[p] == 108 && inp[p + 1] == 101 && inp[p + 2] == 115 && inp[p + 3] == 115 && inp[p + 4] == 84 && inp[p + 5] == 104 && inp[p + 6] == 97 && inp[p + 7] == 110 && inp[p + 8] == 79 && inp[p + 9] == 114 && inp[p + 10] == 69 && inp[p + 11] == 113 && inp[p + 12] == 117 && inp[p + 13] == 97 && inp[p + 14] == 108 && inp[p + 15] == 115 { p += 16; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 16 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 108
+        && inp[p + 1] == 101
+        && inp[p + 2] == 115
+        && inp[p + 3] == 115
+        && inp[p + 4] == 84
+        && inp[p + 5] == 104
+        && inp[p + 6] == 97
+        && inp[p + 7] == 110
+        && inp[p + 8] == 79
+        && inp[p + 9] == 114
+        && inp[p + 10] == 69
+        && inp[p + 11] == 113
+        && inp[p + 12] == 117
+        && inp[p + 13] == 97
+        && inp[p + 14] == 108
+        && inp[p + 15] == 115
+    {
+        p += 16;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_35(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1441,8 +3271,38 @@ fn m_LIT_35(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 19 > len { fl.hit_end = true; fail = true; } else if inp[p] == 113 && inp[p + 1] == 117 && inp[p + 2] == 97 && inp[p + 3] == 108 && inp[p + 4] == 105 && inp[p + 5] == 102 && inp[p + 6] == 105 && inp[p + 7] == 101 && inp[p + 8] == 100 && inp[p + 9] == 86 && inp[p + 10] == 97 && inp[p + 11] == 108 && inp[p + 12] == 117 && inp[p + 13] == 101 && inp[p + 14] == 83 && inp[p + 15] == 104 && inp[p + 16] == 97 && inp[p + 17] == 112 && inp[p + 18] == 101 { p += 19; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 19 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 113
+        && inp[p + 1] == 117
+        && inp[p + 2] == 97
+        && inp[p + 3] == 108
+        && inp[p + 4] == 105
+        && inp[p + 5] == 102
+        && inp[p + 6] == 105
+        && inp[p + 7] == 101
+        && inp[p + 8] == 100
+        && inp[p + 9] == 86
+        && inp[p + 10] == 97
+        && inp[p + 11] == 108
+        && inp[p + 12] == 117
+        && inp[p + 13] == 101
+        && inp[p + 14] == 83
+        && inp[p + 15] == 104
+        && inp[p + 16] == 97
+        && inp[p + 17] == 112
+        && inp[p + 18] == 101
+    {
+        p += 19;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_36(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1450,8 +3310,36 @@ fn m_LIT_36(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 17 > len { fl.hit_end = true; fail = true; } else if inp[p] == 113 && inp[p + 1] == 117 && inp[p + 2] == 97 && inp[p + 3] == 108 && inp[p + 4] == 105 && inp[p + 5] == 102 && inp[p + 6] == 105 && inp[p + 7] == 101 && inp[p + 8] == 100 && inp[p + 9] == 77 && inp[p + 10] == 105 && inp[p + 11] == 110 && inp[p + 12] == 67 && inp[p + 13] == 111 && inp[p + 14] == 117 && inp[p + 15] == 110 && inp[p + 16] == 116 { p += 17; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 17 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 113
+        && inp[p + 1] == 117
+        && inp[p + 2] == 97
+        && inp[p + 3] == 108
+        && inp[p + 4] == 105
+        && inp[p + 5] == 102
+        && inp[p + 6] == 105
+        && inp[p + 7] == 101
+        && inp[p + 8] == 100
+        && inp[p + 9] == 77
+        && inp[p + 10] == 105
+        && inp[p + 11] == 110
+        && inp[p + 12] == 67
+        && inp[p + 13] == 111
+        && inp[p + 14] == 117
+        && inp[p + 15] == 110
+        && inp[p + 16] == 116
+    {
+        p += 17;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_37(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1459,8 +3347,36 @@ fn m_LIT_37(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 17 > len { fl.hit_end = true; fail = true; } else if inp[p] == 113 && inp[p + 1] == 117 && inp[p + 2] == 97 && inp[p + 3] == 108 && inp[p + 4] == 105 && inp[p + 5] == 102 && inp[p + 6] == 105 && inp[p + 7] == 101 && inp[p + 8] == 100 && inp[p + 9] == 77 && inp[p + 10] == 97 && inp[p + 11] == 120 && inp[p + 12] == 67 && inp[p + 13] == 111 && inp[p + 14] == 117 && inp[p + 15] == 110 && inp[p + 16] == 116 { p += 17; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 17 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 113
+        && inp[p + 1] == 117
+        && inp[p + 2] == 97
+        && inp[p + 3] == 108
+        && inp[p + 4] == 105
+        && inp[p + 5] == 102
+        && inp[p + 6] == 105
+        && inp[p + 7] == 101
+        && inp[p + 8] == 100
+        && inp[p + 9] == 77
+        && inp[p + 10] == 97
+        && inp[p + 11] == 120
+        && inp[p + 12] == 67
+        && inp[p + 13] == 111
+        && inp[p + 14] == 117
+        && inp[p + 15] == 110
+        && inp[p + 16] == 116
+    {
+        p += 17;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_38(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1468,8 +3384,47 @@ fn m_LIT_38(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 28 > len { fl.hit_end = true; fail = true; } else if inp[p] == 113 && inp[p + 1] == 117 && inp[p + 2] == 97 && inp[p + 3] == 108 && inp[p + 4] == 105 && inp[p + 5] == 102 && inp[p + 6] == 105 && inp[p + 7] == 101 && inp[p + 8] == 100 && inp[p + 9] == 86 && inp[p + 10] == 97 && inp[p + 11] == 108 && inp[p + 12] == 117 && inp[p + 13] == 101 && inp[p + 14] == 83 && inp[p + 15] == 104 && inp[p + 16] == 97 && inp[p + 17] == 112 && inp[p + 18] == 101 && inp[p + 19] == 115 && inp[p + 20] == 68 && inp[p + 21] == 105 && inp[p + 22] == 115 && inp[p + 23] == 106 && inp[p + 24] == 111 && inp[p + 25] == 105 && inp[p + 26] == 110 && inp[p + 27] == 116 { p += 28; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 28 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 113
+        && inp[p + 1] == 117
+        && inp[p + 2] == 97
+        && inp[p + 3] == 108
+        && inp[p + 4] == 105
+        && inp[p + 5] == 102
+        && inp[p + 6] == 105
+        && inp[p + 7] == 101
+        && inp[p + 8] == 100
+        && inp[p + 9] == 86
+        && inp[p + 10] == 97
+        && inp[p + 11] == 108
+        && inp[p + 12] == 117
+        && inp[p + 13] == 101
+        && inp[p + 14] == 83
+        && inp[p + 15] == 104
+        && inp[p + 16] == 97
+        && inp[p + 17] == 112
+        && inp[p + 18] == 101
+        && inp[p + 19] == 115
+        && inp[p + 20] == 68
+        && inp[p + 21] == 105
+        && inp[p + 22] == 115
+        && inp[p + 23] == 106
+        && inp[p + 24] == 111
+        && inp[p + 25] == 105
+        && inp[p + 26] == 110
+        && inp[p + 27] == 116
+    {
+        p += 28;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_39(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1477,8 +3432,25 @@ fn m_LIT_39(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 6 > len { fl.hit_end = true; fail = true; } else if inp[p] == 99 && inp[p + 1] == 108 && inp[p + 2] == 111 && inp[p + 3] == 115 && inp[p + 4] == 101 && inp[p + 5] == 100 { p += 6; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 6 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 99
+        && inp[p + 1] == 108
+        && inp[p + 2] == 111
+        && inp[p + 3] == 115
+        && inp[p + 4] == 101
+        && inp[p + 5] == 100
+    {
+        p += 6;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_40(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1486,8 +3458,36 @@ fn m_LIT_40(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 17 > len { fl.hit_end = true; fail = true; } else if inp[p] == 105 && inp[p + 1] == 103 && inp[p + 2] == 110 && inp[p + 3] == 111 && inp[p + 4] == 114 && inp[p + 5] == 101 && inp[p + 6] == 100 && inp[p + 7] == 80 && inp[p + 8] == 114 && inp[p + 9] == 111 && inp[p + 10] == 112 && inp[p + 11] == 101 && inp[p + 12] == 114 && inp[p + 13] == 116 && inp[p + 14] == 105 && inp[p + 15] == 101 && inp[p + 16] == 115 { p += 17; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 17 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 105
+        && inp[p + 1] == 103
+        && inp[p + 2] == 110
+        && inp[p + 3] == 111
+        && inp[p + 4] == 114
+        && inp[p + 5] == 101
+        && inp[p + 6] == 100
+        && inp[p + 7] == 80
+        && inp[p + 8] == 114
+        && inp[p + 9] == 111
+        && inp[p + 10] == 112
+        && inp[p + 11] == 101
+        && inp[p + 12] == 114
+        && inp[p + 13] == 116
+        && inp[p + 14] == 105
+        && inp[p + 15] == 101
+        && inp[p + 16] == 115
+    {
+        p += 17;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_41(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1495,8 +3495,27 @@ fn m_LIT_41(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 8 > len { fl.hit_end = true; fail = true; } else if inp[p] == 104 && inp[p + 1] == 97 && inp[p + 2] == 115 && inp[p + 3] == 86 && inp[p + 4] == 97 && inp[p + 5] == 108 && inp[p + 6] == 117 && inp[p + 7] == 101 { p += 8; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 8 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 104
+        && inp[p + 1] == 97
+        && inp[p + 2] == 115
+        && inp[p + 3] == 86
+        && inp[p + 4] == 97
+        && inp[p + 5] == 108
+        && inp[p + 6] == 117
+        && inp[p + 7] == 101
+    {
+        p += 8;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_42(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1504,8 +3523,19 @@ fn m_LIT_42(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 2 > len { fl.hit_end = true; fail = true; } else if inp[p] == 105 && inp[p + 1] == 110 { p += 2; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 2 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 105 && inp[p + 1] == 110 {
+        p += 2;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_43(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1513,8 +3543,31 @@ fn m_LIT_43(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 12 > len { fl.hit_end = true; fail = true; } else if inp[p] == 114 && inp[p + 1] == 101 && inp[p + 2] == 105 && inp[p + 3] == 102 && inp[p + 4] == 105 && inp[p + 5] == 101 && inp[p + 6] == 114 && inp[p + 7] == 83 && inp[p + 8] == 104 && inp[p + 9] == 97 && inp[p + 10] == 112 && inp[p + 11] == 101 { p += 12; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 12 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 114
+        && inp[p + 1] == 101
+        && inp[p + 2] == 105
+        && inp[p + 3] == 102
+        && inp[p + 4] == 105
+        && inp[p + 5] == 101
+        && inp[p + 6] == 114
+        && inp[p + 7] == 83
+        && inp[p + 8] == 104
+        && inp[p + 9] == 97
+        && inp[p + 10] == 112
+        && inp[p + 11] == 101
+    {
+        p += 12;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_44(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1522,8 +3575,38 @@ fn m_LIT_44(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 19 > len { fl.hit_end = true; fail = true; } else if inp[p] == 114 && inp[p + 1] == 101 && inp[p + 2] == 105 && inp[p + 3] == 102 && inp[p + 4] == 105 && inp[p + 5] == 99 && inp[p + 6] == 97 && inp[p + 7] == 116 && inp[p + 8] == 105 && inp[p + 9] == 111 && inp[p + 10] == 110 && inp[p + 11] == 82 && inp[p + 12] == 101 && inp[p + 13] == 113 && inp[p + 14] == 117 && inp[p + 15] == 105 && inp[p + 16] == 114 && inp[p + 17] == 101 && inp[p + 18] == 100 { p += 19; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 19 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 114
+        && inp[p + 1] == 101
+        && inp[p + 2] == 105
+        && inp[p + 3] == 102
+        && inp[p + 4] == 105
+        && inp[p + 5] == 99
+        && inp[p + 6] == 97
+        && inp[p + 7] == 116
+        && inp[p + 8] == 105
+        && inp[p + 9] == 111
+        && inp[p + 10] == 110
+        && inp[p + 11] == 82
+        && inp[p + 12] == 101
+        && inp[p + 13] == 113
+        && inp[p + 14] == 117
+        && inp[p + 15] == 105
+        && inp[p + 16] == 114
+        && inp[p + 17] == 101
+        && inp[p + 18] == 100
+    {
+        p += 19;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_45(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1531,8 +3614,19 @@ fn m_LIT_45(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 91 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 91 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_46(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1540,8 +3634,19 @@ fn m_LIT_46(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 2 > len { fl.hit_end = true; fail = true; } else if inp[p] == 46 && inp[p + 1] == 46 { p += 2; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 2 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 46 && inp[p + 1] == 46 {
+        p += 2;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_47(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1549,8 +3654,19 @@ fn m_LIT_47(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 93 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 93 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_48(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1558,8 +3674,19 @@ fn m_LIT_48(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 42 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 42 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_49(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1567,8 +3694,28 @@ fn m_LIT_49(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 9 > len { fl.hit_end = true; fail = true; } else if inp[p] == 66 && inp[p + 1] == 108 && inp[p + 2] == 97 && inp[p + 3] == 110 && inp[p + 4] == 107 && inp[p + 5] == 78 && inp[p + 6] == 111 && inp[p + 7] == 100 && inp[p + 8] == 101 { p += 9; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 9 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 66
+        && inp[p + 1] == 108
+        && inp[p + 2] == 97
+        && inp[p + 3] == 110
+        && inp[p + 4] == 107
+        && inp[p + 5] == 78
+        && inp[p + 6] == 111
+        && inp[p + 7] == 100
+        && inp[p + 8] == 101
+    {
+        p += 9;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_50(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1576,8 +3723,19 @@ fn m_LIT_50(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 3 > len { fl.hit_end = true; fail = true; } else if inp[p] == 73 && inp[p + 1] == 82 && inp[p + 2] == 73 { p += 3; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 3 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 73 && inp[p + 1] == 82 && inp[p + 2] == 73 {
+        p += 3;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_51(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1585,8 +3743,26 @@ fn m_LIT_51(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 7 > len { fl.hit_end = true; fail = true; } else if inp[p] == 76 && inp[p + 1] == 105 && inp[p + 2] == 116 && inp[p + 3] == 101 && inp[p + 4] == 114 && inp[p + 5] == 97 && inp[p + 6] == 108 { p += 7; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 7 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 76
+        && inp[p + 1] == 105
+        && inp[p + 2] == 116
+        && inp[p + 3] == 101
+        && inp[p + 4] == 114
+        && inp[p + 5] == 97
+        && inp[p + 6] == 108
+    {
+        p += 7;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_52(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1594,8 +3770,33 @@ fn m_LIT_52(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 14 > len { fl.hit_end = true; fail = true; } else if inp[p] == 66 && inp[p + 1] == 108 && inp[p + 2] == 97 && inp[p + 3] == 110 && inp[p + 4] == 107 && inp[p + 5] == 78 && inp[p + 6] == 111 && inp[p + 7] == 100 && inp[p + 8] == 101 && inp[p + 9] == 79 && inp[p + 10] == 114 && inp[p + 11] == 73 && inp[p + 12] == 82 && inp[p + 13] == 73 { p += 14; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 14 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 66
+        && inp[p + 1] == 108
+        && inp[p + 2] == 97
+        && inp[p + 3] == 110
+        && inp[p + 4] == 107
+        && inp[p + 5] == 78
+        && inp[p + 6] == 111
+        && inp[p + 7] == 100
+        && inp[p + 8] == 101
+        && inp[p + 9] == 79
+        && inp[p + 10] == 114
+        && inp[p + 11] == 73
+        && inp[p + 12] == 82
+        && inp[p + 13] == 73
+    {
+        p += 14;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_53(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1603,8 +3804,37 @@ fn m_LIT_53(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 18 > len { fl.hit_end = true; fail = true; } else if inp[p] == 66 && inp[p + 1] == 108 && inp[p + 2] == 97 && inp[p + 3] == 110 && inp[p + 4] == 107 && inp[p + 5] == 78 && inp[p + 6] == 111 && inp[p + 7] == 100 && inp[p + 8] == 101 && inp[p + 9] == 79 && inp[p + 10] == 114 && inp[p + 11] == 76 && inp[p + 12] == 105 && inp[p + 13] == 116 && inp[p + 14] == 101 && inp[p + 15] == 114 && inp[p + 16] == 97 && inp[p + 17] == 108 { p += 18; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 18 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 66
+        && inp[p + 1] == 108
+        && inp[p + 2] == 97
+        && inp[p + 3] == 110
+        && inp[p + 4] == 107
+        && inp[p + 5] == 78
+        && inp[p + 6] == 111
+        && inp[p + 7] == 100
+        && inp[p + 8] == 101
+        && inp[p + 9] == 79
+        && inp[p + 10] == 114
+        && inp[p + 11] == 76
+        && inp[p + 12] == 105
+        && inp[p + 13] == 116
+        && inp[p + 14] == 101
+        && inp[p + 15] == 114
+        && inp[p + 16] == 97
+        && inp[p + 17] == 108
+    {
+        p += 18;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_54(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1612,8 +3842,31 @@ fn m_LIT_54(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 12 > len { fl.hit_end = true; fail = true; } else if inp[p] == 73 && inp[p + 1] == 82 && inp[p + 2] == 73 && inp[p + 3] == 79 && inp[p + 4] == 114 && inp[p + 5] == 76 && inp[p + 6] == 105 && inp[p + 7] == 116 && inp[p + 8] == 101 && inp[p + 9] == 114 && inp[p + 10] == 97 && inp[p + 11] == 108 { p += 12; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 12 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 73
+        && inp[p + 1] == 82
+        && inp[p + 2] == 73
+        && inp[p + 3] == 79
+        && inp[p + 4] == 114
+        && inp[p + 5] == 76
+        && inp[p + 6] == 105
+        && inp[p + 7] == 116
+        && inp[p + 8] == 101
+        && inp[p + 9] == 114
+        && inp[p + 10] == 97
+        && inp[p + 11] == 108
+    {
+        p += 12;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_55(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1621,8 +3874,29 @@ fn m_LIT_55(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 10 > len { fl.hit_end = true; fail = true; } else if inp[p] == 84 && inp[p + 1] == 114 && inp[p + 2] == 105 && inp[p + 3] == 112 && inp[p + 4] == 108 && inp[p + 5] == 101 && inp[p + 6] == 84 && inp[p + 7] == 101 && inp[p + 8] == 114 && inp[p + 9] == 109 { p += 10; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 10 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 84
+        && inp[p + 1] == 114
+        && inp[p + 2] == 105
+        && inp[p + 3] == 112
+        && inp[p + 4] == 108
+        && inp[p + 5] == 101
+        && inp[p + 6] == 84
+        && inp[p + 7] == 101
+        && inp[p + 8] == 114
+        && inp[p + 9] == 109
+    {
+        p += 10;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_56(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1630,8 +3904,19 @@ fn m_LIT_56(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 64 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 64 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_57(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1639,8 +3924,19 @@ fn m_LIT_57(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 37 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 37 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_58(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1648,8 +3944,19 @@ fn m_LIT_58(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 59 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 59 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_59(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1657,8 +3964,19 @@ fn m_LIT_59(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 47 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 47 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_60(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1666,8 +3984,19 @@ fn m_LIT_60(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 94 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 94 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_61(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1675,8 +4004,19 @@ fn m_LIT_61(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 63 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 63 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_62(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1684,8 +4024,19 @@ fn m_LIT_62(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 43 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 43 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_63(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1693,8 +4044,19 @@ fn m_LIT_63(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 40 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 40 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_64(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1702,8 +4064,19 @@ fn m_LIT_64(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 41 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 41 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_65(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1711,8 +4084,19 @@ fn m_LIT_65(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 3 > len { fl.hit_end = true; fail = true; } else if inp[p] == 60 && inp[p + 1] == 60 && inp[p + 2] == 40 { p += 3; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 3 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 60 && inp[p + 1] == 60 && inp[p + 2] == 40 {
+        p += 3;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_66(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1720,8 +4104,19 @@ fn m_LIT_66(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 3 > len { fl.hit_end = true; fail = true; } else if inp[p] == 41 && inp[p + 1] == 62 && inp[p + 2] == 62 { p += 3; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 3 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 41 && inp[p + 1] == 62 && inp[p + 2] == 62 {
+        p += 3;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_67(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1729,8 +4124,19 @@ fn m_LIT_67(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 2 > len { fl.hit_end = true; fail = true; } else if inp[p] == 94 && inp[p + 1] == 94 { p += 2; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 2 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 94 && inp[p + 1] == 94 {
+        p += 2;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_68(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1738,8 +4144,19 @@ fn m_LIT_68(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 4 > len { fl.hit_end = true; fail = true; } else if inp[p] == 116 && inp[p + 1] == 114 && inp[p + 2] == 117 && inp[p + 3] == 101 { p += 4; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 4 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 116 && inp[p + 1] == 114 && inp[p + 2] == 117 && inp[p + 3] == 101 {
+        p += 4;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_69(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1747,8 +4164,24 @@ fn m_LIT_69(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 5 > len { fl.hit_end = true; fail = true; } else if inp[p] == 102 && inp[p + 1] == 97 && inp[p + 2] == 108 && inp[p + 3] == 115 && inp[p + 4] == 101 { p += 5; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 5 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 102
+        && inp[p + 1] == 97
+        && inp[p + 2] == 108
+        && inp[p + 3] == 115
+        && inp[p + 4] == 101
+    {
+        p += 5;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_70(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1756,8 +4189,19 @@ fn m_LIT_70(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 97 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 97 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_LIT_71(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1765,8 +4209,19 @@ fn m_LIT_71(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 44 { p += 1; } else { fail = true; }
-    if fail { -1 } else { p as isize }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 44 {
+        p += 1;
+    } else {
+        fail = true;
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_SKIP_WS(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1774,11 +4229,35 @@ fn m_SKIP_WS(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p >= len { fl.hit_end = true; fail = true; } else { let c = u32::from(inp[p]); if (c >= 9 && c <= 10) || (c == 13) || (c == 32) { p += 1; } else { fail = true; } }
-    if !fail {
-    loop { if p >= len { fl.hit_end = true; break; } let c = u32::from(inp[p]); if !((c >= 9 && c <= 10) || (c == 13) || (c == 32)) { break; } p += 1; }
+    if p >= len {
+        fl.hit_end = true;
+        fail = true;
+    } else {
+        let c = u32::from(inp[p]);
+        if (c >= 9 && c <= 10) || (c == 13) || (c == 32) {
+            p += 1;
+        } else {
+            fail = true;
+        }
     }
-    if fail { -1 } else { p as isize }
+    if !fail {
+        loop {
+            if p >= len {
+                fl.hit_end = true;
+                break;
+            }
+            let c = u32::from(inp[p]);
+            if !((c >= 9 && c <= 10) || (c == 13) || (c == 32)) {
+                break;
+            }
+            p += 1;
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 fn m_SKIP_COMMENT(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
@@ -1786,11 +4265,32 @@ fn m_SKIP_COMMENT(inp: &[u8], i: usize, fl: &mut Fl) -> isize {
     let mut p = i;
     let mut fail = false;
     fl.m_esc = false;
-    if p + 1 > len { fl.hit_end = true; fail = true; } else if inp[p] == 35 { p += 1; } else { fail = true; }
+    if p + 1 > len {
+        fl.hit_end = true;
+        fail = true;
+    } else if inp[p] == 35 {
+        p += 1;
+    } else {
+        fail = true;
+    }
     if !fail {
-loop { if p >= len { fl.hit_end = true; break; } let c = u32::from(inp[p]); if (c == 10) || (c == 13) { break; } p += 1; }
-}
-    if fail { -1 } else { p as isize }
+        loop {
+            if p >= len {
+                fl.hit_end = true;
+                break;
+            }
+            let c = u32::from(inp[p]);
+            if (c == 10) || (c == 13) {
+                break;
+            }
+            p += 1;
+        }
+    }
+    if fail {
+        -1
+    } else {
+        p as isize
+    }
 }
 
 /* ==================================================================
@@ -1914,8 +4414,32 @@ impl<'i, F: FnMut(Triple)> Machine<'i, F> {
             t_md: -1,
             depth: 0,
             env_base: base_iri.map_or_else(String::new, str::to_string),
-            env_prefixes: HashMap::from([("rdf".to_string(), Rc::from("http://www.w3.org/1999/02/22-rdf-syntax-ns#")), ("rdfs".to_string(), Rc::from("http://www.w3.org/2000/01/rdf-schema#")), ("sh".to_string(), Rc::from("http://www.w3.org/ns/shacl#")), ("xsd".to_string(), Rc::from("http://www.w3.org/2001/XMLSchema#")), ("owl".to_string(), Rc::from("http://www.w3.org/2002/07/owl#"))]),
-            prefix_order: vec!["rdf".to_string(), "rdfs".to_string(), "sh".to_string(), "xsd".to_string(), "owl".to_string()],
+            env_prefixes: HashMap::from([
+                (
+                    "rdf".to_string(),
+                    Rc::from("http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+                ),
+                (
+                    "rdfs".to_string(),
+                    Rc::from("http://www.w3.org/2000/01/rdf-schema#"),
+                ),
+                ("sh".to_string(), Rc::from("http://www.w3.org/ns/shacl#")),
+                (
+                    "xsd".to_string(),
+                    Rc::from("http://www.w3.org/2001/XMLSchema#"),
+                ),
+                (
+                    "owl".to_string(),
+                    Rc::from("http://www.w3.org/2002/07/owl#"),
+                ),
+            ]),
+            prefix_order: vec![
+                "rdf".to_string(),
+                "rdfs".to_string(),
+                "sh".to_string(),
+                "xsd".to_string(),
+                "owl".to_string(),
+            ],
             fresh_ctr: 0,
             push_mode,
 
@@ -1959,7 +4483,9 @@ impl<'i, F: FnMut(Triple)> Machine<'i, F> {
             kc34: Term::NamedNode(Rc::from("http://www.w3.org/ns/shacl#qualifiedValueShape")),
             kc35: Term::NamedNode(Rc::from("http://www.w3.org/ns/shacl#qualifiedMinCount")),
             kc36: Term::NamedNode(Rc::from("http://www.w3.org/ns/shacl#qualifiedMaxCount")),
-            kc37: Term::NamedNode(Rc::from("http://www.w3.org/ns/shacl#qualifiedValueShapesDisjoint")),
+            kc37: Term::NamedNode(Rc::from(
+                "http://www.w3.org/ns/shacl#qualifiedValueShapesDisjoint",
+            )),
             kc38: Term::NamedNode(Rc::from("http://www.w3.org/ns/shacl#closed")),
             kc39: Term::NamedNode(Rc::from("http://www.w3.org/ns/shacl#ignoredProperties")),
             kc40: Term::NamedNode(Rc::from("http://www.w3.org/ns/shacl#hasValue")),
@@ -1984,8 +4510,12 @@ impl<'i, F: FnMut(Triple)> Machine<'i, F> {
             kc59: Term::NamedNode(Rc::from("http://www.w3.org/ns/shacl#zeroOrOnePath")),
             kc60: Term::NamedNode(Rc::from("http://www.w3.org/ns/shacl#zeroOrMorePath")),
             kc61: Term::NamedNode(Rc::from("http://www.w3.org/ns/shacl#oneOrMorePath")),
-            kc62: Term::NamedNode(Rc::from("http://www.w3.org/1999/02/22-rdf-syntax-ns#langString")),
-            kc63: Term::NamedNode(Rc::from("http://www.w3.org/1999/02/22-rdf-syntax-ns#dirLangString")),
+            kc62: Term::NamedNode(Rc::from(
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString",
+            )),
+            kc63: Term::NamedNode(Rc::from(
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#dirLangString",
+            )),
             kc64: Term::NamedNode(Rc::from("http://www.w3.org/2001/XMLSchema#string")),
             kc65: Term::NamedNode(Rc::from("http://www.w3.org/2001/XMLSchema#decimal")),
             kc66: Term::NamedNode(Rc::from("http://www.w3.org/2001/XMLSchema#double")),
@@ -2006,7 +4536,11 @@ impl<'i, F: FnMut(Triple)> Machine<'i, F> {
     }
 
     fn emit_q(&mut self, s: Term, p: Term, o: Term) {
-        let t = Triple { subject: s, predicate: p, object: o };
+        let t = Triple {
+            subject: s,
+            predicate: p,
+            object: o,
+        };
         if self.push_mode {
             self.stmt_buf.push(t);
         } else {
@@ -2029,14 +4563,24 @@ impl<'i, F: FnMut(Triple)> Machine<'i, F> {
 
     fn perr(&self, code: &'static str) -> PErr {
         let (l, c) = self.line_col(self.ts);
-        PErr::Syntax(SyntaxError { message: format!("parse error at line {l}:{c}"), line: l, column: c, code: Some(code) })
+        PErr::Syntax(SyntaxError {
+            message: format!("parse error at line {l}:{c}"),
+            line: l,
+            column: c,
+            code: Some(code),
+        })
     }
 
     fn perr_exp(&self, kind: u16) -> PErr {
         let (l, c) = self.line_col(self.ts);
         PErr::Syntax(SyntaxError {
-            message: format!("expected {} but got {} at line {l}:{c}", TOKEN_NAMES[kind as usize], TOKEN_NAMES[self.tk as usize]),
-            line: l, column: c, code: Some("UNEXPECTED_TOKEN"),
+            message: format!(
+                "expected {} but got {} at line {l}:{c}",
+                TOKEN_NAMES[kind as usize], TOKEN_NAMES[self.tk as usize]
+            ),
+            line: l,
+            column: c,
+            code: Some("UNEXPECTED_TOKEN"),
         })
     }
 
@@ -2044,1576 +4588,3184 @@ impl<'i, F: FnMut(Triple)> Machine<'i, F> {
         let (l, c) = self.line_col(self.ts);
         let names: Vec<&str> = kinds.iter().map(|&k| TOKEN_NAMES[k as usize]).collect();
         PErr::Syntax(SyntaxError {
-            message: format!("expected one of {} but got {} at line {l}:{c}", names.join(", "), TOKEN_NAMES[self.tk as usize]),
-            line: l, column: c, code: Some("UNEXPECTED_TOKEN"),
+            message: format!(
+                "expected one of {} but got {} at line {l}:{c}",
+                names.join(", "),
+                TOKEN_NAMES[self.tk as usize]
+            ),
+            line: l,
+            column: c,
+            code: Some("UNEXPECTED_TOKEN"),
         })
     }
 
     fn lex_err(&self) -> PErr {
         let (l, c) = self.line_col(self.pos);
-        PErr::Syntax(SyntaxError { message: format!("unrecognized token at line {l}:{c}"), line: l, column: c, code: Some("LEX") })
+        PErr::Syntax(SyntaxError {
+            message: format!("unrecognized token at line {l}:{c}"),
+            line: l,
+            column: c,
+            code: Some("LEX"),
+        })
     }
 
     fn outcome(&self) -> ParseOutcome {
         ParseOutcome {
-            prefixes: self.prefix_order.iter().map(|k| (k.clone(), self.env_prefixes.get(k).map(|v| v.to_string()).unwrap_or_default())).collect(),
+            prefixes: self
+                .prefix_order
+                .iter()
+                .map(|k| {
+                    (
+                        k.clone(),
+                        self.env_prefixes
+                            .get(k)
+                            .map(|v| v.to_string())
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect(),
             base: self.env_base.clone(),
         }
     }
 
-fn next_token(&mut self) -> Result<(), PErr> {
-    let inp: &[u8] = self.inp.as_bytes();
-    let len = inp.len();
-    let mut fl = Fl::default();
-    // skip tokens (WS, COMMENT)
-    loop {
-        if self.pos >= len { break; }
-        { let e = m_SKIP_WS(inp, self.pos, &mut fl); if e > self.pos as isize { self.pos = e as usize; continue; } }
-        { let e = m_SKIP_COMMENT(inp, self.pos, &mut fl); if e > self.pos as isize { self.pos = e as usize; continue; } }
-        break;
-    }
-    self.ts = self.pos;
-    if self.pos >= len {
-        if !self.is_final { return Err(PErr::Incomplete); }
-        self.tk = T_EOF;
-        self.te = self.pos;
-        return Ok(());
-    }
-    fl.hit_end = false;
-    let c0 = inp[self.pos];
-    let mut e: isize;
-    let mut best: isize = -1;
-    let mut bk: u16 = 0;
-    let mut b_esc = false;
-    let mut b_m0: isize = -1;
-    let mut b_md: isize = -1;
-    match c0 {
-        33 => {
-            e = m_LIT_10(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_10; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
+    fn next_token(&mut self) -> Result<(), PErr> {
+        let inp: &[u8] = self.inp.as_bytes();
+        let len = inp.len();
+        let mut fl = Fl::default();
+        // skip tokens (WS, COMMENT)
+        loop {
+            if self.pos >= len {
+                break;
+            }
+            {
+                let e = m_SKIP_WS(inp, self.pos, &mut fl);
+                if e > self.pos as isize {
+                    self.pos = e as usize;
+                    continue;
+                }
+            }
+            {
+                let e = m_SKIP_COMMENT(inp, self.pos, &mut fl);
+                if e > self.pos as isize {
+                    self.pos = e as usize;
+                    continue;
+                }
+            }
+            break;
         }
-        34 => {
-            e = m_STRING_LITERAL_QUOTE(inp, self.pos, &mut fl); if e > best { best = e; bk = T_STRING_LITERAL_QUOTE; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_STRING_LITERAL_LONG_QUOTE(inp, self.pos, &mut fl); if e > best { best = e; bk = T_STRING_LITERAL_LONG_QUOTE; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
+        self.ts = self.pos;
+        if self.pos >= len {
+            if !self.is_final {
+                return Err(PErr::Incomplete);
+            }
+            self.tk = T_EOF;
+            self.te = self.pos;
+            return Ok(());
         }
-        37 => {
-            e = m_LIT_57(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_57; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        39 => {
-            e = m_STRING_LITERAL_SINGLE_QUOTE(inp, self.pos, &mut fl); if e > best { best = e; bk = T_STRING_LITERAL_SINGLE_QUOTE; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_STRING_LITERAL_LONG_SINGLE_QUOTE(inp, self.pos, &mut fl); if e > best { best = e; bk = T_STRING_LITERAL_LONG_SINGLE_QUOTE; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        40 => {
-            e = m_LIT_63(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_63; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        41 => {
-            e = m_LIT_64(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_64; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_66(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_66; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        42 => {
-            e = m_LIT_48(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_48; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        43 => {
-            e = m_INTEGER(inp, self.pos, &mut fl); if e > best { best = e; bk = T_INTEGER; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_DECIMAL(inp, self.pos, &mut fl); if e > best { best = e; bk = T_DECIMAL; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_DOUBLE(inp, self.pos, &mut fl); if e > best { best = e; bk = T_DOUBLE; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_62(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_62; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        44 => {
-            e = m_LIT_71(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_71; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        45 => {
-            e = m_INTEGER(inp, self.pos, &mut fl); if e > best { best = e; bk = T_INTEGER; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_DECIMAL(inp, self.pos, &mut fl); if e > best { best = e; bk = T_DECIMAL; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_DOUBLE(inp, self.pos, &mut fl); if e > best { best = e; bk = T_DOUBLE; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_5(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_5; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        46 => {
-            e = m_DECIMAL(inp, self.pos, &mut fl); if e > best { best = e; bk = T_DECIMAL; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_DOUBLE(inp, self.pos, &mut fl); if e > best { best = e; bk = T_DOUBLE; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_8(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_8; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_46(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_46; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        47 => {
-            e = m_LIT_59(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_59; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        48 | 49 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | 57 => {
-            e = m_INTEGER(inp, self.pos, &mut fl); if e > best { best = e; bk = T_INTEGER; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_DECIMAL(inp, self.pos, &mut fl); if e > best { best = e; bk = T_DECIMAL; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_DOUBLE(inp, self.pos, &mut fl); if e > best { best = e; bk = T_DOUBLE; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        58 | 65 | 67 | 68 | 69 | 70 | 71 | 72 | 74 | 75 | 77 | 78 | 79 | 81 | 82 | 83 | 85 | 86 | 87 | 88 | 89 | 90 | 98 | 103 | 106 | 107 | 111 | 118 | 119 | 120 | 121 | 122 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-        }
-        59 => {
-            e = m_LIT_58(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_58; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        60 => {
-            e = m_IRIREF(inp, self.pos, &mut fl); if e > best { best = e; bk = T_IRIREF; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_65(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_65; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        61 => {
-            e = m_LIT_11(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_11; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        63 => {
-            e = m_LIT_61(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_61; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        64 => {
-            e = m_ATPNAME_NS(inp, self.pos, &mut fl); if e > best { best = e; bk = T_ATPNAME_NS; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_ATPNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_ATPNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LANG_DIR(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LANG_DIR; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_56(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_56; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        66 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_0(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_0; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_49(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_49; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_52(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_52; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_53(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_53; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        73 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_1(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_1; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_50(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_50; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_54(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_54; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        76 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_51(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_51; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        80 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_2(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_2; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        84 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_55(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_55; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        91 => {
-            e = m_LIT_45(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_45; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        93 => {
-            e = m_LIT_47(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_47; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        94 => {
-            e = m_LIT_60(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_60; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_67(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_67; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        97 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_70(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_70; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        99 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_18(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_18; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_39(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_39; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        100 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_15(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_15; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_19(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_19; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_32(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_32; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        101 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_31(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_31; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        102 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_28(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_28; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_69(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_69; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        104 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_41(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_41; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        105 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_40(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_40; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_42(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_42; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        108 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_29(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_29; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_33(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_33; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_34(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_34; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        109 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_17(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_17; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_21(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_21; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_22(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_22; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_23(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_23; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_24(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_24; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_25(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_25; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_26(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_26; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        110 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_20(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_20; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        112 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_27(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_27; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        113 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_35(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_35; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_36(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_36; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_37(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_37; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_38(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_38; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        114 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_43(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_43; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_44(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_44; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        115 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_3(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_3; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_4(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_4; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_16(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_16; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        116 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_12(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_12; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_13(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_13; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_14(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_14; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            e = m_LIT_68(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_68; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        117 => {
-            e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
-            e = m_LIT_30(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_30; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        123 => {
-            e = m_LIT_6(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_6; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        124 => {
-            e = m_LIT_9(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_9; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        125 => {
-            e = m_LIT_7(inp, self.pos, &mut fl); if e > best { best = e; bk = T_LIT_7; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-        }
-        _ => {
-            if c0 > 127 {
-                e = m_PNAME_LN(inp, self.pos, &mut fl); if e > best { best = e; bk = T_PNAME_LN; b_esc = fl.m_esc; b_m0 = fl.m0; b_md = fl.m_d; }
-            else if e < 0 && fl.m0 > best { best = fl.m0; bk = T_PNAME_NS; b_esc = false; b_m0 = -1; b_md = -1; }
+        fl.hit_end = false;
+        let c0 = inp[self.pos];
+        let mut e: isize;
+        let mut best: isize = -1;
+        let mut bk: u16 = 0;
+        let mut b_esc = false;
+        let mut b_m0: isize = -1;
+        let mut b_md: isize = -1;
+        match c0 {
+            33 => {
+                e = m_LIT_10(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_10;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            34 => {
+                e = m_STRING_LITERAL_QUOTE(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_STRING_LITERAL_QUOTE;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_STRING_LITERAL_LONG_QUOTE(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_STRING_LITERAL_LONG_QUOTE;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            37 => {
+                e = m_LIT_57(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_57;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            39 => {
+                e = m_STRING_LITERAL_SINGLE_QUOTE(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_STRING_LITERAL_SINGLE_QUOTE;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_STRING_LITERAL_LONG_SINGLE_QUOTE(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_STRING_LITERAL_LONG_SINGLE_QUOTE;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            40 => {
+                e = m_LIT_63(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_63;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            41 => {
+                e = m_LIT_64(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_64;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_66(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_66;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            42 => {
+                e = m_LIT_48(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_48;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            43 => {
+                e = m_INTEGER(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_INTEGER;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_DECIMAL(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_DECIMAL;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_DOUBLE(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_DOUBLE;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_62(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_62;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            44 => {
+                e = m_LIT_71(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_71;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            45 => {
+                e = m_INTEGER(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_INTEGER;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_DECIMAL(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_DECIMAL;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_DOUBLE(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_DOUBLE;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_5(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_5;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            46 => {
+                e = m_DECIMAL(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_DECIMAL;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_DOUBLE(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_DOUBLE;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_8(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_8;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_46(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_46;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            47 => {
+                e = m_LIT_59(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_59;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            48 | 49 | 50 | 51 | 52 | 53 | 54 | 55 | 56 | 57 => {
+                e = m_INTEGER(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_INTEGER;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_DECIMAL(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_DECIMAL;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_DOUBLE(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_DOUBLE;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            58 | 65 | 67 | 68 | 69 | 70 | 71 | 72 | 74 | 75 | 77 | 78 | 79 | 81 | 82 | 83 | 85
+            | 86 | 87 | 88 | 89 | 90 | 98 | 103 | 106 | 107 | 111 | 118 | 119 | 120 | 121 | 122 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+            }
+            59 => {
+                e = m_LIT_58(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_58;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            60 => {
+                e = m_IRIREF(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_IRIREF;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_65(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_65;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            61 => {
+                e = m_LIT_11(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_11;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            63 => {
+                e = m_LIT_61(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_61;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            64 => {
+                e = m_ATPNAME_NS(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_ATPNAME_NS;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_ATPNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_ATPNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LANG_DIR(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LANG_DIR;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_56(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_56;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            66 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_0(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_0;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_49(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_49;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_52(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_52;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_53(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_53;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            73 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_1(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_1;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_50(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_50;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_54(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_54;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            76 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_51(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_51;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            80 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_2(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_2;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            84 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_55(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_55;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            91 => {
+                e = m_LIT_45(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_45;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            93 => {
+                e = m_LIT_47(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_47;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            94 => {
+                e = m_LIT_60(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_60;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_67(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_67;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            97 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_70(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_70;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            99 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_18(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_18;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_39(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_39;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            100 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_15(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_15;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_19(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_19;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_32(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_32;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            101 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_31(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_31;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            102 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_28(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_28;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_69(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_69;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            104 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_41(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_41;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            105 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_40(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_40;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_42(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_42;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            108 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_29(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_29;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_33(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_33;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_34(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_34;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            109 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_17(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_17;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_21(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_21;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_22(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_22;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_23(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_23;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_24(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_24;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_25(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_25;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_26(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_26;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            110 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_20(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_20;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            112 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_27(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_27;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            113 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_35(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_35;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_36(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_36;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_37(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_37;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_38(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_38;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            114 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_43(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_43;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_44(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_44;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            115 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_3(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_3;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_4(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_4;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_16(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_16;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            116 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_12(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_12;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_13(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_13;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_14(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_14;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+                e = m_LIT_68(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_68;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            117 => {
+                e = m_PNAME_LN(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_PNAME_LN;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                } else if e < 0 && fl.m0 > best {
+                    best = fl.m0;
+                    bk = T_PNAME_NS;
+                    b_esc = false;
+                    b_m0 = -1;
+                    b_md = -1;
+                }
+                e = m_LIT_30(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_30;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            123 => {
+                e = m_LIT_6(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_6;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            124 => {
+                e = m_LIT_9(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_9;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            125 => {
+                e = m_LIT_7(inp, self.pos, &mut fl);
+                if e > best {
+                    best = e;
+                    bk = T_LIT_7;
+                    b_esc = fl.m_esc;
+                    b_m0 = fl.m0;
+                    b_md = fl.m_d;
+                }
+            }
+            _ => {
+                if c0 > 127 {
+                    e = m_PNAME_LN(inp, self.pos, &mut fl);
+                    if e > best {
+                        best = e;
+                        bk = T_PNAME_LN;
+                        b_esc = fl.m_esc;
+                        b_m0 = fl.m0;
+                        b_md = fl.m_d;
+                    } else if e < 0 && fl.m0 > best {
+                        best = fl.m0;
+                        bk = T_PNAME_NS;
+                        b_esc = false;
+                        b_m0 = -1;
+                        b_md = -1;
+                    }
+                }
             }
         }
+        // Suspension rule (push mode): if any candidate touched the buffer end,
+        // a longer match may exist in the next chunk — do not commit.
+        if !self.is_final && (fl.hit_end || best == len as isize || best < 0) {
+            return Err(PErr::Incomplete);
+        }
+        if best < 0 {
+            return Err(self.lex_err());
+        }
+        self.tk = bk;
+        self.te = best as usize;
+        self.t_esc = b_esc;
+        self.t_m0 = b_m0;
+        self.t_md = b_md;
+        self.pos = best as usize;
+        Ok(())
     }
-    // Suspension rule (push mode): if any candidate touched the buffer end,
-    // a longer match may exist in the next chunk — do not commit.
-    if !self.is_final && (fl.hit_end || best == len as isize || best < 0) { return Err(PErr::Incomplete); }
-    if best < 0 { return Err(self.lex_err()); }
-    self.tk = bk;
-    self.te = best as usize;
-    self.t_esc = b_esc;
-    self.t_m0 = b_m0;
-    self.t_md = b_md;
-    self.pos = best as usize;
-    Ok(())
-}
 
-/* ---- productions ---- */
+    /* ---- productions ---- */
 
-fn p_shaclcDoc(&mut self) -> Result<(), PErr> {
-while matches!(self.tk, T_LIT_0 | T_LIT_1 | T_LIT_2) {
-self.p_directive()?;
-}
-while matches!(self.tk, T_LIT_3 | T_LIT_4) {
-match self.tk {
-T_LIT_3 => {
-self.p_nodeShape()?;
-}
-T_LIT_4 => {
-self.p_shapeClass()?;
-}
-_ => {
-return Err(self.perr_alt(&[T_LIT_3, T_LIT_4]));
-}
-}
-}
-while (FS_0 >> self.tk) & 1 != 0 {
-self.p_ttlStatement()?;
-}
-self.emit_q(nn(resolve_iri(&self.env_base, "")), self.kc0.clone(), self.kc1.clone());
-Ok(())
-}
+    fn p_shaclcDoc(&mut self) -> Result<(), PErr> {
+        while matches!(self.tk, T_LIT_0 | T_LIT_1 | T_LIT_2) {
+            self.p_directive()?;
+        }
+        while matches!(self.tk, T_LIT_3 | T_LIT_4) {
+            match self.tk {
+                T_LIT_3 => {
+                    self.p_nodeShape()?;
+                }
+                T_LIT_4 => {
+                    self.p_shapeClass()?;
+                }
+                _ => {
+                    return Err(self.perr_alt(&[T_LIT_3, T_LIT_4]));
+                }
+            }
+        }
+        while (FS_0 >> self.tk) & 1 != 0 {
+            self.p_ttlStatement()?;
+        }
+        self.emit_q(
+            nn(resolve_iri(&self.env_base, "")),
+            self.kc0.clone(),
+            self.kc1.clone(),
+        );
+        Ok(())
+    }
 
-fn p_directive(&mut self) -> Result<(), PErr> {
-match self.tk {
-T_LIT_0 => {
-self.p_baseDecl()?;
-}
-T_LIT_1 => {
-self.p_importsDecl()?;
-}
-T_LIT_2 => {
-self.p_prefixDecl()?;
-}
-_ => {
-return Err(self.perr_alt(&[T_LIT_0, T_LIT_1, T_LIT_2]));
-}
-}
-Ok(())
-}
+    fn p_directive(&mut self) -> Result<(), PErr> {
+        match self.tk {
+            T_LIT_0 => {
+                self.p_baseDecl()?;
+            }
+            T_LIT_1 => {
+                self.p_importsDecl()?;
+            }
+            T_LIT_2 => {
+                self.p_prefixDecl()?;
+            }
+            _ => {
+                return Err(self.perr_alt(&[T_LIT_0, T_LIT_1, T_LIT_2]));
+            }
+        }
+        Ok(())
+    }
 
-fn p_baseDecl(&mut self) -> Result<(), PErr> {
-if self.tk != T_LIT_0 { return Err(self.perr_exp(T_LIT_0)); }
-self.next_token()?;
-if self.tk != T_IRIREF { return Err(self.perr_exp(T_IRIREF)); }
-let i: Rc<str> = if self.t_esc { rc_from_string(unesc_u(&self.inp[self.ts + 1..self.te - 1]).map_err(|_| self.perr("INVALID_CODEPOINT"))?) } else { Rc::from(&self.inp[self.ts + 1..self.te - 1]) };
-self.next_token()?;
-let _t0 = resolve_iri(&self.env_base, i.as_ref()).into_owned();
-self.env_base = _t0;
-Ok(())
-}
+    fn p_baseDecl(&mut self) -> Result<(), PErr> {
+        if self.tk != T_LIT_0 {
+            return Err(self.perr_exp(T_LIT_0));
+        }
+        self.next_token()?;
+        if self.tk != T_IRIREF {
+            return Err(self.perr_exp(T_IRIREF));
+        }
+        let i: Rc<str> = if self.t_esc {
+            rc_from_string(
+                unesc_u(&self.inp[self.ts + 1..self.te - 1])
+                    .map_err(|_| self.perr("INVALID_CODEPOINT"))?,
+            )
+        } else {
+            Rc::from(&self.inp[self.ts + 1..self.te - 1])
+        };
+        self.next_token()?;
+        let _t0 = resolve_iri(&self.env_base, i.as_ref()).into_owned();
+        self.env_base = _t0;
+        Ok(())
+    }
 
-fn p_importsDecl(&mut self) -> Result<(), PErr> {
-if self.tk != T_LIT_1 { return Err(self.perr_exp(T_LIT_1)); }
-self.next_token()?;
-if self.tk != T_IRIREF { return Err(self.perr_exp(T_IRIREF)); }
-let i: Rc<str> = if self.t_esc { rc_from_string(unesc_u(&self.inp[self.ts + 1..self.te - 1]).map_err(|_| self.perr("INVALID_CODEPOINT"))?) } else { Rc::from(&self.inp[self.ts + 1..self.te - 1]) };
-self.next_token()?;
-self.emit_q(Term::NamedNode(Rc::from(self.env_base.as_str())), self.kc2.clone(), Term::NamedNode(i.clone()));
-Ok(())
-}
+    fn p_importsDecl(&mut self) -> Result<(), PErr> {
+        if self.tk != T_LIT_1 {
+            return Err(self.perr_exp(T_LIT_1));
+        }
+        self.next_token()?;
+        if self.tk != T_IRIREF {
+            return Err(self.perr_exp(T_IRIREF));
+        }
+        let i: Rc<str> = if self.t_esc {
+            rc_from_string(
+                unesc_u(&self.inp[self.ts + 1..self.te - 1])
+                    .map_err(|_| self.perr("INVALID_CODEPOINT"))?,
+            )
+        } else {
+            Rc::from(&self.inp[self.ts + 1..self.te - 1])
+        };
+        self.next_token()?;
+        self.emit_q(
+            Term::NamedNode(Rc::from(self.env_base.as_str())),
+            self.kc2.clone(),
+            Term::NamedNode(i.clone()),
+        );
+        Ok(())
+    }
 
-fn p_prefixDecl(&mut self) -> Result<(), PErr> {
-if self.tk != T_LIT_2 { return Err(self.perr_exp(T_LIT_2)); }
-self.next_token()?;
-if self.tk != T_PNAME_NS { return Err(self.perr_exp(T_PNAME_NS)); }
-let ns: Rc<str> = Rc::from(&self.inp[self.ts..self.te - 1]);
-self.next_token()?;
-if self.tk != T_IRIREF { return Err(self.perr_exp(T_IRIREF)); }
-let i: Rc<str> = if self.t_esc { rc_from_string(unesc_u(&self.inp[self.ts + 1..self.te - 1]).map_err(|_| self.perr("INVALID_CODEPOINT"))?) } else { Rc::from(&self.inp[self.ts + 1..self.te - 1]) };
-self.next_token()?;
-let _t0: Rc<str> = rc_from_cow(resolve_iri(&self.env_base, i.as_ref()));
-if !self.env_prefixes.contains_key(ns.as_ref()) { self.prefix_order.push(ns.as_ref().to_string()); }
-self.env_prefixes.insert(ns.as_ref().to_string(), _t0);
-Ok(())
-}
+    fn p_prefixDecl(&mut self) -> Result<(), PErr> {
+        if self.tk != T_LIT_2 {
+            return Err(self.perr_exp(T_LIT_2));
+        }
+        self.next_token()?;
+        if self.tk != T_PNAME_NS {
+            return Err(self.perr_exp(T_PNAME_NS));
+        }
+        let ns: Rc<str> = Rc::from(&self.inp[self.ts..self.te - 1]);
+        self.next_token()?;
+        if self.tk != T_IRIREF {
+            return Err(self.perr_exp(T_IRIREF));
+        }
+        let i: Rc<str> = if self.t_esc {
+            rc_from_string(
+                unesc_u(&self.inp[self.ts + 1..self.te - 1])
+                    .map_err(|_| self.perr("INVALID_CODEPOINT"))?,
+            )
+        } else {
+            Rc::from(&self.inp[self.ts + 1..self.te - 1])
+        };
+        self.next_token()?;
+        let _t0: Rc<str> = rc_from_cow(resolve_iri(&self.env_base, i.as_ref()));
+        if !self.env_prefixes.contains_key(ns.as_ref()) {
+            self.prefix_order.push(ns.as_ref().to_string());
+        }
+        self.env_prefixes.insert(ns.as_ref().to_string(), _t0);
+        Ok(())
+    }
 
-fn p_nodeShape(&mut self) -> Result<(), PErr> {
-if self.tk != T_LIT_3 { return Err(self.perr_exp(T_LIT_3)); }
-self.next_token()?;
-let n = self.p_iri()?;
-self.emit_q(n.clone(), self.kc0.clone(), self.kc3.clone());
-if matches!(self.tk, T_LIT_5) {
-self.p_targetClass(n.clone())?;
-}
-self.p_shapeBodyTail(n.clone())?;
-Ok(())
-}
+    fn p_nodeShape(&mut self) -> Result<(), PErr> {
+        if self.tk != T_LIT_3 {
+            return Err(self.perr_exp(T_LIT_3));
+        }
+        self.next_token()?;
+        let n = self.p_iri()?;
+        self.emit_q(n.clone(), self.kc0.clone(), self.kc3.clone());
+        if matches!(self.tk, T_LIT_5) {
+            self.p_targetClass(n.clone())?;
+        }
+        self.p_shapeBodyTail(n.clone())?;
+        Ok(())
+    }
 
-fn p_shapeClass(&mut self) -> Result<(), PErr> {
-if self.tk != T_LIT_4 { return Err(self.perr_exp(T_LIT_4)); }
-self.next_token()?;
-let n = self.p_iri()?;
-self.emit_q(n.clone(), self.kc0.clone(), self.kc3.clone());
-self.emit_q(n.clone(), self.kc0.clone(), self.kc4.clone());
-self.p_shapeBodyTail(n.clone())?;
-Ok(())
-}
+    fn p_shapeClass(&mut self) -> Result<(), PErr> {
+        if self.tk != T_LIT_4 {
+            return Err(self.perr_exp(T_LIT_4));
+        }
+        self.next_token()?;
+        let n = self.p_iri()?;
+        self.emit_q(n.clone(), self.kc0.clone(), self.kc3.clone());
+        self.emit_q(n.clone(), self.kc0.clone(), self.kc4.clone());
+        self.p_shapeBodyTail(n.clone())?;
+        Ok(())
+    }
 
-fn p_targetClass(&mut self, n: Term) -> Result<(), PErr> {
-if self.tk != T_LIT_5 { return Err(self.perr_exp(T_LIT_5)); }
-self.next_token()?;
-loop {
-let c = self.p_iri()?;
-self.emit_q(n.clone(), self.kc5.clone(), c.clone());
-if !((FS_0 >> self.tk) & 1 != 0) { break; }
-}
-Ok(())
-}
+    fn p_targetClass(&mut self, n: Term) -> Result<(), PErr> {
+        if self.tk != T_LIT_5 {
+            return Err(self.perr_exp(T_LIT_5));
+        }
+        self.next_token()?;
+        loop {
+            let c = self.p_iri()?;
+            self.emit_q(n.clone(), self.kc5.clone(), c.clone());
+            if !((FS_0 >> self.tk) & 1 != 0) {
+                break;
+            }
+        }
+        Ok(())
+    }
 
-fn p_shapeBodyTail(&mut self, n: Term) -> Result<(), PErr> {
-match self.tk {
-T_LIT_58 => {
-self.p_annotation(n.clone())?;
-self.p_nodeShapeBody(n.clone())?;
-}
-T_LIT_6 => {
-self.p_nodeShapeBody(n.clone())?;
-}
-_ => {
-return Err(self.perr_alt(&[T_LIT_58, T_LIT_6]));
-}
-}
-Ok(())
-}
+    fn p_shapeBodyTail(&mut self, n: Term) -> Result<(), PErr> {
+        match self.tk {
+            T_LIT_58 => {
+                self.p_annotation(n.clone())?;
+                self.p_nodeShapeBody(n.clone())?;
+            }
+            T_LIT_6 => {
+                self.p_nodeShapeBody(n.clone())?;
+            }
+            _ => {
+                return Err(self.perr_alt(&[T_LIT_58, T_LIT_6]));
+            }
+        }
+        Ok(())
+    }
 
-fn p_nodeShapeBody(&mut self, n: Term) -> Result<(), PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-if self.tk != T_LIT_6 { return Err(self.perr_exp(T_LIT_6)); }
-self.next_token()?;
-while (FS_1 >> self.tk) & 1 != 0 {
-self.p_constraint(n.clone())?;
-}
-if self.tk != T_LIT_7 { return Err(self.perr_exp(T_LIT_7)); }
-self.next_token()?;
-self.depth -= 1;
-Ok(())
-}
+    fn p_nodeShapeBody(&mut self, n: Term) -> Result<(), PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        if self.tk != T_LIT_6 {
+            return Err(self.perr_exp(T_LIT_6));
+        }
+        self.next_token()?;
+        while (FS_1 >> self.tk) & 1 != 0 {
+            self.p_constraint(n.clone())?;
+        }
+        if self.tk != T_LIT_7 {
+            return Err(self.perr_exp(T_LIT_7));
+        }
+        self.next_token()?;
+        self.depth -= 1;
+        Ok(())
+    }
 
-fn p_constraint(&mut self, n: Term) -> Result<(), PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-match self.tk {
-T_LIT_10 | T_LIT_12 | T_LIT_13 | T_LIT_14 | T_LIT_15 | T_LIT_16 | T_LIT_17 | T_LIT_18 | T_LIT_19 | T_LIT_20 | T_LIT_21 | T_LIT_22 | T_LIT_23 | T_LIT_24 | T_LIT_25 | T_LIT_26 | T_LIT_27 | T_LIT_28 | T_LIT_29 | T_LIT_30 | T_LIT_31 | T_LIT_32 | T_LIT_33 | T_LIT_34 | T_LIT_35 | T_LIT_36 | T_LIT_37 | T_LIT_38 | T_LIT_39 | T_LIT_40 | T_LIT_41 | T_LIT_42 | T_LIT_43 | T_LIT_44 => {
-loop {
-self.p_nodeOrEmit(n.clone())?;
-if !((FS_2 >> self.tk) & 1 != 0) { break; }
-}
-if self.tk != T_LIT_8 { return Err(self.perr_exp(T_LIT_8)); }
-self.next_token()?;
-}
-T_IRIREF | T_LIT_60 | T_LIT_63 | T_LIT_70 | T_PNAME_LN | T_PNAME_NS => {
-self.p_propertyShape(n.clone())?;
-if self.tk != T_LIT_8 { return Err(self.perr_exp(T_LIT_8)); }
-self.next_token()?;
-}
-_ => {
-return Err(self.perr_alt(&[T_IRIREF, T_LIT_10, T_LIT_12, T_LIT_13, T_LIT_14, T_LIT_15, T_LIT_16, T_LIT_17, T_LIT_18, T_LIT_19, T_LIT_20, T_LIT_21, T_LIT_22, T_LIT_23, T_LIT_24, T_LIT_25, T_LIT_26, T_LIT_27, T_LIT_28, T_LIT_29, T_LIT_30, T_LIT_31, T_LIT_32, T_LIT_33, T_LIT_34, T_LIT_35, T_LIT_36, T_LIT_37, T_LIT_38, T_LIT_39, T_LIT_40, T_LIT_41, T_LIT_42, T_LIT_43, T_LIT_44, T_LIT_60, T_LIT_63, T_LIT_70, T_PNAME_LN, T_PNAME_NS]));
-}
-}
-self.depth -= 1;
-Ok(())
-}
+    fn p_constraint(&mut self, n: Term) -> Result<(), PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        match self.tk {
+            T_LIT_10 | T_LIT_12 | T_LIT_13 | T_LIT_14 | T_LIT_15 | T_LIT_16 | T_LIT_17
+            | T_LIT_18 | T_LIT_19 | T_LIT_20 | T_LIT_21 | T_LIT_22 | T_LIT_23 | T_LIT_24
+            | T_LIT_25 | T_LIT_26 | T_LIT_27 | T_LIT_28 | T_LIT_29 | T_LIT_30 | T_LIT_31
+            | T_LIT_32 | T_LIT_33 | T_LIT_34 | T_LIT_35 | T_LIT_36 | T_LIT_37 | T_LIT_38
+            | T_LIT_39 | T_LIT_40 | T_LIT_41 | T_LIT_42 | T_LIT_43 | T_LIT_44 => {
+                loop {
+                    self.p_nodeOrEmit(n.clone())?;
+                    if !((FS_2 >> self.tk) & 1 != 0) {
+                        break;
+                    }
+                }
+                if self.tk != T_LIT_8 {
+                    return Err(self.perr_exp(T_LIT_8));
+                }
+                self.next_token()?;
+            }
+            T_IRIREF | T_LIT_60 | T_LIT_63 | T_LIT_70 | T_PNAME_LN | T_PNAME_NS => {
+                self.p_propertyShape(n.clone())?;
+                if self.tk != T_LIT_8 {
+                    return Err(self.perr_exp(T_LIT_8));
+                }
+                self.next_token()?;
+            }
+            _ => {
+                return Err(self.perr_alt(&[
+                    T_IRIREF, T_LIT_10, T_LIT_12, T_LIT_13, T_LIT_14, T_LIT_15, T_LIT_16, T_LIT_17,
+                    T_LIT_18, T_LIT_19, T_LIT_20, T_LIT_21, T_LIT_22, T_LIT_23, T_LIT_24, T_LIT_25,
+                    T_LIT_26, T_LIT_27, T_LIT_28, T_LIT_29, T_LIT_30, T_LIT_31, T_LIT_32, T_LIT_33,
+                    T_LIT_34, T_LIT_35, T_LIT_36, T_LIT_37, T_LIT_38, T_LIT_39, T_LIT_40, T_LIT_41,
+                    T_LIT_42, T_LIT_43, T_LIT_44, T_LIT_60, T_LIT_63, T_LIT_70, T_PNAME_LN,
+                    T_PNAME_NS,
+                ]));
+            }
+        }
+        self.depth -= 1;
+        Ok(())
+    }
 
-fn p_nodeOrEmit(&mut self, n: Term) -> Result<(), PErr> {
-let p = self.p_nodeNot()?;
-let mut t: Option<Term> = None;
-if matches!(self.tk, T_LIT_9) {
-t = Some(self.p_nodeOrTail(p.clone())?);
-}
-if t.is_none() {
-self.emit_q(n.clone(), p.0.clone(), p.1.clone());
-}
-if let Some(_w) = &t {
-self.emit_q(n.clone(), self.kc6.clone(), _w.clone().clone());
-}
-Ok(())
-}
+    fn p_nodeOrEmit(&mut self, n: Term) -> Result<(), PErr> {
+        let p = self.p_nodeNot()?;
+        let mut t: Option<Term> = None;
+        if matches!(self.tk, T_LIT_9) {
+            t = Some(self.p_nodeOrTail(p.clone())?);
+        }
+        if t.is_none() {
+            self.emit_q(n.clone(), p.0.clone(), p.1.clone());
+        }
+        if let Some(_w) = &t {
+            self.emit_q(n.clone(), self.kc6.clone(), _w.clone().clone());
+        }
+        Ok(())
+    }
 
-fn p_nodeOrTail(&mut self, first: (Term, Term)) -> Result<Term, PErr> {
-let _v: Term;
-if self.tk != T_LIT_9 { return Err(self.perr_exp(T_LIT_9)); }
-self.next_token()?;
-let q = self.p_nodeNot()?;
-let b1 = self.fresh_bn();
-self.emit_q(b1.clone(), first.0.clone(), first.1.clone());
-let h = self.fresh_bn();
-self.emit_q(h.clone(), self.kc7.clone(), b1.clone());
-let b2 = self.fresh_bn();
-self.emit_q(b2.clone(), q.0.clone(), q.1.clone());
-let c1 = self.fresh_bn();
-self.emit_q(h.clone(), self.kc8.clone(), c1.clone());
-self.emit_q(c1.clone(), self.kc7.clone(), b2.clone());
-let mut prev: Term = c1.clone();
-'tl0: loop {
-match self.tk {
-T_LIT_9 => {
-self.next_token()?;
-let q2 = self.p_nodeNot()?;
-let b3 = self.fresh_bn();
-self.emit_q(b3.clone(), q2.0.clone(), q2.1.clone());
-let c2 = self.fresh_bn();
-self.emit_q(prev.clone(), self.kc8.clone(), c2.clone());
-self.emit_q(c2.clone(), self.kc7.clone(), b3.clone());
-prev = c2.clone();
-}
-_ => break 'tl0,
-}
-}
-self.emit_q(prev.clone(), self.kc8.clone(), self.kc9.clone());
-_v = h.clone();
-Ok(_v)
-}
+    fn p_nodeOrTail(&mut self, first: (Term, Term)) -> Result<Term, PErr> {
+        let _v: Term;
+        if self.tk != T_LIT_9 {
+            return Err(self.perr_exp(T_LIT_9));
+        }
+        self.next_token()?;
+        let q = self.p_nodeNot()?;
+        let b1 = self.fresh_bn();
+        self.emit_q(b1.clone(), first.0.clone(), first.1.clone());
+        let h = self.fresh_bn();
+        self.emit_q(h.clone(), self.kc7.clone(), b1.clone());
+        let b2 = self.fresh_bn();
+        self.emit_q(b2.clone(), q.0.clone(), q.1.clone());
+        let c1 = self.fresh_bn();
+        self.emit_q(h.clone(), self.kc8.clone(), c1.clone());
+        self.emit_q(c1.clone(), self.kc7.clone(), b2.clone());
+        let mut prev: Term = c1.clone();
+        'tl0: loop {
+            match self.tk {
+                T_LIT_9 => {
+                    self.next_token()?;
+                    let q2 = self.p_nodeNot()?;
+                    let b3 = self.fresh_bn();
+                    self.emit_q(b3.clone(), q2.0.clone(), q2.1.clone());
+                    let c2 = self.fresh_bn();
+                    self.emit_q(prev.clone(), self.kc8.clone(), c2.clone());
+                    self.emit_q(c2.clone(), self.kc7.clone(), b3.clone());
+                    prev = c2.clone();
+                }
+                _ => break 'tl0,
+            }
+        }
+        self.emit_q(prev.clone(), self.kc8.clone(), self.kc9.clone());
+        _v = h.clone();
+        Ok(_v)
+    }
 
-fn p_nodeNot(&mut self) -> Result<(Term, Term), PErr> {
-let _v: (Term, Term);
-match self.tk {
-T_LIT_12 | T_LIT_13 | T_LIT_14 | T_LIT_15 | T_LIT_16 | T_LIT_17 | T_LIT_18 | T_LIT_19 | T_LIT_20 | T_LIT_21 | T_LIT_22 | T_LIT_23 | T_LIT_24 | T_LIT_25 | T_LIT_26 | T_LIT_27 | T_LIT_28 | T_LIT_29 | T_LIT_30 | T_LIT_31 | T_LIT_32 | T_LIT_33 | T_LIT_34 | T_LIT_35 | T_LIT_36 | T_LIT_37 | T_LIT_38 | T_LIT_39 | T_LIT_40 | T_LIT_41 | T_LIT_42 | T_LIT_43 | T_LIT_44 => {
-let p = self.p_nodeValue()?;
-_v = p.clone();
-}
-T_LIT_10 => {
-self.next_token()?;
-let q = self.p_nodeValue()?;
-let b = self.fresh_bn();
-self.emit_q(b.clone(), q.0.clone(), q.1.clone());
-_v = (self.kc10.clone(), b.clone());
-}
-_ => {
-return Err(self.perr_alt(&[T_LIT_10, T_LIT_12, T_LIT_13, T_LIT_14, T_LIT_15, T_LIT_16, T_LIT_17, T_LIT_18, T_LIT_19, T_LIT_20, T_LIT_21, T_LIT_22, T_LIT_23, T_LIT_24, T_LIT_25, T_LIT_26, T_LIT_27, T_LIT_28, T_LIT_29, T_LIT_30, T_LIT_31, T_LIT_32, T_LIT_33, T_LIT_34, T_LIT_35, T_LIT_36, T_LIT_37, T_LIT_38, T_LIT_39, T_LIT_40, T_LIT_41, T_LIT_42, T_LIT_43, T_LIT_44]));
-}
-}
-Ok(_v)
-}
+    fn p_nodeNot(&mut self) -> Result<(Term, Term), PErr> {
+        let _v: (Term, Term);
+        match self.tk {
+            T_LIT_12 | T_LIT_13 | T_LIT_14 | T_LIT_15 | T_LIT_16 | T_LIT_17 | T_LIT_18
+            | T_LIT_19 | T_LIT_20 | T_LIT_21 | T_LIT_22 | T_LIT_23 | T_LIT_24 | T_LIT_25
+            | T_LIT_26 | T_LIT_27 | T_LIT_28 | T_LIT_29 | T_LIT_30 | T_LIT_31 | T_LIT_32
+            | T_LIT_33 | T_LIT_34 | T_LIT_35 | T_LIT_36 | T_LIT_37 | T_LIT_38 | T_LIT_39
+            | T_LIT_40 | T_LIT_41 | T_LIT_42 | T_LIT_43 | T_LIT_44 => {
+                let p = self.p_nodeValue()?;
+                _v = p.clone();
+            }
+            T_LIT_10 => {
+                self.next_token()?;
+                let q = self.p_nodeValue()?;
+                let b = self.fresh_bn();
+                self.emit_q(b.clone(), q.0.clone(), q.1.clone());
+                _v = (self.kc10.clone(), b.clone());
+            }
+            _ => {
+                return Err(self.perr_alt(&[
+                    T_LIT_10, T_LIT_12, T_LIT_13, T_LIT_14, T_LIT_15, T_LIT_16, T_LIT_17, T_LIT_18,
+                    T_LIT_19, T_LIT_20, T_LIT_21, T_LIT_22, T_LIT_23, T_LIT_24, T_LIT_25, T_LIT_26,
+                    T_LIT_27, T_LIT_28, T_LIT_29, T_LIT_30, T_LIT_31, T_LIT_32, T_LIT_33, T_LIT_34,
+                    T_LIT_35, T_LIT_36, T_LIT_37, T_LIT_38, T_LIT_39, T_LIT_40, T_LIT_41, T_LIT_42,
+                    T_LIT_43, T_LIT_44,
+                ]));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_nodeValue(&mut self) -> Result<(Term, Term), PErr> {
-let _v: (Term, Term);
-let k = self.p_nodeParamName()?;
-if self.tk != T_LIT_11 { return Err(self.perr_exp(T_LIT_11)); }
-self.next_token()?;
-let v = self.p_iriOrLiteralOrArray()?;
-_v = (k.clone(), v.clone());
-Ok(_v)
-}
+    fn p_nodeValue(&mut self) -> Result<(Term, Term), PErr> {
+        let _v: (Term, Term);
+        let k = self.p_nodeParamName()?;
+        if self.tk != T_LIT_11 {
+            return Err(self.perr_exp(T_LIT_11));
+        }
+        self.next_token()?;
+        let v = self.p_iriOrLiteralOrArray()?;
+        _v = (k.clone(), v.clone());
+        Ok(_v)
+    }
 
-fn p_nodeParamName(&mut self) -> Result<Term, PErr> {
-let _v: Term;
-match self.tk {
-T_LIT_12 | T_LIT_13 | T_LIT_14 => {
-let t = self.p_targetName()?;
-_v = t.clone();
-}
-T_LIT_15 | T_LIT_16 | T_LIT_17 | T_LIT_18 | T_LIT_19 | T_LIT_20 | T_LIT_21 | T_LIT_22 | T_LIT_23 | T_LIT_24 | T_LIT_25 | T_LIT_26 | T_LIT_27 | T_LIT_28 | T_LIT_29 | T_LIT_30 | T_LIT_31 | T_LIT_32 | T_LIT_33 | T_LIT_34 | T_LIT_35 | T_LIT_36 | T_LIT_37 | T_LIT_38 | T_LIT_39 | T_LIT_40 | T_LIT_41 | T_LIT_42 | T_LIT_43 | T_LIT_44 => {
-let p = self.p_paramName()?;
-_v = p.clone();
-}
-_ => {
-return Err(self.perr_alt(&[T_LIT_12, T_LIT_13, T_LIT_14, T_LIT_15, T_LIT_16, T_LIT_17, T_LIT_18, T_LIT_19, T_LIT_20, T_LIT_21, T_LIT_22, T_LIT_23, T_LIT_24, T_LIT_25, T_LIT_26, T_LIT_27, T_LIT_28, T_LIT_29, T_LIT_30, T_LIT_31, T_LIT_32, T_LIT_33, T_LIT_34, T_LIT_35, T_LIT_36, T_LIT_37, T_LIT_38, T_LIT_39, T_LIT_40, T_LIT_41, T_LIT_42, T_LIT_43, T_LIT_44]));
-}
-}
-Ok(_v)
-}
+    fn p_nodeParamName(&mut self) -> Result<Term, PErr> {
+        let _v: Term;
+        match self.tk {
+            T_LIT_12 | T_LIT_13 | T_LIT_14 => {
+                let t = self.p_targetName()?;
+                _v = t.clone();
+            }
+            T_LIT_15 | T_LIT_16 | T_LIT_17 | T_LIT_18 | T_LIT_19 | T_LIT_20 | T_LIT_21
+            | T_LIT_22 | T_LIT_23 | T_LIT_24 | T_LIT_25 | T_LIT_26 | T_LIT_27 | T_LIT_28
+            | T_LIT_29 | T_LIT_30 | T_LIT_31 | T_LIT_32 | T_LIT_33 | T_LIT_34 | T_LIT_35
+            | T_LIT_36 | T_LIT_37 | T_LIT_38 | T_LIT_39 | T_LIT_40 | T_LIT_41 | T_LIT_42
+            | T_LIT_43 | T_LIT_44 => {
+                let p = self.p_paramName()?;
+                _v = p.clone();
+            }
+            _ => {
+                return Err(self.perr_alt(&[
+                    T_LIT_12, T_LIT_13, T_LIT_14, T_LIT_15, T_LIT_16, T_LIT_17, T_LIT_18, T_LIT_19,
+                    T_LIT_20, T_LIT_21, T_LIT_22, T_LIT_23, T_LIT_24, T_LIT_25, T_LIT_26, T_LIT_27,
+                    T_LIT_28, T_LIT_29, T_LIT_30, T_LIT_31, T_LIT_32, T_LIT_33, T_LIT_34, T_LIT_35,
+                    T_LIT_36, T_LIT_37, T_LIT_38, T_LIT_39, T_LIT_40, T_LIT_41, T_LIT_42, T_LIT_43,
+                    T_LIT_44,
+                ]));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_targetName(&mut self) -> Result<Term, PErr> {
-let _v: Term;
-match self.tk {
-T_LIT_12 => {
-self.next_token()?;
-_v = self.kc11.clone();
-}
-T_LIT_13 => {
-self.next_token()?;
-_v = self.kc12.clone();
-}
-T_LIT_14 => {
-self.next_token()?;
-_v = self.kc13.clone();
-}
-_ => {
-return Err(self.perr_alt(&[T_LIT_12, T_LIT_13, T_LIT_14]));
-}
-}
-Ok(_v)
-}
+    fn p_targetName(&mut self) -> Result<Term, PErr> {
+        let _v: Term;
+        match self.tk {
+            T_LIT_12 => {
+                self.next_token()?;
+                _v = self.kc11.clone();
+            }
+            T_LIT_13 => {
+                self.next_token()?;
+                _v = self.kc12.clone();
+            }
+            T_LIT_14 => {
+                self.next_token()?;
+                _v = self.kc13.clone();
+            }
+            _ => {
+                return Err(self.perr_alt(&[T_LIT_12, T_LIT_13, T_LIT_14]));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_paramName(&mut self) -> Result<Term, PErr> {
-let _v: Term;
-match self.tk {
-T_LIT_15 => {
-self.next_token()?;
-_v = self.kc14.clone();
-}
-T_LIT_16 => {
-self.next_token()?;
-_v = self.kc15.clone();
-}
-T_LIT_17 => {
-self.next_token()?;
-_v = self.kc16.clone();
-}
-T_LIT_18 => {
-self.next_token()?;
-_v = self.kc17.clone();
-}
-T_LIT_19 => {
-self.next_token()?;
-_v = self.kc18.clone();
-}
-T_LIT_20 => {
-self.next_token()?;
-_v = self.kc19.clone();
-}
-T_LIT_21 => {
-self.next_token()?;
-_v = self.kc20.clone();
-}
-T_LIT_22 => {
-self.next_token()?;
-_v = self.kc21.clone();
-}
-T_LIT_23 => {
-self.next_token()?;
-_v = self.kc22.clone();
-}
-T_LIT_24 => {
-self.next_token()?;
-_v = self.kc23.clone();
-}
-T_LIT_25 => {
-self.next_token()?;
-_v = self.kc24.clone();
-}
-T_LIT_26 => {
-self.next_token()?;
-_v = self.kc25.clone();
-}
-T_LIT_27 => {
-self.next_token()?;
-_v = self.kc26.clone();
-}
-T_LIT_28 => {
-self.next_token()?;
-_v = self.kc27.clone();
-}
-T_LIT_29 => {
-self.next_token()?;
-_v = self.kc28.clone();
-}
-T_LIT_30 => {
-self.next_token()?;
-_v = self.kc29.clone();
-}
-T_LIT_31 => {
-self.next_token()?;
-_v = self.kc30.clone();
-}
-T_LIT_32 => {
-self.next_token()?;
-_v = self.kc31.clone();
-}
-T_LIT_33 => {
-self.next_token()?;
-_v = self.kc32.clone();
-}
-T_LIT_34 => {
-self.next_token()?;
-_v = self.kc33.clone();
-}
-T_LIT_35 => {
-self.next_token()?;
-_v = self.kc34.clone();
-}
-T_LIT_36 => {
-self.next_token()?;
-_v = self.kc35.clone();
-}
-T_LIT_37 => {
-self.next_token()?;
-_v = self.kc36.clone();
-}
-T_LIT_38 => {
-self.next_token()?;
-_v = self.kc37.clone();
-}
-T_LIT_39 => {
-self.next_token()?;
-_v = self.kc38.clone();
-}
-T_LIT_40 => {
-self.next_token()?;
-_v = self.kc39.clone();
-}
-T_LIT_41 => {
-self.next_token()?;
-_v = self.kc40.clone();
-}
-T_LIT_42 => {
-self.next_token()?;
-_v = self.kc41.clone();
-}
-T_LIT_43 => {
-self.next_token()?;
-_v = self.kc42.clone();
-}
-T_LIT_44 => {
-self.next_token()?;
-_v = self.kc43.clone();
-}
-_ => {
-return Err(self.perr_alt(&[T_LIT_15, T_LIT_16, T_LIT_17, T_LIT_18, T_LIT_19, T_LIT_20, T_LIT_21, T_LIT_22, T_LIT_23, T_LIT_24, T_LIT_25, T_LIT_26, T_LIT_27, T_LIT_28, T_LIT_29, T_LIT_30, T_LIT_31, T_LIT_32, T_LIT_33, T_LIT_34, T_LIT_35, T_LIT_36, T_LIT_37, T_LIT_38, T_LIT_39, T_LIT_40, T_LIT_41, T_LIT_42, T_LIT_43, T_LIT_44]));
-}
-}
-Ok(_v)
-}
+    fn p_paramName(&mut self) -> Result<Term, PErr> {
+        let _v: Term;
+        match self.tk {
+            T_LIT_15 => {
+                self.next_token()?;
+                _v = self.kc14.clone();
+            }
+            T_LIT_16 => {
+                self.next_token()?;
+                _v = self.kc15.clone();
+            }
+            T_LIT_17 => {
+                self.next_token()?;
+                _v = self.kc16.clone();
+            }
+            T_LIT_18 => {
+                self.next_token()?;
+                _v = self.kc17.clone();
+            }
+            T_LIT_19 => {
+                self.next_token()?;
+                _v = self.kc18.clone();
+            }
+            T_LIT_20 => {
+                self.next_token()?;
+                _v = self.kc19.clone();
+            }
+            T_LIT_21 => {
+                self.next_token()?;
+                _v = self.kc20.clone();
+            }
+            T_LIT_22 => {
+                self.next_token()?;
+                _v = self.kc21.clone();
+            }
+            T_LIT_23 => {
+                self.next_token()?;
+                _v = self.kc22.clone();
+            }
+            T_LIT_24 => {
+                self.next_token()?;
+                _v = self.kc23.clone();
+            }
+            T_LIT_25 => {
+                self.next_token()?;
+                _v = self.kc24.clone();
+            }
+            T_LIT_26 => {
+                self.next_token()?;
+                _v = self.kc25.clone();
+            }
+            T_LIT_27 => {
+                self.next_token()?;
+                _v = self.kc26.clone();
+            }
+            T_LIT_28 => {
+                self.next_token()?;
+                _v = self.kc27.clone();
+            }
+            T_LIT_29 => {
+                self.next_token()?;
+                _v = self.kc28.clone();
+            }
+            T_LIT_30 => {
+                self.next_token()?;
+                _v = self.kc29.clone();
+            }
+            T_LIT_31 => {
+                self.next_token()?;
+                _v = self.kc30.clone();
+            }
+            T_LIT_32 => {
+                self.next_token()?;
+                _v = self.kc31.clone();
+            }
+            T_LIT_33 => {
+                self.next_token()?;
+                _v = self.kc32.clone();
+            }
+            T_LIT_34 => {
+                self.next_token()?;
+                _v = self.kc33.clone();
+            }
+            T_LIT_35 => {
+                self.next_token()?;
+                _v = self.kc34.clone();
+            }
+            T_LIT_36 => {
+                self.next_token()?;
+                _v = self.kc35.clone();
+            }
+            T_LIT_37 => {
+                self.next_token()?;
+                _v = self.kc36.clone();
+            }
+            T_LIT_38 => {
+                self.next_token()?;
+                _v = self.kc37.clone();
+            }
+            T_LIT_39 => {
+                self.next_token()?;
+                _v = self.kc38.clone();
+            }
+            T_LIT_40 => {
+                self.next_token()?;
+                _v = self.kc39.clone();
+            }
+            T_LIT_41 => {
+                self.next_token()?;
+                _v = self.kc40.clone();
+            }
+            T_LIT_42 => {
+                self.next_token()?;
+                _v = self.kc41.clone();
+            }
+            T_LIT_43 => {
+                self.next_token()?;
+                _v = self.kc42.clone();
+            }
+            T_LIT_44 => {
+                self.next_token()?;
+                _v = self.kc43.clone();
+            }
+            _ => {
+                return Err(self.perr_alt(&[
+                    T_LIT_15, T_LIT_16, T_LIT_17, T_LIT_18, T_LIT_19, T_LIT_20, T_LIT_21, T_LIT_22,
+                    T_LIT_23, T_LIT_24, T_LIT_25, T_LIT_26, T_LIT_27, T_LIT_28, T_LIT_29, T_LIT_30,
+                    T_LIT_31, T_LIT_32, T_LIT_33, T_LIT_34, T_LIT_35, T_LIT_36, T_LIT_37, T_LIT_38,
+                    T_LIT_39, T_LIT_40, T_LIT_41, T_LIT_42, T_LIT_43, T_LIT_44,
+                ]));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_propertyShape(&mut self, n: Term) -> Result<(), PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let p = self.p_pathAlternative()?;
-let ps = self.fresh_bn();
-self.emit_q(n.clone(), self.kc44.clone(), ps.clone());
-self.emit_q(ps.clone(), self.kc45.clone(), p.clone());
-while (FS_3 >> self.tk) & 1 != 0 {
-match self.tk {
-T_LIT_45 => {
-self.p_propertyCount(ps.clone())?;
-}
-T_ATPNAME_LN | T_ATPNAME_NS | T_IRIREF | T_LIT_10 | T_LIT_15 | T_LIT_16 | T_LIT_17 | T_LIT_18 | T_LIT_19 | T_LIT_20 | T_LIT_21 | T_LIT_22 | T_LIT_23 | T_LIT_24 | T_LIT_25 | T_LIT_26 | T_LIT_27 | T_LIT_28 | T_LIT_29 | T_LIT_30 | T_LIT_31 | T_LIT_32 | T_LIT_33 | T_LIT_34 | T_LIT_35 | T_LIT_36 | T_LIT_37 | T_LIT_38 | T_LIT_39 | T_LIT_40 | T_LIT_41 | T_LIT_42 | T_LIT_43 | T_LIT_44 | T_LIT_49 | T_LIT_50 | T_LIT_51 | T_LIT_52 | T_LIT_53 | T_LIT_54 | T_LIT_55 | T_LIT_56 | T_LIT_6 | T_LIT_70 | T_PNAME_LN | T_PNAME_NS => {
-self.p_propertyOr(ps.clone())?;
-}
-_ => {
-return Err(self.perr_alt(&[T_ATPNAME_LN, T_ATPNAME_NS, T_IRIREF, T_LIT_10, T_LIT_15, T_LIT_16, T_LIT_17, T_LIT_18, T_LIT_19, T_LIT_20, T_LIT_21, T_LIT_22, T_LIT_23, T_LIT_24, T_LIT_25, T_LIT_26, T_LIT_27, T_LIT_28, T_LIT_29, T_LIT_30, T_LIT_31, T_LIT_32, T_LIT_33, T_LIT_34, T_LIT_35, T_LIT_36, T_LIT_37, T_LIT_38, T_LIT_39, T_LIT_40, T_LIT_41, T_LIT_42, T_LIT_43, T_LIT_44, T_LIT_45, T_LIT_49, T_LIT_50, T_LIT_51, T_LIT_52, T_LIT_53, T_LIT_54, T_LIT_55, T_LIT_56, T_LIT_6, T_LIT_70, T_PNAME_LN, T_PNAME_NS]));
-}
-}
-}
-if matches!(self.tk, T_LIT_57) {
-self.p_pcSection(ps.clone())?;
-}
-self.depth -= 1;
-Ok(())
-}
+    fn p_propertyShape(&mut self, n: Term) -> Result<(), PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let p = self.p_pathAlternative()?;
+        let ps = self.fresh_bn();
+        self.emit_q(n.clone(), self.kc44.clone(), ps.clone());
+        self.emit_q(ps.clone(), self.kc45.clone(), p.clone());
+        while (FS_3 >> self.tk) & 1 != 0 {
+            match self.tk {
+                T_LIT_45 => {
+                    self.p_propertyCount(ps.clone())?;
+                }
+                T_ATPNAME_LN | T_ATPNAME_NS | T_IRIREF | T_LIT_10 | T_LIT_15 | T_LIT_16
+                | T_LIT_17 | T_LIT_18 | T_LIT_19 | T_LIT_20 | T_LIT_21 | T_LIT_22 | T_LIT_23
+                | T_LIT_24 | T_LIT_25 | T_LIT_26 | T_LIT_27 | T_LIT_28 | T_LIT_29 | T_LIT_30
+                | T_LIT_31 | T_LIT_32 | T_LIT_33 | T_LIT_34 | T_LIT_35 | T_LIT_36 | T_LIT_37
+                | T_LIT_38 | T_LIT_39 | T_LIT_40 | T_LIT_41 | T_LIT_42 | T_LIT_43 | T_LIT_44
+                | T_LIT_49 | T_LIT_50 | T_LIT_51 | T_LIT_52 | T_LIT_53 | T_LIT_54 | T_LIT_55
+                | T_LIT_56 | T_LIT_6 | T_LIT_70 | T_PNAME_LN | T_PNAME_NS => {
+                    self.p_propertyOr(ps.clone())?;
+                }
+                _ => {
+                    return Err(self.perr_alt(&[
+                        T_ATPNAME_LN,
+                        T_ATPNAME_NS,
+                        T_IRIREF,
+                        T_LIT_10,
+                        T_LIT_15,
+                        T_LIT_16,
+                        T_LIT_17,
+                        T_LIT_18,
+                        T_LIT_19,
+                        T_LIT_20,
+                        T_LIT_21,
+                        T_LIT_22,
+                        T_LIT_23,
+                        T_LIT_24,
+                        T_LIT_25,
+                        T_LIT_26,
+                        T_LIT_27,
+                        T_LIT_28,
+                        T_LIT_29,
+                        T_LIT_30,
+                        T_LIT_31,
+                        T_LIT_32,
+                        T_LIT_33,
+                        T_LIT_34,
+                        T_LIT_35,
+                        T_LIT_36,
+                        T_LIT_37,
+                        T_LIT_38,
+                        T_LIT_39,
+                        T_LIT_40,
+                        T_LIT_41,
+                        T_LIT_42,
+                        T_LIT_43,
+                        T_LIT_44,
+                        T_LIT_45,
+                        T_LIT_49,
+                        T_LIT_50,
+                        T_LIT_51,
+                        T_LIT_52,
+                        T_LIT_53,
+                        T_LIT_54,
+                        T_LIT_55,
+                        T_LIT_56,
+                        T_LIT_6,
+                        T_LIT_70,
+                        T_PNAME_LN,
+                        T_PNAME_NS,
+                    ]));
+                }
+            }
+        }
+        if matches!(self.tk, T_LIT_57) {
+            self.p_pcSection(ps.clone())?;
+        }
+        self.depth -= 1;
+        Ok(())
+    }
 
-fn p_propertyCount(&mut self, ps: Term) -> Result<(), PErr> {
-if self.tk != T_LIT_45 { return Err(self.perr_exp(T_LIT_45)); }
-self.next_token()?;
-if self.tk != T_INTEGER { return Err(self.perr_exp(T_INTEGER)); }
-let mn: Rc<str> = Rc::from(&self.inp[self.ts..self.te]);
-self.next_token()?;
-if self.tk != T_LIT_46 { return Err(self.perr_exp(T_LIT_46)); }
-self.next_token()?;
-let mx = self.p_propertyMaxCount()?;
-if self.tk != T_LIT_47 { return Err(self.perr_exp(T_LIT_47)); }
-self.next_token()?;
-if (mn.as_ref().parse::<i128>().unwrap_or(i128::MAX)) > (0i128) {
-self.emit_q(ps.clone(), self.kc46.clone(), Term::Literal(Rc::new(LiteralData { value: mn.clone(), language: self.rc_empty.clone(), direction: None, datatype: self.kc47.clone() })));
-}
-if let Some(_w) = &mx {
-self.emit_q(ps.clone(), self.kc48.clone(), Term::Literal(Rc::new(LiteralData { value: _w.clone().clone(), language: self.rc_empty.clone(), direction: None, datatype: self.kc47.clone() })));
-}
-Ok(())
-}
+    fn p_propertyCount(&mut self, ps: Term) -> Result<(), PErr> {
+        if self.tk != T_LIT_45 {
+            return Err(self.perr_exp(T_LIT_45));
+        }
+        self.next_token()?;
+        if self.tk != T_INTEGER {
+            return Err(self.perr_exp(T_INTEGER));
+        }
+        let mn: Rc<str> = Rc::from(&self.inp[self.ts..self.te]);
+        self.next_token()?;
+        if self.tk != T_LIT_46 {
+            return Err(self.perr_exp(T_LIT_46));
+        }
+        self.next_token()?;
+        let mx = self.p_propertyMaxCount()?;
+        if self.tk != T_LIT_47 {
+            return Err(self.perr_exp(T_LIT_47));
+        }
+        self.next_token()?;
+        if (mn.as_ref().parse::<i128>().unwrap_or(i128::MAX)) > (0i128) {
+            self.emit_q(
+                ps.clone(),
+                self.kc46.clone(),
+                Term::Literal(Rc::new(LiteralData {
+                    value: mn.clone(),
+                    language: self.rc_empty.clone(),
+                    direction: None,
+                    datatype: self.kc47.clone(),
+                })),
+            );
+        }
+        if let Some(_w) = &mx {
+            self.emit_q(
+                ps.clone(),
+                self.kc48.clone(),
+                Term::Literal(Rc::new(LiteralData {
+                    value: _w.clone().clone(),
+                    language: self.rc_empty.clone(),
+                    direction: None,
+                    datatype: self.kc47.clone(),
+                })),
+            );
+        }
+        Ok(())
+    }
 
-fn p_propertyMaxCount(&mut self) -> Result<Option<Rc<str>>, PErr> {
-let _v: Option<Rc<str>>;
-match self.tk {
-T_INTEGER => {
-let m: Rc<str> = Rc::from(&self.inp[self.ts..self.te]);
-self.next_token()?;
-_v = Some(m.clone());
-}
-T_LIT_48 => {
-self.next_token()?;
-_v = None;
-}
-_ => {
-return Err(self.perr_alt(&[T_INTEGER, T_LIT_48]));
-}
-}
-Ok(_v)
-}
+    fn p_propertyMaxCount(&mut self) -> Result<Option<Rc<str>>, PErr> {
+        let _v: Option<Rc<str>>;
+        match self.tk {
+            T_INTEGER => {
+                let m: Rc<str> = Rc::from(&self.inp[self.ts..self.te]);
+                self.next_token()?;
+                _v = Some(m.clone());
+            }
+            T_LIT_48 => {
+                self.next_token()?;
+                _v = None;
+            }
+            _ => {
+                return Err(self.perr_alt(&[T_INTEGER, T_LIT_48]));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_propertyOr(&mut self, ps: Term) -> Result<(), PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let p = self.p_propertyNot()?;
-let mut t: Option<Term> = None;
-if matches!(self.tk, T_LIT_9) {
-t = Some(self.p_propOrTail(p.clone())?);
-}
-if t.is_none() {
-self.emit_q(ps.clone(), p.0.clone(), p.1.clone());
-}
-if let Some(_w) = &t {
-self.emit_q(ps.clone(), self.kc6.clone(), _w.clone().clone());
-}
-self.depth -= 1;
-Ok(())
-}
+    fn p_propertyOr(&mut self, ps: Term) -> Result<(), PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let p = self.p_propertyNot()?;
+        let mut t: Option<Term> = None;
+        if matches!(self.tk, T_LIT_9) {
+            t = Some(self.p_propOrTail(p.clone())?);
+        }
+        if t.is_none() {
+            self.emit_q(ps.clone(), p.0.clone(), p.1.clone());
+        }
+        if let Some(_w) = &t {
+            self.emit_q(ps.clone(), self.kc6.clone(), _w.clone().clone());
+        }
+        self.depth -= 1;
+        Ok(())
+    }
 
-fn p_propOrTail(&mut self, first: (Term, Term)) -> Result<Term, PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let _v: Term;
-if self.tk != T_LIT_9 { return Err(self.perr_exp(T_LIT_9)); }
-self.next_token()?;
-let q = self.p_propertyNot()?;
-let b1 = self.fresh_bn();
-self.emit_q(b1.clone(), first.0.clone(), first.1.clone());
-let h = self.fresh_bn();
-self.emit_q(h.clone(), self.kc7.clone(), b1.clone());
-let b2 = self.fresh_bn();
-self.emit_q(b2.clone(), q.0.clone(), q.1.clone());
-let c1 = self.fresh_bn();
-self.emit_q(h.clone(), self.kc8.clone(), c1.clone());
-self.emit_q(c1.clone(), self.kc7.clone(), b2.clone());
-let mut prev: Term = c1.clone();
-'tl1: loop {
-match self.tk {
-T_LIT_9 => {
-self.next_token()?;
-let q2 = self.p_propertyNot()?;
-let b3 = self.fresh_bn();
-self.emit_q(b3.clone(), q2.0.clone(), q2.1.clone());
-let c2 = self.fresh_bn();
-self.emit_q(prev.clone(), self.kc8.clone(), c2.clone());
-self.emit_q(c2.clone(), self.kc7.clone(), b3.clone());
-prev = c2.clone();
-}
-_ => break 'tl1,
-}
-}
-self.emit_q(prev.clone(), self.kc8.clone(), self.kc9.clone());
-_v = h.clone();
-self.depth -= 1;
-Ok(_v)
-}
+    fn p_propOrTail(&mut self, first: (Term, Term)) -> Result<Term, PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let _v: Term;
+        if self.tk != T_LIT_9 {
+            return Err(self.perr_exp(T_LIT_9));
+        }
+        self.next_token()?;
+        let q = self.p_propertyNot()?;
+        let b1 = self.fresh_bn();
+        self.emit_q(b1.clone(), first.0.clone(), first.1.clone());
+        let h = self.fresh_bn();
+        self.emit_q(h.clone(), self.kc7.clone(), b1.clone());
+        let b2 = self.fresh_bn();
+        self.emit_q(b2.clone(), q.0.clone(), q.1.clone());
+        let c1 = self.fresh_bn();
+        self.emit_q(h.clone(), self.kc8.clone(), c1.clone());
+        self.emit_q(c1.clone(), self.kc7.clone(), b2.clone());
+        let mut prev: Term = c1.clone();
+        'tl1: loop {
+            match self.tk {
+                T_LIT_9 => {
+                    self.next_token()?;
+                    let q2 = self.p_propertyNot()?;
+                    let b3 = self.fresh_bn();
+                    self.emit_q(b3.clone(), q2.0.clone(), q2.1.clone());
+                    let c2 = self.fresh_bn();
+                    self.emit_q(prev.clone(), self.kc8.clone(), c2.clone());
+                    self.emit_q(c2.clone(), self.kc7.clone(), b3.clone());
+                    prev = c2.clone();
+                }
+                _ => break 'tl1,
+            }
+        }
+        self.emit_q(prev.clone(), self.kc8.clone(), self.kc9.clone());
+        _v = h.clone();
+        self.depth -= 1;
+        Ok(_v)
+    }
 
-fn p_propertyNot(&mut self) -> Result<(Term, Term), PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let _v: (Term, Term);
-match self.tk {
-T_ATPNAME_LN | T_ATPNAME_NS | T_IRIREF | T_LIT_15 | T_LIT_16 | T_LIT_17 | T_LIT_18 | T_LIT_19 | T_LIT_20 | T_LIT_21 | T_LIT_22 | T_LIT_23 | T_LIT_24 | T_LIT_25 | T_LIT_26 | T_LIT_27 | T_LIT_28 | T_LIT_29 | T_LIT_30 | T_LIT_31 | T_LIT_32 | T_LIT_33 | T_LIT_34 | T_LIT_35 | T_LIT_36 | T_LIT_37 | T_LIT_38 | T_LIT_39 | T_LIT_40 | T_LIT_41 | T_LIT_42 | T_LIT_43 | T_LIT_44 | T_LIT_49 | T_LIT_50 | T_LIT_51 | T_LIT_52 | T_LIT_53 | T_LIT_54 | T_LIT_55 | T_LIT_56 | T_LIT_6 | T_LIT_70 | T_PNAME_LN | T_PNAME_NS => {
-let p = self.p_propertyAtom()?;
-_v = p.clone();
-}
-T_LIT_10 => {
-self.next_token()?;
-let q = self.p_propertyAtom()?;
-let b = self.fresh_bn();
-self.emit_q(b.clone(), q.0.clone(), q.1.clone());
-_v = (self.kc10.clone(), b.clone());
-}
-_ => {
-return Err(self.perr_alt(&[T_ATPNAME_LN, T_ATPNAME_NS, T_IRIREF, T_LIT_10, T_LIT_15, T_LIT_16, T_LIT_17, T_LIT_18, T_LIT_19, T_LIT_20, T_LIT_21, T_LIT_22, T_LIT_23, T_LIT_24, T_LIT_25, T_LIT_26, T_LIT_27, T_LIT_28, T_LIT_29, T_LIT_30, T_LIT_31, T_LIT_32, T_LIT_33, T_LIT_34, T_LIT_35, T_LIT_36, T_LIT_37, T_LIT_38, T_LIT_39, T_LIT_40, T_LIT_41, T_LIT_42, T_LIT_43, T_LIT_44, T_LIT_49, T_LIT_50, T_LIT_51, T_LIT_52, T_LIT_53, T_LIT_54, T_LIT_55, T_LIT_56, T_LIT_6, T_LIT_70, T_PNAME_LN, T_PNAME_NS]));
-}
-}
-self.depth -= 1;
-Ok(_v)
-}
+    fn p_propertyNot(&mut self) -> Result<(Term, Term), PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let _v: (Term, Term);
+        match self.tk {
+            T_ATPNAME_LN | T_ATPNAME_NS | T_IRIREF | T_LIT_15 | T_LIT_16 | T_LIT_17 | T_LIT_18
+            | T_LIT_19 | T_LIT_20 | T_LIT_21 | T_LIT_22 | T_LIT_23 | T_LIT_24 | T_LIT_25
+            | T_LIT_26 | T_LIT_27 | T_LIT_28 | T_LIT_29 | T_LIT_30 | T_LIT_31 | T_LIT_32
+            | T_LIT_33 | T_LIT_34 | T_LIT_35 | T_LIT_36 | T_LIT_37 | T_LIT_38 | T_LIT_39
+            | T_LIT_40 | T_LIT_41 | T_LIT_42 | T_LIT_43 | T_LIT_44 | T_LIT_49 | T_LIT_50
+            | T_LIT_51 | T_LIT_52 | T_LIT_53 | T_LIT_54 | T_LIT_55 | T_LIT_56 | T_LIT_6
+            | T_LIT_70 | T_PNAME_LN | T_PNAME_NS => {
+                let p = self.p_propertyAtom()?;
+                _v = p.clone();
+            }
+            T_LIT_10 => {
+                self.next_token()?;
+                let q = self.p_propertyAtom()?;
+                let b = self.fresh_bn();
+                self.emit_q(b.clone(), q.0.clone(), q.1.clone());
+                _v = (self.kc10.clone(), b.clone());
+            }
+            _ => {
+                return Err(self.perr_alt(&[
+                    T_ATPNAME_LN,
+                    T_ATPNAME_NS,
+                    T_IRIREF,
+                    T_LIT_10,
+                    T_LIT_15,
+                    T_LIT_16,
+                    T_LIT_17,
+                    T_LIT_18,
+                    T_LIT_19,
+                    T_LIT_20,
+                    T_LIT_21,
+                    T_LIT_22,
+                    T_LIT_23,
+                    T_LIT_24,
+                    T_LIT_25,
+                    T_LIT_26,
+                    T_LIT_27,
+                    T_LIT_28,
+                    T_LIT_29,
+                    T_LIT_30,
+                    T_LIT_31,
+                    T_LIT_32,
+                    T_LIT_33,
+                    T_LIT_34,
+                    T_LIT_35,
+                    T_LIT_36,
+                    T_LIT_37,
+                    T_LIT_38,
+                    T_LIT_39,
+                    T_LIT_40,
+                    T_LIT_41,
+                    T_LIT_42,
+                    T_LIT_43,
+                    T_LIT_44,
+                    T_LIT_49,
+                    T_LIT_50,
+                    T_LIT_51,
+                    T_LIT_52,
+                    T_LIT_53,
+                    T_LIT_54,
+                    T_LIT_55,
+                    T_LIT_56,
+                    T_LIT_6,
+                    T_LIT_70,
+                    T_PNAME_LN,
+                    T_PNAME_NS,
+                ]));
+            }
+        }
+        self.depth -= 1;
+        Ok(_v)
+    }
 
-fn p_propertyAtom(&mut self) -> Result<(Term, Term), PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let _v: (Term, Term);
-match self.tk {
-T_IRIREF | T_LIT_70 | T_PNAME_LN | T_PNAME_NS => {
-let dt = self.p_iri()?;
-if or_xsdDatatype(&dt) {
-_v = (self.kc18.clone(), dt.clone());
-} else {
-_v = (self.kc17.clone(), dt.clone());
-}
-}
-T_LIT_49 | T_LIT_50 | T_LIT_51 | T_LIT_52 | T_LIT_53 | T_LIT_54 | T_LIT_55 => {
-let k = self.p_nodeKindName()?;
-_v = (self.kc19.clone(), k.clone());
-}
-T_ATPNAME_LN | T_ATPNAME_NS | T_LIT_56 => {
-let r = self.p_shapeRef()?;
-_v = (self.kc49.clone(), r.clone());
-}
-T_LIT_15 | T_LIT_16 | T_LIT_17 | T_LIT_18 | T_LIT_19 | T_LIT_20 | T_LIT_21 | T_LIT_22 | T_LIT_23 | T_LIT_24 | T_LIT_25 | T_LIT_26 | T_LIT_27 | T_LIT_28 | T_LIT_29 | T_LIT_30 | T_LIT_31 | T_LIT_32 | T_LIT_33 | T_LIT_34 | T_LIT_35 | T_LIT_36 | T_LIT_37 | T_LIT_38 | T_LIT_39 | T_LIT_40 | T_LIT_41 | T_LIT_42 | T_LIT_43 | T_LIT_44 => {
-let pm = self.p_paramName()?;
-if self.tk != T_LIT_11 { return Err(self.perr_exp(T_LIT_11)); }
-self.next_token()?;
-let v = self.p_iriOrLiteralOrArray()?;
-_v = (pm.clone(), v.clone());
-}
-T_LIT_6 => {
-let b = self.fresh_bn();
-self.p_nodeShapeBody(b.clone())?;
-_v = (self.kc49.clone(), b.clone());
-}
-_ => {
-return Err(self.perr_alt(&[T_ATPNAME_LN, T_ATPNAME_NS, T_IRIREF, T_LIT_15, T_LIT_16, T_LIT_17, T_LIT_18, T_LIT_19, T_LIT_20, T_LIT_21, T_LIT_22, T_LIT_23, T_LIT_24, T_LIT_25, T_LIT_26, T_LIT_27, T_LIT_28, T_LIT_29, T_LIT_30, T_LIT_31, T_LIT_32, T_LIT_33, T_LIT_34, T_LIT_35, T_LIT_36, T_LIT_37, T_LIT_38, T_LIT_39, T_LIT_40, T_LIT_41, T_LIT_42, T_LIT_43, T_LIT_44, T_LIT_49, T_LIT_50, T_LIT_51, T_LIT_52, T_LIT_53, T_LIT_54, T_LIT_55, T_LIT_56, T_LIT_6, T_LIT_70, T_PNAME_LN, T_PNAME_NS]));
-}
-}
-self.depth -= 1;
-Ok(_v)
-}
+    fn p_propertyAtom(&mut self) -> Result<(Term, Term), PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let _v: (Term, Term);
+        match self.tk {
+            T_IRIREF | T_LIT_70 | T_PNAME_LN | T_PNAME_NS => {
+                let dt = self.p_iri()?;
+                if or_xsdDatatype(&dt) {
+                    _v = (self.kc18.clone(), dt.clone());
+                } else {
+                    _v = (self.kc17.clone(), dt.clone());
+                }
+            }
+            T_LIT_49 | T_LIT_50 | T_LIT_51 | T_LIT_52 | T_LIT_53 | T_LIT_54 | T_LIT_55 => {
+                let k = self.p_nodeKindName()?;
+                _v = (self.kc19.clone(), k.clone());
+            }
+            T_ATPNAME_LN | T_ATPNAME_NS | T_LIT_56 => {
+                let r = self.p_shapeRef()?;
+                _v = (self.kc49.clone(), r.clone());
+            }
+            T_LIT_15 | T_LIT_16 | T_LIT_17 | T_LIT_18 | T_LIT_19 | T_LIT_20 | T_LIT_21
+            | T_LIT_22 | T_LIT_23 | T_LIT_24 | T_LIT_25 | T_LIT_26 | T_LIT_27 | T_LIT_28
+            | T_LIT_29 | T_LIT_30 | T_LIT_31 | T_LIT_32 | T_LIT_33 | T_LIT_34 | T_LIT_35
+            | T_LIT_36 | T_LIT_37 | T_LIT_38 | T_LIT_39 | T_LIT_40 | T_LIT_41 | T_LIT_42
+            | T_LIT_43 | T_LIT_44 => {
+                let pm = self.p_paramName()?;
+                if self.tk != T_LIT_11 {
+                    return Err(self.perr_exp(T_LIT_11));
+                }
+                self.next_token()?;
+                let v = self.p_iriOrLiteralOrArray()?;
+                _v = (pm.clone(), v.clone());
+            }
+            T_LIT_6 => {
+                let b = self.fresh_bn();
+                self.p_nodeShapeBody(b.clone())?;
+                _v = (self.kc49.clone(), b.clone());
+            }
+            _ => {
+                return Err(self.perr_alt(&[
+                    T_ATPNAME_LN,
+                    T_ATPNAME_NS,
+                    T_IRIREF,
+                    T_LIT_15,
+                    T_LIT_16,
+                    T_LIT_17,
+                    T_LIT_18,
+                    T_LIT_19,
+                    T_LIT_20,
+                    T_LIT_21,
+                    T_LIT_22,
+                    T_LIT_23,
+                    T_LIT_24,
+                    T_LIT_25,
+                    T_LIT_26,
+                    T_LIT_27,
+                    T_LIT_28,
+                    T_LIT_29,
+                    T_LIT_30,
+                    T_LIT_31,
+                    T_LIT_32,
+                    T_LIT_33,
+                    T_LIT_34,
+                    T_LIT_35,
+                    T_LIT_36,
+                    T_LIT_37,
+                    T_LIT_38,
+                    T_LIT_39,
+                    T_LIT_40,
+                    T_LIT_41,
+                    T_LIT_42,
+                    T_LIT_43,
+                    T_LIT_44,
+                    T_LIT_49,
+                    T_LIT_50,
+                    T_LIT_51,
+                    T_LIT_52,
+                    T_LIT_53,
+                    T_LIT_54,
+                    T_LIT_55,
+                    T_LIT_56,
+                    T_LIT_6,
+                    T_LIT_70,
+                    T_PNAME_LN,
+                    T_PNAME_NS,
+                ]));
+            }
+        }
+        self.depth -= 1;
+        Ok(_v)
+    }
 
-fn p_nodeKindName(&mut self) -> Result<Term, PErr> {
-let _v: Term;
-match self.tk {
-T_LIT_49 => {
-self.next_token()?;
-_v = self.kc50.clone();
-}
-T_LIT_50 => {
-self.next_token()?;
-_v = self.kc51.clone();
-}
-T_LIT_51 => {
-self.next_token()?;
-_v = self.kc52.clone();
-}
-T_LIT_52 => {
-self.next_token()?;
-_v = self.kc53.clone();
-}
-T_LIT_53 => {
-self.next_token()?;
-_v = self.kc54.clone();
-}
-T_LIT_54 => {
-self.next_token()?;
-_v = self.kc55.clone();
-}
-T_LIT_55 => {
-self.next_token()?;
-_v = self.kc56.clone();
-}
-_ => {
-return Err(self.perr_alt(&[T_LIT_49, T_LIT_50, T_LIT_51, T_LIT_52, T_LIT_53, T_LIT_54, T_LIT_55]));
-}
-}
-Ok(_v)
-}
+    fn p_nodeKindName(&mut self) -> Result<Term, PErr> {
+        let _v: Term;
+        match self.tk {
+            T_LIT_49 => {
+                self.next_token()?;
+                _v = self.kc50.clone();
+            }
+            T_LIT_50 => {
+                self.next_token()?;
+                _v = self.kc51.clone();
+            }
+            T_LIT_51 => {
+                self.next_token()?;
+                _v = self.kc52.clone();
+            }
+            T_LIT_52 => {
+                self.next_token()?;
+                _v = self.kc53.clone();
+            }
+            T_LIT_53 => {
+                self.next_token()?;
+                _v = self.kc54.clone();
+            }
+            T_LIT_54 => {
+                self.next_token()?;
+                _v = self.kc55.clone();
+            }
+            T_LIT_55 => {
+                self.next_token()?;
+                _v = self.kc56.clone();
+            }
+            _ => {
+                return Err(self.perr_alt(&[
+                    T_LIT_49, T_LIT_50, T_LIT_51, T_LIT_52, T_LIT_53, T_LIT_54, T_LIT_55,
+                ]));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_shapeRef(&mut self) -> Result<Term, PErr> {
-let _v: Term;
-match self.tk {
-T_LIT_56 => {
-self.next_token()?;
-if self.tk != T_IRIREF { return Err(self.perr_exp(T_IRIREF)); }
-let r: Rc<str> = if self.t_esc { rc_from_string(unesc_u(&self.inp[self.ts + 1..self.te - 1]).map_err(|_| self.perr("INVALID_CODEPOINT"))?) } else { Rc::from(&self.inp[self.ts + 1..self.te - 1]) };
-self.next_token()?;
-_v = nn(resolve_iri(&self.env_base, r.as_ref()));
-}
-T_ATPNAME_LN => {
-let a_0: Rc<str> = Rc::from(&self.inp[self.ts + 1..(self.t_m0 as usize) - 1]);
-let a_1: Rc<str> = if self.t_esc { rc_from_string(unesc_local(&self.inp[(self.t_m0 as usize)..self.te])) } else { Rc::from(&self.inp[(self.t_m0 as usize)..self.te]) };
-self.next_token()?;
-if !(self.env_prefixes.contains_key(a_0.as_ref())) { return Err(self.perr("UNDECLARED_PREFIX")); }
-_v = expand_pn(&self.env_prefixes, a_0.as_ref(), a_1.as_ref());
-}
-T_ATPNAME_NS => {
-let a: Rc<str> = Rc::from(&self.inp[self.ts + 1..self.te - 1]);
-self.next_token()?;
-if !(self.env_prefixes.contains_key(a.as_ref())) { return Err(self.perr("UNDECLARED_PREFIX")); }
-_v = expand_pn(&self.env_prefixes, a.as_ref(), "");
-}
-_ => {
-return Err(self.perr_alt(&[T_ATPNAME_LN, T_ATPNAME_NS, T_LIT_56]));
-}
-}
-Ok(_v)
-}
+    fn p_shapeRef(&mut self) -> Result<Term, PErr> {
+        let _v: Term;
+        match self.tk {
+            T_LIT_56 => {
+                self.next_token()?;
+                if self.tk != T_IRIREF {
+                    return Err(self.perr_exp(T_IRIREF));
+                }
+                let r: Rc<str> = if self.t_esc {
+                    rc_from_string(
+                        unesc_u(&self.inp[self.ts + 1..self.te - 1])
+                            .map_err(|_| self.perr("INVALID_CODEPOINT"))?,
+                    )
+                } else {
+                    Rc::from(&self.inp[self.ts + 1..self.te - 1])
+                };
+                self.next_token()?;
+                _v = nn(resolve_iri(&self.env_base, r.as_ref()));
+            }
+            T_ATPNAME_LN => {
+                let a_0: Rc<str> = Rc::from(&self.inp[self.ts + 1..(self.t_m0 as usize) - 1]);
+                let a_1: Rc<str> = if self.t_esc {
+                    rc_from_string(unesc_local(&self.inp[(self.t_m0 as usize)..self.te]))
+                } else {
+                    Rc::from(&self.inp[(self.t_m0 as usize)..self.te])
+                };
+                self.next_token()?;
+                if !(self.env_prefixes.contains_key(a_0.as_ref())) {
+                    return Err(self.perr("UNDECLARED_PREFIX"));
+                }
+                _v = expand_pn(&self.env_prefixes, a_0.as_ref(), a_1.as_ref());
+            }
+            T_ATPNAME_NS => {
+                let a: Rc<str> = Rc::from(&self.inp[self.ts + 1..self.te - 1]);
+                self.next_token()?;
+                if !(self.env_prefixes.contains_key(a.as_ref())) {
+                    return Err(self.perr("UNDECLARED_PREFIX"));
+                }
+                _v = expand_pn(&self.env_prefixes, a.as_ref(), "");
+            }
+            _ => {
+                return Err(self.perr_alt(&[T_ATPNAME_LN, T_ATPNAME_NS, T_LIT_56]));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_pcSection(&mut self, ps: Term) -> Result<(), PErr> {
-if self.tk != T_LIT_57 { return Err(self.perr_exp(T_LIT_57)); }
-self.next_token()?;
-self.p_predicate(ps.clone())?;
-while matches!(self.tk, T_LIT_58) {
-self.next_token()?;
-self.p_predicate(ps.clone())?;
-}
-if self.tk != T_LIT_57 { return Err(self.perr_exp(T_LIT_57)); }
-self.next_token()?;
-Ok(())
-}
+    fn p_pcSection(&mut self, ps: Term) -> Result<(), PErr> {
+        if self.tk != T_LIT_57 {
+            return Err(self.perr_exp(T_LIT_57));
+        }
+        self.next_token()?;
+        self.p_predicate(ps.clone())?;
+        while matches!(self.tk, T_LIT_58) {
+            self.next_token()?;
+            self.p_predicate(ps.clone())?;
+        }
+        if self.tk != T_LIT_57 {
+            return Err(self.perr_exp(T_LIT_57));
+        }
+        self.next_token()?;
+        Ok(())
+    }
 
-fn p_pathAlternative(&mut self) -> Result<Term, PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let _v: Term;
-let e = self.p_pathSequence()?;
-let mut t: Option<Term> = None;
-if matches!(self.tk, T_LIT_9) {
-t = Some(self.p_pathAltTail(e.clone())?);
-}
-let _t0: Term = match t.clone() { Some(_x) => _x, None => e.clone() };
-_v = _t0.clone();
-self.depth -= 1;
-Ok(_v)
-}
+    fn p_pathAlternative(&mut self) -> Result<Term, PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let _v: Term;
+        let e = self.p_pathSequence()?;
+        let mut t: Option<Term> = None;
+        if matches!(self.tk, T_LIT_9) {
+            t = Some(self.p_pathAltTail(e.clone())?);
+        }
+        let _t0: Term = match t.clone() {
+            Some(_x) => _x,
+            None => e.clone(),
+        };
+        _v = _t0.clone();
+        self.depth -= 1;
+        Ok(_v)
+    }
 
-fn p_pathAltTail(&mut self, first: Term) -> Result<Term, PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let _v: Term;
-if self.tk != T_LIT_9 { return Err(self.perr_exp(T_LIT_9)); }
-self.next_token()?;
-let e2 = self.p_pathSequence()?;
-let h = self.fresh_bn();
-self.emit_q(h.clone(), self.kc7.clone(), first.clone());
-let c1 = self.fresh_bn();
-self.emit_q(h.clone(), self.kc8.clone(), c1.clone());
-self.emit_q(c1.clone(), self.kc7.clone(), e2.clone());
-let mut prev: Term = c1.clone();
-'tl2: loop {
-match self.tk {
-T_LIT_9 => {
-self.next_token()?;
-let e3 = self.p_pathSequence()?;
-let c2 = self.fresh_bn();
-self.emit_q(prev.clone(), self.kc8.clone(), c2.clone());
-self.emit_q(c2.clone(), self.kc7.clone(), e3.clone());
-prev = c2.clone();
-}
-_ => break 'tl2,
-}
-}
-self.emit_q(prev.clone(), self.kc8.clone(), self.kc9.clone());
-let n = self.fresh_bn();
-self.emit_q(n.clone(), self.kc57.clone(), h.clone());
-_v = n.clone();
-self.depth -= 1;
-Ok(_v)
-}
+    fn p_pathAltTail(&mut self, first: Term) -> Result<Term, PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let _v: Term;
+        if self.tk != T_LIT_9 {
+            return Err(self.perr_exp(T_LIT_9));
+        }
+        self.next_token()?;
+        let e2 = self.p_pathSequence()?;
+        let h = self.fresh_bn();
+        self.emit_q(h.clone(), self.kc7.clone(), first.clone());
+        let c1 = self.fresh_bn();
+        self.emit_q(h.clone(), self.kc8.clone(), c1.clone());
+        self.emit_q(c1.clone(), self.kc7.clone(), e2.clone());
+        let mut prev: Term = c1.clone();
+        'tl2: loop {
+            match self.tk {
+                T_LIT_9 => {
+                    self.next_token()?;
+                    let e3 = self.p_pathSequence()?;
+                    let c2 = self.fresh_bn();
+                    self.emit_q(prev.clone(), self.kc8.clone(), c2.clone());
+                    self.emit_q(c2.clone(), self.kc7.clone(), e3.clone());
+                    prev = c2.clone();
+                }
+                _ => break 'tl2,
+            }
+        }
+        self.emit_q(prev.clone(), self.kc8.clone(), self.kc9.clone());
+        let n = self.fresh_bn();
+        self.emit_q(n.clone(), self.kc57.clone(), h.clone());
+        _v = n.clone();
+        self.depth -= 1;
+        Ok(_v)
+    }
 
-fn p_pathSequence(&mut self) -> Result<Term, PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let _v: Term;
-let e = self.p_pathEltOrInverse()?;
-let mut t: Option<Term> = None;
-if matches!(self.tk, T_LIT_59) {
-t = Some(self.p_pathSeqTail(e.clone())?);
-}
-let _t0: Term = match t.clone() { Some(_x) => _x, None => e.clone() };
-_v = _t0.clone();
-self.depth -= 1;
-Ok(_v)
-}
+    fn p_pathSequence(&mut self) -> Result<Term, PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let _v: Term;
+        let e = self.p_pathEltOrInverse()?;
+        let mut t: Option<Term> = None;
+        if matches!(self.tk, T_LIT_59) {
+            t = Some(self.p_pathSeqTail(e.clone())?);
+        }
+        let _t0: Term = match t.clone() {
+            Some(_x) => _x,
+            None => e.clone(),
+        };
+        _v = _t0.clone();
+        self.depth -= 1;
+        Ok(_v)
+    }
 
-fn p_pathSeqTail(&mut self, first: Term) -> Result<Term, PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let _v: Term;
-if self.tk != T_LIT_59 { return Err(self.perr_exp(T_LIT_59)); }
-self.next_token()?;
-let e2 = self.p_pathEltOrInverse()?;
-let h = self.fresh_bn();
-self.emit_q(h.clone(), self.kc7.clone(), first.clone());
-let c1 = self.fresh_bn();
-self.emit_q(h.clone(), self.kc8.clone(), c1.clone());
-self.emit_q(c1.clone(), self.kc7.clone(), e2.clone());
-let mut prev: Term = c1.clone();
-'tl3: loop {
-match self.tk {
-T_LIT_59 => {
-self.next_token()?;
-let e3 = self.p_pathEltOrInverse()?;
-let c2 = self.fresh_bn();
-self.emit_q(prev.clone(), self.kc8.clone(), c2.clone());
-self.emit_q(c2.clone(), self.kc7.clone(), e3.clone());
-prev = c2.clone();
-}
-_ => break 'tl3,
-}
-}
-self.emit_q(prev.clone(), self.kc8.clone(), self.kc9.clone());
-_v = h.clone();
-self.depth -= 1;
-Ok(_v)
-}
+    fn p_pathSeqTail(&mut self, first: Term) -> Result<Term, PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let _v: Term;
+        if self.tk != T_LIT_59 {
+            return Err(self.perr_exp(T_LIT_59));
+        }
+        self.next_token()?;
+        let e2 = self.p_pathEltOrInverse()?;
+        let h = self.fresh_bn();
+        self.emit_q(h.clone(), self.kc7.clone(), first.clone());
+        let c1 = self.fresh_bn();
+        self.emit_q(h.clone(), self.kc8.clone(), c1.clone());
+        self.emit_q(c1.clone(), self.kc7.clone(), e2.clone());
+        let mut prev: Term = c1.clone();
+        'tl3: loop {
+            match self.tk {
+                T_LIT_59 => {
+                    self.next_token()?;
+                    let e3 = self.p_pathEltOrInverse()?;
+                    let c2 = self.fresh_bn();
+                    self.emit_q(prev.clone(), self.kc8.clone(), c2.clone());
+                    self.emit_q(c2.clone(), self.kc7.clone(), e3.clone());
+                    prev = c2.clone();
+                }
+                _ => break 'tl3,
+            }
+        }
+        self.emit_q(prev.clone(), self.kc8.clone(), self.kc9.clone());
+        _v = h.clone();
+        self.depth -= 1;
+        Ok(_v)
+    }
 
-fn p_pathEltOrInverse(&mut self) -> Result<Term, PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let _v: Term;
-match self.tk {
-T_IRIREF | T_LIT_63 | T_LIT_70 | T_PNAME_LN | T_PNAME_NS => {
-let e = self.p_pathElt()?;
-_v = e.clone();
-}
-T_LIT_60 => {
-self.next_token()?;
-let e = self.p_pathElt()?;
-let b = self.fresh_bn();
-self.emit_q(b.clone(), self.kc58.clone(), e.clone());
-_v = b.clone();
-}
-_ => {
-return Err(self.perr_alt(&[T_IRIREF, T_LIT_60, T_LIT_63, T_LIT_70, T_PNAME_LN, T_PNAME_NS]));
-}
-}
-self.depth -= 1;
-Ok(_v)
-}
+    fn p_pathEltOrInverse(&mut self) -> Result<Term, PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let _v: Term;
+        match self.tk {
+            T_IRIREF | T_LIT_63 | T_LIT_70 | T_PNAME_LN | T_PNAME_NS => {
+                let e = self.p_pathElt()?;
+                _v = e.clone();
+            }
+            T_LIT_60 => {
+                self.next_token()?;
+                let e = self.p_pathElt()?;
+                let b = self.fresh_bn();
+                self.emit_q(b.clone(), self.kc58.clone(), e.clone());
+                _v = b.clone();
+            }
+            _ => {
+                return Err(self.perr_alt(&[
+                    T_IRIREF, T_LIT_60, T_LIT_63, T_LIT_70, T_PNAME_LN, T_PNAME_NS,
+                ]));
+            }
+        }
+        self.depth -= 1;
+        Ok(_v)
+    }
 
-fn p_pathElt(&mut self) -> Result<Term, PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let _v: Term;
-let p = self.p_pathPrimary()?;
-match self.tk {
-T_LIT_48 | T_LIT_61 | T_LIT_62 => {
-let m = self.p_pathMod()?;
-let b = self.fresh_bn();
-self.emit_q(b.clone(), m.clone(), p.clone());
-_v = b.clone();
-}
-_ => {
-_v = p.clone();
-}
-}
-self.depth -= 1;
-Ok(_v)
-}
+    fn p_pathElt(&mut self) -> Result<Term, PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let _v: Term;
+        let p = self.p_pathPrimary()?;
+        match self.tk {
+            T_LIT_48 | T_LIT_61 | T_LIT_62 => {
+                let m = self.p_pathMod()?;
+                let b = self.fresh_bn();
+                self.emit_q(b.clone(), m.clone(), p.clone());
+                _v = b.clone();
+            }
+            _ => {
+                _v = p.clone();
+            }
+        }
+        self.depth -= 1;
+        Ok(_v)
+    }
 
-fn p_pathMod(&mut self) -> Result<Term, PErr> {
-let _v: Term;
-match self.tk {
-T_LIT_61 => {
-self.next_token()?;
-_v = self.kc59.clone();
-}
-T_LIT_48 => {
-self.next_token()?;
-_v = self.kc60.clone();
-}
-T_LIT_62 => {
-self.next_token()?;
-_v = self.kc61.clone();
-}
-_ => {
-return Err(self.perr_alt(&[T_LIT_48, T_LIT_61, T_LIT_62]));
-}
-}
-Ok(_v)
-}
+    fn p_pathMod(&mut self) -> Result<Term, PErr> {
+        let _v: Term;
+        match self.tk {
+            T_LIT_61 => {
+                self.next_token()?;
+                _v = self.kc59.clone();
+            }
+            T_LIT_48 => {
+                self.next_token()?;
+                _v = self.kc60.clone();
+            }
+            T_LIT_62 => {
+                self.next_token()?;
+                _v = self.kc61.clone();
+            }
+            _ => {
+                return Err(self.perr_alt(&[T_LIT_48, T_LIT_61, T_LIT_62]));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_pathPrimary(&mut self) -> Result<Term, PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let _v: Term;
-match self.tk {
-T_IRIREF | T_LIT_70 | T_PNAME_LN | T_PNAME_NS => {
-let i = self.p_iri()?;
-_v = i.clone();
-}
-T_LIT_63 => {
-self.next_token()?;
-let p = self.p_pathAlternative()?;
-if self.tk != T_LIT_64 { return Err(self.perr_exp(T_LIT_64)); }
-self.next_token()?;
-_v = p.clone();
-}
-_ => {
-return Err(self.perr_alt(&[T_IRIREF, T_LIT_63, T_LIT_70, T_PNAME_LN, T_PNAME_NS]));
-}
-}
-self.depth -= 1;
-Ok(_v)
-}
+    fn p_pathPrimary(&mut self) -> Result<Term, PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let _v: Term;
+        match self.tk {
+            T_IRIREF | T_LIT_70 | T_PNAME_LN | T_PNAME_NS => {
+                let i = self.p_iri()?;
+                _v = i.clone();
+            }
+            T_LIT_63 => {
+                self.next_token()?;
+                let p = self.p_pathAlternative()?;
+                if self.tk != T_LIT_64 {
+                    return Err(self.perr_exp(T_LIT_64));
+                }
+                self.next_token()?;
+                _v = p.clone();
+            }
+            _ => {
+                return Err(self.perr_alt(&[T_IRIREF, T_LIT_63, T_LIT_70, T_PNAME_LN, T_PNAME_NS]));
+            }
+        }
+        self.depth -= 1;
+        Ok(_v)
+    }
 
-fn p_iriOrLiteralOrArray(&mut self) -> Result<Term, PErr> {
-let _v: Term;
-match self.tk {
-T_DECIMAL | T_DOUBLE | T_INTEGER | T_IRIREF | T_LIT_65 | T_LIT_68 | T_LIT_69 | T_LIT_70 | T_PNAME_LN | T_PNAME_NS | T_STRING_LITERAL_LONG_QUOTE | T_STRING_LITERAL_LONG_SINGLE_QUOTE | T_STRING_LITERAL_QUOTE | T_STRING_LITERAL_SINGLE_QUOTE => {
-let v = self.p_iriOrLiteral()?;
-_v = v.clone();
-}
-T_LIT_45 => {
-self.next_token()?;
-let h = self.fresh_bn();
-let mut b: Option<Term> = None;
-if (FS_4 >> self.tk) & 1 != 0 {
-b = Some(self.p_arrayBody(h.clone())?);
-}
-if self.tk != T_LIT_47 { return Err(self.perr_exp(T_LIT_47)); }
-self.next_token()?;
-if b.is_none() {
-self.emit_q(h.clone(), self.kc8.clone(), self.kc9.clone());
-}
-_v = h.clone();
-}
-_ => {
-return Err(self.perr_alt(&[T_DECIMAL, T_DOUBLE, T_INTEGER, T_IRIREF, T_LIT_45, T_LIT_65, T_LIT_68, T_LIT_69, T_LIT_70, T_PNAME_LN, T_PNAME_NS, T_STRING_LITERAL_LONG_QUOTE, T_STRING_LITERAL_LONG_SINGLE_QUOTE, T_STRING_LITERAL_QUOTE, T_STRING_LITERAL_SINGLE_QUOTE]));
-}
-}
-Ok(_v)
-}
+    fn p_iriOrLiteralOrArray(&mut self) -> Result<Term, PErr> {
+        let _v: Term;
+        match self.tk {
+            T_DECIMAL
+            | T_DOUBLE
+            | T_INTEGER
+            | T_IRIREF
+            | T_LIT_65
+            | T_LIT_68
+            | T_LIT_69
+            | T_LIT_70
+            | T_PNAME_LN
+            | T_PNAME_NS
+            | T_STRING_LITERAL_LONG_QUOTE
+            | T_STRING_LITERAL_LONG_SINGLE_QUOTE
+            | T_STRING_LITERAL_QUOTE
+            | T_STRING_LITERAL_SINGLE_QUOTE => {
+                let v = self.p_iriOrLiteral()?;
+                _v = v.clone();
+            }
+            T_LIT_45 => {
+                self.next_token()?;
+                let h = self.fresh_bn();
+                let mut b: Option<Term> = None;
+                if (FS_4 >> self.tk) & 1 != 0 {
+                    b = Some(self.p_arrayBody(h.clone())?);
+                }
+                if self.tk != T_LIT_47 {
+                    return Err(self.perr_exp(T_LIT_47));
+                }
+                self.next_token()?;
+                if b.is_none() {
+                    self.emit_q(h.clone(), self.kc8.clone(), self.kc9.clone());
+                }
+                _v = h.clone();
+            }
+            _ => {
+                return Err(self.perr_alt(&[
+                    T_DECIMAL,
+                    T_DOUBLE,
+                    T_INTEGER,
+                    T_IRIREF,
+                    T_LIT_45,
+                    T_LIT_65,
+                    T_LIT_68,
+                    T_LIT_69,
+                    T_LIT_70,
+                    T_PNAME_LN,
+                    T_PNAME_NS,
+                    T_STRING_LITERAL_LONG_QUOTE,
+                    T_STRING_LITERAL_LONG_SINGLE_QUOTE,
+                    T_STRING_LITERAL_QUOTE,
+                    T_STRING_LITERAL_SINGLE_QUOTE,
+                ]));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_arrayBody(&mut self, h: Term) -> Result<Term, PErr> {
-let _v: Term;
-let o = self.p_iriOrLiteral()?;
-self.emit_q(h.clone(), self.kc7.clone(), o.clone());
-let mut prev: Term = h.clone();
-'tl4: loop {
-match self.tk {
-T_DECIMAL | T_DOUBLE | T_INTEGER | T_IRIREF | T_LIT_65 | T_LIT_68 | T_LIT_69 | T_LIT_70 | T_PNAME_LN | T_PNAME_NS | T_STRING_LITERAL_LONG_QUOTE | T_STRING_LITERAL_LONG_SINGLE_QUOTE | T_STRING_LITERAL_QUOTE | T_STRING_LITERAL_SINGLE_QUOTE => {
-let o2 = self.p_iriOrLiteral()?;
-let c = self.fresh_bn();
-self.emit_q(prev.clone(), self.kc8.clone(), c.clone());
-self.emit_q(c.clone(), self.kc7.clone(), o2.clone());
-prev = c.clone();
-}
-_ => break 'tl4,
-}
-}
-self.emit_q(prev.clone(), self.kc8.clone(), self.kc9.clone());
-_v = h.clone();
-Ok(_v)
-}
+    fn p_arrayBody(&mut self, h: Term) -> Result<Term, PErr> {
+        let _v: Term;
+        let o = self.p_iriOrLiteral()?;
+        self.emit_q(h.clone(), self.kc7.clone(), o.clone());
+        let mut prev: Term = h.clone();
+        'tl4: loop {
+            match self.tk {
+                T_DECIMAL
+                | T_DOUBLE
+                | T_INTEGER
+                | T_IRIREF
+                | T_LIT_65
+                | T_LIT_68
+                | T_LIT_69
+                | T_LIT_70
+                | T_PNAME_LN
+                | T_PNAME_NS
+                | T_STRING_LITERAL_LONG_QUOTE
+                | T_STRING_LITERAL_LONG_SINGLE_QUOTE
+                | T_STRING_LITERAL_QUOTE
+                | T_STRING_LITERAL_SINGLE_QUOTE => {
+                    let o2 = self.p_iriOrLiteral()?;
+                    let c = self.fresh_bn();
+                    self.emit_q(prev.clone(), self.kc8.clone(), c.clone());
+                    self.emit_q(c.clone(), self.kc7.clone(), o2.clone());
+                    prev = c.clone();
+                }
+                _ => break 'tl4,
+            }
+        }
+        self.emit_q(prev.clone(), self.kc8.clone(), self.kc9.clone());
+        _v = h.clone();
+        Ok(_v)
+    }
 
-fn p_iriOrLiteral(&mut self) -> Result<Term, PErr> {
-let _v: Term;
-match self.tk {
-T_IRIREF | T_LIT_70 | T_PNAME_LN | T_PNAME_NS => {
-let i = self.p_iri()?;
-_v = i.clone();
-}
-T_DECIMAL | T_DOUBLE | T_INTEGER | T_LIT_68 | T_LIT_69 | T_STRING_LITERAL_LONG_QUOTE | T_STRING_LITERAL_LONG_SINGLE_QUOTE | T_STRING_LITERAL_QUOTE | T_STRING_LITERAL_SINGLE_QUOTE => {
-let l = self.p_literal()?;
-_v = l.clone();
-}
-T_LIT_65 => {
-let t = self.p_tripleTerm()?;
-_v = t.clone();
-}
-_ => {
-return Err(self.perr_alt(&[T_DECIMAL, T_DOUBLE, T_INTEGER, T_IRIREF, T_LIT_65, T_LIT_68, T_LIT_69, T_LIT_70, T_PNAME_LN, T_PNAME_NS, T_STRING_LITERAL_LONG_QUOTE, T_STRING_LITERAL_LONG_SINGLE_QUOTE, T_STRING_LITERAL_QUOTE, T_STRING_LITERAL_SINGLE_QUOTE]));
-}
-}
-Ok(_v)
-}
+    fn p_iriOrLiteral(&mut self) -> Result<Term, PErr> {
+        let _v: Term;
+        match self.tk {
+            T_IRIREF | T_LIT_70 | T_PNAME_LN | T_PNAME_NS => {
+                let i = self.p_iri()?;
+                _v = i.clone();
+            }
+            T_DECIMAL
+            | T_DOUBLE
+            | T_INTEGER
+            | T_LIT_68
+            | T_LIT_69
+            | T_STRING_LITERAL_LONG_QUOTE
+            | T_STRING_LITERAL_LONG_SINGLE_QUOTE
+            | T_STRING_LITERAL_QUOTE
+            | T_STRING_LITERAL_SINGLE_QUOTE => {
+                let l = self.p_literal()?;
+                _v = l.clone();
+            }
+            T_LIT_65 => {
+                let t = self.p_tripleTerm()?;
+                _v = t.clone();
+            }
+            _ => {
+                return Err(self.perr_alt(&[
+                    T_DECIMAL,
+                    T_DOUBLE,
+                    T_INTEGER,
+                    T_IRIREF,
+                    T_LIT_65,
+                    T_LIT_68,
+                    T_LIT_69,
+                    T_LIT_70,
+                    T_PNAME_LN,
+                    T_PNAME_NS,
+                    T_STRING_LITERAL_LONG_QUOTE,
+                    T_STRING_LITERAL_LONG_SINGLE_QUOTE,
+                    T_STRING_LITERAL_QUOTE,
+                    T_STRING_LITERAL_SINGLE_QUOTE,
+                ]));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_tripleTerm(&mut self) -> Result<Term, PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let _v: Term;
-if self.tk != T_LIT_65 { return Err(self.perr_exp(T_LIT_65)); }
-self.next_token()?;
-let s = self.p_iri()?;
-let p = self.p_iri()?;
-let o = self.p_ttObject()?;
-if self.tk != T_LIT_66 { return Err(self.perr_exp(T_LIT_66)); }
-self.next_token()?;
-_v = Term::Triple(Rc::new(Triple { subject: s.clone(), predicate: p.clone(), object: o.clone() }));
-self.depth -= 1;
-Ok(_v)
-}
+    fn p_tripleTerm(&mut self) -> Result<Term, PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let _v: Term;
+        if self.tk != T_LIT_65 {
+            return Err(self.perr_exp(T_LIT_65));
+        }
+        self.next_token()?;
+        let s = self.p_iri()?;
+        let p = self.p_iri()?;
+        let o = self.p_ttObject()?;
+        if self.tk != T_LIT_66 {
+            return Err(self.perr_exp(T_LIT_66));
+        }
+        self.next_token()?;
+        _v = Term::Triple(Rc::new(Triple {
+            subject: s.clone(),
+            predicate: p.clone(),
+            object: o.clone(),
+        }));
+        self.depth -= 1;
+        Ok(_v)
+    }
 
-fn p_ttObject(&mut self) -> Result<Term, PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let _v: Term;
-match self.tk {
-T_IRIREF | T_LIT_70 | T_PNAME_LN | T_PNAME_NS => {
-let i = self.p_iri()?;
-_v = i.clone();
-}
-T_DECIMAL | T_DOUBLE | T_INTEGER | T_LIT_68 | T_LIT_69 | T_STRING_LITERAL_LONG_QUOTE | T_STRING_LITERAL_LONG_SINGLE_QUOTE | T_STRING_LITERAL_QUOTE | T_STRING_LITERAL_SINGLE_QUOTE => {
-let l = self.p_literal()?;
-_v = l.clone();
-}
-T_LIT_65 => {
-let t = self.p_tripleTerm()?;
-_v = t.clone();
-}
-_ => {
-return Err(self.perr_alt(&[T_DECIMAL, T_DOUBLE, T_INTEGER, T_IRIREF, T_LIT_65, T_LIT_68, T_LIT_69, T_LIT_70, T_PNAME_LN, T_PNAME_NS, T_STRING_LITERAL_LONG_QUOTE, T_STRING_LITERAL_LONG_SINGLE_QUOTE, T_STRING_LITERAL_QUOTE, T_STRING_LITERAL_SINGLE_QUOTE]));
-}
-}
-self.depth -= 1;
-Ok(_v)
-}
+    fn p_ttObject(&mut self) -> Result<Term, PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let _v: Term;
+        match self.tk {
+            T_IRIREF | T_LIT_70 | T_PNAME_LN | T_PNAME_NS => {
+                let i = self.p_iri()?;
+                _v = i.clone();
+            }
+            T_DECIMAL
+            | T_DOUBLE
+            | T_INTEGER
+            | T_LIT_68
+            | T_LIT_69
+            | T_STRING_LITERAL_LONG_QUOTE
+            | T_STRING_LITERAL_LONG_SINGLE_QUOTE
+            | T_STRING_LITERAL_QUOTE
+            | T_STRING_LITERAL_SINGLE_QUOTE => {
+                let l = self.p_literal()?;
+                _v = l.clone();
+            }
+            T_LIT_65 => {
+                let t = self.p_tripleTerm()?;
+                _v = t.clone();
+            }
+            _ => {
+                return Err(self.perr_alt(&[
+                    T_DECIMAL,
+                    T_DOUBLE,
+                    T_INTEGER,
+                    T_IRIREF,
+                    T_LIT_65,
+                    T_LIT_68,
+                    T_LIT_69,
+                    T_LIT_70,
+                    T_PNAME_LN,
+                    T_PNAME_NS,
+                    T_STRING_LITERAL_LONG_QUOTE,
+                    T_STRING_LITERAL_LONG_SINGLE_QUOTE,
+                    T_STRING_LITERAL_QUOTE,
+                    T_STRING_LITERAL_SINGLE_QUOTE,
+                ]));
+            }
+        }
+        self.depth -= 1;
+        Ok(_v)
+    }
 
-fn p_literal(&mut self) -> Result<Term, PErr> {
-let _v: Term;
-match self.tk {
-T_DECIMAL | T_DOUBLE | T_INTEGER => {
-let n = self.p_NumericLiteral()?;
-_v = n.clone();
-}
-T_LIT_68 | T_LIT_69 => {
-let b = self.p_BooleanLiteral()?;
-_v = b.clone();
-}
-T_STRING_LITERAL_LONG_QUOTE | T_STRING_LITERAL_LONG_SINGLE_QUOTE | T_STRING_LITERAL_QUOTE | T_STRING_LITERAL_SINGLE_QUOTE => {
-let r = self.p_RDFLiteral()?;
-_v = r.clone();
-}
-_ => {
-return Err(self.perr_alt(&[T_DECIMAL, T_DOUBLE, T_INTEGER, T_LIT_68, T_LIT_69, T_STRING_LITERAL_LONG_QUOTE, T_STRING_LITERAL_LONG_SINGLE_QUOTE, T_STRING_LITERAL_QUOTE, T_STRING_LITERAL_SINGLE_QUOTE]));
-}
-}
-Ok(_v)
-}
+    fn p_literal(&mut self) -> Result<Term, PErr> {
+        let _v: Term;
+        match self.tk {
+            T_DECIMAL | T_DOUBLE | T_INTEGER => {
+                let n = self.p_NumericLiteral()?;
+                _v = n.clone();
+            }
+            T_LIT_68 | T_LIT_69 => {
+                let b = self.p_BooleanLiteral()?;
+                _v = b.clone();
+            }
+            T_STRING_LITERAL_LONG_QUOTE
+            | T_STRING_LITERAL_LONG_SINGLE_QUOTE
+            | T_STRING_LITERAL_QUOTE
+            | T_STRING_LITERAL_SINGLE_QUOTE => {
+                let r = self.p_RDFLiteral()?;
+                _v = r.clone();
+            }
+            _ => {
+                return Err(self.perr_alt(&[
+                    T_DECIMAL,
+                    T_DOUBLE,
+                    T_INTEGER,
+                    T_LIT_68,
+                    T_LIT_69,
+                    T_STRING_LITERAL_LONG_QUOTE,
+                    T_STRING_LITERAL_LONG_SINGLE_QUOTE,
+                    T_STRING_LITERAL_QUOTE,
+                    T_STRING_LITERAL_SINGLE_QUOTE,
+                ]));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_RDFLiteral(&mut self) -> Result<Term, PErr> {
-let _v: Term;
-let lex = self.p_String()?;
-match self.tk {
-T_LANG_DIR => {
-let ld_0: Rc<str> = rc_from_cow(lang_canon(&self.inp[self.ts + 1..(if self.t_md < 0 { self.te } else { self.t_md as usize })]));
-let ld_1: Option<Rc<str>> = if self.t_md < 0 { None } else { Some(Rc::from(&self.inp[(self.t_md as usize) + 2..self.te])) };
-self.next_token()?;
-_v = match ld_1.clone() { None => Term::Literal(Rc::new(LiteralData { value: lex.clone(), language: ld_0.clone(), direction: None, datatype: self.kc62.clone() })), Some(_cd) => Term::Literal(Rc::new(LiteralData { value: lex.clone(), language: ld_0.clone(), direction: Some(_cd.clone()), datatype: self.kc63.clone() })) };
-}
-T_LIT_67 => {
-self.next_token()?;
-let dt = self.p_iri()?;
-_v = Term::Literal(Rc::new(LiteralData { value: lex.clone(), language: self.rc_empty.clone(), direction: None, datatype: dt.clone() }));
-}
-_ => {
-_v = Term::Literal(Rc::new(LiteralData { value: lex.clone(), language: self.rc_empty.clone(), direction: None, datatype: self.kc64.clone() }));
-}
-}
-Ok(_v)
-}
+    fn p_RDFLiteral(&mut self) -> Result<Term, PErr> {
+        let _v: Term;
+        let lex = self.p_String()?;
+        match self.tk {
+            T_LANG_DIR => {
+                let ld_0: Rc<str> = rc_from_cow(lang_canon(
+                    &self.inp[self.ts + 1..(if self.t_md < 0 {
+                        self.te
+                    } else {
+                        self.t_md as usize
+                    })],
+                ));
+                let ld_1: Option<Rc<str>> = if self.t_md < 0 {
+                    None
+                } else {
+                    Some(Rc::from(&self.inp[(self.t_md as usize) + 2..self.te]))
+                };
+                self.next_token()?;
+                _v = match ld_1.clone() {
+                    None => Term::Literal(Rc::new(LiteralData {
+                        value: lex.clone(),
+                        language: ld_0.clone(),
+                        direction: None,
+                        datatype: self.kc62.clone(),
+                    })),
+                    Some(_cd) => Term::Literal(Rc::new(LiteralData {
+                        value: lex.clone(),
+                        language: ld_0.clone(),
+                        direction: Some(_cd.clone()),
+                        datatype: self.kc63.clone(),
+                    })),
+                };
+            }
+            T_LIT_67 => {
+                self.next_token()?;
+                let dt = self.p_iri()?;
+                _v = Term::Literal(Rc::new(LiteralData {
+                    value: lex.clone(),
+                    language: self.rc_empty.clone(),
+                    direction: None,
+                    datatype: dt.clone(),
+                }));
+            }
+            _ => {
+                _v = Term::Literal(Rc::new(LiteralData {
+                    value: lex.clone(),
+                    language: self.rc_empty.clone(),
+                    direction: None,
+                    datatype: self.kc64.clone(),
+                }));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_NumericLiteral(&mut self) -> Result<Term, PErr> {
-let _v: Term;
-match self.tk {
-T_INTEGER => {
-let n: Rc<str> = Rc::from(&self.inp[self.ts..self.te]);
-self.next_token()?;
-_v = Term::Literal(Rc::new(LiteralData { value: n.clone(), language: self.rc_empty.clone(), direction: None, datatype: self.kc47.clone() }));
-}
-T_DECIMAL => {
-let n: Rc<str> = Rc::from(&self.inp[self.ts..self.te]);
-self.next_token()?;
-_v = Term::Literal(Rc::new(LiteralData { value: n.clone(), language: self.rc_empty.clone(), direction: None, datatype: self.kc65.clone() }));
-}
-T_DOUBLE => {
-let n: Rc<str> = Rc::from(&self.inp[self.ts..self.te]);
-self.next_token()?;
-_v = Term::Literal(Rc::new(LiteralData { value: n.clone(), language: self.rc_empty.clone(), direction: None, datatype: self.kc66.clone() }));
-}
-_ => {
-return Err(self.perr_alt(&[T_DECIMAL, T_DOUBLE, T_INTEGER]));
-}
-}
-Ok(_v)
-}
+    fn p_NumericLiteral(&mut self) -> Result<Term, PErr> {
+        let _v: Term;
+        match self.tk {
+            T_INTEGER => {
+                let n: Rc<str> = Rc::from(&self.inp[self.ts..self.te]);
+                self.next_token()?;
+                _v = Term::Literal(Rc::new(LiteralData {
+                    value: n.clone(),
+                    language: self.rc_empty.clone(),
+                    direction: None,
+                    datatype: self.kc47.clone(),
+                }));
+            }
+            T_DECIMAL => {
+                let n: Rc<str> = Rc::from(&self.inp[self.ts..self.te]);
+                self.next_token()?;
+                _v = Term::Literal(Rc::new(LiteralData {
+                    value: n.clone(),
+                    language: self.rc_empty.clone(),
+                    direction: None,
+                    datatype: self.kc65.clone(),
+                }));
+            }
+            T_DOUBLE => {
+                let n: Rc<str> = Rc::from(&self.inp[self.ts..self.te]);
+                self.next_token()?;
+                _v = Term::Literal(Rc::new(LiteralData {
+                    value: n.clone(),
+                    language: self.rc_empty.clone(),
+                    direction: None,
+                    datatype: self.kc66.clone(),
+                }));
+            }
+            _ => {
+                return Err(self.perr_alt(&[T_DECIMAL, T_DOUBLE, T_INTEGER]));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_BooleanLiteral(&mut self) -> Result<Term, PErr> {
-let _v: Term;
-match self.tk {
-T_LIT_68 => {
-self.next_token()?;
-_v = Term::Literal(Rc::new(LiteralData { value: Rc::from("true"), language: self.rc_empty.clone(), direction: None, datatype: self.kc67.clone() }));
-}
-T_LIT_69 => {
-self.next_token()?;
-_v = Term::Literal(Rc::new(LiteralData { value: Rc::from("false"), language: self.rc_empty.clone(), direction: None, datatype: self.kc67.clone() }));
-}
-_ => {
-return Err(self.perr_alt(&[T_LIT_68, T_LIT_69]));
-}
-}
-Ok(_v)
-}
+    fn p_BooleanLiteral(&mut self) -> Result<Term, PErr> {
+        let _v: Term;
+        match self.tk {
+            T_LIT_68 => {
+                self.next_token()?;
+                _v = Term::Literal(Rc::new(LiteralData {
+                    value: Rc::from("true"),
+                    language: self.rc_empty.clone(),
+                    direction: None,
+                    datatype: self.kc67.clone(),
+                }));
+            }
+            T_LIT_69 => {
+                self.next_token()?;
+                _v = Term::Literal(Rc::new(LiteralData {
+                    value: Rc::from("false"),
+                    language: self.rc_empty.clone(),
+                    direction: None,
+                    datatype: self.kc67.clone(),
+                }));
+            }
+            _ => {
+                return Err(self.perr_alt(&[T_LIT_68, T_LIT_69]));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_String(&mut self) -> Result<Rc<str>, PErr> {
-let _v: Rc<str>;
-match self.tk {
-T_STRING_LITERAL_LONG_QUOTE => {
-let s: Rc<str> = if self.t_esc { rc_from_string(unesc_str(&self.inp[self.ts + 3..self.te - 3]).map_err(|_| self.perr("INVALID_CODEPOINT"))?) } else { Rc::from(&self.inp[self.ts + 3..self.te - 3]) };
-self.next_token()?;
-_v = s.clone();
-}
-T_STRING_LITERAL_QUOTE => {
-let s: Rc<str> = if self.t_esc { rc_from_string(unesc_str(&self.inp[self.ts + 1..self.te - 1]).map_err(|_| self.perr("INVALID_CODEPOINT"))?) } else { Rc::from(&self.inp[self.ts + 1..self.te - 1]) };
-self.next_token()?;
-_v = s.clone();
-}
-T_STRING_LITERAL_SINGLE_QUOTE => {
-let s: Rc<str> = if self.t_esc { rc_from_string(unesc_str(&self.inp[self.ts + 1..self.te - 1]).map_err(|_| self.perr("INVALID_CODEPOINT"))?) } else { Rc::from(&self.inp[self.ts + 1..self.te - 1]) };
-self.next_token()?;
-_v = s.clone();
-}
-T_STRING_LITERAL_LONG_SINGLE_QUOTE => {
-let s: Rc<str> = if self.t_esc { rc_from_string(unesc_str(&self.inp[self.ts + 3..self.te - 3]).map_err(|_| self.perr("INVALID_CODEPOINT"))?) } else { Rc::from(&self.inp[self.ts + 3..self.te - 3]) };
-self.next_token()?;
-_v = s.clone();
-}
-_ => {
-return Err(self.perr_alt(&[T_STRING_LITERAL_LONG_QUOTE, T_STRING_LITERAL_LONG_SINGLE_QUOTE, T_STRING_LITERAL_QUOTE, T_STRING_LITERAL_SINGLE_QUOTE]));
-}
-}
-Ok(_v)
-}
+    fn p_String(&mut self) -> Result<Rc<str>, PErr> {
+        let _v: Rc<str>;
+        match self.tk {
+            T_STRING_LITERAL_LONG_QUOTE => {
+                let s: Rc<str> = if self.t_esc {
+                    rc_from_string(
+                        unesc_str(&self.inp[self.ts + 3..self.te - 3])
+                            .map_err(|_| self.perr("INVALID_CODEPOINT"))?,
+                    )
+                } else {
+                    Rc::from(&self.inp[self.ts + 3..self.te - 3])
+                };
+                self.next_token()?;
+                _v = s.clone();
+            }
+            T_STRING_LITERAL_QUOTE => {
+                let s: Rc<str> = if self.t_esc {
+                    rc_from_string(
+                        unesc_str(&self.inp[self.ts + 1..self.te - 1])
+                            .map_err(|_| self.perr("INVALID_CODEPOINT"))?,
+                    )
+                } else {
+                    Rc::from(&self.inp[self.ts + 1..self.te - 1])
+                };
+                self.next_token()?;
+                _v = s.clone();
+            }
+            T_STRING_LITERAL_SINGLE_QUOTE => {
+                let s: Rc<str> = if self.t_esc {
+                    rc_from_string(
+                        unesc_str(&self.inp[self.ts + 1..self.te - 1])
+                            .map_err(|_| self.perr("INVALID_CODEPOINT"))?,
+                    )
+                } else {
+                    Rc::from(&self.inp[self.ts + 1..self.te - 1])
+                };
+                self.next_token()?;
+                _v = s.clone();
+            }
+            T_STRING_LITERAL_LONG_SINGLE_QUOTE => {
+                let s: Rc<str> = if self.t_esc {
+                    rc_from_string(
+                        unesc_str(&self.inp[self.ts + 3..self.te - 3])
+                            .map_err(|_| self.perr("INVALID_CODEPOINT"))?,
+                    )
+                } else {
+                    Rc::from(&self.inp[self.ts + 3..self.te - 3])
+                };
+                self.next_token()?;
+                _v = s.clone();
+            }
+            _ => {
+                return Err(self.perr_alt(&[
+                    T_STRING_LITERAL_LONG_QUOTE,
+                    T_STRING_LITERAL_LONG_SINGLE_QUOTE,
+                    T_STRING_LITERAL_QUOTE,
+                    T_STRING_LITERAL_SINGLE_QUOTE,
+                ]));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_iri(&mut self) -> Result<Term, PErr> {
-let _v: Term;
-match self.tk {
-T_IRIREF => {
-let r: Rc<str> = if self.t_esc { rc_from_string(unesc_u(&self.inp[self.ts + 1..self.te - 1]).map_err(|_| self.perr("INVALID_CODEPOINT"))?) } else { Rc::from(&self.inp[self.ts + 1..self.te - 1]) };
-self.next_token()?;
-_v = nn(resolve_iri(&self.env_base, r.as_ref()));
-}
-T_PNAME_LN | T_PNAME_NS => {
-let p = self.p_PrefixedName()?;
-_v = p.clone();
-}
-T_LIT_70 => {
-self.next_token()?;
-_v = self.kc0.clone();
-}
-_ => {
-return Err(self.perr_alt(&[T_IRIREF, T_LIT_70, T_PNAME_LN, T_PNAME_NS]));
-}
-}
-Ok(_v)
-}
+    fn p_iri(&mut self) -> Result<Term, PErr> {
+        let _v: Term;
+        match self.tk {
+            T_IRIREF => {
+                let r: Rc<str> = if self.t_esc {
+                    rc_from_string(
+                        unesc_u(&self.inp[self.ts + 1..self.te - 1])
+                            .map_err(|_| self.perr("INVALID_CODEPOINT"))?,
+                    )
+                } else {
+                    Rc::from(&self.inp[self.ts + 1..self.te - 1])
+                };
+                self.next_token()?;
+                _v = nn(resolve_iri(&self.env_base, r.as_ref()));
+            }
+            T_PNAME_LN | T_PNAME_NS => {
+                let p = self.p_PrefixedName()?;
+                _v = p.clone();
+            }
+            T_LIT_70 => {
+                self.next_token()?;
+                _v = self.kc0.clone();
+            }
+            _ => {
+                return Err(self.perr_alt(&[T_IRIREF, T_LIT_70, T_PNAME_LN, T_PNAME_NS]));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_PrefixedName(&mut self) -> Result<Term, PErr> {
-let _v: Term;
-match self.tk {
-T_PNAME_LN => {
-let n_0: Rc<str> = Rc::from(&self.inp[self.ts..(self.t_m0 as usize) - 1]);
-let n_1: Rc<str> = if self.t_esc { rc_from_string(unesc_local(&self.inp[(self.t_m0 as usize)..self.te])) } else { Rc::from(&self.inp[(self.t_m0 as usize)..self.te]) };
-self.next_token()?;
-if !(self.env_prefixes.contains_key(n_0.as_ref())) { return Err(self.perr("UNDECLARED_PREFIX")); }
-_v = expand_pn(&self.env_prefixes, n_0.as_ref(), n_1.as_ref());
-}
-T_PNAME_NS => {
-let n: Rc<str> = Rc::from(&self.inp[self.ts..self.te - 1]);
-self.next_token()?;
-if !(self.env_prefixes.contains_key(n.as_ref())) { return Err(self.perr("UNDECLARED_PREFIX")); }
-_v = expand_pn(&self.env_prefixes, n.as_ref(), "");
-}
-_ => {
-return Err(self.perr_alt(&[T_PNAME_LN, T_PNAME_NS]));
-}
-}
-Ok(_v)
-}
+    fn p_PrefixedName(&mut self) -> Result<Term, PErr> {
+        let _v: Term;
+        match self.tk {
+            T_PNAME_LN => {
+                let n_0: Rc<str> = Rc::from(&self.inp[self.ts..(self.t_m0 as usize) - 1]);
+                let n_1: Rc<str> = if self.t_esc {
+                    rc_from_string(unesc_local(&self.inp[(self.t_m0 as usize)..self.te]))
+                } else {
+                    Rc::from(&self.inp[(self.t_m0 as usize)..self.te])
+                };
+                self.next_token()?;
+                if !(self.env_prefixes.contains_key(n_0.as_ref())) {
+                    return Err(self.perr("UNDECLARED_PREFIX"));
+                }
+                _v = expand_pn(&self.env_prefixes, n_0.as_ref(), n_1.as_ref());
+            }
+            T_PNAME_NS => {
+                let n: Rc<str> = Rc::from(&self.inp[self.ts..self.te - 1]);
+                self.next_token()?;
+                if !(self.env_prefixes.contains_key(n.as_ref())) {
+                    return Err(self.perr("UNDECLARED_PREFIX"));
+                }
+                _v = expand_pn(&self.env_prefixes, n.as_ref(), "");
+            }
+            _ => {
+                return Err(self.perr_alt(&[T_PNAME_LN, T_PNAME_NS]));
+            }
+        }
+        Ok(_v)
+    }
 
-fn p_annotation(&mut self, n: Term) -> Result<(), PErr> {
-loop {
-self.next_token()?;
-self.p_predicate(n.clone())?;
-if !(matches!(self.tk, T_LIT_58)) { break; }
-}
-Ok(())
-}
+    fn p_annotation(&mut self, n: Term) -> Result<(), PErr> {
+        loop {
+            self.next_token()?;
+            self.p_predicate(n.clone())?;
+            if !(matches!(self.tk, T_LIT_58)) {
+                break;
+            }
+        }
+        Ok(())
+    }
 
-fn p_predicate(&mut self, s: Term) -> Result<(), PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let p = self.p_iri()?;
-self.p_objectList(s.clone(), p.clone())?;
-self.depth -= 1;
-Ok(())
-}
+    fn p_predicate(&mut self, s: Term) -> Result<(), PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let p = self.p_iri()?;
+        self.p_objectList(s.clone(), p.clone())?;
+        self.depth -= 1;
+        Ok(())
+    }
 
-fn p_objectList(&mut self, s: Term, p: Term) -> Result<(), PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-loop {
-let o = self.p_object()?;
-self.emit_q(s.clone(), p.clone(), o.clone());
-if self.tk == T_LIT_71 { self.next_token()?; continue; }
-break;
-}
-self.depth -= 1;
-Ok(())
-}
+    fn p_objectList(&mut self, s: Term, p: Term) -> Result<(), PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        loop {
+            let o = self.p_object()?;
+            self.emit_q(s.clone(), p.clone(), o.clone());
+            if self.tk == T_LIT_71 {
+                self.next_token()?;
+                continue;
+            }
+            break;
+        }
+        self.depth -= 1;
+        Ok(())
+    }
 
-fn p_object(&mut self) -> Result<Term, PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let _v: Term;
-match self.tk {
-T_DECIMAL | T_DOUBLE | T_INTEGER | T_IRIREF | T_LIT_65 | T_LIT_68 | T_LIT_69 | T_LIT_70 | T_PNAME_LN | T_PNAME_NS | T_STRING_LITERAL_LONG_QUOTE | T_STRING_LITERAL_LONG_SINGLE_QUOTE | T_STRING_LITERAL_QUOTE | T_STRING_LITERAL_SINGLE_QUOTE => {
-let v = self.p_iriOrLiteral()?;
-_v = v.clone();
-}
-T_LIT_45 => {
-let b = self.p_bnSection()?;
-_v = b.clone();
-}
-T_LIT_63 => {
-let l = self.p_ttlList()?;
-_v = l.clone();
-}
-_ => {
-return Err(self.perr_alt(&[T_DECIMAL, T_DOUBLE, T_INTEGER, T_IRIREF, T_LIT_45, T_LIT_63, T_LIT_65, T_LIT_68, T_LIT_69, T_LIT_70, T_PNAME_LN, T_PNAME_NS, T_STRING_LITERAL_LONG_QUOTE, T_STRING_LITERAL_LONG_SINGLE_QUOTE, T_STRING_LITERAL_QUOTE, T_STRING_LITERAL_SINGLE_QUOTE]));
-}
-}
-self.depth -= 1;
-Ok(_v)
-}
+    fn p_object(&mut self) -> Result<Term, PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let _v: Term;
+        match self.tk {
+            T_DECIMAL
+            | T_DOUBLE
+            | T_INTEGER
+            | T_IRIREF
+            | T_LIT_65
+            | T_LIT_68
+            | T_LIT_69
+            | T_LIT_70
+            | T_PNAME_LN
+            | T_PNAME_NS
+            | T_STRING_LITERAL_LONG_QUOTE
+            | T_STRING_LITERAL_LONG_SINGLE_QUOTE
+            | T_STRING_LITERAL_QUOTE
+            | T_STRING_LITERAL_SINGLE_QUOTE => {
+                let v = self.p_iriOrLiteral()?;
+                _v = v.clone();
+            }
+            T_LIT_45 => {
+                let b = self.p_bnSection()?;
+                _v = b.clone();
+            }
+            T_LIT_63 => {
+                let l = self.p_ttlList()?;
+                _v = l.clone();
+            }
+            _ => {
+                return Err(self.perr_alt(&[
+                    T_DECIMAL,
+                    T_DOUBLE,
+                    T_INTEGER,
+                    T_IRIREF,
+                    T_LIT_45,
+                    T_LIT_63,
+                    T_LIT_65,
+                    T_LIT_68,
+                    T_LIT_69,
+                    T_LIT_70,
+                    T_PNAME_LN,
+                    T_PNAME_NS,
+                    T_STRING_LITERAL_LONG_QUOTE,
+                    T_STRING_LITERAL_LONG_SINGLE_QUOTE,
+                    T_STRING_LITERAL_QUOTE,
+                    T_STRING_LITERAL_SINGLE_QUOTE,
+                ]));
+            }
+        }
+        self.depth -= 1;
+        Ok(_v)
+    }
 
-fn p_bnSection(&mut self) -> Result<Term, PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let _v: Term;
-if self.tk != T_LIT_45 { return Err(self.perr_exp(T_LIT_45)); }
-self.next_token()?;
-let b = self.fresh_bn();
-self.p_predicate(b.clone())?;
-while matches!(self.tk, T_LIT_58) {
-self.next_token()?;
-self.p_predicate(b.clone())?;
-}
-if self.tk != T_LIT_47 { return Err(self.perr_exp(T_LIT_47)); }
-self.next_token()?;
-_v = b.clone();
-self.depth -= 1;
-Ok(_v)
-}
+    fn p_bnSection(&mut self) -> Result<Term, PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let _v: Term;
+        if self.tk != T_LIT_45 {
+            return Err(self.perr_exp(T_LIT_45));
+        }
+        self.next_token()?;
+        let b = self.fresh_bn();
+        self.p_predicate(b.clone())?;
+        while matches!(self.tk, T_LIT_58) {
+            self.next_token()?;
+            self.p_predicate(b.clone())?;
+        }
+        if self.tk != T_LIT_47 {
+            return Err(self.perr_exp(T_LIT_47));
+        }
+        self.next_token()?;
+        _v = b.clone();
+        self.depth -= 1;
+        Ok(_v)
+    }
 
-fn p_ttlList(&mut self) -> Result<Term, PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let _v: Term;
-if self.tk != T_LIT_63 { return Err(self.perr_exp(T_LIT_63)); }
-self.next_token()?;
-let mut inner: Option<Term> = None;
-if (FS_5 >> self.tk) & 1 != 0 {
-inner = Some(self.p_ttlListBody()?);
-}
-if self.tk != T_LIT_64 { return Err(self.perr_exp(T_LIT_64)); }
-self.next_token()?;
-let _t0: Term = match inner.clone() { Some(_x) => _x, None => self.kc9.clone() };
-_v = _t0.clone();
-self.depth -= 1;
-Ok(_v)
-}
+    fn p_ttlList(&mut self) -> Result<Term, PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let _v: Term;
+        if self.tk != T_LIT_63 {
+            return Err(self.perr_exp(T_LIT_63));
+        }
+        self.next_token()?;
+        let mut inner: Option<Term> = None;
+        if (FS_5 >> self.tk) & 1 != 0 {
+            inner = Some(self.p_ttlListBody()?);
+        }
+        if self.tk != T_LIT_64 {
+            return Err(self.perr_exp(T_LIT_64));
+        }
+        self.next_token()?;
+        let _t0: Term = match inner.clone() {
+            Some(_x) => _x,
+            None => self.kc9.clone(),
+        };
+        _v = _t0.clone();
+        self.depth -= 1;
+        Ok(_v)
+    }
 
-fn p_ttlListBody(&mut self) -> Result<Term, PErr> {
-self.depth += 1;
-if self.depth > 8192 { return Err(self.perr("MAXDEPTH")); }
-let _v: Term;
-let o = self.p_object()?;
-let h = self.fresh_bn();
-self.emit_q(h.clone(), self.kc7.clone(), o.clone());
-let mut prev: Term = h.clone();
-'tl5: loop {
-match self.tk {
-T_DECIMAL | T_DOUBLE | T_INTEGER | T_IRIREF | T_LIT_45 | T_LIT_63 | T_LIT_65 | T_LIT_68 | T_LIT_69 | T_LIT_70 | T_PNAME_LN | T_PNAME_NS | T_STRING_LITERAL_LONG_QUOTE | T_STRING_LITERAL_LONG_SINGLE_QUOTE | T_STRING_LITERAL_QUOTE | T_STRING_LITERAL_SINGLE_QUOTE => {
-let o2 = self.p_object()?;
-let c = self.fresh_bn();
-self.emit_q(prev.clone(), self.kc8.clone(), c.clone());
-self.emit_q(c.clone(), self.kc7.clone(), o2.clone());
-prev = c.clone();
-}
-_ => break 'tl5,
-}
-}
-self.emit_q(prev.clone(), self.kc8.clone(), self.kc9.clone());
-_v = h.clone();
-self.depth -= 1;
-Ok(_v)
-}
+    fn p_ttlListBody(&mut self) -> Result<Term, PErr> {
+        self.depth += 1;
+        if self.depth > 8192 {
+            return Err(self.perr("MAXDEPTH"));
+        }
+        let _v: Term;
+        let o = self.p_object()?;
+        let h = self.fresh_bn();
+        self.emit_q(h.clone(), self.kc7.clone(), o.clone());
+        let mut prev: Term = h.clone();
+        'tl5: loop {
+            match self.tk {
+                T_DECIMAL
+                | T_DOUBLE
+                | T_INTEGER
+                | T_IRIREF
+                | T_LIT_45
+                | T_LIT_63
+                | T_LIT_65
+                | T_LIT_68
+                | T_LIT_69
+                | T_LIT_70
+                | T_PNAME_LN
+                | T_PNAME_NS
+                | T_STRING_LITERAL_LONG_QUOTE
+                | T_STRING_LITERAL_LONG_SINGLE_QUOTE
+                | T_STRING_LITERAL_QUOTE
+                | T_STRING_LITERAL_SINGLE_QUOTE => {
+                    let o2 = self.p_object()?;
+                    let c = self.fresh_bn();
+                    self.emit_q(prev.clone(), self.kc8.clone(), c.clone());
+                    self.emit_q(c.clone(), self.kc7.clone(), o2.clone());
+                    prev = c.clone();
+                }
+                _ => break 'tl5,
+            }
+        }
+        self.emit_q(prev.clone(), self.kc8.clone(), self.kc9.clone());
+        _v = h.clone();
+        self.depth -= 1;
+        Ok(_v)
+    }
 
-fn p_ttlStatement(&mut self) -> Result<(), PErr> {
-let s = self.p_iri()?;
-self.p_predicate(s.clone())?;
-while matches!(self.tk, T_LIT_58) {
-self.next_token()?;
-self.p_predicate(s.clone())?;
-}
-if self.tk != T_LIT_8 { return Err(self.perr_exp(T_LIT_8)); }
-self.next_token()?;
-Ok(())
-}
+    fn p_ttlStatement(&mut self) -> Result<(), PErr> {
+        let s = self.p_iri()?;
+        self.p_predicate(s.clone())?;
+        while matches!(self.tk, T_LIT_58) {
+            self.next_token()?;
+            self.p_predicate(s.clone())?;
+        }
+        if self.tk != T_LIT_8 {
+            return Err(self.perr_exp(T_LIT_8));
+        }
+        self.next_token()?;
+        Ok(())
+    }
 
     /* ---- drivers ---- */
 
@@ -3640,7 +7792,12 @@ Ok(())
         match self.parse_all() {
             Ok(()) => Ok(None),
             Err(PErr::Syntax(e)) => Err(e),
-            Err(PErr::Incomplete) => Err(SyntaxError { message: "unexpected end of input".to_string(), line: 0, column: 0, code: Some("EOF") }),
+            Err(PErr::Incomplete) => Err(SyntaxError {
+                message: "unexpected end of input".to_string(),
+                line: 0,
+                column: 0,
+                code: Some("EOF"),
+            }),
         }
     }
 }
@@ -3651,13 +7808,22 @@ Ok(())
 
 /// One-shot parse of a complete document string; `on_quad` receives each
 /// triple as it is emitted (streaming, earliest-emission order).
-pub fn parse<F: FnMut(Triple)>(input: &str, base_iri: Option<&str>, on_quad: F) -> Result<ParseOutcome, SyntaxError> {
+pub fn parse<F: FnMut(Triple)>(
+    input: &str,
+    base_iri: Option<&str>,
+    on_quad: F,
+) -> Result<ParseOutcome, SyntaxError> {
     let mut m = Machine::new(base_iri, false, on_quad);
     m.set_input(Cow::Borrowed(input), true);
     match m.parse_all() {
         Ok(()) => Ok(m.outcome()),
         Err(PErr::Syntax(e)) => Err(e),
-        Err(PErr::Incomplete) => Err(SyntaxError { message: "unexpected end of input".to_string(), line: 0, column: 0, code: Some("EOF") }),
+        Err(PErr::Incomplete) => Err(SyntaxError {
+            message: "unexpected end of input".to_string(),
+            line: 0,
+            column: 0,
+            code: Some("EOF"),
+        }),
     }
 }
 
@@ -3680,14 +7846,23 @@ impl<F: FnMut(Triple)> PushParser<F> {
     /// Create a push parser; `on_quad` receives each triple as its
     /// statement completes.
     pub fn new(base_iri: Option<&str>, on_quad: F) -> PushParser<F> {
-        PushParser { m: Machine::new(base_iri, true, on_quad), carry: String::new(), ended: false }
+        PushParser {
+            m: Machine::new(base_iri, true, on_quad),
+            carry: String::new(),
+            ended: false,
+        }
     }
 
     /// Feed one chunk. Chunks may split the document anywhere (including
     /// mid-token); the parser suspends and resumes at statement granularity.
     pub fn push(&mut self, chunk: &str) -> Result<(), SyntaxError> {
         if self.ended {
-            return Err(SyntaxError { message: "push after end".to_string(), line: 0, column: 0, code: Some("PUSH_AFTER_END") });
+            return Err(SyntaxError {
+                message: "push after end".to_string(),
+                line: 0,
+                column: 0,
+                code: Some("PUSH_AFTER_END"),
+            });
         }
         let s = if self.carry.is_empty() {
             chunk.to_string()
@@ -3698,9 +7873,18 @@ impl<F: FnMut(Triple)> PushParser<F> {
         };
         self.m.set_input(Cow::Owned(s), false);
         match self.m.parse_chunk() {
-            Ok(None) => { self.carry.clear(); Ok(()) }
-            Ok(Some(idx)) => { self.carry = self.m.inp[idx..].to_string(); Ok(()) }
-            Err(e) => { self.ended = true; Err(e) }
+            Ok(None) => {
+                self.carry.clear();
+                Ok(())
+            }
+            Ok(Some(idx)) => {
+                self.carry = self.m.inp[idx..].to_string();
+                Ok(())
+            }
+            Err(e) => {
+                self.ended = true;
+                Err(e)
+            }
         }
     }
 
@@ -3711,7 +7895,12 @@ impl<F: FnMut(Triple)> PushParser<F> {
         self.m.set_input(Cow::Owned(s), true);
         match self.m.parse_chunk() {
             Ok(None) => Ok(self.m.outcome()),
-            Ok(Some(_)) => Err(SyntaxError { message: "unexpected end of input".to_string(), line: 0, column: 0, code: Some("EOF") }),
+            Ok(Some(_)) => Err(SyntaxError {
+                message: "unexpected end of input".to_string(),
+                line: 0,
+                column: 0,
+                code: Some("EOF"),
+            }),
             Err(e) => Err(e),
         }
     }
@@ -3760,13 +7949,73 @@ fn fm_LANG_DIR(s: &str) -> bool {
 }
 
 #[inline]
-fn pn_first(c: u32) -> bool { (c >= 48 && c <= 58) || (c >= 65 && c <= 90) || c == 95 || (c >= 97 && c <= 122) || (c >= 192 && c <= 214) || (c >= 216 && c <= 246) || (c >= 248 && c <= 767) || (c >= 880 && c <= 893) || (c >= 895 && c <= 8191) || (c >= 8204 && c <= 8205) || (c >= 8304 && c <= 8591) || (c >= 11264 && c <= 12271) || (c >= 12289 && c <= 64975) || (c >= 65008 && c <= 65533) || (c >= 65536 && c <= 983039) }
+fn pn_first(c: u32) -> bool {
+    (c >= 48 && c <= 58)
+        || (c >= 65 && c <= 90)
+        || c == 95
+        || (c >= 97 && c <= 122)
+        || (c >= 192 && c <= 214)
+        || (c >= 216 && c <= 246)
+        || (c >= 248 && c <= 767)
+        || (c >= 880 && c <= 893)
+        || (c >= 895 && c <= 8191)
+        || (c >= 8204 && c <= 8205)
+        || (c >= 8304 && c <= 8591)
+        || (c >= 11264 && c <= 12271)
+        || (c >= 12289 && c <= 64975)
+        || (c >= 65008 && c <= 65533)
+        || (c >= 65536 && c <= 983039)
+}
 #[inline]
-fn pn_mid(c: u32) -> bool { (c >= 45 && c <= 46) || (c >= 48 && c <= 58) || (c >= 65 && c <= 90) || c == 95 || (c >= 97 && c <= 122) || c == 183 || (c >= 192 && c <= 214) || (c >= 216 && c <= 246) || (c >= 248 && c <= 893) || (c >= 895 && c <= 8191) || (c >= 8204 && c <= 8205) || (c >= 8255 && c <= 8256) || (c >= 8304 && c <= 8591) || (c >= 11264 && c <= 12271) || (c >= 12289 && c <= 64975) || (c >= 65008 && c <= 65533) || (c >= 65536 && c <= 983039) }
+fn pn_mid(c: u32) -> bool {
+    (c >= 45 && c <= 46)
+        || (c >= 48 && c <= 58)
+        || (c >= 65 && c <= 90)
+        || c == 95
+        || (c >= 97 && c <= 122)
+        || c == 183
+        || (c >= 192 && c <= 214)
+        || (c >= 216 && c <= 246)
+        || (c >= 248 && c <= 893)
+        || (c >= 895 && c <= 8191)
+        || (c >= 8204 && c <= 8205)
+        || (c >= 8255 && c <= 8256)
+        || (c >= 8304 && c <= 8591)
+        || (c >= 11264 && c <= 12271)
+        || (c >= 12289 && c <= 64975)
+        || (c >= 65008 && c <= 65533)
+        || (c >= 65536 && c <= 983039)
+}
 #[inline]
-fn pn_last(c: u32) -> bool { c == 45 || (c >= 48 && c <= 58) || (c >= 65 && c <= 90) || c == 95 || (c >= 97 && c <= 122) || c == 183 || (c >= 192 && c <= 214) || (c >= 216 && c <= 246) || (c >= 248 && c <= 893) || (c >= 895 && c <= 8191) || (c >= 8204 && c <= 8205) || (c >= 8255 && c <= 8256) || (c >= 8304 && c <= 8591) || (c >= 11264 && c <= 12271) || (c >= 12289 && c <= 64975) || (c >= 65008 && c <= 65533) || (c >= 65536 && c <= 983039) }
+fn pn_last(c: u32) -> bool {
+    c == 45
+        || (c >= 48 && c <= 58)
+        || (c >= 65 && c <= 90)
+        || c == 95
+        || (c >= 97 && c <= 122)
+        || c == 183
+        || (c >= 192 && c <= 214)
+        || (c >= 216 && c <= 246)
+        || (c >= 248 && c <= 893)
+        || (c >= 895 && c <= 8191)
+        || (c >= 8204 && c <= 8205)
+        || (c >= 8255 && c <= 8256)
+        || (c >= 8304 && c <= 8591)
+        || (c >= 11264 && c <= 12271)
+        || (c >= 12289 && c <= 64975)
+        || (c >= 65008 && c <= 65533)
+        || (c >= 65536 && c <= 983039)
+}
 #[inline]
-fn pn_esc(c: u32) -> bool { c == 33 || (c >= 35 && c <= 47) || c == 59 || c == 61 || (c >= 63 && c <= 64) || c == 95 || c == 126 }
+fn pn_esc(c: u32) -> bool {
+    c == 33
+        || (c >= 35 && c <= 47)
+        || c == 59
+        || c == 61
+        || (c >= 63 && c <= 64)
+        || c == 95
+        || c == 126
+}
 
 /// Escape an IRI suffix as a PN_LOCAL, or None if not expressible.
 fn esc_local(s: &str) -> Option<String> {
@@ -3776,7 +8025,13 @@ fn esc_local(s: &str) -> Option<String> {
     let mut i = 0;
     while i < n {
         let (cp, w) = cp_at(b, i);
-        let ok = if i == 0 { pn_first(cp) } else if i + w >= n { pn_last(cp) } else { pn_mid(cp) };
+        let ok = if i == 0 {
+            pn_first(cp)
+        } else if i + w >= n {
+            pn_last(cp)
+        } else {
+            pn_mid(cp)
+        };
         if ok {
             out.push_str(&s[i..i + w]);
         } else if pn_esc(cp) {
@@ -3791,11 +8046,148 @@ fn esc_local(s: &str) -> Option<String> {
 }
 
 /* ---- print-model constants (grammar-extracted) ---- */
-static RS_NODE_PARAM: &[(&str, &str)] = &[("http://www.w3.org/ns/shacl#targetNode", "targetNode"), ("http://www.w3.org/ns/shacl#targetObjectsOf", "targetObjectsOf"), ("http://www.w3.org/ns/shacl#targetSubjectsOf", "targetSubjectsOf"), ("http://www.w3.org/ns/shacl#deactivated", "deactivated"), ("http://www.w3.org/ns/shacl#severity", "severity"), ("http://www.w3.org/ns/shacl#message", "message"), ("http://www.w3.org/ns/shacl#class", "class"), ("http://www.w3.org/ns/shacl#datatype", "datatype"), ("http://www.w3.org/ns/shacl#nodeKind", "nodeKind"), ("http://www.w3.org/ns/shacl#minExclusive", "minExclusive"), ("http://www.w3.org/ns/shacl#minInclusive", "minInclusive"), ("http://www.w3.org/ns/shacl#maxExclusive", "maxExclusive"), ("http://www.w3.org/ns/shacl#maxInclusive", "maxInclusive"), ("http://www.w3.org/ns/shacl#minLength", "minLength"), ("http://www.w3.org/ns/shacl#maxLength", "maxLength"), ("http://www.w3.org/ns/shacl#pattern", "pattern"), ("http://www.w3.org/ns/shacl#flags", "flags"), ("http://www.w3.org/ns/shacl#languageIn", "languageIn"), ("http://www.w3.org/ns/shacl#uniqueLang", "uniqueLang"), ("http://www.w3.org/ns/shacl#equals", "equals"), ("http://www.w3.org/ns/shacl#disjoint", "disjoint"), ("http://www.w3.org/ns/shacl#lessThan", "lessThan"), ("http://www.w3.org/ns/shacl#lessThanOrEquals", "lessThanOrEquals"), ("http://www.w3.org/ns/shacl#qualifiedValueShape", "qualifiedValueShape"), ("http://www.w3.org/ns/shacl#qualifiedMinCount", "qualifiedMinCount"), ("http://www.w3.org/ns/shacl#qualifiedMaxCount", "qualifiedMaxCount"), ("http://www.w3.org/ns/shacl#qualifiedValueShapesDisjoint", "qualifiedValueShapesDisjoint"), ("http://www.w3.org/ns/shacl#closed", "closed"), ("http://www.w3.org/ns/shacl#ignoredProperties", "ignoredProperties"), ("http://www.w3.org/ns/shacl#hasValue", "hasValue"), ("http://www.w3.org/ns/shacl#in", "in"), ("http://www.w3.org/ns/shacl#reifierShape", "reifierShape"), ("http://www.w3.org/ns/shacl#reificationRequired", "reificationRequired")];
-static RS_PROP_PARAM: &[(&str, &str)] = &[("http://www.w3.org/ns/shacl#deactivated", "deactivated"), ("http://www.w3.org/ns/shacl#severity", "severity"), ("http://www.w3.org/ns/shacl#message", "message"), ("http://www.w3.org/ns/shacl#class", "class"), ("http://www.w3.org/ns/shacl#datatype", "datatype"), ("http://www.w3.org/ns/shacl#nodeKind", "nodeKind"), ("http://www.w3.org/ns/shacl#minExclusive", "minExclusive"), ("http://www.w3.org/ns/shacl#minInclusive", "minInclusive"), ("http://www.w3.org/ns/shacl#maxExclusive", "maxExclusive"), ("http://www.w3.org/ns/shacl#maxInclusive", "maxInclusive"), ("http://www.w3.org/ns/shacl#minLength", "minLength"), ("http://www.w3.org/ns/shacl#maxLength", "maxLength"), ("http://www.w3.org/ns/shacl#pattern", "pattern"), ("http://www.w3.org/ns/shacl#flags", "flags"), ("http://www.w3.org/ns/shacl#languageIn", "languageIn"), ("http://www.w3.org/ns/shacl#uniqueLang", "uniqueLang"), ("http://www.w3.org/ns/shacl#equals", "equals"), ("http://www.w3.org/ns/shacl#disjoint", "disjoint"), ("http://www.w3.org/ns/shacl#lessThan", "lessThan"), ("http://www.w3.org/ns/shacl#lessThanOrEquals", "lessThanOrEquals"), ("http://www.w3.org/ns/shacl#qualifiedValueShape", "qualifiedValueShape"), ("http://www.w3.org/ns/shacl#qualifiedMinCount", "qualifiedMinCount"), ("http://www.w3.org/ns/shacl#qualifiedMaxCount", "qualifiedMaxCount"), ("http://www.w3.org/ns/shacl#qualifiedValueShapesDisjoint", "qualifiedValueShapesDisjoint"), ("http://www.w3.org/ns/shacl#closed", "closed"), ("http://www.w3.org/ns/shacl#ignoredProperties", "ignoredProperties"), ("http://www.w3.org/ns/shacl#hasValue", "hasValue"), ("http://www.w3.org/ns/shacl#in", "in"), ("http://www.w3.org/ns/shacl#reifierShape", "reifierShape"), ("http://www.w3.org/ns/shacl#reificationRequired", "reificationRequired")];
-static RS_NODEKIND: &[(&str, &str)] = &[("http://www.w3.org/ns/shacl#BlankNode", "BlankNode"), ("http://www.w3.org/ns/shacl#IRI", "IRI"), ("http://www.w3.org/ns/shacl#Literal", "Literal"), ("http://www.w3.org/ns/shacl#BlankNodeOrIRI", "BlankNodeOrIRI"), ("http://www.w3.org/ns/shacl#BlankNodeOrLiteral", "BlankNodeOrLiteral"), ("http://www.w3.org/ns/shacl#IRIOrLiteral", "IRIOrLiteral"), ("http://www.w3.org/ns/shacl#TripleTerm", "TripleTerm")];
-static RS_PATHMOD: &[(&str, &str)] = &[("http://www.w3.org/ns/shacl#zeroOrOnePath", "?"), ("http://www.w3.org/ns/shacl#zeroOrMorePath", "*"), ("http://www.w3.org/ns/shacl#oneOrMorePath", "+")];
-static RS_PREDECLARED: &[(&str, &str)] = &[("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"), ("rdfs", "http://www.w3.org/2000/01/rdf-schema#"), ("sh", "http://www.w3.org/ns/shacl#"), ("xsd", "http://www.w3.org/2001/XMLSchema#"), ("owl", "http://www.w3.org/2002/07/owl#")];
+static RS_NODE_PARAM: &[(&str, &str)] = &[
+    ("http://www.w3.org/ns/shacl#targetNode", "targetNode"),
+    (
+        "http://www.w3.org/ns/shacl#targetObjectsOf",
+        "targetObjectsOf",
+    ),
+    (
+        "http://www.w3.org/ns/shacl#targetSubjectsOf",
+        "targetSubjectsOf",
+    ),
+    ("http://www.w3.org/ns/shacl#deactivated", "deactivated"),
+    ("http://www.w3.org/ns/shacl#severity", "severity"),
+    ("http://www.w3.org/ns/shacl#message", "message"),
+    ("http://www.w3.org/ns/shacl#class", "class"),
+    ("http://www.w3.org/ns/shacl#datatype", "datatype"),
+    ("http://www.w3.org/ns/shacl#nodeKind", "nodeKind"),
+    ("http://www.w3.org/ns/shacl#minExclusive", "minExclusive"),
+    ("http://www.w3.org/ns/shacl#minInclusive", "minInclusive"),
+    ("http://www.w3.org/ns/shacl#maxExclusive", "maxExclusive"),
+    ("http://www.w3.org/ns/shacl#maxInclusive", "maxInclusive"),
+    ("http://www.w3.org/ns/shacl#minLength", "minLength"),
+    ("http://www.w3.org/ns/shacl#maxLength", "maxLength"),
+    ("http://www.w3.org/ns/shacl#pattern", "pattern"),
+    ("http://www.w3.org/ns/shacl#flags", "flags"),
+    ("http://www.w3.org/ns/shacl#languageIn", "languageIn"),
+    ("http://www.w3.org/ns/shacl#uniqueLang", "uniqueLang"),
+    ("http://www.w3.org/ns/shacl#equals", "equals"),
+    ("http://www.w3.org/ns/shacl#disjoint", "disjoint"),
+    ("http://www.w3.org/ns/shacl#lessThan", "lessThan"),
+    (
+        "http://www.w3.org/ns/shacl#lessThanOrEquals",
+        "lessThanOrEquals",
+    ),
+    (
+        "http://www.w3.org/ns/shacl#qualifiedValueShape",
+        "qualifiedValueShape",
+    ),
+    (
+        "http://www.w3.org/ns/shacl#qualifiedMinCount",
+        "qualifiedMinCount",
+    ),
+    (
+        "http://www.w3.org/ns/shacl#qualifiedMaxCount",
+        "qualifiedMaxCount",
+    ),
+    (
+        "http://www.w3.org/ns/shacl#qualifiedValueShapesDisjoint",
+        "qualifiedValueShapesDisjoint",
+    ),
+    ("http://www.w3.org/ns/shacl#closed", "closed"),
+    (
+        "http://www.w3.org/ns/shacl#ignoredProperties",
+        "ignoredProperties",
+    ),
+    ("http://www.w3.org/ns/shacl#hasValue", "hasValue"),
+    ("http://www.w3.org/ns/shacl#in", "in"),
+    ("http://www.w3.org/ns/shacl#reifierShape", "reifierShape"),
+    (
+        "http://www.w3.org/ns/shacl#reificationRequired",
+        "reificationRequired",
+    ),
+];
+static RS_PROP_PARAM: &[(&str, &str)] = &[
+    ("http://www.w3.org/ns/shacl#deactivated", "deactivated"),
+    ("http://www.w3.org/ns/shacl#severity", "severity"),
+    ("http://www.w3.org/ns/shacl#message", "message"),
+    ("http://www.w3.org/ns/shacl#class", "class"),
+    ("http://www.w3.org/ns/shacl#datatype", "datatype"),
+    ("http://www.w3.org/ns/shacl#nodeKind", "nodeKind"),
+    ("http://www.w3.org/ns/shacl#minExclusive", "minExclusive"),
+    ("http://www.w3.org/ns/shacl#minInclusive", "minInclusive"),
+    ("http://www.w3.org/ns/shacl#maxExclusive", "maxExclusive"),
+    ("http://www.w3.org/ns/shacl#maxInclusive", "maxInclusive"),
+    ("http://www.w3.org/ns/shacl#minLength", "minLength"),
+    ("http://www.w3.org/ns/shacl#maxLength", "maxLength"),
+    ("http://www.w3.org/ns/shacl#pattern", "pattern"),
+    ("http://www.w3.org/ns/shacl#flags", "flags"),
+    ("http://www.w3.org/ns/shacl#languageIn", "languageIn"),
+    ("http://www.w3.org/ns/shacl#uniqueLang", "uniqueLang"),
+    ("http://www.w3.org/ns/shacl#equals", "equals"),
+    ("http://www.w3.org/ns/shacl#disjoint", "disjoint"),
+    ("http://www.w3.org/ns/shacl#lessThan", "lessThan"),
+    (
+        "http://www.w3.org/ns/shacl#lessThanOrEquals",
+        "lessThanOrEquals",
+    ),
+    (
+        "http://www.w3.org/ns/shacl#qualifiedValueShape",
+        "qualifiedValueShape",
+    ),
+    (
+        "http://www.w3.org/ns/shacl#qualifiedMinCount",
+        "qualifiedMinCount",
+    ),
+    (
+        "http://www.w3.org/ns/shacl#qualifiedMaxCount",
+        "qualifiedMaxCount",
+    ),
+    (
+        "http://www.w3.org/ns/shacl#qualifiedValueShapesDisjoint",
+        "qualifiedValueShapesDisjoint",
+    ),
+    ("http://www.w3.org/ns/shacl#closed", "closed"),
+    (
+        "http://www.w3.org/ns/shacl#ignoredProperties",
+        "ignoredProperties",
+    ),
+    ("http://www.w3.org/ns/shacl#hasValue", "hasValue"),
+    ("http://www.w3.org/ns/shacl#in", "in"),
+    ("http://www.w3.org/ns/shacl#reifierShape", "reifierShape"),
+    (
+        "http://www.w3.org/ns/shacl#reificationRequired",
+        "reificationRequired",
+    ),
+];
+static RS_NODEKIND: &[(&str, &str)] = &[
+    ("http://www.w3.org/ns/shacl#BlankNode", "BlankNode"),
+    ("http://www.w3.org/ns/shacl#IRI", "IRI"),
+    ("http://www.w3.org/ns/shacl#Literal", "Literal"),
+    (
+        "http://www.w3.org/ns/shacl#BlankNodeOrIRI",
+        "BlankNodeOrIRI",
+    ),
+    (
+        "http://www.w3.org/ns/shacl#BlankNodeOrLiteral",
+        "BlankNodeOrLiteral",
+    ),
+    ("http://www.w3.org/ns/shacl#IRIOrLiteral", "IRIOrLiteral"),
+    ("http://www.w3.org/ns/shacl#TripleTerm", "TripleTerm"),
+];
+static RS_PATHMOD: &[(&str, &str)] = &[
+    ("http://www.w3.org/ns/shacl#zeroOrOnePath", "?"),
+    ("http://www.w3.org/ns/shacl#zeroOrMorePath", "*"),
+    ("http://www.w3.org/ns/shacl#oneOrMorePath", "+"),
+];
+static RS_PREDECLARED: &[(&str, &str)] = &[
+    ("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
+    ("rdfs", "http://www.w3.org/2000/01/rdf-schema#"),
+    ("sh", "http://www.w3.org/ns/shacl#"),
+    ("xsd", "http://www.w3.org/2001/XMLSchema#"),
+    ("owl", "http://www.w3.org/2002/07/owl#"),
+];
 const RS_EXT_ANNOTATION: bool = true;
 const RS_EXT_PC: bool = true;
 const RS_EXT_TTL: bool = true;
@@ -3869,10 +8261,18 @@ fn rs_map_get(m: &'static [(&'static str, &'static str)], k: &str) -> Option<&'s
 }
 
 fn rs_num_bool(v: &str, dtv: &str) -> Option<String> {
-    if dtv == "http://www.w3.org/2001/XMLSchema#integer" && fm_INTEGER(v) { return Some(v.to_string()); }
-    if dtv == "http://www.w3.org/2001/XMLSchema#decimal" && fm_DECIMAL(v) { return Some(v.to_string()); }
-    if dtv == "http://www.w3.org/2001/XMLSchema#double" && fm_DOUBLE(v) { return Some(v.to_string()); }
-    if dtv == "http://www.w3.org/2001/XMLSchema#boolean" && (v == "true" || v == "false") { return Some(v.to_string()); }
+    if dtv == "http://www.w3.org/2001/XMLSchema#integer" && fm_INTEGER(v) {
+        return Some(v.to_string());
+    }
+    if dtv == "http://www.w3.org/2001/XMLSchema#decimal" && fm_DECIMAL(v) {
+        return Some(v.to_string());
+    }
+    if dtv == "http://www.w3.org/2001/XMLSchema#double" && fm_DOUBLE(v) {
+        return Some(v.to_string());
+    }
+    if dtv == "http://www.w3.org/2001/XMLSchema#boolean" && (v == "true" || v == "false") {
+        return Some(v.to_string());
+    }
     None
 }
 
@@ -3923,7 +8323,11 @@ fn rs_term_key(t: &Term) -> String {
         Term::NamedNode(v) => format!("<{v}>"),
         Term::BlankNode(v) => format!("_:{v}"),
         Term::Literal(l) => {
-            let dt = if let Term::NamedNode(d) = &l.datatype { d.as_ref() } else { "" };
+            let dt = if let Term::NamedNode(d) = &l.datatype {
+                d.as_ref()
+            } else {
+                ""
+            };
             let dir = l.direction.as_ref().map_or("", |d| d.as_ref());
             format!("{:?}@{}--{}^^{}", l.value.as_ref(), l.language, dir, dt)
         }
@@ -3944,11 +8348,19 @@ fn rs_strip_fragment(iri: &str) -> &str {
 }
 
 fn nn_value(t: &Term) -> Option<&str> {
-    if let Term::NamedNode(v) = t { Some(v.as_ref()) } else { None }
+    if let Term::NamedNode(v) = t {
+        Some(v.as_ref())
+    } else {
+        None
+    }
 }
 
 fn bn_value(t: &Term) -> Option<&str> {
-    if let Term::BlankNode(v) = t { Some(v.as_ref()) } else { None }
+    if let Term::BlankNode(v) = t {
+        Some(v.as_ref())
+    } else {
+        None
+    }
 }
 
 type Txn = HashSet<usize>;
@@ -3988,7 +8400,13 @@ impl<'a> RPrinter<'a> {
 
     fn single_ref(&self, t: &Term) -> bool {
         match bn_value(t) {
-            Some(label) => self.b_ref.iter().find(|(l, _)| l == label).map_or(0, |(_, c)| *c) == 1,
+            Some(label) => {
+                self.b_ref
+                    .iter()
+                    .find(|(l, _)| l == label)
+                    .map_or(0, |(_, c)| *c)
+                    == 1
+            }
             None => false,
         }
     }
@@ -4013,7 +8431,11 @@ impl<'a> RPrinter<'a> {
     /* ---- literals: lexical-fidelity print or refusal ---- */
     fn lit_text(&self, l: &LiteralData) -> Option<String> {
         let v = l.value.as_ref();
-        let dtv = if let Term::NamedNode(d) = &l.datatype { d.as_ref() } else { V_XSD_STRING };
+        let dtv = if let Term::NamedNode(d) = &l.datatype {
+            d.as_ref()
+        } else {
+            V_XSD_STRING
+        };
         if let Some(nb) = rs_num_bool(v, dtv) {
             return Some(nb);
         }
@@ -4059,7 +8481,11 @@ impl<'a> RPrinter<'a> {
             if bn_value(&node).is_none() || !self.single_ref(&node) {
                 return None;
             }
-            let idxs: Vec<usize> = self.on(&node).into_iter().filter(|&i| self.free(i, txn)).collect();
+            let idxs: Vec<usize> = self
+                .on(&node)
+                .into_iter()
+                .filter(|&i| self.free(i, txn))
+                .collect();
             if idxs.len() != 2 {
                 return None;
             }
@@ -4095,7 +8521,11 @@ impl<'a> RPrinter<'a> {
             Term::Triple(q) => self.tt_text(q)?,
             Term::BlankNode(_) => return None,
         };
-        Some(format!("{K_TT_OPEN} {} {} {ot} {K_TT_CLOSE}", self.iri_text(s), self.iri_text(p)))
+        Some(format!(
+            "{K_TT_OPEN} {} {} {ot} {K_TT_CLOSE}",
+            self.iri_text(s),
+            self.iri_text(p)
+        ))
     }
 
     /* ---- iriOrLiteralOrArray ---- */
@@ -4110,7 +8540,11 @@ impl<'a> RPrinter<'a> {
             return None;
         }
         // array: a proper rdf list of iri/literal/tt, or the empty-array shape
-        let idxs: Vec<usize> = self.on(t).into_iter().filter(|&i| self.free(i, txn)).collect();
+        let idxs: Vec<usize> = self
+            .on(t)
+            .into_iter()
+            .filter(|&i| self.free(i, txn))
+            .collect();
         if RS_EMPTY_ARRAY && idxs.len() == 1 {
             let q = self.all[idxs[0]];
             if self.pred(idxs[0]) == V_RDF_REST && nn_value(&q.object) == Some(V_RDF_NIL) {
@@ -4141,7 +8575,11 @@ impl<'a> RPrinter<'a> {
         if bn_value(t).is_none() || !self.single_ref(t) {
             return None;
         }
-        let idxs: Vec<usize> = self.on(t).into_iter().filter(|&i| self.free(i, txn)).collect();
+        let idxs: Vec<usize> = self
+            .on(t)
+            .into_iter()
+            .filter(|&i| self.free(i, txn))
+            .collect();
         let wrap = |text: String, level: u8| {
             if level < need_level {
                 format!("{K_PAR_OPEN}{text}{K_PAR_CLOSE}")
@@ -4234,7 +8672,11 @@ impl<'a> RPrinter<'a> {
 
     fn property_not_text(&self, pred: &str, obj: &Term, txn: &mut Txn) -> Option<String> {
         if pred == V_NOT && bn_value(obj).is_some() && self.single_ref(obj) {
-            let idxs: Vec<usize> = self.on(obj).into_iter().filter(|&i| self.free(i, txn)).collect();
+            let idxs: Vec<usize> = self
+                .on(obj)
+                .into_iter()
+                .filter(|&i| self.free(i, txn))
+                .collect();
             if idxs.len() == 1 {
                 let q = self.all[idxs[0]];
                 let p = self.pred(idxs[0]).to_string();
@@ -4248,14 +8690,26 @@ impl<'a> RPrinter<'a> {
         self.property_atom_text(pred, obj, txn)
     }
 
-    fn chain_elem_text(&self, kind: ChainElem, pred: &str, obj: &Term, txn: &mut Txn) -> Option<String> {
+    fn chain_elem_text(
+        &self,
+        kind: ChainElem,
+        pred: &str,
+        obj: &Term,
+        txn: &mut Txn,
+    ) -> Option<String> {
         match kind {
             ChainElem::Prop => self.property_not_text(pred, obj, txn),
             ChainElem::Node => self.node_not_text(pred, obj, txn),
         }
     }
 
-    fn or_chain_text(&self, pred: &str, obj: &Term, txn: &mut Txn, kind: ChainElem) -> Option<String> {
+    fn or_chain_text(
+        &self,
+        pred: &str,
+        obj: &Term,
+        txn: &mut Txn,
+        kind: ChainElem,
+    ) -> Option<String> {
         if pred != V_OR || bn_value(obj).is_none() || !self.single_ref(obj) {
             return None;
         }
@@ -4269,7 +8723,11 @@ impl<'a> RPrinter<'a> {
             if bn_value(e).is_none() || !self.single_ref(e) {
                 return None;
             }
-            let idxs: Vec<usize> = self.on(e).into_iter().filter(|&i| self.free(i, &otxn)).collect();
+            let idxs: Vec<usize> = self
+                .on(e)
+                .into_iter()
+                .filter(|&i| self.free(i, &otxn))
+                .collect();
             if idxs.len() != 1 {
                 return None; // each element carries exactly one pair
             }
@@ -4299,7 +8757,11 @@ impl<'a> RPrinter<'a> {
 
     fn node_not_text(&self, pred: &str, obj: &Term, txn: &mut Txn) -> Option<String> {
         if pred == V_NOT && bn_value(obj).is_some() && self.single_ref(obj) {
-            let idxs: Vec<usize> = self.on(obj).into_iter().filter(|&i| self.free(i, txn)).collect();
+            let idxs: Vec<usize> = self
+                .on(obj)
+                .into_iter()
+                .filter(|&i| self.free(i, txn))
+                .collect();
             if idxs.len() == 1 {
                 let q = self.all[idxs[0]];
                 let p = self.pred(idxs[0]).to_string();
@@ -4355,18 +8817,29 @@ impl<'a> RPrinter<'a> {
             }
         }
         // bnSection: every triple on the blank must be expressible
-        let idxs: Vec<usize> = self.on(t).into_iter().filter(|&i| self.free(i, txn)).collect();
+        let idxs: Vec<usize> = self
+            .on(t)
+            .into_iter()
+            .filter(|&i| self.free(i, txn))
+            .collect();
         if idxs.is_empty() {
             return None;
         }
         let groups = self.ext_predicate_groups(t, txn)?;
-        Some(format!("{K_BN_OPEN} {} {K_BN_CLOSE}", groups.join(&format!(" {K_ANN_SEP} "))))
+        Some(format!(
+            "{K_BN_OPEN} {} {K_BN_CLOSE}",
+            groups.join(&format!(" {K_ANN_SEP} "))
+        ))
     }
 
     /// Group ALL free triples of a subject as 'p o1, o2' entries; None if
     /// any object is inexpressible (all-or-nothing, so blanks never dangle).
     fn ext_predicate_groups(&self, subj: &Term, txn: &mut Txn) -> Option<Vec<String>> {
-        let idxs: Vec<usize> = self.on(subj).into_iter().filter(|&i| self.free(i, txn)).collect();
+        let idxs: Vec<usize> = self
+            .on(subj)
+            .into_iter()
+            .filter(|&i| self.free(i, txn))
+            .collect();
         let mut by_pred: Vec<(String, Vec<usize>)> = Vec::new();
         for i in idxs {
             let p = nn_value(&self.all[i].predicate)?.to_string();
@@ -4383,7 +8856,11 @@ impl<'a> RPrinter<'a> {
                 txn.insert(i);
                 objs.push(ot);
             }
-            groups.push(format!("{} {}", self.iri_text(p), objs.join(&format!("{K_OBJ_SEP} "))));
+            groups.push(format!(
+                "{} {}",
+                self.iri_text(p),
+                objs.join(&format!("{K_OBJ_SEP} "))
+            ));
         }
         Some(groups)
     }
@@ -4399,7 +8876,11 @@ impl<'a> RPrinter<'a> {
             return Some(format!("{K_BODY_OPEN}{K_BODY_CLOSE}"));
         }
         let body: Vec<String> = lines.iter().map(|l| format!("{pad}{l}")).collect();
-        Some(format!("{K_BODY_OPEN}\n{}\n{}{K_BODY_CLOSE}", body.join("\n"), "  ".repeat(depth)))
+        Some(format!(
+            "{K_BODY_OPEN}\n{}\n{}{K_BODY_CLOSE}",
+            body.join("\n"),
+            "  ".repeat(depth)
+        ))
     }
 
     /// The constraints of a focus node: property shapes + node-level params.
@@ -4517,7 +8998,10 @@ impl<'a> RPrinter<'a> {
             let mut ptxn = sub.clone();
             if let Some(groups) = self.ext_predicate_groups(ps, &mut ptxn) {
                 sub = ptxn;
-                parts.push(format!("{K_PC_OPEN} {} {K_PC_CLOSE}", groups.join(&format!(" {K_ANN_SEP} "))));
+                parts.push(format!(
+                    "{K_PC_OPEN} {} {K_PC_CLOSE}",
+                    groups.join(&format!(" {K_ANN_SEP} "))
+                ));
             }
         }
         let _ = depth;
@@ -4591,7 +9075,13 @@ pub fn print_with_residual(
     prefix_list.sort_by_key(|e| std::cmp::Reverse(e.1.len())); // stable: ties keep insertion order
 
     let n_all = all.len();
-    let mut p = RPrinter { all, used: vec![false; n_all], by_subj, b_ref, prefix_list };
+    let mut p = RPrinter {
+        all,
+        used: vec![false; n_all],
+        by_subj,
+        b_ref,
+        prefix_list,
+    };
 
     let mut out: Vec<String> = Vec::new();
 
@@ -4633,10 +9123,7 @@ pub fn print_with_residual(
     // IMPORTS: subject is the (single, printed) base
     for i in 0..p.all.len() {
         let q = p.all[i];
-        if !p.used[i]
-            && p.pred(i) == V_IMPORTS
-            && nn_value(&q.subject) == Some(base.as_str())
-        {
+        if !p.used[i] && p.pred(i) == V_IMPORTS && nn_value(&q.subject) == Some(base.as_str()) {
             if let Some(o) = nn_value(&q.object) {
                 p.used[i] = true;
                 out.push(format!("{K_IMPORTS} <{}>", esc_iri(o)));
@@ -4702,7 +9189,10 @@ pub fn print_with_residual(
             let mut atxn = txn.clone();
             if let Some(groups) = p.ext_predicate_groups(&n, &mut atxn) {
                 txn = atxn;
-                header.push_str(&format!(" {K_ANN_SEP} {}", groups.join(&format!(" {K_ANN_SEP} "))));
+                header.push_str(&format!(
+                    " {K_ANN_SEP} {}",
+                    groups.join(&format!(" {K_ANN_SEP} "))
+                ));
             }
         }
         for k in txn {
@@ -4712,7 +9202,10 @@ pub fn print_with_residual(
             out.push(format!("{header} {K_BODY_OPEN}{K_BODY_CLOSE}"));
         } else {
             let body: Vec<String> = lines.iter().map(|l| format!("  {l}")).collect();
-            out.push(format!("{header} {K_BODY_OPEN}\n{}\n{K_BODY_CLOSE}", body.join("\n")));
+            out.push(format!(
+                "{header} {K_BODY_OPEN}\n{}\n{K_BODY_CLOSE}",
+                body.join("\n")
+            ));
         }
     }
 
@@ -4754,7 +9247,11 @@ pub fn print_with_residual(
             residual.push(p.all[i].clone());
         }
     }
-    ResidualPrint { text: Some(out.join("\n") + "\n"), residual, missing: None }
+    ResidualPrint {
+        text: Some(out.join("\n") + "\n"),
+        residual,
+        missing: None,
+    }
 }
 
 /// Total print or verdict: returns the document, or the

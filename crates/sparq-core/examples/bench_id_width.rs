@@ -89,7 +89,9 @@ fn gen_rows(n: usize, inline_frac_pct: u64, inline_base: u64) -> Vec<[u64; 3]> {
 }
 
 fn narrow(rows: &[[u64; 3]]) -> Vec<[u32; 3]> {
-    rows.iter().map(|r| [r[0] as u32, r[1] as u32, r[2] as u32]).collect()
+    rows.iter()
+        .map(|r| [r[0] as u32, r[1] as u32, r[2] as u32])
+        .collect()
 }
 
 fn time<R>(f: impl FnOnce() -> R) -> (R, f64) {
@@ -101,7 +103,11 @@ fn time<R>(f: impl FnOnce() -> R) -> (R, f64) {
 fn bench_width(label: &str, rows64: &[[u64; 3]], rows32: &[[u32; 3]]) {
     let n = rows64.len();
     println!("\n--- {label}: {n} rows ---");
-    println!("memory: u32 {} MB | u64 {} MB", n * 12 / 1_000_000, n * 24 / 1_000_000);
+    println!(
+        "memory: u32 {} MB | u64 {} MB",
+        n * 12 / 1_000_000,
+        n * 24 / 1_000_000
+    );
 
     // 1. sort (build kernel) — min of 3
     let mut best32 = f64::MAX;
@@ -123,7 +129,10 @@ fn bench_width(label: &str, rows64: &[[u64; 3]], rows32: &[[u32; 3]]) {
         let (_, ms) = time(|| b.sort_unstable());
         best64 = best64.min(ms);
     }
-    println!("sort:        u32 {best32:8.1} ms | u64 {best64:8.1} ms | ratio {:.2}x", best64 / best32);
+    println!(
+        "sort:        u32 {best32:8.1} ms | u64 {best64:8.1} ms | ratio {:.2}x",
+        best64 / best32
+    );
 
     // 2. full scan (sum col 2)
     let mut s32 = f64::MAX;
@@ -137,7 +146,10 @@ fn bench_width(label: &str, rows64: &[[u64; 3]], rows32: &[[u32; 3]]) {
         sink ^= r;
         s64 = s64.min(ms);
     }
-    println!("full scan:   u32 {s32:8.1} ms | u64 {s64:8.1} ms | ratio {:.2}x", s64 / s32);
+    println!(
+        "full scan:   u32 {s32:8.1} ms | u64 {s64:8.1} ms | ratio {:.2}x",
+        s64 / s32
+    );
 
     // 3. random range probes: 100k binary searches for predicate-bound prefixes + walk 16 rows
     let probes: Vec<u64> = {
@@ -172,11 +184,17 @@ fn bench_width(label: &str, rows64: &[[u64; 3]], rows32: &[[u32; 3]]) {
         sink ^= r;
         p64 = p64.min(ms);
     }
-    println!("100k probes: u32 {p32:8.1} ms | u64 {p64:8.1} ms | ratio {:.2}x   (sink {sink})", p64 / p32);
+    println!(
+        "100k probes: u32 {p32:8.1} ms | u64 {p64:8.1} ms | ratio {:.2}x   (sink {sink})",
+        p64 / p32
+    );
 }
 
 fn main() {
-    let n: usize = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(10_000_000);
+    let n: usize = std::env::args()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10_000_000);
 
     for &(label, rows) in &[("olympics-scale", 1_800_000usize), ("synthetic", 0)] {
         let n = if rows == 0 { n } else { rows };
@@ -188,13 +206,19 @@ fn main() {
         // 4. compressed sizes
         let raw32 = rows32.len() * 12;
         let c32 = encoded_size(&rows64); // values < 2^32: identical varints to u32 enc
-        // pure widening: same values, ids unchanged (dict ids stay dense; inline stays 2^31)
-        // tag-high: inline ids move to bit 60 (u64 tag scheme, tags in the top nibble)
+                                         // pure widening: same values, ids unchanged (dict ids stay dense; inline stays 2^31)
+                                         // tag-high: inline ids move to bit 60 (u64 tag scheme, tags in the top nibble)
         let tagged: Vec<[u64; 3]> = {
             let mut t: Vec<[u64; 3]> = rows64
                 .iter()
                 .map(|r| {
-                    let m = |x: u64| if x >= (1 << 31) { (1u64 << 60) | (x - (1 << 31)) } else { x };
+                    let m = |x: u64| {
+                        if x >= (1 << 31) {
+                            (1u64 << 60) | (x - (1 << 31))
+                        } else {
+                            x
+                        }
+                    };
                     [m(r[0]), m(r[1]), m(r[2])]
                 })
                 .collect();

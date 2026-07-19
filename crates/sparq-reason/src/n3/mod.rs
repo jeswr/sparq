@@ -133,8 +133,14 @@ impl FactIndex {
             return false;
         }
         let [s, p, o] = &t;
-        self.ps.entry((p.clone(), s.clone())).or_default().push(o.clone());
-        self.po.entry((p.clone(), o.clone())).or_default().push(s.clone());
+        self.ps
+            .entry((p.clone(), s.clone()))
+            .or_default()
+            .push(o.clone());
+        self.po
+            .entry((p.clone(), o.clone()))
+            .or_default()
+            .push(s.clone());
         self.p.entry(p.clone()).or_default().push(t.clone());
         true
     }
@@ -144,12 +150,20 @@ impl FactIndex {
         if pg && sg {
             self.ps
                 .get(&(p.clone(), s.clone()))
-                .map(|os| os.iter().map(|ob| [s.clone(), p.clone(), ob.clone()]).collect())
+                .map(|os| {
+                    os.iter()
+                        .map(|ob| [s.clone(), p.clone(), ob.clone()])
+                        .collect()
+                })
                 .unwrap_or_default()
         } else if pg && og {
             self.po
                 .get(&(p.clone(), o.clone()))
-                .map(|ss| ss.iter().map(|sb| [sb.clone(), p.clone(), o.clone()]).collect())
+                .map(|ss| {
+                    ss.iter()
+                        .map(|sb| [sb.clone(), p.clone(), o.clone()])
+                        .collect()
+                })
                 .unwrap_or_default()
         } else if pg {
             self.p.get(p).cloned().unwrap_or_default()
@@ -245,7 +259,10 @@ pub fn reason_n3(dict: &mut Dict, src: &str) -> Result<Vec<[Id; 3]>, String> {
 
 /// As [`reason_n3`], but also return the derivation (a [`ProofStep`] for each NEWLY-derived
 /// triple, in derivation order) — the EYE `--proof` analogue.
-pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<ProofStep>), String> {
+pub fn reason_n3_proof(
+    dict: &mut Dict,
+    src: &str,
+) -> Result<(Vec<[Id; 3]>, Vec<ProofStep>), String> {
     let parsed = parser::parse(src)?;
     let (facts, steps) = run_closure(parsed, None, None, StepMode::Full);
     intern_closure(dict, &facts, &steps)
@@ -313,7 +330,10 @@ pub fn reason_n3_stratified(
         }
         facts = f;
     }
-    Ok(StratifiedN3Closure { facts: intern_closure(dict, &facts, &[])?.0, strata_facts })
+    Ok(StratifiedN3Closure {
+        facts: intern_closure(dict, &facts, &[])?.0,
+        strata_facts,
+    })
 }
 
 /// The smallest `__st{k}_` prefix that no blank label anywhere in `parsed`
@@ -330,7 +350,8 @@ fn fresh_carry_prefix(parsed: &parser::Parsed) -> String {
             }
             Term::List(ms) => ms.iter().for_each(|m| labels(m, out)),
             Term::Formula(ts) => {
-                ts.iter().for_each(|r| r.iter().for_each(|m| labels(m, out)));
+                ts.iter()
+                    .for_each(|r| r.iter().for_each(|m| labels(m, out)));
             }
             Term::Triple(tr) => tr.iter().for_each(|m| labels(m, out)),
             _ => {}
@@ -366,7 +387,9 @@ fn stratum_blanks(t: &[Term; 3], prefix: &str) -> [Term; 3] {
             Term::Blank(l) => Term::Blank(format!("{}{}", p, l)),
             Term::List(ms) => Term::List(ms.iter().map(|m| go(m, p)).collect()),
             Term::Formula(ts) => Term::Formula(
-                ts.iter().map(|r| [go(&r[0], p), go(&r[1], p), go(&r[2], p)]).collect(),
+                ts.iter()
+                    .map(|r| [go(&r[0], p), go(&r[1], p), go(&r[2], p)])
+                    .collect(),
             ),
             Term::Triple(tr) => {
                 Term::Triple(Box::new([go(&tr[0], p), go(&tr[1], p), go(&tr[2], p)]))
@@ -462,7 +485,12 @@ fn run_closure(
     visited: Option<VisitedDocs>,
     mode: StepMode,
 ) -> (FactIndex, Vec<DerivationStep>) {
-    let parser::Parsed { facts: facts0, mut rules, mut backward_rules, base } = parsed;
+    let parser::Parsed {
+        facts: facts0,
+        mut rules,
+        mut backward_rules,
+        base,
+    } = parsed;
     // Premises evaluate left-to-right with no coroutining — reorder each
     // premise so a builtin runs only after the atoms that produce its inputs
     // (cwm evaluates builtins "when ready"; concat.n3 test13f writes the
@@ -507,8 +535,13 @@ fn run_closure(
     let rule_meta: Vec<(Vec<usize>, bool)> = rules
         .iter()
         .map(|r| {
-            let joins: Vec<usize> =
-                r.premise.iter().enumerate().filter(|(_, p)| is_join_atom(p)).map(|(i, _)| i).collect();
+            let joins: Vec<usize> = r
+                .premise
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| is_join_atom(p))
+                .map(|(i, _)| i)
+                .collect();
             // Non-monotonic premise operators — scoped negation/containment
             // AND the collectAllIn/forAllIn aggregations (their solution sets
             // grow with the closure) — force full re-evaluation every round.
@@ -533,7 +566,11 @@ fn run_closure(
         .map(|r| {
             let mut blanks: std::collections::HashSet<String> = Default::default();
             let mut vars: std::collections::BTreeSet<String> = Default::default();
-            fn scan(t: &Term, blanks: &mut std::collections::HashSet<String>, vars: &mut std::collections::BTreeSet<String>) {
+            fn scan(
+                t: &Term,
+                blanks: &mut std::collections::HashSet<String>,
+                vars: &mut std::collections::BTreeSet<String>,
+            ) {
                 match t {
                     Term::Blank(l) => {
                         blanks.insert(l.clone());
@@ -632,7 +669,10 @@ fn run_closure(
     for st in trans_states.iter_mut() {
         for f in &facts.all {
             if f[1] == st.pred && st.gen_set.insert(f.clone()) {
-                st.gen_out.entry(f[0].clone()).or_default().push(f[2].clone());
+                st.gen_out
+                    .entry(f[0].clone())
+                    .or_default()
+                    .push(f[2].clone());
             }
         }
     }
@@ -672,10 +712,7 @@ fn run_closure(
                                 let g = [x.clone(), st.pred.clone(), f[2].clone()];
                                 if !facts.contains(&g) {
                                     let prem = if mode == StepMode::Full {
-                                        vec![
-                                            [x.clone(), st.pred.clone(), f[0].clone()],
-                                            f.clone(),
-                                        ]
+                                        vec![[x.clone(), st.pred.clone(), f[0].clone()], f.clone()]
                                     } else {
                                         Vec::new()
                                     };
@@ -783,7 +820,10 @@ fn run_closure(
             }
             if let Some(st) = trans_states.iter_mut().find(|st| st.pred == g[1]) {
                 if st.gen_set.insert(g.clone()) {
-                    st.gen_out.entry(g[0].clone()).or_default().push(g[2].clone());
+                    st.gen_out
+                        .entry(g[0].clone())
+                        .or_default()
+                        .push(g[2].clone());
                 }
             }
         }
@@ -815,7 +855,11 @@ fn intern_closure(
     let mut rows = fact_rows;
     rows.append(&mut extra);
     for t in &rows {
-        out.push([intern(dict, &t[0])?, intern(dict, &t[1])?, intern(dict, &t[2])?]);
+        out.push([
+            intern(dict, &t[0])?,
+            intern(dict, &t[1])?,
+            intern(dict, &t[2])?,
+        ]);
     }
     // Intern the proof steps (list terms expanded to their chain heads; the
     // chain structure itself is already in the closure rows above).
@@ -826,9 +870,15 @@ fn intern_closure(
             Ok([intern(d, &r[0])?, intern(d, &r[1])?, intern(d, &r[2])?])
         };
         let conclusion = it(g, dict, &mut exp)?;
-        let premises =
-            prem.iter().map(|p| it(p, dict, &mut exp)).collect::<Result<Vec<_>, _>>()?;
-        proof.push(ProofStep { conclusion, rule: *ri, premises });
+        let premises = prem
+            .iter()
+            .map(|p| it(p, dict, &mut exp))
+            .collect::<Result<Vec<_>, _>>()?;
+        proof.push(ProofStep {
+            conclusion,
+            rule: *ri,
+            premises,
+        });
     }
     Ok((out, proof))
 }
@@ -849,7 +899,11 @@ impl ListExpander {
         (out, std::mem::take(&mut self.structure))
     }
     fn expand_row(&mut self, row: &[Term; 3]) -> [Term; 3] {
-        [self.expand(&row[0]), self.expand(&row[1]), self.expand(&row[2])]
+        [
+            self.expand(&row[0]),
+            self.expand(&row[1]),
+            self.expand(&row[2]),
+        ]
     }
     fn expand(&mut self, t: &Term) -> Term {
         // A quoted triple may carry list values in its components; expand them
@@ -874,8 +928,10 @@ impl ListExpander {
         for m in members.into_iter().rev() {
             self.counter += 1;
             let node = Term::Blank(format!("_l{}", self.counter));
-            self.structure.push([node.clone(), Term::Iri(parser::RDF_FIRST.into()), m]);
-            self.structure.push([node.clone(), Term::Iri(parser::RDF_REST.into()), tail]);
+            self.structure
+                .push([node.clone(), Term::Iri(parser::RDF_FIRST.into()), m]);
+            self.structure
+                .push([node.clone(), Term::Iri(parser::RDF_REST.into()), tail]);
             tail = node;
         }
         self.heads.insert(t.clone(), tail.clone());
@@ -920,8 +976,12 @@ fn match_premise_seeded(
         if seeds.is_empty() {
             return Vec::new();
         }
-        let rest: Vec<[Term; 3]> =
-            premise.iter().enumerate().filter(|&(i, _)| i != k).map(|(_, p)| p.clone()).collect();
+        let rest: Vec<[Term; 3]> = premise
+            .iter()
+            .enumerate()
+            .filter(|&(i, _)| i != k)
+            .map(|(_, p)| p.clone())
+            .collect();
         let mut out = Vec::new();
         for s in &seeds {
             out.extend(match_premise_seeded(&rest, facts, s, None, bw, depth));
@@ -1024,8 +1084,12 @@ fn match_premise_seeded(
                 let Term::List(members) = &subj else { continue };
                 match op {
                     CollectOp::CollectAll => {
-                        let [template, clause, list_pat] = &members[..] else { continue };
-                        let Some(sols) = solve(clause, &b) else { continue };
+                        let [template, clause, list_pat] = &members[..] else {
+                            continue;
+                        };
+                        let Some(sols) = solve(clause, &b) else {
+                            continue;
+                        };
                         let collected =
                             Term::List(sols.iter().map(|s| apply_deep(template, s)).collect());
                         let mut nb = b.clone();
@@ -1035,8 +1099,12 @@ fn match_premise_seeded(
                     }
                     CollectOp::ForAll => {
                         let [ca, cb] = &members[..] else { continue };
-                        let Some(sols_a) = solve(ca, &b) else { continue };
-                        if sols_a.iter().all(|s| matches!(solve(cb, s), Some(ss) if !ss.is_empty()))
+                        let Some(sols_a) = solve(ca, &b) else {
+                            continue;
+                        };
+                        if sols_a
+                            .iter()
+                            .all(|s| matches!(solve(cb, s), Some(ss) if !ss.is_empty()))
                         {
                             next.push(b);
                         }
@@ -1090,7 +1158,10 @@ fn match_premise_seeded(
                 .filter_map(|b| eval_functional(f, &pat[0], &pat[2], facts, bw, b))
                 .collect();
         } else if let Some(op) = binder_builtin(&pat[1]) {
-            bindings = bindings.into_iter().filter_map(|b| eval_binder(op, &pat[0], &pat[2], b)).collect();
+            bindings = bindings
+                .into_iter()
+                .filter_map(|b| eval_binder(op, &pat[0], &pat[2], b))
+                .collect();
         } else if let Some(op) = builtin(&pat[1]) {
             bindings.retain(|b| eval_builtin(op, &pat[0], &pat[2], b));
         } else {
@@ -1224,7 +1295,13 @@ fn is_join_atom(pat: &[Term; 3]) -> bool {
 /// premise — recursively allowing joins, builtins, and further backward rules — and project
 /// each proof back onto the goal's variables. SLD resolution with standardized-apart rule
 /// variables and a depth bound (`depth` counts REMAINING backward applications).
-fn backward_prove(pat: &[Term; 3], b: &Binding, facts: &FactIndex, bw: &BwCtx, depth: usize) -> Vec<Binding> {
+fn backward_prove(
+    pat: &[Term; 3],
+    b: &Binding,
+    facts: &FactIndex,
+    bw: &BwCtx,
+    depth: usize,
+) -> Vec<Binding> {
     let goal = [apply(&pat[0], b), apply(&pat[1], b), apply(&pat[2], b)];
     let mut out = Vec::new();
     for rule in bw.rules {
@@ -1238,7 +1315,11 @@ fn backward_prove(pat: &[Term; 3], b: &Binding, facts: &FactIndex, bw: &BwCtx, d
             // Standardize apart: fresh names for this rule application's variables.
             let n = bw.rename.get();
             bw.rename.set(n + 1);
-            let rc = [rename_vars(&concl[0], n), rename_vars(&concl[1], n), rename_vars(&concl[2], n)];
+            let rc = [
+                rename_vars(&concl[0], n),
+                rename_vars(&concl[1], n),
+                rename_vars(&concl[2], n),
+            ];
             let mut subst = b.clone();
             if !(unify_walked(&goal[0], &rc[0], &mut subst)
                 && unify_walked(&goal[1], &rc[1], &mut subst)
@@ -1249,7 +1330,13 @@ fn backward_prove(pat: &[Term; 3], b: &Binding, facts: &FactIndex, bw: &BwCtx, d
             let prem: Vec<[Term; 3]> = rule
                 .premise
                 .iter()
-                .map(|t| [rename_vars(&t[0], n), rename_vars(&t[1], n), rename_vars(&t[2], n)])
+                .map(|t| {
+                    [
+                        rename_vars(&t[0], n),
+                        rename_vars(&t[1], n),
+                        rename_vars(&t[2], n),
+                    ]
+                })
                 .collect();
             for sol in match_premise_seeded(&prem, facts, &subst, None, bw, depth) {
                 // Project the proof onto the goal's variables (walk chains like
@@ -1284,7 +1371,15 @@ fn rename_vars(t: &Term, n: usize) -> Term {
     match t {
         Term::Var(v) => Term::Var(format!("__bw{n}_{v}")),
         Term::Formula(ts) => Term::Formula(
-            ts.iter().map(|tr| [rename_vars(&tr[0], n), rename_vars(&tr[1], n), rename_vars(&tr[2], n)]).collect(),
+            ts.iter()
+                .map(|tr| {
+                    [
+                        rename_vars(&tr[0], n),
+                        rename_vars(&tr[1], n),
+                        rename_vars(&tr[2], n),
+                    ]
+                })
+                .collect(),
         ),
         Term::List(ms) => Term::List(ms.iter().map(|m| rename_vars(m, n)).collect()),
         Term::Triple(tr) => Term::Triple(Box::new([
@@ -1363,7 +1458,11 @@ fn fact_list(head: &Term, facts: &FactIndex) -> Option<Vec<Term>> {
             return None;
         }
         guard += 1;
-        let f = facts.ps.get(&(first.clone(), cur.clone()))?.first()?.clone();
+        let f = facts
+            .ps
+            .get(&(first.clone(), cur.clone()))?
+            .first()?
+            .clone();
         out.push(f);
         cur = facts.ps.get(&(rest.clone(), cur.clone()))?.first()?.clone();
     }
@@ -1379,9 +1478,11 @@ fn rename_blanks(t: &[Term; 3], map: &FxHashMap<String, String>) -> [Term; 3] {
                 None => t.clone(),
             },
             Term::List(ms) => Term::List(ms.iter().map(|m| go(m, map)).collect()),
-            Term::Triple(tr) => {
-                Term::Triple(Box::new([go(&tr[0], map), go(&tr[1], map), go(&tr[2], map)]))
-            }
+            Term::Triple(tr) => Term::Triple(Box::new([
+                go(&tr[0], map),
+                go(&tr[1], map),
+                go(&tr[2], map),
+            ])),
             _ => t.clone(),
         }
     }
@@ -1475,9 +1576,11 @@ fn apply(t: &Term, b: &Binding) -> Term {
     match t {
         Term::Var(v) => b.get(v).cloned().unwrap_or_else(|| t.clone()),
         Term::List(ms) => Term::List(ms.iter().map(|m| apply(m, b)).collect()),
-        Term::Triple(tr) => {
-            Term::Triple(Box::new([apply(&tr[0], b), apply(&tr[1], b), apply(&tr[2], b)]))
-        }
+        Term::Triple(tr) => Term::Triple(Box::new([
+            apply(&tr[0], b),
+            apply(&tr[1], b),
+            apply(&tr[2], b),
+        ])),
         _ => t.clone(),
     }
 }
@@ -1503,7 +1606,11 @@ fn ground_triple(t: &[Term; 3], b: &Binding) -> Option<[Term; 3]> {
             _ => true,
         }
     }
-    let g = [apply_deep(&t[0], b), apply_deep(&t[1], b), apply_deep(&t[2], b)];
+    let g = [
+        apply_deep(&t[0], b),
+        apply_deep(&t[1], b),
+        apply_deep(&t[2], b),
+    ];
     if g.iter().all(instantiated) {
         Some(g)
     } else {
@@ -1529,8 +1636,8 @@ enum Builtin {
     StrEnds,
     StrGt,
     StrLt,
-    StrMatches,        // string:matches (regex)
-    StrNotMatches,     // string:notMatches (regex, negated; invalid regex ⇒ premise fails)
+    StrMatches,         // string:matches (regex)
+    StrNotMatches,      // string:notMatches (regex, negated; invalid regex ⇒ premise fails)
     StrContainsIgnCase, // string:containsIgnoringCase
     StrNotGt,           // string:notGreaterThan
     StrNotLt,           // string:notLessThan
@@ -1598,7 +1705,9 @@ fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
         | Builtin::StrEqIgnCase
         | Builtin::StrNeIgnCase
         | Builtin::StrContainsRoughly => {
-            let (Some(x), Some(y)) = (lex(&s), lex(&o)) else { return false };
+            let (Some(x), Some(y)) = (lex(&s), lex(&o)) else {
+                return false;
+            };
             match op {
                 Builtin::StrContains => x.contains(y),
                 Builtin::StrStarts => x.starts_with(y),
@@ -1607,13 +1716,20 @@ fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
                 Builtin::StrLt => x < y,
                 Builtin::StrNotGt => x <= y,
                 Builtin::StrNotLt => x >= y,
-                Builtin::StrMatches => regex::Regex::new(y).map(|re| re.is_match(x)).unwrap_or(false),
-                Builtin::StrNotMatches => regex::Regex::new(y).map(|re| !re.is_match(x)).unwrap_or(false),
+                Builtin::StrMatches => regex::Regex::new(y)
+                    .map(|re| re.is_match(x))
+                    .unwrap_or(false),
+                Builtin::StrNotMatches => regex::Regex::new(y)
+                    .map(|re| !re.is_match(x))
+                    .unwrap_or(false),
                 Builtin::StrContainsIgnCase => x.to_lowercase().contains(&y.to_lowercase()),
                 Builtin::StrContainsRoughly => {
                     // cwm roughly.n3: case-insensitive, any whitespace run = one space.
                     let norm = |t: &str| {
-                        t.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+                        t.split_whitespace()
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                            .to_lowercase()
                     };
                     norm(x).contains(&norm(y))
                 }
@@ -1623,7 +1739,9 @@ fn eval_builtin(op: Builtin, s: &Term, o: &Term, b: &Binding) -> bool {
             }
         }
         _ => {
-            let (Some(x), Some(y)) = (num(&s), num(&o)) else { return false };
+            let (Some(x), Some(y)) = (num(&s), num(&o)) else {
+                return false;
+            };
             match op {
                 Builtin::Gt => x > y,
                 Builtin::Lt => x < y,
@@ -1661,7 +1779,11 @@ fn eval_binder(op: Bidi, s: &Term, o: &Term, b: Binding) -> Option<Binding> {
         Bidi::LogUri => match (&sv, &ov) {
             // forward: IRI subject → its text as a string literal
             (Term::Iri(i), _) => {
-                let lit = Term::Lit(i.clone(), "http://www.w3.org/2001/XMLSchema#string".into(), None);
+                let lit = Term::Lit(
+                    i.clone(),
+                    "http://www.w3.org/2001/XMLSchema#string".into(),
+                    None,
+                );
                 if unify_term(o, &lit, &mut nb) {
                     Some(nb)
                 } else {
@@ -1748,7 +1870,13 @@ fn apply_deep(t: &Term, b: &Binding) -> Term {
         Term::List(ms) => Term::List(ms.iter().map(|m| apply_deep(m, b)).collect()),
         Term::Formula(ts) => Term::Formula(
             ts.iter()
-                .map(|r| [apply_deep(&r[0], b), apply_deep(&r[1], b), apply_deep(&r[2], b)])
+                .map(|r| {
+                    [
+                        apply_deep(&r[0], b),
+                        apply_deep(&r[1], b),
+                        apply_deep(&r[2], b),
+                    ]
+                })
                 .collect(),
         ),
         Term::Triple(tr) => Term::Triple(Box::new([
@@ -1850,7 +1978,11 @@ fn reencode_statements(parsed: parser::Parsed) -> Vec<[Term; 3]> {
     };
     let mut ts = parsed.facts;
     for r in &parsed.rules {
-        ts.push([quote(&r.premise), Term::Iri(parser::LOG_IMPLIES.into()), quote(&r.conclusion)]);
+        ts.push([
+            quote(&r.premise),
+            Term::Iri(parser::LOG_IMPLIES.into()),
+            quote(&r.conclusion),
+        ]);
     }
     for r in &parsed.backward_rules {
         ts.push([
@@ -1883,21 +2015,35 @@ fn formula_closure(ts: &[[Term; 3]], bw: &BwCtx) -> Vec<[Term; 3]> {
     for row in ts {
         match (&row[0], &row[1], &row[2]) {
             (Term::Formula(p), Term::Iri(i), Term::Formula(c)) if i == parser::LOG_IMPLIES => {
-                rules.push(Rule { premise: p.clone(), conclusion: c.clone() });
+                rules.push(Rule {
+                    premise: p.clone(),
+                    conclusion: c.clone(),
+                });
             }
             (Term::Formula(c), Term::Iri(i), Term::Formula(p)) if i == parser::LOG_IMPLIED_BY => {
-                backward.push(Rule { premise: p.clone(), conclusion: c.clone() });
+                backward.push(Rule {
+                    premise: p.clone(),
+                    conclusion: c.clone(),
+                });
             }
             _ => facts.push(row.clone()),
         }
     }
-    let parsed =
-        parser::Parsed { facts, rules, backward_rules: backward, base: bw.base.clone() };
+    let parsed = parser::Parsed {
+        facts,
+        rules,
+        backward_rules: backward,
+        base: bw.base.clone(),
+    };
     // Inherit the parent's import-cycle guard ([`VisitedDocs`]) so a `log:semantics` /
     // `log:content` document active up the stack is still recognised when its own closure
     // re-imports it through this nested run.
-    let (closed, _steps) =
-        run_closure(parsed, bw.resolver, Some(bw.visited.clone()), StepMode::None);
+    let (closed, _steps) = run_closure(
+        parsed,
+        bw.resolver,
+        Some(bw.visited.clone()),
+        StepMode::None,
+    );
     // Original statements (including the rule statements, which cwm keeps in
     // log:conclusion output) plus the derivations.
     let mut seen: FxHashSet<[Term; 3]> = ts.iter().cloned().collect();
@@ -2096,9 +2242,8 @@ impl NumVal {
         };
         let ((ma, sa), (mb, sb)) = (part(a)?, part(b)?);
         let s = sa.max(sb);
-        let up = |m: i128, from: u32| -> Option<i128> {
-            m.checked_mul(10i128.checked_pow(s - from)?)
-        };
+        let up =
+            |m: i128, from: u32| -> Option<i128> { m.checked_mul(10i128.checked_pow(s - from)?) };
         Some((up(ma, sa)?, up(mb, sb)?, s))
     }
     /// Value equality. The exact tiers delegate to the SHARED substrate
@@ -2134,20 +2279,29 @@ fn dec_norm(m: i128, s: u32) -> (i128, u32) {
 /// (matching the old behavior), else decimal lexical.
 fn numval_term(v: NumVal) -> Term {
     match v {
-        NumVal::Int(i) => {
-            Term::Lit(i.to_string(), "http://www.w3.org/2001/XMLSchema#integer".into(), None)
-        }
+        NumVal::Int(i) => Term::Lit(
+            i.to_string(),
+            "http://www.w3.org/2001/XMLSchema#integer".into(),
+            None,
+        ),
         NumVal::Dec(m, s) => {
             let (m, s) = dec_norm(m, s);
             let neg = m < 0;
             let digits = m.unsigned_abs().to_string();
             let s = s as usize;
             let (int, frac) = if digits.len() > s {
-                (digits[..digits.len() - s].to_string(), digits[digits.len() - s..].to_string())
+                (
+                    digits[..digits.len() - s].to_string(),
+                    digits[digits.len() - s..].to_string(),
+                )
             } else {
                 ("0".to_string(), format!("{:0>width$}", digits, width = s))
             };
-            let frac = if frac.is_empty() { "0".to_string() } else { frac };
+            let frac = if frac.is_empty() {
+                "0".to_string()
+            } else {
+                frac
+            };
             Term::Lit(
                 format!("{}{int}.{frac}", if neg { "-" } else { "" }),
                 "http://www.w3.org/2001/XMLSchema#decimal".into(),
@@ -2172,29 +2326,29 @@ enum Func {
     Max,
     Min,
     Exponentiation,
-    Logarithm,   // (x base) math:logarithm log_base(x) — EYE: log(U)/log(V)
-    Atan2,       // (x y) math:atan2 — EYE's eye.pl computes atan(x/y), NOT C atan2; we match
-    MemberCount, // math:memberCount — list length, or distinct triple count of a formula
-    Concat,      // string:concatenation
-    Format,      // string:format — ( fmt args… ); %s/%d/%f/%% subset, else premise fails
-    Scrape,      // string:scrape — ( str regex ); the FIRST capture group of the first match
-    Length,      // list:length
-    StrLength,   // string:length (Unicode scalar count)
-    Replace,     // string:replace (regex): ( str pattern replacement ) string:replace ?out
-    First,       // list:first
-    Last,        // list:last
-    Append,      // list:append — ( list… ) list:append ?out (first-class list result)
-    Conjunction, // log:conjunction — merge a list of formulae into one formula
-    Dtlit,       // log:dtlit — ( "lex" xsd:dt ) ↔ "lex"^^xsd:dt (both directions)
+    Logarithm,     // (x base) math:logarithm log_base(x) — EYE: log(U)/log(V)
+    Atan2,         // (x y) math:atan2 — EYE's eye.pl computes atan(x/y), NOT C atan2; we match
+    MemberCount,   // math:memberCount — list length, or distinct triple count of a formula
+    Concat,        // string:concatenation
+    Format,        // string:format — ( fmt args… ); %s/%d/%f/%% subset, else premise fails
+    Scrape,        // string:scrape — ( str regex ); the FIRST capture group of the first match
+    Length,        // list:length
+    StrLength,     // string:length (Unicode scalar count)
+    Replace,       // string:replace (regex): ( str pattern replacement ) string:replace ?out
+    First,         // list:first
+    Last,          // list:last
+    Append,        // list:append — ( list… ) list:append ?out (first-class list result)
+    Conjunction,   // log:conjunction — merge a list of formulae into one formula
+    Dtlit,         // log:dtlit — ( "lex" xsd:dt ) ↔ "lex"^^xsd:dt (both directions)
     LogConclusion, // log:conclusion — a formula's forward closure, as a formula
     ParsedAsN3,    // log:parsedAsN3 — an N3 source string, parsed to a formula
     Langlit,       // log:langlit — ( "lex" "lang" ) → "lex"@lang
     Semantics,     // log:semantics — a document IRI's parsed formula (needs a Resolver)
     Content,       // log:content — a document IRI's source text (needs a Resolver)
     // single-value-arg (string case mapping, Unicode-aware)
-    LowerCase,    // string:lowerCase
-    UpperCase,    // string:upperCase
-    EncodeForUri, // string:encodeForUri — RFC 3986 percent-encoding (see [`encode_for_uri`])
+    LowerCase,       // string:lowerCase
+    UpperCase,       // string:upperCase
+    EncodeForUri,    // string:encodeForUri — RFC 3986 percent-encoding (see [`encode_for_uri`])
     EncodeForUriCwm, // string:encodeForURI — cwm's URI quoting (keeps #'()~, encodes /)
     EncodeForFragId, // string:encodeForFragID — cwm's fragment quoting (keeps /, encodes #'()~)
     // single-value-arg (unary math)
@@ -2328,7 +2482,9 @@ fn eval_functional(
     // log:dtlit needs the UNAPPLIED member terms: its reverse mode binds them by
     // decomposing a ground object literal into ( "lexical" datatype-IRI ).
     if let Func::Dtlit = f {
-        let Term::List(members) = subj else { return None };
+        let Term::List(members) = subj else {
+            return None;
+        };
         if members.len() != 2 {
             return None;
         }
@@ -2342,9 +2498,14 @@ fn eval_functional(
             }
             // reverse: decompose a ground object literal into its parts
             _ => {
-                let Term::Lit(v, dt, _) = apply(obj, &nb) else { return None };
-                (unify_term(&members[0], &Term::Lit(v.clone(), XSD_STRING.into(), None), &mut nb)
-                    && unify_term(&members[1], &Term::Iri(dt.clone()), &mut nb))
+                let Term::Lit(v, dt, _) = apply(obj, &nb) else {
+                    return None;
+                };
+                (unify_term(
+                    &members[0],
+                    &Term::Lit(v.clone(), XSD_STRING.into(), None),
+                    &mut nb,
+                ) && unify_term(&members[1], &Term::Iri(dt.clone()), &mut nb))
                 .then_some(nb)
             }
         };
@@ -2524,17 +2685,24 @@ fn eval_functional(
                 match a {
                     // cwm coerces typed literals to their canonical VALUE
                     // string ("0"^^xsd:boolean → "false", 0E1 → "0").
-                    Term::Lit(v, dt, _) => match dt.strip_prefix("http://www.w3.org/2001/XMLSchema#") {
-                        Some("boolean") => s.push_str(if v == "0" || v == "false" { "false" } else { "true" }),
-                        Some("integer" | "decimal" | "float" | "double") => {
-                            match numval(a) {
+                    Term::Lit(v, dt, _) => {
+                        match dt.strip_prefix("http://www.w3.org/2001/XMLSchema#") {
+                            Some("boolean") => s.push_str(if v == "0" || v == "false" {
+                                "false"
+                            } else {
+                                "true"
+                            }),
+                            Some("integer" | "decimal" | "float" | "double") => match numval(a) {
                                 Some(NumVal::Int(i)) => s.push_str(&i.to_string()),
                                 Some(NumVal::Dec(m, sc)) => {
                                     let (m, sc) = dec_norm(m, sc);
                                     if sc == 0 {
                                         s.push_str(&m.to_string());
                                     } else {
-                                        let Term::Lit(lex, _, _) = numval_term(NumVal::Dec(m, sc)) else { return None };
+                                        let Term::Lit(lex, _, _) = numval_term(NumVal::Dec(m, sc))
+                                        else {
+                                            return None;
+                                        };
                                         s.push_str(&lex);
                                     }
                                 }
@@ -2546,10 +2714,10 @@ fn eval_functional(
                                     }
                                 }
                                 None => s.push_str(v),
-                            }
+                            },
+                            _ => s.push_str(v),
                         }
-                        _ => s.push_str(v),
-                    },
+                    }
                     // cwm coerces IRI arguments to their text (concatenation.n3 s01).
                     Term::Iri(i) => s.push_str(i),
                     _ => return None,
@@ -2559,15 +2727,21 @@ fn eval_functional(
         }
         Func::Length => number_term(args.len() as f64),
         Func::StrLength => number_term(lex(&args[0])?.chars().count() as f64),
-        Func::LowerCase => {
-            Term::Lit(lex(&args[0])?.to_lowercase(), "http://www.w3.org/2001/XMLSchema#string".into(), None)
-        }
-        Func::UpperCase => {
-            Term::Lit(lex(&args[0])?.to_uppercase(), "http://www.w3.org/2001/XMLSchema#string".into(), None)
-        }
-        Func::EncodeForUri => {
-            Term::Lit(encode_for_uri(lex(&args[0])?), "http://www.w3.org/2001/XMLSchema#string".into(), None)
-        }
+        Func::LowerCase => Term::Lit(
+            lex(&args[0])?.to_lowercase(),
+            "http://www.w3.org/2001/XMLSchema#string".into(),
+            None,
+        ),
+        Func::UpperCase => Term::Lit(
+            lex(&args[0])?.to_uppercase(),
+            "http://www.w3.org/2001/XMLSchema#string".into(),
+            None,
+        ),
+        Func::EncodeForUri => Term::Lit(
+            encode_for_uri(lex(&args[0])?),
+            "http://www.w3.org/2001/XMLSchema#string".into(),
+            None,
+        ),
         Func::EncodeForUriCwm | Func::EncodeForFragId => {
             // cwm's quoting pairs (uriEncode-out.n3): URI keeps #'()~ but
             // encodes '/'; FragID keeps '/' but encodes #'()~. Both keep
@@ -2648,10 +2822,14 @@ fn eval_functional(
             let out = re.replace_all(lex(&args[0])?, lex(&args[2])?).into_owned();
             Term::Lit(out, "http://www.w3.org/2001/XMLSchema#string".into(), None)
         }
-        Func::Year | Func::Month | Func::Day | Func::Hours | Func::Minutes | Func::Seconds
-        | Func::DayOfWeek | Func::InSeconds => {
-            number_term(datetime_part(lex(&args[0])?, f)? as f64)
-        }
+        Func::Year
+        | Func::Month
+        | Func::Day
+        | Func::Hours
+        | Func::Minutes
+        | Func::Seconds
+        | Func::DayOfWeek
+        | Func::InSeconds => number_term(datetime_part(lex(&args[0])?, f)? as f64),
         Func::TimeZone => {
             // Only an EXPLICIT numeric offset is a time zone (cwm: `Z`/absent
             // yield nothing).
@@ -2721,7 +2899,13 @@ fn eval_functional(
                             if dt == "http://www.w3.org/2001/XMLSchema#double"
                                 || dt == "http://www.w3.org/2001/XMLSchema#float")
                     });
-                let two = |n: &[f64]| if n.len() == 2 { Some((n[0], n[1])) } else { None };
+                let two = |n: &[f64]| {
+                    if n.len() == 2 {
+                        Some((n[0], n[1]))
+                    } else {
+                        None
+                    }
+                };
                 let v = match f {
                     Func::Sum => nums.iter().sum(),
                     Func::Product => nums.iter().product(),
@@ -2792,7 +2976,7 @@ fn eval_functional(
                     && !(matches!(f, Func::Quotient) && any_double)
                 {
                     return None; // domain error (asin 2, acosh 0.5, …): the premise fails
-                    // (NaN/INF inputs — and IEEE 0/0 — PROPAGATE instead, cwm math/inf.n3)
+                                 // (NaN/INF inputs — and IEEE 0/0 — PROPAGATE instead, cwm math/inf.n3)
                 }
                 if trig_family || any_double {
                     double_term(v)
@@ -2855,7 +3039,11 @@ fn eval_exact(f: Func, args: &[Term]) -> Option<Term> {
         };
         let pow = 10i128.checked_pow(s)?;
         let v = round(m, pow);
-        Some(if s == 0 { NumVal::Int(v) } else { NumVal::Dec(v, 0) })
+        Some(if s == 0 {
+            NumVal::Int(v)
+        } else {
+            NumVal::Dec(v, 0)
+        })
     };
     // The exact add / subtract / multiply DELEGATE to the shared substrate
     // `Dec` (byte-identical `(mant, scale)`: `+`/`-` keep the max scale, `*` sums
@@ -2935,7 +3123,11 @@ fn eval_exact(f: Func, args: &[Term]) -> Option<Term> {
             match (vals[0], vals[1]) {
                 (NumVal::Int(a), NumVal::Int(b)) if b != 0 => {
                     let r = a.checked_rem(b)?;
-                    NumVal::Int(if r != 0 && (r < 0) != (b < 0) { r.checked_add(b)? } else { r })
+                    NumVal::Int(if r != 0 && (r < 0) != (b < 0) {
+                        r.checked_add(b)?
+                    } else {
+                        r
+                    })
                 }
                 _ => return None,
             }
@@ -2978,7 +3170,9 @@ fn eval_exact(f: Func, args: &[Term]) -> Option<Term> {
             if vals.len() != 2 {
                 return None;
             }
-            let (NumVal::Int(e), base) = (vals[1], vals[0]) else { return None };
+            let (NumVal::Int(e), base) = (vals[1], vals[0]) else {
+                return None;
+            };
             if !(0..=64).contains(&e) {
                 return None;
             }
@@ -3013,7 +3207,11 @@ fn datetime_part(s: &str, f: Func) -> Option<i64> {
     let neg = date.starts_with('-');
     let mut dparts = date.trim_start_matches('-').split('-');
     match f {
-        Func::Year => dparts.next()?.parse::<i64>().ok().map(|y| if neg { -y } else { y }),
+        Func::Year => dparts
+            .next()?
+            .parse::<i64>()
+            .ok()
+            .map(|y| if neg { -y } else { y }),
         Func::Month => dparts.nth(1)?.parse().ok(),
         Func::Day => dparts.nth(2)?.parse().ok(),
         Func::Hours | Func::Minutes | Func::Seconds => {
@@ -3033,7 +3231,11 @@ fn datetime_part(s: &str, f: Func) -> Option<i64> {
             let mut dp = date.trim_start_matches('-').split('-');
             let y: i64 = {
                 let y = dp.next()?.parse::<i64>().ok()?;
-                if neg { -y } else { y }
+                if neg {
+                    -y
+                } else {
+                    y
+                }
             };
             let m: i64 = dp.next().and_then(|x| x.parse().ok()).unwrap_or(1);
             let d: i64 = dp.next().and_then(|x| x.parse().ok()).unwrap_or(1);
@@ -3127,9 +3329,17 @@ fn double_term(v: f64) -> Term {
 /// Render an `f64` result as an N3 numeric literal (integer when whole, else decimal).
 fn number_term(v: f64) -> Term {
     if v.fract() == 0.0 && v.abs() < 9.007e15 {
-        Term::Lit((v as i64).to_string(), "http://www.w3.org/2001/XMLSchema#integer".into(), None)
+        Term::Lit(
+            (v as i64).to_string(),
+            "http://www.w3.org/2001/XMLSchema#integer".into(),
+            None,
+        )
     } else {
-        Term::Lit(format!("{v}"), "http://www.w3.org/2001/XMLSchema#decimal".into(), None)
+        Term::Lit(
+            format!("{v}"),
+            "http://www.w3.org/2001/XMLSchema#decimal".into(),
+            None,
+        )
     }
 }
 
@@ -3191,7 +3401,9 @@ fn n3_term_to_oxrdf(t: &Term) -> Result<oxrdf::Term, String> {
             )))
         }
         Term::Var(_) | Term::Formula(_) | Term::List(_) => {
-            return Err(format!("term {t:?} inside a quoted triple has no dictionary representation"))
+            return Err(format!(
+                "term {t:?} inside a quoted triple has no dictionary representation"
+            ))
         }
     })
 }
@@ -3232,8 +3444,15 @@ mod tests {
         let man = dict.intern_iri("http://ex/Man");
         let socrates = dict.intern_iri("http://ex/Socrates");
         let ty = dict.intern_iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
-        let step = proof.iter().find(|s| s.conclusion == [socrates, ty, mortal]).expect("Mortal step");
-        assert_eq!(step.premises, vec![[socrates, ty, man]], "Mortal derived from (Socrates a Man)");
+        let step = proof
+            .iter()
+            .find(|s| s.conclusion == [socrates, ty, mortal])
+            .expect("Mortal step");
+        assert_eq!(
+            step.premises,
+            vec![[socrates, ty, man]],
+            "Mortal derived from (Socrates a Man)"
+        );
     }
 
     #[test]
@@ -3245,7 +3464,13 @@ mod tests {
             { ?x a :Man } => { ?x a :Mortal } .
         "#;
         let (d, s) = closure(src);
-        assert!(has(&d, &s, "http://ex/Socrates", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Mortal"));
+        assert!(has(
+            &d,
+            &s,
+            "http://ex/Socrates",
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+            "http://ex/Mortal"
+        ));
     }
 
     #[test]
@@ -3261,7 +3486,10 @@ mod tests {
         "#;
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-        assert!(has(&d, &s, "http://ex/Socrates", ty, "http://ex/Mortal"), "query rule drives backward proof");
+        assert!(
+            has(&d, &s, "http://ex/Socrates", ty, "http://ex/Mortal"),
+            "query rule drives backward proof"
+        );
 
         // Without a forward rule posing the goal, the backward rule must NOT materialize
         // anything — EYE outputs no `:Mortal` triple for this document either.
@@ -3271,7 +3499,10 @@ mod tests {
             { ?x a :Mortal } <= { ?x a :Man } .
         "#;
         let (d2, s2) = closure(src_no_query);
-        assert!(!has(&d2, &s2, "http://ex/Socrates", ty, "http://ex/Mortal"), "no goal, no backward firing");
+        assert!(
+            !has(&d2, &s2, "http://ex/Socrates", ty, "http://ex/Mortal"),
+            "no goal, no backward firing"
+        );
     }
 
     #[test]
@@ -3289,7 +3520,11 @@ mod tests {
         let int = "http://www.w3.org/2001/XMLSchema#integer";
         let (five, three) = (d.intern_lit("5", int, None), d.intern_lit("3", int, None));
         assert!(
-            s.contains(&[five, id(&d, "http://example.org/#moreInterestingThan"), three]),
+            s.contains(&[
+                five,
+                id(&d, "http://example.org/#moreInterestingThan"),
+                three
+            ]),
             "5 :moreInterestingThan 3 proven goal-directed"
         );
     }
@@ -3307,11 +3542,26 @@ mod tests {
             { :water a :Necessity } => { :water :is :necessary } .
         "#;
         let (d, s) = closure(src);
-        assert!(has(&d, &s, "http://ex/rex", "http://ex/gets", "http://ex/food"), "two-step backward chain");
-        assert!(has(&d, &s, "http://ex/water", "http://ex/is", "http://ex/necessary"), "<= true base case");
+        assert!(
+            has(&d, &s, "http://ex/rex", "http://ex/gets", "http://ex/food"),
+            "two-step backward chain"
+        );
+        assert!(
+            has(
+                &d,
+                &s,
+                "http://ex/water",
+                "http://ex/is",
+                "http://ex/necessary"
+            ),
+            "<= true base case"
+        );
         // The intermediate backward conclusions are NOT materialized.
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-        assert!(!has(&d, &s, "http://ex/rex", ty, "http://ex/Animal"), "backward conclusions stay virtual");
+        assert!(
+            !has(&d, &s, "http://ex/rex", ty, "http://ex/Animal"),
+            "backward conclusions stay virtual"
+        );
     }
 
     #[test]
@@ -3325,7 +3575,10 @@ mod tests {
             { ?a :loops ?b } => { ?a :looped ?b } .
         "#;
         let (d, s) = closure(src);
-        assert!(has(&d, &s, "http://ex/seed", "http://ex/p", "http://ex/o"), "facts survive");
+        assert!(
+            has(&d, &s, "http://ex/seed", "http://ex/p", "http://ex/o"),
+            "facts survive"
+        );
         assert!(
             !s.iter().any(|[_, p, _]| *p == id(&d, "http://ex/looped")),
             "cyclic backward goal proves nothing"
@@ -3341,9 +3594,27 @@ mod tests {
             { ?x :before ?y . ?y :before ?z } => { ?x :before ?z } .
         "#;
         let (d, s) = closure(src);
-        assert!(has(&d, &s, "http://ex/a", "http://ex/before", "http://ex/c"));
-        assert!(has(&d, &s, "http://ex/a", "http://ex/before", "http://ex/d"));
-        assert!(has(&d, &s, "http://ex/b", "http://ex/before", "http://ex/d"));
+        assert!(has(
+            &d,
+            &s,
+            "http://ex/a",
+            "http://ex/before",
+            "http://ex/c"
+        ));
+        assert!(has(
+            &d,
+            &s,
+            "http://ex/a",
+            "http://ex/before",
+            "http://ex/d"
+        ));
+        assert!(has(
+            &d,
+            &s,
+            "http://ex/b",
+            "http://ex/before",
+            "http://ex/d"
+        ));
     }
 
     #[test]
@@ -3360,8 +3631,18 @@ mod tests {
         let int = "http://www.w3.org/2001/XMLSchema#integer";
         let area_id = d.intern_lit("20", int, None); // 4*5
         let half_id = d.intern_lit("9", int, None); // 4+5
-        assert!(s.contains(&[id(&d, "http://ex/rect"), id(&d, "http://ex/area"), area_id]), "math:product 4*5=20");
-        assert!(s.contains(&[id(&d, "http://ex/rect"), id(&d, "http://ex/perimeterHalf"), half_id]), "math:sum 4+5=9");
+        assert!(
+            s.contains(&[id(&d, "http://ex/rect"), id(&d, "http://ex/area"), area_id]),
+            "math:product 4*5=20"
+        );
+        assert!(
+            s.contains(&[
+                id(&d, "http://ex/rect"),
+                id(&d, "http://ex/perimeterHalf"),
+                half_id
+            ]),
+            "math:sum 4+5=9"
+        );
     }
 
     #[test]
@@ -3375,7 +3656,10 @@ mod tests {
         "#;
         let (mut d, s) = closure(src);
         let five = d.intern_lit("5", "http://www.w3.org/2001/XMLSchema#integer", None);
-        assert!(s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/wordLen"), five]), "string:length(hello)=5");
+        assert!(
+            s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/wordLen"), five]),
+            "string:length(hello)=5"
+        );
     }
 
     #[test]
@@ -3387,8 +3671,20 @@ mod tests {
             { ?x :code ?c . ?c string:matches "^[A-Z]+-[0-9]+$" } => { ?x a :Valid } .
         "#;
         let (d, s) = closure(src);
-        assert!(has(&d, &s, "http://ex/a", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Valid"));
-        assert!(!has(&d, &s, "http://ex/b", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Valid"));
+        assert!(has(
+            &d,
+            &s,
+            "http://ex/a",
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+            "http://ex/Valid"
+        ));
+        assert!(!has(
+            &d,
+            &s,
+            "http://ex/b",
+            "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+            "http://ex/Valid"
+        ));
     }
 
     #[test]
@@ -3401,7 +3697,10 @@ mod tests {
         "#;
         let (mut d, s) = closure(src);
         let expected = d.intern_lit("a_b_c_", "http://www.w3.org/2001/XMLSchema#string", None);
-        assert!(s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/clean"), expected]), "replace [0-9]->_ = a_b_c_");
+        assert!(
+            s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/clean"), expected]),
+            "replace [0-9]->_ = a_b_c_"
+        );
     }
 
     #[test]
@@ -3414,8 +3713,22 @@ mod tests {
         "#;
         let (mut d, s) = closure(src);
         let int = "http://www.w3.org/2001/XMLSchema#integer";
-        assert!(s.contains(&[id(&d, "http://ex/x"), id(&d, "http://ex/rem"), d.intern_lit("2", int, None)]), "17 mod 5 = 2");
-        assert!(s.contains(&[id(&d, "http://ex/x"), id(&d, "http://ex/quot"), d.intern_lit("3", int, None)]), "17 div 5 = 3");
+        assert!(
+            s.contains(&[
+                id(&d, "http://ex/x"),
+                id(&d, "http://ex/rem"),
+                d.intern_lit("2", int, None)
+            ]),
+            "17 mod 5 = 2"
+        );
+        assert!(
+            s.contains(&[
+                id(&d, "http://ex/x"),
+                id(&d, "http://ex/quot"),
+                d.intern_lit("3", int, None)
+            ]),
+            "17 div 5 = 3"
+        );
     }
 
     #[test]
@@ -3442,7 +3755,16 @@ mod tests {
             { ?x!:mother :knows ?f } => { ?x :motherKnows ?f } .
         "#;
         let (d, s) = closure(src);
-        assert!(has(&d, &s, "http://ex/alice", "http://ex/motherKnows", "http://ex/bob"), "forward path !");
+        assert!(
+            has(
+                &d,
+                &s,
+                "http://ex/alice",
+                "http://ex/motherKnows",
+                "http://ex/bob"
+            ),
+            "forward path !"
+        );
     }
 
     #[test]
@@ -3459,7 +3781,8 @@ mod tests {
         // ?m=mary: mary^:mother = alice (alice :mother mary); alice :name "Alice"
         // ⊢ mary :hasChildNamed "Alice".
         assert!(
-            s.iter().any(|[a, p, _]| *a == id(&d, "http://ex/mary") && *p == id(&d, "http://ex/hasChildNamed")),
+            s.iter().any(|[a, p, _]| *a == id(&d, "http://ex/mary")
+                && *p == id(&d, "http://ex/hasChildNamed")),
             "backward path ^ derived mary :hasChildNamed"
         );
     }
@@ -3479,8 +3802,14 @@ mod tests {
         "#;
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-        assert!(has(&d, &s, "http://ex/alice", ty, "http://ex/NoEmail"), "alice has no email → NoEmail");
-        assert!(!has(&d, &s, "http://ex/bob", ty, "http://ex/NoEmail"), "bob has email → excluded");
+        assert!(
+            has(&d, &s, "http://ex/alice", ty, "http://ex/NoEmail"),
+            "alice has no email → NoEmail"
+        );
+        assert!(
+            !has(&d, &s, "http://ex/bob", ty, "http://ex/NoEmail"),
+            "bob has email → excluded"
+        );
     }
 
     #[test]
@@ -3496,8 +3825,14 @@ mod tests {
         "#;
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-        assert!(!has(&d, &s, "http://ex/s", ty, "http://ex/Leak"), "empty formula includes nothing");
-        assert!(has(&d, &s, "http://ex/s", ty, "http://ex/Clean"), "empty formula notIncludes everything");
+        assert!(
+            !has(&d, &s, "http://ex/s", ty, "http://ex/Leak"),
+            "empty formula includes nothing"
+        );
+        assert!(
+            has(&d, &s, "http://ex/s", ty, "http://ex/Clean"),
+            "empty formula notIncludes everything"
+        );
     }
 
     #[test]
@@ -3515,10 +3850,22 @@ mod tests {
         "#;
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-        assert!(has(&d, &s, "http://ex/a2", ty, "http://ex/S"), "existential pattern matches ground scope");
-        assert!(has(&d, &s, "http://ex/c2", ty, "http://ex/S"), "existential pattern matches universal scope");
-        assert!(!has(&d, &s, "http://ex/b1", ty, "http://ex/S"), "ground pattern vs existential scope: no");
-        assert!(!has(&d, &s, "http://ex/c1", ty, "http://ex/S"), "ground pattern vs universal scope: no (cwm)");
+        assert!(
+            has(&d, &s, "http://ex/a2", ty, "http://ex/S"),
+            "existential pattern matches ground scope"
+        );
+        assert!(
+            has(&d, &s, "http://ex/c2", ty, "http://ex/S"),
+            "existential pattern matches universal scope"
+        );
+        assert!(
+            !has(&d, &s, "http://ex/b1", ty, "http://ex/S"),
+            "ground pattern vs existential scope: no"
+        );
+        assert!(
+            !has(&d, &s, "http://ex/c1", ty, "http://ex/S"),
+            "ground pattern vs universal scope: no (cwm)"
+        );
     }
 
     #[test]
@@ -3532,7 +3879,10 @@ mod tests {
         "#;
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-        assert!(has(&d, &s, "http://ex/q", ty, "http://ex/S"), "supports = containment in the scope's closure");
+        assert!(
+            has(&d, &s, "http://ex/q", ty, "http://ex/S"),
+            "supports = containment in the scope's closure"
+        );
     }
 
     #[test]
@@ -3546,8 +3896,14 @@ mod tests {
         "#;
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/Matched"), "string:contains match");
-        assert!(!has(&d, &s, "http://ex/b", ty, "http://ex/Matched"), "non-match excluded");
+        assert!(
+            has(&d, &s, "http://ex/a", ty, "http://ex/Matched"),
+            "string:contains match"
+        );
+        assert!(
+            !has(&d, &s, "http://ex/b", ty, "http://ex/Matched"),
+            "non-match excluded"
+        );
     }
 
     #[test]
@@ -3561,7 +3917,10 @@ mod tests {
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
         for m in ["a", "b", "c"] {
-            assert!(has(&d, &s, &format!("http://ex/{m}"), ty, "http://ex/Listed"), "list:member {m}");
+            assert!(
+                has(&d, &s, &format!("http://ex/{m}"), ty, "http://ex/Listed"),
+                "list:member {m}"
+            );
         }
     }
 
@@ -3579,12 +3938,29 @@ mod tests {
         let (mut d, s) = closure(src);
         let int = "http://www.w3.org/2001/XMLSchema#integer";
         let lit = |d: &mut Dict, n: &str| d.intern_lit(n, int, None);
-        let (y, mo, dd, a) = (lit(&mut d, "2024"), lit(&mut d, "3"), lit(&mut d, "15"), lit(&mut d, "5"));
+        let (y, mo, dd, a) = (
+            lit(&mut d, "2024"),
+            lit(&mut d, "3"),
+            lit(&mut d, "15"),
+            lit(&mut d, "5"),
+        );
         let e = id(&d, "http://ex/e");
-        assert!(s.contains(&[e, id(&d, "http://ex/y"), y]), "time:year = 2024");
-        assert!(s.contains(&[e, id(&d, "http://ex/mo"), mo]), "time:month = 3");
-        assert!(s.contains(&[e, id(&d, "http://ex/dd"), dd]), "time:day = 15");
-        assert!(s.contains(&[e, id(&d, "http://ex/absTemp"), a]), "math:absoluteValue(-5) = 5");
+        assert!(
+            s.contains(&[e, id(&d, "http://ex/y"), y]),
+            "time:year = 2024"
+        );
+        assert!(
+            s.contains(&[e, id(&d, "http://ex/mo"), mo]),
+            "time:month = 3"
+        );
+        assert!(
+            s.contains(&[e, id(&d, "http://ex/dd"), dd]),
+            "time:day = 15"
+        );
+        assert!(
+            s.contains(&[e, id(&d, "http://ex/absTemp"), a]),
+            "math:absoluteValue(-5) = 5"
+        );
     }
 
     #[test]
@@ -3600,8 +3976,14 @@ mod tests {
         let int = "http://www.w3.org/2001/XMLSchema#integer";
         let seven = d.intern_lit("7", int, None);
         let three = d.intern_lit("3", int, None);
-        assert!(s.contains(&[id(&d, "http://ex/d"), id(&d, "http://ex/maxVal"), seven]), "math:max = 7");
-        assert!(s.contains(&[id(&d, "http://ex/d"), id(&d, "http://ex/count"), three]), "list:length = 3");
+        assert!(
+            s.contains(&[id(&d, "http://ex/d"), id(&d, "http://ex/maxVal"), seven]),
+            "math:max = 7"
+        );
+        assert!(
+            s.contains(&[id(&d, "http://ex/d"), id(&d, "http://ex/count"), three]),
+            "list:length = 3"
+        );
     }
 
     #[test]
@@ -3617,7 +3999,10 @@ mod tests {
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
         for m in ["o1", "o2", "extra"] {
-            assert!(has(&d, &s, &format!("http://ex/{m}"), ty, "http://ex/Seen"), "list:member {m}");
+            assert!(
+                has(&d, &s, &format!("http://ex/{m}"), ty, "http://ex/Seen"),
+                "list:member {m}"
+            );
         }
     }
 
@@ -3632,9 +4017,18 @@ mod tests {
         "#;
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/InList"), "list:in a");
-        assert!(has(&d, &s, "http://ex/b", ty, "http://ex/InList"), "list:in b");
-        assert!(!has(&d, &s, "http://ex/o", ty, "http://ex/InList"), "non-member excluded");
+        assert!(
+            has(&d, &s, "http://ex/a", ty, "http://ex/InList"),
+            "list:in a"
+        );
+        assert!(
+            has(&d, &s, "http://ex/b", ty, "http://ex/InList"),
+            "list:in b"
+        );
+        assert!(
+            !has(&d, &s, "http://ex/o", ty, "http://ex/InList"),
+            "non-member excluded"
+        );
     }
 
     #[test]
@@ -3650,8 +4044,14 @@ mod tests {
         let xs = "http://www.w3.org/2001/XMLSchema#string";
         let lo = d.intern_lit("hello wörld", xs, None);
         let up = d.intern_lit("HELLO WÖRLD", xs, None);
-        assert!(s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/lower"), lo]), "string:lowerCase");
-        assert!(s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/upper"), up]), "string:upperCase");
+        assert!(
+            s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/lower"), lo]),
+            "string:lowerCase"
+        );
+        assert!(
+            s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/upper"), up]),
+            "string:upperCase"
+        );
     }
 
     #[test]
@@ -3674,14 +4074,36 @@ mod tests {
         let ea = d.intern_lit("AZaz09-._~", xs, None);
         let eb = d.intern_lit("https%3A%2F%2Falice.ex%2Fcard%23me%26client%3Dx", xs, None);
         let ec = d.intern_lit("caf%C3%A9%20d%C3%A9j%C3%A0", xs, None);
-        assert!(s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/enc"), ea]), "unreserved untouched");
-        assert!(s.contains(&[id(&d, "http://ex/b"), id(&d, "http://ex/enc"), eb]), "delimiters encoded");
-        assert!(s.contains(&[id(&d, "http://ex/c"), id(&d, "http://ex/enc"), ec]), "UTF-8 bytes, uppercase hex");
-        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/Unchanged"), "ground object: filter passes");
-        assert!(!has(&d, &s, "http://ex/b", ty, "http://ex/Unchanged"), "ground object: filter rejects");
+        assert!(
+            s.contains(&[id(&d, "http://ex/a"), id(&d, "http://ex/enc"), ea]),
+            "unreserved untouched"
+        );
+        assert!(
+            s.contains(&[id(&d, "http://ex/b"), id(&d, "http://ex/enc"), eb]),
+            "delimiters encoded"
+        );
+        assert!(
+            s.contains(&[id(&d, "http://ex/c"), id(&d, "http://ex/enc"), ec]),
+            "UTF-8 bytes, uppercase hex"
+        );
+        assert!(
+            has(&d, &s, "http://ex/a", ty, "http://ex/Unchanged"),
+            "ground object: filter passes"
+        );
+        assert!(
+            !has(&d, &s, "http://ex/b", ty, "http://ex/Unchanged"),
+            "ground object: filter rejects"
+        );
         // the helper directly (shared with sparq-solid's session-side pair minting)
-        assert_eq!(super::encode_for_uri(" %"), "%20%25", "space and percent themselves");
-        assert_eq!(super::encode_for_uri("नमस्ते"), "%E0%A4%A8%E0%A4%AE%E0%A4%B8%E0%A5%8D%E0%A4%A4%E0%A5%87");
+        assert_eq!(
+            super::encode_for_uri(" %"),
+            "%20%25",
+            "space and percent themselves"
+        );
+        assert_eq!(
+            super::encode_for_uri("नमस्ते"),
+            "%E0%A4%A8%E0%A4%AE%E0%A4%B8%E0%A5%8D%E0%A4%A4%E0%A5%87"
+        );
     }
 
     #[test]
@@ -3695,8 +4117,14 @@ mod tests {
         "#;
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/NonNumeric"), "abc does not match digits");
-        assert!(!has(&d, &s, "http://ex/b", ty, "http://ex/NonNumeric"), "123 matches → excluded");
+        assert!(
+            has(&d, &s, "http://ex/a", ty, "http://ex/NonNumeric"),
+            "abc does not match digits"
+        );
+        assert!(
+            !has(&d, &s, "http://ex/b", ty, "http://ex/NonNumeric"),
+            "123 matches → excluded"
+        );
     }
 
     #[test]
@@ -3712,10 +4140,19 @@ mod tests {
         "#;
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/FoundInFormula"), "?s bound inside the formula");
-        assert!(!has(&d, &s, "http://ex/c", ty, "http://ex/FoundInFormula"), ":c :p :d does not match ?s :p :b");
+        assert!(
+            has(&d, &s, "http://ex/a", ty, "http://ex/FoundInFormula"),
+            "?s bound inside the formula"
+        );
+        assert!(
+            !has(&d, &s, "http://ex/c", ty, "http://ex/FoundInFormula"),
+            ":c :p :d does not match ?s :p :b"
+        );
         // :x :q :y IS in the store but NOT in the subject formula — must not leak through.
-        assert!(!has(&d, &s, "http://ex/s", ty, "http://ex/StoreLeak"), "formula scope must not see the store");
+        assert!(
+            !has(&d, &s, "http://ex/s", ty, "http://ex/StoreLeak"),
+            "formula scope must not see the store"
+        );
     }
 
     #[test]
@@ -3729,8 +4166,14 @@ mod tests {
             { { :a :p :b } log:notIncludes { :a :p :b } } => { :s :bad :yes } .
         "#;
         let (d, s) = closure(src);
-        assert!(has(&d, &s, "http://ex/s", "http://ex/notInc", "http://ex/yes"), "absent triple → notIncludes holds");
-        assert!(!has(&d, &s, "http://ex/s", "http://ex/bad", "http://ex/yes"), "present triple → notIncludes fails");
+        assert!(
+            has(&d, &s, "http://ex/s", "http://ex/notInc", "http://ex/yes"),
+            "absent triple → notIncludes holds"
+        );
+        assert!(
+            !has(&d, &s, "http://ex/s", "http://ex/bad", "http://ex/yes"),
+            "present triple → notIncludes fails"
+        );
     }
 
     #[test]
@@ -3755,10 +4198,19 @@ mod tests {
         let one = d.intern_lit("1.0e0", dbl, None);
         let t = id(&d, "http://ex/t");
         for (p, v) in [
-            ("sin", zero), ("cos", one), ("tan", zero), ("sinh", zero), ("cosh", one),
-            ("tanh", zero), ("acos1", zero), ("sinHalfPi", one),
+            ("sin", zero),
+            ("cos", one),
+            ("tan", zero),
+            ("sinh", zero),
+            ("cosh", one),
+            ("tanh", zero),
+            ("acos1", zero),
+            ("sinHalfPi", one),
         ] {
-            assert!(s.contains(&[t, id(&d, &format!("http://ex/{p}")), v]), "math:{p} exact value");
+            assert!(
+                s.contains(&[t, id(&d, &format!("http://ex/{p}")), v]),
+                "math:{p} exact value"
+            );
         }
     }
 
@@ -3772,7 +4224,9 @@ mod tests {
             { 2 math:asin ?x } => { :s :bad ?x } .
         "#;
         let (d, s) = closure(src);
-        assert!(!s.iter().any(|[a, p, _]| *a == id(&d, "http://ex/s") && *p == id(&d, "http://ex/bad")));
+        assert!(!s
+            .iter()
+            .any(|[a, p, _]| *a == id(&d, "http://ex/s") && *p == id(&d, "http://ex/bad")));
     }
 
     #[test]
@@ -3790,8 +4244,14 @@ mod tests {
         let deg = d.intern_lit("1.8e2", dbl, None);
         let rad = d.intern_lit("3.141592653589793e0", dbl, None);
         let a = id(&d, "http://ex/a");
-        assert!(s.contains(&[a, id(&d, "http://ex/inDegrees"), deg]), "π rad = 180°");
-        assert!(s.contains(&[a, id(&d, "http://ex/inRadians"), rad]), "180° = π rad");
+        assert!(
+            s.contains(&[a, id(&d, "http://ex/inDegrees"), deg]),
+            "π rad = 180°"
+        );
+        assert!(
+            s.contains(&[a, id(&d, "http://ex/inRadians"), rad]),
+            "180° = π rad"
+        );
     }
 
     #[test]
@@ -3811,10 +4271,23 @@ mod tests {
         let three = d.intern_lit("3.0e0", dbl, None);
         let ten = d.intern_lit("1.0e1", dbl, None);
         let zero = d.intern_lit("0.0e0", dbl, None);
-        assert!(s.contains(&[st, id(&d, "http://ex/log8"), three]), "log_2 8 = 3");
-        assert!(s.contains(&[st, id(&d, "http://ex/log1024"), ten]), "log_2 1024 = 10");
-        assert!(s.contains(&[st, id(&d, "http://ex/atan"), zero]), "atan2(0,1) = 0");
-        assert!(!s.iter().any(|[a, p, _]| *a == st && *p == id(&d, "http://ex/badLog")), "base 1 fails");
+        assert!(
+            s.contains(&[st, id(&d, "http://ex/log8"), three]),
+            "log_2 8 = 3"
+        );
+        assert!(
+            s.contains(&[st, id(&d, "http://ex/log1024"), ten]),
+            "log_2 1024 = 10"
+        );
+        assert!(
+            s.contains(&[st, id(&d, "http://ex/atan"), zero]),
+            "atan2(0,1) = 0"
+        );
+        assert!(
+            !s.iter()
+                .any(|[a, p, _]| *a == st && *p == id(&d, "http://ex/badLog")),
+            "base 1 fails"
+        );
     }
 
     #[test]
@@ -3828,10 +4301,21 @@ mod tests {
             { ("%x" 255) string:format ?bad } => { :s :hex ?bad } .
         "#;
         let (mut d, s) = closure(src);
-        let msg = d.intern_lit("alice scored 95%", "http://www.w3.org/2001/XMLSchema#string", None);
+        let msg = d.intern_lit(
+            "alice scored 95%",
+            "http://www.w3.org/2001/XMLSchema#string",
+            None,
+        );
         let st = id(&d, "http://ex/s");
-        assert!(s.contains(&[st, id(&d, "http://ex/msg"), msg]), "%s/%d/%% formatting");
-        assert!(!s.iter().any(|[a, p, _]| *a == st && *p == id(&d, "http://ex/hex")), "%x unsupported → fails");
+        assert!(
+            s.contains(&[st, id(&d, "http://ex/msg"), msg]),
+            "%s/%d/%% formatting"
+        );
+        assert!(
+            !s.iter()
+                .any(|[a, p, _]| *a == st && *p == id(&d, "http://ex/hex")),
+            "%x unsupported → fails"
+        );
     }
 
     #[test]
@@ -3845,8 +4329,15 @@ mod tests {
             => { :s :host ?h } .
         "#;
         let (mut d, s) = closure(src);
-        let host = d.intern_lit("example.org", "http://www.w3.org/2001/XMLSchema#string", None);
-        assert!(s.contains(&[id(&d, "http://ex/s"), id(&d, "http://ex/host"), host]), "capture group 1");
+        let host = d.intern_lit(
+            "example.org",
+            "http://www.w3.org/2001/XMLSchema#string",
+            None,
+        );
+        assert!(
+            s.contains(&[id(&d, "http://ex/s"), id(&d, "http://ex/host"), host]),
+            "capture group 1"
+        );
     }
 
     #[test]
@@ -3863,9 +4354,15 @@ mod tests {
             => { ?s a :FoundViaConjunction } .
         "#;
         let (d, s) = closure(src);
-        assert!(has(&d, &s, "http://ex/s", "http://ex/merged", "http://ex/exact"), "exact merge (logc2)");
+        assert!(
+            has(&d, &s, "http://ex/s", "http://ex/merged", "http://ex/exact"),
+            "exact merge (logc2)"
+        );
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-        assert!(has(&d, &s, "http://ex/c", ty, "http://ex/FoundViaConjunction"), "merged formula as scope");
+        assert!(
+            has(&d, &s, "http://ex/c", ty, "http://ex/FoundViaConjunction"),
+            "merged formula as scope"
+        );
     }
 
     #[test]
@@ -3879,10 +4376,20 @@ mod tests {
             { ?who log:uri "http://ex/bob" } => { ?who a :Named } .
         "#;
         let (mut d, s) = closure(src);
-        let u = d.intern_lit("http://ex/alice", "http://www.w3.org/2001/XMLSchema#string", None);
-        assert!(s.contains(&[id(&d, "http://ex/r"), id(&d, "http://ex/uriStr"), u]), "IRI → string");
+        let u = d.intern_lit(
+            "http://ex/alice",
+            "http://www.w3.org/2001/XMLSchema#string",
+            None,
+        );
+        assert!(
+            s.contains(&[id(&d, "http://ex/r"), id(&d, "http://ex/uriStr"), u]),
+            "IRI → string"
+        );
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-        assert!(has(&d, &s, "http://ex/bob", ty, "http://ex/Named"), "string → IRI");
+        assert!(
+            has(&d, &s, "http://ex/bob", ty, "http://ex/Named"),
+            "string → IRI"
+        );
     }
 
     #[test]
@@ -3899,12 +4406,26 @@ mod tests {
         "#;
         let (mut d, s) = closure(src);
         let y = d.intern_lit("2024", "http://www.w3.org/2001/XMLSchema#integer", None);
-        assert!(s.contains(&[id(&d, "http://ex/d"), id(&d, "http://ex/y"), y]), "forward dtlit feeds time:year");
-        let lex = d.intern_lit("2024-03-15T10:30:45", "http://www.w3.org/2001/XMLSchema#string", None);
-        let e = id(&d, "http://ex/e");
-        assert!(s.contains(&[e, id(&d, "http://ex/lexOf"), lex]), "reverse: lexical part");
         assert!(
-            s.contains(&[e, id(&d, "http://ex/dtOf"), id(&d, "http://www.w3.org/2001/XMLSchema#dateTime")]),
+            s.contains(&[id(&d, "http://ex/d"), id(&d, "http://ex/y"), y]),
+            "forward dtlit feeds time:year"
+        );
+        let lex = d.intern_lit(
+            "2024-03-15T10:30:45",
+            "http://www.w3.org/2001/XMLSchema#string",
+            None,
+        );
+        let e = id(&d, "http://ex/e");
+        assert!(
+            s.contains(&[e, id(&d, "http://ex/lexOf"), lex]),
+            "reverse: lexical part"
+        );
+        assert!(
+            s.contains(&[
+                e,
+                id(&d, "http://ex/dtOf"),
+                id(&d, "http://www.w3.org/2001/XMLSchema#dateTime")
+            ]),
             "reverse: datatype part"
         );
     }
@@ -3922,8 +4443,22 @@ mod tests {
         let (mut d, s) = closure(src);
         let int = "http://www.w3.org/2001/XMLSchema#integer";
         let st = id(&d, "http://ex/s");
-        assert!(s.contains(&[st, id(&d, "http://ex/listCount"), d.intern_lit("3", int, None)]), "list len 3");
-        assert!(s.contains(&[st, id(&d, "http://ex/graphCount"), d.intern_lit("2", int, None)]), "2 distinct");
+        assert!(
+            s.contains(&[
+                st,
+                id(&d, "http://ex/listCount"),
+                d.intern_lit("3", int, None)
+            ]),
+            "list len 3"
+        );
+        assert!(
+            s.contains(&[
+                st,
+                id(&d, "http://ex/graphCount"),
+                d.intern_lit("2", int, None)
+            ]),
+            "2 distinct"
+        );
     }
 
     #[test]
@@ -3937,8 +4472,14 @@ mod tests {
         "#;
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/Match"), "case-insensitive hit");
-        assert!(!has(&d, &s, "http://ex/b", ty, "http://ex/Match"), "non-match excluded");
+        assert!(
+            has(&d, &s, "http://ex/a", ty, "http://ex/Match"),
+            "case-insensitive hit"
+        );
+        assert!(
+            !has(&d, &s, "http://ex/b", ty, "http://ex/Match"),
+            "non-match excluded"
+        );
     }
 
     #[test]
@@ -3952,7 +4493,10 @@ mod tests {
         let (mut d, s) = closure(src);
         let i17 = d.intern_lit("17", "http://www.w3.org/2001/XMLSchema#integer", None);
         let ty = id(&d, "http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
-        assert!(s.contains(&[i17, ty, id(&d, "http://ex/RESULT")]), "list unification binds ?x=17");
+        assert!(
+            s.contains(&[i17, ty, id(&d, "http://ex/RESULT")]),
+            "list unification binds ?x=17"
+        );
     }
 
     #[test]
@@ -3967,10 +4511,22 @@ mod tests {
         "#;
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-        assert!(has(&d, &s, "http://ex/s", ty, "http://ex/AppendOk"), "append filter");
-        assert!(has(&d, &s, "http://ex/s", ty, "http://ex/EmptyOk"), "empty list append");
-        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/Member"), "constructed list is iterable");
-        assert!(has(&d, &s, "http://ex/b", ty, "http://ex/Member"), "constructed list is iterable");
+        assert!(
+            has(&d, &s, "http://ex/s", ty, "http://ex/AppendOk"),
+            "append filter"
+        );
+        assert!(
+            has(&d, &s, "http://ex/s", ty, "http://ex/EmptyOk"),
+            "empty list append"
+        );
+        assert!(
+            has(&d, &s, "http://ex/a", ty, "http://ex/Member"),
+            "constructed list is iterable"
+        );
+        assert!(
+            has(&d, &s, "http://ex/b", ty, "http://ex/Member"),
+            "constructed list is iterable"
+        );
     }
 
     #[test]
@@ -3986,8 +4542,14 @@ mod tests {
         "#;
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
-        assert!(has(&d, &s, "http://ex/b", ty, "http://ex/Second"), "list:iterate index/value");
-        assert!(has(&d, &s, "http://ex/q", ty, "http://ex/GreatThing"), "virtual rdf:first over list");
+        assert!(
+            has(&d, &s, "http://ex/b", ty, "http://ex/Second"),
+            "list:iterate index/value"
+        );
+        assert!(
+            has(&d, &s, "http://ex/q", ty, "http://ex/GreatThing"),
+            "virtual rdf:first over list"
+        );
     }
 
     #[test]
@@ -4000,8 +4562,26 @@ mod tests {
             { ?p :age ?a . ?a math:greaterThan 17 } => { ?p a :Adult } .
         "#;
         let (d, s) = closure(src);
-        assert!(has(&d, &s, "http://ex/alice", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Adult"), "alice is adult");
-        assert!(!has(&d, &s, "http://ex/bob", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Adult"), "bob is NOT adult");
+        assert!(
+            has(
+                &d,
+                &s,
+                "http://ex/alice",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+                "http://ex/Adult"
+            ),
+            "alice is adult"
+        );
+        assert!(
+            !has(
+                &d,
+                &s,
+                "http://ex/bob",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+                "http://ex/Adult"
+            ),
+            "bob is NOT adult"
+        );
     }
 
     // [OPUS-4.8] sq-fodw5 (sq-qcnn): correctness tests for the dark backward-chaining
@@ -4025,7 +4605,13 @@ mod tests {
         // The backward proof must have bound ?ks to the ( :kid1 :kid2 ) list and projected it,
         // so the forward query rule fires and asserts the marker.
         assert!(
-            has(&d, &s, "http://ex/marker", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Proven"),
+            has(
+                &d,
+                &s,
+                "http://ex/marker",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+                "http://ex/Proven"
+            ),
             "backward rule projects a list-valued binding onto the goal variable"
         );
     }
@@ -4065,7 +4651,13 @@ mod tests {
         "#;
         let (d, s) = closure(src);
         assert!(
-            has(&d, &s, "http://ex/pear", "http://www.w3.org/1999/02/22-rdf-syntax-ns#type", "http://ex/Found"),
+            has(
+                &d,
+                &s,
+                "http://ex/pear",
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+                "http://ex/Found"
+            ),
             "backward premise iterates a fact-store list to prove membership"
         );
     }
@@ -4090,9 +4682,18 @@ mod tests {
         let pinf = d.intern_lit("INF", dbl, None);
         let ninf = d.intern_lit("-INF", dbl, None);
         let nan = d.intern_lit("NaN", dbl, None);
-        assert!(s.contains(&[st, id(&d, "http://ex/posInf"), pinf]), "1.0/0.0 → INF (double)");
-        assert!(s.contains(&[st, id(&d, "http://ex/negInf"), ninf]), "-1.0/0.0 → -INF (double)");
-        assert!(s.contains(&[st, id(&d, "http://ex/nan"), nan]), "0.0/0.0 → NaN propagates (not premise failure)");
+        assert!(
+            s.contains(&[st, id(&d, "http://ex/posInf"), pinf]),
+            "1.0/0.0 → INF (double)"
+        );
+        assert!(
+            s.contains(&[st, id(&d, "http://ex/negInf"), ninf]),
+            "-1.0/0.0 → -INF (double)"
+        );
+        assert!(
+            s.contains(&[st, id(&d, "http://ex/nan"), nan]),
+            "0.0/0.0 → NaN propagates (not premise failure)"
+        );
     }
 
     #[test]
@@ -4130,7 +4731,8 @@ mod tests {
         "#;
         let (d, s) = closure(src);
         assert!(
-            !s.iter().any(|[a, p, _]| *a == id(&d, "http://ex/s") && *p == id(&d, "http://ex/bad")),
+            !s.iter()
+                .any(|[a, p, _]| *a == id(&d, "http://ex/s") && *p == id(&d, "http://ex/bad")),
             "acos 2 (finite NaN) fails the premise — no NaN literal emitted"
         );
     }
@@ -4155,8 +4757,14 @@ mod tests {
         let (d, s) = closure(src);
         let ty = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
         // head = first member :a ; rest's head = :b — virtual list walk inside containment.
-        assert!(has(&d, &s, "http://ex/a", ty, "http://ex/Head"), "virtual rdf:first = list head");
-        assert!(has(&d, &s, "http://ex/b", ty, "http://ex/Second"), "virtual rdf:rest then rdf:first = 2nd");
+        assert!(
+            has(&d, &s, "http://ex/a", ty, "http://ex/Head"),
+            "virtual rdf:first = list head"
+        );
+        assert!(
+            has(&d, &s, "http://ex/b", ty, "http://ex/Second"),
+            "virtual rdf:rest then rdf:first = 2nd"
+        );
     }
 
     #[test]
@@ -4205,16 +4813,37 @@ mod tests {
 
         // alice and bob each get a :hasParent edge to a node typed :Parent.
         let parent_of = |who: Id| -> Option<Id> {
-            triples.iter().find(|[s, p, _]| *s == who && *p == hp).map(|[_, _, o]| *o)
+            triples
+                .iter()
+                .find(|[s, p, _]| *s == who && *p == hp)
+                .map(|[_, _, o]| *o)
         };
-        let (ap, bp) = (parent_of(alice).expect("alice has a parent"), parent_of(bob).expect("bob has a parent"));
-        assert!(triples.contains(&[ap, ty, parent]), "alice's parent is typed :Parent");
-        assert!(triples.contains(&[bp, ty, parent]), "bob's parent is typed :Parent");
+        let (ap, bp) = (
+            parent_of(alice).expect("alice has a parent"),
+            parent_of(bob).expect("bob has a parent"),
+        );
+        assert!(
+            triples.contains(&[ap, ty, parent]),
+            "alice's parent is typed :Parent"
+        );
+        assert!(
+            triples.contains(&[bp, ty, parent]),
+            "bob's parent is typed :Parent"
+        );
         // The load-bearing existential invariant: the two firings mint DISTINCT blanks.
-        assert_ne!(ap, bp, "each rule firing mints a fresh existential, not a shared node");
+        assert_ne!(
+            ap, bp,
+            "each rule firing mints a fresh existential, not a shared node"
+        );
         // Exactly two :Parent existentials exist (no spurious extra / no collapse to one).
-        let n_parents = triples.iter().filter(|[_, p, o]| *p == ty && *o == parent).count();
-        assert_eq!(n_parents, 2, "one fresh :Parent per firing — two firings, two parents");
+        let n_parents = triples
+            .iter()
+            .filter(|[_, p, o]| *p == ty && *o == parent)
+            .count();
+        assert_eq!(
+            n_parents, 2,
+            "one fresh :Parent per firing — two firings, two parents"
+        );
     }
 
     // ---- [OPUS-4.8] sq-qcnn.16: coverage gap tests for uncovered builtin paths ----
@@ -4236,9 +4865,18 @@ mod tests {
         let (mut d, s) = closure(src);
         let int = "http://www.w3.org/2001/XMLSchema#integer";
         let e = id(&d, "http://ex/e");
-        assert!(s.contains(&[e, id(&d, "http://ex/h"),  d.intern_lit("10", int, None)]), "time:hours = 10");
-        assert!(s.contains(&[e, id(&d, "http://ex/mi"), d.intern_lit("30", int, None)]), "time:minutes = 30");
-        assert!(s.contains(&[e, id(&d, "http://ex/s"),  d.intern_lit("45", int, None)]), "time:seconds = 45");
+        assert!(
+            s.contains(&[e, id(&d, "http://ex/h"), d.intern_lit("10", int, None)]),
+            "time:hours = 10"
+        );
+        assert!(
+            s.contains(&[e, id(&d, "http://ex/mi"), d.intern_lit("30", int, None)]),
+            "time:minutes = 30"
+        );
+        assert!(
+            s.contains(&[e, id(&d, "http://ex/s"), d.intern_lit("45", int, None)]),
+            "time:seconds = 45"
+        );
     }
 
     /// `time:dayOfWeek` and `time:inSeconds` (forward epoch encoding) — exercise the
@@ -4257,10 +4895,14 @@ mod tests {
         let int = "http://www.w3.org/2001/XMLSchema#integer";
         let e = id(&d, "http://ex/e");
         // 1970-01-01 is epoch second 0, and a Thursday = day-of-week 4 (cwm indexing).
-        assert!(s.contains(&[e, id(&d, "http://ex/secs"), d.intern_lit("0", int, None)]),
-            "1970-01-01T00:00:00Z = epoch 0");
-        assert!(s.contains(&[e, id(&d, "http://ex/dow"), d.intern_lit("4", int, None)]),
-            "1970-01-01 is Thursday (dayOfWeek=4 in cwm indexing)");
+        assert!(
+            s.contains(&[e, id(&d, "http://ex/secs"), d.intern_lit("0", int, None)]),
+            "1970-01-01T00:00:00Z = epoch 0"
+        );
+        assert!(
+            s.contains(&[e, id(&d, "http://ex/dow"), d.intern_lit("4", int, None)]),
+            "1970-01-01 is Thursday (dayOfWeek=4 in cwm indexing)"
+        );
     }
 
     /// `time:inSeconds` **reverse** mode: an epoch integer → UTC dateTime string.
@@ -4276,8 +4918,10 @@ mod tests {
         let (mut d, s) = closure(src);
         let xsd_str = "http://www.w3.org/2001/XMLSchema#string";
         let epoch = d.intern_lit("1970-01-01T00:00:00Z", xsd_str, None);
-        assert!(s.contains(&[id(&d, "http://ex/r"), id(&d, "http://ex/dt"), epoch]),
-            "reverse time:inSeconds 0 = 1970-01-01T00:00:00Z");
+        assert!(
+            s.contains(&[id(&d, "http://ex/r"), id(&d, "http://ex/dt"), epoch]),
+            "reverse time:inSeconds 0 = 1970-01-01T00:00:00Z"
+        );
     }
 
     /// `time:timeZone` — extracts the explicit ±hh:mm timezone offset from a dateTime.
@@ -4294,8 +4938,10 @@ mod tests {
         let xsd_str = "http://www.w3.org/2001/XMLSchema#string";
         let tz = d.intern_lit("+05:30", xsd_str, None);
         let e = id(&d, "http://ex/e");
-        assert!(s.contains(&[e, id(&d, "http://ex/tz"), tz]),
-            "time:timeZone = +05:30 from explicit offset");
+        assert!(
+            s.contains(&[e, id(&d, "http://ex/tz"), tz]),
+            "time:timeZone = +05:30 from explicit offset"
+        );
     }
 
     /// `log:langlit` — constructs a language-tagged literal from (lexical-form, lang-tag).
@@ -4312,8 +4958,10 @@ mod tests {
         let lang_string = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
         let greeting = d.intern_lit("Hola", lang_string, Some("es"));
         let r = id(&d, "http://ex/r");
-        assert!(s.contains(&[r, id(&d, "http://ex/greeting"), greeting]),
-            "log:langlit ( \"Hola\" \"es\" ) = \"Hola\"@es");
+        assert!(
+            s.contains(&[r, id(&d, "http://ex/greeting"), greeting]),
+            "log:langlit ( \"Hola\" \"es\" ) = \"Hola\"@es"
+        );
     }
 
     /// `string:encodeForURI` (cwm variant, keeps #'()~ but encodes /) and
@@ -4333,12 +4981,16 @@ mod tests {
         let r = id(&d, "http://ex/r");
         // cwm keeps #'()~ but encodes /; so "hello/world#test" → "hello%2Fworld#test"
         let cwm_enc = d.intern_lit("hello%2Fworld#test", xsd_str, None);
-        assert!(s.contains(&[r, id(&d, "http://ex/cwm"), cwm_enc]),
-            "string:encodeForURI (cwm) encodes / but keeps #");
+        assert!(
+            s.contains(&[r, id(&d, "http://ex/cwm"), cwm_enc]),
+            "string:encodeForURI (cwm) encodes / but keeps #"
+        );
         // fragID keeps / but encodes #; so "hello/world#test" → "hello/world%23test"
         let frag_enc = d.intern_lit("hello/world%23test", xsd_str, None);
-        assert!(s.contains(&[r, id(&d, "http://ex/frag"), frag_enc]),
-            "string:encodeForFragID keeps / but encodes #");
+        assert!(
+            s.contains(&[r, id(&d, "http://ex/frag"), frag_enc]),
+            "string:encodeForFragID keeps / but encodes #"
+        );
     }
 }
 
@@ -4395,7 +5047,8 @@ mod substrate_seam_differential {
         };
         let ((ma, sa), (mb, sb)) = (part(a)?, part(b)?);
         let s = sa.max(sb);
-        let up = |m: i128, from: u32| -> Option<i128> { m.checked_mul(10i128.checked_pow(s - from)?) };
+        let up =
+            |m: i128, from: u32| -> Option<i128> { m.checked_mul(10i128.checked_pow(s - from)?) };
         Some((up(ma, sa)?, up(mb, sb)?, s))
     }
     /// The pre-adoption `eval_exact` for the DELEGATED arithmetic ops (verbatim i128 algorithm).
@@ -4405,7 +5058,13 @@ mod substrate_seam_differential {
             return None;
         }
         let any_dec = vals.iter().any(|v| matches!(v, OldNum::Dec(_, _)));
-        let renorm = |m: i128, s: u32| if any_dec { NumVal::Dec(m, s) } else { NumVal::Int(m) };
+        let renorm = |m: i128, s: u32| {
+            if any_dec {
+                NumVal::Dec(m, s)
+            } else {
+                NumVal::Int(m)
+            }
+        };
         let out = match f {
             Func::Sum => {
                 let mut acc = OldNum::Int(0);
@@ -4490,14 +5149,26 @@ mod substrate_seam_differential {
             (Func::Sum, vec![plain("2"), plain("3")]),
             (Func::Sum, vec![lit("0.1", XSD_DEC), lit("0.2", XSD_DEC)]),
             (Func::Sum, vec![plain("1"), lit("0.20", XSD_DEC)]),
-            (Func::Sum, vec![plain("1"), plain("2"), plain("3"), lit("0.5", XSD_DEC)]),
+            (
+                Func::Sum,
+                vec![plain("1"), plain("2"), plain("3"), lit("0.5", XSD_DEC)],
+            ),
             (Func::Difference, vec![lit("2.7", XSD_DEC), plain("2")]),
             (Func::Difference, vec![plain("10"), plain("3")]),
-            (Func::Product, vec![lit("2.7", XSD_DEC), lit("2.7", XSD_DEC)]),
+            (
+                Func::Product,
+                vec![lit("2.7", XSD_DEC), lit("2.7", XSD_DEC)],
+            ),
             (Func::Product, vec![plain("6"), plain("7")]),
-            (Func::Product, vec![lit("0.1", XSD_DEC), lit("0.2", XSD_DEC), plain("2")]),
+            (
+                Func::Product,
+                vec![lit("0.1", XSD_DEC), lit("0.2", XSD_DEC), plain("2")],
+            ),
             (Func::Max, vec![plain("3"), lit("2.9", XSD_DEC), plain("5")]),
-            (Func::Min, vec![lit("2.7", XSD_DEC), plain("2"), lit("2.71", XSD_DEC)]),
+            (
+                Func::Min,
+                vec![lit("2.7", XSD_DEC), plain("2"), lit("2.71", XSD_DEC)],
+            ),
             (Func::Negation, vec![lit("3.50", XSD_DEC)]),
             (Func::AbsoluteValue, vec![lit("-3.50", XSD_DEC)]),
         ];
@@ -4547,7 +5218,10 @@ mod substrate_seam_differential {
         let big = 3_037_000_500i128; // ~sqrt(i128::MAX)/... well within i128 when squared? no — pick safe
         let sq = big.checked_mul(big).unwrap();
         assert_eq!(
-            eval_exact(Func::Product, &[plain(&big.to_string()), plain(&big.to_string())]),
+            eval_exact(
+                Func::Product,
+                &[plain(&big.to_string()), plain(&big.to_string())]
+            ),
             Some(lit(&sq.to_string(), XSD_INT))
         );
         // Difference crossing the i64 boundary.
@@ -4558,7 +5232,10 @@ mod substrate_seam_differential {
         );
         // All three delegated ops match the old oracle on the >i64 matrix.
         assert_diff(Func::Sum, &[plain(&a.to_string()), plain(&b.to_string())]);
-        assert_diff(Func::Product, &[plain(&big.to_string()), plain(&big.to_string())]);
+        assert_diff(
+            Func::Product,
+            &[plain(&big.to_string()), plain(&big.to_string())],
+        );
         assert_diff(Func::Difference, &[plain(&hi.to_string()), plain("500")]);
     }
 
@@ -4568,12 +5245,19 @@ mod substrate_seam_differential {
         // identically in both the substrate-backed and old cores.
         for special in ["INF", "-INF", "NaN"] {
             let args = [lit(special, XSD_DBL), plain("2")];
-            assert_eq!(eval_exact(Func::Sum, &args), None, "{} has no exact tier", special);
+            assert_eq!(
+                eval_exact(Func::Sum, &args),
+                None,
+                "{} has no exact tier",
+                special
+            );
             assert_eq!(old_eval_exact(Func::Sum, &args), None);
         }
         // numval classifies the specials as F64 (the lexical-shape coercion edge).
         assert!(matches!(numval(&lit("INF", XSD_DBL)), Some(NumVal::F64(f)) if f == f64::INFINITY));
-        assert!(matches!(numval(&lit("-INF", XSD_DBL)), Some(NumVal::F64(f)) if f == f64::NEG_INFINITY));
+        assert!(
+            matches!(numval(&lit("-INF", XSD_DBL)), Some(NumVal::F64(f)) if f == f64::NEG_INFINITY)
+        );
         assert!(matches!(numval(&lit("NaN", XSD_DBL)), Some(NumVal::F64(f)) if f.is_nan()));
     }
 
@@ -4584,28 +5268,61 @@ mod substrate_seam_differential {
         // so the refactor cannot have perturbed them.
         // integer / integer exact → xsd:integer (NOT a "N.0" decimal — the seam declines
         // substrate Dec::checked_div here, which would always yield a decimal).
-        assert_eq!(eval_exact(Func::Quotient, &[plain("6"), plain("2")]), Some(lit("3", XSD_INT)));
+        assert_eq!(
+            eval_exact(Func::Quotient, &[plain("6"), plain("2")]),
+            Some(lit("3", XSD_INT))
+        );
         // exact terminating quotient → decimal.
-        assert_eq!(eval_exact(Func::Quotient, &[plain("1"), plain("4")]), Some(lit("0.25", XSD_DEC)));
+        assert_eq!(
+            eval_exact(Func::Quotient, &[plain("1"), plain("4")]),
+            Some(lit("0.25", XSD_DEC))
+        );
         // non-terminating → None (f64 fallback), NOT a rounded decimal.
         assert_eq!(eval_exact(Func::Quotient, &[plain("1"), plain("3")]), None);
         // remainder: divisor-sign (Python %): -2 mod 4 = 2, 2 mod -4 = -2.
-        assert_eq!(eval_exact(Func::Remainder, &[plain("-2"), plain("4")]), Some(lit("2", XSD_INT)));
-        assert_eq!(eval_exact(Func::Remainder, &[plain("2"), plain("-4")]), Some(lit("-2", XSD_INT)));
+        assert_eq!(
+            eval_exact(Func::Remainder, &[plain("-2"), plain("4")]),
+            Some(lit("2", XSD_INT))
+        );
+        assert_eq!(
+            eval_exact(Func::Remainder, &[plain("2"), plain("-4")]),
+            Some(lit("-2", XSD_INT))
+        );
         // integerQuotient: floor division.
-        assert_eq!(eval_exact(Func::IntegerQuotient, &[plain("-7"), plain("2")]), Some(lit("-4", XSD_INT)));
+        assert_eq!(
+            eval_exact(Func::IntegerQuotient, &[plain("-7"), plain("2")]),
+            Some(lit("-4", XSD_INT))
+        );
         // floor/ceiling collapse a decimal to an xsd:integer; rounded keeps the "N.0" decimal.
-        assert_eq!(eval_exact(Func::Floor, &[lit("2.7", XSD_DEC)]), Some(lit("2", XSD_INT)));
-        assert_eq!(eval_exact(Func::Ceiling, &[lit("2.1", XSD_DEC)]), Some(lit("3", XSD_INT)));
-        assert_eq!(eval_exact(Func::Rounded, &[lit("2.5", XSD_DEC)]), Some(lit("3.0", XSD_DEC)));
+        assert_eq!(
+            eval_exact(Func::Floor, &[lit("2.7", XSD_DEC)]),
+            Some(lit("2", XSD_INT))
+        );
+        assert_eq!(
+            eval_exact(Func::Ceiling, &[lit("2.1", XSD_DEC)]),
+            Some(lit("3", XSD_INT))
+        );
+        assert_eq!(
+            eval_exact(Func::Rounded, &[lit("2.5", XSD_DEC)]),
+            Some(lit("3.0", XSD_DEC))
+        );
     }
 
     #[test]
     fn diff_negation_abs_tier_preserving() {
         // Negation / abs preserve the tier and scale (Dec stays Dec with its scale).
-        assert_eq!(eval_exact(Func::Negation, &[plain("5")]), Some(lit("-5", XSD_INT)));
-        assert_eq!(eval_exact(Func::Negation, &[lit("3.50", XSD_DEC)]), Some(lit("-3.5", XSD_DEC)));
-        assert_eq!(eval_exact(Func::AbsoluteValue, &[lit("-3.50", XSD_DEC)]), Some(lit("3.5", XSD_DEC)));
+        assert_eq!(
+            eval_exact(Func::Negation, &[plain("5")]),
+            Some(lit("-5", XSD_INT))
+        );
+        assert_eq!(
+            eval_exact(Func::Negation, &[lit("3.50", XSD_DEC)]),
+            Some(lit("-3.5", XSD_DEC))
+        );
+        assert_eq!(
+            eval_exact(Func::AbsoluteValue, &[lit("-3.50", XSD_DEC)]),
+            Some(lit("3.5", XSD_DEC))
+        );
         // A > i64 integer negates exactly (i128 checked_neg on the substrate Dec carrier).
         let big = (i64::MAX as i128) + 7;
         assert_eq!(

@@ -372,12 +372,7 @@ pub struct AuditPending {
 impl AuditPending {
     /// Begins a record. `sparql` is the query/update body to fingerprint (`None` for a GSP
     /// read — there is no body to fingerprint).
-    pub fn begin(
-        action: Action,
-        actor: Actor,
-        resource: Resource,
-        sparql: Option<&str>,
-    ) -> Self {
+    pub fn begin(action: Action, actor: Actor, resource: Resource, sparql: Option<&str>) -> Self {
         Self {
             started: Instant::now(),
             action,
@@ -466,8 +461,14 @@ mod tests {
     #[test]
     fn fingerprint_matches_audit_construction_and_trims() {
         // Same FNV-1a construction as crate::audit (basis offset 0xcbf29ce484222325).
-        assert_eq!(fingerprint("SELECT * WHERE {?s ?p ?o}"), fingerprint("  SELECT * WHERE {?s ?p ?o}\n"));
-        assert_ne!(fingerprint("SELECT * WHERE {?s ?p ?o}"), fingerprint("ASK {?s ?p ?o}"));
+        assert_eq!(
+            fingerprint("SELECT * WHERE {?s ?p ?o}"),
+            fingerprint("  SELECT * WHERE {?s ?p ?o}\n")
+        );
+        assert_ne!(
+            fingerprint("SELECT * WHERE {?s ?p ?o}"),
+            fingerprint("ASK {?s ?p ?o}")
+        );
         let fp = fingerprint("anything");
         assert_eq!(fp.len(), 16);
         assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
@@ -479,7 +480,10 @@ mod tests {
         assert!(matches!(a, Actor::TokenFingerprint(_)));
         let field = a.as_field();
         assert!(field.starts_with("token:"));
-        assert!(!field.contains("super-secret"), "raw token must never appear");
+        assert!(
+            !field.contains("super-secret"),
+            "raw token must never appear"
+        );
         assert_eq!(Actor::from_token(None).as_field(), "anonymous");
         assert_eq!(Actor::from_token(Some("")).as_field(), "anonymous");
         assert_ne!(
@@ -544,7 +548,10 @@ mod tests {
         assert_eq!(v["policy_basis"], "bearer-auth: allowed");
         assert_eq!(v["status"], 200);
         // Content is fingerprinted, NOT raw: the raw query text must not appear anywhere.
-        assert!(!line.contains("SELECT"), "query content must never be logged raw");
+        assert!(
+            !line.contains("SELECT"),
+            "query content must never be logged raw"
+        );
         assert_eq!(v["fingerprint"], fingerprint("SELECT * WHERE {?s ?p ?o}"));
     }
 
@@ -563,8 +570,7 @@ mod tests {
             401,
         );
         sink.record(&ev);
-        let v: serde_json::Value =
-            serde_json::from_str(&sink.0.lock().unwrap()[0]).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&sink.0.lock().unwrap()[0]).unwrap();
         assert_eq!(v["decision"], "deny");
         assert_eq!(v["action"], "graph_write");
         assert_eq!(v["resource"], "https://example.org/g1");
@@ -599,7 +605,11 @@ mod tests {
     fn timestamp_is_rfc3339_z() {
         let ts = now_rfc3339();
         assert!(ts.ends_with('Z'));
-        assert_eq!(ts.len(), 24, "YYYY-MM-DDTHH:MM:SS.mmmZ = 24 chars, got {ts}");
+        assert_eq!(
+            ts.len(),
+            24,
+            "YYYY-MM-DDTHH:MM:SS.mmmZ = 24 chars, got {ts}"
+        );
         // A known epoch day: 2021-01-01 is day 18628.
         assert_eq!(civil_from_days(18628), (2021, 1, 1));
         assert_eq!(civil_from_days(0), (1970, 1, 1));
@@ -609,6 +619,9 @@ mod tests {
     fn sink_target_parses_stderr_vs_file() {
         assert!(matches!(SinkTarget::parse("stderr"), SinkTarget::Stderr));
         assert!(matches!(SinkTarget::parse("STDERR"), SinkTarget::Stderr));
-        assert!(matches!(SinkTarget::parse("/var/log/a.jsonl"), SinkTarget::File(_)));
+        assert!(matches!(
+            SinkTarget::parse("/var/log/a.jsonl"),
+            SinkTarget::File(_)
+        ));
     }
 }

@@ -29,7 +29,12 @@ const POD_B: &str = "https://b.ex";
 const POD_C: &str = "https://c.ex";
 
 fn sess(agent: Option<&str>) -> Session<'_> {
-    Session { agent, client: None, issuer: None, now: None }
+    Session {
+        agent,
+        client: None,
+        issuer: None,
+        now: None,
+    }
 }
 
 /// The four sessions the differential sweeps: alice, bob, anonymous, and alice via a client.
@@ -38,7 +43,12 @@ fn probe_sessions() -> Vec<Session<'static>> {
         sess(Some(ALICE)),
         sess(Some(BOB)),
         sess(None),
-        Session { agent: Some(ALICE), client: Some("https://app.ex"), issuer: None, now: None },
+        Session {
+            agent: Some(ALICE),
+            client: Some("https://app.ex"),
+            issuer: None,
+            now: None,
+        },
     ]
 }
 
@@ -88,18 +98,30 @@ fn assert_equals_fresh_rebuild(store: &mut PodStore, step: &str) {
     let resources = all_resources();
     for s in probe_sessions() {
         for mode in MODES {
-            let got: Vec<String> =
-                store.accessible(&s, mode).iter().map(|n| n.as_str().to_owned()).collect();
-            let want: Vec<String> =
-                fresh.accessible(&s, mode).iter().map(|n| n.as_str().to_owned()).collect();
-            assert_eq!(got, want, "accessible diverged from fresh rebuild at [{step}] for {s:?}/{mode:?}");
+            let got: Vec<String> = store
+                .accessible(&s, mode)
+                .iter()
+                .map(|n| n.as_str().to_owned())
+                .collect();
+            let want: Vec<String> = fresh
+                .accessible(&s, mode)
+                .iter()
+                .map(|n| n.as_str().to_owned())
+                .collect();
+            assert_eq!(
+                got, want,
+                "accessible diverged from fresh rebuild at [{step}] for {s:?}/{mode:?}"
+            );
 
             // decide() uses the per-origin path (accessible_in_origin); its allow must match
             // membership in the fresh full accessible set.
             for r in &resources {
                 let allow = store.decide(&s, r, mode).allow;
                 let want_allow = want.iter().any(|g| g == r);
-                assert_eq!(allow, want_allow, "decide diverged at [{step}] for {s:?}/{mode:?}/{r}");
+                assert_eq!(
+                    allow, want_allow,
+                    "decide diverged at [{step}] for {s:?}/{mode:?}/{r}"
+                );
             }
         }
     }
@@ -109,7 +131,10 @@ fn assert_equals_fresh_rebuild(store: &mut PodStore, step: &str) {
 struct Lcg(u64);
 impl Lcg {
     fn next(&mut self, n: u64) -> u64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (self.0 >> 33) % n
     }
 }
@@ -134,7 +159,9 @@ fn scoped_writes_stay_equivalent_to_full_rebuild_after_every_step() {
             store.delete_acl(&acl_iri).expect("delete_acl");
         } else {
             let body = bodies[rng.next(bodies.len() as u64) as usize];
-            store.put_acl(&acl_iri, &root_acl(pod, body), "ntriples").expect("put_acl");
+            store
+                .put_acl(&acl_iri, &root_acl(pod, body), "ntriples")
+                .expect("put_acl");
         }
         assert_equals_fresh_rebuild(&mut store, &format!("after-op-{i}"));
     }
@@ -148,22 +175,49 @@ fn revoke_leaves_no_stale_grant_and_isolates_other_pods() {
     let alice = sess(Some(ALICE));
 
     // Grant alice Read on pods a and b.
-    store.put_acl("https://a.ex/.acl", &root_acl(POD_A, &[ALICE]), "ntriples").expect("put a");
-    store.put_acl("https://b.ex/.acl", &root_acl(POD_B, &[ALICE]), "ntriples").expect("put b");
+    store
+        .put_acl("https://a.ex/.acl", &root_acl(POD_A, &[ALICE]), "ntriples")
+        .expect("put a");
+    store
+        .put_acl("https://b.ex/.acl", &root_acl(POD_B, &[ALICE]), "ntriples")
+        .expect("put b");
 
     // Warm the cache + confirm the grants are live on both pods.
-    assert!(store.decide(&alice, "https://a.ex/n1", Mode::Read).allow, "a granted");
-    assert!(store.decide(&alice, "https://b.ex/n1", Mode::Read).allow, "b granted");
-    assert_eq!(store.accessible(&alice, Mode::Read).len(), 2, "both pods warm");
+    assert!(
+        store.decide(&alice, "https://a.ex/n1", Mode::Read).allow,
+        "a granted"
+    );
+    assert!(
+        store.decide(&alice, "https://b.ex/n1", Mode::Read).allow,
+        "b granted"
+    );
+    assert_eq!(
+        store.accessible(&alice, Mode::Read).len(),
+        2,
+        "both pods warm"
+    );
 
     // Scoped revoke on pod a (delete its .acl). No stale grant may survive.
     store.delete_acl("https://a.ex/.acl").expect("delete a");
-    assert!(!store.decide(&alice, "https://a.ex/n1", Mode::Read).allow, "a revoked — no stale grant");
+    assert!(
+        !store.decide(&alice, "https://a.ex/n1", Mode::Read).allow,
+        "a revoked — no stale grant"
+    );
     // Pod b is provably unaffected (different origin) — its warm decision still grants.
-    assert!(store.decide(&alice, "https://b.ex/n1", Mode::Read).allow, "b untouched by a's revoke");
-    let got: Vec<String> =
-        store.accessible(&alice, Mode::Read).iter().map(|n| n.as_str().to_owned()).collect();
-    assert_eq!(got, vec!["https://b.ex/n1".to_owned()], "only pod b remains");
+    assert!(
+        store.decide(&alice, "https://b.ex/n1", Mode::Read).allow,
+        "b untouched by a's revoke"
+    );
+    let got: Vec<String> = store
+        .accessible(&alice, Mode::Read)
+        .iter()
+        .map(|n| n.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        got,
+        vec!["https://b.ex/n1".to_owned()],
+        "only pod b remains"
+    );
 
     // And the whole store still equals a from-scratch rebuild.
     assert_equals_fresh_rebuild(&mut store, "after-revoke");
@@ -174,13 +228,20 @@ fn write_to_one_pod_never_changes_another_pods_decision() {
     // Cross-pod isolation across a burst of writes to pod c, while pod a's grant is fixed.
     let mut store = three_pod_store();
     let alice = sess(Some(ALICE));
-    store.put_acl("https://a.ex/.acl", &root_acl(POD_A, &[ALICE]), "ntriples").expect("put a");
+    store
+        .put_acl("https://a.ex/.acl", &root_acl(POD_A, &[ALICE]), "ntriples")
+        .expect("put a");
     assert!(store.decide(&alice, "https://a.ex/n1", Mode::Read).allow);
 
     for body in [&[BOB][..], &[ALICE, BOB][..], &[][..], &[ALICE][..]] {
-        store.put_acl("https://c.ex/.acl", &root_acl(POD_C, body), "ntriples").expect("put c");
+        store
+            .put_acl("https://c.ex/.acl", &root_acl(POD_C, body), "ntriples")
+            .expect("put c");
         // Pod a's decision is invariant under any pod-c churn.
-        assert!(store.decide(&alice, "https://a.ex/n1", Mode::Read).allow, "pod a stable under pod c churn");
+        assert!(
+            store.decide(&alice, "https://a.ex/n1", Mode::Read).allow,
+            "pod a stable under pod c churn"
+        );
         assert_equals_fresh_rebuild(&mut store, "pod-c-churn");
     }
 }
@@ -223,20 +284,37 @@ fn perf_multi_pod_decide_and_query() {
     for i in 0..k {
         let p = i % PODS;
         let r = i % RES_PER_POD;
-        if store.decide(&alice, &format!("https://pod{p}.ex/r{r}"), Mode::Read).allow {
+        if store
+            .decide(&alice, &format!("https://pod{p}.ex/r{r}"), Mode::Read)
+            .allow
+        {
             acc += 1;
         }
     }
     let a = t.elapsed();
-    println!("[sq-b7k7u] A decide: {k} decides over {PODS} pods -> {a:?} ({:?}/decide), allow={acc}", a / k as u32);
+    println!(
+        "[sq-b7k7u] A decide: {k} decides over {PODS} pods -> {a:?} ({:?}/decide), allow={acc}",
+        a / k as u32
+    );
 
     // B. Post-scoped-write query latency for a DIFFERENT pod's session. Warm two sessions,
     // write pod0's .acl, then time the pod-1-only session's next accessible() (its slice is
     // untouched by the pod0 write; before this change the full clear cold-started it).
-    let s_far = Session { agent: Some(ALICE), client: Some("https://only-pod1.ex"), issuer: None, now: None };
+    let s_far = Session {
+        agent: Some(ALICE),
+        client: Some("https://only-pod1.ex"),
+        issuer: None,
+        now: None,
+    };
     let _ = store.accessible(&alice, Mode::Read).len();
     let _ = store.accessible(&s_far, Mode::Read).len(); // warm the far session too
-    store.put_acl("https://pod0.ex/.acl", &root_acl("https://pod0.ex", &[ALICE]), "ntriples").expect("put");
+    store
+        .put_acl(
+            "https://pod0.ex/.acl",
+            &root_acl("https://pod0.ex", &[ALICE]),
+            "ntriples",
+        )
+        .expect("put");
     let t = Instant::now();
     let n = store.accessible(&s_far, Mode::Read).len();
     let b = t.elapsed();
@@ -244,8 +322,17 @@ fn perf_multi_pod_decide_and_query() {
 
     // C. One put_acl = materialize + index rebuild (UNCHANGED whole-store cost; honesty).
     let t = Instant::now();
-    store.put_acl("https://pod0.ex/.acl", &root_acl("https://pod0.ex", &[ALICE]), "ntriples").expect("put");
-    println!("[sq-b7k7u] C one put_acl (materialize+reindex, UNCHANGED): {:?}", t.elapsed());
+    store
+        .put_acl(
+            "https://pod0.ex/.acl",
+            &root_acl("https://pod0.ex", &[ALICE]),
+            "ntriples",
+        )
+        .expect("put");
+    println!(
+        "[sq-b7k7u] C one put_acl (materialize+reindex, UNCHANGED): {:?}",
+        t.elapsed()
+    );
 }
 
 /// A pod root `.acl` in NQUADS (graph column = the `.acl`) granting alice Read by default.
@@ -264,11 +351,7 @@ fn root_acl_nq(pod: &str) -> String {
 fn group_doc_ntriples(group_subj: &str, members: &[&str]) -> String {
     members
         .iter()
-        .map(|m| {
-            format!(
-                "<{group_subj}> <http://www.w3.org/2006/vcard/ns#hasMember> <{m}> .\n"
-            )
-        })
+        .map(|m| format!("<{group_subj}> <http://www.w3.org/2006/vcard/ns#hasMember> <{m}> .\n"))
         .collect()
 }
 
@@ -301,29 +384,36 @@ fn cross_origin_agent_group_revoke() {
         "<https://b.ex/.acl#o> <http://www.w3.org/ns/auth/acl#mode> \
             <http://www.w3.org/ns/auth/acl#Read> <https://b.ex/.acl> .\n",
     );
-    let mut store =
-        PodStore::new(sparq_core::Graph::load_dataset(nq, "nquads").expect("loads"));
+    let mut store = PodStore::new(sparq_core::Graph::load_dataset(nq, "nquads").expect("loads"));
     store.materialize_wac().expect("materializes");
 
     let alice = sess(Some(ALICE));
 
     // Warm the cache: alice reads b.ex/n1 via the group membership.
-    let initial: Vec<String> =
-        store.accessible(&alice, Mode::Read).iter().map(|n| n.as_str().to_owned()).collect();
+    let initial: Vec<String> = store
+        .accessible(&alice, Mode::Read)
+        .iter()
+        .map(|n| n.as_str().to_owned())
+        .collect();
     assert!(
         initial.contains(&"https://b.ex/n1".to_owned()),
         "alice has initial b.ex grant via agentGroup: {initial:?}"
     );
 
     // Revoke alice's membership by emptying the group doc (origin = a.ex).
-    store.put_acl("https://a.ex/team.acl", "", "ntriples").expect("put");
+    store
+        .put_acl("https://a.ex/team.acl", "", "ntriples")
+        .expect("put");
 
     // Diff-based approach: b.ex index bucket changed → b.ex must be invalidated.
     // The cached accessible() must equal a fresh rebuild (alice loses b.ex access).
     assert_equals_fresh_rebuild(&mut store, "cross-origin-agentGroup-revoke");
 
-    let after: Vec<String> =
-        store.accessible(&alice, Mode::Read).iter().map(|n| n.as_str().to_owned()).collect();
+    let after: Vec<String> = store
+        .accessible(&alice, Mode::Read)
+        .iter()
+        .map(|n| n.as_str().to_owned())
+        .collect();
     assert!(
         !after.contains(&"https://b.ex/n1".to_owned()),
         "alice lost b.ex grant after group revoke — diff correctly invalidated b.ex: {after:?}"
@@ -356,8 +446,7 @@ fn cross_origin_foreign_subject_grant_revoke() {
         "<https://a.ex/.acl#x> <http://www.w3.org/ns/auth/acl#mode> \
             <http://www.w3.org/ns/auth/acl#Read> <https://a.ex/.acl> .\n",
     );
-    let mut store =
-        PodStore::new(sparq_core::Graph::load_dataset(nq, "nquads").expect("loads"));
+    let mut store = PodStore::new(sparq_core::Graph::load_dataset(nq, "nquads").expect("loads"));
     store.materialize_wac().expect("materializes");
 
     let mallory = sess(Some(MALLORY));
@@ -368,18 +457,29 @@ fn cross_origin_foreign_subject_grant_revoke() {
     let _ = store.accessible(&mallory, Mode::Read);
 
     // Revoke: empty the a.ex .acl (origin = a.ex).
-    store.put_acl("https://a.ex/.acl", "", "ntriples").expect("put");
+    store
+        .put_acl("https://a.ex/.acl", "", "ntriples")
+        .expect("put");
 
     // Diff-based approach: any b.ex index bucket change must be caught.
     assert_equals_fresh_rebuild(&mut store, "cross-origin-foreign-subject-revoke");
 
     // mallory must have no more access anywhere.
-    let after: Vec<String> =
-        store.accessible(&mallory, Mode::Read).iter().map(|n| n.as_str().to_owned()).collect();
+    let after: Vec<String> = store
+        .accessible(&mallory, Mode::Read)
+        .iter()
+        .map(|n| n.as_str().to_owned())
+        .collect();
     let fresh = AuthIndex::from_graph(&store.graph);
-    let want: Vec<String> =
-        fresh.accessible(&mallory, Mode::Read).iter().map(|n| n.as_str().to_owned()).collect();
-    assert_eq!(after, want, "cached path == fresh rebuild after foreign-subject revoke");
+    let want: Vec<String> = fresh
+        .accessible(&mallory, Mode::Read)
+        .iter()
+        .map(|n| n.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        after, want,
+        "cached path == fresh rebuild after foreign-subject revoke"
+    );
 }
 
 /// (c) Randomized differential with agentGroup bodies.
@@ -406,8 +506,7 @@ fn randomized_cross_origin_group_membership() {
         "<https://b.ex/.acl#o> <http://www.w3.org/ns/auth/acl#mode> \
             <http://www.w3.org/ns/auth/acl#Read> <https://b.ex/.acl> .\n",
     );
-    let mut store =
-        PodStore::new(sparq_core::Graph::load_dataset(nq, "nquads").expect("loads"));
+    let mut store = PodStore::new(sparq_core::Graph::load_dataset(nq, "nquads").expect("loads"));
     store.materialize_wac().expect("materializes");
 
     // Op candidates: group doc bodies (alice member / bob member / both / empty).
@@ -425,27 +524,37 @@ fn randomized_cross_origin_group_membership() {
                 // Write group doc (cross-origin dependency for b.ex).
                 let body = group_bodies[rng.next(4) as usize];
                 let doc = group_doc_ntriples("https://a.ex/team.acl#g", body);
-                store.put_acl("https://a.ex/team.acl", &doc, "ntriples").expect("put group");
+                store
+                    .put_acl("https://a.ex/team.acl", &doc, "ntriples")
+                    .expect("put group");
             }
             1 => {
                 // Delete group doc → alice/bob lose b.ex access.
-                store.delete_acl("https://a.ex/team.acl").expect("delete group");
+                store
+                    .delete_acl("https://a.ex/team.acl")
+                    .expect("delete group");
             }
             2 => {
                 // Write a.ex/.acl with a direct agent grant.
                 let body = acl_bodies[rng.next(3) as usize];
-                store.put_acl("https://a.ex/.acl", &root_acl(POD_A, body), "ntriples")
+                store
+                    .put_acl("https://a.ex/.acl", &root_acl(POD_A, body), "ntriples")
                     .expect("put a.ex acl");
             }
             3 => {
                 // Write c.ex/.acl (unrelated pod — isolation check).
                 let body = acl_bodies[rng.next(3) as usize];
-                store.put_acl("https://c.ex/.acl", &root_acl(POD_C, body), "ntriples")
+                store
+                    .put_acl("https://c.ex/.acl", &root_acl(POD_C, body), "ntriples")
                     .expect("put c.ex acl");
             }
             _ => {
                 // Delete a.ex or c.ex .acl.
-                let target = if rng.next(2) == 0 { "https://a.ex/.acl" } else { "https://c.ex/.acl" };
+                let target = if rng.next(2) == 0 {
+                    "https://a.ex/.acl"
+                } else {
+                    "https://c.ex/.acl"
+                };
                 store.delete_acl(target).expect("delete acl");
             }
         }
@@ -453,4 +562,3 @@ fn randomized_cross_origin_group_membership() {
         assert_equals_fresh_rebuild(&mut store, &format!("after-xo-op-{i}"));
     }
 }
-

@@ -463,9 +463,16 @@ mod tests {
             ("GEOMETRYCOLLECTION EMPTY", None),
         ] {
             let g = parse_wkt_literal(lex).unwrap();
-            assert_eq!(coordinate_dimension(&g.geometry), expected, "coordinate_dimension({lex})");
+            assert_eq!(
+                coordinate_dimension(&g.geometry),
+                expected,
+                "coordinate_dimension({lex})"
+            );
             // Single-source pin: the standalone fn IS the metadata() field.
-            assert_eq!(coordinate_dimension(&g.geometry), g.metadata().coordinate_dimension);
+            assert_eq!(
+                coordinate_dimension(&g.geometry),
+                g.metadata().coordinate_dimension
+            );
         }
     }
 
@@ -478,8 +485,15 @@ mod tests {
             ("LINESTRING EMPTY", None),
         ] {
             let g = parse_wkt_literal(lex).unwrap();
-            assert_eq!(spatial_dimension(&g.geometry), expected, "spatial_dimension({lex})");
-            assert_eq!(spatial_dimension(&g.geometry), g.metadata().spatial_dimension);
+            assert_eq!(
+                spatial_dimension(&g.geometry),
+                expected,
+                "spatial_dimension({lex})"
+            );
+            assert_eq!(
+                spatial_dimension(&g.geometry),
+                g.metadata().spatial_dimension
+            );
         }
     }
 
@@ -492,12 +506,21 @@ mod tests {
             ("LINESTRING(0 0, 1 1)", Some("LineString")),
             ("POLYGON((0 0, 2 0, 2 2, 0 2, 0 0))", Some("Polygon")),
             ("MULTIPOINT((0 0),(1 1))", Some("MultiPoint")),
-            ("MULTILINESTRING((0 0, 1 1),(2 2, 3 3))", Some("MultiLineString")),
-            ("MULTIPOLYGON(((0 0,1 0,1 1,0 1,0 0)))", Some("MultiPolygon")),
+            (
+                "MULTILINESTRING((0 0, 1 1),(2 2, 3 3))",
+                Some("MultiLineString"),
+            ),
+            (
+                "MULTIPOLYGON(((0 0,1 0,1 1,0 1,0 0)))",
+                Some("MultiPolygon"),
+            ),
             // No fabricated class: collections are unmapped, and an empty
             // literal's authored class is unrecoverable (POINT EMPTY parses
             // to an empty MultiPoint), so both decline with None.
-            ("GEOMETRYCOLLECTION(POINT(0 0), POLYGON((0 0,1 0,1 1,0 1,0 0)))", None),
+            (
+                "GEOMETRYCOLLECTION(POINT(0 0), POLYGON((0 0,1 0,1 1,0 1,0 0)))",
+                None,
+            ),
             ("POINT EMPTY", None),
             ("POLYGON EMPTY", None),
             ("GEOMETRYCOLLECTION EMPTY", None),
@@ -512,15 +535,24 @@ mod tests {
         // map to their exact simple-features class.
         use geo_types::{coord, Line, Rect, Triangle};
         let line = Geometry::Line(Line::new(coord! {x: 0., y: 0.}, coord! {x: 1., y: 1.}));
-        assert_eq!(sf_geometry_type(&line), Some("http://www.opengis.net/ont/sf#LineString"));
+        assert_eq!(
+            sf_geometry_type(&line),
+            Some("http://www.opengis.net/ont/sf#LineString")
+        );
         let rect = Geometry::Rect(Rect::new(coord! {x: 0., y: 0.}, coord! {x: 1., y: 1.}));
-        assert_eq!(sf_geometry_type(&rect), Some("http://www.opengis.net/ont/sf#Polygon"));
+        assert_eq!(
+            sf_geometry_type(&rect),
+            Some("http://www.opengis.net/ont/sf#Polygon")
+        );
         let tri = Geometry::Triangle(Triangle::new(
             coord! {x: 0., y: 0.},
             coord! {x: 1., y: 0.},
             coord! {x: 0., y: 1.},
         ));
-        assert_eq!(sf_geometry_type(&tri), Some("http://www.opengis.net/ont/sf#Polygon"));
+        assert_eq!(
+            sf_geometry_type(&tri),
+            Some("http://www.opengis.net/ont/sf#Polygon")
+        );
     }
 
     #[test]

@@ -290,9 +290,9 @@ fn ql_axiom(axiom: &Axiom) -> Result<(), String> {
         // TransitiveObjectProperty is NOT in the QL grammar (§3 explicitly excludes
         // transitive object properties). [GPT-5.6] sq-zfwzq
         #[cfg(feature = "dl_transitive")]
-        Axiom::TransitiveObjectProperty { .. } => Err(
-            "TransitiveObjectProperty is not permitted in OWL 2 QL (QL §3)".into(),
-        ),
+        Axiom::TransitiveObjectProperty { .. } => {
+            Err("TransitiveObjectProperty is not permitted in OWL 2 QL (QL §3)".into())
+        }
     }
 }
 

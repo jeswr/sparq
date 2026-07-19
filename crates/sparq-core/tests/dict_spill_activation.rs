@@ -42,7 +42,10 @@ fn scratch(tag: &str) -> std::path::PathBuf {
         tag,
         std::process::id(),
         n,
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
     let _ = std::fs::remove_dir_all(&p);
     std::fs::create_dir_all(&p).unwrap();
@@ -56,12 +59,29 @@ fn synthetic_nt(n: u32) -> String {
     let xsd = "http://www.w3.org/2001/XMLSchema#";
     let mut s = String::new();
     for i in 0..n {
-        s.push_str(&format!("<http://ex/s{i}> <http://ex/name> \"unique value {i} \\\"q\\\" \\u00e9\" .\n"));
-        s.push_str(&format!("<http://ex/s{i}> <http://ex/age> \"{}\"^^<{xsd}integer> .\n", i % 90));
-        s.push_str(&format!("<http://ex/s{i}> <http://ex/score> \"{}.5\"^^<{xsd}decimal> .\n", i % 50));
-        s.push_str(&format!("<http://ex/s{i}> <http://ex/when> \"2026-03-{:02}T0{}:00:00Z\"^^<{xsd}dateTime> .\n", 1 + i % 28, i % 10));
-        s.push_str(&format!("<http://ex/s{i}> <http://ex/label> \"étiquette {i}\"@fr .\n"));
-        s.push_str(&format!("<http://ex/s{i}> <http://ex/follows> <http://ex/s{}> .\n", (i * 7 + 3) % n.max(1)));
+        s.push_str(&format!(
+            "<http://ex/s{i}> <http://ex/name> \"unique value {i} \\\"q\\\" \\u00e9\" .\n"
+        ));
+        s.push_str(&format!(
+            "<http://ex/s{i}> <http://ex/age> \"{}\"^^<{xsd}integer> .\n",
+            i % 90
+        ));
+        s.push_str(&format!(
+            "<http://ex/s{i}> <http://ex/score> \"{}.5\"^^<{xsd}decimal> .\n",
+            i % 50
+        ));
+        s.push_str(&format!(
+            "<http://ex/s{i}> <http://ex/when> \"2026-03-{:02}T0{}:00:00Z\"^^<{xsd}dateTime> .\n",
+            1 + i % 28,
+            i % 10
+        ));
+        s.push_str(&format!(
+            "<http://ex/s{i}> <http://ex/label> \"étiquette {i}\"@fr .\n"
+        ));
+        s.push_str(&format!(
+            "<http://ex/s{i}> <http://ex/follows> <http://ex/s{}> .\n",
+            (i * 7 + 3) % n.max(1)
+        ));
         s.push_str(&format!("_:b{i} <http://ex/about> <http://ex/s{i}> .\n"));
         if i % 5 == 0 {
             s.push_str(&format!("<urn:uuid:item-{i}> <http://ex/idx> \"{i}\" .\n"));
@@ -70,7 +90,10 @@ fn synthetic_nt(n: u32) -> String {
     // Exact duplicates + shared terms across distant lines (cache-epoch crossers).
     s.push_str("<http://ex/s0> <http://ex/name> \"unique value 0 \\\"q\\\" \\u00e9\" .\n");
     for i in 0..n.min(40) {
-        s.push_str(&format!("<http://ex/s{i}> <http://ex/age> \"{}\"^^<{xsd}integer> .\n", i % 90));
+        s.push_str(&format!(
+            "<http://ex/s{i}> <http://ex/age> \"{}\"^^<{xsd}integer> .\n",
+            i % 90
+        ));
     }
     s
 }
@@ -84,7 +107,11 @@ fn dump(g: &Graph) -> Vec<[String; 3]> {
         .iter()
         .map(|r| {
             let spo = scan.to_spo(r);
-            [g.dict.term(spo[0]).to_string(), g.dict.term(spo[1]).to_string(), g.dict.term(spo[2]).to_string()]
+            [
+                g.dict.term(spo[0]).to_string(),
+                g.dict.term(spo[1]).to_string(),
+                g.dict.term(spo[2]).to_string(),
+            ]
         })
         .collect();
     v.sort();
@@ -118,7 +145,10 @@ fn spill_build_aborts_when_disk_floor_exceeds_free_space() {
     assert!(free > 0, "a real filesystem reports some free space");
     let nt = synthetic_nt(50);
     // Floor above free space => the very first ensure_disk in build_external_spill must Err.
-    let cfg = SpillConfig { mem_budget: 1, disk_floor: free.saturating_add(1 << 40) };
+    let cfg = SpillConfig {
+        mem_budget: 1,
+        disk_floor: free.saturating_add(1 << 40),
+    };
     let err = Graph::build_external_spill(nt.as_bytes(), "ntriples", &dir, 256, &cfg)
         .expect_err("spill build must refuse to run below the disk floor");
     assert!(
@@ -140,8 +170,14 @@ fn tiny_budget_eviction_matches_comfortable_budget_byte_for_byte() {
     let tiny_dir = scratch("tiny");
     let comfy_dir = scratch("comfy");
 
-    let tiny = SpillConfig { mem_budget: 1, disk_floor: 0 }; // constant epoch eviction + many runs
-    let comfy = SpillConfig { mem_budget: 512 << 20, disk_floor: 0 }; // no eviction, single sort
+    let tiny = SpillConfig {
+        mem_budget: 1,
+        disk_floor: 0,
+    }; // constant epoch eviction + many runs
+    let comfy = SpillConfig {
+        mem_budget: 512 << 20,
+        disk_floor: 0,
+    }; // no eviction, single sort
     Graph::build_external_spill(nt.as_bytes(), "ntriples", &tiny_dir, 256, &tiny).unwrap();
     Graph::build_external_spill(nt.as_bytes(), "ntriples", &comfy_dir, 256, &comfy).unwrap();
 
@@ -163,14 +199,21 @@ fn tiny_budget_eviction_matches_comfortable_budget_byte_for_byte() {
         let f = format!("perm{}.bin", perm as usize);
         let a = std::fs::read(tiny_dir.join(&f)).unwrap();
         let b = std::fs::read(comfy_dir.join(&f)).unwrap();
-        assert!(a == b, "permutation {f} differs between tiny and comfortable budgets");
+        assert!(
+            a == b,
+            "permutation {f} differs between tiny and comfortable budgets"
+        );
     }
 
     // Both stores open and answer identically (a semantic guard atop the byte guard).
     let tg = Graph::open(&tiny_dir).unwrap();
     let cg = Graph::open(&comfy_dir).unwrap();
     assert_eq!(tg.len(), cg.len(), "triple counts differ across budgets");
-    assert_eq!(dump(&tg), dump(&cg), "term-level content differs across budgets");
+    assert_eq!(
+        dump(&tg),
+        dump(&cg),
+        "term-level content differs across budgets"
+    );
 
     let _ = std::fs::remove_dir_all(&tiny_dir);
     let _ = std::fs::remove_dir_all(&comfy_dir);
@@ -185,27 +228,56 @@ fn tiny_budget_eviction_matches_comfortable_budget_byte_for_byte() {
 fn spill_built_store_mmap_reload_round_trip() {
     let nt = synthetic_nt(600);
     let spill_dir = scratch("reload");
-    let cfg = SpillConfig { mem_budget: 1, disk_floor: 0 }; // tight budget => spill activates
+    let cfg = SpillConfig {
+        mem_budget: 1,
+        disk_floor: 0,
+    }; // tight budget => spill activates
     Graph::build_external_spill(nt.as_bytes(), "ntriples", &spill_dir, 256, &cfg).unwrap();
 
     let mem = Graph::load_str(&nt, "ntriples").unwrap();
     let ext = Graph::open(&spill_dir).unwrap();
 
     // Counts + full term-level content.
-    assert_eq!(mem.len(), ext.len(), "triple count differs (mem vs spill-mmap)");
-    assert_eq!(mem.dict.len(), ext.dict.len(), "dict size differs (mem vs spill-mmap)");
-    assert_eq!(dump(&mem), dump(&ext), "term-level content differs (mem vs spill-mmap)");
+    assert_eq!(
+        mem.len(),
+        ext.len(),
+        "triple count differs (mem vs spill-mmap)"
+    );
+    assert_eq!(
+        mem.dict.len(),
+        ext.dict.len(),
+        "dict size differs (mem vs spill-mmap)"
+    );
+    assert_eq!(
+        dump(&mem),
+        dump(&ext),
+        "term-level content differs (mem vs spill-mmap)"
+    );
 
     // Bound-predicate scans over the mmap'd store match the in-memory store's, term for term.
     let pred = |g: &Graph, p: &str| -> usize {
-        match g.id_of(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(p.to_string()))) {
+        match g.id_of(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+            p.to_string(),
+        ))) {
             Some(pid) => g.store.scan(&[None, Some(pid), None]).rows.len(),
             None => 0,
         }
     };
-    for p in ["http://ex/age", "http://ex/follows", "http://ex/label", "http://ex/when"] {
-        assert_eq!(pred(&mem, p), pred(&ext, p), "scan cardinality differs for predicate {p}");
-        assert!(pred(&ext, p) > 0, "predicate {p} unexpectedly absent from the spill store");
+    for p in [
+        "http://ex/age",
+        "http://ex/follows",
+        "http://ex/label",
+        "http://ex/when",
+    ] {
+        assert_eq!(
+            pred(&mem, p),
+            pred(&ext, p),
+            "scan cardinality differs for predicate {p}"
+        );
+        assert!(
+            pred(&ext, p) > 0,
+            "predicate {p} unexpectedly absent from the spill store"
+        );
     }
 
     // Numeric + temporal value caches: every age/score/when value the spill build streamed must
@@ -224,27 +296,49 @@ fn spill_built_store_mmap_reload_round_trip() {
             }
             let et = ext.temporal_value(id);
             let mt = mem.temporal_value(remap_id(&mem, &ext, id));
-            assert_eq!(et.map(|t| t.instant), mt.map(|t| t.instant), "temporal value cache diverges");
+            assert_eq!(
+                et.map(|t| t.instant),
+                mt.map(|t| t.instant),
+                "temporal value cache diverges"
+            );
             if et.is_some() {
                 temporal_checks += 1;
             }
         }
     }
-    assert!(numeric_checks > 0, "the test never exercised a numeric cache cell (vacuous)");
-    assert!(temporal_checks > 0, "the test never exercised a temporal cache cell (vacuous)");
+    assert!(
+        numeric_checks > 0,
+        "the test never exercised a numeric cache cell (vacuous)"
+    );
+    assert!(
+        temporal_checks > 0,
+        "the test never exercised a temporal cache cell (vacuous)"
+    );
 
     // Re-save the spill-built store (raw + compressed) and re-open: a second mmap round trip
     // through the loader, proving the spill-produced graph persists + reloads identically.
     let raw_dir = scratch("resave-raw");
     ext.save(&raw_dir).unwrap();
     let raw = Graph::open(&raw_dir).unwrap();
-    assert_eq!(dump(&raw), dump(&ext), "raw re-save round trip changed content");
+    assert_eq!(
+        dump(&raw),
+        dump(&ext),
+        "raw re-save round trip changed content"
+    );
 
     let comp_dir = scratch("resave-comp");
     ext.save_compressed(&comp_dir).unwrap();
     let comp = Graph::open(&comp_dir).unwrap();
-    assert_eq!(dump(&comp), dump(&ext), "compressed re-save round trip changed content");
-    assert_eq!(comp.len(), ext.len(), "compressed re-save triple count drifted");
+    assert_eq!(
+        dump(&comp),
+        dump(&ext),
+        "compressed re-save round trip changed content"
+    );
+    assert_eq!(
+        comp.len(),
+        ext.len(),
+        "compressed re-save triple count drifted"
+    );
 
     let _ = std::fs::remove_dir_all(&spill_dir);
     let _ = std::fs::remove_dir_all(&raw_dir);
@@ -265,7 +359,10 @@ fn remap_id(to: &Graph, from: &Graph, from_id: sparq_core::dict::Id) -> sparq_co
 #[test]
 fn spill_build_empty_input_opens_empty() {
     let dir = scratch("empty");
-    let cfg = SpillConfig { mem_budget: 1, disk_floor: 0 };
+    let cfg = SpillConfig {
+        mem_budget: 1,
+        disk_floor: 0,
+    };
     Graph::build_external_spill("".as_bytes(), "ntriples", &dir, 64, &cfg).unwrap();
     let g = Graph::open(&dir).unwrap();
     assert_eq!(g.len(), 0, "empty spill build has no triples");

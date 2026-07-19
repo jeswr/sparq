@@ -124,8 +124,7 @@ struct Summary {
 fn load() -> (Snapshot, Matrix) {
     let snapshot: Snapshot =
         serde_json::from_str(SNAPSHOT_JSON).expect("gate_count_snapshot.json parses");
-    let matrix: Matrix =
-        serde_json::from_str(MATRIX_JSON).expect("bb_gates_matrix.json parses");
+    let matrix: Matrix = serde_json::from_str(MATRIX_JSON).expect("bb_gates_matrix.json parses");
     (snapshot, matrix)
 }
 
@@ -162,7 +161,11 @@ fn matrix_circuit_sizes_match_snapshot() {
                 "{member}: present in the matrix but ABSENT from gate_count_snapshot.json"
             )),
         }
-        let want_lane = if is_value_lane(member) { "value" } else { "string" };
+        let want_lane = if is_value_lane(member) {
+            "value"
+        } else {
+            "string"
+        };
         if c.lane != want_lane {
             errors.push(format!(
                 "{member}: lane={:?} but the {VALUE_LANE_PREFIX} classification wants {want_lane:?}",
@@ -253,7 +256,8 @@ fn illegal_cells_carry_a_reason_not_a_cost() {
                 }
             } else {
                 match cell.reason.as_deref() {
-                    Some("IllegalPair") | Some("IdentityOpAtValueLane") | Some("UnknownMethod") => {}
+                    Some("IllegalPair") | Some("IdentityOpAtValueLane") | Some("UnknownMethod") => {
+                    }
                     other => errors.push(format!(
                         "{member} × {key}: ILLEGAL cell must carry a fail-closed reason \
                          (a DispatchError variant), found {other:?}"
@@ -283,8 +287,10 @@ fn cell_rejects_a_fabricated_per_cell_cost() {
         "a cell carrying a fabricated circuit_size must fail to parse (deny_unknown_fields)"
     );
     assert!(
-        serde_json::from_str::<Cell>(r#"{"legal": false, "reason": "IllegalPair", "gate_count": 42}"#)
-            .is_err(),
+        serde_json::from_str::<Cell>(
+            r#"{"legal": false, "reason": "IllegalPair", "gate_count": 42}"#
+        )
+        .is_err(),
         "an illegal cell carrying a fabricated gate_count must fail to parse"
     );
     // The two honest cell shapes still parse.
@@ -316,14 +322,20 @@ fn summary_matches_rows() {
             }
         }
     }
-    assert_eq!(matrix.summary.circuits, circuits, "summary.circuits mismatch");
+    assert_eq!(
+        matrix.summary.circuits, circuits,
+        "summary.circuits mismatch"
+    );
     assert_eq!(matrix.summary.methods, methods, "summary.methods mismatch");
     assert_eq!(
         matrix.summary.configs,
         circuits * methods,
         "summary.configs mismatch"
     );
-    assert_eq!(matrix.summary.legal_configs, legal, "summary.legal_configs mismatch");
+    assert_eq!(
+        matrix.summary.legal_configs, legal,
+        "summary.legal_configs mismatch"
+    );
     assert_eq!(
         matrix.summary.illegal_configs, illegal,
         "summary.illegal_configs mismatch"
@@ -360,10 +372,12 @@ fn comparison_numbers_are_joined_from_snapshot() {
         if let (Some(sm), Some(ss)) = (&cmp.string_lane_member, cmp.string_lane_circuit_size) {
             match snapshot.members.get(sm) {
                 Some(&snap) if snap == ss => {}
-                Some(&snap) => {
-                    errors.push(format!("{dt}: string_lane_circuit_size={ss} != snapshot={snap}"))
-                }
-                None => errors.push(format!("{dt}: string_lane_member {sm} absent from snapshot")),
+                Some(&snap) => errors.push(format!(
+                    "{dt}: string_lane_circuit_size={ss} != snapshot={snap}"
+                )),
+                None => errors.push(format!(
+                    "{dt}: string_lane_member {sm} absent from snapshot"
+                )),
             }
             if let Some(rx) = cmp.gate_reduction_x {
                 let want = (ss as f64 / cmp.value_lane_circuit_size as f64 * 100.0).round() / 100.0;
@@ -468,9 +482,13 @@ fn committed_legality_matches_resolve_circuit() {
     let mut checked = 0usize;
     let mut errors = Vec::new();
     for (member, c) in &matrix.matrix {
-        let Some(id) = circuit_for(member) else { continue };
+        let Some(id) = circuit_for(member) else {
+            continue;
+        };
         for (key, method) in &methods {
-            let Some(cell) = c.configs.get(*key) else { continue };
+            let Some(cell) = c.configs.get(*key) else {
+                continue;
+            };
             let resolved_legal = match resolve_circuit(*method, &id) {
                 Ok(_) => true,
                 Err(DispatchError::IllegalPair { .. })

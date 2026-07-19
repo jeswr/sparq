@@ -117,8 +117,18 @@ async fn put_get_list_delete_round_trip() {
         .unwrap();
     assert_eq!(list, json!([]));
     // Create → 201; replace → 204.
-    assert_eq!(put_template(&base, "friends", &friends_def()).await.status(), 201);
-    assert_eq!(put_template(&base, "friends", &friends_def()).await.status(), 204);
+    assert_eq!(
+        put_template(&base, "friends", &friends_def())
+            .await
+            .status(),
+        201
+    );
+    assert_eq!(
+        put_template(&base, "friends", &friends_def())
+            .await
+            .status(),
+        204
+    );
     // GET round-trips the definition (name from the path, kind derived).
     let def: Value = client()
         .get(format!("{base}/templates/friends"))
@@ -186,8 +196,12 @@ async fn put_rejects_invalid_definitions() {
     .await;
     assert_eq!(resp.status(), 400);
     // A body name that contradicts the path.
-    let resp = put_template(&base, "bad", &json!({"name": "other", "text": "ASK { ?s ?p ?o }"}))
-        .await;
+    let resp = put_template(
+        &base,
+        "bad",
+        &json!({"name": "other", "text": "ASK { ?s ?p ?o }"}),
+    )
+    .await;
     assert_eq!(resp.status(), 400);
     // Not JSON at all.
     let resp = client()
@@ -274,7 +288,10 @@ async fn invoke_construct_returns_ntriples() {
         .unwrap()
         .starts_with("application/n-triples"));
     let body = resp.text().await.unwrap();
-    assert!(body.contains("<http://ex/bob> <http://ex/knows> <http://ex/carol>"), "{body}");
+    assert!(
+        body.contains("<http://ex/bob> <http://ex/knows> <http://ex/carol>"),
+        "{body}"
+    );
 }
 
 #[tokio::test]
@@ -343,7 +360,8 @@ async fn invoke_update_applies_through_writer_path() {
     )
     .await;
     // A hostile bound literal: under concatenation this would break out and DROP ALL.
-    let hostile = r#"x" } ; DROP ALL ; INSERT DATA { <http://ex/evil> <http://ex/p> <http://ex/o> } # "#;
+    let hostile =
+        r#"x" } ; DROP ALL ; INSERT DATA { <http://ex/evil> <http://ex/p> <http://ex/o> } # "#;
     let resp = client()
         .post(format!("{base}/templates/rename"))
         .json(&json!({"who": "http://ex/alice", "new": hostile}))
@@ -454,7 +472,12 @@ async fn templates_file_survives_restart_and_fails_closed() {
         ..ServerConfig::default()
     };
     let base = spawn_with(true, config.clone()).await;
-    assert_eq!(put_template(&base, "friends", &friends_def()).await.status(), 201);
+    assert_eq!(
+        put_template(&base, "friends", &friends_def())
+            .await
+            .status(),
+        201
+    );
     assert!(file.exists(), "PUT must persist the store");
     // A fresh server over the same file serves the stored template.
     let base2 = spawn_with(true, config.clone()).await;
@@ -472,7 +495,10 @@ async fn templates_file_survives_restart_and_fails_closed() {
         .await
         .unwrap();
     let store_now = std::fs::read_to_string(&file).unwrap();
-    assert_eq!(serde_json::from_str::<Value>(&store_now).unwrap(), json!([]));
+    assert_eq!(
+        serde_json::from_str::<Value>(&store_now).unwrap(),
+        json!([])
+    );
     // A corrupt file is a fail-closed STARTUP error, never a silently-empty store.
     std::fs::write(&file, "not json").unwrap();
     let graph = Graph::load_str(DATA, "turtle").unwrap();

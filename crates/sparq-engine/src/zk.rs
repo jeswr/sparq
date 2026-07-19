@@ -279,7 +279,9 @@ pub fn take() -> ZkTrace {
         .patterns
         .into_iter()
         .map(|ps| {
-            let PatternState { mut matches, ids, .. } = ps;
+            let PatternState {
+                mut matches, ids, ..
+            } = ps;
             // Joint canonical sort of (ids, triples) by id triple.
             let mut order: Vec<usize> = (0..ids.len()).collect();
             order.sort_unstable_by_key(|&i| ids[i]);
@@ -291,7 +293,11 @@ pub fn take() -> ZkTrace {
     for f in &mut filters {
         f.rows.sort_unstable();
     }
-    ZkTrace { patterns, filters, steps: state.steps }
+    ZkTrace {
+        patterns,
+        filters,
+        steps: state.steps,
+    }
 }
 
 #[inline]
@@ -386,12 +392,19 @@ fn record_ids_with_key(graph: &Graph, pattern: PatternKey, matched: &[[Id; 3]], 
         let mut s = s.borrow_mut();
         let gctx = s.graph_ctx.last().cloned();
         let idx = match s.patterns.iter().position(|p| {
-            p.matches.pattern == pattern && p.matches.graph == gctx && p.matches.in_exists == in_exists
+            p.matches.pattern == pattern
+                && p.matches.graph == gctx
+                && p.matches.in_exists == in_exists
         }) {
             Some(i) => i,
             None => {
                 s.patterns.push(PatternState {
-                    matches: PatternMatches { pattern, graph: gctx, in_exists, triples: Vec::new() },
+                    matches: PatternMatches {
+                        pattern,
+                        graph: gctx,
+                        in_exists,
+                        triples: Vec::new(),
+                    },
                     ids: Vec::new(),
                     seen: HashSet::new(),
                 });
@@ -437,7 +450,9 @@ pub(crate) fn record_scan_ids(
             (None, None) => SlotPattern::Wildcard,
         }
     };
-    let pattern = PatternKey { slots: [slot(0), slot(1), slot(2)] };
+    let pattern = PatternKey {
+        slots: [slot(0), slot(1), slot(2)],
+    };
     record_ids_with_key(graph, pattern, matched, bind_join);
 }
 
@@ -454,11 +469,18 @@ pub(crate) fn record_empty_pattern(pattern: Option<PatternKey>) {
         let mut s = s.borrow_mut();
         let gctx = s.graph_ctx.last().cloned();
         let present = s.patterns.iter().any(|p| {
-            p.matches.pattern == pattern && p.matches.graph == gctx && p.matches.in_exists == in_exists
+            p.matches.pattern == pattern
+                && p.matches.graph == gctx
+                && p.matches.in_exists == in_exists
         });
         if !present {
             s.patterns.push(PatternState {
-                matches: PatternMatches { pattern, graph: gctx, in_exists, triples: Vec::new() },
+                matches: PatternMatches {
+                    pattern,
+                    graph: gctx,
+                    in_exists,
+                    triples: Vec::new(),
+                },
                 ids: Vec::new(),
                 seen: HashSet::new(),
             });
@@ -485,7 +507,9 @@ pub(crate) fn key_of_algebra_pattern(tp: &spargebra::term::TriplePattern) -> Opt
         NamedNodePattern::NamedNode(n) => SlotPattern::Term(Term::NamedNode(n.clone())),
         NamedNodePattern::Variable(v) => SlotPattern::Var(v.as_str().to_string()),
     };
-    Some(PatternKey { slots: [slot(&tp.subject)?, predicate, slot(&tp.object)?] })
+    Some(PatternKey {
+        slots: [slot(&tp.subject)?, predicate, slot(&tp.object)?],
+    })
 }
 
 /// Records one FILTER application: distinct operands + per-row operand
@@ -520,7 +544,10 @@ pub(crate) struct OperandMemo {
 
 impl OperandMemo {
     pub(crate) fn new() -> Self {
-        OperandMemo { map: FxHashMap::default(), operands: Vec::new() }
+        OperandMemo {
+            map: FxHashMap::default(),
+            operands: Vec::new(),
+        }
     }
 
     /// The operand index of `id`, materializing through `resolve` on first
@@ -554,7 +581,11 @@ mod tests {
     fn guard_clears_state() {
         let g = install();
         record_empty_pattern(Some(PatternKey {
-            slots: [SlotPattern::Wildcard, SlotPattern::Wildcard, SlotPattern::Wildcard],
+            slots: [
+                SlotPattern::Wildcard,
+                SlotPattern::Wildcard,
+                SlotPattern::Wildcard,
+            ],
         }));
         drop(g);
         let g2 = install();
@@ -588,7 +619,8 @@ mod tests {
 
     #[test]
     fn trace_is_deterministic_across_runs() {
-        let q = "SELECT * WHERE { ?s <http://ex/p> ?o . ?o <http://ex/name> ?n . FILTER(?n != \"B\") }";
+        let q =
+            "SELECT * WHERE { ?s <http://ex/p> ?o . ?o <http://ex/name> ?n . FILTER(?n != \"B\") }";
         let run = || {
             let g = graph(DATA);
             let _guard = install();

@@ -217,10 +217,14 @@ pub fn as_ucq(query: &Query) -> Result<Ucq, CqError> {
         Query::Select { pattern, .. } => (pattern, false),
         Query::Ask { pattern, .. } => (pattern, true),
         Query::Construct { .. } => {
-            return Err(CqError::OutOfScope("CONSTRUCT is not a CQ-answering query".into()))
+            return Err(CqError::OutOfScope(
+                "CONSTRUCT is not a CQ-answering query".into(),
+            ))
         }
         Query::Describe { .. } => {
-            return Err(CqError::OutOfScope("DESCRIBE is not a CQ-answering query".into()))
+            return Err(CqError::OutOfScope(
+                "DESCRIBE is not a CQ-answering query".into(),
+            ))
         }
     };
 
@@ -341,7 +345,9 @@ fn collect_body_var_names(p: &GraphPattern, out: &mut HashSet<String>) {
                 push_term(&tp.object, out);
             }
         }
-        GraphPattern::Path { subject, object, .. } => {
+        GraphPattern::Path {
+            subject, object, ..
+        } => {
             push_term(subject, out);
             push_term(object, out);
         }
@@ -359,7 +365,11 @@ fn collect_body_var_names(p: &GraphPattern, out: &mut HashSet<String>) {
             }
             collect_body_var_names(inner, out);
         }
-        GraphPattern::Extend { inner, variable, expression } => {
+        GraphPattern::Extend {
+            inner,
+            variable,
+            expression,
+        } => {
             out.insert(variable.as_str().to_string());
             for v in expression_vars(expression) {
                 out.insert(v.as_str().to_string());
@@ -410,7 +420,10 @@ fn collect_body_var_names_owned(p: &GraphPattern) -> HashSet<String> {
 /// nested Project/Distinct/LATERAL) are returned UNCHANGED as a single disjunct — the downstream
 /// [`collect_conjunction`] walk then rejects them with their precise reason strings (we do NOT
 /// recurse into them: the whole query is out of scope regardless of any path nested inside).
-fn desugar_paths_dnf(body: &GraphPattern, fresh: &mut FreshVars) -> Result<Vec<GraphPattern>, CqError> {
+fn desugar_paths_dnf(
+    body: &GraphPattern,
+    fresh: &mut FreshVars,
+) -> Result<Vec<GraphPattern>, CqError> {
     match body {
         // A BGP carries no property paths (spargebra lowers simple predicates + top-level
         // sequence/inverse into BGP triples during parsing). Return it unchanged; any blank-node
@@ -419,7 +432,11 @@ fn desugar_paths_dnf(body: &GraphPattern, fresh: &mut FreshVars) -> Result<Vec<G
 
         // A surviving `Path` node is a non-recursive alternation (whose arms may nest
         // sequence/inverse/named-node) — or a recursive/negated form that must be rejected.
-        GraphPattern::Path { subject, path, object } => desugar_path(subject, path, object, fresh),
+        GraphPattern::Path {
+            subject,
+            path,
+            object,
+        } => desugar_path(subject, path, object, fresh),
 
         // Join distributes over the union produced by desugaring either side (DNF).
         GraphPattern::Join { left, right } => {
@@ -577,10 +594,18 @@ fn parse_cq_body(
     let mut filter_exprs = Vec::new();
     let mut values_blocks = Vec::new();
 
-    collect_conjunction(body, top_distinguished, &mut atoms, &mut filter_exprs, &mut values_blocks)?;
+    collect_conjunction(
+        body,
+        top_distinguished,
+        &mut atoms,
+        &mut filter_exprs,
+        &mut values_blocks,
+    )?;
 
     if atoms.is_empty() {
-        return Err(CqError::OutOfScope("empty query body (no triple patterns)".into()));
+        return Err(CqError::OutOfScope(
+            "empty query body (no triple patterns)".into(),
+        ));
     }
 
     // B1 uniform-arity check: every projected variable must appear in this branch.
@@ -659,7 +684,10 @@ fn collect_conjunction(
             Ok(())
         }
         // B4: VALUES — accept iff all vars are distinguished AND all rows fully bound. [SONNET-4.6]
-        GraphPattern::Values { variables, bindings } => {
+        GraphPattern::Values {
+            variables,
+            bindings,
+        } => {
             // Guard: all variables must be distinguished.
             for v in variables {
                 if !distinguished.iter().any(|d| d == v) {
@@ -693,42 +721,44 @@ fn collect_conjunction(
             Ok(())
         }
         // Every other operator is outside the conjunctive fragment — REJECT, naming it.
-        GraphPattern::LeftJoin { .. } => {
-            Err(CqError::OutOfScope("OPTIONAL (LeftJoin) is not conjunctive".into()))
-        }
+        GraphPattern::LeftJoin { .. } => Err(CqError::OutOfScope(
+            "OPTIONAL (LeftJoin) is not conjunctive".into(),
+        )),
         GraphPattern::Union { .. } => {
             // A Union inside the body (after the top-level branch split) is nested UNION —
             // not a plain top-level UCQ pattern; reject as non-conjunctive.
-            Err(CqError::OutOfScope("nested UNION inside a CQ branch is not conjunctive".into()))
+            Err(CqError::OutOfScope(
+                "nested UNION inside a CQ branch is not conjunctive".into(),
+            ))
         }
         GraphPattern::Minus { .. } => Err(CqError::OutOfScope("MINUS is not conjunctive".into())),
         GraphPattern::Path { .. } => Err(CqError::OutOfScope(
             "property path is not conjunctive (reintroduces recursion QL excludes)".into(),
         )),
-        GraphPattern::Graph { .. } => {
-            Err(CqError::OutOfScope("named-graph (GRAPH) is out of scope".into()))
-        }
-        GraphPattern::Extend { .. } => {
-            Err(CqError::OutOfScope("BIND (Extend) is not conjunctive".into()))
-        }
-        GraphPattern::Group { .. } => {
-            Err(CqError::OutOfScope("aggregation (GROUP BY) is not conjunctive".into()))
-        }
-        GraphPattern::Service { .. } => {
-            Err(CqError::OutOfScope("SERVICE (federation) is out of scope".into()))
-        }
-        GraphPattern::OrderBy { .. } => {
-            Err(CqError::OutOfScope("ORDER BY inside the body is out of scope".into()))
-        }
-        GraphPattern::Slice { .. } => {
-            Err(CqError::OutOfScope("LIMIT/OFFSET inside the body is out of scope".into()))
-        }
+        GraphPattern::Graph { .. } => Err(CqError::OutOfScope(
+            "named-graph (GRAPH) is out of scope".into(),
+        )),
+        GraphPattern::Extend { .. } => Err(CqError::OutOfScope(
+            "BIND (Extend) is not conjunctive".into(),
+        )),
+        GraphPattern::Group { .. } => Err(CqError::OutOfScope(
+            "aggregation (GROUP BY) is not conjunctive".into(),
+        )),
+        GraphPattern::Service { .. } => Err(CqError::OutOfScope(
+            "SERVICE (federation) is out of scope".into(),
+        )),
+        GraphPattern::OrderBy { .. } => Err(CqError::OutOfScope(
+            "ORDER BY inside the body is out of scope".into(),
+        )),
+        GraphPattern::Slice { .. } => Err(CqError::OutOfScope(
+            "LIMIT/OFFSET inside the body is out of scope".into(),
+        )),
         GraphPattern::Distinct { .. } | GraphPattern::Reduced { .. } => Err(CqError::OutOfScope(
             "nested DISTINCT/REDUCED is out of scope".into(),
         )),
-        GraphPattern::Project { .. } => {
-            Err(CqError::OutOfScope("nested sub-SELECT is out of scope".into()))
-        }
+        GraphPattern::Project { .. } => Err(CqError::OutOfScope(
+            "nested sub-SELECT is out of scope".into(),
+        )),
         // `Lateral` exists because the vendored spargebra is built with `sep-0006` (the
         // workspace dep enables it). Match it unconditionally.
         GraphPattern::Lateral { .. } => {
@@ -827,11 +857,18 @@ fn collect_expr_vars(expr: &spargebra::algebra::Expression, out: &mut Vec<Variab
     use spargebra::algebra::Expression;
     match expr {
         Expression::Variable(v) => out.push(v.clone()),
-        Expression::Or(a, b) | Expression::And(a, b) | Expression::Equal(a, b)
-        | Expression::SameTerm(a, b) | Expression::Greater(a, b)
-        | Expression::GreaterOrEqual(a, b) | Expression::Less(a, b)
-        | Expression::LessOrEqual(a, b) | Expression::Add(a, b) | Expression::Subtract(a, b)
-        | Expression::Multiply(a, b) | Expression::Divide(a, b) => {
+        Expression::Or(a, b)
+        | Expression::And(a, b)
+        | Expression::Equal(a, b)
+        | Expression::SameTerm(a, b)
+        | Expression::Greater(a, b)
+        | Expression::GreaterOrEqual(a, b)
+        | Expression::Less(a, b)
+        | Expression::LessOrEqual(a, b)
+        | Expression::Add(a, b)
+        | Expression::Subtract(a, b)
+        | Expression::Multiply(a, b)
+        | Expression::Divide(a, b) => {
             collect_expr_vars(a, out);
             collect_expr_vars(b, out);
         }
@@ -933,7 +970,8 @@ mod tests {
         }
     }
 
-    const PRE: &str = "PREFIX : <http://ex/> PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>";
+    const PRE: &str =
+        "PREFIX : <http://ex/> PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>";
 
     // ---- existing acceptance cases (must not regress) ----
 
@@ -955,7 +993,9 @@ mod tests {
 
     #[test]
     fn accepts_distinct() {
-        let cq = accepts(&format!("{PRE} SELECT DISTINCT ?x WHERE {{ ?x rdf:type :A }}"));
+        let cq = accepts(&format!(
+            "{PRE} SELECT DISTINCT ?x WHERE {{ ?x rdf:type :A }}"
+        ));
         assert!(cq.distinct);
     }
 
@@ -986,10 +1026,9 @@ mod tests {
 
     #[test]
     fn rejects_property_path() {
-        assert!(rejects(&format!(
-            "{PRE} SELECT ?x WHERE {{ ?x :r+ ?y }}"
-        ))
-        .contains("property path"));
+        assert!(
+            rejects(&format!("{PRE} SELECT ?x WHERE {{ ?x :r+ ?y }}")).contains("property path")
+        );
     }
 
     #[test]
@@ -1066,7 +1105,11 @@ mod tests {
         ));
         match as_conjunctive_query(&q) {
             Err(CqError::OutOfScope(r)) => {
-                assert!(r.contains("UCQ") || r.contains("UNION"), "expected UCQ rejection, got: {}", r);
+                assert!(
+                    r.contains("UCQ") || r.contains("UNION"),
+                    "expected UCQ rejection, got: {}",
+                    r
+                );
             }
             Ok(_) => panic!("as_conjunctive_query must reject a multi-branch UCQ"),
         }
@@ -1081,7 +1124,11 @@ mod tests {
             "{PRE} SELECT ?x WHERE {{ ?x rdf:type :A FILTER(?x != :Bad) }}"
         ));
         assert_eq!(cq.atoms.len(), 1);
-        assert_eq!(cq.filter_exprs.len(), 1, "filter expression must be collected");
+        assert_eq!(
+            cq.filter_exprs.len(),
+            1,
+            "filter expression must be collected"
+        );
     }
 
     #[test]
@@ -1188,7 +1235,11 @@ mod tests {
             "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> PREFIX : <http://ex/> \
              SELECT ?x ?label WHERE { ?x rdfs:label ?label }",
         );
-        assert_eq!(cq.atoms.len(), 1, "rdfs:label must be admitted as a plain role atom");
+        assert_eq!(
+            cq.atoms.len(),
+            1,
+            "rdfs:label must be admitted as a plain role atom"
+        );
     }
 
     #[test]
@@ -1197,7 +1248,11 @@ mod tests {
             "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> PREFIX : <http://ex/> \
              SELECT ?x ?ref WHERE { ?x rdfs:seeAlso ?ref }",
         );
-        assert_eq!(cq.atoms.len(), 1, "rdfs:seeAlso must be admitted as a plain role atom");
+        assert_eq!(
+            cq.atoms.len(),
+            1,
+            "rdfs:seeAlso must be admitted as a plain role atom"
+        );
     }
 
     #[test]

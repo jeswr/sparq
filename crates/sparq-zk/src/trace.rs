@@ -89,7 +89,13 @@ impl CommittedNamedGraph {
             .enumerate()
             .map(|(i, t)| (t.clone(), i))
             .collect();
-        Ok(CommittedNamedGraph { name, triples, commitment, label_map, leaf_of })
+        Ok(CommittedNamedGraph {
+            name,
+            triples,
+            commitment,
+            label_map,
+            leaf_of,
+        })
     }
 
     /// Leaf index of a store-form triple (input labels), via the issued
@@ -103,7 +109,9 @@ impl CommittedNamedGraph {
 /// RDFC-1.0 issued-identifier map for a graph's content (input label →
 /// canonical `c14nN` label). Single-sourced via the [`sparq_canon`] public API
 /// (same bridge as [`crate::canon`]). [OPUS-4.8] sq-0qip.
-fn issue_label_map(triples: &[Triple]) -> Result<HashMap<String, String>, crate::canon::CanonError> {
+fn issue_label_map(
+    triples: &[Triple],
+) -> Result<HashMap<String, String>, crate::canon::CanonError> {
     sparq_canon::issue_triples(triples)
 }
 
@@ -113,7 +121,8 @@ fn issue_label_map(triples: &[Triple]) -> Result<HashMap<String, String>, crate:
 fn relabel_triple(t: &Triple, map: &HashMap<String, String>) -> Option<Triple> {
     use oxrdf::NamedOrBlankNode;
     let relabel_bnode = |b: &BlankNode| -> Option<BlankNode> {
-        map.get(b.as_str()).map(|l| BlankNode::new_unchecked(l.clone()))
+        map.get(b.as_str())
+            .map(|l| BlankNode::new_unchecked(l.clone()))
     };
     let subject = match &t.subject {
         NamedOrBlankNode::BlankNode(b) => NamedOrBlankNode::BlankNode(relabel_bnode(b)?),
@@ -186,7 +195,11 @@ impl TracedExecution {
 impl ZkDataset {
     /// Builds the queried union from named graphs of `store`, committing
     /// each under its salt. `names` and `salts` are parallel slices.
-    pub fn from_store(store: &Graph, names: &[NamedNode], salts: &[Fr]) -> Result<Self, TraceError> {
+    pub fn from_store(
+        store: &Graph,
+        names: &[NamedNode],
+        salts: &[Fr],
+    ) -> Result<Self, TraceError> {
         assert_eq!(names.len(), salts.len(), "names and salts must be parallel");
         let mut graphs = Vec::with_capacity(names.len());
         for (name, salt) in names.iter().zip(salts) {
@@ -194,8 +207,9 @@ impl ZkDataset {
             let Some((_, g)) = store.named.iter().find(|(n, _)| *n == gname) else {
                 return Err(TraceError::MissingGraph(name.as_str().to_string()));
             };
-            let triples = crate::canon::graph_triples(g)
-                .map_err(|e| TraceError::Commit(name.as_str().to_string(), CommitError::Canon(e)))?;
+            let triples = crate::canon::graph_triples(g).map_err(|e| {
+                TraceError::Commit(name.as_str().to_string(), CommitError::Canon(e))
+            })?;
             graphs.push(CommittedNamedGraph::build(name.clone(), triples, *salt)?);
         }
         let union = build_union(&graphs);
@@ -210,7 +224,8 @@ impl ZkDataset {
         names: &[NamedNode],
         salts: &[Fr],
     ) -> Result<Self, TraceError> {
-        let store = Graph::load_dataset(text, format).map_err(|e| TraceError::Query(e.to_string()))?;
+        let store =
+            Graph::load_dataset(text, format).map_err(|e| TraceError::Query(e.to_string()))?;
         Self::from_store(&store, names, salts)
     }
 
@@ -218,12 +233,15 @@ impl ZkDataset {
     /// resolves leaf references, and applies the Q6 bnode guard.
     pub fn query_traced(&self, sparql: &str) -> Result<TracedExecution, TraceError> {
         let _guard = sparq_engine::zk::install();
-        let result =
-            sparq_engine::query(&self.union, sparql).map_err(TraceError::Query)?;
+        let result = sparq_engine::query(&self.union, sparql).map_err(TraceError::Query)?;
         let trace = sparq_engine::zk::take();
         let patterns = self.resolve(&trace)?;
         bnode_guard(&trace, &patterns, &self.graphs)?;
-        Ok(TracedExecution { result, trace, patterns })
+        Ok(TracedExecution {
+            result,
+            trace,
+            patterns,
+        })
     }
 
     /// Resolves each traced triple to its (graph, leaf) attributions.
@@ -232,8 +250,7 @@ impl ZkDataset {
         for pm in &trace.patterns {
             let mut leaves = Vec::with_capacity(pm.triples.len());
             for t in &pm.triples {
-                let triple = terms_to_triple(t)
-                    .map_err(TraceError::UnattributableTriple)?;
+                let triple = terms_to_triple(t).map_err(TraceError::UnattributableTriple)?;
                 let mut refs = Vec::new();
                 for (gi, g) in self.graphs.iter().enumerate() {
                     if let Some(leaf) = g.leaf_index(&triple) {
@@ -245,7 +262,10 @@ impl ZkDataset {
                 }
                 leaves.push(refs);
             }
-            out.push(ResolvedPattern { pattern: pm.pattern.clone(), leaves });
+            out.push(ResolvedPattern {
+                pattern: pm.pattern.clone(),
+                leaves,
+            });
         }
         Ok(out)
     }
@@ -312,9 +332,13 @@ fn bnode_guard(
     for (pm, rp) in trace.patterns.iter().zip(resolved) {
         let mut vars: HashMap<String, Support> = HashMap::new();
         for (slot_i, slot) in pm.pattern.slots.iter().enumerate() {
-            let SlotPattern::Var(name) = slot else { continue };
+            let SlotPattern::Var(name) = slot else {
+                continue;
+            };
             for (t, refs) in pm.triples.iter().zip(&rp.leaves) {
-                let Term::BlankNode(b) = &t[slot_i] else { continue };
+                let Term::BlankNode(b) = &t[slot_i] else {
+                    continue;
+                };
                 let gset: HashSet<usize> = refs.iter().map(|r| r.graph).collect();
                 vars.entry(name.clone())
                     .or_default()
@@ -329,9 +353,13 @@ fn bnode_guard(
     for i in 0..per_pattern.len() {
         for j in (i + 1)..per_pattern.len() {
             for (var, support_i) in &per_pattern[i] {
-                let Some(support_j) = per_pattern[j].get(var) else { continue };
+                let Some(support_j) = per_pattern[j].get(var) else {
+                    continue;
+                };
                 for (bnode, sets_i) in support_i {
-                    let Some(sets_j) = support_j.get(bnode) else { continue };
+                    let Some(sets_j) = support_j.get(bnode) else {
+                        continue;
+                    };
                     for si in sets_i {
                         for sj in sets_j {
                             if si.is_disjoint(sj) {

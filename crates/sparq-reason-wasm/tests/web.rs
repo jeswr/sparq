@@ -180,7 +180,10 @@ fn why_n3_proof_tree() {
         { ?x ex:knows ?y . } => { ?x ex:reaches ?y . } ."#;
     let json = Reasoner::why_n3(n3, "<http://ex/a>", "<http://ex/reaches>", "<http://ex/b>")
         .expect("whyN3 must succeed for a derived triple");
-    assert!(json.contains("n3-rule-"), "derivation names the rule: {json}");
+    assert!(
+        json.contains("n3-rule-"),
+        "derivation names the rule: {json}"
+    );
     assert!(json.contains("\"asserted\""), "leaves are asserted: {json}");
 
     let absent = Reasoner::why_n3(n3, "<http://ex/b>", "<http://ex/reaches>", "<http://ex/a>")

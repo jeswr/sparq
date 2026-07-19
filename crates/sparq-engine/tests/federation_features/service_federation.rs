@@ -17,8 +17,8 @@ use std::net::TcpListener;
 use std::sync::mpsc;
 use std::thread;
 
-use sparq_engine::{query, with_service_egress_allow};
 use sparq_core::Graph;
+use sparq_engine::{query, with_service_egress_allow};
 
 /// The loopback test endpoints below resolve to `127.0.0.1`, which the default-deny
 /// SSRF egress filter ([OPUS-4.8], bead sq-2v6f) refuses. The tests are legitimately
@@ -39,7 +39,9 @@ fn serve(status: &'static str, body: String, n: usize) -> String {
     thread::spawn(move || {
         tx.send(()).ok();
         for _ in 0..n {
-            let Ok((mut stream, _)) = listener.accept() else { return };
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
             // Drain the request (headers + form body) so the client's write completes.
             let mut buf = [0u8; 4096];
             let _ = stream.read(&mut buf);
@@ -92,7 +94,11 @@ fn service_returns_and_joins_remote_solutions() {
     let res = query_local(&g, &q).expect("federated query");
 
     // Two local Persons joined with two remote names => two rows.
-    assert_eq!(res.rows.len(), 2, "expected the remote names joined onto both local persons");
+    assert_eq!(
+        res.rows.len(),
+        2,
+        "expected the remote names joined onto both local persons"
+    );
     let names: Vec<String> = res
         .rows
         .iter()
@@ -144,7 +150,10 @@ fn service_non_silent_on_unreachable_endpoint_errors() {
     let q = "PREFIX ex: <http://ex/>\n\
              SELECT ?s WHERE { ?s a ex:Person . \
              SERVICE <http://127.0.0.1:1/> { ?s ex:name ?name } }";
-    assert!(query(&g, q).is_err(), "non-SILENT SERVICE against a dead endpoint must error");
+    assert!(
+        query(&g, q).is_err(),
+        "non-SILENT SERVICE against a dead endpoint must error"
+    );
 }
 
 #[test]
@@ -156,7 +165,10 @@ fn service_malformed_response_errors_but_silent_swallows() {
         "PREFIX ex: <http://ex/>\n\
          SELECT ?s WHERE {{ ?s a ex:Person . SERVICE <{url}> {{ ?s ex:name ?name }} }}"
     );
-    assert!(query_local(&g, &q).is_err(), "malformed remote body must error (non-SILENT)");
+    assert!(
+        query_local(&g, &q).is_err(),
+        "malformed remote body must error (non-SILENT)"
+    );
 
     let url2 = serve("200 OK", "still not json".to_string(), 1);
     let q2 = format!(
@@ -164,7 +176,11 @@ fn service_malformed_response_errors_but_silent_swallows() {
          SELECT ?s WHERE {{ ?s a ex:Person . SERVICE SILENT <{url2}> {{ ?s ex:name ?name }} }}"
     );
     let res = query_local(&g, &q2).expect("SILENT swallows a malformed body");
-    assert_eq!(res.rows.len(), 2, "SILENT malformed -> identity -> local persons survive");
+    assert_eq!(
+        res.rows.len(),
+        2,
+        "SILENT malformed -> identity -> local persons survive"
+    );
 }
 
 #[test]
@@ -181,7 +197,8 @@ fn service_default_deny_refuses_loopback_endpoint() {
          SELECT ?s WHERE {{ ?s a ex:Person . SERVICE <{url}> {{ ?s ex:name ?name }} }}"
     );
     // No `with_service_egress_allow` wrapper => default-deny is in force.
-    let err = query(&g, &q).expect_err("loopback SERVICE must be refused by default-deny SSRF policy");
+    let err =
+        query(&g, &q).expect_err("loopback SERVICE must be refused by default-deny SSRF policy");
     assert!(
         err.to_lowercase().contains("egress")
             || err.to_lowercase().contains("private")
@@ -209,7 +226,11 @@ fn service_silent_default_deny_loopback_yields_identity() {
          SELECT ?s WHERE {{ ?s a ex:Person . SERVICE SILENT <{url}> {{ ?s ex:name ?name }} }}"
     );
     let res = query(&g, &q).expect("SILENT swallows the egress refusal");
-    assert_eq!(res.rows.len(), 2, "SILENT egress refusal -> identity -> local persons survive");
+    assert_eq!(
+        res.rows.len(),
+        2,
+        "SILENT egress refusal -> identity -> local persons survive"
+    );
 }
 
 #[test]

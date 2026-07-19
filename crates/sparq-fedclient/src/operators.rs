@@ -418,9 +418,8 @@ fn fragterm_to_oxterm(term: &FragTerm) -> Term {
         FragTerm::Blank(s) => BlankNode::new(s)
             .map(Term::BlankNode)
             .unwrap_or_else(|_| Term::Literal(Literal::new_simple_literal(s.clone()))),
-        FragTerm::Literal(s) => {
-            Term::from_str(s).unwrap_or_else(|_| Term::Literal(Literal::new_simple_literal(s.clone())))
-        }
+        FragTerm::Literal(s) => Term::from_str(s)
+            .unwrap_or_else(|_| Term::Literal(Literal::new_simple_literal(s.clone()))),
     }
 }
 
@@ -754,7 +753,10 @@ fn solution_to_tuple(sol: &Solution) -> Tuple {
         .vars
         .iter()
         .zip(sol.cells.iter())
-        .filter_map(|(v, cell)| cell.as_ref().map(|t| (FpVar::new(v.clone()), t.to_string())));
+        .filter_map(|(v, cell)| {
+            cell.as_ref()
+                .map(|t| (FpVar::new(v.clone()), t.to_string()))
+        });
     Tuple::new(pairs)
 }
 
@@ -770,7 +772,10 @@ fn tuple_to_solution(t: &Tuple, out_vars: &[String]) -> Result<Solution, FedErro
         match t.get(&FpVar::new(v.clone())) {
             Some(lex) => {
                 let term = Term::from_str(lex).map_err(|e| {
-                    FedError::Transport(format!("streaming join: un-parseable term {:?}: {}", lex, e))
+                    FedError::Transport(format!(
+                        "streaming join: un-parseable term {:?}: {}",
+                        lex, e
+                    ))
                 })?;
                 cells.push(Some(term));
             }
@@ -873,10 +878,7 @@ impl Drop for ScatterPool {
 /// equi-join key), in `left`'s order. The same key the Phase-3 [`natural_join`] computes,
 /// so the streamed join and the materialised join agree. [OPUS-4.8] sq-vtba.
 fn join_vars(left: &[String], right: &[String]) -> Vec<String> {
-    left.iter()
-        .filter(|v| right.contains(v))
-        .cloned()
-        .collect()
+    left.iter().filter(|v| right.contains(v)).cloned().collect()
 }
 
 /// The output header of a join: `left`'s variables followed by `right`'s left-not-present
@@ -1208,7 +1210,8 @@ fn stream_node(
         JoinNode::Join { left, right, .. } => {
             let l = stream_node(resolver, selection, source, left, pool, opts)?;
             let r = stream_leaf(resolver, selection, source, *right, pool, opts)?;
-            let join = StreamingJoin::new(&l.vars, &r.vars, opts.join_opts.clone(), opts.channel_cap);
+            let join =
+                StreamingJoin::new(&l.vars, &r.vars, opts.join_opts.clone(), opts.channel_cap);
             let out_vars = join.out_vars().to_vec();
             let stream = join.run(l.stream, r.stream);
             Ok(StreamNode {
@@ -1346,7 +1349,8 @@ fn stream_node_multi(
         JoinNode::Join { left, right, .. } => {
             let l = stream_node_multi(resolver, selection, adapters, left, pool, opts)?;
             let r = stream_leaf_multi(resolver, selection, adapters, *right, pool, opts)?;
-            let join = StreamingJoin::new(&l.vars, &r.vars, opts.join_opts.clone(), opts.channel_cap);
+            let join =
+                StreamingJoin::new(&l.vars, &r.vars, opts.join_opts.clone(), opts.channel_cap);
             let out_vars = join.out_vars().to_vec();
             let stream = join.run(l.stream, r.stream);
             Ok(StreamNode {
@@ -1771,7 +1775,12 @@ mod tests {
         let lang = Term::Literal(Literal::new_language_tagged_literal("hi", "en").unwrap());
         let sol = Solution::new(
             vec!["s".into(), "o".into(), "n".into(), "u".into()],
-            vec![Some(nn("http://ex/a")), Some(typed.clone()), Some(lang.clone()), None],
+            vec![
+                Some(nn("http://ex/a")),
+                Some(typed.clone()),
+                Some(lang.clone()),
+                None,
+            ],
         );
         let tuple = solution_to_tuple(&sol);
         // The unbound cell (?u) is absent from the tuple; the bound ones survive.
@@ -1813,16 +1822,15 @@ mod tests {
         for order in ["lr", "rl", "alt"] {
             let lstream = SolutionStream::from_rows(left.vars.clone(), left.rows.clone());
             let rstream = SolutionStream::from_rows(right.vars.clone(), right.rows.clone());
-            let join = StreamingJoin::new(
-                &left.vars,
-                &right.vars,
-                StreamJoinOptions::default(),
-                16,
-            );
+            let join =
+                StreamingJoin::new(&left.vars, &right.vars, StreamJoinOptions::default(), 16);
             let _ = order; // the from_rows streams are pre-buffered; the feeder multiplexes them
             let out = join.run(lstream, rstream).collect_solutions().unwrap();
             let got_rows: Vec<Vec<Option<Term>>> = out.iter().map(|s| s.cells.clone()).collect();
-            let got_vars = out.first().map(|s| s.vars.clone()).unwrap_or(oracle.vars.clone());
+            let got_vars = out
+                .first()
+                .map(|s| s.vars.clone())
+                .unwrap_or(oracle.vars.clone());
             assert!(
                 solutions_equal(&got_vars, &got_rows, &oracle.vars, &oracle.rows),
                 "streaming join ({}) must equal natural_join.\n got={:?}\n oracle={:?}",
@@ -1840,13 +1848,23 @@ mod tests {
         let left = Relation {
             vars: vec!["s".into(), "o".into()],
             rows: (0..12)
-                .map(|i| vec![Some(nn(&format!("http://ex/k{}", i % 3))), Some(lit(&format!("o{}", i)))])
+                .map(|i| {
+                    vec![
+                        Some(nn(&format!("http://ex/k{}", i % 3))),
+                        Some(lit(&format!("o{}", i))),
+                    ]
+                })
                 .collect(),
         };
         let right = Relation {
             vars: vec!["s".into(), "z".into()],
             rows: (0..12)
-                .map(|i| vec![Some(nn(&format!("http://ex/k{}", i % 3))), Some(lit(&format!("z{}", i)))])
+                .map(|i| {
+                    vec![
+                        Some(nn(&format!("http://ex/k{}", i % 3))),
+                        Some(lit(&format!("z{}", i))),
+                    ]
+                })
                 .collect(),
         };
         let oracle = natural_join(&left, &right);
@@ -1859,7 +1877,10 @@ mod tests {
         let join = StreamingJoin::new(&left.vars, &right.vars, tiny, 4);
         let out = join.run(lstream, rstream).collect_solutions().unwrap();
         let got_rows: Vec<Vec<Option<Term>>> = out.iter().map(|s| s.cells.clone()).collect();
-        let got_vars = out.first().map(|s| s.vars.clone()).unwrap_or(oracle.vars.clone());
+        let got_vars = out
+            .first()
+            .map(|s| s.vars.clone())
+            .unwrap_or(oracle.vars.clone());
         assert!(
             solutions_equal(&got_vars, &got_rows, &oracle.vars, &oracle.rows),
             "spilled streaming join must equal natural_join"
@@ -1881,7 +1902,10 @@ mod tests {
         fn new(answers: StdHashMap<String, String>) -> Self {
             ArcMapSource {
                 answers,
-                ep: Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(StdHashMap::new()))),
+                ep: Endpoint::new(
+                    "http://8.8.8.8/sparql",
+                    Box::new(MapTransport::new(StdHashMap::new())),
+                ),
             }
         }
     }
@@ -1893,15 +1917,19 @@ mod tests {
         }
         fn discover(
             &self,
-        ) -> Result<(crate::source::Capability, Option<sparq_fedplan::SourceDescriptor>), FedError>
-        {
+        ) -> Result<
+            (
+                crate::source::Capability,
+                Option<sparq_fedplan::SourceDescriptor>,
+            ),
+            FedError,
+        > {
             Ok((crate::source::Capability::endpoint(), None))
         }
         fn execute(&self, sub: &SubQuery) -> Result<String, FedError> {
-            self.answers
-                .get(&sub.sparql)
-                .cloned()
-                .ok_or_else(|| FedError::Transport(format!("no canned answer for {:?}", sub.sparql)))
+            self.answers.get(&sub.sparql).cloned().ok_or_else(|| {
+                FedError::Transport(format!("no canned answer for {:?}", sub.sparql))
+            })
         }
     }
 
@@ -1957,7 +1985,10 @@ mod tests {
         );
 
         // Materialised reference via the Phase-3 interpreter over the SAME canned answers.
-        let ep = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(answers.clone())));
+        let ep = Endpoint::new(
+            "http://8.8.8.8/sparql",
+            Box::new(MapTransport::new(answers.clone())),
+        );
         let adapters: Vec<&dyn FederatedSource> = vec![&ep];
         let resolver_ref = SourceResolver::new(&bgp, &adapters);
         let reference = materialize_single_source(&resolver_ref, &sel, &ep, &tree).unwrap();
@@ -1967,7 +1998,10 @@ mod tests {
         // The resolver only needs an adapter slice for index resolution; the streaming
         // interpreter answers every leaf through `arc_src`, so a stand-in endpoint adapter in
         // the slice is never `execute`d (it only satisfies `resolver.source_count()`/typing).
-        let stub = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(StdHashMap::new())));
+        let stub = Endpoint::new(
+            "http://8.8.8.8/sparql",
+            Box::new(MapTransport::new(StdHashMap::new())),
+        );
         let stub_adapters: Vec<&dyn FederatedSource> = vec![&stub];
         let resolver = SourceResolver::new(&bgp, &stub_adapters);
         let opts = StreamOptions {
@@ -2014,17 +2048,32 @@ mod tests {
         let descriptors = [mk("A"), mk("B")];
         let sel = select_sources(&bgp, &descriptors);
         let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
-        let stub = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(StdHashMap::new())));
+        let stub = Endpoint::new(
+            "http://8.8.8.8/sparql",
+            Box::new(MapTransport::new(StdHashMap::new())),
+        );
         let adapters: Vec<&dyn FederatedSource> = vec![&stub];
         let resolver = SourceResolver::new(&bgp, &adapters);
         let arc_src: Arc<dyn FederatedSource + Send + Sync> =
             Arc::new(ArcMapSource::new(StdHashMap::new()));
         // `SolutionStream` is not `Debug`, so match the error out by hand (cannot `unwrap_err`).
-        let err = match stream_single_source(&resolver, &sel, arc_src, &tree, &StreamOptions::default()) {
+        let err = match stream_single_source(
+            &resolver,
+            &sel,
+            arc_src,
+            &tree,
+            &StreamOptions::default(),
+        ) {
             Ok(_) => panic!("multi-source leaf must fail closed"),
             Err(e) => e,
         };
-        assert_eq!(err, InterpError::MultiSource { pattern: 0, sources: 2 });
+        assert_eq!(
+            err,
+            InterpError::MultiSource {
+                pattern: 0,
+                sources: 2
+            }
+        );
     }
 
     // ─── sq-yzca: TPF / brTPF leaves are answered through the interpreter (not Unsupported) ──
@@ -2092,12 +2141,19 @@ mod tests {
             let total_items = matched.len() as u64;
             let offset = match page {
                 None => 0,
-                Some(tok) => tok.strip_prefix("offset:").and_then(|n| n.parse().ok()).unwrap_or(0),
+                Some(tok) => tok
+                    .strip_prefix("offset:")
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0),
             };
             let end = (offset + self.page_size.max(1)).min(matched.len());
             let triples = matched[offset..end].iter().map(|t| (*t).clone()).collect();
             let next = (end < matched.len()).then(|| format!("offset:{end}"));
-            Ok(FragmentPage { triples, total_items, next })
+            Ok(FragmentPage {
+                triples,
+                total_items,
+                next,
+            })
         }
     }
 
@@ -2131,7 +2187,10 @@ mod tests {
         // page_size 2 forces pagination → exercises hydra:next-to-exhaustion through the adapter.
         let tpf = TpfSource::new(
             "http://frag/tpf",
-            Box::new(FragFixture { triples: knows_triples(), page_size: 2 }),
+            Box::new(FragFixture {
+                triples: knows_triples(),
+                page_size: 2,
+            }),
         );
         let adapters: Vec<&dyn FederatedSource> = vec![&tpf];
         let resolver = SourceResolver::new(&bgp, &adapters);
@@ -2167,12 +2226,19 @@ mod tests {
         let brtpf = BrTpfSource::new(
             "http://frag/brtpf",
             30,
-            Box::new(FragFixture { triples: knows_triples(), page_size: 100 }),
+            Box::new(FragFixture {
+                triples: knows_triples(),
+                page_size: 100,
+            }),
         );
         let adapters: Vec<&dyn FederatedSource> = vec![&brtpf];
         let resolver = SourceResolver::new(&bgp, &adapters);
         let rel = materialize_single_source(&resolver, &sel, &brtpf, &tree).unwrap();
-        assert_eq!(rel.rows.len(), 3, "brTPF unbound scan returns the whole fragment");
+        assert_eq!(
+            rel.rows.len(),
+            3,
+            "brTPF unbound scan returns the whole fragment"
+        );
     }
 
     /// The fragment leaf is also answered by the STREAMING interpreter (the dispatch is shared),
@@ -2192,7 +2258,10 @@ mod tests {
         // Materialised reference.
         let tpf_ref = TpfSource::new(
             "http://frag/tpf",
-            Box::new(FragFixture { triples: knows_triples(), page_size: 2 }),
+            Box::new(FragFixture {
+                triples: knows_triples(),
+                page_size: 2,
+            }),
         );
         let adapters: Vec<&dyn FederatedSource> = vec![&tpf_ref];
         let resolver_ref = SourceResolver::new(&bgp, &adapters);
@@ -2200,7 +2269,10 @@ mod tests {
         // Streamed.
         let arc_src: Arc<dyn FederatedSource + Send + Sync> = Arc::new(TpfSource::new(
             "http://frag/tpf",
-            Box::new(FragFixture { triples: knows_triples(), page_size: 2 }),
+            Box::new(FragFixture {
+                triples: knows_triples(),
+                page_size: 2,
+            }),
         ));
         let resolver = SourceResolver::new(&bgp, &adapters);
         let stream =
@@ -2289,14 +2361,20 @@ mod tests {
             "http://8.8.8.8/sparql",
             Box::new(MapTransport::new(one_answer(
                 sub,
-                srj(&["s", "o"], &[&[("s", "http://ex/a"), ("o", "http://ex/o1")]]),
+                srj(
+                    &["s", "o"],
+                    &[&[("s", "http://ex/a"), ("o", "http://ex/o1")]],
+                ),
             ))),
         );
         let ep_b = Endpoint::new(
             "http://8.8.4.4/sparql",
             Box::new(MapTransport::new(one_answer(
                 sub,
-                srj(&["s", "o"], &[&[("s", "http://ex/b"), ("o", "http://ex/o2")]]),
+                srj(
+                    &["s", "o"],
+                    &[&[("s", "http://ex/b"), ("o", "http://ex/o2")]],
+                ),
             ))),
         );
         // Adapter slice in source-index order: adapters[0]=A, adapters[1]=B.
@@ -2344,13 +2422,26 @@ mod tests {
         let sel = select_sources(&bgp, &descriptors);
         let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
         let sub = "SELECT ?s ?o WHERE { ?s <http://ex/p> ?o }";
-        let body = srj(&["s", "o"], &[&[("s", "http://ex/a"), ("o", "http://ex/o1")]]);
-        let ep_a = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(one_answer(sub, body.clone()))));
-        let ep_b = Endpoint::new("http://8.8.4.4/sparql", Box::new(MapTransport::new(one_answer(sub, body))));
+        let body = srj(
+            &["s", "o"],
+            &[&[("s", "http://ex/a"), ("o", "http://ex/o1")]],
+        );
+        let ep_a = Endpoint::new(
+            "http://8.8.8.8/sparql",
+            Box::new(MapTransport::new(one_answer(sub, body.clone()))),
+        );
+        let ep_b = Endpoint::new(
+            "http://8.8.4.4/sparql",
+            Box::new(MapTransport::new(one_answer(sub, body))),
+        );
         let adapters: Vec<&dyn FederatedSource> = vec![&ep_a, &ep_b];
         let resolver = SourceResolver::new(&bgp, &adapters);
         let rel = materialize_multi_source(&resolver, &sel, &tree).unwrap();
-        assert_eq!(rel.rows.len(), 2, "the shared solution appears once per source");
+        assert_eq!(
+            rel.rows.len(),
+            2,
+            "the shared solution appears once per source"
+        );
     }
 
     /// `stream_multi_source` produces the SAME multiset as `materialize_multi_source` for a
@@ -2377,29 +2468,54 @@ mod tests {
         let sel = select_sources(&bgp, &descriptors);
         let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
         let sub = "SELECT ?s ?o WHERE { ?s <http://ex/p> ?o }";
-        let a_body = srj(&["s", "o"], &[&[("s", "http://ex/a"), ("o", "http://ex/o1")]]);
-        let b_body = srj(&["s", "o"], &[&[("s", "http://ex/b"), ("o", "http://ex/o2")]]);
+        let a_body = srj(
+            &["s", "o"],
+            &[&[("s", "http://ex/a"), ("o", "http://ex/o1")]],
+        );
+        let b_body = srj(
+            &["s", "o"],
+            &[&[("s", "http://ex/b"), ("o", "http://ex/o2")]],
+        );
 
         // Materialised reference.
-        let ep_a = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(one_answer(sub, a_body.clone()))));
-        let ep_b = Endpoint::new("http://8.8.4.4/sparql", Box::new(MapTransport::new(one_answer(sub, b_body.clone()))));
+        let ep_a = Endpoint::new(
+            "http://8.8.8.8/sparql",
+            Box::new(MapTransport::new(one_answer(sub, a_body.clone()))),
+        );
+        let ep_b = Endpoint::new(
+            "http://8.8.4.4/sparql",
+            Box::new(MapTransport::new(one_answer(sub, b_body.clone()))),
+        );
         let ref_adapters: Vec<&dyn FederatedSource> = vec![&ep_a, &ep_b];
         let resolver_ref = SourceResolver::new(&bgp, &ref_adapters);
         let reference = materialize_multi_source(&resolver_ref, &sel, &tree).unwrap();
 
         // Streamed: owned Arc adapters, same source-index order.
-        let arc_a: Arc<dyn FederatedSource + Send + Sync> = Arc::new(ArcMapSource::new(one_answer(sub, a_body)));
-        let arc_b: Arc<dyn FederatedSource + Send + Sync> = Arc::new(ArcMapSource::new(one_answer(sub, b_body)));
+        let arc_a: Arc<dyn FederatedSource + Send + Sync> =
+            Arc::new(ArcMapSource::new(one_answer(sub, a_body)));
+        let arc_b: Arc<dyn FederatedSource + Send + Sync> =
+            Arc::new(ArcMapSource::new(one_answer(sub, b_body)));
         let arc_adapters = vec![arc_a, arc_b];
         // A stub borrowed slice only for index resolution (pattern lookup); the streaming path
         // answers through `arc_adapters`, so these are never `execute`d.
-        let stub_a = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(StdHashMap::new())));
-        let stub_b = Endpoint::new("http://8.8.4.4/sparql", Box::new(MapTransport::new(StdHashMap::new())));
+        let stub_a = Endpoint::new(
+            "http://8.8.8.8/sparql",
+            Box::new(MapTransport::new(StdHashMap::new())),
+        );
+        let stub_b = Endpoint::new(
+            "http://8.8.4.4/sparql",
+            Box::new(MapTransport::new(StdHashMap::new())),
+        );
         let stub_adapters: Vec<&dyn FederatedSource> = vec![&stub_a, &stub_b];
         let resolver = SourceResolver::new(&bgp, &stub_adapters);
-        let stream =
-            stream_multi_source(&resolver, &sel, &arc_adapters, &tree, &StreamOptions::default())
-                .expect("streaming multi-source builds");
+        let stream = stream_multi_source(
+            &resolver,
+            &sel,
+            &arc_adapters,
+            &tree,
+            &StreamOptions::default(),
+        )
+        .expect("streaming multi-source builds");
         let got = stream.collect_solutions().unwrap();
         let got_rows: Vec<Vec<Option<Term>>> = got.iter().map(|s| s.cells.clone()).collect();
         let got_vars = got
@@ -2425,20 +2541,30 @@ mod tests {
             var("o"),
         )]);
         // A descriptor that does NOT declare ex/p ⇒ the source is NOT retained for the leaf.
-        let descriptors = [SourceDescriptor::builder(SourceId::new("A")).total_triples(10).build()];
+        let descriptors = [SourceDescriptor::builder(SourceId::new("A"))
+            .total_triples(10)
+            .build()];
         let sel = select_sources(&bgp, &descriptors);
         assert!(
-            sel.first().map(|ps| ps.candidates.is_empty()).unwrap_or(true),
+            sel.first()
+                .map(|ps| ps.candidates.is_empty())
+                .unwrap_or(true),
             "no source retained for the unmatched predicate"
         );
         // With an empty selection there is no plan (no leaf retained any source); exercise the
         // leaf helper directly to assert the empty-relation contract without a JoinTree.
-        let ep = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(StdHashMap::new())));
+        let ep = Endpoint::new(
+            "http://8.8.8.8/sparql",
+            Box::new(MapTransport::new(StdHashMap::new())),
+        );
         let adapters: Vec<&dyn FederatedSource> = vec![&ep];
         let resolver = SourceResolver::new(&bgp, &adapters);
         let leaf = materialize_leaf_multi(&resolver, &sel, 0).unwrap();
         assert_eq!(leaf.vars, vec!["s".to_string(), "o".to_string()]);
-        assert!(leaf.rows.is_empty(), "no retained source ⇒ empty leaf relation");
+        assert!(
+            leaf.rows.is_empty(),
+            "no retained source ⇒ empty leaf relation"
+        );
     }
 
     /// A retained source index out of range for the streaming adapter slice fails closed with
@@ -2465,13 +2591,23 @@ mod tests {
         let descriptors = [mk("A"), mk("B")];
         let sel = select_sources(&bgp, &descriptors);
         let tree = plan_bgp(&bgp, &sel, &descriptors, &PlanOptions::default()).unwrap();
-        let stub = Endpoint::new("http://8.8.8.8/sparql", Box::new(MapTransport::new(StdHashMap::new())));
+        let stub = Endpoint::new(
+            "http://8.8.8.8/sparql",
+            Box::new(MapTransport::new(StdHashMap::new())),
+        );
         let stub_adapters: Vec<&dyn FederatedSource> = vec![&stub];
         let resolver = SourceResolver::new(&bgp, &stub_adapters);
         // Only ONE Arc adapter supplied, but the selection retained source index 1 ⇒ out of range.
-        let only: Arc<dyn FederatedSource + Send + Sync> = Arc::new(ArcMapSource::new(StdHashMap::new()));
+        let only: Arc<dyn FederatedSource + Send + Sync> =
+            Arc::new(ArcMapSource::new(StdHashMap::new()));
         let arc_adapters = vec![only];
-        let err = match stream_multi_source(&resolver, &sel, &arc_adapters, &tree, &StreamOptions::default()) {
+        let err = match stream_multi_source(
+            &resolver,
+            &sel,
+            &arc_adapters,
+            &tree,
+            &StreamOptions::default(),
+        ) {
             Ok(_) => panic!("an out-of-range source index must fail closed"),
             Err(e) => e,
         };
@@ -2592,6 +2728,10 @@ mod tests {
         pool.join();
         let mut got = StdArc::try_unwrap(seen).unwrap().into_inner().unwrap();
         got.sort_unstable();
-        assert_eq!(got, (0..N).collect::<Vec<_>>(), "every job runs exactly once");
+        assert_eq!(
+            got,
+            (0..N).collect::<Vec<_>>(),
+            "every job runs exactly once"
+        );
     }
 }

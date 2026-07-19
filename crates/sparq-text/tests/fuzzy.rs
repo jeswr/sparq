@@ -60,7 +60,10 @@ fn validates_bound_and_single_term_contract() {
         index.fuzzy("quick fox", 1),
         Err(FuzzyError::ExpectedSingleToken { found: 2 })
     );
-    assert_eq!(index.fuzzy("quick*", 1), Err(FuzzyError::PrefixNotSupported));
+    assert_eq!(
+        index.fuzzy("quick*", 1),
+        Err(FuzzyError::PrefixNotSupported)
+    );
 }
 
 #[cfg(feature = "engine")]

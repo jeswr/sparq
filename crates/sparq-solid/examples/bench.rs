@@ -36,7 +36,8 @@ const TITLES: &str = "SELECT ?title WHERE { ?s <https://ex.dev/ns#title> ?title 
 /// like-for-like for the perf comparison (issue #1546 `#union-default-graph`). Only used on
 /// the spec-conformant default build (under the legacy hatch v2 is already union-always).
 #[cfg(not(feature = "legacy-union-default-graph"))]
-const TITLES_UNION: &str = "SELECT ?title FROM <http://www.w3.org/ns/solid/sparql#union-default-graph> \
+const TITLES_UNION: &str =
+    "SELECT ?title FROM <http://www.w3.org/ns/solid/sparql#union-default-graph> \
      WHERE { ?s <https://ex.dev/ns#title> ?title }";
 
 /// The v2 query that ranges over the authorized union, so its row count matches v1's
@@ -75,55 +76,87 @@ fn main() {
     let stats = timed("WAC auth-view materialization (full pipeline)", || {
         store.materialize_wac().unwrap()
     });
-    println!("    auth view: {} triples, closure {:?}\n", stats.auth_triples, stats.strata_facts);
+    println!(
+        "    auth view: {} triples, closure {:?}\n",
+        stats.auth_triples, stats.strata_facts
+    );
 
     let acp_graph = Graph::load_dataset(&acp_fixture(), "nquads").unwrap();
     let mut acp_store = PodStore::new(acp_graph);
     let astats = timed("ACP auth-view materialization (3 strata)", || {
         acp_store.materialize_acp().unwrap()
     });
-    println!("    auth view: {} triples, closure per stratum {:?}\n", astats.auth_triples, astats.strata_facts);
+    println!(
+        "    auth view: {} triples, closure per stratum {:?}\n",
+        astats.auth_triples, astats.strata_facts
+    );
 
     // 2. per-query: v1 rewrite+copy vs full-dataset direct query
-    let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
+    let alice = Session {
+        agent: Some(ALICE),
+        client: None,
+        issuer: None,
+        now: None,
+    };
     let allowed = store.accessible(&alice, Mode::Read);
     println!("alice readable graphs: {}", allowed.len());
-    let direct = timed("engine::query, FULL dataset (GRAPH ?g over all graphs)", || {
-        sparq_engine::query(
-            &store.graph,
-            "SELECT ?title WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?title } }",
-        )
-        .unwrap()
-    });
+    let direct = timed(
+        "engine::query, FULL dataset (GRAPH ?g over all graphs)",
+        || {
+            sparq_engine::query(
+                &store.graph,
+                "SELECT ?title WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?title } }",
+            )
+            .unwrap()
+        },
+    );
     println!("    rows: {}", direct.rows.len());
-    let v1 = timed("query_as_rewrite (v1: FROM NAMED build_active copy)", || {
-        store.query_as_rewrite(&alice, Mode::Read, TITLES).unwrap()
-    });
-    println!("    rows: {} (authorized subset, union-always)", v1.rows.len());
+    let v1 = timed(
+        "query_as_rewrite (v1: FROM NAMED build_active copy)",
+        || store.query_as_rewrite(&alice, Mode::Read, TITLES).unwrap(),
+    );
+    println!(
+        "    rows: {} (authorized subset, union-always)",
+        v1.rows.len()
+    );
     // v2 ranges over the same authorized union as v1's union-always rewrite — the
     // apples-to-apples perf comparison. On the default build that means opting in with the
     // reserved IRI; under the legacy hatch a bare pattern is already union-always.
-    let v2 = timed("query_as (v2: zero-copy DatasetView, authorized union)", || {
-        store.query_as(&alice, Mode::Read, V2_UNION_QUERY).unwrap()
-    });
+    let v2 = timed(
+        "query_as (v2: zero-copy DatasetView, authorized union)",
+        || store.query_as(&alice, Mode::Read, V2_UNION_QUERY).unwrap(),
+    );
     println!("    rows: {} (authorized subset, union)", v2.rows.len());
-    assert_eq!(v1.rows.len(), v2.rows.len(), "v1 union-always == v2 authorized union");
+    assert_eq!(
+        v1.rows.len(),
+        v2.rows.len(),
+        "v1 union-always == v2 authorized union"
+    );
     // v2 spec default (bare default-graph pattern, no opt-in) is EMPTY per the Editor's Draft
     // (PR #1593): strictly more conservative than v1's union-always. Only holds on the
     // spec-conformant default build — the legacy hatch makes a bare pattern union-always.
     #[cfg(not(feature = "legacy-union-default-graph"))]
     {
-        let v2_default = timed("query_as (v2 spec default: bare pattern, empty default graph)", || {
-            store.query_as(&alice, Mode::Read, TITLES).unwrap()
-        });
-        println!("    rows: {} (empty default graph, spec-conformant)", v2_default.rows.len());
-        assert_eq!(v2_default.rows.len(), 0, "spec-conformant empty default graph (#1546)");
+        let v2_default = timed(
+            "query_as (v2 spec default: bare pattern, empty default graph)",
+            || store.query_as(&alice, Mode::Read, TITLES).unwrap(),
+        );
+        println!(
+            "    rows: {} (empty default graph, spec-conformant)",
+            v2_default.rows.len()
+        );
+        assert_eq!(
+            v2_default.rows.len(),
+            0,
+            "spec-conformant empty default graph (#1546)"
+        );
     }
     // each path's overhead alone, isolated: same query, pattern matched nothing
     const NOTHING: &str = "SELECT ?x WHERE { ?x <urn:none> <urn:none> }";
-    let nothing = timed("v1 copy cost isolated (rewritten query, empty pattern)", || {
-        store.query_as_rewrite(&alice, Mode::Read, NOTHING).unwrap()
-    });
+    let nothing = timed(
+        "v1 copy cost isolated (rewritten query, empty pattern)",
+        || store.query_as_rewrite(&alice, Mode::Read, NOTHING).unwrap(),
+    );
     assert_eq!(nothing.rows.len(), 0);
     let vnothing = timed("v2 view overhead isolated (same empty pattern)", || {
         store.query_as(&alice, Mode::Read, NOTHING).unwrap()
@@ -147,17 +180,30 @@ fn main() {
     });
     println!("    rows: {}", fat_direct.rows.len());
     let fat_v1 = timed("query_as_rewrite (v1 copy path), fat fixture", || {
-        fat_store.query_as_rewrite(&alice, Mode::Read, TITLES).unwrap()
+        fat_store
+            .query_as_rewrite(&alice, Mode::Read, TITLES)
+            .unwrap()
     });
     println!("    rows: {} (union-always)", fat_v1.rows.len());
     // like-for-like: v2 over the authorized union matches v1's union-always semantics.
-    let fat_v2 = timed("query_as (v2 view path, authorized union), fat fixture", || {
-        fat_store.query_as(&alice, Mode::Read, V2_UNION_QUERY).unwrap()
-    });
+    let fat_v2 = timed(
+        "query_as (v2 view path, authorized union), fat fixture",
+        || {
+            fat_store
+                .query_as(&alice, Mode::Read, V2_UNION_QUERY)
+                .unwrap()
+        },
+    );
     println!("    rows: {} (union)", fat_v2.rows.len());
-    assert_eq!(fat_v1.rows.len(), fat_v2.rows.len(), "v1 union-always == v2 authorized union (fat)");
+    assert_eq!(
+        fat_v1.rows.len(),
+        fat_v2.rows.len(),
+        "v1 union-always == v2 authorized union (fat)"
+    );
     let fat_nothing = timed("v1 copy cost isolated, fat fixture", || {
-        fat_store.query_as_rewrite(&alice, Mode::Read, NOTHING).unwrap()
+        fat_store
+            .query_as_rewrite(&alice, Mode::Read, NOTHING)
+            .unwrap()
     });
     assert_eq!(fat_nothing.rows.len(), 0);
     let fat_vnothing = timed("v2 view overhead isolated, fat fixture", || {
@@ -166,12 +212,25 @@ fn main() {
     assert_eq!(fat_vnothing.rows.len(), 0);
 
     // 3. session graph-set: cold vs cached
-    let bob = Session { agent: Some(sparq_solid::fixture::BOB), client: None, issuer: None, now: None };
+    let bob = Session {
+        agent: Some(sparq_solid::fixture::BOB),
+        client: None,
+        issuer: None,
+        now: None,
+    };
     let t = Instant::now();
     let cold = store.accessible(&bob, Mode::Read);
-    println!("{:64} {:10.3} ms", "session graph-set, cold (AuthIndex walk)", t.elapsed().as_secs_f64() * 1e3);
+    println!(
+        "{:64} {:10.3} ms",
+        "session graph-set, cold (AuthIndex walk)",
+        t.elapsed().as_secs_f64() * 1e3
+    );
     let t = Instant::now();
     let cached = store.accessible(&bob, Mode::Read);
-    println!("{:64} {:10.4} ms", "session graph-set, cached", t.elapsed().as_secs_f64() * 1e3);
+    println!(
+        "{:64} {:10.4} ms",
+        "session graph-set, cached",
+        t.elapsed().as_secs_f64() * 1e3
+    );
     assert_eq!(cold.len(), cached.len());
 }

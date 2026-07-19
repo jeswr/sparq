@@ -76,7 +76,11 @@ fn rows_sorted(r: &QueryResult) -> Vec<Vec<String>> {
     let mut out: Vec<Vec<String>> = r
         .rows
         .iter()
-        .map(|row| row.iter().map(|c| c.as_ref().map(|t| t.to_string()).unwrap_or_default()).collect())
+        .map(|row| {
+            row.iter()
+                .map(|c| c.as_ref().map(|t| t.to_string()).unwrap_or_default())
+                .collect()
+        })
         .collect();
     out.sort();
     out
@@ -85,19 +89,24 @@ fn rows_sorted(r: &QueryResult) -> Vec<Vec<String>> {
 /// Runs `sparql` post-hoc and with the real provider installed, asserting identical
 /// results, returning `(rows, residual_checks_posthoc, residual_checks_pushed)`.
 fn differential(graph: &Graph, sparql: &str) -> (Vec<Vec<String>>, usize, usize) {
-    let provider: Arc<dyn SpatialProvider> = Arc::new(GeoIndexProvider::new(GeoIndex::build(graph)));
+    let provider: Arc<dyn SpatialProvider> =
+        Arc::new(GeoIndexProvider::new(GeoIndex::build(graph)));
     let counter = Arc::new(AtomicUsize::new(0));
     let reg = counting_registry(counter.clone());
 
     let posthoc = with_functions(&reg, || query(graph, sparql)).unwrap();
     let checks_posthoc = counter.swap(0, Ordering::Relaxed);
 
-    let pushed = with_spatial_index(provider, || with_functions(&reg, || query(graph, sparql))).unwrap();
+    let pushed =
+        with_spatial_index(provider, || with_functions(&reg, || query(graph, sparql))).unwrap();
     let checks_pushed = counter.load(Ordering::Relaxed);
 
     let a = rows_sorted(&posthoc);
     let b = rows_sorted(&pushed);
-    assert_eq!(a, b, "exact pushdown changed the RESULT (must equal post-hoc)\nquery: {sparql}");
+    assert_eq!(
+        a, b,
+        "exact pushdown changed the RESULT (must equal post-hoc)\nquery: {sparql}"
+    );
     (a, checks_posthoc, checks_pushed)
 }
 
@@ -186,9 +195,15 @@ fn shared_variable_mixed_bindings_shrink_but_keep_the_residual() {
     let (rows, checks_posthoc, checks_pushed) = differential(&g, &q);
     // 5 strictly-inside grid features + u_in.
     assert_eq!(rows.len(), 6);
-    assert_eq!(checks_posthoc, 27, "post-hoc checks all 25 grid + 2 unindexed bindings");
+    assert_eq!(
+        checks_posthoc, 27,
+        "post-hoc checks all 25 grid + 2 unindexed bindings"
+    );
     // Not-indexed rows survive, so the residual FILTER still runs — over the 7
     // survivors of the exact restriction (5 certified rows, on which it is an
     // identity, + the 2 not-indexed it must judge), not the original 27.
-    assert_eq!(checks_pushed, 7, "residual input shrank to the exact-restriction survivors");
+    assert_eq!(
+        checks_pushed, 7,
+        "residual input shrank to the exact-restriction survivors"
+    );
 }

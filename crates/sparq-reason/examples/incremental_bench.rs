@@ -47,8 +47,9 @@ fn main() {
     let mut base: Vec<[Id; 3]> = Vec::new();
     let mut classes: Vec<Id> = Vec::new();
     for i in 0..25 {
-        let chain: Vec<Id> =
-            (0..8).map(|j| dict.intern_iri(&format!("http://ex/C{i}_{j}"))).collect();
+        let chain: Vec<Id> = (0..8)
+            .map(|j| dict.intern_iri(&format!("http://ex/C{i}_{j}")))
+            .collect();
         for w in chain.windows(2) {
             base.push([w[0], sc, w[1]]);
         }
@@ -56,8 +57,9 @@ fn main() {
     }
     let mut props: Vec<Id> = Vec::new();
     for i in 0..10 {
-        let chain: Vec<Id> =
-            (0..3).map(|j| dict.intern_iri(&format!("http://ex/p{i}_{j}"))).collect();
+        let chain: Vec<Id> = (0..3)
+            .map(|j| dict.intern_iri(&format!("http://ex/p{i}_{j}")))
+            .collect();
         for w in chain.windows(2) {
             base.push([w[0], sp, w[1]]);
         }
@@ -68,8 +70,9 @@ fn main() {
         props.extend(chain);
     }
     // ABox: 200k individuals, each with one type + two property assertions (~600k triples).
-    let individuals: Vec<Id> =
-        (0..N_INDIVIDUALS).map(|i| dict.intern_iri(&format!("http://ex/ind{i}"))).collect();
+    let individuals: Vec<Id> = (0..N_INDIVIDUALS)
+        .map(|i| dict.intern_iri(&format!("http://ex/ind{i}")))
+        .collect();
     for &s in &individuals {
         base.push([s, ty, classes[rng.below(classes.len())]]);
         for _ in 0..2 {
@@ -89,7 +92,10 @@ fn main() {
     let t0 = Instant::now();
     let mut g = MaterializedGraph::new(&mut dict, &base);
     let init = t0.elapsed();
-    println!("initial materialization: {} closure triples in {init:?}", g.len());
+    println!(
+        "initial materialization: {} closure triples in {init:?}",
+        g.len()
+    );
 
     let random_abox = |rng: &mut Rng| -> [Id; 3] {
         let s = individuals[rng.below(individuals.len())];
@@ -128,7 +134,11 @@ fn main() {
         let full = t.elapsed();
         best_full_ins = best_full_ins.min(full);
 
-        assert_eq!(g.len(), full_base.len(), "closure size mismatch after insert round {round}");
+        assert_eq!(
+            g.len(),
+            full_base.len(),
+            "closure size mismatch after insert round {round}"
+        );
         g.delete(&delta); // undo: every round starts from the same base
     }
     println!(
@@ -166,12 +176,20 @@ fn main() {
         let full = t.elapsed();
         best_full_del = best_full_del.min(full);
 
-        assert_eq!(g.len(), full_base.len(), "closure size mismatch after delete round {round}");
+        assert_eq!(
+            g.len(),
+            full_base.len(),
+            "closure size mismatch after delete round {round}"
+        );
         g.insert(&delta); // restore
     }
     println!(
         "delete {BATCH} ABox triples:  incremental {best_inc_del:?}  vs  full {best_full_del:?}  ({:.0}x faster)",
         best_full_del.as_secs_f64() / best_inc_del.as_secs_f64().max(1e-9)
     );
-    assert_eq!(g.full_rebuilds(), 0, "ABox-only benchmark must never trigger the TBox fallback");
+    assert_eq!(
+        g.full_rebuilds(),
+        0,
+        "ABox-only benchmark must never trigger the TBox fallback"
+    );
 }

@@ -14,7 +14,9 @@ pub fn write_nt(n: u32, path: &str) -> std::io::Result<usize> {
     let mut w = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut seed = 0x9E3779B97F4A7C15u64;
     let mut rng = || {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (seed >> 33) as u32
     };
     let mut triples = 0usize;
@@ -26,10 +28,18 @@ pub fn write_nt(n: u32, path: &str) -> std::io::Result<usize> {
             "<http://ex/n{i}> <http://ex/age> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .",
             20 + i % 80
         )?;
-        writeln!(w, "<http://ex/n{i}> <http://ex/city> <http://ex/c{}> .", i % n_cities)?;
+        writeln!(
+            w,
+            "<http://ex/n{i}> <http://ex/city> <http://ex/c{}> .",
+            i % n_cities
+        )?;
         triples += 4;
         for _ in 0..follows_per {
-            writeln!(w, "<http://ex/n{i}> <http://ex/follows> <http://ex/n{}> .", rng() % n)?;
+            writeln!(
+                w,
+                "<http://ex/n{i}> <http://ex/follows> <http://ex/n{}> .",
+                rng() % n
+            )?;
             triples += 1;
         }
     }
@@ -49,7 +59,9 @@ pub fn generate(n: u32) -> String {
 
     let mut seed = 0x9E3779B97F4A7C15u64;
     let mut rng = || {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (seed >> 33) as u32
     };
 

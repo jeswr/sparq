@@ -58,7 +58,9 @@
 //! (empirically) that a single wrong byte fails the equality the other tests rely on.
 
 use sparq_core::Graph;
-use sparq_engine::{query_json, query_json_chunks_with_budget, query_json_stream_with_budget, QueryBudget};
+use sparq_engine::{
+    query_json, query_json_chunks_with_budget, query_json_stream_with_budget, QueryBudget,
+};
 
 // ─── corpus construction ──────────────────────────────────────────────────────
 
@@ -75,8 +77,14 @@ fn q04_graph(n_articles: usize) -> Graph {
         let creator = i % 7;
         let journal = i % 5;
         let year = 1990 + (i % 30);
-        nt.push_str(&format!("{} <http://ex/creator> <http://ex/person/{}> .\n", art, creator));
-        nt.push_str(&format!("{} <http://ex/journal> <http://ex/journal/{}> .\n", art, journal));
+        nt.push_str(&format!(
+            "{} <http://ex/creator> <http://ex/person/{}> .\n",
+            art, creator
+        ));
+        nt.push_str(&format!(
+            "{} <http://ex/journal> <http://ex/journal/{}> .\n",
+            art, journal
+        ));
         nt.push_str(&format!(
             "{} <http://ex/year> \"{}\"^^<http://www.w3.org/2001/XMLSchema#integer> .\n",
             art, year
@@ -185,7 +193,9 @@ fn corpus<'a>(q04: &'a Graph, small: &'a Graph) -> Vec<(&'static str, &'a Graph,
     c.push((
         "empty_join_no_solutions",
         small,
-        format!("{PFX}SELECT ?s WHERE {{ ?s ex:p ?mid . ?mid ex:p ?s FILTER(?s = ex:nonexistent) }}"),
+        format!(
+            "{PFX}SELECT ?s WHERE {{ ?s ex:p ?mid . ?mid ex:p ?s FILTER(?s = ex:nonexistent) }}"
+        ),
     ));
 
     // A couple of small deterministic shapes so `flush = None` (single-chunk) and the
@@ -233,7 +243,9 @@ fn emit_concat(g: &Graph, q: &str, flush: Flush) -> String {
         // Both `query_json_chunks_with_budget` (Vec) and the streaming sink go through
         // `eval_select_json_emit(.., Some(64 KiB), ..)`. Assert they AGREE, then return one.
         Flush::SixtyFourKiB => {
-            let via_vec = query_json_chunks_with_budget(g, q, &b).expect("chunks query error").concat();
+            let via_vec = query_json_chunks_with_budget(g, q, &b)
+                .expect("chunks query error")
+                .concat();
             let via_sink = stream_concat(g, q);
             assert_eq!(
                 via_vec, via_sink,
@@ -268,11 +280,21 @@ fn stream_emit_concat_is_byte_identical_to_buffered_over_corpus() {
         // collection, design record §2) so byte-level cross-path equality is well-defined.
         let ref1 = reference(g, q);
         let ref2 = reference(g, q);
-        assert_eq!(ref1, ref2, "reference is non-deterministic for [{label}] — byte-diff would be meaningless: {q}");
+        assert_eq!(
+            ref1, ref2,
+            "reference is non-deterministic for [{label}] — byte-diff would be meaningless: {q}"
+        );
 
         // A valid, closed SPARQL-results document (the empty cases still close correctly).
-        assert!(ref1.starts_with("{\"head\""), "[{label}] reference must open a results doc: {}", &ref1[..ref1.len().min(40)]);
-        assert!(ref1.ends_with("]}}"), "[{label}] reference must close the results doc");
+        assert!(
+            ref1.starts_with("{\"head\""),
+            "[{label}] reference must open a results doc: {}",
+            &ref1[..ref1.len().min(40)]
+        );
+        assert!(
+            ref1.ends_with("]}}"),
+            "[{label}] reference must close the results doc"
+        );
 
         for flush in [Flush::None, Flush::SixtyFourKiB] {
             let got = emit_concat(g, q, flush);
@@ -299,16 +321,37 @@ fn q04_class_result_is_genuinely_multi_chunk_under_64kib() {
     let b = QueryBudget::unlimited();
 
     let single = query_json(&q04, &q).unwrap();
-    assert!(single.len() > 64 * 1024, "corpus must exceed one 64 KiB chunk (got {} bytes)", single.len());
+    assert!(
+        single.len() > 64 * 1024,
+        "corpus must exceed one 64 KiB chunk (got {} bytes)",
+        single.len()
+    );
 
     let chunks = query_json_chunks_with_budget(&q04, &q, &b).unwrap();
-    assert!(chunks.len() > 1, "expected a genuinely multi-chunk stream, got {}", chunks.len());
+    assert!(
+        chunks.len() > 1,
+        "expected a genuinely multi-chunk stream, got {}",
+        chunks.len()
+    );
     // First chunk opens, only the last closes — the boundary logic the byte-diff protects.
-    assert!(chunks[0].starts_with("{\"head\""), "first chunk must carry the header");
-    assert!(chunks.last().unwrap().ends_with("]}}"), "only the last chunk closes the document");
-    assert!(!chunks[0].ends_with("]}}"), "the header chunk must not be the whole document");
+    assert!(
+        chunks[0].starts_with("{\"head\""),
+        "first chunk must carry the header"
+    );
+    assert!(
+        chunks.last().unwrap().ends_with("]}}"),
+        "only the last chunk closes the document"
+    );
+    assert!(
+        !chunks[0].ends_with("]}}"),
+        "the header chunk must not be the whole document"
+    );
     // The load-bearing invariant, on the wide multi-chunk shape.
-    assert_eq!(chunks.concat(), single, "multi-chunk concat must be byte-identical to the buffered reference");
+    assert_eq!(
+        chunks.concat(),
+        single,
+        "multi-chunk concat must be byte-identical to the buffered reference"
+    );
 }
 
 // ─── non-vacuity: a perturbed expected byte MUST go red ────────────────────────
@@ -334,7 +377,10 @@ fn mutation_witness_a_perturbed_expected_byte_goes_red() {
     let reference = query_json(&g, &q).expect("reference query error");
     // Sanity: without perturbation they ARE equal (so the failure below is caused ONLY by
     // the deliberate perturbation, not a pre-existing mismatch).
-    assert_eq!(got, reference, "pre-condition: unperturbed emit-concat must match the reference");
+    assert_eq!(
+        got, reference,
+        "pre-condition: unperturbed emit-concat must match the reference"
+    );
 
     // Perturb exactly one byte of the EXPECTED value. Pick an ASCII byte in the body and
     // flip it to a different ASCII byte so the corrupted expectation is still valid UTF-8
@@ -352,9 +398,15 @@ fn mutation_witness_a_perturbed_expected_byte_goes_red() {
     let perturbed = String::from_utf8(perturbed).expect("single-byte ASCII flip stays valid UTF-8");
 
     // Confirm the perturbation actually changed a byte (guards against a no-op flip).
-    assert_ne!(perturbed, reference, "internal: perturbation must change the expected string");
+    assert_ne!(
+        perturbed, reference,
+        "internal: perturbation must change the expected string"
+    );
 
     // THE ASSERTION UNDER TEST: comparing the true emit-concat to the perturbed
     // expectation MUST fail — the harness's byte-level equality is non-vacuous.
-    assert_eq!(got, perturbed, "MUTATION WITNESS: perturbed byte must differ from the true emit-concat");
+    assert_eq!(
+        got, perturbed,
+        "MUTATION WITNESS: perturbed byte must differ from the true emit-concat"
+    );
 }

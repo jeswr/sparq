@@ -32,8 +32,7 @@ use std::collections::BTreeSet;
 use sparq_kb::validate::{parse_turtle, validate_instances};
 use sparq_kb::PKG_FINDINGS;
 
-const FIXTURE_HANDAUTHORED: &str =
-    include_str!("fixtures/agents-findings.handauthored.ttl");
+const FIXTURE_HANDAUTHORED: &str = include_str!("fixtures/agents-findings.handauthored.ttl");
 
 const BASE: &str = "https://sparq.dev/ns/pkg/example#";
 
@@ -52,8 +51,7 @@ fn triple_set(ttl: &str) -> BTreeSet<String> {
 /// shapes (the same path the full ingest uses).
 #[test]
 fn compiled_findings_conform_zero_violations() {
-    let report =
-        validate_instances(&[PKG_FINDINGS]).expect("compiled findings load + validate");
+    let report = validate_instances(&[PKG_FINDINGS]).expect("compiled findings load + validate");
     assert!(
         report.conforms && report.results.is_empty(),
         "the write-path-COMPILED Findings tier MUST conform with 0 SHACL violations \

@@ -21,8 +21,8 @@ fn const_floor_in(rel_from_workspace: &str, const_name: &str) -> usize {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join(rel_from_workspace);
-    let src = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let src =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     for line in src.lines() {
         let line = line.trim();
         // [OPUS-4.8] sq-t58w.6 — tolerate an optional `pub ` visibility prefix. The
@@ -40,8 +40,11 @@ fn const_floor_in(rel_from_workspace: &str, const_name: &str) -> usize {
                     continue;
                 }
                 if let Some(eq) = after_name.split('=').nth(1) {
-                    let digits: String =
-                        eq.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+                    let digits: String = eq
+                        .trim_start()
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect();
                     if !digits.is_empty() {
                         return digits.parse().expect("floor parses");
                     }
@@ -49,7 +52,10 @@ fn const_floor_in(rel_from_workspace: &str, const_name: &str) -> usize {
             }
         }
     }
-    panic!("did not find `const {const_name}: usize = N;` in {}", path.display());
+    panic!(
+        "did not find `const {const_name}: usize = N;` in {}",
+        path.display()
+    );
 }
 
 /// (suite label, source file, const name) for each crate-local ratchet the
@@ -480,8 +486,9 @@ fn all_crate_test_suites_are_guarded() {
             suite.runner,
             Runner::CrateTest { .. } | Runner::FeatureGatedCrateTest { .. }
         ) {
-            let textually_guarded =
-                CRATE_LOCAL_FLOORS.iter().any(|(label, _, _)| *label == suite.label);
+            let textually_guarded = CRATE_LOCAL_FLOORS
+                .iter()
+                .any(|(label, _, _)| *label == suite.label);
             let lib_sourced = LIB_SOURCED_FLOORS.contains(&suite.label);
             assert!(
                 textually_guarded || lib_sourced,

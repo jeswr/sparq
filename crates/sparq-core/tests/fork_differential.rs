@@ -62,8 +62,9 @@ fn assert_reads_match(forked: &Graph, reference: &[[Term; 3]], ctx: &str) {
             Some(t) => g.id_of(t).map(Some),
         }
     };
-    let opts: Vec<Option<&Term>> =
-        std::iter::once(None).chain(probe_terms.iter().map(Some)).collect();
+    let opts: Vec<Option<&Term>> = std::iter::once(None)
+        .chain(probe_terms.iter().map(Some))
+        .collect();
     for &s in &opts {
         for &p in &opts {
             for &o in &opts {
@@ -88,9 +89,10 @@ fn assert_reads_match(forked: &Graph, reference: &[[Term; 3]], ctx: &str) {
                 for sort_col in [None, Some(0), Some(1), Some(2)] {
                     let (a, b) = match sort_col {
                         None => (forked.store.scan(&fpat), flat.store.scan(&gpat)),
-                        Some(c) => {
-                            (forked.store.scan_sorted(&fpat, c), flat.store.scan_sorted(&gpat, c))
-                        }
+                        Some(c) => (
+                            forked.store.scan_sorted(&fpat, c),
+                            flat.store.scan_sorted(&gpat, c),
+                        ),
                     };
                     // Sorted in the chosen permutation's order (merge-join guarantee).
                     assert!(
@@ -101,7 +103,10 @@ fn assert_reads_match(forked: &Graph, reference: &[[Term; 3]], ctx: &str) {
                     // different ids (independent interning order), so the id-sorted
                     // row ORDER legitimately differs — within-graph sortedness is
                     // asserted above on the fork's own ids.
-                    let term_rows = |g: &Graph, sc: &sparq_core::store::Scan, rows: &[[Id; 3]]| -> Vec<[String; 3]> {
+                    let term_rows = |g: &Graph,
+                                     sc: &sparq_core::store::Scan,
+                                     rows: &[[Id; 3]]|
+                     -> Vec<[String; 3]> {
                         let mut v: Vec<[String; 3]> = rows
                             .iter()
                             .map(|r| {
@@ -193,7 +198,7 @@ fn fork_chain_matches_flat_rebuild() {
         let mut inserts: Vec<[Term; 3]> = Vec::new();
         for i in 0..12 {
             inserts.push([
-                term("new", gen * 100 + i),     // brand-new subject term
+                term("new", gen * 100 + i),      // brand-new subject term
                 term("p", rng.below(7)),         // existing predicate
                 term("nobj", gen * 100 + i / 2), // brand-new object term
             ]);
@@ -223,7 +228,11 @@ fn fork_chain_matches_flat_rebuild() {
         for (k, (old, old_ref)) in generations.iter().enumerate() {
             assert_eq!(old.len(), old_ref.len(), "gen {k} length drifted");
         }
-        assert_eq!(dump(&generations[0].0), base_dump, "base mutated by fork updates");
+        assert_eq!(
+            dump(&generations[0].0),
+            base_dump,
+            "base mutated by fork updates"
+        );
 
         // Dict id stability: a base term resolves to the same id in every generation.
         let probe = iri("http://ex/p0");
@@ -242,7 +251,11 @@ fn fork_chain_matches_flat_rebuild() {
             let before = dump(&g);
             g.compact().unwrap();
             assert!(!g.store.has_overlay(), "compaction must fold the overlay");
-            assert_eq!(g.pending_delta_len(), 0, "compaction must clear the pending delta");
+            assert_eq!(
+                g.pending_delta_len(),
+                0,
+                "compaction must clear the pending delta"
+            );
             assert_eq!(dump(&g), before, "compaction changed visible state");
             assert_reads_match(&g, &reference, &format!("gen {gen} post-compact"));
         }
@@ -272,14 +285,28 @@ fn fork_pending_delta_accounting() {
     let mut g = base.fork();
     assert_eq!(g.pending_delta_len(), 0, "a fresh fork carries no delta");
     let ins: Vec<[Term; 3]> = (0..20)
-        .map(|i| [iri(&format!("http://ex/fresh{i}")), iri("http://ex/p0"), iri(&format!("http://ex/o{i}"))])
+        .map(|i| {
+            [
+                iri(&format!("http://ex/fresh{i}")),
+                iri("http://ex/p0"),
+                iri(&format!("http://ex/o{i}")),
+            ]
+        })
         .collect();
     g.apply_delta(&ins, &[]).unwrap();
     // 20 overlay insertions + 20 fresh subject terms (p0/oN already exist).
-    assert_eq!(g.pending_delta_len(), 40, "overlay + dict extension accounting");
+    assert_eq!(
+        g.pending_delta_len(),
+        40,
+        "overlay + dict extension accounting"
+    );
 
     let g2 = g.fork();
-    assert_eq!(g2.pending_delta_len(), g.pending_delta_len(), "fork carries the delta");
+    assert_eq!(
+        g2.pending_delta_len(),
+        g.pending_delta_len(),
+        "fork carries the delta"
+    );
 
     let mut g3 = g2.fork();
     g3.compact().unwrap();
@@ -287,8 +314,15 @@ fn fork_pending_delta_accounting() {
     assert_eq!(g3.len(), 1020);
     // And the compacted generation forks + updates onward correctly.
     let mut g4 = g3.fork();
-    g4.apply_delta(&[[iri("http://ex/after"), iri("http://ex/p0"), iri("http://ex/after")]], &[])
-        .unwrap();
+    g4.apply_delta(
+        &[[
+            iri("http://ex/after"),
+            iri("http://ex/p0"),
+            iri("http://ex/after"),
+        ]],
+        &[],
+    )
+    .unwrap();
     assert_eq!(g4.len(), 1021);
     assert_eq!(g3.len(), 1020, "compacted base isolated from its fork");
 }
@@ -302,9 +336,19 @@ fn named_graphs_fork_isolated() {
     let base = Graph::load_dataset(src, "nquads").unwrap();
     let mut f = base.fork();
     assert_eq!(f.named.len(), 1);
-    f.named[0].1.apply_delta(&[[iri("http://ex/n"), iri("http://ex/q"), iri("http://ex/m")]], &[]).unwrap();
+    f.named[0]
+        .1
+        .apply_delta(
+            &[[iri("http://ex/n"), iri("http://ex/q"), iri("http://ex/m")]],
+            &[],
+        )
+        .unwrap();
     assert_eq!(f.named[0].1.len(), 2);
-    assert_eq!(base.named[0].1.len(), 1, "base named graph mutated through fork");
+    assert_eq!(
+        base.named[0].1.len(),
+        1,
+        "base named graph mutated through fork"
+    );
     let del = [[iri("http://ex/x"), iri("http://ex/q"), iri("http://ex/y")]];
     let mut f2 = f.fork();
     f2.named[0].1.apply_delta(&[], &del).unwrap();

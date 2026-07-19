@@ -71,7 +71,10 @@ fn score_variable_and_order_by() {
         .iter()
         .map(|row| match &row[1] {
             Some(Term::Literal(l)) => {
-                assert_eq!(l.datatype().as_str(), "http://www.w3.org/2001/XMLSchema#double");
+                assert_eq!(
+                    l.datatype().as_str(),
+                    "http://www.w3.org/2001/XMLSchema#double"
+                );
                 l.value().parse().unwrap()
             }
             other => panic!("expected a score literal, got {other:?}"),
@@ -96,7 +99,10 @@ fn matches_any_and_prefix() {
     .unwrap();
     let mut posts: Vec<String> = r.rows.iter().map(|row| iri(&row[0])).collect();
     posts.sort();
-    assert_eq!(posts, ["http://ex/post1", "http://ex/post2", "http://ex/post3"]);
+    assert_eq!(
+        posts,
+        ["http://ex/post1", "http://ex/post2", "http://ex/post3"]
+    );
 }
 
 #[test]
@@ -263,7 +269,11 @@ fn near_with_slop_and_score() {
     )
     .unwrap();
     let posts: Vec<String> = r.rows.iter().map(|row| iri(&row[0])).collect();
-    assert_eq!(posts, ["http://ex/post1"], "default slop is exact adjacency");
+    assert_eq!(
+        posts,
+        ["http://ex/post1"],
+        "default slop is exact adjacency"
+    );
 
     // text:slop 2 admits post1 (gap 0), post2 (gap 1), post3 (gap 2); the
     // reversed post4 never matches. text:score binds the proximity score; ORDER
@@ -291,7 +301,10 @@ fn near_with_slop_and_score() {
         .iter()
         .map(|row| match &row[1] {
             Some(Term::Literal(l)) => {
-                assert_eq!(l.datatype().as_str(), "http://www.w3.org/2001/XMLSchema#double");
+                assert_eq!(
+                    l.datatype().as_str(),
+                    "http://www.w3.org/2001/XMLSchema#double"
+                );
                 l.value().parse().unwrap()
             }
             other => panic!("expected a score literal, got {other:?}"),
@@ -381,6 +394,9 @@ fn rewrite_errors() {
     ];
     for (q, needle) in cases {
         let err = query_text(&g, q, &idx).unwrap_err();
-        assert!(err.contains(needle), "query {q:?}: error {err:?} should contain {needle:?}");
+        assert!(
+            err.contains(needle),
+            "query {q:?}: error {err:?} should contain {needle:?}"
+        );
     }
 }

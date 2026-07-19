@@ -63,7 +63,11 @@ fn sh_rule_shape_validates_without_firing_when_conforming() {
     let data = g("ex:alice a ex:Person ; ex:name \"Alice\" .");
     let shapes = g(RULE_SHAPE);
     let r = sparq_shacl::validate(&data, &shapes);
-    assert!(r.conforms, "rule must not affect base validation: {}", r.to_text());
+    assert!(
+        r.conforms,
+        "rule must not affect base validation: {}",
+        r.to_text()
+    );
     assert_eq!(r.results.len(), 0, "{}", r.to_text());
 }
 
@@ -79,7 +83,12 @@ fn sh_rule_shape_reports_only_base_constraint_violations() {
     let shapes = g(RULE_SHAPE);
     let r = sparq_shacl::validate(&data, &shapes);
     assert!(!r.conforms);
-    assert_eq!(r.results.len(), 1, "exactly the base violation: {}", r.to_text());
+    assert_eq!(
+        r.results.len(),
+        1,
+        "exactly the base violation: {}",
+        r.to_text()
+    );
     assert!(
         r.results[0]
             .source_component
@@ -108,7 +117,11 @@ fn sh_sparql_rule_does_not_run_under_validate() {
     "#);
     let r = sparq_shacl::validate(&data, &shapes);
     // No Core constraints + rules never run during validate => conforms, no results.
-    assert!(r.conforms, "SPARQLRule must not run under validate: {}", r.to_text());
+    assert!(
+        r.conforms,
+        "SPARQLRule must not run under validate: {}",
+        r.to_text()
+    );
     assert_eq!(r.results.len(), 0, "{}", r.to_text());
 }
 
@@ -145,7 +158,8 @@ fn expression_constraint_is_inert_when_feature_off() {
 #[cfg(feature = "shacl-af")]
 #[test]
 fn apply_rules_fires_triple_rule_when_feature_on() {
-    let data = g("ex:alice a ex:Person ; ex:name \"Alice\" . ex:bob a ex:Person ; ex:name \"Bob\" .");
+    let data =
+        g("ex:alice a ex:Person ; ex:name \"Alice\" . ex:bob a ex:Person ; ex:name \"Bob\" .");
     let shapes = g(RULE_SHAPE);
     let inf = sparq_shacl::apply_rules(&data, &shapes);
     // One inferred type triple per ex:Person focus node.
@@ -154,9 +168,11 @@ fn apply_rules_fires_triple_rule_when_feature_on() {
     let rdf_type = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
     for subj in ["http://example.org/alice", "http://example.org/bob"] {
         assert!(
-            inf.triples.iter().any(|t| t.subject.to_string() == format!("<{}>", subj)
-                && t.predicate.as_str() == rdf_type
-                && t.object.to_string() == format!("<{}>", agent)),
+            inf.triples
+                .iter()
+                .any(|t| t.subject.to_string() == format!("<{}>", subj)
+                    && t.predicate.as_str() == rdf_type
+                    && t.object.to_string() == format!("<{}>", agent)),
             "expected inferred type for {subj}: {:?}",
             inf.triples
         );
@@ -166,10 +182,8 @@ fn apply_rules_fires_triple_rule_when_feature_on() {
     // node carries in the source data) selects the two focus nodes only because
     // the rule's inference is present in the expanded graph.
     let expanded = sparq_shacl::expand(&data, &shapes);
-    let agent_shape = g(
-        "ex:AgentCheck a sh:NodeShape ; sh:targetClass ex:Agent ; \
-         sh:property [ sh:path ex:name ; sh:minCount 1 ] .",
-    );
+    let agent_shape = g("ex:AgentCheck a sh:NodeShape ; sh:targetClass ex:Agent ; \
+         sh:property [ sh:path ex:name ; sh:minCount 1 ] .");
     let model = sparq_shacl::ShapesModel::parse(&agent_shape);
     // No ex:Agent instances in the un-expanded data -> zero focus nodes.
     assert_eq!(
@@ -219,7 +233,11 @@ fn expression_constraint_fires_when_feature_on() {
     let data = g("ex:i a ex:C .");
     let shapes = g("ex:C a rdfs:Class, sh:NodeShape ; sh:expression false .");
     let r = sparq_shacl::validate(&data, &shapes);
-    assert!(!r.conforms, "sh:expression false must violate with shacl-af on: {}", r.to_text());
+    assert!(
+        !r.conforms,
+        "sh:expression false must violate with shacl-af on: {}",
+        r.to_text()
+    );
     assert_eq!(r.results.len(), 1, "{}", r.to_text());
     assert!(
         r.results[0]

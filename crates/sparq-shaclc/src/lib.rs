@@ -71,7 +71,11 @@ pub struct ShaclcError {
 
 impl std::fmt::Display for ShaclcError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SHACL-CS parse error (line {}:{}): {}", self.line, self.column, self.message)
+        write!(
+            f,
+            "SHACL-CS parse error (line {}:{}): {}",
+            self.line, self.column, self.message
+        )
     }
 }
 
@@ -127,7 +131,9 @@ macro_rules! oxrdf_bridge {
                             let dir = match dir.as_ref() {
                                 "ltr" => oxrdf::BaseDirection::Ltr,
                                 "rtl" => oxrdf::BaseDirection::Rtl,
-                                other => return Err(internal(&format!("base direction '{other}'"))),
+                                other => {
+                                    return Err(internal(&format!("base direction '{other}'")))
+                                }
                             };
                             Literal::new_directional_language_tagged_literal_unchecked(
                                 l.value.as_ref(),
@@ -155,7 +161,11 @@ macro_rules! oxrdf_bridge {
                 let Term::NamedNode(predicate) = term(&t.predicate)? else {
                     return Err(internal("a non-IRI predicate"));
                 };
-                Ok(Triple { subject, predicate, object: term(&t.object)? })
+                Ok(Triple {
+                    subject,
+                    predicate,
+                    object: term(&t.object)?,
+                })
             }
 
             fn from_ox_term(t: &Term) -> Result<m::Term, ShaclcWriteError> {
@@ -188,8 +198,12 @@ macro_rules! oxrdf_bridge {
 
             fn from_ox_triple(t: &Triple) -> Result<m::Triple, ShaclcWriteError> {
                 let subject = match &t.subject {
-                    NamedOrBlankNode::NamedNode(n) => m::Term::NamedNode(std::rc::Rc::from(n.as_str())),
-                    NamedOrBlankNode::BlankNode(b) => m::Term::BlankNode(std::rc::Rc::from(b.as_str())),
+                    NamedOrBlankNode::NamedNode(n) => {
+                        m::Term::NamedNode(std::rc::Rc::from(n.as_str()))
+                    }
+                    NamedOrBlankNode::BlankNode(b) => {
+                        m::Term::BlankNode(std::rc::Rc::from(b.as_str()))
+                    }
                 };
                 Ok(m::Triple {
                     subject,
@@ -224,16 +238,30 @@ macro_rules! oxrdf_bridge {
                 })
             }
 
-            pub(super) fn parse(text: &str, base: &str) -> Result<(Vec<Triple>, Outcome), ShaclcError> {
+            pub(super) fn parse(
+                text: &str,
+                base: &str,
+            ) -> Result<(Vec<Triple>, Outcome), ShaclcError> {
                 let mut raw_triples: Vec<m::Triple> = Vec::new();
                 let outcome = m::parse(text, Some(base), |t| raw_triples.push(t)).map_err(|e| {
-                    ShaclcError { line: e.line, column: e.column, code: e.code, message: e.message }
+                    ShaclcError {
+                        line: e.line,
+                        column: e.column,
+                        code: e.code,
+                        message: e.message,
+                    }
                 })?;
                 let mut triples = Vec::with_capacity(raw_triples.len());
                 for t in &raw_triples {
                     triples.push(triple(t)?);
                 }
-                Ok((triples, Outcome { prefixes: outcome.prefixes, base: outcome.base }))
+                Ok((
+                    triples,
+                    Outcome {
+                        prefixes: outcome.prefixes,
+                        base: outcome.base,
+                    },
+                ))
             }
         }
     };
@@ -246,7 +274,11 @@ oxrdf_bridge!(crate::raw::shaclc12ext, bridge_ext);
 /// the chosen [`Profile`]. Relative IRIs resolve against `base` (pass
 /// [`DEFAULT_BASE`] to mirror the no-`BASE` convention); a document-level
 /// `BASE` directive overrides it for subsequent IRIs.
-pub fn parse(text: &str, base: &str, profile: Profile) -> Result<(Vec<Triple>, Outcome), ShaclcError> {
+pub fn parse(
+    text: &str,
+    base: &str,
+    profile: Profile,
+) -> Result<(Vec<Triple>, Outcome), ShaclcError> {
     match profile {
         Profile::Strict => bridge_strict::parse(text, base),
         Profile::Extended => bridge_ext::parse(text, base),
@@ -325,7 +357,9 @@ mod tests {
             .map(|t| t.object.to_string())
             .collect();
         assert!(
-            types.iter().any(|o| o.contains("http://www.w3.org/ns/shacl#NodeShape")),
+            types
+                .iter()
+                .any(|o| o.contains("http://www.w3.org/ns/shacl#NodeShape")),
             "expected a sh:NodeShape typing, got {types:?}"
         );
     }
@@ -351,7 +385,10 @@ mod tests {
         let doc = "PREFIX ex: <http://example.org/x#>\nshape ex:S {\n}\n";
         let (_, outcome) = parse_strict(doc, DEFAULT_BASE).expect("parse");
         assert_eq!(
-            outcome.prefixes.last().map(|(k, v)| (k.as_str(), v.as_str())),
+            outcome
+                .prefixes
+                .last()
+                .map(|(k, v)| (k.as_str(), v.as_str())),
             Some(("ex", "http://example.org/x#"))
         );
     }
@@ -363,9 +400,15 @@ mod tests {
         // fix, observable at the API level.
         let doc = "PREFIX ex: <http://example.org/test#>\nshape ex:S ;\n  ex:myProperty 1\n{\n}\n";
         let err = parse_strict(doc, DEFAULT_BASE).expect_err("strict must reject");
-        assert!(err.line >= 2, "error should point at the extension, got {err}");
+        assert!(
+            err.line >= 2,
+            "error should point at the extension, got {err}"
+        );
         assert!(err.code.is_some(), "stable code expected, got {err:?}");
-        assert!(parse_extended(doc, DEFAULT_BASE).is_ok(), "extended must accept");
+        assert!(
+            parse_extended(doc, DEFAULT_BASE).is_ok(),
+            "extended must accept"
+        );
     }
 
     #[test]
@@ -373,7 +416,10 @@ mod tests {
         let err = parse_strict("shape nope:S {\n}\n", DEFAULT_BASE).expect_err("must reject");
         assert_eq!(err.code, Some("UNDECLARED_PREFIX"));
         let shown = err.to_string();
-        assert!(shown.contains("line 1"), "display carries the position: {shown}");
+        assert!(
+            shown.contains("line 1"),
+            "display carries the position: {shown}"
+        );
     }
 
     #[test]
@@ -407,7 +453,12 @@ mod tests {
     fn profile_and_error_types_behave_like_values() {
         assert_eq!(Profile::Strict, Profile::Strict);
         assert_ne!(Profile::Strict, Profile::Extended);
-        let e = ShaclcError { line: 2, column: 5, code: None, message: "m".into() };
+        let e = ShaclcError {
+            line: 2,
+            column: 5,
+            code: None,
+            message: "m".into(),
+        };
         assert_eq!(e.clone(), e);
         assert!(format!("{e:?}").contains("ShaclcError"));
     }

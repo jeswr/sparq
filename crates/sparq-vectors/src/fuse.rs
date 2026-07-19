@@ -222,8 +222,7 @@ fn normalized<T: Clone>(list: &[(T, f64)]) -> Vec<(T, f64)> {
 /// Sorts the accumulated `(score, first-seen)` map best-first (score desc, then
 /// first-seen asc) and keeps `top_k`.
 fn top_n<T>(acc: FxHashMap<T, (f64, usize)>, top_k: usize) -> Vec<(T, f64)> {
-    let mut out: Vec<(T, f64, usize)> =
-        acc.into_iter().map(|(t, (s, o))| (t, s, o)).collect();
+    let mut out: Vec<(T, f64, usize)> = acc.into_iter().map(|(t, (s, o))| (t, s, o)).collect();
     out.sort_by(|x, y| y.1.total_cmp(&x.1).then(x.2.cmp(&y.2)));
     out.truncate(top_k);
     out.into_iter().map(|(t, s, _)| (t, s)).collect()
@@ -344,7 +343,9 @@ mod tests {
         let fused = fuse_rrf_weighted(&[(&muted, 0.0), (&live, 1.0)], 60.0, 100);
         assert_eq!(fused.len(), 1, "only the live list's item should appear");
         assert_eq!(fused[0].0, "y");
-        assert!(fused.iter().all(|(t, _)| *t != "only_in_muted" && *t != "z"));
+        assert!(fused
+            .iter()
+            .all(|(t, _)| *t != "only_in_muted" && *t != "z"));
     }
 
     // [OPUS-4.8] When EVERY list is muted, the fused result is empty (not a pile of 0.0-scored
@@ -354,7 +355,10 @@ mod tests {
         let a: Vec<(&str, f64)> = vec![("x", 1.0), ("y", 1.0)];
         let b: Vec<(&str, f64)> = vec![("z", 1.0)];
         let fused = fuse_rrf_weighted(&[(&a, 0.0), (&b, 0.0)], 60.0, 100);
-        assert!(fused.is_empty(), "all-muted fusion must be empty, got {fused:?}");
+        assert!(
+            fused.is_empty(),
+            "all-muted fusion must be empty, got {fused:?}"
+        );
     }
 
     #[test]
@@ -381,8 +385,12 @@ mod tests {
         };
         let mut r0 = ann;
         let mut r1 = semantic;
-        let fused =
-            hybrid_search(&"query", 10, 60.0, &mut [&mut r0 as &mut dyn FnMut(&&str) -> _, &mut r1]);
+        let fused = hybrid_search(
+            &"query",
+            10,
+            60.0,
+            &mut [&mut r0 as &mut dyn FnMut(&&str) -> _, &mut r1],
+        );
 
         // Consensus (high in BOTH) beats high-in-only-one: b = rank2 ANN + rank1 semantic
         // = 1/62 + 1/61.
@@ -395,13 +403,21 @@ mod tests {
         assert_eq!(fused.len(), 4);
         let keys: Vec<&str> = fused.iter().map(|(t, _)| *t).collect();
         for want in ["a", "b", "c", "d"] {
-            assert_eq!(keys.iter().filter(|&&t| t == want).count(), 1, "{want} deduped");
+            assert_eq!(
+                keys.iter().filter(|&&t| t == want).count(),
+                1,
+                "{want} deduped"
+            );
         }
         // RRF ignores raw scores: a term in ONE list still appears (d, from semantic only).
         assert!(keys.contains(&"d"));
         // top_k truncates the fused list.
-        let truncated =
-            hybrid_search(&"q", 2, 60.0, &mut [&mut r0 as &mut dyn FnMut(&&str) -> _, &mut r1]);
+        let truncated = hybrid_search(
+            &"q",
+            2,
+            60.0,
+            &mut [&mut r0 as &mut dyn FnMut(&&str) -> _, &mut r1],
+        );
         assert_eq!(truncated.len(), 2);
     }
 
@@ -411,10 +427,18 @@ mod tests {
         // in A only; "soloB" strong in B only.
         let mut a = |_q: &i32| vec![("soloA", 9.9), ("shared", 0.0)];
         let mut b = |_q: &i32| vec![("soloB", 9.9), ("shared", 0.0)];
-        let fused = hybrid_search(&0, 10, 60.0, &mut [&mut a as &mut dyn FnMut(&i32) -> _, &mut b]);
+        let fused = hybrid_search(
+            &0,
+            10,
+            60.0,
+            &mut [&mut a as &mut dyn FnMut(&i32) -> _, &mut b],
+        );
         // shared: 1/62 + 1/62 ≈ 0.03226 beats soloA/soloB at 1/61 ≈ 0.01639.
         assert_eq!(fused[0].0, "shared");
-        assert!(fused[0].1 > fused[1].1, "consensus item must strictly outrank single-list items");
+        assert!(
+            fused[0].1 > fused[1].1,
+            "consensus item must strictly outrank single-list items"
+        );
     }
 
     #[test]
@@ -426,14 +450,25 @@ mod tests {
         // (2) One retriever empty, the other not: degrades to the non-empty list, in order.
         let mut none = |_q: &i32| Vec::<(&'static str, f64)>::new();
         let mut some = |_q: &i32| vec![("x", 1.0), ("y", 0.5)];
-        let fused =
-            hybrid_search(&0, 10, 60.0, &mut [&mut none as &mut dyn FnMut(&i32) -> _, &mut some]);
-        assert_eq!(fused.iter().map(|(t, _)| *t).collect::<Vec<_>>(), vec!["x", "y"]);
+        let fused = hybrid_search(
+            &0,
+            10,
+            60.0,
+            &mut [&mut none as &mut dyn FnMut(&i32) -> _, &mut some],
+        );
+        assert_eq!(
+            fused.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            vec!["x", "y"]
+        );
 
         // (3) Both empty → empty.
         let mut none2 = |_q: &i32| Vec::<(&'static str, f64)>::new();
-        let both_empty =
-            hybrid_search(&0, 10, 60.0, &mut [&mut none as &mut dyn FnMut(&i32) -> _, &mut none2]);
+        let both_empty = hybrid_search(
+            &0,
+            10,
+            60.0,
+            &mut [&mut none as &mut dyn FnMut(&i32) -> _, &mut none2],
+        );
         assert!(both_empty.is_empty());
 
         // (4) top_k == 0 → empty even with results.
@@ -447,7 +482,12 @@ mod tests {
         // below any item ranked by both. "both" is rank 2 in a and rank 1 in b.
         let mut a = |_q: &i32| vec![("top_a", 1.0), ("both", 0.9)];
         let mut b = |_q: &i32| vec![("both", 0.8), ("only_b", 0.7)];
-        let fused = hybrid_search(&0, 10, 60.0, &mut [&mut a as &mut dyn FnMut(&i32) -> _, &mut b]);
+        let fused = hybrid_search(
+            &0,
+            10,
+            60.0,
+            &mut [&mut a as &mut dyn FnMut(&i32) -> _, &mut b],
+        );
         // both: 1/62 + 1/61; top_a: 1/61; only_b: 1/62. Consensus first.
         assert_eq!(fused[0].0, "both");
         assert_eq!(fused[1].0, "top_a"); // single list, but rank 1 (1/61) > only_b's 1/62
@@ -465,8 +505,16 @@ mod tests {
         let list = || vec![("p", 1.0), ("q", 0.5), ("r", 0.1)];
         let mut a = |_q: &i32| list();
         let mut b = |_q: &i32| list();
-        let fused = hybrid_search(&0, 10, 60.0, &mut [&mut a as &mut dyn FnMut(&i32) -> _, &mut b]);
-        assert_eq!(fused.iter().map(|(t, _)| *t).collect::<Vec<_>>(), vec!["p", "q", "r"]);
+        let fused = hybrid_search(
+            &0,
+            10,
+            60.0,
+            &mut [&mut a as &mut dyn FnMut(&i32) -> _, &mut b],
+        );
+        assert_eq!(
+            fused.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+            vec!["p", "q", "r"]
+        );
         assert!((fused[0].1 - 2.0 / 61.0).abs() < 1e-12);
         assert!((fused[1].1 - 2.0 / 62.0).abs() < 1e-12);
         assert!((fused[2].1 - 2.0 / 63.0).abs() < 1e-12);

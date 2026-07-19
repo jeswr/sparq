@@ -438,9 +438,7 @@ mod gated {
         println!("{}", report.render());
         println!(
             "OWL 2 DL render round-trip ratchet pass {} of {} (floor {})",
-            report.round_tripped,
-            report.documents,
-            DL_RENDER_ROUNDTRIP_FLOOR
+            report.round_tripped, report.documents, DL_RENDER_ROUNDTRIP_FLOOR
         );
         // The invariant: NO violations, ever — not a pinnable divergence set.
         assert!(
@@ -468,7 +466,10 @@ mod gated {
             report.documents, DL_RENDER_ROUNDTRIP_DOCUMENTS,
             "render round-trip document count moved — the accounting is pinned"
         );
-        assert!(report.accounting_closed(), "every document in exactly one bucket");
+        assert!(
+            report.accounting_closed(),
+            "every document in exactly one bucket"
+        );
     }
 
     /// Render round-trip derivation canary — NOT a W3C case, NOT counted in any pin.
@@ -564,21 +565,37 @@ mod gated {
             .map(|(k, _)| (*k).to_string())
             .collect();
         assert_eq!(
-            reasoning_fails, pinned_reasoning,
+            reasoning_fails,
+            pinned_reasoning,
             "reasoning-lane divergence set moved — unpinned new fails: {:?}; stale pins \
              (now passing/abstaining — re-audit + re-pin): {:?}",
-            reasoning_fails.difference(&pinned_reasoning).collect::<Vec<_>>(),
-            pinned_reasoning.difference(&reasoning_fails).collect::<Vec<_>>()
+            reasoning_fails
+                .difference(&pinned_reasoning)
+                .collect::<Vec<_>>(),
+            pinned_reasoning
+                .difference(&reasoning_fails)
+                .collect::<Vec<_>>()
         );
-        let profile_fails: BTreeSet<String> =
-            report.profile.fails.iter().map(|(k, _)| k.clone()).collect();
-        let pinned_profile: BTreeSet<String> =
-            PROFILE_DIVERGENCES.iter().map(|(k, _)| (*k).to_string()).collect();
+        let profile_fails: BTreeSet<String> = report
+            .profile
+            .fails
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect();
+        let pinned_profile: BTreeSet<String> = PROFILE_DIVERGENCES
+            .iter()
+            .map(|(k, _)| (*k).to_string())
+            .collect();
         assert_eq!(
-            profile_fails, pinned_profile,
+            profile_fails,
+            pinned_profile,
             "profile-lane divergence set moved — unpinned new fails: {:?}; stale pins: {:?}",
-            profile_fails.difference(&pinned_profile).collect::<Vec<_>>(),
-            pinned_profile.difference(&profile_fails).collect::<Vec<_>>()
+            profile_fails
+                .difference(&pinned_profile)
+                .collect::<Vec<_>>(),
+            pinned_profile
+                .difference(&profile_fails)
+                .collect::<Vec<_>>()
         );
 
         // The EXACT pins (module docs: `==`, not `>=`, so abstention-inflation and
@@ -706,11 +723,9 @@ mod gated {
         assert!(report.all_fails().is_empty(), "{:?}", report.all_fails());
         // And the tri-state mapping itself: an abstention maps to OutOfFragment.
         assert!(matches!(
-            dl_suite::positive_entailment_tri(
-                &sparq_reason_dl::check::EntailmentVerdict::Unknown(
-                    sparq_reason_dl::check::UnknownReason::QlConsistencyPending
-                )
-            ),
+            dl_suite::positive_entailment_tri(&sparq_reason_dl::check::EntailmentVerdict::Unknown(
+                sparq_reason_dl::check::UnknownReason::QlConsistencyPending
+            )),
             TriState::OutOfFragment(_)
         ));
     }

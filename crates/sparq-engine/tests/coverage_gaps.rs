@@ -52,11 +52,17 @@ fn typed_lit(lex: &str, ty: &str) -> String {
 fn xsd_string_from_bool() {
     let pfx = "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
     assert_eq!(
-        sel(&format!("{}SELECT (xsd:string(true) AS ?v) WHERE {{}}", pfx)),
+        sel(&format!(
+            "{}SELECT (xsd:string(true) AS ?v) WHERE {{}}",
+            pfx
+        )),
         Some("\"true\"".to_string())
     );
     assert_eq!(
-        sel(&format!("{}SELECT (xsd:string(false) AS ?v) WHERE {{}}", pfx)),
+        sel(&format!(
+            "{}SELECT (xsd:string(false) AS ?v) WHERE {{}}",
+            pfx
+        )),
         Some("\"false\"".to_string())
     );
 }
@@ -77,7 +83,10 @@ fn xsd_string_from_integer() {
 fn xsd_string_from_decimal() {
     let pfx = "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
     assert_eq!(
-        sel(&format!("{}SELECT (xsd:string(3.14) AS ?v) WHERE {{}}", pfx)),
+        sel(&format!(
+            "{}SELECT (xsd:string(3.14) AS ?v) WHERE {{}}",
+            pfx
+        )),
         Some("\"3.14\"".to_string())
     );
 }
@@ -103,11 +112,17 @@ fn xsd_string_from_iri() {
 fn xsd_boolean_from_bool() {
     let pfx = "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
     assert_eq!(
-        sel(&format!("{}SELECT (xsd:boolean(true) AS ?v) WHERE {{}}", pfx)),
+        sel(&format!(
+            "{}SELECT (xsd:boolean(true) AS ?v) WHERE {{}}",
+            pfx
+        )),
         Some(typed_lit("true", "boolean"))
     );
     assert_eq!(
-        sel(&format!("{}SELECT (xsd:boolean(false) AS ?v) WHERE {{}}", pfx)),
+        sel(&format!(
+            "{}SELECT (xsd:boolean(false) AS ?v) WHERE {{}}",
+            pfx
+        )),
         Some(typed_lit("false", "boolean"))
     );
 }
@@ -366,10 +381,7 @@ fn xsd_float_from_integer_nonzero() {
 fn xsd_float_from_bool() {
     let pfx = "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
     assert_eq!(
-        sel(&format!(
-            "{}SELECT (xsd:float(true) AS ?v) WHERE {{}}",
-            pfx
-        )),
+        sel(&format!("{}SELECT (xsd:float(true) AS ?v) WHERE {{}}", pfx)),
         Some(typed_lit("1.0E0", "float"))
     );
 }
@@ -497,20 +509,12 @@ fn strlangdir_construct() {
 #[test]
 fn is_blank_branches() {
     // BNODE() generates a fresh blank node: isBlank must return true.
-    let r = query(
-        &empty(),
-        "SELECT (isBlank(BNODE()) AS ?v) WHERE {}",
-    )
-    .unwrap();
+    let r = query(&empty(), "SELECT (isBlank(BNODE()) AS ?v) WHERE {}").unwrap();
     let v = r.rows[0][0].as_ref().unwrap().to_string();
     assert_eq!(v, typed_lit("true", "boolean"));
 
     // An IRI is never a blank node.
-    let r = query(
-        &empty(),
-        "SELECT (isBlank(<http://ex/x>) AS ?v) WHERE {}",
-    )
-    .unwrap();
+    let r = query(&empty(), "SELECT (isBlank(<http://ex/x>) AS ?v) WHERE {}").unwrap();
     let v = r.rows[0][0].as_ref().unwrap().to_string();
     assert_eq!(v, typed_lit("false", "boolean"));
 }
@@ -535,7 +539,10 @@ fn xsd_string_from_float() {
 fn xsd_string_from_double() {
     let pfx = "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
     assert_eq!(
-        sel(&format!("{}SELECT (xsd:string(1.5E0) AS ?v) WHERE {{}}", pfx)),
+        sel(&format!(
+            "{}SELECT (xsd:string(1.5E0) AS ?v) WHERE {{}}",
+            pfx
+        )),
         Some("\"1.5\"".to_string())
     );
 }
@@ -616,7 +623,10 @@ fn xsd_boolean_from_lang_tagged() {
 fn xsd_boolean_from_computed_bool() {
     let pfx = "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
     assert_eq!(
-        sel(&format!("{}SELECT (xsd:boolean(1=1) AS ?v) WHERE {{}}", pfx)),
+        sel(&format!(
+            "{}SELECT (xsd:boolean(1=1) AS ?v) WHERE {{}}",
+            pfx
+        )),
         Some(typed_lit("true", "boolean"))
     );
 }
@@ -753,7 +763,10 @@ fn xsd_float_from_float() {
 fn xsd_double_from_integral_double() {
     let pfx = "PREFIX xsd: <http://www.w3.org/2001/XMLSchema#> ";
     assert_eq!(
-        sel(&format!("{}SELECT (xsd:double(2.0E0) AS ?v) WHERE {{}}", pfx)),
+        sel(&format!(
+            "{}SELECT (xsd:double(2.0E0) AS ?v) WHERE {{}}",
+            pfx
+        )),
         Some(typed_lit("2.0", "double"))
     );
 }
@@ -819,10 +832,7 @@ fn langdir_computed_num_branch() {
 /// `LANGDIR(<iri>)` — IRI hits the `_ => Value::Error` arm (line 8539).
 #[test]
 fn langdir_iri_branch() {
-    assert_eq!(
-        sel("SELECT (LANGDIR(<http://ex/x>) AS ?v) WHERE {}"),
-        None
-    );
+    assert_eq!(sel("SELECT (LANGDIR(<http://ex/x>) AS ?v) WHERE {}"), None);
 }
 
 /// `STRLANGDIR` where the first argument is a language-tagged literal — its
@@ -839,10 +849,7 @@ fn strlangdir_lang_tagged_first_arg() {
 /// `IRI(42)` — integer literal hits the `_ => Value::Error` arm (line 8340).
 #[test]
 fn iri_non_string_error() {
-    assert_eq!(
-        sel("SELECT (IRI(42) AS ?v) WHERE {}"),
-        None
-    );
+    assert_eq!(sel("SELECT (IRI(42) AS ?v) WHERE {}"), None);
 }
 
 /// `isNumeric(1+1)` — computed Num hits `Value::Num(_) => true` (line 8347).
@@ -989,7 +996,10 @@ fn sel_g(g: &sparq_core::Graph, q: &str) -> Option<String> {
 fn seq_path_bound_start() {
     let g = chain_graph();
     assert_eq!(
-        sel_g(&g, "SELECT ?o WHERE { <http://ex/a> <http://ex/p>/<http://ex/q> ?o }"),
+        sel_g(
+            &g,
+            "SELECT ?o WHERE { <http://ex/a> <http://ex/p>/<http://ex/q> ?o }"
+        ),
         Some("<http://ex/c>".to_string())
     );
 }
@@ -1000,7 +1010,10 @@ fn seq_path_bound_start() {
 fn seq_path_bound_object() {
     let g = chain_graph();
     assert_eq!(
-        sel_g(&g, "SELECT ?s WHERE { ?s <http://ex/p>/<http://ex/q> <http://ex/c> }"),
+        sel_g(
+            &g,
+            "SELECT ?s WHERE { ?s <http://ex/p>/<http://ex/q> <http://ex/c> }"
+        ),
         Some("<http://ex/a>".to_string())
     );
 }
@@ -1115,7 +1128,10 @@ fn bound_bound_variable() {
         "{}SELECT (BOUND(?v) AS ?r) WHERE {{ VALUES ?v {{ \"1\"^^xsd:integer }} }}",
         pfx
     ));
-    assert_eq!(result, Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()));
+    assert_eq!(
+        result,
+        Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string())
+    );
 }
 
 // ─── eval_expr: IF false arm (line 7479) ─────────────────────────────────────
@@ -1148,7 +1164,10 @@ fn coalesce_all_error() {
     // SUBJECT("hello") → Value::Error; COALESCE falls off the end → Value::Unbound
     // Projected in SELECT → ?v is unbound → sel() returns None (not panics)
     let result = sel(r#"SELECT (COALESCE(SUBJECT("hello")) AS ?v) WHERE {}"#);
-    assert_eq!(result, None, "COALESCE of all errors should produce an unbound cell");
+    assert_eq!(
+        result, None,
+        "COALESCE of all errors should produce an unbound cell"
+    );
 }
 
 // ─── F::Lang on computed numeric / bool (line 8256) ─────────────────────────
@@ -1269,7 +1288,10 @@ fn as_bool_val_other_datatype() {
         "{}SELECT (\"hello\" AS ?v) WHERE {{ FILTER(\"2024-01-01T00:00:00Z\"^^xsd:dateTime) }}",
         pfx
     ));
-    assert_eq!(n, 0, "FILTER(dateTime) hits the other-datatype arm → no row");
+    assert_eq!(
+        n, 0,
+        "FILTER(dateTime) hits the other-datatype arm → no row"
+    );
 }
 
 // ─── eval_numeric: local vocab numeric cache path (line 7615) ────────────────
@@ -1342,7 +1364,10 @@ fn is_numeric_computed_num() {
         "{}SELECT (ISNUMERIC(\"1\"^^xsd:integer + \"2\"^^xsd:integer) AS ?v) WHERE {{}}",
         pfx
     ));
-    assert_eq!(result, Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()));
+    assert_eq!(
+        result,
+        Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string())
+    );
 }
 
 // ─── F::IsTriple / F::Subject / F::Predicate / F::Object (lines 8501-8520) ───
@@ -1358,7 +1383,10 @@ fn rdf_star_triple_builtins() {
         "{}SELECT (ISTRIPLE(TRIPLE(ex:s, ex:p, ex:o)) AS ?v) WHERE {{}}",
         pfx
     ));
-    assert_eq!(is_triple, Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()));
+    assert_eq!(
+        is_triple,
+        Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string())
+    );
 
     let subject_val = sel(&format!(
         "{}SELECT (SUBJECT(TRIPLE(ex:s, ex:p, ex:o)) AS ?v) WHERE {{}}",
@@ -1385,7 +1413,10 @@ fn rdf_star_triple_builtins() {
 #[test]
 fn is_triple_non_triple() {
     let result = sel(r#"SELECT (ISTRIPLE("hello") AS ?v) WHERE {}"#);
-    assert_eq!(result, Some("\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()));
+    assert_eq!(
+        result,
+        Some("\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string())
+    );
 }
 
 // ─── F::Subject / Predicate / Object on non-triple → Error (line 8511/8515/8519)
@@ -1412,7 +1443,10 @@ fn rdf_star_accessor_non_triple_error() {
 #[cfg(feature = "regex")]
 fn regex_basic_match() {
     let r = sel(r#"SELECT (REGEX("abcdef", "cd") AS ?v) WHERE {}"#);
-    assert_eq!(r, Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()));
+    assert_eq!(
+        r,
+        Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string())
+    );
 }
 
 /// `REGEX("ABC", "abc", "i")` — the `i` case-insensitive flag path in
@@ -1421,7 +1455,10 @@ fn regex_basic_match() {
 #[cfg(feature = "regex")]
 fn regex_case_insensitive() {
     let r = sel(r#"SELECT (REGEX("ABC", "abc", "i") AS ?v) WHERE {}"#);
-    assert_eq!(r, Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()));
+    assert_eq!(
+        r,
+        Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string())
+    );
 }
 
 /// `REGEX("abc", "z")` → false (no match). [SONNET-4.6]
@@ -1429,7 +1466,10 @@ fn regex_case_insensitive() {
 #[cfg(feature = "regex")]
 fn regex_no_match() {
     let r = sel(r#"SELECT (REGEX("abc", "z") AS ?v) WHERE {}"#);
-    assert_eq!(r, Some("\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()));
+    assert_eq!(
+        r,
+        Some("\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string())
+    );
 }
 
 /// `REGEX("abc", "[invalid[")` — invalid regex → `build_regex` returns `None` →
@@ -1498,7 +1538,10 @@ fn md5_basic() {
 fn sha1_basic() {
     let r = sel(r#"SELECT (SHA1("abc") AS ?v) WHERE {}"#);
     // SHA1("abc") = a9993e364706816aba3e25717850c26c9cd0d89d
-    assert_eq!(r, Some("\"a9993e364706816aba3e25717850c26c9cd0d89d\"".to_string()));
+    assert_eq!(
+        r,
+        Some("\"a9993e364706816aba3e25717850c26c9cd0d89d\"".to_string())
+    );
 }
 
 /// `SHA256("abc")` — exercises F::Sha256 (line 8398) and digest_hex. [SONNET-4.6]
@@ -1508,7 +1551,11 @@ fn sha256_basic() {
     let r = sel(r#"SELECT (SHA256("abc") AS ?v) WHERE {}"#);
     assert!(r.is_some(), "SHA256 should return a value");
     // SHA256 output is a 64-character hex string (256 bits = 32 bytes = 64 hex chars)
-    assert_eq!(r.unwrap().len(), "\"\"".len() + 64, "SHA256 output is 64 hex chars");
+    assert_eq!(
+        r.unwrap().len(),
+        "\"\"".len() + 64,
+        "SHA256 output is 64 hex chars"
+    );
 }
 
 /// `SHA384("abc")` — exercises F::Sha384 (line 8400). [SONNET-4.6]
@@ -1517,7 +1564,11 @@ fn sha256_basic() {
 fn sha384_basic() {
     let r = sel(r#"SELECT (SHA384("abc") AS ?v) WHERE {}"#);
     assert!(r.is_some(), "SHA384 should return a value");
-    assert_eq!(r.unwrap().len(), "\"\"".len() + 96, "SHA384 output is 96 hex chars");
+    assert_eq!(
+        r.unwrap().len(),
+        "\"\"".len() + 96,
+        "SHA384 output is 96 hex chars"
+    );
 }
 
 /// `SHA512("abc")` — exercises F::Sha512 (line 8402). [SONNET-4.6]
@@ -1526,7 +1577,11 @@ fn sha384_basic() {
 fn sha512_basic() {
     let r = sel(r#"SELECT (SHA512("abc") AS ?v) WHERE {}"#);
     assert!(r.is_some(), "SHA512 should return a value");
-    assert_eq!(r.unwrap().len(), "\"\"".len() + 128, "SHA512 output is 128 hex chars");
+    assert_eq!(
+        r.unwrap().len(),
+        "\"\"".len() + 128,
+        "SHA512 output is 128 hex chars"
+    );
 }
 
 /// `MD5(42)` — non-string arg → `digest_hex` returns `Value::Error` (line 8951).
@@ -1558,28 +1613,40 @@ fn encode_for_uri_basic() {
 #[test]
 fn langmatches_subtag() {
     let r = sel(r#"SELECT (LANGMATCHES("en-US", "en") AS ?v) WHERE {}"#);
-    assert_eq!(r, Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()));
+    assert_eq!(
+        r,
+        Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string())
+    );
 }
 
 /// `LANGMATCHES("en", "*")` → true (any non-empty tag). [SONNET-4.6]
 #[test]
 fn langmatches_star() {
     let r = sel(r#"SELECT (LANGMATCHES("en", "*") AS ?v) WHERE {}"#);
-    assert_eq!(r, Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()));
+    assert_eq!(
+        r,
+        Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string())
+    );
 }
 
 /// `LANGMATCHES("", "*")` → false (empty tag is not any). [SONNET-4.6]
 #[test]
 fn langmatches_empty_tag_star() {
     let r = sel(r#"SELECT (LANGMATCHES("", "*") AS ?v) WHERE {}"#);
-    assert_eq!(r, Some("\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()));
+    assert_eq!(
+        r,
+        Some("\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string())
+    );
 }
 
 /// `LANGMATCHES("de", "en")` → false (different language). [SONNET-4.6]
 #[test]
 fn langmatches_no_match() {
     let r = sel(r#"SELECT (LANGMATCHES("de", "en") AS ?v) WHERE {}"#);
-    assert_eq!(r, Some("\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()));
+    assert_eq!(
+        r,
+        Some("\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string())
+    );
 }
 
 // ─── F::Contains / F::StrStarts / F::StrEnds — lines 8287-8289 ───────────────
@@ -1588,21 +1655,30 @@ fn langmatches_no_match() {
 #[test]
 fn contains_match() {
     let r = sel(r#"SELECT (CONTAINS("hello", "ell") AS ?v) WHERE {}"#);
-    assert_eq!(r, Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()));
+    assert_eq!(
+        r,
+        Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string())
+    );
 }
 
 /// `STRSTARTS("hello", "hel")` → true. [SONNET-4.6]
 #[test]
 fn strstarts_match() {
     let r = sel(r#"SELECT (STRSTARTS("hello", "hel") AS ?v) WHERE {}"#);
-    assert_eq!(r, Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()));
+    assert_eq!(
+        r,
+        Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string())
+    );
 }
 
 /// `STRENDS("hello", "llo")` → true. [SONNET-4.6]
 #[test]
 fn strends_match() {
     let r = sel(r#"SELECT (STRENDS("hello", "llo") AS ?v) WHERE {}"#);
-    assert_eq!(r, Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()));
+    assert_eq!(
+        r,
+        Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string())
+    );
 }
 
 // ─── F::StrBefore / F::StrAfter — lines 8293-8305 ────────────────────────────
@@ -1673,7 +1749,10 @@ fn in_expr_false() {
         "{}SELECT (\"1\"^^xsd:integer IN (\"2\"^^xsd:integer, \"3\"^^xsd:integer) AS ?v) WHERE {{}}",
         pfx
     ));
-    assert_eq!(r, Some("\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()));
+    assert_eq!(
+        r,
+        Some("\"false\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string())
+    );
 }
 
 /// `1 IN (1, 2)` → true (first element matches). Exercises line 7504. [SONNET-4.6]
@@ -1684,7 +1763,10 @@ fn in_expr_true() {
         "{}SELECT (\"1\"^^xsd:integer IN (\"1\"^^xsd:integer, \"2\"^^xsd:integer) AS ?v) WHERE {{}}",
         pfx
     ));
-    assert_eq!(r, Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()));
+    assert_eq!(
+        r,
+        Some("\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string())
+    );
 }
 
 /// `1 IN (?x, 2)` where `?x` is unbound → `values_equal` returns `None` →
@@ -1740,7 +1822,11 @@ fn struuid_returns_string() {
     assert!(r.is_some(), "STRUUID() should return a value");
     let s = r.unwrap();
     // UUID is a simple literal (no type suffix, no lang tag)
-    assert!(s.starts_with('"'), "STRUUID() should return a simple string literal: {}", s);
+    assert!(
+        s.starts_with('"'),
+        "STRUUID() should return a simple string literal: {}",
+        s
+    );
     // Check it has UUID format (8-4-4-4-12 hex chars separated by dashes)
     let inner = s.trim_matches('"');
     assert_eq!(inner.len(), 36, "UUID should be 36 chars: {}", inner);
@@ -1882,7 +1968,11 @@ fn abs_ceil_floor_round() {
 fn query_ask_true_returns_unit_row() {
     let g = empty();
     let r = sparq_engine::query(&g, "ASK { }").unwrap();
-    assert_eq!(r.rows.len(), 1, "ASK true must produce exactly one unit row");
+    assert_eq!(
+        r.rows.len(),
+        1,
+        "ASK true must produce exactly one unit row"
+    );
     assert!(r.rows[0].is_empty(), "unit row has no columns");
     assert!(r.vars.is_empty(), "ASK result has no projected variables");
 }
@@ -1964,20 +2054,28 @@ fn query_json_blank_node_subject_in_result() {
     // serialises it through the fast-path (parts_to_json Blank arm).
     let g = Graph::load_str("_:a <http://ex/p> <http://ex/o> .", "turtle").unwrap();
     let json = sparq_engine::query_json(&g, "SELECT ?s WHERE { ?s ?p ?o }").unwrap();
-    assert!(json.contains("\"bnode\""), "expected bnode type in JSON: {}", json);
+    assert!(
+        json.contains("\"bnode\""),
+        "expected bnode type in JSON: {}",
+        json
+    );
 }
 
 /// Lang-tagged literal → parts_to_json lang arm (json.rs lines 35, 42-50).
 #[test]
 fn query_json_lang_tagged_literal_in_result() {
-    let g = Graph::load_str(
-        "<http://ex/s> <http://ex/label> \"hello\"@en .",
-        "turtle",
-    )
-    .unwrap();
+    let g = Graph::load_str("<http://ex/s> <http://ex/label> \"hello\"@en .", "turtle").unwrap();
     let json = sparq_engine::query_json(&g, "SELECT ?o WHERE { ?s ?p ?o }").unwrap();
-    assert!(json.contains("\"xml:lang\""), "expected xml:lang in JSON: {}", json);
-    assert!(json.contains("\"en\""), "expected en language tag in JSON: {}", json);
+    assert!(
+        json.contains("\"xml:lang\""),
+        "expected xml:lang in JSON: {}",
+        json
+    );
+    assert!(
+        json.contains("\"en\""),
+        "expected en language tag in JSON: {}",
+        json
+    );
 }
 
 /// Typed literal (non-xsd:string) → parts_to_json datatype arm (json.rs lines 51-53).
@@ -1989,8 +2087,16 @@ fn query_json_typed_literal_non_string_in_result() {
     )
     .unwrap();
     let json = sparq_engine::query_json(&g, "SELECT ?o WHERE { ?s ?p ?o }").unwrap();
-    assert!(json.contains("\"datatype\""), "expected datatype key in JSON: {}", json);
-    assert!(json.contains("double"), "expected double type in JSON: {}", json);
+    assert!(
+        json.contains("\"datatype\""),
+        "expected datatype key in JSON: {}",
+        json
+    );
+    assert!(
+        json.contains("double"),
+        "expected double type in JSON: {}",
+        json
+    );
 }
 
 /// Integer zero literal → inline_int_json v==0 arm (json.rs line 64).
@@ -2002,7 +2108,11 @@ fn query_json_integer_zero_in_result() {
     )
     .unwrap();
     let json = sparq_engine::query_json(&g, "SELECT ?o WHERE { ?s ?p ?o }").unwrap();
-    assert!(json.contains("\"0\""), "expected literal zero in JSON: {}", json);
+    assert!(
+        json.contains("\"0\""),
+        "expected literal zero in JSON: {}",
+        json
+    );
     assert!(
         json.contains("integer"),
         "expected integer datatype in JSON: {}",
@@ -2085,9 +2195,16 @@ fn update_clear_all_empties_all_graphs() {
 fn update_drop_default_clears_default_graph() {
     let ttl = "<http://ex/s> <http://ex/p> <http://ex/o> .";
     let mut g = Graph::load_str(ttl, "turtle").unwrap();
-    assert!(!g.store.is_empty(), "setup: default graph must have triples");
+    assert!(
+        !g.store.is_empty(),
+        "setup: default graph must have triples"
+    );
     sparq_engine::update_in_place(&mut g, "DROP DEFAULT").unwrap();
-    assert_eq!(g.store.len(), 0, "DROP DEFAULT must clear the default graph");
+    assert_eq!(
+        g.store.len(),
+        0,
+        "DROP DEFAULT must clear the default graph"
+    );
 }
 
 /// DROP NAMED removes all named-graph entries (update.rs line 460).
@@ -2102,7 +2219,10 @@ fn update_drop_named_removes_named_graphs() {
     .unwrap();
     assert!(!g.named.is_empty(), "setup: named graph should exist");
     sparq_engine::update_in_place(&mut g, "DROP NAMED").unwrap();
-    assert!(g.named.is_empty(), "DROP NAMED must remove all named-graph entries");
+    assert!(
+        g.named.is_empty(),
+        "DROP NAMED must remove all named-graph entries"
+    );
 }
 
 // ─── exec.rs trace_label arms via explain_analyze ────────────────────────────
@@ -2117,16 +2237,10 @@ fn update_drop_named_removes_named_graphs() {
 /// called on the Path pattern and trace_label hits the `GraphPattern::Path` arm.
 #[test]
 fn explain_analyze_path_covers_trace_label_path() {
-    let g = Graph::load_str(
-        "<http://ex/a> <http://ex/p> <http://ex/b> .",
-        "turtle",
-    )
-    .unwrap();
-    let out = sparq_engine::explain_analyze(
-        &g,
-        "SELECT * WHERE { <http://ex/a> <http://ex/p>+ ?o }",
-    )
-    .unwrap();
+    let g = Graph::load_str("<http://ex/a> <http://ex/p> <http://ex/b> .", "turtle").unwrap();
+    let out =
+        sparq_engine::explain_analyze(&g, "SELECT * WHERE { <http://ex/a> <http://ex/p>+ ?o }")
+            .unwrap();
     // The trace header must appear (confirms tracing ran).
     assert!(
         out.contains("Execution trace"),
@@ -2146,11 +2260,9 @@ fn explain_analyze_graph_clause_covers_trace_label_graph() {
         "INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } }",
     )
     .unwrap();
-    let out = sparq_engine::explain_analyze(
-        &g,
-        "SELECT * WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }",
-    )
-    .unwrap();
+    let out =
+        sparq_engine::explain_analyze(&g, "SELECT * WHERE { GRAPH <http://ex/g> { ?s ?p ?o } }")
+            .unwrap();
     assert!(
         out.contains("Execution trace"),
         "expected trace output: {}",
@@ -2164,11 +2276,7 @@ fn explain_analyze_graph_clause_covers_trace_label_graph() {
 /// calls eval_graph_pattern(Project{...}), hitting trace_label(Project).
 #[test]
 fn explain_analyze_sub_select_in_join_covers_trace_label_project() {
-    let g = Graph::load_str(
-        "<http://ex/s> <http://ex/p> <http://ex/o> .",
-        "turtle",
-    )
-    .unwrap();
+    let g = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "turtle").unwrap();
     let out = sparq_engine::explain_analyze(
         &g,
         "SELECT * WHERE { ?s ?p ?o . { SELECT ?x WHERE { ?x ?p2 ?o2 } } }",
@@ -2242,7 +2350,11 @@ fn count_with_datetime_filter_covers_temporal_scan_cmp() {
     assert_eq!(r.rows.len(), 1, "aggregate returns one result row");
     // The COUNT value is 2: e1 (2021) and e3 (2023) pass; e2 (2019) fails.
     let val = r.rows[0][0].as_ref().unwrap().to_string();
-    assert_eq!(val, "\"2\"^^<http://www.w3.org/2001/XMLSchema#integer>", "count must be 2: {}", val);
+    assert_eq!(
+        val, "\"2\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+        "count must be 2: {}",
+        val
+    );
 }
 
 // ─── exec.rs multi-cmp fallback count — lines 1857-1864 ─────────────────────
@@ -2274,7 +2386,11 @@ fn count_with_two_filters_covers_multi_cmp_fallback() {
     assert_eq!(r.rows.len(), 1, "aggregate returns one result row");
     // s2 (7) is the only row passing both filters.
     let val = r.rows[0][0].as_ref().unwrap().to_string();
-    assert_eq!(val, "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>", "count must be 1: {}", val);
+    assert_eq!(
+        val, "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+        "count must be 1: {}",
+        val
+    );
 }
 
 // ─── exec.rs star-count sorted_vals Some branch — lines 1771-1781 ────────────
@@ -2307,8 +2423,7 @@ fn count_star_shape_with_fixed_predicate_covers_sorted_vals_fallback() {
     assert_eq!(r.rows.len(), 1, "aggregate returns one result row");
     let val = r.rows[0][0].as_ref().unwrap().to_string();
     assert_eq!(
-        val,
-        "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>",
+        val, "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>",
         "star-count must be 1 (only <a> has both p1 and p2): {}",
         val
     );
@@ -2324,11 +2439,7 @@ fn count_star_shape_with_fixed_predicate_covers_sorted_vals_fallback() {
 /// exec.rs lines 9130-9134 (Bool arm of value_to_id).
 #[test]
 fn aggregate_max_bound_covers_value_to_id_bool_arm() {
-    let g = Graph::load_str(
-        "<http://ex/s> <http://ex/p> <http://ex/o> .",
-        "turtle",
-    )
-    .unwrap();
+    let g = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "turtle").unwrap();
     // MAX(BOUND(?p)) — BOUND(?p) is Value::Bool(true) for each row; minmax_values
     // returns Value::Bool(true); value_to_id called with it → Bool arm.
     let r = query(&g, "SELECT (MAX(BOUND(?p)) AS ?m) WHERE { ?s ?p ?o }").unwrap();
@@ -2339,11 +2450,7 @@ fn aggregate_max_bound_covers_value_to_id_bool_arm() {
         "expected xsd:boolean result: {}",
         val
     );
-    assert!(
-        val.contains("true"),
-        "MAX(BOUND(?p)) must be true: {}",
-        val
-    );
+    assert!(val.contains("true"), "MAX(BOUND(?p)) must be true: {}", val);
 }
 
 /// On a graph that already contains a boolean literal in the dictionary,
@@ -2360,11 +2467,7 @@ fn aggregate_max_bound_with_bool_in_dict_covers_fast_return() {
     let r = query(&g, "SELECT (MAX(BOUND(?p)) AS ?m) WHERE { ?s ?p ?o }").unwrap();
     assert_eq!(r.rows.len(), 1, "expected one aggregate result row");
     let val = r.rows[0][0].as_ref().unwrap().to_string();
-    assert!(
-        val.contains("true"),
-        "MAX(BOUND(?p)) must be true: {}",
-        val
-    );
+    assert!(val.contains("true"), "MAX(BOUND(?p)) must be true: {}", val);
 }
 
 // ─── exec.rs UnaryPlus / UnaryMinus in eval_exact_lexical — lines 7694-7699 ──
@@ -2419,8 +2522,16 @@ fn filter_unary_minus_negative_input_covers_some_branch() {
 fn explain_aggregate_no_group_by_covers_all_string_branch() {
     let g = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "turtle").unwrap();
     let plan = sparq_engine::explain(&g, "SELECT (COUNT(*) AS ?c) WHERE { ?s ?p ?o }").unwrap();
-    assert!(plan.contains("Group"), "explain must mention Group for aggregate query: {}", plan);
-    assert!(plan.contains("<all>"), "no-variable GROUP must show '<all>': {}", plan);
+    assert!(
+        plan.contains("Group"),
+        "explain must mention Group for aggregate query: {}",
+        plan
+    );
+    assert!(
+        plan.contains("<all>"),
+        "no-variable GROUP must show '<all>': {}",
+        plan
+    );
 }
 
 /// explain() on a query whose WHERE clause is `FILTER(true)` with no triple
@@ -2448,11 +2559,15 @@ fn update_immutable_clear_named_covers_apply_op_named_graphs_arm() {
     sparq_engine::update_in_place(
         &mut g,
         "INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } }",
-    ).unwrap();
+    )
+    .unwrap();
     // Use the IMMUTABLE update() → apply_update_rebuild → apply_op path.
     let g2 = sparq_engine::update(&g, "CLEAR NAMED").unwrap();
     assert_eq!(
-        query(&g2, "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap().rows.len(),
+        query(&g2, "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }")
+            .unwrap()
+            .rows
+            .len(),
         0,
         "CLEAR NAMED via update() must leave named graphs empty"
     );
@@ -2466,7 +2581,10 @@ fn update_immutable_drop_default_covers_apply_op_default_arm() {
     let g = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "turtle").unwrap();
     let g2 = sparq_engine::update(&g, "DROP DEFAULT").unwrap();
     assert_eq!(
-        query(&g2, "SELECT * WHERE { ?s ?p ?o }").unwrap().rows.len(),
+        query(&g2, "SELECT * WHERE { ?s ?p ?o }")
+            .unwrap()
+            .rows
+            .len(),
         0,
         "DROP DEFAULT via update() must empty the default graph"
     );
@@ -2481,10 +2599,14 @@ fn update_immutable_drop_named_covers_apply_op_drop_named_arm() {
     sparq_engine::update_in_place(
         &mut g,
         "INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } }",
-    ).unwrap();
+    )
+    .unwrap();
     let g2 = sparq_engine::update(&g, "DROP NAMED").unwrap();
     assert_eq!(
-        query(&g2, "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }").unwrap().rows.len(),
+        query(&g2, "SELECT * WHERE { GRAPH ?g { ?s ?p ?o } }")
+            .unwrap()
+            .rows
+            .len(),
         0,
         "DROP NAMED via update() must remove all named graphs"
     );
@@ -2525,7 +2647,12 @@ fn construct_with_bnode_subject_covers_subject_term_bnode_arm() {
     )
     .unwrap();
     // The blank-node triple must appear in the output (subject is a blank node).
-    assert_eq!(ts.len(), 1, "one triple expected from blank-node subject CONSTRUCT: {:?}", ts);
+    assert_eq!(
+        ts.len(),
+        1,
+        "one triple expected from blank-node subject CONSTRUCT: {:?}",
+        ts
+    );
     let subj = ts[0].subject.to_string();
     assert!(
         subj.starts_with("_:"),
@@ -2542,11 +2669,8 @@ fn construct_with_bnode_subject_covers_subject_term_bnode_arm() {
 fn describe_with_literal_result_covers_cbd_literal_skip_arm() {
     let g = Graph::load_str("<http://ex/s> <http://ex/p> \"hello\" .", "turtle").unwrap();
     // ?v is bound to the literal "hello"; cbd() must skip it silently.
-    let ts = sparq_engine::describe(
-        &g,
-        "DESCRIBE ?v WHERE { <http://ex/s> <http://ex/p> ?v }",
-    )
-    .unwrap();
+    let ts =
+        sparq_engine::describe(&g, "DESCRIBE ?v WHERE { <http://ex/s> <http://ex/p> ?v }").unwrap();
     // A literal has no CBD, so the result is empty (no triples about "hello").
     assert!(
         ts.is_empty(),
@@ -2564,7 +2688,10 @@ fn ask_prepared_covers_uncalled_function() {
     let g = Graph::load_str("<http://ex/s> <http://ex/p> <http://ex/o> .", "turtle").unwrap();
     let pq = sparq_engine::PreparedQuery::parse("ASK { ?s ?p ?o }").unwrap();
     let result = sparq_engine::ask_prepared(&g, &pq).unwrap();
-    assert!(result, "ASK {{ ?s ?p ?o }} must be true for non-empty graph");
+    assert!(
+        result,
+        "ASK {{ ?s ?p ?o }} must be true for non-empty graph"
+    );
 }
 
 /// `query_view()` covers lib.rs view functions (with_view, query_view,
@@ -2582,7 +2709,11 @@ fn query_view_covers_view_api_functions() {
         default: DefaultGraphMode::StoreDefault,
     };
     let r = sparq_engine::query_view(&view, "SELECT * WHERE { ?s ?p ?o }").unwrap();
-    assert_eq!(r.rows.len(), 1, "query_view must see the default graph triple");
+    assert_eq!(
+        r.rows.len(),
+        1,
+        "query_view must see the default graph triple"
+    );
 }
 
 /// `ask_view()` covers lib.rs ask_view and ask_view_with_budget (both with
@@ -2598,5 +2729,8 @@ fn ask_view_covers_ask_view_function() {
         default: DefaultGraphMode::StoreDefault,
     };
     let result = sparq_engine::ask_view(&view, "ASK { ?s ?p ?o }").unwrap();
-    assert!(result, "ask_view must return true for non-empty default graph");
+    assert!(
+        result,
+        "ask_view must return true for non-empty default graph"
+    );
 }

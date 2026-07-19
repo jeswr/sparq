@@ -35,7 +35,8 @@ fn client() -> reqwest::Client {
     reqwest::Client::new()
 }
 
-const JOIN_QUERY: &str = "PREFIX ex: <http://ex/> SELECT ?a ?b ?age WHERE { ?a ex:knows ?b . ?b ex:age ?age }";
+const JOIN_QUERY: &str =
+    "PREFIX ex: <http://ex/> SELECT ?a ?b ?age WHERE { ?a ex:knows ?b . ?b ex:age ?age }";
 
 // ---------------------------------------------------------------------------
 // EXPLAIN
@@ -51,7 +52,10 @@ async fn get_explain_param_returns_plan_text() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    assert!(resp.headers()["content-type"].to_str().unwrap().starts_with("text/plain"));
+    assert!(resp.headers()["content-type"]
+        .to_str()
+        .unwrap()
+        .starts_with("text/plain"));
     let body = resp.text().await.unwrap();
     assert!(body.contains("EXPLAIN (SELECT)"), "{body}");
     assert!(body.contains("planning-only"), "{body}");
@@ -74,7 +78,10 @@ async fn accept_header_requests_explain() {
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
     assert!(body.contains("EXPLAIN (SELECT)"), "{body}");
-    assert!(body.contains("BGP [binary join plan: greedy GOO ordering]"), "{body}");
+    assert!(
+        body.contains("BGP [binary join plan: greedy GOO ordering]"),
+        "{body}"
+    );
 }
 
 #[tokio::test]
@@ -221,7 +228,9 @@ fn urlencoding(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             b' ' => out.push('+'),
             _ => out.push_str(&format!("%{b:02X}")),
         }
@@ -237,23 +246,55 @@ fn urlencoding(s: &str) -> String {
 async fn metrics_exposes_requests_histogram_and_gauges() {
     let base = spawn().await;
     // One successful query, one malformed (400).
-    let r = client().get(format!("{base}/sparql")).query(&[("query", JOIN_QUERY)]).send().await.unwrap();
+    let r = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", JOIN_QUERY)])
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 200);
-    let r = client().get(format!("{base}/sparql")).query(&[("query", "SELECT WHERE {")]).send().await.unwrap();
+    let r = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", "SELECT WHERE {")])
+        .send()
+        .await
+        .unwrap();
     assert_eq!(r.status(), 400);
     let r = client().get(format!("{base}/health")).send().await.unwrap();
     assert_eq!(r.status(), 200);
 
-    let resp = client().get(format!("{base}/metrics")).send().await.unwrap();
+    let resp = client()
+        .get(format!("{base}/metrics"))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
-    assert!(resp.headers()["content-type"].to_str().unwrap().starts_with("text/plain"));
+    assert!(resp.headers()["content-type"]
+        .to_str()
+        .unwrap()
+        .starts_with("text/plain"));
     let body = resp.text().await.unwrap();
-    assert!(body.contains("sparq_http_requests_total{endpoint=\"/sparql\",status=\"200\"} 1"), "{body}");
-    assert!(body.contains("sparq_http_requests_total{endpoint=\"/sparql\",status=\"400\"} 1"), "{body}");
-    assert!(body.contains("sparq_http_requests_total{endpoint=\"/health\",status=\"200\"} 1"), "{body}");
+    assert!(
+        body.contains("sparq_http_requests_total{endpoint=\"/sparql\",status=\"200\"} 1"),
+        "{body}"
+    );
+    assert!(
+        body.contains("sparq_http_requests_total{endpoint=\"/sparql\",status=\"400\"} 1"),
+        "{body}"
+    );
+    assert!(
+        body.contains("sparq_http_requests_total{endpoint=\"/health\",status=\"200\"} 1"),
+        "{body}"
+    );
     // Histogram: both /sparql requests observed; +Inf equals the count.
-    assert!(body.contains("sparq_query_duration_seconds_bucket{le=\"+Inf\"} 2"), "{body}");
-    assert!(body.contains("sparq_query_duration_seconds_count 2"), "{body}");
+    assert!(
+        body.contains("sparq_query_duration_seconds_bucket{le=\"+Inf\"} 2"),
+        "{body}"
+    );
+    assert!(
+        body.contains("sparq_query_duration_seconds_count 2"),
+        "{body}"
+    );
     assert!(body.contains("sparq_query_duration_seconds_sum "), "{body}");
     // Gauges read live state: 8 triples in DATA, no subscriptions open.
     assert!(body.contains("sparq_graph_triples 8"), "{body}");
@@ -273,9 +314,19 @@ async fn metrics_counts_updates_and_triple_gauge_follows() {
         .unwrap();
     assert_eq!(resp.status(), 204);
 
-    let body = client().get(format!("{base}/metrics")).send().await.unwrap().text().await.unwrap();
+    let body = client()
+        .get(format!("{base}/metrics"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
     assert!(body.contains("sparq_updates_total 1"), "{body}");
     assert!(body.contains("sparq_graph_triples 9"), "{body}");
     // The update went through /sparql, so the histogram observed it too.
-    assert!(body.contains("sparq_query_duration_seconds_count 1"), "{body}");
+    assert!(
+        body.contains("sparq_query_duration_seconds_count 1"),
+        "{body}"
+    );
 }

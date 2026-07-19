@@ -87,9 +87,11 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         Some("record-audit") => cmd_record_audit(&args[1..]),
         Some("record-verdict") => cmd_record_verdict(&args[1..]),
         Some("check-gate") => cmd_check_gate(&args[1..]),
-        _ => Err("usage: literature-pilot run|record-audit|record-verdict|check-gate … \
+        _ => Err(
+            "usage: literature-pilot run|record-audit|record-verdict|check-gate … \
                   (see the module docs)"
-            .to_string()),
+                .to_string(),
+        ),
     }
 }
 
@@ -124,7 +126,8 @@ impl<'a> Flags<'a> {
 fn cmd_record_audit(args: &[String]) -> Result<(), String> {
     let f = Flags { args };
     let sidecar = SidecarFile::new(PathBuf::from(
-        f.get("--sidecar").ok_or("record-audit: --sidecar required")?,
+        f.get("--sidecar")
+            .ok_or("record-audit: --sidecar required")?,
     ));
     let n = f
         .get_usize("--n")?
@@ -132,7 +135,9 @@ fn cmd_record_audit(args: &[String]) -> Result<(), String> {
     let precision = f
         .get_f64("--precision")?
         .ok_or("record-audit: --precision required")?;
-    let auditor = f.get("--auditor").ok_or("record-audit: --auditor required")?;
+    let auditor = f
+        .get("--auditor")
+        .ok_or("record-audit: --auditor required")?;
     let passed = pilot::record_audit_at(&sidecar, n, precision, auditor)?;
     println!(
         "audit recorded verbatim: n={} precision={} passed_bar={}",
@@ -144,9 +149,12 @@ fn cmd_record_audit(args: &[String]) -> Result<(), String> {
 fn cmd_record_verdict(args: &[String]) -> Result<(), String> {
     let f = Flags { args };
     let sidecar = SidecarFile::new(PathBuf::from(
-        f.get("--sidecar").ok_or("record-verdict: --sidecar required")?,
+        f.get("--sidecar")
+            .ok_or("record-verdict: --sidecar required")?,
     ));
-    let verdict = f.get("--verdict").ok_or("record-verdict: --verdict required")?;
+    let verdict = f
+        .get("--verdict")
+        .ok_or("record-verdict: --verdict required")?;
     let notes = f.get("--notes").ok_or("record-verdict: --notes required")?;
     let changes = f.get("--changes").unwrap_or("none recorded");
     pilot::record_verdict_at(&sidecar, verdict, notes, changes)?;
@@ -247,7 +255,11 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
         created_at,
     };
     let run = PilotRun::preregister(cfg, sidecar_path.clone())?;
-    println!("preregistered run {} (sidecar: {})", run_id, sidecar_path.display());
+    println!(
+        "preregistered run {} (sidecar: {})",
+        run_id,
+        sidecar_path.display()
+    );
 
     // Daily API budget (fail-stop BEFORE any request): the per-run request cap is
     // narrowed to what is left of today's budget.
@@ -357,10 +369,8 @@ fn execute<E: Extractor>(
     {
         let gate = |ttl: &str| -> Result<bool, String> {
             let base = "https://sparq.dev/ns/pkg/example#";
-            let data = sparq_kb::validate::graph_from_turtle_docs(
-                &[sparq_kb::PKG_ONTOLOGY, ttl],
-                base,
-            )?;
+            let data =
+                sparq_kb::validate::graph_from_turtle_docs(&[sparq_kb::PKG_ONTOLOGY, ttl], base)?;
             let shapes = sparq_kb::validate::graph_from_turtle_docs(
                 &[
                     sparq_kb::PKG_SHAPES,
@@ -446,8 +456,7 @@ fn fetch_batch(
             let path = f
                 .get("--fixture")
                 .ok_or("run: --source fixture requires --fixture <path>")?;
-            let batch =
-                std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
+            let batch = std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path, e))?;
             let records = normalise_openalex_records(&batch)?;
             let stats = FetchStats {
                 fetched_records: records.len(),
@@ -494,8 +503,12 @@ fn fetch_openalex(
         },
         ledger,
     };
-    let mailto = std::env::var("OPENALEX_MAILTO").ok().filter(|s| !s.is_empty());
-    let api_key = std::env::var("OPENALEX_API_KEY").ok().filter(|s| !s.is_empty());
+    let mailto = std::env::var("OPENALEX_MAILTO")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let api_key = std::env::var("OPENALEX_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
 
     let mut records = Vec::new();
     let mut stats = FetchStats::default();
@@ -525,7 +538,11 @@ fn fetch_openalex(
         let got = page_records.len();
         let total = serde_json::from_str::<serde_json::Value>(&resp.body)
             .ok()
-            .and_then(|v| v.get("meta").and_then(|m| m.get("count")).and_then(|c| c.as_u64()))
+            .and_then(|v| {
+                v.get("meta")
+                    .and_then(|m| m.get("count"))
+                    .and_then(|c| c.as_u64())
+            })
             .map(|n| n as usize);
         records.extend(page_records);
         stats.pages_fetched += 1;
@@ -574,7 +591,10 @@ fn get_with_retry<T: Transport>(
             continue;
         }
         if resp.status >= 400 {
-            return Err(format!("OpenAlex: non-retryable HTTP status {}", resp.status));
+            return Err(format!(
+                "OpenAlex: non-retryable HTTP status {}",
+                resp.status
+            ));
         }
         return Ok(resp);
     }

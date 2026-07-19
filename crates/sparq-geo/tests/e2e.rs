@@ -40,7 +40,9 @@ ex:innerLondonGeom geo:asWKT "POLYGON((-0.25 51.45, 0.05 51.45, 0.05 51.57, -0.2
 "#;
 
 fn iri(suffix: &str) -> Term {
-    Term::NamedNode(NamedNode::new_unchecked(format!("http://example.org/{suffix}")))
+    Term::NamedNode(NamedNode::new_unchecked(format!(
+        "http://example.org/{suffix}"
+    )))
 }
 
 #[test]
@@ -53,7 +55,14 @@ fn turtle_to_index_to_queries() {
     assert_eq!(index.skipped(), 0);
 
     let entities: Vec<&Term> = index.entries().map(|e| &e.entity).collect();
-    for ent in ["london", "paris", "brussels", "amsterdam", "thames", "innerLondon"] {
+    for ent in [
+        "london",
+        "paris",
+        "brussels",
+        "amsterdam",
+        "thames",
+        "innerLondon",
+    ] {
         assert!(entities.contains(&&iri(ent)), "missing {ent}");
     }
     // The geometry NODES are not the reported entities.
@@ -66,7 +75,10 @@ fn turtle_to_index_to_queries() {
     let got: Vec<(&Term, f64)> = index.nearest(center, 6);
     let names: Vec<&Term> = got.iter().map(|(t, _)| *t).collect();
     assert_eq!(got.len(), 6);
-    assert_eq!(names[3..], [&iri("brussels"), &iri("paris"), &iri("amsterdam")]);
+    assert_eq!(
+        names[3..],
+        [&iri("brussels"), &iri("paris"), &iri("amsterdam")]
+    );
     assert!(names[..3].contains(&&iri("london")));
     assert!(names[..3].contains(&&iri("thames")));
     assert!(names[..3].contains(&&iri("innerLondon")));
@@ -75,8 +87,11 @@ fn turtle_to_index_to_queries() {
     assert!((paris_d - 341_000.0).abs() < 4_000.0, "got {paris_d}");
 
     // Within 250 km of London: only the London-area entities.
-    let within: Vec<&Term> =
-        index.within_distance(center, 250_000.0, None).into_iter().map(|(t, _)| t).collect();
+    let within: Vec<&Term> = index
+        .within_distance(center, 250_000.0, None)
+        .into_iter()
+        .map(|(t, _)| t)
+        .collect();
     assert_eq!(within.len(), 3);
     assert!(!within.contains(&&iri("paris")));
 
@@ -89,7 +104,9 @@ fn turtle_to_index_to_queries() {
     // Intersects a thin box across the Thames line: the line, the inner-London
     // polygon, and the London point itself all fall inside it.
     let mut hits = index
-        .intersects_wkt("POLYGON((-0.13 51.40, -0.11 51.40, -0.11 51.60, -0.13 51.60, -0.13 51.40))")
+        .intersects_wkt(
+            "POLYGON((-0.13 51.40, -0.11 51.40, -0.11 51.60, -0.13 51.60, -0.13 51.40))",
+        )
         .unwrap();
     hits.sort_by_key(|t| t.to_string());
     assert_eq!(hits, [&iri("innerLondon"), &iri("london"), &iri("thames")]);
@@ -107,8 +124,10 @@ ex:g geo:asWKT "POINT(1 1)"^^geo:wktLiteral .
     let graph = Graph::load_str(ttl, "turtle").unwrap();
     let index = GeoIndex::build(&graph);
     assert_eq!(index.len(), 2);
-    let mut entities: Vec<String> =
-        index.entries().map(|e| e.entity.to_string()).collect();
+    let mut entities: Vec<String> = index.entries().map(|e| e.entity.to_string()).collect();
     entities.sort();
-    assert_eq!(entities, ["<http://example.org/a>", "<http://example.org/b>"]);
+    assert_eq!(
+        entities,
+        ["<http://example.org/a>", "<http://example.org/b>"]
+    );
 }

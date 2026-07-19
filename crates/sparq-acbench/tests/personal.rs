@@ -62,7 +62,11 @@ fn generate_u1_oracle_fail_closed() {
     let params = GenParams::smoke();
     let ds = personal::generate(&params);
     // Every expected decision in the WAC lane must match the oracle.
-    for ed in ds.expected_decisions.iter().filter(|e| e.model == sparq_acbench::AcModel::Wac) {
+    for ed in ds
+        .expected_decisions
+        .iter()
+        .filter(|e| e.model == sparq_acbench::AcModel::Wac)
+    {
         let oracle_result = oracle_wac(&ed.request, &ds.intents);
         assert_eq!(
             oracle_result, ed.decision,
@@ -76,7 +80,7 @@ fn generate_u1_oracle_fail_closed() {
 /// resource under WAC (the canonical owner-centric Solid pod shape).
 #[test]
 fn owner_always_allowed_wac() {
-    use sparq_acbench::{AccessMode, AcModel, Decision, personal, GenParams, Request};
+    use sparq_acbench::{personal, AcModel, AccessMode, Decision, GenParams, Request};
     let params = GenParams::smoke();
     let ds = personal::generate(&params);
 
@@ -122,7 +126,7 @@ fn owner_always_allowed_wac() {
 /// non-public resources (fail-closed default).
 #[test]
 fn unknown_agent_denied_on_private_resources() {
-    use sparq_acbench::{AccessMode, AcModel, Decision, personal, GenParams, Request};
+    use sparq_acbench::{personal, AcModel, AccessMode, Decision, GenParams, Request};
     let params = GenParams::smoke();
     let ds = personal::generate(&params);
 
@@ -132,9 +136,7 @@ fn unknown_agent_denied_on_private_resources() {
         .expected_decisions
         .iter()
         .filter(|e| {
-            e.model == AcModel::Wac
-                && e.request.agent == unknown
-                && e.decision == Decision::Deny
+            e.model == AcModel::Wac && e.request.agent == unknown && e.decision == Decision::Deny
         })
         .count();
 
@@ -150,7 +152,10 @@ fn unknown_agent_denied_on_private_resources() {
         .filter(|e| e.model == AcModel::Wac && e.request.agent == unknown)
     {
         let oracle = sparq_acbench::oracle_wac(&ed.request, &ds.intents);
-        assert_eq!(oracle, ed.decision, "Oracle mismatch for unknown agent request");
+        assert_eq!(
+            oracle, ed.decision,
+            "Oracle mismatch for unknown agent request"
+        );
     }
 
     // Also verify: an explicit request for an unlisted resource URI returns Deny.
@@ -216,7 +221,7 @@ fn w2_fixtures_present() {
 #[test]
 fn expressibility_matrix_client_restricted() {
     use sparq_acbench::{
-        personal, AcModel, Audience, AccessMode, Condition, Effect, Expressibility, GenParams,
+        personal, AcModel, AccessMode, Audience, Condition, Effect, Expressibility, GenParams,
         IntentRow, Scope,
     };
     // Build a minimal ClientRestricted intent row to probe the expressibility matrix.
@@ -261,7 +266,7 @@ fn expressibility_matrix_client_restricted() {
 #[test]
 fn expressibility_matrix_group() {
     use sparq_acbench::{
-        personal, AcModel, Audience, AccessMode, Condition, Effect, Expressibility, GenParams,
+        personal, AcModel, AccessMode, Audience, Condition, Effect, Expressibility, GenParams,
         IntentRow, Scope,
     };
     let row = IntentRow {
@@ -309,7 +314,11 @@ fn generate_u1_oracle_acp_round_trip() {
     use sparq_acbench::{oracle_acp, personal, AcModel, GenParams};
     let params = GenParams::smoke();
     let ds = personal::generate(&params);
-    for ed in ds.expected_decisions.iter().filter(|e| e.model == AcModel::Acp) {
+    for ed in ds
+        .expected_decisions
+        .iter()
+        .filter(|e| e.model == AcModel::Acp)
+    {
         let oracle_result = oracle_acp(&ed.request, &ds.intents);
         assert_eq!(
             oracle_result, ed.decision,
@@ -325,7 +334,11 @@ fn generate_u1_oracle_odrl_round_trip() {
     use sparq_acbench::{oracle_odrl, personal, AcModel, GenParams};
     let params = GenParams::smoke();
     let ds = personal::generate(&params);
-    for ed in ds.expected_decisions.iter().filter(|e| e.model == AcModel::Odrl) {
+    for ed in ds
+        .expected_decisions
+        .iter()
+        .filter(|e| e.model == AcModel::Odrl)
+    {
         let oracle_result = oracle_odrl(&ed.request, &ds.intents);
         assert_eq!(
             oracle_result, ed.decision,

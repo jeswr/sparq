@@ -75,12 +75,19 @@ fn rdfs_multi_support_survives_partial_retraction() {
     let super_c = iri(&mut dict, "http://ex/Super");
     let x = iri(&mut dict, "http://ex/x");
 
-    let mut base: FxHashSet<[Id; 3]> =
-        [[a, sc, super_c], [b, sc, super_c], [x, ty, a], [x, ty, b]].into_iter().collect();
+    let mut base: FxHashSet<[Id; 3]> = [[a, sc, super_c], [b, sc, super_c], [x, ty, a], [x, ty, b]]
+        .into_iter()
+        .collect();
 
     let mut g = MaterializedGraph::new(&mut dict, &base.iter().copied().collect::<Vec<_>>());
-    assert!(g.contains(&[x, ty, super_c]), "Super membership must be derived");
-    assert_eq!(g.closure().into_iter().collect::<FxHashSet<_>>(), rdfs_oracle(&mut dict, &base));
+    assert!(
+        g.contains(&[x, ty, super_c]),
+        "Super membership must be derived"
+    );
+    assert_eq!(
+        g.closure().into_iter().collect::<FxHashSet<_>>(),
+        rdfs_oracle(&mut dict, &base)
+    );
 
     // Retract the first support: still derivable via B ⊑ Super.
     g.delete(&[[x, ty, a]]);
@@ -89,7 +96,10 @@ fn rdfs_multi_support_survives_partial_retraction() {
         g.contains(&[x, ty, super_c]),
         "one surviving support must keep the derived type (over-deletion guard)"
     );
-    assert_eq!(g.closure().into_iter().collect::<FxHashSet<_>>(), rdfs_oracle(&mut dict, &base));
+    assert_eq!(
+        g.closure().into_iter().collect::<FxHashSet<_>>(),
+        rdfs_oracle(&mut dict, &base)
+    );
     assert_eq!(g.full_rebuilds(), 0, "ABox retraction must not rebuild");
 
     // Retract the last support: now unsupported, must leave the closure.
@@ -99,7 +109,10 @@ fn rdfs_multi_support_survives_partial_retraction() {
         !g.contains(&[x, ty, super_c]),
         "removing the final support must retract the derived type (under-deletion guard)"
     );
-    assert_eq!(g.closure().into_iter().collect::<FxHashSet<_>>(), rdfs_oracle(&mut dict, &base));
+    assert_eq!(
+        g.closure().into_iter().collect::<FxHashSet<_>>(),
+        rdfs_oracle(&mut dict, &base)
+    );
     assert_eq!(g.full_rebuilds(), 0, "ABox retraction must not rebuild");
 }
 
@@ -115,7 +128,10 @@ fn rdfs_multi_support_survives_partial_retraction() {
 fn owl_transitive_multipath_retraction_matches_from_scratch() {
     let mut dict = Dict::default();
     let ty = iri(&mut dict, "http://www.w3.org/1999/02/22-rdf-syntax-ns#type");
-    let transitive = iri(&mut dict, "http://www.w3.org/2002/07/owl#TransitiveProperty");
+    let transitive = iri(
+        &mut dict,
+        "http://www.w3.org/2002/07/owl#TransitiveProperty",
+    );
     let near = iri(&mut dict, "http://ex/near");
     let x = iri(&mut dict, "http://ex/x");
     let y = iri(&mut dict, "http://ex/y");
@@ -133,8 +149,14 @@ fn owl_transitive_multipath_retraction_matches_from_scratch() {
     .collect();
 
     let mut g = MaterializedOwlGraph::new(&mut dict, &base.iter().copied().collect::<Vec<_>>());
-    assert!(g.contains(&[x, near, z]), "transitive edge must be derived via both paths");
-    assert_eq!(g.closure().into_iter().collect::<FxHashSet<_>>(), owl_oracle(&mut dict, &base));
+    assert!(
+        g.contains(&[x, near, z]),
+        "transitive edge must be derived via both paths"
+    );
+    assert_eq!(
+        g.closure().into_iter().collect::<FxHashSet<_>>(),
+        owl_oracle(&mut dict, &base)
+    );
 
     // Drop the first path's intermediate edge: x near z survives via x⇝w⇝z.
     g.delete(&mut dict, &[[x, near, y]]);
@@ -143,7 +165,10 @@ fn owl_transitive_multipath_retraction_matches_from_scratch() {
         g.contains(&[x, near, z]),
         "alternate transitive path must keep the derived edge (over-deletion guard)"
     );
-    assert_eq!(g.closure().into_iter().collect::<FxHashSet<_>>(), owl_oracle(&mut dict, &base));
+    assert_eq!(
+        g.closure().into_iter().collect::<FxHashSet<_>>(),
+        owl_oracle(&mut dict, &base)
+    );
 
     // Drop the second path too: no support remains, edge must leave.
     g.delete(&mut dict, &[[x, near, w]]);
@@ -152,7 +177,10 @@ fn owl_transitive_multipath_retraction_matches_from_scratch() {
         !g.contains(&[x, near, z]),
         "removing the last transitive path must retract the derived edge (under-deletion guard)"
     );
-    assert_eq!(g.closure().into_iter().collect::<FxHashSet<_>>(), owl_oracle(&mut dict, &base));
+    assert_eq!(
+        g.closure().into_iter().collect::<FxHashSet<_>>(),
+        owl_oracle(&mut dict, &base)
+    );
 }
 
 // ───────────────────────────────────────────────────────────────────────────────────────
@@ -181,7 +209,9 @@ fn build_rdfs(dict: &mut Dict, rng: &mut Rng) -> RdfsWorld {
     let mut base: Vec<[Id; 3]> = Vec::new();
     let mut classes = Vec::new();
     for i in 0..4 {
-        let chain: Vec<Id> = (0..5).map(|j| iri(dict, &format!("http://ex/C{i}_{j}"))).collect();
+        let chain: Vec<Id> = (0..5)
+            .map(|j| iri(dict, &format!("http://ex/C{i}_{j}")))
+            .collect();
         for pair in chain.windows(2) {
             base.push([pair[0], sc, pair[1]]);
         }
@@ -189,7 +219,9 @@ fn build_rdfs(dict: &mut Dict, rng: &mut Rng) -> RdfsWorld {
     }
     let mut props = Vec::new();
     for i in 0..3 {
-        let chain: Vec<Id> = (0..3).map(|j| iri(dict, &format!("http://ex/p{i}_{j}"))).collect();
+        let chain: Vec<Id> = (0..3)
+            .map(|j| iri(dict, &format!("http://ex/p{i}_{j}")))
+            .collect();
         for pair in chain.windows(2) {
             base.push([pair[0], sp, pair[1]]);
         }
@@ -199,23 +231,28 @@ fn build_rdfs(dict: &mut Dict, rng: &mut Rng) -> RdfsWorld {
         }
         props.extend(chain);
     }
-    let individuals: Vec<Id> =
-        (0..400).map(|i| iri(dict, &format!("http://ex/ind{i}"))).collect();
-    RdfsWorld { ty, classes, props, individuals, tbox: base }
+    let individuals: Vec<Id> = (0..400)
+        .map(|i| iri(dict, &format!("http://ex/ind{i}")))
+        .collect();
+    RdfsWorld {
+        ty,
+        classes,
+        props,
+        individuals,
+        tbox: base,
+    }
 }
 
-fn random_abox(
-    ty: Id,
-    classes: &[Id],
-    props: &[Id],
-    individuals: &[Id],
-    rng: &mut Rng,
-) -> [Id; 3] {
+fn random_abox(ty: Id, classes: &[Id], props: &[Id], individuals: &[Id], rng: &mut Rng) -> [Id; 3] {
     let s = individuals[rng.below(individuals.len())];
     if rng.below(3) == 0 {
         [s, ty, classes[rng.below(classes.len())]]
     } else {
-        [s, props[rng.below(props.len())], individuals[rng.below(individuals.len())]]
+        [
+            s,
+            props[rng.below(props.len())],
+            individuals[rng.below(individuals.len())],
+        ]
     }
 }
 
@@ -227,7 +264,13 @@ fn random_abox(
 fn deletion_heavy_stratified_ratios_match_from_scratch() {
     let mut dict = Dict::default();
     let mut rng = Rng(0x5EED_D001);
-    let RdfsWorld { ty, classes, props, individuals, tbox } = build_rdfs(&mut dict, &mut rng);
+    let RdfsWorld {
+        ty,
+        classes,
+        props,
+        individuals,
+        tbox,
+    } = build_rdfs(&mut dict, &mut rng);
 
     // Seed a large ABox pool (the TBox is fixed for the whole schedule).
     let mut abox: FxHashSet<[Id; 3]> = FxHashSet::default();

@@ -48,9 +48,12 @@ const B: &str = r#"
 /// Builds a finalized 4-d store over graph A: alice nearest bob, carol far.
 fn build_finalized(g: &Graph, path: &std::path::Path) -> VectorStore {
     let mut s = VectorStore::create(path, 4).unwrap().with_fingerprint(g);
-    s.put(id_of(g, "http://example.org/alice"), &[1.0, 0.0, 0.0, 0.0]).unwrap();
-    s.put(id_of(g, "http://example.org/bob"), &[0.9, 0.1, 0.0, 0.0]).unwrap();
-    s.put(id_of(g, "http://example.org/carol"), &[0.0, 0.0, 0.0, 1.0]).unwrap();
+    s.put(id_of(g, "http://example.org/alice"), &[1.0, 0.0, 0.0, 0.0])
+        .unwrap();
+    s.put(id_of(g, "http://example.org/bob"), &[0.9, 0.1, 0.0, 0.0])
+        .unwrap();
+    s.put(id_of(g, "http://example.org/carol"), &[0.0, 0.0, 0.0, 1.0])
+        .unwrap();
     s.finalize().unwrap();
     s
 }
@@ -75,16 +78,29 @@ fn add_after_finalize_is_found_by_search() {
     store.add(dave, &[0.99, 0.01, 0.0, 0.0]).unwrap();
     assert!(store.has_delta());
     assert_eq!(store.len(), 4, "the appended vector counts in len");
-    assert_eq!(store.get(dave), Some(&[0.99f32, 0.01, 0.0, 0.0][..]), "get reads the delta vector");
+    assert_eq!(
+        store.get(dave),
+        Some(&[0.99f32, 0.01, 0.0, 0.0][..]),
+        "get reads the delta vector"
+    );
 
     // Exact search (which consumes iter()) now returns the added vector, ranked correctly. alice is
     // the exact query (cosine 1.0) so ranks first; dave (0.99, 0.01) outranks bob (0.9, 0.1).
     let q = [1.0f32, 0.0, 0.0, 0.0];
-    let ids: Vec<u32> = nearest_exact(&store, &q, 4).iter().map(|&(id, _)| id).collect();
-    assert!(ids.contains(&dave), "the newly added vector must be found by search: {ids:?}");
+    let ids: Vec<u32> = nearest_exact(&store, &q, 4)
+        .iter()
+        .map(|&(id, _)| id)
+        .collect();
+    assert!(
+        ids.contains(&dave),
+        "the newly added vector must be found by search: {ids:?}"
+    );
     let dave_rank = ids.iter().position(|&i| i == dave).unwrap();
     let bob_rank = ids.iter().position(|&i| i == bob).unwrap();
-    assert!(dave_rank < bob_rank, "the added vector outranks bob: {ids:?}");
+    assert!(
+        dave_rank < bob_rank,
+        "the added vector outranks bob: {ids:?}"
+    );
 
     // term-by-term search of alice (excludes alice itself): the added dave is now alice's nearest.
     let neigh = nearest_term_exact(&store, &g, &iri("http://example.org/alice"), 2);
@@ -92,8 +108,14 @@ fn add_after_finalize_is_found_by_search() {
     assert_eq!(neigh[1].0, iri("http://example.org/bob"));
 
     // add of an id that already has a vector is rejected (use update instead).
-    assert!(store.add(dave, &[0.5, 0.5, 0.0, 0.0]).is_err(), "duplicate add rejected");
-    assert!(store.add(bob, &[0.5, 0.5, 0.0, 0.0]).is_err(), "add over an existing base id rejected");
+    assert!(
+        store.add(dave, &[0.5, 0.5, 0.0, 0.0]).is_err(),
+        "duplicate add rejected"
+    );
+    assert!(
+        store.add(bob, &[0.5, 0.5, 0.0, 0.0]).is_err(),
+        "add over an existing base id rejected"
+    );
     std::fs::remove_file(&path).ok();
 }
 
@@ -108,23 +130,41 @@ fn remove_tombstones_an_id_search_excludes_it() {
     let alice = iri("http://example.org/alice");
 
     // Before removal, bob is alice's nearest.
-    assert_eq!(nearest_term_exact(&store, &g, &alice, 1)[0].0, iri("http://example.org/bob"));
+    assert_eq!(
+        nearest_term_exact(&store, &g, &alice, 1)[0].0,
+        iri("http://example.org/bob")
+    );
 
     // Remove bob: it is now absent from get / iter / len / search.
-    assert!(store.remove(bob), "removing an existing base id returns true");
+    assert!(
+        store.remove(bob),
+        "removing an existing base id returns true"
+    );
     assert_eq!(store.get(bob), None, "a tombstoned id reads as absent");
     assert_eq!(store.len(), 2, "len drops by one after the tombstone");
     let live: Vec<u32> = store.iter().map(|(id, _)| id).collect();
-    assert!(!live.contains(&bob), "iter excludes the tombstoned id: {live:?}");
+    assert!(
+        !live.contains(&bob),
+        "iter excludes the tombstoned id: {live:?}"
+    );
 
     // Search no longer surfaces bob.
     let q = [1.0f32, 0.0, 0.0, 0.0];
-    let ids: Vec<u32> = nearest_exact(&store, &q, 10).iter().map(|&(id, _)| id).collect();
-    assert!(!ids.contains(&bob), "search must exclude the tombstoned id: {ids:?}");
+    let ids: Vec<u32> = nearest_exact(&store, &q, 10)
+        .iter()
+        .map(|&(id, _)| id)
+        .collect();
+    assert!(
+        !ids.contains(&bob),
+        "search must exclude the tombstoned id: {ids:?}"
+    );
 
     // Removing an absent id is a no-op (false); removing twice is idempotent.
     assert!(!store.remove(bob), "second remove is a no-op");
-    assert!(!store.remove(424242), "removing a never-present id is a no-op");
+    assert!(
+        !store.remove(424242),
+        "removing a never-present id is a no-op"
+    );
 
     // A removed id can be re-added (the tombstone is cleared by add).
     store.add(bob, &[0.8, 0.2, 0.0, 0.0]).unwrap();
@@ -145,13 +185,28 @@ fn update_replaces_an_existing_vector() {
     assert_eq!(store.get(carol), Some(&[0.97f32, 0.03, 0.0, 0.0][..]));
     assert_eq!(store.len(), 3, "update does not change the count");
     let q = [1.0f32, 0.0, 0.0, 0.0];
-    let ids: Vec<u32> = nearest_exact(&store, &q, 3).iter().map(|&(id, _)| id).collect();
-    assert!(ids.contains(&carol), "the updated vector is now near the query: {ids:?}");
+    let ids: Vec<u32> = nearest_exact(&store, &q, 3)
+        .iter()
+        .map(|&(id, _)| id)
+        .collect();
+    assert!(
+        ids.contains(&carol),
+        "the updated vector is now near the query: {ids:?}"
+    );
 
     // update of an absent id is rejected (use add); validation still applies.
-    assert!(store.update(424242, &[1.0, 0.0, 0.0, 0.0]).is_err(), "update of an absent id errors");
-    assert!(store.update(carol, &[0.0, 0.0, 0.0, 0.0]).is_err(), "all-zero rejected");
-    assert!(store.update(carol, &[f32::NAN, 0.0, 0.0, 0.0]).is_err(), "non-finite rejected");
+    assert!(
+        store.update(424242, &[1.0, 0.0, 0.0, 0.0]).is_err(),
+        "update of an absent id errors"
+    );
+    assert!(
+        store.update(carol, &[0.0, 0.0, 0.0, 0.0]).is_err(),
+        "all-zero rejected"
+    );
+    assert!(
+        store.update(carol, &[f32::NAN, 0.0, 0.0, 0.0]).is_err(),
+        "non-finite rejected"
+    );
     std::fs::remove_file(&path).ok();
 }
 
@@ -184,11 +239,16 @@ fn compact_equals_a_from_scratch_rebuild_over_the_final_set() {
     // (1) compact() into a fresh base.
     let compact_path = tmp("compact-out");
     let compacted = store.compact(&compact_path, &g).unwrap();
-    assert!(!compacted.has_delta(), "the compacted store carries no delta");
+    assert!(
+        !compacted.has_delta(),
+        "the compacted store carries no delta"
+    );
 
     // (2) a from-scratch rebuild over the SAME final set, via the ordinary build path.
     let rebuild_path = tmp("compact-rebuild");
-    let mut rebuilt = VectorStore::create(&rebuild_path, 4).unwrap().with_fingerprint(&g);
+    let mut rebuilt = VectorStore::create(&rebuild_path, 4)
+        .unwrap()
+        .with_fingerprint(&g);
     for (id, v) in &want {
         rebuilt.put(*id, v).unwrap();
     }
@@ -203,19 +263,33 @@ fn compact_equals_a_from_scratch_rebuild_over_the_final_set() {
     assert_eq!(compacted.len(), rebuilt.len());
     assert_eq!(compacted.len(), want.len());
     for (id, v) in &want {
-        assert_eq!(compacted.get(*id), Some(v.as_slice()), "get mismatch for id {id}");
+        assert_eq!(
+            compacted.get(*id),
+            Some(v.as_slice()),
+            "get mismatch for id {id}"
+        );
         assert_eq!(rebuilt.get(*id), Some(v.as_slice()));
     }
-    assert_eq!(compacted.get(bob), None, "the tombstoned id is gone from the compacted base");
+    assert_eq!(
+        compacted.get(bob),
+        None,
+        "the tombstoned id is gone from the compacted base"
+    );
     let mut got: Vec<(u32, Vec<f32>)> = compacted.iter().map(|(id, v)| (id, v.to_vec())).collect();
     got.sort_by_key(|&(id, _)| id);
-    assert_eq!(got, want, "the compacted base's effective set equals the final set");
+    assert_eq!(
+        got, want,
+        "the compacted base's effective set equals the final set"
+    );
     assert_eq!(compacted.fingerprint(), rebuilt.fingerprint());
     assert!(compacted.check_graph(&g).is_ok());
 
     // A search over the compacted base agrees with the same search over the rebuilt base.
     let q = [0.1f32, 0.9, 0.0, 0.0];
-    assert_eq!(nearest_exact(&compacted, &q, 3), nearest_exact(&rebuilt, &q, 3));
+    assert_eq!(
+        nearest_exact(&compacted, &q, 3),
+        nearest_exact(&rebuilt, &q, 3)
+    );
 
     std::fs::remove_file(&base_path).ok();
     std::fs::remove_file(&compact_path).ok();
@@ -244,8 +318,12 @@ fn delta_tied_to_generation_n_is_rejected_against_a_base_of_generation_m() {
 
     // A separate store built against generation B.
     let b_path = tmp("gen-b");
-    let mut store_b = VectorStore::create(&b_path, 4).unwrap().with_fingerprint(&gb);
-    store_b.put(id_of(&gb, "http://example.org/eve"), &[1.0, 0.0, 0.0, 0.0]).unwrap();
+    let mut store_b = VectorStore::create(&b_path, 4)
+        .unwrap()
+        .with_fingerprint(&gb);
+    store_b
+        .put(id_of(&gb, "http://example.org/eve"), &[1.0, 0.0, 0.0, 0.0])
+        .unwrap();
     store_b.finalize().unwrap();
 
     // Applying the gen-A delta to the gen-B base must be a descriptive ERROR, not a silent mis-key.
@@ -253,11 +331,16 @@ fn delta_tied_to_generation_n_is_rejected_against_a_base_of_generation_m() {
         .apply_delta(delta_a.clone())
         .expect_err("a delta from a different generation must be rejected");
     assert!(err.contains("generation mismatch"), "err was: {err}");
-    assert!(!store_b.has_delta(), "the rejected delta must not be installed");
+    assert!(
+        !store_b.has_delta(),
+        "the rejected delta must not be installed"
+    );
 
     // The same delta applies cleanly onto a fresh handle of its OWN generation (gen A).
     let mut store_a2 = VectorStore::open(&a_path).unwrap();
-    store_a2.apply_delta(delta_a).expect("the delta matches its own generation");
+    store_a2
+        .apply_delta(delta_a)
+        .expect("the delta matches its own generation");
     assert_eq!(store_a2.get(dave), Some(&[0.3f32, 0.7, 0.0, 0.0][..]));
 
     std::fs::remove_file(&a_path).ok();

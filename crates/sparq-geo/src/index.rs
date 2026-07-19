@@ -264,7 +264,10 @@ impl GeoIndex {
         let items: Vec<TreeItem> = entries
             .iter()
             .enumerate()
-            .map(|(i, e)| TreeItem { idx: i as u32, env: geometry_env(&e.geometry) })
+            .map(|(i, e)| TreeItem {
+                idx: i as u32,
+                env: geometry_env(&e.geometry),
+            })
             .collect();
         // The id-level indexed universe: one ref per entry, one set membership per
         // distinct literal id (features sharing a geometry share its literal id). [OPUS-4.8]
@@ -358,7 +361,9 @@ impl GeoIndex {
         for [s, p, o] in inserts.iter().chain(deletes) {
             match p {
                 // Both geometry-serialization predicates touch the subject node. [OPUS-4.8]
-                Term::NamedNode(p) if p.as_str() == vocab::AS_WKT || p.as_str() == vocab::AS_GML => {
+                Term::NamedNode(p)
+                    if p.as_str() == vocab::AS_WKT || p.as_str() == vocab::AS_GML =>
+                {
                     push_unique(s)
                 }
                 Term::NamedNode(p)
@@ -646,7 +651,10 @@ impl GeoIndex {
             .locate_in_envelope_intersecting(window)
             .filter_map(|item| {
                 let e = self.slots[item.idx as usize].as_ref().expect("live slot");
-                e.geometry.geometry.intersects(&geometry.geometry).then_some(&e.entity)
+                e.geometry
+                    .geometry
+                    .intersects(&geometry.geometry)
+                    .then_some(&e.entity)
             })
             .collect()
     }
@@ -709,7 +717,13 @@ impl GeoIndex {
             .tree
             // [OPUS-4.8] rstar 0.13 takes the envelope by value (AABB is Copy).
             .locate_in_envelope_intersecting(window)
-            .map(|item| self.slots[item.idx as usize].as_ref().expect("live slot").literal.clone())
+            .map(|item| {
+                self.slots[item.idx as usize]
+                    .as_ref()
+                    .expect("live slot")
+                    .literal
+                    .clone()
+            })
             .collect();
         dedupe(out)
     }
@@ -801,12 +815,17 @@ mod indexed_ids_tests {
         let g = graph();
         let idx = GeoIndex::build(&g);
         let dict_ptr = std::ptr::from_ref(&g.dict) as usize;
-        let ids = idx.indexed_ids_for(dict_ptr).expect("fresh dict must match");
+        let ids = idx
+            .indexed_ids_for(dict_ptr)
+            .expect("fresh dict must match");
         // Exactly the two geo:asWKT literal ids, and each is the id `id_of` resolves
         // for the corresponding literal Term the index reports as indexed.
         assert_eq!(ids.len(), 2, "two distinct geometry literals");
         for e in idx.entries() {
-            assert!(ids.contains(&e.literal_id), "every entry's literal id is in the set");
+            assert!(
+                ids.contains(&e.literal_id),
+                "every entry's literal id is in the set"
+            );
             // The id-level and Term-level views agree: the id is the one the graph's
             // dict resolves for the same literal Term.
             assert_eq!(g.id_of(&e.literal), Some(e.literal_id));
@@ -850,13 +869,23 @@ mod indexed_ids_tests {
 
         // Remove ONE ownership edge; the geometry (and its literal id) survives.
         let iri = |s: &str| Term::NamedNode(NamedNode::new_unchecked(s.to_string()));
-        let del = [[iri("http://ex/a"), iri(vocab::HAS_GEOMETRY), iri("http://ex/g")]];
+        let del = [[
+            iri("http://ex/a"),
+            iri(vocab::HAS_GEOMETRY),
+            iri("http://ex/g"),
+        ]];
         g.apply_delta(&[], &del).unwrap();
         idx.apply_delta(&g, &[], &del);
         let dict_ptr = std::ptr::from_ref(&g.dict) as usize;
         // One entry (b) remains; the literal id is still present exactly once.
         assert_eq!(idx.entries().count(), 1);
         assert_eq!(idx.indexed_ids_for(dict_ptr).unwrap().len(), 1);
-        assert_eq!(*idx.indexed_ids_for(dict_ptr).unwrap(), GeoIndex::build(&g).indexed_ids_for(dict_ptr).unwrap().clone());
+        assert_eq!(
+            *idx.indexed_ids_for(dict_ptr).unwrap(),
+            GeoIndex::build(&g)
+                .indexed_ids_for(dict_ptr)
+                .unwrap()
+                .clone()
+        );
     }
 }

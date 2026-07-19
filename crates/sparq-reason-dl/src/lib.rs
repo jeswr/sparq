@@ -37,8 +37,8 @@ pub use extract::{extract, ExtractError};
 #[doc(inline)]
 pub use model::{Axiom, ClassExpression, ObjectPropertyExpression, Ontology};
 // [SONNET-4.6] sq-pbz04.4.7: forward RDF renderer (diagnostic / round-trip aid).
-#[doc(inline)]
-pub use render::{render_to_triples, render_to_turtle, triples_to_turtle};
 #[cfg(feature = "dispatch")]
 #[doc(inline)]
 pub use check::DirectChecker;
+#[doc(inline)]
+pub use render::{render_to_triples, render_to_turtle, triples_to_turtle};

@@ -53,7 +53,10 @@ fn row_number_over_partition_by_order_by() {
             (ROW_NUMBER() OVER (PARTITION BY ?dept ORDER BY DESC(?sales)) AS ?rn) \
         WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
     let r = query_over(&g(), q).unwrap();
-    assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "rn"]);
+    assert_eq!(
+        r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+        ["emp", "rn"]
+    );
     // eng partition desc by sales: a=30,b=30 tie (broken stably by input order → a<b),
     // then c=20 → row numbers a=1, b=2, c=3.
     assert_eq!(for_emp(&r, "a", 1), 1);
@@ -106,7 +109,10 @@ fn order_by_computed_expression_in_over() {
         WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
     let r = query_over(&g(), q).unwrap();
     // Output is exactly the named columns — the expression helper is dropped.
-    assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "rn"]);
+    assert_eq!(
+        r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+        ["emp", "rn"]
+    );
     // eng partition, sales*-1 ascending == sales descending: a=30,b=30 tie (stable
     // by input order a<b), then c=20 → row numbers a=1, b=2, c=3.
     assert_eq!(for_emp(&r, "a", 1), 1);
@@ -126,7 +132,10 @@ fn order_by_computed_expression_desc() {
             (RANK() OVER (ORDER BY DESC(?sales + 0)) AS ?r) \
         WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
     let r = query_over(&g(), q).unwrap();
-    assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "r"]);
+    assert_eq!(
+        r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+        ["emp", "r"]
+    );
     // Single partition, ?sales+0 descending: e=40→1, a=30,b=30→2 (tie), c=20→4, d=10→5.
     assert_eq!(for_emp(&r, "e", 1), 1);
     assert_eq!(for_emp(&r, "a", 1), 2);
@@ -141,7 +150,10 @@ fn ordinary_query_passes_through_unchanged() {
     let q = "PREFIX ex: <http://ex/> SELECT ?emp WHERE { ?emp ex:dept ?d }";
     let viaq = query_over(&g(), q).unwrap();
     assert_eq!(viaq.rows.len(), 5);
-    assert_eq!(viaq.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp"]);
+    assert_eq!(
+        viaq.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+        ["emp"]
+    );
 }
 
 // ---- inline windowed AGGREGATES + frames (sq-imj8) [OPUS-4.8] ----
@@ -154,7 +166,10 @@ fn inline_windowed_sum_per_partition() {
             (SUM(?sales) OVER (PARTITION BY ?dept) AS ?dept_total) \
         WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
     let r = query_over(&g(), q).unwrap();
-    assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "dept_total"]);
+    assert_eq!(
+        r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+        ["emp", "dept_total"]
+    );
     // eng = 30+30+20 = 80; sales = 10+40 = 50.
     for emp in ["a", "b", "c"] {
         assert_eq!(for_emp(&r, emp, 1), 80);
@@ -173,7 +188,10 @@ fn inline_running_total_rows_frame() {
             (SUM(?sales) OVER (ORDER BY ?sales ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS ?run) \
         WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
     let r = query_over(&g(), q).unwrap();
-    assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "sales", "run"]);
+    assert_eq!(
+        r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+        ["emp", "sales", "run"]
+    );
     // d (sales=10) is first → run 10. e (sales=40) is last → run = grand total 130
     // (10+20+30+30+40).
     assert_eq!(for_emp(&r, "d", 2), 10);
@@ -247,7 +265,10 @@ fn inline_lag_previous_sales() {
         SELECT ?emp ?sales (LAG(?sales) OVER (ORDER BY ?sales) AS ?prev) \
         WHERE { ?emp ex:dept ?dept ; ex:sales ?sales }";
     let r = query_over(&g(), q).unwrap();
-    assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "sales", "prev"]);
+    assert_eq!(
+        r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+        ["emp", "sales", "prev"]
+    );
     // d is the smallest → no predecessor (unbound). c sees d=10. e sees the previous
     // 30 (a or b — both are 30). The first-in-order row's lag is unbound.
     assert_eq!(opt_for_emp(&r, "d", 2), None);
@@ -311,7 +332,10 @@ fn named_window_clause_reused_across_items() {
         WHERE { ?emp ex:dept ?dept ; ex:sales ?sales } \
         WINDOW w AS (PARTITION BY ?dept ORDER BY DESC(?sales))";
     let r = query_over(&g(), q).unwrap();
-    assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "r", "dr"]);
+    assert_eq!(
+        r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+        ["emp", "r", "dr"]
+    );
     // eng (30,30,20): RANK a=1,b=1,c=3 (gap); DENSE_RANK a=1,b=1,c=2 (no gap).
     assert_eq!(for_emp(&r, "a", 1), 1); // RANK
     assert_eq!(for_emp(&r, "c", 1), 3);
@@ -332,7 +356,10 @@ fn named_window_with_limit_modifier_after() {
         WINDOW w AS (PARTITION BY ?dept ORDER BY ?sales) \
         LIMIT 100";
     let r = query_over(&g(), q).unwrap();
-    assert_eq!(r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(), ["emp", "rn"]);
+    assert_eq!(
+        r.vars.iter().map(|v| v.as_str()).collect::<Vec<_>>(),
+        ["emp", "rn"]
+    );
     assert_eq!(r.rows.len(), 5);
 }
 

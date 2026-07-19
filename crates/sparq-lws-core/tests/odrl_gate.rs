@@ -276,7 +276,11 @@ async fn untargeted_graph_is_untouched() {
     assert!(body_text(resp_b).await.contains(SECRET_MARKER));
 
     let resp_anon = h.get_anon("/alice/pub/other").await;
-    assert_eq!(resp_anon.status(), StatusCode::OK, "public WAC grant stands");
+    assert_eq!(
+        resp_anon.status(),
+        StatusCode::OK,
+        "public WAC grant stands"
+    );
 }
 
 /// Feature-on-but-unattached: with no gate attached the behaviour is identical to the default

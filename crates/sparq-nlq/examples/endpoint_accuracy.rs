@@ -286,9 +286,7 @@ mod inner {
             eprintln!("error: {e}");
             eprintln!();
             eprintln!("Set the following environment variables:");
-            eprintln!(
-                "  SPARQ_NLQ_ENDPOINT_URL   - base URL, e.g. http://localhost:11434/v1"
-            );
+            eprintln!("  SPARQ_NLQ_ENDPOINT_URL   - base URL, e.g. http://localhost:11434/v1");
             eprintln!("  SPARQ_NLQ_ENDPOINT_MODEL - model id, e.g. llama3.1 or gpt-4o-mini");
             eprintln!("  SPARQ_NLQ_ENDPOINT_KEY   - bearer token (optional; skip for local)");
             eprintln!();
@@ -361,18 +359,14 @@ mod inner {
         // 5. Print results.
         println!("\n=== endpoint exec-accuracy (model={model}) ===");
         println!("{}", comparison.summary());
-        print_provenance(
-            "grounded end-to-end",
-            &comparison.grounded_end_to_end.cases,
-        );
+        print_provenance("grounded end-to-end", &comparison.grounded_end_to_end.cases);
         print_provenance(
             "ungrounded end-to-end",
             &comparison.ungrounded_end_to_end.cases,
         );
 
         // 6. Persist recorded sessions for replay/regression.
-        let fixture_dir =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         std::fs::create_dir_all(&fixture_dir).ok();
         for (i, rec) in recorders.iter().enumerate() {
             if !rec.exchanges().is_empty() {
@@ -414,8 +408,7 @@ mod inner {
                 "\nWARNING: grounding did NOT pay for itself on this run — \
                  grounded macroF1={:.3} vs ungrounded macroF1={:.3}. \
                  Check the per-question provenance above.",
-                comparison.grounded_end_to_end.macro_f1,
-                comparison.ungrounded_end_to_end.macro_f1,
+                comparison.grounded_end_to_end.macro_f1, comparison.ungrounded_end_to_end.macro_f1,
             );
             std::process::exit(1);
         }
@@ -448,7 +441,10 @@ mod tests {
         assert_eq!(pos, vec!["endpoint_accuracy"]);
         assert_eq!(path.as_deref(), Some("/tmp/r.json"));
 
-        let plain: Vec<String> = ["endpoint_accuracy"].iter().map(|s| s.to_string()).collect();
+        let plain: Vec<String> = ["endpoint_accuracy"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let (p2, none) = take_json_flag(plain.clone());
         assert_eq!(p2, plain);
         assert!(none.is_none());

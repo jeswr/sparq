@@ -96,9 +96,17 @@ fn tlp_branches_partition_the_base_as_the_case_analysis_predicts() {
     let queries = tlp_queries(PATTERN, PREDICATE);
     assert_eq!(rows(&engine, &queries.base), 4, "s1..s4");
     assert_eq!(rows(&engine, &queries.branch_true), 1, "s2: 20 < 25");
-    assert_eq!(rows(&engine, &queries.branch_false), 1, "s1: 30 < 25 is false");
+    assert_eq!(
+        rows(&engine, &queries.branch_false),
+        1,
+        "s1: 30 < 25 is false"
+    );
     // s3: "twenty" < 25 is a type error; s4: ?age unbound (OPTIONAL) is an error.
-    assert_eq!(rows(&engine, &queries.branch_error), 2, "s3 type error + s4 unbound");
+    assert_eq!(
+        rows(&engine, &queries.branch_error),
+        2,
+        "s3 type error + s4 unbound"
+    );
 }
 
 // --- non-vacuity: each oracle passes on the pristine engine, flags the mutant ---
@@ -113,7 +121,10 @@ fn tlp_passes_on_pristine_sparq() {
 fn tlp_flags_the_seeded_wrong_result_mutant() {
     let mutant = FilterDropsRow::new(pristine());
     let verdict = check_tlp(&mutant, PATTERN, PREDICATE);
-    assert!(verdict.is_violation(), "expected a violation, got {verdict:?}");
+    assert!(
+        verdict.is_violation(),
+        "expected a violation, got {verdict:?}"
+    );
 }
 
 #[test]
@@ -126,7 +137,10 @@ fn norec_passes_on_pristine_sparq() {
 fn norec_flags_the_seeded_wrong_result_mutant() {
     let mutant = FilterDropsRow::new(pristine());
     let verdict = check_norec(&mutant, PATTERN, PREDICATE);
-    assert!(verdict.is_violation(), "expected a violation, got {verdict:?}");
+    assert!(
+        verdict.is_violation(),
+        "expected a violation, got {verdict:?}"
+    );
 }
 
 #[test]
@@ -144,7 +158,10 @@ fn differential_flags_the_seeded_wrong_result_mutant() {
     let mutant = FilterDropsRow::new(pristine());
     let query = format!("SELECT * WHERE {{ {PATTERN} FILTER( {PREDICATE} ) }}");
     let verdict = check_differential(&[&reference, &mutant], &query);
-    assert!(verdict.is_violation(), "expected a violation, got {verdict:?}");
+    assert!(
+        verdict.is_violation(),
+        "expected a violation, got {verdict:?}"
+    );
 }
 
 // --- fail-closed: engine errors are engine failures, never passes or violations ---
@@ -210,7 +227,11 @@ fn lang_atom_exercises_the_full_ebv_trichotomy() {
     let predicate = "LANG(?v) = \"fr\"";
     let queries = tlp_queries(LANG_PATTERN, predicate);
     assert_eq!(rows(&engine, &queries.base), 3, "s1..s3");
-    assert_eq!(rows(&engine, &queries.branch_true), 1, "s1: LANG(\"mot\"@fr) = \"fr\"");
+    assert_eq!(
+        rows(&engine, &queries.branch_true),
+        1,
+        "s1: LANG(\"mot\"@fr) = \"fr\""
+    );
     assert_eq!(
         rows(&engine, &queries.branch_false),
         1,
@@ -232,9 +253,21 @@ fn is_literal_atom_splits_literals_from_iris() {
     let engine = InProcessSparq::from_ntriples("sparq", LANG_DATA).unwrap();
     let predicate = "isLiteral(?v)";
     let queries = tlp_queries(LANG_PATTERN, predicate);
-    assert_eq!(rows(&engine, &queries.branch_true), 2, "s1 lang-tagged + s2 plain");
-    assert_eq!(rows(&engine, &queries.branch_false), 1, "s3: an IRI is not a literal");
-    assert_eq!(rows(&engine, &queries.branch_error), 0, "?v is always bound here");
+    assert_eq!(
+        rows(&engine, &queries.branch_true),
+        2,
+        "s1 lang-tagged + s2 plain"
+    );
+    assert_eq!(
+        rows(&engine, &queries.branch_false),
+        1,
+        "s3: an IRI is not a literal"
+    );
+    assert_eq!(
+        rows(&engine, &queries.branch_error),
+        0,
+        "?v is always bound here"
+    );
     assert!(check_tlp(&engine, LANG_PATTERN, predicate).is_pass());
     assert!(check_norec(&engine, LANG_PATTERN, predicate).is_pass());
 }
@@ -243,10 +276,12 @@ fn is_literal_atom_splits_literals_from_iris() {
 /// the non-vacuity anchor extended to the new atom family.
 #[test]
 fn mutant_is_flagged_on_a_lang_predicate() {
-    let mutant =
-        FilterDropsRow::new(InProcessSparq::from_ntriples("sparq", LANG_DATA).unwrap());
+    let mutant = FilterDropsRow::new(InProcessSparq::from_ntriples("sparq", LANG_DATA).unwrap());
     let verdict = check_tlp(&mutant, LANG_PATTERN, "LANG(?v) = \"fr\"");
-    assert!(verdict.is_violation(), "expected a violation, got {verdict:?}");
+    assert!(
+        verdict.is_violation(),
+        "expected a violation, got {verdict:?}"
+    );
 }
 
 // --- generated cases: the oracles hold on the real engine across seeds ---
@@ -325,8 +360,7 @@ fn generated_cases_with_the_new_atoms_hold_on_pristine_sparq() {
         let case = generate_case(seed);
         let has_lang = case.predicate.contains("LANG(?v)");
         let has_is_literal = case.predicate.contains("isLiteral(?v)");
-        if !(has_lang && lang_checked < WANT) && !(has_is_literal && is_literal_checked < WANT)
-        {
+        if !(has_lang && lang_checked < WANT) && !(has_is_literal && is_literal_checked < WANT) {
             continue;
         }
         let engine = InProcessSparq::from_ntriples("sparq", &case.data_ntriples)

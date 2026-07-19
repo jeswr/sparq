@@ -24,8 +24,8 @@
 
 use std::collections::BTreeMap;
 
-use super::{has_keyword_form, is_keyword, ActiveContext, Direction, Override, TermDefinition};
 use super::iri::relativize_iri;
+use super::{has_keyword_form, is_keyword, ActiveContext, Direction, Override, TermDefinition};
 use crate::json::Json;
 
 // ---------------------------------------------------------------------------
@@ -119,14 +119,15 @@ impl ActiveContext {
 
             // §4.3 steps 4.3–4.4: ensure the result entries exist.
             let container_map = result.entry(iri.clone()).or_default();
-            let tl_map = container_map
-                .entry(container)
-                .or_default();
+            let tl_map = container_map.entry(container).or_default();
 
             // §4.3 step 4.5 ("@any"): record this term as an unconstrained
             // fallback — first-write-wins (shortest/lexicographic guarantee
             // comes from the sort above).
-            tl_map.any.entry("@none".to_string()).or_insert_with(|| term.to_string());
+            tl_map
+                .any
+                .entry("@none".to_string())
+                .or_insert_with(|| term.to_string());
 
             if term_def.reverse {
                 // §4.3 step 4.6: reverse property — store in type map under
@@ -167,7 +168,8 @@ impl ActiveContext {
                     None => {
                         // §4.3 step 4.9.x: no explicit language or direction —
                         // fall back to the context default(s), then "@none".
-                        if self.default_language.is_some() || self.default_base_direction.is_some() {
+                        if self.default_language.is_some() || self.default_base_direction.is_some()
+                        {
                             tl_map
                                 .language
                                 .entry(default_language.clone())
@@ -684,8 +686,7 @@ pub fn compact_iri(
             let better = match &best_compact {
                 None => true,
                 Some(b) => {
-                    candidate.len() < b.len()
-                        || (candidate.len() == b.len() && candidate < *b)
+                    candidate.len() < b.len() || (candidate.len() == b.len() && candidate < *b)
                 }
             };
             if better {
@@ -747,7 +748,12 @@ mod tests {
 
     fn ctx_of(src: &str) -> ActiveContext {
         ActiveContext::new(Some(BASE))
-            .process(&json(src), Some(BASE), &NoopLoader, &JsonLdOptions::default())
+            .process(
+                &json(src),
+                Some(BASE),
+                &NoopLoader,
+                &JsonLdOptions::default(),
+            )
             .expect("context should process")
     }
 
@@ -761,9 +767,7 @@ mod tests {
     #[test]
     fn inverse_ctx_shorter_term_wins_over_longer() {
         // "z" (1 char) beats "aa" (2 chars) for the same IRI.
-        let ac = ctx_of(
-            r#"{"z": "http://ex/foo", "aa": "http://ex/foo"}"#,
-        );
+        let ac = ctx_of(r#"{"z": "http://ex/foo", "aa": "http://ex/foo"}"#);
         let inv = ac.inverse_context();
         // The "@any"/"@none" slot must be "z", not "aa".
         let iri_map = inv.inner.get("http://ex/foo").expect("iri present");
@@ -773,23 +777,15 @@ mod tests {
             Some("z"),
             "shorter term 'z' must beat 'aa'"
         );
-        assert_eq!(
-            tl.language.get("@none").map(String::as_str),
-            Some("z")
-        );
-        assert_eq!(
-            tl.type_.get("@none").map(String::as_str),
-            Some("z")
-        );
+        assert_eq!(tl.language.get("@none").map(String::as_str), Some("z"));
+        assert_eq!(tl.type_.get("@none").map(String::as_str), Some("z"));
     }
 
     /// Equal-length terms: lexicographically least must win.
     #[test]
     fn inverse_ctx_lexicographic_tie_break() {
         // "aa" < "ab" lexicographically.
-        let ac = ctx_of(
-            r#"{"ab": "http://ex/bar", "aa": "http://ex/bar"}"#,
-        );
+        let ac = ctx_of(r#"{"ab": "http://ex/bar", "aa": "http://ex/bar"}"#);
         let inv = ac.inverse_context();
         let tl = inv
             .inner
@@ -807,16 +803,9 @@ mod tests {
     /// Type-mapped term lands in the `@type` sub-map under its type IRI.
     #[test]
     fn inverse_ctx_type_mapped_term_in_type_submap() {
-        let ac = ctx_of(
-            r#"{"typed": {"@id": "http://ex/p", "@type": "http://ex/T"}}"#,
-        );
+        let ac = ctx_of(r#"{"typed": {"@id": "http://ex/p", "@type": "http://ex/T"}}"#);
         let inv = ac.inverse_context();
-        let tl = inv
-            .inner
-            .get("http://ex/p")
-            .unwrap()
-            .get("@none")
-            .unwrap();
+        let tl = inv.inner.get("http://ex/p").unwrap().get("@none").unwrap();
         assert_eq!(
             tl.type_.get("http://ex/T").map(String::as_str),
             Some("typed")
@@ -827,9 +816,7 @@ mod tests {
     /// lower-cased language tag.
     #[test]
     fn inverse_ctx_language_mapped_term_in_language_submap() {
-        let ac = ctx_of(
-            r#"{"label": {"@id": "http://ex/label", "@language": "en"}}"#,
-        );
+        let ac = ctx_of(r#"{"label": {"@id": "http://ex/label", "@language": "en"}}"#);
         let inv = ac.inverse_context();
         let tl = inv
             .inner
@@ -837,19 +824,14 @@ mod tests {
             .unwrap()
             .get("@none")
             .unwrap();
-        assert_eq!(
-            tl.language.get("en").map(String::as_str),
-            Some("label")
-        );
+        assert_eq!(tl.language.get("en").map(String::as_str), Some("label"));
     }
 
     /// Container mapping produces the sorted-join key.
     /// Term with `@container: ["@language"]` → container key `"@language"`.
     #[test]
     fn inverse_ctx_container_key_sorted_join() {
-        let ac = ctx_of(
-            r#"{"labels": {"@id": "http://ex/labels", "@container": "@language"}}"#,
-        );
+        let ac = ctx_of(r#"{"labels": {"@id": "http://ex/labels", "@container": "@language"}}"#);
         let inv = ac.inverse_context();
         // The inverse context should have a "@language" entry, not "@none".
         assert!(
@@ -867,9 +849,13 @@ mod tests {
         let ac = ctx_of(r#"{"dropped": null}"#);
         let inv = ac.inverse_context();
         // A null-mapped term has no IRI: nothing should appear in the inverse.
-        assert!(inv.inner.is_empty() || !inv.inner.values().any(|cm| {
-            cm.values().any(|tl| tl.any.values().any(|t| t == "dropped"))
-        }));
+        assert!(
+            inv.inner.is_empty()
+                || !inv.inner.values().any(|cm| {
+                    cm.values()
+                        .any(|tl| tl.any.values().any(|t| t == "dropped"))
+                })
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -888,7 +874,10 @@ mod tests {
         let ac = ctx_of(r#"{"rdftype": "@type"}"#);
         let inv = ac.inverse_context();
         let result = compact_iri(&ac, &inv, "@type", None, true, false);
-        assert_eq!(result, "rdftype", "keyword alias should compact to the alias term");
+        assert_eq!(
+            result, "rdftype",
+            "keyword alias should compact to the alias term"
+        );
     }
 
     /// Basic term lookup via inverse context.
@@ -964,14 +953,7 @@ mod tests {
         assert_eq!(result, "ex:id1", "prefix:suffix compact IRI");
 
         // Type position: vocab=true — "ex:Type1" is the compact IRI.
-        let result2 = compact_iri(
-            &ac,
-            &inv,
-            "http://example.org/Type1",
-            None,
-            true,
-            false,
-        );
+        let result2 = compact_iri(&ac, &inv, "http://example.org/Type1", None, true, false);
         assert_eq!(result2, "ex:Type1");
     }
 
@@ -1017,9 +999,7 @@ mod tests {
     /// suffix doesn't conflict with a defined term, return the suffix alone.
     #[test]
     fn compact_iri_vocab_relative_suffix() {
-        let ac = ctx_of(
-            r#"{"@vocab": "http://example.org/vocab/"}"#,
-        );
+        let ac = ctx_of(r#"{"@vocab": "http://example.org/vocab/"}"#);
         let inv = ac.inverse_context();
         let result = compact_iri(
             &ac,
@@ -1075,7 +1055,11 @@ mod tests {
             "@language",
             &["en", "@none"],
         );
-        assert_eq!(result.as_deref(), Some("en_label"), "specific language term preferred");
+        assert_eq!(
+            result.as_deref(),
+            Some("en_label"),
+            "specific language term preferred"
+        );
 
         // With preferred_values = ["fr", "@none"], "fr" has no match, so
         // "@none" fallback picks "any_label".
@@ -1093,16 +1077,21 @@ mod tests {
     #[test]
     fn select_term_no_match_returns_none() {
         let inv = InverseContext::default();
-        assert!(select_term(&inv, "http://ex/unknown", &["@none"], "@language", &["@none"]).is_none());
+        assert!(select_term(
+            &inv,
+            "http://ex/unknown",
+            &["@none"],
+            "@language",
+            &["@none"]
+        )
+        .is_none());
     }
 
     /// Reverse property: type_language "@reverse" looks in the type_ sub-map
     /// for the "@reverse" key.
     #[test]
     fn select_term_reverse_property() {
-        let ac = ctx_of(
-            r#"{"parentOf": {"@reverse": "http://ex/childOf"}}"#,
-        );
+        let ac = ctx_of(r#"{"parentOf": {"@reverse": "http://ex/childOf"}}"#);
         let inv = ac.inverse_context();
 
         let result = select_term(
@@ -1236,7 +1225,10 @@ mod tests {
             false,
             false,
         );
-        assert_eq!(result, "c?q=1#sec", "query and fragment preserved in relative ref");
+        assert_eq!(
+            result, "c?q=1#sec",
+            "query and fragment preserved in relative ref"
+        );
     }
 
     /// §7.1 step 6 — cross-scheme IRI is returned unchanged (relativize returns None).

@@ -345,7 +345,13 @@ fn cost_join(
             opts.use_predicate_selectivity
                 .then(|| {
                     predicate_selectivity_estimate(
-                        bgp, cur_card, joined, cand, leaf_card, descriptors, selection,
+                        bgp,
+                        cur_card,
+                        joined,
+                        cand,
+                        leaf_card,
+                        descriptors,
+                        selection,
                     )
                 })
                 .flatten()
@@ -810,7 +816,10 @@ mod tests {
         // Cartesian product 40*100 = 4000, proving the independence path (not Cartesian).
         let out = tree.root.cardinality();
         assert_eq!(out, 40.0, "chain join uses the independence estimate");
-        assert!(out < 40.0 * 100.0, "independence estimate is below the Cartesian product");
+        assert!(
+            out < 40.0 * 100.0,
+            "independence estimate is below the Cartesian product"
+        );
     }
 
     // ---- `star_estimate` returns None (⇒ independence fallback) when the star arm REPEATS a
@@ -963,7 +972,11 @@ mod tests {
         )
         .unwrap();
         if let JoinNode::Join { algo, .. } = &cheap.root {
-            assert_eq!(*algo, JoinAlgo::Bind, "cheap requests ⇒ bind join on a small left");
+            assert_eq!(
+                *algo,
+                JoinAlgo::Bind,
+                "cheap requests ⇒ bind join on a small left"
+            );
         } else {
             panic!("expected a join");
         }
@@ -979,7 +992,11 @@ mod tests {
         )
         .unwrap();
         if let JoinNode::Join { algo, .. } = &pricey.root {
-            assert_eq!(*algo, JoinAlgo::Hash, "expensive requests flip the same join to hash");
+            assert_eq!(
+                *algo,
+                JoinAlgo::Hash,
+                "expensive requests flip the same join to hash"
+            );
         } else {
             panic!("expected a join");
         }
@@ -1269,8 +1286,16 @@ mod tests {
         off_sorted.sort();
         let mut on_sorted = on.clone();
         on_sorted.sort();
-        assert_eq!(off_sorted, vec![0, 1, 2], "OFF plan covers every pattern once");
-        assert_eq!(on_sorted, vec![0, 1, 2], "ON plan covers every pattern once");
+        assert_eq!(
+            off_sorted,
+            vec![0, 1, 2],
+            "OFF plan covers every pattern once"
+        );
+        assert_eq!(
+            on_sorted,
+            vec![0, 1, 2],
+            "ON plan covers every pattern once"
+        );
     }
 
     // ---- A STAR join still uses the characteristic-set estimate regardless of the knob: the

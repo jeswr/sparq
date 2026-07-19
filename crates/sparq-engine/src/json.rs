@@ -16,7 +16,9 @@ const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 /// before calling this. A stray call is a logic error, not silent corruption.
 pub(crate) fn parts_to_json(s: &mut String, parts: TermParts<'_>) {
     match parts {
-        TermParts::Triple(_) => unreachable!("triple-term JSON is written by the id-level writers (exec::write_id_json)"),
+        TermParts::Triple(_) => unreachable!(
+            "triple-term JSON is written by the id-level writers (exec::write_id_json)"
+        ),
         TermParts::Iri { prefix, suffix } => {
             s.push_str("{\"type\":\"uri\",\"value\":\"");
             escape_into(s, prefix);
@@ -28,7 +30,11 @@ pub(crate) fn parts_to_json(s: &mut String, parts: TermParts<'_>) {
             escape_into(s, b);
             s.push_str("\"}");
         }
-        TermParts::Lit { value, datatype, lang } => {
+        TermParts::Lit {
+            value,
+            datatype,
+            lang,
+        } => {
             s.push_str("{\"type\":\"literal\",\"value\":\"");
             escape_into(s, value);
             s.push('"');
@@ -175,8 +181,12 @@ pub(crate) fn term_to_json(s: &mut String, t: &Term) {
         Term::Triple(t) => {
             s.push_str("{\"type\":\"triple\",\"value\":{\"subject\":");
             match &t.subject {
-                oxrdf::NamedOrBlankNode::NamedNode(n) => term_to_json(s, &Term::NamedNode(n.clone())),
-                oxrdf::NamedOrBlankNode::BlankNode(b) => term_to_json(s, &Term::BlankNode(b.clone())),
+                oxrdf::NamedOrBlankNode::NamedNode(n) => {
+                    term_to_json(s, &Term::NamedNode(n.clone()))
+                }
+                oxrdf::NamedOrBlankNode::BlankNode(b) => {
+                    term_to_json(s, &Term::BlankNode(b.clone()))
+                }
             }
             s.push_str(",\"predicate\":");
             term_to_json(s, &Term::NamedNode(t.predicate.clone()));
@@ -235,7 +245,10 @@ mod rows_tests {
     fn rows_slice_is_self_contained_and_partitions_whole() {
         let vars = vec![Variable::new("s").unwrap()];
         let rows = vec![row("http://ex/a"), row("http://ex/b"), row("http://ex/c")];
-        let r = QueryResult { vars: vars.clone(), rows: rows.clone() };
+        let r = QueryResult {
+            vars: vars.clone(),
+            rows: rows.clone(),
+        };
 
         // The whole-result wrapper is the rows == r.rows special case.
         assert_eq!(to_sparql_json(&r), to_sparql_json_rows(&vars, &rows));
@@ -245,7 +258,10 @@ mod rows_tests {
         let rest = to_sparql_json_rows(&vars, &rows[2..3]);
         for doc in [&first, &rest] {
             assert!(doc.contains("\"vars\":[\"s\"]"), "missing head vars: {doc}");
-            assert!(doc.starts_with("{\"head\":") && doc.ends_with("}}"), "not a full doc: {doc}");
+            assert!(
+                doc.starts_with("{\"head\":") && doc.ends_with("}}"),
+                "not a full doc: {doc}"
+            );
         }
         assert_eq!(first.matches("\"s\":{").count(), 2);
         assert_eq!(rest.matches("\"s\":{").count(), 1);

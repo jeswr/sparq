@@ -27,7 +27,6 @@
 //! signature or AEAD at a surrounding security layer authenticate exactly one
 //! encoding (research §6.1).
 
-use crate::CrdtError;
 use crate::codec::{
     expect_array, expect_object, expect_str, parse_dec_u64, parse_dot, parse_summary,
     write_json_string, write_summary,
@@ -35,6 +34,7 @@ use crate::codec::{
 use crate::id::{DatasetId, Dot, EnvelopeId, ReplicaId};
 use crate::quad::CanonicalQuad;
 use crate::summary::CausalSummary;
+use crate::CrdtError;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
@@ -79,14 +79,14 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         Limits {
-            max_envelope_bytes: 1 << 20,       // 1 MiB
+            max_envelope_bytes: 1 << 20, // 1 MiB
             max_adds: 65_536,
             max_removes: 65_536,
             max_dots_per_remove: 1_024,
             max_quad_bytes: 16 * 1024,
             max_clock_entries: 4_096,
             max_cloud_dots: 65_536,
-            max_snapshot_bytes: 256 << 20,     // 256 MiB
+            max_snapshot_bytes: 256 << 20, // 256 MiB
             max_store_entries: 4_194_304,
             max_dots_per_quad: 1_024,
         }
@@ -334,11 +334,7 @@ impl DeltaEnvelope {
     /// `format` version (fail closed); a wrong dataset; a wrong membership
     /// epoch; every structural/bounds violation; and finally — by re-encoding
     /// and byte-comparing — any non-canonical byte form.
-    pub fn decode(
-        bytes: &[u8],
-        admission: &Admission,
-        limits: &Limits,
-    ) -> Result<Self, CrdtError> {
+    pub fn decode(bytes: &[u8], admission: &Admission, limits: &Limits) -> Result<Self, CrdtError> {
         if bytes.len() > limits.max_envelope_bytes {
             return Err(CrdtError::Oversized {
                 what: "envelope bytes",
@@ -386,8 +382,10 @@ impl DeltaEnvelope {
         let mut adds = Vec::with_capacity(adds_arr.len());
         for item in adds_arr {
             let entry = expect_object(item, "envelope add", &["dot", "quad"])?;
-            let quad =
-                CanonicalQuad::parse(expect_str(entry, "envelope add", "quad")?, limits.max_quad_bytes)?;
+            let quad = CanonicalQuad::parse(
+                expect_str(entry, "envelope add", "quad")?,
+                limits.max_quad_bytes,
+            )?;
             let dot = parse_dot(entry.get("dot").expect("key checked above"), "envelope add")?;
             adds.push(DottedAdd { quad, dot });
         }
@@ -422,8 +420,7 @@ impl DeltaEnvelope {
             removes.push(ObservedRemove { quad, dots });
         }
 
-        let envelope =
-            DeltaEnvelope::new(dataset, epoch, origin, sequence, basis, adds, removes)?;
+        let envelope = DeltaEnvelope::new(dataset, epoch, origin, sequence, basis, adds, removes)?;
         if envelope.encode() != bytes {
             return Err(CrdtError::NonCanonical {
                 reason: "envelope bytes are not the canonical encoding of their content".into(),
@@ -461,7 +458,10 @@ mod tests {
     }
 
     fn admission() -> Admission {
-        Admission::new(DatasetId::new("https://example.test/datasets/team").unwrap(), 3)
+        Admission::new(
+            DatasetId::new("https://example.test/datasets/team").unwrap(),
+            3,
+        )
     }
 
     fn sample() -> DeltaEnvelope {
@@ -497,8 +497,14 @@ mod tests {
             1,
             CausalSummary::new(),
             vec![
-                DottedAdd { quad: q2.clone(), dot: dot(b"peer-a", 3) },
-                DottedAdd { quad: q1.clone(), dot: dot(b"peer-a", 2) },
+                DottedAdd {
+                    quad: q2.clone(),
+                    dot: dot(b"peer-a", 3),
+                },
+                DottedAdd {
+                    quad: q1.clone(),
+                    dot: dot(b"peer-a", 2),
+                },
             ],
             vec![ObservedRemove {
                 quad: q1.clone(),
@@ -508,7 +514,10 @@ mod tests {
         .unwrap();
         assert_eq!(env.adds()[0].quad, q1);
         assert_eq!(env.adds()[1].quad, q2);
-        assert_eq!(env.removes()[0].dots, vec![dot(b"peer-b", 1), dot(b"peer-b", 2)]);
+        assert_eq!(
+            env.removes()[0].dots,
+            vec![dot(b"peer-b", 1), dot(b"peer-b", 2)]
+        );
     }
 
     #[test]
@@ -533,7 +542,10 @@ mod tests {
             1,
             CausalSummary::new(),
             vec![
-                DottedAdd { quad: q.clone(), dot: dot(b"peer-a", 2) },
+                DottedAdd {
+                    quad: q.clone(),
+                    dot: dot(b"peer-a", 2)
+                },
                 DottedAdd {
                     quad: quad("<https://ex/t> <https://ex/p> \"y\" ."),
                     dot: dot(b"peer-a", 2),
@@ -549,8 +561,14 @@ mod tests {
             rid(b"peer-a"),
             1,
             CausalSummary::new(),
-            vec![DottedAdd { quad: q.clone(), dot: dot(b"peer-a", 2) }],
-            vec![ObservedRemove { quad: q.clone(), dots: vec![dot(b"peer-a", 2)] }]
+            vec![DottedAdd {
+                quad: q.clone(),
+                dot: dot(b"peer-a", 2)
+            }],
+            vec![ObservedRemove {
+                quad: q.clone(),
+                dots: vec![dot(b"peer-a", 2)]
+            }]
         )
         .is_err());
         // Empty observed dot set.
@@ -561,7 +579,10 @@ mod tests {
             1,
             CausalSummary::new(),
             Vec::new(),
-            vec![ObservedRemove { quad: q.clone(), dots: Vec::new() }]
+            vec![ObservedRemove {
+                quad: q.clone(),
+                dots: Vec::new()
+            }]
         )
         .is_err());
         // Two remove entries for one quad.
@@ -573,8 +594,14 @@ mod tests {
             CausalSummary::new(),
             Vec::new(),
             vec![
-                ObservedRemove { quad: q.clone(), dots: vec![dot(b"peer-a", 1)] },
-                ObservedRemove { quad: q.clone(), dots: vec![dot(b"peer-b", 1)] },
+                ObservedRemove {
+                    quad: q.clone(),
+                    dots: vec![dot(b"peer-a", 1)]
+                },
+                ObservedRemove {
+                    quad: q.clone(),
+                    dots: vec![dot(b"peer-b", 1)]
+                },
             ]
         )
         .is_err());
@@ -653,18 +680,27 @@ mod tests {
     #[test]
     fn decode_rejects_oversized_input_before_parsing() {
         let bytes = sample().encode();
-        let limits = Limits { max_envelope_bytes: bytes.len() - 1, ..Limits::default() };
+        let limits = Limits {
+            max_envelope_bytes: bytes.len() - 1,
+            ..Limits::default()
+        };
         assert!(matches!(
             DeltaEnvelope::decode(&bytes, &admission(), &limits),
             Err(CrdtError::Oversized { .. })
         ));
         // Item-count bounds too.
-        let limits = Limits { max_adds: 0, ..Limits::default() };
+        let limits = Limits {
+            max_adds: 0,
+            ..Limits::default()
+        };
         assert!(matches!(
             DeltaEnvelope::decode(&sample().encode(), &admission(), &limits),
             Err(CrdtError::Oversized { .. })
         ));
-        let limits = Limits { max_removes: 0, ..Limits::default() };
+        let limits = Limits {
+            max_removes: 0,
+            ..Limits::default()
+        };
         assert!(matches!(
             DeltaEnvelope::decode(&sample().encode(), &admission(), &limits),
             Err(CrdtError::Oversized { .. })
@@ -675,7 +711,7 @@ mod tests {
     fn decode_rejects_every_second_byte_form() {
         let canonical = String::from_utf8(sample().encode()).unwrap();
         let variants = [
-            format!(" {canonical}"),                                  // leading whitespace
+            format!(" {canonical}"), // leading whitespace
             canonical.replace("\"epoch\":\"3\"", "\"epoch\":\"03\""), // non-shortest counter
             canonical.replace("\"epoch\":\"3\"", "\"epoch\" :\"3\""), // inner whitespace
             canonical.replace(
@@ -685,8 +721,7 @@ mod tests {
         ];
         for bytes in variants {
             assert!(
-                DeltaEnvelope::decode(bytes.as_bytes(), &admission(), &Limits::default())
-                    .is_err(),
+                DeltaEnvelope::decode(bytes.as_bytes(), &admission(), &Limits::default()).is_err(),
                 "{bytes:?} must be rejected"
             );
         }
@@ -700,8 +735,14 @@ mod tests {
             1,
             CausalSummary::new(),
             vec![
-                DottedAdd { quad: q1, dot: dot(b"peer-a", 1) },
-                DottedAdd { quad: q2, dot: dot(b"peer-a", 2) },
+                DottedAdd {
+                    quad: q1,
+                    dot: dot(b"peer-a", 1),
+                },
+                DottedAdd {
+                    quad: q2,
+                    dot: dot(b"peer-a", 2),
+                },
             ],
             Vec::new(),
         )
@@ -720,12 +761,11 @@ mod tests {
     fn decode_rejects_missing_or_extra_keys_and_non_string_scalars() {
         let canonical = String::from_utf8(sample().encode()).unwrap();
         let no_epoch = canonical.replace("\"epoch\":\"3\",", "");
-        assert!(DeltaEnvelope::decode(no_epoch.as_bytes(), &admission(), &Limits::default())
-            .is_err());
-        let extra = canonical.replace("{\"adds\"", "{\"aaaa\":\"x\",\"adds\"");
         assert!(
-            DeltaEnvelope::decode(extra.as_bytes(), &admission(), &Limits::default()).is_err()
+            DeltaEnvelope::decode(no_epoch.as_bytes(), &admission(), &Limits::default()).is_err()
         );
+        let extra = canonical.replace("{\"adds\"", "{\"aaaa\":\"x\",\"adds\"");
+        assert!(DeltaEnvelope::decode(extra.as_bytes(), &admission(), &Limits::default()).is_err());
         let numeric = canonical.replace("\"sequence\":\"42\"", "\"sequence\":42");
         assert!(
             DeltaEnvelope::decode(numeric.as_bytes(), &admission(), &Limits::default()).is_err()

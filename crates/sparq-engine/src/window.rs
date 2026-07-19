@@ -98,10 +98,16 @@ pub struct SortKey {
 
 impl SortKey {
     pub fn asc(var: Variable) -> Self {
-        Self { var, descending: false }
+        Self {
+            var,
+            descending: false,
+        }
     }
     pub fn desc(var: Variable) -> Self {
-        Self { var, descending: true }
+        Self {
+            var,
+            descending: true,
+        }
     }
 }
 
@@ -141,10 +147,18 @@ pub enum WindowFunction {
     /// `offset` positions BEFORE the current row, in the window `ORDER BY` order.
     /// `offset` defaults to `1`. When the source row falls outside the partition
     /// the result is `default` (unbound when no default is given). [OPUS-4.8] (sq-hqhc)
-    Lag { of: Variable, offset: u64, default: Option<Term> },
+    Lag {
+        of: Variable,
+        offset: u64,
+        default: Option<Term>,
+    },
     /// `LEAD(?of[, offset[, default]])` — as [`Self::Lag`] but `offset` positions
     /// AFTER the current row. [OPUS-4.8] (sq-hqhc)
-    Lead { of: Variable, offset: u64, default: Option<Term> },
+    Lead {
+        of: Variable,
+        offset: u64,
+        default: Option<Term>,
+    },
     /// `NTILE(n)` — the 1-based bucket number (`1..=n`) when the ordered partition
     /// is split into `n` buckets as evenly as possible (earlier buckets take the
     /// extra row when the partition size is not a multiple of `n`). `n` must be
@@ -200,12 +214,20 @@ pub struct WindowFrame {
 impl WindowFrame {
     /// `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW` — a running aggregate.
     pub fn rows_running() -> Self {
-        Self { unit: FrameUnit::Rows, start: FrameBound::UnboundedPreceding, end: FrameBound::CurrentRow }
+        Self {
+            unit: FrameUnit::Rows,
+            start: FrameBound::UnboundedPreceding,
+            end: FrameBound::CurrentRow,
+        }
     }
     /// `ROWS BETWEEN n PRECEDING AND CURRENT ROW` — a trailing moving aggregate of
     /// width `n + 1`.
     pub fn rows_preceding(n: u64) -> Self {
-        Self { unit: FrameUnit::Rows, start: FrameBound::Preceding(n), end: FrameBound::CurrentRow }
+        Self {
+            unit: FrameUnit::Rows,
+            start: FrameBound::Preceding(n),
+            end: FrameBound::CurrentRow,
+        }
     }
 }
 
@@ -240,9 +262,16 @@ pub fn apply_window(result: &QueryResult, spec: &WindowSpec) -> Result<QueryResu
             .position(|c| c == v)
             .ok_or_else(|| format!("window: variable ?{} is not a result column", v.as_str()))
     };
-    let part_cols: Vec<usize> = spec.partition_by.iter().map(&col).collect::<Result<_, _>>()?;
-    let order_cols: Vec<(usize, bool)> =
-        spec.order_by.iter().map(|k| col(&k.var).map(|c| (c, k.descending))).collect::<Result<_, _>>()?;
+    let part_cols: Vec<usize> = spec
+        .partition_by
+        .iter()
+        .map(&col)
+        .collect::<Result<_, _>>()?;
+    let order_cols: Vec<(usize, bool)> = spec
+        .order_by
+        .iter()
+        .map(|k| col(&k.var).map(|c| (c, k.descending)))
+        .collect::<Result<_, _>>()?;
 
     // A frame is only meaningful for an aggregate; validate it (well-formedness +
     // the RANGE numeric-offset restriction) up front so a bad frame is one clear
@@ -371,8 +400,11 @@ fn compute_partition(
                         let (lo, hi) = frame_bounds(frame, pos, ordered, result, order_cols)?;
                         // An empty frame (`hi < lo`) yields the aggregate of the
                         // empty multiset (e.g. COUNT 0, SUM 0, AVG/MIN/MAX unbound).
-                        let slice: &[Option<Term>] =
-                            if lo <= hi { &ordered_cells[lo..=hi] } else { &[] };
+                        let slice: &[Option<Term>] = if lo <= hi {
+                            &ordered_cells[lo..=hi]
+                        } else {
+                            &[]
+                        };
                         values[ri] = eval_window_aggregate(agg, slice);
                     }
                 }
@@ -381,11 +413,33 @@ fn compute_partition(
         // LAG / LEAD: offset the current ordered position by ±`offset`; out of the
         // partition ⇒ the supplied default (unbound if none). The frame is ignored
         // (SQL: an offset function takes no frame). [OPUS-4.8] (sq-hqhc)
-        WindowFunction::Lag { of, offset, default } => {
-            eval_offset(result, of, ordered, values, |pos| pos.checked_sub(*offset as i128), default);
+        WindowFunction::Lag {
+            of,
+            offset,
+            default,
+        } => {
+            eval_offset(
+                result,
+                of,
+                ordered,
+                values,
+                |pos| pos.checked_sub(*offset as i128),
+                default,
+            );
         }
-        WindowFunction::Lead { of, offset, default } => {
-            eval_offset(result, of, ordered, values, |pos| pos.checked_add(*offset as i128), default);
+        WindowFunction::Lead {
+            of,
+            offset,
+            default,
+        } => {
+            eval_offset(
+                result,
+                of,
+                ordered,
+                values,
+                |pos| pos.checked_add(*offset as i128),
+                default,
+            );
         }
         // NTILE(n): split the ordered partition into `n` near-equal buckets; the
         // first `size % n` buckets get one extra row. The frame is ignored.
@@ -484,7 +538,9 @@ fn frame_bounds(
         FrameBound::CurrentRow => match frame.unit {
             FrameUnit::Rows => pos,
             // RANGE: the start of the current row's peer group.
-            FrameUnit::Range => peer_group_start(pos as usize, ordered, result, order_cols) as isize,
+            FrameUnit::Range => {
+                peer_group_start(pos as usize, ordered, result, order_cols) as isize
+            }
         },
         FrameBound::Following(k) => pos.saturating_add(clamp_offset(k)),
         FrameBound::UnboundedFollowing => {
@@ -522,7 +578,12 @@ fn clamp_offset(k: u64) -> isize {
 }
 
 /// The first ordered position that is a PEER of `pos` (same `ORDER BY` keys).
-fn peer_group_start(pos: usize, ordered: &[usize], result: &QueryResult, order_cols: &[(usize, bool)]) -> usize {
+fn peer_group_start(
+    pos: usize,
+    ordered: &[usize],
+    result: &QueryResult,
+    order_cols: &[(usize, bool)],
+) -> usize {
     let mut lo = pos;
     while lo > 0 && peers(result, order_cols, ordered[lo - 1], ordered[pos]) {
         lo -= 1;
@@ -531,7 +592,12 @@ fn peer_group_start(pos: usize, ordered: &[usize], result: &QueryResult, order_c
 }
 
 /// The last ordered position that is a PEER of `pos` (same `ORDER BY` keys).
-fn peer_group_end(pos: usize, ordered: &[usize], result: &QueryResult, order_cols: &[(usize, bool)]) -> usize {
+fn peer_group_end(
+    pos: usize,
+    ordered: &[usize],
+    result: &QueryResult,
+    order_cols: &[(usize, bool)],
+) -> usize {
     let mut hi = pos;
     while hi + 1 < ordered.len() && peers(result, order_cols, ordered[hi + 1], ordered[pos]) {
         hi += 1;
@@ -560,13 +626,23 @@ fn order_rows(result: &QueryResult, order_cols: &[(usize, bool)], a: usize, b: u
 
 fn eval_window_aggregate(agg: &WindowAggregate, cells: &[Option<Term>]) -> Option<Term> {
     match agg {
-        WindowAggregate::Count => Some(int_term(cells.iter().filter(|c| c.is_some()).count() as i64)),
+        WindowAggregate::Count => {
+            Some(int_term(cells.iter().filter(|c| c.is_some()).count() as i64))
+        }
         WindowAggregate::Sum => {
-            let sum: f64 = cells.iter().filter_map(|c| c.as_ref()).filter_map(numeric_value).sum();
+            let sum: f64 = cells
+                .iter()
+                .filter_map(|c| c.as_ref())
+                .filter_map(numeric_value)
+                .sum();
             Some(num_term(sum))
         }
         WindowAggregate::Avg => {
-            let vals: Vec<f64> = cells.iter().filter_map(|c| c.as_ref()).filter_map(numeric_value).collect();
+            let vals: Vec<f64> = cells
+                .iter()
+                .filter_map(|c| c.as_ref())
+                .filter_map(numeric_value)
+                .collect();
             if vals.is_empty() {
                 None
             } else {
@@ -624,7 +700,10 @@ fn kind_rank(t: &Term) -> u8 {
 fn cmp_bound(x: &Term, y: &Term) -> Ordering {
     match (x, y) {
         (Term::Literal(lx), Term::Literal(ly)) => {
-            if let (Some(nx), Some(ny)) = (numeric_value(&Term::Literal(lx.clone())), numeric_value(&Term::Literal(ly.clone()))) {
+            if let (Some(nx), Some(ny)) = (
+                numeric_value(&Term::Literal(lx.clone())),
+                numeric_value(&Term::Literal(ly.clone())),
+            ) {
                 if let Some(o) = nx.partial_cmp(&ny) {
                     if o != Ordering::Equal {
                         return o;
@@ -639,7 +718,9 @@ fn cmp_bound(x: &Term, y: &Term) -> Ordering {
         }
         (Term::NamedNode(a), Term::NamedNode(b)) => a.as_str().cmp(b.as_str()),
         (Term::BlankNode(a), Term::BlankNode(b)) => a.as_str().cmp(b.as_str()),
-        _ => kind_rank(x).cmp(&kind_rank(y)).then_with(|| x.to_string().cmp(&y.to_string())),
+        _ => kind_rank(x)
+            .cmp(&kind_rank(y))
+            .then_with(|| x.to_string().cmp(&y.to_string())),
     }
 }
 
@@ -689,10 +770,26 @@ mod tests {
         QueryResult {
             vars: vec![var("emp"), var("dept"), var("sales")],
             rows: vec![
-                vec![Some(iri("http://ex/a")), Some(iri("http://ex/eng")), Some(int(30))],
-                vec![Some(iri("http://ex/b")), Some(iri("http://ex/eng")), Some(int(30))],
-                vec![Some(iri("http://ex/c")), Some(iri("http://ex/eng")), Some(int(20))],
-                vec![Some(iri("http://ex/d")), Some(iri("http://ex/sales")), Some(int(10))],
+                vec![
+                    Some(iri("http://ex/a")),
+                    Some(iri("http://ex/eng")),
+                    Some(int(30)),
+                ],
+                vec![
+                    Some(iri("http://ex/b")),
+                    Some(iri("http://ex/eng")),
+                    Some(int(30)),
+                ],
+                vec![
+                    Some(iri("http://ex/c")),
+                    Some(iri("http://ex/eng")),
+                    Some(int(20)),
+                ],
+                vec![
+                    Some(iri("http://ex/d")),
+                    Some(iri("http://ex/sales")),
+                    Some(int(10)),
+                ],
             ],
         }
     }
@@ -747,7 +844,10 @@ mod tests {
         let spec = WindowSpec {
             partition_by: vec![var("dept")],
             order_by: vec![],
-            function: WindowFunction::Aggregate { agg: WindowAggregate::Sum, of: var("sales") },
+            function: WindowFunction::Aggregate {
+                agg: WindowAggregate::Sum,
+                of: var("sales"),
+            },
             frame: None,
             new_var: var("total"),
         };
@@ -766,7 +866,10 @@ mod tests {
             &WindowSpec {
                 partition_by: vec![var("dept")],
                 order_by: vec![],
-                function: WindowFunction::Aggregate { agg: WindowAggregate::Count, of: var("sales") },
+                function: WindowFunction::Aggregate {
+                    agg: WindowAggregate::Count,
+                    of: var("sales"),
+                },
                 frame: None,
                 new_var: var("n"),
             },
@@ -783,7 +886,11 @@ mod tests {
                 order_by: vec![],
                 function: WindowFunction::Aggregate {
                     agg: WindowAggregate::Custom(Box::new(|cells: &[Option<Term>]| {
-                        cells.iter().filter_map(|c| c.as_ref()).max_by(|a, b| cmp_terms(Some(a), Some(b))).cloned()
+                        cells
+                            .iter()
+                            .filter_map(|c| c.as_ref())
+                            .max_by(|a, b| cmp_terms(Some(a), Some(b)))
+                            .cloned()
                     })),
                     of: var("sales"),
                 },
@@ -815,7 +922,12 @@ mod tests {
     fn seq() -> QueryResult {
         QueryResult {
             vars: vec![var("k")],
-            rows: vec![vec![Some(int(10))], vec![Some(int(20))], vec![Some(int(20))], vec![Some(int(40))]],
+            rows: vec![
+                vec![Some(int(10))],
+                vec![Some(int(20))],
+                vec![Some(int(20))],
+                vec![Some(int(40))],
+            ],
         }
     }
 
@@ -823,7 +935,10 @@ mod tests {
         WindowSpec {
             partition_by: vec![],
             order_by: vec![SortKey::asc(var("k"))],
-            function: WindowFunction::Aggregate { agg: a, of: var("k") },
+            function: WindowFunction::Aggregate {
+                agg: a,
+                of: var("k"),
+            },
             frame,
             new_var: var("w"),
         }
@@ -832,7 +947,11 @@ mod tests {
     #[test]
     fn rows_running_total_is_cumulative() {
         // ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: running SUM.
-        let out = apply_window(&seq(), &agg(Some(WindowFrame::rows_running()), WindowAggregate::Sum)).unwrap();
+        let out = apply_window(
+            &seq(),
+            &agg(Some(WindowFrame::rows_running()), WindowAggregate::Sum),
+        )
+        .unwrap();
         // 10, 10+20, 10+20+20, 10+20+20+40 = 10, 30, 50, 90.
         assert_eq!(val(&out, 0, 1), int(10).to_string());
         assert_eq!(val(&out, 1, 1), int(30).to_string());
@@ -843,14 +962,22 @@ mod tests {
     #[test]
     fn rows_trailing_moving_sum_and_count() {
         // ROWS BETWEEN 1 PRECEDING AND CURRENT ROW: 2-row trailing window.
-        let sum = apply_window(&seq(), &agg(Some(WindowFrame::rows_preceding(1)), WindowAggregate::Sum)).unwrap();
+        let sum = apply_window(
+            &seq(),
+            &agg(Some(WindowFrame::rows_preceding(1)), WindowAggregate::Sum),
+        )
+        .unwrap();
         // 10, 10+20, 20+20, 20+40 = 10, 30, 40, 60.
         assert_eq!(val(&sum, 0, 1), int(10).to_string());
         assert_eq!(val(&sum, 1, 1), int(30).to_string());
         assert_eq!(val(&sum, 2, 1), int(40).to_string());
         assert_eq!(val(&sum, 3, 1), int(60).to_string());
         // COUNT over the same 2-row trailing window: 1, 2, 2, 2.
-        let cnt = apply_window(&seq(), &agg(Some(WindowFrame::rows_preceding(1)), WindowAggregate::Count)).unwrap();
+        let cnt = apply_window(
+            &seq(),
+            &agg(Some(WindowFrame::rows_preceding(1)), WindowAggregate::Count),
+        )
+        .unwrap();
         assert_eq!(val(&cnt, 0, 1), int(1).to_string());
         assert_eq!(val(&cnt, 1, 1), int(2).to_string());
         assert_eq!(val(&cnt, 3, 1), int(2).to_string());
@@ -859,7 +986,11 @@ mod tests {
     #[test]
     fn rows_centered_following_window() {
         // ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING: this row + next.
-        let frame = WindowFrame { unit: FrameUnit::Rows, start: FrameBound::CurrentRow, end: FrameBound::Following(1) };
+        let frame = WindowFrame {
+            unit: FrameUnit::Rows,
+            start: FrameBound::CurrentRow,
+            end: FrameBound::Following(1),
+        };
         let out = apply_window(&seq(), &agg(Some(frame), WindowAggregate::Sum)).unwrap();
         // 10+20, 20+20, 20+40, 40 = 30, 40, 60, 40 (last row has no follower).
         assert_eq!(val(&out, 0, 1), int(30).to_string());
@@ -873,7 +1004,11 @@ mod tests {
         // RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: the running SUM is the
         // same as ROWS at distinct rows, BUT at the two equal `20` peers the whole
         // peer group is included, so BOTH 20-rows see 10+20+20 = 50 (not 30 then 50).
-        let frame = WindowFrame { unit: FrameUnit::Range, start: FrameBound::UnboundedPreceding, end: FrameBound::CurrentRow };
+        let frame = WindowFrame {
+            unit: FrameUnit::Range,
+            start: FrameBound::UnboundedPreceding,
+            end: FrameBound::CurrentRow,
+        };
         let out = apply_window(&seq(), &agg(Some(frame), WindowAggregate::Sum)).unwrap();
         assert_eq!(val(&out, 0, 1), int(10).to_string()); // 10
         assert_eq!(val(&out, 1, 1), int(50).to_string()); // 10+20+20 (peer group)
@@ -894,7 +1029,11 @@ mod tests {
     #[test]
     fn empty_frame_yields_empty_aggregate() {
         // ROWS BETWEEN 3 PRECEDING AND 2 PRECEDING: empty for the first rows.
-        let frame = WindowFrame { unit: FrameUnit::Rows, start: FrameBound::Preceding(3), end: FrameBound::Preceding(2) };
+        let frame = WindowFrame {
+            unit: FrameUnit::Rows,
+            start: FrameBound::Preceding(3),
+            end: FrameBound::Preceding(2),
+        };
         let sum = apply_window(&seq(), &agg(Some(frame), WindowAggregate::Sum)).unwrap();
         // Row 0: frame ends 2 rows BEFORE row 0 → entirely before the partition →
         // empty. The empty-frame SUM is 0 and COUNT is 0; MIN/MAX/AVG are unbound.
@@ -909,13 +1048,25 @@ mod tests {
     #[test]
     fn malformed_frame_is_error() {
         // start = UNBOUNDED FOLLOWING is malformed.
-        let bad = WindowFrame { unit: FrameUnit::Rows, start: FrameBound::UnboundedFollowing, end: FrameBound::CurrentRow };
+        let bad = WindowFrame {
+            unit: FrameUnit::Rows,
+            start: FrameBound::UnboundedFollowing,
+            end: FrameBound::CurrentRow,
+        };
         assert!(apply_window(&seq(), &agg(Some(bad), WindowAggregate::Sum)).is_err());
         // end = UNBOUNDED PRECEDING is malformed.
-        let bad2 = WindowFrame { unit: FrameUnit::Rows, start: FrameBound::CurrentRow, end: FrameBound::UnboundedPreceding };
+        let bad2 = WindowFrame {
+            unit: FrameUnit::Rows,
+            start: FrameBound::CurrentRow,
+            end: FrameBound::UnboundedPreceding,
+        };
         assert!(apply_window(&seq(), &agg(Some(bad2), WindowAggregate::Sum)).is_err());
         // RANGE with a numeric offset is unsupported.
-        let bad3 = WindowFrame { unit: FrameUnit::Range, start: FrameBound::Preceding(1), end: FrameBound::CurrentRow };
+        let bad3 = WindowFrame {
+            unit: FrameUnit::Range,
+            start: FrameBound::Preceding(1),
+            end: FrameBound::CurrentRow,
+        };
         let e = apply_window(&seq(), &agg(Some(bad3), WindowAggregate::Sum)).unwrap_err();
         assert!(e.contains("RANGE"), "{e}");
     }
@@ -972,7 +1123,11 @@ mod tests {
         let spec = WindowSpec {
             partition_by: vec![],
             order_by: vec![SortKey::asc(var("sales"))],
-            function: WindowFunction::Lag { of: var("sales"), offset: 1, default: None },
+            function: WindowFunction::Lag {
+                of: var("sales"),
+                offset: 1,
+                default: None,
+            },
             frame: None,
             new_var: var("prev"),
         };
@@ -990,7 +1145,11 @@ mod tests {
         let spec = WindowSpec {
             partition_by: vec![],
             order_by: vec![SortKey::asc(var("sales"))],
-            function: WindowFunction::Lag { of: var("sales"), offset: 2, default: Some(int(-1)) },
+            function: WindowFunction::Lag {
+                of: var("sales"),
+                offset: 2,
+                default: Some(int(-1)),
+            },
             frame: None,
             new_var: var("prev2"),
         };
@@ -1008,7 +1167,11 @@ mod tests {
         let spec = WindowSpec {
             partition_by: vec![],
             order_by: vec![SortKey::asc(var("sales"))],
-            function: WindowFunction::Lead { of: var("sales"), offset: 1, default: None },
+            function: WindowFunction::Lead {
+                of: var("sales"),
+                offset: 1,
+                default: None,
+            },
             frame: None,
             new_var: var("next"),
         };
@@ -1095,7 +1258,11 @@ mod tests {
         let spec = WindowSpec {
             partition_by: vec![var("dept")],
             order_by: vec![SortKey::asc(var("sales"))],
-            function: WindowFunction::Lag { of: var("sales"), offset: 1, default: None },
+            function: WindowFunction::Lag {
+                of: var("sales"),
+                offset: 1,
+                default: None,
+            },
             frame: None,
             new_var: var("prev"),
         };
@@ -1110,7 +1277,11 @@ mod tests {
         let spec = WindowSpec {
             partition_by: vec![],
             order_by: vec![SortKey::asc(var("sales"))],
-            function: WindowFunction::Lag { of: var("nope"), offset: 1, default: None },
+            function: WindowFunction::Lag {
+                of: var("nope"),
+                offset: 1,
+                default: None,
+            },
             frame: None,
             new_var: var("prev"),
         };

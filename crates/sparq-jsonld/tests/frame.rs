@@ -14,8 +14,13 @@ fn parse(s: &str) -> Json {
 }
 
 fn run(input: &str, frame_doc: &str) -> Json {
-    run_opts(input, frame_doc, &JsonLdOptions::default(), &FrameOptions::default())
-        .expect("frame ok")
+    run_opts(
+        input,
+        frame_doc,
+        &JsonLdOptions::default(),
+        &FrameOptions::default(),
+    )
+    .expect("frame ok")
 }
 
 fn run_opts(
@@ -24,7 +29,13 @@ fn run_opts(
     options: &JsonLdOptions,
     fopts: &FrameOptions,
 ) -> Result<Json, JsonLdError> {
-    frame(&parse(input), &parse(frame_doc), options, fopts, &NoopLoader)
+    frame(
+        &parse(input),
+        &parse(frame_doc),
+        options,
+        fopts,
+        &NoopLoader,
+    )
 }
 
 fn text(j: &Json) -> String {
@@ -87,9 +98,19 @@ fn explicit_and_default_fill() {
             "ex:gone": {"@omitDefault": true}}"#,
     );
     assert_eq!(out.get("ex:keep"), Some(&Json::Str("k".to_string())));
-    assert!(out.get("ex:drop").is_none(), "@explicit prunes: {}", text(&out));
-    assert_eq!(out.get("ex:missing"), Some(&Json::Str("filled".to_string())));
-    assert!(out.get("ex:gone").is_none(), "@omitDefault suppresses the fill");
+    assert!(
+        out.get("ex:drop").is_none(),
+        "@explicit prunes: {}",
+        text(&out)
+    );
+    assert_eq!(
+        out.get("ex:missing"),
+        Some(&Json::Str("filled".to_string()))
+    );
+    assert!(
+        out.get("ex:gone").is_none(),
+        "@omitDefault suppresses the fill"
+    );
     // An unmatched frame property without @default fills as JSON null.
     let out2 = run(
         input,
@@ -145,7 +166,11 @@ fn list_reemit_keeps_duplicates_and_embeds_nodes() {
     assert_eq!(items.len(), 4, "duplicates retained: {}", text(l));
     assert_eq!(items[1], items[2], "the duplicate 2s survive");
     let node = items[3].get("ex:name");
-    assert_eq!(node, Some(&Json::Str("in-list".to_string())), "node entry embedded");
+    assert_eq!(
+        node,
+        Some(&Json::Str("in-list".to_string())),
+        "node entry embedded"
+    );
 }
 
 /// Blank-node `@embed`: a single-use blank node loses its `@id`
@@ -161,10 +186,17 @@ fn bnode_embed_pruning() {
         r#"{"@context": {"ex": "http://ex/"}, "@type": "ex:T"}"#,
     );
     let single = out.get("ex:single").expect("single-use bnode kept");
-    assert!(single.get("@id").is_none(), "single-use bnode @id pruned: {}", text(&out));
+    assert!(
+        single.get("@id").is_none(),
+        "single-use bnode @id pruned: {}",
+        text(&out)
+    );
     // The shared bnode keeps a label so the two references stay linked.
     let shared_text = text(&out);
-    assert!(shared_text.contains("_:"), "shared bnode label kept: {shared_text}");
+    assert!(
+        shared_text.contains("_:"),
+        "shared bnode label kept: {shared_text}"
+    );
 }
 
 /// `@embed: @never` emits a node reference; `@embed: @always` re-embeds at every
@@ -181,7 +213,11 @@ fn embed_never_and_always() {
         r#"{"@context": {"ex": "http://ex/"}, "@type": "ex:T", "@embed": "@never"}"#,
     );
     let p = never.get("ex:p").expect("reference kept");
-    assert!(p.get("ex:name").is_none(), "@never emits a bare reference: {}", text(&never));
+    assert!(
+        p.get("ex:name").is_none(),
+        "@never emits a bare reference: {}",
+        text(&never)
+    );
 
     let always = run(
         input,
@@ -218,7 +254,11 @@ fn embed_last_keeps_only_last() {
     let node = graph_single(&out);
     let e1 = node.get("ex:e1").expect("e1 kept");
     let e2 = node.get("ex:e2").expect("e2 kept");
-    assert!(e1.get("ex:name").is_none(), "earlier embed demoted: {}", text(&out));
+    assert!(
+        e1.get("ex:name").is_none(),
+        "earlier embed demoted: {}",
+        text(&out)
+    );
     assert_eq!(
         e2.get("ex:name"),
         Some(&Json::Str("embedded".to_string())),
@@ -259,7 +299,11 @@ fn framing_error_codes() {
 fn omit_graph_shaping() {
     let input = r#"{"@id": "http://ex/a", "http://ex/p": "v"}"#;
     let bare = run(input, "{}");
-    assert!(bare.get("@graph").is_none(), "1.1 default omits @graph: {}", text(&bare));
+    assert!(
+        bare.get("@graph").is_none(),
+        "1.1 default omits @graph: {}",
+        text(&bare)
+    );
     assert_eq!(bare.get("@id").and_then(Json::as_str), Some("http://ex/a"));
 
     let mut opts10 = JsonLdOptions::default();

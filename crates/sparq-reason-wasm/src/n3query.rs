@@ -51,7 +51,10 @@ pub(crate) fn n3_query_to_constructs(query: &str) -> Result<Vec<String>, String>
         let template = render_bgp(&rule.conclusion)?;
         // Positional format args (not inline `{template}`) so CodeQL's rust/unused-variable
         // false positive does not fire on this crate.
-        out.push(format!("CONSTRUCT {{ {} }} WHERE {{ {} }}", template, where_bgp));
+        out.push(format!(
+            "CONSTRUCT {{ {} }} WHERE {{ {} }}",
+            template, where_bgp
+        ));
     }
     Ok(out)
 }
@@ -222,7 +225,11 @@ mod tests {
             { ?x :age ?a. ?a math:greaterThan 18 } => { ?x a :Adult }."#;
         let err = n3_query_to_constructs(q).unwrap_err();
         assert!(err.contains("N3 builtin"), "rejects builtin: {}", err);
-        assert!(err.contains("math#greaterThan"), "names the builtin: {}", err);
+        assert!(
+            err.contains("math#greaterThan"),
+            "names the builtin: {}",
+            err
+        );
     }
 
     /// Literal rendering: datatype + language + plain string forms are well-formed.
@@ -252,7 +259,12 @@ mod tests {
             "\"42\"^^<http://www.w3.org/2001/XMLSchema#integer>"
         );
         assert_eq!(
-            render_term(&Term::Lit("bonjour".into(), String::new(), Some("fr".into()))).unwrap(),
+            render_term(&Term::Lit(
+                "bonjour".into(),
+                String::new(),
+                Some("fr".into())
+            ))
+            .unwrap(),
             "\"bonjour\"@fr"
         );
         // Escaping: a quote in the lexical value is escaped.

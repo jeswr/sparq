@@ -24,7 +24,13 @@ fn graph(ttl: &str) -> Graph {
 }
 
 fn unweighted(g: &Graph) -> Sim<'_> {
-    Sim::with_config(g, SimConfig { idf: false, ..SimConfig::default() })
+    Sim::with_config(
+        g,
+        SimConfig {
+            idf: false,
+            ..SimConfig::default()
+        },
+    )
 }
 
 /// Direct `SketchConfig::default` witness: the documented defaults, and two builds
@@ -68,7 +74,10 @@ fn index_len_counts_nonempty_entity_signatures() {
         },
     );
     let idx = no_p.sketch_index(SketchConfig::default());
-    assert!(idx.is_empty(), "every signature is empty once :p is excluded");
+    assert!(
+        idx.is_empty(),
+        "every signature is empty once :p is excluded"
+    );
     assert_eq!(idx.len(), 0);
     assert!(idx.most_similar(&iri("a"), 5).is_empty());
 }
@@ -90,7 +99,10 @@ fn twins_are_always_found_with_exact_scores() {
     let names: Vec<String> = top.iter().map(|(t, _)| t.to_string()).collect();
     assert_eq!(names[0], "<http://ex.org/twin>");
     assert_eq!(top[0].1, 1.0);
-    assert!(!names.iter().any(|n| n == "<http://ex.org/a>"), "self must be excluded");
+    assert!(
+        !names.iter().any(|n| n == "<http://ex.org/a>"),
+        "self must be excluded"
+    );
     assert!(
         !names.iter().any(|n| n == "<http://ex.org/far>"),
         "a zero-overlap entity must never be returned: {names:?}"
@@ -112,10 +124,22 @@ fn estimate_bounds_symmetry_and_decline() {
     let sim = unweighted(&g);
     let idx = sim.sketch_index(SketchConfig::default());
 
-    assert_eq!(idx.estimate(&iri("a"), &iri("b")), 1.0, "identical signatures");
-    assert_eq!(idx.estimate(&iri("a"), &iri("c")), 0.0, "disjoint signatures");
+    assert_eq!(
+        idx.estimate(&iri("a"), &iri("b")),
+        1.0,
+        "identical signatures"
+    );
+    assert_eq!(
+        idx.estimate(&iri("a"), &iri("c")),
+        0.0,
+        "disjoint signatures"
+    );
     let e = idx.estimate(&iri("a"), &iri("x"));
-    assert_eq!(e, idx.estimate(&iri("x"), &iri("a")), "estimate must be symmetric");
+    assert_eq!(
+        e,
+        idx.estimate(&iri("x"), &iri("a")),
+        "estimate must be symmetric"
+    );
     assert!((0.0..=1.0).contains(&e));
     // Decline: absent term, and a literal (never indexed).
     assert_eq!(idx.estimate(&iri("a"), &iri("missing")), 0.0);
@@ -133,16 +157,23 @@ fn estimate_bounds_symmetry_and_decline() {
 /// a 1/4-overlap set almost surely differs from 0.25 exactly.
 #[test]
 fn hand_computed_score_pins_exact_rescoring() {
-    let g = graph(":alice :knows :bob, :eve ; :worksAt :acme . :dave :knows :eve ; :plays :chess .");
+    let g =
+        graph(":alice :knows :bob, :eve ; :worksAt :acme . :dave :knows :eve ; :plays :chess .");
     let sim = unweighted(&g);
     // rows = 1 → any shared component makes a candidate (maximal-recall banding).
-    let idx = sim.sketch_index(SketchConfig { bands: 128, ..SketchConfig::default() });
+    let idx = sim.sketch_index(SketchConfig {
+        bands: 128,
+        ..SketchConfig::default()
+    });
     let top = idx.most_similar(&iri("alice"), 10);
     let dave = top
         .iter()
         .find(|(t, _)| t.to_string() == "<http://ex.org/dave>")
         .expect("dave shares (out, knows, eve) with alice and must be generated");
-    assert_eq!(dave.1, 0.25, "score must be the EXACT weighted Jaccard, not the estimate");
+    assert_eq!(
+        dave.1, 0.25,
+        "score must be the EXACT weighted Jaccard, not the estimate"
+    );
 }
 
 /// The randomized differential: over pseudo-random bit-mask graphs, every result of
@@ -174,7 +205,10 @@ fn randomized_differential_scores_equal_exact_similarity() {
         }
         let g = graph(&ttl);
         let sim = Sim::new(&g); // IDF on
-        let idx = sim.sketch_index(SketchConfig { bands: 64, ..SketchConfig::default() });
+        let idx = sim.sketch_index(SketchConfig {
+            bands: 64,
+            ..SketchConfig::default()
+        });
         for e in 0..ENTITIES {
             let a = iri(&format!("e{e}"));
             if g.id_of(&a).is_none() {
@@ -191,7 +225,10 @@ fn randomized_differential_scores_equal_exact_similarity() {
             for (t, s) in &top {
                 assert!(seen.insert(t.to_string()), "round {round}: duplicate {t}");
                 assert_ne!(t, &a, "round {round}: self must be excluded");
-                assert!(*s > 0.0, "round {round}: zero-overlap results must be dropped");
+                assert!(
+                    *s > 0.0,
+                    "round {round}: zero-overlap results must be dropped"
+                );
                 let exact = sim.similarity(&a, t);
                 assert_eq!(*s, exact, "round {round}: {a} vs {t} score mismatch");
             }
@@ -212,7 +249,10 @@ fn huge_k_does_not_overflow_candidate_budget() {
     );
     let sim = unweighted(&g);
     // rows = 1 → every shared component makes a candidate, so recall is not the variable.
-    let idx = sim.sketch_index(SketchConfig { bands: 128, ..SketchConfig::default() });
+    let idx = sim.sketch_index(SketchConfig {
+        bands: 128,
+        ..SketchConfig::default()
+    });
     let top = idx.most_similar(&iri("a"), usize::MAX);
     let names: Vec<String> = top.iter().map(|(t, _)| t.to_string()).collect();
     assert_eq!(
@@ -233,9 +273,21 @@ fn odd_configs_normalize_and_still_find_twins() {
     let g = graph(":a :p :x . :b :p :x .");
     let sim = unweighted(&g);
     for cfg in [
-        SketchConfig { num_hashes: 5, bands: 64, seed: 7 },
-        SketchConfig { num_hashes: 7, bands: 3, seed: 7 },
-        SketchConfig { num_hashes: 1, bands: 1, seed: 7 },
+        SketchConfig {
+            num_hashes: 5,
+            bands: 64,
+            seed: 7,
+        },
+        SketchConfig {
+            num_hashes: 7,
+            bands: 3,
+            seed: 7,
+        },
+        SketchConfig {
+            num_hashes: 1,
+            bands: 1,
+            seed: 7,
+        },
     ] {
         let idx = sim.sketch_index(cfg);
         let top = idx.most_similar(&iri("a"), 5);

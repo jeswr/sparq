@@ -392,10 +392,26 @@ const CASES: &[Case] = &[
 
 /// ASK cases (run against the People fixture; boolean-valued, inherently order-free).
 const ASK_CASES: &[AskCase] = &[
-    AskCase { name: "ask-true-ground", query: "ASK { ex:alice ex:knows ex:bob }", expected: true },
-    AskCase { name: "ask-false-ground", query: "ASK { ex:bob ex:knows ex:alice }", expected: false },
-    AskCase { name: "ask-filter-true", query: "ASK { ?p ex:age ?a . FILTER(?a > 40) }", expected: true },
-    AskCase { name: "ask-filter-false", query: "ASK { ?p ex:age ?a . FILTER(?a > 100) }", expected: false },
+    AskCase {
+        name: "ask-true-ground",
+        query: "ASK { ex:alice ex:knows ex:bob }",
+        expected: true,
+    },
+    AskCase {
+        name: "ask-false-ground",
+        query: "ASK { ex:bob ex:knows ex:alice }",
+        expected: false,
+    },
+    AskCase {
+        name: "ask-filter-true",
+        query: "ASK { ?p ex:age ?a . FILTER(?a > 40) }",
+        expected: true,
+    },
+    AskCase {
+        name: "ask-filter-false",
+        query: "ASK { ?p ex:age ?a . FILTER(?a > 100) }",
+        expected: false,
+    },
 ];
 
 fn full_query(query: &str) -> String {

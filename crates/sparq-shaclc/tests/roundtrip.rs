@@ -53,7 +53,9 @@ fn base_fixture() -> (Vec<Triple>, Vec<(String, String)>) {
 fn dangling_blank_object_is_a_residual_verdict_in_both_profiles() {
     let (mut triples, prefixes) = base_fixture();
     triples.push(Triple {
-        subject: NamedOrBlankNode::NamedNode(NamedNode::new_unchecked("http://example.org/test#TestShape")),
+        subject: NamedOrBlankNode::NamedNode(NamedNode::new_unchecked(
+            "http://example.org/test#TestShape",
+        )),
         predicate: NamedNode::new_unchecked("http://example.org/unprintable#p"),
         object: Term::BlankNode(BlankNode::new_unchecked("z9")),
     });
@@ -61,9 +63,19 @@ fn dangling_blank_object_is_a_residual_verdict_in_both_profiles() {
         let err = write(&triples, Some(DEFAULT_BASE), &prefixes, profile)
             .expect_err("dangling blank must refuse");
         assert!(!err.missing_ontology);
-        assert_eq!(err.residual.len(), 1, "{profile:?}: exactly the foreign triple: {err}");
-        assert_eq!(err.residual[0].predicate.as_str(), "http://example.org/unprintable#p");
-        assert!(err.to_string().contains("not compact-expressible"), "verdict text: {err}");
+        assert_eq!(
+            err.residual.len(),
+            1,
+            "{profile:?}: exactly the foreign triple: {err}"
+        );
+        assert_eq!(
+            err.residual[0].predicate.as_str(),
+            "http://example.org/unprintable#p"
+        );
+        assert!(
+            err.to_string().contains("not compact-expressible"),
+            "verdict text: {err}"
+        );
     }
 }
 
@@ -74,7 +86,9 @@ fn foreign_iri_predicate_residualizes_in_strict_but_extended_absorbs_it() {
     // graph residualizes by construction.
     let (mut triples, prefixes) = base_fixture();
     triples.push(Triple {
-        subject: NamedOrBlankNode::NamedNode(NamedNode::new_unchecked("http://example.org/test#TestShape")),
+        subject: NamedOrBlankNode::NamedNode(NamedNode::new_unchecked(
+            "http://example.org/test#TestShape",
+        )),
         predicate: NamedNode::new_unchecked("http://example.org/meta#comment"),
         object: Term::NamedNode(NamedNode::new_unchecked("http://example.org/meta#note1")),
     });
@@ -84,7 +98,10 @@ fn foreign_iri_predicate_residualizes_in_strict_but_extended_absorbs_it() {
     let text = write(&triples, Some(DEFAULT_BASE), &prefixes, Profile::Extended)
         .expect("extended absorbs via the annotation layer");
     let (re, _) = parse(&text, DEFAULT_BASE, Profile::Extended).expect("reparse");
-    assert!(is_isomorphic(&re, &triples), "absorbed annotation round-trips\n{text}");
+    assert!(
+        is_isomorphic(&re, &triples),
+        "absorbed annotation round-trips\n{text}"
+    );
 }
 
 #[test]

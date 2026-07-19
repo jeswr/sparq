@@ -41,8 +41,11 @@ fn build_test_store_and_index() -> (VectorStore, VectorIndex) {
     const N: usize = 5_000;
     const DIM: usize = 32;
 
-    let path = std::env::temp_dir()
-        .join(format!("sparq-ef-sweep-{}-{}.spqv", std::process::id(), 0xEF_u64));
+    let path = std::env::temp_dir().join(format!(
+        "sparq-ef-sweep-{}-{}.spqv",
+        std::process::id(),
+        0xEF_u64
+    ));
     let mut store = VectorStore::create(&path, DIM).unwrap();
     let mut state = 0xABCD_EF01_u64;
     for i in 0..N {
@@ -52,7 +55,11 @@ fn build_test_store_and_index() -> (VectorStore, VectorIndex) {
     store.finalize().unwrap();
     // Build index with ef_search=50 as the default so that some ef values tested are
     // below it (e.g. 16, 32) and some above it (e.g. 64, 128, 256).
-    let cfg = HnswConfig { ef_search: 50, ef_construction: 100, seed: 0x5350_5156_0001 };
+    let cfg = HnswConfig {
+        ef_search: 50,
+        ef_construction: 100,
+        seed: 0x5350_5156_0001,
+    };
     let index = VectorIndex::build_with(&store, cfg);
     let _ = std::fs::remove_file(&path);
     (store, index)
@@ -102,24 +109,31 @@ fn ef_sweep_monotone_recall_non_decreasing() {
 
     // Compute recall@K for each ef level over the same fixed query set.
     let mut q_state = 0xDEAD_BEEF_u64;
-    let queries: Vec<Vec<f32>> =
-        (0..QUERIES).map(|_| rand_vec(&mut q_state, DIM)).collect();
+    let queries: Vec<Vec<f32>> = (0..QUERIES).map(|_| rand_vec(&mut q_state, DIM)).collect();
 
     let mut recalls: Vec<f64> = Vec::with_capacity(EF_LEVELS.len());
     for &ef in EF_LEVELS {
         let mut hits = 0usize;
         for q in &queries {
-            let exact_ids: Vec<u32> =
-                nearest_exact(&store, q, K).into_iter().map(|(id, _)| id).collect();
-            let approx_ids: Vec<u32> =
-                index.nearest_with_ef(q, K, ef).into_iter().map(|(id, _)| id).collect();
+            let exact_ids: Vec<u32> = nearest_exact(&store, q, K)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+            let approx_ids: Vec<u32> = index
+                .nearest_with_ef(q, K, ef)
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
             assert_eq!(
                 approx_ids.len(),
                 K,
                 "nearest_with_ef must return exactly K results (ef={})",
                 ef
             );
-            hits += approx_ids.iter().filter(|id| exact_ids.contains(id)).count();
+            hits += approx_ids
+                .iter()
+                .filter(|id| exact_ids.contains(id))
+                .count();
         }
         let recall = hits as f64 / (QUERIES * K) as f64;
         eprintln!("ef={ef:>4}  recall@{K}={recall:.4}");
@@ -184,15 +198,18 @@ fn nearest_with_ef_cache_reuse_is_deterministic() {
 
     let (store, index) = build_test_store_and_index();
     let mut q_state = 0xCAFE_BABE_u64;
-    let queries: Vec<Vec<f32>> =
-        (0..QUERIES).map(|_| rand_vec(&mut q_state, DIM)).collect();
+    let queries: Vec<Vec<f32>> = (0..QUERIES).map(|_| rand_vec(&mut q_state, DIM)).collect();
 
     // First pass — populates the cache for ALT_EF.
-    let first: Vec<Vec<(u32, f32)>> =
-        queries.iter().map(|q| index.nearest_with_ef(q, K, ALT_EF)).collect();
+    let first: Vec<Vec<(u32, f32)>> = queries
+        .iter()
+        .map(|q| index.nearest_with_ef(q, K, ALT_EF))
+        .collect();
     // Second pass — should hit the cache.
-    let second: Vec<Vec<(u32, f32)>> =
-        queries.iter().map(|q| index.nearest_with_ef(q, K, ALT_EF)).collect();
+    let second: Vec<Vec<(u32, f32)>> = queries
+        .iter()
+        .map(|q| index.nearest_with_ef(q, K, ALT_EF))
+        .collect();
 
     assert_eq!(first, second, "cache reuse must produce identical results");
     drop(store);

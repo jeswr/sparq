@@ -43,7 +43,7 @@
 //! # File ownership
 //! **Only bead `sq-i6du2.6` edits this file.**
 
-use crate::{AcModel, Decision, GenParams, IntentRow, QueryClass, Request, oracle};
+use crate::{oracle, AcModel, Decision, GenParams, IntentRow, QueryClass, Request};
 
 /// The recorded skip reason for the W4 query sub-lane.
 ///
@@ -175,7 +175,10 @@ impl W1DecisionBatch {
         }
         // Correctness held: only NOW may we report an (indicative) wall-clock.
         let wall_us_indicative = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-        RunOutcome::Passed { decisions: self.requests.len(), wall_us_indicative }
+        RunOutcome::Passed {
+            decisions: self.requests.len(),
+            wall_us_indicative,
+        }
     }
 }
 
@@ -252,7 +255,10 @@ impl W2QueryCheck {
                 ),
             };
         }
-        RunOutcome::Passed { decisions: expected.len(), wall_us_indicative: 0 }
+        RunOutcome::Passed {
+            decisions: expected.len(),
+            wall_us_indicative: 0,
+        }
     }
 }
 
@@ -279,7 +285,10 @@ impl W2QueryLane {
             }
         }
         let wall_us_indicative = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-        RunOutcome::Passed { decisions: rows, wall_us_indicative }
+        RunOutcome::Passed {
+            decisions: rows,
+            wall_us_indicative,
+        }
     }
 }
 
@@ -367,10 +376,7 @@ impl W3ChurnScript {
                         mismatch: format!(
                             "W3 stale/missing grant after step {step} ({:?}): oracle={got:?} \
                              expected={:?} for agent={} resource={}",
-                            self.model,
-                            probe.expected,
-                            probe.request.agent,
-                            probe.request.resource
+                            self.model, probe.expected, probe.request.agent, probe.request.resource
                         ),
                     };
                 }
@@ -389,7 +395,10 @@ impl W3ChurnScript {
             };
         }
         let wall_us_indicative = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-        RunOutcome::Passed { decisions: checked, wall_us_indicative }
+        RunOutcome::Passed {
+            decisions: checked,
+            wall_us_indicative,
+        }
     }
 
     /// The intent table after applying the first `step` writes to `initial_intents`.
@@ -450,7 +459,9 @@ impl W4Config {
     pub fn run(&self, batch: &W1DecisionBatch) -> W4Outcome {
         W4Outcome {
             decision_lane: self.run_decision_lane(batch),
-            query_lane: RunOutcome::Skipped { reason: W4_QUERY_SKIP_REASON.to_string() },
+            query_lane: RunOutcome::Skipped {
+                reason: W4_QUERY_SKIP_REASON.to_string(),
+            },
         }
     }
 
@@ -530,7 +541,10 @@ impl W4Config {
             }
         }
         let wall_us_indicative = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
-        RunOutcome::Passed { decisions: total, wall_us_indicative }
+        RunOutcome::Passed {
+            decisions: total,
+            wall_us_indicative,
+        }
     }
 }
 
@@ -565,7 +579,10 @@ impl HarnessReport {
 
     /// Record one lane's outcome.
     pub fn record(&mut self, label: impl Into<String>, outcome: RunOutcome) {
-        self.lanes.push(LaneReport { label: label.into(), outcome });
+        self.lanes.push(LaneReport {
+            label: label.into(),
+            outcome,
+        });
     }
 
     /// `true` iff any recorded lane is a [`RunOutcome::Failed`].

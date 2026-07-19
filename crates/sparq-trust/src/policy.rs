@@ -231,10 +231,12 @@ pub fn resolve_rule_keys(
         // Prefer trust:issuerDid (the resolver-bound, D′-narrowing path).
         if let Some(did_term) = object_of(node, vocab::ISSUER_DID, policy) {
             let did_str = term_lexical(&did_term);
-            return resolver.resolve_str(&did_str).map_err(|e| PolicyError::BadIssuerDid {
-                did: did_str,
-                reason: e.to_string(),
-            });
+            return resolver
+                .resolve_str(&did_str)
+                .map_err(|e| PolicyError::BadIssuerDid {
+                    did: did_str,
+                    reason: e.to_string(),
+                });
         }
         // Fall back to the operator-asserted hex key.
         if object_of(node, vocab::ISSUER_KEY, policy).is_some() {

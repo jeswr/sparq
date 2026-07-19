@@ -50,7 +50,10 @@ use unicode_segmentation::UnicodeSegmentation;
 /// folding remains exactly equivalent to [`str::to_lowercase`]. [GPT-5.6]
 #[inline]
 fn lowercase_word(word: &str) -> Cow<'_, str> {
-    if word.bytes().all(|byte| byte.is_ascii() && !byte.is_ascii_uppercase()) {
+    if word
+        .bytes()
+        .all(|byte| byte.is_ascii() && !byte.is_ascii_uppercase())
+    {
         Cow::Borrowed(word)
     } else {
         Cow::Owned(word.to_lowercase())
@@ -103,7 +106,10 @@ pub fn tokenize(text: &str) -> Vec<String> {
 /// of CJK ideograph tokens into its overlapping lowercase character bigrams
 /// (see the module docs). [OPUS-4.8] sq-m3ln
 pub fn tokenize_with(text: &str, analyzer: Analyzer) -> Vec<String> {
-    let words = text.unicode_words().map(lowercase_word).map(Cow::into_owned);
+    let words = text
+        .unicode_words()
+        .map(lowercase_word)
+        .map(Cow::into_owned);
     match analyzer {
         Analyzer::Unicode => words.collect(),
         Analyzer::CjkNgram => cjk_ngram_stream(words),
@@ -191,7 +197,10 @@ pub fn tokenize_query_with(query: &str, analyzer: Analyzer) -> Vec<QueryToken> {
     let flush = |run: &mut Vec<char>, out: &mut Vec<QueryToken>| {
         match run.len() {
             0 => {}
-            1 => out.push(QueryToken { token: run[0].to_string(), prefix: false }),
+            1 => out.push(QueryToken {
+                token: run[0].to_string(),
+                prefix: false,
+            }),
             _ => out.extend(run.windows(2).map(|pair| QueryToken {
                 token: pair.iter().collect(),
                 prefix: false,
@@ -252,7 +261,10 @@ mod tests {
 
     #[test]
     fn words_and_punctuation() {
-        assert_eq!(toks("The quick, brown fox!"), ["the", "quick", "brown", "fox"]);
+        assert_eq!(
+            toks("The quick, brown fox!"),
+            ["the", "quick", "brown", "fox"]
+        );
         assert_eq!(toks("state-of-the-art"), ["state", "of", "the", "art"]);
         // Apostrophes stay inside a UAX #29 word.
         assert_eq!(toks("can't stop"), ["can't", "stop"]);
@@ -291,21 +303,36 @@ mod tests {
         assert_eq!(
             q,
             [
-                QueryToken { token: "auto".into(), prefix: true },
-                QueryToken { token: "complete".into(), prefix: false },
+                QueryToken {
+                    token: "auto".into(),
+                    prefix: true
+                },
+                QueryToken {
+                    token: "complete".into(),
+                    prefix: false
+                },
             ]
         );
         // `*` not adjacent to a token end is plain punctuation.
         assert_eq!(
             tokenize_query("* fox"),
-            [QueryToken { token: "fox".into(), prefix: false }]
+            [QueryToken {
+                token: "fox".into(),
+                prefix: false
+            }]
         );
         // A mid-word `*` splits the word; only the left half is a prefix token.
         assert_eq!(
             tokenize_query("auto*complete"),
             [
-                QueryToken { token: "auto".into(), prefix: true },
-                QueryToken { token: "complete".into(), prefix: false },
+                QueryToken {
+                    token: "auto".into(),
+                    prefix: true
+                },
+                QueryToken {
+                    token: "complete".into(),
+                    prefix: false
+                },
             ]
         );
     }
@@ -317,7 +344,14 @@ mod tests {
         // The whole point of the opt-in: non-CJK text tokenizes identically, so
         // an n-gram index over a Latin/Cyrillic/Greek corpus is byte-for-byte
         // the default one.
-        for s in ["The quick, brown fox!", "state-of-the-art", "RFC 3986 v2.1", "ΣΟΦΊΑ", "café", ""] {
+        for s in [
+            "The quick, brown fox!",
+            "state-of-the-art",
+            "RFC 3986 v2.1",
+            "ΣΟΦΊΑ",
+            "café",
+            "",
+        ] {
             assert_eq!(
                 tokenize_with(s, Analyzer::CjkNgram),
                 tokenize_with(s, Analyzer::Unicode),
@@ -329,7 +363,10 @@ mod tests {
     #[test]
     fn ngram_emits_overlapping_bigrams_for_han_runs() {
         // 東京都 -> overlapping bigrams 東京, 京都 (NOT 東,京,都).
-        assert_eq!(tokenize_with("東京都", Analyzer::CjkNgram), ["東京", "京都"]);
+        assert_eq!(
+            tokenize_with("東京都", Analyzer::CjkNgram),
+            ["東京", "京都"]
+        );
         // A two-char run is a single bigram.
         assert_eq!(tokenize_with("東京", Analyzer::CjkNgram), ["東京"]);
         // A lone ideograph (one-char run) stays a single unigram, so single-char
@@ -348,9 +385,15 @@ mod tests {
         );
         // UAX #29 separates the digit run; the surrounding ideographs each form
         // their own single-char run here (lone ideograph = single-char unigram).
-        assert_eq!(tokenize_with("第3章", Analyzer::CjkNgram), ["第", "3", "章"]);
+        assert_eq!(
+            tokenize_with("第3章", Analyzer::CjkNgram),
+            ["第", "3", "章"]
+        );
         // Two ideographs split by a digit: each side is its own run.
-        assert_eq!(tokenize_with("北42京", Analyzer::CjkNgram), ["北", "42", "京"]);
+        assert_eq!(
+            tokenize_with("北42京", Analyzer::CjkNgram),
+            ["北", "42", "京"]
+        );
     }
 
     #[test]
@@ -359,21 +402,33 @@ mod tests {
         assert_eq!(
             tokenize_query_with("東京都", Analyzer::CjkNgram),
             [
-                QueryToken { token: "東京".into(), prefix: false },
-                QueryToken { token: "京都".into(), prefix: false },
+                QueryToken {
+                    token: "東京".into(),
+                    prefix: false
+                },
+                QueryToken {
+                    token: "京都".into(),
+                    prefix: false
+                },
             ]
         );
         // A trailing `*` after a CJK run is segmentation punctuation, NOT a
         // prefix marker (you cannot prefix-match a bigram).
         assert_eq!(
             tokenize_query_with("東京*", Analyzer::CjkNgram),
-            [QueryToken { token: "東京".into(), prefix: false }]
+            [QueryToken {
+                token: "東京".into(),
+                prefix: false
+            }]
         );
         // A non-CJK word keeps the trailing-`*` prefix marker under the n-gram
         // analyzer.
         assert_eq!(
             tokenize_query_with("auto*", Analyzer::CjkNgram),
-            [QueryToken { token: "auto".into(), prefix: true }]
+            [QueryToken {
+                token: "auto".into(),
+                prefix: true
+            }]
         );
     }
 

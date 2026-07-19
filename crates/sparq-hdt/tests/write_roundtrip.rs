@@ -197,7 +197,8 @@ fn save_empty_graph() {
 #[test]
 fn save_round_trips_escaped_literals_exactly() {
     // Raw lexical forms: he said "hi" and \ done  /  trailing quote " (langtagged).
-    let nt = "<http://example.org/s> <http://example.org/p> \"he said \\\"hi\\\" and \\\\ done\" .\n\
+    let nt =
+        "<http://example.org/s> <http://example.org/p> \"he said \\\"hi\\\" and \\\\ done\" .\n\
               <http://example.org/s> <http://example.org/q> \"trailing quote \\\"\"@en .\n";
     let original = Graph::load_str(nt, "ntriples").unwrap();
     let dir = scratch_dir();

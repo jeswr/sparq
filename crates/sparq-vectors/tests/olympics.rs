@@ -39,14 +39,23 @@ fn olympics_label_embeddings_nearest_term_sanity() {
     let text = std::fs::read_to_string(&path).expect("read olympics.nt");
     let g = Graph::load_str(&text, "ntriples").expect("parse olympics.nt");
     drop(text);
-    assert!(g.len() > 1_700_000, "expected the 1.78M-triple olympics dataset, got {}", g.len());
+    assert!(
+        g.len() > 1_700_000,
+        "expected the 1.78M-triple olympics dataset, got {}",
+        g.len()
+    );
 
-    let spqv = std::env::temp_dir()
-        .join(format!("sparq-vectors-olympics-{}.spqv", std::process::id()));
+    let spqv = std::env::temp_dir().join(format!(
+        "sparq-vectors-olympics-{}.spqv",
+        std::process::id()
+    ));
     let embedder = HashEmbedder::new(64);
     let mut store = VectorStore::create(&spqv, 64).unwrap();
     let n = embed_labels(&g, &mut store, &embedder).expect("embed labels");
-    assert!(n > 100_000, "olympics has 137k rdfs:labels, embedded only {n}");
+    assert!(
+        n > 100_000,
+        "olympics has 137k rdfs:labels, embedded only {n}"
+    );
     store.finalize().unwrap();
 
     // Sparse coverage at scale: labeled entities resolve, unlabeled terms do not.
@@ -59,7 +68,11 @@ fn olympics_label_embeddings_nearest_term_sanity() {
             .unwrap(),
     );
     let top = index.nearest_term(&athlete, &g, &store, 10);
-    assert_eq!(top.len(), 10, "a 137k-vector store must yield 10 neighbours");
+    assert_eq!(
+        top.len(),
+        10,
+        "a 137k-vector store must yield 10 neighbours"
+    );
 
     let type_pid = g
         .id_of(&Term::NamedNode(NamedNode::new(RDF_TYPE).unwrap()))
@@ -75,16 +88,25 @@ fn olympics_label_embeddings_nearest_term_sanity() {
         assert!(*s <= prev, "scores must be non-increasing");
         prev = *s;
         assert_ne!(t, &athlete, "self must be excluded");
-        assert!(!matches!(t, Term::Literal(_)), "only labeled entities are embedded");
+        assert!(
+            !matches!(t, Term::Literal(_)),
+            "only labeled entities are embedded"
+        );
         let nid = g.id_of(t).expect("neighbour must be a dictionary term");
-        if types_of(&g, type_pid, nid).iter().any(|ty| athlete_types.contains(ty)) {
+        if types_of(&g, type_pid, nid)
+            .iter()
+            .any(|ty| athlete_types.contains(ty))
+        {
             same_type += 1;
         }
     }
     // HashEmbedder similarity is lexical (names look like names), so an athlete's
     // nearest labeled neighbours should overwhelmingly share its type. Loose floor;
     // the recall gate lives in tests/recall.rs and the latency numbers in the README.
-    assert!(same_type >= 5, "expected mostly same-type neighbours, got {same_type}/10: {top:?}");
+    assert!(
+        same_type >= 5,
+        "expected mostly same-type neighbours, got {same_type}/10: {top:?}"
+    );
 
     let _ = std::fs::remove_file(&spqv);
 }

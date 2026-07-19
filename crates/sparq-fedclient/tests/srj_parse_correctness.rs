@@ -168,10 +168,9 @@ fn triple_term_round_trips() {
 
 #[test]
 fn triple_term_missing_value_is_clean_error() {
-    let err = parse_srj(
-        r#"{"head":{"vars":["t"]},"results":{"bindings":[{"t":{"type":"triple"}}]}}"#,
-    )
-    .unwrap_err();
+    let err =
+        parse_srj(r#"{"head":{"vars":["t"]},"results":{"bindings":[{"t":{"type":"triple"}}]}}"#)
+            .unwrap_err();
     assert!(err.contains("triple term without value"), "got {}", err);
 }
 
@@ -280,10 +279,9 @@ fn invalid_its_dir_degrades_to_plain_language_tag() {
 fn type_absent_defaults_to_simple_literal() {
     // SRJ permits omitting `type` for a plain literal; an object with only `value` is a simple
     // literal (the `None` arm of the type match).
-    let rel = parse_srj(
-        r#"{"head":{"vars":["x"]},"results":{"bindings":[{"x":{"value":"plain"}}]}}"#,
-    )
-    .unwrap();
+    let rel =
+        parse_srj(r#"{"head":{"vars":["x"]},"results":{"bindings":[{"x":{"value":"plain"}}]}}"#)
+            .unwrap();
     assert_eq!(
         rel.rows[0][0],
         Some(Term::Literal(Literal::new_simple_literal("plain")))

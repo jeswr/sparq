@@ -47,7 +47,9 @@ fn err<T>(msg: impl Into<String>) -> Result<T, ParseError> {
 /// Parse a SPARQL-Results-JSON document (`SELECT` bindings or an `ASK` boolean).
 pub fn parse_results_json(s: &str) -> Result<QueryResults, ParseError> {
     let root: Value = serde_json::from_str(s).map_err(|e| ParseError(e.to_string()))?;
-    let obj = root.as_object().ok_or_else(|| ParseError("root is not an object".into()))?;
+    let obj = root
+        .as_object()
+        .ok_or_else(|| ParseError("root is not an object".into()))?;
 
     // ASK: a top-level "boolean".
     if let Some(b) = obj.get("boolean") {
@@ -85,7 +87,9 @@ pub fn parse_results_json(s: &str) -> Result<QueryResults, ParseError> {
 
     let mut solutions = Vec::with_capacity(bindings.len());
     for row in bindings {
-        let row_obj = row.as_object().ok_or_else(|| ParseError("a binding row is not an object".into()))?;
+        let row_obj = row
+            .as_object()
+            .ok_or_else(|| ParseError("a binding row is not an object".into()))?;
         let mut sol = Solution::new();
         for (var, cell) in row_obj {
             sol.insert(var.clone(), parse_term(cell)?);
@@ -112,7 +116,10 @@ fn parse_term(cell: &Value) -> Result<Term, ParseError> {
         }
         "literal" | "typed-literal" => {
             let lexical = str_field(cell, "value")?.to_string();
-            let lang = cell.get("xml:lang").and_then(Value::as_str).map(str::to_string);
+            let lang = cell
+                .get("xml:lang")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             let explicit_dt = cell.get("datatype").and_then(Value::as_str);
             // `xml:lang` and `datatype` must agree: a language-tagged literal's datatype is
             // `rdf:langString`, and nothing else may carry that datatype. Reject either contradiction
@@ -141,10 +148,21 @@ fn parse_term(cell: &Value) -> Result<Term, ParseError> {
             })
         }
         "triple" => {
-            let v = cell.get("value").ok_or_else(|| ParseError("triple missing \"value\"".into()))?;
-            let s = parse_term(v.get("subject").ok_or_else(|| ParseError("triple missing subject".into()))?)?;
-            let p = parse_term(v.get("predicate").ok_or_else(|| ParseError("triple missing predicate".into()))?)?;
-            let o = parse_term(v.get("object").ok_or_else(|| ParseError("triple missing object".into()))?)?;
+            let v = cell
+                .get("value")
+                .ok_or_else(|| ParseError("triple missing \"value\"".into()))?;
+            let s = parse_term(
+                v.get("subject")
+                    .ok_or_else(|| ParseError("triple missing subject".into()))?,
+            )?;
+            let p = parse_term(
+                v.get("predicate")
+                    .ok_or_else(|| ParseError("triple missing predicate".into()))?,
+            )?;
+            let o = parse_term(
+                v.get("object")
+                    .ok_or_else(|| ParseError("triple missing object".into()))?,
+            )?;
             // RDF triple-term positional constraints (universal across RDF versions): the subject
             // cannot be a literal, and the predicate must be an IRI. Reject a structurally-invalid
             // triple rather than canonicalise non-conformant oracle output, which could mask a
@@ -231,14 +249,19 @@ mod tests {
           } ] }
         }"#;
         let r = parse_results_json(doc).unwrap();
-        let QueryResults::Solutions { solutions, .. } = r else { panic!() };
+        let QueryResults::Solutions { solutions, .. } = r else {
+            panic!()
+        };
         assert!(matches!(solutions[0].get("t"), Some(Term::Triple(_))));
 
         // error paths.
         assert!(parse_results_json("not json").is_err());
         assert!(parse_results_json("[]").is_err());
         assert!(parse_results_json(r#"{"head":{}}"#).is_err());
-        assert!(parse_results_json(r#"{"results":{"bindings":[{"x":{"type":"mystery","value":"?"}}]}}"#).is_err());
+        assert!(parse_results_json(
+            r#"{"results":{"bindings":[{"x":{"type":"mystery","value":"?"}}]}}"#
+        )
+        .is_err());
     }
 
     #[test]
@@ -330,11 +353,14 @@ mod tests {
         );
         // …but an empty projection (valid `SELECT *` over a var-less pattern) is accepted, and
         // a well-formed all-string header round-trips its variable order.
-        let empty = parse_results_json(r#"{"head":{"vars":[]},"results":{"bindings":[]}}"#).unwrap();
+        let empty =
+            parse_results_json(r#"{"head":{"vars":[]},"results":{"bindings":[]}}"#).unwrap();
         assert!(matches!(empty, QueryResults::Solutions { ref vars, .. } if vars.is_empty()));
-        let two = parse_results_json(r#"{"head":{"vars":["a","b"]},"results":{"bindings":[]}}"#)
-            .unwrap();
-        let QueryResults::Solutions { vars, .. } = two else { panic!() };
+        let two =
+            parse_results_json(r#"{"head":{"vars":["a","b"]},"results":{"bindings":[]}}"#).unwrap();
+        let QueryResults::Solutions { vars, .. } = two else {
+            panic!()
+        };
         assert_eq!(vars, vec!["a", "b"]);
     }
 }

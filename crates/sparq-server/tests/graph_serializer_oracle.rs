@@ -15,14 +15,19 @@
 use oxrdf::Triple;
 use sparq_core::Graph;
 use sparq_engine::construct_or_describe;
-use sparq_server::graph::{parse_rdfxml, triples_to_ntriples, triples_to_rdfxml, triples_to_turtle};
+use sparq_server::graph::{
+    parse_rdfxml, triples_to_ntriples, triples_to_rdfxml, triples_to_turtle,
+};
 
 /// An order-independent fingerprint of a triple set: each triple rendered to its canonical
 /// N-Triples line, the whole list sorted. Two graphs share a fingerprint iff they are the
 /// same set of triples. (Blank-node labels are compared verbatim here; the round-trips
 /// below preserve labels, so that is exact for these inputs.)
 fn triple_set(triples: &[Triple]) -> Vec<String> {
-    let mut out: Vec<String> = triples.iter().map(|t| format!("{} {} {} .", t.subject, t.predicate, t.object)).collect();
+    let mut out: Vec<String> = triples
+        .iter()
+        .map(|t| format!("{} {} {} .", t.subject, t.predicate, t.object))
+        .collect();
     out.sort();
     out
 }
@@ -32,7 +37,9 @@ fn reparse_turtle(ttl: &str) -> Vec<Triple> {
     oxttl::TurtleParser::new()
         .for_slice(ttl.as_bytes())
         .collect::<Result<Vec<_>, _>>()
-        .unwrap_or_else(|e| panic!("reference Turtle parser REJECTED our output: {e}\n--- output ---\n{ttl}"))
+        .unwrap_or_else(|e| {
+            panic!("reference Turtle parser REJECTED our output: {e}\n--- output ---\n{ttl}")
+        })
 }
 
 /// Asserts every graph writer round-trips `triples` exactly (well-formed + lossless set).
@@ -41,17 +48,30 @@ fn assert_graph_roundtrips(label: &str, triples: &[Triple]) {
 
     // N-Triples (sanity — it is the canonical form, re-parsed as Turtle since NT ⊂ Turtle).
     let nt = triples_to_ntriples(triples);
-    assert_eq!(triple_set(&reparse_turtle(&nt)), expect, "[{label}/N-Triples] set must round-trip\n{nt}");
+    assert_eq!(
+        triple_set(&reparse_turtle(&nt)),
+        expect,
+        "[{label}/N-Triples] set must round-trip\n{nt}"
+    );
 
     // Prefix-compacting Turtle.
     let ttl = triples_to_turtle(triples);
-    assert_eq!(triple_set(&reparse_turtle(&ttl)), expect, "[{label}/Turtle] set must round-trip\n{ttl}");
+    assert_eq!(
+        triple_set(&reparse_turtle(&ttl)),
+        expect,
+        "[{label}/Turtle] set must round-trip\n{ttl}"
+    );
 
     // RDF/XML.
     let xml = triples_to_rdfxml(triples);
-    let back = parse_rdfxml(xml.as_bytes(), None)
-        .unwrap_or_else(|e| panic!("[{label}/RDF-XML] reference parser REJECTED our output: {e}\n{xml}"));
-    assert_eq!(triple_set(&back), expect, "[{label}/RDF-XML] set must round-trip\n{xml}");
+    let back = parse_rdfxml(xml.as_bytes(), None).unwrap_or_else(|e| {
+        panic!("[{label}/RDF-XML] reference parser REJECTED our output: {e}\n{xml}")
+    });
+    assert_eq!(
+        triple_set(&back),
+        expect,
+        "[{label}/RDF-XML] set must round-trip\n{xml}"
+    );
 }
 
 /// Deterministic LCG → a random Turtle graph mixing IRIs (some under registered prefixes,
@@ -59,7 +79,9 @@ fn assert_graph_roundtrips(label: &str, triples: &[Triple]) {
 fn random_graph_ttl(seed0: u64, n_nodes: u32, n_edges: usize) -> String {
     let mut seed = seed0;
     let mut next = || {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (seed >> 33) as u32
     };
     let lits = [
@@ -94,7 +116,10 @@ fn random_graph_ttl(seed0: u64, n_nodes: u32, n_edges: usize) -> String {
                 ttl.push_str(&format!("ex:n{a} rdf:type foaf:Person .\n"));
             }
             _ => {
-                ttl.push_str(&format!("ex:n{a} foaf:knows [ foaf:name \"t{}\" ] .\n", next() % 5));
+                ttl.push_str(&format!(
+                    "ex:n{a} foaf:knows [ foaf:name \"t{}\" ] .\n",
+                    next() % 5
+                ));
             }
         }
     }
@@ -108,7 +133,8 @@ fn graph_writers_roundtrip_engine_constructs() {
     for seed in [1u64, 7, 42, 1234, 98765] {
         let ttl = random_graph_ttl(seed, 20, 140);
         let g = Graph::load_str(&ttl, "turtle").unwrap();
-        let triples = construct_or_describe(&g, "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }").unwrap();
+        let triples =
+            construct_or_describe(&g, "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }").unwrap();
         assert_graph_roundtrips(&format!("seed{seed}"), &triples);
     }
 }

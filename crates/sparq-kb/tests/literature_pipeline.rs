@@ -357,11 +357,16 @@ fn no_statement_is_emitted_into_more_than_one_tier() {
     // Non-vacuous: each tier really does carry its own source's finding, and NOT the other's.
     assert!(out.machine_tier.contains("10.5555/mixed.ccby"));
     assert!(!out.machine_tier.contains("10.5555/mixed.unknown"));
-    assert!(out.license_restricted_tier.contains("10.5555/mixed.unknown"));
+    assert!(out
+        .license_restricted_tier
+        .contains("10.5555/mixed.unknown"));
     assert!(!out.license_restricted_tier.contains("10.5555/mixed.ccby"));
     // Each tier carries exactly one grounded finding here.
     assert_eq!(out.machine_tier.matches("a pkg:Finding").count(), 1);
-    assert_eq!(out.license_restricted_tier.matches("a pkg:Finding").count(), 1);
+    assert_eq!(
+        out.license_restricted_tier.matches("a pkg:Finding").count(),
+        1
+    );
 }
 
 #[test]
@@ -381,7 +386,10 @@ fn unknown_licence_source_findings_land_restricted_only() {
     assert!(!out.machine_tier.contains("a pkg:Finding"));
     assert!(!out.machine_tier.contains("a pkg:Source"));
     // All four grounded findings are in the restricted tier.
-    assert_eq!(out.license_restricted_tier.matches("a pkg:Finding").count(), 4);
+    assert_eq!(
+        out.license_restricted_tier.matches("a pkg:Finding").count(),
+        4
+    );
     assert!(out.license_restricted_tier.contains("a pkg:Source"));
     // The classifier agrees on the None-licence fixture sources.
     assert_eq!(pipeline::source_tier(None), Tier::LicenseRestricted);
@@ -404,17 +412,35 @@ fn restricted_public_projection_carries_no_abstract_derived_text() {
     // Non-vacuous baseline: the FULL restricted artifact DOES carry the abstract-derived
     // justification text, so the projection genuinely stripped it (not merely empty).
     assert!(
-        out.license_restricted_tier.contains("sigimpl:justification"),
+        out.license_restricted_tier
+            .contains("sigimpl:justification"),
         "restricted FULL tier must carry the justification (else the test is vacuous)"
     );
-    assert!(out.license_restricted_tier.contains("We present a chunk-parallel"));
+    assert!(out
+        .license_restricted_tier
+        .contains("We present a chunk-parallel"));
 
     // The projection carries NONE of it.
-    assert!(!proj.contains("sigimpl:justification"), "projection leaks a justification");
-    assert!(!proj.contains("dcterms:abstract"), "projection leaks an abstract");
-    assert!(!proj.contains("a pkg:Finding"), "projection leaks a Finding");
-    assert!(!proj.contains("We present a chunk-parallel"), "projection leaks abstract text");
-    assert!(!proj.contains("prov:wasGeneratedBy"), "projection leaks finding provenance");
+    assert!(
+        !proj.contains("sigimpl:justification"),
+        "projection leaks a justification"
+    );
+    assert!(
+        !proj.contains("dcterms:abstract"),
+        "projection leaks an abstract"
+    );
+    assert!(
+        !proj.contains("a pkg:Finding"),
+        "projection leaks a Finding"
+    );
+    assert!(
+        !proj.contains("We present a chunk-parallel"),
+        "projection leaks abstract text"
+    );
+    assert!(
+        !proj.contains("prov:wasGeneratedBy"),
+        "projection leaks finding provenance"
+    );
 
     // But it DOES carry the permitted source metadata + licence status.
     assert!(proj.contains("Chunk-Parallel Scanning of Line-Delimited RDF"));
@@ -559,17 +585,20 @@ fn dup_doi_mixed_licence_fails_closed_whole_doi_restricted() {
         "restricted tier must carry at least one Finding for the dup-DOI"
     );
     assert!(
-        out.license_restricted_tier.contains("sigimpl:justification"),
+        out.license_restricted_tier
+            .contains("sigimpl:justification"),
         "restricted tier must carry the abstract-derived justification"
     );
 
     // Restricted public projection must carry the DOI metadata but NO abstract-derived text.
     assert!(
-        out.restricted_public_projection.contains("10.5555/dup.conflict"),
+        out.restricted_public_projection
+            .contains("10.5555/dup.conflict"),
         "restricted public projection must carry the dup-DOI metadata"
     );
     assert!(
-        !out.restricted_public_projection.contains("sigimpl:justification"),
+        !out.restricted_public_projection
+            .contains("sigimpl:justification"),
         "projection must not carry abstract-derived text"
     );
     assert!(
@@ -599,9 +628,15 @@ fn machine_and_restricted_full_tiers_conform_to_the_shacl_gate() {
     .expect("tiered run");
 
     let (m_conforms, m_report) = gate(&out.machine_tier);
-    assert!(m_conforms, "machine-tier artifact must conform:\n{m_report}");
+    assert!(
+        m_conforms,
+        "machine-tier artifact must conform:\n{m_report}"
+    );
     let (r_conforms, r_report) = gate(&out.license_restricted_tier);
-    assert!(r_conforms, "restricted-tier artifact must conform:\n{r_report}");
+    assert!(
+        r_conforms,
+        "restricted-tier artifact must conform:\n{r_report}"
+    );
 }
 
 // ===========================================================================

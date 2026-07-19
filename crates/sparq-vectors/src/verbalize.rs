@@ -92,12 +92,22 @@ pub struct PropertyGroup {
 impl PropertyGroup {
     /// A [`ObjectKind::Literal`] group over `predicates`, one value, no prefix.
     pub fn literal(predicates: Vec<NamedNode>) -> PropertyGroup {
-        PropertyGroup { predicates, prefix: None, kind: ObjectKind::Literal, max_values: 1 }
+        PropertyGroup {
+            predicates,
+            prefix: None,
+            kind: ObjectKind::Literal,
+            max_values: 1,
+        }
     }
 
     /// A [`ObjectKind::EntityLabel`] group over `predicates`, one value, no prefix.
     pub fn entity_label(predicates: Vec<NamedNode>) -> PropertyGroup {
-        PropertyGroup { predicates, prefix: None, kind: ObjectKind::EntityLabel, max_values: 1 }
+        PropertyGroup {
+            predicates,
+            prefix: None,
+            kind: ObjectKind::EntityLabel,
+            max_values: 1,
+        }
     }
 
     /// Sets the prefix (builder style).
@@ -243,7 +253,9 @@ fn verbalize_id(graph: &Graph, id: Id, cfg: &EntityTextConfig) -> Option<String>
     let mut pieces: Vec<String> = Vec::new();
     let mut has_literal_text = false;
     for group in &cfg.groups {
-        let Some(value) = group_value(graph, id, group, cfg) else { continue };
+        let Some(value) = group_value(graph, id, group, cfg) else {
+            continue;
+        };
         has_literal_text |= group.kind == ObjectKind::Literal;
         match &group.prefix {
             Some(p) => pieces.push(format!("{p}{value}")),
@@ -257,7 +269,11 @@ fn verbalize_id(graph: &Graph, id: Id, cfg: &EntityTextConfig) -> Option<String>
     // piece is truncated at a word or sentence boundary and ends the text.
     let mut out = String::new();
     for piece in pieces {
-        let lead = if out.is_empty() { 0 } else { cfg.separator.chars().count() };
+        let lead = if out.is_empty() {
+            0
+        } else {
+            cfg.separator.chars().count()
+        };
         let used = out.chars().count();
         let remaining = cfg.max_chars.saturating_sub(used + lead);
         if remaining == 0 {
@@ -331,9 +347,16 @@ fn is_sentence_delimiter(ch: char) -> bool {
 /// The rendered value of one group for one entity: the first predicate (in group
 /// order) with usable candidates wins; its candidates are ranked by language-chain
 /// position then scan order, deduplicated, capped at `max_values`, joined with `", "`.
-fn group_value(graph: &Graph, id: Id, group: &PropertyGroup, cfg: &EntityTextConfig) -> Option<String> {
+fn group_value(
+    graph: &Graph,
+    id: Id,
+    group: &PropertyGroup,
+    cfg: &EntityTextConfig,
+) -> Option<String> {
     for pred in &group.predicates {
-        let Some(pid) = graph.id_of(&Term::NamedNode(pred.clone())) else { continue };
+        let Some(pid) = graph.id_of(&Term::NamedNode(pred.clone())) else {
+            continue;
+        };
         // (language rank, scan index, text) candidates from one contiguous SPO range.
         let mut cands: Vec<(usize, usize, String)> = Vec::new();
         let scan = graph.store.scan(&[Some(id), Some(pid), None]);
@@ -371,10 +394,14 @@ fn group_value(graph: &Graph, id: Id, group: &PropertyGroup, cfg: &EntityTextCon
 fn literal_text(graph: &Graph, id: Id, languages: &[String]) -> Option<(usize, String)> {
     if dict::is_inline(id) {
         // Inline xsd:integer — decoded via the dictionary, never language-tagged.
-        let Term::Literal(l) = graph.dict.term(id) else { return None };
+        let Term::Literal(l) = graph.dict.term(id) else {
+            return None;
+        };
         return Some((lang_rank(languages, None), l.value().to_string()));
     }
-    let TermParts::Lit { value, lang, .. } = graph.dict.term_parts(id) else { return None };
+    let TermParts::Lit { value, lang, .. } = graph.dict.term_parts(id) else {
+        return None;
+    };
     let value = value.trim();
     if value.is_empty() {
         return None;
@@ -396,7 +423,11 @@ fn entity_label_text(graph: &Graph, id: Id, cfg: &EntityTextConfig) -> Option<(u
             }
             let full = format!("{prefix}{suffix}");
             let local = full.rsplit(['#', '/']).next().unwrap_or(&full);
-            let local = if local.is_empty() { full.as_str() } else { local };
+            let local = if local.is_empty() {
+                full.as_str()
+            } else {
+                local
+            };
             Some((0, local.to_string()))
         }
         TermParts::Blank(_) => naming_label(graph, id, cfg).map(|l| (0, l)),
@@ -408,12 +439,17 @@ fn entity_label_text(graph: &Graph, id: Id, cfg: &EntityTextConfig) -> Option<(u
 fn naming_label(graph: &Graph, id: Id, cfg: &EntityTextConfig) -> Option<String> {
     let mut best: Option<(usize, usize, String)> = None;
     for pred in &cfg.naming_predicates {
-        let Some(pid) = graph.id_of(&Term::NamedNode(pred.clone())) else { continue };
+        let Some(pid) = graph.id_of(&Term::NamedNode(pred.clone())) else {
+            continue;
+        };
         let scan = graph.store.scan(&[Some(id), Some(pid), None]);
         for (i, row) in scan.rows.iter().enumerate() {
             let o = scan.to_spo(row)[2];
             if let Some((rank, text)) = literal_text(graph, o, &cfg.languages) {
-                if best.as_ref().is_none_or(|(br, bi, _)| (rank, i) < (*br, *bi)) {
+                if best
+                    .as_ref()
+                    .is_none_or(|(br, bi, _)| (rank, i) < (*br, *bi))
+                {
                     best = Some((rank, i, text));
                 }
             }
@@ -498,7 +534,9 @@ pub fn embed_entities(
             continue;
         }
         for pred in &group.predicates {
-            let Some(pid) = graph.id_of(&Term::NamedNode(pred.clone())) else { continue };
+            let Some(pid) = graph.id_of(&Term::NamedNode(pred.clone())) else {
+                continue;
+            };
             let scan = graph.store.scan(&[None, Some(pid), None]);
             for row in scan.rows.iter() {
                 let [s, _, _] = scan.to_spo(row);

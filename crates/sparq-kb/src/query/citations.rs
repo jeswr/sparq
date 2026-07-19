@@ -225,9 +225,7 @@ fn render_text(answers: &[CitedAnswer]) -> String {
 /// Return the local name of an IRI: the suffix after the last `#` or `/`.
 /// Falls back to the full IRI when neither delimiter is present.
 fn local_name(iri: &str) -> &str {
-    iri.rfind(['#', '/'])
-        .map(|i| &iri[i + 1..])
-        .unwrap_or(iri)
+    iri.rfind(['#', '/']).map(|i| &iri[i + 1..]).unwrap_or(iri)
 }
 
 /// Is `iri` a term in the live graph dictionary?  An IRI absent from the
@@ -341,8 +339,7 @@ SELECT ?label ?source ?section ?assurance ?conf WHERE {
             .as_ref()
             .expect("citation must be present for a Finding with prov:wasDerivedFrom");
         assert_eq!(
-            cit.source_iri,
-            "https://sparq.dev/ns/pkg/kb#src-real",
+            cit.source_iri, "https://sparq.dev/ns/pkg/kb#src-real",
             "source IRI must match the prov:wasDerivedFrom triple"
         );
         assert_eq!(
@@ -378,15 +375,10 @@ SELECT ?label ?source ?section ?assurance ?conf WHERE {
 
         // (4) Metric harness: resolution-rate 1.0, fabricated-count 0.
         assert_eq!(
-            report.metrics.fabricated_count,
-            0,
+            report.metrics.fabricated_count, 0,
             "no fabricated citations expected on the fixture"
         );
-        assert_eq!(
-            report.metrics.total_citations,
-            1,
-            "one citation expected"
-        );
+        assert_eq!(report.metrics.total_citations, 1, "one citation expected");
         #[allow(clippy::float_cmp)]
         {
             assert_eq!(
@@ -430,8 +422,7 @@ SELECT ?label ?source ?section ?assurance ?conf WHERE {
 
         // The metric harness still measures 0 fabricated citations.
         assert_eq!(
-            report.metrics.fabricated_count,
-            0,
+            report.metrics.fabricated_count, 0,
             "fabricated-count must be 0 — no dangling citation was produced"
         );
     }
@@ -450,9 +441,8 @@ SELECT ?label ?source ?section ?assurance ?conf WHERE {
 
         // Construct a synthetic result row whose ?source column contains an
         // IRI absent from the fixture graph — simulating a fabricated citation.
-        let fake_source =
-            oxrdf::NamedNode::new("https://sparq.dev/ns/pkg/kb#non-existent-source")
-                .expect("valid IRI");
+        let fake_source = oxrdf::NamedNode::new("https://sparq.dev/ns/pkg/kb#non-existent-source")
+            .expect("valid IRI");
         let finding_label = oxrdf::Literal::new_simple_literal("A fabricated finding");
 
         // Build a minimal QueryResult matching the FINDING_PROVENANCE layout.
@@ -479,8 +469,7 @@ SELECT ?label ?source ?section ?assurance ?conf WHERE {
         // The detector must fire: one citation, one fabricated.
         assert_eq!(report.metrics.total_citations, 1);
         assert_eq!(
-            report.metrics.fabricated_count,
-            1,
+            report.metrics.fabricated_count, 1,
             "the harness must catch a citation whose source IRI is not in the graph"
         );
         assert!(
@@ -532,7 +521,10 @@ SELECT ?label ?source ?section ?assurance ?conf WHERE {
             local_name("https://sparq.dev/ns/pkg/kb#src-real"),
             "src-real"
         );
-        assert_eq!(local_name("https://example.org/path/to/resource"), "resource");
+        assert_eq!(
+            local_name("https://example.org/path/to/resource"),
+            "resource"
+        );
         assert_eq!(local_name("urn:no-delimiter"), "urn:no-delimiter");
     }
 

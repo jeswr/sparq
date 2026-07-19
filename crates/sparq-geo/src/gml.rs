@@ -117,7 +117,11 @@ pub fn parse_gml_literal(lex: &str) -> Result<GeoGeometry, GeoError> {
     let crs = node.crs.clone();
     let geometry = build_geometry(&node)?;
     // EPSG:4326 is LAT/LONG; normalise to internal long/lat exactly as WKT does.
-    let geometry = if crs == Crs::Epsg4326 { swap_xy(geometry) } else { geometry };
+    let geometry = if crs == Crs::Epsg4326 {
+        swap_xy(geometry)
+    } else {
+        geometry
+    };
     Ok(GeoGeometry { crs, geometry })
 }
 
@@ -290,12 +294,8 @@ fn local_name(qname: &[u8]) -> String {
 fn crs_from_srs_name(srs: &str) -> Crs {
     let s = srs.trim();
     // urn:ogc:def:crs:EPSG::4326 / EPSG:4326 / .../EPSG/0/4326 all mean 4326.
-    let is_4326 = s.ends_with(":4326")
-        || s.ends_with("/4326")
-        || s == crate::vocab::EPSG_4326;
-    let is_crs84 = s == crate::vocab::CRS84
-        || s.ends_with("CRS84")
-        || s.ends_with(":CRS84");
+    let is_4326 = s.ends_with(":4326") || s.ends_with("/4326") || s == crate::vocab::EPSG_4326;
+    let is_crs84 = s == crate::vocab::CRS84 || s.ends_with("CRS84") || s.ends_with(":CRS84");
     if is_crs84 {
         Crs::Crs84
     } else if is_4326 {
@@ -359,9 +359,14 @@ fn parse_root(lex: &str) -> Result<Node, GeoError> {
             Ok(Event::Eof) => break,
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref());
-                let (crs, dim) =
-                    scan_element_attrs(&e, &mut inherited_crs, &mut inherited_dim)?;
-                stack.push(Node { name, crs, dim, text: String::new(), children: Vec::new() });
+                let (crs, dim) = scan_element_attrs(&e, &mut inherited_crs, &mut inherited_dim)?;
+                stack.push(Node {
+                    name,
+                    crs,
+                    dim,
+                    text: String::new(),
+                    children: Vec::new(),
+                });
             }
             Ok(Event::Text(t)) => {
                 if let Some(top) = stack.last_mut() {
@@ -390,9 +395,14 @@ fn parse_root(lex: &str) -> Result<Node, GeoError> {
             // Empty self-closing element, e.g. <gml:pos/> (degenerate) — keep it.
             Ok(Event::Empty(e)) => {
                 let name = local_name(e.name().as_ref());
-                let (crs, dim) =
-                    scan_element_attrs(&e, &mut inherited_crs, &mut inherited_dim)?;
-                let node = Node { name, crs, dim, text: String::new(), children: Vec::new() };
+                let (crs, dim) = scan_element_attrs(&e, &mut inherited_crs, &mut inherited_dim)?;
+                let node = Node {
+                    name,
+                    crs,
+                    dim,
+                    text: String::new(),
+                    children: Vec::new(),
+                };
                 match stack.last_mut() {
                     Some(parent) => parent.children.push(node),
                     None => root = Some(node),
@@ -417,18 +427,14 @@ fn build_geometry(node: &Node) -> Result<Geometry<f64>, GeoError> {
         "polygon" => Ok(Geometry::Polygon(build_polygon(node)?)),
         "multipoint" => Ok(Geometry::MultiPoint(build_multipoint(node)?)),
         // GML-SF curves are LineStrings; MultiCurve aggregates them.
-        "multicurve" | "multilinestring" => {
-            Ok(Geometry::MultiLineString(build_multicurve(node)?))
-        }
+        "multicurve" | "multilinestring" => Ok(Geometry::MultiLineString(build_multicurve(node)?)),
         // GML-SF surfaces are Polygons; MultiSurface aggregates them.
-        "multisurface" | "multipolygon" => {
-            Ok(Geometry::MultiPolygon(build_multisurface(node)?))
-        }
+        "multisurface" | "multipolygon" => Ok(Geometry::MultiPolygon(build_multisurface(node)?)),
         // A heterogeneous aggregate: the GML 3 `gml:MultiGeometry` and the GML 2
         // `gml:GeometryCollection`. An empty one is the empty geometry (R16). [OPUS-4.8]
-        "multigeometry" | "geometrycollection" => {
-            Ok(Geometry::GeometryCollection(build_geometrycollection(node)?))
-        }
+        "multigeometry" | "geometrycollection" => Ok(Geometry::GeometryCollection(
+            build_geometrycollection(node)?,
+        )),
         // [OPUS-4.8] sq-47vu: real-GML-but-not-SF forms, parsed additively (see
         // the module header). gml:Envelope -> a bbox Polygon; gml:Curve /
         // gml:Surface with arc segments -> arc densification.
@@ -475,7 +481,10 @@ fn parse_coords(text: &str, dim: usize) -> Result<Vec<Coord<f64>>, GeoError> {
     }
     // Take the first two ordinates (X, Y) of each `dim`-wide tuple; any Z (and
     // beyond) is projected out.
-    Ok(nums.chunks_exact(dim).map(|p| Coord { x: p[0], y: p[1] }).collect())
+    Ok(nums
+        .chunks_exact(dim)
+        .map(|p| Coord { x: p[0], y: p[1] })
+        .collect())
 }
 
 /// The coordinate run of a positional element, from any of the SF spellings:
@@ -548,9 +557,7 @@ fn build_polygon(node: &Node) -> Result<Polygon<f64>, GeoError> {
     let ext_wrap = node
         .child("exterior")
         .or_else(|| node.child("outerboundaryis"))
-        .ok_or_else(|| {
-            GeoError::Parse("GML gml:Polygon missing gml:exterior ring".to_string())
-        })?;
+        .ok_or_else(|| GeoError::Parse("GML gml:Polygon missing gml:exterior ring".to_string()))?;
     let exterior = build_ring(ext_wrap)?;
 
     // Interiors: gml:interior (GML 3) or gml:innerBoundaryIs (GML 2).
@@ -568,9 +575,9 @@ fn build_multipoint(node: &Node) -> Result<MultiPoint<f64>, GeoError> {
     let mut points = Vec::new();
     // gml:pointMember (one Point each) and gml:pointMembers (many Points).
     for member in node.children_named("pointmember") {
-        let p = member.child("point").ok_or_else(|| {
-            GeoError::Parse("GML gml:pointMember missing gml:Point".to_string())
-        })?;
+        let p = member
+            .child("point")
+            .ok_or_else(|| GeoError::Parse("GML gml:pointMember missing gml:Point".to_string()))?;
         points.push(build_point(p)?);
     }
     for members in node.children_named("pointmembers") {
@@ -686,12 +693,16 @@ fn build_envelope(node: &Node) -> Result<Polygon<f64>, GeoError> {
             // Fallback: two gml:pos children (lower then upper).
             let pos: Vec<&Node> = node.children_named("pos").collect();
             if pos.len() == 2 {
-                let l = *parse_coords(&pos[0].text, pos[0].dim)?.first().ok_or_else(|| {
-                    GeoError::Parse("GML gml:Envelope: empty gml:pos".to_string())
-                })?;
-                let u = *parse_coords(&pos[1].text, pos[1].dim)?.first().ok_or_else(|| {
-                    GeoError::Parse("GML gml:Envelope: empty gml:pos".to_string())
-                })?;
+                let l = *parse_coords(&pos[0].text, pos[0].dim)?
+                    .first()
+                    .ok_or_else(|| {
+                        GeoError::Parse("GML gml:Envelope: empty gml:pos".to_string())
+                    })?;
+                let u = *parse_coords(&pos[1].text, pos[1].dim)?
+                    .first()
+                    .ok_or_else(|| {
+                        GeoError::Parse("GML gml:Envelope: empty gml:pos".to_string())
+                    })?;
                 (l, u)
             } else {
                 return Err(GeoError::Parse(
@@ -719,9 +730,9 @@ fn build_envelope(node: &Node) -> Result<Polygon<f64>, GeoError> {
 /// (`gml:Arc` / `gml:ArcString` / `gml:CircularArcByCenterPoint`) densified to a
 /// polyline at [`ARC_STEP_DEG`].
 fn build_curve(node: &Node) -> Result<LineString<f64>, GeoError> {
-    let segments = node.child("segments").ok_or_else(|| {
-        GeoError::Parse("GML gml:Curve missing gml:segments".to_string())
-    })?;
+    let segments = node
+        .child("segments")
+        .ok_or_else(|| GeoError::Parse("GML gml:Curve missing gml:segments".to_string()))?;
     let coords = densify_segments(&segments.children)?;
     if coords.len() < 2 {
         return Err(GeoError::Parse(
@@ -746,9 +757,7 @@ fn densify_segments(segs: &[Node]) -> Result<Vec<Coord<f64>>, GeoError> {
             // Arc forms through control points (point triples).
             "arc" | "arcstring" => densify_arc_string(&coords_of(seg)?)?,
             // Centre + radius + start/end angle.
-            "circulararcbycenterpoint" | "arcbycenterpoint" => {
-                densify_arc_by_center(seg)?
-            }
+            "circulararcbycenterpoint" | "arcbycenterpoint" => densify_arc_by_center(seg)?,
             other => {
                 return Err(GeoError::Unsupported(format!(
                     "GML curve segment <{other}> not supported (linear / Arc / ArcString / \
@@ -760,7 +769,9 @@ fn densify_segments(segs: &[Node]) -> Result<Vec<Coord<f64>>, GeoError> {
         any = true;
     }
     if !any {
-        return Err(GeoError::Parse("GML gml:segments has no segment".to_string()));
+        return Err(GeoError::Parse(
+            "GML gml:segments has no segment".to_string(),
+        ));
     }
     Ok(out)
 }
@@ -843,7 +854,10 @@ fn densify_three_point_arc(a: Coord<f64>, b: Coord<f64>, c: Coord<f64>) -> Vec<C
     for k in 0..=n {
         let t = sweep * (k as f64) / (n as f64);
         let theta = if ccw { a_ang + t } else { a_ang - t };
-        out.push(Coord { x: center.x + r * theta.cos(), y: center.y + r * theta.sin() });
+        out.push(Coord {
+            x: center.x + r * theta.cos(),
+            y: center.y + r * theta.sin(),
+        });
     }
     out
 }
@@ -867,9 +881,9 @@ fn directed_sweep(from: f64, to: f64, ccw: bool) -> f64 {
 /// GML measures these angles counter-clockwise from the +X axis. A full circle
 /// (start == end) sweeps the whole 360°.
 fn densify_arc_by_center(seg: &Node) -> Result<Vec<Coord<f64>>, GeoError> {
-    let center_node = seg
-        .child("pos")
-        .ok_or_else(|| GeoError::Parse("GML ArcByCenterPoint missing gml:pos centre".to_string()))?;
+    let center_node = seg.child("pos").ok_or_else(|| {
+        GeoError::Parse("GML ArcByCenterPoint missing gml:pos centre".to_string())
+    })?;
     let center = *parse_coords(&center_node.text, center_node.dim)?
         .first()
         .ok_or_else(|| GeoError::Parse("GML ArcByCenterPoint: empty centre".to_string()))?;
@@ -895,7 +909,9 @@ fn densify_arc_by_center(seg: &Node) -> Result<Vec<Coord<f64>>, GeoError> {
             .text
             .trim()
             .parse::<f64>()
-            .map_err(|_| GeoError::Parse("GML ArcByCenterPoint: non-numeric gml:endAngle".to_string()))?
+            .map_err(|_| {
+                GeoError::Parse("GML ArcByCenterPoint: non-numeric gml:endAngle".to_string())
+            })?
             .to_radians(),
         None => start + std::f64::consts::TAU,
     };
@@ -908,7 +924,10 @@ fn densify_arc_by_center(seg: &Node) -> Result<Vec<Coord<f64>>, GeoError> {
     let mut out = Vec::with_capacity(n + 1);
     for k in 0..=n {
         let theta = start + sweep * (k as f64) / (n as f64);
-        out.push(Coord { x: center.x + radius * theta.cos(), y: center.y + radius * theta.sin() });
+        out.push(Coord {
+            x: center.x + radius * theta.cos(),
+            y: center.y + radius * theta.sin(),
+        });
     }
     Ok(out)
 }
@@ -919,9 +938,9 @@ fn densify_arc_by_center(seg: &Node) -> Result<Vec<Coord<f64>>, GeoError> {
 /// wrapping curve members) and are densified the same way. Only the first patch
 /// is taken (a multi-patch surface is beyond a single `geo_types::Polygon`).
 fn build_surface(node: &Node) -> Result<Polygon<f64>, GeoError> {
-    let patches = node.child("patches").ok_or_else(|| {
-        GeoError::Parse("GML gml:Surface missing gml:patches".to_string())
-    })?;
+    let patches = node
+        .child("patches")
+        .ok_or_else(|| GeoError::Parse("GML gml:Surface missing gml:patches".to_string()))?;
     let patch = patches
         .child("polygonpatch")
         .or_else(|| patches.child("rectangle"))
@@ -933,9 +952,7 @@ fn build_surface(node: &Node) -> Result<Polygon<f64>, GeoError> {
     let ext_wrap = patch
         .child("exterior")
         .or_else(|| patch.child("outerboundaryis"))
-        .ok_or_else(|| {
-            GeoError::Parse("GML gml:PolygonPatch missing gml:exterior".to_string())
-        })?;
+        .ok_or_else(|| GeoError::Parse("GML gml:PolygonPatch missing gml:exterior".to_string()))?;
     let exterior = build_surface_ring(ext_wrap)?;
     let mut interiors = Vec::new();
     for wrap in patch
@@ -958,9 +975,7 @@ fn build_surface_ring(wrap: &Node) -> Result<LineString<f64>, GeoError> {
         let mut coords: Vec<Coord<f64>> = Vec::new();
         for member in ring.children_named("curvemember") {
             let curve = member.child("curve").ok_or_else(|| {
-                GeoError::Unsupported(
-                    "GML gml:Ring member is not a gml:Curve".to_string(),
-                )
+                GeoError::Unsupported("GML gml:Ring member is not a gml:Curve".to_string())
             })?;
             let segments = curve.child("segments").ok_or_else(|| {
                 GeoError::Parse("GML gml:Curve in ring missing gml:segments".to_string())

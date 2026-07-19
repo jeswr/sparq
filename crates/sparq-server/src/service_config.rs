@@ -98,7 +98,9 @@ impl ServiceAllowlist {
         }
         if let Some(suffix) = e.strip_prefix("*.") {
             if suffix.is_empty() || suffix.contains('*') {
-                return Err(format!("invalid SERVICE allow pattern {raw:?}: expected '*.<suffix>'"));
+                return Err(format!(
+                    "invalid SERVICE allow pattern {raw:?}: expected '*.<suffix>'"
+                ));
             }
             // Engine form: leading dot. Matches the apex + any subdomain. A trailing
             // `:port` ([OPUS-4.8] sq-a7jw4) is carried through so the wildcard is
@@ -158,7 +160,11 @@ impl ServiceAllowlist {
         // Unbracketed. Only a single-colon `host:port` is a port-bearing authority;
         // anything with more than one colon is a bare IPv6 literal we must NOT touch.
         if let Some((host, port)) = e.split_once(':') {
-            if !host.contains(':') && !port.contains(':') && !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) {
+            if !host.contains(':')
+                && !port.contains(':')
+                && !port.is_empty()
+                && port.bytes().all(|b| b.is_ascii_digit())
+            {
                 // [OPUS-4.8] sq-a7jw4: PRESERVE the port (port-scoped, exact port only).
                 return e.to_string();
             }
@@ -228,7 +234,11 @@ impl ServiceAllowlist {
     /// suffix wildcards as leading-dot strings (`.example.org`). Fed to
     /// `sparq_engine::with_service_egress_policy`.
     pub fn engine_entries(&self) -> Vec<String> {
-        self.exact.iter().chain(self.suffix.iter()).cloned().collect()
+        self.exact
+            .iter()
+            .chain(self.suffix.iter())
+            .cloned()
+            .collect()
     }
 
     /// A stable, human-readable rendering for the startup log (suffix entries shown
@@ -271,7 +281,10 @@ mod tests {
         assert_eq!(a.len(), 2);
         let mut e = a.engine_entries();
         e.sort();
-        assert_eq!(e, vec!["192.0.2.10".to_string(), "sparql.example.org".to_string()]);
+        assert_eq!(
+            e,
+            vec!["192.0.2.10".to_string(), "sparql.example.org".to_string()]
+        );
     }
 
     #[test]
@@ -282,10 +295,10 @@ mod tests {
         // to every port the way sq-4w18 used to strip it).
         for (raw, want) in [
             // host-level (no port): brackets stripped, bare IPv6 untouched.
-            ("[::1]", "::1"),                       // bracketed ipv6 -> bare ipv6
-            ("example.org", "example.org"),         // already bare -> unchanged
-            ("::1", "::1"),                          // bare (unbracketed) ipv6 -> NOT mangled
-            ("2001:db8::1", "2001:db8::1"),          // bare full ipv6 -> NOT mangled
+            ("[::1]", "::1"),               // bracketed ipv6 -> bare ipv6
+            ("example.org", "example.org"), // already bare -> unchanged
+            ("::1", "::1"),                 // bare (unbracketed) ipv6 -> NOT mangled
+            ("2001:db8::1", "2001:db8::1"), // bare full ipv6 -> NOT mangled
             // port-scoped: port PRESERVED.
             ("example.org:443", "example.org:443"), // host:port -> port preserved
             ("192.0.2.10:8080", "192.0.2.10:8080"), // ipv4:port -> port preserved
@@ -313,7 +326,10 @@ mod tests {
         assert_eq!(a.len(), 2);
         let mut e = a.engine_entries();
         e.sort();
-        assert_eq!(e, vec!["127.0.0.1".to_string(), "127.0.0.1:8053".to_string()]);
+        assert_eq!(
+            e,
+            vec!["127.0.0.1".to_string(), "127.0.0.1:8053".to_string()]
+        );
     }
 
     #[test]
@@ -353,7 +369,8 @@ mod tests {
     #[test]
     fn add_many_splits_on_comma_and_whitespace() {
         let mut a = ServiceAllowlist::default();
-        a.add_many("a.example.org, b.example.org  c.example.org\nd.example.org").unwrap();
+        a.add_many("a.example.org, b.example.org  c.example.org\nd.example.org")
+            .unwrap();
         assert_eq!(a.len(), 4);
     }
 
@@ -361,7 +378,10 @@ mod tests {
     fn from_sources_unions_cli_file_env() {
         // [OPUS-4.8] sq-x4jy: inject the env baseline (hermetic — no process-global mutation).
         let a = ServiceAllowlist::from_sources_with_env(
-            &["cli.example.org".to_string(), "*.cli.example.org".to_string()],
+            &[
+                "cli.example.org".to_string(),
+                "*.cli.example.org".to_string(),
+            ],
             None,
             Some("env.example.org, *.env.example.org".to_string()),
         )
@@ -383,18 +403,22 @@ mod tests {
             "# a comment\nfile.example.org\n\n  *.file.example.org   # trailing comment\n",
         )
         .unwrap();
-        let a = ServiceAllowlist::from_sources_with_env(&[], Some(path.to_str().unwrap()), None).unwrap();
+        let a = ServiceAllowlist::from_sources_with_env(&[], Some(path.to_str().unwrap()), None)
+            .unwrap();
         std::fs::remove_file(&path).ok();
         assert_eq!(a.len(), 2);
         assert!(a.engine_entries().contains(&"file.example.org".to_string()));
-        assert!(a.engine_entries().contains(&".file.example.org".to_string()));
+        assert!(a
+            .engine_entries()
+            .contains(&".file.example.org".to_string()));
     }
 
     #[test]
     fn from_sources_missing_file_errors() {
         // [OPUS-4.8] sq-x4jy: hermetic — no env baseline.
-        let err = ServiceAllowlist::from_sources_with_env(&[], Some("/no/such/sparq-allow-file"), None)
-            .unwrap_err();
+        let err =
+            ServiceAllowlist::from_sources_with_env(&[], Some("/no/such/sparq-allow-file"), None)
+                .unwrap_err();
         assert!(err.contains("service-allow-file"));
     }
 
@@ -429,11 +453,10 @@ mod tests {
         // SPARQ_SERVICE_ALLOW env var. The env var is NOT set in this test (the real
         // env baseline is absent), so the result is the union of the CLI args only.
         // This exercises the `from_sources` function body (lines 177–179).
-        let a = ServiceAllowlist::from_sources(
-            &["direct.example.org".to_string()],
-            None,
-        )
-        .expect("from_sources with valid CLI entry must succeed");
-        assert!(a.engine_entries().contains(&"direct.example.org".to_string()));
+        let a = ServiceAllowlist::from_sources(&["direct.example.org".to_string()], None)
+            .expect("from_sources with valid CLI entry must succeed");
+        assert!(a
+            .engine_entries()
+            .contains(&"direct.example.org".to_string()));
     }
 }

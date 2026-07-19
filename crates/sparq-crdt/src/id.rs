@@ -6,8 +6,8 @@
 //! (`CRDT-WIRE-3`) order dot arrays "by replica bytes then numeric counter"
 //! and the base64url alphabet is not order-preserving over raw bytes.
 
-use crate::CrdtError;
 use crate::codec::{b64url_decode, b64url_encode};
+use crate::CrdtError;
 
 /// Hard upper bound on a replica identifier's raw byte length. The design
 /// recommends 128- or 256-bit random identifiers (research §4.1); 64 bytes

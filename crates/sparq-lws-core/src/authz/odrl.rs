@@ -123,10 +123,7 @@ impl OdrlGate for PolicyOdrlGate {
         let request = Request::new(ODRL_READ)
             .on(target_graph)
             .by(agent)
-            .with(
-                sparq_policy::ODRL_RECIPIENT,
-                Value::Iri(agent.to_owned()),
-            );
+            .with(sparq_policy::ODRL_RECIPIENT, Value::Iri(agent.to_owned()));
         if evaluate(&self.policy, &request).allow {
             OdrlVerdict::Permit
         } else {
@@ -218,7 +215,10 @@ mod tests {
     fn untargeted_graph_is_not_applicable() {
         let gate = permit_alice_prohibit_bob();
         let other = "https://pod.example/alice/c/other";
-        assert_eq!(gate.decide_read(other, Some(ALICE)), OdrlVerdict::NotApplicable);
+        assert_eq!(
+            gate.decide_read(other, Some(ALICE)),
+            OdrlVerdict::NotApplicable
+        );
         assert_eq!(gate.decide_read(other, None), OdrlVerdict::NotApplicable);
     }
 }

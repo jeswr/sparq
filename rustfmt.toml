@@ -1,14 +1,9 @@
 # rustfmt configuration for the sparq workspace.
 #
-# The codebase predates this file, so a one-time `cargo fmt --all` reformat is still
-# pending — it is deferred until the in-flight branches (serve-wave-b, MPC M3,
-# neon-intersect) land, to avoid a workspace-wide reformat conflicting with them.
-# Until then the CI `lint` job runs `cargo fmt --all --check` *informationally*
-# (continue-on-error); clippy is the hard gate. Pinning the config now means that
-# deferred reformat — and the eventual flip of fmt to a hard gate — is deterministic.
+# The workspace is formatted and CI enforces `cargo fmt --all --check` as a hard gate.
 #
 # STABLE options only: `cargo fmt` on the stable toolchain rejects unstable keys
-# (imports_granularity, group_imports, etc.), which would turn the informational
-# check into a confusing hard error. Keep everything here stable.
+# (imports_granularity, group_imports, etc.), which would make the gate fail on
+# configuration rather than formatting. Keep everything here stable.
 edition = "2021"
 max_width = 100

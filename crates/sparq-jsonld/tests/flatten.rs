@@ -51,9 +51,17 @@ fn read_flatten_manifest(root: &Path) -> Result<Vec<Entry>, String> {
         .ok_or("manifest has no sequence array")?;
     let mut out = Vec::new();
     for e in seq {
-        let id = e.get("@id").and_then(Json::as_str).unwrap_or("?").to_string();
+        let id = e
+            .get("@id")
+            .and_then(Json::as_str)
+            .unwrap_or("?")
+            .to_string();
         let is_negative = type_contains(e, "NegativeEvaluationTest");
-        let input = e.get("input").and_then(Json::as_str).unwrap_or("").to_string();
+        let input = e
+            .get("input")
+            .and_then(Json::as_str)
+            .unwrap_or("")
+            .to_string();
         let expect = e.get("expect").and_then(Json::as_str).map(str::to_string);
         let opt = e.get("option");
         let base_override = opt
@@ -312,7 +320,10 @@ fn native_flatten_matches_w3c_suite() {
         return;
     }
     let (pass, fail, skip, failures) = run_flatten_suite(&root);
-    println!("native flatten: {} pass / {} fail / {} skip", pass, fail, skip);
+    println!(
+        "native flatten: {} pass / {} fail / {} skip",
+        pass, fail, skip
+    );
     for f in &failures {
         println!("  {}", f);
     }

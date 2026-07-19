@@ -76,7 +76,10 @@ async fn ask_with_geof_relation() {
         .unwrap();
     assert_eq!(resp.status(), 200);
     let body = resp.text().await.unwrap();
-    assert!(body.contains("\"boolean\":true") || body.contains("\"boolean\": true"), "got: {body}");
+    assert!(
+        body.contains("\"boolean\":true") || body.contains("\"boolean\": true"),
+        "got: {body}"
+    );
 }
 
 #[tokio::test]
@@ -103,7 +106,10 @@ async fn update_where_with_geof_filter() {
     }
     let resp = client
         .get(format!("{base}/sparql"))
-        .query(&[("query", format!("{PREFIXES} SELECT ?c WHERE {{ ?c ex:nearLondon true }}"))])
+        .query(&[(
+            "query",
+            format!("{PREFIXES} SELECT ?c WHERE {{ ?c ex:nearLondon true }}"),
+        )])
         .send()
         .await
         .unwrap();
@@ -128,7 +134,9 @@ async fn unregistered_geof_iri_is_still_an_engine_error() {
         .get(format!("{base}/sparql"))
         .query(&[(
             "query",
-            format!("{PREFIXES} SELECT ?s WHERE {{ ?s ex:loc ?g . FILTER(geof:gmlToWkt(?g) = ?g) }}"),
+            format!(
+                "{PREFIXES} SELECT ?s WHERE {{ ?s ex:loc ?g . FILTER(geof:gmlToWkt(?g) = ?g) }}"
+            ),
         )])
         .send()
         .await

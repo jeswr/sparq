@@ -14,16 +14,18 @@
 //! pointing to the responsible bead.
 
 use sparq_acbench::{
-    AcModel, AccessMode, AudienceMix, Audience, Condition,
-    Decision, Effect, ExpectedDecision, GenParams, IntentRow, Request, Scope,
-    compile_wac, compile_acp, compile_odrl, oracle_wac, oracle_acp, oracle_odrl,
+    compile_acp, compile_odrl, compile_wac, oracle_acp, oracle_odrl, oracle_wac, AcModel,
+    AccessMode, Audience, AudienceMix, Condition, Decision, Effect, ExpectedDecision, GenParams,
+    IntentRow, Request, Scope,
 };
 
 // ── GenParams validation ─────────────────────────────────────────────────────────────
 
 #[test]
 fn gen_params_smoke_validates() {
-    GenParams::smoke().validate().expect("smoke params must be valid");
+    GenParams::smoke()
+        .validate()
+        .expect("smoke params must be valid");
 }
 
 #[test]
@@ -44,7 +46,8 @@ fn gen_params_container_depth_over_max_is_invalid() {
 fn gen_params_group_nesting_depth_max() {
     let mut p = GenParams::smoke();
     p.group_nesting_depth = 4;
-    p.validate().expect("nesting depth 4 is at max, must be valid");
+    p.validate()
+        .expect("nesting depth 4 is at max, must be valid");
 }
 
 #[test]
@@ -71,13 +74,21 @@ fn gen_params_acl_coverage_bounds() {
 
 #[test]
 fn audience_mix_valid() {
-    let mix = AudienceMix { public: 0.3, private: 0.5, shared: 0.2 };
+    let mix = AudienceMix {
+        public: 0.3,
+        private: 0.5,
+        shared: 0.2,
+    };
     mix.validate().expect("sums to 1.0, must be valid");
 }
 
 #[test]
 fn audience_mix_does_not_sum_to_one_is_invalid() {
-    let mix = AudienceMix { public: 0.3, private: 0.5, shared: 0.3 };
+    let mix = AudienceMix {
+        public: 0.3,
+        private: 0.5,
+        shared: 0.3,
+    };
     assert!(mix.validate().is_err(), "1.1 sum must be invalid");
 }
 
@@ -131,7 +142,10 @@ fn compile_wac_allow_agent_produces_triples() {
     let row = simple_allow_row();
     let compiled = compile_wac(&row);
     assert_eq!(compiled.model, AcModel::Wac);
-    assert!(!compiled.nquads.is_empty(), "WAC compiler must produce triples for a simple allow");
+    assert!(
+        !compiled.nquads.is_empty(),
+        "WAC compiler must produce triples for a simple allow"
+    );
 }
 
 #[test]
@@ -166,7 +180,10 @@ fn compile_acp_allow_agent_produces_triples() {
     let row = simple_allow_row();
     let compiled = compile_acp(&row, &[]);
     assert_eq!(compiled.model, AcModel::Acp);
-    assert!(!compiled.nquads.is_empty(), "ACP compiler must produce triples for a simple allow");
+    assert!(
+        !compiled.nquads.is_empty(),
+        "ACP compiler must produce triples for a simple allow"
+    );
 }
 
 #[test]
@@ -177,7 +194,10 @@ fn compile_acp_deny_produces_triples() {
     };
     let compiled = compile_acp(&row, &[]);
     assert_eq!(compiled.model, AcModel::Acp);
-    assert!(!compiled.nquads.is_empty(), "ACP deny should produce triples (acp:deny)");
+    assert!(
+        !compiled.nquads.is_empty(),
+        "ACP deny should produce triples (acp:deny)"
+    );
 }
 
 #[test]
@@ -196,7 +216,10 @@ fn compile_odrl_allow_produces_triples() {
     let row = simple_allow_row();
     let compiled = compile_odrl(&row);
     assert_eq!(compiled.model, AcModel::Odrl);
-    assert!(!compiled.nquads.is_empty(), "ODRL compiler must produce triples for a simple allow");
+    assert!(
+        !compiled.nquads.is_empty(),
+        "ODRL compiler must produce triples for a simple allow"
+    );
 }
 
 #[test]
@@ -209,7 +232,10 @@ fn compile_odrl_temporal_condition_produces_triples() {
         ..simple_allow_row()
     };
     let compiled = compile_odrl(&row);
-    assert!(!compiled.nquads.is_empty(), "ODRL temporal condition must produce constraint triples");
+    assert!(
+        !compiled.nquads.is_empty(),
+        "ODRL temporal condition must produce constraint triples"
+    );
 }
 
 #[test]

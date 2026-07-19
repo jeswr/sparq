@@ -309,7 +309,10 @@ impl EmbeddingProvenance {
             out.push(lit(crate::prov_vocab::MODEL_VERSION, &self.model_version));
         }
         if !self.content_version.is_empty() {
-            out.push(lit(crate::prov_vocab::CONTENT_VERSION, &self.content_version));
+            out.push(lit(
+                crate::prov_vocab::CONTENT_VERSION,
+                &self.content_version,
+            ));
         }
         if !self.verbalization.is_empty() {
             out.push(lit(crate::prov_vocab::VERBALIZATION, &self.verbalization));
@@ -519,7 +522,10 @@ mod tests {
         let a = full();
         let mut b = full();
         b.reserved = vec![1, 2, 3];
-        assert!(a.compatible_with(&b).is_ok(), "reserved area must not gate compatibility");
+        assert!(
+            a.compatible_with(&b).is_ok(),
+            "reserved area must not gate compatibility"
+        );
         assert!(b.compatible_with(&a).is_ok());
     }
 
@@ -535,7 +541,10 @@ mod tests {
         assert!(bare.compatible_with(&bare).is_ok());
         let mut versioned = bare.clone();
         versioned.model_version = "v1".into();
-        assert!(bare.compatible_with(&versioned).is_err(), "value vs absent must mismatch");
+        assert!(
+            bare.compatible_with(&versioned).is_err(),
+            "value vs absent must mismatch"
+        );
     }
 
     #[test]
@@ -560,7 +569,11 @@ mod tests {
     fn from_bytes_rejects_truncation() {
         let bytes = full().to_bytes();
         let err = EmbeddingProvenance::from_bytes(&bytes[..bytes.len() - 3]).unwrap_err();
-        assert!(err.contains("trunc") || err.contains("trailing"), "got: {}", err);
+        assert!(
+            err.contains("trunc") || err.contains("trailing"),
+            "got: {}",
+            err
+        );
     }
 
     #[test]
@@ -594,14 +607,18 @@ mod tests {
             assert_eq!(t.subject.to_string(), "<http://ex/store>");
         }
         let has = |p: &str, o: &str| {
-            nt.iter().any(|t| t.contains(&format!("<{}>", p)) && t.contains(o))
+            nt.iter()
+                .any(|t| t.contains(&format!("<{}>", p)) && t.contains(o))
         };
         assert!(has(crate::prov_vocab::MODEL, "\"text-embedding-3-small\""));
         assert!(has(crate::prov_vocab::MODEL_VERSION, "\"2024-01\""));
         assert!(has(crate::prov_vocab::CONTENT_VERSION, "\"verb-v2\""));
         assert!(has(crate::prov_vocab::METRIC, "\"cosine\""));
         assert!(has(crate::prov_vocab::NORMALIZATION, "\"l2\""));
-        assert!(has(crate::prov_vocab::VERBALIZATION, "\"entity-verbalized\""));
+        assert!(has(
+            crate::prov_vocab::VERBALIZATION,
+            "\"entity-verbalized\""
+        ));
         assert!(has(crate::prov_vocab::DIMENSION, "\"384\""));
 
         // The bare record (empty version/verbalization axes) emits only the mandatory four.
@@ -609,9 +626,13 @@ mod tests {
         let triples = bare.to_rdf(subject, 2);
         assert_eq!(triples.len(), 4, "absent axes must be omitted");
         let nt: Vec<String> = triples.iter().map(|t| t.to_string()).collect();
-        assert!(!nt.iter().any(|t| t.contains("\"\"")), "no empty-string assertions: {nt:?}");
+        assert!(
+            !nt.iter().any(|t| t.contains("\"\"")),
+            "no empty-string assertions: {nt:?}"
+        );
         let has_bare = |p: &str, o: &str| {
-            nt.iter().any(|t| t.contains(&format!("<{}>", p)) && t.contains(o))
+            nt.iter()
+                .any(|t| t.contains(&format!("<{}>", p)) && t.contains(o))
         };
         assert!(has_bare(crate::prov_vocab::MODEL, "\"m\""));
         assert!(has_bare(crate::prov_vocab::METRIC, "\"dot\""));

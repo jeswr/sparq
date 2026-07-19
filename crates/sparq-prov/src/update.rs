@@ -872,7 +872,11 @@ mod tests {
             cfg(),
         )
         .unwrap();
-        assert_eq!(d.inserted().len(), 1, "the operand triple is the generated data");
+        assert_eq!(
+            d.inserted().len(),
+            1,
+            "the operand triple is the generated data"
+        );
         assert!(d.deleted().is_empty());
         let ls = lines(&d);
         assert!(ls.iter().any(|l| l.contains("#wasGeneratedBy>")));
@@ -895,12 +899,18 @@ mod tests {
             cfg(),
         )
         .unwrap();
-        assert_eq!(d.deleted().len(), 1, "the operand triple is the retracted data");
+        assert_eq!(
+            d.deleted().len(),
+            1,
+            "the operand triple is the retracted data"
+        );
         assert!(d.inserted().is_empty());
         let ls = lines(&d);
         // One invalidation entity for the declared retraction; never generated/derived.
         assert_eq!(
-            ls.iter().filter(|l| l.contains("#wasInvalidatedBy>")).count(),
+            ls.iter()
+                .filter(|l| l.contains("#wasInvalidatedBy>"))
+                .count(),
             1
         );
         assert!(ls.iter().all(|l| !l.contains("#wasGeneratedBy>")));
@@ -945,7 +955,10 @@ mod tests {
         assert_eq!(d.deleted().len(), 2);
         assert!(d.inserted().is_empty());
         let ls = lines(&d);
-        let inval = ls.iter().filter(|l| l.contains("#wasInvalidatedBy>")).count();
+        let inval = ls
+            .iter()
+            .filter(|l| l.contains("#wasInvalidatedBy>"))
+            .count();
         assert_eq!(inval, 2, "one invalidation entity per deleted triple");
         // Each invalidated entity is a fresh blank node (no IRI subject for retracted
         // triples — they no longer exist to be named by value).
@@ -1082,7 +1095,10 @@ mod tests {
             "a lone trailing ';' is not a second operation"
         );
         // Whitespace after the trailing ';' is also not an op.
-        assert_eq!(kind_label("INSERT DATA { <a> <b> <c> } ;   "), "INSERT DATA");
+        assert_eq!(
+            kind_label("INSERT DATA { <a> <b> <c> } ;   "),
+            "INSERT DATA"
+        );
     }
 
     /// A `;` inside a single-quoted string literal and inside an IRI is data / part of the
@@ -1115,9 +1131,7 @@ mod tests {
     fn quoted_semicolon_before_real_boundary_is_still_multi_op() {
         // Double-quoted ';' inside the first INSERT DATA template, then a real ';' boundary.
         assert_eq!(
-            kind_label(
-                "INSERT DATA { <http://ex/s> <http://ex/p> \"a; b\" } ; DROP DEFAULT"
-            ),
+            kind_label("INSERT DATA { <http://ex/s> <http://ex/p> \"a; b\" } ; DROP DEFAULT"),
             "SPARQL UPDATE"
         );
         // Single-quoted ';' inside the first template, then a real ';' boundary.
@@ -1440,12 +1454,27 @@ mod tests {
     /// boundary); the cross-guard rows mirror the precise pass's guard conjuncts.
     #[test]
     fn is_multi_op_state_tracking_truth_table() {
-        assert!(!is_multi_op("CREATE GRAPH <HTTP://EX/A;B>"), "';' only inside an IRI");
-        assert!(!is_multi_op("X \"A;B\""), "';' only inside a double-quoted literal");
-        assert!(!is_multi_op("X 'A;B'"), "';' only inside a single-quoted literal");
+        assert!(
+            !is_multi_op("CREATE GRAPH <HTTP://EX/A;B>"),
+            "';' only inside an IRI"
+        );
+        assert!(
+            !is_multi_op("X \"A;B\""),
+            "';' only inside a double-quoted literal"
+        );
+        assert!(
+            !is_multi_op("X 'A;B'"),
+            "';' only inside a single-quoted literal"
+        );
         assert!(is_multi_op("<A> ; B"), "IRI closes, then a real boundary");
-        assert!(is_multi_op("\"A\" ; B"), "double quote closes, then a real boundary");
-        assert!(is_multi_op("'A' ; B"), "single quote closes, then a real boundary");
+        assert!(
+            is_multi_op("\"A\" ; B"),
+            "double quote closes, then a real boundary"
+        );
+        assert!(
+            is_multi_op("'A' ; B"),
+            "single quote closes, then a real boundary"
+        );
         assert!(
             is_multi_op("\"A<B\" ; C"),
             "'<' inside a double-quoted literal must not open IRI state"

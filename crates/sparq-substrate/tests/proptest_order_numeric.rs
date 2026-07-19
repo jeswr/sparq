@@ -31,14 +31,8 @@ mod dec_order {
         };
         let minus_two = Dec { mant: -2, scale: 0 };
 
-        assert_eq!(
-            minus_one_point_five.cmp(minus_two),
-            Some(Ordering::Greater)
-        );
-        assert_eq!(
-            minus_two.cmp(minus_one_point_five),
-            Some(Ordering::Less)
-        );
+        assert_eq!(minus_one_point_five.cmp(minus_two), Some(Ordering::Greater));
+        assert_eq!(minus_two.cmp(minus_one_point_five), Some(Ordering::Less));
     }
 
     proptest! {
@@ -132,9 +126,11 @@ mod order_numeric {
 
         fn literal_kind(&self) -> LiteralKind {
             match self {
-                Term::Integer(_) | Term::Decimal(_) | Term::Float(_) | Term::Double(_) | Term::Nan => {
-                    LiteralKind::Numeric
-                }
+                Term::Integer(_)
+                | Term::Decimal(_)
+                | Term::Float(_)
+                | Term::Double(_)
+                | Term::Nan => LiteralKind::Numeric,
                 Term::PlainString(_) => LiteralKind::String,
                 Term::LangString(_) => LiteralKind::Lang,
                 Term::StrictTyped(_) => LiteralKind::DateTime,
@@ -200,9 +196,7 @@ mod order_numeric {
 
         fn triple_parts(&self) -> Option<[Self; 3]> {
             match self {
-                Term::Triple(s, p, o) => {
-                    Some([*s.clone(), *p.clone(), *o.clone()])
-                }
+                Term::Triple(s, p, o) => Some([*s.clone(), *p.clone(), *o.clone()]),
                 _ => None,
             }
         }
@@ -236,7 +230,8 @@ mod order_numeric {
     /// decimal values to cover the comparison paths.
     fn arb_dec() -> impl Strategy<Value = Dec> {
         // mant in a wide range; scale 0..=6 keeps values tractable.
-        (any::<i64>().prop_map(|i| i as i128), 0u32..=6u32).prop_map(|(mant, scale)| Dec { mant, scale })
+        (any::<i64>().prop_map(|i| i as i128), 0u32..=6u32)
+            .prop_map(|(mant, scale)| Dec { mant, scale })
     }
 
     /// Strategy for a non-triple, non-error term (the "scalar" leaf).
@@ -250,11 +245,19 @@ mod order_numeric {
             arb_dec().prop_map(Term::Decimal),
             // Float: finite + NaN + ±INF
             any::<f32>().prop_map(|f| {
-                if f.is_nan() { Term::Nan } else { Term::Float(f) }
+                if f.is_nan() {
+                    Term::Nan
+                } else {
+                    Term::Float(f)
+                }
             }),
             // Double: finite + ±INF (NaN special-cased via Term::Nan)
             any::<f64>().prop_map(|d| {
-                if d.is_nan() { Term::Nan } else { Term::Double(d) }
+                if d.is_nan() {
+                    Term::Nan
+                } else {
+                    Term::Double(d)
+                }
             }),
             // Non-numeric literals
             arb_label().prop_map(Term::PlainString),
@@ -426,7 +429,8 @@ mod order_numeric {
             (Some(da), Some(db)) => {
                 // Dec::cmp returns Option<Ordering> (may overflow on extreme scale alignment).
                 // On overflow, fall back to f64 (consistent with Num::cmp_total).
-                da.cmp(db).unwrap_or_else(|| fa.partial_cmp(&fb).unwrap_or(Ordering::Equal))
+                da.cmp(db)
+                    .unwrap_or_else(|| fa.partial_cmp(&fb).unwrap_or(Ordering::Equal))
             }
             (Some(da), None) => {
                 // exact vs inexact: compare da's exact value against fb.
@@ -574,11 +578,14 @@ mod order_numeric {
 
     #[test]
     fn generator_covers_all_term_kinds() {
-        use std::collections::HashSet;
-        use proptest::test_runner::{TestRunner, Config};
         use proptest::strategy::ValueTree;
+        use proptest::test_runner::{Config, TestRunner};
+        use std::collections::HashSet;
 
-        let config = Config { cases: 500, ..Config::default() };
+        let config = Config {
+            cases: 500,
+            ..Config::default()
+        };
         let mut runner = TestRunner::new(config);
         let strategy = arb_term();
 
@@ -623,8 +630,12 @@ mod order_numeric {
         const TWO53: i64 = 9_007_199_254_740_992_i64;
         let a = Term::Integer(TWO53);
         let b = Term::Integer(TWO53 + 1); // i64 can hold this
-        // Their f64 images collapse: (TWO53 as f64) == ((TWO53+1) as f64)
-        assert_eq!(TWO53 as f64, (TWO53 + 1) as f64, "test precondition: collapse");
+                                          // Their f64 images collapse: (TWO53 as f64) == ((TWO53+1) as f64)
+        assert_eq!(
+            TWO53 as f64,
+            (TWO53 + 1) as f64,
+            "test precondition: collapse"
+        );
         // But exact_cmp must order them correctly.
         let ord = cmp(&a, &b).expect("compare_terms must return Some for same-class Numeric");
         assert_eq!(ord, Ordering::Less, "2^53 < 2^53+1 must hold via exact_cmp");
@@ -639,15 +650,31 @@ mod order_numeric {
         let pos_inf = Term::Double(f64::INFINITY);
 
         // NaN < -INF
-        assert_eq!(cmp(&nan, &neg_inf), Some(Ordering::Less), "NaN must be < -INF");
+        assert_eq!(
+            cmp(&nan, &neg_inf),
+            Some(Ordering::Less),
+            "NaN must be < -INF"
+        );
         // NaN < 0
         assert_eq!(cmp(&nan, &zero), Some(Ordering::Less), "NaN must be < 0");
         // NaN < +INF
-        assert_eq!(cmp(&nan, &pos_inf), Some(Ordering::Less), "NaN must be < +INF");
+        assert_eq!(
+            cmp(&nan, &pos_inf),
+            Some(Ordering::Less),
+            "NaN must be < +INF"
+        );
         // NaN == NaN (reflexivity for the totalised case)
-        assert_eq!(cmp(&nan, &Term::Nan), Some(Ordering::Equal), "NaN must == NaN");
+        assert_eq!(
+            cmp(&nan, &Term::Nan),
+            Some(Ordering::Equal),
+            "NaN must == NaN"
+        );
         // Antisymmetry: -INF > NaN
-        assert_eq!(cmp(&neg_inf, &nan), Some(Ordering::Greater), "-INF must be > NaN");
+        assert_eq!(
+            cmp(&neg_inf, &nan),
+            Some(Ordering::Greater),
+            "-INF must be > NaN"
+        );
     }
 
     /// Numeric kind ranks BEFORE string kind (kind-first cross-kind order).
@@ -655,7 +682,7 @@ mod order_numeric {
     fn targeted_numeric_kind_before_string_kind() {
         let num = Term::Integer(10);
         let s = Term::PlainString("2".to_string()); // lexically "2" > "10" but different kind
-        // Numeric < String (LiteralKind::Numeric = 0 < LiteralKind::String = 4)
+                                                    // Numeric < String (LiteralKind::Numeric = 0 < LiteralKind::String = 4)
         assert_eq!(cmp(&num, &s), Some(Ordering::Less),
             "Numeric must rank before String in kind-first order (was the cross-kind fix of sq-wjl8i)");
     }
@@ -665,8 +692,11 @@ mod order_numeric {
     fn targeted_positive_negative_zero_equal() {
         let pos_zero = Term::Double(0.0_f64);
         let neg_zero = Term::Double(-0.0_f64);
-        assert_eq!(cmp(&pos_zero, &neg_zero), Some(Ordering::Equal),
-            "+0.0 and -0.0 must be equal in total order");
+        assert_eq!(
+            cmp(&pos_zero, &neg_zero),
+            Some(Ordering::Equal),
+            "+0.0 and -0.0 must be equal in total order"
+        );
     }
 
     /// Term class precedence: Error < Blank < IRI < Literal < Triple.
@@ -698,8 +728,11 @@ mod order_numeric {
         // The reference: 0.1 + 0.2 = 0.3 exactly (1/10 + 2/10 = 3/10)
         let expected = Dec::parse("0.3").unwrap();
         // cmp via Dec::cmp (exact)
-        assert_eq!(sum.cmp(expected), Some(Ordering::Equal),
-            "0.1 + 0.2 must equal 0.3 exactly in Dec arithmetic");
+        assert_eq!(
+            sum.cmp(expected),
+            Some(Ordering::Equal),
+            "0.1 + 0.2 must equal 0.3 exactly in Dec arithmetic"
+        );
     }
 
     /// Num::cmp_total is a total order over the known adversarial triple
@@ -726,8 +759,11 @@ mod order_numeric {
                                 a, b, c, ab, bc, ac);
                         }
                         (Ordering::Equal, Ordering::Equal) => {
-                            assert_eq!(ac, Ordering::Equal,
-                                "cmp_total transitivity (=) failed for NaN triple");
+                            assert_eq!(
+                                ac,
+                                Ordering::Equal,
+                                "cmp_total transitivity (=) failed for NaN triple"
+                            );
                         }
                         _ => {}
                     }

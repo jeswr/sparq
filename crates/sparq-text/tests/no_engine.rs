@@ -77,17 +77,30 @@ fn pure_index_build_and_query() {
     assert_eq!(idx.len(), 3, "three distinct string literals are documents");
 
     // AND: every token must be present; case-folded.
-    assert_eq!(values(&g, &idx.search("quick fox")), ["The quick brown fox"]);
-    assert!(idx.search("quick cat").is_empty(), "AND with an absent token is empty");
+    assert_eq!(
+        values(&g, &idx.search("quick fox")),
+        ["The quick brown fox"]
+    );
+    assert!(
+        idx.search("quick cat").is_empty(),
+        "AND with an absent token is empty"
+    );
     // Token order / duplication does not matter under AND.
     assert_eq!(idx.search("fox quick"), idx.search("quick quick fox"));
 
     // OR: at least one token; unknown tokens ignored under OR but kill AND.
     assert_eq!(
         sorted(values(&g, &idx.search_any("brown lazy"))),
-        ["The quick brown fox", "quick dogs and lazy foxes", "the lazy dog"]
+        [
+            "The quick brown fox",
+            "quick dogs and lazy foxes",
+            "the lazy dog"
+        ]
     );
-    assert_eq!(values(&g, &idx.search_any("brown zzz")), ["The quick brown fox"]);
+    assert_eq!(
+        values(&g, &idx.search_any("brown zzz")),
+        ["The quick brown fox"]
+    );
     assert!(idx.search("brown zzz").is_empty());
 
     // Prefix (`*`-suffix) under AND.
@@ -102,9 +115,9 @@ fn pure_index_build_and_query() {
 #[test]
 fn pure_index_bm25_ranking() {
     let g = graph_of(&[
-        r#""fox""#,                                                              // short, tf 1
-        r#""fox fox fox""#,                                                      // higher tf
-        r#""fox and a very long sentence about many other animals entirely""#,   // long doc
+        r#""fox""#,                                                            // short, tf 1
+        r#""fox fox fox""#,                                                    // higher tf
+        r#""fox and a very long sentence about many other animals entirely""#, // long doc
         r#""unrelated""#,
     ]);
     let idx = TextIndex::build(&g);
@@ -118,7 +131,10 @@ fn pure_index_bm25_ranking() {
     );
     let scores: Vec<f32> = hits.iter().map(|h| h.score).collect();
     assert!(scores.windows(2).all(|w| w[0] >= w[1]), "scores descend");
-    assert!(scores.iter().all(|s| *s > 0.0), "matching scores are positive");
+    assert!(
+        scores.iter().all(|s| *s > 0.0),
+        "matching scores are positive"
+    );
 }
 
 /// Only plain / `xsd:string` / language-tagged literals are indexed (IRIs and
@@ -137,8 +153,14 @@ fn pure_index_only_string_literals() {
     .unwrap();
     let idx = TextIndex::build(&g);
     assert_eq!(idx.len(), 2, "exactly the two string literals");
-    assert!(idx.search("42").is_empty(), "typed literals are not indexed");
-    assert_eq!(sorted(values(&g, &idx.search("text"))), ["plain text", "tagged text"]);
+    assert!(
+        idx.search("42").is_empty(),
+        "typed literals are not indexed"
+    );
+    assert_eq!(
+        sorted(values(&g, &idx.search("text"))),
+        ["plain text", "tagged text"]
+    );
     // The named-analyzer accessor is reachable in the pure path.
     assert_eq!(idx.analyzer(), Analyzer::Unicode);
 }
@@ -150,12 +172,15 @@ fn pure_index_only_string_literals() {
 fn pure_index_positions_phrase_and_near() {
     let g = graph_of(&[
         r#""the quick brown fox""#,
-        r#""quick the brown fox""#,    // tokens present, NOT adjacent-in-order
+        r#""quick the brown fox""#, // tokens present, NOT adjacent-in-order
         r#""a quick brown fox""#,
     ]);
 
     let cheap = TextIndex::build(&g);
-    assert!(!cheap.has_positions(), "the default index stores no positions");
+    assert!(
+        !cheap.has_positions(),
+        "the default index stores no positions"
+    );
 
     let pidx = TextIndex::build_with_positions(&g);
     assert!(pidx.has_positions());
@@ -176,9 +201,17 @@ fn pure_index_positions_phrase_and_near() {
     );
 
     // Proximity: slop 0 == exact adjacency; slop 1 lets the one non-adjacent doc in.
-    assert_eq!(pidx.phrase_near("quick fox", 0).len(), 0, "quick..fox are never adjacent");
+    assert_eq!(
+        pidx.phrase_near("quick fox", 0).len(),
+        0,
+        "quick..fox are never adjacent"
+    );
     let near = pidx.phrase_near("quick fox", 2);
-    assert_eq!(near.len(), 3, "all three have quick before fox within the gap budget");
+    assert_eq!(
+        near.len(),
+        3,
+        "all three have quick before fox within the gap budget"
+    );
     // Tightest cluster ("a quick brown fox": gap 1) scores highest; score 1/(1+gap).
     let near_vals = values(&g, &near);
     assert!(
@@ -186,7 +219,10 @@ fn pure_index_positions_phrase_and_near() {
         "a slop-1 cluster outranks the slop-2 reorder, got {:?}",
         near_vals
     );
-    assert!(near.windows(2).all(|w| w[0].score >= w[1].score), "near scores descend");
+    assert!(
+        near.windows(2).all(|w| w[0].score >= w[1].score),
+        "near scores descend"
+    );
 }
 
 /// Incremental `apply_delta` stays exactly equal to a from-scratch rebuild, and the
@@ -196,12 +232,18 @@ fn pure_index_positions_phrase_and_near() {
 #[test]
 fn pure_index_delta_and_reconcile_contract() {
     let mut graph = Graph::load_str("", "ntriples").unwrap();
-    let seed = [triple("s0", r#"the quick brown fox"#), triple("s1", "lazy dog")];
+    let seed = [
+        triple("s0", r#"the quick brown fox"#),
+        triple("s1", "lazy dog"),
+    ];
     graph.apply_delta(&seed, &[]).unwrap();
 
     let mut index = TextIndex::build(&graph);
     assert_eq!(index.len(), 2);
-    assert!(index.is_consistent_with(&graph), "fresh build is consistent");
+    assert!(
+        index.is_consistent_with(&graph),
+        "fresh build is consistent"
+    );
     assert!(!index.needs_rebuild(&graph));
     let after_build_gen = index.indexed_dict_len();
 
@@ -213,8 +255,14 @@ fn pure_index_delta_and_reconcile_contract() {
     graph.apply_delta(&inserts, &[]).unwrap();
 
     // Before reconcile, the warm index is stale (dict grew).
-    assert!(!index.is_consistent_with(&graph), "dict grew, index is stale");
-    assert!(index.indexed_dict_len() == after_build_gen, "stale gen unchanged pre-reconcile");
+    assert!(
+        !index.is_consistent_with(&graph),
+        "dict grew, index is stale"
+    );
+    assert!(
+        index.indexed_dict_len() == after_build_gen,
+        "stale gen unchanged pre-reconcile"
+    );
 
     // apply_delta and reconcile must each reach the same state as a fresh rebuild.
     let mut via_delta = TextIndex::build(&{
@@ -229,12 +277,25 @@ fn pure_index_delta_and_reconcile_contract() {
     let rebuilt = TextIndex::build(&graph);
     assert_eq!(index, rebuilt, "reconcile == rebuild");
     assert_eq!(via_delta, rebuilt, "apply_delta == rebuild");
-    assert!(index.is_consistent_with(&graph), "reconciled index is consistent");
-    assert!(!index.needs_rebuild(&graph), "an append-only dict never needs a full rebuild");
+    assert!(
+        index.is_consistent_with(&graph),
+        "reconciled index is consistent"
+    );
+    assert!(
+        !index.needs_rebuild(&graph),
+        "an append-only dict never needs a full rebuild"
+    );
 
     // The newly inserted text is now searchable; the typed literal is not indexed.
-    assert_eq!(values(&graph, &index.search("data graph")), ["quick data graph"]);
-    assert_eq!(index.len(), 3, "two seed + one inserted string literal (typed skipped)");
+    assert_eq!(
+        values(&graph, &index.search("data graph")),
+        ["quick data graph"]
+    );
+    assert_eq!(
+        index.len(),
+        3,
+        "two seed + one inserted string literal (typed skipped)"
+    );
 }
 
 fn triple(subj: &str, lit: &str) -> [Term; 3] {
@@ -249,6 +310,9 @@ fn typed_triple(subj: &str, value: &str, dt: &str) -> [Term; 3] {
     [
         Term::NamedNode(NamedNode::new_unchecked(format!("http://ex/{subj}"))),
         Term::NamedNode(NamedNode::new_unchecked("http://ex/comment")),
-        Term::Literal(Literal::new_typed_literal(value, NamedNode::new_unchecked(dt))),
+        Term::Literal(Literal::new_typed_literal(
+            value,
+            NamedNode::new_unchecked(dt),
+        )),
     ]
 }

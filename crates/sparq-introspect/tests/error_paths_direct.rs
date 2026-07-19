@@ -2,7 +2,7 @@
 // and budgeted schema retrieval, without enabling optional crate features.
 
 use sparq_core::Graph;
-use sparq_introspect::{Introspection, characteristic_set_ids};
+use sparq_introspect::{characteristic_set_ids, Introspection};
 
 const FIXTURE: &str = r#"<http://ex.org/alice> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://xmlns.com/foaf/0.1/Person> .
 <http://ex.org/alice> <http://xmlns.com/foaf/0.1/name> "Alice" .

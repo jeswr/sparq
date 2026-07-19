@@ -39,11 +39,11 @@
 
 use sparq_core::Graph;
 use sparq_reason_dl::extract;
+use sparq_reason_dl::model::ClassExpression;
 use sparq_reason_dl::profile::{profiles_from_extraction, Membership, ProfileSet};
 use sparq_reason_dl::tableau::{
     class_satisfiability, consistency_from_extraction, Budget, UnknownReason, Verdict,
 };
-use sparq_reason_dl::model::ClassExpression;
 use std::time::Instant;
 
 // --- the vendored ORE-style smoke subset (hermetic; see each fixture's header) -----------
@@ -269,9 +269,9 @@ fn run_smoke() {
             let (dict, triples) =
                 Graph::parse_to_triples(case.ttl, "turtle").expect("fixture parses");
             let onto = extract(&dict, &triples).expect("fixture is in-fragment");
-            let class_id = dict.lookup(&oxrdf::Term::NamedNode(
-                oxrdf::NamedNode::new_unchecked(class_iri),
-            ));
+            let class_id = dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+                class_iri,
+            )));
             let v = class_satisfiability(&ClassExpression::Class(class_id), &onto, SMOKE_BUDGET);
             println!(
                 "smoke[{}]: class=<{}> satisfiability={}",

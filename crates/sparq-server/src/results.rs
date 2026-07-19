@@ -103,8 +103,12 @@ fn term_to_xml(s: &mut String, t: &Term) {
         Term::Triple(t) => {
             s.push_str("<triple><subject>");
             match &t.subject {
-                oxrdf::NamedOrBlankNode::NamedNode(n) => term_to_xml(s, &Term::NamedNode(n.clone())),
-                oxrdf::NamedOrBlankNode::BlankNode(b) => term_to_xml(s, &Term::BlankNode(b.clone())),
+                oxrdf::NamedOrBlankNode::NamedNode(n) => {
+                    term_to_xml(s, &Term::NamedNode(n.clone()))
+                }
+                oxrdf::NamedOrBlankNode::BlankNode(b) => {
+                    term_to_xml(s, &Term::BlankNode(b.clone()))
+                }
             }
             s.push_str("</subject><predicate>");
             term_to_xml(s, &Term::NamedNode(t.predicate.clone()));
@@ -533,7 +537,11 @@ mod tests {
 
     #[test]
     fn xml_has_header_and_results() {
-        let r = query(&g(), "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a }").unwrap();
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a }",
+        )
+        .unwrap();
         let xml = select_to_xml(&r);
         assert!(xml.starts_with("<?xml version=\"1.0\"?>"));
         assert!(xml.contains("xmlns=\"http://www.w3.org/2005/sparql-results#\""));
@@ -546,7 +554,11 @@ mod tests {
 
     #[test]
     fn xml_escapes_and_lang() {
-        let r = query(&g(), "PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }").unwrap();
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }",
+        )
+        .unwrap();
         let xml = select_to_xml(&r);
         assert!(xml.contains("<literal xml:lang=\"en\">Bob</literal>"));
         // plain xsd:string literal => no datatype attribute
@@ -566,9 +578,15 @@ mod tests {
         .unwrap();
         let r = query(&g, "PREFIX ex: <http://ex/> SELECT ?v WHERE { ?s ex:v ?v }").unwrap();
         let xml = select_to_xml(&r);
-        assert!(xml.contains("<literal>a &lt; b &amp; c &gt; d</literal>"), "unescaped markup: {xml}");
+        assert!(
+            xml.contains("<literal>a &lt; b &amp; c &gt; d</literal>"),
+            "unescaped markup: {xml}"
+        );
         // The raw, unescaped sequence must NOT appear anywhere in the document.
-        assert!(!xml.contains("a < b & c > d"), "literal leaked raw markup: {xml}");
+        assert!(
+            !xml.contains("a < b & c > d"),
+            "literal leaked raw markup: {xml}"
+        );
     }
 
     #[test]
@@ -577,12 +595,29 @@ mod tests {
         // `NamedOrBlankNode::BlankNode` subject arm of the `<triple>` XML encoder (the existing
         // triple-term test only covers a named-node subject). The bnode label is data-dependent,
         // so assert on the structural `<bnode>` element, not its id.
-        let g = Graph::load_str("PREFIX : <http://ex/>\n<< _:s :b :c >> :certainty 0.9 .", "turtle").unwrap();
-        let r = query(&g, "SELECT ?t WHERE { ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t }").unwrap();
+        let g = Graph::load_str(
+            "PREFIX : <http://ex/>\n<< _:s :b :c >> :certainty 0.9 .",
+            "turtle",
+        )
+        .unwrap();
+        let r = query(
+            &g,
+            "SELECT ?t WHERE { ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t }",
+        )
+        .unwrap();
         let xml = select_to_xml(&r);
-        assert!(xml.contains("<triple><subject><bnode>"), "expected a bnode subject in the triple term: {xml}");
-        assert!(xml.contains("<predicate><uri>http://ex/b</uri></predicate>"), "got: {xml}");
-        assert!(xml.contains("<object><uri>http://ex/c</uri></object>"), "got: {xml}");
+        assert!(
+            xml.contains("<triple><subject><bnode>"),
+            "expected a bnode subject in the triple term: {xml}"
+        );
+        assert!(
+            xml.contains("<predicate><uri>http://ex/b</uri></predicate>"),
+            "got: {xml}"
+        );
+        assert!(
+            xml.contains("<object><uri>http://ex/c</uri></object>"),
+            "got: {xml}"
+        );
     }
 
     #[test]
@@ -595,7 +630,11 @@ mod tests {
 
     #[test]
     fn csv_header_and_lexical() {
-        let r = query(&g(), "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a }").unwrap();
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a }",
+        )
+        .unwrap();
         let csv = select_to_csv(&r);
         let mut lines = csv.split("\r\n");
         assert_eq!(lines.next().unwrap(), "s,a");
@@ -621,8 +660,16 @@ mod tests {
     fn xml_and_tsv_triple_terms() {
         // RDF 1.2 triple term: SPARQL 1.2 XML <triple> element; TSV falls back to the
         // SPARQL 1.2 `<<( … )>>` term syntax via oxrdf's Display.
-        let g = Graph::load_str("PREFIX : <http://ex/>\n<< :a :b :c >> :certainty 0.9 .", "turtle").unwrap();
-        let r = query(&g, "SELECT ?t WHERE { ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t }").unwrap();
+        let g = Graph::load_str(
+            "PREFIX : <http://ex/>\n<< :a :b :c >> :certainty 0.9 .",
+            "turtle",
+        )
+        .unwrap();
+        let r = query(
+            &g,
+            "SELECT ?t WHERE { ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> ?t }",
+        )
+        .unwrap();
         let xml = select_to_xml(&r);
         assert!(
             xml.contains(
@@ -631,19 +678,32 @@ mod tests {
             "got: {xml}"
         );
         let tsv = select_to_tsv(&r);
-        assert!(tsv.contains("<<( <http://ex/a> <http://ex/b> <http://ex/c> )>>"), "got: {tsv}");
+        assert!(
+            tsv.contains("<<( <http://ex/a> <http://ex/b> <http://ex/c> )>>"),
+            "got: {tsv}"
+        );
     }
 
     #[test]
     fn tsv_header_and_term_syntax() {
-        let r = query(&g(), "PREFIX ex: <http://ex/> SELECT ?s ?a ?n WHERE { ?s ex:age ?a . ?s ex:name ?n }").unwrap();
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?a ?n WHERE { ?s ex:age ?a . ?s ex:name ?n }",
+        )
+        .unwrap();
         let tsv = select_to_tsv(&r);
         let header = tsv.lines().next().unwrap();
         assert_eq!(header, "?s\t?a\t?n");
         assert!(tsv.contains("<http://ex/alice>"));
         // xsd:integer is abbreviated to its bare Turtle token (sq-u79ee / TSV §Encoding terms).
-        assert!(tsv.contains("\t30\t") || tsv.contains("\t30\n"), "integer not abbreviated: {tsv}");
-        assert!(!tsv.contains("\"30\"^^"), "integer should not be quoted+typed: {tsv}");
+        assert!(
+            tsv.contains("\t30\t") || tsv.contains("\t30\n"),
+            "integer not abbreviated: {tsv}"
+        );
+        assert!(
+            !tsv.contains("\"30\"^^"),
+            "integer should not be quoted+typed: {tsv}"
+        );
         assert!(tsv.contains("\"Bob\"@en"));
         // plain string: just quoted, no datatype
         assert!(tsv.contains("\"Alice\""));
@@ -671,16 +731,37 @@ mod tests {
 
         // Bare numeric tokens (the data's OWN lexical form is preserved — NOT canonicalised:
         // the double stays "1.0E6", it is not rewritten to "1.0e6" or "1000000").
-        assert!(line_ends_with(&tsv, "\t2.2"), "decimal not abbreviated: {tsv}");
-        assert!(line_ends_with(&tsv, "\t1.0E6"), "double lexical form not preserved: {tsv}");
-        assert!(!tsv.contains("1.0e6"), "double must not be canonicalised: {tsv}");
-        assert!(!tsv.contains("1000000"), "double must not be canonicalised: {tsv}");
+        assert!(
+            line_ends_with(&tsv, "\t2.2"),
+            "decimal not abbreviated: {tsv}"
+        );
+        assert!(
+            line_ends_with(&tsv, "\t1.0E6"),
+            "double lexical form not preserved: {tsv}"
+        );
+        assert!(
+            !tsv.contains("1.0e6"),
+            "double must not be canonicalised: {tsv}"
+        );
+        assert!(
+            !tsv.contains("1000000"),
+            "double must not be canonicalised: {tsv}"
+        );
         // xsd:string keeps the quoted short form (no datatype) even when it looks numeric.
-        assert!(line_ends_with(&tsv, "\t\"1\""), "xsd:string `1` should stay quoted: {tsv}");
-        assert!(line_ends_with(&tsv, "\t\"4,4\""), "xsd:string `4,4` should stay quoted: {tsv}");
+        assert!(
+            line_ends_with(&tsv, "\t\"1\""),
+            "xsd:string `1` should stay quoted: {tsv}"
+        );
+        assert!(
+            line_ends_with(&tsv, "\t\"4,4\""),
+            "xsd:string `4,4` should stay quoted: {tsv}"
+        );
         // Integer/decimal SUBTYPES and custom datatypes stay quoted + typed.
         assert!(
-            line_ends_with(&tsv, "\t\"-3\"^^<http://www.w3.org/2001/XMLSchema#negativeInteger>"),
+            line_ends_with(
+                &tsv,
+                "\t\"-3\"^^<http://www.w3.org/2001/XMLSchema#negativeInteger>"
+            ),
             "negativeInteger should not be abbreviated: {tsv}"
         );
         assert!(
@@ -688,7 +769,10 @@ mod tests {
             "custom datatype should stay quoted+typed: {tsv}"
         );
         assert!(
-            line_ends_with(&tsv, "\t\"a7\"^^<http://www.w3.org/2001/XMLSchema#hexBinary>"),
+            line_ends_with(
+                &tsv,
+                "\t\"a7\"^^<http://www.w3.org/2001/XMLSchema#hexBinary>"
+            ),
             "hexBinary should stay quoted+typed: {tsv}"
         );
     }
@@ -716,11 +800,17 @@ mod tests {
         let tsv = select_to_tsv(&r);
         // Canonical engine form, datatype preserved (not abbreviated to a bare integer token).
         assert!(
-            cell_is(&tsv, "\"1000000\"^^<http://www.w3.org/2001/XMLSchema#double>"),
+            cell_is(
+                &tsv,
+                "\"1000000\"^^<http://www.w3.org/2001/XMLSchema#double>"
+            ),
             "computed double should keep its canonical form + datatype: {tsv}"
         );
         // The data spelling 1.0E6 is NOT echoed for a computed value.
-        assert!(!tsv.contains("1.0E6"), "computed value should not carry the data lexical form: {tsv}");
+        assert!(
+            !tsv.contains("1.0E6"),
+            "computed value should not carry the data lexical form: {tsv}"
+        );
     }
 
     /// sq-u79ee: a COMPUTED double whose canonical form lands in scientific notation IS a
@@ -741,8 +831,14 @@ mod tests {
         )
         .unwrap();
         let tsv = select_to_tsv(&r);
-        assert!(cell_is(&tsv, "3.75E-1"), "computed double not canonical scientific + bare: {tsv}");
-        assert!(!tsv.contains("\"3.75E-1\"^^"), "valid Turtle double token should be bare: {tsv}");
+        assert!(
+            cell_is(&tsv, "3.75E-1"),
+            "computed double not canonical scientific + bare: {tsv}"
+        );
+        assert!(
+            !tsv.contains("\"3.75E-1\"^^"),
+            "valid Turtle double token should be bare: {tsv}"
+        );
     }
 
     /// sq-u79ee: integer/decimal/double subtype + token edge cases for the TSV abbreviation
@@ -765,12 +861,18 @@ mod tests {
         let tsv = select_to_tsv(&r);
         // Signed/leading-zero integers abbreviate, preserving spelling.
         assert!(line_ends_with(&tsv, "\t+42"), "signed integer: {tsv}");
-        assert!(line_ends_with(&tsv, "\t007"), "leading-zero integer preserved: {tsv}");
+        assert!(
+            line_ends_with(&tsv, "\t007"),
+            "leading-zero integer preserved: {tsv}"
+        );
         // Decimal forms.
         assert!(line_ends_with(&tsv, "\t-0.5"), "signed decimal: {tsv}");
         assert!(line_ends_with(&tsv, "\t.5"), "leading-dot decimal: {tsv}");
         // Doubles require an exponent.
-        assert!(line_ends_with(&tsv, "\t1e10"), "double with exponent: {tsv}");
+        assert!(
+            line_ends_with(&tsv, "\t1e10"),
+            "double with exponent: {tsv}"
+        );
         assert!(line_ends_with(&tsv, "\t.5e3"), "leading-dot double: {tsv}");
         // boolean true.
         assert!(line_ends_with(&tsv, "\ttrue"), "boolean: {tsv}");
@@ -793,41 +895,73 @@ mod tests {
     /// select_to_csv_chunks concatenates to exactly select_to_csv for a typical small result.
     #[test]
     fn csv_chunks_byte_identical_small() {
-        let r = query(&g(), "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a }").unwrap();
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a }",
+        )
+        .unwrap();
         let single = select_to_csv(&r);
         let chunks = select_to_csv_chunks(&r);
         assert!(!chunks.is_empty(), "chunks must not be empty");
-        assert_eq!(chunks.concat(), single, "CSV chunks must concatenate to the single-string form");
+        assert_eq!(
+            chunks.concat(),
+            single,
+            "CSV chunks must concatenate to the single-string form"
+        );
     }
 
     /// select_to_tsv_chunks concatenates to exactly select_to_tsv for a typical small result.
     #[test]
     fn tsv_chunks_byte_identical_small() {
-        let r = query(&g(), "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a }").unwrap();
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a }",
+        )
+        .unwrap();
         let single = select_to_tsv(&r);
         let chunks = select_to_tsv_chunks(&r);
         assert!(!chunks.is_empty(), "chunks must not be empty");
-        assert_eq!(chunks.concat(), single, "TSV chunks must concatenate to the single-string form");
+        assert_eq!(
+            chunks.concat(),
+            single,
+            "TSV chunks must concatenate to the single-string form"
+        );
     }
 
     /// An empty result (zero rows) produces exactly the header row as a single chunk.
     #[test]
     fn csv_chunks_empty_result() {
-        let r = query(&g(), "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age 9999 }").unwrap();
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age 9999 }",
+        )
+        .unwrap();
         assert!(r.rows.is_empty(), "expected no rows");
         let single = select_to_csv(&r);
         let chunks = select_to_csv_chunks(&r);
-        assert_eq!(chunks.concat(), single, "empty CSV must still produce a header chunk");
+        assert_eq!(
+            chunks.concat(),
+            single,
+            "empty CSV must still produce a header chunk"
+        );
     }
 
     /// An empty result (zero rows) for TSV produces exactly the header row as a single chunk.
     #[test]
     fn tsv_chunks_empty_result() {
-        let r = query(&g(), "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age 9999 }").unwrap();
+        let r = query(
+            &g(),
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:age 9999 }",
+        )
+        .unwrap();
         assert!(r.rows.is_empty(), "expected no rows");
         let single = select_to_tsv(&r);
         let chunks = select_to_tsv_chunks(&r);
-        assert_eq!(chunks.concat(), single, "empty TSV must still produce a header chunk");
+        assert_eq!(
+            chunks.concat(),
+            single,
+            "empty TSV must still produce a header chunk"
+        );
     }
 
     /// A large result (> CSV_TSV_CHUNK_BYTES bytes) produces multiple CSV chunks, all
@@ -851,7 +985,11 @@ mod tests {
             "expected multiple CSV chunks for a large result; got {} chunk(s)",
             chunks.len()
         );
-        assert_eq!(chunks.concat(), single, "large CSV chunk concat must equal single-string form");
+        assert_eq!(
+            chunks.concat(),
+            single,
+            "large CSV chunk concat must equal single-string form"
+        );
     }
 
     /// A large result (> CSV_TSV_CHUNK_BYTES bytes) produces multiple TSV chunks, all
@@ -874,7 +1012,11 @@ mod tests {
             "expected multiple TSV chunks for a large result; got {} chunk(s)",
             chunks.len()
         );
-        assert_eq!(chunks.concat(), single, "large TSV chunk concat must equal single-string form");
+        assert_eq!(
+            chunks.concat(),
+            single,
+            "large TSV chunk concat must equal single-string form"
+        );
     }
 
     /// Helper: true iff some line of `tsv` ends with `suffix` (TSV rows are LF-terminated).
@@ -885,7 +1027,10 @@ mod tests {
     /// Helper: true iff some TAB-separated CELL (in any data row) equals `value` exactly —
     /// robust for single-column results where the cell is the whole line.
     fn cell_is(tsv: &str, value: &str) -> bool {
-        tsv.lines().skip(1).flat_map(|l| l.split('\t')).any(|c| c == value)
+        tsv.lines()
+            .skip(1)
+            .flat_map(|l| l.split('\t'))
+            .any(|c| c == value)
     }
 
     // [OPUS-4.8] sq-qcnn.37: direct unit tests for the pure XML/TSV encoding helpers that the
@@ -953,7 +1098,7 @@ mod tests {
         assert!(!is_turtle_boolean("yes"));
         assert!(!is_turtle_boolean("1"));
         assert!(!is_turtle_boolean("True")); // case-sensitive
-        // Both canonical boolean values must still return true (regression guard).
+                                             // Both canonical boolean values must still return true (regression guard).
         assert!(is_turtle_boolean("true"));
         assert!(is_turtle_boolean("false"));
     }

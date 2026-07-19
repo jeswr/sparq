@@ -190,7 +190,9 @@ pub fn negotiate_or_406(accept: Option<&str>) -> Result<Format, NotAcceptable> {
         // listed wins remaining ties (the `better` test below keeps the earlier match).
         let (fmt, spec) = match media.as_str() {
             "application/sparql-results+json" | "application/json" => (Some(Format::Json), 2),
-            "application/sparql-results+xml" | "application/xml" | "text/xml" => (Some(Format::Xml), 2),
+            "application/sparql-results+xml" | "application/xml" | "text/xml" => {
+                (Some(Format::Xml), 2)
+            }
             "text/csv" => (Some(Format::Csv), 2),
             "text/tab-separated-values" => (Some(Format::Tsv), 2),
             "*/*" => (Some(Format::Json), 0),
@@ -228,8 +230,14 @@ mod tests {
 
     #[test]
     fn exact_types() {
-        assert_eq!(negotiate(Some("application/sparql-results+json")), Format::Json);
-        assert_eq!(negotiate(Some("application/sparql-results+xml")), Format::Xml);
+        assert_eq!(
+            negotiate(Some("application/sparql-results+json")),
+            Format::Json
+        );
+        assert_eq!(
+            negotiate(Some("application/sparql-results+xml")),
+            Format::Xml
+        );
         assert_eq!(negotiate(Some("text/csv")), Format::Csv);
         assert_eq!(negotiate(Some("text/tab-separated-values")), Format::Tsv);
     }
@@ -237,12 +245,16 @@ mod tests {
     #[test]
     fn q_values_pick_highest() {
         assert_eq!(
-            negotiate(Some("application/sparql-results+json;q=0.5, text/csv;q=0.9")),
+            negotiate(Some(
+                "application/sparql-results+json;q=0.5, text/csv;q=0.9"
+            )),
             Format::Csv
         );
         // q=0 rejects json, so xml wins
         assert_eq!(
-            negotiate(Some("application/sparql-results+json;q=0, application/sparql-results+xml")),
+            negotiate(Some(
+                "application/sparql-results+json;q=0, application/sparql-results+xml"
+            )),
             Format::Xml
         );
     }
@@ -275,9 +287,15 @@ mod tests {
             Ok(Format::Json)
         );
         assert_eq!(negotiate_or_406(Some("text/csv")), Ok(Format::Csv));
-        assert_eq!(negotiate_or_406(Some("text/tab-separated-values")), Ok(Format::Tsv));
+        assert_eq!(
+            negotiate_or_406(Some("text/tab-separated-values")),
+            Ok(Format::Tsv)
+        );
         // A supported type alongside an unsupported one still negotiates the supported one.
-        assert_eq!(negotiate_or_406(Some("image/png, text/csv")), Ok(Format::Csv));
+        assert_eq!(
+            negotiate_or_406(Some("image/png, text/csv")),
+            Ok(Format::Csv)
+        );
         // An explicit wildcard rescues an otherwise-unsupported list.
         assert_eq!(negotiate_or_406(Some("image/png, */*")), Ok(Format::Json));
     }
@@ -286,7 +304,10 @@ mod tests {
     fn or_406_present_unsatisfiable_is_not_acceptable() {
         // A present Accept naming ONLY unsupported solution media types → 406 (Oxigraph parity).
         assert_eq!(negotiate_or_406(Some("image/png")), Err(NotAcceptable));
-        assert_eq!(negotiate_or_406(Some("application/pdf")), Err(NotAcceptable));
+        assert_eq!(
+            negotiate_or_406(Some("application/pdf")),
+            Err(NotAcceptable)
+        );
         assert_eq!(
             negotiate_or_406(Some("text/turtle, application/rdf+xml")),
             Err(NotAcceptable)
@@ -309,7 +330,10 @@ mod tests {
             Some("image/png"),
             Some("application/sparql-results+json;q=0"),
         ] {
-            assert_eq!(negotiate(accept), negotiate_or_406(accept).unwrap_or(Format::Json));
+            assert_eq!(
+                negotiate(accept),
+                negotiate_or_406(accept).unwrap_or(Format::Json)
+            );
         }
     }
 
@@ -318,22 +342,28 @@ mod tests {
     fn graph_or_406_absent_or_wildcard_keeps_ntriples_default() {
         assert_eq!(negotiate_graph_or_406(None), Ok(GraphFormat::NTriples));
         assert_eq!(negotiate_graph_or_406(Some("")), Ok(GraphFormat::NTriples));
-        assert_eq!(negotiate_graph_or_406(Some("*/*")), Ok(GraphFormat::NTriples));
+        assert_eq!(
+            negotiate_graph_or_406(Some("*/*")),
+            Ok(GraphFormat::NTriples)
+        );
     }
 
     #[test]
     fn graph_or_406_supported_and_unsatisfiable() {
-        assert_eq!(negotiate_graph_or_406(Some("text/turtle")), Ok(GraphFormat::Turtle));
+        assert_eq!(
+            negotiate_graph_or_406(Some("text/turtle")),
+            Ok(GraphFormat::Turtle)
+        );
         assert_eq!(
             negotiate_graph_or_406(Some("application/n-triples")),
             Ok(GraphFormat::NTriples)
         );
         // A SELECT/ASK result media type is NOT an RDF graph type → 406 for a graph query.
+        assert_eq!(negotiate_graph_or_406(Some("text/csv")), Err(NotAcceptable));
         assert_eq!(
-            negotiate_graph_or_406(Some("text/csv")),
+            negotiate_graph_or_406(Some("image/png")),
             Err(NotAcceptable)
         );
-        assert_eq!(negotiate_graph_or_406(Some("image/png")), Err(NotAcceptable));
     }
 
     #[test]
@@ -342,7 +372,10 @@ mod tests {
         assert_eq!(negotiate_graph(Some("")), GraphFormat::NTriples);
         assert_eq!(negotiate_graph(Some("*/*")), GraphFormat::NTriples);
         assert_eq!(negotiate_graph(Some("text/turtle")), GraphFormat::Turtle);
-        assert_eq!(negotiate_graph(Some("application/n-triples")), GraphFormat::NTriples);
+        assert_eq!(
+            negotiate_graph(Some("application/n-triples")),
+            GraphFormat::NTriples
+        );
         // q-values decide; q=0 rejects.
         assert_eq!(
             negotiate_graph(Some("application/n-triples;q=0.5, text/turtle;q=0.9")),
@@ -353,26 +386,50 @@ mod tests {
             GraphFormat::Turtle
         );
         // exact beats wildcard; unsupported falls back to N-Triples.
-        assert_eq!(negotiate_graph(Some("text/turtle, */*")), GraphFormat::Turtle);
+        assert_eq!(
+            negotiate_graph(Some("text/turtle, */*")),
+            GraphFormat::Turtle
+        );
         // [OPUS-4.8] sq-rt6v: RDF/XML is now a first-class graph format.
-        assert_eq!(negotiate_graph(Some("application/rdf+xml")), GraphFormat::RdfXml);
+        assert_eq!(
+            negotiate_graph(Some("application/rdf+xml")),
+            GraphFormat::RdfXml
+        );
         // The `application/xml`/`text/xml` aliases also map to RDF/XML, but at lower
         // specificity, so an exact `application/rdf+xml` (or turtle/n-triples) wins a tie.
-        assert_eq!(negotiate_graph(Some("application/xml")), GraphFormat::RdfXml);
+        assert_eq!(
+            negotiate_graph(Some("application/xml")),
+            GraphFormat::RdfXml
+        );
         assert_eq!(negotiate_graph(Some("text/xml")), GraphFormat::RdfXml);
-        assert_eq!(negotiate_graph(Some("text/turtle, application/xml")), GraphFormat::Turtle);
+        assert_eq!(
+            negotiate_graph(Some("text/turtle, application/xml")),
+            GraphFormat::Turtle
+        );
         // q=0 rejects RDF/XML, so Turtle wins.
-        assert_eq!(negotiate_graph(Some("application/rdf+xml;q=0, text/turtle")), GraphFormat::Turtle);
+        assert_eq!(
+            negotiate_graph(Some("application/rdf+xml;q=0, text/turtle")),
+            GraphFormat::Turtle
+        );
         // An unsupported type still falls back to N-Triples.
-        assert_eq!(negotiate_graph(Some("application/pdf")), GraphFormat::NTriples);
+        assert_eq!(
+            negotiate_graph(Some("application/pdf")),
+            GraphFormat::NTriples
+        );
     }
 
     // [OPUS-4.8] sq-oy1f.1: JSON-LD negotiation is only compiled with the `jsonld` feature.
     #[cfg(feature = "jsonld")]
     #[test]
     fn graph_format_jsonld() {
-        assert_eq!(negotiate_graph(Some("application/ld+json")), GraphFormat::JsonLd);
-        assert_eq!(GraphFormat::JsonLd.content_type(), "application/ld+json; charset=utf-8");
+        assert_eq!(
+            negotiate_graph(Some("application/ld+json")),
+            GraphFormat::JsonLd
+        );
+        assert_eq!(
+            GraphFormat::JsonLd.content_type(),
+            "application/ld+json; charset=utf-8"
+        );
         // q-values decide between JSON-LD and the other graph formats.
         assert_eq!(
             negotiate_graph(Some("text/turtle;q=0.5, application/ld+json;q=0.9")),
@@ -384,7 +441,10 @@ mod tests {
             GraphFormat::Turtle
         );
         // Exact JSON-LD beats a wildcard.
-        assert_eq!(negotiate_graph(Some("application/ld+json, */*")), GraphFormat::JsonLd);
+        assert_eq!(
+            negotiate_graph(Some("application/ld+json, */*")),
+            GraphFormat::JsonLd
+        );
     }
 
     // [OPUS-4.8] sq-oy1f.1: WITHOUT the feature, `application/ld+json` is just another
@@ -392,7 +452,10 @@ mod tests {
     #[cfg(not(feature = "jsonld"))]
     #[test]
     fn graph_format_jsonld_unsupported_without_feature() {
-        assert_eq!(negotiate_graph(Some("application/ld+json")), GraphFormat::NTriples);
+        assert_eq!(
+            negotiate_graph(Some("application/ld+json")),
+            GraphFormat::NTriples
+        );
         // Even alongside a supported type, the JSON-LD range is ignored and Turtle is picked.
         assert_eq!(
             negotiate_graph(Some("application/ld+json;q=0.9, text/turtle;q=0.5")),

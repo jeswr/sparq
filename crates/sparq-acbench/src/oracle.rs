@@ -82,8 +82,7 @@ fn audience_matches_wac(request: &Request, audience: &Audience) -> bool {
             request.agent.starts_with(g.as_str())
         }
         Audience::ClientRestricted { agent, client } => {
-            &request.agent == agent
-                && request.client.as_deref() == Some(client.as_str())
+            &request.agent == agent && request.client.as_deref() == Some(client.as_str())
         }
         Audience::AllExcept(excl) => {
             // WAC has no deny: AllExcept is approximated as "not in exclusion list".
@@ -154,12 +153,9 @@ fn audience_matches_acp(request: &Request, audience: &Audience) -> bool {
             request.agent.starts_with(g.as_str())
         }
         Audience::ClientRestricted { agent, client } => {
-            &request.agent == agent
-                && request.client.as_deref() == Some(client.as_str())
+            &request.agent == agent && request.client.as_deref() == Some(client.as_str())
         }
-        Audience::AllExcept(excl) => {
-            !excl.iter().any(|e| e == &request.agent)
-        }
+        Audience::AllExcept(excl) => !excl.iter().any(|e| e == &request.agent),
     }
 }
 
@@ -257,12 +253,9 @@ fn audience_matches_odrl(request: &Request, audience: &Audience) -> bool {
             request.agent.starts_with(g.as_str())
         }
         Audience::ClientRestricted { agent, client } => {
-            &request.agent == agent
-                && request.client.as_deref() == Some(client.as_str())
+            &request.agent == agent && request.client.as_deref() == Some(client.as_str())
         }
-        Audience::AllExcept(excl) => {
-            !excl.iter().any(|e| e == &request.agent)
-        }
+        Audience::AllExcept(excl) => !excl.iter().any(|e| e == &request.agent),
     }
 }
 
@@ -309,9 +302,7 @@ pub(crate) fn evaluate_condition(condition: &Condition, now: &str) -> bool {
         Condition::Temporal { start, end } => temporal_in_window(start, end, now),
         Condition::Purpose(p) => p == BENCH_GRANTED_PURPOSE,
         Condition::Count(n) => *n > 0,
-        Condition::And(a, b) => {
-            evaluate_condition(a, now) && evaluate_condition(b, now)
-        }
+        Condition::And(a, b) => evaluate_condition(a, now) && evaluate_condition(b, now),
     }
 }
 
@@ -384,7 +375,7 @@ pub(crate) fn evaluate(
 #[cfg(test)]
 mod tests {
     use super::{
-        BENCH_EVAL_INSTANT, BENCH_GRANTED_PURPOSE, evaluate_condition, temporal_in_window,
+        evaluate_condition, temporal_in_window, BENCH_EVAL_INSTANT, BENCH_GRANTED_PURPOSE,
     };
     use crate::Condition;
 
@@ -430,7 +421,11 @@ mod tests {
     #[test]
     fn temporal_malformed_bound_fails_closed() {
         // A non-canonical width breaks the lexical⇔chronological equivalence ⇒ deny.
-        assert!(!temporal_in_window("2026", "2027-01-01T00:00:00Z", BENCH_EVAL_INSTANT));
+        assert!(!temporal_in_window(
+            "2026",
+            "2027-01-01T00:00:00Z",
+            BENCH_EVAL_INSTANT
+        ));
         assert!(!temporal_in_window(
             "2026-01-01T00:00:00Z",
             "not-a-date",
@@ -471,7 +466,10 @@ mod tests {
 
     #[test]
     fn count_condition_zero_denies_positive_admits() {
-        assert!(!evaluate_condition(&Condition::Count(0), BENCH_EVAL_INSTANT));
+        assert!(!evaluate_condition(
+            &Condition::Count(0),
+            BENCH_EVAL_INSTANT
+        ));
         assert!(evaluate_condition(&Condition::Count(1), BENCH_EVAL_INSTANT));
     }
 
@@ -498,7 +496,9 @@ mod tests {
 
         // Wrong purpose also makes it false.
         let wrong_purpose = Condition::And(
-            Box::new(Condition::Purpose("https://sparq.dev/vocab/purpose#other".to_string())),
+            Box::new(Condition::Purpose(
+                "https://sparq.dev/vocab/purpose#other".to_string(),
+            )),
             Box::new(Condition::Temporal {
                 start: "2026-01-01T00:00:00Z".to_string(),
                 end: "2027-01-01T00:00:00Z".to_string(),

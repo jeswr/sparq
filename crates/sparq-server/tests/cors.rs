@@ -48,7 +48,10 @@ fn cors_config(origins: &[&str]) -> ServerConfig {
     for o in origins {
         cors.add(o).unwrap();
     }
-    ServerConfig { cors_allow: cors, ..ServerConfig::default() }
+    ServerConfig {
+        cors_allow: cors,
+        ..ServerConfig::default()
+    }
 }
 
 fn client() -> reqwest::Client {
@@ -75,7 +78,10 @@ async fn default_emits_no_cors_headers_even_with_origin() {
     assert_eq!(resp.status(), 200);
     // The whole point of the safe default: a browser cross-origin read is blocked because
     // there is NO Access-Control-Allow-Origin header.
-    assert!(resp.headers().get(ACAO).is_none(), "default must emit no ACAO header");
+    assert!(
+        resp.headers().get(ACAO).is_none(),
+        "default must emit no ACAO header"
+    );
     assert!(resp.headers().get(ACAC).is_none());
 }
 
@@ -109,7 +115,10 @@ async fn allowlisted_origin_is_reflected_on_actual_request() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let acao = resp.headers().get(ACAO).expect("ACAO present for allowlisted origin");
+    let acao = resp
+        .headers()
+        .get(ACAO)
+        .expect("ACAO present for allowlisted origin");
     // Exact reflection — never the wildcard `*`.
     assert_eq!(acao.to_str().unwrap(), APP_ORIGIN);
     assert_ne!(acao.to_str().unwrap(), "*");
@@ -140,8 +149,11 @@ async fn unlisted_origin_gets_no_cors_header() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200); // the request itself succeeds...
-    // ...but the browser cannot read it: no ACAO header at all.
-    assert!(resp.headers().get(ACAO).is_none(), "un-listed origin must get no ACAO");
+                                    // ...but the browser cannot read it: no ACAO header at all.
+    assert!(
+        resp.headers().get(ACAO).is_none(),
+        "un-listed origin must get no ACAO"
+    );
 }
 
 #[tokio::test]
@@ -173,15 +185,24 @@ async fn preflight_answered_for_allowlisted_origin() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 204);
-    assert_eq!(resp.headers().get(ACAO).unwrap().to_str().unwrap(), APP_ORIGIN);
+    assert_eq!(
+        resp.headers().get(ACAO).unwrap().to_str().unwrap(),
+        APP_ORIGIN
+    );
     let methods = resp
         .headers()
         .get("access-control-allow-methods")
         .unwrap()
         .to_str()
         .unwrap();
-    assert!(methods.contains("POST"), "preflight advertises POST: {methods}");
-    assert!(methods.contains("GET"), "preflight advertises GET: {methods}");
+    assert!(
+        methods.contains("POST"),
+        "preflight advertises POST: {methods}"
+    );
+    assert!(
+        methods.contains("GET"),
+        "preflight advertises GET: {methods}"
+    );
     // The requested headers are echoed.
     let allow_headers = resp
         .headers()
@@ -244,8 +265,15 @@ async fn cors_does_not_bypass_write_auth() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 401, "CORS must not relax the write-auth gate");
+    assert_eq!(
+        resp.status(),
+        401,
+        "CORS must not relax the write-auth gate"
+    );
     // The CORS header is still stamped on the 401 (it is a response like any other),
     // so a browser can read the 401 — but the write did not happen.
-    assert_eq!(resp.headers().get(ACAO).unwrap().to_str().unwrap(), APP_ORIGIN);
+    assert_eq!(
+        resp.headers().get(ACAO).unwrap().to_str().unwrap(),
+        APP_ORIGIN
+    );
 }

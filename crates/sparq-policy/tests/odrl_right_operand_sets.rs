@@ -57,7 +57,10 @@ fn purpose(iri: &str) -> Request {
 /// evaluation behavior).
 #[test]
 fn list_right_operand_folds_to_set_encoding() {
-    let p = purpose_policy("isAnyOf", "( <urn:purpose/research> <urn:purpose/education> )");
+    let p = purpose_policy(
+        "isAnyOf",
+        "( <urn:purpose/research> <urn:purpose/education> )",
+    );
     let c = &p.permissions[0].constraints[0];
     assert_eq!(c.operator, Operator::IsAnyOf);
     assert_eq!(
@@ -79,7 +82,10 @@ fn multi_object_right_operand_folds_to_set_encoding() {
     );
     let c = &p.permissions[0].constraints[0];
     let Value::Str(s) = &c.right else {
-        panic!("multi-object rightOperand must fold to Value::Str, got {:?}", c.right);
+        panic!(
+            "multi-object rightOperand must fold to Value::Str, got {:?}",
+            c.right
+        );
     };
     let mut members: Vec<&str> = s.split('|').collect();
     members.sort_unstable();
@@ -93,7 +99,10 @@ fn multi_object_right_operand_folds_to_set_encoding() {
 /// `isAnyOf ( <a> <b> )`: every listed member grants, a non-member denies.
 #[test]
 fn is_any_of_list_member_grants_non_member_denied() {
-    let p = purpose_policy("isAnyOf", "( <urn:purpose/research> <urn:purpose/education> )");
+    let p = purpose_policy(
+        "isAnyOf",
+        "( <urn:purpose/research> <urn:purpose/education> )",
+    );
     assert!(evaluate(&p, &purpose("urn:purpose/research")).allow);
     assert!(evaluate(&p, &purpose("urn:purpose/education")).allow);
     assert!(!evaluate(&p, &purpose("urn:purpose/marketing")).allow);
@@ -102,7 +111,10 @@ fn is_any_of_list_member_grants_non_member_denied() {
 /// `isPartOf` consumes the same folded encoding (set membership).
 #[test]
 fn is_part_of_list_member_grants_non_member_denied() {
-    let p = purpose_policy("isPartOf", "( <urn:purpose/research> <urn:purpose/education> )");
+    let p = purpose_policy(
+        "isPartOf",
+        "( <urn:purpose/research> <urn:purpose/education> )",
+    );
     assert!(evaluate(&p, &purpose("urn:purpose/education")).allow);
     assert!(!evaluate(&p, &purpose("urn:purpose/marketing")).allow);
 }

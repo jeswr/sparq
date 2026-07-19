@@ -195,7 +195,10 @@ exq:meas a dqv:QualityMeasurement ;
             _ => String::new(),
         };
         if subject == "find" {
-            assert_eq!(metric, "confidencemeasurement", "metric must be the DQV metric");
+            assert_eq!(
+                metric, "confidencemeasurement",
+                "metric must be the DQV metric"
+            );
             assert_eq!(
                 value.parse::<f64>().unwrap_or(-1.0),
                 0.42,

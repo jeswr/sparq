@@ -519,9 +519,15 @@ mod tests {
             .build();
         let both = TriplePattern::new(iri("http://ex/x"), iri("http://ex/p"), iri("http://ex/y"));
         let est = estimate_cardinality(&both, &degenerate);
-        assert!(est.is_finite(), "no division by zero on a degenerate partition");
+        assert!(
+            est.is_finite(),
+            "no division by zero on a degenerate partition"
+        );
         assert!(est >= 0.0, "estimate is floored at 0");
-        assert_eq!(est, 1.0, "triples.max(1)/(1*1) = 1 for an all-zero partition");
+        assert_eq!(
+            est, 1.0,
+            "triples.max(1)/(1*1) = 1 for an all-zero partition"
+        );
     }
 
     // [GPT-5.6] sq-2b7h7: sweep the estimator's finite, non-negative postcondition
@@ -713,7 +719,12 @@ mod tests {
     fn knows_source(id: &str, triples: u64, hint: Option<Option<u64>>) -> SourceDescriptor {
         let mut b = SourceDescriptor::builder(SourceId::new(id))
             .total_triples(triples)
-            .predicate(pred(&foaf("knows"), triples, triples.max(1), triples.max(1)));
+            .predicate(pred(
+                &foaf("knows"),
+                triples,
+                triples.max(1),
+                triples.max(1),
+            ));
         if let Some(cardinality_hint) = hint {
             b = b.retrieval(RetrievalCapability {
                 vector: true,
@@ -758,7 +769,7 @@ mod tests {
     #[test]
     fn retrieval_hint_u64_max_precedes_unhinted() {
         let srcs = [
-            knows_source("m0", 100, None),                 // unhinted, earlier index.
+            knows_source("m0", 100, None), // unhinted, earlier index.
             knows_source("m1", 100, Some(Some(u64::MAX))), // declared max hint.
         ];
         let bgp = Bgp::new(vec![TriplePattern::new(
@@ -859,6 +870,10 @@ mod tests {
             .iter()
             .map(|c| c.source)
             .collect();
-        assert_eq!(order, vec![0, 3, 1], "the hint reorders (and only reorders)");
+        assert_eq!(
+            order,
+            vec![0, 3, 1],
+            "the hint reorders (and only reorders)"
+        );
     }
 }

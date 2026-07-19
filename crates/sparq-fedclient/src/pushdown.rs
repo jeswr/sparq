@@ -327,7 +327,10 @@ pub fn group_vars(group: &ExclusiveGroup, bgp: &Bgp) -> Vec<String> {
 /// the conjunct is safe to push by this check alone (the caller separately checks the source
 /// covers the conjunct's [`FilterClass`]). [OPUS-4.8] sq-7byx.
 pub fn common_variable_check(filter: &Filter, group_vars: &[String]) -> bool {
-    filter.vars.iter().all(|v| group_vars.iter().any(|g| g == v))
+    filter
+        .vars
+        .iter()
+        .all(|v| group_vars.iter().any(|g| g == v))
 }
 
 // ─── The maximal sub-algebra builder ────────────────────────────────────────────────────
@@ -452,14 +455,25 @@ pub fn push_group(
         // The caller asked for vars, none of which this group produces: a `SELECT *` would
         // over-return, so project the empty set explicitly as the group's own vars (the
         // join still reattaches). Keep it precise: project the group's vars.
-        let v = if fragment { pattern_vars(pats[0]) } else { gvars };
+        let v = if fragment {
+            pattern_vars(pats[0])
+        } else {
+            gvars
+        };
         if v.is_empty() {
             "*".to_string()
         } else {
-            v.iter().map(|n| format!("?{}", n)).collect::<Vec<_>>().join(" ")
+            v.iter()
+                .map(|n| format!("?{}", n))
+                .collect::<Vec<_>>()
+                .join(" ")
         }
     } else {
-        project.iter().map(|n| format!("?{}", n)).collect::<Vec<_>>().join(" ")
+        project
+            .iter()
+            .map(|n| format!("?{}", n))
+            .collect::<Vec<_>>()
+            .join(" ")
     };
 
     // --- FILTER clause(s) for the pushed conjuncts.
@@ -724,7 +738,11 @@ mod tests {
             // pushable: ?age is group-bound, Full covers it.
             Filter::new(vec!["age".to_string()], "?age > 18", FilterClass::Full),
             // NOT pushable: ?city is not in the group (sibling group var).
-            Filter::new(vec!["city".to_string()], "?city = \"NYC\"", FilterClass::Full),
+            Filter::new(
+                vec!["city".to_string()],
+                "?city = \"NYC\"",
+                FilterClass::Full,
+            ),
         ];
         let pushed = push_group(&group, &bgp, &cap, &output, &filters, &[], None).unwrap();
         // The whole group is one sub-query, projecting exactly ?s ?name, pushing FILTER(?age>18).
@@ -732,7 +750,10 @@ mod tests {
             pushed.sub.sparql,
             "SELECT ?s ?name WHERE { ?s <http://ex/age> ?age . ?s <http://ex/name> ?name FILTER(?age > 18) }"
         );
-        assert_eq!(pushed.sub.project, vec!["s".to_string(), "name".to_string()]);
+        assert_eq!(
+            pushed.sub.project,
+            vec!["s".to_string(), "name".to_string()]
+        );
         assert_eq!(pushed.pushed_filters, vec![0]); // first filter pushed
         assert_eq!(pushed.local_filters, vec![1]); // second kept local
     }
@@ -840,11 +861,7 @@ mod tests {
             // needs Full > Equality ⇒ NOT pushable (class not covered), kept local.
             Filter::new(vec!["age".to_string()], "?age > 18", FilterClass::Full),
             // needs Equality ⇒ pushable.
-            Filter::new(
-                vec!["age".to_string()],
-                "?age = 18",
-                FilterClass::Equality,
-            ),
+            Filter::new(vec!["age".to_string()], "?age = 18", FilterClass::Equality),
         ];
         let pushed = push_group(
             &group,
@@ -876,16 +893,7 @@ mod tests {
             patterns: vec![0, 1],
         };
         let cap = Capability::endpoint();
-        let pushed = push_group(
-            &group,
-            &bgp,
-            &cap,
-            &["name".to_string()],
-            &[],
-            &[],
-            None,
-        )
-        .unwrap();
+        let pushed = push_group(&group, &bgp, &cap, &["name".to_string()], &[], &[], None).unwrap();
         assert_eq!(pushed.sub.project, vec!["name".to_string()]);
         assert_eq!(
             pushed.sub.sparql,
@@ -902,10 +910,7 @@ mod tests {
         };
         let cap = Capability::endpoint();
         let pushed = push_group(&group, &bgp, &cap, &[], &[], &[], None).unwrap();
-        assert_eq!(
-            pushed.sub.sparql,
-            "SELECT * WHERE { ?s <http://ex/p> ?o }"
-        );
+        assert_eq!(pushed.sub.sparql, "SELECT * WHERE { ?s <http://ex/p> ?o }");
         assert!(pushed.sub.project.is_empty());
     }
 
@@ -935,7 +940,10 @@ mod tests {
         // Single var → short form.
         let single = render_values_block(
             &["j".to_string()],
-            &[vec!["<http://ex/a>".to_string()], vec!["<http://ex/b>".to_string()]],
+            &[
+                vec!["<http://ex/a>".to_string()],
+                vec!["<http://ex/b>".to_string()],
+            ],
         );
         assert_eq!(single, "VALUES ?j { <http://ex/a> <http://ex/b> }");
         // Multi var → parenthesised form.
@@ -1040,10 +1048,7 @@ mod tests {
         )
         .unwrap();
         // Both s and o1 in projection (s is join var, o1 is output).
-        assert_eq!(
-            pushed.sub.project,
-            vec!["s".to_string(), "o1".to_string()]
-        );
+        assert_eq!(pushed.sub.project, vec!["s".to_string(), "o1".to_string()]);
     }
 
     #[test]
@@ -1052,8 +1057,16 @@ mod tests {
         let block = render_values_block(
             &["x".to_string(), "y".to_string(), "z".to_string()],
             &[
-                vec!["<http://ex/a>".to_string(), "<http://ex/b>".to_string(), "<http://ex/c>".to_string()],
-                vec!["<http://ex/d>".to_string(), "<http://ex/e>".to_string(), "<http://ex/f>".to_string()],
+                vec![
+                    "<http://ex/a>".to_string(),
+                    "<http://ex/b>".to_string(),
+                    "<http://ex/c>".to_string(),
+                ],
+                vec![
+                    "<http://ex/d>".to_string(),
+                    "<http://ex/e>".to_string(),
+                    "<http://ex/f>".to_string(),
+                ],
             ],
         );
         assert_eq!(

@@ -107,10 +107,15 @@ pub fn validate_entry(bug: &FoundBug) -> Result<(), LedgerError> {
         ("summary", &bug.summary),
     ] {
         if value.trim().is_empty() {
-            return Err(LedgerError(format!("entry {:?}: empty field `{field}`", bug.id)));
+            return Err(LedgerError(format!(
+                "entry {:?}: empty field `{field}`",
+                bug.id
+            )));
         }
     }
-    if !(bug.upstream_issue.trim().starts_with("https://") || bug.upstream_issue.trim().starts_with("http://")) {
+    if !(bug.upstream_issue.trim().starts_with("https://")
+        || bug.upstream_issue.trim().starts_with("http://"))
+    {
         return Err(LedgerError(format!(
             "entry {:?}: `upstream_issue` must be an http(s) URL to the filed upstream issue, got {:?}",
             bug.id, bug.upstream_issue
@@ -196,7 +201,10 @@ mod tests {
                 "query" => bug.query = String::new(),
                 _ => bug.summary = String::new(),
             }
-            assert!(validate_entry(&bug).is_err(), "field {field} must be required");
+            assert!(
+                validate_entry(&bug).is_err(),
+                "field {field} must be required"
+            );
         }
     }
 
@@ -210,14 +218,20 @@ mod tests {
 
         let mut bad = valid_entry();
         bad.upstream_issue = String::new();
-        assert!(to_jsonl(&[bad]).is_err(), "invalid entry must abort the write");
+        assert!(
+            to_jsonl(&[bad]).is_err(),
+            "invalid entry must abort the write"
+        );
     }
 
     #[test]
     fn from_jsonl_rejects_a_line_missing_the_confirmation_field() {
         let text = to_jsonl(&[valid_entry()]).unwrap();
         let stripped = text.replace(",\"confirmation\":\"reported\"", "");
-        assert_ne!(text, stripped, "test setup: the field must have been present");
+        assert_ne!(
+            text, stripped,
+            "test setup: the field must have been present"
+        );
         assert!(
             from_jsonl(&stripped).is_err(),
             "confirmation status is required with no default"

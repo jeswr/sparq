@@ -305,10 +305,7 @@ pub fn parse_annotations() -> BTreeMap<String, MethodAnnotations> {
             (x.property.as_str(), x.level.as_deref())
                 .cmp(&(y.property.as_str(), y.level.as_deref()))
         });
-        out.insert(
-            method.clone(),
-            MethodAnnotations { method, assertions },
-        );
+        out.insert(method.clone(), MethodAnnotations { method, assertions });
     }
     out
 }
@@ -401,7 +398,10 @@ pub fn completeness_violations(
         .map(|iri| Violation {
             method: (*iri).to_owned(),
             kind: ViolationKind::MissingAnnotation,
-            detail: format!("production-selectable scheme {} has no annotation block", iri),
+            detail: format!(
+                "production-selectable scheme {} has no annotation block",
+                iri
+            ),
         })
         .collect()
 }
@@ -476,8 +476,7 @@ pub const fn value_only_posture() -> &'static str {
 mod tests {
     use super::*;
 
-    const VOCAB_TTL: &str =
-        include_str!("../../sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl");
+    const VOCAB_TTL: &str = include_str!("../../sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl");
 
     /// The bundled annotation graph is valid Turtle and non-empty.
     #[test]
@@ -602,12 +601,9 @@ mod tests {
     /// constraint, even though the assertion exists on the method.
     #[test]
     fn source_layer_only_does_not_transfer_to_query_proof() {
-        const ILLUSTRATIVE_SOURCE: &str =
-            "https://sparq.dev/ns/zk#illustrative-source-bbs-2023";
-        const UNLINKABILITY_SCOPE: &str =
-            "https://w3id.org/zkp-sparql/sec-prop#UnlinkabilityScope";
-        const CROSS_PRESENTATION: &str =
-            "https://w3id.org/zkp-sparql/sec-prop#CrossPresentation";
+        const ILLUSTRATIVE_SOURCE: &str = "https://sparq.dev/ns/zk#illustrative-source-bbs-2023";
+        const UNLINKABILITY_SCOPE: &str = "https://w3id.org/zkp-sparql/sec-prop#UnlinkabilityScope";
+        const CROSS_PRESENTATION: &str = "https://w3id.org/zkp-sparql/sec-prop#CrossPresentation";
 
         let ann = parse_annotations();
         let src = ann
@@ -628,9 +624,18 @@ mod tests {
         // And the guard reports it as a transfer violation if a caller tries.
         let v = source_layer_transfer_violations(
             &ann,
-            &[(ILLUSTRATIVE_SOURCE, UNLINKABILITY_SCOPE, Some(CROSS_PRESENTATION))],
+            &[(
+                ILLUSTRATIVE_SOURCE,
+                UNLINKABILITY_SCOPE,
+                Some(CROSS_PRESENTATION),
+            )],
         );
-        assert_eq!(v.len(), 1, "expected exactly one transfer violation: {:?}", v);
+        assert_eq!(
+            v.len(),
+            1,
+            "expected exactly one transfer violation: {:?}",
+            v
+        );
         assert_eq!(v[0].kind, ViolationKind::SourceLayerTransfer);
     }
 

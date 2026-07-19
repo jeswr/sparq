@@ -87,8 +87,7 @@ impl Store {
     #[wasm_bindgen(js_name = loadBytesWithBase)]
     pub fn load_bytes_with_base(data: &[u8], format: &str, base: &str) -> Result<Store, JsError> {
         let text = decode_utf8(data)?;
-        let graph =
-            Graph::load_str_with_base(text, format, base).map_err(|e| JsError::new(&e))?;
+        let graph = Graph::load_str_with_base(text, format, base).map_err(|e| JsError::new(&e))?;
         Ok(Store { graph })
     }
 }

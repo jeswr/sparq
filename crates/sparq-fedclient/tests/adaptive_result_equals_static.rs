@@ -30,7 +30,9 @@ use sparq_core::Graph;
 use sparq_engine::json::to_sparql_json;
 use sparq_engine::query;
 use sparq_fedclient::adaptive::execute_adaptive_single_source;
-use sparq_fedclient::{materialize_single_source, solutions_equal, FederatedSource, SourceResolver, Transport};
+use sparq_fedclient::{
+    materialize_single_source, solutions_equal, FederatedSource, SourceResolver, Transport,
+};
 use sparq_fedplan::{
     plan_bgp, select_sources, Bgp, PlanOptions, PredPartition, ReplanOutcome, ReplanPolicy,
     SourceDescriptor, SourceId, Term, TriplePattern, Var,
@@ -206,7 +208,9 @@ fn divergent_star_replans_yet_result_equals_static_and_local() {
         "the divergent fixture must re-plan exactly once"
     );
     assert!(
-        out.replans.iter().any(|e| e.outcome == ReplanOutcome::Switched),
+        out.replans
+            .iter()
+            .any(|e| e.outcome == ReplanOutcome::Switched),
         "a Switched outcome must be recorded"
     );
     assert_ne!(

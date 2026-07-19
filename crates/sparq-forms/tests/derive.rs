@@ -5,8 +5,8 @@
 use oxrdf::{NamedNode, Term};
 use sparq_core::Graph;
 use sparq_forms::{
-    applicable_shapes, derive_form, derive_form_with_model, FormOptions, GroupKind, Mode,
-    ShapeVia, Suitability, WidgetContext, WidgetRegistry, DASH,
+    applicable_shapes, derive_form, derive_form_with_model, FormOptions, GroupKind, Mode, ShapeVia,
+    Suitability, WidgetContext, WidgetRegistry, DASH,
 };
 use sparq_shacl::ShapesModel;
 
@@ -40,10 +40,18 @@ const ALICE: &str = r#"
 
 #[test]
 fn derive_form_returns_fields_widgets_and_cardinality() {
-    let form = derive_form(&g(ALICE), &g(PERSON_SHAPES), &iri("alice"), &FormOptions::default());
+    let form = derive_form(
+        &g(ALICE),
+        &g(PERSON_SHAPES),
+        &iri("alice"),
+        &FormOptions::default(),
+    );
     assert_eq!(form.focus.value, "http://example.org/alice");
     assert_eq!(form.mode, Mode::Edit);
-    assert_eq!(form.shape.as_ref().unwrap().value, "http://example.org/PersonShape");
+    assert_eq!(
+        form.shape.as_ref().unwrap().value,
+        "http://example.org/PersonShape"
+    );
     assert_eq!(form.shapes.len(), 1);
     assert_eq!(form.shapes[0].via, ShapeVia::TargetClass);
 
@@ -57,12 +65,18 @@ fn derive_form_returns_fields_widgets_and_cardinality() {
     assert!(name.required, "sh:minCount 1 marks required");
     assert!(!name.multi, "sh:maxCount 1 removes the add affordance");
     assert!(name.editable);
-    assert_eq!(name.widget.editor.as_deref(), Some(&*format!("{DASH}TextFieldEditor")));
+    assert_eq!(
+        name.widget.editor.as_deref(),
+        Some(&*format!("{DASH}TextFieldEditor"))
+    );
     assert_eq!(name.widget.score, Some(10));
     assert_eq!(name.values.len(), 1);
     assert_eq!(name.values[0].term.value, "Alice");
     assert_eq!(name.constraints.min_count, Some(1));
-    assert_eq!(name.constraints.datatype, vec!["http://www.w3.org/2001/XMLSchema#string"]);
+    assert_eq!(
+        name.constraints.datatype,
+        vec!["http://www.w3.org/2001/XMLSchema#string"]
+    );
 
     let nick = &fields[1];
     assert_eq!(nick.label, "Nickname");
@@ -77,7 +91,10 @@ fn derive_form_returns_fields_widgets_and_cardinality() {
     assert_eq!(ty.label, "Type");
     assert!(!ty.editable);
     assert!(ty.widget.editor.is_none());
-    assert_eq!(ty.widget.viewer.as_deref(), Some(&*format!("{DASH}LabelViewer")));
+    assert_eq!(
+        ty.widget.viewer.as_deref(),
+        Some(&*format!("{DASH}LabelViewer"))
+    );
 }
 
 #[test]
@@ -91,7 +108,10 @@ fn derive_form_view_mode_has_no_editors() {
     assert!(field.widget.editor.is_none());
     assert!(field.widget.editor_alternatives.is_empty());
     assert!(!field.editable);
-    assert_eq!(field.widget.viewer.as_deref(), Some(&*format!("{DASH}LiteralViewer")));
+    assert_eq!(
+        field.widget.viewer.as_deref(),
+        Some(&*format!("{DASH}LiteralViewer"))
+    );
 }
 
 #[test]
@@ -113,10 +133,16 @@ fn derive_form_with_model_uses_custom_registry() {
         &registry,
     );
     let field = &form.groups[0].fields[0];
-    assert_eq!(field.widget.editor.as_deref(), Some("http://example.org/MegaEditor"));
+    assert_eq!(
+        field.widget.editor.as_deref(),
+        Some("http://example.org/MegaEditor")
+    );
     assert_eq!(field.widget.score, Some(90));
     // The DASH pick demoted to first alternative.
-    assert_eq!(field.widget.editor_alternatives[0], format!("{DASH}TextFieldEditor"));
+    assert_eq!(
+        field.widget.editor_alternatives[0],
+        format!("{DASH}TextFieldEditor")
+    );
 }
 
 #[test]
@@ -167,7 +193,10 @@ fn explicit_shape_option_wins_and_is_marked() {
         ..FormOptions::default()
     };
     let form = derive_form(&g(ALICE), &g(shapes_ttl), &iri("alice"), &opts);
-    assert_eq!(form.shape.as_ref().unwrap().value, "http://example.org/UntargetedShape");
+    assert_eq!(
+        form.shape.as_ref().unwrap().value,
+        "http://example.org/UntargetedShape"
+    );
     assert_eq!(form.shapes[0].via, ShapeVia::Explicit);
     assert_eq!(form.groups[0].fields[0].label, "Nick only");
 }
@@ -183,13 +212,21 @@ fn inverse_path_yields_incoming_reference_field() {
       ex:bob ex:knows ex:alice .
       ex:carol ex:knows ex:alice .
     "#;
-    let form = derive_form(&g(data_ttl), &g(shapes_ttl), &iri("alice"), &FormOptions::default());
+    let form = derive_form(
+        &g(data_ttl),
+        &g(shapes_ttl),
+        &iri("alice"),
+        &FormOptions::default(),
+    );
     let field = &form.groups[0].fields[0];
     assert!(field.inverse);
     assert_eq!(field.path, "^(<http://example.org/knows>)");
     let mut incoming: Vec<&str> = field.values.iter().map(|v| v.term.value.as_str()).collect();
     incoming.sort_unstable();
-    assert_eq!(incoming, vec!["http://example.org/bob", "http://example.org/carol"]);
+    assert_eq!(
+        incoming,
+        vec!["http://example.org/bob", "http://example.org/carol"]
+    );
 }
 
 #[test]
@@ -199,11 +236,22 @@ fn explicit_dash_editor_overrides_scoring() {
         sh:property [ sh:path ex:name ; sh:datatype xsd:string ;
                       dash:editor dash:TextAreaEditor ] .
     "#;
-    let form = derive_form(&g(ALICE), &g(shapes_ttl), &iri("alice"), &FormOptions::default());
+    let form = derive_form(
+        &g(ALICE),
+        &g(shapes_ttl),
+        &iri("alice"),
+        &FormOptions::default(),
+    );
     let field = &form.groups[0].fields[0];
     assert!(field.widget.explicit);
-    assert_eq!(field.widget.editor.as_deref(), Some(&*format!("{DASH}TextAreaEditor")));
-    assert!(field.widget.score.is_none(), "explicit declarations carry no score");
+    assert_eq!(
+        field.widget.editor.as_deref(),
+        Some(&*format!("{DASH}TextAreaEditor"))
+    );
+    assert!(
+        field.widget.score.is_none(),
+        "explicit declarations carry no score"
+    );
     // The auto pick (TextFieldEditor) is offered as an alternative instead.
     assert!(field
         .widget
@@ -223,14 +271,27 @@ fn fractional_order_and_groups_sort_fields_and_groups() {
         sh:property [ sh:path ex:x ; sh:name "X" ; sh:group ex:ExtraGroup ] ;
         sh:property [ sh:path ex:loose ; sh:name "Loose" ] .
     "#;
-    let form = derive_form(&g(ALICE), &g(shapes_ttl), &iri("alice"), &FormOptions::default());
+    let form = derive_form(
+        &g(ALICE),
+        &g(shapes_ttl),
+        &iri("alice"),
+        &FormOptions::default(),
+    );
     // Ungrouped fields render first, then groups by sh:order.
     assert_eq!(form.groups[0].kind, GroupKind::Default);
     assert_eq!(form.groups[0].fields[0].label, "Loose");
     assert_eq!(form.groups[1].label.as_deref(), Some("Main"));
     assert_eq!(form.groups[1].order, Some(0.0));
-    let labels: Vec<&str> = form.groups[1].fields.iter().map(|f| f.label.as_str()).collect();
-    assert_eq!(labels, vec!["A", "Mid", "B"], "fractional sh:order 1.5 sorts between 1 and 2");
+    let labels: Vec<&str> = form.groups[1]
+        .fields
+        .iter()
+        .map(|f| f.label.as_str())
+        .collect();
+    assert_eq!(
+        labels,
+        vec!["A", "Mid", "B"],
+        "fractional sh:order 1.5 sorts between 1 and 2"
+    );
     assert_eq!(form.groups[2].label.as_deref(), Some("Extra"));
 }
 
@@ -241,7 +302,12 @@ fn deactivated_property_shape_is_suppressed() {
         sh:property [ sh:path ex:name ; sh:name "Name" ] ;
         sh:property [ sh:path ex:secret ; sh:name "Secret" ; sh:deactivated true ] .
     "#;
-    let form = derive_form(&g(ALICE), &g(shapes_ttl), &iri("alice"), &FormOptions::default());
+    let form = derive_form(
+        &g(ALICE),
+        &g(shapes_ttl),
+        &iri("alice"),
+        &FormOptions::default(),
+    );
     let labels: Vec<&str> = form
         .groups
         .iter()
@@ -262,10 +328,21 @@ fn nested_sh_node_recurses_and_cycles_terminate() {
       ex:alice a ex:Person ; ex:friend ex:bob .
       ex:bob a ex:Person ; ex:friend ex:alice .
     "#;
-    let form = derive_form(&g(data_ttl), &g(shapes_ttl), &iri("alice"), &FormOptions::default());
+    let form = derive_form(
+        &g(data_ttl),
+        &g(shapes_ttl),
+        &iri("alice"),
+        &FormOptions::default(),
+    );
     let friend = &form.groups[0].fields[0];
-    assert_eq!(friend.widget.editor.as_deref(), Some(&*format!("{DASH}DetailsEditor")));
-    let nested = friend.values[0].nested.as_ref().expect("nested sub-form for bob");
+    assert_eq!(
+        friend.widget.editor.as_deref(),
+        Some(&*format!("{DASH}DetailsEditor"))
+    );
+    let nested = friend.values[0]
+        .nested
+        .as_ref()
+        .expect("nested sub-form for bob");
     assert_eq!(nested.focus.value, "http://example.org/bob");
     // bob's nested form points back at alice — recursion terminated (either by
     // the visiting guard or max_depth), so SOME ancestor stops nesting.
@@ -323,7 +400,10 @@ fn dash_hidden_readonly_and_default_value_surface_on_fields() {
 
     // dash:readOnly true → editable=false even though the form is in Edit mode.
     let code = by("Code");
-    assert!(!code.editable, "dash:readOnly true forces read-only in Mode::Edit");
+    assert!(
+        !code.editable,
+        "dash:readOnly true forces read-only in Mode::Edit"
+    );
     assert!(!code.hidden);
 
     // sh:defaultValue terms carried verbatim (literal and IRI kinds).
@@ -354,7 +434,11 @@ fn presentation_flags_are_additive_stripping_them_recovers_plain() {
     // presentation flags cannot perturb widgets, constraints, values, or layout.
     let flagged_shapes = g(&format!("{FLAGGABLE_SHAPES}{PRESENTATION_FLAGS}"));
     let mut stripped = derive_form(&data, &flagged_shapes, &iri("alice"), &opts);
-    for field in stripped.groups.iter_mut().flat_map(|group| &mut group.fields) {
+    for field in stripped
+        .groups
+        .iter_mut()
+        .flat_map(|group| &mut group.fields)
+    {
         field.hidden = false;
         field.default_value = None;
         if field.label == "Code" {

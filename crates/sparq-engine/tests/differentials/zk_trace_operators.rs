@@ -8,9 +8,9 @@
 
 #![cfg(feature = "zk")]
 
+use sparq_core::Graph;
 use sparq_engine::zk::{self, Op, SlotPattern, Step};
 use sparq_engine::{query, QueryResult};
-use sparq_core::Graph;
 
 fn graph(turtle: &str) -> Graph {
     Graph::load_str(turtle, "turtle").unwrap()
@@ -153,11 +153,7 @@ fn group_aggregation_records_pre_aggregation_input() {
     assert_eq!(r.rows.len(), 1);
     // The pre-aggregation input set: all 3 age triples, fully captured (no
     // index-range count pushdown under an armed recorder).
-    let age_triples: usize = t
-        .patterns
-        .iter()
-        .map(|p| p.triples.len())
-        .sum();
+    let age_triples: usize = t.patterns.iter().map(|p| p.triples.len()).sum();
     assert_eq!(age_triples, 3, "pre-aggregation set captured in full");
 }
 
@@ -203,12 +199,28 @@ fn graph_const_single_boundary_and_tag() {
     let q = "SELECT ?o WHERE { GRAPH <http://ex/g1> { ?s <http://ex/p> ?o } }";
     let (r, t) = traced(&ds, q);
     assert_eq!(r.rows.len(), 1);
-    let enters = t.steps.iter().filter(|s| matches!(s, Step::Enter(Op::Graph))).count();
-    let exits = t.steps.iter().filter(|s| matches!(s, Step::Exit(Op::Graph))).count();
-    assert_eq!(enters, 1, "exactly one GRAPH boundary (not double-nested): {:?}", t.steps);
+    let enters = t
+        .steps
+        .iter()
+        .filter(|s| matches!(s, Step::Enter(Op::Graph)))
+        .count();
+    let exits = t
+        .steps
+        .iter()
+        .filter(|s| matches!(s, Step::Exit(Op::Graph)))
+        .count();
+    assert_eq!(
+        enters, 1,
+        "exactly one GRAPH boundary (not double-nested): {:?}",
+        t.steps
+    );
     assert_eq!(exits, 1);
     // The scan is tagged with g1.
-    let p = t.patterns.iter().find(|p| p.graph.is_some()).expect("a graph-tagged pattern");
+    let p = t
+        .patterns
+        .iter()
+        .find(|p| p.graph.is_some())
+        .expect("a graph-tagged pattern");
     assert_eq!(p.graph.as_ref().unwrap().to_string(), "<http://ex/g1>");
 }
 
@@ -225,15 +237,29 @@ fn graph_var_one_boundary_per_iteration() {
     let q = "SELECT ?g ?o WHERE { GRAPH ?g { ?s <http://ex/p> ?o } }";
     let (r, t) = traced(&ds, q);
     assert_eq!(r.rows.len(), 2, "one row per named graph");
-    let enters = t.steps.iter().filter(|s| matches!(s, Step::Enter(Op::Graph))).count();
+    let enters = t
+        .steps
+        .iter()
+        .filter(|s| matches!(s, Step::Enter(Op::Graph)))
+        .count();
     // Two visible named graphs => exactly two GRAPH boundaries, no nesting.
-    assert_eq!(enters, 2, "one boundary per graph iteration, not nested: {:?}", t.steps);
+    assert_eq!(
+        enters, 2,
+        "one boundary per graph iteration, not nested: {:?}",
+        t.steps
+    );
     // Both graph tags appear.
-    let tags: std::collections::BTreeSet<String> =
-        t.patterns.iter().filter_map(|p| p.graph.as_ref().map(|t| t.to_string())).collect();
+    let tags: std::collections::BTreeSet<String> = t
+        .patterns
+        .iter()
+        .filter_map(|p| p.graph.as_ref().map(|t| t.to_string()))
+        .collect();
     assert_eq!(
         tags,
-        std::collections::BTreeSet::from(["<http://ex/g1>".to_string(), "<http://ex/g2>".to_string()])
+        std::collections::BTreeSet::from([
+            "<http://ex/g1>".to_string(),
+            "<http://ex/g2>".to_string()
+        ])
     );
 }
 
@@ -244,7 +270,11 @@ fn property_path_marks_uncaptured() {
     let g = graph(DATA);
     let q = "SELECT ?o WHERE { <http://ex/a> <http://ex/p>+ ?o }";
     let (_r, t) = traced(&g, q);
-    assert_eq!(t.first_uncaptured(), Some(Op::Path), "path must fail closed");
+    assert_eq!(
+        t.first_uncaptured(),
+        Some(Op::Path),
+        "path must fail closed"
+    );
 }
 
 /// EXISTS inner scans are tagged in_exists and step-suppressed (EXISTS is
@@ -301,12 +331,16 @@ fn trace_is_deterministic_across_runs() {
 
 fn assert_boundary(t: &zk::ZkTrace, op: Op) {
     assert!(
-        t.steps.iter().any(|s| matches!(s, Step::Enter(o) if *o == op)),
+        t.steps
+            .iter()
+            .any(|s| matches!(s, Step::Enter(o) if *o == op)),
         "missing Enter({op:?}) in steps: {:?}",
         t.steps
     );
     assert!(
-        t.steps.iter().any(|s| matches!(s, Step::Exit(o) if *o == op)),
+        t.steps
+            .iter()
+            .any(|s| matches!(s, Step::Exit(o) if *o == op)),
         "missing Exit({op:?})"
     );
 }
@@ -322,7 +356,11 @@ fn sparq_zk_replay(t: &zk::ZkTrace) -> Graph {
     let mut ids = Vec::new();
     for pm in &t.patterns {
         for tr in &pm.triples {
-            ids.push([dict.intern(&tr[0]), dict.intern(&tr[1]), dict.intern(&tr[2])]);
+            ids.push([
+                dict.intern(&tr[0]),
+                dict.intern(&tr[1]),
+                dict.intern(&tr[2]),
+            ]);
         }
     }
     Graph::from_parts(dict, ids)

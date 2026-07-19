@@ -136,15 +136,15 @@ pub mod query {
     use sparq_engine::{query, QueryResult};
 
     pub mod canned;
-    /// The PKG **natural-language tool** envelope (agent flavor, sq-ve5dy): run a query
-    /// and return the executed SPARQL + resolved IRIs + grounding confidence so the
-    /// caller can verify the answer was computed, not guessed. [OPUS-4.8] sq-ve5dy
-    pub mod nl_tool;
     /// Citation renderer for PKG-native canned-query answers (sq-2489d.11):
     /// renders `prov:wasDerivedFrom` source citations beside `FINDING_PROVENANCE`
     /// rows and reports citation-resolution-rate + fabricated-citation count.
     /// [SONNET-4.6] sq-2489d.11
     pub mod citations;
+    /// The PKG **natural-language tool** envelope (agent flavor, sq-ve5dy): run a query
+    /// and return the executed SPARQL + resolved IRIs + grounding confidence so the
+    /// caller can verify the answer was computed, not guessed. [OPUS-4.8] sq-ve5dy
+    pub mod nl_tool;
 
     /// Load the PKG ontology + the ingested instances (including the trust-graph
     /// provenance tier, [`crate::PKG_TRUST_GRAPH_FINDINGS`]) into one queryable

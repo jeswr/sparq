@@ -299,7 +299,10 @@ async fn explain_deregistered_after_completion() {
 /// backing store; we keep a clone BEFORE handing ownership to `router()`.
 #[tokio::test]
 async fn explain_registered_while_in_flight_via_state_accessor() {
-    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     // Shared counter: the background task writes the peak observed count.
     let peak_count = Arc::new(AtomicUsize::new(0));

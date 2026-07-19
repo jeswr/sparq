@@ -190,8 +190,10 @@ fn print_case_provenance(case: &sparq_nlq::eval::CaseResult) {
             SPARQ_NLQ_ENDPOINT_KEY (optional) + the olympics.nt dataset"]
 fn endpoint_exec_accuracy() {
     let Some(dataset_path) = olympics_path() else {
-        eprintln!("skipping: olympics.nt not present (set SPARQ_OLYMPICS_NT or place at \
-                   bench/qlever-olympics/olympics.nt)");
+        eprintln!(
+            "skipping: olympics.nt not present (set SPARQ_OLYMPICS_NT or place at \
+                   bench/qlever-olympics/olympics.nt)"
+        );
         return;
     };
 
@@ -260,7 +262,11 @@ fn endpoint_exec_accuracy() {
         if !rec.exchanges().is_empty() {
             let out = fixture_dir.join(format!("endpoint_session_{i}.json"));
             match rec.save(&out) {
-                Ok(()) => eprintln!("wrote {} exchanges to {}", rec.exchanges().len(), out.display()),
+                Ok(()) => eprintln!(
+                    "wrote {} exchanges to {}",
+                    rec.exchanges().len(),
+                    out.display()
+                ),
                 Err(e) => eprintln!("warning: could not write session fixture: {e}"),
             }
         }

@@ -56,8 +56,7 @@ fn sparql_flags_violating_nodes() {
     assert_eq!(r.results.len(), 2, "{}", r.to_text());
     for res in &r.results {
         assert!(
-            res.source_component
-                .ends_with("SPARQLConstraintComponent"),
+            res.source_component.ends_with("SPARQLConstraintComponent"),
             "component: {}",
             res.source_component
         );
@@ -273,7 +272,10 @@ fn sparql_property_shape_path_pre_binding() {
     assert!(res.focus_node.to_string().contains("bad"));
     assert_eq!(res.value.as_ref().unwrap().to_string(), "\"Spain\"@en");
     // The property shape's path is inherited as sh:resultPath.
-    assert_eq!(res.path.as_ref().unwrap().to_turtle(), "<http://example.org/germanLabel>");
+    assert_eq!(
+        res.path.as_ref().unwrap().to_turtle(),
+        "<http://example.org/germanLabel>"
+    );
 }
 
 /// When the SELECT does not project `?value`, `sh:value` defaults to the focus
@@ -302,9 +304,15 @@ fn sparql_value_defaults_to_focus_and_path_binding() {
     assert_eq!(r.results.len(), 1, "{}", r.to_text());
     let res = &r.results[0];
     // ?value not projected -> sh:value is the focus node.
-    assert_eq!(res.value.as_ref().unwrap().to_string(), res.focus_node.to_string());
+    assert_eq!(
+        res.value.as_ref().unwrap().to_string(),
+        res.focus_node.to_string()
+    );
     // ?path bound to an IRI -> sh:resultPath.
-    assert_eq!(res.path.as_ref().unwrap().to_turtle(), "<http://example.org/age>");
+    assert_eq!(
+        res.path.as_ref().unwrap().to_turtle(),
+        "<http://example.org/age>"
+    );
 }
 
 /// Pre-binding must land BELOW solution modifiers: a `SELECT DISTINCT … LIMIT`
@@ -386,7 +394,9 @@ fn sparql_report_turtle_parses() {
     let r = run(data, &shapes);
     assert!(!r.conforms);
     let ttl = r.to_turtle();
-    let parsed: Result<Vec<_>, _> = oxttl::TurtleParser::new().for_slice(ttl.as_bytes()).collect();
+    let parsed: Result<Vec<_>, _> = oxttl::TurtleParser::new()
+        .for_slice(ttl.as_bytes())
+        .collect();
     let triples = parsed.unwrap_or_else(|e| panic!("report Turtle does not parse: {e}\n{ttl}"));
     assert!(triples
         .iter()

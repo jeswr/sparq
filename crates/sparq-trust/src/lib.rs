@@ -120,6 +120,15 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+/// The N3 proof-admissibility ruleset over `sparq-reason` — the §4.3 ODRL →
+/// admissible-proof-set reduction (`strongerThan`-closure / `atLeast` /
+/// `overDimension` / `satisfies`) run as a runnable Notation3 ruleset, with the
+/// Rust default-deny universal (`sq-ufsi9`, Phase 2). Behind the default-OFF
+/// `secprop-admissibility` feature (which enables `secprop-vocab`): nothing in
+/// the lean default build depends on it.
+#[cfg(feature = "secprop-admissibility")]
+#[cfg_attr(docsrs, doc(cfg(feature = "secprop-admissibility")))]
+pub mod admissibility;
 pub mod admit;
 pub mod delegation;
 /// PROV-O delegation audit for human + AI agents (the P5 audit half, `sq-pfae.6`): render
@@ -134,19 +143,6 @@ pub mod delegation_prov;
 #[cfg(feature = "did")]
 #[cfg_attr(docsrs, doc(cfg(feature = "did")))]
 pub mod did;
-pub mod policy;
-/// The N3 proof-admissibility ruleset over `sparq-reason` — the §4.3 ODRL →
-/// admissible-proof-set reduction (`strongerThan`-closure / `atLeast` /
-/// `overDimension` / `satisfies`) run as a runnable Notation3 ruleset, with the
-/// Rust default-deny universal (`sq-ufsi9`, Phase 2). Behind the default-OFF
-/// `secprop-admissibility` feature (which enables `secprop-vocab`): nothing in
-/// the lean default build depends on it.
-#[cfg(feature = "secprop-admissibility")]
-#[cfg_attr(docsrs, doc(cfg(feature = "secprop-admissibility")))]
-pub mod admissibility;
-#[cfg(feature = "secprop-vocab")]
-#[cfg_attr(docsrs, doc(cfg(feature = "secprop-vocab")))]
-pub mod secprop;
 /// The `trustx:` certification-scope vocabulary (`framework_vocab` module +
 /// `trust-framework.ttl`) — the trust-expression program's layer for expressing
 /// framework-certified-issuer trust and issuer certification scope over the
@@ -174,13 +170,10 @@ pub mod framework_vocab;
 #[cfg(feature = "cert-graph")]
 #[cfg_attr(docsrs, doc(cfg(feature = "cert-graph")))]
 pub mod graph;
-/// The trust-document storage / authoring model — server-wide vs per-`.acr` documents,
-/// versioning, revocation, and the admission cache key that composes with the
-/// sparq-solid epoch cache (the P4 model, `sq-pfae.5`). Behind the default-OFF `store`
-/// feature: nothing in the lean default build depends on it.
-#[cfg(feature = "store")]
-#[cfg_attr(docsrs, doc(cfg(feature = "store")))]
-pub mod store;
+pub mod policy;
+#[cfg(feature = "secprop-vocab")]
+#[cfg_attr(docsrs, doc(cfg(feature = "secprop-vocab")))]
+pub mod secprop;
 /// Live credential status / revocation over a W3C Bitstring Status List + a minimal PROV-O
 /// denial justification (the P6 status stratum, `sq-pfae.7`): fetch (pluggable resolver) +
 /// decode (multibase + a pluggable GZIP seam) a status list, gate derivations **fail-closed
@@ -191,16 +184,23 @@ pub mod store;
 #[cfg(feature = "status-list")]
 #[cfg_attr(docsrs, doc(cfg(feature = "status-list")))]
 pub mod status_list;
+/// The trust-document storage / authoring model — server-wide vs per-`.acr` documents,
+/// versioning, revocation, and the admission cache key that composes with the
+/// sparq-solid epoch cache (the P4 model, `sq-pfae.5`). Behind the default-OFF `store`
+/// feature: nothing in the lean default build depends on it.
+#[cfg(feature = "store")]
+#[cfg_attr(docsrs, doc(cfg(feature = "store")))]
+pub mod store;
 pub mod vocab;
 pub mod wire;
 
 #[cfg(feature = "secprop-admissibility")]
 pub use admissibility::{admissible, ruleset, Admissibility};
+#[cfg(feature = "status-list")]
+pub use admit::admit_with_status;
 pub use admit::{
     admit, admit_static, AdmittedFact, PresentedCredential, Session, StaticAdmittedFact,
 };
-#[cfg(feature = "status-list")]
-pub use admit::admit_with_status;
 #[cfg(feature = "secprop-precheck")]
 pub use admit::{
     admit_with_precheck, AdmissibilityConstraint, AdmissibilityPreference, PrecheckOutcome,
@@ -220,7 +220,7 @@ pub use did::{
 };
 #[cfg(feature = "cert-graph")]
 pub use graph::{
-    certification_message, derive_effective_rules, explain_edge, Certification, CertScope,
+    certification_message, derive_effective_rules, explain_edge, CertScope, Certification,
     EdgeRejection,
 };
 pub use policy::{parse_policy, ControlGate, PolicyError, ShapeRef, TrustRule};
@@ -231,14 +231,14 @@ pub use policy::{resolve_rule_keys, IssuerBinding};
 // the admission gate) do NOT need a direct `sparq-zk` dependency — `sparq-trust` is the
 // single dependency chokepoint.
 pub use sparq_zk::sig::{public_key_from_hex, PublicKey};
-#[cfg(feature = "store")]
-pub use store::{
-    AdmissionCacheKey, PolicyVersion, StoreError, TrustDocument, TrustLayer, TrustStore,
-};
 #[cfg(feature = "status-list")]
 pub use status_list::{
     decode_encoded_list, justify_status_decision, GzipDecoder, IdentityGzipDecoder, LiveStatus,
     LiveStatusCheck, SignedStatusList, StatusBitstring, StatusJustification, StatusListEntry,
     StatusListResolver, StatusPurpose, VerifiedStatusListResolver, VerifyingLiveStatusCheck,
+};
+#[cfg(feature = "store")]
+pub use store::{
+    AdmissionCacheKey, PolicyVersion, StoreError, TrustDocument, TrustLayer, TrustStore,
 };
 pub use wire::{derive_conditional_grants, derive_grants, ConditionalGrant};

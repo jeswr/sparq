@@ -10,9 +10,9 @@
 //! (`CRDT-WIRE-3`, `CRDT-UPD-RETRY-1`) without this crate having to trust any
 //! third-party serialiser's output details.
 
-use crate::CrdtError;
 use crate::id::{Dot, ReplicaId};
 use crate::summary::CausalSummary;
+use crate::CrdtError;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
@@ -209,10 +209,12 @@ pub(crate) fn expect_str<'v>(
     what: &'static str,
     key: &str,
 ) -> Result<&'v str, CrdtError> {
-    map.get(key).and_then(Value::as_str).ok_or(CrdtError::Invalid {
-        what,
-        reason: format!("field {key:?} must be a JSON string"),
-    })
+    map.get(key)
+        .and_then(Value::as_str)
+        .ok_or(CrdtError::Invalid {
+            what,
+            reason: format!("field {key:?} must be a JSON string"),
+        })
 }
 
 /// Requires `map[key]` to be a JSON array and returns it.
@@ -221,10 +223,12 @@ pub(crate) fn expect_array<'v>(
     what: &'static str,
     key: &str,
 ) -> Result<&'v Vec<Value>, CrdtError> {
-    map.get(key).and_then(Value::as_array).ok_or(CrdtError::Invalid {
-        what,
-        reason: format!("field {key:?} must be a JSON array"),
-    })
+    map.get(key)
+        .and_then(Value::as_array)
+        .ok_or(CrdtError::Invalid {
+            what,
+            reason: format!("field {key:?} must be a JSON array"),
+        })
 }
 
 /// Parses a `["<b64url replica>","<dec counter>"]` value into a [`Dot`].
@@ -259,10 +263,13 @@ pub(crate) fn parse_summary(
     max_cloud_dots: usize,
 ) -> Result<CausalSummary, CrdtError> {
     let map = expect_object(v, what, &["clock", "cloud"])?;
-    let clock_map = map.get("clock").and_then(Value::as_object).ok_or(CrdtError::Invalid {
-        what,
-        reason: "field \"clock\" must be a JSON object".into(),
-    })?;
+    let clock_map = map
+        .get("clock")
+        .and_then(Value::as_object)
+        .ok_or(CrdtError::Invalid {
+            what,
+            reason: "field \"clock\" must be a JSON object".into(),
+        })?;
     if clock_map.len() > max_clock_entries {
         return Err(CrdtError::Oversized {
             what: "summary clock entries",
@@ -303,10 +310,7 @@ pub(crate) fn parse_summary(
 
 /// Rejects a slice that is not strictly ascending (which also rejects
 /// duplicates), per the canonical array-sorting rules of `CRDT-WIRE-3`.
-pub(crate) fn require_strictly_ascending<T: Ord>(
-    items: &[T],
-    what: &str,
-) -> Result<(), CrdtError> {
+pub(crate) fn require_strictly_ascending<T: Ord>(items: &[T], what: &str) -> Result<(), CrdtError> {
     for window in items.windows(2) {
         if window[0] >= window[1] {
             return Err(CrdtError::NonCanonical {
@@ -352,7 +356,16 @@ mod tests {
         assert_eq!(parse_dec_u64("0").unwrap(), 0);
         assert_eq!(parse_dec_u64("42").unwrap(), 42);
         assert_eq!(parse_dec_u64("18446744073709551615").unwrap(), u64::MAX);
-        for bad in ["", "01", "+1", "-1", "1.0", "1e3", " 1", "18446744073709551616"] {
+        for bad in [
+            "",
+            "01",
+            "+1",
+            "-1",
+            "1.0",
+            "1e3",
+            " 1",
+            "18446744073709551616",
+        ] {
             assert!(parse_dec_u64(bad).is_err(), "{bad:?} must be rejected");
         }
     }
@@ -418,8 +431,16 @@ mod tests {
     #[test]
     fn parse_dot_requires_two_string_elements() {
         let good: Value = serde_json::from_str("[\"cGVlci1h\",\"1\"]").unwrap();
-        assert_eq!(parse_dot(&good, "test").unwrap(), Dot::new(rid(b"peer-a"), 1).unwrap());
-        for bad in ["[\"cGVlci1h\"]", "[\"cGVlci1h\",1]", "[\"cGVlci1h\",\"0\"]", "\"x\""] {
+        assert_eq!(
+            parse_dot(&good, "test").unwrap(),
+            Dot::new(rid(b"peer-a"), 1).unwrap()
+        );
+        for bad in [
+            "[\"cGVlci1h\"]",
+            "[\"cGVlci1h\",1]",
+            "[\"cGVlci1h\",\"0\"]",
+            "\"x\"",
+        ] {
             let v: Value = serde_json::from_str(bad).unwrap();
             assert!(parse_dot(&v, "test").is_err(), "{bad:?} must be rejected");
         }

@@ -2,10 +2,8 @@ name: CI
 
 # Correctness gate (roadmap G1). Build + test the whole workspace on every push to main and every
 # PR — the regression safety net the "no regressions in functionality" constraint requires.
-# clippy now GATES with -D warnings (the workspace is warning-clean). rustfmt runs informationally
-# until the one-time `cargo fmt --all` reformat lands (deferred behind the in-flight branches —
-# see rustfmt.toml); flip it to a hard gate once that reformat merges. Heavy benchmarks live in
-# bench.yml / bench-ec2.yml, NOT here.
+# clippy GATES with -D warnings and rustfmt GATES the workspace formatting. Heavy benchmarks live
+# in bench.yml / bench-ec2.yml, NOT here.
 on:
   push:
     branches: [main]
@@ -1113,15 +1111,9 @@ jobs:
   # panics — needed by the panic-surface test). No duplicate job here. [OPUS-4.8]
 
   lint:
-    # [OPUS-4.8] sq-wjth: the display name must NOT contain the words "informational"
-    # or "advisory" — the ci-summary gate treats any check whose NAME contains either
-    # (case-insensitive) as NON-GATING. clippy here GATES (it's the `-D warnings` hard
-    # gate); only the fmt step is non-blocking. So name it "fmt (non-blocking)" to keep
-    # the meaning while staying out of the advisory exclusion set. (The collision: the
-    # former name "clippy (gate) + fmt (informational)" was wrongly matched by that rule
-    # and would have stopped the clippy gate from gating — verified by hand-tracing the
-    # jq filter against every check name.)
-    name: clippy (gate) + fmt (non-blocking)
+    # [OPUS-4.8] sq-0lk: both checks hard-fail this job. Keep the display name free of
+    # "informational" and "advisory" because ci-summary excludes those names from gating.
+    name: fmt + clippy (gate)
     needs: changes
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
@@ -1199,10 +1191,8 @@ jobs:
         run: |
           cargo clippy --manifest-path bench/dict/Cargo.toml --all-targets -- -D warnings
           cargo run --manifest-path bench/dict/Cargo.toml -- selftest
-      # Informational until the deferred `cargo fmt --all` reformat lands (see rustfmt.toml).
-      - name: rustfmt (informational)
+      - name: rustfmt (check)
         run: cargo fmt --all --check
-        continue-on-error: true
 
   msrv:
     # [OPUS-4.8] sq-ucwf: ENFORCE the declared MSRV. The workspace pins

@@ -69,12 +69,16 @@ impl AccessProvenance {
 
     /// The trusted creator WebID of `resource`, if the caller supplied one.
     pub fn creator(&self, resource: &str) -> Option<&str> {
-        self.by_resource.get(resource).and_then(|p| p.creator.as_deref())
+        self.by_resource
+            .get(resource)
+            .and_then(|p| p.creator.as_deref())
     }
 
     /// The trusted owner WebID of `resource`, if the caller supplied one.
     pub fn owner(&self, resource: &str) -> Option<&str> {
-        self.by_resource.get(resource).and_then(|p| p.owner.as_deref())
+        self.by_resource
+            .get(resource)
+            .and_then(|p| p.owner.as_deref())
     }
 
     /// Whether any creator or owner fact was supplied (an empty map materializes no

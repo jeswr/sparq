@@ -144,7 +144,10 @@ impl ScalarQuantizer {
         let mut seen = false;
         for v in vectors {
             if v.len() != dim {
-                return Err(format!("vector has dim {}, quantizer has dim {dim}", v.len()));
+                return Err(format!(
+                    "vector has dim {}, quantizer has dim {dim}",
+                    v.len()
+                ));
             }
             normalize_into(v, &mut buf);
             for d in 0..dim {
@@ -155,7 +158,11 @@ impl ScalarQuantizer {
         }
         if !seen {
             // Degenerate: no training data. Zero ranges → all-zero codes, reconstruct → 0.
-            return Ok(ScalarQuantizer { dim, min: vec![0.0; dim], step: vec![0.0; dim] });
+            return Ok(ScalarQuantizer {
+                dim,
+                min: vec![0.0; dim],
+                step: vec![0.0; dim],
+            });
         }
         let step: Vec<f32> = (0..dim)
             .map(|d| {
@@ -179,7 +186,13 @@ impl ScalarQuantizer {
     /// clamps to 0 and above the learned max clamps to 255, so an out-of-training-range query
     /// vector still encodes safely. Panics on a dimension mismatch (a programming error).
     pub fn encode(&self, v: &[f32]) -> Vec<u8> {
-        assert_eq!(v.len(), self.dim, "encode dim {} != quantizer dim {}", v.len(), self.dim);
+        assert_eq!(
+            v.len(),
+            self.dim,
+            "encode dim {} != quantizer dim {}",
+            v.len(),
+            self.dim
+        );
         let mut buf = vec![0f32; self.dim];
         normalize_into(v, &mut buf);
         let mut out = vec![0u8; self.dim];
@@ -205,8 +218,16 @@ impl ScalarQuantizer {
     /// this if you want SQ-only ranking, or treat it as the lossy preview before a full-precision
     /// re-rank. Panics on a code length mismatch.
     pub fn reconstruct(&self, code: &[u8]) -> Vec<f32> {
-        assert_eq!(code.len(), self.dim, "code len {} != quantizer dim {}", code.len(), self.dim);
-        (0..self.dim).map(|d| self.min[d] + code[d] as f32 * self.step[d]).collect()
+        assert_eq!(
+            code.len(),
+            self.dim,
+            "code len {} != quantizer dim {}",
+            code.len(),
+            self.dim
+        );
+        (0..self.dim)
+            .map(|d| self.min[d] + code[d] as f32 * self.step[d])
+            .collect()
     }
 
     /// Encodes every vector in `store` into a flat `count × dim`-byte array (slot order, matching
@@ -215,7 +236,11 @@ impl ScalarQuantizer {
     /// mismatch.
     pub fn encode_store(&self, store: &VectorStore) -> Result<EncodedStore, String> {
         if store.dim() != self.dim {
-            return Err(format!("store dim {} != quantizer dim {}", store.dim(), self.dim));
+            return Err(format!(
+                "store dim {} != quantizer dim {}",
+                store.dim(),
+                self.dim
+            ));
         }
         let mut codes = Vec::with_capacity(store.len() * self.dim);
         let mut ids = Vec::with_capacity(store.len());
@@ -227,7 +252,11 @@ impl ScalarQuantizer {
             codes.extend_from_slice(&row);
             ids.push(id);
         }
-        Ok(EncodedStore { ids, codes, stride: self.dim })
+        Ok(EncodedStore {
+            ids,
+            codes,
+            stride: self.dim,
+        })
     }
 }
 
@@ -273,7 +302,12 @@ impl Default for PqConfig {
     fn default() -> Self {
         // M = 16 subspaces × 256 centroids: 16 bytes/vector. For dim=32 (the synthetic gate set)
         // that is two dims per subspace, 8× compression vs 128-byte f32; for dim=128 it is 32×.
-        PqConfig { m: 16, k: 256, iters: 20, seed: 0x5350_5051_0001 }
+        PqConfig {
+            m: 16,
+            k: 256,
+            iters: 20,
+            seed: 0x5350_5051_0001,
+        }
     }
 }
 
@@ -303,7 +337,10 @@ impl ProductQuantizer {
         let mut buf = vec![0f32; dim];
         for v in vectors {
             if v.len() != dim {
-                return Err(format!("vector has dim {}, quantizer has dim {dim}", v.len()));
+                return Err(format!(
+                    "vector has dim {}, quantizer has dim {dim}",
+                    v.len()
+                ));
             }
             normalize_into(v, &mut buf);
             train.extend_from_slice(&buf);
@@ -327,7 +364,13 @@ impl ProductQuantizer {
             })
             .collect();
 
-        Ok(ProductQuantizer { dim, m: cfg.m, k: cfg.k, sub_offsets, centroids })
+        Ok(ProductQuantizer {
+            dim,
+            m: cfg.m,
+            k: cfg.k,
+            sub_offsets,
+            centroids,
+        })
     }
 
     /// The vector dimension this quantizer was fitted for.
@@ -357,7 +400,13 @@ impl ProductQuantizer {
     /// Encodes one vector to its `M`-byte PQ code (L2-normalized first): for each subspace, the id
     /// of the nearest centroid. Panics on a dimension mismatch (a programming error).
     pub fn encode(&self, v: &[f32]) -> Vec<u8> {
-        assert_eq!(v.len(), self.dim, "encode dim {} != quantizer dim {}", v.len(), self.dim);
+        assert_eq!(
+            v.len(),
+            self.dim,
+            "encode dim {} != quantizer dim {}",
+            v.len(),
+            self.dim
+        );
         let mut buf = vec![0f32; self.dim];
         normalize_into(v, &mut buf);
         let mut out = vec![0u8; self.m];
@@ -387,7 +436,13 @@ impl ProductQuantizer {
     /// Reconstructs an approximate (normalized-space) vector by concatenating the chosen centroid
     /// of each subspace — the PQ re-rank preview. Panics on a code length mismatch.
     pub fn reconstruct(&self, code: &[u8]) -> Vec<f32> {
-        assert_eq!(code.len(), self.m, "code len {} != M {}", code.len(), self.m);
+        assert_eq!(
+            code.len(),
+            self.m,
+            "code len {} != M {}",
+            code.len(),
+            self.m
+        );
         let mut out = vec![0f32; self.dim];
         for (s, &c) in code.iter().enumerate() {
             let (lo, hi) = (self.sub_offsets[s], self.sub_offsets[s + 1]);
@@ -452,9 +507,18 @@ impl ProductQuantizer {
             off = need;
         }
         if off != bytes.len() {
-            return Err(format!("PQ codebook block has {} trailing bytes", bytes.len() - off));
+            return Err(format!(
+                "PQ codebook block has {} trailing bytes",
+                bytes.len() - off
+            ));
         }
-        Ok(ProductQuantizer { dim, m, k, sub_offsets, centroids })
+        Ok(ProductQuantizer {
+            dim,
+            m,
+            k,
+            sub_offsets,
+            centroids,
+        })
     }
 
     /// Encodes every vector in `store` into a flat `count × M`-byte code array (slot order,
@@ -462,7 +526,11 @@ impl ProductQuantizer {
     /// cache for [`DiskAnnIndex`](crate::diskann::DiskAnnIndex). Errors on a dim mismatch.
     pub fn encode_store(&self, store: &VectorStore) -> Result<EncodedStore, String> {
         if store.dim() != self.dim {
-            return Err(format!("store dim {} != quantizer dim {}", store.dim(), self.dim));
+            return Err(format!(
+                "store dim {} != quantizer dim {}",
+                store.dim(),
+                self.dim
+            ));
         }
         let mut codes = Vec::with_capacity(store.len() * self.m);
         let mut ids = Vec::with_capacity(store.len());
@@ -474,7 +542,11 @@ impl ProductQuantizer {
             codes.extend_from_slice(&row);
             ids.push(id);
         }
-        Ok(EncodedStore { ids, codes, stride: self.m })
+        Ok(EncodedStore {
+            ids,
+            codes,
+            stride: self.m,
+        })
     }
 }
 
@@ -497,7 +569,14 @@ fn subspace_offsets(dim: usize, m: usize) -> Vec<usize> {
 /// row-major, `n × sub_len`). Returns `k` centroids row-major (`k × sub_len`). When `n < k`, the
 /// `n` points become the first `n` centroids and the rest are duplicated from point 0 (so empty
 /// clusters never produce NaN centroids — they just never win an assignment).
-fn kmeans(data: &[f32], n: usize, sub_len: usize, k: usize, iters: usize, state: &mut u64) -> Vec<f32> {
+fn kmeans(
+    data: &[f32],
+    n: usize,
+    sub_len: usize,
+    k: usize,
+    iters: usize,
+    state: &mut u64,
+) -> Vec<f32> {
     debug_assert_eq!(data.len(), n * sub_len);
     let point = |i: usize| &data[i * sub_len..(i + 1) * sub_len];
     let mut centroids = vec![0f32; k * sub_len];
@@ -607,7 +686,13 @@ impl DistanceTable {
     /// Builds the table for `query` (L2-normalized first, the cosine convention) against `pq`.
     /// Panics on a dimension mismatch.
     pub fn new(pq: &ProductQuantizer, query: &[f32]) -> DistanceTable {
-        assert_eq!(query.len(), pq.dim, "query dim {} != quantizer dim {}", query.len(), pq.dim);
+        assert_eq!(
+            query.len(),
+            pq.dim,
+            "query dim {} != quantizer dim {}",
+            query.len(),
+            pq.dim
+        );
         let mut buf = vec![0f32; pq.dim];
         normalize_into(query, &mut buf);
         let mut tables = vec![0f32; pq.m * pq.k];
@@ -618,13 +703,23 @@ impl DistanceTable {
                 tables[s * pq.k + c] = sq_dist(subq, pq.centroid(s, c));
             }
         }
-        DistanceTable { m: pq.m, k: pq.k, tables }
+        DistanceTable {
+            m: pq.m,
+            k: pq.k,
+            tables,
+        }
     }
 
     /// Estimated squared-Euclidean distance from the query to a PQ `code` (the ADC sum). Panics on
     /// a code length mismatch.
     pub fn distance(&self, code: &[u8]) -> f32 {
-        assert_eq!(code.len(), self.m, "code len {} != M {}", code.len(), self.m);
+        assert_eq!(
+            code.len(),
+            self.m,
+            "code len {} != M {}",
+            code.len(),
+            self.m
+        );
         let mut acc = 0f32;
         for (s, &c) in code.iter().enumerate() {
             acc += self.tables[s * self.k + c as usize];
@@ -664,7 +759,10 @@ impl EncodedStore {
         if stride == 0 && !codes.is_empty() {
             return Err("EncodedStore stride must be > 0 when codes are present".into());
         }
-        let expect = ids.len().checked_mul(stride).ok_or("EncodedStore code length overflow")?;
+        let expect = ids
+            .len()
+            .checked_mul(stride)
+            .ok_or("EncodedStore code length overflow")?;
         if codes.len() != expect {
             return Err(format!(
                 "EncodedStore codes len {} != ids {} × stride {stride}",
@@ -718,6 +816,9 @@ impl EncodedStore {
         // Ascending distance = descending cosine; tie-break ascending id.
         scored.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
         scored.truncate(k);
-        scored.into_iter().map(|(id, d)| (id, cosine_from_sq_dist(d))).collect()
+        scored
+            .into_iter()
+            .map(|(id, d)| (id, cosine_from_sq_dist(d)))
+            .collect()
     }
 }

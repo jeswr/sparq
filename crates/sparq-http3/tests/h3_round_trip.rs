@@ -328,7 +328,8 @@ async fn per_connection_request_cap_backpressures_the_excess_request() -> TestRe
         .ok_or("the first request never entered the handler")?;
 
     let mut second_sender = sender.clone();
-    let second = tokio::spawn(async move { request(&mut second_sender, Method::GET, url, None).await });
+    let second =
+        tokio::spawn(async move { request(&mut second_sender, Method::GET, url, None).await });
     assert!(
         tokio::time::timeout(Duration::from_millis(250), entered_rx.recv())
             .await

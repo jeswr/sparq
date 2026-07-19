@@ -53,8 +53,10 @@ const ALICE_RELAXED_POLICY: &str = "\
 zk:rUnlink odrl:leftOperand secx:requiresUnlinkabilityScope ; odrl:operator odrl:gteq ; odrl:rightOperand secx:PerPresentation .\n\
 zk:rAssur  odrl:leftOperand secx:requiresAssurance          ; odrl:operator odrl:gteq ; odrl:rightOperand secx:Claimed .\n";
 
-const ALICE_RELAXED_CONSTRAINTS: &[&str] =
-    &["https://sparq.dev/ns/zk#rUnlink", "https://sparq.dev/ns/zk#rAssur"];
+const ALICE_RELAXED_CONSTRAINTS: &[&str] = &[
+    "https://sparq.dev/ns/zk#rUnlink",
+    "https://sparq.dev/ns/zk#rAssur",
+];
 
 /// THE GOLDEN INVARIANT: empty admissible set under the strict preference.
 #[test]
@@ -77,7 +79,10 @@ fn string_canonical_is_inadmissible_under_alices_strict_preference() {
     // and assurance (Claimed < Proven) — the honest, fully-explained refusal.
     let mut un = a.unsatisfied.clone();
     un.sort();
-    let mut want = ALICE_STRICT_CONSTRAINTS.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+    let mut want = ALICE_STRICT_CONSTRAINTS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect::<Vec<_>>();
     want.sort();
     assert_eq!(
         un, want,
@@ -103,7 +108,10 @@ fn string_canonical_is_admissible_under_the_relaxed_preference() {
          proving the gate is not vacuously empty): unsatisfied={:?}",
         a.unsatisfied
     );
-    assert!(a.unsatisfied.is_empty(), "no constraint may be unsatisfied when admissible");
+    assert!(
+        a.unsatisfied.is_empty(),
+        "no constraint may be unsatisfied when admissible"
+    );
 }
 
 /// The assurance gate is "just another dimension with the same discharge rule"
@@ -120,7 +128,10 @@ fn assurance_gate_removes_every_unaudited_method() {
         STRING_CANONICAL_ANNOTATIONS,
     )
     .expect("reasoning failed");
-    assert!(!a.admissible, "requiresAssurance gteq Proven must remove a Claimed-only method");
+    assert!(
+        !a.admissible,
+        "requiresAssurance gteq Proven must remove a Claimed-only method"
+    );
 
     // Drop the bar to Claimed and the SAME method clears the assurance gate.
     let relaxed_assur =
@@ -132,5 +143,8 @@ fn assurance_gate_removes_every_unaudited_method() {
         STRING_CANONICAL_ANNOTATIONS,
     )
     .expect("reasoning failed");
-    assert!(a2.admissible, "assurance gteq Claimed is met by a Claimed annotation");
+    assert!(
+        a2.admissible,
+        "assurance gteq Claimed is met by a Claimed annotation"
+    );
 }

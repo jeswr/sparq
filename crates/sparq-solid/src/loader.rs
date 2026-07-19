@@ -167,8 +167,16 @@ pub(crate) fn assemble_input(
     provenance: &AccessProvenance,
 ) -> Result<String, String> {
     let mut out = String::new();
-    let suffix = if system == System::Wac { ACL_SUFFIX } else { ACR_SUFFIX };
-    let own_pred = if system == System::Wac { "ownAcl" } else { "ownAcr" };
+    let suffix = if system == System::Wac {
+        ACL_SUFFIX
+    } else {
+        ACR_SUFFIX
+    };
+    let own_pred = if system == System::Wac {
+        "ownAcl"
+    } else {
+        "ownAcr"
+    };
 
     // 1) resources: every non-control, non-auth graph + every structural container
     //    prefix (containers exist as inheritance anchors even without their own graph).
@@ -297,7 +305,9 @@ fn collect_agents(
     groups: &mut FxHashSet<String>,
     principal_iris: &mut FxHashSet<String>,
 ) {
-    let (Term::NamedNode(p), Term::NamedNode(o)) = (&t[1], &t[2]) else { return };
+    let (Term::NamedNode(p), Term::NamedNode(o)) = (&t[1], &t[2]) else {
+        return;
+    };
     match p.as_str() {
         ACL_AGENT | ACP_AGENT | VCARD_MEMBER => {
             if !SPECIAL_AGENTS.contains(&o.as_str()) {
@@ -364,7 +374,10 @@ mod tests {
 
     #[test]
     fn parent_walks_to_root_and_stops() {
-        assert_eq!(parent_iri("https://pod.ex/a/b/doc.ttl"), Some("https://pod.ex/a/b/"));
+        assert_eq!(
+            parent_iri("https://pod.ex/a/b/doc.ttl"),
+            Some("https://pod.ex/a/b/")
+        );
         assert_eq!(parent_iri("https://pod.ex/a/b/"), Some("https://pod.ex/a/"));
         assert_eq!(parent_iri("https://pod.ex/a/"), Some("https://pod.ex/"));
         assert_eq!(parent_iri("https://pod.ex/"), None);
@@ -378,7 +391,7 @@ mod tests {
         assert_eq!(iri_origin("https://pod.ex/"), "https://pod.ex");
         assert_eq!(iri_origin("https://pod.ex"), "https://pod.ex"); // authority, no path
         assert_eq!(iri_origin("http://host:8080/x"), "http://host:8080"); // port kept
-        // Every graph a `.acl` at origin O governs shares O — the scoping soundness key.
+                                                                          // Every graph a `.acl` at origin O governs shares O — the scoping soundness key.
         let acl = "https://pod.ex/notes/.acl";
         assert_eq!(iri_origin(acl), iri_origin("https://pod.ex/notes/n1"));
         assert_ne!(iri_origin(acl), iri_origin("https://other.ex/notes/n1"));

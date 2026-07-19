@@ -198,7 +198,10 @@ fn w3c_shacl12_core_full_suite() {
         "\nW3C SHACL 1.2 FULL core suite scoreboard (shacl-af = {})",
         cfg!(feature = "shacl-af")
     );
-    println!("{:<24} {:>5} {:>5} {:>5}", "category", "pass", "fail", "skip");
+    println!(
+        "{:<24} {:>5} {:>5} {:>5}",
+        "category", "pass", "fail", "skip"
+    );
     for (group, (p, f, s)) in &score.by_group {
         println!("{group:<24} {p:>5} {f:>5} {s:>5}");
         pass += p;

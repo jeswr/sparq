@@ -478,9 +478,7 @@ impl ChangeLog {
                             // anomalous — keep it (fail-safe) rather than guess its age.
                             None => false,
                             Some(newest) => {
-                                newest
-                                    .timestamp_unix_nanos
-                                    .saturating_add(age.as_nanos())
+                                newest.timestamp_unix_nanos.saturating_add(age.as_nanos())
                                     <= now_unix_nanos
                             }
                         }
@@ -1830,7 +1828,11 @@ mod tests {
     fn one_record_segments(
         tmp: &Path,
         n: u64,
-    ) -> (ChangeLog, GenerationRing<Graph>, std::sync::Arc<Generation<Graph>>) {
+    ) -> (
+        ChangeLog,
+        GenerationRing<Graph>,
+        std::sync::Arc<Generation<Graph>>,
+    ) {
         let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
         let mut prev = ring.current();
         let config = ChangeLogConfig {
@@ -1985,7 +1987,10 @@ mod tests {
                 ..Default::default()
             })
             .expect("partial ack");
-        assert_eq!(report.segments_dropped, 0, "half-acked segment must survive");
+        assert_eq!(
+            report.segments_dropped, 0,
+            "half-acked segment must survive"
+        );
         assert_eq!(log.first_seq(), 0);
 
         // Ack through seq 1: segment 0 is now fully acked -> dropped; seq 2 is not acked.
@@ -2229,7 +2234,9 @@ mod tests {
         let all = log.poll(0).expect("poll");
         assert_eq!(all.len(), 3);
         assert_eq!(
-            all.iter().map(|r| (r.seq, r.generation, r.rebase)).collect::<Vec<_>>(),
+            all.iter()
+                .map(|r| (r.seq, r.generation, r.rebase))
+                .collect::<Vec<_>>(),
             vec![(0, 1, false), (1, 2, true), (2, 3, false)]
         );
         let _ = fs::remove_dir_all(&tmp);
@@ -2416,7 +2423,11 @@ mod tests {
 
         hook(&g0, &g1); // recorded: seq 0, generation 1
         hook(&g2, &g3); // the g1->g2 record was never made: discontinuity, dropped
-        assert_eq!(dropped.load(Ordering::SeqCst), 1, "the broken append is reported");
+        assert_eq!(
+            dropped.load(Ordering::SeqCst),
+            1,
+            "the broken append is reported"
+        );
 
         // Operator resync THROUGH THE CONTROL, with the hook still armed.
         let gap = control.rebase_to(g2.number()).expect("live rebase");
@@ -2440,7 +2451,10 @@ mod tests {
         // The post-restore variant is exposed on the control too: a restarted numbering
         // (generation 0 after generation 3) is accepted only through the explicit
         // new-lineage path.
-        assert!(control.rebase_to(0).is_err(), "same-lineage stays forward-only");
+        assert!(
+            control.rebase_to(0).is_err(),
+            "same-lineage stays forward-only"
+        );
         let gap = control
             .rebase_to_new_lineage(0)
             .expect("lineage rebase via the control");
@@ -2488,12 +2502,16 @@ mod tests {
         assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
 
         // The explicit new-lineage rebase accepts the restarted baseline.
-        let gap = log.rebase_to_new_lineage(r0.number()).expect("lineage rebase");
+        let gap = log
+            .rebase_to_new_lineage(r0.number())
+            .expect("lineage rebase");
         assert_eq!((gap.seq, gap.generation, gap.rebase), (2, 0, true));
         assert_eq!(log.last_generation(), Some(0), "baseline restarted");
 
         // Recording chains from the restarted numbering; seqs stay monotonic.
-        let rec = log.record_commit(&r0, &r1).expect("record on the new lineage");
+        let rec = log
+            .record_commit(&r0, &r1)
+            .expect("record on the new lineage");
         assert_eq!((rec.seq, rec.generation), (3, 1));
 
         let reopened = ChangeLog::open(&tmp).expect("reopen");

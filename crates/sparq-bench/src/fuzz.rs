@@ -1219,7 +1219,10 @@ ex:n4 ex:val "s2" .
         );
         let s = std::fs::read_to_string(path).expect("committed allowlist readable");
         let a = DivergenceAllowlist::from_json(&s, path);
-        assert!(a.cross_family_eq_type_error, "sq-eibog class must be listed");
+        assert!(
+            a.cross_family_eq_type_error,
+            "sq-eibog class must be listed"
+        );
         assert!(a.bnode_iri_inequality, "sq-ai2wa class must be listed");
         // …and the file lists NOTHING this comparator lacks a detector for (an
         // undetectable entry would be a claimed-but-unenforced allowlisting).
@@ -1267,8 +1270,7 @@ ex:n4 ex:val "s2" .
         store
             .load_from_reader(oxigraph::io::RdfFormat::Turtle, ttl.as_bytes())
             .unwrap();
-        let q_iri =
-            "PREFIX ex: <http://ex/>\nSELECT ?s WHERE { ?s ex:val ?v FILTER(?v != ex:n0) }";
+        let q_iri = "PREFIX ex: <http://ex/>\nSELECT ?s WHERE { ?s ex:val ?v FILTER(?v != ex:n0) }";
         assert!(
             is_bnode_iri_inequality(&store, q_iri),
             "bnode-vs-IRI != must be detected"

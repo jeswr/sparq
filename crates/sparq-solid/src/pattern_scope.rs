@@ -65,7 +65,11 @@ impl ScopePattern {
 
     /// The all-wildcard pattern (matches every triple).
     pub fn any() -> Self {
-        ScopePattern { s: None, p: None, o: None }
+        ScopePattern {
+            s: None,
+            p: None,
+            o: None,
+        }
     }
 
     /// `true` iff every concrete component equals the triple's component
@@ -91,13 +95,19 @@ impl GraphScope {
     /// A scope granting ONLY the given patterns (an ODRL *permission* targeting a
     /// pattern asset). An empty list grants nothing.
     pub fn allow_only(allow: Vec<ScopePattern>) -> Self {
-        GraphScope { allow, deny: Vec::new() }
+        GraphScope {
+            allow,
+            deny: Vec::new(),
+        }
     }
 
     /// A scope granting the whole graph EXCEPT the given patterns (an ODRL
     /// *prohibition* carving a hole out of an otherwise-granted graph).
     pub fn deny_within(deny: Vec<ScopePattern>) -> Self {
-        GraphScope { allow: vec![ScopePattern::any()], deny }
+        GraphScope {
+            allow: vec![ScopePattern::any()],
+            deny,
+        }
     }
 
     /// The visibility predicate: matches ≥ 1 allow AND 0 deny.
@@ -115,9 +125,17 @@ pub fn masked_graph(base: &Graph, scope: &GraphScope) -> Graph {
     let mut ids = Vec::new();
     for row in scan.rows.iter() {
         let spo = scan.to_spo(row);
-        let terms = [base.dict.term(spo[0]), base.dict.term(spo[1]), base.dict.term(spo[2])];
+        let terms = [
+            base.dict.term(spo[0]),
+            base.dict.term(spo[1]),
+            base.dict.term(spo[2]),
+        ];
         if scope.visible(&terms) {
-            ids.push([dict.intern(&terms[0]), dict.intern(&terms[1]), dict.intern(&terms[2])]);
+            ids.push([
+                dict.intern(&terms[0]),
+                dict.intern(&terms[1]),
+                dict.intern(&terms[2]),
+            ]);
         }
     }
     Graph::from_parts(dict, ids)
@@ -157,7 +175,11 @@ impl ScopedDataset {
     /// [`PodStore::view_for`]. Take it to drive any other engine entry point via
     /// `sparq_engine::with_view`.
     pub fn view(&self) -> DatasetView<'_> {
-        DatasetView { base: &self.graph, named: Arc::clone(&self.named), default: DefaultGraphMode::Empty }
+        DatasetView {
+            base: &self.graph,
+            named: Arc::clone(&self.named),
+            default: DefaultGraphMode::Empty,
+        }
     }
 
     /// Evaluate a read query over the replica — the same read-path rewrite
@@ -202,7 +224,12 @@ impl PodStore {
     /// The replica materializes every contributing graph (O(accessible dataset) —
     /// measured envelope in `bench/pattern-scope/`); reuse it across queries and
     /// rebuild it after any store mutation or re-materialization.
-    pub fn scoped_dataset(&self, s: &Session, mode: Mode, scopes: &FxHashMap<Term, GraphScope>) -> ScopedDataset {
+    pub fn scoped_dataset(
+        &self,
+        s: &Session,
+        mode: Mode,
+        scopes: &FxHashMap<Term, GraphScope>,
+    ) -> ScopedDataset {
         let accessible = self.accessible_set(s, mode);
         let full = GraphScope::deny_within(Vec::new());
         let mut decisions: FxHashMap<Term, GraphScope> = FxHashMap::default();
@@ -214,7 +241,10 @@ impl PodStore {
         }
         let graph = masked_dataset(&self.graph, &decisions);
         let named: FxHashSet<Term> = graph.named.iter().map(|(n, _)| n.clone()).collect();
-        ScopedDataset { graph, named: Arc::new(named) }
+        ScopedDataset {
+            graph,
+            named: Arc::new(named),
+        }
     }
 }
 
@@ -258,7 +288,10 @@ mod tests {
         let p = ScopePattern::new(None, Some(iri(T.1)), None);
         assert!(GraphScope::allow_only(vec![p.clone()]).visible(&t));
         // …but an equally-matching deny overrides it.
-        let both = GraphScope { allow: vec![p.clone()], deny: vec![p] };
+        let both = GraphScope {
+            allow: vec![p.clone()],
+            deny: vec![p],
+        };
         assert!(!both.visible(&t));
     }
 
@@ -277,8 +310,14 @@ mod tests {
             "ntriples",
         )
         .unwrap();
-        let masked =
-            masked_graph(&g, &GraphScope::deny_within(vec![ScopePattern::new(None, Some(iri("http://ex/p")), None)]));
+        let masked = masked_graph(
+            &g,
+            &GraphScope::deny_within(vec![ScopePattern::new(
+                None,
+                Some(iri("http://ex/p")),
+                None,
+            )]),
+        );
         assert_eq!(masked.len(), 1);
         let none = masked_graph(&g, &GraphScope::allow_only(Vec::new()));
         assert_eq!(none.len(), 0);
@@ -320,14 +359,23 @@ mod tests {
     }
 
     fn alice() -> Session<'static> {
-        Session { agent: Some("https://alice.ex/card#me"), client: None, issuer: None, now: None }
+        Session {
+            agent: Some("https://alice.ex/card#me"),
+            client: None,
+            issuer: None,
+            now: None,
+        }
     }
 
     fn hide_scope() -> FxHashMap<Term, GraphScope> {
         let mut scopes = FxHashMap::default();
         scopes.insert(
             iri("https://pod.ex/d"),
-            GraphScope::deny_within(vec![ScopePattern::new(None, Some(iri("http://ex/hide")), None)]),
+            GraphScope::deny_within(vec![ScopePattern::new(
+                None,
+                Some(iri("http://ex/hide")),
+                None,
+            )]),
         );
         scopes
     }
@@ -336,7 +384,11 @@ mod tests {
     fn scoped_dataset_refines_the_accessible_set() {
         let store = pod();
         let scoped = store.scoped_dataset(&alice(), Mode::Read, &hide_scope());
-        assert_eq!(scoped.graph.named.len(), 1, "only the accessible data graph");
+        assert_eq!(
+            scoped.graph.named.len(),
+            1,
+            "only the accessible data graph"
+        );
         assert_eq!(scoped.graph.named[0].1.len(), 1, "hide-triple masked out");
         // Grant-less session: nothing, no matter the scopes.
         let none = store.scoped_dataset(&Session::default(), Mode::Read, &hide_scope());
@@ -374,7 +426,11 @@ mod tests {
     #[test]
     fn scoped_dataset_ask_masks() {
         let scoped = pod().scoped_dataset(&alice(), Mode::Read, &hide_scope());
-        assert!(scoped.ask("ASK { GRAPH ?g { ?s <http://ex/p> ?o } }").unwrap());
-        assert!(!scoped.ask("ASK { GRAPH ?g { ?s <http://ex/hide> ?o } }").unwrap());
+        assert!(scoped
+            .ask("ASK { GRAPH ?g { ?s <http://ex/p> ?o } }")
+            .unwrap());
+        assert!(!scoped
+            .ask("ASK { GRAPH ?g { ?s <http://ex/hide> ?o } }")
+            .unwrap());
     }
 }

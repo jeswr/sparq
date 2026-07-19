@@ -381,10 +381,12 @@ fn read_components(
             (false, 'M') if kind != DurKind::DayTime => *months += BigInt::from_str(num).ok()?,
             // Day/time axis — illegal in a `yearMonthDuration`.
             (false, 'D') if kind != DurKind::YearMonth => {
-                *seconds = seconds.clone() + BigDecimal::from_str(num).ok()? * BigDecimal::from(86_400)
+                *seconds =
+                    seconds.clone() + BigDecimal::from_str(num).ok()? * BigDecimal::from(86_400)
             }
             (true, 'H') if kind != DurKind::YearMonth => {
-                *seconds = seconds.clone() + BigDecimal::from_str(num).ok()? * BigDecimal::from(3_600)
+                *seconds =
+                    seconds.clone() + BigDecimal::from_str(num).ok()? * BigDecimal::from(3_600)
             }
             (true, 'M') if kind != DurKind::YearMonth => {
                 *seconds = seconds.clone() + BigDecimal::from_str(num).ok()? * BigDecimal::from(60)
@@ -446,12 +448,18 @@ mod tests {
     fn dt_compare_timezone_equivalence() {
         // Same instant, different lexical -> Equal.
         assert_eq!(
-            dt_compare(&dt("2020-01-01T13:00:00Z"), &dt("2020-01-01T14:00:00+01:00")),
+            dt_compare(
+                &dt("2020-01-01T13:00:00Z"),
+                &dt("2020-01-01T14:00:00+01:00")
+            ),
             TemporalOrder::Equal
         );
         // Different instant -> definite order.
         assert_eq!(
-            dt_compare(&dt("2020-01-01T13:00:00Z"), &dt("2020-01-01T13:00:00-05:00")),
+            dt_compare(
+                &dt("2020-01-01T13:00:00Z"),
+                &dt("2020-01-01T13:00:00-05:00")
+            ),
             TemporalOrder::Less
         );
         // Timezone-less vs timezoned, well outside ±14h -> definite.
@@ -528,24 +536,57 @@ mod tests {
     #[test]
     fn parse_datetime_rejects_invalid_calendar_fields() {
         // Out-of-range month/day must NOT value-canonicalise — they fall back to exact-lexical keying.
-        assert!(parse_datetime("2020-00-01T00:00:00Z", DT).is_none(), "month 0");
-        assert!(parse_datetime("2020-13-01T00:00:00Z", DT).is_none(), "month 13");
-        assert!(parse_datetime("2020-01-00T00:00:00Z", DT).is_none(), "day 0");
-        assert!(parse_datetime("2020-01-32T00:00:00Z", DT).is_none(), "day 32");
-        assert!(parse_datetime("2019-04-31", DATE).is_none(), "April has 30 days");
-        assert!(parse_datetime("2021-02-29", DATE).is_none(), "29 Feb in a non-leap year");
+        assert!(
+            parse_datetime("2020-00-01T00:00:00Z", DT).is_none(),
+            "month 0"
+        );
+        assert!(
+            parse_datetime("2020-13-01T00:00:00Z", DT).is_none(),
+            "month 13"
+        );
+        assert!(
+            parse_datetime("2020-01-00T00:00:00Z", DT).is_none(),
+            "day 0"
+        );
+        assert!(
+            parse_datetime("2020-01-32T00:00:00Z", DT).is_none(),
+            "day 32"
+        );
+        assert!(
+            parse_datetime("2019-04-31", DATE).is_none(),
+            "April has 30 days"
+        );
+        assert!(
+            parse_datetime("2021-02-29", DATE).is_none(),
+            "29 Feb in a non-leap year"
+        );
         // Real dates are still accepted, including the leap day of a leap year.
-        assert!(parse_datetime("2020-02-29", DATE).is_some(), "2020 is a leap year");
+        assert!(
+            parse_datetime("2020-02-29", DATE).is_some(),
+            "2020 is a leap year"
+        );
         assert!(parse_datetime("2019-04-30", DATE).is_some());
     }
 
     #[test]
     fn parse_time_rejects_out_of_range_and_accepts_end_of_day() {
         // Hour/minute ranges and a non-negative seconds component in [0, 60).
-        assert!(parse_datetime("2020-01-01T25:00:00Z", DT).is_none(), "hour 25");
-        assert!(parse_datetime("2020-01-01T00:60:00Z", DT).is_none(), "minute 60");
-        assert!(parse_datetime("2020-01-01T00:00:60Z", DT).is_none(), "second 60 (no leap seconds)");
-        assert!(parse_datetime("2020-01-01T00:00:-1Z", DT).is_none(), "negative second");
+        assert!(
+            parse_datetime("2020-01-01T25:00:00Z", DT).is_none(),
+            "hour 25"
+        );
+        assert!(
+            parse_datetime("2020-01-01T00:60:00Z", DT).is_none(),
+            "minute 60"
+        );
+        assert!(
+            parse_datetime("2020-01-01T00:00:60Z", DT).is_none(),
+            "second 60 (no leap seconds)"
+        );
+        assert!(
+            parse_datetime("2020-01-01T00:00:-1Z", DT).is_none(),
+            "negative second"
+        );
         // The XSD end-of-day form 24:00:00 equals 00:00:00 of the next day (so it must canonicalise).
         assert_eq!(
             dt_compare(&dt("2020-01-01T24:00:00Z"), &dt("2020-01-02T00:00:00Z")),
@@ -559,12 +600,27 @@ mod tests {
     #[test]
     fn parse_datetime_rejects_out_of_range_timezone() {
         // XSD timezone range is ±14:00; the bound itself is inclusive but must have zero minutes.
-        assert!(parse_datetime("2020-01-01T00:00:00+14:00", DT).is_some(), "±14:00 is the bound");
+        assert!(
+            parse_datetime("2020-01-01T00:00:00+14:00", DT).is_some(),
+            "±14:00 is the bound"
+        );
         assert!(parse_datetime("2020-01-01T00:00:00-14:00", DT).is_some());
-        assert!(parse_datetime("2020-01-01T00:00:00+15:00", DT).is_none(), "beyond ±14:00");
-        assert!(parse_datetime("2020-01-01T00:00:00+14:30", DT).is_none(), "14:30 exceeds the bound");
-        assert!(parse_datetime("2020-01-01T00:00:00+00:60", DT).is_none(), "tz minute 60");
-        assert!(parse_datetime("2020-01-01-15:00", DATE).is_none(), "date tz beyond ±14:00");
+        assert!(
+            parse_datetime("2020-01-01T00:00:00+15:00", DT).is_none(),
+            "beyond ±14:00"
+        );
+        assert!(
+            parse_datetime("2020-01-01T00:00:00+14:30", DT).is_none(),
+            "14:30 exceeds the bound"
+        );
+        assert!(
+            parse_datetime("2020-01-01T00:00:00+00:60", DT).is_none(),
+            "tz minute 60"
+        );
+        assert!(
+            parse_datetime("2020-01-01-15:00", DATE).is_none(),
+            "date tz beyond ±14:00"
+        );
     }
 
     #[test]
@@ -586,24 +642,51 @@ mod tests {
         // `xsd:yearMonthDuration`: only Y and (date) M; every day/time unit is rejected.
         assert!(parse_duration("P1M", YM).is_some());
         assert!(parse_duration("P1Y2M", YM).is_some());
-        assert!(parse_duration("P30D", YM).is_none(), "day is not a yearMonth unit");
-        assert!(parse_duration("PT1H", YM).is_none(), "a time part is illegal in yearMonth");
-        assert!(parse_duration("P1YT0S", YM).is_none(), "even a zero time part is illegal");
+        assert!(
+            parse_duration("P30D", YM).is_none(),
+            "day is not a yearMonth unit"
+        );
+        assert!(
+            parse_duration("PT1H", YM).is_none(),
+            "a time part is illegal in yearMonth"
+        );
+        assert!(
+            parse_duration("P1YT0S", YM).is_none(),
+            "even a zero time part is illegal"
+        );
         // `xsd:dayTimeDuration`: only D and (time) H/M/S; year and (date) month are rejected.
         assert!(parse_duration("PT1H", DAYT).is_some());
         assert!(parse_duration("P1DT2H3M4.5S", DAYT).is_some());
-        assert!(parse_duration("P1Y", DAYT).is_none(), "year is not a dayTime unit");
-        assert!(parse_duration("P1M", DAYT).is_none(), "date-side month is not a dayTime unit");
+        assert!(
+            parse_duration("P1Y", DAYT).is_none(),
+            "year is not a dayTime unit"
+        );
+        assert!(
+            parse_duration("P1M", DAYT).is_none(),
+            "date-side month is not a dayTime unit"
+        );
     }
 
     #[test]
     fn parse_duration_only_seconds_may_be_fractional() {
         // Seconds may carry a fraction; nothing else may.
         assert!(parse_duration("PT1.5S", DUR).is_some());
-        assert!(parse_duration("P1.5D", DUR).is_none(), "fractional day is invalid");
-        assert!(parse_duration("P1.5M", DUR).is_none(), "fractional (date) month is invalid");
-        assert!(parse_duration("PT1.5H", DUR).is_none(), "fractional hour is invalid");
-        assert!(parse_duration("PT1.5M", DUR).is_none(), "fractional minute is invalid");
+        assert!(
+            parse_duration("P1.5D", DUR).is_none(),
+            "fractional day is invalid"
+        );
+        assert!(
+            parse_duration("P1.5M", DUR).is_none(),
+            "fractional (date) month is invalid"
+        );
+        assert!(
+            parse_duration("PT1.5H", DUR).is_none(),
+            "fractional hour is invalid"
+        );
+        assert!(
+            parse_duration("PT1.5M", DUR).is_none(),
+            "fractional minute is invalid"
+        );
     }
 
     #[test]
@@ -611,8 +694,14 @@ mod tests {
         // Correct order is accepted.
         assert!(parse_duration("P1Y2M3DT4H5M6S", DUR).is_some());
         // Out-of-order units are an invalid lexical (must fall back to exact-lexical keying).
-        assert!(parse_duration("P1D2Y", DUR).is_none(), "date units out of order");
-        assert!(parse_duration("PT1M2H", DUR).is_none(), "time units out of order");
+        assert!(
+            parse_duration("P1D2Y", DUR).is_none(),
+            "date units out of order"
+        );
+        assert!(
+            parse_duration("PT1M2H", DUR).is_none(),
+            "time units out of order"
+        );
         // A repeated unit is invalid.
         assert!(parse_duration("P1Y1Y", DUR).is_none(), "repeated year");
         assert!(parse_duration("PT1S2S", DAYT).is_none(), "repeated second");
@@ -655,7 +744,9 @@ mod tests {
         );
         // Timezone-less never collides with timezoned.
         assert_ne!(
-            parse_datetime("2020-01-01T13:00:00", DT).unwrap().canonical_key(),
+            parse_datetime("2020-01-01T13:00:00", DT)
+                .unwrap()
+                .canonical_key(),
             dt("2020-01-01T13:00:00Z").canonical_key()
         );
         // P1Y and P12M key the same by value.

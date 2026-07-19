@@ -48,19 +48,33 @@ fn xsd(frag: &str) -> String {
 /// Validate `tree` (which must conclude `expect`, if given) against `asserted` (rendered
 /// base triples). Every rule application is re-checked independently; panics with a
 /// description on the first invalid step.
-pub fn check_proof(tree: &ProofTree, asserted: &FxHashSet<[String; 3]>, expect: Option<&[String; 3]>) {
+pub fn check_proof(
+    tree: &ProofTree,
+    asserted: &FxHashSet<[String; 3]>,
+    expect: Option<&[String; 3]>,
+) {
     let nodes = tree.nodes();
     assert!(!nodes.is_empty(), "empty proof");
-    assert_eq!(tree.root() as usize, nodes.len() - 1, "root must be the last node");
+    assert_eq!(
+        tree.root() as usize,
+        nodes.len() - 1,
+        "root must be the last node"
+    );
     if let Some(e) = expect {
         assert_eq!(tree.conclusion(), e, "proof concludes the wrong triple");
     }
     for (i, n) in nodes.iter().enumerate() {
         for &p in &n.premises {
-            assert!((p as usize) < i, "node {i}: premise {p} not before conclusion");
+            assert!(
+                (p as usize) < i,
+                "node {i}: premise {p} not before conclusion"
+            );
         }
-        let prem: Vec<&[String; 3]> =
-            n.premises.iter().map(|&p| &nodes[p as usize].conclusion).collect();
+        let prem: Vec<&[String; 3]> = n
+            .premises
+            .iter()
+            .map(|&p| &nodes[p as usize].conclusion)
+            .collect();
         let c = &n.conclusion;
         let fail = |msg: &str| panic!("node {i} [{}] {c:?} ← {prem:?}: {msg}", n.rule);
         let eq = |a: &str, b: &str, msg: &str| {
@@ -82,7 +96,9 @@ pub fn check_proof(tree: &ProofTree, asserted: &FxHashSet<[String; 3]>, expect: 
                     fail("axiom leaf with premises");
                 }
                 let ok = c[1] == SC
-                    && XSD_PAIRS.iter().any(|&(a, b)| c[0] == xsd(a) && c[2] == xsd(b));
+                    && XSD_PAIRS
+                        .iter()
+                        .any(|&(a, b)| c[0] == xsd(a) && c[2] == xsd(b));
                 if !ok {
                     fail("not an XSD numeric-tower subclass axiom");
                 }
@@ -91,9 +107,8 @@ pub fn check_proof(tree: &ProofTree, asserted: &FxHashSet<[String; 3]>, expect: 
                 if !prem.is_empty() {
                     fail("axiom leaf with premises");
                 }
-                let ok = c[1] == TY
-                    && c[2] == OWL_CLASS
-                    && (c[0] == OWL_THING || c[0] == OWL_NOTHING);
+                let ok =
+                    c[1] == TY && c[2] == OWL_CLASS && (c[0] == OWL_THING || c[0] == OWL_NOTHING);
                 if !ok {
                     fail("not the owl:Thing/Nothing typing axiom");
                 }
@@ -110,7 +125,11 @@ pub fn check_proof(tree: &ProofTree, asserted: &FxHashSet<[String; 3]>, expect: 
             }
             // (a R m), (m R n) ⊢ (a R n) for R = subClassOf / subPropertyOf
             "rdfs11" | "scm-sco" | "rdfs5" | "scm-spo" => {
-                let r = if matches!(n.rule.as_str(), "rdfs11" | "scm-sco") { SC } else { SP };
+                let r = if matches!(n.rule.as_str(), "rdfs11" | "scm-sco") {
+                    SC
+                } else {
+                    SP
+                };
                 let [p0, p1] = two(&prem);
                 eq(&p0[1], r, "premise 0 wrong predicate");
                 eq(&p1[1], r, "premise 1 wrong predicate");
@@ -179,8 +198,11 @@ pub fn check_proof(tree: &ProofTree, asserted: &FxHashSet<[String; 3]>, expect: 
             "prp-eqp1" | "prp-eqp2" => {
                 let [p0, p1] = two(&prem);
                 eq(&p0[1], EQP, "premise 0 not equivalentProperty");
-                let (from, to) =
-                    if n.rule == "prp-eqp1" { (&p0[0], &p0[2]) } else { (&p0[2], &p0[0]) };
+                let (from, to) = if n.rule == "prp-eqp1" {
+                    (&p0[0], &p0[2])
+                } else {
+                    (&p0[2], &p0[0])
+                };
                 eq(&p1[1], from, "data premise predicate mismatch");
                 eq(&c[0], &p1[0], "subject mismatch");
                 eq(&c[1], to, "conclusion predicate mismatch");
@@ -201,7 +223,11 @@ pub fn check_proof(tree: &ProofTree, asserted: &FxHashSet<[String; 3]>, expect: 
             }
             // (a eqc b) ⊢ (a sc b) / (b sc a);   property analogue scm-eqp1
             "scm-eqc1" | "scm-eqp1" => {
-                let (epred, rpred) = if n.rule == "scm-eqc1" { (EQC, SC) } else { (EQP, SP) };
+                let (epred, rpred) = if n.rule == "scm-eqc1" {
+                    (EQC, SC)
+                } else {
+                    (EQP, SP)
+                };
                 let [p0] = one(&prem);
                 eq(&p0[1], epred, "premise not an equivalence");
                 eq(&c[1], rpred, "conclusion wrong predicate");
@@ -213,7 +239,11 @@ pub fn check_proof(tree: &ProofTree, asserted: &FxHashSet<[String; 3]>, expect: 
             }
             // (a sc b), (b sc a) ⊢ (a eqc b);   property analogue scm-eqp2
             "scm-eqc2" | "scm-eqp2" => {
-                let (epred, rpred) = if n.rule == "scm-eqc2" { (EQC, SC) } else { (EQP, SP) };
+                let (epred, rpred) = if n.rule == "scm-eqc2" {
+                    (EQC, SC)
+                } else {
+                    (EQP, SP)
+                };
                 let [p0, p1] = two(&prem);
                 eq(&p0[1], rpred, "premise 0 wrong predicate");
                 eq(&p1[1], rpred, "premise 1 wrong predicate");
@@ -250,7 +280,11 @@ pub fn check_proof(tree: &ProofTree, asserted: &FxHashSet<[String; 3]>, expect: 
             // ENGINE rule (semantics of inverseOf, not in the RL table):
             // (p inv q | q inv p), (p dom c) ⊢ (q rng c)  /  (p rng c) ⊢ (q dom c)
             "inv-dom" | "inv-rng" => {
-                let (src_dr, dst_dr) = if n.rule == "inv-dom" { (RNG, DOM) } else { (DOM, RNG) };
+                let (src_dr, dst_dr) = if n.rule == "inv-dom" {
+                    (RNG, DOM)
+                } else {
+                    (DOM, RNG)
+                };
                 let [p0, p1] = two(&prem);
                 eq(&p0[1], INV, "premise 0 not inverseOf");
                 eq(&p1[1], src_dr, "premise 1 wrong predicate");

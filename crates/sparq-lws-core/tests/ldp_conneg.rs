@@ -248,7 +248,8 @@ fn expanded_profile_output_is_the_default_serialisation_byte_for_byte() {
     // The serialiser's default output IS the expanded document form (top-level array, no
     // `@context`), so the expanded profile is honoured with byte-identical output — which is why
     // it shares the plain-JSON-LD variant ETag.
-    let turtle = b"<https://pod.example/alice/data#me> <http://xmlns.com/foaf/0.1/name> \"Alice\" .";
+    let turtle =
+        b"<https://pod.example/alice/data#me> <http://xmlns.com/foaf/0.1/name> \"Alice\" .";
     let triples =
         parse_to_triples(RdfFormat::Turtle, turtle, "https://pod.example/alice/data").unwrap();
     let default = serialize_triples(RdfFormat::JsonLd, &triples).unwrap();

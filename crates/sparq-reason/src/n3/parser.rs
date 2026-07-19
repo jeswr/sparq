@@ -68,7 +68,12 @@ pub fn parse_turtle_with_base(src: &str, base: &str) -> Result<Parsed, String> {
     p.base = base.to_string();
     p.strict = true;
     let stmts = p.document()?;
-    Ok(Parsed { facts: stmts, rules: Vec::new(), backward_rules: Vec::new(), base: base.to_string() })
+    Ok(Parsed {
+        facts: stmts,
+        rules: Vec::new(),
+        backward_rules: Vec::new(),
+        base: base.to_string(),
+    })
 }
 
 /// As [`parse`], but resolves relative IRIs (in IRIREFs and `@prefix`/`@base`
@@ -85,7 +90,10 @@ pub fn parse_with_base(src: &str, base: &str) -> Result<Parsed, String> {
         match (&pred, &s, &o) {
             // { premise } => { conclusion }
             (Term::Iri(i), Term::Formula(prem), Term::Formula(concl)) if i == LOG_IMPLIES => {
-                rules.push(Rule { premise: prem.clone(), conclusion: concl.clone() });
+                rules.push(Rule {
+                    premise: prem.clone(),
+                    conclusion: concl.clone(),
+                });
             }
             // { conclusion } <= { premise } — a backward rule. EYE never fires these
             // forward: they are tried goal-directed when a forward-rule premise (or an
@@ -96,21 +104,30 @@ pub fn parse_with_base(src: &str, base: &str) -> Result<Parsed, String> {
             (Term::Iri(i), Term::Formula(concl), Term::Formula(prem))
                 if i == LOG_IMPLIED_BY || i == LOG_IMPLIED_BY_LEGACY =>
             {
-                backward_rules.push(Rule { premise: prem.clone(), conclusion: concl.clone() });
+                backward_rules.push(Rule {
+                    premise: prem.clone(),
+                    conclusion: concl.clone(),
+                });
             }
             // `{} => { conclusion }` — `{}` IS the literal true (N3 CG), an
             // always-true premise: fires unconditionally.
             (Term::Iri(i), Term::Lit(v, _, _), Term::Formula(concl))
                 if i == LOG_IMPLIES && v == "true" =>
             {
-                rules.push(Rule { premise: Vec::new(), conclusion: concl.clone() });
+                rules.push(Rule {
+                    premise: Vec::new(),
+                    conclusion: concl.clone(),
+                });
             }
             // { conclusion } <= true. — an always-provable backward fact schema (EYE's
             // idiom for backward base cases).
             (Term::Iri(i), Term::Formula(concl), Term::Lit(v, _, _))
                 if (i == LOG_IMPLIED_BY || i == LOG_IMPLIED_BY_LEGACY) && v == "true" =>
             {
-                backward_rules.push(Rule { premise: Vec::new(), conclusion: concl.clone() });
+                backward_rules.push(Rule {
+                    premise: Vec::new(),
+                    conclusion: concl.clone(),
+                });
             }
             _ => facts.push([s, pred, o]),
         }
@@ -124,7 +141,11 @@ pub fn parse_with_base(src: &str, base: &str) -> Result<Parsed, String> {
     // existentials belong to that graph (log:includes scoping needs them as
     // graph-local terms, not rule variables); blanks appearing ONLY in a
     // conclusion also stay blanks (instantiated fresh per firing).
-    for (ri, r) in rules.iter_mut().chain(backward_rules.iter_mut()).enumerate() {
+    for (ri, r) in rules
+        .iter_mut()
+        .chain(backward_rules.iter_mut())
+        .enumerate()
+    {
         let mut premise_blanks: std::collections::HashSet<String> = Default::default();
         collect_blanks(&r.premise, false, &mut premise_blanks);
         if premise_blanks.is_empty() {
@@ -140,7 +161,12 @@ pub fn parse_with_base(src: &str, base: &str) -> Result<Parsed, String> {
         rewrite_terms(&mut r.premise, false, &rename);
         rewrite_terms(&mut r.conclusion, false, &rename);
     }
-    Ok(Parsed { facts, rules, backward_rules, base: base.to_string() })
+    Ok(Parsed {
+        facts,
+        rules,
+        backward_rules,
+        base: base.to_string(),
+    })
 }
 
 /// The prefixes cwm resolves without declaration (its reference outputs rely
@@ -171,7 +197,11 @@ fn nil_to_list(t: Term) -> Term {
 
 /// Collect blank labels; `into_formulae` controls whether quoted `{ … }`
 /// graphs are descended into (lists always are — they are plain structure).
-fn collect_blanks(stmts: &[[Term; 3]], into_formulae: bool, out: &mut std::collections::HashSet<String>) {
+fn collect_blanks(
+    stmts: &[[Term; 3]],
+    into_formulae: bool,
+    out: &mut std::collections::HashSet<String>,
+) {
     for row in stmts {
         for t in row {
             collect_blanks_term(t, into_formulae, out);
@@ -313,7 +343,10 @@ impl<'a> Parser<'a> {
             return false;
         }
         self.s[self.i..end].eq_ignore_ascii_case(kw.as_bytes())
-            && self.s.get(end).is_none_or(|c| is_ws_byte(*c) || *c == b'<' || *c == b':')
+            && self
+                .s
+                .get(end)
+                .is_none_or(|c| is_ws_byte(*c) || *c == b'<' || *c == b':')
     }
 
     // ---- top level -----------------------------------------------------------
@@ -368,7 +401,10 @@ impl<'a> Parser<'a> {
             } else {
                 Term::Blank(format!("__ex_{local}"))
             };
-            self.quants.last_mut().expect("scope stack").insert(iri, term);
+            self.quants
+                .last_mut()
+                .expect("scope stack")
+                .insert(iri, term);
             if !self.eat(b',') {
                 break;
             }
@@ -379,7 +415,10 @@ impl<'a> Parser<'a> {
 
     /// The quantified stand-in for `iri`, innermost scope first.
     fn quantified(&self, iri: &str) -> Option<Term> {
-        self.quants.iter().rev().find_map(|frame| frame.get(iri).cloned())
+        self.quants
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(iri).cloned())
     }
 
     fn directive_prefix(&mut self) -> Result<(), String> {
@@ -392,7 +431,9 @@ impl<'a> Parser<'a> {
         self.prefixes.insert(pfx, iri);
         let dotted = self.eat(b'.');
         if self.strict && at_form != dotted {
-            return Err("'@prefix' needs a final '.'; SPARQL-style PREFIX must not have one".into());
+            return Err(
+                "'@prefix' needs a final '.'; SPARQL-style PREFIX must not have one".into(),
+            );
         }
         Ok(())
     }
@@ -447,9 +488,7 @@ impl<'a> Parser<'a> {
         self.ws();
         let bracket_subject = self.peek() == Some(b'[');
         let subj = self.term(out)?;
-        if self.strict
-            && !matches!(subj, Term::Iri(_) | Term::Blank(_) | Term::List(_))
-        {
+        if self.strict && !matches!(subj, Term::Iri(_) | Term::Blank(_) | Term::List(_)) {
             return Err(format!("invalid Turtle subject {subj:?}"));
         }
         self.ws();
@@ -472,7 +511,11 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
-    fn predicate_object_list(&mut self, subj: &Term, out: &mut Vec<[Term; 3]>) -> Result<(), String> {
+    fn predicate_object_list(
+        &mut self,
+        subj: &Term,
+        out: &mut Vec<[Term; 3]>,
+    ) -> Result<(), String> {
         loop {
             self.ws();
             let (pred, swapped) = self.verb(out)?;
@@ -554,7 +597,10 @@ impl<'a> Parser<'a> {
                 let pred = self.term(_out)?;
                 self.ws();
                 if !self.keyword("of") {
-                    return Err(format!("expected 'of' after 'is <pred>' at byte {}", self.i));
+                    return Err(format!(
+                        "expected 'of' after 'is <pred>' at byte {}",
+                        self.i
+                    ));
                 }
                 return Ok((pred, true));
             }
@@ -696,7 +742,9 @@ impl<'a> Parser<'a> {
             }
             Some(b'(') => self.read_collection(out),
             Some(b'[') => self.read_bnode_propertylist(out),
-            Some(c) if c.is_ascii_digit() || c == b'+' || c == b'-' || c == b'.' => self.read_number(),
+            Some(c) if c.is_ascii_digit() || c == b'+' || c == b'-' || c == b'.' => {
+                self.read_number()
+            }
             Some(b'@') if !self.strict => {
                 // `@true` / `@false` (the explicit keyword forms under @keywords)
                 if self.starts_with("@true") {
@@ -711,12 +759,11 @@ impl<'a> Parser<'a> {
             }
             Some(_) => {
                 // prefixed name, `true`/`false`, or `a`
-                let bool_allowed = |kws: &Option<std::collections::HashSet<String>>, w: &str| {
-                    match kws {
+                let bool_allowed =
+                    |kws: &Option<std::collections::HashSet<String>>, w: &str| match kws {
                         Some(set) => set.contains(w),
                         None => true,
-                    }
-                };
+                    };
                 if bool_allowed(&self.keywords, "true") && self.keyword("true") {
                     return Ok(Term::Lit("true".into(), XSD_BOOLEAN.into(), None));
                 }
@@ -743,7 +790,9 @@ impl<'a> Parser<'a> {
         }
         let mut iri = String::new();
         loop {
-            let Some(c) = self.peek() else { return Err("unterminated IRI".into()) };
+            let Some(c) = self.peek() else {
+                return Err("unterminated IRI".into());
+            };
             match c {
                 b'>' => {
                     self.i += 1;
@@ -754,7 +803,9 @@ impl<'a> Parser<'a> {
                     // and the DECODED character is held to the same charset.
                     self.i += 1;
                     let ch = self.read_unicode_escape()?;
-                    if (ch as u32) <= 0x20 || matches!(ch, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`') {
+                    if (ch as u32) <= 0x20
+                        || matches!(ch, '<' | '>' | '"' | '{' | '}' | '|' | '^' | '`')
+                    {
                         return Err(format!("escaped character {ch:?} is not allowed in an IRI"));
                     }
                     iri.push(ch);
@@ -788,7 +839,8 @@ impl<'a> Parser<'a> {
         if self.i + digits > self.s.len() {
             return Err("truncated unicode escape".into());
         }
-        let hex = std::str::from_utf8(&self.s[self.i..self.i + digits]).map_err(|e| e.to_string())?;
+        let hex =
+            std::str::from_utf8(&self.s[self.i..self.i + digits]).map_err(|e| e.to_string())?;
         let cp = u32::from_str_radix(hex, 16).map_err(|_| format!("bad unicode escape '{hex}'"))?;
         self.i += digits;
         char::from_u32(cp).ok_or_else(|| format!("invalid code point U+{cp:X}"))
@@ -818,14 +870,19 @@ impl<'a> Parser<'a> {
         while self.i < self.s.len() {
             let c = self.s[self.i];
             if is_ws_byte(c)
-                || matches!(c, b';' | b',' | b']' | b'}' | b')' | b'(' | b'[' | b'{' | b'!' | b'^' | b'#')
+                || matches!(
+                    c,
+                    b';' | b',' | b']' | b'}' | b')' | b'(' | b'[' | b'{' | b'!' | b'^' | b'#'
+                )
             {
                 break; // '#' starts a comment — never part of an (unescaped) pname
             }
             if c == b'\\' {
                 // PN_LOCAL_ESC: the escaped punctuation char, literally.
                 self.i += 1;
-                let Some(e) = self.peek() else { return Err("truncated pname escape".into()) };
+                let Some(e) = self.peek() else {
+                    return Err("truncated pname escape".into());
+                };
                 if !br"_~.-!$&'()*+,;=/?#@%".contains(&e) {
                     return Err(format!("illegal pname escape '\\{}'", e as char));
                 }
@@ -867,11 +924,16 @@ impl<'a> Parser<'a> {
                     && !c.is_ascii_alphanumeric()
                     && !matches!(c, b'_' | b'-' | b'.' | b':' | b'%')
                 {
-                    return Err(format!("character '{}' must be escaped in a local name", c as char));
+                    return Err(format!(
+                        "character '{}' must be escaped in a local name",
+                        c as char
+                    ));
                 }
             }
             let len = utf8_len(c);
-            tok.push_str(std::str::from_utf8(&self.s[self.i..self.i + len]).map_err(|e| e.to_string())?);
+            tok.push_str(
+                std::str::from_utf8(&self.s[self.i..self.i + len]).map_err(|e| e.to_string())?,
+            );
             self.i += len;
         }
         let tok = tok.as_str();
@@ -955,7 +1017,9 @@ impl<'a> Parser<'a> {
             let c = self.s[self.i];
             if c == b'\\' {
                 self.i += 1;
-                let Some(e) = self.peek() else { return Err("truncated escape".into()) };
+                let Some(e) = self.peek() else {
+                    return Err("truncated escape".into());
+                };
                 match e {
                     b'n' => val.push('\n'),
                     b't' => val.push('\t'),
@@ -987,7 +1051,9 @@ impl<'a> Parser<'a> {
             }
             // utf-8 safe push
             let ch_len = utf8_len(c);
-            val.push_str(std::str::from_utf8(&self.s[self.i..self.i + ch_len]).map_err(|e| e.to_string())?);
+            val.push_str(
+                std::str::from_utf8(&self.s[self.i..self.i + ch_len]).map_err(|e| e.to_string())?,
+            );
             self.i += ch_len;
         }
         // datatype / lang
@@ -1002,9 +1068,9 @@ impl<'a> Parser<'a> {
             let valid = !lang.is_empty()
                 && lang.split('-').enumerate().all(|(k, part)| {
                     !part.is_empty()
-                        && part.bytes().all(|c| {
-                            c.is_ascii_alphabetic() || (k > 0 && c.is_ascii_digit())
-                        })
+                        && part
+                            .bytes()
+                            .all(|c| c.is_ascii_alphabetic() || (k > 0 && c.is_ascii_digit()))
                 });
             if !valid {
                 return Err(format!("invalid language tag '@{lang}'"));
@@ -1015,7 +1081,11 @@ impl<'a> Parser<'a> {
                 Some(lang.to_ascii_lowercase()),
             ))
         } else {
-            Ok(Term::Lit(val, "http://www.w3.org/2001/XMLSchema#string".into(), None))
+            Ok(Term::Lit(
+                val,
+                "http://www.w3.org/2001/XMLSchema#string".into(),
+                None,
+            ))
         }
     }
 
@@ -1061,7 +1131,10 @@ impl<'a> Parser<'a> {
                 // `1.5`, or `123.E+1` (Turtle DOUBLE allows an empty fraction)
                 is_decimal = true;
                 self.i += 1;
-            } else if (c == b'e' || c == b'E') && digits > 0 && !is_double && exp_next(self.i, self.s)
+            } else if (c == b'e' || c == b'E')
+                && digits > 0
+                && !is_double
+                && exp_next(self.i, self.s)
             {
                 is_double = true;
                 self.i += 1;
@@ -1078,7 +1151,13 @@ impl<'a> Parser<'a> {
         let txt = std::str::from_utf8(&self.s[start..self.i])
             .map_err(|e| e.to_string())?
             .to_string();
-        let dt = if is_double { XSD_DOUBLE } else if is_decimal { XSD_DECIMAL } else { XSD_INTEGER };
+        let dt = if is_double {
+            XSD_DOUBLE
+        } else if is_decimal {
+            XSD_DECIMAL
+        } else {
+            XSD_INTEGER
+        };
         Ok(Term::Lit(txt, dt.into(), None))
     }
 
@@ -1133,7 +1212,7 @@ impl<'a> Parser<'a> {
     fn read_quoted_triple(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
         self.enter()?;
         self.i += 2; // the caller verified `<<`
-        // RDF 1.2 triple-term form: the literal token `<<(` (no whitespace).
+                     // RDF 1.2 triple-term form: the literal token `<<(` (no whitespace).
         let paren = self.s.get(self.i) == Some(&b'(');
         if paren {
             self.i += 1;
@@ -1142,11 +1221,17 @@ impl<'a> Parser<'a> {
         let p = self.term(out)?;
         let o = self.term(out)?;
         if paren && !self.eat(b')') {
-            return Err(format!("expected ')' closing a <<( … )>> triple term at byte {}", self.i));
+            return Err(format!(
+                "expected ')' closing a <<( … )>> triple term at byte {}",
+                self.i
+            ));
         }
         self.ws();
         if !self.s[self.i..].starts_with(b">>") {
-            return Err(format!("expected '>>' closing a quoted triple at byte {}", self.i));
+            return Err(format!(
+                "expected '>>' closing a quoted triple at byte {}",
+                self.i
+            ));
         }
         self.i += 2;
         self.depth -= 1;
@@ -1213,9 +1298,11 @@ pub(super) fn resolve_iri(base: &str, iri: &str) -> String {
             Some(i) if i > 0 => {
                 let scheme = &s[..i];
                 scheme.starts_with(|c: char| c.is_ascii_alphabetic())
-                    && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
-                    // a pname-like "a:b" inside <> is still an IRI; treat any
-                    // syntactically valid scheme as absolute (RFC 3986 §4.3)
+                    && scheme
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+                // a pname-like "a:b" inside <> is still an IRI; treat any
+                // syntactically valid scheme as absolute (RFC 3986 §4.3)
             }
             _ => false,
         }
@@ -1251,7 +1338,11 @@ pub(super) fn resolve_iri(base: &str, iri: &str) -> String {
     } else {
         // Merge with the base path minus its last segment.
         let path_end = base.rfind('/').map(|i| i + 1).unwrap_or(base.len());
-        let dir = if path_end > authority_end { &base[..path_end] } else { base };
+        let dir = if path_end > authority_end {
+            &base[..path_end]
+        } else {
+            base
+        };
         if dir.ends_with('/') {
             format!("{dir}{iri}")
         } else {
@@ -1394,7 +1485,11 @@ mod parse_surface_tests {
         assert_eq!(p.facts.len(), 1);
         assert_eq!(
             p.facts[0],
-            [iri("http://base/Alice"), iri(RDF_TYPE), iri("http://ex/Person")],
+            [
+                iri("http://base/Alice"),
+                iri(RDF_TYPE),
+                iri("http://ex/Person")
+            ],
             "relative subject resolved against @base; `a` -> rdf:type; prefix expanded"
         );
         assert_eq!(p.base, "http://base/");
@@ -1409,14 +1504,33 @@ mod parse_surface_tests {
         let objs: Vec<&Term> = p.facts.iter().map(|t| &t[2]).collect();
         let rdf_lang_string = "http://www.w3.org/1999/02/22-rdf-syntax-ns#langString";
         assert!(
-            objs.contains(&&Term::Lit("txt".into(), rdf_lang_string.into(), Some("en".into()))),
+            objs.contains(&&Term::Lit(
+                "txt".into(),
+                rdf_lang_string.into(),
+                Some("en".into())
+            )),
             "lang-tagged literal carries rdf:langString + the lowercased tag"
         );
-        assert!(objs.contains(&&Term::Lit("v".into(), "http://ex/dt".into(), None)), "typed");
-        assert!(objs.contains(&&Term::Lit("true".into(), XSD_BOOLEAN.into(), None)), "boolean");
-        assert!(objs.contains(&&Term::Lit("42".into(), XSD_INTEGER.into(), None)), "integer");
-        assert!(objs.contains(&&Term::Lit("3.5".into(), XSD_DECIMAL.into(), None)), "decimal");
-        assert!(objs.contains(&&Term::Lit("6.0e2".into(), XSD_DOUBLE.into(), None)), "double");
+        assert!(
+            objs.contains(&&Term::Lit("v".into(), "http://ex/dt".into(), None)),
+            "typed"
+        );
+        assert!(
+            objs.contains(&&Term::Lit("true".into(), XSD_BOOLEAN.into(), None)),
+            "boolean"
+        );
+        assert!(
+            objs.contains(&&Term::Lit("42".into(), XSD_INTEGER.into(), None)),
+            "integer"
+        );
+        assert!(
+            objs.contains(&&Term::Lit("3.5".into(), XSD_DECIMAL.into(), None)),
+            "decimal"
+        );
+        assert!(
+            objs.contains(&&Term::Lit("6.0e2".into(), XSD_DOUBLE.into(), None)),
+            "double"
+        );
     }
 
     #[test]
@@ -1432,7 +1546,10 @@ mod parse_surface_tests {
         assert_eq!(p.rules[0].premise.len(), 1);
         assert_eq!(p.rules[0].conclusion.len(), 1);
         assert_eq!(p.backward_rules.len(), 1, "one backward rule");
-        assert!(p.backward_rules[0].premise.is_empty(), "`<= true` is an empty premise");
+        assert!(
+            p.backward_rules[0].premise.is_empty(),
+            "`<= true` is an empty premise"
+        );
         assert!(
             p.facts.iter().any(|t| t[1] == iri(OWL_SAME_AS)),
             "`=` desugars to owl:sameAs"
@@ -1457,7 +1574,11 @@ mod parse_surface_tests {
             .expect("collection");
         match &p.facts[0][2] {
             Term::List(items) => {
-                assert_eq!(items, &vec![iri("http://ex/a"), iri("http://ex/b")], "list members");
+                assert_eq!(
+                    items,
+                    &vec![iri("http://ex/a"), iri("http://ex/b")],
+                    "list members"
+                );
             }
             other => panic!("expected a List object, got {other:?}"),
         }
@@ -1471,7 +1592,10 @@ mod parse_surface_tests {
         )
         .expect("predicate/object lists");
         assert_eq!(p.facts.len(), 3, "two objects on p + one on q");
-        assert!(p.facts.iter().all(|t| t[0] == iri("http://ex/s")), "subject shared via `;`");
+        assert!(
+            p.facts.iter().all(|t| t[0] == iri("http://ex/s")),
+            "subject shared via `;`"
+        );
     }
 
     #[test]
@@ -1500,10 +1624,10 @@ mod parse_surface_tests {
         // Each is a genuinely-broken document the parser must REPORT (Err) rather than panic on —
         // exercising distinct error-return branches.
         for bad in [
-            "<http://ex/s> <http://ex/p>",                  // missing object + terminator
+            "<http://ex/s> <http://ex/p>", // missing object + terminator
             "<http://ex/s> <http://ex/p> \"unterminated .", // unterminated string literal
-            "{ ?x <http://ex/p> ?y => .",                   // unbalanced formula brace
-            "<http://ex/s> <http://ex/p> \"v\"@1bad .",      // invalid language tag (digit-led)
+            "{ ?x <http://ex/p> ?y => .",  // unbalanced formula brace
+            "<http://ex/s> <http://ex/p> \"v\"@1bad .", // invalid language tag (digit-led)
         ] {
             assert!(parse(bad).is_err(), "expected a parse error for: {bad:?}");
         }
