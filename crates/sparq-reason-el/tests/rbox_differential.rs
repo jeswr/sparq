@@ -520,6 +520,29 @@ fn told_left_identity_long_chain_is_regular() {
 }
 
 #[test]
+fn top_superproperty_chain_is_regular() {
+    // The OWL 2 property-hierarchy restriction's FIRST case: every chain axiom whose
+    // superproperty is owl:topObjectProperty is admissible. The ternary top self-chain would
+    // false-positive via the `s < s` self-constraint without the exemption (binary transitivity
+    // does not cover n = 3).
+    let ttl = format!(
+        "{PRE}
+         owl:topObjectProperty owl:propertyChainAxiom
+             ( owl:topObjectProperty owl:topObjectProperty owl:topObjectProperty ) .
+         :A rdfs:subClassOf :B ."
+    );
+    let (mut dict, mut triples) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let (d2, t2) = Graph::parse_to_triples(&ttl, "turtle").expect("parse");
+    let report = classify_graph(&mut dict, &mut triples);
+    assert!(
+        !report.rbox_non_regular,
+        "a top-superproperty chain is normatively admissible, never non-regular"
+    );
+    let h = Classifier::classify(&d2, &t2);
+    assert!(!h.report().rbox_non_regular, "typed entry agrees");
+}
+
+#[test]
 fn non_regular_saturation_still_terminates_and_stays_sound() {
     // On a (spec-illegal) non-regular RBox the classifier still terminates and every emitted
     // subsumption is sound; the flag is the ONLY behavioural difference. The chain cycle here

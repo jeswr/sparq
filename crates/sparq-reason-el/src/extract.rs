@@ -235,6 +235,12 @@ struct Vocab {
     property_chain_axiom: Id,
     #[cfg(feature = "rbox")]
     transitive_property: Id,
+    /// `owl:topObjectProperty` — the universal object property. The OWL 2 property-hierarchy
+    /// restriction unconditionally admits every chain axiom whose SUPERPROPERTY is top, so its
+    /// role id (when minted) is threaded into [`crate::rbox::told_rbox_regular`] (`NO_ID` if
+    /// the term is absent, which `Names::role_of` never resolves).
+    #[cfg(feature = "rbox")]
+    top_object_property: Id,
 }
 
 impl Vocab {
@@ -286,6 +292,8 @@ impl Vocab {
             property_chain_axiom: look(format!("{}propertyChainAxiom", OWL)),
             #[cfg(feature = "rbox")]
             transitive_property: look(format!("{}TransitiveProperty", OWL)),
+            #[cfg(feature = "rbox")]
+            top_object_property: look(format!("{}topObjectProperty", OWL)),
         }
     }
 }
@@ -707,7 +715,12 @@ fn normalize_rbox(idx: &Idx, v: &Vocab, names: &mut Names) -> (Vec<RoleAxiom>, b
         out.push(RoleAxiom::Chain(ri, ri, ri));
         told_chains.push((vec![ri, ri], ri));
     }
-    let regular = crate::rbox::told_rbox_regular(&told_incl, &told_chains);
+    // `owl:topObjectProperty`'s identity survives normalization (it is minted like any role),
+    // so the regularity check can apply the restriction's unconditional top-superproperty
+    // exemption. `role_of` is `None` when top never occurs as a role — then no chain can name
+    // it as superproperty and the exemption is vacuous.
+    let top = names.role_of(v.top_object_property);
+    let regular = crate::rbox::told_rbox_regular(&told_incl, &told_chains, top);
     (out, regular)
 }
 

@@ -139,8 +139,9 @@ pub struct Report {
     /// so when this is `true` the classification MAY BE INCOMPLETE (the `skipped_axioms`
     /// honesty posture: flagged, never silently wrong). Conservative: told-inclusion edges
     /// participate in the cycle detection, so a chain constraint fed back through an inclusion
-    /// is also flagged; pure inclusion cycles (equivalent roles) and binary transitivity
-    /// (`r ∘ r ⊑ r`) are NOT. Set by every extraction-based entry (`Classifier::classify`,
+    /// is also flagged; pure inclusion cycles (equivalent roles), binary transitivity
+    /// (`r ∘ r ⊑ r`), and chains with an `owl:topObjectProperty` superproperty (normatively
+    /// admissible, unconditionally) are NOT. Set by every extraction-based entry (`Classifier::classify`,
     /// `classify_graph`, their `par` twins, and the `abox` realiser); `false` on a regular or
     /// RBox-free input, and absent (like the whole role automaton) without the `rbox` feature.
     #[cfg(feature = "rbox")]

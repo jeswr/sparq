@@ -153,11 +153,18 @@ impl RoleBox {
 /// [SONNET-4.6] sq-oj06v: TOLD-RBox regularity check (cycle-with-composition detection), the E2
 /// follow-up honesty gate. The OWL 2 global restrictions require the RBox to be REGULAR: a
 /// strict order `<` on roles must admit every told chain axiom `r1 ∘ … ∘ rn ⊑ s` in one of the
-/// allowed forms — transitivity (`n = 2`, `r1 = r2 = s`, no constraint), left identity
-/// (`r1 = s`, needs `ri < s` for the rest), right identity (`rn = s`, ditto), or the general
-/// form (`ri < s` for every component). The CR10/CR11 saturation terminates and stays SOUND on
-/// any input, but the EL+ COMPLETENESS argument assumes regularity — so a non-regular RBox must
-/// be flagged, never silently classified as if complete.
+/// allowed forms — a `owl:topObjectProperty` superproperty (`s = top`, no constraint — the
+/// FIRST case of the normative restriction), transitivity (`n = 2`, `r1 = r2 = s`, no
+/// constraint), left identity (`r1 = s`, needs `ri < s` for the rest), right identity
+/// (`rn = s`, ditto), or the general form (`ri < s` for every component). The CR10/CR11
+/// saturation terminates and stays SOUND on any input, but the EL+ COMPLETENESS argument
+/// assumes regularity — so a non-regular RBox must be flagged, never silently classified as if
+/// complete.
+///
+/// `top` is the role id of `owl:topObjectProperty` when it occurs as a role (`None` otherwise):
+/// a chain whose superproperty is `top` is unconditionally admissible and contributes no
+/// constraint — without the exemption, e.g. `top ∘ top ∘ top ⊑ top` would false-positive via
+/// the `s < s` check below.
 ///
 /// `inclusions` are the told `r ⊑ s` axioms (incl. degenerate length-1 chains); `chains` the
 /// told n-ary (`n ≥ 2`) composition axioms BEFORE binarization — checking the left-folded
@@ -172,7 +179,11 @@ impl RoleBox {
 /// exotic RBox that feeds a chain super-role back into a component via inclusions is flagged
 /// even where the spec's chain-only ordering would admit it — a false "may be incomplete" note
 /// there is preferred over ever missing a genuinely non-regular input.
-pub fn told_rbox_regular(inclusions: &[(Role, Role)], chains: &[(Vec<Role>, Role)]) -> bool {
+pub fn told_rbox_regular(
+    inclusions: &[(Role, Role)],
+    chains: &[(Vec<Role>, Role)],
+    top: Option<Role>,
+) -> bool {
     // adjacency: role -> (successor, is_strict). Strict = a chain (composition) constraint.
     let mut adj: FxHashMap<Role, Vec<(Role, bool)>> = FxHashMap::default();
     let mut strict_edges: FxHashSet<(Role, Role)> = FxHashSet::default();
@@ -185,6 +196,11 @@ pub fn told_rbox_regular(inclusions: &[(Role, Role)], chains: &[(Vec<Role>, Role
         let n = chain.len();
         if n < 2 {
             continue; // degenerate chains are inclusions; the caller routes them there.
+        }
+        if top == Some(*s) {
+            // `… ⊑ owl:topObjectProperty` — the restriction's first case admits ANY chain with
+            // the top superproperty, ahead of the self-constraint and cycle checks below.
+            continue;
         }
         if n == 2 && chain[0] == *s && chain[1] == *s {
             continue; // transitivity `r ∘ r ⊑ r` — always admissible, no constraint.
@@ -316,7 +332,8 @@ mod tests {
         // r0 ⊑ r1, transitive r2, chain r3 ∘ r4 ⊑ r5 — the ordinary regular shapes.
         assert!(told_rbox_regular(
             &[(0, 1)],
-            &[(vec![2, 2], 2), (vec![3, 4], 5)]
+            &[(vec![2, 2], 2), (vec![3, 4], 5)],
+            None
         ));
     }
 
@@ -325,7 +342,8 @@ mod tests {
         // SNOMED right identity r0 ∘ r1 ⊑ r1 and left identity r2 ∘ r3 ⊑ r2: both admissible.
         assert!(told_rbox_regular(
             &[],
-            &[(vec![0, 1], 1), (vec![2, 3], 2)]
+            &[(vec![0, 1], 1), (vec![2, 3], 2)],
+            None
         ));
     }
 
@@ -334,14 +352,14 @@ mod tests {
         // s ∘ r1 ∘ r2 ⊑ s (told form 3, admissible: r1 < s, r2 < s). The BINARIZED encoding
         // (s ∘ r1 ⊑ f, f ∘ r2 ⊑ s) LOOKS cyclic (s → f → s) — this pins that the check runs on
         // the TOLD chain, where no cycle exists.
-        assert!(told_rbox_regular(&[], &[(vec![0, 1, 2], 0)]));
+        assert!(told_rbox_regular(&[], &[(vec![0, 1, 2], 0)], None));
     }
 
     #[test]
     fn regular_equivalent_roles() {
         // A pure inclusion cycle (equivalent roles) is regular — only chain constraints are
         // strict; the closure already handles it (see inclusion_cycle_is_safe above).
-        assert!(told_rbox_regular(&[(0, 1), (1, 0)], &[]));
+        assert!(told_rbox_regular(&[(0, 1), (1, 0)], &[], None));
     }
 
     #[test]
@@ -350,7 +368,8 @@ mod tests {
         // hasBrother — hasBrother < hasUncle and hasUncle < hasBrother cannot both hold.
         assert!(!told_rbox_regular(
             &[],
-            &[(vec![0, 1], 2), (vec![2, 3], 1)]
+            &[(vec![0, 1], 2), (vec![2, 3], 1)],
+            None
         ));
     }
 
@@ -358,24 +377,41 @@ mod tests {
     fn non_regular_chain_fed_back_through_inclusion() {
         // r0 ∘ r1 ⊑ r2 with r2 ⊑ r0: the chain constraint r0 < r2 cycles back through the
         // inclusion — flagged (conservative hierarchy-aware detection).
-        assert!(!told_rbox_regular(&[(2, 0)], &[(vec![0, 1], 2)]));
+        assert!(!told_rbox_regular(&[(2, 0)], &[(vec![0, 1], 2)], None));
     }
 
     #[test]
     fn non_regular_ternary_self_chain() {
         // s ∘ s ∘ s ⊑ s: only BINARY transitivity is exempt; every admissible form here still
         // constrains an `s` component (`s < s`), so no strict order exists.
-        assert!(!told_rbox_regular(&[], &[(vec![0, 0, 0], 0)]));
+        assert!(!told_rbox_regular(&[], &[(vec![0, 0, 0], 0)], None));
     }
 
     #[test]
     fn non_regular_both_ends_identity() {
         // s ∘ r ∘ s ⊑ s: the left-identity form still constrains the trailing s (s < s).
-        assert!(!told_rbox_regular(&[], &[(vec![0, 1, 0], 0)]));
+        assert!(!told_rbox_regular(&[], &[(vec![0, 1, 0], 0)], None));
+    }
+
+    #[test]
+    fn top_superproperty_chain_is_exempt() {
+        // The restriction's FIRST case: any chain whose superproperty is owl:topObjectProperty
+        // is admissible. top ∘ top ∘ top ⊑ top (role 7 = top) would otherwise fail the `s < s`
+        // self-constraint — pin that the exemption fires ahead of it.
+        assert!(told_rbox_regular(&[], &[(vec![7, 7, 7], 7)], Some(7)));
+        // Without the top identity the same told chain is (correctly) non-regular.
+        assert!(!told_rbox_regular(&[], &[(vec![7, 7, 7], 7)], None));
+        // The exemption also removes would-be cycle constraints: r0 ∘ r1 ⊑ top adds no strict
+        // edge, so pairing it with top ∘ r2 ⊑ r1 stays regular (top < r1 alone is satisfiable).
+        assert!(told_rbox_regular(
+            &[],
+            &[(vec![0, 1], 7), (vec![7, 2], 1)],
+            Some(7)
+        ));
     }
 
     #[test]
     fn empty_rbox_is_regular() {
-        assert!(told_rbox_regular(&[], &[]));
+        assert!(told_rbox_regular(&[], &[], None));
     }
 }
