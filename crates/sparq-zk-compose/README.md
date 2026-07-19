@@ -6,10 +6,7 @@ design ([`research/zkp-query-proofs-plan.md`](../../research/zkp-query-proofs-pl
 v3, §S4.E). Drives the per-property Noir circuit family at
 [`zk/compose/`](../../zk/compose) into a full query-result proof
 (`manifest::ProofManifest` + the nargo/bb subprocess prover) and verifies one
-(`verifier::verify_manifest`). `capture` packages native per-circuit
-`driver::ProofArtifacts` into the browser-shippable *captured* manifest the
-`/showcase/zk-car-hire` in-tab verify fallback consumes (sq-1s2.3 / FL1 follow-up) —
-research-grade, NOT externally audited (sq-qhy4).
+(`verifier::verify_manifest`). `capture` packages native per-circuit `driver::ProofArtifacts` into the browser-shippable *captured* manifest the `/showcase/zk-car-hire` in-tab verify fallback consumes (sq-1s2.3 / FL1 follow-up) — research-grade, NOT externally audited (sq-qhy4).
 
 > **Internal crate — not published** to crates.io (`publish = false`): nothing in
 > the workspace depends on it, so default and wasm builds are byte-identical either way.
