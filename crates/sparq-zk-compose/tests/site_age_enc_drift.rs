@@ -25,13 +25,12 @@
 use sparq_zk_compose::build::encode_int_literal;
 use std::path::PathBuf;
 
-/// Workspace root = <this crate>/../.. (CARGO_MANIFEST_DIR is absolute, so this is
-/// cwd-independent).
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-}
+// Path construction contract for the two out-of-crate reads below: each read joins
+// CARGO_MANIFEST_DIR (absolute => cwd-independent) with the FULL site-file path in
+// ONE literal, semicolon-terminated statement, so the CI ownership audit
+// (scripts/ci_audit_inputs.py) statically resolves the exact file being read. Both
+// files are attributed to this crate in ci/path-ownership.toml — a site-side edit
+// of either anchor re-runs this drift guard instead of being skipped as inert.
 
 /// The native encoding of `"<age>"^^xsd:integer`, lowercased for a case-insensitive
 /// compare against the site's `0x…` hex literals.
@@ -121,7 +120,7 @@ fn parse_const_str(src: &str, name: &str) -> String {
 /// The site's `AGE_OPERAND_ENC` map (zk-prover.ts) must match native `encode_int_literal`.
 #[test]
 fn site_age_operand_enc_matches_native_encoder() {
-    let path = repo_root().join("site/src/lib/zk-prover.ts");
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../site/src/lib/zk-prover.ts");
     let Ok(ts) = std::fs::read_to_string(&path) else {
         // The crate is `publish = false` and only ever tested inside the full
         // workspace, where site/ is present. A genuinely absent file (an unusual
@@ -159,7 +158,8 @@ fn site_age_operand_enc_matches_native_encoder() {
 /// the `AGE_OPERAND_ENC` entry for the same age (the two site files must not disagree).
 #[test]
 fn capture_manifest_operand_enc_matches_native_encoder() {
-    let path = repo_root().join("site/scripts/capture-zk-manifest.mjs");
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../site/scripts/capture-zk-manifest.mjs");
     let Ok(mjs) = std::fs::read_to_string(&path) else {
         eprintln!("[sq-1s2.4] {} absent — skipping drift guard", path.display());
         return;
@@ -179,7 +179,8 @@ fn capture_manifest_operand_enc_matches_native_encoder() {
 
     // Cross-file consistency: the captured age's enc must match the AGE_OPERAND_ENC map,
     // so the fallback (captured) and live-proving paths anchor to the SAME term.
-    let prover_path = repo_root().join("site/src/lib/zk-prover.ts");
+    let prover_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../site/src/lib/zk-prover.ts");
     let Ok(ts) = std::fs::read_to_string(&prover_path) else {
         return;
     };
