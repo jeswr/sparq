@@ -103,6 +103,12 @@ const META: Record<LazyDemoSlug, RowMeta> = {
     readme: `${REPO_URL}/tree/main/crates/sparq-mpc`,
     skill: `${REPO_URL}/blob/main/skills/mpc/SKILL.md`,
   },
+  policy: {
+    caveat:
+      "Captured-output walkthrough: sparq-policy is an opt-in native crate (evaluate() is pure Rust, no I/O) the wasm bundles never carry, so each Permit/Deny decision is the real evaluate() output for that (policy, request) pair — pinned by a named crate test — replayed rather than run in your tab. Single-node ODRL; the federated ODRL→MPC composition is deferred.",
+    readme: `${REPO_URL}/tree/main/crates/sparq-policy`,
+    skill: `${REPO_URL}/blob/main/skills/usage-control-policy/SKILL.md`,
+  },
 };
 
 function TierBadge({ surface }: { surface: Surface }) {
