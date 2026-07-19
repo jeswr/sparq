@@ -1,0 +1,5 @@
+{
+  "pr": 3581,
+  "date": "2026-07-19",
+  "reason": "[SONNET-4.6] #3581 applies the repository-wide rustfmt normalization and makes formatting a hard CI gate. Reflowing always-compiled sparq-core and sparq-engine sources intentionally changes source locations embedded in the feature-OFF sparq-wasm artifact even though it does not enable a new default-path capability. The resulting byte change is declared here; bundle size remains governed separately by the wasm_bundle_bytes ratchet."
+}
