@@ -17,6 +17,10 @@ returns). Numbers below were measured by Opus 4.8.
    coverage map AND an optimisation-target list spanning SPARQL 1.1, joining each
    query's `circuit_size` from the gate-count snapshot. See "SPARQL feature
    catalog" below.
+4. **Per-config bb-gates matrix** (`bb_gates_matrix.json`) — for every
+   `(commitment-method × circuit)` configuration, whether the pair is LEGAL and
+   the circuit's `circuit_size`, so the maintainer can compare the methods (#769).
+   See "per-config bb-gates matrix" below.
 
 ## Files
 
@@ -27,9 +31,11 @@ returns). Numbers below were measured by Opus 4.8.
 | `family_cost_curve.json`          | sq-pn2 full-family (k,n,r,d) prove/verify/size curve |
 | `family_curve/`                   | sq-pn2 standalone timing harness (own cargo project) |
 | `sparql_feature_catalog.json`     | sq-1s2.1.2 SPARQL 1.1 feature → ZK coverage + gate-cost catalog |
+| `bb_gates_matrix.json`            | sq-ot3x per-config (commitment-method × circuit) legality + gate-cost matrix |
 | `scripts/gate_counts.sh`          | regenerate the gate-count JSON |
 | `scripts/prove_verify.sh`         | time prove+verify for one member |
 | `scripts/sparql_catalog.py`       | regenerate the SPARQL feature catalog (joins the snapshot) |
+| `scripts/bb_gates_matrix.py`      | regenerate the per-config bb-gates matrix (joins the snapshot) |
 
 > The gate-count JSON is also the source the in-crate **regression gate**
 > (`crates/sparq-zk-compose/tests/gate_count.rs`, sq-c5f) baselines against —
@@ -89,6 +95,70 @@ snapshot) and then re-run the catalog generator to re-join the new numbers.
 > `site/src/data/zk-sparql-catalog.generated.json`, which the
 > `ZkSparqlCatalog` component (`site/src/components/benchmarks/zk-sparql-catalog.tsx`)
 > renders — so the rendered numbers always trace back to this snapshot-joined data.
+
+## sq-ot3x: per-config bb-gates matrix (commitment-method × circuit)
+
+`bb_gates_matrix.json` is the maintainer-requested (#769) **comparison surface**:
+for every `(commitment-method, circuit)` **configuration** it records whether the
+pair is **legal** (dispatch-compatible — see the load-bearing caveat below) and —
+per circuit — its ultra_honk `bb-gates`
+`circuit_size`. So the maintainer can compare the three commitment methods head to
+head: e.g. the `string-canonical` blake3-token integer FILTER lane
+(`filter_int_d2`) against the `dual-leaf` **value lane** (`filter_value_dl_int`) it
+unlocks — a ~5.7× gate reduction — and see exactly which configs each method
+admits.
+
+Two axes, both **joined from a regression-gated source of truth** — nothing is
+hand-typed that could drift:
+
+- The **gate-count** axis (`circuit_size`) is joined from the regression-gated
+  snapshot (`crates/sparq-zk-compose/tests/gate_count_snapshot.json`), the same
+  source `gate_counts.sh` and `sparql_catalog.py` use.
+- The **legality** axis mirrors the fail-closed dispatch rule
+  (`crates/sparq-zk-compose/src/dispatch.rs`, `resolve_circuit`, sq-cfmv): value-lane
+  members (`filter_value_dl_*`) are legal only against a method that committed a
+  value handle (`dual-leaf` / the `value-only` research dial); string-lane members
+  (scan, join, path, revoke, issuer, holder, the blake3-token `filter_*` lanes) are
+  legal against `string-canonical` / `dual-leaf` but not `value-only`.
+
+**`legal: true` means DISPATCH-COMPATIBLE, not end-to-end provable today.** It says
+the `(method, circuit)` pair is *admitted* by the resolver rule — nothing more. It
+does **not** assert the configuration can currently be committed, proved, and
+verified end to end: the `dual-leaf` host-leaf encoding (sq-j506) is **not yet
+implemented**, and `resolve_circuit` is **not yet wired into `verify_manifest`**. So
+a `legal: true` cell records design-level (structural) legality under the still-
+unwired resolver, not an operational provable path — a distinction that is
+load-bearing on a ZK surface. Only `string-canonical` is implemented end-to-end
+today.
+
+An **illegal** cell carries `legal: false` + the fail-closed `reason` and NO
+per-cell gate number (the config does not exist, so it has no cost); the circuit's
+intrinsic cost lives once on the row's `circuit_size`.
+
+**Honesty is load-bearing.** The bb-gates are **NON-CANONICAL** work-box numbers —
+a comparison tool, not a canonical performance figure. The whole ZK estate is
+internally re-audited but **NOT externally audited** (sq-qhy4). `dual-leaf` and
+`value-only` carry the documented **INV-VL downgrade** (value↔lexical agreement on
+the value-FILTER lane is trusted-issuer-honesty, not machine-enforced; CR-G8, #769
+accepted at research grade); `value-only` is a research/benchmark dial, never
+production. The matrix asserts **no** soundness or privacy property — only which
+configurations are structurally legal and how many gates each circuit costs.
+
+### Regenerate
+
+```sh
+bench/zk-compose/scripts/bb_gates_matrix.py > bench/zk-compose/bb_gates_matrix.json
+```
+
+The generator needs **no** `nargo`/`bb` (it reads the committed snapshot), so it is
+deterministic. The committed JSON is gated by
+`crates/sparq-zk-compose/tests/bb_gates_matrix.rs`, which fails if a circuit is
+absent from the snapshot, if a `circuit_size` disagrees with it, if a snapshot
+member is missing a matrix row, if a legality cell violates the dispatch rule
+(cross-checked against the real `resolve_circuit` under the `dual-leaf` feature),
+or if an illegal cell carries a fabricated cost. After an **intentional** circuit
+change, re-run `scripts/gate_counts.sh` (re-baseline the snapshot) and then this
+generator to re-join the new numbers.
 
 ## sq-pn2: full-family prove/verify cost curve
 
