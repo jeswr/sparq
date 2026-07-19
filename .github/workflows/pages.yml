@@ -125,6 +125,10 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
 
+      # [SONNET-4.6] The explicit post-build optimizer is not bundled with wasm-pack.
+      - name: Install Binaryen (wasm-opt)
+        run: sudo apt-get update -q && sudo apt-get install -y binaryen
+
       # Build the lean wasm bundle (crates/sparq-wasm → js/wasm) that the live REPL loads.
       # [OPUS-4.8] sq-jpki.1 — repo-root npm workspaces: `js/` is now a workspace member and the
       # per-member lock was dropped; this `npm ci` (run in js/) installs the js member's closure

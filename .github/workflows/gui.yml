@@ -155,6 +155,10 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
 
+      # [SONNET-4.6] The explicit post-build optimizer is not bundled with wasm-pack.
+      - name: Install Binaryen (wasm-opt)
+        run: sudo apt-get update -q && sudo apt-get install -y binaryen
+
       - name: Build wasm bundle (shacl,jsonld)
         working-directory: js
         run: npm run build:wasm
@@ -236,6 +240,10 @@ jobs:
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
+
+      # [SONNET-4.6] The explicit post-build optimizer is not bundled with wasm-pack.
+      - name: Install Binaryen (wasm-opt)
+        run: sudo apt-get update -q && sudo apt-get install -y binaryen
 
       - name: Build wasm bundle (shacl,jsonld)
         working-directory: js
@@ -355,6 +363,10 @@ jobs:
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
+
+      # [SONNET-4.6] The explicit post-build optimizer is not bundled with wasm-pack.
+      - name: Install Binaryen (wasm-opt)
+        run: sudo apt-get update -q && sudo apt-get install -y binaryen
 
       # The in-tab WASM engine (shacl,jsonld bundle) is required for queries to run in the browser.
       - name: Build WASM bundle (shacl,jsonld)
@@ -606,6 +618,10 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
 
+      # [SONNET-4.6] The explicit post-build optimizer is not bundled with wasm-pack.
+      - name: Install Binaryen (wasm-opt)
+        run: sudo apt-get update -q && sudo apt-get install -y binaryen
+
       # Build the frontend the Tauri webview embeds. The shell's `cargo build` embeds whatever
       # is in `gui/app/out` at COMPILE TIME (sq-ixc3.8 repointed `frontendDist` to the DISTINCT
       # operational frontend, NOT the marketing site), so the frontend MUST be built first. The
@@ -749,6 +765,10 @@ jobs:
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
+
+      # [SONNET-4.6] The explicit post-build optimizer is not bundled with wasm-pack.
+      - name: Install Binaryen (wasm-opt)
+        run: sudo apt-get update -q && sudo apt-get install -y binaryen
 
       - name: Build the WASM bundle (shacl,jsonld; the in-tab engine)
         working-directory: js

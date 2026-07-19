@@ -39,7 +39,6 @@
     "build:wasm:lean": "wasm-pack build ../crates/sparq-wasm --target web --profile release-wasm --no-opt -- --config profile.release-wasm.strip=false && npm run _optimize:wasm -- ../crates/sparq-wasm/pkg/sparq_wasm_bg.wasm -O3 && npm run _copy:wasm",
     "build:reason-wasm": "wasm-pack build ../crates/sparq-reason-wasm --target web --profile release-wasm --no-opt -- --features explain --config profile.release-wasm.strip=false && npm run _optimize:wasm -- ../crates/sparq-reason-wasm/pkg/sparq_reason_wasm_bg.wasm -Oz",
     "build:rsp-wasm": "wasm-pack build ../crates/sparq-rsp-wasm --target web --profile release-wasm --no-opt -- --config profile.release-wasm.strip=false && npm run _optimize:wasm -- ../crates/sparq-rsp-wasm/pkg/sparq_rsp_wasm_bg.wasm -Oz",
-    "build:shacl-wasm": "wasm-pack build ../crates/sparq-shacl-wasm --target web --profile release-wasm --no-opt -- --config profile.release-wasm.strip=false && npm run _optimize:wasm -- ../crates/sparq-shacl-wasm/pkg/sparq_shacl_wasm_bg.wasm -Oz",
     "build:text-wasm": "wasm-pack build ../crates/sparq-text-wasm --target web --profile release-wasm --no-opt -- --config profile.release-wasm.strip=false && npm run _optimize:wasm -- ../crates/sparq-text-wasm/pkg/sparq_text_wasm_bg.wasm -Oz",
     "build:ts": "tsc",
     "build": "npm run build:wasm && npm run build:ts",
