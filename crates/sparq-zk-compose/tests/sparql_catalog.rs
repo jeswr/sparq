@@ -76,6 +76,12 @@ struct Query {
     floor_member: Option<String>,
     #[serde(default)]
     floor_circuit_size: Option<u64>,
+    /// Honesty flag for the bounded property-path closures (`p?`/`p+`/`p*`):
+    /// they are covered ONLY under the EXISTENCE-ONLY bounded statement
+    /// (research/zksparql-fragment-extension.md §4), never the unbounded SPARQL
+    /// closure. `false`/absent for every other row.
+    #[serde(default)]
+    bounded: bool,
 }
 
 impl Query {
@@ -258,9 +264,13 @@ fn summary_matches_rows() {
 }
 
 /// Sanity: the catalog spans the full SPARQL 1.1 feature surface the §6 design
-/// requires — including EVERY property-path modifier — and is honest that the
-/// general-traversal modifiers are gaps. Guards against a future edit silently
-/// dropping a feature row (the value of the catalog is its COMPLETENESS).
+/// requires — including EVERY property-path modifier — and is honest about which
+/// the fragment gate accepts. After the fragment-gate extension (sq-3kd2g.6) the
+/// bounded closures `?`/`+`/`*` are `covered` under an existence-only bounded
+/// statement (flagged `bounded`), while constructs the gate rejects fail-closed
+/// (OPTIONAL, aggregates, BIND, negation) stay honest GAPs. Guards against a
+/// future edit silently dropping a feature row or misstating its status (the
+/// value of the catalog is its COMPLETENESS and its honesty vs the gate).
 #[test]
 fn catalog_spans_required_features() {
     let (_snapshot, catalog) = load();
@@ -280,16 +290,51 @@ fn catalog_spans_required_features() {
         );
     }
 
-    // The general-traversal closures (+/*/?) have NO circuit today and must be
-    // honestly labelled gaps, not fabricated as covered.
+    // The property-path closures (?/+/*) are now ACCEPTED by the extended
+    // fragment gate (fragment_query) and dispatch to the bounded
+    // `path_reach_d{d}_k{k}_n{n}` family (sq-3kd2g.6, opt-in `extended-fragment`).
+    // They are covered ONLY in the BOUNDED, existence-only sense (design §4: the
+    // depth bound is a public input) — so each must be `covered`, carry the
+    // `bounded` honesty flag, and name only `path_reach_*` members joined from the
+    // regression-gated snapshot. This is the anti-drift guard for the flip side of
+    // §1's Q13/Q14 finding: a closure must never be labelled a flat unbounded
+    // `covered`, nor left a stale GAP now that the gate accepts it.
     for id in [
         "Q16_path_zero_or_one",
         "Q17_path_one_or_more",
         "Q18_path_zero_or_more",
     ] {
+        let q = &catalog.queries[id];
+        assert!(
+            q.is_covered(),
+            "{id}: bounded path closure is accepted by the fragment gate and maps to \
+             the path_reach family — must be `covered` (bounded), not a stale GAP"
+        );
+        assert!(
+            q.bounded,
+            "{id}: a path closure is covered ONLY under the bounded existence-only \
+             statement (design §4) — must carry the `bounded` honesty flag so it is \
+             never read as an unbounded-closure claim"
+        );
+        assert!(
+            !q.zk_members.is_empty()
+                && q.zk_members.iter().all(|m| m.starts_with("path_reach_")),
+            "{id}: bounded path closure must name only path_reach_* members, found {:?}",
+            q.zk_members
+        );
+    }
+
+    // The constructs the gate REJECTS fail-closed (OUT-by-design or not-yet-built)
+    // must stay honest GAPs — never fabricated as covered/partial.
+    for id in [
+        "Q10_optional",              // non-monotone (closed-world) — OUT
+        "Q19_aggregate_group_by",    // pattern-level completeness — OUT
+        "Q21_bind_expression",       // expression estate — phase 3
+        "Q23_negation_minus_notexists", // closed-world negation — OUT
+    ] {
         assert!(
             catalog.queries[id].is_gap(),
-            "{id}: general property-path traversal has no circuit — must be a GAP"
+            "{id}: rejected fail-closed by the fragment gate — must be an honest GAP"
         );
     }
 

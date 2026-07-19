@@ -29,6 +29,21 @@
 # the point. The high-gate covered members (the blake3-bound `filter_*` family at
 # 17,416) are auto-flagged HIGH_GATE_* as the value-hook reduction target (§2.6).
 #
+# sq-3kd2g.11 refresh — status now reflects ACCEPTED SYNTAX at the verifier
+# fragment gate (crates/sparq-zk/src/verify.rs::fragment_query), not merely
+# whether a desugared form compiles to some circuit. The fragment-gate extension
+# (sq-3kd2g.3 gate + sq-3kd2g.6 builder/dispatch, research/zksparql-fragment-
+# extension.md §§1,3,4,7) made property paths, UNION, VALUES and subqueries
+# ACCEPTED, while OPTIONAL/MINUS/BIND/aggregates/EXISTS stay REJECTED fail-closed.
+# So a row is `covered` only when the gate accepts the syntax AND a dedicated
+# circuit member proves it; `partial` when accepted but composed verifier-side
+# (no dedicated member); `gap` when the gate rejects it fail-closed. This fixes
+# the §1 Q13/Q14 drift where `covered` had meant only "a desugared form compiles"
+# while the path syntax was still rejected. The bounded closures p?/p+/p* map to
+# the path_reach family under an EXISTENCE-ONLY bounded statement (§4) and carry
+# a `bounded` honesty flag; the depth bound is a public input, never a claim of
+# unbounded closure.
+#
 # It does NOT require live `bb`/`nargo`: every number comes off the committed
 # snapshot, so the harness is deterministic and non-flaky (CI-safe). To refresh
 # the underlying gate counts, re-run bench/zk-compose/scripts/gate_counts.sh and
@@ -73,6 +88,19 @@ VALUE_HOOK_TARGET = "value-hook (research/zk-field-native-encoding.md §2.6)"
 # `bb gates` once the value-hook lands (§6.3). Carried as prose with the ESTIMATE
 # qualifier so it can never be mistaken for a measurement.
 VALUE_HOOK_PROJECTED = "ESTIMATE ~3200 — MUST be re-measured with bb gates (NOT a measurement)"
+
+# The compiled bounded-depth path-reachability family (the sq-3kd2g.2 circuits,
+# dispatched by sq-3kd2g.6's builder under the opt-in `extended-fragment` feature).
+# These members carry the property-path closures p?/p+/p* under the BOUNDED,
+# EXISTENCE-ONLY statement of research/zksparql-fragment-extension.md §4 — the depth
+# bound is a PUBLIC input; a bounded proof never asserts absence or completeness.
+# circuit_size is joined from the snapshot like every other member (never fabricated).
+PATH_REACH_MEMBERS = [
+    "path_reach_d2_k1_n16",
+    "path_reach_d4_k1_n16",
+    "path_reach_d4_k2_n16",
+    "path_reach_d8_k1_n16",
+]
 
 # ---------------------------------------------------------------------------
 # The query catalog — §6.2 of research/zk-field-native-encoding.md, transcribed.
@@ -156,7 +184,7 @@ CATALOG: list[dict] = [
         "zk_members": [],
         "status": STATUS_GAP,
         "reduction_target": "boolean VALUE_HOOK proposed (research/zk-field-native-encoding.md §2.5)",
-        "note": "No boolean predicate circuit today; a boolean VALUE_HOOK is design-only.",
+        "note": "Rejected fail-closed by the fragment gate — the expression estate is phase 3 (not yet bound). No boolean predicate circuit today; a boolean VALUE_HOOK is design-only.",
     },
     {
         "id": "Q08_filter_string_ops",
@@ -164,7 +192,7 @@ CATALOG: list[dict] = [
         "sparql": 'SELECT ?x WHERE { ?x :name ?n FILTER(CONTAINS(STR(?n), "a")) }',
         "zk_members": [],
         "status": STATUS_GAP,
-        "note": "String lane commits the opaque term hash only; no in-circuit string predicate.",
+        "note": "Rejected fail-closed by the fragment gate (expression estate is phase 3). String lane commits the opaque term hash only; no in-circuit string predicate.",
     },
     {
         "id": "Q09_filter_datetime_compare",
@@ -173,15 +201,15 @@ CATALOG: list[dict] = [
         "zk_members": [],
         "status": STATUS_GAP,
         "reduction_target": "dateTime VALUE_HOOK design-only (research/zk-field-native-encoding.md §2.5)",
-        "note": "No dateTime ordering circuit; a dateTime VALUE_HOOK (epoch-seconds field handle) is design-only.",
+        "note": "Rejected fail-closed by the fragment gate (expression estate is phase 3). No dateTime ordering circuit; a dateTime VALUE_HOOK (epoch-seconds field handle) is design-only.",
     },
     {
         "id": "Q10_optional",
         "feature": "OPTIONAL (left join)",
         "sparql": "SELECT ?s ?v WHERE { ?s :p ?o OPTIONAL { ?s :q ?v } }",
         "zk_members": [],
-        "status": STATUS_PARTIAL,
-        "note": "Required side is a scan; the left-join itself is verifier-side, not an in-circuit relation.",
+        "status": STATUS_GAP,
+        "note": "REJECTED fail-closed by the fragment gate (VerifyError::UnsupportedFragment). OUT by design, not a build backlog: OPTIONAL/LeftJoin is non-monotone — an unbound optional side asserts no compatible extension exists (a closed-world claim). Rewrite to Join, or to a UNION of explicit cases (design record §3.2).",
     },
     {
         "id": "Q11_union",
@@ -189,7 +217,7 @@ CATALOG: list[dict] = [
         "sparql": "SELECT ?s WHERE { { ?s :p ?o } UNION { ?s :q ?o } }",
         "zk_members": [],
         "status": STATUS_PARTIAL,
-        "note": "Each branch is a scan proof; the union is composed verifier-side, not an in-circuit relation.",
+        "note": "ACCEPTED by the fragment gate as per-branch attribution; each branch is a scan proof, the union composed verifier-side (no dedicated circuit member).",
     },
     {
         "id": "Q12_join_shared_var_hidden",
@@ -205,7 +233,7 @@ CATALOG: list[dict] = [
         "sparql": "SELECT ?o WHERE { ?s :p/:q ?o }",
         "zk_members": ["scan_k2_n16_r4", "scan_k2_n16_r8", "scan_k2_n64_r4", "scan_k2_n64_r8"],
         "status": STATUS_COVERED,
-        "note": "Desugars to a multi-pattern BGP (one extra scan slot per step) → the k=2 scan lattice.",
+        "note": "Path syntax now ACCEPTED by the fragment gate (rewritten to a fresh-intermediate BGP — the SPARQL 1.1 translation, design §4); the desugared multi-pattern BGP maps to the k=2 scan lattice. (Pre-extension this row was 'covered' only because the desugared form compiled while the path syntax was still rejected — §1 drift, now resolved.)",
     },
     {
         "id": "Q14_path_inverse",
@@ -213,7 +241,7 @@ CATALOG: list[dict] = [
         "sparql": "SELECT ?s WHERE { ?o ^:p ?s }",
         "zk_members": ["scan_k1_n16_r4", "scan_k1_n16_r8", "scan_k1_n64_r4", "scan_k1_n64_r8"],
         "status": STATUS_COVERED,
-        "note": "Subject/object slot swap on a single BGP → the k=1 scan family (no extra cost over a forward pattern).",
+        "note": "Path syntax now ACCEPTED by the fragment gate (endpoint swap, design §4); maps to the k=1 scan family (no extra cost over a forward pattern). (Pre-extension this row was 'covered' only because the desugared form compiled while the path syntax was still rejected — §1 drift, now resolved.)",
     },
     {
         "id": "Q15_path_alternative",
@@ -221,31 +249,34 @@ CATALOG: list[dict] = [
         "sparql": "SELECT ?o WHERE { ?s (:p|:q) ?o }",
         "zk_members": [],
         "status": STATUS_PARTIAL,
-        "note": "Desugars to a UNION of per-predicate scans; union composed verifier-side (as Q11).",
+        "note": "ACCEPTED by the fragment gate; desugars to a UNION of per-predicate branches, composed verifier-side (as Q11).",
     },
     {
         "id": "Q16_path_zero_or_one",
         "feature": "Property path ? (zero-or-one)",
         "sparql": "SELECT ?o WHERE { ?s :p? ?o }",
-        "zk_members": [],
-        "status": STATUS_GAP,
-        "note": "Needs an optional/identity step (reflexive + one hop); no circuit today.",
+        "zk_members": PATH_REACH_MEMBERS,
+        "status": STATUS_COVERED,
+        "bounded": True,
+        "note": "ACCEPTED by the fragment gate; maps to the bounded path_reach family (opt-in `extended-fragment`). p? is pinned to depth bound 1 (PathClosure::fixed_k) with the zero-length case (endpoint equality + an occurrence witness). EXISTENCE-ONLY bounded statement (design §4); internally re-audited, external cryptographer sign-off pending (sq-qhy4) — NOT a proven soundness claim.",
     },
     {
         "id": "Q17_path_one_or_more",
         "feature": "Property path + (one-or-more, transitive closure)",
         "sparql": "SELECT ?o WHERE { :s :p+ ?o }",
-        "zk_members": [],
-        "status": STATUS_GAP,
-        "note": "Unbounded transitive closure; no in-circuit traversal — the single largest coverage gap.",
+        "zk_members": PATH_REACH_MEMBERS,
+        "status": STATUS_COVERED,
+        "bounded": True,
+        "note": "ACCEPTED by the fragment gate; maps to the bounded path_reach family (opt-in `extended-fragment`) proving a chain of 1..k committed `p`-triples, where k is a PUBLIC depth-bound input. NOT the unbounded SPARQL closure: a bounded proof never asserts longer paths are absent nor that the reachable set is complete (design §4, existence-only). Internally re-audited, external sign-off pending (sq-qhy4).",
     },
     {
         "id": "Q18_path_zero_or_more",
         "feature": "Property path * (zero-or-more, reflexive transitive closure)",
         "sparql": "SELECT ?o WHERE { :s :p* ?o }",
-        "zk_members": [],
-        "status": STATUS_GAP,
-        "note": "Reflexive transitive closure; no in-circuit traversal (as Q17 plus the identity step).",
+        "zk_members": PATH_REACH_MEMBERS,
+        "status": STATUS_COVERED,
+        "bounded": True,
+        "note": "ACCEPTED by the fragment gate; maps to the bounded path_reach family (opt-in `extended-fragment`) as Q17 plus the zero-length case (0..k steps; the zero-length path requires an occurrence witness, not bare equality). BOUNDED existence-only, k is a public input (design §4); NOT the unbounded reflexive-transitive closure. Internally re-audited, external sign-off pending (sq-qhy4).",
     },
     {
         "id": "Q19_aggregate_group_by",
@@ -253,7 +284,7 @@ CATALOG: list[dict] = [
         "sparql": "SELECT ?g (COUNT(?x) AS ?n) WHERE { ?x :inGroup ?g } GROUP BY ?g",
         "zk_members": [],
         "status": STATUS_GAP,
-        "note": "No aggregate proof. The COUNT-forgery guard in scan.nr is anti-forgery over disclosed rows, NOT a proven aggregate.",
+        "note": "Rejected fail-closed by the fragment gate — OUT by design: an aggregate value is a completeness claim over the whole pattern (closed-world), and composed-pattern completeness is not proved. The COUNT-forgery guard in scan.nr is anti-forgery over disclosed rows, NOT a proven aggregate.",
     },
     {
         "id": "Q20_subquery",
@@ -261,7 +292,7 @@ CATALOG: list[dict] = [
         "sparql": "SELECT ?p WHERE { ?p :a ?x { SELECT ?p WHERE { ?p :b ?y } } }",
         "zk_members": [],
         "status": STATUS_PARTIAL,
-        "note": "Composed sub-proofs (no dedicated member); the outer/inner join is verifier-side.",
+        "note": "ACCEPTED by the fragment gate (inner projection = existential quantification, non-projected variables renamed apart); composed sub-proofs, the outer/inner join verifier-side (no dedicated member).",
     },
     {
         "id": "Q21_bind_expression",
@@ -269,7 +300,7 @@ CATALOG: list[dict] = [
         "sparql": "SELECT ?c WHERE { ?s :a ?a . ?s :b ?b BIND(?a + ?b AS ?c) }",
         "zk_members": [],
         "status": STATUS_GAP,
-        "note": "No in-circuit expression evaluation (arithmetic / function eval over bound vars).",
+        "note": "Rejected fail-closed by the fragment gate — BIND (deterministic Extend) is phase 3 of the fragment-extension program; no in-circuit expression evaluation (arithmetic / function eval over bound vars) yet.",
     },
     {
         "id": "Q22_values",
@@ -277,7 +308,7 @@ CATALOG: list[dict] = [
         "sparql": "SELECT ?x WHERE { VALUES ?x { :a :b } ?x :p ?o }",
         "zk_members": [],
         "status": STATUS_PARTIAL,
-        "note": "A constant-slot scan or a verifier-side membership filter; no dedicated member.",
+        "note": "ACCEPTED by the fragment gate; rows are public constants of the query text (UNDEF cells are wildcards), checked verifier-side against disclosed solutions — no dedicated member.",
     },
     {
         "id": "Q23_negation_minus_notexists",
@@ -285,7 +316,7 @@ CATALOG: list[dict] = [
         "sparql": "SELECT ?s WHERE { ?s :p ?o FILTER NOT EXISTS { ?s :q ?v } }",
         "zk_members": [],
         "status": STATUS_GAP,
-        "note": "Requires proven ABSENCE; scan completeness (scan.nr) is the closest primitive but is not a negation proof.",
+        "note": "Rejected fail-closed by the fragment gate — OUT by design: FILTER NOT EXISTS / MINUS is closed-world negation (non-monotone), requiring proven ABSENCE. scan completeness (scan.nr) is the closest primitive but is not a negation proof.",
     },
     {
         "id": "Q24_revocation_status",
@@ -397,6 +428,12 @@ def build_catalog(snapshot: dict) -> dict:
             "status": status,
             "flag": flag,
         }
+        # Honesty flag for the bounded property-path closures (p?/p+/p*): they are
+        # covered ONLY under the EXISTENCE-ONLY bounded statement (§4), never the
+        # unbounded SPARQL closure. Surfaced so a consumer can never read a bounded
+        # path proof as an unbounded-reachability claim.
+        if entry.get("bounded"):
+            out["bounded"] = True
         # Report the per-member sizes and the covered range so a site surface can
         # render either the headline (max) or the spread.
         if per_member:
@@ -424,10 +461,15 @@ def build_catalog(snapshot: dict) -> dict:
             "as the value-hook reduction target). circuit_size is JOINED from "
             "crates/sparq-zk-compose/tests/gate_count_snapshot.json (the "
             "regression-gated source of truth) so it can never drift; gaps carry "
-            "null and are NEVER given a fabricated number. Regenerate with "
-            "bench/zk-compose/scripts/sparql_catalog.py; gated by "
+            "null and are NEVER given a fabricated number. STATUS derives from the "
+            "verifier fragment gate (crates/sparq-zk/src/verify.rs::fragment_query): "
+            "accepted-with-a-dedicated-member = covered, accepted-but-composed-"
+            "verifier-side = partial, rejected-fail-closed = gap — NOT whether a "
+            "desugared form merely compiles (sq-3kd2g.11 fixes the §1 Q13/Q14 drift). "
+            "Regenerate with bench/zk-compose/scripts/sparql_catalog.py; gated by "
             "crates/sparq-zk-compose/tests/sparql_catalog.rs. Design: "
-            "research/zk-field-native-encoding.md §6 (PR #765)."
+            "research/zk-field-native-encoding.md §6 (PR #765) + "
+            "research/zksparql-fragment-extension.md §§1,3,4 (epic sq-3kd2g / #1591)."
         ),
         "tool": snapshot.get("tool", "bb gates -s ultra_honk"),
         "bb_version": snapshot.get("bb_version_baselined"),
