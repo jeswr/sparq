@@ -114,11 +114,23 @@ pub enum AdversaryModel {
     /// cooperating holders (Shamir semi-honest).
     SemiHonest,
     /// **Covert (ε-deterrence).** A corrupt party MAY deviate arbitrarily but is
-    /// *caught with probability ε* (Aumann–Lindell'07); a PVC variant adds a
-    /// publicly-verifiable cheating certificate (see [`PublicVerifiability`]).
-    /// The genuine middle tier between semi-honest and malicious — absent from
-    /// the old enums. ε is carried as an exact rational `deterrence_num /
-    /// deterrence_den` (e.g. `1/2`), avoiding a float in a security descriptor.
+    /// *caught with probability ε* (Aumann–Lindell'07); a PVC variant
+    /// (Asharov–Orlandi'12) adds a publicly-verifiable cheating certificate
+    /// (~354 bytes, 20–40 % overhead — see [`PublicVerifiability`]). The genuine
+    /// dishonest-majority-capable middle tier between semi-honest and malicious —
+    /// absent from the old enums. ε is carried as an exact rational
+    /// `deterrence_num / deterrence_den` (e.g. `1/2`), avoiding a float in a
+    /// security descriptor.
+    ///
+    /// ## Caveat — this is DETECTION/DETERRENCE, NOT soundness
+    /// Covert/PVC is a *fallback accountability* tier, **not** a soundness
+    /// guarantee: an undetected cheat (probability `1 − ε`) still yields a wrong
+    /// output, and even a PVC cheating certificate only attributes a caught cheat
+    /// *after the fact* — it is **not** equivalent to a ZK proof of correct
+    /// computation. So a descriptor MUST NOT let a `Covert` tier stand in for
+    /// [`AdversaryModel::Malicious`] (abort/GOD) or for a verifiable-output claim.
+    /// This mirrors the M4 feasibility finding (`research/mpc-m4-distributed-sig-feasibility.md`
+    /// §3(iii)). `[OPUS-4.8]`
     ///
     /// **Invariant (now enforced, not just documented).** ε must be a valid
     /// probability in `(0, 1]`: `deterrence_den > 0` and `deterrence_num <=
@@ -359,8 +371,15 @@ impl CorruptionThreshold {
 
 /// Marker for **public verifiability** (research §1.3): whether a cheat / the
 /// computation is verifiable by an external party who did not run it — PVC's
-/// publicly-verifiable cheating certificate, or a publicly-verifiable
-/// collaborative-zk proof. Orthogonal to the three axes. `[OPUS-4.8]`
+/// publicly-verifiable cheating certificate (Asharov–Orlandi'12), or a
+/// publicly-verifiable collaborative-zk proof. Orthogonal to the three axes.
+///
+/// Set together with [`AdversaryModel::Covert`], `PublicVerifiability(true)`
+/// denotes the **PVC** tier: a caught cheat produces a transferable certificate
+/// any third party can check. That is still *accountability after detection*,
+/// **not** soundness — see the caveat on [`AdversaryModel::Covert`]. A `true`
+/// marker on a covert tier therefore does NOT upgrade it to a verifiable-output
+/// guarantee. `[OPUS-4.8]`
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PublicVerifiability(pub bool);
 
