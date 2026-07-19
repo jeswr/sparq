@@ -140,7 +140,9 @@ pub fn missing_intervals(
     let mut out: Vec<SequenceInterval> = Vec::new();
     let mut push = |origin: &ReplicaId, first: u64, last: u64| {
         if let Some(prev) = out.last_mut() {
-            if &prev.origin == origin && prev.last + 1 == first {
+            // `checked_add` so a preceding interval ending at u64::MAX does not
+            // overflow the successor test (it simply cannot be adjacent).
+            if &prev.origin == origin && prev.last.checked_add(1) == Some(first) {
                 prev.last = last;
                 return;
             }
@@ -157,22 +159,32 @@ pub fn missing_intervals(
         let remote_clock = remote.clock().get(origin).copied().unwrap_or(0);
         // Contiguous part: (remote_clock, have_clock] minus the remote cloud.
         if have_clock > remote_clock {
-            let mut cursor = remote_clock + 1;
+            // `cursor` is the next unaccounted sequence; `None` once it would
+            // exceed u64::MAX (exhausted — no successor exists, so nothing more
+            // can be missing for this origin). `remote_clock < have_clock <=
+            // u64::MAX` here, so the initial `+ 1` cannot overflow.
+            let mut cursor: Option<u64> = Some(remote_clock + 1);
             for dot in remote.cloud() {
                 if dot.replica() != origin {
                     continue;
                 }
+                let Some(cur) = cursor else { break };
                 let counter = dot.counter();
-                if counter < cursor || counter > have_clock {
+                if counter < cur || counter > have_clock {
                     continue;
                 }
-                if counter > cursor {
-                    push(origin, cursor, counter - 1);
+                if counter > cur {
+                    push(origin, cur, counter - 1);
                 }
-                cursor = counter + 1;
+                // Advance past this remote-known dot; a dot at u64::MAX has no
+                // successor, so the origin is exhausted (skip the trailing
+                // interval rather than wrapping to an invalid `first == 0`).
+                cursor = counter.checked_add(1);
             }
-            if cursor <= have_clock {
-                push(origin, cursor, have_clock);
+            if let Some(cur) = cursor {
+                if cur <= have_clock {
+                    push(origin, cur, have_clock);
+                }
             }
         }
         // Sparse part: this side's cloud dots for the origin.
@@ -302,7 +314,9 @@ impl StabilityTracker {
     pub fn advance_epoch(&mut self, membership: Membership) -> Result<(), CrdtError> {
         if membership.epoch <= self.membership.epoch {
             return Err(CrdtError::WrongEpoch {
-                expected: self.membership.epoch + 1,
+                // Diagnostic only; `saturating_add` so a u64::MAX current epoch
+                // cannot overflow this successor in the error path.
+                expected: self.membership.epoch.saturating_add(1),
                 found: membership.epoch,
             });
         }
@@ -431,6 +445,66 @@ mod tests {
             missing_intervals(&have, &remote_none),
             vec![SequenceInterval { origin: rid(b"a"), first: 1, last: 3 }]
         );
+    }
+
+    #[test]
+    fn missing_intervals_handles_u64_max_boundaries_without_overflow() {
+        // A local clock at u64::MAX with the remote one short by one: the
+        // single missing sequence is exactly u64::MAX, with no successor
+        // arithmetic tripping over the boundary.
+        let mut have_clock = BTreeMap::new();
+        have_clock.insert(rid(b"a"), u64::MAX);
+        let have = CausalSummary::from_parts(have_clock, Vec::new()).unwrap();
+        let mut remote_clock = BTreeMap::new();
+        remote_clock.insert(rid(b"a"), u64::MAX - 1);
+        let remote = CausalSummary::from_parts(remote_clock, Vec::new()).unwrap();
+        assert_eq!(
+            missing_intervals(&have, &remote),
+            vec![SequenceInterval { origin: rid(b"a"), first: u64::MAX, last: u64::MAX }]
+        );
+
+        // A remote cloud dot exactly at u64::MAX is the last sequence the
+        // remote already holds: the cursor advances past it and exhausts,
+        // emitting only the prefix gap and never an invalid `first == 0`.
+        let mut have_clock = BTreeMap::new();
+        have_clock.insert(rid(b"a"), u64::MAX);
+        let have = CausalSummary::from_parts(have_clock, Vec::new()).unwrap();
+        // Remote: clock a:1 plus a sparse cloud dot a:u64::MAX.
+        let mut remote_clock = BTreeMap::new();
+        remote_clock.insert(rid(b"a"), 1);
+        let remote =
+            CausalSummary::from_parts(remote_clock, vec![dot(b"a", u64::MAX)]).unwrap();
+        assert_eq!(
+            missing_intervals(&have, &remote),
+            vec![SequenceInterval { origin: rid(b"a"), first: 2, last: u64::MAX - 1 }]
+        );
+
+        // A local cloud dot at u64::MAX the remote lacks is offered as a
+        // single-sequence interval — the sparse path also stays overflow-free.
+        let mut have_clock = BTreeMap::new();
+        have_clock.insert(rid(b"a"), 1);
+        let have =
+            CausalSummary::from_parts(have_clock, vec![dot(b"a", u64::MAX)]).unwrap();
+        let mut remote_clock = BTreeMap::new();
+        remote_clock.insert(rid(b"a"), 1);
+        let remote = CausalSummary::from_parts(remote_clock, Vec::new()).unwrap();
+        assert_eq!(
+            missing_intervals(&have, &remote),
+            vec![SequenceInterval { origin: rid(b"a"), first: u64::MAX, last: u64::MAX }]
+        );
+    }
+
+    #[test]
+    fn advance_epoch_at_u64_max_reports_saturated_successor_without_overflow() {
+        let members: BTreeSet<ReplicaId> = [rid(b"a")].into_iter().collect();
+        let mut tracker =
+            StabilityTracker::new(Membership::new(u64::MAX, members.clone()).unwrap());
+        // No later epoch exists, so this always hits the error path; the
+        // diagnostic successor must saturate rather than overflow.
+        assert!(matches!(
+            tracker.advance_epoch(Membership::new(u64::MAX, members).unwrap()),
+            Err(CrdtError::WrongEpoch { expected: u64::MAX, found: u64::MAX })
+        ));
     }
 
     #[test]
