@@ -97,6 +97,10 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
 
+      # [SONNET-4.6] The explicit post-build optimizer is not bundled with wasm-pack.
+      - name: Install Binaryen (wasm-opt)
+        run: sudo apt-get update -q && sudo apt-get install -y binaryen
+
       # [OPUS-4.8] sq-fvz8: install the FULL workspace from the repo ROOT, not just the
       # `js/` member. The cross-language Solid differential oracle (test/solid-differential
       # .test.mjs, PR #922) imports n3 / @solid/acl-check / @solidlab/policy-engine / rdflib,

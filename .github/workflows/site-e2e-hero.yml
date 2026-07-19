@@ -83,6 +83,10 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
 
+      # [SONNET-4.6] The explicit post-build optimizer is not bundled with wasm-pack.
+      - name: Install Binaryen (wasm-opt)
+        run: sudo apt-get update -q && sudo apt-get install -y binaryen
+
       # [FABLE-5] PR #3511 review finding 5: redundant second cargo cache REMOVED —
       # the Swatinem/rust-cache above (shared-key: site-wasm) already caches
       # ~/.cargo/registry + ~/.cargo/git + the workspace target/ across the js/pages/

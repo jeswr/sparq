@@ -170,6 +170,10 @@ jobs:
       - name: Install wasm-pack
         if: needs.config.outputs.mode == 'full'
         run: cargo install wasm-pack --locked
+      # [SONNET-4.6] The explicit post-build optimizer is not bundled with wasm-pack.
+      - name: Install Binaryen (wasm-opt)
+        if: needs.config.outputs.mode == 'full'
+        run: sudo apt-get update -q && sudo apt-get install -y binaryen
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: needs.config.outputs.mode == 'full'
         with:
@@ -280,6 +284,10 @@ jobs:
       - name: Install wasm-pack
         if: needs.config.outputs.mode == 'full'
         run: cargo install wasm-pack --locked
+      # [SONNET-4.6] The explicit post-build optimizer is not bundled with wasm-pack.
+      - name: Install Binaryen (wasm-opt)
+        if: needs.config.outputs.mode == 'full'
+        run: sudo apt-get update -q && sudo apt-get install -y binaryen
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: needs.config.outputs.mode == 'full'
         with:
@@ -372,6 +380,10 @@ jobs:
       - name: Install wasm-pack
         if: needs.config.outputs.mode == 'full'
         run: cargo install wasm-pack --locked
+      # [SONNET-4.6] The explicit post-build optimizer is not bundled with wasm-pack.
+      - name: Install Binaryen (wasm-opt)
+        if: needs.config.outputs.mode == 'full'
+        run: sudo apt-get update -q && sudo apt-get install -y binaryen
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: needs.config.outputs.mode == 'full'
         with:
@@ -487,6 +499,10 @@ jobs:
       - name: Install wasm-pack
         if: needs.config.outputs.mode == 'full'
         run: cargo install wasm-pack --locked
+      # [SONNET-4.6] The explicit post-build optimizer is not bundled with wasm-pack.
+      - name: Install Binaryen (wasm-opt)
+        if: needs.config.outputs.mode == 'full'
+        run: sudo apt-get update -q && sudo apt-get install -y binaryen
       - name: Build the WASM bundle (shacl,jsonld; the in-tab engine)
         if: needs.config.outputs.mode == 'full'
         working-directory: js
