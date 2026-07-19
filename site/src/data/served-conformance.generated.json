@@ -4,7 +4,7 @@
     "generated_at": "2026-07-05T14:10:00Z",
     "generated_at_unix": 1783260600,
     "note": "Re-runs the sq-jaj38 (http-protocol) and sq-1uuxz (federation-descriptors) served-surface lanes in-process against the sparq-server loopback endpoint. Pass/divergence/fail counts are conformance facts; `floor` is each suite's ratchet floor (may only rise) from crates/sparq-conformance/src/scoreboard.rs. Documented divergences are reported per-assertion and are NEVER summed into `pass`, so a documented gap can never inflate the conformance number.",
-    "run_source": "https://github.com/jeswr/sparq/actions (per-build artifact); authoritative per-release reports attach to each GitHub Release",
+    "run_source": "https://github.com/sparq-org/sparq/actions (per-build artifact); authoritative per-release reports attach to each GitHub Release",
     "runner": "sparq-conformance served-conformance-report",
     "version": "main (snapshot)"
   },
