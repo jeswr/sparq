@@ -548,8 +548,15 @@ pub fn extract(dict: &Dict, triples: &[[Id; 3]], opts: ExtractOpts) -> Extracted
     // RBox normalization (E2): role inclusions + property chains + transitive roles into
     // [`RoleAxiom`] forms. Done here while `names` is still borrowable so role ids agree with
     // the existential links minted during concept decoding. No-op without the `rbox` feature.
+    // [SONNET-4.6] sq-oj06v: the told-RBox regularity verdict lands in the report — CR10/CR11
+    // stay sound + terminating on a non-regular (spec-illegal) RBox, but completeness is only
+    // argued for regular ones, so the flag is the honest "may be incomplete" surface.
     #[cfg(feature = "rbox")]
-    let role_axioms = normalize_rbox(&idx, &v, &mut names);
+    let role_axioms = {
+        let (role_axioms, regular) = normalize_rbox(&idx, &v, &mut names);
+        report.rbox_non_regular = !regular;
+        role_axioms
+    };
 
     report.named_classes = names.concept_count();
     Extracted {
@@ -665,27 +672,43 @@ fn extract_rbox_triple(idx: &mut Idx, v: &Vocab, s: Id, p: Id, o: Id) {
 /// through the shared [`Names`] table. A property chain of length `n` is left-folded into `n-1`
 /// binary compositions over fresh intermediate roles; a transitive property `r` becomes the
 /// composition `r ∘ r ⊑ r`. A degenerate chain (length 0/1) is treated as a plain inclusion.
+///
+/// [SONNET-4.6] sq-oj06v: also returns the TOLD-RBox regularity verdict (`true` = regular),
+/// computed by [`crate::rbox::told_rbox_regular`] over the PRE-binarization axioms — the told
+/// n-ary chains, not the left-folded binary forms (binarization introduces apparent cycles a
+/// told left-identity chain does not have). The caller surfaces `!regular` as
+/// [`crate::Report::rbox_non_regular`].
 #[cfg(feature = "rbox")]
-fn normalize_rbox(idx: &Idx, v: &Vocab, names: &mut Names) -> Vec<RoleAxiom> {
+fn normalize_rbox(idx: &Idx, v: &Vocab, names: &mut Names) -> (Vec<RoleAxiom>, bool) {
     let mut out: Vec<RoleAxiom> = Vec::new();
+    let mut told_incl: Vec<(Role, Role)> = Vec::new();
+    let mut told_chains: Vec<(Vec<Role>, Role)> = Vec::new();
     // r ⊑ s.
     for &(r, s) in &idx.sub_property {
         let (ri, si) = (names.role(r), names.role(s));
         out.push(RoleAxiom::Sub(ri, si));
+        told_incl.push((ri, si));
     }
     // owl:propertyChainAxiom: r1 ∘ … ∘ rn ⊑ super.
     for (&super_prop, &head) in &idx.chain_head {
         let members = decode_list(head, idx, v);
         let chain: Vec<Role> = members.iter().map(|&m| names.role(m)).collect();
         let sup = names.role(super_prop);
+        match chain[..] {
+            [] => {}
+            [r1] => told_incl.push((r1, sup)),
+            _ => told_chains.push((chain.clone(), sup)),
+        }
         fold_chain(&chain, sup, names, &mut out);
     }
     // owl:TransitiveProperty(r) ≡ r ∘ r ⊑ r.
     for &r in &idx.transitive {
         let ri = names.role(r);
         out.push(RoleAxiom::Chain(ri, ri, ri));
+        told_chains.push((vec![ri, ri], ri));
     }
-    out
+    let regular = crate::rbox::told_rbox_regular(&told_incl, &told_chains);
+    (out, regular)
 }
 
 /// Left-folds a property chain `r1 ∘ … ∘ rn ⊑ sup` into binary [`RoleAxiom::Chain`]s:
