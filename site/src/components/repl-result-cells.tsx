@@ -16,8 +16,10 @@
 import * as React from "react";
 
 import type { SparqlResults, SparqlTerm } from "@/lib/sparq-wasm";
+// [OPUS-4.8] sq-vw3ax.10 — CURIE abbreviation is now shared with the node-link Graph view
+// (repl-graph-view.tsx) via @/lib/curie so both renderers use exactly one prefix set.
+import { XSD, curie } from "@/lib/curie";
 
-const XSD = "http://www.w3.org/2001/XMLSchema#";
 const NUMERIC_XSD = new Set(
   [
     "integer",
@@ -34,27 +36,6 @@ const NUMERIC_XSD = new Set(
     "unsignedLong",
   ].map((t) => XSD + t),
 );
-
-// Well-known prefixes for CURIE display in result cells — the same vocabularies the built-in
-// datasets use. Display-only abbreviation; the raw exports keep full IRIs.
-const DISPLAY_PREFIXES: [string, string][] = [
-  ["ex:", "http://example.org/"],
-  ["foaf:", "http://xmlns.com/foaf/0.1/"],
-  ["rdf:", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"],
-  ["rdfs:", "http://www.w3.org/2000/01/rdf-schema#"],
-  ["xsd:", XSD],
-  ["dc:", "http://purl.org/dc/elements/1.1/"],
-  ["dct:", "http://purl.org/dc/terms/"],
-  ["owl:", "http://www.w3.org/2002/07/owl#"],
-];
-
-/** Abbreviate an IRI to a CURIE when it sits under a well-known prefix (display only). */
-function curie(iri: string): string {
-  for (const [prefix, ns] of DISPLAY_PREFIXES) {
-    if (iri.startsWith(ns)) return prefix + iri.slice(ns.length);
-  }
-  return iri;
-}
 
 function isNumericLiteral(t: SparqlTerm): boolean {
   return (
