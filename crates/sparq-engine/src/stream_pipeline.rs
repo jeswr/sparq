@@ -32,9 +32,18 @@
 //!
 //! ## Driver (§5, amended)
 //!
-//! The seed scan is consumed in blocks with an adaptive ramp
-//! ([`STREAM_BLOCK_FIRST`] doubling to [`STREAM_BLOCK_MAX`]; overridable via the
-//! [`testing`] hooks so the harness can force tiny blocks). Each block runs through
+//! The seed scan is MATERIALIZED once per branch (`scan_to_bindings`, reusing the
+//! sorted-permutation / range-pruning / pushed-down-filter machinery verbatim);
+//! the materialized seed rows are then driven through the join chain in blocks
+//! with an adaptive ramp ([`STREAM_BLOCK_FIRST`] doubling to [`STREAM_BLOCK_MAX`];
+//! overridable via the [`testing`] hooks so the harness can force tiny blocks).
+//! v1 therefore does NOT provide the design record's lazy seed-PULL: the whole
+//! seed relation is retained for the branch's drive (memory bounded by seed
+//! cardinality, not result cardinality) and the store scan is complete before the
+//! first emission. The streamed property v1 DOES provide is emission before the
+//! JOIN completes — first solutions leave the engine while later seed blocks have
+//! not yet been joined. Genuinely incremental seed-scan consumption remains
+//! future work. Each block runs through
 //! the bind-join chain with the existing index kernels; **emission order is
 //! seed-lex** (§5.1): within a block the per-join-value grouping is used ONLY as a
 //! scan cache (one index scan per distinct join value per block, matches cached),
@@ -147,13 +156,16 @@ pub(crate) mod testing {
         BLOCKS.with(|c| c.set(c.get().saturating_add(1)));
     }
 
-    /// Adds a branch's total seed-row count (recorded BEFORE its block loop runs, so
-    /// a mid-drive observer can compare against [`add_seed_processed`]).
+    /// Adds a branch's MATERIALIZED seed-row count (recorded after the branch's
+    /// seed scan materializes, before its block loop runs).
     pub(crate) fn add_seed_total(n: usize) {
         SEED_TOTAL.with(|c| c.set(c.get().saturating_add(n)));
     }
 
-    /// Adds a completed block's seed-row count.
+    /// Adds a block's seed-row count once the block has been driven through the
+    /// join chain. This tracks JOIN progress over the materialized seed — NOT
+    /// store-scan progress: the seed scan is complete before the block loop
+    /// starts (see the module docs).
     pub(crate) fn add_seed_processed(n: usize) {
         SEED_PROCESSED.with(|c| c.set(c.get().saturating_add(n)));
     }
@@ -161,8 +173,10 @@ pub(crate) mod testing {
     /// `(fired, blocks_run, seed_rows_processed, seed_rows_total)` since the last
     /// [`reset_stats`]. Because evaluation is synchronous on the installing thread,
     /// an emit-sink callback can read these MID-STREAM — the
-    /// first-emit-before-eval-complete probe observes
-    /// `seed_rows_processed < seed_rows_total` at first-chunk time.
+    /// first-emit-before-join-complete probe observes
+    /// `seed_rows_processed < seed_rows_total` at first-chunk time, i.e. a chunk
+    /// left the engine while unjoined seed blocks remained. It says nothing about
+    /// the store scan, which is fully materialized before any block is driven.
     pub(crate) fn stats() -> (bool, usize, usize, usize) {
         (
             FIRED.with(|f| f.get()),
@@ -405,8 +419,9 @@ fn classify_branch(graph: &Graph, p: &GraphPattern) -> Option<BranchPlan> {
     })
 }
 
-/// The block driver (§5, amended): consumes each branch's seed scan in ramped
-/// blocks, runs the bind-join chain per block in seed-lex order, applies residual
+/// The block driver (§5, amended): materializes each branch's seed scan up front,
+/// then drives the materialized seed rows through the chain in ramped blocks —
+/// runs the bind-join chain per block in seed-lex order, applies residual
 /// filters / projection / first-seen DISTINCT / slice, and serialises surviving
 /// solutions straight into the pending chunk.
 fn drive(

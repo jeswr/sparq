@@ -612,13 +612,15 @@ mod sect_5_1 {
         assert_eq!(multiset(&got), multiset(&buffered(&g, &q)), "default-ramp multiset equality");
     }
 
-    /// The TTFS probe: an emitted chunk is observed WHILE processed seed rows <
-    /// total seed rows — i.e. first solutions leave the engine before the join (or
-    /// even the seed scan) completes. The 8-row first block fans out to 1600 rows
-    /// (> 64 KiB of JSON, the public entry points' flush threshold), so the first
-    /// chunk is handed to the sink during block 1 of 4+.
+    /// The TTFS probe: an emitted chunk is observed WHILE block-driven seed rows <
+    /// total seed rows — i.e. first solutions leave the engine before the JOIN over
+    /// all seed rows completes. (The seed scan itself is materialized up front, so
+    /// this deliberately claims nothing about scan progress — see the module docs.)
+    /// The 8-row first block fans out to 1600 rows (> 64 KiB of JSON, the public
+    /// entry points' flush threshold), so the first chunk is handed to the sink
+    /// during block 1 of 4+.
     #[test]
-    fn first_emit_observed_before_seed_scan_complete() {
+    fn first_emit_observed_before_join_complete() {
         let _ramp = RampGuard::set(8, 16);
         let g = fanout_graph(45, 5, 200, 2000);
         let q = chain_query();
@@ -638,7 +640,7 @@ mod sect_5_1 {
         assert!(chunks >= 2, "the probe corpus must be genuinely multi-chunk (got {chunks})");
         assert!(
             processed < total,
-            "first emit must be observed BEFORE the seed scan completes (processed {processed} of {total})"
+            "first emit must be observed BEFORE the join over all seed rows completes (driven {processed} of {total})"
         );
     }
 

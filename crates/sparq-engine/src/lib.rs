@@ -198,7 +198,10 @@ pub mod distinct_pushdown_testing {
 /// toggle the classified seed-lex streaming path, override its seed-block ramp so the
 /// differential harness can force multi-block runs on small corpora, and read which
 /// path ran plus its block/seed progress (readable MID-STREAM from an emit sink — the
-/// first-emit-before-eval-complete probe). NOT part of the stable query API. [FABLE-5]
+/// first-emit-before-join-complete probe). The seed counters track block-driving of
+/// the MATERIALIZED seed through the join chain, not store-scan progress (the seed
+/// scan is fully materialized before the block loop starts). NOT part of the stable
+/// query API. [FABLE-5]
 #[doc(hidden)]
 pub mod stream_pipeline_testing {
     /// Enables/disables the streaming pipeline on the current thread (default on),
@@ -222,7 +225,9 @@ pub mod stream_pipeline_testing {
     }
 
     /// `(fired, blocks_run, seed_rows_processed, seed_rows_total)` since the last
-    /// [`reset_stats`].
+    /// [`reset_stats`]. `seed_rows_processed < seed_rows_total` mid-stream means
+    /// unjoined seed blocks remained at that point — emission preceded join
+    /// completion. It is NOT evidence of an incomplete store scan.
     pub fn stats() -> (bool, usize, usize, usize) {
         crate::exec::stream_pipeline::testing::stats()
     }
