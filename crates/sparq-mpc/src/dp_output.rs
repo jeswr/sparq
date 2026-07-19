@@ -43,8 +43,9 @@
 //!   fixes via `sensitivity` (see the Sensitivity section — for a join,
 //!   sensitivity is generally NOT 1). Two neighbouring inputs — inputs whose true
 //!   counts differ by at most `sensitivity` — then produce `B` distributions
-//!   within `e^ε` of each other up to the accounted `δ` failure events (the clamp
-//!   and the tail truncation, δ/2 each). It does NOT make dummies
+//!   within `e^ε` of each other up to the accounted `δ` failure events (the
+//!   neighbouring-support gap — which subsumes the clamp — and the tail
+//!   truncation, δ/2 each). It does NOT make dummies
 //!   indistinguishable from real rows to an authorized recipient who filters tagged
 //!   dummies — that recipient still learns `m` exactly, inherent to a
 //!   set-returning result and UNCHANGED from the base transform (see
@@ -92,11 +93,17 @@
 //! `m + G` with `Pr[G = k] = (1−α)/(1+α) · α^{|k|}`, which is **ε-DP for an
 //! integer count in exact arithmetic**. To make the released count **non-negative**
 //! (and so never truncate a real match), we add a deterministic **shift** `Γ` and
-//! clamp at the true count: `B = m + max(0, Γ + G)`. `Γ` is the smallest integer
-//! with `Pr[G ≤ −Γ] ≤ δ/2`, so the clamp is active with probability ≤ `δ/2`; the
-//! probability that either geometric draw of a release is altered by the `K_CAP`
-//! safety clamp is separately enforced ≤ `δ/2` at construction. Together the two
-//! accounted failure events fit the stated `δ` (the ShrinkWrap-style analysis).
+//! clamp at the true count: `B = m + max(0, Γ + G)`. Because `B` never falls
+//! below the true count, neighbouring counts `m` and `m + Δ` have MISMATCHED
+//! supports: outputs in `[m, m + Δ − 1]` are possible under the lower count but
+//! impossible under the higher — a perfectly distinguishing event whose whole
+//! mass is charged to `δ`. `Γ` is therefore the smallest integer with
+//! `Pr[G ≤ Δ − 1 − Γ] ≤ δ/2` (see [`DpParams::shift`]; for `Δ = 1` this is the
+//! plain clamp event `Pr[G ≤ −Γ]`, and the clamp/reverse-direction event is a
+//! subset of this budget for every `Δ`); the probability that either geometric
+//! draw of a release is altered by the `K_CAP` safety clamp is separately
+//! enforced ≤ `δ/2` at construction. Together the two accounted failure events
+//! fit the stated `δ` (the ShrinkWrap-style analysis).
 //! What remains UNaccounted is the floating-point sampler error itself — see the
 //! HONESTY section. Because `max(0, Γ + G) ≥ 0`, we always have `B ≥ m`: **every
 //! real match is revealed; the crate's never-truncate rule is preserved.**
@@ -220,8 +227,8 @@ impl DpParams {
         // The K_CAP clamp truncates each geometric draw's tail with probability
         // alpha^(K_CAP+1); over the two draws of one release the union bound is
         // 2*alpha^(K_CAP+1). That distortion is charged against the delta/2
-        // truncation half of the failure budget (the clamp event the shift is
-        // calibrated to takes the other delta/2). If it does not fit, refuse
+        // truncation half of the failure budget (the neighbouring-support-gap
+        // event the shift is calibrated to takes the other delta/2). If it does not fit, refuse
         // fail-closed rather than release with an unaccounted tail. Computed as
         // exp(-(eps/sens)*(K_CAP+1)) — mathematically identical, better precision
         // than powi for alpha near 1.
@@ -259,22 +266,37 @@ impl DpParams {
         (-(self.epsilon / self.sensitivity as f64)).exp()
     }
 
-    /// The deterministic non-negative shift `Γ`: the smallest integer `≥ 1` with
-    /// `Pr[G ≤ −Γ] = α^Γ / (1 + α) ≤ δ/2`. This is the value the clamp
-    /// `max(0, Γ + G)` centres on, so the clamp fires with probability `≤ δ/2` —
-    /// the clamp half of the accounted failure budget (the other `δ/2` covers the
-    /// `K_CAP` tail truncation, enforced at [`DpParams::new`]).
+    /// The deterministic non-negative shift `Γ`: the smallest integer `≥ Δ` with
+    /// `Pr[G ≤ Δ−1−Γ] = α^{Γ−Δ+1} / (1 + α) ≤ δ/2` — the **support-gap** event,
+    /// not merely the zero-noise clamp.
+    ///
+    /// Why the support gap is the right event (review finding): the release
+    /// `B = m + max(0, Γ + G)` never falls below the true count, so for
+    /// neighbouring counts `m` and `m + Δ` every output in `[m, m + Δ − 1]` is
+    /// possible under the lower count but IMPOSSIBLE under the higher one — a
+    /// perfectly distinguishing event whose whole mass must be charged to `δ`.
+    /// The lower count lands there exactly when `max(0, Γ + G) ≤ Δ − 1`, i.e.
+    /// `G ≤ Δ − 1 − Γ`. Calibrating only `Pr[G ≤ −Γ] ≤ δ/2` (the `Δ = 1`
+    /// special case) under-counts that mass by `≈ e^{ε(Δ−1)/Δ}` for `Δ > 1`.
+    /// The reverse DP direction's bad event — the clamp atom
+    /// `Pr[G ≤ −Γ] = α^Γ/(1+α)`, where the higher count's clamped release
+    /// `m + Δ` outweighs the lower count's point mass there — is a subset of
+    /// this budget (`Γ ≥ Δ` so `α^Γ ≤ α^{Γ−Δ+1}`), so the same `Γ` covers both
+    /// directions with `≤ δ/2` each; the other `δ/2` covers the `K_CAP` tail
+    /// truncation, enforced at [`DpParams::new`]. `[FABLE-5]`
     ///
     /// Pure function of the parameters (no randomness) — exposed so a caller / test
     /// can size the expected padding a query will pay before running it.
     pub fn shift(&self) -> u64 {
         let alpha = self.alpha();
-        // Solve alpha^Gamma / (1+alpha) <= delta/2
-        //   =>  Gamma >= ln((delta/2)*(1+alpha)) / ln(alpha).
+        // Solve alpha^(Gamma-Delta+1) / (1+alpha) <= delta/2
+        //   =>  Gamma >= (Delta-1) + ln((delta/2)*(1+alpha)) / ln(alpha).
         // For validated params alpha is strictly inside (0, 1) (ln(alpha) finite
         // and < 0) and (delta/2)*(1+alpha) < 1 (delta < 1, alpha < 1), so the ratio
         // is finite and positive. A near-1 alpha (tiny epsilon) makes it large —
-        // clamped by MAX_DP_SHIFT at construction.
+        // clamped by MAX_DP_SHIFT at construction (which thereby also bounds the
+        // accepted sensitivity, so the saturating add below never actually
+        // saturates for accepted params).
         let numer = (self.delta / 2.0 * (1.0 + alpha)).ln();
         let denom = alpha.ln();
         let raw = numer / denom;
@@ -283,7 +305,8 @@ impl DpParams {
             // inside (0, 1)); kept as a defensive floor.
             return 1;
         }
-        (raw.ceil().max(1.0)) as u64
+        let base = (raw.ceil().max(1.0)) as u64;
+        base.saturating_add(self.sensitivity - 1)
     }
 }
 
@@ -765,6 +788,96 @@ mod tests {
             "Δ=4 must pad more than the (wrong-for-a-join) Δ=1: {} vs {}",
             honest.shift(),
             under.shift()
+        );
+    }
+
+    /// Deterministic probability bound (review round 2): for neighbouring counts
+    /// `m` and `m + Δ`, every output in `[m, m + Δ − 1]` is possible under the
+    /// lower count but IMPOSSIBLE under the higher one (`B ≥ true count` always)
+    /// — a perfectly distinguishing support-gap event whose WHOLE mass is
+    /// charged to δ. The lower count lands there exactly when
+    /// `max(0, Γ + G) ≤ Δ − 1`, i.e. `G ≤ Δ − 1 − Γ`. Sum the exact discrete
+    /// two-sided-geometric point masses of that event and require it to fit the
+    /// δ/2 clamp share — for Δ > 1 this is STRICTLY more than the zero-noise
+    /// clamp event `G ≤ −Γ` the shift used to calibrate. Also checks the reverse
+    /// DP direction: its bad event (the clamp atom `Pr[G ≤ −Γ]`, where the
+    /// higher count's clamped release outweighs the lower count's point mass) is
+    /// a subset of the same budget. Covers the fan-out-witness parameterization
+    /// (Δ = 4) among others.
+    #[test]
+    fn support_gap_mass_fits_delta_for_sensitivity_above_one() {
+        for (eps, delta, sens) in [
+            (1.0, 1e-6, 4u64), // the join_fanout_sensitivity_witness parameters
+            (0.5, 1e-4, 2),
+            (2.0, 1e-9, 16),
+            (1.0, 0.05, 1), // Δ = 1: the support gap degenerates to the clamp event
+        ] {
+            let p = DpParams::new(eps, delta, sens).unwrap();
+            let gamma = p.shift() as i64;
+            let alpha = (-(eps / sens as f64)).exp();
+            // The support-gap event is G <= hi with hi = Δ-1-Γ; it must sit at
+            // strictly negative noise (Γ >= Δ) or the gap would include the
+            // no-noise point and could never fit a small δ.
+            let hi = sens as i64 - 1 - gamma;
+            assert!(hi < 0, "Γ = {gamma} must exceed Δ-1 = {}", sens - 1);
+            // Exact point masses Pr[G = k] = (1-α)/(1+α)·α^{|k|}, summed over
+            // k = hi, hi-1, ... The terms decay geometrically; 4096 terms leave
+            // a remainder below f64 significance for every α accepted here.
+            let coeff = (1.0 - alpha) / (1.0 + alpha);
+            let mut summed = 0.0f64;
+            for k in 0..4096i64 {
+                summed += coeff * alpha.powi((hi - k).unsigned_abs() as i32);
+            }
+            // The closed-form tail Pr[G <= hi] = α^{-hi}/(1+α) must agree with
+            // the summation (they are the same mass) and fit the δ/2 budget.
+            let closed = alpha.powi((-hi) as i32) / (1.0 + alpha);
+            assert!(
+                (summed - closed).abs() <= 1e-12 * closed,
+                "(ε={eps}, δ={delta}, Δ={sens}): summed gap mass {summed} disagrees \
+                 with the closed-form tail {closed}"
+            );
+            assert!(
+                closed <= delta / 2.0,
+                "(ε={eps}, δ={delta}, Δ={sens}): support-gap mass {closed} exceeds \
+                 its δ/2 budget {}",
+                delta / 2.0
+            );
+            // Reverse DP direction: the clamp atom Pr[G <= -Γ] is a subset of
+            // the same budget (Γ >= Δ ⇒ α^Γ <= α^{Γ-Δ+1}).
+            let clamp_atom = alpha.powi(gamma as i32) / (1.0 + alpha);
+            assert!(
+                clamp_atom <= closed && clamp_atom <= delta / 2.0,
+                "(ε={eps}, δ={delta}, Δ={sens}): reverse-direction clamp atom \
+                 {clamp_atom} must fit inside the support-gap budget {closed}"
+            );
+        }
+    }
+
+    /// Regression witness (review round 2): at the fan-out-witness parameters
+    /// (Δ = 4) the OLD shift — calibrated only against the zero-noise clamp
+    /// `Pr[G ≤ −Γ₀] ≤ δ/2` — leaves a support-gap mass `α^{Γ₀−Δ+1}/(1+α)`
+    /// ≈ `e^{ε(Δ−1)/Δ}` times the calibrated tail, which demonstrably EXCEEDS
+    /// the δ/2 budget; the corrected shift is exactly Γ₀ + (Δ − 1).
+    #[test]
+    fn old_zero_noise_calibration_undershoots_for_fanout_sensitivity() {
+        let (eps, delta, sens) = (1.0f64, 1e-6f64, 4u64);
+        let p = DpParams::new(eps, delta, sens).unwrap();
+        let alpha = (-(eps / sens as f64)).exp();
+        // The pre-fix shift: smallest Γ₀ ≥ 1 with Pr[G ≤ −Γ₀] = α^Γ₀/(1+α) ≤ δ/2.
+        let gamma_old = ((delta / 2.0 * (1.0 + alpha)).ln() / alpha.ln())
+            .ceil()
+            .max(1.0) as u64;
+        assert_eq!(
+            p.shift(),
+            gamma_old + (sens - 1),
+            "the corrected shift must widen the old one by exactly the Δ-1 support gap"
+        );
+        let old_gap_mass = alpha.powi((gamma_old - (sens - 1)) as i32) / (1.0 + alpha);
+        assert!(
+            old_gap_mass > delta / 2.0,
+            "test premise: the old calibration must violate the support-gap budget \
+             for Δ > 1 ({old_gap_mass} vs {})",
+            delta / 2.0
         );
     }
 
