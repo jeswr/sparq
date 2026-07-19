@@ -444,9 +444,28 @@ def is_fm_group(name: str) -> bool:
     `opt-in group (${{ matrix.group }})`, conclusion=skipped. That is proof legs
     did NOT run; counting it as group presence made every docs/config-only PR
     await a reporter verdict the reporter correctly never posts (zero-leg no-op)
-    and time out RED after the full gate budget. A REAL group check has an
-    expanded name (no `${{`)."""
-    return name.startswith(FM_GROUP_PREFIX) and "${{" not in name
+    and time out RED after the full gate budget.
+
+    SECURITY (sol on #3525): the exclusion must NOT be name-only — matrix.group
+    names come from the PR-controlled assembler, so a real successful group named
+    to contain `${{` could masquerade as the skeleton and drop the reporter
+    requirement (fail-open). The skeleton is identified by BOTH marks: the
+    unexpanded placeholder in the name AND conclusion == skipped (server-set).
+    is_real_fm_group(run) implements that; this name-only helper is for callers
+    that have no conclusion in hand (run-id extraction, where a forged name only
+    ADDS a candidate id — never removes the requirement)."""
+    return name.startswith(FM_GROUP_PREFIX)
+
+
+def is_real_fm_group(run: dict) -> bool:
+    """A group check that PROVES legs ran: group-prefixed name, excluding only the
+    zero-leg skeleton (unexpanded `${{` placeholder AND server-set skipped)."""
+    name = run.get("name", "")
+    if not name.startswith(FM_GROUP_PREFIX):
+        return False
+    if "${{" in name and (run.get("conclusion") or "") == "skipped":
+        return False
+    return True
 
 
 def is_fm_report(name: str) -> bool:
@@ -524,7 +543,7 @@ def fm_report_status(runs: list[dict]) -> str:
     read-only token) will hold here to timeout and RED; that is acceptable — a fork
     PR is not auto-merged into the queue and fail-closed is the safe posture the
     finding demands."""
-    group_present = any(is_fm_group(r.get("name", "")) for r in runs)
+    group_present = any(is_real_fm_group(r) for r in runs)
     if not group_present:
         return "n/a"
     reports = [r for r in runs if is_fm_report(r.get("name", ""))]

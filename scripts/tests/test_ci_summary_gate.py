@@ -1107,8 +1107,19 @@ class TestFeatureMatrixReporterAwait(unittest.TestCase):
             {"name": "opt-in group (${{ matrix.group }})", "status": "completed",
              "conclusion": "skipped", "details_url": ""},
         ]
-        self.assertFalse(g.is_fm_group(runs[0]["name"]))
+        self.assertFalse(g.is_real_fm_group(runs[0]))
         self.assertEqual(g.fm_report_status(runs), "n/a")
+
+    def test_forged_placeholder_name_with_success_still_requires_reporter(self):
+        """SECURITY (sol on #3525): a REAL successful group whose PR-controlled name
+        embeds `${{` must NOT masquerade as the skeleton — the exclusion requires
+        the server-set skipped conclusion too."""
+        runs = [
+            {"name": "opt-in group (g01 ${{ attacker)", "status": "completed",
+             "conclusion": "success", "details_url": ""},
+        ]
+        self.assertTrue(g.is_real_fm_group(runs[0]))
+        self.assertEqual(g.fm_report_status(runs), "pending")
 
     def test_real_group_name_still_counts(self):
         runs = [
