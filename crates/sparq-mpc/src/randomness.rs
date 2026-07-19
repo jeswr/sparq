@@ -48,7 +48,10 @@
 //! [`RandomnessModel::TrustedDealerSim`] (`deployable() == false`).
 //! The dealer-less implementors ([`RandomnessModel::Prss`] /
 //! [`RandomnessModel::HonestMajorityCoinToss`]) are follow-on beads behind this
-//! same trait — no dealer-less crypto is implemented in this module.
+//! same trait — no dealer-less crypto is implemented in this module, and NO
+//! variant is `deployable()` today: the model is a self-reported description,
+//! so deployment acceptance stays fail-closed until a validated dealer-less
+//! implementation lands.
 
 use crate::field::Fp;
 use crate::partial::MpcError;
@@ -82,8 +85,10 @@ pub enum RandomnessModel {
 }
 
 impl RandomnessModel {
-    /// Whether the randomness is generated **without a trusted dealer** — i.e.
-    /// no single party knows a mask. Only [`Self::TrustedDealerSim`] is not.
+    /// Whether this model **describes** a dealer-less regime — one *designed* so
+    /// that no single party knows a mask. Descriptive only: it states what the
+    /// regime is designed to be, not that any implementation validly achieves it.
+    /// Only [`Self::TrustedDealerSim`] is not dealer-less.
     pub fn is_dealer_less(self) -> bool {
         match self {
             RandomnessModel::TrustedDealerSim => false,
@@ -91,13 +96,26 @@ impl RandomnessModel {
         }
     }
 
-    /// Whether this source is honest to deploy to a REAL federation. The
-    /// single-dealer simulation is not (the dealer knows every mask); the
-    /// dealer-less regimes are. Exactly the negation of "is a simulation" today,
-    /// but kept distinct so a future *insecure* dealer-less variant could report
-    /// `is_dealer_less() == true` while `deployable() == false`.
+    /// Whether a source *self-reporting* this model may be accepted for a REAL
+    /// federation deployment. **`false` for every variant today.** The
+    /// single-dealer simulation is structurally non-deployable (the dealer knows
+    /// every mask). The dealer-less regimes are deployable *in principle*, but no
+    /// validated implementation of either exists, and this enum is a
+    /// self-description — any type can report [`Self::Prss`] — so a label alone
+    /// can never be evidence that the mask-secrecy / VSS guarantees actually
+    /// hold. Deployment acceptance stays fail-closed until the concrete
+    /// PRSS / coin-toss implementations land behind an acceptance boundary tied
+    /// to the validated construction (not to this descriptive enum) — the
+    /// follow-on beads in `research/mpc-distributed-randomness-design.md` §5.
     pub fn deployable(self) -> bool {
-        self.is_dealer_less()
+        match self {
+            // The dealer knows every mask — never deployable.
+            RandomnessModel::TrustedDealerSim => false,
+            // Dealer-less BY DESIGN, but descriptive only: no validated
+            // implementation ships, so a self-reported label is refused.
+            RandomnessModel::Prss => false,
+            RandomnessModel::HonestMajorityCoinToss => false,
+        }
     }
 }
 
@@ -116,31 +134,38 @@ impl RandomnessModel {
 /// input sharing is *VSS-verified* against a malicious holder) are **not** part of
 /// any method's contract, because the sole implementor today ([`ShamirDealer`], a
 /// simulation) does not satisfy them — a generic caller must never infer them from
-/// the trait. Those guarantees are instead governed by
-/// [`randomness_model`](Self::randomness_model), and production callers gate on
-/// [`require_deployable`](Self::require_deployable) so a non-deployable source is
-/// refused fail-closed rather than silently trusted.
+/// the trait. Those guarantees are capabilities of a **validated dealer-less
+/// implementation**, none of which ships yet.
+/// [`randomness_model`](Self::randomness_model) is an honest *description* of the
+/// regime, and [`require_deployable`](Self::require_deployable) is the fail-closed
+/// refusal gate — today it refuses EVERY source (see its docs), and wiring it
+/// through the production call sites is itself a follow-on bead (none are wired
+/// yet).
 ///
 /// See `research/mpc-distributed-randomness-design.md` for the full design and
 /// the follow-on implementation beads.
 pub trait DistributedRandomness {
     /// Honest self-description of which regime is producing the randomness — so a
-    /// caller can refuse a non-`deployable()` source in production (fail toward
-    /// the operator) rather than silently run the simulation as if it were a
-    /// federation. This is where the mask-secrecy / dealer-less-VSS guarantees the
-    /// per-method contracts deliberately omit actually live.
+    /// caller (or a `BackendInfo`-style report) can state what the source claims
+    /// to be rather than guess it from the concrete type. **Descriptive only:**
+    /// the label is self-reported and is never by itself evidence that the
+    /// mask-secrecy / dealer-less-VSS guarantees hold — those are capabilities of
+    /// a validated dealer-less implementation, none of which ships yet.
     fn randomness_model(&self) -> RandomnessModel;
 
-    /// Fail-closed production gate: `Ok(())` iff this source's
-    /// [`randomness_model`](Self::randomness_model) is
-    /// [`deployable`](RandomnessModel::deployable) to a real federation, else
-    /// [`MpcError::NoBackendSatisfies`]. Production call sites draw through this
-    /// instead of trusting the concrete type, so a non-deployable simulation
-    /// source (e.g. [`ShamirDealer`]) is REFUSED rather than silently used as if it
-    /// were a federation. The security properties the per-method docs relocate to
-    /// the model (mask secrecy, dealer-less-VSS verification) hold exactly when
-    /// this returns `Ok`. Provided as a default so every implementor inherits the
-    /// same fail-closed check.
+    /// Fail-closed refusal gate: `Err(`[`MpcError::NoBackendSatisfies`]`)` unless
+    /// this source's [`randomness_model`](Self::randomness_model) is
+    /// [`deployable`](RandomnessModel::deployable). **Necessary, not sufficient**
+    /// — and since `deployable()` is `false` for every variant today (no
+    /// validated dealer-less implementation exists, and the model is
+    /// self-reported), this currently refuses EVERY source, including one that
+    /// merely *labels* itself [`RandomnessModel::Prss`]. `Ok` here does NOT
+    /// establish mask secrecy or VSS verification; those require a validated
+    /// dealer-less implementation behind the acceptance boundary the follow-on
+    /// beads add. No production call site draws through this gate yet — wiring
+    /// the callers (`secure_equal`, `degree_reduce`, the oblivious shuffle) is
+    /// itself a follow-on bead (design record §5). Provided as a default so every
+    /// implementor inherits the same refusal.
     fn require_deployable(&self) -> Result<(), MpcError> {
         let model = self.randomness_model();
         if model.deployable() {
@@ -163,11 +188,12 @@ pub trait DistributedRandomness {
     ///
     /// **Structural contract only.** Every implementor returns a well-formed
     /// degree-`t` sharing of a uniform value. Whether *no `≤ t` parties know* that
-    /// mask is a [`randomness_model`](Self::randomness_model) property, NOT part of
-    /// this method's contract: a [`RandomnessModel::TrustedDealerSim`] source draws
-    /// — and therefore knows — every mask; only a `deployable()` (dealer-less)
-    /// model guarantees party-secrecy. A caller that needs secrecy MUST gate on
-    /// [`require_deployable`](Self::require_deployable).
+    /// mask is NOT part of this method's contract: a
+    /// [`RandomnessModel::TrustedDealerSim`] source draws — and therefore knows —
+    /// every mask; party-secrecy is a capability only a validated dealer-less
+    /// implementation delivers (none ships yet). A caller that needs secrecy MUST
+    /// gate on [`require_deployable`](Self::require_deployable) — a necessary,
+    /// not sufficient, check.
     fn shared_mask(&mut self) -> Result<Vec<Share>, MpcError>;
 
     /// A fresh degree-`t` sharing of a uniform **nonzero** mask `r` — the
@@ -175,10 +201,10 @@ pub trait DistributedRandomness {
     /// is the whole correctness of `secure_equal`, and (unlike secrecy) IS part of
     /// this method's structural contract: every implementor returns `r ≠ 0`.
     ///
-    /// **Secrecy + active-adversary caveats are model properties.** As with
-    /// [`shared_mask`](Self::shared_mask), whether *no `≤ t` parties know* `r` is a
-    /// [`randomness_model`](Self::randomness_model) property, not guaranteed here.
-    /// And even a `deployable()` **semi-honest** dealer-less source yields a
+    /// **Secrecy + active-adversary caveats are implementation capabilities.** As
+    /// with [`shared_mask`](Self::shared_mask), whether *no `≤ t` parties know*
+    /// `r` is not guaranteed here — it is a capability of a validated dealer-less
+    /// implementation. And even a validated **semi-honest** dealer-less source yields a
     /// uniform, party-unknown `r` but does NOT defend `r = 0` against an *active*
     /// adversary that biases its contribution: that needs a biasing-resistant joint
     /// generation plus an authenticated distributed nonzero zero-test (a follow-on
@@ -191,14 +217,15 @@ pub trait DistributedRandomness {
     /// **Structural contract only.** Every implementor returns a degree-`t`
     /// sharing that reconstructs to `secret`. Whether that sharing is *verified* —
     /// **dealer-less VSS**, so a malicious holder cannot distribute an inconsistent
-    /// polynomial that reconstructs to different values for different quorums — is a
-    /// [`randomness_model`](Self::randomness_model) property, NOT guaranteed by this
-    /// method. The [`RandomnessModel::TrustedDealerSim`] implementor performs an
-    /// UNCHECKED plain sharing (the holder is assumed to share correctly); a
-    /// `deployable()` model verifies the shares lie on one consistent degree-`t`
+    /// polynomial that reconstructs to different values for different quorums — is
+    /// NOT guaranteed by this method. The [`RandomnessModel::TrustedDealerSim`]
+    /// implementor performs an UNCHECKED plain sharing (the holder is assumed to
+    /// share correctly); only a validated dealer-less VSS implementation (none
+    /// ships yet) verifies the shares lie on one consistent degree-`t`
     /// polynomial and aborts on a cheater — the input-side twin of
     /// [`crate::robust`]'s output-side robustness. A caller that needs that
-    /// guarantee MUST gate on [`require_deployable`](Self::require_deployable).
+    /// guarantee MUST gate on [`require_deployable`](Self::require_deployable) —
+    /// a necessary, not sufficient, check.
     fn vss_own_input(&mut self, secret: Fp) -> Result<Vec<Share>, MpcError>;
 }
 
@@ -266,13 +293,15 @@ mod tests {
     }
 
     #[test]
-    fn dealer_less_models_are_deployable() {
+    fn dealer_less_models_are_descriptive_not_deployable() {
         for m in [
             RandomnessModel::Prss,
             RandomnessModel::HonestMajorityCoinToss,
         ] {
-            assert!(m.is_dealer_less(), "{m:?} must be dealer-less");
-            assert!(m.deployable(), "{m:?} must be deployable");
+            assert!(m.is_dealer_less(), "{m:?} is dealer-less by design");
+            // Descriptive only: no validated implementation exists, so a
+            // self-reported dealer-less label must NOT pass deployment acceptance.
+            assert!(!m.deployable(), "{m:?} must not be deployable yet");
         }
     }
 
@@ -300,11 +329,12 @@ mod tests {
         }
     }
 
-    /// A test-only **deployable** stub reporting a dealer-less model, so the
-    /// `require_deployable` `Ok` branch is exercised. It ships NO dealer-less
-    /// crypto — the randomness methods are unused here and honestly stubbed.
-    struct DeployableStub;
-    impl DistributedRandomness for DeployableStub {
+    /// A test-only stub that *labels* itself [`RandomnessModel::Prss`] while
+    /// implementing NO dealer-less crypto — exactly the source the gate must
+    /// refuse: a self-reported model is not evidence of a validated
+    /// implementation.
+    struct SelfLabelledPrssStub;
+    impl DistributedRandomness for SelfLabelledPrssStub {
         fn randomness_model(&self) -> RandomnessModel {
             RandomnessModel::Prss
         }
@@ -323,16 +353,21 @@ mod tests {
     }
 
     #[test]
-    fn require_deployable_refuses_the_simulation_and_accepts_a_dealer_less_source() {
-        // The single-dealer SIMULATION must be refused fail-closed in production —
-        // it is the whole point of relocating secrecy to the model.
+    fn require_deployable_refuses_the_simulation_and_a_self_labelled_source() {
+        // The single-dealer SIMULATION must be refused fail-closed in production.
         let dealer = seeded_dealer();
         assert!(matches!(
             dealer.require_deployable(),
             Err(MpcError::NoBackendSatisfies { .. })
         ));
-        // A dealer-less (deployable) model passes the production gate.
-        assert!(DeployableStub.require_deployable().is_ok());
+        // A source that merely SELF-LABELS a dealer-less model — with no validated
+        // dealer-less implementation behind it — must ALSO be refused: the label
+        // alone is never sufficient. Acceptance stays fail-closed until the real
+        // PRSS / coin-toss implementations land behind a validated boundary.
+        assert!(matches!(
+            SelfLabelledPrssStub.require_deployable(),
+            Err(MpcError::NoBackendSatisfies { .. })
+        ));
     }
 
     #[test]

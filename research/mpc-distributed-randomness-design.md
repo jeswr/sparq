@@ -229,11 +229,16 @@ classic VSS attack), silently corrupting the aggregate.
 The seam is a single new module carrying:
 
 - **`trait DistributedRandomness`** — the correlated-randomness contract the protocol consumes,
-  independent of *how* the randomness is produced:
-  - `randomness_model() -> RandomnessModel` — honest self-description (is this dealer-less? is it
-    deployable?).
-  - `shared_mask() -> Result<Vec<Share>, MpcError>` — a fresh degree-`t` sharing of a uniform
-    mask **no `≤ t` parties know**.
+  independent of *how* the randomness is produced. The per-method contracts are **structural
+  only** (a well-formed degree-`t` sharing of the stated value); the security guarantees a
+  federation cares about (mask secrecy, VSS verification) are capabilities of a validated
+  dealer-less *implementation*, never of a method or a self-reported label:
+  - `randomness_model() -> RandomnessModel` — honest self-description of the regime
+    (descriptive only — a label is never deployment evidence).
+  - `shared_mask() -> Result<Vec<Share>, MpcError>` — a fresh degree-`t` sharing of a
+    **uniform** mask. Structural contract only: secrecy from up to `t` parties is a capability
+    of a validated dealer-less implementation, not a guarantee of the method itself — the
+    single-dealer implementor draws, and therefore knows, every mask.
   - `shared_nonzero_mask() -> Result<Vec<Share>, MpcError>` — the equality-test mask; **`r ≠ 0`**
     (the §1 threat). Documented semi-honest-only until the nonzero-establishment path
     (biasing-resistant generation + an authenticated distributed zero-test, §1) backs it — an
@@ -241,8 +246,12 @@ The seam is a single new module carrying:
   - `vss_own_input(secret) -> Result<Vec<Share>, MpcError>` — a holder shares its OWN input
     (dealer-less VSS in a real deployment; a plain sharing in the semi-honest simulation).
 - **`enum RandomnessModel { TrustedDealerSim, Prss, HonestMajorityCoinToss }`** — with
-  `is_dealer_less()` and `deployable()` (only `false` for `TrustedDealerSim`), so a caller /
-  `BackendInfo`-style report can state honestly which regime is in force.
+  `is_dealer_less()` (regime description) and `deployable()` (**`false` for every variant
+  today**: the dealer-less variants stay descriptive until a validated implementation lands,
+  because the model is self-reported and any type can claim `Prss`), so a caller /
+  `BackendInfo`-style report can state honestly which regime is in force. The
+  `require_deployable()` refusal gate is accordingly **necessary, not sufficient** — it
+  currently refuses every source fail-closed, including a self-labelled dealer-less stub.
 - **`impl DistributedRandomness for ShamirDealer`** — the CURRENT single-dealer **simulation**.
   It reports `RandomnessModel::TrustedDealerSim` (`deployable() == false`), and its `shared_mask`
   / `shared_nonzero_mask` / `vss_own_input` route to the existing `draw_fp` / `draw_nonzero_fp` /
@@ -275,8 +284,11 @@ same trait — swapped in by `RandomnessModel`, never by concrete type.
    equals `[d·r]` but not that `r ≠ 0`. Promotes `shared_nonzero_mask` from semi-honest-only to
    malicious-with-abort.
 5. **Wire the callers** (`secure_equal`, `degree_reduce`, oblivious-shuffle control bits) to draw
-   through `&mut dyn DistributedRandomness` instead of the inherent dealer methods, so the
-   dealer-less source is selectable end-to-end.
+   through `&mut dyn DistributedRandomness` instead of the inherent dealer methods — with the
+   production entry points gated through `require_deployable()` — so the dealer-less source is
+   selectable end-to-end. Deployment acceptance must then be tied to the validated PRSS /
+   coin-toss constructions themselves (an unforgeable construction boundary), not to the
+   descriptive `RandomnessModel` label a source self-reports.
 
 ---
 
