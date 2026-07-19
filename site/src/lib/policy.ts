@@ -16,22 +16,31 @@
 //     dedicated sparq-policy wasm bundle (a separate portability spike); until that
 //     ships, this is the honest walkthrough tier.
 //
-//   * EVERY verdict below is the REAL `sparq_policy::evaluate` decision for that exact
-//     (policy, request) pair, each one pinned by a NAMED test in the crate's own suite
-//     (`crates/sparq-policy/tests/odrl_eval.rs`, cited per-variant in `test`). The
+//   * WHAT THE CITED TEST PINS vs WHAT IS REPRODUCED — read this before trusting a
+//     verdict. Every verdict below is the `sparq_policy::evaluate` OUTCOME (allow / deny)
+//     for that (policy, request) shape, and the NAMED test cited per-variant in `test`
+//     (`crates/sparq-policy/tests/odrl_eval.rs`) asserts THAT OUTCOME: it exercises the
+//     same policy shape and the same request and asserts allow/deny (a few also assert
+//     the matched-rule count, or that a duty caveat is present). Those tests do NOT
+//     assert the exact rule-IRI ids or the verbatim explanation strings shown here — so
+//     `test` is a provenance handle for the OUTCOME, not proof of the exact string. The
 //     evaluator is pure and deterministic (policy in, decision out — no network, no
 //     randomness), and the suite is ratcheted against the MIT-licensed SolidLab ODRL
 //     Test Suite (67/68 through the real `evaluate` path).
 //
-//   * The `matched`/`unmet` strings are REPRODUCED VERBATIM from the evaluator's
-//     deterministic output shapes (`crates/sparq-policy/src/eval.rs`): a granting
-//     permission's rule id on ALLOW; the overriding prohibition id (+ "prohibition <id>
-//     matches the request") or the unsatisfied `rule <id> constraint (<left> <Op>
-//     <right>) unsatisfied` / "permission <id> requires undischarged duty <iri>" caveat
-//     on DENY. Rules are given NAMED IRIs (not blank nodes) purely so the ids read
-//     cleanly; the shapes are otherwise unchanged. Do NOT hand-edit a verdict — it must
-//     trace to a test. `site/test/policy.test.mjs` pins the internal consistency
-//     (allow ⇔ a matched rule and no unmet caveat) so silent drift fails the unit gate.
+//   * The rule-IRI ids and the `matched`/`unmet` strings are REPRODUCED from the
+//     evaluator's deterministic output FORMAT (`crates/sparq-policy/src/eval.rs`), NOT
+//     copied from a test assertion: a granting permission's rule id on ALLOW; the
+//     overriding prohibition id (+ "prohibition <id> matches the request") or the
+//     `rule <id> constraint (<left> <Op> <right>) unsatisfied` / "permission <id>
+//     requires undischarged duty <iri>" caveat on DENY. The crate tests use BLANK-NODE
+//     rules (which get generated ids); the NAMED IRIs here are a readability rename — the
+//     output SHAPE is otherwise identical. Do NOT hand-edit a verdict: its outcome must
+//     trace to the cited test and its strings to the eval.rs output format.
+//     `site/test/policy.test.mjs` pins the internal consistency (allow ⇔ a matched rule
+//     and no unmet caveat) AND that every caveat matches one of eval.rs's documented
+//     output shapes, so silent drift into a fabricated string fails the unit gate — but
+//     that gate checks SHAPE, not that eval.rs produced this exact string for this input.
 //
 //   * SCOPE — single-node only. The federated-disclosure / ODRL→MPC composition (per-node
 //     ODRL driving the disclosed-vs-hidden split; a Duty → ZK proof obligation) is
@@ -356,14 +365,41 @@ export const SCENARIOS: PolicyScenario[] = [
   },
 ];
 
-/** Render a request variant as the compact API line `sparq-policy` builds it from
- *  (`Request::new(action).on(target).by(party).with(left, value)…`) — display only. */
+/** Expand a display action / leftOperand / duty token to the full IRI the Rust API
+ *  uses: the `odrl:` prefix and bare local names both resolve against {@link ODRL_NS};
+ *  an already-absolute IRI (e.g. `urn:…`, `https:…`) is returned unchanged. */
+function expandIri(a: string): string {
+  if (a.startsWith("odrl:")) return `${ODRL_NS}${a.slice("odrl:".length)}`;
+  return a.includes(":") ? a : `${ODRL_NS}${a}`;
+}
+
+/** The `sparq_policy::Value` constructor the Rust API wraps a context value in, keyed by
+ *  its leftOperand — faithful to the crate tests (dateTime → `Value::DateTime`, purpose →
+ *  `Value::Iri`, recipient → `Value::Str`, count → `Value::Num`). */
+function valueExpr(left: string, value: string): string {
+  switch (left) {
+    case "dateTime":
+      return `Value::DateTime(${JSON.stringify(value)}.into())`;
+    case "purpose":
+      return `Value::Iri(${JSON.stringify(value)}.into())`;
+    case "count":
+      return `Value::Num(${value})`;
+    default:
+      return `Value::Str(${JSON.stringify(value)}.into())`;
+  }
+}
+
+/** Render a request variant as the API line `sparq-policy` builds it — a FAITHFUL,
+ *  compilable-shape `Request::new(action).on(target).by(party).with(leftIri, Value::…)…`
+ *  where every operand is a quoted full IRI and every context value is wrapped in its
+ *  `Value` constructor (matching `crates/sparq-policy/tests/odrl_eval.rs`). Display only. */
 export function requestLine(v: RequestVariant): string {
-  const iri = (a: string) => (a.includes(":") ? a : `${ODRL_NS}${a}`);
-  let line = `Request::new("${iri(v.action)}")`;
+  let line = `Request::new("${expandIri(v.action)}")`;
   if (v.target) line += `.on("${v.target}")`;
   if (v.party) line += `.by("${v.party}")`;
-  for (const c of v.context ?? []) line += `.with(${c.left}, ${JSON.stringify(c.value)})`;
-  for (const d of v.discharged ?? []) line += `.discharge(${d})`;
+  for (const c of v.context ?? []) {
+    line += `.with("${expandIri(c.left)}", ${valueExpr(c.left, c.value)})`;
+  }
+  for (const d of v.discharged ?? []) line += `.discharge("${expandIri(d)}")`;
   return line;
 }

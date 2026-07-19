@@ -2,19 +2,23 @@
 //
 // The policy surface is captured-output tier: sparq-policy is an opt-in native crate
 // (evaluate() is pure Rust, no I/O) the wasm bundles never carry, and the static site
-// has no backend, so src/lib/policy.ts REPLAYS the real evaluate() decision for each
-// (policy, request) pair — every verdict pinned by a named crate test in
-// crates/sparq-policy/tests/odrl_eval.rs.
+// has no backend, so src/lib/policy.ts REPLAYS the evaluate() OUTCOME for each
+// (policy, request) pair. The cited crate test in crates/sparq-policy/tests/odrl_eval.rs
+// pins that OUTCOME (allow/deny) for the same policy shape; the exact rule-IRI ids and
+// matched/unmet strings are reproduced from eval.rs's output FORMAT, not asserted
+// verbatim by those tests (see the honesty contract in src/lib/policy.ts).
 //
 // These tests pin the pasted decisions' INTERNAL CONSISTENCY so a silent hand-edit (the
-// fabrication failure mode) flips the unit gate red:
+// fabrication failure mode) flips the unit gate red — WITHIN the limits of a JS suite
+// that cannot re-run the Rust evaluator, so it checks SHAPE, not evaluator equivalence:
 //   * the fail-closed invariant — a PERMIT has exactly a matched rule AND no unmet
 //     caveat; a DENY always carries an explanation (never a silent no);
 //   * every matched rule id actually appears in that scenario's ODRL Turtle (no
 //     dangling/typo'd rule reference), and a prohibition-override deny names its
 //     prohibition in the caveat;
-//   * every verdict carries a real odrl_eval.rs provenance handle;
-//   * requestLine expands the compact Request builder faithfully.
+//   * every verdict cites an odrl_eval.rs provenance handle AND every caveat matches one
+//     of eval.rs's documented output shapes (so a fabricated free-text caveat fails);
+//   * requestLine renders a faithful, compilable-shape Request builder line.
 // Run via `npm run test:unit`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -80,30 +84,93 @@ test("every matched rule id is grounded in the scenario's Turtle", () => {
   }
 });
 
-test("every verdict carries real crate-test provenance", () => {
+// The `matched`/`unmet` strings are reproduced from eval.rs's output FORMAT (see
+// crates/sparq-policy/src/eval.rs): a prohibition carve-out, a constraint/logical caveat,
+// an undischarged-duty caveat, a fail-closed "no permission" default, or a rule
+// action/target/assignee non-match. A caveat that matches none of these is a fabricated
+// free-text string, not evaluator output — so the gate rejects it. This checks SHAPE, not
+// that eval.rs produced this exact string for this input (a JS suite cannot re-run Rust).
+const UNMET_SHAPES = [
+  /^prohibition .+ matches the request$/,
+  /^rule .+ constraint \(.+\) unsatisfied$/,
+  /^rule .+ logical constraint .+ \(.+\) unsatisfied$/,
+  /^permission .+ requires undischarged duty .+$/,
+  /^no permission matches the request$/,
+  /^rule .+ action .+ != requested .+$/,
+  /^rule .+ target .+ != requested .+$/,
+  /^rule .+ assignee .+ != requester .+$/,
+];
+
+test("every verdict cites provenance and every caveat is an eval.rs output shape", () => {
   for (const s of SCENARIOS) {
     for (const v of s.variants) {
       assert.ok(
         v.test.startsWith("odrl_eval.rs::"),
         `${s.id}/${v.id}: provenance points at odrl_eval.rs (${v.test})`,
       );
+      for (const u of v.decision.unmet) {
+        assert.ok(
+          UNMET_SHAPES.some((re) => re.test(u)),
+          `${s.id}/${v.id}: caveat must match an eval.rs output shape (${u})`,
+        );
+      }
     }
   }
 });
 
-test("requestLine expands the compact Request builder faithfully", () => {
+// Expand a display token to the full IRI the Rust API uses (mirrors expandIri in
+// src/lib/policy.ts): `odrl:` prefix and bare local names resolve against ODRL_NS.
+const expandIri = (a) =>
+  a.startsWith("odrl:") ? `${ODRL_NS}${a.slice(5)}` : a.includes(":") ? a : `${ODRL_NS}${a}`;
+
+test("requestLine renders a faithful, compilable-shape Request builder line", () => {
   for (const s of SCENARIOS) {
     for (const v of s.variants) {
       const line = requestLine(v);
       assert.ok(line.startsWith("Request::new("), `${s.id}/${v.id}: starts with the builder`);
-      // The action expands to a full IRI (bare local names get the ODRL namespace).
-      const expanded = v.action.includes(":") ? v.action : `${ODRL_NS}${v.action}`;
-      assert.ok(line.includes(expanded), `${s.id}/${v.id}: action IRI expanded`);
+      // Action, target, party expand to full, QUOTED IRIs / values.
+      assert.ok(
+        line.includes(`Request::new("${expandIri(v.action)}")`),
+        `${s.id}/${v.id}: action IRI quoted+expanded`,
+      );
       if (v.target) assert.ok(line.includes(`.on("${v.target}")`), `${s.id}/${v.id}: target`);
       if (v.party) assert.ok(line.includes(`.by("${v.party}")`), `${s.id}/${v.id}: party`);
+      for (const c of v.context ?? []) {
+        // Left operand is a full quoted IRI; the value is wrapped in a Value constructor —
+        // never a bare unquoted identifier or bare literal (the old, non-Rust form).
+        assert.ok(
+          line.includes(`.with("${expandIri(c.left)}", Value::`),
+          `${s.id}/${v.id}: context ${c.left} is a quoted IRI + Value ctor`,
+        );
+        assert.ok(
+          !line.includes(`.with(${c.left},`),
+          `${s.id}/${v.id}: left operand is not a bare identifier`,
+        );
+      }
       for (const d of v.discharged ?? []) {
-        assert.ok(line.includes(`.discharge(${d})`), `${s.id}/${v.id}: duty ${d}`);
+        // The duty action is a full, quoted IRI — never bare `odrl:anonymize` (invalid Rust).
+        assert.ok(line.includes(`.discharge("${expandIri(d)}")`), `${s.id}/${v.id}: duty ${d}`);
       }
     }
   }
+});
+
+test("requestLine pins the exact line for a representative context and duty variant", () => {
+  const inWindow = SCENARIOS.find((s) => s.id === "time-window").variants.find(
+    (v) => v.id === "in-window",
+  );
+  assert.equal(
+    requestLine(inWindow),
+    'Request::new("http://www.w3.org/ns/odrl/2/read").on("urn:asset/x")' +
+      '.with("http://www.w3.org/ns/odrl/2/dateTime", Value::DateTime("2026-06-16T09:00:00Z".into()))',
+  );
+
+  const discharged = SCENARIOS.find((s) => s.id === "duty").variants.find(
+    (v) => v.id === "discharged",
+  );
+  assert.equal(
+    requestLine(discharged),
+    'Request::new("http://www.w3.org/ns/odrl/2/read").on("urn:asset/x")' +
+      '.discharge("http://www.w3.org/ns/odrl/2/anonymize")',
+  );
 });
