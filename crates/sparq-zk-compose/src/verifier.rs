@@ -263,9 +263,24 @@ impl KeySet {
     /// `RevocationPolicy` derives the status root from its own snapshot), and which
     /// a `manifest.hidden_issuer_attestations` proof's PUBLIC `key_set_root` must
     /// byte-equal. `None` if the set overflows the tree or `depth` is implausible.
-    // [OPUS-4.8] sq-z9l.
+    ///
+    /// [OPUS-4.8] sq-r6dq: uses the SPARSE builder
+    /// ([`crate::issuer::key_set_root_sparse`], sq-8k3h) rather than the dense
+    /// `key_set_root`, so this derivation is `O(n·depth)` in the number of trusted
+    /// keys instead of `O(2^depth)`. The `depth` is a free policy parameter
+    /// ([`KeySet::with_hidden_issuer_depth`]), so a relying party with a large or
+    /// growing issuer registry can pick a deep tree without the verifier
+    /// materialising all `2^depth` leaves. The sparse root is BIT-IDENTICAL to the
+    /// dense one (cross-checked in `issuer::tests` — all sizes for small depths plus
+    /// representative deep trees), so this is a pure scaling change — the trust
+    /// anchor a prover's public root must match is
+    /// unchanged. Mirrors `revocation::merkle_root`, whose sparse builder is
+    /// likewise the default (sq-hwe). The matching deeper COMPILED circuit member
+    /// (`hidden_issuer_d{depth}` beyond `d4`) is a follow-up requiring the nargo/bb
+    /// toolchain lane to gate-baseline.
+    // [OPUS-4.8] sq-z9l; sparse builder sq-r6dq.
     pub fn hidden_issuer_root(&self, depth: u32) -> Option<Fr> {
-        crate::issuer::key_set_root(&self.ordered_keys(), depth)
+        crate::issuer::key_set_root_sparse(&self.ordered_keys(), depth)
     }
 
     /// The 0-based index of `pk_hex` in the canonical leaf order, if it is a
@@ -7022,6 +7037,66 @@ mod tests {
 
     fn fh(s: &str) -> FieldHex {
         FieldHex(s.to_string())
+    }
+
+    // [OPUS-4.8] sq-r6dq: the hidden-issuer trust-anchor derivation
+    // ([`KeySet::hidden_issuer_root`]) now uses the SPARSE key-set builder
+    // (sq-8k3h), so a relying party with a large/growing issuer registry can pick a
+    // deep tree without the verifier materialising `2^depth` leaves. Pin (a) the
+    // switch is VALUE-PRESERVING — the (sparse) anchor is bit-identical to the dense
+    // root at depths the dense builder can still compute — and (b) it is FEASIBLE
+    // AND CORRECT at a deep tree the dense builder could not materialise: a trusted
+    // member's sparse authentication path must re-fold (LSB-first index bits, the
+    // circuit's fold) to exactly the anchor the verifier derives. (b) is the
+    // non-vacuous guard — a wrong anchor or a wrong sibling fails it.
+    #[test]
+    fn hidden_issuer_root_uses_sparse_builder_and_scales() {
+        use sparq_zk::sig::{key_set_leaf, public_key_to_hex, SecretKey};
+        let sks: Vec<SecretKey> = (0u64..5).map(|s| SecretKey::from_seed(9000 + s)).collect();
+        let hexes: Vec<String> = sks.iter().map(|sk| public_key_to_hex(&sk.public_key())).collect();
+        let k = KeySet::from_hex_keys(hexes).with_hidden_issuer_depth(8);
+        let ordered = k.ordered_keys();
+        assert_eq!(ordered.len(), 5, "all five real keys are trusted");
+
+        // (a) VALUE-PRESERVING: the sparse trust anchor equals the dense root over
+        // the SAME canonical key order, at depths the dense builder can compute.
+        for depth in [4u32, 8, 12] {
+            assert_eq!(
+                k.hidden_issuer_root(depth),
+                crate::issuer::key_set_root(&ordered, depth),
+                "sparse trust anchor must equal the dense root (depth {depth})"
+            );
+        }
+
+        // (b) FEASIBLE + CORRECT at a deep tree: 2^24 = 16.7M dense slots — only the
+        // sparse builder can derive this anchor. Every trusted member's sparse path
+        // must re-fold to exactly the anchor the verifier derives (the soundness tie
+        // between a real member's proof and the RP's trust anchor).
+        let deep = 24u32;
+        let anchor = k.hidden_issuer_root(deep).expect("deep-tree anchor");
+        for index in 0..ordered.len() as u64 {
+            let sibs = crate::issuer::key_membership_witness_sparse(&ordered, deep, index)
+                .expect("deep sparse path");
+            assert_eq!(sibs.len(), deep as usize);
+            let mut node = key_set_leaf(&ordered[index as usize]).unwrap();
+            let mut pos = index;
+            for sib in &sibs {
+                let is_right = pos & 1 == 1;
+                node = if is_right {
+                    sparq_zk::poseidon2::hash(&[*sib, node])
+                } else {
+                    sparq_zk::poseidon2::hash(&[node, *sib])
+                };
+                pos /= 2;
+            }
+            assert_eq!(
+                node, anchor,
+                "member {index}'s sparse path re-folds to the verifier's deep anchor"
+            );
+        }
+
+        // fail-closed parity retained: an implausible depth is still None.
+        assert_eq!(k.hidden_issuer_root(32), None);
     }
 
     // [OPUS-4.8] EMPIRICAL anchor for audit #1: the reconstruction must equal
