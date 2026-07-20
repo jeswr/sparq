@@ -7636,7 +7636,8 @@ mod tests {
 
     fn tmp_work(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!(
-            "sparq_zk_compose_verifier_ut_{tag}_{}_{:?}",
+            "sparq_zk_compose_verifier_ut_{}_{}_{:?}",
+            tag,
             std::process::id(),
             std::thread::current().id()
         ))
