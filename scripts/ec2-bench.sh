@@ -91,6 +91,11 @@ else
   SUITE_WASM='true'
   SUITE_REF='true'
 fi
+if [ -n "$BENCH_FULL_SUITE" ]; then
+  SP2B_EC2_ENV='export SP2B_EC2=1'
+else
+  SP2B_EC2_ENV='true'
+fi
 REMOTE=$(cat <<REMOTE_EOF
 set -e
 sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential pkg-config git >/dev/null 2>&1
@@ -101,6 +106,7 @@ $SUITE_WASM
 git clone -q "$REPO" sparq && cd sparq && git checkout -q "$SHA"
 cargo build --release -q -p sparq-cli -p sparq-bench
 $SUITE_REF
+$SP2B_EC2_ENV
 bash scripts/ci-bench.sh "$SCALE" /tmp/out.json >/dev/null 2>&1
 cat /tmp/out.json
 REMOTE_EOF
