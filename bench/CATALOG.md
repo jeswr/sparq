@@ -297,12 +297,6 @@ Notes on a few that need care:
   same oracle-checked workload in Node + headless Chromium (gather-only installs; per-query
   row-count oracle + cross-library agreement gate every timing row). First-read gap record:
   `research/gap-wasm-2026-07.md`.
-- **FedBench / LargeRDFBench federation is roadmap-only.** [FABLE-5] These suites
-  exercise federation across 9+ endpoints and are outside a single-engine benchmark's
-  scope until sparq has both SPARQL `SERVICE` execution and a source-selection planner.
-  The existing `federation-fedshop` entry is a smaller, local FedShop-shaped comparison;
-  it does not claim FedBench or LargeRDFBench coverage. Do not add either suite to the
-  per-commit harness before those prerequisites land.
 - **`wikidata-8b` is external-cost and gated.** It builds the full Wikidata
   truthy dump (~8-9.4B triples) on a 16 GB EC2 box (~$5-17). It is **blocked
   until dict-spill merges to public main** — see
