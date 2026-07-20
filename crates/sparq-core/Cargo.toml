@@ -113,7 +113,7 @@ oxttl.workspace = true
 # [OPUS-4.8] sq-7d3dj.18: RFC-3987 IRI automaton, OPT-IN behind `iri-fast` (OFF by default).
 # Already present in-tree transitively (oxttl depends on oxiri), so naming it as a direct dep
 # under the feature adds no new compiled crate; the default build never references it.
-oxiri = { version = "0.2", optional = true }
+oxiri = { version = "0.3", optional = true }
 # [OPUS-4.8] sq-dvyi: JSON-LD ingest for the in-memory loaders (`load_str` /
 # `load_dataset` / `load_reader`). Pure-Rust + wasm-portable, but OPT-IN behind the
 # `jsonld` feature (OFF by default) so the tracked lean wasm bundle never links it and

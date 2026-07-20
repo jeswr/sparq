@@ -418,7 +418,7 @@ oxrdf.workspace = true
 spargebra.workspace = true
 # Relative-IRI resolution for IRI()/URI() against the query's BASE (already in the
 # dependency tree via spargebra/oxrdf).
-oxiri = "0.2"
+oxiri = "0.3"
 rustc-hash.workspace = true
 smallvec.workspace = true
 rayon = { workspace = true, optional = true }
