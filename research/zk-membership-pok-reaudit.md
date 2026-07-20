@@ -90,11 +90,16 @@ unprovable), `:4900` (forged signature unprovable), `:4939` (forged root rejecte
 
 ### 2. (load-bearing) hidden-issuer key-set root is verifier-derived — CLOSED
 
-`KeySet::hidden_issuer_root` (`verifier.rs:256`) → `issuer::key_set_root` folds the
+`KeySet::hidden_issuer_root` (`verifier.rs`) → `issuer::key_set_root_sparse`
+(sq-r6dq, since PR #3651; previously the dense `issuer::key_set_root`) folds the
 RP's OWN trusted keys in canonical `BTreeSet` order, leaf = `key_set_leaf(pk) =
 Poseidon2([pk.x, pk.y])` (`sig.rs:1117`), internal = `h2 = Poseidon2([l, r])`
 (`issuer.rs:59`) — bit-identical to `issuer.nr::key_leaf` / `h2` (cross-vector
-`issuer.rs:359`, `tests.nr` `h2(1,2)`). The prover commits the SAME order
+`issuer.rs:359`, `tests.nr` `h2(1,2)`). The sparse root is bit-identical to the
+dense construction (cross-checked in `issuer::tests` across sizes/depths, and
+against the dense root in `hidden_issuer_root_uses_sparse_builder_and_scales`,
+`verifier.rs`), so the derivation change is scaling-only — the anchor a prover's
+public root must byte-equal is unchanged. The prover commits the SAME order
 (`ordered_keys`), so the roots agree. A prover that proves membership in its OWN
 forged set fails the `key_set_root` byte-compare. Padding leaf `Fr::from(0)`; the
 membership fold binds the `index` bits, so a padding slot is never a usable member

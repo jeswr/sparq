@@ -7070,8 +7070,10 @@ mod tests {
 
         // (b) FEASIBLE + CORRECT at a deep tree: 2^24 = 16.7M dense slots — only the
         // sparse builder can derive this anchor. Every trusted member's sparse path
-        // must re-fold to exactly the anchor the verifier derives (the soundness tie
-        // between a real member's proof and the RP's trust anchor).
+        // must re-fold to exactly the anchor the verifier derives — the Merkle
+        // root/path consistency this test pins. (Only that narrow equality is
+        // demonstrated here; the hidden-issuer ZK construction overall remains
+        // research-grade, external cryptographer audit pending sq-qhy4.)
         let deep = 24u32;
         let anchor = k.hidden_issuer_root(deep).expect("deep-tree anchor");
         for index in 0..ordered.len() as u64 {
