@@ -431,7 +431,7 @@ fi
 # The runner applies a timeout to each query and fails closed on result-size drift.
 if [ "${SP2B_EC2:-0}" = 1 ]; then
   bench/sp2b/run-ec2.sh > "$TMP/sp2b-ec2.tsv"
-  while IFS=$'\t' read -r name rows us; do
+  while IFS=$'\t' read -r name _rows us; do
     [ -n "${us:-}" ] && add "$name" us "$us"
   done < "$TMP/sp2b-ec2.tsv"
 fi
