@@ -18,12 +18,12 @@ use sparq_zk::encode::encode_term;
 use sparq_zk::field::{field_to_hex, Fr};
 use sparq_zk::sig::{holder_key_digest, public_key_to_hex, SecretKey};
 use sparq_zk_compose::build::{
-    encode_decimal_literal, encode_int_literal, encode_signed_int_literal,
+    encode_decimal_literal, encode_int_literal, encode_signed_int_literal, JoinWitness,
 };
 use sparq_zk_compose::driver::{CircuitProver, DriverError};
-use sparq_zk_compose::manifest::{BindingMode, CircuitId, FieldHex, StatusListSnapshot};
+use sparq_zk_compose::manifest::{BindingMode, CircuitId, FieldHex, ProofInputs, StatusListSnapshot};
 use sparq_zk_compose::revocation::{merkle_root, merkle_witness, revoke_prover_toml};
-use sparq_zk_compose::toml::join_prover_toml;
+use sparq_zk_compose::toml::{join_prover_toml, prover_toml_for};
 use sparq_zk_compose::verifier::{KeySet, VerifierNonce};
 
 const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
@@ -454,5 +454,95 @@ fn keyset_member_index_is_normalized_and_fail_closed() {
         ks.member_index(&k0_decorated),
         Some(i0),
         "member_index normalizes the queried hex"
+    );
+}
+
+// ============================================================================
+// [OPUS-4.8] sq-qcnn.38: prover_toml_for — the JoinEq dispatch arm. DETERMINISTIC
+// rendering of the `join_eq_na{n_a}_nb{n_b}` member's Prover.toml from a JoinEq
+// ProofInputs + its private JoinWitness. Coverage-only; NO ZK soundness/privacy
+// claim (the verifier is NOT externally audited, sq-qhy4).
+// ============================================================================
+
+/// `prover_toml_for` routes a `JoinEq` ProofInputs (+ its witness) to the
+/// `join_prover_toml` renderer, pads each graph's `enc` to `n_a`/`n_b` slots, and
+/// returns the re-derived circuit id alongside the toml body. The returned id
+/// round-trips to the declared `join_eq_na{n_a}_nb{n_b}` member, and the body
+/// carries the public field-ordered header — a dropped/rewired arm is caught.
+#[test]
+fn prover_toml_for_join_eq_arm_renders_and_pads() {
+    let inputs = ProofInputs::JoinEq {
+        id: CircuitId::JoinEq { n_a: 2, n_b: 1 },
+        commit_a: fh("0x2"),
+        commit_b: fh("0x3"),
+        join_commitment: fh("0x4"),
+        slot_a: 0,
+        slot_b: 1,
+    };
+    let witness = JoinWitness {
+        // One active row for graph A (will be padded up to n_a = 2 slots).
+        enc_a: vec![[fh("0xa1"), fh("0xa2"), fh("0xa3")]],
+        counts_a: 1,
+        enc_b: vec![[fh("0xb1"), fh("0xb2"), fh("0xb3")]],
+        counts_b: 1,
+        row_a: [fh("0xa1"), fh("0xa2"), fh("0xa3")],
+        row_b: [fh("0xb1"), fh("0xb2"), fh("0xb3")],
+        blinding: fh("0x5"),
+    };
+    let (id, toml) = prover_toml_for(
+        &inputs,
+        &fh("0x1"),
+        &[],
+        &[],
+        &[],
+        Some(&witness),
+        None,
+    )
+    .expect("join_eq inputs + witness render a Prover.toml");
+    assert_eq!(id, CircuitId::JoinEq { n_a: 2, n_b: 1 });
+    // The public header is field-ordered exactly as the join member expects.
+    assert!(toml.starts_with("challenge = \"0x1\"\n"), "toml was:\n{}", toml);
+    assert!(toml.contains("commit_a = \"0x2\""), "toml was:\n{}", toml);
+    assert!(toml.contains("commit_b = \"0x3\""), "toml was:\n{}", toml);
+    assert!(toml.contains("join_commitment = \"0x4\""), "toml was:\n{}", toml);
+    assert!(toml.contains("slot_a = \"0\""), "toml was:\n{}", toml);
+    assert!(toml.contains("slot_b = \"1\""), "toml was:\n{}", toml);
+    // enc_a padded to n_a = 2 graph slots (the second row is zero-padded).
+    assert_eq!(
+        toml,
+        join_prover_toml(
+            &fh("0x1"),
+            &fh("0x2"),
+            &fh("0x3"),
+            &fh("0x4"),
+            0,
+            1,
+            &[[fh("0xa1"), fh("0xa2"), fh("0xa3")], [fh("0x0"), fh("0x0"), fh("0x0")]],
+            1,
+            &[[fh("0xb1"), fh("0xb2"), fh("0xb3")]],
+            1,
+            &[fh("0xa1"), fh("0xa2"), fh("0xa3")],
+            &[fh("0xb1"), fh("0xb2"), fh("0xb3")],
+            &fh("0x5"),
+        ),
+        "the JoinEq arm equals join_prover_toml over the pad-to-n_a/n_b witness"
+    );
+}
+
+/// A `JoinEq` ProofInputs with NO witness is a fail-closed error (the member's
+/// private inputs cannot be materialised), not a panic.
+#[test]
+fn prover_toml_for_join_eq_missing_witness_is_error() {
+    let inputs = ProofInputs::JoinEq {
+        id: CircuitId::JoinEq { n_a: 2, n_b: 1 },
+        commit_a: fh("0x2"),
+        commit_b: fh("0x3"),
+        join_commitment: fh("0x4"),
+        slot_a: 0,
+        slot_b: 1,
+    };
+    assert!(
+        prover_toml_for(&inputs, &fh("0x1"), &[], &[], &[], None, None).is_err(),
+        "a join_eq input without its witness must fail closed"
     );
 }
