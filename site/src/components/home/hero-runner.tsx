@@ -46,6 +46,7 @@ import {
   HERO_PREVIEW_ROWS,
 } from "@/data/hero-sample";
 import { withBasePath } from "@/lib/base-path";
+import { isNumericLiteral } from "@/lib/numeric-literal";
 
 // [review #3601] The node-link SVG renderer AND the full node/edge derivation (deriveGraph, which
 // repl-graph-view imports) load through a LITERAL dynamic import() only when the visitor actually
@@ -59,24 +60,6 @@ import { withBasePath } from "@/lib/base-path";
 const ResultGraphView = React.lazy(() =>
   import("@/components/repl-graph-view").then((m) => ({ default: m.ResultGraphView })),
 );
-
-const XSD = "http://www.w3.org/2001/XMLSchema#";
-const NUMERIC_XSD = new Set(
-  ["integer", "decimal", "double", "float", "long", "int", "short", "nonNegativeInteger", "positiveInteger"].map(
-    (t) => XSD + t,
-  ),
-);
-
-/** Whether a term is a numeric literal — used to right-align a numeric result column. */
-function isNumericTerm(t: SparqlTerm | undefined): boolean {
-  return (
-    !!t &&
-    t.type === "literal" &&
-    typeof t.datatype === "string" &&
-    NUMERIC_XSD.has(t.datatype) &&
-    Number.isFinite(Number(t.value))
-  );
-}
 
 /** The first non-empty line of an engine error (keeps the compact strip to one line + any col). */
 function firstErrorLine(err: unknown): string {
@@ -107,7 +90,7 @@ function ResultsTable({
         const t = row[v];
         if (!t) continue;
         sawBound = true;
-        if (!isNumericTerm(t)) allNumeric = false;
+        if (!isNumericLiteral(t)) allNumeric = false;
       }
       m[v] = sawBound && allNumeric;
     }
