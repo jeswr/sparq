@@ -95,7 +95,7 @@ jobs:
       # the repo SHA-pins ALL actions). v0.5.130 — pin verified to peel to this commit via
       # `gh api repos/release-plz/action/git/tags/<annotated> --jq .object.sha`.
       - name: Run release-plz (open/update Release-PR)
-        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
+        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
         with:
           command: release-pr
         env:
@@ -143,7 +143,7 @@ jobs:
       # git tag — it skips cargo publish and skips its own GitHub Release (release.yml owns
       # that). The pushed tag then triggers release.yml.
       - name: Run release-plz (create v<version> tag on version commit)
-        uses: release-plz/action@e8792575c7f2366cf6ff3ccc33ead9ace5b691c7 # v0.5.130
+        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
         with:
           command: release
         env:
