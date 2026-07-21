@@ -25,20 +25,22 @@ without a second concurrent author to race against). The required check is:
 
 | Required check (job name) | Workflow | What it gates |
 |---|---|---|
-| **`ci-summary / gate`** | [`.github/workflows/ci-summary.yml`](../.github/workflows/ci-summary.yml) | **The single gate.** Polls every *other* check-run on the PR head commit and passes iff none failed (`success`/`skipped`/`neutral` are non-failing). |
+| **`ci-summary / gate`** | [`.github/workflows/ci-summary.yml`](../.github/workflows/ci-summary.yml) | **The single gate.** Polls Actions workflow-runs plus external check-runs on the PR head commit and passes iff the newest run/attempt of every gating workflow succeeds (`success`/`skipped`/`neutral` are non-failing). |
 
 > **Select only `ci-summary / gate`** in the ruleset's "Require status checks that must
 > pass" list. Do **not** add the individual job names below — `ci-summary` already
 > aggregates them. This is deliberate: `needs:` cannot span workflows, so requiring each
 > job by name was brittle (every rename / added gate broke the rule and silently weakened
 > the gate). The aggregator adapts automatically — add or rename jobs freely and the gate
-> still covers them, because it discovers the live set of check-runs at run time. See the
-> header of `ci-summary.yml` for the full semantics (stability window + self-exclusion).
+> still covers them, because it discovers the live workflow/check set at run time. See the
+> header of `ci-summary.yml` for the full semantics (newest-run resolution, bounded
+> cancelled-run re-dispatch, stability window, and self-exclusion).
 
 ### What `ci-summary` aggregates (informational — do NOT add these individually)
 
-The gate covers **every** check-run on the head commit. As of this writing those are the
-jobs below; this table is a map for reviewers, **not** a list of required checks.
+The gate covers **every newest Actions workflow run** and every external check-run on the
+head commit. As of this writing those expose the jobs below; this table is a map for
+reviewers, **not** a list of required checks.
 
 > **Advisory/informational checks are non-gating by NAME (sq-wjth).** `ci-summary`
 > excludes any check whose name contains the word `advisory` or `informational`
@@ -250,12 +252,17 @@ belts (all in `scripts/ci_summary_gate.py`, unit-tested in
    (`pull-requests: read`); if the PR was un-drafted meanwhile it concludes
    FAILURE with the same stale-draft-tier message, and an unreadable state
    fail-closes to FAILURE (a draft PR cannot merge anyway).
-6. **Superseded-cancellation forgiveness.** The ready_for_review re-run's per-PR
-   concurrency groups cancel the in-flight draft-tier runs, leaving
-   `cancelled` check-runs on the same SHA; the gate excuses a cancelled/stale
-   check-run **only** when a later run of the same (tier-normalized) name exists —
-   a genuine `failure`/`timed_out` is never forgiven, and a cancellation with no
-   successor still REDs.
+6. **Newest workflow run wins (#3505).** [GPT-5.6] The ready_for_review re-run's
+   per-PR concurrency groups cancel the in-flight draft-tier runs, leaving terminal
+   checks on the same SHA. The gate resolves them by `workflow_id`: only the newest
+   run (by creation/run id) and its newest `run_attempt` is authoritative. Every
+   older run is a non-event even if its conclusion was `cancelled` or `failure`; a
+   genuine failure in the newest run/attempt still REDs. A newest cancelled run is
+   re-dispatched once (`actions: write`); if the retry is cancelled or never
+   advances, the gate REDs loudly with `superseded-legs, re-run required`.
+   Attempt-scoped job listing supplies the completed leg inventory and prevents
+   an old attempt that reused the run id from leaking into the verdict; the
+   workflow-run conclusion supplies the verdict when an entire job evaporates.
 
 **Why the queue can never latch a draft-tier result.** Rule 1 is structural: the
 queue and branch protection admit a PR only on a successful check-run of the
