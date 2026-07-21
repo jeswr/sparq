@@ -180,7 +180,7 @@ jobs:
       # The generator derives transient member locks from the committed root lock without
       # dependency resolution, and fails unless the shared-client runtime view attests both
       # lazy codec dependencies.
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
       - name: Generate JS SBOM (runtime + full tree)
