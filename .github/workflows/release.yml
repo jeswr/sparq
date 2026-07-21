@@ -111,7 +111,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (preinstalled stable)
         # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
         # ships a rustup stable toolchain; the SHA-pinned action's `rustup
@@ -179,7 +179,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (preinstalled stable)
         # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
         # ships a rustup stable toolchain; the SHA-pinned action's `rustup
@@ -309,7 +309,7 @@ jobs:
           - { os: macos-15-intel, label: x64-darwin, soft: true }
           - { os: windows-latest, label: win-x64, soft: true }
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The Tauri webview + bundler system libraries are LINUX-ONLY (macOS ships WKWebView,
       # Windows ships WebView2). This is the SAME apt set gui.yml installs to build the GUI
@@ -597,7 +597,7 @@ jobs:
       # is visible there, not just in the run log.
       security-events: write
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # [GPT-5.6] sq-fvzi6: register the arm64 binfmt emulator before Buildx so the final
       # release push can build both target platforms on this native amd64 runner.
       - name: Set up QEMU for arm64

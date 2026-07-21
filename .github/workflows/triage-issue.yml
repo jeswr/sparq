@@ -34,7 +34,7 @@ jobs:
       # author is untrusted, a maintainer had lifted the quarantine (promote cron or manual).
       WAS_QUARANTINED: ${{ contains(github.event.issue.labels.*.name, 'trust:untrusted') }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Trust-gate the author and the event sender (repo permission, or the orchestrator App itself)
         id: trust

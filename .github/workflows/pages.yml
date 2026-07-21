@@ -88,7 +88,7 @@ jobs:
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/benchmark-data'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # [OPUS-4.8] sq-gdhy — ALWAYS build the `main` site source, even when this run was
           # triggered by a benchmark-data push: the benchmark-data branch is an orphan

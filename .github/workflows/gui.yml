@@ -99,7 +99,7 @@ jobs:
       run:
         working-directory: packages/sparq-client
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -124,7 +124,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The site's static export hard-fails without the wasm bundle; build it first
       # (wasm-pack target, then the lean shacl,jsonld bundle the site syncs into public/).
@@ -206,7 +206,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The GUI frontend embeds the in-tab engine, so the wasm bundle must be built first
       # (the same shacl,jsonld bundle the site syncs).
@@ -327,7 +327,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
@@ -436,7 +436,7 @@ jobs:
       run:
         working-directory: gui/src-tauri
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The Tauri webview system libraries (webkit2gtk + GTK/soup/appindicator) are LINUX-ONLY:
       # macOS (WKWebView) and Windows (WebView2) ship their webview with the OS, so the cargo
@@ -542,7 +542,7 @@ jobs:
     continue-on-error: true
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Tauri system dependencies (+ WebKitWebDriver, xvfb)
         run: |
@@ -698,7 +698,7 @@ jobs:
     continue-on-error: true
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install Tauri system dependencies (+ WebKitWebDriver, xvfb)
         run: |

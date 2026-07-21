@@ -63,7 +63,7 @@ jobs:
     name: maturin build + pytest
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (preinstalled stable)
         # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
         # ships a rustup stable toolchain; the SHA-pinned action's `rustup
@@ -107,7 +107,7 @@ jobs:
     name: maturin build (arrow) + pytest
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (preinstalled stable)
         # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
         # ships a rustup stable toolchain; the SHA-pinned action's `rustup

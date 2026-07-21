@@ -120,7 +120,7 @@ jobs:
       run:
         working-directory: site
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Force-fail check (routing validation)
         env:
@@ -237,7 +237,7 @@ jobs:
       run:
         working-directory: site
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Force-fail check (routing validation)
         env:
@@ -331,7 +331,7 @@ jobs:
       # The nightly-only firefox/webkit projects are opted in here (site/playwright.config.ts).
       SPARQ_NIGHTLY_BROWSERS: "1"
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Force-fail check (routing validation)
         env:
@@ -418,7 +418,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Force-fail check (routing validation)
         env:
@@ -563,7 +563,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 50
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Documented-untested per-platform tauri driver plan
         shell: bash
         run: |
@@ -587,7 +587,7 @@ jobs:
       contents: read
       issues: write
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           sparse-checkout: scripts/nightly/route_sweep_failures.py
           sparse-checkout-cone-mode: false

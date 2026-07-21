@@ -182,7 +182,7 @@ jobs:
       # the bind posture/entrypoint) still gets the image smoke even though the matrix skips.
       docker_changed: ${{ steps.decide.outputs.docker_changed }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Only run the path filter on pull_request: merge_group gets the batch-diff
       # change-class gate in the decide step below (dorny's push/merge_group base-diff is
       # unreliable; the merge_group event payload's base_sha/head_sha pair is not), and
@@ -358,7 +358,7 @@ jobs:
       (needs.select.outputs.mode != 'selected' || needs.select.outputs.affected != '[]')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # [OPUS-4.8] sq-c76x: reclaim ~20-30 GB of pre-installed SDKs/toolchains BEFORE the
       # build + `nextest archive` write. The stock ubuntu-latest runner ships ~14 GB free
       # on `/`; the archive (.tar.zst of every workspace test binary) plus the warm
@@ -551,7 +551,7 @@ jobs:
             partition: "count:3/3"
             crate: ""
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # [OPUS-4.8] sq-c76x: reclaim ~20-30 GB BEFORE downloading/extracting the nextest
       # archive and running the shard. This is the PRIMARY site of the `No space left on
       # device` bulk-shard failures: the bulk shards `--extract-to .` the archived
@@ -785,7 +785,7 @@ jobs:
       issues: write
       actions: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Detect a failed heavy recall shard in this run
@@ -877,7 +877,7 @@ jobs:
        contains(needs.select.outputs.affected, '"sparq-vectors"'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-unknown-unknown
@@ -1126,7 +1126,7 @@ jobs:
     if: needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (preinstalled stable, rustfmt+clippy)
         # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
         # ships a rustup stable toolchain; the SHA-pinned action's `rustup
@@ -1241,7 +1241,7 @@ jobs:
       # proc-macros link) and its meaning is the VERSION floor, not link speed.
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (pinned MSRV toolchain 1.88)
         # [FABLE-5] PR #3511 review finding 4: this gate was VACUOUS — the
         # pre-existing step was the SHA-pinned action with a trailing `# 1.88`
@@ -1287,7 +1287,7 @@ jobs:
        contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (preinstalled stable)
         # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
         # ships a rustup stable toolchain; the SHA-pinned action's `rustup
@@ -1417,7 +1417,7 @@ jobs:
        contains(needs.select.outputs.affected, '"sparq-shacl"'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (preinstalled stable)
         # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
         # ships a rustup stable toolchain; the SHA-pinned action's `rustup
@@ -1550,7 +1550,7 @@ jobs:
        contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (preinstalled stable)
         # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
         # ships a rustup stable toolchain; the SHA-pinned action's `rustup
@@ -1692,7 +1692,7 @@ jobs:
        contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (preinstalled stable)
         # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
         # ships a rustup stable toolchain; the SHA-pinned action's `rustup
@@ -1798,7 +1798,7 @@ jobs:
        contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (preinstalled stable)
         # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
         # ships a rustup stable toolchain; the SHA-pinned action's `rustup
@@ -1900,7 +1900,7 @@ jobs:
        contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (preinstalled stable)
         # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
         # ships a rustup stable toolchain; the SHA-pinned action's `rustup
@@ -2005,7 +2005,7 @@ jobs:
        contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (preinstalled stable)
         # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
         # ships a rustup stable toolchain; the SHA-pinned action's `rustup
@@ -2115,7 +2115,7 @@ jobs:
        contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (preinstalled stable)
         # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
         # ships a rustup stable toolchain; the SHA-pinned action's `rustup
@@ -2253,7 +2253,7 @@ jobs:
        contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (preinstalled stable)
         # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
         # ships a rustup stable toolchain; the SHA-pinned action's `rustup
@@ -2410,7 +2410,7 @@ jobs:
        contains(needs.select.outputs.affected, '"sparq-conformance"'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (preinstalled stable)
         # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
         # ships a rustup stable toolchain; the SHA-pinned action's `rustup
@@ -2705,7 +2705,7 @@ jobs:
     if: github.event_name != 'schedule' && needs.changes.outputs.rust_changed == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Test-presence gate (fast, no compile)
         run: python3 scripts/coverage-presence.py --check
       - name: Shard-partition guard (fast, no compile)
@@ -2793,7 +2793,7 @@ jobs:
       matrix:
         shard: [1, 2, 3]   # [FABLE-5] sq-piapk: was [1,2,3,4]; engine (old shard 1) split out
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # [OPUS-4.8] sq-czlh: reclaim ~20-30 GB of pre-installed SDKs/toolchains BEFORE the
       # instrumented build. cargo-llvm-cov compiles the workspace per-crate with coverage
       # instrumentation AND writes a `.profraw` per test, on a runner that starts with only
@@ -2948,7 +2948,7 @@ jobs:
       matrix:
         part: [1, 2, 3]
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Free runner disk before instrumented build
         run: ./scripts/ci-free-disk.sh
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -2999,7 +2999,7 @@ jobs:
     if: needs.coverage-engine-run.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Free runner disk before instrumented build
         run: ./scripts/ci-free-disk.sh
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -3202,7 +3202,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # [OPUS-4.8] sq-czlh: reclaim ~20-30 GB of pre-installed SDKs/toolchains BEFORE the
       # FULL-tier instrumented build. This nightly job adds the heavy sparq-vectors 50k
       # recall/diskann tests on top of the per-crate llvm-cov instrumentation + per-test
@@ -3438,7 +3438,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Free runner disk before mutation build
         # cargo-mutants builds the workspace many times (one rebuild per mutant); reclaim
         # space first like coverage-nightly. Best-effort, no-ops on absent paths.
@@ -3544,7 +3544,7 @@ jobs:
       github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Ratchet first-party unsafe count against the snapshot
         # Fails CI if a crate's live `unsafe` count exceeds bench/unsafe-snapshot.json.
         # The fix is always: add a row to compliance/memsafety/unsafe-register.md + a
@@ -3575,7 +3575,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Rust (preinstalled stable)
         # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
         # ships a rustup stable toolchain; the SHA-pinned action's `rustup
@@ -3629,7 +3629,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - name: Build image (load into the local daemon)
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0

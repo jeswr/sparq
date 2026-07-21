@@ -75,7 +75,7 @@ jobs:
       pull-requests: write  # open / update the Release-PR
     steps:
       - name: Checkout (full history for changelog generation)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # release-plz / git-cliff walk the full commit history to build the changelog.
           fetch-depth: 0
@@ -117,7 +117,7 @@ jobs:
       # id-token: write  # OIDC token crates-io-auth-action exchanges for a short-lived crates.io token
     steps:
       - name: Checkout (full history for tag detection)
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false

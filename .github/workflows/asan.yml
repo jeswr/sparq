@@ -103,7 +103,7 @@ jobs:
     # than running away (matches miri.yml's posture).
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # [OPUS-4.8] sq-czlh: reclaim ~20-30 GB of pre-installed SDKs/toolchains BEFORE the
       # heavy build. -Zbuild-std recompiles the ENTIRE standard library under ASan
       # instrumentation into a distinct target tree, on a runner that starts with only
