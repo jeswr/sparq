@@ -69,8 +69,16 @@ test("captured decisions equal the real Rust evaluator output verbatim", () => {
           0,
           `${scenario.id}/${variant.id}: Rust fixture failed\n${result.stderr}`,
         );
+        let decision;
+        try {
+          decision = JSON.parse(result.stdout);
+        } catch (error) {
+          assert.fail(
+            `${scenario.id}/${variant.id}: Rust fixture emitted invalid JSON: ${error.message}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+          );
+        }
         assert.deepEqual(
-          JSON.parse(result.stdout),
+          decision,
           variant.decision,
           `${scenario.id}/${variant.id}: captured decision drifted from sparq_policy::evaluate`,
         );
