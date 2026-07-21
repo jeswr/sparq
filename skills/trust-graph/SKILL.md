@@ -230,6 +230,69 @@ Feed `effective_rules` from the closure to either path as the `rules` argument; 
 itself never errors — a credential that fails any gate simply admits nothing
 (fail-closed, default-deny).
 
+## Trust-expression surfaces — verifier↔holder contract (sq-6syab, issue #1592)
+
+The **trust-expression layer** (`sq-6syab` epic) defines a *verifier-to-holder contract*
+for framework-anchored attestation queries — answering: *"emit the results of this query
+over attributes from parties **[X, Y and Z] OR from certified issuers within eIDAS/DIATF**,
+but ONLY where each issuer has issued only what they are certified to issue"* (the
+**certification-scope** constraint).
+
+### The vocabulary layer — `trustx:` certification terms (`sq-6syab.2`, `framework_vocab`)
+
+Behind the default-OFF **`framework-vocab`** feature. The `trustx:` namespace (sharing the
+`trust:` base IRI, extending it, not forking) adds:
+
+- **Trust requirements** (`trustx:TrustRequirements`) — the contract carrier: ONE small RDF
+  graph binding a SPARQL query to its trust conditions. The trust conditions live HERE, never
+  in the query (no new query syntax — design §3.1). Properties: `trustx:question` (the
+  query IRI), `trustx:trustsIssuer` (enumerated issuers), `trustx:trustsFramework`
+  (framework-certified issuers), `trustx:requiresScopeConformance` (issuer certification
+  scope check), `trustx:requiresValidStatusAt` (positive status window instant),
+  `trustx:methodPolicy` (OPTIONAL ODRL reference).
+- **Certification and scope** (`trustx:Certification`, `trustx:scope`) — an issuer being
+  *certified under* a framework (`trustx:underFramework`), for a *scope* ranging from
+  service-level (`trustx:AnyServiceScope`, the honest DIATF granularity) down to a
+  predicate set / SHACL shape (reusing `trust:forShape`). Validity window via
+  `trustx:validFrom`/`trustx:validUntil`.
+- **Status attestation** (`trustx:StatusAttestation`, `trustx:coveredBy`) — positive,
+  time-windowed attestation that an issuer / credential was valid in a window (OWA/monotone:
+  non-revocation = existence of covering attestation, never absence).
+- **Framework individuals** (`trustx:eIDAS2`, `trustx:DIATF`) — thin instances that
+  `rdfs:seeAlso` the vendored `sec-req:` eIDAS 2.0 / UK DVS regulatory individuals (no
+  fork, no duplication).
+
+Machine-readable form: `crates/sparq-trust/ontologies/trust/trust-framework.ttl`. All terms
+are **NON-STANDARD** (a WG would rehome them). **Anchored, not proven** — framework
+membership bottoms out in a trust anchor (the operator's signed Trusted List / register),
+not cryptography. See `crates/sparq-trust/README.md` for the full honesty frame.
+
+### Holder-side evaluation — contract parsing and response assembly (`sq-6syab.4`, `expression`)
+
+Behind the **opt-in `expression` module** (part of the `sq-6syab` epic). The clear-path
+holder-side evaluation:
+
+1. **Trust-requirements parsing** — extract `trustx:TrustRequirements` from the verifier's
+   contract: the query IRI, the trust modes (enumerated OR framework-certified), the
+   scope-conformance and status-attestation checks.
+2. **Reference rewrite** (Q→Q') — rewrite the original query `Q` into Q' that emits
+   provenance (the `sparq-engine` wrapper that feeds provenance-reified triples over each
+   statement that contributed to the answer).
+3. **Scoped query evaluation** — run the rewritten query; each statement's provenance carries
+   the issuer IRI and any issued-by timestamp / status window.
+4. **Response assembly** — build the response dataset `R`: the original query answer + for
+   every contributing statement, machine-readable provenance sufficient for the verifier to
+   re-check admissibility under the trust requirements (design §4 / §5).
+5. **Verification re-check** — locally validate the signature over any VC/commitment in the
+   response before assembly (issuer identity + key binding).
+6. **Status-attestation bridge** — if `trustx:requiresValidStatusAt` is specified, attach
+   the covering positive status attestation to the response provenance (a `trustx:StatusAttestation`
+   reifier).
+
+Fail-closed: if no admissible derivation exists under the constraints, bind nothing. Response
+provenance is **sufficient for independent verifier re-check** (Q' over R) without trusting
+the holder.
+
 ## Cross-references
 
 - `skills/access-control/SKILL.md` — the WAC/ACP layer, the admission stratum, both
@@ -238,9 +301,12 @@ itself never errors — a credential that fails any gate simply admits nothing
 - `skills/verifiable-credentials/SKILL.md` — the standards-interop signed-graph
   complement; `skills/zk-query-proofs/SKILL.md` — the (externally unaudited, sq-qhy4)
   ZK estate.
-- `crates/sparq-trust/README.md` + the `sparq_trust::graph` module docs — the full
-  invariant discussion; `crates/sparq-trust/tests/certification_graph_e2e.rs` — the
-  adversarial edge-forgery matrix.
-- `research/trust-expression-spec.md` §3.4 and
-  `research/solid-trust-graph-authz-design.md` — the design records (epic `sq-pfae`,
-  issue #940).
+- `crates/sparq-trust/README.md` — the crate surface overview, module list, and the
+  full honesty frame. `crates/sparq-trust/src/framework_vocab.rs` + rustdoc (`cargo doc
+  -p sparq-trust --all-features`) — the vocabulary IRIs as Rust constants.
+- `crates/sparq-trust/tests/certification_graph_e2e.rs` — the pod-side adversarial
+  edge-forgery matrix (this section § *Pod-side wiring*).
+- `research/trust-expression-spec.md` (epic `sq-6syab`, issue #1592; design § 3.1 contract,
+  § 3.4 certification-scope, § 4 response provenance encoding, § 7 honesty / trust anchors)
+  and `research/solid-trust-graph-authz-design.md` § 6.0 (pod-side epic `sq-pfae`,
+  issue #940) — the design records.
