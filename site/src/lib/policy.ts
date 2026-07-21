@@ -28,7 +28,7 @@
 //
 //   * The rule-IRI ids and the `matched`/`unmet` strings are captured from the
 //     evaluator's deterministic output (`crates/sparq-policy/src/eval.rs`): a granting
-//     permission's rule id on ALLOW; the
+//     permission's bare rule IRI on ALLOW; the
 //     overriding prohibition id (+ "prohibition <id> matches the request") or the
 //     `rule <id> constraint (<left> <Op> <right>) unsatisfied` / "permission <id>
 //     requires undischarged duty <iri>" caveat on DENY. The crate tests use BLANK-NODE
@@ -137,7 +137,7 @@ export const SCENARIOS: PolicyScenario[] = [
         action: "read",
         target: "urn:asset/x",
         context: [{ left: "dateTime", value: "2026-06-16T09:00:00Z" }],
-        decision: { allow: true, matched: ["<urn:rule/read-until-2026>"], unmet: [] },
+        decision: { allow: true, matched: ["urn:rule/read-until-2026"], unmet: [] },
         test: T("datetime_window_gates"),
       },
       {
@@ -151,7 +151,7 @@ export const SCENARIOS: PolicyScenario[] = [
           allow: false,
           matched: [],
           unmet: [
-            'rule <urn:rule/read-until-2026> constraint (http://www.w3.org/ns/odrl/2/dateTime Lteq "2026-12-31T23:59:59Z") unsatisfied',
+            'rule urn:rule/read-until-2026 constraint (http://www.w3.org/ns/odrl/2/dateTime Lteq "2026-12-31T23:59:59Z") unsatisfied',
           ],
         },
         test: T("datetime_window_gates"),
@@ -166,7 +166,7 @@ export const SCENARIOS: PolicyScenario[] = [
           allow: false,
           matched: [],
           unmet: [
-            'rule <urn:rule/read-until-2026> constraint (http://www.w3.org/ns/odrl/2/dateTime Lteq "2026-12-31T23:59:59Z") unsatisfied',
+            'rule urn:rule/read-until-2026 constraint (http://www.w3.org/ns/odrl/2/dateTime Lteq "2026-12-31T23:59:59Z") unsatisfied',
           ],
         },
         test: T("datetime_window_gates"),
@@ -198,7 +198,7 @@ export const SCENARIOS: PolicyScenario[] = [
         action: "read",
         target: "urn:asset/x",
         party: alice,
-        decision: { allow: true, matched: ["<urn:rule/anyone-read>"], unmet: [] },
+        decision: { allow: true, matched: ["urn:rule/anyone-read"], unmet: [] },
         test: T("prohibition_overrides_permission"),
       },
       {
@@ -210,8 +210,8 @@ export const SCENARIOS: PolicyScenario[] = [
         party: mallory,
         decision: {
           allow: false,
-          matched: ["<urn:rule/deny-mallory>"],
-          unmet: ["prohibition <urn:rule/deny-mallory> matches the request"],
+          matched: ["urn:rule/deny-mallory"],
+          unmet: ["prohibition urn:rule/deny-mallory matches the request"],
         },
         test: T("prohibition_overrides_permission"),
       },
@@ -242,7 +242,7 @@ export const SCENARIOS: PolicyScenario[] = [
         target: "urn:asset/x",
         party: alice,
         context: [{ left: "purpose", value: "urn:purpose/research" }],
-        decision: { allow: true, matched: ["<urn:rule/use-research>"], unmet: [] },
+        decision: { allow: true, matched: ["urn:rule/use-research"], unmet: [] },
         test: T("purpose_match_grants"),
       },
       {
@@ -260,7 +260,7 @@ export const SCENARIOS: PolicyScenario[] = [
             // The evaluator formats the POLICY constraint's right operand (`c.right`,
             // eval.rs), not the request's supplied value — so a purpose-mismatch deny
             // still names the policy's bound <urn:purpose/research>.
-            "rule <urn:rule/use-research> constraint (http://www.w3.org/ns/odrl/2/purpose Eq <urn:purpose/research>) unsatisfied",
+            "rule urn:rule/use-research constraint (http://www.w3.org/ns/odrl/2/purpose Eq <urn:purpose/research>) unsatisfied",
           ],
         },
         test: T("purpose_mismatch_denies"),
@@ -276,7 +276,7 @@ export const SCENARIOS: PolicyScenario[] = [
           allow: false,
           matched: [],
           unmet: [
-            "rule <urn:rule/use-research> constraint (http://www.w3.org/ns/odrl/2/purpose Eq <urn:purpose/research>) unsatisfied",
+            "rule urn:rule/use-research constraint (http://www.w3.org/ns/odrl/2/purpose Eq <urn:purpose/research>) unsatisfied",
           ],
         },
         test: T("missing_purpose_fails_closed"),
@@ -306,7 +306,7 @@ export const SCENARIOS: PolicyScenario[] = [
         action: "distribute",
         target: "urn:asset/x",
         context: [{ left: "recipient", value: "nodeB" }],
-        decision: { allow: true, matched: ["<urn:rule/distribute-nodes>"], unmet: [] },
+        decision: { allow: true, matched: ["urn:rule/distribute-nodes"], unmet: [] },
         test: T("recipient_is_part_of_set"),
       },
       {
@@ -320,7 +320,7 @@ export const SCENARIOS: PolicyScenario[] = [
           allow: false,
           matched: [],
           unmet: [
-            'rule <urn:rule/distribute-nodes> constraint (http://www.w3.org/ns/odrl/2/recipient IsPartOf "nodeB|nodeC") unsatisfied',
+            'rule urn:rule/distribute-nodes constraint (http://www.w3.org/ns/odrl/2/recipient IsPartOf "nodeB|nodeC") unsatisfied',
           ],
         },
         test: T("recipient_is_part_of_set"),
@@ -351,7 +351,7 @@ export const SCENARIOS: PolicyScenario[] = [
           allow: false,
           matched: [],
           unmet: [
-            "permission <urn:rule/read-if-anonymized> requires undischarged duty http://www.w3.org/ns/odrl/2/anonymize",
+            "permission urn:rule/read-if-anonymized requires undischarged duty http://www.w3.org/ns/odrl/2/anonymize",
           ],
         },
         test: T("duty_must_be_discharged"),
@@ -363,7 +363,7 @@ export const SCENARIOS: PolicyScenario[] = [
         action: "read",
         target: "urn:asset/x",
         discharged: ["odrl:anonymize"],
-        decision: { allow: true, matched: ["<urn:rule/read-if-anonymized>"], unmet: [] },
+        decision: { allow: true, matched: ["urn:rule/read-if-anonymized"], unmet: [] },
         test: T("duty_must_be_discharged"),
       },
     ],

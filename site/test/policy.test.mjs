@@ -188,7 +188,7 @@ test("every verdict cites provenance and every caveat is an eval.rs output shape
 // test parses each constraint caveat and anchors all four parts to the scenario's own
 // Turtle, so an operand substitution (the round-2 fabrication failure mode) fails the
 // gate — shape alone cannot catch it.
-const CONSTRAINT_CAVEAT = /^rule (<[^>]+>) constraint \((\S+) (\S+) (.+)\) unsatisfied$/;
+const CONSTRAINT_CAVEAT = /^rule (\S+) constraint \((\S+) (\S+) (.+)\) unsatisfied$/;
 
 test("every constraint caveat's operands anchor to the policy's own constraint", () => {
   let anchored = 0;
