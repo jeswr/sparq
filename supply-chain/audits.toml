@@ -6,3 +6,9 @@ who = "GPT-5.6 <noreply@openai.com>"
 criteria = "safe-to-deploy"
 delta = "0.14.0 -> 0.15.0"
 notes = "Reviewed the exact crates.io delta: pure-Rust iterator API additions and refactors; build remains disabled, the sole runtime dependency remains either, and no unsafe, proc-macro, network, filesystem, process, or dependency additions were introduced. [GPT-5.6]"
+
+[[audits.object_store]]
+who = "GPT-5.6 <noreply@openai.com>"
+criteria = "safe-to-deploy"
+delta = "0.13.2 -> 0.14.1"
+notes = "Reviewed the exact crates.io delta end to end (unsafe, build-script, proc-macro, dependency, network, and filesystem surfaces): API/refactor changes to the object-store abstraction; the notable change is a new optional nix dependency for local-filesystem metadata paths (nix itself audited separately). No build.rs additions, no proc-macros, no new network endpoints beyond the existing store backends. [GPT-5.6; entry restored by the orchestrator after the worker's recording step was lost — review evidenced in the worker transcript 2026-07-21]"
