@@ -1,4 +1,14 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.bytes]]
+who = "GPT-5.6 <noreply@openai.com>"
+criteria = "safe-to-deploy"
+delta = "1.11.1 -> 1.12.1"
+notes = "[GPT-5.6] PR #3653: reviewed the complete checksum-verified registry delta. The release adds BytesMut extend_from_within/try_unsplit and fixes zero-byte signed reads and allocation-panic ownership. The unsafe vtable refactor passes consumed data pointers by value without changing ownership, and MaybeUninit allocation ordering prevents leaking or double-dropping Vec storage if allocation panics. No build.rs, proc-macro, dependency, network, or filesystem capability was added."
+
+[[audits.memchr]]
+who = "GPT-5.6 <noreply@openai.com>"
+criteria = "safe-to-deploy"
+delta = "2.8.2 -> 2.8.3"
+notes = "[GPT-5.6] PR #3653: reviewed the complete checksum-verified registry delta. Raw x86 dispatch helpers are now correctly marked unsafe, and search_slice_with_raw gives the optimizer its existing caller-guaranteed in-bounds invariant via unreachable_unchecked. No build.rs, proc-macro, dependency, network, or filesystem capability was added."
