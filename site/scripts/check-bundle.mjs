@@ -50,6 +50,9 @@ export const HEAVY_MODULE_SUFFIXES = [
   "-> @/components/mpc-demo",
   // The Home hero's in-browser SPARQL runner — pulls the editors + @sparq/client engine wasm glue.
   "-> @/components/home/hero-runner",
+  // [GPT-5] #3606 — the hero's optional Graph view must remain a nested split point so its SVG
+  // renderer and result-graph derivation load only when the visitor invokes that view.
+  "-> @/components/repl-graph-view",
   // The in-tab ZK prover (~MB each), dynamic-imported inside lib/zk-prover.ts.
   "-> @aztec/bb.js",
   "-> @noir-lang/noir_js",
