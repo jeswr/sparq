@@ -36,7 +36,6 @@ import {
   datasetSize,
   prewarmSparqWhenIdle,
   type SparqlResults,
-  type SparqlTerm,
 } from "@/lib/sparq-wasm";
 import {
   HERO_SAMPLE_TURTLE,
