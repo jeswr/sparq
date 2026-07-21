@@ -1,7 +1,7 @@
 // [GPT-5] Shared SPARQL-result numeric detection. Keep result renderers on one XSD datatype set.
 import type { SparqlTerm } from "@/lib/sparq-wasm";
 
-import { XSD } from "@/lib/curie";
+import { XSD } from "./curie";
 
 const NUMERIC_XSD = new Set(
   [
