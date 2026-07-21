@@ -574,7 +574,10 @@ delta.context = union(all adds[i].dot, all removes[i].dots)
   identifier, origin/sequence identity, canonical encoding, quad grammar, blank-node absence,
   dot uniqueness, and all state invariants. An add dot #strong[MUST NOT] also occur in that
   envelope's remove set. If a received dot is already known under another quad, the envelope
-  #strong[MUST] be rejected. Authentication and replica authorisation are deployment
+  #strong[MUST] be rejected. This check is scoped to dot-to-quad associations in the receiver's
+  live store: after removal, the causal context tombstone makes reuse of the removed dot a no-op
+  under `CRDT-JOIN-1`, while full dot non-reuse remains the origin's `CRDT-DOT-1` obligation; no
+  durable provenance journal is required. Authentication and replica authorisation are deployment
   responsibilities outside the CRDT algebra; unauthorised envelopes #strong[MUST] be rejected
   before this validation path.
 ]
