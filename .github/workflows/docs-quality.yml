@@ -562,6 +562,10 @@ jobs:
       # still-settling, idle-queue hang => RED, absolute cap bounded) are pinned by a
       # hermetic stdlib-unittest suite (NO gh, NO network — injected fetchers). A
       # regression in the gate's own logic must red CI before every merge depends on it.
+      # [GPT-5.6] #3505 adds a script-native mutation tripwire: superseded cancellation
+      # must pass, newest failure must fail, and cancelled-run redispatch must stop at one.
+      - name: "Self-test ci-summary #3505 mutations (supersession + failure + bounded redispatch)"
+        run: python3 scripts/ci_summary_gate.py --self-test
       - name: Self-test ci-summary gate loop (verdict semantics + adaptive saturation budget — sq-90cv4)
         run: python3 scripts/tests/test_ci_summary_gate.py
       # [FABLE-5] sq-fmx4u.3: the change-based test-selection stack is now
