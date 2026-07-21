@@ -58,6 +58,24 @@ def R(name, status="completed", conclusion="success", url="", started="", rid=0,
             "external_id": external_id}
 
 
+def W(run_id, workflow_id, *, name="CI", status="completed", conclusion="success",
+      created="2026-07-21T14:00:00Z", attempt=1):
+    """Actions workflow-run fixture for the #3505 authoritative resolver."""
+    return {
+        "id": run_id,
+        "workflow_id": workflow_id,
+        "name": name,
+        "path": f".github/workflows/{name.lower().replace(' ', '-')}.yml",
+        "head_sha": "deadbeef",
+        "status": status,
+        "conclusion": conclusion,
+        "created_at": created,
+        "run_started_at": created,
+        "run_attempt": attempt,
+        "html_url": f"https://github.test/o/r/actions/runs/{run_id}",
+    }
+
+
 GREEN = R("build + test")
 GREEN2 = R("clippy")
 PENDING = R("coverage", status="queued", conclusion=None)
@@ -393,6 +411,238 @@ class TestSelfExclusionAndFetch(unittest.TestCase):
         code, out = run(tiny_cfg(), polls)
         self.assertEqual(code, 1)
         self.assertIn("consecutive check-run fetch failures", out)
+
+
+class TestNewestWorkflowRunResolution(unittest.TestCase):
+    """[GPT-5.6] #3505: workflow identity/attempt, not stale check presence, wins."""
+
+    def test_newest_order_prefers_new_run_id_then_same_run_attempt(self):
+        same_time = "2026-07-21T14:00:00Z"
+        old_rerun = W(101, 7, created=same_time, attempt=2)
+        new_run = W(102, 7, created=same_time, attempt=1)
+        self.assertEqual(g.newest_workflow_runs([old_rerun, new_run])["id:7"]["id"], 102)
+        attempt_one = W(102, 7, created=same_time, attempt=1)
+        attempt_two = W(102, 7, created=same_time, attempt=2)
+        self.assertEqual(
+            g.newest_workflow_runs([attempt_one, attempt_two])["id:7"]["run_attempt"], 2
+        )
+
+    def test_superseded_cancelled_and_failure_are_non_events(self):
+        old_cancel = W(101, 7, conclusion="cancelled", created="2026-07-21T13:00:00Z")
+        old_failure = W(102, 7, conclusion="failure", created="2026-07-21T13:30:00Z")
+        newest = W(103, 7, created="2026-07-21T14:00:00Z")
+        checks = [
+            R("test shard", conclusion="cancelled", rid=1001,
+              url="https://github.test/o/r/actions/runs/101/job/1"),
+            R("test shard", conclusion="failure", rid=1002,
+              url="https://github.test/o/r/actions/runs/102/job/2"),
+        ]
+        resolved, dropped = g.resolve_newest_workflow_runs(
+            checks, [old_cancel, old_failure, newest], "999"
+        )
+        self.assertEqual(dropped, 2)
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("cancelled", [r.get("conclusion") for r in resolved])
+        self.assertNotIn("failure", [r.get("conclusion") for r in resolved])
+
+    def test_newest_failure_still_fails_when_job_check_evaporated(self):
+        newest = W(103, 7, conclusion="failure")
+        resolved, _ = g.resolve_newest_workflow_runs([], [newest], "999")
+        self.assertEqual(len(resolved), 1, "run-level failure evidence must be synthesized")
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 1)
+        self.assertIn("workflow-run verdict (id:7)", out)
+
+    def test_newest_failure_cannot_be_advisory_excluded_by_workflow_name(self):
+        newest = W(103, 7, name="all advisory", conclusion="failure")
+        resolved, _ = g.resolve_newest_workflow_runs([], [newest], "999")
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 1, out)
+
+    def test_authoritative_advisory_job_failure_remains_non_gating(self):
+        newest = W(103, 7, conclusion="failure")
+        advisory_job = {
+            "id": 2001,
+            "name": "vale (prose, advisory)",
+            "status": "completed",
+            "conclusion": "failure",
+            "started_at": "2026-07-21T14:05:00Z",
+            "html_url": "https://github.test/o/r/actions/runs/103/job/2",
+        }
+        resolved, _ = g.resolve_newest_workflow_runs(
+            [], [newest], "999", attempt_jobs={103: [advisory_job]}
+        )
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 0, out)
+
+    def test_green_run_with_evaporated_check_resolves_without_hang(self):
+        newest = W(103, 7)
+        resolved, _ = g.resolve_newest_workflow_runs([], [newest], "999")
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+
+    def test_completed_jobs_listing_recovers_evaporated_required_leg(self):
+        newest = W(103, 7, conclusion="failure")
+        failed_job = {
+            "id": 2001,
+            "name": "required test shard",
+            "status": "completed",
+            "conclusion": "failure",
+            "started_at": "2026-07-21T14:05:00Z",
+            "html_url": "https://github.test/o/r/actions/runs/103/job/2",
+        }
+        resolved, _ = g.resolve_newest_workflow_runs(
+            [], [newest], "999", attempt_jobs={103: [failed_job]}
+        )
+        self.assertEqual([r["name"] for r in resolved], ["required test shard"])
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 1, out)
+
+    def test_evaporated_feature_group_still_requires_reporter(self):
+        newest = W(103, 7)
+        group_job = {
+            "id": 2001,
+            "name": "opt-in group (0)",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-07-21T14:05:00Z",
+            "html_url": "https://github.test/o/r/actions/runs/103/job/2",
+        }
+        resolved, _ = g.resolve_newest_workflow_runs(
+            [], [newest], "999", attempt_jobs={103: [group_job]}
+        )
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 1)
+        self.assertIn("reporter verdict never landed", out)
+
+    def test_rerun_attempt_uses_attempt_jobs_not_old_same_run_id_checks(self):
+        rerun = W(103, 7, attempt=2)
+        old_failure = R(
+            "test shard", conclusion="failure", rid=1001,
+            url="https://github.test/o/r/actions/runs/103/job/1",
+        )
+        latest_job = {
+            "id": 2001,
+            "name": "test shard",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-07-21T14:05:00Z",
+            "html_url": "https://github.test/o/r/actions/runs/103/job/2",
+        }
+        resolved, dropped = g.resolve_newest_workflow_runs(
+            [old_failure], [rerun], "999", attempt_jobs={103: [latest_job]}
+        )
+        self.assertEqual(dropped, 1)
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 0, out)
+
+    def test_rerun_attempt_keeps_only_current_manually_posted_run_checks(self):
+        rerun = W(103, 7, attempt=2)
+        rerun["run_started_at"] = "2026-07-21T14:05:00Z"
+        old_report = R(
+            g.FM_REPORT_NAME, started="2026-07-21T14:00:00Z", rid=1001,
+            url="https://github.test/o/r/actions/runs/103", external_id="103",
+        )
+        current_report = R(
+            g.FM_REPORT_NAME, started="2026-07-21T14:06:00Z", rid=1002,
+            url="https://github.test/o/r/actions/runs/103", external_id="103",
+        )
+        resolved, dropped = g.resolve_newest_workflow_runs(
+            [old_report, current_report], [rerun], "999", attempt_jobs={103: []}
+        )
+        reports = [r for r in resolved if r.get("name") == g.FM_REPORT_NAME]
+        self.assertEqual([r["id"] for r in reports], [1002])
+        self.assertEqual(dropped, 1)
+
+    def test_duplicate_job_names_do_not_cross_workflow_identity(self):
+        a = W(101, 7, name="CI A")
+        b = W(102, 8, name="CI B")
+        a_failure = R(
+            "shared job", conclusion="failure", rid=1001,
+            url="https://github.test/o/r/actions/runs/101/job/1",
+        )
+        b_running = R(
+            "shared job", status="in_progress", conclusion=None, rid=1002,
+            url="https://github.test/o/r/actions/runs/102/job/2",
+        )
+        resolved, _ = g.resolve_newest_workflow_runs(
+            [a_failure, b_running], [a, b], "999"
+        )
+        self.assertEqual(len(g.failfast_failures(resolved)), 1,
+                         "another workflow's same-name in-flight job must not mask failure")
+
+    def test_cancelled_auto_redispatch_is_bounded_once(self):
+        cancelled = W(104, 7, conclusion="cancelled")
+        posts = []
+        resolver = g.WorkflowRunResolver(
+            self_run_id="999",
+            fetch_checks=lambda: [],
+            fetch_workflows=lambda: [cancelled],
+            fetch_attempt_jobs=lambda run_id, attempt: [],
+            redispatch=lambda run_id: posts.append(run_id),
+            redispatch_settle_polls=2,
+        )
+        first = resolver()
+        self.assertTrue(any(r.get("status") != "completed" for r in first),
+                        "a dispatched cancellation must become pending, not failure")
+        resolver()
+        with self.assertRaisesRegex(g.SupersededLegsError, "superseded-legs"):
+            resolver()
+        self.assertEqual(posts, [104], "API lag must never cause a second POST")
+
+    def test_completed_run_jobs_are_authoritative_and_cached(self):
+        complete = W(104, 7)
+        calls = []
+        job = {
+            "id": 2001,
+            "name": "required test shard",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-07-21T14:05:00Z",
+            "html_url": "https://github.test/o/r/actions/runs/104/job/2",
+        }
+
+        def fetch_jobs(run_id, attempt):
+            calls.append((run_id, attempt))
+            return [job]
+
+        resolver = g.WorkflowRunResolver(
+            self_run_id="999",
+            fetch_checks=lambda: [],
+            fetch_workflows=lambda: [complete],
+            fetch_attempt_jobs=fetch_jobs,
+            redispatch=lambda run_id: self.fail("green run must not redispatch"),
+        )
+        first = resolver()
+        second = resolver()
+        self.assertEqual([r["name"] for r in first], ["required test shard"])
+        self.assertEqual([r["name"] for r in second], ["required test shard"])
+        self.assertEqual(calls, [(104, 1)], "terminal job inventory should be cached")
+
+    def test_cancelled_retry_attempt_fails_loud_without_third_attempt(self):
+        cancelled_retry = W(104, 7, conclusion="cancelled", attempt=2)
+        posts = []
+        resolver = g.WorkflowRunResolver(
+            self_run_id="999",
+            fetch_checks=lambda: [],
+            fetch_workflows=lambda: [cancelled_retry],
+            fetch_attempt_jobs=lambda run_id, attempt: [],
+            redispatch=lambda run_id: posts.append(run_id),
+        )
+        with self.assertRaisesRegex(g.SupersededLegsError, "attempt 2"):
+            resolver()
+        self.assertEqual(posts, [])
+
+    def test_unrecoverable_cancellation_uses_distinct_loud_gate_message(self):
+        code, out = run(
+            tiny_cfg(),
+            [g.SupersededLegsError("superseded-legs, re-run required (#3505): fixture")],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("superseded-legs, re-run required", out)
+        self.assertIn("did not dispatch it more than once", out)
 
 
 class TestAdvisoryRule(unittest.TestCase):
