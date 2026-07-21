@@ -3358,6 +3358,8 @@ jobs:
             timeout_minutes: 360
           - crate: sparq-substrate
             features: numeric,join,compare,rows
+          - crate: sparq-sim
+            features: multi-hop,explain,sketch
           # [OPUS-4.8] sq-qcnn.14: sparq-canon QUIRK — the `rdf12-triple-terms` feature
           # gates rdf12.rs (the NON-STANDARD RDF-1.2 triple-term profile). Without it,
           # cargo-mutants mutates rdf12.rs but the tests never compile that module, so all
