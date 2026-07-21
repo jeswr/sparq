@@ -1,4 +1,8 @@
 
 # cargo-vet audits file
 
-[audits]
+[[audits.itertools]]
+who = "GPT-5.6 <noreply@openai.com>"
+criteria = "safe-to-deploy"
+delta = "0.14.0 -> 0.15.0"
+notes = "Reviewed the exact crates.io delta: pure-Rust iterator API additions and refactors; build remains disabled, the sole runtime dependency remains either, and no unsafe, proc-macro, network, filesystem, process, or dependency additions were introduced. [GPT-5.6]"
