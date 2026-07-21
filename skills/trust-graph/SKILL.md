@@ -267,31 +267,16 @@ are **NON-STANDARD** (a WG would rehome them). **Anchored, not proven** — fram
 membership bottoms out in a trust anchor (the operator's signed Trusted List / register),
 not cryptography. See `crates/sparq-trust/README.md` for the full honesty frame.
 
-### Holder-side evaluation — contract parsing and response assembly (`sq-6syab.4`, `expression`)
+### Holder-side evaluation — PLANNED, not implemented (`sq-6syab.4`)
 
-Behind the **opt-in `expression` module** (part of the `sq-6syab` epic). The clear-path
-holder-side evaluation:
-
-1. **Trust-requirements parsing** — extract `trustx:TrustRequirements` from the verifier's
-   contract: the query IRI, the trust modes (enumerated OR framework-certified), the
-   scope-conformance and status-attestation checks.
-2. **Reference rewrite** (Q→Q') — rewrite the original query `Q` into Q' that emits
-   provenance (the `sparq-engine` wrapper that feeds provenance-reified triples over each
-   statement that contributed to the answer).
-3. **Scoped query evaluation** — run the rewritten query; each statement's provenance carries
-   the issuer IRI and any issued-by timestamp / status window.
-4. **Response assembly** — build the response dataset `R`: the original query answer + for
-   every contributing statement, machine-readable provenance sufficient for the verifier to
-   re-check admissibility under the trust requirements (design §4 / §5).
-5. **Verification re-check** — locally validate the signature over any VC/commitment in the
-   response before assembly (issuer identity + key binding).
-6. **Status-attestation bridge** — if `trustx:requiresValidStatusAt` is specified, attach
-   the covering positive status attestation to the response provenance (a `trustx:StatusAttestation`
-   reifier).
-
-Fail-closed: if no admissible derivation exists under the constraints, bind nothing. Response
-provenance is **sufficient for independent verifier re-check** (Q' over R) without trusting
-the holder.
+The holder-side clear-path contract evaluation — trust-requirements parsing, a
+provenance-emitting query rewrite (Q→Q'), and response assembly — is **design work
+only** at this point. `research/trust-expression-spec.md` §3.1 / §4 specifies it, and
+`sq-6syab.4` tracks the future opt-in `expression` module and its acceptance tests.
+**No `expression` module, cargo feature, or tests exist in `sparq-trust` yet** —
+nothing below the vocabulary layer above is runnable, and no behavioral claim
+(fail-closed evaluation, verifier re-check over response provenance) applies until
+that module lands with real-path tests.
 
 ## Cross-references
 
