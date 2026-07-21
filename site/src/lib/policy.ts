@@ -16,34 +16,33 @@
 //     dedicated sparq-policy wasm bundle (a separate portability spike); until that
 //     ships, this is the honest walkthrough tier.
 //
-//   * WHAT THE CITED TEST PINS vs WHAT IS REPRODUCED — read this before trusting a
-//     verdict. Every verdict below is the `sparq_policy::evaluate` OUTCOME (allow / deny)
-//     for that (policy, request) shape, and the NAMED test cited per-variant in `test`
-//     (`crates/sparq-policy/tests/odrl_eval.rs`) asserts THAT OUTCOME: it exercises the
-//     same policy shape and the same request and asserts allow/deny (a few also assert
-//     the matched-rule count, or that a duty caveat is present). Those tests do NOT
-//     assert the exact rule-IRI ids or the verbatim explanation strings shown here — so
-//     `test` is a provenance handle for the OUTCOME, not proof of the exact string. The
-//     evaluator is pure and deterministic (policy in, decision out — no network, no
-//     randomness), and the suite is ratcheted against the MIT-licensed SolidLab ODRL
-//     Test Suite (67/68 through the real `evaluate` path).
+//   * WHAT THE CITED TEST PINS vs WHAT THE SITE GATE PINS — every verdict below is the
+//     `sparq_policy::evaluate` Decision for that exact (policy, request) pair. The named
+//     test cited per variant (`crates/sparq-policy/tests/odrl_eval.rs`) remains a readable
+//     provenance handle for the ODRL behaviour. In addition, `site/test/policy.test.mjs`
+//     sends this module's exact Turtle and request values through the real native Rust
+//     evaluator and compares allow, rule ids, and explanations verbatim. The evaluator
+//     is pure and deterministic (policy in, decision out — no network, no randomness),
+//     and the suite is ratcheted against the MIT-licensed SolidLab ODRL Test Suite
+//     (67/68 through the real `evaluate` path).
 //
-//   * The rule-IRI ids and the `matched`/`unmet` strings are REPRODUCED from the
-//     evaluator's deterministic output FORMAT (`crates/sparq-policy/src/eval.rs`), NOT
-//     copied from a test assertion: a granting permission's rule id on ALLOW; the
+//   * The rule-IRI ids and the `matched`/`unmet` strings are captured from the
+//     evaluator's deterministic output (`crates/sparq-policy/src/eval.rs`): a granting
+//     permission's rule id on ALLOW; the
 //     overriding prohibition id (+ "prohibition <id> matches the request") or the
 //     `rule <id> constraint (<left> <Op> <right>) unsatisfied` / "permission <id>
 //     requires undischarged duty <iri>" caveat on DENY. The crate tests use BLANK-NODE
-//     rules (which get generated ids); the NAMED IRIs here are a readability rename — the
-//     output SHAPE is otherwise identical. Do NOT hand-edit a verdict: its outcome must
-//     trace to the cited test and its strings to the eval.rs output format.
-//     `site/test/policy.test.mjs` pins the internal consistency (allow ⇔ a matched rule
+//     rules (which get generated ids); the site scenarios intentionally use named IRIs
+//     so the displayed identifiers are also the evaluator's exact identifiers. Do NOT
+//     hand-edit a verdict: the native fixture comparison will reject drift.
+//     `site/test/policy.test.mjs` passes every exact Turtle/request pair through a native
+//     test harness backed by `sparq_policy::evaluate` and compares the returned Decision
+//     verbatim. It also pins the internal consistency (allow ⇔ a matched rule
 //     and no unmet caveat) AND that every caveat matches one of eval.rs's documented
 //     output shapes AND that every constraint caveat's (rule, left, operator, right)
 //     anchors to the scenario's OWN Turtle constraint — eval.rs prints the POLICY's
 //     operands verbatim, never the request's supplied value — so a fabricated string or
-//     an operand substitution fails the unit gate. The gate still cannot re-run the Rust
-//     evaluator, so it is anchoring + shape, not full evaluator equivalence.
+//     an operand substitution fails the unit gate.
 //
 //   * SCOPE — single-node only. The federated-disclosure / ODRL→MPC composition (per-node
 //     ODRL driving the disclosed-vs-hidden split; a Duty → ZK proof obligation) is
