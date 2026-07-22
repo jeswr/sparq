@@ -11,6 +11,7 @@ use crate::view::GraphView;
 use oxrdf::{Literal, Term};
 use rustc_hash::{FxHashMap, FxHashSet};
 use sparq_core::dict::{is_inline, is_literal_id, split_lang_dir, Id, TermParts};
+use sparq_core::temporal::{Temporal, TemporalKind};
 use sparq_core::Graph;
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -2849,12 +2850,20 @@ fn cmp_literals(a: &Literal, b: &Literal) -> Option<Ordering> {
     if is_date_time(da) && is_date_time(db) {
         let (ta, tza) = timestamp(a.value(), da)?;
         let (tb, tzb) = timestamp(b.value(), db)?;
-        if tza != tzb {
-            // XSD order between a timezoned and an untimezoned value is
-            // INDETERMINATE (within the ±14h window) — not comparable.
-            return None;
-        }
-        return ta.partial_cmp(&tb);
+        // [GPT-5.6] Issue #3526: the core XSD ±14h mixed-timezone partial order is
+        // used here while this semantics change is under SHACL conformance evaluation.
+        return Temporal::cmp_t(
+            Temporal {
+                instant: ta,
+                has_tz: tza,
+                kind: TemporalKind::DateTime,
+            },
+            Temporal {
+                instant: tb,
+                has_tz: tzb,
+                kind: TemporalKind::DateTime,
+            },
+        );
     }
     None
 }
