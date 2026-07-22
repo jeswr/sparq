@@ -5140,6 +5140,9 @@ dependencies = [
 [[package]]
 name = "sparq-jsonld"
 version = "0.1.0"
+dependencies = [
+ "oxiri",
+]
 
 [[package]]
 name = "sparq-jsonld-registry"
