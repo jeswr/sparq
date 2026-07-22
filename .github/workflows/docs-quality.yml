@@ -416,7 +416,9 @@ jobs:
       # is validated HERE by its hermetic self-test — command-parsing + base-comparison +
       # fail-OPEN-on-error — with NO network/gh dependency (the base lookup is injected). Mirrors
       # coverage-gate.py / check-install-action-tool.py --self-test (stdlib-only, no deps).
-      - name: Self-test stacked-PR arm guard (command parse + base check + fail-open)
+      # [GPT-5.6] #3605: it also runs the real settings command from an unrelated cwd and
+      # proves a missing guard script returns an explicit allow instead of bricking every Bash.
+      - name: Self-test stacked-PR arm guard (cwd-independent + fail-open)
         run: python3 scripts/check-pr-arm-base.py --self-test
       # [OPUS-4.8] sq-53cq: anti-drift guard for the two-hop dashboard publish. The in-repo
       # source-of-truth bench/dashboard/* reaches the live site via bench.yml's "Seed Pages
