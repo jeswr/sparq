@@ -1264,7 +1264,9 @@ jobs:
           rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: cargo check on the declared MSRV
-        run: cargo check --workspace --exclude sparq-py --exclude sparq-hdt
+        # [SONNET-4.6] Test targets must compile at the declared floor too; they can
+        # otherwise hide newer temporary-lifetime-extension behavior from this gate.
+        run: cargo check --workspace --all-targets --exclude sparq-py --exclude sparq-hdt
 
   conformance:
     # W3C SPARQL conformance RATCHET (roadmap T13/38). The full 1229-test scope is at
