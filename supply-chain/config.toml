@@ -1428,7 +1428,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.serdect]]
 version = "0.2.0"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.sha1]]
 version = "0.11.0"
