@@ -194,7 +194,7 @@ export function SurfaceContent({
         )}
         <Button asChild variant="outline" size="sm">
           <a
-            href="https://github.com/jeswr/sparq"
+            href="https://github.com/sparq-org/sparq"
             target="_blank"
             rel="noopener noreferrer"
           >

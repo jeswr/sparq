@@ -31,7 +31,7 @@ import {
   type RequestVariant,
 } from "@/lib/policy";
 
-const REPO = "https://github.com/jeswr/sparq";
+const REPO = "https://github.com/sparq-org/sparq";
 
 /** The ALLOW / DENY verdict pill — the one thing a visitor scans for first. */
 function VerdictBadge({ allow }: { allow: boolean }) {
