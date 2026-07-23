@@ -20,7 +20,6 @@ permissions:
   checks: write
   contents: read
   issues: write
-  pull-requests: write
 
 concurrency:
   group: omnibus-flake-${{ github.event.pull_request.number }}
@@ -29,7 +28,9 @@ concurrency:
 jobs:
   detect:
     name: detect and quarantine flaky omnibus legs
-    if: startsWith(github.event.pull_request.head.ref, 'sparq-omnibus/')
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.event.pull_request.head.ref, 'sparq-omnibus/')
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -68,7 +69,7 @@ jobs:
             });
             const isAdvisory = name => /\b(advisory|informational)\b/i.test(name || '');
             const failed = initial.filter(c =>
-              ['failure', 'timed_out'].includes(c.conclusion) &&
+              ['failure', 'timed_out', 'cancelled'].includes(c.conclusion) &&
               !isAdvisory(c.name) &&
               c.name !== 'gate' &&
               c.name !== 'ci-summary / gate' &&
@@ -80,8 +81,7 @@ jobs:
             }
             const initialIds = new Set(initial.map(c => c.id));
 
-            const flips = [];
-            for (const check of failed) {
+            const probe = async check => {
               const match = check.details_url.match(/\/actions\/runs\/(\d+)\/job\/(\d+)/);
               const jobId = Number(match[2]);
               core.warning(`Flake probe: rerunning "${check.name}" job ${jobId} once on ${headSha}.`);
@@ -96,48 +96,64 @@ jobs:
                   owner, repo, ref: headSha, status: 'completed', per_page: 100
                 });
                 replacement = checks
-                  .filter(c => c.name === check.name && !initialIds.has(c.id))
-                  .sort((a, b) => b.id - a.id)[0];
+                  .filter(c => c.name === check.name && (
+                    !initialIds.has(c.id) ||
+                    (c.id === check.id && new Date(c.updated_at) > new Date(check.updated_at))
+                  ))
+                  .sort((a, b) => new Date(b.updated_at) - new Date(a.updated_at))[0];
                 if (replacement) break;
               }
               if (!replacement) {
                 core.warning(`Rerun of "${check.name}" did not conclude before the probe timeout.`);
-                continue;
+                return;
               }
               if (replacement.conclusion !== 'success') {
                 core.info(`"${check.name}" reproduced as ${replacement.conclusion}; deterministic.`);
-                continue;
+                return;
               }
 
-              const quarantinedName = `${check.name} (advisory, flaky quarantine)`;
-              await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
-                owner, repo, check_run_id: check.id, name: quarantinedName
-              });
-              flips.push({name: check.name, original: check.html_url, rerun: replacement.html_url});
-              core.error(`FLAKY LEG QUARANTINED: "${check.name}" flipped green on one rerun.`);
-            }
+              return {check, replacement};
+            };
 
+            const probeResults = await Promise.all(failed.map(probe));
+            const flips = probeResults.filter(Boolean);
             if (!flips.length) return;
-            const names = flips.map(f => f.name).sort().join(', ');
+            const names = flips.map(f => f.check.name).sort().join(', ');
             const title = `ci: quarantine flaky omnibus leg(s): ${names}`.slice(0, 250);
             const existing = await github.paginate(github.rest.issues.listForRepo, {
               owner, repo, state: 'open', per_page: 100
             });
             let issue = existing.find(i => i.title === title && !i.pull_request);
             if (!issue) {
-              const rows = flips.map(f => `- \`${f.name}\`: [failed check](${f.original}), [green rerun](${f.rerun})`).join('\n');
+              const rows = flips.map(f => `- \`${f.check.name}\`: [failed check](${f.check.html_url}), [green rerun](${f.replacement.html_url})`).join('\n');
               issue = (await github.rest.issues.create({
                 owner, repo, title,
                 body: `> 🤖 SPARQ agent — omnibus flake detector for #${pr.number}.\n\n` +
                       `A gating leg failed on merge-group head \`${headSha}\` and passed when rerun once ` +
-                      `against the identical head. The failed check was renamed with the ` +
-                      `whole-word \`advisory\` quarantine token and must not enter culprit bisection.\n\n${rows}\n\n` +
+                      `against the identical head. The detector will attempt to rename each failed check with ` +
+                      `the whole-word \`advisory\` quarantine token so it cannot enter culprit bisection; ` +
+                      `any rename failure remains recorded here.\n\n${rows}\n\n` +
                       `Source omnibus: #${pr.number}.`
               })).data;
             }
+
+            const quarantined = [];
+            for (const flip of flips) {
+              const quarantinedName = `${flip.check.name} (advisory, flaky quarantine)`;
+              try {
+                await github.request('PATCH /repos/{owner}/{repo}/check-runs/{check_run_id}', {
+                  owner, repo, check_run_id: flip.check.id, name: quarantinedName
+                });
+                quarantined.push(flip);
+                core.error(`FLAKY LEG QUARANTINED: "${flip.check.name}" flipped green on one rerun.`);
+              } catch (error) {
+                core.warning(`Could not quarantine "${flip.check.name}": ${error.message}`);
+              }
+            }
+            if (!quarantined.length) return;
             await github.rest.issues.createComment({
               owner, repo, issue_number: pr.number,
-              body: `> 🤖 SPARQ agent — flake detector quarantined ${flips.length} gating leg(s).\n\n` +
+              body: `> 🤖 SPARQ agent — flake detector quarantined ${quarantined.length} gating leg(s).\n\n` +
                     `They failed on \`${headSha}\` but passed on one same-head rerun: ` +
-                    `${flips.map(f => `\`${f.name}\``).join(', ')}. Tracking: #${issue.number}.`
+                    `${quarantined.map(f => `\`${f.check.name}\``).join(', ')}. Tracking: #${issue.number}.`
             });
