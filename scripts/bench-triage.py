@@ -283,18 +283,33 @@ def load_hardzone_soft_rows(path: str | None) -> list[dict]:
     except (json.JSONDecodeError, ValueError, OSError) as e:
         log(f"warning: could not parse hardzone report {path} ({e}) — skipping its rows")
         return []
+    if not isinstance(data, dict):
+        log(f"warning: hardzone report {path} is not a JSON object — skipping its rows")
+        return []
+    fe = data.get("floor_exempt_hard", [])
+    if not isinstance(fe, list):
+        # {"floor_exempt_hard": null} / a number / a string must degrade to zero merged
+        # rows with a warning — never TypeError out of ordinary soft filing.
+        log(f"warning: hardzone report {path}: floor_exempt_hard is "
+            f"{type(fe).__name__}, expected a list — skipping its rows")
+        return []
     out = []
-    for r in data.get("floor_exempt_hard", []) if isinstance(data, dict) else []:
+    dropped = 0
+    for r in fe:
         if not isinstance(r, dict):
+            dropped += 1
             continue
         name, cur, prev, ratio = (r.get("name"), r.get("current"), r.get("previous"),
                                   r.get("ratio_pct"))
         if (name is None or not isinstance(cur, (int, float))
                 or not isinstance(prev, (int, float)) or not isinstance(ratio, (int, float))):
+            dropped += 1
             continue
         out.append({"name": str(name), "current": float(cur), "previous": float(prev),
                     "ratio_pct": float(ratio), "unit": r.get("unit", ""),
                     "note": r.get("note") or "floor-exempt hard-band"})
+    if dropped:
+        log(f"warning: dropped {dropped} malformed floor_exempt_hard row(s) from {path}")
     return out
 
 
@@ -360,16 +375,60 @@ def _post_issue(title: str, body: str, labels: list[str], existing: str | None) 
         Path(body_file).unlink(missing_ok=True)
 
 
+# ── Markdown sanitizers for artifact-derived fields ────────────────────────────────
+def _md_cell(text) -> str:
+    """Sanitize an artifact-derived value for a plain Markdown table cell.
+
+    Metric names/units/notes arrive from bench artifacts; newlines/pipes could forge
+    table rows, a backtick could open a code span, and a bare @word would ping a GitHub
+    user from an auto-filed issue. Strip newlines, backslash-escape the escapables, and
+    split @-mentions with an empty HTML comment.
+    """
+    s = re.sub(r"[\r\n]+", " ", str(text))
+    s = s.replace("\\", "\\\\").replace("|", "\\|").replace("`", "\\`")
+    return s.replace("@", "@<!-- -->")
+
+
+def _md_code_cell(text) -> str:
+    """Backtick-wrap a value for a Markdown table cell, defusing span-breakers.
+
+    Backslash escapes do NOT work inside a code span, so embedded backticks (which would
+    terminate the span) are replaced with `'`; `\\|` is the one escape GFM honours inside
+    code spans in table cells, and the code span itself neutralizes @-mentions.
+    """
+    s = re.sub(r"[\r\n]+", " ", str(text)).replace("`", "'").replace("|", "\\|")
+    return f"`{s}`"
+
+
 # ── SOFT zone: one rolling deduped bench-flake issue per suite ──────────────────────
 def build_flake_body(suite: str, rows: list[dict], soft: float, hard: float, run_url: str) -> str:
+    tagged = any(r.get("note") for r in rows)
     lines = [
         "> 🤖 **SPARQ agent** — auto-filed by the benchmark self-monitoring soft zone "
         "(noise-reduction-bench-selfmonitor). No human is @-mentioned by design.",
         "",
-        f"Benchmarks in suite `{suite}` regressed into the **soft zone** — above the soft "
-        f"alert-threshold (`{soft}%`) but below the hard fail-threshold (`{hard}%`), so this "
-        "**could be shared-runner flakiness** rather than a real regression. It does **not** "
-        "fail CI. This is a rolling, deduped record — new soft-zone hits append below.",
+    ]
+    if tagged:
+        # Merged floor-exempt hard-band rows sit AT/ABOVE the hard ratio (vs their
+        # median-of-history) — a "everything below the hard threshold" preamble would lie.
+        lines.append(
+            f"Benchmarks in suite `{suite}` were flagged by the benchmark self-monitor. "
+            f"This run's rows fall in **two classes**: **soft-band** rows — above the soft "
+            f"alert-threshold (`{soft}%`) but below the hard fail-threshold (`{hard}%`) vs "
+            f"their single previous point — and tagged **floor-exempt hard-band** rows — "
+            f"at/above the hard ratio vs their median-of-history but under their unit's "
+            f"noise floor, so watch-only for the gate. Either way this **could be "
+            f"shared-runner flakiness** rather than a real regression, and it does **not** "
+            f"fail CI. This is a rolling, deduped record — new hits append below."
+        )
+    else:
+        lines.append(
+            f"Benchmarks in suite `{suite}` regressed into the **soft zone** — above the soft "
+            f"alert-threshold (`{soft}%`) but below the hard fail-threshold (`{hard}%`), so this "
+            "**could be shared-runner flakiness** rather than a real regression. It does **not** "
+            "fail CI. This is a rolling, deduped record — new soft-zone hits append below."
+        )
+    lines += [
         "",
         f"- **Run:** {run_url}",
         "",
@@ -379,12 +438,13 @@ def build_flake_body(suite: str, rows: list[dict], soft: float, hard: float, run
         "|---|---|---|---|",
     ]
     for r in sorted(rows, key=lambda x: -x["ratio_pct"]):
-        tag = f" — {r['note']}" if r.get("note") else ""
+        tag = f" — {_md_cell(r['note'])}" if r.get("note") else ""
+        unit = _md_cell(r["unit"])
         lines.append(
-            f"| `{r['name']}`{tag} | {r['previous']:g}{r['unit']} | "
-            f"{r['current']:g}{r['unit']} | {r['ratio_pct']:g}% |"
+            f"| {_md_code_cell(r['name'])}{tag} | {r['previous']:g}{unit} | "
+            f"{r['current']:g}{unit} | {r['ratio_pct']:g}% |"
         )
-    if any(r.get("note") for r in rows):
+    if tagged:
         lines += [
             "",
             "Rows tagged \"floor-exempt hard-band\" come from the median-of-history hard gate "
@@ -511,9 +571,10 @@ def build_regression_body(cluster_crates: list[str], rows: list[dict], ranked: l
         "|---|---|---|---|",
     ]
     for r in sorted(rows, key=lambda x: -x["ratio_pct"]):
+        unit = _md_cell(r["unit"])
         lines.append(
-            f"| `{r['name']}` | {r['previous']:g}{r['unit']} | "
-            f"{r['current']:g}{r['unit']} | {r['ratio_pct']:g}% |"
+            f"| {_md_code_cell(r['name'])} | {r['previous']:g}{unit} | "
+            f"{r['current']:g}{unit} | {r['ratio_pct']:g}% |"
         )
     lines += ["", "### Ranked suspect commits", ""]
     if ranked:
@@ -524,7 +585,7 @@ def build_regression_body(cluster_crates: list[str], rows: list[dict], ranked: l
             commit_link = f"[`{c['sha'][:10]}`]({repo}/commit/{c['sha']})"
             lines.append(
                 f"| {i} | {commit_link} | {pr_link} | "
-                f"{', '.join(c['overlap']) or '—'} | {c['subject']} |"
+                f"{', '.join(c['overlap']) or '—'} | {_md_cell(c['subject'])} |"
             )
     else:
         lines.append("_No commit in the baseline..head range touched the regressed crates; "
@@ -683,15 +744,50 @@ def self_test() -> int:
         assert "median-of-history" in mbody   # the tagged-row explainer paragraph
         stripped3 = mbody.replace("@-mentioned", "").replace("@-mention", "")
         assert "@" not in stripped3, "flake body with hardzone rows must not @-mention anyone"
+        # [FABLE-5 round 3] the preamble distinguishes the two row classes — a merged
+        # floor-exempt row sits AT/ABOVE the hard ratio, so the soft-only "below the hard
+        # fail-threshold" framing would contradict the table it introduces.
+        assert "two classes" in mbody, "tagged body must distinguish soft vs floor-exempt rows"
+        assert "regressed into the **soft zone**" not in mbody
         # untagged-only bodies carry no explainer paragraph (soft-band prose stays accurate).
         plain = build_flake_body("sparq-geo", soft_rows[1:], 175, 200, "http://run/4")
         assert "floor-exempt hard-band" not in plain
+        assert "regressed into the **soft zone**" in plain and "two classes" not in plain
         # fail-soft: no arg / absent file / unparsable file all -> [] (triage must not break).
         assert load_hardzone_soft_rows(None) == []
         assert load_hardzone_soft_rows(str(Path(td3) / "absent.json")) == []
         bad = Path(td3) / "bad.json"
         bad.write_text("{not json", encoding="utf-8")
         assert load_hardzone_soft_rows(str(bad)) == []
+        # [FABLE-5 round 3] fail-soft on WRONG-TYPED payloads: {"floor_exempt_hard": null},
+        # a number, and a non-object top level must all degrade to zero merged rows with a
+        # warning — never TypeError out of ordinary soft filing.
+        nul = Path(td3) / "nul.json"
+        nul.write_text(json.dumps({"floor_exempt_hard": None}), encoding="utf-8")
+        assert load_hardzone_soft_rows(str(nul)) == []
+        num = Path(td3) / "num.json"
+        num.write_text(json.dumps({"floor_exempt_hard": 7}), encoding="utf-8")
+        assert load_hardzone_soft_rows(str(num)) == []
+        arr = Path(td3) / "arr.json"
+        arr.write_text(json.dumps([1, 2]), encoding="utf-8")
+        assert load_hardzone_soft_rows(str(arr)) == []
+
+        # [FABLE-5 round 3] Markdown-injection hardening: pipes/backticks/newlines/@ in
+        # artifact-derived fields render escaped — no forged table rows, no code-span
+        # breakout, no naked @-mention.
+        evil = [{"name": "evil_us|`name\ninjected", "current": 12.0, "previous": 4.0,
+                 "ratio_pct": 300.0, "unit": "us|`u",
+                 "note": "pinged @someone | `boom`\nrow"}]
+        ebody = build_flake_body("sparq-engine+sparq-core", evil, 175, 200, "http://run/5")
+        evil_lines = [ln for ln in ebody.splitlines() if "evil_us" in ln]
+        assert len(evil_lines) == 1, evil_lines            # a newline never splits the row
+        erow = evil_lines[0]
+        # code-span cell: | escaped GFM-style, span-breaking ` defused, newline stripped.
+        assert "`evil_us\\|'name injected`" in erow, erow
+        assert "us\\|\\`u" in erow, erow                   # plain cell: | and ` escaped
+        assert "\\`boom\\`" in erow, erow                  # note ` cannot open a code span
+        assert "@someone" not in ebody                     # mention split by an HTML comment
+        assert "@<!-- -->someone" in ebody
 
     # nightly attribution ranking: overlap with regressed crates ranks first.
     commits = [

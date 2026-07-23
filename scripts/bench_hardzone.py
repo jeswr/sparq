@@ -452,10 +452,14 @@ def render_report(report: dict, markdown: bool) -> list[str]:
                      f"{', '.join(report['stable_zero'])}")
     if report["uniform_shift"]:
         lines.append("")
-        lines.append("UNIFORM-SHIFT EXEMPTION applied: all four conditions hold (breadth, ratio "
-                     "uniformity, no >= 4x outlier, deterministic metrics unmoved). This makes a "
-                     "masked code regression implausible — NOT impossible — hence this loud "
-                     "record instead of a quiet pass.")
+        # GATED-only cap wording, matching the ::warning: the exemption predicate excludes
+        # floor-exempt rows, and one of those may honestly sit at/above the cap — "no >= 4x
+        # outlier" (unqualified) would be FALSE on exactly such a run.
+        lines.append(f"UNIFORM-SHIFT EXEMPTION applied: all four conditions hold over the GATED "
+                     f"(non-floor-exempt) metrics — breadth, ratio uniformity, no GATED metric "
+                     f"reached {UNIFORM_CAP_RATIO:g}x median, deterministic metrics unmoved. "
+                     f"This makes a masked code regression implausible — NOT impossible — hence "
+                     f"this loud record instead of a quiet pass.")
     elif report["exemption_reasons"]:
         lines.append("")
         lines.append("uniform-shift exemption NOT applied:")
@@ -895,16 +899,29 @@ def self_test() -> int:
     buf = io.StringIO()
     saved_summary = os.environ.pop("GITHUB_STEP_SUMMARY", None)  # keep the CI summary clean
     try:
-        with contextlib.redirect_stdout(buf):
-            emit_report(rep)
+        with tempfile.TemporaryDirectory(prefix="bench-hardzone-selftest-") as td16:
+            summary_file = Path(td16) / "step-summary.md"
+            os.environ["GITHUB_STEP_SUMMARY"] = str(summary_file)
+            with contextlib.redirect_stdout(buf):
+                emit_report(rep)
+            summary = summary_file.read_text(encoding="utf-8") if summary_file.exists() else ""
     finally:
         if saved_summary is not None:
             os.environ["GITHUB_STEP_SUMMARY"] = saved_summary
+        else:
+            os.environ.pop("GITHUB_STEP_SUMMARY", None)
     out = buf.getvalue()
     check("4 of 4 GATED metrics" in out and "no GATED metric reached" in out,
           "uniform-shift annotation reports the gated numerator/denominator + GATED wording")
     check("5 of 9" not in out and "no metric reached" not in out,
           "uniform-shift annotation no longer reports total-row numbers")
+    # [FABLE-5 round 3] the stdout report AND the step-summary prose use the gated-only cap
+    # wording too — the floor-exempt tiny0_us sits at exactly 4.0x in this fixture, so the
+    # old unqualified "no >= 4x outlier" claim would be FALSE in both sinks.
+    check("no GATED metric reached" in summary and summary.strip() != "",
+          "step-summary exemption prose claims the cap over GATED metrics only")
+    check(">= 4x outlier" not in out and ">= 4x outlier" not in summary,
+          "neither stdout nor the step summary carries the unqualified 4x-outlier claim")
 
     # 17. Argument handling: the parser accepts the documented flags on a fixture path.
     ns = build_parser().parse_args(
