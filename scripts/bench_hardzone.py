@@ -18,9 +18,13 @@
 #     pre-existing suite inconsistency this gate compensates for by inverting the ratio
 #     (median/current) for names matching `_per_s$`. (Candidate follow-up: store the inverse —
 #     seconds-per-triple — so the whole suite is genuinely smaller-is-better.)
-#   * FAIL-CLOSED NUMERICS: a current value or history window that is NaN/non-numeric/negative,
-#     or a value that crosses a zero boundary (current 0 vs positive median, or vice versa),
-#     HARD-FAILS with a per-metric message — never silently skipped. The one deliberate carve-out
+#   * FAIL-CLOSED NUMERICS: a current value or history-window value that is NaN/non-numeric/
+#     negative, or a value that crosses a zero boundary (current 0 vs positive median, or vice
+#     versa), HARD-FAILS with a per-metric message — never silently skipped. Current values are
+#     validated BEFORE the no-history / insufficient-history early exits (a bad current on a
+#     brand-new or young metric still fails the run), and every value inside a metric's median
+#     window is checked individually (a negative history point cannot hide behind a positive
+#     median). The one deliberate carve-out
 #     (grounded in the LIVE history): current == 0 AND median == 0 is a legitimate stable value —
 #     four published series are all-zero by design (geo_compliance_deficit, nlq_ask_repairs,
 #     rsp_*_w{2,3}_rows, and the sub-resolution sameas_size8_closure_s), so a blanket "<= 0 fails"
@@ -181,6 +185,18 @@ def evaluate(current: list[dict], hist: dict[str, list]) -> tuple[int, dict]:
 
     for name in sorted(current_by_name):
         row = current_by_name[name]
+        val = row.get("value")
+        unit = row.get("unit") or ""
+        # FAIL-CLOSED, pre-history: validate the current value BEFORE the no-history /
+        # insufficient-history early exits — a NaN/non-numeric/negative current on a brand-new
+        # or young metric must still fail the run, not slide out through "new"/"ungated".
+        if not _is_num(val):
+            invalid.append((name, f"current value {val!r} is not a finite number — fail-closed"))
+            continue
+        val = float(val)
+        if val < 0:
+            invalid.append((name, f"negative current measurement ({val:g}) — fail-closed"))
+            continue
         pts = hist.get(name)
         if not pts:
             new.append(name)
@@ -188,22 +204,16 @@ def evaluate(current: list[dict], hist: dict[str, list]) -> tuple[int, dict]:
         if len(pts) < MIN_HISTORY:
             ungated.append((name, len(pts)))
             continue
-        val = row.get("value")
-        unit = row.get("unit") or ""
-        if not _is_num(val):
-            invalid.append((name, f"current value {val!r} is not a finite number — fail-closed"))
-            continue
-        bad_hist = [p for p in pts if not _is_num(p)]
+        # FAIL-CLOSED, per-window value: every value inside the median window must itself be a
+        # finite non-negative number — a negative history point must not hide behind a positive
+        # median. Zeros stay legal here: the stable-zero carve-out below needs all-zero windows.
+        bad_hist = [p for p in pts if not _is_num(p) or p < 0]
         if bad_hist:
-            invalid.append((name, f"history window contains non-numeric value(s) {bad_hist!r} "
-                                  f"— fail-closed (published history is corrupt for this metric)"))
+            invalid.append((name, f"history window contains non-finite/negative value(s) "
+                                  f"{bad_hist!r} — fail-closed (published history is corrupt "
+                                  f"for this metric)"))
             continue
         med = float(statistics.median(pts))
-        val = float(val)
-        if val < 0 or med < 0:
-            invalid.append((name, f"negative measurement (current {val:g}, median {med:g}) "
-                                  f"— fail-closed"))
-            continue
         larger_better = bool(LARGER_IS_BETTER_RE.search(name))
         det = is_deterministic(name, unit)
         if val == 0 and med == 0:
@@ -533,6 +543,23 @@ def self_test() -> int:
                                        [("a", float("nan"))], [("a", 10.0)]]))
     code, rep = evaluate(_cur([("a", 10.0)]), bad_hist)
     check(code == 1 and len(rep["invalid"]) == 1, "NaN inside the history window fails closed")
+    #    Pre-history validation: a bad CURRENT value must fail even when the metric has no or
+    #    young history — never slide out through the "new"/"ungated" early exits.
+    code, rep = evaluate(_cur([("brandnew", float("nan"))]), {})
+    check(code == 1 and len(rep["invalid"]) == 1 and not rep["new"],
+          "NaN current on a NO-history metric fails closed (not silently listed as new)")
+    young_hist = history_values(_series([[("young", 10.0)], [("young", 10.0)]]))
+    code, rep = evaluate([{"name": "young", "value": "junk", "unit": "us"}], young_hist)
+    check(code == 1 and len(rep["invalid"]) == 1 and not rep["ungated"],
+          "non-numeric current on a young-history metric fails closed (not silently ungated)")
+    code, rep = evaluate(_cur([("fresh", -3.0)]), {})
+    check(code == 1 and len(rep["invalid"]) == 1 and not rep["new"],
+          "negative current on a no-history metric fails closed")
+    #    Per-window negativity: a negative history point must not hide behind a positive median.
+    neg_hist = history_values(_series([[("a", -1.0)], [("a", 10.0)], [("a", 10.0)]]))
+    code, rep = evaluate(_cur([("a", 10.0)]), neg_hist)
+    check(code == 1 and len(rep["invalid"]) == 1,
+          "negative history value inside the window fails closed despite a positive median")
     code, rep = evaluate(_cur([("a", 0.0)]), history_values(series))
     check(code == 1 and len(rep["invalid"]) == 1,
           "current 0 vs positive median is a zero-boundary change — fails closed")
@@ -586,12 +613,22 @@ def self_test() -> int:
           and any("(b) uniformity" in r for r in rep["exemption_reasons"]),
           "broad but NON-uniform shift (cv > 0.15) is NOT exempt — hard fail stands")
 
-    # 11. The 4x cap: broad + uniform-enough band, but one metric >= 4x => NOT exempt.
-    capped = _cur([("a", 19.0), ("b", 19.5), ("c", 41.0), ("d", 10.0)])  # c at 4.1x
+    # 11. The 4x cap ISOLATED: conditions (a) breadth, (b) uniformity and (d) deterministic all
+    #     PASS — ratios 4.05/4.1/4.08/4.06 put 4/4 metrics in the watch band with CV ~0.005 and
+    #     no deterministic metrics — so ONLY the cap (c) blocks the exemption. Removing the cap
+    #     from the predicate would flip exactly this check red.
+    capped = _cur([("a", 40.5), ("b", 41.0), ("c", 40.8), ("d", 40.6)])
     code, rep = evaluate(capped, history_values(series))
-    check(code == 1 and not rep["uniform_shift"]
-          and any("(c) cap" in r for r in rep["exemption_reasons"]),
-          "a >= 4x metric blocks the exemption — catastrophic regressions never hide in the herd")
+    check(code == 1 and not rep["uniform_shift"] and len(rep["hard"]) == 4
+          and len(rep["exemption_reasons"]) == 1
+          and "(c) cap" in rep["exemption_reasons"][0],
+          "a >= 4x metric is the SOLE exemption blocker ((a)/(b)/(d) pass) — hard fail stands")
+    #     Control: the SAME uniform shape kept below the cap (all ~1.9x) IS exempt — proving the
+    #     cap is the discriminating condition, not breadth/uniformity/deterministic drift.
+    under_cap = _cur([("a", 19.0), ("b", 19.5), ("c", 19.2), ("d", 19.1)])
+    code, rep = evaluate(under_cap, history_values(series))
+    check(code == 0 and rep["uniform_shift"] and not rep["exemption_reasons"],
+          "same uniform shape below the cap IS exempt — the 4x cap is the discriminating condition")
 
     # 12. Deterministic-metric drift blocks the exemption: same broad uniform timing shift, but a
     #     byte-count metric moved > 1% => NOT exempt => fail.
