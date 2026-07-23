@@ -67,6 +67,13 @@
 //!   `=` across term kinds (IRI / bnode / literal) → `false`. Unbound operand → error.
 //! * `<` `>` against an integer constant: numeric operand compares by value; any
 //!   non-numeric operand (IRI, bnode, string, boolean, langString) → type error.
+//! * `<` `>` var against var (issue #2443): the strict comparator
+//!   (`value_compare_strict`) decides only same-family pairs — numeric×numeric by
+//!   value (a NaN operand → type error, as above), xsd:string×xsd:string by
+//!   codepoint, boolean×boolean with false < true, and SAME-TAG langString pairs
+//!   by lexical (the lenient engine extension: `FILTER("a"@en < "b"@en)` is TRUE);
+//!   a cross-tag langString pair and every cross-kind pair (IRI or bnode operands
+//!   included) → type error.
 //! * three-valued logic is exactly SPARQL's: `err||true=true`, `err||false=err`,
 //!   `err&&false=false`, `!err=err`; a FILTER error drops the row.
 //! * `BIND` arithmetic: int+int → canonical integer; decimal+int keeps the operand's
@@ -394,6 +401,33 @@ fn cmp_int_spec(t: &T, k: i64) -> Result<std::cmp::Ordering, ()> {
     Ok(num_cmp(&n, &Num::I(k)))
 }
 
+/// SPARQL `<` / `>` of a var against another var: the engine's STRICT relational
+/// semantics (`value_compare_strict`, probe-pinned by
+/// `oracle_known_answer_var_var_relational` — issue #2443). Only same-family pairs
+/// decide: numeric×numeric by value (a NaN operand is undecided → type error,
+/// exactly as in `cmp_int_spec`); xsd:string×xsd:string by codepoint;
+/// boolean×boolean with false < true; langString×langString with the SAME tag by
+/// lexical (the lenient engine extension — a cross-tag pair is a type error).
+/// Every other pair — IRI or bnode operands, cross-kind literals — is a type error.
+fn cmp_vv_spec(a: &T, b: &T) -> Result<std::cmp::Ordering, ()> {
+    use T::*;
+    match (a, b) {
+        (Str(x), Str(y)) => Ok(x.cmp(y)),
+        (Bool(x), Bool(y)) => Ok(x.cmp(y)),
+        (Lang(x, tx), Lang(y, ty)) if tx == ty => Ok(x.cmp(y)),
+        _ => match (num_of(a), num_of(b)) {
+            (Some(x), Some(y)) => {
+                if num_f64(&x).is_nan() || num_f64(&y).is_nan() {
+                    Err(())
+                } else {
+                    Ok(num_cmp(&x, &y))
+                }
+            }
+            _ => Err(()),
+        },
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Test-side query AST + SPARQL rendering
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -516,6 +550,8 @@ enum Expr {
     EqVC(V, T), // T is an IRI or a literal (bnodes are not legal in expressions)
     LtVK(V, i64),
     GtVK(V, i64),
+    LtVV(V, V),
+    GtVV(V, V),
     Bound(V),
     IsIri(V),
     IsBlank(V),
@@ -533,6 +569,8 @@ impl Expr {
             Expr::EqVC(v, c) => format!("({} = {})", vname(*v), c.render()),
             Expr::LtVK(v, k) => format!("({} < {})", vname(*v), k),
             Expr::GtVK(v, k) => format!("({} > {})", vname(*v), k),
+            Expr::LtVV(a, b) => format!("({} < {})", vname(*a), vname(*b)),
+            Expr::GtVV(a, b) => format!("({} > {})", vname(*a), vname(*b)),
             Expr::Bound(v) => format!("BOUND({})", vname(*v)),
             Expr::IsIri(v) => format!("isIRI({})", vname(*v)),
             Expr::IsBlank(v) => format!("isBlank({})", vname(*v)),
@@ -730,6 +768,8 @@ fn eval_expr(e: &Expr, row: &Row) -> Result<bool, ()> {
         Expr::EqVC(v, c) => eq_spec(get(v)?, c),
         Expr::LtVK(v, k) => Ok(cmp_int_spec(get(v)?, *k)? == std::cmp::Ordering::Less),
         Expr::GtVK(v, k) => Ok(cmp_int_spec(get(v)?, *k)? == std::cmp::Ordering::Greater),
+        Expr::LtVV(a, b) => Ok(cmp_vv_spec(get(a)?, get(b)?)? == std::cmp::Ordering::Less),
+        Expr::GtVV(a, b) => Ok(cmp_vv_spec(get(a)?, get(b)?)? == std::cmp::Ordering::Greater),
         Expr::Bound(v) => Ok(row[*v as usize].is_some()),
         // is* over an unbound var is a type error per SPARQL 17.2 (`get(v)?`);
         // the engine now conforms, so generation covers it (sq-qeltv widened).
@@ -1201,6 +1241,8 @@ enum ExprSeed {
     EqVC(u8, T),
     LtVK(u8, i64),
     GtVK(u8, i64),
+    LtVV(u8, u8),
+    GtVV(u8, u8),
     Bound(u8),
     Is(u8, u8), // (which of the four is* forms, var seed) — any in-scope var (sq-qeltv widened)
     Not(Box<ExprSeed>),
@@ -1214,6 +1256,8 @@ fn arb_expr_seed() -> impl Strategy<Value = ExprSeed> {
         (any::<u8>(), arb_expr_const()).prop_map(|(v, c)| ExprSeed::EqVC(v, c)),
         (any::<u8>(), -5i64..=15).prop_map(|(v, k)| ExprSeed::LtVK(v, k)),
         (any::<u8>(), -5i64..=15).prop_map(|(v, k)| ExprSeed::GtVK(v, k)),
+        (any::<u8>(), any::<u8>()).prop_map(|(a, b)| ExprSeed::LtVV(a, b)),
+        (any::<u8>(), any::<u8>()).prop_map(|(a, b)| ExprSeed::GtVV(a, b)),
         any::<u8>().prop_map(ExprSeed::Bound),
         (0u8..4, any::<u8>()).prop_map(|(w, v)| ExprSeed::Is(w, v)),
     ];
@@ -1237,6 +1281,8 @@ fn build_expr(seed: &ExprSeed, filter_vars: &[V]) -> Expr {
         ExprSeed::EqVC(v, c) => Expr::EqVC(pick(*v, filter_vars), c.clone()),
         ExprSeed::LtVK(v, k) => Expr::LtVK(pick(*v, filter_vars), *k),
         ExprSeed::GtVK(v, k) => Expr::GtVK(pick(*v, filter_vars), *k),
+        ExprSeed::LtVV(a, b) => Expr::LtVV(pick(*a, filter_vars), pick(*b, filter_vars)),
+        ExprSeed::GtVV(a, b) => Expr::GtVV(pick(*a, filter_vars), pick(*b, filter_vars)),
         ExprSeed::Bound(v) => Expr::Bound(pick(*v, filter_vars)),
         ExprSeed::Is(which, v) => {
             let var = pick(*v, filter_vars);
@@ -1825,6 +1871,72 @@ fn oracle_known_answer_nan() {
         .collect();
     for (label, asc) in engine_paths(&g, &base) {
         assert_eq!(asc, expected_asc, "NaN-first ORDER BY, path {}", label);
+    }
+}
+
+/// Var-var relational `<` / `>` semantics, hand-computed (issue #2443): the strict
+/// comparator decides only same-family pairs — numeric×numeric by value across
+/// tiers, string×string by codepoint, boolean false < true, and the LENIENT
+/// same-tag langString extension (`FILTER("a"@en < "b"@en)` is TRUE, and the
+/// reversed pair is FALSE — not an error, pinned via the NEGATED filter). A
+/// cross-tag langString pair, a langString×string pair, a NaN operand, and an
+/// IRI pair are all TYPE ERRORS: dropped by the filter AND by its negation.
+#[test]
+fn oracle_known_answer_var_var_relational() {
+    let s = |i: usize| T::Iri(SUBJ_IRIS[i].to_string());
+    let b = |i: usize| T::BNode(BNODE_LABELS[i].to_string());
+    let p = |i: usize| T::Iri(PRED_IRIS[i].to_string());
+    let lang = |l: &str, t: &str| T::Lang(l.to_string(), t.to_string());
+    // one (?v1, ?v2) operand pair per subject, via two shared-subject patterns.
+    let pairs: Vec<(T, T, T)> = vec![
+        (s(0), lang("a", "en"), lang("b", "en")), // same-tag lang: Less (the extension)
+        (s(1), lang("b", "en"), lang("a", "en")), // same-tag lang: Greater (false on <, NOT an error)
+        (s(2), lang("a", "en"), lang("b", "fr")), // cross-tag lang: type error
+        (s(3), lang("a", "en"), T::Str("b".to_string())), // lang × string: type error
+        (s(4), T::Str("a".to_string()), T::Str("b".to_string())), // string codepoint: Less
+        (s(5), T::Int(1), T::Dec(150, 2)),        // numeric by value across tiers: 1 < 1.50
+        (b(0), T::Bool(false), T::Bool(true)),    // boolean: false < true
+        (b(1), T::Dbl("NaN".to_string(), f64::NAN), T::Int(0)), // NaN operand: type error
+        (b(2), s(0), s(1)),                       // IRI pair: not value-comparable, type error
+    ];
+    let mut data = Vec::new();
+    for (subj, left, right) in &pairs {
+        data.push([subj.clone(), p(0), left.clone()]);
+        data.push([subj.clone(), p(1), right.clone()]);
+    }
+    let g = Graph::load_str(&to_ntriples(&data), "ntriples").unwrap();
+    let mk = |filter: Expr| Q {
+        body: Body::Bgp(vec![
+            Tp { s: Pos::Var(0), p: Pos::Const(p(0)), o: Pos::Var(1) },
+            Tp { s: Pos::Var(0), p: Pos::Const(p(1)), o: Pos::Var(2) },
+        ]),
+        bind: None,
+        filter: Some(filter),
+        distinct: false,
+        project: vec![0],
+        order: None,
+        limit: None,
+        offset: None,
+    };
+    let row = |t: &T| vec![Some(t.render())];
+    let less_subjects = || vec![row(&s(0)), row(&s(4)), row(&s(5)), row(&b(0))];
+    let cases: Vec<(Expr, Vec<Vec<Option<String>>>)> = vec![
+        // ?v1 < ?v2 keeps exactly the decided-Less pairs — including "a"@en < "b"@en.
+        (Expr::LtVV(1, 2), less_subjects()),
+        // !(?v1 < ?v2) keeps ONLY the decided-Greater pair: every type-error pair
+        // (cross-tag lang, lang×string, NaN, IRIs) stays dropped (!err = err).
+        (Expr::Not(Box::new(Expr::LtVV(1, 2))), vec![row(&s(1))]),
+        // ?v1 > ?v2 keeps the decided-Greater pair,
+        (Expr::GtVV(1, 2), vec![row(&s(1))]),
+        // and its negation keeps the decided-Less pairs.
+        (Expr::Not(Box::new(Expr::GtVV(1, 2))), less_subjects()),
+    ];
+    for (filter, expected) in cases {
+        let q = mk(filter);
+        assert_eq!(multiset(&oracle_eval(&data, &q)), multiset(&expected), "oracle: {}", q.render());
+        for (label, rows) in engine_paths(&g, &q.render()) {
+            assert_eq!(multiset(&rows), multiset(&expected), "engine ({}): {}", label, q.render());
+        }
     }
 }
 

@@ -371,9 +371,16 @@ class TestPhase2LaneScoping(unittest.TestCase):
     def test_fuzz_runs_on_schedule_backstop(self):
         # The nightly heavy fuzz soak is the full-matrix backstop: a schedule event
         # carries no PR diff => selector mode=full => the fail-closed disjunct RUNS.
+        # [FABLE-5] (2026-07-18 maintainer directive, merge-queue subset): merge_group
+        # is REMOVED — the deterministic replay already gated the PR head, push-to-main
+        # re-replays post-merge, and the nightly soak is the backstop. The polling
+        # ci-summary gate never waits on a check that was never scheduled.
         on = _on_block(self.fuzz)
         self.assertIn("schedule", on, "fuzz.yml must keep its nightly schedule backstop")
-        self.assertIn("merge_group", on, "fuzz.yml must run on merge_group for the gate")
+        self.assertIn("push", on, "fuzz.yml must keep its push-to-main post-merge replay")
+        self.assertNotIn("merge_group", on,
+                         "fuzz.yml must NOT run on merge_group (2026-07-18 merge-queue "
+                         "subset directive: PR head + push-to-main + nightly cover it)")
 
     # ---- differential-smoke lane (fuzz.yml) — [FABLE-5] sq-0iqzw --------------------
     def test_differential_smoke_job_guarded_by_its_seed_closure(self):
@@ -1023,8 +1030,16 @@ class TestDraftTierWiring(unittest.TestCase):
         self.assertIn(self.DRAFT_GUARD, cond,
                       "codeql.yml:analyze must skip on draft PR heads")
         on = _on_block(self.codeql)
+        # [FABLE-5] PR #3511 finding 3: codeql.yml is byte-identical to origin/main —
+        # its triggers (incl. merge_group) are UNTOUCHED by this PR. The workflow is
+        # instead operationally disabled via `gh workflow disable` (state
+        # disabled_manually), so it produces no check-run on ANY event regardless of
+        # its trigger list; open PR #3427 owns the codeql successor policy. Keeping the
+        # trigger set intact avoids the docs/branch-protection.md contradiction (an
+        # earlier round removed merge_group here while the docs claimed it untouched).
         self.assertIn("merge_group", on,
-                      "CodeQL must keep its merge_group run (pre-merge analysis)")
+                      "CodeQL keeps its merge_group trigger (byte-identical to main; "
+                      "operationally disabled, so it produces no check-run anyway)")
         self.assertIn("schedule", on, "CodeQL must keep its weekly schedule")
 
     def test_heavy_shards_also_demoted_on_draft_heads(self):
@@ -1109,12 +1124,12 @@ class TestDraftTierWiring(unittest.TestCase):
         out-of-repo, owner-mutable setting and evadable (a non-draft PR sharing
         the head SHA supplies an analysis; outage relaxation), so it must be
         recorded as defense-in-depth ONLY and the feeding triggers must not
-        rot: push-to-main + merge_group + weekly schedule + ready_for_review."""
+        rot: push-to-main + weekly schedule + ready_for_review (merge_group was
+        removed by the 2026-07-18 merge-queue-subset directive)."""
         on = _on_block(self.codeql)
         push = on.get("push") or {}
         self.assertEqual(push.get("branches"), ["main"],
                          "codeql.yml must keep its push-to-main analysis run")
-        self.assertIn("merge_group", on)
         self.assertIn("schedule", on)
         types = (on.get("pull_request") or {}).get("types", [])
         self.assertIn("ready_for_review", types,
@@ -1133,6 +1148,9 @@ class TestDraftTierWiring(unittest.TestCase):
         self.assertEqual(perms.get("pull-requests"), "read",
                          "the gate needs pull-requests:read for the conclusion-time "
                          "draft re-check")
+        self.assertEqual(perms.get("actions"), "write",
+                         "#3505 needs actions:write only for the bounded once-only "
+                         "re-run of a newest cancelled workflow")
         step = next(s for s in self.summary["jobs"]["gate"]["steps"]
                     if "ci_summary_gate.py" in str(s.get("run", "")))
         env = step.get("env", {})
@@ -1162,9 +1180,12 @@ class TestContainerScanMergeGroupGate(unittest.TestCase):
     job now leads with a `detect container changes` step that diffs the queued batch
     and skips the build+scan on a container-inert merge group (mirrors zk-toolchain's
     proven detect pattern). Pins the SHAPE so the gate cannot silently rot or over-reach.
+    [FABLE-5] (2026-07-18 merge-queue subset): the merge_group TRIGGER is now removed
+    (first test below pins its absence); the detect machinery stays as the fail-safe
+    short-circuit on every remaining event and as the cheap revert path.
 
     Invariants pinned:
-      * the trivy job still triggers on merge_group (check-run always appears → no gate hang);
+      * the workflow does NOT trigger on merge_group (2026-07-18 directive);
       * the detect step is FAIL-SAFE (default container=true; only merge_group can flip false);
       * the heavy build/scan steps are STEP-gated on the detect output (not a job `if:`,
         so the check-run name is preserved and reports success on the skip path);
@@ -1182,11 +1203,16 @@ class TestContainerScanMergeGroupGate(unittest.TestCase):
                 return step
         self.fail(f"container-scan trivy job missing a step named {name_prefix!r}")
 
-    def test_triggers_on_merge_group(self):
+    def test_does_not_trigger_on_merge_group(self):
+        # [FABLE-5] (2026-07-18 merge-queue subset): merge_group removed — coverage
+        # lives at the paths-filtered PR head + push-to-main + the weekly re-scan.
+        # The detect-step machinery below stays (short-circuits to a full scan on
+        # every remaining event; cheap revert path).
         on = _on_block(self.wf)
-        self.assertIn("merge_group", on,
-                      "container-scan must trigger on merge_group so its check-run appears "
-                      "on the queue ref (ci-summary is the single required gate)")
+        self.assertNotIn("merge_group", on,
+                         "container-scan must NOT trigger on merge_group "
+                         "(2026-07-18 merge-queue-subset directive)")
+        self.assertIn("schedule", on, "the weekly re-scan backstop must stay")
 
     def test_detect_step_present_and_fail_safe(self):
         step = self._step("Detect container changes")
@@ -1253,9 +1279,12 @@ class TestSupplyChainMergeGroupGate(unittest.TestCase):
     step now diffs the queued batch's base_sha..head_sha against the SAME `rust` path
     set the pull_request dorny filter uses; a rust-inert merge group skips the heavy
     deny+vet steps (SBOM stays always-on by the sq-6vshe.20 design). Pins the SHAPE.
+    [FABLE-5] (2026-07-18 merge-queue subset): the merge_group TRIGGER is now removed
+    (first test below pins its absence); the Decide-step merge_group branch stays as
+    dead-but-fail-safe code and the cheap revert path.
 
     Invariants pinned:
-      * still triggers on merge_group (check-run appears → no gate hang);
+      * does NOT trigger on merge_group (2026-07-18 directive);
       * the merge_group branch is FAIL-SAFE (rust=true on any diff error);
       * every path in the pull_request dorny `rust` filter is covered by the
         merge_group detect grep (no drift between the two tiers);
@@ -1280,9 +1309,15 @@ class TestSupplyChainMergeGroupGate(unittest.TestCase):
                 return list(filters["rust"])
         self.fail("supply-chain missing the dorny rust paths-filter")
 
-    def test_triggers_on_merge_group(self):
-        self.assertIn("merge_group", _on_block(self.wf),
-                      "supply-chain must trigger on merge_group (required gate sibling)")
+    def test_does_not_trigger_on_merge_group(self):
+        # [FABLE-5] (2026-07-18 merge-queue subset): merge_group removed — coverage
+        # lives at the PR head + push-to-main + dependency-monitoring's weekly cron.
+        on = _on_block(self.wf)
+        self.assertNotIn("merge_group", on,
+                         "supply-chain must NOT trigger on merge_group "
+                         "(2026-07-18 merge-queue-subset directive)")
+        self.assertEqual((on.get("push") or {}).get("branches"), ["main"],
+                         "the push-to-main post-merge run must stay")
 
     def test_merge_group_branch_is_fail_safe(self):
         run = self._decide_run()
@@ -1320,6 +1355,135 @@ class TestSupplyChainMergeGroupGate(unittest.TestCase):
                         "cargo-deny bans/sources/licenses must stay rust_changed-gated")
         self.assertTrue(any("cargo-vet check" in n for n in gated),
                         "cargo-vet must stay rust_changed-gated")
+
+
+class TestMergeGroupChangeClassGate(unittest.TestCase):
+    """[FABLE-5] merge-group change-class gate (extends #3420/#3421 to the
+    rust_changed layer): the ci.yml + feature-matrix.yml `changes` decide steps
+    classify the queued batch's diff via `scripts/ci_select.py --classify-only`
+    instead of hard-forcing rust_changed=true on merge_group, so a docs-only/
+    orchestration-only batch skips the rust_changed-only lanes (lint / msrv /
+    geiger / docker-smoke / coverage-floors; feature-matrix setup / check-tier /
+    fedclient-boundary) with ATTRIBUTED skips. Pins the SHAPE:
+      * the merge_group branch exists and is FAIL-SAFE (defaults true, the #3421
+        fetch guard, `|| cls=engine` on the classifier invocation);
+      * classification is DELEGATED to scripts/ci_select.py (single source of
+        truth) — no duplicated grep path list in the step;
+      * the skip-class set is EXACTLY {docs-only, orchestration-only}, spelled
+        with the classifier module's own tokens (engine/mixed/unknown => full);
+      * ci.yml's docker_changed is class-gated the same way;
+      * fuzz.yml needs no such layer (its heavy jobs are select-gated and
+        ci-select passes the merge_group SHA pair) and bench.yml has no
+        merge_group trigger at all (pinned elsewhere) — this layer must NOT
+        creep into them as a redundant/conflicting second gate."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ci = _load(CI_YML)
+        cls.fm = _load(FM_YML)
+        cls.fuzz = _load(FUZZ_YML)
+        cls.select_mod = _ci_select_module()
+
+    def _decide(self, wf, wf_name):
+        for step in wf["jobs"]["changes"]["steps"]:
+            if str(step.get("name", "")).startswith("Decide rust_changed"):
+                return step
+        self.fail(f"{wf_name} missing the `Decide rust_changed` step")
+
+    def _both(self):
+        return (("ci.yml", self._decide(self.ci, "ci.yml")),
+                ("feature-matrix.yml", self._decide(self.fm, "feature-matrix.yml")))
+
+    def test_merge_group_branch_present_and_fail_safe(self):
+        for wf_name, step in self._both():
+            run = str(step.get("run", ""))
+            self.assertIn('"${EVENT_NAME}" = "merge_group"', run,
+                          f"{wf_name}: decide step must special-case merge_group")
+            self.assertIn("rust=true", run,
+                          f"{wf_name}: merge_group branch must default rust=true (fail-safe)")
+            self.assertIn("|| cls=engine", run,
+                          f"{wf_name}: a classifier invocation failure must fall back to "
+                          "cls=engine (fail-safe => full run)")
+            self.assertIn("git cat-file -e", run,
+                          f"{wf_name}: the #3421 SHA-resolution guard must precede the diff")
+            self.assertIn("fail-safe", run.lower(),
+                          f"{wf_name}: the fail-safe fallback must be documented + taken")
+            # The event payload SHA pair must feed the step (the authoritative diff).
+            env = step.get("env", {}) or {}
+            self.assertEqual(str(env.get("MG_BASE_SHA", "")),
+                             "${{ github.event.merge_group.base_sha }}", wf_name)
+            self.assertEqual(str(env.get("MG_HEAD_SHA", "")),
+                             "${{ github.event.merge_group.head_sha }}", wf_name)
+
+    def test_batch_diff_fetch_deepens_the_shallow_checkout(self):
+        # The `changes` job checks out at the default depth 1. A plain SHA fetch
+        # leaves base_sha/head_sha PRESENT but unconnected (both cat-file guards
+        # pass), and the classifier's three-dot diff then dies with "no merge
+        # base" — the fail-safe would force class=engine on EVERY batch,
+        # silently reducing the whole gate to a no-op. Every fetch in the
+        # merge_group branch must therefore deepen to full history
+        # (--depth=2147483647 == --unshallow, but valid on complete repos too —
+        # the same merge-base rationale as ci-select.yml's fetch-depth: 0).
+        for wf_name, step in self._both():
+            run = str(step.get("run", ""))
+            fetches = [ln for ln in run.splitlines() if "git fetch" in ln]
+            self.assertTrue(fetches, f"{wf_name}: merge_group branch must fetch the SHA pair")
+            for ln in fetches:
+                self.assertIn(
+                    "--depth=2147483647", ln,
+                    f"{wf_name}: every batch-diff fetch must deepen the shallow "
+                    f"checkout or the three-dot diff has no merge base "
+                    f"(permanent fail-safe => the gate never skips): {ln.strip()!r}")
+
+    def test_classification_is_delegated_not_duplicated(self):
+        for wf_name, step in self._both():
+            run = str(step.get("run", ""))
+            self.assertIn("scripts/ci_select.py --classify-only", run,
+                          f"{wf_name}: the merge_group branch must invoke the classifier "
+                          "(scripts/ci_select.py --classify-only), the single source of truth")
+            self.assertNotIn("grep -Eq", run,
+                             f"{wf_name}: the merge_group branch must NOT re-encode the "
+                             "class path sets as a grep — no duplicated path lists")
+
+    def test_skip_class_set_is_exactly_docs_and_orchestration(self):
+        # The case-arm must skip on EXACTLY the two proven-inert classes, spelled
+        # with the classifier module's own tokens; the wildcard arm must force the
+        # full run (engine/mixed/any unknown token => rust=true).
+        docs = self.select_mod._CLASS_DOCS
+        orch = self.select_mod._CLASS_ORCHESTRATION
+        self.assertEqual((docs, orch), ("docs-only", "orchestration-only"),
+                         "classifier tokens drifted — update the workflow case-arms in "
+                         "lock-step (they match on these literal strings)")
+        for wf_name, step in self._both():
+            run = str(step.get("run", ""))
+            self.assertIn(f"{docs}|{orch}) rust=false", run,
+                          f"{wf_name}: the skip case-arm must cover exactly {docs}|{orch}")
+            self.assertIn("*) rust=true", run,
+                          f"{wf_name}: the wildcard arm must force the full run")
+            self.assertNotIn("mixed) rust=false", run, wf_name)
+            self.assertNotIn("engine) rust=false", run, wf_name)
+
+    def test_ci_docker_changed_is_class_gated_with_rust(self):
+        run = str(self._decide(self.ci, "ci.yml").get("run", ""))
+        self.assertIn("rust=false; docker=false", run,
+                      "ci.yml: docker_changed must be class-gated alongside rust_changed "
+                      "(every docker-filter path classifies engine, so the skip is sound)")
+
+    def test_classify_only_flag_exists_and_fails_safe_in_the_selector(self):
+        # The wired flag must exist in the selector CLI and carry the documented
+        # fail-safe (this is the cross-file contract the case-arm relies on).
+        text = CI_SELECT_PY.read_text(encoding="utf-8")
+        self.assertIn("--classify-only", text)
+        self.assertTrue(hasattr(self.select_mod, "_classify_only_main"),
+                        "ci_select.py must expose the classify-only entry point")
+
+    def test_fuzz_has_no_redundant_rust_changed_layer(self):
+        # fuzz.yml's merge-group class gating IS the select pre-job (batch-diff
+        # selection, seed-closure guards) — adding a second rust_changed layer
+        # there would be redundant and could only disagree on transient errors.
+        self.assertNotIn("changes", self.fuzz["jobs"],
+                         "fuzz.yml grew a `changes` job — its merge-group gating is the "
+                         "select pre-job; keep one gate, not two")
 
 
 if __name__ == "__main__":

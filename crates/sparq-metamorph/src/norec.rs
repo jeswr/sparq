@@ -28,8 +28,9 @@
 //!   EBV, by §17.4.1.2 (`IF`). When `ebv(c, μ) = false` it returns `false`; when `c`
 //!   **errors** (type error, unbound variable), `IF` errors, and an error in a
 //!   projection expression leaves `?flag` **unbound while keeping the row** (algebra
-//!   `Extend`, §18.5: "If evaluating exp raises an error … the variable remains
-//!   unbound"; a `SELECT` expression is `Extend` + `Project`, §18.2.4.1). So the
+//!   `Extend`, §18.5: when the expression evaluates to an error, `Extend` returns the
+//!   solution mapping unchanged, so the variable stays unbound; a `SELECT`
+//!   expression is `Extend` + `Project`, §18.2.4.4). So the
 //!   rewrite preserves the full trichotomy observably: `true` / `false` / unbound.
 //! * `Project` preserves bag cardinality (no `DISTINCT`), so the rewrite returns
 //!   exactly `|eval(P)|` rows.
