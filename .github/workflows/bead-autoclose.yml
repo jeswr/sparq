@@ -1,5 +1,7 @@
 # [OPUS-4.8] Durable bead auto-close-on-merge (bead sq-84a8).
 # Authored by Opus 4.8 (Fable unavailable; flag for re-review when Fable returns).
+# [FABLE-5] Retargeted issue-native (issue #2475): the reconcile write now lands through the
+# GitHub API instead of a commit-back to protected main.
 #
 # REPLACES the EPHEMERAL session-scoped "watcher b1kzhfxq5". That watcher was a
 # per-session Monitor/Task: it did not persist, so once the arming session ended no
@@ -7,34 +9,67 @@
 # every mapped bead by hand each tick (e.g. sq-v286.11/sq-4wo.2/sq-v286.10 stayed
 # in_progress after PRs #818/#819/#821 merged). This COMMITTED workflow is durable.
 #
-# TRIGGER: a merged PR (`pull_request: [closed]` gated on `merged == true`) — the same
-# proven shape as flow-on.yml. A squash-merge carries the `(sq-XXXX)` bead token in the
-# PR title (the repo's convention), so the title is the reliable extraction source; we
-# additionally scan the merge-commit subject as a fallback.
+# TRIGGER: a merged PR — `pull_request_target: [closed]` gated on `merged == true`.
+# `pull_request_target`, NOT plain `pull_request` (PR #2528 review): on a `pull_request`
+# event from a FORK, GitHub downgrades GITHUB_TOKEN to read-only regardless of the
+# `permissions:` block below, so `gh issue close` would fail on every merged external
+# contribution and the advertised durable reconcile would be silently lossy for exactly
+# those PRs. `pull_request_target` runs in the BASE-repo context and keeps the declared
+# `issues: write` token for fork PRs too. It is SAFE here because no PR-controlled code
+# ever executes: the checkout below is pinned to trusted `main` (never the PR head /
+# merge ref), and the only PR-derived values (number / title / merge SHA) flow as DATA
+# through env vars into argv — keep it that way. A squash-merge carries the `(sq-XXXX)`
+# bead token in the PR title (the repo's convention), so the title is the reliable
+# extraction source; we additionally scan the merge-commit subject as a fallback.
 #
 # NOT A GATE. It runs AFTER merge (on `closed`), never on the PR head commit during the
 # PR's open lifecycle, so `ci-summary / gate` (which polls check-runs on the PR head while
 # the PR is OPEN) never sees it — it cannot register as a required/blocking check. The job
 # name carries no `advisory`/`informational` token (so it stays visible in the UI) but,
 # being post-merge, it is structurally non-gating. It also never blocks a merge (the merge
-# already happened). flow-on.yml uses the identical trigger and is likewise non-gating.
+# already happened). flow-on.yml's `pull_request: [closed]` trigger is the same post-merge
+# shape and likewise non-gating (it needs no write token, so it stays on plain pull_request).
+#
+# HOW THE RECONCILE PERSISTS (issue #2475 — supersedes the sq-roe3 fail-soft push).
+# The original design committed a minimal .beads/issues.jsonl edit back to main. That
+# write NEVER landed: the default GITHUB_TOKEN cannot push to protected `main` (ruleset
+# GH013, empty bypass list — confirmed on the first real run, bead-autoclose.yml
+# #27828093722 / PR #830), so every reconcile was silently lost and bead state drifted.
+# A PR-based write from this token is equally dead: GITHUB_TOKEN-created events trigger
+# NO workflows, so the required `ci-summary / gate` check would never report on such a PR
+# and it would hang unmergeable forever. The write the token CAN durably land is the
+# ISSUE-NATIVE one: the bd->issues migration (scripts/bd-to-issues.py) stamps every
+# migrated issue with a `<!-- bd-id:sq-… -->` body marker plus the migration-owned
+# `bd-migration` label (bodies are forgeable by any issue author; labels are not), so the
+# script resolves each bead token to its mapped OPEN marker+label issue and closes it via
+# `gh issue close --reason completed` — mutating the tracker with plain `issues: write`,
+# no commit to main at all.
+# Epic (`kind:epic`) / human-gated (`needs:*`) issues are never auto-closed (guardrail
+# parity with reconcile-merged-beads.sh). A bead with NO marker-carrying open issue (not
+# yet migrated, or already closed) is a logged no-op — exactly the (non-)outcome the
+# rejected push produced, minus the misleading red run — and remains covered by the
+# orchestrator's manual reconcile-merged-beads.sh sweep. No workflow triggers on
+# `issues: [closed]` (retriage is cron), so the GITHUB_TOKEN no-downstream-trigger
+# limitation costs nothing here.
 #
 # SAFETY: scripts/ci-close-merged-beads.py verifies the merge against the GitHub API,
-# closes ONLY beads whose exact sq-XXXX(.NN) id is a token in the PR title / merge subject
-# AND are currently open/in_progress/blocked, is idempotent (already-closed => no-op), and
-# does a MINIMAL in-place edit of .beads/issues.jsonl (only the matched lines), so the
-# committed diff stays tiny and does not fight the orchestrator's canonical `bd export`.
+# acts ONLY on beads whose exact sq-XXXX(.NN) id is a token in the PR title / merge
+# subject, and is idempotent (an already-closed mapped issue is simply absent from the
+# open-issue snapshot => no-op).
 name: bead-autoclose
 
 on:
-  pull_request:
+  # Fork-safe privileged trigger — read the TRIGGER comment above before changing this:
+  # safe ONLY while the job checks out pinned `main` and treats PR values purely as data.
+  pull_request_target:
     types: [closed]
 
-# Least privilege: we commit the regenerated .beads/issues.jsonl back to main, nothing more.
+# Least privilege: the reconcile is an API-based issue close — no repo write at all.
 permissions:
-  contents: write
+  contents: read # checkout for the script + the merge-commit-subject fallback
+  issues: write # close the migrated issue(s) mapped to the merged PR
 
-# Serialize per-merge so two near-simultaneous merges don't race the commit-back to main.
+# Serialize per-merge so two near-simultaneous merges don't race the open-issue snapshot.
 # `cancel-in-progress: false` — every merge must be processed; never drop one.
 concurrency:
   group: bead-autoclose
@@ -48,23 +83,24 @@ jobs:
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout main (we commit the bead JSONL back to main, not the merged ref)
+      - name: Checkout main (latest script version + the merge-commit subject fallback)
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          # LOAD-BEARING for the pull_request_target trigger: always trusted `main`, never
+          # the PR head — this job must not execute or read PR-controlled files.
           ref: main
-          # A token with push is needed for the commit-back; the default GITHUB_TOKEN
-          # (contents: write above) is used by the explicit git push step below.
+          # No git write-back happens in this workflow; the API close uses GH_TOKEN below.
           persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
 
       - name: Self-test the close logic (hermetic; fail fast on a logic regression)
         run: python3 scripts/ci-close-merged-beads.py --self-test
 
-      - name: Close mapped bead(s) for the merged PR (minimal in-place JSONL edit)
+      - name: Close the mapped issue(s) via the API (issue-native; no push to protected main)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -78,49 +114,6 @@ jobs:
             --pr "$PR_NUMBER" \
             --title "$PR_TITLE" \
             --subject "$SUBJECT" \
-            --jsonl .beads/issues.jsonl
-
-      # [OPUS-4.8] FAIL-SOFT push (sq-roe3). The default GITHUB_TOKEN CANNOT push to the
-      # protected `main` branch: the repo ruleset (id 17688455, rules: pull_request +
-      # required_status_checks "gate" + code_scanning + non_fast_forward) rejects a direct
-      # push with `GH013: Repository rule violations` and an empty bypass list. Confirmed on
-      # the first real run (bead-autoclose.yml #27828093722, PR #830):
-      #   remote: error: GH013: Repository rule violations found for refs/heads/main
-      #   remote: - Changes must be made through a pull request.
-      #   remote: - Required status check "gate" is expected.
-      #   remote: - Code scanning is waiting for results from CodeQL ...
-      # Until a ruleset bypass-list entry for the github-actions bot exists (owner-only,
-      # needs:user) OR bead-state is folded into the periodic .beads-export PR (sq-2xdg),
-      # the push WILL be rejected. This job runs post-merge (on `closed`) and never gates a
-      # PR, so a red run is pure noise — but it should not be red. We therefore treat a
-      # rejected push as a best-effort no-op: warn clearly and exit 0. The bead-ID
-      # extraction + close logic above still runs every time, so the moment pushing becomes
-      # possible (bypass added) this lands the close with no further change. The orchestrator
-      # closes beads manually in the interim.
-      - name: Commit the regenerated bead JSONL back to main (best-effort; non-fatal on ruleset-blocked push)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          if git diff --quiet -- .beads/issues.jsonl; then
-            echo "no bead status change for PR #${PR_NUMBER} — nothing to commit."
-            exit 0
-          fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add .beads/issues.jsonl
-          git commit -m "chore(beads): auto-close bead(s) mapped to merged PR #${PR_NUMBER} [skip ci]" \
-                     -m "Durable replacement for the ephemeral watcher b1kzhfxq5 (sq-84a8). [OPUS-4.8]"
-          # Best-effort push. A protected-branch ruleset rejection (GH013) or a
-          # non-fast-forward race must NOT fail this non-gating post-merge job. Disable
-          # `errexit` only around the push so we can inspect its status and fail soft.
-          set +e
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
-          push_rc=$?
-          set -e
-          if [ "$push_rc" -ne 0 ]; then
-            echo "::warning title=bead-autoclose push declined::Could not push the .beads close for PR #${PR_NUMBER} to protected main (git push exit ${push_rc}; likely GH013 ruleset rejection — direct pushes to main are blocked). Best-effort no-op: the bead-ID extraction + close logic ran, but the commit was NOT landed. Resolve by adding the github-actions bot to the main ruleset bypass list (owner-only; sq-roe3 needs:user) or folding bead-state into the periodic .beads-export PR (sq-2xdg). The orchestrator closes the bead(s) manually in the meantime."
-            exit 0
-          fi
-          echo "committed + pushed bead auto-close for PR #${PR_NUMBER} to main."
+            --close-issues \
+            --repo "$GITHUB_REPOSITORY" \
+            --skip-jsonl

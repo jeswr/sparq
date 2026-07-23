@@ -161,6 +161,14 @@ q-error is `None` when either side is 0; `nanos` read 0 on wasm32 (no monotonic 
 host installs a per-thread trace clock via `set_trace_clock(fn() -> u64)` — the sparq-wasm ANALYZE
 binding routes `performance.now()` through it (sq-vx7ez, #2428).
 
+Persistent planner statistics *(opt-in `persistent-stats`, OFF by default)* are rebuilt explicitly
+with `stats::analyze(&graph, saved_store_dir)`. This atomically writes a deterministic `stats.bin`
+beside the saved/mmap store containing per-predicate cardinalities and equi-depth subject/object
+value histograms. Load it without scanning indexes using `StatsCatalog::load(dir)`, then install it
+around queries with `with_stats_catalog(&Arc::new(catalog), || query(&graph, sparql))`. The catalog
+changes join estimates/order only; query results are unchanged. `AnalyzeMetrics` exposes stable
+triple/predicate/bucket/byte counts for operational checks.
+
 ## Common recipes
 
 **Aggregates, GROUP BY / HAVING, subqueries** — standard SPARQL 1.1; no special API:

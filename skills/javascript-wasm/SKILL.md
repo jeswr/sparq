@@ -14,19 +14,24 @@ Use `SparqStore` (the high-level wrapper) by default — it covers SELECT/ASK (`
 ```js
 import { SparqStore, DataFactory as DF } from '@jeswr/sparq';
 
-// init() runs lazily on first construction; nothing else to await.
+// init() runs lazily on first construction.
 const store = await SparqStore.fromString(`
   @prefix ex: <http://ex/> .
   ex:alice ex:name "Alice" ; ex:knows ex:bob .
   ex:bob   ex:name "Bob"@en .
 `, 'turtle'); // 'turtle' (default) | 'ntriples' | 'nquads' | 'trig' | 'jsonld'
 
-// SELECT -> RDF/JS Bindings[]
-for (const row of store.queryBindings(
+// SELECT -> asynchronous RDF/JS ResultStream<Bindings>
+const bindings = await store.queryBindings(
   'PREFIX ex: <http://ex/> SELECT ?s ?name WHERE { ?s ex:name ?name }',
-)) {
-  console.log(row.get('s').value, '->', row.get('name').value);
-}
+);
+await new Promise((resolve, reject) => {
+  bindings.on('error', reject);
+  bindings.on('end', resolve);
+  bindings.on('data', (row) => {
+    console.log(row.get('s').value, '->', row.get('name').value);
+  });
+});
 
 // ASK -> boolean (native early-exit at first solution)
 store.queryBoolean('PREFIX ex: <http://ex/> ASK { ex:alice ex:knows ex:bob }'); // true
@@ -65,7 +70,7 @@ interface SparqStoreOptions { compressed?: boolean; dataset?: boolean; baseIri?:
 get size(): number                                  // deduped triples in the DEFAULT graph
 heapBytes(): number                                 // rough wasm-side footprint
 query(sparql): Bindings[] | boolean                 // dispatches: SELECT->Bindings[], ASK->boolean
-queryBindings(sparql): Bindings[]                    // SELECT -> one Bindings per solution
+queryBindings(sparql, context?): Promise<ResultStream<Bindings>> // SELECT -> RDF/JS event stream
 querySolutions(sparql): Map<string, Term>[]          // SELECT -> OXIGRAPH-shaped: array of plain Map (drop-in for oxigraph Store.query)
 querySolutionsStream(sparql): Generator<Map<string,Term>> // streaming querySolutions
 queryBoolean(sparql): boolean                        // ASK (native path; rejects non-ASK)
@@ -94,11 +99,11 @@ removeQuads(quads): void                             // applyDelta([], quads) �
 free(): void                                         // also Symbol.dispose
 ```
 
-`Bindings` (RDF/JS Query-spec, Map-like): `.get('var') -> RDF.Term | undefined`, `.has`, `.keys()`, `.values()`, `.entries()`, `.size`, `.equals`, immutable `.set/.delete/.filter/.map/.merge`, iterable, plus `.toMap() -> Map<string, Term>` (the Oxigraph-shaped bare-string-keyed view — #1123). Terms: `.termType` (`'NamedNode' | 'Literal' | 'BlankNode' | ...`), `.value`, plus `.language` / `.datatype` on literals.
+`Bindings` (RDF/JS Query-spec, Map-like): `.get('var') -> RDF.Term | undefined`, `.has`, `.keys()`, `.values()`, `.entries()`, `.size`, `.equals`, immutable `.set/.delete/.filter/.map/.merge`, iterable, plus `.toMap() -> Map<string, Term>` (the Oxigraph-shaped bare-string-keyed view — #1123). Terms: `.termType` (`'NamedNode' | 'Literal' | 'BlankNode' | ...`), `.value`, plus `.language` / `.datatype` / `.direction` (`'ltr' | 'rtl' | ''`, RDF 1.2 base direction) on literals.
 
 `Dataset` (named export — the full RDF/JS [`Dataset`](https://rdf.js.org/dataset-spec/) over the engine; async factories `Dataset.create/fromString/fromQuads`): `DatasetCore` (`add/delete/has/match/size/[Symbol.iterator]`) PLUS the algebra `union/intersection/difference/addAll/deleteMatches/contains/equals/filter/map/forEach/some/every/reduce/import/toStream/toArray/toString/toCanonical`. The binary set ops (`union/intersection/difference/addAll/contains/equals`) are INTEROP-aware — the operand may be another sparq `Dataset` OR any foreign RDF/JS dataset/store (N3.Store, @rdfjs/dataset), detected via `[Symbol.iterator]`. Full SPARQL surface one accessor away via `dataset.store`. (`toCanonical/equals/contains` are RDFC-1.0 blank-node-ISOMORPHISM-aware — `toCanonical` emits canonical `_:c14nN` N-Quads, `equals` compares canonical forms, `contains` matches a relabelled subgraph; backed by the engine's RDFC-1.0 surfaced over the opt-in `canon` wasm feature.)
 
-Other named exports from `@jeswr/sparq`: `DataFactory` (RDF/JS factory: `namedNode`, `blankNode`, `literal`, `variable`, `quad`, ...) and term classes `NamedNode/BlankNode/Literal/Variable/DefaultGraph/Quad`; `init` (idempotent wasm bootstrap); compression helpers `decompress / decompressToString / sniffCodec`; SPARQL helpers `termFromSparqlJson / termToNT / quadsToNQuads / detectQueryForm / SparqlJsonRowsParser`; and the `SparqDictionaryClient` (server dictionary-fetch protocol).
+Other named exports from `@jeswr/sparq`: `DataFactory` (RDF/JS factory: `namedNode`, `blankNode`, `literal`, `variable`, `quad`, ...) and term classes `NamedNode/BlankNode/Literal/Variable/DefaultGraph/Quad`; `init` (idempotent wasm bootstrap); compression helpers `decompress / decompressToString / sniffCodec`; SPARQL helpers `termFromSparqlJson / termToNT / quadsToNQuads / detectQueryForm / SparqlJsonRowsParser`; and the `SparqDictionaryClient` (server dictionary-fetch protocol). `termFromSparqlJson` accepts the SPARQL 1.2 JSON directional-literal shape — `{ type: 'literal', value: 'x', 'xml:lang': 'en', 'its:dir': 'ltr' }` yields a `Literal` with `.language === 'en'`, `.direction === 'ltr'`, and datatype `rdf:dirLangString` (round-tripped by `termToNT` as `"x"@en--ltr`); without `its:dir` the literal stays plain `rdf:langString`.
 
 Raw wasm `Store` (from `../wasm/sparq_wasm.js`, re-exported as `WasmStore` internally) — use only when you need CONSTRUCT/DESCRIBE, batch cursors, or **query-plan introspection**. Methods return SPARQL-JSON / N-Triples / plan-text **strings**, not RDF/JS terms: `Store.load/loadDataset/loadCompressed(text, format)`, `Store.loadBytes(bytes, format)` / `Store.loadBytesWithBase(bytes, format, base)` (ingest a `Uint8Array` directly, `bytes-ingest` bundle only — see below), `.query(sparql)`, `.queryChunks(sparql)`, `.queryCursor(sparql, batchSize)`, `.queryQuads(sparql)` (CONSTRUCT/DESCRIBE -> N-Triples), `.queryQuadsChunks(sparql, batchSize)`, `.count`, `.ask`, `.askWithMaxRows(sparql, maxRows)`, `.explain(sparql)`, `.explainAnalyze(sparql)`, `.validate(data, shapes, format)` (SHACL report as a JSON **string**, shacl bundle only), `.serialize(format, pretty, indent, abbreviate, prefixes?)` (the store's contents as a Turtle / TriG / JSON-LD **string**, serialize-rdf bundle only — see below), `.parseShaclCompact(text, base?)` (SHACL Compact Syntax → the shapes graph as a Turtle **string**, scs bundle only — see below), `.update`, `.updateInPlace`, `.applyDelta(inserts, deletes)`, `.size`, `.heapBytes()`.
 
@@ -170,6 +175,29 @@ Use the package only for local development, do not expose it as a production ser
 data to disappear on shutdown. TLS termination, persistent storage, and notifications remain
 absent; OIDC verification runs in Node, not wasm.
 
+[FABLE-5] **Transport-agnostic host mode (#2323).** For consumers that already run a web
+framework (or need a per-request handler with no Node socket), `@jeswr/solid-server` also exports
+`createSolidPod({ baseUrl, ownerWebid, oidc })` — the same pod behind a dispatcher instead of a
+listener. `pod.dispatch({ method, url, rawHeaders, body })` resolves to `{ status, headers, body }`
+(`url` origin-form including any query, headers flat name/value pairs both ways, `body` in as
+`string | Buffer | Uint8Array`, out as `Buffer`) and owns the whole host contract: the 2 MiB body
+ceiling → the plain-text 413 shape, trap recycle → 503 (a later request is never served by a
+poisoned instance), wasm-response copy + free, and repeated-header preservation. `baseUrl` is
+required (no listener port to derive it from; OIDC DPoP proofs bind to it); `pod.free()` releases
+the wasm instance. The first-party Fastify plugin sits on the `./fastify` subpath with `fastify`
+as an OPTIONAL peer dependency (the core package keeps its single runtime dep):
+`import { solidPod } from '@jeswr/solid-server/fastify'; await fastify.register(solidPod,
+{ baseUrl, ownerWebid, oidc })`. The plugin is mechanical over `dispatch`: it replaces all
+content-type parsers with a `'*'` buffer parser (JSON-LD/N3 bytes reach wasm unparsed, capped at
+2 MiB with `FST_ERR_CTP_BODY_TOO_LARGE` mapped to the host 413 shape), registers one catch-all
+`all('/*')` route (`exposeHeadRoutes: false`) forwarding `request.raw.url` + `request.raw.rawHeaders`
+(repeated headers and `/sparql?query=` intact), and sends grouped array-valued response headers
+(repeated `Link`/`Vary` preserved). Do not put `@fastify/cors` in front of it — wasm owns CORS.
+The building blocks are exported for assembling other hosts (a service-worker `fetch` handler)
+downstream: `SolidServer`, `createPodDispatcher`, and the `http.js` helpers (`MAX_BODY_BYTES`,
+`flattenRequestHeaders`, `readRequestBody`, `copyWasmResponse`, `writeNodeResponse`) from the
+package root, and the raw wasm glue via the `./wasm` subpath export.
+
 [SONNET-4.6] **Trap recovery (sq-250si).** The wasm artifact uses `panic=abort` (release profile):
 a Rust panic or allocation failure at the wasm32 linear-memory ceiling lowers to an `unreachable`
 trap that the host sees as `WebAssembly.RuntimeError`. Before the abort fires, a `console_error_panic_hook`
@@ -220,7 +248,14 @@ store.countQuads(null, DF.namedNode('http://ex/name'));      // -> 2 (no materia
 ```js
 const store = await SparqStore.empty();
 store.update('INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } }');
-store.queryBindings('SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }'); // [{ g: http://ex/g }]
+const graphBindings = await store.queryBindings('SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
+await new Promise((resolve, reject) => {
+  graphBindings.on('error', reject);
+  graphBindings.on('end', resolve);
+  graphBindings.on('data', (row) => {
+    console.log(row.get('g').value); // http://ex/g
+  });
+});
 ```
 
 **Resolve relative IRIs against a base ([OPUS-4.8] sq-f66jz / #1115).** Pass `{ baseIri }` to `fromString` (or raw `Store.loadWithBase(text, format, base)`) for a document fetched from a URL (or a shapes graph / manifest) that carries relative IRIs and no `@base`. A document-level `@base` still overrides it; line-based formats ignore it; an invalid base throws. Not combinable with `dataset` / `compressed`.
@@ -243,7 +278,14 @@ store.applyDelta(insertQuads, deleteQuads); // deletes applied first, then inser
 
 ```js
 const ds = await SparqStore.fromString(nquads, 'nquads', { dataset: true });
-ds.queryBindings('SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } }');
+const namedBindings = await ds.queryBindings('SELECT ?g ?s WHERE { GRAPH ?g { ?s ?p ?o } }');
+await new Promise((resolve, reject) => {
+  namedBindings.on('error', reject);
+  namedBindings.on('end', resolve);
+  namedBindings.on('data', (row) => {
+    console.log(row.get('g').value, row.get('s').value);
+  });
+});
 ds.update('INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> "o" } }');
 ds.match(null, null, null, DF.namedNode('http://ex/g')); // graph-aware
 ```
