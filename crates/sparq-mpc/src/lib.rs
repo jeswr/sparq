@@ -208,6 +208,13 @@ mod chacha;
 // [OPUS-4.8] sq-1vt: the CSPRNG masking seam (production SecureRng + test-only
 // InsecureTestRng). The real protocol's secret-sharing randomness lives here.
 pub mod rng;
+// [OPUS-4.8] sq-yyro: the DEALER-LESS correlated-randomness seam. `rng` fixes the
+// randomness QUALITY (CSPRNG); this fixes WHO draws it — the contract a PRSS /
+// honest-majority coin-toss / dealer-less VSS source must satisfy to replace the
+// single-trusted-dealer simulation. Design + seam only (the current `ShamirDealer`
+// reports `RandomnessModel::TrustedDealerSim`, `deployable() == false`); no
+// dealer-less crypto ships. See research/mpc-distributed-randomness-design.md.
+pub mod randomness;
 // [OPUS-4.8] sq-m34i (MPC WI-1): Reed-Solomon consistency-checked + robust
 // (Berlekamp-Welch) reconstruction over Fp — detect-and-abort / correct tampered
 // shares when redundancy is present. Closes malicious-security gap (D) at the
@@ -356,6 +363,8 @@ pub use oblivious_join::{
     MatchBit, ObliviousOutput, ObliviousOutputCost, OutputSlot,
 };
 pub use rng::{MpcRng, SecureRng};
+// [OPUS-4.8] sq-yyro: the dealer-less correlated-randomness seam surface.
+pub use randomness::{DistributedRandomness, RandomnessModel};
 pub use robust::{reconstruct_robust, reconstruct_robust_attributed, RobustReconstruction};
 // [OPUS-4.8] sq-km34.1: `MacSession` mints the session-global `[α]` and produces
 // authenticated sharings; `ShamirDealer::new_mac_session` is the entry point.

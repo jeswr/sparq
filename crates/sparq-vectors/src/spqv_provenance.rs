@@ -279,6 +279,44 @@ impl EmbeddingProvenance {
         }
     }
 
+    /// [SONNET-4.6] (sq-tb9p0) **Expresses this provenance record as RDF** (spec assertion
+    /// VG-PROV-5 of `site/specs/sparql-vector-genai.typ`): triples about `store` — the IRI the
+    /// caller uses to name the vector store/index — in the [`crate::prov_vocab`] (`spqvp:`)
+    /// vocabulary, so a dataset can describe its vector indexes. Emitted unconditionally:
+    /// `spqvp:model`, `spqvp:metric`, `spqvp:normalization` (their short token names), and
+    /// `spqvp:dimension` (the store header dimension, passed by the caller since it is not an
+    /// [`EmbeddingProvenance`] field — an `xsd:integer` literal). Emitted only when non-empty
+    /// (an absent axis is NOT asserted as an empty string): `spqvp:modelVersion`,
+    /// `spqvp:contentVersion`, `spqvp:verbalization`. The opaque [`reserved`](Self::reserved)
+    /// area has no defined semantics (KERN boundary, #1746) and is never expressed.
+    pub fn to_rdf(&self, store: oxrdf::NamedNodeRef<'_>, dim: usize) -> Vec<oxrdf::Triple> {
+        use oxrdf::{Literal, NamedNode, Triple};
+        let pred = |iri: &str| NamedNode::new_unchecked(iri);
+        let lit = |p: &str, v: &str| {
+            Triple::new(store.into_owned(), pred(p), Literal::new_simple_literal(v))
+        };
+        let mut out = vec![
+            lit(crate::prov_vocab::MODEL, &self.model_id),
+            lit(crate::prov_vocab::METRIC, self.metric.name()),
+            lit(crate::prov_vocab::NORMALIZATION, self.normalization.name()),
+            Triple::new(
+                store.into_owned(),
+                pred(crate::prov_vocab::DIMENSION),
+                Literal::new_typed_literal(dim.to_string(), oxrdf::vocab::xsd::INTEGER),
+            ),
+        ];
+        if !self.model_version.is_empty() {
+            out.push(lit(crate::prov_vocab::MODEL_VERSION, &self.model_version));
+        }
+        if !self.content_version.is_empty() {
+            out.push(lit(crate::prov_vocab::CONTENT_VERSION, &self.content_version));
+        }
+        if !self.verbalization.is_empty() {
+            out.push(lit(crate::prov_vocab::VERBALIZATION, &self.verbalization));
+        }
+        out
+    }
+
     /// Serializes the provenance to a length-prefixed, self-describing byte block for the `.spqv` v3
     /// header. Layout (all fixed-width little-endian; strings are `u32`-length-prefixed UTF-8):
     ///
@@ -541,6 +579,44 @@ mod tests {
         bytes[4..8].copy_from_slice(&(u32::MAX).to_le_bytes());
         let err = EmbeddingProvenance::from_bytes(&bytes).unwrap_err();
         assert!(err.contains("cap") || err.contains("trunc"), "got: {}", err);
+    }
+
+    #[test]
+    fn to_rdf_expresses_the_record_and_omits_absent_axes() {
+        // [SONNET-4.6] (sq-tb9p0) VG-PROV-5: the full record (all axes set) emits every term; an
+        // absent string axis is OMITTED, never asserted as an empty-string literal.
+        use oxrdf::NamedNodeRef;
+        let subject = NamedNodeRef::new("http://ex/store").unwrap();
+        let triples = full().to_rdf(subject, 384);
+        let nt: Vec<String> = triples.iter().map(|t| t.to_string()).collect();
+        assert_eq!(triples.len(), 7, "all axes set => 7 triples: {nt:?}");
+        for t in &triples {
+            assert_eq!(t.subject.to_string(), "<http://ex/store>");
+        }
+        let has = |p: &str, o: &str| {
+            nt.iter().any(|t| t.contains(&format!("<{}>", p)) && t.contains(o))
+        };
+        assert!(has(crate::prov_vocab::MODEL, "\"text-embedding-3-small\""));
+        assert!(has(crate::prov_vocab::MODEL_VERSION, "\"2024-01\""));
+        assert!(has(crate::prov_vocab::CONTENT_VERSION, "\"verb-v2\""));
+        assert!(has(crate::prov_vocab::METRIC, "\"cosine\""));
+        assert!(has(crate::prov_vocab::NORMALIZATION, "\"l2\""));
+        assert!(has(crate::prov_vocab::VERBALIZATION, "\"entity-verbalized\""));
+        assert!(has(crate::prov_vocab::DIMENSION, "\"384\""));
+
+        // The bare record (empty version/verbalization axes) emits only the mandatory four.
+        let bare = EmbeddingProvenance::new("m", Metric::Dot, Normalization::None);
+        let triples = bare.to_rdf(subject, 2);
+        assert_eq!(triples.len(), 4, "absent axes must be omitted");
+        let nt: Vec<String> = triples.iter().map(|t| t.to_string()).collect();
+        assert!(!nt.iter().any(|t| t.contains("\"\"")), "no empty-string assertions: {nt:?}");
+        let has_bare = |p: &str, o: &str| {
+            nt.iter().any(|t| t.contains(&format!("<{}>", p)) && t.contains(o))
+        };
+        assert!(has_bare(crate::prov_vocab::MODEL, "\"m\""));
+        assert!(has_bare(crate::prov_vocab::METRIC, "\"dot\""));
+        assert!(has_bare(crate::prov_vocab::NORMALIZATION, "\"none\""));
+        assert!(has_bare(crate::prov_vocab::DIMENSION, "\"2\""));
     }
 
     #[test]

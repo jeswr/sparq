@@ -1262,4 +1262,213 @@ mod tests {
             "entity IRI must match FNV-1a XOR hash of the update text + fixed-clock nanos"
         );
     }
+
+    // ── sq-d6hen: mutation hardening (from #1723) — direct truth-table tests over the
+    // `is_multi_op` / `has_top_level_semicolon` boolean state machines. Testing only via
+    // `kind_label` lets first-pass mutants survive, because `has_top_level_semicolon` is
+    // a correcting second pass; these rows pin each scanner state (IRI / double-quote /
+    // single-quote / brace-depth) and each cross-state guard directly.
+    //
+    // Triage note for future mutation runs: mutants that make `is_multi_op`'s FIRST pass
+    // over-detect a `;` (e.g. `&&` → `||` on its guards) are semantically EQUIVALENT and
+    // unkillable — a falsely-detected in-term `;` can never have a blank tail (the term's
+    // closing delimiter follows it), so control always defers to the precise second pass,
+    // which returns the correct global answer. Only under-detection, stuck-state, and
+    // second-pass mutants are killable; the rows below cover those. [FABLE-5] ──────────
+
+    /// Baseline rows: presence/absence of a top-level `;`, the non-blank-tail
+    /// requirement, and degenerate inputs (a bare `;` also pins the `i + 1` tail-slice
+    /// arithmetic: `i - 1` underflows, `i * 1` would report the `;` itself as a tail).
+    #[test]
+    fn has_top_level_semicolon_baseline_truth_table() {
+        assert!(
+            has_top_level_semicolon("A ; B"),
+            "top-level ';' with a following op"
+        );
+        assert!(!has_top_level_semicolon("A B"), "no ';' at all");
+        assert!(!has_top_level_semicolon("A ;"), "blank tail after ';'");
+        assert!(
+            !has_top_level_semicolon("A ;   "),
+            "whitespace-only tail after ';'"
+        );
+        assert!(!has_top_level_semicolon(";"), "bare separator, no ops");
+        assert!(!has_top_level_semicolon(""), "empty input");
+    }
+
+    /// Brace-depth rows: a `;` inside `{ … }` is Turtle predicate-list shorthand, never
+    /// an op boundary; a `;` after the braces close is. The close-then-`;` row kills
+    /// `+=`/`-=` swaps on the depth counter; the unbalanced-`}` row pins `brace == 0`
+    /// exactly (a `<=`/`<` mutant would accept the negative depth).
+    #[test]
+    fn has_top_level_semicolon_brace_depth_truth_table() {
+        assert!(
+            !has_top_level_semicolon("{ A ; B }"),
+            "';' inside braces is a predicate list, not a boundary"
+        );
+        assert!(
+            has_top_level_semicolon("{ A } ; B"),
+            "';' after braces close IS a boundary"
+        );
+        assert!(
+            !has_top_level_semicolon("{ { A ; B } } C"),
+            "';' at nested depth 2 is not a boundary"
+        );
+        assert!(
+            has_top_level_semicolon("{ { A } } ; B"),
+            "';' after nested braces close back to depth 0"
+        );
+        assert!(
+            !has_top_level_semicolon("} ; A"),
+            "';' at negative depth (unbalanced '}}') is not depth 0"
+        );
+    }
+
+    /// Term-skip rows: a `;` inside an `<IRI>` / `"…"` / `'…'` is data; once the term
+    /// closes, a following `;` is a real boundary (the true rows kill stuck-state
+    /// mutants where a toggle becomes `= true`).
+    #[test]
+    fn has_top_level_semicolon_term_skip_truth_table() {
+        assert!(!has_top_level_semicolon("<A;B> C"), "';' inside an IRI");
+        assert!(
+            has_top_level_semicolon("<A;B> ; C"),
+            "IRI closes, then a real ';'"
+        );
+        assert!(
+            !has_top_level_semicolon("\"A;B\" C"),
+            "';' inside a double-quoted literal"
+        );
+        assert!(
+            has_top_level_semicolon("\"A;B\" ; C"),
+            "double-quoted literal closes, then a real ';'"
+        );
+        assert!(
+            !has_top_level_semicolon("'A;B' C"),
+            "';' inside a single-quoted literal"
+        );
+        assert!(
+            has_top_level_semicolon("'A;B' ; C"),
+            "single-quoted literal closes, then a real ';'"
+        );
+    }
+
+    /// Cross-state guard rows: each row is true ONLY if the named state-opening byte is
+    /// inert while a different state is active — dropping any one guard conjunct
+    /// (or `&&` → `||`) leaves the scanner stuck in a phantom state so the trailing
+    /// real `;` is missed.
+    #[test]
+    fn has_top_level_semicolon_cross_state_guard_truth_table() {
+        assert!(
+            has_top_level_semicolon("\"A'B\" ; C"),
+            "'\\'' inside a double-quoted literal must not open single-quote state"
+        );
+        assert!(
+            has_top_level_semicolon("'A\"B' ; C"),
+            "'\"' inside a single-quoted literal must not open double-quote state"
+        );
+        assert!(
+            has_top_level_semicolon("<A\"B> ; C"),
+            "'\"' inside an IRI must not open double-quote state"
+        );
+        assert!(
+            has_top_level_semicolon("<A'B> ; C"),
+            "'\\'' inside an IRI must not open single-quote state"
+        );
+        assert!(
+            has_top_level_semicolon("\"A<B\" ; C"),
+            "'<' inside a double-quoted literal must not open IRI state"
+        );
+        assert!(
+            has_top_level_semicolon("'A<B' ; C"),
+            "'<' inside a single-quoted literal must not open IRI state"
+        );
+        assert!(
+            has_top_level_semicolon("\"A{B\" ; C"),
+            "'{{' inside a double-quoted literal must not bump brace depth"
+        );
+        assert!(
+            has_top_level_semicolon("'A{B' ; C"),
+            "'{{' inside a single-quoted literal must not bump brace depth"
+        );
+        assert!(
+            has_top_level_semicolon("<A{B> ; C"),
+            "'{{' inside an IRI must not bump brace depth"
+        );
+        assert!(
+            has_top_level_semicolon("\"A}B\" ; C"),
+            "'}}' inside a double-quoted literal must not drop brace depth below 0"
+        );
+        assert!(
+            has_top_level_semicolon("'A}B' ; C"),
+            "'}}' inside a single-quoted literal must not drop brace depth below 0"
+        );
+        assert!(
+            has_top_level_semicolon("<A}B> ; C"),
+            "'}}' inside an IRI must not drop brace depth below 0"
+        );
+        assert!(
+            has_top_level_semicolon("A > B ; C"),
+            "a stray '>' with no open IRI is inert"
+        );
+    }
+
+    /// `is_multi_op` first-pass truth table: baseline rows plus the trailing-separator
+    /// early return (a bare `;` also pins the first pass's `i + 1` tail slice).
+    #[test]
+    fn is_multi_op_baseline_truth_table() {
+        assert!(
+            is_multi_op("DROP DEFAULT ; CREATE GRAPH <HTTP://EX/G>"),
+            "a genuine top-level op boundary"
+        );
+        assert!(!is_multi_op("DROP DEFAULT"), "single op, no ';'");
+        assert!(!is_multi_op("DROP DEFAULT ;"), "lone trailing separator");
+        assert!(
+            !is_multi_op("DROP DEFAULT ;   "),
+            "trailing separator + whitespace"
+        );
+        assert!(!is_multi_op(";"), "bare separator, no ops");
+        assert!(!is_multi_op(""), "empty input");
+        // First pass has no brace tracking, so it detects this ';' and must defer to
+        // the precise pass, which rejects it (predicate-list shorthand).
+        assert!(
+            !is_multi_op("INSERT DATA { <S> <P> <O> ; <P2> <O2> }"),
+            "';' inside a template is not a boundary"
+        );
+    }
+
+    /// `is_multi_op` state rows: each true row requires the first pass to correctly
+    /// LEAVE a term state again (a toggle mutated to `= true` sticks and hides the real
+    /// boundary); the cross-guard rows mirror the precise pass's guard conjuncts.
+    #[test]
+    fn is_multi_op_state_tracking_truth_table() {
+        assert!(!is_multi_op("CREATE GRAPH <HTTP://EX/A;B>"), "';' only inside an IRI");
+        assert!(!is_multi_op("X \"A;B\""), "';' only inside a double-quoted literal");
+        assert!(!is_multi_op("X 'A;B'"), "';' only inside a single-quoted literal");
+        assert!(is_multi_op("<A> ; B"), "IRI closes, then a real boundary");
+        assert!(is_multi_op("\"A\" ; B"), "double quote closes, then a real boundary");
+        assert!(is_multi_op("'A' ; B"), "single quote closes, then a real boundary");
+        assert!(
+            is_multi_op("\"A<B\" ; C"),
+            "'<' inside a double-quoted literal must not open IRI state"
+        );
+        assert!(
+            is_multi_op("'A<B' ; C"),
+            "'<' inside a single-quoted literal must not open IRI state"
+        );
+        assert!(
+            is_multi_op("<A\"B> ; C"),
+            "'\"' inside an IRI must not open double-quote state"
+        );
+        assert!(
+            is_multi_op("<A'B> ; C"),
+            "'\\'' inside an IRI must not open single-quote state"
+        );
+        assert!(
+            is_multi_op("\"A'B\" ; C"),
+            "'\\'' inside a double-quoted literal must not open single-quote state"
+        );
+        assert!(
+            is_multi_op("'A\"B' ; C"),
+            "'\"' inside a single-quoted literal must not open double-quote state"
+        );
+    }
 }

@@ -108,15 +108,23 @@ export interface SubscriptionError {
 export type SubscriptionEvent =
   | { kind: "subscribed"; ack: SubscribedAck }
   | { kind: "notification"; notification: SubscriptionNotification }
+  /**
+   * [FABLE-5] sq-140b — the `{"unsubscribed":{"id"}}` ack the WebSocket transport's
+   * `unsubscribe` frame earns. The SSE transport never emits it (an SSE client unsubscribes
+   * by closing the stream), so on that transport this kind simply never occurs.
+   */
+  | { kind: "unsubscribed"; id: number }
   | { kind: "error"; error: SubscriptionError }
   | { kind: "unknown"; raw: unknown };
 
 /**
  * Parse one SSE `data:` JSON payload (the server emits one JSON object per `event:`/`data:`
  * frame) into a tagged {@link SubscriptionEvent}. The SSE `event:` NAME is advisory — the
- * envelope key (`subscribed` / `notification` / `error`) is the source of truth, exactly as
- * the WebSocket transport speaks the same JSON. A malformed / unrecognised payload becomes an
- * `unknown` event (the caller decides whether to surface it), never a throw.
+ * envelope key (`subscribed` / `notification` / `unsubscribed` / `error`) is the source of
+ * truth, exactly as the WebSocket transport speaks the same JSON (the WS transport in
+ * `ws-subscriptions.ts` reuses this parser verbatim; `unsubscribed` is WS-only). A malformed /
+ * unrecognised payload becomes an `unknown` event (the caller decides whether to surface it),
+ * never a throw.
  */
 export function parseSubscriptionData(data: string): SubscriptionEvent {
   let parsed: unknown;
@@ -148,6 +156,10 @@ export function parseSubscriptionData(data: string): SubscriptionEvent {
         removedResults: n.removedResults as SparqlResults,
       },
     };
+  }
+  if (obj.unsubscribed && typeof obj.unsubscribed === "object") {
+    const u = obj.unsubscribed as Record<string, unknown>;
+    return { kind: "unsubscribed", id: Number(u.id) };
   }
   if (obj.error && typeof obj.error === "object") {
     const e = obj.error as Record<string, unknown>;

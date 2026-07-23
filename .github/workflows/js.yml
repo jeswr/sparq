@@ -69,19 +69,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [FABLE-5] CI-economy (2026-07-18 directive 2b): this wasm lane compiles
+          # the same sparq-wasm dependency stack as the other js/pages/gui/site wasm
+          # lanes — ONE shared dependency cache across them keeps demand inside the
+          # 10 GB Actions-cache budget (sq-3sbrr doctrine: save on push-to-main
+          # only, so PR runs are restore-only and never churn the shared budget).
+          shared-key: site-wasm
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
-      - name: Cache cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: js-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      # [FABLE-5] PR #3511 review finding 5: the redundant second cargo cache was
+      # REMOVED. The Swatinem/rust-cache above (shared-key: site-wasm) already caches
+      # ~/.cargo/registry + ~/.cargo/git + the workspace target/ across every js/pages/
+      # gui/site wasm lane, restore-only off main. The former `actions/cache` here
+      # covered the SAME paths under a PR-scoped key (js-wasm-…-hashFiles(Cargo.lock)),
+      # so it saved a duplicate, PR-scoped copy on every PR run — churning the shared
+      # 10 GB Actions-cache budget the economy work exists to protect. One shared
+      # dependency cache, not two, is the goal.
 
       # wasm-pack BEFORE `npm ci`: the package's `prepare` lifecycle (sq-bkag git-pin
       # build) runs on `npm ci` and needs wasm-pack on PATH to compile the wasm engine.

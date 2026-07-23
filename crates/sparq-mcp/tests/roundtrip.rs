@@ -72,6 +72,48 @@ fn initialize_handshake_reports_server_info() {
     assert!(result["capabilities"]["tools"].is_object());
 }
 
+// [SONNET-4.6] sq-bvnqm: MCP version negotiation — a supported client-proposed
+// revision is accepted verbatim; anything else is answered with the server's
+// latest supported revision (per the MCP versioning rules), never a fixed echo.
+#[test]
+fn initialize_accepts_a_supported_proposed_protocol_version() {
+    let mut server = McpServer::new(graph());
+    let resp = call(
+        &mut server,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#,
+    );
+    assert_eq!(resp["result"]["protocolVersion"], "2024-11-05");
+}
+
+#[test]
+fn initialize_answers_an_unsupported_proposed_version_with_the_latest() {
+    let mut server = McpServer::new(graph());
+    let resp = call(
+        &mut server,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"1999-01-01"}}"#,
+    );
+    assert_eq!(resp["result"]["protocolVersion"], sparq_mcp::PROTOCOL_VERSION);
+}
+
+#[test]
+fn initialize_defaults_to_the_latest_when_no_version_is_proposed() {
+    let mut server = McpServer::new(graph());
+    let resp = call(
+        &mut server,
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+    );
+    assert_eq!(resp["result"]["protocolVersion"], sparq_mcp::PROTOCOL_VERSION);
+}
+
+#[test]
+fn latest_protocol_version_heads_the_supported_list() {
+    assert_eq!(
+        sparq_mcp::SUPPORTED_PROTOCOL_VERSIONS.first().copied(),
+        Some(sparq_mcp::PROTOCOL_VERSION),
+    );
+    assert_eq!(sparq_mcp::PROTOCOL_VERSION, "2025-11-25");
+}
+
 #[test]
 fn notifications_get_no_response() {
     let mut server = McpServer::new(graph());
