@@ -70,7 +70,7 @@ aws ec2 wait instance-running --region "$REGION" --instance-ids "$INSTANCE_ID"
 IP=$(aws ec2 describe-instances --region "$REGION" --instance-ids "$INSTANCE_ID" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
 
 echo "== wait for sshd =="
-for i in $(seq 1 30); do ssh $SSHO "ubuntu@$IP" true 2>/dev/null && break; sleep 10; done
+for _ in $(seq 1 30); do ssh $SSHO "ubuntu@$IP" true 2>/dev/null && break; sleep 10; done
 
 echo "== build + bench on the instance (public repo: clone with no creds) =="
 # The instance clones the public repo at this SHA, installs Rust, builds, runs the same emitter at
