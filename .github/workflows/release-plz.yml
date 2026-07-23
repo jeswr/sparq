@@ -75,9 +75,15 @@ jobs:
   # 29990467905 — ORCHESTRATOR_APP_ID empty, HAVE_APP_TOKEN=false, hygiene-only mode), so there is
   # no working token to switch to. Instead: (1) the job name now contains the whole word
   # "advisory", which ci-summary's `\b(advisory|informational)\b` name rule excludes from the
-  # gating set; (2) the KNOWN 403 (PR-creation setting disabled) is tolerated loudly — a
-  # `::warning` naming the needed setting, exit 0 — while ANY OTHER failure still fails the (now
-  # advisory) job, never silently swallowed. DURABLE FIX (maintainer): enable
+  # gating set (registered in .github/advisory-registry.json; owner bead sq-lonae); (2) the KNOWN
+  # 403 (PR-creation setting disabled) is tolerated loudly — a `::warning` naming the needed
+  # setting, exit 0 — but ONLY when BOTH the CAPTURED release-plz output matches the exact
+  # blocked-PR-creation signature (Failed to open PR + 403 on the /pulls URL) AND a
+  # side-effect-free live probe of the same call returns 403 ([FABLE-5] round-1 review:
+  # signature + probe together, so a coincidental 403 — e.g. a secondary-rate-limit response to
+  # the probe — can never launder an unrelated failure, and a non-403 real error with a flaky
+  # probe can never be swallowed). ANY OTHER failure still fails the (now advisory) job, never
+  # silently swallowed. DURABLE FIX (maintainer): enable
   # Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests"
   # (or configure the ORCHESTRATOR_APP secrets and switch this job's token to a minted App token).
   release-plz-pr:
@@ -107,36 +113,75 @@ jobs:
         run: |
           rustup default stable
           rustup show active-toolchain
-      # [OPUS-4.8] sq-v286.4: official release-plz action, SHA-pinned (code-scanning=0;
-      # the repo SHA-pins ALL actions). v0.5.130 — pin verified to peel to this commit via
-      # `gh api repos/release-plz/action/git/tags/<annotated> --jq .object.sha`.
-      - name: Run release-plz (open/update Release-PR)
-        id: releasepr
-        # [FABLE-5] continue-on-error so the containment step below can classify the failure:
-        # the KNOWN 403 (Actions PR-creation setting disabled) is tolerated with a ::warning;
-        # anything else re-fails the job. See the job-level comment.
-        continue-on-error: true
-        uses: release-plz/action@2eb1d8bcb770b4c48ccfaad919734b38b51958c9 # v0.5.131
+      # [FABLE-5] round-1 review: the release-pr invocation moved OUT of the composite
+      # release-plz/action into a direct `run:` step, because the containment below must classify
+      # the failure from release-plz's CAPTURED output — and a `uses:` step's output cannot be
+      # tee'd. The tools are installed with the SAME taiki-e/install-action SHA pin the repo uses
+      # everywhere (v2.83.4; explicit `with: tool:` per sq-ur7o), at the SAME versions the pinned
+      # release-plz/action v0.5.131 installs internally (release-plz@0.3.160 via binstall,
+      # cargo-semver-checks@0.48 — release-plz shells out to it for API-break detection), so the
+      # behavior is unchanged; only the invocation is now wrapped and captured. The unchanged
+      # `release` job below still uses the pinned release-plz/action (no containment needed there).
+      - name: Install release-plz + cargo-semver-checks (pinned)
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
-          command: release-pr
+          tool: release-plz@0.3.160,cargo-semver-checks@0.48
+      - name: Run release-plz release-pr (output captured for failure classification)
+        id: releasepr
+        # continue-on-error so the containment step below can classify the failure from the
+        # captured log: the KNOWN 403 (Actions PR-creation setting disabled) is tolerated with a
+        # ::warning; anything else re-fails the job. See the job-level comment.
+        continue-on-error: true
         env:
           # GITHUB_TOKEN is what release-plz uses to open/update the Release-PR.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          # The commit ident the release-plz/action's git-config sub-action would set for
+          # GITHUB_TOKEN (release-plz commits the version bump onto the Release-PR branch).
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Same invocation the pinned action's release-pr branch runs; 2>&1 | tee captures
+          # BOTH streams (release-plz logs errors to stderr) for the containment step.
+          release-plz release-pr \
+            --git-token "${GITHUB_TOKEN}" \
+            --repo-url "https://github.com/${GITHUB_REPOSITORY}" \
+            -o json 2>&1 | tee /tmp/release-plz-pr.log
+          exit "${PIPESTATUS[0]}"
       # [FABLE-5] Classify a release-plz failure: tolerate ONLY the known 403 (repo setting
       # "Allow GitHub Actions to create and approve pull requests" disabled — live: run
-      # 29988505600). The probe below deterministically reproduces the exact call release-plz
-      # failed on (POST /repos/:repo/pulls with this job's GITHUB_TOKEN) WITHOUT side effects:
-      # head==base is invalid, so a token PERMITTED to create PRs gets 422 Validation Failed and
-      # no PR is ever created, while a token blocked by the Actions PR-creation setting gets the
-      # same 403 release-plz hit (the authorization check precedes body validation). 403 =>
-      # loud ::warning + exit 0; anything else => the failure was NOT the known blocked-setting
-      # condition, so fail the (advisory) job — never silently swallow a different error.
+      # 29988505600), established by TWO independent conditions that must BOTH hold
+      # (round-1 review — the probe alone could misclassify e.g. a rate-limit 403):
+      #   (a) SIGNATURE — the captured release-plz output contains a "Failed to open PR" line
+      #       carrying a 403 on the POST /repos/:repo/pulls URL (the exact live failure shape);
+      #   (b) PROBE — re-running the same call NOW with this job's GITHUB_TOKEN returns 403.
+      #       The probe is side-effect-free: head==base is invalid, so a token PERMITTED to
+      #       create PRs gets 422 Validation Failed and no PR is ever created, while a token
+      #       blocked by the Actions PR-creation setting gets the same 403 release-plz hit
+      #       (the authorization check precedes body validation).
+      # (a)+(b) => loud ::warning + exit 0. Anything else — signature mismatch (a different
+      # release-plz error, even if the probe happens to 403), or a non-403 probe — keeps the
+      # failure a real failure of this (advisory) job. Never silently swallow a different error.
       - name: Contain the known 403 (Actions PR-creation setting disabled)
         if: steps.releasepr.outcome == 'failure'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          log=/tmp/release-plz-pr.log
+          if [ ! -s "$log" ]; then
+            echo "::error::release-plz release-pr failed but left no captured output at $log — cannot classify the failure; treating as a real failure."
+            exit 1
+          fi
+          # (a) SIGNATURE: a single line must carry all three markers — "Failed to open PR",
+          # a 403, and the POST /pulls URL for THIS repo. grep -F for the URL (dots literal).
+          if ! grep "Failed to open PR" "$log" | grep -F "403" | grep -Fq "api.github.com/repos/${GITHUB_REPOSITORY}/pulls"; then
+            echo "::error::release-plz release-pr failed, but the captured output does NOT match the known blocked-PR-creation signature (a 'Failed to open PR' line with a 403 on api.github.com/repos/${GITHUB_REPOSITORY}/pulls) — this is a DIFFERENT, real failure (even if a 403 probe would succeed, e.g. rate limiting). Captured output follows."
+            sed 's/^/  | /' "$log"
+            exit 1
+          fi
+          echo "captured output matches the known blocked-PR-creation signature; probing the live call."
+          # (b) PROBE: the same POST /pulls with this job's token, side-effect-free (head==base).
           code=$(curl -sS -o /tmp/rp-probe.json -w '%{http_code}' -X POST \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
@@ -144,10 +189,10 @@ jobs:
             -d '{"title":"release-plz 403 probe (never created: head==base is invalid)","head":"main","base":"main"}')
           echo "PR-creation probe HTTP status: ${code}"
           if [ "${code}" = "403" ]; then
-            echo "::warning title=release-plz Release-PR blocked by repo setting::GITHUB_TOKEN cannot create pull requests: the repo/org setting 'Settings → Actions → General → Allow GitHub Actions to create and approve pull requests' is disabled, so the Release-PR was NOT opened (known condition; tolerated as advisory). Durable fix: a maintainer enables that setting, or configures the ORCHESTRATOR_APP_ID/_PRIVATE_KEY App secrets and switches this job's token to a minted App token (batch-merge.yml pattern), which bypasses the setting."
+            echo "::warning title=release-plz Release-PR blocked by repo setting::GITHUB_TOKEN cannot create pull requests: the repo/org setting 'Settings → Actions → General → Allow GitHub Actions to create and approve pull requests' is disabled, so the Release-PR was NOT opened (known condition, established by captured-output signature + live probe; tolerated as advisory). Durable fix: a maintainer enables that setting, or configures the ORCHESTRATOR_APP_ID/_PRIVATE_KEY App secrets and switches this job's token to a minted App token (batch-merge.yml pattern), which bypasses the setting."
             exit 0
           fi
-          echo "::error::release-plz release-pr failed, and the PR-creation probe returned HTTP ${code} (not the known 403 blocked-setting condition) — this is a DIFFERENT, real failure. See the 'Run release-plz' step log above. Probe response body follows."
+          echo "::error::release-plz release-pr failed with the blocked-PR-creation signature in its output, but the live PR-creation probe returned HTTP ${code} (not 403) — the blocked-setting condition is not reproducible right now, so this is treated as a real failure. Probe response body follows."
           cat /tmp/rp-probe.json || true
           exit 1
 

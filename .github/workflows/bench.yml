@@ -474,6 +474,43 @@ jobs:
               benchmark-data:benchmark-data
             echo "Created and pushed orphan benchmark-data branch."
           fi
+      # [FABLE-5] HARD zone — deterministic median-of-history regression gate (replaces the action's
+      # single-previous-point fail-on-alert, which flapped on runner environment shifts; see the
+      # fail-on-alert comment on the Store step below). scripts/bench_hardzone.py compares each
+      # metric in THIS run's bench-results.json against the MEDIAN of its last up-to-5 published
+      # VALUES in prev-data.js (fetched by the "Fetch previous benchmark series" step above; absent
+      # history = warn + pass, first-run safe). It FAILS if a gated metric is >= 2.0x its median
+      # (direction-adjusted: `*_per_s` throughput is larger-is-better), fails CLOSED on
+      # NaN/non-numeric/negative/zero-boundary measurements and on >30% of gated metrics
+      # disappearing, and EXEMPTS a runner-environment scaling ONLY when four conditions ALL hold
+      # (>=50% of compared metrics >=1.75x AND their ratios uniform (cv<=0.15) AND nothing >=4x
+      # AND every deterministic byte/count metric within 1% of median) — see the script header for
+      # why those four make a masked code regression implausible, not impossible (hence the loud
+      # warning + table, never a quiet pass).
+      #
+      # ORDERING ([FABLE-5] round-1 review): this step runs BEFORE the Store step DELIBERATELY.
+      # Store auto-pushes this run's point into the benchmark-data history (main pushes), so if the
+      # gate ran after it, a REJECTED regression would already be published — and after a few red
+      # runs the regressed points would BECOME the median, silently re-baselining the gate. Gating
+      # first means a hard-zone failure publishes NOTHING. There is no data dependency on Store:
+      # both inputs (bench-results.json, prev-data.js) exist before it. CONSEQUENCE: on a hard-zone
+      # failure the run publishes nothing and Store's comparison comment/summary never fires — so
+      # the script prints its own per-metric table to stdout AND to GITHUB_STEP_SUMMARY; that table
+      # is the only visible evidence of what tripped.
+      #
+      # Guarded to the SAME main-push condition as auto-push: PR runs are `--deterministic-only`
+      # and already strictly gated by perf-gate.py above, and the nightly `schedule` backstop is a
+      # pure verification run — so PR + schedule behavior is unchanged by this step.
+      # The script self-tests first (repo convention: hermetic --self-test over inline fixtures).
+      - name: Hard zone — median-of-history regression gate (main pushes only)
+        if: github.event_name != 'schedule' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          python3 scripts/bench_hardzone.py --self-test
+          python3 scripts/bench_hardzone.py \
+            --results bench-results.json \
+            --prev-data prev-data.js \
+            --suite 'sparq engine'
       # [OPUS-4.8] sq-owci — clean the working tree before github-action-benchmark switches branches.
       # ROOT CAUSE: the "Run benchmarks" step (scripts/ci-bench.sh) does `cd bench/zk && cargo bench`
       # and `cd bench/zk-trace && cargo bench` (two STANDALONE cargo projects, run WITHOUT --locked),
@@ -497,23 +534,38 @@ jobs:
       # untouched, and the run outputs the later steps read (bench-results.json, prev-data.js) are
       # UNtracked and left intact. Hence: no `if:` — this cleanup always runs.
       #
-      # FIX MECHANICS: restore exactly the TRACKED files the build/bench dirtied, so the action's
-      # branch switch is clean. `git checkout --` only touches tracked paths. Enumerating via
-      # `git diff --name-only` (tracked-modified only) future-proofs this against any other lockfile
-      # a future bench may rewrite.
+      # FIX MECHANICS ([FABLE-5] round-1 review): ALLOW-LIST restore, not `git checkout -- .`.
+      # The ONLY tracked churn this bench run is known to induce is the bench/**/Cargo.lock
+      # re-resolve (bench/zk + bench/zk-trace today; the glob future-proofs any standalone bench
+      # project a future suite adds). Exactly those paths are restored; if ANY OTHER tracked path
+      # is dirty, that is unknown churn — something wrote to the checkout that nothing should
+      # write to — so the step prints the paths and FAILS loudly instead of silently discarding
+      # evidence. Untracked run outputs (bench-results.json, prev-data.js) are never touched.
       - name: Clean bench-induced tracked churn before history switch
         run: |
           set -euo pipefail
           dirty="$(git diff --name-only)"
-          if [ -n "$dirty" ]; then
-            echo "Restoring tracked files the benchmark run modified (incidental Cargo.lock re-resolve):"
-            while IFS= read -r f; do echo "  $f"; done <<< "$dirty"
-            # Restore ALL tracked modifications. `git checkout -- .` only rewrites TRACKED paths,
-            # so the untracked run outputs the next step reads (bench-results.json, prev-data.js)
-            # are left intact — and it is whitespace-safe (no word-splitting of the path list).
-            git checkout -- .
-          else
+          if [ -z "$dirty" ]; then
             echo "Working tree clean — no tracked churn to restore."
+          else
+            unknown=0
+            while IFS= read -r f; do
+              case "$f" in
+                bench/*/Cargo.lock)
+                  echo "Restoring known bench-induced churn: $f"
+                  git checkout -- "$f"
+                  ;;
+                *)
+                  echo "::error title=unknown tracked churn::'$f' is modified but is NOT known bench-induced churn (bench/**/Cargo.lock) — refusing to discard it."
+                  unknown=1
+                  ;;
+              esac
+            done <<< "$dirty"
+            if [ "$unknown" = "1" ]; then
+              echo "::error::Unknown tracked modifications after the bench run (listed above). Unknown churn means something unexpected wrote to tracked paths — investigate; this step never silently discards it."
+              git status --porcelain
+              exit 1
+            fi
           fi
           git status --porcelain
       - name: Store + compare against history
@@ -560,16 +612,19 @@ jobs:
           #     deduped `bench-flake` issue for it — NO @mention of anyone). 175% ≈ p95 run-to-run
           #     timing swing (43.66%) + ~30pp headroom.
           # [FABLE-5] fail-on-alert is now FALSE — the HARD zone moved to the deterministic
-          # median-of-history gate below (scripts/bench_hardzone.py). The action's fail-on-alert
-          # compared each metric against the SINGLE previous benchmark-data point, so one slow-runner
-          # environment shift flipped 9+ unrelated µs-scale metrics uniformly ~1.8-2.1x "worse" and
-          # hard-failed main pushes while interleaved pushes stayed green (live flap over 24h: red at
-          # runs like 29988505852 between green runs, 2026-07-22/23) — the two-zone calibration's own
-          # worst-observed noise swing (185.0%, below) was exceeded by pure runner variance. The
-          # bench_hardzone.py step keeps a HARD gate on main pushes, but against the MEDIAN of the
-          # last up-to-5 published points (a single-point environment shift cannot move a median-of-5)
-          # with a uniform-shift exemption (an across-the-board ratio shift = runner environment,
-          # never a real code regression in every unrelated metric at once).
+          # median-of-history gate ABOVE (scripts/bench_hardzone.py, which runs BEFORE this Store
+          # step so a rejected regression is never auto-pushed into the history it is judged by).
+          # The action's fail-on-alert compared each metric against the SINGLE previous
+          # benchmark-data point, so one slow-runner environment shift flipped 9+ unrelated
+          # µs-scale metrics uniformly ~1.8-2.1x "worse" and hard-failed main pushes while
+          # interleaved pushes stayed green (live flap over 24h: red at runs like 29988505852
+          # between green runs, 2026-07-22/23) — the two-zone calibration's own worst-observed
+          # noise swing (185.0%, below) was exceeded by pure runner variance. The bench_hardzone.py
+          # step keeps a HARD gate on main pushes, but against the MEDIAN of each metric's last
+          # up-to-5 published values (a single-point environment shift cannot move a median-of-5),
+          # with a four-condition uniform-shift exemption (breadth + ratio uniformity + a 4x cap +
+          # deterministic metrics unmoved — conditions that make a MASKED code regression
+          # implausible, not impossible, so the exemption always warns loudly with a full table).
           # DERIVATION (no hard-coded perf numbers in markdown — the numbers live here + are recomputable):
           #   scripts/bench-thresholds.py recomputes the soft threshold from the benchmark-data
           #   history; over 20 commits × 322 timing metrics (6137 adjacent-pair samples) the pooled
@@ -582,30 +637,6 @@ jobs:
           alert-threshold: '175%'
           comment-on-alert: true
           fail-on-alert: false
-      # [FABLE-5] HARD zone — deterministic median-of-history regression gate (replaces the action's
-      # single-previous-point fail-on-alert, which flapped on runner environment shifts; see the
-      # fail-on-alert comment above). scripts/bench_hardzone.py compares each metric in THIS run's
-      # bench-results.json against the MEDIAN of its last up-to-5 published points in prev-data.js
-      # (fetched from the benchmark-data branch by the "Fetch previous benchmark series" step above;
-      # absent history = warn + pass, first-run safe). It FAILS only if a metric is >= 2.0x its
-      # median — a sustained real regression still hard-fails, while a one-off slow-runner point
-      # cannot move a median-of-5 — and it EXEMPTS (loud warning, exit 0) a uniform environment
-      # shift where >= 50% of all compared metrics are simultaneously >= 1.75x median (an
-      # across-the-board shift is the runner, never a real code regression in every unrelated
-      # metric at once). Everything >= 1.75x median is printed as a table either way.
-      # Guarded to the SAME main-push condition as auto-push: PR runs are `--deterministic-only`
-      # and already strictly gated by perf-gate.py above, and the nightly `schedule` backstop is a
-      # pure verification run — so PR + schedule behavior is unchanged by this step.
-      # The script self-tests first (repo convention: hermetic --self-test over inline fixtures).
-      - name: Hard zone — median-of-history regression gate (main pushes only)
-        if: github.event_name != 'schedule' && github.ref == 'refs/heads/main'
-        run: |
-          set -euo pipefail
-          python3 scripts/bench_hardzone.py --self-test
-          python3 scripts/bench_hardzone.py \
-            --results bench-results.json \
-            --prev-data prev-data.js \
-            --suite 'sparq engine'
       # [OPUS-4.8] SOFT-ZONE triage (noise-reduction-bench-selfmonitor). Runs AFTER the action —
       # `if: always()` so it still fires when the hard-zone gate above FAILED; it re-derives
       # the two zones from the SAME thresholds and files/updates a deduped `bench-flake` GitHub issue
