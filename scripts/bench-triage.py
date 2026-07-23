@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import subprocess
 import sys
@@ -111,6 +112,31 @@ def log(msg: str) -> None:
     print(f"[{PROG}] {msg}", file=sys.stderr)
 
 
+def _finite_num(v) -> float | None:
+    """v as a float iff v is a REAL, FINITE number — else None. THE numeric admission gate.
+
+    [FABLE-5 round 4] Every numeric field this script consumes from an artifact routes
+    through here. Admissible inputs are int/float instances that are NOT bool (json
+    true/false must never pass as 1/0), whose float() conversion succeeds — an
+    out-of-float-range int like 10**400 raises OverflowError, which must DROP the value,
+    never crash the triage filer — and whose converted value is finite (json.loads happily
+    emits NaN/Infinity/-Infinity by default, so isfinite is load-bearing).
+    """
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return None
+    try:
+        f = float(v)
+    except (OverflowError, ValueError):
+        return None
+    return f if math.isfinite(f) else None
+
+
+def _entry_date(e: dict) -> float:
+    """Numeric sort key for a data.js entry — junk/absent dates sort as 0, never TypeError."""
+    d = _finite_num(e.get("date"))
+    return 0.0 if d is None else d
+
+
 def metric_crates(name: str) -> list[str]:
     """Map a benchmark metric name to the crates it exercises (longest-prefix wins)."""
     lname = name.lower()
@@ -153,7 +179,9 @@ def classify(ratio_pct: float, soft: float, hard: float) -> str:
 def _to_ratio_pct(cur: float, prev: float) -> float | None:
     if prev == 0:
         return None
-    return (cur / prev) * 100.0
+    ratio = (cur / prev) * 100.0
+    # Two finite floats can still divide to inf (1e308 / 1e-308) — an undefined comparison.
+    return ratio if math.isfinite(ratio) else None
 
 
 def _parse_data_js(text: str) -> dict:
@@ -178,11 +206,13 @@ def baseline_sha(prev_data_js: str, suite: str) -> str:
         data = _parse_data_js(p.read_text(encoding="utf-8"))
         entries = data.get("entries", {})
         series = entries.get(suite) or (next(iter(entries.values())) if entries else [])
-        series = sorted(series, key=lambda e: e.get("date", 0))
+        series = sorted((e for e in series if isinstance(e, dict)), key=_entry_date)
         if not series:
             return ""
-        return (series[-1].get("commit") or {}).get("id", "") or ""
-    except (json.JSONDecodeError, ValueError, OSError):
+        commit = series[-1].get("commit")
+        cid = commit.get("id", "") if isinstance(commit, dict) else ""
+        return str(cid) if cid else ""
+    except (json.JSONDecodeError, ValueError, OSError, TypeError, AttributeError):
         return ""
 
 
@@ -194,7 +224,9 @@ def build_comparison(results_path: str, prev_data_js: str | None, suite: str) ->
     {name,value,unit}); `prev_data_js` is the previously-published dev/bench/data.js (the last
     committed point on the benchmark-data branch). We pair each current metric with its most
     recent previous value of the SAME name in `suite`. Metrics with no previous value are
-    emitted with previous=null (skipped by parse_comparison — nothing to compare).
+    emitted with previous=null (skipped by parse_comparison — nothing to compare). Every
+    numeric field is admitted through _finite_num only: bool / NaN / inf / out-of-float-range
+    values are dropped with a counted warning, never floated blindly.
     """
     current = json.loads(Path(results_path).read_text(encoding="utf-8"))
     cur_rows = current if isinstance(current, list) else current.get("benches", [])
@@ -205,25 +237,36 @@ def build_comparison(results_path: str, prev_data_js: str | None, suite: str) ->
             entries = data.get("entries", {})
             # prefer the named suite; fall back to the only/first suite present.
             series = entries.get(suite) or (next(iter(entries.values())) if entries else [])
-            ordered = sorted(series, key=lambda e: e.get("date", 0))
+            ordered = sorted((e for e in series if isinstance(e, dict)), key=_entry_date)
             for e in ordered:  # later entries overwrite earlier -> most-recent value wins
-                for b in e.get("benches", []):
-                    if b.get("name") is not None and isinstance(b.get("value"), (int, float)):
-                        prev_by_name[b["name"]] = float(b["value"])
-        except (json.JSONDecodeError, ValueError, OSError) as e:
+                benches = e.get("benches", [])
+                for b in (benches if isinstance(benches, list) else []):
+                    if not isinstance(b, dict):
+                        continue
+                    fv = _finite_num(b.get("value"))
+                    if b.get("name") is not None and fv is not None:
+                        prev_by_name[str(b["name"])] = fv
+        except (json.JSONDecodeError, ValueError, OSError, TypeError, AttributeError) as e:
             log(f"warning: could not parse previous data.js ({e}) — no comparison baseline")
     out = []
+    dropped = 0
     for b in cur_rows:
+        if not isinstance(b, dict):
+            dropped += 1
+            continue
         name = b.get("name")
-        val = b.get("value")
-        if name is None or not isinstance(val, (int, float)):
+        val = _finite_num(b.get("value"))
+        if name is None or val is None:
+            dropped += 1
             continue
         out.append({
-            "name": name,
-            "current": float(val),
-            "previous": prev_by_name.get(name),
+            "name": str(name),
+            "current": val,
+            "previous": prev_by_name.get(str(name)),
             "unit": b.get("unit", ""),
         })
+    if dropped:
+        log(f"warning: dropped {dropped} malformed/non-finite result row(s) from {results_path}")
     return out
 
 
@@ -233,27 +276,40 @@ def parse_comparison(path: str) -> list[dict]:
     This is the small normalized shape the workflow builds from github-action-benchmark's
     output (the action does not emit a stable machine file, so the workflow constructs this
     from the current run's results + the previous data.js point). Rows with no previous value
-    (a brand-new metric) are skipped — nothing to compare against.
+    (a brand-new metric) are skipped — nothing to compare against. Numeric fields are
+    admitted through _finite_num only: a present-but-non-finite/bool/unconvertible value is
+    a MALFORMED row, dropped with a counted warning (never a float() crash).
     """
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     rows = data if isinstance(data, list) else data.get("benches", [])
     out = []
+    dropped = 0
     for r in rows:
+        if not isinstance(r, dict):
+            dropped += 1
+            continue
         name = r.get("name")
-        cur = r.get("current", r.get("value"))
-        prev = r.get("previous")
-        if name is None or cur is None or prev is None:
+        cur_raw = r.get("current", r.get("value"))
+        prev_raw = r.get("previous")
+        if name is None or cur_raw is None or prev_raw is None:
+            continue  # brand-new metric / incomplete row — nothing to compare
+        cur = _finite_num(cur_raw)
+        prev = _finite_num(prev_raw)
+        if cur is None or prev is None:
+            dropped += 1  # present but bool/NaN/inf/out-of-range — malformed, not "new"
             continue
-        ratio = _to_ratio_pct(float(cur), float(prev))
+        ratio = _to_ratio_pct(cur, prev)
         if ratio is None:
-            continue
+            continue  # zero previous / overflowing ratio — comparison undefined
         out.append({
-            "name": name,
-            "current": float(cur),
-            "previous": float(prev),
+            "name": str(name),
+            "current": cur,
+            "previous": prev,
             "ratio_pct": round(ratio, 1),
             "unit": r.get("unit", ""),
         })
+    if dropped:
+        log(f"warning: dropped {dropped} malformed/non-finite comparison row(s) from {path}")
     return out
 
 
@@ -271,7 +327,11 @@ def load_hardzone_soft_rows(path: str | None) -> list[dict]:
     accepted points, so these hits must land in the durable bench-flake issue trail instead.
     Rows arrive in the normalized comparison shape with `previous` holding the
     MEDIAN-of-history (not the single previous point) and a `note` tag rendered in the issue
-    table. Malformed rows are dropped (this path must never break the triage filer).
+    table. Malformed rows are dropped with a counted warning (this path must never break the
+    triage filer): every numeric field is admitted through _finite_num — bool rejected
+    (json true/false must not pass as 1/0), NaN/Infinity rejected, and the float() conversion
+    itself guarded (an out-of-float-range int like 10**400 raises OverflowError — a drop,
+    never a crash).
     """
     if not path:
         return []
@@ -299,15 +359,16 @@ def load_hardzone_soft_rows(path: str | None) -> list[dict]:
         if not isinstance(r, dict):
             dropped += 1
             continue
-        name, cur, prev, ratio = (r.get("name"), r.get("current"), r.get("previous"),
-                                  r.get("ratio_pct"))
-        if (name is None or not isinstance(cur, (int, float))
-                or not isinstance(prev, (int, float)) or not isinstance(ratio, (int, float))):
+        name = r.get("name")
+        cur = _finite_num(r.get("current"))
+        prev = _finite_num(r.get("previous"))
+        ratio = _finite_num(r.get("ratio_pct"))
+        if name is None or cur is None or prev is None or ratio is None:
             dropped += 1
             continue
-        out.append({"name": str(name), "current": float(cur), "previous": float(prev),
-                    "ratio_pct": float(ratio), "unit": r.get("unit", ""),
-                    "note": r.get("note") or "floor-exempt hard-band"})
+        out.append({"name": str(name), "current": cur, "previous": prev,
+                    "ratio_pct": ratio, "unit": str(r.get("unit") or ""),
+                    "note": str(r.get("note") or "floor-exempt hard-band")})
     if dropped:
         log(f"warning: dropped {dropped} malformed floor_exempt_hard row(s) from {path}")
     return out
@@ -375,62 +436,112 @@ def _post_issue(title: str, body: str, labels: list[str], existing: str | None) 
         Path(body_file).unlink(missing_ok=True)
 
 
-# ── Markdown sanitizers for artifact-derived fields ────────────────────────────────
-def _md_cell(text) -> str:
-    """Sanitize an artifact-derived value for a plain Markdown table cell.
+# ── defense-in-depth sanitizer for artifact-derived text in issue bodies ────────────
+def _sanitize(text, *, code: bool = False) -> str:
+    """[FABLE-5 round 4] THE sanitizer — every artifact-derived string interpolated into an
+    issue/comment body routes through here (via _md_cell / _md_code_cell / directly).
 
-    Metric names/units/notes arrive from bench artifacts; newlines/pipes could forge
-    table rows, a backtick could open a code span, and a bare @word would ping a GitHub
-    user from an auto-filed issue. Strip newlines, backslash-escape the escapables, and
-    split @-mentions with an empty HTML comment.
+    Layer 1 — HTML, first and unconditional: GitHub renders raw HTML in issue bodies, so a
+    value like `</td></tr></table><h1>forged</h1>` would BREAK OUT of the surrounding table
+    even with perfect Markdown escaping. Escape &, <, > (& first — that also defuses
+    entity-encoded smuggling such as `&#64;user` / `&lt;`). Applied inside code spans too,
+    belt-and-braces: a span that any renderer quirk fails to close must still contain no
+    live tags.
+
+    Layer 2 — Markdown, per cell type:
+      * plain (default): strip newlines (no forged table rows), backslash-escape the
+        escapables (\\ | ` — no forged cells / opened code spans), then split @-mentions
+        with an empty HTML comment. The comment is inserted AFTER the HTML escape so it
+        survives as a real comment; layer 1 already reduced every attacker-supplied < to
+        &lt;, so the only raw HTML left in the output is this trusted defusal comment.
+      * code span (code=True): backslash escapes do NOT work inside a code span, so
+        span-terminating backticks become `'`; `\\|` is the one escape GFM honours inside
+        code spans in table cells; the span itself neutralizes @-mentions.
     """
     s = re.sub(r"[\r\n]+", " ", str(text))
+    s = s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    if code:
+        s = s.replace("`", "'").replace("|", "\\|")
+        return f"`{s}`"
     s = s.replace("\\", "\\\\").replace("|", "\\|").replace("`", "\\`")
     return s.replace("@", "@<!-- -->")
 
 
-def _md_code_cell(text) -> str:
-    """Backtick-wrap a value for a Markdown table cell, defusing span-breakers.
+def _md_cell(text) -> str:
+    """Sanitize an artifact-derived value for a plain Markdown table cell / prose slot."""
+    return _sanitize(text)
 
-    Backslash escapes do NOT work inside a code span, so embedded backticks (which would
-    terminate the span) are replaced with `'`; `\\|` is the one escape GFM honours inside
-    code spans in table cells, and the code span itself neutralizes @-mentions.
+
+def _md_code_cell(text) -> str:
+    """Sanitize an artifact-derived value into a Markdown code span (table-cell safe)."""
+    return _sanitize(text, code=True)
+
+
+def _md_url(text) -> str:
+    """Sanitize an interpolated link DESTINATION (the `(...)` part of a Markdown link).
+
+    Strip all whitespace, then percent-encode every character that could terminate the
+    destination, escape out of it, or open raw HTML. Display text next to the destination
+    goes through _sanitize separately.
     """
-    s = re.sub(r"[\r\n]+", " ", str(text)).replace("`", "'").replace("|", "\\|")
-    return f"`{s}`"
+    s = re.sub(r"\s+", "", str(text))
+    for ch, enc in (("\\", "%5C"), ("(", "%28"), (")", "%29"), ("<", "%3C"),
+                    (">", "%3E"), ('"', "%22"), ("'", "%27"), ("`", "%60")):
+        s = s.replace(ch, enc)
+    return s
 
 
 # ── SOFT zone: one rolling deduped bench-flake issue per suite ──────────────────────
 def build_flake_body(suite: str, rows: list[dict], soft: float, hard: float, run_url: str) -> str:
-    tagged = any(r.get("note") for r in rows)
+    tagged_rows = [r for r in rows if r.get("note")]
+    plain_rows = [r for r in rows if not r.get("note")]
     lines = [
         "> 🤖 **SPARQ agent** — auto-filed by the benchmark self-monitoring soft zone "
         "(noise-reduction-bench-selfmonitor). No human is @-mentioned by design.",
         "",
     ]
-    if tagged:
-        # Merged floor-exempt hard-band rows sit AT/ABOVE the hard ratio (vs their
+    # [FABLE-5 round 4] the class sentence is derived from the row classes ACTUALLY present —
+    # soft-band only, floor-exempt only, or mixed — so the preamble never describes a class
+    # the table below does not contain.
+    if tagged_rows and plain_rows:
+        # MIXED: merged floor-exempt hard-band rows sit AT/ABOVE the hard ratio (vs their
         # median-of-history) — a "everything below the hard threshold" preamble would lie.
         lines.append(
-            f"Benchmarks in suite `{suite}` were flagged by the benchmark self-monitor. "
-            f"This run's rows fall in **two classes**: **soft-band** rows — above the soft "
-            f"alert-threshold (`{soft}%`) but below the hard fail-threshold (`{hard}%`) vs "
-            f"their single previous point — and tagged **floor-exempt hard-band** rows — "
-            f"at/above the hard ratio vs their median-of-history but under their unit's "
-            f"noise floor, so watch-only for the gate. Either way this **could be "
-            f"shared-runner flakiness** rather than a real regression, and it does **not** "
-            f"fail CI. This is a rolling, deduped record — new hits append below."
+            f"Benchmarks in suite {_md_code_cell(suite)} were flagged by the benchmark "
+            f"self-monitor. This run's rows fall in **two classes**: **soft-band** rows — "
+            f"above the soft alert-threshold (`{soft}%`) but below the hard fail-threshold "
+            f"(`{hard}%`) vs their single previous point — and tagged **floor-exempt "
+            f"hard-band** rows — at/above the hard ratio vs their median-of-history but "
+            f"under their unit's noise floor, so watch-only for the gate. Either way this "
+            f"**could be shared-runner flakiness** rather than a real regression, and it "
+            f"does **not** fail CI. This is a rolling, deduped record — new hits append below."
+        )
+    elif tagged_rows:
+        # FLOOR-EXEMPT ONLY: no soft-band row this run — claiming "two classes" (or any
+        # "below the hard fail-threshold" soft framing) would describe rows that are not
+        # in the table.
+        lines.append(
+            f"Benchmarks in suite {_md_code_cell(suite)} were flagged by the benchmark "
+            f"self-monitor. **Every row this run is a tagged floor-exempt hard-band hit** — "
+            f"at/above the hard ratio vs its median-of-history but under its unit's noise "
+            f"floor, so watch-only for the gate; there are no soft-band rows this run. At "
+            f"that scale the measured honest run-to-run bands exceed the hard threshold, so "
+            f"this **could be shared-runner flakiness** rather than a real regression, and "
+            f"it does **not** fail CI. This is a rolling, deduped record — new hits append "
+            f"below."
         )
     else:
+        # SOFT ONLY: the classic soft-zone framing stays exact.
         lines.append(
-            f"Benchmarks in suite `{suite}` regressed into the **soft zone** — above the soft "
-            f"alert-threshold (`{soft}%`) but below the hard fail-threshold (`{hard}%`), so this "
+            f"Benchmarks in suite {_md_code_cell(suite)} regressed into the **soft zone** — "
+            f"above the soft alert-threshold (`{soft}%`) but below the hard fail-threshold "
+            f"(`{hard}%`), so this "
             "**could be shared-runner flakiness** rather than a real regression. It does **not** "
             "fail CI. This is a rolling, deduped record — new soft-zone hits append below."
         )
     lines += [
         "",
-        f"- **Run:** {run_url}",
+        f"- **Run:** {_md_cell(run_url)}",
         "",
         "### Flagged benchmarks (this run)",
         "",
@@ -444,7 +555,7 @@ def build_flake_body(suite: str, rows: list[dict], soft: float, hard: float, run
             f"| {_md_code_cell(r['name'])}{tag} | {r['previous']:g}{unit} | "
             f"{r['current']:g}{unit} | {r['ratio_pct']:g}% |"
         )
-    if tagged:
+    if tagged_rows:
         lines += [
             "",
             "Rows tagged \"floor-exempt hard-band\" come from the median-of-history hard gate "
@@ -559,11 +670,11 @@ def build_regression_body(cluster_crates: list[str], rows: list[dict], ranked: l
         "",
         f"The nightly full-suite benchmark detected a regression **beyond the hard "
         f"fail-threshold (`{hard}%`)** vs the last green nightly baseline, in the "
-        f"`{'+'.join(cluster_crates)}` suite cluster.",
+        f"{_md_code_cell('+'.join(cluster_crates))} suite cluster.",
         "",
-        f"- **Run:** {run_url}",
-        f"- **Baseline (last green nightly):** `{baseline_sha[:12]}`",
-        f"- **Head:** `{head_sha[:12]}`",
+        f"- **Run:** {_md_cell(run_url)}",
+        f"- **Baseline (last green nightly):** {_md_code_cell(baseline_sha[:12])}",
+        f"- **Head:** {_md_code_cell(head_sha[:12])}",
         "",
         "### Regression table",
         "",
@@ -580,12 +691,13 @@ def build_regression_body(cluster_crates: list[str], rows: list[dict], ranked: l
     if ranked:
         lines += ["| rank | commit | PR | overlap crates | subject |", "|---|---|---|---|---|"]
         for i, c in enumerate(ranked[:10], 1):
-            pr = _pr_ref(c["subject"])
-            pr_link = f"[{pr}]({repo}/pull/{pr[1:]})" if pr else "—"
-            commit_link = f"[`{c['sha'][:10]}`]({repo}/commit/{c['sha']})"
+            pr = _pr_ref(c["subject"])  # regex-constrained to "#<digits>" — safe by shape
+            pr_link = f"[{pr}]({_md_url(repo)}/pull/{pr[1:]})" if pr else "—"
+            commit_link = (f"[{_md_code_cell(c['sha'][:10])}]"
+                           f"({_md_url(repo)}/commit/{_md_url(c['sha'])})")
             lines.append(
                 f"| {i} | {commit_link} | {pr_link} | "
-                f"{', '.join(c['overlap']) or '—'} | {_md_cell(c['subject'])} |"
+                f"{_md_cell(', '.join(c['overlap'])) or '—'} | {_md_cell(c['subject'])} |"
             )
     else:
         lines.append("_No commit in the baseline..head range touched the regressed crates; "
@@ -648,6 +760,19 @@ def self_test() -> int:
     # ratio helper.
     assert _to_ratio_pct(15, 10) == 150.0
     assert _to_ratio_pct(10, 0) is None
+    assert _to_ratio_pct(1e308, 1e-308) is None   # finite/finite can still overflow to inf
+
+    # [FABLE-5 round 4] _finite_num — THE numeric admission gate for every consumed field:
+    # bool rejected, NaN/inf rejected, the float() conversion guarded (10**400 raises
+    # OverflowError — a drop, never a crash), strings/None rejected, real numbers pass.
+    assert _finite_num(5) == 5.0 and _finite_num(2.5) == 2.5 and _finite_num(0) == 0.0
+    assert _finite_num(True) is None and _finite_num(False) is None
+    assert _finite_num(float("nan")) is None and _finite_num(float("inf")) is None
+    assert _finite_num(float("-inf")) is None
+    assert _finite_num(10**400) is None           # OverflowError path — dropped, not raised
+    assert _finite_num("5") is None and _finite_num(None) is None and _finite_num([1]) is None
+    # junk dates sort as 0 instead of TypeError-ing the whole comparison build.
+    assert _entry_date({"date": "garbage"}) == 0.0 and _entry_date({"date": 7}) == 7.0
 
     # suite->crate map: longest-prefix + fallback.
     assert metric_crates("watdiv_sf1_q1_us") == ["sparq-engine", "sparq-core"]
@@ -671,9 +796,16 @@ def self_test() -> int:
             {"name": "q02_type_person_count_us", "current": 11.0, "previous": 10.0},      # 110% ok
             {"name": "new_metric_us", "current": 5.0},                                    # no prev -> skip
             {"name": "zero_prev_us", "current": 5.0, "previous": 0.0},                    # prev 0 -> skip
+            # [FABLE-5 round 4] malformed numerics: dropped with a warning, NEVER a crash —
+            # bool current, string current (the old float() call ValueError'd on this),
+            # out-of-float-range int previous (OverflowError), NaN current.
+            {"name": "bool_cur_us", "current": True, "previous": 10.0},
+            {"name": "str_cur_us", "current": "fast", "previous": 10.0},
+            {"name": "huge_prev_us", "current": 5.0, "previous": 10**400},
+            {"name": "nan_cur_us", "current": float("nan"), "previous": 10.0},
         ]), encoding="utf-8")
         rows = parse_comparison(str(cmp))
-        assert len(rows) == 3, [r["name"] for r in rows]   # two skipped
+        assert len(rows) == 3, [r["name"] for r in rows]   # 2 skipped + 4 malformed dropped
         part = zone_partition(rows, 175, 200)
         assert [r["name"] for r in part["hard"]] == ["watdiv_q1_us"]
         assert [r["name"] for r in part["soft"]] == ["geo_within_us"]
@@ -690,20 +822,29 @@ def self_test() -> int:
         results.write_text(json.dumps([
             {"name": "watdiv_q1_us", "value": 30.0, "unit": "us"},
             {"name": "new_only_us", "value": 5.0, "unit": "us"},   # no prev -> previous null
+            {"name": "bool_val_us", "value": True, "unit": "us"},  # bool value -> dropped
+            {"name": "huge_val_us", "value": 10**400},             # OverflowError -> dropped
         ]), encoding="utf-8")
         prev = Path(tdc) / "prev-data.js"
         prev.write_text(
             'window.BENCHMARK_DATA = ' + json.dumps({"entries": {"sparq engine": [
+                # a garbage date sorts as 0 (oldest) instead of TypeError-ing the sort.
+                {"date": "garbage", "commit": {"id": "c0"}, "benches": [
+                    {"name": "watdiv_q1_us", "value": 7.0, "unit": "us"}]},
                 {"date": 1, "commit": {"id": "c1"}, "benches": [
                     {"name": "watdiv_q1_us", "value": 8.0, "unit": "us"}]},
                 {"date": 2, "commit": {"id": "c2"}, "benches": [
-                    {"name": "watdiv_q1_us", "value": 10.0, "unit": "us"}]},  # most-recent wins
+                    {"name": "watdiv_q1_us", "value": 10.0, "unit": "us"},  # most-recent wins
+                    {"name": "bool_prev_us", "value": True},                # never a baseline
+                    {"name": "huge_prev_us", "value": 10**400}]},           # never a baseline
             ]}}) + ';\n', encoding="utf-8")
         cmp_rows = build_comparison(str(results), str(prev), "sparq engine")
         by = {r["name"]: r for r in cmp_rows}
         assert by["watdiv_q1_us"]["previous"] == 10.0, by["watdiv_q1_us"]  # newest prev value
         assert by["watdiv_q1_us"]["current"] == 30.0
         assert by["new_only_us"]["previous"] is None
+        # [FABLE-5 round 4] non-finite/bool/out-of-range values never survive admission.
+        assert "bool_val_us" not in by and "huge_val_us" not in by, sorted(by)
         # feeding it through parse_comparison drops the no-previous row + computes ratio.
         cmp_file = Path(tdc) / "cmp.json"
         cmp_file.write_text(json.dumps(cmp_rows), encoding="utf-8")
@@ -727,6 +868,15 @@ def self_test() -> int:
              "unit": "us",
              "note": "floor-exempt hard-band (>= 2x median-of-history; watch-only for the gate)"},
             {"name": "malformed_row", "current": "not-a-number"},   # dropped, never crashes
+            # [FABLE-5 round 4] numeric admission on EVERY consumed field: bool current
+            # (isinstance(int,float) passes it — must be rejected), NaN current and inf
+            # previous (json.loads emits both by default), and an out-of-float-range int
+            # ratio_pct whose float() raises OverflowError — all dropped with a counted
+            # warning, never a crash.
+            {"name": "bool_row", "current": True, "previous": 4.0, "ratio_pct": 300.0},
+            {"name": "nan_row", "current": float("nan"), "previous": 4.0, "ratio_pct": 300.0},
+            {"name": "inf_row", "current": 12.0, "previous": float("inf"), "ratio_pct": 300.0},
+            {"name": "huge_row", "current": 12.0, "previous": 4.0, "ratio_pct": 10**400},
         ]}), encoding="utf-8")
         extra = load_hardzone_soft_rows(str(hz))
         assert [r["name"] for r in extra] == ["tiny_query_us"], extra
@@ -753,6 +903,17 @@ def self_test() -> int:
         plain = build_flake_body("sparq-geo", soft_rows[1:], 175, 200, "http://run/4")
         assert "floor-exempt hard-band" not in plain
         assert "regressed into the **soft zone**" in plain and "two classes" not in plain
+        # [FABLE-5 round 4] three-way class sentence — the FLOOR-EXEMPT-ONLY case: every row
+        # tagged, no soft-band row, so the body must claim NEITHER "two classes" NOR the
+        # soft-zone framing; the all-floor-exempt sentence + explainer paragraph instead.
+        fe_only = build_flake_body("sparq-engine+sparq-core", extra, 175, 200, "http://run/7")
+        assert "Every row this run is a tagged floor-exempt hard-band hit" in fe_only
+        assert "two classes" not in fe_only
+        assert "regressed into the **soft zone**" not in fe_only
+        assert "median-of-history" in fe_only          # explainer paragraph still present
+        assert "tiny_query_us" in fe_only
+        stripped_fe = fe_only.replace("@-mentioned", "").replace("@-mention", "")
+        assert "@" not in stripped_fe, "floor-exempt-only body must not @-mention anyone"
         # fail-soft: no arg / absent file / unparsable file all -> [] (triage must not break).
         assert load_hardzone_soft_rows(None) == []
         assert load_hardzone_soft_rows(str(Path(td3) / "absent.json")) == []
@@ -788,6 +949,21 @@ def self_test() -> int:
         assert "\\`boom\\`" in erow, erow                  # note ` cannot open a code span
         assert "@someone" not in ebody                     # mention split by an HTML comment
         assert "@<!-- -->someone" in ebody
+
+        # [FABLE-5 round 4] defense-in-depth HTML layer: GitHub renders raw HTML in issue
+        # bodies, so a raw-HTML table breakout in ANY interpolated field must render with
+        # < > & escaped — in plain cells AND inside code spans (belt-and-braces) alike.
+        breakout = "</td></tr></table><h1>forged</h1>"
+        forged = [{"name": f"sneaky_us{breakout}", "current": 12.0, "previous": 4.0,
+                   "ratio_pct": 300.0, "unit": f"us{breakout}", "note": f"n{breakout}"}]
+        hbody = build_flake_body("sparq-engine+sparq-core", forged, 175, 200, "http://run/6")
+        assert "<h1>" not in hbody and "</td>" not in hbody and "</table>" not in hbody, hbody
+        assert "&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;&lt;h1&gt;forged&lt;/h1&gt;" in hbody, hbody
+        # entity-encoded @-mention smuggling is defused by escaping & first.
+        amp_note = [{"name": "amp_us", "current": 12.0, "previous": 4.0, "ratio_pct": 300.0,
+                     "unit": "us", "note": "ping &#64;someone"}]
+        abody = build_flake_body("sparq-engine+sparq-core", amp_note, 175, 200, "http://run/8")
+        assert "&#64;" not in abody and "&amp;#64;" in abody, abody
 
     # nightly attribution ranking: overlap with regressed crates ranks first.
     commits = [
@@ -826,6 +1002,16 @@ def self_test() -> int:
         # no naked @mention (the only '@' allowed is inside '@-mention' prose).
         stripped = rbody.replace("@-mentioned", "").replace("@-mention", "")
         assert "@" not in stripped, "regression body must not @-mention anyone"
+        # [FABLE-5 round 4] a forged-HTML commit SUBJECT renders escaped in the suspect
+        # table too (every interpolated field routes through the one sanitizer).
+        evil_commits = [{"sha": "f" * 40, "subject": f"pwn {breakout} (#104)", "author": "m",
+                         "paths": ["crates/sparq-geo/src/lib.rs"]}]
+        ranked_evil = rank_suspects({"sparq-geo"}, evil_commits)
+        rbody2 = build_regression_body(["sparq-geo"], part2["hard"], ranked_evil, 200,
+                                       "http://run/10", "https://github.com/o/r",
+                                       "d" * 40, "e" * 40)
+        assert "<h1>" not in rbody2 and "</table>" not in rbody2, rbody2
+        assert "&lt;h1&gt;forged&lt;/h1&gt;" in rbody2 and "#104" in rbody2, rbody2
 
     log("self-test OK")
     return 0

@@ -162,8 +162,20 @@ def log(msg: str) -> None:
 
 
 def _is_num(v) -> bool:
-    """A finite real number (bool excluded — json true/false must not pass as 1/0)."""
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    """A finite real number (bool excluded — json true/false must not pass as 1/0).
+
+    [FABLE-5 round 4] the float() probe is guarded: math.isfinite on an out-of-float-range
+    int (e.g. 10**400, which JSON happily round-trips) raises OverflowError, and a gate
+    CRASH is neither fail-open nor fail-closed — such a value is simply not a usable
+    measurement, so this reports False and evaluate() fails closed with the per-metric
+    record, exactly like NaN.
+    """
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
+    try:
+        return math.isfinite(float(v))
+    except (OverflowError, ValueError):
+        return False
 
 
 def parse_data_js(text: str) -> dict:
@@ -681,6 +693,19 @@ def self_test() -> int:
     check(code == 1 and len(rep["invalid"]) == 1, "non-numeric current value fails closed")
     code, rep = evaluate(_cur([("a", -1.0)]), history_values(series))
     check(code == 1 and len(rep["invalid"]) == 1, "negative current value fails closed")
+    #    [FABLE-5 round 4] bool and out-of-float-range int currents: isinstance(int,float)
+    #    admits bool, and math.isfinite(10**400) raises OverflowError — both must land in
+    #    the fail-closed invalid list, never pass as 1/0 and never crash the gate.
+    code, rep = evaluate(_cur([("a", True)]), history_values(series))
+    check(code == 1 and len(rep["invalid"]) == 1, "boolean current value fails closed")
+    code, rep = evaluate(_cur([("a", 10**400)]), history_values(series))
+    check(code == 1 and len(rep["invalid"]) == 1,
+          "out-of-float-range int current (10**400) fails closed — OverflowError guarded")
+    huge_hist = history_values(_series([[("a", 10.0)], [("a", 10**400)], [("a", 10.0)],
+                                        [("a", 10.0)]]))
+    code, rep = evaluate(_cur([("a", 10.0)]), huge_hist)
+    check(code == 1 and len(rep["invalid"]) == 1,
+          "out-of-float-range int inside the history window fails closed — no crash")
     bad_hist = history_values(_series([[("a", 10.0)], [("a", 10.0)],
                                        [("a", float("nan"))], [("a", 10.0)]]))
     code, rep = evaluate(_cur([("a", 10.0)]), bad_hist)
