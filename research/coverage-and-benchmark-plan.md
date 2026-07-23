@@ -44,10 +44,10 @@ paths (`*`/`+`/`?`/seq/alt/inv/negated), subqueries, ASK/CONSTRUCT/DESCRIBE, SER
 
 ### 1.3 Well-known suites — tiered (CI vs EC2/nightly)
 Recommended order: **WatDiv → SP2Bench → BSBM → DBPSB → LUBM**. [SONNET-4.6]
-FedBench and LargeRDFBench remain roadmap-only until both SPARQL `SERVICE` execution and
-source selection can support their multi-endpoint workloads reproducibly. The current
-`federation-fedshop` suite is a smaller, local FedShop-shaped comparison and does not
-claim coverage of either suite.
+FedBench and LargeRDFBench remain roadmap-only until dedicated adapters, local fixtures,
+and reproducible result oracles cover their multi-endpoint workloads. [SONNET-4.6] The
+current `federation-fedshop` suite is a smaller, local FedShop-shaped comparison and does
+not claim coverage of either suite.
 
 | suite | per-commit feasibility | data | queries |
 |---|---|---|---|
