@@ -197,8 +197,19 @@ enum NumData {
 impl NumData {
     /// The cached numeric value of a 1-based dictionary id, or `None` if it is not a
     /// (cached) numeric literal. The engine's O(1) numeric fast path.
-    #[inline]
+    // [FABLE-5] Keep the dominant dense-cache probe small enough that LTO reliably places it
+    // inside numeric gather loops; the larger storage-variant dispatch stays outlined.
+    #[inline(always)]
     fn lookup(&self, id: Id) -> Option<f64> {
+        if let NumData::Owned(values) = self {
+            let value = *values.get((id - 1) as usize)?;
+            return (!value.is_nan()).then_some(value);
+        }
+        self.lookup_non_owned(id)
+    }
+
+    #[inline(never)]
+    fn lookup_non_owned(&self, id: Id) -> Option<f64> {
         match self {
             NumData::Sparse(m) => m.get(&id).copied(),
             #[cfg(feature = "mmap")]
@@ -208,14 +219,7 @@ impl NumData {
                 // Beyond the mmap'd dense cache: a term appended after open.
                 None => extra.get(&id).copied(),
             },
-            NumData::Owned(v) => {
-                let v = *v.get((id - 1) as usize)?;
-                if v.is_nan() {
-                    None
-                } else {
-                    Some(v)
-                }
-            }
+            NumData::Owned(_) => unreachable!("Owned handled by lookup"),
             NumData::Forked { base, extra } => {
                 base.lookup(id).or_else(|| extra.get(&id).copied())
             }
