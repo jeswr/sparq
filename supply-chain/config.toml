@@ -357,6 +357,10 @@ notes = "advisory-fix release for RUSTSEC-2026-0204 (unsound epoch pinning); del
 version = "0.8.21"
 criteria = "safe-to-deploy"
 
+[[exemptions.crs-definitions]]
+version = "0.5.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.crypto-bigint]]
 version = "0.5.5"
 criteria = "safe-to-run"
