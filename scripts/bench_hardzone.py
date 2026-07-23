@@ -34,10 +34,28 @@
 #     DISAPPEAR_FAIL_FRACTION (30%) of the gateable metrics disappeared (suite breakage) — a
 #     plain rename or two must not red main.
 #   * HARD FAIL (exit 1) if any gated metric is >= HARD_RATIO (2.0x) its median (direction-adjusted).
+#   * NOISE FLOOR (UNIT-AWARE): only a metric whose UNIT is in the FLOOR_EXEMPT_UNITS
+#     allow-list ("us" micros, "milli" — each with a measured per-unit floor) AND whose
+#     median-of-window is below that unit's floor can never hard-fail the gate ALONE — at that
+#     scale the measured honest run-to-run bands EXCEED the 2.0x hard threshold (empirical
+#     bands at the FLOOR_EXEMPT_UNITS constant below). EVERY other unit — "s" seconds,
+#     "ns_per_byte", "ratio", `*_per_s` throughputs, deterministic units, and anything
+#     UNKNOWN — is NEVER floor-exempt regardless of magnitude (a stable 10x on a 0.4 s load
+#     IS a real regression; unknown units fail toward gated). Floor-exempt is NOT ungated: the
+#     metric still prints in the watch table flagged "under noise floor — watch only", still
+#     emits a ::warning at >= HARD_RATIO, the Store step's soft comparison comment still
+#     fires, and every floor-exempt hit at >= HARD_RATIO is written to the --report-out JSON,
+#     which the Soft-zone triage step (scripts/bench-triage.py --hardzone-report) merges into
+#     the rolling deduped `bench-flake` issue — the DURABLE trail: a persistent sub-floor
+#     regression rebases the median after a few accepted points, so the issue trail is the
+#     record that survives. Floor-exempt metrics are also EXCLUDED from every uniform-shift
+#     computation (breadth/uniformity/cap) — their degenerate small-integer ratios would
+#     distort all three. DETERMINISTIC metrics (bytes/count/gates/rows/...) are NEVER
+#     floor-exempt — a 2x move on a deterministic output is real at any scale.
 #   * UNIFORM-SHIFT EXEMPTION (exit 0 + loud warning + full table to stdout AND the job summary):
 #     the run is treated as a runner-environment scaling — and the hard zone waived — ONLY if ALL
-#     four conditions hold:
-#       (a) >= UNIFORM_FRACTION (50%) of compared metrics are >= WATCH_RATIO (1.75x) median;
+#     four conditions hold (computed over the GATED, i.e. non-floor-exempt, metrics):
+#       (a) >= UNIFORM_FRACTION (50%) of gated metrics are >= WATCH_RATIO (1.75x) median;
 #       (b) ratio uniformity: over the >= 1.75x metrics, stdev(ratio)/mean(ratio) <= 0.15 — a
 #           multiplicative environment scaling moves every wall-clock metric by ~the same factor,
 #           while a hot-path code regression does not hit unrelated metric families uniformly;
@@ -73,6 +91,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import math
 import os
@@ -94,14 +114,43 @@ HISTORY_WINDOW = 5      # median over the last up-to-5 published VALUES per metr
 MIN_HISTORY = 3         # a metric needs >= 3 history values to be gated at all
 DISAPPEAR_FAIL_FRACTION = 0.30  # > 30% of gateable metrics missing from results => suite breakage
 
+# NOISE FLOOR — UNIT-AWARE ALLOW-LIST of (unit, floor) pairs. A metric is floor-exempt
+# (watch-only, never a hard fail alone, excluded from the uniform-shift computations) ONLY if
+# its unit appears here AND its median-of-window is below that unit's floor. Floors are
+# justified PER-UNIT by the measured honest run-to-run bands in the published benchmark-data
+# history (2026-07-23 replay):
+#   * "us" (micros, floor 20.0): µs-scale timing metrics have HONEST noise bands exceeding the
+#     2.0x hard threshold. Within the honest pre-red-era oldest-10 points alone, max/min bands:
+#     sameas_size32_query_us 2.55x (values ~4-9µs), deeptax_d1000_query_us 3.25x (~4-13µs),
+#     lubm_q14_count_us 2.45x. Live replays: the honest head fails sameas_size32_query_us at
+#     2.14x (9 vs median 4.2); another honest entry fails deeptax_d1000_query_us at 2.00x
+#     (8 vs 4). Every observed false-fail metric has a median <~15 units; 20.0 covers them
+#     with margin while keeping every >= 20µs timing metric fully hard-gated.
+#   * "milli" (floor 20.0): the empirically-degenerate HNSW recall family —
+#     vectors_hnsw_recall_at10 honestly oscillates 1<->4 (4.0x band) at integer-milli
+#     resolution; its stable siblings (vectors_diskann_recall_at10 ~34,
+#     vectors_pq_recall_at10 ~22) sit ABOVE the floor and stay hard-gated.
+# EVERY unit NOT in this allow-list is NEVER floor-exempt regardless of magnitude. That
+# includes "s" seconds (nine published series — load_s, text_build_s, rdfs_infer_s, ... at
+# ~0.4-15 s — where a stable 10x IS a real regression; a raw magnitude-only floor wrongly
+# exempted all of them), "ns_per_byte", "ratio", the `*_per_s` throughputs, every
+# deterministic unit, and any UNKNOWN/absent unit: unknown units FAIL TOWARD GATED.
+# DETERMINISTIC metrics are never floor-exempt even in an allow-listed unit.
+FLOOR_EXEMPT_UNITS: dict[str, float] = {"us": 20.0, "milli": 20.0}
+
 # Deterministic (byte/count/structural) metric classification. UNIT-first because the live metric
 # NAMES are trappy: bsbm_query01_count_us / lubm_*_count_us are TIMING metrics whose names contain
 # "count", store_bytes_per_triple carries "bytes" mid-name, and rsp_persistentdict_triples_per_s
 # carries "triples" but is wall-clock throughput. The unit set below is the exact deterministic
 # unit vocabulary observed in the published benchmark-data history (bytes/count/chars/fixtures/
-# gates/milli/rows/triples); us / s / ns/byte / ratio / triples_per_s are the noisy families.
+# gates/rows/triples); us / s / ns/byte / ratio / triples_per_s / milli are the noisy families.
+# "milli" is NOISY, not deterministic: it carries the three vectors_*_recall_at10 series, and the
+# live history shows vectors_hnsw_recall_at10 honestly oscillating 1<->4 (randomized HNSW build
+# at degenerate integer-milli resolution) — a measurement, not a deterministic output. Its stable
+# siblings (diskann ~34, pq ~22) sit ABOVE the milli floor (FLOOR_EXEMPT_UNITS) and stay
+# hard-gated as noisy metrics.
 # The anchored-name fallback only fires when a row carries no unit at all.
-DETERMINISTIC_UNITS = {"bytes", "count", "chars", "fixtures", "gates", "milli", "rows", "triples"}
+DETERMINISTIC_UNITS = {"bytes", "count", "chars", "fixtures", "gates", "rows", "triples"}
 DETERMINISTIC_NAME_RE = re.compile(r"(_bytes|_count|_chars|_deficit|_gates|_rows|_triples)$")
 
 # Direction: `*_per_s` metrics store raw throughput => LARGER is better (ratio = median/current).
@@ -113,8 +162,20 @@ def log(msg: str) -> None:
 
 
 def _is_num(v) -> bool:
-    """A finite real number (bool excluded — json true/false must not pass as 1/0)."""
-    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+    """A finite real number (bool excluded — json true/false must not pass as 1/0).
+
+    [FABLE-5 round 4] the float() probe is guarded: math.isfinite on an out-of-float-range
+    int (e.g. 10**400, which JSON happily round-trips) raises OverflowError, and a gate
+    CRASH is neither fail-open nor fail-closed — such a value is simply not a usable
+    measurement, so this reports False and evaluate() fails closed with the per-metric
+    record, exactly like NaN.
+    """
+    if not isinstance(v, (int, float)) or isinstance(v, bool):
+        return False
+    try:
+        return math.isfinite(float(v))
+    except (OverflowError, ValueError):
+        return False
 
 
 def parse_data_js(text: str) -> dict:
@@ -152,14 +213,28 @@ def is_deterministic(name: str, unit: str) -> bool:
     return bool(DETERMINISTIC_NAME_RE.search(name))
 
 
+def _floor_desc() -> str:
+    """Compact rendering of the unit-aware floor allow-list for report/annotation text."""
+    return ", ".join(f"{u} < {f:g}" for u, f in sorted(FLOOR_EXEMPT_UNITS.items()))
+
+
 def evaluate(current: list[dict], hist: dict[str, list]) -> tuple[int, dict]:
     """Pure gate logic — unit-tested by --self-test. No I/O, no env access.
 
     `current` is this run's bench-results.json rows ({name,value,unit}); `hist` is the per-metric
     history value lists (see history_values). Returns (exit_code, report) where report carries:
-      compared      — number of ratio-gated metrics
-      rows          — [(name, cur, median, n, ratio, deterministic, larger_better)] all compared
-      watch / hard  — the >= WATCH_RATIO / >= HARD_RATIO subsets of rows
+      compared      — number of ratio-compared metrics (gated + floor-exempt)
+      rows          — [(name, cur, median, n, ratio, deterministic, larger_better, floor_exempt)]
+      watch         — the >= WATCH_RATIO subset of rows (floor-exempt rows included, flagged)
+      hard          — the >= HARD_RATIO subset of GATED rows (floor-exempt can never hard-fail)
+      floor_exempt  — rows whose UNIT is in FLOOR_EXEMPT_UNITS with median under that unit's
+                      floor (watch-only; unit-aware allow-list, unknown units stay gated)
+      floor_exempt_hard — floor-exempt rows at >= HARD_RATIO, in the soft-triage comparison
+                      shape ({name,current,previous,ratio_pct,unit,note}; previous = the
+                      MEDIAN-of-history) — the durable-trail payload written by --report-out
+                      and merged into the deduped bench-flake issue by bench-triage.py
+      gated_compared / gated_watch — counts over the GATED (non-floor-exempt) rows, backing
+                      the uniform-shift annotation (gated numerator/denominator)
       invalid       — [(name, reason)] fail-closed numeric errors (any entry => exit 1)
       ungated       — [(name, n)] metrics with 1..MIN_HISTORY-1 history values (listed, not gated)
       new           — metric names present in results with NO history at all
@@ -172,6 +247,7 @@ def evaluate(current: list[dict], hist: dict[str, list]) -> tuple[int, dict]:
     ungated: list[tuple[str, int]] = []
     new: list[str] = []
     stable_zero: list[str] = []
+    units: dict[str, str] = {}
 
     current_by_name: dict[str, dict] = {}
     for row in current:
@@ -228,23 +304,51 @@ def evaluate(current: list[dict], hist: dict[str, list]) -> tuple[int, dict]:
         else:
             # customSmallerIsBetter suite, EXCEPT `*_per_s` throughput (larger is better): invert.
             ratio = (med / val) if larger_better else (val / med)
-        rows.append((name, val, med, len(pts), ratio, det, larger_better))
+        # NOISE FLOOR — UNIT-AWARE: exempt ONLY allow-listed units ("us"/"milli") whose median
+        # sits under that unit's measured floor (see FLOOR_EXEMPT_UNITS). Every other unit —
+        # "s" seconds, "ns_per_byte", "ratio", `*_per_s`, unknown — is gated regardless of
+        # magnitude (unknown units fail toward gated), and deterministic metrics are NEVER
+        # exempt (belt-and-braces: no deterministic unit is allow-listed).
+        unit_floor = FLOOR_EXEMPT_UNITS.get(unit)
+        floor_exempt = (not det) and unit_floor is not None and med < unit_floor
+        rows.append((name, val, med, len(pts), ratio, det, larger_better, floor_exempt))
+        units[name] = unit
 
     compared = len(rows)
+    # Floor-exempt rows stay in the watch TABLE (flagged "under noise floor — watch only") but
+    # are excluded from the hard set AND from every uniform-shift computation below — their
+    # degenerate small-integer ratios would distort breadth (a), uniformity (b) and the cap (c)
+    # alike (the honest sub-floor history reaches 4.0x on pure noise).
+    gated_rows = [r for r in rows if not r[7]]
+    floor_exempt_rows = [r for r in rows if r[7]]
     watch = [r for r in rows if r[4] >= WATCH_RATIO]
-    hard = [r for r in rows if r[4] >= HARD_RATIO]
+    hard = [r for r in gated_rows if r[4] >= HARD_RATIO]
+    # DURABLE TRAIL — floor-exempt rows at/above HARD_RATIO never red the gate, and after a few
+    # accepted points the regressed median REBASES, erasing the gate-side evidence. Emit them in
+    # the soft-triage comparison-row shape (`previous` = the MEDIAN-of-history, tagged in `note`)
+    # so bench-triage.py --mode soft --hardzone-report merges them into the rolling deduped
+    # bench-flake issue (see --report-out).
+    floor_exempt_hard = [
+        {"name": r[0], "current": r[1], "previous": r[2],
+         "ratio_pct": round(r[4] * 100.0, 1), "unit": units.get(r[0], ""),
+         "note": f"floor-exempt hard-band (>= {HARD_RATIO:g}x median-of-history; "
+                 f"watch-only for the gate)"}
+        for r in floor_exempt_rows if r[4] >= HARD_RATIO
+    ]
 
-    # Uniform-shift exemption — ALL four conditions must hold (see header).
+    # Uniform-shift exemption — ALL four conditions must hold (see header), computed over the
+    # GATED (non-floor-exempt) rows only.
     uniform = False
     exemption_reasons: list[str] = []
-    if compared and watch:
-        frac = len(watch) / compared
+    gated_watch = [r for r in gated_rows if r[4] >= WATCH_RATIO]
+    if gated_rows and gated_watch:
+        frac = len(gated_watch) / len(gated_rows)
         cond_a = frac >= UNIFORM_FRACTION
         if not cond_a:
             exemption_reasons.append(
-                f"(a) breadth: only {len(watch)}/{compared} compared metrics >= "
-                f"{WATCH_RATIO}x (< {UNIFORM_FRACTION:.0%})")
-        ratios = [r[4] for r in watch]
+                f"(a) breadth: only {len(gated_watch)}/{len(gated_rows)} gated metrics >= "
+                f"{WATCH_RATIO}x (< {UNIFORM_FRACTION:.0%}; floor-exempt metrics excluded)")
+        ratios = [r[4] for r in gated_watch]
         if len(ratios) >= 2:
             cv = statistics.stdev(ratios) / statistics.mean(ratios)
             cond_b = cv <= UNIFORM_MAX_CV
@@ -256,13 +360,14 @@ def evaluate(current: list[dict], hist: dict[str, list]) -> tuple[int, dict]:
             cond_b = False
             exemption_reasons.append(
                 "(b) uniformity: a single shifted metric is not an environment-wide scaling")
-        worst = max(r[4] for r in rows)
+        worst = max(r[4] for r in gated_rows)
         cond_c = worst < UNIFORM_CAP_RATIO
         if not cond_c:
             exemption_reasons.append(
-                f"(c) cap: worst ratio {worst:.2f}x >= {UNIFORM_CAP_RATIO}x — a catastrophic "
-                f"regression never hides in the herd")
-        det_moved = [r for r in rows if r[5] and abs(r[4] - 1.0) > DET_TOLERANCE]
+                f"(c) cap: worst gated ratio {worst:.2f}x >= {UNIFORM_CAP_RATIO}x — a "
+                f"catastrophic regression never hides in the herd")
+        # Deterministic rows are never floor-exempt, so gated_rows covers every one of them.
+        det_moved = [r for r in gated_rows if r[5] and abs(r[4] - 1.0) > DET_TOLERANCE]
         cond_d = not det_moved
         if not cond_d:
             names = ", ".join(f"{r[0]} ({r[4]:.3f}x)" for r in det_moved[:5])
@@ -282,6 +387,8 @@ def evaluate(current: list[dict], hist: dict[str, list]) -> tuple[int, dict]:
 
     report = {
         "compared": compared, "rows": rows, "watch": watch, "hard": hard,
+        "floor_exempt": floor_exempt_rows, "floor_exempt_hard": floor_exempt_hard,
+        "gated_compared": len(gated_rows), "gated_watch": len(gated_watch),
         "invalid": invalid, "ungated": ungated, "new": new, "stable_zero": stable_zero,
         "disappeared": disappeared, "disappeared_frac": disappeared_frac,
         "uniform_shift": uniform, "exemption_reasons": exemption_reasons,
@@ -290,18 +397,21 @@ def evaluate(current: list[dict], hist: dict[str, list]) -> tuple[int, dict]:
 
 
 def _table_lines(entries: list[tuple], markdown: bool) -> list[str]:
-    """Render [(name, cur, med, n, ratio, det, larger_better)] rows as a table."""
+    """Render [(name, cur, med, n, ratio, det, larger_better, floor_exempt)] rows as a table."""
     out = []
     if markdown:
-        out.append("| metric | current | median (n) | ratio | direction |")
-        out.append("|---|---:|---:|---:|---|")
-        for name, cur, med, n, ratio, _det, lb in sorted(entries, key=lambda t: -t[4]):
+        out.append("| metric | current | median (n) | ratio | direction | gating |")
+        out.append("|---|---:|---:|---:|---|---|")
+        for name, cur, med, n, ratio, _det, lb, floor in sorted(entries, key=lambda t: -t[4]):
+            gating = "under noise floor — watch only" if floor else "hard-zone"
             out.append(f"| `{name}` | {cur:.6g} | {med:.6g} (n={n}) | {ratio:.2f}x |"
-                       f" {'larger-is-better' if lb else 'smaller-is-better'} |")
+                       f" {'larger-is-better' if lb else 'smaller-is-better'} | {gating} |")
     else:
         out.append(f"  {'metric':<60} {'current':>14} {'median(n)':>18} {'ratio':>7}")
-        for name, cur, med, n, ratio, _det, lb in sorted(entries, key=lambda t: -t[4]):
+        for name, cur, med, n, ratio, _det, lb, floor in sorted(entries, key=lambda t: -t[4]):
             suffix = "  [larger-is-better]" if lb else ""
+            if floor:
+                suffix += "  [under noise floor — watch only]"
             out.append(f"  {name:<60} {cur:>14.4g} {med:>13.4g}(n={n}) {ratio:>6.2f}x{suffix}")
     return out
 
@@ -311,13 +421,19 @@ def render_report(report: dict, markdown: bool) -> list[str]:
     h2 = "## " if markdown else ""
     lines: list[str] = [f"{h2}bench hard zone — median-of-history gate"]
     lines.append(f"{report['compared']} metrics compared; {len(report['watch'])} >= "
-                 f"{WATCH_RATIO}x median; {len(report['hard'])} >= {HARD_RATIO}x median.")
+                 f"{WATCH_RATIO}x median; {len(report['hard'])} gated >= {HARD_RATIO}x median.")
     if report["watch"]:
         lines.append("")
         lines.append(f"**Watch band (>= {WATCH_RATIO}x median):**" if markdown
                      else f"metrics >= {WATCH_RATIO}x their median of the last up-to-"
                           f"{HISTORY_WINDOW} published values:")
         lines.extend(_table_lines(report["watch"], markdown))
+    if report["floor_exempt"]:
+        floor_watch = sum(1 for r in report["floor_exempt"] if r[4] >= WATCH_RATIO)
+        lines.append(f"{len(report['floor_exempt'])} noisy metric(s) under their unit's noise "
+                     f"floor (allow-list: {_floor_desc()}): watch-only, never a hard fail alone "
+                     f"(measured honest bands at that scale exceed {HARD_RATIO}x); "
+                     f"{floor_watch} currently >= {WATCH_RATIO}x median (flagged in the table).")
     if report["invalid"]:
         lines.append("")
         lines.append("**Fail-closed numeric errors (each one fails the run):**" if markdown
@@ -348,10 +464,14 @@ def render_report(report: dict, markdown: bool) -> list[str]:
                      f"{', '.join(report['stable_zero'])}")
     if report["uniform_shift"]:
         lines.append("")
-        lines.append("UNIFORM-SHIFT EXEMPTION applied: all four conditions hold (breadth, ratio "
-                     "uniformity, no >= 4x outlier, deterministic metrics unmoved). This makes a "
-                     "masked code regression implausible — NOT impossible — hence this loud "
-                     "record instead of a quiet pass.")
+        # GATED-only cap wording, matching the ::warning: the exemption predicate excludes
+        # floor-exempt rows, and one of those may honestly sit at/above the cap — "no >= 4x
+        # outlier" (unqualified) would be FALSE on exactly such a run.
+        lines.append(f"UNIFORM-SHIFT EXEMPTION applied: all four conditions hold over the GATED "
+                     f"(non-floor-exempt) metrics — breadth, ratio uniformity, no GATED metric "
+                     f"reached {UNIFORM_CAP_RATIO:g}x median, deterministic metrics unmoved. "
+                     f"This makes a masked code regression implausible — NOT impossible — hence "
+                     f"this loud record instead of a quiet pass.")
     elif report["exemption_reasons"]:
         lines.append("")
         lines.append("uniform-shift exemption NOT applied:")
@@ -375,14 +495,19 @@ def emit_report(report: dict) -> None:
         with open(summary_path, "a", encoding="utf-8") as f:
             f.write("\n".join(render_report(report, markdown=True)) + "\n")
     if report["uniform_shift"]:
+        # GATED numbers only — the exemption predicate is computed over the gated
+        # (non-floor-exempt) rows, so the annotation must report exactly those counts:
+        # total-row numbers would misstate the breadth and "no metric reached 4x" would be
+        # FALSE whenever a floor-exempt row honestly spiked past the cap.
         print(f"::warning title=bench hard zone — uniform environment shift, not gating::"
-              f"{len(report['watch'])} of {report['compared']} compared metrics are >= "
-              f"{WATCH_RATIO}x their median-of-history simultaneously, the shifted ratios are "
-              f"uniform (stdev/mean <= {UNIFORM_MAX_CV}), no metric reached "
-              f"{UNIFORM_CAP_RATIO}x, and every deterministic metric is within "
-              f"{DET_TOLERANCE:.0%} of its median. Treated as a runner-environment scaling and "
-              f"NOT failing the run — a masked code regression is implausible under these four "
-              f"conditions, not impossible, so review the table in the job summary.")
+              f"{report['gated_watch']} of {report['gated_compared']} GATED metrics "
+              f"(floor-exempt excluded) are >= {WATCH_RATIO}x their median-of-history "
+              f"simultaneously, the shifted ratios are uniform (stdev/mean <= "
+              f"{UNIFORM_MAX_CV}), no GATED metric reached {UNIFORM_CAP_RATIO}x, and every "
+              f"deterministic metric is within {DET_TOLERANCE:.0%} of its median. Treated as "
+              f"a runner-environment scaling and NOT failing the run — a masked code "
+              f"regression is implausible under these four conditions, not impossible, so "
+              f"review the table in the job summary.")
     for name, reason in report["invalid"]:
         print(f"::error title=bench hard zone — invalid measurement::{name}: {reason}")
     if report["disappeared_frac"] > DISAPPEAR_FAIL_FRACTION:
@@ -391,8 +516,18 @@ def emit_report(report: dict) -> None:
               f"({report['disappeared_frac']:.0%}) are missing from this run's results — more "
               f"than {DISAPPEAR_FAIL_FRACTION:.0%} of the gated suite disappeared at once, "
               f"which is a bench-suite breakage, not a rename. See the disappeared list above.")
+    floor_hot = [r for r in report["floor_exempt"] if r[4] >= HARD_RATIO]
+    if floor_hot:
+        names = ", ".join(f"{r[0]} ({r[4]:.2f}x, median {r[2]:.6g})" for r in floor_hot)
+        print(f"::warning title=bench hard zone — under noise floor, watch only::{names} "
+              f"at/above {HARD_RATIO}x median, but the median is under the unit's noise floor "
+              f"(allow-list: {_floor_desc()}) — measured honest run-to-run bands at that scale "
+              f"exceed {HARD_RATIO}x, so this cannot fail the gate alone. It stays visible "
+              f"here, in the watch table, in the Store step's comparison comment, AND it is "
+              f"routed via the --report-out JSON into the soft-triage deduped bench-flake "
+              f"issue — the durable trail that survives the median rebasing.")
     if report["hard"] and not report["uniform_shift"]:
-        for name, cur, med, n, ratio, _det, lb in report["hard"]:
+        for name, cur, med, n, ratio, _det, lb, _floor in report["hard"]:
             direction = "median/current (larger-is-better)" if lb else "current/median"
             print(f"::error title=bench hard zone::{name} is {ratio:.2f}x its "
                   f"median-of-{n} history ({direction}: {cur:.6g} vs median {med:.6g}) — "
@@ -407,10 +542,16 @@ def build_parser() -> argparse.ArgumentParser:
                     help="previously-published data.js (prev-data.js; absent => warn + pass)")
     ap.add_argument("--suite", default="sparq engine",
                     help="data.js entries suite name (EXACT match; absent => warn + pass)")
+    ap.add_argument("--report-out", default=None,
+                    help="write a machine-readable report JSON here (carries the "
+                         "floor_exempt_hard rows bench-triage.py --hardzone-report merges "
+                         "into the deduped bench-flake issue — the durable trail for "
+                         "sub-floor watch-only regressions); optional")
     return ap
 
 
-def run_gate(results_path: str, prev_data_path: str, suite: str) -> int:
+def run_gate(results_path: str, prev_data_path: str, suite: str,
+             report_out: str | None = None) -> int:
     rp = Path(results_path)
     if not rp.exists():
         print(f"::error title=bench hard zone::results file {results_path} is absent — the "
@@ -458,6 +599,16 @@ def run_gate(results_path: str, prev_data_path: str, suite: str) -> int:
         return 0
     code, report = evaluate(current, history_values(series))
     emit_report(report)
+    if report_out:
+        # Written on pass AND fail (the step may fail on another metric while a floor-exempt
+        # row still needs its durable trail); the Soft-zone triage step runs `if: always()`.
+        Path(report_out).write_text(json.dumps(
+            {"suite": suite, "hard_ratio": HARD_RATIO,
+             "floor_exempt_units": FLOOR_EXEMPT_UNITS,
+             "floor_exempt_hard": report["floor_exempt_hard"]},
+            indent=2) + "\n", encoding="utf-8")
+        log(f"report JSON ({len(report['floor_exempt_hard'])} floor-exempt hard-band row(s)) "
+            f"written to {report_out}")
     if code == 0 and not report["hard"] and not report["uniform_shift"]:
         log(f"hard zone clean: {report['compared']} metrics compared against their "
             f"median-of-history; {len(report['watch'])} in the watch band, none failing.")
@@ -490,8 +641,10 @@ def self_test() -> int:
             failures.append(what)
             log(f"self-test FAIL: {what}")
 
-    # Baseline 5-commit history: four metrics stable at 10.0.
-    series = _series([[("a", 10.0), ("b", 10.0), ("c", 10.0), ("d", 10.0)]] * 5)
+    # Baseline 5-commit history: four metrics stable at 100.0 — deliberately ABOVE NOISE_FLOOR
+    # so these fixtures keep exercising the hard zone proper (sub-floor behavior is tested in
+    # its own section below).
+    series = _series([[("a", 100.0), ("b", 100.0), ("c", 100.0), ("d", 100.0)]] * 5)
 
     # 1. Median semantics: window trims to the last 5 VALUES per metric.
     hist = history_values(_series([[("m", 100.0)], [("m", 1.0)], [("m", 2.0)], [("m", 3.0)],
@@ -500,8 +653,9 @@ def self_test() -> int:
     check(statistics.median(hist["m"]) == 3.0, "median of 5-value history is the middle value")
     hist_even = history_values(_series([[("m", 1.0)], [("m", 2.0)], [("m", 3.0)], [("m", 8.0)]]))
     check(statistics.median(hist_even["m"]) == 2.5, "median of an even count averages the middle two")
-    code, rep = evaluate(_cur([("m", 15.0)]), history_values(
-        _series([[("m", 10.0)], [("m", 10.0)], [("m", 10.0)], [("m", 10.0)], [("m", 30.0)]])))
+    code, rep = evaluate(_cur([("m", 150.0)]), history_values(
+        _series([[("m", 100.0)], [("m", 100.0)], [("m", 100.0)], [("m", 100.0)],
+                 [("m", 300.0)]])))
     check(code == 0 and not rep["hard"],
           "single outlier history point does not move the median (1.5x vs median passes)")
 
@@ -509,16 +663,16 @@ def self_test() -> int:
     #    collects all 5 of its values (the old per-commit window judged it from 1 point).
     sparse_pts: list[list[tuple]] = []
     for i in range(10):
-        commit: list[tuple] = [("dense", 10.0)]
+        commit: list[tuple] = [("dense", 100.0)]
         if i % 2 == 0:
-            commit.append(("sparse", 10.0 + i))  # values 10,12,14,16,18 at commits 0,2,4,6,8
+            commit.append(("sparse", 100.0 + 10 * i))  # 100,120,140,160,180 at commits 0,2,4,6,8
         sparse_pts.append(commit)
     hist_sparse = history_values(_series(sparse_pts))
-    check(hist_sparse["sparse"] == [10.0, 12.0, 14.0, 16.0, 18.0],
+    check(hist_sparse["sparse"] == [100.0, 120.0, 140.0, 160.0, 180.0],
           "sparse metric collects its last 5 values across the FULL retained history")
-    code, rep = evaluate(_cur([("sparse", 15.0), ("dense", 10.0)]), hist_sparse)
+    code, rep = evaluate(_cur([("sparse", 150.0), ("dense", 100.0)]), hist_sparse)
     check(code == 0 and rep["compared"] == 2,
-          "sparse metric is gated against its own 5-value median (14.0), not a 1-point window")
+          "sparse metric is gated against its own 5-value median (140.0), not a 1-point window")
 
     # 3. Insufficient history (< 3 values) => listed as ungated, not silently gated or failed.
     two_pt = history_values(_series([[("young", 10.0)], [("young", 10.0)]]))
@@ -539,6 +693,19 @@ def self_test() -> int:
     check(code == 1 and len(rep["invalid"]) == 1, "non-numeric current value fails closed")
     code, rep = evaluate(_cur([("a", -1.0)]), history_values(series))
     check(code == 1 and len(rep["invalid"]) == 1, "negative current value fails closed")
+    #    [FABLE-5 round 4] bool and out-of-float-range int currents: isinstance(int,float)
+    #    admits bool, and math.isfinite(10**400) raises OverflowError — both must land in
+    #    the fail-closed invalid list, never pass as 1/0 and never crash the gate.
+    code, rep = evaluate(_cur([("a", True)]), history_values(series))
+    check(code == 1 and len(rep["invalid"]) == 1, "boolean current value fails closed")
+    code, rep = evaluate(_cur([("a", 10**400)]), history_values(series))
+    check(code == 1 and len(rep["invalid"]) == 1,
+          "out-of-float-range int current (10**400) fails closed — OverflowError guarded")
+    huge_hist = history_values(_series([[("a", 10.0)], [("a", 10**400)], [("a", 10.0)],
+                                        [("a", 10.0)]]))
+    code, rep = evaluate(_cur([("a", 10.0)]), huge_hist)
+    check(code == 1 and len(rep["invalid"]) == 1,
+          "out-of-float-range int inside the history window fails closed — no crash")
     bad_hist = history_values(_series([[("a", 10.0)], [("a", 10.0)],
                                        [("a", float("nan"))], [("a", 10.0)]]))
     code, rep = evaluate(_cur([("a", 10.0)]), bad_hist)
@@ -589,25 +756,25 @@ def self_test() -> int:
           "_per_s throughput doubling is an improvement (ratio 0.5) — passes")
 
     # 8. Single-metric hard fail: one metric >= 2.0x median, the rest normal => exit 1.
-    lone = _cur([("a", 21.0), ("b", 10.2), ("c", 9.9), ("d", 10.0)])
+    lone = _cur([("a", 210.0), ("b", 102.0), ("c", 99.0), ("d", 100.0)])
     code, rep = evaluate(lone, history_values(series))
     check(code == 1 and not rep["uniform_shift"] and len(rep["hard"]) == 1
           and rep["hard"][0][0] == "a",
           "single sustained >= 2.0x regression hard-fails (no uniform exemption)")
-    watch_only = _cur([("a", 18.0), ("b", 10.0), ("c", 10.0), ("d", 10.0)])
+    watch_only = _cur([("a", 180.0), ("b", 100.0), ("c", 100.0), ("d", 100.0)])
     code, rep = evaluate(watch_only, history_values(series))
     check(code == 0 and len(rep["watch"]) == 1 and not rep["hard"],
           "a lone watch-band metric (1.8x, < 2.0x) is reported but does not fail")
 
     # 9. Uniform-shift exemption POSITIVE: broad (3/4 >= 1.75x), uniform ratios (cv <= 0.15),
     #    nothing >= 4x, no deterministic metric moved => exempt, exit 0.
-    shifted = _cur([("a", 19.0), ("b", 19.5), ("c", 20.5), ("d", 11.0)])
+    shifted = _cur([("a", 190.0), ("b", 195.0), ("c", 205.0), ("d", 110.0)])
     code, rep = evaluate(shifted, history_values(series))
     check(code == 0 and rep["uniform_shift"] and len(rep["watch"]) == 3 and len(rep["hard"]) == 1,
           "uniform environment shift (3/4 >= 1.75x, uniform, capped, no det drift) is exempted")
 
     # 10. Uniformity rejection: broad shift with NON-uniform ratios => NOT exempt => fail.
-    ragged = _cur([("a", 18.0), ("b", 25.0), ("c", 35.0), ("d", 10.0)])  # ratios 1.8/2.5/3.5
+    ragged = _cur([("a", 180.0), ("b", 250.0), ("c", 350.0), ("d", 100.0)])  # 1.8/2.5/3.5
     code, rep = evaluate(ragged, history_values(series))
     check(code == 1 and not rep["uniform_shift"]
           and any("(b) uniformity" in r for r in rep["exemption_reasons"]),
@@ -617,7 +784,7 @@ def self_test() -> int:
     #     PASS — ratios 4.05/4.1/4.08/4.06 put 4/4 metrics in the watch band with CV ~0.005 and
     #     no deterministic metrics — so ONLY the cap (c) blocks the exemption. Removing the cap
     #     from the predicate would flip exactly this check red.
-    capped = _cur([("a", 40.5), ("b", 41.0), ("c", 40.8), ("d", 40.6)])
+    capped = _cur([("a", 405.0), ("b", 410.0), ("c", 408.0), ("d", 406.0)])
     code, rep = evaluate(capped, history_values(series))
     check(code == 1 and not rep["uniform_shift"] and len(rep["hard"]) == 4
           and len(rep["exemption_reasons"]) == 1
@@ -625,7 +792,7 @@ def self_test() -> int:
           "a >= 4x metric is the SOLE exemption blocker ((a)/(b)/(d) pass) — hard fail stands")
     #     Control: the SAME uniform shape kept below the cap (all ~1.9x) IS exempt — proving the
     #     cap is the discriminating condition, not breadth/uniformity/deterministic drift.
-    under_cap = _cur([("a", 19.0), ("b", 19.5), ("c", 19.2), ("d", 19.1)])
+    under_cap = _cur([("a", 190.0), ("b", 195.0), ("c", 192.0), ("d", 191.0)])
     code, rep = evaluate(under_cap, history_values(series))
     check(code == 0 and rep["uniform_shift"] and not rep["exemption_reasons"],
           "same uniform shape below the cap IS exempt — the 4x cap is the discriminating condition")
@@ -633,14 +800,14 @@ def self_test() -> int:
     # 12. Deterministic-metric drift blocks the exemption: same broad uniform timing shift, but a
     #     byte-count metric moved > 1% => NOT exempt => fail.
     det_series = [{"date": i, "benches": [
-        {"name": "a", "value": 10.0, "unit": "us"},
-        {"name": "b", "value": 10.0, "unit": "us"},
-        {"name": "c", "value": 10.0, "unit": "us"},
+        {"name": "a", "value": 100.0, "unit": "us"},
+        {"name": "b", "value": 100.0, "unit": "us"},
+        {"name": "c", "value": 100.0, "unit": "us"},
         {"name": "wasm_bundle_bytes", "value": 1000.0, "unit": "bytes"},
     ]} for i in range(5)]
-    det_cur = [{"name": "a", "value": 19.0, "unit": "us"},
-               {"name": "b", "value": 19.5, "unit": "us"},
-               {"name": "c", "value": 20.5, "unit": "us"},
+    det_cur = [{"name": "a", "value": 190.0, "unit": "us"},
+               {"name": "b", "value": 195.0, "unit": "us"},
+               {"name": "c", "value": 205.0, "unit": "us"},
                {"name": "wasm_bundle_bytes", "value": 1030.0, "unit": "bytes"}]  # +3%
     code, rep = evaluate(det_cur, history_values(det_series))
     check(code == 1 and not rep["uniform_shift"]
@@ -653,13 +820,135 @@ def self_test() -> int:
           "same shift with the deterministic metric unmoved IS exempt (control case)")
 
     # 13. Deterministic classification is unit-first (name traps are real: *_count_us is timing).
+    #     "milli" is NOISY: vectors_hnsw_recall_at10 honestly oscillates 1<->4 in the live
+    #     history (randomized HNSW build at degenerate resolution) — a measurement, not a count.
     check(is_deterministic("wasm_bundle_bytes", "bytes")
           and not is_deterministic("bsbm_query01_count_us", "us")
           and not is_deterministic("rsp_persistentdict_triples_per_s", "triples_per_s")
+          and not is_deterministic("vectors_hnsw_recall_at10", "milli")
           and is_deterministic("zk_compose_filter_f64_gates", ""),
           "deterministic classification: unit-first, anchored-name fallback only when unit absent")
 
-    # 14. Argument handling: the parser accepts the documented flags on a fixture path.
+    # 14. NOISE FLOOR — sub-floor "us" timing metric at 3.0x median: watch-only, NEVER a hard
+    #     fail alone (measured honest µs-scale bands exceed 2x — see FLOOR_EXEMPT_UNITS).
+    #     MUTATION CHECK vs check 15: zeroing the "us" floor in FLOOR_EXEMPT_UNITS (or removing
+    #     the entry) must turn exactly THIS red.
+    sub = history_values(_series([[("tiny_query_us", 4.0)]] * 5))
+    code, rep = evaluate(_cur([("tiny_query_us", 12.0)]), sub)
+    check(code == 0 and not rep["hard"] and len(rep["floor_exempt"]) == 1
+          and len(rep["watch"]) == 1 and rep["watch"][0][0] == "tiny_query_us",
+          "sub-floor timing metric at 3.0x median is watch-only — no hard fail")
+    check("under noise floor — watch only" in "\n".join(render_report(rep, markdown=False)),
+          "sub-floor watch row is flagged 'under noise floor — watch only' in the report")
+    #     DURABLE TRAIL: the same hit is emitted in floor_exempt_hard in the soft-triage
+    #     comparison shape (previous = median-of-history, tagged "floor-exempt hard-band") —
+    #     the exact contract bench-triage.py --hardzone-report consumes.
+    check(rep["floor_exempt_hard"] == [{
+              "name": "tiny_query_us", "current": 12.0, "previous": 4.0, "ratio_pct": 300.0,
+              "unit": "us",
+              "note": f"floor-exempt hard-band (>= {HARD_RATIO:g}x median-of-history; "
+                      f"watch-only for the gate)"}],
+          "floor-exempt hard-band hit is emitted in the soft-triage comparison shape")
+    code, rep = evaluate(_cur([("tiny_query_us", 7.0)]), sub)  # 1.75x: watch, below hard band
+    check(code == 0 and len(rep["floor_exempt"]) == 1 and not rep["floor_exempt_hard"],
+          "a sub-floor row below the hard band is NOT routed to the durable trail")
+
+    # 15. The floor is the DISCRIMINATOR: the same 3.0x shape with its median ABOVE the floor
+    #     hard-fails; and a sub-floor DETERMINISTIC metric at 2.0x still hard-fails (the floor
+    #     never applies to deterministic outputs — a 2x on a count/bytes/gates value is real).
+    over = history_values(_series([[("big_query_us", 40.0)]] * 5))
+    code, rep = evaluate(_cur([("big_query_us", 120.0)]), over)
+    check(code == 1 and len(rep["hard"]) == 1 and not rep["floor_exempt"],
+          "the same 3.0x shape with median above the floor hard-fails")
+    det_small = history_values([{"date": i, "benches": [
+        {"name": "solid_fixture_count", "value": 5.0, "unit": "count"}]} for i in range(5)])
+    code, rep = evaluate([{"name": "solid_fixture_count", "value": 10.0, "unit": "count"}],
+                         det_small)
+    check(code == 1 and len(rep["hard"]) == 1 and not rep["floor_exempt"],
+          "sub-floor DETERMINISTIC metric at 2.0x still hard-fails (floor never applies)")
+
+    # 15b. UNIT-AWARE floor ([FABLE-5] round-2 review): the floor is an explicit per-unit
+    #      allow-list ("us"/"milli"), NOT a raw magnitude comparison. The published history
+    #      carries nine `s`-unit series (load_s, text_build_s, rdfs_infer_s, ... at ~0.4-15 s)
+    #      whose RAW medians sit under 20 — a raw floor wrongly exempted ALL of them, so a
+    #      stable 0.4s -> 4s (10x) load regression would pass and rebase the median.
+    #      MUTATION CHECK: adding "s" to FLOOR_EXEMPT_UNITS must turn exactly THIS red.
+    load_hist = history_values(_series([[("load_s", 0.4)]] * 5))
+    code, rep = evaluate(_cur([("load_s", 4.0)], unit="s"), load_hist)
+    check(code == 1 and len(rep["hard"]) == 1 and rep["hard"][0][0] == "load_s"
+          and not rep["floor_exempt"],
+          "s-unit metric (median 0.4 s) at 10x median HARD-FAILS — seconds are never "
+          "floor-exempt regardless of magnitude")
+    #      Every other non-allow-listed unit with a small median stays gated too — including
+    #      an UNKNOWN unit and a missing unit (allow-list fails toward gated, never open).
+    for u in ("ns_per_byte", "ratio", "mystery_unit", ""):
+        code, rep = evaluate(_cur([("small_metric", 12.0)], unit=u),
+                             history_values(_series([[("small_metric", 4.0)]] * 5)))
+        check(code == 1 and len(rep["hard"]) == 1 and not rep["floor_exempt"],
+              f"unit {u!r} (median 4) at 3.0x median hard-fails — not in the floor allow-list")
+    #      "milli" IS allow-listed: the empirically-degenerate HNSW recall family (honest
+    #      1<->4 oscillation at integer-milli resolution) stays watch-only under the floor.
+    code, rep = evaluate(_cur([("vectors_hnsw_recall_at10", 4.0)], unit="milli"),
+                         history_values(_series([[("vectors_hnsw_recall_at10", 1.0)]] * 5)))
+    check(code == 0 and not rep["hard"] and len(rep["floor_exempt"]) == 1
+          and len(rep["floor_exempt_hard"]) == 1,
+          "milli-unit metric (median 1) at 4.0x is floor-exempt (HNSW recall family) and "
+          "routed to the durable trail")
+
+    # 16. Uniform-shift computations EXCLUDE floor-exempt metrics — degenerate sub-floor ratios
+    #     must distort neither breadth (a) nor uniformity (b) nor the cap (c).
+    mix_series = [{"date": i, "benches":
+                   [{"name": n, "value": 100.0, "unit": "us"} for n in "abcd"]
+                   + [{"name": f"tiny{j}_us", "value": 4.0, "unit": "us"} for j in range(5)]}
+                  for i in range(5)]
+    #     4 gated metrics uniformly ~2.05x (a hard fail without the exemption) + 5 sub-floor
+    #     metrics unmoved: excluding the floor-exempt rows, breadth is 4/4 => exempt (exit 0);
+    #     counting them, breadth would be 4/9 (44% < 50%) => condition (a) fails => exit 1.
+    mix_cur = _cur([("a", 210.0), ("b", 205.0), ("c", 208.0), ("d", 195.0)]
+                   + [(f"tiny{j}_us", 4.0) for j in range(5)])
+    code, rep = evaluate(mix_cur, history_values(mix_series))
+    check(code == 0 and rep["uniform_shift"] and len(rep["floor_exempt"]) == 5,
+          "breadth excludes floor-exempt metrics (4/4 gated uniform => exempt; 4/9 would fail)")
+    #     A sub-floor metric spiking 4.0x (the honest vectors_hnsw 1<->4 shape) must block
+    #     neither the cap (c) nor uniformity (b) for a genuine environment shift.
+    mix_cur2 = _cur([("a", 210.0), ("b", 205.0), ("c", 208.0), ("d", 195.0), ("tiny0_us", 16.0)]
+                    + [(f"tiny{j}_us", 4.0) for j in range(1, 5)])
+    code, rep = evaluate(mix_cur2, history_values(mix_series))
+    check(code == 0 and rep["uniform_shift"],
+          "a 4.0x sub-floor spike blocks neither the cap nor uniformity (excluded from both)")
+
+    # 16b. The uniform-shift ::warning reports GATED numerator/denominator + "no GATED metric
+    #      reached" wording — the predicate is gated-rows-only, so total-row numbers would
+    #      misstate the breadth (5/9 here) and "no metric reached 4x" would be FALSE (the
+    #      floor-exempt tiny0_us honestly sits at exactly 4.0x in this fixture).
+    buf = io.StringIO()
+    saved_summary = os.environ.pop("GITHUB_STEP_SUMMARY", None)  # keep the CI summary clean
+    try:
+        with tempfile.TemporaryDirectory(prefix="bench-hardzone-selftest-") as td16:
+            summary_file = Path(td16) / "step-summary.md"
+            os.environ["GITHUB_STEP_SUMMARY"] = str(summary_file)
+            with contextlib.redirect_stdout(buf):
+                emit_report(rep)
+            summary = summary_file.read_text(encoding="utf-8") if summary_file.exists() else ""
+    finally:
+        if saved_summary is not None:
+            os.environ["GITHUB_STEP_SUMMARY"] = saved_summary
+        else:
+            os.environ.pop("GITHUB_STEP_SUMMARY", None)
+    out = buf.getvalue()
+    check("4 of 4 GATED metrics" in out and "no GATED metric reached" in out,
+          "uniform-shift annotation reports the gated numerator/denominator + GATED wording")
+    check("5 of 9" not in out and "no metric reached" not in out,
+          "uniform-shift annotation no longer reports total-row numbers")
+    # [FABLE-5 round 3] the stdout report AND the step-summary prose use the gated-only cap
+    # wording too — the floor-exempt tiny0_us sits at exactly 4.0x in this fixture, so the
+    # old unqualified "no >= 4x outlier" claim would be FALSE in both sinks.
+    check("no GATED metric reached" in summary and summary.strip() != "",
+          "step-summary exemption prose claims the cap over GATED metrics only")
+    check(">= 4x outlier" not in out and ">= 4x outlier" not in summary,
+          "neither stdout nor the step summary carries the unqualified 4x-outlier claim")
+
+    # 17. Argument handling: the parser accepts the documented flags on a fixture path.
     ns = build_parser().parse_args(
         ["--results", "fixtures/bench-results.json", "--prev-data", "fixtures/prev-data.js",
          "--suite", "sparq engine"])
@@ -667,15 +956,15 @@ def self_test() -> int:
           and ns.prev_data == "fixtures/prev-data.js" and ns.suite == "sparq engine",
           "argument parser maps --results/--prev-data/--suite onto the expected namespace")
 
-    # 15. End-to-end run_gate over real files in a private tempdir: suite-name mismatch must
+    # 18. End-to-end run_gate over real files in a private tempdir: suite-name mismatch must
     #     warn + exit 0 (never fall back to another suite), exact match must gate.
     with tempfile.TemporaryDirectory(prefix="bench-hardzone-selftest-") as td:
         results = Path(td) / "bench-results.json"
-        results.write_text(json.dumps(_cur([("a", 21.0), ("b", 10.0), ("c", 10.0),
-                                            ("d", 10.0)])), encoding="utf-8")
+        results.write_text(json.dumps(_cur([("a", 210.0), ("b", 100.0), ("c", 100.0),
+                                            ("d", 100.0)])), encoding="utf-8")
         prev = Path(td) / "prev-data.js"
         payload = {"entries": {"sparq engine": _series(
-            [[("a", 10.0), ("b", 10.0), ("c", 10.0), ("d", 10.0)]] * 5)}}
+            [[("a", 100.0), ("b", 100.0), ("c", 100.0), ("d", 100.0)]] * 5)}}
         prev.write_text("window.BENCHMARK_DATA = " + json.dumps(payload) + ";",
                         encoding="utf-8")
         check(run_gate(str(results), str(prev), "some other suite") == 0,
@@ -690,6 +979,21 @@ def self_test() -> int:
         corrupt.write_text("window.BENCHMARK_DATA = {not json", encoding="utf-8")
         check(run_gate(str(results), str(corrupt), "sparq engine") == 1,
               "non-empty unparsable prev-data.js fails closed (corrupt published history)")
+        # --report-out: the run writes the machine-readable report JSON carrying the
+        # floor-exempt hard-band rows (the soft-triage durable-trail hand-off).
+        sub_results = Path(td) / "sub-results.json"
+        sub_results.write_text(json.dumps(_cur([("tiny_us", 12.0)])), encoding="utf-8")
+        sub_prev = Path(td) / "sub-prev.js"
+        sub_prev.write_text("window.BENCHMARK_DATA = " + json.dumps(
+            {"entries": {"sparq engine": _series([[("tiny_us", 4.0)]] * 5)}}) + ";",
+            encoding="utf-8")
+        report_path = Path(td) / "hardzone-report.json"
+        rc = run_gate(str(sub_results), str(sub_prev), "sparq engine", str(report_path))
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        check(rc == 0 and [r["name"] for r in payload["floor_exempt_hard"]] == ["tiny_us"]
+              and "floor-exempt hard-band" in payload["floor_exempt_hard"][0]["note"]
+              and payload["floor_exempt_hard"][0]["previous"] == 4.0,
+              "--report-out writes the floor-exempt hard-band rows for the soft-triage trail")
 
     if failures:
         log(f"self-test FAILED ({len(failures)}/{checks} checks): " + "; ".join(failures))
@@ -702,7 +1006,7 @@ def main(argv: list[str]) -> int:
     if "--self-test" in argv:
         return self_test()
     args = build_parser().parse_args(argv)
-    return run_gate(args.results, args.prev_data, args.suite)
+    return run_gate(args.results, args.prev_data, args.suite, args.report_out)
 
 
 if __name__ == "__main__":
