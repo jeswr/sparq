@@ -98,6 +98,7 @@
 //! **sq-py8h.5**. Here the endpoint dedup is over the DISCLOSED endpoint terms,
 //! which is exactly the headline case (the endpoints are the disclosed result).
 
+use crate::backend::{OperatorClass, SecurityDescriptor};
 use crate::compare::secure_equal_to_bit;
 use crate::field::Fp;
 use crate::oblivious_join::{
@@ -107,6 +108,19 @@ use crate::partial::{MpcError, PartialResult};
 use crate::shamir::{self, ShamirBackend, ShamirDealer, Share};
 use oxrdf::{Term, Variable};
 use std::collections::BTreeMap;
+
+/// The typed three-axis [`SecurityDescriptor`] of the hidden-intermediate chain at
+/// the backend's `(n, t)`. The chain reduces to the SAME primitives as the
+/// semi-honest comparison chain — each hop is a [`secure_equal_to_bit`], and the
+/// AND/OR folds route through `mul_shares_raw` + `degree_reduce` with no
+/// in-protocol re-sharing integrity check — so its honest classification is the
+/// [`OperatorClass::Comparison`] descriptor of the crate's own backend
+/// (honest-majority, semi-honest-only for the whole chain), to which this
+/// delegates. This is the implementation-owned source the `secprop-annotations`
+/// graph's adversary-drift test pins the RDF annotations to.
+pub fn security_descriptor(backend: &ShamirBackend) -> SecurityDescriptor {
+    backend.operator_descriptor(OperatorClass::Comparison)
+}
 
 /// Reserved subject-end / object-end variable names the operator projects onto.
 const SUBJECT_VAR: &str = "__pp_a";

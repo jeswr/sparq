@@ -29,6 +29,20 @@ fn nn(iri: &str) -> NamedNode {
     NamedNode::new(iri).unwrap()
 }
 
+/// The typed descriptor delegates to the Comparison-class descriptor of the
+/// crate's own backend — honest-majority, SEMI-HONEST for the whole chain (the
+/// AND/OR folds route through unauthenticated re-sharings), never Malicious.
+#[test]
+fn security_descriptor_is_the_semi_honest_comparison_descriptor() {
+    let backend = ShamirBackend::new(3).unwrap();
+    let desc = security_descriptor(&backend);
+    assert_eq!(
+        desc,
+        backend.operator_descriptor(crate::backend::OperatorClass::Comparison),
+    );
+    assert_eq!(desc.adversary, crate::backend::AdversaryModel::SemiHonest);
+}
+
 fn iri_term(iri: &str) -> Term {
     Term::NamedNode(nn(iri))
 }

@@ -5,8 +5,9 @@
 # security-properties ontology. Written while Fable unavailable; flag for
 # re-review when Fable returns.
 #
-# WHAT THIS IS. The machine-readable, honest encoding of "sparq-mpc is
-# semi-honest only" — the §5c analogue of the sparq-zk per-method graph
+# WHAT THIS IS. The machine-readable, honest encoding of sparq-mpc's MIXED
+# semi-honest / malicious-with-abort (all honest-majority) protocol estate —
+# the §5c analogue of the sparq-zk per-method graph
 # (crates/sparq-zk/ontologies/secprop-methods.ttl, Phase 3). Each sparq-mpc
 # PROTOCOL is a subject under the minted `mpc:` namespace
 # (https://sparq.dev/ns/mpc#, mirroring `zk:`), and each `secx:hasProperty` is a
@@ -39,14 +40,21 @@
 #      construction).
 #   2. The SEMI-HONEST protocols additionally carry `secx:assumption
 #      secx:SemiHonest`. These are the ones whose `SecurityDescriptor.adversary`
-#      is `AdversaryModel::SemiHonest` — pinned to the crate's own per-operator
-#      descriptor by the `semi_honest_annotation_matches_backend_descriptor` test
-#      in crates/sparq-mpc/src/secprop.rs so the annotation cannot silently
-#      over-claim malicious security. The MALICIOUS-with-abort twins
+#      is `AdversaryModel::SemiHonest`. The MALICIOUS-with-abort twins
 #      (`crate::auth_compare`, `crate::auth_disclose`) do NOT carry
-#      `secx:SemiHonest`: a "requires malicious-security" preference forbids
-#      `secx:SemiHonest` and excludes the semi-honest set while ADMITTING the
-#      malicious twins — the honest binary the assumption axis encodes.
+#      `secx:SemiHonest` — a CLOSED-WORLD claim (design §5c): the ABSENCE of the
+#      assumption asserts the protocol does not rest on it, backed by the
+#      module's own typed `security_descriptor()` reporting
+#      `AdversaryModel::Malicious`. BOTH sides are pinned, exhaustively and in
+#      both directions, by the
+#      `adversary_annotations_match_implementation_descriptors_exhaustively`
+#      test in crates/sparq-mpc/src/secprop.rs (every protocol IRI classified
+#      from an implementation-owned descriptor; exact set equality against the
+#      RDF `secx:SemiHonest` / assumption-absent sets), so neither an annotation
+#      nor a descriptor can silently drift or over-claim malicious security. A
+#      "requires malicious-security" preference forbids `secx:SemiHonest` and
+#      excludes the semi-honest set while ADMITTING the malicious twins — the
+#      honest binary the assumption axis encodes.
 #
 # COMPLETENESS. Every protocol IRI the Rust `secprop` module declares
 # (`MPC_PROTOCOL_IRIS`) has an annotation block here — the machine-readable
@@ -109,8 +117,10 @@ mpc:secure-comparison-v1
 # property-path chain (crate::hidden_path): each hop is a never-opened
 # secret-shared `secure_equal_to_bit`, the `k` hops AND-chained via
 # `mul_shares_raw` + `degree_reduce`. It reduces to the same semi-honest
-# secret-shared equality primitive as the hidden-value join, so it is
-# honest-majority semi-honest-only (module docs).
+# secret-shared equality primitive as the comparison chain, so it is
+# honest-majority semi-honest-only (its typed
+# `hidden_path::security_descriptor()` delegates to the Comparison-class
+# descriptor).
 mpc:hidden-property-path-v1
   rdfs:comment "Honest-majority hidden-intermediate exactly-k property-path chain over secret-shared equality. Semi-honest adversary model (reduces to the crate::compare / EqualityJoin equality primitive)."@en-GB ;
   secx:hasProperty

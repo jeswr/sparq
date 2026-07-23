@@ -633,10 +633,43 @@ which the gate records in its decision provenance.
 
 ### 5c. MPC methods (ties to sparq-mpc)
 
-`sparq-mpc` protocols are annotated the same way, with `secx:assumption
-secx:HonestMajority` and `secx:SemiHonest` — so a preference requiring malicious-
-security or dishonest-majority mechanically excludes them. This is the honest encoding of
-"semi-honest only" in the property data, not just in prose.
+`sparq-mpc` protocols are annotated the same way, on the `secx:assumption` axis.
+The estate is **mixed** — *(amended [FABLE-5] with the Phase-6 annotation graph
+`crates/sparq-mpc/ontologies/secprop-mpc.ttl`; the original §5c predated the
+malicious-with-abort twins `auth_compare`/`auth_disclose` (sq-ka8m/sq-6fv7) and
+described a uniformly semi-honest estate that a malicious-security preference
+excluded wholesale)*:
+
+- **Every** protocol carries `secx:assumption secx:HonestMajority` — v1 has no
+  dishonest-majority backend, so a preference requiring dishonest-majority
+  tolerance (forbid `secx:HonestMajority`) mechanically excludes the whole estate.
+- The **semi-honest** protocols additionally carry `secx:SemiHonest`; the
+  **malicious-with-abort** twins (`mpc:auth-comparison-v1`, `mpc:auth-disclose-v1`
+  — IT-MAC-carried chains, MAC-checked before any open) deliberately do **not**.
+  A preference requiring malicious security (forbid `secx:SemiHonest`) therefore
+  excludes the semi-honest set while **admitting** the malicious twins.
+- **Closed-world reading of assumption absence.** Within this graph, the *absence*
+  of `secx:SemiHonest` on a protocol block is itself a load-bearing claim — "this
+  protocol does not rest on the semi-honest assumption" — not an unknown. That is
+  only honest because the graph's coverage is total (every declared protocol IRI
+  has exactly one block, and only declared IRIs are annotated) and each side of
+  the partition is test-pinned (below); an open-world reading would let a merely
+  *unannotated* protocol slip past a malicious-security preference.
+- **Evidence bar for admission under a malicious-security preference.** A protocol
+  may omit `secx:SemiHonest` (and hence be admitted) only when **(i)** its
+  implementation exports a typed `SecurityDescriptor` reporting
+  `AdversaryModel::Malicious` (the module-owned `security_descriptor()` fns /
+  `ShamirBackend::operator_descriptor`), and **(ii)** the exhaustive
+  two-directional drift test
+  (`adversary_annotations_match_implementation_descriptors_exhaustively`,
+  `crates/sparq-mpc/src/secprop.rs`) pins exact set equality between the
+  implementation classification and the RDF assumption sets over *every* declared
+  protocol IRI. Even then the claim stays `secx:Claimed` +
+  `secx:ExternalSignOffPending` — an admitted malicious twin is admitted on an
+  **unaudited** basis while sq-qhy4 is open, exactly the §5b caveat.
+
+This is the honest encoding of the crate's real (mixed, honest-majority) security
+posture in the property data, not just in prose.
 
 ---
 

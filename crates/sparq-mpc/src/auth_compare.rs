@@ -55,10 +55,30 @@
 //! and only after the MAC-check passes. `[OPUS-4.8]`
 
 use crate::authenticated::{auth_add, auth_add_constant, auth_scale, auth_sub, AuthenticatedShare};
+use crate::backend::{
+    AbortKind, AdversaryModel, CorruptionThreshold, OutputGuarantee, PublicVerifiability,
+    SecurityDescriptor,
+};
 use crate::compare::COMPARE_BITS;
 use crate::field::Fp;
 use crate::partial::MpcError;
 use crate::shamir::{MacSession, ShamirBackend};
+
+/// The typed three-axis [`SecurityDescriptor`] of this module's protocols at the
+/// backend's `(n, t)` — the machine-readable form of the "Security tier" module
+/// contract above: AXIS-1 [`AdversaryModel::Malicious`] (the IT-MAC upgrade),
+/// AXIS-2 [`OutputGuarantee::Abort`]([`AbortKind::Unanimous`]) (detect-and-abort,
+/// NOT identifiable abort, NOT GOD), AXIS-3 the backend's honest-majority
+/// threshold, no public verifiability. This is the implementation-owned source the
+/// `secprop-annotations` graph's adversary-drift test pins the RDF annotations to.
+pub fn security_descriptor(backend: &ShamirBackend) -> SecurityDescriptor {
+    SecurityDescriptor {
+        adversary: AdversaryModel::Malicious,
+        output_guarantee: OutputGuarantee::Abort(AbortKind::Unanimous),
+        threshold: CorruptionThreshold::from_n_t(backend.parties(), backend.threshold()),
+        public_verifiability: PublicVerifiability(false),
+    }
+}
 
 /// `n >= 2t+1` is required so each multiplication's degree reduction exists. Mirror
 /// [`crate::compare`]'s fail-closed check, with the malicious-mode message.
@@ -307,6 +327,24 @@ mod tests {
     use super::*;
     use crate::field::P;
     use crate::shamir::{ShamirBackend, Share};
+
+    /// The typed descriptor states EXACTLY the module contract's tier — AXIS-1
+    /// `Malicious`, AXIS-2 `Abort(Unanimous)` (not IA, not GOD), AXIS-3 the
+    /// backend's honest-majority threshold, no public verifiability — at the
+    /// minimal `n = 2t+1` where RS redundancy is zero.
+    #[test]
+    fn security_descriptor_reports_malicious_with_unanimous_abort() {
+        let backend = ShamirBackend::new(3).unwrap();
+        let desc = security_descriptor(&backend);
+        assert_eq!(desc.adversary, AdversaryModel::Malicious);
+        assert_eq!(desc.output_guarantee, OutputGuarantee::Abort(AbortKind::Unanimous));
+        assert_eq!(
+            desc.threshold,
+            CorruptionThreshold::from_n_t(backend.parties(), backend.threshold()),
+        );
+        assert!(desc.threshold.is_honest_majority());
+        assert_eq!(desc.public_verifiability, PublicVerifiability(false));
+    }
 
     /// THE differential (both-secret): the MAC-checked verdict equals the plaintext
     /// `a > b` across a spread of values incl. edges, several honest-majority party

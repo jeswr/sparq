@@ -1,6 +1,7 @@
 //! # `secprop` — the per-protocol security-properties annotation graph (Phase 6)
 //!
-//! The **machine-readable, honest encoding of "sparq-mpc is semi-honest only"** —
+//! The **machine-readable, honest encoding of sparq-mpc's mixed semi-honest /
+//! malicious-with-abort (all honest-majority) estate** —
 //! the §5c analogue of the sparq-zk per-method annotation graph (Phase 3,
 //! `crates/sparq-zk/src/secprop.rs`). A **static annotation graph**
 //! (`ontologies/secprop-mpc.ttl`) keyed on the minted `mpc:` protocol IRIs,
@@ -48,10 +49,15 @@
 //!    protocol carries the [`SECX_HONEST_MAJORITY`] assumption — the whole v1
 //!    estate is honest-majority.
 //!
-//! And the annotation is **pinned to the crate's own `SecurityDescriptor`** by
-//! the `semi_honest_annotation_matches_backend_descriptor` test, so the
-//! `secx:SemiHonest` set cannot silently drift from
-//! [`crate::shamir::ShamirBackend::operator_descriptor`].
+//! And the annotation set is **pinned to the crate's own typed descriptors** by
+//! the `adversary_annotations_match_implementation_descriptors_exhaustively`
+//! test: a single exhaustive mapping classifies EVERY [`MPC_PROTOCOL_IRIS`]
+//! protocol from an implementation-owned descriptor
+//! ([`crate::shamir::ShamirBackend::operator_descriptor`], or the per-module
+//! `security_descriptor` fns of [`crate::hidden_path`], [`crate::auth_compare`]
+//! and [`crate::auth_disclose`]), and exact set equality is asserted in BOTH
+//! directions between that classification and the RDF `secx:SemiHonest` /
+//! assumption-absent sets — so neither side can silently drift.
 //!
 //! ## Opt-in by construction
 //!
@@ -150,9 +156,10 @@ pub const MPC_PROTOCOL_IRIS: &[&str] = &[
     MPC_AUTH_DISCLOSE_V1,
 ];
 
-/// The **semi-honest** protocols — those that carry `secx:SemiHonest`. Their
-/// adversary model is pinned to the crate's own `SecurityDescriptor` by
-/// `semi_honest_annotation_matches_backend_descriptor`.
+/// The **semi-honest** protocols — those that carry `secx:SemiHonest`. This set
+/// (and its [`MALICIOUS_PROTOCOL_IRIS`] complement) is pinned, exhaustively and
+/// in both directions, to the crate's own typed descriptors by
+/// `adversary_annotations_match_implementation_descriptors_exhaustively`.
 pub const SEMI_HONEST_PROTOCOL_IRIS: &[&str] = &[
     MPC_SECURE_AGGREGATE_V1,
     MPC_HIDDEN_VALUE_JOIN_V1,
@@ -624,37 +631,125 @@ mod tests {
         );
     }
 
-    /// **The honesty keystone — pin the `secx:SemiHonest` annotation to the
-    /// crate's OWN `SecurityDescriptor`.** For each semi-honest protocol that
-    /// maps to an [`OperatorClass`], the Shamir backend's per-operator descriptor
-    /// must actually report `AdversaryModel::SemiHonest`. This makes the graph a
-    /// read of the code, not an independent claim that could silently over-claim
-    /// malicious security. `n = 3` (`t = 1`, the honest-majority `n = 2t+1`) is
+    /// **The honesty keystone — pin the WHOLE adversary annotation set to the
+    /// crate's OWN typed descriptors, exhaustively and in BOTH directions.**
+    /// A single protocol → implementation-adversary mapping covers EVERY declared
+    /// [`MPC_PROTOCOL_IRIS`] IRI (panicking on an unmapped one, so a newly
+    /// declared protocol fails here until it is classified from an
+    /// implementation-owned descriptor). The test then asserts exact set equality
+    /// between (a) the implementation's semi-honest set, the RDF `secx:SemiHonest`
+    /// set, and [`SEMI_HONEST_PROTOCOL_IRIS`]; and (b) the implementation's
+    /// malicious set, the RDF non-`SemiHonest` complement, and
+    /// [`MALICIOUS_PROTOCOL_IRIS`] — so REMOVING `secx:SemiHonest` from any
+    /// semi-honest block, ADDING it to a malicious twin, annotating a protocol the
+    /// implementation does not classify, or a descriptor drifting away from its
+    /// annotation ALL fail. `n = 3` (`t = 1`, the honest-majority `n = 2t+1`) is
     /// the worst case: the degree-`2t` equality open has zero RS redundancy there.
     #[test]
-    fn semi_honest_annotation_matches_backend_descriptor() {
+    fn adversary_annotations_match_implementation_descriptors_exhaustively() {
         let ann = parse_annotations();
         let backend = ShamirBackend::new(3).expect("n=3 honest-majority backend");
-        let mapped = [
-            (MPC_SECURE_AGGREGATE_V1, OperatorClass::LinearAggregate),
-            (MPC_HIDDEN_VALUE_JOIN_V1, OperatorClass::EqualityJoin),
-            (MPC_SECURE_COMPARISON_V1, OperatorClass::Comparison),
-        ];
-        for (iri, op) in mapped {
-            let adversary = backend.operator_descriptor(op).adversary;
-            assert_eq!(
-                adversary,
-                AdversaryModel::SemiHonest,
-                "{:?} descriptor is not SemiHonest — the {} annotation would over-claim",
-                op,
-                iri,
-            );
-            assert!(
-                ann[iri].requires_assumption(SECX_SEMI_HONEST),
-                "{} maps to a SemiHonest operator but does not carry secx:SemiHonest",
-                iri,
-            );
+
+        // The single exhaustive mapping. Every arm reads a typed descriptor the
+        // IMPLEMENTATION owns (`operator_descriptor` / the per-module
+        // `security_descriptor` fns) — never this module's own constants — so the
+        // graph stays a read of the code, not an independent claim.
+        let implementation_adversary = |iri: &str| -> AdversaryModel {
+            match iri {
+                MPC_SECURE_AGGREGATE_V1 => {
+                    backend
+                        .operator_descriptor(OperatorClass::LinearAggregate)
+                        .adversary
+                }
+                MPC_HIDDEN_VALUE_JOIN_V1 => {
+                    backend
+                        .operator_descriptor(OperatorClass::EqualityJoin)
+                        .adversary
+                }
+                MPC_SECURE_COMPARISON_V1 => {
+                    backend.operator_descriptor(OperatorClass::Comparison).adversary
+                }
+                MPC_HIDDEN_PROPERTY_PATH_V1 => {
+                    crate::hidden_path::security_descriptor(&backend).adversary
+                }
+                MPC_AUTH_COMPARISON_V1 => {
+                    crate::auth_compare::security_descriptor(&backend).adversary
+                }
+                MPC_AUTH_DISCLOSE_V1 => {
+                    crate::auth_disclose::security_descriptor(&backend).adversary
+                }
+                other => panic!(
+                    "protocol {} has no implementation-adversary mapping — classify \
+                     it here from a typed implementation descriptor before (or when) \
+                     annotating it",
+                    other,
+                ),
+            }
+        };
+
+        // Partition EVERY declared protocol by the adversary its implementation
+        // reports. Anything not SemiHonest/Malicious is unclassified — fail.
+        let mut impl_semi: BTreeSet<&str> = BTreeSet::new();
+        let mut impl_malicious: BTreeSet<&str> = BTreeSet::new();
+        for &iri in MPC_PROTOCOL_IRIS {
+            match implementation_adversary(iri) {
+                AdversaryModel::SemiHonest => {
+                    impl_semi.insert(iri);
+                }
+                AdversaryModel::Malicious => {
+                    impl_malicious.insert(iri);
+                }
+                other => panic!(
+                    "{} reports adversary {:?}, which this graph does not encode",
+                    iri, other,
+                ),
+            }
         }
+
+        // The graph annotates EXACTLY the declared protocol set — a block for an
+        // undeclared (hence unclassified) protocol fails here, closing the "newly
+        // added/omitted protocol" hole in both directions.
+        let annotated: BTreeSet<&str> = ann.keys().map(String::as_str).collect();
+        let declared: BTreeSet<&str> = MPC_PROTOCOL_IRIS.iter().copied().collect();
+        assert_eq!(
+            annotated, declared,
+            "the annotation subjects must be exactly the declared protocol set",
+        );
+
+        // Exact set equality, both directions: the RDF `secx:SemiHonest` set IS
+        // the implementation's semi-honest set (removing the assumption from any
+        // semi-honest block, or adding it to a malicious twin, fails here) …
+        let rdf_semi: BTreeSet<&str> = ann
+            .values()
+            .filter(|p| p.requires_assumption(SECX_SEMI_HONEST))
+            .map(|p| p.protocol.as_str())
+            .collect();
+        assert_eq!(
+            rdf_semi, impl_semi,
+            "the RDF secx:SemiHonest set must equal the implementation's \
+             semi-honest set exactly",
+        );
+
+        // … and the RDF complement (assumption ABSENT — the closed-world malicious
+        // claim) is backed by a descriptor actually reporting Malicious.
+        let rdf_not_semi: BTreeSet<&str> = declared.difference(&rdf_semi).copied().collect();
+        assert_eq!(
+            rdf_not_semi, impl_malicious,
+            "every block omitting secx:SemiHonest must be backed by an \
+             implementation descriptor reporting AdversaryModel::Malicious",
+        );
+
+        // The module's declared constant sets agree with both sides too.
+        let const_semi: BTreeSet<&str> = SEMI_HONEST_PROTOCOL_IRIS.iter().copied().collect();
+        let const_malicious: BTreeSet<&str> = MALICIOUS_PROTOCOL_IRIS.iter().copied().collect();
+        assert_eq!(
+            impl_semi, const_semi,
+            "SEMI_HONEST_PROTOCOL_IRIS drifted from the implementation descriptors",
+        );
+        assert_eq!(
+            impl_malicious, const_malicious,
+            "MALICIOUS_PROTOCOL_IRIS drifted from the implementation descriptors",
+        );
     }
 
     /// A claim can rest on more than one assumption — the parser collects every

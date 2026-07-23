@@ -90,9 +90,21 @@ use crate::authenticated::{auth_add, auth_add_constant, auth_scale, auth_sub, Au
 use crate::compare::{
     check_party_count, DECOMP_MASK_BITS, DECOMP_VALUE_BITS, DECOMP_VALUE_MAX_EXCLUSIVE,
 };
+use crate::backend::SecurityDescriptor;
 use crate::field::Fp;
 use crate::partial::{HolderId, MpcError, PartialResult};
 use crate::shamir::{MacSession, ShamirBackend, Share};
+
+/// The typed three-axis [`SecurityDescriptor`] of this module's protocol at the
+/// backend's `(n, t)` — identical to [`crate::auth_compare::security_descriptor`]
+/// by the module contract above ("matching `crate::auth_compare`": AXIS-1
+/// `Malicious`, AXIS-2 `Abort(Unanimous)`, AXIS-3 honest-majority), so it
+/// delegates rather than restating the tier. This is the implementation-owned
+/// source the `secprop-annotations` graph's adversary-drift test pins the RDF
+/// annotations to.
+pub fn security_descriptor(backend: &ShamirBackend) -> SecurityDescriptor {
+    crate::auth_compare::security_descriptor(backend)
+}
 
 /// **Malicious-secure threshold disclosure over an existing secret-shared sum** —
 /// the IT-MAC twin of [`crate::compare::disclose_threshold_verdict`]. Returns a
@@ -491,6 +503,17 @@ mod tests {
     use super::*;
     use crate::compare::disclose_threshold_verdict;
     use crate::shamir::ShamirBackend;
+
+    /// The typed descriptor is IDENTICAL to [`crate::auth_compare`]'s (the module
+    /// contract's "matching" claim, made mechanical), and reports the malicious
+    /// adversary the annotation graph's closed-world encoding rests on.
+    #[test]
+    fn security_descriptor_matches_auth_compare() {
+        let backend = ShamirBackend::new(3).unwrap();
+        let desc = security_descriptor(&backend);
+        assert_eq!(desc, crate::auth_compare::security_descriptor(&backend));
+        assert_eq!(desc.adversary, crate::backend::AdversaryModel::Malicious);
+    }
 
     /// Deal a degree-`t` sharing of a cleartext sum, exactly as the federation
     /// aggregate would hand `disclose_threshold_verdict` its `[sum]`.
