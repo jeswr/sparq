@@ -17,6 +17,9 @@ const MAGIC: &[u8; 8] = b"SPQSTAT1";
 const FILE_NAME: &str = "stats.bin";
 const DEFAULT_BUCKETS: usize = 64;
 
+// [SONNET-4.6] Keep the nested accumulator readable and clippy-clean.
+type ValueFrequencies = (BTreeMap<Id, u64>, BTreeMap<Id, u64>);
+
 /// One deterministic equi-depth value-histogram bucket.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HistogramBucket {
@@ -90,7 +93,7 @@ pub struct AnalyzeMetrics {
 /// Explicitly rebuilds and atomically publishes `stats.bin` beside a saved graph.
 pub fn analyze(graph: &Graph, dir: impl AsRef<Path>) -> io::Result<AnalyzeMetrics> {
     let dir = dir.as_ref();
-    let mut values: BTreeMap<Id, (BTreeMap<Id, u64>, BTreeMap<Id, u64>)> = BTreeMap::new();
+    let mut values: BTreeMap<Id, ValueFrequencies> = BTreeMap::new();
     let mut triples = 0u64;
     for [s, p, o] in graph.iter_ids() {
         let (subjects, objects) = values.entry(p).or_default();
