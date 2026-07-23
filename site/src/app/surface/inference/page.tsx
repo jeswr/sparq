@@ -63,8 +63,8 @@ export default function InferenceSurfacePage() {
           server-side via <code className="font-mono">sparq-cli reason</code>.
         </p>
       }
-      readmeHref="https://github.com/jeswr/sparq/tree/main/crates/sparq-reason"
-      skillHref="https://github.com/jeswr/sparq/blob/main/skills/inference/SKILL.md"
+      readmeHref="https://github.com/sparq-org/sparq/tree/main/crates/sparq-reason"
+      skillHref="https://github.com/sparq-org/sparq/blob/main/skills/inference/SKILL.md"
     >
       <InferencePlayground />
     </SurfaceContent>
