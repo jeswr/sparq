@@ -6,7 +6,7 @@
 // net-new view that must arrive on the invocation path (site bundle policy). This module imports
 // nothing heavy, so the hero chunk carries only this cheap scan (a bounded Set of at most
 // MAX_GRAPH_NODES term keys — no node/edge maps); deriveGraph + the SVG renderer load lazily
-// (`next/dynamic` on ResultGraphView) the first time a visitor switches to Graph.
+// (`next/dynamic` with SSR disabled on ResultGraphView) the first time a visitor switches to Graph.
 //
 // SINGLE SOURCE OF TRUTH: deriveGraph uses this as its precondition gate AND this predicate
 // exactly models deriveGraph's capped admission (the first MAX_GRAPH_NODES distinct terms in scan
