@@ -502,6 +502,13 @@ jobs:
       # and already strictly gated by perf-gate.py above, and the nightly `schedule` backstop is a
       # pure verification run — so PR + schedule behavior is unchanged by this step.
       # The script self-tests first (repo convention: hermetic --self-test over inline fixtures).
+      #
+      # --report-out ([FABLE-5] round-2 review): floor-exempt (sub-noise-floor us/milli) metrics
+      # never fail this gate, and once a few regressed points are accepted the median REBASES —
+      # so any floor-exempt hit at >= 2.0x is written to bench-hardzone-report.json, which the
+      # "Soft-zone triage" step below merges into the rolling deduped `bench-flake` issue
+      # (tagged "floor-exempt hard-band"): the durable trail that survives the rebase. The file
+      # is written on pass AND fail; triage runs `if: always()` and tolerates its absence.
       - name: Hard zone — median-of-history regression gate (main pushes only)
         if: github.event_name != 'schedule' && github.ref == 'refs/heads/main'
         run: |
@@ -510,7 +517,8 @@ jobs:
           python3 scripts/bench_hardzone.py \
             --results bench-results.json \
             --prev-data prev-data.js \
-            --suite 'sparq engine'
+            --suite 'sparq engine' \
+            --report-out bench-hardzone-report.json
       # [OPUS-4.8] sq-owci — clean the working tree before github-action-benchmark switches branches.
       # ROOT CAUSE: the "Run benchmarks" step (scripts/ci-bench.sh) does `cd bench/zk && cargo bench`
       # and `cd bench/zk-trace && cargo bench` (two STANDALONE cargo projects, run WITHOUT --locked),
@@ -644,6 +652,11 @@ jobs:
       # hard gate: the median-of-history gate above ([FABLE-5] scripts/bench_hardzone.py) owns the
       # hard-zone failure; this step
       # only handles the soft (possible-flakiness) band and always exits 0 (its filing is best-effort).
+      # [FABLE-5] --hardzone-report: additionally merges the median gate's floor-exempt hard-band
+      # rows (bench-hardzone-report.json, written by the gate's --report-out on main pushes;
+      # absent on PR/schedule = no-op) into the same deduped issue, tagged "floor-exempt
+      # hard-band" — the gate never reds on those watch-only rows and their median rebases, so
+      # this issue trail is their only durable record.
       # Canonical repo only — fork PRs get a read-only token, so no issue can be filed there.
       - name: Soft-zone triage (file a deduped bench-flake issue; no @mentions)
         if: always() && github.repository == 'sparq-org/sparq'
@@ -666,6 +679,7 @@ jobs:
           # scripts/bench-thresholds.py from the benchmark-data history).
           python3 scripts/bench-triage.py --mode soft \
             --comparison bench-comparison.json \
+            --hardzone-report bench-hardzone-report.json \
             --soft 175 --hard 200 \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             || echo "::warning::soft-zone triage filer failed (non-fatal)"

@@ -17,6 +17,14 @@
 #             update ONE rolling deduped GitHub issue per benchmark suite (label `bench-flake`),
 #             listing the flagged benchmarks + runs. No @mentions.
 #
+# FLOOR-EXEMPT HARD-BAND ([FABLE-5]): the median-of-history hard gate (scripts/bench_hardzone.py)
+# never fails on a floor-exempt (sub-noise-floor us/milli) metric, and after a few accepted
+# points the regressed median REBASES — so those hits would leave NO durable trail from the gate
+# itself. `--hardzone-report` points at bench_hardzone.py's --report-out JSON; its
+# `floor_exempt_hard` rows (previous = the MEDIAN-of-history, tagged "floor-exempt hard-band")
+# are merged into the SOFT partition so they land in the same rolling deduped bench-flake issue.
+# This NEVER weakens a gate — those rows were watch-only for the gate already.
+#
 # NIGHTLY ATTRIBUTION (--mode nightly): when the scheduled/nightly bench detects a regression
 # vs the last green nightly baseline, rank the most likely culprit commits/PRs by intersecting
 # each commit's touched paths with the crates the regressed suite exercises (a small static
@@ -256,6 +264,51 @@ def zone_partition(rows: list[dict], soft: float, hard: float) -> dict[str, list
     return part
 
 
+def load_hardzone_soft_rows(path: str | None) -> list[dict]:
+    """Floor-exempt hard-band rows from bench_hardzone.py's --report-out JSON (fail-soft -> []).
+
+    The hard gate never fails on a floor-exempt metric and its median rebases after a few
+    accepted points, so these hits must land in the durable bench-flake issue trail instead.
+    Rows arrive in the normalized comparison shape with `previous` holding the
+    MEDIAN-of-history (not the single previous point) and a `note` tag rendered in the issue
+    table. Malformed rows are dropped (this path must never break the triage filer).
+    """
+    if not path:
+        return []
+    p = Path(path)
+    if not p.exists():
+        return []  # hardzone gate did not run on this event (PR/schedule) — nothing to merge
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, ValueError, OSError) as e:
+        log(f"warning: could not parse hardzone report {path} ({e}) — skipping its rows")
+        return []
+    out = []
+    for r in data.get("floor_exempt_hard", []) if isinstance(data, dict) else []:
+        if not isinstance(r, dict):
+            continue
+        name, cur, prev, ratio = (r.get("name"), r.get("current"), r.get("previous"),
+                                  r.get("ratio_pct"))
+        if (name is None or not isinstance(cur, (int, float))
+                or not isinstance(prev, (int, float)) or not isinstance(ratio, (int, float))):
+            continue
+        out.append({"name": str(name), "current": float(cur), "previous": float(prev),
+                    "ratio_pct": float(ratio), "unit": r.get("unit", ""),
+                    "note": r.get("note") or "floor-exempt hard-band"})
+    return out
+
+
+def merge_hardzone_rows(soft_rows: list[dict], extra: list[dict]) -> list[dict]:
+    """Merge floor-exempt hard-band rows into the soft partition (tagged row wins by name).
+
+    A metric can appear both in the single-previous-point soft band and in the hardzone
+    report; the tagged median-of-history row is the more meaningful record, so it replaces
+    the untagged one rather than duplicating the table row.
+    """
+    have = {r["name"] for r in extra}
+    return [r for r in soft_rows if r["name"] not in have] + extra
+
+
 # ── gh helpers (fail-soft) ─────────────────────────────────────────────────────────
 def gh(*argv: str) -> str:
     return subprocess.run(["gh", *argv], check=True, capture_output=True, text=True).stdout.strip()
@@ -326,10 +379,21 @@ def build_flake_body(suite: str, rows: list[dict], soft: float, hard: float, run
         "|---|---|---|---|",
     ]
     for r in sorted(rows, key=lambda x: -x["ratio_pct"]):
+        tag = f" — {r['note']}" if r.get("note") else ""
         lines.append(
-            f"| `{r['name']}` | {r['previous']:g}{r['unit']} | "
+            f"| `{r['name']}`{tag} | {r['previous']:g}{r['unit']} | "
             f"{r['current']:g}{r['unit']} | {r['ratio_pct']:g}% |"
         )
+    if any(r.get("note") for r in rows):
+        lines += [
+            "",
+            "Rows tagged \"floor-exempt hard-band\" come from the median-of-history hard gate "
+            "(`scripts/bench_hardzone.py`): they are at/above the HARD ratio against their "
+            "median-of-history but sit under their unit's noise floor, so they are watch-only "
+            "for the gate. They are recorded here so a persistent sub-floor regression keeps a "
+            "durable trail even after the median rebases — for those rows the `previous` "
+            "column is the median-of-history, not the single previous point.",
+        ]
     lines += [
         "",
         "If these persist across several runs the swing is likely real — promote to a "
@@ -593,6 +657,42 @@ def self_test() -> int:
         assert baseline_sha(str(prev), "nonexistent suite") == "c2"  # falls back to only suite
         assert baseline_sha(str(Path(tdc) / "absent.js"), "sparq engine") == ""
 
+    # [FABLE-5] hardzone floor-exempt hard-band rows: loaded fail-soft, merged into the soft
+    # partition (tagged row wins on a name collision), rendered tagged in the flake body.
+    with tempfile.TemporaryDirectory() as td3:
+        hz = Path(td3) / "hardzone-report.json"
+        hz.write_text(json.dumps({"floor_exempt_hard": [
+            {"name": "tiny_query_us", "current": 12.0, "previous": 4.0, "ratio_pct": 300.0,
+             "unit": "us",
+             "note": "floor-exempt hard-band (>= 2x median-of-history; watch-only for the gate)"},
+            {"name": "malformed_row", "current": "not-a-number"},   # dropped, never crashes
+        ]}), encoding="utf-8")
+        extra = load_hardzone_soft_rows(str(hz))
+        assert [r["name"] for r in extra] == ["tiny_query_us"], extra
+        soft_rows = [
+            {"name": "tiny_query_us", "current": 8.0, "previous": 4.0, "ratio_pct": 200.0,
+             "unit": "us"},                                          # same-name untagged row
+            {"name": "geo_within_us", "current": 18.0, "previous": 10.0, "ratio_pct": 180.0,
+             "unit": "us"},
+        ]
+        merged = merge_hardzone_rows(soft_rows, extra)
+        assert [r["name"] for r in merged] == ["geo_within_us", "tiny_query_us"], merged
+        assert merged[-1]["note"].startswith("floor-exempt hard-band")
+        mbody = build_flake_body("sparq-engine+sparq-core", merged, 175, 200, "http://run/3")
+        assert "floor-exempt hard-band" in mbody and "tiny_query_us" in mbody
+        assert "median-of-history" in mbody   # the tagged-row explainer paragraph
+        stripped3 = mbody.replace("@-mentioned", "").replace("@-mention", "")
+        assert "@" not in stripped3, "flake body with hardzone rows must not @-mention anyone"
+        # untagged-only bodies carry no explainer paragraph (soft-band prose stays accurate).
+        plain = build_flake_body("sparq-geo", soft_rows[1:], 175, 200, "http://run/4")
+        assert "floor-exempt hard-band" not in plain
+        # fail-soft: no arg / absent file / unparsable file all -> [] (triage must not break).
+        assert load_hardzone_soft_rows(None) == []
+        assert load_hardzone_soft_rows(str(Path(td3) / "absent.json")) == []
+        bad = Path(td3) / "bad.json"
+        bad.write_text("{not json", encoding="utf-8")
+        assert load_hardzone_soft_rows(str(bad)) == []
+
     # nightly attribution ranking: overlap with regressed crates ranks first.
     commits = [
         {"sha": "a" * 40, "subject": "feat(geo): add index (#101)", "author": "x",
@@ -647,6 +747,10 @@ def main() -> int:
     ap.add_argument("--out", help="where build-comparison writes the normalized JSON")
     ap.add_argument("--soft", type=float, default=175.0, help="soft alert-threshold %% (150==1.5x)")
     ap.add_argument("--hard", type=float, default=200.0, help="hard fail-threshold %% (150==1.5x)")
+    ap.add_argument("--hardzone-report",
+                    help="bench_hardzone.py --report-out JSON; its floor_exempt_hard rows are "
+                         "merged into the soft partition tagged 'floor-exempt hard-band' "
+                         "(absent file = no-op; soft mode only)")
     ap.add_argument("--run-url", default="")
     ap.add_argument("--baseline-sha", default="")
     ap.add_argument("--head-sha", default="")
@@ -683,6 +787,14 @@ def main() -> int:
 
     repo = args.repo_url or "https://github.com/sparq-org/sparq"
     if args.mode == "soft":
+        # [FABLE-5] durable trail: floor-exempt hard-band hits from the median-of-history gate
+        # never red that gate and would vanish once the median rebases — merge them into the
+        # soft partition so the deduped bench-flake issue records every one.
+        extra = load_hardzone_soft_rows(args.hardzone_report)
+        if extra:
+            part["soft"] = merge_hardzone_rows(part["soft"], extra)
+            log(f"merged {len(extra)} floor-exempt hard-band row(s) from the hardzone report "
+                f"into the soft partition (durable bench-flake trail)")
         file_flake_issues(part, args.soft, args.hard, args.run_url)
     else:  # nightly
         file_regression_issues(part, args.soft, args.hard, args.baseline_sha,
