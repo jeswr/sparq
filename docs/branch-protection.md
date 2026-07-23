@@ -381,10 +381,16 @@ The merge queue on `main` drains individually-armed worker PRs up to its per-win
 heads carrying `review:pass` with an active auto-merge arm by `app/sparq-orchestrator`)
 are waiting at once, the scheduled/event-driven batcher
 ([`scripts/batch-merge.py`](../scripts/batch-merge.py), run by
-[`.github/workflows/batch-merge.yml`](../.github/workflows/batch-merge.yml)) folds the
-overflow — everything beyond the 8 lowest-numbered PRs, at least 2 constituents — into one
-`sparq-omnibus/<utcstamp>` integration PR (fresh off `main`, sequential `--no-ff` merges;
-a conflicting constituent is skipped and stays individually armed) and arms it so a single
+[`.github/workflows/batch-merge.yml`](../.github/workflows/batch-merge.yml), every
+15 minutes) folds the overflow — everything beyond the 8 lowest-numbered PRs — into one
+`sparq-omnibus/<class>-<utcstamp>` integration PR **per change-class** (issue #3433:
+`slim` = constituents whose diffs are docs-/orchestration-only per `ci_select`'s audited
+allowlist, so a slim batch rides the slim merge-group lane set and never waits on a
+full-matrix run; `engine` = everything else, fail-closed; at least 2 and at most 15
+constituents per omnibus — batch-15 per 15-minute run tracks the 60-merges/hour target
+and keeps a v2 culprit bisect at log2(15) ≈ 4 runs; one omnibus per class in flight).
+Each omnibus is fresh off `main`, built with sequential `--no-ff` merges (a conflicting
+constituent is skipped and stays individually armed) and armed so a single
 queue slot lands the whole batch; the omnibus body carries `Closes #` refs for every
 constituent's issue, and once it merges the batcher closes each contained constituent PR.
 The `sparq-omnibus/` prefix (and the absence of any `review:*` label) keeps these PRs out
