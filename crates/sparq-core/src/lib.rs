@@ -10845,6 +10845,25 @@ mod tests {
         assert_eq!(by_val("INF"), Some(f64::INFINITY), "'INF'^^xsd:double still hits");
     }
 
+    // [SONNET-4.6] Exercise the outlined storage dispatch directly so the coverage
+    // ratchet sees every non-mmap cache shape, not only the dominant owned fast path.
+    #[test]
+    fn numeric_cache_lookup_covers_outlined_storage_variants() {
+        let mut sparse_values = rustc_hash::FxHashMap::default();
+        sparse_values.insert(2, 2.5);
+        let sparse = NumData::Sparse(sparse_values);
+        assert_eq!(sparse.lookup(2), Some(2.5));
+        assert_eq!(sparse.lookup(1), None);
+
+        let base = std::sync::Arc::new(NumData::Owned(vec![1.5, f64::NAN]));
+        let mut extra = rustc_hash::FxHashMap::default();
+        extra.insert(3, 3.5);
+        let forked = NumData::Forked { base, extra };
+        assert_eq!(forked.lookup(1), Some(1.5));
+        assert_eq!(forked.lookup(2), None);
+        assert_eq!(forked.lookup(3), Some(3.5));
+    }
+
     /// [OPUS-4.8] (sq-x32t) Recursively reads every regular file under `dir` and returns true iff
     /// `needle`'s bytes appear in ANY of them — used to prove a deleted term's bytes are PHYSICALLY
     /// gone from the on-disk store (not merely logically hidden by the overlay).
