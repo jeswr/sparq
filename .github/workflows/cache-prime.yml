@@ -169,14 +169,23 @@ jobs:
       - name: clippy workspace, all features (primes the all-features dep closure)
         run: cargo clippy --workspace --all-targets --all-features
 
-  # Family `wasm` — ci.yml's wasm job (sparq-wasm on wasm32-unknown-unknown, default +
-  # opt-in feature states). Build passes warm the build-mode deps; the union-feature
-  # clippy pass warms the check-mode deps (incl. the jsonld-only oxjsonld closure).
+  # Family `wasm` — ci.yml's wasm job (every browser bundle + wasm-safety crate on
+  # wasm32-unknown-unknown). The two cargo steps below mirror that job's FULL
+  # build/clippy closure — every (package, feature-state) it compiles. The mirror must
+  # be exact: rust-cache prunes workspace members before saving (dependency artifacts
+  # only), and cargo resolves third-party dep features PER invocation state, so a state
+  # omitted here restores COLD in the target job even when a sibling state is primed.
+  # ENFORCED structurally by scripts/check-cache-prime-wasm.py (docs-quality
+  # quick-gates): a cargo state added to ci.yml's wasm job without a matching line
+  # here — or a stale extra here — reds that gate, so the mirror cannot silently
+  # drift. The target job's wasm-pack test steps are NOT mirrored: they add only the
+  # small build-mode dev-dep closure (wasm-bindgen-test), which the first post-merge
+  # main run of the real job saves into this same family.
   prime-wasm:
     name: prime wasm family
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     # EXACT REPLICA of ci.yml's global env (see ENV TRAP above).
     env:
       CARGO_TERM_COLOR: always
@@ -198,12 +207,40 @@ jobs:
         with:
           shared-key: "wasm"
           cache-on-failure: true
-      - name: Build sparq-wasm (default features)
-        run: cargo build -p sparq-wasm --target wasm32-unknown-unknown
-      - name: Build sparq-wasm (shacl + jsonld, the site bundle)
-        run: cargo build -p sparq-wasm --target wasm32-unknown-unknown --features shacl,jsonld
-      - name: clippy sparq-wasm (shacl + jsonld — primes check-mode deps; no -D)
-        run: cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features shacl,jsonld
+      - name: Build every wasm32 bundle feature state (mirrors ci.yml `wasm`)
+        run: |
+          cargo build -p sparq-wasm --target wasm32-unknown-unknown
+          cargo build -p sparq-wasm --target wasm32-unknown-unknown --features shacl
+          cargo build -p sparq-wasm --target wasm32-unknown-unknown --features jsonld
+          cargo build -p sparq-wasm --target wasm32-unknown-unknown --features shacl,jsonld
+          cargo build -p sparq-wasm --target wasm32-unknown-unknown --features policy
+          cargo build -p sparq-wasm --target wasm32-unknown-unknown --features explain-json
+          cargo build -p sparq-reason-wasm --target wasm32-unknown-unknown
+          cargo build -p sparq-reason-wasm --target wasm32-unknown-unknown --features explain
+          cargo build -p sparq-rsp-wasm --target wasm32-unknown-unknown
+          cargo build -p sparq-text-wasm --target wasm32-unknown-unknown
+          cargo build -p sparq-shacl-wasm --target wasm32-unknown-unknown
+          cargo build -p sparq-shacl-wasm --target wasm32-unknown-unknown --features shacl-af
+          cargo build -p sparq-vectors --target wasm32-unknown-unknown
+      # Same states in check mode — NO `-D warnings` (cache builder, not a second lint
+      # gate; see the prime-all-features note). sparq-vectors stays lib-only (no
+      # --all-targets), exactly like the target job.
+      - name: clippy every wasm32 state (primes check-mode deps; mirrors ci.yml `wasm`)
+        run: |
+          cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets
+          cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features shacl
+          cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features jsonld
+          cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features policy
+          cargo clippy -p sparq-wasm --target wasm32-unknown-unknown --all-targets --features explain-json
+          cargo clippy -p sparq-reason-wasm --target wasm32-unknown-unknown --all-targets
+          cargo clippy -p sparq-reason-wasm --target wasm32-unknown-unknown --all-targets --features explain
+          cargo clippy -p sparq-rsp-wasm --target wasm32-unknown-unknown --all-targets
+          cargo clippy -p sparq-text-wasm --target wasm32-unknown-unknown --all-targets
+          cargo clippy -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-targets
+          cargo clippy -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-targets --features shacl-af
+          cargo clippy -p sparq-introspect --target wasm32-unknown-unknown --all-targets
+          cargo clippy -p sparq-solid --target wasm32-unknown-unknown --all-targets
+          cargo clippy -p sparq-vectors --target wasm32-unknown-unknown
 
   # Family `feature-matrix-check-tier-{engine,rest}` — feature-matrix.yml's check-tier
   # shards. This job is the family's ONLY writer (see hole 2 in the header), so it runs

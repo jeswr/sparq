@@ -343,6 +343,20 @@ jobs:
         run: shellcheck scripts/ci-cache-audit.sh scripts/tests/test_ci_cache_audit.sh
       - name: Self-test ci-cache-audit.sh (entries flow through + verdict thresholds)
         run: bash scripts/tests/test_ci_cache_audit.sh
+      # [FABLE-5] sq-6vshe.5 (PR #2521 round 4): the `wasm` rust-cache family is written
+      # by cache-prime.yml's prime-wasm job and restored by ci.yml's wasm job. rust-cache
+      # prunes workspace members before saving, and cargo resolves third-party dep
+      # features per invocation state — so the primer warms exactly the (build|clippy,
+      # package, feature-set) states it compiles, and any ci.yml wasm state the primer
+      # omits restores cold. This structural check parses both workflows and requires
+      # the two wasm32 cargo closures to be EQUAL: a state added to the wasm job cannot
+      # silently drift out of the primer, and a stale primer extra is flagged too.
+      # Deterministic (YAML parse only, no network, no build); PyYAML is the hash-pinned
+      # install above.
+      - name: Self-test the prime-wasm closure check (pure logic)
+        run: python3 scripts/check-cache-prime-wasm.py --self-test
+      - name: cache-prime prime-wasm mirrors ci.yml wasm closure — GATING
+        run: python3 scripts/check-cache-prime-wasm.py
       # [OPUS-4.8] sq-4vo9m: the per-tick disk guard (df-check + merged-worktree prune +
       # gated main-target reclaim) that stops the autonomous loop from filling the work box
       # to ENOSPC. Validated HERE (hermetic: the harness PATH-shadows df/pgrep and sandboxes
