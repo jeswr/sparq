@@ -1,0 +1,57 @@
+# routing-self-tests — cheap, hermetic validation of the orchestration routing contract.
+# [OPUS-4.8] #3423: routing changes must fail on the PR that introduces them, rather
+# than waiting for an out-of-band retriage run or a maintainer's local invocation.
+#
+# The pull-request path filter covers the routing table, the three validation/planning
+# scripts, and ready-issues.py (which dispatch-plan.py imports and exercises). The
+# workflow itself is included so edits to this gate validate their replacement.
+#
+# Gate integration: the job name contains neither "advisory" nor "informational", so
+# ci-summary auto-discovers it as a gating sibling. merge_group cannot use a paths
+# filter; it runs this seconds-cheap job unconditionally so the queue ref exposes the
+# same gating check. No build, network access, package install, or write permission.
+name: routing-self-tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "orchestration/routing.toml"
+      - "scripts/routing-validate.py"
+      - "scripts/route-resolve.py"
+      - "scripts/dispatch-plan.py"
+      - "scripts/ready-issues.py"
+      - ".github/workflows/routing-self-tests.yml"
+  merge_group:
+  push:
+    branches: [main]
+    paths:
+      - "orchestration/routing.toml"
+      - "scripts/routing-validate.py"
+      - "scripts/route-resolve.py"
+      - "scripts/dispatch-plan.py"
+      - "scripts/ready-issues.py"
+      - ".github/workflows/routing-self-tests.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: routing-self-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Routing contract self-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Validate routing schema and resolver/planner contracts
+        run: |
+          set -euo pipefail
+          python3 scripts/routing-validate.py --self-test
+          python3 scripts/routing-validate.py
+          python3 scripts/route-resolve.py --self-test
+          python3 scripts/dispatch-plan.py --self-test
