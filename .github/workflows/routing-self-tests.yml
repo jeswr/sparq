@@ -3,8 +3,11 @@
 # than waiting for an out-of-band retriage run or a maintainer's local invocation.
 #
 # The pull-request path filter covers the routing table, the three validation/planning
-# scripts, and ready-issues.py (which dispatch-plan.py imports and exercises). The
-# workflow itself is included so edits to this gate validate their replacement.
+# scripts, ready-issues.py (which dispatch-plan.py imports and exercises), and the
+# batch-merge.py <- ci_select.py import pair (#3433: the batcher reuses the selector's
+# change-class allowlist, so a drift on either side must fail on ITS PR, not at the
+# batcher's next live run). The workflow itself is included so edits to this gate
+# validate their replacement.
 #
 # Gate integration: the job name contains neither "advisory" nor "informational", so
 # ci-summary auto-discovers it as a gating sibling. merge_group cannot use a paths
@@ -21,6 +24,10 @@ on:
       - "scripts/route-resolve.py"
       - "scripts/dispatch-plan.py"
       - "scripts/ready-issues.py"
+      # batch-merge.py imports ci_select.classify_change (#3433 class-partitioned
+      # batching) — run its hermetic self-test on the PR that could break either side.
+      - "scripts/batch-merge.py"
+      - "scripts/ci_select.py"
       - ".github/workflows/routing-self-tests.yml"
   merge_group:
   push:
@@ -31,6 +38,10 @@ on:
       - "scripts/route-resolve.py"
       - "scripts/dispatch-plan.py"
       - "scripts/ready-issues.py"
+      # batch-merge.py imports ci_select.classify_change (#3433 class-partitioned
+      # batching) — run its hermetic self-test on the PR that could break either side.
+      - "scripts/batch-merge.py"
+      - "scripts/ci_select.py"
       - ".github/workflows/routing-self-tests.yml"
 
 permissions:
@@ -55,3 +66,4 @@ jobs:
           python3 scripts/routing-validate.py
           python3 scripts/route-resolve.py --self-test
           python3 scripts/dispatch-plan.py --self-test
+          python3 scripts/batch-merge.py --self-test
