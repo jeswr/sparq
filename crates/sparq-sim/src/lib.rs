@@ -389,7 +389,7 @@ impl<'g> Sim<'g> {
             }
         }
         // 2. Keep the strongest M candidates by accumulated (upper-bound) weight …
-        let m = (4 * k).max(64);
+        let m = k.saturating_mul(4).max(64);
         let mut cands: Vec<(Id, f64)> = acc.into_iter().collect();
         cands.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         cands.truncate(m);
@@ -445,7 +445,7 @@ impl<'g> Sim<'g> {
             }
         }
         roles.sort_unstable_by_key(|&(_, _, est)| est);
-        let budget = (4 * k).max(64);
+        let budget = k.saturating_mul(4).max(64);
         let mut acc: FxHashMap<Id, f64> = FxHashMap::default();
         for &(dir, p, _) in &roles {
             // Who else plays this role? Every subject (OUT) / object (IN) of
@@ -1203,6 +1203,17 @@ mod tests {
         assert_eq!(by_sig[0].0.to_string(), "<http://ex.org/a>");
         assert_eq!(by_sig[0].1, 1.0);
         assert_eq!(by_sig[1].0.to_string(), "<http://ex.org/twin>");
+    }
+
+    // [SONNET-4.6] Exercise both the primary and profile-fallback candidate budgets.
+    #[test]
+    fn huge_k_does_not_overflow_non_sketch_candidate_budgets() {
+        let g = graph(":a :plays :chess . :b :plays :tennis .");
+        let sim = unweighted(&g);
+
+        let top = sim.most_similar(&iri("a"), usize::MAX);
+
+        assert_eq!(top, vec![(iri("b"), 1.0)]);
     }
 
     #[test]

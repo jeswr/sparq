@@ -1,0 +1,46 @@
+# [GPT-5] Issue #447 — arm reviewed worker PRs without bypassing the merge queue.
+name: auto-arm
+
+on:
+  pull_request:
+    types: [labeled]
+  schedule:
+    # Explicit minutes make the ten-minute backstop auditable (no */N shorthand).
+    - cron: "4,14,24,34,44,54 * * * *"
+  workflow_dispatch:
+
+# Enabling auto-merge needs only repository contents + pull-request write access.
+permissions:
+  contents: write
+  pull-requests: write
+
+# A label event and the sweep must never race each other into a double arm.
+concurrency:
+  group: auto-arm
+  cancel-in-progress: false
+
+jobs:
+  arm:
+    name: arm reviewed PRs
+    if: github.event_name != 'pull_request' || github.event.label.name == 'review:pass'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Run the trusted default-branch policy, never code from the candidate PR head.
+      - name: Checkout auto-arm policy
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          sparse-checkout: scripts/auto-arm.py
+          sparse-checkout-cone-mode: false
+
+      - name: Self-test policy
+        run: python3 scripts/auto-arm.py --self-test
+
+      - name: Arm eligible PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: python3 scripts/auto-arm.py --repo "$REPO" --default-branch "$DEFAULT_BRANCH"

@@ -203,6 +203,20 @@ crates = ["sparq-conformance"]
 pattern = "fuzz/seeds/**"
 crates = ["sparq-conformance"]
 
+# [FABLE-5] sq-1s2.4 (PR #3622): the browser age-gate's precomputed `operand_enc`
+# anchors, read at runtime by sparq-zk-compose's build-time drift guard
+# (tests/site_age_enc_drift.rs) which pins the committed site constants against the
+# native encode_int_literal encoder. FIRST-MATCH-WINS: these two file entries sit
+# BEFORE the `site/**` safe entry below, so an anchor edit re-runs the drift guard
+# while the rest of site/ stays inert for the Rust matrix.
+[[map]]
+pattern = "site/src/lib/zk-prover.ts"
+crates = ["sparq-zk-compose"]
+
+[[map]]
+pattern = "site/scripts/capture-zk-manifest.mjs"
+crates = ["sparq-zk-compose"]
+
 # ---------------------------------------------------------------------------
 # ADDITIONAL-READERS (`readers`, sq-m4bxc [FABLE-5]) — sibling-crate inputs read
 # across a boundary where a real cargo dep edge would be a forbidden CYCLE, so no
@@ -282,8 +296,10 @@ safe = true
 pattern = "docs/**"
 safe = true
 
-# The marketing/explanatory website (Next.js). Owns its own CI lane (pages.yml);
-# no Rust crate reads site/.
+# The marketing/explanatory website (Next.js). Owns its own CI lane (pages.yml).
+# EXCEPTION (first-match-wins): the two zk-anchor files attributed to
+# sparq-zk-compose above (sq-1s2.4) are matched before this entry; NO other Rust
+# crate reads site/ (the out-of-crate-input audit re-verifies every run).
 [[map]]
 pattern = "site/**"
 safe = true

@@ -117,9 +117,12 @@ docs match the shipped surface. If no doc change is warranted, note why and clos
 """
 
 # --- New bench suite → dashboard row -------------------------------------------
-# Trigger: a brand-new `bench/<suite>/` directory (detected via an added
-# benchmarks.toml or run.sh under it). A capability suite should get a
-# FEATURED_SUITES row in the dashboard (produced out-of-band, so un-gateable).
+# Trigger: a brand-new REGISTERED `bench/<suite>/` directory (detected via an
+# added benchmarks.toml or run.sh under it, then resolved through the central
+# registry). Unregistered harnesses and entries already carrying
+# `featured = false` do not need a dashboard follow-on; this covers agent-token
+# research harnesses that emit no performance metrics. A capability suite should
+# get a FEATURED_SUITES row in the dashboard (produced out-of-band, so un-gateable).
 [[rule]]
 id = "new-bench-dashboard-row"
 description = "A new bench suite landed; add a dashboard FEATURED_SUITES row (or flag it unfeatured)."
