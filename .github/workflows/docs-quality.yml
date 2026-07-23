@@ -397,6 +397,16 @@ jobs:
       # exit codes) runs on every PR — same stdlib-only, no-deps pattern as the lints above.
       - name: Self-test Miri verdict classifier (timeout-vs-UB split + exit codes)
         run: python3 scripts/miri_classify_verdict.py --self-test
+      # [FABLE-5] #3419: the issue-triage pair (scripts/triage.py + scripts/retriage.py) was
+      # self-tested ONLY inside the retriage cron (retriage.yml), so a PR that changed
+      # triage.py's promotion behavior (#2898: park no-area issues) broke retriage's fixture
+      # expectations on main SILENTLY — the KeyError surfaced a day later, out-of-band.
+      # Running both hermetic self-tests HERE (stdlib-only, no gh/network: pure label-delta
+      # fixtures) reds the offending PR instead of the next cron run.
+      - name: Self-test triage.py + retriage.py (static-triage + retriage-plan fixtures)
+        run: |
+          python3 scripts/triage.py --self-test
+          python3 scripts/retriage.py --self-test
       # [OPUS-4.8] sq-ur7o: every SHA-pinned `taiki-e/install-action` step MUST carry an
       # explicit `with: tool:`. install-action picks the tool from its @<tool> git ref; the
       # code-scanning=0 SHA-pin policy DROPS that selector, so without `with: tool:` the
