@@ -345,7 +345,9 @@ exactly a `trusted_setup` difference, so report per component:
 pub enum SetupRequirement {
     /// No setup — information-theoretic / transparent (the SS core; a STARK/UltraHonk proof).
     None,
-    /// Only base OTs (symmetric bootstrap) — MASCOT. Not a CRS; a one-time OT bootstrap.
+    /// Only base OTs — MASCOT. Not a CRS and no trusted party; a one-time cryptographic
+    /// bootstrap (typically a public-key-style OT — PQ posture Conditional on that
+    /// instantiation) from which OT extension proceeds symmetric-key.
     BaseOtBootstrap,
     /// A distributed / threshold key must be generated (Overdrive's BGV key) — no single
     /// trusted party, but a setup ceremony among the parties.
