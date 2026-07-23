@@ -188,8 +188,9 @@ fn lex_roundtrip_drops_the_geographic_crs_prefix_after_normalisation() {
 // ---- Full EPSG registry fallback (the opt-in `epsg_full` feature, sq-248) --
 
 /// Non-curated codes resolved through the embedded registry, verified against
-/// independent reference coordinates; plus the honesty filters (grid-shift and
-/// datum-less definitions stay refused) and curated-table precedence.
+/// independent reference coordinates; plus the honesty filters (grid-shift,
+/// datum-less, and unproven-axis-order definitions stay refused) and
+/// curated-table precedence.
 #[cfg(feature = "epsg_full")]
 mod epsg_full {
     use super::EPSG;
@@ -217,13 +218,23 @@ mod epsg_full {
     }
 
     #[test]
-    fn poland_cs92_central_meridian_is_invariant() {
-        // EPSG:2180 (ETRS89 / Poland CS92): tmerc, lon_0 = 19°E, x_0 = 500000,
-        // null Helmert. Any point ON the central meridian (easting exactly
-        // x_0) must reproject to longitude 19 regardless of northing.
-        let (lon, lat) = point(2180, 500_000.0, 500_000.0);
-        assert!((lon - 19.0).abs() < 1e-9, "lon {lon}");
-        assert!((50.0..55.0).contains(&lat), "lat {lat}");
+    fn northing_easting_projected_registry_definitions_stay_refused() {
+        // proj4rs consumes (easting, northing) and PROJ.4 strings carry no
+        // EPSG axis metadata, so a projected registry entry is accepted only
+        // when its WKT proves that order. EPSG:2180 (ETRS89 / Poland CS92)
+        // and EPSG:3044 (ETRS89 / UTM zone 32N (N-E)) are officially
+        // NORTHING/EASTING per the EPSG registry — feeding their wktLiteral
+        // coordinates to proj4rs verbatim would silently transpose them (for
+        // 3044, the independent witness is curated EPSG:25832: the SAME
+        // projection with easting/northing axes, so a 3044 literal read
+        // verbatim would land thousands of km away) — both stay refused.
+        assert!(proj4_definition(2180).is_none());
+        assert!(proj4_definition(3044).is_none());
+        let g = parse_wkt_literal(&format!("<{EPSG}/3044> POINT(5432790 514940)")).unwrap();
+        assert!(matches!(to_crs84(&g), Err(GeoError::Unsupported(m)) if m.contains("EPSG:3044")));
+        // West/south-axis grids (South African LO, `+axis=wsu`) are refused
+        // too: their WKT declares AXIS west/south, not easting/northing.
+        assert!(proj4_definition(2048).is_none());
     }
 
     #[test]
@@ -238,6 +249,19 @@ mod epsg_full {
         assert!((lat - 34.7).abs() < 0.01, "lat {lat}");
         // Projected registry codes stay non-geographic.
         assert_eq!(geographic_axis_order(2056), None);
+    }
+
+    #[test]
+    fn explicit_lon_lat_registry_geographic_codes_are_honoured() {
+        // EPSG:8902 (RGWF96 (lon-lat)) is one of the rare EPSG geographic
+        // CRSs defined LONGITUDE-first — its registry WKT declares
+        // AXIS[…,EAST],AXIS[…,NORTH] explicitly, so the fallback must NOT
+        // apply the default lat/long convention. Wallis-and-Futuna written
+        // (lon -178.12, lat -14.31) comes back unchanged (GRS80, null shift).
+        assert_eq!(geographic_axis_order(8902), Some(AxisOrder::LongLat));
+        let (lon, lat) = point(8902, -178.12, -14.31);
+        assert!((lon - -178.12).abs() < 1e-6, "lon {lon}");
+        assert!((lat - -14.31).abs() < 1e-6, "lat {lat}");
     }
 
     #[test]
