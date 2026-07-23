@@ -29,7 +29,13 @@
 /** Field encodings of `"<age>"^^xsd:integer`, precomputed natively via
  *  `sparq_zk_compose::build::encode_int_literal` (the SAME encoder the scan proof
  *  uses for the operand column). Each is the `operand_enc` public input that binds
- *  the hidden age to the committed credential. */
+ *  the hidden age to the committed credential.
+ *
+ *  DRIFT GUARD (sq-1s2.4): these values are pinned against the native encoder by
+ *  `crates/sparq-zk-compose/tests/site_age_enc_drift.rs`. If a circuit / encoder bump
+ *  changes the term encoding, that test fails RED and prints the regenerated hex to
+ *  paste here — do NOT let these go stale, or the live in-browser age-gate becomes
+ *  unsatisfiable (the witness solve fails). */
 const AGE_OPERAND_ENC: Record<number, string> = {
   24: "0x1c8a81ea95b253e105b99209deff1a4908be9568e588fbd89afea9f49f5f20cf",
   25: "0x2b5caeb2bbd290ab32434a9109030784c7faebadee7a9908d24dccb847910d1d",

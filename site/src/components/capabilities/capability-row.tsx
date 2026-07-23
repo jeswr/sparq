@@ -36,7 +36,7 @@ import {
   type LazyDemoSlug,
 } from "@/components/capabilities/lazy-demo";
 
-const REPO_URL = "https://github.com/jeswr/sparq";
+const REPO_URL = "https://github.com/sparq-org/sparq";
 
 interface RowMeta {
   /** ONE caveat sentence (honesty preserved; the full hedge lives in the SKILL/README). */

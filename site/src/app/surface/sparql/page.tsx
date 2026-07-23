@@ -61,8 +61,8 @@ export default function SparqlSurfacePage() {
           row counts but zero wall-times under wasm32 (no monotonic clock).
         </p>
       }
-      readmeHref="https://github.com/jeswr/sparq/tree/main/crates/sparq-engine"
-      skillHref="https://github.com/jeswr/sparq/blob/main/skills/sparql-query/SKILL.md"
+      readmeHref="https://github.com/sparq-org/sparq/tree/main/crates/sparq-engine"
+      skillHref="https://github.com/sparq-org/sparq/blob/main/skills/sparql-query/SKILL.md"
       links={[{ href: withBasePath("/app/"), label: "Open the SPARQL workbench", external: true }]}
     />
   );
