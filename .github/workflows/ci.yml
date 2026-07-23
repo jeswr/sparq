@@ -954,18 +954,31 @@ jobs:
       - name: clippy (wasm32 target, sparq-text-wasm, deny warnings)
         run: cargo clippy -p sparq-text-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
       # [OPUS-4.8] sq-lfmf (W-shacl): the tier-b SHACL validation bundle. Build + clippy it
-      # on wasm32 in BOTH feature states (default SHACL Core + SHACL-SPARQL, and the opt-in
-      # `shacl-af` sh:rule feature) so the SHACL bundle (sparq-shacl + its no-default-features
-      # sparq-engine/sparq-core wasm32 graph, carrying the pure-Rust `sh:pattern` regex) is
-      # gate-protected exactly like the other wasm bundles.
+      # on wasm32 in EVERY feature state (default SHACL Core + SHACL-SPARQL, the opt-in
+      # `shacl-af` sh:rule feature, the opt-in `stateful` pre-parsed-handle feature, and the
+      # combined `shacl-af`+`stateful` state via --all-features) so the SHACL bundle
+      # (sparq-shacl + its no-default-features sparq-engine/sparq-core wasm32 graph,
+      # carrying the pure-Rust `sh:pattern` regex) is gate-protected exactly like the other
+      # wasm bundles.
       - name: Build sparq-shacl-wasm for the browser target
         run: cargo build -p sparq-shacl-wasm --target wasm32-unknown-unknown
       - name: Build sparq-shacl-wasm for the browser target (shacl-af feature)
         run: cargo build -p sparq-shacl-wasm --target wasm32-unknown-unknown --features shacl-af
+      # [FABLE-5] sq-01xlp: the opt-in `stateful` (pre-parsed ParsedGraph handle) state.
+      - name: Build sparq-shacl-wasm for the browser target (stateful feature)
+        run: cargo build -p sparq-shacl-wasm --target wasm32-unknown-unknown --features stateful
+      # [FABLE-5] sq-01xlp: the combined state (`shacl-af`+`stateful` — both opt-in features
+      # can be enabled together, and stateful validation inherits sh:rule behaviour).
+      - name: Build sparq-shacl-wasm for the browser target (all features)
+        run: cargo build -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-features
       - name: clippy (wasm32 target, sparq-shacl-wasm, deny warnings)
         run: cargo clippy -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-targets -- -D warnings
       - name: clippy (wasm32 target, sparq-shacl-wasm, shacl-af feature, deny warnings)
         run: cargo clippy -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-targets --features shacl-af -- -D warnings
+      - name: clippy (wasm32 target, sparq-shacl-wasm, stateful feature, deny warnings)
+        run: cargo clippy -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-targets --features stateful -- -D warnings
+      - name: clippy (wasm32 target, sparq-shacl-wasm, all features, deny warnings)
+        run: cargo clippy -p sparq-shacl-wasm --target wasm32-unknown-unknown --all-targets --all-features -- -D warnings
       - name: Guard the wasm dependency graph (no native-only deps)
         # [OPUS-4.8] sq-9qz6: enforce the "flate2/zstd/rayon/sparq-parse must never
         # enter the wasm graph" invariant (was comment-only) — fails if a native-only
@@ -1044,14 +1057,23 @@ jobs:
       # [OPUS-4.8] sq-lfmf (W-shacl): drive the REAL #[wasm_bindgen] Validator exports
       # (crates/sparq-shacl-wasm/tests/web.rs) in a genuine wasm runtime — SHACL validation +
       # the JSON / Turtle / text report serialisation across the JS boundary, which a
-      # `cargo build --target wasm32` above never RUNS. Both feature states: default, then
-      # with the opt-in `shacl-af` (sh:rule) feature.
+      # `cargo build --target wasm32` above never RUNS. Every feature state: default, the
+      # opt-in `shacl-af` (sh:rule) feature, the opt-in `stateful` feature, then the
+      # combined `shacl-af`+`stateful` state (--all-features).
       - name: Headless wasm tests (sparq-shacl-wasm, wasm-pack test --node)
         working-directory: crates/sparq-shacl-wasm
         run: wasm-pack test --node
       - name: Headless wasm tests (sparq-shacl-wasm, wasm-pack test --node, shacl-af feature)
         working-directory: crates/sparq-shacl-wasm
         run: wasm-pack test --node --features shacl-af
+      # [FABLE-5] sq-01xlp: drive the opt-in pre-parsed `ParsedGraph` exports (incl. the
+      # JsError-returning `parse` the native suite cannot run) in a real wasm runtime.
+      - name: Headless wasm tests (sparq-shacl-wasm, wasm-pack test --node, stateful feature)
+        working-directory: crates/sparq-shacl-wasm
+        run: wasm-pack test --node --features stateful
+      - name: Headless wasm tests (sparq-shacl-wasm, wasm-pack test --node, all features)
+        working-directory: crates/sparq-shacl-wasm
+        run: wasm-pack test --node --all-features
       # [OPUS-4.8] sq-aq5: sparq-introspect wasm-safety. The crate is pure sorted scans over
       # sparq-core's public read API (no threads, no syscalls, no wall clock) so it is a
       # tier-b browser surface for in-tab schema cards. It is NOT a #[wasm_bindgen] BUNDLE
