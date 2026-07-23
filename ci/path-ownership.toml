@@ -203,6 +203,20 @@ crates = ["sparq-conformance"]
 pattern = "fuzz/seeds/**"
 crates = ["sparq-conformance"]
 
+# [FABLE-5] sq-1s2.4 (PR #3622): the browser age-gate's precomputed `operand_enc`
+# anchors, read at runtime by sparq-zk-compose's build-time drift guard
+# (tests/site_age_enc_drift.rs) which pins the committed site constants against the
+# native encode_int_literal encoder. FIRST-MATCH-WINS: these two file entries sit
+# BEFORE the `site/**` safe entry below, so an anchor edit re-runs the drift guard
+# while the rest of site/ stays inert for the Rust matrix.
+[[map]]
+pattern = "site/src/lib/zk-prover.ts"
+crates = ["sparq-zk-compose"]
+
+[[map]]
+pattern = "site/scripts/capture-zk-manifest.mjs"
+crates = ["sparq-zk-compose"]
+
 # ---------------------------------------------------------------------------
 # ADDITIONAL-READERS (`readers`, sq-m4bxc [FABLE-5]) — sibling-crate inputs read
 # across a boundary where a real cargo dep edge would be a forbidden CYCLE, so no
@@ -216,9 +230,22 @@ crates = ["sparq-conformance"]
 # vocab (crates/sparq-zk/src/secprop.rs) to assert the two crates' sec-prop IRIs
 # agree. sparq-trust DEPENDS ON sparq-zk (crates/sparq-trust/Cargo.toml), so a
 # sparq-zk -> sparq-trust dep would be a cycle: additional-readers instead.
+# [FABLE-5] sq-mgxz8 (PR #3440): sparq-policy's cross-crate dimension-IRI drift
+# guards (crates/sparq-policy/src/secprop.rs #[cfg(test)]) also include_str! this
+# vocab; the no-crate-edge choice is deliberate (the lean policy crate must not
+# grow a sparq-trust/sparq-zk edge just for a compile-time drift test), so the
+# monotone readers union attributes the read instead.
 [[map]]
 pattern = "crates/sparq-trust/ontologies/zkp-sparql/**"
-readers = ["sparq-zk", "sparq-trust"]
+readers = ["sparq-zk", "sparq-trust", "sparq-policy"]
+
+# [FABLE-5] sq-mgxz8 (PR #3440): sparq-policy's drift guard also include_str!s
+# sparq-zk's per-method secprop annotation graph (secprop-methods.ttl) to catch
+# a dimension-IRI typo/rename across the estate. Same rationale as above — no
+# crate edge for a compile-time drift test; additional-readers instead.
+[[map]]
+pattern = "crates/sparq-zk/ontologies/**"
+readers = ["sparq-policy"]
 
 # sparq-reason's compiled-vs-interpreted N3 equivalence + incremental tests read
 # sparq-solid's WAC/ACP/ODRL-spike rule corpus READ-ONLY from ../sparq-solid/rules
@@ -269,8 +296,10 @@ safe = true
 pattern = "docs/**"
 safe = true
 
-# The marketing/explanatory website (Next.js). Owns its own CI lane (pages.yml);
-# no Rust crate reads site/.
+# The marketing/explanatory website (Next.js). Owns its own CI lane (pages.yml).
+# EXCEPTION (first-match-wins): the two zk-anchor files attributed to
+# sparq-zk-compose above (sq-1s2.4) are matched before this entry; NO other Rust
+# crate reads site/ (the out-of-crate-input audit re-verifies every run).
 [[map]]
 pattern = "site/**"
 safe = true

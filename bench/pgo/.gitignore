@@ -1,0 +1,10 @@
+# Only the harness (run.sh, bolt.sh, serve_driver.py, report.py, README.md) is tracked.
+# All measurement output is regenerable and stays out of git (bench/CATALOG.md disk rules).
+results/
+data/
+*.profraw
+*.profdata
+*.perf.data
+*.fdata
+REPORT.md
+summary.json

@@ -389,7 +389,7 @@ impl<'g> Sim<'g> {
             }
         }
         // 2. Keep the strongest M candidates by accumulated (upper-bound) weight …
-        let m = (4 * k).max(64);
+        let m = k.saturating_mul(4).max(64);
         let mut cands: Vec<(Id, f64)> = acc.into_iter().collect();
         cands.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
         cands.truncate(m);
@@ -445,7 +445,7 @@ impl<'g> Sim<'g> {
             }
         }
         roles.sort_unstable_by_key(|&(_, _, est)| est);
-        let budget = (4 * k).max(64);
+        let budget = k.saturating_mul(4).max(64);
         let mut acc: FxHashMap<Id, f64> = FxHashMap::default();
         for &(dir, p, _) in &roles {
             // Who else plays this role? Every subject (OUT) / object (IN) of
@@ -666,6 +666,254 @@ impl Sim<'_> {
                 weight: w,
             })
             .collect()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// [FABLE-5] sq-lgw: opt-in `sketch` feature — MinHash/LSH signature sketches, the
+// Phase-4 escape hatch for graphs dense enough that `most_similar`'s per-query,
+// per-element range-scan candidate generation hits its scaling wall
+// (research/genai-design.md §6). Candidate generation becomes LSH bucket lookups
+// against a prebuilt index; returned scores stay EXACT (the same weighted-Jaccard
+// re-scoring `most_similar` performs), so only candidate RECALL is approximate.
+// ---------------------------------------------------------------------------
+
+/// Configuration for [`Sim::sketch_index`] (the opt-in `sketch` feature).
+///
+/// `num_hashes` MinHash components per entity estimate the **unweighted** Jaccard
+/// similarity of two entities' signature element *sets* (IDF weights play no part in
+/// the estimate — only in the exact re-scoring). The components split into `bands`
+/// LSH bands of `num_hashes / bands` rows each: two entities become candidates for
+/// each other iff they agree on EVERY row of at least one band, so more bands (fewer
+/// rows per band) trade precision for recall. A fixed `seed` makes index builds fully
+/// deterministic.
+#[cfg(feature = "sketch")]
+#[derive(Clone, Debug)]
+pub struct SketchConfig {
+    /// MinHash components per sketch (default 128). Estimation error shrinks as
+    /// `O(1/√num_hashes)`; memory is `4 · num_hashes` bytes per indexed entity.
+    pub num_hashes: usize,
+    /// LSH bands (default 32 — 4 rows per band at the default `num_hashes`). Clamped
+    /// to `1..=num_hashes`; when `bands` does not divide `num_hashes` the trailing
+    /// remainder components contribute to estimates but not to banding.
+    pub bands: usize,
+    /// Hash-family seed. The default is fixed so builds reproduce byte-identically.
+    pub seed: u64,
+}
+
+#[cfg(feature = "sketch")]
+impl Default for SketchConfig {
+    fn default() -> Self {
+        // Default seed: "SKETCH" in ASCII. With 128 hashes / 32 bands (4 rows), an
+        // entity pair with unweighted Jaccard s collides with prob 1 − (1 − s⁴)³².
+        SketchConfig { num_hashes: 128, bands: 32, seed: 0x534B_4554_4348 }
+    }
+}
+
+/// SplitMix64 finalizer (public-domain constants) — the crate's dependency-free
+/// 64-bit mixer for the MinHash hash family and the LSH band keys.
+#[cfg(feature = "sketch")]
+#[inline]
+fn splitmix64(x: u64) -> u64 {
+    let mut z = x.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// The LSH key of one band: the band's row components folded through the mixer,
+/// domain-separated by the band index. Shared by build and query so an entity always
+/// finds its own bucket.
+#[cfg(feature = "sketch")]
+fn band_key(band: usize, rows: usize, sketch: &[u32]) -> u64 {
+    let mut key = splitmix64(band as u64);
+    for &component in &sketch[band * rows..(band + 1) * rows] {
+        key = splitmix64(key ^ u64::from(component));
+    }
+    key
+}
+
+/// A prebuilt MinHash/LSH index over every entity of a [`Sim`]'s graph — the
+/// dense-graph candidate generator behind [`SketchIndex::most_similar`]. Build via
+/// [`Sim::sketch_index`]; the index snapshots the graph at build time (rebuild after
+/// updates). Sketches are built from the SAME signature elements exact scoring reads
+/// (mode, excluded predicates, and — under `multi-hop` — depth all respected); only
+/// the element weights are invisible to the sketch.
+#[cfg(feature = "sketch")]
+pub struct SketchIndex<'s, 'g> {
+    sim: &'s Sim<'g>,
+    num_hashes: usize,
+    bands: usize,
+    rows: usize,
+    /// Indexed entity ids, ascending; an entity's SLOT is its position here.
+    entities: Vec<Id>,
+    slot_of: FxHashMap<Id, u32>,
+    /// Concatenated fixed-length sketches: slot `s` owns `data[s·H..][..H]`.
+    data: Vec<u32>,
+    /// `(band, band key) -> slots` — the LSH buckets.
+    buckets: FxHashMap<(u32, u64), Vec<u32>>,
+}
+
+#[cfg(feature = "sketch")]
+impl<'g> Sim<'g> {
+    /// Builds a [`SketchIndex`] over every entity of this `Sim`'s graph: one full
+    /// scan to enumerate entities, then per entity one signature build plus
+    /// `num_hashes` hashes per element — `O(Σ degree · num_hashes)` total, paid once
+    /// instead of per query. Entities with an empty signature (e.g. every adjacent
+    /// predicate excluded) are not indexed.
+    pub fn sketch_index(&self, cfg: SketchConfig) -> SketchIndex<'_, 'g> {
+        let num_hashes = cfg.num_hashes.max(1);
+        let bands = cfg.bands.clamp(1, num_hashes);
+        let rows = num_hashes / bands;
+        let hash_seeds: Vec<u64> = (0..num_hashes as u64)
+            .map(|i| splitmix64(cfg.seed.wrapping_add(i.wrapping_mul(0x9E37_79B9_7F4A_7C15))))
+            .collect();
+
+        // The entity universe: every subject + entity object, one full scan,
+        // ascending-id order (slot order therefore equals id order).
+        let scan = self.graph.store.scan(&[None, None, None]);
+        let mut ids: Vec<Id> = Vec::with_capacity(2 * scan.rows.len());
+        for row in scan.rows.iter() {
+            let [s, _, o] = scan.to_spo(row);
+            ids.push(s);
+            ids.push(o);
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        ids.retain(|&id| self.is_entity(id));
+
+        let mut entities: Vec<Id> = Vec::new();
+        let mut slot_of: FxHashMap<Id, u32> = FxHashMap::default();
+        let mut data: Vec<u32> = Vec::new();
+        let mut buckets: FxHashMap<(u32, u64), Vec<u32>> = FxHashMap::default();
+        let mut mins = vec![u32::MAX; num_hashes];
+        for id in ids {
+            let sig = self.signature_of_id(id);
+            if sig.is_empty() {
+                continue;
+            }
+            mins.iter_mut().for_each(|m| *m = u32::MAX);
+            for &(dir, p, n) in sig.elems.iter() {
+                let mut base = splitmix64(u64::from(dir));
+                base = splitmix64(base ^ u64::from(p));
+                base = splitmix64(base ^ u64::from(n));
+                for (min, &seed) in mins.iter_mut().zip(&hash_seeds) {
+                    // Truncating the mix to its top 32 bits halves sketch memory; a
+                    // per-component collision (2⁻³²) only perturbs the estimate — a
+                    // returned score is always re-scored exactly.
+                    let h = (splitmix64(base ^ seed) >> 32) as u32;
+                    if h < *min {
+                        *min = h;
+                    }
+                }
+            }
+            let slot = entities.len() as u32;
+            for b in 0..bands {
+                buckets.entry((b as u32, band_key(b, rows, &mins))).or_default().push(slot);
+            }
+            entities.push(id);
+            slot_of.insert(id, slot);
+            data.extend_from_slice(&mins);
+        }
+        SketchIndex { sim: self, num_hashes, bands, rows, entities, slot_of, data, buckets }
+    }
+}
+
+#[cfg(feature = "sketch")]
+impl SketchIndex<'_, '_> {
+    /// Number of indexed entities (entities with a non-empty signature).
+    pub fn len(&self) -> usize {
+        self.entities.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entities.is_empty()
+    }
+
+    #[inline]
+    fn sketch_of(&self, slot: u32) -> &[u32] {
+        let start = slot as usize * self.num_hashes;
+        &self.data[start..start + self.num_hashes]
+    }
+
+    /// The fraction of matching MinHash components — an unbiased estimate of the
+    /// **unweighted** Jaccard similarity of two entities' signature element sets, in
+    /// `[0, 1]`. 0 when either term is not in the index (absent from the graph, a
+    /// literal, or an empty signature). This is the ranking signal candidate
+    /// generation uses; it is NOT the exact IDF-weighted [`Sim::similarity`] score.
+    pub fn estimate(&self, a: &Term, b: &Term) -> f64 {
+        let (Some(a), Some(b)) = (self.sim.graph.id_of(a), self.sim.graph.id_of(b)) else {
+            return 0.0;
+        };
+        let (Some(&sa), Some(&sb)) = (self.slot_of.get(&a), self.slot_of.get(&b)) else {
+            return 0.0;
+        };
+        self.matching_fraction(self.sketch_of(sa), self.sketch_of(sb))
+    }
+
+    fn matching_fraction(&self, a: &[u32], b: &[u32]) -> f64 {
+        let matching = a.iter().zip(b).filter(|(x, y)| x == y).count();
+        matching as f64 / self.num_hashes as f64
+    }
+
+    /// The `k` entities most similar to `a` (excluding `a`), best first — the
+    /// dense-graph counterpart of [`Sim::most_similar`]. Candidate generation reads
+    /// LSH buckets instead of index ranges: every indexed entity agreeing with `a` on
+    /// at least one full band is a candidate, candidates rank by
+    /// [`estimate`](Self::estimate), and the top `max(4k, 64)` re-score EXACTLY with
+    /// [`Sim::similarity`] semantics — a returned `(entity, score)` pair always
+    /// satisfies `score == similarity(a, entity)`. Zero-scoring candidates (LSH
+    /// band-key false positives with no real signature overlap) are dropped.
+    ///
+    /// **Approximation:** recall is probabilistic — an entity at unweighted Jaccard
+    /// `s` from `a` becomes a candidate with probability `1 − (1 − s^rows)^bands`
+    /// (identical-signature twins always collide). Unlike [`Sim::most_similar`]
+    /// there is no shares-a-sub-cap-element recall guarantee, and no profile
+    /// fallback. In exchange, per-query cost is the matched buckets plus the exact
+    /// re-scoring — independent of hub-element frequency, which is the point of the
+    /// escape hatch.
+    pub fn most_similar(&self, a: &Term, k: usize) -> Vec<(Term, f64)> {
+        let Some(id) = self.sim.graph.id_of(a) else {
+            return Vec::new();
+        };
+        let Some(&slot) = self.slot_of.get(&id) else {
+            return Vec::new();
+        };
+        if k == 0 {
+            return Vec::new();
+        }
+        let sketch = self.sketch_of(slot);
+        // 1. LSH candidate generation: union of `a`'s buckets across all bands.
+        let mut cand_slots: Vec<u32> = Vec::new();
+        for b in 0..self.bands {
+            if let Some(bucket) = self.buckets.get(&(b as u32, band_key(b, self.rows, sketch))) {
+                cand_slots.extend(bucket.iter().copied());
+            }
+        }
+        cand_slots.sort_unstable();
+        cand_slots.dedup();
+        // 2. Keep the strongest M candidates by estimated Jaccard (slot order equals
+        //    id order, so the tie-break matches `most_similar`'s id-ascending rule) …
+        let mut ranked: Vec<(u32, f64)> = cand_slots
+            .into_iter()
+            .filter(|&s| s != slot)
+            .map(|s| (s, self.matching_fraction(sketch, self.sketch_of(s))))
+            .collect();
+        ranked.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        ranked.truncate(k.saturating_mul(4).max(64));
+        // 3. … and re-score them exactly against the full weighted signature.
+        let sig = self.sim.signature_of_id(id);
+        let mut scored: Vec<(Id, f64)> = ranked
+            .into_iter()
+            .map(|(s, _)| {
+                let c = self.entities[s as usize];
+                (c, weighted_jaccard(&sig, &self.sim.signature_of_id(c)))
+            })
+            .filter(|&(_, v)| v > 0.0)
+            .collect();
+        scored.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+        scored.truncate(k);
+        scored.into_iter().map(|(c, v)| (self.sim.graph.dict.term(c), v)).collect()
     }
 }
 
@@ -955,6 +1203,17 @@ mod tests {
         assert_eq!(by_sig[0].0.to_string(), "<http://ex.org/a>");
         assert_eq!(by_sig[0].1, 1.0);
         assert_eq!(by_sig[1].0.to_string(), "<http://ex.org/twin>");
+    }
+
+    // [SONNET-4.6] Exercise both the primary and profile-fallback candidate budgets.
+    #[test]
+    fn huge_k_does_not_overflow_non_sketch_candidate_budgets() {
+        let g = graph(":a :plays :chess . :b :plays :tennis .");
+        let sim = unweighted(&g);
+
+        let top = sim.most_similar(&iri("a"), usize::MAX);
+
+        assert_eq!(top, vec![(iri("b"), 1.0)]);
     }
 
     #[test]

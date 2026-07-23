@@ -140,10 +140,10 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install PyYAML
@@ -154,11 +154,11 @@ jobs:
         # Consumers here: skill-frontmatter + the ci-scripts selection-wiring inspection.
         run: pip install --require-hashes -r .github/requirements/docs-quality.txt
       - name: Install typos
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: typos@1.47.2
       - name: Install lychee (for the site-links self-test)
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: lychee@0.23.0
 
@@ -397,6 +397,16 @@ jobs:
       # exit codes) runs on every PR — same stdlib-only, no-deps pattern as the lints above.
       - name: Self-test Miri verdict classifier (timeout-vs-UB split + exit codes)
         run: python3 scripts/miri_classify_verdict.py --self-test
+      # [FABLE-5] #3419: the issue-triage pair (scripts/triage.py + scripts/retriage.py) was
+      # self-tested ONLY inside the retriage cron (retriage.yml), so a PR that changed
+      # triage.py's promotion behavior (#2898: park no-area issues) broke retriage's fixture
+      # expectations on main SILENTLY — the KeyError surfaced a day later, out-of-band.
+      # Running both hermetic self-tests HERE (stdlib-only, no gh/network: pure label-delta
+      # fixtures) reds the offending PR instead of the next cron run.
+      - name: Self-test triage.py + retriage.py (static-triage + retriage-plan fixtures)
+        run: |
+          python3 scripts/triage.py --self-test
+          python3 scripts/retriage.py --self-test
       # [OPUS-4.8] sq-ur7o: every SHA-pinned `taiki-e/install-action` step MUST carry an
       # explicit `with: tool:`. install-action picks the tool from its @<tool> git ref; the
       # code-scanning=0 SHA-pin policy DROPS that selector, so without `with: tool:` the
@@ -416,7 +426,9 @@ jobs:
       # is validated HERE by its hermetic self-test — command-parsing + base-comparison +
       # fail-OPEN-on-error — with NO network/gh dependency (the base lookup is injected). Mirrors
       # coverage-gate.py / check-install-action-tool.py --self-test (stdlib-only, no deps).
-      - name: Self-test stacked-PR arm guard (command parse + base check + fail-open)
+      # [GPT-5.6] #3605: it also runs the real settings command from an unrelated cwd and
+      # proves a missing guard script returns an explicit allow instead of bricking every Bash.
+      - name: Self-test stacked-PR arm guard (cwd-independent + fail-open)
         run: python3 scripts/check-pr-arm-base.py --self-test
       # [OPUS-4.8] sq-53cq: anti-drift guard for the two-hop dashboard publish. The in-repo
       # source-of-truth bench/dashboard/* reaches the live site via bench.yml's "Seed Pages
@@ -562,6 +574,10 @@ jobs:
       # still-settling, idle-queue hang => RED, absolute cap bounded) are pinned by a
       # hermetic stdlib-unittest suite (NO gh, NO network — injected fetchers). A
       # regression in the gate's own logic must red CI before every merge depends on it.
+      # [GPT-5.6] #3505 adds a script-native mutation tripwire: superseded cancellation
+      # must pass, newest failure must fail, and cancelled-run redispatch must stop at one.
+      - name: "Self-test ci-summary #3505 mutations (supersession + failure + bounded redispatch)"
+        run: python3 scripts/ci_summary_gate.py --self-test
       - name: Self-test ci-summary gate loop (verdict semantics + adaptive saturation budget — sq-90cv4)
         run: python3 scripts/tests/test_ci_summary_gate.py
       # [FABLE-5] sq-fmx4u.3: the change-based test-selection stack is now
@@ -658,6 +674,29 @@ jobs:
         run: python3 scripts/check-advisory-registry.py --self-test
       - name: "Enforce advisory-job registry + gate-intent placement (C2/C3) — GATING"
         run: python3 scripts/check-advisory-registry.py
+      # [OPUS-4.8] sparq-org/sparq#3475: the fast-fix ring's ONLY privileged
+      # capability is the cross-repo REGISTRY_RING_TOKEN doorbell. Because a
+      # `workflow_run` workflow is ALSO delivered for fork / cross-repo triggering
+      # runs (and workflow_run grants secret access even when the triggering run
+      # lacked secrets), the ring MUST fail-closed on
+      #   github.event.workflow_run.head_repository.full_name == github.repository
+      # at the job level, with same-repo+same-head-SHA defense in depth in the
+      # head_sha->PR resolution and a live head_repo/head_sha re-check before the
+      # dispatch. This REGRESSION checker PINS THE WHOLE WORKFLOW DOCUMENT byte-exact
+      # against scripts/tests/fast-fix-ring.golden.yml (after semantically-inert
+      # trailing-whitespace/newline normalization only), so ANY edit to the file reds:
+      # a job-level guard weakening (OR-wrap, negation, operand swap, demoted-to-comment
+      # predicate, uncalled-function move, alt dispatch spelling, dropped select conjunct,
+      # inverted `!=`, changed permission, dispatch-target swap), a SECOND token consumer
+      # in ANY syntax (dotted or `secrets['...']` bracket), a workflow-level `env:` a
+      # second job inherits, or a workflow-level `defaults.run.shell` wrapper. The
+      # whole-file pin SUBSUMES the former whole-job pin (there is no level above the
+      # whole file), which is why it is terminal (self-test proves it with the full
+      # round-1..5 mutation table via the live --root path). Pure stdlib — no PyYAML.
+      - name: Self-test the fast-fix ring cross-repo guard (#3475 negative fixtures)
+        run: python3 scripts/check-fast-fix-ring-guard.py --self-test
+      - name: "Enforce the fast-fix ring fail-closed cross-repo guard (#3475) — GATING"
+        run: python3 scripts/check-fast-fix-ring-guard.py
 
   # ----------------------------- ADVISORY -----------------------------
   # [FABLE-5] sq-6vshe.20: the three former advisory jobs as step-groups on ONE
@@ -676,7 +715,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 

@@ -179,7 +179,13 @@ el-suite-par = ["el-suite", "sparq-reason-el/par"]
 # (`sparq-reason-dl/dl_transitive`), graduating the corpus's transitive consistency /
 # entailment / profile cases from fail-closed abstentions to definitive verdicts (floors
 # re-pinned with the per-mechanism evidence in `tests/dl_suite.rs`).
-dl-direct = ["dep:sparq-reason-dl", "sparq-reason-dl/dispatch", "sparq-reason-dl/dl_transitive"]
+# [FABLE-5] sq-fj8lj: the arm also enables the graduated QL dispatch branch
+# (`sparq-reason-dl/dispatch_ql` → sparq-reason-ql's DL-Lite_R consistency checker), so the
+# lane exercises the feature-on path. MEASURED at the pinned export snapshot: ZERO corpus
+# rows dispatch to the QL branch (in-QL ∧ not-RL ∧ not-EL forces a complement shape absent
+# from the extractable corpus — the pre-change abstention histogram had no
+# "QL consistency pending" entry), so every floor is UNCHANGED.
+dl-direct = ["dep:sparq-reason-dl", "sparq-reason-dl/dispatch", "sparq-reason-dl/dl_transitive", "sparq-reason-dl/dispatch_ql"]
 
 # [OPUS-4.8] sq-ushvx (epic sq-my8wd) — the in-process SERVICE-federation test harness.
 # OPT-IN and OFF by default: it stands up a REAL `sparq_server::serve` endpoint on an

@@ -150,6 +150,19 @@ policy = ["dep:sparq-policy"]
 # document. OFF by default so the lean `wasm_bundle_bytes` baseline is byte-identical;
 # see the sparq-forms dependency note above for the wasm32-safety rationale.
 forms = ["dep:sparq-forms", "dep:serde_json"]
+# [FABLE-5] sq-3ul2n.11 (#2752): route the wasm SERIAL Turtle path through sparq-core's
+# native byte-level Turtle parser (`native-ttl`, sq-jocpn) — the structural fix for the
+# sq-wrn61 single-thread Turtle gap. wasm has no threads, so the chunk-parallel Turtle
+# path that wins natively never runs here and the incumbent oxttl serial parser is the
+# whole load path — exactly the near-parity-vs-oxigraph-wasm Turtle axis the
+# cross-library compare flagged (research/gap-wasm-2026-07.md; ADVISORY until quiet-box
+# confirmed). The native parser is a validated byte-identical drop-in (native-vs-oxttl
+# differential + the W3C TurtleTests conformance ratchet: identical accept/reject +
+# resolved-term set; only anonymous blank-node labels differ). Pulls NO new external
+# crate (`oxiri` is already in-tree transitively via oxttl). OFF by default so the lean
+# `wasm_bundle_bytes` baseline is byte-identical; the published bundle (js `build:wasm`)
+# turns it on.
+native-ttl = ["sparq-core/native-ttl"]
 # [FABLE-5] sq-ixc3.19: expose the engine's STRUCTURED query plan (sparq-engine's
 # `explain_json::PlanNode` — the sq-u4lgr/#902 typed EXPLAIN tree) as the
 # `Store::explainPlanJson(sparql)` / `Store::explainPlanAnalyzeJson(sparql)` bindings,

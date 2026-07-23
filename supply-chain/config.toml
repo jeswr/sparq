@@ -33,10 +33,26 @@ criteria = "safe-to-deploy"
 version = "1.1.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.anstream]]
+version = "1.0.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.anstyle]]
 version = "1.0.14"
-criteria = "safe-to-run"
-notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+criteria = "safe-to-deploy"
+notes = "hdt 0.7.3 runtime dependency; no trusted audit available upstream [SONNET-4.6]"
+
+[[exemptions.anstyle-parse]]
+version = "1.0.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.anstyle-query]]
+version = "1.1.5"
+criteria = "safe-to-deploy"
+
+[[exemptions.anstyle-wincon]]
+version = "3.0.11"
+criteria = "safe-to-deploy"
 
 [[exemptions.anyhow]]
 version = "1.0.102"
@@ -185,12 +201,24 @@ criteria = "safe-to-deploy"
 version = "0.4.10"
 criteria = "safe-to-deploy"
 
+[[exemptions.bincode]]
+version = "1.3.3"
+criteria = "safe-to-deploy"
+
+[[exemptions.binout]]
+version = "0.3.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.bit-set]]
 version = "0.10.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.bitflags]]
 version = "2.13.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.bitset-core]]
+version = "0.1.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.blake3]]
@@ -239,21 +267,33 @@ criteria = "safe-to-deploy"
 
 [[exemptions.clap]]
 version = "4.6.1"
-criteria = "safe-to-run"
-notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+criteria = "safe-to-deploy"
+notes = "hdt 0.7.3 runtime dependency; no trusted audit available upstream [SONNET-4.6]"
 
 [[exemptions.clap_builder]]
 version = "4.6.0"
-criteria = "safe-to-run"
-notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+criteria = "safe-to-deploy"
+notes = "hdt 0.7.3 runtime dependency; no trusted audit available upstream [SONNET-4.6]"
+
+[[exemptions.clap_derive]]
+version = "4.6.1"
+criteria = "safe-to-deploy"
 
 [[exemptions.clap_lex]]
 version = "1.1.0"
-criteria = "safe-to-run"
-notes = "dev-only criterion bench dependency (sq-qonbz.4); not in the shipped or wasm build; no trusted audit available upstream [OPUS-4.8]"
+criteria = "safe-to-deploy"
+notes = "hdt 0.7.3 runtime dependency; no trusted audit available upstream [SONNET-4.6]"
 
 [[exemptions.cmake]]
 version = "0.1.58"
+criteria = "safe-to-deploy"
+
+[[exemptions.co_sort]]
+version = "0.2.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.colorchoice]]
+version = "1.0.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.combine]]
@@ -363,7 +403,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.crypto-bigint]]
 version = "0.5.5"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.crypto-common]]
 version = "0.1.7"
@@ -421,13 +462,18 @@ criteria = "safe-to-deploy"
 version = "1.0.5"
 criteria = "safe-to-deploy"
 
+[[exemptions.dyn_size_of]]
+version = "0.4.5"
+criteria = "safe-to-deploy"
+
 [[exemptions.earcut]]
 version = "0.4.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.ecdsa]]
 version = "0.16.9"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.ed25519]]
 version = "2.2.3"
@@ -443,7 +489,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.elliptic-curve]]
 version = "0.13.8"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.enum-ordinalize]]
 version = "4.3.2"
@@ -451,6 +498,14 @@ criteria = "safe-to-deploy"
 
 [[exemptions.enum-ordinalize-derive]]
 version = "4.3.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.env_filter]]
+version = "2.0.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.env_logger]]
+version = "0.11.11"
 criteria = "safe-to-deploy"
 
 [[exemptions.event-listener]]
@@ -471,7 +526,8 @@ criteria = "safe-to-run"
 
 [[exemptions.ff]]
 version = "0.13.1"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.find-msvc-tools]]
 version = "0.1.9"
@@ -496,6 +552,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.fs_extra]]
 version = "1.3.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.fsum]]
+version = "0.1.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.futures]]
@@ -536,6 +596,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.generic-array]]
 version = "0.14.7"
+criteria = "safe-to-deploy"
+
+[[exemptions.generic-tests]]
+version = "0.1.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.geo]]
@@ -584,7 +648,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.group]]
 version = "0.13.0"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.h2]]
 version = "0.4.15"
@@ -611,7 +676,7 @@ version = "0.14.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.hdt]]
-version = "0.4.0"
+version = "0.7.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.heapless]]
@@ -767,6 +832,10 @@ criteria = "safe-to-deploy"
 version = "2.12.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.is_terminal_polyfill]]
+version = "1.70.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.itertools]]
 version = "0.14.0"
 criteria = "safe-to-deploy"
@@ -880,6 +949,14 @@ criteria = "safe-to-deploy"
 version = "0.11.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.mem_dbg]]
+version = "0.3.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.mem_dbg-derive]]
+version = "0.2.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.memchr]]
 version = "2.8.2"
 criteria = "safe-to-deploy"
@@ -903,6 +980,10 @@ criteria = "safe-to-run"
 [[exemptions.minimal-lexical]]
 version = "0.2.1"
 criteria = "safe-to-run"
+
+[[exemptions.minimum_redundancy]]
+version = "0.3.3"
+criteria = "safe-to-deploy"
 
 [[exemptions.mio]]
 version = "1.2.1"
@@ -989,6 +1070,10 @@ criteria = "safe-to-run"
 version = "1.21.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.once_cell_polyfill]]
+version = "1.70.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.openssl-probe]]
 version = "0.2.1"
 criteria = "safe-to-deploy"
@@ -1043,8 +1128,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.p256]]
 version = "0.13.2"
-criteria = "safe-to-run"
-notes = "solid-server-rs import pre-flight (sq-gg0qq.1): DEV-ONLY (safe-to-run) — mints test JWS access tokens + DPoP proofs in the incoming server's auth-middleware unit tests; RustCrypto ES256 stack, never in the shipped build. [FABLE-5]"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; direct dep of the OFF-by-default vc-bridge feature (needs safe-to-deploy — subsumes the solid-server-rs sq-gg0qq.1 DEV-ONLY ES256 test-token usage which only needs safe-to-run); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.parking]]
 version = "2.2.1"
@@ -1154,7 +1239,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.primeorder]]
 version = "0.13.6"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.profiling]]
 version = "1.0.18"
@@ -1215,6 +1301,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.quote]]
 version = "0.3.15"
+criteria = "safe-to-deploy"
+
+[[exemptions.qwt]]
+version = "0.4.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.r-efi]]
@@ -1293,7 +1383,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.rfc6979]]
 version = "0.4.0"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (ecdsa path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.ring]]
 version = "0.17.14"
@@ -1391,7 +1482,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.sec1]]
 version = "0.7.3"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.security-framework]]
 version = "3.7.0"
@@ -1410,6 +1502,10 @@ version = "0.3.6"
 criteria = "safe-to-deploy"
 notes = "Opt-in sparq-arrow Parquet dependency closure; explicit review backlog exemption for PR #2196 [GPT-5.6]"
 
+[[exemptions.serde-big-array]]
+version = "0.5.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.serde_json]]
 version = "1.0.150"
 criteria = "safe-to-deploy"
@@ -1424,7 +1520,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.serdect]]
 version = "0.2.0"
-criteria = "safe-to-run"
+criteria = "safe-to-deploy"
+notes = "RustCrypto-org crate; transitive dep of the OFF-by-default vc-bridge feature (p256 path); no upstream audit covers this exact version [OPUS-4.8]"
 
 [[exemptions.sha1]]
 version = "0.11.0"
@@ -1548,6 +1645,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.stable_deref_trait]]
 version = "1.2.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.strsim]]
+version = "0.11.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.sucds]]
@@ -1709,6 +1810,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.utf8-zero]]
 version = "0.8.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.utf8parse]]
+version = "0.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.uuid]]

@@ -38,7 +38,9 @@ const CAPTURED_AGE = 30;
 const AGE_THRESHOLD = 25;
 // `operand_enc` for `"30"^^xsd:integer`, the SAME committed anchor the page ships in
 // AGE_OPERAND_ENC[30] (precomputed natively via encode_int_literal). It binds the
-// hidden age digits to the committed credential.
+// hidden age digits to the committed credential. DRIFT GUARD (sq-1s2.4): pinned
+// against the native encoder by crates/sparq-zk-compose/tests/site_age_enc_drift.rs —
+// on a circuit/encoder bump that test fails RED with the regenerated value to paste.
 const OPERAND_ENC =
   "0x132fa587351bf3f12fd3cbed64d5526f28791099d1d40870f94595873c78fa72";
 

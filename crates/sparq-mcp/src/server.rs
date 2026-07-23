@@ -21,10 +21,43 @@ use crate::jsonrpc::{
 };
 use crate::tools;
 
-/// The MCP protocol version this server implements (the value echoed in the
-/// `initialize` result). Pinned to a published MCP revision; a client that speaks a
-/// different revision still interoperates for the basic tools flow.
-pub const PROTOCOL_VERSION: &str = "2024-11-05";
+/// The newest MCP protocol revision this server implements — the version offered in
+/// the `initialize` result when the client proposes an unsupported (or no) revision,
+/// per the MCP versioning rules. [SONNET-4.6] sq-bvnqm
+pub const PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// Every published MCP protocol revision this server can speak, newest first
+/// (`[0]` is [`PROTOCOL_VERSION`]). The `initialize` / `tools/list` / `tools/call`
+/// request-response shapes this tools-only server implements are identical across
+/// these revisions — the later additions (structured tool output, elicitation,
+/// tasks, icons, resource links) are all optional capabilities a server may simply
+/// not declare, and the plain `type`/`properties`/`required` tool input schemas are
+/// valid under the JSON Schema 2020-12 dialect that 2025-11-25 makes the default.
+///
+/// The 2025-03-26 revision is deliberately ABSENT: it is the one revision that
+/// REQUIRES receiving JSON-RPC batches (added there, removed again in 2025-06-18),
+/// which this one-object-per-message dispatch core does not implement — so claiming
+/// it would overstate conformance. A 2025-03-26 client is offered
+/// [`PROTOCOL_VERSION`] instead and decides whether to proceed. [SONNET-4.6] sq-bvnqm
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2024-11-05"];
+
+/// MCP version negotiation over the client's `initialize` params: accept the
+/// client's proposed `protocolVersion` when it is one we support, otherwise respond
+/// with our latest ([`PROTOCOL_VERSION`]) — the client then decides whether to
+/// continue or disconnect. A missing or non-string proposal gets the latest too.
+/// [SONNET-4.6] sq-bvnqm
+pub(crate) fn negotiate_protocol_version(params: &Value) -> &'static str {
+    params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .and_then(|proposed| {
+            SUPPORTED_PROTOCOL_VERSIONS
+                .iter()
+                .copied()
+                .find(|supported| *supported == proposed)
+        })
+        .unwrap_or(PROTOCOL_VERSION)
+}
 
 /// Server configuration. The security-relevant field is [`Self::allow_update`]:
 /// it is **`false` by default**, so a freshly-built server is strictly read-only
@@ -171,7 +204,7 @@ impl McpServer {
     /// error object.
     fn dispatch(&mut self, req: &Request) -> Result<Value, RpcError> {
         match req.method.as_str() {
-            "initialize" => Ok(self.initialize_result()),
+            "initialize" => Ok(self.initialize_result(&req.params)),
             // Lifecycle notification from the client; nothing to do.
             "notifications/initialized" | "initialized" => Ok(Value::Null),
             "ping" => Ok(json!({})),
@@ -184,11 +217,11 @@ impl McpServer {
         }
     }
 
-    /// The `initialize` handshake result: protocol version, server info, and the
-    /// declared capabilities (just `tools`).
-    fn initialize_result(&self) -> Value {
+    /// The `initialize` handshake result: the negotiated protocol version, server
+    /// info, and the declared capabilities (just `tools`).
+    fn initialize_result(&self, params: &Value) -> Value {
         json!({
-            "protocolVersion": PROTOCOL_VERSION,
+            "protocolVersion": negotiate_protocol_version(params),
             "capabilities": { "tools": {} },
             "serverInfo": {
                 "name": self.config.server_name,
