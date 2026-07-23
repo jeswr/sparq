@@ -58,6 +58,24 @@ def R(name, status="completed", conclusion="success", url="", started="", rid=0,
             "external_id": external_id}
 
 
+def W(run_id, workflow_id, *, name="CI", status="completed", conclusion="success",
+      created="2026-07-21T14:00:00Z", attempt=1):
+    """Actions workflow-run fixture for the #3505 authoritative resolver."""
+    return {
+        "id": run_id,
+        "workflow_id": workflow_id,
+        "name": name,
+        "path": f".github/workflows/{name.lower().replace(' ', '-')}.yml",
+        "head_sha": "deadbeef",
+        "status": status,
+        "conclusion": conclusion,
+        "created_at": created,
+        "run_started_at": created,
+        "run_attempt": attempt,
+        "html_url": f"https://github.test/o/r/actions/runs/{run_id}",
+    }
+
+
 GREEN = R("build + test")
 GREEN2 = R("clippy")
 PENDING = R("coverage", status="queued", conclusion=None)
@@ -393,6 +411,238 @@ class TestSelfExclusionAndFetch(unittest.TestCase):
         code, out = run(tiny_cfg(), polls)
         self.assertEqual(code, 1)
         self.assertIn("consecutive check-run fetch failures", out)
+
+
+class TestNewestWorkflowRunResolution(unittest.TestCase):
+    """[GPT-5.6] #3505: workflow identity/attempt, not stale check presence, wins."""
+
+    def test_newest_order_prefers_new_run_id_then_same_run_attempt(self):
+        same_time = "2026-07-21T14:00:00Z"
+        old_rerun = W(101, 7, created=same_time, attempt=2)
+        new_run = W(102, 7, created=same_time, attempt=1)
+        self.assertEqual(g.newest_workflow_runs([old_rerun, new_run])["id:7"]["id"], 102)
+        attempt_one = W(102, 7, created=same_time, attempt=1)
+        attempt_two = W(102, 7, created=same_time, attempt=2)
+        self.assertEqual(
+            g.newest_workflow_runs([attempt_one, attempt_two])["id:7"]["run_attempt"], 2
+        )
+
+    def test_superseded_cancelled_and_failure_are_non_events(self):
+        old_cancel = W(101, 7, conclusion="cancelled", created="2026-07-21T13:00:00Z")
+        old_failure = W(102, 7, conclusion="failure", created="2026-07-21T13:30:00Z")
+        newest = W(103, 7, created="2026-07-21T14:00:00Z")
+        checks = [
+            R("test shard", conclusion="cancelled", rid=1001,
+              url="https://github.test/o/r/actions/runs/101/job/1"),
+            R("test shard", conclusion="failure", rid=1002,
+              url="https://github.test/o/r/actions/runs/102/job/2"),
+        ]
+        resolved, dropped = g.resolve_newest_workflow_runs(
+            checks, [old_cancel, old_failure, newest], "999"
+        )
+        self.assertEqual(dropped, 2)
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("cancelled", [r.get("conclusion") for r in resolved])
+        self.assertNotIn("failure", [r.get("conclusion") for r in resolved])
+
+    def test_newest_failure_still_fails_when_job_check_evaporated(self):
+        newest = W(103, 7, conclusion="failure")
+        resolved, _ = g.resolve_newest_workflow_runs([], [newest], "999")
+        self.assertEqual(len(resolved), 1, "run-level failure evidence must be synthesized")
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 1)
+        self.assertIn("workflow-run verdict (id:7)", out)
+
+    def test_newest_failure_cannot_be_advisory_excluded_by_workflow_name(self):
+        newest = W(103, 7, name="all advisory", conclusion="failure")
+        resolved, _ = g.resolve_newest_workflow_runs([], [newest], "999")
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 1, out)
+
+    def test_authoritative_advisory_job_failure_remains_non_gating(self):
+        newest = W(103, 7, conclusion="failure")
+        advisory_job = {
+            "id": 2001,
+            "name": "vale (prose, advisory)",
+            "status": "completed",
+            "conclusion": "failure",
+            "started_at": "2026-07-21T14:05:00Z",
+            "html_url": "https://github.test/o/r/actions/runs/103/job/2",
+        }
+        resolved, _ = g.resolve_newest_workflow_runs(
+            [], [newest], "999", attempt_jobs={103: [advisory_job]}
+        )
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 0, out)
+
+    def test_green_run_with_evaporated_check_resolves_without_hang(self):
+        newest = W(103, 7)
+        resolved, _ = g.resolve_newest_workflow_runs([], [newest], "999")
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+
+    def test_completed_jobs_listing_recovers_evaporated_required_leg(self):
+        newest = W(103, 7, conclusion="failure")
+        failed_job = {
+            "id": 2001,
+            "name": "required test shard",
+            "status": "completed",
+            "conclusion": "failure",
+            "started_at": "2026-07-21T14:05:00Z",
+            "html_url": "https://github.test/o/r/actions/runs/103/job/2",
+        }
+        resolved, _ = g.resolve_newest_workflow_runs(
+            [], [newest], "999", attempt_jobs={103: [failed_job]}
+        )
+        self.assertEqual([r["name"] for r in resolved], ["required test shard"])
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 1, out)
+
+    def test_evaporated_feature_group_still_requires_reporter(self):
+        newest = W(103, 7)
+        group_job = {
+            "id": 2001,
+            "name": "opt-in group (0)",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-07-21T14:05:00Z",
+            "html_url": "https://github.test/o/r/actions/runs/103/job/2",
+        }
+        resolved, _ = g.resolve_newest_workflow_runs(
+            [], [newest], "999", attempt_jobs={103: [group_job]}
+        )
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 1)
+        self.assertIn("reporter verdict never landed", out)
+
+    def test_rerun_attempt_uses_attempt_jobs_not_old_same_run_id_checks(self):
+        rerun = W(103, 7, attempt=2)
+        old_failure = R(
+            "test shard", conclusion="failure", rid=1001,
+            url="https://github.test/o/r/actions/runs/103/job/1",
+        )
+        latest_job = {
+            "id": 2001,
+            "name": "test shard",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-07-21T14:05:00Z",
+            "html_url": "https://github.test/o/r/actions/runs/103/job/2",
+        }
+        resolved, dropped = g.resolve_newest_workflow_runs(
+            [old_failure], [rerun], "999", attempt_jobs={103: [latest_job]}
+        )
+        self.assertEqual(dropped, 1)
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 0, out)
+
+    def test_rerun_attempt_keeps_only_current_manually_posted_run_checks(self):
+        rerun = W(103, 7, attempt=2)
+        rerun["run_started_at"] = "2026-07-21T14:05:00Z"
+        old_report = R(
+            g.FM_REPORT_NAME, started="2026-07-21T14:00:00Z", rid=1001,
+            url="https://github.test/o/r/actions/runs/103", external_id="103",
+        )
+        current_report = R(
+            g.FM_REPORT_NAME, started="2026-07-21T14:06:00Z", rid=1002,
+            url="https://github.test/o/r/actions/runs/103", external_id="103",
+        )
+        resolved, dropped = g.resolve_newest_workflow_runs(
+            [old_report, current_report], [rerun], "999", attempt_jobs={103: []}
+        )
+        reports = [r for r in resolved if r.get("name") == g.FM_REPORT_NAME]
+        self.assertEqual([r["id"] for r in reports], [1002])
+        self.assertEqual(dropped, 1)
+
+    def test_duplicate_job_names_do_not_cross_workflow_identity(self):
+        a = W(101, 7, name="CI A")
+        b = W(102, 8, name="CI B")
+        a_failure = R(
+            "shared job", conclusion="failure", rid=1001,
+            url="https://github.test/o/r/actions/runs/101/job/1",
+        )
+        b_running = R(
+            "shared job", status="in_progress", conclusion=None, rid=1002,
+            url="https://github.test/o/r/actions/runs/102/job/2",
+        )
+        resolved, _ = g.resolve_newest_workflow_runs(
+            [a_failure, b_running], [a, b], "999"
+        )
+        self.assertEqual(len(g.failfast_failures(resolved)), 1,
+                         "another workflow's same-name in-flight job must not mask failure")
+
+    def test_cancelled_auto_redispatch_is_bounded_once(self):
+        cancelled = W(104, 7, conclusion="cancelled")
+        posts = []
+        resolver = g.WorkflowRunResolver(
+            self_run_id="999",
+            fetch_checks=lambda: [],
+            fetch_workflows=lambda: [cancelled],
+            fetch_attempt_jobs=lambda run_id, attempt: [],
+            redispatch=lambda run_id: posts.append(run_id),
+            redispatch_settle_polls=2,
+        )
+        first = resolver()
+        self.assertTrue(any(r.get("status") != "completed" for r in first),
+                        "a dispatched cancellation must become pending, not failure")
+        resolver()
+        with self.assertRaisesRegex(g.SupersededLegsError, "superseded-legs"):
+            resolver()
+        self.assertEqual(posts, [104], "API lag must never cause a second POST")
+
+    def test_completed_run_jobs_are_authoritative_and_cached(self):
+        complete = W(104, 7)
+        calls = []
+        job = {
+            "id": 2001,
+            "name": "required test shard",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-07-21T14:05:00Z",
+            "html_url": "https://github.test/o/r/actions/runs/104/job/2",
+        }
+
+        def fetch_jobs(run_id, attempt):
+            calls.append((run_id, attempt))
+            return [job]
+
+        resolver = g.WorkflowRunResolver(
+            self_run_id="999",
+            fetch_checks=lambda: [],
+            fetch_workflows=lambda: [complete],
+            fetch_attempt_jobs=fetch_jobs,
+            redispatch=lambda run_id: self.fail("green run must not redispatch"),
+        )
+        first = resolver()
+        second = resolver()
+        self.assertEqual([r["name"] for r in first], ["required test shard"])
+        self.assertEqual([r["name"] for r in second], ["required test shard"])
+        self.assertEqual(calls, [(104, 1)], "terminal job inventory should be cached")
+
+    def test_cancelled_retry_attempt_fails_loud_without_third_attempt(self):
+        cancelled_retry = W(104, 7, conclusion="cancelled", attempt=2)
+        posts = []
+        resolver = g.WorkflowRunResolver(
+            self_run_id="999",
+            fetch_checks=lambda: [],
+            fetch_workflows=lambda: [cancelled_retry],
+            fetch_attempt_jobs=lambda run_id, attempt: [],
+            redispatch=lambda run_id: posts.append(run_id),
+        )
+        with self.assertRaisesRegex(g.SupersededLegsError, "attempt 2"):
+            resolver()
+        self.assertEqual(posts, [])
+
+    def test_unrecoverable_cancellation_uses_distinct_loud_gate_message(self):
+        code, out = run(
+            tiny_cfg(),
+            [g.SupersededLegsError("superseded-legs, re-run required (#3505): fixture")],
+        )
+        self.assertEqual(code, 1)
+        self.assertIn("superseded-legs, re-run required", out)
+        self.assertIn("did not dispatch it more than once", out)
 
 
 class TestAdvisoryRule(unittest.TestCase):
@@ -1098,6 +1348,37 @@ class TestFeatureMatrixReporterAwait(unittest.TestCase):
     past the gate — absence keeps the gate polling and FAILS CLOSED at timeout."""
 
     # ---- pure predicates ----------------------------------------------------
+    def test_zero_leg_skeleton_placeholder_is_not_group_presence(self):
+        """The unexpanded `${{ matrix.group }}` skeleton (zero-leg run, skipped) must
+        NOT trigger the reporter requirement — production incident PR #3524: every
+        docs/config-only PR timed out RED awaiting a verdict the reporter correctly
+        never posts on a zero-leg run."""
+        runs = [
+            {"name": "opt-in group (${{ matrix.group }})", "status": "completed",
+             "conclusion": "skipped", "details_url": ""},
+        ]
+        self.assertFalse(g.is_real_fm_group(runs[0]))
+        self.assertEqual(g.fm_report_status(runs), "n/a")
+
+    def test_forged_placeholder_name_with_success_still_requires_reporter(self):
+        """SECURITY (sol on #3525): a REAL successful group whose PR-controlled name
+        embeds `${{` must NOT masquerade as the skeleton — the exclusion requires
+        the server-set skipped conclusion too."""
+        runs = [
+            {"name": "opt-in group (g01 ${{ attacker)", "status": "completed",
+             "conclusion": "success", "details_url": ""},
+        ]
+        self.assertTrue(g.is_real_fm_group(runs[0]))
+        self.assertEqual(g.fm_report_status(runs), "pending")
+
+    def test_real_group_name_still_counts(self):
+        runs = [
+            {"name": "opt-in group (g01 sparq-engine)", "status": "completed",
+             "conclusion": "success", "details_url": "https://github.com/o/r/actions/runs/123/job/9"},
+        ]
+        self.assertTrue(g.is_fm_group(runs[0]["name"]))
+        self.assertEqual(g.fm_report_status(runs), "pending")
+
     def test_predicate_contract(self):
         self.assertTrue(g.is_fm_group("opt-in group (sparq-engine 1/2)"))
         self.assertFalse(g.is_fm_group("opt-in sparq-engine (paths)"),
@@ -1304,6 +1585,94 @@ class TestFeatureMatrixReporterCorrelation(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("awaiting the feature-matrix reporter verdict", out)
         self.assertIn("PASSED", out)
+
+
+# --- Fix round 3 (fable): latest-run-relative presence -------------------------
+# Same-SHA zero-leg rerun (ready_for_review / label) leaves an OLDER real group run's
+# check-runs on the commit alongside a NEWER zero-leg skeleton run. Keying presence
+# off ANY real group (the old run's) while keying the run id off the newer skeleton
+# deadlocked the gate: current_run_id = the skeleton's id, no report ever carries it
+# (zero-leg posts none), matched=[] => "pending" => timeout RED. FIX: presence AND the
+# reporter requirement are decided relative to the LATEST feature-matrix run.
+def _skel(run_id="", conclusion="skipped"):
+    """The zero-leg skeleton check-run (unexpanded placeholder + server-set skipped),
+    optionally carrying its own run id url (it is a check-run of that run)."""
+    url = f"https://github.com/o/r/actions/runs/{run_id}/job/1" if run_id else ""
+    return R("opt-in group (${{ matrix.group }})", conclusion=conclusion, url=url)
+
+
+class TestLatestRunRelativePresence(unittest.TestCase):
+    """[FABLE-5] fix round 3: a same-SHA zero-leg rerun must CONCLUDE (n/a), not
+    deadlock awaiting a reporter the zero-leg run correctly never posts."""
+
+    def test_a_mixed_old_real_plus_new_skeleton_is_na(self):
+        """(a) THE DEADLOCK: an OLD real group run (111) + its report(111) sit on the
+        SHA next to a NEWER zero-leg skeleton run (222). The latest run (222) is
+        zero-leg, so NO reporter is expected — the gate must conclude n/a, NOT await
+        run 222's absent report and time out RED."""
+        runs = [_grp("111"), _rep("111"), _skel("222")]
+        # current run id is the newer skeleton's (222) — the very shape that deadlocked.
+        self.assertEqual(g.fm_group_run_id(runs), "222")
+        self.assertEqual(g.fm_report_status(runs), "n/a")
+
+    def test_a_end_to_end_concludes_without_awaiting(self):
+        """(a) end-to-end: the mixed old-real + new-skeleton head PASSES immediately
+        (no reporter await), never RED-on-timeout."""
+        code, out = run(tiny_cfg(), [[_grp("111"), _rep("111"), _skel("222"), GREEN]])
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+        self.assertNotIn("reporter verdict never landed", out)
+
+    def test_b_old_skeleton_plus_new_real_awaits_new_reporter(self):
+        """(b) reversed order: an OLD zero-leg skeleton (111) sits next to the NEWER
+        real run (222). The latest run has real legs => require ITS reporter. Absent
+        => pending; present with external_id == 222 => ok; a stale-only 111 report
+        (there is none here) could never satisfy it."""
+        pending = [_skel("111"), _grp("222"), GREEN]
+        self.assertEqual(g.fm_group_run_id(pending), "222")
+        self.assertEqual(g.fm_report_status(pending), "pending")
+        ok = [_skel("111"), _grp("222"), _rep("222"), GREEN]
+        self.assertEqual(g.fm_report_status(ok), "ok")
+        # A report only for the OLD run id does NOT satisfy the latest real run.
+        stale_only = [_skel("111"), _grp("222"), _rep("111"), GREEN]
+        self.assertEqual(g.fm_report_status(stale_only), "pending")
+
+    def test_c_isolated_skeleton_is_na(self):
+        """(c) existing invariant preserved: an isolated zero-leg skeleton (with OR
+        without a locating url) requires no reporter."""
+        self.assertEqual(g.fm_report_status([_skel()]), "n/a")
+        self.assertEqual(g.fm_report_status([_skel("222")]), "n/a")
+
+    def test_d_forged_placeholder_success_is_latest_still_requires_reporter(self):
+        """(d) SECURITY (r2 carried forward): a REAL successful group whose PR-controlled
+        name embeds the `${{` placeholder counts as REAL for the run it belongs to. When
+        it is the LATEST run, the reporter is STILL required — it must not drop the
+        requirement by masquerading as the zero-leg skeleton (which needs a server-set
+        `skipped`, not `success`)."""
+        forged = R("opt-in group (g01 ${{ attacker)", conclusion="success",
+                   url="https://github.com/o/r/actions/runs/222/job/3")
+        self.assertTrue(g.is_real_fm_group(forged))
+        # Latest run 222 is this forged-but-real group => require reporter.
+        self.assertEqual(g.fm_report_status([forged, GREEN]), "pending")
+        # Its reporter, correlated to 222, satisfies it.
+        self.assertEqual(g.fm_report_status([forged, _rep("222"), GREEN]), "ok")
+        # A zero-leg skeleton on an OLDER run (111) does not drop the requirement.
+        self.assertEqual(g.fm_report_status([_skel("111"), forged, GREEN]), "pending")
+
+    def test_e_real_group_unparseable_url_fails_closed(self):
+        """(e) fail-closed semantics: a REAL group check with NO parseable run id means
+        real legs ran on a run we cannot identify — we must NOT declare the latest run
+        zero-leg. The reporter requirement is kept (degrading to any-report correlation),
+        never n/a. FM_GROUP has an empty url; alone it holds pending, and it must keep
+        the requirement even when a NEWER skeleton carries a parseable id."""
+        # Real group, no url => pending (require reporter), never n/a.
+        self.assertEqual(g.fm_report_status([FM_GROUP, GREEN]), "pending")
+        # A real-unparseable group is NOT masked away by a parseable skeleton: the
+        # skeleton (222) would otherwise be "the latest run" and look zero-leg, but the
+        # unparseable real leg forbids that n/a — fail closed to require the reporter.
+        self.assertEqual(g.fm_report_status([FM_GROUP, _skel("222"), GREEN]), "pending")
+        # With any legacy report present it degrades to any-report (never a false RED).
+        self.assertEqual(g.fm_report_status([FM_GROUP, FM_REPORT_OK, GREEN]), "ok")
 
 
 if __name__ == "__main__":

@@ -12,8 +12,9 @@
 # (Pattern ported from jeswr/prod-solid-server's pr-gate.yml, incl. its stability-
 # window race fix.)
 #
-# SEMANTICS: success / skipped / neutral are non-failing; failure / cancelled /
-# timed_out / action_required / stale fail the gate. The gate EXCLUDES ITSELF (no
+# SEMANTICS: success / skipped / neutral are non-failing; a genuine newest-run
+# failure / timed_out / action_required / stale fails the gate. Cancelled runs are
+# re-dispatched once, never treated as a test failure. The gate EXCLUDES ITSELF (no
 # self-deadlock). It waits until EVERY discovered sibling check-run is terminal
 # (pending == 0) AND that all-terminal state has HELD for a short settle window,
 # bounded below by a startup-race floor and above by the job timeout. This converges
@@ -120,7 +121,7 @@
 # FAIL-FAST + FAST-FIX RING (2026-07-17 maintainer directive). [FABLE-5]
 # (1) FAIL-FAST: while polling, the moment any GATING leg has CONCLUDED failure the
 # gate REDs immediately instead of waiting for every other leg — a genuine `failure`
-# is never forgiven by any later state (only cancelled/stale are supersedable), so
+# from the authoritative NEWEST workflow run/attempt is never forgiven, so
 # every eventual render REDs anyway; the wait was pure latency on the verdict. A red
 # PR learns its fate in roughly the time of its fastest failing leg (~2-4 min for
 # clippy/fmt/test-compile classes) instead of the full sibling wall-clock (~30-40
@@ -149,6 +150,24 @@
 # by a PR to exfiltrate the token. `workflow_run` always runs the default-branch copy
 # of the file, isolated from PR-head content — see that file's header for the full
 # threat model + adversarial self-check.
+#
+# NEWEST WORKFLOW RUN WINS (#3505). [GPT-5.6] Check-run presence/name is not the
+# authority for Actions attempts: concurrency cancellation leaves terminal job
+# checks from an older run on the same SHA; re-runs reuse a run id; duplicate job
+# names collide across workflows; and a disabled/rewritten job can evaporate its
+# check-run even though the workflow run itself is green. The script therefore
+# lists workflow-runs for this head SHA and selects the newest run by
+# created_at/id and its newest run_attempt per workflow_id. Every older run is a
+# NON-EVENT, regardless of cancelled/failure conclusion. It reads completed runs
+# (and every re-run attempt) through the attempt-scoped Jobs API, then uses the
+# workflow-run verdict as a run-level backstop when checks are missing. A newest
+# FAILURE still REDs exactly as before.
+# A newest CANCELLED run is auto-re-dispatched ONCE; run_attempt is the durable
+# marker and an in-process attempted-set prevents repeated POSTs during API lag.
+# If that retry is cancelled or does not advance, the gate fails loudly with
+# "superseded-legs, re-run required" instead of misreporting a test failure or
+# hanging. Total wait caps are unchanged; this remains a pure waiter/poller and
+# never executes tests.
 #
 # IMPLEMENTATION (sq-90cv4). [FABLE-5] The poll loop + verdict live in
 # scripts/ci_summary_gate.py (extracted from the previous inline bash so the
@@ -190,17 +209,19 @@ on:
   push:
     branches: [main]
 
-# Read-only: the gate READS check-runs + commit statuses for the head commit, plus
-# the repo's queued workflow-run count (`actions: read` — the sq-90cv4 saturation
-# signal; a permissions failure there degrades to the progress-only signal, it never
+# The gate READS check-runs + commit statuses for the head commit, plus
+# the repo's queued workflow-run count (the read side of `actions` — the sq-90cv4
+# saturation signal; a permissions failure there degrades to the progress-only signal, it never
 # fails the gate by itself), plus the PR's live draft state (`pull-requests: read`
 # — the draft-tier conclusion-time re-check; a failure there fail-closes to RED,
-# never to a pass).
+# never to a pass). `actions: write` is narrowly required by #3505 for the bounded
+# once-only POST that re-runs a newest cancelled workflow; it grants no source write
+# and the gate remains test-execution-free.
 permissions:
   checks: read
   statuses: read
   contents: read
-  actions: read
+  actions: write
   pull-requests: read
 
 # One in-flight gate per PR (or per branch on push). Cancel a superseded run so a

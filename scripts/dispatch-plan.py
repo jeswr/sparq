@@ -71,7 +71,12 @@ def plan_dispatch(ready_issues, routing_doc):
     for it in ready_issues:
         labels = labels_of(it)
         role = _role_of(labels)
-        package = sorted(packages_of(labels))[0]
+        # Package semantics mirror the registry's plan_package byte-for-byte (issue #3691):
+        # exactly one unique area -> that area; zero or multiple -> the serializing GLOBAL
+        # partition. The old first-of-sorted pick disagreed with the registry cross-check on
+        # multi-area issues, perma-deferring them at dispatch.
+        pkgs = packages_of(labels)
+        package = next(iter(pkgs)) if len(pkgs) == 1 else _ready.GLOBAL
         model_chain, agent, escalate = resolve(labels, routing_doc)
         if role is None:
             # No declared role → the resolver returned [defaults]; do NOT guess an agent/role.
@@ -154,7 +159,7 @@ def _self_test():
     chk("impl -> single row", len(p_impl), 1)
     row = p_impl[0]
     chk("impl row", (row["role"], row["model_chain"][0], row["agent"], row["escalate"]),
-        ("impl", "fable", "sparq-rust-impl", False))
+        ("impl", "sol", "sparq-rust-impl", False))
     chk("impl package", row["package"], "sparq-core")
     chk("impl priority", row["priority"], 1)
 
@@ -180,7 +185,7 @@ def _self_test():
     ci = compute_ready([iss(8, R + ["priority:P1", "role:ci", "area:ci"])])
     row = plan_dispatch(ci, doc)[0]
     chk("ci -> frontier-only row", (row["role"], row["model_chain"], row["agent"], row["escalate"]),
-        ("ci", ["fable", "sol"], "sparq-ci-infra", False))
+        ("ci", ["sol", "fable"], "sparq-ci-infra", False))
     chk("ci row has no sub-frontier tier", sorted(set(row["model_chain"]) & {"sonnet", "haiku"}), [])
 
     # --- Fixture: package-conflict pair → only the higher-priority one is planned ----------------
@@ -203,6 +208,15 @@ def _self_test():
     p_norole = plan_dispatch([iss(7, ["priority:P1", "area:sparq-core"])], doc)
     row = p_norole[0]
     chk("no-role -> flagged", (row["role"], row["agent"], row["model_chain"]), (None, None, []))
+
+        # --- #3691 package-semantics fixtures (mirror registry plan_package) --------------------------
+    one = plan_dispatch([iss(90, R + ["priority:P2", "role:impl", "area:sparq-core"])], doc)
+    chk("#3691 exactly-one area maps to that area", one[0]["package"], "sparq-core")
+    multi = plan_dispatch([iss(91, R + ["priority:P2", "role:perf", "area:bench", "area:sparq-serve"])], doc)
+    chk("#3691 multi-area maps to the GLOBAL serializing partition (first-of-sorted pick => red)",
+        multi[0]["package"], _ready.GLOBAL)
+    zero = plan_dispatch([iss(92, R + ["priority:P2", "role:docs"])], doc)
+    chk("#3691 zero-area maps to GLOBAL", zero[0]["package"], _ready.GLOBAL)
 
     print("dispatch-plan self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
