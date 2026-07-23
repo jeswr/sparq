@@ -1148,6 +1148,9 @@ class TestDraftTierWiring(unittest.TestCase):
         self.assertEqual(perms.get("pull-requests"), "read",
                          "the gate needs pull-requests:read for the conclusion-time "
                          "draft re-check")
+        self.assertEqual(perms.get("actions"), "write",
+                         "#3505 needs actions:write only for the bounded once-only "
+                         "re-run of a newest cancelled workflow")
         step = next(s for s in self.summary["jobs"]["gate"]["steps"]
                     if "ci_summary_gate.py" in str(s.get("run", "")))
         env = step.get("env", {})

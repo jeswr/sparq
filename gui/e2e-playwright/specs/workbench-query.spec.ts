@@ -74,6 +74,18 @@ test.describe("workbench-query", () => {
     await expect(selectResult).toBeVisible();
   });
 
+  test("entity-shaped SELECT renders as a node-link Graph view", async ({ page }) => {
+    await setEditorValue(page, "SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 5");
+    await page.getByRole("button", { name: "Run query" }).click();
+    await expect(page.locator('[data-result-kind="select"]')).toBeVisible();
+
+    await page.getByRole("button", { name: "Graph", exact: true }).click();
+    await expect(page.locator("[data-select-result-graph]")).toBeVisible();
+    await expect(
+      page.getByRole("img", { name: /Node-link graph of .* from the SELECT result/ }),
+    ).toBeVisible();
+  });
+
   test("error result on invalid SPARQL", async ({ page }) => {
     await setEditorValue(page, "THIS IS NOT SPARQL AT ALL");
 
