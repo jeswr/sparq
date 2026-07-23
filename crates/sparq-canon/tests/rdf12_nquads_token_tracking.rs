@@ -10,8 +10,9 @@
 //!
 //! This suite makes that re-verification impossible to miss:
 //!
-//! 1. [`serializer_versions_pinned`] pins the **resolved** oxrdf/oxttl
-//!    serializer versions from the workspace `Cargo.lock`. Any bump fails the
+//! 1. [`serializer_versions_pinned`] pins the oxrdf/oxttl versions **resolved
+//!    by sparq-canon itself** (its dependency edges in the workspace
+//!    `Cargo.lock`). Any bump fails the
 //!    test with instructions: re-check the byte-exact token expectations below
 //!    against the upstream changelog + the (then-final) W3C rdf12-n-quads
 //!    grammar, then update the pin.
@@ -33,6 +34,10 @@ use std::path::Path;
 const PINNED_OXRDF: &str = "0.3.3";
 /// The oxttl line the profile re-parses its own canonical lines with.
 const PINNED_OXTTL: &str = "0.2.3";
+/// The oxrdf line the rdf-canon bridge speaks (dep alias `oxrdf02`).
+const PINNED_OXRDF_BRIDGE: &str = "0.2.4";
+/// The oxttl line the rdf-canon bridge speaks (dep alias `oxttl01`).
+const PINNED_OXTTL_BRIDGE: &str = "0.1.8";
 
 fn iri(s: &str) -> NamedNode {
     NamedNode::new(s).unwrap()
@@ -55,13 +60,10 @@ fn canon_line(object: Term) -> String {
     c.lines[0].clone()
 }
 
-/// Every resolved version of `package` in the workspace `Cargo.lock`
-/// (the crate also pins an oxrdf 0.2 / oxttl 0.1 pair for the rdf-canon
-/// bridge, so a package name can resolve to several versions).
-fn locked_versions(package: &str) -> Vec<String> {
-    let lock = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock");
-    let lock = std::fs::read_to_string(&lock)
-        .unwrap_or_else(|e| panic!("read workspace Cargo.lock at {:?}: {e}", lock));
+/// Every resolved version of `package` in the workspace `Cargo.lock`.
+/// Fallback resolver for [`sparq_canon_dep_versions`] when a dependency edge
+/// carries no version (Cargo omits it when only one version exists graph-wide).
+fn locked_versions(lock: &str, package: &str) -> Vec<String> {
     let mut versions = Vec::new();
     let mut last_name: Option<String> = None;
     for line in lock.lines() {
@@ -79,6 +81,54 @@ fn locked_versions(package: &str) -> Vec<String> {
     versions
 }
 
+/// The versions of `package` that **sparq-canon itself** resolves, read from
+/// the `dependencies` edges of sparq-canon's own `[[package]]` entry in the
+/// workspace `Cargo.lock` (edges look like `"oxrdf 0.3.3"` when several
+/// versions coexist, bare `"oxrdf"` when only one does). Binding to this
+/// crate's edges — rather than filtering every lockfile entry by an expected
+/// version prefix — means a version move by sparq-canon cannot hide behind
+/// another workspace crate that still resolves the previously-pinned line.
+fn sparq_canon_dep_versions(package: &str) -> Vec<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock");
+    let lock = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read workspace Cargo.lock at {:?}: {e}", path));
+    let mut in_canon = false;
+    let mut in_deps = false;
+    let mut versions = Vec::new();
+    for line in lock.lines() {
+        let line = line.trim();
+        if line == "[[package]]" {
+            in_canon = false;
+            in_deps = false;
+        } else if line == "name = \"sparq-canon\"" {
+            in_canon = true;
+        } else if in_canon && line == "dependencies = [" {
+            in_deps = true;
+        } else if in_deps {
+            if line == "]" {
+                break;
+            }
+            let edge = line.trim_end_matches(',').trim_matches('"');
+            let mut parts = edge.split_whitespace();
+            if parts.next() == Some(package) {
+                match parts.next() {
+                    Some(v) => versions.push(v.to_string()),
+                    // Unversioned edge: unique version graph-wide.
+                    None => versions.extend(locked_versions(&lock, package)),
+                }
+            }
+        }
+    }
+    assert!(
+        !versions.is_empty(),
+        "no {package:?} dependency edge found on sparq-canon's [[package]] \
+         entry in {path:?} — the lockfile format or the dependency set changed; \
+         fix this resolver rather than weakening the pin (sq-g6b6)"
+    );
+    versions.sort();
+    versions
+}
+
 /// The tracking pin (sq-g6b6): the resolved oxrdf-0.3.x / oxttl-0.2.x
 /// serializer versions must match the versions the byte-exact token
 /// expectations in this file were verified against.
@@ -91,27 +141,24 @@ fn locked_versions(package: &str) -> Vec<String> {
 /// `PINNED_OXRDF` / `PINNED_OXTTL`.
 #[test]
 fn serializer_versions_pinned() {
-    let oxrdf03: Vec<String> = locked_versions("oxrdf")
-        .into_iter()
-        .filter(|v| v.starts_with("0.3."))
-        .collect();
+    // The COMPLETE set of oxrdf/oxttl versions sparq-canon resolves — the
+    // serializer line the profile prints with plus the rdf-canon bridge line —
+    // with no prefix filtering, so a move to any other major/minor (e.g.
+    // oxrdf 0.4) fails here even while another workspace crate still resolves
+    // the previously-pinned line.
     assert_eq!(
-        oxrdf03,
-        vec![PINNED_OXRDF.to_string()],
-        "resolved oxrdf 0.3.x changed: re-verify the canonical-token edge cases \
-         in this file against upstream + W3C rdf12-n-quads, then update the pin \
-         (sq-g6b6; see module docs)"
+        sparq_canon_dep_versions("oxrdf"),
+        vec![PINNED_OXRDF_BRIDGE.to_string(), PINNED_OXRDF.to_string()],
+        "oxrdf versions resolved by sparq-canon changed: re-verify the \
+         canonical-token edge cases in this file against upstream + W3C \
+         rdf12-n-quads, then update the pin (sq-g6b6; see module docs)"
     );
-    let oxttl02: Vec<String> = locked_versions("oxttl")
-        .into_iter()
-        .filter(|v| v.starts_with("0.2."))
-        .collect();
     assert_eq!(
-        oxttl02,
-        vec![PINNED_OXTTL.to_string()],
-        "resolved oxttl 0.2.x changed: re-verify the canonical-token edge cases \
-         in this file against upstream + W3C rdf12-n-quads, then update the pin \
-         (sq-g6b6; see module docs)"
+        sparq_canon_dep_versions("oxttl"),
+        vec![PINNED_OXTTL_BRIDGE.to_string(), PINNED_OXTTL.to_string()],
+        "oxttl versions resolved by sparq-canon changed: re-verify the \
+         canonical-token edge cases in this file against upstream + W3C \
+         rdf12-n-quads, then update the pin (sq-g6b6; see module docs)"
     );
 }
 
