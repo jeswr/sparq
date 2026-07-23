@@ -8,13 +8,12 @@
 
 **Opt-in RDFS / OWL-RL / Notation3 reasoning** for the [sparq](../../README.md) RDF engine.
 
-It forward-chains the deductive closure (RDFS, the OWL 2 RL property/class axioms, or
-user-supplied N3 rules — including RDF 1.2 `<< s p o >>` quoted-triple terms in rule
-bodies and heads) over dictionary-encoded triples and **materializes** the entailed
-facts, so querying stays exactly as fast as before. Reasoning runs over integer ids (joins
-on fixed-width keys); the closure can be maintained incrementally under inserts/deletes, and
-the non-default `explain` feature answers `why(triple)` with a proof tree. This crate is
-**isolated** — depend on it to get reasoning; the core engine and wasm build carry zero cost.
+It forward-chains the deductive closure (RDFS, the OWL 2 RL property/class axioms, or user-supplied N3 rules —
+including RDF 1.2 `<< s p o >>` quoted-triple terms in rule bodies and heads) over dictionary-encoded triples
+and **materializes** the entailed facts, so querying stays exactly as fast as before. Reasoning runs over
+integer ids (joins on fixed-width keys); the closure can be maintained incrementally under inserts/deletes,
+and the non-default `explain` feature answers `why(triple)` with a proof tree. This crate is **isolated** —
+depend on it to get reasoning; the core engine and wasm build carry zero cost.
 
 ## 🚀 Quickstart
 
@@ -27,16 +26,14 @@ use sparq_reason::{materialize, Profile};
 let (mut dict, mut triples) = Graph::parse_to_triples(turtle, "turtle")?;
 let _added = materialize(Profile::Rdfs, &mut dict, &mut triples); // OwlRl includes RDFS
 let g = Graph::from_parts(dict, triples);
-# let _ = g;
-# Ok(()) }
+# let _ = g; Ok(()) }
 # const turtle: &str = "<http://ex/a> <http://www.w3.org/2000/01/rdf-schema#subClassOf> <http://ex/b> .";
 ```
 
 ## ✨ Features
 
 - **RDFS entailment** — the non-explosive subset (rdfs2/3/5/7/9/11), materialized in one pass.
-- **OWL 2 RL** — property/class axioms over the same fixpoint engine; use `sparq-reason-el`
-  for complete class classification.
+- **OWL 2 RL** — property/class axioms over the same fixpoint engine; use `sparq-reason-el` for complete class classification.
 - **D-entailment** (opt-in `d-entail`) — `Profile::D`: rdfD1 datatype-typing rule under a
   recognized 30-XSD-datatype map (string/normalizedString/token + the
   language/Name/NCName/NMTOKEN pattern-restricted types, boolean, 13 integer types, decimal,
@@ -90,8 +87,7 @@ let g = Graph::from_parts(dict, triples);
   engine drives, supplying the reasoner's own key projection + budget monomorphically.
   Also covers the OWL-RL semi-naive Δ⋈full adjacency (`prp-fp`, `prp-ifp`, `prp-trp`): a
   persistent `DeltaAdj` (two `DeltaTable`s, `sq-qonbz.2`) replaces the per-round `FxHashMap`
-  probes — same closure output, only the join machinery changes.
-  Off by default; byte/bundle ratchets unchanged.
+  probes — same closure output, only the join machinery changes. Off by default; byte/bundle ratchets unchanged.
 - **Shared term total order** (opt-in `substrate-compare`) — `compare::IdTerm` implements the
   substrate's `CompareTerm` for dictionary ids, so ordering entailed solutions
   (`compare::sort_ids` / `compare::compare_ids`) is parity-identical to the SPARQL engine's `ORDER BY`
