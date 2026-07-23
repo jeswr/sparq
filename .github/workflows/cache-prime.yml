@@ -170,22 +170,26 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features
 
   # Family `wasm` — ci.yml's wasm job (every browser bundle + wasm-safety crate on
-  # wasm32-unknown-unknown). The two cargo steps below mirror that job's FULL
-  # build/clippy closure — every (package, feature-state) it compiles. The mirror must
-  # be exact: rust-cache prunes workspace members before saving (dependency artifacts
-  # only), and cargo resolves third-party dep features PER invocation state, so a state
-  # omitted here restores COLD in the target job even when a sibling state is primed.
-  # ENFORCED structurally by scripts/check-cache-prime-wasm.py (docs-quality
-  # quick-gates): a cargo state added to ci.yml's wasm job without a matching line
-  # here — or a stale extra here — reds that gate, so the mirror cannot silently
-  # drift. The target job's wasm-pack test steps are NOT mirrored: they add only the
-  # small build-mode dev-dep closure (wasm-bindgen-test), which the first post-merge
-  # main run of the real job saves into this same family.
+  # wasm32-unknown-unknown). The three cargo steps below mirror that job's FULL
+  # build/clippy/test closure — every (package, feature-state) it compiles, including
+  # the wasm-pack test steps' dev-dependency closures. The mirror must be exact:
+  # rust-cache prunes workspace members before saving (dependency artifacts only), and
+  # cargo resolves third-party dep features PER invocation state, so a state omitted
+  # here restores COLD in the target job even when a sibling state is primed — and an
+  # omitted TEST state would leave its dev-dep closure (wasm-bindgen-test + friends)
+  # cold for every PR between a fresh stable key and the next post-merge main run,
+  # exactly the hole this workflow closes for the build states. ENFORCED structurally
+  # by scripts/check-cache-prime-wasm.py (docs-quality quick-gates): a cargo
+  # build/clippy or wasm-pack test state added to ci.yml's wasm job without a matching
+  # line here — or a stale extra here — reds that gate, so the mirror cannot silently
+  # drift.
   prime-wasm:
     name: prime wasm family
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # 90 covered build+clippy; the test-closure mirror adds dev-dep compiles + wasm
+    # test-binary links on a cold morning.
+    timeout-minutes: 120
     # EXACT REPLICA of ci.yml's global env (see ENV TRAP above).
     env:
       CARGO_TERM_COLOR: always
@@ -241,6 +245,26 @@ jobs:
           cargo clippy -p sparq-introspect --target wasm32-unknown-unknown --all-targets
           cargo clippy -p sparq-solid --target wasm32-unknown-unknown --all-targets
           cargo clippy -p sparq-vectors --target wasm32-unknown-unknown
+      # Same states' TEST closures — one line per `wasm-pack test --node` state in the
+      # target job. wasm-pack drives `cargo test` under the hood (dev profile, dev-deps
+      # resolved per feature state); `cargo test --no-run` compiles that same
+      # third-party dev-dep closure without needing the wasm-pack/Node toolchain or a
+      # wasm runner here (rust-cache prunes the workspace test binaries anyway — only
+      # the dependency artifacts survive into the family).
+      - name: Build every wasm32 test closure (mirrors ci.yml `wasm` wasm-pack states)
+        run: |
+          cargo test --no-run -p sparq-wasm --target wasm32-unknown-unknown
+          cargo test --no-run -p sparq-wasm --target wasm32-unknown-unknown --features shacl
+          cargo test --no-run -p sparq-wasm --target wasm32-unknown-unknown --features jsonld
+          cargo test --no-run -p sparq-wasm --target wasm32-unknown-unknown --features explain-json
+          cargo test --no-run -p sparq-reason-wasm --target wasm32-unknown-unknown
+          cargo test --no-run -p sparq-reason-wasm --target wasm32-unknown-unknown --features explain
+          cargo test --no-run -p sparq-rsp-wasm --target wasm32-unknown-unknown
+          cargo test --no-run -p sparq-text-wasm --target wasm32-unknown-unknown
+          cargo test --no-run -p sparq-shacl-wasm --target wasm32-unknown-unknown
+          cargo test --no-run -p sparq-shacl-wasm --target wasm32-unknown-unknown --features shacl-af
+          cargo test --no-run -p sparq-introspect --target wasm32-unknown-unknown
+          cargo test --no-run -p sparq-solid --target wasm32-unknown-unknown
 
   # Family `feature-matrix-check-tier-{engine,rest}` — feature-matrix.yml's check-tier
   # shards. This job is the family's ONLY writer (see hole 2 in the header), so it runs

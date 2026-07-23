@@ -11,13 +11,20 @@
 # only sparq-wasm default + shacl,jsonld while the target job also compiled separate
 # shacl / jsonld / policy / explain-json states and four more wasm crates.
 #
-# Rule enforced: the set of cargo build/clippy invocation states (mode, package,
-# feature-set, --all-targets) against --target wasm32-unknown-unknown must be EQUAL
-# between the two jobs. Missing primer states leave the fresh-key/stable-bump hole
-# open; stale primer extras burn runner time and cache budget on artifacts the real
-# job never restores. `-D warnings` (everything after a bare ` -- `) is ignored —
-# the primer deliberately drops it (cache builder, not a second lint gate).
-# wasm-pack / cargo-tree / non-wasm32 lines are out of scope.
+# Rule enforced: the set of invocation states (mode, package, feature-set,
+# --all-targets) against wasm32-unknown-unknown must be EQUAL between the two jobs:
+# cargo build/clippy lines with `--target wasm32-unknown-unknown`, PLUS test states —
+# the target job's `wasm-pack test` steps (package from `working-directory:
+# crates/<pkg>` or the positional crate path; wasm-pack drives `cargo test` on wasm32
+# under the hood, dev profile, dev-deps resolved per feature state) mirrored by the
+# primer's `cargo test --no-run -p <pkg> --target wasm32-unknown-unknown` lines,
+# which compile the same third-party dev-dep closure. Missing primer states —
+# build/clippy OR test/dev — leave the fresh-key/stable-bump hole open; stale primer
+# extras burn runner time and cache budget on artifacts the real job never restores.
+# `-D warnings` (everything after a bare ` -- `) is ignored — the primer deliberately
+# drops it (cache builder, not a second lint gate). cargo-tree / non-wasm32 lines are
+# out of scope. Crate directory name == package name is assumed (true workspace-wide;
+# a rename shows up as a loud state mismatch, not a silent pass).
 #
 # Deterministic: YAML parse only — no network, no build. Needs PyYAML (hash-pinned
 # in .github/requirements/docs-quality.txt where this runs).
@@ -32,52 +39,88 @@ TARGET_JOB = "wasm"
 PRIME_JOB = "prime-wasm"
 WASM_TARGET = "wasm32-unknown-unknown"
 
-_CARGO_RE = re.compile(r"\bcargo\s+(build|clippy)\b")
+_CARGO_RE = re.compile(r"\bcargo\s+(build|clippy|test)\b")
+_WASM_PACK_RE = re.compile(r"\bwasm-pack\s+test\b")
 
 
 def cargo_wasm_states(job):
     """Extract the set of (mode, package, features, all_targets) states for every
-    `cargo build`/`cargo clippy` invocation against the wasm32 target in a job."""
+    `cargo build`/`clippy`/`test` invocation against the wasm32 target and every
+    `wasm-pack test` invocation (always wasm32; recorded as mode `test`) in a job."""
     states = set()
     for step in job.get("steps") or []:
         run = step.get("run")
         if not isinstance(run, str):
             continue
+        workdir = step.get("working-directory")
         # Join shell line-continuations so a wrapped invocation parses whole.
         for line in run.replace("\\\n", " ").splitlines():
             m = _CARGO_RE.search(line)
-            if not m:
+            if m:
+                # Drop trailing-args after a bare ` -- ` (e.g. `-- -D warnings`).
+                args = line[m.end():].split(" -- ")[0].split()
+                pkg = None
+                feats = frozenset()
+                target = None
+                all_targets = False
+                i = 0
+                while i < len(args):
+                    tok = args[i]
+                    if tok in ("-p", "--package") and i + 1 < len(args):
+                        i += 1
+                        pkg = args[i]
+                    elif tok == "--features" and i + 1 < len(args):
+                        i += 1
+                        feats = frozenset(args[i].split(","))
+                    elif tok == "--target" and i + 1 < len(args):
+                        i += 1
+                        target = args[i]
+                    elif tok == "--all-targets":
+                        all_targets = True
+                    i += 1
+                if target != WASM_TARGET:
+                    continue
+                states.add((m.group(1), pkg, feats, all_targets))
                 continue
-            # Drop trailing-args after a bare ` -- ` (e.g. `-- -D warnings`).
-            args = line[m.end():].split(" -- ")[0].split()
-            pkg = None
+            wp = _WASM_PACK_RE.search(line)
+            if not wp:
+                continue
+            # wasm-pack test always targets wasm32 and drives `cargo test` (dev
+            # profile, dev-deps) under the hood — model it as a `test` state so the
+            # primer must carry a matching `cargo test --no-run` line.
+            args = line[wp.end():].split(" -- ")[0].split()
             feats = frozenset()
-            target = None
-            all_targets = False
+            path = None
             i = 0
             while i < len(args):
                 tok = args[i]
-                if tok in ("-p", "--package") and i + 1 < len(args):
-                    i += 1
-                    pkg = args[i]
-                elif tok == "--features" and i + 1 < len(args):
+                if tok == "--features" and i + 1 < len(args):
                     i += 1
                     feats = frozenset(args[i].split(","))
-                elif tok == "--target" and i + 1 < len(args):
-                    i += 1
-                    target = args[i]
-                elif tok == "--all-targets":
-                    all_targets = True
+                elif not tok.startswith("-"):
+                    path = tok
                 i += 1
-            if target != WASM_TARGET:
-                continue
-            states.add((m.group(1), pkg, feats, all_targets))
+            crate_dir = path or workdir
+            if not crate_dir:
+                print(
+                    "check-cache-prime-wasm: cannot attribute a package to '%s' (no "
+                    "working-directory and no positional crate path) — extend this "
+                    "parser" % line.strip(),
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            # Crate dir name == package name (workspace convention, see header).
+            states.add(("test", crate_dir.rstrip("/").split("/")[-1], feats, False))
     return states
 
 
 def fmt_state(state):
     mode, pkg, feats, all_targets = state
+    # Render `test` as the primer's mirror spelling (the target side spells it
+    # `wasm-pack test --node`) so the MISSING message is copy-pasteable.
     parts = ["cargo", mode, "-p", str(pkg)]
+    if mode == "test":
+        parts.insert(2, "--no-run")
     if all_targets:
         parts.append("--all-targets")
     if feats:
@@ -139,8 +182,8 @@ def check_repo(yaml):
         ok = False
     if ok:
         print(
-            "check-cache-prime-wasm: OK — prime-wasm mirrors all %d wasm32 cargo "
-            "states of ci.yml's wasm job" % len(target_states)
+            "check-cache-prime-wasm: OK — prime-wasm mirrors all %d wasm32 "
+            "build/clippy/test states of ci.yml's wasm job" % len(target_states)
         )
         return 0
     return 1
@@ -157,7 +200,11 @@ jobs:
       - run: cargo clippy -p crate-a --target wasm32-unknown-unknown --all-targets --features x -- -D warnings
       - run: cargo clippy -p crate-b --target wasm32-unknown-unknown -- -D warnings
       - run: cargo build -p crate-a --target x86_64-unknown-linux-gnu
-      - run: wasm-pack test --node
+      - working-directory: crates/crate-a
+        run: wasm-pack test --node
+      - working-directory: crates/crate-a
+        run: wasm-pack test --node --features x
+      - run: wasm-pack test --node crates/crate-b
       - working-directory: crates/crate-a
         run: |
           if cargo tree -p crate-a --target wasm32-unknown-unknown -e normal | grep -q z; then
@@ -174,6 +221,10 @@ jobs:
           cargo build -p crate-a --target wasm32-unknown-unknown --features y,x
       - run: cargo clippy -p crate-a --target wasm32-unknown-unknown --all-targets --features x
       - run: cargo clippy -p crate-b --target wasm32-unknown-unknown
+      - run: |
+          cargo test --no-run -p crate-a --target wasm32-unknown-unknown
+          cargo test --no-run -p crate-a --target wasm32-unknown-unknown --features x
+          cargo test --no-run -p crate-b --target wasm32-unknown-unknown
 """
 
 
@@ -181,13 +232,18 @@ def self_test(yaml):
     target = cargo_wasm_states(yaml.safe_load(_SELF_TEST_TARGET)["jobs"]["wasm"])
     prime = cargo_wasm_states(yaml.safe_load(_SELF_TEST_PRIME)["jobs"]["prime-wasm"])
 
-    # Extraction: host-triple, wasm-pack, and cargo-tree lines are ignored; feature
-    # order and `-- -D warnings` do not affect state identity.
+    # Extraction: host-triple and cargo-tree lines are ignored; feature order and
+    # `-- -D warnings` do not affect state identity. wasm-pack test lines become
+    # `test` states — package from working-directory or the positional crate path —
+    # matched by the primer's `cargo test --no-run` mirror lines.
     expect = {
         ("build", "crate-a", frozenset(), False),
         ("build", "crate-a", frozenset({"x", "y"}), False),
         ("clippy", "crate-a", frozenset({"x"}), True),
         ("clippy", "crate-b", frozenset(), False),
+        ("test", "crate-a", frozenset(), False),
+        ("test", "crate-a", frozenset({"x"}), False),
+        ("test", "crate-b", frozenset(), False),
     }
     assert target == expect, "extraction mismatch: %r" % (target,)
     assert compare(target, prime) == ([], []), "equal closures must pass"
@@ -197,19 +253,26 @@ def self_test(yaml):
     missing, extra = compare(target, dropped)
     assert missing == [("clippy", "crate-a", frozenset({"x"}), True)] and extra == []
 
+    # A TEST/dev state the primer omits is reported as missing too — the round-5
+    # review hole: a wasm-pack test state with no cargo-test mirror leaves its
+    # dev-dep closure cold on a fresh stable key.
+    dropped = prime - {("test", "crate-a", frozenset({"x"}), False)}
+    missing, extra = compare(target, dropped)
+    assert missing == [("test", "crate-a", frozenset({"x"}), False)] and extra == []
+
     # A primer-only state is reported as stale (all-targets is part of identity).
     padded = prime | {("clippy", "crate-b", frozenset(), True)}
     missing, extra = compare(target, padded)
     assert missing == [] and extra == [("clippy", "crate-b", frozenset(), True)]
 
-    print("check-cache-prime-wasm: self-test OK (4 cases)")
+    print("check-cache-prime-wasm: self-test OK (5 cases)")
     return 0
 
 
 def main(argv):
     ap = argparse.ArgumentParser(
         description="Assert cache-prime's prime-wasm job mirrors ci.yml's wasm job "
-        "cargo closure exactly."
+        "build/clippy/test closure exactly (wasm-pack test states included)."
     )
     ap.add_argument("--self-test", action="store_true",
                     help="run the hermetic parser/comparison self-test and exit")
