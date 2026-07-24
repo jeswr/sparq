@@ -157,6 +157,12 @@
    "owner_bead": "sq-lonae",
    "promotion_criteria": "advisory while the repo/org setting 'Allow GitHub Actions to create and approve pull requests' is disabled (GITHUB_TOKEN cannot open the Release-PR: known 403, live run 29988505600, contained loudly via captured-output signature + side-effect-free probe). Promote when a maintainer enables that setting or configures the ORCHESTRATOR_APP_ID/_PRIVATE_KEY secrets (batch-merge.yml App-token pattern): drop the ' (advisory)' name token, remove the 403-containment step, and delete this entry",
    "registered": "2026-07-23"
+  },
+  "merge-queue dequeued feedback (advisory)": {
+   "workflow": "merge-queue-feedback.yml",
+   "owner_bead": "registry jeswr/agent-account-registry#563 item 3 (durable fix for registry#556)",
+   "promotion_criteria": "permanently advisory BY DESIGN: this job runs on pull_request [dequeued] AFTER a gate verdict exists on the head SHA, and its writes (disable-auto + review:changes + comment) are orchestration feedback, not a merge-worthiness verdict — a feedback hiccup must never red a later gate evaluation on the same SHA. Promote never; delete this entry only if the workflow is removed",
+   "registered": "2026-07-24"
   }
  }
 }

@@ -24,7 +24,10 @@ jobs:
     name: arm reviewed PRs
     if: github.event_name != 'pull_request' || github.event.label.name == 'review:pass'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # 10 (was 5): headroom for the #3759 bounded transient-retry backoff (up to
+    # 10s+30s per idempotent READ during a platform blip) without hitting the
+    # job ceiling; the sweep itself is unchanged.
+    timeout-minutes: 10
     steps:
       # Run the trusted default-branch policy, never code from the candidate PR head.
       - name: Checkout auto-arm policy
@@ -32,11 +35,17 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
-          sparse-checkout: scripts/auto-arm.py
+          # gh_retry.py is auto-arm.py's #3759 transient-retry dependency — the
+          # self-test below imports it, so a missing path fails BEFORE the live run.
+          sparse-checkout: |
+            scripts/auto-arm.py
+            scripts/gh_retry.py
           sparse-checkout-cone-mode: false
 
       - name: Self-test policy
-        run: python3 scripts/auto-arm.py --self-test
+        run: |
+          python3 scripts/gh_retry.py --self-test
+          python3 scripts/auto-arm.py --self-test
 
       - name: Arm eligible PRs
         env:

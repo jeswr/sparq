@@ -1,0 +1,129 @@
+# [FABLE-5] registry jeswr/agent-account-registry#563 item 3 — durable fix for
+# registry#556 (invisible merge-group failures). 🤖 SPARQ agent.
+#
+# WHY: when the merge queue drops a PR (a failed/timed-out merge-group run, a queue
+# clear, a conflict), GitHub silently disables nothing and notifies nobody — the PR
+# sits green-looking with a dead arm until an orchestrator sweep happens to re-derive
+# its state from the live rollup (registry#556). The merge queue's `dequeued`
+# pull_request activity type is a PUSH signal for exactly this edge, so this workflow
+# converts every dequeue into the fix lane's admission shape: auto-merge disabled,
+# `review:changes` applied, and a self-identified comment linking the failed
+# merge-group run — the registry's fix-enumeration then admits the PR on its next
+# tick instead of never.
+#
+# GATE INTEGRATION: the job name carries the whole-word `advisory` token, so the
+# ci-summary gate's discovery excludes it from the gating set (a dequeue-feedback
+# hiccup on a PR head must never red a later gate evaluation on that same SHA). The
+# labels/comments it writes are exactly the fix lane's normal inputs.
+#
+# FLAKE-CLASSIFIED failures: an infra-flavoured dequeue reason (e.g. CI_TIMEOUT) is
+# noted in the comment but STILL routes to review:changes — the fix lane's ci-flavour
+# owns re-runs, so the routing is identical by design.
+#
+# No third-party actions (nothing to SHA-pin); every step is plain `gh` against the
+# workflow token, least-privilege scoped below.
+name: merge-queue feedback
+
+on:
+  pull_request:
+    types: [dequeued]
+
+# contents: write + pull-requests: write — disable auto-merge, label, comment (the
+# same scope pair auto-arm.yml holds for the enable direction). actions: read — list
+# this repo's merge_group workflow runs to find the failed run for the queue branch.
+permissions:
+  contents: write
+  pull-requests: write
+  actions: read
+
+# One feedback job per PR at a time; never cancel a half-posted notification.
+concurrency:
+  group: merge-queue-feedback-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  feedback:
+    name: merge-queue dequeued feedback (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      # The dequeued activity payload carries the queue's removal reason (e.g.
+      # CI_FAILURE, CI_TIMEOUT, MERGE_CONFLICT, QUEUE_CLEARED, MANUAL, ROLL_BACK).
+      DEQUEUE_REASON: ${{ github.event.reason || 'UNKNOWN' }}
+    steps:
+      - name: Disable dead arm, apply review:changes, comment with the failed run
+        run: |
+          set -euo pipefail
+
+          # RACE GUARD: the PR can merge or close between the dequeue event and this
+          # job (e.g. a manual merge, a re-queue that already landed). Feedback on a
+          # non-open PR is meaningless — exit 0 with a log line, never an error.
+          ensure_open_or_exit() {
+            local st
+            st=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state -q .state 2>/dev/null || echo UNKNOWN)
+            if [ "$st" != "OPEN" ]; then
+              echo "PR #$PR_NUMBER is ${st} (merged/closed race between the dequeue event and this job) — nothing to route; exiting 0."
+              exit 0
+            fi
+          }
+          ensure_open_or_exit
+
+          # (a) Disable the now-dead auto-merge arm. Best-effort: GitHub sometimes
+          # clears it on dequeue already, and a raced merge/close makes it moot.
+          gh pr merge "$PR_NUMBER" --repo "$REPO" --disable-auto \
+            || echo "disable-auto returned non-zero (already disabled, or raced) — continuing."
+
+          # (b) Route to the fix lane. This label is the load-bearing signal the
+          # registry's fix-enumeration admits on its next tick; if it cannot be
+          # applied to a still-open PR, fail loudly (advisory job: visible in the
+          # Actions UI, never gating).
+          if ! gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "review:changes"; then
+            ensure_open_or_exit
+            echo "::error::failed to apply review:changes to open PR #$PR_NUMBER — the fix lane will not see this dequeue until the next label sweep."
+            exit 1
+          fi
+
+          # (c) Best-effort discovery of the failed merge-group run: merge_group runs
+          # execute on the transient gh-readonly-queue/<base>/pr-<N>-<sha> branch,
+          # which is deleted on dequeue — but the WORKFLOW RUNS persist and keep that
+          # head_branch, so the Actions API finds them after the fact.
+          runs_json=$(gh api "repos/$REPO/actions/runs?event=merge_group&per_page=100" \
+            --jq "[.workflow_runs[]
+                   | select(.head_branch != null)
+                   | select(.head_branch | test(\"^gh-readonly-queue/.*/pr-${PR_NUMBER}-\"))]" \
+            2>/dev/null || echo "[]")
+          failed_runs=$(jq -r '[.[] | select(.conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "cancelled")]
+                               | sort_by(.run_started_at) | reverse | .[:3][]
+                               | "- [\(.name) (\(.conclusion))](\(.html_url))"' <<<"$runs_json")
+          if [ -n "$failed_runs" ]; then
+            run_lines="Failed merge-group run(s) for this PR's queue branch:"$'\n'"$failed_runs"
+          else
+            run_lines="The failed merge-group run was not discoverable from the Actions API at notification time (no non-success \`merge_group\` run recorded for \`gh-readonly-queue/*/pr-${PR_NUMBER}-*\`) — check this PR's checks tab for the queue history."
+          fi
+
+          # Infra-flake note: a timeout/queue-side reason is flagged, but the routing
+          # is deliberately IDENTICAL — the fix lane's ci-flavour handles re-runs.
+          flake_note=""
+          case "$DEQUEUE_REASON" in
+            CI_TIMEOUT|QUEUE_CLEARED|ROLL_BACK)
+              flake_note=$'\n'"Reason \`${DEQUEUE_REASON}\` is queue/infra-flavoured (likely not a fault in this PR's diff); it is still routed to \`review:changes\` because the fix lane's ci-flavour owns re-runs."
+              ;;
+          esac
+
+          body_file=$(mktemp)
+          {
+            printf '%s\n\n' "> 🤖 SPARQ agent — autonomous orchestration."
+            printf '%s\n\n' "This PR was **dequeued from the merge queue** (reason: \`${DEQUEUE_REASON}\`). Its auto-merge arm has been disabled and \`review:changes\` applied, so the fix pipeline admits it on the next enumeration tick (durable feedback loop for registry#556)."
+            printf '%s\n' "$run_lines"
+            printf '%s\n' "$flake_note"
+          } > "$body_file"
+
+          if ! gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$body_file"; then
+            ensure_open_or_exit
+            echo "::error::failed to comment the dequeue notification on open PR #$PR_NUMBER (label was applied — routing is intact, the explanation is missing)."
+            exit 1
+          fi
+          echo "PR #$PR_NUMBER: dequeue (reason ${DEQUEUE_REASON}) routed to review:changes with notification."

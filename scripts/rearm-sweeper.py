@@ -2,6 +2,12 @@
 """Re-arm reviewed pull requests whose merge-queue arm was dropped by GitHub."""
 
 # [GPT-5.6] Issue #3675 — restore dropped arms without mistaking queued PRs for drops.
+# [FABLE-5] Issue #3759 / registry#563 item 4 — idempotent gh READS (pr list, the
+# GraphQL live-state QUERY) go through gh_retry.run_gh_read (bounded, transient-only
+# retry); the arm MUTATION (gh pr merge --auto) stays one-shot on the un-wrapped
+# runner. Exhausted transient retries end the sweep as ::warning + exit 0 (a missed
+# cycle is harmless — the cron covers it) instead of redding main's gate; any
+# non-transient error still fails loudly.
 
 from __future__ import annotations
 
@@ -12,6 +18,8 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Callable
+
+import gh_retry
 
 
 PROGRAM = "rearm-sweeper"
@@ -110,6 +118,19 @@ def run_gh(argv: list[str]) -> str:
     return result.stdout
 
 
+def run_gh_read(argv: list[str]) -> str:
+    """Idempotent READ path: bounded transient-only retries (#3759).
+
+    Non-transient failures re-raise as :class:`GhError` so the existing per-PR
+    error handling keeps working; exhausted transients propagate as
+    :class:`gh_retry.GhTransientExhausted` for the ::warning + exit-0 sweep policy.
+    """
+    try:
+        return gh_retry.run_gh_read(argv)
+    except gh_retry.GhFatalError as error:
+        raise GhError(str(error)) from error
+
+
 class RearmSweeper:
     def __init__(
         self,
@@ -118,6 +139,7 @@ class RearmSweeper:
         *,
         max_rearms: int = DEFAULT_MAX_REARMS,
         gh: Callable[[list[str]], str] = run_gh,
+        gh_read: Callable[[list[str]], str] | None = None,
         log: Callable[[str], None] = print,
     ) -> None:
         if not 1 <= max_rearms <= DEFAULT_MAX_REARMS:
@@ -126,6 +148,9 @@ class RearmSweeper:
         self.default_branch = default_branch
         self.max_rearms = max_rearms
         self.gh = gh
+        # Idempotent READS may go through a retrying runner (#3759); the arm
+        # MUTATION always uses the one-shot `gh` runner above.
+        self.gh_read = gh_read if gh_read is not None else gh
         self.log = log
         try:
             self.owner, self.name = repo.split("/", 1)
@@ -157,7 +182,7 @@ class RearmSweeper:
 
     def list_candidates(self) -> list[PullRequest]:
         raw = json.loads(
-            self.gh(
+            self.gh_read(
                 [
                     "pr",
                     "list",
@@ -180,7 +205,7 @@ class RearmSweeper:
 
     def live_state(self, number: int) -> PullRequest:
         response = json.loads(
-            self.gh(
+            self.gh_read(
                 [
                     "api",
                     "graphql",
@@ -420,6 +445,30 @@ def self_test() -> None:
         messages
     )
 
+    # [FABLE-5] #3759: READS route through gh_read (and really are reads — the retry
+    # helper's fail-closed guard accepts them); the arm MUTATION stays on the
+    # one-shot runner, so a retry wrapper can never double-fire it.
+    dropped = fixture(3759)
+    fake = FakeGh(
+        [{k: v for k, v in dropped.items() if k not in ("mergeQueueEntry", "autoMergeRequest")}],
+        {3759: dropped},
+    )
+    read_calls: list[list[str]] = []
+
+    def spy_read(argv: list[str]) -> str:
+        read_calls.append(argv)
+        gh_retry.assert_read_only(argv)
+        return fake(argv)
+
+    RearmSweeper(
+        "sparq-org/sparq", "main", gh=fake, gh_read=spy_read, log=lambda _m: None
+    ).run()
+    assert [c[:2] for c in read_calls] == [["pr", "list"], ["api", "graphql"]], (
+        read_calls
+    )
+    assert [c[:2] for c in arm_calls(fake)] == [["pr", "merge"]], fake.calls
+    assert all(c[:2] != ["pr", "merge"] for c in read_calls), read_calls
+
     print("rearm-sweeper self-test: PASS")
 
 
@@ -438,9 +487,19 @@ def main() -> int:
         parser.error("--repo is required unless --self-test is used")
     try:
         sweeper = RearmSweeper(
-            args.repo, args.default_branch, max_rearms=args.max_rearms
+            args.repo, args.default_branch, max_rearms=args.max_rearms,
+            gh_read=run_gh_read,
         )
         return 1 if sweeper.run() else 0
+    except gh_retry.GhTransientExhausted as error:
+        # [FABLE-5] #3759: the sweep is periodic + idempotent — a cycle missed on a
+        # transient platform 5xx must not red main's gate. Warn loudly, exit 0.
+        print(
+            f"::warning title={PROGRAM} skipped a cycle on transient GitHub API "
+            f"failures::{error} — bounded retries exhausted; the next cron run "
+            "covers this sweep, so this run reports success."
+        )
+        return 0
     except (GhError, ValueError, json.JSONDecodeError) as error:
         print(f"[{PROGRAM}] fatal: {error}", file=sys.stderr)
         return 1

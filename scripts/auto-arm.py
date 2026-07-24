@@ -7,6 +7,12 @@ to GitHub's explicit ``enablePullRequestAutoMerge`` GraphQL mutation.
 """
 
 # [GPT-5] Issue #447 — deterministic, hermetically self-tested auto-arm policy.
+# [FABLE-5] Issue #3759 / registry#563 item 4 — idempotent gh READS (pr list/view) go
+# through gh_retry.run_gh_read (bounded, transient-only retry); MUTATIONS (pr ready,
+# the enablePullRequestAutoMerge CAS) stay one-shot on the un-wrapped runner. When a
+# transient 5xx survives every bounded retry, the sweep exits ::warning + 0 instead of
+# redding main's gate — a missed cycle is harmless, the cron covers it. Any
+# non-transient error still fails loudly (GhFatalError -> GhError -> traceback).
 
 from __future__ import annotations
 
@@ -17,6 +23,8 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Callable
+
+import gh_retry
 
 
 REVIEW_LABEL = "review:pass"
@@ -87,6 +95,19 @@ def run_gh(argv: list[str]) -> str:
     return result.stdout
 
 
+def run_gh_read(argv: list[str]) -> str:
+    """Idempotent READ path: bounded transient-only retries (#3759).
+
+    Non-transient failures re-raise as :class:`GhError` so every existing per-PR
+    handler keeps working; exhausted transients propagate as
+    :class:`gh_retry.GhTransientExhausted` for the ::warning + exit-0 sweep policy.
+    """
+    try:
+        return gh_retry.run_gh_read(argv)
+    except gh_retry.GhFatalError as error:
+        raise GhError(str(error)) from error
+
+
 class AutoArmer:
     def __init__(
         self,
@@ -94,15 +115,20 @@ class AutoArmer:
         default_branch: str,
         gh: Callable[[list[str]], str] = run_gh,
         log: Callable[[str], None] = print,
+        *,
+        gh_read: Callable[[list[str]], str] | None = None,
     ) -> None:
         self.repo = repo
         self.default_branch = default_branch
         self.gh = gh
+        # Idempotent READS may go through a retrying runner (#3759); mutations
+        # (pr ready, the arm CAS) always use the one-shot `gh` runner above.
+        self.gh_read = gh_read if gh_read is not None else gh
         self.log = log
 
     def list_open(self) -> list[PullRequest]:
         raw = json.loads(
-            self.gh(
+            self.gh_read(
                 [
                     "pr",
                     "list",
@@ -121,7 +147,7 @@ class AutoArmer:
 
     def refresh(self, number: int) -> PullRequest:
         raw = json.loads(
-            self.gh(
+            self.gh_read(
                 [
                     "pr",
                     "view",
@@ -237,6 +263,22 @@ class AutoArmer:
         for pr in self.list_open():
             if REVIEW_LABEL in pr.labels:
                 self.process(pr)
+
+
+def run_sweep(armer: AutoArmer, log: Callable[[str], None] = print) -> int:
+    """One periodic sweep. Exhausted TRANSIENT retries => ::warning + exit 0 (#3759):
+    the sweep is idempotent and cron-covered, so a missed cycle must not red main's
+    gate. Every other error propagates and fails loudly."""
+    try:
+        armer.run()
+    except gh_retry.GhTransientExhausted as error:
+        log(
+            "::warning title=auto-arm skipped a cycle on transient GitHub API "
+            f"failures::{error} — bounded retries exhausted; a missed sweep is "
+            "harmless (the cron backstop covers it), so this run reports success."
+        )
+        return 0
+    return 0
 
 
 def fixture(
@@ -376,6 +418,52 @@ def self_test() -> None:
     assert not graphql_calls(fake), fake.calls
     assert any("non-default-base" in message for message in messages), messages
 
+    # [FABLE-5] #3759: READS route through gh_read; MUTATIONS stay on the one-shot
+    # runner (the retry helper itself refuses them — see gh_retry.assert_read_only).
+    fake = FakeGh(clean)
+    read_calls: list[list[str]] = []
+
+    def spy_read(argv: list[str]) -> str:
+        read_calls.append(argv)
+        gh_retry.assert_read_only(argv)  # every read the armer issues IS a read
+        return fake(argv)
+
+    AutoArmer(
+        "sparq-org/sparq", "main", fake, lambda _m: None, gh_read=spy_read
+    ).run()
+    assert [c[:2] for c in read_calls] == [["pr", "list"], ["pr", "view"]], read_calls
+    direct = [c for c in fake.calls if c not in read_calls]
+    assert [c[:2] for c in direct] == [["api", "graphql"]], fake.calls
+
+    # Exhausted transient retries abort the sweep as ::warning + exit 0 (a missed
+    # cycle is harmless); the arm mutation is never attempted on partial state.
+    def exhausted(_argv: list[str]) -> str:
+        raise gh_retry.GhTransientExhausted("gh pr list: HTTP 504 (3 attempts)")
+
+    fake = FakeGh(clean)
+    warnings: list[str] = []
+    code = run_sweep(
+        AutoArmer("sparq-org/sparq", "main", fake, lambda _m: None, gh_read=exhausted),
+        log=warnings.append,
+    )
+    assert code == 0, code
+    assert not fake.calls, fake.calls
+    assert warnings and warnings[0].startswith("::warning"), warnings
+
+    # A NON-transient failure still fails loudly: GhError escapes run_sweep untouched.
+    def fatal(_argv: list[str]) -> str:
+        raise GhError("gh pr list failed: HTTP 403 forbidden")
+
+    try:
+        run_sweep(
+            AutoArmer("sparq-org/sparq", "main", fake, lambda _m: None, gh_read=fatal),
+            log=warnings.append,
+        )
+    except GhError:
+        pass
+    else:
+        raise AssertionError("non-transient errors must not be swallowed")
+
     print("auto-arm self-test: PASS")
 
 
@@ -391,8 +479,7 @@ def main() -> int:
         return 0
     if not args.repo:
         parser.error("--repo is required unless --self-test is used")
-    AutoArmer(args.repo, args.default_branch).run()
-    return 0
+    return run_sweep(AutoArmer(args.repo, args.default_branch, gh_read=run_gh_read))
 
 
 if __name__ == "__main__":
