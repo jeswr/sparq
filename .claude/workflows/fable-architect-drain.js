@@ -15,8 +15,13 @@
 // The beads Stage1 emits MUST have DISJOINT file/crate surfaces (curated disjoint-crate wave
 // pattern) so the Stage3 fleet runs in parallel worktrees with ZERO merge conflicts.
 //
-// MODEL TIERS: opts.model ('fable'|'sonnet'|'haiku') selects the tier and drives cost TODAY.
-// opts.agentType names the role agents ('sparq-architect' for the decompose call, 'sparq-reviewer'
+// MODEL TIERS: opts.model carries the DISPATCH model taken from the TIER table below via
+// dispatchModel(token) — NEVER a hand-written literal. Top-tier calls (token 'fable'/'opus')
+// dispatch the FULL primary id `claude-opus-5`: the bare `fable`/`opus` harness ALIASES still
+// lag onto the downgrade tiers (claude-fable-5 / claude-opus-4-8 — alias lag probe-proven in
+// PR #3763), so an alias dispatch would silently serve a downgrade model while the table
+// stamps [OPUS-5]. Cheap-tier calls keep their aliases (no rollout lag in play). opts.agentType
+// names the role agents ('sparq-architect' for the decompose call, 'sparq-reviewer'
 // for the review call), now APPLIED under .claude/agents/ (maintainer-authorized, commit
 // c28d90e4); the agentType refs resolve to those role configs and opts.model overrides the tier
 // on top of them. (If an agent is ever removed, an unknown agentType falls back to the default
@@ -59,18 +64,31 @@ export const meta = {
 // flags the work for re-review under Opus 5. Existing [FABLE]/[FABLE-5]/[OPUS-4.8] stamps
 // in history are accurate HISTORY — never rewrite them.
 const TIER = {
-  // Top-tier routing tokens — both dispatch to the Opus 5 primary.
-  fable:  { marker: '[OPUS-5]',     trailer: 'Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>' },
-  opus:   { marker: '[OPUS-5]',     trailer: 'Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>' },
-  // Cheap fleet tiers.
-  sonnet: { marker: '[SONNET-4.6]', trailer: 'Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>' },
-  haiku:  { marker: '[HAIKU-4.5]',  trailer: 'Co-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>' },
+  // Top-tier routing tokens — both dispatch the Opus 5 primary BY FULL ID. Full-ID dispatch
+  // serves exactly the requested model (probe-proven in this PR: modelUsage billed
+  // claude-opus-5 with no silent fallback), so on these rows dispatch-requested == served;
+  // the bare `fable`/`opus` ALIASES still lag onto the downgrade tiers, which is why the
+  // dispatch sites take `model` from THIS table (dispatchModel) and never pass the alias.
+  fable:  { model: 'claude-opus-5', marker: '[OPUS-5]',     trailer: 'Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>' },
+  opus:   { model: 'claude-opus-5', marker: '[OPUS-5]',     trailer: 'Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>' },
+  // Cheap fleet tiers — dispatched by alias (no rollout lag in play; the aliases track the
+  // current cheap models claude-sonnet-4-6 / claude-haiku-4-5, per orchestration/routing.toml).
+  sonnet: { model: 'sonnet', marker: '[SONNET-4.6]', trailer: 'Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>' },
+  haiku:  { model: 'haiku',  marker: '[HAIKU-4.5]',  trailer: 'Co-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>' },
   // Downgrade tiers (Opus 5 unavailable) — stamped only by the model that ACTUALLY served.
-  'fable-5':  { marker: '[FABLE-5]',  trailer: 'Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>' },
-  'opus-4-8': { marker: '[OPUS-4.8]', trailer: 'Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>' },
+  // Reachable two ways: a DELIBERATE downgrade dispatch (pass this row's full `model` id) or a
+  // detected downgraded serving (scripts/fable/detect-tier.sh on the run's transcript).
+  'fable-5':  { model: 'claude-fable-5',  marker: '[FABLE-5]',  trailer: 'Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>' },
+  'opus-4-8': { model: 'claude-opus-4-8', marker: '[OPUS-4.8]', trailer: 'Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>' },
 }
 const mark = (t) => (TIER[t] || TIER.opus).marker
 const trailer = (t) => (TIER[t] || TIER.opus).trailer
+// The ONLY place a dispatch site may take opts.model from — marker/trailer/model all derive
+// from the SAME selected row, so attribution and the live dispatches cannot diverge again.
+// This workflow has no in-band served-model hook, so attribution rides the dispatched row:
+// safe because full-ID dispatch == served (probe above); verify post-hoc with
+// scripts/fable/detect-tier.sh, whose downgrade verdict routes stamping to the downgrade rows.
+const dispatchModel = (t) => (TIER[t] || TIER.opus).model
 
 const DISK_SCHEMA = {
   type: 'object',
@@ -261,7 +279,7 @@ async function mechVerify(impl, b) {
   if (!impl || impl.skipped || !impl.pr_url) {
     return { bead: b.id, surface: b.surface, pr: null, armed: false, escalate: false, honest: false, skipped: true, reason: (impl && impl.reason) || 'no PR produced' }
   }
-  const m = await agent(mechPrompt(impl, b), { label: 'mech:' + b.id, phase: 'Verify', schema: MECH_SCHEMA, agentType: 'general-purpose', model: 'haiku' })
+  const m = await agent(mechPrompt(impl, b), { label: 'mech:' + b.id, phase: 'Verify', schema: MECH_SCHEMA, agentType: 'general-purpose', model: dispatchModel('haiku') })
   // [OPUS-4.8] Thread b.surface through the verdict object so the Stage5 'fable_implements'
   // path can route pickAgent(v.surface) to the right implementer agent (else it is undefined
   // and dispatch silently falls back to general-purpose).
@@ -272,7 +290,7 @@ async function processEpic(epic) {
   // [OPUS-4.8] sq-4vo9m: disk guard BEFORE the expensive Fable decompose — a CRITICAL disk
   // means the worktree fleet cannot run this pass, so do not even pay for the architect call.
   phase('Guard')
-  const disk = await agent(diskGuardPrompt(), { label: 'disk:' + epic, phase: 'Guard', schema: DISK_SCHEMA, agentType: 'general-purpose', model: 'haiku' })
+  const disk = await agent(diskGuardPrompt(), { label: 'disk:' + epic, phase: 'Guard', schema: DISK_SCHEMA, agentType: 'general-purpose', model: dispatchModel('haiku') })
   const diskState = (disk && disk.disk_state) || 'UNKNOWN'
   log('disk: state=' + diskState + (disk && disk.disk_free_gb != null ? ' (~' + disk.disk_free_gb + 'G free)' : ''))
   if (diskState === 'CRITICAL') {
@@ -281,7 +299,7 @@ async function processEpic(epic) {
   }
 
   phase('Decompose')
-  const decomp = await agent(architectPrompt(epic), { label: 'architect:' + epic, phase: 'Decompose', schema: DECOMPOSE_SCHEMA, agentType: 'sparq-architect', model: 'fable' })
+  const decomp = await agent(architectPrompt(epic), { label: 'architect:' + epic, phase: 'Decompose', schema: DECOMPOSE_SCHEMA, agentType: 'sparq-architect', model: dispatchModel('fable') })
   const beads = ((decomp && decomp.beads) || []).filter(b => b && b.id)
   if (!beads.length) {
     return { epic, design_record: (decomp && decomp.design_record_path) || null, beads: [], armed: [], open_for_review: [], skipped: [{ bead: epic, reason: (decomp && decomp.notes) || 'architect produced no disjoint beads' }] }
@@ -290,7 +308,7 @@ async function processEpic(epic) {
 
   // Stage2 — HAIKU recon grounds each bead in parallel (findings only, no worktree, no PR).
   phase('Recon')
-  const grounded = await parallel(beads, (b) => agent(reconPrompt(b, decomp), { label: 'recon:' + b.id, phase: 'Recon', schema: GROUND_SCHEMA, agentType: 'general-purpose', model: 'haiku' }))
+  const grounded = await parallel(beads, (b) => agent(reconPrompt(b, decomp), { label: 'recon:' + b.id, phase: 'Recon', schema: GROUND_SCHEMA, agentType: 'general-purpose', model: dispatchModel('haiku') }))
   const groundById = new Map()
   grounded.forEach((g, i) => groundById.set(beads[i].id, g))
 
@@ -299,7 +317,7 @@ async function processEpic(epic) {
   phase('Implement')
   const built = await pipeline(
     beads,
-    (b) => agent(implPrompt(b, groundById.get(b.id), 'sonnet'), { label: 'impl:' + b.id, phase: 'Implement', schema: IMPL_SCHEMA, agentType: pickAgent(b.surface), model: 'sonnet', isolation: 'worktree' }),
+    (b) => agent(implPrompt(b, groundById.get(b.id), 'sonnet'), { label: 'impl:' + b.id, phase: 'Implement', schema: IMPL_SCHEMA, agentType: pickAgent(b.surface), model: dispatchModel('sonnet'), isolation: 'worktree' }),
     (impl, b) => mechVerify(impl, b)
   )
 
@@ -314,7 +332,7 @@ async function processEpic(epic) {
   if (escalated.length) {
     phase('Review')
     verdicts = await parallel(escalated, (r) =>
-      agent(fableReviewPrompt(r), { label: 'fable:' + r.bead, phase: 'Review', schema: FABLE_VERDICT_SCHEMA, agentType: 'sparq-reviewer', model: 'fable' })
+      agent(fableReviewPrompt(r), { label: 'fable:' + r.bead, phase: 'Review', schema: FABLE_VERDICT_SCHEMA, agentType: 'sparq-reviewer', model: dispatchModel('fable') })
         .then(v => ({ bead: r.bead, pr: r.pr, surface: r.surface, honest: (v && v.honest) || false, recommend_arm: (v && v.recommend_arm) || false, disposition: (v && v.disposition) || 'hold', concerns: (v && v.concerns) || [] }))
     )
   }
@@ -323,7 +341,7 @@ async function processEpic(epic) {
   phase('Arm')
   for (const v of verdicts) {
     if (v.disposition === 'arm' && v.honest && v.recommend_arm) {
-      const a = await agent(armPrompt(v), { label: 'arm:' + v.bead, phase: 'Arm', schema: ARM_SCHEMA, agentType: 'general-purpose', model: 'haiku' })
+      const a = await agent(armPrompt(v), { label: 'arm:' + v.bead, phase: 'Arm', schema: ARM_SCHEMA, agentType: 'general-purpose', model: dispatchModel('haiku') })
       if (a && a.armed) { armed.push(v.bead); continue }
       open_for_review.push({ bead: v.bead, pr: v.pr, concerns: (a && a.error) ? ['arm failed: ' + a.error] : v.concerns })
     } else if (v.disposition === 'fable_implements') {
@@ -332,7 +350,7 @@ async function processEpic(epic) {
       // Route through pickAgent for an IMPLEMENTER toolset (Edit/Write) — the architect role
       // forbids implementation — while opts.model forces the Fable tier onto that role.
       phase('Implement')
-      const fix = await agent(fableImplPrompt(v), { label: 'fable-impl:' + v.bead, phase: 'Implement', schema: IMPL_SCHEMA, agentType: pickAgent(v.surface), model: 'fable', isolation: 'worktree' })
+      const fix = await agent(fableImplPrompt(v), { label: 'fable-impl:' + v.bead, phase: 'Implement', schema: IMPL_SCHEMA, agentType: pickAgent(v.surface), model: dispatchModel('fable'), isolation: 'worktree' })
       phase('Verify')
       const m = await mechVerify(fix, { id: v.bead, surface: v.surface || '', title: '' })
       if (m.armed) armed.push(v.bead)

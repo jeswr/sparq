@@ -57,16 +57,20 @@ bd's features are reproduced on issues + workflows:
 (agent-discovered out-of-scope work — bug/tech-debt/doc-drift/footgun/better-approach — for the
 self-improvement triage lane; see [`agent-observability-and-self-improvement.md`](agent-observability-and-self-improvement.md))
 · package = existing
-`area:<crate>` · `model:*` — the **models** are `haiku,sonnet,opus,fable` (Anthropic/Claude, via the
-`claude` CLI) and `terra` (OpenAI/GPT, via the `codex` CLI). **`codex` is the HARNESS, not a model**
-(as `claude` is the harness for Claude models); the selector resolves a model → (account, harness).
+`area:<crate>` · `model:*` — the **models** are `haiku,sonnet,opus,fable,opus5` (Anthropic/Claude,
+via the `claude` CLI) and `terra` (OpenAI/GPT, via the `codex` CLI). **`codex` is the HARNESS, not a
+model** (as `claude` is the harness for Claude models); the selector resolves a model → (account,
+harness).
 
 **Routing** (`orchestration/routing.toml`, public — no account info): `(role/label) → (model-chain,
-agent)` with first-class **model fallback chains**. Per maintainer doctrine (updated 2026-07-24),
-**Opus 5 (`claude-opus-5`) is the primary code-writer, used heavily** — it replaces both Fable and
-Opus 4.8 as the head model on every task previously routed to either; the `fable`/`opus` chain tokens
-are STABLE routing tokens whose dispatch target is now Opus 5, with Fable 5 / Opus 4.8 as downgrade
-fallbacks tagged for re-review under Opus 5; `haiku`/`sonnet` do cheap or mechanical work; `terra`
+agent)` with first-class **model fallback chains**. Every chain token resolves to a concrete
+provider model id via the table's `[models]` catalog — tokens are never re-pointed at a different
+model. Per maintainer doctrine (updated 2026-07-24), **Opus 5 (`claude-opus-5`) is the primary
+code-writer, used heavily**: it enters as the NEW `opus5` token (catalog entry
+`provider_model = "claude-opus-5"`) at the head of every chain that previously led with `fable` or
+`opus`. The `fable`/`opus` tokens keep resolving to `claude-fable-5`/`claude-opus-4-8` and remain in
+the chains solely as tail/downgrade fallbacks — downgrade-authored work is stamped with its actual
+tier and tagged for re-review under Opus 5; `haiku`/`sonnet` do cheap or mechanical work; `terra`
 (GPT) is a cross-provider implementation fallback. The registry consumes the chain to pick the first
 available account.
 
