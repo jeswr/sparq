@@ -62,11 +62,13 @@ self-improvement triage lane; see [`agent-observability-and-self-improvement.md`
 (as `claude` is the harness for Claude models); the selector resolves a model → (account, harness).
 
 **Routing** (`orchestration/routing.toml`, public — no account info): `(role/label) → (model-chain,
-agent)` with first-class **model fallback chains**. Per maintainer doctrine, **Fable is the primary
-code-writer, used heavily** (impl/site/ci/perf/research lead with `fable`); **Opus** does
-security/adversarial/soundness review; `haiku`/`sonnet` do cheap or mechanical work; `terra` (GPT) is
-a cross-provider implementation fallback. The registry consumes the chain to pick the first available
-account.
+agent)` with first-class **model fallback chains**. Per maintainer doctrine (updated 2026-07-24),
+**Opus 5 (`claude-opus-5`) is the primary code-writer, used heavily** — it replaces both Fable and
+Opus 4.8 as the head model on every task previously routed to either; the `fable`/`opus` chain tokens
+are STABLE routing tokens whose dispatch target is now Opus 5, with Fable 5 / Opus 4.8 as downgrade
+fallbacks tagged for re-review under Opus 5; `haiku`/`sonnet` do cheap or mechanical work; `terra`
+(GPT) is a cross-provider implementation fallback. The registry consumes the chain to pick the first
+available account.
 
 ## Private account registry (separate private repo `jeswr/agent-account-registry`)
 

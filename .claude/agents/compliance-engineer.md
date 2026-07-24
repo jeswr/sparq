@@ -134,9 +134,8 @@ assigned **one framework** (your worktree branch is `cert-<framework>`). Produce
   reference epic `sq-toze`); never hand-edit `.beads/`. Address every `compliance-auditor` finding; if
   you disagree, rebut with evidence in the control table rather than silently closing it.
 - Identify as **SPARQ agent** (🤖 blockquote) in every PR/issue/comment. Commit on branch
-  `cert-<framework>` (pre-created by the lead) with the RUNNING model's trailer + inline marker —
-  `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>` + `[OPUS-5]` under the Opus 5 primary; a
-  downgraded Fable 5 / Opus 4.8 session stamps its own `[FABLE-5]` / `[OPUS-4.8]` marker + matching
-  trailer, flagged for re-review under Opus 5. **Upstream
+  `cert-<framework>` (pre-created by the lead) with the RUNNING model's trailer + inline marker
+  (canonical per-tier table: `.claude/workflows/fable-architect-drain.js` — Opus 5 primary,
+  downgrade work flagged for re-review under Opus 5). **Upstream
   stop-gate:** never `gh pr create` against a non-owned repo. Open a **draft PR** against `main`;
   arm auto-merge only when the lead says so. You cannot spawn sub-agents.

@@ -48,15 +48,26 @@ export const meta = {
   ],
 }
 
-// [OPUS-4.8] Model-attribution is PARAMETERIZED per tier (vs the hard-coded Opus-4.8 literal
-// in autonomous-scheduler.js) because the Fable tier mixes models on one PR train — each
-// dispatched agent tags with ITS model's marker + Co-Authored-By trailer. Maintainer: confirm
-// the exact Fable model id string before this ships.
+// CANONICAL per-tier marker/trailer table — the single source of truth (AGENTS.md § The
+// sub-agent shared contract item 5: agent briefs POINT here and never replicate these
+// mappings). Opus 5 (claude-opus-5) is the PRIMARY top tier (maintainer directive
+// 2026-07-24), replacing both the Fable 5 and Opus 4.8 heads — the `fable`/`opus` keys are
+// STABLE routing tokens (bead labels / dispatch params; do not rename) whose dispatch
+// target is now Opus 5. The marker/trailer always follows the model that ACTUALLY served
+// the run (harness --model; verify with scripts/fable/detect-tier.sh): a DOWNGRADED
+// session (Opus 5 unavailable — e.g. Fable 5 / Opus 4.8) stamps its own row below, which
+// flags the work for re-review under Opus 5. Existing [FABLE]/[FABLE-5]/[OPUS-4.8] stamps
+// in history are accurate HISTORY — never rewrite them.
 const TIER = {
-  fable:  { marker: '[FABLE]',      trailer: 'Co-Authored-By: Claude Fable <noreply@anthropic.com>' },
+  // Top-tier routing tokens — both dispatch to the Opus 5 primary.
+  fable:  { marker: '[OPUS-5]',     trailer: 'Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>' },
+  opus:   { marker: '[OPUS-5]',     trailer: 'Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>' },
+  // Cheap fleet tiers.
   sonnet: { marker: '[SONNET-4.6]', trailer: 'Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>' },
   haiku:  { marker: '[HAIKU-4.5]',  trailer: 'Co-Authored-By: Claude Haiku 4.5 <noreply@anthropic.com>' },
-  opus:   { marker: '[OPUS-4.8]',   trailer: 'Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>' },
+  // Downgrade tiers (Opus 5 unavailable) — stamped only by the model that ACTUALLY served.
+  'fable-5':  { marker: '[FABLE-5]',  trailer: 'Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>' },
+  'opus-4-8': { marker: '[OPUS-4.8]', trailer: 'Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>' },
 }
 const mark = (t) => (TIER[t] || TIER.opus).marker
 const trailer = (t) => (TIER[t] || TIER.opus).trailer

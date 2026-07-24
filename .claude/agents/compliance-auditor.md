@@ -82,7 +82,6 @@ Write `compliance/audit/<framework>-findings-<round>.md`:
 - Capture genuinely-discovered codebase work as a `bd` bead (reference epic `sq-toze`), so a finding
   that needs a code fix is tracked, not just noted.
 - Identify as **SPARQ agent** (🤖 blockquote) in every PR comment. Commit findings on the
-  `cert-<framework>` branch (or comment on the PR); use the RUNNING model's trailer —
-  `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>` under the Opus 5 primary; a downgraded
-  Fable 5 / Opus 4.8 session uses its own matching trailer, flagged for re-review under Opus 5.
-  You cannot spawn sub-agents.
+  `cert-<framework>` branch (or comment on the PR); use the RUNNING model's trailer (canonical
+  per-tier table: `.claude/workflows/fable-architect-drain.js` — Opus 5 primary, downgrade work
+  flagged for re-review under Opus 5). You cannot spawn sub-agents.
