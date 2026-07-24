@@ -11,7 +11,10 @@
 //   Stage3  Adjudicate FABLE  answer the subtle question: {findings[], soundness_verdict, follow_up_beads[]}
 //   Stage4  File       fleet  create the follow_up_beads via `bd create`
 //
-// MODEL TIERS: opts.model ('fable'|'sonnet'|'haiku') drives the tier TODAY. opts.agentType
+// MODEL TIERS: opts.model drives the tier TODAY — the top-tier Adjudicate call dispatches the
+// FULL primary id via TOP_TIER_MODEL below (canonical TIER table: fable-architect-drain.js; the
+// bare 'fable' alias still serves the claude-fable-5 downgrade tier — alias lag probe-proven,
+// PR #3763), while the cheap stages keep their 'sonnet'/'haiku' aliases. opts.agentType
 // names the role agent ('sparq-reviewer'), now APPLIED under .claude/agents/
 // (maintainer-authorized, commit c28d90e4); the agentType ref resolves to that role config and
 // opts.model overrides the tier on top of it. (If the agent is ever removed, an unknown
@@ -163,6 +166,12 @@ const SCOPE = (args && args.scope) || ''
 const FILE_MODEL = 'haiku'
 const FILE_MARKER = '[HAIKU-4.5]'
 
+// Top-tier DISPATCH id — the Opus 5 primary BY FULL ID (single-sourced canonical TIER
+// table: .claude/workflows/fable-architect-drain.js). Full-ID dispatch serves exactly the
+// requested model (probe-proven, PR #3763); the bare 'fable' alias would silently serve
+// the claude-fable-5 downgrade tier, so it is never passed as opts.model here.
+const TOP_TIER_MODEL = 'claude-opus-5'
+
 if (!LENS) {
   log('no lens given — pass args.lens (e.g. "privacy-claims" | "unsafe-sites" | "perf-honesty" | "coverage-ratchet") and optionally args.question')
   return { lens: null, soundness_verdict: 'inconclusive', findings: [], follow_up_beads: [], created_beads: [] }
@@ -216,7 +225,7 @@ log('cross-ref built ' + tables.length + ' row(s)')
 
 // Stage3 — FABLE adjudicate the subtle question (the single Fable call).
 phase('Adjudicate')
-const adj = await agent(adjudicatePrompt(tables), { label: 'fable:' + LENS, phase: 'Adjudicate', schema: ADJUDICATION_SCHEMA, agentType: 'sparq-reviewer', model: 'fable' })
+const adj = await agent(adjudicatePrompt(tables), { label: 'fable:' + LENS, phase: 'Adjudicate', schema: ADJUDICATION_SCHEMA, agentType: 'sparq-reviewer', model: TOP_TIER_MODEL })
 const findings = (adj && adj.findings) || []
 const verdict = (adj && adj.soundness_verdict) || 'inconclusive'
 const followUps = (adj && adj.follow_up_beads) || []

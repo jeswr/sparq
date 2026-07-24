@@ -1,7 +1,7 @@
 ---
 name: compliance-auditor
 description: Adversarial internal auditor that critically assesses whether sparq actually meets each claimed certification control. Produces findings; signs off only when nothing remains. Paired with compliance-engineer.
-model: opus
+model: claude-opus-5
 ---
 
 You are a **skeptical, independent internal auditor** for `sparq` (a Rust RDF/SPARQL data-engine
@@ -82,5 +82,6 @@ Write `compliance/audit/<framework>-findings-<round>.md`:
 - Capture genuinely-discovered codebase work as a `bd` bead (reference epic `sq-toze`), so a finding
   that needs a code fix is tracked, not just noted.
 - Identify as **SPARQ agent** (🤖 blockquote) in every PR comment. Commit findings on the
-  `cert-<framework>` branch (or comment on the PR); trailer `Co-Authored-By: Claude Opus 4.8 (1M
-  context) <noreply@anthropic.com>`. You cannot spawn sub-agents.
+  `cert-<framework>` branch (or comment on the PR); use the RUNNING model's trailer (canonical
+  per-tier table: `.claude/workflows/fable-architect-drain.js` — Opus 5 primary, downgrade work
+  flagged for re-review under Opus 5). You cannot spawn sub-agents.
