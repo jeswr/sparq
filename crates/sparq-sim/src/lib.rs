@@ -717,6 +717,7 @@ impl<'g> Sim<'g> {
     /// Expand `sig` with elements inferred from the T-box hierarchy:
     /// - `(OUT, rdf:type, C)` → add `(OUT, rdf:type, Ci)` for each transitive superclass Ci.
     /// - `(dir, P, N)` → add `(dir, Pi, N)` for each transitive superproperty Pi of P.
+    ///
     /// Inferred elements receive `original_weight × TBOX_ATTENUATION`. When an inferred
     /// element duplicates a direct element the direct weight (higher) wins. [SONNET-4.6] sq-181
     fn tbox_expand_signature(&self, sig: Signature, keep_neighbor: bool) -> Signature {
@@ -770,7 +771,7 @@ impl<'g> Sim<'g> {
             .iter()
             .copied()
             .zip(sig.weights.iter().copied())
-            .chain(new_elems.into_iter().zip(new_weights.into_iter()))
+            .chain(new_elems.into_iter().zip(new_weights))
             .collect();
         merged.sort_unstable_by_key(|&(e, _)| e);
 
@@ -853,7 +854,7 @@ fn tbox_transitive_closure(
     direct: &FxHashMap<Id, Vec<Id>>,
 ) -> FxHashMap<Id, Vec<Id>> {
     let mut closure: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
-    for (&start, _) in direct {
+    for &start in direct.keys() {
         let mut seen: rustc_hash::FxHashSet<Id> = rustc_hash::FxHashSet::default();
         let mut stack: Vec<Id> = direct.get(&start).cloned().unwrap_or_default();
         while let Some(n) = stack.pop() {
