@@ -39,6 +39,16 @@ explain = []
 # `most_similar`'s range-scan generation hits its scaling wall
 # (research/genai-design.md §6). Returned scores stay exact (same re-scoring).
 sketch = []
+# [SONNET-4.6] sq-181 v1.1: T-box-aware signatures — expand rdf:type elements via the
+# graph's own rdfs:subClassOf transitive closure and predicate elements via
+# rdfs:subPropertyOf. Inferred elements contribute at 0.5× their IDF weight.
+# No new dependencies; the closure is computed from the graph itself.
+tbox = []
+# [SONNET-4.6] sq-181 v1.1: FST-style sorted-dictionary lexical tier — IRI local-name
+# trigram-Jaccard similarity as a tertiary fallback in `most_similar` when structural
+# and profile fallbacks starve. Builds a sorted (local_name → id) index at
+# `Sim::with_config` time. No new external dependencies.
+lexical = []
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
