@@ -34,7 +34,23 @@
 #      it gates" enforceable: the gate can only match a check-run by its display
 #      name, so a rename un-matches the declaration (the job GATES — fail-closed)
 #      and C4 REDs here until the declaration is deliberately updated. It also
-#      catches STALE entries whose job was deleted or renamed away.
+#      catches STALE entries whose job was deleted or renamed away, an entry with NO
+#      identity pair at all, and a key with no literal anchor outside its
+#      `${{ … }}` expressions.
+#
+# [OPUS-5] #3774 review (gpt-5.6-sol) — the two C4 holes that reached this file:
+#   (a) C4 used to `continue` past an identity-less entry "already reported by C2".
+#       C2 only iterates jobs whose NAME carries the advisory/informational token, so
+#       an identity-less entry keyed on a NON-token name (`clippy (gate) + fmt
+#       (non-blocking)`) was reported by nobody: this checker printed
+#       `all clear (C2 + C3 + C4)` while ci_summary_gate.py excluded the real clippy
+#       leg from the gating set. C4 REPORTS it now, and the gate's
+#       REGISTRY_REQUIRED_FIELDS was widened to the same five fields so the GATE
+#       refuses it too — the checker alone was never sufficient.
+#   (b) An expression-ONLY key (from the idiomatic `name: ${{ matrix.label }}`)
+#       compiled to `.+` in the gate and matched every check-run including `gate`,
+#       while C4 was satisfied because the key did equal the live YAML `name:`.
+#       Both sides now require a literal anchor.
 #
 # MOTIVATION: #1679 (gate-intent G3 self-test sat in an advisory job = provably
 # non-gating until caught); #1656 (gui-mock-ipc gated without recorded probation
@@ -100,7 +116,21 @@ SCRIPT_PATH_RE = re.compile(r"[\w./-]+\.(?:py|sh|bash|mjs|cjs|js|ts)\b")
 NPM_RUN_RE = re.compile(r"\bnpm\s+(?:[^\s]+\s+)*?run\s+(?:-[^\s]+\s+(?:[^\s-][^\s]*\s+)?)*([\w:.@/-]+)")
 
 # Required fields in every registry entry. [OPUS-5] #3773 adds the C4 identity pair.
+# This set is MIRRORED by ci_summary_gate.py's REGISTRY_REQUIRED_FIELDS — the gate must
+# refuse exactly what this checker refuses, or an entry the checker rejects can still
+# buy a runtime exclusion (#3774 review, gpt-5.6-sol finding 2(a)).
 REQUIRED_FIELDS = ("owner_bead", "promotion_criteria", "registered", "workflow", "job_id")
+
+# [OPUS-5] #3774 review (finding 2(b)) — a `${{ … }}` in a registry key compiles to an
+# unbounded `.+` in ci_summary_gate.py, so a key with no LITERAL, non-whitespace
+# character outside its expressions matches every check-run name (`gate` included).
+# Mirrors ci_summary_gate.py's `_YAML_EXPR_RE` / `registry_key_has_literal_anchor`.
+YAML_EXPR_RE = re.compile(r"\$\{\{.*?\}\}")
+
+
+def _has_literal_anchor(key: str) -> bool:
+    """Does this registry key pin at least one literal character outside `${{ … }}`?"""
+    return any(part.strip() for part in YAML_EXPR_RE.split(key or ""))
 
 
 # ---------------------------------------------------------------------------
@@ -372,16 +402,45 @@ def check_registry_bindings(registry: dict,
     DISPLAY NAME, so a declaration that drifts from the job it describes silently
     stops applying. Fail-closed is the gate's job (a renamed job GATES); making the
     drift LOUD is this check's job.
+
+    [OPUS-5] #3774 review (gpt-5.6-sol, finding 2(a)). This used to `continue` past an
+    entry with no `workflow`/`job_id` "already reported by C2" — FALSE. C2 only
+    iterates jobs whose NAME carries an advisory/informational token, so an
+    identity-less entry whose key is not token-named (`clippy (gate) + fmt
+    (non-blocking)`) was reported by NOBODY: the checker printed `all clear` while the
+    gate excluded the real clippy leg. C4 now REPORTS it, and it is C4's to report
+    because the missing pair is precisely C4's binding input.
+    Finding 2(b): a key with no literal anchor outside its `${{ … }}` expressions is
+    also reported — its binding LOOKS correct (the key does equal the live `name:`)
+    while the gate would compile it to `.+` and exclude every check-run including
+    `gate`.
     """
     offences: list[str] = []
     for key, entry in sorted(registry.items()):
         if not isinstance(entry, dict):
             offences.append(f"C4: registry entry {key!r} is not an object")
             continue
+        if not _has_literal_anchor(key):
+            offences.append(
+                f"C4: registry key {key!r} has no literal (non-expression) anchor. It "
+                f"compiles to an unbounded `.+` in ci_summary_gate.py, so it would "
+                f"whole-name-match EVERY check-run — `gate` included — from one "
+                f"registry line. Frame the expression with literal text (e.g. "
+                f"`GUI build ({key}, advisory)`)."
+            )
         workflow = entry.get("workflow") or ""
         job_id = entry.get("job_id") or ""
         if not workflow or not job_id:
-            continue  # already reported by C2 (missing required field)
+            missing = [f for f in ("workflow", "job_id") if not entry.get(f)]
+            offences.append(
+                f"C4: registry entry {key!r} is missing {missing} — it has NO job "
+                f"identity to bind to, so no check can police it (C2 only sees "
+                f"advisory/informational-NAMED jobs, so it does not report this key). "
+                f"ci_summary_gate.py refuses such an entry outright (it declares "
+                f"nothing and the check keeps GATING): add the workflow file name and "
+                f"the job's YAML key, or delete the entry."
+            )
+            continue
         actual = live_jobs.get((workflow, job_id))
         if actual is None:
             offences.append(
@@ -641,11 +700,47 @@ def _c4_cases() -> int:
             {},
             1,
         ),
+        # [OPUS-5] #3774 review, finding 2(a). These four used to be a single
+        # "C4-skip: identity incomplete (C2 already reports it)" case asserting ZERO
+        # offences. C2 does NOT report an identity-less entry whose key carries no
+        # advisory/informational token — that is the hole the reviewer walked through
+        # end-to-end (`clippy (gate) + fmt (non-blocking)`, 3 fields, checker
+        # `all clear`, real clippy gate excluded). C4 must REPORT, never skip.
         (
-            "C4-skip: identity incomplete (C2 already reports it)",
+            "C4-negative(#3774): identity incomplete (no job_id) is REPORTED",
             {"foundation smoke (advisory)": {k: v for k, v in entry.items()
                                              if k != "job_id"}},
             {},
+            1,
+        ),
+        (
+            "C4-negative(#3774): identity incomplete (no workflow) is REPORTED",
+            {"foundation smoke (advisory)": {k: v for k, v in entry.items()
+                                             if k != "workflow"}},
+            {},
+            1,
+        ),
+        (
+            "C4-negative(#3774): the reviewer's NON-token 3-field entry is REPORTED "
+            "(C2 never sees it — its key carries no advisory/informational token)",
+            {"clippy (gate) + fmt (non-blocking)": {
+                "owner_bead": "x", "promotion_criteria": "y",
+                "registered": "2026-07-25"}},
+            {("ci.yml", "clippy"): "clippy (gate) + fmt (non-blocking)"},
+            1,
+        ),
+        (
+            "C4-negative(#3774): expression-ONLY key has no literal anchor",
+            {"${{ matrix.label }}": {**entry, "workflow": "gui.yml",
+                                     "job_id": "build"}},
+            {("gui.yml", "build"): "${{ matrix.label }}"},
+            1,
+        ),
+        (
+            "C4-clean(#3774): a FRAMED expression key is fine",
+            {"GUI build + clippy (${{ matrix.label }}, advisory)": {
+                **entry, "workflow": "gui.yml", "job_id": "build"}},
+            {("gui.yml", "build"): "GUI build + clippy (${{ matrix.label }}, advisory)"},
             0,
         ),
     ]
@@ -857,7 +952,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         "  C4: the entry's key must equal the CURRENT `name:` of workflow:job_id it "
-        "declares. Re-key the entry after a rename, or delete a stale entry."
+        "declares, must carry BOTH identity halves, and must contain literal text "
+        "outside any ${{ … }} expression. Re-key the entry after a rename, delete a "
+        "stale entry, add the missing workflow/job_id, or frame the expression."
     )
     return 1
 

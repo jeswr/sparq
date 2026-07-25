@@ -43,8 +43,15 @@
 #     C4 registry check until the declaration is deliberately updated;
 #   * a MISSING or unparseable registry is a LOUD, immediate exit-1 (fail-closed):
 #     the gate refuses to evaluate rather than silently gating everything;
-#   * a registry entry missing its required fields does NOT declare anything — that
-#     check keeps gating (fail-closed per entry) and the load prints a warning.
+#   * a registry entry missing any of its five required fields — INCLUDING the
+#     `workflow`/`job_id` identity pair C4 binds to — does NOT declare anything; that
+#     check keeps gating (fail-closed per entry) and the load prints a warning. The
+#     gate and scripts/check-advisory-registry.py require the SAME five fields; when
+#     the gate required only three, a 3-field entry bought a silent exclusion that the
+#     checker reported as "all clear" (#3774 review, gpt-5.6-sol finding 2(a));
+#   * a registry key with NO literal anchor outside its `${{ … }}` expressions is
+#     REFUSED for the same reason: it compiles to `.+` and would neutralise every
+#     check-run on the commit, `gate` included (finding 2(b)).
 # The gate reads the registry from its own checkout, so ci-summary.yml's sparse
 # checkout MUST include `.github/advisory-registry.json` (pinned by a wiring test in
 # scripts/tests/test_ci_summary_gate.py). Trust model is unchanged: on
@@ -193,10 +200,19 @@ from dataclasses import dataclass, field
 # Path is relative to the repo checkout the gate runs from (ci-summary.yml sparse-
 # checks out BOTH this script and this file).
 ADVISORY_REGISTRY_PATH = ".github/advisory-registry.json"
-# A registry entry declares nothing unless it carries all three (same required set
-# scripts/check-advisory-registry.py C2 enforces) — an under-specified entry must not
-# buy an exclusion.
-REGISTRY_REQUIRED_FIELDS = ("owner_bead", "promotion_criteria", "registered")
+# A registry entry declares nothing unless it carries ALL FIVE — the SAME required
+# set scripts/check-advisory-registry.py C2/C4 enforce. An under-specified entry must
+# not buy an exclusion.
+# [OPUS-5] #3774 review (gpt-5.6-sol, finding 2(a)): this tuple used to hold only the
+# three bookkeeping fields while the checker required five, so a 3-field entry with NO
+# `workflow`/`job_id` neutralised any check-run it named while C4 `continue`d past it
+# and the checker printed `all clear`. The identity pair is what C4 binds a
+# declaration to, so an entry without it is exactly the entry C4 cannot police:
+# requiring it HERE is what makes "an under-specified entry must not buy an exclusion"
+# true of the GATE and not merely of the checker.
+REGISTRY_REQUIRED_FIELDS = (
+    "owner_bead", "promotion_criteria", "registered", "workflow", "job_id",
+)
 # A registry key is the job's `name:` as written in the workflow YAML, so it may embed
 # `${{ matrix.x }}` expressions that only expand at runtime. Each expression matches a
 # non-empty run of characters; every other character is matched LITERALLY, whole-name,
@@ -855,8 +871,31 @@ class AdvisoryRegistryError(RuntimeError):
     """The declared-advisory registry could not be read (missing/unparseable)."""
 
 
+def registry_key_has_literal_anchor(declared: str) -> bool:
+    """[OPUS-5] #3774 review (gpt-5.6-sol, finding 2(b)) — does this registry key pin
+    at least one LITERAL, non-whitespace character outside a `${{ … }}` expression?
+
+    Each expression compiles to an unbounded `.+`, so a key that is ONLY an expression
+    — the idiomatic `name: ${{ matrix.label }}` — compiles to `.+`, whole-name-matches
+    EVERY check-run including `gate` itself, and thereby declares the entire run
+    non-gating from a single registry line. C4 cannot catch it either: the key does
+    equal the live YAML `name:`, so the binding looks correct. A key with no literal
+    frame is therefore REFUSED outright rather than compiled: declare each expansion
+    with a literal frame around the expression (as the shipped Tauri key does)."""
+    return any(part.strip() for part in _YAML_EXPR_RE.split(declared or ""))
+
+
 def _compile_declared_name(declared: str) -> re.Pattern:
-    """Compile ONE registry key into a whole-name matcher (see _YAML_EXPR_RE)."""
+    """Compile ONE registry key into a whole-name matcher (see _YAML_EXPR_RE).
+
+    Raises AdvisoryRegistryError for an ANCHORLESS key (see
+    registry_key_has_literal_anchor) — fail-closed: the gate refuses to install a
+    matcher that could neutralise arbitrary check-runs."""
+    if not registry_key_has_literal_anchor(declared):
+        raise AdvisoryRegistryError(
+            f"registry key {declared!r} has no literal anchor outside its "
+            "expression(s) — it would match EVERY check-run name (including `gate`)"
+        )
     literals = _YAML_EXPR_RE.split(declared.strip())
     return re.compile(
         "".join(re.escape(part) for part in literals[:1])
@@ -869,7 +908,8 @@ def parse_advisory_registry(payload: object) -> tuple[list[str], list[str]]:
     """Split a loaded registry document into (declared_keys, warnings).
 
     An entry declares its key non-gating ONLY when it is a mapping carrying every
-    REGISTRY_REQUIRED_FIELDS value; anything else is skipped with a warning so the
+    REGISTRY_REQUIRED_FIELDS value AND its key carries a literal anchor
+    (registry_key_has_literal_anchor); anything else is skipped with a warning so the
     check keeps GATING (fail-closed per entry) instead of buying a silent exclusion.
     """
     if not isinstance(payload, dict):
@@ -890,6 +930,13 @@ def parse_advisory_registry(payload: object) -> tuple[list[str], list[str]]:
         if missing:
             warnings.append(
                 f"registry entry {key!r} is missing {missing} — it declares nothing (still GATES)"
+            )
+            continue
+        if not registry_key_has_literal_anchor(key):
+            warnings.append(
+                f"registry entry {key!r} has no literal anchor outside its "
+                "expression(s) — it would match EVERY check-run name; it declares "
+                "nothing (still GATES)"
             )
             continue
         declared.append(key)
@@ -1388,8 +1435,9 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
     if failed:
         _emit(
             f"### ci-summary: FAILED — {len(failed)} non-passing gating check(s) of "
-            f"{len(gating)} gating ({excluded} advisory check(s) excluded — "
-            f"declared in {ADVISORY_REGISTRY_PATH})",
+            f"{len(gating)} gating ({excluded} advisory check(s) excluded — each "
+            f"DECLARED in {ADVISORY_REGISTRY_PATH} or on the platform-managed "
+            f"allow-list)",
             summary_path,
         )
         for r in failed:
@@ -1399,9 +1447,13 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
     if _draft_recheck(tier_ctx, summary_path) != 0:
         return 1
     _emit(
+        # [OPUS-5] #3774 review: the excluded set is DECLARED-in-the-registry OR on the
+        # exact platform-managed allow-list (PLATFORM_MANAGED_ADVISORY_NAMES) — saying
+        # "each DECLARED in the registry" understated the second, smaller source.
         f"### ci-summary: PASSED — all {len(gating)} gating check(s) green (or skipped/neutral); "
         f"{excluded} advisory check(s) excluded (each DECLARED in "
-        f"{ADVISORY_REGISTRY_PATH}); set stable."
+        f"{ADVISORY_REGISTRY_PATH}, or on the exact platform-managed allow-list); "
+        f"set stable."
         + (
             " DRAFT-TIER verdict (reduced leg set; PR draft state re-confirmed). This "
             f"check-run is `{DRAFT_TIER_GATE_NAME}`, never the required `{GATE_CHECK_NAME}` "

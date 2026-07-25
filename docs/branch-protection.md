@@ -55,6 +55,14 @@ reviewers, **not** a list of required checks.
 > `workflow` + `job_id` and must equal that job's **current** name — so a rename cannot
 > silently flip gating status; the renamed job gates, fail-closed).
 >
+> Two entry-shape rules the aggregator itself enforces, so an under-specified entry can
+> never buy an exclusion the integrity checker would have rejected: **all five fields are
+> required by `ci-summary` too** (an entry missing `workflow`/`job_id` declares nothing and
+> the check keeps gating), and a key must carry **literal text outside any `${{ … }}`
+> expression** — an expression-only key such as `${{ matrix.label }}` would match every
+> check-run name, `gate` included, so it is refused. Frame the expression instead:
+> `GUI build + clippy (${{ matrix.label }}, advisory)`.
+>
 > Until 2026-07-25 the aggregator instead inferred advisory status from the display name
 > matching `\b(advisory|informational)\b` (sq-wjth). That was removed in #3773: it silently
 > neutralised four real gates, because any job whose name happened to contain those words

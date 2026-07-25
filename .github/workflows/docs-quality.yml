@@ -669,22 +669,30 @@ jobs:
       # only, no git/network.
       - name: Self-test check-install-action-tool.py (fixtures + live invariant — sq-1cb6l)
         run: python3 scripts/tests/test_install_action_tool.py
-      # [SONNET-4.6] sq-qcnn.32: the advisory-job registry + gate-intent placement
-      # check. Two directions, both diff-visible instead of review-catch-dependent:
+      # [SONNET-4.6] sq-qcnn.32 / [OPUS-5] #3773: the advisory-job registry + gate-intent
+      # placement check. Since #3773 the registry is LOAD-BEARING (it is the ONLY thing
+      # that makes a check-run non-gating), so this is its integrity gate. THREE
+      # directions, all diff-visible instead of review-catch-dependent:
       #   C2 — every job whose NAME matches \b(advisory|informational)\b must have
-      #        a registry entry in .github/advisory-registry.json with
-      #        {owner_bead, promotion_criteria, registered}.
-      #   C3 — no run-step invoking a gate-classified script (scripts/*gate*.py) may
-      #        live inside an advisory-named job without a `gate_script_waiver` in
-      #        the registry (lesson: #1679 gate-intent G3 self-test sat in an advisory
-      #        job = provably non-gating until caught).
+      #        a registry entry in .github/advisory-registry.json with all five of
+      #        {owner_bead, promotion_criteria, registered, workflow, job_id}.
+      #   C3 — no run-step invoking a gate-classified command may live inside an
+      #        advisory-named job without a `gate_script_waiver` in the registry.
+      #        #3773 made classification LANGUAGE-AGNOSTIC (python/shell/node + npm
+      #        aliases resolved through package.json); the old `scripts/*gate*.py`-only
+      #        rule could not see a shell or npm gate at all (lesson: #1679 gate-intent
+      #        G3 self-test sat in an advisory job = provably non-gating until caught).
+      #   C4 — every declaration must BIND to a live `workflow` + `job_id` whose CURRENT
+      #        name is exactly the key, must carry both identity halves, and must have a
+      #        literal anchor outside any ${{ … }} expression. This is what makes a
+      #        rename unable to silently flip gating status.
       # Self-test pins the gate's own classification logic; the enforce step applies
       # it over the live workflows — including this PR's own consolidated advisory job
       # + registry edit (sq-6vshe.20), so the consolidation self-validates.
       # Stdlib-only, no deps — placed here with the other structural workflow-lint steps.
-      - name: Self-test the advisory-registry checker (C2/C3 logic — sq-qcnn.32)
+      - name: Self-test the advisory-registry checker (C2/C3/C4 logic — sq-qcnn.32, #3773)
         run: python3 scripts/check-advisory-registry.py --self-test
-      - name: "Enforce advisory-job registry + gate-intent placement (C2/C3) — GATING"
+      - name: "Enforce advisory-job registry + gate-intent placement (C2/C3/C4) — GATING"
         run: python3 scripts/check-advisory-registry.py
       # [OPUS-4.8] sparq-org/sparq#3475: the fast-fix ring's ONLY privileged
       # capability is the cross-repo REGISTRY_RING_TOKEN doorbell. Because a

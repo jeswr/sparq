@@ -813,13 +813,17 @@ class TestAdvisoryRegistryLoading(unittest.TestCase):
     def _reload(self):
         g.set_declared_advisory(DECLARED_ADVISORY)
 
+    # A COMPLETE entry carries all five REGISTRY_REQUIRED_FIELDS — the identity pair
+    # (`workflow`/`job_id`) included, since #3774's review.
+    COMPLETE = {"owner_bead": "sq-a", "promotion_criteria": "x",
+                "registered": "2026-01-01", "workflow": "ci.yml", "job_id": "j"}
+
     def test_entry_without_required_fields_declares_nothing(self):
         payload = {"jobs": {
-            "complete (advisory)": {"owner_bead": "sq-a", "promotion_criteria": "x",
-                                    "registered": "2026-01-01"},
-            "no-owner (advisory)": {"promotion_criteria": "x", "registered": "2026-01-01"},
-            "blank-owner (advisory)": {"owner_bead": "", "promotion_criteria": "x",
-                                       "registered": "2026-01-01"},
+            "complete (advisory)": dict(self.COMPLETE),
+            "no-owner (advisory)": {k: v for k, v in self.COMPLETE.items()
+                                    if k != "owner_bead"},
+            "blank-owner (advisory)": {**self.COMPLETE, "owner_bead": ""},
             "not-an-object (advisory)": "oops",
         }}
         declared, warnings = g.parse_advisory_registry(payload)
@@ -834,6 +838,176 @@ class TestAdvisoryRegistryLoading(unittest.TestCase):
             self.assertFalse(g.is_advisory("not-an-object (advisory)"))
         finally:
             self._reload()
+
+    # ---------------------------------------------------------------------
+    # [OPUS-5] #3774 cross-provider review (gpt-5.6-sol), finding 2(a).
+    # The GATE required 3 fields while scripts/check-advisory-registry.py required 5,
+    # and C4 `continue`d past an identity-less entry believing C2 had reported it. C2
+    # only inspects jobs whose NAME carries an advisory/informational token, so an
+    # identity-less entry keyed on a NON-token name was reported by NOBODY: it
+    # neutralised a real gate while the checker printed `all clear (C2 + C3 + C4)`.
+    # These tests pin the fix ON THE GATE — being flagged by the checker is not
+    # enough, because the checker is a separate job and the gate is what authorises
+    # the merge.
+    # ---------------------------------------------------------------------
+
+    def test_gate_refuses_an_entry_with_no_job_identity(self):
+        # MUTATION TARGET: drop "workflow"/"job_id" from REGISTRY_REQUIRED_FIELDS.
+        # Behaviour is asserted FIRST so the mutant REDs on the real exclusion
+        # decision (`declared` / `is_advisory` / the verdict), not merely on the
+        # membership of a constant.
+        for dropped in ("workflow", "job_id"):
+            with self.subTest(missing=dropped):
+                key = f"no-{dropped} (advisory)"
+                payload = {"jobs": {key: {k: v for k, v in self.COMPLETE.items()
+                                          if k != dropped}}}
+                declared, warnings = g.parse_advisory_registry(payload)
+                # The entry declares NOTHING and says so out loud.
+                self.assertEqual(declared, [])
+                self.assertEqual(len(warnings), 1)
+                self.assertIn(dropped, warnings[0])
+                self.assertIn("still GATES", warnings[0])
+                try:
+                    g.set_declared_advisory(declared)
+                    self.assertFalse(g.is_advisory(key))
+                    # ...and a FAILURE of that check REDs the gate.
+                    code, out = run(tiny_cfg(), [[R(key, conclusion="failure")]])
+                    self.assertEqual(code, 1, out)
+                finally:
+                    self._reload()
+        # A BLANK identity value is as absent as a missing key (fail-closed).
+        for blanked in ("workflow", "job_id"):
+            with self.subTest(blank=blanked):
+                payload = {"jobs": {"blank (advisory)":
+                                    {**self.COMPLETE, blanked: ""}}}
+                declared, _ = g.parse_advisory_registry(payload)
+                self.assertEqual(declared, [])
+        # Only now the constant itself, as documentation of the mechanism.
+        self.assertIn("workflow", g.REGISTRY_REQUIRED_FIELDS)
+        self.assertIn("job_id", g.REGISTRY_REQUIRED_FIELDS)
+
+    def test_gate_and_registry_checker_require_the_same_fields(self):
+        # The two must not drift again: an entry the checker rejects must not buy a
+        # runtime exclusion, and vice versa.
+        checker = REPO_ROOT / "scripts" / "check-advisory-registry.py"
+        spec = importlib.util.spec_from_file_location("_car", checker)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(set(mod.REQUIRED_FIELDS), set(g.REGISTRY_REQUIRED_FIELDS))
+
+    def test_reviewers_three_field_clippy_entry_cannot_neutralise_the_clippy_gate(self):
+        # THE REVIEWER'S EXACT REPRODUCTION, end to end. Injecting this entry into the
+        # LIVE registry used to make `is_advisory(...) == True` (the real clippy gate
+        # dropped from the gating set) while check-advisory-registry.py exited 0.
+        key = "clippy (gate) + fmt (non-blocking)"
+        live = json.loads(
+            (REPO_ROOT / ".github" / "advisory-registry.json").read_text(
+                encoding="utf-8")
+        )
+        baseline, _ = g.parse_advisory_registry(live)
+        live["jobs"][key] = {"owner_bead": "x", "promotion_criteria": "y",
+                            "registered": "2026-07-25"}
+        declared, warnings = g.parse_advisory_registry(live)
+        try:
+            # (1) The 3-field entry declares NOTHING — the declared set is unchanged.
+            self.assertNotIn(key, declared)
+            self.assertEqual(declared, baseline)
+            # (2) It warns, naming the missing identity pair.
+            hits = [w for w in warnings if key in w]
+            self.assertEqual(len(hits), 1, warnings)
+            self.assertIn("workflow", hits[0])
+            self.assertIn("job_id", hits[0])
+            g.set_declared_advisory(declared)
+            # (3) The clippy leg still GATES: a failure REDs the verdict, and the
+            #     exclusion count does not claim it was excluded.
+            self.assertFalse(g.is_advisory(key))
+            code, out = run(tiny_cfg(), [[R(key, conclusion="failure"), GREEN]])
+            self.assertEqual(code, 1, out)
+            self.assertIn(f"- ✗ {key}: failure", out)
+            self.assertIn("0 advisory check(s) excluded", out)
+        finally:
+            self._reload()
+
+    # ---------------------------------------------------------------------
+    # [OPUS-5] #3774 review finding 2(b) — a `${{ … }}` compiles to an unbounded
+    # `.+`, so an expression-ONLY key (the idiomatic `name: ${{ matrix.label }}`)
+    # compiled to `.+` and whole-name-matched EVERY check-run — `gate` itself
+    # included — neutralising the entire run from one registry line. C4 could not see
+    # it: the key DID equal the live YAML `name:`.
+    # ---------------------------------------------------------------------
+
+    ANCHORLESS_KEYS = (
+        "${{ matrix.label }}",
+        "${{matrix.label}}",
+        "${{ matrix.os }}${{ matrix.label }}",
+        "  ${{ matrix.label }}  ",
+        "${{ matrix.a }} ${{ matrix.b }}",   # only whitespace between expressions
+    )
+
+    def test_an_anchorless_registry_key_is_refused_not_compiled(self):
+        # MUTATION TARGET: delete the registry_key_has_literal_anchor guard (i.e.
+        # restore the unbounded `.+` compilation).
+        for key in self.ANCHORLESS_KEYS:
+            with self.subTest(key=key):
+                self.assertFalse(g.registry_key_has_literal_anchor(key))
+                # The compiler REFUSES it outright — fail-closed, never `.+`.
+                with self.assertRaises(g.AdvisoryRegistryError):
+                    g._compile_declared_name(key)
+                # ...and the loader skips it with a warning, declaring nothing.
+                payload = {"jobs": {key: dict(self.COMPLETE)}}
+                declared, warnings = g.parse_advisory_registry(payload)
+                self.assertEqual(declared, [])
+                self.assertEqual(len(warnings), 1)
+                self.assertIn("literal anchor", warnings[0])
+                self.assertIn("still GATES", warnings[0])
+
+    def test_an_anchorless_key_would_otherwise_neutralise_the_gate_itself(self):
+        # The BLAST RADIUS the guard prevents, stated as an assertion: were an
+        # expression-only key installable, `.+` would fullmatch every real check-run
+        # name on the commit — `gate` (the required context) included. This is what
+        # the mutant does, so the mutant must flip these.
+        for key in self.ANCHORLESS_KEYS:
+            with self.subTest(key=key):
+                payload = {"jobs": {key: dict(self.COMPLETE)}}
+                declared, _ = g.parse_advisory_registry(payload)
+                try:
+                    g.set_declared_advisory(declared)
+                    for victim in ("gate", "clippy", "test (ubuntu-latest)",
+                                   "coverage ratchet", "ci-select"):
+                        self.assertFalse(g.is_advisory(victim), victim)
+                    # A real gating FAILURE therefore still REDs.
+                    code, out = run(tiny_cfg(), [[R("clippy", conclusion="failure")]])
+                    self.assertEqual(code, 1, out)
+                finally:
+                    self._reload()
+
+    def test_a_framed_expression_key_is_still_accepted(self):
+        # The guard must not break the LEGITIMATE shape: a literal frame around the
+        # expression, which is what every shipped matrix declaration uses.
+        framed = "GUI build + clippy (${{ matrix.label }}, advisory)"
+        self.assertTrue(g.registry_key_has_literal_anchor(framed))
+        payload = {"jobs": {framed: dict(self.COMPLETE)}}
+        declared, warnings = g.parse_advisory_registry(payload)
+        self.assertEqual(declared, [framed])
+        self.assertEqual(warnings, [])
+        try:
+            g.set_declared_advisory(declared)
+            self.assertTrue(g.is_advisory("GUI build + clippy (x64-linux, advisory)"))
+            self.assertFalse(g.is_advisory("gate"))
+        finally:
+            self._reload()
+
+    def test_every_live_registry_key_carries_a_literal_anchor(self):
+        # Vacuity guard on the real file: the guard is only meaningful if the shipped
+        # registry actually satisfies it (it does — all 27 keys are framed).
+        raw = json.loads(
+            (REPO_ROOT / ".github" / "advisory-registry.json").read_text(
+                encoding="utf-8")
+        )["jobs"]
+        self.assertGreater(len(raw), 5)
+        for key in raw:
+            with self.subTest(key=key):
+                self.assertTrue(g.registry_key_has_literal_anchor(key), key)
 
     def test_malformed_root_raises(self):
         for payload in ([], "x", {}, {"jobs": []}, {"jobs": "x"}):
