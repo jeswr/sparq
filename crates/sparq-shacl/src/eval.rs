@@ -9,8 +9,8 @@ use crate::report::{ShapeDiagnostic, ValidationResult};
 use crate::sparql::{ComponentResultFields, PreparedValidator};
 use crate::view::GraphView;
 use oxrdf::{Literal, Term};
-use rustc_hash::FxHashMap;
-use sparq_core::dict::{is_inline, Id, TermParts};
+use rustc_hash::{FxHashMap, FxHashSet};
+use sparq_core::dict::{is_inline, is_literal_id, split_lang_dir, Id, TermParts};
 use sparq_core::Graph;
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -43,6 +43,28 @@ thread_local! {
     /// the fast path actually FIRED (non-vacuity — with a never-firing fast path
     /// the report diff would be trivially, meaninglessly equal).
     static IDFAST_WALKS: Cell<u64> = const { Cell::new(0) };
+    /// [FABLE-5] (sq-j9hls) Test-only: counts the id-level checks taken by the
+    /// EXTENDED surfaces (sh:class / comparand paths / sh:closed / focus-target
+    /// enumeration / sh:hasValue / sh:in / sh:uniqueLang) — the same non-vacuity
+    /// role `IDFAST_WALKS` plays for the value-node walk.
+    static IDFAST_EXT: Cell<u64> = const { Cell::new(0) };
+}
+
+/// [FABLE-5] (sq-j9hls) Ticks the extended-surface non-vacuity counter (no-op
+/// outside tests). Called once per id-level route taken by an extended arm.
+#[cfg(test)]
+fn tick_idfast_ext() {
+    IDFAST_EXT.with(|c| c.set(c.get() + 1));
+}
+#[cfg(not(test))]
+#[inline]
+fn tick_idfast_ext() {}
+
+/// [FABLE-5] (sq-j9hls) Test-only: the number of extended-surface id-level checks
+/// taken on this thread (see `IDFAST_EXT`).
+#[cfg(test)]
+pub(crate) fn idfast_ext_checks() -> u64 {
+    IDFAST_EXT.with(Cell::get)
 }
 
 /// [FABLE-5] (sq-7d3dj.33.4) Test-only: the number of id-level value-node walks
@@ -180,6 +202,18 @@ impl ValueNodes {
     }
 }
 
+/// [FABLE-5] (sq-j9hls) The id-level `rdfs:subClassOf` closure of one class: the
+/// class id plus every descendant present in the data dictionary. `order` keeps
+/// the BFS discovery order (the `sh:targetClass` instance enumeration must match
+/// the Term-level order exactly); `set` answers the per-value instance check.
+/// Both are empty when the class term is absent from the dictionary (no data
+/// triple can mention it, so it has no instances — exactly the Term-level
+/// outcome).
+struct ClassClosure {
+    order: Vec<Id>,
+    set: FxHashSet<Id>,
+}
+
 struct Validator<'a> {
     data: GraphView<'a>,
     shapes: &'a ShapesModel,
@@ -241,6 +275,26 @@ struct Validator<'a> {
     /// An entry is stored ONLY when the Term-keyed memo stored one (the same
     /// context-free rule — see [`Validator::conforms`]).
     memo_ids: Vec<FxHashMap<Id, bool>>,
+    /// [FABLE-5] (sq-j9hls) Predicate ids of `rdf:type` / `rdfs:subClassOf` in
+    /// the data dictionary (`None` = absent → no typed instances / no subclass
+    /// edges), resolved once so the id-level class-instance checks and the
+    /// `sh:targetClass` enumeration never re-hash the two IRIs.
+    rdf_type_id: Option<Id>,
+    subclass_of_id: Option<Id>,
+    /// [FABLE-5] (sq-j9hls) Per-class id-level subclass closures, cached per
+    /// class TERM (a shape set names few distinct classes; each closure is built
+    /// once per validation run and shared by every focus/value check against it).
+    class_closures: FxHashMap<Term, Rc<ClassClosure>>,
+    /// [FABLE-5] (sq-j9hls) Compiled id-level COMPARAND paths (`sh:equals` /
+    /// `sh:disjoint` / `sh:lessThan(OrEquals)` / `sh:subsetOf`), indexed by shape
+    /// id and keyed by component index — compiled once per validation run exactly
+    /// like [`Self::compiled_paths`], so the per-focus comparand walk never
+    /// re-hashes a predicate IRI string.
+    compiled_comparands: Vec<FxHashMap<usize, PathIds>>,
+    /// [FABLE-5] (sq-j9hls) Dictionary ids of shapes-graph constants
+    /// (`sh:hasValue` / `sh:in` members), memoised per term (`None` = absent
+    /// from the data dictionary — such a constant can exactly-equal no data id).
+    term_ids: FxHashMap<Term, Option<Id>>,
 }
 
 impl<'a> Validator<'a> {
@@ -254,6 +308,26 @@ impl<'a> Validator<'a> {
             .shapes
             .iter()
             .map(|s| s.path.as_ref().map(|p| p.compile(&view)))
+            .collect();
+        // [FABLE-5] (sq-j9hls) Comparand paths, compiled under the same cheap
+        // eager rule as `compiled_paths` (shapes graphs are small).
+        let compiled_comparands = shapes
+            .shapes
+            .iter()
+            .map(|s| {
+                let mut m = FxHashMap::default();
+                for (i, c) in s.components.iter().enumerate() {
+                    if let Component::Equals(p)
+                    | Component::Disjoint(p)
+                    | Component::LessThan(p)
+                    | Component::LessThanOrEquals(p)
+                    | Component::SubsetOf(p) = c
+                    {
+                        m.insert(i, p.compile(&view));
+                    }
+                }
+                m
+            })
             .collect();
         Validator {
             data: view,
@@ -269,6 +343,11 @@ impl<'a> Validator<'a> {
             node_expr_cache: None,
             compiled_paths,
             memo_ids: vec![FxHashMap::default(); shapes.shapes.len()],
+            rdf_type_id: view.pred_id(crate::view::RDF_TYPE),
+            subclass_of_id: view.pred_id(crate::view::RDFS_SUBCLASS_OF),
+            class_closures: FxHashMap::default(),
+            compiled_comparands,
+            term_ids: FxHashMap::default(),
         }
     }
 
@@ -286,7 +365,8 @@ impl<'a> Validator<'a> {
             match t {
                 Target::Node(n) => out.push(n.clone()),
                 Target::Class(c) | Target::ImplicitClass(c) => {
-                    out.extend(self.data.instances_of(c))
+                    let instances = self.instances_of_fast(c);
+                    out.extend(instances);
                 }
                 Target::SubjectsOf(p) => out.extend(self.data.subjects_of(p)),
                 Target::ObjectsOf(p) => out.extend(self.data.objects_of(p)),
@@ -412,6 +492,214 @@ impl<'a> Validator<'a> {
             self.memo_ids[sid].insert(id, ok);
         }
         ok
+    }
+
+    // ---- extended id-level surfaces ([FABLE-5] sq-j9hls) -------------------------
+
+    /// The cached id-level subclass closure of `class` (see [`ClassClosure`]).
+    /// BFS over `subjects_ids(rdfs:subClassOf, c)` — the same scans, in the same
+    /// order, as the Term-level [`GraphView::subclass_closure`], so the closure
+    /// contains exactly the ids of that walk's terms in the same discovery order.
+    fn class_closure(&mut self, class: &Term) -> Rc<ClassClosure> {
+        if let Some(c) = self.class_closures.get(class) {
+            return Rc::clone(c);
+        }
+        let mut order = Vec::new();
+        let mut set = FxHashSet::default();
+        if let Some(cid) = self.data.id_of(class) {
+            order.push(cid);
+            set.insert(cid);
+            if let Some(sub_p) = self.subclass_of_id {
+                let mut i = 0;
+                while i < order.len() {
+                    let c = order[i];
+                    i += 1;
+                    for sub in self.data.subjects_ids(sub_p, c) {
+                        if set.insert(sub) {
+                            order.push(sub);
+                        }
+                    }
+                }
+            }
+        }
+        let rc = Rc::new(ClassClosure { order, set });
+        self.class_closures.insert(class.clone(), Rc::clone(&rc));
+        rc
+    }
+
+    /// Id twin of the [`GraphView::is_instance_of`] decision: `v` is a SHACL
+    /// instance iff one of its `rdf:type` ids is in the class's subclass-closure
+    /// set — the same reachability relation the Term-level upward superclass walk
+    /// decides, answered set-side (closure cached per class). A literal / absent
+    /// / type-less `v` has no `rdf:type` triples, so it is not an instance —
+    /// exactly the Term-level outcome.
+    fn instance_in_closure(&self, v: Id, closure: &ClassClosure) -> bool {
+        if closure.set.is_empty() {
+            return false;
+        }
+        let Some(tp) = self.rdf_type_id else {
+            return false;
+        };
+        self.data
+            .objects_ids(v, tp)
+            .iter()
+            .any(|t| closure.set.contains(t))
+    }
+
+    /// Id-level `sh:targetClass` focus enumeration — the twin of
+    /// [`GraphView::instances_of`]: same BFS class order, same per-class subject
+    /// scan order, same first-seen dedup, materialising each distinct instance
+    /// exactly once (the Term route materialised every scanned row).
+    fn instances_of_fast(&mut self, class: &Term) -> Vec<Term> {
+        #[cfg(test)]
+        if FORCE_NO_IDFAST.with(Cell::get) {
+            return self.data.instances_of(class);
+        }
+        let Some(tp) = self.rdf_type_id else {
+            // No rdf:type triple exists, so no class has instances.
+            return Vec::new();
+        };
+        tick_idfast_ext();
+        let closure = self.class_closure(class);
+        let mut seen: FxHashSet<Id> = FxHashSet::default();
+        let mut out = Vec::new();
+        for &c in &closure.order {
+            for s in self.data.subjects_ids(tp, c) {
+                if seen.insert(s) {
+                    out.push(self.data.term_of(s));
+                }
+            }
+        }
+        out
+    }
+
+    /// The dictionary id of value node `v` under a RESOLVED focus id: the focus's
+    /// own id when `v` IS the focus (the no-path node-shape case — no re-hash),
+    /// else one dictionary hash. `None` = absent from the data graph (the term
+    /// can match no triple — every graph-scan decision is vacuously empty, which
+    /// is exactly what the Term-level scans decide for it).
+    fn value_id(&self, focus: &Term, fid: Id, v: &Term) -> Option<Id> {
+        if v == focus {
+            Some(fid)
+        } else {
+            self.data.id_of(v)
+        }
+    }
+
+    /// The comparand path's value-node ids for focus id `fid`, via the per-run
+    /// compiled comparand of `(sid, comp_idx)` (present for every comparand
+    /// component — compiled eagerly in [`Self::new`]).
+    fn comparand_values_ids(&self, sid: usize, comp_idx: usize, fid: Id) -> Vec<Id> {
+        self.compiled_comparands[sid]
+            .get(&comp_idx)
+            .expect("comparand path compiled in Validator::new")
+            .values_ids(&self.data, fid)
+    }
+
+    /// The comparand path's value nodes as TERMS: the id-level walk +
+    /// materialisation when the focus id is resolved (both routes materialise
+    /// through the same dictionary and the compiled walk mirrors `Path::values`
+    /// order exactly, so the vectors are identical), else the Term-level walk.
+    fn comparand_terms(
+        &self,
+        sid: usize,
+        comp_idx: usize,
+        fid: Option<Id>,
+        p: &Path,
+        focus: &Term,
+    ) -> Vec<Term> {
+        match fid {
+            Some(f) => {
+                tick_idfast_ext();
+                self.comparand_values_ids(sid, comp_idx, f)
+                    .into_iter()
+                    .map(|id| self.data.term_of(id))
+                    .collect()
+            }
+            None => p.values(&self.data, focus),
+        }
+    }
+
+    /// The memoised dictionary id of a shapes-graph constant term.
+    fn term_id(&mut self, t: &Term) -> Option<Id> {
+        if let Some(&id) = self.term_ids.get(t) {
+            return id;
+        }
+        let id = self.data.id_of(t);
+        self.term_ids.insert(t.clone(), id);
+        id
+    }
+
+    /// Id twin of the `sh:hasValue` membership check: does any id in `ids`
+    /// denote a term SHACL-equal ([`equal_value`]) to `t`? Exact term equality
+    /// is id equality (the dictionary is injective; a `t` absent from the
+    /// dictionary can exactly-equal no data id); value equality (SPARQL `=`
+    /// families) only relates LITERALS, so only literal ids materialise — and
+    /// only when `t` is itself a literal.
+    fn equal_value_ids(&mut self, ids: &[Id], t: &Term) -> bool {
+        if let Some(tid) = self.term_id(t) {
+            if ids.contains(&tid) {
+                return true;
+            }
+        }
+        if !matches!(t, Term::Literal(_)) {
+            return false;
+        }
+        ids.iter().any(|&v| {
+            is_literal_id(&self.data.graph().dict, v)
+                && matches!(cmp_terms(&self.data.term_of(v), t), Some(Ordering::Equal))
+        })
+    }
+
+    /// Id twin of the per-value `sh:in` membership check (`any(equal_value)`),
+    /// under the same exact-vs-value split as [`Self::equal_value_ids`].
+    fn in_list_id(&mut self, v: Id, list: &[Term]) -> bool {
+        if list.iter().any(|m| self.term_id(m) == Some(v)) {
+            return true;
+        }
+        if !is_literal_id(&self.data.graph().dict, v)
+            || !list.iter().any(|m| matches!(m, Term::Literal(_)))
+        {
+            return false;
+        }
+        let vt = self.data.term_of(v);
+        list.iter()
+            .any(|m| matches!(cmp_terms(&vt, m), Some(Ordering::Equal)))
+    }
+
+    /// Id-level `sh:closed` scan of one value node: walks the value's
+    /// `(predicate, object)` id pairs and reports every predicate outside
+    /// `allowed`, materialising terms only for VIOLATING pairs. A data predicate
+    /// is always in the dictionary, so string membership in the Term-level
+    /// allowed set ⟺ id membership here; the non-IRI-predicate skip mirrors the
+    /// Term-level arm (an id in `allowed` is the id of an IRI, so a non-IRI
+    /// predicate is skipped on both routes regardless of check order).
+    fn closed_scan_id(
+        &mut self,
+        sid: usize,
+        focus: &Term,
+        v: Id,
+        allowed: &FxHashSet<Id>,
+        out: &mut Vec<ValidationResult>,
+    ) {
+        for (pid, oid) in self.data.predicate_objects_ids(v) {
+            if allowed.contains(&pid) {
+                continue;
+            }
+            let p_str = match self.data.term_of(pid) {
+                Term::NamedNode(n) => n.as_str().to_string(),
+                _ => continue,
+            };
+            let mut r = self.result(
+                sid,
+                focus,
+                Some(self.data.term_of(oid)),
+                "ClosedConstraintComponent",
+                format!("Predicate <{p_str}> is not allowed (closed shape)"),
+            );
+            r.path = Some(Path::Predicate(p_str));
+            out.push(r);
+        }
     }
 
     /// [OPUS-4.8] (sq-f8gu) Validate `node` against shape `sid` and RETURN the
@@ -544,7 +832,7 @@ impl<'a> Validator<'a> {
                 Some(m) if !m.is_empty() => Some(m.clone()),
                 _ => None,
             };
-            self.eval_component(sid, focus, &mut values, comp, out);
+            self.eval_component(sid, focus, fid, i, &mut values, comp, out);
             self.active_meta = None;
         }
         // [FABLE-5] (sq-1jemy) Hand the caller's per-statement override back
@@ -619,17 +907,22 @@ impl<'a> Validator<'a> {
             .collect()
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// `fid`/`comp_idx` ([FABLE-5] sq-j9hls): the resolved focus id (`None` ⇒
+    /// every extended fast route is OFF — the Term-level original runs) and this
+    /// component's index in the shape (the compiled-comparand key).
+    #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
     fn eval_component(
         &mut self,
         sid: usize,
         focus: &Term,
+        fid: Option<Id>,
+        comp_idx: usize,
         values: &mut ValueNodes,
         comp: &Component,
         out: &mut Vec<ValidationResult>,
     ) {
         let g = self.data;
-        // ---- id-level fast arms ([FABLE-5] sq-7d3dj.33.4) --------------------
+        // ---- id-level fast arms ([FABLE-5] sq-7d3dj.33.4, extended sq-j9hls) --
         // While the value nodes are still ids (from the compiled-path walk), the
         // hot Core components check them without materialising a single term —
         // only a VIOLATING value materialises, for its report entry. Every arm
@@ -637,7 +930,7 @@ impl<'a> Validator<'a> {
         // dictionary records (differential-tested: `idfast_` tests in lib.rs).
         // Any other component materialises the values once and takes the
         // unchanged Term-level route.
-        if let ValueNodes::Ids(ids) = &*values {
+        if let (ValueNodes::Ids(ids), Some(fid)) = (&*values, fid) {
             match comp {
                 Component::MinCount(n) => {
                     if (ids.len() as u64) < *n {
@@ -762,14 +1055,202 @@ impl<'a> Validator<'a> {
                     }
                     return;
                 }
+                // ---- extended arms ([FABLE-5] sq-j9hls) ----------------------
+                Component::Class(cls) => {
+                    tick_idfast_ext();
+                    let closure = self.class_closure(cls);
+                    for &v in ids {
+                        if !self.instance_in_closure(v, &closure) {
+                            out.push(self.result(
+                                sid,
+                                focus,
+                                Some(g.term_of(v)),
+                                "ClassConstraintComponent",
+                                format!("Value does not have class {cls}"),
+                            ));
+                        }
+                    }
+                    return;
+                }
+                Component::ClassIn(classes) => {
+                    tick_idfast_ext();
+                    let closures: Vec<Rc<ClassClosure>> =
+                        classes.iter().map(|c| self.class_closure(c)).collect();
+                    for &v in ids {
+                        if !closures.iter().any(|c| self.instance_in_closure(v, c)) {
+                            let joined = classes
+                                .iter()
+                                .map(|c| c.to_string())
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            out.push(self.result(
+                                sid,
+                                focus,
+                                Some(g.term_of(v)),
+                                "ClassConstraintComponent",
+                                format!("Value does not have any of the allowed classes {joined}"),
+                            ));
+                        }
+                    }
+                    return;
+                }
+                // sh:equals — both membership directions are exact-term checks,
+                // which over dictionary ids is id equality; only violating ids
+                // materialise. Result order mirrors the Term arm: path values
+                // missing from the comparand first, then comparand values
+                // missing from the path.
+                Component::Equals(p) => {
+                    tick_idfast_ext();
+                    let others = self.comparand_values_ids(sid, comp_idx, fid);
+                    for &v in ids {
+                        if !others.contains(&v) {
+                            out.push(self.result(
+                                sid,
+                                focus,
+                                Some(g.term_of(v)),
+                                "EqualsConstraintComponent",
+                                format!("Value missing from {}", p.to_turtle()),
+                            ));
+                        }
+                    }
+                    for &o in &others {
+                        if !ids.contains(&o) {
+                            out.push(self.result(
+                                sid,
+                                focus,
+                                Some(g.term_of(o)),
+                                "EqualsConstraintComponent",
+                                format!("Value of {} missing from the path values", p.to_turtle()),
+                            ));
+                        }
+                    }
+                    return;
+                }
+                Component::Disjoint(p) => {
+                    tick_idfast_ext();
+                    let others = self.comparand_values_ids(sid, comp_idx, fid);
+                    for &v in ids {
+                        if others.contains(&v) {
+                            out.push(self.result(
+                                sid,
+                                focus,
+                                Some(g.term_of(v)),
+                                "DisjointConstraintComponent",
+                                format!("Value shared with {}", p.to_turtle()),
+                            ));
+                        }
+                    }
+                    return;
+                }
+                Component::SubsetOf(p) => {
+                    tick_idfast_ext();
+                    let others = self.comparand_values_ids(sid, comp_idx, fid);
+                    for &v in ids {
+                        if !others.contains(&v) {
+                            out.push(self.result(
+                                sid,
+                                focus,
+                                Some(g.term_of(v)),
+                                "SubsetOfConstraintComponent",
+                                format!("Value not in the value set of {}", p.to_turtle()),
+                            ));
+                        }
+                    }
+                    return;
+                }
+                Component::HasValue(t) => {
+                    tick_idfast_ext();
+                    if !self.equal_value_ids(ids, t) {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            None,
+                            "HasValueConstraintComponent",
+                            format!("Missing required value {t}"),
+                        ));
+                    }
+                    return;
+                }
+                Component::In(list) => {
+                    tick_idfast_ext();
+                    for &v in ids {
+                        if !self.in_list_id(v, list) {
+                            out.push(self.result(
+                                sid,
+                                focus,
+                                Some(g.term_of(v)),
+                                "InConstraintComponent",
+                                "Value is not in the enumeration".into(),
+                            ));
+                        }
+                    }
+                    return;
+                }
+                // sh:uniqueLang — the language key comes straight from the
+                // stored slot: `split_lang_dir` agrees with the materialised
+                // `Literal::language()`/`direction()` pair by construction (the
+                // dict documents both paths validate the `--dir` suffix
+                // identically), so the keys — and the sorted duplicate list —
+                // match the Term arm byte-for-byte with ZERO materialisation.
+                Component::UniqueLang => {
+                    tick_idfast_ext();
+                    let mut counts: FxHashMap<String, usize> = FxHashMap::default();
+                    for &v in ids {
+                        if is_inline(v) {
+                            continue; // inline xsd:integer — no language tag
+                        }
+                        if let TermParts::Lit {
+                            lang: Some(slot), ..
+                        } = g.graph().dict.term_parts(v)
+                        {
+                            let (tag, dir) = split_lang_dir(slot);
+                            let key = match dir {
+                                Some(d) => format!("{}--{}", tag.to_lowercase(), d),
+                                None => tag.to_lowercase(),
+                            };
+                            *counts.entry(key).or_insert(0) += 1;
+                        }
+                    }
+                    let mut langs: Vec<&String> = counts
+                        .iter()
+                        .filter(|(_, &c)| c > 1)
+                        .map(|(l, _)| l)
+                        .collect();
+                    langs.sort();
+                    for lang in langs {
+                        out.push(self.result(
+                            sid,
+                            focus,
+                            None,
+                            "UniqueLangConstraintComponent",
+                            format!("Language \"{}\" is used more than once", lang),
+                        ));
+                    }
+                    return;
+                }
                 _ => {} // no id twin — materialise and take the Term-level route
             }
         }
         let values: &[Term] = values.materialize(&g);
         match comp {
             Component::Class(cls) => {
+                // [FABLE-5] (sq-j9hls) With a resolved focus id, decide via the
+                // cached id-level closure (Term-form values arise for node shapes
+                // — the value IS the focus — and for `sh:values` expressions).
+                // Both routes resolve `v` through the same dictionary hash, so
+                // the per-value instance verdicts are identical.
+                let closure = fid.map(|_| self.class_closure(cls));
+                if closure.is_some() {
+                    tick_idfast_ext();
+                }
                 for v in values {
-                    if !self.data.is_instance_of(v, cls) {
+                    let ok = match (&closure, fid) {
+                        (Some(c), Some(f)) => self
+                            .value_id(focus, f, v)
+                            .is_some_and(|vid| self.instance_in_closure(vid, c)),
+                        _ => self.data.is_instance_of(v, cls),
+                    };
+                    if !ok {
                         out.push(self.result(
                             sid,
                             focus,
@@ -784,8 +1265,19 @@ impl<'a> Validator<'a> {
             // conforms iff it is a SHACL instance of ANY listed class (the
             // subclass-aware `is_instance_of` is reused per listed class).
             Component::ClassIn(classes) => {
+                // [FABLE-5] (sq-j9hls) Same id-level closure route as `sh:class`.
+                let closures: Option<Vec<Rc<ClassClosure>>> = fid.map(|_| {
+                    tick_idfast_ext();
+                    classes.iter().map(|c| self.class_closure(c)).collect()
+                });
                 for v in values {
-                    if !classes.iter().any(|cls| self.data.is_instance_of(v, cls)) {
+                    let ok = match (&closures, fid) {
+                        (Some(cs), Some(f)) => self.value_id(focus, f, v).is_some_and(|vid| {
+                            cs.iter().any(|c| self.instance_in_closure(vid, c))
+                        }),
+                        _ => classes.iter().any(|cls| self.data.is_instance_of(v, cls)),
+                    };
+                    if !ok {
                         let joined = classes
                             .iter()
                             .map(|c| c.to_string())
@@ -1018,7 +1510,7 @@ impl<'a> Validator<'a> {
             // sets must be equal: one result per path value absent from the
             // comparand set, and one per comparand value absent from the path set.
             Component::Equals(p) => {
-                let others = p.values(&self.data, focus);
+                let others = self.comparand_terms(sid, comp_idx, fid, p, focus);
                 for v in values {
                     if !others.contains(v) {
                         out.push(self.result(
@@ -1045,7 +1537,7 @@ impl<'a> Validator<'a> {
             // [OPUS-4.8] (sq-sx15d) `sh:disjoint` — the comparand is a PATH (SHACL
             // 1.2). A path value shared with the comparand value set is a result.
             Component::Disjoint(p) => {
-                let others = p.values(&self.data, focus);
+                let others = self.comparand_terms(sid, comp_idx, fid, p, focus);
                 for v in values {
                     if others.contains(v) {
                         out.push(self.result(
@@ -1062,7 +1554,9 @@ impl<'a> Validator<'a> {
             // `1 < "a"` and `1 < "b"` to report `sh:value 1` twice.
             // [OPUS-4.8] (sq-sx15d) the comparand is a PATH (SHACL 1.2).
             Component::LessThan(p) => {
-                let others = p.values(&self.data, focus);
+                // [FABLE-5] (sq-j9hls) The pair comparison needs terms either
+                // way, so only the comparand WALK is id-level here.
+                let others = self.comparand_terms(sid, comp_idx, fid, p, focus);
                 for v in values {
                     for o in &others {
                         if !matches!(cmp_terms(v, o), Some(Ordering::Less)) {
@@ -1078,7 +1572,7 @@ impl<'a> Validator<'a> {
                 }
             }
             Component::LessThanOrEquals(p) => {
-                let others = p.values(&self.data, focus);
+                let others = self.comparand_terms(sid, comp_idx, fid, p, focus);
                 for v in values {
                     for o in &others {
                         if !matches!(cmp_terms(v, o), Some(Ordering::Less | Ordering::Equal)) {
@@ -1100,7 +1594,7 @@ impl<'a> Validator<'a> {
             // shape's path must be a SUBSET of the comparand path's value set. One
             // result per path value absent from the comparand set.
             Component::SubsetOf(p) => {
-                let others = p.values(&self.data, focus);
+                let others = self.comparand_terms(sid, comp_idx, fid, p, focus);
                 for v in values {
                     if !others.contains(v) {
                         out.push(self.result(
@@ -1345,6 +1839,24 @@ impl<'a> Validator<'a> {
                     }
                     Some(allowed)
                 };
+                // [FABLE-5] (sq-j9hls) With a resolved focus id and a FIXED
+                // allowed set, scan each value's (predicate, object) pairs at
+                // the id level — an allowed IRI absent from the data dictionary
+                // can never appear as a data predicate, so id-set membership ⟺
+                // the Term-level string membership; a value absent from the
+                // dictionary has no triples (no violations) on both routes. The
+                // per-value `sh:ByTypes` allowed set stays on the Term route.
+                if let (Some(f), Some(a)) = (fid, &fixed_allowed) {
+                    tick_idfast_ext();
+                    let allowed_ids: FxHashSet<Id> =
+                        a.iter().filter_map(|p| g.pred_id(p)).collect();
+                    for v in values {
+                        if let Some(vid) = self.value_id(focus, f, v) {
+                            self.closed_scan_id(sid, focus, vid, &allowed_ids, out);
+                        }
+                    }
+                    return;
+                }
                 for v in values {
                     let allowed = match &fixed_allowed {
                         Some(a) => a.clone(),
@@ -2029,18 +2541,104 @@ impl<'a> Validator<'a> {
 /// turned into a leading inline `(?...)` group. Shared by [`Validator::regex_for`]
 /// (compile + match) and [`Validator::note_pattern_skipped`] (recompute the error)
 /// so both see byte-identical input.
+///
+/// [FABLE-5] (sq-8ro) XPath-regex divergences from the Rust `regex` crate are
+/// translated here: the XPath F&O `q` flag (literal-pattern mode — only `i` keeps
+/// its effect alongside it, mirroring the engine's `build_regex`), and the
+/// XPath/XSD `\i` / `\I` / `\c` / `\C` name-character classes (see
+/// [`translate_xpath_escapes`]).
 fn compose_pattern(source: &str, flags: Option<&str>) -> String {
+    let flags = flags.unwrap_or("");
+    if flags.contains('q') {
+        // Literal-pattern mode: every pattern character matches itself, which
+        // also suppresses the other flags' metacharacters — per XPath, only `i`
+        // is combinable with `q`.
+        let escaped = regex::escape(source);
+        return if flags.contains('i') {
+            format!("(?i){}", escaped)
+        } else {
+            escaped
+        };
+    }
+    let source = translate_xpath_escapes(source);
     let mut inline = String::new();
-    for f in flags.unwrap_or("").chars() {
+    for f in flags.chars() {
         if matches!(f, 'i' | 'm' | 's' | 'x' | 'U') {
             inline.push(f);
         }
     }
     if inline.is_empty() {
-        source.to_string()
+        source
     } else {
         format!("(?{inline}){source}")
     }
+}
+
+/// XML 1.0 `NameStartChar` as a Rust-regex character-class BODY (no brackets).
+macro_rules! xml_name_start_char {
+    () => {
+        concat!(
+            r":A-Z_a-z\x{C0}-\x{D6}\x{D8}-\x{F6}\x{F8}-\x{2FF}\x{370}-\x{37D}",
+            r"\x{37F}-\x{1FFF}\x{200C}-\x{200D}\x{2070}-\x{218F}\x{2C00}-\x{2FEF}",
+            r"\x{3001}-\x{D7FF}\x{F900}-\x{FDCF}\x{FDF0}-\x{FFFD}\x{10000}-\x{EFFFF}"
+        )
+    };
+}
+const XML_NAME_START_CHAR: &str = xml_name_start_char!();
+/// XML 1.0 `NameChar` (`NameStartChar` plus `-` `.` digits #xB7 combining marks).
+const XML_NAME_CHAR: &str = concat!(
+    xml_name_start_char!(),
+    r"\-.0-9\x{B7}\x{300}-\x{36F}\x{203F}-\x{2040}"
+);
+
+/// [FABLE-5] (sq-8ro) Translates the XPath/XSD multi-character escapes the Rust
+/// `regex` crate does not recognise — `\i` (XML `NameStartChar`), `\c` (XML
+/// `NameChar`) and their complements `\I` / `\C` — into bracketed character
+/// classes. The replacement is a bracketed class even INSIDE `[...]`: the Rust
+/// regex syntax accepts nested classes, so `[\c!]` becomes `[[…]!]` with the
+/// correct union (and `[^\i]` the correct complement-of-union) semantics. Every
+/// other escape pair passes through untouched, so `\\i` stays a literal
+/// backslash + `i` and constructs the Rust engine genuinely lacks (look-around)
+/// still land on the sq-lz99x skip-with-diagnostic path.
+fn translate_xpath_escapes(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut chars = source.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('i') => {
+                out.push('[');
+                out.push_str(XML_NAME_START_CHAR);
+                out.push(']');
+            }
+            Some('I') => {
+                out.push_str("[^");
+                out.push_str(XML_NAME_START_CHAR);
+                out.push(']');
+            }
+            Some('c') => {
+                out.push('[');
+                out.push_str(XML_NAME_CHAR);
+                out.push(']');
+            }
+            Some('C') => {
+                out.push_str("[^");
+                out.push_str(XML_NAME_CHAR);
+                out.push(']');
+            }
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            // A trailing lone backslash: pass through (an invalid regex either
+            // way — it takes the skip-with-diagnostic path).
+            None => out.push('\\'),
+        }
+    }
+    out
 }
 
 /// [OPUS-4.8] (sq-f8gu) The DISTINCT members of `members` that appear more than
@@ -2252,9 +2850,21 @@ fn cmp_literals(a: &Literal, b: &Literal) -> Option<Ordering> {
         let (ta, tza) = timestamp(a.value(), da)?;
         let (tb, tzb) = timestamp(b.value(), db)?;
         if tza != tzb {
-            // XSD order between a timezoned and an untimezoned value is
-            // INDETERMINATE (within the ±14h window) — not comparable.
-            return None;
+            // XSD's ±14h rule (XSD 1.1 pt.2 §3.3.7): an untimezoned value may
+            // lie in any timezone from -14:00 to +14:00, so it denotes a 28h
+            // window of instants around its as-if-UTC timestamp. Order against
+            // a timezoned instant is DETERMINATE only when the whole window
+            // falls strictly on one side; otherwise the pair is incomparable.
+            const TZ_WINDOW_SECS: f64 = 14.0 * 3600.0;
+            let (u, z) = if tza { (tb, ta) } else { (ta, tb) };
+            let ord = if u + TZ_WINDOW_SECS < z {
+                Ordering::Less
+            } else if u - TZ_WINDOW_SECS > z {
+                Ordering::Greater
+            } else {
+                return None;
+            };
+            return Some(if tza { ord.reverse() } else { ord });
         }
         return ta.partial_cmp(&tb);
     }
@@ -2306,8 +2916,9 @@ fn parse_bool(v: &str) -> Option<bool> {
 }
 
 /// Seconds-since-epoch of an XSD date/time lexical value plus whether it
-/// carries an explicit timezone (an untimezoned value is normalised AS IF UTC,
-/// but only values agreeing on timezone presence are mutually comparable).
+/// carries an explicit timezone (an untimezoned value is normalised AS IF UTC;
+/// against a timezoned value it is ordered via the ±14h determinate window —
+/// see `cmp_literals`).
 fn timestamp(value: &str, dt: &str) -> Option<(f64, bool)> {
     let local = dt.strip_prefix(XSD)?;
     let v = value.trim();
@@ -2681,7 +3292,9 @@ mod tests {
             ),
             Ordering::Equal
         );
-        // Timezone presence must agree for the values to be comparable.
+        // Mixed timezone presence: XSD's ±14h rule. An untimezoned value may
+        // lie in any timezone from -14:00 to +14:00, so pairs closer than 14h
+        // are INDETERMINATE (None); pairs farther apart are determinate.
         let lit = |v: &str| {
             Literal::new_typed_literal(v, oxrdf::NamedNode::new(xsd("dateTime")).unwrap())
         };
@@ -2690,7 +3303,33 @@ mod tests {
                 &lit("2002-10-10T12:00:00-05:00"),
                 &lit("2002-10-10T12:00:00")
             ),
-            None
+            None,
+            "inside the ±14h window -> indeterminate"
+        );
+        assert_eq!(
+            cmp_literals(&lit("2000-01-12T12:00:00"), &lit("2000-01-14T12:00:00Z")),
+            Some(Ordering::Less),
+            "whole window below the instant -> determinate <"
+        );
+        assert_eq!(
+            cmp_literals(&lit("2000-01-14T12:00:00Z"), &lit("2000-01-12T12:00:00")),
+            Some(Ordering::Greater),
+            "same pair, flipped operands"
+        );
+        assert_eq!(
+            cmp_literals(&lit("2000-01-16T12:00:00"), &lit("2000-01-14T12:00:00Z")),
+            Some(Ordering::Greater),
+            "whole window above the instant -> determinate >"
+        );
+        assert_eq!(
+            cmp_literals(&lit("2000-01-01T00:00:00"), &lit("2000-01-01T14:00:00Z")),
+            None,
+            "exactly 14h apart: the -14:00 reading coincides -> indeterminate"
+        );
+        assert_eq!(
+            cmp_literals(&lit("2000-01-01T00:00:00"), &lit("2000-01-01T14:00:01Z")),
+            Some(Ordering::Less),
+            "one second past the window edge -> determinate <"
         );
     }
 }
