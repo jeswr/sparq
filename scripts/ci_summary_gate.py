@@ -731,17 +731,15 @@ class WorkflowRunResolver:
         # redispatch decision, the attempt-jobs inventory and the resolver must all
         # agree on which run is authoritative, or a vacuous label-flip run could still
         # supersede a real predecessor through one of the other two paths.
-        # [OPUS-5] #3788: union in the OBSERVED-vacuous runs (every check-run they
-        # registered concluded `skipped`, and a sibling run of the same workflow has
-        # evidence). #3781's declared marker only reaches the four ci-select callers;
-        # `vectorized-feature-off.yml` emits no select, so once #3788 gave it the #2546
-        # label-trigger guard its guarded flip run would otherwise have superseded the
-        # in-flight real wasm build. Both sets feed the SAME downstream argument, so the
-        # redispatch decision, the attempt-jobs inventory and the resolver stay in
-        # agreement about which run is authoritative.
+        # [OPUS-5] The OBSERVED-vacuous exclusion that #3788 unioned in here has MOVED to
+        # sparq#3795. Three cross-provider review rounds each found a distinct laundered-red
+        # in it — an evaporated failing leg, a `neutral` run outside the demotable set, and an
+        # ordering hole where the Jobs API later supplied the skipped legs anyway — so it is
+        # being redesigned around the authoritative Jobs API inventory rather than inferring
+        # absence-of-work from the check-run snapshot, which is only ever a subset.
+        # #3781's DECLARED marker exclusion is independent of that and stays exactly as it was.
         declared_no_leg = no_leg_run_ids(checks)
-        observed_no_leg = vacuous_run_ids(checks, workflows)
-        no_leg_ids = declared_no_leg | observed_no_leg
+        no_leg_ids = declared_no_leg
         authoritative = [
             r for r in workflows if _as_int(r.get("id")) not in no_leg_ids
         ]
@@ -751,8 +749,6 @@ class WorkflowRunResolver:
         # announced once, by the declared rule).
         for reason, ids in (
             ("declared NO LEGS (guarded label-flip no-op, #3781)", declared_no_leg),
-            ("NO LEGS observed — every check-run they registered concluded `skipped` "
-             "(#3788)", observed_no_leg),
         ):
             fresh_no_leg = sorted(ids - self._no_leg_reported)
             if not fresh_no_leg:
@@ -900,134 +896,6 @@ def no_leg_run_ids(check_runs: list[dict]) -> set[int]:
         rid = _workflow_run_id_of_check(r)
         if rid:
             out.add(rid)
-    return out
-
-
-# The workflow-run conclusions a run may be DEMOTED as vacuous under. DERIVED from _PASSING,
-# never written out again, because the two sets are not independent — see below.
-#
-# THE INVARIANT: every conclusion the gate honours as PASSING must be demotable.
-#
-# The first cut of this hand-wrote {"success", "skipped"} and argued that leaving everything
-# else authoritative was "the fail-closed direction, an unrecognised conclusion must never buy
-# a demotion". That conflates two different directions. Keeping a vacuous run authoritative is
-# only safe when that run's legs CANNOT satisfy the gate. `neutral` is in _PASSING, so the gap
-# was directly exploitable and cross-provider review reproduced it on head 89aabfb8:
-#
-#   run 901 older, FAILED. run 902 newer, concluded `neutral`, both jobs skipped. 902 is not
-#   demotable (neutral was absent here) => stays authoritative => its two `skipped` legs are in
-#   _PASSING => ci-summary PASSED, exit 0, over a failed run.
-#
-# Conclusions OUTSIDE _PASSING (`failure`, `cancelled`, `timed_out`, `action_required`, `stale`)
-# stay non-demotable and that IS fail-closed for them: their legs cannot satisfy the gate, so
-# keeping them authoritative makes the gate hold or fail rather than launder. Derivation makes
-# the pairing structural — adding a conclusion to _PASSING can no longer silently open a new
-# gap, and `test_every_passing_conclusion_is_demotable` asserts it.
-_VACUOUS_OK_CONCLUSIONS = frozenset(_PASSING)
-
-
-def vacuous_run_ids(
-    check_runs: list[dict], workflow_runs: list[dict]
-) -> set[int]:
-    """[OPUS-5] #3788: run ids that produced NO EVIDENCE — every check-run they
-    registered concluded `skipped` — while a SIBLING run of the same workflow on this
-    SHA did produce some. Such a run must not become the authoritative newest run and
-    erase the sibling's real legs.
-
-    WHY THIS EXISTS ALONGSIDE no_leg_run_ids. #3781's exclusion is DECLARED: it reads
-    the ", no-leg" marker off the pure ci-select pre-job, so it only reaches the four
-    lanes that call the reusable selector. `vectorized-feature-off.yml` emits no select
-    at all, so when #3788 gave it the #2546 label-trigger guard its guarded label-flip
-    run — two skipped jobs, completed in seconds — became that workflow's newest run and
-    the still-building real run's in-flight legs were dropped as superseded, rendering a
-    GREEN gate over an unfinished wasm feature-OFF build (measured against this module
-    before the fix). This exclusion is OBSERVED rather than declared: it is a fact about
-    the conclusions a run registered, so no workflow has to claim anything and no
-    name/marker can drift out from under it.
-
-    FAIL-CLOSED IN EVERY DIRECTION:
-      * a run with ANY non-skipped observed conclusion produced evidence and stays
-        authoritative (a real run can never be excluded, however cheap);
-      * a run with NO observed check-runs yet — the just-started `ready_for_review`
-        re-run on an unchanged SHA is exactly this — is NOT excluded, so it becomes
-        newest and the gate HOLDS on it rather than greening off its predecessor;
-      * a vacuous run is excluded only when a sibling run of the SAME workflow exists
-        to be authoritative instead, so this can never un-require a lane whose only
-        run on the SHA was all-skipped (that stays satisfied, as before);
-      * the RUN ITSELF must be terminal and its conclusion must be one the gate honours as
-        PASSING (_VACUOUS_OK_CONCLUSIONS, derived from _PASSING — a passing conclusion that
-        were not demotable would be laundering waiting to happen). Observed check-runs are
-        a possibly-strict SUBSET of a run's jobs, so "every observed conclusion is
-        skipped" does not entail "this run did no work" — see _vacuous. Without this,
-        a FAILED run whose failing leg had evaporated from the snapshot, and a merely
-        EARLY in-flight run, were both demoted; the first laundered a red into a green.
-        Unrecognised conclusions and non-terminal statuses keep the run authoritative.
-    The net direction matches #3781's: the gate keeps REAL conclusions in preference to
-    vacuous `skipped` ones, so a mid-flight sibling keeps it polling and a FAILED
-    sibling keeps failing it, instead of either being erased by a label flip."""
-    observed: dict[int, list[dict]] = {}
-    for r in check_runs:
-        rid = _workflow_run_id_of_check(r)
-        if rid:
-            observed.setdefault(rid, []).append(r)
-
-    runs_by_id: dict[int, dict] = {}
-    for run in workflow_runs:
-        rid = _as_int(run.get("id"))
-        if rid:
-            runs_by_id[rid] = run
-
-    def _vacuous(run_id: int) -> bool:
-        # The observed check-runs are NOT the run's job inventory — they are whatever the
-        # commit's check-runs snapshot happens to show, which can be a strict SUBSET. So
-        # "every observed conclusion is skipped" does not entail "this run did no work",
-        # and treating it as if it did was a false-green (cross-provider review of #3788's
-        # fix, reproduced 2026-07-25):
-        #
-        #   run 101 older, success; run 102 newest, concluded FAILURE. 102's failing leg
-        #   has evaporated from the snapshot (the #3677 phenomenon) while one `skipped`
-        #   leg of it is still visible => 102 read as vacuous => demoted => the resolver
-        #   falls back to 101 and the gate GREENS over a failed run.
-        #
-        # The same subset problem hits a run that is merely EARLY: a still-registering
-        # in-flight run whose first leg happens to be a `skipped` change-detector was
-        # demoted too, which is the very erasure this exclusion exists to prevent.
-        #
-        # The missing conjunct is therefore about the WORKFLOW RUN, not the check-run —
-        # the earlier note here reasoned about the check-run's own status and concluded no
-        # input could distinguish it, which was true and beside the point. A run may be
-        # classified vacuous ONLY if it is terminal AND did not fail: a genuinely vacuous
-        # label-flip run (every job skipped) concludes `success`/`skipped`, so the real
-        # case is untouched, while `failure`/`cancelled`/`timed_out`/`action_required` and
-        # every non-terminal status now keep the run authoritative. Unknown/absent
-        # conclusions fail toward KEEPING the run, which is the safe direction: the gate
-        # then holds or fails on it instead of greening off a predecessor.
-        # An id absent from workflow_runs yields {}, whose empty status fails the next
-        # conjunct — so a missing run is never demoted, and no separate isinstance guard is
-        # needed (a non-dict entry could not have reached runs_by_id, which is built by
-        # calling .get on each one).
-        run = runs_by_id.get(run_id) or {}
-        if str(run.get("status") or "") != "completed":
-            return False
-        if str(run.get("conclusion") or "") not in _VACUOUS_OK_CONCLUSIONS:
-            return False
-        checks = observed.get(run_id) or []
-        return bool(checks) and all(
-            c.get("conclusion") == "skipped" for c in checks
-        )
-
-    by_workflow: dict[str, set[int]] = {}
-    for run in workflow_runs:
-        rid = _as_int(run.get("id"))
-        if rid:
-            by_workflow.setdefault(workflow_identity(run), set()).add(rid)
-
-    out: set[int] = set()
-    for run_ids in by_workflow.values():
-        vacuous = {rid for rid in run_ids if _vacuous(rid)}
-        # Only ever demote a vacuous run when a sibling survives to be authoritative.
-        if vacuous and vacuous != run_ids:
-            out |= vacuous
     return out
 
 
