@@ -119,13 +119,35 @@ DISAPPEAR_FAIL_FRACTION = 0.30  # > 30% of gateable metrics missing from results
 # its unit appears here AND its median-of-window is below that unit's floor. Floors are
 # justified PER-UNIT by the measured honest run-to-run bands in the published benchmark-data
 # history (2026-07-23 replay):
-#   * "us" (micros, floor 20.0): µs-scale timing metrics have HONEST noise bands exceeding the
+#   * "us" (micros, floor 40.0): µs-scale timing metrics have HONEST noise bands exceeding the
 #     2.0x hard threshold. Within the honest pre-red-era oldest-10 points alone, max/min bands:
 #     sameas_size32_query_us 2.55x (values ~4-9µs), deeptax_d1000_query_us 3.25x (~4-13µs),
 #     lubm_q14_count_us 2.45x. Live replays: the honest head fails sameas_size32_query_us at
 #     2.14x (9 vs median 4.2); another honest entry fails deeptax_d1000_query_us at 2.00x
-#     (8 vs 4). Every observed false-fail metric has a median <~15 units; 20.0 covers them
-#     with margin while keeping every >= 20µs timing metric fully hard-gated.
+#     (8 vs 4).
+#     RE-DERIVED 2026-07-25 (the original 20.0 was set from the oldest-10 window and its
+#     "every false-fail has a median <~15" claim no longer holds). Replaying THIS gate's own
+#     methodology — worst current/median-of-trailing-5 per metric — over the full published
+#     `us` history, bucketed by metric magnitude, the honest band is:
+#         median  0-10µs : n=48  p90 1.84x  MAX 3.00x   (2 metrics >= 2.0x)
+#         median 10-20µs : n=40  p90 1.81x  MAX 2.09x   (1 metric  >= 2.0x)
+#         median 20-40µs : n=15  p90 1.84x  MAX 2.23x   (1 metric  >= 2.0x)
+#         median 40-80µs : n=30  p90 1.80x  MAX 1.88x   (none)
+#         median 80-200µs: n=25  p90 1.59x  MAX 1.76x   (none)
+#         median >=200µs : n=153 p90 1.52x  MAX 1.90x   (none)
+#     These buckets are a LOWER BOUND on the honest band, not an estimate of it: bench.yml's
+#     "Store + compare against history" step runs AFTER this gate and is skipped when the gate
+#     fails, so the published series contains only runs that already passed — every honest run
+#     whose noise exceeded the threshold is censored from the very history used to set the floor.
+#     The honest band only drops below the 2.0x hard threshold at >= 40µs, so 20.0 left the
+#     20-40µs band hard-gated INSIDE its own noise: honest history alone already reaches
+#     watdiv_sf1_L2_json_us 2.23x (43.7 vs trailing median 19.6) and watdiv_sf1_L2_materialize_us
+#     1.97x, and this floor's under-setting red main on run 30154655798 (a site-only commit —
+#     no Rust in the diff) via watdiv_sf1_L5_materialize_us 2.03x (median 20.6) and
+#     watdiv_sf1_S5_json_us 2.08x (median 39.5), both inside the measured band for their
+#     magnitude. 40.0 moves 15 metrics from hard-gated to watch-only — 6 of which had ALREADY
+#     reached >= 1.75x on honest history alone — and keeps every >= 40µs timing metric, where
+#     the measured band tops out at 1.88x, fully hard-gated.
 #   * "milli" (floor 20.0): the empirically-degenerate HNSW recall family —
 #     vectors_hnsw_recall_at10 honestly oscillates 1<->4 (4.0x band) at integer-milli
 #     resolution; its stable siblings (vectors_diskann_recall_at10 ~34,
@@ -136,7 +158,7 @@ DISAPPEAR_FAIL_FRACTION = 0.30  # > 30% of gateable metrics missing from results
 # exempted all of them), "ns_per_byte", "ratio", the `*_per_s` throughputs, every
 # deterministic unit, and any UNKNOWN/absent unit: unknown units FAIL TOWARD GATED.
 # DETERMINISTIC metrics are never floor-exempt even in an allow-listed unit.
-FLOOR_EXEMPT_UNITS: dict[str, float] = {"us": 20.0, "milli": 20.0}
+FLOOR_EXEMPT_UNITS: dict[str, float] = {"us": 40.0, "milli": 20.0}
 
 # Deterministic (byte/count/structural) metric classification. UNIT-first because the live metric
 # NAMES are trappy: bsbm_query01_count_us / lubm_*_count_us are TIMING metrics whose names contain
@@ -856,10 +878,34 @@ def self_test() -> int:
     # 15. The floor is the DISCRIMINATOR: the same 3.0x shape with its median ABOVE the floor
     #     hard-fails; and a sub-floor DETERMINISTIC metric at 2.0x still hard-fails (the floor
     #     never applies to deterministic outputs — a 2x on a count/bytes/gates value is real).
-    over = history_values(_series([[("big_query_us", 40.0)]] * 5))
-    code, rep = evaluate(_cur([("big_query_us", 120.0)]), over)
+    over = history_values(_series([[("big_query_us", 60.0)]] * 5))
+    code, rep = evaluate(_cur([("big_query_us", 180.0)]), over)
     check(code == 1 and len(rep["hard"]) == 1 and not rep["floor_exempt"],
           "the same 3.0x shape with median above the floor hard-fails")
+
+    # 15a. The "us" floor SITS AT 40.0, not 20.0 — re-derived 2026-07-25 from the published
+    #      history (see FLOOR_EXEMPT_UNITS: the honest band only drops under 2.0x at >= 40µs;
+    #      the 20-40µs bucket honestly reaches 2.23x). This pair pins the boundary from BOTH
+    #      sides so neither a silent revert to 20.0 nor an open-ended raise passes:
+    #        - a 30µs-median metric at 2.0x is watch-only (would have RED main on run
+    #          30154655798, whose two hard failures had medians 20.6 and 39.5),
+    #        - a 45µs-median metric at the same 2.0x still hard-fails.
+    #      MUTATION CHECK: setting the "us" floor back to 20.0 turns the first check red;
+    #      raising it to >= 45.0 (or 90.0) turns the second red. The boundary is exclusive
+    #      (`med < floor`), so a metric whose median is EXACTLY the floor stays gated.
+    band = history_values(_series([[("midband_query_us", 30.0)]] * 5))
+    code, rep = evaluate(_cur([("midband_query_us", 60.0)]), band)
+    check(code == 0 and not rep["hard"] and len(rep["floor_exempt"]) == 1
+          and len(rep["floor_exempt_hard"]) == 1,
+          "20-40µs metric at 2.0x is watch-only under the re-derived 40µs floor (not a hard fail)")
+    above = history_values(_series([[("aboveband_query_us", 45.0)]] * 5))
+    code, rep = evaluate(_cur([("aboveband_query_us", 90.0)]), above)
+    check(code == 1 and len(rep["hard"]) == 1 and not rep["floor_exempt"],
+          ">= 40µs metric at the SAME 2.0x still hard-fails — 40.0 is the discriminating floor")
+    exact = history_values(_series([[("exact_floor_query_us", 40.0)]] * 5))
+    code, rep = evaluate(_cur([("exact_floor_query_us", 80.0)]), exact)
+    check(code == 1 and len(rep["hard"]) == 1 and not rep["floor_exempt"],
+          "a median EXACTLY at the floor stays gated (`med < floor` is exclusive)")
     det_small = history_values([{"date": i, "benches": [
         {"name": "solid_fixture_count", "value": 5.0, "unit": "count"}]} for i in range(5)])
     code, rep = evaluate([{"name": "solid_fixture_count", "value": 10.0, "unit": "count"}],
