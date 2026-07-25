@@ -20,7 +20,7 @@ export const metadata: Metadata = {
     "The same SPARQL query over the same Solid Pod returns different result sets per (user, application) pair — because WAC/ACP access control filters which named graphs each requester may read. A faithful, live-in-tab illustration of sparq-solid's graph-level, fail-closed enforcement.",
 };
 
-const REPO_URL = "https://github.com/jeswr/sparq";
+const REPO_URL = "https://github.com/sparq-org/sparq";
 
 export default function SolidFlagshipPage() {
   return (

@@ -89,7 +89,8 @@ branch — **RL** (`sparq-reason` materialization + clash scan; `Inconsistent` s
 *checked* Theorem PR1 preconditions, `Consistent` only past a divergence guard over the
 constructs implicated in the documented RL rule-set divergences), **EL** (`sparq-reason-el`
 classification; verdicts only for a pure ⊤-free EL+⊥ TBox with zero skipped axioms), **QL**
-(always `Unknown` — DL-Lite_R consistency is the QL workstream's, not duplicated), or the
+(opt-in `dispatch_ql`, sq-fj8lj: `sparq-reason-ql`'s DL-Lite_R violation-query checker, whose
+OWN capture accounting owns the verdict; without it, always `Unknown(QlConsistencyPending)`), or the
 **ALCH tableau** (complete for the fragment). `check::DirectChecker::entailment` decides
 premise ⊨ conclusion per conclusion-axiom by sound refutation encodings on the tableau
 (GCI / class-assertion / the fresh-class trick, its sq-pbz04.4.9 role-subsumption lift for

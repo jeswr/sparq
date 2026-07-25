@@ -164,6 +164,38 @@ fn single_key(id: Id) -> Key {
     k
 }
 
+/// Equality predicate used by the raw hash-table probe.
+///
+/// [FABLE-5] #3644: `SmallVec`'s general slice equality may lower to an outlined
+/// `bcmp` even for the dominant one-id join key. Keep that shape as a scalar
+/// comparison and retain the exact prior equality operation for every other key
+/// width.
+#[inline(always)]
+fn probe_key_eq(candidate: &Key, key: &Key) -> bool {
+    match key.as_slice() {
+        [id] => matches!(candidate.as_slice(), [candidate_id] if candidate_id == id),
+        _ => candidate == key,
+    }
+}
+
+/// Select the serial table or the radix partition for a precomputed key hash.
+///
+/// Converting the documented 64-partition shape to an array reference gives LLVM
+/// a statically-known bound; the masked partition index therefore needs no slice
+/// bounds check. The fallback preserves the former behavior for malformed or
+/// non-standard table slices.
+#[inline(always)]
+fn probe_table(tables: &[JoinTable], hash: u64) -> &JoinTable {
+    if let [table] = tables {
+        return table;
+    }
+    let partition = (hash % JOIN_PARTS as u64) as usize;
+    if let Ok(partitioned) = <&[JoinTable; JOIN_PARTS]>::try_from(tables) {
+        return &partitioned[partition];
+    }
+    &tables[partition]
+}
+
 /// The partition/lookup hash for a join key — build and probe must agree on it.
 #[inline]
 pub fn key_hash(key: &Key) -> u64 {
@@ -313,12 +345,8 @@ pub fn probe_emit(
     // [SONNET-4.6] sq-7d3dj.19: hash ONCE — partition selection and raw_entry lookup
     // share this value; no second internal re-hash on the partitioned probe path.
     let h = key_hash(&key);
-    let table = if tables.len() == 1 {
-        &tables[0]
-    } else {
-        &tables[(h % JOIN_PARTS as u64) as usize]
-    };
-    let Some((_, matches)) = table.raw_entry().from_hash(h, |k| *k == key) else {
+    let table = probe_table(tables, h);
+    let Some((_, matches)) = table.raw_entry().from_hash(h, |k| probe_key_eq(k, &key)) else {
         return;
     };
     // Reserve exact match count — one allocation for the entire key group.
@@ -355,12 +383,8 @@ pub fn probe_gather_indices(
 ) {
     let key: Key = keys.right_key(prow);
     let h = key_hash(&key);
-    let table = if tables.len() == 1 {
-        &tables[0]
-    } else {
-        &tables[(h % JOIN_PARTS as u64) as usize]
-    };
-    if let Some((_, matches)) = table.raw_entry().from_hash(h, |k| *k == key) {
+    let table = probe_table(tables, h);
+    if let Some((_, matches)) = table.raw_entry().from_hash(h, |k| probe_key_eq(k, &key)) {
         build_indices.extend(matches.iter().copied());
     }
 }
@@ -1390,6 +1414,53 @@ mod tests {
         let k1: Key = smallvec![1u32, 2u32];
         let k2: Key = smallvec![1u32, 2u32];
         assert_eq!(key_hash(&k1), key_hash(&k2)); // build & probe MUST agree
+    }
+
+    #[test]
+    fn probe_key_eq_is_identical_to_key_equality_for_all_key_widths() {
+        // [FABLE-5] #3644: deterministic randomized differential covering the scalar
+        // one-id branch and the unchanged general fallback, including spilled keys.
+        let mut state = 0x9e37_79b9_u32;
+        let mut keys = Vec::new();
+        for len in 0..=4 {
+            for _ in 0..64 {
+                let mut key = Key::new();
+                for _ in 0..len {
+                    state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    key.push(state % 11);
+                }
+                keys.push(key);
+            }
+        }
+        for left in &keys {
+            for right in &keys {
+                assert_eq!(probe_key_eq(left, right), left == right);
+            }
+        }
+
+        // Mutation witness: a planted scalar comparator that ignores the candidate
+        // value disagrees with the reference, so the differential above is non-vacuous.
+        let left = single_key(3);
+        let right = single_key(7);
+        let deliberately_wrong = left.len() == 1 && right.len() == 1;
+        assert_ne!(deliberately_wrong, left == right);
+    }
+
+    #[test]
+    fn probe_table_preserves_serial_partitioned_and_fallback_selection() {
+        let serial = vec![JoinTable::default()];
+        assert!(std::ptr::eq(probe_table(&serial, 17), &serial[0]));
+
+        let partitioned: Vec<JoinTable> = (0..JOIN_PARTS).map(|_| JoinTable::default()).collect();
+        for hash in 0..256_u64 {
+            let expected = (hash % JOIN_PARTS as u64) as usize;
+            assert!(std::ptr::eq(probe_table(&partitioned, hash), &partitioned[expected]));
+        }
+
+        // Witness the decline path: a non-standard slice retains the prior indexed
+        // selection rather than entering the fixed-array optimization.
+        let fallback: Vec<JoinTable> = (0..JOIN_PARTS + 1).map(|_| JoinTable::default()).collect();
+        assert!(std::ptr::eq(probe_table(&fallback, 5), &fallback[5]));
     }
 
     #[test]

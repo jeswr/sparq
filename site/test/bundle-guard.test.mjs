@@ -81,6 +81,18 @@ test("PRESENCE: the ZK prover deps must stay dynamic", () => {
   assert.ok(errors.every((e) => e.startsWith("PRESENCE:")));
 });
 
+test("PRESENCE: the hero Graph view must stay a nested split point", () => {
+  const inputs = healthyInputs();
+  const graphView = "-> @/components/repl-graph-view";
+  assert.ok(HEAVY_MODULE_SUFFIXES.includes(graphView));
+
+  delete inputs.loadable[`src ${graphView}`];
+  const { errors } = analyzeBundle(inputs);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /^PRESENCE:/);
+  assert.match(errors[0], /@\/components\/repl-graph-view/);
+});
+
 test("CONFIG: images.unoptimized=false is flagged", () => {
   const inputs = healthyInputs();
   inputs.images.images.unoptimized = false;

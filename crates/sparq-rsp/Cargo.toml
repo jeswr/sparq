@@ -57,7 +57,7 @@ sparq-substrate = { path = "../sparq-substrate", version = "0.1.0", default-feat
 oxrdf.workspace = true
 # Register-time validation only (SELECT-form check); already in the tree via sparq-engine.
 spargebra.workspace = true
-# ISTREAM/DSTREAM row-hash diffs (already in the tree via sparq-core).
+# CONSTRUCT set differences (already in the tree via sparq-core).
 rustc-hash.workspace = true
 
 # [OPUS-4.8] (sq-cxji) Test-only: PARSE the `examples/throughput.rs` `--json` emit back

@@ -25,11 +25,9 @@ cargo test -p sparq-lws-core --no-default-features
 SOLID_SERVER_RECONCILE_INTERVAL_SECS=3600 cargo run -p sparq-lws-core
 ```
 
-The binary is configured entirely by `SOLID_SERVER_*` / `PSS_*` environment
-variables (bind address, TLS PEM paths, backend selection, seeding) — see the
-module docs on `src/main.rs`. `SOLID_SERVER_RECONCILE_INTERVAL_SECS` is unset by
-default; a positive integer enables one periodic sweep using the unchanged
-one-hour orphan grace period. Invalid or zero values fail boot.
+The binary is configured entirely by `SOLID_SERVER_*` / `PSS_*` env variables (bind address, TLS PEM paths, backend selection, seeding) — see the module docs on `src/main.rs`. `SOLID_SERVER_RECONCILE_INTERVAL_SECS` is unset by default; a positive integer enables one periodic orphan sweep (unchanged one-hour grace period); invalid or zero fails boot.
+
+**`SOLID_SERVER_SEED_DEMO`** (default OFF, `1|true|TRUE|True` only) opt-in-seeds the `research/lws-demo-architecture.md` §3.2 public demo: `/playground/` writable by any *authenticated* agent, anonymous read-only, `acl:Control` granted to nobody — so visitors are not isolated and can overwrite/delete each other's resources (disclosed in the seeded `/README`). It normally requires `PSS_SPARQ_BACKEND=memory`; the escape hatch `SOLID_SERVER_ALLOW_SEED_NONMEMORY=1` permits it on **any** non-memory backend, intended for an *ephemeral* embedded test instance — the server does **not** verify ephemerality, so it is not memory-only in the enforced sense. API break: `seed::DEMO_USER` + `DemoFixtures::{pod, welcome_doc, owner}` removed, `DemoFixtures::playground` moved `/demo/playground/` → `/playground/`, `DemoFixtures::readme` added.
 
 ## 📦 Native container image
 
@@ -68,7 +66,9 @@ docker run --rm --name sparq-lws-core -p 127.0.0.1:3000:3000 \
 ## ✨ Features
 
 - **LDP surface** — containers + RDF/non-RDF resources, Turtle / JSON-LD content
-  negotiation (oxrdf/oxttl/oxjsonld), conditional requests, `Content-Range` reads.
+  negotiation (oxrdf/oxttl/oxjsonld) honouring the JSON-LD `profile` parameter
+  (expanded / compacted forms echoed in `Content-Type`; compaction is local and
+  context-free — nothing fetched), conditional requests, `Content-Range` reads.
 - **Access control** — WAC (`acl:`) evaluated against the SPARQ-authoritative
   store, with an ACL decision cache; public-read fast path.
 - **WAC-scoped query endpoint** — [GPT-5.6] default-on, query-only
@@ -109,12 +109,10 @@ docker run --rm --name sparq-lws-core -p 127.0.0.1:3000:3000 \
 - Epic sq-gg0qq tracks the migration: bench/, conformance/, docs/, decisions/
   stay in the source repo until their own beads land (sq-gg0qq.3 landed).
 - Design records: `docs/` + `decisions/` in
-  [jeswr/solid-server-rs](https://github.com/jeswr/solid-server-rs) (e.g.
-  `decisions/0001-embed-sparq-in-process.md`, the high-throughput PoP design).
+  [jeswr/solid-server-rs](https://github.com/jeswr/solid-server-rs).
 - Related crates: [`sparq-solid`](../sparq-solid) (Solid protocol pieces),
   [`sparq-server`](../sparq-server) (the SPARQL endpoint it can delegate to).
 
 ## License
 
-MIT OR Apache-2.0 (preserved from the source repository — see LICENSE-MIT and
-LICENSE-APACHE in this directory).
+MIT OR Apache-2.0 — see LICENSE-MIT and LICENSE-APACHE in this directory.

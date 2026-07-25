@@ -364,4 +364,238 @@ mod tests {
             "the profile TTL must state it asserts no security property of any method",
         );
     }
+
+    // ── cross-crate dimension-IRI drift guards (sq-mgxz8) ────────────────────
+    //
+    // Three crates independently declare `secx:` dimension IRIs as `const &str`
+    // data with no crate-dependency edge between them:
+    //   (1) THIS file — the `DIM_*` constants in `SECPROP_LEFT_OPERANDS`
+    //   (2) `sparq-trust/src/secprop.rs` — the full `SECX_*` vocabulary
+    //   (3) `sparq-zk/ontologies/secprop-methods.ttl` — the per-method annotation
+    //       graph (`secx:property secx:Foo` triples)
+    //
+    // Each has its own per-crate TTL↔Rust drift test, but a typo in ONE crate's
+    // dimension IRI would NOT be caught against the others. These two tests fill
+    // that gap without adding a crate-dependency edge: they use `include_str!`
+    // (a compile-time file read) to compare across crate boundaries.
+    //
+    // `sec-prop:` VENDORED DIMS: `PostQuantumForgery`, `PostQuantumSnooping`, and
+    // `SignatureTypeLeakage` are original vendored class IRIs from the ZKP-SPARQL
+    // paper (`vocab/sec-prop.yaml.ld`). They appear under the same `secx:` namespace
+    // and are USED as dimension IRIs throughout the estate, but `secprop-ext.ttl`
+    // does NOT re-declare them as subjects (the non-forking design §4.1 keeps only
+    // the LEVELS there). They are exempted from the subject-declaration check and
+    // receive a namespace check only.
+
+    /// Local names of `sec-prop:` property IRIs that are VENDORED from the original
+    /// ZKP-SPARQL vocabulary and therefore NOT re-declared as new `secx:X a …`
+    /// subjects in `secprop-ext.ttl`. Their levels are added in the extension file
+    /// but their own class IRIs are kept in the original vocabulary.
+    const VENDORED_SEC_PROP_DIMS: &[&str] = &[
+        "PostQuantumForgery",
+        "PostQuantumSnooping",
+        "SignatureTypeLeakage",
+    ];
+
+    /// Cross-crate dimension-IRI drift guard (sq-mgxz8): every `DIM_*` in
+    /// `SECPROP_LEFT_OPERANDS` must be declared as a `secx:LocalName` subject in
+    /// the canonical `secprop-ext.ttl` owned by `sparq-trust`, UNLESS its local
+    /// name is in `VENDORED_SEC_PROP_DIMS` (vendored class IRIs that are exempt
+    /// from the subject-declaration check — see comment block above). Uses
+    /// `include_str!` — a compile-time read, NOT a crate-dependency edge.
+    #[test]
+    fn policy_dim_iris_are_in_trust_vocab_or_vendored() {
+        const TRUST_VOCAB: &str =
+            include_str!("../../sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl");
+
+        for (_, dim) in SECPROP_LEFT_OPERANDS {
+            let dim_local = dim
+                .strip_prefix(SECX_NS)
+                .expect("dimension is in the secx: namespace");
+
+            if VENDORED_SEC_PROP_DIMS.contains(&dim_local) {
+                // Vendored class IRI: only the namespace can be checked here
+                // (the class declaration is in sec-prop.yaml.ld, not secprop-ext.ttl).
+                assert!(
+                    dim.starts_with(SECX_NS),
+                    "vendored dimension `secx:{}` must be in the secx: namespace",
+                    dim_local,
+                );
+                continue;
+            }
+
+            // Extension term: must be declared as `secx:LocalName a …` in the
+            // trust-crate vocabulary so a rename in the ext TTL is caught here.
+            let decl = format!("secx:{} ", dim_local);
+            assert!(
+                TRUST_VOCAB.contains(&decl),
+                "dimension `secx:{}` in SECPROP_LEFT_OPERANDS is not declared as a \
+                 subject in sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl — \
+                 IRI drift between the policy constants and the trust vocabulary \
+                 (sq-mgxz8); check for a rename or a missing declaration",
+                dim_local,
+            );
+        }
+    }
+
+    /// Minimal Turtle-aware tokenizer for the drift guards below: drops `#`
+    /// comments (outside `<…>` IRIs and `"…"` literals), splits on whitespace,
+    /// and emits `[ ] ( ) ; ,` as their own tokens — so a predicate and its
+    /// object are ADJACENT tokens regardless of line breaks, indentation, or
+    /// interleaved comments. NOT a Turtle parser (no long strings, no escapes
+    /// beyond `\"`); just enough to make the scan formatting-independent.
+    fn turtle_tokens(src: &str) -> Vec<&str> {
+        let bytes = src.as_bytes();
+        let mut tokens = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                c if c.is_ascii_whitespace() => i += 1,
+                b'#' => {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                }
+                b'<' => {
+                    let start = i;
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'>' {
+                        i += 1;
+                    }
+                    i = (i + 1).min(bytes.len());
+                    tokens.push(&src[start..i]);
+                }
+                b'"' => {
+                    let start = i;
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        i += if bytes[i] == b'\\' { 2 } else { 1 };
+                    }
+                    i = (i + 1).min(bytes.len());
+                    tokens.push(&src[start..i]);
+                }
+                b'[' | b']' | b'(' | b')' | b';' | b',' => {
+                    tokens.push(&src[i..i + 1]);
+                    i += 1;
+                }
+                _ => {
+                    let start = i;
+                    while i < bytes.len()
+                        && !bytes[i].is_ascii_whitespace()
+                        && !matches!(bytes[i], b'#' | b'[' | b']' | b'(' | b')' | b';' | b',')
+                    {
+                        i += 1;
+                    }
+                    tokens.push(&src[start..i]);
+                }
+            }
+        }
+        tokens
+    }
+
+    /// The object token of every `secx:property` assertion in `src`, in order.
+    /// Token-based (see [`turtle_tokens`]), so `secx:property\n  # note\n  secx:X`
+    /// is found exactly like the single-line form, and a commented-out
+    /// annotation is NOT.
+    fn secx_property_objects(src: &str) -> Vec<&str> {
+        let tokens = turtle_tokens(src);
+        tokens
+            .windows(2)
+            .filter(|pair| pair[0] == "secx:property")
+            .map(|pair| pair[1])
+            .collect()
+    }
+
+    /// Cross-crate dimension-IRI drift guard (sq-mgxz8): every `secx:property
+    /// secx:*` dimension IRI in `sparq-zk/ontologies/secprop-methods.ttl` must be
+    /// one of: a policy `DIM_*` local name (in `SECPROP_LEFT_OPERANDS`), a known
+    /// vendored dimension (`VENDORED_SEC_PROP_DIMS`), or a `secx:LocalName` subject
+    /// declared in `secprop-ext.ttl`. A typo or rename in the annotation graph's
+    /// dimension IRI fails at least one condition. Uses `include_str!` — no crate
+    /// edge.
+    #[test]
+    fn methods_ttl_dims_are_policy_or_trust_vocab_or_vendored() {
+        const TRUST_VOCAB: &str =
+            include_str!("../../sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl");
+        const METHODS: &str =
+            include_str!("../../sparq-zk/ontologies/secprop-methods.ttl");
+
+        let policy_dim_locals: std::collections::HashSet<&str> = SECPROP_LEFT_OPERANDS
+            .iter()
+            .filter_map(|(_, dim)| dim.strip_prefix(SECX_NS))
+            .collect();
+
+        let mut found = 0usize;
+        for object in secx_property_objects(METHODS) {
+            // A non-`secx:` object (e.g. the full-IRI form) must fail LOUDLY,
+            // not fall out of the scan: silent skips are exactly the drift this
+            // guard exists to catch.
+            let local = object.strip_prefix("secx:").unwrap_or_else(|| {
+                panic!(
+                    "secprop-methods.ttl has a `secx:property` object `{}` that is \
+                     not in `secx:LocalName` prefix form — this drift guard only \
+                     understands prefixed dimension IRIs (sq-mgxz8); either keep \
+                     the annotation graph in prefix form or extend the guard",
+                    object,
+                )
+            });
+            found += 1;
+
+            if policy_dim_locals.contains(local) || VENDORED_SEC_PROP_DIMS.contains(&local) {
+                continue;
+            }
+
+            // Not a policy dimension and not a known vendored one: must be declared
+            // in the extension vocab to be a verifiable term, not an undetected typo.
+            let decl = format!("secx:{} ", local);
+            assert!(
+                TRUST_VOCAB.contains(&decl),
+                "secprop-methods.ttl uses `secx:property secx:{}` but this IRI is \
+                 neither a policy dimension (SECPROP_LEFT_OPERANDS), a known vendored \
+                 sec-prop: dimension (VENDORED_SEC_PROP_DIMS), nor declared as a subject \
+                 in sparq-trust's secprop-ext.ttl — possible IRI drift or undeclared \
+                 term (sq-mgxz8); if this is intentional, add it to VENDORED_SEC_PROP_DIMS",
+                local,
+            );
+        }
+
+        assert!(
+            found > 0,
+            "no `secx:property secx:*` dimension values found in secprop-methods.ttl — \
+             the methods TTL format may have changed, breaking this drift guard (sq-mgxz8)",
+        );
+    }
+
+    /// Regression (PR #3440 review): the drift-guard scan must be Turtle-
+    /// formatting-independent. A reformatted annotation with the object on its
+    /// own line behind a comment — plus a typo'd dimension name — MUST still be
+    /// surfaced to the validation loop; the old exact-text `secx:property secx:`
+    /// scan silently skipped it.
+    #[test]
+    fn secx_property_scan_survives_multiline_and_comment_formatting() {
+        let ttl = "[ secx:property # the dimension\n      secx:TypoDim ;\n\
+                   secx:level secx:Sound ] .\n\
+                   [ secx:property secx:Soundness ; secx:level secx:Sound ] .";
+        assert_eq!(
+            secx_property_objects(ttl),
+            vec!["secx:TypoDim", "secx:Soundness"],
+            "a multiline/commented `secx:property` annotation must be found by \
+             the scan exactly like the single-line form (sq-mgxz8)",
+        );
+    }
+
+    /// Regression (PR #3440 review): a commented-out annotation is NOT a
+    /// dimension assertion and must not be counted by the scan.
+    #[test]
+    fn secx_property_scan_ignores_comments_and_iris() {
+        let ttl = "# [ secx:property secx:CommentedOut ] .\n\
+                   <http://example.org/x#secx:property> a secx:Thing .\n\
+                   [ secx:property secx:Real ] .";
+        assert_eq!(
+            secx_property_objects(ttl),
+            vec!["secx:Real"],
+            "commented-out annotations and IRI-internal text must not count as \
+             `secx:property` assertions (sq-mgxz8)",
+        );
+    }
 }

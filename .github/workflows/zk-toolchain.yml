@@ -67,27 +67,15 @@ on:
       # and the ieee754 differential oracle. zk/compose is the only in-tree Noir tree left.
       - "zk/compose/**"
       - ".github/workflows/zk-toolchain.yml"
-  # [OPUS-4.8] Merge queue: zk-toolchain surfaces a check on zk-touching PRs, so it
-  # must also run on the queue's merge_group ref or the required ci-summary would wait
-  # for a sibling that never appears there. NOTE: the `merge_group` event does NOT
-  # honour `paths` filters (GitHub ignores paths/paths-ignore for merge_group), so a
-  # BARE trigger would run the full ~60min forge suite on EVERY enqueue, not only
-  # zk-touching ones — making the serialized queue unusably slow.
-  #
-  # [OPUS-4.8] sq-9jnj — CHANGED-FILES GATE (in `forge-suite` below): on merge_group the
-  # job ALWAYS runs (so the `zk forge + anchor suite (nargo/bb)` check-run always appears
-  # on the merge_group ref and ci-summary never hangs waiting for an absent sibling), but
-  # a cheap leading `detect zk changes` step diffs the queued batch's
-  # github.event.merge_group.base_sha..head_sha and decides whether any ZK-relevant path
-  # (the SAME set the pull_request paths filter uses) changed. The heavy toolchain-install
-  # + real-bb-proving steps are gated `if: steps.changes.outputs.zk == 'true'`, so:
-  #   • zk paths changed in the batch  → full forge suite runs and GATES (soundness kept),
-  #   • no zk paths changed            → heavy steps skip; the job completes a FAST GREEN
-  #     check-run with the identical name, matching the paths-gated PR posture.
-  # For every NON-merge_group event the detect step short-circuits to zk=true, so the
-  # paths-filtered pull_request / push / schedule / dispatch behaviour is UNCHANGED (the
-  # workflow only triggers on those events when zk paths changed in the first place).
-  merge_group:
+  # [FABLE-5] (2026-07-18 maintainer directive, merge-queue subset) merge_group
+  # REMOVED: the forge suite already ran + gated on any zk-touching PR (paths filter
+  # above), re-runs on zk-touching push-to-main below (post-merge detection), and
+  # the daily schedule is the standing backstop. The polling `ci-summary / gate`
+  # aggregates only siblings that DO run on the queue ref — it never waits on a
+  # check that was never scheduled (bench.yml sq-6vshe.6 rationale). The sq-9jnj
+  # `detect zk changes` step in `forge-suite` stays — it short-circuits to zk=true
+  # on every remaining event, so paths-filtered behaviour is unchanged and the
+  # merge_group branch is dead code kept for a cheap revert.
   push:
     branches: [main]
     paths:
@@ -216,9 +204,16 @@ jobs:
               | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Install Rust (stable)
+      - name: Rust (preinstalled stable)
         if: steps.changes.outputs.zk == 'true'
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
 
       - name: Cache cargo + target
         if: steps.changes.outputs.zk == 'true'

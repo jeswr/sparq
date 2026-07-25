@@ -75,11 +75,15 @@ different workflows:
   `200`.
 - `dev/bench-ec2` — the **heavy EC2 series**, written by `bench-ec2.yml`
   (`benchmark-data-dir-path: dev/bench-ec2`). This is the easy-to-miss one. Note
-  `bench-ec2.yml` is **not live yet** (it fails harmlessly at the OIDC step until
-  the repo variable `AWS_BENCH_ROLE_ARN` is set), so `dev/bench-ec2` may be empty
-  or absent on the served snapshot today — hence its `404` above. It is still a
-  declared, scheduled producer of a **second** Pages directory, so any unified
-  producer must account for it or the EC2 dashboard `404`s after cutover.
+  `bench-ec2.yml` is **not live**: it authenticates through an AWS OIDC role
+  (`vars.AWS_BENCH_ROLE_ARN`) that was deliberately descoped, and its crons were
+  **retired** in [#3784](https://github.com/sparq-org/sparq/issues/3784) because
+  each scheduled tick failed at the credentials step and — carrying no advisory
+  declaration — gated `main`. It is now **manual dispatch only** (pick `lane:
+  heavy` or `lane: full-suite`), so `dev/bench-ec2` may be empty or absent on the
+  served snapshot today — hence its `404` above. It is still a declared producer of
+  a **second** Pages directory, so any unified producer must account for it or the
+  EC2 dashboard `404`s after cutover.
 
 ### Chart.js is loaded from a CDN
 
@@ -186,7 +190,9 @@ gh api -X PUT repos/jeswr/sparq/pages \
 Within a minute or so, `https://jeswr.github.io/sparq/dev/bench/` is served from
 the branch again — and, unlike the frozen snapshot, it **resumes updating** as
 `bench.yml` pushes new points to `benchmark-data`. (`dev/bench-ec2` will appear
-once `bench-ec2.yml` is live and has pushed at least one point.)
+once `bench-ec2.yml` is live and has pushed at least one point — which now requires
+both re-provisioning `AWS_BENCH_ROLE_ARN` and a manual dispatch, since #3784 retired
+its crons.)
 
 This rollback is the **recommended interim state** until the unified producer is
 ready: it is the only configuration in which the dashboard both serves *and*
