@@ -563,8 +563,9 @@ clock, no Docker. A JS-reference differential twin (vs. `@solidlab/policy-engine
 `cargo kani -p sparq-solid` model-checks the pure decision structure (the
 mechanized-proof program, `research/mechanized-proof-program.md` §3.1). All harnesses are
 `#[cfg(kani)]` — **proof-only diff**: a normal build/test/clippy never compiles them and
-the runtime authorization logic is unchanged. Claim tier: **PROVED (bounded)** — every
-harness doc-comment states its exact bounds; none claims "proved for all inputs".
+the runtime authorization logic is unchanged. **Intended** claim tier: **PROVED (bounded)** —
+every harness doc-comment states its exact bounds and none claims "proved for all inputs".
+That tier is **not yet delivered** — see *CI wiring + status* at the end of this section.
 
 - **Fail-closed decision structure** (`src/decide.rs::kani_proofs::decide_one_is_fail_closed`):
   over a bounded product domain (3 concrete resources incl. a malformed IRI × all 8
@@ -579,14 +580,23 @@ harness doc-comment states its exact bounds; none claims "proved for all inputs"
   same algebra. Pair/triple minting, matchers, and time windows are OUTSIDE the proof
   bounds — the conformance corpora + differential oracle stay the tier of record there.
 - **Container-walk termination** (`src/decide.rs::kani_proofs::parent_iri_strictly_shortens`):
-  for every ASCII string ≤ 24 bytes, `parent_iri` returns a strictly-shorter `/`-terminated
-  prefix or `None` — the domain is closed under the step, so the `resolve_acl` walk
-  terminates within it. Nearest-ancestor **selection** is exhaustively enumerated (1551
+  for every ASCII string ≤ **8** bytes (`MAX_LEN = 8`, `#[kani::unwind(16)]` — tightened from
+  the original 24 by [SONNET-4.6] for solver tractability; the structural invariant is
+  length-independent, see the harness doc-comment), `parent_iri` returns a strictly-shorter
+  `/`-terminated prefix or `None` — the domain is closed under the step, so the `resolve_acl`
+  walk terminates within it. Nearest-ancestor **selection** is exhaustively enumerated (1551
   datasets, generator-derived reference) in `tests/container_walk_exhaustive.rs`.
 
-The CI lane is `.github/workflows/kani.yml` (nightly, informational); wiring these
-harnesses into it is bead `sq-sqtk2.5`. Run locally: `cargo install --locked kani-verifier
-&& cargo kani setup && cargo kani -p sparq-solid`.
+**CI wiring + status — read this before quoting any bullet above.** The suite is registered
+in `ci/formal-verification.toml` as `solid-wac-acp-decision-core` and in the nightly
+`.github/workflows/kani.yml` matrix, with `pr_gate = false`
+(`pr_gate_blocked_by = sq-sqtk2.7`) and `debt: true`, because the suite is **intractable as
+designed and no complete `cargo kani -p sparq-solid` run exists** — an owned, logged
+ground-truth run completed **zero** of the six harnesses in ~50 minutes. **No harness above
+is evidenced as passing**: the bullets state what each harness is written to prove, not a
+delivered verdict. Re-scoping to a real, log-backed verdict is bead `sq-sqtk2.7`. Run
+locally: `cargo install --locked kani-verifier && cargo kani setup && cargo kani -p
+sparq-solid`.
 
 ## Security posture — fail-closed
 
