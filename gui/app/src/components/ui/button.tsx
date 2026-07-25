@@ -7,8 +7,15 @@ import { cn } from "@/lib/utils";
 // [OPUS-4.8] sq-ixc3.9 — operational Button. Same variants as the site's design system
 // (reuse, don't reinvent) so the GUI reads as a sibling tool; sizes lean compact for the
 // dense workbench chrome.
+//
+// [FABLE-5] sq-7i0xh — re-synced the sq-vw3ax focus ring from the site's button.tsx (ring-3 +
+// 2px background offset — the crisper keyboard halo from the synced design-system card).
+// Intentional GUI deltas kept, per the operational-vs-marketing split (GH #836): compact
+// sizes + rounded-md + the extra icon-sm size for the dense workbench chrome, and NO
+// default-variant elevation glow — in the workbench the glow is an opt-in brand accent
+// (`.sq-glow-btn`, e.g. the top-bar Import action), not every primary button.
 const buttonVariants = cva(
-  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all outline-none focus-visible:ring-2 focus-visible:ring-ring/50 active:translate-y-px disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0",
+  "inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-all outline-none focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:ring-offset-2 focus-visible:ring-offset-background active:translate-y-px disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg:not([class*='size-'])]:size-4 shrink-0",
   {
     variants: {
       variant: {

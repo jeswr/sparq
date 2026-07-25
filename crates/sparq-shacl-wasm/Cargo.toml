@@ -51,6 +51,12 @@ default = []
 # turning on `sparq-shacl`'s non-default `shacl-af` feature. OFF by default so the standard
 # SHACL bundle carries zero rule code; CI builds the bundle BOTH with and without it.
 shacl-af = ["sparq-shacl/shacl-af"]
+# [FABLE-5] sq-01xlp: the pre-parsed `ParsedGraph` handle for repeat validation without
+# re-parse (a directional, non-canonical measurement found data-graph parsing dominating
+# the one-shot at scale-tier corpora — research/shacl-wasm-stateful-2026-07.md). No new
+# deps; OFF by default so the showcase artifact (and its deterministic bundle-bytes
+# record) is unchanged. CI covers every feature combination.
+stateful = []
 
 [dev-dependencies]
 # [OPUS-4.8] sq-lfmf — headless wasm test harness, mirroring sparq-reason-wasm: exercises
