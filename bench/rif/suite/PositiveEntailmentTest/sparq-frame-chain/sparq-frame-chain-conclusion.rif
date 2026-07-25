@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- [FABLE-5] sq-hmd7l.24 — sparq-authored vendored case (not a W3C file). -->
+<Frame xmlns="http://www.w3.org/2007/rif#">
+  <object><Const type="http://www.w3.org/2007/rif#iri">http://example.org/a</Const></object>
+  <slot>
+    <Const type="http://www.w3.org/2007/rif#iri">http://example.org/q</Const>
+    <Const type="http://www.w3.org/2007/rif#iri">http://example.org/b</Const>
+  </slot>
+</Frame>

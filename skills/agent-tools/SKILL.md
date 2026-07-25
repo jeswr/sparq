@@ -147,6 +147,11 @@ let cfg = ServerConfig { allow_update: true, ..ServerConfig::default() };
 # Ok(()) }
 ```
 
+`initialize` negotiates the MCP protocol revision: a client-proposed `protocolVersion`
+in `sparq_mcp::SUPPORTED_PROTOCOL_VERSIONS` is accepted verbatim; otherwise the server
+answers with its latest (`sparq_mcp::PROTOCOL_VERSION`) and the client decides whether
+to proceed. The tools flow is identical across the supported revisions.
+
 The standard MCP stdio transport is behind the **`stdio`** feature:
 `sparq_mcp::serve_stdio(&mut server)` runs the line-delimited JSON-RPC loop over this
 process's stdin/stdout. For an arbitrary reader/writer pair use `sparq_mcp::serve`.

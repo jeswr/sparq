@@ -55,12 +55,12 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
   ∈ R(r)` (an asserted/derived `a r a`) reads off as `∃r.Self ∈ S({a})` (CRs3 — sound: a nominal
   is a singleton). A general `(X,X)` link from `X ⊑ ∃r.X` never triggers either (load-bearing);
   a malformed shape stays a counted skip. Under `abox` self-loops realise as `a r a` (WG -001/-002).
-- **RBox role automaton + lattice readoff** *(opt-in `rbox` feature, Phases E2/E3)* —
-  `rdfs:subPropertyOf` inclusions (**CR10**), `owl:propertyChainAxiom` + `owl:TransitiveProperty`
-  compositions (**CR11**), incl. the SNOMED-critical right-identity `r ∘ s ⊑ s`; and a
-  **role-lattice readoff**: `classify_graph` also emits the NON-REFLEXIVE told-inclusion closure
-  as `rdfs:subPropertyOf` triples (`Report::emitted_role_subsumptions` counts the new ones). OFF
-  by default: zero role-automaton code without it.
+- **RBox role automaton + lattice readoff** *(opt-in `rbox` feature, Phases E2/E3)* — `rdfs:subPropertyOf`
+  inclusions (**CR10**), `owl:propertyChainAxiom` + `owl:TransitiveProperty` compositions (**CR11**), incl. the
+  SNOMED-critical right-identity `r ∘ s ⊑ s`; and a **role-lattice readoff**: `classify_graph` also emits the
+  NON-REFLEXIVE told-inclusion closure as `rdfs:subPropertyOf` triples (`Report::emitted_role_subsumptions`
+  counts the new ones). A told RBox that is NOT regular (a role-dependency cycle through a property-chain constraint — forbidden by the OWL 2 global restrictions) is flagged via
+  `Report::rbox_non_regular`: saturation still terminates and stays sound, but classification may be incomplete (honest, never silent). OFF by default: zero role-automaton code without it.
 - **Transitive reduction → Hasse diagram** *(opt-in `hasse` feature, Phase E3)* — `DirectHierarchy`
   reduces the full closure to the **direct (immediate) subsumers**, collapses **equivalence
   cliques**, and `classify_hasse_graph` emits the COMPACT taxonomy (direct `rdfs:subClassOf` +

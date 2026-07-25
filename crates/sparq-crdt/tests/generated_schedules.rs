@@ -10,8 +10,12 @@
 //! regression protection, not a proof of convergence.
 
 use proptest::prelude::*;
+// [OPUS-5] `Dot` here is the MODEL dot (`context::Dot`); the crate root's `Dot` is the
+// wire type from the codec layer (`id::Dot`, bead sq-tag1q.7.2). The two are distinct
+// by design, so the model's is imported by its module path rather than re-exported.
+use sparq_crdt::context::Dot;
 use sparq_crdt::{
-    assert_converged, deliver_all, run_schedule, CausalContext, Dot, Envelope, GraphKey, Op, Quad,
+    assert_converged, deliver_all, run_schedule, CausalContext, Envelope, GraphKey, Op, Quad,
     Replica, State, Step,
 };
 

@@ -163,8 +163,12 @@ cells on the loopback tier; the shaped LAN/WAN multiplier awaits the privileged/
   443`). ORQ-style O(n log n) sort-merge is **OPEN** (bead **sq-ujz8**).
 - **No collaborative ZK proof; no in-circuit signature.** `proof.rs` is honest
   `NotYetImplemented` stubs.
-- **Single-dealer randomness simulation.** A real federation needs PRSS / dealer-less VSS
-  (bead **sq-yyro OPEN**); `dealer()` is a stand-in.
+- **Single-dealer randomness simulation.** A real federation needs PRSS / dealer-less VSS;
+  `dealer()` is a stand-in. **Design + code seam landed** (bead **sq-yyro**:
+  `research/mpc-distributed-randomness-design.md` + the `randomness` module —
+  `DistributedRandomness` / `RandomnessModel`, current dealer reports
+  `TrustedDealerSim`, `deployable() == false`); the PRSS/coin-toss/VSS **impl** is
+  follow-on beads behind the seam (still OPEN).
 
 ### 1.3 The two-regime split (load-bearing; from architecture convention #4)
 
@@ -655,7 +659,11 @@ LANDED on `main`** — see the per-item ✅ DONE notes.
    adversarial catch-tests, the bench AXIS-1 lift) is decomposed into **`sq-km34.2–.9` (OPEN)**.
 6. **Distributed randomness (PRSS / dealer-less VSS).** Replace the single-dealer simulation so
    masks/correlated randomness are jointly generated — prerequisite for any real federation and
-   for P4/P5 correlated randomness. Bead **sq-yyro (OPEN)** ✅ tracked.
+   for P4/P5 correlated randomness. **Design + seam DONE** (bead **sq-yyro**:
+   `research/mpc-distributed-randomness-design.md` + the `randomness` module seam —
+   PRSS-vs-coin-toss decision, dealer-less VSS, the `r = 0` threat; current dealer labelled
+   `RandomnessModel::TrustedDealerSim`). The PRSS/coin-toss/VSS **implementation** is follow-on
+   beads behind the `DistributedRandomness` trait (OPEN).
 7. **Network transport + round/byte instrumentation (tier-1 modelled, tier-2/3 real).** Make
    the round-count/comm cost — the dominant real-world cost — observable; prerequisite for ANY
    per-config performance verdict. **DONE (CLOSED):** tier-1 modelled counters

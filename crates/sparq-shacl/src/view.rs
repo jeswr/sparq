@@ -97,6 +97,19 @@ impl<'g> GraphView<'g> {
         scan.rows.iter().map(|r| scan.to_spo(r)[0]).collect()
     }
 
+    /// `(predicate, object)` id pairs of triples with subject `s` — id twin of
+    /// [`Self::predicate_objects`] (`sh:closed`), same row order. [FABLE-5] (sq-j9hls)
+    pub(crate) fn predicate_objects_ids(&self, s: Id) -> Vec<(Id, Id)> {
+        let scan = self.g.store.scan(&[Some(s), None, None]);
+        scan.rows
+            .iter()
+            .map(|r| {
+                let [_, p, o] = scan.to_spo(r);
+                (p, o)
+            })
+            .collect()
+    }
+
     /// True iff the fully-ground triple is present.
     pub fn contains(&self, s: &Term, p: &str, o: &Term) -> bool {
         let Ok(p) = NamedNode::new(p) else {
