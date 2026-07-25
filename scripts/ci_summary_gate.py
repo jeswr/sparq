@@ -173,6 +173,33 @@
 #     cannot merge anyway, so a false RED here is cheap; a false PASS is the
 #     invariant violation).
 #
+# NO-LEG RUNS AND THE UNSATISFIABLE HOLD (#3781). [OPUS-5] The two rules "a worker PR
+# stays DRAFT until reviewed" and "a full-tier gate refuses a draft-tier leg set" are
+# each correct and composed into a deadlock with no exit. Measured 3-for-3 on
+# 2026-07-25 (#3472/#3468/#3681): `sparq-orchestrator[bot]` re-drafts a freshly-readied
+# worker PR ~13 min after the ready, flipping `review:needs` in the same breath; the
+# label flip re-triggers ci.yml / bench.yml / feature-matrix.yml / fuzz.yml, whose
+# #2546 label-trigger guard skips EVERY root job — so each run's only non-skipped job
+# is the unconditional select pre-job, which (the PR now being a draft) came out named
+# `…, draft-tier`. Four fresh draft-marked select instances therefore appeared on a
+# head with no possible full-tier successor, and the gate burned all 155 polls before
+# fail-closed-refusing a leg set with ZERO failing legs. Two additions close it:
+#   * NO-LEG RUNS ARE NOT EVIDENCE — ci-select.yml names its job `…, no-leg` (never
+#     `…, draft-tier`) on a guarded label-flip no-op, and the gate treats such a run as
+#     NON-AUTHORITATIVE: it is excluded from newest-run candidacy and every check-run
+#     it produced is a non-event (no_leg_run_ids / resolve_newest_workflow_runs). The
+#     previous REAL run of that workflow therefore stays authoritative. This is
+#     strictly MORE fail-closed than the pre-#3781 behaviour, where newest-run
+#     resolution let a vacuous all-skipped run supersede a real one — erasing a
+#     still-in-flight matrix (measured: #3472's real CI run finished at 07:34:08, six
+#     minutes AFTER the flip runs completed) or even a real FAILURE.
+#   * THE HOLD IS DETECTED WHEN IT IS UNSATISFIABLE — a full-tier PR gate whose
+#     siblings have ALL concluded, which still holds on a draft-marked select with no
+#     successor, and whose PR reads as CURRENTLY A DRAFT, is waiting for something that
+#     cannot happen (only a non-draft payload produces a full-tier select). It REDs
+#     immediately with that diagnosis instead of burning ~67 minutes of budget on a
+#     refusal already decided. Same verdict, named honestly, ~1 minute in.
+#
 # Exit-0 paths, exhaustively (fail-fast adds NO exit-0 path — it only ever
 # returns 1): (1) render_verdict over a stable-empty set;
 # (2) render_verdict over an all-terminal set with zero non-passing GATING checks
@@ -266,6 +293,28 @@ _PASSING = ("success", "skipped", "neutral")
 # advisory rule uses — so the gate can partition draft-assembled from full-assembled
 # selection check-runs on a head SHA without any extra API surface.
 DRAFT_TIER_MARKER = ", draft-tier"
+# [OPUS-5] #3781: the marker ci-select.yml appends INSTEAD of ", draft-tier" when the
+# calling run is a GUARDED LABEL-FLIP NO-OP — a labeled/unlabeled pull_request event
+# whose label is none of ci-full/bench-full/fuzz-full. The #2546 label-trigger guard
+# `if:`s off every root job of ci.yml / bench.yml / feature-matrix.yml / fuzz.yml on
+# such an event, so the run assembles ZERO legs and that workflow's unconditional
+# select pre-job is its ONLY non-skipped job. Such a run is NOT draft-tier evidence and
+# NOT full-tier evidence — it is not evidence at all — so the gate treats it as
+# NON-AUTHORITATIVE (no_leg_run_ids + resolve_newest_workflow_runs) and it can neither
+# create nor discharge a draft-tier hold (draft_selects_unsuperseded).
+#
+# WHY A WHOLE-RUN EXCLUSION, NOT MERELY A TIER-NEUTRAL SELECT NAME. Measured on sparq
+# #3472: the PR was readied at 07:15:37 (full-tier runs dispatched; CI's real matrix ran
+# until 07:34:08), re-drafted with `review:needs` at 07:28:50, and the resulting 8
+# label-flip runs completed within ~90s with every job skipped. Newest-run resolution
+# (#3505) is per-workflow, so those vacuous runs BECOME the authoritative run for CI /
+# Benchmarks / feature-matrix / fuzz and their all-`skipped` leg sets REPLACE the real,
+# still-in-flight ones. Neutralising only the select NAME would therefore have swapped a
+# 155-poll deadlock for a GREEN gate rendered over legs that had not finished. Ignoring
+# the RUN instead keeps the previous real run authoritative — strictly more fail-closed:
+# a mid-flight run keeps the gate polling, and a FAILED run keeps failing it instead of
+# being erased by a label flip.
+NO_LEG_MARKER = ", no-leg"
 # [FABLE-5] Draft-tier CI: THIS aggregator's own job name is tiered the same way
 # (ci-summary.yml `gate` job): a draft-payload run emits the check-run
 # `gate, draft-tier` and NEVER the required `gate` context — the structural half
@@ -333,6 +382,11 @@ class Config:
     max_total_polls: int = 155  # absolute cap: 45 extension polls x 40s = +30 min
     sat_queue_min: int = 5      # queued workflow-runs in the repo => saturation
     progress_window: int = 15   # polls over which a completed-count rise = progress
+    # [OPUS-5] #3781: consecutive polls the UNSATISFIABLE-HOLD state must persist before
+    # the gate fails fast on it (see run_gate). Small on purpose — the state is already
+    # all-terminal, so the only thing this window buys is tolerance for check-run
+    # registration lag; 3 polls x 20s replaces a ~67-minute burn with ~1 minute.
+    unsat_confirm_polls: int = 3
     max_consec_fetch_failures: int = 5
     summary_path: str = field(default_factory=lambda: os.environ.get("GITHUB_STEP_SUMMARY", ""))
 
@@ -465,6 +519,7 @@ def resolve_newest_workflow_runs(
     *,
     attempt_jobs: dict[int, list[dict]] | None = None,
     redispatch_pending_ids: set[int] | None = None,
+    no_leg_ids: set[int] | None = None,
 ) -> tuple[list[dict], int]:
     """Resolve Actions checks through newest workflow runs, preserving external checks.
 
@@ -476,10 +531,20 @@ def resolve_newest_workflow_runs(
     preserved: manually-posted checks (notably ``feature-matrix report``) may link
     to a workflow_run whose own head SHA differs from the commit on which it posts
     the check.
+
+    ``no_leg_ids`` ([OPUS-5] #3781, computed by no_leg_run_ids over the SAME check
+    list): runs that declared themselves EVIDENCE-FREE via the ", no-leg" select
+    marker. They are excluded from newest-run candidacy — so a vacuous label-flip
+    run can never supersede the previous real run of its workflow — and every
+    check-run of theirs is counted as superseded. Defaults to the empty set, which
+    makes this function byte-identical to its pre-#3781 behaviour.
     """
     attempt_jobs = attempt_jobs or {}
     redispatch_pending_ids = redispatch_pending_ids or set()
-    newest = newest_workflow_runs(workflow_runs)
+    no_leg_ids = no_leg_ids or set()
+    newest = newest_workflow_runs(
+        [r for r in workflow_runs if _as_int(r.get("id")) not in no_leg_ids]
+    )
     all_by_id = {_as_int(r.get("id")): r for r in workflow_runs if _as_int(r.get("id"))}
     self_id = _as_int(self_run_id)
     self_workflow = ""
@@ -498,6 +563,14 @@ def resolve_newest_workflow_runs(
         latest = newest.get(key)
         if key == self_workflow:
             continue
+        # [OPUS-5] #3781: a run that assembled NO legs (a guarded label-flip no-op) was
+        # already removed from `newest` above, so every check-run it produced — its own
+        # select plus the whole skipped needs-graph behind it — falls out below as a
+        # NON-EVENT: either `run_id != latest_id` (a real predecessor stayed
+        # authoritative) or `latest is None` (the vacuous run was that workflow's only
+        # one). Deliberately NOT an extra `run_id in no_leg_ids` branch here: it would
+        # be unreachable, and a guard that no input can distinguish is a guard no test
+        # can pin (it survived every mutant).
         if latest is None:
             superseded += 1
             continue
@@ -611,11 +684,33 @@ class WorkflowRunResolver:
         # bound, preventing repeated POSTs while the list API still shows attempt 1.
         self._redispatch_seen: dict[tuple[str, int, int], int] = {}
         self._terminal_jobs_cache: dict[tuple[int, int], list[dict]] = {}
+        # [OPUS-5] #3781: run ids already announced as NO-LEG (log once, not per poll).
+        self._no_leg_reported: set[int] = set()
 
     def __call__(self) -> list[dict]:
         checks = self.fetch_checks()
         workflows = self.fetch_workflows()
-        newest = newest_workflow_runs(workflows)
+        # [OPUS-5] #3781: drop the EVIDENCE-FREE runs (", no-leg" select marker) from
+        # newest-run candidacy BEFORE anything downstream keys off `newest` — the
+        # redispatch decision, the attempt-jobs inventory and the resolver must all
+        # agree on which run is authoritative, or a vacuous label-flip run could still
+        # supersede a real predecessor through one of the other two paths.
+        no_leg_ids = no_leg_run_ids(checks)
+        authoritative = [
+            r for r in workflows if _as_int(r.get("id")) not in no_leg_ids
+        ]
+        fresh_no_leg = sorted(no_leg_ids - self._no_leg_reported)
+        if fresh_no_leg:
+            # Announced ONCE per run id, not once per poll: the gate can poll 155 times
+            # and this line is a standing fact about the head, not a per-poll event.
+            self._no_leg_reported |= set(fresh_no_leg)
+            print(
+                f"  workflow-run resolver: {len(fresh_no_leg)} run(s) declared NO LEGS "
+                f"(guarded label-flip no-op, #3781) — ignored, so the previous real run "
+                f"of each workflow stays authoritative: "
+                f"{', '.join(str(i) for i in fresh_no_leg)}"
+            )
+        newest = newest_workflow_runs(authoritative)
         self_id = _as_int(self.self_run_id)
         self_workflow = ""
         for run in workflows:
@@ -686,6 +781,7 @@ class WorkflowRunResolver:
             self.self_run_id,
             attempt_jobs=attempt_jobs,
             redispatch_pending_ids=redispatch_pending,
+            no_leg_ids=no_leg_ids,
         )
         if superseded:
             print(
@@ -696,9 +792,10 @@ class WorkflowRunResolver:
 
 
 def normalized_name(name: str) -> str:
-    """A check-run name with the draft-tier marker stripped — the identity under
-    which a draft-assembled select and its full-tier successor are the SAME leg."""
-    return name.replace(DRAFT_TIER_MARKER, "")
+    """A check-run name with every TIER marker stripped — the identity under which a
+    draft-assembled select, a no-leg label-flip select ([OPUS-5] #3781) and their
+    full-tier successor are all the SAME leg."""
+    return name.replace(DRAFT_TIER_MARKER, "").replace(NO_LEG_MARKER, "")
 
 
 def _leg_identity(run: dict) -> tuple[str, str]:
@@ -709,6 +806,47 @@ def _leg_identity(run: dict) -> tuple[str, str]:
 def is_draft_tier(name: str) -> bool:
     """Was this check-run produced by a draft-tier-assembled run (name marker)?"""
     return DRAFT_TIER_MARKER in name
+
+
+def is_no_leg_select(name: str) -> bool:
+    """[OPUS-5] #3781: is this the PURE selection pre-job of a run that assembled NO
+    LEGS (a guarded label-flip no-op — see NO_LEG_MARKER)? Deliberately conjoined with
+    is_pure_select: only the bare reusable ci-select pre-job may declare its run
+    evidence-free. A COMPOUND job that merely contains the selection phrase while
+    carrying additional gating evidence (`fv-select (change-based test selection) +
+    fv-manifest (proof inventory)`) can never make its run non-authoritative, so a
+    marker that drifted onto an evidence-bearing job name fails CLOSED (the run stays
+    authoritative and keeps gating)."""
+    return NO_LEG_MARKER in name and is_pure_select(name)
+
+
+def select_tier(name: str) -> str:
+    """[OPUS-5] #3781: the TIER a selection check-run was assembled at — "draft",
+    "no-leg" or "full". Three-valued so cross-tier supersession stays explicit:
+    no-leg evidence must no more stand in for a full-tier selection than draft
+    evidence may (forgive_superseded)."""
+    if is_draft_tier(name):
+        return "draft"
+    if NO_LEG_MARKER in name:
+        return "no-leg"
+    return "full"
+
+
+def no_leg_run_ids(check_runs: list[dict]) -> set[int]:
+    """[OPUS-5] #3781: the Actions run ids that DECLARED THEMSELVES evidence-free by
+    naming their pure select check-run with NO_LEG_MARKER. Such a run assembled zero
+    legs (the #2546 label-trigger guard skipped every root job), so it must not become
+    the authoritative newest run for its workflow and erase the previous real run's
+    legs. Run ids come from the check-run's own details/html url — the same
+    server-supplied locator the newest-run resolver already trusts."""
+    out: set[int] = set()
+    for r in check_runs:
+        if not is_no_leg_select(r.get("name", "")):
+            continue
+        rid = _workflow_run_id_of_check(r)
+        if rid:
+            out.add(rid)
+    return out
 
 
 def is_draft_gate_artifact(name: str) -> bool:
@@ -780,11 +918,20 @@ def forgive_superseded(runs: list[dict]) -> tuple[list[dict], list[dict]]:
             key = _leg_identity(r)
             mine = _order_key(r)
             pure_select = is_pure_select(r_name)
-            r_tier = is_draft_tier(r_name)
+            r_tier = select_tier(r_name)
             if any(
                 o is not r
                 and _leg_identity(o) == key
                 and o.get("conclusion") not in _SUPERSEDABLE
+                # [OPUS-5] #3781: a NO-LEG select proves nothing about any tier's
+                # selection, so it may only ever supersede another no-leg select.
+                # Without this the strictly-later disjunct below would let a vacuous
+                # label-flip select forgive a cancelled REAL-tier select and thereby
+                # release a draft-tier hold. Pure narrowing (fewer forgivenesses =>
+                # more REDs), and unreachable in production because the no-leg run's
+                # checks never survive resolve_newest_workflow_runs — defence in depth
+                # for any caller that renders a verdict over a raw check list.
+                and (select_tier(o.get("name", "")) == "no-leg") == (r_tier == "no-leg")
                 and (
                     # pure select: any SAME-TIER same-name success proves a
                     # sound selection; everything else (non-select legs,
@@ -793,7 +940,7 @@ def forgive_superseded(runs: list[dict]) -> tuple[list[dict], list[dict]]:
                     (
                         pure_select
                         and o.get("conclusion") == "success"
-                        and is_draft_tier(o.get("name", "")) == r_tier
+                        and select_tier(o.get("name", "")) == r_tier
                     )
                     or _order_key(o) > mine
                 )
@@ -834,11 +981,21 @@ def draft_selects_unsuperseded(runs: list[dict]) -> list[str]:
     that each demand a successor; a hold that cannot be satisfied REDs at budget
     exhaustion ("stale draft-tier run, full run pending") rather than ever
     passing over draft-assembled legs. Re-running the selecting workflows (or
-    pushing a new head) clears it."""
+    pushing a new head) clears it.
+
+    [OPUS-5] #3781: a NO-LEG select (a guarded label-flip no-op run — see
+    NO_LEG_MARKER) belongs to NEITHER pool. It cannot CREATE a hold, because its run
+    assembled no legs at all and a full-tier successor for it can never exist while
+    the PR is a draft — that composition is the #3781 deadlock, which burned all 155
+    polls on three PRs with zero failing legs. And it cannot DISCHARGE one either: an
+    evidence-free selection must never stand in for the full-tier re-run a genuinely
+    draft-assembled leg set is waiting on. In production such a check never reaches
+    here (its whole run is dropped by resolve_newest_workflow_runs); this is the
+    predicate-level belt for any path that renders a verdict over a raw check list."""
     groups: dict[tuple[str, str], tuple[list[dict], list[dict]]] = {}
     for r in runs:
         name = r.get("name", "")
-        if not is_select(name):
+        if not is_select(name) or is_no_leg_select(name):
             continue
         marked, unmarked = groups.setdefault(_leg_identity(r), ([], []))
         (marked if is_draft_tier(name) else unmarked).append(r)
@@ -1244,6 +1401,26 @@ def _emit(line: str, summary_path: str = "") -> None:
             fh.write(line + "\n")
 
 
+def _bounded_draft_read(
+    tier_ctx: TierContext | None,
+) -> tuple[bool | None, Exception | None]:
+    """The PR's LIVE draft state via tier_ctx.fetch_pr_draft, bounded-retried on
+    transient FetchError. Returns (state, last_error); state is None when there is no
+    fetcher wired or every attempt failed. Shared by the conclusion-time re-check
+    (_draft_recheck) and the #3781 unsatisfiable-hold detector so both read the state
+    exactly the same way — the CALLERS decide what an unreadable state means."""
+    still_draft: bool | None = None
+    last_err: Exception | None = None
+    if tier_ctx is not None and tier_ctx.fetch_pr_draft is not None:
+        for _ in range(max(1, tier_ctx.draft_check_retries)):
+            try:
+                still_draft = tier_ctx.fetch_pr_draft()
+                break
+            except FetchError as exc:  # transient API blip: bounded retry
+                last_err = exc
+    return still_draft, last_err
+
+
 def _draft_recheck(tier_ctx: TierContext | None, summary_path: str = "") -> int:
     """[FABLE-5] Draft-tier conclusion-time re-check, applied on EVERY would-be-
     SUCCESS path (including the stable-empty set): a DRAFT-tier run confirms the
@@ -1256,15 +1433,7 @@ def _draft_recheck(tier_ctx: TierContext | None, summary_path: str = "") -> int:
     violation. Returns 0 (ok to pass) or 1 (fail). Full-tier runs: always 0."""
     if not tier_ctx or tier_ctx.run_tier != "draft":
         return 0
-    still_draft = None
-    last_err: Exception | None = None
-    if tier_ctx.fetch_pr_draft is not None:
-        for _ in range(max(1, tier_ctx.draft_check_retries)):
-            try:
-                still_draft = tier_ctx.fetch_pr_draft()
-                break
-            except FetchError as exc:  # transient API blip: bounded retry
-                last_err = exc
+    still_draft, last_err = _bounded_draft_read(tier_ctx)
     if still_draft is None:
         _emit(
             "### ci-summary: FAILED — draft-tier run could not confirm the PR's "
@@ -1521,6 +1690,8 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
     # observed on the PREVIOUS poll — the red fires only when a fresh re-poll
     # re-observes the identical set (header §FAIL-FAST).
     ff_suspect: tuple | None = None
+    # [OPUS-5] #3781: consecutive polls the UNSATISFIABLE-HOLD state has persisted.
+    unsat_polls = 0
 
     attempt = 0
     while attempt < cfg.max_total_polls:
@@ -1645,6 +1816,79 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
                 )
                 continue  # no sleep: the grace re-poll is deliberately immediate
             ff_suspect = None
+
+        # [OPUS-5] #3781 — UNSATISFIABLE HOLD: detect it, do not wait it out.
+        # The draft-tier hold (awaiting_full) is a WAIT for the ready_for_review
+        # full-tier re-runs to register. That wait is only meaningful while such a
+        # re-run can still happen. When ALL THREE hold —
+        #   (1) every awaited sibling has CONCLUDED (pending == 0: nothing is coming),
+        #   (2) a draft-marked select instance still lacks a full-tier successor, and
+        #   (3) the PR is CURRENTLY A DRAFT (live API read),
+        # — the hold is unsatisfiable ON ARRIVAL: a full-tier select is produced ONLY
+        # by a non-draft pull_request payload, so while the PR stays a draft no
+        # successor can ever register on this SHA. Measured on #3472/#3468/#3681: the
+        # gate spent all 155 polls (~67 min of wall-clock budget) in exactly this state
+        # and then emitted the refusal it could have emitted at poll 3, on PRs with
+        # ZERO failing legs. This is a `return 1` — the SAME refusal render_verdict's
+        # stale-draft-tier belt reaches at budget exhaustion, arrived at sooner and
+        # named honestly; it never turns a would-be RED green.
+        # NOT fired while anything is still settling (pending / awaiting_report), before
+        # the startup-race floor, or on a state that has not persisted for
+        # unsat_confirm_polls — that window is the discrimination against check-run
+        # registration lag. An UNREADABLE draft state does NOT fire either: the gate
+        # keeps polling exactly as before (a false RED here would be a new failure mode,
+        # while the pre-#3781 behaviour of burning the budget is merely slow).
+        if (
+            awaiting_full
+            and pending == 0
+            and not awaiting_report
+            and attempt >= cfg.min_polls
+        ):
+            unsat_polls += 1
+            if unsat_polls >= cfg.unsat_confirm_polls:
+                still_draft, draft_err = _bounded_draft_read(tier_ctx)
+                if still_draft is True:
+                    stale = draft_selects_unsuperseded(runs)
+                    _emit(
+                        "### ci-summary: FAILED (fail-fast) — UNSATISFIABLE draft-tier "
+                        "hold, not a slow run. Every sibling check-run on this head SHA "
+                        f"has CONCLUDED, {len(stale)} draft-marked select instance(s) "
+                        "still have no full-tier successor, and the PR is CURRENTLY A "
+                        "DRAFT — so no full-tier select can ever register on this SHA "
+                        "(only a non-draft pull_request payload produces one). The hold "
+                        "is unsatisfiable on arrival, so the gate REDs NOW with the "
+                        f"diagnosis instead of burning the remaining "
+                        f"{cfg.max_total_polls - attempt} poll(s) on a refusal that is "
+                        "already decided (#3781). REMEDY: re-ready the PR (`gh pr "
+                        "ready` fires ready_for_review, which re-runs every selecting "
+                        "workflow at FULL tier), or push a new head. A worker PR that "
+                        "the review pipeline re-drafts mid-gate hits this whenever the "
+                        "re-draft lands inside the gate's polling window.",
+                        cfg.summary_path,
+                    )
+                    for n in sorted(set(stale)):
+                        _emit(
+                            f"- ✗ {n}: draft-tier selection with no full-tier successor",
+                            cfg.summary_path,
+                        )
+                    print(
+                        "::error::ci-summary failed fast — unsatisfiable draft-tier hold "
+                        "(all siblings terminal, PR still a draft, no full-tier select "
+                        "possible)."
+                    )
+                    return 1
+                # Not unsatisfiable (PR is ready, or the state is unreadable): keep
+                # polling and re-arm the window, so the live draft state is re-read at
+                # most once every unsat_confirm_polls polls rather than on every poll.
+                unsat_polls = 0
+                print(
+                    "  unsatisfiable-hold check: the draft-tier hold is all-terminal but "
+                    f"the PR draft state read as {still_draft!r}"
+                    + (f" (last error: {draft_err})" if draft_err else "")
+                    + " — not declaring it unsatisfiable; continuing to poll."
+                )
+        else:
+            unsat_polls = 0
 
         # Clean convergence: everything terminal, held for the settle, past the floor.
         if attempt >= cfg.min_polls and pending == 0 and stable >= cfg.settle_polls:
