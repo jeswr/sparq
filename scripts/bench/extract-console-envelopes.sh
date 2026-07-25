@@ -8,12 +8,15 @@
 # authoritative recovery channel when the SSH pull path dies. This extractor parses
 # those blocks back into files. Load-bearing details:
 #   * the trailing === delimiter is STRIPPED from the BEGIN marker, so recovered
-#     files keep their exact `*.json` basenames;
+#     files keep their exact `*.json` basenames (a naive `name=$2` kept the ===,
+#     producing `<name>.json===` files the launcher's *.json listing then dropped);
 #   * serial-console CR line endings are stripped;
 #   * the recovered name is ALLOWLISTED (plain alnum/._- basename ending in .json,
-#     no leading dot/dash, no slashes).
+#     no leading dot/dash, no slashes) — console content is instance-controlled, so
+#     a garbled or hostile marker must never become a path or an odd filename.
 #
 # Usage: extract-console-envelopes.sh <console.txt> <out-dir>
+# Fixture-tested by scripts/tests/test_extract_console_envelopes.sh.
 set -euo pipefail
 
 CONSOLE="${1:?usage: extract-console-envelopes.sh <console.txt> <out-dir>}"
