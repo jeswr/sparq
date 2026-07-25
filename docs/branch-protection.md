@@ -206,7 +206,7 @@ no check-run there either — not a byte-identical copy of the PR check-set.)
 | `artifact-exact-equality` (wasm feature-OFF byte identity) | `vectorized-feature-off.yml` | kept iff `sparq-wasm` is in the affected closure (in-step `ci_select.py` verdict; ci-full label / selector error / full mode ⇒ run) |
 
 **The integrity invariant — a draft-tier gate result must NEVER admit a PR to the
-merge queue.** The load-bearing mechanism is rule 1 (structural); rules 2–6 are
+merge queue.** The load-bearing mechanism is rule 1 (structural); rules 2–7 are
 belts (all in `scripts/ci_summary_gate.py`, unit-tested in
 `scripts/tests/test_ci_summary_gate.py`; the name/trigger wiring pinned by
 `scripts/tests/test_ci_select_wiring.py`):
@@ -263,6 +263,29 @@ belts (all in `scripts/ci_summary_gate.py`, unit-tested in
    Attempt-scoped job listing supplies the completed leg inventory and prevents
    an old attempt that reused the run id from leaking into the verdict; the
    workflow-run conclusion supplies the verdict when an entire job evaporates.
+7. **An UNSATISFIABLE rule-4 hold ends immediately, and a gate re-run is NOT the
+   remedy (#3758).** [OPUS-5] Converting a PR back to **draft** mid-wave makes the
+   draft-tier wave the newest run of every selecting workflow, so rule 6 discards
+   the earlier full-tier selects and rule 4's hold demands a successor that — while
+   the PR stays a draft and the head's Actions queue is idle — nothing will ever
+   dispatch. The hold pins the settle counter at 0, and with every sibling terminal
+   (`pending == 0`) the sq-90cv4 hang detector used to be bypassed entirely, so the
+   only exit was the ~68-minute absolute poll budget — burned again on every gate
+   re-run, since the hold is a pure function of the head's check-run set. Two
+   additive exits now end it: (a) while the hold is up with zero pending siblings
+   the gate counts **non-terminal Actions workflow runs on this head SHA** (its own
+   workflow excluded); `unsat_grace_polls` consecutive **zero** observations (~3 min
+   — a registration-grace window, since a re-dispatch appears as a `queued` run
+   within seconds) prove the hold unsatisfiable and RED at once; (b) the base-budget
+   hang branch now also fires for a zero-pending hold, where repo-wide runner
+   saturation is deliberately **not** an extension reason (nothing of ours is
+   starving in that queue) — but live per-head activity **is**: a probe that just
+   saw a non-terminal run on this SHA vetoes both exits, leaving the pre-existing
+   absolute-budget bound in place. Both route through rule 4's own verdict — the exit can
+   never render a pass — and the RED states the remedy explicitly: **re-running the
+   `ci-summary` gate cannot clear it**; only a **full-tier re-dispatch of the
+   selecting workflows** on this head, **`ready_for_review`**, or a **new head
+   commit** can. Repair automation must not re-run the gate on this verdict.
 
 **Why the queue can never latch a draft-tier result.** Rule 1 is structural: the
 queue and branch protection admit a PR only on a successful check-run of the
@@ -270,7 +293,7 @@ exact context `gate`, and no draft-tier run ever emits one. This matters more
 than it may look, because the `merge_group` run deliberately omits two lanes
 (`bench.yml`'s deterministic byte ratchet and the heavy recall shards,
 sq-6vshe.6) on the premise that their full form already ran on the PR head —
-a premise a draft-built head would otherwise break. Rules 2–6 alone would NOT
+a premise a draft-built head would otherwise break. Rules 2–7 alone would NOT
 close that: a concluded draft-tier `gate` success would remain the *latest* run
 of the required context from the un-draft moment until the ready_for_review
 `ci-summary` run registers its check-run (seconds of event latency; indefinitely

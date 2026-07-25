@@ -85,11 +85,12 @@ RED = R("clippy", conclusion="failure")
 
 def tiny_cfg(**over):
     """Small budgets so the loop phases are reachable in a handful of polls:
-    base budget = 4 polls, absolute cap = 8, settle = 2, floor = 2."""
+    base budget = 4 polls, absolute cap = 8, settle = 2, floor = 2. The #3758
+    unsatisfiable-hold grace is 2 confirming polls (prod: 9)."""
     base = dict(self_run_id="999", interval=0, min_polls=2, settle_polls=2,
                 base_polls=4, sat_interval=0, max_total_polls=8,
                 sat_queue_min=5, progress_window=2, max_consec_fetch_failures=3,
-                summary_path="")
+                summary_path="", unsat_grace_polls=2)
     base.update(over)
     return g.Config(**base)
 
@@ -112,10 +113,12 @@ def scripted(polls, repeat_last=True):
     return fetch
 
 
-def run(cfg, polls, depth=0, tier_ctx=None):
+def run(cfg, polls, depth=0, tier_ctx=None, head_activity=None):
     """Drive run_gate with scripted polls + a constant queue depth (None = the
     depth API is unavailable). Returns (exit_code, captured_output). tier_ctx
-    (default None) exercises the draft-tier integrity semantics."""
+    (default None) exercises the draft-tier integrity semantics. head_activity is
+    the #3758 per-head unsatisfiability probe: a callable, or omitted (None) for
+    "no probe wired" — which must leave every pre-#3758 path byte-identical."""
     out = io.StringIO()
     fetch = scripted(polls)
 
@@ -124,7 +127,7 @@ def run(cfg, polls, depth=0, tier_ctx=None):
 
     with redirect_stdout(out):
         code = g.run_gate(cfg, fetch, depth_fn, sleep_fn=lambda s: None,
-                          tier_ctx=tier_ctx)
+                          tier_ctx=tier_ctx, fetch_head_activity=head_activity)
     return code, out.getvalue()
 
 
@@ -1242,6 +1245,320 @@ class TestDraftTierIntegrity(unittest.TestCase):
                 url="https://github.com/o/r/actions/runs/111/job/5")
         code, out = run(tiny_cfg(), [[art, GREEN]])
         self.assertEqual(code, 0, out)
+
+
+def probe(*values):
+    """#3758 head-activity probe stub: yields values[i] on call i (an Exception
+    instance is RAISED), repeating the last one. A value is the count of
+    non-terminal workflow runs on the head SHA (0 => the awaiting_full hold can
+    never be satisfied), or None => the probe is unavailable/unknown."""
+    state = {"i": 0, "calls": 0}
+
+    def fetch():
+        state["calls"] += 1
+        value = values[min(state["i"], len(values) - 1)]
+        state["i"] += 1
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    fetch.state = state
+    return fetch
+
+
+class TestUnsatisfiableDraftTierHold(unittest.TestCase):
+    """[OPUS-5] #3758: an `awaiting_full` hold on a head whose Actions queue is
+    IDLE and whose every sibling is terminal (pending == 0) is UNSATISFIABLE — no
+    full-tier successor can ever register, so the hold pins `stable` at 0 forever
+    and (pre-fix) only the ~68-minute absolute budget exited, while a GATE re-run
+    re-derived the identical stall (PR #3470 head 552368bd, run 30002198053 x3).
+    The exit is ADDITIVE: RED (never a silent pass), naming what actually clears
+    the state; a SATISFIABLE hold still waits, and the pending>0 hang path and
+    normal green sets are untouched."""
+
+    # The live incident's shape: four draft-marked select instances (ci / bench /
+    # feature-matrix / fuzz share one select name), zero full-tier selects, every
+    # sibling terminal, PR still a draft.
+    DRAFTS = [R(SELECT_DRAFT, started=f"2026-07-23T11:24:0{i}Z", rid=i)
+              for i in range(1, 5)]
+
+    def _hold_polls(self):
+        return [list(self.DRAFTS) + [GREEN, GREEN2]]
+
+    def test_unsatisfiable_hold_with_idle_head_reds_immediately(self):
+        """Zero non-terminal workflow runs on the head for `unsat_grace_polls`
+        consecutive polls => conclude at once, with the stale-draft-tier verdict
+        and the "a gate re-run cannot clear this" remedy."""
+        p = probe(0)
+        cfg = tiny_cfg()
+        code, out = run(cfg, self._hold_polls(),
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                        head_activity=p)
+        self.assertEqual(code, 1, out)
+        self.assertIn("UNSATISFIABLE", out)
+        self.assertIn("stale draft-tier run, full run pending", out)
+        self.assertIn("4 draft-marked select instance(s)", out)
+        # It must NOT have burned the budget: the grace is 2 confirming polls, so
+        # the loop concludes well before the base budget (4) and absolute cap (8).
+        self.assertLessEqual(p.state["calls"], cfg.unsat_grace_polls + 1)
+        self.assertIn(f"concluding at poll {cfg.unsat_grace_polls}", out)
+        self.assertNotIn("attempt 5:", out)
+
+    def test_red_message_names_what_actually_clears_the_state(self):
+        """LOAD-BEARING for the repair lanes (they re-ran the gate 3x): the RED
+        must say a gate re-run cannot help, and name the three things that do."""
+        code, out = run(tiny_cfg(), self._hold_polls(),
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                        head_activity=probe(0))
+        self.assertEqual(code, 1)
+        self.assertIn("RE-RUNNING THIS `ci-summary` GATE CANNOT CLEAR THIS STATE", out)
+        self.assertIn("re-dispatch the SELECTING workflows", out)
+        self.assertIn("ready_for_review", out)
+        self.assertIn("push a new head commit", out)
+
+    def test_satisfiable_hold_still_waits_and_passes_when_the_full_select_lands(self):
+        """A QUEUED full-tier run on the head (probe > 0) means the hold CAN be
+        satisfied: the gate must keep waiting — and when the full-tier selects
+        register it still PASSES. No early RED on a live head."""
+        fulls = [R(SELECT_FULL, started=f"2026-07-23T11:40:0{i}Z", rid=10 + i)
+                 for i in range(1, 5)]
+        polls = [
+            list(self.DRAFTS) + [GREEN, GREEN2],           # hold, head busy
+            list(self.DRAFTS) + [GREEN, GREEN2],           # hold, head busy
+            list(self.DRAFTS) + [GREEN, GREEN2],           # hold, head busy
+            list(self.DRAFTS) + fulls + [GREEN, GREEN2],   # full-tier wave lands
+            list(self.DRAFTS) + fulls + [GREEN, GREEN2],
+            list(self.DRAFTS) + fulls + [GREEN, GREEN2],
+        ]
+        code, out = run(tiny_cfg(), polls,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                        head_activity=probe(2))
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+        self.assertIn("could still register", out)
+        self.assertNotIn("UNSATISFIABLE", out)
+
+    def test_live_head_activity_vetoes_the_base_budget_shortcut(self):
+        """A probe that keeps seeing a non-terminal run on this head contradicts
+        unsatisfiability, so the base-budget shortcut must NOT fire either — the
+        gate falls back to the pre-#3758 absolute-budget bound and REDs there."""
+        code, out = run(tiny_cfg(), self._hold_polls(), depth=0,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                        head_activity=probe(1))
+        self.assertEqual(code, 1)
+        self.assertNotIn("UNSATISFIABLE", out)
+        self.assertIn("attempt 8:", out)                 # rode the absolute cap
+        self.assertIn("stale draft-tier run, full run pending", out)
+
+    def test_a_queued_run_appearing_resets_the_confirming_streak(self):
+        """The probe evidence must be CONSECUTIVE: idle, then a queued run, then
+        idle again must never accumulate the 2-poll grace, so the FAST exit cannot
+        fire. (The run still ends RED via the base-budget belt on the first idle
+        poll at/after the base budget — never on the strength of non-consecutive
+        idle observations.)"""
+        code, out = run(tiny_cfg(), self._hold_polls(),
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                        head_activity=probe(0, 3, 0, 3, 0, 3, 0, 3))
+        self.assertEqual(code, 1)
+        self.assertIn("1/2 confirming poll(s)", out)
+        self.assertNotIn("2/2 confirming poll(s)", out)
+        self.assertNotIn("concluding at poll 2", out)   # the grace never accrued
+        self.assertIn("concluding at poll 5", out)      # base budget + the veto poll
+        self.assertIn("base poll budget was reached", out)
+        self.assertIn("stale draft-tier run, full run pending", out)
+
+    def test_unknown_probe_never_concludes_unsatisfiability(self):
+        """An unavailable probe (None) or one that RAISES is UNKNOWN — it can never
+        prove the hold unsatisfiable. The base-budget widening still bounds the
+        wait (idle repo queue + no progress) rather than the absolute cap."""
+        for label, p in (("none", probe(None)),
+                         ("raises", probe(RuntimeError("boom")))):
+            with self.subTest(probe=label):
+                code, out = run(tiny_cfg(), self._hold_polls(),
+                                tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                                head_activity=p)
+                self.assertEqual(code, 1, out)
+                self.assertIn("probe unavailable" if label == "none"
+                              else "probe raised", out)
+                self.assertIn("stale draft-tier run, full run pending", out)
+
+    def test_no_probe_wired_still_ends_at_the_base_budget(self):
+        """(2) The widened genuine-hang condition: with NO probe at all, an
+        awaiting_full hold + pending == 0 + idle repo queue + no progress must
+        conclude at the BASE budget (poll 4 here) instead of the absolute cap
+        (poll 8) — the pre-fix behaviour burned the whole budget."""
+        code, out = run(tiny_cfg(), self._hold_polls(), depth=0,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"))
+        self.assertEqual(code, 1)
+        self.assertIn("UNSATISFIABLE", out)
+        self.assertIn("base poll budget was reached", out)
+        self.assertIn("attempt 4:", out)
+        self.assertNotIn("attempt 5:", out)
+
+    def test_repo_saturation_does_not_extend_a_zero_pending_hold(self):
+        """A DEEP repo-wide Actions queue is not evidence that THIS head's hold can
+        be satisfied — nothing of ours is pending in that queue, and a real
+        re-dispatch would show up as a queued run on the head. So the hold still
+        concludes at the base budget under saturation (contrast:
+        test_saturation_extension_then_green, where pending > 0)."""
+        code, out = run(tiny_cfg(), self._hold_polls(), depth=50,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"))
+        self.assertEqual(code, 1)
+        self.assertIn("UNSATISFIABLE", out)
+        self.assertNotIn("Extending the wait", out)
+
+    def test_live_progress_still_extends_a_zero_pending_hold(self):
+        """Progress (the completed count still rising) DOES justify extending: the
+        set is churning, so a full-tier successor may still be landing."""
+        polls = [
+            list(self.DRAFTS) + [GREEN],
+            list(self.DRAFTS) + [GREEN, GREEN2],
+            list(self.DRAFTS) + [GREEN, GREEN2, R("msrv")],
+            list(self.DRAFTS) + [GREEN, GREEN2, R("msrv"), R("docs")],
+            list(self.DRAFTS) + [GREEN, GREEN2, R("msrv"), R("docs"), R("wasm")],
+            list(self.DRAFTS) + [GREEN, GREEN2, R("msrv"), R("docs"), R("wasm"),
+                                 R("fuzz")],
+        ]
+        code, out = run(tiny_cfg(), polls, depth=0,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"))
+        self.assertEqual(code, 1)              # ends RED at the absolute cap belt
+        self.assertIn("Extending the wait", out)
+        self.assertIn("stale draft-tier run, full run pending", out)
+
+    # ---- everything else must be untouched ---------------------------------
+    def test_pending_hang_path_unchanged_by_the_probe(self):
+        """(3) The pending>0 genuine-hang path keeps its own message and never
+        routes through the unsatisfiable-hold exit, even with the probe wired and
+        an awaiting_full hold up."""
+        polls = [list(self.DRAFTS) + [GREEN, PENDING]]
+        code, out = run(tiny_cfg(), polls, depth=0,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                        head_activity=probe(0))
+        self.assertEqual(code, 1)
+        self.assertIn("genuine hang, not a still-settling set", out)
+        self.assertNotIn("UNSATISFIABLE", out)
+
+    def test_probe_is_not_consulted_without_a_hold(self):
+        """A normal green set must be unaffected: the probe is never called (no
+        extra API traffic on the happy path) and the verdict is still PASS."""
+        p = probe(0)
+        code, out = run(tiny_cfg(), [[GREEN, GREEN2]],
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                        head_activity=p)
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+        self.assertEqual(p.state["calls"], 0)
+
+    def test_probe_not_consulted_on_a_draft_tier_run(self):
+        """awaiting_full is a FULL-tier pull_request concept; a draft-tier run must
+        never consult the probe nor take the exit."""
+        p = probe(0)
+        code, out = run(tiny_cfg(), [[R(SELECT_DRAFT), GREEN]],
+                        tier_ctx=draft_ctx(counting(True)), head_activity=p)
+        self.assertEqual(code, 0, out)
+        self.assertIn("DRAFT-TIER verdict", out)
+        self.assertEqual(p.state["calls"], 0)
+
+    def test_failing_leg_still_fails_fast_inside_an_unsatisfiable_hold(self):
+        """The fail-fast belt keeps priority: a concluded gating FAILURE inside the
+        hold must RED with the fail-fast message, not the unsatisfiability one."""
+        polls = [list(self.DRAFTS) + [RED, GREEN]]
+        code, out = run(tiny_cfg(), polls,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                        head_activity=probe(0))
+        self.assertEqual(code, 1)
+        self.assertIn("FAILED (fail-fast)", out)
+
+    def test_exit_can_never_render_a_pass(self):
+        """Belt: _conclude_unsatisfiable_hold delegates to render_verdict, and if a
+        future refactor ever let that render a PASS over an unsatisfiable hold, the
+        coercion must still RED."""
+        cfg = tiny_cfg()
+        out = io.StringIO()
+        original = g.render_verdict
+        try:
+            g.render_verdict = lambda runs, path="", ctx=None: 0
+            with redirect_stdout(out):
+                code = g._conclude_unsatisfiable_hold(
+                    list(self.DRAFTS) + [GREEN], cfg,
+                    draft_ctx(counting(True), run_tier="full"),
+                    attempt=3, evidence="a synthetic pass-rendering verdict")
+        finally:
+            g.render_verdict = original
+        self.assertEqual(code, 1)
+        self.assertIn("must never render as a pass", out.getvalue())
+
+    def test_grace_default_is_a_bounded_minutes_scale_window(self):
+        """Prod knob sanity: the grace must be several polls (registration window
+        for the ready_for_review re-dispatch) but a small fraction of the absolute
+        budget that used to be the only exit."""
+        prod = g.Config()
+        self.assertGreaterEqual(prod.unsat_grace_polls, 3)
+        self.assertLess(prod.unsat_grace_polls * prod.interval, 10 * 60)
+        self.assertLess(prod.unsat_grace_polls, prod.base_polls)
+
+
+class TestHeadActivityProbeWiring(unittest.TestCase):
+    """[OPUS-5] #3758: the live probe must count only NON-TERMINAL runs on the head
+    and must exclude this gate's OWN workflow — two concurrent ci-summary runs on
+    one head must not each count the other as a candidate successor (that mutual
+    stall is the bug)."""
+
+    def _probe(self, runs, self_run_id="999"):
+        original = g.make_fetch_workflow_runs
+        try:
+            g.make_fetch_workflow_runs = lambda repo, sha, sid="": (lambda: list(runs))
+            fetch = g.make_fetch_head_activity("o/r", "deadbeef", self_run_id)
+        finally:
+            g.make_fetch_workflow_runs = original
+        with redirect_stdout(io.StringIO()):
+            return fetch()
+
+    def test_counts_only_non_terminal_foreign_runs(self):
+        self.assertEqual(
+            self._probe([
+                W(999, 1, name="ci-summary", status="in_progress", conclusion=None),
+                W(101, 2, name="CI"),                                     # completed
+                W(102, 3, name="bench", status="queued", conclusion=None),
+            ]),
+            1,
+        )
+
+    def test_own_workflow_runs_never_count(self):
+        """A SECOND ci-summary run on the same head (same workflow_id) is not a
+        candidate successor — a gate run cannot register a full-tier select."""
+        self.assertEqual(
+            self._probe([
+                W(999, 1, name="ci-summary", status="in_progress", conclusion=None),
+                W(998, 1, name="ci-summary", status="in_progress", conclusion=None),
+                W(101, 2, name="CI"),
+            ]),
+            0,
+        )
+
+    def test_all_terminal_head_is_zero(self):
+        self.assertEqual(
+            self._probe([W(999, 1, name="ci-summary", status="in_progress",
+                           conclusion=None),
+                         W(101, 2, name="CI"), W(102, 3, name="bench")]),
+            0,
+        )
+
+    def test_fetch_failure_is_unknown_not_zero(self):
+        """A failed probe must be UNKNOWN (None) — never 0, which would assert an
+        idle head and could fire the RED on no evidence."""
+        original = g.make_fetch_workflow_runs
+        try:
+            def boom(repo, sha, sid=""):
+                def fetch():
+                    raise g.FetchError("api down")
+                return fetch
+            g.make_fetch_workflow_runs = boom
+            fetch = g.make_fetch_head_activity("o/r", "deadbeef", "999")
+        finally:
+            g.make_fetch_workflow_runs = original
+        with redirect_stdout(io.StringIO()):
+            self.assertIsNone(fetch())
 
 
 class TestMergeGroupChangeClassAccounting(unittest.TestCase):

@@ -135,6 +135,43 @@
 #     cannot merge anyway, so a false RED here is cheap; a false PASS is the
 #     invariant violation).
 #
+# UNSATISFIABLE awaiting_full HOLD (#3758). [OPUS-5] The awaiting_full hold above
+# is SATISFIABLE only while some run on the head SHA can still register a
+# strictly-later FULL-tier select. A PR converted to DRAFT mid-wave breaks that:
+# the draft-tier wave becomes the newest run of every selecting workflow, the
+# #3505 resolver discards the earlier full-tier selects as superseded, and while
+# the PR stays a draft with an idle Actions queue NO full-tier run for this head
+# will ever be dispatched. The hold then pins `stable` at 0 (clean convergence
+# unreachable) and — because every sibling is terminal — `pending == 0`, which the
+# sq-90cv4 genuine-hang branch required to be > 0. Only the ABSOLUTE poll budget
+# exited: ~68 min of a runner slot per attempt, and re-running the GATE cannot
+# change the head's check-run set, so every attempt repeats the identical stall
+# (observed 3x on PR #3470 head 552368bd, run 30002198053). Two ADDITIVE exits:
+#   * UNSATISFIABILITY PROBE — while awaiting_full holds with pending == 0 the
+#     loop asks Actions how many non-terminal workflow runs exist ON THIS HEAD
+#     SHA (excluding this gate's own workflow). Zero means the awaited successor
+#     cannot arrive from anything currently running; UNSAT_GRACE_POLLS
+#     CONSECUTIVE zero observations (a registration-grace window for the
+#     ready_for_review re-runs, which appear as queued runs the instant the event
+#     fires) conclude the hold UNSATISFIABLE and RED immediately through the
+#     stale-draft-tier verdict belt. Probe unavailable/failed => UNKNOWN => never
+#     concludes (the belt below still bounds the wait).
+#   * BASE-BUDGET WIDENING — the genuine-hang branch now also fires for an
+#     awaiting_full hold with pending == 0, and in that state repo-wide runner
+#     SATURATION is explicitly NOT an extension reason: with zero pending
+#     siblings nothing of ours is starving in that queue, and Actions creates a
+#     run (status=queued) the instant the triggering event fires regardless of
+#     pool depth. Live progress (a rising completed count) still extends, and so
+#     does live PER-HEAD activity — a probe that saw a non-terminal run on this
+#     SHA this poll vetoes the shortcut, leaving the pre-#3758 absolute-budget
+#     bound in place. The per-head probe, not the repo-wide queue, is the
+#     authoritative satisfiability signal for a zero-pending hold.
+# Both exits are exit-1-only and route through render_verdict's stale-draft-tier
+# belt, so they can never synthesise a pass; a hold that IS satisfiable (a queued
+# full-tier run exists) waits exactly as before. The RED names the remedy
+# (UNSAT_HOLD_REMEDY): a GATE re-run cannot clear this state — only a full-tier
+# re-dispatch of the selecting workflows, ready_for_review, or a new head can.
+#
 # Exit-0 paths, exhaustively (fail-fast adds NO exit-0 path — it only ever
 # returns 1): (1) render_verdict over a stable-empty set;
 # (2) render_verdict over an all-terminal set with zero non-passing GATING checks
@@ -217,6 +254,22 @@ FM_REPORT_NAME = "feature-matrix report"
 RUNS_URL_RE = re.compile(r"/actions/runs/(\d+)(?:/|$)")
 ACTIONS_JOB_URL_RE = re.compile(r"/actions/runs/\d+/job/\d+(?:/|$)")
 
+# [OPUS-5] #3758: the stale-draft-tier RED is ACTIONABLE ONLY outside this gate,
+# and the repair automation guessed wrong — it re-ran the `ci-summary` gate three
+# times on PR #3470's head, each attempt re-deriving the identical hold from the
+# identical check-run set and burning another ~68 min of a runner slot. The hold is
+# a pure function of the head's check-run set, so this text is load-bearing
+# operator/automation guidance and is emitted by EVERY path that REDs on the hold.
+UNSAT_HOLD_REMEDY = (
+    "RE-RUNNING THIS `ci-summary` GATE CANNOT CLEAR THIS STATE (#3758): the hold is a "
+    "pure function of the check-run set on this head SHA, which a gate re-run does not "
+    "change — every re-run re-derives the same verdict. Exactly three things clear it: "
+    "(1) re-dispatch the SELECTING workflows (ci / bench / feature-matrix / fuzz) at "
+    "FULL tier on this head SHA, (2) mark the PR `ready_for_review` so the "
+    "ready_for_review full-tier wave is dispatched, or (3) push a new head commit. "
+    "Automated repair lanes: do NOT re-run this workflow for this verdict."
+)
+
 
 @dataclass
 class Config:
@@ -234,6 +287,13 @@ class Config:
     sat_queue_min: int = 5      # queued workflow-runs in the repo => saturation
     progress_window: int = 15   # polls over which a completed-count rise = progress
     max_consec_fetch_failures: int = 5
+    # [OPUS-5] #3758: CONSECUTIVE polls that must confirm "awaiting_full holds,
+    # every sibling terminal, and ZERO non-terminal workflow runs on this head
+    # SHA" before the hold is declared unsatisfiable. 9 x 20s ~= 3 min — a
+    # registration-grace window for the ready_for_review full-tier re-runs (which
+    # appear as queued runs within seconds of the event) — versus the ~68 min the
+    # absolute budget used to burn.
+    unsat_grace_polls: int = 9
     summary_path: str = field(default_factory=lambda: os.environ.get("GITHUB_STEP_SUMMARY", ""))
 
 
@@ -1083,7 +1143,8 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
                 "(ci/bench/feature-matrix/fuzz share one select name — one full-tier "
                 "select must never release the hold for the others). A draft-tier leg "
                 "set must never admit a non-draft PR to the merge queue "
-                "(docs/branch-protection.md §Draft-tier CI).",
+                "(docs/branch-protection.md §Draft-tier CI). "
+                + UNSAT_HOLD_REMEDY,
                 summary_path,
             )
             print("::error::ci-summary failed — stale draft-tier leg set on a non-draft head.")
@@ -1227,14 +1288,74 @@ def failfast_failures(runs: list[dict]) -> list[dict]:
     return out
 
 
+def _conclude_unsatisfiable_hold(
+    runs: list[dict],
+    cfg: Config,
+    tier_ctx: TierContext | None,
+    *,
+    attempt: int,
+    evidence: str,
+) -> int:
+    """[OPUS-5] #3758: end an UNSATISFIABLE draft-tier `awaiting_full` hold NOW.
+
+    `evidence` states, in operator language, WHY no full-tier successor can arrive
+    (the caller's proof: an idle head with zero non-terminal workflow runs, or the
+    base budget reached with an idle head and no progress).
+
+    The verdict itself is DELEGATED to render_verdict so this exit renders the same
+    stale-draft-tier belt message, over the same sibling set, as the budget-
+    exhaustion path always has — this is a shortcut to an EXISTING red, never a new
+    classification. render_verdict's belt tests the identical predicate the caller's
+    `awaiting_full` did (full tier + pull_request + draft_selects_unsuperseded), so
+    it necessarily REDs; the explicit non-zero coercion below is a belt in case a
+    future refactor loosens that coupling — an unsatisfiable hold must NEVER be
+    reported as a silent pass.
+    """
+    stale = draft_selects_unsuperseded(runs)
+    _emit(
+        "### ci-summary: the draft-tier `awaiting_full` hold on this head SHA is "
+        f"UNSATISFIABLE (#3758) — concluding at poll {attempt} instead of holding to "
+        f"poll {cfg.max_total_polls}. {len(stale)} draft-marked select instance(s) are "
+        f"waiting for a strictly-later FULL-tier successor, every sibling check is "
+        f"terminal, and {evidence} — so no run can register that successor and the "
+        "hold can never clear. Waiting out the remaining budget would only occupy a "
+        "runner slot to reach the identical verdict.",
+        cfg.summary_path,
+    )
+    print(
+        "::notice::ci-summary: unsatisfiable draft-tier awaiting_full hold detected "
+        f"at poll {attempt} ({evidence}) — exiting early with the stale-draft-tier "
+        "verdict (#3758)."
+    )
+    code = render_verdict(runs, cfg.summary_path, tier_ctx)
+    if code == 0:
+        _emit(
+            "### ci-summary: FAILED — stale draft-tier run, full run pending. The "
+            "unsatisfiable draft-tier hold above must never render as a pass "
+            f"({len(stale)} draft-marked select instance(s) with no full-tier "
+            "successor). Fail-closed (#3758). " + UNSAT_HOLD_REMEDY,
+            cfg.summary_path,
+        )
+        print(
+            "::error::ci-summary failed — unsatisfiable draft-tier hold could not be "
+            "rendered as a verdict; fail-closed."
+        )
+        return 1
+    return code
+
+
 def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
-             tier_ctx: TierContext | None = None) -> int:
+             tier_ctx: TierContext | None = None, fetch_head_activity=None) -> int:
     """The poll loop. `fetch_runs()` -> list of {name,status,conclusion,details_url,
     started_at,id} dicts (raises FetchError on API failure); `fetch_queue_depth()`
     -> int queued workflow-run count for the repo, or None when unknown (API
     failure — the gate then falls back to the progress signal alone). tier_ctx
     carries the draft-tier integrity context (None => pre-draft-tier semantics).
-    Returns the exit code."""
+    fetch_head_activity() -> int count of non-terminal Actions workflow runs on
+    THIS head SHA excluding this gate's own workflow, or None when unknown; it is
+    consulted ONLY inside a draft-tier `awaiting_full` hold with zero pending
+    siblings (#3758), and None/absent simply means the unsatisfiability exit never
+    fires. Returns the exit code."""
     prev_names: list[str] | None = None
     stable = 0
     runs: list[dict] = []
@@ -1246,6 +1367,10 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
     # observed on the PREVIOUS poll — the red fires only when a fresh re-poll
     # re-observes the identical set (header §FAIL-FAST).
     ff_suspect: tuple | None = None
+    # [OPUS-5] #3758: consecutive polls that have CONFIRMED an unsatisfiable
+    # awaiting_full hold (hold up, zero pending siblings, zero non-terminal
+    # workflow runs on this head). Reset by any contrary observation.
+    unsat_confirms = 0
 
     attempt = 0
     while attempt < cfg.max_total_polls:
@@ -1371,6 +1496,66 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
                 continue  # no sleep: the grace re-poll is deliberately immediate
             ff_suspect = None
 
+        # [OPUS-5] #3758 UNSATISFIABILITY PROBE. The awaiting_full hold pins
+        # `stable` at 0, so with every sibling terminal (pending == 0) NO exit below
+        # can fire before the absolute budget — and the hold is satisfiable only if
+        # some run on this head can still register a strictly-later full-tier select.
+        # Ask Actions directly: how many non-terminal workflow runs exist on THIS
+        # head SHA (this gate's own workflow excluded)? Zero means nothing is running
+        # that could produce the successor — the PR was re-drafted and the
+        # full-tier wave is neither running nor queued. UNSAT_GRACE_POLLS
+        # CONSECUTIVE zero observations (registration grace: a ready_for_review
+        # re-dispatch appears as a queued run within seconds) prove the hold cannot
+        # clear, and the gate REDs now through the same stale-draft-tier belt the
+        # budget-exhaustion path uses. A probe that is absent or fails is UNKNOWN and
+        # never concludes anything (the base-budget widening below still bounds it).
+        # head_busy is THIS poll's per-head evidence that the hold may still be
+        # satisfiable; it also vetoes the base-budget shortcut further below, so the
+        # per-head probe — not the repo-wide queue depth — stays the authoritative
+        # satisfiability signal for a zero-pending hold.
+        head_busy = False
+        if awaiting_full and pending == 0:
+            head_activity = None
+            if fetch_head_activity is not None:
+                try:
+                    head_activity = fetch_head_activity()
+                except Exception as exc:  # never let a probe crash the gate
+                    print(f"  (head-activity probe raised {exc!r} — treating as unknown)")
+                    head_activity = None
+            if head_activity is None:
+                print(
+                    "  awaiting_full hold with 0 pending sibling(s): head-activity "
+                    "probe unavailable (unknown) — cannot prove the hold unsatisfiable, "
+                    "still waiting (#3758)."
+                )
+            elif head_activity > 0:
+                unsat_confirms = 0
+                head_busy = True
+                print(
+                    f"  awaiting_full hold with 0 pending sibling(s): {head_activity} "
+                    "non-terminal workflow run(s) on this head SHA could still register "
+                    "the full-tier successor — still settling (#3758)."
+                )
+            else:
+                unsat_confirms += 1
+                print(
+                    "  awaiting_full hold with 0 pending sibling(s) and NO queued/"
+                    "in-progress workflow run on this head SHA — no full-tier successor "
+                    f"can arrive ({unsat_confirms}/{cfg.unsat_grace_polls} confirming "
+                    "poll(s), #3758)."
+                )
+                if attempt >= cfg.min_polls and unsat_confirms >= cfg.unsat_grace_polls:
+                    return _conclude_unsatisfiable_hold(
+                        runs, cfg, tier_ctx, attempt=attempt,
+                        evidence=(
+                            f"{unsat_confirms} consecutive poll(s) found ZERO queued or "
+                            "in-progress workflow runs on this head SHA (this gate's own "
+                            "workflow excluded)"
+                        ),
+                    )
+        else:
+            unsat_confirms = 0
+
         # Clean convergence: everything terminal, held for the settle, past the floor.
         if attempt >= cfg.min_polls and pending == 0 and stable >= cfg.settle_polls:
             return render_verdict(runs, cfg.summary_path, tier_ctx)
@@ -1378,7 +1563,10 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
         # ADAPTIVE SATURATION BUDGET (sq-90cv4): at/after the base budget with work
         # still pending, extend ONLY while the evidence says throughput-starvation
         # (deep queue) or live progress — otherwise it's a genuine hang: RED.
-        if attempt >= cfg.base_polls and pending > 0:
+        # [OPUS-5] #3758 WIDENING: an awaiting_full hold with pending == 0 is also a
+        # non-converging state whose evidence must be consulted here — previously
+        # `pending > 0` excluded it, leaving the absolute budget as its only exit.
+        if attempt >= cfg.base_polls and (pending > 0 or awaiting_full):
             progressing = (
                 len(completed_hist) > cfg.progress_window
                 and completed_hist[-1] > completed_hist[-1 - cfg.progress_window]
@@ -1393,7 +1581,31 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
                 print(f"  (queue-depth fetch raised {exc!r} — treating depth as unknown)")
                 depth = None
             saturated = depth is not None and depth >= cfg.sat_queue_min
-            if not (saturated or progressing):
+            # [OPUS-5] #3758: with ZERO pending siblings (a pure awaiting_full hold)
+            # repo-wide runner saturation explains NOTHING — none of OUR work is
+            # starving in that queue, and Actions creates a run (status=queued) the
+            # instant its triggering event fires regardless of pool depth, which the
+            # per-head probe above would have seen. Only LIVE PROGRESS (the sibling
+            # set still churning) justifies extending this state. For pending > 0 the
+            # sq-90cv4 semantics are byte-identical to before.
+            hold_only = pending == 0 and awaiting_full
+            # ...and conversely, LIVE PER-HEAD ACTIVITY (head_busy: the probe saw a
+            # non-terminal run on this SHA this poll) DOES keep a zero-pending hold
+            # alive — that run may yet register the awaited full-tier select, so the
+            # gate falls back to the pre-#3758 bound (the absolute budget) rather
+            # than concluding unsatisfiability the probe just contradicted.
+            if not (progressing or (saturated and not hold_only)
+                    or (hold_only and head_busy)):
+                if hold_only:
+                    return _conclude_unsatisfiable_hold(
+                        runs, cfg, tier_ctx, attempt=attempt,
+                        evidence=(
+                            "the base poll budget was reached with every sibling terminal, "
+                            f"an idle Actions queue (depth="
+                            f"{depth if depth is not None else 'unknown'} < {cfg.sat_queue_min}) "
+                            f"and no completions in the last {cfg.progress_window} poll(s)"
+                        ),
+                    )
                 print(
                     f"::error::ci-summary timed out — {pending} sibling check-run(s) never "
                     f"finished within the base budget, the Actions queue is idle "
@@ -1406,7 +1618,9 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
                 extension_started = True
                 print(
                     f"::notice::ci-summary base budget reached with {pending} sibling(s) still "
-                    f"pending, but the runner pool shows saturation/progress "
+                    f"pending"
+                    + (" (awaiting the full-tier re-run)" if awaiting_full else "")
+                    + f", but the runner pool shows saturation/progress "
                     f"(queued runs={depth if depth is not None else 'unknown'}, "
                     f"progressing={progressing}) — this is a throughput signal, not a hang. "
                     f"Extending the wait (adaptive budget, sq-90cv4) up to poll "
@@ -1608,6 +1822,46 @@ def make_fetch_pr_draft(repo: str, pr_number: str):
     return fetch
 
 
+def make_fetch_head_activity(repo: str, sha: str, self_run_id: str = ""):
+    """[OPUS-5] #3758: the per-head UNSATISFIABILITY probe. Returns a
+    () -> int | None fetcher giving the number of NON-TERMINAL (queued /
+    in_progress / requested / waiting / pending) Actions workflow runs on THIS head
+    SHA, excluding every run of this gate's OWN workflow — a ci-summary run can
+    never register the full-tier select the awaiting_full hold waits for, and two
+    concurrent gate runs on one head must not each count the other as a candidate
+    (that is the 68-minute mutual stall this exit exists to end).
+
+    Zero therefore means: nothing is running or queued on this commit that could
+    produce the awaited strictly-later full-tier successor. None means UNKNOWN (API
+    failure) — run_gate then never concludes unsatisfiability from it. Reuses the
+    existing workflow-run lister (same endpoint, same self-run merge) so the probe
+    and the #3505 resolver read one consistent view of the head."""
+
+    list_runs = make_fetch_workflow_runs(repo, sha, self_run_id)
+
+    def fetch():
+        try:
+            runs = list_runs()
+        except FetchError as exc:
+            print(f"  (head-activity probe failed: {exc} — treating as unknown)")
+            return None
+        self_id = _as_int(self_run_id)
+        self_workflow = ""
+        for run in runs:
+            if _as_int(run.get("id")) == self_id:
+                self_workflow = workflow_identity(run)
+                break
+        return sum(
+            1
+            for run in runs
+            if run.get("status") != "completed"
+            and _as_int(run.get("id")) != self_id
+            and not (self_workflow and workflow_identity(run) == self_workflow)
+        )
+
+    return fetch
+
+
 def make_fetch_queue_depth(repo: str):
     """Queued workflow-run count for the repo — the saturation signal. Returns None
     (unknown) on any failure so a permissions/API blip degrades to progress-only,
@@ -1637,7 +1891,8 @@ def make_fetch_queue_depth(repo: str):
 
 
 def _self_test() -> int:
-    """Hermetic mutation checks for the three #3505 safety properties."""
+    """Hermetic mutation checks: the three #3505 safety properties + the #3758
+    unsatisfiable-hold exit (fast RED on an idle head; a satisfiable hold waits)."""
 
     def require(condition: bool, message: str) -> None:
         if not condition:
@@ -1726,9 +1981,55 @@ def _self_test() -> int:
         "cancelled workflow never failed loud after bounded redispatch grace",
     )
 
+    # [OPUS-5] #3758: the unsatisfiable awaiting_full hold exits FAST and RED, and a
+    # SATISFIABLE hold (a non-terminal run still on the head) does not exit early.
+    hold_ctx = TierContext(run_tier="full", event_name="pull_request")
+    draft_select = {
+        "name": "select (change-based test selection, draft-tier)",
+        "status": "completed",
+        "conclusion": "success",
+        "details_url": "",
+        "html_url": "",
+        "started_at": "2026-07-23T11:24:01Z",
+        "id": 5001,
+        "external_id": "",
+    }
+    hold_cfg = Config(
+        self_run_id="999", interval=0, min_polls=1, settle_polls=2, base_polls=50,
+        sat_interval=0, max_total_polls=6, unsat_grace_polls=2, summary_path="",
+    )
+    unsat_log = io.StringIO()
+    with redirect_stdout(unsat_log):
+        unsat_code = run_gate(
+            hold_cfg, lambda: [dict(draft_select)], lambda: 0,
+            sleep_fn=lambda _s: None, tier_ctx=hold_ctx,
+            fetch_head_activity=lambda: 0,
+        )
+    require(unsat_code == 1, "unsatisfiable draft-tier hold did not RED (#3758)")
+    require(
+        "UNSATISFIABLE" in unsat_log.getvalue()
+        and "concluding at poll 2" in unsat_log.getvalue(),
+        "unsatisfiable draft-tier hold did not conclude at the grace poll (#3758)",
+    )
+    busy_log = io.StringIO()
+    with redirect_stdout(busy_log):
+        busy_code = run_gate(
+            hold_cfg, lambda: [dict(draft_select)], lambda: 0,
+            sleep_fn=lambda _s: None, tier_ctx=hold_ctx,
+            fetch_head_activity=lambda: 1,
+        )
+    require(busy_code == 1, "satisfiable-hold budget exhaustion must still RED")
+    require(
+        "UNSATISFIABLE" not in busy_log.getvalue()
+        and "attempt 6:" in busy_log.getvalue(),
+        "a SATISFIABLE hold (non-terminal run on the head) exited early (#3758)",
+    )
+
     print(
         "ci-summary --self-test: ALL ASSERTIONS PASSED "
-        "(superseded cancellation ignored; newest failure preserved; redispatch bounded once)"
+        "(superseded cancellation ignored; newest failure preserved; redispatch "
+        "bounded once; unsatisfiable draft-tier hold exits fast + RED while a "
+        "satisfiable hold still waits)"
     )
     return 0
 
@@ -1762,7 +2063,11 @@ def main() -> int:
     print(f"ci-summary: evaluating tier={run_tier} (event={event_name or '<unset>'}).")
     cfg = Config(self_run_id=self_run_id)
     return run_gate(cfg, make_fetch_runs(repo, sha, self_run_id), make_fetch_queue_depth(repo),
-                    tier_ctx=tier_ctx)
+                    tier_ctx=tier_ctx,
+                    # [OPUS-5] #3758: consulted ONLY inside a draft-tier awaiting_full
+                    # hold with zero pending siblings — no extra API traffic on any
+                    # normal poll.
+                    fetch_head_activity=make_fetch_head_activity(repo, sha, self_run_id))
 
 
 if __name__ == "__main__":
