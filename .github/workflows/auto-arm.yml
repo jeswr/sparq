@@ -52,4 +52,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: python3 scripts/auto-arm.py --repo "$REPO" --default-branch "$DEFAULT_BRANCH"
+          # [FABLE-5] #3759 finding 5: the label-triggered (pull_request) invocation is
+          # EVENT mode — it has no per-PR cron backstop, so an exhausted transient must
+          # exit non-zero (visibly red + retried), NOT the sweep's lenient ::warning+0.
+          # The scheduled/dispatch runs are SWEEP mode (a missed cycle is cron-covered).
+          ARM_MODE: ${{ github.event_name == 'pull_request' && 'event' || 'sweep' }}
+        run: >-
+          python3 scripts/auto-arm.py
+          --repo "$REPO"
+          --default-branch "$DEFAULT_BRANCH"
+          --mode "$ARM_MODE"

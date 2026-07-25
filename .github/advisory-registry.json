@@ -161,7 +161,7 @@
   "merge-queue dequeued feedback (advisory)": {
    "workflow": "merge-queue-feedback.yml",
    "owner_bead": "registry jeswr/agent-account-registry#563 item 3 (durable fix for registry#556)",
-   "promotion_criteria": "permanently advisory BY DESIGN: this job runs on pull_request [dequeued] AFTER a gate verdict exists on the head SHA, and its writes (disable-auto + review:changes + comment) are orchestration feedback, not a merge-worthiness verdict — a feedback hiccup must never red a later gate evaluation on the same SHA. Promote never; delete this entry only if the workflow is removed",
+   "promotion_criteria": "permanently advisory BY DESIGN: this job runs on pull_request_target [dequeued] (write-only, no PR-head checkout) AFTER a gate verdict exists on the head SHA, and its writes (disable-auto + review:changes swap + comment) are orchestration feedback, not a merge-worthiness verdict — a feedback hiccup must never red a later gate evaluation on the same SHA. Promote never; delete this entry only if the workflow is removed",
    "registered": "2026-07-24"
   }
  }

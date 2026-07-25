@@ -17,12 +17,23 @@ gate on transient GitHub 5xx blips (HTTP 502/504 at 15:22/22:42/14:29 — #3759)
     entrypoint can convert exactly that case into ``::warning`` + exit 0 (a missed
     cycle is harmless; the cron covers it) while everything else stays a hard red.
   * NEVER WRAPS MUTATIONS — arms/labels/merges must stay one-shot (a blind retry of
-    a CAS mutation is how double-arms happen). :func:`assert_read_only` fail-closed
-    ALLOW-LISTS the read shapes this helper accepts and raises
-    :class:`GhRetryUsageError` before ever invoking ``gh`` otherwise. Note ``gh api``
-    auto-switches to POST when field params are given, so REST calls carrying fields
-    are rejected unless the method is explicitly GET; ``gh api graphql`` is accepted
-    only when no query text contains a ``mutation`` operation.
+    a CAS mutation is how double-arms happen). :func:`assert_read_only` is
+    FAIL-CLOSED: it ALLOW-LISTS the read shapes this helper accepts and raises
+    :class:`GhRetryUsageError` before ever invoking ``gh`` for anything it cannot
+    AFFIRMATIVELY prove is a read. A call is retried ONLY when it positively matches a
+    known-safe read shape — an allow-listed read subcommand, or ``gh api`` whose
+    method is GET/HEAD with an INLINE, self-evidently-read body. Anything whose intent
+    cannot be read off the argv is refused (one-shot), never retried:
+
+      - ``gh api`` auto-switches to POST when field params are given, so a REST call
+        carrying fields is refused unless the method is explicitly GET/HEAD;
+      - ``gh api graphql`` is accepted only when the query text is present INLINE in
+        argv (``-f query=…`` / ``--field query=…``) AND contains no ``mutation``
+        (or ``subscription``) operation. A file-backed or stdin body
+        (``--input file.json`` / ``-F query=@file`` / ``-f query=@file`` / no inline
+        query at all) is OPAQUE to this guard — it cannot be proven a read, so it is
+        refused rather than retried. This closes the file-backed-mutation bypass:
+        the allow-list never says "retry" on a body it did not itself inspect.
 
 Usage::
 
@@ -83,7 +94,13 @@ _READ_SUBCOMMANDS = frozenset(
     }
 )
 
-_MUTATION_RE = re.compile(r"\bmutation\b", re.IGNORECASE)
+# A GraphQL document that starts (after leading whitespace/comments) with a mutation
+# or subscription operation is never a read. We also refuse the bare keyword anywhere
+# to stay conservative — an inline query naming these operations cannot be proven safe.
+_MUTATION_RE = re.compile(r"\b(?:mutation|subscription)\b", re.IGNORECASE)
+
+# Flags whose value carries the GraphQL query text inline in argv.
+_QUERY_FIELD_FLAGS = ("-f", "--field", "-F", "--raw-field")
 
 
 class GhRetryUsageError(ValueError):
@@ -123,6 +140,59 @@ def _has_field_params(argv: Sequence[str]) -> bool:
     )
 
 
+def _flag_values(argv: Sequence[str], flags: Sequence[str]) -> list[str]:
+    """Collect the values passed to any of ``flags`` in argv (``-f v`` and ``-f=v``)."""
+    values: list[str] = []
+    index = 0
+    argc = len(argv)
+    while index < argc:
+        arg = str(argv[index])
+        if arg in flags:
+            if index + 1 < argc:
+                values.append(str(argv[index + 1]))
+                index += 2
+                continue
+            values.append("")  # dangling flag; treated as opaque below
+        else:
+            for flag in flags:
+                if arg.startswith(flag + "="):
+                    values.append(arg.split("=", 1)[1])
+                    break
+        index += 1
+    return values
+
+
+def _graphql_uses_opaque_body(rest: Sequence[str]) -> bool:
+    """True if the GraphQL body is not fully inline in argv (file-backed / stdin).
+
+    ``gh api graphql`` can source its query from a file or stdin — ``--input file``,
+    ``-F query=@file``, ``-f query=@file`` — none of which places the query text in
+    argv where the mutation guard can inspect it. Such a call is OPAQUE: we cannot
+    prove it is a read, so the caller must refuse (one-shot), never retry.
+    """
+    if any(str(arg) in ("--input", "--input=-") or str(arg).startswith("--input=")
+           for arg in rest):
+        return True
+    for value in _flag_values(rest, _QUERY_FIELD_FLAGS):
+        # `key=@file` (and the bare `@file`/`@-` form) reads the value from a file/stdin.
+        payload = value.split("=", 1)[1] if "=" in value else value
+        if payload.startswith("@"):
+            return True
+    return False
+
+
+def _inline_graphql_query(rest: Sequence[str]) -> str | None:
+    """Return the inline ``query=…`` text if present in argv, else ``None``.
+
+    Only a ``query`` field whose value is present literally in argv counts; a
+    ``query=@file`` reference is not inline and yields ``None`` (handled as opaque).
+    """
+    for value in _flag_values(rest, _QUERY_FIELD_FLAGS):
+        if value.startswith("query=") and not value.startswith("query=@"):
+            return value.split("=", 1)[1]
+    return None
+
+
 def assert_read_only(argv: Sequence[str]) -> None:
     """Fail-closed guard: raise :class:`GhRetryUsageError` unless argv is a read."""
     if not argv:
@@ -132,12 +202,29 @@ def assert_read_only(argv: Sequence[str]) -> None:
         rest = [str(arg) for arg in argv[1:]]
         method = _explicit_method(rest)
         if "graphql" in rest:
-            if any(_MUTATION_RE.search(arg) for arg in rest):
+            # FAIL-CLOSED: a GraphQL call is retriable ONLY if we can read the whole
+            # query text off argv and prove it carries no mutation/subscription. A
+            # file-backed or stdin body (`--input`, `-F query=@file`, `-f query=@file`,
+            # or no inline query at all) is opaque — refuse it rather than retry.
+            if _graphql_uses_opaque_body(rest):
                 raise GhRetryUsageError(
-                    "refusing to wrap a GraphQL mutation — arms/mutations stay one-shot"
+                    "refusing to wrap gh api graphql with a file-backed/stdin body "
+                    "(--input / query=@file / stdin) — its query text is not inline in "
+                    "argv, so it cannot be proven a read; mutations stay one-shot"
+                )
+            inline_query = _inline_graphql_query(rest)
+            if inline_query is None:
+                raise GhRetryUsageError(
+                    "refusing to wrap gh api graphql with no inline `query=` text — "
+                    "cannot prove it is a read; mutations stay one-shot"
+                )
+            if _MUTATION_RE.search(inline_query):
+                raise GhRetryUsageError(
+                    "refusing to wrap a GraphQL mutation/subscription — "
+                    "arms/mutations stay one-shot"
                 )
             return
-        if method not in (None, "GET"):
+        if method not in (None, "GET", "HEAD"):
             raise GhRetryUsageError(
                 f"refusing to wrap gh api with method {method or '<missing>'} — "
                 "mutations stay one-shot"
@@ -272,6 +359,21 @@ def self_test() -> None:
         ["api", "-X", "POST", "repos/o/r/issues"],
         ["api", "--method=DELETE", "repos/o/r/labels/x"],
         [],
+        # [FABLE-5] #3759 finding 6: FAIL-CLOSED on file-backed / stdin GraphQL bodies.
+        # The query text is not inline in argv, so it CANNOT be proven a read — the
+        # substring-only guard used to accept these (the file could hold a mutation).
+        ["api", "graphql", "--input", "payload.json"],
+        ["api", "graphql", "--input=payload.json"],
+        ["api", "graphql", "--input", "-"],  # stdin body
+        ["api", "graphql", "-F", "query=@file.graphql"],
+        ["api", "graphql", "-f", "query=@file.graphql"],
+        ["api", "graphql", "--field", "query=@q.gql"],
+        # An inline query naming a mutation/subscription operation is still refused.
+        ["api", "graphql", "-f", "query=mutation Arm { enableAutoMerge { id } }"],
+        ["api", "graphql", "-F", "query=subscription S { x }"],
+        # graphql with no inline `query=` at all is opaque — refuse (cannot prove read).
+        ["api", "graphql", "-f", "owner=sparq-org"],
+        ["api", "graphql"],
     ]
     for argv in refused:
         boom = _FakeRun([(0, "", "")])
@@ -282,15 +384,27 @@ def self_test() -> None:
         else:
             raise AssertionError(f"must refuse to wrap mutation shape: {argv}")
 
-    # Allowed read shapes pass the guard (GraphQL queries, explicit-GET REST, views).
+    # Allowed read shapes pass the guard (INLINE GraphQL queries, explicit-GET REST,
+    # views). The rearm-sweeper's live-state query is an inline `-f query=query(...)`.
     for argv in (
         ["api", "graphql", "-f", "query=query($n:Int!){repository{pullRequest}}"],
+        ["api", "graphql", "--field", "query=query{viewer{login}}", "-F", "n=1"],
         ["api", "repos/o/r/actions/runs?event=merge_group"],
         ["api", "-X", "GET", "search/issues", "-f", "q=is:open"],
+        ["api", "-X", "HEAD", "repos/o/r"],
         ["pr", "view", "1", "--json", "state"],
         ["run", "list", "--limit", "5"],
     ):
         assert_read_only(argv)
+
+    # A file-backed body next to an inline non-query field is still opaque (the query
+    # itself is file-sourced) and must be refused — not smuggled through by the field.
+    try:
+        assert_read_only(["api", "graphql", "-F", "query=@q.gql", "-f", "n=1"])
+    except GhRetryUsageError:
+        pass
+    else:
+        raise AssertionError("file-backed graphql query must be refused")
 
     print("gh-retry self-test: PASS")
 

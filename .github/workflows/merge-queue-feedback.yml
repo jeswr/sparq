@@ -6,10 +6,30 @@
 # sits green-looking with a dead arm until an orchestrator sweep happens to re-derive
 # its state from the live rollup (registry#556). The merge queue's `dequeued`
 # pull_request activity type is a PUSH signal for exactly this edge, so this workflow
-# converts every dequeue into the fix lane's admission shape: auto-merge disabled,
-# `review:changes` applied, and a self-identified comment linking the failed
-# merge-group run — the registry's fix-enumeration then admits the PR on its next
-# tick instead of never.
+# converts every genuine (non-merge) dequeue into the fix lane's admission shape:
+# auto-merge disabled, review:pass swapped for `review:changes`, and a self-identified
+# comment linking the failed merge-group run — the registry's fix-enumeration then
+# admits the PR on its next tick instead of never.
+#
+# ── pull_request_target (NOT pull_request) ────────────────────────────────────────
+# [FABLE-5] #3759 finding 2. This workflow only WRITES (disable-auto, relabel,
+# comment) and needs NO checkout of the PR's code. On `pull_request` a fork PR's run
+# gets a READ-ONLY token (so the label/comment writes would fail) and the event may
+# not even fire on a conflict-dequeue. `pull_request_target` runs in the BASE-repo
+# context with the base repo's write token, so the writes succeed on fork PRs too and
+# the trigger is reliable.
+#
+#   SECURITY — pull_request_target runs with a REPO-WRITE token in the trusted base
+#   context. The classic pull_request_target pitfall is executing untrusted PR HEAD
+#   code with that token. This job does NEITHER of the dangerous things:
+#     * it NEVER checks out the PR head (`actions/checkout` is not used at all), and
+#     * it NEVER executes any code, script, or path from the PR — every step is a
+#       plain `gh` call keyed only on github.event fields (the PR NUMBER + the
+#       dequeue reason) and gh-api reads by that number.
+#   No PR-controlled value is ever interpolated into a shell command (the reason is
+#   passed through env and only echoed/switched on a fixed allow-list). If this
+#   workflow is ever extended to build/test PR code, it MUST move that work to a
+#   separate `pull_request`-triggered job — do not add a checkout of the PR head here.
 #
 # GATE INTEGRATION: the job name carries the whole-word `advisory` token, so the
 # ci-summary gate's discovery excludes it from the gating set (a dequeue-feedback
@@ -25,14 +45,14 @@
 name: merge-queue feedback
 
 on:
-  pull_request:
+  pull_request_target:
     types: [dequeued]
 
-# contents: write + pull-requests: write — disable auto-merge, label, comment (the
-# same scope pair auto-arm.yml holds for the enable direction). actions: read — list
-# this repo's merge_group workflow runs to find the failed run for the queue branch.
+# Least-privilege for a WRITE-only, NO-checkout job: pull-requests: write covers the
+# disable-auto / relabel / comment writes; actions: read lists this repo's merge_group
+# runs to find the failed run. NO contents write is needed — nothing is pushed and no
+# repo code is checked out (see the pull_request_target safety note above).
 permissions:
-  contents: write
   pull-requests: write
   actions: read
 
@@ -54,35 +74,99 @@ jobs:
       # CI_FAILURE, CI_TIMEOUT, MERGE_CONFLICT, QUEUE_CLEARED, MANUAL, ROLL_BACK).
       DEQUEUE_REASON: ${{ github.event.reason || 'UNKNOWN' }}
     steps:
-      - name: Disable dead arm, apply review:changes, comment with the failed run
+      # [FABLE-5] #3759 finding 3: a dequeue caused by a SUCCESSFUL queue merge is not
+      # a failure — GitHub emits pull_request.dequeued with merged==true when the PR
+      # landed. Exit 0 immediately; disabling the (already-consumed) arm, relabeling a
+      # merged PR, or commenting "dequeued — please fix" would be wrong and noisy.
+      - name: Skip successful-merge dequeues
+        if: github.event.pull_request.merged == true
+        run: |
+          echo "PR ${PR_NUMBER} dequeued via successful merge - no action."
+
+      - name: Route genuine dequeue to the fix lane
+        if: github.event.pull_request.merged != true
         run: |
           set -euo pipefail
 
-          # RACE GUARD: the PR can merge or close between the dequeue event and this
-          # job (e.g. a manual merge, a re-queue that already landed). Feedback on a
-          # non-open PR is meaningless — exit 0 with a log line, never an error.
+          # ── state read (finding 4) ──────────────────────────────────────────────
+          # A gh pr view failure has TWO very different causes we must not conflate:
+          #   * the PR is genuinely CLOSED/MERGED (a race between the dequeue event and
+          #     this job) — benign, exit 0; there is nothing to route.
+          #   * the state read itself FAILED (transient 5xx / API blip) — we CANNOT
+          #     prove the routing happened, so we must NOT masquerade it as a benign
+          #     skip. We read with an explicit success-vs-error distinction and a
+          #     bounded transient retry (the scripts/gh_retry.py 10s+30s schedule); on
+          #     a genuine read failure we exit NON-zero so the run is visibly red.
+          read_state() {
+            gh pr view "$PR_NUMBER" --repo "$REPO" --json state -q .state
+          }
+
+          is_transient() {
+            printf '%s' "$1" | grep -qiE 'HTTP (50[234])|Bad Gateway|Service Unavailable|Gateway Timeout|connection reset|connection refused|i/o timeout|TLS handshake timeout|context deadline exceeded|temporary failure in name resolution|unexpected EOF'
+          }
+
+          # Bounded transient retry, printing the state on success (rc 0) or leaving
+          # STATE empty on a genuine read failure (rc 1).
+          retrying_state_read() {
+            local attempt err
+            for attempt in 1 2 3; do
+              if STATE=$(read_state 2>/tmp/pr_view_err); then
+                return 0
+              fi
+              err=$(cat /tmp/pr_view_err 2>/dev/null || true)
+              echo "gh pr view attempt ${attempt}/3 failed: ${err}"
+              if is_transient "$err" && [ "$attempt" -lt 3 ]; then
+                if [ "$attempt" -eq 1 ]; then sleep 10; else sleep 30; fi
+                continue
+              fi
+              return 1
+            done
+            return 1
+          }
+
+          STATE=""
+          if ! retrying_state_read; then
+            echo "::error::could not read PR #${PR_NUMBER} state (gh pr view failed on every attempt) — the dequeue may not have been routed to the fix lane. Failing the run so it is visibly red rather than a silent benign-skip."
+            exit 1
+          fi
+
+          if [ "$STATE" != "OPEN" ]; then
+            echo "PR #${PR_NUMBER} is ${STATE} (merged/closed race between the dequeue event and this job) — nothing to route; exiting 0."
+            exit 0
+          fi
+
+          # ensure_open_or_exit: re-read AFTER a write fails to classify a race vs a
+          # real write failure. A read failure here is NOT benign — it must not turn a
+          # failed write into a silent success (finding 4).
           ensure_open_or_exit() {
-            local st
-            st=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state -q .state 2>/dev/null || echo UNKNOWN)
-            if [ "$st" != "OPEN" ]; then
-              echo "PR #$PR_NUMBER is ${st} (merged/closed race between the dequeue event and this job) — nothing to route; exiting 0."
+            if ! retrying_state_read; then
+              echo "::error::state re-read for PR #${PR_NUMBER} failed after a write error — cannot prove the PR is closed, so cannot treat the write failure as benign."
+              exit 1
+            fi
+            if [ "$STATE" != "OPEN" ]; then
+              echo "PR #${PR_NUMBER} is ${STATE} (merged/closed race) — nothing to route; exiting 0."
               exit 0
             fi
           }
-          ensure_open_or_exit
 
           # (a) Disable the now-dead auto-merge arm. Best-effort: GitHub sometimes
           # clears it on dequeue already, and a raced merge/close makes it moot.
           gh pr merge "$PR_NUMBER" --repo "$REPO" --disable-auto \
             || echo "disable-auto returned non-zero (already disabled, or raced) — continuing."
 
-          # (b) Route to the fix lane. This label is the load-bearing signal the
-          # registry's fix-enumeration admits on its next tick; if it cannot be
-          # applied to a still-open PR, fail loudly (advisory job: visible in the
-          # Actions UI, never gating).
-          if ! gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "review:changes"; then
+          # (b) Route to the fix lane — ATOMICALLY. [FABLE-5] #3759 finding 1: add
+          # review:changes AND remove review:pass / review:needs-user in the SAME
+          # `gh pr edit` so the 10-min auto-arm sweep can never observe a window where
+          # review:pass still coexists with review:changes and re-arm the dequeued PR
+          # before remediation. (auto-arm.py ALSO treats review:changes as a hard
+          # exclusion — belt-and-suspenders.) --remove-label is idempotent: gh does not
+          # error when a label to remove is already absent.
+          if ! gh pr edit "$PR_NUMBER" --repo "$REPO" \
+                --add-label "review:changes" \
+                --remove-label "review:pass" \
+                --remove-label "review:needs-user"; then
             ensure_open_or_exit
-            echo "::error::failed to apply review:changes to open PR #$PR_NUMBER — the fix lane will not see this dequeue until the next label sweep."
+            echo "::error::failed to swap review:pass -> review:changes on open PR #${PR_NUMBER} — the fix lane will not see this dequeue until the next label sweep."
             exit 1
           fi
 
@@ -116,14 +200,14 @@ jobs:
           body_file=$(mktemp)
           {
             printf '%s\n\n' "> 🤖 SPARQ agent — autonomous orchestration."
-            printf '%s\n\n' "This PR was **dequeued from the merge queue** (reason: \`${DEQUEUE_REASON}\`). Its auto-merge arm has been disabled and \`review:changes\` applied, so the fix pipeline admits it on the next enumeration tick (durable feedback loop for registry#556)."
+            printf '%s\n\n' "This PR was **dequeued from the merge queue** (reason: \`${DEQUEUE_REASON}\`). Its auto-merge arm has been disabled and \`review:pass\` swapped for \`review:changes\`, so the fix pipeline admits it on the next enumeration tick (durable feedback loop for registry#556)."
             printf '%s\n' "$run_lines"
             printf '%s\n' "$flake_note"
           } > "$body_file"
 
           if ! gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$body_file"; then
             ensure_open_or_exit
-            echo "::error::failed to comment the dequeue notification on open PR #$PR_NUMBER (label was applied — routing is intact, the explanation is missing)."
+            echo "::error::failed to comment the dequeue notification on open PR #${PR_NUMBER} (label was applied — routing is intact, the explanation is missing)."
             exit 1
           fi
-          echo "PR #$PR_NUMBER: dequeue (reason ${DEQUEUE_REASON}) routed to review:changes with notification."
+          echo "PR #${PR_NUMBER}: dequeue (reason ${DEQUEUE_REASON}) routed to review:changes with notification."

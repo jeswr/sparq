@@ -266,11 +266,18 @@ class RearmSweeper:
             try:
                 self.arm(current.number)
             except GhError as error:
-                # The command is idempotent, but classify an API race loudly when possible.
+                # The arm MUTATION failed — that failure is the primary status. The
+                # follow-up live-state read is a diagnostic to classify an API race,
+                # and it is retriable: it can raise GhError, a decode error, OR
+                # GhTransientExhausted. [FABLE-5] #3759 finding 5: the diagnostic's
+                # OWN exhaustion must never escape here — if it did, main's lenient
+                # `except GhTransientExhausted -> exit 0` would convert a genuine
+                # failed arm into a false success. Catch exhaustion too; on any
+                # inconclusive diagnostic, record the arm failure as a real error.
                 try:
                     raced = self.live_state(current.number)
                     race_reason = self.decision(raced, live=True)
-                except (GhError, json.JSONDecodeError):
+                except (GhError, json.JSONDecodeError, gh_retry.GhTransientExhausted):
                     race_reason = None
                 if race_reason:
                     self.emit(current.number, "SKIP", f"arm raced: {race_reason}")
@@ -469,6 +476,92 @@ def self_test() -> None:
     assert [c[:2] for c in arm_calls(fake)] == [["pr", "merge"]], fake.calls
     assert all(c[:2] != ["pr", "merge"] for c in read_calls), read_calls
 
+    # [FABLE-5] #3759 finding 5: an arm MUTATION failure must be recorded as a real
+    # error even when the follow-up race-diagnostic READ (live_state) exhausts its
+    # transient retries. If the diagnostic's GhTransientExhausted escaped run(), main's
+    # lenient handler would turn a genuinely failed arm into a false success. Here the
+    # arm raises GhError; the post-arm live_state raises GhTransientExhausted.
+    dropped = fixture(4001)
+    snapshot = {
+        k: v for k, v in dropped.items() if k not in ("mergeQueueEntry", "autoMergeRequest")
+    }
+
+    class _ArmFailsDiagExhausts:
+        def __init__(self) -> None:
+            self.armed = False
+            self.calls: list[list[str]] = []
+
+        def __call__(self, argv: list[str]) -> str:
+            self.calls.append(argv)
+            if argv[:2] == ["pr", "list"]:
+                return json.dumps([snapshot])
+            if argv[:2] == ["api", "graphql"]:
+                if self.armed:
+                    # The post-arm diagnostic read exhausts transient retries.
+                    raise gh_retry.GhTransientExhausted(
+                        "gh api graphql: HTTP 504 (3 attempts)"
+                    )
+                pr = copy.deepcopy(dropped)
+                pr["labels"] = {
+                    "nodes": pr["labels"],
+                    "pageInfo": {"hasNextPage": False},
+                }
+                return json.dumps({"data": {"repository": {"pullRequest": pr}}})
+            if argv[:2] == ["pr", "merge"]:
+                self.armed = True
+                raise GhError("simulated arm failure")
+            raise AssertionError(f"unexpected fake gh call: {argv}")
+
+    fake_ad = _ArmFailsDiagExhausts()
+    messages = []
+    errors = RearmSweeper(
+        "sparq-org/sparq", "main", gh=fake_ad, gh_read=fake_ad, log=messages.append
+    ).run()
+    assert errors == 1, (errors, messages)
+    assert any("re-arm failed" in line for line in messages), messages
+    # The diagnostic exhaustion did NOT escape run() (no exception propagated here).
+
+    # [FABLE-5] #3759 finding 5: EVENT-mode exhausted transient on the enumeration read
+    # exits NON-zero (no per-PR backstop); SWEEP-mode is the lenient ::warning + 0.
+    import io
+    from contextlib import redirect_stderr, redirect_stdout
+
+    def _exhausted_read(_argv: list[str]) -> str:
+        raise gh_retry.GhTransientExhausted("gh pr list: HTTP 504 (3 attempts)")
+
+    original_run_gh_read = globals()["run_gh_read"]
+
+    class _ModeHarness:
+        """Drive main() with a stubbed enumeration read that exhausts transients."""
+
+        def __init__(self, mode: str) -> None:
+            self.mode = mode
+
+        def __enter__(self):
+            globals()["run_gh_read"] = _exhausted_read
+            self._argv = sys.argv
+            sys.argv = [
+                "rearm-sweeper.py", "--repo", "sparq-org/sparq", "--mode", self.mode,
+            ]
+            return self
+
+        def __exit__(self, *exc):
+            globals()["run_gh_read"] = original_run_gh_read
+            sys.argv = self._argv
+            return False
+
+    out, err = io.StringIO(), io.StringIO()
+    with _ModeHarness("event"), redirect_stdout(out), redirect_stderr(err):
+        event_code = main()
+    assert event_code == 1, event_code
+    assert "event-mode" in err.getvalue(), err.getvalue()
+
+    out, err = io.StringIO(), io.StringIO()
+    with _ModeHarness("sweep"), redirect_stdout(out), redirect_stderr(err):
+        sweep_code = main()
+    assert sweep_code == 0, sweep_code
+    assert "::warning" in out.getvalue(), out.getvalue()
+
     print("rearm-sweeper self-test: PASS")
 
 
@@ -477,6 +570,18 @@ def main() -> int:
     parser.add_argument("--repo", help="OWNER/REPOSITORY to sweep")
     parser.add_argument("--default-branch", default="main")
     parser.add_argument("--max-rearms", type=int, default=DEFAULT_MAX_REARMS)
+    parser.add_argument(
+        "--mode",
+        choices=("sweep", "event"),
+        default="sweep",
+        help=(
+            "sweep: periodic cron (exhausted transient READS on the enumeration path "
+            "=> ::warning + exit 0, the cron backstop covers a missed cycle). event: a "
+            "single-PR event-driven invocation with no per-PR backstop — an exhausted "
+            "transient exits non-zero so the run is visibly red. This workflow runs "
+            "sweep-only today; the flag keeps the exit contract explicit and testable."
+        ),
+    )
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -492,8 +597,17 @@ def main() -> int:
         )
         return 1 if sweeper.run() else 0
     except gh_retry.GhTransientExhausted as error:
-        # [FABLE-5] #3759: the sweep is periodic + idempotent — a cycle missed on a
-        # transient platform 5xx must not red main's gate. Warn loudly, exit 0.
+        # [FABLE-5] #3759: only the periodic + idempotent SWEEP may swallow a missed
+        # cycle on a transient platform 5xx (the cron backstop covers it). An
+        # EVENT-driven invocation has no per-PR backstop, so it fails loudly (finding
+        # 5). A failed arm MUTATION never reaches here as GhTransientExhausted — its
+        # own diagnostic read cannot overwrite it (see run()).
+        if args.mode == "event":
+            print(
+                f"[{PROGRAM}] fatal: event-mode exhausted transient retries: {error}",
+                file=sys.stderr,
+            )
+            return 1
         print(
             f"::warning title={PROGRAM} skipped a cycle on transient GitHub API "
             f"failures::{error} — bounded retries exhausted; the next cron run "
