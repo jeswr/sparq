@@ -42,6 +42,14 @@ packages_of = _ready.packages_of
 labels_of = _ready.labels_of
 valid_priority = _ready.valid_priority
 resolve = _route.resolve
+# [OPUS-5] The registry's dispatch.yml does `getattr(dispatch, "roleless_ready", None)` and, when
+# a target planner lacks it, prints "target planner has no roleless_ready() — ready-but-roleless
+# issues are NOT counted for this target" and skips the enumeration entirely. sparq WAS that
+# target: the silent-invisibility class went unreported here on every tick. Re-exported from the
+# readiness engine so the orchestrator reports a real number for sparq instead of degrading.
+roleless_ready = _ready.roleless_ready
+ready_candidates = _ready.ready_candidates
+GLOBAL = _ready.GLOBAL
 
 try:
     import tomllib

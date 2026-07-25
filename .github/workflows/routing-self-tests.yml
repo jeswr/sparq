@@ -28,6 +28,10 @@ on:
       # batching) — run its hermetic self-test on the PR that could break either side.
       - "scripts/batch-merge.py"
       - "scripts/ci_select.py"
+      # [OPUS-5] the readiness VISIBILITY suite — pins the occupancy-attribution,
+      # in-progress-review and local/orchestrator-parity contracts, and pins this
+      # workflow's own run block to the scripts it must invoke.
+      - "scripts/tests/test_readiness_visibility.py"
       - ".github/workflows/routing-self-tests.yml"
   merge_group:
   push:
@@ -42,6 +46,10 @@ on:
       # batching) — run its hermetic self-test on the PR that could break either side.
       - "scripts/batch-merge.py"
       - "scripts/ci_select.py"
+      # [OPUS-5] the readiness VISIBILITY suite — pins the occupancy-attribution,
+      # in-progress-review and local/orchestrator-parity contracts, and pins this
+      # workflow's own run block to the scripts it must invoke.
+      - "scripts/tests/test_readiness_visibility.py"
       - ".github/workflows/routing-self-tests.yml"
 
 permissions:
@@ -65,5 +73,10 @@ jobs:
           python3 scripts/routing-validate.py --self-test
           python3 scripts/routing-validate.py
           python3 scripts/route-resolve.py --self-test
+          # [OPUS-5] ready-issues.py was in the `paths:` filter above but its --self-test was
+          # NEVER invoked here, so its assertions were dead in this repo's CI and first ran
+          # inside the registry's dispatch tick — where a failure breaks EVERY target at once.
+          python3 scripts/ready-issues.py --self-test
           python3 scripts/dispatch-plan.py --self-test
           python3 scripts/batch-merge.py --self-test
+          python3 scripts/tests/test_readiness_visibility.py
