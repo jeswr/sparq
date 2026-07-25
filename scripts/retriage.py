@@ -168,17 +168,19 @@ def _self_test():
             author=FLOW_ON_MINTER),
     ]
     actions = {n: (a, r) for n, a, r in plan_retriage(fixture, trusted)}
+    # [FABLE-5] (#3419) .get defaults: a fixture dropped by a triage.py behavior change (how
+    # the #2898 no-area parking drift surfaced) must print a clean FAIL line, not a KeyError.
+    a1, a2, a9, a10 = (actions.get(n, ([], [])) for n in (1, 2, 9, 10))
     chk("promoted set", sorted(actions), [1, 2, 9, 10])
-    chk("label-added priority promotes", actions[1],
-        (["status:ready"], ["status:untriaged"]))
-    chk("default P3 applied", "priority:P3" in actions[2][0], True)
-    chk("default promotion readies", ("status:ready" in actions[2][0],
-                                      "status:untriaged" in actions[2][1]), (True, True))
-    chk("role derived for default case", any(x.startswith("role:") for x in actions[2][0]), True)
-    chk("bot author promoted", actions[9][0][0].startswith(("priority", "role", "status")), True)
+    chk("label-added priority promotes", a1, (["status:ready"], ["status:untriaged"]))
+    chk("default P3 applied", "priority:P3" in a2[0], True)
+    chk("default promotion readies", ("status:ready" in a2[0],
+                                      "status:untriaged" in a2[1]), (True, True))
+    chk("role derived for default case", any(x.startswith("role:") for x in a2[0]), True)
+    chk("bot author promoted", bool(a9[0]) and a9[0][0].startswith(("priority", "role", "status")), True)
     chk("flow-on statusless backlog promoted (#2474)",
-        ("status:ready" in actions[10][0], "priority:P3" in actions[10][0],
-         any(x.startswith("role:") for x in actions[10][0])), (True, True, True))
+        ("status:ready" in a10[0], "priority:P3" in a10[0],
+         any(x.startswith("role:") for x in a10[0])), (True, True, True))
     chk("github-actions[bot] not blanket-trusted", 11 in actions, False)
     chk("already-routed flow-on untouched", 12 in actions, False)
     chk("ambiguous priority untouched", 3 in actions, False)

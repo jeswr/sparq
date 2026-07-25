@@ -34,6 +34,14 @@
   features: "topology_index"
   test: true
 
+# [FABLE-5] sq-248: the full embedded EPSG registry fallback behind the curated
+# reproject table is default-OFF (implies `reproject`), and the `epsg_full` test
+# module in tests/reproject.rs is compiled only with this feature.
+- name: "sparq-geo (epsg_full)"
+  crate: "sparq-geo"
+  features: "epsg_full"
+  test: true
+
 # [FABLE-5] sq-lsp7k: the GeoSPARQL 1.1 non-topological ACCESSOR functions
 # (geof:dimension/coordinateDimension/spatialDimension/isSimple/geometryType)
 # register into geof_registry() only under this default-OFF feature; the

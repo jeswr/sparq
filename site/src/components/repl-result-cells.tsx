@@ -19,32 +19,7 @@ import type { SparqlResults, SparqlTerm } from "@/lib/sparq-wasm";
 // [OPUS-4.8] sq-vw3ax.10 — CURIE abbreviation is now shared with the node-link Graph view
 // (repl-graph-view.tsx) via @/lib/curie so both renderers use exactly one prefix set.
 import { XSD, curie } from "@/lib/curie";
-
-const NUMERIC_XSD = new Set(
-  [
-    "integer",
-    "decimal",
-    "double",
-    "float",
-    "long",
-    "int",
-    "short",
-    "byte",
-    "nonNegativeInteger",
-    "positiveInteger",
-    "unsignedInt",
-    "unsignedLong",
-  ].map((t) => XSD + t),
-);
-
-function isNumericLiteral(t: SparqlTerm): boolean {
-  return (
-    t.type === "literal" &&
-    typeof t.datatype === "string" &&
-    NUMERIC_XSD.has(t.datatype) &&
-    Number.isFinite(Number(t.value))
-  );
-}
+import { isNumericLiteral } from "@/lib/numeric-literal";
 
 /**
  * Render one result cell with typed-value colouring. Reuses the foundation's syntax-highlight
