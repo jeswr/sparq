@@ -1,6 +1,12 @@
 {
  "_doc": "Advisory-job registry (sq-qcnn.32). [SONNET-4.6] Every job whose NAME matches the ci-summary exclusion pattern \\b(advisory|informational)\\b must have an entry here with {owner_bead, promotion_criteria, registered}. A job that intentionally runs a gate-classified script (scripts/*gate*.py) must also carry gate_script_waiver. Maintained by check-advisory-registry.py (C2/C3). See scripts/check-advisory-registry.py for the enforcement rule.",
  "jobs": {
+  "changed-code mutation review (advisory)": {
+   "workflow": "mutants-diff.yml",
+   "owner_bead": "sq-qcnn.30",
+   "promotion_criteria": "promote only after the lane is stable across observed PRs, its runtime remains within the documented workload budget, and a reviewed allowlist mechanism exists for provably equivalent surviving mutants",
+   "registered": "2026-07-19"
+  },
   "secret-literal grep (advisory)": {
    "workflow": "deploy-terraform-lint.yml",
    "owner_bead": "sq-sos84",
@@ -145,6 +151,18 @@
    "owner_bead": "sq-6vshe",
    "promotion_criteria": "not promotable to a gate: the ring runs post-hoc via workflow_run (on ci-summary completion), never on a PR/merge_group head commit, so it produces no gating check-run by design (sparq-org/sparq#3474 moved it here so the REGISTRY_RING_TOKEN doorbell is unreachable from PR-head content); it only notifies the registry doorbell after a gating-leg failure and must never gate a PR",
    "registered": "2026-07-18"
+  },
+  "release-plz / Release-PR (advisory)": {
+   "workflow": "release-plz.yml",
+   "owner_bead": "sq-lonae",
+   "promotion_criteria": "advisory while the repo/org setting 'Allow GitHub Actions to create and approve pull requests' is disabled (GITHUB_TOKEN cannot open the Release-PR: known 403, live run 29988505600, contained loudly via captured-output signature + side-effect-free probe). Promote when a maintainer enables that setting or configures the ORCHESTRATOR_APP_ID/_PRIVATE_KEY secrets (batch-merge.yml App-token pattern): drop the ' (advisory)' name token, remove the 403-containment step, and delete this entry",
+   "registered": "2026-07-23"
+  },
+  "merge-queue dequeued feedback (advisory)": {
+   "workflow": "merge-queue-feedback.yml",
+   "owner_bead": "registry jeswr/agent-account-registry#563 item 3 (durable fix for registry#556)",
+   "promotion_criteria": "permanently advisory BY DESIGN: this job runs on pull_request_target [dequeued] (write-only, no PR-head checkout) AFTER a gate verdict exists on the head SHA, and its writes (disable-auto + review:changes swap + comment) are orchestration feedback, not a merge-worthiness verdict — a feedback hiccup must never red a later gate evaluation on the same SHA. Promote never; delete this entry only if the workflow is removed",
+   "registered": "2026-07-24"
   }
  }
 }
