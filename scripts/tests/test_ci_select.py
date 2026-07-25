@@ -606,6 +606,121 @@ class ChangeClassTests(unittest.TestCase):
         self.assertEqual(good.affected, ["app"])
 
 
+# [FABLE-5] ---- classify-only mode (merge-group change-class gate; #3420/#3421 follow-up)
+class ClassifyOnlyMainTests(unittest.TestCase):
+    """The `--classify-only` CLI contract the ci.yml / feature-matrix.yml `changes`
+    pre-jobs consume on merge_group: stdout is EXACTLY one class token, the
+    `change_class=` output line is written, NO cargo metadata is ever needed, and
+    EVERY error path fails safe to `engine` (=> the consumer runs the full matrix)
+    with exit 0."""
+
+    def _run_main(self, argv):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = cs.main(argv)
+        return code, buf.getvalue()
+
+    def _write(self, text, suffix=".txt"):
+        fd, path = tempfile.mkstemp(suffix=suffix)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
+    def test_docs_only_batch_classifies_docs_only(self):
+        # The #2533-shaped merge-group batch: pure docs/research prose. MUTATION
+        # VISIBILITY (brief): breaking classify_change back to always-`engine`
+        # makes THIS assertion fail — the class-gated merge-group skip cannot
+        # silently regress to always-full without a red test.
+        changed = self._write("docs/branch-protection.md\nresearch/design-record.md\n")
+        code, out = self._run_main(["--classify-only", "--event", "merge_group",
+                                    "--changed-file", changed])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "docs-only")
+
+    def test_orchestration_only_batch_classifies_orchestration_only(self):
+        changed = self._write("orchestration/routing.toml\nscripts/triage.py\n")
+        code, out = self._run_main(["--classify-only", "--event", "merge_group",
+                                    "--changed-file", changed])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "orchestration-only")
+
+    def test_engine_batch_classifies_engine(self):
+        changed = self._write("crates/app/src/lib.rs\n")
+        code, out = self._run_main(["--classify-only", "--event", "merge_group",
+                                    "--changed-file", changed])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "engine")
+
+    def test_mixed_batch_classifies_mixed(self):
+        # A mixed batch is NOT a skip class in the workflow case-arm => full run.
+        changed = self._write("docs/x.md\ncrates/app/src/lib.rs\n")
+        code, out = self._run_main(["--classify-only", "--event", "merge_group",
+                                    "--changed-file", changed])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "mixed")
+
+    def test_stdout_is_exactly_one_token_line(self):
+        # The shell consumer does `cls="$(...)"` and `case`s on the WHOLE value:
+        # any extra stdout line would fall into the wildcard arm (safe, but the
+        # single-line contract is what makes the gate legible) — pin it.
+        changed = self._write("docs/x.md\n")
+        code, out = self._run_main(["--classify-only", "--event", "merge_group",
+                                    "--changed-file", changed])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines(), ["docs-only"])
+
+    def test_output_and_summary_files_carry_the_class(self):
+        changed = self._write("docs/x.md\n")
+        out_file = self._write("")
+        summary = self._write("")
+        code, _ = self._run_main(["--classify-only", "--event", "merge_group",
+                                  "--changed-file", changed,
+                                  "--output-file", out_file, "--summary-file", summary])
+        self.assertEqual(code, 0)
+        self.assertIn("change_class=docs-only", Path(out_file).read_text(encoding="utf-8"))
+        self.assertIn("docs-only", Path(summary).read_text(encoding="utf-8"))
+
+    def test_no_cargo_metadata_needed_even_when_metadata_is_broken(self):
+        # classify-only must never touch cargo metadata: a bogus --metadata-file
+        # is simply ignored (the whole point — the changes pre-job has no
+        # toolchain and pays no metadata cost).
+        changed = self._write("docs/x.md\n")
+        code, out = self._run_main(["--classify-only", "--event", "merge_group",
+                                    "--changed-file", changed,
+                                    "--metadata-file", "/no/such/meta.json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "docs-only")
+
+    def test_unresolvable_diff_fails_safe_to_engine(self):
+        # Garbage SHAs => git diff fails => class engine (full run), exit 0 —
+        # the #3421 fail-safe posture (cost, never soundness).
+        code, out = self._run_main(["--classify-only", "--event", "merge_group",
+                                    "--base", "deadbeefdeadbeef",
+                                    "--head", "cafebabecafebabe"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "engine")
+
+    def test_missing_base_fails_safe_to_engine(self):
+        code, out = self._run_main(["--classify-only", "--event", "merge_group"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "engine")
+
+    def test_non_diff_event_is_engine(self):
+        # schedule/push/workflow_dispatch carry no batch diff => engine (full).
+        for event in ("schedule", "push", "workflow_dispatch"):
+            code, out = self._run_main(["--classify-only", "--event", event])
+            self.assertEqual(code, 0)
+            self.assertEqual(out.strip(), "engine", f"event {event}")
+
+    def test_full_override_is_engine(self):
+        changed = self._write("docs/x.md\n")
+        code, out = self._run_main(["--classify-only", "--full", "--event", "merge_group",
+                                    "--changed-file", changed])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "engine")
+
+
 class OrchestrationSafeInertnessTests(unittest.TestCase):
     """[OPUS-4.8] THE INERTNESS OBLIGATION: every _ORCHESTRATION_SAFE entry must be
     PROVEN not read by any Rust-CI workflow. This greps the real Rust-CI workflow

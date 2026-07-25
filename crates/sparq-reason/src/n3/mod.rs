@@ -39,8 +39,10 @@
 //!     and bidirectional inSeconds (epoch, deterministic — no wall-clock);
 //!   * `log:` equalTo/notEqualTo, includes/notIncludes/supports (see below),
 //!     conjunction (true = empty formula), conclusion (a formula's own
-//!     closure), parsedAsN3, langlit, uri and dtlit (both directions), and —
-//!     ONLY when the caller supplies a [`Resolver`] — semantics/content.
+//!     closure), parsedAsN3, langlit, uri and dtlit (both directions),
+//!     collectAllIn (scoped aggregation — findall over a clause's solutions)
+//!     and forAllIn (scoped universal quantification), and — ONLY when the
+//!     caller supplies a [`Resolver`] — semantics/content.
 //!
 //! `log:includes` containment is cwm-faithful (`formula_containment`): the
 //! scope is the subject formula (the empty formula includes nothing); pattern
@@ -80,9 +82,9 @@
 //! TERMINATES. A diamond that re-uses a shared document across SIBLING branches
 //! is NOT a cycle and still resolves on every branch.
 //!
-//! Next increments: `log:collectAllIn` (scoped aggregation), full
-//! `log:conclusion` parity on deep multi-document closures (cwm_includes
-//! conclusion.n3 is the one remaining honest reasoner-suite fail).
+//! Next increments: full `log:conclusion` parity on deep multi-document
+//! closures (cwm_includes conclusion.n3 is the one remaining honest
+//! reasoner-suite fail).
 
 // [FABLE-5] sq-zgbso.3 (epic sq-zgbso, issue #1582): OPT-IN id-level compiled-rule
 // evaluation for the scoped access-control N3 subset — see the module's own docs for the
@@ -249,6 +251,132 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<
     intern_closure(dict, &facts, &steps)
 }
 
+/// A stratified run's result ([`reason_n3_stratified`]).
+pub struct StratifiedN3Closure {
+    /// The FINAL stratum's ground closure, interned into the dictionary (the
+    /// same form [`reason_n3`] returns).
+    pub facts: Vec<[Id; 3]>,
+    /// Term-level closure size after each stratum, in stratum order (counted
+    /// before rdf:first/rest list expansion and interning) — the per-stratum
+    /// stats hook a stratified pipeline records.
+    pub strata_facts: Vec<usize>,
+}
+
+/// Run the rule closure STRATUM BY STRATUM: each `strata[i]` is a complete N3
+/// document (facts + rules), and the full term-level closure of the strata
+/// before it is carried forward IN MEMORY as additional input facts — no
+/// serialize/re-parse round-trip between strata (formula-valued facts, which
+/// a text round-trip cannot represent, carry over intact).
+///
+/// This is the sound driver for the engine's NON-MONOTONIC premise operators
+/// (store-scoped `log:notIncludes`, `log:collectAllIn` / `log:forAllIn`):
+/// those are only reliable over predicates FULLY PRESENT before their stratum
+/// starts (rules containing them re-evaluate every fixpoint round but derived
+/// facts are never retracted), so derive such predicates to a fixpoint in an
+/// earlier stratum and negate/aggregate over them in a later one.
+///
+/// Blank-node scope is PER STRATUM, exactly as if each stratum were its own
+/// re-parsed document: carried blank nodes (input blanks and minted rule
+/// existentials) are renamed apart at every stratum boundary — co-reference
+/// within the carried closure is preserved, and a label reused in a later
+/// stratum's source stays a DISTINCT node.
+///
+/// One stratum is exactly [`reason_n3`]; zero strata yield an empty closure.
+pub fn reason_n3_stratified(
+    dict: &mut Dict,
+    strata: &[&str],
+) -> Result<StratifiedN3Closure, String> {
+    let mut carried: Vec<[Term; 3]> = Vec::new();
+    let mut facts = FactIndex::default();
+    let mut strata_facts = Vec::with_capacity(strata.len());
+    for (i, src) in strata.iter().enumerate() {
+        let mut parsed = parser::parse(src)?;
+        if !carried.is_empty() {
+            // Rename carried blanks (input blanks and minted `__sk…` rule
+            // existentials) apart from this stratum's own labels. The prefix
+            // is chosen fresh against every blank label the stratum's source
+            // actually uses, so even a literal `_:__st0_b` in the source
+            // cannot capture a carried node, and `__st…` never collides with
+            // the `__sk…` labels this stratum's closure mints (whose counter
+            // restarts). One uniform injective rename preserves co-reference
+            // within the carried closure.
+            let prefix = fresh_carry_prefix(&parsed);
+            for t in &mut carried {
+                *t = stratum_blanks(t, &prefix);
+            }
+        }
+        parsed.facts.append(&mut carried);
+        let (f, _steps) = run_closure(parsed, None, None, StepMode::None);
+        strata_facts.push(f.all.len());
+        if i + 1 < strata.len() {
+            carried = f.all.iter().cloned().collect();
+        }
+        facts = f;
+    }
+    Ok(StratifiedN3Closure { facts: intern_closure(dict, &facts, &[])?.0, strata_facts })
+}
+
+/// The smallest `__st{k}_` prefix that no blank label anywhere in `parsed`
+/// (facts and rule premises/conclusions alike, recursing through lists,
+/// formulae, and quoted triples) starts with. Renaming a carried label `l`
+/// to `__st{k}_{l}` therefore yields a label proven absent from the
+/// stratum's source — and one that can never collide with the `__sk…`
+/// labels [`run_closure`] mints for rule existentials.
+fn fresh_carry_prefix(parsed: &parser::Parsed) -> String {
+    fn labels<'a>(t: &'a Term, out: &mut FxHashSet<&'a str>) {
+        match t {
+            Term::Blank(l) => {
+                out.insert(l.as_str());
+            }
+            Term::List(ms) => ms.iter().for_each(|m| labels(m, out)),
+            Term::Formula(ts) => {
+                ts.iter().for_each(|r| r.iter().for_each(|m| labels(m, out)));
+            }
+            Term::Triple(tr) => tr.iter().for_each(|m| labels(m, out)),
+            _ => {}
+        }
+    }
+    let mut seen: FxHashSet<&str> = FxHashSet::default();
+    let rule_terms = parsed
+        .rules
+        .iter()
+        .chain(&parsed.backward_rules)
+        .flat_map(|r| r.premise.iter().chain(&r.conclusion));
+    for t in parsed.facts.iter().chain(rule_terms) {
+        t.iter().for_each(|m| labels(m, &mut seen));
+    }
+    let mut k = 0usize;
+    loop {
+        let prefix = format!("__st{}_", k);
+        if !seen.iter().any(|l| l.starts_with(&prefix)) {
+            return prefix;
+        }
+        k += 1;
+    }
+}
+
+/// `t` with every blank label pushed into the carried namespace `prefix`
+/// (recursing into lists, formulae, and quoted triples) — the per-stratum
+/// document scope of [`reason_n3_stratified`]. `prefix` comes from
+/// [`fresh_carry_prefix`]; prefixing is injective, so co-reference among
+/// carried blanks is preserved.
+fn stratum_blanks(t: &[Term; 3], prefix: &str) -> [Term; 3] {
+    fn go(t: &Term, p: &str) -> Term {
+        match t {
+            Term::Blank(l) => Term::Blank(format!("{}{}", p, l)),
+            Term::List(ms) => Term::List(ms.iter().map(|m| go(m, p)).collect()),
+            Term::Formula(ts) => Term::Formula(
+                ts.iter().map(|r| [go(&r[0], p), go(&r[1], p), go(&r[2], p)]).collect(),
+            ),
+            Term::Triple(tr) => {
+                Term::Triple(Box::new([go(&tr[0], p), go(&tr[1], p), go(&tr[2], p)]))
+            }
+            _ => t.clone(),
+        }
+    }
+    [go(&t[0], prefix), go(&t[1], prefix), go(&t[2], prefix)]
+}
+
 /// TERM-level closure + full derivation steps `(conclusion, rule index, premises)` —
 /// the `explain` feature's N3 entry point ([`crate::MaterializedN3Graph::why`]).
 #[cfg(feature = "explain")]
@@ -381,7 +509,13 @@ fn run_closure(
         .map(|r| {
             let joins: Vec<usize> =
                 r.premise.iter().enumerate().filter(|(_, p)| is_join_atom(p)).map(|(i, _)| i).collect();
-            let has_neg = r.premise.iter().any(|p| scope_op(&p[1]).is_some());
+            // Non-monotonic premise operators — scoped negation/containment
+            // AND the collectAllIn/forAllIn aggregations (their solution sets
+            // grow with the closure) — force full re-evaluation every round.
+            let has_neg = r
+                .premise
+                .iter()
+                .any(|p| scope_op(&p[1]).is_some() || collect_op(&p[1]).is_some());
             let needs_bw = joins.iter().any(|&k| match &r.premise[k][1] {
                 Term::Iri(i) => bw_any_var_pred || bw_concl_preds.contains(i.as_str()),
                 _ => !backward_rules.is_empty(),
@@ -846,6 +980,75 @@ fn match_premise_seeded(
             }
             continue;
         }
+        // log:collectAllIn / log:forAllIn — scoped aggregation and universal
+        // quantification (EYE / N3 builtins spec):
+        //   * `( ?template { clause } ?list ) log:collectAllIn ?scope` binds
+        //     ?list to the ?template instantiations, one per solution of the
+        //     clause in the scope (findall — duplicates kept, in match order;
+        //     no solutions ⇒ the empty list).
+        //   * `( { clause-a } { clause-b } ) log:forAllIn ?scope` holds iff
+        //     EVERY solution of clause-a extends to a solution of clause-b
+        //     (vacuously true with none); no clause bindings leak out.
+        // The scope follows the log:includes convention: a bound `{ … }`
+        // formula is matched syntactically; an unbound or non-formula scope
+        // (EYE's idiomatic `?SCOPE` / `_:x`) is the CURRENT STORE, where a
+        // clause is full premise evaluation (joins, builtins, backward
+        // rules). Both operators are NON-MONOTONIC over a store scope — the
+        // solution set can grow as the closure grows, their rules re-evaluate
+        // every round (`needs_full`), and derived facts are never retracted —
+        // so, exactly like scoped negation, they are only sound over
+        // predicates fully present before the stratum starts
+        // ([`reason_n3_stratified`] is the stratified driver). A malformed
+        // subject (wrong arity, non-formula clause) FAILS the premise for
+        // that binding (fail-closed).
+        if let Some(op) = collect_op(&pat[1]) {
+            let mut next = Vec::new();
+            for b in bindings {
+                // Solutions of a `{ clause }` value under `seed`, against the
+                // applied scope (`None` ⇒ the clause is not a formula).
+                let solve = |clause: &Term, seed: &Binding| -> Option<Vec<Binding>> {
+                    let atoms: &[[Term; 3]] = match clause {
+                        Term::Formula(ts) => ts,
+                        // `{}` parses as the literal true: no constraint —
+                        // exactly one (empty) solution.
+                        Term::Lit(v, _, _) if v == "true" => &[],
+                        _ => return None,
+                    };
+                    Some(match apply_deep(&pat[2], seed) {
+                        Term::Formula(scope) => formula_containment(&scope, atoms, seed),
+                        Term::Lit(v, _, _) if v == "true" => formula_containment(&[], atoms, seed),
+                        _ => match_premise_seeded(atoms, facts, seed, None, bw, depth),
+                    })
+                };
+                let subj = apply(&pat[0], &b);
+                let Term::List(members) = &subj else { continue };
+                match op {
+                    CollectOp::CollectAll => {
+                        let [template, clause, list_pat] = &members[..] else { continue };
+                        let Some(sols) = solve(clause, &b) else { continue };
+                        let collected =
+                            Term::List(sols.iter().map(|s| apply_deep(template, s)).collect());
+                        let mut nb = b.clone();
+                        if unify_term(list_pat, &collected, &mut nb) {
+                            next.push(nb);
+                        }
+                    }
+                    CollectOp::ForAll => {
+                        let [ca, cb] = &members[..] else { continue };
+                        let Some(sols_a) = solve(ca, &b) else { continue };
+                        if sols_a.iter().all(|s| matches!(solve(cb, s), Some(ss) if !ss.is_empty()))
+                        {
+                            next.push(b);
+                        }
+                    }
+                }
+            }
+            bindings = next;
+            if bindings.is_empty() {
+                break;
+            }
+            continue;
+        }
         if let Some(gen) = list_generator(&pat[1]) {
             // list:member / list:in / list:iterate — one binding per member.
             let (list_pos, var_pos) = match gen {
@@ -1012,6 +1215,7 @@ fn is_join_atom(pat: &[Term; 3]) -> bool {
         && binder_builtin(&pat[1]).is_none()
         && list_generator(&pat[1]).is_none()
         && scope_op(&pat[1]).is_none()
+        && collect_op(&pat[1]).is_none()
         && !virtual_list
 }
 
@@ -1508,6 +1712,26 @@ fn scope_op(p: &Term) -> Option<ScopeOp> {
         Some("includes") => Some(ScopeOp::Includes),
         Some("notIncludes") => Some(ScopeOp::NotIncludes),
         Some("supports") => Some(ScopeOp::Supports),
+        _ => None,
+    }
+}
+
+/// The scoped AGGREGATION / universal-quantification operators (EYE and the
+/// N3 builtins spec; they share the scope convention of the [`ScopeOp`]s).
+#[derive(Clone, Copy)]
+enum CollectOp {
+    /// `( ?template { clause } ?list ) log:collectAllIn ?scope` — findall.
+    CollectAll,
+    /// `( { clause-a } { clause-b } ) log:forAllIn ?scope` — every solution
+    /// of clause-a extends to one of clause-b.
+    ForAll,
+}
+
+fn collect_op(p: &Term) -> Option<CollectOp> {
+    let Term::Iri(i) = p else { return None };
+    match i.strip_prefix(LOG) {
+        Some("collectAllIn") => Some(CollectOp::CollectAll),
+        Some("forAllIn") => Some(CollectOp::ForAll),
         _ => None,
     }
 }

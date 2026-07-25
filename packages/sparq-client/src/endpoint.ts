@@ -341,9 +341,9 @@ export function buildSparqlRequest(
  * Build the WebSocket subprotocols for a `/subscriptions` handshake: the
  * `bearer.<token>` subprotocol the server's `ws_auth_gate` accepts (browsers cannot set
  * an `Authorization` header on a WS upgrade). Returns `[]` when no token is configured.
- * This client does not open subscriptions itself (that is the live-subscriptions view,
- * tracked separately); this helper exists so the same auth posture is reused there
- * without re-deriving the subprotocol string.
+ * The consumer is the multiplexed WebSocket subscriptions transport (sq-140b,
+ * `ws-subscriptions.ts` `openSubscriptionSocket`); the helper lives here so the auth
+ * posture stays derived in ONE place, next to the classifier it belongs with.
  */
 export function wsSubprotocols(token?: string): string[] {
   const t = (token ?? "").trim();

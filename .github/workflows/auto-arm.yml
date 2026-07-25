@@ -1,0 +1,64 @@
+# [GPT-5] Issue #447 — arm reviewed worker PRs without bypassing the merge queue.
+name: auto-arm
+
+on:
+  pull_request:
+    types: [labeled]
+  schedule:
+    # Explicit minutes make the ten-minute backstop auditable (no */N shorthand).
+    - cron: "4,14,24,34,44,54 * * * *"
+  workflow_dispatch:
+
+# Enabling auto-merge needs only repository contents + pull-request write access.
+permissions:
+  contents: write
+  pull-requests: write
+
+# A label event and the sweep must never race each other into a double arm.
+concurrency:
+  group: auto-arm
+  cancel-in-progress: false
+
+jobs:
+  arm:
+    name: arm reviewed PRs
+    if: github.event_name != 'pull_request' || github.event.label.name == 'review:pass'
+    runs-on: ubuntu-latest
+    # 10 (was 5): headroom for the #3759 bounded transient-retry backoff (up to
+    # 10s+30s per idempotent READ during a platform blip) without hitting the
+    # job ceiling; the sweep itself is unchanged.
+    timeout-minutes: 10
+    steps:
+      # Run the trusted default-branch policy, never code from the candidate PR head.
+      - name: Checkout auto-arm policy
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          # gh_retry.py is auto-arm.py's #3759 transient-retry dependency — the
+          # self-test below imports it, so a missing path fails BEFORE the live run.
+          sparse-checkout: |
+            scripts/auto-arm.py
+            scripts/gh_retry.py
+          sparse-checkout-cone-mode: false
+
+      - name: Self-test policy
+        run: |
+          python3 scripts/gh_retry.py --self-test
+          python3 scripts/auto-arm.py --self-test
+
+      - name: Arm eligible PRs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          # [FABLE-5] #3759 finding 5: the label-triggered (pull_request) invocation is
+          # EVENT mode — it has no per-PR cron backstop, so an exhausted transient must
+          # exit non-zero (visibly red + retried), NOT the sweep's lenient ::warning+0.
+          # The scheduled/dispatch runs are SWEEP mode (a missed cycle is cron-covered).
+          ARM_MODE: ${{ github.event_name == 'pull_request' && 'event' || 'sweep' }}
+        run: >-
+          python3 scripts/auto-arm.py
+          --repo "$REPO"
+          --default-branch "$DEFAULT_BRANCH"
+          --mode "$ARM_MODE"

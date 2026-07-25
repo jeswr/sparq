@@ -41,7 +41,7 @@ test('fromString parses JSON-LD (folded), queryable like Turtle', async () => {
   });
   const store = await SparqStore.fromString(jsonld, 'jsonld');
   assert.equal(store.size, 2);
-  const rows = store.queryBindings('PREFIX ex: <http://ex/> SELECT ?n WHERE { ex:alice ex:name ?n }');
+  const rows = store.query('PREFIX ex: <http://ex/> SELECT ?n WHERE { ex:alice ex:name ?n }');
   assert.equal(rows.length, 1);
   assert.equal(rows[0].get('n').value, 'Alice');
 });
@@ -52,14 +52,14 @@ test('fromString JSON-LD with dataset:true preserves @graph as a named graph', a
     '@graph': [{ '@id': 'http://ex/s', 'http://ex/p': { '@id': 'http://ex/o' } }],
   });
   const store = await SparqStore.fromString(jsonld, 'jsonld', { dataset: true });
-  const rows = store.queryBindings('SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
+  const rows = store.query('SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
   assert.equal(rows.length, 1);
   assert.equal(rows[0].get('g').value, 'http://ex/g1');
 });
 
 test('SELECT returns RDF/JS bindings with spec-compliant terms', async () => {
   const store = await load();
-  const rows = store.queryBindings(
+  const rows = store.query(
     'PREFIX ex: <http://ex/> SELECT ?s ?n ?a WHERE { ?s ex:name ?n . ?s ex:age ?a } ORDER BY ?a',
   );
   assert.equal(rows.length, 2);
@@ -88,7 +88,7 @@ test('SELECT returns RDF/JS bindings with spec-compliant terms', async () => {
 
 test('bindings are Map-like per the RDF/JS query spec', async () => {
   const store = await load();
-  const [row] = store.queryBindings(
+  const [row] = store.query(
     'PREFIX ex: <http://ex/> SELECT ?s ?n WHERE { ?s ex:name ?n . ?s ex:knows ?x }',
   );
   assert.equal(row.type, 'bindings');
@@ -146,7 +146,7 @@ test('full-text-style matching via plain SPARQL string functions', async () => {
   // plain SPARQL — which the wasm engine evaluates directly. This pins the
   // plain-SPARQL substring path that browser callers get.
   const store = await load();
-  const rows = store.queryBindings(
+  const rows = store.query(
     'SELECT ?s WHERE { ?s ?p ?o FILTER(isLiteral(?o) && CONTAINS(LCASE(STR(?o)), "ali")) }',
   );
   assert.equal(rows.length, 1);
@@ -266,11 +266,11 @@ test('dataset stores preserve named graphs (GRAPH / FROM / FROM NAMED)', async (
   const store = await loadDataset();
   assert.equal(store.size, 1); // size reports the default graph
 
-  const g1 = store.queryBindings('SELECT ?o WHERE { GRAPH <http://ex/g1> { ?s <http://ex/p> ?o } }');
+  const g1 = store.query('SELECT ?o WHERE { GRAPH <http://ex/g1> { ?s <http://ex/p> ?o } }');
   assert.equal(g1.length, 1);
   assert.equal(g1[0].get('o').value, 'in-g1');
 
-  const all = store.queryBindings('SELECT ?g ?o WHERE { GRAPH ?g { ?s ?p ?o } }');
+  const all = store.query('SELECT ?g ?o WHERE { GRAPH ?g { ?s ?p ?o } }');
   assert.equal(all.length, 3);
   assert.deepEqual([...new Set(all.map(r => r.get('g').value))].sort(), ['http://ex/g1', 'http://ex/g2']);
 
@@ -278,10 +278,10 @@ test('dataset stores preserve named graphs (GRAPH / FROM / FROM NAMED)', async (
   assert.equal(store.queryBoolean('ASK { GRAPH <http://ex/g2> { ?s ?p "in-g1" } }'), false);
 
   // FROM merges the named graph into the active default graph
-  const from = store.queryBindings('SELECT ?o FROM <http://ex/g1> WHERE { ?s <http://ex/p> ?o }');
+  const from = store.query('SELECT ?o FROM <http://ex/g1> WHERE { ?s <http://ex/p> ?o }');
   assert.deepEqual(from.map(r => r.get('o').value), ['in-g1']);
   // FROM NAMED scopes which graphs GRAPH ?g ranges over
-  const fromNamed = store.queryBindings(
+  const fromNamed = store.query(
     'SELECT ?o FROM NAMED <http://ex/g2> WHERE { GRAPH ?g { ?s ?p ?o } }',
   );
   assert.deepEqual(fromNamed.map(r => r.get('o').value), ['in-g2']);
@@ -429,7 +429,7 @@ test('update() applies in place: handle stays valid, named graphs preserved', as
 
 test('engine errors surface as JS exceptions', async () => {
   const store = await load();
-  assert.throws(() => store.queryBindings('SELECT ?s WHERE { broken'), /error|expected/i);
+  assert.throws(() => store.query('SELECT ?s WHERE { broken'), /error|expected/i);
   assert.throws(() => store.query('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }'), /SELECT/);
 });
 
@@ -536,7 +536,7 @@ test('empty() builds a mutable store; named-graph updates round-trip', async () 
   assert.equal(store.size, 1);
   // Named-graph INSERT then GRAPH ?g query returns the inserted row (no dataset flag needed).
   store.update('INSERT DATA { GRAPH <http://ex/g> { <http://ex/s> <http://ex/p> <http://ex/o> } }');
-  const rows = store.queryBindings('SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
+  const rows = store.query('SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
   assert.equal(rows.length, 1);
   assert.equal(rows[0].get('g').value, 'http://ex/g');
 });
@@ -558,7 +558,7 @@ test('fromString with baseIri resolves relative IRIs', async () => {
     baseIri: 'http://ex/dir/',
   });
   assert.equal(store.size, 1);
-  const rows = store.queryBindings('SELECT ?s ?o WHERE { ?s ?p ?o }');
+  const rows = store.query('SELECT ?s ?o WHERE { ?s ?p ?o }');
   assert.equal(rows[0].get('s').value, 'http://ex/dir/a');
   assert.equal(rows[0].get('o').value, 'http://ex/up/o');
 });
@@ -566,7 +566,7 @@ test('fromString with baseIri resolves relative IRIs', async () => {
 test('fromStringSync with baseIri resolves relative IRIs', async () => {
   await SparqStore.empty(); // ensure wasm init
   const store = SparqStore.fromStringSync('<a> <p> <o> .', 'turtle', { baseIri: 'http://ex/' });
-  const rows = store.queryBindings('SELECT ?s WHERE { ?s ?p ?o }');
+  const rows = store.query('SELECT ?s WHERE { ?s ?p ?o }');
   assert.equal(rows[0].get('s').value, 'http://ex/a');
 });
 

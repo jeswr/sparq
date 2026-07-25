@@ -1,0 +1,76 @@
+# [GPT-5.6] Issue #3675 — restore auto-merge arms GitHub drops after merge-group churn.
+#
+# NOT A GATE. This runs only on schedule / workflow_dispatch, never on a PR head. The
+# review:pass label is the pipeline's attested verdict and remains mandatory; CI state
+# alone can never make this workflow arm a PR. A null autoMergeRequest is insufficient:
+# queued PRs expose a live mergeQueueEntry while autoMergeRequest is null and are skipped.
+name: re-arm sweeper
+
+on:
+  schedule:
+    # Offset from auto-arm's ten-minute cron so both policies do not start together.
+    - cron: "8,18,28,38,48,58 * * * *"
+  workflow_dispatch:
+
+# Arming auto-merge needs push authority AND the merge must fire downstream push
+# workflows (flow-on autoclose) — a GITHUB_TOKEN-enabled arm risks the recursion
+# guard suppressing them. Arm with the sparq-orchestrator App token (the same
+# identity batch-merge.yml uses); fall back to the workflow token only when the
+# App is not configured, in which case failed arms surface loudly as errors.
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: re-arm-sweeper
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: restore dropped merge-queue arms
+    runs-on: ubuntu-latest
+    # 10 (was 5): headroom for the #3759 bounded transient-retry backoff (up to
+    # 10s+30s per idempotent READ during a platform blip) without hitting the
+    # job ceiling; the sweep itself is unchanged.
+    timeout-minutes: 10
+    env:
+      # Secrets are not readable from step `if:` expressions — mirror the id into env
+      # so the mint step can be skipped fail-soft when the App is not configured.
+      ORCHESTRATOR_APP_ID: ${{ secrets.ORCHESTRATOR_APP_ID }}
+    steps:
+      - name: Mint the sparq-orchestrator App token (arms must fire merge events)
+        id: app-token
+        if: env.ORCHESTRATOR_APP_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.ORCHESTRATOR_APP_ID }}
+          private-key: ${{ secrets.ORCHESTRATOR_APP_PRIVATE_KEY }}
+
+      # Always execute the trusted default-branch policy, including on manual dispatch.
+      - name: Checkout re-arm policy
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          # gh_retry.py is rearm-sweeper.py's #3759 transient-retry dependency — the
+          # self-test below imports it, so a missing path fails BEFORE the live run.
+          sparse-checkout: |
+            scripts/rearm-sweeper.py
+            scripts/gh_retry.py
+          sparse-checkout-cone-mode: false
+
+      - name: Self-test policy
+        run: |
+          python3 scripts/gh_retry.py --self-test
+          python3 scripts/rearm-sweeper.py --self-test
+
+      - name: Re-arm dropped reviewed PRs
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: >-
+          python3 scripts/rearm-sweeper.py
+          --repo "$REPO"
+          --default-branch "$DEFAULT_BRANCH"
+          --max-rearms 10

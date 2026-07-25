@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- [GPT-5.6] **Breaking (`@jeswr/sparq`)** — `SparqStore.queryBindings(sparql, context?)` now
+  returns `Promise<ResultStream<Bindings>>` instead of `Bindings[]`; await it and consume
+  `data` / `end` / `error` events (or use `query()` for synchronous materialisation). Unsupported
+  `context.sources` overrides, including an empty array, now reject instead of being ignored.
+
 ## [0.1.0] - 2026-06-13
 
 First release: an experimental, from-scratch RDF triplestore and SPARQL engine in Rust

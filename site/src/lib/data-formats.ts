@@ -5,8 +5,8 @@
 //
 // WHY THESE LIVE HERE (and are framework-free). The demo's parse step runs the real wasm
 // Store (no mocks); but the *gzip ingest* path is plain Web-platform code: gzip is the one
-// codec the browser decompresses natively (zstd decodes through the LAZY-loaded decoder in
-// `dataset-archive.ts#loadCodec`; bzip2 is native-only — see the page's honest caveat), so
+// codec the browser decompresses natively (zstd reaches the LAZY-loaded decoder through
+// `js/src/decompress.ts`; bzip2 is native-only — see the page's honest caveat), so
 // the gzip round-trip demo is `gunzip(bytes)` -> `Store.load(text, fmt)`.
 // Keeping the codec round-trip + the sample catalogue here (no React, no wasm) lets them
 // unit-test directly under `node --test` (the Web Streams API is in Node ≥ 18).
@@ -154,8 +154,8 @@ export function sampleFor(format: DataFormat): FormatSample | undefined {
 
 // ---------------------------------------------------------------------------
 // gzip round-trip — the live compressed-ingest path (gzip is the one codec the
-// browser decompresses natively; zstd is decoded by the lazy-loaded codec in
-// dataset-archive.ts; bzip2 is native-only, see the page caveat).
+// browser decompresses natively; zstd is decoded by the shared lazy-loaded JS package
+// path; bzip2 is native-only, see the page caveat).
 // ---------------------------------------------------------------------------
 
 // All byte buffers here are backed by a plain `ArrayBuffer` (never `SharedArrayBuffer`),
