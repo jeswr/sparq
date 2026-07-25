@@ -52,6 +52,19 @@ Pulls `oxrdf` only when enabled. Two ordering methods on `Num`:
 - `Num::cmp_relational` — SPARQL `<`/`>` / D-entailment / RIF numeric equality; NaN → `None`
   (type error). [OPUS-4.8] sq-v5evr.
 
+**`xs:float` promotion rounds ONCE.** `Num::f32` (and `Dec::f32` under it) is the single
+shared helper the float tier of `binop` — and the `overhead` kernel's inline replica of it —
+promote through, so the two cannot drift apart. Integer → `f32` and decimal-lexical → `f32`
+are each a SINGLE correctly-rounded conversion; routing through `f64` first and narrowing
+rounds TWICE, which is not what XPath/XSD numeric promotion requires. Verified by exact
+rational arithmetic: the `i64` value `4611686293305294849` has correctly-rounded `f32` bits
+`0x5E800001`, but `as f64 as f32` gives `0x5E800000` — so `SUM(?int, "0.0"^^xsd:float)` and
+`AVG` over a mixed integer/float column returned a float one ULP off for magnitudes above
+2^53. `parse_xsd_f32` likewise parses `&str -> f32` DIRECTLY (its ACCEPTANCE still delegates
+to the shared `sparq_core::parse_xsd_f64` spelling rules, so which lexicals are well-formed
+is unchanged). Regression tests assert `f32::to_bits()`, not a formatted decimal — the two
+candidates are ADJACENT floats that print identically. [OPUS-5] issue #3796.
+
 ```toml
 [dependencies]
 sparq-substrate = { version = "0.1.0", features = ["numeric"] }

@@ -395,8 +395,9 @@ pub fn xsd_value(lex: &str, dt: &str) -> Option<XsdVal> {
         }
         "decimal" => Some(XsdVal::Num(canon_decimal(lex)?)),
         "float" => {
-            let f = parse_xsd_float(lex)?;
-            let f = f as f32;
+            // Parsed DIRECTLY at f32 — parsing at f64 and narrowing double-rounds.
+            // [OPUS-5] issue #3796
+            let f = parse_xsd_float_single(lex)?;
             Some(XsdVal::F32(if f.is_nan() { f32::NAN.to_bits() } else { f.to_bits() }))
         }
         "double" => {
@@ -481,19 +482,41 @@ fn xml_content_well_formed(lex: &str) -> bool {
     stack.is_empty()
 }
 
+/// The non-special part of the XSD float/double lexical space: xsd float/double syntax is a
+/// subset of Rust's, so reject the forms Rust accepts but XSD does not. Shared by
+/// [`parse_xsd_float`] and [`parse_xsd_float_single`] so the two widths cannot disagree on
+/// which lexicals are well-formed. [OPUS-5] issue #3796
+#[inline]
+fn xsd_float_body_wellformed(lex: &str) -> bool {
+    !(lex.contains(['x', 'X']) || lex.ends_with(['f', 'F', 'd', 'D']) || lex.contains("inf"))
+}
+
 fn parse_xsd_float(lex: &str) -> Option<f64> {
     match lex {
         "INF" | "+INF" => Some(f64::INFINITY),
         "-INF" => Some(f64::NEG_INFINITY),
         "NaN" => Some(f64::NAN),
-        _ => {
-            // xsd float/double syntax is a subset of Rust's; reject the forms
-            // Rust accepts but XSD does not.
-            if lex.contains(['x', 'X']) || lex.ends_with(['f', 'F', 'd', 'D']) || lex.contains("inf") {
-                return None;
-            }
-            lex.parse::<f64>().ok()
-        }
+        _ if xsd_float_body_wellformed(lex) => lex.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+/// SINGLE-precision twin of [`parse_xsd_float`], for `xsd:float` literals.
+///
+/// The lexical is parsed `&str -> f32` DIRECTLY. The pre-fix path parsed at `f64` and then
+/// narrowed (`parse_xsd_float(lex)? as f32`), which rounds twice, and two roundings are not
+/// the correctly-rounded single conversion XSD requires — so an `xsd:float` literal could be
+/// ingested one ULP off and, in THIS crate, scored as conformant. Witness (verified by exact
+/// rational arithmetic): `"4611686293305294849"` has correctly-rounded `f32` bits
+/// `0x5E80_0001`, but parsing at `f64` and narrowing yields `0x5E80_0000`.
+/// [OPUS-5] issue #3796
+fn parse_xsd_float_single(lex: &str) -> Option<f32> {
+    match lex {
+        "INF" | "+INF" => Some(f32::INFINITY),
+        "-INF" => Some(f32::NEG_INFINITY),
+        "NaN" => Some(f32::NAN),
+        _ if xsd_float_body_wellformed(lex) => lex.parse::<f32>().ok(),
+        _ => None,
     }
 }
 
@@ -776,6 +799,67 @@ mod tests {
         assert!(entails(&closure, &conclusion, &d), "D value equality");
         let d0 = Recognized::default();
         assert!(!entails(&closure, &conclusion, &d0), "unrecognized: lexical only");
+    }
+
+    /// `xsd:float` literals must be ingested with a SINGLE rounding to single precision.
+    ///
+    /// Parsing at `f64` and narrowing rounds twice, and this crate SCORES conformance — a
+    /// value that is one ULP off here is recorded as conformant. The fixtures are exact-
+    /// rational-verified: `H = (2m+1) * 2^38` is an f32 midpoint exactly representable in
+    /// f64, so `H +/- 1` rounds to `H` in f64 and then ties-to-even to the WRONG neighbour.
+    /// Asserted on `to_bits()` — the two candidates are adjacent floats that format alike.
+    /// [OPUS-5] issue #3796
+    #[test]
+    fn xsd_float_value_is_single_rounded_bit_exact() {
+        let float = format!("{XSD}float");
+        // true value ABOVE the midpoint -> correct rounding is UP (0x5E800001)
+        assert_eq!(
+            xsd_value("4611686293305294849", &float),
+            Some(XsdVal::F32(0x5E80_0001))
+        );
+        assert_eq!(
+            xsd_value("4.611686293305294849E18", &float),
+            Some(XsdVal::F32(0x5E80_0001))
+        );
+        // true value BELOW the midpoint -> correct rounding is DOWN (also 0x5E800001)
+        assert_eq!(
+            xsd_value("4611686843061108735", &float),
+            Some(XsdVal::F32(0x5E80_0001))
+        );
+        // The f64-then-narrow route lands on the two ADJACENT floats instead — pinned so
+        // the fixtures cannot silently stop witnessing the defect.
+        assert_eq!(
+            (parse_xsd_float("4611686293305294849").expect("well-formed") as f32).to_bits(),
+            0x5E80_0000
+        );
+        assert_eq!(
+            (parse_xsd_float("4611686843061108735").expect("well-formed") as f32).to_bits(),
+            0x5E80_0002
+        );
+    }
+
+    /// Acceptance (which lexicals are well-formed) must be IDENTICAL at both widths — the
+    /// single-precision parser shares `xsd_float_body_wellformed` with the f64 one.
+    #[test]
+    fn parse_xsd_float_single_accepts_exactly_what_the_f64_parser_accepts() {
+        for lex in [
+            "INF", "+INF", "-INF", "NaN", "0", "-0", "1", "1.0E3", "-2.5", "1e-7",
+            // Rust-FromStr-only spellings XSD rejects, plus junk
+            "inf", "Infinity", "nan", "0x1p3", "1.0f", "2.0d", "", "abc",
+        ] {
+            assert_eq!(
+                parse_xsd_float_single(lex).is_some(),
+                parse_xsd_float(lex).is_some(),
+                "float/double lexical acceptance disagrees on {:?}",
+                lex
+            );
+        }
+        assert!(parse_xsd_float_single("NaN").expect("NaN").is_nan());
+        assert_eq!(parse_xsd_float_single("-INF"), Some(f32::NEG_INFINITY));
+        assert_eq!(
+            parse_xsd_float_single("-0.0").map(f32::to_bits),
+            Some((-0.0f32).to_bits())
+        );
     }
 
     #[test]
