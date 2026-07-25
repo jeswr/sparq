@@ -2,15 +2,12 @@
 //
 // The policy surface is captured-output tier: sparq-policy is an opt-in native crate
 // (evaluate() is pure Rust, no I/O) the wasm bundles never carry, and the static site
-// has no backend, so src/lib/policy.ts REPLAYS the evaluate() OUTCOME for each
-// (policy, request) pair. The cited crate test in crates/sparq-policy/tests/odrl_eval.rs
-// pins that OUTCOME (allow/deny) for the same policy shape; the exact rule-IRI ids and
-// matched/unmet strings are reproduced from eval.rs's output FORMAT, not asserted
-// verbatim by those tests (see the honesty contract in src/lib/policy.ts).
+// has no backend, so src/lib/policy.ts REPLAYS evaluate() for each (policy, request)
+// pair. This suite sends those exact pairs through the real native evaluator and
+// compares its complete Decision with the captured object verbatim.
 //
-// These tests pin the pasted decisions' INTERNAL CONSISTENCY so a silent hand-edit (the
-// fabrication failure mode) flips the unit gate red — WITHIN the limits of a JS suite
-// that cannot re-run the Rust evaluator, so it checks SHAPE, not evaluator equivalence:
+// The native comparison proves evaluator equivalence. The remaining tests also pin the
+// pasted decisions' INTERNAL CONSISTENCY and make failures more diagnostic:
 //   * the fail-closed invariant — a PERMIT has exactly a matched rule AND no unmet
 //     caveat; a DENY always carries an explanation (never a silent no);
 //   * every matched rule id actually appears in that scenario's ODRL Turtle (no
@@ -25,8 +22,72 @@
 // Run via `npm run test:unit`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 
 import { SCENARIOS, ODRL_NS, requestLine } from "../src/lib/policy.ts";
+
+const valueKind = (left) =>
+  left === "dateTime"
+    ? "datetime"
+    : left === "purpose"
+      ? "iri"
+      : left === "count"
+        ? "number"
+        : "string";
+
+test("captured decisions equal the real Rust evaluator output verbatim", () => {
+  // [GPT-5] #3557 — pass the imported objects themselves to the native harness: no
+  // second policy/request fixture can drift independently from the walkthrough.
+  const fixtureDir = mkdtempSync(join(tmpdir(), "sparq-policy-site-"));
+  try {
+    for (const scenario of SCENARIOS) {
+      const turtlePath = join(fixtureDir, `${scenario.id}.ttl`);
+      writeFileSync(turtlePath, scenario.turtle);
+      for (const variant of scenario.variants) {
+        const args = [
+          "run",
+          "--quiet",
+          "--manifest-path",
+          "test/fixtures/policy-evaluator/Cargo.toml",
+          "--",
+          turtlePath,
+          expandIri(variant.action),
+          variant.target ?? "-",
+          variant.party ?? "-",
+        ];
+        for (const context of variant.context ?? []) {
+          args.push("context", valueKind(context.left), expandIri(context.left), context.value);
+        }
+        for (const duty of variant.discharged ?? []) args.push("discharge", expandIri(duty));
+
+        const result = spawnSync("cargo", args, { cwd: process.cwd(), encoding: "utf8" });
+        assert.equal(
+          result.status,
+          0,
+          `${scenario.id}/${variant.id}: Rust fixture failed\n${result.stderr}`,
+        );
+        let decision;
+        try {
+          decision = JSON.parse(result.stdout);
+        } catch (error) {
+          assert.fail(
+            `${scenario.id}/${variant.id}: Rust fixture emitted invalid JSON: ${error.message}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+          );
+        }
+        assert.deepEqual(
+          decision,
+          variant.decision,
+          `${scenario.id}/${variant.id}: captured decision drifted from sparq_policy::evaluate`,
+        );
+      }
+    }
+  } finally {
+    rmSync(fixtureDir, { recursive: true, force: true });
+  }
+});
 
 test("scenarios are well-formed and uniquely identified", () => {
   assert.ok(SCENARIOS.length >= 3, "at least a few scenarios");
@@ -91,8 +152,7 @@ test("every matched rule id is grounded in the scenario's Turtle", () => {
 // crates/sparq-policy/src/eval.rs): a prohibition carve-out, a constraint/logical caveat,
 // an undischarged-duty caveat, a fail-closed "no permission" default, or a rule
 // action/target/assignee non-match. A caveat that matches none of these is a fabricated
-// free-text string, not evaluator output — so the gate rejects it. This checks SHAPE, not
-// that eval.rs produced this exact string for this input (a JS suite cannot re-run Rust).
+// free-text string, not evaluator output — so the diagnostic gate rejects it.
 const UNMET_SHAPES = [
   /^prohibition .+ matches the request$/,
   /^rule .+ constraint \(.+\) unsatisfied$/,
@@ -128,7 +188,7 @@ test("every verdict cites provenance and every caveat is an eval.rs output shape
 // test parses each constraint caveat and anchors all four parts to the scenario's own
 // Turtle, so an operand substitution (the round-2 fabrication failure mode) fails the
 // gate — shape alone cannot catch it.
-const CONSTRAINT_CAVEAT = /^rule (<[^>]+>) constraint \((\S+) (\S+) (.+)\) unsatisfied$/;
+const CONSTRAINT_CAVEAT = /^rule (\S+) constraint \((\S+) (\S+) (.+)\) unsatisfied$/;
 
 test("every constraint caveat's operands anchor to the policy's own constraint", () => {
   let anchored = 0;

@@ -15,7 +15,7 @@
 # NEVER a sparq win by omission). Timing basis is each engine's own loaded-graph
 # materialization report (see materialize-same-box.sh METHODOLOGY).
 #
-# Envelopes: $OUT/materialize-lubm<univ>-<UTC>.json + $OUT/hdt-snikmeta-<UTC>.json,
+# Envelopes: $OUT/materialize-lubm<univ>-<UTC>.json + $OUT/hdt-lubm<univ>-<UTC>.json,
 # CANONICAL=1. Every envelope is ALSO cat'd into the gather log between
 # ===ENVELOPE-BEGIN/END=== markers so `aws ec2 get-console-output` can recover results
 # even if the SSH pull path dies (envelopes are a few KB). Writes /root/GATHER_DONE when
@@ -28,6 +28,7 @@
 #   MAT_ITERS="5 3"     best-of-N per scale   TIMEOUT_S=3600   per-engine cap, s
 #   JAVA_XMX=24g        Jena heap (the JVM default ~25%-of-RAM OOMs at univ=100)
 #   HDT=1               also run the HDT decode gather        OUT=<repo>/bench/gather-out
+#   HDT_LUBM_UNIV=1     LUBM scale converted to HDT for the decode comparison
 set -uo pipefail   # NOT -e: one failed engine/build must never kill the gather
 
 # [FABLE-5] sq-hmd7l.32 — DEFINE HOME/USER/LOGNAME BEFORE ANYTHING ELSE. This script is
@@ -65,6 +66,7 @@ MAT_ITERS="${MAT_ITERS:-5 3}"
 TIMEOUT_S="${TIMEOUT_S:-3600}"
 JAVA_XMX="${JAVA_XMX:-24g}"
 HDT="${HDT:-1}"
+HDT_LUBM_UNIV="${HDT_LUBM_UNIV:-1}"
 OUT="${OUT:-$ROOT/bench/gather-out}"
 
 # Pinned competitor sources (recorded into the envelopes as VLOG_VERSION/NEMO_VERSION).
@@ -159,13 +161,31 @@ CANONICAL=1 LUBM_UNIVS="$LUBM_UNIVS" MAT_ITERS="$MAT_ITERS" TIMEOUT_S="$TIMEOUT_
 
 # ---- 5. the HDT decode gather (same box, afterwards — sq-hmd7l.33) --------------------
 if [ "$HDT" = "1" ]; then
-  step "build sparq-hdt bench_oracle"
-  if cargo build --release -p sparq-hdt --example bench_oracle; then
-    step "hdt-same-box.sh CANONICAL=1"
-    CANONICAL=1 OUT_DIR="$OUT" bash scripts/bench/hdt-same-box.sh \
+  # [SONNET-4.6] sq-45zbg — build a scale-representative archive with the same
+  # hdt-cpp image used for decode. gen.sh is deterministic for seed 0; combining
+  # ABox + TBox gives the gather a self-contained LUBM corpus.
+  step "generate LUBM($HDT_LUBM_UNIV) HDT archive"
+  HDT_INPUT_DIR="/tmp/hdt-lubm${HDT_LUBM_UNIV}"
+  mkdir -p "$HDT_INPUT_DIR"
+  mapfile -t HDT_ARTS < <("$ROOT/bench/lubm/gen.sh" "$HDT_LUBM_UNIV" 0)
+  HDT_NT="$HDT_INPUT_DIR/lubm${HDT_LUBM_UNIV}.nt"
+  HDT_ARCHIVE="$HDT_INPUT_DIR/lubm${HDT_LUBM_UNIV}.hdt"
+  if [ "${#HDT_ARTS[@]}" -ge 2 ] \
+     && cat "${HDT_ARTS[0]}" "${HDT_ARTS[1]}" > "$HDT_NT" \
+     && docker run --rm -v "$HDT_INPUT_DIR:/data" rdfhdt/hdt-cpp:latest \
+          rdf2hdt "/data/$(basename "$HDT_NT")" "/data/$(basename "$HDT_ARCHIVE")"; then
+    step "build sparq-hdt bench_oracle"
+    cargo build --release -p sparq-hdt --example bench_oracle || true
+  else
+    step "WARN: LUBM-to-HDT generation failed — hdt gather skipped"
+  fi
+  if [ -x "$ROOT/target/release/examples/bench_oracle" ] && [ -f "$HDT_ARCHIVE" ]; then
+    step "hdt-same-box.sh CANONICAL=1 archive=$HDT_ARCHIVE"
+    CANONICAL=1 OUT_DIR="$OUT" HDT_ARCHIVE="$HDT_ARCHIVE" \
+      bash scripts/bench/hdt-same-box.sh \
       && step "hdt gather done" || step "WARN: hdt-same-box.sh exited non-zero"
   else
-    step "WARN: bench_oracle build failed — hdt gather skipped"
+    step "WARN: bench_oracle or generated HDT archive absent — hdt gather skipped"
   fi
 fi
 
