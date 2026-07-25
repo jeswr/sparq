@@ -509,7 +509,7 @@
       "note": "Committed circuit_size baseline of the hidden-index revocation member (Merkle inclusion + bit-unset at depth 10) - the cheapest member of the family. Deterministic artifact fact under the pinned toolchain. [FABLE-5 sq-3kd2g.1]"
     },
     "zkarch.gates_hidden_issuer": {
-      "value": 16946,
+      "value": 24452,
       "unit": "ultra_honk-gates",
       "environment": "canonical",
       "kind": "gate-count",

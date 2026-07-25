@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-07-06T01:16:00Z",
+  "timestamp": "2026-07-25T05:33:20Z",
   "tool": "bb gates -s ultra_honk",
   "bb_version": "5.0.0-nightly.20260324",
   "nargo_version": "nargo version = 1.0.0-beta.21",
@@ -19,7 +19,7 @@
     "filter_value_dl_decimal": { "circuit_size": 3070 },
     "filter_value_dl_f64": { "circuit_size": 4502 },
     "filter_value_dl_int": { "circuit_size": 3033 },
-    "hidden_issuer_d4": { "circuit_size": 16946 },
+    "hidden_issuer_d4": { "circuit_size": 24452 },
     "holder_pok": { "circuit_size": 10334 },
     "holder_set_d4": { "circuit_size": 10650 },
     "join_eq_na16_nb16": { "circuit_size": 7025 },
