@@ -25,6 +25,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import re
 import sys
 import unittest
 from contextlib import redirect_stdout
@@ -1834,14 +1835,20 @@ class TestDraftTierIntegrity(unittest.TestCase):
     # ---- stale draft-tier leg-set belt (full-tier pull_request runs) --------
     def test_full_tier_holds_then_reds_on_unsuperseded_draft_select(self):
         """A full-tier pull_request gate over a draft-tier-assembled leg set must
-        WAIT (the ready_for_review re-run is expected), and at budget exhaustion
-        must RED — never conclude success over draft-tier legs."""
+        WAIT (the ready_for_review re-run is expected) and must RED — never
+        conclude success over draft-tier legs.
+
+        [OPUS-5] #3781: with the PR STILL A DRAFT the hold is unsatisfiable, so the
+        refusal now arrives via the fast path instead of at budget exhaustion. The
+        verdict (exit 1) and the hold itself are unchanged; the budget-exhaustion
+        belt is pinned by TestUnsatisfiableHoldFastFail
+        ::test_unreadable_draft_state_falls_back_to_the_budget_belt."""
         polls = [[R(SELECT_DRAFT, started="2026-07-17T10:00:00Z", rid=1), GREEN]]
         code, out = run(tiny_cfg(), polls,
                         tier_ctx=draft_ctx(counting(True), run_tier="full"))
         self.assertEqual(code, 1)
         self.assertIn("awaiting the full-tier re-run", out)
-        self.assertIn("stale draft-tier run, full run pending", out)
+        self.assertIn("UNSATISFIABLE draft-tier hold", out)
 
     def test_full_tier_passes_once_full_select_supersedes(self):
         draft_sel = R(SELECT_DRAFT, started="2026-07-17T10:00:00Z", rid=1)
@@ -1886,8 +1893,10 @@ class TestDraftTierIntegrity(unittest.TestCase):
     def test_first_full_select_must_not_release_all_draft_instances(self):
         """REGRESSION (critic finding 2): with four draft-marked selects and only
         ONE later full-tier select ever registering, the gate must hold and then
-        RED at budget exhaustion — never conclude success over the three
-        workflows whose full-tier runs never registered any check-runs."""
+        RED — never conclude success over the three workflows whose full-tier runs
+        never registered any check-runs. ([OPUS-5] #3781: the PR is still a draft, so
+        the RED now arrives on the unsatisfiable-hold fast path; the COUNT — the
+        load-bearing part of this regression — is asserted either way.)"""
         drafts = [R(SELECT_DRAFT, started=f"2026-07-17T10:00:0{i}Z", rid=i)
                   for i in range(1, 5)]
         one_full = R(SELECT_FULL, started="2026-07-17T10:05:00Z", rid=99)
@@ -1896,7 +1905,6 @@ class TestDraftTierIntegrity(unittest.TestCase):
                         tier_ctx=draft_ctx(counting(True), run_tier="full"))
         self.assertEqual(code, 1)
         self.assertIn("awaiting the full-tier re-run", out)
-        self.assertIn("stale draft-tier run, full run pending", out)
         self.assertIn("3 draft-marked select instance(s)", out)
 
     def test_full_tier_non_pr_event_ignores_draft_selects(self):
@@ -2044,6 +2052,498 @@ class TestDraftTierIntegrity(unittest.TestCase):
                 url="https://github.com/o/r/actions/runs/111/job/5")
         code, out = run(tiny_cfg(), [[art, GREEN]])
         self.assertEqual(code, 0, out)
+
+
+SELECT_NO_LEG = "select / select (change-based test selection, no-leg)"
+
+
+def _job(name, *, run_id, status="completed", conclusion="success", jid=0,
+         started="2026-07-25T07:15:40Z"):
+    """An Actions Jobs-API payload as make_fetch_attempt_jobs returns it."""
+    return {"id": jid or run_id * 10, "name": name, "status": status,
+            "conclusion": conclusion, "started_at": started,
+            "html_url": f"https://github.test/o/r/actions/runs/{run_id}/job/{jid or 1}"}
+
+
+def _check(name, *, run_id, status="completed", conclusion="success", rid=0,
+           started="2026-07-25T07:15:40Z"):
+    """A commit check-run whose details_url locates its Actions run (the locator
+    no_leg_run_ids + the newest-run resolver both key off)."""
+    return R(name, status=status, conclusion=conclusion, rid=rid or run_id,
+             started=started,
+             url=f"https://github.test/o/r/actions/runs/{run_id}/job/{rid or 1}")
+
+
+class TestNoLegRunExclusion(unittest.TestCase):
+    """[OPUS-5] #3781 — a run that assembled NO LEGS is not evidence, so it must
+    never become the authoritative newest run for its workflow.
+
+    THE MEASURED SHAPE (sparq #3472, 2026-07-25). The PR was readied at 07:15:37 and
+    four full-tier runs started (CI's real matrix ran until 07:34:08). At 07:28:50 the
+    review pipeline re-drafted it and flipped `review:needs`; that label event started
+    8 more runs which completed within ~90s with EVERY job skipped except the
+    unconditional `select` — named `…, draft-tier`, because the PR was a draft again.
+    Two independent harms followed, and both are pinned here:
+      (1) four draft-marked select instances appeared with no possible full-tier
+          successor, so the gate burned all 155 polls and refused (the #3781 deadlock);
+      (2) newest-run resolution is per-workflow, so those vacuous runs BECAME
+          authoritative for CI/Benchmarks/feature-matrix/fuzz — meaning the real,
+          still-in-flight legs were discarded and replaced by `skipped` ones.
+
+    Harm (2) is why the fix ignores the RUN rather than merely neutralising the select
+    NAME: neutralising the name alone would have turned the deadlock into a GREEN gate
+    rendered over legs that had not finished. Every test below drives the PRODUCTION
+    call site (WorkflowRunResolver.__call__), not resolve_newest_workflow_runs
+    directly, so dropping the `no_leg_ids=` argument there is caught."""
+
+    def _resolver(self, checks_by_poll, workflows_by_poll):
+        """A WorkflowRunResolver over scripted (checks, workflows) polls."""
+        state = {"i": 0}
+
+        def nth(seq):
+            i = min(state["i"], len(seq) - 1)
+            return [dict(x) for x in seq[i]]
+
+        def fetch_checks():
+            return nth(checks_by_poll)
+
+        def fetch_workflows():
+            out = nth(workflows_by_poll)
+            state["i"] += 1
+            return out
+
+        jobs = {}
+        posts = []
+
+        def fetch_attempt_jobs(run_id, attempt):
+            return [dict(j) for j in jobs.get(run_id, [])]
+
+        resolver = g.WorkflowRunResolver(
+            self_run_id="999",
+            fetch_checks=fetch_checks,
+            fetch_workflows=fetch_workflows,
+            fetch_attempt_jobs=fetch_attempt_jobs,
+            redispatch=posts.append,
+        )
+        resolver.jobs = jobs
+        resolver.posts = posts
+        return resolver
+
+    def _drive(self, resolver, cfg=None, tier_ctx=None, depth=0):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = g.run_gate(cfg or tiny_cfg(), resolver, lambda: depth,
+                              sleep_fn=lambda s: None, tier_ctx=tier_ctx)
+        return code, out.getvalue()
+
+    # ---- (a) the suppression -------------------------------------------------
+    def test_a_label_flip_no_op_run_cannot_erase_a_real_runs_FAILURE(self):
+        """(a) THE SHARPEST FORM. The real full-tier run FAILED. A later label-flip
+        no-op run of the same workflow must NOT supersede it — a red must survive a
+        label flip. Mutating the suppression away (dropping `no_leg_ids=` at the call
+        site, or making no_leg_run_ids return an empty set) makes the vacuous run
+        newest, its `skipped` legs satisfy the gate, and this GREENS."""
+        real = W(101, 7, name="CI", conclusion="failure",
+                 created="2026-07-25T07:15:37Z")
+        flip = W(102, 7, name="CI", conclusion="success",
+                 created="2026-07-25T07:28:57Z")
+        checks = [
+            _check("test shard", run_id=101, conclusion="failure", rid=1),
+            _check(SELECT_FULL, run_id=101, rid=2),
+            _check("test shard", run_id=102, conclusion="skipped", rid=3,
+                   started="2026-07-25T07:29:23Z"),
+            _check(SELECT_NO_LEG, run_id=102, rid=4,
+                   started="2026-07-25T07:29:23Z"),
+        ]
+        resolver = self._resolver([checks], [[real, flip]])
+        resolver.jobs[101] = [_job("test shard", run_id=101, conclusion="failure"),
+                              _job("select / select (change-based test selection)",
+                                   run_id=101, jid=2)]
+        resolver.jobs[102] = [_job("test shard", run_id=102, conclusion="skipped"),
+                              _job(SELECT_NO_LEG, run_id=102, jid=2)]
+        code, out = self._drive(resolver)
+        self.assertEqual(
+            code, 1,
+            "a guarded label-flip no-op run must NOT supersede the real run and erase "
+            "its FAILURE — the gate went GREEN over a vacuous all-skipped run "
+            f"(#3781). Output:\n{out}")
+        self.assertIn("declared NO LEGS", out)
+
+    def test_a_label_flip_no_op_run_cannot_discard_an_inflight_real_run(self):
+        """(a, second harm) The real run is STILL RUNNING when the flip lands (the
+        measured #3472 timing: real CI finished 07:34:08, the flip runs completed by
+        07:29:47). The gate must keep WAITING on the real legs and conclude on them —
+        not conclude immediately over the flip run's skipped ones."""
+        inflight = W(101, 7, name="CI", status="in_progress", conclusion=None,
+                     created="2026-07-25T07:15:37Z")
+        done = W(101, 7, name="CI", conclusion="success",
+                 created="2026-07-25T07:15:37Z")
+        flip = W(102, 7, name="CI", conclusion="success",
+                 created="2026-07-25T07:28:57Z")
+        pending_checks = [
+            _check("test shard", run_id=101, status="in_progress", conclusion=None,
+                   rid=1),
+            _check(SELECT_FULL, run_id=101, rid=2),
+            _check(SELECT_NO_LEG, run_id=102, rid=4,
+                   started="2026-07-25T07:29:23Z"),
+        ]
+        done_checks = [
+            _check("test shard", run_id=101, rid=1),
+            _check(SELECT_FULL, run_id=101, rid=2),
+            _check(SELECT_NO_LEG, run_id=102, rid=4,
+                   started="2026-07-25T07:29:23Z"),
+        ]
+        resolver = self._resolver(
+            [pending_checks, pending_checks, done_checks],
+            [[inflight, flip], [inflight, flip], [done, flip]],
+        )
+        resolver.jobs[101] = [_job("test shard", run_id=101),
+                              _job(SELECT_FULL, run_id=101, jid=2)]
+        code, out = self._drive(resolver)
+        self.assertEqual(code, 0, out)
+        self.assertIn(
+            "attempt 1: 3 check-run(s), 2 running", out,
+            "the in-flight real leg must still be counted as PENDING — a vacuous "
+            "label-flip run superseded it, so the gate stopped waiting for the real "
+            f"matrix (#3781). Output:\n{out}")
+
+    def test_the_no_leg_select_creates_no_draft_tier_hold(self):
+        """(a, the deadlock itself) The exact #3472 head: a completed real full-tier
+        run plus a later label-flip no-op run, gate at FULL tier, PR currently a
+        DRAFT. The no-leg select must create NO hold — with the pre-fix
+        `, draft-tier` name this is precisely the state that burned 155 polls."""
+        real = W(101, 7, name="CI", created="2026-07-25T07:15:37Z")
+        flip = W(102, 7, name="CI", created="2026-07-25T07:28:57Z")
+        checks = [
+            _check("test shard", run_id=101, rid=1),
+            _check(SELECT_FULL, run_id=101, rid=2),
+            _check(SELECT_NO_LEG, run_id=102, rid=4,
+                   started="2026-07-25T07:29:23Z"),
+        ]
+        resolver = self._resolver([checks], [[real, flip]])
+        resolver.jobs[101] = [_job("test shard", run_id=101),
+                              _job(SELECT_FULL, run_id=101, jid=2)]
+        code, out = self._drive(
+            resolver, tier_ctx=draft_ctx(counting(True), run_tier="full"))
+        self.assertEqual(code, 0, out)
+        self.assertNotIn(
+            "awaiting the full-tier re-run", out,
+            "a no-leg select must not manufacture a draft-tier hold: its run "
+            "assembled zero legs and no full-tier successor can ever exist while "
+            f"the PR is a draft (#3781). Output:\n{out}")
+        self.assertIn("PASSED", out)
+
+    def test_a_cancelled_no_leg_run_is_never_redispatched(self):
+        """(a) The exclusion must reach the #3505 REDISPATCH decision too, not only the
+        check-resolution pass. A cancelled label-flip no-op run would otherwise look
+        like `the newest run of this workflow was cancelled`, burning the once-only
+        `actions: write` re-run POST on a vacuous run and then REDding the gate with
+        `superseded-legs, re-run required`. All three consumers of `newest` (redispatch,
+        the attempt-jobs inventory, resolution) must agree on who is authoritative."""
+        real = W(101, 7, name="CI", created="2026-07-25T07:15:37Z")
+        cancelled_flip = W(102, 7, name="CI", conclusion="cancelled",
+                           created="2026-07-25T07:28:57Z")
+        checks = [
+            _check("test shard", run_id=101, rid=1),
+            _check(SELECT_FULL, run_id=101, rid=2),
+            _check(SELECT_NO_LEG, run_id=102, conclusion="cancelled", rid=4,
+                   started="2026-07-25T07:29:23Z"),
+        ]
+        resolver = self._resolver([checks], [[real, cancelled_flip]])
+        resolver.jobs[101] = [_job("test shard", run_id=101),
+                              _job(SELECT_FULL, run_id=101, jid=2)]
+        code, out = self._drive(resolver)
+        self.assertFalse(
+            resolver.posts,
+            "a cancelled label-flip NO-OP run must never be re-dispatched — it "
+            "assembled no legs, so re-running it produces no evidence and its "
+            f"cancellation is not a superseded-legs event (#3781). Output:\n{out}")
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("superseded-legs, re-run required", out)
+
+    # ---- (b) the discrimination: draft-tier CI must NOT be blinded -----------
+    def test_a_genuine_draft_tier_run_stays_authoritative_and_still_holds(self):
+        """(b) THE OTHER HALF. A real DRAFT-TIER run (a draft `synchronize`, which
+        assembles a genuinely reduced leg set) must NOT be ignored: it stays the
+        authoritative newest run AND its draft-marked select still creates the hold
+        that keeps draft-assembled legs out of the merge queue. A fix that ignored
+        draft-tier runs too would blind draft-tier CI completely."""
+        draft_run = W(201, 7, name="CI", created="2026-07-25T06:00:00Z")
+        checks = [
+            _check("test shard", run_id=201, rid=1, started="2026-07-25T06:00:10Z"),
+            _check(SELECT_DRAFT, run_id=201, rid=2, started="2026-07-25T06:00:10Z"),
+        ]
+        resolver = self._resolver([checks], [[draft_run]])
+        resolver.jobs[201] = [_job("test shard", run_id=201,
+                                   started="2026-07-25T06:00:10Z"),
+                              _job(SELECT_DRAFT, run_id=201, jid=2,
+                                   started="2026-07-25T06:00:10Z")]
+        code, out = self._drive(
+            resolver, tier_ctx=draft_ctx(counting(True), run_tier="full"))
+        self.assertEqual(code, 1, out)
+        self.assertNotIn(
+            "declared NO LEGS", out,
+            "a genuinely draft-tier run assembles REAL (reduced) legs and must stay "
+            f"authoritative — the fix must not blind draft-tier CI. Output:\n{out}")
+        self.assertIn("awaiting the full-tier re-run", out,
+                      "the draft-tier hold must still be created for a real "
+                      "draft-assembled leg set")
+        self.assertIn("test shard", [r.get("name") for r in resolver()],
+                      "the draft-tier run's own legs must still be judged")
+
+    # ---- predicate-level belts ----------------------------------------------
+    def test_marker_predicates_discriminate_all_three_tiers(self):
+        self.assertEqual(g.NO_LEG_MARKER, ", no-leg")
+        self.assertEqual(g.select_tier(SELECT_FULL), "full")
+        self.assertEqual(g.select_tier(SELECT_DRAFT), "draft")
+        self.assertEqual(g.select_tier(SELECT_NO_LEG), "no-leg")
+        self.assertTrue(g.is_no_leg_select(SELECT_NO_LEG))
+        self.assertFalse(g.is_no_leg_select(SELECT_DRAFT))
+        self.assertFalse(g.is_no_leg_select(SELECT_FULL))
+        self.assertFalse(g.is_draft_tier(SELECT_NO_LEG),
+                         "a no-leg select must never read as draft-tier")
+        self.assertTrue(g.is_select(SELECT_NO_LEG))
+        self.assertFalse(g.is_advisory(SELECT_NO_LEG))
+        self.assertEqual(g.normalized_name(SELECT_NO_LEG), SELECT_FULL)
+
+    def test_a_compound_select_can_never_declare_its_run_evidence_free(self):
+        """FAIL-CLOSED hardening: only the PURE ci-select pre-job may make its run
+        non-authoritative. A compound job that carries additional gating evidence
+        (fv-select + fv-manifest) keeps its run authoritative even if the marker
+        drifted onto its name."""
+        compound = ("fv-select (change-based test selection, no-leg) + "
+                    "fv-manifest (proof inventory)")
+        self.assertFalse(g.is_no_leg_select(compound))
+        self.assertEqual(
+            g.no_leg_run_ids([_check(compound, run_id=303, rid=1)]), set(),
+            "an evidence-bearing compound job must not be able to make its whole "
+            "run a non-event")
+
+    def test_no_leg_run_ids_reads_the_run_locator(self):
+        self.assertEqual(
+            g.no_leg_run_ids([_check(SELECT_NO_LEG, run_id=102, rid=4)]), {102})
+        self.assertEqual(g.no_leg_run_ids([_check(SELECT_FULL, run_id=101, rid=1)]),
+                         set())
+        # No parseable run id => nothing to exclude (fail back to the old behaviour).
+        self.assertEqual(g.no_leg_run_ids([R(SELECT_NO_LEG)]), set())
+
+    def test_a_no_leg_select_can_neither_create_nor_discharge_a_hold(self):
+        """The predicate-level belt (defence in depth: in production the whole run is
+        already dropped upstream). A no-leg instance is in NEITHER pool."""
+        no_leg = R(SELECT_NO_LEG, started="2026-07-25T07:29:23Z", rid=4)
+        draft = R(SELECT_DRAFT, started="2026-07-25T06:00:00Z", rid=1)
+        self.assertEqual(g.draft_selects_unsuperseded([no_leg]), [],
+                         "a no-leg select must not CREATE a hold (#3781)")
+        self.assertEqual(
+            g.draft_selects_unsuperseded([draft, no_leg]), [SELECT_DRAFT],
+            "a no-leg select must not DISCHARGE a real draft-tier hold — "
+            "evidence-free selection can never stand in for the full-tier re-run")
+
+    def test_a_no_leg_success_does_not_forgive_a_cancelled_real_select(self):
+        """forgive_superseded is tier-aware in THREE values now: a later no-leg
+        success must not excuse a cancelled draft-tier select (which would release
+        the hold by deleting the instance that demands a successor)."""
+        cancelled_draft = R(SELECT_DRAFT, conclusion="cancelled",
+                            started="2026-07-25T06:00:00Z", rid=1)
+        later_no_leg = R(SELECT_NO_LEG, started="2026-07-25T07:29:23Z", rid=4)
+        kept, forgiven = g.forgive_superseded([cancelled_draft, later_no_leg])
+        self.assertEqual(forgiven, [],
+                         "a no-leg select must not forgive a cancelled real-tier "
+                         "select")
+        self.assertIn(cancelled_draft, kept)
+        # The intended un-draft flow is untouched: a later FULL-tier select still does.
+        later_full = R(SELECT_FULL, started="2026-07-25T07:29:23Z", rid=5)
+        _, forgiven2 = g.forgive_superseded([cancelled_draft, later_full])
+        self.assertEqual(forgiven2, [cancelled_draft])
+
+
+class TestUnsatisfiableHoldFastFail(unittest.TestCase):
+    """[OPUS-5] #3781 ask 2 — the gate can DETECT an unsatisfiable hold, so it must
+    say so instead of burning the budget.
+
+    Measured on #3472/#3468/#3681: the gate spent all 155 poll attempts printing
+    `awaiting the full-tier re-run (draft-tier selection present)` and then emitted
+    the refusal it could have emitted at poll 3 — ~37 minutes of silent burn per
+    occurrence, on PRs with ZERO failing legs. The hold is a WAIT for the
+    ready_for_review full-tier re-runs; when every sibling has concluded, a
+    draft-marked select still lacks a successor, AND the PR is currently a draft, no
+    such re-run can happen (only a non-draft payload produces a full-tier select), so
+    the wait is unsatisfiable on arrival.
+
+    This is a `return 1` — the same verdict the budget-exhaustion belt reaches, named
+    honestly and ~1 minute in. It NEVER turns a would-be RED green."""
+
+    def _stuck(self):
+        """All-terminal set holding on one draft-marked select with no successor."""
+        return [[R(SELECT_DRAFT, started="2026-07-25T07:29:23Z", rid=1), GREEN]]
+
+    # ---- (c) detection + the naming diagnosis --------------------------------
+    def test_unsatisfiable_hold_fails_fast_with_the_naming_diagnosis(self):
+        cfg = tiny_cfg()
+        fetch = scripted(self._stuck())
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = g.run_gate(cfg, fetch, lambda: 0, sleep_fn=lambda s: None,
+                              tier_ctx=draft_ctx(counting(True), run_tier="full"))
+        text = out.getvalue()
+        self.assertEqual(code, 1, text)
+        self.assertIn("UNSATISFIABLE draft-tier hold", text)
+        self.assertIn("PR is CURRENTLY A DRAFT", text)
+        self.assertIn("1 draft-marked select instance(s)", text)
+        self.assertIn("gh pr ready", text, "the diagnosis must name the remedy")
+        self.assertLess(
+            fetch.state["calls"], cfg.max_total_polls,
+            "the unsatisfiable hold must be DETECTED, not waited out: the gate "
+            f"burned all {cfg.max_total_polls} polls on a refusal that was already "
+            "decided at poll 3 (#3781 — measured 155 polls / ~37 min per "
+            "occurrence, 3-for-3)")
+        self.assertLessEqual(
+            fetch.state["calls"], cfg.unsat_confirm_polls + cfg.min_polls,
+            f"detection must fire within the confirm window; took "
+            f"{fetch.state['calls']} polls")
+
+    def test_the_fast_path_only_ever_reds(self):
+        """No new exit-0 path: the detector's only outcome is the refusal."""
+        source = (REPO_ROOT / "scripts" / "ci_summary_gate.py").read_text(
+            encoding="utf-8")
+        self.assertEqual(
+            len(re.findall(r"^\s*return 0\b", source, re.M)), 5,
+            "the #3781 detector must add only `return 1` paths — the gate's exit-0 "
+            "surface is FIXED and enumerated in the module header (_draft_recheck's "
+            "two, render_verdict's empty-set + PASS, and _self_test's)")
+
+    # ---- (d) the discrimination: a still-settling set is NOT unsatisfiable ---
+    def test_a_still_settling_set_is_not_declared_unsatisfiable(self):
+        """(d) The hold with legs STILL RUNNING is exactly what the wait is for. It
+        must not be called unsatisfiable, and once the full-tier select lands the
+        gate must PASS."""
+        draft_sel = R(SELECT_DRAFT, started="2026-07-25T07:29:23Z", rid=1)
+        full_sel = R(SELECT_FULL, started="2026-07-25T07:35:00Z", rid=2)
+        # The pending phase deliberately outlasts min_polls + unsat_confirm_polls, so a
+        # detector that ignored `pending` WOULD fire here (and RED) before the re-run
+        # registers. That is the whole discrimination.
+        cfg = tiny_cfg(max_total_polls=12, base_polls=10)
+        polls = [
+            [draft_sel, PENDING],                    # legs still running: settling
+            [draft_sel, PENDING],
+            [draft_sel, PENDING],
+            [draft_sel, PENDING],
+            [draft_sel, PENDING],
+            [draft_sel, PENDING],
+            [draft_sel, full_sel, GREEN],            # the full-tier re-run registers
+            [draft_sel, full_sel, GREEN],
+            [draft_sel, full_sel, GREEN],
+        ]
+        code, out = run(cfg, polls,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"))
+        self.assertNotIn(
+            "UNSATISFIABLE", out,
+            "a set with siblings STILL RUNNING is genuinely settling — the hold is a "
+            "WAIT for those legs, so declaring it unsatisfiable is a false RED "
+            f"(#3781). Output:\n{out}")
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+
+    def test_a_hold_about_to_be_discharged_is_not_declared_unsatisfiable(self):
+        """(d) The confirm window's REASON. The set is all-terminal and the hold looks
+        stuck, but the full-tier select is merely a poll or two behind (check-run
+        registration lag at the un-draft moment). Firing on the FIRST observation would
+        RED a PR whose successor lands immediately afterwards; the state must persist
+        for unsat_confirm_polls first."""
+        draft_sel = R(SELECT_DRAFT, started="2026-07-25T07:29:23Z", rid=1)
+        full_sel = R(SELECT_FULL, started="2026-07-25T07:35:00Z", rid=2)
+        polls = [
+            [draft_sel, GREEN],                      # all-terminal, hold looks stuck
+            [draft_sel, GREEN],
+            [draft_sel, full_sel, GREEN],            # lag over: the successor lands
+            [draft_sel, full_sel, GREEN],
+            [draft_sel, full_sel, GREEN],
+        ]
+        code, out = run(tiny_cfg(), polls,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"))
+        self.assertNotIn(
+            "UNSATISFIABLE", out,
+            "the confirm window exists so a successor that is merely LATE is not "
+            f"mistaken for one that can never come (#3781). Output:\n{out}")
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+
+    def test_a_readied_pr_is_not_declared_unsatisfiable(self):
+        """(d) The PR reads NON-draft: the ready_for_review full-tier re-runs may
+        still be registering, so the hold is satisfiable and the detector must stand
+        down. The pre-#3781 budget-exhaustion belt then renders the refusal."""
+        fetch_draft = counting(False)
+        code, out = run(tiny_cfg(), self._stuck(),
+                        tier_ctx=draft_ctx(fetch_draft, run_tier="full"))
+        self.assertEqual(code, 1)
+        self.assertNotIn("UNSATISFIABLE", out)
+        self.assertIn("stale draft-tier run, full run pending", out)
+        self.assertGreater(fetch_draft.state["calls"], 0,
+                           "the detector must actually READ the live draft state")
+
+    def test_unreadable_draft_state_falls_back_to_the_budget_belt(self):
+        """An API failure must not manufacture a NEW failure mode: the detector
+        stands down and the gate behaves exactly as it did pre-#3781 (hold, then RED
+        at budget exhaustion via render_verdict's stale-draft-tier belt)."""
+        cfg = tiny_cfg()
+        fetch = scripted(self._stuck())
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = g.run_gate(
+                cfg, fetch, lambda: 0, sleep_fn=lambda s: None,
+                tier_ctx=draft_ctx(counting(g.FetchError("api down")),
+                                   run_tier="full"))
+        text = out.getvalue()
+        self.assertEqual(code, 1, text)
+        self.assertNotIn("UNSATISFIABLE", text)
+        self.assertIn("stale draft-tier run, full run pending", text)
+        self.assertEqual(fetch.state["calls"], cfg.max_total_polls,
+                         "an unreadable draft state must fall back to the full "
+                         "pre-#3781 budget, never to a fast RED")
+
+    def test_no_hold_means_the_draft_api_is_never_touched(self):
+        """Cost + blast-radius discipline: a full-tier run with no draft-tier hold
+        must not read the PR's draft state at all (the pre-#3781 invariant)."""
+        fetch_draft = counting(True)
+        code, out = run(tiny_cfg(), [[GREEN, GREEN2]],
+                        tier_ctx=draft_ctx(fetch_draft, run_tier="full"))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(fetch_draft.state["calls"], 0)
+
+    def test_the_startup_floor_is_respected(self):
+        """min_polls guards a startup race: no verdict — including this one — before
+        the floor, so a check set that has barely begun registering cannot be
+        declared unsatisfiable."""
+        cfg = tiny_cfg(min_polls=6, unsat_confirm_polls=1, max_total_polls=8)
+        fetch = scripted(self._stuck())
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = g.run_gate(cfg, fetch, lambda: 0, sleep_fn=lambda s: None,
+                              tier_ctx=draft_ctx(counting(True), run_tier="full"))
+        self.assertEqual(code, 1, out.getvalue())
+        self.assertGreaterEqual(fetch.state["calls"], 6,
+                                "the detector must not fire before min_polls")
+
+    def test_a_failing_leg_still_fails_FAST_ahead_of_the_hold_diagnosis(self):
+        """Precedence: a genuine failing leg is the better diagnosis, and the
+        existing fail-fast path must still win."""
+        polls = [[R(SELECT_DRAFT, started="2026-07-25T07:29:23Z", rid=1), RED,
+                  PENDING]]
+        code, out = run(tiny_cfg(), polls,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"))
+        self.assertEqual(code, 1)
+        self.assertIn("FAILED (fail-fast)", out)
+        self.assertIn("- ✗ clippy: failure", out)
+        self.assertNotIn("UNSATISFIABLE", out)
+
+    def test_a_non_pr_event_never_reaches_the_detector(self):
+        """merge_group/push run on a fresh ref and have no PR to read."""
+        fetch_draft = counting(True)
+        ctx = g.TierContext(run_tier="full", event_name="merge_group",
+                            fetch_pr_draft=fetch_draft)
+        code, out = run(tiny_cfg(), [[R(SELECT_DRAFT), GREEN]], tier_ctx=ctx)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(fetch_draft.state["calls"], 0)
 
 
 class TestMergeGroupChangeClassAccounting(unittest.TestCase):
