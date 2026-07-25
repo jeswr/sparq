@@ -51,6 +51,23 @@ dual-leaf = []
 # file read, NOT a crate edge). RECORDS claims + their epistemic basis; asserts NO
 # soundness/privacy property (estate NOT externally audited, sq-qhy4).
 secprop-annotations = ["dep:oxttl"]
+# [OPUS-4.8] sq-9c5e: the OFF-circuit W3C Verifiable-Credential ingest BRIDGE
+# (`vc_bridge` module) — verify a source VC's W3C Data-Integrity proof
+# (`eddsa-rdfc-2022` / `ecdsa-rdfc-2019`) at the HOST (off-circuit, fail-closed),
+# then re-commit under sparq's commitment pipeline and record the
+# `zk:sourceCryptosuite` provenance. OFF by default: a normal build does NOT pull
+# ed25519/p256/sha2/serde_json and the `vc_bridge` module is compiled out — the
+# default `commit`/`ingest`/`registry`/`sig` surface is byte-unchanged. The
+# `zk:sourceCryptosuite` registry SLOT (the provenance field + IRI const +
+# (de)serialization) is always present (it is just an optional registry field);
+# this feature gates the VERIFY+re-commit bridge that POPULATES it. NOT externally
+# audited (sq-qhy4); the bridge verifies the DI hashing off-circuit and asserts no
+# in-circuit / soundness property. design `research/zk-configurable-commitment-design.md` §5.
+# LEAN footprint: the bridge operates over the credential's RDF graph (its
+# canonical N-Quads — the form the DI suites hash) + raw resolved key/signature
+# bytes, so it pulls only the verify primitives (Ed25519 / ECDSA-P256 + SHA-256),
+# NOT a JSON-LD processor (`oxjsonld` does JSON-LD->RDF as a separate ingest step).
+vc-bridge = ["dep:ed25519-dalek", "dep:p256", "dep:sha2"]
 
 [dependencies]
 # sparq term model / store / engine. The engine dep turns on its non-default
@@ -107,6 +124,15 @@ ark-ed-on-bn254 = { version = "0.6", default-features = false }
 ark-ec = { version = "0.6", default-features = false }
 ark-serialize = { version = "0.6", default-features = false }
 ark-std = { version = "0.6", default-features = false, features = ["std"] }
+
+# [OPUS-4.8] sq-9c5e: OFF-circuit W3C VC ingest-bridge crypto. ALL OPTIONAL +
+# gated behind the OFF-by-default `vc-bridge` feature, so the default build pulls
+# NONE of them (the lean-default constraint). RustCrypto Ed25519 (eddsa-rdfc-2022)
+# + P-256 ECDSA (ecdsa-rdfc-2019) verify the source VC's Data-Integrity proof at
+# the HOST; sha2 is the DI hash over the RDFC10-canonical credential + proof config.
+ed25519-dalek = { version = "2", default-features = false, optional = true }
+p256 = { version = "0.13", default-features = false, features = ["ecdsa"], optional = true }
+sha2 = { version = "0.10", default-features = false, optional = true }
 
 # [dev-dependencies] removed: the W3C rdf-canon suite (and its serde_json/sha2
 # deps) moved to `sparq-canon` with the canonicalization surface (sq-0qip).

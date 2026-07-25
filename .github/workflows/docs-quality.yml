@@ -140,10 +140,10 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install PyYAML
@@ -154,11 +154,11 @@ jobs:
         # Consumers here: skill-frontmatter + the ci-scripts selection-wiring inspection.
         run: pip install --require-hashes -r .github/requirements/docs-quality.txt
       - name: Install typos
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: typos@1.47.2
       - name: Install lychee (for the site-links self-test)
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: lychee@0.23.0
 
@@ -397,6 +397,28 @@ jobs:
       # exit codes) runs on every PR — same stdlib-only, no-deps pattern as the lints above.
       - name: Self-test Miri verdict classifier (timeout-vs-UB split + exit codes)
         run: python3 scripts/miri_classify_verdict.py --self-test
+      # [FABLE-5] #3419: the issue-triage pair (scripts/triage.py + scripts/retriage.py) was
+      # self-tested ONLY inside the retriage cron (retriage.yml), so a PR that changed
+      # triage.py's promotion behavior (#2898: park no-area issues) broke retriage's fixture
+      # expectations on main SILENTLY — the KeyError surfaced a day later, out-of-band.
+      # Running both hermetic self-tests HERE (stdlib-only, no gh/network: pure label-delta
+      # fixtures) reds the offending PR instead of the next cron run.
+      - name: Self-test triage.py + retriage.py (static-triage + retriage-plan fixtures)
+        run: |
+          python3 scripts/triage.py --self-test
+          python3 scripts/retriage.py --self-test
+      # [FABLE-5] #3759 / registry#563 item 4: the transient-tolerant gh READ retry
+      # helper (scripts/gh_retry.py — bounded, transient-5xx-only, fail-closed
+      # read-allow-list so mutations/arm calls can never be wrapped) and the two arm
+      # sweeps that consume it. Their own workflows (auto-arm.yml / rearm-sweeper.yml)
+      # self-test only the DEFAULT-BRANCH copy at cron time, so a PR changing any of
+      # the three files would otherwise merge unvalidated — these hermetic self-tests
+      # (injected runners, no gh/network) red the offending PR instead.
+      - name: Self-test gh-retry helper + arm sweeps (#3759 transient tolerance)
+        run: |
+          python3 scripts/gh_retry.py --self-test
+          python3 scripts/auto-arm.py --self-test
+          python3 scripts/rearm-sweeper.py --self-test
       # [OPUS-4.8] sq-ur7o: every SHA-pinned `taiki-e/install-action` step MUST carry an
       # explicit `with: tool:`. install-action picks the tool from its @<tool> git ref; the
       # code-scanning=0 SHA-pin policy DROPS that selector, so without `with: tool:` the
@@ -416,7 +438,9 @@ jobs:
       # is validated HERE by its hermetic self-test — command-parsing + base-comparison +
       # fail-OPEN-on-error — with NO network/gh dependency (the base lookup is injected). Mirrors
       # coverage-gate.py / check-install-action-tool.py --self-test (stdlib-only, no deps).
-      - name: Self-test stacked-PR arm guard (command parse + base check + fail-open)
+      # [GPT-5.6] #3605: it also runs the real settings command from an unrelated cwd and
+      # proves a missing guard script returns an explicit allow instead of bricking every Bash.
+      - name: Self-test stacked-PR arm guard (cwd-independent + fail-open)
         run: python3 scripts/check-pr-arm-base.py --self-test
       # [OPUS-4.8] sq-53cq: anti-drift guard for the two-hop dashboard publish. The in-repo
       # source-of-truth bench/dashboard/* reaches the live site via bench.yml's "Seed Pages
@@ -562,6 +586,10 @@ jobs:
       # still-settling, idle-queue hang => RED, absolute cap bounded) are pinned by a
       # hermetic stdlib-unittest suite (NO gh, NO network — injected fetchers). A
       # regression in the gate's own logic must red CI before every merge depends on it.
+      # [GPT-5.6] #3505 adds a script-native mutation tripwire: superseded cancellation
+      # must pass, newest failure must fail, and cancelled-run redispatch must stop at one.
+      - name: "Self-test ci-summary #3505 mutations (supersession + failure + bounded redispatch)"
+        run: python3 scripts/ci_summary_gate.py --self-test
       - name: Self-test ci-summary gate loop (verdict semantics + adaptive saturation budget — sq-90cv4)
         run: python3 scripts/tests/test_ci_summary_gate.py
       # [FABLE-5] sq-fmx4u.3: the change-based test-selection stack is now
@@ -641,22 +669,30 @@ jobs:
       # only, no git/network.
       - name: Self-test check-install-action-tool.py (fixtures + live invariant — sq-1cb6l)
         run: python3 scripts/tests/test_install_action_tool.py
-      # [SONNET-4.6] sq-qcnn.32: the advisory-job registry + gate-intent placement
-      # check. Two directions, both diff-visible instead of review-catch-dependent:
+      # [SONNET-4.6] sq-qcnn.32 / [OPUS-5] #3773: the advisory-job registry + gate-intent
+      # placement check. Since #3773 the registry is LOAD-BEARING (it is the ONLY thing
+      # that makes a check-run non-gating), so this is its integrity gate. THREE
+      # directions, all diff-visible instead of review-catch-dependent:
       #   C2 — every job whose NAME matches \b(advisory|informational)\b must have
-      #        a registry entry in .github/advisory-registry.json with
-      #        {owner_bead, promotion_criteria, registered}.
-      #   C3 — no run-step invoking a gate-classified script (scripts/*gate*.py) may
-      #        live inside an advisory-named job without a `gate_script_waiver` in
-      #        the registry (lesson: #1679 gate-intent G3 self-test sat in an advisory
-      #        job = provably non-gating until caught).
+      #        a registry entry in .github/advisory-registry.json with all five of
+      #        {owner_bead, promotion_criteria, registered, workflow, job_id}.
+      #   C3 — no run-step invoking a gate-classified command may live inside an
+      #        advisory-named job without a `gate_script_waiver` in the registry.
+      #        #3773 made classification LANGUAGE-AGNOSTIC (python/shell/node + npm
+      #        aliases resolved through package.json); the old `scripts/*gate*.py`-only
+      #        rule could not see a shell or npm gate at all (lesson: #1679 gate-intent
+      #        G3 self-test sat in an advisory job = provably non-gating until caught).
+      #   C4 — every declaration must BIND to a live `workflow` + `job_id` whose CURRENT
+      #        name is exactly the key, must carry both identity halves, and must have a
+      #        literal anchor outside any ${{ … }} expression. This is what makes a
+      #        rename unable to silently flip gating status.
       # Self-test pins the gate's own classification logic; the enforce step applies
       # it over the live workflows — including this PR's own consolidated advisory job
       # + registry edit (sq-6vshe.20), so the consolidation self-validates.
       # Stdlib-only, no deps — placed here with the other structural workflow-lint steps.
-      - name: Self-test the advisory-registry checker (C2/C3 logic — sq-qcnn.32)
+      - name: Self-test the advisory-registry checker (C2/C3/C4 logic — sq-qcnn.32, #3773)
         run: python3 scripts/check-advisory-registry.py --self-test
-      - name: "Enforce advisory-job registry + gate-intent placement (C2/C3) — GATING"
+      - name: "Enforce advisory-job registry + gate-intent placement (C2/C3/C4) — GATING"
         run: python3 scripts/check-advisory-registry.py
       # [OPUS-4.8] sparq-org/sparq#3475: the fast-fix ring's ONLY privileged
       # capability is the cross-repo REGISTRY_RING_TOKEN doorbell. Because a
@@ -681,6 +717,33 @@ jobs:
         run: python3 scripts/check-fast-fix-ring-guard.py --self-test
       - name: "Enforce the fast-fix ring fail-closed cross-repo guard (#3475) — GATING"
         run: python3 scripts/check-fast-fix-ring-guard.py
+      # [OPUS-5] sparq-org/sparq#3760 — THE ARM PATH. The re-arm sweeper spent days unable
+      # to enable auto-merge at all ("Resource not accessible by integration
+      # (enablePullRequestAutoMerge)") because its job declared `contents: read` while the
+      # operation needs repository WRITE. Both arm policies now (a) probe their token's arm
+      # capability at job start and fail with ONE actionable ::error, and (b) collect per-PR
+      # arm failures instead of aborting the sweep. Their own self-tests only ran inside the
+      # scheduled arm workflows, i.e. never on the PR that broke them — so they gate HERE:
+      #   * rearm-sweeper.py --self-test / auto-arm.py --self-test — probe verdicts
+      #     (can-arm / cannot-arm / inconclusive), per-PR failure collection + continue,
+      #     one-::error-per-run, and the exit semantics (an arm failure never exits 0).
+      #     [OPUS-5] #3766 adds the STICKY-FAILURE PRECEDENCE sequences —
+      #     `collected-failure > transient-exhaustion > clean` — because collecting the
+      #     failures was only half the job: the collected state lived in a LOCAL, so a
+      #     LATER candidate's exhausted transient unwound past the accumulated-failure
+      #     check and reported ::warning + exit 0, discarding a real arm failure.
+      #   * test_arm_capability_wiring.py — cross-file pins: `contents: write` +
+      #     `pull-requests: write` on both workflows (a downgrade reproduces #3760 and is
+      #     invisible in a python-only diff), the probe step present and BEFORE the arm step
+      #     with a byte-identical GH_TOKEN expression, the remediation naming every
+      #     flippable lever, and no drift between the two deliberately duplicated copies.
+      # The wiring test needs PyYAML — installed once in the shared setup above.
+      - name: Self-test the re-arm sweeper policy (arm capability + failure isolation — #3760)
+        run: python3 scripts/rearm-sweeper.py --self-test
+      - name: Self-test the auto-arm policy (arm capability + failure isolation — #3760)
+        run: python3 scripts/auto-arm.py --self-test
+      - name: "Arm-path wiring inspection (contents: write + probe-before-arm — #3760)"
+        run: python3 scripts/tests/test_arm_capability_wiring.py
 
   # ----------------------------- ADVISORY -----------------------------
   # [FABLE-5] sq-6vshe.20: the three former advisory jobs as step-groups on ONE
@@ -699,7 +762,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 

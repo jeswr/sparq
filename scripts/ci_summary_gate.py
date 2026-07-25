@@ -9,18 +9,56 @@
 # for `gh`).
 #
 # SEMANTICS (faithful port of the bash — sq-prg4 / sq-ipkku / sq-wjth):
-#   * Discovers every check-run on the head commit EXCEPT this gate's own run
-#     (matched by an ANCHORED "/runs/<SELF_RUN_ID>(/|$)" test on details_url —
-#     strictly tighter than the old substring `contains`, which could in principle
-#     match a longer run id sharing the prefix).
+#   * Discovers every check-run AND every Actions workflow-run on the head commit.
+#     For each workflow, only its newest run/attempt is authoritative; every job
+#     from an older run is a supersession artifact, regardless of conclusion.
+#     This gate's own workflow is excluded by SELF_RUN_ID/workflow identity.
 #   * pending = check-runs with status != "completed". The settle window is re-armed
 #     ONLY by pending work (the sq-ipkku / #997 guard): an injection of
 #     already-terminal check-runs can never starve convergence.
 #   * A verdict renders only when EVERY discovered sibling is terminal, never before
 #     the MIN_POLLS startup floor, and only after SETTLE_POLLS consecutive quiet
-#     polls. Verdict: advisory/informational-named checks (whole-word, case-
-#     insensitive) are EXCLUDED; a gating check passes iff its conclusion is
-#     success/skipped/neutral; an empty stable set passes.
+#     polls. Verdict: only DECLARED-advisory checks (see §ADVISORY MUST BE DECLARED)
+#     are EXCLUDED; a gating check passes iff its conclusion is success/skipped/
+#     neutral; an empty stable set passes.
+#
+# ADVISORY MUST BE DECLARED, NOT INFERRED FROM A NAME (#3773). [OPUS-5] Until
+# 2026-07-25 this gate dropped a whole check-run from the gating set whenever its
+# DISPLAY NAME matched `\b(advisory|informational)\b`. That was a correctness hole in
+# the one check that authorises merges: any job whose name happened to contain those
+# words was neutralised wholesale — no waiver, no registry entry, no record — so
+# `gate: SUCCESS` over-promised. An adversarial audit (#3773) found FOUR genuinely
+# gating checks neutralised that way (the site determinism grep-gate, the #1740
+# browserName tripwire, the gui no-sleep-gate, the axe a11y ratchet), and two of
+# them were documented in-repo as "HARD" gates while gating nothing.
+# THE RULE NOW: a check-run is non-gating ONLY if it is EXPLICITLY DECLARED in
+# `.github/advisory-registry.json` (or is on the tiny platform-managed allow-list
+# below). Anything else GATES, whatever it is called. Consequences, deliberately:
+#   * a name token is DIAGNOSTIC ONLY — `foo (advisory)` with no registry entry
+#     GATES, and the verdict prints a loud UNDECLARED note naming it;
+#   * the registry declaration is BOUND to the job's stable identity
+#     (`workflow file` + `job_id`, enforced by scripts/check-advisory-registry.py
+#     C4), so a RENAME can never flip gating status silently: renaming a declared
+#     job makes it GATE (no entry matches the new name) and simultaneously REDs the
+#     C4 registry check until the declaration is deliberately updated;
+#   * a MISSING or unparseable registry is a LOUD, immediate exit-1 (fail-closed):
+#     the gate refuses to evaluate rather than silently gating everything;
+#   * a registry entry missing any of its five required fields — INCLUDING the
+#     `workflow`/`job_id` identity pair C4 binds to — does NOT declare anything; that
+#     check keeps gating (fail-closed per entry) and the load prints a warning. The
+#     gate and scripts/check-advisory-registry.py require the SAME five fields; when
+#     the gate required only three, a 3-field entry bought a silent exclusion that the
+#     checker reported as "all clear" (#3774 review, gpt-5.6-sol finding 2(a));
+#   * a registry key with NO literal anchor outside its `${{ … }}` expressions is
+#     REFUSED for the same reason: it compiles to `.+` and would neutralise every
+#     check-run on the commit, `gate` included (finding 2(b)).
+# The gate reads the registry from its own checkout, so ci-summary.yml's sparse
+# checkout MUST include `.github/advisory-registry.json` (pinned by a wiring test in
+# scripts/tests/test_ci_summary_gate.py). Trust model is unchanged: on
+# `pull_request` the registry, the workflow files and this script all come from the
+# same merge ref that already decided the job names, so nothing widens — the
+# difference is that an exclusion is now a reviewable diff in one file instead of an
+# invisible consequence of wording.
 #   * Exhausting the loop budget with pending == 0 renders the REAL verdict on the
 #     final all-terminal set (the #997 graceful timeout), never a blind RED.
 #
@@ -50,9 +88,9 @@
 #
 # FAIL-FAST ON A CONCLUDED GATING FAILURE (2026-07-17 maintainer directive).
 # [FABLE-5] Mid-poll, if any GATING leg has CONCLUDED failure, the gate REDs NOW
-# instead of waiting for every other sibling to finish: a genuine `failure` is
-# never forgiven by any later state (forgive_superseded excuses only
-# cancelled/stale), so every future render over any superset of this sibling set
+# instead of waiting for every other sibling to finish: a genuine `failure` in
+# the authoritative newest workflow run/attempt is never forgiven, so every
+# future render over any superset of this already-resolved sibling set
 # REDs anyway — the remaining wait is pure latency on the red verdict (and on the
 # fast-fix trigger it fires, ci-summary.yml `fix-ring`). Soundness guards, each
 # reusing the FINAL render's own classification (failfast_failures):
@@ -60,7 +98,7 @@
 #     / post-draft-gate-artifact set the final render sees — a cancelled-then-
 #     rerun leg or a concurrency race-loser select can never fire it (cancelled
 #     is not failure, and forgiven runs are dropped upstream);
-#   * advisory/informational legs never fire it (the same is_advisory predicate
+#   * DECLARED-advisory legs never fire it (the same is_advisory predicate
 #     render_verdict excludes by);
 #   * a red leg with a same-tier-normalized-name run still IN PROGRESS (a rerun
 #     already underway on the SHA) stands down — the gate keeps waiting on the
@@ -72,6 +110,25 @@
 #     normal settle path, byte-identical to before.
 # Fail-fast is an exit-1-only path: it can never conclude success, so every
 # exit-0 invariant below is untouched.
+#
+# AUTHORITATIVE WORKFLOW-RUN RESOLUTION (#3505). [GPT-5.6] A check-run name is not
+# a stable attempt identity: distinct workflows may reuse one name, a re-run may
+# reuse one Actions run id, and a disabled/rewritten workflow may leave its newest
+# green run with no corresponding check-run on the commit. The live fetcher now
+# lists Actions workflow-runs for SHA and selects exactly the newest run by
+# created_at/id and its newest run_attempt for each workflow_id. Check-runs from
+# every older run are NON-EVENTS even when they concluded failure/cancelled;
+# completed runs and re-run attempts are read through the attempt-scoped jobs
+# endpoint; and a run-level synthetic check preserves the newest run's terminal
+# verdict when job check-runs evaporate.
+# A newest genuine FAILURE therefore still REDs. A newest CANCELLED run is never
+# rendered as failure directly: the resolver asks Actions to re-run it once when
+# run_attempt == 1, using both run_attempt (durable server-side marker) and an
+# in-process attempted-set (API-lag guard) to bound dispatch. A cancelled retry or
+# a dispatch that never advances emits the distinct loud
+# "superseded-legs, re-run required" failure. The poll/absolute time budgets are
+# unchanged, and re-dispatch remains orchestration only — this waiter executes no
+# test command.
 #
 # DRAFT-TIER INTEGRITY (bead: draft-tier CI). [FABLE-5] Draft PR heads run a REDUCED
 # leg set (coverage / bench / CodeQL / heavy shards / wasm-equality skipped — see
@@ -129,15 +186,79 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
 import subprocess
 import sys
 import time
+from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 
-ADVISORY_RE = re.compile(r"\b(advisory|informational)\b")
+# [OPUS-5] #3773 — the DECLARED-advisory registry. See §ADVISORY MUST BE DECLARED.
+# Path is relative to the repo checkout the gate runs from (ci-summary.yml sparse-
+# checks out BOTH this script and this file).
+ADVISORY_REGISTRY_PATH = ".github/advisory-registry.json"
+# A registry entry declares nothing unless it carries ALL FIVE — the SAME required
+# set scripts/check-advisory-registry.py C2/C4 enforce. An under-specified entry must
+# not buy an exclusion.
+# [OPUS-5] #3774 review (gpt-5.6-sol, finding 2(a)): this tuple used to hold only the
+# three bookkeeping fields while the checker required five, so a 3-field entry with NO
+# `workflow`/`job_id` neutralised any check-run it named while C4 `continue`d past it
+# and the checker printed `all clear`. The identity pair is what C4 binds a
+# declaration to, so an entry without it is exactly the entry C4 cannot police:
+# requiring it HERE is what makes "an under-specified entry must not buy an exclusion"
+# true of the GATE and not merely of the checker.
+REGISTRY_REQUIRED_FIELDS = (
+    "owner_bead", "promotion_criteria", "registered", "workflow", "job_id",
+)
+# A registry key is the job's `name:` as written in the workflow YAML, so it may embed
+# `${{ matrix.x }}` expressions that only expand at runtime. Each expression matches a
+# non-empty run of characters; every other character is matched LITERALLY, whole-name,
+# case-insensitively. Nothing else is pattern-like: this is an exact declared-identity
+# match, never a substring/word search over the display name.
+_YAML_EXPR_RE = re.compile(r"\$\{\{.*?\}\}")
+# [OPUS-5] #3773 — DIAGNOSTIC ONLY, never a decision input. The old (removed) rule
+# excluded any name matching this; the verdict now prints an UNDECLARED note for a
+# check whose name carries the token but which has NO registry declaration, so the
+# formerly-silent hole is loud. Wiring this back into is_advisory() would restore the
+# defect — scripts/tests/test_ci_summary_gate.py::TestDeclaredAdvisoryRule pins that.
+ADVISORY_NAME_TOKEN_RE = re.compile(r"\b(advisory|informational)\b")
+# [OPUS-5] PLATFORM-MANAGED advisory check-runs — an EXACT, fail-closed allow-list.
+# The registry declares jobs THIS repo authors, keyed on the workflow job it belongs
+# to. A GitHub-MANAGED job has no workflow file in this repo at all, so it cannot be
+# declared that way — and it therefore GATES, however non-gating it actually is.
+# Entries here are matched WHOLE and case-insensitively
+# (never as a substring / prefix / wildcard), so an unknown or newly-introduced name
+# still GATES: adding a platform surface is a deliberate, reviewed edit to this set.
+#
+#   • "dependabot" — the sole job of GitHub's managed `Dependabot Updates` workflow
+#     (event=dynamic, path `dynamic/dependabot/dependabot-updates`). Verified against
+#     the Actions Jobs API over the newest 60 runs of that workflow on this repo: the
+#     ONLY job name it has ever emitted is exactly "Dependabot" (37 success /
+#     23 failure), so this allow-list is complete for the surface as it stands, and no
+#     repo-authored workflow declares a job of that name (a collision would need a new
+#     job deliberately named "Dependabot").
+#     WHY NON-GATING: this check reports DEPENDABOT'S OWN ability to act on an upstream
+#     advisory, not this repo's code health. It concludes `failure` on outcomes nobody
+#     in this repo can fix — notably `security_update_not_possible`, i.e. the reachable
+#     update path cannot land a version that clears every advisory on the package (live
+#     case: main run 30136978362, 2026-07-25T00:46Z, npm `brace-expansion` — the 1.x
+#     tree is pinned by `minimatch@3`'s `^1.1.7`, so the only unaffected release, 5.0.8,
+#     is unreachable). Under the stop-the-line rule that red halted `main` for a
+#     condition with no in-repo remedy.
+#     SECURITY POSTURE IS UNCHANGED: nothing here suppresses an alert or a scanner.
+#     The Dependabot alert stays OPEN and visible, Dependabot keeps retrying weekly and
+#     will open the PR the moment a reachable patch exists, and the actionable Rust
+#     dependency-vulnerability GATE — `cargo deny check advisories` inside
+#     "supply-chain gates (deny + vet + SBOM + VEX + OpenSSF + js-sbom)" — is untouched
+#     and still REDs on a real finding. Honest caveat: that lane covers the CARGO graph;
+#     this repo has no in-repo npm vulnerability gate today (the js-sbom step generates
+#     CycloneDX SBOMs, it does not fail on advisories), so Dependabot alerts remain the
+#     npm surveillance surface — which is exactly why this change must not, and does
+#     not, touch alerting.
+PLATFORM_MANAGED_ADVISORY_NAMES = frozenset({"dependabot"})
 _PASSING = ("success", "skipped", "neutral")
 # [FABLE-5] draft-tier CI: the marker ci-select.yml appends to the select job name
 # on a draft-assembled run ("select (change-based test selection, draft-tier)").
@@ -155,9 +276,10 @@ DRAFT_TIER_MARKER = ", draft-tier"
 # the sibling set (see run_gate).
 GATE_CHECK_NAME = "gate"
 DRAFT_TIER_GATE_NAME = GATE_CHECK_NAME + DRAFT_TIER_MARKER
-# Conclusions a LATER same-normalized-name check-run may excuse (superseded-run
-# forgiveness). Deliberately ONLY the supersession artifacts — a genuine failure /
-# timed_out is never forgiven by a later attempt.
+# Conclusions a LATER same-workflow/name check-run may excuse after authoritative
+# workflow-run resolution. Deliberately ONLY check-level supersession artifacts;
+# failures from OLDER workflow runs are removed by resolve_newest_workflow_runs,
+# while a failure in the newest run/attempt is never forgiven here.
 _SUPERSEDABLE = ("cancelled", "stale")
 # [FABLE-5] sq-fmx4u.3: the change-based test-selection pre-job (the reusable
 # .github/workflows/ci-select.yml job, called from ci.yml + feature-matrix.yml).
@@ -193,6 +315,7 @@ FM_REPORT_NAME = "feature-matrix report"
 # CURRENT group run (feature-matrix reruns on the same head on ready_for_review /
 # label events, so several group runs — hence several reports — can share a head SHA).
 RUNS_URL_RE = re.compile(r"/actions/runs/(\d+)(?:/|$)")
+ACTIONS_JOB_URL_RE = re.compile(r"/actions/runs/\d+/job/\d+(?:/|$)")
 
 
 @dataclass
@@ -218,6 +341,10 @@ class FetchError(RuntimeError):
     """A poll's API fetch failed (transient or otherwise)."""
 
 
+class SupersededLegsError(RuntimeError):
+    """A newest cancelled workflow could not be auto-re-dispatched safely."""
+
+
 @dataclass
 class TierContext:
     """[FABLE-5] Draft-tier CI: which tier THIS gate run is evaluating, and how to
@@ -232,10 +359,351 @@ class TierContext:
     draft_check_retries: int = 3
 
 
+def _as_int(value, default: int = 0) -> int:
+    """GitHub JSON sometimes exposes numeric ids/attempts as strings."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def workflow_identity(run: dict) -> str:
+    """Stable identity for newest-run selection.
+
+    workflow_id is the authoritative Actions identity. The path/name fallbacks
+    keep hermetic fixtures and a degraded API payload fail-closed instead of
+    collapsing unrelated workflows into one empty key.
+    """
+    workflow_id = run.get("workflow_id")
+    if workflow_id not in (None, ""):
+        return f"id:{workflow_id}"
+    if run.get("path"):
+        return f"path:{run['path']}"
+    return f"name:{run.get('name') or '<unnamed>'}"
+
+
+def _workflow_order_key(run: dict) -> tuple:
+    """Newest order: creation/run id chooses the run; attempt breaks a same-run tie."""
+    return (
+        run.get("created_at") or "",
+        _as_int(run.get("id")),
+        _as_int(run.get("run_attempt"), 1),
+    )
+
+
+def newest_workflow_runs(workflow_runs: list[dict]) -> dict[str, dict]:
+    """Return the newest Actions run for every workflow on the already-filtered SHA."""
+    newest: dict[str, dict] = {}
+    for run in workflow_runs:
+        key = workflow_identity(run)
+        if key not in newest or _workflow_order_key(run) > _workflow_order_key(newest[key]):
+            newest[key] = run
+    return newest
+
+
+def _workflow_run_id_of_check(run: dict) -> int:
+    """Actions run id embedded in a job check's details/html URL, else 0."""
+    url = run.get("details_url") or run.get("html_url") or ""
+    match = RUNS_URL_RE.search(url)
+    return _as_int(match.group(1)) if match else 0
+
+
+def _is_actions_job_check(run: dict) -> bool:
+    """True for Actions-created job checks, false for manually posted run links."""
+    url = run.get("details_url") or run.get("html_url") or ""
+    return bool(ACTIONS_JOB_URL_RE.search(url))
+
+
+def _workflow_summary_check(run: dict, *, force_pending: bool = False) -> dict:
+    """Run-level evidence used when jobs are pending/evaporated or failure is hidden."""
+    completed = run.get("status") == "completed" and not force_pending
+    return {
+        # Never copy the workflow display name here: the synthetic name must not
+        # collide with any advisory-registry declaration, so a workflow's
+        # authoritative run-level FAILURE can never be excluded. (Under the pre-#3773
+        # name rule this also stopped a workflow merely CALLED "…advisory…" from
+        # excluding itself; the declared-registry rule makes that structural.)
+        "name": f"workflow-run verdict ({workflow_identity(run)})",
+        "status": "completed" if completed else (
+            "queued" if force_pending else (run.get("status") or "queued")
+        ),
+        "conclusion": run.get("conclusion") if completed else None,
+        "details_url": run.get("html_url") or run.get("url") or "",
+        "html_url": run.get("html_url") or "",
+        "started_at": run.get("run_started_at") or run.get("created_at") or "",
+        "id": _as_int(run.get("id")),
+        "external_id": "",
+        "_workflow_summary": True,
+        "_workflow_name": run.get("name") or run.get("path") or "",
+        "_workflow_id": workflow_identity(run),
+    }
+
+
+def _attempt_job_check(job: dict, workflow_run: dict) -> dict:
+    """Normalize an attempt-scoped Actions job to the existing check-run vocabulary."""
+    return {
+        "name": job.get("name") or "<unnamed Actions job>",
+        "status": job.get("status") or "queued",
+        "conclusion": job.get("conclusion"),
+        "details_url": job.get("html_url") or "",
+        "html_url": job.get("html_url") or "",
+        "started_at": job.get("started_at") or workflow_run.get("run_started_at")
+        or workflow_run.get("created_at") or "",
+        "id": _as_int(job.get("id")),
+        "external_id": "",
+        "_workflow_job_inventory": True,
+        "_workflow_id": workflow_identity(workflow_run),
+        "_workflow_run_id": _as_int(workflow_run.get("id")),
+        "_workflow_run_attempt": _as_int(workflow_run.get("run_attempt"), 1),
+    }
+
+
+def resolve_newest_workflow_runs(
+    check_runs: list[dict],
+    workflow_runs: list[dict],
+    self_run_id: str,
+    *,
+    attempt_jobs: dict[int, list[dict]] | None = None,
+    redispatch_pending_ids: set[int] | None = None,
+) -> tuple[list[dict], int]:
+    """Resolve Actions checks through newest workflow runs, preserving external checks.
+
+    Returns ``(resolved_checks, superseded_check_count)``. Check-runs whose URL
+    belongs to an older run of a known workflow are dropped regardless of their
+    conclusion. A completed latest run (and every run_attempt > 1) is represented
+    by its attempt-scoped Jobs API payload, so evaporated checks and old-attempt
+    checks sharing the same run id cannot poison the verdict. Unknown run ids are
+    preserved: manually-posted checks (notably ``feature-matrix report``) may link
+    to a workflow_run whose own head SHA differs from the commit on which it posts
+    the check.
+    """
+    attempt_jobs = attempt_jobs or {}
+    redispatch_pending_ids = redispatch_pending_ids or set()
+    newest = newest_workflow_runs(workflow_runs)
+    all_by_id = {_as_int(r.get("id")): r for r in workflow_runs if _as_int(r.get("id"))}
+    self_id = _as_int(self_run_id)
+    self_workflow = ""
+    if self_id in all_by_id:
+        self_workflow = workflow_identity(all_by_id[self_id])
+
+    resolved: list[dict] = []
+    superseded = 0
+    for check in check_runs:
+        run_id = _workflow_run_id_of_check(check)
+        workflow_run = all_by_id.get(run_id)
+        if workflow_run is None:
+            resolved.append(check)  # external/manually-posted check
+            continue
+        key = workflow_identity(workflow_run)
+        latest = newest.get(key)
+        if key == self_workflow:
+            continue
+        if latest is None:
+            superseded += 1
+            continue
+        latest_id = _as_int(latest.get("id"))
+        if run_id != latest_id:
+            # #3505: every conclusion from an older workflow run is a NON-EVENT.
+            superseded += 1
+            continue
+        if latest_id in redispatch_pending_ids:
+            # The once-only retry has been requested but no new attempt is visible.
+            # Every check attached to this cancelled attempt is stale, including
+            # manually posted summaries whose URL intentionally lacks `/job/`.
+            superseded += 1
+            continue
+        attempt = _as_int(latest.get("run_attempt"), 1)
+        if latest_id in attempt_jobs and _is_actions_job_check(check):
+            # Completed runs and re-run attempts use the Jobs API as authority;
+            # commit check-runs can be missing or belong to an earlier attempt.
+            superseded += 1
+            continue
+        if attempt > 1:
+            # Manually-posted checks (notably feature-matrix report/per-leg checks)
+            # link to the run WITHOUT `/job/`; keep only ones posted at/after this
+            # attempt's run_started_at so attempt-1 reports cannot satisfy attempt 2.
+            if (
+                (check.get("started_at") or "")
+                < (latest.get("run_started_at") or latest.get("created_at") or "")
+            ):
+                superseded += 1
+                continue
+        enriched = dict(check)
+        enriched["_workflow_id"] = key
+        enriched["_workflow_run_id"] = latest_id
+        enriched["_workflow_run_attempt"] = attempt
+        resolved.append(enriched)
+
+    selected = [r for key, r in newest.items() if key != self_workflow]
+    for workflow_run in selected:
+        run_id = _as_int(workflow_run.get("id"))
+        force_pending = run_id in redispatch_pending_ids
+        if run_id in attempt_jobs and not force_pending:
+            resolved.extend(
+                _attempt_job_check(job, workflow_run)
+                for job in attempt_jobs.get(run_id, [])
+            )
+
+        visible = [r for r in resolved if r.get("_workflow_id") == workflow_identity(workflow_run)]
+        status = workflow_run.get("status")
+        conclusion = workflow_run.get("conclusion")
+        # Run-level state closes three check-run holes:
+        #   * pending run whose jobs have not registered yet (hold, never early-pass),
+        #   * terminal run with no surviving job check (evaporation), and
+        #   * non-success run whose failing job check vanished (fail closed).
+        visible_required_failure = any(
+            r.get("status") == "completed"
+            and r.get("conclusion") not in _PASSING
+            and not is_advisory(r.get("name", ""))
+            for r in visible
+        )
+        visible_advisory_failure = any(
+            r.get("_workflow_job_inventory") is True
+            and r.get("status") == "completed"
+            and r.get("conclusion") not in _PASSING
+            and is_advisory(r.get("name", ""))
+            for r in visible
+        )
+        # A complete Jobs API inventory lets the established advisory-name policy
+        # remain authoritative: an advisory job may make its workflow run red, but
+        # that advisory-only failure must not acquire a synthetic gating verdict.
+        advisory_only_failure = (
+            run_id in attempt_jobs
+            and visible_advisory_failure
+            and not visible_required_failure
+        )
+        need_summary = (
+            force_pending
+            or status != "completed"
+            or not visible
+            or (
+                conclusion not in _PASSING
+                and not visible_required_failure
+                and not advisory_only_failure
+            )
+        )
+        if need_summary:
+            resolved.append(_workflow_summary_check(workflow_run, force_pending=force_pending))
+
+    return resolved, superseded
+
+
+class WorkflowRunResolver:
+    """Live/testable newest-run resolver with once-only cancelled-run re-dispatch."""
+
+    def __init__(
+        self,
+        *,
+        self_run_id: str,
+        fetch_checks,
+        fetch_workflows,
+        fetch_attempt_jobs,
+        redispatch,
+        redispatch_settle_polls: int = 3,
+    ):
+        self.self_run_id = self_run_id
+        self.fetch_checks = fetch_checks
+        self.fetch_workflows = fetch_workflows
+        self.fetch_attempt_jobs = fetch_attempt_jobs
+        self.redispatch = redispatch
+        self.redispatch_settle_polls = max(1, redispatch_settle_polls)
+        # Durable bound: only run_attempt==1 is eligible. This set is the second
+        # bound, preventing repeated POSTs while the list API still shows attempt 1.
+        self._redispatch_seen: dict[tuple[str, int, int], int] = {}
+        self._terminal_jobs_cache: dict[tuple[int, int], list[dict]] = {}
+
+    def __call__(self) -> list[dict]:
+        checks = self.fetch_checks()
+        workflows = self.fetch_workflows()
+        newest = newest_workflow_runs(workflows)
+        self_id = _as_int(self.self_run_id)
+        self_workflow = ""
+        for run in workflows:
+            if _as_int(run.get("id")) == self_id:
+                self_workflow = workflow_identity(run)
+                break
+
+        redispatch_pending: set[int] = set()
+        for key, run in newest.items():
+            if key == self_workflow:
+                continue
+            if run.get("status") != "completed" or run.get("conclusion") != "cancelled":
+                continue
+            run_id = _as_int(run.get("id"))
+            attempt = _as_int(run.get("run_attempt"), 1)
+            marker = (key, run_id, attempt)
+            if attempt > 1:
+                raise SupersededLegsError(
+                    f"superseded-legs, re-run required (#3505): newest workflow "
+                    f"{run.get('name') or key!r} run {run_id} was cancelled on "
+                    f"attempt {attempt}; the gate auto-re-dispatches at most once"
+                )
+            if marker not in self._redispatch_seen:
+                try:
+                    self.redispatch(run_id)
+                except FetchError as exc:
+                    raise SupersededLegsError(
+                        f"superseded-legs, re-run required (#3505): newest workflow "
+                        f"{run.get('name') or key!r} run {run_id} is cancelled and "
+                        f"its once-only auto-redispatch failed: {exc}"
+                    ) from exc
+                self._redispatch_seen[marker] = 0
+                print(
+                    f"::notice::ci-summary #3505: newest workflow "
+                    f"{run.get('name') or key!r} run {run_id} was cancelled; "
+                    "requested its one bounded re-run (run_attempt marker=1)."
+                )
+            else:
+                self._redispatch_seen[marker] += 1
+                if self._redispatch_seen[marker] >= self.redispatch_settle_polls:
+                    raise SupersededLegsError(
+                        f"superseded-legs, re-run required (#3505): workflow "
+                        f"{run.get('name') or key!r} run {run_id} stayed cancelled "
+                        "after its once-only auto-redispatch request"
+                    )
+            redispatch_pending.add(run_id)
+
+        attempt_jobs: dict[int, list[dict]] = {}
+        for key, run in newest.items():
+            run_id = _as_int(run.get("id"))
+            if key == self_workflow or run_id in redispatch_pending:
+                continue
+            attempt = _as_int(run.get("run_attempt"), 1)
+            if attempt > 1 or run.get("status") == "completed":
+                cache_key = (run_id, attempt)
+                if cache_key not in self._terminal_jobs_cache:
+                    jobs = self.fetch_attempt_jobs(run_id, attempt)
+                    if run.get("status") == "completed":
+                        self._terminal_jobs_cache[cache_key] = jobs
+                    else:
+                        attempt_jobs[run_id] = jobs
+                        continue
+                attempt_jobs[run_id] = self._terminal_jobs_cache[cache_key]
+
+        resolved, superseded = resolve_newest_workflow_runs(
+            checks,
+            workflows,
+            self.self_run_id,
+            attempt_jobs=attempt_jobs,
+            redispatch_pending_ids=redispatch_pending,
+        )
+        if superseded:
+            print(
+                f"  workflow-run resolver: ignored {superseded} check-run(s) from "
+                "superseded runs/attempts (#3505)."
+            )
+        return resolved
+
+
 def normalized_name(name: str) -> str:
     """A check-run name with the draft-tier marker stripped — the identity under
     which a draft-assembled select and its full-tier successor are the SAME leg."""
     return name.replace(DRAFT_TIER_MARKER, "")
+
+
+def _leg_identity(run: dict) -> tuple[str, str]:
+    """Workflow-qualified leg identity; legacy/external checks use an empty scope."""
+    return (run.get("_workflow_id") or "", normalized_name(run.get("name", "")))
 
 
 def is_draft_tier(name: str) -> bool:
@@ -274,8 +742,8 @@ def forgive_superseded(runs: list[dict]) -> tuple[list[dict], list[dict]]:
     RED the fresh full-tier gate. Branch protection itself honours only the
     LATEST run of a check name, so excusing a superseded cancellation aligns the
     gate with the enforcement layer. SAFETY: only cancelled/stale are ever
-    forgiven (a genuine failure/timed_out always gates, no matter what runs
-    later), and a cancellation with NO successor still fails the gate. Call this
+    forgiven here (a genuine failure/timed_out in this already-newest/external
+    check set always gates), and a cancellation with NO successor still fails. Call this
     over the RAW list (self-run included) so THIS gate run's own fresh `gate`
     check-run can supersede its cancelled predecessor.
 
@@ -309,13 +777,13 @@ def forgive_superseded(runs: list[dict]) -> tuple[list[dict], list[dict]]:
     for r in runs:
         if r.get("conclusion") in _SUPERSEDABLE:
             r_name = r.get("name", "")
-            key = normalized_name(r_name)
+            key = _leg_identity(r)
             mine = _order_key(r)
             pure_select = is_pure_select(r_name)
             r_tier = is_draft_tier(r_name)
             if any(
                 o is not r
-                and normalized_name(o.get("name", "")) == key
+                and _leg_identity(o) == key
                 and o.get("conclusion") not in _SUPERSEDABLE
                 and (
                     # pure select: any SAME-TIER same-name success proves a
@@ -367,12 +835,12 @@ def draft_selects_unsuperseded(runs: list[dict]) -> list[str]:
     exhaustion ("stale draft-tier run, full run pending") rather than ever
     passing over draft-assembled legs. Re-running the selecting workflows (or
     pushing a new head) clears it."""
-    groups: dict[str, tuple[list[dict], list[dict]]] = {}
+    groups: dict[tuple[str, str], tuple[list[dict], list[dict]]] = {}
     for r in runs:
         name = r.get("name", "")
         if not is_select(name):
             continue
-        marked, unmarked = groups.setdefault(normalized_name(name), ([], []))
+        marked, unmarked = groups.setdefault(_leg_identity(r), ([], []))
         (marked if is_draft_tier(name) else unmarked).append(r)
     out: list[str] = []
     for marked, unmarked in groups.values():
@@ -389,11 +857,167 @@ def draft_selects_unsuperseded(runs: list[dict]) -> list[str]:
     return sorted(out)
 
 
+def is_platform_managed_advisory(name: str) -> bool:
+    """[OPUS-5] Is this a GitHub-MANAGED advisory check-run whose name we cannot
+    tag with the advisory token? EXACT whole-name, case-insensitive membership in
+    PLATFORM_MANAGED_ADVISORY_NAMES (see that constant for the per-name rationale
+    and the security-posture argument). Deliberately NOT a substring/prefix/wildcard
+    rule: an unknown or renamed platform check FAILS CLOSED (it keeps gating), so
+    widening this exclusion is always an explicit, reviewed edit."""
+    return name.strip().lower() in PLATFORM_MANAGED_ADVISORY_NAMES
+
+
+class AdvisoryRegistryError(RuntimeError):
+    """The declared-advisory registry could not be read (missing/unparseable)."""
+
+
+def registry_key_has_literal_anchor(declared: str) -> bool:
+    """[OPUS-5] #3774 review (gpt-5.6-sol, finding 2(b)) — does this registry key pin
+    at least one LITERAL, non-whitespace character outside a `${{ … }}` expression?
+
+    Each expression compiles to an unbounded `.+`, so a key that is ONLY an expression
+    — the idiomatic `name: ${{ matrix.label }}` — compiles to `.+`, whole-name-matches
+    EVERY check-run including `gate` itself, and thereby declares the entire run
+    non-gating from a single registry line. C4 cannot catch it either: the key does
+    equal the live YAML `name:`, so the binding looks correct. A key with no literal
+    frame is therefore REFUSED outright rather than compiled: declare each expansion
+    with a literal frame around the expression (as the shipped Tauri key does)."""
+    return any(part.strip() for part in _YAML_EXPR_RE.split(declared or ""))
+
+
+def _compile_declared_name(declared: str) -> re.Pattern:
+    """Compile ONE registry key into a whole-name matcher (see _YAML_EXPR_RE).
+
+    Raises AdvisoryRegistryError for an ANCHORLESS key (see
+    registry_key_has_literal_anchor) — fail-closed: the gate refuses to install a
+    matcher that could neutralise arbitrary check-runs."""
+    if not registry_key_has_literal_anchor(declared):
+        raise AdvisoryRegistryError(
+            f"registry key {declared!r} has no literal anchor outside its "
+            "expression(s) — it would match EVERY check-run name (including `gate`)"
+        )
+    literals = _YAML_EXPR_RE.split(declared.strip())
+    return re.compile(
+        "".join(re.escape(part) for part in literals[:1])
+        + "".join(".+" + re.escape(part) for part in literals[1:]),
+        re.IGNORECASE,
+    )
+
+
+def parse_advisory_registry(payload: object) -> tuple[list[str], list[str]]:
+    """Split a loaded registry document into (declared_keys, warnings).
+
+    An entry declares its key non-gating ONLY when it is a mapping carrying every
+    REGISTRY_REQUIRED_FIELDS value AND its key carries a literal anchor
+    (registry_key_has_literal_anchor); anything else is skipped with a warning so the
+    check keeps GATING (fail-closed per entry) instead of buying a silent exclusion.
+    """
+    if not isinstance(payload, dict):
+        raise AdvisoryRegistryError("registry root is not a JSON object")
+    jobs = payload.get("jobs")
+    if not isinstance(jobs, dict):
+        raise AdvisoryRegistryError("registry has no `jobs` object")
+    declared: list[str] = []
+    warnings: list[str] = []
+    for key, entry in jobs.items():
+        if not isinstance(key, str) or not key.strip():
+            warnings.append("registry entry with an empty key ignored (it declares nothing)")
+            continue
+        if not isinstance(entry, dict):
+            warnings.append(f"registry entry {key!r} is not an object — it declares nothing (still GATES)")
+            continue
+        missing = [f for f in REGISTRY_REQUIRED_FIELDS if not entry.get(f)]
+        if missing:
+            warnings.append(
+                f"registry entry {key!r} is missing {missing} — it declares nothing (still GATES)"
+            )
+            continue
+        if not registry_key_has_literal_anchor(key):
+            warnings.append(
+                f"registry entry {key!r} has no literal anchor outside its "
+                "expression(s) — it would match EVERY check-run name; it declares "
+                "nothing (still GATES)"
+            )
+            continue
+        declared.append(key)
+    return declared, warnings
+
+
+# The installed declared-advisory matchers. EMPTY BY DEFAULT: with no registry loaded
+# NOTHING is advisory, so an un-wired gate fails closed (it can only over-gate, never
+# under-gate). main() loads the real registry and exits 1 loudly if it cannot.
+_DECLARED_ADVISORY: tuple[re.Pattern, ...] = ()
+
+
+def set_declared_advisory(names) -> None:
+    """Install the DECLARED-advisory check-name set (main() + hermetic tests)."""
+    global _DECLARED_ADVISORY
+    _DECLARED_ADVISORY = tuple(_compile_declared_name(n) for n in names)
+
+
+def declared_advisory_names() -> tuple[str, ...]:
+    """The installed declarations, as their compiled source (diagnostics/tests)."""
+    return tuple(m.pattern for m in _DECLARED_ADVISORY)
+
+
+def load_advisory_registry(path: str = ADVISORY_REGISTRY_PATH) -> list[str]:
+    """Read + install the declared-advisory set from the registry file.
+
+    Raises AdvisoryRegistryError when the file is missing or unreadable — main()
+    turns that into an immediate loud exit 1 rather than evaluating a gate whose
+    exclusion set it could not establish.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError as exc:
+        raise AdvisoryRegistryError(f"{path} not found in this checkout") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AdvisoryRegistryError(f"{path} could not be read: {exc}") from exc
+    declared, warnings = parse_advisory_registry(payload)
+    for warning in warnings:
+        print(f"::warning::ci-summary: {warning}")
+    set_declared_advisory(declared)
+    return declared
+
+
+def is_declared_advisory(name: str) -> bool:
+    """[OPUS-5] #3773 — is this check-run EXPLICITLY DECLARED non-gating?
+
+    Matched WHOLE-NAME against the installed `.github/advisory-registry.json` keys
+    (case-insensitive; `${{ … }}` in a key matches its runtime expansion). No
+    substring reach, no word search: an undeclared check GATES no matter what it is
+    called, and a declared job that gets RENAMED stops matching — i.e. it GATES,
+    fail-closed, while C4 in scripts/check-advisory-registry.py REDs on the drift."""
+    candidate = (name or "").strip()
+    return any(m.fullmatch(candidate) for m in _DECLARED_ADVISORY)
+
+
 def is_advisory(name: str) -> bool:
-    """Whole-word advisory/informational match (sq-wjth): excludes the standalone
-    words (hyphen-/paren-/comma-delimited too) but NOT substrings — notably
-    "cargo-deny (advisories, ...)" is plural and GATES."""
-    return bool(ADVISORY_RE.search(name.lower()))
+    """[OPUS-5] #3773 — the SINGLE non-gating classifier: DECLARED in the advisory
+    registry, or on the exact platform-managed allow-list. NOT a name rule — the
+    display-name regex this used to consult was the #3773 correctness hole.
+
+    Every consumer inherits the same answer — the verdict (render_verdict),
+    fail-fast (failfast_failures) AND the resolver's run-level synthetic check
+    (advisory_only_failure). Splitting them would leave the Dependabot workflow's red
+    run to acquire a synthetic gating verdict and red the gate anyway."""
+    return is_declared_advisory(name) or is_platform_managed_advisory(name)
+
+
+def undeclared_token_names(runs: list[dict]) -> list[str]:
+    """[OPUS-5] #3773 DIAGNOSTIC: check-runs whose NAME carries an advisory/
+    informational token but which are NOT declared — i.e. exactly the checks the old
+    name rule neutralised silently and that now GATE. Reported by render_verdict so
+    the transition is visible in every gate summary; never a decision input."""
+    return sorted(
+        {
+            r.get("name", "")
+            for r in runs
+            if ADVISORY_NAME_TOKEN_RE.search((r.get("name", "") or "").lower())
+            and not is_advisory(r.get("name", ""))
+        }
+    )
 
 
 def is_select(name: str) -> bool:
@@ -767,6 +1391,16 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
         return 0
     gating = [r for r in runs if not is_advisory(r.get("name", ""))]
     excluded = total - len(gating)
+    # [OPUS-5] #3773: make the formerly-silent exclusion loud in BOTH directions —
+    # every check that carries an advisory name token but is NOT declared is listed
+    # here and IS in `gating` above. (Diagnostic only; see undeclared_token_names.)
+    for undeclared in undeclared_token_names(runs):
+        _emit(
+            f"note: `{undeclared}` carries an advisory/informational NAME token but has no "
+            f"declaration in {ADVISORY_REGISTRY_PATH} — it GATES (#3773). Declare it there "
+            f"(with an owner_bead + promotion_criteria) or drop the misleading token.",
+            summary_path,
+        )
     # Selection pre-job health — searched over ALL runs (not just gating) so a
     # hypothetical advisory-renamed select could still never green-light a skip.
     # NB superseded-cancelled select INSTANCES are already dropped upstream by
@@ -801,7 +1435,9 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
     if failed:
         _emit(
             f"### ci-summary: FAILED — {len(failed)} non-passing gating check(s) of "
-            f"{len(gating)} gating ({excluded} advisory check(s) excluded)",
+            f"{len(gating)} gating ({excluded} advisory check(s) excluded — each "
+            f"DECLARED in {ADVISORY_REGISTRY_PATH} or on the platform-managed "
+            f"allow-list)",
             summary_path,
         )
         for r in failed:
@@ -811,8 +1447,13 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
     if _draft_recheck(tier_ctx, summary_path) != 0:
         return 1
     _emit(
+        # [OPUS-5] #3774 review: the excluded set is DECLARED-in-the-registry OR on the
+        # exact platform-managed allow-list (PLATFORM_MANAGED_ADVISORY_NAMES) — saying
+        # "each DECLARED in the registry" understated the second, smaller source.
         f"### ci-summary: PASSED — all {len(gating)} gating check(s) green (or skipped/neutral); "
-        f"{excluded} advisory check(s) excluded; set stable."
+        f"{excluded} advisory check(s) excluded (each DECLARED in "
+        f"{ADVISORY_REGISTRY_PATH}, or on the exact platform-managed allow-list); "
+        f"set stable."
         + (
             " DRAFT-TIER verdict (reduced leg set; PR draft state re-confirmed). This "
             f"check-run is `{DRAFT_TIER_GATE_NAME}`, never the required `{GATE_CHECK_NAME}` "
@@ -847,11 +1488,7 @@ def failfast_failures(runs: list[dict]) -> list[dict]:
     exactly as the settle loop always has). `timed_out`/`cancelled`/`stale`
     conclusions deliberately do NOT qualify: only an unambiguous `failure`
     fails fast; everything else waits for the full render."""
-    inflight = {
-        normalized_name(r.get("name", ""))
-        for r in runs
-        if r.get("status") != "completed"
-    }
+    inflight = {_leg_identity(r) for r in runs if r.get("status") != "completed"}
     out: list[dict] = []
     for r in runs:
         if r.get("status") != "completed" or r.get("conclusion") != "failure":
@@ -859,7 +1496,7 @@ def failfast_failures(runs: list[dict]) -> list[dict]:
         name = r.get("name", "")
         if is_advisory(name):
             continue
-        if normalized_name(name) in inflight:
+        if _leg_identity(r) in inflight:
             continue
         out.append(r)
     return out
@@ -890,6 +1527,15 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
         attempt += 1
         try:
             raw = fetch_runs()
+        except SupersededLegsError as exc:
+            _emit(
+                f"### ci-summary: FAILED — {exc}. The gate did not treat the "
+                "cancelled newest run as a test failure and did not dispatch it "
+                "more than once; a fresh workflow run or new head is required.",
+                cfg.summary_path,
+            )
+            print(f"::error::ci-summary failed — {exc}")
+            return 1
         except FetchError as exc:
             consec_fetch_failures += 1
             if consec_fetch_failures >= cfg.max_consec_fetch_failures:
@@ -962,7 +1608,8 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
 
         # [FABLE-5] FAIL-FAST (header §FAIL-FAST): a concluded gating failure in
         # the (already forgiveness-filtered) sibling set decides the verdict now
-        # — a genuine `failure` is never forgiven, so every later render REDs
+        # — a genuine `failure` in the authoritative newest run is never forgiven,
+        # so every later render REDs
         # anyway; waiting out the remaining legs only delays the red and the
         # fast-fix trigger behind it. Applies only while siblings are still
         # outstanding (pending / awaiting_full): an all-terminal set renders via
@@ -980,7 +1627,7 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
                         f"### ci-summary: FAILED (fail-fast) — {len(ff)} gating "
                         f"check(s) concluded failure while {pending} sibling(s) "
                         f"were still running; no later state can turn this verdict "
-                        f"green (a genuine failure is never forgiven), so the gate "
+                        f"green (a newest-run failure is never forgiven), so the gate "
                         f"REDs now instead of waiting out the remaining legs.",
                         cfg.summary_path,
                     )
@@ -1093,7 +1740,7 @@ def _gh_json_lines(args: list[str]) -> list[dict]:
     return out
 
 
-def make_fetch_runs(repo: str, sha: str):
+def make_fetch_check_runs(repo: str, sha: str):
     def fetch() -> list[dict]:
         # started_at + id feed the superseded-run ordering (draft-tier CI): a
         # cancelled/stale check-run is forgiven only for a strictly LATER
@@ -1112,6 +1759,101 @@ def make_fetch_runs(repo: str, sha: str):
         )
 
     return fetch
+
+
+def make_fetch_workflow_runs(repo: str, sha: str, self_run_id: str = ""):
+    """List Actions workflow runs on SHA; resolution happens by workflow_id."""
+
+    self_cache: list[dict] = []
+
+    def fetch() -> list[dict]:
+        runs = _gh_json_lines(
+            [
+                f"repos/{repo}/actions/runs?head_sha={sha}&per_page=100",
+                "--paginate",
+                "--jq",
+                ".workflow_runs[] | {id, workflow_id, name, path, head_sha, status, "
+                "conclusion, created_at, run_started_at, run_attempt, html_url}",
+            ]
+        )
+        # The current run endpoint is fetched once and merged defensively. It
+        # guarantees self-workflow identity even during list-index lag (otherwise
+        # an older ci-summary run on this SHA could acquire a synthetic pending
+        # summary and make the gate wait on itself).
+        if self_run_id and not self_cache:
+            self_cache.extend(
+                _gh_json_lines(
+                    [
+                        f"repos/{repo}/actions/runs/{self_run_id}",
+                        "--jq",
+                        "{id, workflow_id, name, path, head_sha, status, conclusion, "
+                        "created_at, run_started_at, run_attempt, html_url}",
+                    ]
+                )
+            )
+        known_ids = {_as_int(run.get("id")) for run in runs}
+        runs.extend(run for run in self_cache if _as_int(run.get("id")) not in known_ids)
+        return runs
+
+    return fetch
+
+
+def make_fetch_attempt_jobs(repo: str):
+    """Read the selected run attempt's jobs (authoritative leg inventory)."""
+
+    def fetch(run_id: int, attempt: int) -> list[dict]:
+        endpoint = (
+            f"repos/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100"
+            if attempt > 1
+            else f"repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=100"
+        )
+        return _gh_json_lines(
+            [
+                endpoint,
+                "--paginate",
+                "--jq",
+                ".jobs[] | {id, name, status, conclusion, started_at, completed_at, html_url}",
+            ]
+        )
+
+    return fetch
+
+
+def make_redispatch_workflow(repo: str):
+    """Return the once-only Actions re-run POST used for newest cancellations."""
+
+    def redispatch(run_id: int) -> None:
+        try:
+            proc = subprocess.run(
+                [
+                    "gh",
+                    "api",
+                    "--method",
+                    "POST",
+                    f"repos/{repo}/actions/runs/{run_id}/rerun",
+                ],
+                capture_output=True,
+                text=True,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            raise FetchError(f"redispatch subprocess raised: {exc}") from exc
+        if proc.returncode != 0:
+            raise FetchError(
+                proc.stderr.strip()[:300] or f"redispatch gh api exited {proc.returncode}"
+            )
+
+    return redispatch
+
+
+def make_fetch_runs(repo: str, sha: str, self_run_id: str = ""):
+    """Build the authoritative check fetcher (kept under the historical name)."""
+    return WorkflowRunResolver(
+        self_run_id=self_run_id,
+        fetch_checks=make_fetch_check_runs(repo, sha),
+        fetch_workflows=make_fetch_workflow_runs(repo, sha, self_run_id),
+        fetch_attempt_jobs=make_fetch_attempt_jobs(repo),
+        redispatch=make_redispatch_workflow(repo),
+    )
 
 
 def make_fetch_pr_draft(repo: str, pr_number: str):
@@ -1169,13 +1911,134 @@ def make_fetch_queue_depth(repo: str):
     return fetch
 
 
+def _self_test() -> int:
+    """Hermetic mutation checks for the three #3505 safety properties."""
+
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            raise AssertionError(message)
+
+    old_cancelled = {
+        "id": 101,
+        "workflow_id": 7,
+        "name": "CI",
+        "status": "completed",
+        "conclusion": "cancelled",
+        "created_at": "2026-07-21T13:40:00Z",
+        "run_started_at": "2026-07-21T13:40:01Z",
+        "run_attempt": 1,
+        "html_url": "https://github.test/actions/runs/101",
+    }
+    newest_green = {
+        **old_cancelled,
+        "id": 102,
+        "status": "completed",
+        "conclusion": "success",
+        "created_at": "2026-07-21T14:30:00Z",
+        "run_started_at": "2026-07-21T14:30:01Z",
+        "html_url": "https://github.test/actions/runs/102",
+    }
+    cancelled_check = {
+        "name": "test shard",
+        "status": "completed",
+        "conclusion": "cancelled",
+        "details_url": "https://github.test/actions/runs/101/job/1",
+        "html_url": "",
+        "started_at": "2026-07-21T13:40:01Z",
+        "id": 1001,
+        "external_id": "",
+    }
+    resolved, dropped = resolve_newest_workflow_runs(
+        [cancelled_check], [old_cancelled, newest_green], "999"
+    )
+    with redirect_stdout(io.StringIO()):
+        superseded_code = render_verdict(resolved)
+    require(dropped == 1, "superseded cancelled fixture was not discarded")
+    require(
+        superseded_code == 0,
+        "superseded cancelled fixture failed (mutation: treat-superseded-as-failure)",
+    )
+
+    newest_failure = {
+        **newest_green,
+        "id": 103,
+        "conclusion": "failure",
+        "created_at": "2026-07-21T14:40:00Z",
+        "run_started_at": "2026-07-21T14:40:01Z",
+        "html_url": "https://github.test/actions/runs/103",
+    }
+    failure_resolved, _ = resolve_newest_workflow_runs(
+        [], [newest_green, newest_failure], "999"
+    )
+    with redirect_stdout(io.StringIO()):
+        failure_code = render_verdict(failure_resolved)
+    require(
+        failure_code == 1,
+        "newest-run FAILURE passed (mutation: genuine-failure detection weakened)",
+    )
+
+    cancelled_latest = {**old_cancelled, "id": 104}
+    posts: list[int] = []
+    resolver = WorkflowRunResolver(
+        self_run_id="999",
+        fetch_checks=lambda: [],
+        fetch_workflows=lambda: [cancelled_latest],
+        fetch_attempt_jobs=lambda run_id, attempt: [],
+        redispatch=lambda run_id: posts.append(run_id),
+        redispatch_settle_polls=2,
+    )
+    with redirect_stdout(io.StringIO()):
+        resolver()
+        resolver()
+        bounded_error = None
+        try:
+            resolver()
+        except SupersededLegsError as exc:
+            bounded_error = exc
+    require(posts == [104], "cancelled workflow redispatch was not bounded to one POST")
+    require(
+        bounded_error is not None,
+        "cancelled workflow never failed loud after bounded redispatch grace",
+    )
+
+    print(
+        "ci-summary --self-test: ALL ASSERTIONS PASSED "
+        "(superseded cancellation ignored; newest failure preserved; redispatch bounded once)"
+    )
+    return 0
+
+
 def main() -> int:
+    if sys.argv[1:] == ["--self-test"]:
+        return _self_test()
+    if sys.argv[1:]:
+        print("usage: ci_summary_gate.py [--self-test]", file=sys.stderr)
+        return 2
     repo = os.environ.get("REPO", "")
     sha = os.environ.get("SHA", "")
     self_run_id = os.environ.get("SELF_RUN_ID", "")
     if not repo or not sha or not self_run_id:
         print("::error::ci-summary: REPO, SHA and SELF_RUN_ID must all be set.")
         return 1
+    # [OPUS-5] #3773 — establish the DECLARED-advisory set BEFORE polling, and fail
+    # LOUD + FAST if it cannot be read. Evaluating a merge-authorising gate without
+    # knowing which checks were deliberately declared non-gating is exactly the
+    # over-promise this issue is about, so an unreadable registry is exit 1 in
+    # seconds, never a 37-minute wait or a silent "everything gates".
+    registry_path = os.environ.get("ADVISORY_REGISTRY", ADVISORY_REGISTRY_PATH)
+    try:
+        declared = load_advisory_registry(registry_path)
+    except AdvisoryRegistryError as exc:
+        print(
+            f"::error::ci-summary: the advisory registry is unreadable ({exc}). The gate "
+            f"cannot decide which checks are DECLARED non-gating, so it fails closed. "
+            f"Ensure ci-summary.yml's sparse-checkout includes {ADVISORY_REGISTRY_PATH}."
+        )
+        return 1
+    print(
+        f"ci-summary: {len(declared)} declared-advisory job name(s) loaded from "
+        f"{registry_path}; every other check GATES (#3773)."
+    )
     # [FABLE-5] Draft-tier CI: the tier THIS run evaluates is decided by its own
     # trigger payload — a pull_request event with draft == true is a DRAFT-tier
     # gate (ci-summary.yml exports the payload's draft flag + PR number). Every
@@ -1192,7 +2055,7 @@ def main() -> int:
     )
     print(f"ci-summary: evaluating tier={run_tier} (event={event_name or '<unset>'}).")
     cfg = Config(self_run_id=self_run_id)
-    return run_gate(cfg, make_fetch_runs(repo, sha), make_fetch_queue_depth(repo),
+    return run_gate(cfg, make_fetch_runs(repo, sha, self_run_id), make_fetch_queue_depth(repo),
                     tier_ctx=tier_ctx)
 
 

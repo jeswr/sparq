@@ -143,6 +143,21 @@ pub fn build_external<R: std::io::Read + Send>(reader: R, format: &str, dir: &Pa
 pub fn new() -> Graph                 // also: Graph::default()
 ```
 
+`sparq_core::Dict` — compact FILTERED rebuild on the `(Dict, triples)` seam:
+
+```rust
+// [GPT-5.6] sq-eiv — consume the Dict, keep only the real ids `retain` accepts, and get
+// back a dense rebuilt Dict plus an old→new remap (`remap[(old_id - 1) as usize]`; NO_ID
+// = dropped) for rewriting triple ids before `from_parts`. Inline integer ids are not
+// dictionary records: never passed to `retain`, unchanged under remapping. Dependency-aware
+// for RDF 1.2 triple terms — retaining a triple term implicitly retains its s/p/o and any
+// recursively nested components (their remap entries are populated even if `retain` said
+// false). Never materialises an `oxrdf::Term` and never re-interns survivors (arena
+// payloads MOVE; blob/mmap/frozen records copy compactly); dead prefix/datatype metadata
+// is filtered too, so it does not accumulate across rebuilds.
+pub fn rebuild_filtered(self, retain: impl FnMut(Id) -> bool) -> (Dict, Vec<Id>)
+```
+
 `sparq_core::Graph` — single-triple mutation from `oxrdf` terms (the ergonomic one-triple
 case over `apply_delta`; each position takes anything that converts into a `Term`:
 `NamedNode` / `Literal` / `BlankNode` / a `Term`). Set-valued (re-insert / absent-remove is a
