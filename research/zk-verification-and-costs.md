@@ -107,7 +107,7 @@ the catalog and the regression gate cannot drift **once the gate runs**.
 > `sparql_catalog` binaries with the toolchain present, so an intentional circuit
 > change must re-baseline in the same PR. Numbers in this record are the
 > post-re-baseline snapshot.
-
+>
 > **All timings below are INDICATIVE / NON-CANONICAL** (native `bb prove` or Node
 > `generateProof` on a shared EC2 work box), not a benchmark of record. Per project
 > policy, EC2 measurements are not baked into docs or tests. Gate counts are the only
