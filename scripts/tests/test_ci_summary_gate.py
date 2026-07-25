@@ -1248,10 +1248,16 @@ class TestDraftTierIntegrity(unittest.TestCase):
 
 
 def probe(*values):
-    """#3758 head-activity probe stub: yields values[i] on call i (an Exception
-    instance is RAISED), repeating the last one. A value is the count of
-    non-terminal workflow runs on the head SHA (0 => the awaiting_full hold can
-    never be satisfied), or None => the probe is unavailable/unknown."""
+    """#3758 head-activity probe stub: yields values[i] on call i, repeating the
+    last one. A value is written in the CALLER's shorthand and translated to the
+    real three-state contract (PR #3765 finding 1):
+      * int          => HeadActivityReport.confirmed(n) — an ACTUAL observation of n
+                        non-terminal workflow runs on the head SHA (0 => the
+                        awaiting_full hold cannot be satisfied by anything running)
+      * None         => HeadActivityReport.unknown(...)  — probe unavailable
+      * Exception    => RAISED from the probe (also UNKNOWN, via run_gate's guard)
+      * a HeadActivityReport / anything else => returned verbatim, so a test can
+                        hand back a raw value the production contract forbids."""
     state = {"i": 0, "calls": 0}
 
     def fetch():
@@ -1260,6 +1266,10 @@ def probe(*values):
         state["i"] += 1
         if isinstance(value, Exception):
             raise value
+        if value is None:
+            return g.HeadActivityReport.unknown("probe unavailable (API failure)")
+        if isinstance(value, int) and not isinstance(value, bool):
+            return g.HeadActivityReport.confirmed(value)
         return value
 
     fetch.state = state
@@ -1368,9 +1378,11 @@ class TestUnsatisfiableDraftTierHold(unittest.TestCase):
         self.assertIn("stale draft-tier run, full run pending", out)
 
     def test_unknown_probe_never_concludes_unsatisfiability(self):
-        """An unavailable probe (None) or one that RAISES is UNKNOWN — it can never
-        prove the hold unsatisfiable. The base-budget widening still bounds the
-        wait (idle repo queue + no progress) rather than the absolute cap."""
+        """An unavailable probe (None) or one that RAISES is UNKNOWN — a
+        NON-observation, which can never prove the hold unsatisfiable. [PR #3765
+        finding 1] Neither exit may fire on it: the gate falls back to the
+        pre-#3758 absolute-budget bound (poll 8) and REDs there via the
+        stale-draft-tier belt, and it must never claim an idle queue it never saw."""
         for label, p in (("none", probe(None)),
                          ("raises", probe(RuntimeError("boom")))):
             with self.subTest(probe=label):
@@ -1380,32 +1392,46 @@ class TestUnsatisfiableDraftTierHold(unittest.TestCase):
                 self.assertEqual(code, 1, out)
                 self.assertIn("probe unavailable" if label == "none"
                               else "probe raised", out)
+                self.assertIn("probe is UNKNOWN", out)
                 self.assertIn("stale draft-tier run, full run pending", out)
+                # NOT concluded from a non-observation, and no idle-queue claim.
+                self.assertNotIn("UNSATISFIABLE", out)
+                self.assertNotIn("idle Actions queue", out)
+                self.assertIn("attempt 8:", out)        # rode the absolute bound
 
-    def test_no_probe_wired_still_ends_at_the_base_budget(self):
-        """(2) The widened genuine-hang condition: with NO probe at all, an
-        awaiting_full hold + pending == 0 + idle repo queue + no progress must
-        conclude at the BASE budget (poll 4 here) instead of the absolute cap
-        (poll 8) — the pre-fix behaviour burned the whole budget."""
+    def test_no_probe_wired_never_takes_the_base_budget_shortcut(self):
+        """[PR #3765 finding 1] With NO probe wired there is NO per-head evidence at
+        all, so the widened base-budget branch must not fire either: the per-head
+        probe is the authoritative satisfiability signal, and an unwired probe is
+        UNKNOWN exactly like a failed one. The wait falls back to the pre-#3758
+        absolute cap (poll 8) and still REDs there — bounded, just not "proven"."""
         code, out = run(tiny_cfg(), self._hold_polls(), depth=0,
                         tier_ctx=draft_ctx(counting(True), run_tier="full"))
+        self.assertEqual(code, 1)
+        self.assertNotIn("UNSATISFIABLE", out)
+        self.assertIn("probe is UNKNOWN (no probe wired)", out)
+        self.assertIn("attempt 8:", out)
+        self.assertIn("stale draft-tier run, full run pending", out)
+
+    def test_repo_saturation_does_not_extend_a_zero_pending_hold(self):
+        """A DEEP repo-wide Actions queue is not evidence that THIS head's hold can
+        be satisfied — nothing of ours is pending in that queue, and a real
+        re-dispatch would show up as a queued run on the head. So a CONFIRMED-idle
+        head still concludes at the base budget under saturation (contrast:
+        test_saturation_extension_then_green, where pending > 0). The grace is
+        lifted above the budget here so the fast exit cannot pre-empt this path."""
+        code, out = run(tiny_cfg(unsat_grace_polls=99), self._hold_polls(), depth=50,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                        head_activity=probe(0))
         self.assertEqual(code, 1)
         self.assertIn("UNSATISFIABLE", out)
         self.assertIn("base poll budget was reached", out)
         self.assertIn("attempt 4:", out)
         self.assertNotIn("attempt 5:", out)
-
-    def test_repo_saturation_does_not_extend_a_zero_pending_hold(self):
-        """A DEEP repo-wide Actions queue is not evidence that THIS head's hold can
-        be satisfied — nothing of ours is pending in that queue, and a real
-        re-dispatch would show up as a queued run on the head. So the hold still
-        concludes at the base budget under saturation (contrast:
-        test_saturation_extension_then_green, where pending > 0)."""
-        code, out = run(tiny_cfg(), self._hold_polls(), depth=50,
-                        tier_ctx=draft_ctx(counting(True), run_tier="full"))
-        self.assertEqual(code, 1)
-        self.assertIn("UNSATISFIABLE", out)
         self.assertNotIn("Extending the wait", out)
+        # The evidence must not misreport a depth-50 queue as idle (PR #3765 f1).
+        self.assertNotIn("idle Actions queue", out)
+        self.assertIn("CONFIRMED ZERO queued or in-progress workflow runs", out)
 
     def test_live_progress_still_extends_a_zero_pending_hold(self):
         """Progress (the completed count still rising) DOES justify extending: the
@@ -1515,38 +1541,37 @@ class TestHeadActivityProbeWiring(unittest.TestCase):
             return fetch()
 
     def test_counts_only_non_terminal_foreign_runs(self):
-        self.assertEqual(
-            self._probe([
-                W(999, 1, name="ci-summary", status="in_progress", conclusion=None),
-                W(101, 2, name="CI"),                                     # completed
-                W(102, 3, name="bench", status="queued", conclusion=None),
-            ]),
-            1,
-        )
+        report = self._probe([
+            W(999, 1, name="ci-summary", status="in_progress", conclusion=None),
+            W(101, 2, name="CI"),                                     # completed
+            W(102, 3, name="bench", status="queued", conclusion=None),
+        ])
+        self.assertEqual(report.state, g.HeadActivity.CONFIRMED_BUSY)
+        self.assertEqual(report.count, 1)
+        self.assertFalse(report.confirms_idle)
 
     def test_own_workflow_runs_never_count(self):
         """A SECOND ci-summary run on the same head (same workflow_id) is not a
         candidate successor — a gate run cannot register a full-tier select."""
-        self.assertEqual(
-            self._probe([
-                W(999, 1, name="ci-summary", status="in_progress", conclusion=None),
-                W(998, 1, name="ci-summary", status="in_progress", conclusion=None),
-                W(101, 2, name="CI"),
-            ]),
-            0,
-        )
+        report = self._probe([
+            W(999, 1, name="ci-summary", status="in_progress", conclusion=None),
+            W(998, 1, name="ci-summary", status="in_progress", conclusion=None),
+            W(101, 2, name="CI"),
+        ])
+        self.assertEqual(report.state, g.HeadActivity.CONFIRMED_IDLE)
+        self.assertEqual(report.count, 0)
+        self.assertTrue(report.confirms_idle)
 
     def test_all_terminal_head_is_zero(self):
-        self.assertEqual(
-            self._probe([W(999, 1, name="ci-summary", status="in_progress",
-                           conclusion=None),
-                         W(101, 2, name="CI"), W(102, 3, name="bench")]),
-            0,
-        )
+        report = self._probe([W(999, 1, name="ci-summary", status="in_progress",
+                                conclusion=None),
+                              W(101, 2, name="CI"), W(102, 3, name="bench")])
+        self.assertEqual(report.state, g.HeadActivity.CONFIRMED_IDLE)
+        self.assertTrue(report.confirms_idle)
 
     def test_fetch_failure_is_unknown_not_zero(self):
-        """A failed probe must be UNKNOWN (None) — never 0, which would assert an
-        idle head and could fire the RED on no evidence."""
+        """A failed probe must be UNKNOWN — never a zero COUNT, which would assert
+        an idle head and could fire the RED on no evidence (PR #3765 finding 1)."""
         original = g.make_fetch_workflow_runs
         try:
             def boom(repo, sha, sid=""):
@@ -1558,7 +1583,175 @@ class TestHeadActivityProbeWiring(unittest.TestCase):
         finally:
             g.make_fetch_workflow_runs = original
         with redirect_stdout(io.StringIO()):
-            self.assertIsNone(fetch())
+            report = fetch()
+        self.assertEqual(report.state, g.HeadActivity.UNKNOWN)
+        self.assertIsNone(report.count)
+        self.assertFalse(report.confirms_idle)
+        self.assertIn("api down", report.detail)
+
+
+class TestUnknownProbeIsNotConfirmedZero(unittest.TestCase):
+    """[OPUS-5] PR #3765 cross-provider review, findings 1 + 2 — one bug class: an
+    UNKNOWN probe result (absent / API failure / exception / non-report) was treated
+    as a CONFIRMED-ZERO observation of the head's Actions queue.
+
+    * FINDING 1 — the base-budget exit's veto was `head_busy` (confirmed non-zero
+      ONLY), so an UNKNOWN probe silently SATISFIED the exit condition: a transient
+      probe failure could RED a hold that was in fact SATISFIABLE, and the evidence
+      line reported "an idle Actions queue (depth=50 < 5)" for a queue of depth 50
+      it had never observed as idle.
+    * FINDING 2 — `unsat_confirms` was not reset on UNKNOWN, so [zero, unknown,
+      zero] reached a two-poll grace while claiming "2 consecutive poll(s)".
+
+    The fix makes the probe THREE-STATE (`HeadActivityReport`): only
+    `confirms_idle` is evidence; every non-observation falls through to continued
+    polling and RESETS the confirming streak."""
+
+    DRAFTS = TestUnsatisfiableDraftTierHold.DRAFTS
+    FULLS = [R(SELECT_FULL, started=f"2026-07-23T11:40:0{i}Z", rid=10 + i)
+             for i in range(1, 5)]
+
+    def _hold_polls(self):
+        return [list(self.DRAFTS) + [GREEN, GREEN2]]
+
+    # ---- finding 1 ---------------------------------------------------------
+    def test_transient_probe_failure_at_the_base_budget_does_not_red(self):
+        """THE finding-1 regression. The head really IS busy (a full-tier wave is
+        queued, so the hold is SATISFIABLE) but the probe blips at exactly the base
+        budget poll. Pre-fix the blip took the base-budget exit and RED a
+        satisfiable hold; the gate must instead keep polling — and when the
+        full-tier selects land it PASSES. depth=50 pins the misreport too: a deep
+        repo queue must never be logged as idle."""
+        polls = [
+            list(self.DRAFTS) + [GREEN, GREEN2],                   # 1  hold
+            list(self.DRAFTS) + [GREEN, GREEN2],                   # 2  hold
+            list(self.DRAFTS) + [GREEN, GREEN2],                   # 3  hold
+            list(self.DRAFTS) + [GREEN, GREEN2],                   # 4  base budget
+            list(self.DRAFTS) + self.FULLS + [GREEN, GREEN2],      # 5  wave lands
+            list(self.DRAFTS) + self.FULLS + [GREEN, GREEN2],      # 6  settles
+            list(self.DRAFTS) + self.FULLS + [GREEN, GREEN2],
+        ]
+        code, out = run(tiny_cfg(), polls, depth=50,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                        # busy, busy, busy, TRANSIENT FAILURE at the base budget
+                        head_activity=probe(1, 1, 1, None, 1))
+        self.assertEqual(code, 0, out)                  # no false RED
+        self.assertIn("PASSED", out)
+        self.assertNotIn("UNSATISFIABLE", out)
+        self.assertIn("probe is UNKNOWN", out)          # honest reason logged
+        self.assertIn("attempt 5:", out)                # it kept polling
+        # ...and it never claimed the depth-50 queue was idle.
+        self.assertNotIn("idle Actions queue", out)
+        self.assertNotIn("depth=50 < 5", out)
+
+    def test_unknown_probe_at_the_base_budget_logs_probe_unknown_not_idle(self):
+        """The log-honesty half of finding 1: when the gate keeps polling because
+        the probe is UNKNOWN it must SAY so, and must not attribute the wait to a
+        throughput/saturation signal (saturation is not an extension reason for a
+        zero-pending hold at all)."""
+        code, out = run(tiny_cfg(), self._hold_polls(), depth=50,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                        head_activity=probe(None))
+        self.assertEqual(code, 1)                       # still bounded: RED at cap
+        self.assertIn("probe is UNKNOWN", out)
+        self.assertIn("NOT observed", out)
+        self.assertIn("deliberately", out)              # saturation is not the reason
+        self.assertNotIn("throughput signal", out)
+        self.assertNotIn("UNSATISFIABLE", out)
+        self.assertNotIn("idle Actions queue", out)
+
+    def test_a_bare_int_return_is_unknown_not_a_confirmed_count(self):
+        """The ROOT CAUSE of finding 1 was a bare falsy return. The contract is now
+        a HeadActivityReport, and a bare `0` — the pre-fix "idle head" value — must
+        degrade to UNKNOWN rather than fire the RED."""
+        code, out = run(tiny_cfg(), self._hold_polls(),
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                        head_activity=lambda: 0)   # the FORBIDDEN bare-count return
+        self.assertEqual(code, 1)
+        self.assertNotIn("UNSATISFIABLE", out)
+        self.assertIn("not a HeadActivityReport", out)
+        self.assertIn("probe is UNKNOWN", out)
+        self.assertIn("attempt 8:", out)
+
+    def test_unknown_report_count_is_none_and_never_confirms_idle(self):
+        """Type-level pin: `confirms_idle` must be a STATE test, not a truthiness
+        test on the count — an UNKNOWN report's count is None, which is falsy."""
+        unknown = g.HeadActivityReport.unknown("api down")
+        self.assertIs(unknown.state, g.HeadActivity.UNKNOWN)
+        self.assertIsNone(unknown.count)
+        self.assertFalse(unknown.confirms_idle)
+        self.assertFalse(bool(unknown.count))           # the trap it replaces
+        idle = g.HeadActivityReport.confirmed(0)
+        self.assertIs(idle.state, g.HeadActivity.CONFIRMED_IDLE)
+        self.assertTrue(idle.confirms_idle)
+        busy = g.HeadActivityReport.confirmed(3)
+        self.assertIs(busy.state, g.HeadActivity.CONFIRMED_BUSY)
+        self.assertFalse(busy.confirms_idle)
+
+    # ---- finding 2 ---------------------------------------------------------
+    def test_interleaved_unknown_resets_the_confirming_streak(self):
+        """THE finding-2 regression. [confirmed-zero, UNKNOWN, confirmed-zero] must
+        never reach the two-poll grace: "N consecutive polls" is a claim about N
+        consecutive CONFIRMED observations. A probe that RAISES is handled
+        identically to one that returns unknown. The budget knobs isolate the
+        counter (base_polls above the cap), so ONLY the streak can conclude."""
+        cfg = tiny_cfg(base_polls=99, max_total_polls=3, min_polls=1)
+        for label, middle in (("none", None), ("raises", RuntimeError("boom"))):
+            with self.subTest(unknown=label):
+                code, out = run(cfg, self._hold_polls(),
+                                tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                                head_activity=probe(0, middle, 0))
+                self.assertEqual(code, 1, out)          # RED, but at the cap
+                self.assertIn("1/2 confirming poll(s)", out)
+                self.assertNotIn("2/2 confirming poll(s)", out)
+                self.assertNotIn("UNSATISFIABLE", out)
+                self.assertIn("attempt 3:", out)
+                self.assertIn("stale draft-tier run, full run pending", out)
+
+    def test_two_consecutive_confirmations_do_satisfy_the_grace(self):
+        """The paired positive — without it the test above would also pass on a
+        gate that had simply stopped concluding. Same knobs, no interleaved
+        UNKNOWN: [confirmed-zero, confirmed-zero] DOES reach the grace and REDs at
+        poll 2 naming the hold."""
+        cfg = tiny_cfg(base_polls=99, max_total_polls=3, min_polls=1)
+        code, out = run(cfg, self._hold_polls(),
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                        head_activity=probe(0, 0))
+        self.assertEqual(code, 1)
+        self.assertIn("2/2 confirming poll(s)", out)
+        self.assertIn("UNSATISFIABLE", out)
+        self.assertIn("concluding at poll 2", out)
+        self.assertIn("2 consecutive poll(s) CONFIRMED ZERO", out)
+        self.assertNotIn("attempt 3:", out)
+
+    def test_confirmed_busy_still_resets_the_streak(self):
+        """Unchanged by the fix (and the contrast that shows the reset is about
+        NON-observation, not just about zero-vs-nonzero): a confirmed BUSY poll
+        also breaks the streak."""
+        cfg = tiny_cfg(base_polls=99, max_total_polls=3, min_polls=1)
+        code, out = run(cfg, self._hold_polls(),
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                        head_activity=probe(0, 2, 0))
+        self.assertEqual(code, 1)
+        self.assertNotIn("2/2 confirming poll(s)", out)
+        self.assertNotIn("UNSATISFIABLE", out)
+
+    def test_a_skipped_poll_does_not_bridge_two_confirmations(self):
+        """Same invariant, one layer out: a poll whose check-run fetch FAILED
+        observed nothing at all (not even the hold), so it cannot sit inside a run
+        of consecutive confirmations either."""
+        cfg = tiny_cfg(base_polls=99, max_total_polls=3, min_polls=1)
+        polls = [
+            list(self.DRAFTS) + [GREEN, GREEN2],
+            g.FetchError("transient"),
+            list(self.DRAFTS) + [GREEN, GREEN2],
+        ]
+        code, out = run(cfg, polls,
+                        tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                        head_activity=probe(0))
+        self.assertEqual(code, 1)
+        self.assertIn("check-run fetch failed", out)
+        self.assertNotIn("2/2 confirming poll(s)", out)
 
 
 class TestMergeGroupChangeClassAccounting(unittest.TestCase):

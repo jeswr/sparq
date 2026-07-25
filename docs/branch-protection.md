@@ -274,14 +274,19 @@ belts (all in `scripts/ci_summary_gate.py`, unit-tested in
    re-run, since the hold is a pure function of the head's check-run set. Two
    additive exits now end it: (a) while the hold is up with zero pending siblings
    the gate counts **non-terminal Actions workflow runs on this head SHA** (its own
-   workflow excluded); `unsat_grace_polls` consecutive **zero** observations (~3 min
-   — a registration-grace window, since a re-dispatch appears as a `queued` run
-   within seconds) prove the hold unsatisfiable and RED at once; (b) the base-budget
-   hang branch now also fires for a zero-pending hold, where repo-wide runner
-   saturation is deliberately **not** an extension reason (nothing of ours is
-   starving in that queue) — but live per-head activity **is**: a probe that just
-   saw a non-terminal run on this SHA vetoes both exits, leaving the pre-existing
-   absolute-budget bound in place. Both route through rule 4's own verdict — the exit can
+   workflow excluded); `unsat_grace_polls` consecutive **confirmed-zero**
+   observations (~3 min — a registration-grace window, since a re-dispatch appears
+   as a `queued` run within seconds) prove the hold unsatisfiable and RED at once;
+   (b) the base-budget hang branch now also fires for a zero-pending hold, where
+   repo-wide runner saturation is deliberately **not** an extension reason (nothing
+   of ours is starving in that queue) — but anything short of a **confirmed-idle**
+   head is. The probe is three-state (`confirmed-zero` / `confirmed-nonzero` /
+   **`unknown`**) and only a confirmed zero is evidence, so live per-head activity
+   **and** an unknown/failed/unwired probe alike veto both exits, leaving the
+   pre-existing absolute-budget bound in place; an `unknown` observation also
+   **resets** the consecutive-confirmation counter (N consecutive polls must mean N
+   consecutive *confirmed* observations) and is never logged as an idle queue.
+   Both route through rule 4's own verdict — the exit can
    never render a pass — and the RED states the remedy explicitly: **re-running the
    `ci-summary` gate cannot clear it**; only a **full-tier re-dispatch of the
    selecting workflows** on this head, **`ready_for_review`**, or a **new head

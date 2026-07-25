@@ -154,18 +154,27 @@
 #     CONSECUTIVE zero observations (a registration-grace window for the
 #     ready_for_review re-runs, which appear as queued runs the instant the event
 #     fires) conclude the hold UNSATISFIABLE and RED immediately through the
-#     stale-draft-tier verdict belt. Probe unavailable/failed => UNKNOWN => never
-#     concludes (the belt below still bounds the wait).
+#     stale-draft-tier verdict belt.
 #   * BASE-BUDGET WIDENING — the genuine-hang branch now also fires for an
 #     awaiting_full hold with pending == 0, and in that state repo-wide runner
 #     SATURATION is explicitly NOT an extension reason: with zero pending
 #     siblings nothing of ours is starving in that queue, and Actions creates a
 #     run (status=queued) the instant the triggering event fires regardless of
 #     pool depth. Live progress (a rising completed count) still extends, and so
-#     does live PER-HEAD activity — a probe that saw a non-terminal run on this
-#     SHA this poll vetoes the shortcut, leaving the pre-#3758 absolute-budget
-#     bound in place. The per-head probe, not the repo-wide queue, is the
-#     authoritative satisfiability signal for a zero-pending hold.
+#     does anything short of a CONFIRMED-IDLE head. The per-head probe, not the
+#     repo-wide queue, is the authoritative satisfiability signal for a
+#     zero-pending hold.
+#   * THREE-STATE PROBE (PR #3765 review finding 1). The probe returns a
+#     HeadActivityReport whose state is CONFIRMED_IDLE / CONFIRMED_BUSY / UNKNOWN,
+#     and ONLY CONFIRMED_IDLE is evidence. UNKNOWN — probe absent, API failure,
+#     exception, or a non-report return — is a NON-OBSERVATION: it can never
+#     satisfy either exit (both fall back to the pre-#3758 absolute-budget bound)
+#     and it is never logged as an idle queue. It also RESETS the confirming
+#     streak (finding 2), because "N consecutive polls" must mean N consecutive
+#     CONFIRMED observations — [zero, unknown, zero] proves nothing about
+#     consecutiveness. The earlier `int | None` probe let a falsy count stand in
+#     for a confirmed zero, so a transient probe failure could RED a hold that was
+#     in fact SATISFIABLE while reporting an idle queue it had never seen.
 # Both exits are exit-1-only and route through render_verdict's stale-draft-tier
 # belt, so they can never synthesise a pass; a hold that IS satisfiable (a queued
 # full-tier run exists) waits exactly as before. The RED names the remedy
@@ -194,6 +203,7 @@ import sys
 import time
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
+from enum import Enum
 
 ADVISORY_RE = re.compile(r"\b(advisory|informational)\b")
 _PASSING = ("success", "skipped", "neutral")
@@ -269,6 +279,56 @@ UNSAT_HOLD_REMEDY = (
     "ready_for_review full-tier wave is dispatched, or (3) push a new head commit. "
     "Automated repair lanes: do NOT re-run this workflow for this verdict."
 )
+
+
+class HeadActivity(Enum):
+    """[OPUS-5] PR #3765 review finding 1: the THREE states of the per-head
+    unsatisfiability probe, kept DISTINCT in the type system.
+
+    The probe originally returned `int | None` and the call sites branched on
+    truthiness, so `None` (UNKNOWN — probe absent, failed, or raised) took the same
+    branch as a CONFIRMED zero. A transient API blip could therefore "prove" an idle
+    head and RED a hold that was in fact SATISFIABLE, while the log claimed an idle
+    queue it had never observed. Only ``CONFIRMED_IDLE`` is evidence; the other two
+    states must both fall through to continued polling.
+    """
+
+    CONFIRMED_IDLE = "confirmed-zero"      # observed: 0 non-terminal runs on the head
+    CONFIRMED_BUSY = "confirmed-nonzero"   # observed: >= 1 non-terminal run
+    UNKNOWN = "unknown"                    # NOT observed: absent / failed / raised
+
+
+@dataclass(frozen=True)
+class HeadActivityReport:
+    """One per-head probe observation (#3758): a `HeadActivity` state plus the
+    observed count (None iff UNKNOWN) and an operator-facing reason for UNKNOWN.
+
+    Construct through `confirmed()` / `unknown()` — never by truthiness of a bare
+    count, which is the conflation PR #3765 finding 1 removed."""
+
+    state: HeadActivity
+    count: int | None = None
+    detail: str = ""
+
+    @classmethod
+    def confirmed(cls, count: int) -> HeadActivityReport:
+        """An ACTUAL observation of `count` non-terminal runs on the head SHA."""
+        return cls(
+            HeadActivity.CONFIRMED_IDLE if count == 0 else HeadActivity.CONFIRMED_BUSY,
+            count,
+        )
+
+    @classmethod
+    def unknown(cls, detail: str) -> HeadActivityReport:
+        """NO observation was obtained (`detail` says why). Never evidence."""
+        return cls(HeadActivity.UNKNOWN, None, detail)
+
+    @property
+    def confirms_idle(self) -> bool:
+        """The ONLY predicate any exit may condition on. Deliberately NOT
+        `not self.count`: an UNKNOWN report carries count=None, which is falsy —
+        exactly the bug (PR #3765 finding 1)."""
+        return self.state is HeadActivity.CONFIRMED_IDLE
 
 
 @dataclass
@@ -1344,6 +1404,34 @@ def _conclude_unsatisfiable_hold(
     return code
 
 
+def _probe_head_activity(fetch_head_activity) -> HeadActivityReport:
+    """[OPUS-5] PR #3765 finding 1: call the per-head probe and normalise EVERY
+    non-observation to `HeadActivity.UNKNOWN`. The four non-observations — no probe
+    wired, `None` returned (API failure), an exception, or a value that is not a
+    `HeadActivityReport` (e.g. a bare count from a future refactor) — are all
+    UNKNOWN, so no exit can mistake them for a confirmed-idle head."""
+    if fetch_head_activity is None:
+        return HeadActivityReport.unknown("no probe wired")
+    try:
+        report = fetch_head_activity()
+    except Exception as exc:  # never let a probe crash the gate
+        print(f"  (head-activity probe raised {exc!r} — treating as unknown)")
+        return HeadActivityReport.unknown(f"probe raised {type(exc).__name__}")
+    if isinstance(report, HeadActivityReport):
+        return report
+    if report is None:
+        return HeadActivityReport.unknown("probe unavailable (API failure)")
+    # Fail-safe: a bare int/whatever is NOT a confirmed observation here. Coercing it
+    # to "confirmed" is precisely how finding 1 arose, so it degrades to UNKNOWN.
+    print(
+        f"  (head-activity probe returned {report!r}, not a HeadActivityReport — "
+        "treating as unknown)"
+    )
+    return HeadActivityReport.unknown(
+        f"probe unavailable (non-report return of type {type(report).__name__})"
+    )
+
+
 def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
              tier_ctx: TierContext | None = None, fetch_head_activity=None) -> int:
     """The poll loop. `fetch_runs()` -> list of {name,status,conclusion,details_url,
@@ -1351,11 +1439,12 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
     -> int queued workflow-run count for the repo, or None when unknown (API
     failure — the gate then falls back to the progress signal alone). tier_ctx
     carries the draft-tier integrity context (None => pre-draft-tier semantics).
-    fetch_head_activity() -> int count of non-terminal Actions workflow runs on
-    THIS head SHA excluding this gate's own workflow, or None when unknown; it is
-    consulted ONLY inside a draft-tier `awaiting_full` hold with zero pending
-    siblings (#3758), and None/absent simply means the unsatisfiability exit never
-    fires. Returns the exit code."""
+    fetch_head_activity() -> HeadActivityReport for THIS head SHA (non-terminal
+    Actions workflow runs, this gate's own workflow excluded); it is consulted ONLY
+    inside a draft-tier `awaiting_full` hold with zero pending siblings (#3758).
+    Absent / failing / raising / non-report => HeadActivity.UNKNOWN, which is never
+    evidence: neither unsatisfiability exit can fire on it (PR #3765 finding 1).
+    Returns the exit code."""
     prev_names: list[str] | None = None
     stable = 0
     runs: list[dict] = []
@@ -1369,7 +1458,12 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
     ff_suspect: tuple | None = None
     # [OPUS-5] #3758: consecutive polls that have CONFIRMED an unsatisfiable
     # awaiting_full hold (hold up, zero pending siblings, zero non-terminal
-    # workflow runs on this head). Reset by any contrary observation.
+    # workflow runs on this head). PR #3765 finding 2: "consecutive" means
+    # consecutive CONFIRMED OBSERVATIONS, so this resets on any contrary
+    # observation AND on any NON-observation — an UNKNOWN/raising probe, or a poll
+    # that never reached the probe at all (fetch failure, fail-fast grace re-poll).
+    # Otherwise [confirmed-zero, unknown, confirmed-zero] would reach a 2-poll
+    # grace while claiming "2 consecutive polls", which is not what it proved.
     unsat_confirms = 0
 
     attempt = 0
@@ -1398,6 +1492,10 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
                 f"attempt {attempt}: check-run fetch failed ({exc}) — skipping this poll "
                 f"({consec_fetch_failures}/{cfg.max_consec_fetch_failures} consecutive)."
             )
+            # PR #3765 finding 2: this poll observed NOTHING (not even the sibling set
+            # the hold is derived from), so it cannot sit inside a run of consecutive
+            # CONFIRMED observations.
+            unsat_confirms = 0
             sleep_fn(cfg.sat_interval if extension_started else cfg.interval)
             continue
         consec_fetch_failures = 0
@@ -1493,6 +1591,9 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
                     f"  fail-fast: {len(ff)} concluded gating failure(s) observed — "
                     f"immediate grace re-poll to confirm before concluding."
                 )
+                # PR #3765 finding 2: the grace re-poll skips the probe, so this poll
+                # contributes no CONFIRMED observation to the consecutive streak.
+                unsat_confirms = 0
                 continue  # no sleep: the grace re-poll is deliberately immediate
             ff_suspect = None
 
@@ -1507,36 +1608,32 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
         # CONSECUTIVE zero observations (registration grace: a ready_for_review
         # re-dispatch appears as a queued run within seconds) prove the hold cannot
         # clear, and the gate REDs now through the same stale-draft-tier belt the
-        # budget-exhaustion path uses. A probe that is absent or fails is UNKNOWN and
-        # never concludes anything (the base-budget widening below still bounds it).
-        # head_busy is THIS poll's per-head evidence that the hold may still be
-        # satisfiable; it also vetoes the base-budget shortcut further below, so the
-        # per-head probe — not the repo-wide queue depth — stays the authoritative
-        # satisfiability signal for a zero-pending hold.
-        head_busy = False
+        # budget-exhaustion path uses. A probe that is absent, fails, raises, or hands
+        # back a non-report is UNKNOWN — NOT an observation — so it can never conclude
+        # anything AND it RESETS the confirming streak (PR #3765 findings 1+2). `head`
+        # is THIS poll's per-head report; it also gates the base-budget shortcut
+        # further below, so the per-head probe — not the repo-wide queue depth — stays
+        # the authoritative satisfiability signal for a zero-pending hold.
+        head = HeadActivityReport.unknown("probe not consulted (no zero-pending hold)")
         if awaiting_full and pending == 0:
-            head_activity = None
-            if fetch_head_activity is not None:
-                try:
-                    head_activity = fetch_head_activity()
-                except Exception as exc:  # never let a probe crash the gate
-                    print(f"  (head-activity probe raised {exc!r} — treating as unknown)")
-                    head_activity = None
-            if head_activity is None:
+            head = _probe_head_activity(fetch_head_activity)
+            if head.state is HeadActivity.UNKNOWN:
+                # PR #3765 finding 2: a non-observation BREAKS consecutiveness.
+                unsat_confirms = 0
                 print(
                     "  awaiting_full hold with 0 pending sibling(s): head-activity "
-                    "probe unavailable (unknown) — cannot prove the hold unsatisfiable, "
-                    "still waiting (#3758)."
+                    f"probe UNKNOWN ({head.detail}) — this head's Actions queue was "
+                    "NOT observed, so the hold cannot be proven unsatisfiable; the "
+                    "confirming streak is RESET and the gate keeps polling (#3758)."
                 )
-            elif head_activity > 0:
+            elif head.state is HeadActivity.CONFIRMED_BUSY:
                 unsat_confirms = 0
-                head_busy = True
                 print(
-                    f"  awaiting_full hold with 0 pending sibling(s): {head_activity} "
+                    f"  awaiting_full hold with 0 pending sibling(s): {head.count} "
                     "non-terminal workflow run(s) on this head SHA could still register "
                     "the full-tier successor — still settling (#3758)."
                 )
-            else:
+            else:  # HeadActivity.CONFIRMED_IDLE — the ONLY evidential state
                 unsat_confirms += 1
                 print(
                     "  awaiting_full hold with 0 pending sibling(s) and NO queued/"
@@ -1548,9 +1645,9 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
                     return _conclude_unsatisfiable_hold(
                         runs, cfg, tier_ctx, attempt=attempt,
                         evidence=(
-                            f"{unsat_confirms} consecutive poll(s) found ZERO queued or "
-                            "in-progress workflow runs on this head SHA (this gate's own "
-                            "workflow excluded)"
+                            f"{unsat_confirms} consecutive poll(s) CONFIRMED ZERO queued "
+                            "or in-progress workflow runs on this head SHA (this gate's "
+                            "own workflow excluded)"
                         ),
                     )
         else:
@@ -1585,36 +1682,77 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
             # repo-wide runner saturation explains NOTHING — none of OUR work is
             # starving in that queue, and Actions creates a run (status=queued) the
             # instant its triggering event fires regardless of pool depth, which the
-            # per-head probe above would have seen. Only LIVE PROGRESS (the sibling
-            # set still churning) justifies extending this state. For pending > 0 the
-            # sq-90cv4 semantics are byte-identical to before.
+            # per-head probe above would have seen. LIVE PROGRESS (the sibling set
+            # still churning) justifies extending this state — as does any per-head
+            # observation short of a CONFIRMED idle (next comment). Repo-wide
+            # saturation never does. For pending > 0 the sq-90cv4 semantics are
+            # byte-identical to before.
             hold_only = pending == 0 and awaiting_full
-            # ...and conversely, LIVE PER-HEAD ACTIVITY (head_busy: the probe saw a
-            # non-terminal run on this SHA this poll) DOES keep a zero-pending hold
-            # alive — that run may yet register the awaited full-tier select, so the
-            # gate falls back to the pre-#3758 bound (the absolute budget) rather
-            # than concluding unsatisfiability the probe just contradicted.
-            if not (progressing or (saturated and not hold_only)
-                    or (hold_only and head_busy)):
+            depth_txt = depth if depth is not None else "unknown"
+            # ...and conversely, anything OTHER than a CONFIRMED-IDLE head keeps a
+            # zero-pending hold alive. [OPUS-5] PR #3765 finding 1: this used to be
+            # `head_busy` (confirmed non-zero only), so an UNKNOWN probe — absent,
+            # failed, raised — silently satisfied the exit condition and could RED a
+            # SATISFIABLE hold on a transient blip, logging an idle queue it had never
+            # observed. Only `confirms_idle` is evidence; CONFIRMED_BUSY (that run may
+            # yet register the awaited select) and UNKNOWN (nothing was observed at
+            # all) both fall back to the pre-#3758 bound, the absolute budget.
+            if hold_only:
+                extend = progressing or not head.confirms_idle
+            else:
+                extend = progressing or saturated   # sq-90cv4, byte-identical
+            if not extend:
                 if hold_only:
                     return _conclude_unsatisfiable_hold(
                         runs, cfg, tier_ctx, attempt=attempt,
                         evidence=(
                             "the base poll budget was reached with every sibling terminal, "
-                            f"an idle Actions queue (depth="
-                            f"{depth if depth is not None else 'unknown'} < {cfg.sat_queue_min}) "
-                            f"and no completions in the last {cfg.progress_window} poll(s)"
+                            "the per-head probe CONFIRMED ZERO queued or in-progress "
+                            "workflow runs on this head SHA, and no completions landed in "
+                            f"the last {cfg.progress_window} poll(s) (repo-wide Actions "
+                            f"queue depth={depth_txt} is deliberately NOT an extension "
+                            "reason with zero pending siblings)"
                         ),
                     )
                 print(
                     f"::error::ci-summary timed out — {pending} sibling check-run(s) never "
                     f"finished within the base budget, the Actions queue is idle "
-                    f"(depth={depth if depth is not None else 'unknown'} < {cfg.sat_queue_min}) "
+                    f"(depth={depth_txt} < {cfg.sat_queue_min}) "
                     f"and no completions landed in the last {cfg.progress_window} poll(s): "
                     f"genuine hang, not a still-settling set. See the per-poll log above."
                 )
                 return 1
-            if not extension_started:
+            if hold_only:
+                # [OPUS-5] PR #3765 finding 1: state the REAL reason this zero-pending
+                # hold is still being waited on. The sq-90cv4 notice below would
+                # misreport it as a throughput signal, and an UNKNOWN probe must never
+                # be logged as an idle queue.
+                if progressing:
+                    reason = "live sibling progress (the set is still churning)"
+                elif head.state is HeadActivity.UNKNOWN:
+                    reason = (
+                        f"the head-activity probe is UNKNOWN ({head.detail}) — this "
+                        "head's Actions queue was NOT observed, so unsatisfiability is "
+                        "NOT proven"
+                    )
+                else:
+                    reason = (
+                        f"{head.count} non-terminal workflow run(s) on this head SHA "
+                        "could still register the full-tier successor"
+                    )
+                if not extension_started:
+                    extension_started = True
+                    print(
+                        "::notice::ci-summary base budget reached with every sibling "
+                        "terminal and the draft-tier `awaiting_full` hold still up: "
+                        f"{reason}. Extending the wait to the absolute budget (poll "
+                        f"{cfg.max_total_polls}) instead of concluding — repo-wide "
+                        f"runner saturation (queue depth={depth_txt}) is deliberately "
+                        "NOT an extension reason for a zero-pending hold (#3758)."
+                    )
+                else:
+                    print(f"  hold extension (poll {attempt}): {reason} — still waiting.")
+            elif not extension_started:
                 extension_started = True
                 print(
                     f"::notice::ci-summary base budget reached with {pending} sibling(s) still "
@@ -1824,39 +1962,42 @@ def make_fetch_pr_draft(repo: str, pr_number: str):
 
 def make_fetch_head_activity(repo: str, sha: str, self_run_id: str = ""):
     """[OPUS-5] #3758: the per-head UNSATISFIABILITY probe. Returns a
-    () -> int | None fetcher giving the number of NON-TERMINAL (queued /
-    in_progress / requested / waiting / pending) Actions workflow runs on THIS head
-    SHA, excluding every run of this gate's OWN workflow — a ci-summary run can
-    never register the full-tier select the awaiting_full hold waits for, and two
+    () -> HeadActivityReport fetcher counting the NON-TERMINAL (queued / in_progress
+    / requested / waiting / pending) Actions workflow runs on THIS head SHA,
+    excluding every run of this gate's OWN workflow — a ci-summary run can never
+    register the full-tier select the awaiting_full hold waits for, and two
     concurrent gate runs on one head must not each count the other as a candidate
     (that is the 68-minute mutual stall this exit exists to end).
 
-    Zero therefore means: nothing is running or queued on this commit that could
-    produce the awaited strictly-later full-tier successor. None means UNKNOWN (API
-    failure) — run_gate then never concludes unsatisfiability from it. Reuses the
-    existing workflow-run lister (same endpoint, same self-run merge) so the probe
-    and the #3505 resolver read one consistent view of the head."""
+    A CONFIRMED zero therefore means: nothing is running or queued on this commit
+    that could produce the awaited strictly-later full-tier successor. An API failure
+    yields `HeadActivityReport.unknown(...)` — never a zero count (PR #3765 finding
+    1: run_gate must be unable to mistake a non-observation for an idle head).
+    Reuses the existing workflow-run lister (same endpoint, same self-run merge) so
+    the probe and the #3505 resolver read one consistent view of the head."""
 
     list_runs = make_fetch_workflow_runs(repo, sha, self_run_id)
 
-    def fetch():
+    def fetch() -> HeadActivityReport:
         try:
             runs = list_runs()
         except FetchError as exc:
             print(f"  (head-activity probe failed: {exc} — treating as unknown)")
-            return None
+            return HeadActivityReport.unknown(f"probe unavailable (API failure: {exc})")
         self_id = _as_int(self_run_id)
         self_workflow = ""
         for run in runs:
             if _as_int(run.get("id")) == self_id:
                 self_workflow = workflow_identity(run)
                 break
-        return sum(
-            1
-            for run in runs
-            if run.get("status") != "completed"
-            and _as_int(run.get("id")) != self_id
-            and not (self_workflow and workflow_identity(run) == self_workflow)
+        return HeadActivityReport.confirmed(
+            sum(
+                1
+                for run in runs
+                if run.get("status") != "completed"
+                and _as_int(run.get("id")) != self_id
+                and not (self_workflow and workflow_identity(run) == self_workflow)
+            )
         )
 
     return fetch
@@ -2003,7 +2144,7 @@ def _self_test() -> int:
         unsat_code = run_gate(
             hold_cfg, lambda: [dict(draft_select)], lambda: 0,
             sleep_fn=lambda _s: None, tier_ctx=hold_ctx,
-            fetch_head_activity=lambda: 0,
+            fetch_head_activity=lambda: HeadActivityReport.confirmed(0),
         )
     require(unsat_code == 1, "unsatisfiable draft-tier hold did not RED (#3758)")
     require(
@@ -2016,7 +2157,7 @@ def _self_test() -> int:
         busy_code = run_gate(
             hold_cfg, lambda: [dict(draft_select)], lambda: 0,
             sleep_fn=lambda _s: None, tier_ctx=hold_ctx,
-            fetch_head_activity=lambda: 1,
+            fetch_head_activity=lambda: HeadActivityReport.confirmed(1),
         )
     require(busy_code == 1, "satisfiable-hold budget exhaustion must still RED")
     require(
@@ -2025,11 +2166,60 @@ def _self_test() -> int:
         "a SATISFIABLE hold (non-terminal run on the head) exited early (#3758)",
     )
 
+    # [OPUS-5] PR #3765 review findings 1+2: an UNKNOWN probe is NOT a confirmed-idle
+    # head. (1) It must never conclude unsatisfiability — not even at/after the base
+    # budget, where the exit condition used to be satisfied by a falsy count.
+    # (2) It must RESET the consecutive-confirmation counter, so an interleaved
+    # [zero, unknown, zero] can never reach a 2-poll grace.
+    for label, probe in (
+        ("none", lambda: None),
+        ("raises", lambda: (_ for _ in ()).throw(RuntimeError("probe boom"))),
+        ("bare-int-0", lambda: 0),   # the pre-fix conflation, now UNKNOWN
+    ):
+        unknown_log = io.StringIO()
+        with redirect_stdout(unknown_log):
+            unknown_code = run_gate(
+                Config(self_run_id="999", interval=0, min_polls=1, settle_polls=2,
+                       base_polls=3, sat_interval=0, max_total_polls=6,
+                       unsat_grace_polls=2, sat_queue_min=5, summary_path=""),
+                lambda: [dict(draft_select)], lambda: 0,
+                sleep_fn=lambda _s: None, tier_ctx=hold_ctx,
+                fetch_head_activity=probe,
+            )
+        require(unknown_code == 1, f"UNKNOWN probe ({label}) must still RED at the cap")
+        require(
+            "UNSATISFIABLE" not in unknown_log.getvalue()
+            and "probe is UNKNOWN" in unknown_log.getvalue()
+            and "attempt 6:" in unknown_log.getvalue(),
+            f"an UNKNOWN probe ({label}) concluded unsatisfiability or claimed an idle "
+            "queue instead of polling on (PR #3765 finding 1)",
+        )
+    interleaved = iter([HeadActivityReport.confirmed(0), None,
+                        HeadActivityReport.confirmed(0)])
+    inter_log = io.StringIO()
+    with redirect_stdout(inter_log):
+        inter_code = run_gate(
+            Config(self_run_id="999", interval=0, min_polls=1, settle_polls=2,
+                   base_polls=9, sat_interval=0, max_total_polls=3,
+                   unsat_grace_polls=2, sat_queue_min=5, summary_path=""),
+            lambda: [dict(draft_select)], lambda: 0,
+            sleep_fn=lambda _s: None, tier_ctx=hold_ctx,
+            fetch_head_activity=lambda: next(interleaved, None),
+        )
+    require(inter_code == 1, "interleaved-unknown hold must still RED at the cap")
+    require(
+        "UNSATISFIABLE" not in inter_log.getvalue()
+        and "2/2 confirming poll(s)" not in inter_log.getvalue(),
+        "[zero, unknown, zero] reached the 2-poll grace — the UNKNOWN probe did not "
+        "reset the consecutive-confirmation counter (PR #3765 finding 2)",
+    )
+
     print(
         "ci-summary --self-test: ALL ASSERTIONS PASSED "
         "(superseded cancellation ignored; newest failure preserved; redispatch "
         "bounded once; unsatisfiable draft-tier hold exits fast + RED while a "
-        "satisfiable hold still waits)"
+        "satisfiable hold still waits; an UNKNOWN probe neither concludes nor "
+        "sustains a confirming streak)"
     )
     return 0
 
