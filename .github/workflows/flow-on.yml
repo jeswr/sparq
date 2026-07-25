@@ -3,8 +3,8 @@
 #
 # On every MERGED pull request, evaluate scripts/flow-on-rules.toml against the
 # PR's changed files / labels / title and open a GitHub issue (labelled
-# `flow-on` + `auto`, idempotent) for each triggered follow-on. The orchestrator
-# reconciles those issues into beads — we do NOT touch `bd` / `.beads/` in CI.
+# `flow-on` + `auto`, idempotent) for each triggered follow-on. GitHub issues are
+# the sole tracker (beads was retired 2026-07-17) — the follow-on issues ARE the work.
 #
 # [FABLE-5] (#2474) flow-on.py ALSO applies role/priority/status routing labels at
 # creation (via the shared scripts/triage.py static pass): issues created under

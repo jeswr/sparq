@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 # [OPUS-4.8] Issue-native orchestration: migrate bd beads -> GitHub issues (Phase 1).
+#
+# HISTORICAL TOOL — the migration RAN on 2026-07-17. Beads (`bd` / `.beads/`) has been
+# retired and GitHub issues are now the sole tracker (see docs/bd-migration.md + the
+# committed sq-id -> issue map in docs/bd-migration-map.json). This script is kept as the
+# migration record + a re-runnable reference; it is NOT part of any live workflow, and there
+# is no longer a `bd` DB to export from on this repo.
 """bd-to-issues.py — one-time, idempotent migration of open bd beads into GitHub issues.
 
 DEFAULT is --dry-run: it parses `bd export`, computes the issue payloads + label mapping + the

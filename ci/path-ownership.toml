@@ -304,10 +304,10 @@ safe = true
 pattern = "site/**"
 safe = true
 
-# The bead task database. Task-tracking only; no crate reads .beads/.
-[[map]]
-pattern = ".beads/**"
-safe = true
+# NOTE: a ".beads/**" entry (the bead task database) lived here until the 2026-07-17
+# beads->GitHub-issues cutover removed the directory. Pattern roots must exist on disk
+# (MapValidityTests), so the entry is deleted rather than left dangling; nothing replaces
+# it because the issue tracker is not a repo path.
 
 # [FABLE-5] sq-63ups: the formal-verification manifest (proof suites -> verified
 # paths + the alarmed lanes). Consumed ONLY by the formal-verification.yml /

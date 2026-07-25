@@ -7,12 +7,10 @@
 # (labelled `flow-on` + `auto` + role/priority/status routing labels — see
 # routing_labels(), #2474) per triggered follow-on template.
 #
-# WHY GITHUB ISSUES, NOT `bd create`:
-# (research/maintenance-flow-on-automation-design.md §2.2) In CI there is NO `bd`
-# dolt DB — it lives only in the orchestrator's main checkout and is gitignored,
-# and hand-editing `.beads/` is forbidden. So this script must NOT touch `bd` or
-# `.beads/`. Instead it emits each follow-on as a GitHub issue; the orchestrator
-# reconciles those issues into beads (`bd create`) out-of-band.
+# WHY GITHUB ISSUES:
+# (research/maintenance-flow-on-automation-design.md §2.2) GitHub issues are the
+# sole task tracker (beads was retired 2026-07-17). This script emits each follow-on
+# directly as a GitHub issue — the tracked unit of work, no reconciliation step.
 #
 # IDEMPOTENCY: each `create` template has a `dedup_key`. After expansion the key
 # is embedded in the issue body as `<!-- flow-on-key: <key> -->`. Before creating,

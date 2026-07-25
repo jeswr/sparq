@@ -124,15 +124,16 @@ _ORCHESTRATION_SAFE: list[str] = [
     # Orchestration configuration + agent harness (never compiled/tested by cargo).
     "orchestration/",       # routing.toml + orchestration policy (the #3416 class)
     ".claude/",             # agent definitions / skills / workflows / settings
-    ".beads/",              # the bead task DB (never read by any build/test)
-    # Orchestration-only workflow files (PR/issue/bead/merge automation — none run
+    # NOTE: ".beads/" was here until the 2026-07-17 beads->issues cutover retired the
+    # directory. Entries must exist on disk (OrchestrationSafeInertnessTests), so a
+    # deleted path is removed rather than left as a dead prefix.
+    # Orchestration-only workflow files (PR/issue/merge automation — none run
     # cargo build/test/clippy/coverage/bench/fuzz/CodeQL).
     ".github/workflows/triage-issue.yml",
     ".github/workflows/retriage.yml",
     ".github/workflows/pr-backlog.yml",
     ".github/workflows/pr-title.yml",
     ".github/workflows/batch-merge.yml",
-    ".github/workflows/bead-autoclose.yml",
     ".github/workflows/promote-on-approval.yml",
     ".github/workflows/differential-update.yml",
     ".github/workflows/kb-dump.yml",
@@ -140,7 +141,7 @@ _ORCHESTRATION_SAFE: list[str] = [
     # NOTE deliberately NOT here: selection-alarm.yml / formal-alarm.yml — they are
     # monitors for the Rust/formal lanes (borderline), so they keep triggering full
     # (fail-closed; the value of skipping them is negligible and the audit is cleaner).
-    # Orchestration-only scripts (PR/issue/bead/routing/dispatch automation). Each is
+    # Orchestration-only scripts (PR/issue/routing/dispatch automation). Each is
     # pinned inert by the OrchestrationSafeInertnessTests grep.
     "scripts/triage.py",
     "scripts/retriage.py",
@@ -150,7 +151,11 @@ _ORCHESTRATION_SAFE: list[str] = [
     "scripts/pr-backlog.py",
     "scripts/batch-merge.py",
     "scripts/save-agent-log.sh",
-    "scripts/push-frontier.sh",
+    # NOTE: "scripts/push-frontier.sh" was here until the 2026-07-17 cutover deleted it
+    # (superseded by scripts/ready-issues.py). Its replacement is deliberately NOT
+    # allowlisted here: fail-closed is the safe direction (a change to ready-issues.py
+    # keeps triggering the full matrix, which costs time but can never be unsound), and
+    # admitting it needs the inertness audit above run against it first.
 ]
 
 

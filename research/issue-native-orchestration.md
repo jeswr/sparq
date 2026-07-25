@@ -49,7 +49,7 @@ bd's features are reproduced on issues + workflows:
 | priority (0–4) | `priority:P0..P4` labels |
 | type/labels | native labels (`role:`, `model:`, `status:`, `trust:`) + existing `area:<crate>` = **package** |
 | conflict-partition (push-frontier) | package = `area:<crate>` label; one in-progress worker per package |
-| auto-close on merge | issue-native retarget of `bead-autoclose.yml` |
+| auto-close on merge | GitHub-native `Closes #N` in the merged PR body. (An issue-native retarget of `bead-autoclose.yml` was built in #2528 but **retired at the 2026-07-17 cutover**: it only trusted issues carrying a `bd-migration` authentication label, that label was never created, and no migrated issue ever carried it — so the path could never close anything. Native `Closes #N` is what actually closed the migrated issues, e.g. #2831 ← PR #3572.) |
 | `sq-…` PR tokens | preserved via a `sq-… ↔ #NN` map written at migration |
 
 **Label taxonomy** (created in Phase 0): `priority:P0..P4` · `role:{impl,review,docs,research,perf,ci,site,soundness}`

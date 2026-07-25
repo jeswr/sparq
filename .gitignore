@@ -57,18 +57,6 @@ node_modules/
 # Claude Code agent worktrees (transient scratch; the tracked skills under .claude/skills/ stay)
 /.claude/worktrees/
 
-# Beads / Dolt files (added by bd init)
-# [OPUS-4.8] Scope the Dolt/SQLite ignore to .beads/ so legitimate *.db
-# fixtures elsewhere in the tree are NOT silently hidden from `git add`.
-# (The generated DBs live under .beads/, which also ships its own .gitignore.)
-.dolt/
-.beads/*.db
-.beads/*.db-journal
-.beads/*.db-wal
-.beads/*.db-shm
-.beads-credential-key
-.beads/proxieddb/
-
 # [OPUS-4.8] Agent-metrics RUNTIME rows (bead sq-lhwo.1): per-PR/per-task metrics
 # rows carry NON-CANONICAL session-local numbers (and may reference session
 # transcripts), so the live append-only log is git-ignored. The COMMITTED data is the

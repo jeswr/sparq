@@ -112,21 +112,34 @@ This rule binds the orchestrator, every sub-agent, and the autonomous-scheduler 
 <!-- [OPUS-4.8] charter cross-poll from PSS #173 -->
 When a bug or review finding describes a **class** of problem affecting more than one place — a parser edge case in Turtle that also hits TriG, an operator bug whose sibling operators share a code path, a `pub`-surface footgun repeated across the CLI / HTTP / Python / JS-WASM bindings — it must **eventually be addressed in every instance, not patched only where it surfaced.** **Prefer fixing the pattern ONCE in the shared place** (the common code path, or a `sparq-core` helper) so all surfaces inherit it; if a shared fix isn't feasible, fix each instance to the **same spec** and file a bead for the consolidation. Either way, when you fix one instance, **file a bead** (see *Task tracking* below) covering the other affected crates/surfaces so the parity work is tracked, not lost. This is the cross-crate analogue of the differential-fuzz philosophy (a finding in one path implies checking the others — see the *Post-batch re-evaluation checklist*).
 
-## Task tracking — beads, not markdown TODOs
+## Task tracking — GitHub issues, not markdown TODOs
 
-This repo tracks work in **beads** (`bd`, a git-native dependency-graph issue tracker; the committed source-of-record is `.beads/issues.jsonl`). Rules for any agent working here:
+This repo tracks work in **GitHub issues** (`sparq-org/sparq`). Beads (`bd`) was the tracker until it was migrated to issues on **2026-07-17** — see [`docs/bd-migration.md`](docs/bd-migration.md) and the committed `sq-id → issue` map ([`docs/bd-migration-map.json`](docs/bd-migration-map.json)) for resolving historical `sq-XXXX` references in old PR titles / commits / `research/` records. Rules for any agent working here:
 
-- **Do NOT write TODO/FIXME into markdown or leave them in `TODO.md` files.** Capture future work as a bead instead.
-- **When you identify follow-up/future work, create a bead for it** (from the repo root, with `bd` on your PATH):
+- **Do NOT write TODO/FIXME into markdown or leave `TODO.md` files.** Capture future work as an issue.
+- **When you identify follow-up/future work, open an issue** (from anywhere, with `gh`):
   ```sh
-  bd create "<imperative title>" -t <task|bug|feature|chore|spike> -p <0-4> -l <area:crate,kind:...> -d "<what + why + where>"
+  gh issue create -R sparq-org/sparq --title "<imperative title>" \
+    --label "area:<crate>,priority:P<0-4>,role:<impl|…>[,kind:…]" \
+    --body "> 🤖 SPARQ agent — <one line>
+
+  <what + why + where>"
   ```
-  This writes the shared Dolt DB (exclusive-lock-serialized — safe across parallel agents). For the rationale behind a *deferred* task, put it in the bead's `-d` description or `--design` field so the bead is self-contained. **Never edit `.beads/issues.jsonl` (or any `.beads/` file) by hand** — it causes merge conflicts; `bd export` regenerates it.
-- Run `bd ready` to see unblocked work; close with `bd close <id>`.
+  Out-of-scope **discoveries** you make while doing something else (a latent bug, tech-debt, doc drift, a footgun) instead go to `gh issue create --label self-improvement` — the discovery channel in the *shared contract* (item 12). Dedupe first (`gh issue list --state open --search "<keywords>"`).
 
-**Beads session-context hook.** `.claude/settings.json` registers a `SessionStart` hook (`scripts/bd-session-context.sh`) that injects a concise bead snapshot — the `bd ready` list + open count — at the start of every Claude Code session, so a new or post-compaction session recovers the task state automatically. It's a graceful no-op when `bd` isn't installed or `.beads/` is absent. We deliberately do **not** use beads' own `bd setup claude` / `bd prime` injection: that path ships generic rules ("do not use TaskCreate / MEMORY.md") that conflict with this harness's task tracker and auto-memory, and it duplicates the beads guidance already in this file. The hook ships only the useful, non-conflicting part. (A committed `.claude/settings.json` hook takes effect on the *next* session start / `/hooks` reload, not the current session.)
+**Label taxonomy** (the pipeline reads only these prefixes; free-form tags are ignored):
 
-## Orchestration — delegate to sub-agents + run a continuous bead loop
+- `area:<crate>` — the conflict partition. The dispatcher serialises one in-flight issue per `area:<crate>`; an issue with **no** `area:` reserves the **global partition** (serialises against everything), so at scale always give a work issue an `area:` unless it genuinely is cross-cutting.
+- `priority:P0`…`P4`, `role:<impl|…>` — dispatch selection + routing.
+- `status:ready` — a **positive attestation** that triage/trust cleared the issue for dispatch; the readiness engine (`scripts/ready-issues.py`) only surfaces issues carrying it. Absence of `status:ready` = not yet launchable.
+- `needs:*` — a gate on an external/human action (credential, EC2, upstream, a decision). `needs:user` is the durable **parking state** for anything an agent cannot implement (external-audit / token-placement / maintainer-decision work): it keeps the issue maintainer-visible and out of the dispatch frontier. See the *`needs:user` queue* section below.
+- `trust:*`, `kind:*` (e.g. `kind:epic`, which the readiness engine excludes from dispatch — an epic is an umbrella, never a work item).
+
+**Close on merge.** Put `Closes #<n>` (or `Fixes #<n>`) in the PR body so the merge auto-closes the issue; GitHub does this natively — no separate close-on-merge automation is needed.
+
+## Orchestration — delegate to sub-agents + run a continuous work loop
+
+> **Cutover note (2026-07-17):** beads (`bd` / `.beads/`) was retired; **GitHub issues are the sole tracker** (`docs/bd-migration.md`). The issue-native launchable frontier is **`scripts/ready-issues.py`** (replaces `bd ready` + the removed `push-frontier.sh`); close-on-merge is native `Closes #N` (the removed `bead-autoclose.yml` / `bead-close-on-merge.sh` / `reconcile-merged-beads.sh` are gone). Where the prose below still says "bead" / `bd ready` / `bd close` / `push-frontier.sh`, read it as the equivalent issue operation (`gh issue`, `ready-issues.py`, `Closes #N`). Full retargeting of this section + `.claude/workflows/autonomous-scheduler.js` to the issue-native flow is tracked as a follow-up.
 
 If you are an ORCHESTRATING agent (driving multi-step work on this repo), three standing rules:
 
@@ -446,7 +459,7 @@ This is the standing orchestration loop that ties the sections above together. R
 
 0. **Reconcile first (cheap, every pass).** `git worktree list` + `gh pr list`; reap finished-but-unnotified worktree agents (a committed branch + no live `cargo` process = done → open its PR); merge any PR that is `ci-summary`-green **and** has all review threads resolved (squash, delete branch, then watch main CI); rebase any PR gone stale/red. (See *Orchestration cadence* + *Contribution workflow*.)
    - **Disk guard (run EVERY tick — `scripts/disk-guard.sh --apply`).** <!-- [OPUS-4.8] sq-4vo9m per-tick disk guard --> The autonomous loop spawns one worktree-isolated agent per bead, each accumulating a multi-GB `target/`, so disk re-fills every wave — left unguarded the work box hit 99% / ENOSPC and crashed a `--workspace` verify build mid-run. So each tick run `scripts/disk-guard.sh --apply`: it `df`-checks `/` (warns when **< 20 G** free, escalates **< 10 G**), then **delegates the worktree prune to `worktree-gc.sh`** (which only ever removes a worktree whose HEAD is in `origin/main` or whose branch is gone-on-origin, with no dirty/unpushed work — **never an active one**, never the main checkout — and, with the `--reclaim-completed` path the guard passes through by default (sq-h34dc), also a **completed-but-unmerged** workflow worktree that is clean, fully pushed, workflow-named, and not in use). When the disk is genuinely **CRITICAL** (< 10 G) and you opt in (`--reclaim-main-target`), it also drops the **orchestrator main checkout's `target/`** — regenerable, because impl agents build in their OWN worktrees — but only after confirming no live `cargo`/`rustc` build references the main checkout (so it can never abort an in-flight build). It is **non-fatal** (a guard tick never aborts the sweep) and **dry-run by default** (it only mutates with `--apply`); its advisory exit code encodes the disk state (0 OK / 10 WARN / 20 CRITICAL). The `autonomous-scheduler` runs this same guard before each wave and **backs off dispatch under pressure** (WARN → ≤ 1 new agent; CRITICAL → dispatch nothing that wave, let the prune/reclaim take effect, re-measure next tick). (See the script catalog below; supersedes the bare "run `worktree-gc.sh --apply` at idle" advice — the guard wraps it and adds the per-tick `df` check + escalation.)
-   - **Reconcile merged-but-still-open beads (run EVERY tick — `scripts/reconcile-merged-beads.sh`).** <!-- [OPUS-4.8] sq-13uyp reconcile merged beads --> push-frontier's in-flight exclusion (sq-7mwun) subtracts beads with an **OPEN** PR, but it misses a bead whose fix already **MERGED** and was simply never `bd close`d — that bead stays on the launchable frontier and an agent gets dispatched only to find the work done (2026-06-21 sq-bpoey: merged via #1017, left open, ~32k tokens wasted). This script is the **COMPLEMENT** to that exclusion: for each OPEN bead it greps the **MERGED** signal (merged-PR titles + head-branches via `gh pr list --state merged`, plus `origin/main` commit subjects) for the bead's **exact dotted id token** and reports the matches as close-candidates (bead id + the merging `#N`/commit). Together: sq-7mwun handles OPEN-PR (in-flight) beads, sq-13uyp handles MERGED-but-bead-still-open beads — both keep the frontier free of beads that must not be re-dispatched. It is **conservative** (exact-token match only — `sq-ixc3.1` never matches `sq-ixc3.11`; OPEN-status beads only) and **NEVER auto-closes an epic, an umbrella-parent (≥ 1 dependent), or a `needs:user`/`needs:maintainer`/decision bead** — those are reported for **manual review** instead. **Default is dry-run** (report only; mutates nothing); the orchestrator reviews the candidates and applies the closes separately (`--apply` closes matched non-gated beads with note `reconcile: fix merged via #N`). It is idempotent and **fail-safe** (a per-bead lookup error skips that bead; an empty merged signal closes nothing). Pinned by `scripts/tests/test_reconcile_merged_beads.sh`. (See the script catalog below.)
+   - **Close resolved issues (native — no reconcile sweep needed).** <!-- [FABLE-5] cutover: reconcile-merged-beads.sh retired --> Since the 2026-07-17 cutover, a merged PR that carries `Closes #N` in its body auto-closes issue #N on GitHub, so a resolved issue leaves the `ready-issues.py` frontier automatically. (The bd-era `reconcile-merged-beads.sh` sweep — which existed only because `bd close` was a manual step — is retired.) When a PR resolves an issue but did not carry `Closes #N`, close the issue by hand on merge with a comment linking the PR.
 1. **Charter cross-pollination.** *Pull:* fetch each sibling charter (`gh api repos/<sibling>/contents/AGENTS.md --jq .content | base64 -d`) + the open cross-pollination issues on this repo; fold genuinely-portable conventions into THIS file — **adapted to sparq** (cargo/clippy `-D warnings` + the W3C-conformance + best-ever-perf ratchets as the gate; roborev/codex as the reviewer; beads; the crate/wasm/CLI/HTTP/Py/JS surfaces) — via a PR, conservatively; then close/comment the issue. *Push:* for any convention this charter gains that a sibling lacks, file an issue (or PR) on the sibling repo. *Watch:* poll the cross-repo threads YOU opened/commented on (the sibling's issues + PRs) for follow-up replies and answer them, self-identifying as the SPARQ agent. No-op when there is no charter drift and no open thread awaits a reply. (See *Cross-pollinate the charter with sibling repos*.)
 2. **Screen + triage inbound work — open issues, code-scanning alerts, deps, roborev.**
    - **Open issues** (`gh issue list`): screen every one. Many are filed by the **PSS agent** — the agent developing the private sibling `jeswr/prod-solid-server`, which consumes sparq as its triplestore/server; **"PSS" anywhere in an issue refers to that codebase.** For each actionable issue: capture it as a bead (`bd create` with the issue as `--external-ref`, priority by the issue's stated severity — a "SHOWSTOPPER" → P0/P1) and drive it through the loop; comment on the issue with the bead id + status; close it when the work lands (referencing the merged PR). If an issue is **unclear, do not guess — post a clarifying reply on the issue** (the PSS agent monitors and responds), and leave it open.
@@ -470,7 +483,7 @@ This is the standing orchestration loop that ties the sections above together. R
 
 **Done when** `bd ready` minus `needs:user` is empty and no PR / agent / CI is in flight.
 
-### Orchestration automation (mostly manual-invoke scripts + one durable CI; mechanical substrate for the loop)
+### Orchestration automation (manual-invoke scripts; mechanical substrate for the loop)
 
 The deterministic, no-judgment parts of the loop above are factored into small shell
 scripts under `scripts/`. They follow the mechanical-vs-judgment boundary set out in
@@ -478,44 +491,23 @@ scripts under `scripts/`. They follow the mechanical-vs-judgment boundary set ou
 the bookkeeping; never automate the DECISION.** The first three (PR #374 Phases A/C/F)
 are shipped; `worktree-gc.sh` (sq-6xdr) is a later addition that follows the same
 discipline (dry-run default, mutation behind `--apply`). These shell scripts are
-**invoked manually**. The **one piece of auto-running, mutating automation that IS wired**
-is the durable bead-autoclose CI (`.github/workflows/bead-autoclose.yml`, sq-84a8, below) —
-it replaced an ephemeral session-scoped watcher (`b1kzhfxq5`) that did not persist across
-sessions, so beads stayed `in_progress` after their PR merged and the orchestrator closed
-them by hand each tick. The other deferred hooks (a `SessionStart` orphan-check hook, a
-`PostToolUse` bead-export hook) remain a documented follow-up in the design doc's phased
+**invoked manually**. Since the 2026-07-17 cutover there is **no bespoke auto-running
+close-on-merge CI** — the bd-era `bead-autoclose.yml` is retired (below) and GitHub's native
+`Closes #N` does the job. The other deferred hooks (a `SessionStart` orphan-check hook, a
+`PostToolUse` export hook) remain a documented follow-up in the design doc's phased
 plan (§5, Beads D/E + H), to be added only after the scripts are proven in manual use. Each
 shell script is `bash -n`/`shellcheck` clean and carries a `--dry-run-self-test` (hermetic;
-no network); the Python close-script carries a `--self-test`.
+no network).
 
-- **`.github/workflows/bead-autoclose.yml` + `scripts/ci-close-merged-beads.py`**
-  (sq-84a8; issue-native since #2475) — the **durable** auto-close-on-merge. On a merged PR
-  (`pull_request_target: [closed]` gated on `merged == true` — base-repo context so the
-  `issues: write` token survives fork PRs; safe because the job checks out pinned `main`
-  and never executes PR-controlled code),
-  it extracts the `sq-XXXX(.NN)` bead token(s) from the PR title + merge-commit subject and
-  closes the **migrated GitHub issue** each bead maps to (resolved via the migration's
-  `<!-- bd-id:sq-… -->` body marker; `gh issue close --reason completed`, plain
-  `issues: write`). The original JSONL-commit-back design never persisted — the default
-  `GITHUB_TOKEN` cannot push to protected `main` (GH013 ruleset rejection, sq-roe3), and a
-  PR-based write from that token would hang forever because `GITHUB_TOKEN` events trigger
-  no workflows, so `ci-summary / gate` would never report. Epic (`kind:epic`) /
-  human-gated (`needs:*`) issues are never auto-closed; a bead with no marker-carrying
-  open issue (not yet migrated, or already closed) is a logged no-op, covered by the
-  manual `reconcile-merged-beads.sh` sweep. The script retains the minimal in-place
-  `.beads/issues.jsonl` edit mode for orchestrator use outside CI (CI passes
-  `--skip-jsonl`). It runs AFTER merge, so it is **NOT a gate** and never registers as a
-  required check (`ci-summary / gate` polls the PR head while the PR is OPEN; this
-  workflow does not trigger on the open-PR events). The merge is verified against the
-  GitHub API as defense-in-depth on top of the `merged == true` event gate.
-- **`scripts/bead-close-on-merge.sh <pr> [--apply]`** (Phase A) — the **manual** sibling of
-  the bead-autoclose CI, for orchestrator use outside CI: closes the bead a PR
-  maps to, but **only after verifying the merge against the API** (`gh pr view --json
-  mergedAt` must be non-null; a parsed log/monitor line is never the source of truth).
-  Resolves the bead id from an `sq-XXXX` token in the PR title or in a linked issue's
-  title/body. **Default is dry-run** (prints what it *would* close); acts only with
-  `--apply`; idempotent (a bead already closed is a no-op). The guardrail makes the
-  dangerous case — closing a bead for a PR that did **not** merge — impossible.
+- **Close-on-merge (retired at the 2026-07-17 cutover).** The bd-era auto-close CI
+  (`bead-autoclose.yml` + `ci-close-merged-beads.py`) and its manual sibling
+  `bead-close-on-merge.sh` are **gone** — GitHub issues close natively on `Closes #N` in
+  the merged PR body, so no bespoke close-on-merge automation is needed. The CI's last
+  incarnation (#2528, issue #2475) had been retargeted to close the *migrated* issue via a
+  `<!-- bd-id:sq-… -->` body marker **authenticated by a `bd-migration` label**; that label was
+  never created and no issue ever carried it, so the path was a provable no-op (it burned one
+  Actions run per merged PR to log "unmapped"). Native `Closes #N` is what actually closed those
+  issues (e.g. #2831 ← PR #3572), which is why the retarget is retired rather than kept.
 - **`scripts/orphan-check-bench.sh [--apply] [--region r]`** (Phase C) — lists
   running/pending EC2 instances carrying the **exact** tag `purpose=sparq-bench`
   (allow-list semantics, not deny-list) and greps the local process table for in-flight
@@ -536,19 +528,14 @@ no network); the Python close-script carries a `--self-test`.
   UNPUSHED test, **not** "ancestor of `origin/main`" — squash-merged feature branches are
   *not* ancestors of main yet *were* pushed, so an ancestor test would re-introduce the
   bug). Run `worktree-gc.sh --apply` at idle so stale worktrees do not pile up.
-- **`scripts/push-frontier.sh`** — the read-only **decision layer** on top of
-  `refill-candidates.sh`. Prints the beads SAFE TO LAUNCH NOW: `bd ready` **minus**
-  in-flight beads (open PR, or a worktree branch with unpushed commits — same signal as
-  refill, not every branch) **minus** conflict-collisions (the conflict-partition: at
-  most **one bead per crate/surface**, with `site` and the sparq-server `server-auth`
-  http.rs path serialised to ≤ 1) **minus** epics, then capped at the CPU ceiling
-  (`min(16, nproc-2)`). **The conflict-partition is canonical — it must be applied to the
-  COMBINED launch set, not bypassed by a raw `bd ready` fallback.** If you ever dispatch
-  from `bd ready` directly (push-frontier unavailable), you MUST still apply the same
-  ≤ 1-per-crate / server+site→1 dedup over the COMBINED push-frontier + bd-ready set, or
-  two beads on the same crate launch and conflict (this gap once dispatched two
-  sparq-server beads at once — sq-8rpq). Carries an `--explain` (per-bead keep/drop
-  reasons) and a hermetic `--dry-run-self-test`.
+- **`scripts/ready-issues.py`** — the issue-native launchable **decision layer** (replaces
+  the retired bd-era `push-frontier.sh` at the 2026-07-17 cutover). Prints the OPEN issues
+  SAFE TO DISPATCH NOW, FAIL-CLOSED: an issue is READY only if it carries `status:ready` (a
+  positive triage/trust attestation), exactly one `priority:P0..P4`, a `role:*`, **no** gate
+  label (`needs:*` / `trust:untrusted`) and no busy status, has zero open `Blocked-by: #NN`
+  blockers, and its `area:<crate>` package(s) are not already taken by an in-progress or
+  earlier-selected ready issue — a no-`area:` issue reserves the serializing **global
+  partition**. Epics (`kind:epic`) are excluded. Carries a hermetic `--self-test`.
 - **`.claude/workflows/autonomous-scheduler.js`** (epic sq-sgu1) — the **self-driving
   bead-frontier loop**, MATERIALISED as a committed, re-runnable harness Workflow so it
   survives a session restart. <!-- [OPUS-4.8] durable scheduler --> Each wave it reads the
@@ -625,29 +612,11 @@ no network); the Python close-script carries a `--self-test`.
   state→exit mapping, non-fatal delegation) is pinned by `scripts/tests/test_disk_guard.sh`.
   The maintenance loop runs `--apply` each tick (step 0) and the `autonomous-scheduler` runs it
   before every wave (`--apply --reclaim-main-target`) and backs off dispatch under pressure.
-- **`scripts/reconcile-merged-beads.sh [--dry-run | --apply] [--json]`** (sq-13uyp) — the
-  **per-tick merged-bead reconcile**: it closes the gap where a bead's fix already **MERGED**
-  but the bead was never `bd close`d, so it lingered on `push-frontier.sh`'s launchable frontier
-  and an agent was dispatched only to find it done (sq-bpoey, merged via #1017, ~32k tokens
-  wasted). It **COMPLEMENTS** push-frontier's open-PR exclusion (sq-7mwun): that exclusion drops
-  beads with an **OPEN** PR (in flight); this script catches beads whose PR is already **MERGED**.
-  For each OPEN bead it tests the **merged blob** — merged-PR titles + head-branches
-  (`gh pr list --state merged`) **and** `origin/main` commit subjects (squash-merge stamps
-  `(sq-XXXX)` there) — for the bead's **EXACT dotted id token** (a right/left boundary excluding
-  `[A-Za-z0-9.]`, so `sq-ixc3.1` never matches `sq-ixc3.11` and a base id never matches a `.N`
-  molecule). A match on an OPEN, non-gated bead is a **close-candidate** (reported with its
-  merging `#N`/commit). It **NEVER auto-closes** an epic (`issue_type==epic`, or an
-  `[epic]`/`EPIC:`-titled bead), an **umbrella-parent** (≥ 1 dependent — a single merged child PR
-  must not close the parent), or a `needs:user`/`needs:maintainer`/decision bead — those are
-  reported in a separate **manual-review** list. **Default is dry-run** (report only); `--apply`
-  closes the matched non-gated beads with reason `reconcile: fix merged via #N`. **Idempotent**
-  (a closed bead drops out of the open set) and **fail-safe** (a per-bead `bd show` error skips
-  that bead, never mass-closes; an empty merged signal — gh + git both unavailable — closes
-  nothing). `--json` emits a machine-readable `{candidates,count,gated,gated_count}` for a
-  scheduler. Carries a hermetic `--dry-run-self-test`; end-to-end behaviour (exact-match, the
-  `.1`-vs-`.11` guard, open-PR/unrelated exclusion, epic/umbrella/needs gating, apply/idempotency/
-  fail-safe) is pinned by `scripts/tests/test_reconcile_merged_beads.sh`. The maintenance loop
-  runs it (dry-run) each tick (step 0); the orchestrator reviews + applies the closes separately.
+- **Merged-issue reconcile (retired at the 2026-07-17 cutover).** The bd-era
+  `reconcile-merged-beads.sh` + `scripts/tests/test_reconcile_merged_beads.sh` are **gone**: a
+  merged PR carrying `Closes #N` auto-closes issue #N natively, so a resolved issue leaves the
+  `ready-issues.py` frontier with no reconcile sweep. (The sweep only existed because `bd close`
+  was a manual step and a fixed-and-merged bead could linger open.)
 
 See `research/orchestration-automation-design.md` §1.3 (the five judgment behaviours that
 must stay with the orchestrator), §6 (failure modes + the guardrail behind each), and §5
