@@ -45,7 +45,8 @@ use crate::authz::{mode_for_operation, AccessMode};
 use crate::error::ServerError;
 use crate::ldp::conditional::{self, evaluate as eval_preconditions};
 use crate::ldp::content::{
-    classify, negotiate_accept, parse_to_triples, serialize_triples, validate_rdf, RdfFormat,
+    classify, negotiate_accept_with_profile, parse_to_triples, serialize_triples,
+    serialize_triples_negotiated, validate_rdf, RdfFormat,
 };
 use crate::ldp::patch::{
     apply_patch, classify_patch_media_type, parse_n3_patch, parse_sparql_update, PatchKind,
@@ -1861,7 +1862,8 @@ async fn render_container<S: Store>(
     // it as the conneg default (most faithful) and parse the stored body for its own triples.
     let stored_format = classify(Some(stored_content_type)).ok();
     let default_format = stored_format.unwrap_or(RdfFormat::Turtle);
-    let format = negotiate_accept(accept, default_format).ok_or(ServerError::NotAcceptable)?;
+    let negotiated =
+        negotiate_accept_with_profile(accept, default_format).ok_or(ServerError::NotAcceptable)?;
 
     let subject = NamedNode::new(container_iri)
         .map_err(|e| ServerError::Storage(format!("invalid container IRI {container_iri}: {e}")))?;
@@ -1972,8 +1974,12 @@ async fn render_container<S: Store>(
     triples.extend(stored_triples);
     triples.extend(generated);
 
-    let bytes = serialize_triples(format, &triples)?;
-    Ok((Bytes::from(bytes), format.media_type().to_string()))
+    // Serialise into the negotiated format AND JSON-LD document form; the `Content-Type` echoes
+    // any honoured profile. The representation ETag the caller derives from these bytes is
+    // profile-variant-specific exactly when the bytes differ (compacted output differs; expanded
+    // output is byte-identical to the default serialisation).
+    let bytes = serialize_triples_negotiated(negotiated, &triples)?;
+    Ok((Bytes::from(bytes), negotiated.content_type()))
 }
 
 /// A STRONG ETag computed from a rendered representation's BYTES — `"<len>-<hash>"`.
@@ -2105,9 +2111,13 @@ fn write_response(existed: bool, meta: &ResourceMeta, iri: &str) -> Response {
 }
 
 /// Content-negotiate the response body for an RDF resource. For a non-RDF stored type the body is
-/// returned verbatim. For an RDF type, the stored bytes are re-serialised into the negotiated format
-/// when it differs from the stored one. A client that EXPLICITLY refuses (q=0) every producible
-/// type it covers ⇒ 406; an Accept naming no producible type falls back to Turtle (Solid default).
+/// returned verbatim. For an RDF type, the stored bytes are re-serialised into the negotiated
+/// format when it differs from the stored one — or when the client's explicit `application/ld+json`
+/// range carried an honoured `profile` (expanded / compacted): the stored bytes are whatever
+/// document form was originally written, so an honoured profile always re-serialises into the
+/// requested form and the `Content-Type` echoes the profile. A client that EXPLICITLY refuses
+/// (q=0) every producible type it covers ⇒ 406; an Accept naming no producible type falls back to
+/// Turtle (Solid default).
 fn negotiate_body(
     stored_body: &Bytes,
     stored_content_type: &str,
@@ -2121,14 +2131,15 @@ fn negotiate_body(
         Err(_) => return Ok((stored_body.clone(), stored_content_type.to_string())),
     };
 
-    let chosen = negotiate_accept(accept, stored_format).ok_or(ServerError::NotAcceptable)?;
-    if chosen == stored_format {
+    let negotiated =
+        negotiate_accept_with_profile(accept, stored_format).ok_or(ServerError::NotAcceptable)?;
+    if negotiated.serves_stored_verbatim(stored_format) {
         return Ok((stored_body.clone(), stored_content_type.to_string()));
     }
-    // Re-serialise into the chosen format.
+    // Re-serialise into the chosen format + document form.
     let triples = parse_to_triples(stored_format, stored_body, base_iri)?;
-    let bytes = serialize_triples(chosen, &triples)?;
-    Ok((Bytes::from(bytes), chosen.media_type().to_string()))
+    let bytes = serialize_triples_negotiated(negotiated, &triples)?;
+    Ok((Bytes::from(bytes), negotiated.content_type()))
 }
 
 /// The validator (ETag) the response serving this PLAIN resource under `accept` carries —
@@ -2137,16 +2148,22 @@ fn negotiate_body(
 ///
 /// - non-RDF stored content: no RDF conneg, a single representation ⇒ the stored tag, whatever the
 ///   `Accept` (matches [`negotiate_body`]'s verbatim branch);
-/// - RDF served in its STORED format ⇒ the stored tag (the bytes ARE the stored representation);
-/// - RDF re-serialised into the OTHER format ⇒ the [`conditional::variant_etag`]
-///   `"<state>+<variant>"` tag, distinct per negotiated media type and derived from the stored
-///   state — so the tag a 200 carries for each negotiated type is exactly the tag that later 304s
-///   for that type, and the write path can round-trip its state part (`conditional` module doc);
+/// - RDF served in its STORED format with no honoured JSON-LD profile ⇒ the stored tag (the bytes
+///   ARE the stored representation);
+/// - RDF re-serialised (the other format, or an honoured `profile` on an explicit
+///   `application/ld+json` range) ⇒ the [`conditional::variant_etag`] `"<state>+<variant>"` tag,
+///   distinct per negotiated byte-representation and derived from the stored state — so the tag a
+///   200 carries for each negotiated representation is exactly the tag that later 304s for it, and
+///   the write path can round-trip its state part (`conditional` module doc). The variant token
+///   ([`crate::ldp::content::NegotiatedFormat::variant_suffix`]) is profile-specific exactly when
+///   the bytes differ: `compacted` gets its own token, while `expanded` output is byte-identical
+///   to the default JSON-LD serialisation and shares its token;
 /// - an `Accept` that explicitly refuses (q=0) every producible type it covers ⇒ 406 (no selected
 ///   representation, no validator); one merely naming no producible type falls back to Turtle.
 ///
-/// The format decision is the same [`negotiate_accept`] call [`negotiate_body`] makes, so the
-/// validator and the body it labels can never disagree.
+/// The decision is the same [`negotiate_accept_with_profile`] call [`negotiate_body`] makes (via
+/// the shared `serves_stored_verbatim` rule), so the validator and the body it labels can never
+/// disagree.
 fn negotiated_validator(
     stored_etag: &str,
     stored_content_type: &str,
@@ -2156,21 +2173,13 @@ fn negotiated_validator(
         // Non-RDF stored content (binary): served verbatim — one representation, the stored tag.
         return Ok(stored_etag.to_string());
     };
-    let chosen = negotiate_accept(accept, stored_format).ok_or(ServerError::NotAcceptable)?;
-    Ok(if chosen == stored_format {
+    let negotiated =
+        negotiate_accept_with_profile(accept, stored_format).ok_or(ServerError::NotAcceptable)?;
+    Ok(if negotiated.serves_stored_verbatim(stored_format) {
         stored_etag.to_string()
     } else {
-        conditional::variant_etag(stored_etag, variant_suffix(chosen))
+        conditional::variant_etag(stored_etag, negotiated.variant_suffix())
     })
-}
-
-/// The short `+<variant>` suffix token for a negotiated [`RdfFormat`] (kept short and `+`-free so
-/// [`conditional`]'s state-part split stays unambiguous).
-fn variant_suffix(format: RdfFormat) -> &'static str {
-    match format {
-        RdfFormat::Turtle => "ttl",
-        RdfFormat::JsonLd => "jsonld",
-    }
 }
 
 /// Whether a POST asks for a CONTAINER child via `Link: <ldp#BasicContainer>; rel="type"` (or
@@ -5234,6 +5243,180 @@ mod tests {
         assert_eq!(
             negotiated_validator(stored, "text/turtle", Some("application/ld+json")).unwrap(),
             "\"5-abc123+jsonld\""
+        );
+    }
+
+    #[test]
+    fn negotiated_validator_is_profile_variant_specific_when_the_bytes_differ() {
+        // sq-10ty4: an honoured JSON-LD `profile` changes which bytes are served, so it changes
+        // the validator too — exactly when the bytes differ.
+        let stored = "\"5-abc123\"";
+        const EXPANDED: &str = "application/ld+json;profile=\"http://www.w3.org/ns/json-ld#expanded\"";
+        const COMPACTED: &str =
+            "application/ld+json;profile=\"http://www.w3.org/ns/json-ld#compacted\"";
+        // Compacted output differs from the default JSON-LD serialisation ⇒ its own variant tag.
+        assert_eq!(
+            negotiated_validator(stored, "text/turtle", Some(COMPACTED)).unwrap(),
+            "\"5-abc123+jsonld-c\""
+        );
+        // Expanded output is byte-identical to the default serialisation ⇒ the same variant tag.
+        assert_eq!(
+            negotiated_validator(stored, "text/turtle", Some(EXPANDED)).unwrap(),
+            "\"5-abc123+jsonld\""
+        );
+        // A stored-JSON-LD resource under an honoured profile is NOT served verbatim (the stored
+        // bytes are whatever form the client wrote), so the stored tag no longer applies…
+        assert_eq!(
+            negotiated_validator(stored, "application/ld+json", Some(EXPANDED)).unwrap(),
+            "\"5-abc123+jsonld\""
+        );
+        assert_eq!(
+            negotiated_validator(stored, "application/ld+json", Some(COMPACTED)).unwrap(),
+            "\"5-abc123+jsonld-c\""
+        );
+        // …while with no profile it stays the verbatim stored representation.
+        assert_eq!(
+            negotiated_validator(stored, "application/ld+json", Some("application/ld+json"))
+                .unwrap(),
+            stored
+        );
+    }
+
+    #[tokio::test]
+    async fn get_jsonld_compacted_profile_is_honoured_end_to_end() {
+        // sq-10ty4: Accept with the compacted profile ⇒ the response echoes the profile in
+        // Content-Type, serves GENUINELY compacted JSON-LD, and mints a profile-specific variant
+        // ETag that 304s only for that representation.
+        const COMPACTED: &str =
+            "application/ld+json;profile=\"http://www.w3.org/ns/json-ld#compacted\"";
+        let state = state_with_owner_resource("/alice/doc", COND_DOC).await;
+
+        // The plain (no-profile) JSON-LD tag, for contrast.
+        let mut accept_plain = HeaderMap::new();
+        accept_plain.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("application/ld+json"),
+        );
+        let plain_tag = etag_of(&get_with(&state, owner_token(), "/alice/doc", accept_plain).await);
+
+        let mut accept = HeaderMap::new();
+        accept.insert(header::ACCEPT, HeaderValue::from_static(COMPACTED));
+        let resp = get_with(&state, owner_token(), "/alice/doc", accept.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        // The honoured profile is echoed back in the Content-Type (JSON-LD 1.1 IANA registration).
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            COMPACTED
+        );
+        let compacted_tag = etag_of(&resp);
+        assert_ne!(
+            compacted_tag, plain_tag,
+            "compacted bytes differ from the default serialisation, so the tag must too"
+        );
+        // The body is genuinely compacted: a single-subject doc compacts to the bare node object
+        // with the lone plain literal collapsed to a string.
+        let body: serde_json::Value =
+            serde_json::from_slice(&body_bytes(resp).await).expect("valid JSON");
+        assert_eq!(
+            body.get("@id").and_then(|v| v.as_str()),
+            Some("https://pod.example/alice/doc#me")
+        );
+        assert_eq!(
+            body.get("http://xmlns.com/foaf/0.1/name"),
+            Some(&serde_json::json!("X"))
+        );
+
+        // The compacted tag 304s a conditional GET for the SAME representation…
+        let mut cond = accept.clone();
+        cond.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_str(&compacted_tag).unwrap(),
+        );
+        let not_mod = get_with(&state, owner_token(), "/alice/doc", cond).await;
+        assert_eq!(not_mod.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(etag_of(&not_mod), compacted_tag);
+
+        // …but the PLAIN JSON-LD tag never 304s the compacted representation.
+        let mut cond_plain = accept;
+        cond_plain.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_str(&plain_tag).unwrap(),
+        );
+        let resp = get_with(&state, owner_token(), "/alice/doc", cond_plain).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a plain-JSON-LD tag must not 304 the compacted representation"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_jsonld_expanded_profile_echoes_profile_with_byte_identical_body() {
+        // sq-10ty4: the serialiser's default output IS the expanded document form, so the expanded
+        // profile is honoured with byte-identical output — same variant ETag, but the Content-Type
+        // echoes the honoured profile.
+        const EXPANDED: &str =
+            "application/ld+json;profile=\"http://www.w3.org/ns/json-ld#expanded\"";
+        let state = state_with_owner_resource("/alice/doc", COND_DOC).await;
+
+        let mut accept_plain = HeaderMap::new();
+        accept_plain.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("application/ld+json"),
+        );
+        let plain = get_with(&state, owner_token(), "/alice/doc", accept_plain).await;
+        let plain_tag = etag_of(&plain);
+        let plain_body = body_bytes(plain).await;
+
+        let mut accept = HeaderMap::new();
+        accept.insert(header::ACCEPT, HeaderValue::from_static(EXPANDED));
+        let resp = get_with(&state, owner_token(), "/alice/doc", accept).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.headers().get(header::CONTENT_TYPE).unwrap(), EXPANDED);
+        assert_eq!(
+            etag_of(&resp),
+            plain_tag,
+            "byte-identical representations share the validator"
+        );
+        assert_eq!(body_bytes(resp).await, plain_body);
+    }
+
+    #[tokio::test]
+    async fn get_container_jsonld_compacted_profile_echoes_content_type() {
+        // sq-10ty4 on the container read path: render_container honours the profile too — the
+        // Content-Type echo plus a compacted (bare node object) body, and the representation ETag
+        // (hashed from the rendered bytes) is distinct from the plain JSON-LD listing's.
+        const COMPACTED: &str =
+            "application/ld+json;profile=\"http://www.w3.org/ns/json-ld#compacted\"";
+        let state = state_with_owner_resource("/alice/c/child", COND_DOC).await;
+
+        let mut accept_plain = HeaderMap::new();
+        accept_plain.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("application/ld+json"),
+        );
+        let plain_tag = etag_of(&get_with(&state, owner_token(), "/alice/c/", accept_plain).await);
+
+        let mut accept = HeaderMap::new();
+        accept.insert(header::ACCEPT, HeaderValue::from_static(COMPACTED));
+        let resp = get_with(&state, owner_token(), "/alice/c/", accept).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            COMPACTED
+        );
+        assert_ne!(etag_of(&resp), plain_tag);
+        // The single-subject container listing compacts to the bare node object; its containment
+        // triple compacts to a single node reference.
+        let body: serde_json::Value =
+            serde_json::from_slice(&body_bytes(resp).await).expect("valid JSON");
+        assert_eq!(
+            body.get("@id").and_then(|v| v.as_str()),
+            Some("https://pod.example/alice/c/")
+        );
+        assert_eq!(
+            body.get("http://www.w3.org/ns/ldp#contains"),
+            Some(&serde_json::json!({"@id": "https://pod.example/alice/c/child"}))
         );
     }
 

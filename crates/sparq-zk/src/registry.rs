@@ -40,6 +40,22 @@ pub const ZK_NS: &str = "https://sparq.dev/ns/zk#";
 pub const ZK_COMMITMENT: &str = "https://sparq.dev/ns/zk#commitment";
 pub const ZK_SCHEME: &str = "https://sparq.dev/ns/zk#scheme";
 pub const ZK_CRYPTOSUITE: &str = "https://sparq.dev/ns/zk#cryptosuite";
+/// **Provenance** predicate (sq-9c5e): the W3C Data-Integrity cryptosuite the
+/// *source* VC was signed under, recorded verbatim when a credential is brought
+/// in through the off-circuit VC ingest bridge (`crate::vc_bridge`, design
+/// `research/zk-configurable-commitment-design.md` §5.2 / §10 Q5 default).
+///
+/// This is **distinct** from [`ZK_CRYPTOSUITE`]: `zk:cryptosuite` names the
+/// *sparq* scheme the in-circuit / verifier-side query proof binds to
+/// (`poseidon2-schnorr-v1`); `zk:sourceCryptosuite` is *back-compat / perf-
+/// comparison provenance only* — it records which W3C suite (`eddsa-rdfc-2022`,
+/// `ecdsa-rdfc-2019`, …) the credential carried before it was off-circuit
+/// verified and re-committed. It is **NOT** a re-verifiable in-proof property
+/// (§5.3): the query proof does not re-check the VC's Data-Integrity signature.
+/// Recorded as a plain literal (the verbatim `proof.cryptosuite` value, which is
+/// a bare suite token in a W3C VC, not an absolute IRI).
+// [OPUS-4.8] sq-9c5e.
+pub const ZK_SOURCE_CRYPTOSUITE: &str = "https://sparq.dev/ns/zk#sourceCryptosuite";
 pub const ZK_ISSUER_KEY: &str = "https://sparq.dev/ns/zk#issuerKey";
 /// The issuer's actual verification-key material (compressed Baby-JubJub point,
 /// hex) — the bytes the verifier resolves to check the commitment signature
@@ -114,6 +130,14 @@ pub struct RegistryEntry {
     pub scheme: NamedNode,
     /// Issuer cryptosuite id, when known.
     pub cryptosuite: Option<NamedNode>,
+    /// **Provenance** (sq-9c5e): the W3C Data-Integrity cryptosuite the *source*
+    /// VC was signed under (verbatim `proof.cryptosuite`, e.g. `eddsa-rdfc-2022`),
+    /// set when the entry was produced by the off-circuit VC ingest bridge
+    /// (`crate::vc_bridge`). Back-compat / perf-comparison provenance only — NOT a
+    /// re-verifiable in-proof property; distinct from [`Self::cryptosuite`] (the
+    /// sparq scheme the query proof binds to). `None` for non-VC-bridge entries.
+    // [OPUS-4.8] sq-9c5e.
+    pub source_cryptosuite: Option<String>,
     /// Issuer verification-method reference (a `did:` URL).
     pub issuer_key: Option<NamedNode>,
     /// The issuer's actual verification key (compressed Baby-JubJub point, hex)
@@ -152,6 +176,7 @@ impl RegistryEntry {
             commitment,
             scheme: NamedNode::new_unchecked(ZK_SCHEME_POSEIDON2_RDFC10_V1),
             cryptosuite: None,
+            source_cryptosuite: None,
             issuer_key: None,
             issuer_public_key: None,
             commitment_signature: None,
@@ -193,6 +218,19 @@ impl RegistryEntry {
     #[must_use]
     pub fn with_method(mut self, method: crate::commit::CommitmentMethod) -> Self {
         self.scheme = method.scheme_node();
+        self
+    }
+
+    /// Records the **source** W3C Data-Integrity cryptosuite (`zk:sourceCryptosuite`)
+    /// — provenance for a credential brought in through the off-circuit VC ingest
+    /// bridge (sq-9c5e). `suite` is the verbatim `proof.cryptosuite` token of the
+    /// source VC (e.g. `eddsa-rdfc-2022`). This is back-compat / perf-comparison
+    /// provenance ONLY; it does not change [`Self::cryptosuite`] (the sparq scheme
+    /// the query proof binds to) and is not a re-verifiable in-proof property.
+    // [OPUS-4.8] sq-9c5e.
+    #[must_use]
+    pub fn with_source_cryptosuite(mut self, suite: impl Into<String>) -> Self {
+        self.source_cryptosuite = Some(suite.into());
         self
     }
 
@@ -360,6 +398,15 @@ impl RegistryEntry {
         ];
         if let Some(cs) = &self.cryptosuite {
             out.push([s.clone(), pred(ZK_CRYPTOSUITE), Term::NamedNode(cs.clone())]);
+        }
+        // [OPUS-4.8] sq-9c5e: source-VC cryptosuite provenance (plain literal,
+        // the verbatim W3C `proof.cryptosuite` token).
+        if let Some(scs) = &self.source_cryptosuite {
+            out.push([
+                s.clone(),
+                pred(ZK_SOURCE_CRYPTOSUITE),
+                Term::Literal(oxrdf::Literal::new_simple_literal(scs.clone())),
+            ]);
         }
         if let Some(k) = &self.issuer_key {
             out.push([s.clone(), pred(ZK_ISSUER_KEY), Term::NamedNode(k.clone())]);
@@ -550,6 +597,8 @@ pub fn read_registry(graph: &Graph) -> Vec<RegistryEntry> {
             commitment,
             scheme,
             cryptosuite: iri_of(ZK_CRYPTOSUITE),
+            // [OPUS-4.8] sq-9c5e: source-VC cryptosuite provenance (plain literal).
+            source_cryptosuite: str_of(ZK_SOURCE_CRYPTOSUITE),
             issuer_key: iri_of(ZK_ISSUER_KEY),
             issuer_public_key: str_of(ZK_ISSUER_PUBLIC_KEY),
             commitment_signature: str_of(ZK_COMMITMENT_SIGNATURE),
@@ -582,6 +631,32 @@ mod tests {
         e.status_list = Some(NamedNode::new_unchecked("https://dmv.example/status/3#94"));
         e.ingested = Some("2026-06-12T00:00:00Z".to_string());
         e
+    }
+
+    // [OPUS-4.8] sq-9c5e: the `zk:sourceCryptosuite` provenance slot round-trips
+    // through the store unchanged (the real serialize/parse path), independent of
+    // the sparq `zk:cryptosuite`. An entry without it parses back as `None`.
+    #[test]
+    fn source_cryptosuite_round_trips_through_store() {
+        let e = RegistryEntry::new(
+            NamedNode::new("https://dmv.example/vc/lic-9").unwrap(),
+            Fr::from(7u64),
+            salt_from_bytes(&[2u8; 32]),
+        )
+        .with_source_cryptosuite("eddsa-rdfc-2022");
+        assert_eq!(e.source_cryptosuite.as_deref(), Some("eddsa-rdfc-2022"));
+        let mut g = Graph::load_str("", "turtle").unwrap();
+        install_registry(&mut g, std::slice::from_ref(&e)).unwrap();
+        let back = read_registry(&g);
+        assert_eq!(back, vec![e]);
+        assert_eq!(back[0].source_cryptosuite.as_deref(), Some("eddsa-rdfc-2022"));
+        // A plain entry has no source-cryptosuite (the slot is optional provenance).
+        let plain =
+            RegistryEntry::new(NamedNode::new("https://x/y").unwrap(), Fr::from(1u64), Fr::from(2u64));
+        assert_eq!(plain.source_cryptosuite, None);
+        let mut g2 = Graph::load_str("", "turtle").unwrap();
+        install_registry(&mut g2, std::slice::from_ref(&plain)).unwrap();
+        assert_eq!(read_registry(&g2)[0].source_cryptosuite, None);
     }
 
     // [OPUS-4.8] audit #3: an attested entry, its signature, and tamper cases.

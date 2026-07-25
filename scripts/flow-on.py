@@ -4,7 +4,8 @@
 #
 # Reads a MERGED PR's changed-file list + labels + title, evaluates the
 # declarative rules in scripts/flow-on-rules.toml, and opens ONE GitHub issue
-# (labelled `flow-on` + `auto`) per triggered follow-on template.
+# (labelled `flow-on` + `auto` + role/priority/status routing labels — see
+# routing_labels(), #2474) per triggered follow-on template.
 #
 # WHY GITHUB ISSUES:
 # (research/maintenance-flow-on-automation-design.md §2.2) GitHub issues are the
@@ -42,8 +43,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RULES = REPO_ROOT / "scripts" / "flow-on-rules.toml"
+BENCH_REGISTRY = REPO_ROOT / "bench" / "benchmarks.toml"
 
-# Labels every flow-on issue carries (in addition to a rule's own labels).
+# Labels every flow-on issue carries (in addition to a rule's own labels and the
+# routing labels computed by routing_labels() below).
 BASE_LABELS = ["flow-on", "auto"]
 
 # Public-surface paths whose change should trigger the "changed-public-feature"
@@ -53,6 +56,16 @@ SKILL_PATHS = ("skills/",)
 
 # The reactive docs rule that the pub-API-diff gate below applies to.
 DOCS_RULE_ID = "changed-public-feature-docs"
+BENCH_DASHBOARD_RULE_ID = "new-bench-dashboard-row"
+
+
+# Sibling scripts are loaded by path (the scripts dir is not an importable package).
+def _load_script_module(stem: str):
+    spec = importlib.util.spec_from_file_location(stem, REPO_ROOT / "scripts" / f"{stem}.py")
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 # [OPUS-4.8] The `changed-public-feature-docs` rule must fire ONLY on a NET
@@ -60,19 +73,38 @@ DOCS_RULE_ID = "changed-public-feature-docs"
 # relocation diff (dogfooded: PR #250 mis-minted a skill-sync follow-on for a
 # comment+lint-attr-only diff — bead sq-l0a0). We reuse the EXACT `pub `-item
 # multiset-diff used by merge gate G2, factored into scripts/pub_api_diff.py, so
-# the reactive engine and the proactive gate can never drift. Loaded by path
-# (the scripts dir is not an importable package).
-def _load_pub_api_diff():
-    spec = importlib.util.spec_from_file_location(
-        "pub_api_diff", REPO_ROOT / "scripts" / "pub_api_diff.py"
-    )
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+# the reactive engine and the proactive gate can never drift.
+_pad = _load_script_module("pub_api_diff")
+
+# [FABLE-5] (#2474) The shared static-triage pass, also used by triage-issue.yml and
+# the retriage cron — flow-on computes each follow-on's routing labels with it so
+# the three triage surfaces can never drift.
+_triage = _load_script_module("triage")
+
+# [FABLE-5] (#2474) Default priority for minted follow-ons, matching the retriage
+# cron's convergence default (scripts/retriage.py DEFAULT_PRIORITY).
+DEFAULT_PRIORITY = "priority:P3"
 
 
-_pad = _load_pub_api_diff()
+def routing_labels(labels: list[str]) -> list[str]:
+    """Return the role/priority/status routing labels a follow-on needs at CREATION.
+
+    [FABLE-5] (#2474) GitHub SUPPRESSES workflow events for objects created under
+    `secrets.GITHUB_TOKEN` (recursion guard), so `triage-issue.yml` (`issues:
+    opened`) never runs on flow-on issues — minted without routing labels they were
+    invisible to the dispatch frontier forever. So flow-on labels each issue
+    dispatch-ready itself, via the SAME static pass (scripts/triage.py) the event
+    and cron triagers use. Trust is by construction: the title/body/labels come from
+    the checked-in rule table, not third-party input, so skipping the author
+    trust-probe (which would not recognise github-actions[bot]) is sound here.
+    A default `priority:P3` is applied when no rule label carries one, so the
+    result converges to `status:ready` instead of parking `status:untriaged`."""
+    base = set(labels)
+    effective = set(base)
+    if not any(_triage._PRIO.match(lb) for lb in effective):
+        effective.add(DEFAULT_PRIORITY)
+    verdict = _triage.triage(effective, "task")
+    return sorted((effective | verdict["add"]) - base)
 
 
 @dataclass
@@ -219,6 +251,32 @@ def _any_glob_match(globs: list[str], paths: list[str]) -> bool:
     return False
 
 
+def _bench_suite_needs_dashboard_follow_on(suite: str) -> bool:
+    """Return whether a registered suite lacks an unfeatured disposition."""
+    try:
+        registry = BENCH_REGISTRY.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    # [GPT-5.6] Match the same registry reference fields as merge gate G3. An
+    # unregistered research harness may live under bench/, but it has no metric
+    # feed and therefore must not mint a dead dashboard-card follow-on.
+    blocks = re.split(r"(?m)^\s*\[\[benchmark\]\]\s*$", registry)[1:]
+    needle = re.compile(rf"\bbench/{re.escape(suite)}/")
+    for block in blocks:
+        refs = " ".join(
+            re.findall(
+                r"^\s*(?:source|invoke|dataset|records_to)\s*=\s*(.*)$",
+                block,
+                re.MULTILINE,
+            )
+        )
+        if needle.search(refs):
+            return not re.search(
+                r"^\s*featured\s*=\s*false\b", block, re.MULTILINE
+            )
+    return False
+
+
 def rule_matches(
     rule: Rule,
     changed: list[str],
@@ -243,6 +301,11 @@ def rule_matches(
         return False
     if rule.when_title is not None and not re.search(rule.when_title, title, re.IGNORECASE):
         return False
+
+    if rule.id == BENCH_DASHBOARD_RULE_ID:
+        suite = _first_segment_after("bench/", added)
+        if not suite or not _bench_suite_needs_dashboard_follow_on(suite):
+            return False
 
     # [OPUS-4.8] Special handling for the changed-public-feature docs rule
     # (bead sq-l0a0). The when_paths glob is only a cheap pre-filter; on top of it
@@ -299,6 +362,10 @@ def evaluate(
                 f"(rule `{rule.id}`) from merged PR #{pr}. Reconcile into a bead."
             )
             labels_full = list(dict.fromkeys(BASE_LABELS + tmpl.labels))
+            # [FABLE-5] (#2474) dispatch-visibility: append role/priority/status
+            # routing labels at creation (see routing_labels for why the event
+            # path can never label these issues).
+            labels_full += routing_labels(labels_full)
             out.append(
                 FollowOn(
                     rule_id=rule.id,

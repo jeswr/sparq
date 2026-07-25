@@ -14,7 +14,7 @@
 //! |---|--------|--------|--------------|----------------|------------|
 //! | 1 | RL (L2 says in-RL) | `sparq_reason::materialize(Profile::OwlRl)` + `inconsistencies()` | only past the **divergence guard** | sound via **Theorem PR1** (preconditions CHECKED, not assumed) | [`UnknownReason::RlPr1Preconditions`], [`UnknownReason::RlDivergenceGuard`] |
 //! | 2 | EL (in-EL) | `sparq_reason_el::Classifier::classify` | only for a pure ⊤-free EL+⊥ TBox (argument below) | never (see the ⊤ guard) | [`UnknownReason::ElSkippedAxioms`], [`UnknownReason::ElUnappliedAxioms`], [`UnknownReason::ElTopGuard`] |
-//! | 3 | QL (in-QL) | none — deferred | never | never | [`UnknownReason::QlConsistencyPending`] (always; DL-Lite_R consistency is sq-pbz04.3.4's, not duplicated here) |
+//! | 3 | QL (in-QL) | `sparq_reason_ql::check_consistency` (opt-in feature `dispatch_ql`, [FABLE-5] sq-fj8lj); without it, none — deferred | only past the QL crate's own capture accounting (see §"QL branch soundness") | sound at any capture level (monotonicity) | [`UnknownReason::QlCaptureGap`]; without `dispatch_ql`, [`UnknownReason::QlConsistencyPending`] (always) |
 //! | 4 | ALCH (everything else L1 extracted) | the L3 tableau | complete for the fragment | complete for the fragment | [`UnknownReason::ResourceBudget`] |
 //! | — | extraction failed | none | never | never | [`UnknownReason::OutOfFragment`] |
 //!
@@ -72,6 +72,38 @@
 //! by induction every ⊤-free EL class expression (named class, ⊥, ⊓, ∃) denotes ∅, so every
 //! GCI/equivalence/disjointness holds. This branch never returns `Inconsistent` (a pure
 //! ⊤-free EL+⊥ TBox is always consistent; anything else is guarded away).
+//!
+//! ## QL branch soundness (opt-in `dispatch_ql`, [FABLE-5] sq-fj8lj)
+//!
+//! With the `dispatch_ql` feature the QL branch reconstructs the ORIGINAL input triples from
+//! the dict (a faithful id-to-term rendering of exactly the graph L1 extracted — nothing is
+//! translated through the L1 model) and hands them to `sparq_reason_ql::check_consistency`,
+//! the sq-p6yb7 DL-Lite_R checker (violation-query composition over PerfectRef). The
+//! cross-crate soundness argument deliberately does NOT rely on the L2 profile test agreeing
+//! with the QL crate's fragment: L2's `In(QL)` is a ROUTING decision only. The QL crate
+//! re-extracts its own TBox from the raw triples with its OWN capture accounting, and:
+//! - `Inconsistent` is sound at ANY capture level (a violation witnessed on a captured
+//!   SUBSET of the axioms is an inconsistency of the whole KB, by monotonicity) — and for
+//!   an ontology in OWL 2 QL, DL-Lite_R unsatisfiability of the encoded KB coincides with
+//!   Direct-Semantics inconsistency (the profile's defining correspondence, W3C QL §3 /
+//!   Calvanese et al. JAR 2007);
+//! - `Consistent` is returned by the QL crate ONLY when its `TBox::fully_captured()` holds
+//!   AND `consistency_uncaptured == 0` — i.e. its own accounting certifies that every schema
+//!   triple was captured, so the cln(T)-closure completeness argument applies to the WHOLE
+//!   KB. Any L2-grammar-vs-QL-capture semantic drift (e.g. the QL super-∃ with a named
+//!   filler, which the W3C grammar admits but the QL crate conservatively skips) therefore
+//!   lands in `Unknown`, never in a manufactured verdict;
+//! - anything else maps to [`UnknownReason::QlCaptureGap`] (fail-closed, carrying the QL
+//!   crate's own gap accounting).
+//!
+//! Note the structural consequence of the in-order dispatch: a graph reaches this branch
+//! only when it is in-QL but NOT in-RL and NOT in-EL, which (over the L1 axiom kinds)
+//! forces an `ObjectComplementOf` somewhere — a shape the QL crate today counts as
+//! uncaptured. So in practice this branch currently graduates `Inconsistent` verdicts
+//! (disjointness violations are decided at any capture level) while `Consistent` stays
+//! `Unknown(QlCaptureGap)` until the QL crate's capture broadens; that is the honest
+//! fail-closed reading, not a defect. Without the feature the branch abstains with
+//! [`UnknownReason::QlConsistencyPending`] exactly as before.
 //!
 //! # Entailment by refutation (design record §4)
 //!
@@ -164,7 +196,8 @@
 //!
 //! This module never claims completeness beyond the argued fragment: the only complete
 //! branch is the ALCH tableau (within budget); RL `Consistent` is guard-narrowed, EL
-//! `Consistent` is ⊤-free-TBox-narrowed, QL consistency is wholly deferred, and every
+//! `Consistent` is ⊤-free-TBox-narrowed, QL consistency is capture-accounting-narrowed
+//! under the opt-in `dispatch_ql` feature (and wholly deferred without it), and every
 //! uncertain case is a typed [`UnknownReason`].
 
 use crate::extract::extract;
@@ -192,8 +225,13 @@ pub enum Branch {
     RlMaterialization,
     /// OWL 2 EL consequence-based classification (`sparq-reason-el`), triple-guarded.
     ElClassification,
-    /// OWL 2 QL — consistency wholly deferred to the QL workstream (sq-pbz04.3.4).
+    /// OWL 2 QL without the `dispatch_ql` feature — consistency deferred (the arm that
+    /// sq-fj8lj graduates; produced only when `dispatch_ql` is OFF).
     QlDeferred,
+    /// OWL 2 QL DL-Lite_R consistency by violation-query composition
+    /// (`sparq_reason_ql::check_consistency`, sq-p6yb7) — produced only under the opt-in
+    /// `dispatch_ql` feature (module docs §"QL branch soundness"). [FABLE-5] sq-fj8lj
+    QlConsistency,
     /// The L3 ALCH completion-forest tableau (complete for the L1 fragment).
     AlchTableau,
 }
@@ -220,9 +258,18 @@ pub enum UnknownReason {
     /// The model mentions `owl:Thing`: the EL classifier does not track ⊤'s
     /// satisfiability (empirically verified), so a ⊤-involving verdict is withheld.
     ElTopGuard,
-    /// The ontology dispatched to the QL branch, whose Direct-Semantics consistency
-    /// procedure is deferred to the QL workstream (sq-pbz04.3.4) — never duplicated here.
+    /// The ontology dispatched to the QL branch with the `dispatch_ql` feature OFF: the
+    /// Direct-Semantics consistency procedure lives in sparq-reason-ql (sq-p6yb7) and is
+    /// engaged only opt-in — never duplicated here. Produced only without `dispatch_ql`
+    /// ([FABLE-5] sq-fj8lj graduated the feature-on path).
     QlConsistencyPending,
+    /// The QL branch ran the sparq-reason-ql DL-Lite_R checker (feature `dispatch_ql`) and
+    /// it abstained: its own extraction accounting could not certify full capture of the KB
+    /// (`fully_captured()` false, or a structurally-uncaptured negative axiom such as
+    /// `owl:complementOf`), so a `Consistent` claim would be unsound and no violation query
+    /// matched. The payload carries the QL crate's gap accounting. Fail-closed.
+    /// [FABLE-5] sq-fj8lj
+    QlCaptureGap(String),
     /// The ALCH tableau exhausted its deterministic count budget mid-search.
     ResourceBudget(ExhaustedBudget),
     /// Entailment only: the conclusion-axiom kind has no argued refutation encoding.
@@ -413,6 +460,13 @@ impl DirectChecker {
             return el_branch(dict, triples, &onto);
         }
         if ps.ql.is_in() {
+            // [FABLE-5] sq-fj8lj: with `dispatch_ql` the QL branch delegates to the
+            // sparq-reason-ql DL-Lite_R checker over the RAW input triples (module docs
+            // §"QL branch soundness" — the QL crate's OWN capture accounting owns the
+            // verdict; L2's `In` only routes). Without the feature, deferred as before.
+            #[cfg(feature = "dispatch_ql")]
+            return ql_branch(dict, triples);
+            #[cfg(not(feature = "dispatch_ql"))]
             return ConsistencyOutcome {
                 verdict: ConsistencyVerdict::Unknown(UnknownReason::QlConsistencyPending),
                 branch: Branch::QlDeferred,
@@ -849,6 +903,57 @@ fn ce_mentions_thing(ce: &ClassExpression) -> bool {
         ClassExpression::ObjectSomeValuesFrom(_, filler)
         | ClassExpression::ObjectAllValuesFrom(_, filler) => ce_mentions_thing(filler),
     }
+}
+
+// -------------------------------------------------------------------------------------------
+// QL branch ([FABLE-5] sq-fj8lj, opt-in `dispatch_ql`)
+// -------------------------------------------------------------------------------------------
+
+/// The QL branch (module docs §"QL branch soundness"): reconstruct the raw input triples and
+/// delegate to the sparq-reason-ql DL-Lite_R checker, whose OWN extraction accounting owns
+/// the verdict (`check_consistency` = `TBox::extract` over the same kb + violation sweep —
+/// exactly the pairing its `check_consistency_with` contract requires).
+#[cfg(feature = "dispatch_ql")]
+fn ql_branch(dict: &Dict, triples: &[[Id; 3]]) -> ConsistencyOutcome {
+    use sparq_reason_ql::QlConsistency;
+    let out = |verdict| ConsistencyOutcome {
+        verdict,
+        branch: Branch::QlConsistency,
+    };
+    let kb = match ql_kb(dict, triples) {
+        Ok(kb) => kb,
+        // Unreachable in practice (these triples already extracted through L1, so subjects/
+        // predicates are IRIs or blank nodes) — kept fail-closed regardless.
+        Err(msg) => return out(ConsistencyVerdict::Unknown(UnknownReason::QlCaptureGap(msg))),
+    };
+    match sparq_reason_ql::check_consistency(&kb) {
+        QlConsistency::Consistent => out(ConsistencyVerdict::Consistent),
+        QlConsistency::Inconsistent(_) => out(ConsistencyVerdict::Inconsistent),
+        QlConsistency::Unknown(gap) => out(ConsistencyVerdict::Unknown(
+            UnknownReason::QlCaptureGap(format!("{:?}", gap)),
+        )),
+    }
+}
+
+/// Faithfully render the id triples back into oxrdf triples — the EXACT graph L1 extracted,
+/// not a translation of the L1 model — so the QL crate's accounting sees the same input.
+#[cfg(feature = "dispatch_ql")]
+fn ql_kb(dict: &Dict, triples: &[[Id; 3]]) -> Result<Vec<oxrdf::Triple>, String> {
+    use oxrdf::NamedOrBlankNode;
+    let mut kb = Vec::with_capacity(triples.len());
+    for t in triples {
+        let subject = match dict.term(t[0]) {
+            OTerm::NamedNode(n) => NamedOrBlankNode::NamedNode(n),
+            OTerm::BlankNode(b) => NamedOrBlankNode::BlankNode(b),
+            other => return Err(format!("subject {} is not an IRI or blank node", other)),
+        };
+        let predicate = match dict.term(t[1]) {
+            OTerm::NamedNode(n) => n,
+            other => return Err(format!("predicate {} is not an IRI", other)),
+        };
+        kb.push(oxrdf::Triple::new(subject, predicate, dict.term(t[2])));
+    }
+    Ok(kb)
 }
 
 // -------------------------------------------------------------------------------------------

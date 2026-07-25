@@ -195,6 +195,14 @@ impl Names {
         self.self_of_concept.get(&c).copied()
     }
 
+    /// [FABLE-5] sq-8zqwb: the self-restriction concept `∃role.Self` IF one was minted for
+    /// `role` (non-minting, unlike [`Names::self_concept`]) — the CRs3 nominal-reflexivity
+    /// trigger test: a SAME-NOMINAL self-link `({a},{a}) ∈ R(r)` reads off as `∃r.Self ∈
+    /// S({a})`. Returns `None` on a `hasSelf`-free ontology, so that path's cost is unchanged.
+    pub fn self_concept_of(&self, role: Role) -> Option<Concept> {
+        self.self_by_role.get(&role).copied()
+    }
+
     /// Whether ANY self-restriction was minted — the O(1) fast-path guard that keeps the CR-Self
     /// rules a no-op (zero cost) on `owl:hasSelf`-free ontologies, so hasSelf-free classification
     /// is byte-identical in behaviour AND cost to the pre-CR-Self path.
@@ -219,8 +227,10 @@ impl Names {
 
     /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): the internal role for `dict_id` IF one was already
     /// minted, WITHOUT minting a new one (unlike [`Names::role`]). Used to append the
-    /// `owl:bottomObjectProperty` empty-role axiom only when that property actually occurs.
-    #[cfg(feature = "abox")]
+    /// `owl:bottomObjectProperty` empty-role axiom only when that property actually occurs,
+    /// and by the regularity check (`rbox`) to resolve `owl:topObjectProperty` only when it
+    /// occurs as a role.
+    #[cfg(any(feature = "abox", feature = "rbox"))]
     pub fn role_of(&self, dict_id: Id) -> Option<Role> {
         self.role_by_dict.get(&dict_id).copied()
     }

@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 scripts/check-pr-arm-base.py",
+            "command": "guard=\"$CLAUDE_PROJECT_DIR/scripts/check-pr-arm-base.py\"; if [ -n \"$CLAUDE_PROJECT_DIR\" ] && [ -r \"$guard\" ] && guard_output=$(python3 \"$guard\"); then printf '%s\\n' \"$guard_output\"; else printf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"permissionDecisionReason\":\"🤖 SPARQ stacked-PR arm guard: guard script unavailable or failed; allowing because guard failures are fail-open (other merge gates still apply)\"}}'; fi",
             "timeout": 40,
             "statusMessage": "Stacked-PR arm guard: checking PR base is main…"
           },

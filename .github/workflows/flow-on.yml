@@ -6,6 +6,13 @@
 # `flow-on` + `auto`, idempotent) for each triggered follow-on. GitHub issues are
 # the sole tracker (beads was retired 2026-07-17) — the follow-on issues ARE the work.
 #
+# [FABLE-5] (#2474) flow-on.py ALSO applies role/priority/status routing labels at
+# creation (via the shared scripts/triage.py static pass): issues created under
+# `secrets.GITHUB_TOKEN` fire no `issues: opened` event (GitHub's recursion
+# guard), so triage-issue.yml can never label them post-hoc — unrouted, they were
+# invisible to the dispatch frontier. The retriage cron sweeps the pre-fix
+# label-less backlog.
+#
 # This is NOT a gate: it never blocks a merge (it runs AFTER merge) and the job
 # name carries no `advisory`/`informational` token so it stays visible. It only
 # mints follow-on issues.
@@ -32,7 +39,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Run flow-on engine
