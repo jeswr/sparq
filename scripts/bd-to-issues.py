@@ -642,11 +642,8 @@ def apply_migration(repo, open_ids, blockers, parents, limit=None, checkpoint="/
         rplan = plan_reconcile({b: open_ids[b] for b in ids}, id_map, have_labels, crates)
         if rplan:
             ensure_labels(repo, {l for v in rplan.values() for l in v})
-            node_ids.update({n: node_ids[n] for n in rplan if n in node_ids})
-            unknown = [n for n in rplan if n not in node_ids]
-            if unknown:                     # freshly created this run — re-fetch their node ids
-                for it in fetch_issues(repo):
-                    node_ids[it["number"]] = it["id"]
+            if any(n not in node_ids for n in rplan):   # created THIS run — re-fetch their ids
+                node_ids.update({it["number"]: it["id"] for it in fetch_issues(repo)})
             reconciled = apply_reconcile(repo, rplan, node_ids)
     if backfill:
         print(f"[apply] authenticated {len(backfill)} pre-label issue(s) via migration-owned "
