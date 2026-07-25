@@ -84,7 +84,7 @@ per lane:
 
 1. Delete the lane's entry from the registry (that is the load-bearing change — it takes the
    job out of the aggregator's exclusion set). Optionally drop the now-meaningless
-   ` (advisory)` token from the job `name:` in the same PR; if you do, the entry must go in
+   `(advisory)` token from the job `name:` in the same PR; if you do, the entry must go in
    the same commit or C4/C2 in `scripts/check-advisory-registry.py` REDs.
 2. Remove the `continue-on-error: true` on the browser/exec step(s) so a real failure turns
    the job red.
