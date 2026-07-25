@@ -29,7 +29,16 @@ import subprocess
 import sys
 
 GATE_LABELS = ("needs:", "trust:untrusted")
-BUSY_STATUS = {"status:in-progress", "status:blocked", "status:deferred", "status:untriaged"}
+# [OPUS-5] `status:in-progress-review` was MISSING here while the registry's dispatch.yml keeps
+# such rows in `ready_input` precisely because it believes compute_ready() will (a) never select
+# them and (b) still let them RESERVE their package. Neither held: the label is not a gate label,
+# so an in-progress-review issue that also carried `status:ready` was SELECTABLE, and the reserve
+# branch below only fired on `status:in-progress`, so its crate was left free for a second
+# dispatch. Both halves fail OPEN into a double-dispatch; see IN_FLIGHT_STATUS below.
+BUSY_STATUS = {"status:in-progress", "status:in-progress-review", "status:blocked",
+               "status:deferred", "status:untriaged"}
+# The statuses that make an OPEN ISSUE in-flight work occupying its area (not merely excluded).
+IN_FLIGHT_STATUS = {"status:in-progress", "status:in-progress-review"}
 # [GPT-5.6] Parked is not in-flight: these terminal, human-owned snapshot artifacts cannot
 # advance autonomously, so they must not reserve an area indefinitely. Removing the label in a
 # later snapshot restores occupancy immediately; there is no remembered park state.
@@ -53,10 +62,38 @@ def valid_priority(labels):
     return next(iter(ps)) if len(ps) == 1 else None
 
 
+def declared_packages(labels):
+    """The SET of area:<crate> packages ACTUALLY declared — empty when none are, no global fallback.
+
+    [OPUS-5] Separated from `packages_of` because the empty→GLOBAL fallback is only sound for a
+    CANDIDATE (a no-area issue is cross-cutting work that must serialize against everything).
+    Applying it to an in-flight artifact inverts the meaning: it turns "we cannot attribute this
+    to a crate" into "this seizes every crate". Nothing labels PRs with `area:` — all 60 open
+    sparq PRs carried none — so the old rule let a single unlabelled PR hold __global__ and
+    reduce the whole frontier to zero. See `_reserving_packages`.
+    """
+    return {m.group(1) for lb in labels for m in [_PKG.match(lb)] if m}
+
+
 def packages_of(labels):
-    """The SET of all area:<crate> packages; empty → the serializing global partition."""
-    pkgs = {m.group(1) for lb in labels for m in [_PKG.match(lb)] if m}
-    return pkgs or {GLOBAL}
+    """The SET of all area:<crate> packages; empty → the serializing global partition.
+
+    CANDIDATE-side rule (fail-closed): an unlabelled issue is treated as cross-cutting.
+    """
+    return declared_packages(labels) or {GLOBAL}
+
+
+def _reserving_packages(labels):
+    """OCCUPANCY-side rule: an in-flight artifact reserves ONLY the areas it declares.
+
+    [OPUS-5] The deliberate asymmetry with `packages_of`. Fail-closed on a candidate costs one
+    dispatch; fail-closed on an occupant costs the ENTIRE fleet, because an unattributable
+    occupant would serialize every package at once with no way for the pipeline to clear it
+    (nothing in the pipeline applies `area:` labels to PRs). An occupant we cannot attribute
+    therefore reserves nothing and is instead handled by the linked-issue suppression the
+    registry planner applies (`Closes #N` / `sparq-agent/issue-N-*` heads).
+    """
+    return declared_packages(labels)
 
 
 def has_role(labels):
@@ -87,8 +124,93 @@ def _artifact_name(artifact):
     return f"{kind}#{artifact.get('number', '?')}"
 
 
+def exclusion_reason(labels, open_blockers=0):
+    """Why this label-set is NOT an enumerable ready candidate, or None when it is.
+
+    Label/state gates ONLY — package serialization is a separate, capacity-shaped question
+    answered by compute_ready(). Shared by ready_candidates() and the --diagnose taxonomy so the
+    two can never drift apart.
+    """
+    if "status:ready" not in labels:
+        return "no status:ready attestation"
+    if NON_DISPATCHABLE in labels:
+        return f"{NON_DISPATCHABLE} tracking umbrella"
+    gates = sorted(lb for lb in labels for g in GATE_LABELS if lb == g or lb.startswith(g))
+    if gates:
+        return f"gated by {gates[0]}"
+    busy = sorted(labels & BUSY_STATUS)
+    if busy:
+        return f"busy: {busy[0]}"
+    parked = sorted(labels & PARKED_AREA_LABELS)
+    if parked:
+        return f"parked: {parked[0]}"
+    if valid_priority(labels) is None:
+        return "no single valid priority:P0..P4"
+    if not has_role(labels):
+        return "no role:* label"
+    if int(open_blockers) > 0:
+        return f"{int(open_blockers)} open blocker(s)"
+    return None
+
+
+def ready_candidates(issues, log=None):
+    """The DRAINABLE backlog: every open issue whose LABELS make it dispatchable.
+
+    [OPUS-5] Distinct from compute_ready(), which additionally serializes to one issue per
+    package and therefore answers a CONCURRENCY question, not a "how much work is available"
+    question. Conflating the two makes a healthy 200-item backlog behind a 4-wide frontier
+    indistinguishable from an empty one. Returns [(priority, number, issue, packages)].
+
+    `log`, when supplied, receives one attributable line per issue that carries the
+    `status:ready` attestation and was nonetheless dropped — a silent `continue` here is what
+    lets a label-regressed issue leave the frontier forever with zero signal. Issues without
+    the attestation are NOT logged (they are not candidates and would flood the log).
+    """
+    out = []
+    for it in issues:
+        if str(it.get("state", "OPEN")).upper() != "OPEN":
+            continue
+        if "pull_request" in it:             # PRs reserve work; they are never issue candidates
+            continue
+        L = labels_of(it)
+        reason = exclusion_reason(L, it.get("open_blockers", 0))
+        if reason is not None:
+            if log is not None and "status:ready" in L:
+                log(f"defer #{it.get('number', '?')}: {reason}")
+            continue
+        out.append((valid_priority(L), it.get("number", 0), it, packages_of(L)))
+    return out
+
+
+def roleless_ready(issues):
+    """The SILENT-INVISIBILITY class: open, attested, un-gated, un-blocked — and yet NO `role:*`.
+
+    [OPUS-5] Ported from the registry planner (its issue #225, where 117 accumulated unnoticed).
+    `ready_candidates` drops these BEFORE any plan row exists, so they appear in no plan and in
+    no diagnostic and drain never. The fail-closed drop is CORRECT — a role is never guessed —
+    but its silence was not, so callers report this count loudly. Pure; returns sorted numbers.
+    """
+    numbers = []
+    for it in issues:
+        if str(it.get("state", "OPEN")).upper() != "OPEN" or "pull_request" in it:
+            continue
+        L = labels_of(it)
+        if "status:ready" not in L or NON_DISPATCHABLE in L:
+            continue
+        if is_gated(L) or is_busy(L) or is_parked(L):
+            continue
+        if int(it.get("open_blockers", 0)) > 0:
+            continue
+        if not has_role(L):
+            numbers.append(it.get("number", 0))
+    return sorted(numbers)
+
+
 def compute_ready(issues, in_progress_packages=None, conflict_log=None):
-    """Conflict-free, priority-ordered, FAIL-CLOSED ready frontier.
+    """Conflict-free, priority-ordered, FAIL-CLOSED CONCURRENCY FRONTIER.
+
+    This is the one-per-package concurrency WIDTH, not the size of the drainable backlog — use
+    `ready_candidates()` for the latter. compute_ready() ⊆ ready_candidates() always.
 
     `conflict_log`, when supplied, receives one attribution line per conflict-excluded candidate;
     the live default writes those diagnostics to stderr without polluting the frontier rows.
@@ -119,29 +241,9 @@ def compute_ready(issues, in_progress_packages=None, conflict_log=None):
         if str(it.get("state", "OPEN")).upper() != "OPEN" or not occupies_area(it):
             continue
         L = labels_of(it)
-        if "pull_request" in it or "status:in-progress" in L:
-            reserve(packages_of(L), it)
-    cands = []
-    for it in issues:
-        if str(it.get("state", "OPEN")).upper() != "OPEN":
-            continue
-        if "pull_request" in it:             # PRs reserve work; they are never issue candidates
-            continue
-        L = labels_of(it)
-        if "status:ready" not in L:          # positive attestation required
-            continue
-        if NON_DISPATCHABLE in L:            # epics are tracking umbrellas, not work items
-            continue
-        if is_gated(L) or is_busy(L) or is_parked(L):
-            continue
-        p = valid_priority(L)
-        if p is None:                        # need exactly one valid priority
-            continue
-        if not has_role(L):                  # need a role
-            continue
-        if int(it.get("open_blockers", 0)) > 0:
-            continue
-        cands.append((p, it.get("number", 0), it, packages_of(L)))
+        if "pull_request" in it or L & IN_FLIGHT_STATUS:
+            reserve(_reserving_packages(L), it)
+    cands = ready_candidates(issues)
     cands.sort(key=lambda c: (c[0], c[1]))   # priority then number (deterministic)
     ready = []
     for _p, _n, it, pkgs in cands:
@@ -268,6 +370,42 @@ def _flatten_pages(pages):
             if isinstance(i, dict)]
 
 
+_LINK_HEAD = re.compile(r"^sparq-agent/issue-([1-9][0-9]*)-")
+_CLOSES = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#([1-9][0-9]*)\b")
+TRUSTED_ASSOCIATIONS = {"OWNER", "MEMBER", "COLLABORATOR"}
+
+
+def linked_issue_numbers(pulls, repo):
+    """Issues already covered by an open PR — the suppression the REGISTRY planner applies.
+
+    [OPUS-5] Mirrors dispatch.yml's `linked_issue_numbers` so the local CLI previews the same
+    frontier the orchestrator dispatches. A fork PR must never suppress an issue: only a
+    same-repo `sparq-agent/issue-N-*` head is pipeline-owned provenance (a fork's head branch
+    text is attacker-controlled), and a closing keyword in a body counts only from a trusted
+    author association.
+    """
+    linked = set()
+    for pull in pulls:
+        head = pull.get("head") or {}
+        ref = head.get("ref") or ""
+        body = pull.get("body") or ""
+        same_repo = ((head.get("repo") or {}).get("full_name") == repo)
+        app_pr = same_repo and _LINK_HEAD.match(ref) is not None
+        if app_pr:
+            linked.update(int(n) for n in _LINK_HEAD.findall(ref))
+        if app_pr or str(pull.get("author_association", "")).upper() in TRUSTED_ASSOCIATIONS:
+            linked.update(int(n) for n in _CLOSES.findall(body))
+    return linked
+
+
+def _fetch_pulls(repo):
+    out = subprocess.run(
+        ["gh", "api", "--paginate", "--slurp", f"repos/{repo}/pulls?state=open&per_page=100"],
+        capture_output=True, text=True, check=True).stdout
+    return [p for page in json.loads(out or "[]") if isinstance(page, list)
+            for p in page if isinstance(p, dict)]
+
+
 def _fetch(repo, ceiling=10000):
     """Open-issue snapshot via REAL cursor pagination (`gh api --paginate` follows Link headers),
     replacing the old single-page `--limit 1000` fetch that FAILED CLOSED at exactly 1000 open
@@ -298,14 +436,53 @@ def _fetch(repo, ceiling=10000):
     return issues
 
 
+def diagnose(issues, linked=()):
+    """Re-runnable VISIBILITY taxonomy: why the open backlog is not on the frontier.
+
+    Returns (counts, roleless, candidates, frontier). Every open issue lands in exactly one
+    bucket, so the buckets sum to the open-issue count and no class can hide.
+    """
+    linked = set(linked)
+    counts, open_issues = {}, []
+    for it in issues:
+        if str(it.get("state", "OPEN")).upper() != "OPEN" or "pull_request" in it:
+            continue
+        open_issues.append(it)
+        if it.get("number") in linked:
+            reason = "covered by an open linked PR"
+        else:
+            reason = exclusion_reason(labels_of(it), it.get("open_blockers", 0)) or "ENUMERABLE"
+        counts[reason] = counts.get(reason, 0) + 1
+    visible = [it for it in issues if it.get("number") not in linked]
+    return (counts, roleless_ready(open_issues),
+            ready_candidates(visible), compute_ready(visible, conflict_log=lambda _m: None))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--repo", default="sparq-org/sparq")
     ap.add_argument("--self-test", action="store_true")
+    ap.add_argument("--diagnose", action="store_true",
+                    help="print the full visibility taxonomy instead of just the frontier")
     args = ap.parse_args()
     if args.self_test:
         return _self_test()
-    for it in compute_ready(_fetch(args.repo)):
+    issues = _fetch(args.repo)
+    linked = linked_issue_numbers(_fetch_pulls(args.repo), args.repo)
+    visible = [it for it in issues if it.get("number") not in linked]
+    if args.diagnose:
+        counts, roleless, cands, frontier = diagnose(issues, linked)
+        total = sum(counts.values())
+        print(f"open issues: {total}")
+        for reason, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+            print(f"  {n:5d}  {100 * n / total:5.1f}%  {reason}")
+        print(f"\ndrainable backlog (ready_candidates): {len(cands)}")
+        print(f"concurrency frontier (compute_ready): {len(frontier)}")
+        if roleless:
+            print(f"\n::warning:: {len(roleless)} attested issue(s) carry NO role:* label and are "
+                  f"INVISIBLE to dispatch: {', '.join('#%d' % n for n in roleless[:20])}")
+        return 0
+    for it in compute_ready(visible):
         L = labels_of(it)
         print(f"P{valid_priority(L)}  #{it['number']:5}  {sorted(packages_of(L))}")
     return 0
