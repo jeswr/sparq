@@ -1,14 +1,8 @@
 //! Determinism and metric-law coverage for dictionary-grounded query repair.
 
-// Import the crate-private production implementation so the metric laws mutation-test
-// the exact function used for suggestion ranking without widening sparq-nlq's API.
-// [GPT-5.6] sq-lxw27
-#[path = "../src/constrain/distance.rs"]
-mod distance;
-
-use distance::edit_distance;
 use proptest::prelude::*;
 use spargebra::{Query, SparqlParser};
+use sparq_core::strdist::edit_distance;
 use sparq_core::Graph;
 use sparq_nlq::constrain::{dictionary_repair_message, unknown_terms, TermRole};
 

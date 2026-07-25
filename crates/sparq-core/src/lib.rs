@@ -27,6 +27,7 @@ mod ttl;
 #[cfg(feature = "shared")]
 pub mod shared;
 pub mod store;
+pub mod strdist;
 pub mod temporal;
 
 use dict::{Dict, Id};
