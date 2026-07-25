@@ -1266,6 +1266,35 @@ pub fn secure_greater_than_shared(
     greater_than_bits(dealer, &a_bits, &b_bits)
 }
 
+/// [OPUS-5] sq-ujz8 (review round 3) — **in-protocol proof that ONE
+/// already-secret-shared operand lies inside the comparator's injective window**
+/// `[0, 2^`[`RABBIT_VALUE_BITS`]`)`, without ever reconstructing it.
+///
+/// This is exactly the guard pair `secure_greater_than_shared` /
+/// `secure_equal_to_bit_shared` run on each of their two operands, factored out so a
+/// caller whose control flow may perform **zero comparisons** can still enforce the
+/// range contract on every value it holds. The motivating case is
+/// `crate::sort_merge_join::oblivious_sort_by_secret_key`: a Batcher network over a
+/// column of `<= 1` element emits ZERO compare-exchange gates, so a contract enforced
+/// only *inside* the comparator is silently skipped there — the same out-of-range
+/// sharing was rejected at two elements and accepted at one. Enforcing it per element
+/// up front makes the documented contract hold at every column length.
+///
+/// Cost: one Rabbit bit-decomposition + one range proof per call (the same masked
+/// openings the comparator would perform — `c = x + r mod p`, near-uniform /
+/// statistically hiding at `≤ 2^{-61}` each; the value itself is never opened).
+/// `n >= 2t+1` (fail-closed). Honest-majority, semi-honest; external soundness
+/// sign-off pending (sq-qhy4).
+pub(crate) fn verify_shared_operand_in_range(
+    dealer: &mut ShamirDealer,
+    backend: &ShamirBackend,
+    value_shares: &[Share],
+) -> Result<(), MpcError> {
+    check_party_count(dealer.parties(), dealer.threshold())?;
+    let bits = secure_bit_decompose_rabbit(dealer, backend, value_shares)?;
+    verify_value_in_range_rabbit(dealer, value_shares, &bits)
+}
+
 /// [OPUS-4.8] sq-ujz8 — **`[a == b]` over two ALREADY-secret-shared operands**,
 /// returning a fresh degree-`t` sharing of the 0/1 equality bit WITHOUT ever
 /// opening it.

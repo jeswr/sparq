@@ -117,7 +117,10 @@
 //! multiplications, the oblivious shuffle's switch count/depth, and the padded
 //! reveal opens. The in-process simulation's wall-clock is NOT an MPC latency.
 
-use crate::compare::{secure_equal_to_bit_shared, secure_greater_than_shared, COMPARE_MAX_EXCLUSIVE};
+use crate::compare::{
+    check_party_count, secure_equal_to_bit_shared, secure_greater_than_shared,
+    verify_shared_operand_in_range, COMPARE_MAX_EXCLUSIVE,
+};
 use crate::field::Fp;
 use crate::oblivious::{shuffle, SortingNetwork};
 use crate::partial::{HolderId, MpcError, PartialResult};
@@ -469,13 +472,56 @@ fn sort_merge_semi_anti_faulted(
 ///
 /// This is exposed for the composed operators (and their differential tests) that
 /// need only the sort — DISTINCT-over-hidden, ORDER BY, MIN/MAX, the sort-merge
-/// join's own union sort. Values must be `< 2^60` (comparator range, fail-closed).
-/// `n >= 2t+1`. Honest-majority, semi-honest (sq-qhy4 pending).
+/// join's own union sort.
+///
+/// ## Fail-closed contracts — enforced UP FRONT, independent of the gate count
+///
+/// - **`n >= 2t+1`** for the secure multiplications the comparator and the
+///   conditional swap perform. Checked before any protocol work.
+/// - **Every column value must be `< 2^60`** (`COMPARE_MAX_EXCLUSIVE`), so the
+///   comparator's bit-decomposition is injective and cannot return a silently-wrapped
+///   verdict. The values are SHARINGS, so this cannot be checked in cleartext: it is
+///   PROVED in-protocol, once per element, by the same Rabbit range proof the
+///   comparator runs (`compare::verify_shared_operand_in_range`) — the value is never
+///   reconstructed.
+///
+/// [OPUS-5] Both were previously enforced only *inside* `secure_greater_than_shared`,
+/// i.e. once per compare-exchange gate. `SortingNetwork::new(n)` emits ZERO gates for
+/// `n <= 1`, so for a 0- or 1-element column neither guard ran and the contract above
+/// was skipped — the identical out-of-range sharing was rejected at `n = 2` and
+/// accepted at `n = 1`. Checking up front makes the contract hold at every length
+/// (regression tests `oblivious_sort_rejects_out_of_range_value_at_every_column_length`
+/// / `oblivious_sort_rejects_deficient_party_count_at_gateless_lengths`). The added
+/// cost is `O(n)` decompositions against the sort's own `O(n log² n)`, and it is
+/// strictly stronger than the per-gate check: every element is proved in range BEFORE
+/// any comparison opens anything.
+///
+/// Honest-majority, semi-honest; external soundness sign-off pending (sq-qhy4).
 pub fn oblivious_sort_by_secret_key(
     backend: &ShamirBackend,
     dealer: &mut ShamirDealer,
     mut col: Vec<Vec<Share>>,
 ) -> Result<Vec<Vec<Share>>, MpcError> {
+    // --- Fail-closed contract enforcement, BEFORE any protocol work and independent
+    //     of how many compare-exchange gates the network happens to emit. ---
+    check_party_count(dealer.parties(), dealer.threshold()).map_err(|e| match e {
+        MpcError::Protocol(m) => MpcError::Protocol(format!(
+            "oblivious_sort_by_secret_key: refusing to sort on a deficient backend — {m}"
+        )),
+        other => other,
+    })?;
+    for (k, entry) in col.iter().enumerate() {
+        verify_shared_operand_in_range(dealer, backend, entry).map_err(|e| match e {
+            MpcError::Protocol(m) => MpcError::Protocol(format!(
+                "oblivious_sort_by_secret_key: column entry #{k} failed the in-protocol range \
+                 check (every value must be < 2^60 = {}, the comparator's injective window) — \
+                 refusing fail-closed rather than sorting on a wrapped comparison: {m}",
+                COMPARE_MAX_EXCLUSIVE
+            )),
+            other => other,
+        })?;
+    }
+
     let n = col.len();
     let net = SortingNetwork::new(n);
     for &(i, j) in net.compare_exchanges() {
@@ -1115,5 +1161,107 @@ mod tests {
                 .unwrap();
         assert!(res.rows.is_empty());
         assert_eq!(cost.union_size, 1);
+    }
+
+    // ---- fail-closed contracts of the SORT SUBSTRATE, independent of gate count ---
+    //
+    // [OPUS-5] Review round 3 (sq-ujz8). `oblivious_sort_by_secret_key` documents a
+    // fail-closed range + party-count contract, but the guards used to live ONLY
+    // inside `secure_greater_than_shared` — which the sort calls once per
+    // compare-exchange gate. `SortingNetwork::new(n)` emits ZERO gates for `n <= 1`,
+    // so for a 0- or 1-element column NEITHER guard ever ran and the documented
+    // contract was silently skipped: the SAME out-of-range sharing was rejected at
+    // `n = 2` and accepted at `n = 1`. The tests below pin the contract at exactly
+    // the gate-free sizes; they are RED without the up-front enforcement in
+    // `oblivious_sort_by_secret_key`.
+
+    /// An out-of-range value must be refused at EVERY column length — including the
+    /// gate-free `n = 1`, where the comparator (and therefore its in-protocol range
+    /// proof) is never invoked. Also pins the `n = 2` case so the two agree: the
+    /// contract must not depend on how many compare-exchanges the network happens to
+    /// emit.
+    #[test]
+    fn oblivious_sort_rejects_out_of_range_value_at_every_column_length() {
+        let backend = ShamirBackend::new_seeded(3, 4242).unwrap();
+        let mut dealer = backend.dealer();
+        // == 2^60: the first value ABOVE the comparator's injective window, so its
+        // bit-decomposition would be truncated and the comparison silently wrong.
+        let out_of_range = Fp::new(COMPARE_MAX_EXCLUSIVE);
+
+        // n = 1 — ZERO compare-exchange gates. This is the case that was accepted.
+        let singleton = vec![dealer.share(out_of_range)];
+        let err = oblivious_sort_by_secret_key(&backend, &mut dealer, singleton).unwrap_err();
+        assert!(
+            matches!(&err, MpcError::Protocol(m)
+                if m.contains("oblivious_sort_by_secret_key") && m.contains("range")),
+            "singleton out-of-range column must fail closed with a range error, got {err:?}"
+        );
+
+        // n = 2 — one gate; rejected before AND after, and now by the same up-front
+        // check, so the diagnostic is identical in shape.
+        let pair = vec![dealer.share(out_of_range), dealer.share(Fp::new(1))];
+        let err = oblivious_sort_by_secret_key(&backend, &mut dealer, pair).unwrap_err();
+        assert!(
+            matches!(&err, MpcError::Protocol(m)
+                if m.contains("oblivious_sort_by_secret_key") && m.contains("range")),
+            "n = 2 out-of-range column must fail closed with a range error, got {err:?}"
+        );
+
+        // An out-of-range value anywhere in a LONGER column is refused too — the
+        // check is per element, not per gate.
+        let mut mixed: Vec<Vec<Share>> = (0..4u64).map(|v| dealer.share(Fp::new(v))).collect();
+        mixed.push(dealer.share(out_of_range));
+        let err = oblivious_sort_by_secret_key(&backend, &mut dealer, mixed).unwrap_err();
+        assert!(
+            matches!(&err, MpcError::Protocol(m) if m.contains("column entry #4")),
+            "the offending element must be named, got {err:?}"
+        );
+    }
+
+    /// An in-range column of ANY length still sorts — the fail-closed check must not
+    /// have become a blanket refusal. Covers the two gate-free lengths (0 and 1) plus
+    /// a value at the top of the legal window.
+    #[test]
+    fn oblivious_sort_accepts_in_range_columns_including_gateless_lengths() {
+        let backend = ShamirBackend::new_seeded(3, 4243).unwrap();
+        let mut dealer = backend.dealer();
+
+        // n = 0.
+        let empty = oblivious_sort_by_secret_key(&backend, &mut dealer, Vec::new()).unwrap();
+        assert!(empty.is_empty());
+
+        // n = 1, at the largest LEGAL value (2^60 − 1) — the boundary below the bound.
+        let top = Fp::new(COMPARE_MAX_EXCLUSIVE - 1);
+        let top_col = vec![dealer.share(top)];
+        let one = oblivious_sort_by_secret_key(&backend, &mut dealer, top_col)
+            .expect("the top in-range value must be accepted");
+        assert_eq!(backend.reconstruct(&one[0]).unwrap(), top);
+    }
+
+    /// The `n >= 2t+1` party-count contract must hold at the gate-free lengths too:
+    /// with a deficient backend the sort's own secure multiplications (and the
+    /// comparator's) are unsound, so it must refuse BEFORE doing any protocol work —
+    /// even for a column so short that no comparison would ever run.
+    #[test]
+    fn oblivious_sort_rejects_deficient_party_count_at_gateless_lengths() {
+        // 3 parties with t = 2 violates n >= 2t+1 (3 < 5). The public constructors
+        // can never build this; the test-only escape hatch can.
+        let backend = ShamirBackend::with_unchecked_threshold(3, 2);
+        let mut dealer = backend.dealer();
+
+        // n = 0 — zero gates AND zero elements: only an up-front check can catch it.
+        let err = oblivious_sort_by_secret_key(&backend, &mut dealer, Vec::new()).unwrap_err();
+        assert!(
+            matches!(&err, MpcError::Protocol(m) if m.contains("2t+1")),
+            "empty column on a deficient backend must fail closed, got {err:?}"
+        );
+
+        // n = 1 — zero gates.
+        let col = vec![dealer.share(Fp::new(7))];
+        let err = oblivious_sort_by_secret_key(&backend, &mut dealer, col).unwrap_err();
+        assert!(
+            matches!(&err, MpcError::Protocol(m) if m.contains("2t+1")),
+            "singleton column on a deficient backend must fail closed, got {err:?}"
+        );
     }
 }
