@@ -34,10 +34,22 @@
 //! negatives, uniform-random negatives}` — training a fresh model per cell on the *same* split and
 //! reporting filtered metrics + the long-tail breakdown per cell. The **scoring model** is the
 //! [`ModelKind`](crate::train::ModelKind) on [`EvalConfig::train`]; it is the same for all four
-//! cells of a single run so the deltas isolate the prior. A gUFO-prior cell is structurally present
-//! as an **ablation axis the harness can already toggle** ([`AblationCell::gufo_prior`]) so the
-//! later gUFO-prior phase wires straight in; at this stage the prior is a no-op
-//! (`gufo_prior = false` everywhere) and the gUFO slice establishes the **baseline**.
+//! cells of a single run so the deltas isolate the prior.
+//!
+//! # The gUFO-prior axis (wired, default OFF) — [FABLE-5] kern/ufo-priors
+//!
+//! The gUFO-prior axis ([`AblationCell::gufo_prior`], toggled by [`EvalConfig::gufo_prior`]) is now
+//! **wired**: when ON, the [`crate::ufo_priors`] reader mines the UFO-**provable** disjointness
+//! mask (kind-partition + identity-provider propagation + nature partition, all fail-closed), feeds
+//! it into the P3 [`DisjointnessOracle`](crate::taxonomy::DisjointnessOracle), and the filtered
+//! ranking applies it as the **serve-time hard mask**: a candidate whose `rdf:type` is provably
+//! disjoint from the relation's declared `rdfs:domain`/`rdfs:range` class is dropped from the
+//! ranking pool. This is **answer-safe** (design §6.A): on a UFO-consistent graph a true answer's
+//! types are never disjoint from the relation's declared signature, so only provably-wrong
+//! distractors are removed — per query the filtered rank can only improve or stay equal, a property
+//! the tests assert. Training is untouched (the mask is serve-time only; a train-time repulsion
+//! term remains a tracked follow-up). The axis is **default OFF** and, when OFF, the mask is never
+//! even constructed — the baseline stays byte-identical (asserted by the no-op tests below).
 //!
 //! # The model axis is load-bearing (adversarial-review finding)
 //!
@@ -80,10 +92,12 @@
 //! **multi-seed** reporting — never on these synthetic, work-box, single-seed figures.
 
 use crate::provenance::WeightMode;
-use crate::structure::{materialise_closure, ClosedGraph, TypeConstraints};
+use crate::structure::{
+    is_embeddable, materialise_closure, ClosedGraph, TermScope, TypeConstraints,
+};
 use crate::train::{train, TrainConfig, TrainReport, TrainedModel};
 use rustc_hash::{FxHashMap, FxHashSet};
-use sparq_core::dict::{Id, TermParts};
+use sparq_core::dict::Id;
 use sparq_core::Graph;
 use sparq_reason::Profile;
 
@@ -113,11 +127,15 @@ fn hash_triple([s, p, o]: [Id; 3], seed_mix: u64) -> u64 {
     splitmix64(&mut s2)
 }
 
-fn is_entity(graph: &Graph, id: Id) -> bool {
-    matches!(
-        graph.dict.term_parts(id),
-        TermParts::Iri { .. } | TermParts::Blank(_)
-    )
+/// Is the term id an **atomic** entity (named/blank node) for split / ranking-pool purposes?
+///
+/// Deliberately pinned to [`TermScope::IriBlank`] under **both** arms of the quoted-terms
+/// ablation: split membership and the ranking pool stay **scope-invariant**, so a paired
+/// ON-vs-OFF delta isolates the *training-side* visibility effect rather than comparing rankings
+/// over different candidate populations (which would be an incomparable measurement). The
+/// quoted-terms switch widens only what the **trainer** sees ([`TrainConfig::term_scope`]).
+fn is_atomic_entity(graph: &Graph, id: Id) -> bool {
+    is_embeddable(graph, id, TermScope::IriBlank)
 }
 
 /// The RDF/RDFS/OWL **schema / structural** predicate IRIs. Triples whose predicate is one of these
@@ -190,7 +208,7 @@ impl Splits {
         let mut all: Vec<[Id; 3]> = Vec::new();
         let mut ent: FxHashSet<Id> = FxHashSet::default();
         for [s, p, o] in graph.iter_ids() {
-            if is_entity(graph, s) && is_entity(graph, o) {
+            if is_atomic_entity(graph, s) && is_atomic_entity(graph, o) {
                 // The ranking pool is every entity that participates in any object-property triple
                 // (including schema triples — a class is still an entity that could be a candidate).
                 ent.insert(s);
@@ -295,10 +313,16 @@ pub struct AblationCell {
     pub closure: bool,
     /// Type-constrained negatives (vs uniform-random)? (the type-negative prior).
     pub type_constrained: bool,
-    /// The gUFO prior — an **ablation axis the harness already exposes** for the later phase. At
-    /// this stage it is always `false` (the prior is a no-op); the field exists so the gUFO-prior
-    /// phase wires straight into the matrix without changing the harness shape.
+    /// The gUFO prior — **wired** ([FABLE-5] kern/ufo-priors): mirrors [`EvalConfig::gufo_prior`].
+    /// When `true` the UFO-provable disjointness mask ([`crate::ufo_priors`]) was applied to the
+    /// serve-time candidate pool of every ranking in this cell; when `false` (the default) the
+    /// mask was never constructed and the cell is the byte-identical baseline.
     pub gufo_prior: bool,
+    /// The RDF 1.2 **quoted-terms visibility axis** ([`TermScope`]) — always `false` in
+    /// [`run_ablation`] (the matrix trains with the byte-stable [`TermScope::IriBlank`] default;
+    /// same wiring pattern as `gufo_prior`). The axis is measured by the dedicated paired runner
+    /// [`run_quoted_ablation`], never silently inside the 2×2 matrix.
+    pub quoted_terms: bool,
     /// Filtered metrics over the test split for this cell.
     pub metrics: Metrics,
     /// Long-tail breakdown for this cell.
@@ -320,6 +344,7 @@ fn filtered_rank(
     splits: &Splits,
     triple: [Id; 3],
     side: Side,
+    ufo_mask: Option<&UfoMask>,
 ) -> Option<u32> {
     let [h, r, t] = triple;
     // The held-out true score must be computable.
@@ -346,6 +371,16 @@ fn filtered_rank(
         // Filter: skip OTHER known-true triples (they are correct answers, not distractors).
         if splits.is_true(&cand) {
             continue;
+        }
+        // [FABLE-5] kern/ufo-priors: the gUFO-prior serve-time hard mask (only under
+        // `EvalConfig::gufo_prior`, else `None` and this arm is byte-identical to the baseline).
+        // Drops a candidate whose type is PROVABLY disjoint from the relation's declared
+        // domain/range class — answer-safe (see `UfoMask::provably_excluded`; the held-out
+        // answer was already skipped above, so it can never be masked).
+        if let Some(mask) = ufo_mask {
+            if mask.provably_excluded(r, side, c) {
+                continue;
+            }
         }
         let Some(cs) = model.score(cand[0], cand[1], cand[2]) else {
             continue; // candidate not scorable (no row) → cannot outrank
@@ -381,6 +416,7 @@ fn evaluate(
     model: &TrainedModel,
     splits: &Splits,
     long_tail_threshold: u32,
+    ufo_mask: Option<&UfoMask>,
 ) -> (Metrics, LongTail) {
     let mut acc = MetricAcc::default();
     let mut head_acc = MetricAcc::default();
@@ -388,7 +424,7 @@ fn evaluate(
 
     for &triple in &splits.test {
         for side in [Side::Head, Side::Tail] {
-            if let Some(rank) = filtered_rank(model, splits, triple, side) {
+            if let Some(rank) = filtered_rank(model, splits, triple, side, ufo_mask) {
                 acc.add(rank);
                 let answer = match side {
                     Side::Head => triple[0],
@@ -464,6 +500,16 @@ pub struct EvalConfig {
     pub split_seed: u64,
     /// Long-tail frequency threshold (an answer entity with train-freq ≤ this is "long-tail").
     pub long_tail_threshold: u32,
+    /// [FABLE-5] kern/ufo-priors — the gUFO-prior ablation switch. **Default `false`** (the
+    /// byte-identical baseline: the UFO mask is never constructed and no ranking changes). When
+    /// `true`, the UFO-provable disjointness mask ([`crate::ufo_priors`]) is applied to every
+    /// ranking's candidate pool as the answer-safe serve-time hard mask (see the module docs).
+    pub gufo_prior: bool,
+    /// The namespace the graph mints the gUFO meta-vocabulary under — only read when
+    /// [`gufo_prior`](Self::gufo_prior) is on. Defaults to the canonical
+    /// [`GUFO_NS`](crate::ufo_priors::GUFO_NS); the synthetic gUFO slice uses `http://ex/gufo#`.
+    /// An explicit caller declaration, never a heuristic guess (no silent fallback).
+    pub gufo_ns: &'static str,
 }
 
 impl EvalConfig {
@@ -476,7 +522,91 @@ impl EvalConfig {
             valid_frac: 0.1,
             split_seed: seed ^ 0xF00D,
             long_tail_threshold: 2,
+            // Default OFF: the gUFO prior is opt-in per run; with it off the harness is the
+            // byte-identical pre-wiring baseline. [FABLE-5] kern/ufo-priors
+            gufo_prior: false,
+            gufo_ns: crate::ufo_priors::GUFO_NS,
         }
+    }
+}
+
+// ---- The gUFO serve-time mask ([FABLE-5] kern/ufo-priors) ---------------------------------------
+
+/// The serve-time UFO mask of one (possibly closed) eval graph: the UFO-augmented
+/// [`DisjointnessOracle`] plus the id-level lookups the ranking loop needs (candidate `rdf:type`s
+/// and per-relation declared `rdfs:domain`/`rdfs:range` classes). Built ONCE per closure arm, and
+/// ONLY when [`EvalConfig::gufo_prior`] is on — the OFF path never constructs it.
+///
+/// [`DisjointnessOracle`]: crate::taxonomy::DisjointnessOracle
+struct UfoMask {
+    /// `DisjointnessOracle::mine` (owl axioms) + the UFO-proven pairs absorbed on top.
+    oracle: crate::taxonomy::DisjointnessOracle,
+    /// Entity id → its asserted/entailed `rdf:type` class ids.
+    types_of: FxHashMap<Id, Vec<Id>>,
+    /// Relation id → declared `rdfs:domain` class ids.
+    domain_of: FxHashMap<Id, Vec<Id>>,
+    /// Relation id → declared `rdfs:range` class ids.
+    range_of: FxHashMap<Id, Vec<Id>>,
+}
+
+impl UfoMask {
+    /// Build the mask from `graph`, mining the gUFO vocabulary under `ns`.
+    fn build(graph: &Graph, ns: &str) -> UfoMask {
+        let priors = crate::ufo_priors::UfoPriors::mine_with_namespace(graph, ns);
+        let mut oracle = crate::taxonomy::DisjointnessOracle::mine(graph);
+        priors.augment_oracle(&mut oracle);
+
+        let iri = |s: &str| oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(s));
+        let rdf_type = graph.id_of(&iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#type"));
+        let domain = graph.id_of(&iri("http://www.w3.org/2000/01/rdf-schema#domain"));
+        let range = graph.id_of(&iri("http://www.w3.org/2000/01/rdf-schema#range"));
+
+        let mut types_of: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+        let mut domain_of: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+        let mut range_of: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+        for [s, p, o] in graph.iter_ids() {
+            if !(is_embeddable(graph, s, TermScope::IriBlank)
+                && is_embeddable(graph, o, TermScope::IriBlank))
+            {
+                continue;
+            }
+            if Some(p) == rdf_type {
+                types_of.entry(s).or_default().push(o);
+            } else if Some(p) == domain {
+                domain_of.entry(s).or_default().push(o);
+            } else if Some(p) == range {
+                range_of.entry(s).or_default().push(o);
+            }
+        }
+        UfoMask {
+            oracle,
+            types_of,
+            domain_of,
+            range_of,
+        }
+    }
+
+    /// Is candidate `c` **provably excluded** from the `(r, side)` ranking — i.e. does some
+    /// declared query-side class of `r` (its `rdfs:range` for a tail ranking, `rdfs:domain` for a
+    /// head ranking) stand provably disjoint from some `rdf:type` of `c`?
+    ///
+    /// ANSWER-SAFE: on a UFO-consistent graph a true answer of `(h, r, ?)` is typed by `r`'s
+    /// declared range (an RDFS entailment), so none of its types can be provably disjoint from
+    /// that range — only provably-wrong distractors return `true`. A relation with no declared
+    /// signature, or a candidate with no types, excludes nothing (the open-world default).
+    /// Structurally, the held-out answer itself is never even tested (the ranking loop skips it
+    /// before the mask), so no metric can lose its true answer even on an inconsistent graph.
+    fn provably_excluded(&self, r: Id, side: Side, c: Id) -> bool {
+        let query_classes = match side {
+            Side::Head => self.domain_of.get(&r),
+            Side::Tail => self.range_of.get(&r),
+        };
+        let (Some(query_classes), Some(cand_types)) = (query_classes, self.types_of.get(&c)) else {
+            return false;
+        };
+        query_classes
+            .iter()
+            .any(|&q| cand_types.iter().any(|&t| self.oracle.is_disjoint(q, t)))
     }
 }
 
@@ -518,6 +648,15 @@ pub fn run_ablation(
         let graph = &closed.graph;
         let splits = Splits::split(graph, cfg.train_frac, cfg.valid_frac, cfg.split_seed);
 
+        // [FABLE-5] kern/ufo-priors: the gUFO serve-time mask, built ONCE per closure arm and
+        // ONLY when the axis is explicitly on — with it off (the default) no UFO code runs and
+        // the run is byte-identical to the pre-wiring baseline (asserted by tests).
+        let ufo_mask = if cfg.gufo_prior {
+            Some(UfoMask::build(graph, cfg.gufo_ns))
+        } else {
+            None
+        };
+
         for type_constrained in [false, true] {
             let mode = if type_constrained {
                 crate::structure::SamplingMode::TypeConstrained
@@ -535,12 +674,18 @@ pub fn run_ablation(
             let (model, report) = train(&train_graph, &train_tc, tcfg);
 
             // Rank over the FULL entity pool and filter against ALL splits (filtered protocol).
-            let (metrics, long_tail) = evaluate(&model, &splits, cfg.long_tail_threshold);
+            let (metrics, long_tail) =
+                evaluate(&model, &splits, cfg.long_tail_threshold, ufo_mask.as_ref());
 
             cells.push(AblationCell {
                 closure,
                 type_constrained,
-                gufo_prior: false,
+                gufo_prior: cfg.gufo_prior,
+                // The quoted-terms axis is NOT toggled by this matrix — the cell reports the
+                // template's scope verbatim (`false` for every preset, whose default is the
+                // byte-stable `IriBlank`); the dedicated paired runner `run_quoted_ablation`
+                // is the instrument that measures the axis.
+                quoted_terms: tcfg.term_scope == TermScope::Embeddable,
                 metrics,
                 long_tail,
                 report,
@@ -570,7 +715,11 @@ impl MeanStd {
         }
         let mean = xs.iter().sum::<f64>() / n as f64;
         let var = xs.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n as f64;
-        MeanStd { mean, std: var.sqrt(), n }
+        MeanStd {
+            mean,
+            std: var.sqrt(),
+            n,
+        }
     }
 }
 
@@ -872,7 +1021,12 @@ pub fn run_weight_ablation(
         let closed: ClosedGraph =
             materialise_closure(base_dict.clone(), base_triples.clone(), template.profile);
         let graph = &closed.graph;
-        let splits = Splits::split(graph, template.train_frac, template.valid_frac, seed ^ 0xF00D);
+        let splits = Splits::split(
+            graph,
+            template.train_frac,
+            template.valid_frac,
+            seed ^ 0xF00D,
+        );
 
         // Train graph + type constraints are shared across the two arms (no leakage either way).
         let train_graph = restrict_to_train(graph, &splits);
@@ -883,7 +1037,9 @@ pub fn run_weight_ablation(
             tcfg.seed = seed;
             tcfg.weight_mode = mode;
             let (model, _report) = train(&train_graph, &train_tc, tcfg);
-            let (metrics, _long_tail) = evaluate(&model, &splits, template.long_tail_threshold);
+            // The weight ablation isolates the provenance axis; the gUFO mask stays off here.
+            let (metrics, _long_tail) =
+                evaluate(&model, &splits, template.long_tail_threshold, None);
             metrics
         };
 
@@ -897,6 +1053,113 @@ pub fn run_weight_ablation(
     }
 
     Ok(WeightAblation {
+        off: off.finish(),
+        on: on.finish(),
+        mrr: PairedDelta::of(&mrr_deltas),
+        hits10: PairedDelta::of(&hits10_deltas),
+    })
+}
+
+// ---- RDF 1.2 QUOTED-TERMS visibility ablation ---------------------------------------------------
+
+/// The result of a paired **quoted-terms visibility** ablation ([`run_quoted_ablation`]): the two
+/// per-arm metric aggregates ([`TermScope::IriBlank`] OFF vs [`TermScope::Embeddable`] ON) plus
+/// the **paired** per-seed MRR / Hits@10 deltas.
+///
+/// The two arms share — per seed — the parse, closure, split, restricted train graph, type
+/// constraints, and seed (common random numbers); they differ **only** in
+/// [`TrainConfig::term_scope`], so the per-seed paired delta `Δ_s = MRR(on)_s − MRR(off)_s`
+/// cancels the shared noise and [`PairedDelta::significant_at`] gates adoption exactly as for the
+/// closure and provenance-weighting axes. Split membership and the ranking pool are
+/// **scope-invariant** (see [`Splits`]), so the delta isolates the *training-side* visibility
+/// effect. On a quote-free graph the two arms are byte-identical and every delta is exactly zero
+/// (the honest no-op — the same property [`run_weight_ablation`] documents for provenance-free
+/// graphs). **No bar is hard-coded and no accuracy claim is made.**
+#[derive(Clone, Debug)]
+pub struct QuotedAblation {
+    /// Quoted-terms visibility OFF ([`TermScope::IriBlank`]) — the baseline arm, over seeds.
+    pub off: CellStats,
+    /// Quoted-terms visibility ON ([`TermScope::Embeddable`]) — the treatment arm, over seeds.
+    pub on: CellStats,
+    /// Paired per-seed MRR delta `MRR(on) − MRR(off)` (variance-reduced). The headline statistic.
+    pub mrr: PairedDelta,
+    /// Paired per-seed Hits@10 delta `Hits@10(on) − Hits@10(off)`.
+    pub hits10: PairedDelta,
+}
+
+impl QuotedAblation {
+    /// Convenience: is the quoted-terms MRR lift significant at `k` standard errors of its paired
+    /// spread (`n ≥ 2` required)? `false` means the honest verdict is **no measured lift**.
+    pub fn mrr_significant_at(&self, k: f64) -> bool {
+        self.mrr.significant_at(k)
+    }
+}
+
+/// Run the **quoted-terms visibility ON vs OFF** ablation per seed and return the paired
+/// MRR / Hits@10 deltas. Closure, negative-sampling mode, and weighting are held at the
+/// `template.train` / `template.profile` settings; only the [`TrainConfig::term_scope`] axis is
+/// ablated, so the delta isolates the RDF 1.2 quoted-term visibility effect.
+///
+/// For each seed the two arms are produced from the **same** closed graph, split, restricted
+/// train graph, and type constraints — the graph, targets, filter set, and ranking pool are
+/// identical between arms (scope-invariance; see [`QuotedAblation`]) — so the paired delta is the
+/// cleanest possible estimate of the visibility effect. The graph must carry RDF 1.2 quoted
+/// triples (`rdf:reifies` edges, e.g. [`synthetic_rdf12_ttl`]) for the ON arm to differ from OFF;
+/// over a quote-free graph the two arms are byte-identical and the delta is exactly zero.
+pub fn run_quoted_ablation(
+    text: &str,
+    format: &str,
+    template: EvalConfig,
+    seeds: &[u64],
+) -> Result<QuotedAblation, String> {
+    assert!(!seeds.is_empty(), "need at least one seed");
+    let (base_dict, base_triples) = Graph::parse_to_triples(text, format)?;
+
+    let mut off = BucketSamples::default();
+    let mut on = BucketSamples::default();
+    let mut mrr_deltas: Vec<f64> = Vec::with_capacity(seeds.len());
+    let mut hits10_deltas: Vec<f64> = Vec::with_capacity(seeds.len());
+
+    for &seed in seeds {
+        // Build the closed graph for this seed, once — both arms share it.
+        let closed: ClosedGraph =
+            materialise_closure(base_dict.clone(), base_triples.clone(), template.profile);
+        let graph = &closed.graph;
+        let splits = Splits::split(
+            graph,
+            template.train_frac,
+            template.valid_frac,
+            seed ^ 0xF00D,
+        );
+
+        // Train graph + type constraints are shared across the two arms. `restrict_to_train`
+        // keeps `rdf:reifies` triples as structural context under BOTH arms (their quoted-term
+        // object is not an atomic target), so the arms genuinely see the same graph and differ
+        // only in what the trainer is allowed to embed.
+        let train_graph = restrict_to_train(graph, &splits);
+        let train_tc = TypeConstraints::mine(&train_graph);
+
+        let metric_for = |scope: TermScope| -> Metrics {
+            let mut tcfg = template.train;
+            tcfg.seed = seed;
+            tcfg.term_scope = scope;
+            let (model, _report) = train(&train_graph, &train_tc, tcfg);
+            // This paired runner isolates the triple-term visibility axis; the gUFO mask stays off.
+            let (metrics, _long_tail) =
+                evaluate(&model, &splits, template.long_tail_threshold, None);
+            metrics
+        };
+
+        let m_off = metric_for(TermScope::IriBlank);
+        let m_on = metric_for(TermScope::Embeddable);
+
+        mrr_deltas.push(m_on.mrr - m_off.mrr);
+        hits10_deltas.push(m_on.hits10 - m_off.hits10);
+        off.push(&m_off);
+        on.push(&m_on);
+    }
+
+    Ok(QuotedAblation {
         off: off.finish(),
         on: on.finish(),
         mrr: PairedDelta::of(&mrr_deltas),
@@ -958,7 +1221,7 @@ fn restrict_to_train(graph: &Graph, splits: &Splits) -> Graph {
     let train_set: FxHashSet<[Id; 3]> = splits.train.iter().copied().collect();
     let mut kept: Vec<[Id; 3]> = Vec::new();
     for [s, p, o] in graph.iter_ids() {
-        let both_entities = is_entity(graph, s) && is_entity(graph, o);
+        let both_entities = is_atomic_entity(graph, s) && is_atomic_entity(graph, o);
         if both_entities && !splits.schema_preds.contains(&p) {
             // A TARGET (non-schema) object-property triple: keep only if it is a train positive.
             if train_set.contains(&[s, p, o]) {
@@ -1316,6 +1579,173 @@ pub fn synthetic_provenance_ttl(n_entities: usize, seed: u64) -> String {
     out
 }
 
+// ---- Synthetic RDF 1.2 quoted-triple slice ------------------------------------------------------
+
+/// The three layers of the [`synthetic_rdf12_parts`] slice, separated so tests can compose them:
+/// the byte-identity regression (quoted-term-bearing lines added under the default
+/// [`TermScope::IriBlank`] must change **nothing**, bit-for-bit) appends `reifications` to `base`,
+/// while the visibility ablation runs over all three.
+///
+/// Every string is **N-Triples** (full IRIs, one statement per line — also valid Turtle): the
+/// N-Triples path is the RDF 1.2 quoted-term path the crate's fingerprint tests already exercise.
+/// Parse with format `"ntriples"`.
+pub struct Rdf12Parts {
+    /// IRI-only community-structured base graph (a valid, quote-free slice on its own):
+    /// entities + `ex:relatedTo` claim edges (community-clustered), typed sources, and the
+    /// pre-registered eval target `ex:corroborates` (source–source, IRI–IRI — identically split
+    /// under both scopes).
+    pub base: String,
+    /// ONLY `ex:stmtJ rdf:reifies <<( h p t )>>` lines — **every** triple here has a quoted-term
+    /// endpoint, i.e. is invisible under [`TermScope::IriBlank`] (the byte-identity fixture).
+    pub reifications: String,
+    /// Reifier metadata: `ex:stmtJ rdf:type ex:Statement` and `ex:stmtJ ex:assertedBy ex:srcK`
+    /// (all IRI–IRI) — the atomic context that connects statements to sources.
+    pub metadata: String,
+}
+
+impl Rdf12Parts {
+    /// The full slice: `base + reifications + metadata`.
+    pub fn full(&self) -> String {
+        format!("{}{}{}", self.base, self.reifications, self.metadata)
+    }
+}
+
+/// Build a small synthetic **RDF 1.2 quoted-triple** slice for the quoted-terms visibility
+/// ablation ([`run_quoted_ablation`]). Deterministic in `seed`, sized by `n_entities`.
+///
+/// **Signal mechanism (stated honestly).** A shallow KGE treats a quoted term as an *opaque
+/// node*: this slice buys the trainer **structural** visibility only — `rdf:reifies` edges and
+/// content-addressed hub sharing (`sparq-core` interns triple terms by their component ids, so
+/// two reifiers of the same claim share ONE quoted-term node) — **not** compositional access to
+/// the quoted `(s, p, o)` content (that is the separate, derived statement-level encoder
+/// [`crate::train::TrainedModel::encode_quoted_term`], whose adoption stays measurement-gated).
+/// Under [`TermScope::Embeddable`], `src ←assertedBy− stmt −reifies→ tt ←reifies−
+/// stmt′ −assertedBy→ src′` paths connect sources through shared-claim hubs; whether that lifts
+/// the pre-registered target is exactly what the ablation measures — **no lift is promised, and
+/// a synthetic win does not extrapolate off-corpus**.
+///
+/// Construction (mirrors the honesty guards of the gUFO/relational/provenance slices):
+/// - community-clustered entities with `ex:relatedTo` claim edges (recoverable base structure);
+/// - per-community sources asserting **overlapping** claim subsets (≥2 reifiers per shared
+///   quoted term — the hub), plus occasional cross-community **noise** reifications;
+/// - the eval target `ex:corroborates` between same-community sources sharing ≥1 claim — but
+///   only for ~70% of sharing pairs: the rest are **decoys** (overlapping-but-uncorroborated),
+///   so neither a type filter nor raw claim overlap trivially separates the target.
+pub fn synthetic_rdf12_parts(n_entities: usize, seed: u64) -> Rdf12Parts {
+    let mut state = seed ^ 0x12F1_2F12_12F1_2F12;
+    let mut next = |m: usize| -> usize { (splitmix64(&mut state) as usize) % m.max(1) };
+
+    const EX: &str = "http://ex/";
+    const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+    const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+    let n = n_entities.max(24);
+    let n_comm = 5usize;
+    let comm = |k: usize| -> usize { k % n_comm };
+    let n_src = (n / 6).max(10);
+
+    // 1) Claims: each entity emits 1–2 within-community `relatedTo` edges (deduplicated).
+    //    Claims are asserted in the base graph AND are the reification targets below.
+    let mut claims: Vec<(usize, usize)> = Vec::new();
+    let mut seen_claims = FxHashSet::default();
+    for i in 0..n {
+        for pass in 0..2usize {
+            let p = if pass == 0 { 8 } else { 4 };
+            if next(10) < p {
+                // A same-community partner (bounded retry, fall back to any other entity).
+                let mut tgt = None;
+                for _ in 0..8 {
+                    let cand = next(n);
+                    if cand != i && comm(cand) == comm(i) {
+                        tgt = Some(cand);
+                        break;
+                    }
+                }
+                let t = tgt.unwrap_or((i + 1) % n);
+                if t != i && seen_claims.insert((i, t)) {
+                    claims.push((i, t));
+                }
+            }
+        }
+    }
+
+    // 2) Assertions: each source asserts ~60% of its community's claims (overlapping subsets ⇒
+    //    shared quoted-term hubs) plus, with ~15% probability, one cross-community noise claim.
+    let mut assertions: Vec<(usize, usize)> = Vec::new(); // (source, claim index)
+    for s in 0..n_src {
+        let sc = comm(s);
+        for (ci, &(h, _)) in claims.iter().enumerate() {
+            if comm(h) == sc && next(10) < 6 {
+                assertions.push((s, ci));
+            }
+        }
+        if next(100) < 15 && !claims.is_empty() {
+            let ci = next(claims.len());
+            assertions.push((s, ci));
+        }
+    }
+
+    // 3) The corroboration target: same-community source pairs sharing ≥1 asserted claim get an
+    //    `ex:corroborates` edge with probability ~70% — the rest are decoys (no edge), so claim
+    //    overlap alone cannot separate the relation.
+    let mut asserted_by: Vec<FxHashSet<usize>> = vec![FxHashSet::default(); n_src];
+    for &(s, ci) in &assertions {
+        asserted_by[s].insert(ci);
+    }
+    let mut corroborates: Vec<(usize, usize)> = Vec::new();
+    for a in 0..n_src {
+        for b in (a + 1)..n_src {
+            if comm(a) == comm(b)
+                && asserted_by[a]
+                    .intersection(&asserted_by[b])
+                    .next()
+                    .is_some()
+                && next(10) < 7
+            {
+                corroborates.push((a, b));
+            }
+        }
+    }
+
+    // 4) Emit the three N-Triples layers (full IRIs; `rdf:type` spelled out — `a` is Turtle-only).
+    let mut base = String::new();
+    for i in 0..n {
+        base.push_str(&format!("<{EX}e{i}> <{RDF_TYPE}> <{EX}Entity> .\n"));
+    }
+    for s in 0..n_src {
+        base.push_str(&format!("<{EX}src{s}> <{RDF_TYPE}> <{EX}Source> .\n"));
+    }
+    for &(h, t) in &claims {
+        base.push_str(&format!("<{EX}e{h}> <{EX}relatedTo> <{EX}e{t}> .\n"));
+    }
+    for &(a, b) in &corroborates {
+        base.push_str(&format!("<{EX}src{a}> <{EX}corroborates> <{EX}src{b}> .\n"));
+    }
+
+    let mut reifications = String::new();
+    let mut metadata = String::new();
+    for (j, &(s, ci)) in assertions.iter().enumerate() {
+        let (h, t) = claims[ci];
+        reifications.push_str(&format!(
+            "<{EX}stmt{j}> <{RDF_REIFIES}> <<( <{EX}e{h}> <{EX}relatedTo> <{EX}e{t}> )>> .\n"
+        ));
+        metadata.push_str(&format!("<{EX}stmt{j}> <{RDF_TYPE}> <{EX}Statement> .\n"));
+        metadata.push_str(&format!("<{EX}stmt{j}> <{EX}assertedBy> <{EX}src{s}> .\n"));
+    }
+
+    Rdf12Parts {
+        base,
+        reifications,
+        metadata,
+    }
+}
+
+/// The full [`synthetic_rdf12_parts`] slice (`base + reifications + metadata`) as one N-Triples
+/// document — the input for [`run_quoted_ablation`]. Parse with format `"ntriples"`.
+/// Deterministic in `seed`, sized by `n_entities`.
+pub fn synthetic_rdf12_ttl(n_entities: usize, seed: u64) -> String {
+    synthetic_rdf12_parts(n_entities, seed).full()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1373,7 +1803,7 @@ ex:c ex:rel ex:y .
         let rel = g.id_of(&iri("http://ex/rel")).unwrap();
         let x = g.id_of(&iri("http://ex/x")).unwrap();
         // Rank (a rel ?) with answer x: y must be FILTERED (it is also a true tail of a).
-        let rank = filtered_rank(&model, &s, [a, rel, x], Side::Tail).unwrap();
+        let rank = filtered_rank(&model, &s, [a, rel, x], Side::Tail, None).unwrap();
         // With y filtered, only x and the remaining distractors remain; rank is bounded by the pool.
         assert!(rank >= 1);
         // Sanity: the all_true set indeed contains (a rel y).
@@ -1400,8 +1830,91 @@ ex:c ex:rel ex:y .
             assert!(c.metrics.queries > 0, "cell produced no scorable queries");
             assert!(c.report.loss_decreased(), "cell model did not learn");
         }
-        // The gUFO-prior ablation axis exists and is OFF at this stage (baseline phase).
+        // The gUFO-prior ablation axis is DEFAULT-OFF: an EvalConfig::small run is the baseline.
         assert!(cells.iter().all(|c| !c.gufo_prior));
+    }
+
+    // ---- gUFO-prior axis ([FABLE-5] kern/ufo-priors) --------------------------------------------
+
+    #[test]
+    fn gufo_prior_on_a_gufo_free_graph_is_byte_identical_to_off() {
+        // The honest no-op (mirrors the provenance-weighting convention): over a graph carrying
+        // NO gUFO annotations the mined priors are empty, the mask drops nothing, and the ON and
+        // OFF arms must be BYTE-IDENTICAL — exact f64 equality, not approximate.
+        let ttl = synthetic_relational_ttl(120, 3);
+        let off = EvalConfig::small(5);
+        let mut on = off;
+        on.gufo_prior = true;
+        let a = run_ablation(&ttl, "turtle", off).unwrap();
+        let b = run_ablation(&ttl, "turtle", on).unwrap();
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(x.metrics.queries, y.metrics.queries);
+            assert_eq!(x.metrics.mrr, y.metrics.mrr, "byte-identical MRR");
+            assert_eq!(x.metrics.hits1, y.metrics.hits1);
+            assert_eq!(x.metrics.hits3, y.metrics.hits3);
+            assert_eq!(x.metrics.hits10, y.metrics.hits10);
+            assert_eq!(x.long_tail.tail.mrr, y.long_tail.tail.mrr);
+        }
+        assert!(a.iter().all(|c| !c.gufo_prior) && b.iter().all(|c| c.gufo_prior));
+    }
+
+    #[test]
+    fn gufo_prior_off_is_deterministic_and_default() {
+        // The OFF arm reads no entropy and constructs no mask: two identical runs are identical,
+        // and EvalConfig::small defaults the axis off (the byte-identical baseline).
+        let cfg = EvalConfig::small(17);
+        assert!(!cfg.gufo_prior, "the gUFO prior must be DEFAULT-OFF");
+        let ttl = synthetic_gufo_ttl(60, 4);
+        let a = run_ablation(&ttl, "turtle", cfg).unwrap();
+        let b = run_ablation(&ttl, "turtle", cfg).unwrap();
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(x.metrics.mrr, y.metrics.mrr);
+            assert_eq!(x.metrics.queries, y.metrics.queries);
+        }
+    }
+
+    #[test]
+    fn gufo_prior_mask_is_answer_safe_and_never_hurts_a_rank() {
+        // The load-bearing answer-safety property, asserted end-to-end: the mask only REMOVES
+        // provably-wrong distractors from each ranking, so with the SAME trained model (training
+        // is untouched) every query's filtered rank can only improve or stay equal — per cell,
+        // MRR/Hits@k(ON) >= MRR/Hits@k(OFF) and the query count is unchanged. On the gUFO slice
+        // (three gufo:Kinds: Person/Organisation/Course, roles/phases under Person) the mask must
+        // also actually BITE (some rank strictly improves) — Person ⊥ Course is UFO-proven, so
+        // person candidates drop out of enrolledIn tail rankings.
+        let ttl = synthetic_gufo_ttl(120, 3);
+        let off = EvalConfig::small(3);
+        let mut on = off;
+        on.gufo_prior = true;
+        on.gufo_ns = "http://ex/gufo#"; // the slice's explicit (non-canonical) gUFO namespace
+        let a = run_ablation(&ttl, "turtle", off).unwrap();
+        let b = run_ablation(&ttl, "turtle", on).unwrap();
+        let mut bit = false;
+        for (x, y) in a.iter().zip(&b) {
+            assert_eq!(
+                x.metrics.queries, y.metrics.queries,
+                "the mask never changes WHICH queries are scorable"
+            );
+            assert!(
+                y.metrics.mrr >= x.metrics.mrr,
+                "answer-safety: masking provably-wrong distractors can never lower MRR \
+                 (cell closure={} tc={}: on={} off={})",
+                x.closure,
+                x.type_constrained,
+                y.metrics.mrr,
+                x.metrics.mrr
+            );
+            assert!(y.metrics.hits1 >= x.metrics.hits1);
+            assert!(y.metrics.hits3 >= x.metrics.hits3);
+            assert!(y.metrics.hits10 >= x.metrics.hits10);
+            if y.metrics.mrr > x.metrics.mrr {
+                bit = true;
+            }
+        }
+        assert!(
+            bit,
+            "on a gUFO-annotated slice the mask must actually remove distractors"
+        );
     }
 
     #[test]
@@ -1639,5 +2152,283 @@ ex:c ex:rel ex:y .
 
     fn iri(s: &str) -> oxrdf::Term {
         oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(s))
+    }
+
+    // ---- RDF 1.2 quoted-terms visibility axis ---------------------------------------------------
+
+    use sparq_core::dict::TermParts;
+
+    fn is_quoted(g: &Graph, id: Id) -> bool {
+        matches!(g.dict.term_parts(id), TermParts::Triple(_))
+    }
+
+    fn assert_metrics_bit_equal(a: &Metrics, b: &Metrics, what: &str) {
+        assert_eq!(a.queries, b.queries, "{what}: queries");
+        assert_eq!(a.mrr.to_bits(), b.mrr.to_bits(), "{what}: mrr");
+        assert_eq!(a.hits1.to_bits(), b.hits1.to_bits(), "{what}: hits1");
+        assert_eq!(a.hits3.to_bits(), b.hits3.to_bits(), "{what}: hits3");
+        assert_eq!(a.hits10.to_bits(), b.hits10.to_bits(), "{what}: hits10");
+    }
+
+    /// T-2 — the LOAD-BEARING byte-identity regression: adding quoted-term-bearing triples
+    /// (`rdf:reifies` lines) to a graph changes NOTHING under the default `TermScope::IriBlank` —
+    /// same splits, same ranking pool, bit-equal model bytes and loss curve, bit-equal metrics.
+    /// The two variants share ONE parsed dictionary (the base-only variant filters the quoted
+    /// triples out of the same id space), so the comparison is robust to parser id assignment and
+    /// any difference is attributable to the reifications alone.
+    #[test]
+    fn invisible_reifications_change_nothing_when_scope_is_off() {
+        let parts = synthetic_rdf12_parts(80, 42);
+        let with_text = format!("{}{}", parts.base, parts.reifications);
+        let (dict, triples) = Graph::parse_to_triples(&with_text, "ntriples").unwrap();
+
+        let quoted_free: Vec<[Id; 3]> = {
+            let probe = Graph::from_parts(dict.clone(), triples.clone());
+            triples
+                .iter()
+                .copied()
+                .filter(|&[s, _, o]| !is_quoted(&probe, s) && !is_quoted(&probe, o))
+                .collect()
+        };
+        assert!(
+            quoted_free.len() < triples.len(),
+            "fixture precondition: the reifications layer must add quoted-term triples"
+        );
+
+        // T-9 (closure non-interference smoke guard): the RDFS closure neither destructures nor
+        // multiplies quoted terms — the entailed-triple count is unaffected by the reifications.
+        let closed_with = materialise_closure(dict.clone(), triples.clone(), Profile::Rdfs);
+        let closed_base = materialise_closure(dict.clone(), quoted_free.clone(), Profile::Rdfs);
+        assert_eq!(
+            closed_with.entailed_triples, closed_base.entailed_triples,
+            "closure must be inert over the reifications layer"
+        );
+
+        let run = |g: &Graph| {
+            let splits = Splits::split(g, 0.8, 0.1, 99);
+            let train_graph = restrict_to_train(g, &splits);
+            let tc = TypeConstraints::mine(&train_graph);
+            let cfg = TrainConfig::small(crate::structure::SamplingMode::TypeConstrained, 7);
+            assert_eq!(
+                cfg.term_scope,
+                TermScope::IriBlank,
+                "preset must default OFF"
+            );
+            let (model, report) = train(&train_graph, &tc, cfg);
+            let (metrics, _) = evaluate(&model, &splits, 2, None);
+            (splits, model, report, metrics)
+        };
+
+        let (s_with, m_with, r_with, met_with) = run(&closed_with.graph);
+        let (s_base, m_base, r_base, met_base) = run(&closed_base.graph);
+
+        // Identical splits (same [Id;3] vectors — the dict is shared, so ids are comparable) and
+        // the identical ranking pool.
+        assert_eq!(s_with.train, s_base.train, "train split must be identical");
+        assert_eq!(s_with.valid, s_base.valid, "valid split must be identical");
+        assert_eq!(s_with.test, s_base.test, "test split must be identical");
+        assert_eq!(
+            s_with.entities, s_base.entities,
+            "ranking pool must be identical"
+        );
+
+        // Bit-equal parameters and loss curve: the trainer's PRNG stream, row assignment, and
+        // float path are untouched by invisible triples.
+        assert_eq!(
+            m_with.entity_emb, m_base.entity_emb,
+            "entity params must be bit-equal"
+        );
+        assert_eq!(
+            m_with.rel_emb, m_base.rel_emb,
+            "relation params must be bit-equal"
+        );
+        assert_eq!(
+            r_with.epoch_loss, r_base.epoch_loss,
+            "loss curve must be bit-equal"
+        );
+        assert_eq!(
+            r_with.positives, r_base.positives,
+            "positive count must be identical"
+        );
+
+        assert_metrics_bit_equal(&met_with, &met_base, "flag-off metrics");
+    }
+
+    /// T-3 — the honest no-op: on a QUOTE-FREE graph the ON and OFF arms of the quoted ablation
+    /// are byte-identical and every paired delta is exactly zero (mirrors the weight-ablation
+    /// property on provenance-free graphs). Together with T-2 this brackets the change from both
+    /// directions: invisible additions change nothing OFF; the ON arm changes nothing without
+    /// quoted terms.
+    #[test]
+    fn quoted_ablation_is_exactly_zero_on_quote_free_graphs() {
+        let ttl = synthetic_relational_ttl(120, 5);
+        let r = run_quoted_ablation(&ttl, "turtle", EvalConfig::small(0), &[1, 2]).unwrap();
+        assert_eq!(r.mrr.n, 2);
+        assert_eq!(r.mrr.mean, 0.0, "paired MRR delta must be EXACTLY zero");
+        assert_eq!(r.mrr.std, 0.0);
+        assert_eq!(
+            r.hits10.mean, 0.0,
+            "paired Hits@10 delta must be EXACTLY zero"
+        );
+        assert_eq!(r.off.mrr.mean.to_bits(), r.on.mrr.mean.to_bits());
+        assert_eq!(r.off.queries.mean.to_bits(), r.on.queries.mean.to_bits());
+        assert!(
+            !r.mrr_significant_at(2.0),
+            "a zero effect must never certify"
+        );
+    }
+
+    /// T-6 — split/pool scope-invariance on the RDF 1.2 slice: quoted terms are in NO split, NO
+    /// ranking pool (they are trainer-side only; the eval population is identical in both arms).
+    #[test]
+    fn rdf12_splits_and_ranking_pool_stay_atomic() {
+        let ttl = synthetic_rdf12_ttl(80, 3);
+        let c = close_for_vectorise(&ttl, "ntriples", Profile::Rdfs).unwrap();
+        let g = &c.graph;
+        let s = Splits::split(g, 0.8, 0.1, 17);
+        for &e in &s.entities {
+            assert!(!is_quoted(g, e), "ranking pool must contain no quoted term");
+        }
+        for t in s.train.iter().chain(&s.valid).chain(&s.test) {
+            assert!(
+                !is_quoted(g, t[0]) && !is_quoted(g, t[2]),
+                "no split triple may carry a quoted-term endpoint"
+            );
+        }
+        assert!(
+            !s.test.is_empty(),
+            "the slice must yield a measurable test split"
+        );
+    }
+
+    /// T-8 — the slice's honesty guards: deterministic in seed; every reifications line carries a
+    /// quoted term; shared quoted-term hubs exist (≥2 reifiers of one claim); a substantial
+    /// fraction of claim-sharing source pairs is NOT corroborated (decoys — claim overlap alone
+    /// cannot separate the target relation).
+    #[test]
+    fn rdf12_slice_properties_hold() {
+        let a = synthetic_rdf12_parts(96, 11);
+        let b = synthetic_rdf12_parts(96, 11);
+        assert_eq!(a.base, b.base, "deterministic in seed");
+        assert_eq!(a.reifications, b.reifications);
+        assert_eq!(a.metadata, b.metadata);
+        let c = synthetic_rdf12_parts(96, 12);
+        assert_ne!(a.reifications, c.reifications, "seed must move the slice");
+
+        // Every reifications line has a quoted-term endpoint (T-2's fixture precondition).
+        let lines: Vec<&str> = a.reifications.lines().filter(|l| !l.is_empty()).collect();
+        assert!(
+            lines.len() >= 20,
+            "need a non-trivial reification set: {}",
+            lines.len()
+        );
+        for l in &lines {
+            assert!(
+                l.contains("<<("),
+                "every reification must quote a triple: {l}"
+            );
+        }
+
+        // Hub structure: ≥3 quoted terms with ≥2 distinct reifiers (content-addressed sharing).
+        let full = a.full();
+        let (dict, triples) = Graph::parse_to_triples(&full, "ntriples").unwrap();
+        let g = Graph::from_parts(dict, triples);
+        let reifies = g
+            .id_of(&iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies"))
+            .unwrap();
+        let mut reifiers_of: FxHashMap<Id, FxHashSet<Id>> = FxHashMap::default();
+        for [s, p, o] in g.iter_ids() {
+            if p == reifies {
+                assert!(
+                    is_quoted(&g, o),
+                    "every rdf:reifies object must be a quoted term"
+                );
+                reifiers_of.entry(o).or_default().insert(s);
+            }
+        }
+        let hubs = reifiers_of.values().filter(|r| r.len() >= 2).count();
+        assert!(hubs >= 3, "need shared quoted-term hubs (got {hubs})");
+
+        // Decoys: sources sharing ≥1 claim but NOT corroborated must be a substantial fraction.
+        let asserted_by_pred = g.id_of(&iri("http://ex/assertedBy")).unwrap();
+        let corroborates = g.id_of(&iri("http://ex/corroborates")).unwrap();
+        let mut claims_of: FxHashMap<Id, FxHashSet<Id>> = FxHashMap::default(); // src -> {tt}
+        let mut stmt_claim: FxHashMap<Id, Id> = FxHashMap::default();
+        for [s, p, o] in g.iter_ids() {
+            if p == reifies {
+                stmt_claim.insert(s, o);
+            }
+        }
+        for [s, p, o] in g.iter_ids() {
+            if p == asserted_by_pred {
+                if let Some(&tt) = stmt_claim.get(&s) {
+                    claims_of.entry(o).or_default().insert(tt);
+                }
+            }
+        }
+        let edges: FxHashSet<(Id, Id)> = g
+            .iter_ids()
+            .filter(|[_, p, _]| *p == corroborates)
+            .map(|[s, _, o]| (s, o))
+            .collect();
+        let mut sources: Vec<Id> = claims_of.keys().copied().collect();
+        sources.sort_unstable();
+        let mut sharing = 0usize;
+        let mut decoys = 0usize;
+        for (i, &sa) in sources.iter().enumerate() {
+            for &sb in &sources[i + 1..] {
+                if claims_of[&sa]
+                    .intersection(&claims_of[&sb])
+                    .next()
+                    .is_some()
+                {
+                    sharing += 1;
+                    if !edges.contains(&(sa, sb)) && !edges.contains(&(sb, sa)) {
+                        decoys += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            sharing >= 10,
+            "need a non-trivial sharing-pair population: {sharing}"
+        );
+        assert!(
+            !edges.is_empty(),
+            "the corroborates target must be non-empty"
+        );
+        assert!(
+            decoys * 100 >= sharing * 15,
+            "≥15% of claim-sharing pairs must be uncorroborated decoys: {decoys}/{sharing}"
+        );
+    }
+
+    /// T-11 + the visibility-path exercise: the presets keep the axis OFF (`run_ablation` cells
+    /// all report `quoted_terms == false`), and the paired runner runs end-to-end over the RDF
+    /// 1.2 slice with an identical eval population in both arms. NO lift is asserted — whether
+    /// visibility helps is exactly the open measurement.
+    #[test]
+    fn quoted_ablation_runs_on_the_rdf12_slice_and_presets_stay_off() {
+        assert_eq!(EvalConfig::small(3).train.term_scope, TermScope::IriBlank);
+        let cells =
+            run_ablation(&synthetic_gufo_ttl(40, 1), "turtle", EvalConfig::small(3)).unwrap();
+        assert!(
+            cells.iter().all(|c| !c.quoted_terms),
+            "matrix cells must report the axis OFF"
+        );
+
+        let ttl = synthetic_rdf12_ttl(60, 11);
+        let r = run_quoted_ablation(&ttl, "ntriples", EvalConfig::small(0), &[1, 2]).unwrap();
+        assert_eq!(r.mrr.n, 2, "all seeds contribute");
+        assert!(
+            r.off.queries.mean > 0.0,
+            "OFF arm must produce scorable queries"
+        );
+        // Scope-invariant eval population: the two arms rank the same queries over the same pool.
+        assert_eq!(
+            r.off.queries.mean.to_bits(),
+            r.on.queries.mean.to_bits(),
+            "both arms must evaluate the identical query population"
+        );
     }
 }

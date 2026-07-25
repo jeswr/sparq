@@ -15,8 +15,10 @@
 #      single advisory `rsp_persistentdict_triples_per_s` (trend-only — NOT gated, machine-
 #      sensitive). Correctness lives in expected.tsv, exactly like LUBM / FTS / SHACL.
 #
-# Perf head-to-head vs C-SPARQL / CQELS / RSP4J is explicitly OUT OF SCOPE (they are
-# wall-clock service engines — a different time model; see README.md).
+# Raw perf head-to-head vs C-SPARQL / CQELS / RSP4J stays OUT OF SCOPE here (wall-clock
+# service engines — a different time model); the BOUNDED count-matched-replay comparison
+# (design record sec 5.2) lives beside this gate: see README.md + rsp4j-smoke.sh /
+# gather-rsp4j.sh (sq-hmd7l.20).
 #
 # Usage: bench/rsp/run.sh   (run from anywhere; honours $RSP_BIN override)
 set -euo pipefail

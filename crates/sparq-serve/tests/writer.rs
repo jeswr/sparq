@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sparq_serve::{ApplyUpdates, GenerationRing, PodId, WriteError, Writer, WriterConfig};
+use sparq_serve::{
+    ApplyUpdates, CommitGranularity, GenerationRing, PodId, WriteError, Writer, WriterConfig,
+};
 
 /// Snapshot = the log of applied updates, in application order.
 type Log = Vec<String>;
@@ -481,6 +483,100 @@ fn window_timing_approximately_honored() {
     assert!(
         elapsed < Duration::from_secs(2),
         "the ack follows the window without unbounded slack (took {elapsed:?})"
+    );
+}
+
+/// [OPUS-4.8] (sq-p7kk5) ADAPTIVE group-commit: a serial client does NOT wait the window.
+/// The counterpart to `window_timing_approximately_honored` — with `adaptive_commit: true`
+/// the SAME lone update against a 10 s window acks in engine-time (the writer drains the
+/// empty backlog and commits immediately), never holding the batch open for the window.
+#[test]
+fn adaptive_commit_does_not_wait_the_window_for_a_serial_client() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let ring = Arc::new(GenerationRing::new(Log::new()));
+    let writer = Writer::spawn(
+        ring.clone(),
+        MockApplier::new(&forks),
+        WriterConfig {
+            // A window so long that WAITING it would dominate — the whole point is that
+            // adaptive mode never touches it when the backlog is empty.
+            window: Duration::from_secs(10),
+            max_batch: 256,
+            adaptive_commit: true,
+            ..WriterConfig::default()
+        },
+    );
+
+    let started = Instant::now();
+    assert_eq!(writer.submit("a".into(), pods(&["p"])).unwrap(), 1);
+    let elapsed = started.elapsed();
+
+    // The windowed default would block ~10 s here (see window_timing_approximately_honored);
+    // adaptive mode commits in engine-time. A generous ceiling keeps this robust on a noisy CI
+    // box while still proving the multi-second window was NOT waited.
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "adaptive commit must not wait the 10 s window for a serial client (acked after {elapsed:?})"
+    );
+    let current = ring.current();
+    assert_eq!(current.number(), 1);
+    assert_eq!(*current.snapshot(), vec!["a".to_string()]);
+    assert_eq!(current.epochs().epoch(&PodId::from("p")), 1);
+    assert_eq!(
+        forks.load(Ordering::SeqCst),
+        1,
+        "one fork for the single-update commit"
+    );
+}
+
+/// [OPUS-4.8] (sq-p7kk5) ADAPTIVE group-commit preserves batching of a QUEUED backlog:
+/// updates already sitting in the queue when the writer wakes are all drained into ONE
+/// generation (one fork/seal/publish), so group-commit amortisation under concurrency is
+/// NOT lost — adaptive mode only skips the timed WAIT, it still batches what has arrived.
+#[test]
+fn adaptive_commit_still_batches_a_queued_backlog() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let ring = Arc::new(GenerationRing::new(Log::new()));
+    let writer = Writer::spawn(
+        ring.clone(),
+        MockApplier::new(&forks),
+        WriterConfig {
+            window: Duration::from_millis(1),
+            max_batch: 256,
+            adaptive_commit: true,
+            ..WriterConfig::default()
+        },
+    );
+
+    // Fire-and-forget submits enqueue WITHOUT blocking, so by the time the writer wakes on the
+    // first, several are already queued — exactly the "backlog piled up between iterations"
+    // concurrency case. A trailing sync submit's ack proves what published together.
+    for i in 0..5 {
+        writer
+            .submit_detached(format!("u{i}"), pods(&[&format!("pod:{i}"), "pod:shared"]))
+            .unwrap();
+    }
+    let generation = writer
+        .submit("u5".to_string(), pods(&["pod:5", "pod:shared"]))
+        .unwrap();
+
+    let current = ring.current();
+    // The whole drained backlog collapses into as few generations as the drain saw it — in
+    // practice generation 1 for a backlog present at wake. We assert the STRONG invariant the
+    // fix must preserve: all six updates are committed, in strict FIFO order, and the trailing
+    // sync's generation is the current one.
+    assert_eq!(current.number(), generation);
+    let expected: Log = (0..6).map(|i| format!("u{i}")).collect();
+    assert_eq!(*current.snapshot(), expected, "strict FIFO, nothing dropped");
+    for i in 0..6 {
+        assert_eq!(current.epochs().epoch(&PodId::from(format!("pod:{i}"))), 1);
+    }
+    // The queued backlog was batched, not committed one-fork-per-update: far fewer forks than
+    // six. (A pure per-update path would fork six times.)
+    assert!(
+        forks.load(Ordering::SeqCst) < 6,
+        "a queued backlog must batch (forks={}, want < 6)",
+        forks.load(Ordering::SeqCst)
     );
 }
 
@@ -1069,4 +1165,171 @@ fn restore_failure_keeps_writer_alive_and_store_intact() {
         2,
         "both restore attempts ran on the writer thread"
     );
+}
+
+// ---------------------------------------------------------------------------
+// [FABLE-5] (sq-bdaw5) Commit hook: the per-publish observation seam that lets a
+// change-stream recorder ride the writer thread instead of serialising submitters.
+// ---------------------------------------------------------------------------
+
+/// The chained-pairs + ack-ordering invariant: the hook fires exactly once per
+/// published generation, ON the writer thread, with `(predecessor, published)`
+/// pairs that CHAIN gapless — and a submitter's ack happens-after the hook, so
+/// by the time `submit` returns its generation's pair is already observed.
+/// (Mutation witness: knock out the `hook` call in the writer's `commit` and
+/// `pairs` stays empty — every assertion below goes red.)
+#[test]
+fn commit_hook_fires_once_per_publish_with_chained_pairs_before_ack() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let ring = Arc::new(GenerationRing::<Log>::new(Vec::new()));
+    let pairs: Arc<std::sync::Mutex<Vec<(u64, u64)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pairs_hook = pairs.clone();
+
+    let writer = Writer::spawn_with_commit_hook(
+        ring.clone(),
+        MockApplier::new(&forks),
+        WriterConfig {
+            adaptive_commit: true, // serial submits: one generation each, no window wait
+            ..WriterConfig::default()
+        },
+        move |from: &sparq_serve::Generation<Log>, to: &sparq_serve::Generation<Log>| {
+            pairs_hook.lock().unwrap().push((from.number(), to.number()));
+        },
+    );
+
+    for (i, u) in ["a", "b", "c"].iter().enumerate() {
+        let n = writer.submit(u.to_string(), pods(&["pod:a"])).unwrap();
+        assert_eq!(n, i as u64 + 1);
+        // Ack happens-after the hook: the pair for THIS generation is already recorded.
+        assert!(
+            pairs.lock().unwrap().iter().any(|&(_, to)| to == n),
+            "submit({u}) acked before its commit hook ran"
+        );
+    }
+    drop(writer);
+
+    // Exactly one hook fire per published generation, chained gapless from gen 0.
+    assert_eq!(*pairs.lock().unwrap(), vec![(0, 1), (1, 2), (2, 3)]);
+}
+
+/// A batch whose every update failed publishes nothing — and must not fire the
+/// hook (there is no new generation to report; a change-stream record for it
+/// would be a non-forward append the log rejects).
+#[test]
+fn commit_hook_not_fired_when_nothing_publishes() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let ring = Arc::new(GenerationRing::<Log>::new(Vec::new()));
+    let fires = Arc::new(AtomicUsize::new(0));
+    let fires_hook = fires.clone();
+
+    let writer = Writer::spawn_with_commit_hook(
+        ring.clone(),
+        MockApplier::new(&forks),
+        WriterConfig {
+            adaptive_commit: true,
+            ..WriterConfig::default()
+        },
+        move |_: &sparq_serve::Generation<Log>, _: &sparq_serve::Generation<Log>| {
+            fires_hook.fetch_add(1, Ordering::SeqCst);
+        },
+    );
+
+    let err = writer
+        .submit("fail:nope".to_string(), pods(&["pod:a"]))
+        .unwrap_err();
+    assert_eq!(err, WriteError::Rejected("nope".to_string()));
+    assert_eq!(
+        fires.load(Ordering::SeqCst),
+        0,
+        "an all-failed batch publishes nothing, so the hook must not fire"
+    );
+
+    writer.submit("ok".to_string(), pods(&["pod:a"])).unwrap();
+    assert_eq!(fires.load(Ordering::SeqCst), 1);
+}
+
+/// A RESTORE publish must NOT fire the commit hook (the restored snapshot does
+/// not share the predecessor's writer lineage — a lineage-diffing recorder must
+/// never be handed the pair). Commits after the restore chain FROM the restored
+/// generation, so the skipped publish is visible to the recorder as an explicit
+/// discontinuity, never a silently-diffed-through one.
+#[test]
+fn commit_hook_not_fired_for_restore_publish() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let restores = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let restore_fails = Arc::new(AtomicUsize::new(0));
+    let ring = Arc::new(GenerationRing::<Log>::new(Vec::new()));
+    let pairs: Arc<std::sync::Mutex<Vec<(u64, u64)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pairs_hook = pairs.clone();
+
+    let writer = Writer::spawn_with_commit_hook(
+        ring.clone(),
+        MockApplier::with_restore_control(&forks, &restores, &restore_fails),
+        WriterConfig {
+            adaptive_commit: true,
+            ..WriterConfig::default()
+        },
+        move |from: &sparq_serve::Generation<Log>, to: &sparq_serve::Generation<Log>| {
+            pairs_hook.lock().unwrap().push((from.number(), to.number()));
+        },
+    );
+
+    writer.submit("a".to_string(), pods(&["pod:a"])).unwrap(); // gen 1: hook fires
+    let restored = writer
+        .restore(vec!["fresh".to_string()])
+        .unwrap()
+        .expect("restore ok"); // gen 2: published, hook NOT fired
+    assert_eq!(restored, 2);
+    writer.submit("b".to_string(), pods(&["pod:a"])).unwrap(); // gen 3: hook fires
+    drop(writer);
+
+    assert_eq!(
+        *pairs.lock().unwrap(),
+        vec![(0, 1), (2, 3)],
+        "commit publishes fire the hook; the restore publish (gen 2) must not"
+    );
+}
+
+/// Under `CommitGranularity::CommuteGroup` every published commuting run fires
+/// the hook once — the mock's default `footprint` is `Barrier`, so one window's
+/// batch degrades to one generation per update, and the pairs still chain.
+#[test]
+fn commit_hook_fires_per_commute_group() {
+    let forks = Arc::new(AtomicUsize::new(0));
+    let ring = Arc::new(GenerationRing::<Log>::new(Vec::new()));
+    let pairs: Arc<std::sync::Mutex<Vec<(u64, u64)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pairs_hook = pairs.clone();
+
+    let writer = Writer::spawn_with_commit_hook(
+        ring.clone(),
+        MockApplier::new(&forks),
+        WriterConfig {
+            window: Duration::from_millis(200), // wide window: all submissions share one batch
+            granularity: CommitGranularity::CommuteGroup,
+            ..WriterConfig::default()
+        },
+        move |from: &sparq_serve::Generation<Log>, to: &sparq_serve::Generation<Log>| {
+            pairs_hook.lock().unwrap().push((from.number(), to.number()));
+        },
+    );
+
+    // Queue three fire-and-forget updates, then a sync one; barriers split the
+    // (single) window into one generation per update.
+    writer.submit_detached("a".to_string(), pods(&["pod:a"])).unwrap();
+    writer.submit_detached("b".to_string(), pods(&["pod:a"])).unwrap();
+    writer.submit_detached("c".to_string(), pods(&["pod:a"])).unwrap();
+    let last = writer.submit("d".to_string(), pods(&["pod:a"])).unwrap();
+    drop(writer);
+
+    let pairs = pairs.lock().unwrap();
+    assert_eq!(
+        pairs.len() as u64,
+        last,
+        "one hook fire per published generation (one per barrier-split group)"
+    );
+    // The pairs chain gapless from generation 0 regardless of batching splits.
+    for (i, &(from, to)) in pairs.iter().enumerate() {
+        assert_eq!(from, i as u64, "pair {i} chains from the previous publish");
+        assert_eq!(to, i as u64 + 1);
+    }
 }

@@ -1,0 +1,2 @@
+@prefix ex: 8http://e.{ 
+ex:a { ex:b }

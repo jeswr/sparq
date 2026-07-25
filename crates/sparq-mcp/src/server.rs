@@ -21,10 +21,43 @@ use crate::jsonrpc::{
 };
 use crate::tools;
 
-/// The MCP protocol version this server implements (the value echoed in the
-/// `initialize` result). Pinned to a published MCP revision; a client that speaks a
-/// different revision still interoperates for the basic tools flow.
-pub const PROTOCOL_VERSION: &str = "2024-11-05";
+/// The newest MCP protocol revision this server implements — the version offered in
+/// the `initialize` result when the client proposes an unsupported (or no) revision,
+/// per the MCP versioning rules. [SONNET-4.6] sq-bvnqm
+pub const PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// Every published MCP protocol revision this server can speak, newest first
+/// (`[0]` is [`PROTOCOL_VERSION`]). The `initialize` / `tools/list` / `tools/call`
+/// request-response shapes this tools-only server implements are identical across
+/// these revisions — the later additions (structured tool output, elicitation,
+/// tasks, icons, resource links) are all optional capabilities a server may simply
+/// not declare, and the plain `type`/`properties`/`required` tool input schemas are
+/// valid under the JSON Schema 2020-12 dialect that 2025-11-25 makes the default.
+///
+/// The 2025-03-26 revision is deliberately ABSENT: it is the one revision that
+/// REQUIRES receiving JSON-RPC batches (added there, removed again in 2025-06-18),
+/// which this one-object-per-message dispatch core does not implement — so claiming
+/// it would overstate conformance. A 2025-03-26 client is offered
+/// [`PROTOCOL_VERSION`] instead and decides whether to proceed. [SONNET-4.6] sq-bvnqm
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2024-11-05"];
+
+/// MCP version negotiation over the client's `initialize` params: accept the
+/// client's proposed `protocolVersion` when it is one we support, otherwise respond
+/// with our latest ([`PROTOCOL_VERSION`]) — the client then decides whether to
+/// continue or disconnect. A missing or non-string proposal gets the latest too.
+/// [SONNET-4.6] sq-bvnqm
+pub(crate) fn negotiate_protocol_version(params: &Value) -> &'static str {
+    params
+        .get("protocolVersion")
+        .and_then(Value::as_str)
+        .and_then(|proposed| {
+            SUPPORTED_PROTOCOL_VERSIONS
+                .iter()
+                .copied()
+                .find(|supported| *supported == proposed)
+        })
+        .unwrap_or(PROTOCOL_VERSION)
+}
 
 /// Server configuration. The security-relevant field is [`Self::allow_update`]:
 /// it is **`false` by default**, so a freshly-built server is strictly read-only
@@ -47,6 +80,15 @@ pub struct ServerConfig {
     pub max_rows: Option<usize>,
     /// The server name reported in the `initialize` handshake (`serverInfo.name`).
     pub server_name: String,
+    /// [FABLE-5] (sq-lsp7k.10, feature `templates`) The named parameterized templates this
+    /// server exposes through the `template_list` / `template_invoke` tools. Registered by
+    /// the embedder as ALREADY-VALIDATED [`sparq_engine::templates::Template`]s (parse +
+    /// declared-parameter validation happen at construction, fail-closed), so every listed
+    /// template is invocable. Empty (the default) ⇒ the two tools are not advertised. An
+    /// UPDATE template is advertised but only *invocable* when [`Self::allow_update`] is
+    /// also `true` — the template layer never widens the read-only posture.
+    #[cfg(feature = "templates")]
+    pub templates: Vec<sparq_engine::templates::Template>,
 }
 
 impl Default for ServerConfig {
@@ -59,6 +101,9 @@ impl Default for ServerConfig {
             query_timeout_secs: Some(30),
             max_rows: Some(1_000_000),
             server_name: "sparq-mcp".to_string(),
+            // [FABLE-5] sq-lsp7k.10: no templates unless the embedder registers them.
+            #[cfg(feature = "templates")]
+            templates: Vec::new(),
         }
     }
 }
@@ -71,18 +116,29 @@ impl Default for ServerConfig {
 pub struct McpServer {
     graph: Graph,
     config: ServerConfig,
+    /// [FABLE-5] (sq-lsp7k.10, feature `text`) The lazily-built BM25 literal index behind
+    /// the `text_search` tool. `None` until the first search; reconciled incrementally
+    /// (`O(new dictionary terms)`) before every search so it stays current across
+    /// `update` / `template_invoke` mutations without a per-call rebuild.
+    #[cfg(feature = "text")]
+    text_index: Option<sparq_text::TextIndex>,
 }
 
 impl McpServer {
     /// Build a read-only server over `graph` with the default [`ServerConfig`]
     /// (update disabled).
     pub fn new(graph: Graph) -> Self {
-        McpServer { graph, config: ServerConfig::default() }
+        Self::with_config(graph, ServerConfig::default())
     }
 
     /// Build a server over `graph` with an explicit [`ServerConfig`].
     pub fn with_config(graph: Graph, config: ServerConfig) -> Self {
-        McpServer { graph, config }
+        McpServer {
+            graph,
+            config,
+            #[cfg(feature = "text")]
+            text_index: None,
+        }
     }
 
     /// Whether the mutating `update` tool is exposed (mirrors
@@ -104,6 +160,12 @@ impl McpServer {
     /// Read-only borrow of the served graph (for embedders / tests).
     pub fn graph(&self) -> &Graph {
         &self.graph
+    }
+
+    /// The server's configuration (crate-internal: template-tool advertisement reads it).
+    #[cfg(feature = "templates")]
+    pub(crate) fn config(&self) -> &ServerConfig {
+        &self.config
     }
 
     /// Handle one raw JSON-RPC message. Returns `Ok(Some(response_json))` for a
@@ -142,7 +204,7 @@ impl McpServer {
     /// error object.
     fn dispatch(&mut self, req: &Request) -> Result<Value, RpcError> {
         match req.method.as_str() {
-            "initialize" => Ok(self.initialize_result()),
+            "initialize" => Ok(self.initialize_result(&req.params)),
             // Lifecycle notification from the client; nothing to do.
             "notifications/initialized" | "initialized" => Ok(Value::Null),
             "ping" => Ok(json!({})),
@@ -155,11 +217,11 @@ impl McpServer {
         }
     }
 
-    /// The `initialize` handshake result: protocol version, server info, and the
-    /// declared capabilities (just `tools`).
-    fn initialize_result(&self) -> Value {
+    /// The `initialize` handshake result: the negotiated protocol version, server
+    /// info, and the declared capabilities (just `tools`).
+    fn initialize_result(&self, params: &Value) -> Value {
         json!({
-            "protocolVersion": PROTOCOL_VERSION,
+            "protocolVersion": negotiate_protocol_version(params),
             "capabilities": { "tools": {} },
             "serverInfo": {
                 "name": self.config.server_name,
@@ -201,8 +263,21 @@ impl McpServer {
             "introspect" => self.tool_introspect(&args),
             "shapes" => self.tool_shapes(&args),
             "stats" => self.tool_stats(),
+            "classes" => self.tool_classes(),
+            "prefixes" => self.tool_prefixes(),
+            "void" => self.tool_void(&args),
             #[cfg(feature = "nlq")]
             "ask" => self.tool_ask(&args),
+            #[cfg(feature = "templates")]
+            "template_list" => self.tool_template_list(),
+            #[cfg(feature = "templates")]
+            "template_invoke" => self.tool_template_invoke(&args),
+            #[cfg(feature = "text")]
+            "text_search" => self.tool_text_search(&args),
+            #[cfg(feature = "shacl")]
+            "validate" => self.tool_validate(&args),
+            #[cfg(feature = "shacl")]
+            "describe_form" => self.tool_describe_form(&args),
             "update" => self.tool_update(&args),
             other => {
                 return Err(RpcError::new(
@@ -285,6 +360,262 @@ impl McpServer {
         Ok(serde_json::to_string_pretty(&stats).unwrap_or_else(|_| stats.to_string()))
     }
 
+    /// [GPT-5.6] sq-cekgj: `classes`, class profiles ranked by instance count.
+    fn tool_classes(&self) -> Result<String, String> {
+        let ix = Introspection::build(&self.graph);
+        let mut profiles = ix.classes;
+        let distinct_classes = profiles.len();
+        profiles.sort_by(|a, b| b.instances.cmp(&a.instances).then(a.class.cmp(&b.class)));
+        let classes: Vec<Value> = profiles
+            .into_iter()
+            .map(|profile| {
+                json!({
+                    "class": profile.class,
+                    "instances": profile.instances,
+                    "predicate_count": profile.predicates.len(),
+                })
+            })
+            .collect();
+        let result = json!({
+            "distinct_classes": distinct_classes,
+            "classes": classes,
+        });
+        Ok(serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()))
+    }
+
+    /// [GPT-5.6] sq-kx5b0: `prefixes`, namespace declarations ranked by term count.
+    fn tool_prefixes(&self) -> Result<String, String> {
+        let ix = Introspection::build(&self.graph);
+        let distinct_prefixes = ix.vocabularies.distinct;
+        let mut namespaces = ix.vocabularies.namespaces;
+        namespaces.sort_by(|a, b| b.terms.cmp(&a.terms).then(a.namespace.cmp(&b.namespace)));
+        let prefixes: Vec<Value> = namespaces
+            .into_iter()
+            .map(|vocabulary| {
+                json!({
+                    "prefix": vocabulary.prefix,
+                    "namespace": vocabulary.namespace,
+                    "term_count": vocabulary.terms,
+                })
+            })
+            .collect();
+        let result = json!({
+            "distinct_prefixes": distinct_prefixes,
+            "prefixes": prefixes,
+        });
+        Ok(serde_json::to_string_pretty(&result).unwrap_or_else(|_| result.to_string()))
+    }
+
+    /// `void`: W3C VoID dataset descriptor as deterministic N-Triples.
+    fn tool_void(&self, args: &Value) -> Result<String, String> {
+        let dataset_iri = match args.get("dataset") {
+            None => "urn:sparq:dataset",
+            Some(value) => value
+                .as_str()
+                .ok_or_else(|| "argument `dataset` must be a string".to_string())?,
+        };
+        let characteristic_sets = match args.get("characteristic_sets") {
+            None => false,
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| "argument `characteristic_sets` must be a boolean".to_string())?,
+        };
+        let ix = Introspection::build(&self.graph);
+        Ok(if characteristic_sets {
+            ix.to_void_with_cs(dataset_iri)
+        } else {
+            ix.to_void(dataset_iri)
+        })
+    }
+
+    /// `template_list` (feature `templates`): the registered named-template definitions
+    /// as JSON — name / kind / text / declared typed parameters / description — so an
+    /// agent can ground a `template_invoke` call. [FABLE-5] sq-lsp7k.10
+    #[cfg(feature = "templates")]
+    fn tool_template_list(&self) -> Result<String, String> {
+        let defs: Vec<Value> = self.config.templates.iter().map(|t| t.to_json()).collect();
+        let out = Value::Array(defs);
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()))
+    }
+
+    /// `template_invoke` (feature `templates`): bind typed JSON arguments into a
+    /// registered template through the injection-safe #901 algebra rewrite and execute
+    /// it. FAIL-CLOSED: an unknown template name, an unknown/missing parameter, or a
+    /// JSON shape that does not match the declared type is a tool error, never a guess.
+    /// An UPDATE template additionally requires `allow_update` — exactly the raw
+    /// `update` tool's gate, so the template layer never widens write access.
+    /// [FABLE-5] sq-lsp7k.10
+    #[cfg(feature = "templates")]
+    fn tool_template_invoke(&mut self, args: &Value) -> Result<String, String> {
+        let name = arg_str(args, "name")?;
+        let template = self
+            .config
+            .templates
+            .iter()
+            .find(|t| t.name() == name)
+            .ok_or_else(|| format!("no such template `{}` (see template_list)", name))?
+            .clone();
+        if template.is_update() && !self.allow_update() {
+            return Err(format!(
+                "template `{}` is a SPARQL UPDATE and this server is read-only                  (start it with update enabled to allow template writes)",
+                name
+            ));
+        }
+        let params = args.get("parameters").cloned().unwrap_or_else(|| json!({}));
+        let bound = template.bind_json(&params)?;
+        // The bound algebra renders to canonical SPARQL (values escaped as data) and runs
+        // through the SAME budgeted engine entry points as the raw query/update tools.
+        let rendered = bound.render();
+        if bound.is_update() {
+            let budget = self.budget();
+            sparq_engine::update_in_place_atomic_with_budget(&mut self.graph, &rendered, &budget)?;
+            Ok(format!("ok; graph now has {} triples", self.graph.len()))
+        } else if bound.is_graph_form() {
+            sparq_engine::construct_ntriples_with_budget(&self.graph, &rendered, &self.budget())
+        } else {
+            sparq_engine::query_json_with_budget(&self.graph, &rendered, &self.budget())
+        }
+    }
+
+    /// `text_search` (feature `text`): BM25 full-text search over the graph's string
+    /// literals via `sparq-text`. The index is built lazily on first use and reconciled
+    /// incrementally (`O(new dictionary terms)`) before every search, so it stays current
+    /// after `update` / `template_invoke` mutations. Returns ranked hits as JSON —
+    /// each the matching literal (N-Triples form) plus its BM25 score. [FABLE-5]
+    /// sq-lsp7k.10
+    #[cfg(feature = "text")]
+    fn tool_text_search(&mut self, args: &Value) -> Result<String, String> {
+        let query = arg_str(args, "query")?;
+        let mode = args.get("mode").and_then(Value::as_str).unwrap_or("and");
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(20)
+            .clamp(1, 1000) as usize;
+        // Lazy build / incremental reconcile (a shrunken dictionary — impossible within
+        // one live Graph, but guarded anyway — forces a rebuild).
+        let rebuild = match &self.text_index {
+            None => true,
+            Some(ix) => ix.needs_rebuild(&self.graph),
+        };
+        if rebuild {
+            self.text_index = Some(sparq_text::TextIndex::build(&self.graph));
+        }
+        let index = self.text_index.as_mut().expect("just ensured");
+        index.reconcile(&self.graph);
+        let hits = match mode {
+            "and" => index.search(query),
+            "any" => index.search_any(query),
+            other => {
+                return Err(format!(
+                    "unknown mode `{}` (expected \"and\" or \"any\")",
+                    other
+                ))
+            }
+        };
+        let total = hits.len();
+        let rows: Vec<Value> = hits
+            .iter()
+            .take(limit)
+            .map(|h| {
+                json!({
+                    "literal": self.graph.dict.term(h.id).to_string(),
+                    "score": h.score,
+                })
+            })
+            .collect();
+        let out = json!({ "total_matches": total, "returned": rows.len(), "hits": rows });
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()))
+    }
+
+    /// `validate` (feature `shacl`): parse a caller-owned shapes graph and run the
+    /// existing SHACL validator over a shared borrow of the served data. [GPT-5.6]
+    #[cfg(feature = "shacl")]
+    fn tool_validate(&self, args: &Value) -> Result<String, String> {
+        let source = arg_str(args, "shapes")?;
+        let format = args
+            .get("format")
+            .and_then(Value::as_str)
+            .unwrap_or("turtle");
+        let shapes = Graph::load_str(source, format)
+            .map_err(|error| format!("invalid SHACL shapes graph: {error}"))?;
+
+        let report = sparq_shacl::validate(self.graph(), &shapes);
+        // ValidationReport retains below-threshold results for diagnostics. The MCP
+        // contract returns only results at severities that participate in this shapes
+        // graph's conformance decision.
+        let model = sparq_shacl::ShapesModel::parse(&shapes);
+        let disallowed: Vec<&str> = model
+            .conformance_disallows()
+            .map(|set| set.iter().map(String::as_str).collect())
+            .unwrap_or_else(|| sparq_shacl::DEFAULT_CONFORMANCE_DISALLOWS.to_vec());
+        let results: Vec<Value> = report
+            .results
+            .iter()
+            .filter(|result| disallowed.contains(&result.severity.as_str()))
+            .map(|result| {
+                let message = result
+                    .effective_messages()
+                    .into_iter()
+                    .next()
+                    .map(|term| match term {
+                        oxrdf::Term::Literal(literal) => literal.value().to_owned(),
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_default();
+                json!({
+                    "focusNode": result.focus_node.to_string(),
+                    "path": result.path.as_ref().map(|path| path.to_turtle()),
+                    "severity": result.severity,
+                    "message": message,
+                })
+            })
+            .collect();
+        let out = json!({ "conforms": report.conforms, "results": results });
+        Ok(serde_json::to_string_pretty(&out).unwrap_or_else(|_| out.to_string()))
+    }
+
+    /// `describe_form` (feature `shacl`): parse the focus node + a caller-owned
+    /// shapes graph (the same parsing path as `validate`), derive the form with
+    /// `sparq_forms::derive_form` over a shared borrow of the served data, and
+    /// return its `FormDescription` JSON VERBATIM (no key reshaping — agents and
+    /// renderers consume the one canonical contract). [FABLE-5] sq-lsp7k.1.6
+    #[cfg(feature = "shacl")]
+    fn tool_describe_form(&self, args: &Value) -> Result<String, String> {
+        let focus = parse_focus_term(arg_str(args, "focus")?)?;
+        let source = arg_str(args, "shapes")?;
+        let format = args
+            .get("format")
+            .and_then(Value::as_str)
+            .unwrap_or("turtle");
+        let shapes = Graph::load_str(source, format)
+            .map_err(|error| format!("invalid SHACL shapes graph: {}", error))?;
+
+        let mut opts = sparq_forms::FormOptions::default();
+        if let Some(mode) = args.get("mode").and_then(Value::as_str) {
+            opts.mode = match mode {
+                "edit" => sparq_forms::Mode::Edit,
+                "view" => sparq_forms::Mode::View,
+                other => {
+                    // Fail closed on an unknown mode rather than silently editing.
+                    return Err(format!(
+                        "unknown mode `{}` (expected \"edit\" or \"view\")",
+                        other
+                    ));
+                }
+            };
+        }
+        if let Some(shape) = args.get("shape").and_then(Value::as_str) {
+            let iri = oxrdf::NamedNode::new(shape)
+                .map_err(|error| format!("invalid shape IRI: {}", error))?;
+            opts.shape = Some(oxrdf::Term::NamedNode(iri));
+        }
+
+        let form = sparq_forms::derive_form(self.graph(), &shapes, &focus, &opts);
+        serde_json::to_string_pretty(&form)
+            .map_err(|error| format!("form serialization failed: {}", error))
+    }
+
     /// `update`: apply a SPARQL 1.1 Update atomically (only reachable when enabled).
     fn tool_update(&mut self, args: &Value) -> Result<String, String> {
         let sparql = arg_str(args, "sparql")?;
@@ -294,15 +625,31 @@ impl McpServer {
     }
 }
 
+/// Parse a `describe_form` focus argument: `_:label` denotes a blank node, anything
+/// else must be a valid IRI (literals cannot be SHACL focus nodes for a form).
+/// [FABLE-5] sq-lsp7k.1.6
+#[cfg(feature = "shacl")]
+fn parse_focus_term(focus: &str) -> Result<oxrdf::Term, String> {
+    if let Some(label) = focus.strip_prefix("_:") {
+        oxrdf::BlankNode::new(label)
+            .map(oxrdf::Term::BlankNode)
+            .map_err(|error| format!("invalid focus blank-node label: {}", error))
+    } else {
+        oxrdf::NamedNode::new(focus)
+            .map(oxrdf::Term::NamedNode)
+            .map_err(|error| format!("invalid focus IRI: {}", error))
+    }
+}
+
 /// Extract a required string argument or produce a tool-level error message.
-fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
+pub(crate) fn arg_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
     args.get(key)
         .and_then(Value::as_str)
         .ok_or_else(|| format!("missing required string argument `{}`", key))
 }
 
 /// Wrap a tool's textual output in the MCP `CallToolResult` shape.
-fn tool_text_result(text: String, is_error: bool) -> Value {
+pub(crate) fn tool_text_result(text: String, is_error: bool) -> Value {
     json!({
         "content": [ { "type": "text", "text": text } ],
         "isError": is_error,
@@ -312,7 +659,7 @@ fn tool_text_result(text: String, is_error: bool) -> Value {
 /// Serialize a response, falling back to a hand-built internal-error object if
 /// serialization itself somehow fails (it cannot for our concrete types, but we never
 /// panic on the I/O path).
-fn serialize(resp: &Response) -> String {
+pub(crate) fn serialize(resp: &Response) -> String {
     serde_json::to_string(resp).unwrap_or_else(|_| {
         format!(
             "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":{},\"message\":\"response serialization failed\"}}}}",

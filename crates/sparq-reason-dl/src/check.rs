@@ -14,9 +14,17 @@
 //! |---|--------|--------|--------------|----------------|------------|
 //! | 1 | RL (L2 says in-RL) | `sparq_reason::materialize(Profile::OwlRl)` + `inconsistencies()` | only past the **divergence guard** | sound via **Theorem PR1** (preconditions CHECKED, not assumed) | [`UnknownReason::RlPr1Preconditions`], [`UnknownReason::RlDivergenceGuard`] |
 //! | 2 | EL (in-EL) | `sparq_reason_el::Classifier::classify` | only for a pure ⊤-free EL+⊥ TBox (argument below) | never (see the ⊤ guard) | [`UnknownReason::ElSkippedAxioms`], [`UnknownReason::ElUnappliedAxioms`], [`UnknownReason::ElTopGuard`] |
-//! | 3 | QL (in-QL) | none — deferred | never | never | [`UnknownReason::QlConsistencyPending`] (always; DL-Lite_R consistency is sq-pbz04.3.4's, not duplicated here) |
+//! | 3 | QL (in-QL) | `sparq_reason_ql::check_consistency` (opt-in feature `dispatch_ql`, [FABLE-5] sq-fj8lj); without it, none — deferred | only past the QL crate's own capture accounting (see §"QL branch soundness") | sound at any capture level (monotonicity) | [`UnknownReason::QlCaptureGap`]; without `dispatch_ql`, [`UnknownReason::QlConsistencyPending`] (always) |
 //! | 4 | ALCH (everything else L1 extracted) | the L3 tableau | complete for the fragment | complete for the fragment | [`UnknownReason::ResourceBudget`] |
 //! | — | extraction failed | none | never | never | [`UnknownReason::OutOfFragment`] |
+//!
+//! **Opt-in transitive roles ([GPT-5.6] sq-zfwzq, feature `dl_transitive`):** an ontology
+//! declaring `owl:TransitiveProperty` (the feature-gated `TransitiveObjectProperty` axiom
+//! kind) routes STRAIGHT to the ALCH+S tableau before the profile dispatch — the only
+//! branch whose soundness/completeness argument covers transitivity (tableau module docs
+//! §5a). The RL/EL guards below also recognise the axiom kind fail-closed (defence in
+//! depth). With the feature OFF, extraction refuses transitivity before dispatch, exactly
+//! as before.
 //!
 //! The first branch whose profile test matches OWNS the verdict — an abstaining branch does
 //! NOT fall through (the record specifies dispatch-in-order; a tableau fallback for
@@ -65,6 +73,38 @@
 //! GCI/equivalence/disjointness holds. This branch never returns `Inconsistent` (a pure
 //! ⊤-free EL+⊥ TBox is always consistent; anything else is guarded away).
 //!
+//! ## QL branch soundness (opt-in `dispatch_ql`, [FABLE-5] sq-fj8lj)
+//!
+//! With the `dispatch_ql` feature the QL branch reconstructs the ORIGINAL input triples from
+//! the dict (a faithful id-to-term rendering of exactly the graph L1 extracted — nothing is
+//! translated through the L1 model) and hands them to `sparq_reason_ql::check_consistency`,
+//! the sq-p6yb7 DL-Lite_R checker (violation-query composition over PerfectRef). The
+//! cross-crate soundness argument deliberately does NOT rely on the L2 profile test agreeing
+//! with the QL crate's fragment: L2's `In(QL)` is a ROUTING decision only. The QL crate
+//! re-extracts its own TBox from the raw triples with its OWN capture accounting, and:
+//! - `Inconsistent` is sound at ANY capture level (a violation witnessed on a captured
+//!   SUBSET of the axioms is an inconsistency of the whole KB, by monotonicity) — and for
+//!   an ontology in OWL 2 QL, DL-Lite_R unsatisfiability of the encoded KB coincides with
+//!   Direct-Semantics inconsistency (the profile's defining correspondence, W3C QL §3 /
+//!   Calvanese et al. JAR 2007);
+//! - `Consistent` is returned by the QL crate ONLY when its `TBox::fully_captured()` holds
+//!   AND `consistency_uncaptured == 0` — i.e. its own accounting certifies that every schema
+//!   triple was captured, so the cln(T)-closure completeness argument applies to the WHOLE
+//!   KB. Any L2-grammar-vs-QL-capture semantic drift (e.g. the QL super-∃ with a named
+//!   filler, which the W3C grammar admits but the QL crate conservatively skips) therefore
+//!   lands in `Unknown`, never in a manufactured verdict;
+//! - anything else maps to [`UnknownReason::QlCaptureGap`] (fail-closed, carrying the QL
+//!   crate's own gap accounting).
+//!
+//! Note the structural consequence of the in-order dispatch: a graph reaches this branch
+//! only when it is in-QL but NOT in-RL and NOT in-EL, which (over the L1 axiom kinds)
+//! forces an `ObjectComplementOf` somewhere — a shape the QL crate today counts as
+//! uncaptured. So in practice this branch currently graduates `Inconsistent` verdicts
+//! (disjointness violations are decided at any capture level) while `Consistent` stays
+//! `Unknown(QlCaptureGap)` until the QL crate's capture broadens; that is the honest
+//! fail-closed reading, not a defect. Without the feature the branch abstains with
+//! [`UnknownReason::QlConsistencyPending`] exactly as before.
+//!
 //! # Entailment by refutation (design record §4)
 //!
 //! [`DirectChecker::entailment`] checks `O ⊨ α` per conclusion axiom by encoding the
@@ -88,8 +128,33 @@
 //! - `DisjointClasses(C, D)` — `O ∪ {(C ⊓ D)(x)}`, `x` fresh: the `C ⊓ D ⊑ ⊥` desugaring.
 //! - `ObjectPropertyDomain(R, C)` / `ObjectPropertyRange(R, C)` — the `∃R.⊤ ⊑ C` /
 //!   `⊤ ⊑ ∀R.C` desugarings (record §3), then the GCI refutation.
-//! - `SubObjectPropertyOf` — [`UnknownReason::UnencodedConclusion`]: the record defers
-//!   property-axiom conclusions (no argued encoding is composed here).
+//! - `SubObjectPropertyOf(R, S)` — `O ∪ {R(a,b), B(b), (∀S.¬B)(a)}` with `a`, `b` FRESH
+//!   individuals and `B` a FRESH class name ([FABLE-5] sq-pbz04.4.9; record §4 as amended —
+//!   the role-subsumption lift of the fresh-class trick). Sound AND complete: if every
+//!   model of `O` has `Rᴵ ⊆ Sᴵ`, then in any model of the union `(a,b) ∈ R ⊆ S` makes `b`
+//!   an `S`-successor of `a`, so `a ∈ ∀S.¬B` forces `b ∈ ¬B`, clashing with `B(b)` — the
+//!   union is inconsistent. Conversely a model `I` of `O` with some `(u,v) ∈ Rᴵ ∖ Sᴵ`
+//!   extends to a model of the union via `aᴵ = u`, `bᴵ = v`, `Bᴵ = {v}` (`a`/`b`/`B` occur
+//!   nowhere in `O`; `(u,v) ∉ Sᴵ` means no `S`-successor of `u` is `v`, the sole member of
+//!   `B`, so `(∀S.¬B)(a)` holds) — non-entailment yields consistency. The tableau side
+//!   holds because its `∀`-rule fires modulo the role hierarchy (`System::is_subrole`,
+//!   reflexive-transitive), so the `R`-edge `a → b` is seen by `∀S` exactly when
+//!   `O ⊢ R ⊑* S`. All three additions stay inside the L1 fragment.
+//! - `TransitiveObjectProperty(R)` (opt-in `dl_transitive`, [GPT-5.6] sq-zfwzq) —
+//!   `O ∪ {R(a,b), R(b,c), B(c), (∀R.¬B)(a)}` with `a`, `b`, `c` FRESH individuals and
+//!   `B` a FRESH class name: the two-step-chain lift of the fresh-class trick. Sound AND
+//!   complete: if `O ⊨ Trans(R)`, then in any model of the union `Rᴵ` is transitive, so
+//!   `(a,b), (b,c) ∈ R` give `(a,c) ∈ R` — `a ∈ ∀R.¬B` forces `c ∈ ¬B`, clashing with
+//!   `B(c)`: the union is inconsistent. Conversely a model `I` of `O` in which `Rᴵ` is
+//!   NOT transitive has a witness chain `(u,v), (v,w) ∈ Rᴵ` with `(u,w) ∉ Rᴵ`; extend it
+//!   via `aᴵ = u`, `bᴵ = v`, `cᴵ = w`, `Bᴵ = {w}` (`a`/`b`/`c`/`B` occur nowhere in `O`;
+//!   `(u,w) ∉ Rᴵ` means no `R`-successor of `u` is `w`, the sole member of `B`, so
+//!   `(∀R.¬B)(a)` holds) — non-entailment yields consistency. All four additions stay
+//!   inside the feature-extended L1 fragment, and the tableau deciding them is the
+//!   §5a-argued ALCH+S calculus (sound and complete for that fragment), so the reduction
+//!   is exact however `O` happens to entail the transitivity — e.g. a declared `Trans(R)`
+//!   (the ∀₊-rule carries `∀R.¬B` down the `a → b → c` chain to the clash at `c`), a
+//!   declared-transitive equivalent role, or an `R` forced empty by `⊤ ⊑ ∀R.⊥`.
 //!
 //! `Entailed` needs every conclusion axiom's refutation(s) unsatisfiable; a single
 //! definitively-satisfiable refutation is `NotEntailed` (sound because the tableau is
@@ -98,19 +163,50 @@
 //! `Entailed`. Fresh names are minted as `urn:` IRIs checked against every id occurring in
 //! the premise AND conclusion models.
 //!
+//! ## Conclusion anonymous individuals ([OPUS-4.8] sq-pbz04.4.13)
+//!
+//! Official OWL 2 Direct-Semantics entailment reads a blank-node individual in the CONCLUSION
+//! EXISTENTIALLY (`a p _:x` means "`a` has *some* `p`-successor", not "`a p c` for a specific
+//! constant `c`"). L1 maps a blank node to an ordinary (skolem) constant: entailment-preserving
+//! on the PREMISE side (kept), but UNSOUND on the CONCLUSION side — the skolem refutation of
+//! `a p _:x` stays satisfiable even when the premise's `∃p.⊤` typing grants the existential, so
+//! it would certify a WRONG `NotEntailed`. Before the refutation loop, `roll_conclusion_anonymous`
+//! resolves conclusion blank nodes under the existential reading: a TREE-shaped anonymous
+//! assertion set (each blank node the object of exactly one property edge, reaching only blank
+//! successors, acyclic, anchored to a named root) ROLLS UP into an existential class assertion
+//! `root : ∃p.(⊓ types ⊓ ⊓ ∃q.⟨child⟩)` the tableau decides SOUNDLY in both directions (so
+//! somevaluesfrom2bnode / WebOnt-someValuesFrom-003 become genuine passes). Any non-rollable
+//! shape — shared between two assertions, cyclic, a named/nominal successor, or an unanchored
+//! free-existential root — abstains fail-closed ([`UnknownReason::ConclusionAnonymousIndividual`]),
+//! NEVER a skolem-constant `NotEntailed`.
+//!
+//! **Declaration-free conclusion roles ([GPT-5.6] sq-zfwzq).** OWL declarations have no
+//! Direct-Semantics consequences, and W3C conclusion documents commonly omit an
+//! `owl:ObjectProperty` declaration for a role already typed by the premise. In the
+//! `dl_transitive` extension, L1 deliberately refuses an otherwise-ambiguous RDF predicate,
+//! so entailment augments the conclusion's extraction input with declarations for **only**
+//! named object properties already proved to be roles by a fully-extracted premise that
+//! declares transitivity. This is semantics-preserving (the added declarations carry no
+//! logical content), never guesses an unknown predicate's kind, is discarded after extraction,
+//! and leaves the pre-feature ALCH entailment boundary unchanged. It is load-bearing for the
+//! DIRECT transitive-chain entailment cases, whose conclusion is just the composed role
+//! assertion.
+//!
 //! # Honest boundary
 //!
 //! This module never claims completeness beyond the argued fragment: the only complete
 //! branch is the ALCH tableau (within budget); RL `Consistent` is guard-narrowed, EL
-//! `Consistent` is ⊤-free-TBox-narrowed, QL consistency is wholly deferred, and every
+//! `Consistent` is ⊤-free-TBox-narrowed, QL consistency is capture-accounting-narrowed
+//! under the opt-in `dispatch_ql` feature (and wholly deferred without it), and every
 //! uncertain case is a typed [`UnknownReason`].
 
 use crate::extract::extract;
-use crate::model::{Axiom, ClassExpression, Ontology};
+use crate::model::{Axiom, ClassExpression, ObjectPropertyExpression, Ontology};
 use crate::profile::profiles;
 use crate::tableau::{self, Budget, ExhaustedBudget};
-use rustc_hash::FxHashSet;
-use sparq_core::dict::{Dict, Id};
+use oxrdf::{NamedNode, Term as OTerm};
+use rustc_hash::{FxHashMap, FxHashSet};
+use sparq_core::dict::{is_inline, Dict, Id, TermParts};
 use sparq_reason::{inconsistencies, materialize, Profile};
 use sparq_reason_el::Classifier;
 
@@ -129,8 +225,13 @@ pub enum Branch {
     RlMaterialization,
     /// OWL 2 EL consequence-based classification (`sparq-reason-el`), triple-guarded.
     ElClassification,
-    /// OWL 2 QL — consistency wholly deferred to the QL workstream (sq-pbz04.3.4).
+    /// OWL 2 QL without the `dispatch_ql` feature — consistency deferred (the arm that
+    /// sq-fj8lj graduates; produced only when `dispatch_ql` is OFF).
     QlDeferred,
+    /// OWL 2 QL DL-Lite_R consistency by violation-query composition
+    /// (`sparq_reason_ql::check_consistency`, sq-p6yb7) — produced only under the opt-in
+    /// `dispatch_ql` feature (module docs §"QL branch soundness"). [FABLE-5] sq-fj8lj
+    QlConsistency,
     /// The L3 ALCH completion-forest tableau (complete for the L1 fragment).
     AlchTableau,
 }
@@ -157,14 +258,36 @@ pub enum UnknownReason {
     /// The model mentions `owl:Thing`: the EL classifier does not track ⊤'s
     /// satisfiability (empirically verified), so a ⊤-involving verdict is withheld.
     ElTopGuard,
-    /// The ontology dispatched to the QL branch, whose Direct-Semantics consistency
-    /// procedure is deferred to the QL workstream (sq-pbz04.3.4) — never duplicated here.
+    /// The ontology dispatched to the QL branch with the `dispatch_ql` feature OFF: the
+    /// Direct-Semantics consistency procedure lives in sparq-reason-ql (sq-p6yb7) and is
+    /// engaged only opt-in — never duplicated here. Produced only without `dispatch_ql`
+    /// ([FABLE-5] sq-fj8lj graduated the feature-on path).
     QlConsistencyPending,
+    /// The QL branch ran the sparq-reason-ql DL-Lite_R checker (feature `dispatch_ql`) and
+    /// it abstained: its own extraction accounting could not certify full capture of the KB
+    /// (`fully_captured()` false, or a structurally-uncaptured negative axiom such as
+    /// `owl:complementOf`), so a `Consistent` claim would be unsound and no violation query
+    /// matched. The payload carries the QL crate's gap accounting. Fail-closed.
+    /// [FABLE-5] sq-fj8lj
+    QlCaptureGap(String),
     /// The ALCH tableau exhausted its deterministic count budget mid-search.
     ResourceBudget(ExhaustedBudget),
-    /// Entailment only: the conclusion-axiom kind has no argued refutation encoding
-    /// (property-axiom conclusions are deferred by the design record).
+    /// Entailment only: the conclusion-axiom kind has no argued refutation encoding.
+    /// Every axiom kind the L1 model can currently express HAS an argued encoding
+    /// (`SubObjectPropertyOf` gained one under sq-pbz04.4.9; the opt-in
+    /// `TransitiveObjectProperty` kind gained the two-step-chain lift under sq-zfwzq), so
+    /// this reason is not produced today — it is RETAINED fail-closed for future model
+    /// growth (a new axiom kind abstains here until its encoding is argued in the design
+    /// record). [GPT-5.6]
     UnencodedConclusion(String),
+    /// Entailment only: the CONCLUSION ontology mentions a blank-node individual in a shape
+    /// that does NOT roll up into a tree-shaped existential class assertion (it is shared
+    /// between two assertions, cyclic, has a named or a nominal successor, or is a free
+    /// existential root). Official OWL 2 Direct-Semantics entailment reads a conclusion
+    /// blank node EXISTENTIALLY, so the L1 skolem-constant reading would be UNSOUND for a
+    /// `NotEntailed` verdict — the checker abstains fail-closed instead (sq-pbz04.4.13).
+    /// The payload names the first offending anonymous individual. [OPUS-4.8]
+    ConclusionAnonymousIndividual(String),
 }
 
 /// Tri-state Direct-Semantics consistency verdict (design record §4).
@@ -308,6 +431,27 @@ impl DirectChecker {
                 }
             }
         };
+        // [GPT-5.6] sq-zfwzq (opt-in `dl_transitive`): an ontology declaring a TRANSITIVE
+        // role routes STRAIGHT to the ALCH+S tableau — the only branch whose soundness /
+        // completeness argument covers transitivity (tableau module docs §5a). Although a
+        // transitive ontology can be syntactically in-RL/in-EL, the RL rule set's documented
+        // divergences implicate transitivity ("no clash" would not certify consistency) and
+        // the EL classifier does not apply the axiom kind — both branches would abstain
+        // (their guards below keep that fail-closed as defence in depth), so per the
+        // record's "definitive verdicts only from a complete branch" rule the tableau owns
+        // the verdict. With the feature OFF this arm does not exist (extraction refuses
+        // `owl:TransitiveProperty` before dispatch).
+        #[cfg(feature = "dl_transitive")]
+        if onto
+            .axioms()
+            .iter()
+            .any(|a| matches!(a, Axiom::TransitiveObjectProperty { .. }))
+        {
+            return ConsistencyOutcome {
+                verdict: tableau_consistency(&onto, self.budget),
+                branch: Branch::AlchTableau,
+            };
+        }
         let ps = profiles(&onto);
         if ps.rl.is_in() {
             return rl_branch(dict, triples, &onto);
@@ -316,6 +460,13 @@ impl DirectChecker {
             return el_branch(dict, triples, &onto);
         }
         if ps.ql.is_in() {
+            // [FABLE-5] sq-fj8lj: with `dispatch_ql` the QL branch delegates to the
+            // sparq-reason-ql DL-Lite_R checker over the RAW input triples (module docs
+            // §"QL branch soundness" — the QL crate's OWN capture accounting owns the
+            // verdict; L2's `In` only routes). Without the feature, deferred as before.
+            #[cfg(feature = "dispatch_ql")]
+            return ql_branch(dict, triples);
+            #[cfg(not(feature = "dispatch_ql"))]
             return ConsistencyOutcome {
                 verdict: ConsistencyVerdict::Unknown(UnknownReason::QlConsistencyPending),
                 branch: Branch::QlDeferred,
@@ -352,13 +503,59 @@ impl DirectChecker {
             Ok(onto) => onto,
             Err(e) => return unknown_extraction(format!("premise: {}", e)),
         };
-        let concl = match extract(dict, conclusion) {
+        // [GPT-5.6] sq-zfwzq: declarations have no Direct-Semantics import. Seed the
+        // conclusion extraction with declarations for premise-confirmed roles so a bare
+        // conclusion role assertion is classifiable without weakening L1 globally.
+        let mut conclusion_for_extraction = conclusion.to_vec();
+        let mut premise_roles = FxHashSet::default();
+        #[cfg(feature = "dl_transitive")]
+        if prem
+            .axioms()
+            .iter()
+            .any(|axiom| matches!(axiom, Axiom::TransitiveObjectProperty { .. }))
+        {
+            collect_role_ids(&prem, &mut premise_roles);
+        }
+        let conclusion_predicates: FxHashSet<Id> =
+            conclusion.iter().map(|triple| triple[1]).collect();
+        if !premise_roles.is_empty() {
+            let rdf_type = dict.intern(&OTerm::NamedNode(NamedNode::new_unchecked(
+                "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+            )));
+            let object_property = dict.intern(&OTerm::NamedNode(NamedNode::new_unchecked(
+                "http://www.w3.org/2002/07/owl#ObjectProperty",
+            )));
+            for role in premise_roles {
+                if conclusion_predicates.contains(&role) {
+                    conclusion_for_extraction.push([role, rdf_type, object_property]);
+                }
+            }
+        }
+        let concl = match extract(dict, &conclusion_for_extraction) {
             Ok(onto) => onto,
             Err(e) => return unknown_extraction(format!("conclusion: {}", e)),
         };
+        // [OPUS-4.8] sq-pbz04.4.13 — conclusion anonymous individuals are EXISTENTIAL under
+        // the official OWL 2 Direct-Semantics entailment reading. L1 maps a conclusion blank
+        // node to an ordinary (skolem) constant; that reading is entailment-preserving on the
+        // PREMISE side but UNSOUND on the conclusion side (it would certify a `NotEntailed`
+        // that is wrong existentially — the pinned M2 divergences somevaluesfrom2bnode /
+        // WebOnt-someValuesFrom-003). `roll_conclusion_anonymous` rolls a tree-shaped bnode
+        // assertion set into an existential class assertion the tableau decides SOUNDLY (both
+        // directions); a non-rollable shape (shared / cyclic / nominal / free-root bnode)
+        // abstains fail-closed, never a skolem `NotEntailed`.
+        let concl_axioms = match roll_conclusion_anonymous(dict, &concl) {
+            Ok(axioms) => axioms,
+            Err(reason) => {
+                return EntailmentOutcome {
+                    verdict: EntailmentVerdict::Unknown(reason),
+                    branch: Branch::AlchTableau,
+                }
+            }
+        };
         let mut fresh = FreshNames::new(dict, [&prem, &concl]);
         let mut first_unknown: Option<UnknownReason> = None;
-        for axiom in concl.axioms() {
+        for axiom in &concl_axioms {
             match self.axiom_entailed(&prem, axiom, &mut fresh) {
                 AxiomVerdict::Entailed => {}
                 AxiomVerdict::NotEntailed => {
@@ -429,6 +626,60 @@ enum AxiomVerdict {
     Unknown(UnknownReason),
 }
 
+/// Collect every named object property whose role kind is established by a fully-extracted
+/// premise model. Used only to add semantically inert declarations to conclusion extraction.
+fn collect_role_ids(onto: &Ontology, into: &mut FxHashSet<Id>) {
+    for axiom in onto.axioms() {
+        match axiom {
+            Axiom::SubClassOf { sub, sup } => {
+                collect_role_ids_in_ce(sub, into);
+                collect_role_ids_in_ce(sup, into);
+            }
+            Axiom::EquivalentClasses(left, right) | Axiom::DisjointClasses(left, right) => {
+                collect_role_ids_in_ce(left, into);
+                collect_role_ids_in_ce(right, into);
+            }
+            Axiom::SubObjectPropertyOf { sub, sup } => {
+                into.extend([sub.named(), sup.named()]);
+            }
+            Axiom::ObjectPropertyDomain { property, domain } => {
+                into.insert(property.named());
+                collect_role_ids_in_ce(domain, into);
+            }
+            Axiom::ObjectPropertyRange { property, range } => {
+                into.insert(property.named());
+                collect_role_ids_in_ce(range, into);
+            }
+            Axiom::ClassAssertion { class, .. } => collect_role_ids_in_ce(class, into),
+            Axiom::ObjectPropertyAssertion { property, .. } => {
+                into.insert(property.named());
+            }
+            #[cfg(feature = "dl_transitive")]
+            Axiom::TransitiveObjectProperty { property } => {
+                into.insert(property.named());
+            }
+        }
+    }
+}
+
+fn collect_role_ids_in_ce(class: &ClassExpression, into: &mut FxHashSet<Id>) {
+    match class {
+        ClassExpression::ObjectIntersectionOf(members)
+        | ClassExpression::ObjectUnionOf(members) => {
+            for member in members {
+                collect_role_ids_in_ce(member, into);
+            }
+        }
+        ClassExpression::ObjectComplementOf(inner) => collect_role_ids_in_ce(inner, into),
+        ClassExpression::ObjectSomeValuesFrom(property, filler)
+        | ClassExpression::ObjectAllValuesFrom(property, filler) => {
+            into.insert(property.named());
+            collect_role_ids_in_ce(filler, into);
+        }
+        ClassExpression::Class(_) | ClassExpression::Thing | ClassExpression::Nothing => {}
+    }
+}
+
 // -------------------------------------------------------------------------------------------
 // RL branch
 // -------------------------------------------------------------------------------------------
@@ -487,6 +738,11 @@ fn pr1_punning_violation(onto: &Ontology) -> Option<String> {
                 properties.insert(property.named());
                 individuals.extend([*source, *target]);
             }
+            // [GPT-5.6] sq-zfwzq: a transitivity declaration uses its subject as a property.
+            #[cfg(feature = "dl_transitive")]
+            Axiom::TransitiveObjectProperty { property } => {
+                properties.insert(property.named());
+            }
             Axiom::SubClassOf { .. }
             | Axiom::EquivalentClasses(_, _)
             | Axiom::DisjointClasses(_, _) => {}
@@ -525,6 +781,17 @@ fn pr1_punning_violation(onto: &Ontology) -> Option<String> {
 /// construct the model touches, or `None` when "no clash" may soundly read as consistent.
 fn rl_divergence_guard(onto: &Ontology) -> Option<String> {
     for axiom in onto.axioms() {
+        // [GPT-5.6] sq-zfwzq: the documented RL divergences implicate transitivity, so "no
+        // clash" must not certify consistency here. Defence in depth only — dispatch routes
+        // transitive ontologies to the ALCH+S tableau BEFORE this branch can match.
+        #[cfg(feature = "dl_transitive")]
+        if matches!(axiom, Axiom::TransitiveObjectProperty { .. }) {
+            return Some(
+                "owl:TransitiveProperty (implicated by the documented RL rule-set \
+                 divergences on property chains/transitivity)"
+                    .to_string(),
+            );
+        }
         if matches!(axiom, Axiom::DisjointClasses(_, _)) {
             return Some(
                 "owl:disjointWith (implicated by DOCUMENTED_DIVERGENCES \
@@ -549,6 +816,8 @@ fn axiom_ces(axiom: &Axiom) -> Vec<&ClassExpression> {
         Axiom::ObjectPropertyRange { range, .. } => vec![range],
         Axiom::ClassAssertion { class, .. } => vec![class],
         Axiom::SubObjectPropertyOf { .. } | Axiom::ObjectPropertyAssertion { .. } => Vec::new(),
+        #[cfg(feature = "dl_transitive")]
+        Axiom::TransitiveObjectProperty { .. } => Vec::new(),
     }
 }
 
@@ -616,6 +885,10 @@ fn el_unapplied_kind(onto: &Ontology) -> Option<String> {
         Axiom::ObjectPropertyRange { .. } => Some("ObjectPropertyRange".to_string()),
         Axiom::ClassAssertion { .. } => Some("ClassAssertion".to_string()),
         Axiom::ObjectPropertyAssertion { .. } => Some("ObjectPropertyAssertion".to_string()),
+        // [GPT-5.6] sq-zfwzq: the EL classifier does not apply transitivity — abstain
+        // (defence in depth; dispatch routes transitive ontologies to the tableau first).
+        #[cfg(feature = "dl_transitive")]
+        Axiom::TransitiveObjectProperty { .. } => Some("TransitiveObjectProperty".to_string()),
     })
 }
 
@@ -630,6 +903,57 @@ fn ce_mentions_thing(ce: &ClassExpression) -> bool {
         ClassExpression::ObjectSomeValuesFrom(_, filler)
         | ClassExpression::ObjectAllValuesFrom(_, filler) => ce_mentions_thing(filler),
     }
+}
+
+// -------------------------------------------------------------------------------------------
+// QL branch ([FABLE-5] sq-fj8lj, opt-in `dispatch_ql`)
+// -------------------------------------------------------------------------------------------
+
+/// The QL branch (module docs §"QL branch soundness"): reconstruct the raw input triples and
+/// delegate to the sparq-reason-ql DL-Lite_R checker, whose OWN extraction accounting owns
+/// the verdict (`check_consistency` = `TBox::extract` over the same kb + violation sweep —
+/// exactly the pairing its `check_consistency_with` contract requires).
+#[cfg(feature = "dispatch_ql")]
+fn ql_branch(dict: &Dict, triples: &[[Id; 3]]) -> ConsistencyOutcome {
+    use sparq_reason_ql::QlConsistency;
+    let out = |verdict| ConsistencyOutcome {
+        verdict,
+        branch: Branch::QlConsistency,
+    };
+    let kb = match ql_kb(dict, triples) {
+        Ok(kb) => kb,
+        // Unreachable in practice (these triples already extracted through L1, so subjects/
+        // predicates are IRIs or blank nodes) — kept fail-closed regardless.
+        Err(msg) => return out(ConsistencyVerdict::Unknown(UnknownReason::QlCaptureGap(msg))),
+    };
+    match sparq_reason_ql::check_consistency(&kb) {
+        QlConsistency::Consistent => out(ConsistencyVerdict::Consistent),
+        QlConsistency::Inconsistent(_) => out(ConsistencyVerdict::Inconsistent),
+        QlConsistency::Unknown(gap) => out(ConsistencyVerdict::Unknown(
+            UnknownReason::QlCaptureGap(format!("{:?}", gap)),
+        )),
+    }
+}
+
+/// Faithfully render the id triples back into oxrdf triples — the EXACT graph L1 extracted,
+/// not a translation of the L1 model — so the QL crate's accounting sees the same input.
+#[cfg(feature = "dispatch_ql")]
+fn ql_kb(dict: &Dict, triples: &[[Id; 3]]) -> Result<Vec<oxrdf::Triple>, String> {
+    use oxrdf::NamedOrBlankNode;
+    let mut kb = Vec::with_capacity(triples.len());
+    for t in triples {
+        let subject = match dict.term(t[0]) {
+            OTerm::NamedNode(n) => NamedOrBlankNode::NamedNode(n),
+            OTerm::BlankNode(b) => NamedOrBlankNode::BlankNode(b),
+            other => return Err(format!("subject {} is not an IRI or blank node", other)),
+        };
+        let predicate = match dict.term(t[1]) {
+            OTerm::NamedNode(n) => n,
+            other => return Err(format!("predicate {} is not an IRI", other)),
+        };
+        kb.push(oxrdf::Triple::new(subject, predicate, dict.term(t[2])));
+    }
+    Ok(kb)
 }
 
 // -------------------------------------------------------------------------------------------
@@ -714,6 +1038,10 @@ fn collect_ids(onto: &Ontology, into: &mut FxHashSet<Id>) {
             } => {
                 into.extend([property.named(), *source, *target]);
             }
+            #[cfg(feature = "dl_transitive")]
+            Axiom::TransitiveObjectProperty { property } => {
+                into.insert(property.named());
+            }
             Axiom::SubClassOf { .. }
             | Axiom::EquivalentClasses(_, _)
             | Axiom::DisjointClasses(_, _) => {}
@@ -794,7 +1122,348 @@ fn refutation_checks(conclusion: &Axiom, fresh: &mut FreshNames) -> Option<Vec<V
                 },
             ]])
         }
-        // Property-axiom conclusions are deferred by the record (§4): no encoding here.
-        Axiom::SubObjectPropertyOf { .. } => None,
+        // The fresh-individual-pair role-subsumption trick (module docs; record §4 as
+        // amended by sq-pbz04.4.9 — sound AND complete). [FABLE-5]
+        Axiom::SubObjectPropertyOf { sub, sup } => {
+            let a = fresh.mint();
+            let b = fresh.mint();
+            let witness = fresh.mint();
+            Some(vec![vec![
+                Axiom::ObjectPropertyAssertion {
+                    property: sub.clone(),
+                    source: a,
+                    target: b,
+                },
+                Axiom::ClassAssertion {
+                    class: ClassExpression::Class(witness),
+                    individual: b,
+                },
+                Axiom::ClassAssertion {
+                    class: ClassExpression::only(
+                        sup.named(),
+                        ClassExpression::ObjectComplementOf(Box::new(ClassExpression::Class(
+                            witness,
+                        ))),
+                    ),
+                    individual: a,
+                },
+            ]])
+        }
+        // The two-step-chain lift of the fresh-class trick for a TRANSITIVITY conclusion
+        // (module docs; [GPT-5.6] sq-zfwzq — sound AND complete): `O ⊨ Trans(R)` iff
+        // `O ∪ {R(a,b), R(b,c), B(c), (∀R.¬B)(a)}` is unsatisfiable, with `a`/`b`/`c`/`B`
+        // fresh. A non-transitive witness chain `(u,v), (v,w) ∈ Rᴵ, (u,w) ∉ Rᴵ` in some
+        // model of `O` is exactly what keeps the union satisfiable (`B = {w}`).
+        #[cfg(feature = "dl_transitive")]
+        Axiom::TransitiveObjectProperty { property } => {
+            let a = fresh.mint();
+            let b = fresh.mint();
+            let c = fresh.mint();
+            let witness = fresh.mint();
+            Some(vec![vec![
+                Axiom::ObjectPropertyAssertion {
+                    property: property.clone(),
+                    source: a,
+                    target: b,
+                },
+                Axiom::ObjectPropertyAssertion {
+                    property: property.clone(),
+                    source: b,
+                    target: c,
+                },
+                Axiom::ClassAssertion {
+                    class: ClassExpression::Class(witness),
+                    individual: c,
+                },
+                Axiom::ClassAssertion {
+                    class: ClassExpression::only(
+                        property.named(),
+                        ClassExpression::ObjectComplementOf(Box::new(ClassExpression::Class(
+                            witness,
+                        ))),
+                    ),
+                    individual: a,
+                },
+            ]])
+        }
+    }
+}
+
+// -------------------------------------------------------------------------------------------
+// Conclusion anonymous-individual rolling ([OPUS-4.8] sq-pbz04.4.13)
+// -------------------------------------------------------------------------------------------
+//
+// Official OWL 2 Direct-Semantics entailment reads a blank-node individual in the CONCLUSION
+// ontology EXISTENTIALLY (an "existential variable" — the somevaluesfrom2bnode test's own
+// description). L1 maps every blank node to an ordinary dict id, i.e. a (skolem) CONSTANT. On
+// the PREMISE side skolemisation is entailment-preserving and stays; on the CONCLUSION side it
+// is NOT — a `NotEntailed` certificate from the skolem reading is UNSOUND, because the premise
+// may entail the conclusion existentially (a p _:x) without entailing it for any specific
+// constant. So a conclusion blank-node assertion set must be resolved BEFORE the refutation
+// loop: rolled up into an existential class assertion when it is tree-shaped, or refused
+// fail-closed otherwise (never a skolem `NotEntailed`).
+//
+// ROLLING-UP is the standard tree-shaped-query technique: an anonymous individual reached by a
+// single property edge `s p _:x`, whose asserted types are `C₁ … Cₙ` and whose own outgoing
+// edges are `_:x qⱼ _:yⱼ`, denotes exactly `s : ∃p.(C₁ ⊓ … ⊓ Cₙ ⊓ ∃q₁.⟨roll _:y₁⟩ ⊓ …)`. This
+// is SOUND and COMPLETE for the tree shape (no inverse roles, no shared variables, no nominals
+// — all guaranteed by the rollability checks + the ALCH fragment), so a `NotEntailed` from a
+// ROLLED existential class assertion is decided by the complete tableau and is genuinely
+// sound, and the graduated cases (somevaluesfrom2bnode / WebOnt-someValuesFrom-003) become
+// real passes rather than abstentions.
+
+/// Whether `id` is an anonymous (blank-node) individual in `dict`.
+fn is_anonymous_individual(dict: &Dict, id: Id) -> bool {
+    !is_inline(id) && matches!(dict.term_parts(id), TermParts::Blank(_))
+}
+
+/// Render an id for a fail-closed diagnostic (positional-arg friendly — CodeQL note).
+fn term_of(dict: &Dict, id: Id) -> String {
+    if is_inline(id) {
+        return format!("(inline literal id {})", id);
+    }
+    match dict.term_parts(id) {
+        TermParts::Iri { prefix, suffix } => format!("<{}{}>", prefix, suffix),
+        TermParts::Lit { value, .. } => format!("\"{}\"", value),
+        TermParts::Blank(label) => format!("_:{}", label),
+        TermParts::Triple(_) => "<<triple term>>".to_string(),
+    }
+}
+
+/// Resolve the CONCLUSION ontology's anonymous (blank-node) individuals under the official
+/// EXISTENTIAL reading (module note above; sq-pbz04.4.13).
+///
+/// Returns the blank-node-FREE conclusion axiom list the caller decides by refutation:
+/// - if the conclusion mentions no blank-node individual, its axioms unchanged (clone);
+/// - otherwise, the blank-node ABox assertions ROLLED UP into existential class assertions on
+///   their named roots, with every blank-node-free conclusion axiom kept verbatim.
+///
+/// # Errors
+/// [`UnknownReason::ConclusionAnonymousIndividual`] when a blank-node individual is NOT in a
+/// tree-shaped roll-up: it must be the object of EXACTLY ONE property assertion (its unique
+/// parent edge), reach only blank-node successors (a named/literal successor would need a
+/// nominal, out of the ALCH fragment), and be acyclic / anchored to a named root. Fail-closed
+/// — the caller abstains, never a skolem-constant `NotEntailed`.
+fn roll_conclusion_anonymous(dict: &Dict, concl: &Ontology) -> Result<Vec<Axiom>, UnknownReason> {
+    // Fast path: no anonymous individual anywhere → decide the conclusion verbatim, so the
+    // blank-node-free path (every existing entailment case) is byte-identical to before.
+    let mentions_bnode = concl.axioms().iter().any(|axiom| match axiom {
+        Axiom::ClassAssertion { individual, .. } => is_anonymous_individual(dict, *individual),
+        Axiom::ObjectPropertyAssertion { source, target, .. } => {
+            is_anonymous_individual(dict, *source) || is_anonymous_individual(dict, *target)
+        }
+        _ => false,
+    });
+    if !mentions_bnode {
+        return Ok(concl.axioms().to_vec());
+    }
+
+    // Build the roll-up structure over the ABox. `in_degree` counts parent property edges per
+    // blank individual; `types` collects each blank individual's asserted class types;
+    // `outgoing` its child property edges; `top_edges` the named→blank edges that ANCHOR a
+    // tree; `clean` keeps every blank-node-free axiom verbatim.
+    let mut in_degree: FxHashMap<Id, usize> = FxHashMap::default();
+    let mut types: FxHashMap<Id, Vec<ClassExpression>> = FxHashMap::default();
+    let mut outgoing: FxHashMap<Id, Vec<(Id, Id)>> = FxHashMap::default();
+    let mut top_edges: Vec<(Id, Id, Id)> = Vec::new();
+    let mut clean: Vec<Axiom> = Vec::new();
+
+    for axiom in concl.axioms() {
+        match axiom {
+            Axiom::ClassAssertion { class, individual } => {
+                if is_anonymous_individual(dict, *individual) {
+                    in_degree.entry(*individual).or_insert(0);
+                    types.entry(*individual).or_default().push(class.clone());
+                } else {
+                    clean.push(axiom.clone());
+                }
+            }
+            Axiom::ObjectPropertyAssertion {
+                property,
+                source,
+                target,
+            } => {
+                let s_anon = is_anonymous_individual(dict, *source);
+                let t_anon = is_anonymous_individual(dict, *target);
+                match (s_anon, t_anon) {
+                    (false, false) => clean.push(axiom.clone()),
+                    (false, true) => {
+                        // named --p--> blank : a top edge anchoring a tree.
+                        *in_degree.entry(*target).or_insert(0) += 1;
+                        top_edges.push((property.named(), *source, *target));
+                    }
+                    (true, true) => {
+                        // blank --p--> blank : an internal tree edge.
+                        in_degree.entry(*source).or_insert(0);
+                        *in_degree.entry(*target).or_insert(0) += 1;
+                        outgoing
+                            .entry(*source)
+                            .or_default()
+                            .push((property.named(), *target));
+                    }
+                    (true, false) => {
+                        // blank --p--> named : the anonymous individual has a NAMED successor,
+                        // rollable only through a nominal {named} — out of ALCH. Recorded so
+                        // `roll_bnode` refuses at the exact offending node.
+                        in_degree.entry(*source).or_insert(0);
+                        outgoing
+                            .entry(*source)
+                            .or_default()
+                            .push((property.named(), *target));
+                    }
+                }
+            }
+            other => clean.push(other.clone()),
+        }
+    }
+
+    // Every blank-node individual must have EXACTLY ONE parent edge: in-degree 0 is an
+    // unanchored free existential root, in-degree ≥ 2 is a node SHARED between two assertions.
+    // Both are outside the tree-shaped roll-up (and exactly the negative-probe shapes).
+    for (&b, &deg) in &in_degree {
+        if deg != 1 {
+            return Err(UnknownReason::ConclusionAnonymousIndividual(format!(
+                "anonymous individual {} has {} parent property-assertion(s); a tree-shaped \
+                 roll-up needs exactly one (shared / unanchored anonymous individual)",
+                term_of(dict, b),
+                deg
+            )));
+        }
+    }
+
+    // Fold each named-anchored subtree into an existential class assertion on its named root.
+    // `consumed` records every blank node folded into a tree; a blank node reached from no
+    // named root (a pure cycle / an anchorless component) stays unconsumed and is refused.
+    let mut rolled: Vec<Axiom> = clean;
+    let mut consumed: FxHashSet<Id> = FxHashSet::default();
+    for &(property, source, target) in &top_edges {
+        let mut visiting: FxHashSet<Id> = FxHashSet::default();
+        let filler = roll_bnode(dict, target, &types, &outgoing, &mut visiting, &mut consumed)?;
+        rolled.push(Axiom::ClassAssertion {
+            class: ClassExpression::ObjectSomeValuesFrom(
+                ObjectPropertyExpression::ObjectProperty(property),
+                Box::new(filler),
+            ),
+            individual: source,
+        });
+    }
+
+    // Any blank-node individual not folded into a named-rooted tree is a cyclic / anchorless
+    // shape (each has in-degree 1 from the check above, so a component with no named anchor is
+    // necessarily cyclic) — refuse fail-closed.
+    for &b in in_degree.keys() {
+        if !consumed.contains(&b) {
+            return Err(UnknownReason::ConclusionAnonymousIndividual(format!(
+                "anonymous individual {} is not reachable from a named root (cyclic or \
+                 anchorless anonymous shape)",
+                term_of(dict, b)
+            )));
+        }
+    }
+    Ok(rolled)
+}
+
+/// Roll one blank-node subtree (rooted at `b`) into the class expression whose existential the
+/// parent edge asserts: the conjunction of `b`'s asserted class types and `∃p.⟨child subtree⟩`
+/// per outgoing edge. An empty conjunction is `owl:Thing`. Cycle- and nominal-guarded.
+fn roll_bnode(
+    dict: &Dict,
+    b: Id,
+    types: &FxHashMap<Id, Vec<ClassExpression>>,
+    outgoing: &FxHashMap<Id, Vec<(Id, Id)>>,
+    visiting: &mut FxHashSet<Id>,
+    consumed: &mut FxHashSet<Id>,
+) -> Result<ClassExpression, UnknownReason> {
+    if !visiting.insert(b) {
+        return Err(UnknownReason::ConclusionAnonymousIndividual(format!(
+            "anonymous individual {} lies on a cycle (no tree-shaped roll-up)",
+            term_of(dict, b)
+        )));
+    }
+    // A node reachable through two named-anchored paths would already have in-degree ≥ 2 and be
+    // refused before we get here; `consumed` insertion is the fold record.
+    consumed.insert(b);
+    let mut members: Vec<ClassExpression> = types.get(&b).cloned().unwrap_or_default();
+    if let Some(edges) = outgoing.get(&b) {
+        for &(property, target) in edges {
+            if !is_anonymous_individual(dict, target) {
+                // A named/literal successor of an anonymous individual needs a nominal {t}.
+                return Err(UnknownReason::ConclusionAnonymousIndividual(format!(
+                    "anonymous individual {} has a non-anonymous successor {} (a nominal \
+                     roll-up is out of the ALCH fragment)",
+                    term_of(dict, b),
+                    term_of(dict, target)
+                )));
+            }
+            let filler = roll_bnode(dict, target, types, outgoing, visiting, consumed)?;
+            members.push(ClassExpression::ObjectSomeValuesFrom(
+                ObjectPropertyExpression::ObjectProperty(property),
+                Box::new(filler),
+            ));
+        }
+    }
+    visiting.remove(&b);
+    Ok(match members.len() {
+        0 => ClassExpression::Thing,
+        1 => members.pop().expect("len checked == 1"),
+        _ => ClassExpression::ObjectIntersectionOf(members),
+    })
+}
+
+// -------------------------------------------------------------------------------------------
+// Direct unit tests for the transitive defence-in-depth guards ([GPT-5.6] sq-zfwzq).
+// The dispatch routes transitive ontologies to the tableau BEFORE the RL/EL branches, so
+// these private guard arms are unreachable end-to-end BY DESIGN — they exist so a future
+// dispatch change cannot silently hand a transitive ontology to an incomplete branch. The
+// tests pin that contract directly (the integration suite covers the routed path).
+// -------------------------------------------------------------------------------------------
+
+#[cfg(all(test, feature = "dl_transitive"))]
+mod transitive_guard_tests {
+    use super::*;
+    use crate::model::ObjectPropertyExpression as OPE;
+
+    fn transitive_onto() -> Ontology {
+        Ontology {
+            axioms: vec![Axiom::TransitiveObjectProperty {
+                property: OPE::ObjectProperty(10),
+            }],
+        }
+    }
+
+    #[test]
+    fn rl_divergence_guard_abstains_on_transitivity() {
+        let msg = rl_divergence_guard(&transitive_onto())
+            .expect("the RL guard must implicate transitivity");
+        assert!(msg.contains("TransitiveProperty"), "got {}", msg);
+    }
+
+    #[test]
+    fn el_unapplied_kind_flags_transitivity() {
+        assert_eq!(
+            el_unapplied_kind(&transitive_onto()).as_deref(),
+            Some("TransitiveObjectProperty")
+        );
+    }
+
+    #[test]
+    fn pr1_scan_counts_transitive_property_as_property_use() {
+        // The property id 10 is ALSO used as a class: the PR1 punning scan must see the
+        // overlap through the TransitiveObjectProperty arm.
+        let onto = Ontology {
+            axioms: vec![
+                Axiom::TransitiveObjectProperty {
+                    property: OPE::ObjectProperty(10),
+                },
+                Axiom::SubClassOf {
+                    sub: ClassExpression::Class(10),
+                    sup: ClassExpression::Thing,
+                },
+            ],
+        };
+        assert!(
+            pr1_punning_violation(&onto).is_some(),
+            "class/property punning through the transitivity axiom must be seen"
+        );
     }
 }

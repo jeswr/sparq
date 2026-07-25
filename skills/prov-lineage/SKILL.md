@@ -1,6 +1,6 @@
 ---
 name: prov-lineage
-description: "Capture W3C PROV-O data lineage for DERIVED RDF — when a CONSTRUCT/DESCRIBE query produces a new graph, a SPARQL UPDATE (INSERT…WHERE / INSERT DATA / DELETE) changes a store, OR a reasoner materializes inferred triples (RDFS/OWL-RL/N3), record who/what/when made it (prov:Activity + prov:Entity + wasGeneratedBy/used/wasDerivedFrom; wasInvalidatedBy for deletes) using the opt-in sparq-prov crate. Use when you need machine-readable provenance for derived/mutated data — citable lineage for GenAI-grounded answers, audit/compliance (CDMC CD-1) data-lineage capture, attribution of constructed graphs or UPDATE writes to their source(s), or per-fact inference lineage from a why() proof tree (the `reason` feature). Off by default; does not touch sparq-core/sparq-engine's lean build."
+description: "Capture W3C PROV-O data lineage for DERIVED RDF, or explain a missing BGP target binding: record CONSTRUCT/DESCRIBE, SPARQL UPDATE, and reasoner-materialization lineage; under the opt-in `why-not` feature, report exactly which grounded BGP triple patterns are absent. Off by default; does not touch sparq-core/sparq-engine's lean build."
 ---
 
 # sparq-prov — W3C PROV-O lineage for derived data
@@ -45,8 +45,10 @@ let d = derive_construct(
 ).unwrap();
 
 let derived = d.triples();       // the derived data (Vec<Triple>)
+let inputs  = d.used_inputs();   // configured input IRIs, in order (&[NamedNode])
 let lineage = d.prov_graph();    // its PROV-O record (Vec<Triple>)
-let turtle  = d.prov_ntriples(); // …serialised (N-Triples ⊂ Turtle)
+let turtle  = d.prov_turtle();   // …prefix-compacted Turtle
+let nt      = d.prov_ntriples(); // …or canonical N-Triples
 ```
 
 ## The emitted PROV-O shape
@@ -93,7 +95,9 @@ let d = derive_update(
 
 let inserted = d.inserted();    // the generated (derived) triples
 let deleted  = d.deleted();     // the retracted (invalidated) triples
+let inputs   = d.used_inputs(); // configured input IRIs, in order
 let lineage  = d.prov_graph();  // its PROV-O record (Vec<Triple>)
+let turtle   = d.prov_turtle(); // prefix-compacted Turtle for that same graph
 ```
 
 Emitted shape — for update activity `A`, generated entity `E` (the inserts), inputs `Iᵢ`:
@@ -152,12 +156,17 @@ sparq-reason = { path = "crates/sparq-reason", features = ["explain"] }
 ```
 
 ```rust
-use sparq_prov::{prov_from_proof, ProvProofConfig};
+use sparq_prov::{prov_from_proof, prov_ntriples, ProvProofConfig};
 
 // g: a sparq_reason::MaterializedGraph / MaterializedOwlGraph / MaterializedN3Graph.
 let proof   = g.why(&dict, inferred_fact).expect("fact is in the closure");
 let lineage = prov_from_proof(&proof, &ProvProofConfig::default());  // Vec<Triple>
+let ntriples = prov_ntriples(&proof, &ProvProofConfig::default());   // String
 ```
+
+`prov_ntriples` is the one-call serializer for the same ordered lineage triples.
+With the default clock-free configuration, both the triples and their
+content-addressed IRIs are deterministic. <!-- [GPT-5.6] sq-8jn86 -->
 
 Emitted shape — for each proof node (fact) `F` and the rule firing `R` that
 generated a non-leaf `F` from premises `Pᵢ`:
@@ -184,13 +193,92 @@ DAG (the same shared fact names the same entity).
 | Derivation path | Status |
 |---|---|
 | `CONSTRUCT` / `DESCRIBE` | ✅ covered (`derive_construct`) |
-| Reasoner materialization (RDFS / OWL-RL / N3) | ✅ covered (`reason` feature → `prov_from_proof`) |
+| Reasoner materialization (RDFS / OWL-RL / N3) | ✅ covered (`reason` feature → `prov_from_proof` / `prov_ntriples`) |
 | SPARQL UPDATE data ops (`INSERT … WHERE`, `INSERT DATA`, `DELETE …`, `LOAD`) | ✅ covered (`derive_update`) — inserts ⇒ generated/derived, deletes ⇒ `wasInvalidatedBy` |
 | SPARQL UPDATE structural ops (`CLEAR` / `DROP` / `CREATE`) | ⛔ no per-triple entity (deliberate boundary — recorded only as the activity kind) |
 
 For the reasoner's per-fact proof itself (the input to `prov_from_proof`), see the
 [`inference`](../inference/SKILL.md) skill's `explain` feature (`why()` produces
 a proof tree — derivation provenance at the rule/premise level).
+
+## Missing-answer explanation (`why-not` feature)
+
+<!-- [GPT-5.6] sq-lsp7k.17 -->
+
+The non-default `why-not` feature handles one bounded case: a fully-ground target
+binding that did not appear in the answers to a single basic graph pattern (BGP).
+`why_not(&Graph, &GraphPattern, &HashMap<Variable, Term>)` substitutes the target
+through each BGP triple pattern and returns a `Vec<MissingPattern>` containing
+exactly the absent concrete triples, in BGP order. If every triple is present,
+the vector is empty because that target would satisfy the BGP.
+
+```toml
+[dependencies]
+sparq-prov = { path = "crates/sparq-prov", features = ["why-not"] }
+spargebra = { version = "0.4", features = ["sparql-12", "sep-0006"] }
+```
+
+The accepted algebra node is exactly `GraphPattern::Bgp`. `OPTIONAL`, `UNION`,
+`FILTER`, property paths, named graphs, and every other algebra variant return
+`WhyNotError::UnsupportedAlgebra`. A target missing a referenced variable, a
+literal bound in subject position, or a non-IRI predicate binding also returns
+an error. The explainer never treats an invalid substitution as evidence of an
+absent RDF triple.
+
+```rust
+use std::collections::HashMap;
+
+use oxrdf::{NamedNode, Term, Variable};
+use spargebra::algebra::GraphPattern;
+use spargebra::term::{NamedNodePattern, TermPattern, TriplePattern};
+use sparq_core::Graph;
+use sparq_prov::{why_not, why_not_report_ntriples, why_not_report_turtle};
+
+let ex = |local: &str| NamedNode::new_unchecked(format!("http://example.com/{local}"));
+let var = |name: &str| Variable::new_unchecked(name);
+let triple_pattern = |predicate: &str, object_variable: &str| TriplePattern {
+    subject: TermPattern::Variable(var("x")),
+    predicate: NamedNodePattern::NamedNode(ex(predicate)),
+    object: TermPattern::Variable(var(object_variable)),
+};
+
+let graph = Graph::load_str("@prefix : <http://example.com/> . :a :p :b .", "turtle")?;
+let bgp = GraphPattern::Bgp {
+    patterns: vec![triple_pattern("p", "y"), triple_pattern("q", "z")],
+};
+let target = HashMap::from([
+    (var("x"), Term::NamedNode(ex("a"))),
+    (var("y"), Term::NamedNode(ex("b"))),
+    (var("z"), Term::NamedNode(ex("c"))),
+]);
+
+let missing = why_not(&graph, &bgp, &target)?;
+assert_eq!(missing.len(), 1);
+assert_eq!(missing[0].grounded().predicate, ex("q"));
+let ntriples = why_not_report_ntriples(&target, &missing)?;
+let turtle = why_not_report_turtle(&target, &missing)?;
+assert!(ntriples.contains("urn:sparq:prov:absent"));
+assert!(turtle.contains("spqprov:absent"));
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+<!-- [GPT-5.6] sq-lsp7k -->
+Both report functions validate that `target` still grounds every retained
+pattern to its recorded `MissingPattern::grounded()` triple; a different or
+incomplete target fails closed. The emitted graph has one deterministic report
+node per missing conjunct, in BGP order:
+
+```turtle
+<urn:sparq:prov:missing:0:…> a prov:Entity ;
+    rdf:reifies <<( <http://example.com/a> <http://example.com/q> <http://example.com/c> )>> ;
+    spqprov:absent true ;
+    spqprov:position 0 ;
+    spqprov:targetBinding "?x=<http://example.com/a>; …" .
+```
+
+`rdf:reifies` carries an RDF 1.2 triple term: the missing triple is quoted exactly and
+is not asserted into the report graph. N-Triples and Turtle serialize the same
+five metadata triples per missing conjunct with stable bytes/triple order.
 
 ## See also
 

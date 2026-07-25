@@ -1,0 +1,5 @@
+{
+  "pr": 1800,
+  "date": "2026-07-10",
+  "reason": "sq-7d3dj.32.2.6: the SPQCPRM2 col2 frame-of-reference spike is fully behind the OFF-by-default `spqcprm2` cargo feature (new items put_zigzag_varint / get_zigzag_varint / encode_block_v2 / decode_block_v2_at / CompressedPerm::encode_v2 / pub enum Format / pub const FILE_MAGIC_V2 / the CompressedPerm.format field / the decode_block_at V2 dispatch / all V2 tests are each #[cfg(feature = \"spqcprm2\")]), so with the feature OFF no new code compiles. Verified in-worktree: the feature-OFF sparq-wasm CODE section is byte-for-byte identical between base and head (section [9729,1482465)); the only delta is 4 same-size byte moves at a 16-byte stride inside the DATA section (offsets 1514356/72/88/1514404), i.e. LLVM reordered #[track_caller] panic-location `&str` fat-pointers whose file:line:col line numbers shifted when the cfg-gated source lines were inserted into compress.rs. Behaviour-identical (identical machine code), same total bundle size (no ratchet floor bump needed), no new dependencies, no unsafe. NOT a feature leak — a declaration is the sanctioned fix for a same-size data-section string-reorder."
+}

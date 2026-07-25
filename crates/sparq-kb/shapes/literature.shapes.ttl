@@ -97,4 +97,22 @@ pkg:MachineFindingShape a sh:NodeShape ;
         $this cito:citesAsEvidence ?cited .
         FILTER NOT EXISTS { ?cited a pkg:Source }
       }"""
+  ] ;
+
+  # RULE 4 — retrieval timestamp on every machine-extracted Finding. Every machine-
+  # extracted Finding must carry prov:generatedAtTime (the UTC instant the finding was
+  # extracted). This closure on the retrieval timestamp is required for dump provenance,
+  # freshness-weighting, and audit trails. Findings without this timestamp are
+  # quarantined (fail-closed). [HAIKU-4.5] sq-tzars.2
+  sh:sparql [
+    a sh:SPARQLConstraint ;
+    sh:message "a machine-extracted Finding must carry prov:generatedAtTime (the extraction instant)" ;
+    sh:select """
+      PREFIX pkg:  <https://sparq.dev/ns/pkg#>
+      PREFIX prov: <http://www.w3.org/ns/prov#>
+      SELECT $this WHERE {
+        $this prov:wasAttributedTo ?agent .
+        ?agent a pkg:MachineAgent .
+        FILTER NOT EXISTS { $this prov:generatedAtTime ?t }
+      }"""
   ] .

@@ -290,6 +290,81 @@ class AuditUnitTests(unittest.TestCase):
         self.assertFalse(r.ok)
         self.assertTrue(any("NOT to 'crate-a'" in f for f in r.findings))
 
+    def test_sibling_read_covered_by_additional_readers(self):
+        # [FABLE-5] sq-m4bxc: crate-a reads a file inside crate-c and is NOT in
+        # closure(c) — normally a finding — but a `readers` map entry declaring
+        # crate-a covers it (the selector unions crate-a into the affected set).
+        entries = [{"pattern": "crates/c/**", "readers": ["crate-a"]}]
+        r = self._audit([_ref("crate-a", "crates/c/rules/x.n3")], entries)
+        self.assertTrue(r.ok, r.findings)
+        self.assertIn(("crate-a", "crates/c/rules/x.n3", "additional-readers map"), r.covered)
+
+    def test_sibling_read_not_in_readers_is_still_a_finding(self):
+        # A `readers` entry that does NOT name the reader does not cover it.
+        entries = [{"pattern": "crates/c/**", "readers": ["crate-b"]}]
+        r = self._audit([_ref("crate-a", "crates/c/rules/x.n3")], entries)
+        self.assertFalse(r.ok)
+        self.assertTrue(any("reverse-dependency closure" in f for f in r.findings))
+
+
+class AdditionalReadersMapTests(unittest.TestCase):
+    """[FABLE-5] sq-m4bxc: the shipped map's `readers` entries validate + resolve.
+
+    The two residual sibling-reads (sparq-zk -> secprop-ext, sparq-reason ->
+    sparq-solid/rules) are now closed by additional-readers entries; assert they
+    are present, valid, and MONOTONE (never a trigger-shadow, never an ownership
+    verdict)."""
+
+    def test_shipped_map_has_the_two_readers_entries(self):
+        readers_map = {
+            e["pattern"]: e["readers"]
+            for e in _real_map_entries() if "readers" in e
+        }
+        self.assertEqual(
+            readers_map.get("crates/sparq-trust/ontologies/zkp-sparql/**"),
+            # [FABLE-5] sq-mgxz8 (PR #3440): + sparq-policy, whose cross-crate
+            # dimension-IRI drift guards include_str! the shared secprop vocab.
+            ["sparq-zk", "sparq-trust", "sparq-policy"],
+        )
+        self.assertEqual(
+            readers_map.get("crates/sparq-solid/rules/**"), ["sparq-reason"],
+        )
+        # [FABLE-5] sq-mgxz8 (PR #3440): sparq-policy's drift guard also reads
+        # sparq-zk's per-method annotation graph (secprop-methods.ttl).
+        self.assertEqual(
+            readers_map.get("crates/sparq-zk/ontologies/**"), ["sparq-policy"],
+        )
+
+    def test_every_readers_name_is_a_real_member(self):
+        members = MapValidityTests()._members()
+        for e in _real_map_entries():
+            for c in e.get("readers", []) or []:
+                self.assertIn(c, members, f"map references unknown reader crate {c!r}")
+
+    def test_additional_readers_resolves_the_residual_paths(self):
+        entries = _real_map_entries()
+        self.assertIn(
+            "sparq-zk",
+            cs.additional_readers(
+                "crates/sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl", entries),
+        )
+        self.assertIn(
+            "sparq-reason",
+            cs.additional_readers("crates/sparq-solid/rules", entries),
+        )
+
+    def test_readers_entry_is_not_an_ownership_verdict(self):
+        # A readers entry must never resolve as a `crates`/`safe` verdict.
+        entries = _real_map_entries()
+        self.assertIsNone(cs.apply_ownership_map("crates/sparq-solid/rules/wac.n3", entries))
+
+    def test_validate_map_rejects_unknown_reader(self):
+        problems = cs.validate_map(
+            [{"pattern": "crates/x/**", "readers": ["nope"]}],
+            members={"sparq-core"}, known_generated_roots={"crates/x"},
+        )
+        self.assertTrue(any("unknown readers crate" in p for p in problems))
+
 
 class ScanRefsTests(unittest.TestCase):
     """The scanner finds escaping include_str! + manifest-join reads in a tempdir."""

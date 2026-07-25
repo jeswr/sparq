@@ -1,0 +1,4 @@
+@prefix ufo: <urn:ufo-sn3:> .
+@prefix ex:  <urn:ufo-sn3:case:accessibility:> .
+
+ex:intendsDelivery ufo:holdsIn ex:w2.

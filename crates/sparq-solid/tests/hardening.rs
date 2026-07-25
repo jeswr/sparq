@@ -90,6 +90,10 @@ fn reserved_session_values_fail_closed() {
 }
 
 /// End-to-end sanity after hardening: the normal path still works.
+// [OPUS-4.8] sq-gq28y (issue #1546): probes via an explicit `GRAPH ?g` pattern (feature-
+// agnostic under the empty-default flip — a single-triple bare pattern under the old
+// union-always default was exactly this) so alice's authorized-union count (599) is asserted
+// on the default (spec-conformant) build.
 #[test]
 fn normal_path_still_green_after_hardening() {
     let mut s = PodStore::new(Graph::load_dataset(&wac_fixture(), "nquads").unwrap());
@@ -98,7 +102,7 @@ fn normal_path_still_green_after_hardening() {
         .query_as(
             &Session { agent: Some(ALICE), client: None, issuer: None, now: None },
             Mode::Read,
-            "SELECT ?title WHERE { ?s <https://ex.dev/ns#title> ?title }",
+            "SELECT ?title WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?title } }",
         )
         .unwrap();
     assert_eq!(res.rows.len(), 599);

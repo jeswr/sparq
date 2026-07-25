@@ -68,12 +68,25 @@ Importing this `test` gives you, with no boilerplate:
 | `runner-state.ts` | `RunnerState` × surface → stable-locator map; `expectRunnerState` |
 | `page-objects/base-page.ts` | `BasePage` (nav + ⌘K palette + runner-state); subclass per surface |
 | `test-data/github.ts` + `fixtures/*.json` | the checked-in releases/latest fixtures + matcher |
-| `test-data/rdf.ts` | small deterministic RDF/SPARQL fixtures for the `/try` + home journeys |
+| `test-data/rdf.ts` | small deterministic RDF/SPARQL fixtures for the home + runner journeys |
 | `index.ts` | the barrel spec authors import |
 | `foundation.smoke.spec.ts` | the runner-state demo + determinism/hermetic proof (the stress-bar spec) |
 
-## CI
+## CI, gating & flake-quarantine
 
-`.github/workflows/site-e2e-foundation.yml` runs this foundation smoke as an **advisory**
-(`continue-on-error`) lane — it never gates the merge queue. Promotion to a required check is the
-separate bead `sq-ymr2e.12` (advisory-first, promotion earned; design §6.3).
+`.github/workflows/site-e2e-foundation.yml` runs this foundation smoke (+ the axe a11y scan) as an
+**advisory** (`continue-on-error`) lane — it never gates the merge queue. The site journey/visual
+lanes (`site-e2e-hero.yml`, `site-visual.yml`) are likewise advisory.
+
+Promotion of any of these deterministic lanes to a **required** check is governed by the
+checked-in policy **[`.github/E2E-GATING-POLICY.md`](../../../.github/E2E-GATING-POLICY.md)**
+(design of record: `research/web-gui-test-program.md` §6.3). In brief:
+
+- **Probation bar:** a lane earns gating only after **50 consecutive green runs on `main`
+  spanning ≥ 10 distinct PRs, OR two weeks — whichever is LONGER**, with zero quarantine events in
+  the window; evidence is linked in the promotion PR + the policy's ledger. Promotion is a one-line
+  flip (drop ` (advisory)` from the job name). The visual subset promotes separately and last.
+- **Flake-quarantine:** a test that passes-on-retry twice within 7 days is quarantined the same day
+  (`test.fixme`) with a P2 fix bead filed same-day; quarantined tests cannot gate. CI keeps
+  `retries=1` + `trace: on-first-retry` as diagnostics — never to hide a flake. The lane must never
+  train contributors to re-run.

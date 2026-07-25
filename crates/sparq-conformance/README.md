@@ -3,27 +3,27 @@
 
 The **W3C conformance harness** for [sparq](../../README.md): it runs the official
 test suites against the engine and reports a per-suite pass/fail/skip scoreboard,
-gated in CI by a pass-count ratchet. Three binaries share manifest-walking /
+gated in CI by pass-count ratchets. Three binaries share manifest-walking /
 result-comparison machinery: `sparq-conformance` (W3C SPARQL query/update/syntax),
 `sparq-inference-conformance` (RDF Semantics, OWL 2 RL, N3, entailment regimes via
-`sparq-reason`), and `sparq-conformance-scoreboard` (consolidated index of every
-ratchet — SPARQL, inference, W3C SHACL, OGC GeoSPARQL, Solid WAC + ACP, **W3C
-JSON-LD 1.1 toRdf + fromRdf + compact + expand + flatten + frame**, **SolidLab ODRL**).
-The scoreboard also surfaces SIX **`sparq extension`** rows, HONESTLY labelled NOT
-standards claims and tallied separately: the `sparq-text` BM25 oracle (sq-ripcg), the
-`sparq-rsp` RSP/SRBench oracle (sq-mcb3q), the **RIF-Core** expressivity ratchet
-(sq-rh4gu), the **OWL 2 QL** DL-Lite_R certain-answer oracle (sq-qo1a9), the **OWL 2 QL
-entailment-regime graduated subset** (sq-pbz04.3.4 — `pr:QL` cases passing a SIX-condition
-soundness predicate, pinned as an exact named-case list, the rest held with an exhaustive
-reason taxonomy — never a full-regime/profile QL claim), and the **OWL 2 EL** ratchet
-(sq-pbz04.2.4 — CR1–CR6, NOT full EL). Floors are MEASURED, mirrored + guarded textually.
+`sparq-reason`), and `sparq-conformance-scoreboard` (a consolidated index of every
+ratchet — SPARQL, inference, SHACL, GeoSPARQL, Solid WAC + ACP, JSON-LD 1.1,
+SolidLab ODRL — plus eight `sparq extension` rows, HONESTLY labelled NOT standards
+claims and tallied separately). Floors are MEASURED and guarded textually; the
+`scoreboard` rustdoc has the full per-lane provenance and divergence sets.
 
-Crate-local `cargo test` lanes also sit behind **opt-in features** (OFF by default, so the lean `cargo test` never links their heavy deps). **`jsonld-suite`** ratchets the W3C `json-ld-api` (toRdf/fromRdf/**compact**/**expand**/**flatten**, sq-oy1f) + `json-ld-framing` (**frame**, sq-oy1f.19) suites against the NORMATIVE expected docs (MEASURED floors, divergences reported not inflated). **`service-loopback`** (sq-ushvx) is the SERVICE-federation keystone — `service_loopback::LoopbackEndpoint` stands up a REAL `sparq_server::serve` on an ephemeral `127.0.0.1:0` port and drives a federated SERVICE query through the engine's REAL `ureq` transport end-to-end; its egress allowlist is scoped to the bound loopback host (NOT a global disable; host- not port-keyed, see rustdoc). **`service`** (sq-ddpgx) builds on it to ratchet the W3C `sparql11/service` EVALUATION suite: each `qt:serviceData` block is served by a loopback endpoint, endpoint IRIs are rewritten to the bound URLs, and the federated query runs end-to-end vs the `.srx` oracle (MEASURED floor; `SILENT`-swallow vs non-`SILENT`-propagate tested against a closed port; a variable `SERVICE ?ep` is the one documented Skip (nested non-`SILENT` `SERVICE` now handled via per-endpoint egress config, sq-my8wd.1)). **`http-protocol`** (sq-jaj38) reuses the same loopback server but drives RAW HTTP at the bound port to ratchet the W3C SPARQL 1.1 **Protocol** itself — GET/POST query+update, the `QUERY` method (#1304), `default`/`named-graph-uri` overrides, SRJ/SRX/CSV/TSV negotiation, 200/400/405/415 (MEASURED PASS floor; the 406-less Accept fallback + ASK-in-CSV are documented divergences, NOT summed in). **`federation-descriptors`** (sq-1uuxz) reuses the same loopback server — with the server's `federation-descriptors` flag ON — to ratchet the SPARQL 1.1 **Service Description** (the `GET /sparql` no-query `sd:Service` advertises exactly the formats/languages/versions/features the server genuinely implements — no over-advertising, each result format cross-checked against a real request) + the **Graph Store Protocol** (a GET/PUT/POST/DELETE round-trip on a named graph — indirect `?graph=` + direct `/graphs/<path>` — and the default graph `?default`, verifying store state after each op; 200/201/204/400/404/405/415; the absent-graph 200-empty read is a documented divergence, NOT summed in). The inference-side lanes **`d-entail`** (sq-e5atd), **`rif-core`** (sq-rh4gu), **`ql-experimental`** (sq-qo1a9 + the sq-pbz04.3.4 graduated-subset floor) and **`el-suite`** (sq-pbz04.2.4 — the OWL 2 EL classifier via `sparq-reason-el/classify_graph`) are likewise opt-in crate-test ratchets (see the `scoreboard` rustdoc). The ODRL ratchet (sq-tmsd6) lives in `sparq-policy`.
+The registry also has a **machine-readable export** (sq-gum8.14):
+`scoreboard::scoreboard_json()` renders the same rows + floors as deterministic JSON,
+committed as `bench/conformance-scoreboard.generated.json` and drift-guarded by
+`tests/scoreboard_export.rs` — so paper-evidence bindings can reference suite rows /
+floors by json-pointer without the mirror silently drifting. Several crate-local
+`cargo test` lanes sit behind **opt-in features** (OFF by default) — `jsonld-suite`,
+`service`, `http-protocol`, `federation-descriptors`, and the inference/geo/syntax
+lanes; the `scoreboard` rustdoc documents each lane's scope, floor and divergences.
 
 > **Internal dev-only harness — not published** (`publish = false`). Test data is
-> fetched by `scripts/fetch-conformance.sh`, `fetch-jsonld-tests.sh`,
-> `fetch-jsonld-framing-tests.sh`, `fetch-odrl-suite.sh`. Contributing:
-> [`AGENTS.md`](../../AGENTS.md).
+> fetched by `scripts/fetch-conformance.sh` + the sibling `fetch-jsonld*` /
+> `fetch-odrl-suite.sh` scripts. Contributing: [`AGENTS.md`](../../AGENTS.md).
 
 ## License
 

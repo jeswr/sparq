@@ -14,9 +14,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 . "$ROOT/scripts/lib/fetch-retry.sh"
 
 # Pinned w3c/json-ld-api commit (main, 2026-06). Bump deliberately: the
-# JSON-LD conformance pass-count floors (toRdf / fromRdf) in
-# crates/sparq-conformance/tests/jsonld_floors.rs are calibrated against THIS
-# suite revision — they are only comparable across runs when the suite is fixed.
+# JSON-LD conformance pass-count floors (toRdf / fromRdf / compact / expand /
+# flatten) in crates/sparq-conformance/src/floors/<lane>.rs ([FABLE-5] sq-oy1f.40 —
+# the lib-side single source, imported by the runner + scoreboard + ci grep) are
+# calibrated against THIS suite revision — they are only comparable across runs
+# when the suite is fixed.
 PIN="8654ac22b6cf4f441d2fee915ae634d36b5a8067"
 
 DEST="$ROOT/tests/w3c/json-ld-api"

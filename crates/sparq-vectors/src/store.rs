@@ -16,6 +16,44 @@
 //!            (id: u32, slot: u32) pairs sorted by id ascending
 //! ```
 //!
+//! # [FABLE-5] (sq-lhcot.1) File format version 3 — embedding provenance
+//!
+//! Version 3 extends the v2 header with a length-prefixed **embedding-provenance block** after the
+//! fingerprint, then the data section begins:
+//!
+//! ```text
+//! offset 0..56  (as v2, but version = 3)
+//! offset 56  prov_len     u32 (length of the provenance block)   4 bytes
+//! offset 60  provenance   [prov_len] bytes                       prov_len bytes
+//!            (see crate::spqv_provenance::EmbeddingProvenance::to_bytes)
+//! offset 60+prov_len  data ... (as v2)
+//! ```
+//!
+//! The provenance block records the embedding pipeline's identity (model id, model/content version,
+//! metric, normalization, verbalization regime) and a RESERVED opaque extension area (KERN boundary:
+//! **extension fields reserved pending the cross-implementation profile #1746** — no fields defined).
+//! [`VectorStore::check_provenance`] rejects a query whose embedder is incompatible with the store's,
+//! closing the reproducibility gap the v2 container left open (a query in a different embedding space
+//! returns arithmetically-defined but semantically-WRONG neighbours). See [`crate::spqv_provenance`].
+//!
+//! **Opt-in write discipline (mirrors how v2 was introduced).** v3 is WRITTEN only when the opt-in
+//! `spqv-provenance` feature is on AND a provenance was bound (`VectorStore::with_provenance`); with
+//! the feature off (or no provenance) the writer emits v2 exactly as before — the default on-disk
+//! format is unchanged. The v3 READ path is ALWAYS compiled: a v3 store opens on a feature-off build
+//! (its provenance is exposed via [`VectorStore::provenance`]; only the demanding query check is
+//! feature-gated), exactly as v1 and v2 both open regardless of features. A v2/v1 store carries no
+//! provenance, so `check_provenance` fails closed against it unless the caller opts into
+//! [`LegacyMode::Allow`].
+//!
+//! # Version 4 — opt-in per-vector metadata
+//!
+//! With the default-OFF `metadata-sidecar` feature, calling `put_with_meta` selects v4. It adds a
+//! deterministic, length-delimited metadata block between the optional provenance block and the
+//! aligned vector data. Each entry is `(id, opaque UTF-8 bytes)`, sorted by id. Ordinary `put` calls
+//! write v2 (or v3 when provenance is bound) exactly as before, even when the feature is enabled.
+//! Metadata is accessed with `meta` and decorates `nearest_exact_with_meta`; it never participates
+//! in scoring or ordering.
+//!
 //! [OPUS-4.8] (sq-32i5) The **fingerprint** binds the store to the graph it was built against
 //! (see [`crate::fingerprint`]): a store keyed by dictionary id is meaningless against a graph
 //! whose ids have shifted, so [`VectorStore::check_graph`] errors on a mismatch instead of letting
@@ -52,6 +90,10 @@
 //! byte-identical version-1 files.
 
 use crate::fingerprint::{self, Fingerprint, FINGERPRINT_LEN};
+use crate::spqv_provenance::EmbeddingProvenance;
+// [FABLE-5] (sq-98c) memmap2 is a native-only dependency (target-gated out of wasm32 builds in
+// Cargo.toml); on wasm the read paths use the owned-bytes backing below instead of a map.
+#[cfg(not(target_arch = "wasm32"))]
 use memmap2::Mmap;
 use rustc_hash::FxHashMap;
 use sparq_core::dict::Id;
@@ -61,12 +103,24 @@ use std::path::{Path, PathBuf};
 
 /// First four bytes of every `.spqv` file.
 pub const SPQV_MAGIC: [u8; 4] = *b"SPQV";
-/// Current format version. [OPUS-4.8] (sq-32i5) v2 adds the 24-byte graph fingerprint block at
-/// offset 32; v1 files (32-byte header, no fingerprint) still open but cannot be verified.
+/// Current DEFAULT format version. [OPUS-4.8] (sq-32i5) v2 adds the 24-byte graph fingerprint block
+/// at offset 32; v1 files (32-byte header, no fingerprint) still open but cannot be verified. v2
+/// remains the default WRITE version — the v3 embedding-provenance format ([`SPQV_VERSION_V3`]) is
+/// written only under the opt-in `spqv-provenance` feature with a bound provenance. [FABLE-5]
 pub const SPQV_VERSION: u32 = 2;
+/// [FABLE-5] (sq-lhcot.1) The embedding-provenance format version — a v2 header plus a
+/// length-prefixed [`EmbeddingProvenance`] block after the fingerprint. WRITTEN only when the opt-in
+/// `spqv-provenance` feature is on and a provenance was bound (`VectorStore::with_provenance`); READ
+/// always (a v3 file opens regardless of features).
+pub const SPQV_VERSION_V3: u32 = 3;
+/// Metadata-bearing `.spqv` format, written only by the opt-in `metadata-sidecar` feature when at
+/// least one vector carries a tag.
+#[cfg(feature = "metadata-sidecar")]
+pub const SPQV_VERSION_V4: u32 = 4;
 /// Header length of a version-1 file (no fingerprint block).
 const HEADER_LEN_V1: usize = 32;
-/// Header length of the current (version-2) format: the v1 header + the fingerprint block.
+/// Header length of the version-2 format: the v1 header + the fingerprint block. Also the length of
+/// the v3 header PREFIX (the v3 provenance block + its `u32` length prefix follow this offset).
 const HEADER_LEN: usize = HEADER_LEN_V1 + FINGERPRINT_LEN;
 
 /// [OPUS-4.8] A 4-byte-aligned owned byte buffer. A plain `Vec<u8>` has alignment 1, so its base
@@ -74,7 +128,7 @@ const HEADER_LEN: usize = HEADER_LEN_V1 + FINGERPRINT_LEN;
 /// `&[f32]` via `from_raw_parts`, which is UNDEFINED BEHAVIOR on an unaligned pointer. Backing the
 /// owned bytes with a `Vec<u32>` (alignment 4) guarantees the base — and therefore every
 /// `HEADER_LEN + slot·dim·4` offset (all multiples of 4) — is f32-aligned. See review 1874.
-struct AlignedBytes {
+pub(crate) struct AlignedBytes {
     /// Backing storage; only `len` bytes are logically valid (the last word may be padding).
     words: Vec<u32>,
     len: usize,
@@ -104,17 +158,55 @@ impl AlignedBytes {
 /// Read-phase backing bytes: a memory map ([`VectorStore::open`]) or an owned
 /// buffer ([`VectorStore::open_from_bytes`] — environments without a
 /// filesystem). Both deref to `[u8]`; every read path is shared.
-enum Bytes {
+/// `pub(crate)` so [`crate::diskann`] shares the same backing for `.spqg` files. [FABLE-5]
+pub(crate) enum Bytes {
+    /// [FABLE-5] (sq-98c) Native-only: memmap2 is target-gated out of wasm32 builds, where
+    /// the owned-bytes backing serves every read instead.
+    #[cfg(not(target_arch = "wasm32"))]
     Map(Mmap),
     /// [OPUS-4.8] f32-aligned owned bytes (see `AlignedBytes`) so the `slot_vector` f32 cast is
     /// always aligned — a plain `Vec<u8>` is alignment 1 and would risk UB. Review 1874.
     Owned(AlignedBytes),
 }
 
+impl Bytes {
+    /// Copies `bytes` into the f32-aligned owned backing. Shared by the `open_from_bytes`
+    /// entry points here and in [`crate::diskann`]. [FABLE-5]
+    pub(crate) fn owned(bytes: Vec<u8>) -> Bytes {
+        Bytes::Owned(AlignedBytes::from_vec(bytes))
+    }
+}
+
+/// [FABLE-5] (sq-98c) Opens the read backing for a store/index file: a read-only memory map on
+/// native targets, a buffered `std::fs::read` into the f32-aligned owned backing on wasm32
+/// (memmap2 is target-gated out of wasm builds; a wasm target WITH a filesystem, e.g. WASI,
+/// reads the whole file — on `wasm32-unknown-unknown` the read fails with a clean I/O error,
+/// and [`VectorStore::open_from_bytes`] / [`DiskAnnIndex::open_from_bytes`] are the
+/// filesystem-less paths). Validation downstream is identical for both backings.
+///
+/// [`DiskAnnIndex::open_from_bytes`]: crate::diskann::DiskAnnIndex::open_from_bytes
+pub(crate) fn open_backing(path: &Path) -> Result<Bytes, String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+        // SAFETY: read-only map of a regular file; we treat concurrent external
+        // modification of the file as out of contract (same stance as sparq-core's
+        // mmap'd dictionary/indexes).
+        let map = unsafe { Mmap::map(&file) }.map_err(|e| format!("mmap {}: {e}", path.display()))?;
+        Ok(Bytes::Map(map))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        Ok(Bytes::owned(bytes))
+    }
+}
+
 impl std::ops::Deref for Bytes {
     type Target = [u8];
     fn deref(&self) -> &[u8] {
         match self {
+            #[cfg(not(target_arch = "wasm32"))]
             Bytes::Map(m) => m,
             Bytes::Owned(v) => v.as_bytes(),
         }
@@ -126,6 +218,21 @@ enum Backing {
     Build { data: Vec<f32>, slots: FxHashMap<Id, u32>, ids: Vec<Id> },
     /// Read phase: the whole file is memory-mapped or held as owned bytes.
     Map(Bytes),
+}
+
+/// [FABLE-5] (sq-lhcot.1) How [`VectorStore::check_provenance`] treats a LEGACY (v1/v2) store that
+/// carries no embedding provenance. The default is [`Reject`](Self::Reject) — fail-closed, since a
+/// legacy store's embedding pipeline is unverifiable. A v3 store is always checked against its
+/// recorded provenance regardless of this mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LegacyMode {
+    /// Fail-closed (the default): a legacy store with no provenance REJECTS a provenance-demanding
+    /// query — its embedding pipeline cannot be verified compatible.
+    Reject,
+    /// Bypass the check for a LEGACY (no-provenance) store only — for a caller that KNOWS the store
+    /// was built with a compatible pipeline. A v3 store is still checked against its recorded
+    /// provenance.
+    Allow,
 }
 
 /// A flat per-term-id f32 vector store backed by one `.spqv` file. See the module docs
@@ -141,10 +248,16 @@ pub struct VectorStore {
     /// [`check_graph`](Self::check_graph) uses it to reject a stale store before a query
     /// can mis-resolve.
     fingerprint: Option<Fingerprint>,
+    /// [FABLE-5] (sq-lhcot.1) The embedding provenance bound to this store: `Some` for a v3 file (or
+    /// a build-phase store after `with_provenance` (feature-gated)), `None` for a v1/v2 file
+    /// (which predate embedding provenance) and a freshly `create`d store until a provenance is bound.
+    /// [`check_provenance`](Self::check_provenance) uses it to reject an incompatible query embedder.
+    provenance: Option<EmbeddingProvenance>,
     /// Byte offset where the dense vector data begins: [`HEADER_LEN`] for a version-2 file (the
-    /// current build path), [`HEADER_LEN_V1`] for an opened legacy version-1 file. Every read path
-    /// (`get`, `iter`, `slot_vector`, the trailing index) keys off this so both versions are read
-    /// correctly by the same code.
+    /// v2 build path), [`HEADER_LEN_V1`] for an opened legacy version-1 file, and
+    /// `HEADER_LEN + 4 + prov_len` for a v3 file (the fingerprint block + the length-prefixed
+    /// provenance block). Every read path (`get`, `iter`, `slot_vector`, the trailing index) keys off
+    /// this so all versions are read correctly by the same code. [FABLE-5]
     data_offset: usize,
     /// slot→id for mmap mode (the on-disk index is sorted by id, the data by slot);
     /// built lazily on the first [`iter`](Self::iter), O(count) once.
@@ -158,6 +271,10 @@ pub struct VectorStore {
     /// feature, so the default build carries no delta state. See [`crate::delta`].
     #[cfg(feature = "delta")]
     delta: Option<crate::delta::VectorDelta>,
+    /// Opaque per-vector tags. Present only in `metadata-sidecar` builds, so the default store
+    /// carries neither the map nor the v4 codec.
+    #[cfg(feature = "metadata-sidecar")]
+    metadata: FxHashMap<Id, String>,
 }
 
 impl VectorStore {
@@ -175,10 +292,13 @@ impl VectorStore {
             path: path.into(),
             backing: Backing::Build { data: Vec::new(), slots: FxHashMap::default(), ids: Vec::new() },
             fingerprint: None,
+            provenance: None,
             data_offset: HEADER_LEN,
             inverse: std::sync::OnceLock::new(),
             #[cfg(feature = "delta")]
             delta: None,
+            #[cfg(feature = "metadata-sidecar")]
+            metadata: FxHashMap::default(),
         })
     }
 
@@ -194,6 +314,24 @@ impl VectorStore {
         self
     }
 
+    /// [FABLE-5] (sq-lhcot.1) Binds this build-phase store to the embedding `provenance` its vectors
+    /// were produced with — the model id, model/content version, metric, normalization, and
+    /// verbalization regime. [`finalize`](Self::finalize) then writes the store in the **v3** format
+    /// with the provenance embedded in the header. Call it before `finalize` (most naturally right
+    /// after `create`, with the provenance of the embedder used to `put` the vectors).
+    ///
+    /// Binding a provenance is what selects the v3 write path: a store finalized WITHOUT one is
+    /// written in the v2 format (no provenance), exactly as before. This method is gated behind the
+    /// opt-in `spqv-provenance` feature — mirroring how the v2 fingerprint format was introduced, the
+    /// v3 WRITE surface is opt-in so the default build's on-disk format is unchanged. Chains:
+    /// `VectorStore::create(p, d)?.with_provenance(prov)`.
+    #[cfg(feature = "spqv-provenance")]
+    #[must_use]
+    pub fn with_provenance(mut self, provenance: EmbeddingProvenance) -> VectorStore {
+        self.provenance = Some(provenance);
+        self
+    }
+
     /// Memory-maps an existing `.spqv` file read-only. Cheap: only the header and the trailing
     /// `count·8`-byte id→slot index are read eagerly (the index is validated so no later read can
     /// panic on a corrupt file); the vector data — the overwhelming bulk of the file — is paged in
@@ -204,14 +342,15 @@ impl VectorStore {
     /// file (32-byte header, no fingerprint) still opens — its `fingerprint` is `None`, so
     /// `check_graph` reports it as unverifiable rather than silently passing. Rebuild such a store to
     /// enable the staleness check.
+    ///
+    /// [FABLE-5] (sq-98c) On wasm32 (memmap2 target-gated out) this reads the whole file into
+    /// the same f32-aligned owned backing [`open_from_bytes`](Self::open_from_bytes) uses —
+    /// identical validation, no map. `wasm32-unknown-unknown` has no filesystem, so there the
+    /// read fails with a clean I/O error and `open_from_bytes` is the supported path.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<VectorStore, String> {
         let path = path.as_ref();
-        let file = std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
-        // SAFETY: read-only map of a regular file; we treat concurrent external
-        // modification of the file as out of contract (same stance as sparq-core's
-        // mmap'd dictionary/indexes).
-        let map = unsafe { Mmap::map(&file) }.map_err(|e| format!("mmap {}: {e}", path.display()))?;
-        Self::open_validated(Bytes::Map(map), path.to_path_buf(), &path.display().to_string())
+        let backing = open_backing(path)?;
+        Self::open_validated(backing, path.to_path_buf(), &path.display().to_string())
     }
 
     /// Opens a `.spqv` document held entirely in memory — for environments
@@ -222,7 +361,7 @@ impl VectorStore {
     pub fn open_from_bytes(bytes: Vec<u8>) -> Result<VectorStore, String> {
         // [OPUS-4.8] Copy into a 4-byte-aligned backing so the read-phase f32 casts are aligned
         // (a plain Vec<u8> is alignment 1 — casting its slices to &[f32] is UB). Review 1874.
-        Self::open_validated(Bytes::Owned(AlignedBytes::from_vec(bytes)), PathBuf::new(), "<bytes>")
+        Self::open_validated(Bytes::owned(bytes), PathBuf::new(), "<bytes>")
     }
 
     /// Shared header/index validation behind [`open`](Self::open) and
@@ -239,23 +378,6 @@ impl VectorStore {
             return Err(format!("{origin}: not a .spqv file (bad magic)"));
         }
         let version = u32::from_le_bytes(map[4..8].try_into().unwrap());
-        // [OPUS-4.8] (sq-32i5) Both v1 (no fingerprint, 32-byte header) and v2 (fingerprint,
-        // 56-byte header) open; the header length and the offset where the vector data begins
-        // depend on the version, so every downstream read keys off `data_offset` below.
-        let (data_offset, fingerprint): (usize, Option<Fingerprint>) = match version {
-            1 => (HEADER_LEN_V1, None),
-            2 => {
-                if map.len() < HEADER_LEN {
-                    return Err(format!("{origin}: truncated version-2 header (fingerprint block)"));
-                }
-                // [OPUS-4.8] (sq-32i5) An all-zero block (a v2 store finalized without
-                // `with_fingerprint`) decodes to `None` ("unverifiable"), not a zero fingerprint
-                // that would surface as a spurious "DIFFERENT graph" mismatch.
-                let fp = Fingerprint::from_bytes_opt(&map[HEADER_LEN_V1..HEADER_LEN]);
-                (HEADER_LEN, fp)
-            }
-            v => return Err(format!("{origin}: unsupported .spqv version {v}")),
-        };
         let dim = u32::from_le_bytes(map[8..12].try_into().unwrap()) as usize;
         let count64 = u64::from_le_bytes(map[12..20].try_into().unwrap());
         if dim == 0 {
@@ -264,6 +386,133 @@ impl VectorStore {
         let count: usize = count64
             .try_into()
             .map_err(|_| format!("{origin}: count {count64} exceeds the address space"))?;
+        #[cfg(feature = "metadata-sidecar")]
+        let mut metadata = FxHashMap::default();
+        // [OPUS-4.8] (sq-32i5) v1 (no fingerprint, 32-byte header), v2 (fingerprint, 56-byte header),
+        // and [FABLE-5] (sq-lhcot.1) v3 (v2 header + a length-prefixed embedding-provenance block)
+        // all open; the header length and the offset where the vector data begins depend on the
+        // version, so every downstream read keys off `data_offset` below. The v3 READ path is always
+        // compiled (a v3 file opens even on a build without the `spqv-provenance` feature).
+        let (data_offset, fingerprint, provenance): (usize, Option<Fingerprint>, Option<EmbeddingProvenance>) =
+            match version {
+                1 => (HEADER_LEN_V1, None, None),
+                2 => {
+                    if map.len() < HEADER_LEN {
+                        return Err(format!(
+                            "{origin}: truncated version-2 header (fingerprint block)"
+                        ));
+                    }
+                    // [OPUS-4.8] (sq-32i5) An all-zero block (a v2 store finalized without
+                    // `with_fingerprint`) decodes to `None` ("unverifiable"), not a zero fingerprint
+                    // that would surface as a spurious "DIFFERENT graph" mismatch.
+                    let fp = Fingerprint::from_bytes_opt(&map[HEADER_LEN_V1..HEADER_LEN]);
+                    (HEADER_LEN, fp, None)
+                }
+                3 => {
+                    // [FABLE-5] (sq-lhcot.1) v3 header = the v2 header (magic/version/dim/count/
+                    // reserved/fingerprint) + a `u32` provenance-block length at HEADER_LEN + that
+                    // many provenance bytes; the data section follows. Validate each step before
+                    // slicing so a corrupt header is a descriptive error, never an out-of-bounds read.
+                    if map.len() < HEADER_LEN + 4 {
+                        return Err(format!(
+                            "{origin}: truncated version-3 header (provenance length prefix)"
+                        ));
+                    }
+                    let fp = Fingerprint::from_bytes_opt(&map[HEADER_LEN_V1..HEADER_LEN]);
+                    let prov_len =
+                        u32::from_le_bytes(map[HEADER_LEN..HEADER_LEN + 4].try_into().unwrap())
+                            as usize;
+                    if prov_len > crate::spqv_provenance::MAX_PROVENANCE_BLOCK_LEN {
+                        return Err(format!(
+                            "{origin}: version-3 provenance block length {prov_len} exceeds the cap"
+                        ));
+                    }
+                    let prov_start = HEADER_LEN + 4;
+                    let prov_end = prov_start.checked_add(prov_len).ok_or_else(|| {
+                        format!("{origin}: version-3 provenance length {prov_len} overflows")
+                    })?;
+                    if map.len() < prov_end {
+                        return Err(format!(
+                            "{origin}: truncated version-3 provenance block (need {prov_len} bytes)"
+                        ));
+                    }
+                    let prov = EmbeddingProvenance::from_bytes(&map[prov_start..prov_end])
+                        .map_err(|e| format!("{origin}: {e}"))?;
+                    // [FABLE-5] The data section is zero-padded to the next 4-byte boundary after the
+                    // provenance block (see `build_header`) so the f32 casts stay aligned. Recompute
+                    // the same padded offset here; the pad bytes (if any) are not part of the block.
+                    let padded = prov_end.div_ceil(4) * 4;
+                    if map.len() < padded {
+                        return Err(format!(
+                            "{origin}: truncated version-3 header (provenance padding)"
+                        ));
+                    }
+                    (padded, fp, Some(prov))
+                }
+                #[cfg(feature = "metadata-sidecar")]
+                4 => {
+                    if map.len() < HEADER_LEN + 4 {
+                        return Err(format!(
+                            "{origin}: truncated version-4 header (provenance length prefix)"
+                        ));
+                    }
+                    let fp = Fingerprint::from_bytes_opt(&map[HEADER_LEN_V1..HEADER_LEN]);
+                    let prov_len =
+                        u32::from_le_bytes(map[HEADER_LEN..HEADER_LEN + 4].try_into().unwrap())
+                            as usize;
+                    if prov_len > crate::spqv_provenance::MAX_PROVENANCE_BLOCK_LEN {
+                        return Err(format!(
+                            "{origin}: version-4 provenance block length {prov_len} exceeds the cap"
+                        ));
+                    }
+                    let prov_start = HEADER_LEN + 4;
+                    let prov_end = prov_start.checked_add(prov_len).ok_or_else(|| {
+                        format!("{origin}: version-4 provenance length {prov_len} overflows")
+                    })?;
+                    let meta_len_end = prov_end.checked_add(8).ok_or_else(|| {
+                        format!("{origin}: version-4 metadata length offset overflows")
+                    })?;
+                    if map.len() < meta_len_end {
+                        return Err(format!(
+                            "{origin}: truncated version-4 header (metadata length prefix)"
+                        ));
+                    }
+                    let provenance = if prov_len == 0 {
+                        None
+                    } else {
+                        Some(
+                            EmbeddingProvenance::from_bytes(&map[prov_start..prov_end])
+                                .map_err(|e| format!("{origin}: {e}"))?,
+                        )
+                    };
+                    let meta_len64 =
+                        u64::from_le_bytes(map[prov_end..meta_len_end].try_into().unwrap());
+                    let meta_len: usize = meta_len64.try_into().map_err(|_| {
+                        format!("{origin}: metadata block length exceeds the address space")
+                    })?;
+                    let meta_end = meta_len_end.checked_add(meta_len).ok_or_else(|| {
+                        format!("{origin}: version-4 metadata length {meta_len} overflows")
+                    })?;
+                    if map.len() < meta_end {
+                        return Err(format!(
+                            "{origin}: truncated version-4 metadata block (need {meta_len} bytes)"
+                        ));
+                    }
+                    metadata = crate::metadata::decode(
+                        &map[meta_len_end..meta_end],
+                        count,
+                        origin,
+                    )?;
+                    let padded = meta_end.div_ceil(4) * 4;
+                    if map.len() < padded {
+                        return Err(format!(
+                            "{origin}: truncated version-4 header (metadata padding)"
+                        ));
+                    }
+                    (padded, fp, provenance)
+                }
+                v => return Err(format!("{origin}: unsupported .spqv version {v}")),
+            };
         // Checked size arithmetic: a malformed header must be rejected here, not wrap
         // around and pass the size check (or panic later in `get`/`iter`).
         let expect = count
@@ -285,9 +534,12 @@ impl VectorStore {
         // `iter`'s inverse map assumes). After this, no read path can panic on a
         // corrupt index.
         {
-            let index = &map[data_offset + count * dim * 4..];
+            let index_start = data_offset + count * dim * 4;
+            let index = &map[index_start..index_start + count * 8];
             let mut slot_seen = vec![false; count];
             let mut prev_id: Option<Id> = None;
+            #[cfg(feature = "metadata-sidecar")]
+            let mut metadata_matches = 0usize;
             for i in 0..count {
                 let id = u32::from_le_bytes(index[i * 8..i * 8 + 4].try_into().unwrap());
                 let slot =
@@ -304,6 +556,16 @@ impl VectorStore {
                     ));
                 }
                 slot_seen[slot] = true;
+                #[cfg(feature = "metadata-sidecar")]
+                if metadata.contains_key(&id) {
+                    metadata_matches += 1;
+                }
+            }
+            #[cfg(feature = "metadata-sidecar")]
+            if metadata_matches != metadata.len() {
+                return Err(format!(
+                    "{origin}: metadata references an id that has no vector"
+                ));
             }
         }
         Ok(VectorStore {
@@ -311,10 +573,13 @@ impl VectorStore {
             path,
             backing: Backing::Map(map),
             fingerprint,
+            provenance,
             data_offset,
             inverse: std::sync::OnceLock::new(),
             #[cfg(feature = "delta")]
             delta: None,
+            #[cfg(feature = "metadata-sidecar")]
+            metadata,
         })
     }
 
@@ -337,6 +602,22 @@ impl VectorStore {
         Ok(())
     }
 
+    /// Appends `vector` for `id` and associates an opaque UTF-8 metadata tag with it.
+    ///
+    /// Validation and build-phase restrictions are identical to [`put`](Self::put). The tag is
+    /// persisted byte-for-byte by [`finalize`](Self::finalize), including an empty string. Writing
+    /// the first tag selects the opt-in v4 format; stores built exclusively with `put` retain the
+    /// existing v2/v3 format exactly.
+    #[cfg(feature = "metadata-sidecar")]
+    pub fn put_with_meta(&mut self, id: Id, vector: &[f32], meta: &str) -> Result<(), String> {
+        if meta.len() > u32::MAX as usize {
+            return Err(format!("metadata for id {id} exceeds the .spqv length limit"));
+        }
+        self.put(id, vector)?;
+        self.metadata.insert(id, meta.to_owned());
+        Ok(())
+    }
+
     /// Writes the `.spqv` file and re-opens it memory-mapped; the handle then serves
     /// reads from the map and rejects further [`put`](Self::put)s. Idempotent on an
     /// already-finalized/opened store.
@@ -345,18 +626,17 @@ impl VectorStore {
             return Ok(());
         };
         let count = ids.len();
-        let mut header = [0u8; HEADER_LEN];
-        header[0..4].copy_from_slice(&SPQV_MAGIC);
-        header[4..8].copy_from_slice(&SPQV_VERSION.to_le_bytes());
-        header[8..12].copy_from_slice(&(self.dim as u32).to_le_bytes());
-        header[12..20].copy_from_slice(&(count as u64).to_le_bytes());
-        // [OPUS-4.8] (sq-32i5) Embed the graph fingerprint (offset 32..56). A store finalized
-        // without one (no `with_fingerprint`) writes a zeroed block, which `open` decodes back to
-        // `None` (`Fingerprint::from_bytes_opt`) — reported by `check_graph` as "unverifiable",
-        // NOT as a spurious "DIFFERENT graph" mismatch; prefer setting it explicitly.
-        if let Some(fp) = self.fingerprint {
-            header[HEADER_LEN_V1..HEADER_LEN].copy_from_slice(&fp.to_bytes());
-        }
+        // [FABLE-5] (sq-lhcot.1) Build the header: v3 (with the embedding-provenance block) if a
+        // provenance is bound, else v2 exactly as before. `build_header` is the single seam that both
+        // this in-RAM writer and the `StreamingWriter` share, so the two writers stay byte-identical.
+        let header = build_header(
+            self.dim,
+            count,
+            self.fingerprint,
+            self.provenance.as_ref(),
+            #[cfg(feature = "metadata-sidecar")]
+            (!self.metadata.is_empty()).then_some(&self.metadata),
+        );
 
         let mut index: Vec<(Id, u32)> = slots.iter().map(|(&id, &slot)| (id, slot)).collect();
         index.sort_unstable();
@@ -380,13 +660,22 @@ impl VectorStore {
             .and_then(|()| file.write_all(&index_bytes))
             .and_then(|()| file.flush())
             .map_err(|e| format!("write {}: {e}", self.path.display()))?;
+        // [FABLE-5] (sq-98c) Explicit close before the reopen below. On wasm32 the `File` stub
+        // has no `Drop` impl, which trips clippy's `drop_non_drop` there — the close is still
+        // intentional on every target that can reach this path (native + WASI).
+        #[allow(clippy::drop_non_drop)]
         drop(file);
 
         let reopened = VectorStore::open(&self.path)?;
         self.backing = reopened.backing;
         self.fingerprint = reopened.fingerprint;
+        self.provenance = reopened.provenance;
         self.data_offset = reopened.data_offset;
         self.inverse = std::sync::OnceLock::new();
+        #[cfg(feature = "metadata-sidecar")]
+        {
+            self.metadata = reopened.metadata;
+        }
         Ok(())
     }
 
@@ -407,6 +696,14 @@ impl VectorStore {
             }
         }
         self.base_get(id)
+    }
+
+    /// Returns `id`'s opaque metadata tag, or `None` when the id has no effective vector or was
+    /// written with [`put`](Self::put) rather than [`put_with_meta`](Self::put_with_meta).
+    #[cfg(feature = "metadata-sidecar")]
+    pub fn meta(&self, id: Id) -> Option<&str> {
+        self.get(id)?;
+        self.metadata.get(&id).map(String::as_str)
     }
 
     /// The vector for `id` from the immutable base only (no delta) — the original `get` body. The
@@ -504,6 +801,59 @@ impl VectorStore {
             self.path.display().to_string()
         };
         fingerprint::check_against(self.fingerprint, graph, fingerprint::Artifact::Store, &origin)
+    }
+
+    /// [FABLE-5] (sq-lhcot.1) The embedding provenance this store was built with, or `None` for a
+    /// legacy v1/v2 file (which predate embedding provenance) or a store finalized without
+    /// `with_provenance` (feature-gated). See [`check_provenance`](Self::check_provenance).
+    /// Always available (the v3 read path is always compiled, even without the `spqv-provenance`
+    /// feature).
+    pub fn provenance(&self) -> Option<&EmbeddingProvenance> {
+        self.provenance.as_ref()
+    }
+
+    /// [FABLE-5] (sq-lhcot.1) **Mandatory compatibility guard.** Verifies a query issued under
+    /// `query` embedding provenance is compatible with this store's — the SAME model id, model/content
+    /// version, metric, normalization, and verbalization regime, AND the same `dim` — so the query
+    /// vector lands in the store's embedding space. Returns a descriptive `Err` naming every mismatched
+    /// axis; the query would otherwise return arithmetically-defined but semantically WRONG neighbours.
+    ///
+    /// **Fail-closed for legacy stores.** A v1/v2 store carries no provenance ([`provenance`](Self::provenance)
+    /// is `None`). By default (`legacy` = [`LegacyMode::Reject`]) this REJECTS such a store — its
+    /// embedding pipeline is unverifiable, so we cannot certify the query is compatible. A caller that
+    /// KNOWS the legacy store is compatible can pass [`LegacyMode::Allow`] to bypass the check for a
+    /// legacy store only (a v3 store is ALWAYS checked against its recorded provenance regardless of
+    /// `legacy`). See [`LegacyMode`].
+    ///
+    /// The reserved (KERN) extension area of the provenance does NOT participate in the check
+    /// (extension fields reserved pending the #1746 profile), so a v3 store written by a future
+    /// implementation that populated it stays queryable by this build.
+    pub fn check_provenance(
+        &self,
+        query: &EmbeddingProvenance,
+        legacy: LegacyMode,
+    ) -> Result<(), String> {
+        let origin = if self.path.as_os_str().is_empty() {
+            "<bytes>".to_string()
+        } else {
+            self.path.display().to_string()
+        };
+        match &self.provenance {
+            // Dimension is not an EmbeddingProvenance field: a query vector of the wrong width is
+            // already a hard error on the search/`get` path (it compares `dim`-width slices), so the
+            // provenance check covers the model/metric/normalization/verbalization axes, and the
+            // width axis is enforced structurally by the vector length.
+            Some(stored) => stored.compatible_with(query).map_err(|e| format!("{origin}: {e}")),
+            None => match legacy {
+                LegacyMode::Reject => Err(format!(
+                    "{origin}: this store carries no embedding provenance (a legacy v1/v2 .spqv, or \
+                     one finalized without binding a provenance) and so cannot be verified compatible \
+                     with the query embedder; rebuild it with an embedding provenance (v3), or pass \
+                     LegacyMode::Allow if you KNOW the store was built with a compatible pipeline",
+                )),
+                LegacyMode::Allow => Ok(()),
+            },
+        }
     }
 
     /// Iterates all `(id, vector)` pairs — what ANN index construction consumes. Base entries come
@@ -644,6 +994,8 @@ impl VectorStore {
                     *s -= 1;
                 }
             }
+            #[cfg(feature = "metadata-sidecar")]
+            self.metadata.remove(&id);
             return true;
         }
         let had = self.get(id).is_some();
@@ -651,6 +1003,8 @@ impl VectorStore {
             let delta = self.delta_mut();
             delta.appended.remove(&id);
             delta.tombstones.insert(id);
+            #[cfg(feature = "metadata-sidecar")]
+            self.metadata.remove(&id);
         }
         had
     }
@@ -735,6 +1089,12 @@ impl VectorStore {
     ) -> Result<VectorStore, String> {
         let out_path = out_path.into();
         let mut fresh = VectorStore::create(&out_path, self.dim)?.with_fingerprint(graph);
+        // [FABLE-5] (sq-lhcot.1) Carry the source store's embedding provenance forward, so a v3 store
+        // stays v3 (and mandatory-compatibility-checkable) after a compaction. Set the field directly
+        // (the public `with_provenance` builder is `spqv-provenance`-gated; `compact` is `delta`-gated,
+        // and the provenance value is always present on the read-path struct). A v2/v1 source has
+        // `None` here, so its compaction stays v2 — the format is preserved across compaction.
+        fresh.provenance = self.provenance.clone();
         // Collect first so the new file is independent of `self`'s mmap (which may be the same
         // path): `iter()` yields the effective base+delta view in a deterministic order, and `put`
         // re-sorts the id→slot index on `finalize`, so the output is order-independent of the
@@ -742,6 +1102,11 @@ impl VectorStore {
         let pairs: Vec<(Id, Vec<f32>)> =
             self.iter().map(|(id, v)| (id, v.to_vec())).collect();
         for (id, v) in &pairs {
+            #[cfg(feature = "metadata-sidecar")]
+            if let Some(meta) = self.meta(*id) {
+                fresh.put_with_meta(*id, v, meta)?;
+                continue;
+            }
             fresh.put(*id, v)?;
         }
         fresh.finalize()?;
@@ -888,6 +1253,71 @@ fn describe_generation(fp: Option<Fingerprint>) -> String {
     }
 }
 
+/// [FABLE-5] (sq-lhcot.1) Builds the `.spqv` header bytes for a store with `count` vectors of the
+/// given `dim`, optional graph `fingerprint`, optional embedding `provenance`, and (when enabled)
+/// optional metadata. Emits v4 when metadata is present, v3 when only provenance is present, and v2
+/// otherwise. The single header seam both the in-RAM [`VectorStore::finalize`] and the
+/// [`StreamingWriter`] share, so untagged stores agree byte-for-byte.
+fn build_header(
+    dim: usize,
+    count: usize,
+    fingerprint: Option<Fingerprint>,
+    provenance: Option<&EmbeddingProvenance>,
+    #[cfg(feature = "metadata-sidecar")] metadata: Option<&FxHashMap<Id, String>>,
+) -> Vec<u8> {
+    // The provenance-block bytes (empty ⇒ v2). The `EmbeddingProvenance` codec is always compiled
+    // (v3 read path), so this seam works in both feature states — v3 is written only when a
+    // provenance was bound, which itself requires the feature-gated `with_provenance`.
+    let prov_bytes = provenance.map(|p| p.to_bytes());
+    let mut header = vec![0u8; HEADER_LEN];
+    header[0..4].copy_from_slice(&SPQV_MAGIC);
+    #[cfg(feature = "metadata-sidecar")]
+    let metadata_bytes = metadata.map(crate::metadata::encode);
+    // Version tag: v4 iff metadata is present, otherwise v3 iff provenance is present, else v2.
+    #[cfg(feature = "metadata-sidecar")]
+    let version = if metadata_bytes.is_some() {
+        SPQV_VERSION_V4
+    } else if prov_bytes.is_some() {
+        SPQV_VERSION_V3
+    } else {
+        SPQV_VERSION
+    };
+    #[cfg(not(feature = "metadata-sidecar"))]
+    let version = if prov_bytes.is_some() { SPQV_VERSION_V3 } else { SPQV_VERSION };
+    header[4..8].copy_from_slice(&version.to_le_bytes());
+    header[8..12].copy_from_slice(&(dim as u32).to_le_bytes());
+    header[12..20].copy_from_slice(&(count as u64).to_le_bytes());
+    // [OPUS-4.8] (sq-32i5) Embed the graph fingerprint (offset 32..56). A store with none writes a
+    // zeroed block, which `open` decodes back to `None` ("unverifiable"), NOT a spurious mismatch.
+    if let Some(fp) = fingerprint {
+        header[HEADER_LEN_V1..HEADER_LEN].copy_from_slice(&fp.to_bytes());
+    }
+    // [FABLE-5] v3: append the length-prefixed provenance block after the fingerprint block, then
+    // ZERO-PAD to the next 4-byte boundary so the dense f32 data section that follows stays
+    // 4-byte-aligned (the `slot_vector` f32 cast requires it — a misaligned cast is UB). The stored
+    // `prov_len` is the REAL block length; the reader recomputes the same padded data offset.
+    #[cfg(feature = "metadata-sidecar")]
+    if let Some(metadata_bytes) = metadata_bytes {
+        let provenance_bytes = prov_bytes.as_deref().unwrap_or_default();
+        header.extend_from_slice(&(provenance_bytes.len() as u32).to_le_bytes());
+        header.extend_from_slice(provenance_bytes);
+        header.extend_from_slice(&(metadata_bytes.len() as u64).to_le_bytes());
+        header.extend_from_slice(&metadata_bytes);
+        let pad = (4 - header.len() % 4) % 4;
+        header.extend(std::iter::repeat_n(0u8, pad));
+        debug_assert_eq!(header.len() % 4, 0, "v4 data section must start 4-byte aligned");
+        return header;
+    }
+    if let Some(bytes) = prov_bytes {
+        header.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        header.extend_from_slice(&bytes);
+        let pad = (4 - header.len() % 4) % 4;
+        header.extend(std::iter::repeat_n(0u8, pad));
+        debug_assert_eq!(header.len() % 4, 0, "v3 data section must start 4-byte aligned");
+    }
+    header
+}
+
 /// Shared `put` validation: dimension, finiteness, non-zero direction.
 fn validate_vector(dim: usize, id: Id, vector: &[f32]) -> Result<(), String> {
     if vector.len() != dim {
@@ -942,7 +1372,7 @@ impl StreamingWriter {
     /// WITHOUT a graph fingerprint (unverifiable — [`check_graph`](VectorStore::check_graph) errors);
     /// use [`create_with_fingerprint`](Self::create_with_fingerprint) to bind it to a graph.
     pub fn create<P: Into<PathBuf>>(path: P, dim: usize) -> Result<StreamingWriter, String> {
-        Self::create_inner(path, dim, None)
+        Self::create_inner(path, dim, None, None)
     }
 
     /// [OPUS-4.8] (sq-32i5) Like [`create`](Self::create) but embeds `graph`'s fingerprint in the
@@ -954,13 +1384,29 @@ impl StreamingWriter {
         dim: usize,
         graph: &Graph,
     ) -> Result<StreamingWriter, String> {
-        Self::create_inner(path, dim, Some(Fingerprint::of(graph)))
+        Self::create_inner(path, dim, Some(Fingerprint::of(graph)), None)
+    }
+
+    /// [FABLE-5] (sq-lhcot.1) Like [`create_with_fingerprint`](Self::create_with_fingerprint) but
+    /// ALSO binds an embedding `provenance`, so the streamed store is written in the **v3** format
+    /// with the provenance in the header (mandatory-compatibility checkable). Gated behind the opt-in
+    /// `spqv-provenance` feature — the v3 WRITE surface is opt-in (mirroring how the v2 fingerprint
+    /// format was introduced). Pass the SAME graph whose term ids the vectors are keyed by.
+    #[cfg(feature = "spqv-provenance")]
+    pub fn create_with_provenance<P: Into<PathBuf>>(
+        path: P,
+        dim: usize,
+        graph: &Graph,
+        provenance: EmbeddingProvenance,
+    ) -> Result<StreamingWriter, String> {
+        Self::create_inner(path, dim, Some(Fingerprint::of(graph)), Some(provenance))
     }
 
     fn create_inner<P: Into<PathBuf>>(
         path: P,
         dim: usize,
         fingerprint: Option<Fingerprint>,
+        provenance: Option<EmbeddingProvenance>,
     ) -> Result<StreamingWriter, String> {
         if dim == 0 || dim > u32::MAX as usize {
             return Err(format!("invalid vector dimension {dim}"));
@@ -971,15 +1417,18 @@ impl StreamingWriter {
         let path = path.into();
         let mut file = std::fs::File::create(&path)
             .map_err(|e| format!("create {}: {e}", path.display()))?;
-        // Header with a zero count placeholder; finalize patches offset 12. The fingerprint
-        // (offset 32..56) is known up front, so it is written here, not patched.
-        let mut header = [0u8; HEADER_LEN];
-        header[0..4].copy_from_slice(&SPQV_MAGIC);
-        header[4..8].copy_from_slice(&SPQV_VERSION.to_le_bytes());
-        header[8..12].copy_from_slice(&(dim as u32).to_le_bytes());
-        if let Some(fp) = fingerprint {
-            header[HEADER_LEN_V1..HEADER_LEN].copy_from_slice(&fp.to_bytes());
-        }
+        // [FABLE-5] Header with a zero count placeholder; finalize patches offset 12. The fingerprint
+        // (offset 32..56) and — for v3 — the length-prefixed provenance block are known up front, so
+        // they are written here (via the shared `build_header` seam), not patched. `build_header`
+        // emits v3 iff a provenance is present, else v2 (byte-identical to the pre-v3 streaming header).
+        let header = build_header(
+            dim,
+            0,
+            fingerprint,
+            provenance.as_ref(),
+            #[cfg(feature = "metadata-sidecar")]
+            None,
+        );
         file.write_all(&header).map_err(|e| format!("write {}: {e}", path.display()))?;
         let ids_path = {
             let mut p = path.clone().into_os_string();
@@ -1064,6 +1513,9 @@ impl StreamingWriter {
                 .and_then(|()| file.write_all(&count.to_le_bytes()))
                 .and_then(|()| file.sync_all())
                 .map_err(|e| format!("write {}: {e}", path.display()))?;
+            // [FABLE-5] (sq-98c) See `finalize`: intentional close-before-reopen; on wasm32 the
+            // `File` stub has no `Drop` impl and clippy's `drop_non_drop` fires there.
+            #[allow(clippy::drop_non_drop)]
             drop(file);
             std::fs::remove_file(&ids_path).ok();
             VectorStore::open(&path)
@@ -1115,7 +1567,21 @@ mod kani_proofs {
     /// of `open_from_bytes` does an aligned-copy + the full validation; the failure path is a
     /// plain `Err`. Neither may abort.
     #[kani::proof]
-    #[kani::unwind(40)] // > MAX_LEN so every bounded slice/index loop fully unrolls.
+    // (sq-kycq5) [SONNET-4.6] Loop census for this harness: the setup loop `for b in
+    // bytes.iter_mut()` runs up to `len` times where `len <= MAX_LEN`; the
+    // `AlignedBytes::from_vec` aligned copy covers the same `len` bytes; the fingerprint
+    // scan in `Fingerprint::from_bytes_opt` covers FINGERPRINT_LEN = 24 bytes; and the
+    // index-validation loop `for i in 0..count` runs at most 2 times within MAX_LEN = 88
+    // (a dim=1 count=2 store needs 56 + 8 + 16 = 80 bytes; count=3 needs 92 > 88).
+    // All loops are bounded by MAX_LEN = HEADER_LEN + 32 = 56 + 32 = 88.
+    // Therefore the required unwind bound is MAX_LEN + 1 = 89. The previous bound of 40
+    // was LESS than MAX_LEN (40 < 88) and its comment "// > MAX_LEN" was factually wrong;
+    // that bound fired an unwinding assertion in the nightly Kani lane (an INCOMPLETE proof,
+    // not a counterexample). See the sq-gnvfc fix for the sibling harness for the same
+    // pattern. NOTE: raising the bound may make this harness slower (more unwinding steps);
+    // that is acceptable — the lane's per-harness timeout keeps it visible, and an honest
+    // timeout beats a false incomplete proof.
+    #[kani::unwind(89)] // MAX_LEN + 1 = 88 + 1; bounds every loop in the harness cone
     fn open_from_bytes_never_panics() {
         // A symbolic length in `0..=MAX_LEN`, then a symbolic buffer of that length.
         let len: usize = kani::any();
@@ -1135,7 +1601,12 @@ mod kani_proofs {
     /// shrinks the symbolic surface so Kani spends its budget on the arithmetic/loop logic
     /// (the part the corpus is least likely to have exhausted) rather than on the magic byte.
     #[kani::proof]
-    #[kani::unwind(40)]
+    // [OPUS-4.8] (sq-gnvfc) The harness buffer is HEADER_LEN + 16 = 72 concrete bytes. The
+    // setup loop `bytes[8..].iter_mut()` runs 64 iterations, and every other per-element pass
+    // over the full 72-byte buffer (aligned copy, the fingerprint scan, the index loop) needs
+    // at most 72 steps; 73 > 72 bounds them all. The old bound of 40 < 64 fired an unwinding
+    // assertion (an INCOMPLETE proof, not a counterexample) on the setup loop.
+    #[kani::unwind(73)]
     fn open_validated_v2_tail_never_panics() {
         let mut bytes = vec![0u8; HEADER_LEN + 16];
         bytes[0..4].copy_from_slice(&SPQV_MAGIC);
@@ -1147,6 +1618,50 @@ mod kani_proofs {
         }
         let _ = VectorStore::open_from_bytes(bytes);
     }
+
+    // DOMAIN-COVERAGE SELF-CHECK, part 1 of 2 (the sq-og8u8 anti-vacuity pattern). Lesson of
+    // sq-sqtk2.1 (2026-07-04): a bound can SILENTLY prune the very inputs a harness means to
+    // cover, so it passes VACUOUSLY while reporting nothing wrong. The two totality harnesses
+    // above prove `open_from_bytes` NEVER panics over a bounded symbolic byte domain — but
+    // that is worthless if the ACCEPT path (the aligned copy + the full header / version /
+    // size / fingerprint validation) is unreachable within `MAX_LEN` and every in-domain
+    // buffer is rejected at the first size check.
+    //
+    // The self-check is split in two because a `#[kani::proof]` form of the accept-path pin
+    // does NOT terminate practically under Kani 0.67 (measured locally: > 20 min, dominated by
+    // CBMC's memory-model churn in the `AlignedBytes` raw-pointer copy + the error-arm
+    // `format!`/alloc machinery — the same cost class that keeps the two totality harnesses
+    // above over the nightly lane's per-harness budget). Splitting loses nothing: the input is
+    // fully CONCRETE, so native execution checks the identical property, and the buffer lies
+    // INSIDE the symbolic harnesses' domain, so their (eventual) no-panic/no-UB verdict covers
+    // it symbolically too.
+    //
+    //   part 1 (here, compile-time, evaluated whenever Kani builds this crate): the bounded
+    //   domain is big enough to CONTAIN a well-formed store — `MAX_LEN >= HEADER_LEN`. A
+    //   re-scope that shrank the fuzzed domain below the minimal valid store goes red at
+    //   kani-build time.
+    //
+    //   part 2 (`domain_bounded_buffer_contains_an_accepted_store` in `fingerprint_tests`,
+    //   every `cargo test` run): the minimal well-formed `HEADER_LEN`-byte version-2 buffer —
+    //   which part 1 proves in-domain — actually validates `Ok`, so the totality harnesses'
+    //   domain genuinely contains an ACCEPTED store and their proof is not vacuously
+    //   reject-only. [OPUS-4.8] sq-og8u8
+    const _DOMAIN_ADMITS_A_WELL_FORMED_STORE: () =
+        assert!(MAX_LEN >= HEADER_LEN, "the fuzzed domain must contain a minimal valid store");
+
+    // DOMAIN-COVERAGE SELF-CHECK for the v2-tail harness (sq-og8u8 anti-vacuity pattern): the
+    // focused `open_validated_v2_tail_never_panics` harness fixes a 72-byte (HEADER_LEN + 16)
+    // buffer with the magic + version-2 prefix. Its interesting tail is the index-validation
+    // loop (`for i in 0..count`), which is only reached when count >= 1 — a bound or budget that
+    // silently forced count = 0 would make the harness pass VACUOUSLY over the reject/skip path.
+    // With version 2 (data_offset = HEADER_LEN) the body budget is HEADER_LEN + 16 - HEADER_LEN =
+    // 16 bytes; a minimal 1-entry dim=1 store needs count*dim*4 + count*8 = 1*4 + 8 = 12 <= 16. ✓
+    // Its runtime companion `v2_tail_domain_admits_an_indexed_store` (in `fingerprint_tests`)
+    // proves a concrete such buffer validates `Ok`. [OPUS-4.8] sq-gnvfc
+    const _V2_TAIL_DOMAIN_ADMITS_AN_INDEXED_STORE: () = assert!(
+        HEADER_LEN + 16 >= HEADER_LEN + 4 + 8,
+        "v2-tail harness domain must fit >= 1 index entry (dim=1 count=1: 4-byte vector + 8-byte slot)"
+    );
 }
 
 #[cfg(test)]
@@ -1201,6 +1716,71 @@ mod fingerprint_tests {
         s.put(carol, &[0.0, 0.0, 0.0, 1.0]).unwrap(); // far from alice
         s.finalize().unwrap();
         s
+    }
+
+    /// DOMAIN-COVERAGE SELF-CHECK, part 2 of 2 (the sq-og8u8 anti-vacuity pattern — part 1,
+    /// the compile-time `MAX_LEN >= HEADER_LEN` binding, lives in `kani_proofs`; see the
+    /// rationale there): the minimal well-formed version-2 buffer — exactly `HEADER_LEN`
+    /// bytes: magic + version 2 + `dim = 1` + `count = 0` (no data, no index) + an all-zero
+    /// fingerprint (decodes to `None`/unverifiable, still valid) — validates `Ok`. Because
+    /// part 1 proves this buffer lies INSIDE the Kani totality harnesses' `MAX_LEN` domain,
+    /// this test going green means those harnesses' domain genuinely CONTAINS an accepted
+    /// store: their no-panic proof is not vacuously covering only the reject branches. If a
+    /// format change makes every in-domain buffer rejectable, this goes red on every
+    /// `cargo test` run. [OPUS-4.8] sq-og8u8
+    #[test]
+    fn domain_bounded_buffer_contains_an_accepted_store() {
+        let mut bytes = vec![0u8; 56]; // HEADER_LEN — pinned numerically on purpose:
+        assert_eq!(bytes.len(), HEADER_LEN, "minimal v2 store is exactly the header");
+        bytes[0..4].copy_from_slice(&SPQV_MAGIC);
+        bytes[4..8].copy_from_slice(&SPQV_VERSION.to_le_bytes());
+        bytes[8..12].copy_from_slice(&1u32.to_le_bytes()); // dim = 1 (dim == 0 is rejected)
+        // count = 0 (bytes 12..20 stay zero) ⇒ no data + no index; reserved + fingerprint
+        // stay all-zero (a valid v2 store finalized without `with_fingerprint`).
+        let store = VectorStore::open_from_bytes(bytes)
+            .expect("a minimal well-formed v2 store must validate — else the accept path is vacuous");
+        assert_eq!(store.dim(), 1);
+        assert!(store.fingerprint().is_none(), "all-zero fingerprint decodes to None");
+    }
+
+    /// DOMAIN-COVERAGE SELF-CHECK for the v2-tail harness (sq-og8u8 anti-vacuity pattern,
+    /// sq-gnvfc — companion to the compile-time `_V2_TAIL_DOMAIN_ADMITS_AN_INDEXED_STORE`
+    /// const in `kani_proofs`). Proves a concrete 72-byte buffer in the
+    /// `open_validated_v2_tail_never_panics` harness's domain (the magic + version-2 prefix,
+    /// count = 1, dim = 2) validates `Ok` — so the index-validation loop `for i in 0..count`
+    /// runs exactly once. This confirms the focused harness genuinely covers the indexed-store
+    /// path, not only the size-mismatch / bad-index reject branches. [OPUS-4.8] sq-gnvfc
+    #[test]
+    fn v2_tail_domain_admits_an_indexed_store() {
+        // Buffer layout for a valid v2 store with dim = 2, count = 1:
+        //   [0..4]   SPQV_MAGIC
+        //   [4..8]   version = 2 (LE u32)
+        //   [8..12]  dim = 2 (LE u32)
+        //   [12..20] count = 1 (LE u64)
+        //   [20..32] reserved (zeros) — fills the rest of HEADER_LEN_V1 (32 bytes)
+        //   [32..56] fingerprint block (all-zero = no fingerprint, still a valid v2) — HEADER_LEN
+        //   [56..64] vector data: one dim=2 f32 vector (2 * 4 = 8 bytes)
+        //   [64..72] index: one entry — id = 1 (u32 LE) + slot = 0 (u32 LE) = 8 bytes
+        //   total = 72 bytes = HEADER_LEN + 16
+        let mut bytes = vec![0u8; HEADER_LEN + 16];
+        assert_eq!(bytes.len(), 72, "buffer must be HEADER_LEN + 16 = 72 bytes");
+        bytes[0..4].copy_from_slice(&SPQV_MAGIC);
+        bytes[4..8].copy_from_slice(&2u32.to_le_bytes()); // version 2
+        bytes[8..12].copy_from_slice(&2u32.to_le_bytes()); // dim = 2
+        bytes[12..20].copy_from_slice(&1u64.to_le_bytes()); // count = 1
+        // fingerprint block [32..56] stays all-zero (valid: no fingerprint).
+        // vector data [56..64]: f32 values [1.0, 0.0] in LE.
+        bytes[56..60].copy_from_slice(&1.0f32.to_le_bytes());
+        bytes[60..64].copy_from_slice(&0.0f32.to_le_bytes());
+        // index [64..72]: entry 0 — id = 1 (u32 LE), slot = 0 (u32 LE).
+        bytes[64..68].copy_from_slice(&1u32.to_le_bytes()); // id = 1
+        bytes[68..72].copy_from_slice(&0u32.to_le_bytes()); // slot = 0
+        let store = VectorStore::open_from_bytes(bytes).expect(
+            "72-byte v2 store with dim=2 count=1 must validate — the index loop must be reachable \
+             in the focused harness domain",
+        );
+        assert_eq!(store.dim(), 2);
+        assert!(store.fingerprint().is_none(), "all-zero fingerprint block decodes to None");
     }
 
     #[test]
@@ -1327,6 +1907,138 @@ mod fingerprint_tests {
         assert_eq!(store.fingerprint(), Some(Fingerprint::of(&ga)));
         assert!(store.check_graph(&ga).is_ok());
         assert!(store.check_graph(&graph(B)).is_err());
+        std::fs::remove_file(&path).ok();
+    }
+}
+
+// [FABLE-5] (sq-lhcot.1) ALWAYS-COMPILED tests for the `.spqv` v3 embedding-provenance READ path and
+// the `check_provenance` guard. Compiled in BOTH feature states: the v3 READ path (and `build_header`
+// / the `EmbeddingProvenance` codec) is always present, so a v3 file written by a feature-on build
+// must OPEN on a feature-off build — this module synthesizes a v3 file with the always-compiled
+// `build_header` (no `with_provenance` needed) and proves it opens and checks correctly regardless of
+// the `spqv-provenance` feature. Direct unit tests for every new public read-path fn (coverage floor).
+#[cfg(test)]
+mod provenance_read_tests {
+    use super::*;
+    use crate::spqv_provenance::{EmbeddingProvenance, Metric, Normalization};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    fn tmp(tag: &str) -> PathBuf {
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("sparq_v3read_{tag}_{}_{n}.spqv", std::process::id()))
+    }
+
+    fn prov() -> EmbeddingProvenance {
+        let mut p = EmbeddingProvenance::new("model-A", Metric::Cosine, Normalization::L2);
+        p.model_version = "v1".into();
+        p.verbalization = "entity-verbalized".into();
+        p
+    }
+
+    /// Synthesize a real v3 `.spqv` file for `(dim, ids→vectors, provenance)` using ONLY the
+    /// always-compiled `build_header` seam (no `with_provenance`, so this works with the feature off).
+    fn write_v3(path: &std::path::Path, dim: usize, rows: &[(Id, Vec<f32>)], p: &EmbeddingProvenance) {
+        let count = rows.len();
+        let header = build_header(
+            dim,
+            count,
+            None,
+            Some(p),
+            #[cfg(feature = "metadata-sidecar")]
+            None,
+        );
+        let mut bytes = header;
+        // Dense data in insertion-slot order.
+        for (_, v) in rows {
+            for &x in v {
+                bytes.extend_from_slice(&x.to_le_bytes());
+            }
+        }
+        // id→slot index sorted by id.
+        let mut index: Vec<(Id, u32)> =
+            rows.iter().enumerate().map(|(slot, (id, _))| (*id, slot as u32)).collect();
+        index.sort_unstable();
+        for (id, slot) in index {
+            bytes.extend_from_slice(&id.to_le_bytes());
+            bytes.extend_from_slice(&slot.to_le_bytes());
+        }
+        std::fs::write(path, &bytes).unwrap();
+    }
+
+    #[test]
+    fn v3_file_opens_and_exposes_provenance_in_both_feature_states() {
+        let path = tmp("open");
+        let rows = vec![(1u32, vec![1.0, 0.0, 0.0, 0.0]), (2u32, vec![0.0, 1.0, 0.0, 0.0])];
+        write_v3(&path, 4, &rows, &prov());
+        let store = VectorStore::open(&path).expect("a v3 file must open regardless of the feature");
+        assert_eq!(store.provenance(), Some(&prov()), "provenance read from the v3 header");
+        // Data reads correctly past the variable-length v3 header (data_offset from the header).
+        assert_eq!(store.get(1), Some(&[1.0, 0.0, 0.0, 0.0][..]));
+        assert_eq!(store.get(2), Some(&[0.0, 1.0, 0.0, 0.0][..]));
+        assert_eq!(store.len(), 2);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn check_provenance_accepts_compatible_and_rejects_incompatible() {
+        let path = tmp("check");
+        write_v3(&path, 4, &[(1u32, vec![1.0, 0.0, 0.0, 0.0])], &prov());
+        let store = VectorStore::open(&path).unwrap();
+        // Compatible query (same provenance) → Ok.
+        assert!(store.check_provenance(&prov(), LegacyMode::Reject).is_ok());
+        // Incompatible (wrong metric) → Err naming the axis.
+        let mut q = prov();
+        q.metric = Metric::Euclidean;
+        let err = store.check_provenance(&q, LegacyMode::Reject).unwrap_err();
+        assert!(err.contains("metric"), "err names the axis: {err}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn legacy_v2_store_rejects_by_default_and_allows_on_opt_in() {
+        // A plain v2 store (no provenance) fails closed by default, passes under LegacyMode::Allow.
+        let path = tmp("legacy");
+        let mut store = VectorStore::create(&path, 4).unwrap();
+        store.put(1, &[1.0, 0.0, 0.0, 0.0]).unwrap();
+        store.finalize().unwrap();
+        let store = VectorStore::open(&path).unwrap();
+        assert!(store.provenance().is_none());
+        assert!(store.check_provenance(&prov(), LegacyMode::Reject).is_err());
+        assert!(store.check_provenance(&prov(), LegacyMode::Allow).is_ok());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn corrupt_v3_provenance_block_is_rejected_not_paniced() {
+        // A v3 header whose provenance block is malformed (unknown metric tag) must be a descriptive
+        // open error, never a panic or an out-of-bounds read (fail-closed).
+        let path = tmp("corrupt");
+        write_v3(&path, 4, &[(1u32, vec![1.0, 0.0, 0.0, 0.0])], &prov());
+        let mut bytes = std::fs::read(&path).unwrap();
+        // The provenance block starts at HEADER_LEN + 4; its metric tag is 2 bytes in (after the
+        // u16 block version). Corrupt it to an unknown metric tag.
+        let metric_tag_off = HEADER_LEN + 4 + 2;
+        bytes[metric_tag_off] = 200;
+        std::fs::write(&path, &bytes).unwrap();
+        let err = VectorStore::open(&path)
+            .err()
+            .expect("a corrupt v3 provenance block must be rejected");
+        assert!(err.contains("metric tag") || err.contains("provenance"), "err: {err}");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn v3_header_declares_version_3_and_data_offset_shifts() {
+        // The header is v3 and the data offset is HEADER_LEN + 4 + prov_len (not the v2 HEADER_LEN).
+        let path = tmp("hdr");
+        write_v3(&path, 4, &[(1u32, vec![1.0, 0.0, 0.0, 0.0])], &prov());
+        let bytes = std::fs::read(&path).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), SPQV_VERSION_V3);
+        let store = VectorStore::open(&path).unwrap();
+        // data_offset is past the provenance block; the single vector still reads.
+        assert_eq!(store.get(1), Some(&[1.0, 0.0, 0.0, 0.0][..]));
         std::fs::remove_file(&path).ok();
     }
 }

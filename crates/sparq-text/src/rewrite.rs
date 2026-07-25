@@ -24,6 +24,9 @@
 //!
 //! - `?lit text:matches "query"` — AND of tokens, `*`-suffix = prefix token;
 //! - `?lit text:matchesAny "query"` — OR of tokens;
+//! - `?lit text:fuzzy "term"` — with the `fuzzy` feature, a typo-tolerant
+//!   single-token match at edit distance one by default; a same-subject
+//!   `text:maxDistance N` companion selects `0..=2`. [GPT-5.6]
 //! - `?lit text:phrase "foo bar"` — tokens ADJACENT and IN ORDER (a positional
 //!   phrase match; needs a positions-enabled index — see below). [OPUS-4.8]
 //! - `?lit text:near "foo bar"` — tokens IN ORDER within a bounded gap (the
@@ -88,8 +91,14 @@ pub fn query_text_with_budget(
 /// engine's `*_prepared` entry points (`ask_prepared`, `construct_prepared`,
 /// …). Note the hits are frozen at rewrite time: re-prepare after the graph
 /// (and index) change.
-pub fn prepare_text(graph: &Graph, sparql: &str, index: &TextIndex) -> Result<PreparedQuery, String> {
-    let query = spargebra::SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+pub fn prepare_text(
+    graph: &Graph,
+    sparql: &str,
+    index: &TextIndex,
+) -> Result<PreparedQuery, String> {
+    let query = spargebra::SparqlParser::new()
+        .parse_query(sparql)
+        .map_err(|e| e.to_string())?;
     Ok(PreparedQuery::from(rewrite_query(query, graph, index)?))
 }
 
@@ -144,12 +153,31 @@ fn rewrite_pattern(p: &mut GraphPattern, graph: &Graph, index: &TextIndex) -> Re
 /// it; an explicit budget is the common case. [OPUS-4.8]
 pub const DEFAULT_SLOP: u32 = 0;
 
+#[cfg(feature = "fuzzy")]
+fn is_match_predicate(iri: &str) -> bool {
+    matches!(
+        iri,
+        vocab::MATCHES | vocab::MATCHES_ANY | vocab::PHRASE | vocab::NEAR | vocab::FUZZY
+    )
+}
+
+#[cfg(not(feature = "fuzzy"))]
+fn is_match_predicate(iri: &str) -> bool {
+    matches!(
+        iri,
+        vocab::MATCHES | vocab::MATCHES_ANY | vocab::PHRASE | vocab::NEAR
+    )
+}
+
 /// Which index query a `text:` match request runs.
 enum ReqKind {
     /// `text:matches` — AND of tokens (BM25-scored).
     All,
     /// `text:matchesAny` — OR of tokens (BM25-scored).
     Any,
+    /// `text:fuzzy` — bounded single-token Levenshtein lookup. [GPT-5.6]
+    #[cfg(feature = "fuzzy")]
+    Fuzzy { max_distance: Option<u8> },
     /// `text:phrase` — adjacent, in-order tokens (positional, unscored). [OPUS-4.8]
     Phrase,
     /// `text:near` — in-order tokens within a bounded total gap, proximity-scored
@@ -181,6 +209,8 @@ fn rewrite_bgp(
     // (subject var, parsed slop) collected from `text:slop` patterns, attached
     // to the matching `text:near` after the scan (order-independent). [OPUS-4.8]
     let mut slops: Vec<(Variable, u32)> = Vec::new();
+    #[cfg(feature = "fuzzy")]
+    let mut max_distances: Vec<(Variable, u8)> = Vec::new();
 
     for tp in patterns {
         let NamedNodePattern::NamedNode(pred) = &tp.predicate else {
@@ -195,11 +225,13 @@ fn rewrite_bgp(
         let subject_var = |s: &TermPattern| -> Result<Variable, String> {
             match s {
                 TermPattern::Variable(v) => Ok(v.clone()),
-                other => Err(format!("text: the subject of <{iri}> must be a variable, got {other}")),
+                other => Err(format!(
+                    "text: the subject of <{iri}> must be a variable, got {other}"
+                )),
             }
         };
         match iri {
-            vocab::MATCHES | vocab::MATCHES_ANY | vocab::PHRASE | vocab::NEAR => {
+            iri if is_match_predicate(iri) => {
                 let var = subject_var(&tp.subject)?;
                 let TermPattern::Literal(q) = &tp.object else {
                     return Err(format!(
@@ -211,9 +243,16 @@ fn rewrite_bgp(
                     vocab::MATCHES_ANY => ReqKind::Any,
                     vocab::PHRASE => ReqKind::Phrase,
                     vocab::NEAR => ReqKind::Near { slop: None },
+                    #[cfg(feature = "fuzzy")]
+                    vocab::FUZZY => ReqKind::Fuzzy { max_distance: None },
                     _ => ReqKind::All,
                 };
-                reqs.push(MatchReq { var, query: q.value().to_string(), kind, score: None });
+                reqs.push(MatchReq {
+                    var,
+                    query: q.value().to_string(),
+                    kind,
+                    score: None,
+                });
             }
             vocab::SLOP => {
                 let var = subject_var(&tp.subject)?;
@@ -234,6 +273,32 @@ fn rewrite_bgp(
                 })?;
                 slops.push((var, slop));
             }
+            #[cfg(feature = "fuzzy")]
+            vocab::MAX_DISTANCE => {
+                let var = subject_var(&tp.subject)?;
+                let TermPattern::Literal(n) = &tp.object else {
+                    return Err(format!(
+                        "text: the object of text:maxDistance must be a constant integer in \
+                         0..={}, got {}",
+                        crate::fuzzy::MAX_DISTANCE,
+                        tp.object
+                    ));
+                };
+                let distance: u8 = n.value().parse().map_err(|_| {
+                    format!(
+                        "text: text:maxDistance must be an integer in 0..={}, got \"{}\"",
+                        crate::fuzzy::MAX_DISTANCE,
+                        n.value()
+                    )
+                })?;
+                if distance > crate::fuzzy::MAX_DISTANCE {
+                    return Err(format!(
+                        "text: text:maxDistance must be at most {}, got {distance}",
+                        crate::fuzzy::MAX_DISTANCE
+                    ));
+                }
+                max_distances.push((var, distance));
+            }
             vocab::SCORE => {
                 let var = subject_var(&tp.subject)?;
                 let TermPattern::Variable(score_var) = &tp.object else {
@@ -247,7 +312,41 @@ fn rewrite_bgp(
             _ => {
                 return Err(format!(
                     "text: unknown magic predicate <{iri}> (supported: text:matches, \
-                     text:matchesAny, text:phrase, text:near, text:slop, text:score)"
+                     text:matchesAny, text:phrase, text:near, text:slop, text:score{})",
+                    if cfg!(feature = "fuzzy") {
+                        ", text:fuzzy, text:maxDistance"
+                    } else {
+                        ""
+                    }
+                ))
+            }
+        }
+    }
+
+    #[cfg(feature = "fuzzy")]
+    for (var, value) in max_distances {
+        let mut owners = reqs.iter_mut().filter(|r| r.var == var);
+        match (owners.next(), owners.next()) {
+            (Some(req), None) => match &mut req.kind {
+                ReqKind::Fuzzy { max_distance } => {
+                    if max_distance.replace(value).is_some() {
+                        return Err(format!("text: duplicate text:maxDistance for {var}"));
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "text: text:maxDistance on {var} is only valid alongside text:fuzzy"
+                    ))
+                }
+            },
+            (None, _) => {
+                return Err(format!(
+                    "text: text:maxDistance on {var} has no text:fuzzy in the same basic graph pattern"
+                ))
+            }
+            (Some(_), Some(_)) => {
+                return Err(format!(
+                    "text: text:maxDistance on {var} is ambiguous ({var} has more than one text: match pattern in this basic graph pattern)"
                 ))
             }
         }
@@ -325,10 +424,26 @@ fn rewrite_bgp(
         // proximity `text:near`) also carry a score, the positional phrase mode
         // is unscored (id only). [OPUS-4.8]
         let hits: Vec<(Id, Option<f32>)> = match req.kind {
-            ReqKind::All => index.search(&req.query).into_iter().map(|h| (h.id, Some(h.score))).collect(),
-            ReqKind::Any => {
-                index.search_any(&req.query).into_iter().map(|h| (h.id, Some(h.score))).collect()
-            }
+            ReqKind::All => index
+                .search(&req.query)
+                .into_iter()
+                .map(|h| (h.id, Some(h.score)))
+                .collect(),
+            ReqKind::Any => index
+                .search_any(&req.query)
+                .into_iter()
+                .map(|h| (h.id, Some(h.score)))
+                .collect(),
+            #[cfg(feature = "fuzzy")]
+            ReqKind::Fuzzy { max_distance } => index
+                .fuzzy(
+                    &req.query,
+                    max_distance.unwrap_or(crate::fuzzy::DEFAULT_MAX_DISTANCE),
+                )
+                .map_err(|error| format!("text: {error}"))?
+                .into_iter()
+                .map(|hit| (hit.id, Some(hit.score)))
+                .collect(),
             ReqKind::Phrase => {
                 if !index.has_positions() {
                     return Err(
@@ -337,7 +452,11 @@ fn rewrite_bgp(
                             .to_string(),
                     );
                 }
-                index.phrase(&req.query).into_iter().map(|id| (id, None)).collect()
+                index
+                    .phrase(&req.query)
+                    .into_iter()
+                    .map(|id| (id, None))
+                    .collect()
             }
             ReqKind::Near { slop } => {
                 if !index.has_positions() {
@@ -348,7 +467,11 @@ fn rewrite_bgp(
                     );
                 }
                 let slop = slop.unwrap_or(DEFAULT_SLOP);
-                index.phrase_near(&req.query, slop).into_iter().map(|h| (h.id, Some(h.score))).collect()
+                index
+                    .phrase_near(&req.query, slop)
+                    .into_iter()
+                    .map(|h| (h.id, Some(h.score)))
+                    .collect()
             }
         };
         let mut variables = vec![req.var];
@@ -369,11 +492,17 @@ fn rewrite_bgp(
                 row
             })
             .collect();
-        let values = GraphPattern::Values { variables, bindings };
+        let values = GraphPattern::Values {
+            variables,
+            bindings,
+        };
         out = match out {
             // An all-magic BGP leaves an empty Bgp behind: drop the unit table.
             GraphPattern::Bgp { ref patterns } if patterns.is_empty() => values,
-            other => GraphPattern::Join { left: Box::new(values), right: Box::new(other) },
+            other => GraphPattern::Join {
+                left: Box::new(values),
+                right: Box::new(other),
+            },
         };
     }
     Ok(out)

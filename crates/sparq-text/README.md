@@ -9,8 +9,8 @@
 
 Opt-in **full-text search over literals** for the
 [sparq](https://github.com/jeswr/sparq) RDF engine: a small, owned BM25 inverted index
-over a `Graph`'s string literals, plus `text:` **magic predicates** that run text search
-inside plain SPARQL.
+over a `Graph`'s string literals, prefix completion over IRIs and common RDF labels,
+plus `text:` **magic predicates** that run text search inside plain SPARQL.
 
 A **separate crate** by design (the `sparq-geo` shape): no existing sparq crate — and
 in particular not the wasm build — depends on it. The index is in-house (tokenizer +
@@ -72,10 +72,10 @@ let r = query_text(&graph, r#"
 
 ## ✨ Features
 
-- **`text:` magic predicates** — `text:matches` (AND), `text:matchesAny` (OR),
-  `text:phrase` (adjacency), `text:near` (proximity/slop, relevance-ranked) with the
+- **`text:` magic predicates** — `text:matches` (AND), `text:matchesAny` (OR), `text:phrase` (adjacency), `text:near` (proximity/slop, relevance-ranked) with the
   `text:slop N` and `text:score ?s` companions. The query string must be a **constant**
   literal, the match subject a variable, and an unknown `text:` IRI is a hard error.
+- **Opt-in fuzzy search** — the default-OFF `fuzzy` feature adds `TextIndex::fuzzy(term, max_distance)` and `text:fuzzy`, backed by bounded deletion-neighbour candidates and exact Levenshtein verification (default one, hard cap two). [GPT-5.6] sq-lsp7k.14
 - **BM25 ranking, exact-token semantics** — UAX #29 word segmentation + Unicode
   lowercasing; **no stemming, no stopword list, no diacritic folding** (`café` ≠ `cafe`)
   — language-neutral by design. Only plain / `xsd:string` / language-tagged literals are
@@ -84,8 +84,11 @@ let r = query_text(&graph, r#"
   against an independent from-scratch reference scorer, wired into the central
   scoreboard as a `sparq extension` ratchet — **honestly NOT a standards-conformance
   claim** (no normative full-text-over-RDF / BM25 suite exists).
-- **Opt-in phrase positions** — the cheap default (`TextIndex::build`) stores **no**
-  positions (8 B per token/doc pair); `build_with_positions` enables `phrase` /
+- **IRI and label completion** — `CompletionIndex::build(&graph)` indexes IRIs, local
+  names, `rdfs:label`, and `skos:prefLabel`. `complete(prefix, k, scores)` does
+  deterministic case-insensitive matching with caller-injected scores; no fuzzy matching.
+- **Index metrics / phrase positions** — `len`, `token_count`, and `total_postings` count documents, distinct tokens, and token/document posting pairs. The cheap default (`TextIndex::build`) stores **no**
+  positions (8 B per pair); `build_with_positions` enables `phrase` /
   `phrase_near`. A phrase query against a positionless index is a **hard query error**
   (the bare `phrase()` method panics) — only callers that need it pay for it.
 - **Incremental upkeep** — `apply_delta` indexes newly inserted string literals

@@ -1,0 +1,15 @@
+# [FABLE-5] sq-hmd7l.10 — vendored ORE-style task OUTSIDE the ALCH fragment
+# (expected: UNKNOWN / out-of-fragment abstention).
+# Hand-authored. A minCardinality restriction — routine in the real ORE 2014/2015
+# corpora, outside sparq-reason-dl's scoped ALCH fragment. Pins the FAIL-CLOSED honesty
+# behaviour the harness depends on: the checker must ABSTAIN
+# (Verdict::Unknown(OutOfFragment)) rather than reason over a graph it only partially
+# understood, and the harness must never enter such a row into a timing comparison.
+@prefix : <http://sparq.dev/bench/ore-smoke/cardinality#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+:Person rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :hasParent ;
+                          owl:minCardinality "2"^^xsd:nonNegativeInteger ] .
+:x a :Person .

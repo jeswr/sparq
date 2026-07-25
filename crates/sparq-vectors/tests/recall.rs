@@ -6,7 +6,7 @@
 // [OPUS-4.8] (sq-ip3a) HNSW (VectorIndex) is the approximate backend — gated behind `approx-ann`.
 #![cfg(feature = "approx-ann")]
 
-use sparq_vectors::{nearest_exact, VectorIndex, VectorStore};
+use sparq_vectors::{nearest_exact, HnswConfig, VectorIndex, VectorStore};
 
 fn splitmix64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E3779B97F4A7C15);
@@ -99,6 +99,62 @@ fn exact_and_hnsw_agree_on_tiny_separable_data() {
     let zero = vec![0.0f32; DIM];
     assert!(nearest_exact(&store, &zero, 5).is_empty());
     assert!(index.nearest(&zero, 5).is_empty());
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// [OPUS-4.8] (sq-ose80) The `fast_build` build-time preset must still clear the recall floor,
+/// and `high_recall`'s denser graph must not recall *worse* than `fast_build`'s. This exercises
+/// the REAL `VectorIndex::build_with` path for each preset (not a mock) — the load-bearing
+/// invariant of sq-ose80 is that trading `ef_construction` for build speed keeps recall ≥ 0.95.
+#[test]
+fn build_time_presets_preserve_the_recall_floor() {
+    const N: usize = 20_000;
+    const DIM: usize = 32;
+    const K: usize = 10;
+    const QUERIES: usize = 100;
+
+    let path = std::env::temp_dir()
+        .join(format!("sparq-vectors-presets-{}.spqv", std::process::id()));
+    let mut store = VectorStore::create(&path, DIM).unwrap();
+    let mut state = 0xC0FFEE_u64;
+    for i in 0..N {
+        store.put((i as u32) * 7 + 3, &rand_vec(&mut state, DIM)).unwrap();
+    }
+    store.finalize().unwrap();
+
+    // The two presets share ef_search + seed with the default; only ef_construction differs,
+    // so a fixed seed still yields a deterministic (reproducible) graph for each.
+    assert_eq!(HnswConfig::fast_build().ef_construction, 40);
+    assert_eq!(HnswConfig::high_recall().ef_construction, 200);
+    assert_eq!(HnswConfig::fast_build().ef_search, HnswConfig::default().ef_search);
+    assert_eq!(HnswConfig::fast_build().seed, HnswConfig::default().seed);
+
+    let recall_of = |cfg: HnswConfig| -> f64 {
+        let index = VectorIndex::build_with(&store, cfg);
+        let mut q_state = 0xDECAF_u64;
+        let mut hits = 0usize;
+        for _ in 0..QUERIES {
+            let q = rand_vec(&mut q_state, DIM);
+            let exact: Vec<u32> =
+                nearest_exact(&store, &q, K).into_iter().map(|(id, _)| id).collect();
+            let approx: Vec<u32> =
+                index.nearest(&q, K).into_iter().map(|(id, _)| id).collect();
+            hits += approx.iter().filter(|id| exact.contains(id)).count();
+        }
+        hits as f64 / (QUERIES * K) as f64
+    };
+
+    let fast = recall_of(HnswConfig::fast_build());
+    let high = recall_of(HnswConfig::high_recall());
+    eprintln!("preset recall@{K}: fast_build={fast:.4}  high_recall={high:.4}");
+
+    // The load-bearing invariant: the faster build still clears the 0.95 floor.
+    assert!(fast >= 0.95, "fast_build recall {fast:.4} fell below the 0.95 floor");
+    // A denser construction graph should not recall worse than the sparser one (small margin
+    // for float-sum-order noise in the rayon-parallel build).
+    assert!(high + 0.01 >= fast, "high_recall {high:.4} recalled worse than fast_build {fast:.4}");
+    assert!(high >= 0.95, "high_recall recall {high:.4} fell below the 0.95 floor");
 
     let _ = std::fs::remove_file(&path);
 }

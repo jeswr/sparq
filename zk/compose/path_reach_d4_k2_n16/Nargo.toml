@@ -1,0 +1,7 @@
+[package]
+name = "path_reach_d4_k2_n16"
+type = "bin"
+authors = ["sparq"]
+
+[dependencies]
+sparq_zk_compose_core = { path = "../compose_core" }

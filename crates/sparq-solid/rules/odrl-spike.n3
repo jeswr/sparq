@@ -1,0 +1,97 @@
+# [OPUS-4.8] sq-zgbso.1 — MEASURED SPIKE (NOT production wiring).
+# ONE representative ODRL permission-evaluation case expressed as N3 inference rules, to
+# be differentially tested against the hand-written Rust path (`sparq-policy::evaluate` +
+# `sparq-solid::odrl_bridge::materialize_policy`). Design record:
+# research/odrl-n3-compiled-rules.md (epic sq-zgbso, issue #1582).
+#
+# Scope of THIS case (deliberately the faithful subset the design record §3 calls the
+# "stateless core"): a Permission grants a WAC/ACP mode iff its action/target/assignee
+# match the request, its (optional) `odrl:dateTime lteq` window holds, and NO prohibition
+# in the same policy carves the request out (deny-overrides). A matched Prohibition
+# materialises the `auth:deny<Mode>` triple. Everything else (other constraint operators,
+# stateful `odrl:count`, purpose/recipient/spatial taxonomies, the `odrl:use` umbrella)
+# is OUT of this spike's scope and — being unmodelled here — simply never grants
+# (fail-closed): a permission carrying an unmodelled constraint hits NEITHER grant rule.
+#
+# Faithfulness notes (verified against sparq-policy/src/eval.rs on origin/main):
+#   * action -> mode uses the SAME table as odrl_bridge::action_to_mode, supplied as data
+#     facts below (read family -> auth:read, append -> auth:append, modify/delete/write ->
+#     auth:write). The `odrl:use` umbrella and unknown actions are intentionally absent
+#     (no mode fact -> no grant), matching action_to_mode returning None.
+#   * `odrl:dateTime lteq D` is `now <= D`. Rust compares xsd:dateTime by INSTANT
+#     (eval.rs::cmp_datetime); `string:notGreaterThan` compares LEXICALLY. These agree
+#     ONLY for canonical UTC (`...Z`, zero-padded) dateTimes — the spike fixture uses that
+#     form. A production N3 path needs a dateTime-normalising builtin for arbitrary
+#     offsets/precisions; that gap is a finding of this spike, not a claim of parity.
+#   * deny-overrides: a matching prohibition makes `evaluate` return deny with NO allow
+#     grant, so the grant rules carry a scoped `log:notIncludes` over the same-policy
+#     prohibition-match pattern. The negation scopes over INPUT-only predicates (policy
+#     facts), so the engine's no-retraction negation-as-failure is sound in one stratum
+#     (the WAC/ACP §3.5 stratification lesson). Constraint-BEARING prohibitions would need
+#     the fuller stratification the design record §7 flags — the spike keeps prohibitions
+#     constraint-free, within the modelled subset.
+
+@prefix odrl:   <http://www.w3.org/ns/odrl/2/> .
+@prefix auth:   <https://sparq.dev/ns/auth#> .
+@prefix spike:  <https://sparq.dev/ns/odrl-spike#> .
+@prefix log:    <http://www.w3.org/2000/10/swap/log#> .
+@prefix string: <http://www.w3.org/2000/10/swap/string#> .
+
+# ── action -> WAC/ACP mode (mirror of odrl_bridge::action_to_mode) ─────────────────────
+odrl:read    spike:mode auth:read .
+odrl:display spike:mode auth:read .
+odrl:present spike:mode auth:read .
+odrl:print   spike:mode auth:read .
+odrl:play    spike:mode auth:read .
+odrl:append  spike:mode auth:append .
+odrl:modify  spike:mode auth:write .
+odrl:delete  spike:mode auth:write .
+odrl:write   spike:mode auth:write .
+
+# ── action -> the `auth:deny<Mode>` predicate a matched prohibition materialises ───────
+odrl:read    spike:denyMode auth:denyRead .
+odrl:display spike:denyMode auth:denyRead .
+odrl:present spike:denyMode auth:denyRead .
+odrl:print   spike:denyMode auth:denyRead .
+odrl:play    spike:denyMode auth:denyRead .
+odrl:append  spike:denyMode auth:denyAppend .
+odrl:modify  spike:denyMode auth:denyWrite .
+odrl:delete  spike:denyMode auth:denyWrite .
+odrl:write   spike:denyMode auth:denyWrite .
+
+# ── grant: UNCONSTRAINED permission, no carve-out prohibition ──────────────────────────
+# Fires only when the permission carries NO odrl:constraint (a constrained permission is
+# handled by the dateTime rule below; an unmodelled-constraint permission hits neither ->
+# fail-closed). Deny-overrides via the scoped same-policy prohibition-match negation.
+{
+  ?pol odrl:permission ?perm .
+  ?perm odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party .
+  ?act spike:mode ?mode .
+  ?req a odrl:Request ; odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party .
+  ?S1 log:notIncludes { ?perm odrl:constraint ?anyc } .
+  ?S2 log:notIncludes { ?pol odrl:prohibition ?px .
+                        ?px odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party } .
+} => { ?party ?mode ?tgt } .
+
+# ── grant: permission gated by a single `odrl:dateTime lteq D` window ──────────────────
+# Fires when now <= D (canonical UTC lexical == instant order) and no carve-out.
+{
+  ?pol odrl:permission ?perm .
+  ?perm odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party ;
+        odrl:constraint ?c .
+  ?c odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lteq ; odrl:rightOperand ?deadline .
+  ?act spike:mode ?mode .
+  ?req a odrl:Request ; odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party ;
+       spike:atTime ?now .
+  ?now string:notGreaterThan ?deadline .
+  ?S2 log:notIncludes { ?pol odrl:prohibition ?px .
+                        ?px odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party } .
+} => { ?party ?mode ?tgt } .
+
+# ── deny: a matching prohibition materialises `auth:deny<Mode>` (deny-overrides) ───────
+{
+  ?pol odrl:prohibition ?proh .
+  ?proh odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party .
+  ?act spike:denyMode ?dmode .
+  ?req a odrl:Request ; odrl:action ?act ; odrl:target ?tgt ; odrl:assignee ?party .
+} => { ?party ?dmode ?tgt } .

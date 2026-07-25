@@ -232,6 +232,15 @@ impl Renamer {
 mod tests {
     use super::*;
 
+    // [GPT-5.6] sq-bvdyd: exercise every lexical context that can affect whether
+    // a second canonicalization pass changes the cache key.
+    const IDEMPOTENCE_QUERIES: [&str; 4] = [
+        "  SELECT   ?x\n WHERE {\t?x ?p ?o } # trailing comment\n",
+        "SELECT ?x # ignored ?comment\nWHERE { ?x ?p \"literal  ?data and $data\" }",
+        "ASK { $x ?p 'literal ?x and $x' ; ?q $x .\n}",
+        "",
+    ];
+
     #[test]
     fn whitespace_collapses() {
         let a = canonicalize("SELECT  ?x\n WHERE {\t?x ?y ?z }");
@@ -303,5 +312,21 @@ mod tests {
         let q = r#"ASK { ?s ?p "a \" b" }"#;
         let r = canonicalize(q);
         assert!(r.contains(r#""a \" b""#));
+    }
+
+    #[test]
+    fn canonicalize_is_idempotent() {
+        for query in IDEMPOTENCE_QUERIES {
+            let once = canonicalize(query);
+            assert_eq!(canonicalize(&once), once, "query: {query:?}");
+        }
+    }
+
+    #[test]
+    fn canonicalize_renamed_is_idempotent() {
+        for query in IDEMPOTENCE_QUERIES {
+            let once = canonicalize_renamed(query);
+            assert_eq!(canonicalize_renamed(&once), once, "query: {query:?}");
+        }
     }
 }

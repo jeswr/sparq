@@ -1,0 +1,173 @@
+# Routing table for issue-native orchestration (PUBLIC — no account information).
+# Maps a triaged issue's role/labels to a MODEL fallback-chain + the agent that implements it.
+# The private account registry (jeswr/agent-account-registry) consumes `model_chain` to pick the
+# first AVAILABLE account (respecting per-account limits + the lease + cache affinity).
+# See research/issue-native-orchestration.md. Validated by scripts/routing-validate.py.
+#
+# PRECEDENCE (consumer contract): security-label overrides > explicit role > [defaults]. Rules are
+# evaluated top-to-bottom, FIRST MATCH WINS, so the `[[route]]` blocks with `match_labels` (security
+# surfaces) are listed FIRST and win over the role blocks below them.
+#
+# match_labels SEMANTICS: a rule matches if ANY of the issue's labels CONTAINS any listed keyword as
+# a substring (so `zk` matches `area:sparq-zk`, `mpc` matches `area:sparq-mpc`, etc.). role rules
+# match the exact `role:<r>` label.
+
+# ---------------------------------------------------------------------------------------------------
+# [models] — the catalog. A model alias resolves to a provider + harness + concrete provider model id
+# + credential format. `codex` and `claude` are HARNESSES (CLIs), not models. The account selector +
+# worker use these to pick the right account and restore the right credential.
+#
+# CREDENTIAL FORMAT (Anthropic): use `claude-oauth-token` — a long-lived, NON-rotating token from
+# `claude setup-token`, designed for headless/CI. Do NOT use the interactive `claude-credentials-json`
+# subscription blob for a worker: its refresh token ROTATES, so a copy seeded into a secret is
+# invalidated the moment the interactive session (or another worker) refreshes — the worker then
+# fails with an auth error. setup-token also creates a SEPARATE credential, so the worker never
+# rotates the coordinating session's own login out from under it. (anthropic-api-key is also
+# supported by the worker if a Console key is preferred over the subscription.)
+[models.haiku]
+provider = "anthropic"
+harness = "claude"
+provider_model = "claude-haiku-4-5"   # concrete id; maintainer confirms exact pin
+credential_format = "claude-oauth-token"
+[models.sonnet]
+provider = "anthropic"
+harness = "claude"
+provider_model = "claude-sonnet-4-6"
+credential_format = "claude-oauth-token"
+[models.opus]
+provider = "anthropic"
+harness = "claude"
+provider_model = "claude-opus-4-8"     # Tail fallback since 2026-07-24 (opus5 is the primary tier).
+credential_format = "claude-oauth-token"
+[models.fable]
+provider = "anthropic"
+harness = "claude"
+provider_model = "claude-fable-5"      # Tail fallback since 2026-07-24 (opus5 is the primary tier).
+credential_format = "claude-oauth-token"
+[models.opus5]
+provider = "anthropic"
+harness = "claude"
+provider_model = "claude-opus-5"       # Opus 5 (maintainer directive 2026-07-24): replaces BOTH
+                                       # fable (claude-fable-5) AND opus (claude-opus-4-8) as the
+                                       # primary model on every task where they were used — opus5
+                                       # is now the TOP anthropic tier. The old tiers stay in every
+                                       # chain as TAIL FALLBACKS only (degradation path: an opus5
+                                       # capacity outage parks work gracefully instead of stalling
+                                       # single-model chains). Probe-verified live 2026-07-24
+                                       # (`claude --model claude-opus-5 -p` -> OK); mirrors the
+                                       # registry's routing.toml (agent-account-registry #562).
+credential_format = "claude-oauth-token"
+[models.terra]
+provider = "openai"
+harness = "codex"
+provider_model = ""                    # EMPTY = omit --model (codex CLI default). The literal "TBD" placeholder
+                                       # reached `codex exec --model TBD` in every terra fleet worker -> API 400 /
+                                       # no-tool-call fallback (2026-07-18). Never ship a placeholder id here.
+                                       # sentinel is load-bearing: dispatch/worker pass NO --model flag
+credential_format = "codex-auth-json"
+[models.sol]
+provider = "openai"
+harness = "codex"
+provider_model = "gpt-5.6-sol"         # Cross-provider REVIEW model (maintainer 2026-07-18): the registry
+                                       # REVIEW_CHAIN routes reviews of anthropic-authored CONTENT to
+                                       # `sol`. Distinct alias from `terra` (a different GPT model); id
+                                       # probed working on the worker account type 2026-07-18.
+credential_format = "codex-auth-json"
+[models.luna]
+provider = "openai"
+harness = "codex"
+provider_model = "gpt-5.6-luna"        # Second tier of the unified fix ladder opus<luna<fable<opus5<sol
+                                       # (maintainer 2026-07-18) + sol's review fallback; id probed
+                                       # working on the worker account type 2026-07-18.
+credential_format = "codex-auth-json"
+
+[defaults]
+model_chain = ["sol", "opus5", "fable", "opus"]
+agent = "sparq-rust-impl"
+
+# ---------------------------------------------------------------------------------------------------
+# SECURITY-LABEL OVERRIDES (first-match; win over role). Soundness surfaces run on Opus 5 (opus-4.8
+# as tail fallback since 2026-07-24, so an opus5 capacity outage degrades to the previous soundness
+# tier instead of stalling the single-model chain) and, on chain-exhaustion, ESCALATE to a human
+# (needs:user) rather than fall to a weaker/cross-provider model.
+[[route]]
+match_labels = ["zk", "mpc", "reasoner", "crypto", "auth", "e2ee"]
+model_chain = ["opus5", "opus"]
+agent = "sparq-reviewer"
+escalate = true                        # consumed by dispatch: on chain-exhaustion, label needs:user
+
+# ---------------------------------------------------------------------------------------------------
+# ROLE ROUTES. Implementation chains LEAD WITH SOL (maintainer directive 2026-07-18: credit
+# abundance; capability order opus < luna < fable < opus5 < sol since 2026-07-24). Opus 5 leads
+# the anthropic side (fable/opus are its tail fallbacks), so an OpenAI outage does not stall
+# implementation. Cross-provider review flips automatically: sol-authored implementation
+# receives Anthropic review, and vice versa.
+[[route]]
+role = "impl"
+model_chain = ["sol", "opus5", "fable", "opus"]
+agent = "sparq-rust-impl"
+
+# [FABLE-5] UI/front-end ownership (maintainer decision 2026-07-17): GPT-5.6 codex (openai; alias
+# `terra`) implemented the original registry dashboard UI (jeswr/agent-account-registry e4098b9)
+# and is responsible for ALL UI/front-end work, so the site chain LEADS with terra; the previous
+# chain follows as fallback. scripts/triage.py derives role:site for UI-surface labels
+# (area:site/area:gui/surface:frontend/dashboard) so surface-labelled work lands here too.
+# Deliberately a ROLE route, not match_labels: the review lane's arm-side security classifier
+# unions ALL match_labels keywords, so UI keywords there would human-arm every UI PR.
+[[route]]
+role = "site"
+model_chain = ["sol", "opus5", "fable", "opus"]
+agent = "sparq-site"
+
+# [FABLE-5] STANDING RULE — frontier-tier CI/infrastructure authorship (maintainer decision
+# 2026-07-17; same standing-rule pattern as the UI→codex route above, PR #3416): ALL CI/
+# infrastructure work — .github/workflows, gate aggregators, orchestration/ + dispatch scripts,
+# the self-draining pipeline itself — is authored by a FRONTIER-tier model only: opus5 (Claude
+# Opus 5, the primary anthropic tier since 2026-07-24; fable is its tail fallback) or sol
+# (GPT-5.6 / codex). Cheaper tiers (sonnet/haiku) no longer author infra;
+# cross-provider review is unchanged (whichever provider's frontier writes, the other reviews).
+# The chain is deliberately FRONTIER-ONLY rather than floor-pinned: the routing schema has no
+# floor/pin marker (the fix-floor pin lives in the registry's review loop, not here), and
+# chain-exhaustion at the registry's claim step already DEFERS the item (no eligible account →
+# no claim → retried next tick) instead of degrading below the chain. NOT `escalate = true`:
+# that flips a starved item to needs:user (human); this rule wants defer+retry.
+# scripts/triage.py derives role:ci for infra-surface labels (area:ci/area:ci-fragments/
+# area:orchestration/area:workflows/area:release) so surface-labelled infra work lands here.
+# Security overlap: the match_labels overrides above still WIN over this route (opus + human
+# escalation) — where role:ci and a security surface overlap, the security lane is correct.
+[[route]]
+role = "ci"
+model_chain = ["sol", "opus5", "fable"]
+agent = "sparq-ci-infra"
+
+[[route]]
+role = "perf"
+model_chain = ["sol", "opus5", "fable", "opus"]
+agent = "sparq-perf-engineer"
+
+[[route]]
+role = "research"
+model_chain = ["opus5", "fable", "opus"]
+agent = "sparq-researcher"
+
+# docs-only cheap tiers (maintainer 2026-07-18): sonnet AND terra appear in THIS chain and
+# nowhere else — scripts/route-resolve.py validate_routing() REJECTS any table naming either
+# outside role=docs.
+[[route]]
+role = "docs"
+model_chain = ["haiku", "sonnet", "terra", "opus5", "fable"]
+agent = "sparq-docs"
+
+# Review / soundness: Opus 5 (opus-4.8 tail fallback since 2026-07-24); escalate to human on
+# chain-exhaustion (do NOT fall to a weaker model).
+[[route]]
+role = "review"
+model_chain = ["opus5", "opus"]
+agent = "sparq-reviewer"
+escalate = true
+
+[[route]]
+role = "soundness"
+model_chain = ["opus5", "opus"]
+agent = "sparq-reviewer"
+escalate = true

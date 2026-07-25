@@ -147,6 +147,33 @@ pub mod admissibility;
 #[cfg(feature = "secprop-vocab")]
 #[cfg_attr(docsrs, doc(cfg(feature = "secprop-vocab")))]
 pub mod secprop;
+/// The `trustx:` certification-scope vocabulary (`framework_vocab` module +
+/// `trust-framework.ttl`) — the trust-expression program's layer for expressing
+/// framework-certified-issuer trust and issuer certification scope over the
+/// verifier→holder trust requirements (issue #1592; design record
+/// `research/trust-expression-spec.md` §3.4 / D4). It EXTENDS the `trust:` vocabulary
+/// (shared base IRI) and REFERENCES the vendored `sec-req:` eIDAS/UK-DVS individuals via
+/// `rdfs:seeAlso` — it does not fork or duplicate them (the design's D5). Behind the
+/// default-OFF `framework-vocab` feature: `const &str` data + a TTL drift test, no new
+/// dependency, strictly additive.
+#[cfg(feature = "framework-vocab")]
+#[cfg_attr(docsrs, doc(cfg(feature = "framework-vocab")))]
+pub mod framework_vocab;
+/// The depth-bounded certification-edge trust-graph closure (`graph` module): a pure,
+/// **fail-closed, attenuation-only** pre-processing step that derives additional
+/// `TrustRule`s from signed `trustx:Certification` edges AHEAD of — and consumed verbatim
+/// by — the UNCHANGED admission gate. Every derived rule is `⊆ (anchor ∩ cert scope ∩
+/// validity window)`: a certification can only NARROW, never widen, the certifier's own
+/// authority, and any unverifiable / expired / cyclic / over-depth / broadening edge
+/// contributes NOTHING; zero certifications ⇒ output is the direct rules byte-identical.
+/// Behind the default-OFF `cert-graph` feature (which enables `framework-vocab` for the
+/// vocabulary): pure Rust over the RDFC-1.0 signature primitive this crate already carries
+/// — NO new dependency, strictly additive (`sq-pfae.15`). A plain code-span (not an
+/// intra-doc link) for `TrustRule` so the default-feature doc build does not reference a
+/// feature-gated item.
+#[cfg(feature = "cert-graph")]
+#[cfg_attr(docsrs, doc(cfg(feature = "cert-graph")))]
+pub mod graph;
 /// The trust-document storage / authoring model — server-wide vs per-`.acr` documents,
 /// versioning, revocation, and the admission cache key that composes with the
 /// sparq-solid epoch cache (the P4 model, `sq-pfae.5`). Behind the default-OFF `store`
@@ -191,9 +218,19 @@ pub use delegation_prov::{
 pub use did::{
     did_key_for, Did, DidDocumentFetcher, DidError, DidKeyResolver, DidResolver, DidWebResolver,
 };
+#[cfg(feature = "cert-graph")]
+pub use graph::{
+    certification_message, derive_effective_rules, explain_edge, Certification, CertScope,
+    EdgeRejection,
+};
 pub use policy::{parse_policy, ControlGate, PolicyError, ShapeRef, TrustRule};
 #[cfg(feature = "did")]
 pub use policy::{resolve_rule_keys, IssuerBinding};
+// [SONNET-4.6] sq-0hu2w: re-export the sig primitives so downstream crates that need to
+// parse/hold a `PublicKey` (e.g. callers constructing a `TrustRule.issuer_key` or calling
+// the admission gate) do NOT need a direct `sparq-zk` dependency — `sparq-trust` is the
+// single dependency chokepoint.
+pub use sparq_zk::sig::{public_key_from_hex, PublicKey};
 #[cfg(feature = "store")]
 pub use store::{
     AdmissionCacheKey, PolicyVersion, StoreError, TrustDocument, TrustLayer, TrustStore,

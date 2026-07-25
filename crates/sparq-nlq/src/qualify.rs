@@ -46,6 +46,17 @@ use crate::provenance::{self, ProvenanceRecord};
 use sparq_core::Graph;
 use sparq_engine::QueryResult;
 
+/// Structural UNCALIBRATED disclaimer, always set on every [`AnswerQualification`].
+///
+/// `pkg:confidence` values in this crate are **hand-authored estimates** stored in the
+/// knowledge-graph by a human author. No reliability-diagram measurement or calibration
+/// harness yet validates them against observed frequencies (§6.4 rung C of the
+/// calibration ladder builds that harness; this is rung B — making the fact structural
+/// rather than a free-text footnote). Until rung C exists, no caller should interpret
+/// the numeric confidence values as calibrated probabilities.
+pub const UNCALIBRATED_NOTICE: &str =
+    "confidence values are UNCALIBRATED hand-authored estimates — no reliability measurement exists yet";
+
 /// The epistemic basis of a supporting binding, read from its `pkg:assurance` IRI's local
 /// name (`secx:Proven` / `secx:Claimed` / `secx:Conjectured`). [`Assurance::Missing`] is
 /// the fail-closed default for a binding that asserts no assurance — the **weakest** rung,
@@ -186,6 +197,14 @@ impl QualifyConfig {
 /// Built by [`qualify_result`] from the Phase-1 provenance join — every field is a read of
 /// asserted `pkg:assurance` / `pkg:confidence`, folded weakest-link. Reflects asserted
 /// assurance; it is **not** a calibrated confidence.
+///
+/// ## Structural UNCALIBRATED disclaimer (§6.4 rung B)
+///
+/// The [`calibration_notice`](Self::calibration_notice) field is always
+/// [`UNCALIBRATED_NOTICE`] — a structural (not free-text) reminder that the
+/// `pkg:confidence` values driving `band` and `min_confidence` are hand-authored estimates
+/// with no reliability measurement behind them. It is a field, not a doc comment, so any
+/// code that reads or serialises this struct encounters it and cannot silently drop it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnswerQualification {
     /// The weakest assurance present across all supporting bindings — drives the verb
@@ -207,6 +226,13 @@ pub struct AnswerQualification {
     /// How many of the `supporting` bindings asserted **no** `pkg:confidence` — the
     /// un-provenanced fraction, kept explicit so a caller can report it honestly.
     pub unprovenanced: usize,
+    /// **Always [`UNCALIBRATED_NOTICE`].** Structural disclaimer (§6.4 rung B): the
+    /// `pkg:confidence` values that drive `band` and `min_confidence` are hand-authored
+    /// estimates — no reliability-diagram measurement calibrates them. Present as a field
+    /// (not a free-text phrase appendage) so serialisers and destructuring code see it and
+    /// cannot silently drop it. Rung C of the calibration ladder builds the harness that
+    /// will eventually justify retiring this notice.
+    pub calibration_notice: &'static str,
 }
 
 impl AnswerQualification {
@@ -306,6 +332,7 @@ pub fn qualify_records(
         abstain,
         supporting: records.len(),
         unprovenanced,
+        calibration_notice: UNCALIBRATED_NOTICE,
     }
 }
 
@@ -625,6 +652,46 @@ ex:bare a pkg:Finding ;
         // The honesty caveat is in the phrase: NOT calibrated.
         assert!(p.contains("not calibrated"));
         assert!(p.contains("medium"));
+    }
+
+    /// STRUCTURAL UNCALIBRATED DISCLAIMER (sq-2489d.9, §6.4 rung B): every
+    /// [`AnswerQualification`] — regardless of its assurance, band, or abstention state —
+    /// must carry [`UNCALIBRATED_NOTICE`] in its `calibration_notice` field. This is the
+    /// coverage-ratchet unit test for the structural disclaimer (one direct test per new
+    /// public field, per the brief). It is NOT enough that the phrase contains "not
+    /// calibrated"; the field must be present and correct on the struct itself.
+    #[test]
+    fn qualified_answer_carries_structural_uncalibrated_notice() {
+        let g = graph();
+        // Test against a non-trivial qualified answer (Claimed/medium confidence).
+        let r = select(
+            &g,
+            "PREFIX prov: <http://www.w3.org/ns/prov#> \
+             SELECT ?f WHERE { VALUES ?f { <http://ex/claimed-mid> } ?f prov:wasDerivedFrom ?s }",
+        );
+        let q = qualify_result(&g, &r, &QualifyConfig::default());
+        // The field must be exactly UNCALIBRATED_NOTICE (not a dynamic string, not empty).
+        assert_eq!(
+            q.calibration_notice,
+            UNCALIBRATED_NOTICE,
+            "calibration_notice must be UNCALIBRATED_NOTICE on every AnswerQualification"
+        );
+        assert!(
+            q.calibration_notice.contains("UNCALIBRATED"),
+            "notice must contain 'UNCALIBRATED'"
+        );
+        assert!(
+            q.calibration_notice.contains("hand-authored"),
+            "notice must contain 'hand-authored'"
+        );
+        // Also verify the empty-records (vacuous) case carries the notice — the disclaimer
+        // must be present regardless of whether any supporting bindings were resolved.
+        let empty = qualify_records(&[], &QualifyConfig::default());
+        assert_eq!(
+            empty.calibration_notice,
+            UNCALIBRATED_NOTICE,
+            "vacuous (empty-records) qualification must also carry UNCALIBRATED_NOTICE"
+        );
     }
 
     #[test]

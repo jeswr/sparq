@@ -117,6 +117,105 @@ async fn explain_of_malformed_query_is_400_and_explain_false_executes() {
     assert!(resp.text().await.unwrap().contains("\"bindings\""));
 }
 
+// ---------------------------------------------------------------------------
+// STRUCTURED explain (`Accept: application/x-sparq-explain+json`) — sq-ixc3.19.
+// The camelCase typed plan tree (the sq-jbqh4 schema contract the GUI plan
+// explorer renders). Feature-gated: the arm exists only under `explain-json`
+// (default-on for the server binary); a lean build answers 406 (tested below).
+// 🤖 SPARQ agent. [FABLE-5]
+// ---------------------------------------------------------------------------
+
+const EXPLAIN_JSON_CT: &str = "application/x-sparq-explain+json";
+
+#[cfg(feature = "explain-json")]
+#[tokio::test]
+async fn accept_json_ct_returns_structured_plan_dry_run() {
+    let base = spawn().await;
+    // The JSON Accept ALONE requests a (plan-only) explain, mirroring the text CT.
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", JOIN_QUERY)])
+        .header("accept", EXPLAIN_JSON_CT)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let ct = resp.headers()["content-type"].to_str().unwrap().to_string();
+    assert!(ct.starts_with(EXPLAIN_JSON_CT), "{ct}");
+    let body = resp.text().await.unwrap();
+    // The schema contract: camelCase keys + children nesting; a dry run executes
+    // nothing, so actual/nanos/qError are null and it is NOT a result set.
+    assert!(body.contains("\"operator\":"), "{body}");
+    assert!(body.contains("\"children\":"), "{body}");
+    assert!(body.contains("\"actual\":null"), "{body}");
+    assert!(body.contains("\"qError\":null"), "{body}");
+    assert!(!body.contains("\"bindings\""), "{body}");
+}
+
+#[cfg(feature = "explain-json")]
+#[tokio::test]
+async fn explain_analyze_with_json_ct_fills_actuals() {
+    let base = spawn().await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", JOIN_QUERY), ("explain", "analyze")])
+        .header("accept", EXPLAIN_JSON_CT)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    // ANALYZE executed: the join yields exactly 2 rows (alice→bob, bob→carol), so
+    // the root operator's actual output-row count is a number, with wall nanos.
+    assert!(body.contains("\"actual\":2"), "{body}");
+    assert!(!body.contains("\"nanos\":null"), "{body}");
+}
+
+#[cfg(feature = "explain-json")]
+#[tokio::test]
+async fn json_analyze_of_construct_is_400() {
+    let base = spawn().await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[
+            ("query", "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"),
+            ("explain", "analyze"),
+        ])
+        .header("accept", EXPLAIN_JSON_CT)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+/// A build WITHOUT `explain-json` refuses the structured request up front (406,
+/// never a silent text fallback the caller would mis-parse), while the TEXT
+/// explain surface stays fully available.
+#[cfg(not(feature = "explain-json"))]
+#[tokio::test]
+async fn lean_build_answers_structured_explain_406() {
+    let base = spawn().await;
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", JOIN_QUERY)])
+        .header("accept", EXPLAIN_JSON_CT)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 406);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("explain-json"), "{body}");
+    // The text explain still works on the same build.
+    let resp = client()
+        .get(format!("{base}/sparql"))
+        .query(&[("query", JOIN_QUERY), ("explain", "true")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert!(resp.text().await.unwrap().contains("EXPLAIN (SELECT)"));
+}
+
 /// Minimal percent-encoding for the form body (space + reserved chars used here).
 fn urlencoding(s: &str) -> String {
     let mut out = String::new();

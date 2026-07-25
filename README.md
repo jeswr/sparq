@@ -68,8 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 The CLI, HTTP server, Python (`sparq-rdf` on PyPI — `import sparq`), and JS/WASM
-(`@jeswr/sparq`) mirror the same surface. Per-surface how-tos live in the
-[usage skills](skills/SKILL.md).
+(`@jeswr/sparq`) mirror the same surface. [GPT-5.6] The separate
+`@jeswr/solid-server` package hosts the Solid/LDP wasm adapter for loopback-only
+local development. Per-surface how-tos live in the [usage skills](skills/SKILL.md).
 
 ## ✨ Features
 
@@ -96,6 +97,9 @@ standard it implements.
   ([guide](skills/sparql-query/SKILL.md)).
 - **RDF parsing & ingest** — load and parse Turtle, N-Triples, N-Quads, and TriG, with
   transparent `.gz` / `.bz2` / `.zst` decompression ([guide](skills/data-formats/SKILL.md)).
+- **Rust-native RDF objects** — bind a focus term to an owned or borrowed store, traverse
+  outgoing/incoming predicates, and convert typed literal values without handling raw triples
+  ([guide](skills/rdf-wrapper/SKILL.md)). <!-- [GPT-5.6] sq-1rg2q M1 -->
 - **RDF 1.2 triple terms** — store and query triple terms per
   [RDF 1.2 Concepts](https://www.w3.org/TR/rdf12-concepts/) ([guide](skills/sparql-query/SKILL.md)).
 - **Custom extension functions** — register your own Rust functions under IRIs and call them in
@@ -142,7 +146,8 @@ standard it implements.
   [Graph Store HTTP Protocol](https://www.w3.org/TR/sparql11-http-rdf-update/)
   [HTTP server](skills/http-server/SKILL.md), a WebAssembly /
   [JavaScript build](skills/javascript-wasm/SKILL.md), and a
-  [Python package](skills/python/SKILL.md).
+  [Python package](skills/python/SKILL.md), plus a
+  [Kubernetes Helm deployment](skills/helm-deploy/SKILL.md). <!-- [GPT-5.6] -->
 <!-- ANCHOR_END: interfaces -->
 
 > Agent skills — how to use sparq from Claude Code and other AI agents — are
@@ -166,6 +171,9 @@ See [`AGENTS.md`](AGENTS.md) for the full crate map and what each one does.
   [`bench/CATALOG.md`](bench/CATALOG.md). The QLever comparison methodology is in
   [`bench/qlever-baselines.md`](bench/qlever-baselines.md) and the continuous Oxigraph
   differential harness in [`research/BENCHMARKS.md`](research/BENCHMARKS.md).
+- **Trust it** — [`ASSURANCE.md`](ASSURANCE.md): the 15-minute walkthrough of the assurance
+  estate (conformance ratchets, independent oracles, fuzzing, bounded proofs, honesty gates) —
+  how to check sparq works as claimed without reading the codebase.
 - **Contribute** — [`CONTRIBUTING.md`](CONTRIBUTING.md) (the build/test/lint gate, the
   conformance ratchets, and the crate-README conventions) and [`SECURITY.md`](SECURITY.md).
 

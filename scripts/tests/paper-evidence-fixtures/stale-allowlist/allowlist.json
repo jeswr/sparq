@@ -1,0 +1,5 @@
+{
+  "_comment": "Lists a record that now has a passing binding — a stale entry the shrink-only ratchet must reject.",
+  "seed_count": 1,
+  "keys": ["demo.sparql_floor"]
+}

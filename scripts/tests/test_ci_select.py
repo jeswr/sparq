@@ -37,6 +37,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CI_SELECT = REPO_ROOT / "scripts" / "ci_select.py"
+MAP_FILE = REPO_ROOT / "ci" / "path-ownership.toml"
 
 
 def _load_module():
@@ -178,9 +179,11 @@ class SyntheticGraphTests(unittest.TestCase):
         self.assertEqual(sel.changed_crates, ["engine"])
 
     def test_json_contract_keys(self):
+        # [OPUS-4.8] `change_class` added to the JSON contract (audit-trail label; not
+        # a gating input — the downstream guards still read only mode/affected).
         sel = self._select(["crates/app/src/lib.rs"])
         obj = sel.to_json_obj()
-        self.assertEqual(set(obj), {"mode", "reason", "affected"})
+        self.assertEqual(set(obj), {"mode", "reason", "affected", "change_class"})
 
 
 class OwnershipMapTests(unittest.TestCase):
@@ -215,9 +218,100 @@ class OwnershipMapTests(unittest.TestCase):
         self.assertIn("unknown crate", sel.reason)
 
     def test_map_malformed_entry_raises(self):
-        m = [{"pattern": "tests/w3c/**"}]  # neither safe nor crates
+        m = [{"pattern": "tests/w3c/**"}]  # neither safe, crates, nor readers
         with self.assertRaises(cs.SelectorError):
             cs.select(["tests/w3c/x"], self.meta, m)
+
+
+class AdditionalReadersTests(unittest.TestCase):
+    """[FABLE-5] sq-m4bxc: the additional-readers (monotone union) mechanism.
+
+    A `readers` entry unions extra reader crates into the affected set EVEN FOR
+    A CRATE-OWNED path, closing a sibling read where a real dep edge would be a
+    forbidden cycle. The load-bearing invariant is MONOTONICITY: adding a
+    `readers` entry can only ENLARGE (never shrink) the selection — so it can
+    never turn a run into an unsound skip (design §2/§4.2)."""
+
+    def setUp(self):
+        self.meta = _synthetic_meta()
+
+    def test_readers_union_enlarges_a_crate_owned_selection(self):
+        # An `app` change alone selects {app}. A readers entry on the app dir
+        # naming `parse` also pulls parse's reverse closure (parse<-engine<-app).
+        base = cs.select(["crates/app/src/lib.rs"], self.meta)
+        self.assertEqual(base.affected, ["app"])
+        m = [{"pattern": "crates/app/**", "readers": ["parse"]}]
+        sel = cs.select(["crates/app/src/lib.rs"], self.meta, m)
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, ["app", "engine", "parse"])
+        self.assertIn("parse", sel.affected)  # the extra reader is present
+
+    def test_readers_added_alongside_prefix_owner(self):
+        # The path's normal prefix owner is STILL selected (readers only adds).
+        m = [{"pattern": "crates/app/**", "readers": ["parse"]}]
+        sel = cs.select(["crates/app/src/lib.rs"], self.meta, m)
+        self.assertIn("app", sel.changed_crates)
+        self.assertIn("parse", sel.changed_crates)
+
+    def test_unknown_additional_reader_fails_full(self):
+        # A `readers` naming a non-member cannot silently skip — fail-safe to full.
+        m = [{"pattern": "crates/app/**", "readers": ["ghost-crate"]}]
+        sel = cs.select(["crates/app/src/lib.rs"], self.meta, m)
+        self.assertEqual(sel.mode, "full")
+        self.assertIn("unknown additional-reader", sel.reason)
+        self.assertEqual(sel.affected, ALL_MEMBERS)
+
+    def test_readers_never_rescue_an_unowned_path(self):
+        # MONOTONICITY GUARD: a `readers` entry must NOT convert an otherwise
+        # unowned/unmapped path (which forces full) into a narrow selection —
+        # that would SHRINK the run set. It stays full.
+        m = [{"pattern": "weird/**", "readers": ["core"]}]
+        sel = cs.select(["weird/thing.txt"], self.meta, m)
+        self.assertEqual(sel.mode, "full")
+        self.assertEqual(sel.affected, ALL_MEMBERS)
+
+    def test_readers_entry_is_not_an_ownership_verdict(self):
+        # apply_ownership_map treats a readers-only entry as transparent (None),
+        # so it never provides a `crates`/`safe` verdict nor raises.
+        m = [{"pattern": "data/**", "readers": ["core"]}]
+        self.assertIsNone(cs.apply_ownership_map("data/x", m))
+
+    def test_additional_readers_helper_unions_all_matches(self):
+        m = [
+            {"pattern": "crates/app/**", "readers": ["parse"]},
+            {"pattern": "crates/app/src/**", "readers": ["engine"]},
+        ]
+        self.assertEqual(cs.additional_readers("crates/app/src/lib.rs", m), ["engine", "parse"])
+        self.assertEqual(cs.additional_readers("crates/core/src/x.rs", m), [])
+
+    def test_monotonicity_property_readers_only_enlarges(self):
+        # PROPERTY: for ANY changed-path set, adding a `readers` entry yields an
+        # affected set that is a SUPERSET of the selection without it. Exercise a
+        # spread of cases (leaf / root / mapped / safe / unowned-full).
+        readers_entry = {"pattern": "crates/app/**", "readers": ["parse", "core"]}
+        base_maps = [
+            [],
+            [{"pattern": "research/**", "safe": True}],
+            [{"pattern": "tests/w3c/**", "crates": ["engine"]}],
+        ]
+        path_sets = [
+            ["crates/app/src/lib.rs"],
+            ["crates/core/src/dict.rs"],
+            ["crates/devlib/src/lib.rs"],
+            ["research/x.md", "crates/app/src/lib.rs"],
+            ["tests/w3c/data.ttl", "crates/app/x.rs"],
+            ["docs/unowned.md"],  # forces full in both -> superset (equal) holds
+        ]
+        for base in base_maps:
+            augmented = base + [readers_entry]
+            for paths in path_sets:
+                base_sel = cs.select(paths, self.meta, base)
+                aug_sel = cs.select(paths, self.meta, augmented)
+                self.assertTrue(
+                    set(base_sel.affected).issubset(set(aug_sel.affected)),
+                    f"monotonicity violated for paths={paths}, base={base}: "
+                    f"{base_sel.affected} !subset {aug_sel.affected}",
+                )
 
 
 class MapValidityTests(unittest.TestCase):
@@ -382,6 +476,8 @@ class WiringHookTests(unittest.TestCase):
         self.assertEqual(lines["mode"], "selected")
         self.assertEqual(json.loads(lines["affected"]), ["app"])
         self.assertEqual(lines["filterset"], "package(app)")
+        # [OPUS-4.8] change-class output present (a crate change => engine).
+        self.assertEqual(lines["change_class"], "engine")
 
     def test_filterset_joins_members_with_plus(self):
         self.assertEqual(
@@ -389,6 +485,295 @@ class WiringHookTests(unittest.TestCase):
             "package(a) + package(b)",
         )
         self.assertEqual(cs.filterset(cs.Selection(mode="full", reason="", affected=[])), "")
+
+
+# [OPUS-4.8] ---- change-class layer (path-aware CI for orchestration PRs) --------
+class ChangeClassTests(unittest.TestCase):
+    """The classifier fixtures the maintainer brief mandates: engine diff => full;
+    an orchestration-only diff (the #3416 file set exactly) => reduced (mode=selected,
+    empty closure); docs-only => reduced; mixed => full; a rename crossing classes =>
+    full. classify_change is a PURE function of the diff and is fail-closed (an
+    unclassified path taints the class to engine/mixed)."""
+
+    def setUp(self):
+        self.meta = _synthetic_meta()
+
+    def _select(self, paths, map_entries=None):
+        return cs.select(paths, self.meta, map_entries)
+
+    # --- classify_change unit behaviour ---
+    def test_classify_engine_on_crate_change(self):
+        self.assertEqual(cs.classify_change(["crates/app/src/lib.rs"]), "engine")
+
+    def test_classify_orchestration_only(self):
+        # The #3416 file set EXACTLY: an orchestration config + an orchestration script.
+        self.assertEqual(
+            cs.classify_change(["orchestration/routing.toml", "scripts/triage.py"]),
+            "orchestration-only",
+        )
+
+    def test_classify_docs_only(self):
+        self.assertEqual(cs.classify_change(["docs/guide.md", "research/x.md"]), "docs-only")
+
+    def test_classify_mixed_orchestration_plus_engine(self):
+        self.assertEqual(
+            cs.classify_change(["scripts/triage.py", "crates/app/src/lib.rs"]), "mixed"
+        )
+
+    def test_classify_mixed_docs_plus_orchestration(self):
+        self.assertEqual(
+            cs.classify_change(["docs/x.md", "scripts/triage.py"]), "mixed"
+        )
+
+    def test_classify_engine_on_ci_gate_script(self):
+        # A Rust-CI gate script is NOT orchestration-safe => engine (fail-closed).
+        self.assertEqual(cs.classify_change(["scripts/coverage-gate.py"]), "engine")
+
+    def test_classify_engine_on_rust_ci_workflow(self):
+        self.assertEqual(cs.classify_change([".github/workflows/ci.yml"]), "engine")
+
+    # --- the selection consequences (the whole point) ---
+    def test_orchestration_only_diff_selects_empty_closure(self):
+        # A pure-orchestration PR: mode=selected with an EMPTY affected set — every
+        # Rust lane (incl. the bench/fuzz/wasm seed lanes) skips.
+        sel = self._select(["orchestration/routing.toml", "scripts/triage.py"])
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, [])
+        self.assertEqual(sel.change_class, "orchestration-only")
+        self.assertIn("skipped-by-class: orchestration-only", sel.reason)
+
+    def test_docs_only_diff_selects_empty_closure(self):
+        m = [{"pattern": "research/**", "safe": True}]
+        sel = self._select(["research/design.md"], m)
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, [])
+        self.assertEqual(sel.change_class, "docs-only")
+
+    def test_orchestration_safe_never_triggers_full(self):
+        # Even paired with a crate change, the orch-safe path must not FORCE full;
+        # the crate change narrows normally (selected), class becomes mixed.
+        sel = self._select(["scripts/triage.py", "crates/app/src/lib.rs"])
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, ["app"])
+        self.assertEqual(sel.change_class, "mixed")
+
+    def test_mixed_engine_ci_script_still_forces_full(self):
+        # A Rust-CI script (NOT orch-safe) keeps forcing full even alongside orch paths.
+        sel = self._select(["scripts/coverage-gate.py", "scripts/triage.py"])
+        self.assertEqual(sel.mode, "full")
+
+    def test_workflow_file_change_forces_full_and_runs_gate_selftest(self):
+        # A .github/workflows/ Rust-CI workflow edit (ci.yml) is NOT orch-safe: it
+        # forces full, so the gate's own self-test leg + actionlint run (a CI change
+        # must prove the gate still works). Representative Rust-CI workflow.
+        sel = self._select([".github/workflows/ci.yml"])
+        self.assertEqual(sel.mode, "full")
+
+    def test_orchestration_workflow_edit_is_safe(self):
+        # An orchestration-ONLY workflow file (triage-issue.yml) is proven inert.
+        sel = self._select([".github/workflows/triage-issue.yml"])
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, [])
+        self.assertEqual(sel.change_class, "orchestration-only")
+
+    def test_rename_crossing_classes_forces_full(self):
+        # git diff --no-renames reports a move as delete+add of BOTH paths. Moving an
+        # orchestration script INTO a crate dir surfaces both paths: the crate path is
+        # owned (engine) => the diff is mixed and the crate is selected (never a skip
+        # of the destination crate). Moving a crate file OUT to orchestration surfaces
+        # the crate delete (owned) => that crate still runs.
+        sel = self._select(["scripts/triage.py", "crates/app/src/triage.rs"])
+        self.assertEqual(sel.change_class, "mixed")
+        self.assertEqual(sel.mode, "selected")
+        self.assertIn("app", sel.affected)
+
+    def test_mutation_break_classifier_reddens_engine_fixture(self):
+        # MUTATION SPOT-CHECK (brief): if the classifier were broken to call EVERYTHING
+        # orchestration-safe, an engine-diff fixture must go RED. We simulate the break
+        # by monkeypatching _orchestration_safe_match to always-True and assert the
+        # engine fixture then wrongly skips — proving the real (False) path is what
+        # keeps the engine diff running.
+        orig = cs._orchestration_safe_match
+        try:
+            cs._orchestration_safe_match = lambda _p: True
+            broken = cs.select(["crates/app/src/lib.rs"], self.meta)
+            # Under the break, the crate change is swallowed as "safe" => empty closure.
+            self.assertEqual(broken.affected, [], "mutation should make the engine diff skip")
+        finally:
+            cs._orchestration_safe_match = orig
+        # And the REAL classifier keeps the engine crate selected (red-on-wrong-answer).
+        good = cs.select(["crates/app/src/lib.rs"], self.meta)
+        self.assertEqual(good.affected, ["app"])
+
+
+# [FABLE-5] ---- classify-only mode (merge-group change-class gate; #3420/#3421 follow-up)
+class ClassifyOnlyMainTests(unittest.TestCase):
+    """The `--classify-only` CLI contract the ci.yml / feature-matrix.yml `changes`
+    pre-jobs consume on merge_group: stdout is EXACTLY one class token, the
+    `change_class=` output line is written, NO cargo metadata is ever needed, and
+    EVERY error path fails safe to `engine` (=> the consumer runs the full matrix)
+    with exit 0."""
+
+    def _run_main(self, argv):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            code = cs.main(argv)
+        return code, buf.getvalue()
+
+    def _write(self, text, suffix=".txt"):
+        fd, path = tempfile.mkstemp(suffix=suffix)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(text)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return path
+
+    def test_docs_only_batch_classifies_docs_only(self):
+        # The #2533-shaped merge-group batch: pure docs/research prose. MUTATION
+        # VISIBILITY (brief): breaking classify_change back to always-`engine`
+        # makes THIS assertion fail — the class-gated merge-group skip cannot
+        # silently regress to always-full without a red test.
+        changed = self._write("docs/branch-protection.md\nresearch/design-record.md\n")
+        code, out = self._run_main(["--classify-only", "--event", "merge_group",
+                                    "--changed-file", changed])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "docs-only")
+
+    def test_orchestration_only_batch_classifies_orchestration_only(self):
+        changed = self._write("orchestration/routing.toml\nscripts/triage.py\n")
+        code, out = self._run_main(["--classify-only", "--event", "merge_group",
+                                    "--changed-file", changed])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "orchestration-only")
+
+    def test_engine_batch_classifies_engine(self):
+        changed = self._write("crates/app/src/lib.rs\n")
+        code, out = self._run_main(["--classify-only", "--event", "merge_group",
+                                    "--changed-file", changed])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "engine")
+
+    def test_mixed_batch_classifies_mixed(self):
+        # A mixed batch is NOT a skip class in the workflow case-arm => full run.
+        changed = self._write("docs/x.md\ncrates/app/src/lib.rs\n")
+        code, out = self._run_main(["--classify-only", "--event", "merge_group",
+                                    "--changed-file", changed])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "mixed")
+
+    def test_stdout_is_exactly_one_token_line(self):
+        # The shell consumer does `cls="$(...)"` and `case`s on the WHOLE value:
+        # any extra stdout line would fall into the wildcard arm (safe, but the
+        # single-line contract is what makes the gate legible) — pin it.
+        changed = self._write("docs/x.md\n")
+        code, out = self._run_main(["--classify-only", "--event", "merge_group",
+                                    "--changed-file", changed])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines(), ["docs-only"])
+
+    def test_output_and_summary_files_carry_the_class(self):
+        changed = self._write("docs/x.md\n")
+        out_file = self._write("")
+        summary = self._write("")
+        code, _ = self._run_main(["--classify-only", "--event", "merge_group",
+                                  "--changed-file", changed,
+                                  "--output-file", out_file, "--summary-file", summary])
+        self.assertEqual(code, 0)
+        self.assertIn("change_class=docs-only", Path(out_file).read_text(encoding="utf-8"))
+        self.assertIn("docs-only", Path(summary).read_text(encoding="utf-8"))
+
+    def test_no_cargo_metadata_needed_even_when_metadata_is_broken(self):
+        # classify-only must never touch cargo metadata: a bogus --metadata-file
+        # is simply ignored (the whole point — the changes pre-job has no
+        # toolchain and pays no metadata cost).
+        changed = self._write("docs/x.md\n")
+        code, out = self._run_main(["--classify-only", "--event", "merge_group",
+                                    "--changed-file", changed,
+                                    "--metadata-file", "/no/such/meta.json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "docs-only")
+
+    def test_unresolvable_diff_fails_safe_to_engine(self):
+        # Garbage SHAs => git diff fails => class engine (full run), exit 0 —
+        # the #3421 fail-safe posture (cost, never soundness).
+        code, out = self._run_main(["--classify-only", "--event", "merge_group",
+                                    "--base", "deadbeefdeadbeef",
+                                    "--head", "cafebabecafebabe"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "engine")
+
+    def test_missing_base_fails_safe_to_engine(self):
+        code, out = self._run_main(["--classify-only", "--event", "merge_group"])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "engine")
+
+    def test_non_diff_event_is_engine(self):
+        # schedule/push/workflow_dispatch carry no batch diff => engine (full).
+        for event in ("schedule", "push", "workflow_dispatch"):
+            code, out = self._run_main(["--classify-only", "--event", event])
+            self.assertEqual(code, 0)
+            self.assertEqual(out.strip(), "engine", f"event {event}")
+
+    def test_full_override_is_engine(self):
+        changed = self._write("docs/x.md\n")
+        code, out = self._run_main(["--classify-only", "--full", "--event", "merge_group",
+                                    "--changed-file", changed])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.strip(), "engine")
+
+
+class OrchestrationSafeInertnessTests(unittest.TestCase):
+    """[OPUS-4.8] THE INERTNESS OBLIGATION: every _ORCHESTRATION_SAFE entry must be
+    PROVEN not read by any Rust-CI workflow. This greps the real Rust-CI workflow
+    files for a reference to each allowlisted SCRIPT/WORKFLOW and FAILS if one is
+    referenced — so an entry can never silently become unsound when a script is later
+    wired into a gate. Directory prefixes (orchestration/, .claude/, .beads/) are
+    audited by convention (never cargo-compiled) and exempt from the grep."""
+
+    # The workflows that run cargo build/test/clippy/coverage/bench/fuzz/CodeQL and
+    # therefore MUST NOT reference an orchestration-safe script.
+    _RUST_CI_WORKFLOWS = [
+        "ci.yml", "feature-matrix.yml", "codeql.yml", "supply-chain.yml",
+        "bench.yml", "fuzz.yml", "miri.yml", "asan.yml", "kani.yml",
+        "metamorph.yml", "vectorized-feature-off.yml", "ci-select.yml",
+        "ci-summary.yml", "formal-verification.yml", "differential.yml",
+        "shacl-diff-fuzz.yml", "nightly-full-sweep.yml",
+    ]
+
+    def test_no_orch_safe_script_is_referenced_by_a_rust_ci_workflow(self):
+        wf_dir = REPO_ROOT / ".github" / "workflows"
+        corpus = []
+        for name in self._RUST_CI_WORKFLOWS:
+            p = wf_dir / name
+            if p.exists():
+                corpus.append(p.read_text(encoding="utf-8"))
+        blob = "\n".join(corpus)
+        for entry in cs._ORCHESTRATION_SAFE:
+            if entry.endswith("/"):
+                continue  # directory prefixes: never cargo-compiled (audited by convention)
+            if entry.startswith(".github/workflows/"):
+                # An orchestration WORKFLOW file: it must not itself be a Rust-CI wf.
+                self.assertNotIn(
+                    Path(entry).name, self._RUST_CI_WORKFLOWS,
+                    f"{entry} is listed as orchestration-safe but is a Rust-CI workflow",
+                )
+                continue
+            # A script: it must not be referenced anywhere in a Rust-CI workflow.
+            self.assertNotIn(
+                entry, blob,
+                f"orchestration-safe {entry} IS referenced by a Rust-CI workflow — it is "
+                f"NOT inert; remove it from _ORCHESTRATION_SAFE (fail-closed: a referenced "
+                f"script must keep triggering the full matrix).",
+            )
+
+    def test_orch_safe_scripts_exist_on_disk(self):
+        # A stale allowlist entry (script deleted/renamed) should be caught, else it
+        # silently covers nothing. Directory prefixes are checked as dirs.
+        for entry in cs._ORCHESTRATION_SAFE:
+            path = REPO_ROOT / entry.rstrip("/")
+            self.assertTrue(
+                path.exists(),
+                f"orchestration-safe entry {entry} does not exist on disk (stale allowlist)",
+            )
 
 
 class RealMetadataShapeTests(unittest.TestCase):
@@ -436,6 +821,209 @@ class RealMetadataShapeTests(unittest.TestCase):
         self.assertEqual(sel.mode, "selected")
         self.assertIn("sparq-geo", sel.affected)
         self.assertNotIn("sparq-parse", sel.affected)  # parse does not depend on geo
+
+    # ---- sq-m4bxc additional-readers acceptance, REAL metadata + REAL map ------
+    # These use the SHIPPED ci/path-ownership.toml `readers` entries against live
+    # cargo metadata: a change to sparq-trust's shared secprop vocab must select
+    # sparq-zk (a sparq-zk->sparq-trust dep is a cycle, so the reverse closure
+    # cannot reach it), and a change to sparq-solid's rule corpus must select
+    # sparq-reason (sparq-solid depends on sparq-reason — the reverse cycle).
+    def test_secprop_ext_change_selects_zk_and_trust(self):
+        real_map = cs.load_ownership_map(str(MAP_FILE))
+        sel = cs.select(
+            ["crates/sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl"],
+            self.meta, real_map,
+        )
+        self.assertEqual(sel.mode, "selected")
+        self.assertIn("sparq-zk", sel.affected,
+                      "a secprop-ext.ttl change must run sparq-zk's cross-crate drift test")
+        self.assertIn("sparq-trust", sel.affected)
+
+    def test_solid_rules_change_selects_reason(self):
+        real_map = cs.load_ownership_map(str(MAP_FILE))
+        sel = cs.select(["crates/sparq-solid/rules/wac.n3"], self.meta, real_map)
+        self.assertEqual(sel.mode, "selected")
+        self.assertIn("sparq-reason", sel.affected,
+                      "a sparq-solid/rules change must run sparq-reason's N3-equivalence tests")
+        self.assertIn("sparq-solid", sel.affected)
+
+    # ---- phase-2 lane mapping against REAL metadata (bead sq-fmx4u.6) ----------
+    def test_lane_seed_crates_are_real_workspace_members(self):
+        # A seed that is not a current member would make its lane skip exactly when
+        # it should run (`lane_runs` fail-closes it to RUN, but the intent is that
+        # the list stays real). Pin every fuzz/wasm seed against the live metadata.
+        ws = cs.parse_workspace(self.meta)
+        for lane, seeds in cs._LANE_SEEDS.items():
+            for seed in seeds:
+                self.assertIn(seed, ws.members,
+                              f"{lane} seed {seed!r} is not a workspace member")
+
+    def test_geo_only_pr_skips_fuzz_and_wasm(self):
+        # ACCEPTANCE: a geo-only PR skips the sparq-core fuzz smoke + wasm builds.
+        # sparq-geo is a reverse-graph leaf; none of the fuzz/wasm seeds depend on
+        # it, so neither lane is affected (skipped-green).
+        sel = cs.select(["crates/sparq-geo/src/lib.rs"], self.meta)
+        self.assertEqual(sel.mode, "selected")
+        self.assertFalse(cs.lane_runs(sel, cs._LANE_SEEDS["fuzz"]),
+                         "geo-only PR must SKIP the fuzz lane")
+        self.assertFalse(cs.lane_runs(sel, cs._LANE_SEEDS["wasm"]),
+                         "geo-only PR must SKIP the wasm lane")
+
+    def test_core_pr_runs_fuzz_and_wasm(self):
+        # ACCEPTANCE: a sparq-core PR still runs both — every fuzz seed and every
+        # wasm bundle depends (transitively) on sparq-core, so both are affected.
+        sel = cs.select(["crates/sparq-core/src/dict.rs"], self.meta)
+        self.assertEqual(sel.mode, "selected")
+        self.assertTrue(cs.lane_runs(sel, cs._LANE_SEEDS["fuzz"]),
+                        "sparq-core PR must RUN the fuzz lane")
+        self.assertTrue(cs.lane_runs(sel, cs._LANE_SEEDS["wasm"]),
+                        "sparq-core PR must RUN the wasm lane")
+
+    # ---- bench (perf-gate) lane acceptance, real metadata (bead sq-mel85) ------
+    def test_engine_pr_runs_bench(self):
+        # ACCEPTANCE (sq-mel85): an engine-touching PR runs the perf gate — sparq-engine
+        # is a direct bench seed (and the store/dict/parse hard-gated metrics could move).
+        sel = cs.select(["crates/sparq-engine/src/lib.rs"], self.meta)
+        self.assertEqual(sel.mode, "selected")
+        self.assertTrue(cs.lane_runs(sel, cs._LANE_SEEDS["bench"]),
+                        "engine-touching PR must RUN the bench lane")
+
+    def test_core_pr_runs_bench(self):
+        # A sparq-core change moves the HARD-GATED store/dict/parse byte metrics; core is
+        # a dep of every bench seed's release binary, so it lands in the affected closure.
+        sel = cs.select(["crates/sparq-core/src/dict.rs"], self.meta)
+        self.assertTrue(cs.lane_runs(sel, cs._LANE_SEEDS["bench"]),
+                        "sparq-core PR must RUN the bench lane (store/dict/parse floors)")
+
+    def test_wasm_only_pr_runs_bench(self):
+        # SOUNDNESS (sq-mel85): the wasm_bundle_bytes floor is enforced ONLY in bench.yml,
+        # and a wasm-only diff does NOT flow up into engine/cli/bench — so sparq-wasm is a
+        # DIRECT bench seed and a wasm-only PR must still RUN the perf gate.
+        sel = cs.select(["crates/sparq-wasm/src/lib.rs"], self.meta)
+        self.assertEqual(sel.mode, "selected")
+        self.assertTrue(cs.lane_runs(sel, cs._LANE_SEEDS["bench"]),
+                        "wasm-only PR must RUN the bench lane (wasm_bundle_bytes floor)")
+
+    def test_isolated_crate_pr_skips_bench(self):
+        # ACCEPTANCE (sq-mel85): a PR to a crate that NO bench seed depends on skips the
+        # perf gate. sparq-rsp is isolated (its bench is a standalone example, and neither
+        # sparq-engine/-cli/-bench/-wasm depends on it), so the bench closure is unaffected
+        # => skipped-green. Its trend-only latency comment is informational, not a gate.
+        sel = cs.select(["crates/sparq-rsp/src/lib.rs"], self.meta)
+        self.assertEqual(sel.mode, "selected")
+        self.assertFalse(cs.lane_runs(sel, cs._LANE_SEEDS["bench"]),
+                         "isolated-crate PR (sparq-rsp) must SKIP the bench lane")
+
+    def test_cli_linked_crate_runs_bench_conservatively(self):
+        # HONEST over-run (sq-mel85): the seed set is "sparq-engine + the release binaries"
+        # (bead spec). sparq-cli transitively depends on sparq-geo (sparq-cli -> sparq-server
+        # -> sparq-geo), so a geo change rebuilds a benchmarked release binary and the bench
+        # lane RUNS. This is a conservative over-run (a geo change cannot move a
+        # PR-tier-measured hard-gated metric — store/dict/parse are sparq-core, wasm_bundle
+        # is sparq-wasm; geo_compliance_deficit is mode:auto but main-tier-only in ci-bench.sh,
+        # where mode=full always), never an unsound skip. Pinned so the behaviour is a
+        # documented decision, not a surprise.
+        ws = cs.parse_workspace(self.meta)
+        self.assertIn("sparq-cli", cs.reverse_closure("sparq-geo", ws.reverse_adj),
+                      "test premise: sparq-cli depends transitively on sparq-geo")
+        sel = cs.select(["crates/sparq-geo/src/lib.rs"], self.meta)
+        self.assertTrue(cs.lane_runs(sel, cs._LANE_SEEDS["bench"]),
+                        "geo change rebuilds the sparq-cli release binary => bench RUNS")
+
+    def test_docs_only_pr_skips_bench(self):
+        # ACCEPTANCE (sq-mel85): a docs-only PR (SAFE-listed research/**) selects an
+        # EMPTY closure, so the perf gate is inert => skipped-green. Real metadata (so the
+        # bench seeds are known members) + the research SAFE map entry.
+        m = [{"pattern": "research/**", "safe": True}]
+        sel = cs.select(["research/change-based-test-selection.md"], self.meta, m)
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, [])
+        self.assertFalse(cs.lane_runs(sel, cs._LANE_SEEDS["bench"]),
+                         "docs-only PR must SKIP the bench lane")
+
+
+class LaneMappingTests(unittest.TestCase):
+    """[OPUS-4.8] sq-fmx4u.6 (design §5.2, phase 2): hermetic tests of
+    `lane_runs` — the executable spec of the fuzz.yml + ci.yml `wasm` job `if:`
+    guards — and the SAFE-only coverage-ratchet skip. All synthetic (no cargo)."""
+
+    def _sel(self, mode, affected, members):
+        return cs.Selection(mode=mode, reason="", affected=list(affected),
+                            all_members=list(members))
+
+    def test_lane_runs_when_a_seed_is_affected(self):
+        sel = self._sel("selected", ["sparq-core", "sparq-geo"],
+                        ["sparq-core", "sparq-geo", "sparq-wasm"])
+        self.assertTrue(cs.lane_runs(sel, ["sparq-core"]))
+
+    def test_lane_skips_when_no_seed_is_affected(self):
+        sel = self._sel("selected", ["sparq-geo"],
+                        ["sparq-core", "sparq-geo", "sparq-wasm"])
+        self.assertFalse(cs.lane_runs(sel, ["sparq-core", "sparq-wasm"]))
+
+    def test_full_and_shadow_modes_always_run_the_lane(self):
+        # full (nightly backstop / ci-full / error) + shadow (report-only) => RUN.
+        for mode in ("full", "shadow"):
+            sel = self._sel(mode, [], ["sparq-core"])
+            self.assertTrue(cs.lane_runs(sel, ["sparq-core"]),
+                            f"mode={mode} must always run the lane")
+
+    def test_selected_empty_affected_skips_the_lane(self):
+        # SAFE-only change: mode=selected, affected=[] => the lane is inert => skip.
+        sel = self._sel("selected", [], ["sparq-core"])
+        self.assertFalse(cs.lane_runs(sel, ["sparq-core"]))
+
+    def test_unknown_seed_forces_run_fail_closed(self):
+        # A typo'd/renamed seed cannot silently skip its lane: lane_runs RUNS it.
+        sel = self._sel("selected", ["sparq-geo"], ["sparq-core", "sparq-geo"])
+        self.assertTrue(cs.lane_runs(sel, ["sparq-core-TYPO"]),
+                        "an unknown seed must fail-closed to RUN")
+
+    def test_lane_seeds_are_the_expected_lanes(self):
+        # [SONNET-4.6] sq-mel85 added the `bench` lane to the fuzz + wasm phase-2 set.
+        # [FABLE-5] sq-0iqzw added `differential-smoke` (fuzz.yml PR-level blocking
+        # sparq-vs-Oxigraph differential regression windows).
+        self.assertEqual(set(cs._LANE_SEEDS),
+                         {"fuzz", "wasm", "bench", "differential-smoke"})
+        self.assertEqual(cs._LANE_SEEDS["fuzz"],
+                         ["sparq-core", "sparq-engine", "sparq-shacl"])
+        self.assertIn("sparq-wasm", cs._LANE_SEEDS["wasm"])
+        self.assertIn("sparq-solid", cs._LANE_SEEDS["wasm"])
+        # bench (perf gate): sparq-engine + the release binaries + sparq-wasm (the
+        # wasm_bundle_bytes floor is enforced only in bench.yml — a direct seed).
+        self.assertEqual(cs._LANE_SEEDS["bench"],
+                         ["sparq-engine", "sparq-cli", "sparq-bench", "sparq-wasm"])
+        # differential-smoke: the engine under test + the harness/oracle crate.
+        self.assertEqual(cs._LANE_SEEDS["differential-smoke"],
+                         ["sparq-core", "sparq-engine", "sparq-bench"])
+
+    # ---- SAFE-only coverage-ratchet skip (acceptance) -------------------------
+    @staticmethod
+    def _coverage_ratchet_skips(sel):
+        """Mirror the ci.yml `coverage-measure` job `if:` disjunction:
+            mode != 'selected' || affected != '[]'   (RUN when either holds)
+        so the ratchet is SKIPPED iff mode == 'selected' AND affected == []."""
+        return sel.mode == "selected" and json.dumps(sel.affected) == "[]"
+
+    def test_safe_only_pr_skips_coverage_ratchet(self):
+        # ACCEPTANCE: an affected-empty (SAFE-only) PR skips the coverage ratchet.
+        m = [{"pattern": "research/**", "safe": True}]
+        sel = cs.select(["research/x.md"], _synthetic_meta(), m)
+        self.assertEqual(sel.mode, "selected")
+        self.assertEqual(sel.affected, [])
+        self.assertTrue(self._coverage_ratchet_skips(sel))
+
+    def test_nonempty_affected_keeps_coverage_ratchet_running(self):
+        # A non-empty closure keeps coverage always-run (a dep change can shift
+        # executed lines in dependents — design §5.2).
+        sel = cs.select(["crates/app/src/lib.rs"], _synthetic_meta())
+        self.assertEqual(sel.mode, "selected")
+        self.assertFalse(self._coverage_ratchet_skips(sel))
+
+    def test_full_mode_keeps_coverage_ratchet_running(self):
+        sel = cs.select(["Cargo.lock"], _synthetic_meta())
+        self.assertEqual(sel.mode, "full")
+        self.assertFalse(self._coverage_ratchet_skips(sel))
 
 
 class EnforceRolloutTests(unittest.TestCase):

@@ -15,7 +15,7 @@ use sparq_engine::QueryResult;
 
 use crate::{FIELD_DATATYPE, FIELD_DIRECTION, FIELD_KIND, FIELD_LANGUAGE, FIELD_VALUE};
 
-/// Failure converting a [`QueryResult`] to a [`RecordBatch`].
+/// Failure converting a [`QueryResult`] to Arrow or Parquet output.
 ///
 /// The only failure modes are an invalid SELECT projection (a duplicate variable name,
 /// which would make two Arrow fields collide) and an Arrow-side construction error
@@ -25,7 +25,7 @@ use crate::{FIELD_DATATYPE, FIELD_DIRECTION, FIELD_KIND, FIELD_LANGUAGE, FIELD_V
 pub enum ArrowExportError {
     /// Two SELECT variables share a name, so they cannot be distinct Arrow columns.
     DuplicateVariable(String),
-    /// The underlying Arrow library rejected the assembled schema/arrays.
+    /// The Arrow or Parquet library rejected the assembled output.
     Arrow(ArrowError),
 }
 
@@ -41,9 +41,7 @@ impl std::fmt::Display for ArrowExportError {
                     v
                 )
             }
-            ArrowExportError::Arrow(e) => {
-                write!(f, "arrow record-batch construction failed: {}", e)
-            }
+            ArrowExportError::Arrow(e) => write!(f, "Arrow/Parquet export failed: {}", e),
         }
     }
 }

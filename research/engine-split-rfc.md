@@ -1,9 +1,12 @@
 # RFC: Splitting `sparq-engine` — Phase-0 decision package (sq-6vshe.3) [FABLE-5]
 
-> **Status: PROPOSED — awaiting maintainer ratification.** This is a decision RFC, not an
-> implementation record. No engine source changes accompany it, and nothing in this
-> document authorizes the cut: execution (sq-6vshe.4) stays gated on the maintainer's
-> steer against the decision rule in `research/ci-structural-speedup.md` §3.4 (PR #1396).
+> **Status: ADJUDICATED (2026-07-05, sq-6vshe.4) — program closed at two seams.**
+> The direction was maintainer-ratified via steer #1402; Phases A1
+> (`sparq-engine-serialize`, PR #1542) and A2 (`sparq-engine-service`, PR #1563) are
+> MERGED. Phase A3 is **WITHDRAWN** — its §4 premise turned out to be false against the
+> code (see the CORRECTION block in §4). Option B is **NOT EXECUTED** — the measured
+> §6-D2 critical-path verdict came in under the ratified threshold, tripping this RFC's
+> own veto condition. Architect ruling + Option-B reopening conditions in §10.
 >
 > Bead: **sq-6vshe.3** · Program: **sq-6vshe** / #1396 · Perf review: #1397 ·
 > Hard constraint: **#1303** (no-dyn perf-neutrality gate) · Deferred measurement:
@@ -180,7 +183,7 @@ nothing structural.
 |---|---|---|
 | `sparq-engine-serialize` | `serialize.rs`, `serialize/compact.rs`, `serialize/frame.rs` (optionally `json.rs`, `construct.rs`) | `serialize-rdf`, `streaming-serialization` |
 | `sparq-engine-service` | `service.rs` | `service` (keeps `cfg(not(wasm32))`) |
-| `sparq-engine-serve` | `cache.rs`, `txn.rs`, `params.rs`, `solution.rs`, `explain_json.rs`, `window.rs`, `window_syntax.rs` | `result-cache`, `txn`, `params`, `query-solution`, `explain-json`, `window-functions` |
+| `sparq-engine-serve` **(WITHDRAWN — see the CORRECTION below)** | `cache.rs`, `txn.rs`, `params.rs`, `solution.rs`, `explain_json.rs`, `window.rs`, `window_syntax.rs` | `result-cache`, `txn`, `params`, `query-solution`, `explain-json`, `window-functions` |
 
 Left behind: the core engine (`exec` + planner + `update` + `dataset` + `aggregate` +
 `explain` text + `lib` facade) plus the woven-in `zk` hooks.
@@ -193,6 +196,39 @@ Left behind: the core engine (`exec` + planner + `update` + `dataset` + `aggrega
 non-dyn scoped-context API so the peeled crates can set up execution. `service` keeps
 its existing `Box<dyn Transport>` install point (already dyn, per-SERVICE-call,
 off-row-path — allowlisted).
+
+> **CORRECTION (2026-07-05, sq-6vshe.4 ruling) [FABLE-5] — the A3/serve claim above is
+> FALSE against the code.** A1 and A2 moved genuine *leaves* — code the executor calls
+> into (`serialize` crossed only via `triples_to_ntriples` + `QueryResult`; `service.rs`
+> had zero `crate::` back-refs). The seven serve modules are the opposite: upward
+> consumers of the core facade, and the scoped-context promotion alone cannot free them.
+> Re-derived per-module on `origin/main` (post-A1/A2):
+>
+> - **`lib.rs` ⇄ `params.rs` is a bidirectional cycle**, not just an upward dep:
+>   `PreparedQuery::bind` / `PreparedUpdate::bind` in `lib.rs` call `params::bind_query`
+>   / `params::bind_update`, while `params.rs` calls `crate::ask`.
+> - **The promotion targets are co-consumed by staying modules.** `view_scope` /
+>   `active_dataset` are used by `construct.rs`, `explain.rs`, and `lib.rs`'s own query
+>   fns as well as by the moving candidates (`cache.rs`, `explain_json.rs`); promoting
+>   them `pub` does not let them move, so the consumers still depend on core.
+> - **Every serve module needs at least one `lib.rs`-defined item** (`QueryResult`,
+>   `QueryBudget`, or the facade fns `query`/`ask`/`count`), and the verbatim-facade
+>   requirement forces `sparq-engine` to re-export the moved modules (`lib.rs`
+>   `pub use`s `cache`/`solution`/`explain_json`/`window_syntax`). A serve crate that
+>   depends on `sparq-engine` while `sparq-engine` re-exports it is a forbidden Cargo
+>   crate cycle.
+> - **No leaf subset exists among the seven.** `explain_json.rs` is among the *most*
+>   core-coupled (`exec`, `explain`, `explain_analyze`, `view_scope`, `active_dataset`,
+>   `QueryBudget`) — the opposite of leafy. The leafiest members are `window.rs` and
+>   `solution.rs`, each needing exactly one core item (`QueryResult`, defined in
+>   `lib.rs`) — but freeing even them requires hoisting a core public type into a new
+>   lower crate (the Option-B base-hoist mechanism in miniature), and `window_syntax.rs`
+>   (which needs the core `query`/`query_with_budget`) could not follow `window.rs`,
+>   fracturing the `window-functions` feature across two crates.
+>
+> The only mechanism that breaks the cycle is the Option-B `sparq-engine-base` hoist —
+> and the §6-D2 measurement subsequently scored that hoist's payoff under threshold.
+> A3 is therefore **WITHDRAWN**, not re-scoped (ruling in §10).
 
 **Trade-offs.** (+) Mostly mechanical: the cut coincides with the feature flags, so
 "byte-identical when off" contracts carry over. (+) Coverage: `serialize`'s ~5k LOC
@@ -281,7 +317,7 @@ Thresholds below are **proposed targets for ratification**, not measurements.
 | # | Criterion | Test | GO condition |
 |---|---|---|---|
 | D1 | **Structural seam quality** (§3.4-i) | Interface-width audit of this RFC (§3.3/§4): count of cross-seam `pub` items per seam; no orphan-rule tangles | ≥2 seams with a narrow interface. **Assessed now: PASS on structure** — Seam 1 crosses only the existing facade (+1 promoted scoped-context API); Seam 2 crosses `Prepared`+plan+`Ctx`+`Statistics`, narrow *after* the base-crate hoist |
-| D2 | **Critical-path cut** (§3.4-ii) | `cargo build --timings` model on the canonical CI runner class + `cargo llvm-lines` attribution (sq-6vshe.12) + git-churn map, before/after prediction for the modal engine-touching PR | Material predicted reduction (order 25%+, per §3.4-ii). **NOT assessable yet — this is the open input.** If llvm-lines shows codegen dominated by downstream instantiation, record NO-GO for Option B honestly |
+| D2 | **Critical-path cut** (§3.4-ii) | `cargo build --timings` model on the canonical CI runner class + `cargo llvm-lines` attribution (sq-6vshe.12) + git-churn map, before/after prediction for the modal engine-touching PR | Material predicted reduction (order 25%+, per §3.4-ii). **Monomorphization sub-axis: ASSESSED — does NOT veto B** (sq-6vshe.12, indicative workbox `cargo llvm-lines -p sparq-engine --release`; numbers in the bead per §8). The NO-GO trigger ("codegen dominated by downstream/exported-generic instantiation") is **not** met: `sparq-engine` exports ~zero generic surface (the `lib.rs` facade fns are concrete; `exec.rs` defines two generic fns) so downstream crates do not monomorphize engine code, and engine's own IR is dominated by large *non-generic* function bodies — engine-defined monomorphization is a low-single-digit % of engine IR, and the substrate `JoinKeys`/`compare_terms` weight is concrete/single-instantiation, not a multiplier. So a planner\|executor cut divides genuine non-generic frontend work rather than merely relocating instantiation. **Caveats:** the majority-of-IR library-generic instantiations (iterators/`Vec`/`SmallVec`/hashbrown/rayon) re-instantiate per sub-crate and dedup only under fat-LTO, so the codegen half is partial; Seam B is a chain (executor depends on the plan), buying little cross-crate parallelism. **Timings sub-axis: MEASURED — FAIL against the threshold** (sq-aqr2f, indicative work-box `cargo build --timings`; numbers stay in the bead per §8/repo hygiene). In today's cold-cache CI, engine's own compile is a small minority of the full-build wall and is *off* the dependency critical path (the GPU stack `naga`→`wgpu-hal`→`wgpu-core`→`sparq-gpu` is the cold pole), so any engine split buys ~nothing cold. In the warm/cached regime (the modal engine-touching rebuild) engine *is* the single largest pole, but (i) the dependent tail — nearly as large — is untouchable by any internal split, since downstream rebuilds via the facade on any engine-half change; (ii) Seam B is a chain, so a full-engine rebuild is not shortened, only a one-half-touched rebuild is; (iii) the modal engine PR touches `exec.rs` = the *larger* executor half, so the split typically skips only the smaller planner half (`dp`/`cs` are even feature-gated off default). The realizable modal-PR saving falls well under the order-25% GO condition. **D2 = NO-GO for Option B in the current regime**; reopening conditions in §10 |
 | D3 | **Coverage-shard rebalance** | Coverage matrix wall-times from the CI catalog before/after (per sq-piapk's instrumentation); new crates onboarded to the per-crate ratchet | Longest engine-family shard drops materially below today's single-crate shard on the existing 4-way matrix; every new crate meets a floor set from its *measured* post-split coverage (no fabricated floors; one direct unit test per new/promoted public fn) |
 | D4 | **#1303 no-dyn HARD gate** | (a) perf-neutrality/feature-OFF proof lanes stay green; (b) seam-API dyn audit (ast-grep for `dyn` in cross-crate signatures; allowlist = the pre-existing `Box<dyn Transport>` only); (c) EC2 runtime benches non-regressing per the benchmark catalog | Zero new `dyn` on any per-row/per-scan path; byte-identical feature-off contract preserved. **Any violation is an unconditional VETO regardless of build wins** |
 | D5 | **API + semantics neutrality** | `cargo public-api` diff on `sparq-engine`; full conformance + differential suites (dp/semijoin/yannakakis/vectorized/mvcc/dict) unchanged; wasm32 build (service excluded) green | No breaking public-API change; zero test-behavior drift |
@@ -299,20 +335,35 @@ coordinated freeze windows on `exec.rs`-touching work (#1396 §3.2 churn note).
 
 - **Phase 0 (this RFC + data):** maintainer steer on §9; run sq-6vshe.12
   (llvm-lines + `--timings` attribution) and the cheap churn map; re-score D2.
+  *Status: DONE — steer ratified (#1402); llvm-lines half (sq-6vshe.12: monomorphization
+  does not veto B) and `--timings` half (sq-aqr2f: critical-path share measured) both
+  landed; D2 re-scored in §6 as NO-GO. The churn map was never gathered — it survives as
+  a reopening obligation (§10), not a debt of this closed program.*
 - **Phase A1:** peel `sparq-engine-serialize` (cleanest: crosses via
   `triples_to_ntriples` + `QueryResult` only). Gate: D3/D4/D5 checks green.
+  *Status: DONE — merged as PR #1542.*
 - **Phase A2:** peel `sparq-engine-service` (nearly standalone; keeps the dyn-Transport
-  allowlist entry).
+  allowlist entry). *Status: DONE — merged as PR #1563.*
 - **Phase A3:** promote the scoped-context API (concrete, documented init-order), then
   peel `sparq-engine-serve`. This is the step with the real API decision in it.
+  *Status: WITHDRAWN — the premise is false against the code (§4 CORRECTION): the serve
+  modules are upward consumers with a `lib.rs`⇄`params` cycle, and no leaf subset
+  clears the A1/A2 bar. Executing it would smuggle in the Option-B base hoist that D2
+  scored under threshold.*
 - **Phase B0 (in-crate, = Option C):** split `exec.rs` into `plan/`/`eval/`/`ctx/`
   modules; hoist `Row`/`Prepared`/`CsCtx`/`Ctx` into an internal base module. No crate
   boundary yet — pure de-risking, valuable regardless of the B verdict.
+  *Status: NOT EXECUTED — with B1/B2 closed its de-risking rationale lapses; per §8 it
+  is developer ergonomics only, so it is deliberately not beaded under this program
+  (revisit on its own merits if ergonomics ever warrant it).*
 - **Phase B1 (GO on D2 only):** extract `sparq-engine-base`, introduce the generic
-  `Statistics` trait, verify zero perf drift.
+  `Statistics` trait, verify zero perf drift. *Status: NOT EXECUTED — D2 measured under
+  threshold (§6); reopening conditions in §10.*
 - **Phase B2 (GO on D2 only):** extract `sparq-engine-plan` (with `dp`/`cs`), executor
   stays in core. Final D1–D5 re-check; retire sq-piapk machinery if D3 makes it moot
-  (coordinate — piapk explicitly waits on this profile).
+  (coordinate — piapk explicitly waits on this profile). *Status: NOT EXECUTED — same
+  gate as B1. Consequence: the sq-piapk tactical coverage-sharding machinery stays
+  necessary; the structural retirement this phase promised does not happen.*
 
 **Risks & unknowns:** thread-local init order across crates (mitigation: single
 `Ctx` install API owned by base, asserted in debug builds); the zk zero-cost-when-off
@@ -333,6 +384,10 @@ with in-flight engine work; release-plz/publish surface for internal crates.
 - **Option C:** developer-ergonomics only; no CI-structural effect.
 
 ## 9. Recommendation (for ratification, not a decision)
+
+*(Historical — adjudicated. The recommendation below was followed: Option A was
+ratified via steer #1402 and executed to two seams; Option B was held on data and is
+now closed on the measured data. The binding outcome is §10.)*
 
 **Recommend: ratify Option A now; hold Option B at "gather sq-6vshe.12 data first";
 fold Option C in as Option B's Phase B0 regardless.**
@@ -355,3 +410,60 @@ Decision requested from the maintainer:
    the binding go/no-go rule for Option B.
 3. **Sequence sq-6vshe.12** ahead of any Option B work; sq-6vshe.4 remains gated on the
    resulting D2 verdict.
+
+## 10. Adjudication (2026-07-05) — the sq-6vshe.4 architect ruling [FABLE-5]
+
+Inputs: the A3 structural stop-condition finding (sq-6vshe.4 comments, re-derived
+against the code for this ruling), the D2 measurements (sq-6vshe.12 llvm-lines;
+sq-aqr2f `cargo build --timings` — numbers live in the beads per repo hygiene; both
+indicative work-box, non-canonical), and the delivered A1/A2 state (PRs #1542, #1563).
+Issued under the proceed-and-document rule; a post-hoc steer issue was opened against
+the #1402 ratification, since this ruling withdraws A3 from the ratified plan.
+
+**Ruling.**
+
+1. **Option B (planner|executor over `sparq-engine-base`): DO NOT EXECUTE.** The
+   monomorphization axis cleared (it does not veto), but the measured critical-path
+   axis came in under the §6-D2 GO condition, and "D2 below threshold in the measured
+   model" is one of this RFC's ratified veto conditions (§6). What survives of B's case
+   is a modest incremental-granularity + change-based-selection lever whose payoff is
+   contingent on infrastructure that does not exist yet (see reopening conditions) —
+   not enough to pay B's refactor cost, churn, and #1303 proof obligations.
+2. **Phase A3 (`sparq-engine-serve`): WITHDRAWN.** The §4 premise is false against the
+   code (§4 CORRECTION). No subset of the seven serve modules clears the bar A1/A2
+   cleared — a verbatim leaf move with no core-type hoist and real feature-on codegen
+   removed. Even the leafiest candidates (`window.rs`, `solution.rs`) require hoisting
+   `QueryResult` out of `lib.rs` — the Option-B base-hoist mechanism in miniature, for
+   strictly less payoff than the B case D2 just scored under threshold; the serve
+   modules also sit off the warm-regime executor pole, so peeling them cannot shrink
+   the pole that dominates the modal engine rebuild.
+3. **The peel phase closes at two seams as delivered value.** A1 + A2 achieved the
+   program's periphery goals: serialization-only and federation-only changes no longer
+   invalidate `sparq-engine` (per-crate cache granularity + ci-select skipping), and
+   the two heaviest feature-gated codegen bodies left the feature-on engine build.
+   Stopping here is the honest reading of the evidence, not a concession.
+4. **Phase B0 / Option C: not program work.** Its stated value was de-risking B; with B
+   closed it is developer ergonomics only (§8) and is deliberately NOT beaded — this
+   ruling creates nothing speculative.
+5. **sq-piapk consequence:** the engine coverage shard is not structurally removed; the
+   tactical sharding machinery stays necessary.
+
+**Reopening conditions for Option B.** A regime change re-opens the question —
+re-measure, do not extrapolate from the closed verdict:
+
+- **Per-job build caching lands in CI** (the necessary precondition): the warm regime —
+  the only one where engine is the dominant pole — becomes the regime CI actually runs
+  in. Today's cold-cache CI sees ~nothing from any engine split.
+- **A churn map shows planner-heavy engine PRs** (the still-ungathered §2 obligation):
+  B only skips the untouched half, and today's modal engine PR touches the executor —
+  the larger half.
+- **The cold critical path collapses** — e.g. the GPU stack (`naga`/`wgpu-*`) leaves
+  the workspace or the default build graph, leaving engine as the cold pole after all.
+- **The dependent tail shrinks materially** — e.g. downstream crates narrow their deps
+  so engine-own-compile's share of the engine-touching rebuild grows.
+
+Procedure to reopen: after the caching precondition holds, re-run the sq-aqr2f
+measurement on the then-current tree plus the churn map; Option B re-opens iff the
+predicted modal-engine-PR saving clears the §6-D2 order-25% bar. The same re-measurement
+would also be the moment to revisit a `QueryResult`-hoist serve peel, which shares the
+base-hoist mechanism and the same economics.

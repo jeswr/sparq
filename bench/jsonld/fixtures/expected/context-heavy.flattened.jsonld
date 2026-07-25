@@ -1,0 +1,171 @@
+[
+  {
+    "@id": "https://example.org/org/acme",
+    "@type": [
+      "http://schema.org/Organization"
+    ],
+    "http://schema.org/name": [
+      {
+        "@value": "ACME Analytics"
+      }
+    ],
+    "https://example.org/vocab/byRegion": [
+      {
+        "@id": "https://example.org/org/acme/apac"
+      },
+      {
+        "@id": "https://example.org/org/acme/emea"
+      }
+    ],
+    "https://example.org/vocab/department": [
+      {
+        "@id": "https://example.org/org/acme/research"
+      },
+      {
+        "@id": "https://example.org/org/acme/platform"
+      }
+    ],
+    "https://example.org/vocab/slogan": [
+      {
+        "@value": "Zahlen, die zaehlen",
+        "@language": "de"
+      },
+      {
+        "@value": "Numbers that matter",
+        "@language": "en"
+      },
+      {
+        "@value": "Des chiffres qui comptent",
+        "@language": "fr"
+      }
+    ],
+    "https://example.org/vocab/term00": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#integer",
+        "@value": "100"
+      }
+    ],
+    "https://example.org/vocab/term08": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#integer",
+        "@value": "108"
+      }
+    ],
+    "https://example.org/vocab/term16": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#integer",
+        "@value": "116"
+      }
+    ],
+    "https://example.org/vocab/term24": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#integer",
+        "@value": "124"
+      }
+    ],
+    "https://example.org/vocab/term32": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#integer",
+        "@value": "132"
+      }
+    ],
+    "https://example.org/vocab/term40": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#integer",
+        "@value": "140"
+      }
+    ],
+    "https://example.org/vocab/term48": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#integer",
+        "@value": "148"
+      }
+    ],
+    "https://example.org/vocab/term56": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#integer",
+        "@value": "156"
+      }
+    ],
+    "https://example.org/vocab/term64": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#integer",
+        "@value": "164"
+      }
+    ],
+    "https://example.org/vocab/term72": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#integer",
+        "@value": "172"
+      }
+    ],
+    "https://example.org/vocab/term80": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#integer",
+        "@value": "180"
+      }
+    ],
+    "https://example.org/vocab/term88": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#integer",
+        "@value": "188"
+      }
+    ]
+  },
+  {
+    "@id": "https://example.org/org/acme/apac",
+    "@index": "apac",
+    "http://schema.org/name": [
+      {
+        "@value": "ACME APAC"
+      }
+    ]
+  },
+  {
+    "@id": "https://example.org/org/acme/emea",
+    "@index": "emea",
+    "http://schema.org/name": [
+      {
+        "@value": "ACME EMEA"
+      }
+    ]
+  },
+  {
+    "@id": "https://example.org/org/acme/platform",
+    "http://schema.org/name": [
+      {
+        "@value": "Platform"
+      }
+    ],
+    "https://example.org/vocab/headcount": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#integer",
+        "@value": "17"
+      }
+    ],
+    "https://example.org/vocab/lead": [
+      {
+        "@id": "https://example.org/people/mary"
+      }
+    ]
+  },
+  {
+    "@id": "https://example.org/org/acme/research",
+    "http://schema.org/name": [
+      {
+        "@value": "Research"
+      }
+    ],
+    "https://example.org/vocab/headcount": [
+      {
+        "@type": "http://www.w3.org/2001/XMLSchema#integer",
+        "@value": "42"
+      }
+    ],
+    "https://example.org/vocab/lead": [
+      {
+        "@id": "https://example.org/people/ada"
+      }
+    ]
+  }
+]

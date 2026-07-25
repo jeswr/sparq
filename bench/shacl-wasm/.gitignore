@@ -1,0 +1,4 @@
+# [FABLE-5] sq-i858h — build/gather outputs only; the harness + vendored ABox
+# + expected.tsv are committed.
+/pkg/
+/results/

@@ -75,6 +75,15 @@ FIXED = {
         "label": "WASM bundle size",
         "suite": "Memory / Size", "dataset": "n/a (build artifact)",
         "query": "compiled sparq-wasm browser bundle size", "unit": "bytes"},
+    # [OPUS-4.8] (sq-7d3dj.14) TREND-ONLY shipped size after wasm-opt -Oz. Emitted alongside
+    # wasm_bundle_bytes (the hard-gated raw ratchet) to make real shipped-size wins visible.
+    # Not in scripts/perf-gate.py. The wasm-opt version is logged per CI run (see ci-bench.sh).
+    "wasm_opt_bundle_bytes": {
+        "label": "WASM shipped size (wasm-opt -Oz)",
+        "suite": "Memory / Size",
+        "dataset": "n/a (build artifact, post wasm-opt -Oz; binaryen — version logged per CI run)",
+        "query": "sparq-wasm bundle size after wasm-opt -Oz (trend-only; raw gate is wasm_bundle_bytes)",
+        "unit": "bytes"},
 }
 
 # --- qlever-synthetic: descriptive filenames (qNN_<slug>); slug words are the description -----

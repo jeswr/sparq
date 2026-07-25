@@ -97,6 +97,45 @@ fn unknown_profile_errors() {
     assert!(Reasoner::materialize(SOCRATES_TTL, "turtle", "nope").is_err());
 }
 
+// [FABLE-5] sq-ohnj1 — the eye-js README socrates example (data + query), driving the compat
+// bindings in a real wasm runtime.
+const SOC_DATA: &str = r#"@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#>.
+@prefix : <http://example.org/socrates#>.
+:Socrates a :Human.
+:Human rdfs:subClassOf :Mortal.
+{?A rdfs:subClassOf ?B. ?S a ?A} => {?S a ?B}."#;
+const SOC_QUERY: &str = r#"@prefix : <http://example.org/socrates#>.
+{:Socrates a ?WHAT} => {:Socrates a ?WHAT}."#;
+const SOC_MORTAL_NT: &str = "<http://example.org/socrates#Socrates> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.org/socrates#Mortal> .";
+const SOC_HUMAN_NT: &str = "<http://example.org/socrates#Socrates> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://example.org/socrates#Human> .";
+
+/// `reasonN3New` (eye-js DERIVATIONS default) returns only the newly-derived Mortal typing,
+/// not the asserted base.
+#[wasm_bindgen_test]
+fn reason_n3_new_is_delta() {
+    let nt = Reasoner::reason_n3_new(SOC_DATA).expect("derivations delta in wasm");
+    assert!(nt.contains(SOC_MORTAL_NT), "derived Mortal present: {nt}");
+    assert!(!nt.contains(SOC_HUMAN_NT), "asserted Human excluded: {nt}");
+}
+
+/// `reasonN3Query` (eye-js `--query`) selects every `:Socrates a ?WHAT` over the closure —
+/// both the asserted Human and the entailed Mortal.
+#[wasm_bindgen_test]
+fn reason_n3_query_selects_over_closure() {
+    let nt = Reasoner::reason_n3_query(SOC_DATA, SOC_QUERY).expect("query filter in wasm");
+    assert!(nt.contains(SOC_MORTAL_NT), "entailed Mortal selected: {nt}");
+    assert!(nt.contains(SOC_HUMAN_NT), "asserted Human selected: {nt}");
+}
+
+/// A query using an unsupported builtin fails closed in wasm too.
+#[wasm_bindgen_test]
+fn reason_n3_query_builtin_fails_closed() {
+    let q = r#"@prefix math: <http://www.w3.org/2000/10/swap/math#>.
+@prefix : <http://ex/>.
+{ ?x :age ?a. ?a math:greaterThan 18 } => { ?x a :Adult }."#;
+    assert!(Reasoner::reason_n3_query("@prefix : <http://ex/>. :a :age 21 .", q).is_err());
+}
+
 /// `why` (only compiled with the `explain` feature) returns a proof tree for the entailed
 /// triple, and `null` for a triple that is not entailed.
 #[cfg(feature = "explain")]
@@ -127,5 +166,24 @@ fn why_proof_tree() {
         "<http://ex/Mortal>",
     )
     .expect("why must not error on an absent triple");
+    assert_eq!(absent, "null", "absent triple => null");
+}
+
+/// [FABLE-5] sq-ixc3.20 — `whyN3` (only compiled with the `explain` feature) returns a proof
+/// tree for an N3-rule-derived triple (naming the fired rule), and `null` for a triple that is
+/// not in the closure.
+#[cfg(feature = "explain")]
+#[wasm_bindgen_test]
+fn why_n3_proof_tree() {
+    let n3 = r#"@prefix ex: <http://ex/> .
+        ex:a ex:knows ex:b .
+        { ?x ex:knows ?y . } => { ?x ex:reaches ?y . } ."#;
+    let json = Reasoner::why_n3(n3, "<http://ex/a>", "<http://ex/reaches>", "<http://ex/b>")
+        .expect("whyN3 must succeed for a derived triple");
+    assert!(json.contains("n3-rule-"), "derivation names the rule: {json}");
+    assert!(json.contains("\"asserted\""), "leaves are asserted: {json}");
+
+    let absent = Reasoner::why_n3(n3, "<http://ex/b>", "<http://ex/reaches>", "<http://ex/a>")
+        .expect("whyN3 must not error on an absent triple");
     assert_eq!(absent, "null", "absent triple => null");
 }

@@ -1,0 +1,28 @@
+{
+  "@context": {
+    "@vocab": "http://schema.org/",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+    "ex": "https://example.org/people/",
+    "knows": {
+      "@id": "http://schema.org/knows",
+      "@type": "@id"
+    },
+    "birthDate": {
+      "@id": "http://schema.org/birthDate",
+      "@type": "xsd:date"
+    },
+    "label": {
+      "@id": "http://www.w3.org/2000/01/rdf-schema#label",
+      "@container": "@language"
+    },
+    "authoredInOrder": {
+      "@id": "https://example.org/vocab/authoredInOrder",
+      "@container": "@list",
+      "@type": "@id"
+    },
+    "homepage": {
+      "@id": "http://schema.org/url",
+      "@type": "@id"
+    }
+  }
+}

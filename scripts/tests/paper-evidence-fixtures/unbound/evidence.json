@@ -1,0 +1,13 @@
+{
+  "_comment": "UNBOUND fixture: a canonical record with NO binding and NOT on the allowlist — fail-closed. MUST fail (the core invariant: a canonical record must be bound or allowlisted).",
+  "schemaVersion": 2,
+  "records": {
+    "demo.unbound_floor": {
+      "value": 5,
+      "unit": "count",
+      "environment": "canonical",
+      "source": "not bound, not allowlisted",
+      "note": "No binding, no allowlist entry — must fail the paper build."
+    }
+  }
+}

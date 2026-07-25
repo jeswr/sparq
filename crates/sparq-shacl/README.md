@@ -8,10 +8,10 @@
 </p>
 
 Opt-in **SHACL Core + SHACL-SPARQL (`sh:sparql`)** validation over
-[`sparq_core::Graph`]s. Constraints are evaluated by direct, index-backed permutation
-scans (no SPARQL round-trip) except `sh:sparql`, which routes its `sh:select` through
-`sparq-engine`. Validation yields a `ValidationReport` — `conforms` + per-result detail,
-`to_turtle()` (the W3C SHACL report vocabulary), and `to_text()`.
+[`sparq_core::Graph`]s. Core constraints run at the dictionary-id level via direct,
+index-backed permutation scans (no SPARQL round-trip; terms materialise only at the
+report boundary); `sh:sparql` routes its `sh:select` through `sparq-engine`. Reports:
+`conforms` + per-result detail; `to_turtle()` / `to_ntriples()` (W3C report graph), `to_json()`, and `to_text()`.
 
 Like `sparq-reason`, this crate is **isolated**: no other sparq crate depends on it, so
 the core engine and the default wasm bundle carry zero SHACL code. The browser/JS
@@ -42,9 +42,8 @@ let report = sparq_shacl::validate(&data, &shapes);
 if !report.conforms {
     eprintln!("{}", report.to_text());   // or report.to_turtle() for the report graph
 }
-// `conforms` fails on the SHACL-1.2 default disallowed set {Violation,Warning,Info}
-// (Debug/Trace are reported but conform); `conforms_violations_only` fails on Violation only:
-if report.conforms_violations_only() { /* a stricter-threshold CI toggle */ }
+// SHACL-1.2 default `conforms` fails on {Violation,Warning,Info}; the stricter toggle:
+if report.conforms_violations_only() { /* fails on sh:Violation only */ }
 # assert!(!report.conforms);
 # Ok(()) }
 ```
@@ -54,10 +53,9 @@ and call `validate_with_model`. CLI: `cargo run -p sparq-shacl --example validat
 
 ## ✨ Features
 
-- **W3C core conformance — 98 / 98 (100%)** of the `sht:Validate` entries in the core
-  section of the official [w3c/data-shapes](https://github.com/w3c/data-shapes) suite
-  (pinned commit `b6e73695`). Run it: `crates/sparq-shacl/fetch-shacl-tests.sh` then
-  `cargo test -p sparq-shacl --test w3c_core`.
+- **W3C core conformance — 98 / 98 (100%)** of the core `sht:Validate` entries of the
+  official [w3c/data-shapes](https://github.com/w3c/data-shapes) suite (pinned
+  `b6e73695`); `fetch-shacl-tests.sh` then `cargo test -p sparq-shacl --test w3c_core`.
 - **SHACL 1.2 core constraints** — `sh:memberShape`/`sh:uniqueMembers`/
   `sh:{min,max}ListLength`/`sh:uniqueValuesFor`/`sh:closed sh:ByTypes` (sq-vg3y),
   disjunctive-list `sh:datatype`/`sh:nodeKind`/`sh:class`, path-valued comparands for
@@ -77,12 +75,11 @@ and call `validate_with_model`. CLI: `cargo run -p sparq-shacl --example validat
   by the W3C `sparql/*` sub-suites.
 - **SHACL Advanced Features (opt-in `shacl-af`)** — a rule **inference** step
   (`sh:rule` / `sh:values`, not part of `validate`): `sh:TripleRule`, `sh:SPARQLRule`,
-  value rules, the SHACL 1.2 node-expression algebra + function registry (`shnex:`/`sh:`),
-  and `sh:expression` / `sh:nodeByExpression`. Off ⇒ none of it compiles.
-- **Differential fuzzing** — a deterministic SplitMix64 fuzzer
-  (`tests/diff_fuzz.rs`) cross-checks reports against pluggable reference engines
-  (pySHACL, Apache Jena SHACL, the Zazuko / `rdf-validate-shacl` Node engines); it is
-  `#[ignore]`d, runs as a nightly CI lane, and skips cleanly when none resolves.
+  value rules, node expressions, and `sh:expression` / `sh:nodeByExpression`;
+  `validate_with_domain` selects asserted facts or `data ∪ inferred`; its model variant reuses parsed shapes. Off ⇒ none compiles.
+- **Differential fuzzing** — a deterministic SplitMix64 fuzzer (`tests/diff_fuzz.rs`)
+  cross-checks reports against pluggable reference engines (pySHACL, Jena SHACL, the
+  Zazuko / `rdf-validate-shacl` Node engines); `#[ignore]`d, a nightly CI lane.
 - **Full path + target support** — all SHACL path forms (sequence / alternative /
   inverse / `zeroOrMore`·`oneOrMore`·`zeroOrOne`), `sh:targetNode`/`Class`/
   `SubjectsOf`/`ObjectsOf` + implicit class targets, the SHACL-1.2 targets
@@ -91,29 +88,32 @@ and call `validate_with_model`. CLI: `cargo run -p sparq-shacl --example validat
 - **SHACL Compact Syntax parser (opt-in `scs`)** — `parse_scs(text, base)` /
   `parse_scs_to_graph(text, base)` turn a [W3C SHACL Compact Syntax](https://w3c.github.io/shacl/shacl-compact-syntax/)
   document into the same shapes triples `validate` consumes; round-trips **32/32** of the
-  vendored W3C `shacl12-cs` valid fixtures graph-isomorphically. A hand-rolled lexer +
-  recursive-descent parser over `SHACLC.g4` (full list in the SKILL); adds **zero new
-  dependencies**, returns a typed `ScsError` on unsupported constructs. Off ⇒ none compiles.
+  vendored W3C fixtures graph-isomorphically; zero new deps. Off ⇒ none compiles.
+- **Shapes-graph assembly (opt-in `imports`)** — `resolve_shapes_graph`/`resolve_imports`:
+  `sh:shapesGraph` + cycle-guarded `owl:imports` closure via a caller-supplied loader. Off ⇒ none compiles.
 
 ## 📚 Learn more
 
 - **How-to** — [`skills/shacl-validation/SKILL.md`](../../skills/shacl-validation/SKILL.md)
   (the exhaustive supported-constraint list and the report shape).
 - **API reference** — [docs.rs/sparq-shacl](https://docs.rs/sparq-shacl).
-- **Spec** — W3C SHACL (Core, SPARQL, Advanced Features); the implemented surface is
-  pinned by the suites in [`tests/`](tests/).
+- **Spec** — W3C SHACL (Core, SPARQL, AF); the surface is pinned by [`tests/`](tests/).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md).
 
 ## Scope and non-goals
 
-`validate_strict` returns `Err(ShaclFailure)` for an unsound SHACL-SPARQL pre-binding
-(`MINUS`/`VALUES`/`SERVICE` / a sub-`SELECT` dropping `$this` / a `BIND` re-binding it,
-sq-0mjfd); `validate` skips such a constraint. Out of scope: `$shapesGraph` — see
-`bd list -l area:sparq-shacl`. Validation results are **not deduplicated** across
-traversal routes (a nested shape reached through two parents reports twice, matching the
-suite), re-entrant recursion on the same focus/shape pair counts as conforming (SHACL
-leaves recursion undefined), and an **uncompilable `sh:pattern`** (e.g. a `(?!…)`
-lookahead) is **skipped** into `report.diagnostics`, never fail-closed onto every value.
+`validate_strict` returns `Err(ShaclFailure)` for an unsound SHACL-SPARQL pre-binding (`MINUS`/
+`VALUES`/`SERVICE` / a sub-`SELECT` dropping `$this` / a `BIND` re-binding it, sq-0mjfd) and for
+**ill-formed shapes-graph constructs** — the W3C-suite `sht:Failure` outcome: an unparsable
+`sh:path` or pathless property shape, a non-`xsd:integer` count/length, a malformed SHACL list,
+a non-node-kind `sh:nodeKind`, a non-IRI `sh:severity`, EITHER qualified parameter without the
+other, ANY `sh:entailment` (no regime is supported, SHACL §3.4), or a PRESENT `sh:select`/
+`sh:sparqlExpr`/`shacl-af` node expression that does not build — **fail-closed relative to this
+engine's parsers** (sq-11a, sq-ehq4g, sq-c1v3e); construct-local checks, not a full
+SHACL-of-SHACL pass. `validate` skips all of these leniently, surfacing each skip in
+`report.diagnostics` (joining the sq-lz99x uncompilable-`sh:pattern` skip there). Out of scope:
+`$shapesGraph` — see `bd list -l area:sparq-shacl`. Results are **not deduplicated** across
+traversal routes (a nested shape reports once per parent route); re-entrant recursion conforms.
 
 ## License
 

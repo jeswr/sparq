@@ -9,6 +9,8 @@
 //     whose existing interactive component is now lazily mounted in-place on /capabilities
 //     (see components/capabilities/lazy-demo.tsx). Its old route ships a client redirect stub
 //     to /capabilities#<theme> (static export cannot 301).
+//   * a NATIVE row — a built opt-in Rust crate with one API snippet + crate/SKILL deep links;
+//     it has no dense site page and adds no browser implementation to the static bundle.
 //   * a SOON row — a surface with no built page yet (cli, python); a plain "coming soon" row
 //     that links out to GitHub. Its old /surface/<slug> route is a placeholder today and is
 //     redirected too.
@@ -33,10 +35,7 @@ export const DEEP_PAGE_SLUGS = new Set([
   "inference",
 ]);
 
-/** A surface that is rendered as a live REPL/playground link, not a gallery row. */
-export const TRY_SLUG = "try";
-
-export type CapabilityKind = "deep" | "demo" | "soon";
+export type CapabilityKind = "deep" | "demo" | "native" | "soon";
 
 export interface CapabilityRow {
   surface: Surface;
@@ -48,6 +47,8 @@ export interface CapabilityRow {
 /** Classify one surface for the gallery. `built === false` (cli/python) → "soon". */
 export function classify(surface: Surface): CapabilityKind {
   if (DEEP_PAGE_SLUGS.has(surface.slug)) return "deep";
+  // [GPT-5.6] sq-vw3ax.15 — native metadata is the explicit built-without-a-site-demo seam.
+  if (surface.native) return "native";
   if (surface.built === false || surface.built === undefined) {
     // cli / python have no `built: true` flag and no page → honest "coming soon" row.
     return surface.slug === "cli" || surface.slug === "python" ? "soon" : "demo";
@@ -72,15 +73,13 @@ export function capabilityAnchor(themeId: string): string {
 
 /**
  * Every surface that previously had a /surface/<slug> route which is now REMOVED (a demo or
- * soon row) — used to generate the client-side redirect stubs. The 5 deep pages and /try are
- * excluded (they keep their own route). The map value is the /capabilities anchor the stub
- * redirects to.
+ * soon row) — used to generate the client-side redirect stubs. The 5 deep pages are excluded
+ * (they keep their own route). The map value is the /capabilities anchor the stub redirects to.
  */
 export function removedSurfaceRoutes(): { slug: string; anchor: string }[] {
   const out: { slug: string; anchor: string }[] = [];
   for (const group of GROUPS) {
     for (const s of group.surfaces) {
-      if (s.slug === TRY_SLUG) continue; // /try keeps its own route
       if (DEEP_PAGE_SLUGS.has(s.slug)) continue; // deep pages keep their own route
       if (!s.href.startsWith("/surface/")) continue; // only /surface/* routes are removed
       out.push({ slug: s.slug, anchor: capabilityAnchor(group.id) });
@@ -98,10 +97,10 @@ export interface CapabilityTheme {
 export function capabilityThemes(): CapabilityTheme[] {
   return GROUPS.map((group) => ({
     group,
-    rows: group.surfaces
-      // /try is the live REPL surface — it is surfaced on Home + its own /try route + the
-      // theme's "Open the REPL" affordance, not as a gallery row that would duplicate it.
-      .filter((s) => s.slug !== TRY_SLUG)
-      .map((surface) => ({ surface, themeId: group.id, kind: classify(surface) })),
+    rows: group.surfaces.map((surface) => ({
+      surface,
+      themeId: group.id,
+      kind: classify(surface),
+    })),
   }));
 }

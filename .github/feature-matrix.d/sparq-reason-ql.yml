@@ -27,3 +27,14 @@
   crate: "sparq-reason-ql"
   features: "experimental"
   test: true
+
+# [FABLE-5] sq-p6yb7: DL-Lite_R KB consistency checking by violation-query composition —
+# `check_consistency`/`check_consistency_with` + the structural negative-inclusion capture
+# (`TBox::neg_incl`/`consistency_uncaptured`) behind the OFF-by-default `ql-consistency`
+# feature (which pulls `experimental` for the PerfectRef machinery it reuses). Without the
+# feature the consistency module + its unit tests + tests/consistency_oracle.rs compile
+# EMPTY, so this leg is the ONLY thing that executes the checker in CI. No new dependency.
+- name: "sparq-reason-ql (ql-consistency — DL-Lite_R violation-query consistency check)"
+  crate: "sparq-reason-ql"
+  features: "ql-consistency"
+  test: true

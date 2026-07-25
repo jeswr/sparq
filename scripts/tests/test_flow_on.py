@@ -213,12 +213,181 @@ class NewBenchTest(unittest.TestCase):
         self.rules = flow_on.load_rules(RULES)
 
     def test_new_bench_suite_triggers_dashboard_row(self):
-        added = ["bench/widgets/benchmarks.toml", "bench/widgets/run.sh"]
-        fos = flow_on.evaluate(self.rules, 11, "add widgets bench", added, added, [])
+        added = ["bench/watdiv/benchmarks.toml", "bench/watdiv/run.sh"]
+        fos = flow_on.evaluate(self.rules, 11, "add watdiv bench", added, added, [])
         dash = [fo for fo in fos if fo.rule_id == "new-bench-dashboard-row"]
         self.assertTrue(dash)
-        self.assertEqual(dash[0].dedup_key, "dashboard-row-widgets")
-        self.assertIn("widgets", dash[0].title)
+        self.assertEqual(dash[0].dedup_key, "dashboard-row-watdiv")
+        self.assertIn("watdiv", dash[0].title)
+
+    def test_unfeatured_agent_token_harnesses_do_not_trigger_dashboard_row(self):
+        # [GPT-5.6] These registry entries explicitly set featured=false: their
+        # NON-CANONICAL token A/B verdicts never feed the performance dashboard.
+        for suite in ("pkg-dogfood", "terse"):
+            with self.subTest(suite=suite):
+                added = [f"bench/{suite}/run.sh"]
+                fos = flow_on.evaluate(
+                    self.rules, 11, f"add {suite} research harness", added, added, []
+                )
+                self.assertNotIn(
+                    "new-bench-dashboard-row", {fo.rule_id for fo in fos}
+                )
+
+    def test_unregistered_harness_does_not_trigger_dashboard_row(self):
+        added = ["bench/token-research-spike/run.sh"]
+        fos = flow_on.evaluate(self.rules, 11, "add token spike", added, added, [])
+        self.assertNotIn("new-bench-dashboard-row", {fo.rule_id for fo in fos})
+
+
+class ZkCircuitGatecountTest(unittest.TestCase):
+    """[OPUS-4.8] sq-fyzq7 (#1655): the `new-zk-circuit-gatecount` rule must fire
+    ONLY for a genuinely-new top-level `zk/<family>/` circuit — never for a new
+    member inside the existing `zk/compose/` family (those are already covered by
+    the hard `snapshot_covers_every_member` gate) — and must name the circuit from
+    `zk/`, never from a `bench/` output dir."""
+
+    def setUp(self):
+        self.rules = flow_on.load_rules(RULES)
+
+    def _zk_follow_ons(self, fos):
+        return [fo for fo in fos if fo.rule_id == "new-zk-circuit-gatecount"]
+
+    def test_new_compose_member_does_not_fire(self):
+        # REGRESSION (mis-fired #1655): merged #1608 added `zk/compose/<member>/`
+        # path_reach members (already baselined + covered by
+        # snapshot_covers_every_member) and modified the bench gate-count JSON.
+        # `fnmatch`'s `*` crosses `/`, so `zk/*/Nargo.toml` matched the two-level
+        # member manifest; `exclude_new_paths = ["zk/compose/**"]` now drops it.
+        added = [
+            "zk/compose/path_reach_d2_k1_n16/Nargo.toml",
+            "zk/compose/path_reach_d2_k1_n16/src/main.nr",
+        ]
+        changed = added + [
+            "bench/zk-compose/gate_counts_latest.json",  # MODIFIED, not added
+            "crates/sparq-zk-compose/tests/gate_count_snapshot.json",
+        ]
+        fos = flow_on.evaluate(
+            self.rules, 1608, "feat(zk/compose): path_reach family", changed, added, []
+        )
+        self.assertEqual(self._zk_follow_ons(fos), [])
+        # And no phantom `zk-compose` key leaks from any rule.
+        self.assertNotIn("zk-gatecount-zk-compose", {fo.dedup_key for fo in fos})
+
+    def test_new_top_level_family_fires_with_zk_derived_name(self):
+        # A genuinely-new top-level family under zk/ DOES fire, and the circuit is
+        # named from `zk/` (here `arith`), NOT from a co-changed `bench/` dir.
+        added = ["zk/arith/Nargo.toml", "zk/arith/src/main.nr"]
+        changed = added + ["bench/zk-compose/gate_counts_latest.json"]
+        fos = flow_on.evaluate(
+            self.rules, 2000, "feat(zk): arith circuit", changed, added, []
+        )
+        zk = self._zk_follow_ons(fos)
+        self.assertEqual(len(zk), 1)
+        self.assertEqual(zk[0].dedup_key, "zk-gatecount-arith")
+        self.assertIn("zk/arith", zk[0].body)
+        # The bench dir name must NOT contaminate the zk circuit name.
+        self.assertNotIn("zk-compose", zk[0].dedup_key)
+        self.assertNotIn("zk/zk-compose", zk[0].body)
+
+    def test_new_family_with_member_subdir_fires_once(self):
+        # A new WORKSPACE family (root + a member circuit) still yields exactly one
+        # follow-on, named for the family root.
+        added = [
+            "zk/lattice/Nargo.toml",
+            "zk/lattice/scan_a/Nargo.toml",
+            "zk/lattice/scan_a/src/main.nr",
+        ]
+        fos = flow_on.evaluate(
+            self.rules, 2100, "feat(zk): lattice family", added, added, []
+        )
+        zk = self._zk_follow_ons(fos)
+        self.assertEqual(len(zk), 1)
+        self.assertEqual(zk[0].dedup_key, "zk-gatecount-lattice")
+
+    def test_modified_only_zk_family_does_not_fire(self):
+        # Editing an EXISTING top-level circuit (changed, not added) must not fire
+        # the new-family rule.
+        changed = ["zk/arith/src/main.nr"]
+        fos = flow_on.evaluate(
+            self.rules, 2200, "tweak arith circuit", changed, [], []
+        )
+        self.assertEqual(self._zk_follow_ons(fos), [])
+
+
+class RoutingLabelsTest(unittest.TestCase):
+    """[FABLE-5] (#2474) GITHUB_TOKEN-created issues fire no `issues: opened`
+    event, so triage-issue.yml can never label a flow-on follow-up post-hoc.
+    Every minted follow-on must therefore be dispatch-ready AT CREATION: exactly
+    one `role:*`, exactly one `priority:*`, and `status:ready` — computed by the
+    shared static triage pass (scripts/triage.py) with a default priority:P3."""
+
+    def setUp(self):
+        self.rules = flow_on.load_rules(RULES)
+
+    def _all_follow_ons(self):
+        # One evaluate() per rule family so every template in the table is minted.
+        fixtures = [
+            # changed-public-feature-docs
+            dict(changed=["crates/sparq-cli/src/main.rs"], added=[], labels=[],
+                 title="add --explain flag",
+                 pub_changed={"crates/sparq-cli/src/main.rs"}),
+            # new-bench-dashboard-row
+            dict(changed=["bench/watdiv/benchmarks.toml"],
+                 added=["bench/watdiv/benchmarks.toml"], labels=[], title="bench",
+                 pub_changed=None),
+            # competitor-feature-gather
+            dict(changed=["crates/sparq-engine/src/exec/join.rs"], added=[],
+                 labels=["competitor-relevant"], title="joins", pub_changed=None),
+            # new-zk-circuit-gatecount
+            dict(changed=["zk/arith/Nargo.toml"], added=["zk/arith/Nargo.toml"],
+                 labels=[], title="zk arith", pub_changed=None),
+        ]
+        out = []
+        for fx in fixtures:
+            out += flow_on.evaluate(
+                self.rules, 99, fx["title"], fx["changed"], fx["added"],
+                fx["labels"], fx["pub_changed"],
+            )
+        return out
+
+    def test_every_follow_on_is_dispatch_ready_at_creation(self):
+        fos = self._all_follow_ons()
+        self.assertTrue(fos, "fixture should mint at least one follow-on per rule")
+        for fo in fos:
+            roles = [lb for lb in fo.labels if lb.startswith("role:")]
+            prios = [lb for lb in fo.labels if lb.startswith("priority:")]
+            self.assertEqual(len(roles), 1, f"{fo.rule_id}: {fo.labels}")
+            self.assertEqual(len(prios), 1, f"{fo.rule_id}: {fo.labels}")
+            self.assertIn("status:ready", fo.labels, fo.rule_id)
+            self.assertNotIn("status:untriaged", fo.labels, fo.rule_id)
+
+    def test_roles_derive_from_rule_kind_labels(self):
+        by_rule = {fo.rule_id: fo for fo in self._all_follow_ons()}
+        # kind:docs → role:docs; kind:perf → role:perf; the zk security keyword
+        # forces role:soundness; default priority:P3 everywhere (no rule sets one).
+        self.assertIn("role:docs", by_rule["changed-public-feature-docs"].labels)
+        self.assertIn("role:docs", by_rule["new-bench-dashboard-row"].labels)
+        self.assertIn("role:perf", by_rule["competitor-feature-gather"].labels)
+        self.assertIn("role:soundness", by_rule["new-zk-circuit-gatecount"].labels)
+        for fo in by_rule.values():
+            self.assertIn("priority:P3", fo.labels, fo.rule_id)
+
+    def test_dry_run_prints_routing_labels(self):
+        # The dry-run plan is how a human previews a mint — it must show that the
+        # issue will be born routed (labels line includes status:ready).
+        with tempfile.TemporaryDirectory() as td:
+            changed = Path(td) / "changed.txt"
+            changed.write_text("bench/watdiv/benchmarks.toml\nbench/watdiv/run.sh\n")
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = flow_on.main(
+                    ["--pr", "42", "--dry-run", "--changed-files", str(changed),
+                     "--added-files", str(changed), "--title", "add widgets bench"]
+                )
+            out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertIn("status:ready", out)
+        self.assertIn("priority:P3", out)
 
 
 class IdempotencyTest(unittest.TestCase):
@@ -232,11 +401,11 @@ class IdempotencyTest(unittest.TestCase):
         # [OPUS-4.8] (bead sq-l0a0) Repointed off the removed new-crate rule onto
         # the new-bench-dashboard-row follow-on, which still fires and produces a
         # stable, non-empty dedup key.
-        added = ["bench/widgets/benchmarks.toml"]
+        added = ["bench/watdiv/benchmarks.toml"]
         a = flow_on.evaluate(self.rules, 42, "t", added, added, [])
         b = flow_on.evaluate(self.rules, 42, "t", added, added, [])
         keys_a = sorted(fo.dedup_key for fo in a)
-        self.assertIn("dashboard-row-widgets", keys_a)
+        self.assertIn("dashboard-row-watdiv", keys_a)
         self.assertEqual(keys_a, sorted(fo.dedup_key for fo in b))
 
     def test_marker_round_trips(self):
@@ -259,7 +428,7 @@ class DryRunTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             changed = Path(td) / "changed.txt"
-            changed.write_text("bench/widgets/benchmarks.toml\nbench/widgets/run.sh\n")
+            changed.write_text("bench/watdiv/benchmarks.toml\nbench/watdiv/run.sh\n")
             buf = io.StringIO()
             with redirect_stdout(buf):
                 rc = flow_on.main(
@@ -272,13 +441,13 @@ class DryRunTest(unittest.TestCase):
                         "--added-files",
                         str(changed),
                         "--title",
-                        "add widgets bench suite",
+                        "add watdiv bench suite",
                     ]
                 )
             out = buf.getvalue()
         self.assertEqual(rc, 0)
         self.assertIn("[dry-run] WOULD create", out)
-        self.assertIn("dashboard-row-widgets", out)
+        self.assertIn("dashboard-row-watdiv", out)
 
     def test_dry_run_on_new_crate_with_g1_artifacts_is_clean(self):
         # [OPUS-4.8] (bead sq-l0a0) A new-crate PR that ships its G1 artifacts

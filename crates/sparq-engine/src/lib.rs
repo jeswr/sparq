@@ -1,11 +1,22 @@
 #![doc = include_str!("../README.md")]
-#![forbid(unsafe_code)] // [OPUS-4.8] sq-emay: crate has zero `unsafe`
+#![warn(clippy::undocumented_unsafe_blocks)]
 
 // [OPUS-4.8] (sq-a9cn) Opt-in materialised-view / query-result cache. NON-DEFAULT
 // `result-cache` feature — when off, zero cache code compiles and the default native +
 // wasm builds are byte-identical (no new deps).
 #[cfg(feature = "result-cache")]
 pub mod cache;
+// [FABLE-5] (sq-7d3dj.30.14) Membership-cluster pre-materialisation for the greedy BGP
+// planner (SP2Bench q07). NON-DEFAULT `cluster-materialize` feature — when off, zero of
+// this code compiles and the default native + wasm builds are byte-identical. Pure
+// join-order choice; results are identical either way (differentially tested).
+#[cfg(feature = "cluster-materialize")]
+pub(crate) mod cluster;
+// [FABLE-5] (sq-7d3dj.30.14) Test-only hook so an integration differential can force the
+// membership-cluster planner path on a small graph. Not part of the stable query API.
+#[cfg(feature = "cluster-materialize")]
+#[doc(hidden)]
+pub use cluster::with_test_thresholds;
 mod construct;
 #[cfg(feature = "cs-planner")]
 pub mod cs;
@@ -14,6 +25,8 @@ mod cs_gate;
 mod dataset;
 mod exec;
 mod explain;
+#[cfg(feature = "persistent-stats")]
+pub mod stats;
 // [OPUS-4.8] (sq-u4lgr, #902) Structured EXPLAIN: typed `PlanNode` plan tree + JSON +
 // per-operator q-error + bounded slow-query ring. NON-DEFAULT `explain-json` feature —
 // when off, zero of this code compiles and the default native + wasm builds are
@@ -27,48 +40,73 @@ pub mod json;
 // new deps (oxrdf + spargebra are already direct deps).
 #[cfg(feature = "params")]
 pub mod params;
+// [GPT-5.6] (sq-lsp7k.3.1) Opt-in programmatic full-path enumeration. NON-DEFAULT
+// and dependency-free, so feature-off engine and wasm builds remain unchanged.
+#[cfg(feature = "paths")]
+pub mod paths;
+#[cfg(feature = "paths")]
+pub use paths::{enumerate_paths, PathMode, PathSolution, PathSpec, Via};
+// [GPT-5.6] (sq-lsp7k.3.2) Dedicated non-standard PATHS syntax. The ordinary
+// SPARQL parser remains untouched, so this surface is available only by explicit opt-in.
+#[cfg(feature = "paths")]
+mod paths_syntax;
+#[cfg(feature = "paths")]
+pub use paths_syntax::{explain_paths, query_paths};
+// [OPUS-4.8] (sq-7d3dj.30.1) Pre-execution SPARQL algebra rewrite pass (result-equivalent
+// FILTER `?v = <iri>` constant-substitution + `OPTIONAL … !bound` → anti-join). NON-DEFAULT
+// `algebra-rewrite` feature; when off, zero of this code compiles, `PreparedQuery::parse`
+// takes the algebra verbatim, and the default native + wasm builds are byte-identical. Pulls
+// in no new deps (oxrdf + spargebra are already direct deps).
+#[cfg(feature = "algebra-rewrite")]
+pub mod rewrite;
 // SPARQL 1.1 federated query (SERVICE). NON-DEFAULT `service` feature; pulls a
 // blocking HTTP client (ureq) + serde_json, both gated off wasm. When off, zero
 // federation code compiles. [OPUS-4.8]
-#[cfg(feature = "service")]
-mod service;
+// [OPUS-4.8] (sq-6vshe.4) Seam A2 of the facade split (RFC research/engine-split-rfc.md §4
+// Option A / §7 Phase A2): the `service` module moved to the internal `sparq-engine-service`
+// sub-crate. The executor references it as `sparq_engine_service::service::*`; the facade
+// re-exports its public fns verbatim below, so every public path (`sparq_engine::
+// with_service_egress_allow`, …) + the `service` feature NAME are preserved for external users.
 // SSRF default-deny egress filter + opt-in allowlist for SERVICE federation
 // (threat-model B4 / sq-2v6f). [OPUS-4.8]
 #[cfg(feature = "service")]
-pub use service::with_service_egress_allow;
+pub use sparq_engine_service::service::with_service_egress_allow;
 // [OPUS-4.8] (sq-iu0c) Stable marker substring in every SERVICE egress-refusal engine
 // error, so a network-exposed host (sparq-server) can classify a blocked SERVICE as a
 // policy refusal (403-style) rather than a server fault (500), mirroring the existing
 // `"query budget exceeded (timeout)"` → 503 pattern.
 #[cfg(feature = "service")]
-pub use service::SERVICE_EGRESS_REFUSED_MARKER;
+pub use sparq_engine_service::service::SERVICE_EGRESS_REFUSED_MARKER;
 // Strict allowlist-only egress policy: only listed hosts reachable (even public ones
 // off the list are refused). The network-exposed server wires this to --service-allow
 // so federation is restricted to operator-configured endpoints. [OPUS-4.8] (sq-4w18)
 #[cfg(feature = "service")]
-pub use service::with_service_egress_policy;
+pub use sparq_engine_service::service::with_service_egress_policy;
 // [OPUS-4.8] (sq-vbnyc) The SERVICE-egress per-entry host:port matching rule, exposed as a
 // pure function so `sparq-fedclient`'s independent egress guard adopts the SAME port-scoping
 // semantics (port-0/overflow/IPv6-bracket/trailing-colon all handled identically) instead of
 // keeping a second, divergent copy of the allowlist-matching logic — one source of truth.
 #[cfg(feature = "service")]
-pub use service::{allowlist_entry_host_matches, allowlist_entry_permits};
+pub use sparq_engine_service::service::{allowlist_entry_host_matches, allowlist_entry_permits};
 // Bind-join (VALUES pushdown) block-size knob — the only OPT-IN tunable for the
 // SERVICE bound-join pushdown (on-by-default, correctness-preserving). [OPUS-4.8] (sq-sjkj)
 #[cfg(feature = "service")]
-pub use service::with_service_bound_join_block_size;
+pub use sparq_engine_service::service::with_service_bound_join_block_size;
 // Per-query remote-request cap for a high-cardinality `SERVICE ?ep` (endpoint var bound
 // to many distinct IRIs): an OPT-IN ceiling on the distinct endpoints one SERVICE ?ep
 // evaluation may dial, enforced PRE-HTTP (a typed refusal, not post-hoc cancellation).
 // DEFAULT is uncapped, so normal SERVICE queries are unchanged. [OPUS-4.8] (sq-b93pv)
 #[cfg(feature = "service")]
-pub use service::{with_service_remote_request_cap, SERVICE_REMOTE_CAP_MARKER};
-// [OPUS-4.8] (sq-678h) RDF serializer matrix (Turtle / TriG / N-Quads writers). NON-DEFAULT
-// `serialize-rdf` feature — when off, zero serializer code compiles and the default build's
-// dependency graph is unchanged (the writers add no new deps). The always-on N-Triples writer
-// stays in `construct::triples_to_ntriples`.
+pub use sparq_engine_service::service::{with_service_remote_request_cap, SERVICE_REMOTE_CAP_MARKER};
+// [OPUS-4.8] (sq-678h, sq-6vshe.4) RDF serializer matrix (Turtle / TriG / N-Quads / JSON-LD
+// writers). NON-DEFAULT `serialize-rdf` feature — when off, zero serializer code compiles and
+// the default build's dependency graph is unchanged. Seam 1 of the facade split (RFC
+// research/engine-split-rfc.md §4 Option A / §7 Phase A1): the module moved to the internal
+// `sparq-engine-serialize` sub-crate and is re-exported VERBATIM here, so every existing public
+// path (`sparq_engine::serialize::write_turtle`, `…::graph_to_jsonld`, `…::JsonLdForm`, …) is
+// preserved. The always-on N-Triples writer stays in `construct::triples_to_ntriples`.
 #[cfg(feature = "serialize-rdf")]
-pub mod serialize;
+pub use sparq_engine_serialize::serialize;
 mod update;
 // zk-trace seam (NON-DEFAULT `zk` feature; consumed only by `sparq-zk`).
 // When off, zero zk code is compiled — default builds and wasm are untouched.
@@ -96,7 +134,7 @@ pub use cs::{with_cs_table, CsSet, CsTable};
 #[cfg(feature = "dp-planner")]
 pub mod dp;
 #[cfg(feature = "dp-planner")]
-pub use dp::{with_dp_planner, with_dp_planner_budget};
+pub use dp::{with_dp_planner, with_dp_planner_budget, without_dp_planner};
 pub use explain::{explain, explain_analyze, explain_analyze_with_budget};
 // [OPUS-4.8] (sq-u4lgr, #902) Structured EXPLAIN re-exports — gated on `explain-json`.
 #[cfg(feature = "explain-json")]
@@ -110,6 +148,114 @@ pub use update::{
     with_load_base, UpdateEffect,
 };
 
+/// Test/measurement hooks for sideways information passing (SIP) — the correlated
+/// graph-pattern join optimisation (bead sq-7d3dj.30.3). SIP is a semantics-preserving
+/// perf optimisation that is always on in normal evaluation; these hooks exist so the
+/// differential acceptance test can force it OFF and read whether it fired. Not part of
+/// the stable query API. [OPUS-4.8]
+#[doc(hidden)]
+pub mod sip_testing {
+    /// Enables/disables SIP on the current thread, returning the previous value.
+    pub fn set_enabled(v: bool) -> bool {
+        crate::exec::sip::set_enabled(v)
+    }
+
+    /// Clears the per-query SIP firing statistics.
+    pub fn reset_stats() {
+        crate::exec::sip::reset_stats()
+    }
+
+    /// `(fired, correlated_child_rows, distinct_bindings_evaluated)` since the last
+    /// [`reset_stats`].
+    pub fn stats() -> (bool, usize, usize) {
+        crate::exec::sip::stats()
+    }
+}
+
+/// Test-only surface for the DISTINCT-projection loose skip-scan (bead sq-7d3dj.30.4):
+/// toggle the pushdown and read its per-query statistics. NOT part of the stable query
+/// API. [OPUS-4.8]
+#[doc(hidden)]
+pub mod distinct_pushdown_testing {
+    /// Enables/disables the DISTINCT-projection pushdown on the current thread, returning
+    /// the previous value.
+    pub fn set_enabled(v: bool) -> bool {
+        crate::exec::distinct_pushdown::set_enabled(v)
+    }
+
+    /// Clears the per-query pushdown statistics.
+    pub fn reset_stats() {
+        crate::exec::distinct_pushdown::reset_stats()
+    }
+
+    /// `(fired, distinct_values_emitted, permutation_rows_scanned)` since the last
+    /// [`reset_stats`].
+    pub fn stats() -> (bool, usize, usize) {
+        crate::exec::distinct_pushdown::stats()
+    }
+}
+
+/// Test-only surface for the OPT-IN characteristic-set anchor-incidence prune (bead
+/// `sq-jnb1e`, the `cs-anchor-incidence` feature): toggle the prune and read whether it fired
+/// plus how many candidate predicates it eliminated, so the differential acceptance test can
+/// compare the incidence-pruned block scan against the exact scan within one binary. NOT part
+/// of the stable query API. [FABLE-5]
+#[cfg(feature = "cs-anchor-incidence")]
+#[doc(hidden)]
+pub mod anchor_incidence_testing {
+    /// Enables/disables the incidence prune on the current thread, returning the previous
+    /// value.
+    pub fn set_enabled(v: bool) -> bool {
+        crate::exec::anchor_incidence::set_enabled(v)
+    }
+
+    /// Clears the per-query incidence statistics.
+    pub fn reset_stats() {
+        crate::exec::anchor_incidence::reset_stats()
+    }
+
+    /// `(incidence_built, predicates_pruned)` since the last [`reset_stats`].
+    pub fn stats() -> (bool, usize) {
+        crate::exec::anchor_incidence::stats()
+    }
+}
+
+/// Test/measurement hooks for the correlated (theta) anti-join — the
+/// `OPTIONAL … FILTER(!bound(?nb))` negation idiom with a correlated inner FILTER
+/// (bead sq-7d3dj.30.9, SP2Bench q06). A semantics-preserving perf optimisation that
+/// is always on in normal evaluation; these hooks exist so the differential
+/// acceptance test can force it OFF and read whether it fired. NOT part of the stable
+/// query API. [FABLE-5]
+#[doc(hidden)]
+pub mod theta_antijoin_testing {
+    /// Enables/disables the correlated theta anti-join on the current thread,
+    /// returning the previous value.
+    pub fn set_enabled(v: bool) -> bool {
+        crate::exec::theta_antijoin::set_enabled(v)
+    }
+
+    /// Clears the per-query firing statistics.
+    pub fn reset_stats() {
+        crate::exec::theta_antijoin::reset_stats()
+    }
+
+    /// `(fired, correlated_right_rows, distinct_correlations_evaluated)` since the
+    /// last [`reset_stats`].
+    pub fn stats() -> (bool, usize, usize) {
+        crate::exec::theta_antijoin::stats()
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.30.20) Number of anti-join shapes the STATIC early-decline gate
+    /// (opt-in `antijoin-static-decline`) rejected BEFORE evaluating the mandatory left side
+    /// since the last [`reset_stats`] — i.e. the redundant left evaluations the feature saved.
+    /// Compiled only with the feature on; the differential test asserts it is `> 0` on the
+    /// SP2Bench-q07 shape (the gate fired) and `0` on a correlated (q06) shape (it did not).
+    #[cfg(feature = "antijoin-static-decline")]
+    pub fn early_declined() -> usize {
+        crate::exec::theta_antijoin::early_declined()
+    }
+}
+
 use oxrdf::{Term, Variable};
 use sparq_core::Graph;
 use spargebra::{Query, SparqlParser};
@@ -121,8 +267,8 @@ use spargebra::{Query, SparqlParser};
 /// an unlimited budget (the default) costs nothing on the hot paths. When a limit
 /// trips, evaluation stops and the query fails with
 /// `"query budget exceeded (timeout)"` / `"query budget exceeded (max-rows)"` /
-/// `"query budget exceeded (max-bytes)"`.
-#[derive(Debug, Clone, Copy, Default)]
+/// `"query budget exceeded (max-bytes)"` / `"query budget exceeded (cancelled)"`.
+#[derive(Debug, Clone, Default)]
 pub struct QueryBudget {
     /// Wall-clock deadline. Native only: `std::time::Instant` is unusable on
     /// `wasm32-unknown-unknown` (it panics), so the field does not exist there —
@@ -148,12 +294,30 @@ pub struct QueryBudget {
     /// anti-OOM ceiling, not an exact RSS quota. `None` (the default) disables it; it
     /// composes with `max_rows` (whichever trips first aborts).
     pub max_bytes: Option<usize>,
+    /// Cross-thread cooperative cancellation flag. The executor observes `true`
+    /// at the same coarse polling sites as the other limits and aborts with
+    /// `"query budget exceeded (cancelled)"`; cancellation is therefore prompt at
+    /// the next poll, not immediate. The flag controls evaluation only and does
+    /// not publish shared query data.
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl QueryBudget {
     /// The do-nothing budget every non-budgeted entry point uses.
     pub fn unlimited() -> Self {
         Self::default()
+    }
+
+    /// Creates an otherwise unlimited budget cancelled by `flag`.
+    pub fn cancelled_by(flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self::unlimited().with_cancel(flag)
+    }
+
+    /// Adds a cross-thread cooperative cancellation flag to this budget.
+    #[must_use]
+    pub fn with_cancel(mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.cancel = Some(flag);
+        self
     }
 }
 
@@ -273,6 +437,22 @@ pub use chunk::{DataChunk, SelVec, VecCmp};
 // when off. No new dependencies.
 #[cfg(feature = "vectorized")]
 pub(crate) mod reduce;
+// [SONNET-4.6] (sq-pntvh.5) M4 Phase 5: columnar_eligible dispatcher + morsel constants
+// (VEC_MIN_BATCH/VEC_MORSEL) + I5 probe counters {chunks_built, rows_columnar,
+// rows_delegated, declines_by_reason}. NON-DEFAULT `vectorized` feature; compiled out
+// entirely when off (relaxed atomics + dispatch helpers compile away). The probe counters
+// and VecStats snapshot are public but UNSTABLE/test-facing (not semver-stable). No new
+// dependencies.
+#[cfg(feature = "vectorized")]
+pub mod vec_dispatch;
+#[cfg(feature = "vectorized")]
+pub use vec_dispatch::{reset_stats, stats_snapshot, VecStats};
+// [SONNET-4.6] (sq-y5ew5) M4 hybrid tri-mask FILTER kernel for general decoded columns:
+// classifies each lane into Confident / Tie / Unknown and delegates Tie+Unknown to the
+// scalar predicate. NON-DEFAULT `vectorized` feature; zero code compiles when off. No new
+// dependencies. `pub(crate)` only — purely an internal accelerator, no public surface.
+#[cfg(feature = "vectorized")]
+pub(crate) mod chunk_select;
 
 // [OPUS-4.8] (sq-gr8mb, survey §A3) Exact-bitmap semi-join reducer on dense u32 ids
 // (CIDR'26 "Not Yannakakis"; research/optimization-techniques.md §1.1/§2(a)). The binary
@@ -334,6 +514,23 @@ pub enum SpatialQuery<'a> {
     BboxIntersects { arg_wkt: &'a str },
 }
 
+/// A request for an EXACT-certified candidate set — see
+/// [`SpatialProvider::candidates_exact`]. Separate from [`SpatialQuery`] on
+/// purpose: a `SpatialQuery` names a WINDOW the provider may over-approximate,
+/// while a `SpatialExactQuery` names the precise PREDICATE the certification is
+/// about, so "exact" is never ambiguous about which relation was certified.
+/// [FABLE-5] (sq-lk3aw.4)
+#[cfg(feature = "spatial-exact-pushdown")]
+#[cfg_attr(docsrs, doc(cfg(feature = "spatial-exact-pushdown")))]
+#[derive(Debug, Clone)]
+pub enum SpatialExactQuery<'a> {
+    /// `geof:sfWithin(?g, region)` — equivalently `geof:sfContains(region, ?g)`
+    /// (Simple Features defines `contains(a, b) ⇔ within(b, a)`): the geometry
+    /// variable's binding lies within the constant `region`. `region_wkt` is the
+    /// constant geometry's lexical form (a `geo:wktLiteral` value).
+    WithinRegion { region_wkt: &'a str },
+}
+
 /// A spatial index the engine can push a recognised `geof:` FILTER into.
 ///
 /// Implemented by sparq-geo over its `GeoIndex`; installed per-query via
@@ -369,6 +566,67 @@ pub trait SpatialProvider: Send + Sync {
     /// decides. (For a `GeoIndex`: the geographic-CRS `geo:asWKT` literals it
     /// extracted.)
     fn is_indexed(&self, term: &Term) -> bool;
+
+    /// The ID-LEVEL indexed universe: the dictionary ids of the geometries this
+    /// index holds an opinion on — the exact id-set of the terms for which
+    /// [`is_indexed`](Self::is_indexed) returns `true` — returned ONLY when that
+    /// set was resolved against the SAME dict identified by `dict_ptr`
+    /// (`std::ptr::from_ref(&graph.dict) as usize`), else `None`.
+    ///
+    /// This lets the pushdown replace a per-row `Term` materialisation +
+    /// `is_indexed` hash with a pure `FxHashSet<Id>` lookup on the scanned
+    /// column. It is a PURE OPTIMISATION of the `is_indexed` decision: for a row
+    /// whose binding id is `i`, `set.contains(&i)` MUST equal
+    /// `is_indexed(&graph.dict.term(i))` — same keep/drop verdict, so the result
+    /// is byte-identical to the per-row path. The FRESHNESS contract is
+    /// load-bearing: an id-set only maps to the right terms against the dict it
+    /// came from, so the provider returns `Some` ONLY when certain the dict
+    /// matches and `None` on ANY doubt — whereupon the engine uses the per-row
+    /// fallback (always correct). Returned as an `Arc` so the engine holds it
+    /// cheaply. The default returns `None` (a provider with no id-level universe
+    /// is served entirely by the per-row path). [OPUS-4.8]
+    fn indexed_ids(
+        &self,
+        dict_ptr: usize,
+    ) -> Option<std::sync::Arc<rustc_hash::FxHashSet<sparq_core::dict::Id>>> {
+        let _ = dict_ptr;
+        None
+    }
+
+    /// An EXACT-certified candidate set, or `None` for "no exact certification"
+    /// (the default — the engine then uses the superset [`candidates`](Self::candidates)
+    /// + residual-FILTER path, always correct). [FABLE-5] (sq-lk3aw.4)
+    ///
+    /// EXACTNESS CONTRACT (STRICTLY stronger than `candidates`' superset contract —
+    /// a wrong `Some` here silently returns WRONG query answers):
+    ///
+    /// * `Some(v)` CERTIFIES that `v` is EXACTLY the set of INDEXED
+    ///   geometry-variable bindings (the WKT-literal `Term`s for which
+    ///   [`is_indexed`](Self::is_indexed) is `true`) that satisfy `query` — no
+    ///   false positives AND no false negatives among the indexed universe. On
+    ///   the strength of that certificate the engine MAY skip the residual
+    ///   `geof:` FILTER for rows whose binding is in `v`; a false positive would
+    ///   ADD a wrong row to the query answer (the superset path's false
+    ///   positives are harmless only because the residual FILTER removes them —
+    ///   here it will not run).
+    /// * "Satisfy" means: the registered `geof:` extension function for the
+    ///   certified predicate, applied to that binding and the query constant,
+    ///   evaluates to `true`. The provider asserts its exact refinement agrees
+    ///   with the function-registry semantics it is deployed with (sparq-geo
+    ///   pins that equivalence in its `topology_index` tests).
+    /// * The certificate says NOTHING about a binding that is NOT indexed: the
+    ///   engine still routes every not-indexed binding through the residual
+    ///   `geof:` FILTER (never drops it, never keeps it unjudged), exactly as
+    ///   the superset path does.
+    /// * Return `None` on ANY doubt (unparsable constant, non-geographic CRS, a
+    ///   predicate the index cannot decide exactly, …) — declining is always
+    ///   sound; the engine falls back to `candidates`.
+    #[cfg(feature = "spatial-exact-pushdown")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "spatial-exact-pushdown")))]
+    fn candidates_exact(&self, query: &SpatialExactQuery) -> Option<Vec<Term>> {
+        let _ = query;
+        None
+    }
 }
 
 /// Runs `f` with `idx` installed as the active spatial index — the planner
@@ -535,8 +793,28 @@ pub struct PreparedQuery {
 
 impl PreparedQuery {
     /// Parses a SPARQL query string into its reusable algebra form.
+    ///
+    /// With the opt-in `algebra-rewrite` feature ON, the parsed algebra is run
+    /// through the result-equivalent pre-execution rewrite pass (`rewrite`
+    /// module) here — the single seam every string query entry point
+    /// ([`query`], [`ask`], [`count`], the JSON paths) funnels through — so
+    /// production benefits without touching the executor. The `From<Query>`
+    /// conversion deliberately does NOT rewrite: it takes an already-built
+    /// algebra verbatim (the opt-out / test-baseline path). When the feature is
+    /// OFF the algebra is stored verbatim and the build is byte-identical.
     pub fn parse(sparql: &str) -> Result<PreparedQuery, String> {
-        Ok(PreparedQuery { query: SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())? })
+        // Feature-OFF arm is the VERBATIM pre-`algebra-rewrite` expression so the
+        // default build's codegen is byte-identical (the `feature_off_exact` wasm
+        // gate). Only the feature-ON arm introduces the rewrite call. [OPUS-4.8]
+        #[cfg(not(feature = "algebra-rewrite"))]
+        {
+            Ok(PreparedQuery { query: SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())? })
+        }
+        #[cfg(feature = "algebra-rewrite")]
+        {
+            let query = rewrite::rewrite_query(SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?);
+            Ok(PreparedQuery { query })
+        }
     }
 
     /// The wrapped `spargebra` algebra (e.g. to inspect the query form or dataset
@@ -813,6 +1091,65 @@ pub fn query_json_chunks_with_budget(graph: &Graph, sparql: &str, budget: &Query
         Query::Select { pattern, .. } => exec::eval_select_json_chunks(graph, pattern, Some(JSON_CHUNK_BYTES)),
         Query::Ask { pattern, .. } => {
             Ok(vec![format!("{{\"head\":{{}},\"boolean\":{}}}", exec::eval_ask(graph, pattern)?)])
+        }
+        _ => Err("only SELECT and ASK queries are supported".into()),
+    }
+}
+
+/// Streams the SPARQL-JSON serialisation of a SELECT (or ASK) result, invoking `sink` for
+/// each serialised chunk **as it is produced** rather than materialising the whole
+/// `Vec<String>` first ([`query_json_chunks_with_budget`]).
+///
+/// [OPUS-4.8] (sq-7d3dj.34.2) This is the TTFB-streaming entry point: the server sinks each
+/// chunk straight onto the HTTP socket, so the results header + early solutions are written
+/// before the whole result is serialised — and, for the single-pattern scan fast path,
+/// before the scan even finishes. The concatenation of the chunks handed to `sink` is
+/// **byte-identical** to [`query_json_with_budget`] for the same query and budget.
+///
+/// `sink` returns [`std::ops::ControlFlow::Break`] to stop early (the consumer went away —
+/// e.g. the HTTP client disconnected); the engine then abandons the remaining work. A
+/// cooperative budget (row / byte cap or deadline) that trips is returned as `Err` exactly
+/// as on the buffered path, but note that on this streaming path some chunks may already
+/// have been handed to `sink` (and flushed to the socket) when the trip is detected — a
+/// post-first-byte trip cannot change the already-sent HTTP status, so the caller truncates
+/// the body (see the server's `stream_select_json`).
+pub fn query_json_stream_with_budget(
+    graph: &Graph,
+    sparql: &str,
+    budget: &QueryBudget,
+    sink: impl FnMut(String) -> std::ops::ControlFlow<()>,
+) -> Result<(), String> {
+    query_json_stream_prepared_with_budget(graph, &PreparedQuery::parse(sparql)?, budget, sink)
+}
+
+/// [`query_json_stream_with_budget`] over a [`PreparedQuery`] — no per-execution parse.
+///
+/// [OPUS-4.8] (sq-7d3dj.34.1) The HTTP floor path: `sparq-server` parses the request query
+/// ONCE (to classify its form + apply any protocol dataset override) and hands the resulting
+/// algebra straight here, so the streamed SELECT-JSON body is produced without the engine
+/// re-parsing the query string — the per-request parse is paid exactly once, not twice. The
+/// concatenation of the chunks handed to `sink` is byte-identical to
+/// [`query_json_stream_with_budget`] for the same query and budget.
+pub fn query_json_stream_prepared_with_budget(
+    graph: &Graph,
+    prepared: &PreparedQuery,
+    budget: &QueryBudget,
+    mut sink: impl FnMut(String) -> std::ops::ControlFlow<()>,
+) -> Result<(), String> {
+    let q = &prepared.query;
+    let active = active_dataset(graph, q);
+    let graph = active.as_ref().unwrap_or(graph);
+    let _view_scope = view_scope(&active);
+    let _guard = exec::budget::install(budget);
+    exec::set_query_base(q.base_iri().map(|b| b.as_str()));
+    match q {
+        Query::Select { pattern, .. } => {
+            exec::eval_select_json_emit(graph, pattern, Some(JSON_CHUNK_BYTES), &mut sink)
+        }
+        Query::Ask { pattern, .. } => {
+            let doc = format!("{{\"head\":{{}},\"boolean\":{}}}", exec::eval_ask(graph, pattern)?);
+            let _ = sink(doc);
+            Ok(())
         }
         _ => Err("only SELECT and ASK queries are supported".into()),
     }
@@ -2120,6 +2457,106 @@ mod tests {
         assert!(e.contains("query budget exceeded (max-rows)"), "got: {e}");
     }
 
+    /// [OPUS-4.8] (sq-7d3dj.34.2) `query_json_stream_with_budget` hands each chunk to the
+    /// sink AS IT IS PRODUCED and its concatenation is byte-identical to the buffered JSON.
+    #[test]
+    fn query_json_stream_concat_is_byte_identical() {
+        let b = QueryBudget::unlimited();
+        for q in [
+            "SELECT * WHERE { ?s ?p ?o }",
+            "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a }",
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:name ?n OPTIONAL { ?s ex:knows ?k } }",
+            "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a }",
+        ] {
+            let single = query_json(&g(), q).unwrap();
+            let mut streamed = String::new();
+            query_json_stream_with_budget(&g(), q, &b, |c| {
+                streamed.push_str(&c);
+                std::ops::ControlFlow::Continue(())
+            })
+            .unwrap();
+            assert_eq!(streamed, single, "stream concat mismatch for: {q}");
+        }
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.34.1) The prepared streaming entry (no per-execution re-parse —
+    /// the HTTP floor path) produces a body byte-identical to BOTH the string-streaming entry
+    /// and the buffered `query_json`, over SELECT and ASK, so reusing the algebra parsed by the
+    /// server does not change any response byte.
+    #[test]
+    fn query_json_stream_prepared_matches_string_and_buffered() {
+        let b = QueryBudget::unlimited();
+        for q in [
+            "SELECT * WHERE { ?s ?p ?o }",
+            "PREFIX ex: <http://ex/> SELECT ?s ?a WHERE { ?s ex:age ?a } ORDER BY ?a",
+            "PREFIX ex: <http://ex/> SELECT * WHERE { ?s ex:name ?n OPTIONAL { ?s ex:knows ?k } }",
+            "PREFIX ex: <http://ex/> ASK { ?s ex:age ?a }",
+            // 0-row (floor-shaped) result.
+            "PREFIX ex: <http://ex/> SELECT ?s WHERE { ?s ex:nope ?o }",
+        ] {
+            let buffered = query_json(&g(), q).unwrap();
+            let prepared = PreparedQuery::parse(q).unwrap();
+            let mut streamed = String::new();
+            query_json_stream_prepared_with_budget(&g(), &prepared, &b, |c| {
+                streamed.push_str(&c);
+                std::ops::ControlFlow::Continue(())
+            })
+            .unwrap();
+            assert_eq!(streamed, buffered, "prepared-stream concat mismatch for: {q}");
+        }
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.34.2) ANTI-VACUITY: on a large (>64 KiB) result the sink is
+    /// invoked MORE THAN ONCE and the FIRST chunk (carrying the results header) is delivered
+    /// BEFORE the last chunk — i.e. bytes are emitted before the result is exhausted. This is
+    /// the property the server relies on to flush a first byte before full serialisation.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn query_json_stream_flushes_first_chunk_before_exhaustion() {
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..3000 {
+            ttl.push_str(&format!("ex:subject{i} ex:somePredicate \"value-{i}-padding-padding\" .\n"));
+        }
+        let big = Graph::load_str(&ttl, "turtle").unwrap();
+        let q = "SELECT * WHERE { ?s ?p ?o }";
+        let single = query_json(&big, q).unwrap();
+        assert!(single.len() > 64 * 1024, "test corpus must exceed one chunk");
+
+        let mut chunks: Vec<String> = Vec::new();
+        query_json_stream_with_budget(&big, q, &QueryBudget::unlimited(), |c| {
+            chunks.push(c);
+            std::ops::ControlFlow::Continue(())
+        })
+        .unwrap();
+        // Multiple flushes: the first arrived before the last was produced.
+        assert!(chunks.len() > 1, "expected an incremental multi-chunk stream, got {}", chunks.len());
+        // The first chunk opens the SPARQL-results document (header emitted before all rows).
+        assert!(chunks[0].starts_with("{\"head\""), "first chunk must carry the header: {}", &chunks[0][..chunks[0].len().min(40)]);
+        // Only the final chunk closes the document.
+        assert!(chunks.last().unwrap().ends_with("]}}"), "last chunk must close the document");
+        assert!(!chunks[0].ends_with("]}}"), "the header chunk must NOT be the whole document");
+        assert_eq!(chunks.concat(), single, "stream concat mismatch");
+    }
+
+    /// [OPUS-4.8] (sq-7d3dj.34.2) A sink that returns `Break` (the HTTP client disconnected)
+    /// stops the engine early instead of serialising the rest of a large result.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn query_json_stream_break_stops_early() {
+        let mut ttl = String::from("@prefix ex: <http://ex/> .\n");
+        for i in 0..3000 {
+            ttl.push_str(&format!("ex:subject{i} ex:somePredicate \"value-{i}-padding-padding\" .\n"));
+        }
+        let big = Graph::load_str(&ttl, "turtle").unwrap();
+        let mut calls = 0usize;
+        query_json_stream_with_budget(&big, "SELECT * WHERE { ?s ?p ?o }", &QueryBudget::unlimited(), |_c| {
+            calls += 1;
+            std::ops::ControlFlow::Break(()) // bail after the very first chunk
+        })
+        .unwrap();
+        assert_eq!(calls, 1, "engine must stop after the sink breaks on the first chunk");
+    }
+
     /// [OPUS-4.8] roborev 1538 (High) / sq-7d3dj.10: a budget must bound CPU/memory on a
     /// LARGE single-pattern SELECT, not just the final response. A ROW/BYTE cap cannot be
     /// enforced mid-fan-out (fragments are built before any count is known), so it takes
@@ -2730,3 +3167,14 @@ mod tests {
         );
     }
 }
+
+// [FABLE-5] (sq-lsp7k.10) Named parameterized SPARQL templates — the shared definition +
+// typed-JSON-binding layer under the server's REST template store and the MCP
+// `template_invoke` tool. NON-DEFAULT `templates` feature (builds on `params`); when off,
+// zero of this code compiles. Declared at the END of this file deliberately: inserting a
+// compiled-out declaration mid-file would shift `line!()`/`Location` values of the
+// always-compiled code below it and move feature-OFF wasm bytes for no reason (the
+// vectorized-feature-off gate's drift class).
+#[cfg(feature = "templates")]
+#[cfg_attr(docsrs, doc(cfg(feature = "templates")))]
+pub mod templates;

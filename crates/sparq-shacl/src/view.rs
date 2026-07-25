@@ -6,6 +6,7 @@
 //! (bound-prefix range scan on the best permutation), never a full-graph filter.
 
 use oxrdf::{NamedNode, Term};
+use sparq_core::dict::Id;
 use sparq_core::Graph;
 
 pub(crate) const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
@@ -54,6 +55,57 @@ impl<'g> GraphView<'g> {
                     self.g.dict.term(p),
                     self.g.dict.term(o),
                 ]
+            })
+            .collect()
+    }
+
+    // ---- id-level twins ([FABLE-5] sq-7d3dj.33.4) --------------------------------
+    // The Term-level lookups above pay a dictionary hash of every bound term PLUS an
+    // `oxrdf::Term` materialisation per matched row on EVERY call — the profiled hot
+    // cost of core-constraint validation (find_iri/hash_iri + Term alloc churn per
+    // focus node). These twins keep the whole per-focus walk at the `Id` level and
+    // materialise a `Term` only at the report boundary. Row order is identical to
+    // the Term-level methods (same permutation scans).
+
+    /// The dictionary id of `t`, or `None` when absent (matches nothing).
+    pub(crate) fn id_of(&self, t: &Term) -> Option<Id> {
+        self.g.id_of(t)
+    }
+
+    /// The id of a predicate IRI string (`None`: invalid IRI or absent from the
+    /// dictionary — either way the predicate matches nothing, exactly like the
+    /// Term-level `triples` guard).
+    pub(crate) fn pred_id(&self, iri: &str) -> Option<Id> {
+        let n = NamedNode::new(iri).ok()?;
+        self.g.id_of(&Term::NamedNode(n))
+    }
+
+    /// Materialises the term for `id` (the report boundary).
+    pub(crate) fn term_of(&self, id: Id) -> Term {
+        self.g.dict.term(id)
+    }
+
+    /// Object ids of `(s, p, ?)` — id twin of [`Self::objects`], same row order.
+    pub(crate) fn objects_ids(&self, s: Id, p: Id) -> Vec<Id> {
+        let scan = self.g.store.scan(&[Some(s), Some(p), None]);
+        scan.rows.iter().map(|r| scan.to_spo(r)[2]).collect()
+    }
+
+    /// Subject ids of `(?, p, o)` — id twin of [`Self::subjects`], same row order.
+    pub(crate) fn subjects_ids(&self, p: Id, o: Id) -> Vec<Id> {
+        let scan = self.g.store.scan(&[None, Some(p), Some(o)]);
+        scan.rows.iter().map(|r| scan.to_spo(r)[0]).collect()
+    }
+
+    /// `(predicate, object)` id pairs of triples with subject `s` — id twin of
+    /// [`Self::predicate_objects`] (`sh:closed`), same row order. [FABLE-5] (sq-j9hls)
+    pub(crate) fn predicate_objects_ids(&self, s: Id) -> Vec<(Id, Id)> {
+        let scan = self.g.store.scan(&[Some(s), None, None]);
+        scan.rows
+            .iter()
+            .map(|r| {
+                let [_, p, o] = scan.to_spo(r);
+                (p, o)
             })
             .collect()
     }
@@ -258,6 +310,20 @@ pub(crate) fn dedup(items: impl IntoIterator<Item = Term>) -> Vec<Term> {
     for t in items {
         if seen.insert(t.clone()) {
             out.push(t);
+        }
+    }
+    out
+}
+
+/// Order-preserving dedup over ids — the id twin of [`dedup`]. Ids and terms are
+/// in bijection (the dictionary is injective), so deduplicating ids keeps exactly
+/// the elements (and order) the Term-level dedup would. [FABLE-5] (sq-7d3dj.33.4)
+pub(crate) fn dedup_ids(items: impl IntoIterator<Item = Id>) -> Vec<Id> {
+    let mut seen: rustc_hash::FxHashSet<Id> = rustc_hash::FxHashSet::default();
+    let mut out = Vec::new();
+    for id in items {
+        if seen.insert(id) {
+            out.push(id);
         }
     }
     out

@@ -15,6 +15,7 @@ use crate::filter_int::{filter_int_check, OP_EQ, OP_GE, OP_GT, OP_LE, OP_LT, OP_
 use crate::filter_signed::{filter_decimal_check, filter_signed_int_check};
 use crate::hashes::{commit_fold, h2, h3, TYPE_CODE_LITERAL};
 use crate::join::{JOIN_DOMAIN, join_eq_check, join_value_commitment};
+use crate::path::path_reach_check;
 use crate::revoke::{revoke_unset_check, revoke_unset_check_committed, SIG_DOMAIN_STATUS_IDX_COMMIT};
 use crate::scan::{PatternSpec, scan_check};
 
@@ -744,7 +745,8 @@ fn revoke_committed_wrong_index_commitment_rejected() {
 // ---------------------------------------------------------------------------
 
 use crate::issuer::{
-    hidden_issuer_attestation, key_set_membership, Point, reduction_range_bind, schnorr_verify,
+    assert_in_prime_order_subgroup, assert_on_curve, hidden_issuer_attestation, key_set_membership,
+    Point, reduction_range_bind, schnorr_verify,
 };
 
 // In-set signer (seed102, index 2 in K).
@@ -874,12 +876,56 @@ fn hidden_issuer_identity_key_rejected() {
     schnorr_verify(Point { x: 0, y: 1 }, in_set_r(), IV_S, IV_E, IV_E_K, IV_M);
 }
 
-// (5) REJECT off-curve key: an off-curve pk (a forger's twist/small-subgroup
-// point) is rejected by the on-curve guard before the equation.
+// (5) REJECT off-curve key: an off-curve pk (a forger's twist / arbitrary point,
+// NOT on the curve) is rejected by the on-curve guard before the equation. (A
+// low-order/torsion point IS on the curve; that is a SEPARATE guard -- see (6).)
 #[test(should_fail_with = "point is not on Baby-JubJub")]
 fn hidden_issuer_off_curve_key_rejected() {
     // (1, 1) is not on Baby-JubJub (1 + 1 != 1 + d).
     schnorr_verify(Point { x: 1, y: 1 }, in_set_r(), IV_S, IV_E, IV_E_K, IV_M);
+}
+
+// [OPUS-4.8] sq-l15mi (audit H-1): the TORSION / small-subgroup key forgery guard.
+// Baby-JubJub has cofactor 8, so `(0, -1)` (= (0, q_base - 1)) is an order-2 point
+// that is ON the curve and is NOT the identity. Before this fix `schnorr_verify`
+// accepted it (on-curve + non-identity), and a prover with NO secret key could forge
+// a satisfying `(R, s)` for such a torsion key. The prime-order-subgroup guard
+// `[L]*pk == O` now rejects it.
+
+// (6a) NON-VACUITY witness: the order-2 torsion point `(0, -1)` PASSES the two
+// pre-existing guards (on-curve, and not the identity `(0, 1)`), so ONLY the new
+// prime-order-subgroup guard can catch it. If this ever fails, the torsion vector
+// below is no longer a valid "slips past the old guards" witness.
+#[test]
+fn torsion_key_passes_on_curve_and_non_identity_guards() {
+    let torsion = Point { x: 0, y: -1 };
+    assert_on_curve(torsion); // on the curve (0 + 1 == 1 + 0)
+    assert(!((torsion.x == 0) & (torsion.y == 1)), "torsion (0,-1) is not the identity");
+}
+
+// (6b) The new guard ACCEPTS a genuine prime-order (order-L) key -- non-vacuity in
+// the accept direction: it does not reject legitimate issuer keys (`in_set_pk` is a
+// real `sk*G`, so it lies in the order-L subgroup and `[L]*pk == O`).
+#[test]
+fn prime_order_guard_accepts_valid_issuer_key() {
+    assert_in_prime_order_subgroup(in_set_pk());
+    assert_in_prime_order_subgroup(in_set_r()); // honest R = k*G is in-subgroup too
+}
+
+// (6c) The new guard in ISOLATION REJECTS the order-2 torsion point `(0, -1)`.
+#[test(should_fail_with = "not in prime-order subgroup")]
+fn prime_order_guard_rejects_order2_torsion() {
+    assert_in_prime_order_subgroup(Point { x: 0, y: -1 });
+}
+
+// (6d) FORGE REJECTION end-to-end: `schnorr_verify` rejects the torsion issuer key
+// at the prime-order-subgroup guard. Message-matched (noir-testing convention) so
+// this pins the NEW clause: before the fix this input flowed past to the equation
+// and failed with "schnorr verification equation failed" (a DIFFERENT message), so
+// the message match makes this test non-vacuous w.r.t. the fix.
+#[test(should_fail_with = "not in prime-order subgroup")]
+fn hidden_issuer_torsion_key_rejected() {
+    schnorr_verify(Point { x: 0, y: -1 }, in_set_r(), IV_S, IV_E, IV_E_K, IV_M);
 }
 
 // [OPUS-4.8] sq-ru0yx (internal re-audit finding M-1): the challenge-reduction
@@ -1415,5 +1461,418 @@ fn join_eq_mixed_slots_multi_row_accepts() {
         a1,
         row_b,
         JB,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// path_reach_check -- accept + adversarial (sq-3kd2g.2 / #1591, record sec 4).
+// Tiny (D=3, K=1, N=8) monomorphisation for the single-graph cases; a (D=2,
+// K=2, N=4) one for cross-graph chaining, attribution and the strict-ordering
+// guard. The padding-forgery negatives are NORMATIVE (record sec 4 req 4).
+// ---------------------------------------------------------------------------
+
+// [FABLE-5] Path-test universe: node term encodings (arbitrary nonzero field
+// elements; the relation only sees equality structure). The single committed
+// graph holds a P-chain NA -> NB -> NC -> ND, a P_OTHER distractor edge
+// NB -> ND (so a P-proof cannot shortcut through it), and a P back-edge
+// NB -> NA (so a chain may legally revisit nodes -- record sec 4 req 6).
+global NA: Field = 401;
+global NB: Field = 402;
+global NC: Field = 403;
+global ND: Field = 404;
+global GARBAGE: Field = 0xdead;
+
+fn path_graph() -> ([[[Field; 3]; 8]; 1], [u32; 1], [Field; 1]) {
+    let enc: [[[Field; 3]; 8]; 1] = [
+        [
+            [NA, P, NB],
+            [NB, P, NC],
+            [NC, P, ND],
+            [NB, P_OTHER, ND],
+            [NB, P, NA],
+            [0, 0, 0],
+            [0, 0, 0],
+            [0, 0, 0],
+        ],
+    ];
+    let counts: [u32; 1] = [5];
+    let mut leaves: [Field; 8] = [0; 8];
+    for i in 0..8 {
+        leaves[i] = h3(enc[0][i][0], enc[0][i][1], enc[0][i][2]);
+    }
+    let commitments: [Field; 1] = [commit_fold(leaves, counts[0])];
+    (enc, counts, commitments)
+}
+
+global PATH_ATTR: [bool; 1] = [true];
+
+#[test]
+fn path_accepts_single_step() {
+    let (enc, counts, commitments) = path_graph();
+    // NA -P-> NB, one active step; padding nodes unconstrained garbage.
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NA, NB, false, 3, PATH_ATTR, 1, [NB, GARBAGE, GARBAGE], counts, enc,
+    );
+}
+
+#[test]
+fn path_accepts_full_depth_chain() {
+    let (enc, counts, commitments) = path_graph();
+    // NA -P-> NB -P-> NC -P-> ND: all D steps active.
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NA, ND, false, 3, PATH_ATTR, 3, [NB, NC, ND], counts, enc,
+    );
+}
+
+#[test]
+fn path_accepts_shorter_chain_with_garbage_padding() {
+    let (enc, counts, commitments) = path_graph();
+    // l = 2 < D = 3: the inactive third row carries garbage and must be inert
+    // on the ACCEPT side too (an honest shorter chain proves fine).
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NA, NC, false, 3, PATH_ATTR, 2, [NB, NC, GARBAGE], counts, enc,
+    );
+}
+
+// Record sec 4 req 6: cycles are harmless for membership -- the chain may revisit
+// nodes (NA -P-> NB -P-> NA -P-> NB uses the committed back-edge).
+#[test]
+fn path_accepts_chain_revisiting_nodes() {
+    let (enc, counts, commitments) = path_graph();
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NA, NB, false, 3, PATH_ATTR, 3, [NB, NA, NB], counts, enc,
+    );
+}
+
+// Record sec 4 req 5 accept side: zero-length path (`p*`) with the endpoint term
+// occurring as a NODE (subject and object) of the committed union.
+#[test]
+fn path_accepts_zero_length_when_allowed() {
+    let (enc, counts, commitments) = path_graph();
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NC, NC, true, 3, PATH_ATTR, 0, [GARBAGE, GARBAGE, GARBAGE], counts, enc,
+    );
+}
+
+// The chain cannot jump: (NA, P, NC) is not a committed triple.
+#[test(should_fail_with = "chain step not in any committed graph")]
+fn path_rejects_uncommitted_step() {
+    let (enc, counts, commitments) = path_graph();
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NA, NC, false, 3, PATH_ATTR, 1, [NC, GARBAGE, GARBAGE], counts, enc,
+    );
+}
+
+// Predicate soundness: NB -> ND exists ONLY under P_OTHER; a P-path proof
+// cannot use it (the membership probe carries pred_enc structurally).
+#[test(should_fail_with = "chain step not in any committed graph")]
+fn path_rejects_wrong_predicate_edge() {
+    let (enc, counts, commitments) = path_graph();
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NB, ND, false, 3, PATH_ATTR, 1, [ND, GARBAGE, GARBAGE], counts, enc,
+    );
+}
+
+// Endpoint forgery: an honest single step NA -> NB cannot claim destination ND.
+#[test(should_fail_with = "chain does not reach the destination")]
+fn path_rejects_wrong_destination() {
+    let (enc, counts, commitments) = path_graph();
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NA, ND, false, 3, PATH_ATTR, 1, [NB, GARBAGE, GARBAGE], counts, enc,
+    );
+}
+
+// NORMATIVE padding forge-negative (record sec 4 req 4, direction 1): a SHORTER
+// real chain cannot forge a LONGER claim -- the prover holds only NA -P-> NB
+// (l = 1) and crafts the INACTIVE second row to "reach" ND; the pass-through
+// padding never advances the endpoint, so the destination check trips.
+#[test(should_fail_with = "chain does not reach the destination")]
+fn path_rejects_padding_row_extending_the_chain() {
+    let (enc, counts, commitments) = path_graph();
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NA, ND, false, 3, PATH_ATTR, 1, [NB, ND, GARBAGE], counts, enc,
+    );
+}
+
+// NORMATIVE padding forge-negative (record sec 4 req 4, direction 2): declaring
+// the crafted row ACTIVE instead (l = 2) walks it into the membership check --
+// (NB, P, ND) is not a committed triple.
+#[test(should_fail_with = "chain step not in any committed graph")]
+fn path_rejects_activating_a_fabricated_step() {
+    let (enc, counts, commitments) = path_graph();
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NA, ND, false, 3, PATH_ATTR, 2, [NB, ND, GARBAGE], counts, enc,
+    );
+}
+
+// `p+` (allow_zero = false) requires at least one step.
+#[test(should_fail_with = "zero-length path not allowed for this operator")]
+fn path_rejects_zero_length_when_disallowed() {
+    let (enc, counts, commitments) = path_graph();
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NC, NC, false, 3, PATH_ATTR, 0, [GARBAGE, GARBAGE, GARBAGE], counts, enc,
+    );
+}
+
+// Record sec 4 req 5: bare src == dst equality is NOT enough for a zero-length
+// path -- the term must occur in the committed union.
+#[test(should_fail_with = "zero-length endpoint not a node of any committed graph")]
+fn path_rejects_zero_length_endpoint_not_committed() {
+    let (enc, counts, commitments) = path_graph();
+    path_reach_check::<3, 1, 8>(
+        commitments, P, GARBAGE, GARBAGE, true, 3, [true], 0,
+        [GARBAGE, GARBAGE, GARBAGE], counts, enc,
+    );
+}
+
+// SPARQL's zero-length term universe is the graph's NODES (subjects/objects):
+// P occurs only in predicate position, so it is not a zero-length endpoint.
+#[test(should_fail_with = "zero-length endpoint not a node of any committed graph")]
+fn path_rejects_zero_length_predicate_only_occurrence() {
+    let (enc, counts, commitments) = path_graph();
+    path_reach_check::<3, 1, 8>(
+        commitments, P, P, P, true, 3, [true], 0, [GARBAGE, GARBAGE, GARBAGE], counts, enc,
+    );
+}
+
+// A zero-length claim between DIFFERENT endpoints fails the endpoint check
+// (the never-advanced running endpoint is still src).
+#[test(should_fail_with = "chain does not reach the destination")]
+fn path_rejects_zero_length_unequal_endpoints() {
+    let (enc, counts, commitments) = path_graph();
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NA, NB, true, 3, PATH_ATTR, 0, [GARBAGE, GARBAGE, GARBAGE], counts, enc,
+    );
+}
+
+#[test(should_fail_with = "path length exceeds circuit depth bound")]
+fn path_rejects_length_over_the_bound() {
+    let (enc, counts, commitments) = path_graph();
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NA, ND, false, 3, PATH_ATTR, 4, [NB, NC, ND], counts, enc,
+    );
+}
+
+// Mechanism (a) belt-and-braces: the public depth_bound input must equal the
+// member's compile-time D (the VK identity already discloses it; a manifest
+// cannot surface a different number).
+#[test(should_fail_with = "depth bound does not match the circuit member")]
+fn path_rejects_depth_bound_mismatch() {
+    let (enc, counts, commitments) = path_graph();
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NA, NB, false, 4, PATH_ATTR, 1, [NB, GARBAGE, GARBAGE], counts, enc,
+    );
+}
+
+#[test(should_fail_with = "graph commitment mismatch")]
+fn path_rejects_tampered_commitment() {
+    let (enc, counts, mut commitments) = path_graph();
+    commitments[0] += 1;
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NA, NB, false, 3, PATH_ATTR, 1, [NB, GARBAGE, GARBAGE], counts, enc,
+    );
+}
+
+// --- cross-graph fixture (D=2, K=2, N=4) ----------------------------------
+//
+// Graph A holds the chain edges { (NA, P, NB), (NB, P, NC) }; graph B holds
+// one unrelated P_OTHER triple. The fixture canonicalises the pair into
+// ascending-commitment order (the relation's step-1b contract, exactly like
+// `test_graphs`) and returns graph A's canonical index so the attribution
+// tests can name the truly-contributing graph regardless of hash order.
+fn path_cross_graphs() -> ([[[Field; 3]; 4]; 2], [u32; 2], [Field; 2], u32) {
+    let ga: [[Field; 3]; 4] = [[NA, P, NB], [NB, P, NC], [0, 0, 0], [0, 0, 0]];
+    let gb: [[Field; 3]; 4] = [[S2, P_OTHER, O2], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let mut la: [Field; 4] = [0; 4];
+    let mut lb: [Field; 4] = [0; 4];
+    for i in 0..4 {
+        la[i] = h3(ga[i][0], ga[i][1], ga[i][2]);
+        lb[i] = h3(gb[i][0], gb[i][1], gb[i][2]);
+    }
+    let ca = commit_fold(la, 2);
+    let cb = commit_fold(lb, 1);
+    if ca.lt(cb) {
+        ([ga, gb], [2, 1], [ca, cb], 0)
+    } else {
+        ([gb, ga], [1, 2], [cb, ca], 1)
+    }
+}
+
+// Accept: the whole chain lives in graph A; graph B contributes nothing --
+// and the true attribution says exactly that. The inactive-row corner is
+// covered by the D=2 bucket being full here (both steps active).
+#[test]
+fn path_accepts_with_exact_cross_graph_attribution() {
+    let (enc, counts, commitments, idx_a) = path_cross_graphs();
+    let mut attr: [bool; 2] = [false, false];
+    attr[idx_a] = true;
+    path_reach_check::<2, 2, 4>(commitments, P, NA, NC, false, 2, attr, 2, [NB, NC], counts, enc);
+}
+
+// Overstating: claiming the non-contributing graph B as a source is rejected
+// (the attested set is exact w.r.t. the witnessed chain, both directions).
+#[test(should_fail_with = "attribution does not match the witnessed chain's source graphs")]
+fn path_rejects_attribution_overstated() {
+    let (enc, counts, commitments, _idx_a) = path_cross_graphs();
+    path_reach_check::<2, 2, 4>(
+        commitments, P, NA, NC, false, 2, [true, true], 2, [NB, NC], counts, enc,
+    );
+}
+
+// Understating: hiding the contributing graph A is rejected too.
+#[test(should_fail_with = "attribution does not match the witnessed chain's source graphs")]
+fn path_rejects_attribution_understated() {
+    let (enc, counts, commitments, idx_a) = path_cross_graphs();
+    let mut attr: [bool; 2] = [false, false];
+    attr[1 - idx_a] = true;
+    path_reach_check::<2, 2, 4>(commitments, P, NA, NC, false, 2, attr, 2, [NB, NC], counts, enc);
+}
+
+// A chain may SPAN graphs: put the two edges in two separate committed graphs
+// (canonicalised ascending, like every fixture) -- both source bits are true.
+#[test]
+fn path_accepts_chain_spanning_two_graphs() {
+    let g1: [[Field; 3]; 4] = [[NA, P, NB], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let g2: [[Field; 3]; 4] = [[NB, P, NC], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let mut l1: [Field; 4] = [0; 4];
+    let mut l2: [Field; 4] = [0; 4];
+    for i in 0..4 {
+        l1[i] = h3(g1[i][0], g1[i][1], g1[i][2]);
+        l2[i] = h3(g2[i][0], g2[i][1], g2[i][2]);
+    }
+    let c1 = commit_fold(l1, 1);
+    let c2 = commit_fold(l2, 1);
+    let (enc, commitments) = if c1.lt(c2) {
+        ([g1, g2], [c1, c2])
+    } else {
+        ([g2, g1], [c2, c1])
+    };
+    path_reach_check::<2, 2, 4>(
+        commitments, P, NA, NC, false, 2, ATTR_BOTH, 2, [NB, NC], [1, 1], enc,
+    );
+}
+
+// Family guard 1b carries over: duplicate (non-increasing) commitments are
+// rejected before any chain logic.
+#[test(should_fail_with = "per-graph commitments not strictly increasing")]
+fn path_rejects_duplicate_commitments() {
+    let (enc, counts, commitments) = path_graph();
+    let enc2: [[[Field; 3]; 8]; 2] = [enc[0], enc[0]];
+    let counts2: [u32; 2] = [counts[0], counts[0]];
+    let commitments2: [Field; 2] = [commitments[0], commitments[0]];
+    path_reach_check::<3, 2, 8>(
+        commitments2, P, NA, NB, false, 3, ATTR_BOTH, 1, [NB, GARBAGE, GARBAGE], counts2, enc2,
+    );
+}
+
+// [FABLE-5] SLOT-padding forgery (the scan relation's other padding surface,
+// orthogonal to the CHAIN-padding negatives above): a fabricated row parked in
+// an INACTIVE slot (index >= counts[g]). The commitment recompute still passes
+// (commit_fold only folds the first counts[g] leaves), so the membership probe
+// is the only thing standing between this row and a forged chain step -- it
+// must not see slot indices beyond the committed count.
+#[test(should_fail_with = "chain step not in any committed graph")]
+fn path_rejects_fabricated_row_in_inactive_slot() {
+    let (mut enc, counts, commitments) = path_graph();
+    // Slot 5 is beyond counts[0] = 5: plant the missing shortcut (NA, P, ND).
+    enc[0][5] = [NA, P, ND];
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NA, ND, false, 3, PATH_ATTR, 1, [ND, GARBAGE, GARBAGE], counts, enc,
+    );
+}
+
+// Same slot-padding surface for the zero-length occurrence witness (record
+// sec 4 req 5): an endpoint term occurring ONLY in an inactive slot is NOT a
+// node of the committed union.
+#[test(should_fail_with = "zero-length endpoint not a node of any committed graph")]
+fn path_rejects_zero_length_occurrence_in_inactive_slot() {
+    let (mut enc, counts, commitments) = path_graph();
+    enc[0][5] = [GARBAGE, P, GARBAGE];
+    path_reach_check::<3, 1, 8>(
+        commitments, P, GARBAGE, GARBAGE, true, 3, PATH_ATTR, 0,
+        [GARBAGE, GARBAGE, GARBAGE], counts, enc,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// [FABLE-5] sq-apwxw: Mutation-pinning tests for the reviewer-identified
+// surviving mutants (escalated review comment, 2026-07-06).
+// ---------------------------------------------------------------------------
+
+// --- Item 1: padding-row attribution gate (`active &` in contrib) -----------
+//
+// Fixture (D=2, K=2, N=4): graph A holds the single chain edge (NA, P, NB);
+// graph B holds (NB, P, ND) -- the chain's endpoint NB appears as the SUBJECT of
+// graph B's committed triple. The prover witnesses: src=NA, dst=NB, path_len=1,
+// nodes=[NB, ND]. Step 0 is ACTIVE (NA-P->NB, attributed to A). Step 1 is
+// INACTIVE: nodes[1]=ND, but `cur` stays at NB (pass-through) and the inactive
+// step must NOT attribute graph B even though graph B contains (NB, P, ND) and
+// `present_g` would be true for that step.
+//
+// Without `active &` in `contrib[g] |= active & present_g`, graph B would be
+// spuriously attributed at the inactive step (provenance forgery). The accept
+// test pins that the correct circuit accepts [A only]; the reject test pins that
+// claiming [A,B] is rejected -- both mutations kill the surviving `contrib` mutant.
+fn path_graph_k2_attr_inactive() -> ([[[Field; 3]; 4]; 2], [u32; 2], [Field; 2], u32) {
+    // Graph A: the chain edge only. Graph B: (NB, P, ND) -- NB is the chain
+    // endpoint; an inactive padding row nodes[1]=ND walks into this triple's
+    // "present" check but the step is inactive and must not attribute.
+    let ga: [[Field; 3]; 4] = [[NA, P, NB], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let gb: [[Field; 3]; 4] = [[NB, P, ND], [0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let mut la: [Field; 4] = [0; 4];
+    let mut lb: [Field; 4] = [0; 4];
+    for i in 0..4 {
+        la[i] = h3(ga[i][0], ga[i][1], ga[i][2]);
+        lb[i] = h3(gb[i][0], gb[i][1], gb[i][2]);
+    }
+    let ca = commit_fold(la, 1);
+    let cb = commit_fold(lb, 1);
+    // Canonicalise into ascending-commitment order (step-1b contract).
+    if ca.lt(cb) {
+        ([ga, gb], [1, 1], [ca, cb], 0)
+    } else {
+        ([gb, ga], [1, 1], [cb, ca], 1)
+    }
+}
+
+// ACCEPT: chain NA-P->NB lives in graph A only; graph B's committed triple
+// (NB,P,ND) is not visited by any ACTIVE step, so the true attribution is
+// [A only]. The real circuit accepts; the mutant (missing `active &`) would
+// compute [A,B] and fail the attribution assertion here.
+#[test]
+fn path_accepts_inactive_row_does_not_attribute_graph_b() {
+    let (enc, counts, commitments, idx_a) = path_graph_k2_attr_inactive();
+    let mut attr: [bool; 2] = [false, false];
+    attr[idx_a] = true;
+    // nodes[1] = ND (inactive): cur stays NB; graph B's (NB,P,ND) is not attributed.
+    path_reach_check::<2, 2, 4>(commitments, P, NA, NB, false, 2, attr, 1, [NB, ND], counts, enc);
+}
+
+// REJECT: claiming that graph B (which contributes only via the INACTIVE step)
+// is also a source -- the correct circuit's exact attribution check catches the
+// overstatement. (The mutant would accept [A,B] and pass this through, revealing it.)
+#[test(should_fail_with = "attribution does not match the witnessed chain's source graphs")]
+fn path_rejects_inactive_row_attribution_overstatement() {
+    let (enc, counts, commitments, _idx_a) = path_graph_k2_attr_inactive();
+    // Claim both graphs contributed, but only graph A's chain edge was active.
+    path_reach_check::<2, 2, 4>(
+        commitments, P, NA, NB, false, 2, [true, true], 1, [NB, ND], counts, enc,
+    );
+}
+
+// --- Item 2: padding-advance direction -- forged dst in the LAST padding row --
+//
+// Sibling to `path_rejects_padding_row_extending_the_chain`: the forged destination
+// ND is planted in the LAST (index 2) padding row instead of index 1. The pass-
+// through guard applies to ALL inactive rows regardless of position; the endpoint
+// check must still fail. This shape is exactly the "strongest witness" the escalated
+// reviewer verified manually on the PR head -- now pinned as a permanent test.
+#[test(should_fail_with = "chain does not reach the destination")]
+fn path_rejects_padding_row_forged_dst_in_last_slot() {
+    let (enc, counts, commitments) = path_graph();
+    // l=1 (only NA-P->NB active); nodes=[NB, GARBAGE, ND]: the forged destination
+    // ND is in the last (index 2) padding row. Inactive steps cannot advance cur.
+    path_reach_check::<3, 1, 8>(
+        commitments, P, NA, ND, false, 3, PATH_ATTR, 1, [NB, GARBAGE, ND], counts, enc,
     );
 }

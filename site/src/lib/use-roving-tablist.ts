@@ -1,8 +1,7 @@
 "use client";
 
 // [FABLE-5] sq-ymr2e.9 — shared WAI-ARIA tabs keyboard contract for the site's
-// `role="tablist"` selector family (home hero Query/Data, the /try Result-view /
-// Graph-format / Execution-target selectors).
+// `role="tablist"` selector family (home hero Query/Data selectors, and other tab widgets).
 //
 // The site's tab widgets already carried the STATIC half of the ARIA Authoring
 // Practices tabs pattern (`tablist`/`tab` roles + `aria-selected`) but not the

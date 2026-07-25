@@ -1,0 +1,11 @@
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix ex: <http://example.org/> .
+
+ex:eve a ex:Employee ;
+  ex:fullName "Eve Example" ;
+  ex:bio "Line one.\nLine two." ;
+  ex:motto "carpe diem"@en , "grip dagen"@no ;
+  ex:active "true"^^xsd:boolean ;
+  ex:hireDate "2024-02-29"^^xsd:date ;
+  ex:internalCode "X-13" ;
+  ex:badge <http://example.org/badges/eve.png> .

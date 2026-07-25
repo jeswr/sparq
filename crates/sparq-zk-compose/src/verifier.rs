@@ -136,6 +136,17 @@ use sparq_zk::verify::{
     fragment_filters, fragment_pattern_consts, fragment_patterns, recheck, variable_slots,
     FilterCmp, JoinEdge, QueryFilter, VerifyError,
 };
+// [OPUS-4.8] sq-3kd2g.6: the wave-1 extended-fragment query re-derivation the
+// fail-closed `dispatch_fragment` routing gate consumes (never trusting the
+// manifest). Opt-in (`extended-fragment`). [OPUS-4.8] sq-1zf94: `SlotPattern` is
+// the shape of a re-derived path endpoint the disclosed-solution binding matches on.
+// [OPUS-4.8] sq-ygk6x: `branch_obligations` re-derives one UNION branch's Q6
+// cross-graph non-bnode obligations (join edges + multi-graph path links) from the
+// query text + the manifest's proof-bound per-obligation attributions — the
+// per-branch analogue of the flat `cross_graph_join_obligations` the compose
+// verifier's `bind_fragment_join_coherence` gate enforces.
+#[cfg(feature = "extended-fragment")]
+use sparq_zk::verify::{branch_obligations, fragment_query, SlotPattern};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -1515,6 +1526,43 @@ pub enum CheckError {
     JoinCommitmentChainMismatch { edge: usize },
     /// Subprocess / io failure (not a verification verdict).
     Driver(DriverError),
+    /// [OPUS-4.8] sq-h732x: the FAIL-CLOSED extended-fragment structural routing
+    /// gate ([`dispatch_fragment`]) refused the presentation — the query is
+    /// outside the wave-1 fragment, or a disclosed solution's branch witness does
+    /// not route to a bound sub-proof of the correct circuit member. Carried into
+    /// [`verify_fragment_manifest`] so an extended-fragment refusal surfaces as one
+    /// structured error alongside the stage-1 gates. Opt-in (`extended-fragment`).
+    #[cfg(feature = "extended-fragment")]
+    FragmentDispatch(FragmentDispatchError),
+    /// [OPUS-4.8] sq-1zf94: the FAIL-CLOSED extended-fragment DISCLOSED-SOLUTION
+    /// term binding ([`bind_fragment_solution`]) refused the presentation — a
+    /// `PathReach` `pred_enc`/`src_enc`/`dst_enc` or a `VALUES` cell does not equal
+    /// the encoding the verifier re-derives from the disclosed solution + query
+    /// text (never the manifest's encodings). Carried into
+    /// [`verify_fragment_manifest`]. Opt-in (`extended-fragment`).
+    #[cfg(feature = "extended-fragment")]
+    FragmentSolution(FragmentSolutionError),
+    /// [OPUS-4.8] sq-qyfth: the FAIL-CLOSED extended-fragment BGP SCAN-SLOT binding
+    /// ([`bind_fragment_scans`]) refused the presentation — a BGP scan sub-proof
+    /// does not answer the query pattern, no supporting row is selected for a scan
+    /// pattern carrying a variable, the selected row is out of range, a selected
+    /// row slot does not equal the disclosed solution's re-encoded term for a
+    /// projected variable, or two atoms sharing a variable selected rows whose slot
+    /// values disagree (join incoherence). Carried into
+    /// [`verify_fragment_manifest`]. Opt-in (`extended-fragment`).
+    #[cfg(feature = "extended-fragment")]
+    FragmentScan(FragmentScanError),
+    /// [OPUS-4.8] sq-ygk6x: the FAIL-CLOSED extended-fragment PER-BRANCH JOIN
+    /// COHERENCE + cross-graph Q6 non-bnode gate ([`bind_fragment_join_coherence`])
+    /// refused the presentation — an existential variable shared between two branch
+    /// atoms (scan/scan, scan/path, or path/path) resolves to disagreeing disclosed
+    /// values, a `PathReach` whose proof-bound attribution admits more than one
+    /// committed graph (whose interior-chain non-bnode obligation the verifier cannot
+    /// discharge from disclosed data), or a required cross-graph join obligation not
+    /// covered by the disclosed data. Carried into [`verify_fragment_manifest`].
+    /// Opt-in (`extended-fragment`).
+    #[cfg(feature = "extended-fragment")]
+    FragmentJoin(FragmentJoinError),
 }
 
 impl std::fmt::Display for CheckError {
@@ -1563,7 +1611,7 @@ impl std::fmt::Display for CheckError {
             ),
             CheckError::UnattestedCommitment { proof, commitment } => write!(
                 f,
-                "scan sub-proof {proof}: commitment {commitment} has no issuer attestation (unsigned / prover-invented commitment — no credential provenance)"
+                "sub-proof {proof}: commitment {commitment} has no issuer attestation (unsigned / prover-invented commitment — no credential provenance); applies to a BGP scan or an extended-fragment path sub-proof alike"
             ),
             CheckError::InvalidIssuerSignature { commitment } => write!(
                 f,
@@ -1595,7 +1643,7 @@ impl std::fmt::Display for CheckError {
             ),
             CheckError::ScanCommitmentSaltMissing { proof, commitment } => write!(
                 f,
-                "scan sub-proof {proof}: the attestation covering commitment {commitment} carries no salt (audit #9 / codex 2221 HIGH: a scan-covering attestation MUST be salt-bound — a salt-less legacy attestation bypasses salt-separation)"
+                "sub-proof {proof}: the attestation covering commitment {commitment} carries no salt (audit #9 / codex 2221 HIGH: a scan- or path-covering attestation MUST be salt-bound — a salt-less legacy attestation bypasses salt-separation)"
             ),
             CheckError::AttributionMalformed { proof, expected, got } => write!(
                 f,
@@ -1620,11 +1668,11 @@ impl std::fmt::Display for CheckError {
             ),
             CheckError::ScanCommitmentStatusMissing { proof, commitment } => write!(
                 f,
-                "scan sub-proof {proof}: the attestation covering commitment {commitment} carries no issuer-bound status reference (audit #12: a scan-covering attestation MUST bind a status-list reference — a status-unbound attestation lets a revoked credential be presented unchecked)"
+                "sub-proof {proof}: the attestation covering commitment {commitment} carries no issuer-bound status reference (audit #12: a scan- or path-covering attestation MUST bind a status-list reference — a status-unbound attestation lets a revoked credential be presented unchecked)"
             ),
             CheckError::RevocationReferenceMissing { proof } => write!(
                 f,
-                "scan sub-proof {proof}: an issuer-bound status reference is present but manifest.revocation is absent (audit #12: the prover dropped the disclosed revocation reference needed to check the issuer-signed status digest)"
+                "sub-proof {proof}: an issuer-bound status reference is present but manifest.revocation is absent (audit #12: the prover dropped the disclosed revocation reference needed to check the issuer-signed status digest)"
             ),
             CheckError::RevocationReferenceMismatch { commitment } => write!(
                 f,
@@ -1831,6 +1879,22 @@ impl std::fmt::Display for CheckError {
                 "join edge {edge}: an N-way join chain over a shared variable carries differing join_commitments across its pairwise join_eq proofs (sq-r2s8 §2.4: every hop of a multi-way join must bind the SAME hiding commitment so the join value composes transitively — distinct commitments leave the N-way join unproven, fail-closed)"
             ),
             CheckError::Driver(e) => write!(f, "{e}"),
+            #[cfg(feature = "extended-fragment")]
+            CheckError::FragmentDispatch(e) => {
+                write!(f, "extended-fragment dispatch rejected: {}", e)
+            }
+            #[cfg(feature = "extended-fragment")]
+            CheckError::FragmentSolution(e) => {
+                write!(f, "extended-fragment disclosed-solution binding rejected: {}", e)
+            }
+            #[cfg(feature = "extended-fragment")]
+            CheckError::FragmentScan(e) => {
+                write!(f, "extended-fragment BGP scan-slot binding rejected: {}", e)
+            }
+            #[cfg(feature = "extended-fragment")]
+            CheckError::FragmentJoin(e) => {
+                write!(f, "extended-fragment per-branch join coherence rejected: {}", e)
+            }
         }
     }
 }
@@ -1964,6 +2028,27 @@ fn derive_id(inputs: &ProofInputs) -> Option<CircuitId> {
             };
             derive_join_eq_id(n_a, n_b)
         }
+        // [OPUS-4.8] sq-3kd2g.6: bounded-depth path reachability. The declared id
+        // carries the depth bound `d` and slot bucket `n`; `k` is re-derived from
+        // `commitments.len()` (the arity a wrong-length attribution cannot fake —
+        // it changes the reconstructed public-input vector's length). The disclosed
+        // `depth_bound` MUST equal the member's `d` (it is constant-constrained to
+        // `D` in-circuit, soundness req 1), so a manifest disclosing a different
+        // bound derives NO id (fail-closed). `derive_path_reach_id` then requires
+        // `(d, k, n)` to be an EXACTLY compiled member (a wrong `k` bucket => a
+        // different / no derived id => `CircuitIdMismatch` upstream).
+        #[cfg(feature = "extended-fragment")]
+        ProofInputs::PathReach { commitments, depth_bound, .. } => {
+            let (d, n) = match inputs.circuit_id() {
+                CircuitId::PathReach { d, n, .. } => (*d, *n),
+                _ => return None,
+            };
+            if *depth_bound != d {
+                return None;
+            }
+            let k = commitments.len() as u32;
+            crate::build::derive_path_reach_id(d, k, n)
+        }
     }
 }
 
@@ -2005,27 +2090,78 @@ pub fn prefilter_manifest_structure(
     trusted_key_set: &KeySet,
     revocation_policy: &RevocationPolicy,
 ) -> Result<Vec<JoinEdge>, CheckError> {
-    // --- Stage 1a: sparq-zk layer-3 bnode / arity re-check. ---
-    // [OPUS-4.8] sq-en5dx (Finding A of the sq-1s2.6 composition review): feed the
-    // Q6 cross-graph obligation gate a GLOBAL-namespace attribution vector, NOT the
-    // raw scan-LOCAL indices. `manifest.attributions[pi]` indexes the ANSWERING
-    // scan's OWN `commitments`, so two DISTINCT `k=1` scans both declaring local
-    // index 0 (the `[[0],[0]]` cross-scan alias) would COLLAPSE to one element and
-    // the non-bnode obligation would be DROPPED for the cross-scan join. Keying the
-    // union on the committed-graph IDENTITY (via `global_attributions`) makes two
-    // distinct graphs distinct so the obligation is correctly required, while two
-    // scans over the SAME graph still collapse (a same-graph bnode join is
-    // legitimate). See `global_attributions` for the fail-closed edge cases.
-    let attributions = global_attributions(manifest);
-    let declared: Vec<JoinEdge> = manifest
-        .join_obligations
-        .iter()
-        .map(|(variable, i, j)| JoinEdge {
-            variable: variable.clone(),
-            patterns: (*i, *j),
-        })
-        .collect();
-    let required = recheck(&manifest.query, &attributions, &declared)?;
+    // The public structural pre-filter is the FLAT stage-1 regime
+    // (`skip_query_binding = false`): every stage-1 query-text gate runs, so its
+    // behaviour is byte-identical with or without the `extended-fragment` feature.
+    prefilter_manifest_structure_impl(manifest, trusted_key_set, revocation_policy, false)
+}
+
+/// Shared body of [`prefilter_manifest_structure`]. `skip_query_binding` selects
+/// the stage-1 QUERY-TEXT binding regime; every query-INDEPENDENT gate runs
+/// identically in both.
+///
+/// - `false` — the FLAT stage-1 fragment, the ONLY value the sound
+///   [`verify_manifest`] path and the default build ever use. Stage 1a runs the
+///   full [`recheck`] (`fragment_patterns` + the flat cross-graph Q6 obligation
+///   binding), and the query-text term-binding gates `bind_query_correctness`,
+///   `bind_attributions`, `bind_joins` all run.
+/// - `true` — the EXTENDED-fragment regime, set ONLY by
+///   `verify_fragment_manifest` AFTER `dispatch_fragment` has re-derived and
+///   routed the query through `fragment_query` (sq-h732x). Stage 1a's
+///   query-fragment ACCEPTANCE is routed through `fragment_query` (accepts the
+///   wave-1 `UNION` / `VALUES` / property-path extensions, fail-closed on anything
+///   outside), and the FLAT cross-graph obligation binding plus the per-branch
+///   term binding (`bind_query_correctness` / `bind_attributions` / `bind_joins`)
+///   are DEFERRED to the structural routing gate + bead sq-1zf94.
+///
+/// The query-INDEPENDENT gates — id hygiene (stage 1b), binding edges (stage 2),
+/// issuer attestation (stage 2d), revocation (stage 2f) — are UNCHANGED in both
+/// regimes. This is the honest scope of the extended-fragment routing: it lets an
+/// accepted extended query's sub-proofs verify end-to-end WITHOUT claiming the
+/// disclosed path/`VALUES` terms are bound to the proofs (that binding is
+/// sq-1zf94). NOT externally audited (sq-qhy4).
+// [OPUS-4.8] sq-h732x: mode-aware stage-1 pre-filter (flat vs extended fragment).
+fn prefilter_manifest_structure_impl(
+    manifest: &ProofManifest,
+    trusted_key_set: &KeySet,
+    revocation_policy: &RevocationPolicy,
+    skip_query_binding: bool,
+) -> Result<Vec<JoinEdge>, CheckError> {
+    // --- Stage 1a: query-fragment gate + (flat stage-1 only) cross-graph
+    // obligations. ---
+    let required = if skip_query_binding {
+        // Extended-fragment regime: route the query-fragment ACCEPTANCE through
+        // `fragment_query` (fail-closed on anything OUTSIDE the wave-1 fragment)
+        // instead of the stage-1-only `fragment_patterns`, so the extended query is
+        // not rejected here. The flat cross-graph Q6 obligation binding is DEFERRED
+        // to `dispatch_fragment` (structural routing) + sq-1zf94 (term binding), so
+        // there are no flat obligations to return.
+        #[cfg(feature = "extended-fragment")]
+        fragment_query(&manifest.query).map_err(CheckError::Sparqzk)?;
+        Vec::new()
+    } else {
+        // [OPUS-4.8] sq-en5dx (Finding A of the sq-1s2.6 composition review): feed
+        // the Q6 cross-graph obligation gate a GLOBAL-namespace attribution vector,
+        // NOT the raw scan-LOCAL indices. `manifest.attributions[pi]` indexes the
+        // ANSWERING scan's OWN `commitments`, so two DISTINCT `k=1` scans both
+        // declaring local index 0 (the `[[0],[0]]` cross-scan alias) would COLLAPSE
+        // to one element and the non-bnode obligation would be DROPPED for the
+        // cross-scan join. Keying the union on the committed-graph IDENTITY (via
+        // `global_attributions`) makes two distinct graphs distinct so the
+        // obligation is correctly required, while two scans over the SAME graph
+        // still collapse (a same-graph bnode join is legitimate). See
+        // `global_attributions` for the fail-closed edge cases.
+        let attributions = global_attributions(manifest);
+        let declared: Vec<JoinEdge> = manifest
+            .join_obligations
+            .iter()
+            .map(|(variable, i, j)| JoinEdge {
+                variable: variable.clone(),
+                patterns: (*i, *j),
+            })
+            .collect();
+        recheck(&manifest.query, &attributions, &declared)?
+    };
 
     // --- Stage 1b: re-derive each circuit id from public inputs. ---
     for (i, sp) in manifest.sub_proofs.iter().enumerate() {
@@ -2131,7 +2267,17 @@ pub fn prefilter_manifest_structure(
     // #1). This stage is the VERIFIER-SIDE check that those bound values match
     // the query the relying party reads in `manifest.query` — without it a
     // proof of one statement is presented under a different query.
-    bind_query_correctness(manifest)?;
+    //
+    // [OPUS-4.8] sq-h732x: this gate re-parses the query with the FLAT
+    // `fragment_patterns` (rejecting `UNION`/`VALUES`/paths) and binds scan
+    // constants per the flat BGP model. In the extended-fragment regime
+    // (`skip_query_binding`) the per-branch term binding is DEFERRED to sq-1zf94,
+    // so it is skipped here (documented unbound-terms limitation — the sub-proofs
+    // still verify cryptographically, they are just not yet tied to the disclosed
+    // solution terms).
+    if !skip_query_binding {
+        bind_query_correctness(manifest)?;
+    }
 
     // --- Stage 2e: cross-graph attribution binding (audit #8). ---
     // Bind manifest.attributions (the JSON sets fed to the Q6 obligation gate in
@@ -2141,7 +2287,13 @@ pub fn prefilter_manifest_structure(
     // a collapsed `[[0],[0]]` to drop the cross-graph non-bnode obligation: the
     // declared attribution must be a SUPERSET of the proof-bound matched-graph
     // set, so under-declaring a contributing graph is rejected here.
-    bind_attributions(manifest)?;
+    //
+    // [OPUS-4.8] sq-h732x: re-parses via the flat `fragment_patterns` to map
+    // patterns->scans, so the extended-fragment regime (`skip_query_binding`)
+    // defers it to the per-branch routing (`dispatch_fragment`) + sq-1zf94.
+    if !skip_query_binding {
+        bind_attributions(manifest)?;
+    }
 
     // --- Stage 2d: issuer-signature / key-set binding (audit #3 / codex #1). ---
     // Every scan sub-proof's commitments[g] must carry a valid issuer signature
@@ -2189,14 +2341,25 @@ pub fn prefilter_manifest_structure(
     // structural gate that ties those bound public inputs to the attested scans and
     // the query. Placed AFTER bind_issuer_attestations so the commitments it
     // byte-matches are already known issuer-attested + in K (design §3.3 step 3).
-    bind_joins(manifest)?;
+    //
+    // [OPUS-4.8] sq-h732x: `bind_joins` re-derives the query-shared join slots via
+    // the flat `fragment_patterns`, so the extended-fragment regime
+    // (`skip_query_binding`) defers it — the hidden-join slot binding over a
+    // multi-branch query is part of the per-branch term binding (sq-1zf94).
+    if !skip_query_binding {
+        bind_joins(manifest)?;
+    }
 
     Ok(required)
 }
 
-/// Stage 2d: bind every scan commitment to an issuer signature whose key is in
-/// the EXTERNAL trusted key-set `K` (audit #3, soundness fix for codex #1). For
-/// each `commitments[g]` of each scan sub-proof:
+/// Stage 2d: bind every committed graph a verified sub-proof draws triples from to
+/// an issuer signature whose key is in the EXTERNAL trusted key-set `K` (audit #3,
+/// soundness fix for codex #1). For each `commitments[g]` of each `Scan` and — in
+/// the `extended-fragment` regime — each bounded-path `PathReach` sub-proof
+/// (sq-nlulr; a path graph is attested + salt-recorded on the same footing as a
+/// scan graph, so the flat cross-graph non-bnode discipline extends to a
+/// scan↔single-graph-path join):
 /// - there MUST be a `commitment_attestations` entry over that commitment value
 ///   OR a hidden-issuer proof covering it (sq-xxg, see below),
 /// - its signature MUST verify under its declared `issuer_public_key`,
@@ -2261,22 +2424,40 @@ fn bind_issuer_attestations(
         }
     }
 
-    // [OPUS-4.8] codex 2223 LOW: the verified per-graph salt for every commitment
-    // ACTUALLY REFERENCED by a verified scan sub-proof. The salt-uniqueness check
-    // (step 3) runs ONLY over this referenced set, not over every declared
-    // attestation: the #9 security property only concerns committed graphs a
-    // verified scan drew triples from, so an unrelated extra attestation reusing a
-    // salt must NOT false-reject a valid proof. Keyed by canonical commitment hex
-    // (so the same graph referenced by several scans records once); the value is
-    // the verified salt hex. Populated only after the attestation over `c` has
-    // fully verified (key ∈ K, signature valid, salt present + salt-bound), so a
-    // recorded salt is always issuer-attested.
+    // [OPUS-4.8] codex 2223 LOW / sq-nlulr: the verified per-graph salt for every
+    // commitment ACTUALLY REFERENCED by a verified SCAN or (extended-fragment) PATH
+    // sub-proof. The salt-uniqueness check (step 3) runs ONLY over this referenced
+    // set, not over every declared attestation: the #9 security property only
+    // concerns committed graphs a verified sub-proof drew triples from, so an
+    // unrelated extra attestation reusing a salt must NOT false-reject a valid
+    // proof. Keyed by canonical commitment hex (so the same graph referenced by
+    // several scans/paths records once); the value is the verified salt hex.
+    // Populated only after the attestation over `c` has fully verified (key ∈ K,
+    // signature valid, salt present + salt-bound), so a recorded salt is always
+    // issuer-attested.
     let mut referenced_salt: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
 
     for (pi, sp) in manifest.sub_proofs.iter().enumerate() {
-        let ProofInputs::Scan { commitments, .. } = &sp.inputs else {
-            continue;
+        // [OPUS-4.8] sq-nlulr: the audit-#9 issuer-attestation + salt-uniqueness
+        // requirement covers EVERY committed graph a VERIFIED sub-proof draws
+        // triples from. A BGP `Scan` and, in the extended fragment, a bounded
+        // property-path `PathReach` both expose `commitments` (each with a
+        // proof-bound `attribution`), so a path commitment is attested and
+        // salt-recorded on the SAME footing as a scan commitment. This is what
+        // makes a cross-graph scan<->single-graph-PATH join's non-bnode COROLLARY
+        // (`bind_fragment_join_coherence`) carry the flat path's distinct-salt
+        // discipline: the path graph now contributes an issuer-attested,
+        // distinctly-salted commitment to `referenced_salt`, so the salt-uniqueness
+        // gate (step 3) rejects a path graph reusing a scan graph's salt. Flat
+        // manifests carry NO `PathReach` sub-proof (that variant is
+        // `extended-fragment`-gated), so the default build is byte-identical: the
+        // match collapses to the original `Scan`-or-continue.
+        let commitments: &[FieldHex] = match &sp.inputs {
+            ProofInputs::Scan { commitments, .. } => commitments,
+            #[cfg(feature = "extended-fragment")]
+            ProofInputs::PathReach { commitments, .. } => commitments,
+            _ => continue,
         };
         for c in commitments {
             // Find an attestation declared over this exact commitment value
@@ -2460,26 +2641,28 @@ fn bind_issuer_attestations(
                     commitment: c.0.clone(),
                 });
             }
-            // [OPUS-4.8] codex 2223 LOW: record the now-verified salt for this
-            // SCAN-REFERENCED commitment. Keyed by canonical commitment hex so the
-            // same graph referenced by multiple scans records a single entry; the
-            // salt-uniqueness gate (step 3) iterates only this set, so an unrelated
-            // extra attestation never participates.
+            // [OPUS-4.8] codex 2223 LOW / sq-nlulr: record the now-verified salt for
+            // this SCAN- or PATH-REFERENCED commitment. Keyed by canonical commitment
+            // hex so the same graph referenced by multiple scans/paths records a
+            // single entry; the salt-uniqueness gate (step 3) iterates only this set,
+            // so an unrelated extra attestation never participates.
             referenced_salt.insert(field_to_hex(&commitment_fr), field_to_hex(&salt_fr));
         }
     }
 
     // (3) Salt uniqueness (audit #9): no two DISTINCT committed graphs USED BY A
-    // VERIFIED SCAN may share a salt. A reused salt is the Q6 cross-graph
-    // bnode-correlation channel — a same-label canonical bnode then encodes
-    // identically across both graphs. [OPUS-4.8] codex 2223 LOW: this check is
-    // scoped to `referenced_salt` (commitments an actually-verified scan drew from)
-    // rather than every `manifest.commitment_attestations` entry. The #9 property
-    // only concerns committed graphs a verified scan used, so an UNRELATED extra
-    // attestation that happens to reuse a salt must NOT false-reject an otherwise
-    // valid proof. Each recorded salt is already issuer-attested (recorded only
-    // after the signature verified above). A salt reused across two distinct
-    // SCAN-referenced commitments still REJECTS. (Two attestations over the SAME
+    // VERIFIED SCAN OR PATH sub-proof may share a salt. A reused salt is the Q6
+    // cross-graph bnode-correlation channel — a same-label canonical bnode then
+    // encodes identically across both graphs. [OPUS-4.8] codex 2223 LOW / sq-nlulr:
+    // this check is scoped to `referenced_salt` (commitments an actually-verified
+    // scan or path drew from) rather than every `manifest.commitment_attestations`
+    // entry. The #9 property only concerns committed graphs a verified sub-proof
+    // used, so an UNRELATED extra attestation that happens to reuse a salt must NOT
+    // false-reject an otherwise valid proof. Each recorded salt is already
+    // issuer-attested (recorded only after the signature verified above). A salt
+    // reused across two distinct SCAN- or PATH-referenced commitments still REJECTS
+    // — including a scan graph and a single-graph path graph, which is the
+    // sq-nlulr cross-graph scan<->path corollary. (Two attestations over the SAME
     // commitment collapse to one entry by the commitment-keyed map and so are
     // fine: the same graph attested twice.)
     let mut salt_to_commitment: std::collections::BTreeMap<String, String> =
@@ -4722,7 +4905,53 @@ pub fn verify_manifest(
     nonce: &VerifierNonce,
     seen: &dyn SeenNonces,
 ) -> Result<(), CheckError> {
-    prefilter_manifest_structure(manifest, trusted_key_set, revocation_policy)?;
+    // The sound stage-1 entry point: the FLAT-fragment regime
+    // (`skip_query_binding = false`) keeps EVERY stage-1 query-text gate live, so
+    // this path is byte-identical with or without the `extended-fragment` feature.
+    verify_manifest_impl(
+        manifest,
+        prover,
+        work_dir,
+        trusted_key_set,
+        revocation_policy,
+        holder_registry,
+        holder_binding_policy,
+        entailment_policy,
+        nonce,
+        seen,
+        false,
+    )
+}
+
+/// Shared crypto-verification body of [`verify_manifest`] (and, under
+/// `extended-fragment`, `verify_fragment_manifest`). `skip_query_binding` is
+/// threaded straight into `prefilter_manifest_structure_impl` and selects the
+/// stage-1 query-text binding regime (flat vs extended fragment); it changes
+/// NOTHING else. Every other gate — the entailment regime, the verifier-nonce
+/// single-use + challenge binding, holder PoP, the per-sub-proof public-input
+/// reconstruction + canonical-vk + `bb verify`, and the hidden revocation /
+/// issuer / holder gates — runs identically in both regimes.
+// [OPUS-4.8] sq-h732x: mode-aware shared body (flat vs extended fragment).
+#[allow(clippy::too_many_arguments)]
+fn verify_manifest_impl(
+    manifest: &ProofManifest,
+    prover: &CircuitProver,
+    work_dir: &Path,
+    trusted_key_set: &KeySet,
+    revocation_policy: &RevocationPolicy,
+    holder_registry: &HolderRegistry,
+    holder_binding_policy: &HolderBindingPolicy,
+    entailment_policy: &EntailmentPolicy,
+    nonce: &VerifierNonce,
+    seen: &dyn SeenNonces,
+    skip_query_binding: bool,
+) -> Result<(), CheckError> {
+    prefilter_manifest_structure_impl(
+        manifest,
+        trusted_key_set,
+        revocation_policy,
+        skip_query_binding,
+    )?;
 
     // --- sq-314: entailment regime + derivation steps (fail-closed). ---
     // Enforce `manifest.entailment_regime` against the relying party's policy so
@@ -4895,6 +5124,1488 @@ pub fn verify_manifest(
     bind_holder_set(manifest, holder_registry, prover, work_dir, &challenge)?;
 
     Ok(())
+}
+
+/// Why a wave-1 extended-fragment manifest was REJECTED by [`dispatch_fragment`]
+/// (sq-3kd2g.6). Every variant is a FAIL-CLOSED refusal — the gate never falls
+/// through to a default / silent accept for anything outside the proven-sound
+/// fragment.
+// [OPUS-4.8] sq-3kd2g.6. Opt-in (`extended-fragment`), NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FragmentDispatchError {
+    /// The query is OUTSIDE the wave-1 extended fragment: `fragment_query`
+    /// (re-derived from the query text alone, never the manifest) rejected it
+    /// (e.g. `OPTIONAL` / `MINUS` / `GRAPH` / `SERVICE` / a non-atomic closure).
+    /// Carries the underlying reason.
+    OutsideFragment(String),
+    /// A [`crate::manifest::BranchWitness`] attributes a disclosed solution to a
+    /// `UNION` branch index that does not exist (the "wrong branch" rejection).
+    BranchOutOfRange { witness: usize, branch: usize, branches: usize },
+    /// A branch witness's per-obligation arity (`scan_proofs` / `path_proofs` /
+    /// `values_rows`) does not match the re-derived branch's obligation count.
+    ObligationArityMismatch { witness: usize, what: &'static str, expected: usize, got: usize },
+    /// A named `sub_proofs` index is out of range of the embedded manifest.
+    DanglingProof { witness: usize, proof: usize },
+    /// A sub-proof carries an unknown / uncompiled circuit id (`derive_id` =>
+    /// None) — e.g. a `PathReach` whose disclosed `depth_bound` is not a compiled
+    /// member's bound.
+    UnknownCircuit { proof: usize },
+    /// A sub-proof's DECLARED circuit id does not equal the id re-derived from its
+    /// public inputs — the "k (or n/d) mismatch between claim and circuit member"
+    /// rejection (e.g. a `PathReach` declaring `k = 2` but carrying one
+    /// commitment). Same invariant `prefilter_manifest_structure` stage-1b
+    /// enforces, checked here too so the routing gate is self-contained.
+    CircuitIdMismatch { proof: usize, declared: CircuitId, derived: CircuitId },
+    /// A BGP-scan obligation's named sub-proof is not a [`ProofInputs::Scan`].
+    NotAScanProof { witness: usize, obligation: usize, proof: usize },
+    /// A bounded-path obligation has NO bound [`ProofInputs::PathReach`] sub-proof
+    /// of the right member at its named index (the "path claimed without a bound
+    /// sub-proof" rejection).
+    ///
+    /// The depth-overflow / mismatch case — a `PathReach` whose disclosed
+    /// `depth_bound` is not the member's compiled `d` (soundness req 1) — is
+    /// rejected EARLIER, by the id-hygiene check, as
+    /// [`FragmentDispatchError::UnknownCircuit`] (`derive_id` returns `None` when
+    /// `depth_bound != d`), so it never reaches this per-obligation stage.
+    PathReachMissing { witness: usize, obligation: usize, proof: usize },
+    /// A path sub-proof's `allow_zero` disagrees with the query-re-derived
+    /// closure (`p+` cannot be presented as `p*`/`p?` or vice versa).
+    PathClosureMismatch { witness: usize, obligation: usize },
+    /// A FIXED-depth closure (`p?`, whose bound is pinned to 1) is bound to a
+    /// member whose depth `d` exceeds that fixed bound.
+    PathDepthExceedsClosure { witness: usize, obligation: usize, member_d: u32, fixed: usize },
+    /// A VALUES-row index is out of range of the re-derived block's rows.
+    ValuesRowOutOfRange { witness: usize, block: usize, row: usize, rows: usize },
+}
+
+#[cfg(feature = "extended-fragment")]
+impl std::fmt::Display for FragmentDispatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FragmentDispatchError::OutsideFragment(why) => {
+                write!(f, "query is outside the wave-1 extended fragment: {}", why)
+            }
+            FragmentDispatchError::BranchOutOfRange { witness, branch, branches } => write!(
+                f,
+                "branch witness {} attributes a solution to branch {} but the query \
+                 re-derives only {} branch(es) (fail-closed: wrong branch)",
+                witness, branch, branches
+            ),
+            FragmentDispatchError::ObligationArityMismatch { witness, what, expected, got } => write!(
+                f,
+                "branch witness {} has {} {} proof-refs but the branch has {} {} obligation(s)",
+                witness, got, what, expected, what
+            ),
+            FragmentDispatchError::DanglingProof { witness, proof } => write!(
+                f,
+                "branch witness {} names sub-proof {} which is out of range",
+                witness, proof
+            ),
+            FragmentDispatchError::UnknownCircuit { proof } => write!(
+                f,
+                "sub-proof {} carries an unknown / uncompiled circuit id (fail-closed)",
+                proof
+            ),
+            FragmentDispatchError::CircuitIdMismatch { proof, declared, derived } => write!(
+                f,
+                "sub-proof {}: declared circuit id {:?} but its public inputs re-derive {:?} \
+                 (fail-closed: claim / circuit-member mismatch)",
+                proof, declared, derived
+            ),
+            FragmentDispatchError::NotAScanProof { witness, obligation, proof } => write!(
+                f,
+                "branch witness {} BGP obligation {} names sub-proof {}, which is not a scan proof",
+                witness, obligation, proof
+            ),
+            FragmentDispatchError::PathReachMissing { witness, obligation, proof } => write!(
+                f,
+                "branch witness {} path obligation {} names sub-proof {}, which is not a \
+                 bound path_reach proof (fail-closed: path claimed without a bound sub-proof)",
+                witness, obligation, proof
+            ),
+            FragmentDispatchError::PathClosureMismatch { witness, obligation } => write!(
+                f,
+                "branch witness {} path obligation {}: allow_zero disagrees with the query closure",
+                witness, obligation
+            ),
+            FragmentDispatchError::PathDepthExceedsClosure { witness, obligation, member_d, fixed } => {
+                write!(
+                    f,
+                    "branch witness {} path obligation {}: member depth {} exceeds the closure's fixed \
+                     bound {} (fail-closed)",
+                    witness, obligation, member_d, fixed
+                )
+            }
+            FragmentDispatchError::ValuesRowOutOfRange { witness, block, row, rows } => write!(
+                f,
+                "branch witness {} VALUES block {}: row index {} out of range ({} row(s))",
+                witness, block, row, rows
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "extended-fragment")]
+impl std::error::Error for FragmentDispatchError {}
+
+/// FAIL-CLOSED wave-1 extended-fragment DISPATCH (sq-3kd2g.6): route a
+/// [`crate::manifest::FragmentManifest`] to the circuit members the query's
+/// property-path / `UNION` / `VALUES` constructs require, REFUSING anything
+/// outside the proven-sound fragment — never a silent fallback.
+///
+/// The gate re-derives the query's branch structure from the query TEXT alone
+/// (`sparq_zk::verify::fragment_query`, never trusting the manifest) and enforces,
+/// fail-closed, the load-bearing routing invariant (design record §3–§4):
+///
+/// 1. the query is IN the wave-1 fragment ([`FragmentDispatchError::OutsideFragment`]
+///    otherwise — everything the record excludes still rejects);
+/// 2. EVERY embedded sub-proof carries a KNOWN, compiled circuit id (an unknown /
+///    uncompiled id => [`FragmentDispatchError::UnknownCircuit`]);
+/// 3. each disclosed solution's [`crate::manifest::BranchWitness`] attributes it to
+///    a REAL branch ([`FragmentDispatchError::BranchOutOfRange`] — the "wrong
+///    branch" rejection) and names EXACTLY one bound sub-proof per branch
+///    obligation, of the RIGHT member: a BGP obligation => a [`ProofInputs::Scan`],
+///    a bounded-path obligation => a [`ProofInputs::PathReach`] of a member whose
+///    disclosed `depth_bound` equals its compiled `d` (soundness req 1) and whose
+///    `allow_zero` matches the closure — a path claimed WITHOUT a bound path
+///    sub-proof, a `k`/depth mismatch, or a closure mismatch all REJECT;
+/// 4. each disclosed VALUES row-index is in range of the re-derived block.
+///
+/// # Honest scope (load-bearing)
+/// This is the STRUCTURAL ROUTING gate. It binds each construct to a bound
+/// sub-proof of the correct member and surfaces the depth bound; it is the
+/// composition analogue of `verify::branch_obligations`. It does NOT itself run
+/// the bb proof verification (that is the [`verify_manifest`] loop, which
+/// `reconstruct_public_inputs` serializes `PathReach` inputs for) NOR the disclosed
+/// TERM binding of a path's `pred_enc`/`src_enc`/`dst_enc` or a VALUES row's cells
+/// — that disclosed-solution term binding is [`bind_fragment_solution`] (sq-1zf94),
+/// and both run together in [`verify_fragment_manifest`] for an end-to-end
+/// path/`UNION`/`VALUES` accept. The verifier stack is internally re-audited but
+/// NOT externally audited (sq-qhy4 pending); NO soundness / privacy property is
+/// asserted as achieved.
+// [OPUS-4.8] sq-3kd2g.6: fail-closed fragment dispatch routing gate.
+#[cfg(feature = "extended-fragment")]
+pub fn dispatch_fragment(
+    fm: &crate::manifest::FragmentManifest,
+) -> Result<(), FragmentDispatchError> {
+    let manifest = &fm.manifest;
+    // (1) Re-derive the fragment from the query text alone — fail-closed on
+    // anything outside the wave-1 extended fragment.
+    let fq = fragment_query(&manifest.query)
+        .map_err(|e| FragmentDispatchError::OutsideFragment(e.to_string()))?;
+
+    // (2) Every embedded sub-proof MUST carry a known, compiled circuit id whose
+    // DECLARED value equals the id re-derived from its public inputs — no unknown /
+    // uncompiled member, and no claim/member mismatch (e.g. a wrong `k` bucket),
+    // reaches the routing (fail-closed hygiene, independent of branch attribution).
+    for (i, sp) in manifest.sub_proofs.iter().enumerate() {
+        match derive_id(&sp.inputs) {
+            None => return Err(FragmentDispatchError::UnknownCircuit { proof: i }),
+            Some(derived) if &derived != sp.inputs.circuit_id() => {
+                return Err(FragmentDispatchError::CircuitIdMismatch {
+                    proof: i,
+                    declared: sp.inputs.circuit_id().clone(),
+                    derived,
+                })
+            }
+            Some(_) => {}
+        }
+    }
+
+    // A manifest with no branch attribution carries no extended-fragment claim to
+    // route (a stage-1 presentation): the query-hygiene + id checks above are all
+    // that apply. This keeps the gate a strict no-op on stage-1 manifests.
+    if fm.branch_witnesses.is_empty() {
+        return Ok(());
+    }
+
+    for (wi, bw) in fm.branch_witnesses.iter().enumerate() {
+        let branch =
+            fq.branches
+                .get(bw.branch)
+                .ok_or(FragmentDispatchError::BranchOutOfRange {
+                    witness: wi,
+                    branch: bw.branch,
+                    branches: fq.branches.len(),
+                })?;
+
+        // (3) Per-obligation arity: EXACTLY one bound sub-proof per BGP-scan and
+        // per bounded-path obligation, and one chosen row per VALUES block.
+        if bw.scan_proofs.len() != branch.patterns.len() {
+            return Err(FragmentDispatchError::ObligationArityMismatch {
+                witness: wi,
+                what: "scan",
+                expected: branch.patterns.len(),
+                got: bw.scan_proofs.len(),
+            });
+        }
+        if bw.path_proofs.len() != branch.path_reach.len() {
+            return Err(FragmentDispatchError::ObligationArityMismatch {
+                witness: wi,
+                what: "path",
+                expected: branch.path_reach.len(),
+                got: bw.path_proofs.len(),
+            });
+        }
+        if bw.values_rows.len() != branch.values.len() {
+            return Err(FragmentDispatchError::ObligationArityMismatch {
+                witness: wi,
+                what: "values",
+                expected: branch.values.len(),
+                got: bw.values_rows.len(),
+            });
+        }
+
+        // Each BGP obligation must name a bound scan sub-proof.
+        for (oi, &pi) in bw.scan_proofs.iter().enumerate() {
+            let sp = manifest
+                .sub_proofs
+                .get(pi)
+                .ok_or(FragmentDispatchError::DanglingProof { witness: wi, proof: pi })?;
+            if !matches!(sp.inputs, ProofInputs::Scan { .. }) {
+                return Err(FragmentDispatchError::NotAScanProof {
+                    witness: wi,
+                    obligation: oi,
+                    proof: pi,
+                });
+            }
+        }
+
+        // Each bounded-path obligation must name a bound PathReach sub-proof of the
+        // member the closure requires (depth surfaced + matching, allow_zero
+        // consistent, fixed-depth closures pinned).
+        for (oi, &pi) in bw.path_proofs.iter().enumerate() {
+            let obligation = &branch.path_reach[oi];
+            let sp = manifest
+                .sub_proofs
+                .get(pi)
+                .ok_or(FragmentDispatchError::DanglingProof { witness: wi, proof: pi })?;
+            let ProofInputs::PathReach { allow_zero, id, .. } = &sp.inputs else {
+                return Err(FragmentDispatchError::PathReachMissing {
+                    witness: wi,
+                    obligation: oi,
+                    proof: pi,
+                });
+            };
+            let CircuitId::PathReach { d, .. } = id else {
+                return Err(FragmentDispatchError::PathReachMissing {
+                    witness: wi,
+                    obligation: oi,
+                    proof: pi,
+                });
+            };
+            // The sub-proof's disclosed `depth_bound` is already pinned to this
+            // member's `d` by the id-hygiene check above (`derive_id` => None when
+            // `depth_bound != d`) — the depth-surfacing / anti-overflow gate
+            // (soundness req 1). `d` is re-used here only for the fixed-closure check.
+            // Closure <-> allow_zero: the zero-length case is admitted iff the
+            // closure's minimum length is 0 (`*`/`?`), never for `+`.
+            let expect_allow_zero = obligation.closure.min_len() == 0;
+            if *allow_zero != expect_allow_zero {
+                return Err(FragmentDispatchError::PathClosureMismatch { witness: wi, obligation: oi });
+            }
+            // A fixed-depth closure (`p?`, bound pinned to 1) must not bind a
+            // deeper member — that would let a 2-step chain masquerade as `p?`.
+            if let Some(fixed) = obligation.closure.fixed_k() {
+                if *d as usize != fixed {
+                    return Err(FragmentDispatchError::PathDepthExceedsClosure {
+                        witness: wi,
+                        obligation: oi,
+                        member_d: *d,
+                        fixed,
+                    });
+                }
+            }
+        }
+
+        // (4) Each disclosed VALUES row-index must be in range of the re-derived
+        // block (the rows are public constants of the query text).
+        for (bi, &row) in bw.values_rows.iter().enumerate() {
+            let rows = branch.values[bi].rows.len();
+            if row >= rows {
+                return Err(FragmentDispatchError::ValuesRowOutOfRange {
+                    witness: wi,
+                    block: bi,
+                    row,
+                    rows,
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Which endpoint of a `PathReach` obligation a disclosed-solution binding refers
+/// to (`src_enc` vs `dst_enc`). Used by [`FragmentSolutionError`] (sq-1zf94).
+// [OPUS-4.8] sq-1zf94. Opt-in (`extended-fragment`).
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathEndpoint {
+    /// The chain SOURCE (`src_enc`, the path subject).
+    Src,
+    /// The chain DESTINATION (`dst_enc`, the path object).
+    Dst,
+}
+
+#[cfg(feature = "extended-fragment")]
+impl std::fmt::Display for PathEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PathEndpoint::Src => write!(f, "src"),
+            PathEndpoint::Dst => write!(f, "dst"),
+        }
+    }
+}
+
+/// Why the FAIL-CLOSED extended-fragment DISCLOSED-SOLUTION term binding
+/// ([`bind_fragment_solution`], sq-1zf94) REJECTED a presentation. Every variant
+/// is a fail-closed refusal: the verifier RE-ENCODES the query predicate / query
+/// constant / disclosed solution term ITSELF and demands byte-equality with the
+/// proof-bound `PathReach` `pred_enc`/`src_enc`/`dst_enc` and the query's inline
+/// `VALUES` cells — a mismatch never silently accepts.
+// [OPUS-4.8] sq-1zf94. Opt-in (`extended-fragment`), NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FragmentSolutionError {
+    /// A disclosed [`crate::manifest::SolutionBinding`] term is malformed (an
+    /// unparseable IRI / datatype / language tag, a language + non-`rdf:langString`
+    /// datatype, or a term the encoder rejects) — the verifier cannot re-derive its
+    /// encoding, so it refuses fail-closed.
+    MalformedSolutionTerm { witness: usize, var: String },
+    /// A `PathReach` sub-proof's `pred_enc` does not equal the encoding of the
+    /// query-text path predicate: a chain proved over the WRONG predicate.
+    PathPredMismatch { witness: usize, obligation: usize },
+    /// A `PathReach` sub-proof's endpoint encoding (`src_enc` / `dst_enc`) does not
+    /// equal the encoding the verifier re-derives from the query-CONSTANT endpoint
+    /// or the disclosed solution's binding for the endpoint VARIABLE — the proof's
+    /// disclosed endpoint is not the term the presented solution claims.
+    PathEndpointMismatch { witness: usize, obligation: usize, endpoint: PathEndpoint },
+    /// A PROJECTED path endpoint VARIABLE is absent from the disclosed solution.
+    /// The relying party MUST disclose every projected endpoint so it can be bound;
+    /// omitting it to dodge the binding is fail-closed.
+    UnboundProjectedEndpoint {
+        witness: usize,
+        obligation: usize,
+        endpoint: PathEndpoint,
+        var: String,
+    },
+    /// A `VALUES` cell for a PROJECTED variable does not match the disclosed
+    /// solution's binding for that variable — a wrong disclosed row, or a solution
+    /// term inconsistent with the query's inline `VALUES` data.
+    ValuesCellMismatch { witness: usize, block: usize, column: usize, var: String },
+    /// A `VALUES` cell for a PROJECTED variable has NO disclosed-solution binding
+    /// (fail-closed — a projected VALUES-constrained variable must be disclosed).
+    UnboundProjectedValuesVar { witness: usize, block: usize, column: usize, var: String },
+    /// A path endpoint slot was an unnamed wildcard (the property-path fragment
+    /// never produces one; refused for totality).
+    WildcardEndpoint { witness: usize, obligation: usize, endpoint: PathEndpoint },
+    /// A structural inconsistency the routing gate normally rules out first (a
+    /// branch / obligation / row index out of range, or a path obligation naming a
+    /// non-`PathReach` sub-proof). Kept so this gate is SELF-CONTAINED and never
+    /// panics on an index — a fail-closed refusal even if reached directly.
+    Structure { witness: usize, what: &'static str },
+}
+
+#[cfg(feature = "extended-fragment")]
+impl std::fmt::Display for FragmentSolutionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FragmentSolutionError::MalformedSolutionTerm { witness, var } => write!(
+                f,
+                "branch witness {} discloses a malformed solution term for ?{} (fail-closed)",
+                witness, var
+            ),
+            FragmentSolutionError::PathPredMismatch { witness, obligation } => write!(
+                f,
+                "branch witness {} path obligation {}: pred_enc does not match the query-text path predicate (path proved over the wrong predicate)",
+                witness, obligation
+            ),
+            FragmentSolutionError::PathEndpointMismatch { witness, obligation, endpoint } => write!(
+                f,
+                "branch witness {} path obligation {}: {}_enc does not match the disclosed solution / query-constant endpoint",
+                witness, obligation, endpoint
+            ),
+            FragmentSolutionError::UnboundProjectedEndpoint { witness, obligation, endpoint, var } => {
+                write!(
+                    f,
+                    "branch witness {} path obligation {}: projected {} endpoint ?{} is not disclosed in the solution (fail-closed)",
+                    witness, obligation, endpoint, var
+                )
+            }
+            FragmentSolutionError::ValuesCellMismatch { witness, block, column, var } => write!(
+                f,
+                "branch witness {} VALUES block {} column {} (?{}): the disclosed solution does not match the chosen row's cell (wrong disclosed row / inconsistent term)",
+                witness, block, column, var
+            ),
+            FragmentSolutionError::UnboundProjectedValuesVar { witness, block, column, var } => {
+                write!(
+                    f,
+                    "branch witness {} VALUES block {} column {} (?{}): projected VALUES variable is not disclosed in the solution (fail-closed)",
+                    witness, block, column, var
+                )
+            }
+            FragmentSolutionError::WildcardEndpoint { witness, obligation, endpoint } => write!(
+                f,
+                "branch witness {} path obligation {}: {} endpoint is an unnamed wildcard (fail-closed)",
+                witness, obligation, endpoint
+            ),
+            FragmentSolutionError::Structure { witness, what } => write!(
+                f,
+                "branch witness {} disclosed-solution structure error: {} out of range (fail-closed)",
+                witness, what
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "extended-fragment")]
+impl std::error::Error for FragmentSolutionError {}
+
+/// Whether a proof-bound `FieldHex` parses to EXACTLY the expected field element
+/// `want`. A malformed hex is treated as a mismatch (fail-closed) — the crypto
+/// stage additionally rejects it as [`CheckError::MalformedField`].
+// [OPUS-4.8] sq-1zf94.
+#[cfg(feature = "extended-fragment")]
+fn field_hex_is(h: &FieldHex, want: &Fr) -> bool {
+    h.to_field().map(|f| f == *want).unwrap_or(false)
+}
+
+/// Bind ONE `PathReach` endpoint (`src_enc` or `dst_enc`) to the query-re-derived
+/// endpoint slot: a query CONSTANT binds to its own encoding; a PROJECTED query
+/// VARIABLE binds to the disclosed solution's encoding for it; a non-projected
+/// (existential) variable stays hidden and is NOT term-bound here (documented
+/// residual). Fail-closed on any mismatch / missing projected binding / wildcard.
+// [OPUS-4.8] sq-1zf94.
+#[cfg(feature = "extended-fragment")]
+#[allow(clippy::too_many_arguments)]
+fn bind_path_endpoint(
+    witness: usize,
+    obligation: usize,
+    endpoint: PathEndpoint,
+    slot: &SlotPattern,
+    enc: &FieldHex,
+    mu: &std::collections::BTreeMap<String, Fr>,
+    projected: &BTreeSet<String>,
+    salt: &Fr,
+) -> Result<(), FragmentSolutionError> {
+    match slot {
+        SlotPattern::Term(t) => {
+            let want = encode_term(t, salt).ok_or(FragmentSolutionError::PathEndpointMismatch {
+                witness,
+                obligation,
+                endpoint,
+            })?;
+            if field_hex_is(enc, &want) {
+                Ok(())
+            } else {
+                Err(FragmentSolutionError::PathEndpointMismatch { witness, obligation, endpoint })
+            }
+        }
+        SlotPattern::Var(v) => {
+            // A non-projected endpoint is existential (hidden by design) — the
+            // disclosed solution says nothing about it, so it is not term-bound.
+            if !projected.contains(v) {
+                return Ok(());
+            }
+            match mu.get(v) {
+                None => Err(FragmentSolutionError::UnboundProjectedEndpoint {
+                    witness,
+                    obligation,
+                    endpoint,
+                    var: v.clone(),
+                }),
+                Some(want) if field_hex_is(enc, want) => Ok(()),
+                Some(_) => {
+                    Err(FragmentSolutionError::PathEndpointMismatch { witness, obligation, endpoint })
+                }
+            }
+        }
+        SlotPattern::Wildcard => {
+            Err(FragmentSolutionError::WildcardEndpoint { witness, obligation, endpoint })
+        }
+    }
+}
+
+/// FAIL-CLOSED wave-1 extended-fragment DISCLOSED-SOLUTION term binding
+/// (sq-1zf94): the composition analogue of the flat query-text term binding
+/// (`bind_query_correctness`'s scan-const check + the `bind_joins` slot binding),
+/// for the extended constructs `dispatch_fragment` routes but does NOT term-bind.
+///
+/// For each disclosed solution (one [`crate::manifest::BranchWitness`], attributed
+/// to a branch the routing gate already validated), the verifier RE-DERIVES the
+/// branch structure from the query TEXT alone ([`fragment_query`], never the
+/// manifest), re-encodes each disclosed [`crate::manifest::SolutionBinding`] term
+/// ITSELF, and demands, fail-closed:
+///
+/// 1. **Path predicate.** Each bound `PathReach`'s `pred_enc` equals the encoding
+///    of the query-text path predicate — a chain proved over a DIFFERENT predicate
+///    than the query names is refused.
+/// 2. **Path endpoints.** Each `src_enc` / `dst_enc` equals the encoding the
+///    verifier re-derives from the query-CONSTANT endpoint, or (for a PROJECTED
+///    endpoint variable) from the disclosed solution's binding for that variable —
+///    a proof whose disclosed endpoint is not the claimed term is refused, and a
+///    projected endpoint omitted from the solution is refused.
+/// 3. **VALUES cells.** For each disclosed `VALUES` row, every PROJECTED
+///    variable's disclosed solution binding equals the encoding of that row's cell
+///    — a "wrong disclosed row" (`values_rows` pointing at a row whose cell does
+///    not match the disclosed term) is refused.
+///
+/// Because `PathReach.pred_enc`/`src_enc`/`dst_enc` are byte-bound into the bb
+/// public inputs by `reconstruct_public_inputs` (audit #1), a solution that
+/// passes THIS structural gate AND the crypto stage has its disclosed path
+/// endpoints / VALUES-constrained variables both equal to the query + disclosed
+/// terms and bound into a valid sub-proof, so the disclosed terms are genuinely
+/// tied to the proofs.
+///
+/// # Honest scope — the RESIDUAL still deferred (load-bearing)
+/// This binds the PATH and `VALUES` disclosed terms. The BGP-SCAN-slot binding of a
+/// disclosed solution's variables to a scan sub-proof's disclosed rows (a scan
+/// discloses `r` rows; the per-solution row-selection model) is done by the
+/// SIBLING gate [`bind_fragment_scans`] (sq-qyfth), which
+/// [`verify_fragment_manifest`] runs immediately after this one. Still NOT bound by
+/// either gate: (a) the flat cross-graph Q6 non-bnode obligation per branch (and
+/// the existential scan↔path join coherence — sq-ygk6x), and (b) an EXISTENTIAL
+/// (non-projected) path endpoint's value (hidden by design — disclosed only as an
+/// opaque encoding). The whole verifier stack is internally re-audited but NOT
+/// externally audited (sq-qhy4). NO soundness / privacy property is asserted as
+/// achieved.
+// [OPUS-4.8] sq-1zf94: disclosed-solution term binding. Opt-in
+// (`extended-fragment`), research-grade, NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+pub fn bind_fragment_solution(
+    fm: &crate::manifest::FragmentManifest,
+) -> Result<(), FragmentSolutionError> {
+    let manifest = &fm.manifest;
+    // Re-derive the fragment from the query TEXT alone (never the manifest). An
+    // outside-fragment / unparseable query is normally caught first by
+    // `dispatch_fragment`; refuse fail-closed if we somehow reach here.
+    let fq = fragment_query(&manifest.query)
+        .map_err(|_| FragmentSolutionError::Structure { witness: 0, what: "query" })?;
+    let projected: BTreeSet<String> = fq.projected.iter().cloned().collect();
+    // IRIs / literals (the only disclosable term kinds, and every query constant /
+    // VALUES cell) are salt-INDEPENDENT, so salt 0 matches the prover's encoding
+    // (`build_path_reach` uses the graph salt, identical for non-bnode terms).
+    let salt = Fr::from(0u64);
+
+    for (wi, bw) in fm.branch_witnesses.iter().enumerate() {
+        let Some(branch) = fq.branches.get(bw.branch) else {
+            return Err(FragmentSolutionError::Structure { witness: wi, what: "branch" });
+        };
+
+        // Re-encode the disclosed solution: var -> Fr, VERIFIER-recomputed (never a
+        // prover-supplied encoding).
+        let mut mu: std::collections::BTreeMap<String, Fr> = std::collections::BTreeMap::new();
+        for sb in &bw.solution {
+            let term = sb.term.to_term().ok_or_else(|| {
+                FragmentSolutionError::MalformedSolutionTerm { witness: wi, var: sb.var.clone() }
+            })?;
+            let enc = encode_term(&term, &salt).ok_or_else(|| {
+                FragmentSolutionError::MalformedSolutionTerm { witness: wi, var: sb.var.clone() }
+            })?;
+            mu.insert(sb.var.clone(), enc);
+        }
+
+        // (1)+(2) Path predicate + endpoint binding.
+        for (oi, &pi) in bw.path_proofs.iter().enumerate() {
+            let Some(obl) = branch.path_reach.get(oi) else {
+                return Err(FragmentSolutionError::Structure { witness: wi, what: "path obligation" });
+            };
+            let sp = manifest.sub_proofs.get(pi).ok_or(FragmentSolutionError::Structure {
+                witness: wi,
+                what: "path proof index",
+            })?;
+            let ProofInputs::PathReach { pred_enc, src_enc, dst_enc, .. } = &sp.inputs else {
+                return Err(FragmentSolutionError::Structure { witness: wi, what: "path proof kind" });
+            };
+            let want_pred = encode_term(&oxrdf::Term::NamedNode(obl.predicate.clone()), &salt)
+                .ok_or(FragmentSolutionError::PathPredMismatch { witness: wi, obligation: oi })?;
+            if !field_hex_is(pred_enc, &want_pred) {
+                return Err(FragmentSolutionError::PathPredMismatch { witness: wi, obligation: oi });
+            }
+            bind_path_endpoint(wi, oi, PathEndpoint::Src, &obl.subject, src_enc, &mu, &projected, &salt)?;
+            bind_path_endpoint(wi, oi, PathEndpoint::Dst, &obl.object, dst_enc, &mu, &projected, &salt)?;
+        }
+
+        // (3) VALUES cell binding — the disclosed solution must agree with the
+        // CHOSEN row's inline query constants for every PROJECTED variable.
+        for (bi, &row) in bw.values_rows.iter().enumerate() {
+            let Some(block) = branch.values.get(bi) else {
+                return Err(FragmentSolutionError::Structure { witness: wi, what: "values block" });
+            };
+            let Some(cells) = block.rows.get(row) else {
+                return Err(FragmentSolutionError::Structure { witness: wi, what: "values row" });
+            };
+            for (col, var) in block.variables.iter().enumerate() {
+                // A non-projected VALUES variable is existential here (not term-bound).
+                if !projected.contains(var) {
+                    continue;
+                }
+                // `None` (UNDEF) cell => no constraint on this variable.
+                let Some(Some(term)) = cells.get(col) else {
+                    continue;
+                };
+                let want = encode_term(term, &salt).ok_or_else(|| {
+                    FragmentSolutionError::ValuesCellMismatch {
+                        witness: wi,
+                        block: bi,
+                        column: col,
+                        var: var.clone(),
+                    }
+                })?;
+                match mu.get(var) {
+                    None => {
+                        return Err(FragmentSolutionError::UnboundProjectedValuesVar {
+                            witness: wi,
+                            block: bi,
+                            column: col,
+                            var: var.clone(),
+                        })
+                    }
+                    Some(sol) if *sol == want => {}
+                    Some(_) => {
+                        return Err(FragmentSolutionError::ValuesCellMismatch {
+                            witness: wi,
+                            block: bi,
+                            column: col,
+                            var: var.clone(),
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Why the FAIL-CLOSED extended-fragment BGP SCAN-SLOT binding
+/// ([`bind_fragment_scans`], sq-qyfth) REJECTED a presentation. Every variant is a
+/// fail-closed refusal: the verifier RE-DERIVES the query BGP pattern + the
+/// disclosed solution term ITSELF and demands byte-equality with the proof-bound
+/// scan `pattern_const_enc` / disclosed-row slot values (never a prover encoding).
+// [OPUS-4.8] sq-qyfth. Opt-in (`extended-fragment`), NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FragmentScanError {
+    /// A disclosed [`crate::manifest::SolutionBinding`] term is malformed (the
+    /// verifier cannot re-derive its encoding) — refused fail-closed.
+    MalformedSolutionTerm { witness: usize, var: String },
+    /// A BGP obligation names a sub-proof that is not a [`ProofInputs::Scan`] (the
+    /// routing gate normally rules this out; kept so this gate is self-contained).
+    NotAScanProof { witness: usize, obligation: usize, proof: usize },
+    /// A structural inconsistency the routing gate normally rules out first (a
+    /// branch / obligation / proof index out of range). Kept so this gate never
+    /// panics on an index — a fail-closed refusal even if reached directly.
+    Structure { witness: usize, what: &'static str },
+    /// The scan sub-proof's bound `pattern_is_const`/`pattern_const_enc` does not
+    /// answer the query BGP pattern the obligation stands for (a scan over the
+    /// WRONG predicate/constant, or a constant/variable slot-shape mismatch) — the
+    /// composition analogue of the flat `scan_matches_pattern` gate.
+    ScanPatternMismatch { witness: usize, obligation: usize },
+    /// The scan pattern carries at least one VARIABLE slot, but the manifest
+    /// selected NO supporting disclosed row for this scan (`scan_rows` has no entry
+    /// for the obligation) — a solution variable in the scan pattern cannot be
+    /// bound without a row, so it is refused fail-closed.
+    MissingRowSelection { witness: usize, obligation: usize },
+    /// The selected supporting row index is outside the scan's ACTIVE disclosed
+    /// rows (`min(row_count, rows.len())`).
+    RowOutOfRange { witness: usize, obligation: usize, row: usize, active: usize },
+    /// A PROJECTED (disclosed) variable occupies a scan slot but is absent from the
+    /// disclosed solution — omitting it to dodge the binding is refused fail-closed.
+    UnboundProjectedScanVar { witness: usize, obligation: usize, slot: usize, var: String },
+    /// The selected row's slot value does not equal the encoding the verifier
+    /// re-derives from the disclosed solution's binding for that PROJECTED variable
+    /// (the row does not support the claimed solution) — refused fail-closed.
+    ScanSlotMismatch { witness: usize, obligation: usize, slot: usize, var: String },
+    /// Two atoms in the SAME branch that share an EXISTENTIAL (non-projected)
+    /// variable selected rows whose slot values for it disagree (join incoherence —
+    /// there is no single witness for the shared variable), mirroring the flat
+    /// `bind_joins` / disclosed-row join gate. Refused fail-closed.
+    JoinIncoherent { witness: usize, obligation: usize, slot: usize, var: String },
+    /// A scan pattern slot is an unnamed wildcard (the BGP fragment never produces
+    /// one; refused for totality).
+    WildcardSlot { witness: usize, obligation: usize, slot: usize },
+}
+
+#[cfg(feature = "extended-fragment")]
+impl std::fmt::Display for FragmentScanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FragmentScanError::MalformedSolutionTerm { witness, var } => write!(
+                f,
+                "branch witness {} discloses a malformed solution term for ?{} (fail-closed)",
+                witness, var
+            ),
+            FragmentScanError::NotAScanProof { witness, obligation, proof } => write!(
+                f,
+                "branch witness {} BGP obligation {}: sub-proof {} is not a scan (fail-closed)",
+                witness, obligation, proof
+            ),
+            FragmentScanError::Structure { witness, what } => write!(
+                f,
+                "branch witness {} scan-slot structure error: {} out of range (fail-closed)",
+                witness, what
+            ),
+            FragmentScanError::ScanPatternMismatch { witness, obligation } => write!(
+                f,
+                "branch witness {} BGP obligation {}: the scan does not answer the query pattern (wrong predicate/constant or slot-shape mismatch)",
+                witness, obligation
+            ),
+            FragmentScanError::MissingRowSelection { witness, obligation } => write!(
+                f,
+                "branch witness {} BGP obligation {}: the scan pattern has a variable but no supporting row was selected (fail-closed)",
+                witness, obligation
+            ),
+            FragmentScanError::RowOutOfRange { witness, obligation, row, active } => write!(
+                f,
+                "branch witness {} BGP obligation {}: selected row {} is outside the {} active disclosed rows (fail-closed)",
+                witness, obligation, row, active
+            ),
+            FragmentScanError::UnboundProjectedScanVar { witness, obligation, slot, var } => write!(
+                f,
+                "branch witness {} BGP obligation {} slot {}: projected scan variable ?{} is not disclosed in the solution (fail-closed)",
+                witness, obligation, slot, var
+            ),
+            FragmentScanError::ScanSlotMismatch { witness, obligation, slot, var } => write!(
+                f,
+                "branch witness {} BGP obligation {} slot {} (?{}): the selected row's slot does not match the disclosed solution (wrong supporting row / inconsistent term)",
+                witness, obligation, slot, var
+            ),
+            FragmentScanError::JoinIncoherent { witness, obligation, slot, var } => write!(
+                f,
+                "branch witness {} BGP obligation {} slot {} (?{}): rows selected for atoms sharing this existential variable disagree (join incoherent)",
+                witness, obligation, slot, var
+            ),
+            FragmentScanError::WildcardSlot { witness, obligation, slot } => write!(
+                f,
+                "branch witness {} BGP obligation {} slot {}: unnamed wildcard slot (fail-closed)",
+                witness, obligation, slot
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "extended-fragment")]
+impl std::error::Error for FragmentScanError {}
+
+/// The query BGP pattern's constant slots as `Option<oxrdf::Term>` (the input
+/// `scan_matches_pattern` expects): a `Term` slot is a constant, a `Var` /
+/// `Wildcard` slot is `None`.
+// [OPUS-4.8] sq-qyfth.
+#[cfg(feature = "extended-fragment")]
+fn pattern_slot_consts(slots: &[SlotPattern; 3]) -> [Option<oxrdf::Term>; 3] {
+    let c = |s: &SlotPattern| match s {
+        SlotPattern::Term(t) => Some(t.clone()),
+        _ => None,
+    };
+    [c(&slots[0]), c(&slots[1]), c(&slots[2])]
+}
+
+/// FAIL-CLOSED wave-1 extended-fragment BGP SCAN-SLOT binding (sq-qyfth): the
+/// composition analogue of the flat `bind_query_correctness` scan-const check +
+/// the disclosed-row / `bind_joins` slot binding, for the BGP scans a branch
+/// carries. This is the LARGEST unbound surface [`bind_fragment_solution`] (#1673)
+/// left: a disclosed solution variable that occurs ONLY in a BGP scan (not as a
+/// `PathReach` endpoint or `VALUES` cell) was routed but not term-bound to the
+/// scan's disclosed rows.
+///
+/// For each disclosed solution (one [`crate::manifest::BranchWitness`], attributed
+/// to a branch the routing gate already validated), the verifier RE-DERIVES the
+/// branch's BGP patterns from the query TEXT alone ([`fragment_query`], never the
+/// manifest), re-encodes each disclosed [`crate::manifest::SolutionBinding`] term
+/// ITSELF, and for every BGP obligation demands, fail-closed:
+///
+/// 1. **Pattern binding.** The scan sub-proof's bound `pattern_is_const` /
+///    `pattern_const_enc` answer the query BGP pattern (`scan_matches_pattern`) —
+///    a scan over the wrong predicate/constant is refused. Because those inputs are
+///    byte-bound into the bb public inputs and the scan circuit binds every
+///    disclosed row's constant slots to `pattern_const_enc`, the selected row's
+///    constant slots are transitively equal to the query constants.
+/// 2. **Row selection.** A scan pattern that carries ANY variable needs a selected
+///    supporting row (`BranchWitness::scan_rows`); a missing selection, or an index
+///    outside the scan's ACTIVE disclosed rows, is refused.
+/// 3. **Projected-variable binding.** For each VARIABLE slot bound to a PROJECTED
+///    (disclosed) query variable, the selected row's slot value must equal the
+///    encoding the verifier re-derives from the disclosed solution's binding for
+///    that variable — a row that does not support the claimed solution, or a
+///    projected scan variable omitted from the solution, is refused.
+/// 4. **Join coherence.** For an EXISTENTIAL (non-projected) variable shared by two
+///    atoms in the branch, the rows selected for those atoms must agree on its slot
+///    value (mirroring the flat `bind_joins` / disclosed-row join gate) — an
+///    incoherent row selection is refused.
+///
+/// Because the scan `rows` and `pattern_const_enc` are byte-bound into the bb
+/// public inputs by `reconstruct_public_inputs` (audit #1), a solution that passes
+/// THIS structural gate AND the crypto stage has its disclosed scan-bound variables
+/// genuinely tied to the proofs.
+///
+/// # Honest scope — where the remaining obligations live (load-bearing)
+/// This gate binds the BGP-scan-slot residual [`bind_fragment_solution`] named and
+/// checks scan↔scan join coherence. The COMPLEMENTARY obligations — the flat
+/// cross-graph Q6 non-bnode obligation PER BRANCH, and the existential coherence of
+/// a variable shared between a scan slot and a `PathReach` endpoint (`src_enc` /
+/// `dst_enc`) — are enforced by [`bind_fragment_join_coherence`] (sq-ygk6x), run as
+/// the next layer of [`verify_fragment_manifest`]. What still remains after BOTH
+/// gates (documented on [`bind_fragment_join_coherence`]): since sq-nlulr the
+/// salt-uniqueness gate covers PATH-referenced committed graphs too, so a cross-graph
+/// join through a single-graph PATH graph carries the same distinct-salt non-bnode
+/// discipline as a scan↔scan join (a multi-graph path is still refused fail-closed);
+/// the only remaining BY-DESIGN item is that an EXISTENTIAL (non-projected) path
+/// endpoint's value stays hidden. The whole verifier stack is internally re-audited
+/// but NOT externally audited (sq-qhy4). NO soundness / privacy property is asserted
+/// as achieved.
+// [OPUS-4.8] sq-qyfth: BGP scan-slot binding. Opt-in (`extended-fragment`),
+// research-grade, NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+pub fn bind_fragment_scans(
+    fm: &crate::manifest::FragmentManifest,
+) -> Result<(), FragmentScanError> {
+    let manifest = &fm.manifest;
+    // Re-derive the fragment from the query TEXT alone (never the manifest). An
+    // outside-fragment / unparseable query is normally caught first by
+    // `dispatch_fragment`; refuse fail-closed if we somehow reach here.
+    let fq = fragment_query(&manifest.query)
+        .map_err(|_| FragmentScanError::Structure { witness: 0, what: "query" })?;
+    let projected: BTreeSet<String> = fq.projected.iter().cloned().collect();
+    // IRIs / literals (the only disclosable term kinds) are salt-INDEPENDENT, so
+    // salt 0 matches the prover's encoding for a projected variable's term. The
+    // existential coherence check compares two disclosed row slot values DIRECTLY
+    // (never re-derived), so it is salt-agnostic within a graph.
+    let salt = Fr::from(0u64);
+
+    for (wi, bw) in fm.branch_witnesses.iter().enumerate() {
+        let Some(branch) = fq.branches.get(bw.branch) else {
+            return Err(FragmentScanError::Structure { witness: wi, what: "branch" });
+        };
+
+        // Re-encode the disclosed solution: var -> Fr, VERIFIER-recomputed.
+        let mut mu: std::collections::BTreeMap<String, Fr> = std::collections::BTreeMap::new();
+        for sb in &bw.solution {
+            let term = sb.term.to_term().ok_or_else(|| {
+                FragmentScanError::MalformedSolutionTerm { witness: wi, var: sb.var.clone() }
+            })?;
+            let enc = encode_term(&term, &salt).ok_or_else(|| {
+                FragmentScanError::MalformedSolutionTerm { witness: wi, var: sb.var.clone() }
+            })?;
+            mu.insert(sb.var.clone(), enc);
+        }
+
+        // Per-branch coherence map for EXISTENTIAL (non-projected) variables shared
+        // across the branch's scans (the disclosed-row join analogue of bind_joins).
+        let mut existential: std::collections::BTreeMap<String, Fr> =
+            std::collections::BTreeMap::new();
+
+        for (oi, &pi) in bw.scan_proofs.iter().enumerate() {
+            let Some(pattern) = branch.patterns.get(oi) else {
+                return Err(FragmentScanError::Structure { witness: wi, what: "scan obligation" });
+            };
+            let sp = manifest.sub_proofs.get(pi).ok_or(FragmentScanError::Structure {
+                witness: wi,
+                what: "scan proof index",
+            })?;
+            let ProofInputs::Scan { rows, row_count, .. } = &sp.inputs else {
+                return Err(FragmentScanError::NotAScanProof { witness: wi, obligation: oi, proof: pi });
+            };
+
+            // A wildcard slot never comes from a parsed BGP; refuse for totality.
+            if let Some(slot) =
+                pattern.slots.iter().position(|s| matches!(s, SlotPattern::Wildcard))
+            {
+                return Err(FragmentScanError::WildcardSlot { witness: wi, obligation: oi, slot });
+            }
+
+            // (1) The scan must answer this query BGP pattern (constant/shape
+            // binding — the flat `scan_matches_pattern` gate). This binds the
+            // pattern constants; the scan circuit binds each disclosed row's
+            // constant slots to those, so we only bind the VARIABLE slots below.
+            let consts = pattern_slot_consts(&pattern.slots);
+            if !scan_matches_pattern(&sp.inputs, &consts) {
+                return Err(FragmentScanError::ScanPatternMismatch { witness: wi, obligation: oi });
+            }
+
+            // A pattern with no variable slot is fully bound by (1); no row needed.
+            let has_var = pattern.slots.iter().any(|s| matches!(s, SlotPattern::Var(_)));
+            if !has_var {
+                continue;
+            }
+
+            // (2) A variable pattern needs a selected supporting disclosed row that
+            // lies within the scan's ACTIVE rows.
+            let Some(&row) = bw.scan_rows.get(oi) else {
+                return Err(FragmentScanError::MissingRowSelection { witness: wi, obligation: oi });
+            };
+            let active = (*row_count as usize).min(rows.len());
+            if row >= active {
+                return Err(FragmentScanError::RowOutOfRange {
+                    witness: wi,
+                    obligation: oi,
+                    row,
+                    active,
+                });
+            }
+            let selected = &rows[row];
+
+            // (3)+(4) Bind each variable slot to the disclosed solution (projected)
+            // or the per-branch existential coherence map.
+            for (slot, sp_slot) in pattern.slots.iter().enumerate() {
+                let SlotPattern::Var(v) = sp_slot else {
+                    // Term slots are bound by (1); wildcards were refused above.
+                    continue;
+                };
+                // A malformed row hex is a mismatch fail-closed (the crypto stage
+                // also rejects it as MalformedField).
+                let Some(row_enc) = selected[slot].to_field() else {
+                    return Err(FragmentScanError::ScanSlotMismatch {
+                        witness: wi,
+                        obligation: oi,
+                        slot,
+                        var: v.clone(),
+                    });
+                };
+                if projected.contains(v) {
+                    match mu.get(v) {
+                        None => {
+                            return Err(FragmentScanError::UnboundProjectedScanVar {
+                                witness: wi,
+                                obligation: oi,
+                                slot,
+                                var: v.clone(),
+                            })
+                        }
+                        Some(want) if *want == row_enc => {}
+                        Some(_) => {
+                            return Err(FragmentScanError::ScanSlotMismatch {
+                                witness: wi,
+                                obligation: oi,
+                                slot,
+                                var: v.clone(),
+                            })
+                        }
+                    }
+                } else {
+                    match existential.get(v) {
+                        None => {
+                            existential.insert(v.clone(), row_enc);
+                        }
+                        Some(prev) if *prev == row_enc => {}
+                        Some(_) => {
+                            return Err(FragmentScanError::JoinIncoherent {
+                                witness: wi,
+                                obligation: oi,
+                                slot,
+                                var: v.clone(),
+                            })
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Why the FAIL-CLOSED extended-fragment PER-BRANCH JOIN COHERENCE + cross-graph
+/// Q6 non-bnode gate ([`bind_fragment_join_coherence`], sq-ygk6x) REJECTED a
+/// presentation. Every variant is a fail-closed refusal: the verifier RE-DERIVES
+/// the branch's join structure + Q6 obligations from the query TEXT + the
+/// proof-bound disclosed data (rows / `src_enc` / `dst_enc` / attributions), never
+/// a prover-supplied claim.
+// [OPUS-4.8] sq-ygk6x. Opt-in (`extended-fragment`), NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FragmentJoinError {
+    /// A structural inconsistency the routing / scan-slot gates normally rule out
+    /// first (a branch / obligation / proof / row index out of range, a wrong
+    /// sub-proof kind, a malformed proof-bound attribution, or a variable scan with
+    /// no selected supporting row). Kept so this gate never panics on an index — a
+    /// fail-closed refusal even if reached directly.
+    Structure { witness: usize, what: &'static str },
+    /// A proof-bound endpoint encoding / disclosed row slot (`src_enc` / `dst_enc` /
+    /// a scan row slot) is not a valid field element — refused fail-closed (the
+    /// crypto stage additionally rejects it as [`CheckError::MalformedField`]).
+    MalformedField { witness: usize, obligation: usize, what: &'static str },
+    /// Two atoms in the SAME branch that share a variable resolve it to DISAGREEING
+    /// disclosed values — the join has no single witness. `obligation` is the atom
+    /// (combined index: `0..patterns.len()` are BGP scans, `patterns.len()..` are
+    /// path obligations) whose value disagreed with the one first seen for `var`.
+    /// This is the sq-ygk6x join coherence spanning scan↔scan (mirroring
+    /// [`bind_fragment_scans`]) AND the NEW scan↔path / path↔path edges: a path
+    /// claiming a different node than its supporting scan row (or another path
+    /// endpoint) supports is refused, both directions.
+    Incoherent { witness: usize, obligation: usize, var: String },
+    /// A [`ProofInputs::PathReach`] sub-proof whose proof-bound attribution admits
+    /// MORE THAN ONE committed graph (`obligation` is its combined index). The path's
+    /// interior chain nodes then cross graph boundaries; the flat cross-graph
+    /// non-bnode obligation would demand every chain-equated interior node
+    /// IRI/literal-typed, but those nodes are hidden IN-CIRCUIT — the verifier cannot
+    /// discharge that obligation from disclosed data — so a multi-graph path is
+    /// refused fail-closed. A single-graph path (interior within one graph) is
+    /// accepted.
+    MultiGraphPath { witness: usize, obligation: usize },
+    /// A required cross-graph join obligation (re-derived per branch by
+    /// [`branch_obligations`]) whose shared variable is not covered by a disclosed
+    /// value in one of its two atoms — the disclosed data cannot discharge the
+    /// obligation, so it is refused fail-closed (the branch-local analogue of the
+    /// flat `recheck` MissingObligation rejection).
+    UncoveredCrossGraphJoin { witness: usize, variable: String },
+}
+
+#[cfg(feature = "extended-fragment")]
+impl std::fmt::Display for FragmentJoinError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FragmentJoinError::Structure { witness, what } => write!(
+                f,
+                "branch witness {} join-coherence structure error: {} out of range (fail-closed)",
+                witness, what
+            ),
+            FragmentJoinError::MalformedField { witness, obligation, what } => write!(
+                f,
+                "branch witness {} obligation {}: proof-bound `{}` is not a valid field element (fail-closed)",
+                witness, obligation, what
+            ),
+            FragmentJoinError::Incoherent { witness, obligation, var } => write!(
+                f,
+                "branch witness {} obligation {} (?{}): atoms sharing this variable resolve it to disagreeing disclosed values (join incoherent — a scan↔path / scan↔scan / path↔path mismatch)",
+                witness, obligation, var
+            ),
+            FragmentJoinError::MultiGraphPath { witness, obligation } => write!(
+                f,
+                "branch witness {} obligation {}: a path whose proof-bound attribution admits more than one committed graph is refused (its interior-chain non-bnode obligation is not verifier-dischargeable from disclosed data)",
+                witness, obligation
+            ),
+            FragmentJoinError::UncoveredCrossGraphJoin { witness, variable } => write!(
+                f,
+                "branch witness {}: required cross-graph join on ?{} is not covered by the disclosed data (fail-closed)",
+                witness, variable
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "extended-fragment")]
+impl std::error::Error for FragmentJoinError {}
+
+/// FAIL-CLOSED wave-1 extended-fragment PER-BRANCH JOIN COHERENCE + cross-graph Q6
+/// non-bnode gate (sq-ygk6x): the branch-local analogue of the flat cross-graph
+/// non-bnode obligation (`sparq_zk::verify::cross_graph_join_obligations` /
+/// `recheck`), extended to the path-rewritten obligations of one `UNION` branch.
+///
+/// [`bind_fragment_scans`] (#1678) bound each disclosed solution variable in a BGP
+/// SCAN to its selected row and checked scan↔scan join coherence, but explicitly
+/// left TWO residuals to THIS gate: (a) an existential variable shared between a
+/// BGP scan atom and a [`ProofInputs::PathReach`] ENDPOINT was not bound (the path
+/// `src_enc` / `dst_enc` are public `FieldHex`, directly comparable to a selected
+/// scan row slot), and (b) the flat cross-graph Q6 non-bnode obligation was not
+/// enforced PER BRANCH.
+///
+/// For each disclosed solution (one [`crate::manifest::BranchWitness`], attributed
+/// to a branch the routing gate already validated), the verifier re-derives the
+/// branch from the query TEXT alone ([`fragment_query`], never the manifest) and:
+///
+/// 1. **Join coherence (item 2).** Builds a per-branch value map from every atom's
+///    disclosed data — each BGP-scan variable slot from its SELECTED disclosed row
+///    ([`crate::manifest::BranchWitness::scan_rows`]) and each `PathReach` variable
+///    ENDPOINT from the proof-bound `src_enc` / `dst_enc` — and requires every
+///    occurrence of a shared variable to resolve to the SAME encoding. A path
+///    claiming a different node than its supporting scan row (or another path
+///    endpoint) supports is refused ([`FragmentJoinError::Incoherent`]), both
+///    directions. Because `src_enc` / `dst_enc` and the scan `rows` are byte-bound
+///    into the `bb` public inputs (audit #1), a coherent selection genuinely ties
+///    the shared existential value across the scan and path sub-proofs.
+/// 2. **Cross-graph Q6 non-bnode obligation (item 1).** Re-derives the branch's Q6
+///    obligations with [`branch_obligations`] over the PROOF-BOUND per-obligation
+///    graph attributions (each scan / path sub-proof's `attribution` bits over its
+///    `commitments`, interned to a per-branch committed-graph identity so two atoms
+///    over the SAME graph collapse and two over DISTINCT graphs stay distinct — the
+///    same safe-coarser discipline as the flat `global_attributions`). Every
+///    required cross-graph join edge's shared variable MUST be covered by the
+///    disclosed value map ([`FragmentJoinError::UncoveredCrossGraphJoin`] otherwise);
+///    the coherence check (1) already forces its two atoms to agree. Combined with
+///    the ALWAYS-ACTIVE salt-uniqueness gate (audit #9 — a same-label canonical
+///    blank node encodes DIFFERENTLY across two distinctly-salted graphs), an equal
+///    encoding across a cross-graph edge cannot be a blank node, so the flat
+///    non-bnode obligation holds branch-locally. Since sq-nlulr the salt-uniqueness
+///    gate (`bind_issuer_attestations`) records PATH-referenced committed graphs
+///    too, so this holds for scan↔scan, scan↔single-graph-path, AND
+///    path↔single-graph-path edges alike (a single-graph path graph is now
+///    issuer-attested + distinctly salted on the same footing as a scan graph).
+/// 3. **Multi-graph paths (fail-closed).** A `PathReach` whose proof-bound
+///    attribution admits more than one committed graph
+///    ([`branch_obligations`]'s `path_link_non_bnode`) has interior chain nodes that
+///    cross graph boundaries. The flat obligation would demand those IRI/literal-
+///    typed, but they are hidden in-circuit — the verifier cannot discharge it from
+///    disclosed data — so such a path is refused fail-closed
+///    ([`FragmentJoinError::MultiGraphPath`]).
+///
+/// # Honest scope (load-bearing)
+/// After this gate, the extended regime enforces the SAME cross-graph non-bnode
+/// obligation as the flat path — branch-locally, via the coherence enc-equality +
+/// the active salt-uniqueness gate (the identical mechanism) — for BGP scan↔scan,
+/// scan↔single-graph-path, AND path↔single-graph-path joins, and additionally binds
+/// every existential scan/path endpoint for coherence. sq-nlulr CLOSED the residual
+/// that #1684 enumerated here: the salt-uniqueness gate (audit #9,
+/// `bind_issuer_attestations`) now records PATH-referenced committed graphs on the
+/// SAME footing as SCAN-referenced ones (each path commitment carries the issuer-
+/// attestation requirement AND participates in the distinct-salt record), so a
+/// cross-graph scan↔single-graph-path join's enc-equality is no longer a bare
+/// AGREEMENT check: its non-bnode COROLLARY is discharged by the two graphs being
+/// distinctly salted, exactly as for a scan↔scan join. An unattested or
+/// salt-colliding path commitment is refused fail-closed
+/// ([`CheckError::UnattestedCommitment`] / [`CheckError::SaltReused`]) before any
+/// `bb` sub-proof runs. A MULTI-graph path is still refused fail-closed (item 3:
+/// its interior-chain non-bnode obligation is not verifier-dischargeable from
+/// disclosed data). What remains BY DESIGN — not a non-bnode gap: an EXISTENTIAL
+/// (non-projected) path endpoint's VALUE stays hidden (a privacy choice). The whole
+/// verifier stack is internally re-audited but NOT externally audited (sq-qhy4). NO
+/// soundness / privacy property is asserted as achieved.
+// [OPUS-4.8] sq-ygk6x: per-branch join coherence + cross-graph Q6. Opt-in
+// (`extended-fragment`), research-grade, NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+pub fn bind_fragment_join_coherence(
+    fm: &crate::manifest::FragmentManifest,
+) -> Result<(), FragmentJoinError> {
+    let manifest = &fm.manifest;
+    // Re-derive the fragment from the query TEXT alone (never the manifest).
+    let fq = fragment_query(&manifest.query)
+        .map_err(|_| FragmentJoinError::Structure { witness: 0, what: "query" })?;
+
+    for (wi, bw) in fm.branch_witnesses.iter().enumerate() {
+        let Some(branch) = fq.branches.get(bw.branch) else {
+            return Err(FragmentJoinError::Structure { witness: wi, what: "branch" });
+        };
+        let n_scans = branch.patterns.len();
+
+        // Per-obligation disclosed value maps (combined index space: 0..n_scans are
+        // BGP scans, n_scans.. are path obligations — the SAME order `branch_obligations`
+        // uses) plus per-obligation proof-bound global attribution sets. A per-branch
+        // committed-graph identity interning (distinct graphs -> distinct ids, same
+        // graph -> one id) keys the attributions the SAME safe-coarser way as the flat
+        // `global_attributions`; it never touches the disclosed values.
+        let mut per_obl: Vec<std::collections::BTreeMap<String, Fr>> = Vec::new();
+        let mut scan_attrs: Vec<BTreeSet<usize>> = Vec::new();
+        let mut path_attrs: Vec<BTreeSet<usize>> = Vec::new();
+        let mut intern: std::collections::BTreeMap<[u8; 32], usize> =
+            std::collections::BTreeMap::new();
+        let mut next_id = 0usize;
+
+        // --- BGP-scan obligations. ---
+        for oi in 0..n_scans {
+            let pattern = &branch.patterns[oi];
+            let &pi = bw.scan_proofs.get(oi).ok_or(FragmentJoinError::Structure {
+                witness: wi,
+                what: "scan obligation",
+            })?;
+            let sp = manifest.sub_proofs.get(pi).ok_or(FragmentJoinError::Structure {
+                witness: wi,
+                what: "scan proof index",
+            })?;
+            let ProofInputs::Scan { rows, row_count, commitments, attribution, .. } = &sp.inputs
+            else {
+                return Err(FragmentJoinError::Structure { witness: wi, what: "scan proof kind" });
+            };
+            scan_attrs.push(intern_attribution(commitments, attribution, &mut intern, &mut next_id)
+                .ok_or(FragmentJoinError::Structure { witness: wi, what: "scan attribution" })?);
+
+            // Disclosed value map for THIS scan's variable slots (from the selected
+            // supporting row). A constant-only pattern needs no row.
+            let mut map = std::collections::BTreeMap::new();
+            if pattern.slots.iter().any(|s| matches!(s, SlotPattern::Var(_))) {
+                let &row = bw.scan_rows.get(oi).ok_or(FragmentJoinError::Structure {
+                    witness: wi,
+                    what: "scan row selection",
+                })?;
+                let active = (*row_count as usize).min(rows.len());
+                if row >= active {
+                    return Err(FragmentJoinError::Structure { witness: wi, what: "scan row range" });
+                }
+                for (slot, s) in pattern.slots.iter().enumerate() {
+                    if let SlotPattern::Var(v) = s {
+                        let val = rows[row][slot].to_field().ok_or(
+                            FragmentJoinError::MalformedField {
+                                witness: wi,
+                                obligation: oi,
+                                what: "scan row slot",
+                            },
+                        )?;
+                        map.insert(v.clone(), val);
+                    }
+                }
+            }
+            per_obl.push(map);
+        }
+
+        // --- Bounded-path obligations. ---
+        for oi in 0..branch.path_reach.len() {
+            let obligation = &branch.path_reach[oi];
+            let &pi = bw.path_proofs.get(oi).ok_or(FragmentJoinError::Structure {
+                witness: wi,
+                what: "path obligation",
+            })?;
+            let sp = manifest.sub_proofs.get(pi).ok_or(FragmentJoinError::Structure {
+                witness: wi,
+                what: "path proof index",
+            })?;
+            let ProofInputs::PathReach { src_enc, dst_enc, commitments, attribution, .. } =
+                &sp.inputs
+            else {
+                return Err(FragmentJoinError::Structure { witness: wi, what: "path proof kind" });
+            };
+            path_attrs.push(intern_attribution(commitments, attribution, &mut intern, &mut next_id)
+                .ok_or(FragmentJoinError::Structure { witness: wi, what: "path attribution" })?);
+
+            // A VARIABLE path endpoint's value IS the public `src_enc`/`dst_enc`
+            // (directly comparable to a scan row slot — the #1678 clean-extension
+            // observation). A constant endpoint is bound by `bind_fragment_solution`.
+            let combined = n_scans + oi;
+            let mut map = std::collections::BTreeMap::new();
+            if let SlotPattern::Var(v) = &obligation.subject {
+                let val = src_enc.to_field().ok_or(FragmentJoinError::MalformedField {
+                    witness: wi,
+                    obligation: combined,
+                    what: "path src_enc",
+                })?;
+                map.insert(v.clone(), val);
+            }
+            if let SlotPattern::Var(v) = &obligation.object {
+                let val = dst_enc.to_field().ok_or(FragmentJoinError::MalformedField {
+                    witness: wi,
+                    obligation: combined,
+                    what: "path dst_enc",
+                })?;
+                map.insert(v.clone(), val);
+            }
+            per_obl.push(map);
+        }
+
+        // (1) JOIN COHERENCE (item 2): every shared variable resolves to ONE value
+        // across all atoms (scan↔scan, scan↔path, path↔path). The safe-coarser
+        // direction — it can only reject more.
+        let mut seen: std::collections::BTreeMap<String, Fr> = std::collections::BTreeMap::new();
+        for (idx, map) in per_obl.iter().enumerate() {
+            for (v, val) in map {
+                match seen.get(v) {
+                    None => {
+                        seen.insert(v.clone(), *val);
+                    }
+                    Some(prev) if *prev == *val => {}
+                    Some(_) => {
+                        return Err(FragmentJoinError::Incoherent {
+                            witness: wi,
+                            obligation: idx,
+                            var: v.clone(),
+                        })
+                    }
+                }
+            }
+        }
+
+        // (2)+(3) CROSS-GRAPH Q6 obligation (item 1): re-derive the branch's Q6
+        // obligations from the PROOF-BOUND attributions (the per-branch analogue of
+        // the flat `recheck`). Arity is already validated by `dispatch_fragment`; a
+        // mismatch here is refused fail-closed.
+        let obligations = branch_obligations(branch, &scan_attrs, &path_attrs)
+            .map_err(|_| FragmentJoinError::Structure { witness: wi, what: "branch obligations" })?;
+
+        // (3) A multi-graph path's interior-chain non-bnode obligation is not
+        // verifier-dischargeable from disclosed data — refuse fail-closed.
+        if let Some(&p) = obligations.path_link_non_bnode.first() {
+            return Err(FragmentJoinError::MultiGraphPath { witness: wi, obligation: n_scans + p });
+        }
+
+        // (2) Every required cross-graph join edge's shared variable MUST be covered
+        // by the disclosed value map of BOTH its atoms (the coherence check above has
+        // already forced them equal). A required cross-graph obligation the disclosed
+        // data does not cover is refused fail-closed (branch-local `recheck`).
+        for edge in &obligations.join_edges {
+            let (i, j) = edge.patterns;
+            let covered = per_obl.get(i).is_some_and(|m| m.contains_key(&edge.variable))
+                && per_obl.get(j).is_some_and(|m| m.contains_key(&edge.variable));
+            if !covered {
+                return Err(FragmentJoinError::UncoveredCrossGraphJoin {
+                    witness: wi,
+                    variable: edge.variable.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// The per-branch interned committed-graph identity set a sub-proof's PROOF-BOUND
+/// `attribution` bits select over its `commitments` (sq-ygk6x). `intern` maps each
+/// distinct 32-byte committed-graph identity to a stable per-branch id (distinct
+/// graphs -> distinct ids, the same graph -> one id — the flat `global_attributions`
+/// safe-coarser discipline). Returns `None` fail-closed on a malformed proof-bound
+/// attribution (length != `commitments` — stage 1b `AttributionMalformed` also
+/// rejects it) or a commitment that is not a valid field element; under-counting the
+/// contributing graphs would WEAKEN the obligation, so it is refused rather than
+/// padded.
+// [OPUS-4.8] sq-ygk6x.
+#[cfg(feature = "extended-fragment")]
+fn intern_attribution(
+    commitments: &[FieldHex],
+    attribution: &[bool],
+    intern: &mut std::collections::BTreeMap<[u8; 32], usize>,
+    next_id: &mut usize,
+) -> Option<BTreeSet<usize>> {
+    if attribution.len() != commitments.len() {
+        return None;
+    }
+    let mut out = BTreeSet::new();
+    for (g, &bit) in attribution.iter().enumerate() {
+        if !bit {
+            continue;
+        }
+        let key = field_to_be_bytes_32(&commitments[g].to_field()?);
+        let id = *intern.entry(key).or_insert_with(|| {
+            let v = *next_id;
+            *next_id += 1;
+            v
+        });
+        out.insert(id);
+    }
+    Some(out)
+}
+
+/// FAIL-CLOSED wave-1 extended-fragment END-TO-END verification (sq-h732x):
+/// route a [`crate::manifest::FragmentManifest`]'s property-path / `UNION` /
+/// `VALUES` presentation all the way through the cryptographic gate, so an
+/// accepted extended query's `bb` sub-proofs actually VERIFY end-to-end — which
+/// [`verify_manifest`] alone CANNOT do, because its stage-1 `recheck` rejects
+/// every extended query at `fragment_patterns` before any sub-proof runs.
+///
+/// Five layers, all fail-closed:
+/// 1. [`dispatch_fragment`] re-derives the query fragment from the query TEXT
+///    alone (`fragment_query`, never the manifest), REFUSES anything outside the
+///    wave-1 fragment, and routes each disclosed solution's branch witness to a
+///    bound sub-proof of the correct circuit member — mapped into
+///    [`CheckError::FragmentDispatch`]. It runs FIRST, before the verifier nonce
+///    is burnt or any `bb` subprocess starts, so an outside-fragment / mis-routed
+///    presentation is refused without side effects.
+/// 2. [`bind_fragment_solution`] (sq-1zf94) binds each bound path's
+///    `pred_enc`/`src_enc`/`dst_enc` and each disclosed `VALUES` cell to the
+///    encoding the verifier RE-DERIVES from the query text + the disclosed solution
+///    — mapped into [`CheckError::FragmentSolution`]. Also before the nonce is
+///    burnt, so a proof whose disclosed endpoints are not the claimed terms is
+///    refused with no side effects.
+/// 3. [`bind_fragment_scans`] (sq-qyfth) binds each solution variable occurring in
+///    a BGP scan pattern to the selected disclosed row's slot value (again
+///    re-derived from the query text + disclosed solution), enforces the scan
+///    answers the query pattern, and checks join coherence across SCAN atoms sharing
+///    a variable — mapped into [`CheckError::FragmentScan`]. Also before the nonce
+///    is burnt.
+/// 4. [`bind_fragment_join_coherence`] (sq-ygk6x) re-derives each branch's Q6
+///    obligations from the proof-bound attributions, binds every existential
+///    variable shared between two atoms — INCLUDING a scan slot and a `PathReach`
+///    endpoint — to one value (enc-equality), enforces the flat cross-graph
+///    non-bnode obligation branch-locally for BGP scans, and refuses a multi-graph
+///    path — mapped into [`CheckError::FragmentJoin`]. Also before the nonce is
+///    burnt.
+/// 5. the embedded [`crate::manifest::FragmentManifest::manifest`] is then run
+///    through the SAME crypto stage as [`verify_manifest`] (the per-sub-proof
+///    public-input reconstruction + canonical-vk + `bb verify`, the
+///    verifier-nonce single-use + challenge binding, holder PoP, issuer
+///    attestation, revocation, and the hidden gates), EXCEPT that stage-1a's
+///    query-fragment acceptance is routed through `fragment_query` (so the
+///    extended query is not rejected) and the FLAT per-branch term-binding gates
+///    (`bind_query_correctness`/`bind_attributions`/`bind_joins`) are replaced by
+///    layers 2–4's extended analogue.
+///
+/// # Honest scope (LOAD-BEARING — read before relying on this)
+/// Layers 2–4 bind the disclosed path predicate/endpoints, `VALUES` cells, and a
+/// disclosed solution's BGP-scan variables (all via the audit-#1 byte binding of
+/// those public inputs), and layer 4 (sq-ygk6x) additionally enforces the flat
+/// cross-graph Q6 non-bnode obligation PER BRANCH for BGP scans and binds every
+/// existential variable shared across scan↔scan / scan↔path / path↔path atoms. So an
+/// accepted proof's disclosed path endpoints, VALUES-constrained variables, and
+/// BGP-scan-bound variables ARE tied to the specific disclosed terms, and its
+/// per-branch cross-graph scan AND single-graph-path joins carry the same non-bnode
+/// obligation as the flat path. sq-nlulr CLOSED the #1684 residual: the
+/// salt-uniqueness gate (audit #9, `bind_issuer_attestations`) now covers
+/// PATH-referenced committed graphs as well as SCAN-referenced ones, so a cross-graph
+/// join between a scan graph and a single-graph PATH graph is no longer a bare
+/// AGREEMENT check — the path graph carries the issuer-attestation requirement AND
+/// the distinct-salt record, so its non-bnode corollary is discharged exactly as for
+/// a scan↔scan join, and an unattested / salt-colliding path commitment is refused
+/// fail-closed. A MULTI-graph path is still refused fail-closed. What remains BY
+/// DESIGN (not a gap): an EXISTENTIAL (non-projected) path endpoint's value stays
+/// hidden. So the extended regime now carries the SAME attestation + salt discipline
+/// as the flat path for scan↔scan / scan↔path / path↔path cross-graph joins. The
+/// whole verifier stack is internally re-audited but **NOT externally audited**
+/// (sq-qhy4). NO soundness / privacy property is asserted as achieved.
+// [OPUS-4.8] sq-h732x: extended-fragment end-to-end routing. Opt-in
+// (`extended-fragment`), research-grade, NOT-yet-sound (sq-qhy4).
+#[cfg(feature = "extended-fragment")]
+#[allow(clippy::too_many_arguments)]
+pub fn verify_fragment_manifest(
+    fm: &crate::manifest::FragmentManifest,
+    prover: &CircuitProver,
+    work_dir: &Path,
+    trusted_key_set: &KeySet,
+    revocation_policy: &RevocationPolicy,
+    holder_registry: &HolderRegistry,
+    holder_binding_policy: &HolderBindingPolicy,
+    entailment_policy: &EntailmentPolicy,
+    nonce: &VerifierNonce,
+    seen: &dyn SeenNonces,
+) -> Result<(), CheckError> {
+    // (1) FAIL-CLOSED structural routing FIRST — before the nonce is burnt or any
+    // bb subprocess runs. Re-derive the fragment from the query text, refuse
+    // anything outside it, and route each branch witness to a bound sub-proof of
+    // the correct member.
+    dispatch_fragment(fm).map_err(CheckError::FragmentDispatch)?;
+
+    // (2) FAIL-CLOSED DISCLOSED-SOLUTION term binding (sq-1zf94): bind each bound
+    // path's pred_enc/src_enc/dst_enc and each disclosed VALUES cell to the encoding
+    // the verifier re-derives from the query text + the disclosed solution (never a
+    // prover-supplied encoding). Also before the nonce is burnt or any bb runs, so a
+    // proof whose disclosed endpoints are not the claimed terms is refused with no
+    // side effects. The residual still-deferred surface is documented on
+    // `bind_fragment_solution`.
+    bind_fragment_solution(fm).map_err(CheckError::FragmentSolution)?;
+
+    // (2b) FAIL-CLOSED BGP SCAN-SLOT binding (sq-qyfth): bind each solution
+    // variable occurring in a BGP scan pattern to the selected disclosed row's slot
+    // value (re-derived from the query text + disclosed solution), and check join
+    // coherence across scan atoms sharing a variable. Also before the nonce is burnt
+    // or any bb runs.
+    bind_fragment_scans(fm).map_err(CheckError::FragmentScan)?;
+
+    // (2c) FAIL-CLOSED PER-BRANCH JOIN COHERENCE + cross-graph Q6 non-bnode
+    // (sq-ygk6x): re-derive each branch's Q6 obligations from the proof-bound
+    // per-obligation attributions and bind every existential variable shared between
+    // atoms — INCLUDING a scan slot and a `PathReach` endpoint (`src_enc`/`dst_enc`)
+    // — to one value (enc-equality). Enforces the flat cross-graph non-bnode
+    // obligation branch-locally for BGP scans (via the enc-equality + the active
+    // salt-uniqueness gate) and refuses a multi-graph path whose interior-chain
+    // non-bnode obligation the verifier cannot discharge. Also before the nonce is
+    // burnt or any bb runs. The remaining residual is documented on
+    // `bind_fragment_join_coherence`.
+    bind_fragment_join_coherence(fm).map_err(CheckError::FragmentJoin)?;
+
+    // (3) Crypto stage over the EMBEDDED manifest, with stage-1a routed through
+    // `fragment_query` (`skip_query_binding = true`) so the extended query is not
+    // rejected. Every other gate is identical to `verify_manifest` (see
+    // `verify_manifest_impl` / `prefilter_manifest_structure_impl`). The deferred
+    // per-branch term binding is the documented sq-1zf94 / sq-qyfth limitation.
+    verify_manifest_impl(
+        &fm.manifest,
+        prover,
+        work_dir,
+        trusted_key_set,
+        revocation_policy,
+        holder_registry,
+        holder_binding_policy,
+        entailment_policy,
+        nonce,
+        seen,
+        true,
+    )
 }
 
 /// Reconstruct the bb `public_inputs` byte vector from the DECLARED
@@ -5123,6 +6834,45 @@ fn reconstruct_public_inputs(
             push_uint(&mut out, u64::from(*slot_a));
             push_uint(&mut out, u64::from(*slot_b));
         }
+        // [OPUS-4.8] sq-3kd2g.6: bounded-depth path reachability public inputs, in
+        // the `path_reach_d{d}_k{k}_n{n}` member's `main` declaration order:
+        // challenge (pushed above), commitments[k], pred_enc, src_enc, dst_enc,
+        // allow_zero (bool -> {0,1}), depth_bound (u32), attribution[k] (bool ->
+        // {0,1}). Cross-reference `zk/compose/path_reach_d{d}_k{k}_n{n}/src/main.nr`
+        // — do not reorder. The `commitments` / `attribution` length is the declared
+        // `CircuitId.k` (re-derived from `commitments.len()` in stage 1b), so a
+        // wrong-length attribution yields a wrong-length vector that cannot
+        // byte-match the real member's proof. `depth_bound` is the PUBLIC bound the
+        // consumer sees (soundness req 1); it is also constant-constrained to the
+        // member's `D` in-circuit.
+        #[cfg(feature = "extended-fragment")]
+        ProofInputs::PathReach {
+            commitments,
+            pred_enc,
+            src_enc,
+            dst_enc,
+            allow_zero,
+            depth_bound,
+            attribution,
+            ..
+        } => {
+            for c in commitments {
+                push_field(&mut out, c, proof, "commitments")?;
+            }
+            push_field(&mut out, pred_enc, proof, "pred_enc")?;
+            push_field(&mut out, src_enc, proof, "src_enc")?;
+            push_field(&mut out, dst_enc, proof, "dst_enc")?;
+            push_uint(&mut out, u64::from(*allow_zero));
+            push_uint(&mut out, u64::from(*depth_bound));
+            let k = match inputs.circuit_id() {
+                CircuitId::PathReach { k, .. } => *k as usize,
+                _ => return Err(CheckError::MalformedField { proof, what: "path id" }),
+            };
+            for g in 0..k {
+                let bit = attribution.get(g).copied().unwrap_or(false);
+                push_uint(&mut out, u64::from(bit));
+            }
+        }
     }
     Ok(out)
 }
@@ -5209,6 +6959,60 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
         i += 2;
     }
     Some(out)
+}
+
+// [OPUS-4.8] sq-nlulr: shared test fixtures for the audit-#9 issuer-attestation +
+// salt-uniqueness gate. Kept at parent scope (compiled only under `#[cfg(test)]`)
+// so BOTH the flat `mod tests` and the `extended-fragment` `fragment_dispatch_tests`
+// build an attestation of the IDENTICAL shape — the scan- and path-covering paths
+// exercise the same attestation discipline. `commitment` is an arbitrary field
+// element (the gate verifies the signature over the given commitment value; it does
+// not recompute it from triples), so tests can pick distinct commitments/salts.
+#[cfg(test)]
+const TEST_STATUS_LIST: &str = "http://ex/status/1";
+#[cfg(test)]
+const TEST_STATUS_INDEX: u64 = 3;
+#[cfg(test)]
+const TEST_STATUS_VERSION: u64 = 1;
+
+/// A valid salt- AND status-bound issuer attestation over `commitment` (the
+/// scan-/path-verify path requires a salt+status-bound attestation).
+#[cfg(test)]
+fn test_attestation(
+    commitment: Fr,
+    salt: Fr,
+    sk: &sparq_zk::sig::SecretKey,
+) -> crate::manifest::CommitmentAttestation {
+    let list_id = sparq_zk::sig::status_list_id_to_field(TEST_STATUS_LIST);
+    let status_ref =
+        sparq_zk::sig::status_ref_digest(&list_id, TEST_STATUS_INDEX, TEST_STATUS_VERSION);
+    crate::manifest::CommitmentAttestation {
+        commitment: FieldHex::from_field(&commitment),
+        issuer_public_key: sparq_zk::sig::public_key_to_hex(&sk.public_key()),
+        signature: sk.sign_commitment_with_status(&commitment, &salt, &status_ref),
+        cryptosuite: sparq_zk::sig::SignatureScheme::Poseidon2SchnorrV1
+            .cryptosuite_iri()
+            .to_string(),
+        salt: Some(FieldHex::from_field(&salt)),
+        status: Some(crate::manifest::AttestedStatusRef {
+            index: Some(TEST_STATUS_INDEX),
+            version: TEST_STATUS_VERSION,
+            index_commitment: None,
+        }),
+        holder: None,
+    }
+}
+
+/// The disclosed revocation reference matching [`test_attestation`]'s signed status
+/// reference (required so the issuer gate can recompute the signed status digest).
+#[cfg(test)]
+fn test_revocation() -> crate::manifest::RevocationStatus {
+    crate::manifest::RevocationStatus {
+        status_list: TEST_STATUS_LIST.to_string(),
+        index: Some(TEST_STATUS_INDEX),
+        version: TEST_STATUS_VERSION,
+        index_commitment: None,
+    }
 }
 
 #[cfg(test)]
@@ -5708,5 +7512,1649 @@ mod tests {
             reconstruct_public_inputs(&inputs, &fh("0x2a"), 0),
             Err(CheckError::MalformedField { proof: 0, what: "operand_enc" })
         ));
+    }
+
+    // --- sq-h732x: stage-1 NON-REGRESSION (runs in BOTH feature states) -----
+
+    /// A ProofManifest carrying only the required fields — enough to drive the
+    /// flat stage-1 pre-filter for the query-fragment non-regression checks.
+    fn minimal_manifest(query: &str) -> ProofManifest {
+        ProofManifest {
+            r#type: "urn:sparq:zk:ProofManifest".to_string(),
+            query: query.to_string(),
+            issuers: vec![],
+            key_set: vec![],
+            commitment_attestations: vec![],
+            attributions: vec![],
+            join_obligations: vec![],
+            entailment_regime: EntailmentRegime::Simple,
+            derivation_steps: vec![],
+            binding: BindingMode::Challenge { challenge: fh("0x2a") },
+            revocation: None,
+            status_snapshots: vec![],
+            sub_proofs: vec![],
+            binding_edges: vec![],
+            join_edges: vec![],
+            hidden_revocation: None,
+            hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
+        }
+    }
+
+    #[test]
+    fn stage1_prefilter_still_rejects_union_fragment() {
+        // [OPUS-4.8] sq-h732x: the FLAT stage-1 pre-filter still rejects an
+        // extended (UNION) query at `recheck` with the SAME structured error as
+        // before the extended-fragment routing landed — byte-identical whether or
+        // not the `extended-fragment` feature is compiled in.
+        let m = minimal_manifest(
+            "SELECT * WHERE { { ?s <http://ex/p> ?o } UNION { ?o <http://ex/q> ?s } }",
+        );
+        let err = prefilter_manifest_structure(
+            &m,
+            &KeySet::empty(),
+            &RevocationPolicy::accept_version(1),
+        )
+        .unwrap_err();
+        match err {
+            CheckError::Sparqzk(VerifyError::UnsupportedFragment(msg)) => {
+                assert!(msg.contains("UNION"), "expected UNION rejection, got {msg}");
+            }
+            other => panic!("flat stage-1 must still reject UNION, got {other:?}"),
+        }
+    }
+
+    /// [OPUS-4.8] sq-nlulr: FLAT-PATH INVARIANCE. The audit-#9 issuer-attestation +
+    /// salt-uniqueness gate over a FLAT (scan-only) manifest must behave IDENTICALLY
+    /// whether or not `extended-fragment` is compiled in — the new `PathReach` match
+    /// arm is cfg-gated and a flat manifest never reaches it (no `PathReach`
+    /// sub-proof exists in the default build). This test lives in the
+    /// always-compiled `mod tests`, so it runs in BOTH `cargo test` and `cargo test
+    /// --features extended-fragment` and must give the SAME verdict in each.
+    #[test]
+    fn bind_issuer_attestations_flat_scan_is_feature_state_invariant() {
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let commit = Fr::from(100u64);
+        let scan = ProofInputs::Scan {
+            id: CircuitId::Scan { k: 1, n: 16, r: 4 },
+            commitments: vec![FieldHex::from_field(&commit)],
+            pattern_is_const: [true, true, false],
+            pattern_const_enc: [fh("0x1"), fh("0x2"), fh("0x0")],
+            rows: vec![],
+            row_count: 0,
+            attribution: vec![false],
+        };
+        // Attested + salt-bound => the flat scan passes the issuer + salt gate.
+        let mut ok = minimal_manifest("SELECT * WHERE { ?s <http://ex/p> ?o }");
+        ok.sub_proofs =
+            vec![crate::manifest::SubProof { inputs: scan, proof_hex: String::new() }];
+        ok.commitment_attestations = vec![test_attestation(commit, Fr::from(7u64), &sk)];
+        ok.revocation = Some(test_revocation());
+        assert!(
+            bind_issuer_attestations(&ok, &k, &std::collections::BTreeSet::new()).is_ok(),
+            "a flat attested scan must pass the issuer gate identically in both feature states"
+        );
+        // Drop the attestation => the flat scan is refused (deterministic, both states).
+        let mut bad = ok.clone();
+        bad.commitment_attestations.clear();
+        assert!(
+            matches!(
+                bind_issuer_attestations(&bad, &k, &std::collections::BTreeSet::new()),
+                Err(CheckError::UnattestedCommitment { proof: 0, .. })
+            ),
+            "an unattested flat scan must be refused identically in both feature states"
+        );
+    }
+}
+
+// [OPUS-4.8] sq-3kd2g.6: FAIL-CLOSED wave-1 fragment DISPATCH tests — the
+// acceptance-set negatives (a path claimed without a bound sub-proof; a k / member
+// mismatch; branch attribution at the wrong branch) plus the accept + closure +
+// VALUES routing. Structural (no bb): the crypto binding is the verify_manifest
+// loop; the term binding to disclosed solutions is a documented follow-up.
+#[cfg(all(test, feature = "extended-fragment"))]
+mod fragment_dispatch_tests {
+    use super::*;
+    use crate::manifest::{BranchWitness, FragmentManifest, SubProof};
+
+    fn fh(s: &str) -> FieldHex {
+        FieldHex(s.to_string())
+    }
+
+    /// A `PathReach` input whose id is EXACTLY `(d, k, n)` and whose
+    /// `commitments`/`attribution` have length `k` and `depth_bound == d` (a
+    /// consistent, id-hygiene-passing member).
+    fn path_ok(d: u32, k: u32, n: u32, allow_zero: bool) -> ProofInputs {
+        ProofInputs::PathReach {
+            id: CircuitId::PathReach { d, k, n },
+            commitments: (0..k).map(|i| fh(&format!("0x{:x}", i + 1))).collect(),
+            pred_enc: fh("0x11"),
+            src_enc: fh("0x22"),
+            dst_enc: fh("0x33"),
+            allow_zero,
+            depth_bound: d,
+            attribution: vec![true; k as usize],
+        }
+    }
+
+    fn scan_min() -> ProofInputs {
+        ProofInputs::Scan {
+            id: CircuitId::Scan { k: 1, n: 16, r: 4 },
+            commitments: vec![fh("0x1")],
+            pattern_is_const: [true, true, false],
+            pattern_const_enc: [fh("0x1"), fh("0x2"), fh("0x0")],
+            rows: vec![],
+            row_count: 0,
+            attribution: vec![false],
+        }
+    }
+
+    fn sub(inputs: ProofInputs) -> SubProof {
+        SubProof { inputs, proof_hex: String::new() }
+    }
+
+    fn base_manifest(query: &str, sub_proofs: Vec<SubProof>) -> ProofManifest {
+        ProofManifest {
+            r#type: "urn:sparq:zk:ProofManifest".to_string(),
+            query: query.to_string(),
+            issuers: vec![],
+            key_set: vec![],
+            commitment_attestations: vec![],
+            attributions: vec![],
+            join_obligations: vec![],
+            entailment_regime: EntailmentRegime::Simple,
+            derivation_steps: vec![],
+            binding: BindingMode::Challenge { challenge: fh("0x2a") },
+            revocation: None,
+            status_snapshots: vec![],
+            sub_proofs,
+            binding_edges: vec![],
+            join_edges: vec![],
+            hidden_revocation: None,
+            hidden_issuer_attestations: vec![],
+            holder_pok_proofs: vec![],
+            holder_set_proofs: vec![],
+        }
+    }
+
+    fn fm(query: &str, sub_proofs: Vec<SubProof>, witnesses: Vec<BranchWitness>) -> FragmentManifest {
+        FragmentManifest::new(base_manifest(query, sub_proofs), witnesses)
+    }
+
+    const PLUS: &str = "SELECT * WHERE { <http://ex/a> <http://ex/p>+ ?o }";
+    const STAR: &str = "SELECT * WHERE { <http://ex/a> <http://ex/p>* ?o }";
+    const OPT: &str = "SELECT * WHERE { <http://ex/a> <http://ex/p>? ?o }";
+    const UNION: &str =
+        "SELECT * WHERE { { ?s <http://ex/p> ?o } UNION { ?o <http://ex/q> ?s } }";
+    const VALUES: &str =
+        "SELECT * WHERE { ?s <http://ex/p> ?o VALUES ?o { <http://ex/x> <http://ex/y> } }";
+
+    fn bw(branch: usize, scan: Vec<usize>, path: Vec<usize>, values: Vec<usize>) -> BranchWitness {
+        BranchWitness {
+            branch,
+            scan_proofs: scan,
+            path_proofs: path,
+            values_rows: values,
+            scan_rows: vec![],
+            solution: vec![],
+        }
+    }
+
+    // --- ACCEPT paths (a bound path member of the right member routes) -------
+
+    #[test]
+    fn accepts_bounded_plus_path_with_a_bound_member() {
+        // `p+` => allow_zero false; a d=4,k=1,n=16 member is a valid bound.
+        let m = fm(PLUS, vec![sub(path_ok(4, 1, 16, false))], vec![bw(0, vec![], vec![0], vec![])]);
+        assert_eq!(dispatch_fragment(&m), Ok(()));
+    }
+
+    #[test]
+    fn accepts_star_path_zero_length_admitted() {
+        // `p*` => allow_zero true.
+        let m = fm(STAR, vec![sub(path_ok(4, 1, 16, true))], vec![bw(0, vec![], vec![0], vec![])]);
+        assert_eq!(dispatch_fragment(&m), Ok(()));
+    }
+
+    #[test]
+    fn accepts_union_with_per_branch_solution_attribution() {
+        // Two solutions, one per branch; each branch is a single BGP scan.
+        let m = fm(
+            UNION,
+            vec![sub(scan_min()), sub(scan_min())],
+            vec![bw(0, vec![0], vec![], vec![]), bw(1, vec![1], vec![], vec![])],
+        );
+        assert_eq!(dispatch_fragment(&m), Ok(()));
+    }
+
+    #[test]
+    fn accepts_values_row_in_range() {
+        // One BGP scan + a VALUES block of 2 rows; the solution picks row 1.
+        let m = fm(
+            VALUES,
+            vec![sub(scan_min())],
+            vec![bw(0, vec![0], vec![], vec![1])],
+        );
+        assert_eq!(dispatch_fragment(&m), Ok(()));
+    }
+
+    #[test]
+    fn empty_branch_witnesses_is_a_noop_on_a_fragment_query() {
+        // No attribution => the gate only re-derives the fragment + checks the
+        // sub-proof ids; a stage-1-style presentation is a pass-through.
+        let m = fm(PLUS, vec![], vec![]);
+        assert_eq!(dispatch_fragment(&m), Ok(()));
+    }
+
+    // --- ACCEPTANCE NEGATIVE 1: PathReach claimed without a bound sub-proof ---
+
+    #[test]
+    fn rejects_path_obligation_pointing_at_a_scan_proof() {
+        // The path obligation names sub-proof 0, which is a SCAN (not a bound
+        // path_reach) => PathReachMissing (fail-closed).
+        let m = fm(PLUS, vec![sub(scan_min())], vec![bw(0, vec![], vec![0], vec![])]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::PathReachMissing { witness: 0, obligation: 0, proof: 0 })
+        ));
+    }
+
+    #[test]
+    fn rejects_path_obligation_naming_an_out_of_range_proof() {
+        // No sub-proofs at all, but the path obligation names index 0 => dangling.
+        let m = fm(PLUS, vec![], vec![bw(0, vec![], vec![0], vec![])]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::DanglingProof { witness: 0, proof: 0 })
+        ));
+    }
+
+    // --- ACCEPTANCE NEGATIVE 2: k / member mismatch between claim and circuit --
+
+    #[test]
+    fn rejects_path_member_k_mismatch() {
+        // Declared id says k=2 but only ONE commitment is carried => the id
+        // re-derives PathReach{4,1,16} != the declared {4,2,16} => CircuitIdMismatch.
+        let inputs = ProofInputs::PathReach {
+            id: CircuitId::PathReach { d: 4, k: 2, n: 16 },
+            commitments: vec![fh("0x1")], // len 1, not 2
+            pred_enc: fh("0x11"),
+            src_enc: fh("0x22"),
+            dst_enc: fh("0x33"),
+            allow_zero: false,
+            depth_bound: 4,
+            attribution: vec![true],
+        };
+        let m = fm(PLUS, vec![sub(inputs)], vec![]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::CircuitIdMismatch {
+                proof: 0,
+                declared: CircuitId::PathReach { d: 4, k: 2, n: 16 },
+                derived: CircuitId::PathReach { d: 4, k: 1, n: 16 },
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_path_depth_bound_not_a_compiled_member() {
+        // depth_bound (5) != the member's d (4) => derive_id returns None =>
+        // UnknownCircuit (the depth-overflow / mismatch rejection, req 1).
+        let inputs = ProofInputs::PathReach {
+            id: CircuitId::PathReach { d: 4, k: 1, n: 16 },
+            commitments: vec![fh("0x1")],
+            pred_enc: fh("0x11"),
+            src_enc: fh("0x22"),
+            dst_enc: fh("0x33"),
+            allow_zero: false,
+            depth_bound: 5, // != d
+            attribution: vec![true],
+        };
+        let m = fm(PLUS, vec![sub(inputs)], vec![]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::UnknownCircuit { proof: 0 })
+        ));
+    }
+
+    // --- ACCEPTANCE NEGATIVE 3: branch attribution pointing at the wrong branch -
+
+    #[test]
+    fn rejects_branch_attribution_out_of_range() {
+        // The UNION query has 2 branches; attributing a solution to branch 5 =>
+        // BranchOutOfRange (the "wrong branch" rejection).
+        let m = fm(UNION, vec![sub(scan_min())], vec![bw(5, vec![0], vec![], vec![])]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::BranchOutOfRange { witness: 0, branch: 5, branches: 2 })
+        ));
+    }
+
+    #[test]
+    fn rejects_wrong_branch_obligation_shape() {
+        // Attributing to branch 0 (a single BGP scan) but naming a PATH proof for
+        // it => the branch has 0 path obligations, so the path arity mismatches.
+        let m = fm(
+            UNION,
+            vec![sub(path_ok(4, 1, 16, false))],
+            vec![bw(0, vec![], vec![0], vec![])],
+        );
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::ObligationArityMismatch {
+                witness: 0,
+                what: "scan",
+                expected: 1,
+                got: 0
+            })
+        ));
+    }
+
+    // --- closure / allow_zero + fixed-depth + VALUES range rejections ---------
+
+    #[test]
+    fn rejects_plus_presented_as_star() {
+        // A `p+` obligation (allow_zero expected false) bound to a path proof with
+        // allow_zero = true => PathClosureMismatch.
+        let m = fm(PLUS, vec![sub(path_ok(4, 1, 16, true))], vec![bw(0, vec![], vec![0], vec![])]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::PathClosureMismatch { witness: 0, obligation: 0 })
+        ));
+    }
+
+    #[test]
+    fn rejects_zero_or_one_bound_to_a_deeper_member() {
+        // `p?` pins the depth bound to 1, but the smallest compiled member is d=2:
+        // binding a d=4 member (allow_zero true, matching the ? closure) still
+        // rejects because d != the fixed bound => PathDepthExceedsClosure.
+        let m = fm(OPT, vec![sub(path_ok(4, 1, 16, true))], vec![bw(0, vec![], vec![0], vec![])]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::PathDepthExceedsClosure {
+                witness: 0,
+                obligation: 0,
+                member_d: 4,
+                fixed: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_scan_obligation_pointing_at_a_path_proof() {
+        // The VALUES query's single BGP obligation names sub-proof 0, which is a
+        // PATH proof (not a scan) => NotAScanProof.
+        let m = fm(
+            VALUES,
+            vec![sub(path_ok(4, 1, 16, false))],
+            vec![bw(0, vec![0], vec![], vec![0])],
+        );
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::NotAScanProof { witness: 0, obligation: 0, proof: 0 })
+        ));
+    }
+
+    #[test]
+    fn rejects_values_row_out_of_range() {
+        // The VALUES block has 2 rows (indices 0,1); claiming row 2 => out of range.
+        let m = fm(VALUES, vec![sub(scan_min())], vec![bw(0, vec![0], vec![], vec![2])]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::ValuesRowOutOfRange {
+                witness: 0,
+                block: 0,
+                row: 2,
+                rows: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_query_outside_the_fragment() {
+        // OPTIONAL is non-monotone => outside the wave-1 fragment, fail-closed.
+        let m = fm(
+            "SELECT * WHERE { ?s <http://ex/p> ?o OPTIONAL { ?o <http://ex/q> ?x } }",
+            vec![sub(scan_min())],
+            vec![],
+        );
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::OutsideFragment(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_circuit_id_in_a_sub_proof() {
+        // A scan id outside the compiled family (k=3 is not a SCAN_K_VALUES member)
+        // => derive_id None => UnknownCircuit, independent of branch attribution.
+        let inputs = ProofInputs::Scan {
+            id: CircuitId::Scan { k: 3, n: 16, r: 4 },
+            commitments: vec![fh("0x1"), fh("0x2"), fh("0x3")],
+            pattern_is_const: [true, true, false],
+            pattern_const_enc: [fh("0x1"), fh("0x2"), fh("0x0")],
+            rows: vec![],
+            row_count: 0,
+            attribution: vec![false, false, false],
+        };
+        let m = fm(PLUS, vec![sub(inputs)], vec![]);
+        assert!(matches!(
+            dispatch_fragment(&m),
+            Err(FragmentDispatchError::UnknownCircuit { proof: 0 })
+        ));
+    }
+
+    #[test]
+    fn reconstruct_path_reach_public_inputs_layout() {
+        // Declaration order after challenge: commitments[k], pred_enc, src_enc,
+        // dst_enc, allow_zero, depth_bound, attribution[k]. k=2 =>
+        // 1 (challenge) + 2 (commit) + 3 (enc) + 1 (allow_zero) + 1 (depth) + 2
+        // (attr) = 10 words * 32 bytes.
+        let inputs = ProofInputs::PathReach {
+            id: CircuitId::PathReach { d: 4, k: 2, n: 16 },
+            commitments: vec![fh("0x1"), fh("0x2")],
+            pred_enc: fh("0x11"),
+            src_enc: fh("0x22"),
+            dst_enc: fh("0x33"),
+            allow_zero: true,
+            depth_bound: 4,
+            attribution: vec![true, false],
+        };
+        let bytes = reconstruct_public_inputs(&inputs, &fh("0x2a"), 0).unwrap();
+        assert_eq!(bytes.len(), 10 * 32, "1 challenge + 2 commit + 3 enc + allow_zero + depth + 2 attr");
+        // allow_zero (word index 6) is 1, depth_bound (word 7) is 4.
+        assert_eq!(bytes[6 * 32 + 31], 1, "allow_zero = true -> 1");
+        assert_eq!(bytes[7 * 32 + 31], 4, "depth_bound word = 4");
+        // attribution[0]=true (word 8), attribution[1]=false (word 9).
+        assert_eq!(bytes[8 * 32 + 31], 1);
+        assert_eq!(bytes[9 * 32 + 31], 0);
+    }
+
+    #[test]
+    fn derive_id_path_reach_binds_k_and_depth() {
+        // A consistent member re-derives itself.
+        assert_eq!(
+            derive_id(&path_ok(4, 1, 16, false)),
+            Some(CircuitId::PathReach { d: 4, k: 1, n: 16 })
+        );
+        // depth_bound != d => None (the depth-overflow / mismatch rejection).
+        let bad_depth = ProofInputs::PathReach {
+            id: CircuitId::PathReach { d: 4, k: 1, n: 16 },
+            commitments: vec![fh("0x1")],
+            pred_enc: fh("0x11"),
+            src_enc: fh("0x22"),
+            dst_enc: fh("0x33"),
+            allow_zero: false,
+            depth_bound: 7,
+            attribution: vec![true],
+        };
+        assert_eq!(derive_id(&bad_depth), None);
+    }
+
+    #[test]
+    fn error_display_is_non_empty_for_each_variant() {
+        // Cheap Display coverage (the error is `pub` + `impl Error`).
+        let errs = [
+            FragmentDispatchError::OutsideFragment("x".into()),
+            FragmentDispatchError::BranchOutOfRange { witness: 0, branch: 1, branches: 1 },
+            FragmentDispatchError::ObligationArityMismatch {
+                witness: 0,
+                what: "path",
+                expected: 1,
+                got: 0,
+            },
+            FragmentDispatchError::DanglingProof { witness: 0, proof: 9 },
+            FragmentDispatchError::UnknownCircuit { proof: 0 },
+            FragmentDispatchError::CircuitIdMismatch {
+                proof: 0,
+                declared: CircuitId::PathReach { d: 4, k: 2, n: 16 },
+                derived: CircuitId::PathReach { d: 4, k: 1, n: 16 },
+            },
+            FragmentDispatchError::NotAScanProof { witness: 0, obligation: 0, proof: 0 },
+            FragmentDispatchError::PathReachMissing { witness: 0, obligation: 0, proof: 0 },
+            FragmentDispatchError::PathClosureMismatch { witness: 0, obligation: 0 },
+            FragmentDispatchError::PathDepthExceedsClosure {
+                witness: 0,
+                obligation: 0,
+                member_d: 4,
+                fixed: 1,
+            },
+            FragmentDispatchError::ValuesRowOutOfRange { witness: 0, block: 0, row: 2, rows: 2 },
+        ];
+        for e in &errs {
+            assert!(!format!("{}", e).is_empty());
+        }
+    }
+
+    // --- sq-h732x: end-to-end verify_fragment_manifest routing -------------
+
+    /// A query OUTSIDE the wave-1 fragment (`OPTIONAL`).
+    const OUTSIDE: &str =
+        "SELECT * WHERE { ?s <http://ex/p> ?o OPTIONAL { ?o <http://ex/q> ?r } }";
+
+    fn dummy_prover() -> CircuitProver {
+        // Never invoked in these tests — every case rejects before the sub-proof
+        // bb loop, so no nargo/bb toolchain is needed.
+        CircuitProver::new(std::env::temp_dir())
+    }
+
+    /// The full external-input set for `verify_fragment_manifest` /
+    /// `verify_manifest`, wired so the reject happens BEFORE the crypto gate.
+    #[allow(clippy::type_complexity)]
+    fn empty_verify_env() -> (
+        CircuitProver,
+        std::path::PathBuf,
+        KeySet,
+        RevocationPolicy,
+        HolderRegistry,
+        HolderBindingPolicy,
+        EntailmentPolicy,
+        VerifierNonce,
+        InMemorySeenNonces,
+    ) {
+        (
+            dummy_prover(),
+            std::env::temp_dir(),
+            KeySet::empty(),
+            RevocationPolicy::accept_version(1),
+            HolderRegistry::empty(),
+            HolderBindingPolicy::allow_bearer(),
+            EntailmentPolicy::simple_only(),
+            VerifierNonce::from_hex("0x2a").unwrap(),
+            InMemorySeenNonces::new(),
+        )
+    }
+
+    #[test]
+    fn verify_fragment_manifest_refuses_outside_fragment_before_bb() {
+        // `dispatch_fragment` runs FIRST (before the nonce is burnt or any bb
+        // subprocess starts): an OPTIONAL query fails closed as a structured
+        // CheckError::FragmentDispatch, never a silent fallthrough.
+        let m = fm(OUTSIDE, vec![], vec![]);
+        let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
+        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
+            .unwrap_err();
+        assert!(
+            matches!(err, CheckError::FragmentDispatch(FragmentDispatchError::OutsideFragment(_))),
+            "outside-fragment must fail-closed as FragmentDispatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_fragment_manifest_routes_union_past_stage1_recheck() {
+        // The load-bearing end-to-end routing invariant: a UNION query that the
+        // FLAT `verify_manifest` rejects at its stage-1 `recheck` now routes PAST
+        // stage-1 through the fragment path and reaches the crypto/attestation
+        // gate. With an EMPTY trust anchor the scan commitments are unattested, so
+        // it fails at the issuer gate (`UnattestedCommitment`) — NOT at a stage-1
+        // fragment rejection. No bb: both reject before the sub-proof loop.
+        // Each branch's BGP scan answers its pattern with a row consistent with the
+        // disclosed solution (so the sq-qyfth scan-slot binding also passes).
+        let sc0 = scan_real(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s0"), iri("http://ex/p"), iri("http://ex/o0")]],
+        );
+        let sc1 = scan_real(
+            [None, Some("http://ex/q"), None],
+            vec![[iri("http://ex/o1"), iri("http://ex/q"), iri("http://ex/s1")]],
+        );
+        let m = fm(
+            UNION,
+            vec![sub(sc0), sub(sc1)],
+            vec![
+                bw_scan(0, vec![0], vec![0], vec![], sol(&[("s", "http://ex/s0"), ("o", "http://ex/o0")])),
+                bw_scan(1, vec![1], vec![0], vec![], sol(&[("o", "http://ex/o1"), ("s", "http://ex/s1")])),
+            ],
+        );
+        // Fragment path: routes past stage-1a; fails at the (empty-K) issuer gate.
+        let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
+        let frag_err =
+            verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen).unwrap_err();
+        assert!(
+            matches!(frag_err, CheckError::UnattestedCommitment { .. }),
+            "fragment path must route past stage-1 into the attestation gate, got {frag_err:?}"
+        );
+        // NON-REGRESSION: the FLAT entry point still rejects the same query at
+        // stage-1 with the same structured error as before this bead.
+        let (p2, w2, ks2, rp2, hr2, hbp2, ep2, n2, seen2) = empty_verify_env();
+        let flat_err = verify_manifest(
+            &m.manifest, &p2, &w2, &ks2, &rp2, &hr2, &hbp2, &ep2, &n2, &seen2,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(flat_err, CheckError::Sparqzk(VerifyError::UnsupportedFragment(_))),
+            "flat verify_manifest must still reject UNION at stage-1, got {flat_err:?}"
+        );
+    }
+
+    #[test]
+    fn prefilter_impl_routes_union_where_flat_rejects() {
+        // Direct unit test of the mode-aware stage-1a routing (no scans): the flat
+        // regime rejects UNION at `recheck`; the extended regime routes the
+        // acceptance through `fragment_query` and passes (obligations deferred).
+        let m = base_manifest(UNION, vec![]);
+        let flat = prefilter_manifest_structure_impl(
+            &m,
+            &KeySet::empty(),
+            &RevocationPolicy::accept_version(1),
+            false,
+        );
+        assert!(
+            matches!(flat, Err(CheckError::Sparqzk(VerifyError::UnsupportedFragment(_)))),
+            "flat regime rejects UNION at stage-1a, got {flat:?}"
+        );
+        let ext = prefilter_manifest_structure_impl(
+            &m,
+            &KeySet::empty(),
+            &RevocationPolicy::accept_version(1),
+            true,
+        );
+        assert!(
+            matches!(ext, Ok(ref v) if v.is_empty()),
+            "extended regime routes the UNION acceptance through fragment_query, got {ext:?}"
+        );
+    }
+
+    #[test]
+    fn prefilter_impl_extended_regime_still_enforces_id_hygiene() {
+        // Stage-1b (id hygiene) runs in BOTH regimes: a PathReach whose declared
+        // id (k=2) disagrees with the id re-derived from its single commitment
+        // (k=1) is rejected fail-closed even in the extended regime.
+        let bad = ProofInputs::PathReach {
+            id: CircuitId::PathReach { d: 4, k: 2, n: 16 },
+            commitments: vec![fh("0x1")],
+            pred_enc: fh("0x11"),
+            src_enc: fh("0x22"),
+            dst_enc: fh("0x33"),
+            allow_zero: false,
+            depth_bound: 4,
+            attribution: vec![true],
+        };
+        let m = base_manifest(PLUS, vec![sub(bad)]);
+        let err = prefilter_manifest_structure_impl(
+            &m,
+            &KeySet::empty(),
+            &RevocationPolicy::accept_version(1),
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, CheckError::CircuitIdMismatch { proof: 0, .. }),
+            "extended regime must still run stage-1b id hygiene, got {err:?}"
+        );
+    }
+
+    // --- sq-1zf94: DISCLOSED-SOLUTION term binding (bind_fragment_solution) ----
+    //
+    // Non-vacuous, no nargo/bb: the disclosed path pred/endpoints + VALUES cells
+    // are bound to encodings the verifier re-derives from the query text + the
+    // disclosed solution. A mismatch REFUSES before the sub-proof loop; a
+    // consistent solution reaches the SAME downstream gate as the #1665 routing.
+
+    use crate::manifest::{DisclosedTerm, SolutionBinding};
+
+    /// A path with variable endpoints (both projected).
+    const VPATH: &str = "SELECT * WHERE { ?s <http://ex/p>+ ?o }";
+
+    fn iri(s: &str) -> oxrdf::Term {
+        oxrdf::Term::NamedNode(oxrdf::NamedNode::new(s).unwrap())
+    }
+
+    /// The canonical `FieldHex` encoding of a term (salt 0 — IRIs/literals are
+    /// salt-independent), exactly as the verifier re-derives it.
+    fn enc_hex(t: &oxrdf::Term) -> FieldHex {
+        FieldHex(field_to_hex(&encode_term(t, &Fr::from(0u64)).unwrap()))
+    }
+
+    /// A `PathReach` input with REAL pred/src/dst encodings (over IRIs).
+    fn path_real(d: u32, k: u32, n: u32, allow_zero: bool, pred: &str, src: &str, dst: &str) -> ProofInputs {
+        ProofInputs::PathReach {
+            id: CircuitId::PathReach { d, k, n },
+            commitments: (0..k).map(|i| fh(&format!("0x{:x}", i + 1))).collect(),
+            pred_enc: enc_hex(&iri(pred)),
+            src_enc: enc_hex(&iri(src)),
+            dst_enc: enc_hex(&iri(dst)),
+            allow_zero,
+            depth_bound: d,
+            attribution: vec![true; k as usize],
+        }
+    }
+
+    /// Disclosed IRI solution bindings from `(var, iri)` pairs.
+    fn sol(pairs: &[(&str, &str)]) -> Vec<SolutionBinding> {
+        pairs
+            .iter()
+            .map(|(v, i)| SolutionBinding {
+                var: v.to_string(),
+                term: DisclosedTerm::Iri { value: i.to_string() },
+            })
+            .collect()
+    }
+
+    fn bw_sol(
+        branch: usize,
+        scan: Vec<usize>,
+        path: Vec<usize>,
+        values: Vec<usize>,
+        solution: Vec<SolutionBinding>,
+    ) -> BranchWitness {
+        BranchWitness {
+            branch,
+            scan_proofs: scan,
+            path_proofs: path,
+            values_rows: values,
+            scan_rows: vec![],
+            solution,
+        }
+    }
+
+    /// [OPUS-4.8] sq-qyfth: a branch witness that also carries a per-scan
+    /// `scan_rows` row-selection (for the BGP scan-slot binding tests).
+    fn bw_scan(
+        branch: usize,
+        scan: Vec<usize>,
+        scan_rows: Vec<usize>,
+        values: Vec<usize>,
+        solution: Vec<SolutionBinding>,
+    ) -> BranchWitness {
+        BranchWitness {
+            branch,
+            scan_proofs: scan,
+            path_proofs: vec![],
+            values_rows: values,
+            scan_rows,
+            solution,
+        }
+    }
+
+    /// [OPUS-4.8] sq-qyfth: a `Scan` input over a query BGP pattern with REAL
+    /// slot encodings. `consts` gives the 3 slots as `Some(iri)` for a constant or
+    /// `None` for a variable (`pattern_is_const`/`pattern_const_enc` are derived to
+    /// match, so `scan_matches_pattern` accepts it); `rows` are the disclosed
+    /// matched rows as `[Term; 3]` (already the right slot encodings).
+    fn scan_real(consts: [Option<&str>; 3], rows: Vec<[oxrdf::Term; 3]>) -> ProofInputs {
+        let z = fh("0x0");
+        let is_const = [consts[0].is_some(), consts[1].is_some(), consts[2].is_some()];
+        let const_enc = [
+            consts[0].map(|s| enc_hex(&iri(s))).unwrap_or_else(|| z.clone()),
+            consts[1].map(|s| enc_hex(&iri(s))).unwrap_or_else(|| z.clone()),
+            consts[2].map(|s| enc_hex(&iri(s))).unwrap_or_else(|| z.clone()),
+        ];
+        let enc_rows: Vec<[FieldHex; 3]> = rows
+            .iter()
+            .map(|r| [enc_hex(&r[0]), enc_hex(&r[1]), enc_hex(&r[2])])
+            .collect();
+        let row_count = enc_rows.len() as u32;
+        // Derive the id EXACTLY as `derive_id` re-derives it (so the dispatch
+        // id-hygiene check passes end-to-end): k=1, n=16 bucket, r bucketed from the
+        // active row count.
+        let id = crate::build::derive_scan_id(1, 16, row_count).expect("scan id in family");
+        ProofInputs::Scan {
+            id,
+            commitments: vec![fh("0x1")],
+            pattern_is_const: is_const,
+            pattern_const_enc: const_enc,
+            rows: enc_rows,
+            row_count,
+            attribution: vec![true],
+        }
+    }
+
+    #[test]
+    fn bind_solution_accepts_a_consistent_constant_source_path() {
+        // PLUS: subject <http://ex/a> (constant), object ?o (projected) = <b>.
+        // pred_enc = enc(<p>), src_enc = enc(<a>), dst_enc = enc(<b>) all consistent.
+        let m = fm(
+            PLUS,
+            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/a", "http://ex/b"))],
+            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("o", "http://ex/b")]))],
+        );
+        assert_eq!(bind_fragment_solution(&m), Ok(()));
+    }
+
+    #[test]
+    fn bind_solution_rejects_a_wrong_path_predicate() {
+        // pred_enc encodes <q>, but the query names <p> => PathPredMismatch.
+        let m = fm(
+            PLUS,
+            vec![sub(path_real(4, 1, 16, false, "http://ex/q", "http://ex/a", "http://ex/b"))],
+            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("o", "http://ex/b")]))],
+        );
+        assert_eq!(
+            bind_fragment_solution(&m),
+            Err(FragmentSolutionError::PathPredMismatch { witness: 0, obligation: 0 })
+        );
+    }
+
+    #[test]
+    fn bind_solution_rejects_src_enc_not_matching_the_disclosed_solution() {
+        // VPATH: subject ?s (projected) disclosed = <a>, but src_enc encodes <zzz>
+        // => PathEndpointMismatch{Src}. This is the load-bearing sq-1zf94 negative.
+        let m = fm(
+            VPATH,
+            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/zzz", "http://ex/b"))],
+            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("s", "http://ex/a"), ("o", "http://ex/b")]))],
+        );
+        assert_eq!(
+            bind_fragment_solution(&m),
+            Err(FragmentSolutionError::PathEndpointMismatch {
+                witness: 0,
+                obligation: 0,
+                endpoint: PathEndpoint::Src,
+            })
+        );
+    }
+
+    #[test]
+    fn bind_solution_rejects_dst_enc_not_matching_the_disclosed_solution() {
+        // PLUS: object ?o disclosed = <b>, but dst_enc encodes <other> => Dst mismatch.
+        let m = fm(
+            PLUS,
+            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/a", "http://ex/other"))],
+            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("o", "http://ex/b")]))],
+        );
+        assert_eq!(
+            bind_fragment_solution(&m),
+            Err(FragmentSolutionError::PathEndpointMismatch {
+                witness: 0,
+                obligation: 0,
+                endpoint: PathEndpoint::Dst,
+            })
+        );
+    }
+
+    #[test]
+    fn bind_solution_rejects_a_projected_endpoint_omitted_from_the_solution() {
+        // VPATH: ?s is projected but the solution omits it => UnboundProjectedEndpoint.
+        let m = fm(
+            VPATH,
+            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/a", "http://ex/b"))],
+            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("o", "http://ex/b")]))],
+        );
+        assert_eq!(
+            bind_fragment_solution(&m),
+            Err(FragmentSolutionError::UnboundProjectedEndpoint {
+                witness: 0,
+                obligation: 0,
+                endpoint: PathEndpoint::Src,
+                var: "s".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn bind_solution_accepts_a_values_row_consistent_with_the_solution() {
+        // VALUES ?o { <x> <y> }; row 1 = <y>, solution ?o = <y> => consistent.
+        let m = fm(
+            VALUES,
+            vec![sub(scan_min())],
+            vec![bw_sol(0, vec![0], vec![], vec![1], sol(&[("o", "http://ex/y")]))],
+        );
+        assert_eq!(bind_fragment_solution(&m), Ok(()));
+    }
+
+    #[test]
+    fn bind_solution_rejects_a_values_cell_mismatch() {
+        // Row 1 = <y>, but the disclosed solution claims ?o = <z> => ValuesCellMismatch.
+        let m = fm(
+            VALUES,
+            vec![sub(scan_min())],
+            vec![bw_sol(0, vec![0], vec![], vec![1], sol(&[("o", "http://ex/z")]))],
+        );
+        assert_eq!(
+            bind_fragment_solution(&m),
+            Err(FragmentSolutionError::ValuesCellMismatch {
+                witness: 0,
+                block: 0,
+                column: 0,
+                var: "o".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn bind_solution_rejects_pointing_at_the_wrong_disclosed_row() {
+        // The solution ?o = <y>, but values_rows picks row 0 (<x>) => the "wrong
+        // disclosed row" rejection (ValuesCellMismatch).
+        let m = fm(
+            VALUES,
+            vec![sub(scan_min())],
+            vec![bw_sol(0, vec![0], vec![], vec![0], sol(&[("o", "http://ex/y")]))],
+        );
+        assert_eq!(
+            bind_fragment_solution(&m),
+            Err(FragmentSolutionError::ValuesCellMismatch {
+                witness: 0,
+                block: 0,
+                column: 0,
+                var: "o".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn bind_solution_rejects_a_projected_values_var_with_no_disclosure() {
+        // ?o is a projected VALUES variable but the solution is empty => fail-closed.
+        let m = fm(VALUES, vec![sub(scan_min())], vec![bw_sol(0, vec![0], vec![], vec![1], vec![])]);
+        assert_eq!(
+            bind_fragment_solution(&m),
+            Err(FragmentSolutionError::UnboundProjectedValuesVar {
+                witness: 0,
+                block: 0,
+                column: 0,
+                var: "o".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn bind_solution_rejects_a_malformed_disclosed_term() {
+        // A disclosed IRI that does not parse => MalformedSolutionTerm (fail-closed).
+        let m = fm(
+            VPATH,
+            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/a", "http://ex/b"))],
+            vec![bw_sol(0, vec![], vec![0], vec![], sol(&[("s", "not an iri"), ("o", "http://ex/b")]))],
+        );
+        assert_eq!(
+            bind_fragment_solution(&m),
+            Err(FragmentSolutionError::MalformedSolutionTerm { witness: 0, var: "s".to_string() })
+        );
+    }
+
+    #[test]
+    fn bind_solution_does_not_bind_an_existential_endpoint() {
+        // ASK projects nothing, so both endpoints are existential (hidden) — the
+        // src/dst encodings are NOT term-bound, only the query-constant predicate is.
+        // A garbage src/dst therefore still passes the disclosed-solution gate.
+        let ask = "ASK { ?s <http://ex/p>+ ?o }";
+        let m = fm(
+            ask,
+            vec![sub(path_real(4, 1, 16, false, "http://ex/p", "http://ex/whatever", "http://ex/junk"))],
+            vec![bw_sol(0, vec![], vec![0], vec![], vec![])],
+        );
+        assert_eq!(bind_fragment_solution(&m), Ok(()));
+    }
+
+    #[test]
+    fn verify_fragment_manifest_refuses_inconsistent_solution_before_bb() {
+        // End-to-end: a VALUES cell that disagrees with the disclosed solution is
+        // refused as a structured CheckError::FragmentSolution — BEFORE the nonce is
+        // burnt or any bb subprocess runs.
+        let m = fm(
+            VALUES,
+            vec![sub(scan_min())],
+            vec![bw_sol(0, vec![0], vec![], vec![1], sol(&[("o", "http://ex/z")]))],
+        );
+        let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
+        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                CheckError::FragmentSolution(FragmentSolutionError::ValuesCellMismatch { .. })
+            ),
+            "an inconsistent disclosed solution must fail-closed as FragmentSolution, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_fragment_manifest_consistent_solution_reaches_the_crypto_gate() {
+        // The accept path: a CONSISTENT disclosed solution passes the routing, the
+        // disclosed-solution binding AND the sq-qyfth BGP scan-slot binding, then
+        // reaches the SAME downstream crypto/attestation gate as the #1665 routing
+        // test (empty K => UnattestedCommitment) — NOT a fragment-stage rejection.
+        // No bb. The VALUES query's BGP pattern `?s <p> ?o` is answered by a scan
+        // whose row (?s=<s1>, ?o=<y>) matches the disclosed solution; ?o=<y> also
+        // matches VALUES row 1.
+        let sc = scan_real(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/y")]],
+        );
+        let m = fm(
+            VALUES,
+            vec![sub(sc)],
+            vec![bw_scan(
+                0,
+                vec![0],
+                vec![0],
+                vec![1],
+                sol(&[("s", "http://ex/s1"), ("o", "http://ex/y")]),
+            )],
+        );
+        let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
+        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
+            .unwrap_err();
+        assert!(
+            matches!(err, CheckError::UnattestedCommitment { .. }),
+            "a consistent solution must route past the bindings into the attestation gate, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fragment_solution_error_display_is_non_empty_for_each_variant() {
+        // Cheap Display coverage (the error is `pub` + `impl Error`).
+        let errs = [
+            FragmentSolutionError::MalformedSolutionTerm { witness: 0, var: "s".into() },
+            FragmentSolutionError::PathPredMismatch { witness: 0, obligation: 0 },
+            FragmentSolutionError::PathEndpointMismatch {
+                witness: 0,
+                obligation: 0,
+                endpoint: PathEndpoint::Src,
+            },
+            FragmentSolutionError::UnboundProjectedEndpoint {
+                witness: 0,
+                obligation: 0,
+                endpoint: PathEndpoint::Dst,
+                var: "o".into(),
+            },
+            FragmentSolutionError::ValuesCellMismatch {
+                witness: 0,
+                block: 0,
+                column: 0,
+                var: "o".into(),
+            },
+            FragmentSolutionError::UnboundProjectedValuesVar {
+                witness: 0,
+                block: 0,
+                column: 0,
+                var: "o".into(),
+            },
+            FragmentSolutionError::WildcardEndpoint {
+                witness: 0,
+                obligation: 0,
+                endpoint: PathEndpoint::Src,
+            },
+            FragmentSolutionError::Structure { witness: 0, what: "branch" },
+        ];
+        for e in &errs {
+            assert!(!format!("{}", e).is_empty());
+        }
+    }
+
+    // --- sq-qyfth: BGP SCAN-SLOT binding (bind_fragment_scans) -----------------
+    //
+    // Non-vacuous, no nargo/bb: a disclosed solution variable occurring in a BGP
+    // scan is bound to the SELECTED disclosed row's slot value (re-derived from the
+    // query text + the disclosed solution). A wrong / out-of-range / missing /
+    // join-incoherent row selection REFUSES before the sub-proof loop; a consistent
+    // selection reaches the same downstream gate as the #1673 accept path.
+
+    /// A single-scan BGP (both endpoints projected).
+    const SCANQ: &str = "SELECT * WHERE { ?s <http://ex/p> ?o }";
+    /// A two-scan BGP joined on an EXISTENTIAL variable ?x (projected: ?s ?o).
+    const JOINQ: &str =
+        "SELECT ?s ?o WHERE { ?s <http://ex/p> ?x . ?x <http://ex/q> ?o }";
+
+    /// A scan answering `?s <http://ex/p> ?o` with one row `(<s1>, <p>, <o1>)`.
+    fn scan_sp_o(o: &str) -> ProofInputs {
+        scan_real(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri(o)]],
+        )
+    }
+
+    #[test]
+    fn bind_scans_accepts_a_row_consistent_with_the_disclosed_solution() {
+        let m = fm(
+            SCANQ,
+            vec![sub(scan_sp_o("http://ex/o1"))],
+            vec![bw_scan(0, vec![0], vec![0], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(bind_fragment_scans(&m), Ok(()));
+    }
+
+    #[test]
+    fn bind_scans_rejects_a_slot_not_matching_the_disclosed_term() {
+        // The row's object slot is <other>, but the solution claims ?o=<o1>.
+        let m = fm(
+            SCANQ,
+            vec![sub(scan_sp_o("http://ex/other"))],
+            vec![bw_scan(0, vec![0], vec![0], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(
+            bind_fragment_scans(&m),
+            Err(FragmentScanError::ScanSlotMismatch { witness: 0, obligation: 0, slot: 2, var: "o".to_string() })
+        );
+    }
+
+    #[test]
+    fn bind_scans_rejects_pointing_at_the_wrong_disclosed_row() {
+        // Two rows; the solution matches row 0, but scan_rows selects row 1.
+        let sc = scan_real(
+            [None, Some("http://ex/p"), None],
+            vec![
+                [iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/o1")],
+                [iri("http://ex/s2"), iri("http://ex/p"), iri("http://ex/o2")],
+            ],
+        );
+        let m = fm(
+            SCANQ,
+            vec![sub(sc)],
+            vec![bw_scan(0, vec![0], vec![1], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        // Row 1 slot 0 (?s = <s2>) disagrees with the disclosed ?s = <s1>.
+        assert_eq!(
+            bind_fragment_scans(&m),
+            Err(FragmentScanError::ScanSlotMismatch { witness: 0, obligation: 0, slot: 0, var: "s".to_string() })
+        );
+    }
+
+    #[test]
+    fn bind_scans_rejects_an_out_of_range_row() {
+        let m = fm(
+            SCANQ,
+            vec![sub(scan_sp_o("http://ex/o1"))],
+            vec![bw_scan(0, vec![0], vec![3], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(
+            bind_fragment_scans(&m),
+            Err(FragmentScanError::RowOutOfRange { witness: 0, obligation: 0, row: 3, active: 1 })
+        );
+    }
+
+    #[test]
+    fn bind_scans_rejects_a_missing_row_selection_for_a_variable_scan() {
+        // The pattern has variables ?s ?o but no scan_rows entry => MissingRowSelection.
+        let m = fm(
+            SCANQ,
+            vec![sub(scan_sp_o("http://ex/o1"))],
+            vec![bw_scan(0, vec![0], vec![], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(
+            bind_fragment_scans(&m),
+            Err(FragmentScanError::MissingRowSelection { witness: 0, obligation: 0 })
+        );
+    }
+
+    #[test]
+    fn bind_scans_rejects_a_projected_scan_var_omitted_from_the_solution() {
+        // ?s is projected but the solution omits it => UnboundProjectedScanVar.
+        let m = fm(
+            SCANQ,
+            vec![sub(scan_sp_o("http://ex/o1"))],
+            vec![bw_scan(0, vec![0], vec![0], vec![], sol(&[("o", "http://ex/o1")]))],
+        );
+        assert_eq!(
+            bind_fragment_scans(&m),
+            Err(FragmentScanError::UnboundProjectedScanVar { witness: 0, obligation: 0, slot: 0, var: "s".to_string() })
+        );
+    }
+
+    #[test]
+    fn bind_scans_rejects_a_scan_over_the_wrong_predicate() {
+        // The scan answers <q>, but the query pattern names <p> => ScanPatternMismatch.
+        let sc = scan_real(
+            [None, Some("http://ex/q"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/q"), iri("http://ex/o1")]],
+        );
+        let m = fm(
+            SCANQ,
+            vec![sub(sc)],
+            vec![bw_scan(0, vec![0], vec![0], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(
+            bind_fragment_scans(&m),
+            Err(FragmentScanError::ScanPatternMismatch { witness: 0, obligation: 0 })
+        );
+    }
+
+    #[test]
+    fn bind_scans_rejects_a_non_scan_proof_for_a_bgp_obligation() {
+        // The BGP obligation names sub-proof 0, which is a PATH proof.
+        let m = fm(
+            SCANQ,
+            vec![sub(path_ok(4, 1, 16, false))],
+            vec![bw_scan(0, vec![0], vec![0], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(
+            bind_fragment_scans(&m),
+            Err(FragmentScanError::NotAScanProof { witness: 0, obligation: 0, proof: 0 })
+        );
+    }
+
+    #[test]
+    fn bind_scans_rejects_a_malformed_disclosed_term() {
+        let m = fm(
+            SCANQ,
+            vec![sub(scan_sp_o("http://ex/o1"))],
+            vec![bw_scan(0, vec![0], vec![0], vec![], sol(&[("s", "not an iri"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(
+            bind_fragment_scans(&m),
+            Err(FragmentScanError::MalformedSolutionTerm { witness: 0, var: "s".to_string() })
+        );
+    }
+
+    #[test]
+    fn bind_scans_accepts_a_coherent_existential_join() {
+        // ?x existential, shared across both atoms; the two selected rows agree on it.
+        let sc0 = scan_real(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
+        );
+        let sc1 = scan_real(
+            [None, Some("http://ex/q"), None],
+            vec![[iri("http://ex/x1"), iri("http://ex/q"), iri("http://ex/o1")]],
+        );
+        let m = fm(
+            JOINQ,
+            vec![sub(sc0), sub(sc1)],
+            vec![bw_scan(0, vec![0, 1], vec![0, 0], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(bind_fragment_scans(&m), Ok(()));
+    }
+
+    #[test]
+    fn bind_scans_rejects_an_incoherent_existential_join() {
+        // The two rows disagree on the shared existential ?x (x1 vs x2) => JoinIncoherent.
+        let sc0 = scan_real(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
+        );
+        let sc1 = scan_real(
+            [None, Some("http://ex/q"), None],
+            vec![[iri("http://ex/x2"), iri("http://ex/q"), iri("http://ex/o1")]],
+        );
+        let m = fm(
+            JOINQ,
+            vec![sub(sc0), sub(sc1)],
+            vec![bw_scan(0, vec![0, 1], vec![0, 0], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(
+            bind_fragment_scans(&m),
+            Err(FragmentScanError::JoinIncoherent { witness: 0, obligation: 1, slot: 0, var: "x".to_string() })
+        );
+    }
+
+    #[test]
+    fn bind_scans_accepts_an_all_constant_pattern_with_no_row() {
+        // A fully-ground BGP pattern needs no disclosed row (bound by scan_matches_pattern).
+        const GROUND: &str = "ASK { <http://ex/a> <http://ex/p> <http://ex/b> }";
+        let sc = scan_real(
+            [Some("http://ex/a"), Some("http://ex/p"), Some("http://ex/b")],
+            vec![[iri("http://ex/a"), iri("http://ex/p"), iri("http://ex/b")]],
+        );
+        let m = fm(GROUND, vec![sub(sc)], vec![bw_scan(0, vec![0], vec![], vec![], vec![])]);
+        assert_eq!(bind_fragment_scans(&m), Ok(()));
+    }
+
+    #[test]
+    fn verify_fragment_manifest_refuses_wrong_scan_row_before_bb() {
+        // End-to-end: a scan row inconsistent with the disclosed solution is refused
+        // as a structured CheckError::FragmentScan BEFORE the nonce is burnt or any
+        // bb subprocess runs.
+        let m = fm(
+            SCANQ,
+            vec![sub(scan_sp_o("http://ex/other"))],
+            vec![bw_scan(0, vec![0], vec![0], vec![], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
+        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
+            .unwrap_err();
+        assert!(
+            matches!(err, CheckError::FragmentScan(FragmentScanError::ScanSlotMismatch { .. })),
+            "an inconsistent scan row must fail-closed as FragmentScan, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fragment_scan_error_display_is_non_empty_for_each_variant() {
+        let errs = [
+            FragmentScanError::MalformedSolutionTerm { witness: 0, var: "s".into() },
+            FragmentScanError::NotAScanProof { witness: 0, obligation: 0, proof: 0 },
+            FragmentScanError::Structure { witness: 0, what: "branch" },
+            FragmentScanError::ScanPatternMismatch { witness: 0, obligation: 0 },
+            FragmentScanError::MissingRowSelection { witness: 0, obligation: 0 },
+            FragmentScanError::RowOutOfRange { witness: 0, obligation: 0, row: 3, active: 1 },
+            FragmentScanError::UnboundProjectedScanVar { witness: 0, obligation: 0, slot: 0, var: "s".into() },
+            FragmentScanError::ScanSlotMismatch { witness: 0, obligation: 0, slot: 2, var: "o".into() },
+            FragmentScanError::JoinIncoherent { witness: 0, obligation: 1, slot: 0, var: "x".into() },
+            FragmentScanError::WildcardSlot { witness: 0, obligation: 0, slot: 0 },
+        ];
+        for e in &errs {
+            assert!(!format!("{}", e).is_empty());
+        }
+    }
+
+    // --- sq-ygk6x: PER-BRANCH JOIN COHERENCE + cross-graph Q6 (bind_fragment_join_coherence)
+    //
+    // Non-vacuous, no nargo/bb: an existential variable shared between a BGP scan
+    // slot and a PathReach endpoint (or two scans across graphs) is bound to ONE
+    // disclosed value; a mismatch REFUSES before the sub-proof loop. A multi-graph
+    // path (interior chain non-bnode not verifier-dischargeable) REFUSES. A coherent
+    // solution reaches the same downstream gate as the #1678 accept path.
+
+    /// A BGP scan joined to a `+` path on an EXISTENTIAL ?x (the path SUBJECT).
+    /// Projected ?s ?o; ?x is not projected.
+    const SCANPATH_SRC: &str =
+        "SELECT ?s ?o WHERE { ?s <http://ex/p> ?x . ?x <http://ex/q>+ ?o }";
+    /// A BGP scan joined to a `+` path on an EXISTENTIAL ?x (the path OBJECT).
+    const SCANPATH_DST: &str =
+        "SELECT ?s ?o WHERE { ?s <http://ex/p> ?x . ?o <http://ex/q>+ ?x }";
+
+    /// A branch witness carrying scan proofs, path proofs, VALUES rows, per-scan row
+    /// selection, and the disclosed solution together (sq-ygk6x tests).
+    #[allow(clippy::too_many_arguments)]
+    fn bw_full(
+        branch: usize,
+        scan_proofs: Vec<usize>,
+        path_proofs: Vec<usize>,
+        values_rows: Vec<usize>,
+        scan_rows: Vec<usize>,
+        solution: Vec<SolutionBinding>,
+    ) -> BranchWitness {
+        BranchWitness { branch, scan_proofs, path_proofs, values_rows, scan_rows, solution }
+    }
+
+    /// [`scan_real`] over a SPECIFIC committed graph (so two scans can be attributed
+    /// to DISTINCT graphs for the cross-graph tests).
+    fn scan_real_c(consts: [Option<&str>; 3], rows: Vec<[oxrdf::Term; 3]>, commit: &str) -> ProofInputs {
+        match scan_real(consts, rows) {
+            ProofInputs::Scan {
+                id,
+                pattern_is_const,
+                pattern_const_enc,
+                rows,
+                row_count,
+                attribution,
+                ..
+            } => ProofInputs::Scan {
+                id,
+                commitments: vec![fh(commit)],
+                pattern_is_const,
+                pattern_const_enc,
+                rows,
+                row_count,
+                attribution,
+            },
+            _ => unreachable!("scan_real always builds a Scan"),
+        }
+    }
+
+    #[test]
+    fn bind_join_coherence_accepts_a_coherent_scan_path() {
+        // scan row ?x = <x1>; path src_enc = enc(<x1>) agrees => coherent.
+        let sc = scan_real(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
+        );
+        let pa = path_real(4, 1, 16, false, "http://ex/q", "http://ex/x1", "http://ex/o1");
+        let m = fm(
+            SCANPATH_SRC,
+            vec![sub(sc), sub(pa)],
+            vec![bw_full(0, vec![0], vec![1], vec![], vec![0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(bind_fragment_join_coherence(&m), Ok(()));
+    }
+
+    #[test]
+    fn bind_join_coherence_rejects_scan_path_src_mismatch() {
+        // scan row ?x = <x1>; path src_enc = enc(<zzz>) disagrees => Incoherent at
+        // the path obligation (combined index 1 = n_scans(1) + 0).
+        let sc = scan_real(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
+        );
+        let pa = path_real(4, 1, 16, false, "http://ex/q", "http://ex/zzz", "http://ex/o1");
+        let m = fm(
+            SCANPATH_SRC,
+            vec![sub(sc), sub(pa)],
+            vec![bw_full(0, vec![0], vec![1], vec![], vec![0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(
+            bind_fragment_join_coherence(&m),
+            Err(FragmentJoinError::Incoherent { witness: 0, obligation: 1, var: "x".to_string() })
+        );
+    }
+
+    #[test]
+    fn bind_join_coherence_rejects_scan_path_dst_mismatch() {
+        // ?x is the path OBJECT (dst_enc). scan ?x = <x1>; path dst_enc = enc(<zzz>)
+        // => Incoherent, the OTHER direction of the scan↔path endpoint join.
+        let sc = scan_real(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
+        );
+        let pa = path_real(4, 1, 16, false, "http://ex/q", "http://ex/o1", "http://ex/zzz");
+        let m = fm(
+            SCANPATH_DST,
+            vec![sub(sc), sub(pa)],
+            vec![bw_full(0, vec![0], vec![1], vec![], vec![0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(
+            bind_fragment_join_coherence(&m),
+            Err(FragmentJoinError::Incoherent { witness: 0, obligation: 1, var: "x".to_string() })
+        );
+    }
+
+    #[test]
+    fn bind_join_coherence_rejects_a_multi_graph_path() {
+        // A k=2 path (attribution [true, true]) admits a cross-graph interior chain
+        // whose non-bnode obligation the verifier cannot discharge => MultiGraphPath.
+        let pa = path_real(4, 2, 16, false, "http://ex/p", "http://ex/a", "http://ex/b");
+        let m = fm(
+            PLUS,
+            vec![sub(pa)],
+            vec![bw_full(0, vec![], vec![0], vec![], vec![], sol(&[("o", "http://ex/b")]))],
+        );
+        assert_eq!(
+            bind_fragment_join_coherence(&m),
+            Err(FragmentJoinError::MultiGraphPath { witness: 0, obligation: 0 })
+        );
+    }
+
+    #[test]
+    fn bind_join_coherence_refuses_cross_graph_disagreeing_join() {
+        // Two scans over DISTINCT committed graphs (0x1, 0x2) sharing existential ?x,
+        // whose selected rows DISAGREE — the encoding a blank node would take across
+        // two distinctly-salted graphs. Refused (join incoherent) at obligation 1.
+        let sc0 = scan_real_c(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
+            "0x1",
+        );
+        let sc1 = scan_real_c(
+            [None, Some("http://ex/q"), None],
+            vec![[iri("http://ex/x2"), iri("http://ex/q"), iri("http://ex/o1")]],
+            "0x2",
+        );
+        let m = fm(
+            JOINQ,
+            vec![sub(sc0), sub(sc1)],
+            vec![bw_full(0, vec![0, 1], vec![], vec![], vec![0, 0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(
+            bind_fragment_join_coherence(&m),
+            Err(FragmentJoinError::Incoherent { witness: 0, obligation: 1, var: "x".to_string() })
+        );
+    }
+
+    #[test]
+    fn bind_join_coherence_accepts_cross_graph_agreeing_join() {
+        // Two scans over DISTINCT committed graphs sharing existential ?x whose rows
+        // AGREE (a non-bnode IRI encodes identically across graphs) => Ok, and the
+        // REQUIRED cross-graph obligation `branch_obligations` derives is covered.
+        let sc0 = scan_real_c(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
+            "0x1",
+        );
+        let sc1 = scan_real_c(
+            [None, Some("http://ex/q"), None],
+            vec![[iri("http://ex/x1"), iri("http://ex/q"), iri("http://ex/o1")]],
+            "0x2",
+        );
+        let m = fm(
+            JOINQ,
+            vec![sub(sc0), sub(sc1)],
+            vec![bw_full(0, vec![0, 1], vec![], vec![], vec![0, 0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        assert_eq!(bind_fragment_join_coherence(&m), Ok(()));
+    }
+
+    #[test]
+    fn verify_fragment_manifest_refuses_scan_path_incoherence_before_bb() {
+        // End-to-end: a path endpoint inconsistent with its supporting scan row is
+        // refused as CheckError::FragmentJoin BEFORE the nonce is burnt or any bb runs.
+        // ?x is existential (bind_fragment_solution ignores its src); ?o projected =>
+        // dst_enc = enc(o1) must match. The scan↔path ?x mismatch surfaces in layer 2c.
+        let sc = scan_real(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
+        );
+        let pa = path_real(4, 1, 16, false, "http://ex/q", "http://ex/zzz", "http://ex/o1");
+        let m = fm(
+            SCANPATH_SRC,
+            vec![sub(sc), sub(pa)],
+            vec![bw_full(0, vec![0], vec![1], vec![], vec![0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
+        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
+            .unwrap_err();
+        assert!(
+            matches!(err, CheckError::FragmentJoin(FragmentJoinError::Incoherent { .. })),
+            "an incoherent scan↔path join must fail-closed as FragmentJoin, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_fragment_manifest_coherent_scan_path_reaches_the_crypto_gate() {
+        // The accept path: a coherent scan↔path solution passes routing + all three
+        // binding layers, then reaches the SAME downstream attestation gate (empty K
+        // => UnattestedCommitment). No bb.
+        let sc = scan_real(
+            [None, Some("http://ex/p"), None],
+            vec![[iri("http://ex/s1"), iri("http://ex/p"), iri("http://ex/x1")]],
+        );
+        let pa = path_real(4, 1, 16, false, "http://ex/q", "http://ex/x1", "http://ex/o1");
+        let m = fm(
+            SCANPATH_SRC,
+            vec![sub(sc), sub(pa)],
+            vec![bw_full(0, vec![0], vec![1], vec![], vec![0], sol(&[("s", "http://ex/s1"), ("o", "http://ex/o1")]))],
+        );
+        let (p, w, ks, rp, hr, hbp, ep, n, seen) = empty_verify_env();
+        let err = verify_fragment_manifest(&m, &p, &w, &ks, &rp, &hr, &hbp, &ep, &n, &seen)
+            .unwrap_err();
+        assert!(
+            matches!(err, CheckError::UnattestedCommitment { .. }),
+            "a coherent scan↔path solution must route past the bindings into the attestation gate, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fragment_join_error_display_is_non_empty_for_each_variant() {
+        let errs = [
+            FragmentJoinError::Structure { witness: 0, what: "branch" },
+            FragmentJoinError::MalformedField { witness: 0, obligation: 1, what: "path src_enc" },
+            FragmentJoinError::Incoherent { witness: 0, obligation: 1, var: "x".into() },
+            FragmentJoinError::MultiGraphPath { witness: 0, obligation: 0 },
+            FragmentJoinError::UncoveredCrossGraphJoin { witness: 0, variable: "x".into() },
+        ];
+        for e in &errs {
+            assert!(!format!("{}", e).is_empty());
+        }
+    }
+
+    // --- sq-nlulr: issuer-attestation + salt-uniqueness (audit #9) over PATH
+    // commitments (bind_issuer_attestations). Non-vacuous, no nargo/bb: these call
+    // the REAL issuer gate directly over a manifest carrying a `PathReach`
+    // sub-proof — the same gate `verify_manifest`/`verify_fragment_manifest` run.
+
+    /// A single-graph `PathReach` sub-proof over a CHOSEN committed graph (so the
+    /// attestation / salt tests can attest or collide specific commitments; the
+    /// gate verifies the signature over the commitment value, never recomputes it).
+    fn path_with_commit(commit: Fr) -> ProofInputs {
+        ProofInputs::PathReach {
+            id: CircuitId::PathReach { d: 4, k: 1, n: 16 },
+            commitments: vec![FieldHex::from_field(&commit)],
+            pred_enc: fh("0x11"),
+            src_enc: fh("0x22"),
+            dst_enc: fh("0x33"),
+            allow_zero: false,
+            depth_bound: 4,
+            attribution: vec![true],
+        }
+    }
+
+    /// A single-graph BGP `Scan` sub-proof over a CHOSEN committed graph.
+    fn scan_with_commit(commit: Fr) -> ProofInputs {
+        ProofInputs::Scan {
+            id: CircuitId::Scan { k: 1, n: 16, r: 4 },
+            commitments: vec![FieldHex::from_field(&commit)],
+            pattern_is_const: [true, true, false],
+            pattern_const_enc: [fh("0x1"), fh("0x2"), fh("0x0")],
+            rows: vec![],
+            row_count: 0,
+            attribution: vec![false],
+        }
+    }
+
+    #[test]
+    fn bind_issuer_attestations_refuses_an_unattested_path_commitment() {
+        // A PathReach commitment with NO issuer attestation is refused on the SAME
+        // footing as an unattested scan commitment. Before sq-nlulr the issuer gate
+        // silently skipped path sub-proofs, so this passed unattested.
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let mut m = base_manifest(PLUS, vec![sub(path_with_commit(Fr::from(100u64)))]);
+        m.revocation = Some(test_revocation());
+        let err = bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new())
+            .unwrap_err();
+        assert!(
+            matches!(err, CheckError::UnattestedCommitment { proof: 0, .. }),
+            "an unattested PATH commitment must be refused at the issuer gate, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bind_issuer_attestations_refuses_a_scan_path_salt_collision() {
+        // A scan graph and a single-graph PATH graph, distinctly committed but
+        // SHARING a salt, are the audit-#9 cross-graph bnode-correlation channel.
+        // Both attestations verify, so the gate reaches the salt-uniqueness step and
+        // REFUSES SaltReused — the load-bearing sq-nlulr corollary.
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let salt = Fr::from(7u64);
+        let c_scan = Fr::from(100u64);
+        let c_path = Fr::from(200u64); // distinct commitment, SAME salt.
+        let mut m = base_manifest(
+            SCANPATH_SRC,
+            vec![sub(scan_with_commit(c_scan)), sub(path_with_commit(c_path))],
+        );
+        m.commitment_attestations =
+            vec![test_attestation(c_scan, salt, &sk), test_attestation(c_path, salt, &sk)];
+        m.revocation = Some(test_revocation());
+        let err = bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new())
+            .unwrap_err();
+        assert!(
+            matches!(err, CheckError::SaltReused { .. }),
+            "a scan-graph <-> single-graph-path-graph salt collision must be refused (audit #9), got {err:?}"
+        );
+    }
+
+    #[test]
+    fn bind_issuer_attestations_accepts_an_attested_distinctly_salted_scan_path() {
+        // With DISTINCT salts the attested scan AND path both record their salt and
+        // the gate passes to the downstream stage — proving the path commitment is
+        // attested + salt-recorded (not merely ignored) and only COLLISIONS refuse.
+        let sk = sparq_zk::sig::SecretKey::from_seed(1);
+        let k = KeySet::from_hex_keys([sparq_zk::sig::public_key_to_hex(&sk.public_key())]);
+        let c_scan = Fr::from(100u64);
+        let c_path = Fr::from(200u64);
+        let mut m = base_manifest(
+            SCANPATH_SRC,
+            vec![sub(scan_with_commit(c_scan)), sub(path_with_commit(c_path))],
+        );
+        m.commitment_attestations = vec![
+            test_attestation(c_scan, Fr::from(7u64), &sk),
+            test_attestation(c_path, Fr::from(9u64), &sk),
+        ];
+        m.revocation = Some(test_revocation());
+        assert!(
+            bind_issuer_attestations(&m, &k, &std::collections::BTreeSet::new()).is_ok(),
+            "an attested, distinctly-salted scan+path must pass the issuer + salt gate"
+        );
     }
 }

@@ -40,6 +40,20 @@ pub struct CandidateFinding {
     pub cited_dois: Vec<String>,
 }
 
+/// One candidate REJECTED at an extractor's defensive boundary (the live extractor's
+/// `apply_defensive_caps` drops likely hallucinations BEFORE the pipeline sees them —
+/// `sq-tx8v9`). Carries the claimed source DOI plus a stable reason category ONLY — no
+/// justification text — so it is safe to thread verbatim into the committed run sidecar
+/// (fail-closed licensing: no abstract-derived text).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryReject {
+    /// The source DOI the rejected candidate claimed.
+    pub source_doi: String,
+    /// The stable reason category (the same keys the pilot's quarantine metrics use:
+    /// `justification-not-anchored` | `unknown-source`).
+    pub reason: String,
+}
+
 /// The extraction step, abstracted so the live (model) and replay (fixture) implementations
 /// are interchangeable. `extract` takes the normalised source stubs and returns the
 /// candidate Findings per source. A live implementation would call a cheap-model batch
@@ -49,6 +63,15 @@ pub trait Extractor {
     /// swallowed) so the pipeline can quarantine a source whose extraction failed rather
     /// than silently produce zero findings for it.
     fn extract(&self, stubs: &[SourceStub]) -> Result<Vec<CandidateFinding>, String>;
+
+    /// The candidates this extractor REJECTED at its defensive boundary, accumulated
+    /// across every `extract` call since construction. INVARIANT (`sq-tx8v9`): boundary
+    /// rejects are COUNTED, never silently dropped — the pilot threads these into the run
+    /// metrics so the fetched→extracted honesty gap is visible in the sidecar. The
+    /// default is empty: a replay extractor applies no boundary.
+    fn boundary_rejects(&self) -> Vec<BoundaryReject> {
+        Vec::new()
+    }
 }
 
 /// The **replay** extractor: returns the candidate Findings recorded in a committed tape,
@@ -186,6 +209,7 @@ mod tests {
             title: "orphan".to_string(),
             abstract_text: "x".to_string(),
             year: None,
+            license: None,
         };
         let cands = extractor.extract(std::slice::from_ref(&orphan)).unwrap();
         assert!(cands.is_empty());

@@ -14,14 +14,16 @@
 # workspace-to-workspace dep edge on a published member would re-trip it. The fix (sq-f04e)
 # MATERIALIZES the link target's real package node + its nested closure so npm ls resolves it.
 #
-# This pins TWO load-bearing behaviours over a tiny SYNTHETIC root lock (no real repo content):
+# This pins THREE load-bearing behaviours over a tiny SYNTHETIC root lock (no real repo content):
 #   1. TEETH (the regression itself) — a member with a `link: true` workspace devDep must derive
 #      a lock on which BOTH `npm ls --omit=dev` (runtime view) AND `npm ls` (full/dev view) exit
 #      0. (Before the fix, --omit=dev exited 254 with the 'extraneous' crash.) The derived lock
 #      must materialize the link TARGET node + its nested, version-conflicting closure.
-#   2. RUNTIME INVARIANCE — the runtime (`--omit=dev`) closure must contain ONLY the member's real
-#      runtime dep (here `fzstd`), NOT the dev-only workspace link, so the published SBOM's
+#   2. RUNTIME INVARIANCE — the runtime (`--omit=dev`) closure must contain the member's real
+#      runtime deps, NOT the dev-only workspace link, so the published SBOM's
 #      runtime surface is unchanged by the presence of a workspace-link DEV edge.
+#   3. ORDINARY NESTED CLOSURE — a runtime package whose transitive dependency conflicts with a
+#      hoisted root version must retain its nested version in the derived member lock.
 #
 # HERMETIC: builds its own throwaway root package-lock.json under a mktemp dir; no repo content,
 # no network (`--package-lock-only`). Requires `node` + `npm` (the ci-scripts runner ships both;
@@ -72,7 +74,7 @@ cat > "${PROJ}/package-lock.json" <<'JSON'
       "name": "@synthetic/mbr",
       "version": "0.1.0",
       "license": "MIT",
-      "dependencies": { "fzstd": "^0.1.1" },
+      "dependencies": { "fzstd": "^0.1.1", "codec": "^1.0.0" },
       "devDependencies": { "typescript": "^6.0.0", "@synthetic/cli": "*" }
     },
     "pkgs/cli": {
@@ -86,6 +88,22 @@ cat > "${PROJ}/package-lock.json" <<'JSON'
       "version": "0.1.1",
       "resolved": "https://registry.npmjs.org/fzstd/-/fzstd-0.1.1.tgz",
       "integrity": "sha512-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=="
+    },
+    "node_modules/codec": {
+      "version": "1.0.0",
+      "resolved": "https://registry.npmjs.org/codec/-/codec-1.0.0.tgz",
+      "integrity": "sha512-DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD==",
+      "dependencies": { "helper": "^1.0.0" }
+    },
+    "node_modules/helper": {
+      "version": "2.0.0",
+      "resolved": "https://registry.npmjs.org/helper/-/helper-2.0.0.tgz",
+      "integrity": "sha512-EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE=="
+    },
+    "node_modules/codec/node_modules/helper": {
+      "version": "1.2.0",
+      "resolved": "https://registry.npmjs.org/helper/-/helper-1.2.0.tgz",
+      "integrity": "sha512-FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF=="
     },
     "node_modules/typescript": {
       "version": "6.0.3",
@@ -106,7 +124,7 @@ cat > "${PROJ}/mbr/package.json" <<'JSON'
 {
   "name": "@synthetic/mbr",
   "version": "0.1.0",
-  "dependencies": { "fzstd": "^0.1.1" },
+  "dependencies": { "fzstd": "^0.1.1", "codec": "^1.0.0" },
   "devDependencies": { "typescript": "^6.0.0", "@synthetic/cli": "*" }
 }
 JSON
@@ -139,6 +157,9 @@ if (!p["pkgs/cli/node_modules/typescript"] || p["pkgs/cli/node_modules/typescrip
 if (!p["node_modules/typescript"] || p["node_modules/typescript"].version !== "6.0.3") {
   fail("the member's own top-level typescript@6.0.3 must remain hoisted, distinct from the target's nested 5.9.3");
 }
+if (!p["node_modules/codec/node_modules/helper"] || p["node_modules/codec/node_modules/helper"].version !== "1.2.0") {
+  fail("an ordinary runtime dependency's nested, version-conflicting helper was not preserved");
+}
 console.log("PASS: workspace-link target + nested closure materialized in the derived lock");
 NODE
 
@@ -170,7 +191,7 @@ fi
 
 # --------------------------------------------------------------------------- #
 # Case 4 (RUNTIME INVARIANCE): the runtime (`--omit=dev`) closure must contain the member's
-# real runtime dep `fzstd` and MUST NOT contain the dev-only workspace link or its dev-only
+# real runtime deps `fzstd`/`codec` and MUST NOT contain the dev-only workspace link or its dev-only
 # `typescript` — i.e. a workspace-link DEV edge never leaks into the published runtime surface.
 # --------------------------------------------------------------------------- #
 node - /tmp/npmls-omitdev.json <<'NODE'
@@ -179,9 +200,10 @@ const tree = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 const deps = Object.keys(tree.dependencies || {});
 const fail = (m) => { console.error("FAIL: " + m + " (runtime deps were: " + JSON.stringify(deps) + ")"); process.exit(1); };
 if (!deps.includes("fzstd")) fail("runtime (--omit=dev) tree is missing the real runtime dep fzstd");
+if (!deps.includes("codec")) fail("runtime (--omit=dev) tree is missing the nested-closure fixture codec");
 if (deps.includes("@synthetic/cli")) fail("the dev-only workspace LINK leaked into the runtime (--omit=dev) tree");
 if (deps.includes("typescript")) fail("a dev-only dep (typescript) leaked into the runtime (--omit=dev) tree");
-console.log("PASS: runtime (--omit=dev) closure is exactly the real runtime dep set (fzstd); no dev-link leak");
+console.log("PASS: runtime (--omit=dev) closure contains the real runtime deps; no dev-link leak");
 NODE
 
 echo "All derive-workspace-member-lock workspace-link self-tests passed."

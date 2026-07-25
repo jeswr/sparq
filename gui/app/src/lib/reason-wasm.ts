@@ -33,6 +33,21 @@ export interface WasmReasoner {
   materializeStats(data: string, format: string, profile: string): string;
   /** N3 rule reasoning (`{ … } => { … }` + facts) -> entailed ground triples as N-Triples. */
   reasonN3(n3: string): string;
+  /**
+   * [FABLE-5] sq-ixc3.20 — ONE derivation of the triple `(s, p, o)` from the asserted base
+   * of `data` under `profile` (`"rdfs"` | `"owl-rl"`), as `sparq-reason`'s proof-tree JSON —
+   * or the JSON literal `"null"` when the triple is not entailed. `s`/`p`/`o` are N-Triples
+   * term strings. Present only in a bundle built with the `explain` feature (the published
+   * GUI bundle is — `js`'s `build:reason-wasm`); callers feature-detect at runtime so an
+   * older synced bundle degrades honestly instead of crashing.
+   */
+  why(data: string, format: string, profile: string, s: string, p: string, o: string): string;
+  /**
+   * [FABLE-5] sq-ixc3.20 — as {@link why}, for N3 RULES mode: `n3` is the combined
+   * rules + base-facts document (exactly what {@link reasonN3} consumes). Internal nodes
+   * name the fired rule as `n3-rule-<i>`. `explain`-feature bundles only; feature-detect.
+   */
+  whyN3(n3: string, s: string, p: string, o: string): string;
 }
 
 interface ReasonModule {
@@ -71,12 +86,12 @@ export async function loadReasoner(): Promise<WasmReasoner> {
 // ---------------------------------------------------------------------------
 
 /**
- * The reasoner PROFILE string a non-"off" {@link WorkspaceInferenceMode} maps to. The mode
- * strings deliberately equal the reasoner's own profile names (`"rdfs"` / `"owl-rl"`), so this
- * is the identity for the active modes — but keeping it explicit documents the contract and
- * gives one place to change if the two ever diverge.
+ * The reasoner PROFILE string for RDFS / OWL 2 RL modes. Narrowed to `"rdfs" | "owl-rl"` —
+ * N3 mode calls `reasoner.reasonN3(...)` directly and never maps through this function. The
+ * mode strings equal the reasoner's own profile names, so this is the identity — but keeping
+ * it explicit documents the contract and gives one place to change if the two ever diverge.
  */
-export function modeToProfile(mode: Exclude<WorkspaceInferenceMode, "off">): string {
+export function modeToProfile(mode: "rdfs" | "owl-rl"): string {
   return mode;
 }
 
@@ -101,5 +116,11 @@ export const INFERENCE_MODE_META: Record<
     short: "OWL RL",
     blurb:
       "OWL 2 RL entailment (a superset of RDFS): also inverse/symmetric/transitive properties, sameAs, and more.",
+  },
+  n3: {
+    label: "N3 Rules",
+    short: "N3",
+    blurb:
+      "N3 rule reasoning: forward-chain custom { antecedent } => { consequent } rules over the live store. Attach rules in the Inference tool. Derived ground triples only.",
   },
 };

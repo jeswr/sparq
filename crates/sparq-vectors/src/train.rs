@@ -56,7 +56,9 @@
 //! embeddings are **non-degenerate** (not all-equal / not collapsed to a point). The eval harness
 //! ([`crate::eval`]) then measures filtered link-prediction quality.
 
-use crate::structure::{Corrupt, NegativeSampler, SamplingMode, TypeConstraints};
+use crate::structure::{
+    is_embeddable, Corrupt, NegativeSampler, SamplingMode, TermScope, TypeConstraints,
+};
 use rustc_hash::FxHashMap;
 use sparq_core::dict::{Id, TermParts};
 use sparq_core::Graph;
@@ -161,6 +163,13 @@ pub struct TrainConfig {
     /// [`WeightMode::Uniform`](crate::provenance::WeightMode::Uniform) every weight is `1.0` and the
     /// loop is byte-identical to the unweighted trainer (the ablation-off baseline).
     pub weight_mode: crate::provenance::WeightMode,
+    /// The RDF 1.2 **quoted-terms ablation switch** ([`TermScope`]): under the default
+    /// [`TermScope::IriBlank`] the trainer is byte-identical to the pre-switch trainer (quoted
+    /// triple terms are invisible — the historical behaviour); under [`TermScope::Embeddable`]
+    /// triples with a quoted-term endpoint (`rdf:reifies` edges) become positives, quoted terms
+    /// get entity rows, and negative corruption is sort-preserving (see
+    /// [`NegativeSampler::sample`]). Every preset defaults this OFF.
+    pub term_scope: TermScope,
     /// Master seed for init + negative draws + positive shuffle. Fixed ⇒ reproducible.
     pub seed: u64,
 }
@@ -189,6 +198,9 @@ impl TrainConfig {
             // Default OFF: an existing caller (and the P0 ablation) keeps the unweighted baseline
             // until it explicitly opts into provenance-weighting via `weight_mode`. [OPUS-4.8]
             weight_mode: crate::provenance::WeightMode::Uniform,
+            // Default OFF (`TermScope::IriBlank`): quoted-term visibility is opt-in per ablation
+            // arm; every existing baseline stays byte-identical. [FABLE-5]
+            term_scope: TermScope::default(),
             seed,
         }
     }
@@ -276,6 +288,84 @@ impl TrainedModel {
         Some(self.score_rows(hr, rr, tr))
     }
 
+    /// The **compositional STATEMENT-level encoding** of parameter rows `(h_row, r_row, t_row)` —
+    /// the per-component interaction terms of the model's own scoring product, as a `dim`-float
+    /// vector. [SONNET-4.6] sq-1e5kk (follow-up to the node-level quoted-terms visibility arm).
+    ///
+    /// Construction, per [`ModelKind`]:
+    /// - [`ModelKind::DistMult`]: `v[i] = e_h[i]·w_r[i]·e_t[i]` — the trilinear product *before*
+    ///   the final sum, so `v.iter().sum::<f32>()` recovers [`TrainedModel::score_rows`] exactly
+    ///   (same products, same summation order).
+    /// - [`ModelKind::ComplEx`]: the complex Hadamard product `e_h ∘ w_r ∘ conj(e_t)` in the
+    ///   crate's real-half-then-imaginary-half layout (`v[i] = Re_i`, `v[dim/2 + i] = Im_i`). The
+    ///   real half sums to [`TrainedModel::score_rows`] (the Hermitian score keeps only the real
+    ///   part); the imaginary half carries the direction information the scalar score discards.
+    ///
+    /// The encoding is **deterministic and derived** — no new parameters are trained, so it
+    /// inherits the trainer's bit-for-bit reproducibility. It lives in the model's **interaction
+    /// space, not entity space**: never compare it against entity rows (or store it beside them in
+    /// one index) — its only meaningful comparisons are with other statement encodings from the
+    /// same model. **No accuracy claim is made**: whether this representation helps any downstream
+    /// task is empirical, and adoption stays measurement-gated like every other axis here.
+    pub fn encode_statement_rows(&self, h_row: usize, r_row: usize, t_row: usize) -> Vec<f32> {
+        let h = self.entity_vec(h_row);
+        let r = self.rel_vec(r_row);
+        let t = self.entity_vec(t_row);
+        match self.model {
+            ModelKind::DistMult => (0..self.dim).map(|i| h[i] * r[i] * t[i]).collect(),
+            ModelKind::ComplEx => {
+                let half = self.dim / 2;
+                let mut v = vec![0.0f32; self.dim];
+                for i in 0..half {
+                    let (h_re, h_im) = (h[i], h[half + i]);
+                    let (r_re, r_im) = (r[i], r[half + i]);
+                    let (t_re, t_im) = (t[i], t[half + i]);
+                    // Real part: the identical term order `score_complex` sums, so the real half
+                    // of the encoding accumulates to the score bit-for-bit.
+                    v[i] = h_re * r_re * t_re + h_re * r_im * t_im + h_im * r_re * t_im
+                        - h_im * r_im * t_re;
+                    // Imaginary part of h·r·conj(t): Im((A + iB)(t_re − i·t_im)) = B·t_re − A·t_im
+                    // with A = Re(h·r), B = Im(h·r).
+                    v[half + i] = (h_re * r_im + h_im * r_re) * t_re
+                        - (h_re * r_re - h_im * r_im) * t_im;
+                }
+                v
+            }
+        }
+    }
+
+    /// [`TrainedModel::encode_statement_rows`] for a triple of dict-ids, or `None` if any
+    /// constituent is unknown to the model (mirrors [`TrainedModel::score`]): the head/tail need
+    /// entity rows, the predicate a relation row. A nested quoted-triple *constituent* resolves
+    /// through its own node-level entity row (present only under [`TermScope::Embeddable`]
+    /// training where it appeared as a triple endpoint) — composition is deliberately **one level
+    /// deep**, never recursive: a
+    /// statement encoding lives in interaction space and must not be re-fed as an entity vector.
+    pub fn encode_statement(&self, h: Id, r: Id, t: Id) -> Option<Vec<f32>> {
+        let hr = self.entity_row(h)?;
+        let rr = self.rel_row(r)?;
+        let tr = self.entity_row(t)?;
+        Some(self.encode_statement_rows(hr, rr, tr))
+    }
+
+    /// The compositional STATEMENT-level encoding of the RDF 1.2 **quoted-triple term** `term` —
+    /// unpack its `(s, p, o)` constituent ids from the dictionary and delegate to
+    /// [`TrainedModel::encode_statement`]. `None` if `term` is not a quoted-triple term or any
+    /// constituent is unknown to the model. [SONNET-4.6] sq-1e5kk.
+    ///
+    /// This is the compositional counterpart of the **node-level** quoted-terms path (which stays
+    /// intact and independent): under [`TermScope::Embeddable`] a quoted term gets an *opaque*
+    /// entity row ([`TrainedModel::entity_row`]); this encoder
+    /// instead composes a vector from the quoted `(s, p, o)` *content*. The two coexist — and
+    /// because the constituents are ordinary atomic terms, the statement encoding is available
+    /// even under the default `IriBlank` scope, where the quoted term itself has **no** row.
+    pub fn encode_quoted_term(&self, graph: &Graph, term: Id) -> Option<Vec<f32>> {
+        match graph.dict.term_parts(term) {
+            TermParts::Triple([h, p, t]) => self.encode_statement(h, p, t),
+            _ => None,
+        }
+    }
+
     /// Mean L2 norm of the entity embeddings — a cheap **non-degeneracy** probe. A collapsed model
     /// (all rows equal / all-zero) has a tiny or zero spread; see [`TrainedModel::row_spread`].
     pub fn mean_entity_norm(&self) -> f32 {
@@ -348,23 +438,17 @@ impl TrainReport {
     }
 }
 
-/// Is the term id an **entity** (named/blank node), as opposed to a literal? Only entities get a
-/// row in entity space (mirrors [`crate::structure`]).
-fn is_entity(graph: &Graph, id: Id) -> bool {
-    matches!(
-        graph.dict.term_parts(id),
-        TermParts::Iri { .. } | TermParts::Blank(_)
-    )
-}
-
 /// The output of [`collect_positives`]: the positive triples, the entity id→row map, and the
 /// relation id→row map.
 type CollectedPositives = (Vec<[Id; 3]>, FxHashMap<Id, usize>, FxHashMap<Id, usize>);
 
-/// Collect the **object-property** positives `(h, r, t)` of `graph` (both ends entities) plus the
-/// distinct entity and relation id sets, assigning each a dense parameter row (sorted id order, so
-/// row assignment is deterministic and platform-independent).
-fn collect_positives(graph: &Graph) -> CollectedPositives {
+/// Collect the **object-property** positives `(h, r, t)` of `graph` (both ends embeddable under
+/// `scope` — see [`is_embeddable`]) plus the distinct entity and relation id sets, assigning each
+/// a dense parameter row (sorted id order, so row assignment is deterministic and
+/// platform-independent). Under [`TermScope::IriBlank`] this is the identical collection the
+/// pre-scope trainer performed; under [`TermScope::Embeddable`], `rdf:reifies` edges become
+/// positives and their quoted terms get entity rows.
+fn collect_positives(graph: &Graph, scope: TermScope) -> CollectedPositives {
     let mut positives: Vec<[Id; 3]> = Vec::new();
     let mut entity_ids: Vec<Id> = Vec::new();
     let mut rel_ids: Vec<Id> = Vec::new();
@@ -372,7 +456,7 @@ fn collect_positives(graph: &Graph) -> CollectedPositives {
     let mut seen_r = rustc_hash::FxHashSet::default();
 
     for [s, p, o] in graph.iter_ids() {
-        if is_entity(graph, s) && is_entity(graph, o) {
+        if is_embeddable(graph, s, scope) && is_embeddable(graph, o, scope) {
             positives.push([s, p, o]);
             if seen_e.insert(s) {
                 entity_ids.push(s);
@@ -416,7 +500,7 @@ pub fn train(
     constraints: &TypeConstraints,
     config: TrainConfig,
 ) -> (TrainedModel, TrainReport) {
-    let (positives, entity_row, rel_row) = collect_positives(graph);
+    let (positives, entity_row, rel_row) = collect_positives(graph, config.term_scope);
     // ComplEx needs an even `dim` (real + imaginary halves); round an odd value down. DistMult is
     // unconstrained. `dim.max(2)` keeps a degenerate dim=0 config from producing empty rows.
     let dim = match config.model {
@@ -439,7 +523,8 @@ pub fn train(
         *x = next_unit(&mut init_state) * scale;
     }
 
-    let sampler = NegativeSampler::new(graph, constraints, config.sampling);
+    let sampler =
+        NegativeSampler::new_scoped(graph, constraints, config.sampling, config.term_scope);
 
     // [OPUS-4.8] sq-2489d.4 (Phase 4): mine the per-triple provenance weights ONCE. Under
     // `WeightMode::Uniform` this still reads the graph but every `weight_of` returns 1.0, so the
@@ -487,16 +572,36 @@ pub fn train(
             // its own; weighting only the positive is the canonical CKRL form). Under
             // `WeightMode::Uniform` `w == 1.0`, so `lr * w == lr` and the step is unchanged.
             let w = prov_weights.weight_of([h, r, t], config.weight_mode);
-            let (l, _) =
-                step(config.model, &mut entity_emb, &mut rel_emb, dim, hr, rr, tr, 1.0, lr * w, l2);
+            let (l, _) = step(
+                config.model,
+                &mut entity_emb,
+                &mut rel_emb,
+                dim,
+                hr,
+                rr,
+                tr,
+                1.0,
+                lr * w,
+                l2,
+            );
             loss_sum += l as f64;
             loss_terms += 1;
 
             // Tail-corrupted negatives.
             for neg in sampler.sample([h, r, t], Corrupt::Tail, half_neg, neg_seed) {
                 let ntr = entity_row[&neg[2]];
-                let (l, _) =
-                    step(config.model, &mut entity_emb, &mut rel_emb, dim, hr, rr, ntr, 0.0, lr, l2);
+                let (l, _) = step(
+                    config.model,
+                    &mut entity_emb,
+                    &mut rel_emb,
+                    dim,
+                    hr,
+                    rr,
+                    ntr,
+                    0.0,
+                    lr,
+                    l2,
+                );
                 loss_sum += l as f64;
                 loss_terms += 1;
             }
@@ -508,8 +613,18 @@ pub fn train(
                 neg_seed ^ 0xDEAD_BEEF,
             ) {
                 let nhr = entity_row[&neg[0]];
-                let (l, _) =
-                    step(config.model, &mut entity_emb, &mut rel_emb, dim, nhr, rr, tr, 0.0, lr, l2);
+                let (l, _) = step(
+                    config.model,
+                    &mut entity_emb,
+                    &mut rel_emb,
+                    dim,
+                    nhr,
+                    rr,
+                    tr,
+                    0.0,
+                    lr,
+                    l2,
+                );
                 loss_sum += l as f64;
                 loss_terms += 1;
             }
@@ -558,8 +673,12 @@ fn step(
     l2: f32,
 ) -> (f32, f32) {
     match model {
-        ModelKind::DistMult => step_distmult(entity_emb, rel_emb, dim, h_row, r_row, t_row, label, lr, l2),
-        ModelKind::ComplEx => step_complex(entity_emb, rel_emb, dim, h_row, r_row, t_row, label, lr, l2),
+        ModelKind::DistMult => {
+            step_distmult(entity_emb, rel_emb, dim, h_row, r_row, t_row, label, lr, l2)
+        }
+        ModelKind::ComplEx => {
+            step_complex(entity_emb, rel_emb, dim, h_row, r_row, t_row, label, lr, l2)
+        }
     }
 }
 
@@ -812,26 +931,32 @@ ex:alice ex:owns ex:milo .
         // DistMult: the forward and reverse scores are MATHEMATICALLY identical (structural
         // symmetry); they differ only by f32 summation-order rounding, which is exactly the point —
         // DistMult cannot represent any directional preference, so it is near-random on this slice.
-        let dm_cfg = TrainConfig::small_with_model(ModelKind::DistMult, SamplingMode::Unconstrained, 7);
+        let dm_cfg =
+            TrainConfig::small_with_model(ModelKind::DistMult, SamplingMode::Unconstrained, 7);
         let (dm, _) = train(&c.graph, &tc, dm_cfg);
         let fwd = dm.score(a0, next, a1).unwrap();
         let rev = dm.score(a1, next, a0).unwrap();
         assert!(
             (fwd - rev).abs() <= 1e-5 * fwd.abs().max(1.0),
             "DistMult MUST be (mathematically) symmetric: (a0 next a1)={} vs (a1 next a0)={}",
-            fwd, rev
+            fwd,
+            rev
         );
 
         // ComplEx: trained on the forward-only chain, it must learn to score the forward edge above
         // its reverse on average over the chain (the asymmetry it exists to capture).
-        let cx_cfg = TrainConfig::small_with_model(ModelKind::ComplEx, SamplingMode::Unconstrained, 7);
+        let cx_cfg =
+            TrainConfig::small_with_model(ModelKind::ComplEx, SamplingMode::Unconstrained, 7);
         let (cx, _) = train(&c.graph, &tc, cx_cfg);
         let mut wins = 0usize;
         let mut nontrivial_gap = 0usize;
         let mut total = 0usize;
         for i in 0..39 {
             let x = c.graph.id_of(&iri(&format!("http://ex/a{}", i))).unwrap();
-            let y = c.graph.id_of(&iri(&format!("http://ex/a{}", i + 1))).unwrap();
+            let y = c
+                .graph
+                .id_of(&iri(&format!("http://ex/a{}", i + 1)))
+                .unwrap();
             let f = cx.score(x, next, y).unwrap();
             let r = cx.score(y, next, x).unwrap();
             if f > r {
@@ -864,7 +989,8 @@ ex:alice ex:owns ex:milo .
     fn complex_trains_and_is_non_degenerate_and_deterministic() {
         let c = close_for_vectorise(TTL, "turtle", Profile::Rdfs).unwrap();
         let tc = TypeConstraints::mine(&c.graph);
-        let cfg = TrainConfig::small_with_model(ModelKind::ComplEx, SamplingMode::TypeConstrained, 5);
+        let cfg =
+            TrainConfig::small_with_model(ModelKind::ComplEx, SamplingMode::TypeConstrained, 5);
         let (m1, r1) = train(&c.graph, &tc, cfg);
         assert!(r1.loss_decreased(), "ComplEx loss must decrease");
         assert!(m1.row_spread() > 1e-3, "ComplEx rows collapsed");
@@ -883,7 +1009,8 @@ ex:alice ex:owns ex:milo .
     fn complex_odd_dim_rounds_down_to_even() {
         let c = close_for_vectorise(TTL, "turtle", Profile::Rdfs).unwrap();
         let tc = TypeConstraints::mine(&c.graph);
-        let mut cfg = TrainConfig::small_with_model(ModelKind::ComplEx, SamplingMode::Unconstrained, 1);
+        let mut cfg =
+            TrainConfig::small_with_model(ModelKind::ComplEx, SamplingMode::Unconstrained, 1);
         cfg.dim = 31; // odd → rounded to 30
         let (m, _) = train(&c.graph, &tc, cfg);
         assert_eq!(m.dim, 30, "odd ComplEx dim must round down to even");
@@ -891,5 +1018,187 @@ ex:alice ex:owns ex:milo .
 
     fn iri(s: &str) -> oxrdf::Term {
         oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(s))
+    }
+
+    // ---- RDF 1.2 quoted-terms visibility (TermScope::Embeddable) ------------------------------
+
+    #[test]
+    fn presets_default_to_the_byte_stable_scope() {
+        // The presets audit: every constructor produces the OFF (byte-identical) baseline.
+        let a = TrainConfig::small(SamplingMode::TypeConstrained, 1);
+        assert_eq!(a.term_scope, TermScope::IriBlank);
+        let b = TrainConfig::small_with_model(ModelKind::DistMult, SamplingMode::Unconstrained, 2);
+        assert_eq!(b.term_scope, TermScope::IriBlank);
+    }
+
+    #[test]
+    fn embeddable_scope_gives_quoted_terms_rows_and_learns() {
+        // Under `TermScope::Embeddable` on the RDF 1.2 slice: `rdf:reifies` edges become
+        // positives, quoted terms get entity rows, training is deterministic, and loss decreases.
+        // Under the default `IriBlank` the same graph yields FEWER positives and NO quoted rows.
+        use sparq_core::dict::TermParts;
+        let ttl = crate::eval::synthetic_rdf12_ttl(48, 7);
+        let c = close_for_vectorise(&ttl, "ntriples", Profile::Rdfs).unwrap();
+        let g = &c.graph;
+        let tc = TypeConstraints::mine(g);
+
+        let quoted: Vec<sparq_core::dict::Id> = {
+            let mut ids: Vec<_> = g
+                .iter_ids()
+                .map(|[_, _, o]| o)
+                .filter(|&o| matches!(g.dict.term_parts(o), TermParts::Triple(_)))
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            ids
+        };
+        assert!(
+            !quoted.is_empty(),
+            "the rdf12 slice must carry quoted terms"
+        );
+
+        let mut on_cfg = TrainConfig::small(SamplingMode::Unconstrained, 5);
+        on_cfg.term_scope = TermScope::Embeddable;
+        let off_cfg = TrainConfig::small(SamplingMode::Unconstrained, 5);
+
+        let (on_model, on_report) = train(g, &tc, on_cfg);
+        let (off_model, off_report) = train(g, &tc, off_cfg);
+
+        // Visibility: the ON arm counts every `rdf:reifies` positive the OFF arm drops, and every
+        // quoted term has a dense row; the OFF arm has none.
+        assert!(
+            on_report.positives > off_report.positives,
+            "reifies positives must be visible ON ({}) and dropped OFF ({})",
+            on_report.positives,
+            off_report.positives
+        );
+        // Statement subjects are atomic and already rowed in BOTH arms (via their `rdf:type` /
+        // `ex:assertedBy` metadata triples), so the ON−OFF row delta is EXACTLY the quoted terms.
+        assert_eq!(on_report.entities, off_report.entities + quoted.len());
+        for &tt in &quoted {
+            assert!(
+                on_model.entity_row(tt).is_some(),
+                "quoted term must have an entity row ON"
+            );
+            assert!(
+                off_model.entity_row(tt).is_none(),
+                "quoted term must have NO row OFF"
+            );
+        }
+
+        // It learns, and it reproduces.
+        assert!(on_report.loss_decreased(), "ON-arm loss must decrease");
+        let (on_model2, on_report2) = train(g, &tc, on_cfg);
+        assert_eq!(on_report.epoch_loss, on_report2.epoch_loss);
+        assert_eq!(on_model.entity_emb, on_model2.entity_emb);
+        assert_eq!(on_model.rel_emb, on_model2.rel_emb);
+    }
+
+    // ---- Compositional STATEMENT-level encoder (sq-1e5kk) -------------------------------------
+
+    #[test]
+    fn statement_encoding_sums_to_the_score_for_both_models() {
+        // The load-bearing construction invariant: the encoding is the model's OWN interaction
+        // product before the final sum, so summing it (DistMult: all of it; ComplEx: the real
+        // half) must recover the scalar score — a wrong composition goes red here.
+        let c = close_for_vectorise(TTL, "turtle", Profile::Rdfs).unwrap();
+        let tc = TypeConstraints::mine(&c.graph);
+        let owns = c.graph.id_of(&iri("http://ex/owns")).unwrap();
+        let alice = c.graph.id_of(&iri("http://ex/alice")).unwrap();
+        let rex = c.graph.id_of(&iri("http://ex/rex")).unwrap();
+        let tom = c.graph.id_of(&iri("http://ex/tom")).unwrap();
+
+        for kind in [ModelKind::DistMult, ModelKind::ComplEx] {
+            let cfg = TrainConfig::small_with_model(kind, SamplingMode::TypeConstrained, 5);
+            let (model, _) = train(&c.graph, &tc, cfg);
+
+            let v = model.encode_statement(alice, owns, rex).unwrap();
+            assert_eq!(v.len(), model.dim, "{:?}: full-dim encoding", kind);
+            let score = model.score(alice, owns, rex).unwrap();
+            let summed: f32 = match kind {
+                ModelKind::DistMult => v.iter().sum(),
+                ModelKind::ComplEx => v[..model.dim / 2].iter().sum(),
+            };
+            assert!(
+                (summed - score).abs() <= 1e-5 * score.abs().max(1.0),
+                "{:?}: encoding must sum to the model score: {} vs {}",
+                kind,
+                summed,
+                score
+            );
+
+            // Compositional: changing one constituent changes the encoding.
+            let v2 = model.encode_statement(alice, owns, tom).unwrap();
+            assert_ne!(v, v2, "{:?}: the tail must change the encoding", kind);
+
+            // Unknown constituents abstain: `alice` has no RELATION row.
+            assert!(
+                model.encode_statement(alice, alice, rex).is_none(),
+                "{:?}: a non-relation predicate must yield None",
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn quoted_terms_encode_compositionally_under_both_scopes() {
+        // The statement-level encoder gives compositional access to a quoted triple's (s, p, o)
+        // content under BOTH scopes — including the default `IriBlank`, where the quoted term has
+        // no node row at all — and leaves the node-level path intact under `Embeddable`.
+        let ttl = crate::eval::synthetic_rdf12_ttl(48, 7);
+        let c = close_for_vectorise(&ttl, "ntriples", Profile::Rdfs).unwrap();
+        let g = &c.graph;
+        let tc = TypeConstraints::mine(g);
+
+        // A quoted term + its constituents (the slice reifies BASE claims, so every constituent
+        // is an already-rowed atomic term under both scopes).
+        let tt = g
+            .iter_ids()
+            .map(|[_, _, o]| o)
+            .find(|&o| matches!(g.dict.term_parts(o), TermParts::Triple(_)))
+            .expect("the rdf12 slice must carry quoted terms");
+        let TermParts::Triple([h, p, t]) = g.dict.term_parts(tt) else {
+            unreachable!()
+        };
+
+        // OFF arm (default `IriBlank`): NO node-level row, yet the statement encoding composes.
+        let (off, _) = train(g, &tc, TrainConfig::small(SamplingMode::Unconstrained, 5));
+        assert!(off.entity_row(tt).is_none(), "no node-level row OFF");
+        let v = off
+            .encode_quoted_term(g, tt)
+            .expect("statement encoding must compose from the constituents OFF");
+        assert_eq!(
+            v,
+            off.encode_statement(h, p, t).unwrap(),
+            "quoted-term encoding == the encoding of its unpacked (s, p, o)"
+        );
+        let score = off.score(h, p, t).unwrap();
+        let summed: f32 = v[..off.dim / 2].iter().sum(); // small() is ComplEx
+        assert!(
+            (summed - score).abs() <= 1e-5 * score.abs().max(1.0),
+            "real half must sum to the quoted content's score: {} vs {}",
+            summed,
+            score
+        );
+        // An atomic term is not a statement: the encoder abstains (the node-level path for
+        // atomic terms is `entity_row`/`entity_vec`, unchanged).
+        assert!(off.encode_quoted_term(g, h).is_none());
+
+        // ON arm (`Embeddable`): the node-level opaque row is INTACT and the statement-level
+        // encoding coexists as a distinct representation.
+        let mut on_cfg = TrainConfig::small(SamplingMode::Unconstrained, 5);
+        on_cfg.term_scope = TermScope::Embeddable;
+        let (on, _) = train(g, &tc, on_cfg);
+        let row = on.entity_row(tt).expect("node-level row intact ON");
+        let sv = on.encode_quoted_term(g, tt).expect("statement encoding ON");
+        assert_ne!(
+            sv.as_slice(),
+            on.entity_vec(row),
+            "statement-level encoding must be distinct from the node-level row"
+        );
+
+        // Derived, no new parameters ⇒ determinism is inherited from the trainer.
+        let (on2, _) = train(g, &tc, on_cfg);
+        assert_eq!(sv, on2.encode_quoted_term(g, tt).unwrap());
     }
 }

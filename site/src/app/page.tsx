@@ -28,7 +28,7 @@ import { SectionHeader } from "@/components/home/section-header";
 import { FlagshipCard } from "@/components/home/flagship-card";
 import { CapabilityCard } from "@/components/home/capability-card";
 
-const REPO_URL = "https://github.com/jeswr/sparq";
+const REPO_URL = "https://github.com/sparq-org/sparq";
 
 // The honesty tiers, told ONCE here (the per-surface badge/dot is the per-page pointer).
 // Order mirrors the strongest → most-hedged execution model. Each is a real Tier so the
@@ -38,6 +38,8 @@ const TIER_LEGEND: { tier: Tier; note: string }[] = [
   { tier: "live-bbjs", note: "in-tab proving via the 3rd-party bb.js UltraHonk prover" },
   { tier: "live-sim", note: "a faithful in-tab JS simulation of a native protocol" },
   { tier: "hosted", note: "a small hosted sparq-server where a wasm rebuild is uneconomic" },
+  // [GPT-5.6] sq-vw3ax.15 — the dot used by built opt-in crates has an explicit legend.
+  { tier: "native", note: "a built, opt-in Rust crate with code and docs linked from this site" },
   { tier: "walkthrough", note: "real, captured engine output replayed (native-only surface)" },
 ];
 

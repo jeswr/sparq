@@ -450,3 +450,588 @@ fn empty_or_is_fail_closed() {
         "a malformed compound operand must fail closed"
     );
 }
+
+// ===========================================================================
+// sq-c2aze — `odrl:recipient` constraints resolve party-collection membership
+// ([FABLE-5]): a recipient may be a party OR a member of an `odrl:PartyCollection`,
+// mirroring the assignee field's equality-or-membership lookup. Membership draws
+// ONLY on the request-supplied `with_party_membership(s)` evidence — with no edge,
+// recipient matching stays the flat base case (fail-closed, never widened).
+// ===========================================================================
+
+/// The bead's headline case: a `recipient isPartOf <PartyCollectionIRI>` constraint
+/// is satisfied by a *member* of that collection (previously the flat string split
+/// could only match the collection IRI itself).
+#[test]
+fn recipient_is_part_of_party_collection_grants_member() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix ex: <http://example.org/> .
+<urn:pol/rc> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target ex:x ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:isPartOf ;
+                      odrl:rightOperand ex:team ] ] .
+ex:team a odrl:PartyCollection .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    // alice IS a member of ex:team → the recipient constraint is satisfied → grant.
+    let member = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/alice")
+        .with_party_membership("http://example.org/alice", "http://example.org/team");
+    assert!(
+        evaluate(&p, &member).allow,
+        "a recipient who is a member of the party collection must be granted"
+    );
+    // bob supplies membership evidence — but in a DIFFERENT collection → DENY.
+    let nonmember = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/bob")
+        .with_party_membership("http://example.org/bob", "http://example.org/otherTeam");
+    assert!(
+        !evaluate(&p, &nonmember).allow,
+        "membership in a different collection must not match"
+    );
+    // NO membership evidence at all → the flat base case → DENY (never widened).
+    let no_evidence = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/alice");
+    assert!(
+        !evaluate(&p, &no_evidence).allow,
+        "without membership evidence the base case is unchanged (fail-closed)"
+    );
+}
+
+/// `recipient eq <collection>` also resolves membership — the exact
+/// equality-or-membership shape the assignee field gets via `party_matches`.
+#[test]
+fn recipient_eq_collection_matches_member() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix ex: <http://example.org/> .
+<urn:pol/re> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target ex:x ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;
+                      odrl:rightOperand ex:team ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let member = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/alice")
+        .with_party_membership("http://example.org/alice", "http://example.org/team");
+    assert!(evaluate(&p, &member).allow);
+    let outsider = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/eve")
+        .with_party_membership("http://example.org/eve", "http://example.org/otherTeam");
+    assert!(!evaluate(&p, &outsider).allow);
+}
+
+/// `recipient neq <collection>` EXCLUDES a member of that collection (the negative
+/// dual — the carve-out extends to members, mirroring the taxonomic `neq`; being in
+/// the excluded group is being the excluded recipient).
+#[test]
+fn recipient_neq_collection_excludes_members() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix ex: <http://example.org/> .
+<urn:pol/rn> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target ex:x ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:neq ;
+                      odrl:rightOperand ex:blocked ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    // A member of the excluded collection is ALSO excluded (no widening away).
+    let blocked_member = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/mallory")
+        .with_party_membership("http://example.org/mallory", "http://example.org/blocked");
+    assert!(
+        !evaluate(&p, &blocked_member).allow,
+        "a member of the excluded collection must be denied"
+    );
+    // A party whose membership evidence names an UNRELATED collection is not excluded.
+    let outsider = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/carol")
+        .with_party_membership("http://example.org/carol", "http://example.org/team");
+    assert!(evaluate(&p, &outsider).allow);
+}
+
+/// A PROHIBITION whose recipient constraint names a collection carves out its
+/// members (deny-overrides through the same membership resolution).
+#[test]
+fn recipient_prohibition_carves_out_collection_members() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix ex: <http://example.org/> .
+<urn:pol/rp> a odrl:Set ;
+    odrl:permission  [ odrl:action odrl:read ; odrl:target ex:x ] ;
+    odrl:prohibition [ odrl:action odrl:read ; odrl:target ex:x ;
+        odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:isPartOf ;
+                          odrl:rightOperand ex:blocked ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let blocked_member = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/mallory")
+        .with_party_membership("http://example.org/mallory", "http://example.org/blocked");
+    assert!(
+        !evaluate(&p, &blocked_member).allow,
+        "the prohibition must carve out a member of the blocked collection"
+    );
+    let outsider = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/carol")
+        .with_party_membership("http://example.org/carol", "http://example.org/team");
+    assert!(
+        evaluate(&p, &outsider).allow,
+        "a non-member is not carved out"
+    );
+}
+
+/// An EXPLICIT `odrl:recipient` context value (the disclosure target need not be
+/// the requester) resolves through the same membership evidence.
+#[test]
+fn explicit_recipient_context_resolves_via_membership() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix ex: <http://example.org/> .
+<urn:pol/rx> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target ex:x ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:isPartOf ;
+                      odrl:rightOperand ex:team ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    // alice asks, disclosing to dave — dave (the explicit recipient) is the member.
+    let req = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/alice")
+        .with(
+            "http://www.w3.org/ns/odrl/2/recipient",
+            Value::Iri("http://example.org/dave".into()),
+        )
+        .with_party_membership("http://example.org/dave", "http://example.org/team");
+    assert!(evaluate(&p, &req).allow);
+    // alice's OWN membership does not stand in for the explicit recipient's.
+    let wrong = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/alice")
+        .with(
+            "http://www.w3.org/ns/odrl/2/recipient",
+            Value::Iri("http://example.org/dave".into()),
+        )
+        .with_party_membership("http://example.org/alice", "http://example.org/team");
+    assert!(!evaluate(&p, &wrong).allow);
+}
+
+/// The two beads compose: `recipient isNoneOf "<g1>|<g2>"` (sq-uaz85) excludes a
+/// MEMBER of g1 through the membership resolution (sq-c2aze); an unrelated party
+/// with membership evidence in another group still grants.
+#[test]
+fn recipient_is_none_of_excludes_collection_members() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix ex: <http://example.org/> .
+<urn:pol/rno> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target ex:x ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:isNoneOf ;
+        odrl:rightOperand "http://example.org/g1|http://example.org/g2" ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let g1_member = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/mallory")
+        .with_party_membership("http://example.org/mallory", "http://example.org/g1");
+    assert!(
+        !evaluate(&p, &g1_member).allow,
+        "a member of an excluded collection must be denied under isNoneOf"
+    );
+    let outsider = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/carol")
+        .with_party_membership("http://example.org/carol", "http://example.org/team");
+    assert!(evaluate(&p, &outsider).allow);
+}
+
+/// The `recipient_status` audit surface reports the membership-resolved verdict —
+/// exactly what the evaluator acts on (member → Satisfied; non-member →
+/// DefinitelyUnsatisfied; no identity → Unprovable).
+#[test]
+fn recipient_status_reflects_membership_resolution() {
+    use sparq_policy::{recipient_status, RecipientMatch};
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix ex: <http://example.org/> .
+<urn:pol/rs> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target ex:x ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:isPartOf ;
+                      odrl:rightOperand ex:team ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let rule = &p.permissions[0];
+    let member = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/alice")
+        .with_party_membership("http://example.org/alice", "http://example.org/team");
+    assert_eq!(recipient_status(rule, &member), RecipientMatch::Satisfied);
+    let nonmember = Request::new(left("read"))
+        .on("http://example.org/x")
+        .by("http://example.org/bob")
+        .with_party_membership("http://example.org/bob", "http://example.org/otherTeam");
+    assert_eq!(
+        recipient_status(rule, &nonmember),
+        RecipientMatch::DefinitelyUnsatisfied
+    );
+    let anonymous = Request::new(left("read")).on("http://example.org/x");
+    assert_eq!(
+        recipient_status(rule, &anonymous),
+        RecipientMatch::Unprovable
+    );
+}
+
+// ===========================================================================
+// sq-dkuff — LIST-valued LogicalConstraint combinator operands ([FABLE-5]):
+// `odrl:or ( <c1> <c2> )` binds the combinator object to the RDF-collection
+// HEAD; pre-fold that head degraded to the unsatisfiable guard (fail-closed on
+// permissions, but silently DISABLING a prohibition's compound carve-out). The
+// head is now expanded into its member constraints before assembly.
+// ===========================================================================
+
+/// `odrl:or` with a LIST-valued operand set parses to the member constraints and
+/// evaluates faithfully (grant on either member purpose, deny otherwise).
+#[test]
+fn or_list_valued_operand_set() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/orlist> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:or (
+        [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+          odrl:rightOperand <urn:purpose/research> ]
+        [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+          odrl:rightOperand <urn:purpose/teaching> ] ) ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let lcs = &p.permissions[0].logical_constraints;
+    assert_eq!(lcs.len(), 1, "the compound must parse");
+    // Structural witness: the LIST head must be replaced by its TWO member
+    // constraints (pre-fold this was ONE unsatisfiable-guard operand).
+    assert_eq!(
+        lcs[0].operands.len(),
+        2,
+        "the list head must expand to its member operands, got {:?}",
+        lcs[0].operands
+    );
+    let base = Request::new(left("read")).on("urn:asset/x");
+    for purpose in ["urn:purpose/research", "urn:purpose/teaching"] {
+        let req = base.clone().for_purpose(Value::Iri(purpose.into()));
+        assert!(evaluate(&p, &req).allow, "OR member {purpose} must grant");
+    }
+    // Non-member purpose → both operands definitely fail → deny.
+    let marketing = base
+        .clone()
+        .for_purpose(Value::Iri("urn:purpose/marketing".into()));
+    assert!(!evaluate(&p, &marketing).allow);
+    // No purpose evidence → unprovable → fail-closed.
+    assert!(!evaluate(&p, &base).allow);
+}
+
+/// `odrl:and` with a LIST-valued operand set (a closed time window) — inside the
+/// window grants, outside/unprovable denies.
+#[test]
+fn and_list_valued_time_window() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:pol/andlist> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:and (
+        [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:gt ;
+          odrl:rightOperand "2024-01-01T00:00:00Z"^^xsd:dateTime ]
+        [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ;
+          odrl:rightOperand "2024-12-31T23:59:59Z"^^xsd:dateTime ] ) ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    assert_eq!(p.permissions[0].logical_constraints[0].operands.len(), 2);
+    let base = Request::new(left("read")).on("urn:asset/x");
+    assert!(evaluate(&p, &base.clone().at("2024-06-15T12:00:00Z")).allow);
+    assert!(!evaluate(&p, &base.clone().at("2025-06-01T00:00:00Z")).allow);
+    assert!(!evaluate(&p, &base).allow, "no time evidence → fail-closed");
+}
+
+/// THE widening-hazard case the fold closes: a PROHIBITION whose compound uses a
+/// LIST-valued `odrl:and`. Pre-fold the head degraded to an unsatisfiable operand,
+/// the carve-out never fired, and the sibling permission granted INSIDE the
+/// prohibited window (deny-overrides silently bypassed).
+#[test]
+fn prohibition_list_valued_and_fires_inside_window() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:pol/plist> a odrl:Set ;
+    odrl:permission [ odrl:action odrl:read ; odrl:target <urn:asset/x> ] ;
+    odrl:prohibition [ odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+        odrl:constraint [ a odrl:LogicalConstraint ; odrl:and (
+            [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:gt ;
+              odrl:rightOperand "2024-01-01T00:00:00Z"^^xsd:dateTime ]
+            [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ;
+              odrl:rightOperand "2024-12-31T23:59:59Z"^^xsd:dateTime ] ) ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let base = Request::new(left("read")).on("urn:asset/x");
+    // Inside the prohibited window → the compound holds → DENY (pre-fold: allow).
+    assert!(
+        !evaluate(&p, &base.clone().at("2024-06-01T00:00:00Z")).allow,
+        "a list-valued prohibition compound must fire inside its window"
+    );
+    // Outside the window → the carve-out lifts → the permission grants.
+    assert!(evaluate(&p, &base.clone().at("2025-06-01T00:00:00Z")).allow);
+}
+
+/// Mixed operand forms on ONE combinator — a direct object AND a list — merge
+/// (in order, deduplicated) into one operand set.
+#[test]
+fn mixed_direct_and_list_operands_merge() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/mixed> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ;
+        odrl:or _:c1 ;
+        odrl:or ( _:c2 ) ] ] .
+_:c1 odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+     odrl:rightOperand <urn:purpose/research> .
+_:c2 odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+     odrl:rightOperand <urn:purpose/teaching> .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let lcs = &p.permissions[0].logical_constraints;
+    assert_eq!(lcs.len(), 1);
+    assert_eq!(lcs[0].operands.len(), 2, "direct + list member must merge");
+    let base = Request::new(left("read")).on("urn:asset/x");
+    for purpose in ["urn:purpose/research", "urn:purpose/teaching"] {
+        let req = base.clone().for_purpose(Value::Iri(purpose.into()));
+        assert!(
+            evaluate(&p, &req).allow,
+            "merged member {purpose} must grant"
+        );
+    }
+    let other = base.for_purpose(Value::Iri("urn:purpose/marketing".into()));
+    assert!(!evaluate(&p, &other).allow);
+}
+
+/// A list member that is itself a NESTED compound `odrl:LogicalConstraint`
+/// recurses through the normal compound assembly (an `odrl:or` of a listed
+/// `odrl:and` window).
+#[test]
+fn list_member_nested_compound_recurses() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+<urn:pol/nestedlist> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:or (
+        [ a odrl:LogicalConstraint ; odrl:and (
+            [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:gt ;
+              odrl:rightOperand "2024-01-01T09:00:00Z"^^xsd:dateTime ]
+            [ odrl:leftOperand odrl:dateTime ; odrl:operator odrl:lt ;
+              odrl:rightOperand "2024-01-01T17:00:00Z"^^xsd:dateTime ] ) ]
+        [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+          odrl:rightOperand <urn:purpose/research> ] ) ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    let base = Request::new(left("read")).on("urn:asset/x");
+    // In the nested window → the compound member holds → grant.
+    assert!(evaluate(&p, &base.clone().at("2024-01-01T12:00:00Z")).allow);
+    // Outside the window but the research purpose → the atomic member holds → grant.
+    let research = base
+        .clone()
+        .at("2025-01-01T12:00:00Z")
+        .for_purpose(Value::Iri("urn:purpose/research".into()));
+    assert!(evaluate(&p, &research).allow);
+    // Neither member holds → deny.
+    let neither = base
+        .at("2025-01-01T12:00:00Z")
+        .for_purpose(Value::Iri("urn:purpose/marketing".into()));
+    assert!(!evaluate(&p, &neither).allow);
+}
+
+/// An EMPTY list operand (`odrl:or ()` — `rdf:nil` directly) REFUSES the whole
+/// parse: per-operand degradation would silently DISABLE a prohibition's compound
+/// carve-out (deny-overrides bypassed), so the degenerate shape is rejected
+/// outright (fail-closed on both rule kinds).
+#[test]
+fn empty_list_operand_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/emptylist> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:or () ] ] .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("EMPTY collection operand"),
+        "an empty combinator collection must refuse the parse, got: {err}"
+    );
+}
+
+/// A NESTED-list member (a list inside the list) REFUSES the whole parse — one
+/// expansion level only, mirroring the rightOperand fold; silently flattening or
+/// degrading could mis-honour the authored structure on either rule kind.
+#[test]
+fn nested_list_member_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/nestednil> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:and (
+        ( [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+            odrl:rightOperand <urn:purpose/x> ] ) ) ] ] .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("NESTED-list member"),
+        "a nested-list member must refuse the parse, got: {err}"
+    );
+}
+
+/// A MALFORMED collection (broken tail — a cons cell with `rdf:first` but no
+/// `rdf:rest`) REFUSES the parse: honouring the valid PREFIX of an `odrl:and`
+/// operand list would make the compound EASIER to satisfy than authored
+/// (widening). Written with explicit cons-cell triples (Turtle `( … )` sugar
+/// always emits well-formed lists).
+#[test]
+fn broken_tail_list_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/broken> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:and _:l1 ] ] .
+_:l1 rdf:first _:c1 .
+_:c1 odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+     odrl:rightOperand <urn:purpose/x> .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection operand"),
+        "a broken-tail list must refuse the parse, got: {err}"
+    );
+}
+
+/// A CYCLIC collection (`rdf:rest` looping back to the head) REFUSES the parse —
+/// a cycle never reaches `rdf:nil`, so the collection has no well-defined member
+/// set. Crucially this holds on a PROHIBITION too: a degraded compound would
+/// silently disable the carve-out and let the sibling permission grant (widening).
+#[test]
+fn cyclic_list_on_prohibition_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/cyclic> a odrl:Set ;
+    odrl:permission [ odrl:action odrl:read ; odrl:target <urn:asset/x> ] ;
+    odrl:prohibition [ odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+        odrl:constraint [ a odrl:LogicalConstraint ; odrl:and _:l1 ] ] .
+_:l1 rdf:first _:c1 ; rdf:rest _:l1 .
+_:c1 odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+     odrl:rightOperand <urn:purpose/x> .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection operand"),
+        "a cyclic list (esp. gating a prohibition) must refuse the parse, got: {err}"
+    );
+}
+
+/// A FORKED cons cell (two distinct `rdf:rest` values) REFUSES the parse:
+/// honouring one deterministic fork of an ambiguous collection could silently
+/// drop authored members.
+#[test]
+fn forked_list_cell_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/forked> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:and _:l1 ] ] .
+_:l1 rdf:first _:c1 ; rdf:rest _:l2 , rdf:nil .
+_:l2 rdf:first _:c2 ; rdf:rest rdf:nil .
+_:c1 odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+     odrl:rightOperand <urn:purpose/x> .
+_:c2 odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+     odrl:rightOperand <urn:purpose/y> .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection operand"),
+        "a forked list cell must refuse the parse, got: {err}"
+    );
+}
+
+/// Regression: the direct multi-object combinator form (`odrl:or <c1>, <c2>` — the
+/// SolidLab suite's form) is untouched by the list fold.
+#[test]
+fn direct_object_operands_unchanged_by_list_fold() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/direct> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:or
+        [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+          odrl:rightOperand <urn:purpose/research> ] ,
+        [ odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+          odrl:rightOperand <urn:purpose/teaching> ] ] ] .
+"#;
+    let p = parse_policy_str(ttl, "turtle").unwrap();
+    assert_eq!(p.permissions[0].logical_constraints[0].operands.len(), 2);
+    let req = Request::new(left("read"))
+        .on("urn:asset/x")
+        .for_purpose(Value::Iri("urn:purpose/teaching".into()));
+    assert!(evaluate(&p, &req).allow);
+}
+
+/// A HEAD-position rest-only cons cell (`rdf:rest` but NO `rdf:first`) is
+/// invisible to the `rdf:first`-keyed cells table, so it would silently bypass
+/// collection validation and degrade — disabling a PROHIBITION's compound
+/// (widening). It REFUSES the parse instead.
+#[test]
+fn rest_only_head_on_prohibition_refuses_the_parse() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/restonly> a odrl:Set ;
+    odrl:permission [ odrl:action odrl:read ; odrl:target <urn:asset/x> ] ;
+    odrl:prohibition [ odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+        odrl:constraint [ a odrl:LogicalConstraint ; odrl:and _:l1 ] ] .
+_:l1 rdf:rest rdf:nil .
+"#;
+    let err = parse_policy_str(ttl, "turtle").unwrap_err();
+    assert!(
+        err.contains("MALFORMED collection operand"),
+        "a rest-only head cell must refuse the parse, got: {err}"
+    );
+}
+
+/// Constraint-reading PRECEDENCE: a combinator operand that is a real atomic
+/// constraint keeps that reading even when the node is `rdf:nil` (pathological,
+/// but previously accepted — the refusal paths must stay strictly narrow).
+#[test]
+fn nil_with_constraint_reading_keeps_precedence() {
+    let ttl = r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+<urn:pol/nilatom> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <urn:asset/x> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:or rdf:nil ] ] .
+rdf:nil odrl:leftOperand odrl:purpose ; odrl:operator odrl:eq ;
+    odrl:rightOperand <urn:purpose/x> .
+"#;
+    let p = parse_policy_str(ttl, "turtle")
+        .expect("a nil node WITH a constraint reading must keep it, not refuse");
+    let base = Request::new(left("read")).on("urn:asset/x");
+    let ok = base.clone().for_purpose(Value::Iri("urn:purpose/x".into()));
+    assert!(evaluate(&p, &ok).allow, "the atomic reading must evaluate");
+    let wrong = base.for_purpose(Value::Iri("urn:purpose/y".into()));
+    assert!(!evaluate(&p, &wrong).allow);
+}

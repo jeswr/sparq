@@ -24,6 +24,10 @@ publish = false
 # lineage pay nothing (no sparq-reason dep) unless they ask for `reason`.
 [features]
 default = []
+# [GPT-5.6] sq-lsp7k.17: bounded missing-answer explanation for one BGP.
+# The public surface and its direct spargebra dependency do not exist unless
+# explicitly requested.
+why-not = ["dep:spargebra"]
 # Map a sparq-reason `why()` proof tree → PROV-O RDF (the `reason` module). Pulls
 # sparq-reason with its `explain` feature (the `ProofTree`/`ProofNode` surface).
 reason = ["dep:sparq-reason"]
@@ -34,12 +38,16 @@ sparq-core = { path = "../sparq-core" }
 # The CONSTRUCT derivation we wrap (and, by extension, DESCRIBE).
 sparq-engine = { path = "../sparq-engine" }
 oxrdf = { workspace = true }
+# Prefix-compacted Turtle output for `Derivation` and `UpdateDerivation`.
+# [GPT-5.6] sq-ijw35: promoted from the test-only dependency below; no new crate.
+oxttl = { workspace = true }
+# Parsed BGP algebra, only for the opt-in missing-answer explainer.
+spargebra = { workspace = true, optional = true }
 # Reasoner proof trees (`why()`), only under the `reason` feature. `explain` is the
 # sparq-reason feature that exposes ProofTree/ProofNode; default-features stay on
 # (parallel materialization) — sparq-prov never enters the wasm graph.
 sparq-reason = { path = "../sparq-reason", features = ["explain"], optional = true }
 
 [dev-dependencies]
-# Round-trip the emitted PROV-O graph back through the loader to prove it is
-# well-formed RDF (Turtle ⊇ N-Triples).
-oxttl = { workspace = true }
+# [GPT-5.6] sq-hggpo: generate derivation shapes for structural PROV-O properties.
+proptest = "1"

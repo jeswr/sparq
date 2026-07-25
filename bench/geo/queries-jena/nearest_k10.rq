@@ -1,0 +1,28 @@
+# [FABLE-5] sq-a8anf — PINNED jena-geosparql rendering of the `nearest_k10`
+# workload for scripts/bench/geo-same-box.sh. sparq evaluates k-nearest via the
+# GeoIndex::nearest index surface; the DIALECT DIFFERS here because standard
+# GeoSPARQL has no k-nearest function, so the rendering is a distance
+# ORDER BY + LIMIT k (any engine is free to optimize it internally;
+# jena-geosparql's non-standard spatial:nearby needs a radius, so it is not a
+# faithful k-NN rendering — see research/gap-geo-2026-07.md). ?e tie-breaks
+# equal distances for a deterministic result SET; only the result-set SIZE is
+# cross-checked (== k on a corpus larger than k, the same invariant sparq's
+# expected.tsv pins), never coordinates or ordering.
+# SORT KEY (sq-a8anf): the original standard-form key
+#   geof:distance(?wkt, centre, uom:metre)
+# throws per row on jena 5.4.0 (planar degree-space Euclidean + degree->metre
+# UnitsConversionException — research/gap-geo-2026-07.md §6d); in ORDER BY the
+# per-row error does NOT drop rows, it silently DEGENERATES the ordering to the
+# ?e tie-break, so the ==k size crosscheck stayed vacuously green while jena
+# was not distance-sorting at all (wave-1 nearest_k timings retracted, §6b).
+# spatialF:greatCircleGeom is Jena's working great-circle distance (metres, on
+# the same mean sphere as sparq's haversine) — verified on a fixture to return
+# the true nearest set.
+PREFIX geo:      <http://www.opengis.net/ont/geosparql#>
+PREFIX spatialF: <http://jena.apache.org/function/spatial#>
+PREFIX uom:      <http://www.opengis.net/def/uom/OGC/1.0/>
+SELECT ?e WHERE {
+  ?e geo:asWKT ?wkt .
+}
+ORDER BY ASC(spatialF:greatCircleGeom(?wkt, "POINT(0 51)"^^geo:wktLiteral, uom:metre)) ?e
+LIMIT 10

@@ -1,0 +1,14 @@
+@prefix ufo: <urn:ufo-sn3:> .
+@prefix ex:  <urn:ufo-sn3:case:validation:> .
+
+ex:w a ufo:World;
+    ufo:closedFor ex:employmentScope.
+
+ex:employmentScope a ufo:ValidationScope;
+    ufo:requiredProposition ex:aliceEmployed.
+
+ex:aliceEmployed a ufo:Proposition;
+    ufo:subj ex:alice;
+    ufo:pred ex:employedBy;
+    ufo:obj ex:acme;
+    ufo:notHoldsIn ex:w.

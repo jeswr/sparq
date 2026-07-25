@@ -116,7 +116,9 @@ fn round_trip_through_enforcement() {
     assert!(store.accessible(&Session::default(), Mode::Read).is_empty());
 
     // End-to-end: alice's authorized query returns the content; others see nothing.
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     assert_eq!(store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 1);
     assert_eq!(store.query_as(&mallory, Mode::Read, sel).unwrap().rows.len(), 0);
     assert_eq!(store.query_as(&Session::default(), Mode::Read, sel).unwrap().rows.len(), 0);
@@ -562,7 +564,9 @@ fn recipient_constraint_persists_as_rechecked_condition() {
     assert!(store.accessible(&Session::default(), Mode::Read).is_empty(), "anonymous denied");
 
     // End-to-end through query_as: only carol sees the content.
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     let carol = Session { agent: Some(CAROL), client: None, issuer: None, now: None };
     let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
     assert_eq!(store.query_as(&carol, Mode::Read, sel).unwrap().rows.len(), 1);
@@ -889,7 +893,9 @@ fn withdrawn_permission_loses_access_after_refresh() {
         store.accessible(&alice, Mode::Read).iter().any(|g| g.as_str() == N1),
         "bridged grant is live before withdrawal",
     );
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     assert_eq!(store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 1);
 
     // The policy WITHDRAWS the permission → refresh against the new (empty) policy.
@@ -1483,7 +1489,9 @@ fn reads_n1(store: &mut PodStore, agent: &str) -> bool {
 #[test]
 fn purpose_match_grants_through_enforcement() {
     let pol = purpose_read_policy();
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
 
     // (a) Matching purpose → grant → alice reads through accessible AND query_as.
@@ -1516,7 +1524,9 @@ fn missing_purpose_fails_closed_through_enforcement() {
     let out = store.materialize_odrl_permission(&purpose_read_policy(), &no_purpose);
     assert!(!out.granted, "missing purpose must NOT grant: {out:?}");
     assert!(!reads_n1(&mut store, ALICE), "no access when purpose is unstated");
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
     assert_eq!(store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 0);
 }
@@ -1683,7 +1693,9 @@ fn recipient_neq_grants_everyone_except_named_party() {
     );
 
     // End-to-end via query_as: bob sees nothing, carol sees the content.
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     let bob = Session { agent: Some(BOB), client: None, issuer: None, now: None };
     let carol = Session { agent: Some(CAROL), client: None, issuer: None, now: None };
     assert_eq!(store.query_as(&bob, Mode::Read, sel).unwrap().rows.len(), 0);
@@ -1840,7 +1852,9 @@ fn refresh_noneof_grant_replays_changed_exclusion_set() {
     assert!(!ms[0].1.contains("bob.ex"), "no residual bob carve-out: {ms:?}");
 
     // End-to-end through query_as confirms the flip at the query layer.
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     let bob = Session { agent: Some(BOB), client: None, issuer: None, now: None };
     let dave = Session { agent: Some(DAVE), client: None, issuer: None, now: None };
     assert_eq!(store.query_as(&bob, Mode::Read, sel).unwrap().rows.len(), 1, "bob now reads");
@@ -1951,7 +1965,9 @@ fn recipient_eq_and_neq_grants_only_carol() {
     assert!(store.accessible(&Session::default(), Mode::Read).is_empty(), "anonymous denied");
 
     // End-to-end via query_as: only carol sees the content.
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     let carol = Session { agent: Some(CAROL), client: None, issuer: None, now: None };
     let bob = Session { agent: Some(BOB), client: None, issuer: None, now: None };
     assert_eq!(store.query_as(&carol, Mode::Read, sel).unwrap().rows.len(), 1);
@@ -2039,7 +2055,9 @@ fn conditional_deny_overrides_allow_for_carved_party() {
     assert!(!reads(&mut store, CAROL), "DENY-OVERRIDES: carol loses access");
     assert!(reads(&mut store, BOB), "bob keeps the allow (only carol is denied)");
     // End-to-end query_as: carol sees nothing, bob sees the content.
-    let sel = "SELECT ?t WHERE { ?s <https://ex.dev/ns#title> ?t }";
+    // [OPUS-4.8] sq-gq28y: explicit GRAPH ?g (empty-default spec flip — identical row count
+    // for this single-triple probe as the old union-always bare pattern).
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
     let carol = Session { agent: Some(CAROL), client: None, issuer: None, now: None };
     let bob = Session { agent: Some(BOB), client: None, issuer: None, now: None };
     assert_eq!(store.query_as(&carol, Mode::Read, sel).unwrap().rows.len(), 0);
@@ -2247,4 +2265,634 @@ fn unset_conflict_is_not_refused() {
     let out = materialize_policy(&mut g, &conflicting_write_policy(""), &req);
     assert!(!out.refused, "an undeclared conflict strategy defaults to deny-overrides: {out:?}");
     assert!(out.prohibited, "the deny still materializes: {out:?}");
+}
+
+// ===========================================================================
+// [FABLE-5] sq-5fkpp — faithful `odrl:isAnyOf` / `odrl:isNoneOf` mapping.
+// `recipient isAnyOf <set>` → one re-checked agent head per member (exactly the
+// `isPartOf` shape — the evaluator matches both operators as the same flat lexical
+// set, sq-uaz85); `recipient isNoneOf <set>` → one ACP noneOf exceptMatcher per
+// member (the list-valued `neq` dual, sq-5037). Previously both routed through the
+// catch-all to Unmappable, freezing the whole rule one-shot.
+// ===========================================================================
+
+/// bob OR carol may read n1 — `recipient isAnyOf "bob|carol"`.
+fn recipient_isanyof_policy() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/anyof> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ;
+                      odrl:operator odrl:isAnyOf ;
+                      odrl:rightOperand "https://bob.ex/card#me|https://carol.ex/card#me" ] ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+/// everyone EXCEPT bob and dave may read n1 — `recipient isNoneOf "bob|dave"`.
+fn recipient_isnoneof_policy() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/noneof> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ;
+                      odrl:operator odrl:isNoneOf ;
+                      odrl:rightOperand "https://bob.ex/card#me|https://dave.ex/card#me" ] ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+/// A recipient-`isNoneOf`-style permission with an arbitrary operator + right operand
+/// spliced in (for the malformed-operand fail-closed cases).
+fn recipient_set_policy(operator: &str, right_operand: &str) -> sparq_policy::Policy {
+    let ttl = format!(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/setop> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ;
+                      odrl:operator odrl:{operator} ;
+                      odrl:rightOperand {right_operand} ] ] .
+"#
+    );
+    parse_policy_str(&ttl, "turtle").expect("policy parses")
+}
+
+/// Bridge ↔ evaluator PARITY over identified recipients: after bridging (materialized
+/// by ALICE — the constraint need not hold against the materializing party), each
+/// candidate agent's per-session access equals `sparq_policy::evaluate`'s verdict for
+/// a request naming that party. Anonymous sessions are deliberately OUT of the panel:
+/// the evaluator is fail-closed on missing identity, while the bridged noneOf shape
+/// keeps the everyone-except public head — the accepted sq-5037 semantics (asserted
+/// separately below).
+fn assert_bridge_evaluator_parity(pol: &sparq_policy::Policy) {
+    let mut store = PodStore::new(pod());
+    let mat = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission_conditional(pol, &mat).granted);
+    for agent in [ALICE, BOB, CAROL, DAVE] {
+        let bridged = reads(&mut store, agent);
+        let evaluated =
+            sparq_policy::evaluate(pol, &Request::new(odrl("read")).on(N1).by(agent)).allow;
+        assert_eq!(bridged, evaluated, "bridge/evaluator parity for {agent}");
+    }
+}
+
+// 30. `isAnyOf` BRIDGE SHAPE: one re-checked agent head per set member (NOT a public
+//     head), exactly as `isPartOf`.
+#[test]
+fn recipient_isanyof_persists_one_condition_per_member() {
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_permission_conditional(&mut g, &recipient_isanyof_policy(), &req);
+    assert!(out.granted, "isAnyOf maps faithfully to agent conditions: {out:?}");
+    assert_eq!(cond_grants_for(&g, Some(BOB)), 1, "bob head present");
+    assert_eq!(cond_grants_for(&g, Some(CAROL)), 1, "carol head present");
+    assert_eq!(
+        cond_grants_for(&g, Some("https://sparq.dev/ns/auth#Public")),
+        0,
+        "a positive set is per-member heads, never a public head"
+    );
+    assert!(except_matchers(&g).is_empty(), "no exception on a positive set");
+
+    // RE-CHECKED end-to-end: members read, everyone else (incl. the materializer) not.
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&recipient_isanyof_policy(), &req).granted);
+    assert!(reads(&mut store, BOB), "bob in set");
+    assert!(reads(&mut store, CAROL), "carol in set");
+    assert!(!reads(&mut store, ALICE), "alice (the materializer) not in set");
+    assert!(!reads(&mut store, DAVE), "dave not in set");
+    assert!(store.accessible(&Session::default(), Mode::Read).is_empty(), "anonymous denied");
+}
+
+// 31. `isNoneOf` BRIDGE SHAPE: a single public head carrying one exceptMatcher PER
+//     member of the exclusion set (the list-valued `neq` / ACP noneOf dual).
+#[test]
+fn recipient_isnoneof_emits_one_exception_per_member() {
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_permission_conditional(&mut g, &recipient_isnoneof_policy(), &req);
+    assert!(out.granted, "isNoneOf maps faithfully to a noneOf condition: {out:?}");
+    assert_eq!(
+        cond_grants_for(&g, Some("https://sparq.dev/ns/auth#Public")),
+        1,
+        "everyone-except is a single public head"
+    );
+    let ms = except_matchers(&g);
+    assert_eq!(ms.len(), 2, "one exceptMatcher per excluded member: {ms:?}");
+    assert!(ms.iter().any(|m| m.1.contains("bob.ex")), "bob carved out: {ms:?}");
+    assert!(ms.iter().any(|m| m.1.contains("dave.ex")), "dave carved out: {ms:?}");
+
+    // RE-CHECKED end-to-end: everyone reads EXCEPT the set members. The public head
+    // matches anonymous too — the accepted sq-5037 everyone-except semantics.
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&recipient_isnoneof_policy(), &req).granted);
+    assert!(reads(&mut store, ALICE), "alice (not excluded) granted");
+    assert!(reads(&mut store, CAROL), "carol (not excluded) granted");
+    assert!(!reads(&mut store, BOB), "bob carved out");
+    assert!(!reads(&mut store, DAVE), "dave carved out");
+    assert!(
+        store.accessible(&Session::default(), Mode::Read).iter().any(|gr| gr.as_str() == N1),
+        "anonymous (public) is granted; only the set members are excepted"
+    );
+}
+
+// 32. PARITY with the evaluator on both operators, over an identified-agent panel:
+//     the persisted, re-checked condition must verdict exactly as `evaluate` would.
+//     Non-vacuous vs the pre-fix routing: Unmappable would freeze a one-shot verdict
+//     scoped to the MATERIALIZING party (deny-all for isAnyOf since alice ∉ set;
+//     alice-only for isNoneOf), flipping the members'/non-members' verdicts.
+#[test]
+fn isanyof_bridge_matches_evaluator_verdicts() {
+    assert_bridge_evaluator_parity(&recipient_isanyof_policy());
+}
+
+#[test]
+fn isnoneof_bridge_matches_evaluator_verdicts() {
+    assert_bridge_evaluator_parity(&recipient_isnoneof_policy());
+}
+
+// 33. MALFORMED right operands stay fail-closed (Unmappable → one-shot), mirroring the
+//     evaluator's own guards — never a persisted condition that widens access.
+#[test]
+fn isnoneof_nonstring_operand_stays_one_shot_fail_closed() {
+    // A numeric or dateTime operand is never satisfied by the evaluator's isNoneOf
+    // (set_negation_representable), so a persisted everyone-except grant would WIDEN
+    // access. One-shot fallback: evaluate denies the materializer → NOTHING emitted.
+    // The dateTime case is the distinguishing one: its lexical form is non-empty, so
+    // an (incorrect) lexical set-split would fabricate an exception member and fail
+    // open to a public grant — the arm must reject on the VALUE TYPE, not set size.
+    for operand in
+        ["42", r#""2020-01-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>"#]
+    {
+        let pol = recipient_set_policy("isNoneOf", operand);
+        let mut g = pod();
+        let req = Request::new(odrl("read")).on(N1).by(ALICE);
+        let out = materialize_permission_conditional(&mut g, &pol, &req);
+        assert!(!out.granted, "isNoneOf over {operand} grants nothing: {out:?}");
+        assert_eq!(cond_grants_for(&g, None), 0, "no condition from operand {operand}");
+        assert!(except_matchers(&g).is_empty(), "no exception matcher for {operand}");
+
+        let mut store = PodStore::new(pod());
+        assert!(!store.materialize_odrl_permission_conditional(&pol, &req).granted);
+        for agent in [ALICE, BOB, CAROL] {
+            assert!(!reads(&mut store, agent), "{agent} denied (fail-closed) for {operand}");
+        }
+    }
+}
+
+#[test]
+fn isanyof_empty_set_is_unsatisfiable_nothing_materialized() {
+    // isAnyOf over the empty set has no member to equal — unsatisfiable for everyone
+    // in the evaluator; the bridge must not turn it into any persisted head.
+    let pol = recipient_set_policy("isAnyOf", r#""""#);
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_permission_conditional(&mut g, &pol, &req);
+    assert!(!out.granted, "empty isAnyOf set grants nothing: {out:?}");
+    assert_eq!(cond_grants_for(&g, None), 0, "no condition from an empty set");
+}
+
+#[test]
+fn isnoneof_empty_set_stays_one_shot_no_public_widening() {
+    // The DEGENERATE empty exclusion set stays one-shot (conservative): the evaluator
+    // vacuously satisfies it for a stated recipient, so the frozen path still grants
+    // the materializing party — but the bridge must NOT promote a (likely malformed)
+    // empty operand into a bare unconditional re-checked public grant.
+    let pol = recipient_set_policy("isNoneOf", r#""""#);
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_permission_conditional(&mut g, &pol, &req);
+    assert!(out.granted, "vacuous isNoneOf holds for the materializer (frozen): {out:?}");
+    assert_eq!(cond_grants_for(&g, None), 0, "no re-checked condition from an empty set");
+
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&pol, &req).granted);
+    assert!(reads(&mut store, ALICE), "frozen grant scoped to the materializer");
+    assert!(!reads(&mut store, CAROL), "no public widening from an empty exclusion set");
+}
+
+// 34. A RESERVED-ENCODED member anywhere in the exclusion set sinks the WHOLE rule to
+//     one-shot — dropping just that member would re-admit it (fail-open); mirrors the
+//     single-value neq guard (test 21) for the list-valued path.
+#[test]
+fn isnoneof_reserved_member_sinks_whole_rule_to_one_shot() {
+    let pol = recipient_set_policy(
+        "isNoneOf",
+        r#""https://bob.ex/card#me|urn:sparq:pair?agent=x&client=y""#,
+    );
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    // One-shot: the evaluator proves isNoneOf for alice (not a member) → a frozen
+    // alice-scoped grant; crucially NO public noneOf head is emitted.
+    let out = materialize_permission_conditional(&mut g, &pol, &req);
+    assert!(out.granted, "one-shot grants the (non-excluded) materializer: {out:?}");
+    assert_eq!(
+        cond_grants_for(&g, Some("https://sparq.dev/ns/auth#Public")),
+        0,
+        "a reserved-encoded exclusion member must not widen to a public grant"
+    );
+    assert!(except_matchers(&g).is_empty(), "no unenforceable matcher emitted");
+
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&pol, &req).granted);
+    assert!(!reads(&mut store, CAROL), "no public widening: carol denied");
+    assert!(!reads(&mut store, BOB), "bob (excluded member) denied");
+}
+
+// 35. The PROHIBITION dual: `recipient isAnyOf <set>` on a prohibition persists one
+//     re-checked conditional DENY per member, composing with deny-overrides.
+#[test]
+fn isanyof_prohibition_persists_conditional_deny_per_member() {
+    // A public allow (bare permission via the conditional path → Public head)…
+    let permit = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/pub> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    // …plus a prohibition denying the set {bob, carol}.
+    let prohib = parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/panyof> a odrl:Set ; odrl:prohibition [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ odrl:leftOperand odrl:recipient ;
+                      odrl:operator odrl:isAnyOf ;
+                      odrl:rightOperand "https://bob.ex/card#me|https://carol.ex/card#me" ] ] .
+"#,
+        "turtle",
+    )
+    .unwrap();
+    let mut store = PodStore::new(pod());
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission_conditional(&permit, &req).granted);
+    let out = store.materialize_odrl_prohibition_conditional(&prohib, &req);
+    assert!(out.prohibited, "isAnyOf prohibition maps to per-member deny conditions: {out:?}");
+
+    // Deny-overrides through the real path: the set members lose the public allow.
+    assert!(!reads(&mut store, BOB), "bob (in set) denied — deny beats allow");
+    assert!(!reads(&mut store, CAROL), "carol (in set) denied — deny beats allow");
+    assert!(reads(&mut store, ALICE), "alice (not in set) keeps the public allow");
+    assert!(reads(&mut store, DAVE), "dave (not in set) keeps the public allow");
+}
+
+// ===========================================================================
+// [OPUS-4.8] sq-9n1q4 — a BARE odrl:assignee (the rule PROPERTY, not an
+// odrl:assignee CONSTRAINT block) with ZERO constraints must NOT widen to
+// auth:Public through the conditional entry points. Regression guard for the
+// access-control WIDENING bug: `condition_agents` used to ignore `rule.assignee`
+// and default an empty recipient set to auth:Public, so a permission scoped to
+// ONE assignee granted EVERYONE (incl. anonymous), and a prohibition scoped to
+// one assignee DENIED everyone (over-deny). Both are closed by folding
+// `rule.assignee` into the condition head when there is no recipient constraint.
+// ===========================================================================
+
+// 30. WIDENING CLOSED (permission): a bare-assignee permission (assignee=alice,
+//     ZERO constraints) via the CONDITIONAL entry point grants ONLY alice — bob
+//     AND an anonymous session are DENIED accessible()/query_as for the target.
+//     Before the fix this granted auth:Public (bob + anonymous read n1).
+#[test]
+fn bare_assignee_permission_conditional_scopes_to_assignee_not_public() {
+    // The rule carries `odrl:assignee alice` as a PROPERTY and no constraint block.
+    // (`read_policy()` in this file is exactly this shape.)
+    let pol = read_policy();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+
+    // Free-function form: the ConditionalGrant head is ALICE, NOT auth:Public.
+    let mut g = pod();
+    let out = materialize_permission_conditional(&mut g, &pol, &req);
+    assert!(out.granted, "bare-assignee permission still grants: {out:?}");
+    assert_eq!(
+        cond_grants_for(&g, Some("https://sparq.dev/ns/auth#Public")),
+        0,
+        "NO auth:Public head — the assignee restriction is honoured"
+    );
+    assert_eq!(cond_grants_for(&g, Some(ALICE)), 1, "the grant head is scoped to alice");
+
+    // Through the real enforcement path: only alice reads n1.
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&pol, &req).granted);
+    assert!(reads(&mut store, ALICE), "the assignee (alice) is granted");
+    assert!(!reads(&mut store, BOB), "bob (not the assignee) is DENIED — widening closed");
+    assert!(
+        store.accessible(&Session::default(), Mode::Read).is_empty(),
+        "an anonymous session is DENIED — widening closed"
+    );
+
+    // End-to-end through query_as: only alice sees the content.
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
+    let bob = Session { agent: Some(BOB), client: None, issuer: None, now: None };
+    assert_eq!(store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 1);
+    assert_eq!(store.query_as(&bob, Mode::Read, sel).unwrap().rows.len(), 0);
+    assert_eq!(
+        store.query_as(&Session::default(), Mode::Read, sel).unwrap().rows.len(),
+        0,
+        "anonymous query sees nothing"
+    );
+}
+
+// 31. WIDENING CLOSED (prohibition dual): a bare-assignee prohibition
+//     (assignee=alice, ZERO constraints) via the CONDITIONAL entry point denies
+//     ONLY alice — bob keeps a pre-existing public allow. Before the fix this
+//     materialized a PUBLIC deny (over-deny: everyone, incl. bob, denied).
+#[test]
+fn bare_assignee_prohibition_conditional_scopes_to_assignee_not_public() {
+    let mut store = PodStore::new(pod());
+    // Baseline PUBLIC allow so we can observe the deny biting only the assignee.
+    let permit = parse_policy_str(
+        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+        <urn:pol/pub> a odrl:Set ; odrl:permission [
+            odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ] ."#,
+        "turtle",
+    )
+    .unwrap();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission_conditional(&permit, &req).granted);
+    assert!(reads(&mut store, BOB), "bob reads via the public allow before the deny");
+
+    // A bare-assignee prohibition: `odrl:assignee alice`, ZERO constraints.
+    let prohib = parse_policy_str(
+        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+        <urn:pol/pbare> a odrl:Set ; odrl:prohibition [
+            odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ;
+            odrl:assignee <https://alice.ex/card#me> ] ."#,
+        "turtle",
+    )
+    .unwrap();
+
+    // Free-function form: the deny head is ALICE, NOT auth:Public.
+    let mut g = pod();
+    assert!(materialize_permission_conditional(&mut g, &permit, &req).granted);
+    let dout = materialize_prohibition_conditional(&mut g, &prohib, &req);
+    assert!(dout.prohibited, "bare-assignee prohibition materialises a deny: {dout:?}");
+    assert_eq!(
+        cond_denies_for(&g, Some("https://sparq.dev/ns/auth#Public")),
+        0,
+        "NO auth:Public deny — the deny is scoped to the assignee"
+    );
+    assert_eq!(cond_denies_for(&g, Some(ALICE)), 1, "the deny head is scoped to alice");
+
+    // Through the real enforcement path: deny-overrides removes ONLY alice's access.
+    assert!(store.materialize_odrl_prohibition_conditional(&prohib, &req).prohibited);
+    assert!(!reads(&mut store, ALICE), "alice (the assignee) is denied — deny-overrides");
+    assert!(reads(&mut store, BOB), "bob keeps the public allow — NOT over-denied");
+    assert!(
+        !store.accessible(&Session::default(), Mode::Read).is_empty(),
+        "an anonymous session keeps the public allow — NOT over-denied"
+    );
+}
+
+// ===========================================================================
+// [OPUS-4.8] sq-izzak — a rule whose ONLY restriction is a COMPOUND
+// `odrl:LogicalConstraint` (`odrl:and`/`odrl:or`/`odrl:xone`) with ZERO atomic
+// constraints must NOT widen to auth:Public through the conditional entry
+// points. Regression guard for the access-control WIDENING bug:
+// `map_constraints_to_agents` used to examine ONLY `rule.constraints`, so a rule
+// carrying only a compound constraint mapped `Faithful` with an EMPTY recipient
+// set → an auth:Public head, silently DROPPING the compound restriction (a
+// permission granted EVERYONE incl. anonymous; the prohibition dual over-denied
+// everyone). Closed by classifying any `logical_constraints` as Unmappable →
+// the one-shot path (which DOES enforce the compound, frozen).
+//
+// A `recipient eq alice` sub-constraint is used so the one-shot fallback grants/
+// denies EXACTLY alice (the evaluator reads Request::party as recipient evidence),
+// while bob and an anonymous session are structurally excluded.
+// ===========================================================================
+
+/// A permission whose ONLY restriction is a compound `odrl:and` (one operand: a
+/// `recipient eq alice` sub-constraint). ZERO atomic `rule.constraints`, NO bare
+/// `odrl:assignee` property → the pre-fix conditional path folded an empty
+/// recipient set to auth:Public, dropping the compound restriction.
+fn compound_recipient_permit_policy() -> sparq_policy::Policy {
+    parse_policy_str(
+        r#"
+@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+<urn:pol/cand> a odrl:Set ; odrl:permission [
+    odrl:action odrl:read ;
+    odrl:target <https://pod.ex/notes/n1> ;
+    odrl:constraint [ a odrl:LogicalConstraint ; odrl:and
+        [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;
+          odrl:rightOperand <https://alice.ex/card#me> ] ] ] .
+"#,
+        "turtle",
+    )
+    .expect("policy parses")
+}
+
+// 32. WIDENING CLOSED (permission): a compound-only permission (an `odrl:and`
+//     of a single `recipient eq alice`, ZERO atomic constraints) via the
+//     CONDITIONAL entry point grants ONLY alice — no auth:Public head, and bob
+//     AND an anonymous session are DENIED through accessible()/query_as. Before
+//     the fix `map_constraints_to_agents` ignored the compound → Faithful with an
+//     empty recipient set → an auth:Public grant (bob + anonymous read n1).
+#[test]
+fn compound_only_permission_conditional_scopes_not_public() {
+    // Sanity: the policy really carries a compound constraint and NO atomic one.
+    let pol = compound_recipient_permit_policy();
+    assert_eq!(pol.permissions[0].constraints.len(), 0, "no atomic constraint");
+    assert_eq!(pol.permissions[0].logical_constraints.len(), 1, "one compound constraint");
+    assert!(pol.permissions[0].assignee.is_none(), "no bare assignee property");
+
+    // Free-function form: NO auth:Public head is materialized (the compound forces
+    // the one-shot fallback, which freezes a grant scoped to the materializing party).
+    let mut g = pod();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    let out = materialize_permission_conditional(&mut g, &pol, &req);
+    assert!(out.granted, "compound-only permission still grants alice one-shot: {out:?}");
+    assert_eq!(
+        cond_grants_for(&g, Some("https://sparq.dev/ns/auth#Public")),
+        0,
+        "NO auth:Public head — the compound restriction is NOT dropped"
+    );
+
+    // Through the real enforcement path: only alice reads n1; bob + anonymous denied.
+    let mut store = PodStore::new(pod());
+    assert!(store.materialize_odrl_permission_conditional(&pol, &req).granted);
+    assert!(reads(&mut store, ALICE), "the compound recipient (alice) is granted");
+    assert!(!reads(&mut store, BOB), "bob (not the recipient) is DENIED — widening closed");
+    assert!(
+        store.accessible(&Session::default(), Mode::Read).is_empty(),
+        "an anonymous session is DENIED — widening closed"
+    );
+
+    // End-to-end through query_as: only alice sees the content.
+    let sel = "SELECT ?t WHERE { GRAPH ?g { ?s <https://ex.dev/ns#title> ?t } }";
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
+    let bob = Session { agent: Some(BOB), client: None, issuer: None, now: None };
+    assert_eq!(store.query_as(&alice, Mode::Read, sel).unwrap().rows.len(), 1);
+    assert_eq!(store.query_as(&bob, Mode::Read, sel).unwrap().rows.len(), 0);
+    assert_eq!(
+        store.query_as(&Session::default(), Mode::Read, sel).unwrap().rows.len(),
+        0,
+        "anonymous query sees nothing"
+    );
+}
+
+// 33. WIDENING CLOSED (prohibition dual): a compound-only prohibition (an
+//     `odrl:xone` of a single `recipient eq alice`, ZERO atomic constraints) via
+//     the CONDITIONAL entry point denies ONLY alice — bob AND an anonymous session
+//     keep a pre-existing public allow. Before the fix this materialized a PUBLIC
+//     deny (over-deny: everyone, incl. bob + anonymous, denied). `odrl:xone` is
+//     used to exercise a second combinator (satisfied iff exactly one operand
+//     holds — here the single `recipient eq alice`).
+#[test]
+fn compound_only_prohibition_conditional_scopes_not_public() {
+    let mut store = PodStore::new(pod());
+    // Baseline PUBLIC allow so we can observe the deny biting only the recipient.
+    let permit = parse_policy_str(
+        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+        <urn:pol/pub> a odrl:Set ; odrl:permission [
+            odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ] ."#,
+        "turtle",
+    )
+    .unwrap();
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission_conditional(&permit, &req).granted);
+    assert!(reads(&mut store, BOB), "bob reads via the public allow before the deny");
+
+    // A compound-only prohibition: `odrl:xone` of one `recipient eq alice`, ZERO atomic.
+    let prohib = parse_policy_str(
+        r#"@prefix odrl: <http://www.w3.org/ns/odrl/2/> .
+        <urn:pol/pxone> a odrl:Set ; odrl:prohibition [
+            odrl:action odrl:read ; odrl:target <https://pod.ex/notes/n1> ;
+            odrl:constraint [ a odrl:LogicalConstraint ; odrl:xone
+                [ odrl:leftOperand odrl:recipient ; odrl:operator odrl:eq ;
+                  odrl:rightOperand <https://alice.ex/card#me> ] ] ] ."#,
+        "turtle",
+    )
+    .unwrap();
+    assert_eq!(prohib.prohibitions[0].constraints.len(), 0, "no atomic constraint");
+    assert_eq!(prohib.prohibitions[0].logical_constraints.len(), 1, "one compound constraint");
+
+    // Free-function form: NO auth:Public deny head — the deny is scoped to alice
+    // (one-shot fallback freezes a deny for the materializing party iff it matches).
+    let mut g = pod();
+    assert!(materialize_permission_conditional(&mut g, &permit, &req).granted);
+    let dout = materialize_prohibition_conditional(&mut g, &prohib, &req);
+    assert!(dout.prohibited, "compound-only prohibition materialises a deny for alice: {dout:?}");
+    assert_eq!(
+        cond_denies_for(&g, Some("https://sparq.dev/ns/auth#Public")),
+        0,
+        "NO auth:Public deny — the compound restriction is NOT dropped"
+    );
+
+    // Through the real enforcement path: deny-overrides removes ONLY alice's access.
+    assert!(store.materialize_odrl_prohibition_conditional(&prohib, &req).prohibited);
+    assert!(!reads(&mut store, ALICE), "alice (the recipient) is denied — deny-overrides");
+    assert!(reads(&mut store, BOB), "bob keeps the public allow — NOT over-denied");
+    assert!(
+        !store.accessible(&Session::default(), Mode::Read).is_empty(),
+        "an anonymous session keeps the public allow — NOT over-denied"
+    );
+}
+
+// ===========================================================================
+// [FABLE-5] sq-37f1a — an EMPTY static closure must stay MATERIALIZED under the
+// bridge feature. The static materializer installs `<urn:sparq:auth>` even when the
+// closure grants nothing (presence == the "materialized" marker; empty-but-present
+// == a definitive Resolved deny). The post-materialize ledger reconcile
+// (`reconcile_bridged_after_static` → `BridgeLedger::refresh`) used to route the
+// baseline reset through the drop-when-empty `install_triples`, deleting the marker
+// and turning the definitive 403-class deny into a retryable `Unloaded` (a 503 at
+// the server) — only in odrl-bridge builds, which is exactly the combined-feature
+// breakage issue #2718 pinned at the server level.
+// ===========================================================================
+
+/// A pod with a syntactically-valid ACL that GRANTS NOTHING: the `acl:agentGroup`
+/// target has no `vcard:hasMember`, so the WAC closure is empty.
+fn pod_with_grantless_acl() -> Graph {
+    Graph::load_dataset(
+        r#"
+<https://pod.ex/notes/n1#it> <https://ex.dev/ns#title> "hello" <https://pod.ex/notes/n1> .
+<https://pod.ex/notes/n1.acl#rule> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#rule> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/notes/n1> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#rule> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/notes/n1.acl> .
+<https://pod.ex/notes/n1.acl#rule> <http://www.w3.org/ns/auth/acl#agentGroup> <https://alice.ex/card#me> <https://pod.ex/notes/n1.acl> .
+"#,
+        "nquads",
+    )
+    .expect("dataset loads")
+}
+
+// 21. An empty WAC closure decides as a DEFINITIVE Resolved deny, not a retryable
+//     Unloaded: the bridge reconcile keeps the empty `<urn:sparq:auth>` present.
+#[test]
+fn empty_static_closure_stays_materialized_as_resolved_deny() {
+    let mut store = PodStore::new(pod_with_grantless_acl());
+    let stats = store.materialize_wac().expect("materializes");
+    assert_eq!(stats.auth_triples, 0, "the closure grants nothing (member-less group)");
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
+    let d = store.decide(&alice, N1, Mode::Read);
+    assert!(!d.allow, "no grant => deny");
+    assert_eq!(
+        d.status,
+        sparq_solid::AclStatus::Resolved,
+        "an empty MATERIALIZED view is a definitive Resolved deny (403), never a \
+         retryable Unloaded (503) — the ledger reconcile must not drop the marker"
+    );
+}
+
+// 22. The presence-preserving reset must not INVENT the marker either: a store whose
+//     view was never statically materialized stays `Unloaded` through a ledger refresh.
+#[test]
+fn refresh_does_not_invent_the_materialized_marker() {
+    let mut store = PodStore::new(pod_with_grantless_acl());
+    // No materialize_* call: the view is absent. A bare refresh has nothing to replay
+    // and must not install an empty `<urn:sparq:auth>` shell.
+    assert_eq!(store.refresh_odrl_grants(), 0, "empty ledger retracts nothing");
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
+    let d = store.decide(&alice, N1, Mode::Read);
+    assert!(!d.allow, "fail-closed: deny");
+    assert_eq!(
+        d.status,
+        sparq_solid::AclStatus::Unloaded,
+        "never-materialized stays a retryable Unloaded — refresh must not fake the marker"
+    );
+}
+
+// 23. Nor may the marker survive via a BRIDGED-ONLY grant: without any static
+//     materialization the bridged grant alone creates `<urn:sparq:auth>`, so the
+//     graph's presence at refresh-time does NOT mean a static closure was computed.
+//     Once the grant is withdrawn and replay emits nothing, the view must go ABSENT
+//     again (`static_baseline` was never captured) — the status returns to a
+//     retryable `Unloaded`, never an invented "materialized, no grants" Resolved deny.
+#[test]
+fn bridged_only_retraction_returns_to_unloaded() {
+    let mut store = PodStore::new(pod_with_grantless_acl());
+    // NO static materialize_* call — the baseline is never captured; the bridged
+    // grant is what creates the auth view.
+    let req = Request::new(odrl("read")).on(N1).by(ALICE);
+    assert!(store.materialize_odrl_permission(&read_policy(), &req).granted);
+    let alice = Session { agent: Some(ALICE), client: None, issuer: None, now: None };
+    assert!(store.decide(&alice, N1, Mode::Read).allow, "bridged grant is live");
+
+    // The policy WITHDRAWS the permission → refresh replays it to nothing.
+    let (matched, retracted) =
+        store.refresh_odrl_grant(&empty_policy(), &req, BridgeKind::Permission);
+    assert!(matched, "the tracked grant slot matched");
+    assert_eq!(retracted, 1, "the withdrawn grant was retracted");
+
+    let d = store.decide(&alice, N1, Mode::Read);
+    assert!(!d.allow, "fail-closed: deny");
+    assert_eq!(
+        d.status,
+        sparq_solid::AclStatus::Unloaded,
+        "a never-statically-materialized store returns to retryable Unloaded once its \
+         only bridged grant retracts — refresh must not preserve an empty view no \
+         static baseline was ever captured for"
+    );
 }

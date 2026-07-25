@@ -284,12 +284,29 @@ impl Parser<'_> {
                     return Err(self.error("unescaped control character in string"));
                 }
                 Some(_) => {
-                    // Copy a whole UTF-8 char.
-                    let rest = &self.bytes[self.pos..];
-                    let s = std::str::from_utf8(rest).map_err(|_| self.error("invalid UTF-8"))?;
-                    let c = s.chars().next().unwrap();
-                    out.push(c);
-                    self.pos += c.len_utf8();
+                    // [FABLE-5] (sq-hmd7l.42) Copy the maximal run of plain bytes (no
+                    // quote, no backslash, no control character) in one step, validating
+                    // UTF-8 once per run. The previous per-character path ran
+                    // `str::from_utf8` over the WHOLE remaining input for every character
+                    // — O(n²) on the document, and the dominant cost of the parse+expand
+                    // pipeline on a ~10 KB document (measured with `perf`, work box,
+                    // NON-canonical).
+                    let start = self.pos;
+                    while let Some(&b) = self.bytes.get(self.pos) {
+                        if b == b'"' || b == b'\\' || b < 0x20 {
+                            break;
+                        }
+                        self.pos += 1;
+                    }
+                    match std::str::from_utf8(&self.bytes[start..self.pos]) {
+                        Ok(run) => out.push_str(run),
+                        Err(e) => {
+                            // Report the error at the first invalid byte — exactly where
+                            // the old per-character path stopped.
+                            self.pos = start + e.valid_up_to();
+                            return Err(self.error("invalid UTF-8"));
+                        }
+                    }
                 }
             }
         }
@@ -559,6 +576,34 @@ mod tests {
         );
         // A lone (unpaired) high surrogate is rejected.
         assert!(Json::parse("\"\\uD83D\"").is_err());
+    }
+
+    /// [FABLE-5] (sq-hmd7l.42) The run-copying string fast path: plain runs (including
+    /// multi-byte UTF-8) interleaved with escapes and terminators must decode exactly as
+    /// the old per-character path did, and invalid UTF-8 must still be reported at the
+    /// first invalid byte.
+    #[test]
+    fn parse_string_run_fast_path_preserves_semantics() {
+        // A long plain ASCII run (exercises the run copy, not the per-char path).
+        let long = "x".repeat(2048);
+        assert_eq!(
+            Json::parse(&format!("\"{long}\"")).unwrap(),
+            Json::Str(long.clone())
+        );
+        // Multi-byte UTF-8 inside a run, runs split by escapes on both sides.
+        assert_eq!(
+            Json::parse("\"héllo wörld\\n后半 run🚀\"").unwrap(),
+            Json::Str("héllo wörld\n后半 run🚀".into())
+        );
+        // A run terminated by a control character still errors (the run must stop there),
+        // and the error position points at the offending byte just past the run — the
+        // run loop must not swallow or misattribute the terminator. (`Json::parse` takes
+        // `&str`, and the run loop only breaks at ASCII bytes — never mid-UTF-8-sequence
+        // — so the defensive invalid-UTF-8 arm is unreachable from the public API.)
+        let e = Json::parse("\"abcd\u{01}\"").unwrap_err();
+        assert_eq!(e.position, 5, "error must point at the offending byte after the run");
+        // An unterminated long run still reports "unterminated string", not a panic/hang.
+        assert!(Json::parse(&format!("\"{long}")).is_err());
     }
 
     #[test]

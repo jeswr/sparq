@@ -33,9 +33,102 @@
     "memory-exhaustion DoS) are BOTH recorded below as `exploitable` (NOT not_affected): sparq's own",
     "RDF/XML parse paths are on the patched 0.41, but the transitive quick-xml 0.37.5 pinned by the",
     "oxigraph 0.5.x stack IS reachable when oxigraph parses untrusted RDF/XML and has no fixed",
-    "upstream release yet. Both are fixed by the same upgrade (>= 0.41.0)."
+    "upstream release yet. Both are fixed by the same upgrade (>= 0.41.0).",
+    "[GPT-5.6] sq-cx4w2: RUSTSEC-2024-0436 records that paste is unmaintained, not a",
+    "vulnerability. parquet 59 reintroduces it for sparq-arrow's default-OFF parquet feature;",
+    "remove the deny ignore and matching VEX statement together when parquet drops paste."
   ],
   "vulnerabilities": [
+    {
+      "id": "RUSTSEC-2024-0436",
+      "source": {
+        "name": "RustSec",
+        "url": "https://rustsec.org/advisories/RUSTSEC-2024-0436"
+      },
+      "ratings": [
+        {
+          "source": {
+            "name": "RustSec"
+          },
+          "severity": "none"
+        }
+      ],
+      "description": "paste is archived and no longer maintained. This is an informational maintenance-status advisory: it reports no vulnerability, CVE, or known exploit.",
+      "detail": "[GPT-5.6] parquet 59 pulls paste 1.0.15 transitively for sparq-arrow's separate default-OFF parquet feature. parquet currently publishes no paste-free release, so sparq cannot remove this transitive crate without dropping the requested Parquet capability.",
+      "analysis": {
+        "state": "not_affected",
+        "justification": "code_not_reachable",
+        "response": [
+          "will_not_fix"
+        ],
+        "detail": "The advisory describes project maintenance status rather than vulnerable behavior, so there is no exploit path to reach. The proc macro is present only while compiling the opt-in parquet dependency closure and is absent from default sparq-arrow, lean core, and WebAssembly builds. Follow-up bead sq-cx4w2 tracks parquet upstream; remove this statement and the matching deny.toml ignore together once parquet drops paste."
+      },
+      "affects": [
+        {
+          "ref": "pkg:cargo/sparq"
+        }
+      ]
+    },
+    {
+      "id": "RUSTSEC-2025-0134",
+      "source": {
+        "name": "RustSec",
+        "url": "https://rustsec.org/advisories/RUSTSEC-2025-0134"
+      },
+      "ratings": [
+        {
+          "source": {
+            "name": "RustSec"
+          },
+          "severity": "none"
+        }
+      ],
+      "description": "rustls-pemfile is unmaintained (archived): its PEM-parsing functionality moved into rustls-pki-types' PemObject API. This is an informational 'unmaintained' advisory - there is no vulnerability, no CVE, and no known exploit; the crate is a small, stable PEM decoder.",
+      "detail": "Re-added for the solid-server-rs import pre-flight (bead sq-gg0qq.1, epic sq-gg0qq): the imported server's mTLS serve path parses the PEM certificate chain + private key via rustls-pemfile 2 into the DER types that rustls' with_client_cert_verifier(..).with_single_cert(..) builder needs, exactly as upstream jeswr/solid-server-rs ships it. The crate was previously in the tree via ureq 2 and this same advisory was tolerated until sq-g2xs removed it (ureq 3 dropped the dep); this statement restores the same justification for the incoming crates.",
+      "analysis": {
+        "state": "not_affected",
+        "justification": "code_not_reachable",
+        "response": [
+          "will_not_fix"
+        ],
+        "detail": "Honest scope: 'unmaintained' is an advisory ABOUT maintenance status, not an exploitable flaw - there is no vulnerable code path to reach. The parser handles operator-supplied local PEM files (TLS cert/key material), not untrusted network input. Planned remediation: migrate the imported mTLS path to rustls-pki-types' PemObject (the maintained successor API, already in the tree) in follow-up bead sq-5ah3p, then remove this statement AND the matching deny.toml [advisories].ignore entry together. Mirrors the deny.toml ignore entry (same reason)."
+      },
+      "affects": [
+        {
+          "ref": "pkg:cargo/sparq"
+        }
+      ]
+    },
+    {
+      "id": "RUSTSEC-2025-0141",
+      "source": {
+        "name": "RustSec",
+        "url": "https://rustsec.org/advisories/RUSTSEC-2025-0141"
+      },
+      "ratings": [
+        {
+          "source": {
+            "name": "RustSec"
+          },
+          "severity": "none"
+        }
+      ],
+      "description": "bincode 1.3.3 is permanently unmaintained. This is an informational maintenance-status advisory with no reported vulnerability, CVE, or known exploit.",
+      "detail": "[SONNET-4.6] hdt 0.7.3 pulls bincode 1.3.3 transitively through qwt 0.4.0. No maintained bincode release is available on that dependency path.",
+      "analysis": {
+        "state": "not_affected",
+        "justification": "code_not_reachable",
+        "response": [
+          "will_not_fix"
+        ],
+        "detail": "The advisory concerns maintenance status rather than vulnerable behavior. sparq does not deserialize attacker-controlled bincode data; bincode is an internal qwt serialization dependency below the opt-in HDT surface. Remove this statement and the matching deny.toml ignore together when hdt/qwt replaces bincode."
+      },
+      "affects": [
+        {
+          "ref": "pkg:cargo/sparq"
+        }
+      ]
+    },
     {
       "id": "RUSTSEC-2026-0194",
       "source": {

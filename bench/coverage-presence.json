@@ -1,6 +1,6 @@
 {
   "_comment": [
-    "[OPUS-4.8] TEST-PRESENCE gate (sq-hbg7). Per-crate FLOOR on the number of #[test]/#[tokio::test]/#[rstest] functions + whether the crate keeps its tests/ integration dir. Catches a whole crate losing its tests \u2014 which the line-% ratchet (bench/coverage-floor.json) can miss (esp. the subprocess-driven sparq-cli). Counts are FLOORS (>=); adding tests is always fine.",
+    "[OPUS-4.8] TEST-PRESENCE gate (sq-hbg7). Per-crate FLOOR on the number of #[test]/#[tokio::test]/#[rstest] functions + whether the crate keeps its tests/ integration dir. Catches a whole crate losing its tests — which the line-% ratchet (bench/coverage-floor.json) can miss (esp. the subprocess-driven sparq-cli). Counts are FLOORS (>=); adding tests is always fine.",
     "Counted from source (no compile) by scripts/coverage-presence.py, run every commit by the .github/workflows/ci.yml coverage job. The floor only RISES (--seed will not lower without --allow-lower). Regenerate after adding tests: scripts/coverage-presence.py --seed."
   ],
   "crates": {
@@ -35,6 +35,16 @@
       "had_integration_dir": true,
       "min_tests": 238
     },
+    "sparq-engine-serialize": {
+      "had_integration_dir": false,
+      "min_tests": 103,
+      "note": "[OPUS-4.8] sq-6vshe.4: seam 1 of the sparq-engine facade split — the RDF writer matrix moved here with its 105 inline #[test]s (all in the src `serialize` module `mod tests`; the crate has no tests/ integration dir). Floor 103 leaves a small margin (mirrors the sparq-substrate style). Brought under the presence gate so the moved writer tests cannot silently vanish."
+    },
+    "sparq-engine-service": {
+      "had_integration_dir": false,
+      "min_tests": 62,
+      "note": "[OPUS-4.8] sq-6vshe.4: seam A2 of the sparq-engine facade split — the SPARQL 1.1 SERVICE client moved here with its 64 inline #[test]s (all in the src `service` module `mod tests`; the crate has no tests/ integration dir). Floor 62 leaves a small margin (mirrors the sibling sparq-engine-serialize style). Brought under the presence gate so the moved SRJ/SRX-parse / egress-policy / bound-join / transport-timeout tests cannot silently vanish. The end-to-end federation integration tests (tests/federation_features/*) stayed in sparq-engine."
+    },
     "sparq-fedclient": {
       "had_integration_dir": true,
       "min_tests": 150
@@ -42,6 +52,11 @@
     "sparq-fedplan": {
       "had_integration_dir": true,
       "min_tests": 50
+    },
+    "sparq-forms": {
+      "had_integration_dir": true,
+      "min_tests": 44,
+      "note": "[GPT-5.6] sq-ncrhx: current source scan counts 44 #[test] attributes across src/ and tests/; the crate keeps its tests/ integration directory."
     },
     "sparq-geo": {
       "had_integration_dir": true,
@@ -58,6 +73,11 @@
     "sparq-introspect": {
       "had_integration_dir": true,
       "min_tests": 15
+    },
+    "sparq-lws-core": {
+      "had_integration_dir": true,
+      "min_tests": 880,
+      "note": "[FABLE-5] sq-gg0qq.2: crate imported whole from jeswr/solid-server-rs@1e555b10 with 893 #[test]s counted (inline unit + tests/ integration); floor 880 leaves a small margin. The %-coverage floor (bench/coverage-floor.json) is deferred to the sq-gg0qq epic's split beads — the crate is presence-gated meanwhile."
     },
     "sparq-mpc": {
       "had_integration_dir": false,
@@ -87,6 +107,16 @@
     "sparq-reason": {
       "had_integration_dir": true,
       "min_tests": 127
+    },
+    "sparq-reason-el": {
+      "had_integration_dir": true,
+      "min_tests": 128,
+      "note": "[OPUS-4.8] sq-qcnn.23: OWL 2 EL classifier (E1 core + rbox Phase E2 + hasse Phase E3). 130 #[test]s measured across src/ (lib.rs 13, abox.rs 17, cdomain.rs 16, rbox.rs 7) and tests/ (differential.rs 20, rbox_differential.rs 16, cdomain.rs 18, hasse_reduction.rs 10, nominals.rs 11, snomed_go_scale.rs 2); floor 128 leaves a small margin (mirrors sparq-substrate/sparq-canon style). Brought under the presence gate so the EL classifier tests cannot silently vanish."
+    },
+    "sparq-reason-ql": {
+      "had_integration_dir": true,
+      "min_tests": 137,
+      "note": "[OPUS-4.8] sq-qcnn.23: EXPERIMENTAL OWL 2 QL rewriter (PerfectRef + CQ-shape gate). 139 #[test]s measured across src/ (cq.rs 27, minimise.rs 10, perfectref.rs 7, treewitness.rs 5, lib.rs 9, dllite.rs 2) and tests/ (oracle.rs 18, tbox_capture.rs 18, path_desugar.rs 23, broadened_shapes.rs 12, branch_aware_emit.rs 8); floor 137 leaves a small margin (mirrors sparq-substrate/sparq-canon style). Brought under the presence gate so the QL rewriter tests cannot silently vanish."
     },
     "sparq-reason-wasm": {
       "had_integration_dir": true,

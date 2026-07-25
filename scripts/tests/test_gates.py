@@ -40,6 +40,9 @@ def _load(name: str, filename: str):
 g1 = _load("gate_new_crate", "gate-new-crate.py")
 g2 = _load("gate_api_skill", "gate-api-skill.py")
 g6 = _load("check_config_documented", "check-config-documented.py")
+# [SONNET-4.6] (sq-5owmc) the merge_group PR-number resolver used by the G2/G6
+# "Read PR labels" steps to honour the escape-hatch label in the merge queue.
+resolve_mg = _load("resolve_merge_group_pr", "resolve-merge-group-pr.py")
 
 
 def _statused(added: list[str], modified: list[str] | None = None) -> list[str]:
@@ -640,6 +643,69 @@ class G6Test(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# merge_group PR-number resolution — G2/G6 escape-hatch label in the queue
+# [SONNET-4.6] (sq-5owmc)
+# --------------------------------------------------------------------------- #
+class MergeGroupPrResolveTest(unittest.TestCase):
+    # [SONNET-4.6] (sq-5owmc) The G2/G6 "Read PR labels" steps must resolve the PR
+    # number in merge_group context so the `skill-not-needed` / `config-internal`
+    # escape-hatch labels are honoured in the merge queue. Before the fix the step
+    # resolved the PR via `commits/<merge_group.head_sha>/pulls`; that returned
+    # empty (synthetic merge commit / empty head_sha), pr-labels.txt was empty, the
+    # label never suppressed, the gate failed the GROUP and the queue silently
+    # ejected the PR (hit #1542 twice). The fix parses the PR number
+    # DETERMINISTICALLY from the gh-readonly-queue head ref; these tests exercise
+    # that pure parse (the network fallback + loud warn live in the workflow).
+
+    def test_parses_pr_from_observed_ref_format(self):
+        # The exact ref shape GitHub sets on github.event.merge_group.head_ref for
+        # the single-PR merge group that ejected #1542.
+        ref = "refs/heads/gh-readonly-queue/main/pr-1542-" + "0" * 40
+        self.assertEqual(resolve_mg.parse_pr_number_from_ref(ref), 1542)
+
+    def test_parses_ref_without_refs_heads_prefix(self):
+        # head_ref may arrive with or without the leading refs/heads/.
+        ref = "gh-readonly-queue/main/pr-42-" + "d" * 40
+        self.assertEqual(resolve_mg.parse_pr_number_from_ref(ref), 42)
+
+    def test_parses_ref_with_slashed_base_branch(self):
+        # A base branch that itself contains a slash must not break the parse.
+        ref = "refs/heads/gh-readonly-queue/release/v1/pr-7-" + "a" * 40
+        self.assertEqual(resolve_mg.parse_pr_number_from_ref(ref), 7)
+
+    def test_empty_ref_returns_none(self):
+        # The fail-closed path: an empty/absent head_ref yields None so the workflow
+        # warns LOUDLY and runs the gate unsuppressed (never silently passes).
+        self.assertIsNone(resolve_mg.parse_pr_number_from_ref(""))
+        self.assertIsNone(resolve_mg.parse_pr_number_from_ref(None))
+
+    def test_non_queue_ref_returns_none(self):
+        self.assertIsNone(resolve_mg.parse_pr_number_from_ref("refs/heads/feature/x"))
+        self.assertIsNone(resolve_mg.parse_pr_number_from_ref("refs/heads/main"))
+
+    def test_cli_entry_point(self):
+        # The workflow invokes the module as a CLI: prints the number + exit 0 on a
+        # successful parse; exit 1 with no output when unparseable.
+        import contextlib
+        import io
+
+        ref = "refs/heads/gh-readonly-queue/main/pr-99-" + "f" * 40
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc_ok = resolve_mg.main(["prog", ref])
+        self.assertEqual(rc_ok, 0)
+        self.assertEqual(buf.getvalue().strip(), "99")
+
+        buf_empty = io.StringIO()
+        with contextlib.redirect_stdout(buf_empty):
+            rc_empty = resolve_mg.main(["prog", ""])
+        self.assertEqual(rc_empty, 1)
+        self.assertEqual(buf_empty.getvalue().strip(), "")
+
+        self.assertEqual(resolve_mg.main(["prog"]), 1)  # missing arg → exit 1
+
+
+# --------------------------------------------------------------------------- #
 # main() smoke (hermetic, via --changed-files + --dry-run; no git/network)
 # --------------------------------------------------------------------------- #
 class MainSmokeTest(unittest.TestCase):
@@ -664,6 +730,111 @@ class MainSmokeTest(unittest.TestCase):
             f = _write(tmp, "diff.txt", _statused([], ["research/foo.md"]))
             rc = g6.main(["--dry-run", "--changed-files", f])
             self.assertEqual(rc, 0)
+
+
+# --------------------------------------------------------------------------- #
+# comp_store_bytes_per_triple ratchet enforcement (sq-7d3dj.32.2.5) [SONNET-4.6]
+# --------------------------------------------------------------------------- #
+perf_gate = _load("perf_gate", "perf-gate.py")
+
+
+class CompStoreRatchetTest(unittest.TestCase):
+    """Mutation tests for the comp_store_bytes_per_triple ratchet.
+
+    [SONNET-4.6] (sq-7d3dj.32.2.5) The compressed-profile B/triple floor must:
+      1. HARD-FAIL (exit 2) when the measured value exceeds floor*(1+0.02).
+      2. PASS (exit 0) when the measured value equals or is below the floor
+         (including a genuine improvement that triggers the auto-ratchet-down).
+    These use perf-gate.py's pure evaluate() / main() entry points so they are
+    hermetic (no ci-bench.sh build needed, no network) — exactly the same
+    pattern as the perf-gate self-test in scripts/perf-gate.py --self-test.
+    """
+
+    FLOOR = 56       # the seeded floor (B/triple, SPQCPRM2 V2 post-#1824)
+    METRIC = "comp_store_bytes_per_triple"
+
+    def _baseline(self, floor=None):
+        f = self.FLOOR if floor is None else floor
+        return {
+            self.METRIC: {
+                "floor": float(f),
+                "threshold": 0.02,
+                "mode": "auto",
+            }
+        }
+
+    def test_regression_above_band_hard_fails(self):
+        # MUTATION: inject a value ABOVE floor*(1+0.02) — simulates a compressed-
+        # store regression where into_compressed() now uses more bytes per triple.
+        # The gate must exit 2 (HARD FAIL) — the regression cannot drift undetected.
+        regressed_value = self.FLOOR * 1.05  # +5%, clearly above the 2% band
+        regressions, _ = perf_gate.evaluate(
+            {self.METRIC: regressed_value}, self._baseline()
+        )
+        self.assertEqual(
+            [r[0] for r in regressions],
+            [self.METRIC],
+            f"a regression of +5% above the floor must be caught; got regressions={regressions}",
+        )
+
+    def test_within_band_passes(self):
+        # A within-band reading (at the floor itself, or at floor+1%) must PASS.
+        for cur in (self.FLOOR, self.FLOOR * 1.01):
+            regressions, _ = perf_gate.evaluate(
+                {self.METRIC: cur}, self._baseline()
+            )
+            self.assertEqual(
+                regressions,
+                [],
+                f"a within-band value ({cur:g}) must pass; got regressions={regressions}",
+            )
+
+    def test_genuine_improvement_passes_and_ratchets_down(self):
+        # A value BELOW the floor is an improvement: gate passes, and
+        # update_baseline should lower the floor to the new best-ever value.
+        improved = self.FLOOR - 5  # e.g. 51 B/triple after a format optimisation
+        regressions, _ = perf_gate.evaluate(
+            {self.METRIC: improved}, self._baseline()
+        )
+        self.assertEqual(
+            regressions, [], "an improved value must pass the gate"
+        )
+        new_bl, changes = perf_gate.update_baseline(
+            {self.METRIC: improved}, self._baseline()
+        )
+        self.assertEqual(
+            new_bl[self.METRIC]["floor"],
+            improved,
+            "the floor must ratchet DOWN to the genuine improvement",
+        )
+        self.assertTrue(
+            any("auto-ratchet" in c[3] for c in changes),
+            f"auto-ratchet-down change expected; got {changes}",
+        )
+
+    def test_boundary_exactly_at_plus_two_percent_passes(self):
+        # Exactly at floor*(1+0.02) is boundary-inclusive (not strictly greater).
+        boundary = self.FLOOR * 1.02
+        regressions, _ = perf_gate.evaluate(
+            {self.METRIC: boundary}, self._baseline()
+        )
+        self.assertEqual(
+            regressions,
+            [],
+            f"a value exactly at the +2% boundary ({boundary:g}) must pass (inclusive)",
+        )
+
+    def test_one_byte_above_band_fails(self):
+        # Even one integer unit above the boundary must trip the ratchet.
+        just_over = self.FLOOR * 1.02 + 1  # 58.12 + 1 = 59.12 → FAIL
+        regressions, _ = perf_gate.evaluate(
+            {self.METRIC: just_over}, self._baseline()
+        )
+        self.assertEqual(
+            [r[0] for r in regressions],
+            [self.METRIC],
+            f"a value just above the +2% band ({just_over:g}) must hard-fail",
+        )
 
 
 if __name__ == "__main__":

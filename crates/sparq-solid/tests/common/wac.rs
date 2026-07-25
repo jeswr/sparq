@@ -223,6 +223,23 @@ fn control_governs_acl_document() -> WacScenario {
         .expect(Expect::agent(BOB).read(acl_doc).is(Decision::Deny))
 }
 
+/// [GPT-5.6] sq-61uvs: an ACL document is never an ordinary descendant for
+/// `acl:default` inheritance. Only Control on the governed resource exposes it.
+fn acl_document_control_gate_blocks_default_and_anonymous() -> WacScenario {
+    let container = "https://pod.example/control/";
+    let acl_doc = "https://pod.example/control/.acl";
+    let mut acl = AclBuilder::new();
+    acl.access_to(container, |a| a.agent(ALICE).mode(Mode::Control));
+    acl.default_for(container, |a| a.agent(BOB).mode(Mode::Read));
+    acl.document(container);
+    WacScenario::new("acl-document-control-gate")
+        .acl(acl)
+        .expect(Expect::agent(ALICE).read(acl_doc).is(Decision::Allow))
+        .expect(Expect::agent(ALICE).write(acl_doc).is(Decision::Allow))
+        .expect(Expect::agent(BOB).read(acl_doc).is(Decision::Deny))
+        .expect(Expect::anonymous().read(acl_doc).is(Decision::Deny))
+}
+
 /// WAC fail-closed: a resource with NO applicable ACL (no own ACL, no ancestor ACL) grants
 /// nobody — not the anonymous requestor, not any authenticated agent. An unprotected
 /// resource is invisible.
@@ -268,6 +285,7 @@ pub fn wac_corpus() -> Vec<WacScenario> {
         origin_user_app_pair(),
         mode_independence(),
         control_governs_acl_document(),
+        acl_document_control_gate_blocks_default_and_anonymous(),
         fail_closed_no_acl(),
         multi_agent_union(),
     ]

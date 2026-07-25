@@ -12,6 +12,13 @@
 # Fields: name (required -> check-run name), crate (required), features (required,
 # non-empty comma list), test (bool — run `cargo test` for the leg).
 
+# [GPT-5.6] Exercise the default-OFF dual-leaf identity/desynchronisation
+# regression guard in an explicit opt-in matrix leg.
+- name: "sparq-zk (dual-leaf — identity/desync regression guard)"
+  crate: "sparq-zk"
+  features: "dual-leaf"
+  test: true
+
 # [OPUS-4.8] sq-bevd3 (epic sq-0dksu, Phase 3): the per-method
 # security-properties ANNOTATION GRAPH + over-claim guards in sparq-zk. The
 # `secprop` module, its unit tests (the 3 guards + the drift/honesty checks),

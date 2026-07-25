@@ -5,10 +5,10 @@
   "nargo_version_baselined": "1.0.0-beta.21",
   "tolerance_pct": 3.0,
   "_comment_sq_pzet": "[OPUS-4.8] sq-pzet (sq-8dx2): the remaining scan (k,n,r)-lattice members the family could derive but had no compiled package, plus the N=64 hidden-join buckets so a join composes with an n=64 scan. These baselines were measured on linux x86_64 (this CI box), not the darwin-arm64 the older members were baselined on, so they may read ~0.75% below a future darwin re-measure (absorbed by the 3% tolerance). NOT a soundness change: the verifier remains NOT-yet-sound (sq-qhy4 / sq-9hrn / sq-1s2). To re-baseline run bench/zk-compose/scripts/gate_counts.sh.",
-  "_comment_g5": "[OPUS-4.8] sq-ncvq.8 (Gate G5): `snapshot_covers_every_member` enforces a baseline for every `zk/compose/` proving member; `snapshot_covers_top_level_circuits` (tests/gate_count.rs) extends that coverage to EVERY `bin`-type Noir package elsewhere under `zk/` — a new top-level circuit family. Such a circuit must have either a `members` baseline row OR an `exempt_circuits` entry (with a reason), so a deployable circuit cannot ship without a gate-count baseline. Non-deployed `bin` packages (e.g. test harnesses) belong in `exempt_circuits`. Today the only top-level `bin` package outside zk/compose is xpath_unit_tests; `zk/ieee754` and `zk/xpath/xpath` are libraries (no circuit_size to gate).",
-  "exempt_circuits": {
-    "xpath_unit_tests": "[OPUS-4.8] zk/xpath/xpath_unit_tests is a type=bin test HARNESS that drives the xpath library's unit tests — NOT a deployed proving circuit, so it carries no gate-count guarantee. If it ever becomes a deployed circuit, replace this exemption with a `members` baseline (run bench/zk-compose/scripts/gate_counts.sh)."
-  },
+  "_comment_g5": "[OPUS-4.8] sq-ncvq.8 (Gate G5): `snapshot_covers_every_member` enforces a baseline for every `zk/compose/` proving member; `snapshot_covers_top_level_circuits` (tests/gate_count.rs) extends that coverage to EVERY `bin`-type Noir package elsewhere under `zk/` — a new top-level circuit family. Such a circuit must have either a `members` baseline row OR an `exempt_circuits` entry (with a reason), so a deployable circuit cannot ship without a gate-count baseline. Non-deployed `bin` packages (e.g. test harnesses) belong in `exempt_circuits`. [OPUS-4.8] sq-5reoy: the zk/ieee754 and zk/xpath trees were externalized to the sparq-org/noir_IEEE754 and sparq-org/noir_XPath face repos (#1599), so zk/compose is now the only proving-circuit family in-tree and there are no top-level `bin` packages outside it — `exempt_circuits` is intentionally empty (the former xpath_unit_tests harness lives in the face repo's CI now).",
+  "_comment_sq_dgb9q": "[OPUS-4.8] sq-dgb9q (#1060, flow-on from #1006): there is NO monolithic top-level `zk/compose` proving circuit to baseline. `zk/compose` is a `[workspace]` ROOT (no `[package]`, no `main.nr`, no `circuit_size`); composition is verified HOST-SIDE by the Rust `verify_manifest` path over per-member proofs (crates/sparq-zk-compose/src/verifier.rs), NOT by one aggregating Noir circuit. So coverage is COMPLETE without a separate top-level row: every deployable proving circuit is a compose `bin` member with a `members` baseline, guarded by `snapshot_covers_every_member` (family members) + `snapshot_covers_top_level_circuits` (any `bin` elsewhere under `zk/`, Gate G5). A top-level compose row is not added because no such circuit exists — and a gate number is never fabricated for a non-existent circuit.",
+  "_comment_sq_3kd2g_2": "[FABLE-5] sq-3kd2g.2 (#1591): the path_reach_d{D}_k{K}_n{N} bounded-depth path-reachability members (property paths p+/p* under the bounded EXISTENCE-ONLY statement of research/zksparql-fragment-extension.md sec 4; compile-time depth D per member = distinct deterministic VK, mechanism (a)). Baselines measured on linux x86_64 with the pinned toolchain (bb 5.0.0-nightly.20260324 / nargo 1.0.0-beta.21). NOT a soundness change: the composition verifier remains NOT-yet-sound (sq-qhy4); builder/manifest dispatch for these members is sq-3kd2g.6. RE-BASELINE riding along: filter_f64 3113->3634 and filter_value_dl_f64 4157->4502 — these grew when the sq-25mgo deep-underflow saturating-exponent fix changed the sparq_ieee754 comparison circuit (an INTENTIONAL, correctness-motivated change) and were never re-baselined, because gate_count_regression runs in NO CI lane (the zk-toolchain lane runs --ignored tests only; the normal lanes have no nargo/bb). Verified identical pre- and post-externalization (#1602 tag v0.10.0 = in-tree), so this is a stale baseline, not an externalization drift. CI-coverage-hole bead filed.",
+  "exempt_circuits": {},
   "members": {
     "scan_k1_n16_r4": 5991,
     "scan_k1_n16_r8": 7038,
@@ -22,7 +22,7 @@
     "filter_int_d2": 17416,
     "filter_int_d3": 17416,
     "filter_int_d4": 17416,
-    "filter_f64": 3113,
+    "filter_f64": 3634,
     "filter_f64_d1": 17416,
     "filter_f64_d2": 17416,
     "filter_f64_d3": 17416,
@@ -31,7 +31,7 @@
     "filter_signed_int_d4": 17416,
     "filter_decimal_i3_f2": 17416,
     "filter_value_dl_int": 3033,
-    "filter_value_dl_f64": 4157,
+    "filter_value_dl_f64": 4502,
     "filter_value_dl_decimal": 3070,
     "revoke_unset_d10": 899,
     "hidden_issuer_d4": 16946,
@@ -40,6 +40,10 @@
     "join_eq_na16_nb16": 7025,
     "join_eq_na16_nb64": 12885,
     "join_eq_na64_nb16": 12885,
-    "join_eq_na64_nb64": 18681
+    "join_eq_na64_nb64": 18681,
+    "path_reach_d2_k1_n16": 5156,
+    "path_reach_d4_k1_n16": 5497,
+    "path_reach_d4_k2_n16": 8322,
+    "path_reach_d8_k1_n16": 6180
   }
 }

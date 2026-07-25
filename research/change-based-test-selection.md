@@ -140,7 +140,8 @@ selection-logic PR therefore always validates against the full matrix.
 
 ### 4.2 The ownership map — `ci/path-ownership.toml`
 
-A small, checked-in, audited policy file with exactly three verdict forms:
+A small, checked-in, audited policy file. Three ownership-verdict forms plus the
+monotone `readers` union (below):
 
 ```toml
 # Attribute a non-crate path to the crates whose tests read it:
@@ -152,6 +153,12 @@ crates = ["sparq-conformance"]
 [[map]]
 pattern = "research/**"
 safe = true
+
+# Additional-readers: union extra reader crates for a CRATE-OWNED path where a
+# real dep edge would be a cycle (monotone; see below):
+[[map]]
+pattern = "crates/sparq-solid/rules/**"
+readers = ["sparq-reason"]
 
 # Everything unmapped and unowned => mode=full (implicit default).
 ```
@@ -168,6 +175,37 @@ Rules:
 - A map-validity unit test asserts every `crates` name is a current workspace
   member and every literal pattern root exists — the map cannot silently rot
   when crates move.
+
+**Additional-readers (monotone union)** — sq-m4bxc [FABLE-5]. A fourth verdict
+form, `readers = [...]`, added as a *deliberate deviation from pure
+input-relocation*. The two closed residuals were sibling reads across a boundary
+where the "attribute the shared input to both crates" fix is not available: the
+input lives *inside* a crate dir (so crate-prefix ownership, steps 1–2, wins
+before the map is ever consulted for a `crates` attribution) **and** the reading
+crate is not in the owner's reverse-dependency closure. Relocation was rejected
+because it would move a *vendored crypto ontology*
+(`crates/sparq-trust/ontologies/zkp-sparql/secprop-ext.ttl`) and a *crate's core
+authorization rule corpus* (`crates/sparq-solid/rules/*.n3`) out of their owning
+crates and rewrite production `include_str!` / runtime include paths in
+`sparq-trust`, `sparq-solid`, `sparq-zk` and `sparq-reason`. The dep-edge
+alternative is a **cargo cycle** in both cases (`sparq-trust` depends on
+`sparq-zk`; `sparq-solid` depends on `sparq-reason`), so `reason -> solid` /
+`zk -> trust` edges are impossible.
+
+`readers` is the one verdict form consulted **even for a crate-owned path**: it
+UNIONS the listed crates into the changed-crate set *in addition to* the path's
+normal prefix owner, without changing the ownership verdict. This makes it
+strictly **monotone / fail-safe** — adding a `readers` entry can only ENLARGE the
+affected set (it never rescues an unowned/unmapped path from `mode=full`), so it
+cannot introduce the unsound skip §2 forbids; a unit test pins that monotonicity
+property. The out-of-crate-input audit (bead 2) treats a sibling read as covered
+iff the reader is listed in a matching `readers` entry, and the map-validity test
+extends to `readers` names. Residual 3 (`sparq-conformance`'s
+`scoreboard_floors.rs` reading sibling **test sources** at a statically
+unresolvable runtime path) is *not* coverable by `readers` — it stays
+acknowledged, backstopped by the nightly full run, and is tracked for a shared
+floors-crate refactor in its own bead (sq-z1xv8), which conflicts with the
+"no shared test edits" constraint here and so needs its own design pass.
 
 ### 4.3 Fail-closed mechanics
 
@@ -230,6 +268,52 @@ satisfying a required status check. Implementation traps to honor:
 - Full run-condition:
   `needs.select.outputs.mode != 'selected' || contains(...)` — empty output
   ⇒ run (§4.3).
+
+> **⚠️ ERRATUM (bead sq-fmx4u.7, 2026-07-05, PR #1437). [HAIKU-4.5]**
+>
+> **The prescriptive design above is NOT implementable as written for the
+> feature-matrix legs.** The design (and §7 P5) specify a *job-level* `if:`
+> guard keyed on `matrix.crate` — e.g.
+> `contains(needs.select.outputs.affected, format('"{0}"', matrix.crate))`
+> evaluated in `jobs.<job_id>.if`. GitHub Actions does **not** make the
+> `matrix` context available in `jobs.<job_id>.if`: per the Actions
+> *contexts-availability* table, a job-level `if:` can reference only
+> `github`, `needs`, `vars`, and `inputs` — **not `matrix`**. A `matrix.crate`
+> reference there silently evaluates to the empty string, so under enforcement
+> the guard degrades to `contains(affected, '""')`, which is always false and
+> would skip **every** leg unconditionally — precisely the silent-unsound-skip
+> class the skip invariant (§2) forbids. This is an infeasibility of the
+> original design, **not** an optimization trade-off: the job-level
+> `matrix.crate` guard cannot be built on GitHub Actions at all.
+>
+> **What shipped instead** (both fail-closed, both pinned by
+> `scripts/tests/test_ci_select_wiring.py`, which additionally asserts that no
+> job-level `if:` ever references `matrix.`):
+>
+> 1. **Feature-matrix legs → assembly-time leg filtering** in the unit-tested
+>    `scripts/assemble-feature-matrix.py` (see
+>    `.github/workflows/feature-matrix.yml`, the `select`/`setup` jobs). The
+>    per-leg keep/drop decision is made in Python before the matrix is
+>    materialized; an unassembled leg spawns **no** check-run, and the polling
+>    `ci-summary` aggregator never waits on a check that does not exist
+>    (requiredness flows through `ci-summary / gate`, not per-leg names —
+>    verified against live branch protection by bead sq-fmx4u.4). Shadow /
+>    full / missing selection outputs fail-close to the full leg set inside the
+>    assembler.
+> 2. **Heavy `crates/sparq-vectors` shards → a step-level bash guard** in the
+>    test step (see `.github/workflows/ci.yml`, the shard test step). The *step*
+>    context — unlike the job-level `if:` — **does** see `matrix`, so the guard
+>    reads `${{ matrix.crate }}` and `exit 0`s with a skip notice (reporting
+>    `success`, not conclusion `skipped`) when the shard's crate is absent from
+>    the affected closure. Fail-closed: only `mode = 'selected'` with a
+>    non-empty crate and a definite non-membership can skip; empty/missing
+>    selection outputs fall through to a run.
+>
+> The prescriptive text and §7 P5 are retained above as the original decision
+> record; this erratum is the correction. Where §5.2/§7 P5 say "job-level
+> `if:` guard" for the feature-matrix legs, read "assembly-time filtering";
+> the job-level `if:` guard remains accurate only for the per-crate lanes whose
+> guard keys on `needs`-derived outputs, not on `matrix`.
 
 ### 5.3 `ci-summary` (the aggregator)
 

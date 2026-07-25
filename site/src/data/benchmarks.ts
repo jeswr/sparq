@@ -68,6 +68,26 @@ export interface SameBoxRow {
   rows: number;
   values: Record<string, number | null>;
   count_match: boolean | null;
+  // [FABLE-5] sq-7d3dj.34 — present on HTTP/TTFB-panel suites (e.g. "sp2b-http") only:
+  // `values` is then the keep-alive full-request best; these carry the TTFB and
+  // fresh-connect twins (same best-of-gathers rule; see the entry's `connection` note).
+  values_ttfb?: Record<string, number | null>;
+  values_fresh?: Record<string, number | null>;
+  values_fresh_ttfb?: Record<string, number | null>;
+}
+
+// [OPUS-4.8] sq-1sa9r — one engine column in a same-box comparison. `mode` labels the
+// measurement path (CLI in-process vs HTTP SPARQL adapter) — a real asymmetry that must be
+// surfaced. `status`/`failure` carry a whole-engine failure (e.g. fuseki load timeout) so
+// the column renders "failed", never blank.
+export interface SameBoxEngine {
+  id: string;
+  label: string;
+  version: string;
+  env?: string;
+  mode?: string;
+  status?: string; // "ok" | "failed"
+  failure?: string;
 }
 
 export interface SameBoxComparison {
@@ -77,13 +97,24 @@ export interface SameBoxComparison {
   git_commit: string;
   gathered_at_utc: string;
   source: string;
+  // [OPUS-4.8] sq-1sa9r — true for a dedicated quiet-box canonical gather (recorded as
+  // `canonical` in the envelope). Absent/false = an ephemeral non-canonical ordering gather.
+  canonical?: boolean;
+  combine?: string; // how duplicate gathers were combined (e.g. best-of)
+  count_crosscheck_note?: string;
+  // [FABLE-5] sq-7d3dj.34 — HTTP/TTFB-panel entries only: which connection regimes were
+  // measured (keep-alive AND fresh-connect) + which one `values` reports.
+  connection?: { modes_measured: string[]; primary: string; note: string };
+  profile?: string;
   env: {
     host_class: string;
     quiet_box: boolean;
     gathered_at_utc?: string;
+    cpu_model?: string;
+    kernel?: string;
     note?: string;
   };
-  engines: { id: string; label: string; version: string; env?: string }[];
+  engines: SameBoxEngine[];
   rows: SameBoxRow[];
 }
 
@@ -316,6 +347,18 @@ export const FAMILIES: Family[] = [
     suites: ["hdt"],
     prefixes: ["hdt"],
   },
+  // [FABLE-5] sq-hmd7l.28 — the SPARQL 1.1 Update parity axis (PSS LDP-CRUD stream). Its
+  // canonical same-box gather (suite `pss-update-parity`, competitors Fuseki / Oxigraph over
+  // an HTTP update endpoint) surfaces here via SAMEBOX_SUITE_FAMILY even before a CI-feed
+  // `update_*` metric emits, so the competitor columns render as soon as the gather merges.
+  {
+    key: "update",
+    title: "SPARQL Update (LDP-CRUD parity)",
+    blurb:
+      "SPARQL 1.1 Update latency over a Solid-pod LDP-CRUD stream (INSERT / DELETE / DROP), with same-box Apache Jena Fuseki + Oxigraph baselines; the post-workload quad count is cross-checked engine-vs-engine before any latency row is trusted.",
+    suites: ["update", "sparql update", "pss-update-parity", "pss update"],
+    prefixes: ["update", "pss"],
+  },
   {
     key: "rsp",
     title: "RDF Stream Processing (continuous queries)",
@@ -353,6 +396,7 @@ const CAPABILITY_KEYS = new Set([
   "zk",
   "solid",
   "hdt",
+  "update",
   "rsp",
   "genai",
   "gpu",
@@ -432,6 +476,11 @@ export interface FullSuiteGroup {
   rows: MetricRow[];
   summary: CompetitiveSummary;
   sameBox?: SameBoxComparison;
+  // [OPUS-4.8] sq-7d3dj.34.3 — the canonical HTTP-mode panel (all engines over HTTP,
+  // full-request + TTFB, keep-alive + fresh-connect) for this suite, plus its own honest
+  // same-mode wins/losses summary. Present only for suites with a `<base>-http` gather.
+  httpSameBox?: SameBoxComparison;
+  httpSummary?: CompetitiveSummary;
   references: ReferenceBaseline[];
   // sq-hsyg: per-suite trend series (one per metric) + scaling families (size-parametrised).
   trends: TrendSeries[];
@@ -443,15 +492,69 @@ export function fullSuiteGroupsForFamily(key: string): FullSuiteGroup[] {
   // is small). Trend/scaling carry a `suite` so the per-suite filter is exact.
   const allTrends = trendSeriesForFamily(key);
   const allScaling = scalingFamiliesForFamily(key);
-  return suiteGroupsForFamily(key).map((g) => ({
-    suite: g.suite,
-    rows: g.rows,
-    summary: g.summary,
-    sameBox: sameBoxFor(g.suite),
-    references: referencesForSuite(g.suite),
-    trends: allTrends.filter((t) => t.suite === g.suite),
-    scaling: allScaling.filter((s) => s.suite === g.suite),
-  }));
+  const groups = suiteGroupsForFamily(key).map((g) => {
+    const httpSameBox = httpSameBoxFor(g.suite);
+    return {
+      suite: g.suite,
+      rows: g.rows,
+      summary: g.summary,
+      sameBox: sameBoxFor(g.suite),
+      httpSameBox,
+      // Computed server-side (no fabrication client-side) — same honesty path as the CLI
+      // matrix, so a SP2Bench HTTP loss shows as a loss, never spun.
+      httpSummary: httpSameBox ? summarizeSameBox(httpSameBox) : undefined,
+      references: referencesForSuite(g.suite),
+      trends: allTrends.filter((t) => t.suite === g.suite),
+      scaling: allScaling.filter((s) => s.suite === g.suite),
+    };
+  });
+
+  // [FABLE-5] sq-hmd7l.28 — surface same-box comparisons whose FAMILY is this one but which
+  // have NO CI-feed metric yet (so suiteGroupsForFamily produced no group for them). Without
+  // this a canonical fts/geo/hdt/update/materialize gather would land in competitors.json and
+  // stay INVISIBLE on the site (the group list is bench-driven). We synthesize a group per
+  // such comparison carrying the same-box table + its honest live summary, zero metric rows.
+  // A `-http` twin is NOT synthesized standalone: it attaches to its base via httpSameBoxFor.
+  const alreadyRendered = new Set<string>();
+  for (const g of groups) {
+    if (g.sameBox) alreadyRendered.add(g.sameBox.suite.toLowerCase());
+    if (g.httpSameBox) alreadyRendered.add(g.httpSameBox.suite.toLowerCase());
+  }
+  const extra: FullSuiteGroup[] = [];
+  for (const c of COMPETITORS.same_box_comparisons || []) {
+    if (familyForComparison(c) !== key) continue;
+    const sid = c.suite.toLowerCase();
+    if (alreadyRendered.has(sid)) continue;
+    if (sid.endsWith("-http")) continue; // attaches to a base group, not standalone
+    alreadyRendered.add(sid);
+    const httpSameBox = httpSameBoxFor(c.suite);
+    if (httpSameBox) alreadyRendered.add(httpSameBox.suite.toLowerCase());
+    extra.push({
+      suite: sameBoxDisplaySuite(c),
+      rows: [],
+      summary: summarizeSameBox(c),
+      sameBox: c,
+      httpSameBox,
+      httpSummary: httpSameBox ? summarizeSameBox(httpSameBox) : undefined,
+      references: referencesForSuite(c.suite),
+      trends: [],
+      scaling: [],
+    });
+  }
+  return [...groups, ...extra];
+}
+
+// A human display label for a comparison-only suite group header (the raw suite id like
+// `pss-update-parity` is machine-ish; render a friendlier title, provenance stays in the table).
+function sameBoxDisplaySuite(c: SameBoxComparison): string {
+  const map: Record<string, string> = {
+    fts: "Full-text search — same-box vs Jena-text",
+    geo: "GeoSPARQL — same-box vs Jena GeoSPARQL",
+    hdt: "HDT decode — same-box vs hdt-cpp",
+    "pss-update-parity": "SPARQL Update — same-box parity",
+    "materialize-competitors": "Materialisation — same-box vs Jena / VLog / Nemo",
+  };
+  return map[c.suite.toLowerCase()] || `${c.suite} — same-box comparison`;
 }
 
 // ---- LIVE competitive summary (the load-bearing honesty computation) ------------------
@@ -471,6 +574,30 @@ export type CompetitiveSummary =
       engines: string[]; // competitor labels present in the comparison
       provenance: string; // host/scale/quiet-box provenance string (NON-CANONICAL)
       nonCanonical: boolean;
+    }
+  | {
+      // [OPUS-4.8] sq-1sa9r — a CANONICAL (or non-canonical) same-box multi-engine gather.
+      // We deliberately do NOT headline a single "N× faster" multiplier here: the engines are
+      // measured in DIFFERENT modes (sparq/Oxigraph in-process via the CLI; Fuseki/Virtuoso/
+      // QLever over an HTTP SPARQL adapter), so on small result sets the absolute ratios carry
+      // per-query harness/transport overhead as much as engine speed. Instead we report the
+      // honest, count-checked "fastest on W of N" plus the raw range, heavily caveated.
+      kind: "same-box";
+      competitors: string[]; // competitor labels that produced >=1 timing
+      cliCompetitors: string[]; // in-process CLI competitors (excl. sparq), e.g. Oxigraph
+      httpEngines: string[]; // HTTP-adapter engines, e.g. Fuseki / Virtuoso / QLever
+      failedEngines: string[]; // labels of engines that failed to load (e.g. Fuseki)
+      total: number; // count-cross-checked queries compared
+      wins: number; // queries where sparq was the fastest engine
+      losses: number; // queries where a competitor was faster
+      median: number; // median (fastest-competitor / sparq) over the compared queries
+      min: number;
+      max: number;
+      diffQueries: string[]; // queries excluded because engines disagreed on the count
+      canonical: boolean;
+      host: string;
+      scale: string;
+      gitCommit: string;
     }
   | {
       kind: "pending";
@@ -493,7 +620,9 @@ function median(xs: number[]): number {
 
 const round1 = (x: number) => Math.round(x * 10) / 10;
 
-// Find the same_box_comparisons entry whose suite matches (case-insensitive).
+// Find the same_box_comparisons entry whose suite matches (case-insensitive). The
+// fuzzy match deliberately does NOT match the `<base>-http` panel suites (e.g. "sp2b-http"),
+// so a CLI suite group ("SP2Bench") binds to the CLI matrix ("sp2b"), not the HTTP panel.
 function sameBoxFor(suite: string): SameBoxComparison | undefined {
   const norm = suite.toLowerCase();
   return (COMPETITORS.same_box_comparisons || []).find(
@@ -502,6 +631,46 @@ function sameBoxFor(suite: string): SameBoxComparison | undefined {
       norm.includes(c.suite.toLowerCase()) ||
       c.suite.toLowerCase().includes(norm.split(" ")[0]),
   );
+}
+
+// [OPUS-4.8] sq-7d3dj.34.3 — find the canonical HTTP-mode panel (`<base>-http`) for a CLI
+// suite group, so the SP2Bench / WatDiv groups can render the same-mode HTTP full-request +
+// TTFB panel BELOW the CLI matrix. We strip the "-http" suffix and reuse the same fuzzy
+// suite match ("sp2b-http" → "sp2b" matches the "SP2Bench" group). Returns undefined when
+// no HTTP panel exists for the suite, so groups without one are unaffected.
+function httpSameBoxFor(suite: string): SameBoxComparison | undefined {
+  const norm = suite.toLowerCase();
+  return (COMPETITORS.same_box_comparisons || []).find((c) => {
+    const cs = c.suite.toLowerCase();
+    if (!cs.endsWith("-http")) return false;
+    const base = cs.slice(0, -"-http".length);
+    return norm === base || norm.includes(base) || base.includes(norm.split(" ")[0]);
+  });
+}
+
+// [FABLE-5] sq-hmd7l.28 — map a same_box_comparison's `suite` id (as the ingest emits it) to
+// the capability FAMILY whose page should render it. This is the seam that lets a new-axis
+// canonical gather surface on the site WITHOUT hand-editing the page: the ingest writes the
+// entry into competitors.json under a known suite id, and this table routes it to a family.
+// A comparison whose suite is not listed (a brand-new axis) still renders on the SPARQL-suite
+// pages via the existing fuzzy sameBoxFor() bind, so it is never dropped silently.
+const SAMEBOX_SUITE_FAMILY: { match: RegExp; family: string }[] = [
+  { match: /^fts$/i, family: "fts" },
+  { match: /^geo$/i, family: "geo" },
+  { match: /^hdt$/i, family: "hdt" },
+  { match: /^pss-update-parity$/i, family: "update" },
+  { match: /^update/i, family: "update" },
+  { match: /^materialize/i, family: "reasoning" },
+  { match: /^parse/i, family: "core" },
+];
+
+// The family a same_box_comparison belongs to (or null if it is a SPARQL-suite comparison
+// already surfaced by the per-suite fuzzy bind — sp2b / watdiv and their -http twins).
+function familyForComparison(c: SameBoxComparison): string | null {
+  for (const { match, family } of SAMEBOX_SUITE_FAMILY) {
+    if (match.test(c.suite)) return family;
+  }
+  return null;
 }
 
 export function competitiveSummary(
@@ -549,57 +718,102 @@ export function competitiveSummary(
     };
   }
 
-  // (2) same_box_comparisons (SP2Bench): per-query rows with a sparq value + competitor
-  //     values measured on ONE box. Compute ratios only from rows where BOTH sparq and at
-  //     least one competitor have a real number.
+  // (2) same_box_comparisons (SP2Bench / WatDiv): per-query rows with a sparq value +
+  //     competitor values measured on ONE box. HONESTY (sq-1sa9r): we compute the ratio ONLY
+  //     from rows whose solution COUNT cross-checked across engines (count_match !== false —
+  //     a disagreeing count means a competitor computed a DIFFERENT answer, so its timing is
+  //     not comparable). We also record the mode asymmetry (in-process CLI vs HTTP adapter)
+  //     and any failed engine so the UI can caveat, never a bald "N× faster" headline.
   const sb = sameBoxFor(suite);
-  if (sb) {
-    const ratios: number[] = [];
-    const engines = new Set<string>();
-    for (const row of sb.rows) {
-      const sparq = row.values["sparq"];
-      if (typeof sparq !== "number" || sparq <= 0) continue;
-      let best = Infinity;
-      for (const [eng, v] of Object.entries(row.values)) {
-        if (eng === "sparq") continue;
-        if (typeof v === "number" && v > 0) {
-          engines.add(eng);
-          if (v < best) best = v;
-        }
-      }
-      if (best !== Infinity) ratios.push(best / sparq);
-    }
-    if (ratios.length > 0) {
-      return {
-        kind: "speedup",
-        min: round1(Math.min(...ratios)),
-        max: round1(Math.max(...ratios)),
-        median: round1(median(ratios)),
-        n: ratios.length,
-        competitor: "next-best competitor",
-        engines: engineLabels([...engines]),
-        provenance:
-          (sb.env.host_class || "ephemeral box") +
-          " (NON-CANONICAL; for cross-engine ordering)",
-        nonCanonical: true,
-      };
-    }
-    // a same-box gather EXISTS but every competitor cell is null → honest pending
-    return {
-      kind: "pending",
-      reason:
-        "A same-box " +
-        sb.suite +
-        " comparison was run, but competitor (Oxigraph / QLever) timings were not captured this run, so no speedup can be computed yet.",
-      provenance: sb.env.host_class,
-    };
-  }
+  if (sb) return summarizeSameBox(sb);
 
   // (3) nothing comparable on the same box.
   return {
     kind: "sparq-only",
     reason:
       "No same-box competitor baseline has been gathered for this suite yet — sparq's absolute numbers are shown below.",
+  };
+}
+
+// [FABLE-5]-authored data, this UI by [OPUS-4.8] sq-7d3dj.34.3 — the honest same-box
+// summary for ONE comparison (CLI matrix OR HTTP-mode panel). Extracted from
+// competitiveSummary so both the CLI cross-engine table and the HTTP/TTFB panel share the
+// identical count-checked wins/losses computation (no fabrication; a query whose solution
+// count disagreed across engines is EXCLUDED from the ratio, never spun into a win). The
+// ratio is fastest-competitor / sparq per query; wins = queries where sparq was fastest.
+export function summarizeSameBox(sb: SameBoxComparison): CompetitiveSummary {
+  const ratios: number[] = [];
+  const diffQueries: string[] = [];
+  const engines = new Set<string>();
+  let wins = 0;
+  let losses = 0;
+  for (const row of sb.rows) {
+    const sparq = row.values["sparq"];
+    if (typeof sparq !== "number" || sparq <= 0) continue;
+    if (row.count_match === false) {
+      diffQueries.push(row.query);
+      continue; // engines disagreed on the count — timing not comparable
+    }
+    let best = Infinity;
+    for (const [eng, v] of Object.entries(row.values)) {
+      if (eng === "sparq") continue;
+      if (typeof v === "number" && v > 0) {
+        engines.add(eng);
+        if (v < best) best = v;
+      }
+    }
+    if (best !== Infinity) {
+      const ratio = best / sparq;
+      ratios.push(ratio);
+      if (ratio > 1) wins += 1;
+      else if (ratio < 1) losses += 1;
+    }
+  }
+  // Label + mode grouping comes from THIS comparison's own engines (not the top-level
+  // registry), so a competitor absent from the registry still gets its proper label, and
+  // the CLI-vs-HTTP asymmetry is classified from each engine's recorded `mode`. In the
+  // HTTP-mode panel every engine's mode is HTTP, so cliCompetitors is empty and httpEngines
+  // is all — that is the point: the panel measures every engine in the SAME mode.
+  const isHttp = (e: { mode?: string }) => /http/i.test(e.mode || "");
+  const isCli = (e: { mode?: string }) => /in-process/i.test(e.mode || "");
+  const failedEngines = sb.engines
+    .filter((e) => e.status === "failed")
+    .map((e) => e.label);
+  const competitors = sb.engines
+    .filter((e) => e.id !== "sparq" && engines.has(e.id))
+    .map((e) => e.label);
+  const cliCompetitors = sb.engines
+    .filter((e) => e.id !== "sparq" && isCli(e))
+    .map((e) => e.label);
+  const httpEngines = sb.engines.filter((e) => isHttp(e)).map((e) => e.label);
+  if (ratios.length > 0) {
+    return {
+      kind: "same-box",
+      competitors,
+      cliCompetitors,
+      httpEngines,
+      failedEngines,
+      total: ratios.length,
+      wins,
+      losses,
+      median: round1(median(ratios)),
+      min: round1(Math.min(...ratios)),
+      max: round1(Math.max(...ratios)),
+      diffQueries,
+      canonical: sb.canonical === true,
+      host: sb.env.host_class || "quiet box",
+      scale: sb.scale,
+      gitCommit: sb.git_commit,
+    };
+  }
+  // a same-box gather EXISTS but every competitor cell is null → honest pending
+  return {
+    kind: "pending",
+    reason:
+      "A same-box " +
+      sb.suite +
+      " comparison was run, but competitor timings were not captured this run, so no comparison can be computed yet.",
+    provenance: sb.env.host_class,
   };
 }
 
@@ -627,14 +841,12 @@ export function sameBoxComparison(suite: string): SameBoxComparison | undefined 
 }
 
 // Number-formatter matching dashboard.js fmtNum (no fabrication, just display).
-export function fmtNum(v: number | null | undefined): string {
-  if (v == null) return "—";
-  if (v === 0) return "0";
-  const abs = Math.abs(v);
-  if (abs >= 1000) return v.toLocaleString("en-US", { maximumFractionDigits: 0 });
-  if (abs >= 1) return (Math.round(v * 100) / 100).toLocaleString("en-US");
-  return (Math.round(v * 10000) / 10000).toString();
-}
+// [FABLE-5] sq-qgkwy.1 — moved to src/lib/fmt-num.ts and RE-EXPORTED here for server-side
+// callers only. "use client" components must import it from "@/lib/fmt-num" directly:
+// importing any VALUE from THIS module drags the full ~1.3 MB generated snapshot into the
+// browser bundle (it double-shipped /benchmarks/[type]'s data as a ~762 KB raw page chunk
+// on top of the prerendered HTML). Guarded by test/benchmarks-data-server-only.test.mjs.
+export { fmtNum } from "@/lib/fmt-num";
 
 // ---- TREND series (sq-hsyg; mirror of dashboard.js trendPoints) -----------------------
 // Per-metric history points {date, value} across the committed window, oldest → newest.
@@ -794,6 +1006,9 @@ export function summaryHeadline(suite: string, s: CompetitiveSummary): string {
         ? `${s.min}×`
         : `${s.min}×–${s.max}× (median ${s.median}×)`;
     return `${range} faster than ${s.competitor} across ${suite}`;
+  }
+  if (s.kind === "same-box") {
+    return `${s.canonical ? "canonical " : ""}same-box: sparq fastest on ${s.wins}/${s.total} count-checked queries (vs ${s.competitors.length} competitor${s.competitors.length === 1 ? "" : "s"})`;
   }
   if (s.kind === "pending") return "competitor baseline pending";
   return "sparq absolute numbers (no competitor baseline yet)";

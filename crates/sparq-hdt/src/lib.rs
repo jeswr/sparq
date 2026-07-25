@@ -38,6 +38,18 @@ mod write;
 #[cfg(feature = "write")]
 pub use write::save;
 
+/// A subject/predicate/object filter for opt-in HDT loading.
+///
+/// `None` is a wildcard. Subjects use [`oxrdf::NamedOrBlankNode`], predicates
+/// use [`oxrdf::NamedNode`], and objects use [`oxrdf::Term`], matching the RDF
+/// term kinds allowed in each triple position.
+#[cfg(feature = "load-filter")]
+pub type TriplePattern = (
+    Option<oxrdf::NamedOrBlankNode>,
+    Option<oxrdf::NamedNode>,
+    Option<oxrdf::Term>,
+);
+
 /// The error type for HDT loading.
 #[derive(Debug)]
 pub enum Error {
@@ -206,6 +218,38 @@ pub fn load_reader<R: BufRead>(reader: R) -> Result<Graph, Error> {
     with_hdt_stream(reader, |r| decode::graph_from_reader(r))
 }
 
+/// Loads only the triples matching `pattern` from an HDT archive.
+///
+/// Filtering happens during the one-shot SPO walk, before the result's
+/// dictionary and permutation indexes are built. Consequently, terms used only
+/// by rejected triples are not interned into the returned [`Graph`]. An
+/// all-wildcard pattern is exactly equivalent to [`load_reader`]. Compressed HDT
+/// containers are detected and streamed as in [`load_reader`].
+///
+/// # Example
+///
+/// ```no_run
+/// use oxrdf::NamedNode;
+/// use sparq_hdt::TriplePattern;
+///
+/// let predicate = NamedNode::new("http://xmlns.com/foaf/0.1/knows")?;
+/// let pattern: TriplePattern = (None, Some(predicate), None);
+/// let file = std::io::BufReader::new(std::fs::File::open("dataset.hdt")?);
+/// let graph = sparq_hdt::load_reader_filtered(file, &pattern)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[cfg(feature = "load-filter")]
+pub fn load_reader_filtered<R: BufRead>(
+    reader: R,
+    pattern: &TriplePattern,
+) -> Result<Graph, Error> {
+    // Preserve the existing loader byte-for-byte for the wildcard identity case.
+    if pattern.0.is_none() && pattern.1.is_none() && pattern.2.is_none() {
+        return load_reader(reader);
+    }
+    with_hdt_stream(reader, |r| decode::graph_from_reader_filtered(r, pattern))
+}
+
 /// Loads via the WRAPPED `hdt` crate's full `Hdt::read` (which builds the query
 /// indexes) and the per-id `id_to_string` translation — the path the direct
 /// decoder ([`load_reader`]) replaces. Kept as the in-process differential oracle
@@ -241,6 +285,70 @@ pub fn header_reader<R: BufRead>(reader: R) -> Result<Graph, Error> {
         }
         Graph::load_str(&nt, "ntriples").map_err(Error::Term)
     })
+}
+
+/// Cardinalities stored in an HDT archive's dictionary and triples sections.
+///
+/// These values are read directly from the validated HDT metadata without
+/// decoding dictionary strings, materializing triples, or building indexes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HdtStats {
+    /// The exact number of triples in the archive.
+    pub triples: usize,
+    /// Terms used in both subject and object position.
+    pub shared: usize,
+    /// Terms used only in subject position.
+    pub subjects_only: usize,
+    /// Terms used only in object position.
+    pub objects_only: usize,
+    /// Distinct predicates.
+    pub predicates: usize,
+}
+
+impl HdtStats {
+    /// Returns the number of distinct subjects.
+    pub const fn distinct_subjects(&self) -> usize {
+        self.shared + self.subjects_only
+    }
+
+    /// Returns the number of distinct objects.
+    pub const fn distinct_objects(&self) -> usize {
+        self.shared + self.objects_only
+    }
+}
+
+/// Reads HDT dictionary cardinalities and the exact triple count from a file.
+///
+/// This validates the header, dictionary, and triples-section checksums but does
+/// not decode dictionary strings, materialize triples, or build HDT query indexes.
+/// Compressed containers are detected and streamed as in [`load`].
+pub fn stats(path: impl AsRef<Path>) -> Result<HdtStats, Error> {
+    let file = std::fs::File::open(path)?;
+    stats_reader(std::io::BufReader::new(file))
+}
+
+/// [`stats`] from any buffered reader positioned at the start of the HDT data.
+pub fn stats_reader<R: BufRead>(reader: R) -> Result<HdtStats, Error> {
+    with_hdt_stream(reader, |r| decode::stats_from_reader(r))
+}
+
+// [GPT-5.6] sq-obhf1: filtered count parity with `load_reader_filtered`.
+/// Counts triples matching `pattern` without constructing a result [`Graph`].
+///
+/// Matching uses the same one-shot SPO walk and resolved [`TriplePattern`] as
+/// [`load_reader_filtered`]. The returned [`HdtStats::triples`] is the number of
+/// matches; its dictionary cardinalities still describe the complete archive.
+/// An all-wildcard pattern is exactly equivalent to [`stats_reader`]. Compressed
+/// containers are detected and streamed as in [`load_reader`].
+#[cfg(feature = "load-filter")]
+pub fn stats_reader_filtered<R: BufRead>(
+    reader: R,
+    pattern: &TriplePattern,
+) -> Result<HdtStats, Error> {
+    if pattern.0.is_none() && pattern.1.is_none() && pattern.2.is_none() {
+        return stats_reader(reader);
+    }
+    with_hdt_stream(reader, |r| decode::stats_from_reader_filtered(r, pattern))
 }
 
 /// Converts an already-decoded [`hdt::Hdt`] into a sparq [`Graph`] — the seam for

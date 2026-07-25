@@ -11,7 +11,7 @@ A **W3C-conformant HTTP server** exposing the [sparq](../../README.md) query eng
 **SPARQL 1.1 Protocol** (`query` + `update` at `/sparql`) and the **Graph Store HTTP Protocol**
 over a `Graph`. **In-memory by default** (updates lost on restart) or **durable** with
 `--persist <DIR>`. Adds content negotiation, EXPLAIN, `/metrics`, WebSocket/SSE subscriptions, and
-opt-in time-travel. Reads and writes never share a lock, so queries never wait on the writer.
+generation-pinned snapshot reads. Reads and writes never share a lock, so queries never wait on the writer.
 
 ## 🚀 Quickstart
 
@@ -38,9 +38,9 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   flag — a Solid-style `text/n3` **N3-Patch** (`solid:InsertDeletePatch`).
 - **Content negotiation** — q-value aware; SELECT/ASK in JSON/XML/CSV/TSV, CONSTRUCT/DESCRIBE and
   GSP read in N-Triples / prefix-Turtle / RDF-XML / **JSON-LD** (`application/ld+json` — the
-  `jsonld` feature, **default-on**: both emit and accept — see "Default-on JSON-LD"); streamed
-  SELECT bodies; a present-but-unsatisfiable `Accept` is **406** (Oxigraph parity), absent/`*/*`
-  keeps the default. Plus **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, **WebSocket + SSE**.
+  `jsonld` feature, **default-on**: both emit and accept — see "Default-on JSON-LD"); TTFB-streamed
+  SELECT-JSON bodies; a present-but-unsatisfiable `Accept` is **406** (Oxigraph parity), absent/`*/*`
+  keeps the default. Plus **EXPLAIN / EXPLAIN ANALYZE**, Prometheus **`/metrics`**, **WebSocket + SSE**, and a **`Sparq-Generation`** header + **`?generation=N`** snapshot pin (default build, bounded to the ring's concurrency-retention window; aged-out → `410`).
 - **Durable persistence** — `--persist <DIR>` makes the on-disk index the source of truth (off by
   default, in-memory). See "Durable persistence".
 - **Authentication** — optional `--auth-token <TOKEN>` Bearer write gate (constant-time; mirrors
@@ -50,19 +50,19 @@ curl -G http://127.0.0.1:3030/sparql --data-urlencode 'query=SELECT * WHERE { ?s
   read timeouts, row/byte memory caps, gzip zip-bomb ratio cap, and the SERVICE egress allowlist,
   each with a `SPARQ_*` env override (honest per-cap semantics in the SKILL's "Server hardening").
 - **Opt-in features** (a build without a feature carries zero code for it) — `time-travel`
-  (`?generation=N` snapshot pinning), `geo` (`geof:` functions), `service` (SERVICE federation,
+  (EXTENDS `?generation=N` retention past the default concurrency window), `geo` (`geof:` functions), `service` (SERVICE federation,
   **default-deny** SSRF guard), `federation-descriptors` (VoID + Service Description discovery),
-  `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl`
-  (`POST /shacl/validate`), `terse` (`POST /terse/transpile` — the verifiable LLM-ergonomic
-  `K:<name>`→canonical-SPARQL transpiler), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
+  `facets` (`POST /facets` grouped counts, runtime-off until `--facets`; [GPT-5.6] sq-lsp7k.5.2), `complete` (`GET /complete` IRI/label prefix completion, runtime-off until `--complete`; [GPT-5.6] sq-lsp7k.9.3), `tpf`/`brtpf` (Triple Pattern Fragments / bind-restricted LDF source), `shacl` (`POST /shacl/validate` plus runtime-off `--shacl-guard --shacl-shapes FILE`, rejecting invalid write post-states with `422`; [GPT-5.6] sq-lsp7k.2.4),
+  `terse` (`POST /terse/transpile` — the verifiable LLM-ergonomic `K:<name>`→canonical-SPARQL transpiler), `templates` (`/templates` — server-stored named parameterized query/UPDATE templates with typed fail-closed JSON binding; UPDATE invocations write-gated through the same sequenced-writer path, sq-lsp7k.10), `solid-authz` (Solid WAC/ACP `POST /authz/decide`+`/wac-allow`+`/query`, a fail-closed HTTP shell over [`sparq-solid`](../sparq-solid)), `odrl-authz` (the ODRL lane on all three `/authz/*` endpoints — dataset-carried ODRL policies gate the query AND the advisory decide/wac-allow surfaces via the `sparq-solid` bridge, fail-closed, read-scoped advertisement), `n3-patch` (Solid `text/n3` N3-Patch on GSP `PATCH`),
   `backup` (no-stop-the-world `/admin/backup` snapshot + PITR delta `/admin/backup/delta` +
-  `/admin/restore`; on `--persist`, `?persist=true`/`--restore-persist` writes the restore through to
-  disk crash-safely so it survives a restart), `change-stream` (durable CDC — commits recorded to a segmented fsync'd log + the Neptune-`GetRecords`-shaped `GET /streams` poll, `--change-stream DIR`),
-  `audit-log`/`access-audit`, `zlib-ng`.
-- **Default-on JSON-LD** ([OPUS-4.8] sq-oy1f.4, epic sq-oy1f) — the `jsonld` feature is in the
-  server's **default** set: `application/ld+json` joins q-value-aware RDF conneg out of the box, **both
-  directions** (flattened JSON-LD on CONSTRUCT/DESCRIBE/GSP-read; `oxjsonld` GSP write body). Off via
-  `--no-default-features --features server` (→ 406 read, 415 write). Full conneg ratcheting is roadmap.
+  `/admin/restore` — single-flight: a second concurrent restore is an explicit `409`; on `--persist`,
+  `?persist=true`/`--restore-persist` writes the restore through to disk crash-safely so it survives a restart), `change-stream` (durable CDC — commits recorded to a segmented fsync'd log + the Neptune-`GetRecords`-shaped `GET /streams` poll + the `POST /admin/change-stream/rebase` operator resync of a broken stream, `--change-stream DIR`),
+  `audit-log`/`access-audit`, `query-registry` (`GET /queries` list + `DELETE /queries/{id}` cooperative cancel — both admin/auth-gated, fingerprint-only, no raw text; all query paths including EXPLAIN ANALYZE registered; [SONNET-4.6] sq-qsm5z + sq-t1isr), `zlib-ng`, `http2`, and `http3` (encrypted QUIC/UDP; see below).
+- **HTTP/2 transport** ([GPT-5.6] sq-oprna.6) — `--features http2` switches TCP to HTTP/1.1+h2c; add `--tls-cert cert.pem --tls-key key.pem` for TLS 1.3 with ALPN `h2,http/1.1`. Omitting both PEM flags preserves cleartext; WebSocket upgrades keep using HTTP/1.1; the slow-loris header deadline remains active.
+- **HTTP/3 transport** ([GPT-5.6] sq-oprna.3/.4) — `--features http3` + `--http3 --tls-cert cert.pem --tls-key key.pem` adds encrypted QUIC/UDP on the same router and advertises its live port with `Alt-Svc`; combine `http2,http3` to use the PEM pair for both TLS TCP and QUIC. Detail in the SKILL.
+- **Default-on JSON-LD** ([OPUS-4.8] sq-oy1f.4) — `jsonld` is in the **default** set: `application/ld+json`
+  joins q-value RDF conneg both directions (`--no-default-features --features server` → 406 read / 415 write).
+- **Default-on algebra rewrite** ([FABLE-5] sq-7d3dj.30.13) — `algebra-rewrite` is in the default set too: the engine's result-equivalent pre-execution rewrite (#1735 — `FILTER(?v = <iri>)` constant folding + `!bound` anti-join), so the shipped binary runs the same plans the CLI/canonical benchmarks measure. Drop via `--no-default-features --features server,jsonld`.
 
 ## Security posture (essentials — full detail in the SKILL)
 
@@ -89,9 +89,9 @@ By default: **no auth, loopback-only.** Hardening is opt-in but honest where it 
 > *external* deployment concern.
 
 Readers pin the current immutable generation; writers commit batches as new generations
-([`sparq-serve`](../sparq-serve/README.md)). **This single writer IS the write ceiling, by design**
-— a feature for the interactive single-resource-write workload, not a gap. An in-engine
-distributed/sharded writer is an **explicit Phase-2 non-goal** ([`research/`](../../research/adr-horizontal-scaling.md), gh-52 / PSS ADR-0012; no engine code).
+([`sparq-serve`](../sparq-serve/README.md)). **Adaptive group-commit** (on by default; `--no-adaptive-commit`
+to disable): a serial interactive client commits in engine-time (µs) instead of paying a fixed group-commit
+window, while concurrent load still batches — same FIFO/atomicity/durability, lower latency. **This single writer IS the write ceiling, by design** — an in-engine distributed/sharded writer is an **explicit Phase-2 non-goal** ([`research/`](../../research/adr-horizontal-scaling.md), gh-52 / PSS ADR-0012).
 
 ## Durable persistence (`--persist DIR`)
 

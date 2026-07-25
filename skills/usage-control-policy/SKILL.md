@@ -66,12 +66,14 @@ assert_eq!(d.matched_rules.len(), 1);  // the granting permission, for audit
 
 1. A `Rule` **matches** when its action permits the request action (per the ODRL action hierarchy — `use` subsumes its sub-actions but not the `transfer` subtree), its `target`/`assignee` (if set) agree (by IRI equality **or collection membership** — see below), and **every** atomic `Constraint` **and** compound `LogicalConstraint` is satisfied (all ANDed).
 2. A `Permission` grants iff it matches **and** all its `Duty`s are discharged.
-3. A matching `Prohibition` **overrides** any permission (carve-out — ODRL Formal Semantics conflict default).
+3. A matching `Prohibition` **overrides** any permission (carve-out — deny-overrides, the one conflict strategy implemented; NOT a spec default: the ODRL 2.2 IM default for an unset `odrl:conflict` is `invalid`, and the ODRL Formal Semantics CG report's conflict machinery is explicitly pending — see the crate README's ODRL conformance note).
 4. **DENY by default:** no matching+discharged permission, or any matching prohibition ⇒ DENY. An empty/malformed policy denies everything; a constraint with no request value, an unknown operator, or a structurally incomplete constraint all fail closed.
 
 ## Constraint operators
 
-`eq`, `neq`, `lt`, `lteq`, `gt`, `gteq`, `isPartOf` (set membership: `right` is a `|`/space/comma-separated set — **or**, for the taxonomic dimensions `purpose`/`spatial`, a transitive subsumption match over a request-supplied closure, see below), `isA` (identity, ≈ `eq`). Numeric (`xsd:integer`/`decimal`/`double`/…) and `xsd:dateTime`/`date` operands compare by magnitude/instant; everything else by IRI/string value. Order comparison on non-orderable values is `false` (fail-closed). **`dateTime` ordering compares the real UTC instant each lexical form denotes — mixed timezone offsets are normalized to UTC before comparing** (`parse_instant().cmp()`, sq-qj2q; an unparseable operand is incomparable → fail-closed), so `2026-06-16T13:00:00+02:00` (= `11:00Z`) correctly orders *before* `2026-06-16T12:00:00Z`. The single offset-aware comparator is `sparq_policy::cmp_datetime` (one source of truth; doctest `cmp_datetime_orders_by_instant_not_lexical`).
+`eq`, `neq`, `lt`, `lteq`, `gt`, `gteq`, `isPartOf` (set membership: `right` is a `|`/space/comma-separated set — **or**, for the taxonomic dimensions `purpose`/`spatial`, a transitive subsumption match over a request-supplied closure, see below), `isA` (identity, ≈ `eq`), `isAnyOf` (the value equals **at least one** member of the right-operand set — same set encoding and matching as `isPartOf`, incl. the taxonomic subsumption case; [FABLE-5] sq-uaz85), `isNoneOf` (the value equals **none** of them — the negative dual; a sub-value of an excluded member is also excluded under a supplied taxonomy, missing evidence stays *unprovable* — never vacuously satisfied — and a numeric/dateTime operand fails closed rather than negating a lexical representation gap). Numeric (`xsd:integer`/`decimal`/`double`/…) and `xsd:dateTime`/`date` operands compare by magnitude/instant; everything else by IRI/string value. Order comparison on non-orderable values is `false` (fail-closed). **`dateTime` ordering compares the real UTC instant each lexical form denotes — mixed timezone offsets are normalized to UTC before comparing** (`parse_instant().cmp()`, sq-qj2q; an unparseable operand is incomparable → fail-closed), so `2026-06-16T13:00:00+02:00` (= `11:00Z`) correctly orders *before* `2026-06-16T12:00:00Z`. The single offset-aware comparator is `sparq_policy::cmp_datetime` (one source of truth; doctest `cmp_datetime_orders_by_instant_not_lexical`).
+
+**Multi-valued `rightOperand` ([FABLE-5] sq-ueydm):** the parser folds an RDF-list right operand (`odrl:rightOperand ( <a> <b> )` — the `rdf:first`/`rdf:rest` chain) and a multi-object one (`odrl:rightOperand <a>, <b>`) into that same `|`-separated set encoding, so the set-relation operators (`isPartOf`/`isAnyOf`/`isNoneOf`) see the full member set (previously first-binding-wins dropped members / degraded a list to an unmatchable blank-node string). A single value — including a one-element list — keeps the typed (numeric/dateTime) path unchanged. Fail-closed degradations: a multi-value under a **non-set** operator (`eq`, `lt`, …) is ambiguous → the unsatisfiable guard; a member carrying a separator character (`|`/whitespace/`,`) cannot be encoded faithfully → the whole constraint is unsatisfiable (never split into unintended members); a malformed **cyclic** list terminates and still yields its complete member set; an empty list (`rdf:nil`) stays the unmatchable nil IRI. Tests: `tests/odrl_right_operand_sets.rs`. A list-valued *combinator* object (`odrl:or ( … )`) is NOT folded (operands are several objects of the combinator property, per the suite's form) — that gap is beaded separately.
 
 ## `odrl:spatial` region enforcement + region `isPartOf` trees — [OPUS-4.8] sq-wukl
 
@@ -148,10 +150,10 @@ A purpose constraint restricts a rule to a stated *purpose of use*. The request 
 A `recipient` constraint restricts **who the data may be disclosed to**. The recipient-of-data is the requesting party, so a request that names a party (`.by(webid)`) but supplies **no** explicit `odrl:recipient` context is read as `recipient = party` — i.e. a `recipient` rule gates on *who is asking*, end-to-end through the same `evaluate` constraint path as every other dimension. An explicit `.with(ODRL_RECIPIENT, Value)` still takes precedence (the disclosure target need not be the authenticated principal in every deployment).
 
 - **`recipient neq X` ("everyone EXCEPT X"):** grants/forbids for any recipient that is **not** `X`. A request whose recipient IS `X` is the carve-out (deny on a permission; the prohibition no longer carves *this* party out). **Missing identity (no `odrl:recipient` AND no party) is *unprovable* → fail-closed:** a `neq` permission does **not** grant to an unknown recipient, and a `neq` prohibition is **not** withdrawn.
-- **`eq`/`isA`** = recipient IS the named party; **`isPartOf`** = recipient ∈ static set. Match is **exact** IRI/string equality (no recipient hierarchy).
+- **`eq`/`isA`** = recipient IS the named party; **`isPartOf`/`isAnyOf`** = recipient ∈ static set; **`isNoneOf`** = recipient ∉ static set. Match is **exact** IRI/string equality by default — plus **party-collection membership** ([FABLE-5] sq-c2aze): when the request supplies `.with_party_membership(party, collection)` evidence, a recipient bound may name an `odrl:PartyCollection` the recipient is a *member* of (the same equality-or-membership lookup the `assignee` field gets), so `recipient isPartOf <PartyCollectionIRI>` is satisfied by a member — and the negative operators (`neq`/`isNoneOf`) also EXCLUDE a member of an excluded collection (the carve-out is not widened away). Membership draws ONLY on the caller-supplied evidence (never inferred); with no edge, recipient matching is byte-for-byte the flat base case.
 - **Audit:** `recipient_status(&rule, &request) -> RecipientMatch` reports exactly what the evaluator checks — `Satisfied` / `DefinitelyUnsatisfied` / `Unprovable` / `NotConstrained` (the recipient dual of `purpose_status`).
 - **Combined `recipient eq A AND neq B` (one rule):** the constraints are AND-combined — the recipient must BE `A` and must NOT BE `B`. Through the bridge this emits a single `ConditionalGrant` headed by `A` (positive) carrying an `exceptMatcher` carving out `B` (the per-head exception).
-- Through the bridge, `recipient neq X` maps to an ACP **`noneOf`** exception (see the mapping table + the bridge note below) — re-checked per session.
+- Through the bridge, `recipient neq X` maps to an ACP **`noneOf`** exception, and `recipient isNoneOf <set>` to one exception matcher **per member** (the list-valued dual — [FABLE-5] sq-5fkpp; see the mapping table + the bridge note below) — re-checked per session.
 
 ## `odrl:dateTime` time-window enforcement (faithful, fail-closed) — [OPUS-4.8] sq-idnv
 
@@ -185,6 +187,25 @@ assert!(!evaluate_and_exercise(&policy, &req, &store).allow); // 4th: limit reac
 
 ## Static conflict + containment analysis (request-free) — [OPUS-4.8] sq-zabv
 
+## Decision reports (opt-in `decision-report`) — [GPT-5.6] sq-mu4au
+
+Enable `sparq-policy`'s default-off `decision-report` feature to aggregate already-computed
+decisions without re-running or changing authorization. Supply the request action beside each
+`Decision`; the report sorts action buckets and emits byte-stable compact JSON.
+
+```rust,ignore
+use sparq_policy::report::DecisionReport;
+
+let decisions = [(request.action.as_str(), &decision)];
+let report = DecisionReport::summarize(decisions);
+assert_eq!(report.permitted + report.denied, report.total);
+let stable_json = report.to_json();
+```
+
+`conflicts` counts denials whose completed decision contains `evaluate`'s canonical
+matching-prohibition audit explanation. The helper is read-only and never makes or re-derives
+an allow/deny decision.
+
 Where `evaluate` answers *"may THIS request go through?"*, two **request-free** functions answer questions about the policies themselves (the query-containment comparison semantics, [arXiv 2509.05139 §comparison](https://arxiv.org/html/2509.05139v1)). Both are always compiled (no feature, no deps) and both are **sound / fail-closed — never over-claimed**.
 
 ```rust,ignore
@@ -203,7 +224,7 @@ match contains(&provider_policy, &request_policy) {
 
 - **`detect_conflicts(&policy) -> Vec<Conflict>`** — every permission/prohibition pair whose request footprints overlap (a prohibition carves the permission out — deny-overrides). `Conflict { permission_id, prohibition_id, overlap, action, target }`. `overlap` is `Overlap::Certain` **only** when the structural attributes (action / target / assignee) prove an overlap AND the prohibition adds **no** constraint the permission lacks (so the carve-out covers the *whole* permission); otherwise `Overlap::Possible` (the rules *might* overlap but we cannot prove they always do). A pair that **provably never** overlaps (disjoint concrete action / target / assignee) is omitted. Conflict is strictly across the permission/prohibition divide — two permissions never conflict.
 - **`contains(outer, inner) -> Containment`** — does `outer` permit everything `inner` permits (refinement / requester-vs-provider containment)? `Containment::Contains` **only** when every `inner` permission is *provably* subsumed by some `outer` permission AND no `outer` prohibition could carve into it; `Containment::NotContained` when an `inner` permission *provably* grants a request `outer` denies (disjoint concrete target/action, or `inner` leaves a dimension `outer` restricts wide open); `Containment::Unknown` otherwise. An `inner` with no permissions is contained vacuously.
-- **`conflict_admissibility(&policy) -> Result<(), String>`** ([OPUS-4.8] sq-ihqbl) — the fail-closed guard the bridge runs BEFORE materialising anything, deciding whether a policy's declared `odrl:conflict` conflict-resolution strategy (`Policy.conflict: Option<ConflictStrategy>`, parsed from `odrl:conflict`) is one the engine can faithfully honour. The bridge implements **exactly one** strategy — `odrl:prohibit` (deny-overrides), which is also the operative default when `odrl:conflict` is unset. Any other declared strategy returns `Err(reason)` (a **loud** refusal — see the bridge section) rather than being silently coerced into deny-overrides (an authorization-correctness hazard): `ConflictStrategy::Perm` (`odrl:perm`, permissions override prohibitions — unrepresentable by `∪ allow ∖ ∪ deny`) is **always** refused; `ConflictStrategy::Invalid` (`odrl:invalid`, a conflicting policy is void as a whole) is refused **iff** `detect_conflicts` finds a conflict (else admissible — nothing to void); `ConflictStrategy::Unknown(iri)` (an unrecognised `odrl:conflict` value) is **always** refused. **Honest boundary:** an *unset* `odrl:conflict` defaults to `prohibit`, NOT the ODRL 2.2 spec default of `invalid` — fully honouring `invalid` for every undeclared conflicting policy would refuse the bridge's core deny-overrides use case, tracked as a follow-up (issue below).
+- **`conflict_admissibility(&policy) -> Result<(), String>`** ([OPUS-4.8] sq-ihqbl) — the fail-closed guard the bridge runs BEFORE materialising anything, deciding whether a policy's declared `odrl:conflict` conflict-resolution strategy (`Policy.conflict: Option<ConflictStrategy>`, parsed from `odrl:conflict`) is one the engine can faithfully honour. The bridge implements **exactly one** strategy — `odrl:prohibit` (deny-overrides), which is also the operative default when `odrl:conflict` is unset. Any other declared strategy returns `Err(reason)` (a **loud** refusal — see the bridge section) rather than being silently coerced into deny-overrides (an authorization-correctness hazard): `ConflictStrategy::Perm` (`odrl:perm`, permissions override prohibitions — unrepresentable by `∪ allow ∖ ∪ deny`) is **always** refused; `ConflictStrategy::Invalid` (`odrl:invalid`, a conflicting policy is void as a whole) is refused **iff** `detect_conflicts` finds a conflict (else admissible — nothing to void); `ConflictStrategy::Unknown(iri)` (an unrecognised `odrl:conflict` value) is **always** refused. **Honest boundary:** an *unset* `odrl:conflict` defaults to `prohibit`, NOT the ODRL 2.2 spec default of `invalid` — fully honouring `invalid` for every undeclared conflicting policy would refuse the bridge's core deny-overrides use case. This divergence is **deliberate and documented** (decided on issue [#1375](https://github.com/jeswr/sparq/issues/1375), sq-zjtu1): deny-overrides is fail-closed and never authorises what a prohibition forbids; see the crate README's ODRL conformance note and the odrl-policy-bridge paper's Limitation #1.
 - **Soundness boundary (honest).** Constraint satisfiability / query containment is undecidable in the general ODRL constraint language. This module decides only what it can *prove* from rule structure plus a conservative per-dimension constraint comparison (identical constraints; `eq v` admitted by an `outer` bound; a *tighter* same-direction order bound — `lt`/`lteq`, `gt`/`gteq` — implying a looser one). Everything else degrades to `Possible` / `Unknown` — it **never** reports `Certain` / `Contains` it cannot prove (that is the fail-OPEN failure mode: claiming an ask is covered when it is not). It also does not (yet) prove `NotContained` from a *looser* inner numeric bound reaching above a tighter outer one — that case honestly returns `Unknown`. DPV/`isPartOf` set-subset refinement is a deferred bead.
 
 ## Security-property ODRL profile — `secx:requires…` leftOperands (opt-in `secprop-leftoperands`) — [OPUS-4.8] sq-uor3g
@@ -247,6 +268,8 @@ assert!(!store.accessible(&Session { agent: Some("https://alice.ex/card#me"), cl
 
 **Fail-closed:** a grant is materialized only on a *definite Permit* AND a *mappable action* AND a *concrete party (WebID) + target graph*. A Deny, unsatisfied constraint, undischarged duty, unmapped action, or partyless/targetless request materializes **nothing**.
 
+**Interactive surface** — [FABLE-5] sq-ixc3.15: the desktop GUI's **Policies (ODRL) tool** (`gui/`, opt-in `odrl` cargo feature on `gui/src-tauri`) drives exactly this one-shot bridge path end-to-end: author/validate a policy, evaluate a request, and preview the same SPARQL query per requester through `query_json_as` next to the ungated rows (`gui/src-tauri/src/odrl.rs`).
+
 ### Prohibitions → explicit `auth:deny*` (deny-overrides) — [OPUS-4.8] sq-w693
 
 A matched ODRL **Prohibition** is materialized as the dual triple — `principal auth:deny<Mode> target` — via `materialize_odrl_prohibition` (or `materialize_odrl_policy`, which does both sides at once). The **same** action→mode mapping picks the mode, so the deny predicate is `auth:denyRead` / `auth:denyWrite` / `auth:denyAppend` / `auth:denyControl`.
@@ -284,8 +307,8 @@ store.materialize_odrl_permission_conditional(&policy, &req); // policy: recipie
 | ODRL constraint | Operator | ACP analogue | Faithful? | Behaviour |
 |---|---|---|---|---|
 | `odrl:recipient` / `odrl:assignee` | `eq` / `isA` | `auth:agent <webid>` on a `ConditionalGrant` (agent matcher) | ✅ recipient-of-data IS the session agent | **persisted, re-checked per session** |
-| `odrl:recipient` / `odrl:assignee` | `isPartOf` (static set) | one `auth:agent` head per member (OR) | ✅ set membership = agent ∈ set | **persisted** (one grant/member) |
-| `odrl:recipient` / `odrl:assignee` | `neq` ("everyone EXCEPT X") | `auth:Public` `ConditionalGrant` + `auth:exceptMatcher` carving out `X` (ACP `noneOf`) | ✅ everyone-except is exactly the ACP `noneOf` shape | **persisted, re-checked per session** ([OPUS-4.8] sq-5037) |
+| `odrl:recipient` / `odrl:assignee` | `isPartOf` / `isAnyOf` (static set) | one `auth:agent` head per member (OR) | ✅ set membership = agent ∈ set (the evaluator matches both operators as the same flat lexical set) | **persisted** (one grant/member; `isAnyOf` [FABLE-5] sq-5fkpp) |
+| `odrl:recipient` / `odrl:assignee` | `neq` ("everyone EXCEPT X") / `isNoneOf` (everyone except a static set) | `auth:Public` `ConditionalGrant` + one `auth:exceptMatcher` per excluded member (ACP `noneOf`) | ✅ everyone-except is exactly the ACP `noneOf` shape | **persisted, re-checked per session** ([OPUS-4.8] sq-5037; list-valued `isNoneOf` [FABLE-5] sq-5fkpp — a numeric/dateTime operand or an EMPTY member set stays one-shot, fail-closed) |
 | `odrl:recipient` / `odrl:assignee` | order (`lt`/`gt`/…) | (none — not meaningful on a recipient) | ❌ | **one-shot** (frozen) |
 | `odrl:purpose` | any (incl. `isPartOf` DPV hierarchy) | (none — a client app ≠ a purpose-of-use) | ❌ ACP session carries no purpose dimension; client-matcher would over-grant | **one-shot** (frozen) |
 | `odrl:spatial` | any (incl. `isPartOf` region hierarchy) | (none — ACP session carries no region) | ❌ no spatial dimension to re-check | **one-shot** (frozen) ([OPUS-4.8] sq-wukl) |
@@ -296,7 +319,7 @@ store.materialize_odrl_permission_conditional(&policy, &req); // policy: recipie
 | any unrecognised left-operand | any | (none) | ❌ | **one-shot** (frozen) |
 | *no constraint* | — | `auth:agent auth:Public` (action/target/duties already held) | ✅ | persisted (public) |
 
-**The `neq` / "everyone-except" → `noneOf` shape ([OPUS-4.8] sq-5037):** a `recipient neq X` rule emits a `ConditionalGrant` whose head is the positive recipient set (or `auth:Public` if there is none) plus one `auth:exceptMatcher <m>` per excluded `X`; the matcher `<m>` carries the accept-set facts the session layer reads (`solidx:acceptsAgentP <X>` + `solidx:acceptsClientP auth:AnyClient`). `AuthIndex` then suppresses the grant for any session the matcher accepts — i.e. for `X` under any client — so everyone keeps the grant **except** `X`. This is byte-for-byte the shape the ACP `noneOf` rules (`rules/acp-c.n3`) emit, re-checked by the same `cond_applies` code path. A `neq` recipient inside the reserved pair encoding **cannot** become an enforceable matcher (it would impersonate a minted pair principal), so rather than emit an exception that silently fails to bite (which would re-admit `X`), the whole rule falls back to the one-shot path — **fail-closed: never widen to a public everyone-except grant on an unenforceable exclusion**.
+**The `neq`/`isNoneOf` / "everyone-except" → `noneOf` shape ([OPUS-4.8] sq-5037; list-valued `isNoneOf` [FABLE-5] sq-5fkpp):** a `recipient neq X` (or `recipient isNoneOf <set>`) rule emits a `ConditionalGrant` whose head is the positive recipient set (or `auth:Public` if there is none) plus one `auth:exceptMatcher <m>` per excluded `X`; the matcher `<m>` carries the accept-set facts the session layer reads (`solidx:acceptsAgentP <X>` + `solidx:acceptsClientP auth:AnyClient`). `AuthIndex` then suppresses the grant for any session the matcher accepts — i.e. for `X` under any client — so everyone keeps the grant **except** `X`. This is byte-for-byte the shape the ACP `noneOf` rules (`rules/acp-c.n3`) emit, re-checked by the same `cond_applies` code path. A `neq` recipient inside the reserved pair encoding **cannot** become an enforceable matcher (it would impersonate a minted pair principal), so rather than emit an exception that silently fails to bite (which would re-admit `X`), the whole rule falls back to the one-shot path — **fail-closed: never widen to a public everyone-except grant on an unenforceable exclusion** (a reserved-encoded member anywhere in an `isNoneOf` set sinks the whole rule the same way, as does a numeric/dateTime operand — which the evaluator never satisfies — or the degenerate EMPTY set).
 
 **Fail-safe on mixed constraints:** a persisted condition is emitted ONLY when **every** constraint on the rule maps faithfully — but a faithfully-mapped recipient AND a faithfully-mapped inclusive `dateTime` window now COMPOSE on one grant (the recipient head carries the `auth:notBefore`/`auth:notAfter` window — [OPUS-4.8] sq-0q7n). A rule mixing a mappable constraint with an unmappable `purpose`/`count`/strict `dateTime` still falls back **entirely** to the one-shot path — persisting only the mappable part would silently drop the other bound and over-grant. Recipient IRIs inside the reserved pair encoding (`urn:sparq:` / `&client=`) are dropped from the grant head (anti-impersonation). The two ODRL "any recipient" sentinels fold onto auth principals: `odrl:All`/`odrl:Group` → `auth:Public`, `odrl:AllConnections` → `auth:Authenticated`.
 
@@ -306,7 +329,7 @@ store.materialize_odrl_permission_conditional(&policy, &req); // policy: recipie
 
 The dual of the conditional grant: a matched ODRL **prohibition** whose recipient/assignee constraints map faithfully is persisted as a re-checked `auth:ConditionalGrant` with **`auth:effect auth:Deny`** (rather than a frozen one-shot `auth:deny*`). The carve-out is re-verified per session through the SAME `accessible`/`query_as` path, and **composes with deny-overrides**: the session layer subtracts `∪ deny` from `∪ allow`, so a conditional deny that applies to a session removes the target from its accessible set — beating any allow for the same principal+target+mode.
 
-- A prohibition `recipient eq carol` → a deny condition headed by carol (only carol's sessions are denied); `recipient neq bob` → a deny on **everyone EXCEPT bob** (an `exceptMatcher` carving bob back IN to access). Same mapping table as the allow path (recipient/assignee `eq`/`isA`/`isPartOf`/`neq` are faithful; `purpose`/`dateTime`/`count` are unmappable).
+- A prohibition `recipient eq carol` → a deny condition headed by carol (only carol's sessions are denied); `recipient neq bob` → a deny on **everyone EXCEPT bob** (an `exceptMatcher` carving bob back IN to access). Same mapping table as the allow path (recipient/assignee `eq`/`isA`/`isPartOf`/`isAnyOf`/`neq`/`isNoneOf` are faithful; `purpose`/`dateTime`/`count` are unmappable).
 - **Fail-safe fallback:** a prohibition carrying an unmappable constraint (`purpose`/`dateTime`/`count`) falls back to the one-shot `materialize_odrl_prohibition` (frozen, materialized iff the prohibition currently matches) so the bound is still enforced — a persisted deny condition is emitted ONLY when every constraint maps faithfully. A reserved-encoded recipient cannot become a matcher, so the rule falls back to one-shot rather than emit a deny that silently fails to bite (which would FAIL OPEN — a dropped deny widens access).
 - **Refresh.** Tracked as `BridgeKind::ProhibitionConditional`. On refresh the recipient carve-out is re-checked per session, so the deny is re-emitted while the prohibition still structurally names the request; a withdrawn prohibition re-emits nothing → the deny condition is **retracted** → access restored. A one-shot fallback uses the asymmetric deny-retraction rule below (re-emit on `Ambiguous`, retract only on a definite `Withdrawn`).
 
@@ -345,6 +368,36 @@ let (matched, retracted) =
 // ambiguous re-eval (no constraint evidence) → retracted == 0 (deny KEPT, fail-closed).
 ```
 
+## Pattern-scoped ODRL targets (sub-graph result masking) — [OPUS-4.8] sq-f9u1y
+
+An ODRL target can denote a **triple-pattern sub-graph** of a source graph rather than the whole graph — a *pattern asset*. Two layers, at different maturity:
+
+**Shipped — the `pattern-scope` masking primitive** (opt-in `pattern-scope` feature of `sparq-solid`, library-level, off by default). A `GraphScope` is a set of allow/deny `ScopePattern`s; each pattern's subject/predicate/object is a concrete `Term` or a **wildcard** (`None` = matches anything in that position). A triple is visible iff it matches ≥1 allow pattern **and** 0 deny patterns — **deny overrides allow**. Matching is **term-identity**, not value equality (`"01"^^xsd:integer` does not match a pattern naming the canonical `1`). `masked_graph(base, &scope)` **materializes** the masked sub-graph — it does not filter at query time — so the engine evaluates a real `Graph = D ∖ masked-triples`: OPTIONAL / EXISTS / MINUS / aggregate / COUNT / ASK equivalence is an identity, inherited by every engine fast path.
+
+```rust,ignore
+// Only phone triples are visible in this scope; every other triple is masked out.
+let scope = GraphScope::allow_only(vec![
+    ScopePattern::new(None, Some(phone_pred), None), // wildcard S/O, fixed predicate
+]);
+let masked = masked_graph(&contacts, &scope);
+```
+
+**Fail-closed:** `GraphScope::allow_only(vec![])` (an empty allow-set) grants **nothing** — never a whole-graph fallback.
+
+**Designed — the ODRL→pattern-grant bridge vocabulary** (research §5). The policy parsing + `auth:PatternGrant` materialization are **follow-up beads, not yet wired**, so an ODRL policy cannot yet target a pattern asset end-to-end; the intended triples-native vocabulary (sparq ODRL-profile namespace) is:
+
+```turtle
+<urn:ex:asset:contacts-sans-phone> a sparq:PatternAsset ;
+    sparq:sourceGraph <https://pod.ex/contacts> ;                 # exactly one
+    sparq:pattern [ sparq:predicate <https://ex.dev/ns#phone> ] . # >=1; absent component = wildcard
+```
+
+`odrl:target <PatternAsset>` on a **permission** yields allow-patterns over `sourceGraph`; on a **prohibition**, deny-patterns (deny overrides allow, as in the graph-granular bridge). The materialized output (in the reserved `<urn:sparq:auth>` graph) is an `auth:PatternGrant` node (`auth:agent` / `auth:mode` / `auth:graph` + ≥1 `auth:allowPattern` / `auth:denyPattern` blank nodes), structurally parallel to the existing `auth:ConditionalGrant`.
+
+**Fail-closed parse rule (designed):** a `PatternAsset` with **zero** parseable patterns, an **ambiguous** `sourceGraph`, or **any** non-concrete component ⇒ the rule materializes **nothing** (absence-of-grant, never a whole-graph fallback).
+
+*Honest scope:* clear-path authorisation — no cryptographic / privacy / unlinkability guarantee is claimed. Design record: [`research/odrl-pattern-scoped-targets-2026-07.md`](../../research/odrl-pattern-scoped-targets-2026-07.md).
+
 ## Conformance — SolidLab ODRL Test Suite — [OPUS-4.8] sq-tmsd6
 
 The evaluator is ratcheted against the MIT-licensed
@@ -382,5 +435,6 @@ self-skips cleanly when the fetched dir is absent. Run:
 
 - Crate README: [`crates/sparq-policy/README.md`](../../crates/sparq-policy/README.md)
 - Design record: `research/feature-research-odrl-policy.md` (epic sq-3183)
+- Enforcement consumers: `sparq-server`'s opt-in `/authz/*` ODRL lane and `sparq-lws-core`'s opt-in read/query gate seam (`authz::odrl`, `LdpState::set_odrl_gate` — deny-overrides / permit-extends over WAC), both behind an `odrl-authz` feature ([SONNET-4.6] sq-elg47)
 - Sibling access-control skill: [`skills/http-server`](../http-server/SKILL.md) (Solid WAC/ACP via `sparq-solid`)
 - W3C [ODRL Information Model 2.2](https://www.w3.org/TR/odrl-model/) · [Formal Semantics](https://w3c.github.io/odrl/formal-semantics/)

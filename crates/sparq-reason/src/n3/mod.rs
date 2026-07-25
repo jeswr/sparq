@@ -5,7 +5,11 @@
 //! `@forAll`/`@forSome` quantifiers), first-class lists (`( … )` is a TERM, not
 //! rdf:first/rest structure), quoted formulae (`{ … }`; the empty formula `{}`
 //! IS the literal `true`) and **builtins** (`math:`, `string:`, `log:`, …) on
-//! top of Turtle. The engine: a parser (`parser`, with a STRICT Turtle mode),
+//! top of Turtle. RDF-star / RDF 1.2 **quoted-triple terms** (`<< s p o >>` /
+//! `<<( s p o )>>`, GH #2012) are first-class [`Term::Triple`] values: rule
+//! premises match them structurally (variables inside the quotation bind,
+//! nesting included), rule heads derive them, and ground quoted triples intern
+//! into the dictionary through the content-addressed RDF 1.2 triple-term path. The engine: a parser (`parser`, with a STRICT Turtle mode),
 //! a term model (`model`), and a semi-naive forward chainer that applies rules
 //! to a fixpoint. Premises are reordered so each builtin runs only after the
 //! atoms that can produce its inputs (cwm evaluates builtins "when ready").
@@ -35,8 +39,10 @@
 //!     and bidirectional inSeconds (epoch, deterministic — no wall-clock);
 //!   * `log:` equalTo/notEqualTo, includes/notIncludes/supports (see below),
 //!     conjunction (true = empty formula), conclusion (a formula's own
-//!     closure), parsedAsN3, langlit, uri and dtlit (both directions), and —
-//!     ONLY when the caller supplies a [`Resolver`] — semantics/content.
+//!     closure), parsedAsN3, langlit, uri and dtlit (both directions),
+//!     collectAllIn (scoped aggregation — findall over a clause's solutions)
+//!     and forAllIn (scoped universal quantification), and — ONLY when the
+//!     caller supplies a [`Resolver`] — semantics/content.
 //!
 //! `log:includes` containment is cwm-faithful (`formula_containment`): the
 //! scope is the subject formula (the empty formula includes nothing); pattern
@@ -76,10 +82,16 @@
 //! TERMINATES. A diamond that re-uses a shared document across SIBLING branches
 //! is NOT a cycle and still resolves on every branch.
 //!
-//! Next increments: `log:collectAllIn` (scoped aggregation), full
-//! `log:conclusion` parity on deep multi-document closures (cwm_includes
-//! conclusion.n3 is the one remaining honest reasoner-suite fail).
+//! Next increments: full `log:conclusion` parity on deep multi-document
+//! closures (cwm_includes conclusion.n3 is the one remaining honest
+//! reasoner-suite fail).
 
+// [FABLE-5] sq-zgbso.3 (epic sq-zgbso, issue #1582): OPT-IN id-level compiled-rule
+// evaluation for the scoped access-control N3 subset — see the module's own docs for the
+// honest builtin/feature envelope. When the `compiled-rules` feature is off, zero of it
+// is compiled (this hook is the module's only footprint in the default build).
+#[cfg(feature = "compiled-rules")]
+pub mod compiled;
 mod model;
 pub mod parser;
 
@@ -239,6 +251,132 @@ pub fn reason_n3_proof(dict: &mut Dict, src: &str) -> Result<(Vec<[Id; 3]>, Vec<
     intern_closure(dict, &facts, &steps)
 }
 
+/// A stratified run's result ([`reason_n3_stratified`]).
+pub struct StratifiedN3Closure {
+    /// The FINAL stratum's ground closure, interned into the dictionary (the
+    /// same form [`reason_n3`] returns).
+    pub facts: Vec<[Id; 3]>,
+    /// Term-level closure size after each stratum, in stratum order (counted
+    /// before rdf:first/rest list expansion and interning) — the per-stratum
+    /// stats hook a stratified pipeline records.
+    pub strata_facts: Vec<usize>,
+}
+
+/// Run the rule closure STRATUM BY STRATUM: each `strata[i]` is a complete N3
+/// document (facts + rules), and the full term-level closure of the strata
+/// before it is carried forward IN MEMORY as additional input facts — no
+/// serialize/re-parse round-trip between strata (formula-valued facts, which
+/// a text round-trip cannot represent, carry over intact).
+///
+/// This is the sound driver for the engine's NON-MONOTONIC premise operators
+/// (store-scoped `log:notIncludes`, `log:collectAllIn` / `log:forAllIn`):
+/// those are only reliable over predicates FULLY PRESENT before their stratum
+/// starts (rules containing them re-evaluate every fixpoint round but derived
+/// facts are never retracted), so derive such predicates to a fixpoint in an
+/// earlier stratum and negate/aggregate over them in a later one.
+///
+/// Blank-node scope is PER STRATUM, exactly as if each stratum were its own
+/// re-parsed document: carried blank nodes (input blanks and minted rule
+/// existentials) are renamed apart at every stratum boundary — co-reference
+/// within the carried closure is preserved, and a label reused in a later
+/// stratum's source stays a DISTINCT node.
+///
+/// One stratum is exactly [`reason_n3`]; zero strata yield an empty closure.
+pub fn reason_n3_stratified(
+    dict: &mut Dict,
+    strata: &[&str],
+) -> Result<StratifiedN3Closure, String> {
+    let mut carried: Vec<[Term; 3]> = Vec::new();
+    let mut facts = FactIndex::default();
+    let mut strata_facts = Vec::with_capacity(strata.len());
+    for (i, src) in strata.iter().enumerate() {
+        let mut parsed = parser::parse(src)?;
+        if !carried.is_empty() {
+            // Rename carried blanks (input blanks and minted `__sk…` rule
+            // existentials) apart from this stratum's own labels. The prefix
+            // is chosen fresh against every blank label the stratum's source
+            // actually uses, so even a literal `_:__st0_b` in the source
+            // cannot capture a carried node, and `__st…` never collides with
+            // the `__sk…` labels this stratum's closure mints (whose counter
+            // restarts). One uniform injective rename preserves co-reference
+            // within the carried closure.
+            let prefix = fresh_carry_prefix(&parsed);
+            for t in &mut carried {
+                *t = stratum_blanks(t, &prefix);
+            }
+        }
+        parsed.facts.append(&mut carried);
+        let (f, _steps) = run_closure(parsed, None, None, StepMode::None);
+        strata_facts.push(f.all.len());
+        if i + 1 < strata.len() {
+            carried = f.all.iter().cloned().collect();
+        }
+        facts = f;
+    }
+    Ok(StratifiedN3Closure { facts: intern_closure(dict, &facts, &[])?.0, strata_facts })
+}
+
+/// The smallest `__st{k}_` prefix that no blank label anywhere in `parsed`
+/// (facts and rule premises/conclusions alike, recursing through lists,
+/// formulae, and quoted triples) starts with. Renaming a carried label `l`
+/// to `__st{k}_{l}` therefore yields a label proven absent from the
+/// stratum's source — and one that can never collide with the `__sk…`
+/// labels [`run_closure`] mints for rule existentials.
+fn fresh_carry_prefix(parsed: &parser::Parsed) -> String {
+    fn labels<'a>(t: &'a Term, out: &mut FxHashSet<&'a str>) {
+        match t {
+            Term::Blank(l) => {
+                out.insert(l.as_str());
+            }
+            Term::List(ms) => ms.iter().for_each(|m| labels(m, out)),
+            Term::Formula(ts) => {
+                ts.iter().for_each(|r| r.iter().for_each(|m| labels(m, out)));
+            }
+            Term::Triple(tr) => tr.iter().for_each(|m| labels(m, out)),
+            _ => {}
+        }
+    }
+    let mut seen: FxHashSet<&str> = FxHashSet::default();
+    let rule_terms = parsed
+        .rules
+        .iter()
+        .chain(&parsed.backward_rules)
+        .flat_map(|r| r.premise.iter().chain(&r.conclusion));
+    for t in parsed.facts.iter().chain(rule_terms) {
+        t.iter().for_each(|m| labels(m, &mut seen));
+    }
+    let mut k = 0usize;
+    loop {
+        let prefix = format!("__st{}_", k);
+        if !seen.iter().any(|l| l.starts_with(&prefix)) {
+            return prefix;
+        }
+        k += 1;
+    }
+}
+
+/// `t` with every blank label pushed into the carried namespace `prefix`
+/// (recursing into lists, formulae, and quoted triples) — the per-stratum
+/// document scope of [`reason_n3_stratified`]. `prefix` comes from
+/// [`fresh_carry_prefix`]; prefixing is injective, so co-reference among
+/// carried blanks is preserved.
+fn stratum_blanks(t: &[Term; 3], prefix: &str) -> [Term; 3] {
+    fn go(t: &Term, p: &str) -> Term {
+        match t {
+            Term::Blank(l) => Term::Blank(format!("{}{}", p, l)),
+            Term::List(ms) => Term::List(ms.iter().map(|m| go(m, p)).collect()),
+            Term::Formula(ts) => Term::Formula(
+                ts.iter().map(|r| [go(&r[0], p), go(&r[1], p), go(&r[2], p)]).collect(),
+            ),
+            Term::Triple(tr) => {
+                Term::Triple(Box::new([go(&tr[0], p), go(&tr[1], p), go(&tr[2], p)]))
+            }
+            _ => t.clone(),
+        }
+    }
+    [go(&t[0], prefix), go(&t[1], prefix), go(&t[2], prefix)]
+}
+
 /// TERM-level closure + full derivation steps `(conclusion, rule index, premises)` —
 /// the `explain` feature's N3 entry point ([`crate::MaterializedN3Graph::why`]).
 #[cfg(feature = "explain")]
@@ -371,7 +509,13 @@ fn run_closure(
         .map(|r| {
             let joins: Vec<usize> =
                 r.premise.iter().enumerate().filter(|(_, p)| is_join_atom(p)).map(|(i, _)| i).collect();
-            let has_neg = r.premise.iter().any(|p| scope_op(&p[1]).is_some());
+            // Non-monotonic premise operators — scoped negation/containment
+            // AND the collectAllIn/forAllIn aggregations (their solution sets
+            // grow with the closure) — force full re-evaluation every round.
+            let has_neg = r
+                .premise
+                .iter()
+                .any(|p| scope_op(&p[1]).is_some() || collect_op(&p[1]).is_some());
             let needs_bw = joins.iter().any(|&k| match &r.premise[k][1] {
                 Term::Iri(i) => bw_any_var_pred || bw_concl_preds.contains(i.as_str()),
                 _ => !backward_rules.is_empty(),
@@ -398,6 +542,9 @@ fn run_closure(
                         vars.insert(v.clone());
                     }
                     Term::List(ms) => ms.iter().for_each(|m| scan(m, blanks, vars)),
+                    // Quoted triples are transparent structure: their blanks are
+                    // conclusion existentials, their vars part of the firing key.
+                    Term::Triple(t) => t.iter().for_each(|m| scan(m, blanks, vars)),
                     _ => {}
                 }
             }
@@ -705,6 +852,16 @@ impl ListExpander {
         [self.expand(&row[0]), self.expand(&row[1]), self.expand(&row[2])]
     }
     fn expand(&mut self, t: &Term) -> Term {
+        // A quoted triple may carry list values in its components; expand them
+        // in place (the chain structure is asserted in the OUTER graph) so the
+        // triple term itself stays dictionary-representable. [FABLE-5]
+        if let Term::Triple(tr) = t {
+            return Term::Triple(Box::new([
+                self.expand(&tr[0]),
+                self.expand(&tr[1]),
+                self.expand(&tr[2]),
+            ]));
+        }
         let Term::List(ms) = t else { return t.clone() };
         if ms.is_empty() {
             return Term::Iri(parser::RDF_NIL.into());
@@ -823,6 +980,75 @@ fn match_premise_seeded(
             }
             continue;
         }
+        // log:collectAllIn / log:forAllIn — scoped aggregation and universal
+        // quantification (EYE / N3 builtins spec):
+        //   * `( ?template { clause } ?list ) log:collectAllIn ?scope` binds
+        //     ?list to the ?template instantiations, one per solution of the
+        //     clause in the scope (findall — duplicates kept, in match order;
+        //     no solutions ⇒ the empty list).
+        //   * `( { clause-a } { clause-b } ) log:forAllIn ?scope` holds iff
+        //     EVERY solution of clause-a extends to a solution of clause-b
+        //     (vacuously true with none); no clause bindings leak out.
+        // The scope follows the log:includes convention: a bound `{ … }`
+        // formula is matched syntactically; an unbound or non-formula scope
+        // (EYE's idiomatic `?SCOPE` / `_:x`) is the CURRENT STORE, where a
+        // clause is full premise evaluation (joins, builtins, backward
+        // rules). Both operators are NON-MONOTONIC over a store scope — the
+        // solution set can grow as the closure grows, their rules re-evaluate
+        // every round (`needs_full`), and derived facts are never retracted —
+        // so, exactly like scoped negation, they are only sound over
+        // predicates fully present before the stratum starts
+        // ([`reason_n3_stratified`] is the stratified driver). A malformed
+        // subject (wrong arity, non-formula clause) FAILS the premise for
+        // that binding (fail-closed).
+        if let Some(op) = collect_op(&pat[1]) {
+            let mut next = Vec::new();
+            for b in bindings {
+                // Solutions of a `{ clause }` value under `seed`, against the
+                // applied scope (`None` ⇒ the clause is not a formula).
+                let solve = |clause: &Term, seed: &Binding| -> Option<Vec<Binding>> {
+                    let atoms: &[[Term; 3]] = match clause {
+                        Term::Formula(ts) => ts,
+                        // `{}` parses as the literal true: no constraint —
+                        // exactly one (empty) solution.
+                        Term::Lit(v, _, _) if v == "true" => &[],
+                        _ => return None,
+                    };
+                    Some(match apply_deep(&pat[2], seed) {
+                        Term::Formula(scope) => formula_containment(&scope, atoms, seed),
+                        Term::Lit(v, _, _) if v == "true" => formula_containment(&[], atoms, seed),
+                        _ => match_premise_seeded(atoms, facts, seed, None, bw, depth),
+                    })
+                };
+                let subj = apply(&pat[0], &b);
+                let Term::List(members) = &subj else { continue };
+                match op {
+                    CollectOp::CollectAll => {
+                        let [template, clause, list_pat] = &members[..] else { continue };
+                        let Some(sols) = solve(clause, &b) else { continue };
+                        let collected =
+                            Term::List(sols.iter().map(|s| apply_deep(template, s)).collect());
+                        let mut nb = b.clone();
+                        if unify_term(list_pat, &collected, &mut nb) {
+                            next.push(nb);
+                        }
+                    }
+                    CollectOp::ForAll => {
+                        let [ca, cb] = &members[..] else { continue };
+                        let Some(sols_a) = solve(ca, &b) else { continue };
+                        if sols_a.iter().all(|s| matches!(solve(cb, s), Some(ss) if !ss.is_empty()))
+                        {
+                            next.push(b);
+                        }
+                    }
+                }
+            }
+            bindings = next;
+            if bindings.is_empty() {
+                break;
+            }
+            continue;
+        }
         if let Some(gen) = list_generator(&pat[1]) {
             // list:member / list:in / list:iterate — one binding per member.
             let (list_pos, var_pos) = match gen {
@@ -926,6 +1152,7 @@ fn order_premise(premise: &[[Term; 3]]) -> Vec<[Term; 3]> {
             Term::Formula(ts) => ts
                 .iter()
                 .for_each(|r| r.iter().for_each(|m| term_vars(m, out))),
+            Term::Triple(tr) => tr.iter().for_each(|m| term_vars(m, out)),
             _ => {}
         }
     }
@@ -988,6 +1215,7 @@ fn is_join_atom(pat: &[Term; 3]) -> bool {
         && binder_builtin(&pat[1]).is_none()
         && list_generator(&pat[1]).is_none()
         && scope_op(&pat[1]).is_none()
+        && collect_op(&pat[1]).is_none()
         && !virtual_list
 }
 
@@ -1059,6 +1287,11 @@ fn rename_vars(t: &Term, n: usize) -> Term {
             ts.iter().map(|tr| [rename_vars(&tr[0], n), rename_vars(&tr[1], n), rename_vars(&tr[2], n)]).collect(),
         ),
         Term::List(ms) => Term::List(ms.iter().map(|m| rename_vars(m, n)).collect()),
+        Term::Triple(tr) => Term::Triple(Box::new([
+            rename_vars(&tr[0], n),
+            rename_vars(&tr[1], n),
+            rename_vars(&tr[2], n),
+        ])),
         _ => t.clone(),
     }
 }
@@ -1101,6 +1334,11 @@ fn unify_walked(a: &Term, c: &Term, s: &mut Binding) -> bool {
         (Term::List(xs), Term::List(ys)) => {
             xs.len() == ys.len() && xs.iter().zip(ys).all(|(x, y)| unify_walked(x, y, s))
         }
+        // Structural quoted-triple unification (backward goals over
+        // quoted-triple arguments). [FABLE-5]
+        (Term::Triple(xs), Term::Triple(ys)) => {
+            xs.iter().zip(ys.iter()).all(|(x, y)| unify_walked(x, y, s))
+        }
         _ => false,
     }
 }
@@ -1141,6 +1379,9 @@ fn rename_blanks(t: &[Term; 3], map: &FxHashMap<String, String>) -> [Term; 3] {
                 None => t.clone(),
             },
             Term::List(ms) => Term::List(ms.iter().map(|m| go(m, map)).collect()),
+            Term::Triple(tr) => {
+                Term::Triple(Box::new([go(&tr[0], map), go(&tr[1], map), go(&tr[2], map)]))
+            }
             _ => t.clone(),
         }
     }
@@ -1176,6 +1417,12 @@ fn unify_term(pat: &Term, val: &Term, b: &mut Binding) -> bool {
         // value when their triple multisets correspond under the binding
         // (pattern variables may bind quoted terms — cwm unify1/unify2).
         (Term::Formula(ps), Term::Formula(vs)) => formula_unify(ps, vs, b),
+        // Quoted triples unify STRUCTURALLY, component by component (so
+        // `<< ?s :p ?o >>` matches `<< :a :p :b >>` binding ?s/?o —
+        // SPARQL-star / RDF-star triple-pattern semantics). [FABLE-5]
+        (Term::Triple(ps), Term::Triple(vs)) => {
+            ps.iter().zip(vs.iter()).all(|(p, v)| unify_term(p, v, b))
+        }
         (other, _) => other == val,
     }
 }
@@ -1228,6 +1475,9 @@ fn apply(t: &Term, b: &Binding) -> Term {
     match t {
         Term::Var(v) => b.get(v).cloned().unwrap_or_else(|| t.clone()),
         Term::List(ms) => Term::List(ms.iter().map(|m| apply(m, b)).collect()),
+        Term::Triple(tr) => {
+            Term::Triple(Box::new([apply(&tr[0], b), apply(&tr[1], b), apply(&tr[2], b)]))
+        }
         _ => t.clone(),
     }
 }
@@ -1247,6 +1497,9 @@ fn ground_triple(t: &[Term; 3], b: &Binding) -> Option<[Term; 3]> {
             Term::Var(_) => false,
             Term::List(ms) => ms.iter().all(instantiated),
             Term::Formula(_) => true, // opaque value; inner vars are formula-scoped
+            // TRANSPARENT structure (unlike a formula): a variable left inside
+            // a concluded quoted triple leaves the conclusion uninstantiated.
+            Term::Triple(tr) => tr.iter().all(instantiated),
             _ => true,
         }
     }
@@ -1463,6 +1716,26 @@ fn scope_op(p: &Term) -> Option<ScopeOp> {
     }
 }
 
+/// The scoped AGGREGATION / universal-quantification operators (EYE and the
+/// N3 builtins spec; they share the scope convention of the [`ScopeOp`]s).
+#[derive(Clone, Copy)]
+enum CollectOp {
+    /// `( ?template { clause } ?list ) log:collectAllIn ?scope` — findall.
+    CollectAll,
+    /// `( { clause-a } { clause-b } ) log:forAllIn ?scope` — every solution
+    /// of clause-a extends to one of clause-b.
+    ForAll,
+}
+
+fn collect_op(p: &Term) -> Option<CollectOp> {
+    let Term::Iri(i) = p else { return None };
+    match i.strip_prefix(LOG) {
+        Some("collectAllIn") => Some(CollectOp::CollectAll),
+        Some("forAllIn") => Some(CollectOp::ForAll),
+        _ => None,
+    }
+}
+
 /// Substitute bound variables in `t`, recursing into lists AND quoted
 /// formulae (used where a formula value must be fully instantiated:
 /// includes scopes, conclusion emission).
@@ -1478,6 +1751,11 @@ fn apply_deep(t: &Term, b: &Binding) -> Term {
                 .map(|r| [apply_deep(&r[0], b), apply_deep(&r[1], b), apply_deep(&r[2], b)])
                 .collect(),
         ),
+        Term::Triple(tr) => Term::Triple(Box::new([
+            apply_deep(&tr[0], b),
+            apply_deep(&tr[1], b),
+            apply_deep(&tr[2], b),
+        ])),
         _ => t.clone(),
     }
 }
@@ -1692,12 +1970,88 @@ fn num(t: &Term) -> Option<f64> {
 /// decimals compute exactly (scaled i128), doubles (an `e` exponent or
 /// INF/NaN) in f64. Strings coerce by lexical shape — `("2.7" "2")
 /// math:difference 0.7` must hold EXACTLY (f64 gives 0.700…0002).
+///
+/// # Seam-2 tower adoption (sq-pbz04.5.1, `research/rif-core-conformance-and-builtins.md` §2)
+///
+/// The exact add / subtract / multiply / negate / abs arithmetic and the
+/// scale-alignment used by the comparison / max-min paths are now DELEGATED to
+/// the SHARED `sparq_substrate::numeric::Dec` (the same exact fixed-point
+/// `mant * 10^-scale` decimal the SPARQL engine's FILTER / BIND path uses), so
+/// the N3 chainer and the engine can never diverge on exact-decimal arithmetic.
+/// This enum stays the thin **EYE-compat adapter** over that shared core: the
+/// three tiers are exactly EYE's (`Int` in `i128`, exact `Dec`, `f64`) and every
+/// EYE-specific edge is preserved byte-for-byte — lexical-shape string coercion
+/// ([`numval`]), the `numval_term` result rendering (whole-`f64` → `xsd:integer`,
+/// `Dec` normalised via `dec_norm`), `math:remainder`'s divisor-sign integer
+/// semantics, `math:integerQuotient`'s aligned-mantissa floor-division, the
+/// `math:quotient` scale-34 exactness rule (non-terminating → `f64`, integer /
+/// integer exact → `xsd:integer`), integer `math:exponentiation`, and the
+/// `Int`-collapse rendering of `floor` / `ceiling`.
+///
+/// The **i128 ↔ i64 wrinkle** the seam names: the chainer's `Int` tier is `i128`
+/// while substrate `Num::Int` is `i64`, so this adapter never carries a substrate
+/// `Num::Int` — it converts each exact tier to a substrate `Dec` for the delegated
+/// arithmetic (`Int(i)` → `Dec { mant: i, scale: 0 }`, exact for the full `i128`
+/// range including `> i64::MAX`; overflow of the `Dec` mantissa falls back to
+/// `f64` exactly as the pre-adoption `checked_*` path did). The substrate ops
+/// used ([`sparq_substrate::numeric::Dec::checked_add`] / `checked_sub` /
+/// `checked_mul` / `cmp`) are the SAME `i128` mantissa operations the private
+/// tower had, so the closure is byte-identical (verified by the direct
+/// old-vs-substrate differential in the tests below and the unchanged N3/EYE
+/// differential + expressivity floors). The EYE-specific ops that the substrate
+/// tower deliberately does NOT provide (quotient's scale-34 / type rule,
+/// remainder, integer-quotient, exponentiation, floor/ceiling/rounded rendering)
+/// keep their EYE algorithm here — reasoned non-adoption of those edges, so the
+/// refactor stays behaviour-neutral rather than smuggling a behaviour change
+/// through a shared method whose contract differs (e.g. `Dec::checked_div` rounds
+/// at scale 18 and always yields a decimal, which EYE's `math:quotient` does not).
 #[derive(Clone, Copy, Debug)]
 enum NumVal {
     Int(i128),
     /// mantissa, scale: value = mantissa / 10^scale.
     Dec(i128, u32),
     F64(f64),
+}
+
+/// EYE-compat bridge to the shared exact-decimal core. The exact tiers (`Int` /
+/// `Dec`) map to a substrate [`sparq_substrate::numeric::Dec`]; `F64` has no exact
+/// image (returns `None`, so the caller stays on the `f64` fallback path exactly
+/// as the private tower did). `Int(i128)` maps to `Dec { mant: i, scale: 0 }` for
+/// the FULL `i128` range — this is the i128↔i64 wrinkle: substrate `Num::Int` is
+/// `i64`, so an out-of-`i64`-range chainer integer is carried as a scale-0 `Dec`
+/// (exact). [OPUS-4.8] sq-pbz04.5.1
+#[inline]
+fn numval_to_subdec(v: NumVal) -> Option<sparq_substrate::numeric::Dec> {
+    match v {
+        NumVal::Int(i) => Some(sparq_substrate::numeric::Dec { mant: i, scale: 0 }),
+        NumVal::Dec(m, s) => Some(sparq_substrate::numeric::Dec { mant: m, scale: s }),
+        NumVal::F64(_) => None,
+    }
+}
+
+/// EYE `math:negation`, tier-preserving. The exact tiers negate the substrate
+/// `Dec` mantissa via `i128::checked_neg` (so `i128::MIN` overflows → `None`, the
+/// premise fails, exactly as the private tower did — the substrate `Num::neg`
+/// would instead fall back to `Double`, a NON-neutral edge, so negation keeps its
+/// EYE None-on-overflow semantics here). [OPUS-4.8] sq-pbz04.5.1
+#[inline]
+fn numval_negate(v: NumVal) -> Option<NumVal> {
+    match v {
+        NumVal::Int(i) => Some(NumVal::Int(i.checked_neg()?)),
+        NumVal::Dec(m, s) => Some(NumVal::Dec(m.checked_neg()?, s)),
+        NumVal::F64(x) => Some(NumVal::F64(-x)),
+    }
+}
+
+/// EYE `math:absoluteValue`, tier-preserving (`i128::checked_abs`, so `i128::MIN`
+/// overflows → `None`; symmetric to [`numval_negate`]). [OPUS-4.8] sq-pbz04.5.1
+#[inline]
+fn numval_abs(v: NumVal) -> Option<NumVal> {
+    match v {
+        NumVal::Int(i) => Some(NumVal::Int(i.checked_abs()?)),
+        NumVal::Dec(m, s) => Some(NumVal::Dec(m.checked_abs()?, s)),
+        NumVal::F64(x) => Some(NumVal::F64(x.abs())),
+    }
 }
 
 fn numval(t: &Term) -> Option<NumVal> {
@@ -1747,10 +2101,19 @@ impl NumVal {
         };
         Some((up(ma, sa)?, up(mb, sb)?, s))
     }
+    /// Value equality. The exact tiers delegate to the SHARED substrate
+    /// [`sparq_substrate::numeric::Dec::cmp`] (the same scale-alignment the private
+    /// tower's `aligned` did — `Dec::cmp` returns `None` on an alignment overflow,
+    /// which falls back to the `f64` image exactly as before); any `f64` operand or
+    /// an alignment overflow compares by `f64`. Byte-identical to the pre-adoption
+    /// `aligned`-then-`==` path. [OPUS-4.8] sq-pbz04.5.1
     fn eq(a: NumVal, b: NumVal) -> bool {
-        match NumVal::aligned(a, b) {
-            Some((x, y, _)) => x == y,
-            None => a.to_f64() == b.to_f64(),
+        match (numval_to_subdec(a), numval_to_subdec(b)) {
+            (Some(x), Some(y)) => match x.cmp(y) {
+                Some(ord) => ord == std::cmp::Ordering::Equal,
+                None => a.to_f64() == b.to_f64(), // scale-alignment overflow → f64 image
+            },
+            _ => a.to_f64() == b.to_f64(),
         }
     }
 }
@@ -1993,11 +2356,7 @@ fn eval_functional(
         if !s_applied.is_ground() {
             let o_applied = apply(obj, &b);
             if let Some(v) = numval(&o_applied) {
-                let negated = match v {
-                    NumVal::Int(i) => NumVal::Int(i.checked_neg()?),
-                    NumVal::Dec(m, sc) => NumVal::Dec(m.checked_neg()?, sc),
-                    NumVal::F64(x) => NumVal::F64(-x),
-                };
+                let negated = numval_negate(v)?;
                 let mut nb = b;
                 return unify_term(subj, &numval_term(negated), &mut nb).then_some(nb);
             }
@@ -2498,43 +2857,48 @@ fn eval_exact(f: Func, args: &[Term]) -> Option<Term> {
         let v = round(m, pow);
         Some(if s == 0 { NumVal::Int(v) } else { NumVal::Dec(v, 0) })
     };
+    // The exact add / subtract / multiply DELEGATE to the shared substrate
+    // `Dec` (byte-identical `(mant, scale)`: `+`/`-` keep the max scale, `*` sums
+    // the scales — the SAME i128 mantissa ops the private tower did). `renorm`
+    // keeps EYE's result-type rule (all-integer in → integer out; any decimal in
+    // → decimal out). [OPUS-4.8] sq-pbz04.5.1
+    use sparq_substrate::numeric::Dec as SubDec;
     let out = match f {
         Func::Sum => {
-            let mut acc = NumVal::Int(0);
+            let mut acc = SubDec { mant: 0, scale: 0 };
             for &v in &vals {
-                let (a, b, s) = NumVal::aligned(acc, v)?;
-                acc = NumVal::Dec(a.checked_add(b)?, s);
+                acc = acc.checked_add(numval_to_subdec(v)?)?;
             }
-            let NumVal::Dec(m, s) = acc else { return None };
-            renorm(m, s)
+            renorm(acc.mant, acc.scale)
         }
         Func::Product => {
-            let mut acc = NumVal::Int(1);
+            let mut acc = SubDec { mant: 1, scale: 0 };
             for &v in &vals {
-                let (ma, sa) = match acc {
-                    NumVal::Int(i) => (i, 0),
-                    NumVal::Dec(m, s) => (m, s),
-                    NumVal::F64(_) => return None,
-                };
-                let (mb, sb) = match v {
-                    NumVal::Int(i) => (i, 0),
-                    NumVal::Dec(m, s) => (m, s),
-                    NumVal::F64(_) => return None,
-                };
-                acc = NumVal::Dec(ma.checked_mul(mb)?, sa.checked_add(sb)?);
+                acc = acc.checked_mul(numval_to_subdec(v)?)?;
             }
-            let NumVal::Dec(m, s) = acc else { return None };
-            renorm(m, s)
+            renorm(acc.mant, acc.scale)
         }
         Func::Difference => {
-            let (a, b, s) = pair()?;
-            renorm(a.checked_sub(b)?, s)
+            if vals.len() != 2 {
+                return None;
+            }
+            let d = numval_to_subdec(vals[0])?.checked_sub(numval_to_subdec(vals[1])?)?;
+            renorm(d.mant, d.scale)
         }
         Func::Max | Func::Min => {
+            // Compare via the shared substrate `Dec::cmp` (the same scale-aligned
+            // i128 order as the private tower's `aligned`-then-`>`); an alignment
+            // overflow (`cmp` → `None`) falls through to the f64 path, matching the
+            // pre-adoption `aligned(..)?` behaviour. The WINNING ORIGINAL operand is
+            // returned unchanged (its own scale preserved). [OPUS-4.8] sq-pbz04.5.1
             let mut best = vals[0];
             for &v in &vals[1..] {
-                let (a, b, _) = NumVal::aligned(best, v)?;
-                let take = if matches!(f, Func::Max) { b > a } else { b < a };
+                let ord = numval_to_subdec(best)?.cmp(numval_to_subdec(v)?)?;
+                let take = if matches!(f, Func::Max) {
+                    ord == std::cmp::Ordering::Less
+                } else {
+                    ord == std::cmp::Ordering::Greater
+                };
                 if take {
                     best = v;
                 }
@@ -2583,15 +2947,18 @@ fn eval_exact(f: Func, args: &[Term]) -> Option<Term> {
             }
             NumVal::Int(a.div_euclid(b))
         }
+        // Tier-preserving unary sign ops via the shared adapter helpers (i128
+        // `checked_neg`/`checked_abs` on the substrate `Dec` mantissa — `None` on
+        // `i128::MIN` overflow, exactly as before). `vals[0]` is never `F64` here
+        // (the leading guard returns early on any `F64`), so the helper's `F64` arm
+        // is unreachable in this path. [OPUS-4.8] sq-pbz04.5.1
         Func::Negation => match vals[0] {
-            NumVal::Int(i) => NumVal::Int(i.checked_neg()?),
-            NumVal::Dec(m, s) => NumVal::Dec(m.checked_neg()?, s),
             NumVal::F64(_) => return None,
+            v => numval_negate(v)?,
         },
         Func::AbsoluteValue => match vals[0] {
-            NumVal::Int(i) => NumVal::Int(i.checked_abs()?),
-            NumVal::Dec(m, s) => NumVal::Dec(m.checked_abs()?, s),
             NumVal::F64(_) => return None,
+            v => numval_abs(v)?,
         },
         // round-half-UP: floor(x + 1/2) — what the suite references encode
         // (-2.5 → -2, 0.5 → 1, 2.5 → 3). rounded keeps the decimal TYPE
@@ -2772,8 +3139,60 @@ fn intern(dict: &mut Dict, t: &Term) -> Result<Id, String> {
         Term::Iri(i) => dict.intern_iri(i),
         Term::Lit(v, dt, lang) => dict.intern_lit(v, dt, lang.as_deref()),
         Term::Blank(b) => dict.intern_blank(b),
+        // A ground quoted triple interns through `Dict`'s RDF 1.2 triple-term
+        // path (content-addressed by component ids), via the same `oxrdf`
+        // representation the Turtle/N-Triples loaders use — so an N3-derived
+        // `<< s p o >>` and a store-loaded `<<( s p o )>>` share one id. [FABLE-5]
+        Term::Triple(_) => dict.intern(&n3_term_to_oxrdf(t)?),
         Term::Var(_) | Term::Formula(_) => return Err("non-ground term in closure".into()),
         Term::List(_) => return Err("unexpanded list term in closure".into()),
+    })
+}
+
+/// Convert a GROUND N3 term into its `oxrdf` form for dictionary interning of
+/// quoted-triple components. Mirrors the acceptance of the component interners
+/// exactly (`intern_iri`/`intern_blank` validate nothing, so `new_unchecked` —
+/// the SAME strings intern identically inside and outside a quoted triple).
+/// RDF 1.2 structural constraints apply: a triple term's subject must be an
+/// IRI or blank node and its predicate an IRI — anything else (incl. N3's
+/// generalized literal-subject triples, formulae, unexpanded lists) is a loud
+/// error, never a silent re-encoding. [FABLE-5]
+fn n3_term_to_oxrdf(t: &Term) -> Result<oxrdf::Term, String> {
+    Ok(match t {
+        Term::Iri(i) => oxrdf::NamedNode::new_unchecked(i).into(),
+        Term::Lit(v, dt, lang) => match lang {
+            Some(l) => oxrdf::Literal::new_language_tagged_literal_unchecked(v, l).into(),
+            None => {
+                oxrdf::Literal::new_typed_literal(v, oxrdf::NamedNode::new_unchecked(dt)).into()
+            }
+        },
+        Term::Blank(b) => oxrdf::BlankNode::new_unchecked(b).into(),
+        Term::Triple(tr) => {
+            let s: oxrdf::NamedOrBlankNode = match &tr[0] {
+                Term::Iri(i) => oxrdf::NamedNode::new_unchecked(i).into(),
+                Term::Blank(b) => oxrdf::BlankNode::new_unchecked(b).into(),
+                other => {
+                    return Err(format!(
+                        "quoted-triple subject {other:?} is not an IRI or blank node (RDF 1.2 triple terms admit no other subject kind)"
+                    ))
+                }
+            };
+            let Term::Iri(p) = &tr[1] else {
+                return Err(format!(
+                    "quoted-triple predicate {:?} is not an IRI (RDF 1.2 triple terms admit no other predicate kind)",
+                    tr[1]
+                ));
+            };
+            let o = n3_term_to_oxrdf(&tr[2])?;
+            oxrdf::Term::Triple(Box::new(oxrdf::Triple::new(
+                s,
+                oxrdf::NamedNode::new_unchecked(p),
+                o,
+            )))
+        }
+        Term::Var(_) | Term::Formula(_) | Term::List(_) => {
+            return Err(format!("term {t:?} inside a quoted triple has no dictionary representation"))
+        }
     })
 }
 
@@ -3920,5 +4339,278 @@ mod tests {
         let frag_enc = d.intern_lit("hello/world%23test", xsd_str, None);
         assert!(s.contains(&[r, id(&d, "http://ex/frag"), frag_enc]),
             "string:encodeForFragID keeps / but encodes #");
+    }
+}
+
+/// [OPUS-4.8] sq-pbz04.5.1 — DIRECT differential over the seam-2 tower adoption: the
+/// current (substrate-`Dec`-backed) exact-arithmetic core vs a verbatim re-derivation of
+/// the OLD private-`NumVal` semantics, plus pinned EYE-edge outputs. The two must agree
+/// BYTE-FOR-BYTE (`Term` equality — lexical + datatype). Covers the arithmetic matrix the
+/// bead names: `> i64::MAX` integers (the i128↔i64 wrinkle), exact-decimal add/sub/mul
+/// (`0.1 + 0.2` = `0.3`), INF/NaN, and the `('2.7' '2') math:difference = 0.7` exactness
+/// case. Each assertion pins an EXACT value so a mutation of the arithmetic / rendering /
+/// branch logic goes red.
+#[cfg(test)]
+mod substrate_seam_differential {
+    use super::*;
+
+    const XSD_INT: &str = "http://www.w3.org/2001/XMLSchema#integer";
+    const XSD_DEC: &str = "http://www.w3.org/2001/XMLSchema#decimal";
+    const XSD_DBL: &str = "http://www.w3.org/2001/XMLSchema#double";
+
+    fn lit(v: &str, dt: &str) -> Term {
+        Term::Lit(v.to_string(), dt.into(), None)
+    }
+    fn plain(v: &str) -> Term {
+        // A plain (un-typed) literal — the chainer coerces it by LEXICAL SHAPE via `numval`.
+        Term::Lit(v.to_string(), XSD_INT.into(), None)
+    }
+
+    // --- The OLD private-`NumVal` exact core, re-derived VERBATIM as the differential
+    // oracle (the pre-adoption code the seam replaced). It must produce the identical
+    // `(mant, scale)` the current substrate-`Dec`-backed core does for the delegated ops
+    // (Sum/Product/Difference/Max/Min/Negation/AbsoluteValue). ---
+
+    #[derive(Clone, Copy)]
+    enum OldNum {
+        Int(i128),
+        Dec(i128, u32),
+        // The old tower's `F64` tier: `eval_exact` returns `None` on ANY `F64` input (the
+        // exact core is integer/decimal-only), so the payload is never consulted — a unit
+        // marker is enough for the oracle and avoids a dead-field lint. [OPUS-4.8]
+        F64,
+    }
+    fn old_parse(t: &Term) -> Option<OldNum> {
+        match numval(t)? {
+            NumVal::Int(i) => Some(OldNum::Int(i)),
+            NumVal::Dec(m, s) => Some(OldNum::Dec(m, s)),
+            NumVal::F64(_) => Some(OldNum::F64),
+        }
+    }
+    fn old_aligned(a: OldNum, b: OldNum) -> Option<(i128, i128, u32)> {
+        let part = |v: OldNum| match v {
+            OldNum::Int(i) => Some((i, 0u32)),
+            OldNum::Dec(m, s) => Some((m, s)),
+            OldNum::F64 => None,
+        };
+        let ((ma, sa), (mb, sb)) = (part(a)?, part(b)?);
+        let s = sa.max(sb);
+        let up = |m: i128, from: u32| -> Option<i128> { m.checked_mul(10i128.checked_pow(s - from)?) };
+        Some((up(ma, sa)?, up(mb, sb)?, s))
+    }
+    /// The pre-adoption `eval_exact` for the DELEGATED arithmetic ops (verbatim i128 algorithm).
+    fn old_eval_exact(f: Func, args: &[Term]) -> Option<Term> {
+        let vals: Vec<OldNum> = args.iter().map(old_parse).collect::<Option<_>>()?;
+        if vals.iter().any(|v| matches!(v, OldNum::F64)) {
+            return None;
+        }
+        let any_dec = vals.iter().any(|v| matches!(v, OldNum::Dec(_, _)));
+        let renorm = |m: i128, s: u32| if any_dec { NumVal::Dec(m, s) } else { NumVal::Int(m) };
+        let out = match f {
+            Func::Sum => {
+                let mut acc = OldNum::Int(0);
+                for &v in &vals {
+                    let (a, b, s) = old_aligned(acc, v)?;
+                    acc = OldNum::Dec(a.checked_add(b)?, s);
+                }
+                let OldNum::Dec(m, s) = acc else { return None };
+                renorm(m, s)
+            }
+            Func::Product => {
+                let mut acc = OldNum::Int(1);
+                for &v in &vals {
+                    let (ma, sa) = match acc {
+                        OldNum::Int(i) => (i, 0),
+                        OldNum::Dec(m, s) => (m, s),
+                        OldNum::F64 => return None,
+                    };
+                    let (mb, sb) = match v {
+                        OldNum::Int(i) => (i, 0),
+                        OldNum::Dec(m, s) => (m, s),
+                        OldNum::F64 => return None,
+                    };
+                    acc = OldNum::Dec(ma.checked_mul(mb)?, sa.checked_add(sb)?);
+                }
+                let OldNum::Dec(m, s) = acc else { return None };
+                renorm(m, s)
+            }
+            Func::Difference => {
+                if vals.len() != 2 {
+                    return None;
+                }
+                let (a, b, s) = old_aligned(vals[0], vals[1])?;
+                renorm(a.checked_sub(b)?, s)
+            }
+            Func::Max | Func::Min => {
+                let mut best = vals[0];
+                for &v in &vals[1..] {
+                    let (a, b, _) = old_aligned(best, v)?;
+                    let take = if matches!(f, Func::Max) { b > a } else { b < a };
+                    if take {
+                        best = v;
+                    }
+                }
+                match best {
+                    OldNum::Int(i) => NumVal::Int(i),
+                    OldNum::Dec(m, s) => NumVal::Dec(m, s),
+                    OldNum::F64 => return None,
+                }
+            }
+            Func::Negation => match vals[0] {
+                OldNum::Int(i) => NumVal::Int(i.checked_neg()?),
+                OldNum::Dec(m, s) => NumVal::Dec(m.checked_neg()?, s),
+                OldNum::F64 => return None,
+            },
+            Func::AbsoluteValue => match vals[0] {
+                OldNum::Int(i) => NumVal::Int(i.checked_abs()?),
+                OldNum::Dec(m, s) => NumVal::Dec(m.checked_abs()?, s),
+                OldNum::F64 => return None,
+            },
+            _ => return None,
+        };
+        Some(numval_term(out))
+    }
+
+    /// The differential invariant: for the DELEGATED ops the substrate-backed `eval_exact`
+    /// equals the old-semantics oracle byte-for-byte.
+    fn assert_diff(f: Func, args: &[Term]) {
+        assert_eq!(
+            eval_exact(f, args),
+            old_eval_exact(f, args),
+            "substrate-backed eval_exact diverged from the old NumVal semantics for {:?} on {:?}",
+            f as u8,
+            args
+        );
+    }
+
+    #[test]
+    fn diff_sum_difference_product_over_matrix() {
+        // Integer, decimal, mixed, multi-arg — the value+scale-preserving delegated ops.
+        let cases: &[(Func, Vec<Term>)] = &[
+            (Func::Sum, vec![plain("2"), plain("3")]),
+            (Func::Sum, vec![lit("0.1", XSD_DEC), lit("0.2", XSD_DEC)]),
+            (Func::Sum, vec![plain("1"), lit("0.20", XSD_DEC)]),
+            (Func::Sum, vec![plain("1"), plain("2"), plain("3"), lit("0.5", XSD_DEC)]),
+            (Func::Difference, vec![lit("2.7", XSD_DEC), plain("2")]),
+            (Func::Difference, vec![plain("10"), plain("3")]),
+            (Func::Product, vec![lit("2.7", XSD_DEC), lit("2.7", XSD_DEC)]),
+            (Func::Product, vec![plain("6"), plain("7")]),
+            (Func::Product, vec![lit("0.1", XSD_DEC), lit("0.2", XSD_DEC), plain("2")]),
+            (Func::Max, vec![plain("3"), lit("2.9", XSD_DEC), plain("5")]),
+            (Func::Min, vec![lit("2.7", XSD_DEC), plain("2"), lit("2.71", XSD_DEC)]),
+            (Func::Negation, vec![lit("3.50", XSD_DEC)]),
+            (Func::AbsoluteValue, vec![lit("-3.50", XSD_DEC)]),
+        ];
+        for (f, args) in cases {
+            assert_diff(*f, args);
+        }
+    }
+
+    #[test]
+    fn diff_exact_decimal_add_sub_mul_pinned() {
+        // 0.1 + 0.2 is EXACTLY 0.3 (the f64 path gets 0.30000000000000004).
+        assert_eq!(
+            eval_exact(Func::Sum, &[lit("0.1", XSD_DEC), lit("0.2", XSD_DEC)]),
+            Some(lit("0.3", XSD_DEC))
+        );
+        // ('2.7' '2') math:difference = 0.7 EXACTLY (f64 gives 0.7000000000000002).
+        assert_eq!(
+            eval_exact(Func::Difference, &[lit("2.7", XSD_DEC), plain("2")]),
+            Some(lit("0.7", XSD_DEC))
+        );
+        // 2.7 * 2.7 = 7.29 exactly (scale 1 * scale 1 → scale 2).
+        assert_eq!(
+            eval_exact(Func::Product, &[lit("2.7", XSD_DEC), lit("2.7", XSD_DEC)]),
+            Some(lit("7.29", XSD_DEC))
+        );
+        // A trailing-zero scale is normalised by numval_term/dec_norm: 1 + 0.20 → "1.2".
+        assert_eq!(
+            eval_exact(Func::Sum, &[plain("1"), lit("0.20", XSD_DEC)]),
+            Some(lit("1.2", XSD_DEC))
+        );
+    }
+
+    #[test]
+    fn diff_over_i64_max_integers_i128_wrinkle() {
+        // The i128↔i64 wrinkle: chainer Int is i128, substrate Num::Int is i64, so an
+        // out-of-i64 integer is carried as substrate Dec { mant, scale: 0 } (EXACT). The
+        // sum stays an xsd:integer and is EXACT (no f64 collapse).
+        let a = (i64::MAX as i128) + 1; // 9223372036854775808, beyond i64
+        let b: i128 = 1000;
+        let sum = a + b;
+        assert_eq!(
+            eval_exact(Func::Sum, &[plain(&a.to_string()), plain(&b.to_string())]),
+            Some(lit(&sum.to_string(), XSD_INT)),
+            "sum of a > i64::MAX integer stays an exact xsd:integer via the substrate Dec carrier"
+        );
+        // Product of two large integers, still exact within i128.
+        let big = 3_037_000_500i128; // ~sqrt(i128::MAX)/... well within i128 when squared? no — pick safe
+        let sq = big.checked_mul(big).unwrap();
+        assert_eq!(
+            eval_exact(Func::Product, &[plain(&big.to_string()), plain(&big.to_string())]),
+            Some(lit(&sq.to_string(), XSD_INT))
+        );
+        // Difference crossing the i64 boundary.
+        let hi = (i64::MAX as i128) + 500;
+        assert_eq!(
+            eval_exact(Func::Difference, &[plain(&hi.to_string()), plain("500")]),
+            Some(lit(&(i64::MAX).to_string(), XSD_INT))
+        );
+        // All three delegated ops match the old oracle on the >i64 matrix.
+        assert_diff(Func::Sum, &[plain(&a.to_string()), plain(&b.to_string())]);
+        assert_diff(Func::Product, &[plain(&big.to_string()), plain(&big.to_string())]);
+        assert_diff(Func::Difference, &[plain(&hi.to_string()), plain("500")]);
+    }
+
+    #[test]
+    fn diff_inf_nan_stay_on_f64_fallback() {
+        // INF / NaN have no exact tier: eval_exact returns None (→ the f64 fallback path),
+        // identically in both the substrate-backed and old cores.
+        for special in ["INF", "-INF", "NaN"] {
+            let args = [lit(special, XSD_DBL), plain("2")];
+            assert_eq!(eval_exact(Func::Sum, &args), None, "{} has no exact tier", special);
+            assert_eq!(old_eval_exact(Func::Sum, &args), None);
+        }
+        // numval classifies the specials as F64 (the lexical-shape coercion edge).
+        assert!(matches!(numval(&lit("INF", XSD_DBL)), Some(NumVal::F64(f)) if f == f64::INFINITY));
+        assert!(matches!(numval(&lit("-INF", XSD_DBL)), Some(NumVal::F64(f)) if f == f64::NEG_INFINITY));
+        assert!(matches!(numval(&lit("NaN", XSD_DBL)), Some(NumVal::F64(f)) if f.is_nan()));
+    }
+
+    #[test]
+    fn diff_kept_eye_ops_unchanged() {
+        // The EYE-specific ops that KEEP their algorithm (quotient's scale-34 / type rule,
+        // remainder's divisor-sign, integer-quotient's floor) are pinned to their EYE output
+        // so the refactor cannot have perturbed them.
+        // integer / integer exact → xsd:integer (NOT a "N.0" decimal — the seam declines
+        // substrate Dec::checked_div here, which would always yield a decimal).
+        assert_eq!(eval_exact(Func::Quotient, &[plain("6"), plain("2")]), Some(lit("3", XSD_INT)));
+        // exact terminating quotient → decimal.
+        assert_eq!(eval_exact(Func::Quotient, &[plain("1"), plain("4")]), Some(lit("0.25", XSD_DEC)));
+        // non-terminating → None (f64 fallback), NOT a rounded decimal.
+        assert_eq!(eval_exact(Func::Quotient, &[plain("1"), plain("3")]), None);
+        // remainder: divisor-sign (Python %): -2 mod 4 = 2, 2 mod -4 = -2.
+        assert_eq!(eval_exact(Func::Remainder, &[plain("-2"), plain("4")]), Some(lit("2", XSD_INT)));
+        assert_eq!(eval_exact(Func::Remainder, &[plain("2"), plain("-4")]), Some(lit("-2", XSD_INT)));
+        // integerQuotient: floor division.
+        assert_eq!(eval_exact(Func::IntegerQuotient, &[plain("-7"), plain("2")]), Some(lit("-4", XSD_INT)));
+        // floor/ceiling collapse a decimal to an xsd:integer; rounded keeps the "N.0" decimal.
+        assert_eq!(eval_exact(Func::Floor, &[lit("2.7", XSD_DEC)]), Some(lit("2", XSD_INT)));
+        assert_eq!(eval_exact(Func::Ceiling, &[lit("2.1", XSD_DEC)]), Some(lit("3", XSD_INT)));
+        assert_eq!(eval_exact(Func::Rounded, &[lit("2.5", XSD_DEC)]), Some(lit("3.0", XSD_DEC)));
+    }
+
+    #[test]
+    fn diff_negation_abs_tier_preserving() {
+        // Negation / abs preserve the tier and scale (Dec stays Dec with its scale).
+        assert_eq!(eval_exact(Func::Negation, &[plain("5")]), Some(lit("-5", XSD_INT)));
+        assert_eq!(eval_exact(Func::Negation, &[lit("3.50", XSD_DEC)]), Some(lit("-3.5", XSD_DEC)));
+        assert_eq!(eval_exact(Func::AbsoluteValue, &[lit("-3.50", XSD_DEC)]), Some(lit("3.5", XSD_DEC)));
+        // A > i64 integer negates exactly (i128 checked_neg on the substrate Dec carrier).
+        let big = (i64::MAX as i128) + 7;
+        assert_eq!(
+            eval_exact(Func::Negation, &[plain(&big.to_string())]),
+            Some(lit(&(-big).to_string(), XSD_INT))
+        );
     }
 }

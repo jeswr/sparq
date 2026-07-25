@@ -6,16 +6,20 @@
 // here, page-scoped (fixed/inset:0/z-index:-1, behind all content).
 //
 // The old "Run a query now" scroll-CTA is gone: Run itself is in-fold in the runner card, so the
-// two hero CTAs are just "Open the full workbench →" (/try) and "GitHub". The four-cell stat strip
+// two hero CTAs are just "Open the full workbench →" (/app) and "GitHub". The four-cell stat strip
 // moved to a slim band under the hero (StatBand). No performance/timing claim anywhere here.
+//
+// [OPUS-4.8] sq-4hiqe — the workbench CTA targets /app (the single workbench; /try was removed).
+// /app is a SEPARATE Next.js app overlaid at /app/, so this is a HARD full-page anchor
+// (withBasePath + trailing slash), NOT a next/link soft nav (which would fetch /app/index.txt).
 
-import Link from "next/link";
 import { ArrowRight, Github } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { HeroQueryRunnerLazy } from "@/components/home/hero-runner-lazy";
+import { withBasePath } from "@/lib/base-path";
 
-const REPO_URL = "https://github.com/jeswr/sparq";
+const REPO_URL = "https://github.com/sparq-org/sparq";
 
 export function Hero() {
   return (
@@ -42,10 +46,10 @@ export function Hero() {
 
           <div className="mt-7 flex flex-wrap gap-3">
             <Button asChild size="lg">
-              <Link href="/try">
+              <a href={withBasePath("/app/")}>
                 Open the full workbench
                 <ArrowRight className="size-4" aria-hidden />
-              </Link>
+              </a>
             </Button>
             <Button asChild size="lg" variant="ghost">
               <a href={REPO_URL} target="_blank" rel="noopener noreferrer">

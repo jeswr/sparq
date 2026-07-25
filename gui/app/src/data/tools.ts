@@ -17,6 +17,7 @@ import {
   Database,
   Network as GraphIcon,
   ShieldCheck,
+  FilePenLine,
   Brain,
   Search,
   Binary,
@@ -25,6 +26,8 @@ import {
   Lock,
   Users,
   Server,
+  Scale,
+  Gauge,
 } from "lucide-react";
 
 /**
@@ -32,6 +35,8 @@ import {
  * (site/src/data/surfaces.ts) so the GUI inherits the same honest "what runs where" framing.
  *   live           — shipped wasm, in-tab today
  *   live-new-wasm  — a new wasm bundle (portability spike first)
+ *   live-native    — LIVE on the desktop app's native engine; honestly unavailable in the
+ *                    hosted web build (the capability is not in the wasm bundle)
  *   live-bbjs      — 3rd-party WASM (bb.js UltraHonk proving); NOT externally audited
  *   live-sim       — faithful in-tab JS simulation; NOT the native protocol
  *   walkthrough    — captured-I/O replay (native-only / different host)
@@ -40,10 +45,18 @@ import {
 export type Tier =
   | "live"
   | "live-new-wasm"
+  | "live-native"
   | "live-bbjs"
   | "live-sim"
   | "walkthrough"
   | "soon";
+
+/**
+ * [FABLE-5] sq-5lyme — rail grouping for the later honesty regroup (sq-1odi9): `working` tools
+ * have a live panel today; `coming-soon` tools are honest stubs. Data-only for now — nothing
+ * renders the group yet.
+ */
+export type ToolGroup = "working" | "coming-soon";
 
 export interface ToolDef {
   /** Stable id — the tab key + the Cmd-K (later) index key. */
@@ -56,6 +69,27 @@ export interface ToolDef {
   icon: LucideIcon;
   /** Does a working tab exist yet, or is this an honest stub the later phases fill? */
   built: boolean;
+  /** Rail group (sq-5lyme): working panel vs coming-soon honest stub. Not yet rendered. */
+  group: ToolGroup;
+}
+
+/**
+ * [FABLE-5] sq-5lyme — an optional honesty-metadata override a per-tool PANEL FILE exports
+ * (see the tool-panel registry), merged over the base `ToolDef` by `applyToolOverride`. This
+ * is the seam that lets a later tool bead flip its tier/copy/group INSIDE its own panel file
+ * when the working panel lands — never by editing this shared file. OMIT fields you do not
+ * override (an explicit `undefined` field would clobber the base value).
+ */
+export interface ToolOverride {
+  tier?: Tier;
+  blurb?: string;
+  built?: boolean;
+  group?: ToolGroup;
+}
+
+/** Merge a panel file's override (if any) over the base tool definition. */
+export function applyToolOverride(tool: ToolDef, override?: ToolOverride): ToolDef {
+  return override ? { ...tool, ...override } : tool;
 }
 
 /** The TOOLS list, in the rail order from research/gui-design.md §A.2. */
@@ -67,6 +101,21 @@ export const TOOLS: ToolDef[] = [
     tier: "live",
     icon: Database,
     built: true,
+    group: "working",
+  },
+  {
+    id: "plan",
+    label: "Plan",
+    // [FABLE-5] sq-ixc3.19 — the visual query-plan explorer: EXPLAIN / EXPLAIN ANALYZE as a
+    // navigable operator tree (per-operator time / cardinality / q-error heat), over the
+    // in-tab store, the desktop native engine (real wall times), or a server endpoint;
+    // plus the this-workbench live query monitor with endpoint Kill.
+    blurb:
+      "Explore EXPLAIN / EXPLAIN ANALYZE as an operator tree — est vs actual rows, q-error heat, per-operator time — and monitor/kill in-flight queries.",
+    tier: "live",
+    icon: Gauge,
+    built: true,
+    group: "working",
   },
   {
     id: "graph-view",
@@ -75,6 +124,7 @@ export const TOOLS: ToolDef[] = [
     tier: "soon",
     icon: GraphIcon,
     built: false,
+    group: "coming-soon",
   },
   {
     id: "shacl",
@@ -83,6 +133,17 @@ export const TOOLS: ToolDef[] = [
     tier: "live",
     icon: ShieldCheck,
     built: true,
+    group: "working",
+  },
+  {
+    id: "forms",
+    label: "Forms",
+    // [GPT-5.6] sq-lsp7k.1.2 — shared renderer is live; edits remain drafts until F4.
+    blurb: "View and edit resources through DASH widgets selected from SHACL shapes; consumes FormDescription JSON.",
+    tier: "live",
+    icon: FilePenLine,
+    built: true,
+    group: "working",
   },
   {
     id: "inference",
@@ -93,6 +154,7 @@ export const TOOLS: ToolDef[] = [
     tier: "live-new-wasm",
     icon: Brain,
     built: true,
+    group: "working",
   },
   {
     id: "full-text",
@@ -101,6 +163,7 @@ export const TOOLS: ToolDef[] = [
     tier: "live-new-wasm",
     icon: Search,
     built: false,
+    group: "coming-soon",
   },
   {
     id: "vector",
@@ -109,6 +172,7 @@ export const TOOLS: ToolDef[] = [
     tier: "walkthrough",
     icon: Binary,
     built: false,
+    group: "coming-soon",
   },
   {
     id: "geosparql",
@@ -117,6 +181,7 @@ export const TOOLS: ToolDef[] = [
     tier: "walkthrough",
     icon: MapPin,
     built: false,
+    group: "coming-soon",
   },
   {
     id: "streaming",
@@ -125,6 +190,7 @@ export const TOOLS: ToolDef[] = [
     tier: "live-new-wasm",
     icon: Radio,
     built: false,
+    group: "coming-soon",
   },
   {
     id: "zk",
@@ -134,6 +200,7 @@ export const TOOLS: ToolDef[] = [
     tier: "live-bbjs",
     icon: Lock,
     built: false,
+    group: "coming-soon",
   },
   {
     id: "mpc",
@@ -143,6 +210,20 @@ export const TOOLS: ToolDef[] = [
     tier: "live-sim",
     icon: Users,
     built: false,
+    group: "coming-soon",
+  },
+  {
+    id: "odrl",
+    label: "Policies",
+    // [FABLE-5] sq-ixc3.15 — the ODRL usage-control tool. NATIVE-ONLY: the sparq-policy
+    // evaluator + sparq-solid enforcement store are not in the in-tab wasm bundle, so the
+    // hosted web build degrades honestly (the panel shows the native-only message).
+    blurb:
+      "Author + evaluate an ODRL policy; preview the access-gated result set per requester next to the ungated rows.",
+    tier: "live-native",
+    icon: Scale,
+    built: false,
+    group: "coming-soon",
   },
   {
     id: "server",
@@ -152,6 +233,7 @@ export const TOOLS: ToolDef[] = [
     tier: "walkthrough",
     icon: Server,
     built: false,
+    group: "coming-soon",
   },
 ];
 
@@ -159,6 +241,7 @@ export const TOOLS: ToolDef[] = [
 export const TIER_META: Record<Tier, { dot: string; label: string }> = {
   live: { dot: "bg-[var(--success)]", label: "Live in-tab" },
   "live-new-wasm": { dot: "bg-[var(--success)]", label: "Live (new wasm)" },
+  "live-native": { dot: "bg-primary", label: "Live (desktop native only)" },
   "live-bbjs": { dot: "bg-primary", label: "Live (bb.js); not audited" },
   "live-sim": { dot: "bg-[var(--warning)]", label: "In-tab simulation" },
   walkthrough: { dot: "bg-muted-foreground", label: "Walkthrough (native-only)" },

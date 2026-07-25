@@ -31,6 +31,10 @@
 //! - [`verify`] — the verifier-side static re-check (plan §2.4 layer 3):
 //!   independent re-derivation of fragment patterns and cross-graph join
 //!   obligations from the query text.
+//! - `vc_bridge` — the OFF-circuit W3C VC ingest bridge (OPT-IN, behind the
+//!   `vc-bridge` feature): verify a source VC's Data-Integrity proof
+//!   (`eddsa-rdfc-2022` / `ecdsa-rdfc-2019`) at the host, then re-commit + record
+//!   the `zk:sourceCryptosuite` provenance (sq-9c5e, design §5).
 //!
 //! NOTHING in the sparq workspace depends on this crate; default builds and
 //! the wasm artifact are byte-identical with or without it.
@@ -54,9 +58,18 @@ pub mod commit;
 // INV-VL downgrade (#769 accepted, CR-G8 / sq-qhy4); NOT externally audited.
 #[cfg(feature = "dual-leaf")]
 pub mod dual_leaf;
+// [FABLE-5] sq-hh7a4: dual-leaf `xsd:boolean` host encoder (same feature gate,
+// same INV-VL downgrade + CR-G8 / sq-qhy4 audit obligation as `dual_leaf`).
+#[cfg(feature = "dual-leaf")]
+pub mod dual_leaf_boolean;
 pub mod encode;
 pub mod field;
 pub mod ingest;
+// [FABLE-5] sq-we9vs: dual-leaf `xsd:dateTime`/`xsd:date` host encoders — the
+// §13 signed scaled-epoch, Z-only, fail-closed lanes (same feature gate, same
+// INV-VL downgrade + CR-G8 / sq-qhy4 audit obligation as `dual_leaf`).
+#[cfg(feature = "dual-leaf")]
+pub mod dual_leaf_datetime;
 pub mod poseidon2;
 mod poseidon2_constants;
 pub mod registry;
@@ -71,6 +84,16 @@ pub mod registry;
 pub mod secprop;
 pub mod sig;
 pub mod trace;
+// [OPUS-4.8] sq-9c5e: OFF-circuit W3C Verifiable-Credential ingest bridge —
+// verify a source VC's Data-Integrity proof (`eddsa-rdfc-2022` / `ecdsa-rdfc-2019`)
+// at the HOST, then re-commit + record `zk:sourceCryptosuite` provenance. OPT-IN
+// behind the `vc-bridge` cargo feature (OFF by default): the default build pulls
+// no Ed25519/ECDSA/SHA-256 dependency and this module is compiled out. The
+// `zk:sourceCryptosuite` registry slot itself is always present. Provenance-only;
+// the query proof does NOT re-verify the VC proof in-circuit (design §5.3). NOT
+// externally audited (sq-qhy4).
+#[cfg(feature = "vc-bridge")]
+pub mod vc_bridge;
 pub mod verify;
 
 pub use field::Fr;

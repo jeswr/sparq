@@ -1,4 +1,4 @@
-//! Integration tests for the Arrow export (the `arrow` feature). The whole file is
+//! Integration tests for Arrow import/export (the `arrow` feature). The whole file is
 //! `#![cfg(feature = "arrow")]`, so it ONLY runs with `--features arrow`; the default
 //! (no-feature) build is exercised by the workspace default lane (the field-name
 //! constants + the schema docs are all that compiles there).
@@ -9,13 +9,15 @@
 //! language / direction land in the right fields).
 #![cfg(feature = "arrow")]
 
+use std::sync::Arc;
+
 use arrow_array::cast::AsArray;
-use arrow_array::{Array, StringArray, StructArray};
-use arrow_schema::DataType;
-use oxrdf::{NamedNode, Term, Variable};
+use arrow_array::{Array, ArrayRef, RecordBatch, StringArray, StructArray};
+use arrow_schema::{DataType, Field, Schema};
+use oxrdf::{BaseDirection, BlankNode, Literal, NamedNode, Term, Triple, Variable};
 use sparq_arrow::{
-    term_schema, to_record_batch, FIELD_DATATYPE, FIELD_DIRECTION, FIELD_KIND, FIELD_LANGUAGE,
-    FIELD_VALUE,
+    from_record_batch, term_schema, term_struct_type, to_record_batch, FIELD_DATATYPE,
+    FIELD_DIRECTION, FIELD_KIND, FIELD_LANGUAGE, FIELD_VALUE,
 };
 use sparq_core::Graph;
 use sparq_engine::{query, QueryResult};
@@ -197,5 +199,116 @@ fn duplicate_variable_is_an_error() {
         format!("{}", err).contains("duplicate SELECT variable 'x'"),
         "{}",
         err
+    );
+}
+
+/// [GPT-5.6] Mutation witness for the inverse mapping: removing any term-kind arm or
+/// metadata reconstruction makes this exact row-for-row identity assertion fail.
+#[test]
+fn all_term_kinds_round_trip_to_identical_query_result() {
+    let vars = vec![Variable::new("term").unwrap()];
+    let result = QueryResult {
+        vars: vars.clone(),
+        rows: vec![
+            vec![Some(Term::NamedNode(
+                NamedNode::new("http://example.com/resource").unwrap(),
+            ))],
+            vec![Some(Term::BlankNode(BlankNode::new("blank-1").unwrap()))],
+            vec![Some(Term::Literal(Literal::new_simple_literal("plain")))],
+            vec![Some(Term::Literal(Literal::new_typed_literal(
+                "42",
+                NamedNode::new("http://www.w3.org/2001/XMLSchema#integer").unwrap(),
+            )))],
+            vec![Some(Term::Literal(
+                Literal::new_language_tagged_literal("hello", "en").unwrap(),
+            ))],
+            vec![Some(Term::Literal(
+                Literal::new_directional_language_tagged_literal("مرحبا", "ar", BaseDirection::Rtl)
+                    .unwrap(),
+            ))],
+            vec![Some(Term::Triple(Box::new(Triple::new(
+                NamedNode::new("http://example.com/s").unwrap(),
+                NamedNode::new("http://example.com/p").unwrap(),
+                Literal::new_simple_literal("object"),
+            ))))],
+            vec![None],
+        ],
+    };
+
+    let batch = to_record_batch(&result).unwrap();
+    let restored = from_record_batch(&batch).unwrap();
+
+    assert_eq!(restored.vars, result.vars);
+    assert_eq!(restored.rows, result.rows);
+    assert_eq!(restored.vars, vars);
+}
+
+/// A kind outside the four-value contract is rejected, never guessed as a term.
+#[test]
+fn unknown_kind_is_rejected() {
+    let vars = vec![Variable::new("term").unwrap()];
+    let children: Vec<(Arc<Field>, ArrayRef)> = vec![
+        (
+            Arc::new(Field::new(FIELD_KIND, DataType::Utf8, true)),
+            Arc::new(StringArray::from(vec![Some("mystery")])) as ArrayRef,
+        ),
+        (
+            Arc::new(Field::new(FIELD_VALUE, DataType::Utf8, true)),
+            Arc::new(StringArray::from(vec![Some("value")])) as ArrayRef,
+        ),
+        (
+            Arc::new(Field::new(FIELD_DATATYPE, DataType::Utf8, true)),
+            Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+        ),
+        (
+            Arc::new(Field::new(FIELD_LANGUAGE, DataType::Utf8, true)),
+            Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+        ),
+        (
+            Arc::new(Field::new(FIELD_DIRECTION, DataType::Utf8, true)),
+            Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+        ),
+    ];
+    let column = Arc::new(StructArray::from(children)) as ArrayRef;
+    let batch = RecordBatch::try_new(Arc::new(term_schema(&vars).unwrap()), vec![column]).unwrap();
+
+    let error = from_record_batch(&batch).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("unknown RDF term kind 'mystery'"),
+        "{error}"
+    );
+}
+
+/// A top-level column outside the term-struct schema is rejected before any cell read.
+#[test]
+fn invalid_term_schema_is_rejected() {
+    let schema = arrow_schema::Schema::new(vec![Field::new("term", DataType::Utf8, true)]);
+    let column = Arc::new(StringArray::from(vec![Some("http://example.com/resource")])) as ArrayRef;
+    let batch = RecordBatch::try_new(Arc::new(schema), vec![column]).unwrap();
+
+    let error = from_record_batch(&batch).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not use the nullable RDF-term struct schema"),
+        "{error}"
+    );
+}
+
+/// Duplicate field names are rejected by the shared schema-to-variable validator.
+#[test]
+fn duplicate_import_variable_is_rejected() {
+    let field = Field::new("term", term_struct_type(), true);
+    let schema = Arc::new(Schema::new(vec![field.clone(), field]));
+    let batch = RecordBatch::new_empty(schema);
+
+    let error = from_record_batch(&batch).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("duplicate SELECT variable 'term' in Arrow schema"),
+        "{error}"
     );
 }

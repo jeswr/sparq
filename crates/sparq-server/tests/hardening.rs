@@ -982,6 +982,49 @@ async fn spawn_serve(config: ServerConfig) -> SocketAddr {
     addr
 }
 
+/// [GPT-5.6] sq-rejk9: the bespoke TCP loop must preserve axum's peer-address contract just as
+/// the HTTP/3 dispatch path does. A missing extension makes the extractor reject this request,
+/// while checking the exact source socket prevents a placeholder address from satisfying it.
+#[tokio::test]
+async fn tcp_serve_injects_peer_connect_info() {
+    use axum::extract::ConnectInfo;
+    use axum::routing::get;
+
+    async fn peer(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> String {
+        addr.to_string()
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let server_addr = listener.local_addr().unwrap();
+    let app = axum::Router::new().route("/peer", get(peer));
+    tokio::spawn(async move {
+        sparq_server::serve(listener, app, None, None, std::future::pending::<()>())
+            .await
+            .unwrap();
+    });
+
+    let mut socket = TcpStream::connect(server_addr).await.unwrap();
+    let expected_peer = socket.local_addr().unwrap();
+    socket
+        .write_all(b"GET /peer HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut response = String::new();
+    tokio::time::timeout(Duration::from_secs(5), socket.read_to_string(&mut response))
+        .await
+        .expect("TCP response timed out")
+        .unwrap();
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "response: {response:?}"
+    );
+    assert!(
+        response.ends_with(&expected_peer.to_string()),
+        "handler saw the wrong peer; expected {expected_peer}, response: {response:?}"
+    );
+}
+
 /// A slow-loris connection: open a socket, send a partial request line + ONE header, then
 /// never send the terminating blank line. With a short `header_read_timeout` the SERVER must
 /// close the connection (a read returns 0 / a reset) within roughly the deadline. Without the

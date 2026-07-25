@@ -12,6 +12,17 @@
 # Fields: name (required -> check-run name), crate (required), features (required,
 # non-empty comma list), test (bool — run `cargo test` for the leg).
 
+# [FABLE-5] sq-uz0 (#3405): shapes-graph assembly — the `imports` module
+# (sparq-shacl/src/imports.rs: sh:shapesGraph discovery + transitive owl:imports
+# closure, W3C SHACL §§3.1/3.3 (shapes-graph)) and its acceptance tests (tests/imports.rs, whole-file
+# `#[cfg(feature = "imports")]`) are entirely feature-gated, so without this leg
+# they would run in NO gating CI. clippy --all-targets -D warnings with `imports`
+# ON plus the crate's tests. Zero new deps: pure traversal over GraphView + Dict.
+- name: "sparq-shacl (imports)"
+  crate: "sparq-shacl"
+  features: "imports"
+  test: true
+
 # [OPUS-4.8] sq-wuft: SHACL Advanced Features (SHACL-AF) rules — the `sh:rule`
 # module (sparq-shacl/src/rules.rs + the gated arms of eval.rs/model.rs/lib.rs) is
 # entirely `#[cfg(feature = "shacl-af")]`, so the default build/clippy/test never
@@ -22,4 +33,20 @@
 - name: "sparq-shacl (shacl-af)"
   crate: "sparq-shacl"
   features: "shacl-af"
+  test: true
+
+# [FABLE-5] sq-tonhr.3: SHACL Compact Syntax (SCS) — the `scs` parser module
+# (sparq-shacl/src/scs.rs) and its tests (`tests/scs_roundtrip.rs` +
+# `tests/scs_error_paths.rs`, both whole-file `#[cfg(feature = "scs")]`) are
+# entirely feature-gated, so before this leg they ran in NO gating CI (they were
+# allowlisted in scripts/check-feature-test-execution.allowlist.json as a known
+# gap). This leg closes it: clippy --all-targets -D warnings with `scs` ON plus
+# the crate's tests. The W3C shacl12-cs corpus dir (tests/shacl/) is gitignored
+# and absent in CI, so scs_roundtrip records honest SKIPs there; the
+# scs_error_paths fail-closed contract tests are self-contained and always run.
+# Prerequisite hygiene for the sq-tonhr shacl-compact work, which adds its own
+# leg to this same fragment file (sequenced to avoid collisions).
+- name: "sparq-shacl (scs)"
+  crate: "sparq-shacl"
+  features: "scs"
   test: true

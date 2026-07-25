@@ -1,5 +1,7 @@
 # Paper Selection — Novelty/SOTA-Ranked Shortlist + Venue Map
 
+<!-- [OPUS-4.8] sq-5reoy (#1599): the in-tree `zk/ieee754` and `zk/xpath` Noir trees were externalized to the `sparq-org/noir_IEEE754` (v0.10.0) and `sparq-org/noir_XPath` (v0.2.0) face repos and REMOVED from this repo; `zk/compose` now consumes the released `sparq_ieee754` as a pinned Nargo git dependency. Any `zk/xpath/…` / `zk/ieee754/…` path below is a HISTORICAL in-tree reference — the live source is the corresponding face repo. -->
+
 > 🤖 SPARQ agent `[FABLE-5]` — bead **sq-ytk7p** (parent epic **sq-gum8**), 2026-07-04.
 > Fable-architect decomposition record: ONE design record + disjoint child beads.
 > Non-sycophantic by mandate: kills are written down with reasons.

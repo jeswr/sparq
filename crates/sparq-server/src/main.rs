@@ -9,8 +9,11 @@
 //!                [--query-timeout SECS] [--update-where-timeout SECS] [--max-body-bytes N] [--max-concurrent N]
 //!                [--max-results N] [--max-query-rows N] [--max-decompress-ratio N]
 //!                [--max-subscriptions N] [--max-subscriptions-per-conn N]
+//!                [--complete]
 //!                [--service-allow HOST|*.SUFFIX]... [--service-allow-file PATH]
 //!                [--cors-allow-origin ORIGIN]... [--cors-allow-origin-file PATH]
+//!                [--tls-cert FILE --tls-key FILE]
+//!                [--http3 [--http3-addr HOST:PORT]]
 //!                [--verbose] [DATA_FILE]
 //!
 //! DURABLE PERSISTENCE (`--persist DIR`, env `SPARQ_PERSIST_DIR`; QLever's `--persist-updates`
@@ -77,6 +80,11 @@
 //!                             update (a slow update releases the single writer within S instead of
 //!                             holding it for the full --query-timeout). 0/unset = use --query-timeout
 //!                             [unset, env SPARQ_UPDATE_WHERE_TIMEOUT]
+//!   --no-adaptive-commit      [OPUS-4.8 sq-p7kk5] DISABLE adaptive group-commit (restore the always-
+//!                             windowed writer). Adaptive commit is ON by default: a serial interactive
+//!                             client commits in engine-time (µs) instead of paying the fixed group-commit
+//!                             window (ms); concurrent load still batches. FIFO/atomicity/durability
+//!                             unchanged. [on, env SPARQ_ADAPTIVE_COMMIT=0 to disable]
 //!   --max-body-bytes N        maximum request body in bytes              [1048576, env SPARQ_MAX_BODY_BYTES]
 //!   --max-concurrent N        maximum in-flight requests (429 beyond)    [32, env SPARQ_MAX_CONCURRENT]
 //!   --header-read-timeout S   [OPUS-4.8 sq-2gqr] slow-loris guard: max SECONDS a connection may take
@@ -97,6 +105,12 @@
 //!   --max-decompress-ratio N  [OPUS-4.8 sq-ebii] DECOMPRESSION-RATIO cap for a `Content-Encoding: gzip`
 //!                             request body (zip-bomb guard; 413), 0 = refuse gzip bodies
 //!                                                                        [20, env SPARQ_MAX_DECOMPRESS_RATIO]
+//!   --facets                  [GPT-5.6 sq-lsp7k.5.2] (feature `facets`) serve the OPT-IN grouped
+//!                             facet-count endpoint `POST /facets`. Read-only. Off by default
+//!                                                                        [off, env SPARQ_FACETS=1]
+//!   --complete                [GPT-5.6 sq-lsp7k.9.3] (feature `complete`) serve the OPT-IN
+//!                             prefix-completion endpoint `GET /complete`. Read-only. Off by default
+//!                                                                        [off, env SPARQ_COMPLETE=1]
 //!   --brtpf-max-bindings N    [OPUS-4.8 sq-r74h] (feature `brtpf`) DoS cap on the brTPF binding-set
 //!                             MAPPING COUNT — one index scan runs per mapping, so cost is super-linear
 //!                             in the count, not the bytes (413 beyond), 0 off
@@ -108,6 +122,9 @@
 //!                             endpoint `POST /shacl/validate`: POST a shapes graph, the server validates
 //!                             its loaded data graph against it. Read-only. Off by default
 //!                                                                        [off, env SPARQ_SHACL=1]
+//!   --shacl-guard             [GPT-5.6 sq-lsp7k.2.4] reject violating UPDATE/GSP post-states
+//!                                                                        [off, env SPARQ_SHACL_GUARD=1]
+//!   --shacl-shapes FILE       shapes graph for guard mode [env SPARQ_SHACL_SHAPES]
 //!   --n3-patch                [OPUS-4.8 sq-hj4n] (feature `n3-patch`) enable the OPT-IN Solid N3-Patch
 //!                             (`text/n3`) dialect on the Graph-Store-Protocol `PATCH` method. The
 //!                             always-on `application/sparql-update` PATCH dialect needs no flag.
@@ -117,6 +134,18 @@
 //!                             query (the `K:<name>` keyword layer over canonical SPARQL), the server
 //!                             returns the CANONICAL SPARQL it expands to (it never executes it). Off
 //!                             by default                                 [off, env SPARQ_TERSE=1]
+//!   --templates               [FABLE-5 sq-lsp7k.10] (feature `templates`) serve the OPT-IN named
+//!                             parameterized-template REST surface: `GET /templates` lists,
+//!                             `PUT`/`GET`/`DELETE /templates/{name}` manage one definition,
+//!                             `POST /templates/{name}` invokes it with typed JSON arguments
+//!                             (fail-closed on unknown/missing/mistyped parameters). Template
+//!                             writes + UPDATE-template invocations are write-gated through the
+//!                             same sequenced-writer path as /sparql updates. Off by default
+//!                                                                        [off, env SPARQ_TEMPLATES=1]
+//!   --templates-file PATH     [FABLE-5 sq-lsp7k.10] (feature `templates`) durable template store:
+//!                             definitions load from PATH at startup (fail-closed) and every
+//!                             successful PUT/DELETE rewrites it atomically
+//!                                                                        [in-memory, env SPARQ_TEMPLATES_FILE]
 //!   --verbose                 per-request logging (TraceLayer)
 //!   --log-full-requests       [OPUS-4.8 sq-toze.34] OPT OUT of request-log redaction: log the
 //!                             raw request URI (incl. the full `?query=` SPARQL text) verbatim.
@@ -151,6 +180,9 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+#[cfg(any(feature = "http2", feature = "http3"))]
+use std::{path::PathBuf, sync::Arc};
+
 use sparq_core::Graph;
 // [OPUS-4.8] sq-o4qf: bind_posture / BindPosture gate the non-loopback bind; sq-zcby:
 // AuthPosture folds the --auth-token Bearer gate into that bind decision.
@@ -182,12 +214,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut addr = "127.0.0.1:3030".to_string();
+    // [GPT-5.6] sq-oprna.3: HTTP/3 is runtime-off even in a feature-on binary. Its UDP
+    // address defaults to the TCP address (same numeric port, different transport).
+    #[cfg(feature = "http3")]
+    let mut http3 = false;
+    #[cfg(feature = "http3")]
+    let mut http3_addr: Option<String> = None;
+    #[cfg(any(feature = "http2", feature = "http3"))]
+    let mut tls_cert: Option<PathBuf> = None;
+    #[cfg(any(feature = "http2", feature = "http3"))]
+    let mut tls_key: Option<PathBuf> = None;
     let mut format = "turtle".to_string();
     let mut data_file: Option<String> = None;
     // Env first, flags override. [OPUS-4.8] sq-4w18: a malformed SPARQ_SERVICE_ALLOW
     // surfaces here as a clean config error (the `?` turns the String into the boxed
     // error main returns -> a one-line message to stderr + non-zero exit), not a panic.
     let mut config = ServerConfig::from_env()?;
+    #[cfg(feature = "shacl")]
+    let mut shacl_shapes_path = std::env::var_os("SPARQ_SHACL_SHAPES").map(std::path::PathBuf::from);
     // [OPUS-4.8] sq-4w18: collect SERVICE egress allowlist entries from the CLI; they
     // are UNIONed with the SPARQ_SERVICE_ALLOW env baseline (already in `config`) + an
     // optional --service-allow-file, after the arg loop. An allowlist is additive, so
@@ -209,6 +253,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--addr" => addr = args.next().ok_or("--addr requires a value")?,
+            #[cfg(feature = "http3")]
+            "--http3" => http3 = true,
+            #[cfg(feature = "http3")]
+            "--http3-addr" => {
+                http3_addr = Some(
+                    args.next()
+                        .ok_or("--http3-addr requires a HOST:PORT value")?,
+                );
+            }
+            #[cfg(any(feature = "http2", feature = "http3"))]
+            "--tls-cert" => {
+                tls_cert = Some(PathBuf::from(
+                    args.next().ok_or("--tls-cert requires a file path")?,
+                ));
+            }
+            #[cfg(any(feature = "http2", feature = "http3"))]
+            "--tls-key" => {
+                tls_key = Some(PathBuf::from(
+                    args.next().ok_or("--tls-key requires a file path")?,
+                ));
+            }
             "--format" => format = args.next().ok_or("--format requires a value")?,
             "--query-timeout" => {
                 let secs: u64 = parse_flag(&mut args, "--query-timeout")?;
@@ -221,6 +286,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let secs: u64 = parse_flag(&mut args, "--update-where-timeout")?;
                 config.update_where_timeout = (secs > 0).then(|| Duration::from_secs(secs));
             }
+            // [OPUS-4.8] sq-p7kk5: restore the always-windowed writer (disable adaptive
+            // group-commit). Adaptive commit is ON by default — a serial interactive client
+            // then commits in engine-time instead of paying the fixed group-commit window.
+            "--no-adaptive-commit" => config.adaptive_commit = false,
             "--max-body-bytes" => {
                 config.max_body_bytes = parse_flag(&mut args, "--max-body-bytes")?
             }
@@ -391,6 +460,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // GET /sparql with no query. Off by default (env SPARQ_FEDERATION_DESCRIPTORS=1).
             #[cfg(feature = "federation-descriptors")]
             "--federation-descriptors" => config.federation_descriptors = true,
+            // [GPT-5.6] sq-lsp7k.5.2: OPT-IN grouped facet counts over a pinned snapshot.
+            // Read-only. Off by default (env SPARQ_FACETS=1).
+            #[cfg(feature = "facets")]
+            "--facets" => config.facets = true,
+            // [GPT-5.6] sq-lsp7k.9.3: OPT-IN prefix completion backed by a generation-keyed
+            // AppState cache. Read-only. Off by default (env SPARQ_COMPLETE=1).
+            #[cfg(feature = "complete")]
+            "--complete" => config.complete = true,
             // [OPUS-4.8] sq-bzh1 (epic sq-3183): OPT-IN Triple Pattern Fragments / LDF source
             // endpoint — serve a paged RDF fragment of a triple pattern at GET /tpf with Hydra
             // controls. Read-only. Off by default (env SPARQ_TPF=1).
@@ -414,6 +491,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // loaded data graph against it. Read-only. Off by default (env SPARQ_SHACL=1).
             #[cfg(feature = "shacl")]
             "--shacl" => config.shacl = true,
+            // [GPT-5.6] sq-lsp7k.2.4: post-state SHACL transaction guard + shapes source.
+            #[cfg(feature = "shacl")]
+            "--shacl-guard" => config.shacl_guard = true,
+            #[cfg(feature = "shacl")]
+            "--shacl-shapes" => {
+                let path = args.next().ok_or("--shacl-shapes requires a file path")?;
+                if path.is_empty() { return Err("--shacl-shapes must not be empty".into()); }
+                shacl_shapes_path = Some(std::path::PathBuf::from(path));
+            }
             // [OPUS-4.8] sq-hj4n (gh-916): OPT-IN Solid N3-Patch (text/n3) PATCH dialect on the
             // Graph-Store-Protocol graph route. The always-on application/sparql-update PATCH
             // dialect needs no flag; this enables the OPTIONAL text/n3 one. Off by default
@@ -425,10 +511,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // (it never executes it). Off by default (env SPARQ_TERSE=1).
             #[cfg(feature = "terse")]
             "--terse" => config.terse = true,
-            // [OPUS-4.8] sq-2999l (gh-906): OPT-IN durable CDC change-stream at DIR. Enables both
-            // RECORDING every committed update to the segmented, fsync'd append-only log AND the
-            // Neptune-GetRecords-shaped poll endpoint GET /streams over it. Resumes the same stream
-            // gaplessly when DIR already holds segments. Off by default (env SPARQ_CHANGE_STREAM=DIR).
+            // [FABLE-5] sq-lsp7k.10: OPT-IN named-parameterized-template REST surface — the
+            // /templates store (list / PUT-GET-DELETE one definition / POST-invoke with typed
+            // JSON arguments). Query invocations are read-gated; template writes and UPDATE
+            // invocations are write-gated through the same sequenced-writer path as /sparql
+            // updates. Off by default (env SPARQ_TEMPLATES=1); --templates-file PATH (env
+            // SPARQ_TEMPLATES_FILE) makes the store durable (fail-closed load at startup).
+            #[cfg(feature = "templates")]
+            "--templates" => config.templates = true,
+            #[cfg(feature = "templates")]
+            "--templates-file" => {
+                let v: String = parse_flag(&mut args, "--templates-file")?;
+                config.templates_file = (!v.is_empty()).then(|| std::path::PathBuf::from(v));
+            }
+            // [FABLE-5] sq-snopa.6 (issue #992 FR-4): OPT-IN Solid WAC/ACP HTTP authorization
+            // surface — POST /authz/decide, /authz/wac-allow, /authz/query, a thin HTTP shell over
+            // the sparq-solid library authoriser. Fail-closed on every error path. Off by default
+            // (env SPARQ_SOLID_AUTHZ=1).
+            #[cfg(feature = "solid-authz")]
+            "--solid-authz" => config.solid_authz = true,
+            // [GPT-5.6] (sq-kqofk, gh-906): OPT-IN durable CDC change-stream at DIR. Records each
+            // published group-commit generation on the writer thread to the segmented, fsync'd log
+            // and serves the Neptune-GetRecords-shaped GET /streams endpoint. Resumes gaplessly
+            // when DIR already holds segments. Off by default (env SPARQ_CHANGE_STREAM=DIR).
             #[cfg(feature = "change-stream")]
             "--change-stream" => {
                 let dir = args.next().ok_or("--change-stream requires a directory path")?;
@@ -474,6 +579,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     ""
                 };
+                // [GPT-5.6] sq-lsp7k.5.2: surface the OPT-IN facet-count endpoint flag.
+                let facets = if cfg!(feature = "facets") {
+                    " [--facets]"
+                } else {
+                    ""
+                };
+                // [GPT-5.6] sq-lsp7k.9.3: surface the OPT-IN prefix-completion endpoint flag.
+                let complete = if cfg!(feature = "complete") {
+                    " [--complete]"
+                } else {
+                    ""
+                };
                 // [OPUS-4.8] sq-r74h: surface the brTPF binding-set DoS caps in --help (feature brtpf).
                 let brtpf = if cfg!(feature = "brtpf") {
                     " [--brtpf-max-bindings N] [--brtpf-max-values-bytes N]"
@@ -482,7 +599,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
                 // [OPUS-4.8] sq-r868: surface the SHACL validate endpoint flag (feature shacl).
                 let shacl = if cfg!(feature = "shacl") {
-                    " [--shacl]"
+                    " [--shacl] [--shacl-guard --shacl-shapes FILE]"
                 } else {
                     ""
                 };
@@ -498,6 +615,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     ""
                 };
+                // [FABLE-5] sq-lsp7k.10: surface the OPT-IN template-surface flags (feature templates).
+                let templates = if cfg!(feature = "templates") {
+                    " [--templates] [--templates-file PATH]"
+                } else {
+                    ""
+                };
                 // [OPUS-4.8] sq-o5bi / sq-ft7u: surface the OPT-IN restore flags (feature backup).
                 let backup = if cfg!(feature = "backup") {
                     " [--restore FILE] [--restore-persist]"
@@ -510,16 +633,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     ""
                 };
+                // [GPT-5.6] sq-oprna.3: these flags exist only in an `http3` build.
+                let http3 = if cfg!(feature = "http3") {
+                    " [--http3 [--http3-addr HOST:PORT] --tls-cert FILE --tls-key FILE]"
+                } else {
+                    ""
+                };
                 eprintln!(
                     "usage: sparq-server [--addr HOST:PORT] [--allow-remote] [--persist DIR] \
                      [--auth-token TOKEN] [--auth-token-read] [--format FMT] \
-                     [--query-timeout SECS] [--update-where-timeout SECS] [--header-read-timeout SECS] \
+                     [--query-timeout SECS] [--update-where-timeout SECS] [--no-adaptive-commit] [--header-read-timeout SECS] \
                      [--max-body-bytes N] [--max-concurrent N] \
                      [--max-results N] [--max-query-rows N] [--max-query-bytes N] [--max-decompress-ratio N] \
                      [--max-subscriptions N] \
-                     [--max-subscriptions-per-conn N]{time_travel}{service}{brtpf}{shacl}{n3_patch}{terse}{backup}{change_stream} \
+                     [--max-subscriptions-per-conn N]{time_travel}{service}{facets}{complete}{brtpf}{shacl}{n3_patch}{terse}{templates}{backup}{change_stream} \
                      [--cors-allow-origin ORIGIN]... [--cors-allow-origin-file PATH] [--verbose] \
-                     [--log-full-requests] [DATA_FILE]\n  \
+                     [--log-full-requests]{http3} [DATA_FILE]\n  \
                      or: sparq-server --health-probe [--health-probe-addr HOST:PORT]\n\n  \
                      HEALTH-PROBE: --health-probe (the container HEALTHCHECK) connects to an \
                      already-running server's /health on 127.0.0.1:3030 (override with \
@@ -561,6 +690,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      ?at=N / ?after=N, ?limit=N) returning the records + a nextSequenceNumber \
                      continuation token. Resumes the same stream gaplessly across a restart. Off by \
                      default; reading is gated by the read auth.\n  \
+                     HTTP/2 (the `http2` build feature): the TCP listener accepts h1 and h2c. \
+                     Supply both --tls-cert and --tls-key PEM files to enable TLS with ALPN \
+                     h2/http/1.1; omitting both keeps cleartext compatibility. WebSocket \
+                     subscriptions use HTTP/1.1 upgrade.\n  \
+                     HTTP/3 (the `http3` build feature): --http3 starts an encrypted QUIC/UDP \
+                     listener beside TCP. It defaults to the same address and numeric port; \
+                     override UDP with --http3-addr. Both PEM flags are required.\n  \
                      CORS: NO CORS headers by default (a cross-origin browser fetch cannot read \
                      responses). For a FIRST-PARTY browser app on another origin, allowlist its \
                      exact origin(s) via --cors-allow-origin ORIGIN (repeatable) / \
@@ -572,6 +708,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             other => data_file = Some(other.to_string()),
         }
+    }
+
+    // [GPT-5.6] sq-oprna.6: TCP TLS is selected by a complete credential pair. Reject a lone
+    // path rather than silently serving cleartext; `http3` retains its stricter runtime rule.
+    #[cfg(feature = "http2")]
+    if tls_cert.is_some() != tls_key.is_some() {
+        return Err("--tls-cert and --tls-key must be provided together".into());
+    }
+
+    // [GPT-5.6] sq-oprna.3: QUIC cannot run without TLS. Reject incomplete configuration
+    // before loading a potentially large dataset or binding either listener.
+    #[cfg(feature = "http3")]
+    if http3 && (tls_cert.is_none() || tls_key.is_none()) {
+        return Err("--http3 requires both --tls-cert FILE and --tls-key FILE".into());
+    }
+
+    // [GPT-5.6] sq-lsp7k.2.4: load shapes once at startup, failing closed on bad input.
+    #[cfg(feature = "shacl")]
+    if let Some(path) = shacl_shapes_path {
+        let text = std::fs::read_to_string(&path)
+            .map_err(|e| format!("--shacl-shapes: cannot read {}: {e}", path.display()))?;
+        let format = match path.extension().and_then(|s| s.to_str()).unwrap_or("") {
+            "nt" => "ntriples", "nq" => "nquads", "trig" => "trig", _ => "turtle",
+        };
+        let shapes = Graph::load_str(&text, format)
+            .map_err(|e| format!("--shacl-shapes: failed to load {} as {format}: {e}", path.display()))?;
+        config.shacl_shapes = Some(sparq_server::ShaclShapes::new(shapes));
     }
 
     // [OPUS-4.8] sq-4w18: merge the --service-allow-file + --service-allow CLI entries
@@ -797,6 +960,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.max_subscriptions,
         config.max_subscriptions_per_conn,
     );
+    // [OPUS-4.8] sq-p7kk5: surface the write-path commit mode at startup.
+    eprintln!(
+        "write path: adaptive-group-commit={}",
+        if config.adaptive_commit { "on" } else { "off" }
+    );
     // [OPUS-4.8] sq-r74h: surface the brTPF binding-set DoS caps at startup (feature `brtpf`).
     #[cfg(feature = "brtpf")]
     {
@@ -892,6 +1060,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let addr: SocketAddr = addr.parse()?;
+    #[cfg(feature = "http3")]
+    let http3_addr = if http3 {
+        Some(match http3_addr {
+            Some(value) => value
+                .parse::<SocketAddr>()
+                .map_err(|e| format!("--http3-addr: invalid HOST:PORT '{value}': {e}"))?,
+            None => addr,
+        })
+    } else {
+        None
+    };
     // [OPUS-4.8] sq-o4qf / sq-zcby: enforce the bind posture BEFORE binding. A non-loopback
     // address is refused unless explicitly opted into (--allow-remote / SPARQ_ALLOW_REMOTE)
     // OR the whole surface is authenticated (--auth-token AND --auth-token-read). A
@@ -900,6 +1079,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         BindPosture::Loopback => {}
         BindPosture::RemoteAllowed { warning } => eprintln!("{warning}"),
         BindPosture::RemoteRefused { message } => return Err(message.into()),
+    }
+    // [GPT-5.6] sq-oprna.3: the independently configured UDP listener obeys the same
+    // loopback/auth/--allow-remote exposure policy as the TCP listener.
+    #[cfg(feature = "http3")]
+    if let Some(http3_addr) = http3_addr {
+        match bind_posture(&http3_addr, config.allow_remote, auth) {
+            BindPosture::Loopback => {}
+            BindPosture::RemoteAllowed { warning } => eprintln!("HTTP/3: {warning}"),
+            BindPosture::RemoteRefused { message } => {
+                return Err(format!("HTTP/3: {message}").into());
+            }
+        }
     }
 
     // [OPUS-4.8] sq-2gqr / sq-lodb: capture the connection-layer slow-client deadlines BEFORE
@@ -913,13 +1104,96 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = AppState::try_with_config(graph, config)?;
     let app = router(state);
 
+    // [GPT-5.6] sq-oprna.6: a complete PEM pair opts the HTTP/2-capable TCP listener into TLS;
+    // no pair preserves the cleartext h1+h2c path. Parse before binding so invalid material fails
+    // startup without briefly exposing a listening socket.
+    #[cfg(feature = "http2")]
+    let tcp_tls_config = match (tls_cert.as_deref(), tls_key.as_deref()) {
+        (Some(cert), Some(key)) => Some(load_tcp_tls_config(cert, key)?),
+        (None, None) => None,
+        _ => unreachable!("the credential-pair invariant was validated above"),
+    };
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    #[cfg(not(feature = "http2"))]
     eprintln!("sparq-server listening on http://{addr}  (SPARQL endpoint: /sparql, subscriptions: ws://{addr}/subscriptions)");
+    #[cfg(feature = "http2")]
+    if tcp_tls_config.is_some() {
+        eprintln!("sparq-server listening on https://{addr} (HTTP/1.1 + HTTP/2; SPARQL endpoint: /sparql, subscriptions: wss://{addr}/subscriptions)");
+    } else {
+        eprintln!("sparq-server listening on http://{addr} (HTTP/1.1 + h2c; SPARQL endpoint: /sparql, subscriptions: ws://{addr}/subscriptions)");
+    }
+    // [GPT-5.6] sq-oprna.3: feature-on/runtime-on adds a separate encrypted UDP listener,
+    // but both transports dispatch through clones of the one router built above. The TCP
+    // future is still the exact bespoke `sparq_server::serve` path with both slow-client
+    // timers and WebSocket upgrades intact.
+    #[cfg(feature = "http3")]
+    if let Some(http3_addr) = http3_addr {
+        let cert = tls_cert.as_deref().expect("validated with --http3");
+        let key = tls_key.as_deref().expect("validated with --http3");
+        let endpoint = bind_http3_endpoint(http3_addr, cert, key)?;
+        let bound_addr = endpoint.local_addr()?;
+        // [GPT-5.6] sq-oprna.4: derive the advertisement from the successfully bound endpoint, not
+        // from requested configuration. Keep the h3 router unlayered: Alt-Svc is discovery for the
+        // TCP response path, and both routers still share the same application handlers.
+        let tcp_app = app
+            .clone()
+            .layer(sparq_http3::alt_svc_layer(bound_addr.port()));
+        eprintln!("sparq-server HTTP/3 listening on https://{bound_addr} (QUIC/UDP; WebSocket subscriptions remain HTTP/1.1-only)");
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let shutdown_task = tokio::spawn(async move {
+            shutdown_signal().await;
+            let _ = shutdown_tx.send(true);
+        });
+        let tcp_shutdown = wait_for_shutdown(shutdown_rx.clone());
+        let h3_shutdown = wait_for_shutdown(shutdown_rx);
+        #[cfg(not(feature = "http2"))]
+        let tcp = sparq_server::serve(
+            listener,
+            tcp_app,
+            header_read_timeout,
+            body_read_timeout,
+            tcp_shutdown,
+        );
+        #[cfg(feature = "http2")]
+        let tcp = {
+            let tcp_tls_config = tcp_tls_config.clone();
+            async move {
+                if let Some(tls_config) = tcp_tls_config {
+                    sparq_server::serve_tls(
+                        listener,
+                        tcp_app,
+                        tls_config,
+                        header_read_timeout,
+                        body_read_timeout,
+                        tcp_shutdown,
+                    )
+                    .await
+                } else {
+                    sparq_server::serve(
+                        listener,
+                        tcp_app,
+                        header_read_timeout,
+                        body_read_timeout,
+                        tcp_shutdown,
+                    )
+                    .await
+                }
+            }
+        };
+        let h3 = sparq_http3::serve_h3(endpoint, app, h3_shutdown);
+        let result = tokio::try_join!(tcp, h3);
+        shutdown_task.abort();
+        result?;
+        return Ok(());
+    }
     // [OPUS-4.8] sq-2gqr / sq-lodb: NOT `axum::serve` — it never installs a timer, so hyper's
     // header-read deadline is inert there and a slow-loris client holds a connection (and
     // concurrency slot) open forever. `sparq_server::serve` is the same accept + graceful-drain
     // loop WITH the header-read deadline (slow-loris HEADER guard) and the body read/idle deadline
     // (slow-BODY guard) wired in.
+    #[cfg(not(feature = "http2"))]
     sparq_server::serve(
         listener,
         app,
@@ -928,7 +1202,113 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         shutdown_signal(),
     )
     .await?;
+    #[cfg(feature = "http2")]
+    if let Some(tls_config) = tcp_tls_config {
+        sparq_server::serve_tls(
+            listener,
+            app,
+            tls_config,
+            header_read_timeout,
+            body_read_timeout,
+            shutdown_signal(),
+        )
+        .await?;
+    } else {
+        sparq_server::serve(
+            listener,
+            app,
+            header_read_timeout,
+            body_read_timeout,
+            shutdown_signal(),
+        )
+        .await?;
+    }
     Ok(())
+}
+
+/// [GPT-5.6] sq-oprna.6: load the TCP listener's TLS-1.3 certificate and key and advertise both
+/// supported application protocols. The auto builder selects the matching h1/h2 connection.
+#[cfg(feature = "http2")]
+fn load_tcp_tls_config(
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> Result<Arc<rustls::ServerConfig>, Box<dyn std::error::Error>> {
+    let cert_file = std::fs::File::open(cert_path)
+        .map_err(|e| format!("--tls-cert: cannot read {}: {e}", cert_path.display()))?;
+    let certs = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("--tls-cert: malformed PEM in {}: {e}", cert_path.display()))?;
+    if certs.is_empty() {
+        return Err(format!(
+            "--tls-cert: {} contains no certificates",
+            cert_path.display()
+        )
+        .into());
+    }
+
+    let key_file = std::fs::File::open(key_path)
+        .map_err(|e| format!("--tls-key: cannot read {}: {e}", key_path.display()))?;
+    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file))
+        .map_err(|e| format!("--tls-key: malformed PEM in {}: {e}", key_path.display()))?
+        .ok_or_else(|| format!("--tls-key: {} contains no private key", key_path.display()))?;
+
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("TCP TLS certificate/key configuration is invalid: {e}"))?;
+    tls.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(Arc::new(tls))
+}
+
+/// [GPT-5.6] sq-oprna.3: load an operator-supplied PEM chain/key into an aws-lc-rs-backed,
+/// TLS-1.3-only Quinn endpoint. This helper is absent from feature-off binaries.
+#[cfg(feature = "http3")]
+fn bind_http3_endpoint(
+    addr: SocketAddr,
+    cert_path: &std::path::Path,
+    key_path: &std::path::Path,
+) -> Result<quinn::Endpoint, Box<dyn std::error::Error>> {
+    let cert_file = std::fs::File::open(cert_path)
+        .map_err(|e| format!("--tls-cert: cannot read {}: {e}", cert_path.display()))?;
+    let certs = rustls_pemfile::certs(&mut std::io::BufReader::new(cert_file))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("--tls-cert: malformed PEM in {}: {e}", cert_path.display()))?;
+    if certs.is_empty() {
+        return Err(format!(
+            "--tls-cert: {} contains no certificates",
+            cert_path.display()
+        )
+        .into());
+    }
+
+    let key_file = std::fs::File::open(key_path)
+        .map_err(|e| format!("--tls-key: cannot read {}: {e}", key_path.display()))?;
+    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(key_file))
+        .map_err(|e| format!("--tls-key: malformed PEM in {}: {e}", key_path.display()))?
+        .ok_or_else(|| format!("--tls-key: {} contains no private key", key_path.display()))?;
+
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| format!("HTTP/3 TLS certificate/key configuration is invalid: {e}"))?;
+    tls.alpn_protocols = vec![b"h3".to_vec()];
+    let quic = sparq_http3::quic_server_config(tls)?;
+    quinn::Endpoint::server(quic, addr).map_err(Into::into)
+}
+
+/// [GPT-5.6] sq-oprna.3: adapt one shared signal notification into each listener's
+/// independently owned shutdown future.
+#[cfg(feature = "http3")]
+async fn wait_for_shutdown(mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    while !*shutdown.borrow_and_update() {
+        if shutdown.changed().await.is_err() {
+            break;
+        }
+    }
 }
 
 /// [OPUS-4.8] sq-toze.36 (cert gap GX-13): detect the `--health-probe` subcommand and resolve

@@ -279,7 +279,8 @@ export function ZkCarHire() {
             </Badge>
           </CardHeader>
           <CardContent className="space-y-3">
-            <pre className="max-h-64 overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-[11.5px] leading-relaxed">
+            {/* [FABLE-5] tabIndex=0: keyboard-focusable scrollable region (scrollable-region-focusable, sq-0rbfn) */}
+            <pre tabIndex={0} className="max-h-64 overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-[11.5px] leading-relaxed">
               {CREDENTIAL_TURTLE}
             </pre>
             <p className="text-xs text-muted-foreground">
@@ -305,7 +306,8 @@ export function ZkCarHire() {
             </div>
           </CardHeader>
           <CardContent className="space-y-4">
-            <pre className="overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-[11.5px] leading-relaxed">
+            {/* [FABLE-5] tabIndex=0: keyboard-focusable scrollable region (scrollable-region-focusable, sq-0rbfn) */}
+            <pre tabIndex={0} className="overflow-auto rounded-lg border bg-muted/40 p-3 font-mono text-[11.5px] leading-relaxed">
               {ELIGIBILITY_QUERY}
             </pre>
 
@@ -613,7 +615,8 @@ function CompositionPanel({
           )}
           data-zk-verdict={eligible ? "eligible" : "pending"}
         >
-          <p className="text-xs uppercase tracking-wide opacity-80">
+          {/* [FABLE-5] opacity-100 (was 80): the label on the muted verdict card was 4.26:1, below WCAG AA 4.5:1 (color-contrast, sq-0rbfn) */}
+          <p className="text-xs uppercase tracking-wide">
             Composed verdict
           </p>
           <p className="text-2xl font-semibold">
@@ -804,7 +807,8 @@ function VerdictPanel({ phase, age }: { phase: Phase; age: number }) {
               : "bg-muted text-muted-foreground",
           )}
         >
-          <p className="text-xs uppercase tracking-wide opacity-80">
+          {/* [FABLE-5] opacity-100 (was 80): same low-contrast muted-verdict-card label as above (color-contrast, sq-0rbfn) */}
+          <p className="text-xs uppercase tracking-wide">
             Eligibility verdict (the only age-derived bit revealed)
           </p>
           <p className="text-2xl font-semibold">
@@ -1146,7 +1150,7 @@ function HonestyPanel() {
         <p className="flex flex-wrap gap-3 pt-1">
           <a
             className="text-primary underline-offset-4 hover:underline"
-            href="https://github.com/jeswr/sparq/blob/main/SECURITY.md"
+            href="https://github.com/sparq-org/sparq/blob/main/SECURITY.md"
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -1154,7 +1158,7 @@ function HonestyPanel() {
           </a>
           <a
             className="text-primary underline-offset-4 hover:underline"
-            href="https://github.com/jeswr/sparq/tree/main/compliance/cryptoreview"
+            href="https://github.com/sparq-org/sparq/tree/main/compliance/cryptoreview"
             target="_blank"
             rel="noopener noreferrer"
           >
@@ -1162,7 +1166,7 @@ function HonestyPanel() {
           </a>
           <a
             className="text-primary underline-offset-4 hover:underline"
-            href="https://github.com/jeswr/sparq/tree/main/zk/compose"
+            href="https://github.com/sparq-org/sparq/tree/main/zk/compose"
             target="_blank"
             rel="noopener noreferrer"
           >

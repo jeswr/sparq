@@ -117,6 +117,108 @@ pub fn wrap_for_view(sparql: &str) -> Result<String, String> {
     Ok(q.to_string())
 }
 
+/// [OPUS-4.8] sq-gq28y (issue #1546). The spec-minted reserved IRI a client uses to opt a
+/// query into **union default graph mode**, per the *Access-Controlled SPARQL Query over a
+/// Solid Pod* Editor's Draft §"Union default graph mode" (`jeswr/solid-sparql-query`). When
+/// it appears among a query's default-graph IRIs — a `FROM` clause here (the
+/// `default-graph-uri` protocol parameter is the equivalent signal at the HTTP layer, handled
+/// by the Solid server, not this string API) — the default graph FOR THAT QUERY becomes the
+/// RDF merge of the session's authorized named graphs. In `FROM NAMED` position it "names
+/// nothing" (treated as absent) and never binds `GRAPH ?g`.
+///
+/// This is DEFAULT public surface: the spec-conformant empty-default + explicit-union read
+/// path ([`wrap_for_view_opt_in`]) is always on. The opt-in is the ONLY way a bare
+/// default-graph pattern sees anything; without it the standing default graph is empty.
+pub const UNION_DEFAULT_GRAPH_IRI: &str = "http://www.w3.org/ns/solid/sparql#union-default-graph";
+
+/// Detect the union-default-graph opt-in and STRIP the reserved IRI from the query's
+/// dataset clause. Returns `true` iff the reserved IRI was present in a **default-graph**
+/// (`FROM`) position (the opt-in signal per the Editor's Draft §"Union default graph mode").
+///
+/// The reserved IRI is a *signal*, never a real graph name, so it is removed from BOTH the
+/// default and named dataset positions before evaluation:
+/// - in `FROM NAMED` position it must be treated as **absent** (draft: "names nothing …
+///   `GRAPH ?g` never binds to it") — leaving it would intersect the view's authorized
+///   named-graph set down to the empty set and wrongly collapse `GRAPH ?g` to zero solutions;
+/// - when stripping empties the whole dataset clause (e.g. the query carried ONLY
+///   `FROM <reserved>`), the clause is dropped so the query round-trips as "no dataset
+///   clause" and the view applies the FULL authorized named-graph set (draft: "when only
+///   the reserved IRI is given, the named-graph set remains the authorized set, so `GRAPH`
+///   patterns stay usable alongside the union default graph").
+///
+/// Matching is EXACT (a near-miss IRI is a normal, absent, per-pod-model dataset reference
+/// that contributes nothing and never widens): an unrecognised value therefore fails
+/// **closed** — it does NOT silently enable the union default graph.
+fn take_union_default_opt_in(q: &mut Query) -> bool {
+    let dataset = match q {
+        Query::Select { dataset, .. }
+        | Query::Construct { dataset, .. }
+        | Query::Describe { dataset, .. }
+        | Query::Ask { dataset, .. } => dataset,
+    };
+    let Some(d) = dataset.as_mut() else { return false };
+    let reserved = NamedNode::new_unchecked(UNION_DEFAULT_GRAPH_IRI);
+    let opt_in = d.default.contains(&reserved);
+    d.default.retain(|g| *g != reserved);
+    if let Some(named) = d.named.as_mut() {
+        named.retain(|g| *g != reserved);
+    }
+    let empty = d.default.is_empty() && d.named.as_ref().is_none_or(|n| n.is_empty());
+    if empty {
+        *dataset = None;
+    }
+    opt_in
+}
+
+/// [OPUS-4.8] sq-gq28y (issue #1546). The **spec-conformant default** read-path rewrite: the
+/// *Access-Controlled SPARQL Query over a Solid Pod* Editor's Draft empty-default +
+/// explicit-union semantics, layered on top of [`wrap_for_view`]. This is the rewrite
+/// [`crate::PodStore::query_as`] uses by default (the `legacy-union-default-graph` feature
+/// swaps it back to [`wrap_for_view`] for a union-always escape hatch).
+///
+/// Detects + strips the reserved [`UNION_DEFAULT_GRAPH_IRI`] from the dataset clause, then:
+/// - **opt-in present** (reserved IRI in a `FROM` clause) → apply the per-pattern GRAPH
+///   wrap ([`wrap_for_view`]'s transformation) so bare default-graph patterns range over
+///   the session's authorized named graphs — the union default graph, emulated at the
+///   query layer (the engine's view keeps its `Empty` default graph; no `UnionOfVisible`
+///   engine mode is needed — design record §5.4(a));
+/// - **opt-in absent** → leave default-graph patterns UNWRAPPED, so they evaluate against
+///   the view's **empty** default graph and yield zero solutions (draft: "The standing
+///   default graph of the queried dataset MUST be empty").
+///
+/// Per-request only: the choice is a pure function of THIS query's dataset clause, so it
+/// cannot leak across requests (the store/session carry no union-default state).
+///
+/// # Errors
+///
+/// Returns `Err` if `sparql` is not a valid SPARQL query. The rewrite itself cannot fail.
+///
+/// # Examples
+///
+/// ```
+/// use sparq_solid::{wrap_for_view_opt_in, UNION_DEFAULT_GRAPH_IRI};
+///
+/// // No opt-in: the bare default-graph pattern is left unwrapped (empty default graph).
+/// let plain = wrap_for_view_opt_in("SELECT ?t WHERE { ?s <urn:p> ?t }").unwrap();
+/// assert!(!plain.contains("GRAPH"));
+///
+/// // Opt-in via `FROM <reserved>`: the pattern is wrapped to range over named graphs, and
+/// // the reserved IRI is stripped (it never reaches the engine as a graph name).
+/// let opted = wrap_for_view_opt_in(
+///     &format!("SELECT ?t FROM <{}> WHERE {{ ?s <urn:p> ?t }}", UNION_DEFAULT_GRAPH_IRI),
+/// )
+/// .unwrap();
+/// assert!(opted.contains("GRAPH"));
+/// assert!(!opted.contains(UNION_DEFAULT_GRAPH_IRI));
+/// ```
+pub fn wrap_for_view_opt_in(sparql: &str) -> Result<String, String> {
+    let mut q = SparqlParser::new().parse_query(sparql).map_err(|e| e.to_string())?;
+    if take_union_default_opt_in(&mut q) {
+        wrap_query(&mut q, sparql);
+    }
+    Ok(q.to_string())
+}
+
 /// Apply the per-pattern GRAPH wrap to a parsed query, with a graph-variable prefix
 /// that cannot collide with any user variable: lengthen until it appears nowhere in
 /// the original query text.
@@ -252,5 +354,62 @@ fn wrap_expr(e: &mut Expression, fresh: &mut Fresh, in_graph: bool) {
             }
         }
         Expression::Bound(_) | Expression::NamedNode(_) | Expression::Literal(_) | Expression::Variable(_) => {}
+    }
+}
+
+// [OPUS-4.8] sq-gq28y: direct unit tests for the spec-conformant default opt-in rewrite
+// (`wrap_for_view_opt_in`). End-to-end enforcement (row counts through `PodStore`) is in
+// `tests/union_default_graph.rs`; these pin the STRING-rewrite contract directly.
+#[cfg(test)]
+mod opt_in_tests {
+    use super::{wrap_for_view_opt_in, UNION_DEFAULT_GRAPH_IRI};
+
+    fn from_reserved(body: &str) -> String {
+        format!("SELECT ?t FROM <{}> WHERE {{ {} }}", UNION_DEFAULT_GRAPH_IRI, body)
+    }
+
+    #[test]
+    fn no_opt_in_leaves_bare_pattern_unwrapped() {
+        // A bare default-graph pattern with NO opt-in is left as-is: no GRAPH wrap, so it
+        // evaluates against the view's empty default graph (zero rows) — draft §4.
+        let out = wrap_for_view_opt_in("SELECT ?t WHERE { ?s <urn:p> ?t }").unwrap();
+        assert!(!out.contains("GRAPH"), "no opt-in must not wrap: {out}");
+        assert!(!out.contains(UNION_DEFAULT_GRAPH_IRI));
+    }
+
+    #[test]
+    fn opt_in_in_default_position_wraps_and_strips_reserved_iri() {
+        let out = wrap_for_view_opt_in(&from_reserved("?s <urn:p> ?t")).unwrap();
+        assert!(out.contains("GRAPH ?__sg0"), "opt-in must wrap default-graph pattern: {out}");
+        // the reserved IRI is a signal, never a real graph name: it must not survive.
+        assert!(!out.contains(UNION_DEFAULT_GRAPH_IRI), "reserved IRI must be stripped: {out}");
+    }
+
+    #[test]
+    fn reserved_iri_in_from_named_is_stripped_not_opt_in() {
+        // In FROM NAMED position the reserved IRI names nothing (draft §4): stripped, and
+        // NOT treated as the (default-position) opt-in — so a bare pattern stays unwrapped.
+        let q = format!(
+            "SELECT ?t FROM NAMED <{}> WHERE {{ ?s <urn:p> ?t }}",
+            UNION_DEFAULT_GRAPH_IRI
+        );
+        let out = wrap_for_view_opt_in(&q).unwrap();
+        assert!(!out.contains(UNION_DEFAULT_GRAPH_IRI), "reserved IRI must be stripped: {out}");
+        assert!(!out.contains("GRAPH"), "FROM NAMED position is not the opt-in: {out}");
+    }
+
+    #[test]
+    fn near_miss_iri_does_not_trigger_opt_in_fail_closed() {
+        // Exact-match discipline: a near-miss IRI is a normal (absent) dataset reference,
+        // NOT the opt-in — the bare pattern stays unwrapped (fail-closed, no silent union).
+        let q = "SELECT ?t FROM <http://www.w3.org/ns/solid/sparql#union-default-graphX> \
+                 WHERE { ?s <urn:p> ?t }";
+        let out = wrap_for_view_opt_in(q).unwrap();
+        assert!(!out.contains("GRAPH"), "near-miss IRI must not enable union: {out}");
+    }
+
+    #[test]
+    fn invalid_query_errors() {
+        assert!(wrap_for_view_opt_in("SELECT WHERE nonsense").is_err());
     }
 }

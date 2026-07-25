@@ -4,7 +4,8 @@
 //!
 //! ## What this module is
 //!
-//! A PURE (no async, no HTTP types) builder — like [`crate::tpf`] / [`crate::descriptors`] — that
+//! A PURE (no async, no HTTP types) builder — like `crate::tpf` / `crate::descriptors` (both
+//! behind their own features, hence not intra-doc-linked) — that
 //! (1) parses the `GetRecords` query parameters (`iteratorType` / `at` / `after` / `limit`) into a
 //! resolved start offset + bound, and (2) given the polled, ordered slice of
 //! [`sparq_serve::ChangeRecord`]s, renders the JSON response body (the ordered change records plus a
@@ -49,6 +50,12 @@
 //!   "hasMoreRecords": false }
 //! ```
 //!
+//! [FABLE-5] (gh-2436) An operator **re-base gap record** (`ChangeRecord::rebase`, appended
+//! by `POST /admin/change-stream/rebase` to resync a broken stream) renders as ONE marker
+//! entry with `"op": "REBASE"` and no `data`: the span before its `generation` was NOT
+//! captured, so a consumer needing a complete view re-bootstraps (e.g. from a backup at or
+//! after that generation) before replaying on.
+//!
 //! ## OPT-IN — feature `change-stream` AND a configured log directory, both OFF by default
 //!
 //! Compiled only behind the `change-stream` cargo feature; even then the route refuses (`404`)
@@ -62,7 +69,7 @@ use sparq_serve::{ChangeOp, ChangeRecord};
 
 /// The default page size — the maximum number of change records (commits) one poll returns when
 /// the request does not set `limit`. A bounded page is the whole point of a poll API; 100 mirrors
-/// the conventional default of a record-batch poll (and the TPF page default in [`crate::tpf`]).
+/// the conventional default of a record-batch poll (and the TPF page default in `crate::tpf`).
 pub const DEFAULT_LIMIT: usize = 100;
 
 /// The hard ceiling on `limit` — a request asking for more is clamped to this. Bounds the
@@ -213,6 +220,21 @@ pub fn page(records: &[ChangeRecord], from_seq: u64, limit: usize) -> Page<'_> {
 pub fn to_json(page: &Page<'_>) -> String {
     let mut records = Vec::new();
     for rec in page.records {
+        // [FABLE-5] (gh-2436) An operator re-base GAP record (`ChangeRecord::rebase`, no
+        // changes — `ChangeLog::rebase_to` / `POST /admin/change-stream/rebase`) must be
+        // VISIBLE to a consumer: flattening it to zero entries would silently skip the one
+        // record that says "the span before this generation was NOT captured — re-bootstrap
+        // before trusting the diff stream". Rendered as ONE marker entry with `"op":
+        // "REBASE"` and no `data` (there is no quad).
+        if rec.rebase {
+            records.push(serde_json::json!({
+                "eventId": { "commitNum": rec.seq, "opNum": 1 },
+                "op": "REBASE",
+                "generation": rec.generation,
+                "commitTimestampNanos": rec.timestamp_unix_nanos.to_string(),
+            }));
+            continue;
+        }
         // `opNum` is 1-based WITHIN the commit (Neptune convention), in the record's own
         // deterministic change order (inserts first, then deletes — see `ChangeRecord`).
         for (i, change) in rec.changes.iter().enumerate() {
@@ -260,6 +282,7 @@ mod tests {
                     quad: quad.to_string(),
                 })
                 .collect(),
+            rebase: false,
         }
     }
 
@@ -402,6 +425,44 @@ mod tests {
         assert_eq!(v["records"][1]["eventId"]["opNum"], 2);
         // The timestamp is a string (u128 does not fit a JSON number losslessly).
         assert!(r0["commitTimestampNanos"].is_string());
+    }
+
+    /// [FABLE-5] (gh-2436) A re-base gap record (no changes) must NOT flatten to nothing —
+    /// it renders as one explicit `"op": "REBASE"` marker entry, so a consumer replaying
+    /// past it KNOWS the stream is not a complete diff history there. A regression back to
+    /// pure per-change flattening turns this red (the gap would silently disappear).
+    #[test]
+    fn json_renders_a_rebase_gap_record_as_an_explicit_marker() {
+        let gap = ChangeRecord {
+            seq: 1,
+            generation: 5,
+            timestamp_unix_nanos: 1_001,
+            changes: Vec::new(),
+            rebase: true,
+        };
+        let records = vec![
+            rec(0, 1, vec![(ChangeOp::Insert, "a")]),
+            gap,
+            rec(2, 6, vec![(ChangeOp::Insert, "b")]),
+        ];
+        let p = page(&records, 0, 100);
+        let body = to_json(&p);
+        let v: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+        assert_eq!(v["totalRecords"], 3);
+        let flattened = v["records"].as_array().unwrap();
+        assert_eq!(flattened.len(), 3, "the gap contributes ONE marker entry");
+        let marker = &flattened[1];
+        assert_eq!(marker["op"], "REBASE");
+        assert_eq!(marker["eventId"]["commitNum"], 1);
+        assert_eq!(marker["generation"], 5);
+        assert!(
+            marker.get("data").is_none(),
+            "a gap marker carries no quad: {marker}"
+        );
+        // The surrounding commits still render as ordinary ADDs.
+        assert_eq!(flattened[0]["op"], "ADD");
+        assert_eq!(flattened[2]["op"], "ADD");
+        assert_eq!(v["nextSequenceNumber"], 3);
     }
 
     #[test]

@@ -5,7 +5,9 @@
 // Implements five P1 journeys that prove the home hero's in-browser WASM SPARQL runner
 // actually computes results (a JOIN + SUM + ORDER BY that a static site cannot credibly fake),
 // keeps ZERO network egress (the zero-network invariant, a machine-check of the "runs in your
-// tab" product promise), and hands off faithfully to the /try workbench.
+// tab" product promise), and hands off to the live /app GUI.
+// [OPUS-4.8] sq-4hiqe — the /try workbench was removed; the "Open in workbench" hand-off now does a
+// hard full-page navigation to /app (window.location) instead of a sessionStorage handoff → /try.
 //
 // Doctrine (research/web-gui-test-program.md §1):
 //   §1.1  No time-based waits — ONLY web-first waiters (expectRunnerState, web assertions).
@@ -14,7 +16,7 @@
 //
 // WASM PREREQ. The hero runner loads the lean wasm bundle from `public/wasm/`. The light
 // site-e2e CI lane has no Rust toolchain, so this whole file SKIPS when the bundle is absent
-// (matching the try-journeys/try-query-smoke posture). Run locally:
+// (the shared wasm-gated posture — see a11y.spec.ts). Run locally:
 //   (cd ../js && npm run build:wasm) && npm run sync-wasm \
 //     && npx playwright install chromium && npm run test:e2e -- home-runner.spec.ts
 import { test, expect, BasePage } from "./support";
@@ -128,8 +130,9 @@ class HomeRunnerPage extends BasePage {
   }
 
   /**
-   * The "Open in workbench →" button in the proof footer; navigates to /try via router.push.
-   * Only present in phase === "done".
+   * The "Open in workbench →" button in the proof footer; does a HARD full-page navigation to the
+   * live /app GUI via window.location.assign (sq-4hiqe — the old sessionStorage handoff → /try was
+   * removed). Only present in phase === "done".
    */
   openInWorkbenchButton(): Locator {
     return this.page.getByRole("button", { name: /Open in workbench/i });
@@ -282,13 +285,13 @@ test("(d) error state: friendly error shown, previous results intact, edit clear
   await expect(hp.heroErrorAlert()).toHaveCount(0);
 });
 
-// ── (e) P1 — handoff to /try ─────────────────────────────────────────────────────────────────
-// [SONNET-4.6] Proves the "Open in workbench →" handoff: the hero runner writes the current
-// query + data to sessionStorage["sparq:handoff"], navigates to /try via router.push("/try"),
-// and the /try REPL consumes (reads + clears) the handoff on mount — prepopulating its editor
-// with the exact same query the visitor ran on the home page. The sessionStorage key is null
-// after consumption, proving it was cleared (no stale re-use on subsequent /try visits).
-test("(e) handoff to /try: editor prepopulated + sessionStorage key consumed", async ({ page }) => {
+// ── (e) P1 — hand off to the live /app GUI ────────────────────────────────────────────────────
+// [OPUS-4.8] sq-4hiqe — the /try workbench (and its sessionStorage["sparq:handoff"] channel) was
+// REMOVED. The "Open in workbench →" button no longer writes a handoff + router.push("/try"); it
+// now does a HARD full-page navigation to the live operational GUI
+// (window.location.assign(withBasePath("/app/"))). This asserts the button lands on /sparq/app/ —
+// there is no query handoff anymore, just the navigation.
+test("(e) hand off to /app: Open in workbench navigates to the live GUI", async ({ page }) => {
   const hp = new HomeRunnerPage(page);
   await hp.gotoReady();
   await hp.expectRunnerState("home", "idle-preview");
@@ -300,24 +303,11 @@ test("(e) handoff to /try: editor prepopulated + sessionStorage key consumed", a
   // The "Open in workbench" button only appears in phase === "done".
   await expect(hp.openInWorkbenchButton()).toBeVisible();
 
-  // Click "Open in workbench": writeHandoff(…) then router.push("/try").
+  // Click "Open in workbench": a HARD full-page navigation to the /app GUI (no handoff).
   await hp.openInWorkbenchButton().click();
 
-  // Client-side navigation — wait for the URL to change to /sparq/try.
-  await page.waitForURL(/\/sparq\/try/);
-
-  // Wait for the /try REPL to reach engine-ready — the WASM module loads and the "Engine ready"
-  // pill appears. The handoff's useEffect runs on mount BEFORE engine-ready, so by this point
-  // the sessionStorage key has already been consumed and cleared.
-  await hp.expectRunnerState("try", "engine-ready");
-
-  // The REPL editor on /try is prepopulated with HERO_DEFAULT_QUERY from the handoff.
-  const replEditor = page.getByRole("textbox", { name: "SPARQL query" });
-  await expect(replEditor).toHaveValue(HERO_DEFAULT_QUERY);
-
-  // The handoff key is null — consumed and cleared on mount (single-use, never re-read on reload).
-  const handoffValue = await page.evaluate(() =>
-    window.sessionStorage.getItem("sparq:handoff"),
-  );
-  expect(handoffValue, "sparq:handoff should be null after consumption").toBeNull();
+  // Wait for the hard nav to land on /sparq/app/ — the live operational GUI destination.
+  await page.waitForURL(/\/sparq\/app\//, { timeout: 30_000 });
+  expect(new URL(page.url()).pathname).toContain("/app");
+  await expect(page.getByRole("heading", { name: "App", level: 1 })).toBeVisible();
 });

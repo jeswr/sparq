@@ -54,6 +54,35 @@ tauri-build = { version = "2", features = [] }
 # cannot. The webview-target build (Pages "Try the GUI live") never links this crate at all.
 default = []
 hdt = ["dep:sparq-hdt"]
+# [FABLE-5] sq-ixc3.14 — native federated SERVICE query execution for the Query tool. OFF by
+# default for the same lean-build reasons as `hdt`: it forwards to `sparq-engine/service`, whose
+# federation client pulls a blocking HTTP/TLS stack (ureq) the default build must not carry. The
+# desktop release build turns it ON (alongside `hdt`) so SERVICE-clause queries run over the
+# native engine — the browser build fundamentally cannot (no blocking cross-origin HTTP). Every
+# `query_service` call installs the engine's STRICT fail-closed egress allowlist (federation.rs).
+federation = ["sparq-engine/service"]
+# [FABLE-5] sq-ixc3.15 — the ODRL policy tool's native backing: author/validate a Turtle ODRL
+# policy, evaluate a request, and preview the access-controlled result set (PodStore::query_as
+# via the odrl-bridge, fail-closed per-session named-graph gating) next to the ungated results.
+# OFF by default for the same lean-build reasons as `hdt`/`federation`: it pulls the optional
+# research-track sparq-policy evaluator + sparq-solid enforcement store. The desktop release
+# build turns it ON; the webview/wasm target never links these crates (the tool degrades
+# honestly to a native-only message in the browser). Lean builds register a stub that fails
+# loudly with a rebuild hint (odrl.rs).
+odrl = ["dep:sparq-policy", "dep:sparq-solid"]
+# [GPT-5.6] sq-1cnox — native SHACL-to-form derivation for the Forms tool. OFF by
+# default so the standalone desktop shell stays lean unless a release explicitly
+# opts into the sparq-forms + SHACL model stack. Lean builds still register the
+# command, whose stub returns an actionable unavailable error (forms.rs).
+forms = ["dep:oxrdf", "dep:sparq-forms"]
+# [FABLE-5] sq-t6492 — embed + serve the frontendDist static export instead of connecting to
+# `devUrl` (http://localhost:3001). Tauri's build script sets `cfg(dev) = !custom-protocol`
+# (tauri build.rs: `let dev = !custom_protocol`), and in dev mode the webview navigates to
+# `devUrl`; a plain `cargo build` (no `custom-protocol`) therefore shows "Could not connect to
+# localhost: Connection refused" when no dev server is running. `cargo tauri build` enables this
+# feature automatically; a plain `cargo build` (e2e/CI) must pass `--features custom-protocol` so
+# the webview loads the embedded assets. Independent of the debug/release profile.
+custom-protocol = ["tauri/custom-protocol"]
 
 [dependencies]
 tauri = { version = "2", features = [] }
@@ -78,11 +107,27 @@ serde_json = "1"
 # (`graph_to_nquads`), the named-graph-preserving wire format the Import drawer's native
 # loader hands a parsed disk/URL/HDT document back to the in-tab store as.
 sparq-core = { path = "../../crates/sparq-core", features = ["jsonld"] }
-sparq-engine = { path = "../../crates/sparq-engine", features = ["serialize-rdf"] }
+# [FABLE-5] sq-ixc3.19 — `explain-json` (zero new dependencies: `explain-json = []` in the
+# engine) turns on the typed plan tree (`explain_json::PlanNode`) the always-compiled
+# `explain_native` command (explain.rs) serialises for the GUI plan explorer.
+sparq-engine = { path = "../../crates/sparq-engine", features = ["serialize-rdf", "explain-json"] }
 
 # [OPUS-4.8] sq-ixc3.13 — opt-in native-only HDT reader (loads .hdt[.gz] straight into a
 # sparq Graph; the wasm read-replica cannot). Pulled in only under this crate's `hdt` feature.
 sparq-hdt = { path = "../../crates/sparq-hdt", optional = true }
+
+# [FABLE-5] sq-ixc3.15 — opt-in native-only ODRL usage-control stack for the ODRL policy tool:
+# the sparq-policy evaluator (parse/validate a Turtle policy + evaluate a request) and the
+# sparq-solid enforcement store (`PodStore::query_json_as` fail-closed named-graph gating, fed
+# by the `odrl-bridge` materialization). Pulled in only under this crate's `odrl` feature.
+sparq-policy = { path = "../../crates/sparq-policy", optional = true }
+sparq-solid = { path = "../../crates/sparq-solid", features = ["odrl-bridge"], optional = true }
+
+# [GPT-5.6] sq-1cnox — optional native Forms bridge. oxrdf is named directly because the
+# Tauri boundary validates the serialized focus/shape nodes into typed RDF terms before it
+# calls sparq_forms::derive_form; neither dependency enters the default desktop build.
+oxrdf = { version = "0.3", features = ["rdf-12"], optional = true }
+sparq-forms = { path = "../../crates/sparq-forms", optional = true }
 
 # [OPUS-4.8] sq-ixc3.13 — streaming decompression for the native disk loader: gzip + bzip2 +
 # zstd, the SAME codec matrix the CLI's `open_reader` handles (crates/sparq-cli/src/main.rs).

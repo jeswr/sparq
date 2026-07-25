@@ -1,0 +1,14 @@
+[package]
+name = "jsonld-context-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+sparq-jsonld = { path = "../../crates/sparq-jsonld" }
+
+[[bin]]
+name = "jsonld-context-bench"
+path = "src/main.rs"

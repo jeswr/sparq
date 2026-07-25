@@ -58,3 +58,45 @@
   crate: "sparq-reason-el"
   features: "cdomain"
   test: true
+
+# [OPUS-4.8] sq-pbz04.2.5: sparq-reason-el's `abox` feature — ABox realisation +
+# whole-ontology consistency. Same gap as the rbox/hasse/cdomain legs above: the
+# behavioral tests in `src/abox.rs` are gated `#[cfg(feature = "abox")]` (the whole
+# module is feature-gated), so the default build (and ci.yml's `--workspace
+# --all-targets` archive, which passes NO `--features`) compiles them EMPTY and runs
+# ZERO of them — this leg is the ONLY thing that executes them in CI. No new dep
+# (`abox = []`, reuses sparq-core + rustc-hash + oxrdf already in the default dep
+# set). Verified locally: `cargo test -p sparq-reason-el --features abox` green.
+- name: "sparq-reason-el (abox — ABox realisation + whole-ontology consistency)"
+  crate: "sparq-reason-el"
+  features: "abox"
+  test: true
+
+# [FABLE-5] sq-wy3i6 (Phase E4): sparq-reason-el's `par` feature — deterministic parallel
+# (bulk-synchronous scoped-worker) CR saturation: `Classifier::classify_par` /
+# `classify_graph_par`. Same gap as the legs above: tests/par_differential.rs is
+# `#![cfg(feature = "par")]` (par-vs-sequential closure differentials over the CR1–CR6 +
+# CR-Self fixture corpus incl. el_smoke.ttl, the delayed-filler CR4 / CRs1-reflexive-link
+# mutation-witness fixtures, a multi-chunk synthetic-scale case, and the repeated-run
+# determinism stress) and the whole par engine in classify.rs is `#[cfg(feature = "par")]`,
+# so the default build compiles them EMPTY and runs ZERO of them. This leg is also the ONLY
+# thing that exercises the par-WITHOUT-rbox link-apply arm (a `not(feature = "rbox")` code
+# path). No new dep (`par = []`, std scoped threads only). The W3C-corpus differential is
+# the ci.yml el-suite lane (`--features el-suite,el-suite-par`).
+- name: "sparq-reason-el (par — E4 deterministic parallel saturation)"
+  crate: "sparq-reason-el"
+  features: "par"
+  test: true
+
+# [FABLE-5] sq-wy3i6: the COMBINED par leg — `par` composed with `rbox` (CR10/CR11) and
+# `cdomain` (CR7–CR9). Its OWN leg per rule (b) of feature-matrix.yml's guard: `par`+`rbox`
+# swaps the parallel apply phase onto the `add_link_rbox` role-closure arm (a
+# `not(feature = …)` split from the plain-par leg above), and the
+# `cfg(all(feature = "par", feature = "rbox"))` / `…"cdomain"` fixtures in
+# tests/par_differential.rs (property chains / transitivity / faceted ranges under the
+# parallel engine) compile EMPTY on the plain `par` leg — this leg is the only thing that
+# runs them.
+- name: "sparq-reason-el (par+rbox+cdomain — parallel saturation, full rule set)"
+  crate: "sparq-reason-el"
+  features: "par,rbox,cdomain"
+  test: true

@@ -1,0 +1,3 @@
+# [GPT-5.6] sq-6xasp.3: wasm-pack artifacts are rebuilt from source and never committed.
+/pkg
+/pkg-node

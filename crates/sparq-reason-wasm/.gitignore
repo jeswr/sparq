@@ -2,3 +2,7 @@
 # crates/sparq-wasm/.gitignore). The bundle is rebuilt from source by CI / the site deploy.
 /pkg
 /pkg-node
+# [FABLE-5] sq-ixc3.20 — packages/eyereasoner-compat's DEDICATED out-dir (built WITHOUT the
+# `explain` feature); separate from /pkg so its `prepare`-hook rebuild can never clobber the
+# explain-enabled bundle the GUI/site sync from /pkg.
+/pkg-eyereasoner-compat

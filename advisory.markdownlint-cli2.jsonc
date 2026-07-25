@@ -37,7 +37,9 @@
     "**/target",
     "vendor",
     "**/vendor",
-    "zk/xpath/vendor",
+    // [OPUS-4.8] sq-5reoy: dropped the "zk/xpath/vendor" entry — the zk/xpath tree
+    // moved to the sparq-org/noir_XPath face repo (#1599); "**/vendor" still covers
+    // any remaining vendored subtree, and "zk" below already excludes zk/ wholesale.
     // sq-rqyo: research/ + zk/ are now HARD-gated — exclude here to avoid double-reporting.
     "research",
     "zk"

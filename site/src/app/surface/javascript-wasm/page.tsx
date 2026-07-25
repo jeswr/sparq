@@ -4,6 +4,7 @@ import { Boxes } from "lucide-react";
 import { SurfaceContent } from "@/components/surface-content";
 import { JavascriptWasmDemo } from "@/components/javascript-wasm-demo";
 import { EsmImportSnippet } from "./esm-import-snippet";
+import { withBasePath } from "@/lib/base-path";
 
 export const metadata: Metadata = {
   title: "JavaScript / WASM",
@@ -27,8 +28,9 @@ export default function JavascriptWasmSurfacePage() {
           <code className="font-mono text-foreground">@jeswr/sparq</code> wraps the Rust
           triplestore + SPARQL engine — compiled to a single ~886 KB (≈314 KB gzipped)
           wasm artifact — in an idiomatic{" "}
+          {/* [FABLE-5] persistent underline: distinguishable without color (link-in-text-block, sq-0rbfn) */}
           <a
-            className="text-primary underline-offset-4 hover:underline"
+            className="text-primary underline underline-offset-4"
             href="https://rdf.js.org/"
             target="_blank"
             rel="noopener noreferrer"
@@ -76,10 +78,10 @@ export default function JavascriptWasmSurfacePage() {
           surface), trading a smaller download for those native-only features.
         </p>
       }
-      readmeHref="https://github.com/jeswr/sparq/tree/main/crates/sparq-wasm"
-      skillHref="https://github.com/jeswr/sparq/blob/main/skills/javascript-wasm/SKILL.md"
+      readmeHref="https://github.com/sparq-org/sparq/tree/main/crates/sparq-wasm"
+      skillHref="https://github.com/sparq-org/sparq/blob/main/skills/javascript-wasm/SKILL.md"
       links={[
-        { href: "/try", label: "Open the live REPL" },
+        { href: withBasePath("/app/"), label: "Open the SPARQL workbench", external: true },
         {
           href: "https://www.npmjs.com/package/@jeswr/sparq",
           label: "@jeswr/sparq on npm",

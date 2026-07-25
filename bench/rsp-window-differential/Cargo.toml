@@ -1,0 +1,16 @@
+# [GPT-5.6] sq-no6iy — standalone differential harness; no production dependency edge.
+[package]
+name = "rsp-window-differential"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[patch.crates-io]
+spargebra = { path = "../../vendor/spargebra" }
+
+[dependencies]
+sparq-rsp = { path = "../../crates/sparq-rsp" }
+oxrdf = { version = "0.3", features = ["rdf-12"] }
+

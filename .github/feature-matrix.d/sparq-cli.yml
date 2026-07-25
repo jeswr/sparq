@@ -30,3 +30,37 @@
   crate: "sparq-cli"
   features: "terse"
   test: true
+
+# [FABLE-5] sq-8ju74: the HDT loader hook (`hdt`) + the `to-hdt` exporter (`hdt-write`,
+# which implies `hdt`). Both suites were SILENT GAPS before this leg: tests/hdt_cli.rs
+# (`#[cfg(feature = "hdt")]`) and tests/hdt_write_cli.rs (`#[cfg(feature = "hdt-write")]`)
+# never ran in CI because no leg enabled the features (the workflow's old SCOPE note
+# excluded them for an MSRV reason that is now stale — sparq-hdt declares 1.87, at/below
+# the 1.88 workspace floor, so the stable lane covers it). One combined leg: `hdt-write`
+# co-enables cleanly with (and implies) `hdt`, so both suites run together.
+# Verified: `cargo test -p sparq-cli --features hdt,hdt-write -- --list` shows the 2
+# hdt_cli + 5 hdt_write_cli tests.
+- name: "sparq-cli (hdt, hdt-write)"
+  crate: "sparq-cli"
+  features: "hdt,hdt-write"
+  test: true
+
+# [FABLE-5] sq-lsp7k.8: the `tabular` subcommand — materializing tabular→RDF import (CSV
+# direct mapping + the R2RML materializing subset over CSV logical tables). The module,
+# its inline unit tests, and tests/tabular_cli.rs (incl. the data-driven W3C-adapted R2RML
+# fixture suite under tests/fixtures/r2rml/) are all `#[cfg(feature = "tabular")]`, so the
+# default build never compiles or runs them — this leg is what keeps them lit in CI.
+# Zero new deps (first-party RFC-4180 reader; mappings parse via sparq-core's Turtle path).
+# Verified: `cargo test -p sparq-cli --features tabular -- --list` shows the 29 inline
+# tabular::tests + 9 tabular_cli tests.
+- name: "sparq-cli (tabular)"
+  crate: "sparq-cli"
+  features: "tabular"
+  test: true
+
+# [GPT-5.6] sq-lsp7k.28: the deterministic RDF triple-set `diff` subcommand and its
+# subprocess contract suite are compiled only when this default-OFF feature is enabled.
+- name: "sparq-cli (diff)"
+  crate: "sparq-cli"
+  features: "diff"
+  test: true

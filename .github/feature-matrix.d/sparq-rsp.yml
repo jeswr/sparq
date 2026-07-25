@@ -1,0 +1,22 @@
+# Feature-matrix fragment for `sparq-rsp`.
+
+# [GPT-5.6] Gap-triggered event-time session windows are default-OFF, and
+# tests/session_oracle.rs is compiled only with this feature.
+- name: "sparq-rsp (session_windows)"
+  crate: "sparq-rsp"
+  features: "session_windows"
+  test: true
+
+# [GPT-5.6] sq-lsp7k.27: closed-window scalar aggregates and their deterministic
+# oracle are compiled only with this default-OFF feature.
+- name: "sparq-rsp (window-aggregate)"
+  crate: "sparq-rsp"
+  features: "window-aggregate"
+  test: true
+
+# [GPT-5.6] sq-ayn0i: RSP-QL T0/MAXDELAY parser branches and their exact
+# compatibility oracle compile only with this default-OFF feature.
+- name: "sparq-rsp (window-origin)"
+  crate: "sparq-rsp"
+  features: "window-origin"
+  test: true

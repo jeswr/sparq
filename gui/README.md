@@ -97,15 +97,46 @@ engine calls directly. The foundation frontend runs the in-tab WASM engine in BO
 total for the status bar's disk gauge (least-privilege — confined in Rust to that subtree, follows
 no symlink out of it; the byte-summing walk is unit-tested directly).
 
+<!-- [GPT-5.6] sq-n18o5 — browser URL imports now share the compressed-file decoder. -->
 For **ingest**, the Import drawer (`sq-ixc3.13`) calls the engine's **native loader** IPC
 (`load_path` / `load_text`) when running in the desktop shell: a disk file — including
 **compressed** (`.gz` / `.bz2` / `.zst`) streams and **native-only HDT** (`.hdt` / `.hdt.gz`,
 behind the crate's opt-in `hdt` feature) — is decoded by the native engine (threads, no ~2 GiB
 wasm-tab ceiling) and handed back as N-Quads for the in-tab store to merge (named-graph-
-preserving). On the hosted web target, the drawer's paste/URL tabs parse in the in-tab WASM
-engine instead (no compressed-file / HDT path — the drawer says so). A successful import records a
-`WorkspaceSourceMeta` + a workspace snapshot (the `sq-atb0` save/open cache). The full on-disk
-workspace persistence path activates once the shell grants the `fs` capability (`sq-ixc3.6`).
+preserving). On the hosted web target, the drawer parses paste, file uploads, and URL responses in
+the in-tab WASM engine; compressed uploads and URL responses (`.gz` / `.zip` / `.zst` / `.bz2`)
+are decoded in the browser before parsing, while HDT remains native-only. A successful import
+records a `WorkspaceSourceMeta` + a workspace snapshot (the `sq-atb0` save/open cache). The full
+on-disk workspace persistence path activates once the shell grants the `fs` capability
+(`sq-ixc3.6`).
+
+For **federation** (`sq-ixc3.14`), a SERVICE-bearing SELECT/ASK in the Query tool routes to the
+native `query_service` command (behind the crate's opt-in `federation` feature, which forwards to
+`sparq-engine/service`): the live store's N-Quads snapshot is evaluated natively, joining remote
+SPARQL endpoints under the engine's **strict fail-closed egress allowlist** — a SERVICE clause may
+dial ONLY the per-workspace `Federation` control's entries (host / host:port / `*.suffix`, the
+same grammar as sparq-server's `--service-allow`); everything else, including public hosts, is
+refused pre-HTTP. The browser build labels SERVICE **native-only** (CORS) instead of pretending.
+
+For **usage control** (`sq-ixc3.15`), the **Policies (ODRL) tool** runs its whole round-trip in
+one native command (`odrl_preview`, behind the crate's opt-in `odrl` feature, pulling the
+research-track `sparq-policy` evaluator + `sparq-solid` enforcement store): author/validate a
+Turtle ODRL policy, evaluate a (party, action, target) request — decision + matched rules + unmet
+constraints — then run the SAME SPARQL query ungated AND per requester through `PodStore`'s
+**fail-closed** per-session named-graph gating (the one-shot `odrl-bridge` materialization path;
+the `*_conditional` variants with the bare-assignee widening hazard, bead `sq-9n1q4`, are not
+wired). A malformed policy materializes **nothing** — deny-everything with the parser's verbatim
+reason — and an `odrl:prohibition` visibly flips a previously visible named graph to hidden in
+that requester's pane. The browser build labels the tool **native-only** (the ODRL stack is not
+in the wasm bundle) instead of pretending.
+
+## File ingest library (`lib/file-ingest.ts`, sq-vnh1v)
+
+The **file ingest library** is a shared zero-server multi-file upload harness for the RDF import (sq-eydh9), SHACL shapes (sq-txrui), and N3 rules (sq-glo5r) surfaces. It operates on a single `IngestResult` contract: every file is `accepted[]` (name, text, bytes) or `rejected[]` (name, reason) — **no silent drops**. 
+
+**Entry points** — `pickTextFiles(opts)` opens a file picker using File System Access `showOpenFilePicker` where available, falling back to `<input type="file" multiple>` for browser parity (the floor); `readDroppedFiles(dataTransfer, opts)` extracts files from a drop event (must be called synchronously from the drop handler). Both work in the static `/app` export with no server and no Tauri global.
+
+**UI layer** — `<Dropzone>` (standalone dashed panel + keyboard-accessible button), `<DropTarget>` (wraps children as a drop surface with a hover overlay), and `useFileDrop` (raw drag/drop wiring for custom affordances). All three consume the same `IngestResult` contract, so callers surface accepted and rejected files identically.
 
 ## Inference (per-workspace entailment) — `sq-tp1m`
 

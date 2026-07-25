@@ -317,6 +317,31 @@ fn collect_agents(
     }
 }
 
+/// The origin (`scheme://authority`) of an IRI — the coarse pod boundary used to bucket
+/// the auth index + session cache for an ACL-write invalidation ([OPUS-4.8] sq-b7k7u).
+/// `https://pod.ex/a/b` → `https://pod.ex`; an authority with no path (`https://pod.ex`)
+/// is its own origin. An IRI with no `://` (e.g. `urn:…`) returns the whole IRI — a
+/// self-contained fallback bucket only ever invalidated by a FULL re-materialization.
+///
+/// Soundness of scoping on this key: `reindex_with`'s **diff-based** invalidation
+/// ([SONNET-4.6] sq-b7k7u fix) diffs old vs new `AuthIndex` per-origin and invalidates
+/// exactly the origins whose buckets changed — so a cross-origin dependency (WAC
+/// agentGroup membership, foreign-subject grant, ACP cross-document indirection) is
+/// caught automatically, without relying on any confinement argument about where grants
+/// can originate.
+pub(crate) fn iri_origin(iri: &str) -> &str {
+    match iri.find("://") {
+        Some(i) => {
+            let after = i + 3;
+            match iri[after..].find('/') {
+                Some(j) => &iri[..after + j],
+                None => iri,
+            }
+        }
+        None => iri,
+    }
+}
+
 /// Solid slash-semantics parent of an IRI (None at/above the authority root).
 pub(crate) fn parent_iri(iri: &str) -> Option<&str> {
     let scheme_end = iri.find("://").map(|i| i + 3)?;
@@ -335,7 +360,7 @@ pub(crate) fn parent_iri(iri: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::parent_iri;
+    use super::{iri_origin, parent_iri};
 
     #[test]
     fn parent_walks_to_root_and_stops() {
@@ -343,5 +368,21 @@ mod tests {
         assert_eq!(parent_iri("https://pod.ex/a/b/"), Some("https://pod.ex/a/"));
         assert_eq!(parent_iri("https://pod.ex/a/"), Some("https://pod.ex/"));
         assert_eq!(parent_iri("https://pod.ex/"), None);
+    }
+
+    #[test]
+    fn iri_origin_is_scheme_authority() {
+        // [OPUS-4.8] sq-b7k7u: origin = scheme://authority, stable across the whole subtree.
+        assert_eq!(iri_origin("https://pod.ex/a/b/doc.ttl"), "https://pod.ex");
+        assert_eq!(iri_origin("https://pod.ex/.acl"), "https://pod.ex");
+        assert_eq!(iri_origin("https://pod.ex/"), "https://pod.ex");
+        assert_eq!(iri_origin("https://pod.ex"), "https://pod.ex"); // authority, no path
+        assert_eq!(iri_origin("http://host:8080/x"), "http://host:8080"); // port kept
+        // Every graph a `.acl` at origin O governs shares O — the scoping soundness key.
+        let acl = "https://pod.ex/notes/.acl";
+        assert_eq!(iri_origin(acl), iri_origin("https://pod.ex/notes/n1"));
+        assert_ne!(iri_origin(acl), iri_origin("https://other.ex/notes/n1"));
+        // No scheme → the whole IRI is its own fallback bucket (no slash `.acl` governs it).
+        assert_eq!(iri_origin("urn:sparq:auth"), "urn:sparq:auth");
     }
 }

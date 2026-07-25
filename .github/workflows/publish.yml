@@ -54,6 +54,14 @@ on:
         description: "Publish @jeswr/sparq to npm with provenance"
         type: boolean
         default: false
+      publish_eyereasoner_compat:
+        description: "Publish @sparq-org/eyereasoner-compat to npm (needs the one-time npm-side bootstrap — see job)"
+        type: boolean
+        default: false
+      publish_solid_server:
+        description: "Publish @jeswr/solid-server to npm (needs the one-time npm-side bootstrap — see job)"
+        type: boolean
+        default: false
       attest_crates:
         description: "Package + attest publishable crates (crates.io bytes)"
         type: boolean
@@ -104,7 +112,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-unknown-unknown
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           # registry-url is still REQUIRED: it writes the .npmrc `//registry.npmjs.org/:...`
@@ -157,6 +165,158 @@ jobs:
           fi
           echo "Provenance attestation present. Consumers verify with: npm audit signatures"
 
+  # ---- npm: @sparq-org/eyereasoner-compat via OIDC TRUSTED PUBLISHING (no NPM_TOKEN) ----
+  # [FABLE-5] sq-ohnj1 (GH #1499). The eye-js migration package (packages/eyereasoner-compat) —
+  # the eye-js `n3reasoner` API backed by the sparq-reason wasm bundle, which ships INSIDE the
+  # tarball (never the site-hosted wasm URL). Same tokenless OIDC trusted-publishing pattern as
+  # the @jeswr/sparq job above: `id-token: write` lets the npm CLI mint a short-lived publish
+  # credential + record a Sigstore-signed SLSA provenance statement; no NPM_TOKEN is stored.
+  #
+  # GRACEFUL-SKIP: this job runs ONLY on an explicit manual `workflow_dispatch` with
+  # `publish_eyereasoner_compat=true` — NOT on `release: published`. So a release never fails
+  # because the npm-side bootstrap below is not yet done; the maintainer triggers it once ready.
+  #
+  # ONE-TIME needs:user step (registry-side config — cannot be a repo file). npm trusted
+  # publishing can only be configured on a package that ALREADY EXISTS, and this is a NEW package
+  # under a NEW scope, so the maintainer does exactly this ONCE, then every CI publish is tokenless:
+  #   1. Create the npm organisation `@sparq-org` (npmjs.com → "Add Organization") if it does not
+  #      exist, and ensure the publishing identity is a member with publish rights.
+  #   2. Bootstrap-publish the first version with a granular token (or `npm login`):
+  #        cd packages/eyereasoner-compat && npm run build && npm publish --access public
+  #   3. Register the Trusted Publisher on
+  #      npmjs.com/package/@sparq-org/eyereasoner-compat/access → "Trusted Publisher":
+  #        GitHub organisation/user `sparq-org`, repository `sparq`, workflow FILENAME
+  #        `publish.yml` (filename only, with extension — NOT a path), environment left blank.
+  #      Then remove the granular token. Every publish this job triggers thereafter is tokenless.
+  # Until step 1–3 are done, DO NOT trigger this job (the publish would fail to mint a credential
+  # by design — no static token is stored). See docs/release.md.
+  npm-eyereasoner-compat:
+    name: npm publish @sparq-org/eyereasoner-compat (OIDC trusted publishing)
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.publish_eyereasoner_compat
+    permissions:
+      contents: read
+      id-token: write # OIDC token npm exchanges for a short-lived publish credential + provenance signing
+    defaults:
+      run:
+        working-directory: packages/eyereasoner-compat
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+      # OIDC trusted publishing requires npm CLI >= 11.5.1 (Node 22 bundles an older npm).
+      - name: Pin npm CLI >= 11.5.1 (trusted-publishing floor)
+        run: |
+          npm install -g 'npm@^11.5.1'
+          npm --version
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+      # Build tooling only (typescript, @rdfjs/types). --workspaces=false installs just this
+      # package's devDeps without pulling the whole monorepo graph; the package has no lockfile.
+      - name: Install build dependencies
+        run: npm install --workspaces=false --no-package-lock --no-audit --no-fund
+      # Build (wasm-pack + tsc) then verify the tarball actually ships dist/ + the wasm engine.
+      - name: Build + package guardrail check
+        run: |
+          npm run build
+          npm run check:package
+      # `prepack` rebuilds the same tree; provenance is emitted by default under trusted
+      # publishing (--provenance is belt-and-suspenders). --access public: scoped package.
+      - name: Publish to npm (OIDC trusted publishing + provenance)
+        run: npm publish --provenance --access public
+      - name: Verify published provenance attestation
+        run: |
+          set -euo pipefail
+          ver=$(node -p "require('./package.json').version")
+          att=$(npm view "@sparq-org/eyereasoner-compat@${ver}" dist.attestations 2>/dev/null || true)
+          echo "$att"
+          if [ -z "$att" ] || [ "$att" = "undefined" ]; then
+            echo "::error::no provenance attestation recorded for @sparq-org/eyereasoner-compat@${ver}"
+            exit 1
+          fi
+          echo "Provenance attestation present. Consumers verify with: npm audit signatures"
+
+  # ---- npm: @jeswr/solid-server via OIDC TRUSTED PUBLISHING (no NPM_TOKEN) ----
+  # [OPUS-4.8] sq-6xasp.11 (epic sq-6xasp). The WebAssembly Solid server package
+  # (packages/solid-server) — a local-dev Solid/LDP pod backed by the sparq-lws wasm handler,
+  # which ships INSIDE the tarball (the `files` allowlist packs bin/ + src/ + the built wasm/ +
+  # README). Same tokenless OIDC trusted-publishing pattern as the @jeswr/sparq job above:
+  # `id-token: write` lets the npm CLI mint a short-lived publish credential + record a
+  # Sigstore-signed SLSA provenance statement; no NPM_TOKEN is stored.
+  #
+  # GRACEFUL-SKIP: this job runs ONLY on an explicit manual `workflow_dispatch` with
+  # `publish_solid_server=true` — NOT on `release: published`. So a release never fails because
+  # the npm-side bootstrap below is not yet done; the maintainer triggers it once ready.
+  #
+  # ONE-TIME needs:user step (registry-side config — cannot be a repo file). npm trusted
+  # publishing can only be configured on a package that ALREADY EXISTS, and this is a NEW package,
+  # so the maintainer does exactly this ONCE, then every CI publish is tokenless:
+  #   1. Bootstrap-publish the first version with a granular token (or `npm login`) — build the
+  #      wasm first so the tarball ships wasm/ (the `files` allowlist expects it):
+  #        cd packages/solid-server && npm run build:lws-wasm && npm publish --access public
+  #   2. Register the Trusted Publisher on
+  #      npmjs.com/package/@jeswr/solid-server/access → "Trusted Publisher":
+  #        GitHub organisation/user `jeswr`, repository `sparq`, workflow FILENAME `publish.yml`
+  #        (filename only, with extension — NOT a path), environment left blank.
+  #      Then remove the granular token. Every publish this job triggers thereafter is tokenless.
+  # Until step 1–2 are done, DO NOT trigger this job (the publish would fail to mint a credential
+  # by design — no static token is stored). See docs/release.md.
+  npm-solid-server:
+    name: npm publish @jeswr/solid-server (OIDC trusted publishing)
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.publish_solid_server
+    permissions:
+      contents: read
+      id-token: write # OIDC token npm exchanges for a short-lived publish credential + provenance signing
+    defaults:
+      run:
+        working-directory: packages/solid-server
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+      # OIDC trusted publishing requires npm CLI >= 11.5.1 (Node 22 bundles an older npm).
+      - name: Pin npm CLI >= 11.5.1 (trusted-publishing floor)
+        run: |
+          npm install -g 'npm@^11.5.1'
+          npm --version
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --locked
+      # Build the wasm bundle so the `files` allowlist packs a populated wasm/ tree. This package
+      # has NO `prepack`/`build` script (unlike @jeswr/sparq / eyereasoner-compat), so the wasm is
+      # NOT rebuilt automatically on `npm publish` — build it explicitly here, before publish.
+      - name: Build wasm bundle
+        run: npm run build:lws-wasm
+      # `npm publish` packs ONLY the `files` allowlist (bin/ + src/ + wasm/ + README); runtime
+      # dependencies are resolved by the consumer at install time and are not bundled, so no npm
+      # install is needed for a correct tarball. Provenance is emitted by default under trusted
+      # publishing (--provenance is belt-and-suspenders). --access public: scoped package.
+      - name: Publish to npm (OIDC trusted publishing + provenance)
+        run: npm publish --provenance --access public
+      - name: Verify published provenance attestation
+        run: |
+          set -euo pipefail
+          ver=$(node -p "require('./package.json').version")
+          att=$(npm view "@jeswr/solid-server@${ver}" dist.attestations 2>/dev/null || true)
+          echo "$att"
+          if [ -z "$att" ] || [ "$att" = "undefined" ]; then
+            echo "::error::no provenance attestation recorded for @jeswr/solid-server@${ver}"
+            exit 1
+          fi
+          echo "Provenance attestation present. Consumers verify with: npm audit signatures"
+
   # ---- crates.io: attest the packaged .crate artifacts (provenance over the publish bytes) ----
   # crates.io has no native provenance; we attest the `cargo package` output (identical bytes to
   # what `cargo publish` uploads) with the SAME mechanism release.yml uses. This does NOT publish
@@ -175,8 +335,15 @@ jobs:
       attestations: write # write the attestation to the repo's attestation store
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       # Package every publishable crate (publish = false crates are skipped by cargo package
       # when run per-package; we package the workspace and collect the resulting .crate files).
       # --no-verify avoids a full from-scratch compile of every crate on the runner; the bytes
@@ -330,7 +497,7 @@ jobs:
       # the default) generates + uploads a PEP-740 attestation per file. No static API token.
       # `print-hash` echoes the uploaded digests into the log for audit.
       - name: Publish to PyPI with provenance attestations
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
         with:
           attestations: true
           print-hash: true

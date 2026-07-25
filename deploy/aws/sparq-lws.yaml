@@ -1,0 +1,595 @@
+# [SONNET-4.6] sq-17rgw — AWS CloudFormation template: sparq-lws-core (Solid server) on ECS Fargate.
+#
+# STATUS: activates once sq-lmz40 ships (the native sparq-lws-core container image).
+# The image referenced below (ghcr.io/sparq-org/sparq-lws-core) is NOT yet published.
+# This template is structurally complete and cfn-lint/yaml-valid; deploy it once sq-lmz40
+# lands and the image is available on GHCR.
+#
+# DESIGN NOTE (sq-17rgw):
+# The LWS server is fail-closed by design (opposite posture to sparq-server):
+#   - Anonymous mutation is rejected by default
+#   - HTTPS-only IdP/WebID required
+#   - DPoP required; bidirectional WebID<->issuer check is strict
+# Therefore R1 (auth ON) is already satisfied by the image; the template's job is
+# to wire the required env vars and connect it to HTTPS (R3/ALB+ACM).
+# [GPT-5.6] R9: the sibling sparq-server image is open by default; its template gates it
+# with a Secrets Manager token. Never remove that sibling template's token wiring.
+#
+# KEY REQUIREMENT: This template requires an external OIDC issuer
+# (SOLID_SERVER_TRUSTED_ISSUER). An LWS deploy cannot be zero-input — you must name
+# a trusted IdP. The /readyz probe is the seam that keeps a mis-configured instance
+# from serving traffic behind the ALB.
+#
+# [GPT-5.6] SINGLE-REPLICA NOTE: the canonical image contract builds default features,
+# which do not include the opt-in redis-replay feature. DesiredCount is therefore pinned
+# to one so cross-instance DPoP replay protection cannot silently fail or abort at boot.
+#
+# DECISION LOG (sq-17rgw):
+#   - ECS Fargate + ALB + ACM: same architecture as sparq-server.yaml (R3).
+#   - Secrets Manager ValueFrom for any secret env vars (R4).
+#   - Dedicated TaskRole + ExecutionRole scoped to own resources (R5).
+#   - Task SG accepts traffic on port 3000 ONLY from ALB SG (R6).
+#   - ALB target group health check on /readyz (R7, readiness probe).
+#   - ECS service health is driven by the ALB /readyz target check; /livez remains available (R7).
+#   - Dev-only escape hatches (ALLOW_LOOPBACK / SEED_CONFORMANCE / etc.) NEVER present (R2).
+
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  sparq-lws-core (Solid/LWS server) on ECS Fargate with ALB (HTTPS/TLS via ACM).
+  Fail-closed by design; auth + DPoP enforced at the image layer.
+  Activates once sq-lmz40 publishes the ghcr.io/sparq-org/sparq-lws-core image.
+  [SONNET-4.6] sq-17rgw
+
+# ---------------------------------------------------------------------------
+# Parameters
+# ---------------------------------------------------------------------------
+Parameters:
+
+  # --- Required ---
+  AcmCertificateArn:
+    Type: String
+    Description: >
+      ARN of an ACM certificate for the domain used as SOLID_SERVER_BASE_URL.
+      TLS is terminated at the ALB. (R3)
+    AllowedPattern: "^arn:aws[a-z-]*:acm:[a-z0-9-]+:[0-9]{12}:certificate/.+$"
+    ConstraintDescription: Must be a valid ACM certificate ARN.
+
+  SolidBaseUrl:
+    Type: String
+    Description: >
+      Public HTTPS base URL of this Solid server, e.g. https://solid.example.com.
+      Used as SOLID_SERVER_BASE_URL and (if SolidAudience is empty) as
+      SOLID_SERVER_AUDIENCE. Must be the HTTPS URL that points to this ALB.
+    AllowedPattern: "^https://.+"
+    ConstraintDescription: Must start with https://.
+
+  SolidTrustedIssuerSecretArn:
+    Type: String
+    Description: >
+      ARN of a Secrets Manager secret whose value is the trusted OIDC issuer URL
+      (SOLID_SERVER_TRUSTED_ISSUER). This is the OIDC IdP that issues tokens for
+      WebID authentication. Example: https://solid.community or your own IdP.
+      Store the URL as the secret value so it is not hard-coded here. (R4)
+    AllowedPattern: "^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+$"
+    ConstraintDescription: Must be a valid Secrets Manager secret ARN.
+
+  # --- Optional ---
+  ImageRef:
+    Type: String
+    Default: "ghcr.io/sparq-org/sparq-lws-core:latest"
+    Description: >
+      Full image reference for sparq-lws-core. Defaults to the canonical GHCR image.
+      This image does not exist until sq-lmz40 ships. Pin to a specific tag in production.
+    AllowedPattern: "^[a-z0-9._/-]+:[a-zA-Z0-9._-]+$"
+
+  SolidAudience:
+    Type: String
+    Default: ""
+    Description: >
+      SOLID_SERVER_AUDIENCE — defaults to SolidBaseUrl if left empty.
+      Set this if your OIDC 'aud' claim differs from the base URL.
+
+  # [GPT-5.6] R7 requires a per-server, overridable readiness path.
+  HealthCheckPath:
+    Type: String
+    Default: "/readyz"
+    AllowedPattern: "^/[-A-Za-z0-9._~/%]*$"
+    ConstraintDescription: Must be an absolute HTTP path.
+    Description: ALB readiness path. The canonical sparq-lws-core image serves /readyz.
+
+  TaskCpu:
+    Type: Number
+    Default: 512
+    AllowedValues: [256, 512, 1024, 2048, 4096]
+    Description: Fargate task CPU units.
+
+  TaskMemory:
+    Type: Number
+    Default: 1024
+    AllowedValues: [512, 1024, 2048, 4096, 8192, 16384]
+    Description: Fargate task memory in MiB.
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 1
+    Description: >
+      [GPT-5.6] Number of running tasks, fixed at one because the canonical image does not
+      include the opt-in redis-replay feature required for safe horizontal scaling.
+
+# ---------------------------------------------------------------------------
+# Conditions
+# ---------------------------------------------------------------------------
+Conditions:
+  HasCustomAudience: !Not [!Equals [!Ref SolidAudience, ""]]
+
+# [GPT-5.6] Reject CPU/memory pairs that ECS Fargate cannot register.
+Rules:
+  ValidFargateTaskSize:
+    Assertions:
+      - Assert: !Or
+          - !And
+            - !Equals [!Ref TaskCpu, 256]
+            - !Contains [[512, 1024, 2048], !Ref TaskMemory]
+          - !And
+            - !Equals [!Ref TaskCpu, 512]
+            - !Contains [[1024, 2048, 4096], !Ref TaskMemory]
+          - !And
+            - !Equals [!Ref TaskCpu, 1024]
+            - !Contains [[2048, 4096, 8192], !Ref TaskMemory]
+          - !And
+            - !Equals [!Ref TaskCpu, 2048]
+            - !Contains [[4096, 8192, 16384], !Ref TaskMemory]
+          - !And
+            - !Equals [!Ref TaskCpu, 4096]
+            - !Contains [[8192, 16384], !Ref TaskMemory]
+        AssertDescription: Select a CPU and memory combination supported by ECS Fargate.
+
+# ---------------------------------------------------------------------------
+# Resources
+# ---------------------------------------------------------------------------
+Resources:
+
+  # -------------------------------------------------------------------------
+  # Networking (same topology as sparq-server.yaml — VPC + public/private subnets)
+  # -------------------------------------------------------------------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "10.11.0.0/16"
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-igw"
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.11.0.0/24"
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-a"
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.11.1.0/24"
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-b"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-rt"
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetARouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  NatEipA:
+    Type: AWS::EC2::EIP
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGatewayA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEipA.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-nat-a"
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.11.10.0/24"
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-a"
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: "10.11.11.0/24"
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-b"
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-rt"
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      NatGatewayId: !Ref NatGatewayA
+
+  PrivateSubnetARouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  # -------------------------------------------------------------------------
+  # Security Groups (R6)
+  # -------------------------------------------------------------------------
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "sparq-lws ALB: inbound HTTPS from internet, outbound to task SG"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+          Description: "HTTPS from internet"
+      # [GPT-5.6] Prevent implicit allow-all egress; the ALB reaches only this task SG.
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          DestinationSecurityGroupId: !Ref TaskSecurityGroup
+          Description: "HTTP to sparq-lws tasks only"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-alb-sg"
+
+  # Task SG: accepts port 3000 ONLY from the ALB SG
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "sparq-lws task: inbound port 3000 from ALB SG only"
+      VpcId: !Ref VPC
+      # [GPT-5.6] HTTPS-only egress covers GHCR, Secrets Manager, OIDC, and CloudWatch.
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: "0.0.0.0/0"
+          Description: "HTTPS dependencies via NAT"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-task-sg"
+
+  # [GPT-5.6] Standalone rule avoids a circular SG dependency and limits task ingress to ALB.
+  TaskIngressFromAlb:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref TaskSecurityGroup
+      IpProtocol: tcp
+      FromPort: 3000
+      ToPort: 3000
+      SourceSecurityGroupId: !Ref AlbSecurityGroup
+      Description: "sparq-lws-core port from ALB only"
+
+  # -------------------------------------------------------------------------
+  # CloudWatch Logs
+  # -------------------------------------------------------------------------
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${AWS::StackName}/sparq-lws"
+      RetentionInDays: 30
+
+  # -------------------------------------------------------------------------
+  # IAM: Execution Role (R5)
+  # -------------------------------------------------------------------------
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+            # [GPT-5.6] Bind ECS assumptions to this account to mitigate confused-deputy use.
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+      Policies:
+        # [GPT-5.6] GHCR is public, so the wildcard AWS-managed ECR policy is unnecessary.
+        - PolicyName: LaunchLwsTask
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref SolidTrustedIssuerSecretArn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub >-
+                  arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:${LogGroup}:log-stream:*
+
+  # -------------------------------------------------------------------------
+  # IAM: Task Role (R5)
+  # -------------------------------------------------------------------------
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+            # [GPT-5.6] The application gets no AWS API permissions; trust is account-scoped.
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+
+  # -------------------------------------------------------------------------
+  # ECS Cluster
+  # -------------------------------------------------------------------------
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${AWS::StackName}-cluster"
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  # -------------------------------------------------------------------------
+  # ECS Task Definition
+  # -------------------------------------------------------------------------
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${AWS::StackName}-sparq-lws"
+      Cpu: !Ref TaskCpu
+      Memory: !Ref TaskMemory
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: sparq-lws
+          Image: !Ref ImageRef
+          Essential: true
+          ReadonlyRootFilesystem: true
+          # Non-root: the image runs as nonroot (R8). Do not override.
+          # [GPT-5.6] The service needs no Linux capabilities.
+          LinuxParameters:
+            Capabilities:
+              Drop:
+                - ALL
+          PortMappings:
+            - ContainerPort: 3000
+              Protocol: tcp
+          # R4: Secrets Manager ValueFrom injection — trusted issuer URL is a secret
+          # so it does not appear in CloudFormation parameter logs.
+          Secrets:
+            - Name: SOLID_SERVER_TRUSTED_ISSUER
+              ValueFrom: !Ref SolidTrustedIssuerSecretArn
+          Environment:
+            # Required: public HTTPS base URL known at boot.
+            - Name: SOLID_SERVER_BASE_URL
+              Value: !Ref SolidBaseUrl
+            # Audience: defaults to base URL if not set separately.
+            - Name: SOLID_SERVER_AUDIENCE
+              Value: !If [HasCustomAudience, !Ref SolidAudience, !Ref SolidBaseUrl]
+            # Bind on all interfaces inside the container.
+            - Name: SOLID_SERVER_BIND
+              Value: "0.0.0.0:3000"
+            # BIDIRECTIONAL strict check is the default in the image; make it explicit.
+            - Name: SOLID_SERVER_BIDIRECTIONAL
+              Value: "strict"
+            # DO NOT set any of the following dev-only escape hatches here (R2):
+            #   SOLID_SERVER_ALLOW_LOOPBACK
+            #   SOLID_SERVER_SEED_CONFORMANCE
+            #   SOLID_SERVER_SEED_BENCH
+            #   SOLID_SERVER_ALLOW_SEED_NONMEMORY
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: sparq-lws
+          # [GPT-5.6] Do not invent a local --health-probe command: the LWS image contract
+          # exposes HTTP /livez and /readyz only. ECS uses the ALB readiness check below.
+
+  # -------------------------------------------------------------------------
+  # Application Load Balancer (HTTPS-only, R3)
+  # -------------------------------------------------------------------------
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      Subnets:
+        - !Ref PublicSubnetA
+        - !Ref PublicSubnetB
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: "60"
+        - Key: routing.http.drop_invalid_header_fields.enabled
+          Value: "true"
+
+  # R7: health check targets /readyz (readiness), matcher 200.
+  # A 503 response causes the ALB to deregister the target until it is ready.
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VPC
+      Protocol: HTTP
+      Port: 3000
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: !Ref HealthCheckPath
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref AcmCertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  # -------------------------------------------------------------------------
+  # ECS Service
+  # -------------------------------------------------------------------------
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - HttpsListener
+      - TaskIngressFromAlb
+    Properties:
+      ServiceName: !Sub "${AWS::StackName}-service"
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      DesiredCount: !Ref DesiredCount
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref PrivateSubnetA
+            - !Ref PrivateSubnetB
+          SecurityGroups:
+            - !Ref TaskSecurityGroup
+          AssignPublicIp: DISABLED
+      LoadBalancers:
+        - ContainerName: sparq-lws
+          ContainerPort: 3000
+          TargetGroupArn: !Ref TargetGroup
+      HealthCheckGracePeriodSeconds: 60
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+
+# ---------------------------------------------------------------------------
+# Outputs
+# ---------------------------------------------------------------------------
+Outputs:
+
+  AlbDnsName:
+    Description: >
+      ALB DNS name — create a CNAME from SolidBaseUrl's domain to this value.
+      The Solid server is at https://<your-domain>/ (e.g. https://solid.example.com/).
+    Value: !GetAtt ALB.DNSName
+    Export:
+      Name: !Sub "${AWS::StackName}-AlbDnsName"
+
+  AlbHostedZoneId:
+    Description: ALB hosted zone ID — use with Route 53 alias records.
+    Value: !GetAtt ALB.CanonicalHostedZoneID
+    Export:
+      Name: !Sub "${AWS::StackName}-AlbHostedZoneId"
+
+  SolidServerUrl:
+    Description: Solid server public URL (matches SolidBaseUrl parameter).
+    Value: !Ref SolidBaseUrl
+
+  LogGroupName:
+    Description: CloudWatch log group for sparq-lws container logs.
+    Value: !Ref LogGroup
+    Export:
+      Name: !Sub "${AWS::StackName}-LogGroup"

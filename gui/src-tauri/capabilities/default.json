@@ -1,13 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "[OPUS-4.8] sq-2e93 / sq-ixc3.6 / sq-cno90 — default capability for the sparq GUI main window: the minimal core-window permissions, the file-open dialog (for loading an RDF file from disk into the native store), and a LEAST-PRIVILEGE filesystem grant scoped to the app's local-data `workspaces/` dir ONLY (durable on-disk workspace persistence, epic sq-ixc3). No shell, no HTTP, NO arbitrary FS — every fs-PLUGIN permission is path-scoped to $APPLOCALDATA/workspaces; the engine runs in-process over IPC. The app-defined `disk_usage` command (sq-cno90, the OS-reported store-footprint probe) is invocable on this window by `core:default`; it adds NO new fs-plugin surface — it reads via the engine's own std::fs and is confined in Rust to the SAME $APPLOCALDATA/workspaces subtree (it resolves that dir, sums its files' real byte sizes, and follows no symlink out of the tree).",
+  "description": "[OPUS-4.8] sq-2e93 / sq-ixc3.6 / sq-cno90 / sq-w2sod — default capability for the sparq GUI main window: the minimal core-window permissions and a LEAST-PRIVILEGE filesystem grant scoped to the app's local-data `workspaces/` dir ONLY (durable on-disk workspace persistence, epic sq-ixc3). The fs-PLUGIN grant is path-scoped to $APPLOCALDATA/workspaces and grants no arbitrary FS. HONEST APP-COMMAND POSTURE (sq-w2sod): the Tauri capability ACL here gates only CORE and PLUGIN commands (core:/plugin:); it does NOT bind the app-defined `#[tauri::command]`s registered in lib.rs, which any webview script can invoke by name. Those are constrained IN RUST, not by this allowlist — `load_path` reads ONLY paths the user picked through the `pick_rdf_files` command (which opens the OS file dialog SERVER-SIDE and records the canonicalised selection as an unforgeable approved-path capability) and returns a single GENERIC error for any failure so it is no filesystem existence/permission oracle; `disk_usage` (sq-cno90) resolves and stays within the SAME $APPLOCALDATA/workspaces subtree, sums its files' real byte sizes, and follows no symlink out of the tree; `load_text` decodes only in-memory text the webview already holds. The pre-wired native query/update commands the frontend never called were REMOVED to shrink the invocable surface. The file dialog is now driven from Rust, so no `dialog:allow-open` grant is needed (the webview no longer invokes `plugin:dialog|open`).",
   "windows": [
     "main"
   ],
   "permissions": [
     "core:default",
-    "dialog:allow-open",
     {
       "identifier": "fs:allow-read-text-file",
       "allow": [{ "path": "$APPLOCALDATA/workspaces/**" }]

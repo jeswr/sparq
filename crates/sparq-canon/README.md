@@ -32,10 +32,10 @@ let map = sparq_canon::issued_identifiers(&[q]).unwrap();
 
 ## ✨ Features
 
-- **Dataset API** — [`canonicalize`]/`canonicalize_quads` return the canonical
-  N-Quads `String`; `issued_identifiers`/`issue_quads` return the blank-node
-  issuer map. `*_with::<D: Digest>` selects a non-default hash profile (the spec
-  default is SHA-256; `sha2::Sha384` gives the SHA-384 profile).
+- **Dataset API** — [`canonicalize`]/`canonicalize_quads` return canonical
+  N-Quads; `digest_quads_with::<D>` returns its exact digest bytes; and
+  `issued_identifiers`/`issue_quads` return the blank-node issuer map. The other
+  `*_with::<D: Digest>` functions select a non-default RDFC-1.0 hash profile.
 - **Single-graph API** — `canonicalize_triples` / `canonicalize_graph_content`
   return a `CanonicalGraph` (sorted canonical N-Quads lines + re-parsed
   canonical triples). This is what the ZK per-graph commitment pipeline
@@ -74,27 +74,27 @@ sparq-canon = { path = "crates/sparq-canon", features = ["rdf12-triple-terms"] }
 let nq = sparq_canon::canonicalize_rdf12(&dataset)?;             // quads
 let cg = sparq_canon::canonicalize_triples_rdf12(&triples)?;     // single graph
 let m  = sparq_canon::issue_dataset_rdf12(&dataset)?;            // issuer map
+// Constrained: requires GROUND triple terms (errors on any nested blank node).
+let vc = sparq_canon::canonicalize_rdf12_ground_terms(&dataset)?;
 // Hash-profile parity with the standard path: pick a hash via `*_with::<D: Digest>`.
 let nq384 = sparq_canon::canonicalize_rdf12_with::<sha2::Sha384>(&dataset)?;
 ```
 
-**Boundary:** SHA-256 is the default; a `*_with::<D: Digest>` sibling of each v2
-entry point (e.g. `canonicalize_rdf12_with`) selects another hash — notably
-`sha2::Sha384` — for parity with the standard path's `canonicalize_quads_with`.
-The non-generic entry points are SHA-256 and byte-identical to before; a
-different `D` may yield a different (still canonical, isomorphism-stable under
-that `D`) relabelling. Triple terms occur only as objects in oxrdf 0.3 (a
-triple's subject is `NamedOrBlankNode`), so nesting descends strictly through
-the object position; the HNDQ poison-graph limit still applies.
+**Constrained ground-triple-term variant** (`canonicalize_rdf12_ground_terms` +
+`issue_dataset`/`triples`/`*_with` siblings): a thin wrapper that fails closed
+with `CanonError::NestedBlankNode` unless every triple term is blank-node-free —
+the common credential/VC case. Accepted input never exercises the nested-bnode
+HNDQ descent: it is exactly RDFC-1.0 with triple terms as opaque constants.
+
+**Boundary:** SHA-256 is the default; each v2 entry point has a `*_with::<D:
+Digest>` sibling (notably `sha2::Sha384`) for standard-path parity. A different
+`D` may yield a different (still canonical, isomorphism-stable) relabelling.
+Triple terms occur only as objects in oxrdf 0.3; the HNDQ limit still applies.
 
 **Distinguishing power (regression-tested).** An adversarial soundness audit of
 the nested-bnode descent (sq-mu1cd / sq-63g0) found the profile **sound** (0
-confirmed defects / 5 refuted suspicions): distinct nested structure never
-collapses, because the serialization re-renders the real `Term::Triple` with c14n
-labels. The audit's sharper non-isomorphic vectors are landed as permanent
-regression tests in `tests/rdf12_triple_term_canon.rs` §5 — each **brute-force-proven
-non-isomorphic** by an independent oracle before asserting the canon differs, so a
-future false-equal is caught. That comment block carries the full per-vector detail.
+defects / 5 refuted suspicions); its sharper non-isomorphic vectors are pinned as
+brute-force-anchored regression tests in `tests/rdf12_triple_term_canon.rs` §5.
 
 ### Opt-in, single-sourced
 

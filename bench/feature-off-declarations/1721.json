@@ -1,0 +1,5 @@
+{
+  "pr": 1721,
+  "date": "2026-07-10",
+  "reason": "sq-y5ew5 (M4 hybrid tri-mask FILTER kernel): all new code is fully #[cfg(feature = \"vectorized\")]-gated (new chunk_select module) or #[cfg(test)] (columnar_filter_seam tests); with the feature OFF NONE of it compiles into sparq-wasm. Verified by parsing the wasm: the CODE section is byte-for-byte IDENTICAL to base (executable behaviour unchanged, no vectorized leak) and the DATA section is the SAME size with the SAME string set (2194 strings, no additions/removals) — only 41 bytes differ, all inside the data section, and they are &str fat-pointer (ptr,len) addresses that shifted by a small constant because reorganising the always-compiled apply_filter dispatch body (now behind a #[cfg(feature=\"vectorized\")] `if let Some(rows) = columnar_filter(..)?` block) nudges LLVM's static read-only data emission ORDER while emitting identical content. Size delta +0 bytes (+0.000%), so no metrics.wasm_bundle_bytes floor bump. Semantics-preserving, NOT accidental vectorization (feature-OFF == feature-ON semantics invariant preserved), no new dependencies, no unsafe."
+}

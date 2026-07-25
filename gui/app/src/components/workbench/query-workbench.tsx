@@ -36,9 +36,10 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { downloadText } from "@/lib/download";
+// [FABLE-5] sq-ixc3.19 — the shared EXPLAIN/ANALYZE operator-tree renderer (plan explorer).
+import { PlanTree } from "@/components/workbench/plan-tree";
 import {
   useEngine,
   DEFAULT_ROW_CAP,
@@ -57,11 +58,25 @@ import {
   type TurtleToken,
 } from "@sparq/client";
 import { WorkbenchSparqlEditor } from "@/components/workbench/sparql-editor";
-import { GraphView } from "@/components/workbench/graph-view";
+import { GraphView, type InferredAffordance } from "@/components/workbench/graph-view";
+// [FABLE-5] sq-ixc3.20 — click-to-explain inferred facts: the why() proof-tree panel + the
+// canonical triple identity that gates the affordance (membership in the closure-added set).
+import { ProofPanel, type ExplainTarget } from "@/components/workbench/proof-panel";
+import {
+  inferredFactsMatchingKeys,
+  termToNT,
+  tripleKeyOfBindings,
+  type InferredFact,
+} from "@/lib/inferred-facts";
 // [OPUS-4.8] sq-tp1m (#757) — the per-workspace inference (RDFS / OWL 2 RL) selector, in the
 // action row so the active entailment regime is visible + controllable while querying.
 import { InferenceControl } from "@/components/workbench/inference-control";
+// [FABLE-5] sq-ixc3.14 — the federation allowlist editor + the honest run-location badge.
+import { FederationControl, RunLocationBadge } from "@/components/workbench/federation-control";
+import { useWorkspace } from "@/lib/workspace-context";
 import { DEFAULT_QUERY } from "@/data/sample-graph";
+// [FABLE-5] sq-ixc3.14 — the honesty-override type for QUERY_TOOL_OVERRIDE (sq-5lyme seam).
+import type { ToolOverride } from "@/data/tools";
 // [OPUS-4.8] sq-ixc3.10 — the Query tool contributes its operational verbs (run / EXPLAIN /
 // EXPLAIN ANALYZE / re-run a recent query) to the Cmd-K spine while it is mounted.
 import { useRegisterPaletteCommands } from "@/components/workbench/command-palette";
@@ -75,6 +90,14 @@ import {
 
 /** The co-resident result views the panel toggles between (all over the same run). */
 type ResultView = "table" | "graph" | "json" | "ntriples";
+
+// [SONNET-4.6] #3602 — SELECT graph rendering is optional workbench code. Keep it out of the
+// initial GUI bundle and load it only when a user opens Graph for a SELECT result.
+const SelectResultGraphView = React.lazy(() =>
+  import("@/components/workbench/select-result-graph-view").then((module) => ({
+    default: module.SelectResultGraphView,
+  })),
+);
 
 const VIEWS: { id: ResultView; label: string }[] = [
   { id: "table", label: "Table" },
@@ -98,7 +121,14 @@ const DEFAULT_PAGE_SIZE = 100;
 // changes — paging itself never re-extracts the table. NOTE this paginates over the rows the
 // engine ALREADY streamed into JS; demand-driven query EVALUATION up to the current page needs
 // a pull-iterator exec model the engine lacks today (gated — see results.ts / gui-design.md).
-function SelectTable({ results }: { results: SparqlResults }) {
+function SelectTable({
+  results,
+  inferred,
+}: {
+  results: SparqlResults;
+  /** [FABLE-5] sq-ixc3.20 — mark + explain inferred rows (absent = no affordance). */
+  inferred?: InferredAffordance | null;
+}) {
   const table = React.useMemo(() => extractTable(results), [results]);
   const [pageSize, setPageSize] = React.useState<number>(DEFAULT_PAGE_SIZE);
   const [page, setPage] = React.useState(0);
@@ -112,6 +142,26 @@ function SelectTable({ results }: { results: SparqlResults }) {
   React.useEffect(() => {
     setPage(0);
   }, [cache]);
+
+  // [FABLE-5] sq-ixc3.20 — a SELECT row is a solution, not inherently a triple; it earns
+  // the why() affordance ONLY when its first three bound terms ARE a triple the active
+  // closure ADDED (exact membership in the entailed set — never a heuristic — so an
+  // asserted fact, or a row that is not a fact at all, can never show the affordance).
+  const rowTarget = React.useCallback(
+    (absRow: number): ExplainTarget | null => {
+      if (!inferred || table.vars.length < 3) return null;
+      const b = results.results?.bindings?.[absRow];
+      if (!b) return null;
+      const s = b[table.vars[0]];
+      const p = b[table.vars[1]];
+      const o = b[table.vars[2]];
+      if (!s || !p || !o) return null;
+      if (!inferred.keys.has(tripleKeyOfBindings(s, p, o))) return null;
+      return { s: termToNT(s), p: termToNT(p), o: termToNT(o) };
+    },
+    [inferred, table, results],
+  );
+  const showWhyColumn = inferred != null && table.vars.length >= 3;
 
   if (table.vars.length === 0) {
     return <p className="p-3 text-sm text-muted-foreground">No projected variables.</p>;
@@ -141,28 +191,56 @@ function SelectTable({ results }: { results: SparqlResults }) {
                   ?{v}
                 </th>
               ))}
+              {/* [FABLE-5] sq-ixc3.20 — the why? affordance column (inference active only). */}
+              {showWhyColumn && (
+                <th className="w-14 border-b px-2 py-1.5" aria-label="Explain inferred facts" />
+              )}
             </tr>
           </thead>
           <tbody>
             {rows.length === 0 ? (
               <tr>
                 <td
-                  colSpan={table.vars.length}
+                  colSpan={table.vars.length + (showWhyColumn ? 1 : 0)}
                   className="px-3 py-3 text-center text-muted-foreground"
                 >
                   0 rows
                 </td>
               </tr>
             ) : (
-              rows.map((row, i) => (
-                <tr key={startRow + i} className="odd:bg-muted/30">
-                  {row.map((cell, j) => (
-                    <td key={j} className="border-b px-3 py-1 font-mono text-xs">
-                      {cell}
-                    </td>
-                  ))}
-                </tr>
-              ))
+              rows.map((row, i) => {
+                // [FABLE-5] sq-ixc3.20 — non-null ONLY for a row whose s/p/o is a triple
+                // the closure added: asserted facts get NO affordance (the honesty gate).
+                const target = showWhyColumn ? rowTarget(startRow + i) : null;
+                return (
+                  <tr
+                    key={startRow + i}
+                    className="odd:bg-muted/30"
+                    {...(target ? { "data-inferred-row": true } : {})}
+                  >
+                    {row.map((cell, j) => (
+                      <td key={j} className="border-b px-3 py-1 font-mono text-xs">
+                        {cell}
+                      </td>
+                    ))}
+                    {showWhyColumn && (
+                      <td className="border-b px-2 py-1 text-right">
+                        {target && (
+                          <button
+                            type="button"
+                            className="rounded border border-transparent bg-primary/10 px-1.5 py-0 font-mono text-[10px] text-primary hover:bg-primary/20"
+                            onClick={() => inferred!.onExplain(target)}
+                            title="This fact is inferred (not asserted) — see its derivation"
+                            data-explain-trigger
+                          >
+                            why?
+                          </button>
+                        )}
+                      </td>
+                    )}
+                  </tr>
+                );
+              })
             )}
           </tbody>
         </table>
@@ -251,37 +329,102 @@ const TURTLE_TOKEN_CLASS: Record<TurtleToken["type"], string> = {
   plain: "",
 };
 
-/** A highlighted RDF document (pretty Turtle by default, raw N-Triples otherwise). */
-function RdfDocument({ ntriples, pretty }: { ntriples: string; pretty: boolean }) {
+/** [GPT-5.6] Highlight one RDF text fragment without changing its line/triple identity. */
+function RdfTokens({ text }: { text: string }) {
+  const tokens = React.useMemo(() => tokenizeTurtle(text), [text]);
+  return tokens.map((t, i) => {
+    const cls = TURTLE_TOKEN_CLASS[t.type];
+    return cls ? (
+      <span key={i} className={cls}>
+        {t.text}
+      </span>
+    ) : (
+      <React.Fragment key={i}>{t.text}</React.Fragment>
+    );
+  });
+}
+
+/** A highlighted pretty-Turtle document. */
+function RdfDocument({ ntriples }: { ntriples: string }) {
   const text = React.useMemo(() => {
-    if (!pretty) return ntriples;
     try {
       return prettyTurtle(ntriples);
     } catch {
       // The serialiser never throws by design, but degrade to the raw form if it ever does.
       return ntriples;
     }
-  }, [ntriples, pretty]);
-  const tokens = React.useMemo(() => tokenizeTurtle(text), [text]);
+  }, [ntriples]);
   return (
     <pre className="overflow-auto whitespace-pre p-3 font-mono text-xs">
-      {tokens.map((t, i) => {
-        const cls = TURTLE_TOKEN_CLASS[t.type];
-        return cls ? (
-          <span key={i} className={cls}>
-            {t.text}
-          </span>
-        ) : (
-          <React.Fragment key={i}>{t.text}</React.Fragment>
-        );
-      })}
+      <RdfTokens text={text} />
     </pre>
   );
 }
 
+/** [GPT-5.6] One raw result line plus its exact inferred membership, if any. */
+interface NTriplesLine {
+  text: string;
+  fact: InferredFact | null;
+}
+
+/** [GPT-5.6] Raw N-Triples keeps one statement per line, so why() can be attached precisely. */
+function RawNTriplesDocument({
+  lines,
+  onExplain,
+}: {
+  lines: readonly NTriplesLine[];
+  onExplain?: (target: ExplainTarget) => void;
+}) {
+  return (
+    <div className="min-w-max py-2 font-mono text-xs" data-ntriples-lines>
+      {lines.map(({ text, fact }, index) => (
+        <div
+          key={index}
+          className={cn(
+            "flex min-h-5 items-start gap-2 px-3",
+            fact && "border-l-2 border-primary bg-primary/5 pl-2.5",
+          )}
+          {...(fact ? { "data-inferred-line": true } : {})}
+        >
+          <pre className="min-w-0 flex-1 whitespace-pre">
+            <RdfTokens text={text} />
+          </pre>
+          {fact && onExplain ? (
+            <button
+              type="button"
+              className="sticky right-2 shrink-0 rounded border border-transparent bg-primary/10 px-1.5 py-0 text-[10px] text-primary hover:bg-primary/20"
+              onClick={() => onExplain(fact)}
+              aria-label={`Explain inferred fact: ${fact.ntriples}`}
+              title="This fact is inferred (not asserted) — see its derivation"
+              data-explain-trigger
+              data-ntriples-explain
+            >
+              why?
+            </button>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 /** The N-Triples / Turtle view, with a pretty-Turtle ⇄ raw-N-Triples toggle. */
-function GraphTextView({ ntriples }: { ntriples: string }) {
+function GraphTextView({
+  ntriples,
+  inferred,
+}: {
+  ntriples: string;
+  /** [GPT-5.6] Exact inferred-line membership + proof-panel opener. */
+  inferred?: InferredAffordance | null;
+}) {
   const [pretty, setPretty] = React.useState(true);
+  const lines = React.useMemo<readonly NTriplesLine[]>(() => {
+    return ntriples.split("\n").map((text) => ({
+      text,
+      fact: inferred ? (inferredFactsMatchingKeys(text, inferred.keys)[0] ?? null) : null,
+    }));
+  }, [ntriples, inferred]);
+  const hasInferredLines = lines.some((line) => line.fact !== null);
   if (!ntriples.trim()) {
     return <p className="p-3 text-sm text-muted-foreground">(empty graph)</p>;
   }
@@ -294,7 +437,9 @@ function GraphTextView({ ntriples }: { ntriples: string }) {
         ].map((opt) => (
           <button
             key={String(opt.id)}
+            type="button"
             onClick={() => setPretty(opt.id)}
+            aria-pressed={pretty === opt.id}
             className={cn(
               "rounded px-2 py-0.5 text-[11px]",
               pretty === opt.id
@@ -305,9 +450,23 @@ function GraphTextView({ ntriples }: { ntriples: string }) {
             {opt.label}
           </button>
         ))}
+        {hasInferredLines ? (
+          <span
+            className="ml-auto text-[10px] text-muted-foreground"
+            data-text-inferred-hint
+          >
+            {pretty
+              ? "Switch to N-Triples to explain inferred facts."
+              : "Marked lines are inferred — choose why? for a derivation."}
+          </span>
+        ) : null}
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        <RdfDocument ntriples={ntriples} pretty={pretty} />
+        {pretty ? (
+          <RdfDocument ntriples={ntriples} />
+        ) : (
+          <RawNTriplesDocument lines={lines} onExplain={inferred?.onExplain} />
+        )}
       </div>
     </div>
   );
@@ -343,7 +502,16 @@ function ExportRow({ results }: { results: SparqlResults }) {
   );
 }
 
-function ResultBody({ outcome, view }: { outcome: QueryOutcome; view: ResultView }) {
+function ResultBody({
+  outcome,
+  view,
+  inferred,
+}: {
+  outcome: QueryOutcome;
+  view: ResultView;
+  /** [GPT-5.6] sq-l54uy — the inferred-fact affordance (table + graph + N-Triples views). */
+  inferred?: InferredAffordance | null;
+}) {
   if (outcome.kind === "error") {
     return (
       <pre
@@ -362,6 +530,20 @@ function ResultBody({ outcome, view }: { outcome: QueryOutcome; view: ResultView
     );
   }
   if (outcome.kind === "explain") {
+    // [FABLE-5] sq-ixc3.19 — the structured plan renders as the navigable operator tree
+    // (per-operator est/actual rows, q-error heat, time); a lean bundle without the
+    // explain-json binding still gets the text plan verbatim (never a synthesised tree).
+    if (outcome.tree) {
+      return (
+        <div data-result-kind="explain">
+          <PlanTree
+            tree={outcome.tree}
+            analyzed={outcome.mode === "analyze"}
+            source={outcome.source ?? "wasm"}
+          />
+        </div>
+      );
+    }
     return (
       <pre
         className="overflow-auto whitespace-pre p-3 font-mono text-xs"
@@ -385,7 +567,7 @@ function ResultBody({ outcome, view }: { outcome: QueryOutcome; view: ResultView
     );
   }
   if (outcome.kind === "graph") {
-    if (view === "graph") return <GraphView ntriples={outcome.ntriples} />;
+    if (view === "graph") return <GraphView ntriples={outcome.ntriples} inferred={inferred} />;
     if (view === "table") {
       return (
         <p className="p-3 text-sm text-muted-foreground" data-result-kind="graph">
@@ -406,7 +588,7 @@ function ResultBody({ outcome, view }: { outcome: QueryOutcome; view: ResultView
     }
     return (
       <div className="h-full" data-result-kind="graph">
-        <GraphTextView ntriples={outcome.ntriples} />
+        <GraphTextView ntriples={outcome.ntriples} inferred={inferred} />
       </div>
     );
   }
@@ -431,16 +613,17 @@ function ResultBody({ outcome, view }: { outcome: QueryOutcome; view: ResultView
       )}
       <div className="min-h-0 flex-1 overflow-auto">
         {view === "table" ? (
-          <SelectTable results={outcome.results} />
+          <SelectTable results={outcome.results} inferred={inferred} />
         ) : view === "json" ? (
           <pre className="overflow-auto p-3 font-mono text-xs" data-result-view="json">
             {outcome.rawJson}
           </pre>
         ) : view === "graph" ? (
-          <p className="p-3 text-sm text-muted-foreground">
-            The Graph view renders CONSTRUCT / DESCRIBE results. A SELECT is a solution table —
-            use the Table or Raw JSON view.
-          </p>
+          <React.Suspense
+            fallback={<p className="p-3 text-sm text-muted-foreground">Loading Graph view…</p>}
+          >
+            <SelectResultGraphView results={outcome.results} />
+          </React.Suspense>
         ) : (
           <p className="p-3 text-sm text-muted-foreground">
             N-Triples / Turtle applies to CONSTRUCT / DESCRIBE results.
@@ -455,12 +638,30 @@ function ResultBody({ outcome, view }: { outcome: QueryOutcome; view: ResultView
 // The workbench.
 // ---------------------------------------------------------------------------
 
+// [FABLE-5] sq-ixc3.14 — honesty override (the sq-5lyme seam: copy flips live in the panel
+// file that earns them, never by editing data/tools.ts). The Query tool now also executes
+// federated SERVICE queries — on the DESKTOP's native engine, gated by the per-workspace
+// egress allowlist; the browser build labels that half native-only instead of pretending.
+export const QUERY_TOOL_OVERRIDE: ToolOverride = {
+  blurb:
+    "Run SPARQL 1.1/1.2 over the live store — SELECT/ASK/CONSTRUCT/DESCRIBE/UPDATE, plus " +
+    "federated SERVICE on the desktop's native engine (allowlist-gated, fail-closed).",
+};
+
 export function QueryWorkbench() {
   // [OPUS-4.8] sq-ixc3.10/.12 — EXPLAIN is the canonical run(query, { mode }) path (no standalone
   // explain() method); the Cmd-K verbs and the EXPLAIN/ANALYZE buttons both drive it.
-  const { run, status } = useEngine();
+  const { run, status, entailedTripleKeys, inferenceMode, inferenceStatus } = useEngine();
   const workbench = useWorkbench();
+  // [OPUS-4.8] sq-lcd6e — the editor text round-trips through the active workspace so a saved
+  // query survives a reload / workspace switch (the persisted editor state was never restored
+  // before). `workspace` starts null (restore is async); we seed the editor from it once, on the
+  // first restore AND on every workspace-id change, and write the text back (debounced) below.
+  const { workspace, setEditorQuery, recordUpdateSnapshot } = useWorkspace();
   const [query, setQuery] = React.useState(DEFAULT_QUERY);
+  // The id of the workspace whose editor text is currently loaded — guards the write-back from
+  // firing (and clobbering the saved query) before the restore has hydrated the editor.
+  const loadedWsRef = React.useRef<string | null>(null);
   const [outcome, setOutcome] = React.useState<QueryOutcome | null>(null);
   const [view, setView] = React.useState<ResultView>("table");
   const [running, setRunning] = React.useState(false);
@@ -468,10 +669,47 @@ export function QueryWorkbench() {
   const abortRef = React.useRef<AbortController | null>(null);
   // [OPUS-4.8] sq-ixc3.10 — a session-only ring of recently-run queries for the palette.
   const [recentQueries, setRecentQueries] = React.useState<RecentQuery[]>([]);
+  // [FABLE-5] sq-ixc3.20 — the inferred fact whose why() proof panel is open, or null.
+  const [explainTarget, setExplainTarget] = React.useState<ExplainTarget | null>(null);
+
+  // [FABLE-5] sq-ixc3.20 — the inferred-fact affordance for the results views: live only
+  // while the ACTIVE regime's closure is materialised (`inferenceStatus` is the reactive
+  // signal; `entailedTripleKeys` the key-guarded set) and something was actually entailed.
+  const inferred = React.useMemo<InferredAffordance | null>(() => {
+    if (inferenceMode === "off" || inferenceStatus.kind !== "ready") return null;
+    const keys = entailedTripleKeys();
+    if (!keys || keys.size === 0) return null;
+    return { keys, onExplain: setExplainTarget };
+  }, [inferenceMode, inferenceStatus, entailedTripleKeys]);
+
+  // A regime change invalidates an open proof (it was derived under the previous regime).
+  React.useEffect(() => {
+    setExplainTarget(null);
+  }, [inferenceMode]);
 
   const recordRecent = React.useCallback((q: string) => {
     setRecentQueries((prev) => pushRecentQuery(prev, q, Date.now()));
   }, []);
+
+  // [OPUS-4.8] sq-lcd6e — hydrate the editor from the restored / switched workspace's saved query.
+  // Runs once per workspace id (never re-clobbering the user's in-progress edits within a session).
+  React.useEffect(() => {
+    if (!workspace) return;
+    if (loadedWsRef.current === workspace.id) return;
+    loadedWsRef.current = workspace.id;
+    setQuery(workspace.editor.query);
+  }, [workspace]);
+
+  // [OPUS-4.8] sq-lcd6e — write the editor text back to the workspace (debounced) so it persists.
+  // Guarded on `loadedWsRef` so the initial DEFAULT_QUERY never overwrites a saved query before
+  // the restore above has run.
+  React.useEffect(() => {
+    if (loadedWsRef.current === null) return;
+    const handle = setTimeout(() => {
+      void setEditorQuery(query);
+    }, 400);
+    return () => clearTimeout(handle);
+  }, [query, setEditorQuery]);
 
   // [OPUS-4.8] sq-ixc3.10/.12 — the SINGLE run path: plain run, EXPLAIN (plan only), or EXPLAIN
   // ANALYZE (plan + run), each surfaced as a { kind } outcome through the same RunResult pipeline.
@@ -488,6 +726,12 @@ export function QueryWorkbench() {
         const result = await run(query, { mode, signal: controller.signal });
         setOutcome(result.outcome);
         setRunLatencyMs(result.latencyMs);
+        // (sq-7gdfp) — snapshot the live store after a successful SPARQL UPDATE so INSERT/DELETE
+        // data survives a page reload. A failed update yields outcome.kind === "error" and never
+        // reaches here, so the snapshot is never taken on failure.
+        if (result.outcome.kind === "update") {
+          void recordUpdateSnapshot();
+        }
         // Pick the most useful default view for the result shape.
         if (result.outcome.kind === "graph") {
           if (view === "table" || view === "json") setView("graph");
@@ -499,7 +743,7 @@ export function QueryWorkbench() {
         setRunning(false);
       }
     },
-    [run, query, view, recordRecent],
+    [run, query, view, recordRecent, recordUpdateSnapshot],
   );
 
   const onStop = React.useCallback(() => {
@@ -591,12 +835,16 @@ export function QueryWorkbench() {
         {/* Action row. */}
         <div className="flex items-center gap-2 border-b bg-card px-3 py-1.5">
           <span className="text-xs font-medium text-muted-foreground">SPARQL</span>
-          <Badge variant="outline" className="h-5 gap-1 text-[10px]" title="Where this query runs">
-            LOCAL · in-tab WASM
-          </Badge>
+          {/* [FABLE-5] sq-ixc3.14 — the HONEST run-location badge: in-tab WASM for a plain
+              query; the desktop's native engine (allowlist-gated) when SERVICE is detected;
+              native-only labelling on the web build instead of pretending to federate. */}
+          <RunLocationBadge query={query} />
           {/* [OPUS-4.8] sq-tp1m — the per-workspace inference regime (queries run with the chosen
               RDFS / OWL 2 RL entailment applied by the engine). */}
           <InferenceControl className="ml-2" />
+          {/* [FABLE-5] sq-ixc3.14 — the per-workspace federation egress allowlist (fail-closed:
+              SERVICE may dial ONLY these endpoints, enforced by the native engine). */}
+          <FederationControl className="ml-1" />
           <div className="ml-auto flex items-center gap-1.5">
             <Button
               size="sm"
@@ -649,8 +897,8 @@ export function QueryWorkbench() {
         />
       </div>
 
-      {/* Results pane. */}
-      <div className="flex min-h-0 flex-[2] flex-col">
+      {/* Results pane. [FABLE-5] sq-ixc3.20 — `relative` hosts the proof-panel overlay. */}
+      <div className="relative flex min-h-0 flex-[2] flex-col">
         <div className="flex items-center gap-1 border-b bg-card px-3 py-1">
           {VIEWS.map((v) => (
             <button
@@ -688,9 +936,13 @@ export function QueryWorkbench() {
                 : "Waiting for the engine to warm…"}
             </p>
           ) : (
-            <ResultBody outcome={outcome} view={view} />
+            <ResultBody outcome={outcome} view={view} inferred={inferred} />
           )}
         </div>
+        {/* [FABLE-5] sq-ixc3.20 — the why() proof-tree panel for the clicked inferred fact. */}
+        {explainTarget && (
+          <ProofPanel target={explainTarget} onClose={() => setExplainTarget(null)} />
+        )}
       </div>
     </div>
   );

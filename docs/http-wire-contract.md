@@ -184,7 +184,7 @@ on full message text.
 | `404` | unknown route; `DELETE` of an absent named graph (a `GET` serves the empty graph instead, §3); a compiled-but-flag-disabled opt-in route | permanent | `not found` (unknown route) |
 | `405` | method not allowed on a route | permanent | — (carries `Allow`) |
 | `406` | present-but-unsatisfiable `Accept` (both result classes, §2) | permanent | — |
-| `410` | *(feature: `time-travel`)* `?generation=N` aged out of retention | permanent | `aged out` |
+| `410` | `?generation=N` aged out of the retention window (default build: the ring's concurrency-retention window; wider under the `time-travel` feature) | permanent | `aged out` |
 | `413` | body over cap; result row/byte working-set cap; gzip ratio cap | permanent for the identical request (honest refusal, never truncation) | `row limit` / `byte limit` |
 | `415` | unsupported request `Content-Type` (§1, §3) | permanent | — |
 | `429` | concurrency cap: request shed **before it ran** | **transient** | — |
@@ -208,11 +208,12 @@ Served today, **NOT covered by the v1 freeze** — may change or disappear in an
   (`crates/sparq-server/SUBSCRIPTIONS.md`).
 - `/admin/compact`, and the `backup`-feature routes `/admin/backup`, `/admin/backup/delta`,
   `/admin/restore` (and their `409` semantics).
-- All opt-in-feature routes and parameters: `/tpf` (+`brtpf`), `/shacl/validate`,
-  `/terse/transpile`, `/streams`, `/.well-known/void`, the Service-Description response on a
-  query-less `GET /sparql`, the `text/n3` GSP `PATCH` dialect, and time-travel's
-  `?generation` / `Sparq-Generation` header (their *error statuses*, where documented in §6,
-  are frozen; the surfaces themselves are not).
+- All opt-in-feature routes and parameters: `/complete`, `/tpf` (+`brtpf`),
+  `/shacl/validate`, `/terse/transpile`, `/streams`, `/.well-known/void`, the Service-Description response on a
+  query-less `GET /sparql`, the `text/n3` GSP `PATCH` dialect, and the `?generation` /
+  `Sparq-Generation` generation-pinning surface (default build since `sq-ci2d6`, bounded to the
+  ring's concurrency-retention window; `time-travel` extends it) — its *error statuses*, where
+  documented in §6, are frozen; the surface itself is NOT yet part of the v1 freeze (rides gh-1416).
 - `EXPLAIN` / `EXPLAIN ANALYZE` output format; audit/log record formats; CORS specifics;
   response headers not named in this document; exact error-message wording beyond the §6
   sentinels; default values of operator caps.

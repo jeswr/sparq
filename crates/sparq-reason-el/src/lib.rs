@@ -5,13 +5,24 @@
 //! entry points are [`classify_graph`] (emit the complete subsumption lattice into a
 //! `(Dict, triples)` pair) and [`Classifier`] (the typed [`ClassHierarchy`] API). The
 //! algorithm lives in private modules: `normal` (Baader–Brandt–Lutz normalization),
-//! `classify` (CR1–CR6 saturation), `extract` (RDF → EL+⊥ axioms), and — under the
-//! `cdomain` feature — `cdomain` (CR7–CR9 concrete-domain facet satisfiability on the
-//! shared `sparq_substrate::numeric` value tower).
+//! `classify` (CR1–CR6 saturation), `extract` (RDF → EL+⊥ axioms), under the
+//! `cdomain` feature `cdomain` (CR7–CR9 concrete-domain facet satisfiability on the
+//! shared `sparq_substrate::numeric` value tower), and under the `abox` feature `abox`
+//! (ABox assertion internalization as safe nominals + the realisation readoff — the
+//! `realize` / `realize_graph` entry points). Under the `par` feature (Phase E4) the
+//! `Classifier::classify_par` / `classify_graph_par` entries run the same saturation as
+//! deterministic bulk-synchronous parallel rounds with an identical derived closure at
+//! every thread count (all the feature-gated names here are code spans, not intra-doc
+//! links, so this always-compiled note stays clean under the no-`--all-features`
+//! rustdoc check).
 
 use rustc_hash::FxHashMap;
 use sparq_core::dict::{Dict, Id};
 
+// [OPUS-4.8] sq-pbz04.2.5: ABox internalization + realisation + whole-ontology consistency —
+// only under `abox`, so the default TBox classifier carries zero assertion-reasoning code.
+#[cfg(feature = "abox")]
+mod abox;
 // [FABLE-5] sq-pbz04.2.2: CR7–CR9 (concrete domains) — only under `cdomain`, so the
 // default build carries zero concrete-domain code and no sparq-substrate dependency.
 #[cfg(feature = "cdomain")]
@@ -24,26 +35,40 @@ mod normal;
 #[cfg(feature = "rbox")]
 mod rbox;
 
+#[cfg(feature = "abox")]
+pub use abox::{realize, realize_graph, AboxReport, Realization};
 #[cfg(feature = "hasse")]
 pub use hasse::{classify_hasse_graph, DirectHierarchy};
 
 const RDFS_SUB_CLASS_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
 const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
+/// [SONNET-4.6] sq-pbz04.2.7 (`rbox`): the `rdfs:subPropertyOf` predicate IRI — interned by
+/// `classify_graph` when the `rbox` feature is on so the role-lattice readoff can emit
+/// non-reflexive inclusion pairs as triples.
+#[cfg(feature = "rbox")]
+const RDFS_SUB_PROPERTY_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf";
 
 /// A tally of what the extractor read and what it could not (so an honest
 /// "n axioms outside the EL fragment were ignored" can be surfaced).
 ///
 /// The classifier is SOUND but only COMPLETE for the fragment it recognises. By default that is
 /// EL+⊥-minus-RBox (the E1 MVP) **plus safe nominals** (sq-pbz04.2.1: singleton `owl:oneOf` and
-/// object-valued `owl:hasValue` — the `{a}` / `∃r.{a}` concepts, completion rule **CR6**); with
+/// object-valued `owl:hasValue` — the `{a}` / `∃r.{a}` concepts, completion rule **CR6**) **and
+/// self-restrictions** (sq-pbz04.2.6: `owl:hasSelf "true"^^xsd:boolean` — the `∃r.Self` local
+/// reflexivity concept, completion rules **CR-Self**); with
 /// the `rbox` feature it adds the RBox role automaton (`rdfs:subPropertyOf` role inclusions,
-/// `owl:propertyChainAxiom` chains, `owl:TransitiveProperty` — completion rules CR10/CR11).
+/// `owl:propertyChainAxiom` chains, `owl:TransitiveProperty` — completion rules CR10/CR11);
+/// completeness there additionally assumes a REGULAR told RBox — a non-regular one (forbidden
+/// by the OWL 2 global restrictions) is flagged via the `rbox_non_regular` field, not silently
+/// classified as if complete.
 /// Axioms using constructs outside the active fragment are NOT applied and their class-axiom
 /// occurrences are counted in [`Report::skipped_axioms`] (honest incompleteness rather than a
 /// silent wrong answer). Two kinds of skip are distinguished by the EL theory:
 /// - **Outside EL entirely** — `owl:unionOf`, `owl:complementOf`, `owl:allValuesFrom`, cardinality,
-///   `owl:hasSelf`, and a MULTI-individual `owl:oneOf` (the profile's `ObjectOneOf` admits exactly
-///   one individual; more is a disjunction): these need ALC / Horn-SHIQ expressivity.
+///   and a MULTI-individual `owl:oneOf` (the profile's `ObjectOneOf` admits exactly one individual;
+///   more is a disjunction): these need ALC / Horn-SHIQ expressivity. (`owl:hasSelf` is NOT in this
+///   list since sq-pbz04.2.6 — `ObjectHasSelf` is IN the EL profile and reasoned over by CR-Self;
+///   only a malformed `owl:hasSelf` — non-`true`/non-boolean, or missing `owl:onProperty` — skips.)
 /// - **Concrete domains (CR7–CR9)** — gated behind the `cdomain` feature (sq-pbz04.2.2).
 ///   WITHOUT it, every concrete-domain occurrence (`owl:onDataRange` / `owl:withRestrictions` /
 ///   `owl:onDatatype` and the literal-valued `owl:hasValue`/`owl:oneOf` forms, i.e.
@@ -57,9 +82,14 @@ const OWL_NOTHING: &str = "http://www.w3.org/2002/07/owl#Nothing";
 ///
 /// Nominal honesty notes (sq-pbz04.2.1): CR6 uses the classic reachability side-condition — every
 /// derived subsumption is sound, but completeness is claimed only for the typical "safe" nominal
-/// usage, not every EL++ nominal interplay (see `classify.rs` `cr6_pass` for the boundary); and
-/// ABox `rdf:type` assertions are NOT internalized as nominal axioms (TBox classification only —
-/// materializing instance closures is the RL path's job).
+/// usage, not every EL++ nominal interplay (see `classify.rs` `cr6_pass` for the boundary). The
+/// TBox [`Classifier::classify`] / [`classify_graph`] do NOT internalize ABox assertions — that
+/// stays their documented contract in EVERY feature state. Under the opt-in `abox` feature
+/// (sq-pbz04.2.5) a SEPARATE `realize` / `realize_graph` entry internalizes
+/// `ClassAssertion`/`ObjectPropertyAssertion` as safe-nominal axioms over exactly this CR6
+/// machinery and reads off instance typings, `owl:sameAs`, and a whole-ontology `inconsistent`
+/// verdict (the `realize`/`realize_graph` names are code spans, not intra-doc links, so this
+/// always-compiled note stays clean under the no-`--all-features` rustdoc check).
 ///
 /// Without `rbox`, RBox axioms (`rdfs:subPropertyOf` / property chains / transitivity) are also
 /// left unapplied (roles are compared for equality only) — but those are gated capability, not the
@@ -84,6 +114,38 @@ pub struct Report {
     pub emitted_subsumptions: usize,
     /// Named classes found unsatisfiable (`⊑ owl:Nothing`).
     pub unsatisfiable_classes: usize,
+    /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): ABox assertions the realiser DEFERRED as counted skips
+    /// — a `DataPropertyAssertion` (literal object; the `cdomain` point-range rescue is a
+    /// sequenced follow-up) or a `ClassAssertion` whose class expression is outside the EL
+    /// fragment. Set only by [`realize`] / [`realize_graph`]; the TBox `Classifier::classify` /
+    /// `classify_graph` leave it `0`. A non-zero count is the honest "n instance facts not
+    /// internalized" signal (fail-closed — never a guessed typing).
+    #[cfg(feature = "abox")]
+    pub skipped_assertions: usize,
+    /// [SONNET-4.6] sq-pbz04.2.7 (`rbox`): new `rdfs:subPropertyOf` triples emitted by
+    /// `classify_graph` for the told-inclusion role-lattice closure — the count of NON-REFLEXIVE
+    /// closure pairs that were NOT already present in the graph (i.e. the purely-derived
+    /// transitive-closure edges, excluding told inclusions already in the input). `0` without the
+    /// `rbox` feature; `0` on a second (idempotent) call. Set only by `classify_graph`; the
+    /// typed `Classifier::classify` API leaves it `0`.
+    #[cfg(feature = "rbox")]
+    pub emitted_role_subsumptions: usize,
+    /// [SONNET-4.6] sq-oj06v (`rbox`): honest RBox-regularity flag — `true` when the TOLD RBox
+    /// (role inclusions + property chains + transitive roles) is NOT regular, i.e. its
+    /// dependency graph has a cycle through a property-chain constraint (detected by
+    /// `rbox::told_rbox_regular` over the pre-binarization axioms). The OWL 2 global
+    /// restrictions forbid such an RBox; the CR10/CR11 saturation still TERMINATES and every
+    /// derived subsumption stays SOUND, but the EL+ completeness argument assumes regularity —
+    /// so when this is `true` the classification MAY BE INCOMPLETE (the `skipped_axioms`
+    /// honesty posture: flagged, never silently wrong). Conservative: told-inclusion edges
+    /// participate in the cycle detection, so a chain constraint fed back through an inclusion
+    /// is also flagged; pure inclusion cycles (equivalent roles), binary transitivity
+    /// (`r ∘ r ⊑ r`), and chains with an `owl:topObjectProperty` superproperty (normatively
+    /// admissible, unconditionally) are NOT. Set by every extraction-based entry (`Classifier::classify`,
+    /// `classify_graph`, their `par` twins, and the `abox` realiser); `false` on a regular or
+    /// RBox-free input, and absent (like the whole role automaton) without the `rbox` feature.
+    #[cfg(feature = "rbox")]
+    pub rbox_non_regular: bool,
 }
 
 /// The complete class-subsumption lattice for the named classes of a TBox, as a typed view
@@ -98,6 +160,12 @@ pub struct ClassHierarchy {
     /// Dict ids of the unsatisfiable named classes (`⊑ owl:Nothing`).
     unsatisfiable: Vec<Id>,
     report: Report,
+    /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): whole-ontology inconsistency (`{a} ⊑ ⊥` for an asserted
+    /// individual, or a global `⊤ ⊑ ⊥`). `false` for a TBox `Classifier::classify` (which by its
+    /// documented contract decides NAMED-class satisfiability, not whole-ontology consistency);
+    /// set true only by the `abox` realiser.
+    #[cfg(feature = "abox")]
+    inconsistent: bool,
 }
 
 impl ClassHierarchy {
@@ -121,6 +189,18 @@ impl ClassHierarchy {
     /// needs an asserted instance of an unsatisfiable class — ABox reasoning, out of scope).
     pub fn unsatisfiable_classes(&self) -> &[Id] {
         &self.unsatisfiable
+    }
+
+    /// [OPUS-4.8] sq-pbz04.2.5 (`abox`): whether the WHOLE ontology is inconsistent — an asserted
+    /// individual forced into `owl:Nothing` (`{a} ⊑ ⊥`, e.g. two disjoint `ClassAssertion`s) or a
+    /// global `⊤ ⊑ ⊥`. Only ever `true` on a hierarchy produced by [`realize`] / [`realize_graph`]
+    /// (the ABox path); a plain [`Classifier::classify`] result is always `false` (it decides
+    /// named-class satisfiability, not whole-ontology consistency — see [`unsatisfiable_classes`]).
+    ///
+    /// [`unsatisfiable_classes`]: ClassHierarchy::unsatisfiable_classes
+    #[cfg(feature = "abox")]
+    pub fn is_inconsistent(&self) -> bool {
+        self.inconsistent
     }
 
     /// The extraction/classification [`Report`] (named-class count, skipped non-EL axioms,
@@ -168,45 +248,106 @@ impl Classifier {
     /// subsumption [`ClassHierarchy`]. Does NOT mutate the graph; use [`classify_graph`] to
     /// materialize the lattice as triples. Single-threaded.
     pub fn classify(dict: &Dict, triples: &[[Id; 3]]) -> ClassHierarchy {
-        let extract::Extracted {
-            axioms,
-            names,
-            mut report,
-            #[cfg(feature = "rbox")]
-            role_axioms,
-        } = extract::extract(dict, triples);
-        // The role box (CR10/CR11 saturation) is built only under `rbox`; without it the
-        // saturator runs the E1 calculus (roles compared for equality only). Building it here
-        // before `names` is borrowed by `saturate` keeps role ids consistent.
-        #[cfg(feature = "rbox")]
-        let role_box = rbox::RoleBox::build(&role_axioms, names.role_count());
-        #[cfg(feature = "rbox")]
-        let sat = classify::saturate(&axioms, &names, &role_box);
-        #[cfg(not(feature = "rbox"))]
-        let sat = classify::saturate(&axioms, &names);
-        let cls = classify::classify(&sat, &names);
-        // Re-key the named-concept lattice onto dict ids for the public view.
-        let mut subsumers: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
-        for (&c, sups) in &cls.subsumers {
-            let Some(cid) = names.dict_of(c) else {
-                continue;
-            };
-            let row: Vec<Id> = sups.iter().filter_map(|&d| names.dict_of(d)).collect();
-            if !row.is_empty() {
-                subsumers.insert(cid, row);
-            }
+        // TBox only: `ExtractOpts::default()` never internalizes ABox assertions, so this path is
+        // byte-identical in every `abox` feature state (the ABox reasoning is the separate
+        // `abox::realize` entry — `classify` / `classify_graph` keep their documented TBox-only
+        // contract, which is exactly what the conformance lane pins).
+        let ex = extract::extract(dict, triples, extract::ExtractOpts::default());
+        let sat = saturate_extracted(&ex);
+        let cls = classify::classify(&sat, &ex.names);
+        hierarchy_from(cls, &ex.names, ex.report)
+    }
+
+    /// [FABLE-5] sq-wy3i6 (Phase E4, `par`): like [`Classifier::classify`] but the CR
+    /// saturation runs on a bounded pool of up to `threads` scoped workers (deterministic
+    /// bulk-synchronous rounds — see the E4 design note in `classify.rs`). The derived
+    /// subsumption closure — and therefore the returned hierarchy — is IDENTICAL to the
+    /// single-threaded path for every `threads` value; `threads = 1` drives the same rule
+    /// kernel through the round loop with no spawned worker. Native targets only (do not
+    /// enable `par` for wasm, where `std::thread` cannot spawn — the default build stays
+    /// single-threaded, which is exactly why `par` is opt-in).
+    #[cfg(feature = "par")]
+    pub fn classify_par(
+        dict: &Dict,
+        triples: &[[Id; 3]],
+        threads: std::num::NonZeroUsize,
+    ) -> ClassHierarchy {
+        // Same TBox-only extraction contract as `classify` above.
+        let ex = extract::extract(dict, triples, extract::ExtractOpts::default());
+        let sat = saturate_extracted_par(&ex, threads);
+        let cls = classify::classify(&sat, &ex.names);
+        hierarchy_from(cls, &ex.names, ex.report)
+    }
+}
+
+/// Runs the CR saturation for an [`extract::Extracted`], branching on the `rbox` feature to build
+/// the role automaton first (so every asserted existential link is closed under role
+/// inclusion/composition before CR4/CR5 fire). Shared by [`Classifier::classify`] (TBox) and the
+/// `abox` realiser so both reason over the same fixpoint.
+pub(crate) fn saturate_extracted(ex: &extract::Extracted) -> classify::Saturation {
+    #[cfg(feature = "rbox")]
+    {
+        let role_box = rbox::RoleBox::build(&ex.role_axioms, ex.names.role_count());
+        classify::saturate(&ex.axioms, &ex.names, &role_box)
+    }
+    #[cfg(not(feature = "rbox"))]
+    {
+        classify::saturate(&ex.axioms, &ex.names)
+    }
+}
+
+/// [FABLE-5] sq-wy3i6 (E4): the parallel twin of [`saturate_extracted`] — same `rbox`
+/// branching, but the fixpoint runs on the bounded scoped-worker pool. Kept structurally
+/// parallel to `saturate_extracted` so the two entry families cannot drift on the role-box
+/// wiring.
+#[cfg(feature = "par")]
+pub(crate) fn saturate_extracted_par(
+    ex: &extract::Extracted,
+    threads: std::num::NonZeroUsize,
+) -> classify::Saturation {
+    #[cfg(feature = "rbox")]
+    {
+        let role_box = rbox::RoleBox::build(&ex.role_axioms, ex.names.role_count());
+        classify::saturate_par(&ex.axioms, &ex.names, &role_box, threads)
+    }
+    #[cfg(not(feature = "rbox"))]
+    {
+        classify::saturate_par(&ex.axioms, &ex.names, threads)
+    }
+}
+
+/// Projects a [`classify::Classification`] onto dict ids: the named-class subsumption lattice +
+/// the unsatisfiable classes, filling `Report::unsatisfiable_classes`. The whole-ontology
+/// `abox`-inconsistency verdict is a separate concern the realiser sets afterwards; a plain TBox
+/// classification leaves it `false`.
+pub(crate) fn hierarchy_from(
+    cls: classify::Classification,
+    names: &normal::Names,
+    mut report: Report,
+) -> ClassHierarchy {
+    // Re-key the named-concept lattice onto dict ids for the public view.
+    let mut subsumers: FxHashMap<Id, Vec<Id>> = FxHashMap::default();
+    for (&c, sups) in &cls.subsumers {
+        let Some(cid) = names.dict_of(c) else {
+            continue;
+        };
+        let row: Vec<Id> = sups.iter().filter_map(|&d| names.dict_of(d)).collect();
+        if !row.is_empty() {
+            subsumers.insert(cid, row);
         }
-        let unsatisfiable: Vec<Id> = cls
-            .unsatisfiable
-            .iter()
-            .filter_map(|&c| names.dict_of(c))
-            .collect();
-        report.unsatisfiable_classes = unsatisfiable.len();
-        ClassHierarchy {
-            subsumers,
-            unsatisfiable,
-            report,
-        }
+    }
+    let unsatisfiable: Vec<Id> = cls
+        .unsatisfiable
+        .iter()
+        .filter_map(|&c| names.dict_of(c))
+        .collect();
+    report.unsatisfiable_classes = unsatisfiable.len();
+    ClassHierarchy {
+        subsumers,
+        unsatisfiable,
+        report,
+        #[cfg(feature = "abox")]
+        inconsistent: false,
     }
 }
 
@@ -216,12 +357,57 @@ impl Classifier {
 /// clashes are surfaced via [`Report::unsatisfiable_classes`] (not emitted as triples — the
 /// caller decides whether to flag them, matching the RL `inconsistencies()` reporting shape).
 ///
-/// Returns the [`Report`] with `emitted_subsumptions` set to the number of NEW triples added.
-/// Idempotent: a second call adds nothing. This is the seam the CLI/`Graph` integration uses —
-/// the emitted edges are ordinary triples queryable by plain BGP eval, exactly like the RL
-/// `scm-*` output.
+/// With the `rbox` feature on, ALSO materializes the NON-REFLEXIVE told-inclusion role-lattice
+/// closure as `rdfs:subPropertyOf` triples: every `(r, s)` pair with `r != s` and `s` in the
+/// reflexive-transitive closure of the told `rdfs:subPropertyOf` / `owl:propertyChainAxiom` /
+/// `owl:TransitiveProperty` role inclusions. This is a READOFF of the already-computed
+/// `RoleBox::super_of` table — no new saturation. The `emitted_role_subsumptions` field of the
+/// returned `Report` counts the NEW role triples added (told pairs already present are not
+/// re-emitted). Idempotent: a second call adds nothing.
+///
+/// Returns the [`Report`] with `emitted_subsumptions` set to the number of NEW class triples
+/// added. This is the seam the CLI/`Graph` integration uses — the emitted edges are ordinary
+/// triples queryable by plain BGP eval, exactly like the RL `scm-*` output.
 pub fn classify_graph(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> Report {
-    let hierarchy = Classifier::classify(dict, triples);
+    // [SONNET-4.6] sq-pbz04.2.7: share the extraction so the role box is available for the
+    // readoff without a second triple scan. Without `rbox` this is byte-identical to the
+    // previous `Classifier::classify` call (same three extraction/saturation/project steps,
+    // same `ExtractOpts::default()` — never internalizes ABox assertions).
+    let ex = extract::extract(dict, triples, extract::ExtractOpts::default());
+    let sat = saturate_extracted(&ex);
+    materialize_lattice(dict, triples, &ex, &sat)
+}
+
+/// [FABLE-5] sq-wy3i6 (Phase E4, `par`): like [`classify_graph`] but the CR saturation runs on
+/// a bounded pool of up to `threads` scoped workers. The emitted triples — content AND order —
+/// are IDENTICAL to [`classify_graph`]'s for every `threads` value: the parallel fixpoint
+/// reaches the same closure (see the E4 design note in `classify.rs`) and the shared
+/// materialization sorts before emitting. Native targets only (see `Classifier::classify_par`).
+#[cfg(feature = "par")]
+pub fn classify_graph_par(
+    dict: &mut Dict,
+    triples: &mut Vec<[Id; 3]>,
+    threads: std::num::NonZeroUsize,
+) -> Report {
+    let ex = extract::extract(dict, triples, extract::ExtractOpts::default());
+    let sat = saturate_extracted_par(&ex, threads);
+    materialize_lattice(dict, triples, &ex, &sat)
+}
+
+/// The shared `classify_graph` / `classify_graph_par` tail: project the saturation onto named
+/// classes, append the derived `rdfs:subClassOf` triples in deterministic sorted order (+ the
+/// `rbox` role-lattice readoff), and fill the [`Report`] counts. Factored out (sq-wy3i6) so the
+/// sequential and parallel entries cannot drift on emission/dedup/ordering behaviour —
+/// behaviour-identical to the pre-E4 inline tail.
+fn materialize_lattice(
+    dict: &mut Dict,
+    triples: &mut Vec<[Id; 3]>,
+    ex: &extract::Extracted,
+    sat: &classify::Saturation,
+) -> Report {
+    let cls = classify::classify(sat, &ex.names);
+    let hierarchy = hierarchy_from(cls, &ex.names, ex.report);
+
     let sub_class_of = dict.intern_iri(RDFS_SUB_CLASS_OF);
     let _ = dict.intern_iri(OWL_NOTHING); // ensure the term exists for downstream clash checks.
 
@@ -241,9 +427,56 @@ pub fn classify_graph(dict: &mut Dict, triples: &mut Vec<[Id; 3]>) -> Report {
             }
         }
     }
+
+    // [SONNET-4.6] sq-pbz04.2.7 (`rbox`): role-lattice readoff. Emit the non-reflexive
+    // told-inclusion closure as `rdfs:subPropertyOf` triples. READOFF ONLY — builds the
+    // RoleBox a second time (cheap: O(role_count) BFS over a tiny graph) to read off
+    // `super_of` without changing `saturate_extracted`'s internal structure.
+    #[cfg(feature = "rbox")]
+    let emitted_roles = emit_role_pairs(dict, ex, &mut present, triples);
+
     let mut report = hierarchy.report;
     report.emitted_subsumptions = emitted;
+    #[cfg(feature = "rbox")]
+    {
+        report.emitted_role_subsumptions = emitted_roles;
+    }
     report
+}
+
+/// [SONNET-4.6] sq-pbz04.2.7 (`rbox`): builds the `RoleBox` from the already-extracted role
+/// axioms and emits every non-reflexive told-inclusion pair as a `rdfs:subPropertyOf` triple,
+/// deduplicating against `present` so idempotency holds. Returns the count of NEW triples added.
+/// Anonymous chain-intermediate roles (`Id::MAX` sentinel) are skipped — they never appear in
+/// the output vocabulary.
+#[cfg(feature = "rbox")]
+fn emit_role_pairs(
+    dict: &mut Dict,
+    ex: &extract::Extracted,
+    present: &mut rustc_hash::FxHashSet<[Id; 3]>,
+    triples: &mut Vec<[Id; 3]>,
+) -> usize {
+    let role_box = rbox::RoleBox::build(&ex.role_axioms, ex.names.role_count());
+    let sub_prop_of = dict.intern_iri(RDFS_SUB_PROPERTY_OF);
+    // Collect, filter anonymous roles, sort for deterministic output order.
+    let mut pairs: Vec<(Id, Id)> = role_box
+        .inclusion_pairs()
+        .filter_map(|(r, s)| {
+            let r_id = ex.names.role_dict_of(r)?;
+            let s_id = ex.names.role_dict_of(s)?;
+            Some((r_id, s_id))
+        })
+        .collect();
+    pairs.sort_unstable();
+    let mut n = 0usize;
+    for (r_id, s_id) in pairs {
+        let t = [r_id, sub_prop_of, s_id];
+        if present.insert(t) {
+            triples.push(t);
+            n += 1;
+        }
+    }
+    n
 }
 
 #[cfg(test)]
@@ -450,6 +683,71 @@ mod tests {
         }
         let (g, hh) = (iri(&dict, "http://ex/G"), iri(&dict, "http://ex/H"));
         assert!(h.is_subclass_of(g, hh), "the EL part (G ⊑ H) must still classify");
+    }
+
+    #[test]
+    fn tbox_self_restriction_subsumption() {
+        // [OPUS-4.8] sq-pbz04.2.6: A ⊑ ∃r.Self, ∃r.Self ⊑ D ⊨ A ⊑ D. Both hasSelf restriction
+        // bnodes are distinct but share (onProperty r, hasSelf true), so they decode to the SAME
+        // ∃r.Self atom; CR1 threads A ⊑ ∃r.Self ⊑ D (CR-Self-2 realised via the self-concept).
+        let ttl = format!(
+            "{PRE}
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             :A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :r ; owl:hasSelf \"true\"^^xsd:boolean ] .
+             [ a owl:Restriction ; owl:onProperty :r ; owl:hasSelf \"true\"^^xsd:boolean ] rdfs:subClassOf :D ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let h = Classifier::classify(&dict, &triples);
+        let (a, d) = (iri(&dict, "http://ex/A"), iri(&dict, "http://ex/D"));
+        assert!(h.is_subclass_of(a, d), "A ⊑ ∃r.Self ⊑ D must classify");
+        assert_eq!(h.report().skipped_axioms, 0, "owl:hasSelf is in-fragment (CR-Self)");
+    }
+
+    #[test]
+    fn general_self_link_does_not_trigger_cr_self_2() {
+        // The load-bearing CR-Self-2 side-condition: `A ⊑ ∃r.A` creates a general link (A,A) ∈
+        // R(r) whose invariant is only A ⊑ ∃r.A, NOT A ⊑ ∃r.Self (the successor is a FRESH A-node,
+        // not A itself). So `∃r.Self ⊑ D` must NOT derive A ⊑ D — firing CR-Self-2 off the raw
+        // link would be UNSOUND. No derivation without a positive rule premise.
+        let ttl = format!(
+            "{PRE}
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             :A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :r ; owl:someValuesFrom :A ] .
+             [ a owl:Restriction ; owl:onProperty :r ; owl:hasSelf \"true\"^^xsd:boolean ] rdfs:subClassOf :D ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let h = Classifier::classify(&dict, &triples);
+        let (a, d) = (iri(&dict, "http://ex/A"), iri(&dict, "http://ex/D"));
+        assert!(
+            !h.is_subclass_of(a, d),
+            "a general (A,A) link is not ∃r.Self — CR-Self-2 must not fire"
+        );
+        assert_eq!(h.report().skipped_axioms, 0, "someValuesFrom + hasSelf are both in-fragment");
+    }
+
+    #[test]
+    fn malformed_has_self_is_skipped() {
+        // [OPUS-4.8] sq-pbz04.2.6 (fail-closed): a `hasSelf "false"` and a `hasSelf true` WITHOUT
+        // owl:onProperty are BOTH counted skips, never a guessed self-restriction; the EL part
+        // still classifies and the skipped axioms fabricate nothing.
+        let ttl = format!(
+            "{PRE}
+             @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+             :A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :r ; owl:hasSelf \"false\"^^xsd:boolean ] .
+             :B rdfs:subClassOf [ a owl:Restriction ; owl:hasSelf \"true\"^^xsd:boolean ] .
+             :E rdfs:subClassOf :F ."
+        );
+        let (dict, triples) = parse(&ttl);
+        let h = Classifier::classify(&dict, &triples);
+        assert_eq!(
+            h.report().skipped_axioms,
+            2,
+            "hasSelf false + hasSelf-without-onProperty are both counted skips"
+        );
+        let (e, f) = (iri(&dict, "http://ex/E"), iri(&dict, "http://ex/F"));
+        assert!(h.is_subclass_of(e, f), "the EL part (E ⊑ F) still classifies");
+        let a = iri(&dict, "http://ex/A");
+        assert!(h.super_classes(a).is_empty(), "a skipped hasSelf axiom fabricates no subsumption");
     }
 
     #[test]

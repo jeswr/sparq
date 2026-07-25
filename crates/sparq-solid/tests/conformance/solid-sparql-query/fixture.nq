@@ -1,0 +1,54 @@
+# Access-Controlled SPARQL Query over a Solid Pod — query-semantics conformance fixture.
+#
+# Storage https://alice.pod.example/. Requester R = <https://r.example/card#me> can Read
+# /profile/card and /contacts/bob, but NOT /private/journal (which exists). Owner alice
+# holds Read/Write/Control everywhere. One named graph per RDF resource (graph name =
+# resource IRI). WAC ACLs in the linked `<resource>.acl` graphs (acl:accessTo governs each
+# resource's own ACL). This mirrors the Editor's Draft "Example storage" section.
+
+# --- resource content (one named graph per resource) ---
+<https://alice.pod.example/profile/card#me> <http://xmlns.com/foaf/0.1/name> "Alice" <https://alice.pod.example/profile/card> .
+<https://alice.pod.example/profile/card#me> <http://xmlns.com/foaf/0.1/knows> <https://bob.example/card#me> <https://alice.pod.example/profile/card> .
+<https://bob.example/card#me> <http://xmlns.com/foaf/0.1/name> "Bob" <https://alice.pod.example/contacts/bob> .
+<https://alice.pod.example/private/journal#e1> <http://example.org/ns#secret> "hidden" <https://alice.pod.example/private/journal> .
+
+# --- WAC: root ACL (owner alice: Read/Write/Control on the storage and its members) ---
+<https://alice.pod.example/.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://alice.pod.example/.acl> .
+<https://alice.pod.example/.acl#owner> <http://www.w3.org/ns/auth/acl#accessTo> <https://alice.pod.example/> <https://alice.pod.example/.acl> .
+<https://alice.pod.example/.acl#owner> <http://www.w3.org/ns/auth/acl#default> <https://alice.pod.example/> <https://alice.pod.example/.acl> .
+<https://alice.pod.example/.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.example/card#me> <https://alice.pod.example/.acl> .
+<https://alice.pod.example/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://alice.pod.example/.acl> .
+<https://alice.pod.example/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> <https://alice.pod.example/.acl> .
+<https://alice.pod.example/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Control> <https://alice.pod.example/.acl> .
+
+# --- WAC: /profile/card.acl (R: Read; owner: Read/Write/Control) ---
+<https://alice.pod.example/profile/card.acl#r> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://alice.pod.example/profile/card.acl> .
+<https://alice.pod.example/profile/card.acl#r> <http://www.w3.org/ns/auth/acl#accessTo> <https://alice.pod.example/profile/card> <https://alice.pod.example/profile/card.acl> .
+<https://alice.pod.example/profile/card.acl#r> <http://www.w3.org/ns/auth/acl#agent> <https://r.example/card#me> <https://alice.pod.example/profile/card.acl> .
+<https://alice.pod.example/profile/card.acl#r> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://alice.pod.example/profile/card.acl> .
+<https://alice.pod.example/profile/card.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://alice.pod.example/profile/card.acl> .
+<https://alice.pod.example/profile/card.acl#owner> <http://www.w3.org/ns/auth/acl#accessTo> <https://alice.pod.example/profile/card> <https://alice.pod.example/profile/card.acl> .
+<https://alice.pod.example/profile/card.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.example/card#me> <https://alice.pod.example/profile/card.acl> .
+<https://alice.pod.example/profile/card.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://alice.pod.example/profile/card.acl> .
+<https://alice.pod.example/profile/card.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> <https://alice.pod.example/profile/card.acl> .
+<https://alice.pod.example/profile/card.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Control> <https://alice.pod.example/profile/card.acl> .
+
+# --- WAC: /contacts/bob.acl (R: Read; owner: Read/Write/Control) ---
+<https://alice.pod.example/contacts/bob.acl#r> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://alice.pod.example/contacts/bob.acl> .
+<https://alice.pod.example/contacts/bob.acl#r> <http://www.w3.org/ns/auth/acl#accessTo> <https://alice.pod.example/contacts/bob> <https://alice.pod.example/contacts/bob.acl> .
+<https://alice.pod.example/contacts/bob.acl#r> <http://www.w3.org/ns/auth/acl#agent> <https://r.example/card#me> <https://alice.pod.example/contacts/bob.acl> .
+<https://alice.pod.example/contacts/bob.acl#r> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://alice.pod.example/contacts/bob.acl> .
+<https://alice.pod.example/contacts/bob.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://alice.pod.example/contacts/bob.acl> .
+<https://alice.pod.example/contacts/bob.acl#owner> <http://www.w3.org/ns/auth/acl#accessTo> <https://alice.pod.example/contacts/bob> <https://alice.pod.example/contacts/bob.acl> .
+<https://alice.pod.example/contacts/bob.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.example/card#me> <https://alice.pod.example/contacts/bob.acl> .
+<https://alice.pod.example/contacts/bob.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://alice.pod.example/contacts/bob.acl> .
+<https://alice.pod.example/contacts/bob.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> <https://alice.pod.example/contacts/bob.acl> .
+<https://alice.pod.example/contacts/bob.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Control> <https://alice.pod.example/contacts/bob.acl> .
+
+# --- WAC: /private/journal.acl (owner only — R has NO grant here) ---
+<https://alice.pod.example/private/journal.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://alice.pod.example/private/journal.acl> .
+<https://alice.pod.example/private/journal.acl#owner> <http://www.w3.org/ns/auth/acl#accessTo> <https://alice.pod.example/private/journal> <https://alice.pod.example/private/journal.acl> .
+<https://alice.pod.example/private/journal.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.example/card#me> <https://alice.pod.example/private/journal.acl> .
+<https://alice.pod.example/private/journal.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://alice.pod.example/private/journal.acl> .
+<https://alice.pod.example/private/journal.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> <https://alice.pod.example/private/journal.acl> .
+<https://alice.pod.example/private/journal.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Control> <https://alice.pod.example/private/journal.acl> .

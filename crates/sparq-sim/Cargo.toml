@@ -25,6 +25,21 @@ rustdoc-args = ["--cfg", "docsrs"]
 # and similarity is a predicate-IDF-weighted Jaccard over those sets — no embeddings,
 # no model, no network; incrementally correct because the indexes ARE the feature store.
 
+[features]
+default = []
+# Deterministic breadth-first structural expansion beyond the existing one-hop signature.
+multi-hop = []
+# [FABLE-5] sq-lsp7k: similarity explanation surface — `Sim::explain_similarity` returns
+# the decoded shared signature elements (the weighted-Jaccard intersection) behind a
+# similarity/most_similar score, for reasoning UX ("WHY are these two similar").
+explain = []
+# [FABLE-5] sq-lgw: MinHash/LSH signature sketches — a prebuilt sketch index
+# (`Sim::sketch_index`) whose candidate generation reads LSH buckets instead of
+# per-element index ranges: the Phase-4 escape hatch for graphs dense enough that
+# `most_similar`'s range-scan generation hits its scaling wall
+# (research/genai-design.md §6). Returned scores stay exact (same re-scoring).
+sketch = []
+
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
@@ -37,4 +52,5 @@ rustc-hash.workspace = true
 # (hand-built `format!`, mirroring `mpc_net_bench::cell_json`); serde_json is a
 # dev-dependency so it never enters the crate's published graph.
 [dev-dependencies]
+proptest = "1"
 serde_json = "1"

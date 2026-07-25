@@ -46,23 +46,38 @@
 //! for arbitrary-precision integer / decimal and `xsd:double`/`float` incl. `INF`/`-INF`/`NaN`
 //! ([`numeric`]); `xsd:dateTime`/`date`/`duration` value comparison with timezone normalisation and
 //! the ±14h indeterminate window ([`temporal`]); a SPARQL-Results-JSON reader into the neutral
-//! `{var → term}` model ([`json`]); and the multiset + `ORDER BY` sort-key-equivalence-class
-//! comparators ([`multiset`]).
+//! `{var → term}` model ([`json`]); the multiset + `ORDER BY` sort-key-equivalence-class
+//! comparators ([`multiset`]); and the admission-decision (allow/deny set) equivalence +
+//! fail-closed-asymmetry comparator ([`decision`]) shared by the trust/WAC/ODRL differential
+//! tests (a structural check, not a soundness proof).
+//!
+//! # Admission-decision overlap boundary
+//!
+//! [GPT-5.6] Admission-decision comparisons deliberately do not validate or reconcile a
+//! producer's contradictory `allow ∩ deny` outcome. In particular, a reference/baseline tuple
+//! present in both sets counts as already allowed for the structural
+//! `candidate.allow \ baseline.allow` check, so that overlap can mask a deny-to-allow escalation.
+//! Rejecting or normalising contradictory outcomes belongs to the producing policy harness and
+//! is a documented non-goal of this engine-independent comparator.
 //!
 //! Deliberately **not** here (separate DAG nodes / beads): blank-node isomorphism across oracles
 //! (`sq-qcnn.7`), wiring these comparators into the fuzz harness (`sq-qcnn.5`), the query/data
 //! generator extension (`sq-qcnn.6`), and the pluggable second-oracle adapter (`sq-qcnn.8`).
 
+pub mod decision;
 pub mod json;
 pub mod multiset;
 pub mod numeric;
 pub mod temporal;
 pub mod term;
 
+pub use decision::{
+    decision_diff, fail_closed_asymmetry, Baseline, Candidate, DecisionDiff, DecisionOutcome,
+};
 pub use json::{parse_results_json, QueryResults, Solution};
 pub use multiset::{multiset_equal, order_by_equal};
 pub use numeric::{canonical_double_string, numeric_equal, parse_numeric, NumericValue};
 pub use temporal::{
-    duration_compare, dt_compare, parse_datetime, parse_duration, Duration, TemporalOrder,
+    dt_compare, duration_compare, parse_datetime, parse_duration, Duration, TemporalOrder,
 };
 pub use term::{canonical_key, term_equal_rdf, Term};

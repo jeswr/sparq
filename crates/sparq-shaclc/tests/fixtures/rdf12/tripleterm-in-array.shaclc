@@ -1,0 +1,7 @@
+BASE <http://example.org/rdf12>
+
+PREFIX ex: <http://example.org/test#>
+
+shape ex:TestShape {
+	ex:claim in=[<<( ex:s ex:q "lit" )>> <<( ex:s ex:q <<( ex:a ex:b ex:c )>> )>>] .
+}

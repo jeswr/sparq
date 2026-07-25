@@ -265,8 +265,9 @@ fn materialize_leaf_multi(
 /// The retained source indices for `pattern`, ascending (the deterministic order
 /// [`select_sources`](sparq_fedplan::select_sources) records). A pattern absent from the
 /// selection — or one whose candidate set is empty — contributes no sources, hence an empty
-/// leaf relation. [OPUS-4.8] sq-7yf0.
-fn leaf_source_indices(selection: &[PatternSources], pattern: usize) -> Vec<usize> {
+/// leaf relation. `pub(crate)`: the adaptive executor's union-arm leaf fetch
+/// ([FABLE-5] sq-xw8zz) shares this so both fan-outs resolve arms identically. [OPUS-4.8] sq-7yf0.
+pub(crate) fn leaf_source_indices(selection: &[PatternSources], pattern: usize) -> Vec<usize> {
     selection
         .iter()
         .find(|ps| ps.pattern == pattern)
@@ -348,8 +349,9 @@ fn materialize_leaf(
 ///
 /// This is the wiring the bead asks for: a `JoinTree` leaf that resolves to a TPF/brTPF source is
 /// now answered, not rejected with `Unsupported`. The single-source-per-leaf contract is enforced
-/// by the caller. [OPUS-4.8] sq-yzca.
-fn fetch_leaf_relation(
+/// by the caller. `pub(crate)`: the adaptive executor's union-arm leaf fetch ([FABLE-5] sq-xw8zz)
+/// times this exact fetch per arm, so both interpreters answer a leaf identically. [OPUS-4.8] sq-yzca.
+pub(crate) fn fetch_leaf_relation(
     source: &dyn FederatedSource,
     tp: &TriplePattern,
 ) -> Result<Relation, InterpError> {
@@ -493,10 +495,8 @@ fn join_key(row: &[Option<Term>], shared: &[(usize, usize)], from_left: bool) ->
     let mut key = Vec::with_capacity(shared.len());
     for &(li, ri) in shared {
         let col = if from_left { li } else { ri };
-        match row.get(col).cloned().flatten() {
-            Some(t) => key.push(t),
-            None => return None,
-        }
+        let t = row.get(col).cloned().flatten()?;
+        key.push(t);
     }
     Some(key)
 }
@@ -511,40 +511,77 @@ fn join_key(row: &[Option<Term>], shared: &[(usize, usize)], from_left: bool) ->
 /// from a solution object is UNBOUND (`None`). An ASK `boolean` body is rejected (this
 /// interpreter only joins SELECT relations). [OPUS-4.8] sq-j27p.
 pub fn parse_srj(text: &str) -> Result<Relation, String> {
-    let v: serde_json::Value =
+    // [GPT-5.6] sq-1rtc2: borrow the document envelope and each binding cell from the input.
+    // Cells outside `head.vars` remain undecoded, matching the previous parser's semantics.
+    let document: SrjDocument<'_> =
         serde_json::from_str(text).map_err(|e| format!("invalid results JSON: {}", e))?;
-    if v.get("boolean").is_some() {
+    if document.boolean.is_some() {
         return Err("endpoint returned an ASK boolean, expected SELECT bindings".to_string());
     }
-    let vars: Vec<String> = v
-        .pointer("/head/vars")
-        .and_then(|a| a.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| s.as_str().map(|s| s.to_string()))
-                .collect()
+    let vars = document
+        .head
+        .and_then(|head| head.vars)
+        .map(|vars| {
+            serde_json::from_str::<Vec<&serde_json::value::RawValue>>(vars.get())
+                .map_err(|_| "results JSON missing head.vars".to_string())
+        })
+        .transpose()?
+        .map(|vars| {
+            vars.into_iter()
+                .filter_map(|var| serde_json::from_str::<String>(var.get()).ok())
+                .collect::<Vec<_>>()
         })
         .ok_or_else(|| "results JSON missing head.vars".to_string())?;
 
     let mut rows: Vec<Vec<Option<Term>>> = Vec::new();
-    for sol in v
-        .pointer("/results/bindings")
-        .and_then(|a| a.as_array())
+    for solution in document
+        .results
+        .and_then(|results| results.bindings)
+        .map(|bindings| {
+            serde_json::from_str::<Vec<&serde_json::value::RawValue>>(bindings.get())
+                .map_err(|_| "results JSON missing results.bindings".to_string())
+        })
+        .transpose()?
         .ok_or_else(|| "results JSON missing results.bindings".to_string())?
     {
-        let obj = sol
-            .as_object()
-            .ok_or_else(|| "a solution binding is not a JSON object".to_string())?;
+        let object: std::collections::HashMap<String, &serde_json::value::RawValue> =
+            serde_json::from_str(solution.get())
+                .map_err(|_| "a solution binding is not a JSON object".to_string())?;
         let mut row: Vec<Option<Term>> = Vec::with_capacity(vars.len());
         for var in &vars {
-            match obj.get(var) {
-                Some(cell) => row.push(Some(srj_term(cell)?)),
+            match object.get(var) {
+                Some(cell) => {
+                    let value: serde_json::Value = serde_json::from_str(cell.get())
+                        .map_err(|e| format!("invalid results JSON: {}", e))?;
+                    row.push(Some(srj_term(&value)?));
+                }
                 None => row.push(None),
             }
         }
         rows.push(row);
     }
     Ok(Relation { vars, rows })
+}
+
+#[derive(serde::Deserialize)]
+struct SrjDocument<'a> {
+    #[serde(borrow)]
+    head: Option<SrjHead<'a>>,
+    #[serde(borrow)]
+    results: Option<SrjResults<'a>>,
+    boolean: Option<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct SrjHead<'a> {
+    #[serde(borrow)]
+    vars: Option<&'a serde_json::value::RawValue>,
+}
+
+#[derive(serde::Deserialize)]
+struct SrjResults<'a> {
+    #[serde(borrow)]
+    bindings: Option<&'a serde_json::value::RawValue>,
 }
 
 /// Reconstruct one `oxrdf::Term` from an SRJ binding value object — the inbound counterpart
@@ -1385,8 +1422,9 @@ fn stream_leaf_multi(
 
 /// Project one parsed SRJ row from its `src_vars` order onto `keep`'s order (an absent
 /// variable becomes unbound). The streaming analogue of [`Relation::project`] for a single
-/// row. [OPUS-4.8] sq-vtba.
-fn rel_row_project(
+/// row. `pub(crate)`: also re-keys union arms in the adaptive executor ([FABLE-5] sq-xw8zz).
+/// [OPUS-4.8] sq-vtba.
+pub(crate) fn rel_row_project(
     src_vars: &[String],
     row: &[Option<Term>],
     keep: &[String],
@@ -2444,5 +2482,116 @@ mod tests {
                 sources: 1,
             })
         );
+    }
+
+    // [FABLE-5] sq-3dyje.6 (mutation-kill): DIRECT unit tests for the private ChannelPeek
+    // readiness probe. Its ready()/is_done() answers only steer the streaming feeder's
+    // side-preference, so no end-to-end result-equality test can observe them (the join
+    // result is order-independent) — cargo-mutants proved that by surviving BOTH
+    // `ready -> true` and `ready -> false`. Pin the probe's contract directly instead.
+    #[test]
+    fn channel_peek_ready_look_ahead_and_done_semantics() {
+        use crate::stream::{Solution, SolutionStream};
+        let (sink, stream) = SolutionStream::bounded(4);
+        let mut peek = ChannelPeek::over(stream);
+        assert!(!peek.ready(), "an empty open channel is NOT ready");
+        assert!(!peek.is_done(), "an open channel is not done");
+        let sol = Solution::new(vec!["s".to_string()], vec![None]);
+        assert!(sink.emit(sol.clone()));
+        assert!(peek.ready(), "an emitted item makes the side ready");
+        assert!(
+            peek.ready(),
+            "readiness is idempotent (the look-ahead buffers exactly one item)"
+        );
+        let got = peek
+            .next()
+            .expect("the buffered look-ahead is the next item")
+            .expect("a solution, not an error");
+        assert_eq!(got, sol, "next() consumes the look-ahead first");
+        assert!(!peek.ready(), "consumed: not ready again until a new emit");
+        drop(sink);
+        assert!(
+            !peek.ready(),
+            "a closed, drained channel is not ready (and marks done)"
+        );
+        assert!(peek.is_done(), "closed + no look-ahead ⇒ done");
+        assert!(peek.next().is_none(), "done ⇒ next() is None");
+    }
+
+    #[test]
+    fn channel_peek_next_blocks_through_to_a_late_item_and_close() {
+        use crate::stream::{Solution, SolutionStream};
+        // next() must return an item emitted AFTER the (empty) readiness probe — the
+        // blocking recv path — and then None once the sink drops.
+        let (sink, stream) = SolutionStream::bounded(1);
+        let mut peek = ChannelPeek::over(stream);
+        assert!(!peek.ready(), "nothing emitted yet");
+        let producer = std::thread::spawn(move || {
+            let ok = sink.emit(Solution::new(
+                vec!["s".to_string()],
+                vec![Some(oxrdf::Term::NamedNode(
+                    oxrdf::NamedNode::new("http://ex/late").unwrap(),
+                ))],
+            ));
+            assert!(ok, "consumer is alive");
+            // sink drops here → the channel closes.
+        });
+        let got = peek.next().expect("the late item arrives").expect("ok");
+        assert_eq!(
+            got.get("s").map(|t| t.to_string()),
+            Some("<http://ex/late>".to_string())
+        );
+        producer.join().unwrap();
+        assert!(peek.next().is_none(), "after close: drained");
+        assert!(peek.is_done());
+    }
+
+    // [FABLE-5] sq-3dyje.6 (mutation-kill): ScatterPool::join must BLOCK until every submitted
+    // job's side effect is visible — that blocking-drain is its whole contract (Drop only
+    // closes the queue and lets workers finish detached). cargo-mutants showed `join` replaced
+    // by `()` survived: no test observed that after join() returns, all work is DONE. Submit
+    // jobs that each sleep then bump a shared counter; a no-op join returns before the sleeping
+    // jobs finish, so the counter would be < N right after it returns.
+    #[test]
+    fn scatter_pool_join_blocks_until_all_jobs_complete() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+        use std::time::Duration;
+        const N: usize = 8;
+        let done = StdArc::new(AtomicUsize::new(0));
+        let pool = ScatterPool::new(4, N);
+        for _ in 0..N {
+            let done = StdArc::clone(&done);
+            pool.submit(move || {
+                // Sleep so a no-op join cannot have waited for this to finish.
+                std::thread::sleep(Duration::from_millis(40));
+                done.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        // Not yet joined: at least one job is still sleeping, so the count is below N.
+        pool.join();
+        assert_eq!(
+            done.load(Ordering::SeqCst),
+            N,
+            "join() must block until EVERY submitted job has completed its side effect"
+        );
+    }
+
+    #[test]
+    fn scatter_pool_runs_every_submitted_job_exactly_once() {
+        // Each of N distinct jobs records its own index; after join the recorded set is
+        // EXACTLY {0..N} — no job dropped, none run twice (submit → send → worker runs once).
+        use std::sync::Arc as StdArc;
+        const N: usize = 16;
+        let seen: StdArc<Mutex<Vec<usize>>> = StdArc::new(Mutex::new(Vec::new()));
+        let pool = ScatterPool::new(3, 4);
+        for i in 0..N {
+            let seen = StdArc::clone(&seen);
+            pool.submit(move || seen.lock().unwrap().push(i));
+        }
+        pool.join();
+        let mut got = StdArc::try_unwrap(seen).unwrap().into_inner().unwrap();
+        got.sort_unstable();
+        assert_eq!(got, (0..N).collect::<Vec<_>>(), "every job runs exactly once");
     }
 }

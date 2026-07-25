@@ -29,6 +29,17 @@ path = "src/bin/inference.rs"
 name = "sparq-conformance-scoreboard"
 path = "src/bin/scoreboard.rs"
 
+# [OPUS-4.8] sq-ro6if (PSS #1415/#1478) — the MACHINE-READABLE served-surface SPARQL
+# 1.1 Protocol conformance report emitter. Re-runs the EXISTING served-surface lanes
+# (sq-jaj38 http-protocol + sq-1uuxz Service-Description/GSP) in-process and serialises
+# their per-assertion outcomes + counts + provenance to JSON, for the per-release
+# conformance artifact + the site dashboard. Requires BOTH `http-protocol` and
+# `federation-descriptors`; with either off it compiles to a fail-closed stub `main`
+# (so the default + `--workspace` builds link no async stack — the lean opt-in posture).
+[[bin]]
+name = "served-conformance-report"
+path = "src/bin/served-conformance-report.rs"
+
 [features]
 # [OPUS-4.8] sq-oy1f.2 — the W3C JSON-LD 1.1 conformance lane (toRdf + fromRdf
 # ratchets, the crate-local `tests/jsonld_suite.rs` runner). OPT-IN and OFF by
@@ -44,6 +55,12 @@ path = "src/bin/scoreboard.rs"
 # [SONNET-4.6] sq-kk1mq — also enables dep:sparq-jsonld so the expand lane can call
 # the native expand() algorithm directly instead of going through the RDF writer.
 jsonld-suite = ["sparq-core/jsonld", "sparq-engine/serialize-rdf", "dep:oxjsonld", "dep:sparq-jsonld"]
+# [OPUS-4.8] sq-jocpn — run the whole conformance lane (including the W3C rdf-turtle suite in
+# `turtle_suite.rs`, which parses THROUGH `sparq_core::Graph::parse_to_triples_with_base`) with the
+# native byte-level Turtle parser instead of oxttl. OFF by default; enabling it forwards to
+# `sparq-core/native-ttl` so the ratchet proves the native parser's accept/reject + resolved-term
+# set is IDENTICAL to oxttl's on the entire suite (the load-bearing conformance-set-identical claim).
+native-ttl-suite = ["sparq-core/native-ttl"]
 # [OPUS-4.8] sq-e5atd (epic sq-pbz04) — the D-entailment (datatype / value-space)
 # conformance lane (the crate-local `tests/d_entail_suite.rs` runner + the `Regime::D`
 # arm in `inference::entail`). OPT-IN and OFF by default so the default
@@ -68,6 +85,25 @@ d-entail = ["sparq-reason/d-entail"]
 # subset — NOT a full RIF-BLD/PRD or SPARQL-RIF-entailment-regime conformance claim.
 rif-core = ["sparq-reason/rif-core"]
 
+# [FABLE-5] sq-pbz04.5.5 (epic sq-pbz04.5) — the W3C RIF WG test-suite CONFORMANCE arm,
+# Core subset (the crate-local `tests/rif_wg_core_suite.rs` runner). DISTINCT from the
+# self-asserting `rif-core` EXPRESSIVITY ratchet above: this drives the REAL W3C RIF WG
+# test cases (Core dialect) end-to-end through the real path — RIF/XML `import` →
+# `validate` → `closure` → conclusion oracle — and is tallied as a STANDARDS-suite lane
+# with an HONEST denominator (the printed per-category skip taxonomy IS the denominator's
+# honesty). OPT-IN and OFF by default so the bare `cargo test -p sparq-conformance` and
+# the default `--workspace` shards neither link the RIF/XML importer nor go red on a
+# fresh checkout — the lean-core posture. Forwards to sparq-reason's opt-in `rif-xml`
+# feature (which itself pulls `rif-core` + `quick-xml`). When OFF the lane compiles to a
+# single self-SKIP `#[test]`; when ON it reads the fetched W3C fixtures (fetched by
+# scripts/fetch-inference-suites.sh into the gitignored tests/w3c/rif-core/) and SKIPS
+# when they are absent (offline-green). Pure-Rust, no new third-party deps (the DTD
+# internal-subset entity pre-resolution is a std-only string pass in the runner). Also
+# pulls `sparq-substrate/numeric` for the VALUE-AWARE numeric conclusion comparison
+# (an entailed "2.0"^^xsd:decimal must satisfy a "2"^^xsd:decimal conclusion — no
+# lexical-form false negative), gated so the default build never links it.
+rif-wg-core = ["sparq-reason/rif-xml", "dep:sparq-substrate", "sparq-substrate/numeric"]
+
 # [OPUS-4.8] sq-kuvu3 (epic sq-pbz04) — the EXPERIMENTAL OWL 2 QL (DL-Lite_R)
 # query-rewriting arm of the entailment-regime suite (the `inference::sparql_entail`
 # QL pass + the crate-local `tests/ql_experimental_arm.rs` runner). OPT-IN and OFF
@@ -82,7 +118,10 @@ rif-core = ["sparq-reason/rif-core"]
 # rewriter is sound-but-FAIL-CLOSED (a query it cannot soundly rewrite is reported
 # as abstain/OutOfScope, never a guessed pass). When OFF the lane compiles to a
 # single self-SKIP `#[test]`. Pure-Rust, no new third-party deps.
-ql-experimental = ["dep:sparq-reason-ql", "sparq-reason-ql/experimental"]
+# [FABLE-5] sq-p6yb7: also forwards to `sparq-reason-ql/ql-consistency` so the
+# graduation predicate's condition (3) runs the DL-Lite_R violation-query
+# consistency check instead of holding every negative-axiom TBox unconditionally.
+ql-experimental = ["dep:sparq-reason-ql", "sparq-reason-ql/experimental", "sparq-reason-ql/ql-consistency"]
 
 # [SONNET-4.6] sq-pbz04.2.4 (epic sq-pbz04) — the OWL 2 EL entailment-regime
 # EXPRESSIVITY ratchet (the crate-local `tests/el_suite.rs` runner). OPT-IN and OFF
@@ -97,7 +136,56 @@ ql-experimental = ["dep:sparq-reason-ql", "sparq-reason-ql/experimental"]
 # floor. HONESTLY a sparq EXTENSION-shaped expressivity ratchet over the EL fragment the
 # classifier implements — NOT a full OWL 2 EL conformance claim (CR7–CR9 concrete domains
 # + ABox-inconsistency reasoning are deferred). Pure-Rust, no new third-party deps.
-el-suite = ["dep:sparq-reason-el"]
+# [SONNET-4.6] sq-pbz04.2.9 — also forward `rbox` (CR10/CR11 property-chain + transitive
+# role saturation) and `cdomain` (CR7–CR9 faceted datatype-restriction + DataHasValue) so
+# the CI lane exercises the FULL shipped feature set, not just the default E1 classifier.
+# [SONNET-4.6] sq-pbz04.2.10 — also forward `abox` (ABox internalization + realisation +
+# whole-ontology consistency from sq-pbz04.2.5/.6/.7/.8) so the CI lane exercises the full
+# ABox-mechanism layer: `realize_graph` replaces `classify_graph` in the lane, routing
+# new realisation rows + the whole-ontology inconsistency verdict into the outcome mapping.
+el-suite = ["dep:sparq-reason-el", "sparq-reason-el/rbox", "sparq-reason-el/cdomain", "sparq-reason-el/abox"]
+
+# [FABLE-5] sq-wy3i6 (Phase E4) — the PARALLEL-saturation differential arm of the EL lane:
+# forwards `sparq-reason-el/par` and, per selected W3C EL case, additionally asserts that
+# `classify_graph_par` at thread counts 1/2/8 reproduces the sequential `classify_graph`
+# closure EXACTLY (term-level triple-set equality + the same unsatisfiable-class count).
+# This is the sq-wy3i6 acceptance oracle over the REAL conformance corpus — a concurrency
+# bug that drops or fabricates a derivation on any W3C EL case turns the whole lane red.
+# The ratchet floor itself is UNCHANGED (the pass/divergence accounting still runs on the
+# sequential engine); this feature only ADDS the differential assertion. Wired into the
+# ci.yml el-suite lane (`--features el-suite,el-suite-par`). Pure-Rust, no new deps.
+el-suite-par = ["el-suite", "sparq-reason-el/par"]
+
+# [FABLE-5] sq-pbz04.4.5 (epic sq-pbz04.4) — the OWL 2 **Direct-Semantics arm** of the
+# OWL WG export (the `inference::dl_suite` runner + the crate-local `tests/dl_suite.rs`
+# floors). OPT-IN and OFF by default so the bare `cargo test -p sparq-conformance`, the
+# inference BINARY, and the default `--workspace` shards neither link the `sparq-reason-dl`
+# checker (nor, transitively, its `dispatch`-feature RL/EL reasoner deps) nor change a
+# single existing ratchet floor — the lean opt-in posture. Forwards to
+# `sparq-reason-dl/dispatch` (the L4 fragment-dispatch DirectChecker; depending on the
+# crate alone gives only L1–L3). Two lanes with TRI-STATE accounting
+# {Pass, Fail, OutOfFragment(reason)} — an ABSTENTION IS NEVER A PASS: the
+# profile-identification lane (the L2 syntactic checker vs the export's POSITIVE
+# `test:profile` tags ONLY — the explicit-negative direction was MEASURED and not adopted,
+# because L2's `In` is fragment-grammar membership and cannot refute full-profile
+# membership (runner module docs); nothing is inferred from a MISSING tag) and the
+# Direct consistency/entailment lane (the L4
+# dispatch under a PINNED deterministic count budget). HONESTLY a sparq EXTENSION ratchet
+# over the SCOPED FRAGMENT the layered checker implements — NOT full OWL 2 DL, and never
+# folded into standards-conformance totals; the dual-tagged tests' RDF-Based runs stay in
+# the owl_suite / el-suite lanes (separate semantics). When OFF the lane compiles to a
+# single self-SKIP `#[test]`. Pure-Rust, no new third-party deps.
+# [GPT-5.6] sq-zfwzq: the arm also enables the opt-in transitive-roles extension
+# (`sparq-reason-dl/dl_transitive`), graduating the corpus's transitive consistency /
+# entailment / profile cases from fail-closed abstentions to definitive verdicts (floors
+# re-pinned with the per-mechanism evidence in `tests/dl_suite.rs`).
+# [FABLE-5] sq-fj8lj: the arm also enables the graduated QL dispatch branch
+# (`sparq-reason-dl/dispatch_ql` → sparq-reason-ql's DL-Lite_R consistency checker), so the
+# lane exercises the feature-on path. MEASURED at the pinned export snapshot: ZERO corpus
+# rows dispatch to the QL branch (in-QL ∧ not-RL ∧ not-EL forces a complement shape absent
+# from the extractable corpus — the pre-change abstention histogram had no
+# "QL consistency pending" entry), so every floor is UNCHANGED.
+dl-direct = ["dep:sparq-reason-dl", "sparq-reason-dl/dispatch", "sparq-reason-dl/dl_transitive", "sparq-reason-dl/dispatch_ql"]
 
 # [OPUS-4.8] sq-ushvx (epic sq-my8wd) — the in-process SERVICE-federation test harness.
 # OPT-IN and OFF by default: it stands up a REAL `sparq_server::serve` endpoint on an
@@ -164,19 +252,56 @@ http-protocol = ["service-loopback"]
 # 200-empty, not a 404) reported separately and NEVER summed into the floor.
 federation-descriptors = ["service-loopback", "sparq-server/federation-descriptors"]
 
+# [FABLE-5] sq-iwulr — the GeoSPARQL geometry-function DIFFERENTIAL lane (the
+# crate-local `tests/geo_function_differential.rs` runner). OPT-IN and OFF by default
+# so the bare `cargo test -p sparq-conformance` and the default `--workspace` shards
+# never link the georust geometry stack — the scoreboard module's "stay free of
+# sparq-geo" constraint continues to hold for every DEFAULT build (and for all three
+# scoreboard/report binaries, which have no geo path at all); the coupling exists only
+# under this opt-in lane feature, exactly the pattern of the reasoner lanes above.
+# Pulls sparq-geo with `default-features = false`: the PURE geometry library (WKT
+# literals + the public `geof`/`geof::lex` functions as plain Rust) — no `engine`
+# feature, so no second engine surface rides in. The runner asserts every committed
+# geometry-function case (simple-features predicates, DE-9IM matrices, degree-unit
+# distance, buffer-membership) agrees with the OFFLINE-captured GEOS golden
+# truth-table in bench/geo/function-golden/ (oracle-agreement on the committed
+# corpus — NOT an OGC-completeness claim; the OGC ratchets live in sparq-geo).
+# When OFF the lane compiles to a single self-SKIP `#[test]`.
+geo = ["dep:sparq-geo"]
+
 [dependencies]
 # [OPUS-4.8] sq-ushvx — the embeddable in-process server (`serve` / `router` / `AppState`),
 # used ONLY by the `service-loopback` harness to stand up a real loopback SERVICE endpoint.
 # OFF by default (optional, behind `service-loopback`) so the default harness build never
 # links the async server stack.
 sparq-server = { path = "../sparq-server", optional = true }
+# [FABLE-5] sq-iwulr — the opt-in GeoSPARQL geometry library, used ONLY by the `geo`
+# differential lane to drive the PUBLIC string-level `geof::lex` functions against the
+# captured GEOS golden truth-table (bench/geo/function-golden/). OFF by default
+# (optional, behind `geo`) and `default-features = false` (pure geometry — no engine
+# feature) so the default harness build links zero geometry code — the lean opt-in
+# posture, and the scoreboard's no-geo-dep constraint stays true of default builds.
+sparq-geo = { path = "../sparq-geo", default-features = false, optional = true }
 # [OPUS-4.8] sq-ushvx — async runtime for the loopback server's accept loop. Same minimal
 # feature set the server tests use (rt-multi-thread + net + time + sync for the shutdown
 # signal). OFF by default (optional, behind `service-loopback`).
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "time", "sync"], optional = true }
 sparq-core = { path = "../sparq-core" }
-sparq-engine = { path = "../sparq-engine" }
+# [FABLE-5] (sq-7d3dj.30.13) `algebra-rewrite` ON: the W3C conformance ratchet validates the
+# SHIPPED configuration — the sparq-cli / sparq-server binaries default-light the engine's
+# pre-execution algebra rewrite pass (#1735), so the ratchet must run the same rewritten
+# plans real users execute (a rewrite that broke a W3C test would otherwise merge green).
+# The pass is result-equivalent by design; this harness crate is `publish = false` and the
+# engine LIBRARY default stays OFF, so no lean-consumer surface changes.
+sparq-engine = { path = "../sparq-engine", features = ["algebra-rewrite"] }
 sparq-reason = { path = "../sparq-reason" }
+# [FABLE-5] sq-pbz04.5.5 — the shared numeric value-tower, used ONLY by the `rif-wg-core`
+# arm's conclusion oracle to compare numeric literals VALUE-AWARE (via `numeric::as_numeric`)
+# so an entailed `"2.0"^^xsd:decimal` is not a false negative against a `"2"^^xsd:decimal`
+# conclusion. OFF by default (optional, behind `rif-wg-core`) so the default harness build
+# links zero substrate code — the lean opt-in posture. `default-features = false` +
+# the `numeric` slice only (no rows/join/compare kernels).
+sparq-substrate = { path = "../sparq-substrate", version = "0.1.0", default-features = false, optional = true }
 # [OPUS-4.8] sq-kuvu3 — the EXPERIMENTAL OWL 2 QL query-rewriting reasoner, used ONLY
 # by the `ql-experimental` arm to rewrite each QL-tagged entailment test's conjunctive
 # query into a certain-answer UCQ. OFF by default (optional, behind `ql-experimental`)
@@ -187,6 +312,11 @@ sparq-reason-ql = { path = "../sparq-reason-ql", optional = true }
 # EL-profiled OWL 2 test case. OFF by default (optional, behind `el-suite`) so the default
 # harness build links zero EL code — the lean opt-in posture.
 sparq-reason-el = { path = "../sparq-reason-el", optional = true }
+# [FABLE-5] sq-pbz04.4.5 — the OPT-IN layered OWL 2 Direct-Semantics checker (L1 fail-closed
+# extraction, L2 profile checker, L3 ALCH tableau, L4 dispatch via its `dispatch` feature),
+# used ONLY by the `dl-direct` arm. OFF by default (optional, behind `dl-direct`) so the
+# default harness build links zero Direct-Semantics code — the lean opt-in posture.
+sparq-reason-dl = { path = "../sparq-reason-dl", optional = true }
 oxrdf.workspace = true
 oxttl.workspace = true
 spargebra.workspace = true
@@ -207,3 +337,11 @@ oxjsonld = { workspace = true, optional = true }
 # `jsonld-suite`) so the default harness build never links it — the lean opt-in
 # posture.
 sparq-jsonld = { path = "../sparq-jsonld", optional = true, default-features = false }
+
+# [FABLE-5] sq-hmd7l.15 — the bench/jsonld comparative-harness runner (expand /
+# flatten / compact / toRdf + the output-equality gate + advisory timing).
+# `required-features` keeps it OUT of the default `--all-targets` build: it only
+# compiles when the OPT-IN `jsonld-suite` feature is on — the lean opt-in posture.
+[[example]]
+name = "bench_jsonld"
+required-features = ["jsonld-suite"]

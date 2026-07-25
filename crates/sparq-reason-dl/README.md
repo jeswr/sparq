@@ -57,14 +57,14 @@ match extract(&dict, &triples) {
   fragment aborts the whole extraction** with a typed `ExtractError`, rather than being silently
   dropped: the downstream checker must never reason over a graph it only *partially* understood
   (a dropped axiom can flip a consistency verdict). Understood in full, or refused.
-- **Structured rejection taxonomy** — `ExtractError` has five arms: `OutOfFragment` (cardinality,
-  nominals, inverses, `owl:sameAs`, property characteristics, chains, keys, …), `DataConstruct`
-  (datatypes / data properties — no concrete domain in L1), `MalformedList` (ill-formed
-  `owl:intersectionOf`/`owl:unionOf` lists), `MalformedClassExpression` (a restriction missing
-  its property/filler, conflicting shapes, cyclic nesting), and `Unclassifiable` (a predicate
-  that cannot be mapped soundly without a declaration). Every arm has a diagnostic and a unit
-  test; annotations, declarations, and ontology headers are recognised and ignored (they carry
-  no ALCH-logical import).
+- **Structured rejection taxonomy** — `ExtractError` distinguishes unsupported logical
+  constructs, data constructs, malformed lists/expressions, and unclassifiable predicates.
+  Every arm has a diagnostic and unit test. Annotations, declarations, and ontology headers
+  are recognised and ignored because they carry no ALCH-logical import.
+- **Forward RDF renderer** (`render`, bead sq-pbz04.4.7) — `render_to_triples(&Ontology, &mut Dict)`
+  maps the structural model back to OWL RDF triples (the inverse of `extract`), enabling
+  full-fragment round-trip testing (`RDF → extract → render → extract` ≡ same model) and
+  diagnostics via `render_to_turtle`. No extra deps; always compiled.
 
 **Profile checker (L2, bead sq-pbz04.4.2):** `profile::profiles(onto)` checks OWL 2 EL/QL/RL
 profile membership via a purely syntactic grammar walk (W3C OWL 2 Profiles §2/§3/§4), returning
@@ -89,17 +89,24 @@ branch — **RL** (`sparq-reason` materialization + clash scan; `Inconsistent` s
 *checked* Theorem PR1 preconditions, `Consistent` only past a divergence guard over the
 constructs implicated in the documented RL rule-set divergences), **EL** (`sparq-reason-el`
 classification; verdicts only for a pure ⊤-free EL+⊥ TBox with zero skipped axioms), **QL**
-(always `Unknown` — DL-Lite_R consistency is the QL workstream's, not duplicated), or the
+(opt-in `dispatch_ql`, sq-fj8lj: `sparq-reason-ql`'s DL-Lite_R violation-query checker, whose
+OWN capture accounting owns the verdict; without it, always `Unknown(QlConsistencyPending)`), or the
 **ALCH tableau** (complete for the fragment). `check::DirectChecker::entailment` decides
 premise ⊨ conclusion per conclusion-axiom by sound refutation encodings on the tableau
-(GCI / class-assertion / the fresh-class role-assertion trick + the record's desugarings);
-unencoded kinds abstain. Every verdict carries its producing `Branch`; every guard fails
+(GCI / class-assertion / the fresh-class trick, its sq-pbz04.4.9 role-subsumption lift for
+`SubObjectPropertyOf`, the sq-zfwzq transitivity lift when enabled, + the record's
+desugarings); a future unencoded kind abstains. A **blank-node individual in the conclusion is read EXISTENTIALLY**
+(sq-pbz04.4.13): a tree-shaped anonymous assertion set rolls up into an `∃`-class assertion
+decided soundly, and a non-rollable shape (shared / cyclic / nominal / free-root) abstains
+`ConclusionAnonymousIndividual` — never a skolem-constant `NotEntailed`. Every verdict carries its producing `Branch`; every guard fails
 closed (`Unknown(reason)`, never a guess). The `dispatch` feature pulls `sparq-reason` +
 `sparq-reason-el` as optional deps — **off by default**, so L1–L3 stay dependency-light.
 
-**Deferred** (each rejected, never mis-mapped): inverse roles, cardinality/functionality,
-nominals (`owl:oneOf`/`owl:hasValue`), transitivity, `sameAs`/`differentFrom`, datatypes, keys —
-with a named reason and unlock path in the design record's deferral ledger.
+**Transitive roles (opt-in `dl_transitive`, OFF by default, sq-zfwzq):** `owl:TransitiveProperty`
+via the tableau's ∀₊-rule, argued in the `tableau` docs §5a. Transitivity-bearing premises may
+also supply the already-established role kind for declaration-free conclusion assertions;
+unknown conclusion predicates still fail closed. **Deferred** (each rejected, never
+mis-mapped): inverses, cardinality, nominals, `sameAs`, datatypes, keys — see the design record.
 
 ## 📚 Learn more
 

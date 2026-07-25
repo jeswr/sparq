@@ -1,0 +1,7 @@
+@prefix ufo: <urn:ufo-sn3:> .
+@prefix ex:  <urn:ufo-sn3:case:relator:> .
+
+ex:employment ufo:existentiallyDependsOn ex:alice, ex:acme.
+ex:alice ufo:existsIn ex:w.
+ex:acme ufo:existsIn ex:w.
+ex:employmentStatement ufo:holdsIn ex:w.

@@ -1,0 +1,5 @@
+{
+  "pr": 2184,
+  "date": "2026-07-12",
+  "reason": "[GPT-5.6] sq-lk3aw.4: intentional feature-OFF posture declaration for the new `sparq-engine/spatial-exact-pushdown` surface. The exact-candidate certification API, executor path, and tests are behind the default-OFF `spatial-exact-pushdown` feature, and the feature adds no dependency. With the feature disabled, no exact spatial certification or residual-FILTER skip behavior is enabled; the existing superset pushdown plus residual FILTER remains the default path. The same-length deterministic wasm artifact movement reported by the byte-identity gate is therefore declared as intentional metadata/cfg-surface movement, not a new default-on spatial capability, and remains governed separately by the wasm size ratchet."
+}

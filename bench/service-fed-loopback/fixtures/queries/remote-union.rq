@@ -1,0 +1,14 @@
+PREFIX ex: <http://example.test/federation/>
+SELECT ?product ?review ?score WHERE {
+  SERVICE <{{reviews}}> {
+    {
+      ?review ex:about ?product ; ex:score ?score .
+      FILTER(?score = 5)
+    }
+    UNION
+    {
+      ?review ex:about ?product ; ex:score ?score .
+      FILTER(?score = 3)
+    }
+  }
+}

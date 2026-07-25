@@ -212,8 +212,19 @@ conclusion-axiom, each with an explicit sound encoding into a consistency questi
 `O ∪ {(¬C)(a)}` inconsistent; `ObjectPropertyAssertion(R,a,b)` → `O ∪ {B(b), (∀R.¬B)(a)}`
 inconsistent with `B` a **fresh** class name (sound *and* complete: a model of `O` lacking
 `R(a,b)` extends to one interpreting `B` as `{b}`, and conversely `b ∈ B` forces the clash
-exactly when every model has `R(a,b)`). Conclusion-axiom kinds without an argued encoding
-(property-axiom conclusions, keys, …) → `Unknown`. **Negative entailment** verdicts are
+exactly when every model has `R(a,b)`); `SubObjectPropertyOf(R,S)` →
+`O ∪ {R(a,b), B(b), (∀S.¬B)(a)}` inconsistent with `a`, `b` **fresh** individuals and `B` a
+**fresh** class name (**§4 amendment, sq-pbz04.4.9** — the role-subsumption lift of the
+fresh-class trick; the original record deferred property-axiom conclusions). Soundness: if
+`O ⊨ R ⊑ S`, any model of the union has `(a,b) ∈ R ⊆ S`, so `b` is an `S`-successor of `a`
+and `(∀S.¬B)(a)` forces `b ∈ ¬B`, clashing with `B(b)` — no model exists. Completeness: a
+model `I` of `O` with `(u,v) ∈ Rᴵ ∖ Sᴵ` extends to the union via `aᴵ = u`, `bᴵ = v`,
+`Bᴵ = {v}` — the fresh names occur nowhere in `O`, and `(u,v) ∉ Sᴵ` means no `S`-successor
+of `u` is `v` (the sole member of `B`), so `(∀S.¬B)(a)` holds. The decision procedure is
+faithful to this semantics because the L3 tableau's `∀`-rule fires modulo the
+reflexive-transitive role hierarchy, and all three additions stay inside the §3 fragment.
+Conclusion-axiom kinds without an argued encoding (keys, …; none currently expressible in
+the L1 model) → `Unknown`. **Negative entailment** verdicts are
 emitted only when the refutation check lands in a branch that is *complete* (EL-guarded,
 ALCH, or RL-with-guard) — a definitive "consistent" is what certifies non-entailment.
 
@@ -238,10 +249,10 @@ wrong species check would poison the lane. Untagged species assertions are not c
 | Construct / capability | Deferred because | Unlock path |
 |---|---|---|
 | Inverse roles (`inverseOf`, I) | subset blocking becomes **incomplete** (constraints propagate back into blocked contexts); needs equality blocking | dedicated bead post-v1, with a new blocking argument |
-| Transitive roles (S) | kept out of v1 to keep the §3 argument minimal — note: this is the **first-in-line** extension (the ∀₊-propagation rule needs *no* blocking change absent inverses, per Horrocks & Sattler) | small follow-up bead once v1's floor is pinned |
+| Transitive roles (S) | **IMPLEMENTED (opt-in)** — bead sq-zfwzq [GPT-5.6] shipped the first-in-line extension behind the OFF-by-default `dl_transitive` cargo feature: L1 recognises `owl:TransitiveProperty` (→ `TransitiveObjectProperty`), the L3 tableau adds the ∀₊-propagation rule, and the extended termination/soundness/completeness argument (Horrocks & Sattler 1999: *no* blocking change absent inverses — the `E(R) ∪ ⋃ E(T)⁺` model construction) is WRITTEN OUT in `tableau.rs` module docs §5a, per this ledger's discipline (deferrals are argued, never silently added). L4 dispatch routes transitive ontologies straight to the tableau (the only transitivity-complete branch); the RL/EL guards recognise the axiom kind fail-closed as defence in depth. With the feature OFF, behaviour is byte-identical to v1 (fail-closed refusal). | done (sq-zfwzq); inverses/cardinality/nominals below remain the next rows |
 | Cardinalities / functionality (N/Q/F) | need the choose-rule + node merging; merging + blocking interaction is the classic unsoundness trap; with inverses added later this escalates to pairwise blocking | post-v1, only with a written argument |
 | Nominals in class expressions (`oneOf`, `hasValue`, O) | the O+I+Q interaction is where NEXPTIME bites and where naive blocking is unsound; a "fresh-concept" approximation is sound but **incomplete** and would blur the completeness ledger | revisit only after I and Q are argued |
-| Datatypes / data properties (D) | a datatype-aware tableau needs a concrete-domain satisfiability oracle; sparq already has the seam (`sparq-substrate` numeric tower; `dtype.rs`; EL `cdomain`) but wiring it into a tableau is its own design problem | future record; reuse the shared tower, never a private one |
+| Datatypes / data properties (D) | a datatype-aware tableau needs a concrete-domain satisfiability oracle; sparq already has the seam (`sparq-substrate` numeric tower; `dtype.rs`; EL `cdomain`) but wiring it into a tableau is its own design problem. **sq-pbz04.4.9 hardened the L1 boundary here:** a bare OWL 2 datatype-map IRI (`xsd:*`, `rdfs:Literal`, `rdf:PlainLiteral`/`XMLLiteral`, `owl:real`/`rational`) reaching ANY class-expression position — including an `rdfs:range`/`rdfs:domain` object — now refuses extraction as a `DataConstruct` rather than reading as an opaque object class (which silently dropped the value-space meaning; two disjoint datatype ranges were invisibly unrelated, e.g. WebOnt-I5.3-015). Uniform position check, same discipline as the literal / `owl:onDatatype` refusals. | future record; reuse the shared tower, never a private one |
 | `sameAs` / `differentFrom` in the tableau path | equality reasoning = merging (see cardinalities); RL branch already covers them for RL ontologies | with N/Q |
 | Keys, property chains, `hasSelf`, property disjointness/(a)symmetry/(ir)reflexivity | outside ALCH; RL branch handles their assertional consequences for RL ontologies | per-construct evaluation later |
 | OWL 2 DL species validation (global restrictions) | needs regularity/simple-role machinery; wrong checks poison the profile lane | post-v1 bead if the lane's value warrants it |
