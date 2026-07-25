@@ -2554,6 +2554,116 @@ class TestVacuousRunExclusion(unittest.TestCase):
                 "the fresh run must be authoritative and the gate must HOLD on it, not "
                 "pass on the older run's legs")
 
+    def test_a_FAILED_run_whose_failing_leg_evaporated_is_never_vacuous(self):
+        """THE HOLE cross-provider review found in this PR's own first cut, reproduced
+        2026-07-25. The observed check-runs are NOT the run's job inventory — they are
+        whatever the commit snapshot shows, which can be a strict SUBSET. So a run that
+        CONCLUDED FAILURE, but whose failing leg has evaporated from the snapshot (the
+        #3677 phenomenon) while one `skipped` leg is still visible, read as "every observed
+        conclusion is skipped" and was demoted. The resolver then fell back to the older
+        successful run and the gate GREENED over a failed run — the exact laundering this
+        whole exclusion exists to stop, reintroduced by the exclusion itself.
+
+        Deleting either the `status == completed` or the `_VACUOUS_OK_CONCLUSIONS` conjunct
+        in `_vacuous` makes this test RED."""
+        old = W(501, 77, name="vectorized-feature-off", conclusion="success",
+                created="2026-07-25T07:15:37Z")
+        failed = W(502, 77, name="vectorized-feature-off", conclusion="failure",
+                   created="2026-07-25T07:40:00Z")
+        checks = [
+            _check(VFO_QUICK, run_id=501, rid=51),
+            _check(VFO_HEAVY, run_id=501, rid=52),
+            # 502's FAILING leg is absent from the snapshot; only its skipped one shows.
+            _check(VFO_QUICK, run_id=502, conclusion="skipped", rid=53,
+                   started="2026-07-25T07:40:05Z"),
+        ]
+        self.assertEqual(
+            g.vacuous_run_ids(checks, [old, failed]), set(),
+            "a run that CONCLUDED FAILURE was demoted as vacuous because its failing leg "
+            "was missing from the check-runs snapshot — this greens the gate over a red run")
+        resolved, _ = g.resolve_newest_workflow_runs(
+            checks, [old, failed], "999",
+            no_leg_ids=g.vacuous_run_ids(checks, [old, failed]))
+        with redirect_stdout(io.StringIO()):
+            self.assertNotEqual(
+                g.render_verdict(resolved), 0,
+                "the gate PASSED while the newest vectorized-feature-off run had concluded "
+                "failure — the laundered-red false green")
+
+    def test_a_partially_registered_in_flight_run_is_never_vacuous(self):
+        """The sibling of the case above, and the one the reviewer did not name. A run that
+        is merely EARLY — still `in_progress`, and the first leg it happened to register is
+        a `skipped` change-detector — also satisfied "every observed conclusion is skipped".
+        `test_a_run_with_no_checks_yet_is_not_vacuous` covers ZERO observed checks; this
+        covers ONE, which is the same erasure a moment later in the registration sequence."""
+        old = W(601, 77, name="vectorized-feature-off", conclusion="success",
+                created="2026-07-25T07:15:37Z")
+        starting = W(602, 77, name="vectorized-feature-off", status="in_progress",
+                     conclusion=None, created="2026-07-25T07:40:00Z")
+        checks = [
+            _check(VFO_QUICK, run_id=601, rid=61),
+            _check(VFO_HEAVY, run_id=601, rid=62),
+            _check(VFO_QUICK, run_id=602, conclusion="skipped", rid=63,
+                   started="2026-07-25T07:40:05Z"),
+        ]
+        self.assertEqual(
+            g.vacuous_run_ids(checks, [old, starting]), set(),
+            "an in-flight run was demoted because the only leg it had registered so far "
+            "was a skipped change-detector — its real legs are still to come")
+
+    def test_a_non_terminal_run_is_never_vacuous_even_reporting_a_good_conclusion(self):
+        """The `status == completed` conjunct in its own right. Found by mutation: with only
+        the conclusion allow-list, dropping the status check stayed GREEN, because the
+        in-flight fixture above carries `conclusion: None` and the allow-list already
+        rejects that. So the status conjunct was UNTESTED — an untested guard is one nobody
+        can safely refactor. This pins it: a run reporting a non-terminal status must stay
+        authoritative however good its conclusion field looks, because the jobs it has yet
+        to register cannot have been observed. Drop the status conjunct and this goes RED."""
+        old = W(801, 77, name="vectorized-feature-off", conclusion="success",
+                created="2026-07-25T07:15:37Z")
+        checks_for = lambda rid: [
+            _check(VFO_QUICK, run_id=801, rid=81),
+            _check(VFO_QUICK, run_id=rid, conclusion="skipped", rid=82,
+                   started="2026-07-25T07:40:05Z"),
+        ]
+        for status in ("in_progress", "queued", "requested", "waiting", "pending"):
+            with self.subTest(status=status):
+                newer = W(802, 77, name="vectorized-feature-off", status=status,
+                          conclusion="success", created="2026-07-25T07:40:00Z")
+                self.assertEqual(
+                    g.vacuous_run_ids(checks_for(802), [old, newer]), set(),
+                    f"a run with status={status!r} was demoted as vacuous — a non-terminal "
+                    f"run's remaining jobs cannot have been observed yet, so 'every observed "
+                    f"conclusion is skipped' says nothing about what it will produce")
+
+    def test_only_success_and_skipped_conclusions_can_demote_a_run(self):
+        """FAIL-CLOSED DIRECTION of the new conjunct, stated over every conclusion rather
+        than the two that bit us. `_VACUOUS_OK_CONCLUSIONS` is an ALLOW-list precisely so a
+        conclusion GitHub adds later cannot silently buy a demotion; an unrecognised value
+        must keep the run authoritative. Turning the allow-list into a deny-list, or adding
+        any of the terminal-failure conclusions to it, makes this RED."""
+        old = W(701, 77, name="vectorized-feature-off", conclusion="success",
+                created="2026-07-25T07:15:37Z")
+        demotable, protected = {"success", "skipped"}, {
+            "failure", "cancelled", "timed_out", "action_required", "neutral", "stale",
+            "startup_failure", "a_conclusion_github_has_not_invented_yet", "", None,
+        }
+        for conclusion in demotable | protected:
+            with self.subTest(conclusion=conclusion):
+                newer = W(702, 77, name="vectorized-feature-off", conclusion=conclusion,
+                          created="2026-07-25T07:40:00Z")
+                checks = [
+                    _check(VFO_QUICK, run_id=701, rid=71),
+                    _check(VFO_QUICK, run_id=702, conclusion="skipped", rid=72,
+                           started="2026-07-25T07:40:05Z"),
+                ]
+                demoted = 702 in g.vacuous_run_ids(checks, [old, newer])
+                self.assertEqual(
+                    demoted, conclusion in demotable,
+                    f"run concluded {conclusion!r}: demoted={demoted}; only "
+                    f"{sorted(demotable)} may ever be demoted, everything else — including "
+                    f"conclusions that do not exist yet — must stay authoritative")
+
     def test_a_lone_all_skipped_run_is_left_authoritative(self):
         """FAIL-CLOSED EDGE, other side. A vacuous run is demoted only when a SIBLING run
         of the same workflow can be authoritative instead. With no sibling, demoting it

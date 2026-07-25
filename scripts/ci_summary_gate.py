@@ -903,6 +903,15 @@ def no_leg_run_ids(check_runs: list[dict]) -> set[int]:
     return out
 
 
+# The only workflow-run conclusions a run may be DEMOTED as vacuous under. A run whose every
+# job skipped concludes `success` (GitHub occasionally reports `skipped` at run level), so this
+# covers the real case exactly. Everything else — `failure`, `cancelled`, `timed_out`,
+# `action_required`, `neutral`, `stale`, and any conclusion added later — keeps the run
+# authoritative, which is the fail-closed direction: an unrecognised conclusion must never buy
+# a demotion. Deliberately an allow-list, not a deny-list, for that reason.
+_VACUOUS_OK_CONCLUSIONS = frozenset({"success", "skipped"})
+
+
 def vacuous_run_ids(
     check_runs: list[dict], workflow_runs: list[dict]
 ) -> set[int]:
@@ -930,7 +939,13 @@ def vacuous_run_ids(
         newest and the gate HOLDS on it rather than greening off its predecessor;
       * a vacuous run is excluded only when a sibling run of the SAME workflow exists
         to be authoritative instead, so this can never un-require a lane whose only
-        run on the SHA was all-skipped (that stays satisfied, as before).
+        run on the SHA was all-skipped (that stays satisfied, as before);
+      * the RUN ITSELF must be terminal and must not have failed. Observed check-runs are
+        a possibly-strict SUBSET of a run's jobs, so "every observed conclusion is
+        skipped" does not entail "this run did no work" — see _vacuous. Without this,
+        a FAILED run whose failing leg had evaporated from the snapshot, and a merely
+        EARLY in-flight run, were both demoted; the first laundered a red into a green.
+        Unrecognised conclusions and non-terminal statuses keep the run authoritative.
     The net direction matches #3781's: the gate keeps REAL conclusions in preference to
     vacuous `skipped` ones, so a mid-flight sibling keeps it polling and a FAILED
     sibling keeps failing it, instead of either being erased by a label flip."""
@@ -940,13 +955,46 @@ def vacuous_run_ids(
         if rid:
             observed.setdefault(rid, []).append(r)
 
+    runs_by_id: dict[int, dict] = {}
+    for run in workflow_runs:
+        rid = _as_int(run.get("id"))
+        if rid:
+            runs_by_id[rid] = run
+
     def _vacuous(run_id: int) -> bool:
-        # `conclusion == "skipped"` is the WHOLE test. A queued/in-flight check-run has a
-        # null conclusion, so it already fails it; a separate `status == "completed"`
-        # conjunct would be a guard no input can distinguish (and, for a degraded payload
-        # reporting `skipped` on a non-terminal status, it would only NARROW the
-        # exclusion — the less safe direction), so it is deliberately absent. Same
-        # reasoning the resolver applies to its own unreachable-branch note above.
+        # The observed check-runs are NOT the run's job inventory — they are whatever the
+        # commit's check-runs snapshot happens to show, which can be a strict SUBSET. So
+        # "every observed conclusion is skipped" does not entail "this run did no work",
+        # and treating it as if it did was a false-green (cross-provider review of #3788's
+        # fix, reproduced 2026-07-25):
+        #
+        #   run 101 older, success; run 102 newest, concluded FAILURE. 102's failing leg
+        #   has evaporated from the snapshot (the #3677 phenomenon) while one `skipped`
+        #   leg of it is still visible => 102 read as vacuous => demoted => the resolver
+        #   falls back to 101 and the gate GREENS over a failed run.
+        #
+        # The same subset problem hits a run that is merely EARLY: a still-registering
+        # in-flight run whose first leg happens to be a `skipped` change-detector was
+        # demoted too, which is the very erasure this exclusion exists to prevent.
+        #
+        # The missing conjunct is therefore about the WORKFLOW RUN, not the check-run —
+        # the earlier note here reasoned about the check-run's own status and concluded no
+        # input could distinguish it, which was true and beside the point. A run may be
+        # classified vacuous ONLY if it is terminal AND did not fail: a genuinely vacuous
+        # label-flip run (every job skipped) concludes `success`/`skipped`, so the real
+        # case is untouched, while `failure`/`cancelled`/`timed_out`/`action_required` and
+        # every non-terminal status now keep the run authoritative. Unknown/absent
+        # conclusions fail toward KEEPING the run, which is the safe direction: the gate
+        # then holds or fails on it instead of greening off a predecessor.
+        # An id absent from workflow_runs yields {}, whose empty status fails the next
+        # conjunct — so a missing run is never demoted, and no separate isinstance guard is
+        # needed (a non-dict entry could not have reached runs_by_id, which is built by
+        # calling .get on each one).
+        run = runs_by_id.get(run_id) or {}
+        if str(run.get("status") or "") != "completed":
+            return False
+        if str(run.get("conclusion") or "") not in _VACUOUS_OK_CONCLUSIONS:
+            return False
         checks = observed.get(run_id) or []
         return bool(checks) and all(
             c.get("conclusion") == "skipped" for c in checks
