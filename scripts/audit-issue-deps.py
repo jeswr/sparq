@@ -362,6 +362,9 @@ def main():
     ap.add_argument("--prove", action="store_true", help="print the direction-proof witness and exit")
     ap.add_argument("--remove-spurious", action="store_true",
                     help="with --apply, also DELETE native edges with no bd counterpart")
+    ap.add_argument("--include-closed-blockers", action="store_true",
+                    help="also mirror edges whose blocker issue is already CLOSED (inert for "
+                         "readiness — GitHub's issueDependenciesSummary.blockedBy excludes them)")
     ap.add_argument("--json-out", help="write the full audit record here")
     ap.add_argument("--limit", type=int, help="cap the number of writes this run")
     args = ap.parse_args()
@@ -385,26 +388,34 @@ def main():
     have = {(n, k) for n, ks in native.items() for k in ks}
     have_mapped = {(n, k) for (n, k) in have if n in rev and k in rev}
 
-    missing = sorted(want - have)
+    absent = sorted(want - have)
     spurious = sorted(have - want)          # native edge with no bd counterpart (incl. unmapped ends)
     present = sorted(want & have)
+
+    # An absent edge whose BLOCKER ISSUE is already CLOSED is SATISFIED, not missing: MEASURED,
+    # GitHub reports `issueDependenciesSummary.blockedBy = 0` for a closed blocker (while
+    # `totalBlockedBy` counts it), and scripts/ready-issues.py counts a `Blocked-by: #NN` marker
+    # only when the number is in `open_numbers`. Neither consumer would hold the child. They are
+    # reported in their own bucket so a re-run does not carry a permanent phantom "missing" count
+    # that would mask a real future gap. `--include-closed-blockers` mirrors them anyway.
+    def blocker_closed(e):
+        return issues.get(e[1], {}).get("state") != "open"
+
+    satisfied = [e for e in absent if blocker_closed(e)]
+    missing = [e for e in absent if not blocker_closed(e)]
 
     # ---- 2. stale blockers: an edge whose BLOCKER issue is already CLOSED -----------------------
     stale_native = sorted((n, k) for (n, k) in have
                           if issues.get(k, {}).get("state") == "closed"
                           and issues.get(n, {}).get("state") == "open")
-    stale_want = sorted((n, k) for (n, k) in want
-                        if issues.get(k, {}).get("state") == "closed"
-                        and issues.get(n, {}).get("state") == "open")
-    # bd-side equivalent: open bead blocked by a closed bead
+    # bd-side equivalent: open bead blocked by a closed bead. NOT a defect on its own — `bd ready`
+    # is blocker-aware and treats a closed blocker as satisfied (verified: sq-0xquh, whose only
+    # blocker sq-0wo9e is closed, IS listed by `bd ready --limit 2000`). Reported for visibility.
     stale_bd = sorted((a, b) for (a, b) in edges_bd
                       if bd_is_open(beads.get(a)) and not bd_is_open(beads.get(b)))
 
     # ---- 3. writes we will actually perform -----------------------------------------------------
-    # Do NOT write an edge whose blocker is already CLOSED: it would create a permanently-satisfied
-    # blocker that GitHub still renders as blocked, hiding ready work. Report them instead.
-    to_add = [(n, k) for (n, k) in missing if issues.get(k, {}).get("state") == "open"]
-    skipped_closed_blocker = [(n, k) for (n, k) in missing if issues.get(k, {}).get("state") != "open"]
+    to_add = missing + (satisfied if args.include_closed_blockers else [])
 
     # ---- 4. cycles -------------------------------------------------------------------------------
     cyc_bd = find_cycles({(a, b) for (a, b) in edges_bd
@@ -424,18 +435,21 @@ def main():
         "github_native_edges_total": len(have),
         "github_native_edges_both_ends_bd_mapped": len(have_mapped),
         "present": len(present),
-        "missing": len(missing),
-        "missing_writable_open_blocker": len(to_add),
-        "missing_skipped_closed_blocker": len(skipped_closed_blocker),
+        "missing_active": len(missing),
+        "satisfied_blocker_closed_not_mirrored": len(satisfied),
+        "satisfied_distinct_children": len({n for n, _ in satisfied}),
+        "will_write": len(to_add),
         "spurious": len(spurious),
         "stale_native_open_issue_blocked_by_closed_issue": len(stale_native),
-        "stale_would_be_if_written": len(stale_want),
         "stale_bd_open_bead_blocked_by_closed_bead": len(stale_bd),
         "cycles_bd_open": cyc_bd,
         "cycles_github_projected": cyc_gh_after,
         "samples": {
-            "missing": [{"blocked": f"#{n} ({rev.get(n)})", "blocker": f"#{k} ({rev.get(k)})"}
-                        for n, k in missing[:15]],
+            "missing_active": [{"blocked": f"#{n} ({rev.get(n)})", "blocker": f"#{k} ({rev.get(k)})"}
+                               for n, k in missing[:15]],
+            "satisfied_blocker_closed": [
+                {"blocked": f"#{n} ({rev.get(n)})", "closed_blocker": f"#{k} ({rev.get(k)})"}
+                for n, k in satisfied[:20]],
             "spurious": [{"blocked": f"#{n} ({rev.get(n, '-')})", "blocker": f"#{k} ({rev.get(k, '-')})"}
                          for n, k in spurious[:15]],
             "stale_native": [{"blocked": f"#{n}", "closed_blocker": f"#{k}"} for n, k in stale_native[:15]],
@@ -488,7 +502,7 @@ def main():
             rep["applied_remove_noop"] = rnoop
     else:
         print(f"\n[audit-only] would add {len(to_add)} native edge(s); "
-              f"{len(skipped_closed_blocker)} skipped (blocker already closed); "
+              f"{len(satisfied)} not mirrored (blocker already closed — inert); "
               f"{len(spurious)} spurious edge(s) present. Re-run with --apply.")
 
     if args.json_out:

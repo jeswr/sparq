@@ -27,6 +27,13 @@ ROLE_BY_TYPE = {"feature": "impl", "bug": "impl", "task": "impl", "chore": "ci",
                 "spike": "research", "epic": "impl"}
 ROLE_BY_KIND = {"docs": "docs", "design": "research", "research": "research", "perf": "perf",
                 "test": "impl", "ci": "ci", "site": "site"}
+# [OPUS-4.8] bd emits BOTH spellings for a blocker edge and they have the SAME orientation —
+# {"issue_id": X, "depends_on_id": Y} means X is blocked by Y either way (verified with `bd show
+# sq-8ic6`, whose `blocked-by` rows render under DEPENDS ON exactly like `blocks` rows do).
+# plan() previously matched only "blocks" and silently dropped the rest; the loss is latent today
+# only because all 3 current `blocked-by` rows hang off a CLOSED bead. Keep in sync with
+# scripts/audit-issue-deps.py::BLOCKER_TYPES.
+BLOCKER_TYPES = ("blocks", "blocked-by")
 
 
 def parse_export(lines):
@@ -274,7 +281,7 @@ def plan(issues, edges, include_closed=False):
             continue
         if etype == "parent-child":
             parents.setdefault(frm, []).append(to)
-        elif etype == "blocks":
+        elif etype in BLOCKER_TYPES:
             blockers.setdefault(frm, []).append(to)
         # other edge types (related/discovered/duplicate/…) are NOT readiness blockers — skipped
     return open_ids, blockers, parents
@@ -856,6 +863,20 @@ def _self_test():
             chk("irreducible oversize issue fails loud", "SystemExit", "SystemExit")
     finally:
         globals()["_run"], globals()["_label_node_ids"] = real_run, real_ids
+
+    # [OPUS-4.8] plan() must treat BOTH blocker spellings as readiness blockers with the SAME
+    # orientation, and must never turn parent-child into one (that is the sub-epic-leaf-invisibility
+    # bug). Matching only "blocks" silently dropped every `blocked-by` row.
+    def _plan_edges(etype):
+        beads = {"X": {"id": "X", "status": "open", "title": "x"},
+                 "Y": {"id": "Y", "status": "open", "title": "y"}}
+        _, blockers, parents = plan(beads, [("X", "Y", etype)])
+        return blockers, parents
+    chk("blocks row is a blocker edge X<-Y", _plan_edges("blocks"), ({"X": ["Y"]}, {}))
+    chk("blocked-by row is ALSO a blocker edge X<-Y", _plan_edges("blocked-by"), ({"X": ["Y"]}, {}))
+    chk("parent-child row is a parent link, never a blocker", _plan_edges("parent-child"),
+        ({}, {"X": ["Y"]}))
+    chk("related row is neither", _plan_edges("related"), ({}, {}))
 
     print("bd-to-issues self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
