@@ -65,6 +65,19 @@
 # ([OPUS-4.8] sq-8ic6: "readme-template (template, advisory)" was PROMOTED to the HARD
 #  gate "readme-template (template)" — no advisory token, so it now GATES — once the
 #  sq-9jw5 README-overhaul backlog cleared and sq-ixsf tightened the stub classifier.)
+# [OPUS-5] PLATFORM-MANAGED companion rule (ci_summary_gate.py
+#  PLATFORM_MANAGED_ADVISORY_NAMES / is_platform_managed_advisory). The name-token rule
+#  above only reaches check-runs whose name THIS repo controls. A GitHub-MANAGED job
+#  cannot carry the token, so it is excluded by an EXACT, case-insensitive, whole-name
+#  allow-list — currently just:
+#   • "Dependabot"   (GitHub's managed `Dependabot Updates` workflow, event=dynamic,
+#                     path `dynamic/dependabot/dependabot-updates`; its only job name)
+#  That check reports Dependabot's own ability to act on an UPSTREAM advisory — it REDs
+#  on `security_update_not_possible`, where no reachable version clears every advisory
+#  on the package — not this repo's code health, so it must not halt the line. Nothing
+#  is suppressed: the Dependabot ALERT stays open, Dependabot keeps retrying, and the
+#  actionable cargo dependency-vulnerability GATE (`cargo deny check advisories` inside
+#  "supply-chain gates (…)") is untouched. Unknown/new names FAIL CLOSED (still gate).
 # REQUIRED checks (gate / build+test / clippy / coverage / the conformance + perf
 # ratchets / wasm / MSRV / supply-chain / …) do NOT contain those words, so they
 # still gate normally. Rationale: an advisory job that concludes `failure` (e.g.
