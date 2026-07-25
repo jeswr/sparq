@@ -399,9 +399,14 @@ def resolve_resume_map(trusted, unverified, checkpoint_map, owned=frozenset()):
     return id_map, backfill, unverifiable
 
 
+# Agent self-identification (standing repo rule): every issue/comment an agent opens says so, so a
+# maintainer scanning the tracker can tell machine-filed items from human ones at a glance.
+SELF_ID = "> 🤖 SPARQ agent — migrated from the local `bd` tracker by `scripts/bd-to-issues.py`."
+
+
 def _body(bead, bid):
     desc = (bead.get("description") or "").strip()
-    return f"{desc}\n\n<!-- bd-id:{bid} -->\n"
+    return f"{SELF_ID}\n\n{desc}\n\n<!-- bd-id:{bid} -->\n"
 
 
 def ensure_labels(repo, labels):
@@ -512,30 +517,48 @@ def _label_node_ids(repo, names):
     return ids
 
 
-def apply_reconcile(repo, plan, node_ids, batch=20, pause=4.0, log=print):
+def apply_reconcile(repo, plan, node_ids, batch=8, pause=2.0, log=print):
     """Apply `plan` ({issue_number: [labels]}) with ONE GraphQL request per `batch` issues.
 
     Batching is not cosmetic: ~800 single `gh issue edit` mutations trip GitHub's secondary
     rate limiter, and a 403 mid-run leaves the repo half-labeled. Aliased mutations keep the
-    whole reconcile inside ~40 requests, and the pacing stays under the documented GraphQL
-    mutation budget (5 points/mutation, 2000 points/min). Backs off on a secondary-limit 403
-    instead of hammering."""
+    whole reconcile inside ~100 requests, paced under the documented GraphQL mutation budget
+    (5 points/mutation, 2000 points/min).
+
+    Two distinct server refusals, two distinct responses (both learned from a real run):
+      * `Resource limits for this query exceeded` — the REQUEST is too big. A batch of 20 hit
+        this on the very first chunk, and GitHub had already executed the first few aliases
+        before refusing, so a naive retry of the same shape would loop forever while partially
+        applying. HALVE the chunk and retry; ADD-only mutations make the replay harmless.
+      * a secondary-rate-limit 403 — the request is fine but too frequent. Back off, don't split.
+    """
     if not plan:
         return 0
     label_ids = _label_node_ids(repo, {l for v in plan.values() for l in v})
-    done = 0
-    for chunk in _chunks(sorted(plan), batch):
+    queue, done, total = _chunks(sorted(plan), batch), 0, len(plan)
+    while queue:
+        chunk = queue.pop(0)
         muts = []
         for i, num in enumerate(chunk):
             lids = ",".join(f'"{label_ids[l]}"' for l in plan[num])
             muts.append(f'm{i}: addLabelsToLabelable(input: {{labelableId: "{node_ids[num]}", '
                         f'labelIds: [{lids}]}}) {{ __typename }}')
         query = "mutation {\n  " + "\n  ".join(muts) + "\n}"
+        applied = False
         for attempt in range(5):
             r = _run(["gh", "api", "graphql", "-f", f"query={query}"], check=False)
             if r.returncode == 0 and '"errors"' not in (r.stdout or ""):
+                applied = True
                 break
             err = ((r.stderr or "") + (r.stdout or "")).lower()
+            if "resource limit" in err or "query is too large" in err:
+                if len(chunk) == 1:
+                    raise SystemExit(f"label reconcile: issue #{chunk[0]} is irreducibly over the "
+                                     f"GraphQL resource limit: {err[:300]}")
+                half = max(1, len(chunk) // 2)
+                log(f"  request over the GraphQL resource limit — splitting {len(chunk)} -> {half}")
+                queue[:0] = [chunk[:half], chunk[half:]]
+                break
             if "secondary rate" in err or "abuse" in err or "was submitted too quickly" in err:
                 wait = 30 * (2 ** attempt)
                 log(f"  secondary rate limit — backing off {wait}s")
@@ -545,8 +568,10 @@ def apply_reconcile(repo, plan, node_ids, batch=20, pause=4.0, log=print):
                              f"{((r.stderr or '') + (r.stdout or '')).strip()[:400]}")
         else:
             raise SystemExit(f"label reconcile: still rate-limited after 5 backoffs at {chunk}")
+        if not applied:
+            continue                       # split happened; the halves are back on the queue
         done += len(chunk)
-        log(f"  reconciled {done}/{len(plan)} issue(s)")
+        log(f"  reconciled {done}/{total} issue(s)")
         time.sleep(pause)
     return done
 
@@ -796,6 +821,41 @@ def _self_test():
         plan_reconcile(beads, {"sq-zzz": 12}, {12: []}, cr), {})
     chk("batching chunks evenly", [len(c) for c in _chunks(range(45), 20)], [20, 20, 5])
     chk("empty reconcile does zero API calls", apply_reconcile("o/r", {}, {}), 0)
+    # Adaptive split on the server's `Resource limits for this query exceeded` refusal (a real
+    # 20-mutation batch hit it on the first chunk). Every issue must still be applied EXACTLY
+    # once overall, and a single irreducible issue must fail loud rather than loop.
+    calls = []
+
+    def fake_run(args, check=True):
+        q = args[-1]
+        n = q.count("addLabelsToLabelable")
+        calls.append(n)
+        big = n > 2
+        return type("R", (), {"returncode": 1 if big else 0,
+                              "stdout": "" if big else "{}",
+                              "stderr": "Resource limits for this query exceeded" if big else ""})()
+
+    real_run, real_ids = _run, _label_node_ids
+    try:
+        globals()["_run"] = fake_run
+        globals()["_label_node_ids"] = lambda repo, names: {n: f"L_{n}" for n in names}
+        plan5 = {n: ["role:impl"] for n in range(1, 6)}
+        got = apply_reconcile("o/r", plan5, {n: f"I_{n}" for n in plan5}, batch=5, pause=0)
+        chk("split-and-retry still applies every issue exactly once", got, 5)
+        # 5 refused -> [2,3]; 2 applied; 3 refused -> [1,2]; 1 applied; 2 applied. A refused size
+        # is NEVER re-issued at the same size (that would loop while partially applying).
+        chk("oversize batch splits strictly downward, never retried at the same size",
+            calls, [5, 2, 3, 1, 2])
+        calls.clear()
+        globals()["_run"] = lambda a, check=True: type("R", (), {
+            "returncode": 1, "stdout": "", "stderr": "Resource limits for this query exceeded"})()
+        try:
+            apply_reconcile("o/r", {1: ["role:impl"]}, {1: "I_1"}, batch=1, pause=0)
+            chk("irreducible oversize issue fails loud", "no-exit", "SystemExit")
+        except SystemExit:
+            chk("irreducible oversize issue fails loud", "SystemExit", "SystemExit")
+    finally:
+        globals()["_run"], globals()["_label_node_ids"] = real_run, real_ids
 
     print("bd-to-issues self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
