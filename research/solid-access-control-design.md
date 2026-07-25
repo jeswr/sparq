@@ -154,12 +154,13 @@ Relevant supported features (verified in `mod.rs`/`parser.rs`):
 - `string:concatenation` — deterministic minting of pair-principal / grant-node IRIs.
 - `string:startsWith/contains/matches/…`, `math:*` comparisons, `list:member/in`,
   `log:dtlit`, `log:conjunction`.
-- **Not supported / gaps** (small `sparq-reason` follow-ups rather than contortions, §7;
-  tracked as bead `sq-jwsp`): <!-- [OPUS-4.8] -->
-  no aggregate/count over *property values* (`math:memberCount` is list/formula-only — would
-  simplify allOf), no `log:collectAllIn`/`e:findall`, no built-in URI-encoding (pair-IRI
-  minting concatenates raw IRIs with reserved-char delimiters instead), backward-rule depth
-  is bounded (we use forward rules only).
+- **Follow-ups shipped** (bead `sq-jwsp`, DONE): `log:collectAllIn` (scoped findall — with
+  `math:memberCount` this is the count-over-*property-values* aggregate) and `log:forAllIn`
+  (scoped universal quantification — the direct allOf collapse), both non-monotonic like the
+  negation idiom (sound over stratum-complete predicates only), plus the multi-stratum entry
+  point `reason_n3_stratified` (§7 item 2). URI-encoding shipped earlier
+  (`string:encodeForUri`). Remaining by design: backward-rule depth is bounded (we use
+  forward rules only). <!-- [FABLE-5] sq-jwsp -->
 
 `reason_n3(dict, src)` is single-graph (facts are term-triples). The materializer therefore
 *assembles* the reasoning input from the relevant named graphs + synthesized facts (§4.2) —
@@ -796,10 +797,14 @@ Reading the numbers honestly:
    DONE (RFC 3986 / fn:encode-for-uri percent-encoding; wac.n3/acp-a.n3/acp-c.n3 pair
    and candidate minting now encode their components, the session side shares the same
    `encode_for_uri` helper, and the reserved-encoding validation is KEPT as defense in
-   depth). Still open (bead `sq-jwsp`): a documented multi-stratum entry point
-   (`reason_n3_stratified(&[src])`) so the ACP pipeline does not re-serialize closures
-   between strata; optionally `log:forAllIn`/count-over-property-values to collapse ACP
-   strata B+C into one. <!-- [OPUS-4.8] -->
+   depth). Bead `sq-jwsp` — DONE: the multi-stratum entry point
+   (`reason_n3_stratified(dict, &[src])`, in-memory closure carry with per-stratum blank
+   scope + per-stratum sizes) and `log:collectAllIn` / `log:forAllIn` (scoped
+   aggregation/universal quantification; with `math:memberCount` this is
+   count-over-property-values) are shipped in `sparq-reason`
+   (`crates/sparq-reason/tests/n3_collect_stratified.rs`). ACP pipeline adoption
+   (materializer switch + collapsing strata B+C / simplifying allOf in the rules) is a
+   beaded `sparq-solid` follow-up. <!-- [FABLE-5] sq-jwsp -->
 3. **Incremental auth maintenance**: re-materialization is v1 (measured §6); N3-incremental
    needs derivation counting under stratified NAF — T18's counting is RDFS-only today.
 4. **ACP issuer/vc/Creator/Owner**, custom ACP modes, `acl:accessToClass` — §3.6.

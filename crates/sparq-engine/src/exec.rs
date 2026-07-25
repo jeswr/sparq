@@ -7615,6 +7615,10 @@ pub(crate) fn goo_pick(
 /// other terminal is bound (so the column is effectively keyed).
 fn pattern_var_ndv(graph: &Graph, id_pat: &IdPattern, pos: usize, est: usize) -> f64 {
     let est = (est as f64).max(1.0);
+    #[cfg(feature = "persistent-stats")]
+    if let Some(ndv) = id_pat[1].and_then(|pid| crate::stats::predicate_ndv(pid, pos)) {
+        return (ndv as f64).clamp(1.0, est);
+    }
     let stat = id_pat[1].and_then(|pid| graph.store.pred_stat(pid));
     match (pos, stat) {
         // subject var, predicate bound, object unbound -> distinct subjects of P

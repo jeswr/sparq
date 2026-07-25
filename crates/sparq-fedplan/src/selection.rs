@@ -45,6 +45,23 @@
 //! preserved. Bound subject/object positions divide the predicate's triple count by its
 //! distinct-subject / distinct-object count respectively (CostFed's selectivity buckets).
 //!
+//! ## Retrieval-capability ordering hint (advisory only)
+//!
+//! [FABLE-5] sq-3uijg. A source's declared
+//! [`RetrievalCapability`](crate::RetrievalCapability) is consumed here as a
+//! **STATIC ordering hint** over each pattern's retained candidates: sources declaring a
+//! `sret:cardinalityHint` order first, ascending by hint (the source expecting the
+//! smallest per-request result set is contacted first — the same selective-first
+//! discipline the join planner applies), sources declaring none keep their relative
+//! index order after them, and ascending source index is the deterministic tie-break —
+//! so with no hints declared anywhere the ordering is exactly the historical
+//! ascending-index order. **Answer-safety invariant (load-bearing):** the hint is read
+//! only *after* the prune decision, so a wrong or absent value may reorder the
+//! candidates but can NEVER change the retained-source SET or any cardinality estimate
+//! (proven by the `retrieval_hint_*` differential tests below). The vector/text
+//! endpoint flags are deliberately not consulted — they describe retrieval operators,
+//! not BGP answering.
+//!
 //! [OPUS-4.8] sq-a35t.
 
 use crate::descriptor::SourceDescriptor;
@@ -66,7 +83,11 @@ pub struct SourceCandidate {
 pub struct PatternSources {
     /// Index of the pattern within the BGP.
     pub pattern: usize,
-    /// Retained sources, ascending by source index (deterministic).
+    /// Retained sources, ordered by the advisory retrieval-capability rank (declared
+    /// `sret:cardinalityHint` ascending, undeclared last), tie-broken by ascending
+    /// source index — plain ascending index order when no source declares a hint.
+    /// The ordering is ADVISORY ONLY: the retained SET never depends on the hint
+    /// (see the module docs). [FABLE-5] sq-3uijg.
     pub candidates: Vec<SourceCandidate>,
 }
 
@@ -91,7 +112,11 @@ impl PatternSources {
 /// Returns, per pattern, the retained sources and their CostFed cardinality estimates.
 /// **Recall-safe** (see the module docs): a source is pruned for a pattern only when
 /// the descriptor proves it cannot contribute. Deterministic: candidates are ordered by
-/// source index.
+/// the advisory retrieval-capability rank (declared cardinality hint ascending,
+/// undeclared last), then by source index — which is the plain historical ascending
+/// index order whenever no source declares a hint. The rank is ADVISORY ONLY: it is
+/// applied strictly after the prune decision, so it can reorder candidates but never
+/// change the retained SET (see the module docs). [FABLE-5] sq-3uijg.
 pub fn select_sources(bgp: &Bgp, sources: &[SourceDescriptor]) -> Vec<PatternSources> {
     bgp.patterns
         .iter()
@@ -106,15 +131,25 @@ pub fn select_sources(bgp: &Bgp, sources: &[SourceDescriptor]) -> Vec<PatternSou
                     });
                 }
             }
-            // Already in ascending source-index order (enumeration order); explicit for
-            // determinism guarantees if the loop ever changes.
-            candidates.sort_by_key(|c| c.source);
+            // Advisory ordering hint ONLY — the membership decision above is final.
+            candidates.sort_by_key(|c| (retrieval_rank(&sources[c.source]), c.source));
             PatternSources {
                 pattern: pi,
                 candidates,
             }
         })
         .collect()
+}
+
+/// The STATIC ordering rank of a source's declared retrieval capability: an explicit
+/// presence discriminator (`is_none()` — every declared hint, including `u64::MAX`,
+/// sorts before every undeclared one) then the `sret:cardinalityHint` ascending, with
+/// the historical ascending-index order among unhinted sources preserved via the
+/// source-index tie-break. Read only after the prune decision — never affects the
+/// retained-source set (the answer-safety invariant). [FABLE-5] sq-3uijg.
+fn retrieval_rank(src: &SourceDescriptor) -> (bool, u64) {
+    let hint = src.retrieval().and_then(|r| r.cardinality_hint);
+    (hint.is_none(), hint.unwrap_or_default())
 }
 
 /// The HiBISCuS prune decision for one (pattern, source): `true` iff the source might
@@ -662,5 +697,168 @@ mod tests {
         assert_eq!(sel[0].candidates[0].source, 0);
         assert_eq!(sel[1].candidates.len(), 1);
         assert_eq!(sel[1].candidates[0].source, 1);
+    }
+
+    // ============================================================================
+    // [FABLE-5] sq-3uijg — the RetrievalCapability STATIC ordering hint. Advisory
+    // ONLY: it may reorder each pattern's candidates but can NEVER change the
+    // retained-source SET or any cardinality estimate (the inherited answer-safety
+    // invariant from sq-222my, proven by the differential test below).
+    // ============================================================================
+
+    use crate::descriptor::RetrievalCapability;
+
+    /// A source holding `foaf:knows`, optionally declaring a retrieval capability
+    /// with the given cardinality hint.
+    fn knows_source(id: &str, triples: u64, hint: Option<Option<u64>>) -> SourceDescriptor {
+        let mut b = SourceDescriptor::builder(SourceId::new(id))
+            .total_triples(triples)
+            .predicate(pred(&foaf("knows"), triples, triples.max(1), triples.max(1)));
+        if let Some(cardinality_hint) = hint {
+            b = b.retrieval(RetrievalCapability {
+                vector: true,
+                text: false,
+                cardinality_hint,
+            });
+        }
+        b.build()
+    }
+
+    // ---- Declared hints order candidates ascending-by-hint FIRST; sources without a
+    //      declared hint (no capability at all, or a capability without the hint) keep
+    //      their relative index order AFTER every hinted source.
+    #[test]
+    fn retrieval_hint_orders_declared_hints_first_ascending() {
+        let srcs = [
+            knows_source("s0", 100, Some(Some(500))), // hint 500 ⇒ second.
+            knows_source("s1", 100, None),            // no capability ⇒ last group.
+            knows_source("s2", 100, Some(Some(5))),   // hint 5 ⇒ first.
+            knows_source("s3", 100, Some(None)),      // capability, hint undeclared ⇒ last group.
+        ];
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri(&foaf("knows")),
+            var("o"),
+        )]);
+        let order: Vec<usize> = select_sources(&bgp, &srcs)[0]
+            .candidates
+            .iter()
+            .map(|c| c.source)
+            .collect();
+        assert_eq!(
+            order,
+            vec![2, 0, 1, 3],
+            "hinted ascending (5, 500) first, then unhinted in index order"
+        );
+    }
+
+    // ---- A declared `u64::MAX` hint is NOT the undeclared sentinel: the presence
+    //      discriminator (not the hint value) separates the groups, so a later-index
+    //      source declaring u64::MAX still precedes an earlier-index unhinted source.
+    #[test]
+    fn retrieval_hint_u64_max_precedes_unhinted() {
+        let srcs = [
+            knows_source("m0", 100, None),                 // unhinted, earlier index.
+            knows_source("m1", 100, Some(Some(u64::MAX))), // declared max hint.
+        ];
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri(&foaf("knows")),
+            var("o"),
+        )]);
+        let order: Vec<usize> = select_sources(&bgp, &srcs)[0]
+            .candidates
+            .iter()
+            .map(|c| c.source)
+            .collect();
+        assert_eq!(
+            order,
+            vec![1, 0],
+            "a declared u64::MAX hint sorts before every unhinted source"
+        );
+    }
+
+    // ---- Equal hints (and the all-unhinted case) fall back to the deterministic
+    //      ascending source-index tie-break — with no hints anywhere the ordering is
+    //      exactly the historical ascending-index order.
+    #[test]
+    fn retrieval_hint_ties_and_absence_keep_index_order() {
+        let bgp = Bgp::new(vec![TriplePattern::new(
+            var("s"),
+            iri(&foaf("knows")),
+            var("o"),
+        )]);
+        // Equal hints ⇒ index order.
+        let tied = [
+            knows_source("t0", 100, Some(Some(7))),
+            knows_source("t1", 100, Some(Some(7))),
+        ];
+        let order: Vec<usize> = select_sources(&bgp, &tied)[0]
+            .candidates
+            .iter()
+            .map(|c| c.source)
+            .collect();
+        assert_eq!(order, vec![0, 1], "equal hints tie-break on source index");
+        // No hints at all ⇒ the historical ascending-index order.
+        let unhinted = [knows_source("u0", 100, None), knows_source("u1", 100, None)];
+        let order: Vec<usize> = select_sources(&bgp, &unhinted)[0]
+            .candidates
+            .iter()
+            .map(|c| c.source)
+            .collect();
+        assert_eq!(order, vec![0, 1], "no hints ⇒ ascending index order");
+    }
+
+    // ---- THE inherited invariant (differential acceptance test): selection WITH hints
+    //      vs WITHOUT hints yields, per pattern, the IDENTICAL selected-source SET and
+    //      identical per-source cardinality estimates — only the ordering may differ.
+    //      The hints are chosen adversarially WRONG (a zero hint on a huge source, a
+    //      huge hint on a tiny one) to show a bad hint still cannot change the set.
+    #[test]
+    fn retrieval_hint_never_changes_selected_source_sets() {
+        use std::collections::BTreeMap;
+        // Two-pattern BGP: knows (held by 3 of 4 sources) and name (held by 1).
+        let bgp = Bgp::new(vec![
+            TriplePattern::new(var("s"), iri(&foaf("knows")), var("o")),
+            TriplePattern::new(var("o"), iri(&foaf("name")), var("n")),
+        ]);
+        let with_hints = [
+            knows_source("w0", 10_000, Some(Some(0))), // adversarial: zero hint, huge source.
+            knows_source("w1", 3, Some(Some(u64::MAX))), // adversarial: max hint, tiny source.
+            source_b(), // name-only ⇒ pruned for knows regardless of any hint.
+            knows_source("w3", 100, Some(Some(50))),
+        ];
+        let without_hints = [
+            knows_source("w0", 10_000, None),
+            knows_source("w1", 3, None),
+            source_b(),
+            knows_source("w3", 100, None),
+        ];
+        // Per pattern: the (source ⇒ estimate) map, i.e. the selected SET + estimates
+        // with the advisory ordering erased.
+        let sets = |srcs: &[SourceDescriptor]| -> Vec<BTreeMap<usize, u64>> {
+            select_sources(&bgp, srcs)
+                .iter()
+                .map(|ps| {
+                    ps.candidates
+                        .iter()
+                        .map(|c| (c.source, c.estimated_cardinality.to_bits()))
+                        .collect()
+                })
+                .collect()
+        };
+        assert_eq!(
+            sets(&with_hints),
+            sets(&without_hints),
+            "hints must not change the selected-source sets or the estimates"
+        );
+        // …while the ordering DID change for the knows pattern (the hint is consumed):
+        // zero-hint w0 first, then w3 (50), then max-hint w1.
+        let order: Vec<usize> = select_sources(&bgp, &with_hints)[0]
+            .candidates
+            .iter()
+            .map(|c| c.source)
+            .collect();
+        assert_eq!(order, vec![0, 3, 1], "the hint reorders (and only reorders)");
     }
 }

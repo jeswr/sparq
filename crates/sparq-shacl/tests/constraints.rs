@@ -159,8 +159,9 @@ fn range_string_ordering() {
 
 #[test]
 fn range_datetime_ordering_and_incomparability() {
-    // sh:maxInclusive a timezoned dateTime. A value with the SAME tz-presence
-    // compares; a tz-less value is INCOMPARABLE (not satisfied -> violation).
+    // sh:maxInclusive a timezoned dateTime. A tz-less value compares via
+    // XSD's ±14h rule: determinate when its 28h instant window falls wholly
+    // on one side of the bound, INCOMPARABLE inside the window (-> violation).
     let shapes = r#"
         ex:S a sh:NodeShape ; sh:targetNode ex:n ;
           sh:property [ sh:path ex:d ;
@@ -172,12 +173,19 @@ fn range_datetime_ordering_and_incomparability() {
         shapes,
     );
     assert!(ok.conforms, "{}", ok.to_text());
-    // A timezone-less value is incomparable with the timezoned bound ->
+    // A tz-less value months below the bound is determinately less -> conforms.
+    let ok = run(r#"ex:n ex:d "2024-01-01T00:00:00"^^xsd:dateTime ."#, shapes);
+    assert!(
+        ok.conforms,
+        "tz-less value below the ±14h window is determinately < the bound: {}",
+        ok.to_text()
+    );
+    // A tz-less value inside the bound's ±14h window is incomparable ->
     // constraint not satisfied -> violation.
-    let bad = run(r#"ex:n ex:d "2024-01-01T00:00:00"^^xsd:dateTime ."#, shapes);
+    let bad = run(r#"ex:n ex:d "2024-06-01T00:00:00"^^xsd:dateTime ."#, shapes);
     assert!(
         !bad.conforms,
-        "tz-less vs tz'd dateTime must be incomparable"
+        "tz-less vs tz'd dateTime inside ±14h must be incomparable"
     );
     assert_eq!(count_component(&bad, "MaxInclusiveConstraintComponent"), 1);
 }
@@ -248,6 +256,89 @@ fn pattern_with_flags() {
     assert!(!r.conforms);
     assert_eq!(count_component(&r, "PatternConstraintComponent"), 1);
     assert_eq!(flagged_values(&r), vec!["\"zab\"".to_string()]);
+}
+
+/// [FABLE-5] (sq-8ro) XPath F&O `q` flag: literal-pattern mode — every pattern
+/// character (here `.` and `+`) matches literally, so `"a.b+"` conforms while the
+/// would-be regex match `"axbb"` violates.
+#[test]
+fn pattern_q_flag_is_literal_mode() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property [ sh:path ex:code ; sh:pattern "a.b+" ; sh:flags "q" ] .
+    "#;
+    let r = run(r#"ex:n ex:code "xa.b+y" , "axbb" ."#, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(count_component(&r, "PatternConstraintComponent"), 1);
+    assert_eq!(flagged_values(&r), vec!["\"axbb\"".to_string()]);
+}
+
+/// [FABLE-5] (sq-8ro) Per XPath F&O only `i` keeps its effect alongside `q`:
+/// `"qi"` matches the literal pattern case-insensitively.
+#[test]
+fn pattern_q_flag_combines_with_i() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property [ sh:path ex:code ; sh:pattern "A.B" ; sh:flags "qi" ] .
+    "#;
+    let r = run(r#"ex:n ex:code "a.b" , "AxB" ."#, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(flagged_values(&r), vec!["\"AxB\"".to_string()]);
+}
+
+/// [FABLE-5] (sq-8ro) XPath/XSD `\i` (XML NameStartChar) and `\c` (XML NameChar)
+/// multi-character escapes, which the Rust `regex` crate does not know: an
+/// XML-name-shaped pattern `^\i\c*$` accepts `abc` / `_a:b-c.1` / `édition`
+/// (NameStartChar covers #xC0–#xD6) and rejects a digit-initial or
+/// space-containing value.
+#[test]
+fn pattern_xpath_name_char_classes() {
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property [ sh:path ex:code ; sh:pattern "^\\i\\c*$" ] .
+    "#;
+    let ok = run(
+        "ex:n ex:code \"abc\" , \"_a:b-c.1\" , \"\u{e9}dition\" .",
+        shapes,
+    );
+    assert!(ok.conforms, "XML-name values conform: {}", ok.to_text());
+    assert!(ok.diagnostics.is_empty(), "no skip diagnostic: {:?}", ok.diagnostics);
+    let bad = run(r#"ex:n ex:code "1abc" , "ab cd" ."#, shapes);
+    assert!(!bad.conforms, "{}", bad.to_text());
+    assert_eq!(count_component(&bad, "PatternConstraintComponent"), 2);
+}
+
+/// [FABLE-5] (sq-8ro) The complements `\I` / `\C`, and `\c` INSIDE a character
+/// class (where it must expand to a nested class, not a bracketed group).
+#[test]
+fn pattern_xpath_name_class_complements_and_in_class() {
+    // ^\C$ = exactly one non-NameChar: a space conforms, a letter violates.
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property [ sh:path ex:code ; sh:pattern "^\\C$" ] .
+    "#;
+    let r = run(r#"ex:n ex:code " " , "a" ."#, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(flagged_values(&r), vec!["\"a\"".to_string()]);
+
+    // \c inside a class, unioned with "!": "a!" conforms, "a " violates.
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property [ sh:path ex:code ; sh:pattern "^[\\c!]+$" ] .
+    "#;
+    let r = run(r#"ex:n ex:code "a!" , "a " ."#, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(flagged_values(&r), vec!["\"a \"".to_string()]);
+
+    // An ESCAPED backslash before `i` stays a literal-backslash match — the
+    // translator must not misread `\\i` as the name-class escape.
+    let shapes = r#"
+        ex:S a sh:NodeShape ; sh:targetNode ex:n ;
+          sh:property [ sh:path ex:code ; sh:pattern "^\\\\i$" ] .
+    "#;
+    let r = run(r#"ex:n ex:code "\\i" , "x" ."#, shapes);
+    assert!(!r.conforms, "{}", r.to_text());
+    assert_eq!(flagged_values(&r), vec!["\"x\"".to_string()]);
 }
 
 // ---- sh:languageIn / sh:uniqueLang ----

@@ -251,6 +251,12 @@ mod gated {
     /// 70 → 72 positive-entailment). They previously failed closed at L1; the premise
     /// now extracts into ALCHS and the declaration-free conclusion roles reuse only the
     /// premise-confirmed role kind. The audited five-row divergence set is unchanged.
+    /// UNCHANGED at 186 by sq-fj8lj ([FABLE-5] — `dl-direct` now enables
+    /// `sparq-reason-dl/dispatch_ql`, graduating the QL dispatch branch to the
+    /// sparq-reason-ql DL-Lite_R checker): MEASURED at the pinned export, ZERO corpus rows
+    /// dispatch to the QL branch — reaching it needs in-QL ∧ not-RL ∧ not-EL, which forces
+    /// a complement shape absent from the extractable corpus (the pre-change abstention
+    /// histogram carried no "QL consistency pending" entry), so no row's verdict moves.
     pub const DL_DIRECT_FLOOR: usize = 186;
 
     /// Abstained (fail-closed OutOfFragment / guard / deferred / budget) row totals,
@@ -295,6 +301,8 @@ mod gated {
     /// [FABLE-5] sq-pbz04.4.9
     /// Re-pinned by sq-zfwzq ([GPT-5.6]): −4 (472 → 468), exactly the two consistency
     /// and two positive-entailment rows graduated into [`DL_DIRECT_FLOOR`].
+    /// UNCHANGED at 468 by sq-fj8lj (the graduated QL dispatch branch): zero corpus rows
+    /// reach the QL branch — see the [`DL_DIRECT_FLOOR`] note.
     pub const DL_DIRECT_ABSTAINED: usize = 468;
 
     /// Audited, PINNED divergence rows (module docs — mechanisms M3/M5/M6): every row

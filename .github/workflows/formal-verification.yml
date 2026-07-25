@@ -65,10 +65,20 @@ on:
     # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
     # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
     types: [opened, synchronize, reopened, ready_for_review]
-  # Merge queue: re-run the identical check-set on the queue's merge_group ref so the
-  # required ci-summary gate finds the same siblings there (base_sha/head_sha of the
-  # queue entry give the union-diff — same pairing ci-select.yml uses).
-  merge_group:
+  # [FABLE-5] (2026-07-18 maintainer directive, merge-queue subset) merge_group
+  # REMOVED, push-to-main ADDED: the Kani proofs already ran + gated on the PR head;
+  # the queue re-run added wall-clock to every enqueue without new signal. Coverage
+  # now lives at: PR head (this pull_request trigger, unchanged) + push-to-main
+  # below (POST-MERGE DETECTION on main; a break is recovered by revert / fix-forward
+  # — batch-merge.yml's recursive bisection isolates a culprit among the PRE-merge
+  # constituents of a failed omnibus; it does NOT bisect a breakage that already
+  # landed on main) + the nightly-full-sweep backstop (formal-alarm.yml alarms if
+  # it goes silent). The polling `ci-summary / gate` never waits on a check that was
+  # never scheduled. [FABLE-5] PR #3511 review finding 6b: honesty fix — the earlier
+  # "batch-merge/bisection is the recovery net" wording implied a MAIN-recovery
+  # mechanism that batch-merge.yml does not have (its bisection is pre-merge only).
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -128,7 +138,7 @@ jobs:
       # Unconditional: ANY PR can add a `#[cfg(kani)]` module or touch kani.yml/the
       # manifest, and the check is seconds-cheap (a comment-aware source scan + two
       # config parses — no cargo, no build).
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install PyYAML (hash-pinned)

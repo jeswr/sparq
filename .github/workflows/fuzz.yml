@@ -7,19 +7,30 @@
 # or UB"; libFuzzer reports any crash and (in CI) the run fails with the reproducer.
 #
 # TRIGGER + BUDGET (kept BOUNDED + non-flaky so it is a real but fast gate):
-#   - pull_request / merge_group : DETERMINISTIC CORPUS-REPLAY only (heavy-lane
-#     placement, bead sq-6vshe.6). libFuzzer `-runs=0` executes every committed seed
-#     (fuzz/seeds/<t>) + every cached-corpus input EXACTLY ONCE and generates NO new
-#     inputs — so a reintroduced known crasher (or a seed that a code change now makes
-#     panic) replays RED in seconds, but the multi-minute randomized-fuzzing pole is
-#     removed from the per-PR critical path. This job is auto-discovered by
-#     `ci-summary / gate` (its name has no "advisory"/"informational" token) so a
-#     replay crash on a PR BLOCKS the merge — the deterministic slice of the sq-ovnf
-#     gate is preserved; the randomized-search slice moves to push/nightly below.
+#   - pull_request : DETERMINISTIC CORPUS-REPLAY only (heavy-lane placement, bead
+#     sq-6vshe.6). libFuzzer `-runs=0` executes every committed seed (fuzz/seeds/<t>)
+#     + every cached-corpus input EXACTLY ONCE and generates NO new inputs — so a
+#     reintroduced known crasher (or a seed that a code change now makes panic)
+#     replays RED in seconds, but the multi-minute randomized-fuzzing pole is removed
+#     from the per-PR critical path. This job is auto-discovered by `ci-summary / gate`
+#     (its name has no "advisory"/"informational" token) so a replay crash on a PR
+#     BLOCKS the merge — the deterministic slice of the sq-ovnf gate is preserved; the
+#     randomized-search slice moves to push/nightly below.
 #     RATIONALE (design §7): a few minutes of per-PR *random* fuzzing has near-zero
 #     marginal detection probability, so it was pole, not net; replay keeps every
 #     deterministic guarantee. The `fuzz-full` PR label restores randomized fuzzing on
 #     a specific PR (see the budget step) for a fuzz-sensitive change.
+#   - merge_group : this lane does NOT trigger on merge_group (removed by the
+#     2026-07-18 merge-queue-subset directive — see the `on:` block below). The
+#     deterministic replay already ran + gated on the PR head, so re-running it per
+#     enqueue (a pure function of already-gated code) added a full nightly-toolchain +
+#     fuzz-target compile with no new signal. The SAFETY NET for the queue is the
+#     POST-MERGE `push`-to-`main` replay + the nightly randomized soak: a break that
+#     only a queued combination could produce is caught on `main` and recovered by
+#     REVERT / FIX-FORWARD — there is NO merge-group replay and NO POST-MERGE bisection
+#     (batch-merge.yml's recursive bisection isolates a culprit among the PRE-merge
+#     constituents of a failed omnibus only). The polling
+#     `ci-summary / gate` never waits on a check that was never scheduled.
 #   - push to main : RANDOMIZED per-target run (`MAIN_SECS`, default 120s each) for
 #     deeper coverage on the integration branch, where a few extra minutes are
 #     affordable. This is a full-form randomized lane (design §7 "full form" column).
@@ -79,12 +90,18 @@ on:
     # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
     # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
     types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
-  # [OPUS-4.8] Merge queue: fuzz surfaces a check on PRs, so it must also run on the
-  # queue's merge_group ref or the required ci-summary would wait for a sibling that
-  # never appears there. The budget step below maps merge_group to the fast SMOKE
-  # budget (same as pull_request) — a pre-merge gate wants quick coverage, not the
-  # nightly soak. github.ref in the concurrency group is the unique merge_group ref.
-  merge_group:
+  # [FABLE-5] (2026-07-18 maintainer directive, merge-queue subset) merge_group
+  # REMOVED: the deterministic corpus-replay already ran + gated on the PR head
+  # (select-scoped), the push-to-main run above re-replays POST-MERGE (a break on
+  # main is recovered by revert / fix-forward — batch-merge.yml bisects only the
+  # PRE-merge constituents of a failed omnibus, never main itself), and the daily schedule
+  # runs the real randomized soak. Even the queue's smoke tier paid a full nightly-
+  # toolchain + fuzz-target compile per enqueue for a replay that is a pure function
+  # of code already gated on the PR. The polling `ci-summary / gate` never waits on a
+  # check that was never scheduled (bench.yml sq-6vshe.6 rationale; the old "would
+  # wait" comment was stale pre-polling doctrine). [FABLE-5] PR #3511 review finding
+  # 6b: honesty fix — the earlier "batch-merge/bisection is the recovery net" wording
+  # implied a MAIN-recovery mechanism batch-merge.yml does not have.
   workflow_dispatch:
   # Daily heavy tier. 04:23 UTC (offset from ci.yml's 03:17 coverage cron so the two
   # heavy nightly lanes do not contend for the same runner window).
@@ -212,7 +229,7 @@ jobs:
           # cache on its manifests so it is not shared with the workspace build.
           workspaces: "fuzz"
       - name: Install cargo-fuzz
-        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: cargo-fuzz
       # [FABLE-5] sq-0iqzw: persistent corpus. Without this, every run — including
@@ -236,7 +253,9 @@ jobs:
             fuzz-corpus-v1-
       # [FABLE-5] sq-6vshe.6: emit BOTH the per-target budget AND the run MODE.
       #   mode=replay : deterministic corpus-replay only (`-runs=0`, no randomized
-      #                 search) — the per-PR / merge_group default. Seconds, no pole.
+      #                 search) — the per-PR default. Seconds, no pole. (This lane no
+      #                 longer triggers on merge_group; the `merge_group)` case-arm
+      #                 below is kept as a harmless-if-unreached default.)
       #   mode=fuzz   : randomized fuzzing for `-max_total_time=<secs>` — push-to-main,
       #                 nightly, workflow_dispatch, AND any PR carrying the `fuzz-full`
       #                 label (the per-PR opt-back-in for a fuzz-sensitive change,
@@ -252,10 +271,12 @@ jobs:
           set -euo pipefail
           case "${{ github.event_name }}" in
             schedule)                     secs="$NIGHTLY_SECS"; mode="fuzz" ;;
-            # [FABLE-5] sq-6vshe.6: per-PR + merge_group default to deterministic
-            # corpus-replay only — the multi-minute randomized pole moves to push +
-            # nightly. A `fuzz-full`-labelled PR opts BACK IN to the SMOKE randomized
-            # budget so a fuzz-sensitive change can still get per-PR randomized search.
+            # [FABLE-5] sq-6vshe.6: per-PR defaults to deterministic corpus-replay
+            # only — the multi-minute randomized pole moves to push + nightly. A
+            # `fuzz-full`-labelled PR opts BACK IN to the SMOKE randomized budget so a
+            # fuzz-sensitive change can still get per-PR randomized search. (The lane
+            # does not trigger on merge_group; the `merge_group` token is kept in this
+            # pattern only so a re-added trigger would inherit the replay default.)
             pull_request|merge_group)
               if [ "${FUZZ_FULL_LABEL}" = "true" ]; then
                 secs="$SMOKE_SECS"; mode="fuzz"
@@ -447,10 +468,15 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable via toolchain input
-        with:
-          toolchain: stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - name: Cache cargo + target
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
