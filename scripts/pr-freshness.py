@@ -80,6 +80,10 @@ PROG = "pr-freshness"
 # while its fresh run is still converging.
 MAX_UPDATES_PER_TICK = 6
 COOLDOWN_MIN = 40
+# Runs-per-head listing page. Raised from 30 so the common case is a COMPLETE listing;
+# correctness does not depend on the value — a truncated page is detected via
+# total_count and fails closed (see enrich).
+_RUNS_PAGE = 100
 
 ARMED_LABEL = "review:pass"
 BLOCK_LABEL = "review:needs-user"
@@ -166,6 +170,19 @@ def plan(prs, repo, now, cap=MAX_UPDATES_PER_TICK):
         if base != "main":
             actions.append(Action("skip", num, f"base {base or '?'} is not main"))
             continue
+        # update-branch needs write access to the HEAD repository, which the App token has only
+        # for this repo. A fork PR would 403 every tick while consuming the cap.
+        head_repo = pr.get("head_repo") or ""
+        if head_repo != repo:
+            actions.append(Action("skip", num,
+                                  f"head repo {head_repo or '?'} is not {repo} (fork)"))
+            continue
+
+        # A guard we could not EVALUATE is not a guard that passed. Every enrichment default
+        # used to fail open (see enrich) — this is the single place that decision now lands.
+        if pr.get("observation_error"):
+            actions.append(Action("skip", num, f"unobservable: {pr['observation_error']}"))
+            continue
 
         # (b) behind main.
         if int(pr.get("behind_by") or 0) <= 0:
@@ -220,10 +237,18 @@ def _gh_json(argv):
 def collect_prs(repo, gh_json=_gh_json):
     prs = gh_json([
         "pr", "list", "--repo", repo, "--state", "open", "--limit", "200",
-        "--json", "number,isDraft,labels,autoMergeRequest,mergeStateStatus,headRefOid,baseRefName",
+        "--json", "number,isDraft,labels,autoMergeRequest,mergeStateStatus,headRefOid,"
+                  "baseRefName,headRepository,headRepositoryOwner",
     ])
     norm = []
     for p in prs:
+        # A fork PR's head lives in another repository. `update-branch` requires write access
+        # to the HEAD repo, which the App token does not have, so such a PR 403s on every tick
+        # while consuming the per-tick cap and starving PRs we can actually refresh. Build the
+        # full name and let the cheap guards drop it; an unreadable owner/name yields "" and is
+        # therefore also dropped, which is the safe direction.
+        owner = ((p.get("headRepositoryOwner") or {}).get("login") or "")
+        name = ((p.get("headRepository") or {}).get("name") or "")
         norm.append({
             "number": p["number"],
             "is_draft": bool(p.get("isDraft")),
@@ -232,18 +257,20 @@ def collect_prs(repo, gh_json=_gh_json):
             "merge_state": p.get("mergeStateStatus", ""),
             "head_sha": p.get("headRefOid", ""),
             "base_ref": p.get("baseRefName", ""),
+            "head_repo": f"{owner}/{name}" if owner and name else "",
         })
     return norm
 
 
-def _cheaply_eligible(pr) -> bool:
+def _cheaply_eligible(pr, repo) -> bool:
     """Mirror of plan()'s cheap guards — decides which PRs are worth 3 enrichment calls."""
     labels = [l.lower() for l in pr.get("labels", [])]
     return (not pr.get("is_draft")
             and BLOCK_LABEL not in labels
             and (pr.get("armed") or ARMED_LABEL in labels)
             and (pr.get("merge_state") or "").upper() != "DIRTY"
-            and (pr.get("base_ref") or "") == "main")
+            and (pr.get("base_ref") or "") == "main"
+            and (pr.get("head_repo") or "") == repo)
 
 
 def enrich(repo, pr, gh_json=_gh_json):
@@ -253,14 +280,36 @@ def enrich(repo, pr, gh_json=_gh_json):
     # compare(head...main): ahead_by == commits main has that head lacks (= behind-ness),
     # and base_commit == the head commit itself, carrying the committer timestamp the
     # cooldown reads. One call, two signals.
+    # OBSERVATION vs ABSENCE. Every default below used to collapse "the API did not tell us"
+    # into the value that PERMITS the mutation: a missing commit date disabled the cooldown
+    # entirely, a payload without `check_runs` became gate="missing" (an ELIGIBLE state), and a
+    # payload without `workflow_runs` became zero active runs. All three fail OPEN. So each
+    # unreadable payload now records an observation_error and plan() skips the PR — a guard we
+    # could not evaluate is not a guard that passed.
+    pr["observation_error"] = ""
+
+    def unobservable(what):
+        if not pr["observation_error"]:
+            pr["observation_error"] = what
+
     cmp_ = gh_json(["api", f"repos/{repo}/compare/{sha}...main"])
+    if not isinstance(cmp_, dict) or "ahead_by" not in cmp_:
+        unobservable("compare payload unreadable")
+        cmp_ = {}
     pr["behind_by"] = int(cmp_.get("ahead_by") or 0)
     pr["head_committed_at"] = (((cmp_.get("base_commit") or {}).get("commit") or {})
                                .get("committer") or {}).get("date")
+    if not pr["head_committed_at"]:
+        # Without it the cooldown cannot be evaluated at all, and the old code simply skipped
+        # the check — refreshing a head that may have been pushed seconds ago.
+        unobservable("head commit date missing — cooldown unevaluable")
 
     # Latest check-run named exactly `gate` on the head (draft-tier runs render a
     # different name, `gate, draft-tier`, and drafts are excluded anyway).
     checks = gh_json(["api", f"repos/{repo}/commits/{sha}/check-runs?per_page=100"])
+    if not isinstance(checks, dict) or not isinstance(checks.get("check_runs"), list):
+        unobservable("check-runs payload unreadable")
+        checks = {"check_runs": []}
     gates = sorted((c for c in checks.get("check_runs", [])
                     if (c.get("name") or "").strip().lower() == "gate"),
                    key=lambda c: c.get("started_at") or "")
@@ -281,9 +330,27 @@ def enrich(repo, pr, gh_json=_gh_json):
     # state may already be recomputing the verdict. Over-counting merely defers the PR
     # one tick (fail-safe); under-counting churns a converging head — the exact race
     # this guard exists to prevent.
-    runs = gh_json(["api", f"repos/{repo}/actions/runs?head_sha={sha}&per_page=30"])
-    pr["active_runs"] = sum(1 for r in runs.get("workflow_runs", [])
+    #
+    # QUANTIFIER: the obligation is "NO active run exists" — universal. Observing zero
+    # non-completed runs in ONE page does not establish it, and the old code scanned a single
+    # unpaginated page of 30, so an older active run on a re-run head sorted past the page
+    # boundary read as "no active runs" and the head got churned. Presence is easy to prove and
+    # absence is not, so: any non-completed run found => active (skip); zero found on a
+    # TRUNCATED listing => unobservable (skip); zero found on a complete listing => genuinely
+    # idle. Only the last of those permits the refresh.
+    runs = gh_json(["api",
+                    f"repos/{repo}/actions/runs?head_sha={sha}&per_page={_RUNS_PAGE}"])
+    if not isinstance(runs, dict) or not isinstance(runs.get("workflow_runs"), list):
+        unobservable("workflow-runs payload unreadable")
+        pr["active_runs"] = 0
+        return pr
+    listed = runs["workflow_runs"]
+    pr["active_runs"] = sum(1 for r in listed
                             if (r.get("status") or "").lower() != "completed")
+    total = runs.get("total_count")
+    if pr["active_runs"] == 0 and isinstance(total, int) and total > len(listed):
+        unobservable(f"workflow-run listing truncated ({len(listed)} of {total}) — "
+                     f"cannot prove no active run")
     return pr
 
 
@@ -368,7 +435,7 @@ def main() -> int:
 
     prs = collect_prs(args.repo)
     for pr in prs:
-        if _cheaply_eligible(pr):
+        if _cheaply_eligible(pr, args.repo):
             enrich(args.repo, pr)
     actions = plan(prs, args.repo, datetime.now(timezone.utc))
 
@@ -421,7 +488,8 @@ def self_test() -> int:
         base = {"number": number, "is_draft": False, "labels": [], "armed": True,
                 "merge_state": "BLOCKED", "head_sha": f"sha{number}", "base_ref": "main",
                 "behind_by": 5, "gate": "failure", "active_runs": 0,
-                "head_committed_at": ago(120)}
+                "head_committed_at": ago(120), "head_repo": repo,
+                "observation_error": ""}
         base.update(over)
         return base
 
@@ -561,7 +629,21 @@ def self_test() -> int:
         # stacked PR: base != main — must be rejected before spending enrichment calls.
         {"number": 23, "isDraft": False, "labels": [], "autoMergeRequest": {"enabledAt": "x"},
          "mergeStateStatus": "BLOCKED", "headRefOid": "sha23", "baseRefName": "release/stack"},
+        # FORK head: otherwise fully eligible. update-branch needs write on the HEAD repo, so
+        # this 403s every tick while consuming the cap. Must be rejected by the cheap guards,
+        # BEFORE any enrichment call is spent on it.
+        {"number": 26, "isDraft": False, "labels": [{"name": "review:pass"}],
+         "autoMergeRequest": None, "mergeStateStatus": "BLOCKED",
+         "headRefOid": "sha26", "baseRefName": "main",
+         "headRepository": {"name": "sparq"},
+         "headRepositoryOwner": {"login": "some-contributor"}},
     ]
+    # Same-repo head for every fixture that is meant to be eligible. Injected rather than
+    # written inline so a future fixture cannot silently omit it and read as a fork.
+    _owner, _name = repo.split("/", 1)
+    for _raw in raw_pr_list:
+        _raw.setdefault("headRepository", {"name": _name})
+        _raw.setdefault("headRepositoryOwner", {"login": _owner})
     compare_by_sha = {
         "sha21": {"ahead_by": 4,
                   "base_commit": {"commit": {"committer": {"date": ago(120)}}}},
@@ -631,11 +713,11 @@ def self_test() -> int:
     check("collect_prs: baseRefName normalized to base_ref",
           by_num[22]["base_ref"] == "main" and by_num[23]["base_ref"] == "release/stack")
     check("cheap-eligible: label-armed and automerge-armed main PRs pass",
-          _cheaply_eligible(by_num[21]) and _cheaply_eligible(by_num[22]))
+          _cheaply_eligible(by_num[21], repo) and _cheaply_eligible(by_num[22], repo))
     check("cheap-eligible: stacked (base != main) PR rejected before enrichment",
-          not _cheaply_eligible(by_num[23]))
+          not _cheaply_eligible(by_num[23], repo))
 
-    enriched = [enrich(repo, p, gh_json=stub_gh_json) if _cheaply_eligible(p) else p
+    enriched = [enrich(repo, p, gh_json=stub_gh_json) if _cheaply_eligible(p, repo) else p
                 for p in norm]
     check("enrich: stacked PR spent zero API calls", "sha23" not in enrich_calls)
     check("enrich: behind_by wired from compare.ahead_by", by_num[21]["behind_by"] == 4)
@@ -660,6 +742,83 @@ def self_test() -> int:
           raw_actions[22].kind == "skip" and "runs on head" in raw_actions[22].reason)
     check("raw path: #23 skipped for non-main base",
           raw_actions[23].kind == "skip" and "is not main" in raw_actions[23].reason)
+    check("raw path: FORK head #26 is skipped, and NOT at the cost of enrichment calls "
+          "(update-branch has no write access to another repo — it would 403 every tick "
+          "while consuming the per-tick cap)",
+          raw_actions[26].kind == "skip"
+          and "fork" in raw_actions[26].reason
+          and "sha26" not in enrich_calls)
+
+    # ---- FAIL-CLOSED OBSERVATION (cross-provider review of this PR, finding 2) -------------
+    # Each default below used to collapse "the API did not tell us" into the value that PERMITS
+    # the refresh. Asserted against the SAME baseline fixture that DOES update, so these cannot
+    # pass merely because the fixture was ineligible for some other reason.
+    check("baseline for the unobservable checks below really does update",
+          plan([fx(70)], repo, now)[0].kind == "update")
+    for label, over in [
+        ("compare payload unreadable", {"observation_error": "compare payload unreadable"}),
+        ("head commit date missing (cooldown UNEVALUABLE, previously skipped outright)",
+         {"observation_error": "head commit date missing — cooldown unevaluable"}),
+        ("check-runs payload unreadable (previously became gate=missing, an ELIGIBLE state)",
+         {"observation_error": "check-runs payload unreadable"}),
+        ("workflow-runs payload unreadable (previously became 0 active runs)",
+         {"observation_error": "workflow-runs payload unreadable"}),
+    ]:
+        act = plan([fx(71, **over)], repo, now)[0]
+        check(f"unobservable -> skip: {label}",
+              act.kind == "skip" and "unobservable" in act.reason)
+
+    # enrich() must SET those errors from real payload shapes, not just honour them in plan().
+    for label, payload_key, payload in [
+        ("compare without ahead_by", "compare", {}),
+        ("compare without a committer date", "compare", {"ahead_by": 2}),
+        ("check-runs without the check_runs list", "checks", {"total_count": 0}),
+        ("workflow-runs without the workflow_runs list", "runs", {"total_count": 0}),
+    ]:
+        def _stub(argv, _k=payload_key, _p=payload):
+            path = argv[1]
+            if "compare/" in path:
+                return _p if _k == "compare" else {
+                    "ahead_by": 2,
+                    "base_commit": {"commit": {"committer": {"date": ago(120)}}}}
+            if "check-runs" in path:
+                return _p if _k == "checks" else {"check_runs": []}
+            return _p if _k == "runs" else {"total_count": 0, "workflow_runs": []}
+        got = enrich(repo, {"head_sha": "shaX"}, gh_json=_stub)
+        check(f"enrich records an observation error: {label}",
+              bool(got.get("observation_error")))
+
+    # QUANTIFIER (finding 6): "no active run exists" is UNIVERSAL. Zero found in a TRUNCATED
+    # page does not establish it — the old code scanned one unpaginated page of 30.
+    def _trunc_stub(argv):
+        path = argv[1]
+        if "compare/" in path:
+            return {"ahead_by": 2,
+                    "base_commit": {"commit": {"committer": {"date": ago(120)}}}}
+        if "check-runs" in path:
+            return {"check_runs": []}
+        return {"total_count": 250, "workflow_runs": [
+            {"status": "completed"} for _ in range(100)]}
+    trunc = enrich(repo, {"head_sha": "shaT"}, gh_json=_trunc_stub)
+    check("truncated run listing with zero active runs is UNOBSERVABLE, not idle "
+          "(cannot prove absence from one page)",
+          "truncated" in (trunc.get("observation_error") or ""))
+    check("...and plan() therefore skips it rather than churning the head",
+          plan([fx(72, **{k: trunc[k] for k in ('observation_error',)})],
+               repo, now)[0].kind == "skip")
+
+    def _complete_stub(argv):
+        path = argv[1]
+        if "compare/" in path:
+            return {"ahead_by": 2,
+                    "base_commit": {"commit": {"committer": {"date": ago(120)}}}}
+        if "check-runs" in path:
+            return {"check_runs": []}
+        return {"total_count": 3, "workflow_runs": [{"status": "completed"}] * 3}
+    complete = enrich(repo, {"head_sha": "shaC"}, gh_json=_complete_stub)
+    check("a COMPLETE listing with zero active runs is genuinely idle (the guard must not "
+          "become a blanket refusal — otherwise the refresher never refreshes anything)",
+          not complete.get("observation_error") and complete["active_runs"] == 0)
 
     print()
     if fails == 0:
