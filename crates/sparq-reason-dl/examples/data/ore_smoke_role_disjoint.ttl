@@ -1,0 +1,18 @@
+# [FABLE-5] sq-hmd7l.10 — vendored ORE-style CONSISTENCY task (expected: INCONSISTENT).
+# Hand-authored, hand-verified. The clash is DERIVED, not asserted (non-vacuous: the
+# ABox seed contains no direct contradiction, so the seed-clash shortcut cannot fire and
+# the tableau must actually run): a ∀ on the SUPER-role s constrains an edge asserted on
+# the SUB-role r, forcing b ∈ B, which clashes with the asserted b ∈ C under
+# disjoint(B, C). A tableau that dropped ∀-propagation through the subPropertyOf
+# hierarchy — or disjointness — would wrongly report consistent.
+@prefix : <http://sparq.dev/bench/ore-smoke/role-disjoint#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+:r rdfs:subPropertyOf :s .
+:A rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :s ; owl:allValuesFrom :B ] .
+:B owl:disjointWith :C .
+
+:a a :A .
+:a :r :b .
+:b a :C .

@@ -82,7 +82,7 @@ function pdfHref(slug: string): string {
 // Matches the site's existing source-link convention (jeswr/sparq blob/main — see the /surface/*
 // readmeHref/skillHref links). An absolute external link, so no basePath prefix.
 function sourceHref(source: string): string {
-  return `https://github.com/jeswr/sparq/blob/main/site/papers/${source}`;
+  return `https://github.com/sparq-org/sparq/blob/main/site/papers/${source}`;
 }
 
 export default async function PaperPage({

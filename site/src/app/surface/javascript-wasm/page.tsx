@@ -78,8 +78,8 @@ export default function JavascriptWasmSurfacePage() {
           surface), trading a smaller download for those native-only features.
         </p>
       }
-      readmeHref="https://github.com/jeswr/sparq/tree/main/crates/sparq-wasm"
-      skillHref="https://github.com/jeswr/sparq/blob/main/skills/javascript-wasm/SKILL.md"
+      readmeHref="https://github.com/sparq-org/sparq/tree/main/crates/sparq-wasm"
+      skillHref="https://github.com/sparq-org/sparq/blob/main/skills/javascript-wasm/SKILL.md"
       links={[
         { href: withBasePath("/app/"), label: "Open the SPARQL workbench", external: true },
         {

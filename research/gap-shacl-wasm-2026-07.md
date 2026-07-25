@@ -92,10 +92,18 @@ number would come from (sq-hmd7l.39/40 wasm-compare wave; SHACL can join it).
 
 `sparq-shacl-wasm`'s `Validator` is deliberately **stateless one-shot** — there
 is no pre-parsed/persistent-graph validate on this bundle, so a validate-only
-column for sparq is structurally absent (the lean `sparq-wasm` bundle's
-`Store.validate` behind its `shacl` feature is that shape). At micro scale the
-one-shot still wins; at scale-tier corpora repeat-validation without re-parse
-may matter. Follow-up bead filed (below) rather than widening this bundle now.
+column for sparq is structurally absent. At micro scale the one-shot still
+wins; at scale-tier corpora repeat-validation without re-parse may matter.
+Follow-up bead filed (below) rather than widening this bundle now.
+
+> **[FABLE-5] Correction (sq-01xlp).** This record originally cited the lean
+> `sparq-wasm` bundle's `Store.validate` (its `shacl` feature) as the
+> pre-parsed shape. It is not: `Store::validate` is ALSO a stateless one-shot —
+> it re-parses both documents per call and does not consult the store's
+> triples (`crates/sparq-wasm/src/shacl.rs`). Neither wasm surface had a
+> pre-parsed path. **Resolved** by `sparq-shacl-wasm`'s opt-in `stateful`
+> feature (`ParsedGraph`): measurement + decision in
+> `research/shacl-wasm-stateful-2026-07.md`.
 
 ## Follow-ups filed
 
@@ -104,7 +112,9 @@ may matter. Follow-up bead filed (below) rather than widening this bundle now.
   for `sparq-shacl-wasm`.
 - **sq-01xlp** — evaluate a pre-parsed/stateful `Validator` variant (or bless
   the lean bundle's `Store.validate` as the stateful path) for scale-tier
-  repeat validation.
+  repeat validation. **RESOLVED**: decision (b), the opt-in `stateful`
+  feature's `ParsedGraph` handle — see
+  `research/shacl-wasm-stateful-2026-07.md`.
 - Scale-tier + quiet-box canonical gather rides the existing wasm-compare wave
   (sq-hmd7l.39 / sq-hmd7l.40) — the harness here accepts any data file via
   its `--data` seam.

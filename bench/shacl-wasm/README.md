@@ -47,13 +47,19 @@ per-occurrence counting and a dedup engine agree (see the
 **Timing** is one-shot **end-to-end** (parse data + shapes + validate +
 reduce) best-of-N for BOTH engines — the stateless wasm `Validator` cannot
 hoist the parse, so the peer is charged the same work; the peer's
-validate-only time on pre-parsed datasets is an extra advisory column. All
+validate-only time on pre-parsed datasets is an extra advisory column. With
+`FEATURES=stateful` (sq-01xlp) the artifact exports the opt-in pre-parsed
+`ParsedGraph` handle and the harness records the SYMMETRIC sparq column
+(`sparq_validate_only_us`, counts cross-checked against the one-shot every
+iteration); without it the column is absent, never a fabricated 0. All
 timings are NON-canonical on the work box (`canonical:false` in the envelope;
 `CANONICAL=1` only on a dedicated quiet EC2 box).
 
 **Bundle bytes** are the second, **deterministic** column: the
 `wasm-pack --release` nodejs-target artifact (default features — no
-`shacl-af`) byte + gzip-9 sizes, recorded per toolchain in the envelope. The
+`shacl-af`, no `stateful`) byte + gzip-9 sizes, recorded per toolchain in the
+envelope. A `FEATURES=…` build flags its bytes as NON-canonical in the
+envelope (the deterministic record is the default-features artifact). The
 pre-bindgen ratchet (`scripts/ci-bench.sh` `wasm_bundle_bytes`) is
 deliberately untouched.
 

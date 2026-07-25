@@ -18,10 +18,14 @@ branch-protection status on `main` ([`docs/branch-protection.md`](docs/branch-pr
 it polls **every other check-run on the same commit** — build + tests, `clippy -D warnings`,
 the conformance / coverage / unsafe-count ratchets, the opt-in feature matrix, supply-chain,
 and the docs-honesty gates — and passes only when none failed. (One deliberate exception:
-**CodeQL is advisory at merge** — it runs on every eligible PR (non-draft heads whose diff
-touches Rust; skipped analyses are backfilled at ready-for-review and by the
-merge-group/push-to-main/weekly runs) but the gate neither waits on nor reds
-because of it; its alerts are triaged retroactively, see §11.) So:
+**CodeQL is advisory at merge** — when the workflow is enabled it runs on every eligible PR
+(non-draft heads whose diff touches Rust; skipped analyses are backfilled at
+ready-for-review and by the merge-group/push-to-main/weekly runs) but the gate neither
+waits on nor reds because of it; its alerts are triaged retroactively, see §11. Since
+2026-07-18 `codeql.yml` is additionally **disabled at the Actions level**
+(`disabled_manually`, maintainer call on merge latency), so no analysis runs at all until
+it is re-enabled — the triggers are untouched, so re-enabling restores it as a non-gating
+leg.) So:
 
 1. Open any merged PR (or the latest commit on `main`) and look at its **checks list** —
    green `ci-summary / gate` ≈ everything below in this document that gates was green.
@@ -286,8 +290,9 @@ written justification), **cargo-vet** (per-dependency audit attestations — an 
 cannot enter silently), a CycloneDX **SBOM**, and a VEX↔deny.toml drift check. Per release
 ([`release.yml`](.github/workflows/release.yml)): SBOM + VEX per artifact and **SLSA build
 provenance** attestations (verifiable with `gh attestation verify`). Continuously: **CodeQL**
-SAST ([`codeql.yml`](.github/workflows/codeql.yml) — advisory at merge time since 2026-07-17;
-open alerts are mirrored daily into a rolling triage issue by
+SAST ([`codeql.yml`](.github/workflows/codeql.yml) — advisory at merge time since 2026-07-17
+and Actions-disabled since 2026-07-18, so it produces no analysis until re-enabled; whenever
+it runs, open alerts are mirrored daily into a rolling triage issue by
 [`codeql-alert-sweep.yml`](.github/workflows/codeql-alert-sweep.yml) and driven back to zero
 retroactively), a daily
 advisory watchdog ([`dependency-monitoring.yml`](.github/workflows/dependency-monitoring.yml)),

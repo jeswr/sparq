@@ -7,12 +7,16 @@
 //! `hdt::TriplesBitmap::read` calls `TriplesBitmap::new`, which — purely to serve
 //! pattern/object/predicate *queries* sparq never issues on a bulk load — builds:
 //!
-//!  * a full `WaveletMatrix<Rank9Sel>` over `sequence_y` (`build_wavelet`), then
-//!  * `max_object` worth of `Vec<Vec<u32>>` (the `vec![Vec::with_capacity(4); max_object]`
-//!    mega-allocation), one inner Vec per distinct object,
-//!  * a per-object `sort_by_cached_key` whose key is `wavelet_y.access(..)`
-//!    (cache-hostile, O(log σ) per probe), and
-//!  * an OP-index = a `CompactVector` + a `Rank9Sel`-backed `Bitmap`.
+//!  * a full wavelet matrix over `sequence_y` (`WaveletMatrix<Rank9Sel>` on the
+//!    0.4 line this was first measured against; `QWT512` since the 0.6 `sucds`→
+//!    `qwt` swap — [FABLE-5] sq-fkj re-verified the eager build is unchanged on
+//!    the released 0.7.3), then
+//!  * a materialize-and-sort of every (object, predicate, position) entry for the
+//!    OP-index (`build_op_index_from_entries` on 0.7.x; per-object `Vec<Vec<u32>>`
+//!    plus a cache-hostile `sort_by_cached_key` probing `wavelet_y.access(..)`
+//!    on 0.4), and
+//!  * the OP-index itself = a compact position sequence + a rank/select-backed
+//!    `Bitmap` (`RSNarrow` on 0.7.x, `Rank9Sel` on 0.4).
 //!
 //! sparq iterates every triple exactly once in SPO order and never runs a triple
 //! pattern, object, or predicate query against the HDT structure, so all of the

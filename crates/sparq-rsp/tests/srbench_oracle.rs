@@ -801,7 +801,7 @@ FROM NAMED WINDOW <http://ex/w1> ON <http://ex/obs> RANGE 10 STEP 10";
 //   w2 [20,30): {(stA,NY,9),(stC,CA,30)}               — 2 rows
 //   w3 [30,40): {}                                      — 0 rows (trailing empty)
 //
-// ISTREAM (cur ∖ prev, multiset hash diff):
+// ISTREAM (cur ∖ prev, exact term-level multiset difference):
 //   w0: prev={} → emit all 3 rows                      = 3
 //   w1: prev=w0 ∖ w1 matches = none (every value changed) → emit 2 rows = 2
 //   w2: prev=w1 ∖ w2 matches = none (every value changed) → emit 2 rows = 2

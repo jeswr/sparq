@@ -14,7 +14,10 @@
 //! [`tableau`]), and — behind the OPT-IN `dispatch` cargo feature, which pulls the existing
 //! RL/EL profile reasoners as optional dependencies — the L4 fragment-dispatch
 //! Direct-Semantics checker + entailment-by-refutation (the `check` module's
-//! `DirectChecker`; code spans, not links, because the module is feature-gated).
+//! `DirectChecker`; code spans, not links, because the module is feature-gated). The
+//! additive OPT-IN `dispatch_ql` feature ([FABLE-5] sq-fj8lj) graduates the dispatch's QL
+//! branch by pulling sparq-reason-ql's `ql-consistency` DL-Lite_R checker; without it the
+//! QL branch abstains (`QlConsistencyPending`).
 
 pub mod extract;
 pub mod model;

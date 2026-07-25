@@ -1,0 +1,26 @@
+# [FABLE-5] sq-hmd7l.10 — vendored ORE-style CONSISTENCY task (expected: CONSISTENT).
+# Hand-authored, hand-verified ALCH university ontology in the shape of an ORE
+# competition consistency task (the real ORE 2014/2015 corpora are gather-only downloads
+# — big corpora stay out of git). Exercises subClassOf, disjointness, an existential, a
+# role hierarchy, a universal with a UNION filler (⊔-branching), and ABox assertions.
+#
+# Hand model: alice ∈ Professor ⊑ Person with a fresh teaches-successor in Course;
+# bob ∈ Student ⊑ Person with involvedWith-successor cs101, and the ∀involvedWith
+# filler (Course ⊔ Person) is satisfied by cs101 ∈ Course. No clash is derivable.
+@prefix : <http://sparq.dev/bench/ore-smoke/univ#> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+:Professor rdfs:subClassOf :Person .
+:Student rdfs:subClassOf :Person .
+:Person owl:disjointWith :Course .
+:Professor rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :teaches ;
+                             owl:someValuesFrom :Course ] .
+:teaches rdfs:subPropertyOf :involvedWith .
+:Student rdfs:subClassOf [ a owl:Restriction ; owl:onProperty :involvedWith ;
+                           owl:allValuesFrom [ owl:unionOf ( :Course :Person ) ] ] .
+
+:alice a :Professor .
+:bob a :Student .
+:bob :involvedWith :cs101 .
+:cs101 a :Course .
