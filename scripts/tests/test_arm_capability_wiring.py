@@ -30,6 +30,11 @@
 #     only its own file, so they CANNOT import a shared helper) while keeping the same
 #     denial-marker set. This pins the duplication instead of letting it rot.
 #   * EXIT SEMANTICS — neither script may lose its non-zero exit on an arm failure.
+#   * STICKY PRECEDENCE (#3766) — collecting failures is only half the job. Both scripts
+#     must compute the exit from the FINAL accumulated state with the precedence
+#     `collected-failure > transient-exhaustion > clean`, so a LATER candidate's exhausted
+#     transient can never downgrade an EARLIER candidate's real arm failure to the lenient
+#     ::warning + exit 0. Pinned in both (deliberately duplicated) files.
 #
 # Needs PyYAML (already a docs-quality dependency); everything else is stdlib. Run:
 #   python3 scripts/tests/test_arm_capability_wiring.py
@@ -273,6 +278,71 @@ class TestScriptContract(unittest.TestCase):
         self.assertEqual(
             self.auto.ArmOutcome(capability=self.auto.CANNOT_ARM).exit_code, 1
         )
+
+    @staticmethod
+    def _outcome_class(module: ModuleType):
+        return getattr(module, "SweepOutcome", None) or module.ArmOutcome
+
+    def test_both_outcomes_carry_sticky_transient_state(self) -> None:
+        # #3766: the per-candidate transient must be RECORDED state, not an exception that
+        # unwinds the run — an exception is what discarded the earlier collected failure.
+        for module in (self.rearm, self.auto):
+            outcome = self._outcome_class(module)()
+            for attribute in (
+                "transient_exhaustions",
+                "sweep_transient",
+                "hard_failed",
+                "transient_detail",
+            ):
+                self.assertTrue(
+                    hasattr(outcome, attribute),
+                    f"{module.PROGRAM}: {attribute} is load-bearing for #3766",
+                )
+
+    def test_a_collected_failure_outranks_a_later_transient_exhaustion(self) -> None:
+        for module in (self.rearm, self.auto):
+            outcome_class = self._outcome_class(module)
+            dominated = outcome_class(
+                arm_failures=[(451, "unstable")],
+                transient_exhaustions=[(452, "HTTP 504")],
+            )
+            self.assertTrue(dominated.hard_failed, module.PROGRAM)
+            self.assertEqual(
+                dominated.exit_code,
+                1,
+                f"{module.PROGRAM}: a LATER candidate's exhausted transient must never "
+                "downgrade a COLLECTED arm failure to success (#3766)",
+            )
+            # ... while the lenient policy survives where it IS correct.
+            transient_only = outcome_class(transient_exhaustions=[(452, "HTTP 504")])
+            self.assertFalse(transient_only.hard_failed, module.PROGRAM)
+            self.assertEqual(transient_only.exit_code, 0, module.PROGRAM)
+            self.assertIsNotNone(transient_only.transient_detail, module.PROGRAM)
+
+    def test_both_publish_the_outcome_on_the_runner(self) -> None:
+        # The exit is computed at the END from this state, so it must be reachable after an
+        # exception escapes run() — a local variable is exactly what #3766 lost.
+        rearm_runner = self.rearm.RearmSweeper(
+            "o/r", "main", gh=lambda _argv: "", log=lambda _line: None
+        )
+        auto_runner = self.auto.AutoArmer("o/r", "main", lambda _argv: "", lambda _l: None)
+        for runner, module in ((rearm_runner, self.rearm), (auto_runner, self.auto)):
+            self.assertIsInstance(
+                runner.outcome, self._outcome_class(module), module.PROGRAM
+            )
+
+    def test_both_expose_an_end_of_run_precedence_function(self) -> None:
+        self.assertTrue(callable(self.rearm.sweep_exit))
+        self.assertTrue(callable(self.auto.arm_exit_code))
+        for module in (self.rearm, self.auto):
+            source = (REARM_PY if module is self.rearm else AUTO_ARM_PY).read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(
+                "collected-failure > transient-exhaustion > clean",
+                source,
+                f"{module.PROGRAM}: the precedence rule must be documented in-source",
+            )
 
     def test_capability_probe_query_reads_the_repository_setting(self) -> None:
         for module in (self.rearm, self.auto):

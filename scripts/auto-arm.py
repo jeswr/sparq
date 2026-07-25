@@ -22,6 +22,16 @@ to GitHub's explicit ``enablePullRequestAutoMerge`` GraphQL mutation.
 #   deliberately self-contained (auto-arm.yml sparse-checks out only this file, so it
 #   cannot import shared helpers); scripts/tests/test_arm_capability_wiring.py pins the
 #   load-bearing strings against scripts/rearm-sweeper.py so the copies cannot drift.
+# [OPUS-5] Issue #3766 — STICKY FAILURE PRECEDENCE. Collecting the failures (above) was
+#   only half the job: the collected state lived in a LOCAL of run(), so a
+#   GhTransientExhausted raised while processing a LATER candidate unwound past the
+#   accumulated-failure check and run_sweep's lenient handler reported ::warning + exit 0.
+#   Reproduced: PR #451's arm failed, PR #452's pre-arm refresh exhausted its retries, and
+#   the run exited 0 — discarding #451's real failure. Now the outcome lives on the ARMER
+#   (AutoArmer.outcome), a later candidate's exhaustion is recorded as its OWN
+#   warning-class per-candidate outcome without escaping the loop, and the exit status is
+#   computed at the END by arm_exit_code() from that final state.
+#   PRECEDENCE: collected-failure > transient-exhaustion > clean.
 
 from __future__ import annotations
 
@@ -146,10 +156,31 @@ class ArmOutcome:
     armed: int = 0
     arm_failures: list[tuple[int, str]] = field(default_factory=list)
     capability: str = INCONCLUSIVE
+    # [OPUS-5] #3766 — warning-class per-candidate outcomes: (number, detail) for every
+    # candidate whose own bounded read retries were exhausted. These NEVER downgrade a
+    # collected failure; they only matter when they are the run's ONLY problem.
+    transient_exhaustions: list[tuple[int, str]] = field(default_factory=list)
+    # Whole-sweep transient exhaustion (the enumeration read, or a backstop catch).
+    sweep_transient: str | None = None
 
     @property
     def capability_failed(self) -> bool:
         return self.capability == CANNOT_ARM
+
+    @property
+    def hard_failed(self) -> bool:
+        """A COLLECTED failure: the verdict that outranks every later transient (#3766)."""
+        return self.capability_failed or bool(self.arm_failures)
+
+    @property
+    def transient_detail(self) -> str | None:
+        """The first transient exhaustion, or None. Warning-class — never a verdict."""
+        if self.sweep_transient:
+            return self.sweep_transient
+        if self.transient_exhaustions:
+            number, reason = self.transient_exhaustions[0]
+            return f"PR #{number}: {reason}"
+        return None
 
     @property
     def exit_code(self) -> int:
@@ -157,8 +188,12 @@ class ArmOutcome:
 
         This is how #3759 finding 5's invariant survives the #3760 refactor: the failed
         arm no longer unwinds the sweep, so it must be the run's EXIT STATUS instead.
+
+        Deliberately independent of ``transient_exhaustions`` — a transient's exit is
+        MODE-dependent (#3759) and is applied by :func:`arm_exit_code`, whereas a
+        collected failure is non-zero in every mode.
         """
-        return 1 if self.capability_failed or self.arm_failures else 0
+        return 1 if self.hard_failed else 0
 
 
 class GhError(RuntimeError):
@@ -241,6 +276,9 @@ class AutoArmer:
         # one per PR, and arming must stop once the token is known to be unable to arm.
         self.capability_error_emitted = False
         self.capability_lost = False
+        # [OPUS-5] #3766: the collected outcome lives HERE, not only in a local of run(),
+        # so an exception escaping run() can never discard an already-earned failure.
+        self.outcome = ArmOutcome()
         owner, _, name = repo.partition("/")
         self.owner = owner
         self.name = name
@@ -460,6 +498,16 @@ class AutoArmer:
 
         try:
             self.arm(current)
+        except gh_retry.GhTransientExhausted as mutation_exhausted:
+            # [OPUS-5] #3766, fail CLOSED. The arm runs on the ONE-SHOT runner, which never
+            # raises this today (gh_retry refuses to wrap mutations) — but if it ever did,
+            # the mutation's outcome would be UNKNOWN, and an unknown arm must be a per-PR
+            # FAILURE, never the lenient warning-class outcome a transient normally gets.
+            self.log(
+                f"PR #{initial.number}: arm-failed (transient exhaustion on the arm "
+                f"mutation itself: {mutation_exhausted})"
+            )
+            return FAILED, f"transient exhaustion on the arm mutation ({mutation_exhausted})"
         except GhError as mutation_error:
             message = str(mutation_error)
             # [OPUS-5] #3760: a capability denial is NOT a per-PR condition — every
@@ -502,7 +550,10 @@ class AutoArmer:
         return ARMED, None
 
     def run(self) -> ArmOutcome:
-        outcome = ArmOutcome()
+        # [OPUS-5] #3766: publish the outcome on the ARMER before doing any work, so every
+        # failure collected below survives any exception that escapes this method and the
+        # exit status can be computed at the END from this state (see arm_exit_code).
+        outcome = self.outcome = ArmOutcome()
         verdict = self.probe_arm_capability()
         outcome.capability = verdict.status
         self.log(f"[{PROGRAM}] arm-capability probe: {verdict.status} — {verdict.detail}")
@@ -517,7 +568,18 @@ class AutoArmer:
             )
             return outcome
 
-        for pr in self.list_open():
+        try:
+            candidates = self.list_open()
+        except gh_retry.GhTransientExhausted as error:
+            # Whole-sweep transient: nothing has been collected yet, so this is a plain
+            # missed cycle. Recorded, not raised — the exit is decided at the end.
+            outcome.sweep_transient = str(error)
+            self.log(
+                f"[{PROGRAM}] candidate enumeration exhausted transient retries ({error})"
+            )
+            candidates = []
+
+        for pr in candidates:
             if REVIEW_LABEL not in pr.labels:
                 continue
             outcome.considered += 1
@@ -527,7 +589,21 @@ class AutoArmer:
                     "(see the single ::error above)"
                 )
                 continue
-            status, failure = self.process(pr)
+            try:
+                status, failure = self.process(pr)
+            except gh_retry.GhTransientExhausted as error:
+                # [OPUS-5] #3766 (BLOCKING, reproduced by cross-provider review): a LATER
+                # candidate's exhausted transient is its OWN warning-class per-candidate
+                # outcome. It must NOT escape this loop — an escaping exception carried the
+                # run past the accumulated-failure check, so PR #451's real arm failure was
+                # reported as ::warning + exit 0 once PR #452's refresh exhausted. The
+                # sweep continues; the verdict #451 already earned is untouchable.
+                outcome.transient_exhaustions.append((pr.number, str(error)))
+                self.log(
+                    f"PR #{pr.number}: skipped transient-exhausted ({error}); the sweep "
+                    "continues and this cannot downgrade an earlier arm failure"
+                )
+                continue
             if status == ARMED:
                 outcome.armed += 1
             elif status == FAILED:
@@ -537,12 +613,56 @@ class AutoArmer:
 
         for number, reason in outcome.arm_failures:
             self.log(f"[{PROGRAM}] arm-failure summary: PR #{number} — {reason}")
+        for number, reason in outcome.transient_exhaustions:
+            self.log(f"[{PROGRAM}] transient-exhaustion summary: PR #{number} — {reason}")
         self.log(
             f"[{PROGRAM}] complete: considered={outcome.considered} "
             f"armed={outcome.armed} arm-failures={len(outcome.arm_failures)} "
+            f"transient-exhaustions={len(outcome.transient_exhaustions)} "
             f"capability={outcome.capability}"
         )
         return outcome
+
+
+def arm_exit_code(
+    outcome: ArmOutcome, *, mode: str, log: Callable[[str], None] = print
+) -> int:
+    """Decide the run's exit status from the FINAL collected state (#3766).
+
+    PRECEDENCE — ``collected-failure > transient-exhaustion > clean``:
+
+    1. A COLLECTED arm/capability failure DOMINATES, in either mode. Nothing that happens
+       while processing a LATER candidate — an exhausted transient above all — can
+       downgrade a verdict an EARLIER candidate already earned. This check is reached from
+       the accumulated state, never short-circuited by an exception.
+    2. TRANSIENT EXHAUSTION alone (no collected failure anywhere) keeps #3759's intended
+       lenient policy: ``sweep`` reports ``::warning`` + exit 0, because a missed cycle is
+       harmless and the cron re-covers it. ``event`` has no per-PR backstop, so it fails
+       loudly instead.
+    3. CLEAN is 0.
+    """
+    if outcome.hard_failed:
+        if outcome.transient_detail:
+            log(
+                f"[{PROGRAM}] a transient exhaustion also occurred "
+                f"({outcome.transient_detail}) but a collected failure outranks it "
+                "(precedence: collected-failure > transient-exhaustion > clean): exit 1"
+            )
+        return outcome.exit_code
+    if outcome.transient_detail:
+        if mode == "event":
+            # Event-driven arm: no per-PR cron backstop — fail loudly so it is retried.
+            raise GhError(
+                "event-mode auto-arm exhausted transient retries: "
+                f"{outcome.transient_detail}"
+            )
+        log(
+            "::warning title=auto-arm skipped a cycle on transient GitHub API "
+            f"failures::{outcome.transient_detail} — bounded retries exhausted; a missed "
+            "sweep is harmless (the cron backstop covers it), so this run reports success."
+        )
+        return 0
+    return 0
 
 
 def run_sweep(
@@ -563,24 +683,23 @@ def run_sweep(
     exhaustion can never overwrite it — see ``process``). Since #3760 it no longer does so
     by unwinding the sweep: it is COLLECTED so every later candidate is still considered,
     and it surfaces as ``ArmOutcome.exit_code == 1``. A provable arm-capability failure is
-    likewise never a transient — it reds both modes with one ``::error``."""
+    likewise never a transient — it reds both modes with one ``::error``.
+
+    Since #3766 the exit is computed at the END from :class:`ArmOutcome`, whose precedence
+    is ``collected-failure > transient-exhaustion > clean`` — see :func:`arm_exit_code`."""
     if mode not in ("sweep", "event"):
         raise ValueError(f"mode must be 'sweep' or 'event', got {mode!r}")
     try:
-        return armer.run().exit_code
+        outcome = armer.run()
     except gh_retry.GhTransientExhausted as error:
-        if mode == "event":
-            # Event-driven arm: no per-PR cron backstop — fail loudly so it is retried.
-            raise GhError(
-                f"event-mode auto-arm exhausted transient retries: {error}"
-            ) from error
-        log(
-            "::warning title=auto-arm skipped a cycle on transient GitHub API "
-            f"failures::{error} — bounded retries exhausted; a missed sweep is "
-            "harmless (the cron backstop covers it), so this run reports success."
-        )
-        return 0
-    return 0
+        # [OPUS-5] #3766 STICKY BACKSTOP. run() already records a per-candidate exhaustion
+        # without unwinding; this is defence in depth for any read that is ever added
+        # OUTSIDE that guarded loop. The outcome is read back OFF THE ARMER, so everything
+        # already collected still reaches arm_exit_code — an exception can no longer
+        # short-circuit past the accumulated-failure check and report a false success.
+        outcome = armer.outcome
+        outcome.sweep_transient = outcome.sweep_transient or str(error)
+    return arm_exit_code(outcome, mode=mode, log=log)
 
 
 def fixture(
@@ -1071,6 +1190,152 @@ def self_test() -> None:
     assert healthy.probe_arm_capability().status == CAN_ARM
     assert probe_arm_capability_exit(healthy) == 0
 
+    # ---------------------------------------------------------------------------------
+    # [OPUS-5] #3766 — STICKY FAILURE PRECEDENCE:
+    #     collected-failure > transient-exhaustion > clean.
+    # The false pass this fixes (reproduced by the cross-provider review): PR #451's arm
+    # FAILED and was collected, then PR #452's pre-arm refresh exhausted its bounded
+    # retries; that exhaustion unwound run() and run_sweep's lenient handler reported
+    # ::warning + exit 0 — discarding a real arm failure. The collected verdict must be
+    # untouchable by anything that happens for a LATER candidate.
+    # ---------------------------------------------------------------------------------
+
+    def sequence(*, arm_fails: bool, mode: str):
+        """PR #451 (optionally arm-failing), then PR #452 whose refresh exhausts retries."""
+        sequence_fake = FakeGh(
+            [fixture(number=451), fixture(number=452)],
+            mutation_errors=(
+                {451: "gh api graphql failed: Pull request is in unstable status"}
+                if arm_fails
+                else None
+            ),
+        )
+
+        def read_452_exhausts(argv: list[str]) -> str:
+            if argv[:2] == ["pr", "view"] and argv[2] == "452":
+                raise gh_retry.GhTransientExhausted("gh pr view: HTTP 504 (3 attempts)")
+            return sequence_fake(argv)
+
+        lines: list[str] = []
+        armer = AutoArmer(
+            "sparq-org/sparq",
+            "main",
+            sequence_fake,
+            lines.append,
+            gh_read=read_452_exhausts,
+        )
+        try:
+            return lines, run_sweep(armer, log=lines.append, mode=mode)
+        except GhError as error:
+            return lines, error
+
+    # (9) THE #3766 SEQUENCE — arm failure on A, exhausted transient on a LATER B.
+    lines, code = sequence(arm_fails=True, mode="sweep")
+    assert code == 1, (
+        "a COLLECTED arm failure must dominate a LATER candidate's exhausted transient "
+        f"(code={code}, {lines})"
+    )
+    assert any("PR #451: arm-failed" in line for line in lines), lines
+    assert any("arm-failure summary: PR #451" in line for line in lines), lines
+    assert any("PR #452: skipped transient-exhausted" in line for line in lines), lines
+    assert any("precedence: collected-failure" in line for line in lines), lines
+    # The lenient ::warning must NOT be emitted while a real failure stands.
+    assert not [line for line in lines if line.startswith("::warning")], lines
+
+    # (10) CONTROL — the lenient policy is intact where it IS correct: a sweep whose ONLY
+    # problem is an exhausted transient still exits 0 with exactly one ::warning, and the
+    # candidates around it are still armed.
+    lines, code = sequence(arm_fails=False, mode="sweep")
+    assert code == 0, (code, lines)
+    warned = [line for line in lines if line.startswith("::warning")]
+    assert len(warned) == 1, warned
+    assert "452" in warned[0], warned
+    assert any("PR #451: armed head" in line for line in lines), lines
+
+    # (11) CONTROL — event mode is unchanged: a collected arm failure is non-zero, and an
+    # exhausted transient alone still fails loudly (no per-PR cron backstop).
+    lines, code = sequence(arm_fails=True, mode="event")
+    assert code == 1, (code, lines)
+    lines, result = sequence(arm_fails=False, mode="event")
+    assert isinstance(result, GhError) and "event-mode" in str(result), (result, lines)
+
+    # (12) The precedence rule itself, at the seam: a collected failure outranks a
+    # transient in BOTH modes; a transient alone is mode-dependent; clean is 0.
+    both = ArmOutcome(
+        arm_failures=[(451, "unstable")], transient_exhaustions=[(452, "HTTP 504")]
+    )
+    assert both.hard_failed and both.exit_code == 1, both
+    for mode in ("sweep", "event"):
+        assert arm_exit_code(both, mode=mode, log=lambda _m: None) == 1, mode
+    transient_only = ArmOutcome(transient_exhaustions=[(452, "HTTP 504")])
+    assert not transient_only.hard_failed and transient_only.exit_code == 0
+    assert arm_exit_code(transient_only, mode="sweep", log=lambda _m: None) == 0
+    try:
+        arm_exit_code(transient_only, mode="event", log=lambda _m: None)
+    except GhError as error:
+        assert "event-mode" in str(error), error
+    else:
+        raise AssertionError("event-mode transient exhaustion must not exit 0")
+    assert ArmOutcome().transient_detail is None
+    assert ArmOutcome(sweep_transient="HTTP 504").transient_detail == "HTTP 504"
+
+    # (13) FAIL CLOSED — an exhausted transient raised by the ARM MUTATION itself leaves the
+    # arm's outcome UNKNOWN, so it must be a per-PR failure (exit 1), never a lenient
+    # warning-class missed cycle. The one-shot runner cannot raise this today; the handler
+    # exists so a future refactor cannot open a second false-pass route.
+    mutation_fake = FakeGh(clean)
+
+    def gh_arm_exhausts(argv: list[str]) -> str:
+        if argv[:2] == ["api", "graphql"] and not is_capability_query(argv):
+            raise gh_retry.GhTransientExhausted("gh api graphql: HTTP 504 (3 attempts)")
+        return mutation_fake(argv)
+
+    lines = []
+    code = run_sweep(
+        AutoArmer(
+            "sparq-org/sparq", "main", gh_arm_exhausts, lines.append,
+            gh_read=mutation_fake,
+        ),
+        log=lines.append,
+        mode="sweep",
+    )
+    assert code == 1, (code, lines)
+    assert not [line for line in lines if line.startswith("::warning")], lines
+    assert any("transient exhaustion on the arm mutation" in line for line in lines), lines
+
+    # (14) END TO END through main() — the precedence must hold for the real entry point,
+    # not only for the seam the assertions above call directly.
+    import io
+    from contextlib import redirect_stdout
+
+    e2e = FakeGh(
+        [fixture(number=451), fixture(number=452)],
+        mutation_errors={451: "gh api graphql failed: Pull request is in unstable status"},
+    )
+
+    def e2e_read(argv: list[str]) -> str:
+        if argv[:2] == ["pr", "view"] and argv[2] == "452":
+            raise gh_retry.GhTransientExhausted("gh pr view: HTTP 504 (3 attempts)")
+        return e2e(argv)
+
+    saved_argv = sys.argv
+    saved_read = globals()["run_gh_read"]
+    saved_gh = globals()["run_gh"]
+    captured = io.StringIO()
+    try:
+        globals()["run_gh_read"] = e2e_read
+        globals()["run_gh"] = e2e
+        sys.argv = ["auto-arm.py", "--repo", "sparq-org/sparq", "--mode", "sweep"]
+        with redirect_stdout(captured):
+            e2e_code = main()
+    finally:
+        sys.argv = saved_argv
+        globals()["run_gh_read"] = saved_read
+        globals()["run_gh"] = saved_gh
+    assert e2e_code == 1, (e2e_code, captured.getvalue())
+    assert "arm-failure summary: PR #451" in captured.getvalue(), captured.getvalue()
+    assert "::warning" not in captured.getvalue(), captured.getvalue()
+
     print("auto-arm self-test: PASS")
 
 
@@ -1116,7 +1381,9 @@ def main() -> int:
         return 0
     if not args.repo:
         parser.error("--repo is required unless --self-test is used")
-    armer = AutoArmer(args.repo, args.default_branch, gh_read=run_gh_read)
+    # `run_gh` is passed EXPLICITLY (not left to the default argument) so the self-test can
+    # substitute both runners at the module level and drive main() end to end (#3766).
+    armer = AutoArmer(args.repo, args.default_branch, run_gh, gh_read=run_gh_read)
     if args.probe_arm_capability:
         return probe_arm_capability_exit(armer)
     return run_sweep(armer, mode=args.mode)

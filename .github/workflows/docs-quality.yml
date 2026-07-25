@@ -719,6 +719,11 @@ jobs:
       #   * rearm-sweeper.py --self-test / auto-arm.py --self-test — probe verdicts
       #     (can-arm / cannot-arm / inconclusive), per-PR failure collection + continue,
       #     one-::error-per-run, and the exit semantics (an arm failure never exits 0).
+      #     [OPUS-5] #3766 adds the STICKY-FAILURE PRECEDENCE sequences —
+      #     `collected-failure > transient-exhaustion > clean` — because collecting the
+      #     failures was only half the job: the collected state lived in a LOCAL, so a
+      #     LATER candidate's exhausted transient unwound past the accumulated-failure
+      #     check and reported ::warning + exit 0, discarding a real arm failure.
       #   * test_arm_capability_wiring.py — cross-file pins: `contents: write` +
       #     `pull-requests: write` on both workflows (a downgrade reproduces #3760 and is
       #     invisible in a python-only diff), the probe step present and BEFORE the arm step
