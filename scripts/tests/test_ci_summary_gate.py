@@ -658,6 +658,124 @@ class TestAdvisoryRule(unittest.TestCase):
         self.assertFalse(g.is_advisory("gate"))
 
 
+# [OPUS-5] PLATFORM-MANAGED advisory exclusion (the exact fail-closed allow-list).
+# LIVE DEFECT: main gate run 30136978362 (2026-07-25T00:46Z) failed fast on
+# "✗ Dependabot: failure" — the GitHub-managed Dependabot Updates job (run
+# 30136987253) concluded `security_update_not_possible` for npm `brace-expansion`,
+# an UPSTREAM condition with no in-repo remedy. Because the name is chosen by
+# GitHub it cannot carry the "(advisory)" token, so the name-token rule could not
+# reach it and it GATED. These tests pin all four halves of the fix:
+#   (1) exactly "Dependabot" failing does NOT red the verdict;
+#   (2) an unknown/new platform-ish name still REDs (fail-closed — no wildcards);
+#   (3) the pre-existing advisory-name rule is untouched; and
+#   (4) a REAL gating failure alongside a Dependabot failure still REDs.
+class TestPlatformManagedAdvisoryRule(unittest.TestCase):
+    DEPENDABOT = "Dependabot"
+
+    def test_predicate_matches_only_the_exact_allow_listed_name(self):
+        self.assertTrue(g.is_platform_managed_advisory(self.DEPENDABOT))
+        # Case-insensitive + surrounding-whitespace tolerant whole-name match.
+        self.assertTrue(g.is_platform_managed_advisory("  dependabot "))
+        self.assertTrue(g.is_platform_managed_advisory("DEPENDABOT"))
+        # (2) FAIL-CLOSED: no substring/prefix/suffix/wildcard reach. Every one of
+        # these is an unknown name and must keep gating.
+        for unknown in (
+            "Dependabot Updates",
+            "Dependabot alerts",
+            "dependabot-security-check",
+            "verify Dependabot lockfile",
+            "Dependabot / npm_and_yarn",
+            "supply-chain gates (deny + vet + SBOM + VEX + OpenSSF + js-sbom)",
+            "build + test",
+            "gate",
+        ):
+            self.assertFalse(g.is_platform_managed_advisory(unknown), unknown)
+            self.assertFalse(g.is_advisory(unknown), unknown)
+        # (3) The name-token rule is a SEPARATE concern and is not absorbed by the
+        # allow-list — an advisory-named leg is not "platform managed".
+        self.assertFalse(g.is_platform_managed_advisory("vale (prose, advisory)"))
+        self.assertTrue(g.is_advisory("vale (prose, advisory)"))
+        # ...and the union predicate every consumer reads sees both rules.
+        self.assertTrue(g.is_advisory(self.DEPENDABOT))
+
+    def test_dependabot_failure_does_not_red_the_verdict(self):
+        # (1) The live defect, end to end through the real verdict path.
+        runs = [R(self.DEPENDABOT, conclusion="failure"), GREEN, GREEN2]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 0, out)
+        self.assertIn("PASSED", out)
+        self.assertIn("1 advisory check(s) excluded", out)
+
+    def test_unknown_platform_managed_name_still_reds(self):
+        # (2) Fail-closed at the VERDICT level, not just the predicate: a renamed or
+        # newly-added platform job is a gating leg until this allow-list is edited.
+        for unknown in ("Dependabot Updates", "Dependabot alerts", "dependabot-security"):
+            with self.subTest(name=unknown):
+                code, out = run(tiny_cfg(), [[R(unknown, conclusion="failure"), GREEN]])
+                self.assertEqual(code, 1, out)
+                self.assertIn(unknown, out)
+
+    def test_existing_advisory_name_rule_still_excludes(self):
+        # (3) Regression guard for sq-wjth alongside the new rule, including the
+        # plural "advisories" that must keep GATING.
+        runs = [R("vale (prose, advisory)", conclusion="failure"),
+                R("unsafe report (cargo-geiger, informational)", conclusion="failure"),
+                R(self.DEPENDABOT, conclusion="failure"),
+                GREEN]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 0, out)
+        self.assertIn("3 advisory check(s) excluded", out)
+        code, _ = run(tiny_cfg(), [[
+            R("cargo-deny (advisories, bans, licenses, sources)", conclusion="failure"),
+            R(self.DEPENDABOT, conclusion="failure"),
+        ]])
+        self.assertEqual(code, 1)
+
+    def test_real_failure_alongside_dependabot_still_reds(self):
+        # (4) The exclusion must not become a blanket amnesty: a genuine gating
+        # failure sharing the sibling set still REDs, and the Dependabot leg is not
+        # what the verdict blames.
+        runs = [R(self.DEPENDABOT, conclusion="failure"), RED, GREEN]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1, out)
+        self.assertIn("clippy", out)
+        failing_lines = [ln for ln in out.splitlines() if ln.startswith("- ✗ ")]
+        self.assertTrue(failing_lines)
+        self.assertNotIn(f"- ✗ {self.DEPENDABOT}: failure", failing_lines)
+
+    def test_dependabot_failure_does_not_fail_fast(self):
+        # Fail-fast reuses is_advisory, so the exclusion must hold there too: a
+        # Dependabot red while siblings are still running must not short-circuit.
+        dependabot = R(self.DEPENDABOT, conclusion="failure")
+        self.assertEqual(g.failfast_failures([dependabot, PENDING]), [])
+        code, out = run(tiny_cfg(), [[dependabot, PENDING], [dependabot, GREEN]])
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("fail-fast", out)
+
+    def test_dependabot_only_workflow_failure_gets_no_synthetic_gating_verdict(self):
+        # The resolver's run-level evidence path also reads is_advisory: GitHub's
+        # Dependabot workflow RUN concludes failure, so without the exclusion a
+        # synthetic "workflow-run verdict (…)" would red the gate even though the
+        # only failing job is the excluded one.
+        newest = W(103, 7, name="Dependabot Updates", conclusion="failure")
+        dependabot_job = {
+            "id": 2001,
+            "name": self.DEPENDABOT,
+            "status": "completed",
+            "conclusion": "failure",
+            "started_at": "2026-07-21T14:05:00Z",
+            "html_url": "https://github.test/o/r/actions/runs/103/job/2",
+        }
+        resolved, _ = g.resolve_newest_workflow_runs(
+            [], [newest], "999", attempt_jobs={103: [dependabot_job]}
+        )
+        self.assertNotIn(
+            "workflow-run verdict (id:7)", [r.get("name") for r in resolved]
+        )
+        code, out = run(tiny_cfg(), [resolved])
+        self.assertEqual(code, 0, out)
+
+
 # [FABLE-5] sq-fmx4u.3: change-based test-selection semantics (design §5.3).
 # The three load-bearing safety invariants, exactly as the bead states them:
 #   (1) skipped-not-affected + select SUCCESS      => gate SUCCESS (no hang, no RED)

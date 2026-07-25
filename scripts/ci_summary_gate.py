@@ -206,6 +206,40 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 ADVISORY_RE = re.compile(r"\b(advisory|informational)\b")
+# [OPUS-5] PLATFORM-MANAGED advisory check-runs — an EXACT, fail-closed allow-list.
+# The advisory NAME-TOKEN rule above only works for check-runs whose name THIS repo
+# controls: we can append "(advisory)" to a job we author. A GitHub-MANAGED job has a
+# name GitHub picks, so it can never carry the token — and it therefore GATES, however
+# non-gating it actually is. Entries here are matched WHOLE and case-insensitively
+# (never as a substring / prefix / wildcard), so an unknown or newly-introduced name
+# still GATES: adding a platform surface is a deliberate, reviewed edit to this set.
+#
+#   • "dependabot" — the sole job of GitHub's managed `Dependabot Updates` workflow
+#     (event=dynamic, path `dynamic/dependabot/dependabot-updates`). Verified against
+#     the Actions Jobs API over the newest 60 runs of that workflow on this repo: the
+#     ONLY job name it has ever emitted is exactly "Dependabot" (37 success /
+#     23 failure), so this allow-list is complete for the surface as it stands, and no
+#     repo-authored workflow declares a job of that name (a collision would need a new
+#     job deliberately named "Dependabot").
+#     WHY NON-GATING: this check reports DEPENDABOT'S OWN ability to act on an upstream
+#     advisory, not this repo's code health. It concludes `failure` on outcomes nobody
+#     in this repo can fix — notably `security_update_not_possible`, i.e. the reachable
+#     update path cannot land a version that clears every advisory on the package (live
+#     case: main run 30136978362, 2026-07-25T00:46Z, npm `brace-expansion` — the 1.x
+#     tree is pinned by `minimatch@3`'s `^1.1.7`, so the only unaffected release, 5.0.8,
+#     is unreachable). Under the stop-the-line rule that red halted `main` for a
+#     condition with no in-repo remedy.
+#     SECURITY POSTURE IS UNCHANGED: nothing here suppresses an alert or a scanner.
+#     The Dependabot alert stays OPEN and visible, Dependabot keeps retrying weekly and
+#     will open the PR the moment a reachable patch exists, and the actionable Rust
+#     dependency-vulnerability GATE — `cargo deny check advisories` inside
+#     "supply-chain gates (deny + vet + SBOM + VEX + OpenSSF + js-sbom)" — is untouched
+#     and still REDs on a real finding. Honest caveat: that lane covers the CARGO graph;
+#     this repo has no in-repo npm vulnerability gate today (the js-sbom step generates
+#     CycloneDX SBOMs, it does not fail on advisories), so Dependabot alerts remain the
+#     npm surveillance surface — which is exactly why this change must not, and does
+#     not, touch alerting.
+PLATFORM_MANAGED_ADVISORY_NAMES = frozenset({"dependabot"})
 _PASSING = ("success", "skipped", "neutral")
 # [FABLE-5] draft-tier CI: the marker ci-select.yml appends to the select job name
 # on a draft-assembled run ("select (change-based test selection, draft-tier)").
@@ -875,11 +909,28 @@ def draft_selects_unsuperseded(runs: list[dict]) -> list[str]:
     return sorted(out)
 
 
+def is_platform_managed_advisory(name: str) -> bool:
+    """[OPUS-5] Is this a GitHub-MANAGED advisory check-run whose name we cannot
+    tag with the advisory token? EXACT whole-name, case-insensitive membership in
+    PLATFORM_MANAGED_ADVISORY_NAMES (see that constant for the per-name rationale
+    and the security-posture argument). Deliberately NOT a substring/prefix/wildcard
+    rule: an unknown or renamed platform check FAILS CLOSED (it keeps gating), so
+    widening this exclusion is always an explicit, reviewed edit."""
+    return name.strip().lower() in PLATFORM_MANAGED_ADVISORY_NAMES
+
+
 def is_advisory(name: str) -> bool:
     """Whole-word advisory/informational match (sq-wjth): excludes the standalone
     words (hyphen-/paren-/comma-delimited too) but NOT substrings — notably
-    "cargo-deny (advisories, ...)" is plural and GATES."""
-    return bool(ADVISORY_RE.search(name.lower()))
+    "cargo-deny (advisories, ...)" is plural and GATES.
+
+    [OPUS-5] ...OR the exact platform-managed allow-list. This stays the SINGLE
+    non-gating classifier so every consumer inherits the same answer — the verdict
+    (render_verdict), fail-fast (failfast_failures) AND the resolver's run-level
+    synthetic check (advisory_only_failure). Splitting them would leave the
+    Dependabot workflow's red run to acquire a synthetic gating verdict and red the
+    gate anyway."""
+    return bool(ADVISORY_RE.search(name.lower())) or is_platform_managed_advisory(name)
 
 
 def is_select(name: str) -> bool:
