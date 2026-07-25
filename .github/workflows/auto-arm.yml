@@ -15,7 +15,8 @@ on:
 # (enablePullRequestAutoMerge)" — the #3760 outage, which the re-arm sweeper hit with
 # exactly that misconfiguration while THIS workflow armed fine (runs 30033315483 vs
 # 30027010495). Pinned by scripts/tests/test_arm_capability_wiring.py.
-# [OPUS-5] #3777 — `workflows` is NOT settable here. MEASURED 2026-07-25.
+# [OPUS-5] #3777 — `workflows` is NOT settable here, and the fix is the TOKEN, not this
+# block. MEASURED 2026-07-25.
 #
 # GitHub refuses `enablePullRequestAutoMerge` on a PR touching `.github/workflows/**`
 # unless the acting identity holds the `workflows` permission. The obvious fix — adding
@@ -23,15 +24,33 @@ on:
 # GITHUB_TOKEN permission scopes, and adding it makes the workflow fail to start at all
 # (run 30176307537: conclusion=failure, ZERO jobs, a startup failure — while the same
 # workflow succeeded on `main` thirteen minutes earlier). yaml.safe_load accepts the key;
-# GitHub does not.
+# GitHub does not. So GITHUB_TOKEN can NEVER arm a workflow-touching PR, at any setting.
 #
-# `workflows` is a GitHub APP INSTALLATION permission. It has to be granted in the App's
-# settings and the installation must then accept the updated permission — a maintainer
-# action, not a repository change. Until that happens, workflow-touching PRs stay unarmable
-# and must be merged by hand.
+# `workflows` is a GitHub APP INSTALLATION permission, and the App already holds it:
+#     gh api /apps/sparq-orchestrator          -> permissions.workflows = write
+#     gh api /orgs/sparq-org/installations     -> id 146840030, workflows = write (accepted)
+# An earlier revision of this comment claimed a maintainer still had to grant it in the
+# App's settings. That was wrong — it was never verified against the API. The grant is done.
 #
-# The set below is PINNED EXACTLY by scripts/tests/test_arm_capability_wiring.py, so it
-# cannot widen unnoticed — including by a future attempt to add `workflows` here.
+# What was actually missing here is that this workflow did not USE the App. It ran the arm
+# on `github.token`, while its siblings (rearm-sweeper.yml, batch-merge.yml) mint the
+# sparq-orchestrator App token first and fall back to `github.token`. That asymmetry is
+# fixed below.
+#
+# HONEST RESIDUAL: minting is fail-soft on `ORCHESTRATOR_APP_ID`, and that secret is NOT
+# configured in this repository — every App-token step in the repo is currently `skipped`
+# (batch-merge runs 30163981782..30177204603, 15/15 skipped; same for rearm-sweeper). So
+# today this still falls back to `github.token` and workflow-touching PRs still are not
+# armed. The remaining maintainer action is the SECRETS (ORCHESTRATOR_APP_ID +
+# ORCHESTRATOR_APP_PRIVATE_KEY), not the App permission. When they land, this lane starts
+# arming workflow-touching PRs with no further change.
+#
+# The set below is PINNED EXACTLY by scripts/tests/test_arm_capability_wiring.py — and the
+# pin is on the EFFECTIVE set (this block, or a job's own block where one is declared, since
+# a job-level `permissions:` REPLACES rather than merges). An earlier revision pinned only
+# this workflow-level block and claimed that "a fourth permission fails the suite"; that was
+# FALSE — a job-level block adding `workflows: write` + `actions: write` was measured to
+# leave the whole suite green. Widening at EITHER level now fails a named test.
 permissions:
   contents: write
   pull-requests: write
@@ -50,7 +69,25 @@ jobs:
     # 10s+30s per idempotent READ during a platform blip) without hitting the
     # job ceiling; the sweep itself is unchanged.
     timeout-minutes: 10
+    env:
+      # Secrets are not readable from step `if:` expressions — mirror the id into env
+      # so the mint step can be skipped fail-soft when the App is not configured.
+      ORCHESTRATOR_APP_ID: ${{ secrets.ORCHESTRATOR_APP_ID }}
     steps:
+      # [OPUS-5] #3777 — the ONLY identity that can arm a workflow-touching PR. GITHUB_TOKEN
+      # structurally cannot (see the header): `workflows` is not one of its scopes. The
+      # sparq-orchestrator App installation holds `workflows: write`, so a minted App token
+      # can. Same action + SHA + fail-soft `if:` as rearm-sweeper.yml and batch-merge.yml —
+      # when the secret is absent this is `skipped` and every consumer falls back to
+      # `github.token`, i.e. exactly today's behaviour, so this cannot regress the lane.
+      - name: Mint the sparq-orchestrator App token (arms must fire merge events)
+        id: app-token
+        if: env.ORCHESTRATOR_APP_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.ORCHESTRATOR_APP_ID }}
+          private-key: ${{ secrets.ORCHESTRATOR_APP_PRIVATE_KEY }}
+
       # Run the trusted default-branch policy, never code from the candidate PR head.
       - name: Checkout auto-arm policy
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -83,7 +120,7 @@ jobs:
       # expression as the arm step below (pinned by the wiring test).
       - name: Probe arm capability (one loud error, never per-PR)
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           REPO: ${{ github.repository }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: >-
@@ -97,7 +134,7 @@ jobs:
       # are collected, summarised, and the run exits non-zero.
       - name: Arm eligible PRs
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           REPO: ${{ github.repository }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           # [FABLE-5] #3759 finding 5: the label-triggered (pull_request) invocation is

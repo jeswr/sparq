@@ -160,6 +160,53 @@ class TestPermissionPin(unittest.TestCase):
                 f"ARBITRARY PRs can do — justify it explicitly rather than extending this set.",
             )
 
+    def test_every_arm_job_EFFECTIVE_permission_set_is_exactly_the_approved_set(
+        self,
+    ) -> None:
+        """The level that actually takes effect — closes the bypass in the test above.
+
+        `test_arm_workflow_permissions_are_EXACTLY_the_approved_set` reads only the
+        WORKFLOW-level block. A job-level `permissions:` block REPLACES it wholesale (the
+        very fact the next test exists to defend), so the exact-set pin was reading the
+        level that does NOT decide. MEASURED bypass: injecting
+
+            arm:
+              permissions:
+                contents: write
+                pull-requests: write
+                workflows: write
+                actions: write
+
+        into auto-arm.yml left the entire suite GREEN. That is doubly bad here — a job-level
+        `workflows: write` also reintroduces the run-30176307537 STARTUP failure, and nothing
+        caught it.
+
+        So: compute each job's EFFECTIVE set (its own block if present, else the
+        workflow-level block) and pin that. Widening at either level now fails.
+        """
+        approved = {"contents": "write", "pull-requests": "write"}
+        for name, (path, _script) in ARM_WORKFLOWS.items():
+            document = load(path)
+            workflow_level = document.get("permissions")
+            for job_id, job in (document.get("jobs") or {}).items():
+                # A job-level block REPLACES the workflow-level one; it does not merge.
+                effective = job["permissions"] if "permissions" in job else workflow_level
+                self.assertEqual(
+                    dict(effective or {}),
+                    approved,
+                    f"{name}:{job_id}: the EFFECTIVE permission set of this arming job is "
+                    f"pinned to exactly {approved} (#3777). This job "
+                    + (
+                        "declares its own `permissions:` block, which REPLACES the "
+                        "workflow-level one"
+                        if "permissions" in job
+                        else "inherits the workflow-level block"
+                    )
+                    + ". Adding a permission widens what a token that arms ARBITRARY PRs "
+                    "can do; adding `workflows` additionally makes the workflow fail to "
+                    "START. Justify any change explicitly rather than extending this set.",
+                )
+
     def test_arm_workflows_do_not_narrow_permissions_at_the_job_level(self) -> None:
         # A job-level `permissions:` REPLACES the workflow-level block, so a job-level
         # narrowing would silently reintroduce the outage.
@@ -229,6 +276,101 @@ class TestProbeWiring(unittest.TestCase):
                 f"{name}: a probe on a DIFFERENT token than the arm step would attest "
                 "capability the sweep does not have",
             )
+
+    # ---- [OPUS-5] #3777: the SAME TOKEN pin above is RELATIVE, and that is a real hole.
+    #
+    # `test_probe_and_arm_steps_use_the_identical_token_expression` asserts only that the
+    # probe and the arm consume the SAME expression. It never asserts WHICH. Both steps
+    # holding a bare `${{ github.token }}` satisfies it perfectly — which is exactly the
+    # state auto-arm.yml shipped in while rearm-sweeper.yml and batch-merge.yml used the
+    # App token, and the relative pin reported green on both. The pin covered auto-arm
+    # (ARM_WORKFLOWS has always held both files) but was VACUOUS for this class of bug.
+    #
+    # The two tests below are the absolute pin: they name the expression itself, so a
+    # silent revert to `github.token` is a NAMED failure rather than an invisible one.
+
+    APP_TOKEN_EXPRESSION = "${{ steps.app-token.outputs.token || github.token }}"
+    APP_TOKEN_ACTION = (
+        "actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1"
+    )
+
+    def test_arm_workflows_prefer_the_orchestrator_app_token_over_github_token(
+        self,
+    ) -> None:
+        """#3777: GITHUB_TOKEN can NEVER arm a PR that touches `.github/workflows/**`.
+
+        `workflows` is not one of the GITHUB_TOKEN permission scopes — adding it to a
+        `permissions:` block makes the workflow fail to START (run 30176307537:
+        conclusion=failure, zero jobs). It is a GitHub APP INSTALLATION permission, and the
+        sparq-orchestrator installation holds it (`gh api /orgs/sparq-org/installations` ->
+        146840030, workflows=write). So the ONLY identity that can arm those PRs is a minted
+        App token, and every token-consuming step on the arm path must prefer it.
+
+        Falling back to `github.token` is deliberate and fail-soft (the App secrets may be
+        absent), but the App token must come FIRST in the expression.
+        """
+        for name, (path, script) in ARM_WORKFLOWS.items():
+            steps = steps_of(load(path))
+            consumers = [
+                step
+                for step in steps
+                if script in run_of(step) and "--self-test" not in run_of(step)
+            ]
+            self.assertTrue(consumers, f"{name}: expected probe + arm steps")
+            for step in consumers:
+                self.assertEqual(
+                    (step.get("env") or {}).get("GH_TOKEN"),
+                    self.APP_TOKEN_EXPRESSION,
+                    f"{name}: step {step.get('name')!r} must consume "
+                    f"{self.APP_TOKEN_EXPRESSION!r}. A bare `github.token` structurally "
+                    "cannot hold `workflows`, so every PR touching .github/workflows/** "
+                    "becomes permanently un-armable (#3777).",
+                )
+
+    def test_arm_workflows_mint_the_app_token_fail_soft_with_the_pinned_action(
+        self,
+    ) -> None:
+        """The `steps.app-token.outputs.token` half of the expression must be real.
+
+        Without the mint step the preferred half is always empty and the expression silently
+        degrades to `github.token` — green tests, dead capability. Pins the step id (which the
+        expression references by name), the SHA-pinned action (repo-wide supply-chain
+        posture), and the fail-soft `if:` reading the JOB-LEVEL env mirror, because secrets
+        are not readable from a step `if:`.
+        """
+        for name, (path, _script) in ARM_WORKFLOWS.items():
+            document = load(path)
+            for job_id, job in (document.get("jobs") or {}).items():
+                mint = [
+                    step
+                    for step in (job.get("steps") or [])
+                    if step.get("id") == "app-token"
+                ]
+                self.assertEqual(
+                    len(mint),
+                    1,
+                    f"{name}:{job_id} must mint the App token exactly once with "
+                    "id `app-token` (the token expression references it by that id)",
+                )
+                step = mint[0]
+                self.assertEqual(
+                    step.get("uses"),
+                    self.APP_TOKEN_ACTION,
+                    f"{name}:{job_id}: the App-token action stays SHA-pinned",
+                )
+                self.assertEqual(
+                    step.get("if"),
+                    "env.ORCHESTRATOR_APP_ID != ''",
+                    f"{name}:{job_id}: minting must be fail-soft on the env mirror, so an "
+                    "unconfigured App skips the step instead of failing the lane",
+                )
+                self.assertEqual(
+                    (job.get("env") or {}).get("ORCHESTRATOR_APP_ID"),
+                    "${{ secrets.ORCHESTRATOR_APP_ID }}",
+                    f"{name}:{job_id}: the job must mirror ORCHESTRATOR_APP_ID into env — "
+                    "secrets are not readable from a step `if:` expression, so without the "
+                    "mirror the fail-soft guard is always false and the App is never used",
+                )
 
     def test_self_test_step_survives(self) -> None:
         for name, (path, script) in ARM_WORKFLOWS.items():
