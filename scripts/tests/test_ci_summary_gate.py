@@ -353,8 +353,12 @@ class TestAdaptiveSaturationBudget(unittest.TestCase):
         self.assertNotIn("::error::", out)
 
     def test_genuine_hang_fails(self):
-        # Pending forever, idle queue, zero progress => RED at the base budget.
-        polls = [[GREEN, IN_PROGRESS]]
+        # QUEUED forever, idle queue, zero progress => RED at the base budget.
+        # [OPUS-5] #3783: this fixture used to await an `in_progress` sibling, which
+        # is precisely the misfire the liveness veto fixes — a leg that is EXECUTING
+        # is not hung. The genuine-hang shape is a leg that never STARTED (queued,
+        # which is also what an evaporated check-run resolves to — #3677).
+        polls = [[GREEN, PENDING]]
         code, out = run(tiny_cfg(), polls, depth=0)
         self.assertEqual(code, 1)
         self.assertIn("genuine hang", out)
@@ -393,12 +397,283 @@ class TestAdaptiveSaturationBudget(unittest.TestCase):
         self.assertIn("PASSED", out)
 
     def test_no_progress_and_depth_unknown_is_a_hang(self):
-        # Unknown depth + flat completions must NOT extend forever: it REDs at the
-        # base budget exactly like the old behaviour (fail-closed on no evidence).
-        polls = [[GREEN, IN_PROGRESS]]
+        # Unknown depth + flat completions + nothing EXECUTING must NOT extend
+        # forever: it REDs at the base budget exactly like the old behaviour
+        # (fail-closed on no evidence). [OPUS-5] #3783: queued, not in_progress.
+        polls = [[GREEN, PENDING]]
         code, out = run(tiny_cfg(), polls, depth=None)
         self.assertEqual(code, 1)
         self.assertIn("genuine hang", out)
+
+
+# [OPUS-5] The live #3783 shape: `gate` run 30149978128 on main (e8a41ab8c) declared a
+# "genuine hang" while these three legs had been executing for 11 minutes.
+KANI_LIVE = [
+    R("kani sparq-core (dict mmap validator totality) (bounded proofs, informational)",
+      status="in_progress", conclusion=None, started="2026-07-25T08:20:50Z", rid=1),
+    R("kani sparq-engine (vectorized reducer kernels) (bounded proofs, informational)",
+      status="in_progress", conclusion=None, started="2026-07-25T08:20:49Z", rid=2),
+    R("kani sparq-vectors (.spqv validator) (bounded proofs, informational)",
+      status="in_progress", conclusion=None, started="2026-07-25T08:20:50Z", rid=3),
+]
+
+
+class TestLivenessVeto(unittest.TestCase):
+    """[OPUS-5] #3783 — an EXECUTING sibling is positive liveness evidence and must
+    veto the genuine-hang verdict; a sibling that never STARTED must still be
+    detected as a hang. That discrimination is the whole fix, so both directions are
+    pinned here (deleting the veto REDs the first group; broadening it past
+    `in_progress` REDs the second)."""
+
+    def test_in_progress_siblings_are_not_a_hang(self):
+        # The exact incident: idle queue (depth=0) + zero completions + three kani
+        # legs EXECUTING. Both hang signals are satisfied by a healthy bounded proof.
+        code, out = run(tiny_cfg(), [[GREEN] + KANI_LIVE], depth=0)
+        self.assertNotIn(
+            "genuine hang", out,
+            "#3783 REGRESSION: the hang detector fired while awaited siblings were "
+            "`in_progress` — an executing kani bounded proof was declared a hang. An "
+            "idle Actions queue means those jobs DEQUEUED and STARTED, and kani emits "
+            "no completion for tens of minutes by design, so neither signal is "
+            "evidence of a hang. The liveness veto (live_siblings) is missing.",
+        )
+        self.assertIn("sibling(s) EXECUTING", out)
+        # Bounded, and never green: the veto only postpones the red to the cap.
+        self.assertEqual(code, 1, out)
+
+    def test_one_live_sibling_among_queued_ones_vetoes(self):
+        # The real set was mixed (some queued, some running). ONE executing sibling
+        # is enough liveness evidence: nothing is demonstrably lost.
+        code, out = run(tiny_cfg(), [[GREEN, PENDING, KANI_LIVE[0]]], depth=0)
+        self.assertNotIn(
+            "genuine hang", out,
+            "#3783 REGRESSION: a mixed queued+in_progress sibling set was declared a "
+            "hang; one executing leg proves the pipeline is alive.",
+        )
+        self.assertEqual(code, 1, out)
+
+    def test_all_queued_siblings_are_still_a_hang(self):
+        # THE DISCRIMINATION: nothing executing, idle queue, no completions => the
+        # detector must still fire. This is what keeps the veto from blinding it.
+        code, out = run(tiny_cfg(), [[GREEN, PENDING,
+                                      R("shard-2", status="queued", conclusion=None)]],
+                        depth=0)
+        self.assertEqual(code, 1)
+        self.assertIn(
+            "genuine hang", out,
+            "#3783 OVER-CORRECTION: awaited siblings that never STARTED (all `queued`, "
+            "idle queue, no completions) are the genuine-hang case the detector exists "
+            "for (#3677 evaporated check-runs resolve to `queued` too). The veto must "
+            "key on `in_progress` ONLY — it has been broadened to swallow non-running "
+            "legs, so a real hang now waits out the whole budget instead of REDing.",
+        )
+
+    def test_evaporated_check_run_resolves_to_queued_not_live(self):
+        # #3677: an evaporated/pending leg is represented by the run-level synthetic
+        # with force_pending=True. Its status MUST NOT read as liveness, or the hang
+        # detector loses the only case it was built for.
+        synthetic = g._workflow_summary_check(W(700, 7, status="in_progress",
+                                                conclusion=None), force_pending=True)
+        self.assertEqual(
+            synthetic["status"], "queued",
+            "#3677/#3783 REGRESSION: the force_pending run-level synthetic (how an "
+            "EVAPORATED check-run is represented) no longer reports `queued`. If it "
+            "reports `in_progress` it looks EXECUTING to the liveness veto, so a lost "
+            "leg vetoes its own hang detection and the gate waits out the whole budget "
+            "instead of REDing — the exact case the detector was built for.",
+        )
+        self.assertEqual(
+            g.live_siblings([synthetic]), [],
+            "#3677 REGRESSION: the force_pending run-level synthetic (an evaporated "
+            "check-run) is being counted as an EXECUTING sibling, so a lost leg would "
+            "veto its own hang detection and never RED.",
+        )
+
+    def test_live_siblings_counts_in_progress_only(self):
+        # The predicate itself: only `in_progress` is liveness. `queued`/`waiting`/
+        # `requested`/`pending` all mean the leg has not started.
+        rows = [R("a", status="in_progress", conclusion=None),
+                R("b", status="queued", conclusion=None),
+                R("c", status="waiting", conclusion=None),
+                R("d", status="requested", conclusion=None),
+                R("e", status="pending", conclusion=None),
+                R("f")]
+        self.assertEqual(
+            [r["name"] for r in g.live_siblings(rows)], ["a"],
+            "#3783: live_siblings must select EXACTLY the `in_progress` rows — a "
+            "`queued`/`waiting`/`requested`/`pending` leg has not started and is what "
+            "an idle Actions queue is evidence about.",
+        )
+
+    def test_veto_never_turns_a_verdict_green(self):
+        # Exit-0 invariant: the veto is a POSTPONEMENT, never a pass. Siblings that
+        # execute forever exhaust the absolute cap and still exit non-zero.
+        code, _ = run(tiny_cfg(), [[GREEN] + KANI_LIVE], depth=0)
+        self.assertEqual(code, 1, "the liveness veto must never synthesise a pass")
+
+    def test_real_failure_beside_a_live_sibling_still_reds(self):
+        # The veto must not delay a real red: fail-fast still fires while a kani
+        # proof runs.
+        polls = [[RED] + KANI_LIVE, [RED] + KANI_LIVE]
+        code, out = run(tiny_cfg(), polls, depth=0)
+        self.assertEqual(code, 1)
+        self.assertIn("FAILED (fail-fast)", out)
+
+
+class TestVerdictTaxonomy(unittest.TestCase):
+    """[OPUS-5] #3783 ask 3 — "the gate could not determine an answer" must not read
+    like "a gating check failed". Both still exit 1 (fail-closed); only the words
+    differ, and that difference is what stops a budget expiry being diagnosed as a
+    broken tree (#3758/#3765/#3781/#3783)."""
+
+    def test_budget_expiry_with_live_siblings_reads_undetermined(self):
+        code, out = run(tiny_cfg(), [[GREEN] + KANI_LIVE], depth=0)
+        self.assertEqual(code, 1, "fail-closed: an unobserved leg is never assumed green")
+        self.assertIn(
+            "UNDETERMINED (not a test failure)", out,
+            "#3783 ask 3 REGRESSION: a budget expiry with siblings STILL EXECUTING is "
+            "reported identically to a real gating failure. Nothing was shown to be "
+            "broken — this outcome must say 'could not determine', not 'FAILED'.",
+        )
+        self.assertNotIn("### ci-summary: FAILED", out)
+        # It must name WHICH legs were alive, so the reader is not sent hunting.
+        self.assertIn("kani sparq-core", out)
+
+    def test_saturation_absolute_budget_reads_undetermined(self):
+        # The other could-not-determine: the runner pool never drained.
+        code, out = run(tiny_cfg(), [[GREEN, PENDING]], depth=20)
+        self.assertEqual(code, 1)
+        self.assertIn("ABSOLUTE budget", out)
+        self.assertIn(
+            "UNDETERMINED (not a test failure)", out,
+            "#3783 ask 3 REGRESSION: absolute-budget exhaustion under runner "
+            "saturation reports as a failure though no gating check was shown to "
+            "fail; it is a could-not-determine.",
+        )
+
+    def test_genuine_hang_still_reads_as_a_failure(self):
+        # The taxonomy discriminates in BOTH directions: nothing executing + idle
+        # queue + no completions IS a broken pipeline and keeps failing loudly.
+        code, out = run(tiny_cfg(), [[GREEN, PENDING]], depth=0)
+        self.assertEqual(code, 1)
+        self.assertIn("genuine hang", out)
+        self.assertNotIn(
+            "UNDETERMINED", out,
+            "#3783: a genuine hang must NOT be softened to 'could not determine' — "
+            "nothing running with an idle queue and no completions is a real defect.",
+        )
+
+    def test_a_real_gating_failure_is_never_called_undetermined(self):
+        code, out = run(tiny_cfg(), [[GREEN, RED]])
+        self.assertEqual(code, 1)
+        self.assertIn("FAILED", out)
+        self.assertNotIn(
+            "UNDETERMINED", out,
+            "#3783: a genuinely failing gating check must keep reading as FAILED — the "
+            "taxonomy must not launder a real defect into 'could not determine'.",
+        )
+
+
+class TestDescopedEc2Lane(unittest.TestCase):
+    """[OPUS-5] #3784 — the AWS OIDC role `bench-ec2.yml` assumes was DELIBERATELY
+    DESCOPED, so every automated tick of that workflow was a guaranteed GATING failure
+    on `main` (12 credential retries, before any benchmark ran). The chosen fix is
+    RETIREMENT of the automated lane, NOT an advisory-registry mute: #3774 landed the
+    rule that advisory status is declared deliberately, and muting a permanently-broken
+    gate to green a dashboard is the behaviour that rule exists to prevent. These tests
+    pin BOTH halves — the lane cannot fire automatically, AND it was not muted."""
+
+    WORKFLOW = REPO_ROOT / ".github" / "workflows" / "bench-ec2.yml"
+    REGISTRY = REPO_ROOT / ".github" / "advisory-registry.json"
+
+    def _wf(self) -> dict:
+        # PyYAML is installed in the job that runs this file (docs-quality quick-gates);
+        # the raw-text guards in test_the_permanently_failing_check_name_is_gone hold
+        # unconditionally, so the two load-bearing properties gate even without it.
+        try:
+            import yaml
+        except ImportError:  # pragma: no cover - PyYAML is present in CI
+            self.skipTest("PyYAML unavailable")
+        # `on:` is parsed by PyYAML 1.1 as the boolean True.
+        doc = yaml.safe_load(self.WORKFLOW.read_text(encoding="utf-8"))
+        doc["_on"] = doc.get(True, doc.get("on"))
+        return doc
+
+    def test_no_schedule_trigger(self):
+        doc = self._wf()
+        self.assertNotIn(
+            "schedule", doc["_on"],
+            "#3784 REGRESSION: bench-ec2.yml runs on a `schedule:` again. Its AWS OIDC "
+            "role is DESCOPED, so every cron tick fails in `Configure AWS credentials "
+            "(OIDC)` before any benchmark runs, posts a GATING check-run on main's head "
+            "SHA (no advisory token, no registry entry => it GATES per #3773/#3774), and "
+            "makes `main` permanently and uninformatively red. Re-adding a cadence "
+            "requires re-provisioning vars.AWS_BENCH_ROLE_ARN in the same change.",
+        )
+        self.assertIn("workflow_dispatch", doc["_on"],
+                      "maintainer-run EC2 benchmarking is NOT descoped and must stay dispatchable")
+
+    def test_both_campaigns_stay_reachable_by_dispatch(self):
+        # Retiring the cron must not delete a capability: BOTH lanes stay selectable,
+        # so #3488's maintainer-run EC2 benchmarking keeps working once the role exists.
+        doc = self._wf()
+        options = doc["_on"]["workflow_dispatch"]["inputs"]["lane"]["options"]
+        self.assertEqual(sorted(options), ["full-suite", "heavy"])
+        conds = {jid: " ".join(job["if"].split()) for jid, job in doc["jobs"].items()}
+        self.assertIn("github.event.inputs.lane == 'heavy'", conds["ec2-bench"])
+        self.assertIn("github.event.inputs.lane == 'full-suite'", conds["nightly-full-bench"])
+
+    def test_every_oidc_job_carries_the_role_present_guard(self):
+        doc = self._wf()
+        for jid, job in doc["jobs"].items():
+            uses = [s.get("uses", "") for s in job.get("steps", [])]
+            if not any("configure-aws-credentials" in u for u in uses):
+                continue
+            self.assertIn(
+                "vars.AWS_BENCH_ROLE_ARN != ''", " ".join(job.get("if", "").split()),
+                f"#3784 REGRESSION: job `{jid}` assumes the DESCOPED AWS OIDC role with "
+                f"no role-present guard, so a dispatch while the role is absent burns 12 "
+                f"credential retries and posts a gating failure instead of skipping.",
+            )
+
+    def test_the_lane_was_not_muted_via_the_advisory_registry(self):
+        # The easy path we deliberately did NOT take. If a future change wants advisory
+        # status for this lane it must DELETE this assertion with a written justification
+        # — which is exactly the deliberate declaration #3774 demands.
+        declared = json.loads(self.REGISTRY.read_text(encoding="utf-8"))["jobs"]
+        for key, entry in declared.items():
+            self.assertNotEqual(
+                entry.get("workflow"), "bench-ec2.yml",
+                f"#3784: `{key}` declares a bench-ec2.yml job advisory. The descoped "
+                f"OIDC lane was RETIRED, not muted — declaring a permanently-failing "
+                f"gate advisory to green the dashboard is precisely what #3774's "
+                f"declared-not-inferred rule exists to prevent.",
+            )
+
+    def test_the_permanently_failing_check_name_is_gone(self):
+        # The gate has no name-based escape hatch (#3773), so the ONLY way this check-run
+        # stops gating `main` is for it to stop being produced.
+        text = self.WORKFLOW.read_text(encoding="utf-8")
+        self.assertNotIn(
+            "name: nightly full-suite benchmark on EC2 (spot)", text,
+            "#3784 REGRESSION: the check-run name that could never pass is back. It "
+            "carries no advisory token and no registry declaration, so it GATES.",
+        )
+        # And the retirement is a behaviour change, not a rename: no automated trigger
+        # can produce the check-run at all. (Raw text, so this holds without PyYAML.)
+        self.assertNotIn(
+            "cron:", text,
+            "#3784 REGRESSION: a cron re-appeared in bench-ec2.yml — an automated tick "
+            "against the descoped AWS OIDC role is a guaranteed gating failure on main.",
+        )
+        guard_lines = [ln for ln in text.splitlines()
+                       if ln.strip() == "vars.AWS_BENCH_ROLE_ARN != ''"]
+        self.assertEqual(
+            len(guard_lines), 2,
+            "#3784 REGRESSION: both EC2 jobs must carry the role-present guard, so a "
+            "dispatch while the AWS OIDC role is descoped SKIPS instead of failing at "
+            "`Configure AWS credentials (OIDC)` and posting a gating check-run.",
+        )
 
 
 class TestSelfExclusionAndFetch(unittest.TestCase):
@@ -1433,7 +1708,11 @@ class TestSubprocessRobustness(unittest.TestCase):
         Mutation check: remove the try/except in run_gate → RuntimeError propagates
         instead of being caught → this test goes RED."""
         out = io.StringIO()
-        fetch = scripted([[GREEN, IN_PROGRESS]])
+        # [OPUS-5] #3783: the awaited sibling must be QUEUED, not `in_progress` —
+        # an executing sibling is positive liveness evidence and now VETOES the hang
+        # verdict (see TestLivenessVeto). The property under test here is the
+        # try/except around fetch_queue_depth, not the hang shape.
+        fetch = scripted([[GREEN, PENDING]])
 
         def raising_depth():
             raise RuntimeError("subprocess.run raised: gh not found")

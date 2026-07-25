@@ -37,10 +37,14 @@ on:
   # hard-gates the byte-count / memory-layout ratchet (store/dict/wasm bytes; a pure
   # function of the code, immune to shared-runner noise) but SKIPS every wall-clock timing
   # loop + well-known / crate-example latency suite. Those NOISY, FLAKY timing benchmarks
-  # were dragging the merge queue and flapping the gate; they are RELOCATED to the nightly
-  # EC2 lane (bench-ec2.yml `nightly-full-bench`, cron), which publishes the full at-scale
+  # were dragging the merge queue and flapping the gate; they are RELOCATED to the EC2
+  # full-suite lane (bench-ec2.yml `nightly-full-bench`), which publishes the full at-scale
   # series to the benchmark-data branch the Pages dashboard reads. See the "Run benchmarks"
   # step guard below and bench-ec2.yml.
+  # [OPUS-5] #3784 HONEST STATUS: that EC2 lane is MANUAL-DISPATCH ONLY — its cron is retired
+  # because the AWS OIDC role it assumes was descoped, so the at-scale timing series is NOT
+  # being collected automatically. The per-commit deterministic ratchet and the push-to-main
+  # full run below are unaffected; only the AT-SCALE EC2 trend is on hold until the role returns.
   #
   # [FABLE-5] LABEL-TRIGGER GUARD (full rationale: ci.yml's pull_request note): only
   # the `ci-full` / `bench-full` toggles start real work off a label event. The
@@ -290,7 +294,8 @@ jobs:
       # metrics (`--deterministic-only`): the hard-gated store/dict/wasm bytes ratchet — a pure
       # function of the code, seconds not minutes, immune to shared-runner noise. The full noisy
       # timing suite (query latencies + well-known / crate-example suites + the parse timing metric)
-      # is RELOCATED to the nightly EC2 lane (bench-ec2.yml) so it no longer drags the merge queue or
+      # is RELOCATED to the EC2 full-suite lane (bench-ec2.yml — MANUAL DISPATCH ONLY since #3784
+      # retired its cron) so it no longer drags the merge queue or
       # flaps the gate. On push-to-main / schedule / workflow_dispatch (NOT a PR) the FULL suite runs,
       # so the auto-ratchet floor + the benchmark-data history (main-only steps below) stay continuous
       # exactly as before — the per-commit trend on the Pages dashboard is unaffected. The two-line
