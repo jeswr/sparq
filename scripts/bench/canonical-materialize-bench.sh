@@ -28,6 +28,7 @@
 # scripts/bench/ingest-canonical-competitors.mjs deliberately (never auto-committed).
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${AWS_PROFILE:=pss}"; export AWS_PROFILE   # this box's default creds are the dev-instance role — MUST use pss
 REGION="${REGION:-eu-west-2}"
 ITYPE="${ITYPE:-c6i.4xlarge}"
@@ -197,12 +198,8 @@ done
 aws ec2 get-console-output --region "$REGION" --instance-id "$INSTANCE_ID" --output text > "$RESULTS_LOCAL/console.txt" 2>/dev/null || true
 if grep -qa 'ENVELOPE-BEGIN' "$RESULTS_LOCAL/console.txt" 2>/dev/null; then
   log "extracting envelopes from serial console → $RESULTS_LOCAL/gather-out/"
-  mkdir -p "$RESULTS_LOCAL/gather-out"
-  awk '
-    /===ENVELOPE-BEGIN /   { name=$2; f="'"$RESULTS_LOCAL"'/gather-out/" name; capturing=1; next }
-    /===ENVELOPE-END===/   { capturing=0; close(f); next }
-    capturing               { print > f }
-  ' "$RESULTS_LOCAL/console.txt" 2>/dev/null || true
+  "$SCRIPT_DIR/extract-console-envelopes.sh" \
+    "$RESULTS_LOCAL/console.txt" "$RESULTS_LOCAL/gather-out" 2>/dev/null || true
 fi
 
 log "final result pull"
