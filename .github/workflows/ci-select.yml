@@ -155,9 +155,16 @@ jobs:
           # the run sees which tier this selection was assembled for (the machine
           # contract is the job NAME marker above).
           IS_DRAFT_PR: ${{ github.event.pull_request.draft == true }}
+          # [OPUS-5] #3781: the same no-leg condition as the job name above, surfaced
+          # for the human reader. A no-leg run's step summary must NOT claim "Tier:
+          # draft" — it assembled nothing, and saying "draft" is exactly the confusion
+          # that cost a full drain pass to unpick.
+          IS_NO_LEG_RUN: ${{ github.event_name == 'pull_request' && contains(fromJSON('["labeled","unlabeled"]'), github.event.action) && !contains(fromJSON('["ci-full","bench-full","fuzz-full"]'), github.event.label.name) }}
         run: |
           set -euo pipefail
-          if [ "${IS_DRAFT_PR:-}" = "true" ]; then
+          if [ "${IS_NO_LEG_RUN:-}" = "true" ]; then
+            echo "**Tier: no-leg** — this run was started by a \`${EVENT}\` label flip that the label-trigger guard turns into a NO-OP: every leg is skipped and this selection pre-job is the run's only real job. The ci-summary gate therefore IGNORES this whole run and keeps the previous real run of this workflow authoritative (#3781)." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "${IS_DRAFT_PR:-}" = "true" ]; then
             echo "**Tier: draft** — draft-tier CI (reduced sibling set; the full matrix re-runs at ready_for_review and its fresh gate supersedes this head's draft-tier results)." >> "$GITHUB_STEP_SUMMARY"
           fi
           args=(--event "$EVENT")

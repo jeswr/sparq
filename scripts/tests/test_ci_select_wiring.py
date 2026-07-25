@@ -1585,6 +1585,34 @@ class TestNoLegMarkerWiring(unittest.TestCase):
                 f"condition must exclude those labels, or a run that produced real "
                 f"legs would be declared evidence-free and then IGNORED")
 
+    def test_the_step_summary_agrees_with_the_job_name(self):
+        """The human-facing step summary and the machine-facing job name must decide
+        `no-leg` from the SAME condition. A summary that said "Tier: draft" for a run
+        the gate is ignoring is exactly the misreading that cost a full drain pass to
+        unpick, so both expressions are evaluated side by side on every payload."""
+        step = next(s for s in self.sel["jobs"]["select"]["steps"]
+                    if "ci_select.py" in str(s.get("run", "")))
+        expr = str(step["env"]["IS_NO_LEG_RUN"])
+        cases = [
+            dict(draft=True, action="labeled", label="review:needs"),
+            dict(draft=True, action="unlabeled", label="review:pass"),
+            dict(draft=False, action="labeled", label="review:needs"),
+            dict(draft=True, action="labeled", label="ci-full"),
+            dict(draft=True, action="synchronize"),
+            dict(draft=False, action="ready_for_review"),
+            dict(event="push"),
+            dict(event="merge_group"),
+        ]
+        for case in cases:
+            ctx = pr_event(**case)
+            summary_says = _truthy(_GhExpr(expr[3:-2], ctx).parse())
+            name_says = self.gate.is_no_leg_select(render_job_name(self.name, ctx))
+            self.assertEqual(
+                summary_says, name_says,
+                f"{case}: the step summary and the job name disagree about whether "
+                f"this run assembled no legs (summary={summary_says}, "
+                f"name={name_says}) — one of the two conditions has drifted (#3781)")
+
     def test_the_evaluator_itself_is_not_vacuous(self):
         """A wiring test whose evaluator silently returns '' for everything would
         pass every assertion above. Prove the evaluator discriminates."""
