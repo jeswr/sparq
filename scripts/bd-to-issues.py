@@ -479,11 +479,22 @@ def _ensure_markers(repo, num, markers, body=None):
 
 
 # --- ADD-only label reconciliation, batched (audit 2026-07-25) -----------------------------------
+# Label families the pipeline treats as SINGLE-VALUED. `role:` — triage.py enforces a single-role
+# invariant explicitly so the dispatcher's resolve() never sees an ambiguous role set; `priority:` —
+# ready-issues.py's valid_priority() returns None (i.e. NOT dispatchable) when two are present;
+# `area:` — a second area puts one issue in two package partitions. So for these families the
+# reconcile must ADD only when the family is ABSENT, never add a second member. A live run proved
+# the point before this guard existed: it put `role:impl` on issues triage had already routed
+# `role:ci` / `role:soundness`, which would have made them undispatchable.
+_SINGLE_VALUED = ("role:", "priority:", "area:")
+
+
 def plan_reconcile(open_ids, id_map, have_labels, crates=None):
     """{issue_number: [labels to ADD]} for already-mapped OPEN beads whose issue is missing labels
-    the plan requires. ADD-only by construction — never removes, so a human's curation survives.
-    An issue that already carries ANY `area:` keeps it (a human may have refined the partition):
-    the derived area AND the `needs:area` park are both suppressed in that case."""
+    the plan requires. ADD-only by construction — never removes, so a human's or triage's curation
+    survives. A single-valued family already present on the issue is left completely alone (see
+    _SINGLE_VALUED); in particular an issue that already carries an `area:` keeps it and is not
+    `needs:area`-parked either, because it is already classified."""
     out = {}
     for bid, num in sorted(id_map.items()):
         bead = open_ids.get(bid)
@@ -491,8 +502,11 @@ def plan_reconcile(open_ids, id_map, have_labels, crates=None):
             continue                                   # bead is closed/absent — not our business
         have = set(have_labels.get(num) or ())
         want = set(issue_labels(bead, crates))
+        for fam in _SINGLE_VALUED:
+            if any(lb.startswith(fam) for lb in have):
+                want = {lb for lb in want if not lb.startswith(fam)}
         if any(lb.startswith("area:") for lb in have):
-            want = {lb for lb in want if not lb.startswith("area:") and lb != "needs:area"}
+            want.discard("needs:area")                 # already classified — do not park it
         gap = want - have
         if gap:
             out[num] = sorted(gap)
@@ -823,6 +837,18 @@ def _self_test():
                                            MIGRATION_LABEL]}, cr), {})
     chk("an unmapped/closed bead is never reconciled",
         plan_reconcile(beads, {"sq-zzz": 12}, {12: []}, cr), {})
+    # Single-valued families (found by a LIVE run, not by review): the reconcile put role:impl on
+    # issues triage had already routed role:ci / role:soundness. Two role labels break triage.py's
+    # single-role invariant and two priorities make valid_priority() return None — either way the
+    # issue stops being dispatchable, so the "repair" would have made things worse.
+    chk("never adds a SECOND role: label (triage's single-role invariant)",
+        plan_reconcile(beads, {"sq-a": 13}, {13: ["role:ci"]}, cr).get(13, []),
+        ["area:sparq-solid", MIGRATION_LABEL, "priority:P2"])
+    chk("never adds a SECOND priority: label (valid_priority would return None)",
+        [lb for lb in plan_reconcile(beads, {"sq-a": 14}, {14: ["priority:P0"]}, cr).get(14, [])
+         if lb.startswith("priority:")], [])
+    chk("a missing single-valued family IS still filled in",
+        "role:impl" in plan_reconcile(beads, {"sq-a": 15}, {15: ["area:x"]}, cr).get(15, []), True)
     chk("batching chunks evenly", [len(c) for c in _chunks(range(45), 20)], [20, 20, 5])
     chk("empty reconcile does zero API calls", apply_reconcile("o/r", {}, {}), 0)
     # Adaptive split on the server's `Resource limits for this query exceeded` refusal (a real
