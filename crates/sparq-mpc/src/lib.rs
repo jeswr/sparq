@@ -300,7 +300,7 @@ mod witness_validation_tests;
 
 // [OPUS-4.8] sq-km34.1: the IT-MAC authenticated-sharing foundation surface.
 pub use authenticated::{
-    auth_add, auth_add_constant, auth_scale, auth_sub, AuthenticatedShare, MacKey,
+    auth_add, auth_add_constant, auth_scale, auth_sub, auth_sum, AuthenticatedShare, MacKey,
 };
 pub use backend::{
     AbortKind, AdversaryModel, BackendInfo, BackendRegistry, CorruptionThreshold,

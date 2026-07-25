@@ -263,9 +263,60 @@ impl KeySet {
     /// `RevocationPolicy` derives the status root from its own snapshot), and which
     /// a `manifest.hidden_issuer_attestations` proof's PUBLIC `key_set_root` must
     /// byte-equal. `None` if the set overflows the tree or `depth` is implausible.
-    // [OPUS-4.8] sq-z9l.
+    ///
+    /// [OPUS-4.8] sq-r6dq: uses the SPARSE builder
+    /// ([`crate::issuer::key_set_root_sparse`], sq-8k3h) rather than the dense
+    /// `key_set_root`, so this derivation is `O(n·depth)` in the number of trusted
+    /// keys instead of `O(2^depth)`. The `depth` is a free policy parameter
+    /// ([`KeySet::with_hidden_issuer_depth`]), so a relying party with a large or
+    /// growing issuer registry can pick a deep tree without the verifier
+    /// materialising all `2^depth` leaves. Mirrors `revocation::merkle_root`, whose
+    /// sparse builder is likewise the default (sq-hwe). The matching deeper COMPILED
+    /// circuit member (`hidden_issuer_d{depth}` beyond `d4`) is a follow-up requiring
+    /// the nargo/bb toolchain lane to gate-baseline.
+    ///
+    /// # What the substitution guarantees (NOT "scaling-only")
+    /// The sparse root is **value-equivalent to the dense root wherever the dense
+    /// evaluation completes** — the trust anchor a prover's public root must
+    /// byte-equal is unchanged at every depth the dense builder can still be run.
+    /// It is NOT behaviour-preserving: dropping the dense builder's implicit
+    /// `O(2^depth)` host cost means a deep policy depth that previously aborted or
+    /// exhausted memory before yielding an anchor now yields one, so the verifier
+    /// reaches **later states** (key parsing, leaf hashing, the 96-byte public-input
+    /// byte-compare, the `canonical_vk` lookup). Those states are themselves
+    /// fail-closed — an uncompiled `hidden_issuer_d{depth}` makes
+    /// [`crate::driver::CircuitProver::canonical_vk`] error, with no fallback to
+    /// `d4` and no prover-selected vk — but the reachable state space genuinely
+    /// grew, and with it the work an unauthenticated submission can force before the
+    /// verifier discovers the member is unavailable. That residual DoS surface is
+    /// the RP's own `with_hidden_issuer_depth` choice and is tracked separately.
+    ///
+    /// # How far the equivalence is EVIDENCED (two different kinds of evidence)
+    /// - **Dense cross-check against an independent oracle — depths ≤ 12 only:**
+    ///   `issuer::tests::sparse_root_matches_dense_for_all_sizes` (all sizes,
+    ///   depths 0–6), `sparse_witness_matches_dense_for_all_indices` (depths 0–5),
+    ///   and part (a) of `hidden_issuer_root_uses_sparse_builder_and_scales`
+    ///   (depths 4/8/12) compare against the separately-implemented dense builder.
+    /// - **Self-consistency ONLY — deep trees (24, 28, 31):** the deep groups check
+    ///   that a sparse witness re-folds to the sparse root. Root and witness both
+    ///   come from `issuer::sparse_fold_leaves`, so a CORRELATED common-mode error
+    ///   in that shared fold would pass both. There is no independent oracle at
+    ///   those depths (the dense builder cannot materialise `2^24`+ leaves). Deep
+    ///   equivalence therefore rests on the induction argument plus the ≤ 12
+    ///   cross-checks, not on a deep-tree oracle.
+    ///
+    /// The one genuinely independent end-to-end oracle is `tests/e2e.rs`'s
+    /// `prove_hidden_issuer`, which builds the prover's root/path with the DENSE
+    /// builders and attaches this SPARSE anchor as the byte-compared public input,
+    /// so `hidden_issuer_in_set_verifies_and_key_is_private` reddens on a
+    /// single-bit divergence through a real `bb` proof. Do not "simplify" that test
+    /// to one builder — the cross-builder asymmetry is what makes it an oracle.
+    ///
+    /// See `research/zk-membership-pok-reaudit.md` §2. Nothing here is an external
+    /// soundness sign-off; the accredited-cryptographer audit `sq-qhy4` is PENDING.
+    // [OPUS-4.8] sq-z9l; sparse builder sq-r6dq.
     pub fn hidden_issuer_root(&self, depth: u32) -> Option<Fr> {
-        crate::issuer::key_set_root(&self.ordered_keys(), depth)
+        crate::issuer::key_set_root_sparse(&self.ordered_keys(), depth)
     }
 
     /// The 0-based index of `pk_hex` in the canonical leaf order, if it is a
@@ -7022,6 +7073,158 @@ mod tests {
 
     fn fh(s: &str) -> FieldHex {
         FieldHex(s.to_string())
+    }
+
+    // [OPUS-4.8] sq-r6dq: the hidden-issuer trust-anchor derivation
+    // ([`KeySet::hidden_issuer_root`]) now uses the SPARSE key-set builder
+    // (sq-8k3h), so a relying party with a large/growing issuer registry can pick a
+    // deep tree without the verifier materialising `2^depth` leaves. Pin (a) the
+    // switch is VALUE-PRESERVING — the (sparse) anchor is bit-identical to the dense
+    // root at depths the dense builder can still compute — and (b) it is FEASIBLE
+    // AND SELF-CONSISTENT at a deep tree the dense builder could not materialise: a
+    // trusted member's sparse authentication path must re-fold (LSB-first index bits,
+    // the circuit's fold) to exactly the anchor the verifier derives.
+    //
+    // The two parts are NOT the same strength of evidence and must not be quoted as
+    // one. (a) is a CROSS-CHECK against an independently implemented oracle (the
+    // dense builder). (b) is SELF-CONSISTENCY ONLY: `hidden_issuer_root` and
+    // `key_membership_witness_sparse` both go through
+    // `issuer::sparse_fold_leaves`, so (b) catches an ISOLATED wrong anchor or
+    // wrong sibling but a CORRELATED common-mode error inside that shared fold
+    // would pass it. No dense oracle exists at depth 24 (2^24 leaves is not
+    // materialisable), which is exactly why (a) stops at depth 12. The independent
+    // deep oracle is `tests/e2e.rs::prove_hidden_issuer` (dense prover root vs
+    // sparse verifier anchor through a real bb proof), not this test.
+    #[test]
+    fn hidden_issuer_root_uses_sparse_builder_and_scales() {
+        use sparq_zk::sig::{key_set_leaf, public_key_to_hex, SecretKey};
+        let sks: Vec<SecretKey> = (0u64..5).map(|s| SecretKey::from_seed(9000 + s)).collect();
+        let hexes: Vec<String> = sks.iter().map(|sk| public_key_to_hex(&sk.public_key())).collect();
+        let k = KeySet::from_hex_keys(hexes).with_hidden_issuer_depth(8);
+        let ordered = k.ordered_keys();
+        assert_eq!(ordered.len(), 5, "all five real keys are trusted");
+
+        // (a) VALUE-PRESERVING: the sparse trust anchor equals the dense root over
+        // the SAME canonical key order, at depths the dense builder can compute.
+        for depth in [4u32, 8, 12] {
+            assert_eq!(
+                k.hidden_issuer_root(depth),
+                crate::issuer::key_set_root(&ordered, depth),
+                "sparse trust anchor must equal the dense root (depth {depth})"
+            );
+        }
+
+        // (b) FEASIBLE + CORRECT at a deep tree: 2^24 = 16.7M dense slots — only the
+        // sparse builder can derive this anchor. Every trusted member's sparse path
+        // must re-fold to exactly the anchor the verifier derives — the Merkle
+        // root/path consistency this test pins. (Only that narrow equality is
+        // demonstrated here; the hidden-issuer ZK construction overall remains
+        // research-grade, external cryptographer audit pending sq-qhy4.)
+        let deep = 24u32;
+        let anchor = k.hidden_issuer_root(deep).expect("deep-tree anchor");
+        for index in 0..ordered.len() as u64 {
+            let sibs = crate::issuer::key_membership_witness_sparse(&ordered, deep, index)
+                .expect("deep sparse path");
+            assert_eq!(sibs.len(), deep as usize);
+            let mut node = key_set_leaf(&ordered[index as usize]).unwrap();
+            let mut pos = index;
+            for sib in &sibs {
+                let is_right = pos & 1 == 1;
+                node = if is_right {
+                    sparq_zk::poseidon2::hash(&[*sib, node])
+                } else {
+                    sparq_zk::poseidon2::hash(&[node, *sib])
+                };
+                pos /= 2;
+            }
+            assert_eq!(
+                node, anchor,
+                "member {index}'s sparse path re-folds to the verifier's deep anchor"
+            );
+        }
+
+        // fail-closed parity retained: an implausible depth is still None.
+        assert_eq!(k.hidden_issuer_root(32), None);
+    }
+
+    /// [OPUS-5] sq-r6dq review round 3 (gpt-5.6-sol finding 7): the depth-mismatch
+    /// gate `hi.depth != depth` in [`bind_hidden_issuer_attestations`] had NO
+    /// functional test — only a `Display`-string test in `tests/verifier_errors.rs`,
+    /// which formats a hand-built `CheckError` and never runs the comparison. So
+    /// deleting the gate, or flipping `!=` to `==`, reddened nothing.
+    ///
+    /// This drives the REAL gate: an attestation declaring a depth other than the
+    /// policy's must be rejected with `HiddenIssuerDepthMismatch{declared, policy}`
+    /// carrying BOTH values, and the matching declared depth must get PAST the gate
+    /// (it then fails later on the deliberately unreferenced commitment, which is
+    /// how we know the depth check did not swallow it).
+    ///
+    /// Why the verifier's own VK selection is unaffected: `CircuitId::HiddenIssuer`
+    /// is built from `depth` — the POLICY depth — never from `hi.depth`. This gate
+    /// exists so a prover cannot silently present a proof for a different-depth
+    /// member; the vk it is verified against was never the attacker's to choose.
+    #[test]
+    fn hidden_issuer_declared_depth_must_equal_policy_depth() {
+        let mk = |declared: u32| crate::manifest::HiddenIssuerAttestation {
+            commitment: fh("0x7"),
+            depth: declared,
+            key_set_root: fh("0x8"),
+            message: fh("0x9"),
+            salt: None,
+            proof_hex: "00".into(),
+        };
+        // `revocation: None` => `scan_referenced_messages` returns an empty map
+        // WITHOUT error, so the depth gate is the first thing the loop evaluates.
+        let mut m = minimal_manifest("SELECT * WHERE { ?s <http://ex/p> ?o }");
+        let prover = CircuitProver::from_crate_root();
+        let work = std::env::temp_dir().join("sq_r6dq_hi_depth_gate");
+        let policy_depth = 4u32;
+        let k = KeySet::empty().with_hidden_issuer_depth(policy_depth);
+        assert!(
+            k.hidden_issuer_root(policy_depth).is_some(),
+            "an empty KeySet still derives an all-padding anchor, so the gate under \
+             test is reached rather than short-circuited by RootUnavailable"
+        );
+
+        // MISMATCH (both directions: shallower and deeper than the policy) => reject,
+        // with the declared/policy pair reported.
+        for declared in [3u32, 5, 0, 31] {
+            m.hidden_issuer_attestations = vec![mk(declared)];
+            match bind_hidden_issuer_attestations(&m, &k, &prover, &work, &fh("0x2a")) {
+                Err(CheckError::HiddenIssuerDepthMismatch { declared: d, policy: p }) => {
+                    assert_eq!(d, declared, "the REJECTED declared depth is reported");
+                    assert_eq!(p, policy_depth, "the POLICY depth is reported");
+                }
+                other => panic!(
+                    "a hidden-issuer attestation declaring depth {declared} under a \
+                     depth-{policy_depth} policy must be HiddenIssuerDepthMismatch, got {other:?}"
+                ),
+            }
+        }
+
+        // MATCH => the depth gate passes and the entry proceeds to the referenced-
+        // commitment check, which rejects for a DIFFERENT (non-depth) reason. This is
+        // the half that fails if the gate is inverted (`==` instead of `!=`).
+        m.hidden_issuer_attestations = vec![mk(policy_depth)];
+        match bind_hidden_issuer_attestations(&m, &k, &prover, &work, &fh("0x2a")) {
+            Err(CheckError::HiddenIssuerUnreferencedCommitment { .. }) => {}
+            other => panic!(
+                "a MATCHING declared depth must pass the depth gate and fail later on \
+                 the unreferenced commitment, got {other:?}"
+            ),
+        }
+
+        // The gate fires BEFORE any per-entry proof work, and on the FIRST offending
+        // entry: a good entry followed by a bad one still rejects on depth.
+        m.hidden_issuer_attestations = vec![mk(policy_depth), mk(policy_depth + 1)];
+        assert!(
+            matches!(
+                bind_hidden_issuer_attestations(&m, &k, &prover, &work, &fh("0x2a")),
+                Err(CheckError::HiddenIssuerUnreferencedCommitment { .. })
+                    | Err(CheckError::HiddenIssuerDepthMismatch { .. })
+            ),
+            "a mixed batch must still be rejected fail-closed"
+        );
     }
 
     // [OPUS-4.8] EMPIRICAL anchor for audit #1: the reconstruction must equal

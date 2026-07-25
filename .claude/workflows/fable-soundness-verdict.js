@@ -12,7 +12,10 @@
 //   Stage3  Arm        glue   iterate the VERDICT objects: arm honest+recommend_arm+soundness_ok;
 //                             HOLD honest=false and anything touching sq-qhy4 (external ZK audit)
 //
-// MODEL TIERS: opts.model ('fable'|'haiku') drives the tier TODAY. opts.agentType names the
+// MODEL TIERS: opts.model drives the tier TODAY — the top-tier Review fan-out dispatches the
+// FULL primary id via TOP_TIER_MODEL below (canonical TIER table: fable-architect-drain.js; the
+// bare 'fable' alias still serves the claude-fable-5 downgrade tier — alias lag probe-proven,
+// PR #3763), while the cheap stages keep the 'haiku' alias. opts.agentType names the
 // role agent ('sparq-reviewer'), now APPLIED under .claude/agents/ (maintainer-authorized,
 // commit c28d90e4); the agentType ref resolves to that role config and opts.model overrides
 // the tier on top of it. (If the agent is ever removed, an unknown agentType falls back to the
@@ -101,6 +104,12 @@ const ARM_SCHEMA = {
 const LABELS = (args && Array.isArray(args.labels)) ? args.labels : ['soundness', 'honesty']
 const EXPLICIT_PRS = (args && Array.isArray(args.prs)) ? args.prs : null
 
+// Top-tier DISPATCH id — the Opus 5 primary BY FULL ID (single-sourced canonical TIER
+// table: .claude/workflows/fable-architect-drain.js). Full-ID dispatch serves exactly the
+// requested model (probe-proven, PR #3763); the bare 'fable' alias would silently serve
+// the claude-fable-5 downgrade tier, so it is never passed as opts.model here.
+const TOP_TIER_MODEL = 'claude-opus-5'
+
 function enumeratePrompt() {
   if (EXPLICIT_PRS) {
     return 'For EACH of these PRs, assemble a compact evidence pack: ' + JSON.stringify(EXPLICIT_PRS) + '. ' +
@@ -144,7 +153,7 @@ log('enumerated ' + prs.length + ' PR(s) for Fable soundness review: ' + prs.map
 // Stage2 — FABLE reviewer, ONE call per PR (fan-out). Read-only verdicts.
 phase('Review')
 const verdicts = await parallel(prs, (p) =>
-  agent(reviewPrompt(p), { label: 'fable:' + (p.number || p.url), phase: 'Review', schema: SOUND_VERDICT_SCHEMA, agentType: 'sparq-reviewer', model: 'fable' })
+  agent(reviewPrompt(p), { label: 'fable:' + (p.number || p.url), phase: 'Review', schema: SOUND_VERDICT_SCHEMA, agentType: 'sparq-reviewer', model: TOP_TIER_MODEL })
     .then(v => ({
       pr: p.url,
       surface: p.surface,
