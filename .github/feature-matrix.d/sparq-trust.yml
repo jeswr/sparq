@@ -209,7 +209,7 @@
   test: true
 
 # [FABLE-5] sq-6syab.4 (epic sq-6syab, issue #1592): holder-side trust-expression
-# contract evaluation, clear path. The whole `expression` module (envelope parsing,
+# contract evaluation, clear path. The whole `expression` module (request parsing,
 # the §3.1 normative reference rewrite Q→Q', sparq-engine evaluation over the
 # holder's attested named-graph dataset, the RDF 1.2 reifier + named-graph/PROV-O
 # provenance-encoded response, the independent verifier re-check, and the

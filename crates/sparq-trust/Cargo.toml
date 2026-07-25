@@ -73,7 +73,7 @@ framework-vocab = []
 cert-graph = ["framework-vocab"]
 # [FABLE-5] sq-6syab.4 — holder-side trust-expression contract evaluation, CLEAR path
 # (`expression` module; issue #1592, design `research/trust-expression-spec.md` §3.1–3.5):
-# parse the verifier→holder envelope (query + trust-requirements graph + nonce), generate
+# parse the verifier→holder request (query + trust-requirements graph + nonce), generate
 # the §3.1 normative reference rewrite Q→Q' (conjoining issuer membership / positive
 # status-attestation validity at t / certification-scope conformance), evaluate Q' via
 # `sparq-engine` over the holder's attested named-graph dataset, and assemble the

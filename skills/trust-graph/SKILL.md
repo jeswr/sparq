@@ -1,6 +1,6 @@
 ---
 name: trust-graph
-description: "Pod-side certification-edge trust-graph admission with the opt-in cert-graph (sparq-trust) + trust-graph (sparq-solid) cargo features, both default-OFF: anchor trust in a certifier (a framework operator / Trusted-List authority) via a Control-gated trust:TrustRule, then let the depth-bounded, attenuation-only, fail-closed closure (derive_effective_rules) turn that certifier's signed trustx:Certification edges into derived rules the UNCHANGED admission gate consumes — so a pod admits facts from issuers the certifier vouches for, never wider than the certifier's own authority. Use when access should follow certified-issuer attestations rather than a controller-enumerated agent list; covers the anchor-rule TTL shape, the certification-bundle shape, the six EdgeRejection fail-closed reject reasons, and the PodStore wiring. Also covers the default-OFF expression feature (sparq-trust): the verifier→holder trust-expression contract, clear path — parse the query+TR+nonce envelope, generate the §3.1 reference rewrite Q→Q', evaluate over the holder's attested named-graph dataset, and independently re-check the provenance-encoded response. RESEARCH prototype — no privacy/unlinkability claim, ZK estate externally unaudited (sq-qhy4)."
+description: "Pod-side certification-edge trust-graph admission with the opt-in cert-graph (sparq-trust) + trust-graph (sparq-solid) cargo features, both default-OFF: anchor trust in a certifier (a framework operator / Trusted-List authority) via a Control-gated trust:TrustRule, then let the depth-bounded, attenuation-only, fail-closed closure (derive_effective_rules) turn that certifier's signed trustx:Certification edges into derived rules the UNCHANGED admission gate consumes — so a pod admits facts from issuers the certifier vouches for, never wider than the certifier's own authority. Use when access should follow certified-issuer attestations rather than a controller-enumerated agent list; covers the anchor-rule TTL shape, the certification-bundle shape, the six EdgeRejection fail-closed reject reasons, and the PodStore wiring. Also covers the default-OFF expression feature (sparq-trust): the verifier→holder trust-expression contract, clear path — parse the query+TR+nonce request, generate the §3.1 reference rewrite Q→Q', evaluate over the holder's attested named-graph dataset, and independently re-check the provenance-encoded response. RESEARCH prototype — no privacy/unlinkability claim, ZK estate externally unaudited (sq-qhy4)."
 license: MIT
 metadata:
   version: "0.1.0"
@@ -285,30 +285,30 @@ sparq-trust = { path = "crates/sparq-trust", features = ["expression"] }
 
 The five public entry points, in contract order:
 
-1. **`parse_envelope(query, tr_triples, nonce)` → `TrustEnvelope`** — fail-closed on a
+1. **`parse_request(query, tr_triples, nonce)` → `ContractRequest`** — fail-closed on a
    missing/duplicated requirements node, a missing `trustx:question` /
    `trustx:requiresValidStatusAt`, a non-UTC `xsd:dateTime`, a malformed `did:` issuer,
    or a `TR` naming **no trust mode** (neither `trustx:trustsIssuer` nor
    `trustx:trustsFramework` — such a document admits nothing and is refused up front,
    never evaluated vacuously). `trustx:question` is an **opaque label** at this layer:
    it is parsed for presence and IRI-ness but never resolved or compared against the
-   query, so the question↔query association is a caller-owned trust boundary (envelope
+   query, so the question↔query association is a caller-owned trust boundary (request
    authentication / trusted question resolution — see the module's honest-scope docs).
-2. **`rewrite_query(&envelope)`** — the §3.1 normative reference rewrite `Q → Q'`: each
+2. **`rewrite_query(&request)`** — the §3.1 normative reference rewrite `Q → Q'`: each
    of `Q`'s triple patterns is wrapped in a `GRAPH ?g { … }` over the holder's
    attestation bundles and conjoined with issuer-membership (mode 1), positive
    status-attestation validity at *t* (the existence of a covering window — never
    evidence-of-absence), and certification-window + scope-conformance (mode 2) patterns;
    the two modes compose by plain `UNION`.
-3. **`evaluate_contract(&envelope, &holder, precheck)` → `ContractOutcome`** — runs the
+3. **`evaluate_contract(&request, &holder, precheck)` → `ContractOutcome`** — runs the
    optional `trustx:methodPolicy` ODRL pre-check (the existing
    `sparq_trust::admissibility::admissible` reduction), then `Q'` via `sparq-engine`
    over the holder's attested dataset — one named graph per attestation bundle;
    attribution (`prov:wasAttributedTo`), status attestations, and certifications in the
    default graph (build it with `Graph::load_dataset` from TriG) — then assembles the
    response.
-4. **`verify_response(&envelope, &response)`** — the INDEPENDENT verifier re-check:
-   re-derives `Q'` from the envelope alone and evaluates it over the response's
+4. **`verify_response(&request, &response)`** — the INDEPENDENT verifier re-check:
+   re-derives `Q'` from the request alone and evaluates it over the response's
    named-graph (TriG) form. A wrong nonce is refused outright; a stripped- or
    tampered-provenance response simply yields no admissible derivation.
 5. **`mint_status_attestation(…)`** — the status-list bridge: only a verified

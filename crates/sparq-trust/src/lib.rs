@@ -161,7 +161,7 @@ pub mod secprop;
 pub mod framework_vocab;
 /// Holder-side trust-expression contract evaluation, CLEAR path (`expression` module,
 /// `sq-6syab.4`; issue #1592, design `research/trust-expression-spec.md` §3.1–3.5): parse
-/// the verifier→holder envelope (SPARQL query + trust-requirements graph + nonce),
+/// the verifier→holder request (SPARQL query + trust-requirements graph + nonce),
 /// generate the §3.1 normative reference rewrite Q→Q' (conjoining issuer-membership /
 /// positive-status-attestation-validity-at-t / certification-scope-conformance patterns),
 /// evaluate Q' via `sparq-engine` over the holder's attested named-graph dataset, and
@@ -236,9 +236,9 @@ pub use did::{
 };
 #[cfg(feature = "expression")]
 pub use expression::{
-    evaluate_contract, mint_status_attestation, parse_envelope, rewrite_query, verify_response,
-    ContractAnswer, ContractOutcome, ExpressionError, MethodPrecheck, ProvenanceResponse,
-    TrustEnvelope, TrustRequirements,
+    evaluate_contract, mint_status_attestation, parse_request, rewrite_query, verify_response,
+    ContractAnswer, ContractOutcome, ContractRequest, ExpressionError, MethodPrecheck,
+    ProvenanceResponse, TrustRequirements,
 };
 #[cfg(feature = "cert-graph")]
 pub use graph::{

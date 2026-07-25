@@ -8,7 +8,7 @@
 //! **nonce** (the zkSPARQL challenge-response mechanism, reused verbatim — no new
 //! freshness scheme). This module:
 //!
-//! 1. **parses the envelope** ([`parse_envelope`]) — fail-closed on a missing /
+//! 1. **parses the request** ([`parse_request`]) — fail-closed on a missing /
 //!    duplicated requirements node, a missing question IRI, a missing status
 //!    instant, a malformed `did:` issuer (validated through the [`crate::did`]
 //!    binding layer), or a requirements document with **no trust mode** (which
@@ -79,7 +79,7 @@
 //! resolution or digest scheme to check it against), so a `TR` authored for one
 //! question paired with a different supported query is accepted here. Verifying
 //! that `Q` *is* the named question — e.g. a signature over the whole
-//! `(Q, TR, nonce)` envelope, or a trusted publication resolving the question
+//! `(Q, TR, nonce)` request, or a trusted publication resolving the question
 //! IRI to a canonical query — is caller-owned, exactly like the
 //! [`MethodPrecheck`] resolution (design §7.7). Framework trust is **anchored, not
 //! proven** (§7.2). No ZK claim is made here; the ZK realisation is bead
@@ -125,7 +125,7 @@ const RESERVED_VAR_PREFIX: &str = "__tx_";
 
 // ─────────────────────────────── errors ───────────────────────────────
 
-/// Why an envelope / rewrite / evaluation was refused. Every variant is a
+/// Why a request / rewrite / evaluation was refused. Every variant is a
 /// **fail-closed** outcome: nothing is evaluated and no response is produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExpressionError {
@@ -188,7 +188,7 @@ pub enum ExpressionError {
     Engine(String),
     /// The response dataset could not be parsed for the verifier re-check.
     Response(String),
-    /// The response's nonce does not match the envelope's.
+    /// The response's nonce does not match the request's.
     NonceMismatch,
     /// [`mint_status_attestation`] was handed a non-[`LiveStatus::Live`] verdict
     /// (the fail-closed reason token is carried) — a positive attestation can
@@ -248,7 +248,7 @@ impl fmt::Display for ExpressionError {
             Self::Admissibility(e) => write!(f, "admissibility reasoner error: {}", e),
             Self::Engine(e) => write!(f, "engine error: {}", e),
             Self::Response(e) => write!(f, "response dataset error: {}", e),
-            Self::NonceMismatch => write!(f, "response nonce does not match the envelope"),
+            Self::NonceMismatch => write!(f, "response nonce does not match the request"),
             Self::NonPositiveStatus(reason) => write!(
                 f,
                 "refusing to mint a positive status attestation from a non-live check: {}",
@@ -261,7 +261,7 @@ impl fmt::Display for ExpressionError {
 
 impl std::error::Error for ExpressionError {}
 
-// ─────────────────────────────── envelope ───────────────────────────────
+// ─────────────────────────────── request ────────────────────────────────
 
 /// The parsed verifier→holder contract carrier: the SPARQL query `Q`, the
 /// trust-requirements document `TR` (parsed), and the challenge nonce — the
@@ -269,7 +269,7 @@ impl std::error::Error for ExpressionError {}
 /// wire mechanism for the nonce is the zkSPARQL challenge-response, reused
 /// verbatim; this struct is the in-memory form after transport.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrustEnvelope {
+pub struct ContractRequest {
     /// The SPARQL query `Q` (ASK or SELECT; see the module docs for the
     /// supported v1 fragment).
     pub query: String,
@@ -293,7 +293,7 @@ pub struct TrustRequirements {
     pub question: NamedNode,
     /// **Mode 1** (enumerated parties): the issuer identities whose attributed
     /// statements are admissible. `did:` IRIs are syntax-validated through
-    /// [`crate::did::Did::parse`] at envelope-parse time.
+    /// [`crate::did::Did::parse`] at request-parse time.
     pub trusted_issuers: Vec<NamedNode>,
     /// **Mode 2** (framework-certified issuers): the frameworks whose valid,
     /// status-covered certifications admit an issuer. Composes with mode 1 by
@@ -325,7 +325,7 @@ pub struct TrustRequirements {
 /// ## Trust boundary (read before relying on the pre-check)
 ///
 /// [`evaluate_contract`] BINDS the pre-check to `TR`: [`Self::policy`] must
-/// equal the `trustx:methodPolicy` IRI the envelope names, else the whole
+/// equal the `trustx:methodPolicy` IRI the request names, else the whole
 /// evaluation is refused ([`ExpressionError::MethodPolicyMismatch`]) — a
 /// pre-check resolved for a different (e.g. weaker) policy can never be
 /// substituted. What remains **caller-owned** is the *resolution itself*:
@@ -353,17 +353,17 @@ pub struct MethodPrecheck<'a> {
     pub annotations: &'a str,
 }
 
-/// Parse an envelope: the query string `Q`, the trust-requirements graph `TR`
+/// Parse a request: the query string `Q`, the trust-requirements graph `TR`
 /// (as parsed RDF triples — the same input shape as [`crate::policy::parse_policy`]),
 /// and the nonce. Fail-closed on every malformation (see [`ExpressionError`]);
 /// notably a `TR` with **no trust mode** is refused here rather than admitted
 /// as a vacuous evaluation, and every `did:`-scheme issuer must pass
 /// [`crate::did::Did::parse`].
-pub fn parse_envelope(
+pub fn parse_request(
     query: &str,
     requirements: &[Triple],
     nonce: &str,
-) -> Result<TrustEnvelope, ExpressionError> {
+) -> Result<ContractRequest, ExpressionError> {
     if nonce.trim().is_empty() {
         return Err(ExpressionError::EmptyNonce);
     }
@@ -474,7 +474,7 @@ pub fn parse_envelope(
         _ => return Err(ExpressionError::BadTerm(TRUSTX_METHOD_POLICY.to_string())),
     };
 
-    Ok(TrustEnvelope {
+    Ok(ContractRequest {
         query: query.to_string(),
         nonce: nonce.to_string(),
         requirements: TrustRequirements {
@@ -719,9 +719,9 @@ fn build_rewrite(req: &TrustRequirements, shape: &Shape) -> Result<String, Expre
 /// `Q` under `TR`": it is checkable by ANY conformant SPARQL 1.1 engine over
 /// the response's named-graph form, which is exactly what [`verify_response`]
 /// does.
-pub fn rewrite_query(envelope: &TrustEnvelope) -> Result<String, ExpressionError> {
-    let shape = parse_shape(&envelope.query)?;
-    build_rewrite(&envelope.requirements, &shape)
+pub fn rewrite_query(request: &ContractRequest) -> Result<String, ExpressionError> {
+    let shape = parse_shape(&request.query)?;
+    build_rewrite(&request.requirements, &shape)
 }
 
 // ─────────────────────────────── evaluation ───────────────────────────────
@@ -750,7 +750,7 @@ pub enum ContractAnswer {
 /// admissible derivation ⇒ no binding ⇒ zero bundles disclosed).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProvenanceResponse {
-    /// The envelope's nonce, echoed (checked by [`verify_response`]).
+    /// The request's nonce, echoed (checked by [`verify_response`]).
     pub nonce: String,
     /// Option (a), the NORMATIVE encoding: RDF 1.2 reifiers — one
     /// `<bundle> rdf:reifies <<( s p o )>>` statement per contributing
@@ -840,11 +840,11 @@ fn pattern_var_names(patterns: &[TriplePattern]) -> Vec<String> {
 /// bundle / status / certification nodes (following `trustx:coveredBy` links to
 /// their attestations).
 fn assemble_response(
-    envelope: &TrustEnvelope,
+    request: &ContractRequest,
     shape: &Shape,
     holder: &Graph,
 ) -> Result<ProvenanceResponse, ExpressionError> {
-    let req = &envelope.requirements;
+    let req = &request.requirements;
     let body = admissibility_body(req, &shape.patterns)?;
 
     // Projection: every pattern variable + the per-pattern provenance handles.
@@ -956,7 +956,7 @@ fn assemble_response(
 
     let contributing_statements = bundles.values().map(BTreeSet::len).sum();
     Ok(ProvenanceResponse {
-        nonce: envelope.nonce.clone(),
+        nonce: request.nonce.clone(),
         reifier_form,
         dataset_form,
         contributing_statements,
@@ -996,12 +996,12 @@ fn answer_over(shape: &Shape, q_prime: &str, graph: &Graph) -> Result<ContractAn
 /// Fail-closed: no admissible derivation ⇒ `Boolean(false)` / zero rows AND a
 /// response with zero bundles.
 pub fn evaluate_contract(
-    envelope: &TrustEnvelope,
+    request: &ContractRequest,
     holder: &Graph,
     precheck: Option<&MethodPrecheck<'_>>,
 ) -> Result<ContractOutcome, ExpressionError> {
     // D5: the method-policy axis is consulted BEFORE any evaluation.
-    if let Some(required) = &envelope.requirements.method_policy {
+    if let Some(required) = &request.requirements.method_policy {
         let pc = precheck.ok_or(ExpressionError::MethodPolicyWithoutPrecheck)?;
         // Bind the pre-check to the policy TR names: data resolved for a
         // different (weaker) policy is refused, never silently accepted.
@@ -1018,27 +1018,27 @@ pub fn evaluate_contract(
             return Err(ExpressionError::MethodNotAdmissible(verdict.unsatisfied));
         }
     }
-    let shape = parse_shape(&envelope.query)?;
-    let q_prime = build_rewrite(&envelope.requirements, &shape)?;
+    let shape = parse_shape(&request.query)?;
+    let q_prime = build_rewrite(&request.requirements, &shape)?;
     let answer = answer_over(&shape, &q_prime, holder)?;
-    let response = assemble_response(envelope, &shape, holder)?;
+    let response = assemble_response(request, &shape, holder)?;
     Ok(ContractOutcome { answer, rewritten_query: q_prime, response })
 }
 
 /// The INDEPENDENT verifier re-check (the bead's second invariant): given only
-/// the envelope and the response, re-derive `Q'` and evaluate it over `R`'s
+/// the request and the response, re-derive `Q'` and evaluate it over `R`'s
 /// named-graph form. A response whose provenance was stripped or tampered with
 /// simply yields no admissible derivation (fail-closed `false` / zero rows); a
 /// wrong nonce is refused outright.
 pub fn verify_response(
-    envelope: &TrustEnvelope,
+    request: &ContractRequest,
     response: &ProvenanceResponse,
 ) -> Result<ContractAnswer, ExpressionError> {
-    if response.nonce != envelope.nonce {
+    if response.nonce != request.nonce {
         return Err(ExpressionError::NonceMismatch);
     }
-    let shape = parse_shape(&envelope.query)?;
-    let q_prime = build_rewrite(&envelope.requirements, &shape)?;
+    let shape = parse_shape(&request.query)?;
+    let q_prime = build_rewrite(&request.requirements, &shape)?;
     let r = Graph::load_dataset(&response.dataset_form, "trig")
         .map_err(ExpressionError::Response)?;
     answer_over(&shape, &q_prime, &r)
@@ -1296,41 +1296,41 @@ mod tests {
         v
     }
 
-    fn envelope(query: &str, issuers: &[&str], frameworks: &[&str]) -> TrustEnvelope {
-        parse_envelope(query, &tr_triples(issuers, frameworks, None, None), "nonce-1")
-            .expect("fixture envelope parses")
+    fn request(query: &str, issuers: &[&str], frameworks: &[&str]) -> ContractRequest {
+        parse_request(query, &tr_triples(issuers, frameworks, None, None), "nonce-1")
+            .expect("fixture request parses")
     }
 
-    // ── parse_envelope ───────────────────────────────────────────────────
+    // ── parse_request ───────────────────────────────────────────────────
 
     #[test]
-    fn parse_envelope_happy_path_two_modes() {
-        let env = parse_envelope(
+    fn parse_request_happy_path_two_modes() {
+        let req = parse_request(
             ASK_AGE,
             &tr_triples(&[ISS_X], &[TRUSTX_EIDAS2], None, None),
             "n-1",
         )
         .expect("parses");
-        assert_eq!(env.nonce, "n-1");
-        assert_eq!(env.requirements.question.as_str(), "urn:q1");
-        assert_eq!(env.requirements.trusted_issuers, vec![nn(ISS_X)]);
-        assert_eq!(env.requirements.trusted_frameworks, vec![nn(TRUSTX_EIDAS2)]);
+        assert_eq!(req.nonce, "n-1");
+        assert_eq!(req.requirements.question.as_str(), "urn:q1");
+        assert_eq!(req.requirements.trusted_issuers, vec![nn(ISS_X)]);
+        assert_eq!(req.requirements.trusted_frameworks, vec![nn(TRUSTX_EIDAS2)]);
         // ABSENT scope-conformance flag defaults to true (the stricter reading).
-        assert!(env.requirements.requires_scope_conformance);
-        assert_eq!(env.requirements.valid_status_at, T);
-        assert_eq!(env.requirements.method_policy, None);
+        assert!(req.requirements.requires_scope_conformance);
+        assert_eq!(req.requirements.valid_status_at, T);
+        assert_eq!(req.requirements.method_policy, None);
     }
 
     #[test]
-    fn parse_envelope_rejects_empty_nonce_and_empty_query() {
+    fn parse_request_rejects_empty_nonce_and_empty_query() {
         let tr = tr_triples(&[ISS_X], &[], None, None);
-        assert_eq!(parse_envelope(ASK_AGE, &tr, "  "), Err(ExpressionError::EmptyNonce));
-        assert_eq!(parse_envelope(" ", &tr, "n"), Err(ExpressionError::EmptyQuery));
+        assert_eq!(parse_request(ASK_AGE, &tr, "  "), Err(ExpressionError::EmptyNonce));
+        assert_eq!(parse_request(" ", &tr, "n"), Err(ExpressionError::EmptyQuery));
     }
 
     #[test]
-    fn parse_envelope_rejects_missing_or_duplicated_requirements_node() {
-        assert_eq!(parse_envelope(ASK_AGE, &[], "n"), Err(ExpressionError::NoRequirements));
+    fn parse_request_rejects_missing_or_duplicated_requirements_node() {
+        assert_eq!(parse_request(ASK_AGE, &[], "n"), Err(ExpressionError::NoRequirements));
         let mut two = tr_triples(&[ISS_X], &[], None, None);
         two.push(Triple::new(
             nn("urn:tr2"),
@@ -1338,24 +1338,24 @@ mod tests {
             Term::NamedNode(nn(TRUSTX_TRUST_REQUIREMENTS)),
         ));
         assert_eq!(
-            parse_envelope(ASK_AGE, &two, "n"),
+            parse_request(ASK_AGE, &two, "n"),
             Err(ExpressionError::MultipleRequirements)
         );
     }
 
     #[test]
-    fn parse_envelope_rejects_missing_question_and_missing_instant() {
+    fn parse_request_rejects_missing_question_and_missing_instant() {
         let no_q: Vec<Triple> = tr_triples(&[ISS_X], &[], None, None)
             .into_iter()
             .filter(|t| t.predicate.as_str() != TRUSTX_QUESTION)
             .collect();
-        assert_eq!(parse_envelope(ASK_AGE, &no_q, "n"), Err(ExpressionError::MissingQuestion));
+        assert_eq!(parse_request(ASK_AGE, &no_q, "n"), Err(ExpressionError::MissingQuestion));
         let no_t: Vec<Triple> = tr_triples(&[ISS_X], &[], None, None)
             .into_iter()
             .filter(|t| t.predicate.as_str() != TRUSTX_REQUIRES_VALID_STATUS_AT)
             .collect();
         assert_eq!(
-            parse_envelope(ASK_AGE, &no_t, "n"),
+            parse_request(ASK_AGE, &no_t, "n"),
             Err(ExpressionError::MissingValidStatusAt)
         );
     }
@@ -1367,13 +1367,13 @@ mod tests {
         // this layer resolves or verifies it against Q — a TR minted for
         // `urn:q1` paired with a DIFFERENT supported query still parses,
         // evaluates, and re-checks. Verifying that Q is the named question
-        // (envelope authentication / trusted question resolution) is
+        // (request authentication / trusted question resolution) is
         // caller-owned; if an in-band binding is ever enforced, this test must
         // flip to a rejection.
         let tr = tr_triples(&[ISS_X], &[], None, None); // question = urn:q1
         let q = format!("ASK {{ <urn:jesse> <{}> ?name }}", FOAF_NAME);
-        let env = parse_envelope(&q, &tr, "n").expect("unrelated query accepted");
-        assert_eq!(env.requirements.question.as_str(), "urn:q1");
+        let req = parse_request(&q, &tr, "n").expect("unrelated query accepted");
+        assert_eq!(req.requirements.question.as_str(), "urn:q1");
 
         let mut d = String::new();
         d.push_str(&format!("<urn:b1> <{}> <{}> .\n", PROV_WAS_ATTRIBUTED_TO, ISS_X));
@@ -1383,16 +1383,16 @@ mod tests {
             FOAF_NAME
         ));
         let holder = Graph::load_dataset(&d, "trig").expect("fixture parses");
-        let out = evaluate_contract(&env, &holder, None).expect("evaluates");
+        let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         assert_eq!(out.answer, ContractAnswer::Boolean(true));
         assert_eq!(
-            verify_response(&env, &out.response).expect("re-checks"),
+            verify_response(&req, &out.response).expect("re-checks"),
             ContractAnswer::Boolean(true)
         );
     }
 
     #[test]
-    fn parse_envelope_rejects_non_utc_datetime() {
+    fn parse_request_rejects_non_utc_datetime() {
         let mut tr: Vec<Triple> = tr_triples(&[ISS_X], &[], None, None)
             .into_iter()
             .filter(|t| t.predicate.as_str() != TRUSTX_REQUIRES_VALID_STATUS_AT)
@@ -1406,53 +1406,53 @@ mod tests {
             )),
         ));
         assert_eq!(
-            parse_envelope(ASK_AGE, &tr, "n"),
+            parse_request(ASK_AGE, &tr, "n"),
             Err(ExpressionError::BadDateTime("2026-07-05T00:00:00+02:00".to_string()))
         );
     }
 
     #[test]
-    fn parse_envelope_rejects_no_trust_mode() {
+    fn parse_request_rejects_no_trust_mode() {
         // Neither issuers nor frameworks: such a TR admits nothing — refused up front.
         assert_eq!(
-            parse_envelope(ASK_AGE, &tr_triples(&[], &[], None, None), "n"),
+            parse_request(ASK_AGE, &tr_triples(&[], &[], None, None), "n"),
             Err(ExpressionError::NoTrustMode)
         );
     }
 
     #[test]
-    fn parse_envelope_validates_did_issuers_and_accepts_plain_iris() {
+    fn parse_request_validates_did_issuers_and_accepts_plain_iris() {
         // Uppercase DID method is invalid DID syntax → fail-closed via Did::parse.
         assert_eq!(
-            parse_envelope(ASK_AGE, &tr_triples(&["did:WEB:x.example"], &[], None, None), "n"),
+            parse_request(ASK_AGE, &tr_triples(&["did:WEB:x.example"], &[], None, None), "n"),
             Err(ExpressionError::BadIssuer("did:WEB:x.example".to_string()))
         );
         // A non-did IRI identity is accepted opaquely.
-        let env = parse_envelope(
+        let req = parse_request(
             ASK_AGE,
             &tr_triples(&["https://issuers.example/x"], &[], None, None),
             "n",
         )
         .expect("plain IRI issuer accepted");
-        assert_eq!(env.requirements.trusted_issuers, vec![nn("https://issuers.example/x")]);
+        assert_eq!(req.requirements.trusted_issuers, vec![nn("https://issuers.example/x")]);
     }
 
     #[test]
-    fn parse_envelope_reads_explicit_scope_conformance_flag() {
-        let env = parse_envelope(
+    fn parse_request_reads_explicit_scope_conformance_flag() {
+        let req = parse_request(
             ASK_AGE,
             &tr_triples(&[], &[TRUSTX_EIDAS2], Some(false), None),
             "n",
         )
         .expect("parses");
-        assert!(!env.requirements.requires_scope_conformance);
+        assert!(!req.requirements.requires_scope_conformance);
     }
 
     // ── rewrite_query (the §3.1 normative reference rewrite) ─────────────
 
     #[test]
     fn rewrite_mode1_conjoins_graph_status_and_issuer_membership() {
-        let q = rewrite_query(&envelope(ASK_AGE, &[ISS_X], &[])).expect("rewrites");
+        let q = rewrite_query(&request(ASK_AGE, &[ISS_X], &[])).expect("rewrites");
         assert!(q.starts_with("ASK {"), "ASK form preserved: {}", q);
         assert!(q.contains("GRAPH ?__tx_g0"), "bundle GRAPH wrap: {}", q);
         assert!(q.contains(TRUSTX_COVERED_BY), "status coverage pattern: {}", q);
@@ -1474,7 +1474,7 @@ mod tests {
 
     #[test]
     fn rewrite_mode2_conjoins_certification_window_status_and_scope() {
-        let q = rewrite_query(&envelope(ASK_AGE, &[], &[TRUSTX_EIDAS2])).expect("rewrites");
+        let q = rewrite_query(&request(ASK_AGE, &[], &[TRUSTX_EIDAS2])).expect("rewrites");
         assert!(q.contains(TRUSTX_CERTIFICATION), "certification pattern: {}", q);
         assert!(q.contains(TRUSTX_CERTIFIES), "certifies binding: {}", q);
         assert!(
@@ -1495,7 +1495,7 @@ mod tests {
 
     #[test]
     fn rewrite_composes_the_two_modes_by_union() {
-        let q = rewrite_query(&envelope(ASK_AGE, &[ISS_X], &[TRUSTX_EIDAS2])).expect("rewrites");
+        let q = rewrite_query(&request(ASK_AGE, &[ISS_X], &[TRUSTX_EIDAS2])).expect("rewrites");
         assert!(q.contains("UNION"), "modes compose by OR: {}", q);
         assert!(q.contains("VALUES ?__tx_iss0"), "mode 1 arm present: {}", q);
         assert!(q.contains(TRUSTX_CERTIFICATION), "mode 2 arm present: {}", q);
@@ -1503,13 +1503,13 @@ mod tests {
 
     #[test]
     fn rewrite_scope_conformance_false_omits_the_scope_check() {
-        let env = parse_envelope(
+        let req = parse_request(
             ASK_AGE,
             &tr_triples(&[], &[TRUSTX_EIDAS2], Some(false), None),
             "n",
         )
         .expect("parses");
-        let q = rewrite_query(&env).expect("rewrites");
+        let q = rewrite_query(&req).expect("rewrites");
         assert!(!q.contains(TRUSTX_ANY_SERVICE_SCOPE), "scope arm omitted: {}", q);
         // Certification validity + status coverage still required (fail-closed core).
         assert!(q.contains(TRUSTX_CERTIFICATION) && q.contains("?__tx_cst0"));
@@ -1517,9 +1517,9 @@ mod tests {
 
     #[test]
     fn rewrite_preserves_select_projection_and_distinct() {
-        let q = rewrite_query(&envelope(SELECT_AGE, &[ISS_X], &[])).expect("rewrites");
+        let q = rewrite_query(&request(SELECT_AGE, &[ISS_X], &[])).expect("rewrites");
         assert!(q.starts_with("SELECT ?age WHERE {"), "projection preserved: {}", q);
-        let qd = rewrite_query(&envelope(
+        let qd = rewrite_query(&request(
             "SELECT DISTINCT ?age WHERE { <urn:jesse> <http://xmlns.com/foaf/0.1/age> ?age }",
             &[ISS_X],
             &[],
@@ -1547,10 +1547,10 @@ mod tests {
             "ASK { }",
         ];
         for c in cases {
-            let env = envelope(ASK_AGE, &[ISS_X], &[]);
-            let env = TrustEnvelope { query: (*c).to_string(), ..env };
+            let req = request(ASK_AGE, &[ISS_X], &[]);
+            let req = ContractRequest { query: (*c).to_string(), ..req };
             assert!(
-                matches!(rewrite_query(&env), Err(ExpressionError::UnsupportedQuery(_))),
+                matches!(rewrite_query(&req), Err(ExpressionError::UnsupportedQuery(_))),
                 "expected UnsupportedQuery for: {}",
                 c
             );
@@ -1559,28 +1559,28 @@ mod tests {
 
     #[test]
     fn rewrite_refuses_reserved_variables_and_garbage() {
-        let env = envelope(ASK_AGE, &[ISS_X], &[]);
-        let reserved = TrustEnvelope {
+        let req = request(ASK_AGE, &[ISS_X], &[]);
+        let reserved = ContractRequest {
             query: "ASK { ?__tx_g0 <urn:p> ?o }".to_string(),
-            ..env.clone()
+            ..req.clone()
         };
         assert!(matches!(
             rewrite_query(&reserved),
             Err(ExpressionError::ReservedVariable(_))
         ));
-        let garbage = TrustEnvelope { query: "NOT SPARQL".to_string(), ..env };
+        let garbage = ContractRequest { query: "NOT SPARQL".to_string(), ..req };
         assert!(matches!(rewrite_query(&garbage), Err(ExpressionError::QueryParse(_))));
     }
 
     #[test]
     fn rewrite_fails_closed_on_hand_built_invalid_requirements() {
-        // The pub-field structs allow bypassing parse_envelope; the rewrite
+        // The pub-field structs allow bypassing parse_request; the rewrite
         // re-validates fail-closed.
-        let env = envelope(ASK_AGE, &[ISS_X], &[]);
-        let mut no_mode = env.clone();
+        let req = request(ASK_AGE, &[ISS_X], &[]);
+        let mut no_mode = req.clone();
         no_mode.requirements.trusted_issuers.clear();
         assert_eq!(rewrite_query(&no_mode), Err(ExpressionError::NoTrustMode));
-        let mut bad_t = env;
+        let mut bad_t = req;
         bad_t.requirements.valid_status_at = "garbage\") . } #injection".to_string();
         assert!(matches!(rewrite_query(&bad_t), Err(ExpressionError::BadDateTime(_))));
     }
@@ -1589,9 +1589,9 @@ mod tests {
 
     #[test]
     fn mode1_admissible_derivation_binds_and_recheck_reproduces_it() {
-        let env = envelope(ASK_AGE, &[ISS_X], &[]);
+        let req = request(ASK_AGE, &[ISS_X], &[]);
         let holder = holder_mode1(ISS_X, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
-        let out = evaluate_contract(&env, &holder, None).expect("evaluates");
+        let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         assert_eq!(out.answer, ContractAnswer::Boolean(true));
         assert_eq!(out.response.contributing_statements, 1);
         // The (b) form carries the bundle AND its provenance.
@@ -1603,22 +1603,22 @@ mod tests {
         assert!(out.response.reifier_form.contains("<<("));
         // INDEPENDENT verifier re-check: Q' over R reproduces the answer.
         assert_eq!(
-            verify_response(&env, &out.response).expect("re-checks"),
+            verify_response(&req, &out.response).expect("re-checks"),
             ContractAnswer::Boolean(true)
         );
     }
 
     #[test]
     fn mode1_untrusted_issuer_fails_closed() {
-        let env = envelope(ASK_AGE, &[ISS_X], &[]);
+        let req = request(ASK_AGE, &[ISS_X], &[]);
         let holder = holder_mode1(ISS_EVIL, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
-        let out = evaluate_contract(&env, &holder, None).expect("evaluates");
+        let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         // No admissible derivation ⇒ no binding AND an empty response.
         assert_eq!(out.answer, ContractAnswer::Boolean(false));
         assert_eq!(out.response.contributing_statements, 0);
         assert!(out.response.dataset_form.is_empty());
         assert_eq!(
-            verify_response(&env, &out.response).expect("re-checks"),
+            verify_response(&req, &out.response).expect("re-checks"),
             ContractAnswer::Boolean(false)
         );
     }
@@ -1626,9 +1626,9 @@ mod tests {
     #[test]
     fn mode1_stale_status_window_fails_closed() {
         // Attestation exists but its window does not cover t (design §6 case 3).
-        let env = envelope(ASK_AGE, &[ISS_X], &[]);
+        let req = request(ASK_AGE, &[ISS_X], &[]);
         let holder = holder_mode1(ISS_X, "2026-07-01T00:00:00Z", "2026-07-04T00:00:00Z", true);
-        let out = evaluate_contract(&env, &holder, None).expect("evaluates");
+        let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         assert_eq!(out.answer, ContractAnswer::Boolean(false));
         assert_eq!(out.response.contributing_statements, 0);
     }
@@ -1638,18 +1638,18 @@ mod tests {
         // The revocation shape under OWA: a revoked credential simply has NO
         // covering positive attestation (design §6 case 2 — never "false
         // because revoked", just no admissible derivation).
-        let env = envelope(ASK_AGE, &[ISS_X], &[]);
+        let req = request(ASK_AGE, &[ISS_X], &[]);
         let holder = holder_mode1(ISS_X, "", "", false);
-        let out = evaluate_contract(&env, &holder, None).expect("evaluates");
+        let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         assert_eq!(out.answer, ContractAnswer::Boolean(false));
         assert_eq!(out.response.contributing_statements, 0);
     }
 
     #[test]
     fn mode1_select_returns_admissible_bindings_and_recheck_matches() {
-        let env = envelope(SELECT_AGE, &[ISS_X], &[]);
+        let req = request(SELECT_AGE, &[ISS_X], &[]);
         let holder = holder_mode1(ISS_X, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
-        let out = evaluate_contract(&env, &holder, None).expect("evaluates");
+        let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         let ContractAnswer::Solutions { vars, rows } = &out.answer else {
             panic!("expected solutions, got {:?}", out.answer);
         };
@@ -1657,7 +1657,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let bound = rows[0][0].as_ref().expect("age bound").to_string();
         assert!(bound.contains("25"), "age binding: {}", bound);
-        assert_eq!(verify_response(&env, &out.response).expect("re-checks"), out.answer);
+        assert_eq!(verify_response(&req, &out.response).expect("re-checks"), out.answer);
     }
 
     #[test]
@@ -1675,12 +1675,12 @@ mod tests {
             "ASK {{ <urn:jesse> <{}> ?age . <urn:jesse> <{}> ?name }}",
             FOAF_AGE, FOAF_NAME
         );
-        let env = envelope(&q, &[ISS_X], &[]);
-        let out = evaluate_contract(&env, &holder, None).expect("evaluates");
+        let req = request(&q, &[ISS_X], &[]);
+        let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         assert_eq!(out.answer, ContractAnswer::Boolean(true));
         assert_eq!(out.response.contributing_statements, 2);
         assert_eq!(
-            verify_response(&env, &out.response).expect("re-checks"),
+            verify_response(&req, &out.response).expect("re-checks"),
             ContractAnswer::Boolean(true)
         );
     }
@@ -1689,30 +1689,30 @@ mod tests {
 
     #[test]
     fn mode2_scope_conformant_certification_binds() {
-        let env = envelope(ASK_AGE, &[], &[TRUSTX_EIDAS2]);
+        let req = request(ASK_AGE, &[], &[TRUSTX_EIDAS2]);
         let holder = holder_mode2(FOAF_AGE, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
-        let out = evaluate_contract(&env, &holder, None).expect("evaluates");
+        let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         assert_eq!(out.answer, ContractAnswer::Boolean(true));
         // The response provenance includes the certification + BOTH attestations,
         // so the verifier can re-check scope + windows independently.
         assert!(out.response.dataset_form.contains(TRUSTX_CERTIFICATION));
         assert!(out.response.dataset_form.contains("<urn:cst1>"));
         assert_eq!(
-            verify_response(&env, &out.response).expect("re-checks"),
+            verify_response(&req, &out.response).expect("re-checks"),
             ContractAnswer::Boolean(true)
         );
     }
 
     #[test]
     fn mode2_any_service_scope_binds_the_diatf_granularity() {
-        let env = envelope(ASK_AGE, &[], &[TRUSTX_EIDAS2]);
+        let req = request(ASK_AGE, &[], &[TRUSTX_EIDAS2]);
         let holder = holder_mode2(
             TRUSTX_ANY_SERVICE_SCOPE,
             "2026-07-01T00:00:00Z",
             "2026-07-10T00:00:00Z",
             true,
         );
-        let out = evaluate_contract(&env, &holder, None).expect("evaluates");
+        let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         assert_eq!(out.answer, ContractAnswer::Boolean(true));
     }
 
@@ -1721,18 +1721,18 @@ mod tests {
         // Certified issuer, valid windows — but the statement's predicate is
         // OUTSIDE the certified scope (design §6 case 6: the "only issued what
         // they are certified to issue" reject).
-        let env = envelope(ASK_AGE, &[], &[TRUSTX_EIDAS2]);
+        let req = request(ASK_AGE, &[], &[TRUSTX_EIDAS2]);
         let holder = holder_mode2(FOAF_NAME, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
-        let out = evaluate_contract(&env, &holder, None).expect("evaluates");
+        let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         assert_eq!(out.answer, ContractAnswer::Boolean(false));
         assert_eq!(out.response.contributing_statements, 0);
     }
 
     #[test]
     fn mode2_expired_certification_fails_closed() {
-        let env = envelope(ASK_AGE, &[], &[TRUSTX_EIDAS2]);
+        let req = request(ASK_AGE, &[], &[TRUSTX_EIDAS2]);
         let holder = holder_mode2(FOAF_AGE, "2026-06-01T00:00:00Z", "2026-07-04T00:00:00Z", true);
-        let out = evaluate_contract(&env, &holder, None).expect("evaluates");
+        let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         assert_eq!(out.answer, ContractAnswer::Boolean(false));
     }
 
@@ -1740,9 +1740,9 @@ mod tests {
     fn mode2_status_uncovered_certification_fails_closed() {
         // Certifications are status-checked exactly like credentials (design §6
         // case 7): no covering attestation on the certification ⇒ no binding.
-        let env = envelope(ASK_AGE, &[], &[TRUSTX_EIDAS2]);
+        let req = request(ASK_AGE, &[], &[TRUSTX_EIDAS2]);
         let holder = holder_mode2(FOAF_AGE, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", false);
-        let out = evaluate_contract(&env, &holder, None).expect("evaluates");
+        let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         assert_eq!(out.answer, ContractAnswer::Boolean(false));
     }
 
@@ -1757,7 +1757,7 @@ mod tests {
 
     #[test]
     fn method_policy_without_precheck_data_is_refused() {
-        let env = parse_envelope(
+        let req = parse_request(
             ASK_AGE,
             &tr_triples(&[ISS_X], &[], None, Some("urn:policy1")),
             "n",
@@ -1765,14 +1765,14 @@ mod tests {
         .expect("parses");
         let holder = holder_mode1(ISS_X, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
         assert_eq!(
-            evaluate_contract(&env, &holder, None),
+            evaluate_contract(&req, &holder, None),
             Err(ExpressionError::MethodPolicyWithoutPrecheck)
         );
     }
 
     #[test]
     fn method_policy_inadmissible_method_is_refused_before_evaluation() {
-        let env = parse_envelope(
+        let req = parse_request(
             ASK_AGE,
             &tr_triples(&[ISS_X], &[], None, Some("urn:policy1")),
             "n",
@@ -1788,7 +1788,7 @@ mod tests {
         };
         // m1 holds PerPresentation; the policy requires gteq CrossPresentation.
         assert_eq!(
-            evaluate_contract(&env, &holder, Some(&pc)),
+            evaluate_contract(&req, &holder, Some(&pc)),
             Err(ExpressionError::MethodNotAdmissible(vec![CONSTRAINT_CROSS.to_string()]))
         );
     }
@@ -1798,7 +1798,7 @@ mod tests {
         // TR names policy A; the supplied pre-check resolves policy B — data
         // that would be ADMISSIBLE under B. Fail-closed: the named policy can
         // never be substituted with a weaker one the holder picked.
-        let env = parse_envelope(
+        let req = parse_request(
             ASK_AGE,
             &tr_triples(&[ISS_X], &[], None, Some("urn:policyA")),
             "n",
@@ -1813,7 +1813,7 @@ mod tests {
             annotations: M1_ANNOTATIONS,
         };
         assert_eq!(
-            evaluate_contract(&env, &holder, Some(&pc)),
+            evaluate_contract(&req, &holder, Some(&pc)),
             Err(ExpressionError::MethodPolicyMismatch {
                 required: "urn:policyA".to_string(),
                 supplied: "urn:policyB".to_string(),
@@ -1823,7 +1823,7 @@ mod tests {
 
     #[test]
     fn method_policy_admissible_method_proceeds_to_evaluation() {
-        let env = parse_envelope(
+        let req = parse_request(
             ASK_AGE,
             &tr_triples(&[ISS_X], &[], None, Some("urn:policy1")),
             "n",
@@ -1837,7 +1837,7 @@ mod tests {
             policy_n3: POLICY_PER,
             annotations: M1_ANNOTATIONS,
         };
-        let out = evaluate_contract(&env, &holder, Some(&pc)).expect("evaluates");
+        let out = evaluate_contract(&req, &holder, Some(&pc)).expect("evaluates");
         assert_eq!(out.answer, ContractAnswer::Boolean(true));
     }
 
@@ -1845,19 +1845,19 @@ mod tests {
 
     #[test]
     fn verify_response_refuses_a_nonce_mismatch() {
-        let env = envelope(ASK_AGE, &[ISS_X], &[]);
+        let req = request(ASK_AGE, &[ISS_X], &[]);
         let holder = holder_mode1(ISS_X, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
-        let out = evaluate_contract(&env, &holder, None).expect("evaluates");
+        let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         let mut replayed = out.response;
         replayed.nonce = "some-other-session".to_string();
-        assert_eq!(verify_response(&env, &replayed), Err(ExpressionError::NonceMismatch));
+        assert_eq!(verify_response(&req, &replayed), Err(ExpressionError::NonceMismatch));
     }
 
     #[test]
     fn verify_response_fails_closed_on_stripped_provenance() {
-        let env = envelope(ASK_AGE, &[ISS_X], &[]);
+        let req = request(ASK_AGE, &[ISS_X], &[]);
         let holder = holder_mode1(ISS_X, "2026-07-01T00:00:00Z", "2026-07-10T00:00:00Z", true);
-        let out = evaluate_contract(&env, &holder, None).expect("evaluates");
+        let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         // A tampered response keeping the claim but dropping the default-graph
         // provenance yields no admissible derivation on re-check.
         let mut tampered = out.response;
@@ -1868,7 +1868,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(
-            verify_response(&env, &tampered).expect("re-checks"),
+            verify_response(&req, &tampered).expect("re-checks"),
             ContractAnswer::Boolean(false)
         );
     }
@@ -1964,8 +1964,8 @@ mod tests {
             FOAF_AGE, AGE_25
         ));
         let holder = Graph::load_dataset(&d, "trig").expect("fixture parses");
-        let env = envelope(ASK_AGE, &[ISS_X], &[]);
-        let out = evaluate_contract(&env, &holder, None).expect("evaluates");
+        let req = request(ASK_AGE, &[ISS_X], &[]);
+        let out = evaluate_contract(&req, &holder, None).expect("evaluates");
         assert_eq!(out.answer, ContractAnswer::Boolean(true));
     }
 

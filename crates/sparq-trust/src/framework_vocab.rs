@@ -75,7 +75,7 @@ pub const TRUSTX_TRUST_REQUIREMENTS: &str = "https://sparq.dev/ns/trust#TrustReq
 /// `trustx:question` — an opaque IRI naming the question a trust-requirements
 /// document was authored for. A correlation label ONLY: no layer of this crate
 /// resolves or verifies it against the query string, so the question↔query
-/// association belongs to whoever authenticates the envelope (see the
+/// association belongs to whoever authenticates the request (see the
 /// `expression` module's honest-scope docs).
 pub const TRUSTX_QUESTION: &str = "https://sparq.dev/ns/trust#question";
 /// `trustx:trustsIssuer` — **MODE 1** (enumerated parties): admit contributing

@@ -362,7 +362,7 @@ conformance-honesty discipline).
    resolution or digest scheme tying that IRI to a query string, so it never
    verifies that `Q` *is* the named question — a `TR` authored for question A
    paired with an unrelated supported query B parses and evaluates. The
-   question↔query association belongs to whoever authenticates the envelope
+   question↔query association belongs to whoever authenticates the request
    (e.g. a signature over `(Q, TR, nonce)` or a trusted question publication),
    exactly like the `MethodPrecheck` policy resolution. An authoritative
    in-band binding (a digest-IRI question scheme over a canonical query form)
