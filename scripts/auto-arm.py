@@ -32,18 +32,223 @@ to GitHub's explicit ``enablePullRequestAutoMerge`` GraphQL mutation.
 #   warning-class per-candidate outcome without escaping the loop, and the exit status is
 #   computed at the END by arm_exit_code() from that final state.
 #   PRECEDENCE: collected-failure > transient-exhaustion > clean.
+# [OPUS-5] Issue #3776, second half — AN EVENT-TRIGGERED RUN JUDGES THE PR THAT TRIGGERED IT.
+#   `arm reviewed PRs` is a GATING check, and run() swept EVERY open review:pass PR in BOTH
+#   modes. Combined with #3766's (correct) sticky exit, ONE permanently un-armable PR redded
+#   the gating check on every OTHER PR's label event. Live blast radius, measured: sparq had
+#   exactly two review:pass PRs — #3434 and #2521 — and run 30144214363 reported
+#   `considered=2 armed=0 arm-failures=1` because #3434 cannot be armed at all until the
+#   `workflows: write` question (#3777) is decided. One PR taxed the entire queue.
+#   In `--mode event` the run is now scoped to the triggering PR (--pr, or derived from the
+#   runner environment — see resolve_scope_pr). This is a CORRECTNESS fix, not a policy
+#   change: judging unrelated PRs on someone else's label event is wrong independently of
+#   whether the check gates. It NARROWS which PRs a run is ACCOUNTABLE for; it does not
+#   weaken accountability — within its own scope the #3766 precedence
+#   (collected-failure > transient-exhaustion > clean) is untouched, and the triggering PR's
+#   own arm failure is still a hard non-zero exit that no later transient can discard.
+#   `--mode sweep` (the cron) keeps whole-repo scope and #3759's lenient transient policy.
+#   DELIBERATELY NOT CHANGED HERE: whether `arm reviewed PRs` should be a GATING check at
+#   all. That is a policy decision about what may block a merge, not a correctness fix — the
+#   argument and the costed options live in #3777.
 
 from __future__ import annotations
 
 import argparse
 import copy
 import json
+import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Mapping
 
-import gh_retry
+
+# --------------------------------------------------------------------------------------
+# [OPUS-5] Issue #3776 — A MISSING RESILIENCE HELPER MUST NEVER BRICK THE GATING ARM CHECK.
+#
+# THE OUTAGE. `arm reviewed PRs` is a GATING check and auto-arm.yml runs on `pull_request`,
+# so GitHub resolves the WORKFLOW FILE from the PR's own ref while that workflow's checkout
+# step resolves the SCRIPT from `ref: default_branch`. #3766 (6137b7b3, merged
+# 2026-07-25T01:38:35Z) added `import gh_retry` here AND added `scripts/gh_retry.py` to
+# auto-arm.yml's file-by-file `sparse-checkout` list in the SAME commit — atomic on main,
+# not atomic across refs. Every PR ref whose workflow snapshot predates 01:38Z still
+# enumerates `scripts/auto-arm.py` alone, so the runner pairs the NEW default-branch script
+# with a checkout that never materialises gh_retry.py:
+#     File "/home/runner/work/sparq/sparq/scripts/auto-arm.py", line 46, in <module>
+#       import gh_retry
+#   ModuleNotFoundError: No module named 'gh_retry'
+# (sparq #3434, run 30143852994, 2026-07-25T04:20Z — branch cut 2026-07-18.) ci-summary
+# fail-fasts on a failing GATING check, so no reviewed PR on a stale ref could merge.
+#
+# WHY THE FIX MUST LIVE HERE, NOT IN THE WORKFLOW. The stale PR refs cannot be rewritten,
+# so the manifest those runs use is already frozen: editing auto-arm.yml's sparse list heals
+# only refs snapshotted AFTER the edit. The only code that reaches an already-stale PR is
+# code fetched from the DEFAULT BRANCH — this file. Hence the guard here; auto-arm.yml's
+# switch to whole-directory sparse-checkout is the forward-looking half, not the remedy.
+#
+# THE DEGRADATION, EXPLICITLY. gh_retry is a RESILIENCE helper (bounded, transient-only
+# retry for idempotent READS). Losing it must cost RETRIES — never the arm:
+#   * reads become ONE-SHOT via _DegradedGhRetry.run_gh_read. The load-bearing work is
+#     unchanged: candidates are still enumerated, every skip rule is still evaluated, a
+#     draft is still marked ready, and the arm mutation is still issued.
+#   * FAIL-CLOSED classification. With no retries there is nothing to exhaust, so a read
+#     failure raises GhFatalError (loud red). It is NEVER reported as GhTransientExhausted:
+#     that type is precisely what #3759 converts into ::warning + exit 0, so synthesising
+#     it here would turn a 403 into a false success. Degraded mode therefore trades
+#     transient tolerance for LOUDNESS, which is the safe direction — and strictly better
+#     than the guaranteed red it replaces.
+#   * assert_read_only stays a REAL fail-closed guard, not a no-op, so the self-test
+#     assertion "every read this script issues IS a read" cannot go vacuous when degraded.
+#   * exactly ONE loud ::warning at import time names the cause and the remedy.
+# Deliberately DUPLICATED into the sibling arm script — each workflow sparse-checks out only
+# its own script, so neither may import a shared helper (that very constraint is what caused
+# this outage). scripts/tests/test_arm_capability_wiring.py pins the two copies together and
+# proves the degraded path still mutates.
+class _DegradedGhRetry:
+    """One-shot stand-in for scripts/gh_retry.py when that file was not checked out."""
+
+    # Mirrors gh_retry._READ_SUBCOMMANDS.
+    READ_SUBCOMMANDS = frozenset(
+        {
+            ("pr", "list"),
+            ("pr", "view"),
+            ("pr", "checks"),
+            ("pr", "status"),
+            ("issue", "list"),
+            ("issue", "view"),
+            ("run", "list"),
+            ("run", "view"),
+            ("label", "list"),
+            ("search", "prs"),
+            ("search", "issues"),
+        }
+    )
+    MUTATION_RE = re.compile(r"\b(?:mutation|subscription)\b", re.IGNORECASE)
+    QUERY_FIELD_FLAGS = ("-f", "--field", "-F", "--raw-field")
+    FIELD_FLAGS = ("-f", "-F", "--field", "--raw-field", "--input")
+
+    class GhRetryUsageError(ValueError):
+        """argv could not be PROVEN a read. Refused, never wrapped."""
+
+    class GhFatalError(RuntimeError):
+        """A non-retried ``gh`` failure — the caller must fail loudly."""
+
+    class GhTransientExhausted(RuntimeError):
+        """Never raised by this stand-in: with zero retries there is nothing to exhaust.
+
+        Kept so ``except gh_retry.GhTransientExhausted`` clauses stay valid (and so the
+        self-test can still raise it through an injected runner).
+        """
+
+    @classmethod
+    def _field_values(cls, rest: list[str], flags: tuple[str, ...]) -> list[str]:
+        values: list[str] = []
+        index = 0
+        while index < len(rest):
+            arg = rest[index]
+            if arg in flags:
+                values.append(rest[index + 1] if index + 1 < len(rest) else "")
+                index += 2
+                continue
+            for flag in flags:
+                if arg.startswith(flag + "="):
+                    values.append(arg.split("=", 1)[1])
+                    break
+            index += 1
+        return values
+
+    @classmethod
+    def assert_read_only(cls, argv) -> None:
+        """Fail-closed: refuse anything not AFFIRMATIVELY provable as a read."""
+        rest = [str(arg) for arg in argv]
+        if not rest:
+            raise cls.GhRetryUsageError("empty gh argv")
+        if rest[0] != "api":
+            if tuple(rest[:2]) in cls.READ_SUBCOMMANDS:
+                return
+            raise cls.GhRetryUsageError(
+                f"gh {' '.join(rest[:2])} is not an allow-listed read — "
+                "mutations/arm calls stay one-shot"
+            )
+        tail = rest[1:]
+        method = None
+        for index, arg in enumerate(tail):
+            if arg in ("-X", "--method"):
+                method = tail[index + 1].upper() if index + 1 < len(tail) else ""
+                break
+            if arg.startswith("--method="):
+                method = arg.split("=", 1)[1].upper()
+                break
+        if "graphql" in tail:
+            inline = None
+            for value in cls._field_values(tail, cls.QUERY_FIELD_FLAGS):
+                if value.startswith("query=") and not value.startswith("query=@"):
+                    inline = value.split("=", 1)[1]
+            if inline is None:
+                raise cls.GhRetryUsageError(
+                    "refusing gh api graphql with no inline `query=` text (file-backed / "
+                    "stdin bodies are opaque) — cannot prove it is a read"
+                )
+            if cls.MUTATION_RE.search(inline):
+                raise cls.GhRetryUsageError(
+                    "refusing a GraphQL mutation/subscription — arms stay one-shot"
+                )
+            return
+        if method not in (None, "GET", "HEAD"):
+            raise cls.GhRetryUsageError(
+                f"refusing gh api with method {method or '<missing>'}"
+            )
+        if method is None and any(
+            arg in cls.FIELD_FLAGS
+            or any(arg.startswith(flag + "=") for flag in cls.FIELD_FLAGS[2:])
+            for arg in tail
+        ):
+            raise cls.GhRetryUsageError(
+                "refusing gh api with field params and no explicit GET "
+                "(gh auto-switches to POST)"
+            )
+
+    @classmethod
+    def run_gh_read(cls, argv, *, run=subprocess.run) -> str:
+        """Do the read ONCE. No retry, and no transient classification (see above).
+
+        ``run`` is injectable so the wiring test can prove a failing read raises
+        GhFatalError and NEVER the lenient GhTransientExhausted.
+        """
+        cls.assert_read_only(argv)
+        command = ["gh", *[str(arg) for arg in argv]]
+        result = run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            detail = (
+                (result.stderr or "").strip()
+                or (result.stdout or "").strip()
+                or "unknown gh failure"
+            )
+            raise cls.GhFatalError(
+                f"{' '.join(command[:4])} failed (degraded: scripts/gh_retry.py was not "
+                f"checked out, so this read was NOT retried): {detail}"
+            )
+        return result.stdout
+
+
+try:
+    import gh_retry
+
+    GH_RETRY_DEGRADED = False
+except ImportError as _gh_retry_missing:  # pragma: no cover - see the wiring test
+    gh_retry = _DegradedGhRetry  # type: ignore[assignment]
+    GH_RETRY_DEGRADED = True
+    print(
+        "::warning title=auto-arm running WITHOUT transient-retry (scripts/gh_retry.py "
+        f"not checked out)::{_gh_retry_missing} — this run's idempotent gh READS are "
+        "ONE-SHOT: a GitHub 5xx blip will red it instead of being retried. Arming itself "
+        "is UNAFFECTED and proceeds. CAUSE: this script came from the default branch "
+        "while the `sparse-checkout` manifest came from an older workflow snapshot on the "
+        "PR ref, which does not list scripts/gh_retry.py (sparq #3776 / #3766). REMEDY: "
+        "rebase the PR onto the default branch, or re-run once the PR ref carries a "
+        "workflow file that sparse-checks out the whole scripts/ directory."
+    )
 
 
 PROGRAM = "auto-arm"
@@ -264,10 +469,18 @@ class AutoArmer:
         log: Callable[[str], None] = print,
         *,
         gh_read: Callable[[list[str]], str] | None = None,
+        scope_pr: int | None = None,
     ) -> None:
         self.repo = repo
         self.default_branch = default_branch
         self.gh = gh
+        # [OPUS-5] #3776: WHICH PRs this run is accountable for. None = the whole repository
+        # (the cron sweep). A number = EXACTLY that PR and nothing else (an event-triggered
+        # run must judge the PR whose label event triggered it, never a bystander).
+        # Deliberately orthogonal to `mode`, which decides only the EXIT POLICY for an
+        # exhausted transient (#3759 finding 5) — scope answers "whose failure is this run's
+        # business", mode answers "how loud is a missed cycle".
+        self.scope_pr = scope_pr
         # Idempotent READS may go through a retrying runner (#3759); mutations
         # (pr ready, the arm CAS) always use the one-shot `gh` runner above.
         self.gh_read = gh_read if gh_read is not None else gh
@@ -301,6 +514,31 @@ class AutoArmer:
             )
         )
         return [parse_pr(item) for item in raw]
+
+    @property
+    def scope_description(self) -> str:
+        """Human-readable scope, logged before any work so a run states its own remit."""
+        if self.scope_pr is None:
+            return "EVERY open review:pass PR in the repository (whole-repo sweep)"
+        return (
+            f"PR #{self.scope_pr} ONLY — the PR whose label event triggered this run; "
+            "another PR's arm failure is NOT this run's business (#3776)"
+        )
+
+    def candidates(self) -> list[PullRequest]:
+        """The PRs this run is ACCOUNTABLE for — the #3776 scoping seam.
+
+        SCOPED (``scope_pr`` set, i.e. ``--mode event``): exactly the triggering PR. The
+        unrelated PRs are not merely excused, they are never even READ, so nothing about
+        them can reach this run's outcome or its exit status.
+
+        UNSCOPED (``scope_pr is None``, i.e. ``--mode sweep``): every open PR, unchanged.
+        The cron is the whole-repo backstop and must stay one — narrowing it would turn
+        this fix into "event mode does nothing and nothing else covers the repo".
+        """
+        if self.scope_pr is not None:
+            return [self.refresh(self.scope_pr)]
+        return self.list_open()
 
     def refresh(self, number: int) -> PullRequest:
         raw = json.loads(
@@ -554,6 +792,7 @@ class AutoArmer:
         # failure collected below survives any exception that escapes this method and the
         # exit status can be computed at the END from this state (see arm_exit_code).
         outcome = self.outcome = ArmOutcome()
+        self.log(f"[{PROGRAM}] scope: {self.scope_description}")
         verdict = self.probe_arm_capability()
         outcome.capability = verdict.status
         self.log(f"[{PROGRAM}] arm-capability probe: {verdict.status} — {verdict.detail}")
@@ -569,7 +808,7 @@ class AutoArmer:
             return outcome
 
         try:
-            candidates = self.list_open()
+            candidates = self.candidates()
         except gh_retry.GhTransientExhausted as error:
             # Whole-sweep transient: nothing has been collected yet, so this is a plain
             # missed cycle. Recorded, not raised — the exit is decided at the end.
@@ -619,7 +858,8 @@ class AutoArmer:
             f"[{PROGRAM}] complete: considered={outcome.considered} "
             f"armed={outcome.armed} arm-failures={len(outcome.arm_failures)} "
             f"transient-exhaustions={len(outcome.transient_exhaustions)} "
-            f"capability={outcome.capability}"
+            f"capability={outcome.capability} "
+            f"scope={'all' if self.scope_pr is None else f'pr-{self.scope_pr}'}"
         )
         return outcome
 
@@ -670,6 +910,11 @@ def run_sweep(
 ) -> int:
     """Run the armer once. Exit policy depends on the INVOCATION MODE (#3759 finding 5).
 
+    SCOPE and MODE are separate axes (#3776). ``AutoArmer.scope_pr`` decides WHICH PRs the
+    run is accountable for; ``mode`` decides only how loud an exhausted transient is. An
+    event-triggered run is scoped to its triggering PR, so the failures this function can
+    ever see are that PR's own.
+
     ``mode="sweep"`` (the periodic cron) — exhausted TRANSIENT retries on the READ
     path => ``::warning`` + exit 0: the sweep is idempotent and cron-covered, so a
     missed cycle must not red main's gate.
@@ -700,6 +945,69 @@ def run_sweep(
         outcome = armer.outcome
         outcome.sweep_transient = outcome.sweep_transient or str(error)
     return arm_exit_code(outcome, mode=mode, log=log)
+
+
+# [OPUS-5] #3776: emitted when an EVENT-mode run cannot work out which PR triggered it.
+# It falls back to whole-repo scope — the pre-#3776 behaviour — rather than exiting
+# non-zero, because a hard failure here would brick the GATING check for exactly the
+# stale-ref population this issue is about. Loud, not fatal.
+SCOPE_UNRESOLVED_WARNING = (
+    "::warning title=auto-arm could not identify the triggering PR::--mode event was "
+    "requested but neither --pr nor the runner environment (GITHUB_EVENT_PATH's "
+    "pull_request.number, GITHUB_REF's refs/pull/<n>/…) yielded a PR number, so this run "
+    "falls back to WHOLE-REPO scope. Consequence: an unrelated un-armable PR can red this "
+    "run (sparq #3776). REMEDY: pass --pr <number> from the workflow "
+    "(`${{ github.event.pull_request.number }}`)."
+)
+
+# refs/pull/<n>/merge (or /head) — what GITHUB_REF holds on a pull_request event.
+PULL_REF = re.compile(r"^refs/pull/(\d+)/")
+
+
+def resolve_scope_pr(
+    explicit: str | int | None = None,
+    env: Mapping[str, str] | None = None,
+) -> int | None:
+    """Identify the PR whose event triggered this run, or ``None`` if undeterminable.
+
+    Three sources, most explicit first:
+
+    1. ``--pr`` — what the workflow passes.
+    2. ``GITHUB_EVENT_PATH`` → the event payload's ``pull_request.number``.
+    3. ``GITHUB_REF`` → ``refs/pull/<n>/merge``.
+
+    The two environment sources are LOAD-BEARING, not belt-and-braces. ``--pr`` reaches
+    this script from the WORKFLOW FILE, which on a `pull_request` event GitHub resolves
+    from the PR's own — possibly months-old — ref, while this script always comes from the
+    default branch: that skew IS #3776. Deriving the number from the RUNNER's environment
+    instead means every already-stale PR ref gets per-PR scoping the moment this lands,
+    with no per-ref workflow update and no rebase.
+
+    Raises ``ValueError`` only for an explicitly supplied non-numeric ``--pr`` — a typo in
+    the wiring must be loud, never silently a whole-repo sweep.
+    """
+    if explicit is not None and str(explicit).strip():
+        text = str(explicit).strip()
+        if not text.isdigit():
+            # Positive integers only: a sign, a ref name or an empty-ish token must be a
+            # loud wiring error, never `gh pr view -5` or a silent whole-repo sweep.
+            raise ValueError(f"--pr must be a PR number, got {explicit!r}")
+        return int(text)
+    environment = os.environ if env is None else env
+    event_path = (environment.get("GITHUB_EVENT_PATH") or "").strip()
+    if event_path:
+        try:
+            with open(event_path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            number = (payload.get("pull_request") or {}).get("number")
+            if number is not None:
+                return int(number)
+        except (OSError, ValueError, TypeError, AttributeError):
+            # A malformed/absent payload is not this script's problem to die on; fall
+            # through to the ref, then to the documented whole-repo fallback.
+            pass
+    match = PULL_REF.match((environment.get("GITHUB_REF") or "").strip())
+    return int(match.group(1)) if match else None
 
 
 def fixture(
@@ -735,6 +1043,14 @@ CAPABILITY_RESPONSE = {
 DENIAL_TEXT = (
     "gh api graphql failed: GraphQL: Resource not accessible by integration "
     "(enablePullRequestAutoMerge)"
+)
+# The exact text GitHub returned for PR #3434 in run 30144214363 — the PERMANENTLY
+# un-armable PR that poisoned the gating arm check for the whole repository (#3776/#3777).
+# It is deliberately NOT an ARM_DENIAL_MARKER: it is a per-PR condition (that PR modifies a
+# workflow file), so it is collected per-PR rather than latching capability_lost.
+WORKFLOWS_DENIAL = (
+    "gh api graphql -f failed: gh: Pull request refusing to allow a GitHub App to create "
+    "or update workflow `.github/workflows/zk-toolchain.yml` without `workflows` permission"
 )
 
 
@@ -812,11 +1128,13 @@ class FakeGh:
 
 
 def exercise(
-    initial: dict | list[dict], **fake_kwargs
+    initial: dict | list[dict], *, scope_pr: int | None = None, **fake_kwargs
 ) -> tuple[FakeGh, list[str], ArmOutcome]:
     fake = FakeGh(initial, **fake_kwargs)
     messages: list[str] = []
-    outcome = AutoArmer("sparq-org/sparq", "main", fake, messages.append).run()
+    outcome = AutoArmer(
+        "sparq-org/sparq", "main", fake, messages.append, scope_pr=scope_pr
+    ).run()
     return fake, messages, outcome
 
 
@@ -1336,6 +1654,217 @@ def self_test() -> None:
     assert "arm-failure summary: PR #451" in captured.getvalue(), captured.getvalue()
     assert "::warning" not in captured.getvalue(), captured.getvalue()
 
+    # ---------------------------------------------------------------------------------
+    # [OPUS-5] #3776 — AN EVENT-TRIGGERED RUN JUDGES THE PR THAT TRIGGERED IT.
+    # The live shape, replayed: two review:pass PRs, one of them (#3434) permanently
+    # un-armable because it modifies a workflow file and the arm token has no
+    # `workflows: write` (#3777). Pre-#3776 an event run swept BOTH, so #3434's failure
+    # redded the GATING `arm reviewed PRs` check on #2521's label event — and on every
+    # other PR's. The DISCRIMINATION is the test: an UNRELATED PR's failure must be
+    # invisible, while the TRIGGERING PR's own failure must still be fatal.
+    # ---------------------------------------------------------------------------------
+    assert not is_arm_denial(WORKFLOWS_DENIAL), (
+        "the workflows-permission refusal is a PER-PR condition, not a token-capability "
+        "denial: misclassifying it would latch capability_lost and skip every other PR"
+    )
+
+    def scoped(*, scope_pr: int | None, mode: str, failing: int | None = 3434):
+        """Two review:pass PRs — #2521 arms cleanly, #3434 can never be armed."""
+        scoped_fake = FakeGh(
+            [fixture(number=2521), fixture(number=3434)],
+            mutation_errors={failing: WORKFLOWS_DENIAL} if failing else None,
+        )
+        lines: list[str] = []
+        armer = AutoArmer(
+            "sparq-org/sparq", "main", scoped_fake, lines.append, scope_pr=scope_pr
+        )
+        try:
+            return scoped_fake, lines, run_sweep(armer, log=lines.append, mode=mode)
+        except GhError as error:
+            return scoped_fake, lines, error
+
+    # (15) HALF ONE — an un-armable UNRELATED PR must NOT fail an event-mode run for #2521.
+    scoped_fake, lines, code = scoped(scope_pr=2521, mode="event")
+    assert code == 0, (
+        "an event-mode run for PR #2521 must not fail because a DIFFERENT PR (#3434) "
+        f"cannot be armed (code={code}, {lines})"
+    )
+    assert any("PR #2521: armed head" in line for line in lines), lines
+    assert any("PR #2521 ONLY" in line for line in lines), lines
+    assert any("considered=1" in line and "scope=pr-2521" in line for line in lines), lines
+    # Not merely excused — never even READ, so nothing about it can reach this outcome.
+    assert not [line for line in lines if "3434" in line], lines
+    assert not [call for call in scoped_fake.calls if "3434" in " ".join(call)], (
+        scoped_fake.calls
+    )
+
+    # (16) HALF TWO, THE DISCRIMINATION — the TRIGGERING PR's own arm failure is still a
+    # hard non-zero exit. Narrowing WHICH PRs a run answers for must not weaken
+    # accountability for the one it does.
+    scoped_fake, lines, code = scoped(scope_pr=3434, mode="event")
+    assert code == 1, (
+        f"the triggering PR's OWN arm failure must still red the run (code={code}, {lines})"
+    )
+    assert any("PR #3434: arm-failed" in line for line in lines), lines
+    assert any("arm-failure summary: PR #3434" in line for line in lines), lines
+    assert not [line for line in lines if line.startswith("::warning")], lines
+    assert not [call for call in scoped_fake.calls if "2521" in " ".join(call)], (
+        scoped_fake.calls
+    )
+
+    # (17) SWEEP MODE IS STILL WHOLE-REPO. Without this the scoping fix could silently
+    # become "event mode does nothing and nothing else covers the repository".
+    scoped_fake, lines, code = scoped(scope_pr=None, mode="sweep", failing=None)
+    assert code == 0, (code, lines)
+    assert sum("armed head" in line for line in lines) == 2, lines
+    assert any("considered=2" in line and "scope=all" in line for line in lines), lines
+    assert any("whole-repo sweep" in line for line in lines), lines
+    # ... and the whole-repo sweep stays ACCOUNTABLE for every PR in it: #3434's failure
+    # reds the sweep even though it arms #2521 fine.
+    scoped_fake, lines, code = scoped(scope_pr=None, mode="sweep")
+    assert code == 1, (code, lines)
+    assert any("PR #2521: armed head" in line for line in lines), lines
+    assert any("PR #3434: arm-failed" in line for line in lines), lines
+
+    # (18) #3766 STICKY FAILURE, NOW WITHIN SCOPE. The triggering PR's arm fails and then
+    # its OWN race diagnostic exhausts its bounded retries: the earned failure must stand
+    # (exit 1, no lenient ::warning). Scope narrows accountability; it never softens it.
+    sticky_fake = FakeGh(
+        [fixture(number=3434)], mutation_errors={3434: WORKFLOWS_DENIAL}
+    )
+    sticky_views: list[list[str]] = []
+
+    def diagnostic_exhausts(argv: list[str]) -> str:
+        if argv[:2] == ["pr", "view"] and argv[2] == "3434":
+            sticky_views.append(argv)
+            # 1: candidates(), 2: the pre-arm refresh, 3: the post-failure diagnostic.
+            if len(sticky_views) >= 3:
+                raise gh_retry.GhTransientExhausted("gh pr view: HTTP 504 (3 attempts)")
+        return sticky_fake(argv)
+
+    lines = []
+    code = run_sweep(
+        AutoArmer(
+            "sparq-org/sparq",
+            "main",
+            sticky_fake,
+            lines.append,
+            gh_read=diagnostic_exhausts,
+            scope_pr=3434,
+        ),
+        log=lines.append,
+        mode="event",
+    )
+    assert len(sticky_views) == 3, sticky_views
+    assert code == 1, (code, lines)
+    assert not [line for line in lines if line.startswith("::warning")], lines
+    assert any("race diagnostic could not resolve" in line for line in lines), lines
+    assert any("arm-failure summary: PR #3434" in line for line in lines), lines
+
+    # (19) THE CALL SITE, END TO END THROUGH main(). The scoping is only real if the entry
+    # point applies it in event mode and does NOT apply one in sweep mode — exactly the
+    # production-call-site class a unit test on candidates() would miss.
+    def through_main(*argv_tail: str, environ: dict[str, str] | None = None):
+        call_fake = FakeGh(
+            [fixture(number=2521), fixture(number=3434)],
+            mutation_errors={3434: WORKFLOWS_DENIAL},
+        )
+        saved = (sys.argv, globals()["run_gh_read"], globals()["run_gh"], dict(os.environ))
+        buffer = io.StringIO()
+        try:
+            globals()["run_gh_read"] = call_fake
+            globals()["run_gh"] = call_fake
+            if environ is not None:
+                os.environ.clear()
+                os.environ.update(environ)
+            sys.argv = ["auto-arm.py", "--repo", "sparq-org/sparq", *argv_tail]
+            with redirect_stdout(buffer):
+                return main(), buffer.getvalue()
+        finally:
+            sys.argv, globals()["run_gh_read"], globals()["run_gh"] = saved[:3]
+            os.environ.clear()
+            os.environ.update(saved[3])
+
+    scoped_code, scoped_out = through_main(
+        "--mode", "event", "--pr", "2521", environ={}
+    )
+    assert scoped_code == 0, (scoped_code, scoped_out)
+    assert "scope=pr-2521" in scoped_out and "3434" not in scoped_out, scoped_out
+    assert "::warning" not in scoped_out, scoped_out
+    # The stale-ref path: NO --pr, but the runner environment names the PR. This is what
+    # scopes PR refs whose frozen workflow snapshot cannot pass --pr at all.
+    stale_code, stale_out = through_main(
+        "--mode", "event", environ={"GITHUB_REF": "refs/pull/2521/merge"}
+    )
+    assert stale_code == 0, (stale_code, stale_out)
+    assert "scope=pr-2521" in stale_out and "3434" not in stale_out, stale_out
+    assert "could not identify the triggering PR" not in stale_out, stale_out
+    # Undeterminable => loud ::warning + the documented whole-repo fallback, never a hard
+    # failure (that would brick the gating check for the stale refs this issue is about).
+    fallback_code, fallback_out = through_main("--mode", "event", environ={})
+    assert fallback_code == 1, (fallback_code, fallback_out)
+    assert "could not identify the triggering PR" in fallback_out, fallback_out
+    assert "scope=all" in fallback_out, fallback_out
+    # SWEEP through main() stays whole-repo even when the environment names a PR.
+    sweep_code, sweep_out = through_main(
+        "--mode", "sweep", environ={"GITHUB_REF": "refs/pull/2521/merge"}
+    )
+    assert sweep_code == 1, (sweep_code, sweep_out)
+    assert "scope=all" in sweep_out and "considered=2" in sweep_out, sweep_out
+    assert "arm-failure summary: PR #3434" in sweep_out, sweep_out
+
+    # (20) SCOPE RESOLUTION, source by source. Explicit beats payload beats ref; a typo in
+    # the wiring is loud rather than a silent whole-repo sweep.
+    import tempfile
+
+    assert resolve_scope_pr("2521", {}) == 2521
+    assert resolve_scope_pr(" 2521 ", {}) == 2521
+    assert resolve_scope_pr(2521, {}) == 2521
+    assert resolve_scope_pr("", {}) is None
+    assert resolve_scope_pr(None, {}) is None
+    assert resolve_scope_pr("", {"GITHUB_REF": "refs/pull/3434/merge"}) == 3434
+    assert resolve_scope_pr("", {"GITHUB_REF": "refs/pull/3434/head"}) == 3434
+    assert resolve_scope_pr("", {"GITHUB_REF": "refs/heads/main"}) is None
+    assert resolve_scope_pr("42", {"GITHUB_REF": "refs/pull/3434/merge"}) == 42
+    for rejected in ("main", "-5", "3434.0", "refs/pull/7/merge", "  "):
+        try:
+            resolve_scope_pr(rejected, {})
+        except ValueError:
+            pass
+        else:
+            if str(rejected).strip():
+                raise AssertionError(f"--pr {rejected!r} must be rejected loudly")
+    with tempfile.TemporaryDirectory() as scope_tmp:
+        payload_path = f"{scope_tmp}/event.json"
+        with open(payload_path, "w", encoding="utf-8") as handle:
+            json.dump({"pull_request": {"number": 777}}, handle)
+        assert (
+            resolve_scope_pr(
+                "",
+                {"GITHUB_EVENT_PATH": payload_path, "GITHUB_REF": "refs/pull/3434/merge"},
+            )
+            == 777
+        ), "the event payload is more specific than the ref"
+        assert resolve_scope_pr("9", {"GITHUB_EVENT_PATH": payload_path}) == 9
+        with open(payload_path, "w", encoding="utf-8") as handle:
+            json.dump({"schedule": "4,14,24,34,44,54 * * * *"}, handle)
+        assert resolve_scope_pr("", {"GITHUB_EVENT_PATH": payload_path}) is None
+        with open(payload_path, "w", encoding="utf-8") as handle:
+            handle.write("{not json")
+        assert resolve_scope_pr("", {"GITHUB_EVENT_PATH": payload_path}) is None
+        assert (
+            resolve_scope_pr(
+                "", {"GITHUB_EVENT_PATH": f"{scope_tmp}/missing.json"}
+            )
+            is None
+        )
+    try:
+        resolve_scope_pr("main", {})
+    except ValueError as error:
+        assert "--pr must be a PR number" in str(error), error
+    else:
+        raise AssertionError("a non-numeric --pr must be loud, never a whole-repo sweep")
+
     print("auto-arm self-test: PASS")
 
 
@@ -1362,10 +1891,22 @@ def main() -> int:
         choices=("sweep", "event"),
         default="sweep",
         help=(
-            "sweep: periodic cron (exhausted transient reads => ::warning + exit 0, "
-            "the cron backstop covers a missed cycle). event: label-triggered arm on a "
-            "single PR (no per-PR backstop — any failure, incl. exhausted transients, "
-            "exits non-zero so the arm is visibly red and retried)."
+            "sweep: periodic cron over the WHOLE repository (exhausted transient reads "
+            "=> ::warning + exit 0, the cron backstop covers a missed cycle). event: "
+            "label-triggered arm scoped to the TRIGGERING PR ALONE (--pr / #3776), with "
+            "no per-PR backstop — so any failure of THAT PR, incl. exhausted transients, "
+            "exits non-zero so the arm is visibly red and retried."
+        ),
+    )
+    parser.add_argument(
+        "--pr",
+        default="",
+        help=(
+            "the number of the PR whose label event triggered this run. Scopes an "
+            "event-mode run to that PR ALONE (#3776) — an unrelated PR that cannot be "
+            "armed must never red a GATING check on this one. Empty in sweep mode; if it "
+            "is empty in event mode the number is derived from the runner environment "
+            "(see resolve_scope_pr), which is what scopes already-stale PR refs too."
         ),
     )
     parser.add_argument("--self-test", action="store_true")
@@ -1381,9 +1922,31 @@ def main() -> int:
         return 0
     if not args.repo:
         parser.error("--repo is required unless --self-test is used")
+    # [OPUS-5] #3776 THE CALL SITE. Scope is applied in EVENT mode only: the periodic sweep
+    # is the whole-repo backstop and must never be narrowed, or per-PR scoping would leave
+    # nothing covering the repository at all.
+    scope_pr: int | None = None
+    if args.mode == "event":
+        try:
+            scope_pr = resolve_scope_pr(args.pr, os.environ)
+        except ValueError as error:
+            parser.error(str(error))
+        if scope_pr is None:
+            print(SCOPE_UNRESOLVED_WARNING)
+    elif str(args.pr).strip():
+        print(
+            f"[{PROGRAM}] ignoring --pr {args.pr} in sweep mode: the periodic sweep is "
+            "the whole-repo backstop by design (#3776)"
+        )
     # `run_gh` is passed EXPLICITLY (not left to the default argument) so the self-test can
     # substitute both runners at the module level and drive main() end to end (#3766).
-    armer = AutoArmer(args.repo, args.default_branch, run_gh, gh_read=run_gh_read)
+    armer = AutoArmer(
+        args.repo,
+        args.default_branch,
+        run_gh,
+        gh_read=run_gh_read,
+        scope_pr=scope_pr,
+    )
     if args.probe_arm_capability:
         return probe_arm_capability_exit(armer)
     return run_sweep(armer, mode=args.mode)

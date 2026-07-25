@@ -41,8 +41,14 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
+import re
+import shutil
+import subprocess
 import sys
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from types import ModuleType
@@ -417,6 +423,539 @@ class TestSelfTestsRunInCi(unittest.TestCase):
                 blob,
                 f"docs-quality.yml must run `{needle}` in a GATING job",
             )
+
+
+# --------------------------------------------------------------------------------------
+# [OPUS-5] #3776 — THE MISSING-SIBLING-IMPORT CLASS.
+#
+# auto-arm.yml runs on `pull_request`, so GitHub takes the WORKFLOW FILE — and therefore
+# its `sparse-checkout` manifest — from the PR's own ref, while the checkout step takes the
+# SCRIPT from `ref: default_branch`. #3766 added `import gh_retry` to scripts/auto-arm.py
+# and `scripts/gh_retry.py` to that manifest in ONE commit: atomic on main, not atomic
+# across refs. Every PR ref snapshotted earlier kept the one-entry manifest, so the runner
+# paired the NEW script with a checkout that never materialised gh_retry.py:
+#   ModuleNotFoundError: No module named 'gh_retry'  (#3434, run 30143852994)
+# `arm reviewed PRs` is GATING, so ci-summary fail-fasted and no reviewed PR on a stale ref
+# could merge — a missing RESILIENCE helper became a merge blocker.
+#
+# These suites pin BOTH halves of the fix:
+#   * SURVIVABILITY (heals the already-stale refs) — each script must import and pass its
+#     own self-test with gh_retry.py ABSENT, and the degraded path must still do the
+#     load-bearing work (mark ready + issue the arm mutation), never quietly no-op.
+#   * IMPOSSIBILITY (stops new skew) — no workflow may enumerate individual .py files whose
+#     sibling imports are not also enumerated, and the arm workflows must sparse-check out
+#     the whole `scripts` directory.
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+ARM_SCRIPTS = (REARM_PY, AUTO_ARM_PY)
+
+
+def run_without_gh_retry(script: Path, driver: str | None = None):
+    """Run ``script`` from a temp dir holding ONLY it, so `import gh_retry` cannot resolve.
+
+    This reproduces the runner's state exactly: sys.path[0] is the script's own directory,
+    and scripts/gh_retry.py was never checked out into it.
+    """
+    env = {k: v for k, v in __import__("os").environ.items() if k != "PYTHONPATH"}
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / script.name
+        shutil.copy2(script, target)
+        if (Path(tmp) / "gh_retry.py").exists():  # pragma: no cover - paranoia
+            raise AssertionError("the isolation dir must NOT contain gh_retry.py")
+        if driver is None:
+            argv = [sys.executable, str(target), "--self-test"]
+        else:
+            (Path(tmp) / "driver.py").write_text(driver, encoding="utf-8")
+            argv = [sys.executable, str(Path(tmp) / "driver.py"), target.name]
+        return subprocess.run(
+            argv, cwd=tmp, capture_output=True, text=True, check=False, env=env
+        )
+
+
+DRIVER_PRELUDE = textwrap.dedent(
+    '''
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    path = Path(sys.argv[1]).resolve()
+    spec = importlib.util.spec_from_file_location("under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["under_test"] = module
+    spec.loader.exec_module(module)
+
+    # The whole point: this driver must be running in the DEGRADED mode, not silently
+    # picking up the real helper from somewhere on sys.path.
+    assert module.GH_RETRY_DEGRADED is True, "expected degraded mode"
+    assert module.gh_retry is module._DegradedGhRetry, module.gh_retry
+    '''
+)
+
+# The degraded path must still MUTATE. "Gracefully degraded into doing nothing" is the
+# failure mode these two drivers exist to catch: they assert the draft->ready mutation AND
+# the arm mutation are really issued, and that the outcome counts the arm.
+AUTO_ARM_DRIVER = DRIVER_PRELUDE + textwrap.dedent(
+    """
+    # Draft in the list snapshot, ready on the live refresh: exercises BOTH mutations
+    # (gh pr ready, then the enablePullRequestAutoMerge CAS).
+    fake, messages, outcome = module.exercise(
+        module.fixture(draft=True), views=[module.fixture()]
+    )
+    assert outcome.armed == 1, (outcome, messages)
+    assert not outcome.arm_failures, outcome.arm_failures
+    assert any(call[:2] == ["pr", "ready"] for call in fake.calls), fake.calls
+    arm = module.graphql_calls(fake)
+    assert len(arm) == 1, fake.calls
+    assert any("enablePullRequestAutoMerge" in str(a) for a in arm[0]), arm
+    assert any("armed head" in m for m in messages), messages
+    print("DEGRADED-MUTATION-OK")
+    """
+)
+
+REARM_DRIVER = DRIVER_PRELUDE + textwrap.dedent(
+    """
+    fake, messages, outcome = module.exercise(module.fixture(4242))
+    assert outcome.armed == 1, (outcome, messages)
+    assert not outcome.arm_failures, outcome.arm_failures
+    arm = module.arm_calls(fake)
+    assert len(arm) == 1, fake.calls
+    assert "--auto" in arm[0], arm
+    print("DEGRADED-MUTATION-OK")
+    """
+)
+
+DEGRADED_DRIVERS = {REARM_PY: REARM_DRIVER, AUTO_ARM_PY: AUTO_ARM_DRIVER}
+
+
+class TestSurvivesMissingGhRetry(unittest.TestCase):
+    """#3776: a missing resilience helper must cost RETRIES, never the arm."""
+
+    def test_self_test_passes_with_gh_retry_absent(self) -> None:
+        # THE REGRESSION TEST. Before the import guard this reproduced the live
+        # ModuleNotFoundError from run 30143852994 verbatim.
+        for script in ARM_SCRIPTS:
+            with self.subTest(script=script.name):
+                result = run_without_gh_retry(script)
+                self.assertNotIn(
+                    "ModuleNotFoundError: No module named 'gh_retry'",
+                    result.stderr,
+                    f"{script.name} must not abort when gh_retry.py was not checked out "
+                    "(the #3434 outage); it must degrade to no-retry",
+                )
+                self.assertEqual(
+                    0,
+                    result.returncode,
+                    f"{script.name} --self-test must pass without gh_retry.py\n"
+                    f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+                )
+                self.assertIn("self-test: PASS", result.stdout, result.stdout)
+
+    def test_degraded_import_emits_exactly_one_loud_actionable_warning(self) -> None:
+        for script in ARM_SCRIPTS:
+            with self.subTest(script=script.name):
+                out = run_without_gh_retry(script).stdout
+                self.assertEqual(
+                    1,
+                    out.count("::warning title="),
+                    f"{script.name}: exactly ONE ::warning, never one per call\n{out}",
+                )
+                for needle in (
+                    "gh_retry.py",  # the missing file, by name
+                    "sparse-checkout",  # the mechanism
+                    "ONE-SHOT",  # what was actually lost
+                    "REMEDY",  # what to do about it
+                ):
+                    self.assertIn(needle, out, f"{script.name}: warning must name {needle!r}")
+
+    def test_degraded_path_still_performs_the_mutations(self) -> None:
+        # NOT-A-NO-OP. Degrading into silence would be worse than crashing: the check
+        # would go green while nothing was ever armed.
+        for script in ARM_SCRIPTS:
+            with self.subTest(script=script.name):
+                result = run_without_gh_retry(script, driver=DEGRADED_DRIVERS[script])
+                self.assertEqual(
+                    0,
+                    result.returncode,
+                    f"{script.name} degraded arm path\nstdout:\n{result.stdout}\n"
+                    f"stderr:\n{result.stderr}",
+                )
+                self.assertIn("DEGRADED-MUTATION-OK", result.stdout, result.stdout)
+
+
+class TestDegradedHelperContract(unittest.TestCase):
+    """The stand-in is exercised directly — it must not be a permissive stub."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.rearm = load_module(REARM_PY, "rearm_sweeper_under_test")
+        cls.auto = load_module(AUTO_ARM_PY, "auto_arm_under_test")
+
+    def modules(self):
+        return ((self.rearm, "rearm-sweeper"), (self.auto, "auto-arm"))
+
+    def test_the_real_helper_is_used_when_it_is_importable(self) -> None:
+        # Non-vacuity in the OTHER direction: a guard that always degraded would silently
+        # delete #3759's transient tolerance from every scheduled run.
+        for module, name in self.modules():
+            self.assertFalse(module.GH_RETRY_DEGRADED, name)
+            self.assertEqual("gh_retry", module.gh_retry.__name__, name)
+
+    def test_degraded_read_only_guard_still_refuses_the_arm_mutation(self) -> None:
+        for module, name in self.modules():
+            degraded = module._DegradedGhRetry
+            with self.assertRaises(degraded.GhRetryUsageError, msg=name):
+                degraded.assert_read_only(
+                    ["api", "graphql", "-f", f"query={module.ENABLE_AUTO_MERGE}"]
+                    if hasattr(module, "ENABLE_AUTO_MERGE")
+                    else ["pr", "merge", "1", "--auto"]
+                )
+            # ...and refuses a mutation whichever shape it takes.
+            for refused in (
+                ["pr", "merge", "1", "--auto", "--squash"],
+                ["pr", "edit", "1", "--add-label", "review:pass"],
+                ["api", "-X", "POST", "repos/o/r/issues"],
+                ["api", "graphql", "--input", "body.json"],
+                ["api", "graphql", "-f", "query=mutation{enablePullRequestAutoMerge}"],
+            ):
+                with self.assertRaises(degraded.GhRetryUsageError, msg=(name, refused)):
+                    degraded.assert_read_only(refused)
+            # The reads the sweeps actually issue must still be accepted, or the degraded
+            # mode would be a different kind of brick.
+            for allowed in (
+                ["pr", "list", "--repo", "o/r", "--json", "number"],
+                ["pr", "view", "1", "--repo", "o/r", "--json", "number"],
+                ["api", "graphql", "-f", f"query={module.CAPABILITY_QUERY}"],
+            ):
+                degraded.assert_read_only(allowed)
+
+    def test_degraded_read_failure_is_fatal_never_lenient(self) -> None:
+        # GhTransientExhausted is what #3759 converts into ::warning + exit 0. With no
+        # retries there is nothing to exhaust, so synthesising it here would turn a 403
+        # into a false success. Fail closed instead.
+        class _Failed:
+            returncode = 1
+            stdout = ""
+            stderr = "HTTP 504: 504 Gateway Timeout"
+
+        for module, name in self.modules():
+            degraded = module._DegradedGhRetry
+            with self.assertRaises(degraded.GhFatalError, msg=name) as caught:
+                degraded.run_gh_read(
+                    ["pr", "list", "--repo", "o/r"], run=lambda *_a, **_k: _Failed()
+                )
+            self.assertNotIsInstance(
+                caught.exception, degraded.GhTransientExhausted, name
+            )
+            self.assertIn("NOT retried", str(caught.exception), name)
+
+    def test_degraded_stand_ins_do_not_drift_between_the_two_scripts(self) -> None:
+        # Same rule as the denial-marker pin: the workflows cannot share a helper, so the
+        # duplication is pinned rather than left to rot.
+        self.assertEqual(
+            tuple(sorted(self.rearm._DegradedGhRetry.READ_SUBCOMMANDS)),
+            tuple(sorted(self.auto._DegradedGhRetry.READ_SUBCOMMANDS)),
+        )
+        for name in ("assert_read_only", "run_gh_read"):
+            self.assertTrue(callable(getattr(self.rearm._DegradedGhRetry, name)), name)
+            self.assertTrue(callable(getattr(self.auto._DegradedGhRetry, name)), name)
+
+
+class TestSparseCheckoutManifest(unittest.TestCase):
+    """#3776 IMPOSSIBILITY half: a manifest that can go stale must not exist."""
+
+    def test_arm_workflows_check_out_the_whole_scripts_directory(self) -> None:
+        for name, (path, _script) in ARM_WORKFLOWS.items():
+            for step in steps_of(load(path)):
+                with_ = step.get("with") or {}
+                if "sparse-checkout" not in with_:
+                    continue
+                pattern = str(with_["sparse-checkout"]).split()
+                self.assertEqual(
+                    ["scripts"],
+                    pattern,
+                    f"{name}: enumerate the DIRECTORY, not files — a file list must be "
+                    "hand-updated for every new sibling import and is snapshotted per "
+                    "PR ref (#3776)",
+                )
+                self.assertNotIn(
+                    "sparse-checkout-cone-mode",
+                    with_,
+                    f"{name}: cone mode is what makes the bare `scripts` pattern "
+                    "recursive; non-cone would reinterpret it as a gitignore pattern",
+                )
+
+    def test_no_script_shadows_a_stdlib_module(self) -> None:
+        """The hazard the whole-directory checkout introduces, closed up front.
+
+        `python3 scripts/auto-arm.py` puts scripts/ FIRST on sys.path. While the manifest
+        listed two files that was harmless; now the entire directory is materialised, so a
+        file named e.g. scripts/types.py would shadow the stdlib for every script run from
+        there. Cheap to pin, silent and confusing to debug.
+        """
+        offenders = sorted(
+            str(p.relative_to(REPO_ROOT))
+            for p in SCRIPTS_DIR.rglob("*.py")
+            if p.stem in sys.stdlib_module_names
+        )
+        self.assertEqual(
+            [],
+            offenders,
+            "these scripts shadow a stdlib module and would break any sibling script "
+            f"importing it: {offenders}",
+        )
+
+    def test_no_workflow_enumerates_a_python_file_without_its_sibling_imports(
+        self,
+    ) -> None:
+        """The whole CLASS, over every workflow — not just the two arm ones.
+
+        A `sparse-checkout` list that names individual .py files silently encodes that
+        script's import graph. If a listed script imports a sibling under scripts/ that
+        the list omits, the runner gets a script it cannot import: #3434 exactly.
+        """
+        local_modules = {p.stem: p for p in SCRIPTS_DIR.rglob("*.py")}
+        offenders: list[str] = []
+        for workflow in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+            document = load(workflow)
+            if not isinstance(document, dict):
+                continue
+            for step in steps_of(document):
+                with_ = step.get("with") or {}
+                raw = with_.get("sparse-checkout")
+                if not raw:
+                    continue
+                listed = [entry.strip() for entry in str(raw).split() if entry.strip()]
+                listed_stems = {Path(entry).stem for entry in listed}
+                for entry in listed:
+                    if not entry.endswith(".py"):
+                        continue
+                    script = REPO_ROOT / entry
+                    if not script.is_file():
+                        continue
+                    tree = ast.parse(script.read_text(encoding="utf-8"))
+                    imported: set[str] = set()
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.Import):
+                            imported.update(a.name.split(".")[0] for a in node.names)
+                        elif isinstance(node, ast.ImportFrom) and node.module:
+                            imported.add(node.module.split(".")[0])
+                    for sibling in sorted(imported & set(local_modules)):
+                        if sibling not in listed_stems:
+                            offenders.append(
+                                f"{workflow.name}: sparse-checkout lists {entry} which "
+                                f"imports sibling {sibling!r} "
+                                f"({local_modules[sibling].relative_to(REPO_ROOT)}) that "
+                                "the manifest omits — check out the directory instead"
+                            )
+        self.assertEqual([], offenders, "\n".join(offenders))
+
+
+# --------------------------------------------------------------------------------------
+# [OPUS-5] #3776 SECOND HALF — AN EVENT-TRIGGERED RUN JUDGES THE PR THAT TRIGGERED IT.
+#
+# `AutoArmer.run()` swept EVERY open review:pass PR in BOTH modes. #3766 then made the exit
+# status STICKY over collected failures — correct for the cron sweep, catastrophic combined
+# with whole-repo scope on a GATING check: ONE permanently un-armable PR reds
+# `arm reviewed PRs` on every OTHER PR's label event.
+#
+# MEASURED blast radius (run 30144214363, 2026-07-25T04:33Z): sparq had exactly two
+# review:pass PRs and the sweep reported `considered=2 armed=0 arm-failures=1` — #3434
+# cannot be armed at all until the `workflows: write` question (#3777) is decided, so the
+# gating arm check was poisoned for the whole repository by one PR.
+#
+# The fix is SCOPE, not leniency. Two halves are pinned below, and the DISCRIMINATION
+# between them is the test:
+#   * an UNRELATED PR's un-armability must be invisible to an event-mode run, and
+#   * the TRIGGERING PR's own arm failure must still be a hard non-zero exit that no later
+#     transient can discard (#3766's precedence, unchanged, within the narrower scope).
+# Plus the two ways this could silently become a no-op: sweep mode must still cover the
+# whole repository, and the WORKFLOW must actually plumb the triggering PR number through
+# to the script (a production call site — the class a unit test on candidates() misses).
+UNARMABLE = 3434  # modifies a workflow file; no `workflows: write` on the arm token
+ARMABLE = 2521
+
+
+def arm_run(module: ModuleType, *, scope_pr: int | None, mode: str, failing=UNARMABLE):
+    """Replay the live shape: two review:pass PRs, one of them permanently un-armable."""
+    fake = module.FakeGh(
+        [module.fixture(number=ARMABLE), module.fixture(number=UNARMABLE)],
+        mutation_errors={failing: module.WORKFLOWS_DENIAL} if failing else None,
+    )
+    lines: list[str] = []
+    armer = module.AutoArmer(
+        "sparq-org/sparq", "main", fake, lines.append, scope_pr=scope_pr
+    )
+    try:
+        return fake, lines, module.run_sweep(armer, log=lines.append, mode=mode)
+    except module.GhError as error:  # event-mode transient exhaustion raises
+        return fake, lines, error
+
+
+class TestEventModeIsPerPr(unittest.TestCase):
+    """An event-triggered run must be accountable for the triggering PR and no other."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.auto = load_module(AUTO_ARM_PY, "auto_arm_under_test")
+
+    def test_an_unarmable_unrelated_pr_does_not_fail_an_event_run(self) -> None:
+        fake, lines, code = arm_run(self.auto, scope_pr=ARMABLE, mode="event")
+        self.assertEqual(
+            0,
+            code,
+            f"an event run for PR #{ARMABLE} must not fail because a DIFFERENT PR "
+            f"(#{UNARMABLE}) cannot be armed — that is what poisoned the gating check "
+            f"for the whole repo (#3776)\n" + "\n".join(lines),
+        )
+        self.assertTrue(any(f"PR #{ARMABLE}: armed head" in l for l in lines), lines)
+        # Not merely excused — never even READ, so nothing about it can reach this outcome.
+        self.assertEqual(
+            [], [l for l in lines if str(UNARMABLE) in l], "the bystander must be untouched"
+        )
+        self.assertEqual(
+            [], [c for c in fake.calls if str(UNARMABLE) in " ".join(c)], fake.calls
+        )
+
+    def test_the_triggering_prs_own_failure_is_still_fatal(self) -> None:
+        # THE DISCRIMINATION. Narrowing WHICH PRs a run answers for must not weaken
+        # accountability for the one it does: this is the half that keeps the check honest.
+        fake, lines, code = arm_run(self.auto, scope_pr=UNARMABLE, mode="event")
+        self.assertEqual(
+            1,
+            code,
+            "the TRIGGERING PR's own arm failure must still red the run\n"
+            + "\n".join(lines),
+        )
+        self.assertTrue(any(f"PR #{UNARMABLE}: arm-failed" in l for l in lines), lines)
+        self.assertEqual(
+            [], [l for l in lines if l.startswith("::warning")], "no lenient warning"
+        )
+
+    def test_a_later_transient_cannot_discard_the_triggering_prs_failure(self) -> None:
+        # #3766's sticky precedence, INSIDE the narrower scope: the arm fails, then that
+        # same PR's race diagnostic exhausts its bounded retries. Exit 1 must stand.
+        module = self.auto
+        fake = module.FakeGh(
+            [module.fixture(number=UNARMABLE)],
+            mutation_errors={UNARMABLE: module.WORKFLOWS_DENIAL},
+        )
+        views: list[list[str]] = []
+
+        def diagnostic_exhausts(argv: list[str]) -> str:
+            if argv[:2] == ["pr", "view"] and argv[2] == str(UNARMABLE):
+                views.append(argv)
+                if len(views) >= 3:  # candidates(), pre-arm refresh, then the diagnostic
+                    raise module.gh_retry.GhTransientExhausted("HTTP 504 (3 attempts)")
+            return fake(argv)
+
+        lines: list[str] = []
+        code = module.run_sweep(
+            module.AutoArmer(
+                "sparq-org/sparq",
+                "main",
+                fake,
+                lines.append,
+                gh_read=diagnostic_exhausts,
+                scope_pr=UNARMABLE,
+            ),
+            log=lines.append,
+            mode="event",
+        )
+        self.assertEqual(1, code, "\n".join(lines))
+        self.assertEqual([], [l for l in lines if l.startswith("::warning")], lines)
+        self.assertTrue(
+            any("race diagnostic could not resolve" in l for l in lines), lines
+        )
+
+    def test_sweep_mode_still_covers_the_whole_repo(self) -> None:
+        # Without this, the scoping fix could silently become "event mode does nothing and
+        # nothing else covers the repository".
+        _fake, lines, code = arm_run(
+            self.auto, scope_pr=None, mode="sweep", failing=None
+        )
+        self.assertEqual(0, code, "\n".join(lines))
+        self.assertEqual(
+            2,
+            sum("armed head" in l for l in lines),
+            "the periodic sweep must still consider EVERY open review:pass PR\n"
+            + "\n".join(lines),
+        )
+        self.assertTrue(
+            any("considered=2" in l and "scope=all" in l for l in lines), lines
+        )
+        # ...and it stays ACCOUNTABLE for all of them: one failure still reds the sweep.
+        _fake, lines, code = arm_run(self.auto, scope_pr=None, mode="sweep")
+        self.assertEqual(1, code, "\n".join(lines))
+        self.assertTrue(any(f"PR #{ARMABLE}: armed head" in l for l in lines), lines)
+        self.assertTrue(any(f"PR #{UNARMABLE}: arm-failed" in l for l in lines), lines)
+
+    def test_the_workflow_passes_the_triggering_pr_number_to_the_arm_step(self) -> None:
+        """THE CALL SITE. Scoping the script is worthless if nothing supplies the number."""
+        steps = steps_of(load(AUTO_ARM_YML))
+        arm = [
+            step
+            for step in steps
+            if "scripts/auto-arm.py" in run_of(step)
+            and PROBE_FLAG not in run_of(step)
+            and "--self-test" not in run_of(step)
+        ]
+        self.assertEqual(1, len(arm), "auto-arm.yml must have exactly one arming step")
+        run, env = run_of(arm[0]), (arm[0].get("env") or {})
+        match = re.search(r'--pr\s+"\$\{?([A-Z_]+)\}?"', run)
+        self.assertIsNotNone(
+            match,
+            "the arming step must pass --pr \"$VAR\" — without it an event-mode run "
+            "cannot know which PR it is accountable for (#3776)\n" + run,
+        )
+        variable = match.group(1)
+        self.assertIn(variable, env, f"{variable} must be set in the step env")
+        self.assertEqual(
+            "${{ github.event.pull_request.number }}",
+            str(env[variable]).strip(),
+            f"{variable} must be EXACTLY the triggering PR's number: any fallback value "
+            "would scope the periodic sweep too, and the sweep is the whole-repo backstop",
+        )
+        # The mode axis must survive alongside it — scope answers 'whose failure is this
+        # run's business', mode answers 'how loud is a missed cycle' (#3759 finding 5).
+        mode_match = re.search(r'--mode\s+"\$\{?([A-Z_]+)\}?"', run)
+        self.assertIsNotNone(mode_match, run)
+        self.assertIn("event", str(env[mode_match.group(1)]))
+        self.assertIn("sweep", str(env[mode_match.group(1)]))
+
+    def test_the_script_alone_can_scope_a_stale_ref(self) -> None:
+        """The half that heals ALREADY-FROZEN PR refs.
+
+        `ARM_PR` above is snapshotted per PR ref exactly like the sparse-checkout manifest
+        that caused #3776, so a stale ref cannot pass it. The script always comes from the
+        default branch, so it must be able to derive the number from the RUNNER's
+        environment on its own — otherwise this fix would only reach rebased PRs.
+        """
+        resolve = self.auto.resolve_scope_pr
+        self.assertEqual(ARMABLE, resolve("", {"GITHUB_REF": f"refs/pull/{ARMABLE}/merge"}))
+        self.assertIsNone(resolve("", {"GITHUB_REF": "refs/heads/main"}))
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = Path(tmp) / "event.json"
+            payload.write_text('{"pull_request": {"number": 909}}', encoding="utf-8")
+            self.assertEqual(
+                909,
+                resolve("", {"GITHUB_EVENT_PATH": str(payload)}),
+                "the event payload is the most specific environment source",
+            )
+        # An explicit --pr always wins, and a typo is loud rather than a whole-repo sweep.
+        self.assertEqual(42, resolve("42", {"GITHUB_REF": f"refs/pull/{ARMABLE}/merge"}))
+        with self.assertRaises(ValueError):
+            resolve("not-a-number", {})
+
+    def test_the_scoping_seam_is_documented_in_source(self) -> None:
+        source = AUTO_ARM_PY.read_text(encoding="utf-8")
+        for needle in (
+            "scope_pr",
+            "def candidates",
+            "def resolve_scope_pr",
+            # The distinction the maintainer asked to keep visible in the code: scoping is
+            # a CORRECTNESS fix; de-gating `arm reviewed PRs` is a POLICY decision (#3777).
+            "policy decision about what may block a merge",
+        ):
+            self.assertIn(needle, source, f"auto-arm.py must keep {needle!r}")
 
 
 if __name__ == "__main__":

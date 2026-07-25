@@ -27,12 +27,193 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from typing import Callable
 
-import gh_retry
+
+# --------------------------------------------------------------------------------------
+# [OPUS-5] Issue #3776 — A MISSING RESILIENCE HELPER MUST NEVER BRICK AN ARM SWEEP.
+#
+# THE OUTAGE was in the SIBLING script: auto-arm.yml runs on `pull_request`, so its WORKFLOW
+# FILE (and therefore its file-by-file `sparse-checkout` manifest) comes from the PR's own
+# ref while the SCRIPT comes from `ref: default_branch`. #3766 added `import gh_retry` and
+# the matching manifest entry in one commit — atomic on main, not across refs — so every
+# stale PR ref got the new script without gh_retry.py and died with
+# `ModuleNotFoundError: No module named 'gh_retry'` on a GATING check (sparq #3434, run
+# 30143852994). See scripts/auto-arm.py for the full account.
+#
+# THIS script is NOT exposed to that ref skew today: rearm-sweeper.yml triggers only on
+# `schedule` / `workflow_dispatch`, so its workflow file and its `ref: default_branch`
+# checkout are always the same commit, and it is explicitly NOT A GATE. The guard is here
+# for the two ways that changes: adding any per-ref trigger to rearm-sweeper.yml, or adding
+# a second sibling import without remembering the manifest. Same class, same remedy — a
+# missing resilience helper must degrade, not abort.
+#
+# THE DEGRADATION, EXPLICITLY. gh_retry is a RESILIENCE helper (bounded, transient-only
+# retry for idempotent READS). Losing it must cost RETRIES — never the arm:
+#   * reads become ONE-SHOT via _DegradedGhRetry.run_gh_read. The load-bearing work is
+#     unchanged: candidates are still enumerated, every skip rule is still evaluated, a
+#     draft is still marked ready, and the arm mutation is still issued.
+#   * FAIL-CLOSED classification. With no retries there is nothing to exhaust, so a read
+#     failure raises GhFatalError (loud red). It is NEVER reported as GhTransientExhausted:
+#     that type is precisely what #3759 converts into ::warning + exit 0, so synthesising
+#     it here would turn a 403 into a false success. Degraded mode therefore trades
+#     transient tolerance for LOUDNESS, which is the safe direction — and strictly better
+#     than the guaranteed red it replaces.
+#   * assert_read_only stays a REAL fail-closed guard, not a no-op, so the self-test
+#     assertion "every read this script issues IS a read" cannot go vacuous when degraded.
+#   * exactly ONE loud ::warning at import time names the cause and the remedy.
+# Deliberately DUPLICATED into the sibling arm script — each workflow sparse-checks out only
+# its own script, so neither may import a shared helper (that very constraint is what caused
+# this outage). scripts/tests/test_arm_capability_wiring.py pins the two copies together and
+# proves the degraded path still mutates.
+class _DegradedGhRetry:
+    """One-shot stand-in for scripts/gh_retry.py when that file was not checked out."""
+
+    # Mirrors gh_retry._READ_SUBCOMMANDS.
+    READ_SUBCOMMANDS = frozenset(
+        {
+            ("pr", "list"),
+            ("pr", "view"),
+            ("pr", "checks"),
+            ("pr", "status"),
+            ("issue", "list"),
+            ("issue", "view"),
+            ("run", "list"),
+            ("run", "view"),
+            ("label", "list"),
+            ("search", "prs"),
+            ("search", "issues"),
+        }
+    )
+    MUTATION_RE = re.compile(r"\b(?:mutation|subscription)\b", re.IGNORECASE)
+    QUERY_FIELD_FLAGS = ("-f", "--field", "-F", "--raw-field")
+    FIELD_FLAGS = ("-f", "-F", "--field", "--raw-field", "--input")
+
+    class GhRetryUsageError(ValueError):
+        """argv could not be PROVEN a read. Refused, never wrapped."""
+
+    class GhFatalError(RuntimeError):
+        """A non-retried ``gh`` failure — the caller must fail loudly."""
+
+    class GhTransientExhausted(RuntimeError):
+        """Never raised by this stand-in: with zero retries there is nothing to exhaust.
+
+        Kept so ``except gh_retry.GhTransientExhausted`` clauses stay valid (and so the
+        self-test can still raise it through an injected runner).
+        """
+
+    @classmethod
+    def _field_values(cls, rest: list[str], flags: tuple[str, ...]) -> list[str]:
+        values: list[str] = []
+        index = 0
+        while index < len(rest):
+            arg = rest[index]
+            if arg in flags:
+                values.append(rest[index + 1] if index + 1 < len(rest) else "")
+                index += 2
+                continue
+            for flag in flags:
+                if arg.startswith(flag + "="):
+                    values.append(arg.split("=", 1)[1])
+                    break
+            index += 1
+        return values
+
+    @classmethod
+    def assert_read_only(cls, argv) -> None:
+        """Fail-closed: refuse anything not AFFIRMATIVELY provable as a read."""
+        rest = [str(arg) for arg in argv]
+        if not rest:
+            raise cls.GhRetryUsageError("empty gh argv")
+        if rest[0] != "api":
+            if tuple(rest[:2]) in cls.READ_SUBCOMMANDS:
+                return
+            raise cls.GhRetryUsageError(
+                f"gh {' '.join(rest[:2])} is not an allow-listed read — "
+                "mutations/arm calls stay one-shot"
+            )
+        tail = rest[1:]
+        method = None
+        for index, arg in enumerate(tail):
+            if arg in ("-X", "--method"):
+                method = tail[index + 1].upper() if index + 1 < len(tail) else ""
+                break
+            if arg.startswith("--method="):
+                method = arg.split("=", 1)[1].upper()
+                break
+        if "graphql" in tail:
+            inline = None
+            for value in cls._field_values(tail, cls.QUERY_FIELD_FLAGS):
+                if value.startswith("query=") and not value.startswith("query=@"):
+                    inline = value.split("=", 1)[1]
+            if inline is None:
+                raise cls.GhRetryUsageError(
+                    "refusing gh api graphql with no inline `query=` text (file-backed / "
+                    "stdin bodies are opaque) — cannot prove it is a read"
+                )
+            if cls.MUTATION_RE.search(inline):
+                raise cls.GhRetryUsageError(
+                    "refusing a GraphQL mutation/subscription — arms stay one-shot"
+                )
+            return
+        if method not in (None, "GET", "HEAD"):
+            raise cls.GhRetryUsageError(
+                f"refusing gh api with method {method or '<missing>'}"
+            )
+        if method is None and any(
+            arg in cls.FIELD_FLAGS
+            or any(arg.startswith(flag + "=") for flag in cls.FIELD_FLAGS[2:])
+            for arg in tail
+        ):
+            raise cls.GhRetryUsageError(
+                "refusing gh api with field params and no explicit GET "
+                "(gh auto-switches to POST)"
+            )
+
+    @classmethod
+    def run_gh_read(cls, argv, *, run=subprocess.run) -> str:
+        """Do the read ONCE. No retry, and no transient classification (see above).
+
+        ``run`` is injectable so the wiring test can prove a failing read raises
+        GhFatalError and NEVER the lenient GhTransientExhausted.
+        """
+        cls.assert_read_only(argv)
+        command = ["gh", *[str(arg) for arg in argv]]
+        result = run(command, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            detail = (
+                (result.stderr or "").strip()
+                or (result.stdout or "").strip()
+                or "unknown gh failure"
+            )
+            raise cls.GhFatalError(
+                f"{' '.join(command[:4])} failed (degraded: scripts/gh_retry.py was not "
+                f"checked out, so this read was NOT retried): {detail}"
+            )
+        return result.stdout
+
+
+try:
+    import gh_retry
+
+    GH_RETRY_DEGRADED = False
+except ImportError as _gh_retry_missing:  # pragma: no cover - see the wiring test
+    gh_retry = _DegradedGhRetry  # type: ignore[assignment]
+    GH_RETRY_DEGRADED = True
+    print(
+        "::warning title=rearm-sweeper running WITHOUT transient-retry (scripts/gh_retry.py "
+        f"not checked out)::{_gh_retry_missing} — this run's idempotent gh READS are "
+        "ONE-SHOT: a GitHub 5xx blip will red it instead of being retried. Arming itself "
+        "is UNAFFECTED and proceeds. CAUSE: this script came from the default branch "
+        "while the `sparse-checkout` manifest came from an older workflow snapshot on the "
+        "PR ref, which does not list scripts/gh_retry.py (sparq #3776 / #3766). REMEDY: "
+        "rebase the PR onto the default branch, or re-run once the PR ref carries a "
+        "workflow file that sparse-checks out the whole scripts/ directory."
+    )
 
 
 PROGRAM = "rearm-sweeper"

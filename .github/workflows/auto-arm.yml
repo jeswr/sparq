@@ -40,12 +40,21 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
-          # gh_retry.py is auto-arm.py's #3759 transient-retry dependency — the
-          # self-test below imports it, so a missing path fails BEFORE the live run.
-          sparse-checkout: |
-            scripts/auto-arm.py
-            scripts/gh_retry.py
-          sparse-checkout-cone-mode: false
+          # [OPUS-5] #3776 — CHECK OUT THE WHOLE DIRECTORY, never a file-by-file manifest.
+          # This step's `ref:` is the DEFAULT BRANCH, but on a `pull_request` event the
+          # WORKFLOW FILE (and so this manifest) comes from the PR's own ref. Enumerating
+          # individual files therefore couples a default-branch script to a per-ref
+          # snapshot of its dependency list: #3766 added `import gh_retry` to
+          # scripts/auto-arm.py and `scripts/gh_retry.py` to this list in one commit, and
+          # every PR ref cut before that commit kept the one-entry manifest — so the new
+          # script ran without gh_retry.py and died with ModuleNotFoundError on a GATING
+          # check (#3434, run 30143852994). A directory pattern cannot go stale when a new
+          # sibling import is added, so the skew is structurally impossible from here on.
+          # Cone mode (the actions/checkout default) is what makes `scripts` recursive;
+          # do NOT reintroduce `sparse-checkout-cone-mode: false`, under which this bare
+          # word would be a gitignore pattern with different semantics. Pinned by
+          # scripts/tests/test_arm_capability_wiring.py::TestSparseCheckoutManifest.
+          sparse-checkout: scripts
 
       - name: Self-test policy
         run: |
@@ -79,8 +88,20 @@ jobs:
           # exit non-zero (visibly red + retried), NOT the sweep's lenient ::warning+0.
           # The scheduled/dispatch runs are SWEEP mode (a missed cycle is cron-covered).
           ARM_MODE: ${{ github.event_name == 'pull_request' && 'event' || 'sweep' }}
+          # [OPUS-5] #3776: WHICH PR this run answers for. Empty on schedule/dispatch (=>
+          # whole-repo sweep, the backstop); the triggering PR's number on a label event,
+          # so one permanently un-armable PR can no longer red this GATING check on every
+          # OTHER PR's label event. Pinned by
+          # scripts/tests/test_arm_capability_wiring.py::TestEventModeIsPerPr.
+          # NOTE: this expression is the FORWARD-LOOKING half only. Like the
+          # sparse-checkout manifest above, it is snapshotted per PR ref, so already-stale
+          # refs never pass it — which is why scripts/auto-arm.py ALSO derives the number
+          # from the runner environment (GITHUB_EVENT_PATH / GITHUB_REF). That script comes
+          # from the default branch, so it is the only half that can heal a frozen ref.
+          ARM_PR: ${{ github.event.pull_request.number }}
         run: >-
           python3 scripts/auto-arm.py
           --repo "$REPO"
           --default-branch "$DEFAULT_BRANCH"
           --mode "$ARM_MODE"
+          --pr "$ARM_PR"
