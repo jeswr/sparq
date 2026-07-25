@@ -17,3 +17,9 @@
   crate: "sparq-sim"
   features: "explain,multi-hop"
   test: true
+# [FABLE-5] sq-lgw: exercise the MinHash/LSH sketch index — the exact-rescore
+# differential, guaranteed twin recall, and the decline witnesses; default-OFF.
+- name: "sparq-sim (sketch)"
+  crate: "sparq-sim"
+  features: "sketch"
+  test: true

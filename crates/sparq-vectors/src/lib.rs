@@ -148,6 +148,13 @@ pub mod verbalize;
 pub mod vocab {
     /// `vec:` — the sparq vector-search namespace.
     pub const VEC_NS: &str = "http://sparq.dev/vec#";
+    /// [SONNET-4.6] (sq-tb9p0) The highest `vec:` **vocabulary revision** this build implements
+    /// (spec `site/specs/sparql-vector-genai.typ`, VG-GOV-2/VG-GOV-3). Revision 1's recognised
+    /// terms are exactly [`NEAREST`] and [`SEARCH`]; new terms are introduced only by a new spec
+    /// revision, and an unrecognised `vec:` IRI is a HARD query error naming this revision — the
+    /// loud failure IS the forward-compatibility mechanism (a query using a newer revision's term
+    /// against this processor fails instead of silently matching data).
+    pub const VOCAB_REVISION: u32 = 1;
     /// `?node vec:nearest ( <query> <k> )` — binds `?node` to the `<k>` nearest
     /// neighbours (best first) of `<query>`, which is either a node IRI (whose
     /// stored vector is the query, the seed excluded) or a comma-separated
@@ -188,7 +195,9 @@ pub mod prov_vocab {
 
 #[cfg(feature = "metadata-sidecar")]
 pub use ann::nearest_exact_with_meta;
-pub use ann::{cosine, nearest_exact, nearest_term_exact, nearest_term_exact_checked};
+pub use ann::{
+    cosine, nearest_exact, nearest_exact_tiebreak, nearest_term_exact, nearest_term_exact_checked,
+};
 // [OPUS-4.8] (sq-ip3a) The in-RAM HNSW index is the approximate backend — `approx-ann` only
 // (the only feature pulling `instant-distance`). The default build re-exports just the exact
 // searchers above.
@@ -208,7 +217,8 @@ pub use filter::{nearest_exact_filtered, FilterConfig, IdMask};
 // [OPUS-4.8] (sq-7hx6) Pre-filter vs post-filter cost model — the `filtered-ann` feature only.
 #[cfg(feature = "filtered-ann")]
 pub use cost::{
-    nearest_filtered_costed, overfetch_target, postfilter_exact, CostEstimate, CostModel, Strategy,
+    nearest_filtered_costed, nearest_filtered_costed_tiebreak, overfetch_target, postfilter_exact,
+    CostEstimate, CostModel, Strategy,
 };
 // [OPUS-4.8] (sq-ip3a) Pluggable ANN backend + iterative over-fetch filtered path — `filtered-ann`
 // only. `ApproxBackend` is additionally `approx-ann` (re-exported below).

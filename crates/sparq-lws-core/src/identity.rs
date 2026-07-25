@@ -38,7 +38,7 @@ use axum::response::{IntoResponse, Response};
 
 use crate::ldp::conditional;
 use crate::ldp::content::{
-    classify, negotiate_accept, parse_to_triples, serialize_triples, RdfFormat,
+    classify, negotiate_accept_with_profile, parse_to_triples, serialize_triples_negotiated,
 };
 use crate::ldp::handler::LdpState;
 use crate::store::Store;
@@ -356,22 +356,27 @@ async fn serve_identity_request<S: Store>(
         // than serve unnegotiable bytes as an identity document.
         Err(_) => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
-    let format = match negotiate_accept(accept, stored) {
-        Some(f) => f,
+    let negotiated = match negotiate_accept_with_profile(accept, stored) {
+        Some(n) => n,
         None => return (StatusCode::NOT_ACCEPTABLE, "not acceptable").into_response(),
     };
+    // The stored bytes are the representation ONLY in the stored format with no honoured JSON-LD
+    // `profile` — an honoured profile (expanded / compacted) always re-serialises into the
+    // requested document form, mirroring the LDP read path's `negotiate_body`.
+    let verbatim = negotiated.serves_stored_verbatim(stored);
 
     // The response validator is REPRESENTATION-SPECIFIC (RFC 9110 §8.8.3 — an entity-tag identifies
     // a representation, not a resource), mirroring the LDP read path's `negotiated_validator`: the
-    // STORED format (Turtle) keeps the stored strong ETag; a re-serialised representation (JSON-LD)
-    // gets a DISTINCT variant tag (`"<state>+jsonld"`, via `conditional::variant_etag`). Computed
-    // BEFORE the If-None-Match check so a 304 short-circuit uses the tag THIS request's
-    // representation would carry — a client holding the Turtle tag but asking for JSON-LD therefore
-    // gets a fresh 200, never a 304 for bytes it never received (the cross-representation-304 bug).
-    let etag = if format == stored {
+    // STORED format (Turtle) keeps the stored strong ETag; a re-serialised representation gets a
+    // DISTINCT variant tag (`"<state>+<variant>"`, via `conditional::variant_etag`, the shared
+    // profile-aware `NegotiatedFormat::variant_suffix` token). Computed BEFORE the If-None-Match
+    // check so a 304 short-circuit uses the tag THIS request's representation would carry — a
+    // client holding the Turtle tag but asking for JSON-LD therefore gets a fresh 200, never a 304
+    // for bytes it never received (the cross-representation-304 bug).
+    let etag = if verbatim {
         resource.meta.etag.clone()
     } else {
-        conditional::variant_etag(&resource.meta.etag, variant_suffix(format))
+        conditional::variant_etag(&resource.meta.etag, negotiated.variant_suffix())
     };
 
     // Conditional GET: an If-None-Match hit (against the REPRESENTATION-SPECIFIC validator above)
@@ -382,10 +387,11 @@ async fn serve_identity_request<S: Store>(
         return resp;
     }
 
-    // Re-serialise when the negotiated format differs from the stored one. The parse base is the
-    // PUBLIC id-doc IRI (relative IRIs in the doc resolve against the served identity, never the
-    // internal reserved key).
-    let body_bytes = if format == stored {
+    // Re-serialise when the negotiated representation differs from the stored bytes (the other
+    // format, or an honoured JSON-LD profile's document form). The parse base is the PUBLIC id-doc
+    // IRI (relative IRIs in the doc resolve against the served identity, never the internal
+    // reserved key).
+    let body_bytes = if verbatim {
         resource.body.to_vec()
     } else {
         let doc_iri = config.doc_iri(handle);
@@ -395,7 +401,7 @@ async fn serve_identity_request<S: Store>(
                 return (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response()
             }
         };
-        match serialize_triples(format, &triples) {
+        match serialize_triples_negotiated(negotiated, &triples) {
             Ok(b) => b,
             Err(_) => {
                 return (StatusCode::INTERNAL_SERVER_ERROR, "internal server error").into_response()
@@ -408,7 +414,9 @@ async fn serve_identity_request<S: Store>(
     } else {
         Body::from(body_bytes)
     });
-    if let Ok(ct) = HeaderValue::from_str(format.media_type()) {
+    // The `Content-Type` echoes any honoured JSON-LD `profile` back to the client (the JSON-LD 1.1
+    // IANA registration), matching the LDP read path.
+    if let Ok(ct) = HeaderValue::from_str(&negotiated.content_type()) {
         resp.headers_mut().insert(header::CONTENT_TYPE, ct);
     }
     add_identity_headers(&mut resp, &etag);
@@ -444,16 +452,6 @@ fn method_not_allowed() -> Response {
         HeaderValue::from_static("*"),
     );
     resp
-}
-
-/// The short, `+`-free `+<variant>` suffix token for a negotiated RDF format — mirrors the LDP read
-/// path's `variant_suffix` so a Turtle-vs-JSON-LD variant tag is derived identically on both
-/// surfaces (the STORED format never takes a suffix; only a re-serialised representation does).
-fn variant_suffix(format: RdfFormat) -> &'static str {
-    match format {
-        RdfFormat::Turtle => "ttl",
-        RdfFormat::JsonLd => "jsonld",
-    }
 }
 
 /// Whether an `If-None-Match` header value matches `etag` (`*`, or any listed entity-tag, weak
@@ -567,7 +565,12 @@ mod tests {
         // Turtle tag can never match the JSON-LD representation (no cross-representation 304).
         let stored = "\"42-abc\"";
         let turtle = stored.to_string();
-        let jsonld = conditional::variant_etag(stored, variant_suffix(RdfFormat::JsonLd));
+        let negotiated = negotiate_accept_with_profile(
+            Some("application/ld+json"),
+            crate::ldp::content::RdfFormat::Turtle,
+        )
+        .expect("acceptable");
+        let jsonld = conditional::variant_etag(stored, negotiated.variant_suffix());
         assert_eq!(turtle, "\"42-abc\"");
         assert_eq!(jsonld, "\"42-abc+jsonld\"");
         assert_ne!(

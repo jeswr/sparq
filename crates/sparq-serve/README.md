@@ -74,8 +74,8 @@ cargo run -p sparq-server -- --format turtle data.ttl
   `change_stream::ChangeLog` persists each commit as an ordered, monotonically-sequenced
   record to a segmented, fsync'd append-only log (Neptune-Streams shape), appended on the
   writer thread (one per generation) via `ChangeLog::into_commit_hook` + `Writer::spawn_with_commit_hook`.
-  `poll(from_seq)` **replays after a restart**; explicit retention (`apply_retention`) drops old
-  segments by consumer-ack / age / size (a trimmed-offset poll **fails closed**). No HTTP/async.
+  `poll(from_seq)` **replays after a restart**; retention (`apply_retention`) drops old segments (a
+  trimmed poll **fails closed**); `rebase_to` resyncs a broken stream (honest gap). No HTTP/async.
 - **Response-bytes result cache** *(opt-in `result-cache`, OFF by default)* — see
   below.
 

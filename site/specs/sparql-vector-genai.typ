@@ -183,7 +183,7 @@ separate:
 + #emph[What does the specification require?] — answered by the normative sections. A
   requirement is never demoted from the normative surface merely because it is not yet built;
   in particular, the embedding-provenance record of @sec-provenance-model is REQUIRED even
-  though the current sparq container does not yet carry it.
+  though the current sparq container does not carry it by default.
 + #emph[Does a given build comply?] — answered, for sparq, by the informative
   implementation-status report of @sec-impl-status, which records per assertion group what is
   implemented, what is not, and what remains unconfirmed.
@@ -610,12 +610,13 @@ version, metric, normalisation regime, and dimension of a store), aligned with P
 ]
 
 #note[
-  The sparq implementation does #strong[not] yet satisfy this section: the version-2
-  container records the dimension and the graph fingerprint only, and the provider's model
-  string exists only as runtime configuration, never persisted (@sec-impl-status). This is
-  the most consequential known gap between this specification and its reference
-  implementation, and closing it is the highest-priority item this draft asks reviewers to
-  weigh.
+  The sparq implementation does #strong[not] yet satisfy the REQUIRED record by default: the
+  default write path emits the version-2 container, which records the dimension and the graph
+  fingerprint only. An opt-in feature can persist the full record in a version-3 header, and
+  the record is expressible in RDF (VG-PROV-5), but until a record is required rather than
+  optional this remains the most consequential known gap between this specification and its
+  reference implementation, and closing it is the highest-priority item this draft asks
+  reviewers to weigh (@sec-impl-status).
 ]
 
 = Persisted vector store formats <sec-formats>
@@ -653,7 +654,7 @@ container does not conform to this revision. The byte-level binding of the prove
 (a version-3 header) is left to a future revision; until it is pinned, a conforming store
 must persist the record alongside the container in an implementation-defined form and SHOULD
 also express it in RDF (VG-PROV-5). @sec-impl-status records that the sparq implementation
-writes version 2 and does not yet satisfy VG-PROV-1.
+writes version 2 by default and does not yet satisfy VG-PROV-1.
 
 == Sibling containers
 
@@ -863,9 +864,10 @@ This section states plainly what this extension does #strong[not] promise.
 - #strong[Exactness implies reproducibility only together with the tie rule.] This revision
   pins a deterministic boundary tie-break (VG-TIE-1, @sec-ordering), so two implementations
   conforming to answer-exact mode return the same top-k #emph[set] on the same store. The
-  current sparq build does not yet implement VG-TIE-1 (@sec-impl-status); against it,
-  exact-mode results are set-equal up to ties at the k boundary, and cross-implementation
-  membership at a tie is not yet reproducible in practice.
+  sparq build implements VG-TIE-1 on its answer-exact paths — unfiltered and mask-filtered
+  alike — and enforces the embeddable-domain restriction the rule relies on fail-closed: a
+  candidate containing a blank node is a hard query error wherever its term, rather than its
+  score alone, would decide top-k membership (@sec-impl-status).
 - #strong[Embedding models are external nondeterminism.] Two embedding runs are comparable
   only under identical model, version, normalisation, and verbalisation — which the REQUIRED
   provenance record of @sec-provenance-model exists to attest. Until an implementation
@@ -996,24 +998,33 @@ inventory.
 = sparq implementation status <sec-impl-status>
 
 #emph[This section is informative.] It reports, per assertion group, whether the current
-sparq build satisfies this revision. It is derived from the project's read-only estate recon
-digest (`research/specs/vector-genai-estate-recon.md`) rather than a fresh code audit — this
-revision was deliberately authored without opening crate sources — so rows marked
-#emph[unconfirmed] must be confirmed against the implementation before this draft advances.
+sparq build satisfies this revision. It was originally derived from the project's read-only
+estate recon digest (`research/specs/vector-genai-estate-recon.md`) rather than a fresh code
+audit — this revision was deliberately authored without opening crate sources — so rows
+marked #emph[unconfirmed] must be confirmed against the implementation before this draft
+advances. Exception: the `VG-GOV-3`, `VG-TIE-1`, `VG-MET-4`, and `VG-PROV-5` rows record
+behaviour implemented and tested in the crates #emph[after] that digest was taken, and are
+maintained against the code.
 
 #table(
   columns: 3,
   align: (left, left, left),
   table.header[Assertions][sparq status][Notes],
   [`VG-VOC-1`], [Implemented, tested], [unrecognised `vec:` IRIs are a hard query error],
-  [`VG-GOV-1..3`], [Not satisfied], [no namespace document is published at the `vec:` IRI;
-    no vocabulary-revision reporting exists],
+  [`VG-GOV-1..2`], [Not satisfied], [no namespace document is published at the `vec:` IRI,
+    and the machine-readable per-term revision annotation is unchosen],
+  [`VG-GOV-3`], [Implemented, tested], [the build states vocabulary revision 1 in its crate
+    documentation and names it in the VG-VOC-1 unrecognised-term hard error],
   [`VG-PAT-1..3`, `VG-GRM-1..3`, `VG-TYP-1..2`, `VG-ERR-1..6`], [Implemented, tested],
     [except: behaviour for a non-variable #emph[score] position is unconfirmed (editor's
     note, @sec-patterns)],
   [`VG-ORD-1..2`], [Implemented], [unordered `VALUES`-equivalent multiset semantics],
-  [`VG-TIE-1`], [Not implemented], [the current build defines no tie rule; top-k membership
-    at a score tie is unspecified],
+  [`VG-TIE-1`], [Implemented, tested], [boundary-tie membership by ascending N-Triples key on
+    both answer-exact paths (unfiltered and mask-filtered); a candidate containing a blank
+    node is rejected with a fail-closed hard error wherever its term — rather than its score
+    alone — would decide membership. The build additionally embeds ground triple terms, an
+    extension beyond the mainline embeddable domain whose `<<( … )>>` keys are likewise fixed
+    by the serialisation grammar],
   [`VG-DEG-1..2`], [Implemented, tested], [absent seed and all-zero query yield zero
     solutions],
   [`VG-DEG-3`], [Unconfirmed], [behaviour at `k = 0` is not pinned by the grounding digest],
@@ -1025,12 +1036,20 @@ revision was deliberately authored without opening crate sources — so rows mar
     cosine is implicit in the mainline path],
   [`VG-MET-2..3`], [Unconfirmed], [the digest pins cosine-over-L2-normalised but not
     #emph[where] normalisation happens (store-build vs query time)],
-  [`VG-MET-4`], [Not satisfied (mainline)], [nothing is recorded, so nothing can be checked;
-    the structure-feature per-block `Euclidean`/`NonEuclidean` guard implements the
-    block-granularity instance only],
-  [`VG-PROV-1..5`], [Not implemented], [#strong[the headline gap]: the version-2 container
-    records dimension and graph fingerprint only; model identity, version, metric, and
-    normalisation are runtime-only and never persisted],
+  [`VG-MET-4`], [Implemented, tested (declared metrics)], [the mainline query surface rejects
+    a store whose persisted provenance declares a non-cosine metric with a hard error; a
+    legacy store carrying no record declares nothing, so nothing can be checked against it —
+    that absence is the VG-MET-1 gap, not a VG-MET-4 one. The structure-feature per-block
+    `Euclidean`/`NonEuclidean` guard remains the block-granularity instance],
+  [`VG-PROV-1..4`], [Not satisfied (default build)], [#strong[the headline gap]: the default
+    write path emits the version-2 container, which records dimension and graph fingerprint
+    only; an opt-in feature can persist the full record in a version-3 header, but a record
+    remains optional, so the MUST of VG-PROV-1 — and the rejection rules that depend on a
+    record being present — are not met by default],
+  [`VG-PROV-5`], [Implemented, tested], [the provenance record is expressible as RDF triples
+    (model, metric, normalisation, and dimension always; version and verbalisation axes when
+    present) in a sparq vendor provenance vocabulary — the concrete `vec:` term names remain
+    left to a future revision per the editor's note of @sec-provenance-model],
   [`VG-FMT-1..3`], [Implemented, tested], [version-2 layout, streaming writer, byte-slice
     open],
   [`VG-STAL-1..2`], [Implemented, tested], [order-independent fingerprint; round-trip-only
@@ -1049,8 +1068,8 @@ revision was deliberately authored without opening crate sources — so rows mar
 
 Summary: the sparq build conforms to the retrieval core of this revision (patterns, modes,
 filtered answer-safety, staleness, import, embedding acquisition, grounded generation) but
-#strong[does not conform to this revision as a whole]. The known deltas are `VG-GOV-1..3`,
-`VG-TIE-1`, `VG-MET-1`, `VG-MET-4`, and `VG-PROV-1..5`, plus the unconfirmed rows above.
+#strong[does not conform to this revision as a whole]. The known deltas are `VG-GOV-1..2`,
+`VG-MET-1`, and `VG-PROV-1..4`, plus the unconfirmed rows above.
 
 = References
 

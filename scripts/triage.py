@@ -5,11 +5,16 @@
 Given an issue's labels + type, decide the labels to ADD/REMOVE and whether it is triage-complete:
   * role     — from a `kind:*` label or the bead/issue type (feature/bug->impl, docs->docs, ...).
   * priority — kept if a valid single `priority:P0..P4` is present; otherwise triage is incomplete.
-  * package  — the existing `area:<crate>` labels are the package (kept as-is); a no-package issue is
-               cross-cutting (handled by the readiness engine's global partition), not incomplete.
-  * ready    — an issue is `status:ready` iff it has a valid single priority AND a role AND is not
-               gated/untrusted. Otherwise it becomes `status:untriaged` for the retriage cron / an
-               LLM pass (a model call is only needed when role/priority cannot be derived statically).
+  * package  — the existing `area:<crate>` labels are the package (kept as-is). A NO-package issue is
+               NOT promotable: in the issue-native readiness engine a no-area issue reserves the
+               serializing `__global__` partition, so at backlog scale each no-area `status:ready`
+               issue would collapse the whole frontier behind it (audit-2026-07-17). Such an issue is
+               parked `needs:area` (a gate the readiness engine already respects + maintainer-visible)
+               until an area is assigned, then it re-triages to ready via the retriage cron.
+  * ready    — an issue is `status:ready` iff it has a valid single priority AND a role AND an
+               `area:<crate>` AND is not gated/untrusted/epic. Otherwise it becomes `status:untriaged`
+               (missing role/priority) or is `needs:area`-parked (missing area) for the retriage cron
+               / an LLM pass (a model call is only needed when role/priority cannot be derived).
 
 Fail-closed: ambiguity or missing role/priority yields `status:untriaged`, never `status:ready`.
 Pure `triage()` is unit-tested; the workflow applies the returned label delta.
@@ -22,6 +27,21 @@ ROLE_BY_KIND = {"docs": "docs", "design": "research", "research": "research", "p
 ROLE_BY_TYPE = {"feature": "impl", "bug": "impl", "task": "impl", "chore": "ci",
                 "spike": "research", "epic": "impl"}
 SEC_KEYWORDS = ("zk", "mpc", "reasoner", "crypto", "auth", "e2ee")
+# [FABLE-5] UI/front-end surfaces route role:site (maintainer decision 2026-07-17: GPT-5.6 codex,
+# the original registry-dashboard builder — agent-account-registry e4098b9 — owns ALL UI work; the
+# role:site chain in orchestration/routing.toml leads with terra/codex). EXACT labels, not
+# substrings: a substring set would false-match (e.g. "gui" in "guide") and UI keywords must NOT
+# enter routing match_labels, which the arm-side security classifier unions into its keyword set.
+UI_SURFACE_LABELS = ("area:site", "area:gui", "surface:frontend", "dashboard")
+# [FABLE-5] STANDING RULE — frontier-tier CI/infrastructure authorship (maintainer decision
+# 2026-07-17, same pattern as the UI→codex rule above / PR #3416): infra-surface labels derive
+# role:ci so infra work (.github/workflows, gate aggregators, orchestration/ + dispatch scripts)
+# reaches the FRONTIER-ONLY ci chain in orchestration/routing.toml (fable/terra — sonnet/haiku no
+# longer author infra). EXACT labels, not substrings ("ci" as a substring would match nearly every
+# label), and deliberately NOT routing match_labels (the arm-side security classifier unions those
+# keywords — infra keywords there would human-arm every infra PR). Security keywords still win.
+INFRA_SURFACE_LABELS = ("area:ci", "area:ci-fragments", "area:orchestration", "area:workflows",
+                        "area:release")
 _PRIO = re.compile(r"^priority:P([0-4])$")
 
 
@@ -42,6 +62,15 @@ def _role(labels, issue_type):
     for lb in labels:
         if lb.startswith("kind:") and lb[5:] in ROLE_BY_KIND:
             return ROLE_BY_KIND[lb[5:]]
+    # [FABLE-5] UI-surface labels derive role:site (codex-led chain) before the generic type map,
+    # after kind (so kind:docs about the site stays docs) and after an explicit role:* label.
+    if any(lb in UI_SURFACE_LABELS for lb in labels):
+        return "site"
+    # [FABLE-5] infra-surface labels derive role:ci (the frontier-only fable/terra chain) before
+    # the generic type map — same precedence slot as the UI rule: after security (soundness wins),
+    # after an explicit role:*, after kind (so kind:docs about the CI stays docs).
+    if any(lb in INFRA_SURFACE_LABELS for lb in labels):
+        return "ci"
     return ROLE_BY_TYPE.get(issue_type)
 
 
@@ -58,17 +87,28 @@ def triage(labels, issue_type="task", trusted=True):
         # [OPUS-4.8] single-role invariant: strip any OTHER role:* labels so the dispatcher's
         # resolve() never sees an ambiguous role set (a security keyword may override an explicit role).
         remove |= {lb for lb in labels if lb.startswith("role:") and lb != f"role:{role}"}
+    # [FABLE-5] a no-area issue reserves the readiness engine's serializing __global__ partition, so
+    # it must NEVER auto-promote to status:ready (each one collapses the whole dispatch frontier at
+    # backlog scale — audit-2026-07-17). Park it needs:area (a gate ready-issues.py already respects,
+    # and maintainer-visible) so a human/LLM assigns a crate; then the retriage cron re-promotes it.
+    has_area = any(lb.startswith("area:") for lb in labels)
     # [OPUS-4.8] an epic is a tracking umbrella, never dispatchable — it must not gain status:ready
     # (the readiness engine also excludes kind:epic as the hard dispatch gate; this keeps the tracker
     # honest so an epic never *shows* as ready).
-    ready = (bool(role) and _valid_priority(labels) and "needs:user" not in labels
+    ready = (bool(role) and _valid_priority(labels) and has_area and "needs:user" not in labels
              and "kind:epic" not in labels)
     if ready:
         add.add("status:ready")
         remove.add("status:untriaged")
+        remove.add("needs:area")      # an area landed since a prior no-area park — clear the gate
     else:
         add.add("status:untriaged")   # fail-closed: not dispatchable until complete
         remove.add("status:ready")
+        # a triage-complete-but-no-area issue: mark WHY it is parked so it is maintainer-actionable
+        # and stays out of the frontier (needs:* is a hard gate) instead of silently reserving global.
+        if (bool(role) and _valid_priority(labels) and not has_area
+                and "kind:epic" not in labels and "needs:user" not in labels):
+            add.add("needs:area")
     return {"add": add - labels, "remove": remove & labels, "ready": ready, "role": role}
 
 
@@ -107,6 +147,35 @@ def _self_test():
     # single-role invariant: a double-labelled issue is stripped to one role
     r = triage(["priority:P2", "role:impl", "role:site", "area:site"], "feature")
     chk("single-role invariant", (len([x for x in (({"role:impl", "role:site"} | r["add"]) - r["remove"]) if x.startswith("role:")]) == 1), True)
+    # [FABLE-5] UI-surface ownership: a UI-surface label derives role:site (the codex/GPT-5.6-led
+    # chain) even when the issue type would derive impl; kind (docs) and security still win.
+    chk("ui surface -> site", triage(["priority:P2", "area:site"], "feature")["role"], "site")
+    chk("gui surface -> site", triage(["priority:P2", "area:gui"], "task")["role"], "site")
+    chk("explicit impl on ui surface stays impl",
+        triage(["priority:P2", "role:impl", "area:site"], "feature")["role"], "impl")
+    chk("site docs stay docs", triage(["priority:P3", "kind:docs", "area:site"], "task")["role"], "docs")
+    chk("ui+sec -> soundness", triage(["priority:P1", "area:site", "area:sparq-zk"], "feature")["role"], "soundness")
+    # [FABLE-5] frontier-tier infra authorship: an infra-surface label derives role:ci (the
+    # frontier-only fable/terra chain) even when the issue type would derive impl; kind (docs)
+    # and security keywords still win (soundness), matching the UI-rule precedence.
+    chk("infra surface -> ci", triage(["priority:P1", "area:ci"], "feature")["role"], "ci")
+    chk("orchestration surface -> ci",
+        triage(["priority:P2", "area:orchestration"], "task")["role"], "ci")
+    chk("infra docs stay docs", triage(["priority:P3", "kind:docs", "area:ci"], "task")["role"], "docs")
+    chk("infra+sec -> soundness",
+        triage(["priority:P1", "area:ci", "area:sparq-zk"], "feature")["role"], "soundness")
+    # [FABLE-5] no-area guard: a complete priority+role issue with NO area:* is NOT promoted to ready
+    # (it would reserve the serializing __global__ partition); it parks needs:area instead.
+    r = triage(["priority:P1", "role:impl"], "feature")
+    chk("no-area not ready", (r["ready"], "status:ready" in r["add"]), (False, False))
+    chk("no-area parks needs:area", ("needs:area" in r["add"], "status:untriaged" in r["add"]), (True, True))
+    # an epic with no area does NOT get needs:area (it is untriaged-by-design, not area-actionable)
+    chk("epic no-area no needs:area", "needs:area" in triage(["priority:P1", "kind:epic"], "epic")["add"], False)
+    # a needs:user-gated no-area issue is not double-parked with needs:area
+    chk("gated no-area no needs:area", "needs:area" in triage(["priority:P1", "needs:user"], "task")["add"], False)
+    # once an area lands, retriage clears the needs:area gate and promotes
+    r = triage(["priority:P1", "role:impl", "area:sparq-core", "needs:area", "status:untriaged"], "feature")
+    chk("area landed -> ready + clears needs:area", (r["ready"], "needs:area" in r["remove"]), (True, True))
     print("triage self-test", "PASSED" if ok else "FAILED")
     return 0 if ok else 1
 

@@ -366,16 +366,48 @@ An issuer attests a committed graph by signing its commitment:
 
 == The supported SPARQL fragment
 
-The provable fragment of SPARQL #cite("SPARQL11-QUERY") is deliberately small and bucketed:
+This subsection is candidate-normative (section 2.2). The fragment is the monotone,
+federation-free subset below. "IN (today)" means implemented by the reference verifier;
+"IN (phase N)" means designed but #strong[not yet implemented]; `DEFERRED` is admissible
+only after its stated re-entry condition; and `OUT` is excluded. These labels are part of
+the fragment boundary, not an implementation roadmap that a manifest may anticipate.
 
-- basic graph pattern (BGP) scans over committed graphs;
-- value `FILTER` constraints, bucketed by datatype lane: integer, `xsd:double`,
-  signed integer, `xsd:decimal`, and a value-dictionary lane;
-- a single-prover equality `JOIN` across hidden credentials.
+#table(
+  columns: (1.2fr, 1fr, 3.8fr),
+  align: (left, left, left),
+  table.header[Construct][Disposition][Reason],
+  [`SELECT`], [IN (today)], [Membership is defined over solution mappings.],
+  [`ASK`], [IN (today)], [Non-emptiness of eval(P) is monotone.],
+  [`CONSTRUCT`], [OUT], [Graph-template instantiation is outside the membership property; a consumer can instantiate a template from a disclosed mapping.],
+  [`DESCRIBE`], [OUT], [Its result is implementation-defined.],
+  [BGP], [IN (today)], [Scan circuits check row membership and per-scan completeness.],
+  [`Join`], [IN (today)], [Hidden equality join, retaining the cross-graph blank-node exclusion below.],
+  [`FILTER`], [IN (today: four numeric lanes); IN (phases 2–3: section 7.2 expression fragment)], [Monotone under SPARQL error-as-unsatisfied semantics.],
+  [`UNION`], [IN (phase 2)], [Set union is monotone. Each disclosed solution identifies its branch; the verifier re-derives that branch from the query.],
+  [`OPTIONAL` / `LeftJoin`], [OUT], [An unbound optional side asserts that no compatible extension exists, a non-monotone closed-world claim.],
+  [`MINUS`], [OUT], [Closed-world set difference is non-monotone.],
+  [`FILTER NOT EXISTS`], [OUT], [Closed-world negation is non-monotone.],
+  [`FILTER EXISTS`], [DEFERRED], [Positive existence is monotone, but re-entry requires phase 2 and semantics pinned to SPARQL 1.2.],
+  [`GRAPH`], [OUT], [Named-graph attribution contradicts the graph-set privacy model.],
+  [`SERVICE`], [OUT], [Federation is outside the fragment.],
+  [`VALUES`], [IN (phase 2)], [Public inline rows are monotone; `UNDEF` cells are wildcards.],
+  [`BIND` / `Extend`], [IN (phase 3)], [A deterministic in-fragment expression adds a derived binding; non-deterministic built-ins remain out.],
+  [Nested `SELECT`], [IN (phase 3)], [An in-fragment subquery is monotone; subqueries containing aggregates remain out.],
+  [Property paths], [IN (phases 1–2, bounded semantics)], [Governed by the first-class bounded semantics below.],
+  [Aggregation (`GROUP BY`, `HAVING`, `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `GROUP_CONCAT`, `SAMPLE`)], [OUT], [An aggregate claims completeness of the whole pattern, which composed proofs do not establish. Re-entry requires a composed-completeness obligation.],
+  [`ORDER BY`], [OUT; possible accept-and-strip re-entry], [Ordering is membership-indifferent, but accepting it could imply an unverified top-result claim. Re-entry requires an explicit "order not proved" manifest flag.],
+  [`DISTINCT`, `REDUCED`, `LIMIT`, `OFFSET`, projection], [IN (today)], [These modifiers are membership-indifferent.],
+  [SPARQL 1.2 triple terms / reification], [OUT (encoding gap)], [The committed leaf encoding has no triple-term lane.],
+  [SPARQL 1.2 `LANGDIR`, `hasLANG`, `hasLANGDIR`, `STRLANGDIR`, `isTRIPLE`, `TRIPLE`, `SUBJECT`, `PREDICATE`, `OBJECT`], [OUT (encoding gap)], [These require term-encoding lanes first.],
+  [SPARQL 1.2 `EXISTS` clarifications], [Adopted where relevant], [They govern eventual positive-`EXISTS` re-entry.],
+)
 
-`OPTIONAL`, `UNION`, property paths, aggregation, and subqueries are *not* part of the
-fragment. A prover #strong[MUST NOT] emit a manifest claiming coverage of a construct outside
-this fragment, and a verifier encountering such a claim #strong[MUST] reject it.
+A prover #strong[MUST NOT] emit a manifest claiming coverage of a construct whose
+disposition is not "IN (today)", unless the verifier and circuit family implement the named
+phase and identify that extension explicitly. A verifier #strong[MUST] reject a claimed
+construct that it does not implement, any `DEFERRED` or `OUT` construct, and any expression
+or path form outside the tables below. Thus candidate-normative design text does not enlarge
+the reference implementation's claim surface ahead of implementation.
 
 == Formal semantics of the fragment
 
@@ -384,6 +416,101 @@ onto the SPARQL algebra of Pérez, Arenas and Gutiérrez #cite("PAG09"), as adop
 SPARQL 1.1 recommendation #cite("SPARQL11-QUERY"), over the RDF 1.1 graph model
 #cite("RDF11-CONCEPTS") under simple entailment #cite("RDF11-MT"). It is the semantic anchor
 for the correctness obligation `bind_query_correctness` (section 10.3).
+
+*Property-path extension (candidate-normative; phases 1–2).* The following dispositions
+are designed extensions and remain unavailable until their named phase is implemented:
+
+#table(
+  columns: (1fr, 1fr, 4fr),
+  align: (left, left, left),
+  table.header[Path form][Disposition][Evaluation / circuit semantics],
+  [`iri`], [IN (phase 1)], [Identical to a triple pattern.],
+  [`^p`], [IN (phase 1)], [Swap subject and object; composition is preserved.],
+  [`p1/p2`], [IN (phase 1)], [Rewrite to a BGP with a fresh, non-projected intermediate variable.],
+  [`p1|p2`], [IN (phase 2)], [Rewrite to `UNION` with per-solution branch attribution.],
+  [`p?`], [IN (phase 2)], [The union of the occurrence-witnessed zero-length case and one step.],
+  [`p+`], [IN (phase 2, bounded)], [`path_reach` with one through k steps.],
+  [`p*`], [IN (phase 2, bounded)], [`path_reach` with zero through k steps.],
+  [`!(p1|…|pn)` including inverse members], [DEFERRED], [Monotone, but deferred until after `path_reach`; predicate inequality over salted term encodings also requires the re-audited-pending-external argument to be specified.],
+)
+
+For `p+` and `p*`, the circuit #strong[MUST] prove, and the manifest #strong[MUST] be read
+as claiming, exactly:
+
+#quote(block: true)[
+  There exists a chain of committed triples `(t_1, …, t_ℓ)` with `1 ≤ ℓ ≤ k`
+  (`0 ≤ ℓ ≤ k` for `*`), each `t_i` a member of a committed graph in the disclosed
+  attribution set with predicate `p`, chained object-to-subject, connecting `μ(s)` to
+  `μ(o)` — where #strong[`k` is a public input disclosed in the manifest].
+]
+
+The following requirements are first-class verification obligations, subject to the
+external-audit caveat of section 17.1:
+
++ *Public bound.* Proofs at different k are different statements. The verifier
+  #strong[MUST] expose k to the consumer and #strong[MUST] reject a claimed depth greater
+  than the selected circuit member's bound.
++ *Existence only.* A path proof #strong[MUST NOT] assert that longer paths do not exist or
+  that the reachable set is complete. Failure to produce a proof at k proves nothing.
++ *One-directional equivalence.* For the bounded evaluation, $op("eval")_k(P) subset.eq op("eval")(P)$:
+  every bounded witness is a SPARQL `p+` or `p*` solution, while completeness is only up to
+  k. If a walk exists, a simple path of length at most the committed union's node count
+  exists; choosing at least that count restores per-pair completeness, but a verifier
+  #strong[MUST NOT] assume that choice was made.
++ *Padding.* Every unused step when ℓ < k #strong[MUST] contribute nothing: it
+  #strong[MUST] either be a proven committed-row membership or a constrained pass-through
+  preserving the chain endpoint.
++ *Zero length.* For `p*` and `p?`, a zero-length result #strong[MUST] establish both
+  `μ(s) = μ(o)` and that the term occurs in the committed union. Bare equality is
+  insufficient; an occurrence witness is required.
++ *Cycles.* Evaluation is existence-based set semantics. A witness chain need not be
+  simple, and duplicate walks do not create additional solutions.
+
+The intended circuit family is `path_reach_d{k}`, unrolled to k steps. It is designed but
+not implemented at this draft's publication; the requirements above specify what an
+implementation must bind, not a present cryptographic guarantee.
+
+*Expression extension (candidate-normative; phase 3).* The following table is the complete
+designed expression fragment. Except for the four numeric comparison lanes marked today,
+these entries do not describe current verifier coverage.
+
+#table(
+  columns: (1.6fr, 1fr, 3.4fr),
+  align: (left, left, left),
+  table.header[Expression class][Disposition][Verification boundary],
+  [Logical `&&`, `||`, `!`], [IN (phase 3)], [Requires the EBV/error lane below.],
+  [Numeric comparisons], [IN (today: four lanes); phase 3 in expression positions], [`=`, `!=`, `<`, `<=`, `>`, `>=`; integer, double, signed-integer, and decimal lanes.],
+  [String comparison / equality], [IN (phase 3)], [Codepoint order only; locale collation is OUT.],
+  [`dateTime`, `date`, `time`, duration comparison/arithmetic], [IN (phase 3)], [Datatype-bucketed expression-node circuits.],
+  [`sameTerm`], [IN (phase 3)], [Committed-leaf equality.],
+  [RDF-term `=`], [IN (phase 3)], [Leaf plus literal-value equality; retains the dual-leaf caveat of section 17.2.],
+  [`IN` / `NOT IN` constant lists], [IN (phase 3)], [Public-constant (in)equality; `NOT IN` is value inequality, not closed-world negation.],
+  [`BOUND`], [IN (phase 3)], [With `OPTIONAL` out, boundness is static for BGP-derived variables; an `Extend`-introduced variable remains dynamically unbound when its expression errors.],
+  [`IF` / `COALESCE`], [IN (phase 3)], [Requires the EBV/error lane.],
+  [`isIRI`, `isBlank`, `isLiteral`, `isNumeric`, `datatype`, `lang`, `str`], [IN (phase 3 after encoding dependency)], [Requires type, datatype, and language lanes.],
+  [`IRI`, `STRDT`, `STRLANG`], [DEFERRED], [Requires encoding-side term construction.],
+  [`BNODE`, `UUID`, `STRUUID`, `RAND`, `NOW`], [OUT], [Non-deterministic; an as-of value may instead be verifier-supplied public input.],
+  [String functions: `STRLEN`, `SUBSTR`, `UCASE`, `LCASE`, `STRSTARTS`, `STRENDS`, `CONTAINS`, `STRBEFORE`, `STRAFTER`, `ENCODE_FOR_URI`, `CONCAT`], [IN (phase 3)], [Bounded byte-array representation; `SUBSTR` retains its byte-position caveat.],
+  [`REGEX` / `REPLACE`], [IN (phase 3, bounded subset only)], [Literal, anchored, and character-class subset; full `fn:matches` is OUT.],
+  [`langMatches`], [IN (phase 3 after estate gap-fill)], [Requires its missing circuit implementation.],
+  [`abs`, `round`, `ceil`, `floor`], [IN (phase 3)], [Integer and floating-point lanes.],
+  [Arithmetic `+`, `-`, `*`, `/`], [IN (phase 3)], [Division's decimal-as-double approximation #strong[MUST] be surfaced.],
+  [Date components `YEAR` through `TZ`], [IN (phase 3; `TZ` after gap-fill)], [`TZ` requires its missing implementation.],
+  [`MD5`, `SHA1`, `SHA256`, `SHA384`, `SHA512`], [IN (phase 3 after estate gap-fill)], [Requires digest and hexadecimal-output circuits.],
+  [Aggregate functions], [OUT], [Aggregation is outside the fragment.],
+)
+
+Phase 3 uses composable, datatype-bucketed expression-node circuits, not a generic
+expression VM. Each node sub-proof discloses operand and result commitments; binding edges
+#strong[MUST] connect node results leaf-to-root and root every leaf in a scan-row slot. The
+verifier #strong[MUST] re-derive the expression tree from the query text and #strong[MUST]
+reject a manifest whose declared tree differs.
+
+Every expression node #strong[MUST] carry `(value, is_error)`. Comparisons and functions
+#strong[MUST] propagate `is_error` according to SPARQL/XPath rules; `&&`, `||`, `IF`, and
+`COALESCE` #strong[MUST] implement the three-valued effective-boolean-value table; and a
+`FILTER` root #strong[MUST] accept only `true` with `is_error = false`. These are verification
+obligations for the designed extension and are not claims that the phase-3 circuits exist.
 
 *Data model.* Let I, B, and L be the pairwise-disjoint sets of IRIs, blank nodes, and
 literals, and V a set of variables disjoint from all three. An RDF graph G is a finite set
@@ -397,14 +524,20 @@ v in dom(μ1) ∩ dom(μ2); their union μ1 ∪ μ2 is then itself a mapping.
 *Grammar.* A fragment pattern P over the committed graphs G1, …, Gn is generated by:
 
 ```
-P ::= BGP | Filter(C, P) | Join(P1, P2)
+P ::= BGP | Filter(C, P) | Join(P1, P2) | Project(W, P)
+    | Union(P1, P2) | Values(R) | Extend(v, E, P)
+    | Path(s, path, o)
 ```
 
-subject to: a `BGP` (a finite set of triple patterns over terms and variables) is evaluated
+subject to: the first line is the currently implemented grammar; the second line is the
+candidate-normative extension and is admitted only as its corresponding phase becomes
+implemented. A `BGP` (a finite set of triple patterns over terms and variables) is evaluated
 against *exactly one* committed graph; `C` is a value constraint drawn from the
 datatype-bucketed comparison forms of section 7.1; and `Join` is the equality join of
 section 7.1, whose two sub-patterns are evaluated over *distinct* committed graphs and share
-at least one variable.
+at least one variable. `R` is a public `VALUES` row set, `E` is an expression from the table
+above, `W` is a projection list, and `path` is an admitted path form with public bound k
+where required.
 
 *Evaluation.* The evaluation eval(P) is a set of solution mappings:
 
@@ -415,6 +548,14 @@ at least one variable.
   as *not satisfied*;
 - eval(Join(P1, P2)) = the set of unions μ1 ∪ μ2 where μ1 is in eval(P1), μ2 is in eval(P2),
   and μ1 and μ2 are compatible.
+- eval(Union(P1, P2)) = eval(P1) ∪ eval(P2), with the witnessed branch disclosed;
+- eval(Values(R)) is the public set of mappings encoded by R, where `UNDEF` omits that
+  variable from the row mapping;
+- eval(Extend(v, E, P)) evaluates E under each μ in eval(P), adds v ↦ value when E succeeds,
+  and retains μ without a v binding when E raises an expression error;
+- eval(Project(W, P)) restricts each mapping in eval(P) to W;
+- eval(Path(s, path, o)) is SPARQL path evaluation for non-recursive rewrites and eval_k for
+  bounded `p+` / `p*`, exactly as constrained above.
 
 *Blank nodes across graphs.* Blank-node identity is scoped to a single graph
 #cite("RDF11-CONCEPTS"), and per-graph canonicalisation (section 6.1) does not — and cannot —
@@ -433,9 +574,9 @@ only if μ is a member of eval(P) — respectively eval(P) is non-empty — as d
   Editor's note — three boundaries of this definition are deliberate. (1) It is a *set*
   semantics; whether the implementation preserves duplicate-solution multiplicities (the bag
   semantics of #cite("PAG09")) is not pinned by this draft's grounding material;
-  transcription is tracked as bead sq-rvgr2.7. (2) Projection (`SELECT` variable lists) is not
-  transcribed; the correctness property above is defined on full solution mappings, and its
-  transcription is likewise tracked as bead sq-rvgr2.7. (3) Result *completeness* — that no
+  transcription is tracked as bead sq-rvgr2.7. (2) Projection (`SELECT` variable lists) is
+  transcribed above as restriction of each solution mapping to the selected variables; this
+  does not claim bag semantics or result completeness. (3) Result *completeness* — that no
   solutions were omitted — is #strong[not] claimed by `bind_query_correctness` as glossed here;
   whether any obligation claims it is not pinned, and is likewise tracked as bead sq-rvgr2.7.
   None of these boundaries weakens the membership property, but all three

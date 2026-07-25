@@ -60,7 +60,7 @@ q.flush(|result| { /* end-of-stream: close everything up to max ts */ })?;
   COUNT/SUM/AVG/MIN/MEDIAN/MAX scalar folds over emitted rows, without a clock read or
   another query. <!-- [GPT-5.6] sq-sfle1 -->
 - **Relation-to-stream (R2S)** — `R2S::{RStream, IStream, DStream}`: full / added /
-  removed rows per window, computed as multiset diffs over 64-bit row hashes.
+  removed rows per window, computed as exact term-level multiset differences.
 - **RSP-QL surface syntax + multi-window joins** — `RspqlQuery::parse` reads
   `REGISTER [STREAM|RSTREAM|ISTREAM|DSTREAM] … FROM NAMED WINDOW <w> ON <s> RANGE … STEP …`, and
   `ContinuousMultiQuery` joins across 2 or more named windows on one synchronized

@@ -41,8 +41,21 @@ on:
   # EC2 lane (bench-ec2.yml `nightly-full-bench`, cron), which publishes the full at-scale
   # series to the benchmark-data branch the Pages dashboard reads. See the "Run benchmarks"
   # step guard below and bench-ec2.yml.
+  #
+  # [FABLE-5] LABEL-TRIGGER GUARD (full rationale: ci.yml's pull_request note): only
+  # the `ci-full` / `bench-full` toggles start real work off a label event. The
+  # review pipeline's review:*/status:* flips otherwise re-queued this workflow on an
+  # unchanged head SHA on every flip. The guard is AND-composed into the
+  # `dashboard-labels` and `bench` job `if:`s (the `select` pre-job must stay
+  # unconditional — the ci-summary gate REDs on any non-success selection
+  # check-run), and label events get a per-run concurrency group below.
+  # [FABLE-5] Draft-tier CI: + ready_for_review, so the un-draft moment runs the
+  # deterministic perf ratchet the draft head skipped (the `bench` job is skipped
+  # entirely on draft PR heads — see its `if:` guard + docs/branch-protection.md
+  # §Draft-tier CI). This is independent of the label guard above and AND-composes
+  # with it on the `bench` job.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   # [FABLE-5] (sq-6vshe.6, MAINTAINER-DIRECTED) merge_group REMOVED. The deterministic
   # byte-count ratchet is a pure function of the code: it already ran + hard-gated on the
   # PR head (--deterministic-only above), it re-runs on push-to-main below, and the
@@ -80,10 +93,23 @@ on:
 permissions:
   contents: read
 
-# Do NOT cancel an in-progress benchmark run (it would corrupt the stored series).
+# Do NOT cancel an in-progress benchmark run on main/schedule (it would corrupt the
+# stored series). push/schedule therefore keep cancel-in-progress false (see below).
+# [FABLE-5] label-trigger guard: labeled/unlabeled pull_request events get a PER-RUN
+# group (the run_id suffix) so a label flip is ISOLATED — it can neither cancel nor
+# replace the in-flight/pending real run in the shared per-ref group on the same head
+# SHA (a group holds at most ONE PENDING run; without isolation a flip would evict a
+# pending real run even under cancel-in-progress:false). All other events resolve to
+# the constant `-shared` suffix.
+# [FABLE-5] Draft-tier CI: pull_request runs ARE cancelled when superseded — they
+# never write history (the ratchet/history steps are push-to-main-gated below), so a
+# stale PR bench run burning a runner slot buys nothing. This AND the label guard
+# compose: a label flip sits ALONE in its per-run group, so cancel-in-progress=true
+# there is a no-op on the real run; a PR synchronize sits in `-shared` and correctly
+# supersedes its predecessor; push/schedule stay in `-shared` and are never cancelled.
 concurrency:
-  group: bench-${{ github.ref }}
-  cancel-in-progress: false
+  group: bench-${{ github.ref }}-${{ (github.event_name == 'pull_request' && contains(fromJSON('["labeled","unlabeled"]'), github.event.action)) && github.run_id || 'shared' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # [SONNET-4.6] sq-mel85 (design §5.2, phase 2b): the change-based test-selection
@@ -111,10 +137,16 @@ jobs:
   # dashboard.js, and runs the node smoke test (scripts/dashboard-smoke.js).
   dashboard-labels:
     name: dashboard labels (lint + drift)
+    # [FABLE-5] label-trigger guard (see the bench job note below): a root job with
+    # no needs — guard it directly so a non-ci-full/bench-full label flip skips it.
+    if: >-
+      github.event_name != 'pull_request' ||
+      !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) ||
+      contains(fromJSON('["ci-full","bench-full"]'), github.event.label.name)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
       - name: Validate metric-labels.json
@@ -147,13 +179,33 @@ jobs:
     # ONLY narrow on pull_request / merge_group. That is what keeps the auto-ratchet
     # floor + benchmark-data history (both depend on every main commit being benchmarked)
     # continuous — see the push-gated history/ratchet steps below.
+    # [FABLE-5] Draft-tier CI: benchmarks are SKIPPED ENTIRELY on draft PR heads
+    # (first conjunct — fail-open off the PR path: push/schedule/dispatch satisfy
+    # `github.event_name != 'pull_request'` => the selection disjunction decides as
+    # before). This also removes the per-PR benchmark comparison comment
+    # (comment-always) + alert comment on draft heads — both are steps of THIS job.
+    # The ready_for_review full-tier run executes the deterministic ratchet before
+    # the PR can reach the merge queue; docs/branch-protection.md §Draft-tier CI.
     needs: select
+    # [FABLE-5] label-trigger guard (full rationale: ci.yml's pull_request note): the
+    # first AND-term skips this job on any labeled/unlabeled event whose label is not
+    # ci-full/bench-full — the review pipeline's label flips must not re-queue the
+    # bench suite on an unchanged head SHA (with cancel-in-progress:false a flip can
+    # still CANCEL a PENDING real run via the one-pending-slot-per-group rule).
+    # `bench-full` passes because its whole point is re-running this workflow with
+    # the well-known suites enabled (the toolchain-install step reads the label).
+    # `select` stays unguarded (required green by the gate). The second AND-term is
+    # the unchanged fail-closed selection guard.
     if: >-
-      needs.select.outputs.mode != 'selected' ||
-      contains(needs.select.outputs.affected, '"sparq-engine"') ||
-      contains(needs.select.outputs.affected, '"sparq-cli"') ||
-      contains(needs.select.outputs.affected, '"sparq-bench"') ||
-      contains(needs.select.outputs.affected, '"sparq-wasm"')
+      (github.event_name != 'pull_request' ||
+       !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) ||
+       contains(fromJSON('["ci-full","bench-full"]'), github.event.label.name)) &&
+      (github.event_name != 'pull_request' || github.event.pull_request.draft != true) &&
+      (needs.select.outputs.mode != 'selected' ||
+       contains(needs.select.outputs.affected, '"sparq-engine"') ||
+       contains(needs.select.outputs.affected, '"sparq-cli"') ||
+       contains(needs.select.outputs.affected, '"sparq-bench"') ||
+       contains(needs.select.outputs.affected, '"sparq-wasm"'))
     runs-on: ubuntu-latest
     # [OPUS-4.8] Job-scoped writes (least privilege; the rest of the workflow stays read-only):
     #   contents: write     — auto-ratchet commits bench/perf-baseline.json back to main and
@@ -422,40 +474,106 @@ jobs:
               benchmark-data:benchmark-data
             echo "Created and pushed orphan benchmark-data branch."
           fi
+      # [FABLE-5] HARD zone — deterministic median-of-history regression gate (replaces the action's
+      # single-previous-point fail-on-alert, which flapped on runner environment shifts; see the
+      # fail-on-alert comment on the Store step below). scripts/bench_hardzone.py compares each
+      # metric in THIS run's bench-results.json against the MEDIAN of its last up-to-5 published
+      # VALUES in prev-data.js (fetched by the "Fetch previous benchmark series" step above; absent
+      # history = warn + pass, first-run safe). It FAILS if a gated metric is >= 2.0x its median
+      # (direction-adjusted: `*_per_s` throughput is larger-is-better), fails CLOSED on
+      # NaN/non-numeric/negative/zero-boundary measurements and on >30% of gated metrics
+      # disappearing, and EXEMPTS a runner-environment scaling ONLY when four conditions ALL hold
+      # (>=50% of compared metrics >=1.75x AND their ratios uniform (cv<=0.15) AND nothing >=4x
+      # AND every deterministic byte/count metric within 1% of median) — see the script header for
+      # why those four make a masked code regression implausible, not impossible (hence the loud
+      # warning + table, never a quiet pass).
+      #
+      # ORDERING ([FABLE-5] round-1 review): this step runs BEFORE the Store step DELIBERATELY.
+      # Store auto-pushes this run's point into the benchmark-data history (main pushes), so if the
+      # gate ran after it, a REJECTED regression would already be published — and after a few red
+      # runs the regressed points would BECOME the median, silently re-baselining the gate. Gating
+      # first means a hard-zone failure publishes NOTHING. There is no data dependency on Store:
+      # both inputs (bench-results.json, prev-data.js) exist before it. CONSEQUENCE: on a hard-zone
+      # failure the run publishes nothing and Store's comparison comment/summary never fires — so
+      # the script prints its own per-metric table to stdout AND to GITHUB_STEP_SUMMARY; that table
+      # is the only visible evidence of what tripped.
+      #
+      # Guarded to the SAME main-push condition as auto-push: PR runs are `--deterministic-only`
+      # and already strictly gated by perf-gate.py above, and the nightly `schedule` backstop is a
+      # pure verification run — so PR + schedule behavior is unchanged by this step.
+      # The script self-tests first (repo convention: hermetic --self-test over inline fixtures).
+      #
+      # --report-out ([FABLE-5] round-2 review): floor-exempt (sub-noise-floor us/milli) metrics
+      # never fail this gate, and once a few regressed points are accepted the median REBASES —
+      # so any floor-exempt hit at >= 2.0x is written to bench-hardzone-report.json, which the
+      # "Soft-zone triage" step below merges into the rolling deduped `bench-flake` issue
+      # (tagged "floor-exempt hard-band"): the durable trail that survives the rebase. The file
+      # is written on pass AND fail; triage runs `if: always()` and tolerates its absence.
+      - name: Hard zone — median-of-history regression gate (main pushes only)
+        if: github.event_name != 'schedule' && github.ref == 'refs/heads/main'
+        run: |
+          set -euo pipefail
+          python3 scripts/bench_hardzone.py --self-test
+          python3 scripts/bench_hardzone.py \
+            --results bench-results.json \
+            --prev-data prev-data.js \
+            --suite 'sparq engine' \
+            --report-out bench-hardzone-report.json
       # [OPUS-4.8] sq-owci — clean the working tree before github-action-benchmark switches branches.
       # ROOT CAUSE: the "Run benchmarks" step (scripts/ci-bench.sh) does `cd bench/zk && cargo bench`
       # and `cd bench/zk-trace && cargo bench` (two STANDALONE cargo projects, run WITHOUT --locked),
       # so Cargo re-resolves and REWRITES their committed bench/zk{,-trace}/Cargo.lock. That leaves the
-      # working tree dirty. The Store step below then runs with auto-push=true (main only), and the
-      # action internally does `git fetch ... benchmark-data:benchmark-data` + `git switch benchmark-data`,
-      # which ABORTS: "Your local changes to the following files would be overwritten by checkout:
-      # bench/zk-trace/Cargo.lock, bench/zk/Cargo.lock ... Aborting" (live: Benchmarks run 27867742598).
-      # That failed the whole (non-gating) Benchmarks job on every main push and masked real CI signal.
-      # It only ever bit main because on PRs auto-push=false, so the action never switches branches.
+      # working tree dirty. The Store step below then does `git fetch ... benchmark-data:benchmark-data`
+      # + `git switch benchmark-data` internally, which ABORTS: "Your local changes to the following
+      # files would be overwritten by checkout: bench/zk-trace/Cargo.lock, bench/zk/Cargo.lock ...
+      # Aborting" (live: Benchmarks run 27867742598). That failed the whole Benchmarks job and masked
+      # real CI signal.
       #
-      # FIX: restore exactly the TRACKED files the build/bench dirtied, so the action's branch switch is
-      # clean. `git checkout --` only touches tracked paths, so the UNtracked run outputs the next step
-      # reads (bench-results.json, prev-data.js) are left intact. Enumerating via `git diff --name-only`
-      # (tracked-modified only) future-proofs this against any other lockfile a future bench may rewrite.
-      # This does NOT alter the measurement — bench-results.json is already written; we only drop the
-      # incidental lockfile churn. main-guarded to mirror the auto-push gate (the only path that switches).
-      - name: Clean bench-induced tracked churn before history switch (main only)
-        # [SONNET-4.6] sq-mel85: push-to-main ONLY. This cleanup exists solely so the
-        # auto-push branch switch below is clean; the nightly `schedule` backstop never
-        # switches branches (auto-push is push-gated), so it needs no cleanup.
-        if: github.event_name != 'schedule' && github.ref == 'refs/heads/main'
+      # [FABLE-5] UNCONDITIONAL — a previous revision (sq-mel85) guarded this step
+      # `github.event_name != 'schedule' && github.ref == 'refs/heads/main'` on the claim that the
+      # nightly `schedule` backstop "never switches branches (auto-push is push-gated)". That claim
+      # was WRONG: github-action-benchmark fetches + switches to the benchmark-data branch to READ
+      # the comparison history on EVERY event, regardless of auto-push (the branch switch serves the
+      # compare, not just the push) — proven live by the nightly schedule run 29989729092, which
+      # aborted on exactly this lockfile churn with auto-push=false. PR runs never bit only because
+      # the PR leg is `--deterministic-only` (sq-6vshe.6), which skips the zk/zk-trace cargo benches
+      # that rewrite the lockfiles — not because the action skipped the switch. Restoring tracked
+      # churn is safe on every event: bench-results.json is already written, so the measurement is
+      # untouched, and the run outputs the later steps read (bench-results.json, prev-data.js) are
+      # UNtracked and left intact. Hence: no `if:` — this cleanup always runs.
+      #
+      # FIX MECHANICS ([FABLE-5] round-1 review): ALLOW-LIST restore, not `git checkout -- .`.
+      # The ONLY tracked churn this bench run is known to induce is the bench/**/Cargo.lock
+      # re-resolve (bench/zk + bench/zk-trace today; the glob future-proofs any standalone bench
+      # project a future suite adds). Exactly those paths are restored; if ANY OTHER tracked path
+      # is dirty, that is unknown churn — something wrote to the checkout that nothing should
+      # write to — so the step prints the paths and FAILS loudly instead of silently discarding
+      # evidence. Untracked run outputs (bench-results.json, prev-data.js) are never touched.
+      - name: Clean bench-induced tracked churn before history switch
         run: |
           set -euo pipefail
           dirty="$(git diff --name-only)"
-          if [ -n "$dirty" ]; then
-            echo "Restoring tracked files the benchmark run modified (incidental Cargo.lock re-resolve):"
-            while IFS= read -r f; do echo "  $f"; done <<< "$dirty"
-            # Restore ALL tracked modifications. `git checkout -- .` only rewrites TRACKED paths,
-            # so the untracked run outputs the next step reads (bench-results.json, prev-data.js)
-            # are left intact — and it is whitespace-safe (no word-splitting of the path list).
-            git checkout -- .
-          else
+          if [ -z "$dirty" ]; then
             echo "Working tree clean — no tracked churn to restore."
+          else
+            unknown=0
+            while IFS= read -r f; do
+              case "$f" in
+                bench/*/Cargo.lock)
+                  echo "Restoring known bench-induced churn: $f"
+                  git checkout -- "$f"
+                  ;;
+                *)
+                  echo "::error title=unknown tracked churn::'$f' is modified but is NOT known bench-induced churn (bench/**/Cargo.lock) — refusing to discard it."
+                  unknown=1
+                  ;;
+              esac
+            done <<< "$dirty"
+            if [ "$unknown" = "1" ]; then
+              echo "::error::Unknown tracked modifications after the bench run (listed above). Unknown churn means something unexpected wrote to tracked paths — investigate; this step never silently discards it."
+              git status --porcelain
+              exit 1
+            fi
           fi
           git status --porcelain
       - name: Store + compare against history
@@ -497,42 +615,48 @@ jobs:
           # [OPUS-4.8] TWO-ZONE self-monitoring thresholds (noise-reduction-bench-selfmonitor;
           # maintainer-directed). GitHub-hosted runners are noisy, so a single global switch would
           # either trip constantly on µs-scale wall-clock jitter or be so loose it catches nothing.
-          # Instead this action now gates in TWO empirically-derived zones:
           #   * alert-threshold: '175%'  — SOFT zone. Emits an alert COMMENT but does NOT fail the
           #     step (comment-only for the soft band; the "Soft-zone triage" step below files/updates a
           #     deduped `bench-flake` issue for it — NO @mention of anyone). 175% ≈ p95 run-to-run
           #     timing swing (43.66%) + ~30pp headroom.
-          #   * fail-threshold: '200%' + fail-on-alert: true — HARD zone. A regression at/above 200%
-          #     is clearly BEYOND any observed shared-runner noise (worst observed noise swing over the
-          #     20-commit history = 185.0%), so the STEP FAILS CI. An agent must fix it.
-          # WHERE THE TIMING HARD-FAIL BITES (honest — it does NOT re-noise the per-PR gate): under
-          # sq-6vshe.6 (also maintainer-directed) the PR run is `--deterministic-only`, so on a PR this
-          # step sees ONLY the deterministic byte-count metrics (0.00% noise; already strictly gated by
-          # the "Hard gate" perf-gate.py step above — this fail-on-alert is a redundant looser backstop
-          # there and never trips on runner noise). The NOISY TIMING metrics run on push-to-main + the
-          # nightly EC2 lane, so the timing hard-fail bites THERE (a post-merge / nightly hard signal),
-          # NOT on the per-PR path — deliberately, so this change does not re-introduce the merge-queue
-          # flapping sq-6vshe.6 removed. Pre-merge timing coverage stays the nightly attribution lane
-          # (bench-ec2.yml), which files a P1 `bench-regression` issue into the dispatch frontier.
+          # [FABLE-5] fail-on-alert is now FALSE — the HARD zone moved to the deterministic
+          # median-of-history gate ABOVE (scripts/bench_hardzone.py, which runs BEFORE this Store
+          # step so a rejected regression is never auto-pushed into the history it is judged by).
+          # The action's fail-on-alert compared each metric against the SINGLE previous
+          # benchmark-data point, so one slow-runner environment shift flipped 9+ unrelated
+          # µs-scale metrics uniformly ~1.8-2.1x "worse" and hard-failed main pushes while
+          # interleaved pushes stayed green (live flap over 24h: red at runs like 29988505852
+          # between green runs, 2026-07-22/23) — the two-zone calibration's own worst-observed
+          # noise swing (185.0%, below) was exceeded by pure runner variance. The bench_hardzone.py
+          # step keeps a HARD gate on main pushes, but against the MEDIAN of each metric's last
+          # up-to-5 published values (a single-point environment shift cannot move a median-of-5),
+          # with a four-condition uniform-shift exemption (breadth + ratio uniformity + a 4x cap +
+          # deterministic metrics unmoved — conditions that make a MASKED code regression
+          # implausible, not impossible, so the exemption always warns loudly with a full table).
           # DERIVATION (no hard-coded perf numbers in markdown — the numbers live here + are recomputable):
-          #   scripts/bench-thresholds.py recomputes both from the benchmark-data history; over 20
-          #   commits × 322 timing metrics (6137 adjacent-pair samples) the pooled p95 run-to-run swing
-          #   was 43.66% and the worst 185.0%; deterministic byte-count metrics are 0.00% noise. Re-run
-          #   that script and refresh these two values if the noise floor shifts.
+          #   scripts/bench-thresholds.py recomputes the soft threshold from the benchmark-data
+          #   history; over 20 commits × 322 timing metrics (6137 adjacent-pair samples) the pooled
+          #   p95 run-to-run swing was 43.66% and the worst 185.0%; deterministic byte-count metrics
+          #   are 0.00% noise. Re-run that script and refresh if the noise floor shifts.
           # The DETERMINISTIC byte-count ratchet remains the strict, separate "Hard gate" step ABOVE
-          # (scripts/perf-gate.py) — this action's zones govern only the NOISY timing metrics.
+          # (scripts/perf-gate.py) — the zones here govern only the NOISY timing metrics.
           # NO alert-comment-cc-users: the maintainer is never @-mentioned; soft-zone flakiness routes
-          # to a deduped issue and hard-zone timing failures block the run for an agent to fix.
+          # to a deduped issue and hard-zone regressions fail the median gate for an agent to fix.
           alert-threshold: '175%'
-          fail-threshold: '200%'
           comment-on-alert: true
-          fail-on-alert: true
+          fail-on-alert: false
       # [OPUS-4.8] SOFT-ZONE triage (noise-reduction-bench-selfmonitor). Runs AFTER the action —
-      # `if: always()` so it still fires when the action HARD-FAILED (hard zone) above; it re-derives
+      # `if: always()` so it still fires when the hard-zone gate above FAILED; it re-derives
       # the two zones from the SAME thresholds and files/updates a deduped `bench-flake` GitHub issue
       # for any SOFT-zone metric (>=175% and <200%), with NO @mention of anyone. It NEVER weakens the
-      # hard gate: the action's own fail-on-alert already failed the step for the hard zone; this step
+      # hard gate: the median-of-history gate above ([FABLE-5] scripts/bench_hardzone.py) owns the
+      # hard-zone failure; this step
       # only handles the soft (possible-flakiness) band and always exits 0 (its filing is best-effort).
+      # [FABLE-5] --hardzone-report: additionally merges the median gate's floor-exempt hard-band
+      # rows (bench-hardzone-report.json, written by the gate's --report-out on main pushes;
+      # absent on PR/schedule = no-op) into the same deduped issue, tagged "floor-exempt
+      # hard-band" — the gate never reds on those watch-only rows and their median rebases, so
+      # this issue trail is their only durable record.
       # Canonical repo only — fork PRs get a read-only token, so no issue can be filed there.
       - name: Soft-zone triage (file a deduped bench-flake issue; no @mentions)
         if: always() && github.repository == 'sparq-org/sparq'
@@ -555,6 +679,7 @@ jobs:
           # scripts/bench-thresholds.py from the benchmark-data history).
           python3 scripts/bench-triage.py --mode soft \
             --comparison bench-comparison.json \
+            --hardzone-report bench-hardzone-report.json \
             --soft 175 --hard 200 \
             --run-url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             || echo "::warning::soft-zone triage filer failed (non-fatal)"

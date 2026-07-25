@@ -624,7 +624,7 @@ fn pfc_dictionary_edges_translate_identically() {
 ///
 /// Finding: the WRAPPED writer is the mangler, not sparq's decode. The HDT spec (and
 /// hdt-cpp / hdt-java) stores literal lexical forms RAW in the dictionary; upstream
-/// `hdt 0.4`'s `FourSectDict::read_nt` instead stores the sophia/rio term rendering —
+/// `hdt`'s `FourSectDict::read_nt` instead stores the parsed term rendering —
 /// the N-Triples-ESCAPED form (`\"` / `\\` as literal backslash sequences). A
 /// spec-conformant reader (sparq's direct decoder AND the upstream-backed oracle
 /// alike — both treat the stored bytes as raw) therefore decodes a lexical form that

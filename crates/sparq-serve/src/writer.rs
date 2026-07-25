@@ -433,7 +433,9 @@ impl<U: Send + 'static, S: Send + Sync + 'static> Writer<U, S> {
     ///   lineage of its predecessor, so a lineage-diffing consumer (the change stream's
     ///   same-lineage quad diff) must not be handed the pair. A change stream spanning a
     ///   restore needs an explicit re-baseline — the fail-closed discontinuity is
-    ///   surfaced by the recorder, never silently diffed through.
+    ///   surfaced by the recorder, never silently diffed through; the operator resync is
+    ///   `ChangeLog::rebase_to` (feature `change-stream`, sq-r2cu1), which appends an
+    ///   honest gap record and re-arms recording from the restored generation.
     /// - The hook runs on the writer thread: a panic in it kills the writer (submitters
     ///   see [`WriteError::Shutdown`]). Return, don't panic, on recoverable errors.
     pub fn spawn_with_commit_hook<A, H>(

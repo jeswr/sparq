@@ -31,6 +31,28 @@
 # assemble.py` asserts it is byte-identical to the pre-split static list, so the gate
 # aggregator + branch protection keep recognising every required leg.
 #
+# [FABLE-5] GROUPED RUNNERS (CI-economy, maintainer directive 2026-07-18): the legs no
+# longer map 1:1 onto runner jobs. The assembler's `--grouped` mode bin-packs them
+# (same-crate legs clustered; per-leg cost = the fragment's optional `weight:` field,
+# defaulting to a crate-source-size heuristic; each group targets <5 min of warm-cache
+# work) and `opt-in-features` runs ONE JOB PER GROUP. The gate-critical per-leg
+# `opt-in <name>` check-runs are still emitted, byte-identical — but across a TRUSTED
+# BOUNDARY (PR #3511 review, finding 1): the group job executes PR-controlled code
+# (build scripts/proc macros/tests) UNPRIVILEGED (contents: read, persist-credentials:
+# false, no token in the environment) and writes per-leg outcomes to an ARTIFACT.
+# The reporter is NOT a job here — it lives in the separate, DEFAULT-BRANCH-owned
+# .github/workflows/feature-matrix-report.yml, triggered by `workflow_run` on this
+# workflow's completion, so GitHub always runs the reviewed default-branch copy of the
+# reporter workflow AND of scripts/run-feature-matrix-group.py — a PR cannot edit
+# either to forge check-runs with the `checks: write` token (the pwn-requests fix).
+# The reporter downloads THIS run's artifacts (per-leg results + the SELECTED-matrix
+# and metadata this workflow's `setup` job uploads), validates them hostile-input-
+# style against the selected leg set, validates the recorded head SHA against the
+# server-supplied workflow_run.head_sha, and posts the check-runs. Names byte-
+# identical, so the aggregator, branch protection and the golden self-test contract
+# are all unchanged; the group jobs' OWN conclusions remain the always-gating coarse
+# signal on the PR head, independent of reporter timing.
+#
 # GUARD — THE RULE THAT KEEPS THIS LANE HONEST (sq-vya1). A test module/file behind
 # `#[cfg(feature = "X")]` / `#![cfg(feature = "X")]` for a DEFAULT-OFF feature is compiled
 # EMPTY by ci.yml's `cargo nextest archive --workspace --all-targets` (it passes NO
@@ -90,8 +112,22 @@ on:
   # label re-evaluates change-based selection for the opt-in leg set as well (the
   # `setup` assembler filters legs by the selection outputs). Default types are
   # listed explicitly so adding the label events does not drop `synchronize`.
+  # [FABLE-5] LABEL-TRIGGER GUARD (full rationale: ci.yml's pull_request note): only
+  # the `ci-full` toggle starts real work off a label event — the review pipeline's
+  # review:*/status:* flips otherwise restarted this workflow on an unchanged head
+  # SHA, and the concurrency-cancelled `select` check-runs REDdened the ci-summary
+  # gate. The guard is the job-level `if:` on the root `changes` job (everything else
+  # needs:-chains from it); the `select` pre-job stays UNCONDITIONAL and runs to a
+  # cheap success (a skipped select would poison the gate — ci_summary_gate.py
+  # requires every selection check-run to conclude `success`). Label events also get
+  # a per-run concurrency group below so a flip never cancels an in-flight run.
+  # [FABLE-5] Draft-tier CI: + ready_for_review, so the un-draft moment re-assembles
+  # the opt-in leg set at FULL tier (the select job name drops its ", draft-tier"
+  # marker) and the required gate stops honouring the draft-tier-assembled set —
+  # see docs/branch-protection.md §Draft-tier CI. Independent of the label guard
+  # above: a non-`ci-full` label flip stays a no-op regardless of draft state.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   # Merge queue: mirror the PR check-set onto the merge_group ref so the required
   # ci-summary gate finds the same legs it finds on a PR (matches ci.yml/ci-summary.yml).
   merge_group:
@@ -100,7 +136,12 @@ permissions:
   contents: read
 
 concurrency:
-  group: feature-matrix-${{ github.workflow }}-${{ github.ref }}
+  # [FABLE-5] label-trigger guard: labeled/unlabeled pull_request events get a
+  # PER-RUN group — a label-flip run entering the shared per-ref group would cancel
+  # the in-flight real run on the SAME head SHA (run-level cancellation precedes job
+  # `if:` evaluation), leaving cancelled check-runs that RED the ci-summary gate.
+  # All other events keep the shared per-ref group + cancel-in-progress as before.
+  group: feature-matrix-${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'pull_request' && contains(fromJSON('["labeled","unlabeled"]'), github.event.action)) && github.run_id || 'shared' }}
   cancel-in-progress: true
 
 env:
@@ -119,10 +160,30 @@ jobs:
   # The opt-in feature matrix only compiles/tests Rust, so a doc-only PR can skip it while
   # the required ci-summary gate still resolves SUCCESS (the aggregator treats the skipped
   # leg's `skipped` conclusion as non-failing). SAFE-BY-DEFAULT: rust_changed is forced
-  # 'true' on every event except `pull_request`, so the canonical push/merge_group/manual
-  # runs ALWAYS compile the full feature matrix — only a purely non-Rust PR diff skips.
+  # 'true' on push/schedule/workflow_dispatch, so the canonical push/manual runs ALWAYS
+  # compile the full feature matrix — only a purely non-Rust PR diff skips.
+  # [FABLE-5] MERGE-GROUP CHANGE-CLASS GATE (extends #3420/#3421 to this layer; full
+  # doctrine: ci.yml's `changes` job header). merge_group used to hard-force
+  # rust_changed=true, so a docs-only/orchestration-only queued batch still paid this
+  # workflow's rust_changed-only jobs (setup / check-tier / fedclient-boundary) on every
+  # enqueue. The decide step now diffs the queued batch (base_sha...head_sha, the #3421
+  # fetch pattern) and classifies it with `scripts/ci_select.py --classify-only` — the
+  # SAME classify_change() the `select` pre-job runs on this event (no duplicated path
+  # lists). docs-only/orchestration-only => rust_changed=false; any other class, an
+  # unresolvable SHA pair, or any classifier error => true (fail-safe = full run). The
+  # skipped legs report `skipped` and the required ci-summary gate attributes them to
+  # the green same-diff `select` pre-job (attributed skips, never missing legs).
   changes:
     name: detect rust changes (feature-matrix)
+    # [FABLE-5] label-trigger guard (see the pull_request trigger note): a
+    # labeled/unlabeled event for any label other than `ci-full` skips this root job,
+    # and with it every needs:-dependent (setup/opt-in legs/check-tier/no-default-
+    # features lanes/fedclient-boundary). The `select` pre-job deliberately stays
+    # unguarded (its success is required by the gate on every trigger).
+    if: >-
+      github.event_name != 'pull_request' ||
+      !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) ||
+      github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -147,16 +208,68 @@ jobs:
               # leg actually builds+tests — even on an otherwise non-Rust PR.
               - '.github/feature-matrix.d/**'
               - 'scripts/assemble-feature-matrix.py'
+              # [FABLE-5] PR #3511 review finding 2: the grouped-runner engine is as
+              # load-bearing as the assembler — a PR changing ONLY this script must
+              # still run setup (its self-test gates there) + the grouped execution
+              # + the reporter. Wiring pinned by test_feature_matrix_assemble.py.
+              - 'scripts/run-feature-matrix-group.py'
+              # [FABLE-5] PR #3511 review round-3 finding 2: the PRIVILEGED reporter
+              # workflow is the trust-boundary half of finding 1. A PR changing ONLY
+              # .github/workflows/feature-matrix-report.yml would otherwise skip setup,
+              # so its dedicated trusted-boundary self-tests (run in setup) never run —
+              # a change to the privileged reporter must re-run them. Wiring pinned by
+              # test_feature_matrix_assemble.py.
+              - '.github/workflows/feature-matrix-report.yml'
+              # [FABLE-5] PR #3511 review finding 4: the assembler/runner self-test is
+              # the mechanized guard for the gate-critical leg-name contract AND the
+              # trusted-boundary wiring. A test-only edit that WEAKENS it must still
+              # re-run the setup self-test (which runs this file) — otherwise a PR
+              # could gut the guard while skipping the very job that enforces it.
+              - 'scripts/tests/test_feature_matrix_assemble.py'
       - name: Decide rust_changed (safe-by-default off the PR path)
         id: decide
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MG_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+          MG_HEAD_SHA: ${{ github.event.merge_group.head_sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
-            echo "event=${{ github.event_name }} -> forcing rust_changed=true (full feature matrix)"
-          else
+          if [ "${EVENT_NAME}" = "pull_request" ]; then
             echo "rust_changed=${{ steps.filter.outputs.rust }}" >> "$GITHUB_OUTPUT"
             echo "pull_request -> paths-filter says rust=${{ steps.filter.outputs.rust }}"
+          elif [ "${EVENT_NAME}" = "merge_group" ]; then
+            # [FABLE-5] MERGE-GROUP CHANGE-CLASS GATE (see the job header note): diff the
+            # queued batch (#3421 fetch pattern) and classify via scripts/ci_select.py
+            # --classify-only. docs-only/orchestration-only batch => skip; any other
+            # class, unknown token, unresolvable SHAs, or classifier error => full
+            # (fail-safe).
+            rust=true
+            ok=true
+            # --depth=2147483647 (--unshallow, valid on complete repos too): the
+            # depth-1 checkout leaves the three-dot diff with no merge-base — a
+            # shallow SHA fetch passes the cat-file guards yet the diff dies, so
+            # the fail-safe would force class=engine on EVERY batch (silent
+            # no-op gate). Full rationale: ci.yml's decide step.
+            git fetch --no-tags --quiet --depth=2147483647 origin "${MG_BASE_SHA}" "${MG_HEAD_SHA}" 2>/dev/null \
+              || git fetch --no-tags --quiet --depth=2147483647 origin "${MG_BASE_SHA}" 2>/dev/null \
+              || ok=false
+            git cat-file -e "${MG_BASE_SHA}^{commit}" 2>/dev/null || ok=false
+            git cat-file -e "${MG_HEAD_SHA}^{commit}" 2>/dev/null || ok=false
+            if [ "${ok}" = "true" ]; then
+              cls="$(python3 scripts/ci_select.py --classify-only --event merge_group \
+                       --base "${MG_BASE_SHA}" --head "${MG_HEAD_SHA}")" || cls=engine
+              case "${cls}" in
+                docs-only|orchestration-only) rust=false ;;
+                *) rust=true ;;
+              esac
+            else
+              echo "::warning::could not resolve merge_group base/head SHAs for the batch diff — running the full feature matrix (fail-safe)."
+            fi
+            echo "rust_changed=${rust}" >> "$GITHUB_OUTPUT"
+            echo "merge_group -> change_class=${cls:-<unresolved>} rust_changed=${rust}"
+          else
+            echo "rust_changed=true" >> "$GITHUB_OUTPUT"
+            echo "event=${EVENT_NAME} -> forcing rust_changed=true (full feature matrix)"
           fi
 
   # [FABLE-5] sq-fmx4u.3: change-based test-selection pre-job (reusable — doctrine
@@ -205,7 +318,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install PyYAML
@@ -260,12 +373,56 @@ jobs:
           SELECT_AFFECTED: ${{ needs.select.outputs.affected }}
         run: |
           set -euo pipefail
-          MATRIX="$(python3 scripts/assemble-feature-matrix.py --event "${{ github.event_name }}" --select-mode "${SELECT_MODE:-}" --affected "${SELECT_AFFECTED:-}")"
+          # [FABLE-5] CI-economy: --grouped emits ONE matrix entry per bin-packed
+          # GROUP of legs (see the opt-in-features job note); `legs` is the TOTAL
+          # leg count across groups, so the skip-on-zero contract is unchanged.
+          MATRIX="$(python3 scripts/assemble-feature-matrix.py --grouped --event "${{ github.event_name }}" --select-mode "${SELECT_MODE:-}" --affected "${SELECT_AFFECTED:-}")"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          LEGS="$(echo "$MATRIX" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["include"]))')"
+          LEGS="$(echo "$MATRIX" | python3 -c 'import json,sys; m=json.load(sys.stdin)["include"]; print(sum(g["count"] for g in m))')"
+          NGROUPS="$(echo "$MATRIX" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["include"]))')"
           echo "legs=$LEGS" >> "$GITHUB_OUTPUT"
-          echo "Assembled $LEGS opt-in leg(s) (select mode: ${SELECT_MODE:-<unset>}, event ${{ github.event_name }}). Full leg-name set:"
+          echo "Assembled $LEGS opt-in leg(s) into $NGROUPS group(s) (select mode: ${SELECT_MODE:-<unset>}, event ${{ github.event_name }}). Full leg-name set:"
           python3 scripts/assemble-feature-matrix.py --names
+      - name: Emit the SELECTED leg set + metadata for the trusted reporter
+        # [FABLE-5] PR #3511 review findings 1+2: the reporter runs in the separate,
+        # default-branch-owned feature-matrix-report.yml (workflow_run) so it never
+        # executes PR-controlled code with `checks: write`. It needs (a) the EXACT
+        # legs this run should produce — the UNGROUPED selected set (same --event/
+        # --select-mode/--affected filters as the grouped matrix, so byte-identical
+        # legs) — as its completeness ground truth (finding 2), and (b) the head SHA
+        # + originating event as metadata so it can validate the SHA against the
+        # server-supplied workflow_run.head_sha (finding 1). This step runs PR-
+        # controlled assembler code, so it holds NO token and NO checks:write — the
+        # artifact is DATA the trusted reporter validates hostile-input-style.
+        if: needs.changes.outputs.rust_changed == 'true'
+        env:
+          SELECT_MODE: ${{ needs.select.outputs.mode }}
+          SELECT_AFFECTED: ${{ needs.select.outputs.affected }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p fmg-selected fmg-metadata
+          python3 scripts/assemble-feature-matrix.py \
+            --event "${EVENT_NAME}" --select-mode "${SELECT_MODE:-}" \
+            --affected "${SELECT_AFFECTED:-}" > fmg-selected/selected-matrix.json
+          python3 -c 'import json,os; json.dump({"head_sha": os.environ["HEAD_SHA"], "event": os.environ["EVENT_NAME"]}, open("fmg-metadata/metadata.json","w"))'
+      - name: Upload the selected-matrix artifact (reporter completeness ground truth)
+        if: needs.changes.outputs.rust_changed == 'true' && steps.assemble.outputs.legs != '0'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: feature-matrix-selected
+          path: fmg-selected/selected-matrix.json
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload the run metadata artifact (head SHA + event for the reporter)
+        if: needs.changes.outputs.rust_changed == 'true' && steps.assemble.outputs.legs != '0'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: feature-matrix-metadata
+          path: fmg-metadata/metadata.json
+          retention-days: 1
+          if-no-files-found: error
       - name: Loud failure attribution — the opt-in matrix was NOT generated
         # [FABLE-5] sq-2wo5t: when THIS job fails (golden leg-name drift after adding
         # a new opt-in leg, the C1 structural guard, the tier ratchet, or a malformed
@@ -309,57 +466,72 @@ jobs:
     # != '0' => run; and if `setup` itself failed, this job skips via `needs`
     # while the gate REDs on setup's failure.
     if: needs.changes.outputs.rust_changed == 'true' && needs.setup.outputs.legs != '0'
-    # One matrix leg per crate + opt-in feature(group). Coexisting opt-in features of a
-    # single crate are combined into ONE `--features a,b,c` leg (e.g. the sparq-server
-    # federation/persistence/test seams) so the crate is compiled once per leg, not once
-    # per feature. fail-fast:false so one broken feature shows the full picture, not just
-    # the first to break. Each leg: build -> (test, where offline tests exist) -> clippy
-    # --all-targets -D warnings, on the SAME stable toolchain ci.yml's gates use.
+    # [FABLE-5] CI-economy GROUPED LEGS (maintainer directive 2026-07-18). The matrix
+    # is ONE ENTRY PER BIN-PACKED GROUP of legs (assembler --grouped; same-crate legs
+    # clustered, each group targeting <5 min of warm-cache work) instead of one runner
+    # per leg — 159 legs used to mean 159 runners each paying checkout + toolchain +
+    # cache-restore + the dependency compile.
     #
-    # [OPUS-4.8] sq-ibrze: the matrix is now ASSEMBLED dynamically by the `setup` job from
-    # the per-crate fragment files (`.github/feature-matrix.d/<crate>.yml`) — see the
-    # STRUCTURE note in this file's header. The emitted check-run NAME is `opt-in
-    # ${{ matrix.name }}`, BYTE-IDENTICAL to the previous static list (proven by
-    # scripts/tests/test_feature_matrix_assemble.py). To add a leg, edit ONLY the relevant
-    # crate fragment — do NOT reintroduce a static `include:` list here.
-    name: opt-in ${{ matrix.name }}
+    # NAME CONTRACT PRESERVED: the gate-critical `opt-in <name>` check-run for EVERY
+    # leg is still emitted, byte-identical (proven against the golden snapshot by
+    # scripts/tests/test_feature_matrix_assemble.py) — but NOT from this job. THIS
+    # JOB IS DELIBERATELY UNPRIVILEGED (PR #3511 review, critical finding): it
+    # executes PR-controlled code — cargo build scripts, proc macros, tests, clippy
+    # lints, plus the whole third-party dependency graph's build-time code — so it
+    # must NEVER hold a `checks: write` token (malicious build code could forge
+    # arbitrary check runs, incl. gate-critical sibling names) nor persisted git
+    # credentials. It runs scripts/run-feature-matrix-group.py with NO token in the
+    # environment and writes each leg's outcome to a results file, uploaded below as
+    # an artifact for the separate, DEFAULT-BRANCH-owned reporter workflow
+    # (feature-matrix-report.yml, workflow_run — see finding 1 in this file's header),
+    # which executes no PR build code, validates the artifact hostile-input-style, and
+    # posts the per-leg check-runs. A failed leg does not stop the group (the old fail-fast: false),
+    # and the group job then FAILS LOUDLY naming exactly which legs failed — this
+    # job's own conclusion is a required gating signal via `ci-summary / gate`
+    # regardless of any check-run posting (sq-fmx4u.4).
+    #
+    # [OPUS-4.8] sq-ibrze (unchanged): legs are ASSEMBLED from the per-crate fragment
+    # files (`.github/feature-matrix.d/<crate>.yml`). To add a leg, edit ONLY the
+    # relevant crate fragment — do NOT reintroduce a static `include:` list here.
+    name: opt-in group (${{ matrix.group }})
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.setup.outputs.matrix) }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          components: clippy
+          # PR-controlled build code runs in this job — never leave it the
+          # persisted GITHUB_TOKEN in .git/config (PR #3511 review).
+          persist-credentials: false
+      - name: Rust (preinstalled stable + clippy)
+        # [FABLE-5] CI-economy: the ubuntu runner image ships a rustup stable
+        # toolchain (with the default profile, incl. clippy). dtolnay/rust-toolchain
+        # runs `rustup toolchain install stable`, which re-downloads the whole
+        # toolchain whenever the image lags the newest release. `component add` is a
+        # no-op when the component is already present — never a toolchain download.
+        run: |
+          rustup default stable
+          rustup component add clippy
+          rustup show active-toolchain
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          # [OPUS-4.8] sq-3sbrr — PER-CRATE (not per-leg) cache key + save-only-on-main.
-          # WHY: rust-cache stores the DEPENDENCY build only (never sparq's own crates —
-          # they recompile per leg regardless, see ci.yml's build-once note), so the prior
-          # per-leg `…-${{ matrix.crate }}-${{ matrix.features }}` key produced 68
-          # near-identical dependency caches (one per matrix leg). At ~0.2 GB each that is
-          # ~14 GB of demand against the repo's 10 GB Actions-cache budget, so GitHub
-          # LRU-evicted them AND the ci.yml caches (test-workspace / coverage / lint /
-          # wasm) on essentially every run — caching was present but self-defeating and
-          # most jobs restored COLD (recompiling the ~131 s dep floor from scratch).
-          # Keying by CRATE collapses the 68 legs to ONE dependency cache per crate (the
-          # 15 sparq-engine legs now share a single warm dep dir); cargo fingerprinting
-          # still recompiles each feature-varying crate itself, so there is no
-          # stale-artifact risk (the rust-cache key already embeds Cargo.lock + the rustc
-          # version + Cargo.toml hashes). `save-if` makes PR and ephemeral merge_group
-          # runs RESTORE-ONLY so they stop writing branch-scoped caches that churn the
-          # shared budget; the post-merge push-to-main run is what seeds/refreshes them.
-          shared-key: feature-matrix-${{ matrix.crate }}
+          # [OPUS-4.8] sq-3sbrr — PER-CRATE cache key + save-only-on-main, unchanged
+          # in strategy: rust-cache stores the DEPENDENCY build only, so keying by
+          # the group's DOMINANT crate (groups are same-crate-clustered by the
+          # assembler precisely so this key stays meaningful) keeps ONE dependency
+          # cache per crate instead of one per leg — the demand that used to blow
+          # the repo's 10 GB Actions-cache budget and LRU-evict everything. Grouping
+          # REDUCES total demand further (38-ish groups vs 159 leg jobs restoring).
+          # `save-if` keeps PR and ephemeral merge_group runs RESTORE-ONLY; the
+          # post-merge push-to-main run seeds/refreshes the caches.
+          shared-key: feature-matrix-${{ matrix.cache_crate }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch dependencies (retry transient crates.io fetch)
-        # [OPUS-4.8] sq-hhxc: these `opt-in <crate>` legs were failing ~8s in with exit 101
-        # — i.e. in EARLY SETUP (registry resolve/fetch), BEFORE any real compile (8s is far
-        # too short to build) — on PRs that don't touch the crate (#721/#724). The transient
-        # crates.io fetch that `cargo build` does up front (before compiling) is the flake.
-        # Pull it out into a dedicated, bounded shell retry so the registry hiccup is
-        # absorbed here and the subsequent build resolves from the warm cache. Fails only if
+        # [OPUS-4.8] sq-hhxc: transient crates.io fetch flake absorbed by a bounded
+        # retry so the per-leg builds resolve from the warm cache. Fails only if
         # all 3 attempts fail (a genuine outage). No new GitHub Action dependency.
         run: |
           set -euo pipefail
@@ -373,27 +545,48 @@ jobs:
             echo "cargo fetch attempt $n failed; retrying in 10s..." >&2
             sleep 10
           done
-      - name: Build (-p ${{ matrix.crate }} --features ${{ matrix.features }})
-        # [OPUS-4.8] sq-hhxc: bounded shell retry as a safety net — with the cache warmed by
-        # the fetch step above this normally compiles offline, but retry guards any residual
-        # transient network touch during resolution (fail only if all attempts fail).
-        run: |
-          set -euo pipefail
-          n=0
-          until cargo build -p ${{ matrix.crate }} --features ${{ matrix.features }}; do
-            n=$((n+1))
-            if [ "$n" -ge 3 ]; then
-              echo "::error::cargo build failed after $n attempts" >&2
-              exit 1
-            fi
-            echo "cargo build attempt $n failed; retrying in 10s..." >&2
-            sleep 10
-          done
-      - name: Test (-p ${{ matrix.crate }} --features ${{ matrix.features }})
-        if: matrix.test
-        run: cargo test -p ${{ matrix.crate }} --features ${{ matrix.features }}
-      - name: Clippy (--all-targets -D warnings)
-        run: cargo clippy -p ${{ matrix.crate }} --features ${{ matrix.features }} --all-targets -- -D warnings
+      - name: Run the group's legs (build -> test -> clippy; results to artifact)
+        # Each leg: build (bounded sq-hhxc retry) -> test (where the fragment says
+        # so) -> clippy --all-targets -D warnings — the exact step set of the old
+        # per-leg job. NO token here (see the job note): outcomes go to the
+        # results file; the trusted default-branch reporter workflow posts the
+        # check-runs (feature-matrix-report.yml, workflow_run — finding 1).
+        env:
+          GROUP_LEGS: ${{ matrix.legs }}
+          GROUP_NAME: ${{ matrix.group }}
+          FMG_RESULTS: fmg-results/results.json
+        run: python3 scripts/run-feature-matrix-group.py
+      - name: Upload per-leg results for the trusted reporter
+        # `!cancelled()`: a group with FAILED legs must still ship its results so
+        # the reporter posts the red per-leg check-runs. `overwrite: true` keeps
+        # re-runs of failed jobs working (v4+ artifacts are otherwise immutable
+        # within a run). The artifact name is unique per matrix entry.
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: feature-matrix-results-${{ strategy.job-index }}
+          path: fmg-results/results.json
+          retention-days: 1
+          if-no-files-found: error
+          overwrite: true
+
+  # [FABLE-5] PR #3511 review, CRITICAL finding 1: the per-leg `opt-in <name>`
+  # check-run reporter is NO LONGER a job in this PR-triggered workflow. It moved to
+  # the separate, DEFAULT-BRANCH-owned .github/workflows/feature-matrix-report.yml,
+  # triggered by `workflow_run` on this workflow's completion. Rationale: the reporter
+  # is the only holder of `checks: write`, and a `checks: write` job that checks out
+  # the PR head and runs the PR's copy of scripts/{assemble-feature-matrix,run-feature-
+  # matrix-group}.py is the pwn-requests anti-pattern — a PR could edit either script
+  # to forge `gate` or sibling check-runs. `workflow_run` always runs the default-
+  # branch copy of the reporter workflow AND those scripts, isolated from PR-head
+  # content; it downloads THIS run's artifacts (results + the selected-matrix +
+  # metadata this workflow uploads), treats them strictly as validated DATA, validates
+  # the recorded head SHA against the server-supplied workflow_run.head_sha, and posts
+  # the per-leg + `feature-matrix report` summary check-runs onto the head commit.
+  # See feature-matrix-report.yml for the full threat model + adversarial self-check.
+  # The ALWAYS-gating coarse signal is unchanged: the opt-in-features group jobs run
+  # on THIS (PR/merge_group) event, so their own conclusions are discovered directly
+  # by ci-summary regardless of reporter timing (sq-fmx4u.4).
 
   # [SONNET-4.6] sq-ldg8c: T1 CHECK TIER — compile+clippy (NO test run) for the opt-in legs a
   # fragment has DEMOTED with `tier: check`. Design: research/feature-matrix-pyramid.md §3/§5.
@@ -430,7 +623,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - name: Install PyYAML
@@ -455,11 +648,13 @@ jobs:
           N="$(echo "$CHECK" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["include"]))')"
           echo "legs=$N" >> "$GITHUB_OUTPUT"
           echo "check-tier shard '${{ matrix.shard }}': $N demoted leg(s) (event ${{ github.event_name }}, select ${SELECT_MODE:-<unset>})"
-      - name: Install Rust (stable)
+      - name: Rust (preinstalled stable + clippy)
         if: steps.legs.outputs.legs != '0'
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: clippy
+        # [FABLE-5] CI-economy: preinstalled runner-image stable (see the
+        # opt-in-features note) — `component add` is a no-op when present.
+        run: |
+          rustup default stable
+          rustup component add clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         if: steps.legs.outputs.legs != '0'
         with:
@@ -520,10 +715,15 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          components: clippy
+          # Cargo build-time code runs here — no persisted token (PR #3511 review).
+          persist-credentials: false
+      - name: Rust (preinstalled stable + clippy)
+        # [FABLE-5] CI-economy: preinstalled runner-image stable (see the
+        # opt-in-features note) — `component add` is a no-op when present.
+        run: |
+          rustup default stable
+          rustup component add clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: feature-matrix-sparq-lws-core-no-default-features
@@ -584,10 +784,15 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          components: clippy
+          # Cargo build-time code runs here — no persisted token (PR #3511 review).
+          persist-credentials: false
+      - name: Rust (preinstalled stable + clippy)
+        # [FABLE-5] CI-economy: preinstalled runner-image stable (see the
+        # opt-in-features note) — `component add` is a no-op when present.
+        run: |
+          rustup default stable
+          rustup component add clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: feature-matrix-sparq-server-no-default-features
@@ -644,10 +849,15 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
-          components: clippy
+          # Cargo build-time code runs here — no persisted token (PR #3511 review).
+          persist-credentials: false
+      - name: Rust (preinstalled stable + clippy)
+        # [FABLE-5] CI-economy: preinstalled runner-image stable (see the
+        # opt-in-features note) — `component add` is a no-op when present.
+        run: |
+          rustup default stable
+          rustup component add clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: feature-matrix-sparq-geo-no-default-features
@@ -700,8 +910,13 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          # Cargo build-time code runs here — no persisted token (PR #3511 review).
+          persist-credentials: false
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy: preinstalled runner-image stable (see the
+        # opt-in-features note); no extra component needed here.
+        run: rustup default stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: fedclient-boundary

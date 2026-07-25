@@ -44,6 +44,9 @@ name: gui
 
 on:
   pull_request:
+    # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
+    # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
+    types: [opened, synchronize, reopened, ready_for_review]
     # [OPUS-4.8] The `site build + typecheck` job here consumes `site/` (its static export +
     # the bundle-wasm-esm script) and `js/` (the @jeswr/sparq source it bundles), and resolves
     # workspace deps from the root lockfile — so changes to ANY of those can break it. They were
@@ -98,7 +101,7 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
@@ -128,19 +131,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [FABLE-5] CI-economy (2026-07-18 directive 2b): this wasm lane compiles
+          # the same sparq-wasm dependency stack as the other js/pages/gui/site wasm
+          # lanes — ONE shared dependency cache across them keeps demand inside the
+          # 10 GB Actions-cache budget (sq-3sbrr doctrine: save on push-to-main
+          # only, so PR runs are restore-only and never churn the shared budget).
+          shared-key: site-wasm
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
-      - name: Cache cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: gui-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      # [FABLE-5] PR #3511 review finding 5: redundant second cargo cache REMOVED —
+      # the Swatinem/rust-cache above (shared-key: site-wasm) already caches
+      # ~/.cargo/registry + ~/.cargo/git + target/ across the js/pages/gui/site wasm
+      # lanes, restore-only off main. The former PR-scoped `actions/cache`
+      # (gui-wasm-…-hashFiles(Cargo.lock)) covered the same paths and only churned
+      # the shared 10 GB Actions-cache budget with a duplicate PR-scoped copy.
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
@@ -203,19 +213,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [FABLE-5] CI-economy (2026-07-18 directive 2b): this wasm lane compiles
+          # the same sparq-wasm dependency stack as the other js/pages/gui/site wasm
+          # lanes — ONE shared dependency cache across them keeps demand inside the
+          # 10 GB Actions-cache budget (sq-3sbrr doctrine: save on push-to-main
+          # only, so PR runs are restore-only and never churn the shared budget).
+          shared-key: site-wasm
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
-      - name: Cache cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: gui-app-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      # [FABLE-5] PR #3511 review finding 5: redundant second cargo cache REMOVED —
+      # the Swatinem/rust-cache above (shared-key: site-wasm) already caches
+      # ~/.cargo/registry + ~/.cargo/git + target/ across the js/pages/gui/site wasm
+      # lanes, restore-only off main. The former PR-scoped `actions/cache`
+      # (gui-app-wasm-…-hashFiles(Cargo.lock)) covered the same paths and only churned
+      # the shared 10 GB Actions-cache budget with a duplicate PR-scoped copy.
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
@@ -315,19 +332,26 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [FABLE-5] CI-economy (2026-07-18 directive 2b): this wasm lane compiles
+          # the same sparq-wasm dependency stack as the other js/pages/gui/site wasm
+          # lanes — ONE shared dependency cache across them keeps demand inside the
+          # 10 GB Actions-cache budget (sq-3sbrr doctrine: save on push-to-main
+          # only, so PR runs are restore-only and never churn the shared budget).
+          shared-key: site-wasm
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
-      - name: Cache cargo
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: gui-mock-ipc-wasm-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      # [FABLE-5] PR #3511 review finding 5: redundant second cargo cache REMOVED —
+      # the Swatinem/rust-cache above (shared-key: site-wasm) already caches
+      # ~/.cargo/registry + ~/.cargo/git + target/ across the js/pages/gui/site wasm
+      # lanes, restore-only off main. The former PR-scoped `actions/cache`
+      # (gui-mock-ipc-wasm-…-hashFiles(Cargo.lock)) covered the same paths and only
+      # churned the shared 10 GB Actions-cache budget with a duplicate PR-scoped copy.
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --locked
@@ -431,10 +455,16 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          components: clippy
-
+      - name: Rust (preinstalled stable, clippy)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup component add clippy
+          rustup show active-toolchain
       - name: Cache cargo (gui crate)
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -546,18 +576,31 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [FABLE-5] CI-economy (2026-07-18 directive 2b): this wasm lane compiles
+          # the same sparq-wasm dependency stack as the other js/pages/gui/site wasm
+          # lanes — ONE shared dependency cache across them keeps demand inside the
+          # 10 GB Actions-cache budget (sq-3sbrr doctrine: save on push-to-main
+          # only, so PR runs are restore-only and never churn the shared budget).
+          shared-key: site-wasm
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
-      - name: Cache cargo (gui e2e)
+      # [FABLE-5] PR #3511 review finding 5: the ~/.cargo/registry + ~/.cargo/git
+      # paths were DROPPED from this cache — the Swatinem/rust-cache above (shared-key:
+      # site-wasm) already caches them across the wasm lanes. Only gui/src-tauri/target
+      # is KEPT here: it is the SEPARATE Tauri-native build dir (its own
+      # gui/src-tauri/Cargo.lock, not the workspace target/ rust-cache covers), so
+      # this folds in exactly the one path rust-cache misses without the redundant
+      # PR-scoped registry/git duplicate.
+      - name: Cache cargo (gui e2e — tauri native target only)
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            gui/src-tauri/target
+          path: gui/src-tauri/target
           key: gui-e2e-${{ runner.os }}-${{ hashFiles('gui/src-tauri/Cargo.lock', 'Cargo.lock') }}
 
       - name: Install wasm-pack
@@ -680,18 +723,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # [FABLE-5] CI-economy (2026-07-18 directive 2b): this wasm lane compiles
+          # the same sparq-wasm dependency stack as the other js/pages/gui/site wasm
+          # lanes — ONE shared dependency cache across them keeps demand inside the
+          # 10 GB Actions-cache budget (sq-3sbrr doctrine: save on push-to-main
+          # only, so PR runs are restore-only and never churn the shared budget).
+          shared-key: site-wasm
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
-      - name: Cache cargo (gui probe)
+      # [FABLE-5] PR #3511 review finding 5: ~/.cargo/registry + ~/.cargo/git DROPPED
+      # (the Swatinem/rust-cache above with shared-key: site-wasm covers them). Only
+      # the SEPARATE Tauri-native gui/src-tauri/target dir is KEPT — the one path
+      # rust-cache misses — dropping the redundant PR-scoped registry/git duplicate.
+      - name: Cache cargo (gui probe — tauri native target only)
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            gui/src-tauri/target
+          path: gui/src-tauri/target
           key: gui-e2e-probe-${{ runner.os }}-${{ hashFiles('gui/src-tauri/Cargo.lock', 'Cargo.lock') }}
 
       - name: Install wasm-pack

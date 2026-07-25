@@ -63,10 +63,14 @@ A descriptor may also carry an **optional GenAI retrieval capability**
 cardinality hint), served under the `sret:` vocab (`http://sparq.dev/ns/retrieval#`,
 `RETRIEVAL_NS`) next to the VoID partitions and round-tripped via
 `RetrievalCapability::to_void_nt` / `from_void_nt`. It defaults to absent
-(`descriptor.retrieval() == None`) and is **advisory planner metadata only**: it may
-reorder source selection in a follow-up, but can never change which triples answer a
-BGP (the same answer-safe discipline as the cardinality estimators). Set it with
-`.retrieval(..)` on the builder.
+(`descriptor.retrieval() == None`) and is **advisory planner metadata only**:
+`select_sources` consumes it as a STATIC candidate-ordering hint (sources declaring a
+`cardinalityHint` order first, ascending by hint; undeclared keep index order after
+them; source index tie-breaks — so with no hints the ordering is the historical
+ascending-index order), but it can never change which triples answer a BGP: the
+retained-source SET and every estimate are hint-independent (differential-tested; the
+same answer-safe discipline as the cardinality estimators). Set it with
+`.retrieval(..)` on the builder. [FABLE-5] sq-3uijg
 
 ## Select sources for a BGP (recall-safe)
 

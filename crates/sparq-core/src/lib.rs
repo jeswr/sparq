@@ -4495,10 +4495,6 @@ fn newline_chunk_bounds(bytes: &[u8], target: usize) -> Vec<(usize, usize)> {
     bounds
 }
 
-/// Parses + interns N-Triples in parallel: each chunk builds a partial dictionary +
-/// local-id triples, then the partials are merged into one global dictionary with the
-/// local ids remapped. Interning is per-thread (no shared lock); the merge is linear.
-#[cfg(feature = "parallel")]
 /// Per-ISA software prefetch-for-read hint (x86 `prefetcht0`, aarch64 `prfm pldl1keep`, a no-op
 /// elsewhere). Correctness-neutral — a prefetch never faults and never changes architectural
 /// state; it only asks the CPU to pull a cache line in early.
@@ -4637,6 +4633,9 @@ pub fn bench_remap(n: usize, dict_size: usize, iters: usize) -> f64 {
     best
 }
 
+/// Parses + interns N-Triples in parallel: each chunk builds a partial dictionary +
+/// local-id triples, then the partials are merged into one global dictionary with the
+/// local ids remapped. Interning is per-thread (no shared lock); the merge is linear.
 #[cfg(feature = "parallel")]
 fn parse_ntriples_parallel(bytes: &[u8]) -> Result<(Dict, Vec<[Id; 3]>), String> {
     Ok(merge_partials(parse_block(bytes)?))
