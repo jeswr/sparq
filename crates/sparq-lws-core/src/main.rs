@@ -700,9 +700,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // against WHATEVER backend is selected, so without this guard they could write dev fixtures into a live
     // http/embedded store. Set SOLID_SERVER_ALLOW_SEED_NONMEMORY=1 to permit it ONLY for an ephemeral
     // embedded test instance (the conformance run.sh embedded leg). Seeding `memory` is always allowed.
-    let seed_requested = env_flag(ENV_SEED_CONFORMANCE)
-        || bench_seed_count(ENV_SEED_BENCH).is_some()
-        || env_flag(ENV_SEED_DEMO);
+    let seed_requested = seed_requested_from_env();
     if reject_seed_on_nonmemory(seed_requested, &backend, env_flag(ENV_ALLOW_SEED_NONMEMORY)) {
         return Err(format!(
             "refusing to seed test fixtures into a non-memory backend (PSS_SPARQ_BACKEND={backend}): \
@@ -1187,10 +1185,7 @@ where
     // AUTHENTICATED agent can read/write/append (anonymous visitors read-only; nobody has Control)
     // plus a public-read /README carrying the ephemeral-demo banner. Like the other seeds it is
     // purely additive fixture content; it changes no request handling.
-    if env_flag(ENV_SEED_DEMO) {
-        let fixtures = sparq_lws_core::seed::seed_demo(&store, base_url)
-            .await
-            .map_err(|e| format!("demo seeding failed: {e:?}"))?;
+    if let Some(fixtures) = maybe_seed_demo(&store, base_url).await? {
         eprintln!(
             "  SEEDED demo playground — DEMO ONLY: playground={} (authenticated read+write+append, public read, no Control) readme={}",
             fixtures.playground, fixtures.readme
@@ -1237,12 +1232,60 @@ fn fmt_opt_secs(d: Option<Duration>) -> String {
     }
 }
 
-/// Read a boolean-ish env flag: `1` / `true` (case-insensitive) ⇒ true; anything else / absent ⇒ false.
+/// Read a boolean-ish env flag, FAIL-CLOSED: exactly `1` / `true` / `TRUE` / `True`
+/// (after trimming) ⇒ true; anything else — absent, empty, `0`, `false`, `no`, `yes`,
+/// `01`, `1abc` — ⇒ false.
+///
+/// [OPUS-5] sq-5ougp review round 3: this doc previously said "`1` / `true`
+/// (case-insensitive)", which is INACCURATE — mixed-case spellings such as `tRuE` are
+/// rejected. Only the four literals above are accepted. The error direction is safe (an
+/// unrecognised value means OFF), but the doc must not promise a laxer parse than the
+/// code performs.
 fn env_flag(key: &str) -> bool {
     matches!(
         std::env::var(key).ok().as_deref().map(str::trim),
         Some("1") | Some("true") | Some("TRUE") | Some("True")
     )
+}
+
+/// [OPUS-5] sq-5ougp review round 3 (gpt-5.6-sol finding 1): the DEMO-SEED BOOT CALL
+/// SITE, extracted from `build_app_for_store` so the **off-by-default** invariant is
+/// TESTABLE at the site that actually decides it.
+///
+/// Before this extraction the only "flag off" test built a store and simply *declined
+/// to call* `seed_demo`, so it would have passed unchanged if the binary seeded the
+/// demo unconditionally. The gate now lives in one named function that boot calls and
+/// `demo_seed_boot_call_site_*` drives: `None` means the boot performed NO seed write
+/// at all (not "seeded something empty").
+///
+/// Fail-closed by construction: the gate is [`env_flag`], which accepts ONLY
+/// `1|true|TRUE|True` (trimmed) — every other value, including `yes`/`01`/`tRuE`, is
+/// OFF. A seeding failure propagates and aborts boot rather than leaving a
+/// half-seeded store.
+async fn maybe_seed_demo<S: Store>(
+    store: &S,
+    base_url: &str,
+) -> Result<Option<sparq_lws_core::seed::DemoFixtures>, String> {
+    if !env_flag(ENV_SEED_DEMO) {
+        return Ok(None);
+    }
+    let fixtures = sparq_lws_core::seed::seed_demo(store, base_url)
+        .await
+        .map_err(|e| format!("demo seeding failed: {e:?}"))?;
+    Ok(Some(fixtures))
+}
+
+/// [OPUS-5] sq-5ougp review round 3 (gpt-5.6-sol finding 2): GUARD #2's seed-request
+/// predicate, extracted from the boot body so the DEMO disjunct is testable.
+///
+/// Deleting `|| env_flag(ENV_SEED_DEMO)` here is the mutation that previously failed
+/// no test, and it is the only thing stopping the demo playground ACL from being
+/// written into a live `http` / `embedded` store. Feeds
+/// [`reject_seed_on_nonmemory`].
+fn seed_requested_from_env() -> bool {
+    env_flag(ENV_SEED_CONFORMANCE)
+        || bench_seed_count(ENV_SEED_BENCH).is_some()
+        || env_flag(ENV_SEED_DEMO)
 }
 
 /// Resolve the verified-access-token cache capacity from the env value.
@@ -1638,6 +1681,215 @@ mod tests {
         assert!(!reject_seed_on_nonmemory(false, "http", false));
         assert!(!reject_seed_on_nonmemory(false, "embedded", false));
         assert!(!reject_seed_on_nonmemory(false, "memory", false));
+    }
+
+    // =====================================================================
+    // [OPUS-5] sq-5ougp review round 3 — the BOOT-LEVEL demo-seed invariants.
+    //
+    // gpt-5.6-sol's adversarial cross-provider review of #3476 found that the
+    // off-by-default property — the single most important property of an
+    // authorization-granting seed — was NOT TESTED ANYWHERE:
+    //
+    //   finding 1: `demo_seed_flag_off_boot_has_no_playground` never touches
+    //     `env_flag`, Guard #2, or the boot call site. It builds a store and simply
+    //     declines to call `seed_demo`, so it "would pass unchanged if the real
+    //     binary seeded the demo unconditionally".
+    //   finding 2: deleting `|| env_flag(ENV_SEED_DEMO)` from Guard #2's
+    //     `seed_requested` failed no test — and that disjunct is the only thing
+    //     stopping the demo ACL being written into a live `http`/`embedded` store.
+    //
+    // These tests drive the REAL predicates the boot body now calls
+    // (`maybe_seed_demo` / `seed_requested_from_env`) with the REAL env-var names,
+    // so both mutations redden.
+    // =====================================================================
+
+    /// The real `SOLID_SERVER_*` names are process-global, so unlike [`with_env`]
+    /// (which gives each test a unique synthetic key) these tests must serialise.
+    static REAL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// RAII set/clear of a REAL env var, restoring the previous value on drop — so a
+    /// failing assertion cannot leak the flag into the sibling test.
+    struct RealEnvVar {
+        key: &'static str,
+        prev: Option<String>,
+    }
+
+    impl RealEnvVar {
+        fn set(key: &'static str, val: Option<&str>) -> Self {
+            let prev = std::env::var(key).ok();
+            match val {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+            Self { key, prev }
+        }
+    }
+
+    impl Drop for RealEnvVar {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(p) => std::env::set_var(self.key, p),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    fn seed_probe_store() -> CompositeStore<InMemorySparqClient, InMemoryBlobStore> {
+        CompositeStore::new(InMemorySparqClient::new(), InMemoryBlobStore::new())
+    }
+
+    /// A current-thread runtime so the REAL-env lock is never held across an `.await`
+    /// (the env mutation and the seed must be one atomic step for other tests).
+    fn seed_probe_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime")
+    }
+
+    const SEED_PROBE_BASE: &str = "https://demo-probe.example";
+
+    fn seed_probe_iris() -> [String; 4] {
+        [
+            format!("{SEED_PROBE_BASE}/playground/"),
+            format!("{SEED_PROBE_BASE}/playground/.acl"),
+            format!("{SEED_PROBE_BASE}/README"),
+            format!("{SEED_PROBE_BASE}/README.acl"),
+        ]
+    }
+
+    /// FINDING 1, the OFF half. Every value that is not an accepted truthy token must
+    /// leave the boot call site having written NOTHING — no `/playground/`, no
+    /// `/playground/.acl`, no `/README`, no `/README.acl`. This is the test that
+    /// reddens if the binary ever seeds unconditionally, because it drives the real
+    /// [`maybe_seed_demo`] gate rather than declining to call `seed_demo`.
+    #[test]
+    fn demo_seed_boot_call_site_writes_nothing_unless_flag_is_on() {
+        let _lock = REAL_ENV_LOCK.lock().unwrap();
+        let rt = seed_probe_runtime();
+        // `None` = the variable is ABSENT, i.e. the default posture of every boot.
+        for raw in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("0"),
+            Some("false"),
+            Some("False"),
+            Some("FALSE"),
+            Some("no"),
+            Some("off"),
+            Some("yes"),
+            Some("2"),
+            Some("01"),
+            Some("1abc"),
+            Some("tRuE"),
+            Some("truthy"),
+        ] {
+            let _flag = RealEnvVar::set(ENV_SEED_DEMO, raw);
+            let store = seed_probe_store();
+            let outcome = rt
+                .block_on(maybe_seed_demo(&store, SEED_PROBE_BASE))
+                .expect("the OFF path must not error");
+            assert!(
+                outcome.is_none(),
+                "SOLID_SERVER_SEED_DEMO={raw:?} must NOT seed the demo: the boot call \
+                 site is opt-in and env_flag accepts only 1|true|TRUE|True"
+            );
+            for iri in seed_probe_iris() {
+                assert!(
+                    !rt.block_on(store.exists(&iri)).unwrap(),
+                    "SOLID_SERVER_SEED_DEMO={raw:?} must leave {iri} ABSENT — an \
+                     unconditionally-seeding boot would create it"
+                );
+            }
+        }
+    }
+
+    /// FINDING 1, the ON half. The accepted truthy tokens DO seed, and when they do the
+    /// boot call site really produced the §3.2 fixtures — so the OFF half above cannot
+    /// be satisfied by a [`maybe_seed_demo`] that never seeds at all.
+    #[test]
+    fn demo_seed_boot_call_site_seeds_on_accepted_truthy_tokens() {
+        let _lock = REAL_ENV_LOCK.lock().unwrap();
+        let rt = seed_probe_runtime();
+        for raw in ["1", "true", "TRUE", "True", "  1  ", "\ttrue\n"] {
+            let _flag = RealEnvVar::set(ENV_SEED_DEMO, Some(raw));
+            let store = seed_probe_store();
+            let fixtures = rt
+                .block_on(maybe_seed_demo(&store, SEED_PROBE_BASE))
+                .expect("the ON path must not error")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "SOLID_SERVER_SEED_DEMO={raw:?} is an ACCEPTED truthy token \
+                         and must seed at the boot call site"
+                    )
+                });
+            assert_eq!(fixtures.playground, format!("{SEED_PROBE_BASE}/playground/"));
+            assert_eq!(fixtures.readme, format!("{SEED_PROBE_BASE}/README"));
+            for iri in seed_probe_iris() {
+                assert!(
+                    rt.block_on(store.exists(&iri)).unwrap(),
+                    "SOLID_SERVER_SEED_DEMO={raw:?} must create {iri}"
+                );
+            }
+        }
+    }
+
+    /// FINDING 2. GUARD #2's seed-request predicate must see the DEMO flag, so that
+    /// `SEED_DEMO=1` + a non-`memory` backend REFUSES to boot. Without the
+    /// `|| env_flag(ENV_SEED_DEMO)` disjunct the demo playground ACL — a public-read
+    /// + authenticated-write grant — would be written into a live `http`/`embedded`
+    /// store.
+    #[test]
+    fn guard2_seed_requested_sees_the_demo_flag_and_refuses_nonmemory_boot() {
+        let _lock = REAL_ENV_LOCK.lock().unwrap();
+        // Clear the other two seed inputs so ONLY the demo flag varies.
+        let _conf = RealEnvVar::set(ENV_SEED_CONFORMANCE, None);
+        let _bench = RealEnvVar::set(ENV_SEED_BENCH, None);
+        {
+            let _flag = RealEnvVar::set(ENV_SEED_DEMO, None);
+            assert!(
+                !seed_requested_from_env(),
+                "no seed flag set ⇒ Guard #2 must see no seed request"
+            );
+        }
+        for on in ["1", "true", "TRUE", "True"] {
+            let _flag = RealEnvVar::set(ENV_SEED_DEMO, Some(on));
+            assert!(
+                seed_requested_from_env(),
+                "SOLID_SERVER_SEED_DEMO={on:?} must make Guard #2 see a seed request — \
+                 without the `|| env_flag(ENV_SEED_DEMO)` disjunct the demo playground \
+                 ACL can be written into a live http/embedded store"
+            );
+            // ...and that is what makes Guard #2 fire on a non-memory backend.
+            for backend in ["http", "embedded"] {
+                assert!(
+                    reject_seed_on_nonmemory(seed_requested_from_env(), backend, false),
+                    "SEED_DEMO={on:?} + PSS_SPARQ_BACKEND={backend} + no override must \
+                     REFUSE to boot"
+                );
+            }
+            // The documented escape hatch still works, and memory is always allowed.
+            assert!(!reject_seed_on_nonmemory(
+                seed_requested_from_env(),
+                "embedded",
+                true
+            ));
+            assert!(!reject_seed_on_nonmemory(
+                seed_requested_from_env(),
+                "memory",
+                false
+            ));
+        }
+        // Fail-closed direction: an OFF token must NOT arm Guard #2, so a fat-fingered
+        // value cannot make an unrelated boot refuse.
+        for off in ["0", "false", "no", "yes", "01", "tRuE", ""] {
+            let _flag = RealEnvVar::set(ENV_SEED_DEMO, Some(off));
+            assert!(
+                !seed_requested_from_env(),
+                "SOLID_SERVER_SEED_DEMO={off:?} is not an accepted truthy token"
+            );
+        }
     }
 
     #[test]

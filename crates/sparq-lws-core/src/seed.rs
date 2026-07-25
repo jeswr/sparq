@@ -644,10 +644,19 @@ fn owner_only_acl_turtle(doc: &str, webid: &str) -> ServerResult<Vec<u8>> {
 pub const DEMO_README_LABEL: &str = "sparq LWS public demo";
 /// The `/README` banner (`rdfs:comment`) — the §3.2 honesty print every visitor can dereference:
 /// ephemeral, all data public-readable, wiped on idle, throwaway identities, no visitor isolation.
+///
+/// [OPUS-5] sq-5ougp review round 3 (gpt-5.6-sol finding 7): "not isolated from each other"
+/// UNDER-DISCLOSED the consequence of the shared `acl:Write` grant. `acl:AuthenticatedAgent` +
+/// `acl:Write` means any registered visitor may OVERWRITE and DELETE anyone else's resources, and
+/// may publish arbitrary accepted RDF under the operator's origin. That posture is RATIFIED
+/// (`research/lws-demo-architecture.md` §3.2, surfaced via proceed-and-document #2329 with the
+/// steering window closed), so the fix is to DISCLOSE it plainly here — not to narrow the grant.
+/// Pinned by `tests/demo_seed.rs::demo_seed_readme_banner_discloses_the_shared_write_consequences`.
 pub const DEMO_README_BANNER: &str = "This is an EPHEMERAL public demo. Everything is wiped when \
     the instance idles out. All data is public-readable. Identities are throwaway. All visitors \
-    share this one playground and are not isolated from each other. Do not store anything real \
-    here.";
+    share this one playground and are not isolated from each other: ANY registered visitor can \
+    overwrite and delete anything you put here, and anything you publish is served from this \
+    origin as-is. Do not store anything real, private, or of value here.";
 
 /// The IRIs the demo seed produced (echoed at boot so the log shows exactly what to point a demo at).
 #[derive(Debug, Clone)]
