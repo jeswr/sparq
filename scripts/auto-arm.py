@@ -13,6 +13,15 @@ to GitHub's explicit ``enablePullRequestAutoMerge`` GraphQL mutation.
 # transient 5xx survives every bounded retry, the sweep exits ::warning + 0 instead of
 # redding main's gate — a missed cycle is harmless, the cron covers it. Any
 # non-transient error still fails loudly (GhFatalError -> GhError -> traceback).
+# [OPUS-5] Issue #3760 — a startup arm-capability probe that fails LOUDLY ONCE, and per-PR
+#   arm failures that are COLLECTED instead of aborting every later candidate. Before this
+#   change a single failing mutation re-raised out of process() -> run() -> run_sweep(), so
+#   every PR after it was never even considered. #3759 finding 5's invariant is preserved
+#   and strengthened, not weakened: a failed arm still can NEVER read as success — it now
+#   exits non-zero via ArmOutcome.exit_code instead of by unwinding the sweep. Kept
+#   deliberately self-contained (auto-arm.yml sparse-checks out only this file, so it
+#   cannot import shared helpers); scripts/tests/test_arm_capability_wiring.py pins the
+#   load-bearing strings against scripts/rearm-sweeper.py so the copies cannot drift.
 
 from __future__ import annotations
 
@@ -21,12 +30,13 @@ import copy
 import json
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 import gh_retry
 
 
+PROGRAM = "auto-arm"
 REVIEW_LABEL = "review:pass"
 HUMAN_OR_TRUST_LABELS = frozenset(
     {
@@ -55,6 +65,100 @@ ENABLE_AUTO_MERGE = """mutation($id:ID!,$oid:GitObjectID!){
     pullRequest{number headRefOid autoMergeRequest{enabledAt}}
   }
 }"""
+
+# --------------------------------------------------------------------------------------
+# [OPUS-5] #3760 — ARM CAPABILITY. See scripts/rearm-sweeper.py for the full measured
+# rationale. Short version: enabling auto-merge is a repository WRITE operation, so a job
+# whose `permissions:` block says `contents: read` is denied with
+# "Resource not accessible by integration (enablePullRequestAutoMerge)" — proven live by
+# sweeper run 30033315483 (contents: read, denied) vs this workflow's run 30027010495
+# (contents: write, armed two PRs with the same plain GITHUB_TOKEN 90 minutes earlier).
+# Repository.viewerPermission is null for App tokens and PullRequest.viewerCanEnableAutoMerge
+# is false for already-armed/queued/draft PRs even under ADMIN, so neither is a capability
+# signal; autoMergeAllowed is, and the mutation's own denial is the backstop.
+CAPABILITY_QUERY = """query($owner:String!,$name:String!){
+  repository(owner:$owner,name:$name){
+    autoMergeAllowed
+    viewerPermission
+  }
+  viewer{login}
+}"""
+
+# Deliberately disjoint from #3759's TRANSIENT set: a capability denial is permanent and
+# must never be swallowed by the lenient ::warning + exit-0 sweep policy.
+ARM_DENIAL_MARKERS = (
+    "resource not accessible by integration",
+    "must have write access",
+    "must have admin access",
+    "not authorized to enable auto-merge",
+    "auto merge is not allowed for this repository",
+    "auto-merge is not allowed for this repository",
+)
+
+ARM_REMEDIATION = (
+    "the arm token cannot call enablePullRequestAutoMerge. Fix in this order: "
+    "(1) .github/workflows/auto-arm.yml MUST declare `permissions:` with BOTH "
+    "`contents: write` and `pull-requests: write` — enabling auto-merge is a repository "
+    "WRITE operation and `contents: read` is denied with exactly this error (live proof: "
+    "sweeper run 30033315483 failed with contents: read while auto-arm run 30027010495 "
+    "armed successfully with contents: write on the same repo and the same GITHUB_TOKEN "
+    "90 minutes earlier); "
+    "(2) repository Settings -> General -> Pull Requests -> 'Allow auto-merge' must be ON "
+    "(GraphQL Repository.autoMergeAllowed must be true); "
+    "(3) if the repository's `main` ruleset gains a restriction on which integrations may "
+    "write, github-actions[bot] must be allowed or an App token used instead; "
+    "(4) the App path needs the repository/organization secrets ORCHESTRATOR_APP_ID and "
+    "ORCHESTRATOR_APP_PRIVATE_KEY (both are currently UNSET); "
+    "(5) on a `pull_request` event raised from a FORK, GITHUB_TOKEN is read-only no matter "
+    "what the permissions block says — such a PR can only be armed by the scheduled run."
+)
+
+CAN_ARM = "can-arm"
+CANNOT_ARM = "cannot-arm"
+INCONCLUSIVE = "inconclusive"
+
+# process() verdicts.
+ARMED = "armed"
+SKIPPED = "skipped"
+FAILED = "failed"
+
+
+def is_arm_denial(text: str) -> bool:
+    """True when a failure text is a token-capability denial, not a per-PR condition."""
+    lowered = str(text).lower()
+    return any(marker in lowered for marker in ARM_DENIAL_MARKERS)
+
+
+@dataclass(frozen=True)
+class CapabilityVerdict:
+    status: str
+    detail: str
+
+    @property
+    def blocks_sweep(self) -> bool:
+        """Only a decisive cannot-arm blocks; inconclusive must never red the run."""
+        return self.status == CANNOT_ARM
+
+
+@dataclass
+class ArmOutcome:
+    considered: int = 0
+    armed: int = 0
+    arm_failures: list[tuple[int, str]] = field(default_factory=list)
+    capability: str = INCONCLUSIVE
+
+    @property
+    def capability_failed(self) -> bool:
+        return self.capability == CANNOT_ARM
+
+    @property
+    def exit_code(self) -> int:
+        """Never exit 0 while an arm failed — a silent 0 is how #3760 hid for days.
+
+        This is how #3759 finding 5's invariant survives the #3760 refactor: the failed
+        arm no longer unwinds the sweep, so it must be the run's EXIT STATUS instead.
+        """
+        return 1 if self.capability_failed or self.arm_failures else 0
 
 
 class GhError(RuntimeError):
@@ -133,6 +237,13 @@ class AutoArmer:
         # (pr ready, the arm CAS) always use the one-shot `gh` runner above.
         self.gh_read = gh_read if gh_read is not None else gh
         self.log = log
+        # [OPUS-5] #3760 latches: the fleet must see exactly ONE ::error per run, never
+        # one per PR, and arming must stop once the token is known to be unable to arm.
+        self.capability_error_emitted = False
+        self.capability_lost = False
+        owner, _, name = repo.partition("/")
+        self.owner = owner
+        self.name = name
 
     def list_open(self) -> list[PullRequest]:
         raw = json.loads(
@@ -228,41 +339,140 @@ class AutoArmer:
             return f"head-moved ({attempted.head_oid[:12]} -> {current.head_oid[:12]})"
         return None
 
-    def process(self, initial: PullRequest) -> None:
+    def probe_arm_capability(self) -> CapabilityVerdict:
+        """Read-only startup probe: can this token arm at all in this repository?
+
+        Decisive only where it can read decisively; anything else is INCONCLUSIVE and must
+        never red the run (the mutation's own denial is the backstop). An exhausted #3759
+        transient is inconclusive too — the sweep's retrying reads stay the authority on
+        whether this cycle can proceed at all.
+        """
+        try:
+            raw = self.gh_read(
+                [
+                    "api",
+                    "graphql",
+                    "-f",
+                    f"query={CAPABILITY_QUERY}",
+                    "-f",
+                    f"owner={self.owner}",
+                    "-f",
+                    f"name={self.name}",
+                ]
+            )
+        except gh_retry.GhTransientExhausted as error:
+            return CapabilityVerdict(
+                INCONCLUSIVE, f"capability query exhausted transient retries ({error})"
+            )
+        except GhError as error:
+            if is_arm_denial(str(error)):
+                return CapabilityVerdict(
+                    CANNOT_ARM, f"the arm token was denied by GitHub ({error})"
+                )
+            return CapabilityVerdict(
+                INCONCLUSIVE, f"capability query failed, assuming armable ({error})"
+            )
+        try:
+            response = json.loads(raw)
+        except json.JSONDecodeError as error:
+            return CapabilityVerdict(
+                INCONCLUSIVE, f"capability query returned non-JSON ({error})"
+            )
+        if response.get("errors"):
+            detail = json.dumps(response["errors"], sort_keys=True)
+            if is_arm_denial(detail):
+                return CapabilityVerdict(
+                    CANNOT_ARM, f"the arm token was denied by GitHub ({detail})"
+                )
+            return CapabilityVerdict(
+                INCONCLUSIVE, f"capability query returned errors ({detail})"
+            )
+        data = response.get("data") or {}
+        repository = data.get("repository")
+        if not isinstance(repository, dict):
+            return CapabilityVerdict(
+                INCONCLUSIVE, "capability query returned no repository node"
+            )
+        # Diagnostics only — null for App tokens, so it can never be a gate.
+        login = str((data.get("viewer") or {}).get("login") or "unknown")
+        permission = repository.get("viewerPermission")
+        allowed = repository.get("autoMergeAllowed")
+        if allowed is False:
+            return CapabilityVerdict(
+                CANNOT_ARM,
+                "repository setting 'Allow auto-merge' is OFF "
+                "(GraphQL Repository.autoMergeAllowed=false)",
+            )
+        if allowed is not True:
+            return CapabilityVerdict(
+                INCONCLUSIVE,
+                f"autoMergeAllowed not reported (token={login}, "
+                f"viewerPermission={permission})",
+            )
+        return CapabilityVerdict(
+            CAN_ARM,
+            f"autoMergeAllowed=true (token={login}, viewerPermission={permission}); "
+            "write scope is confirmed by the first arm",
+        )
+
+    def fail_capability(self, detail: str) -> None:
+        """Emit the single ::error for this run and stop attempting further arms."""
+        self.capability_lost = True
+        if self.capability_error_emitted:
+            return
+        self.capability_error_emitted = True
+        self.log(
+            f"::error title={PROGRAM} cannot enable auto-merge::{detail} — "
+            f"{ARM_REMEDIATION}"
+        )
+
+    def process(self, initial: PullRequest) -> tuple[str, str | None]:
         reason = self.skip_reason(initial)
         if reason:
             self.log(f"PR #{initial.number}: skipped {reason}")
-            return
+            return SKIPPED, None
 
         if initial.is_draft and not self.mark_ready(initial):
-            return
+            return SKIPPED, None
 
         try:
             current = self.refresh(initial.number)
         except GhError as error:
             self.log(f"PR #{initial.number}: skipped state-refresh-failed ({error})")
-            return
+            return SKIPPED, None
 
         reason = self.skip_reason(current)
         if reason:
             self.log(f"PR #{initial.number}: skipped {reason}")
-            return
+            return SKIPPED, None
         if current.is_draft:
             self.log(f"PR #{initial.number}: skipped draft")
-            return
+            return SKIPPED, None
         if not current.node_id or not current.head_oid:
             self.log(f"PR #{initial.number}: skipped incomplete-live-state")
-            return
+            return SKIPPED, None
         if current.head_oid != initial.head_oid:
             self.log(
                 f"PR #{initial.number}: skipped head-moved "
                 f"({initial.head_oid[:12]} -> {current.head_oid[:12]})"
             )
-            return
+            return SKIPPED, None
 
         try:
             self.arm(current)
         except GhError as mutation_error:
+            message = str(mutation_error)
+            # [OPUS-5] #3760: a capability denial is NOT a per-PR condition — every
+            # remaining candidate would fail identically. Record it, stop arming, and
+            # surface exactly ONE ::error naming what to change.
+            if is_arm_denial(message):
+                self.log(
+                    f"PR #{initial.number}: arm-failed arm capability denied ({message})"
+                )
+                self.fail_capability(
+                    f"arming PR #{initial.number} was denied: {message}"
+                )
+                return FAILED, f"arm capability denied ({message})"
             # The arm mutation FAILED — this error is the primary run status and must
             # survive whatever the follow-up diagnostic read does. The diagnostic
             # read (classify_mutation_race -> refresh) is itself retriable, so it can
@@ -270,25 +480,69 @@ class AutoArmer:
             # retries we must NOT let that exhaustion propagate, or run_sweep's
             # lenient GhTransientExhausted handler would convert a genuine arm failure
             # into a false success (::warning + exit 0). Suppress the diagnostic's own
-            # failure and re-raise the ORIGINAL mutation error. (#3759 finding 5.)
+            # failure and keep the ORIGINAL mutation error as this PR's verdict.
+            # (#3759 finding 5 — its invariant now shows up as a non-zero EXIT rather
+            # than as an exception unwinding the whole sweep, per #3760.)
             try:
                 race = self.classify_mutation_race(current)
             except (GhError, gh_retry.GhTransientExhausted) as diag_error:
                 self.log(
-                    f"PR #{initial.number}: arm failed and the race diagnostic could "
-                    f"not resolve ({diag_error}); propagating the original arm error."
+                    f"PR #{initial.number}: arm-failed and the race diagnostic could "
+                    f"not resolve ({diag_error}); the original arm error stands ({message})"
                 )
-                raise mutation_error from mutation_error
+                return FAILED, message
             if race:
                 self.log(f"PR #{initial.number}: skipped {race}")
-                return
-            raise mutation_error
+                return SKIPPED, None
+            # Collect and CONTINUE — before #3760 this re-raised, so ONE bad PR stopped
+            # every later candidate from ever being armed.
+            self.log(f"PR #{initial.number}: arm-failed ({message})")
+            return FAILED, message
         self.log(f"PR #{initial.number}: armed head {current.head_oid[:12]}")
+        return ARMED, None
 
-    def run(self) -> None:
+    def run(self) -> ArmOutcome:
+        outcome = ArmOutcome()
+        verdict = self.probe_arm_capability()
+        outcome.capability = verdict.status
+        self.log(f"[{PROGRAM}] arm-capability probe: {verdict.status} — {verdict.detail}")
+        if verdict.blocks_sweep:
+            # Fail ONCE, before touching any PR: a broken token would otherwise fail
+            # identically on every candidate, on every label event, forever. This is not
+            # a transient, so it never reaches the #3759 ::warning + exit-0 path.
+            self.fail_capability(f"startup arm-capability probe failed: {verdict.detail}")
+            self.log(
+                f"[{PROGRAM}] complete: considered=0 armed=0 arm-failures=0 "
+                f"capability={verdict.status}"
+            )
+            return outcome
+
         for pr in self.list_open():
-            if REVIEW_LABEL in pr.labels:
-                self.process(pr)
+            if REVIEW_LABEL not in pr.labels:
+                continue
+            outcome.considered += 1
+            if self.capability_lost:
+                self.log(
+                    f"PR #{pr.number}: skipped arm capability lost this run "
+                    "(see the single ::error above)"
+                )
+                continue
+            status, failure = self.process(pr)
+            if status == ARMED:
+                outcome.armed += 1
+            elif status == FAILED:
+                outcome.arm_failures.append((pr.number, failure or "unknown"))
+                if self.capability_lost:
+                    outcome.capability = CANNOT_ARM
+
+        for number, reason in outcome.arm_failures:
+            self.log(f"[{PROGRAM}] arm-failure summary: PR #{number} — {reason}")
+        self.log(
+            f"[{PROGRAM}] complete: considered={outcome.considered} "
+            f"armed={outcome.armed} arm-failures={len(outcome.arm_failures)} "
+            f"capability={outcome.capability}"
+        )
+        return outcome
 
 
 def run_sweep(
@@ -305,12 +559,15 @@ def run_sweep(
     transient (or any other failure) exits NON-zero so the arm attempt is visibly red
     and gets retried. Only the periodic sweep may swallow a transient.
 
-    A failed arm MUTATION always propagates as ``GhError`` in either mode (the
-    diagnostic read's own exhaustion can never overwrite it — see ``process``)."""
+    A failed arm MUTATION always reds the run in either mode (the diagnostic read's own
+    exhaustion can never overwrite it — see ``process``). Since #3760 it no longer does so
+    by unwinding the sweep: it is COLLECTED so every later candidate is still considered,
+    and it surfaces as ``ArmOutcome.exit_code == 1``. A provable arm-capability failure is
+    likewise never a transient — it reds both modes with one ``::error``."""
     if mode not in ("sweep", "event"):
         raise ValueError(f"mode must be 'sweep' or 'event', got {mode!r}")
     try:
-        armer.run()
+        return armer.run().exit_code
     except gh_retry.GhTransientExhausted as error:
         if mode == "event":
             # Event-driven arm: no per-PR cron backstop — fail loudly so it is retried.
@@ -349,44 +606,112 @@ def fixture(
     }
 
 
+CAPABILITY_RESPONSE = {
+    "data": {
+        "repository": {"autoMergeAllowed": True, "viewerPermission": None},
+        "viewer": {"login": "github-actions[bot]"},
+    }
+}
+# The exact text GitHub returned in run 30033315483 — the #3760 regression anchor.
+DENIAL_TEXT = (
+    "gh api graphql failed: GraphQL: Resource not accessible by integration "
+    "(enablePullRequestAutoMerge)"
+)
+
+
+def capability_payload(auto_merge_allowed: bool | None) -> str:
+    payload = copy.deepcopy(CAPABILITY_RESPONSE)
+    payload["data"]["repository"]["autoMergeAllowed"] = auto_merge_allowed
+    return json.dumps(payload)
+
+
+def is_capability_query(argv: list[str]) -> bool:
+    return argv[:2] == ["api", "graphql"] and any(
+        "autoMergeAllowed" in arg for arg in argv
+    )
+
+
 class FakeGh:
     def __init__(
         self,
-        initial: dict,
+        initial: dict | list[dict],
         *,
         views: list[dict] | None = None,
         mutation_error: bool = False,
+        mutation_errors: dict[int, str] | None = None,
+        auto_merge_allowed: bool | None = True,
+        capability_error: str | None = None,
     ) -> None:
-        self.initial = copy.deepcopy(initial)
-        self.views = [copy.deepcopy(view) for view in (views or [initial])]
+        listing = initial if isinstance(initial, list) else [initial]
+        self.listing = [copy.deepcopy(item) for item in listing]
+        self.initial = self.listing[0] if self.listing else {}
+        self.views = [copy.deepcopy(view) for view in (views or self.listing)]
         self.mutation_error = mutation_error
+        self.mutation_errors = dict(mutation_errors or {})
+        self.auto_merge_allowed = auto_merge_allowed
+        self.capability_error = capability_error
         self.calls: list[list[str]] = []
 
     def __call__(self, argv: list[str]) -> str:
         self.calls.append(argv)
         if argv[:2] == ["pr", "list"]:
-            return json.dumps([self.initial])
+            return json.dumps(self.listing)
         if argv[:2] == ["pr", "ready"]:
             return ""
         if argv[:2] == ["pr", "view"]:
-            view = self.views.pop(0) if len(self.views) > 1 else self.views[0]
-            return json.dumps(view)
+            return json.dumps(self._view(int(argv[2])))
+        if is_capability_query(argv):
+            if self.capability_error is not None:
+                raise GhError(self.capability_error)
+            return capability_payload(self.auto_merge_allowed)
         if argv[:2] == ["api", "graphql"]:
             if self.mutation_error:
                 raise GhError("simulated expectedHeadOid CAS rejection")
+            node = next(arg for arg in argv if arg.startswith("id="))
+            failure = next(
+                (
+                    text
+                    for number, text in self.mutation_errors.items()
+                    if node.endswith(str(number))
+                ),
+                None,
+            )
+            if failure is not None:
+                raise GhError(failure)
             return json.dumps({"data": {"enablePullRequestAutoMerge": {}}})
         raise AssertionError(f"unexpected fake gh call: {argv}")
 
+    def _view(self, number: int) -> dict:
+        """Successive views for one PR are consumed in order; the last one sticks."""
+        matching = [view for view in self.views if int(view["number"]) == number]
+        if len(matching) > 1:
+            self.views.remove(matching[0])
+            return matching[0]
+        if matching:
+            return matching[0]
+        return self.views.pop(0) if len(self.views) > 1 else self.views[0]
 
-def exercise(initial: dict, **fake_kwargs) -> tuple[FakeGh, list[str]]:
+
+def exercise(
+    initial: dict | list[dict], **fake_kwargs
+) -> tuple[FakeGh, list[str], ArmOutcome]:
     fake = FakeGh(initial, **fake_kwargs)
     messages: list[str] = []
-    AutoArmer("sparq-org/sparq", "main", fake, messages.append).run()
-    return fake, messages
+    outcome = AutoArmer("sparq-org/sparq", "main", fake, messages.append).run()
+    return fake, messages, outcome
 
 
 def graphql_calls(fake: FakeGh) -> list[list[str]]:
-    return [call for call in fake.calls if call[:2] == ["api", "graphql"]]
+    """Only the ARM mutations — never the read-only capability probe."""
+    return [
+        call
+        for call in fake.calls
+        if call[:2] == ["api", "graphql"] and not is_capability_query(call)
+    ]
+
+
+def probe_query_calls(fake: FakeGh) -> list[list[str]]:
+    return [call for call in fake.calls if is_capability_query(call)]
 
 
 def self_test() -> None:
@@ -403,7 +728,7 @@ def self_test() -> None:
     # Reviewed, live, non-draft: arm once with the explicit method and head-OID CAS.
     clean = fixture()
     assert parse_pr(clean).merge_state == "CLEAN", clean
-    fake, messages = exercise(clean)
+    fake, messages, outcome = exercise(clean)
     mutations = graphql_calls(fake)
     assert len(mutations) == 1, mutations
     mutation = mutations[0]
@@ -414,7 +739,7 @@ def self_test() -> None:
 
     # Every named human/trust area is fail-closed before any mutation.
     for label in sorted(expected_guards):
-        fake, messages = exercise(fixture(labels=(REVIEW_LABEL, label)))
+        fake, messages, outcome = exercise(fixture(labels=(REVIEW_LABEL, label)))
         assert not graphql_calls(fake), (label, fake.calls)
         assert any("security-surface" in message for message in messages), (label, messages)
 
@@ -422,16 +747,16 @@ def self_test() -> None:
     # still carries a STALE review:pass (a race left both on) must NEVER be armed — the
     # fix-lane label wins. Both review-hold labels are checked independent of review:pass.
     for hold in ("review:changes", "review:needs"):
-        fake, messages = exercise(fixture(labels=(REVIEW_LABEL, hold)))
+        fake, messages, outcome = exercise(fixture(labels=(REVIEW_LABEL, hold)))
         assert not graphql_calls(fake), (hold, fake.calls)
         assert any("changes-requested" in message for message in messages), (hold, messages)
     # It also stops an arm when review:changes appears only on the live refresh.
-    fake, messages = exercise(clean, views=[fixture(labels=(REVIEW_LABEL, "review:changes"))])
+    fake, messages, outcome = exercise(clean, views=[fixture(labels=(REVIEW_LABEL, "review:changes"))])
     assert not graphql_calls(fake), fake.calls
     assert any("changes-requested" in message for message in messages), messages
 
     # Existing auto-merge arms are idempotent no-ops.
-    fake, messages = exercise(fixture(armed=True))
+    fake, messages, outcome = exercise(fixture(armed=True))
     assert not graphql_calls(fake), fake.calls
     assert any("already-armed" in message for message in messages), messages
 
@@ -442,7 +767,7 @@ def self_test() -> None:
         (fixture(armed=True), "already-armed"),
     )
     for refreshed, expected_reason in transitions:
-        fake, messages = exercise(clean, views=[refreshed])
+        fake, messages, outcome = exercise(clean, views=[refreshed])
         assert not graphql_calls(fake), (expected_reason, fake.calls)
         assert any(expected_reason in message for message in messages), (
             expected_reason,
@@ -452,26 +777,26 @@ def self_test() -> None:
     # Draft workers become ready, are refreshed, then are armed exactly once.
     draft = fixture(draft=True)
     ready = fixture(draft=False)
-    fake, messages = exercise(draft, views=[ready])
+    fake, messages, outcome = exercise(draft, views=[ready])
     assert any(call[:2] == ["pr", "ready"] for call in fake.calls), fake.calls
     assert len(graphql_calls(fake)) == 1, fake.calls
     assert any("draft -> marked ready" in message for message in messages), messages
 
     # A push between the list snapshot and the live refresh is skipped before mutation.
     moved = fixture(oid="b" * 40)
-    fake, messages = exercise(clean, views=[moved])
+    fake, messages, outcome = exercise(clean, views=[moved])
     assert not graphql_calls(fake), fake.calls
     assert any("head-moved" in message for message in messages), messages
 
     # A moved head makes the GraphQL CAS fail; classify it and never retry this sweep.
-    fake, messages = exercise(
+    fake, messages, outcome = exercise(
         clean, views=[clean, moved], mutation_error=True
     )
     assert len(graphql_calls(fake)) == 1, fake.calls
     assert any("head-moved" in message for message in messages), messages
 
     # Stacked PRs must never be armed into their non-default base.
-    fake, messages = exercise(fixture(base="feature-base"))
+    fake, messages, outcome = exercise(fixture(base="feature-base"))
     assert not graphql_calls(fake), fake.calls
     assert any("non-default-base" in message for message in messages), messages
 
@@ -488,9 +813,18 @@ def self_test() -> None:
     AutoArmer(
         "sparq-org/sparq", "main", fake, lambda _m: None, gh_read=spy_read
     ).run()
-    assert [c[:2] for c in read_calls] == [["pr", "list"], ["pr", "view"]], read_calls
+    # [OPUS-5] #3760: the capability probe is itself an idempotent READ (the retry
+    # helper's fail-closed guard accepts it — no mutation in the query), so it routes
+    # through gh_read and precedes the enumeration.
+    assert [c[:2] for c in read_calls] == [
+        ["api", "graphql"],
+        ["pr", "list"],
+        ["pr", "view"],
+    ], read_calls
+    assert is_capability_query(read_calls[0]), read_calls[0]
     direct = [c for c in fake.calls if c not in read_calls]
     assert [c[:2] for c in direct] == [["api", "graphql"]], fake.calls
+    assert not is_capability_query(direct[0]), direct
 
     # Exhausted transient retries abort the sweep as ::warning + exit 0 (a missed
     # cycle is harmless); the arm mutation is never attempted on partial state.
@@ -521,46 +855,50 @@ def self_test() -> None:
     else:
         raise AssertionError("non-transient errors must not be swallowed")
 
-    # [FABLE-5] #3759 finding 5 (BLOCKING): a real arm MUTATION failure must be the
-    # run's status even when the follow-up race-diagnostic READ exhausts transient
-    # retries. Here the arm CAS fails (GhError) and the diagnostic refresh raises
-    # GhTransientExhausted; the ORIGINAL mutation error must propagate, NOT be
-    # rewritten into a lenient exit-0 success.
+    # [FABLE-5] #3759 finding 5 (BLOCKING) — invariant preserved, mechanism changed by
+    # [OPUS-5] #3760: a real arm MUTATION failure must be the run's status even when the
+    # follow-up race-diagnostic READ exhausts transient retries. It used to prove this by
+    # PROPAGATING the mutation error out of run_sweep, which also aborted every later
+    # candidate (#3760). It now proves the same thing the way the fleet actually needs it:
+    # the failure is recorded and the run exits NON-ZERO. It must never be rewritten into
+    # a lenient exit-0 success.
     fake = FakeGh(clean, mutation_error=True)
 
     def read_lists_then_exhausts(argv: list[str]) -> str:
-        # The pre-arm reads (pr list, the pre-arm pr view) succeed; the diagnostic
-        # refresh AFTER the failed arm is the one that exhausts transients.
+        # The pre-arm reads (the capability probe, pr list, the pre-arm pr view) succeed;
+        # the diagnostic refresh AFTER the failed arm is the one that exhausts transients.
         if argv[:2] == ["pr", "view"] and getattr(read_lists_then_exhausts, "armed", False):
             raise gh_retry.GhTransientExhausted("gh pr view: HTTP 504 (3 attempts)")
-        if argv[:2] == ["api", "graphql"]:
-            read_lists_then_exhausts.armed = True  # type: ignore[attr-defined]
         return fake(argv)
 
     def gh_marks_arm(argv: list[str]) -> str:
-        if argv[:2] == ["api", "graphql"]:
+        # Only the ARM mutation flips the marker — never the read-only probe.
+        if argv[:2] == ["api", "graphql"] and not is_capability_query(argv):
             read_lists_then_exhausts.armed = True  # type: ignore[attr-defined]
         return fake(argv)
 
     read_lists_then_exhausts.armed = False  # type: ignore[attr-defined]
-    try:
-        run_sweep(
-            AutoArmer(
-                "sparq-org/sparq",
-                "main",
-                gh_marks_arm,
-                lambda _m: None,
-                gh_read=read_lists_then_exhausts,
-            ),
-            log=lambda _m: None,
-        )
-    except GhError as error:
-        assert "CAS rejection" in str(error), error
-    else:
-        raise AssertionError(
-            "a failed arm mutation must NOT be masked as success when the follow-up "
-            "diagnostic read exhausts its transient retries"
-        )
+    messages: list[str] = []
+    code = run_sweep(
+        AutoArmer(
+            "sparq-org/sparq",
+            "main",
+            gh_marks_arm,
+            messages.append,
+            gh_read=read_lists_then_exhausts,
+        ),
+        log=lambda _m: None,
+    )
+    assert code == 1, (
+        "a failed arm mutation must NOT be masked as success when the follow-up "
+        f"diagnostic read exhausts its transient retries (code={code}, {messages})"
+    )
+    assert any("CAS rejection" in message for message in messages), messages
+    assert any(
+        "arm-failure summary" in message for message in messages
+    ), messages
+    # It is a per-PR failure, not a capability failure: no ::error, no capability latch.
+    assert not [m for m in messages if m.startswith("::error")], messages
 
     # [FABLE-5] #3759 finding 5: EVENT-mode (label-triggered) arm must NOT use the
     # sweep's lenient exit — an exhausted transient exits NON-zero (there is no
@@ -595,7 +933,159 @@ def self_test() -> None:
     assert code == 0, code
     assert warnings and warnings[0].startswith("::warning"), warnings
 
+    # ---------------------------------------------------------------------------------
+    # [OPUS-5] #3760 — ARM CAPABILITY + PER-PR FAILURE ISOLATION.
+    # ---------------------------------------------------------------------------------
+
+    # The live #3760 error text classifies as a CAPABILITY denial; a CAS/race/transient
+    # does not (the denial set must stay disjoint from #3759's transient set, or a
+    # permanent denial could be swallowed as ::warning + exit 0).
+    assert is_arm_denial(DENIAL_TEXT), DENIAL_TEXT
+    assert is_arm_denial(DENIAL_TEXT.upper()), "denial matching must be case-insensitive"
+    for benign in (
+        "simulated expectedHeadOid CAS rejection",
+        "gh api graphql failed: HTTP 502: 502 Bad Gateway",
+        "gh api graphql failed: HTTP 504: Gateway Timeout",
+        "gh api graphql failed: Head branch was modified. Review and try again",
+    ):
+        assert not is_arm_denial(benign), benign
+
+    # (1) PROBE — can-arm: the probe runs BEFORE any mutation, the sweep proceeds, exit 0.
+    fake, messages, outcome = exercise(clean)
+    assert outcome.capability == CAN_ARM, outcome
+    assert outcome.armed == 1 and outcome.exit_code == 0, (outcome, messages)
+    assert len(probe_query_calls(fake)) == 1, fake.calls
+    assert fake.calls.index(probe_query_calls(fake)[0]) < fake.calls.index(
+        graphql_calls(fake)[0]
+    ), fake.calls
+    assert any("arm-capability probe: can-arm" in m for m in messages), messages
+
+    # (2) PROBE — cannot-arm (repository setting OFF): ONE ::error naming the exact
+    # setting, ZERO PRs touched (the listing never even runs), exit 1.
+    fake, messages, outcome = exercise(clean, auto_merge_allowed=False)
+    assert outcome.capability == CANNOT_ARM and outcome.exit_code == 1, outcome
+    assert not graphql_calls(fake), fake.calls
+    assert not [call for call in fake.calls if call[:2] == ["pr", "list"]], fake.calls
+    emitted = [message for message in messages if message.startswith("::error")]
+    assert len(emitted) == 1, emitted
+    assert "Allow auto-merge" in emitted[0], emitted
+    assert "contents: write" in emitted[0], emitted
+    assert "ORCHESTRATOR_APP_ID" in emitted[0], emitted
+
+    # (3) PROBE — cannot-arm (the token itself is denied by GitHub): same single error.
+    fake, messages, outcome = exercise(clean, capability_error=DENIAL_TEXT)
+    assert outcome.capability == CANNOT_ARM and outcome.exit_code == 1, outcome
+    assert not graphql_calls(fake), fake.calls
+    assert len([m for m in messages if m.startswith("::error")]) == 1, messages
+
+    # (4) PROBE — inconclusive must NEVER red the run or stop the sweep, including an
+    # exhausted #3759 transient on the probe read itself.
+    for kwargs in (
+        {"capability_error": "gh api graphql failed: HTTP 504: Gateway Timeout"},
+        {"auto_merge_allowed": None},
+    ):
+        fake, messages, outcome = exercise(clean, **kwargs)
+        assert outcome.capability == INCONCLUSIVE, (kwargs, outcome)
+        assert outcome.armed == 1 and outcome.exit_code == 0, (kwargs, outcome)
+        assert not [m for m in messages if m.startswith("::error")], messages
+
+    fake = FakeGh(clean)
+
+    def probe_exhausts(argv: list[str]) -> str:
+        if is_capability_query(argv):
+            raise gh_retry.GhTransientExhausted("gh api graphql: HTTP 504 (3 attempts)")
+        return fake(argv)
+
+    probe_verdict = AutoArmer(
+        "sparq-org/sparq", "main", fake, lambda _m: None, gh_read=probe_exhausts
+    ).probe_arm_capability()
+    assert probe_verdict.status == INCONCLUSIVE, probe_verdict
+    assert "transient" in probe_verdict.detail, probe_verdict
+
+    # (5) PER-PR ARM FAILURE — the pre-#3760 bug: a non-capability mutation failure on the
+    # FIRST PR re-raised out of run(), so PR #452 below was never armed. Now the failure is
+    # collected, the sweep continues, and the run still exits non-zero.
+    first = fixture(number=451)
+    second = fixture(number=452)
+    fake, messages, outcome = exercise(
+        [first, second],
+        mutation_errors={451: "gh api graphql failed: Pull request is in unstable status"},
+    )
+    assert outcome.considered == 2, outcome
+    assert outcome.armed == 1, (outcome, messages)
+    assert [number for number, _ in outcome.arm_failures] == [451], outcome
+    assert outcome.exit_code == 1, messages
+    assert any("PR #451: arm-failed" in m for m in messages), messages
+    assert any("PR #452: armed head" in m for m in messages), messages
+    assert any("arm-failure summary: PR #451" in m for m in messages), messages
+    assert not [m for m in messages if m.startswith("::error")], messages
+    assert outcome.capability == CAN_ARM, outcome
+
+    # (6) MID-SWEEP CAPABILITY DENIAL — stop after ONE ::error (never one per PR), leave
+    # the remaining candidates untouched, and still exit non-zero.
+    third = fixture(number=453)
+    fake, messages, outcome = exercise(
+        [first, second, third],
+        mutation_errors={number: DENIAL_TEXT for number in (451, 452, 453)},
+    )
+    assert len(graphql_calls(fake)) == 1, fake.calls
+    assert outcome.capability == CANNOT_ARM, outcome
+    assert outcome.armed == 0, outcome
+    assert [number for number, _ in outcome.arm_failures] == [451], outcome
+    assert outcome.exit_code == 1, messages
+    emitted = [message for message in messages if message.startswith("::error")]
+    assert len(emitted) == 1, emitted
+    assert "contents: write" in emitted[0], emitted
+    assert sum("arm capability lost" in m for m in messages) == 2, messages
+
+    # (7) EXIT SEMANTICS — an arm failure must never exit 0, in EITHER mode. A capability
+    # failure is not a transient, so --mode sweep must not convert it into ::warning + 0.
+    assert ArmOutcome().exit_code == 0
+    assert ArmOutcome(arm_failures=[(1, "x")]).exit_code == 1
+    assert ArmOutcome(capability=CANNOT_ARM).exit_code == 1
+    assert ArmOutcome(capability=INCONCLUSIVE).exit_code == 0
+    for mode in ("sweep", "event"):
+        blocked_fake = FakeGh(clean, auto_merge_allowed=False)
+        emitted = []
+        code = run_sweep(
+            AutoArmer("sparq-org/sparq", "main", blocked_fake, emitted.append),
+            log=emitted.append,
+            mode=mode,
+        )
+        assert code == 1, (mode, code, emitted)
+        assert len([m for m in emitted if m.startswith("::error")]) == 1, emitted
+        assert not [m for m in emitted if m.startswith("::warning")], emitted
+
+    # (8) The standalone probe entry point agrees with the in-sweep verdict.
+    blocked = AutoArmer(
+        "sparq-org/sparq",
+        "main",
+        FakeGh(clean, auto_merge_allowed=False),
+        lambda _message: None,
+    )
+    assert blocked.probe_arm_capability().status == CANNOT_ARM
+    assert probe_arm_capability_exit(blocked) == 1
+    healthy = AutoArmer(
+        "sparq-org/sparq", "main", FakeGh(clean), lambda _message: None
+    )
+    assert healthy.probe_arm_capability().status == CAN_ARM
+    assert probe_arm_capability_exit(healthy) == 0
+
     print("auto-arm self-test: PASS")
+
+
+def probe_arm_capability_exit(armer: AutoArmer) -> int:
+    """Run ONLY the startup probe: 0 = armable (or inconclusive), 1 = provably not.
+
+    Wired as its own workflow step so the job reds at second three with one actionable
+    ::error instead of failing per-PR on every label event, forever.
+    """
+    verdict = armer.probe_arm_capability()
+    armer.log(f"[{PROGRAM}] arm-capability probe: {verdict.status} — {verdict.detail}")
+    if verdict.blocks_sweep:
+        armer.fail_capability(f"startup arm-capability probe failed: {verdict.detail}")
+        return 1
+    return 0
 
 
 def main() -> int:
@@ -614,6 +1104,11 @@ def main() -> int:
         ),
     )
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument(
+        "--probe-arm-capability",
+        action="store_true",
+        help="only verify the token can enable auto-merge here; arm nothing",
+    )
     args = parser.parse_args()
 
     if args.self_test:
@@ -621,9 +1116,10 @@ def main() -> int:
         return 0
     if not args.repo:
         parser.error("--repo is required unless --self-test is used")
-    return run_sweep(
-        AutoArmer(args.repo, args.default_branch, gh_read=run_gh_read), mode=args.mode
-    )
+    armer = AutoArmer(args.repo, args.default_branch, gh_read=run_gh_read)
+    if args.probe_arm_capability:
+        return probe_arm_capability_exit(armer)
+    return run_sweep(armer, mode=args.mode)
 
 
 if __name__ == "__main__":

@@ -9,7 +9,12 @@ on:
     - cron: "4,14,24,34,44,54 * * * *"
   workflow_dispatch:
 
-# Enabling auto-merge needs only repository contents + pull-request write access.
+# Enabling auto-merge needs repository contents + pull-request WRITE access. Both are
+# load-bearing: enablePullRequestAutoMerge is a repository write operation, so demoting
+# `contents` to `read` makes every arm fail with "Resource not accessible by integration
+# (enablePullRequestAutoMerge)" — the #3760 outage, which the re-arm sweeper hit with
+# exactly that misconfiguration while THIS workflow armed fine (runs 30033315483 vs
+# 30027010495). Pinned by scripts/tests/test_arm_capability_wiring.py.
 permissions:
   contents: write
   pull-requests: write
@@ -47,6 +52,23 @@ jobs:
           python3 scripts/gh_retry.py --self-test
           python3 scripts/auto-arm.py --self-test
 
+      # [OPUS-5] #3760 — fail loud ONCE at the start when the token provably cannot arm,
+      # instead of a per-PR failure on every label event. Must use the same GH_TOKEN
+      # expression as the arm step below (pinned by the wiring test).
+      - name: Probe arm capability (one loud error, never per-PR)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: >-
+          python3 scripts/auto-arm.py
+          --repo "$REPO"
+          --default-branch "$DEFAULT_BRANCH"
+          --probe-arm-capability
+
+      # A per-PR arm failure no longer re-raises out of the sweep (pre-#3760 it did, so a
+      # single failing PR stopped every later candidate from ever being armed). Failures
+      # are collected, summarised, and the run exits non-zero.
       - name: Arm eligible PRs
         env:
           GH_TOKEN: ${{ github.token }}
