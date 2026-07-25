@@ -2636,6 +2636,51 @@ class TestVacuousRunExclusion(unittest.TestCase):
                     f"run's remaining jobs cannot have been observed yet, so 'every observed "
                     f"conclusion is skipped' says nothing about what it will produce")
 
+    def test_every_passing_conclusion_is_demotable(self):
+        """THE INVARIANT, asserted structurally so the two sets cannot drift apart again.
+
+        A conclusion the gate honours as PASSING but which cannot be demoted is laundering
+        waiting to happen: the run stays authoritative and its all-`skipped` legs satisfy the
+        gate over whatever it superseded. `neutral` was exactly that gap. This fails the moment
+        anyone adds a conclusion to `_PASSING` without it becoming demotable."""
+        self.assertEqual(
+            set(g._PASSING) - set(g._VACUOUS_OK_CONCLUSIONS), set(),
+            "a conclusion the gate treats as PASSING is not demotable as vacuous — an "
+            "all-skipped run with that conclusion would stay authoritative and its skipped "
+            "legs would satisfy the gate over a superseded failure")
+
+    def test_a_neutral_all_skipped_run_cannot_supersede_a_FAILURE(self):
+        """END-TO-END regression for the gap above, driving the production resolver and
+        verdict rather than the predicate alone — which is how it hid: the conclusion subtest
+        classified `neutral` as protected and never combined it with an older failure.
+
+        Reproduced on head 89aabfb8 before the fix: `vacuous ids: set()`, only the newer
+        skipped legs resolved, `ci-summary: PASSED`, exit 0 — over a failed run."""
+        failed = W(901, 77, name="vectorized-feature-off", conclusion="failure",
+                   created="2026-07-25T10:00:00Z")
+        neutral = W(902, 77, name="vectorized-feature-off", conclusion="neutral",
+                    created="2026-07-25T11:00:00Z")
+        checks = [
+            _check(VFO_QUICK, run_id=901, conclusion="failure", rid=91),
+            _check(VFO_HEAVY, run_id=901, conclusion="failure", rid=92),
+            _check(VFO_QUICK, run_id=902, conclusion="skipped", rid=93,
+                   started="2026-07-25T11:00:05Z"),
+            _check(VFO_HEAVY, run_id=902, conclusion="skipped", rid=94,
+                   started="2026-07-25T11:00:05Z"),
+        ]
+        self.assertIn(
+            902, g.vacuous_run_ids(checks, [failed, neutral]),
+            "an all-skipped run concluding `neutral` was not demoted, so it stays "
+            "authoritative and erases the real failed legs")
+        resolved, _ = g.resolve_newest_workflow_runs(
+            checks, [failed, neutral], "999",
+            no_leg_ids=g.vacuous_run_ids(checks, [failed, neutral]))
+        with redirect_stdout(io.StringIO()):
+            self.assertNotEqual(
+                g.render_verdict(resolved), 0,
+                "the gate PASSED over a FAILED vectorized-feature-off run because a later "
+                "neutral no-op run's skipped legs replaced it")
+
     def test_only_success_and_skipped_conclusions_can_demote_a_run(self):
         """FAIL-CLOSED DIRECTION of the new conjunct, stated over every conclusion rather
         than the two that bit us. `_VACUOUS_OK_CONCLUSIONS` is an ALLOW-list precisely so a
@@ -2644,10 +2689,14 @@ class TestVacuousRunExclusion(unittest.TestCase):
         any of the terminal-failure conclusions to it, makes this RED."""
         old = W(701, 77, name="vectorized-feature-off", conclusion="success",
                 created="2026-07-25T07:15:37Z")
-        demotable, protected = {"success", "skipped"}, {
-            "failure", "cancelled", "timed_out", "action_required", "neutral", "stale",
+        # Derived, not hard-coded: this subtest previously listed `neutral` as protected and
+        # thereby PINNED the very gap the invariant above now forbids — a test written to match
+        # the implementation instead of the requirement.
+        demotable = set(g._VACUOUS_OK_CONCLUSIONS)
+        protected = {
+            "failure", "cancelled", "timed_out", "action_required", "stale",
             "startup_failure", "a_conclusion_github_has_not_invented_yet", "", None,
-        }
+        } - demotable
         for conclusion in demotable | protected:
             with self.subTest(conclusion=conclusion):
                 newer = W(702, 77, name="vectorized-feature-off", conclusion=conclusion,

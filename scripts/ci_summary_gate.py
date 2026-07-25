@@ -903,13 +903,27 @@ def no_leg_run_ids(check_runs: list[dict]) -> set[int]:
     return out
 
 
-# The only workflow-run conclusions a run may be DEMOTED as vacuous under. A run whose every
-# job skipped concludes `success` (GitHub occasionally reports `skipped` at run level), so this
-# covers the real case exactly. Everything else — `failure`, `cancelled`, `timed_out`,
-# `action_required`, `neutral`, `stale`, and any conclusion added later — keeps the run
-# authoritative, which is the fail-closed direction: an unrecognised conclusion must never buy
-# a demotion. Deliberately an allow-list, not a deny-list, for that reason.
-_VACUOUS_OK_CONCLUSIONS = frozenset({"success", "skipped"})
+# The workflow-run conclusions a run may be DEMOTED as vacuous under. DERIVED from _PASSING,
+# never written out again, because the two sets are not independent — see below.
+#
+# THE INVARIANT: every conclusion the gate honours as PASSING must be demotable.
+#
+# The first cut of this hand-wrote {"success", "skipped"} and argued that leaving everything
+# else authoritative was "the fail-closed direction, an unrecognised conclusion must never buy
+# a demotion". That conflates two different directions. Keeping a vacuous run authoritative is
+# only safe when that run's legs CANNOT satisfy the gate. `neutral` is in _PASSING, so the gap
+# was directly exploitable and cross-provider review reproduced it on head 89aabfb8:
+#
+#   run 901 older, FAILED. run 902 newer, concluded `neutral`, both jobs skipped. 902 is not
+#   demotable (neutral was absent here) => stays authoritative => its two `skipped` legs are in
+#   _PASSING => ci-summary PASSED, exit 0, over a failed run.
+#
+# Conclusions OUTSIDE _PASSING (`failure`, `cancelled`, `timed_out`, `action_required`, `stale`)
+# stay non-demotable and that IS fail-closed for them: their legs cannot satisfy the gate, so
+# keeping them authoritative makes the gate hold or fail rather than launder. Derivation makes
+# the pairing structural — adding a conclusion to _PASSING can no longer silently open a new
+# gap, and `test_every_passing_conclusion_is_demotable` asserts it.
+_VACUOUS_OK_CONCLUSIONS = frozenset(_PASSING)
 
 
 def vacuous_run_ids(
@@ -940,7 +954,9 @@ def vacuous_run_ids(
       * a vacuous run is excluded only when a sibling run of the SAME workflow exists
         to be authoritative instead, so this can never un-require a lane whose only
         run on the SHA was all-skipped (that stays satisfied, as before);
-      * the RUN ITSELF must be terminal and must not have failed. Observed check-runs are
+      * the RUN ITSELF must be terminal and its conclusion must be one the gate honours as
+        PASSING (_VACUOUS_OK_CONCLUSIONS, derived from _PASSING — a passing conclusion that
+        were not demotable would be laundering waiting to happen). Observed check-runs are
         a possibly-strict SUBSET of a run's jobs, so "every observed conclusion is
         skipped" does not entail "this run did no work" — see _vacuous. Without this,
         a FAILED run whose failing leg had evaporated from the snapshot, and a merely
