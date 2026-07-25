@@ -131,7 +131,7 @@ fn wac_write_enforcement_matches_grants() {
 /// `user="…",public="…"` format against the hand-computed fixture access matrix above.
 #[test]
 fn wac_allow_header_advertises_held_modes() {
-    let mut s = store();
+    let s = store();
     let sess = |agent: Option<&'static str>| Session { agent, client: None, issuer: None, now: None };
     let res = |g: &str| NamedNode::new(g).expect("valid IRI");
 
@@ -162,6 +162,6 @@ fn wac_allow_header_advertises_held_modes() {
     assert_eq!(s.wac_allow(&sess(Some(ALICE)), &unknown), r#"user="",public="""#);
 
     // 6. Fail-closed before materialization: an un-materialized store grants nothing.
-    let mut bare = PodStore::new(Graph::load_dataset(&wac_fixture(), "nquads").expect("fixture loads"));
+    let bare = PodStore::new(Graph::load_dataset(&wac_fixture(), "nquads").expect("fixture loads"));
     assert_eq!(bare.wac_allow(&sess(Some(ALICE)), &pub1), r#"user="",public="""#);
 }

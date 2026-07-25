@@ -1,0 +1,9 @@
+BASE <http://example.org/leak>
+
+PREFIX ex: <http://example.org/test#>
+
+shape ex:TestShape {
+	ex:property ex:TestClass %
+		ex:myPropertyEscape 1
+	% .
+}

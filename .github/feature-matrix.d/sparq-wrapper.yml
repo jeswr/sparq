@@ -1,0 +1,45 @@
+# Feature-matrix fragment for `sparq-wrapper`.
+#
+# One self-contained leg mapping per opt-in feature(group). Assembled into the
+# feature-matrix `opt-in-features` strategy by scripts/assemble-feature-matrix.py.
+# Each emitted check-run name is `opt-in <name>` and is discovered by the
+# ci-summary gate aggregator, so names must remain unique and stable. [GPT-5.6]
+#
+# All five proposal implementations are default-OFF. Their code and integration
+# tests therefore need explicit feature legs instead of relying on the workspace's
+# default-feature lane. [GPT-5.6] sq-1rg2q
+- name: "sparq-wrapper (proposed-cardinality)"
+  crate: "sparq-wrapper"
+  features: "proposed-cardinality"
+  test: true
+
+- name: "sparq-wrapper (proposed-codecs)"
+  crate: "sparq-wrapper"
+  features: "proposed-codecs"
+  test: true
+
+- name: "sparq-wrapper (proposed-distinct)"
+  crate: "sparq-wrapper"
+  features: "proposed-distinct"
+  test: true
+
+- name: "sparq-wrapper (proposed-observe)"
+  crate: "sparq-wrapper"
+  features: "proposed-observe"
+  test: true
+
+- name: "sparq-wrapper (proposed-typed-focus)"
+  crate: "sparq-wrapper"
+  features: "proposed-typed-focus"
+  test: true
+
+# [GPT-5.6] sq-kf56o: compile and test the five proposals in composition.
+- name: "sparq-wrapper (proposed-composition)"
+  crate: "sparq-wrapper"
+  features: "proposed-distinct,proposed-cardinality,proposed-codecs,proposed-observe,proposed-typed-focus"
+  test: true
+
+- name: "sparq-wrapper (proposed-graph-scope)"
+  crate: "sparq-wrapper"
+  features: "proposed-graph-scope"
+  test: true

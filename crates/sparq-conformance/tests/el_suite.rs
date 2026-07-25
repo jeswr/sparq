@@ -56,9 +56,11 @@
 //! ## Feature gating (both states)
 //!
 //! The whole lane is behind this crate's opt-in `el-suite` feature (forwards to the
-//! OPT-IN `sparq-reason-el` crate). With the feature OFF this file compiles to a
-//! single self-SKIP `#[test]` (no EL classifier links — the lean opt-in posture, so
-//! the default + `--workspace` byte/bundle ratchets are byte-for-byte unchanged).
+//! OPT-IN `sparq-reason-el` crate AND also enables `sparq-reason-el/rbox` +
+//! `sparq-reason-el/cdomain` so the CI lane exercises the full shipped feature set —
+//! sq-pbz04.2.9). With the feature OFF this file compiles to a single self-SKIP
+//! `#[test]` (no EL classifier links — the lean opt-in posture, so the default +
+//! `--workspace` byte/bundle ratchets are byte-for-byte unchanged).
 //! The `all.rdf` export is fetched by `scripts/fetch-inference-suites.sh` into the
 //! gitignored `tests/w3c/owl2/`; when absent the runner SKIPS so a fresh offline
 //! checkout stays green. `EL_SUITE_FLOOR` is read TEXTUALLY by
@@ -84,30 +86,63 @@ mod gated {
     use sparq_conformance::inference::entail::{self, Recognized, Row};
     use sparq_conformance::rdf::MiniGraph;
     use sparq_core::dict::{Dict, Id};
-    use sparq_reason_el::classify_graph;
+    // [SONNET-4.6] sq-pbz04.2.10: use BOTH `classify_graph` (TBox rdfs:subClassOf +
+    // rdfs:subPropertyOf closure) AND `realize_graph` (ABox rdf:type / owl:sameAs /
+    // owl:differentFrom + whole-ontology inconsistency verdict) so the CI lane exercises
+    // the full shipped feature set: classify_graph first (materializes TBox subsumption +
+    // role-lattice into the triple list), then realize_graph on the augmented list (adds
+    // ABox rows + returns the inconsistency flag). The two-step composition is correct:
+    // `realize_graph` re-runs the extraction over the augmented list — the materialized
+    // `rdfs:subClassOf` edges are redundant but inert (the classifier's fixpoint is
+    // idempotent), and the ABox nomination derives off the SAME TBox closure the lane
+    // checks for entailment. The `classify_graph` import is retained; `realize_graph` is
+    // new under the sq-pbz04.2.10 `abox` forward.
+    use sparq_reason_el::{classify_graph, realize_graph};
     use std::path::PathBuf;
     use std::sync::mpsc;
     use std::time::Duration;
 
     /// The OWL 2 EL classification pass FLOOR (the RATCHET). The MEASURED count of
     /// selected EL (`test:EL` ∧ `test:RDF-BASED`, Approved, no-imports) check rows on
-    /// which `sparq_reason_el`'s classifier computes the expected outcome — consistency
-    /// (no unsatisfiable class), inconsistency (some unsatisfiable class), positive
-    /// entailment (conclusion entailed by the materialized lattice), or negative
+    /// which `sparq_reason_el`'s classifier + realiser compute the expected outcome —
+    /// consistency (no unsatisfiable class AND not whole-ontology inconsistent),
+    /// inconsistency (some unsatisfiable class OR whole-ontology ABox inconsistency),
+    /// positive entailment (conclusion entailed by the materialized closure), or negative
     /// entailment (non-conclusion not entailed). MIRRORED in the central scoreboard
     /// (`scoreboard::SUITES`) and read TEXTUALLY by the guard test
     /// `tests/scoreboard_floors.rs`. It may only RISE — never lower it (raise as the EL
     /// classifier's fragment coverage grows). This is the ACTUAL current pass count, not
     /// an aspirational target. HONESTLY a sparq EXTENSION-shaped ratchet over the EL
-    /// fragment the classifier implements, NOT a full-OWL-2-EL-conformance claim.
+    /// fragment the classifier + realiser implement, NOT a full-OWL-2-EL-conformance
+    /// claim.
     ///
-    /// FLOOR COMPOSITION (50 total): 45 consistency / 0 inconsistency /
-    /// 2 positive-entailment / 3 negative-entailment. Only 2 W3C rows exercise actual
-    /// derivation (WebOnt-equivalentClass-002: trivial equivalentClass → 2 subClassOf).
-    /// The lane-local `el_cr4_derivation_canary` test below closes the gap for CR4
+    /// FLOOR COMPOSITION (67 total): 45 consistency / 8 inconsistency /
+    /// 11 positive-entailment / 3 negative-entailment.
+    ///
+    /// The 8 inconsistency passes are ABox-driven inconsistencies newly detected via
+    /// `realize_graph` (sq-pbz04.2.10): DisjointClasses-002 (dual ClassAssertion into
+    /// disjoint classes), New-Feature-BottomObjectProperty-001 (∃⊥.⊤ instance),
+    /// New-Feature-Keys-002 (hasKey merge vs differentFrom), New-Feature-NegativeData-
+    /// PropertyAssertion-001 (data NPA + positive), New-Feature-NegativeObjectProperty-
+    /// Assertion-001 (object NPA + positive), WebOnt-Restriction-001/-002 (∃op.⊥ instance),
+    /// WebOnt-Thing-003 (global ⊤ ≡ ⊥).
+    ///
+    /// The 11 positive-entailment passes include the original 3 (WebOnt-equivalentClass-
+    /// 002/-003 + one further W3C case) plus 8 ABox graduates (sq-pbz04.2.10):
+    /// New-Feature-Keys-001/-003 (owl:sameAs via hasKey), New-Feature-SelfRestriction-001
+    /// (Peter likes Peter via hasSelf), WebOnt-Ontology-001 + WebOnt-equivalentClass-001
+    /// (rdf:type owl:Thing), WebOnt-differentFrom-001 (owl:differentFrom symmetric
+    /// closure), WebOnt-disjointWith-001 (derived owl:differentFrom from disjointWith),
+    /// WebOnt-equivalentProperty-003 (owl:equivalentProperty via mutual subPropertyOf
+    /// augmentation, sq-pbz04.2.10 augment_equivalent_properties).
+    ///
+    /// The lane-local `el_cr4_derivation_canary` test closes the gap for CR4
     /// existential/conjunction derivation — it is NOT counted into this floor.
-    /// [SONNET-4.6] sq-pbz04.2.4
-    pub const EL_SUITE_FLOOR: usize = 50;
+    /// [SONNET-4.6] sq-pbz04.2.4 / sq-pbz04.2.9 (RAISED 50→51) / sq-pbz04.2.10
+    /// (RAISED 51→67: ABox graduation — 8 inconsistency + 8 positive-entailment new
+    /// passes via abox+realize_graph; equivalentProperty augmentation graduates
+    /// WebOnt-equivalentProperty-003)
+    pub const EL_SUITE_FLOOR: usize = 67;
 
     const T: &str = "http://www.w3.org/2007/OWL/testOntology#";
     const OWL_ONTOLOGY: &str = "http://www.w3.org/2002/07/owl#Ontology";
@@ -147,101 +182,79 @@ mod gated {
     ///   EL — recorded as a skipped axiom).
     ///
     /// [SONNET-4.6] sq-pbz04.2.4
+    // [SONNET-4.6] sq-pbz04.2.10: pruned 16 graduated entries (now PASS via abox/realize_graph
+    // or augment_equivalent_properties): DisjointClasses-002, New-Feature-BottomObjectProperty-001,
+    // New-Feature-Keys-001/-002/-003, New-Feature-NegativeDataPropertyAssertion-001,
+    // New-Feature-NegativeObjectPropertyAssertion-001, New-Feature-SelfRestriction-001,
+    // WebOnt-Ontology-001, WebOnt-Restriction-001/-002, WebOnt-Thing-003,
+    // WebOnt-differentFrom-001, WebOnt-disjointWith-001, WebOnt-equivalentClass-001,
+    // WebOnt-equivalentProperty-003. Rationales for remaining 11 entries updated to reflect
+    // the two-step classify_graph + realize_graph composition now in the lane.
     const DOCUMENTED_DIVERGENCES: &[(&str, &str)] = &[
-        // --- positive-entailment: conclusion is an ABox individual fact ---
-        (
-            "New-Feature-Keys-001",
-            "PERMANENT — conclusion is the ABox fact `Peter owl:sameAs Peter_Griffin` derived \
-             via owl:hasKey; the TBox subsumption classifier emits no owl:sameAs and owl:hasKey \
-             is outside its fragment (individual equality is ABox — the RL path's job)",
-        ),
-        (
-            "New-Feature-Keys-003",
-            "PERMANENT — identical owl:hasKey-driven `Peter owl:sameAs Peter_Griffin` ABox \
-             conclusion as New-Feature-Keys-001; no owl:sameAs is emitted by the TBox classifier",
-        ),
+        // --- positive-entailment: instance-level property assertion outside realiser scope ---
         (
             "New-Feature-ObjectPropertyChain-001",
             "PERMANENT — conclusion is the ABox property assertion `Stewie hasAunt Carol` via an \
-             owl:propertyChainAxiom; role chains (CR10/CR11) are the OFF-by-default `rbox` feature \
-             and the conclusion is an instance fact, neither in this lane's TBox subsumption output",
+             owl:propertyChainAxiom; the realiser materialises type/sameAs/differentFrom rows from \
+             the saturated closure but does NOT emit instance-level property assertions at \
+             chain-derived positions (rbox/CR10/CR11 drives TBox class-subsumption derivation; \
+             property-chain ABox expansion is outside the realiser's contract)",
         ),
         (
             "New-Feature-ObjectPropertyChain-BJP-003",
-            "PERMANENT — ABox property assertion `a p c` via a property chain; RBox (CR10/CR11) is \
-             the OFF-by-default `rbox` feature and the conclusion is an instance fact",
+            "PERMANENT — conclusion is the ABox property assertion `a p c` via a property chain; \
+             the realiser does not emit instance-level property assertions from chain derivations \
+             (rbox drives class-subsumption, not ABox property-assertion output)",
         ),
         (
             "New-Feature-ReflexiveProperty-001",
             "PERMANENT — conclusion is the ABox assertion `Peter knows Peter` from a reflexive \
-             object property; general role reflexivity is RBox/ABox, not a TBox class subsumption",
-        ),
-        (
-            "New-Feature-SelfRestriction-001",
-            "PERMANENT — conclusion `Peter likes Peter` from owl:hasSelf; owl:hasSelf is outside \
-             the classifier's EL fragment and the conclusion is an ABox fact",
+             object property; owl:ReflexiveObjectProperty introduces a universal self-loop for ALL \
+             individuals, which the realiser does not implement (only the per-individual hasSelf \
+             mechanism from owl:hasSelf restrictions is handled, sq-pbz04.2.6)",
         ),
         (
             "New-Feature-SelfRestriction-002",
-            "PERMANENT — conclusion types the individual Peter into an owl:hasSelf restriction; \
-             owl:hasSelf is outside the classifier's EL fragment and ClassAssertion is ABox",
-        ),
-        (
-            "WebOnt-Ontology-001",
-            "PERMANENT — conclusion is the ABox ClassAssertions `auto/car rdf:type owl:Thing`; \
-             the TBox classifier emits no instance typings",
-        ),
-        (
-            "WebOnt-differentFrom-001",
-            "PERMANENT — conclusion is the ABox fact `b owl:differentFrom a`; individual \
-             (in)equality is ABox, outside the TBox subsumption lattice",
-        ),
-        (
-            "WebOnt-disjointWith-001",
-            "PERMANENT — conclusion is the ABox fact `a owl:differentFrom b` derived from a \
-             disjointWith; individual inequality is ABox",
-        ),
-        (
-            "WebOnt-equivalentClass-001",
-            "PERMANENT — conclusion is the ABox ClassAssertions `auto/car rdf:type owl:Thing`; \
-             no instance typings are emitted by the TBox classifier",
+            "PERMANENT — conclusion types individual Peter into an owl:hasSelf restriction (the \
+             CONVERSE of CR-Self-1: a raw self-loop forces ∃r.Self class membership); the realiser \
+             handles the forward direction (hasSelf restriction → self-loop, sq-pbz04.2.6) but not \
+             the reverse nominal readoff that adds a ClassAssertion for the anonymous hasSelf class \
+             (documented sq-pbz04.2.6 follow-up)",
         ),
         (
             "WebOnt-equivalentProperty-001",
-            "PERMANENT — conclusion is the ABox property assertion `X hasHead Y` via property \
-             equivalence; property (RBox) reasoning is the OFF-by-default `rbox` feature and the \
-             conclusion is an instance fact",
+            "PERMANENT — conclusion is the ABox property assertion `X hasHead Y` where `hasHead` \
+             is declared equivalent to `hasLeader` via owl:equivalentProperty; the rbox extractor \
+             does NOT extract owl:equivalentProperty axioms as role inclusions (only \
+             rdfs:subPropertyOf, owl:propertyChainAxiom, and owl:TransitiveProperty are extracted), \
+             so no role-inclusion edge exists and the realiser cannot derive the instance-level \
+             property assertion",
         ),
         (
             "WebOnt-sameAs-001",
-            "PERMANENT — conclusion transfers an annotation across an owl:sameAs individual merge \
-             (`c2 first:annotate ...`); annotation + individual equality are ABox, outside the \
-             TBox subsumption lattice",
+            "PERMANENT — conclusion transfers an annotation-property value across an owl:sameAs \
+             individual merge (`c2 first:annotate ...`); the ABox realiser propagates rdf:type \
+             assertions through sameAs merges (sq-pbz04.2.5) but does NOT transfer arbitrary \
+             annotation-property assertions — annotation propagation is outside its contract",
         ),
-        // --- positive-entailment: TBox axiom in a form the classifier does not emit / outside EL ---
+        // --- positive-entailment: TBox axiom form not emitted / outside EL ---
         (
             "chain2trans1",
             "PERMANENT — conclusion is the TBox property axiom `p rdf:type owl:TransitiveProperty` \
-             (from a self property-chain); role reasoning (CR10/CR11) is the OFF-by-default `rbox` \
-             feature and no rule emits owl:TransitiveProperty",
-        ),
-        (
-            "WebOnt-equivalentClass-003",
-            "PERMANENT — the classifier materializes the two-way rdfs:subClassOf edges \
-             (Car ⊑ Automobile ∧ Automobile ⊑ Car) but emits them as rdfs:subClassOf, not the \
-             owl:equivalentClass axiom the conclusion asserts, so the syntactic bnode-homomorphism \
-             check does not match (an output-vocabulary divergence, not an inference gap)",
+             (from a self property-chain); rbox/CR10/CR11 is on but no EL rule emits the \
+             owl:TransitiveProperty axiom form — the classifier emits rdfs:subClassOf and \
+             rdfs:subPropertyOf role-inclusion edges, not property-type declarations",
         ),
         (
             "WebOnt-equivalentProperty-002",
             "PERMANENT — conclusion is the property subsumption `hasHead rdfs:subPropertyOf \
-             hasLeader` (both directions); property/RBox reasoning is the OFF-by-default `rbox` \
-             feature (roles are compared for equality only here)",
-        ),
-        (
-            "WebOnt-equivalentProperty-003",
-            "PERMANENT — conclusion is `hasHead owl:equivalentProperty hasLeader`; property/RBox \
-             reasoning is the OFF-by-default `rbox` feature",
+             hasLeader` (both directions); the rbox extractor does NOT extract the \
+             owl:equivalentProperty axiom in the premise as role inclusions (only \
+             rdfs:subPropertyOf, owl:propertyChainAxiom, and owl:TransitiveProperty are \
+             extracted), so no rdfs:subPropertyOf is derived in either direction — distinct from \
+             WebOnt-equivalentProperty-003 (graduated sq-pbz04.2.10) where EXPLICIT \
+             rdfs:subPropertyOf triples in the premise let the rbox closure and \
+             augment_equivalent_properties complete the conclusion",
         ),
         (
             "WebOnt-I5.5-005",
@@ -249,61 +262,20 @@ mod gated {
              class; owl:unionOf is outside EL (recorded as a skipped axiom) and no EL rule emits \
              union / rdf:List cells",
         ),
-        // --- inconsistency: TBox-only classifier finds unsatisfiable NAMED classes, not ABox/global clashes ---
-        (
-            "DisjointClasses-002",
-            "PERMANENT — the inconsistency is ABox-driven (`Stewie` asserted into both disjoint \
-             Boy and Girl); Boy/Girl are individually satisfiable, so no NAMED class is \
-             unsatisfiable — the classifier does not internalize ABox rdf:type assertions",
-        ),
+        // --- inconsistency: ABox clash not covered by the realiser ---
         (
             "New-Feature-BottomDataProperty-001",
-            "PERMANENT — an individual is typed into `∃owl:bottomDataProperty.Literal`; the clash \
-             is ABox (an instance of an unsatisfiable ANONYMOUS class), not a named-class \
-             unsatisfiability the TBox classifier surfaces",
-        ),
-        (
-            "New-Feature-BottomObjectProperty-001",
-            "PERMANENT — as New-Feature-BottomDataProperty-001 with owl:bottomObjectProperty: an \
-             ABox instance of `∃⊥.⊤`, so no NAMED class is unsatisfiable",
-        ),
-        (
-            "New-Feature-Keys-002",
-            "PERMANENT — an owl:hasKey collision forces `Peter sameAs Peter_Griffin` against a \
-             differentFrom; owl:hasKey is outside the classifier's fragment and the clash is ABox \
-             (individual (in)equality)",
+            "PERMANENT — an individual is typed into `∃owl:bottomDataProperty.Literal`; the ABox \
+             realiser handles owl:bottomObjectProperty (∃⊥.⊤ instance → whole-ontology \
+             inconsistency, sq-pbz04.2.5) but has no analogous rule for owl:bottomDataProperty — \
+             data-property bottom-class instances remain undetected",
         ),
         (
             "New-Feature-Keys-006",
-            "PERMANENT — a functional data property + owl:hasKey clash over the individual Peter; \
-             both owl:hasKey and functional-property ABox reasoning are outside the TBox classifier",
-        ),
-        (
-            "New-Feature-NegativeDataPropertyAssertion-001",
-            "PERMANENT — an owl:NegativePropertyAssertion contradicts an asserted data-property \
-             value; NegativePropertyAssertion + ABox are outside the TBox classifier",
-        ),
-        (
-            "New-Feature-NegativeObjectPropertyAssertion-001",
-            "PERMANENT — as the data-property case with an object property; \
-             NegativePropertyAssertion + ABox are outside the TBox classifier",
-        ),
-        (
-            "WebOnt-Restriction-001",
-            "PERMANENT — individuals a,b are typed into `∃op.owl:Nothing`; the clash is ABox \
-             (instances of an unsatisfiable ANONYMOUS class), so no NAMED class is unsatisfiable",
-        ),
-        (
-            "WebOnt-Restriction-002",
-            "PERMANENT — as WebOnt-Restriction-001 with a shared-nodeID restriction; an ABox \
-             instance clash, no named-class unsatisfiability",
-        ),
-        (
-            "WebOnt-Thing-003",
-            "PERMANENT — `owl:Thing owl:equivalentClass owl:Nothing` is a global ⊤ ⊑ ⊥ \
-             inconsistency; the classifier decides NAMED-class satisfiability (⊤/⊥ excluded from \
-             that surface) and by its documented contract does not decide whole-ontology \
-             consistency, so it flags no unsatisfiable named class",
+            "PERMANENT — a functional data property + owl:hasKey clash over individual Peter; \
+             owl:hasKey merges are handled by the realiser (sq-pbz04.2.8) but \
+             owl:FunctionalProperty enforcement (two distinct values for a functional property \
+             forces a sameAs merge) is outside the realiser's contract — the clash is undetected",
         ),
     ];
 
@@ -337,11 +309,18 @@ mod gated {
 
     /// The classification result of one premise ontology, produced under a watchdog.
     struct Classified {
-        /// The materialized closure (original premise + derived `rdfs:subClassOf`
-        /// edges), as term rows for the bnode-homomorphism entailment check.
+        /// The materialized closure (original premise + derived `rdfs:subClassOf` /
+        /// `rdfs:subPropertyOf` / `rdf:type` / `owl:sameAs` / `owl:differentFrom` edges),
+        /// as term rows for the bnode-homomorphism entailment check.
         closure: Vec<Row>,
         /// Count of named classes found unsatisfiable (`⊑ owl:Nothing`).
         unsatisfiable: usize,
+        /// [SONNET-4.6] sq-pbz04.2.10: whole-ontology inconsistency verdict from
+        /// `realize_graph` — `true` iff an asserted individual is forced into `⊥`, a
+        /// global `⊤ ⊑ ⊥`, an NPA clash, or a sameAs/differentFrom contradiction.
+        /// Distinct from `unsatisfiable > 0` (TBox named-class clash): `inconsistent`
+        /// captures ABox-level clashes the TBox classifier cannot see.
+        inconsistent: bool,
     }
 
     #[test]
@@ -509,18 +488,22 @@ mod gated {
             }
         }
 
-        // [SONNET-4.6] Positive-entailment sub-floor: at least 2 of the counted passes
+        // [SONNET-4.6] Positive-entailment sub-floor: at least 9 of the counted passes
         // must be positive-entailment checks. A neutered classifier (empty saturation)
-        // loses the 2 W3C positive-entailment passes, dropping this to 0 and turning
+        // loses all W3C positive-entailment passes, dropping this to 0 and turning
         // THIS assert RED before `fails.is_empty()` gets a chance to fire — so the
         // derivation gap is caught even if all new undocumented fails are added to the
         // divergence list first. See FLOOR COMPOSITION note on EL_SUITE_FLOOR.
+        // [SONNET-4.6] sq-pbz04.2.9: raised from 2 to 3 (WebOnt-equivalentClass-003).
+        // [SONNET-4.6] sq-pbz04.2.10: raised from 3 to 9 — 8 ABox positive-entailment
+        // tests now graduate via realize_graph + augment_equivalent_properties (total 11).
+        // A floor of 9 requires at least 6 ABox-mechanism passes (beyond the original 3).
         assert!(
-            positive_entailment_passes >= 2,
-            "OWL 2 EL positive-entailment sub-floor: expected >= 2 positive-entailment \
-             passes, got {} — floor composition (45 consistency / 0 inconsistency / \
-             2 positive-entailment / 3 negative-entailment) has shifted; a neutered \
-             classifier scores 0 here",
+            positive_entailment_passes >= 9,
+            "OWL 2 EL positive-entailment sub-floor: expected >= 9 positive-entailment \
+             passes, got {} — floor composition (45 consistency / 8 inconsistency / \
+             11 positive-entailment / 3 negative-entailment) has shifted; a neutered \
+             classifier or disabled ABox realiser scores 0 here (sq-pbz04.2.10)",
             positive_entailment_passes
         );
         // No silent fails: every failure must be an audited documented divergence.
@@ -627,8 +610,14 @@ mod gated {
         for kind in case.checks.clone() {
             let outcome = match kind {
                 "consistency" => {
-                    if classified.unsatisfiable == 0 {
+                    // [SONNET-4.6] sq-pbz04.2.10: a consistent ontology must have NEITHER
+                    // a TBox named-class clash NOR a whole-ontology ABox inconsistency.
+                    if classified.unsatisfiable == 0 && !classified.inconsistent {
                         Outcome::Pass
+                    } else if classified.inconsistent {
+                        Outcome::Fail(
+                            "wrongly judged whole-ontology inconsistent (ABox path)".into(),
+                        )
                     } else {
                         Outcome::Fail(format!(
                             "wrongly judged {} class(es) unsatisfiable",
@@ -637,12 +626,16 @@ mod gated {
                     }
                 }
                 "inconsistency" => {
-                    if classified.unsatisfiable > 0 {
+                    // [SONNET-4.6] sq-pbz04.2.10: the ABox-mechanism layer now detects
+                    // whole-ontology inconsistency via `realize_graph`'s `inconsistent`
+                    // verdict (covering ABox clashes the TBox classifier cannot see),
+                    // in addition to the TBox-level named-class clash (unsatisfiable > 0).
+                    if classified.inconsistent || classified.unsatisfiable > 0 {
                         Outcome::Pass
                     } else {
                         Outcome::Fail(
-                            "inconsistency not detected (no unsatisfiable named class — \
-                             ABox-only inconsistency is outside the TBox classifier)"
+                            "inconsistency not detected (neither a named-class TBox clash \
+                             nor a whole-ontology ABox inconsistency)"
                                 .into(),
                         )
                     }
@@ -654,12 +647,22 @@ mod gated {
                     Some(xml) => match parse_ontology(xml, &base) {
                         Err(e) => Outcome::Fail(format!("conclusion RDF/XML parse error: {}", e)),
                         Ok(conclusion) => {
+                            // [SONNET-4.6] sq-pbz04.2.9 — chain both augmentations:
+                            // (1) datatype axiomatic set (existing), then (2) the
+                            // output-vocabulary equivalentClass completion.
+                            // [SONNET-4.6] sq-pbz04.2.10 — (3) the equivalentProperty
+                            // mutual-rdfs:subPropertyOf completion (over the sq-pbz04.2.7
+                            // role-lattice output + the sq-pbz04.2.10 ABox-expanded closure).
                             let closure = augment_datatypes(&classified.closure, &conclusion, &d);
+                            let closure = augment_equivalent_classes(&closure);
+                            let closure = augment_equivalent_properties(&closure);
                             if entail::entails(&closure, &conclusion, &d) {
                                 Outcome::Pass
                             } else {
                                 Outcome::Fail(
-                                    "conclusion not entailed by the EL subsumption lattice".into(),
+                                    "conclusion not entailed by the EL subsumption \
+                                     lattice + ABox realisation"
+                                        .into(),
                                 )
                             }
                         }
@@ -689,17 +692,23 @@ mod gated {
         out
     }
 
-    /// Runs `classify_graph` on a watchdog thread, catching panics + capping runtime.
+    /// Runs `realize_graph` on a watchdog thread, catching panics + capping runtime.
     ///
-    /// [SONNET-4.6] Thread-lifecycle note: the JoinHandle is stored and then
-    /// EXPLICITLY dropped after `recv_timeout` returns. On the normal path the worker
-    /// has already sent its result and will exit momentarily; dropping the handle
-    /// detaches it (matching the pre-existing implicit-drop behaviour). On the 20 s
-    /// TIMEOUT path the worker may still be running — Rust's JoinHandle drop detaches
-    /// the thread and lets it run to completion or panic on its own; we have no
-    /// cancellation channel so this is the least-harmful option for a test-harness
-    /// thread. The explicit drop here (rather than the previous implicit statement-end
-    /// drop) makes the intentional detach visible to reviewers.
+    /// [SONNET-4.6] sq-pbz04.2.10: uses `realize_graph` (the ABox-aware entry) instead
+    /// of `classify_graph` so the lane exercises the full ABox-mechanism layer
+    /// (sq-pbz04.2.5–.8). The `AboxReport` carries both `unsatisfiable_classes` (TBox
+    /// named-class clashes) and `inconsistent` (whole-ontology ABox verdict); both are
+    /// forwarded to the outcome mapping in `run_case`.
+    ///
+    /// Thread-lifecycle note: the JoinHandle is stored and then EXPLICITLY dropped after
+    /// `recv_timeout` returns. On the normal path the worker has already sent its result
+    /// and will exit momentarily; dropping the handle detaches it (matching the
+    /// pre-existing implicit-drop behaviour). On the 20 s TIMEOUT path the worker may
+    /// still be running — Rust's JoinHandle drop detaches the thread and lets it run to
+    /// completion or panic on its own; we have no cancellation channel so this is the
+    /// least-harmful option for a test-harness thread. The explicit drop here (rather
+    /// than the previous implicit statement-end drop) makes the intentional detach
+    /// visible to reviewers.
     fn classify_under_watchdog(premise: Vec<Row>) -> Result<Classified, String> {
         let (tx, rx) = mpsc::channel();
         let handle = std::thread::spawn(move || {
@@ -709,25 +718,85 @@ mod gated {
                     .iter()
                     .map(|[s, p, o]| [dict.intern(s), dict.intern(p), dict.intern(o)])
                     .collect();
-                let report = classify_graph(&mut dict, &mut ids);
+                // [SONNET-4.6] sq-pbz04.2.10: two-step composition —
+                // Step 1: `classify_graph` materializes the TBox rdfs:subClassOf closure
+                //   (and rdfs:subPropertyOf role-lattice under `rbox`) into `ids`. This
+                //   gives the entailment check access to the full TBox derivations.
+                // Step 2: `realize_graph` on the augmented `ids` adds the ABox rows
+                //   (rdf:type, owl:sameAs, hasSelf self-loops, owl:differentFrom) and
+                //   returns the whole-ontology inconsistency verdict. The materialized
+                //   rdfs:subClassOf rows from step 1 are inert (the re-extraction sees
+                //   them as told inclusions, idempotent in the fixpoint), so the ABox
+                //   readoff derives off the same TBox closure the entailment check uses.
+                // The `unsatisfiable_classes` from step 1 covers named-class TBox clashes;
+                // `abox_report.inconsistent` covers whole-ontology ABox clashes.
+                let tbox_report = classify_graph(&mut dict, &mut ids);
+                // [FABLE-5] sq-wy3i6 (Phase E4, `el-suite-par`): the parallel-saturation
+                // differential over the REAL W3C EL corpus — `classify_graph_par` at
+                // thread counts 1/2/8 must reproduce the sequential closure EXACTLY
+                // (term-level triple-set equality; a fresh Dict per run, so id spaces
+                // are independent) and the same unsatisfiable-class count. Runs INSIDE
+                // the per-case watchdog so a livelocked parallel round cannot hang the
+                // lane; a mismatch panics → the case is a recorded FAIL → the
+                // undocumented-fail guard turns the lane red (loud, never silent).
+                #[cfg(feature = "el-suite-par")]
+                {
+                    let seq_set: std::collections::HashSet<Row> = ids
+                        .iter()
+                        .map(|&[s, p, o]| [dict.term(s), dict.term(p), dict.term(o)])
+                        .collect();
+                    for threads in [1usize, 2, 8] {
+                        let mut par_dict = Dict::new();
+                        let mut par_ids: Vec<[Id; 3]> = premise
+                            .iter()
+                            .map(|[s, p, o]| {
+                                [par_dict.intern(s), par_dict.intern(p), par_dict.intern(o)]
+                            })
+                            .collect();
+                        let par_report = sparq_reason_el::classify_graph_par(
+                            &mut par_dict,
+                            &mut par_ids,
+                            std::num::NonZeroUsize::new(threads).expect("non-zero"),
+                        );
+                        let par_set: std::collections::HashSet<Row> = par_ids
+                            .iter()
+                            .map(|&[s, p, o]| {
+                                [par_dict.term(s), par_dict.term(p), par_dict.term(o)]
+                            })
+                            .collect();
+                        assert_eq!(
+                            par_set, seq_set,
+                            "classify_graph_par(threads={threads}) closure diverged \
+                             from the sequential engine on this EL case"
+                        );
+                        assert_eq!(
+                            par_report.unsatisfiable_classes,
+                            tbox_report.unsatisfiable_classes,
+                            "classify_graph_par(threads={threads}) unsatisfiable-class \
+                             count diverged on this EL case"
+                        );
+                    }
+                }
+                let abox_report = realize_graph(&mut dict, &mut ids);
                 let closure: Vec<Row> = ids
                     .into_iter()
                     .map(|[s, p, o]| [dict.term(s), dict.term(p), dict.term(o)])
                     .collect();
                 Classified {
                     closure,
-                    unsatisfiable: report.unsatisfiable_classes,
+                    unsatisfiable: tbox_report.unsatisfiable_classes,
+                    inconsistent: abox_report.inconsistent,
                 }
             });
             let _ = tx.send(result);
         });
         let out = match rx.recv_timeout(TEST_TIMEOUT) {
             Ok(Ok(c)) => Ok(c),
-            Ok(Err(_)) => Err("EL classifier panicked".into()),
+            Ok(Err(_)) => Err("EL realiser panicked".into()),
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                Err("timeout (20s) in EL classification".into())
+                Err("timeout (20s) in EL realisation".into())
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err("EL classifier panicked".into()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err("EL realiser panicked".into()),
         };
         // Intentional detach: see the function-level comment above.
         drop(handle);
@@ -757,6 +826,111 @@ mod gated {
             }
         }
         closure
+    }
+
+    /// Output-vocabulary completion: T ⊨ 'A owl:equivalentClass B' iff BOTH
+    /// `A rdfs:subClassOf B` AND `B rdfs:subClassOf A` are in the materialized closure
+    /// (mutual subsumption is the semantic identity for owl:equivalentClass in OWL 2
+    /// RDF-based semantics — Table 8 of OWL 2 Mapping to RDF Graphs). The classifier
+    /// emits `rdfs:subClassOf` edges but not the axiom-form `owl:equivalentClass` triple;
+    /// adding it here is an EXACT output-vocabulary completion, NOT a test weakening.
+    ///
+    /// This mirrors the `augment_datatypes` precedent and is applied ONLY to the closure
+    /// used for the positive-entailment bnode-homomorphism check (the negative-entailment
+    /// path keeps the un-augmented closure, per the fail-closed invariant).
+    ///
+    /// [SONNET-4.6] sq-pbz04.2.9
+    fn augment_equivalent_classes(closure: &[Row]) -> Vec<Row> {
+        const RDFS_SUBCLASSOF: &str = "http://www.w3.org/2000/01/rdf-schema#subClassOf";
+        const OWL_EQUIVALENT_CLASS: &str = "http://www.w3.org/2002/07/owl#equivalentClass";
+
+        // Collect all (subject, object) pairs of rdfs:subClassOf where both subject and
+        // object are named nodes (not blank nodes).  A blank-node restriction keeps the
+        // augmentation conservative: anonymous restriction nodes are structural, not
+        // named classes, and the W3C equivalentClass tests only assert pairs of IRIs.
+        use std::collections::HashSet;
+        let mut sub_of: HashSet<(String, String)> = HashSet::new();
+        for [s, p, o] in closure {
+            if let (Term::NamedNode(sn), Term::NamedNode(pn), Term::NamedNode(on)) = (s, p, o) {
+                if pn.as_str() == RDFS_SUBCLASSOF {
+                    sub_of.insert((sn.as_str().to_string(), on.as_str().to_string()));
+                }
+            }
+        }
+
+        let mut extra: Vec<Row> = Vec::new();
+        let eq_prop = Term::NamedNode(oxrdf::NamedNode::new_unchecked(OWL_EQUIVALENT_CLASS));
+        for (a, b) in &sub_of {
+            if sub_of.contains(&(b.clone(), a.clone())) {
+                // Both A ⊑ B and B ⊑ A hold — emit A owl:equivalentClass B (one direction;
+                // the symmetric B owl:equivalentClass A will be emitted when (b,a) is the
+                // outer loop iteration).
+                let an = Term::NamedNode(oxrdf::NamedNode::new_unchecked(a.clone()));
+                let bn = Term::NamedNode(oxrdf::NamedNode::new_unchecked(b.clone()));
+                let row: Row = [an, eq_prop.clone(), bn];
+                if !closure.contains(&row) {
+                    extra.push(row);
+                }
+            }
+        }
+
+        if extra.is_empty() {
+            closure.to_vec()
+        } else {
+            let mut augmented = closure.to_vec();
+            augmented.extend(extra);
+            augmented
+        }
+    }
+
+    /// Output-vocabulary completion: T ⊨ 'A owl:equivalentProperty B' iff BOTH
+    /// `A rdfs:subPropertyOf B` AND `B rdfs:subPropertyOf A` are in the materialized closure
+    /// (mutual role inclusion is the semantic identity for owl:equivalentProperty in OWL 2
+    /// RDF-based semantics — the role-lattice counterpart of [`augment_equivalent_classes`]).
+    /// The sq-pbz04.2.7 `emit_role_pairs` readoff emits `rdfs:subPropertyOf` edges for every
+    /// non-reflexive told-inclusion-closure pair; this completion adds the axiom form on top.
+    ///
+    /// Applied ONLY to the closure used for the positive-entailment check (the negative-entailment
+    /// path keeps the un-augmented closure, per the fail-closed invariant). Named nodes only
+    /// (blank-node role nodes are structural, not named properties).
+    ///
+    /// [SONNET-4.6] sq-pbz04.2.10
+    fn augment_equivalent_properties(closure: &[Row]) -> Vec<Row> {
+        const RDFS_SUB_PROPERTY_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subPropertyOf";
+        const OWL_EQUIVALENT_PROPERTY: &str =
+            "http://www.w3.org/2002/07/owl#equivalentProperty";
+
+        use std::collections::HashSet;
+        let mut sub_of: HashSet<(String, String)> = HashSet::new();
+        for [s, p, o] in closure {
+            if let (Term::NamedNode(sn), Term::NamedNode(pn), Term::NamedNode(on)) = (s, p, o) {
+                if pn.as_str() == RDFS_SUB_PROPERTY_OF {
+                    sub_of.insert((sn.as_str().to_string(), on.as_str().to_string()));
+                }
+            }
+        }
+
+        let mut extra: Vec<Row> = Vec::new();
+        let eq_prop =
+            Term::NamedNode(oxrdf::NamedNode::new_unchecked(OWL_EQUIVALENT_PROPERTY));
+        for (a, b) in &sub_of {
+            if sub_of.contains(&(b.clone(), a.clone())) {
+                let an = Term::NamedNode(oxrdf::NamedNode::new_unchecked(a.clone()));
+                let bn = Term::NamedNode(oxrdf::NamedNode::new_unchecked(b.clone()));
+                let row: Row = [an, eq_prop.clone(), bn];
+                if !closure.contains(&row) {
+                    extra.push(row);
+                }
+            }
+        }
+
+        if extra.is_empty() {
+            closure.to_vec()
+        } else {
+            let mut augmented = closure.to_vec();
+            augmented.extend(extra);
+            augmented
+        }
     }
 
     /// Parses an inline RDF/XML ontology literal, dropping the ontology header
@@ -824,7 +998,7 @@ mod gated {
         let premise =
             parse_ontology(premise_xml, base).expect("canary premise RDF/XML must parse cleanly");
         let classified =
-            classify_under_watchdog(premise).expect("canary: classify_graph must not panic/timeout");
+            classify_under_watchdog(premise).expect("canary: EL realiser must not panic/timeout");
         // A ⊑ D must appear in the derived closure as a plain rdfs:subClassOf triple.
         // [SONNET-4.6] CodeQL positional format! args used throughout (rust/unused-variable guard).
         let a = Term::NamedNode(oxrdf::NamedNode::new_unchecked(
@@ -839,7 +1013,7 @@ mod gated {
         let expected: Row = [a, sub_class_of, d];
         assert!(
             classified.closure.contains(&expected),
-            "EL CR4 derivation canary FAILED: A ⊑ D not found in the classify_graph \
+            "EL CR4 derivation canary FAILED: A ⊑ D not found in the EL realiser \
              closure for TBox {{A ⊑ ∃r.B, B ⊑ C, ∃r.C ⊑ D}}. \
              A neutered (empty-saturation) classifier produces this failure — \
              restore CR1–CR6 saturation in sparq-reason-el::classify_graph."

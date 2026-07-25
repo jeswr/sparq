@@ -1,7 +1,0 @@
-[package]
-name = "xpath_test_xsfloat_from_int"
-type = "lib"
-authors = ["auto-generated"]
-
-[dependencies]
-xpath = { path = "../../xpath" }

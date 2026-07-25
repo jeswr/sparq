@@ -8,6 +8,15 @@ use oxrdf::vocab::xsd;
 use oxrdf::{Literal, NamedNode, Term};
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "schema-diff")]
+mod diff;
+#[cfg(feature = "schema-diff")]
+pub use diff::{DiffEntry, SchemaDiff};
+mod facets;
+pub use facets::{facets, FacetRequest, FacetResponse, PredicateValues};
+#[cfg(feature = "numeric-facets")]
+pub use facets::{NumericBucket, NumericFacet};
 use sparq_core::dict::{self, Id, TermParts, INLINE_BASE};
 use sparq_core::Graph;
 

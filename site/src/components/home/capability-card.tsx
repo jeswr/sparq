@@ -2,7 +2,7 @@
 // a numbered chip + theme title, the theme description, and a wrapped list of the theme's
 // REAL surfaces, each prefixed by its honesty-tier dot. All data is the single GROUPS source
 // (data/surfaces.ts) — theme label, description and every surface title/tier verbatim, links
-// resolved exactly as the prior Home did (deep page / /try keep their route, others go to the
+// resolved exactly as the prior Home did (deep pages keep their route, others go to the
 // /capabilities#theme anchor). The privacy theme's research-grade caveat already lives in its
 // GROUPS description, so the not-externally-audited caveat is rendered here unchanged.
 
@@ -16,10 +16,9 @@ import {
 import { type Surface, type SurfaceGroup } from "@/data/surfaces";
 import { TierDot } from "@/components/home/tier-dot";
 
-/** A surface's link on Home → its post-redesign home (deep page, /try, or /capabilities#theme). */
+/** A surface's link on Home → its post-redesign home (a deep page, or /capabilities#theme). */
 function surfaceHref(surface: Surface, groupId: string): string {
   if (DEEP_PAGE_SLUGS.has(surface.slug)) return surface.href;
-  if (surface.slug === "try") return surface.href;
   return capabilityAnchor(groupId);
 }
 

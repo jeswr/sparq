@@ -1,0 +1,5 @@
+{
+  "pr": 1785,
+  "date": "2026-07-09",
+  "reason": "sq-7d3dj.30.11: the round-2 EXISTS re-entry defence splits the always-compiled `eval_exists` into a thin `eval_exists` wrapper + an always-compiled `eval_exists_inner` holding the verbatim prior body (only the two return arms are cfg-gated on `id-filter-fastpath`; the inner fn is defined unconditionally). This always-compiled refactor plus the surrounding always-compiled edits shift panic-location line numbers and MOVE bytes in the feature-OFF sparq-wasm bundle, so it no longer matches base byte-for-byte. Behaviour-identical: with the feature OFF the wrapper's `#[cfg(not(feature = \"id-filter-fastpath\"))]` arm calls `eval_exists_inner` directly (no thread-local install, no fast-path column set compiled), so the feature-OFF EXISTS path executes the identical logic as base — only the bytes moved. No new dependencies, no `unsafe`."
+}

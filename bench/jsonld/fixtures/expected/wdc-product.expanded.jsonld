@@ -1,0 +1,215 @@
+[
+  {
+    "@id": "https://example.org/store/products/4006381333931",
+    "@type": [
+      "http://schema.org/Product"
+    ],
+    "http://schema.org/aggregateRating": [
+      {
+        "@type": [
+          "http://schema.org/AggregateRating"
+        ],
+        "http://schema.org/bestRating": [
+          {
+            "@type": "http://www.w3.org/2001/XMLSchema#decimal",
+            "@value": "5"
+          }
+        ],
+        "http://schema.org/ratingValue": [
+          {
+            "@type": "http://www.w3.org/2001/XMLSchema#decimal",
+            "@value": "4.4"
+          }
+        ],
+        "http://schema.org/reviewCount": [
+          {
+            "@type": "http://www.w3.org/2001/XMLSchema#integer",
+            "@value": "127"
+          }
+        ]
+      }
+    ],
+    "http://schema.org/brand": [
+      {
+        "@type": [
+          "http://schema.org/Brand"
+        ],
+        "http://schema.org/name": [
+          {
+            "@value": "Aurora Housewares"
+          }
+        ]
+      }
+    ],
+    "http://schema.org/description": [
+      {
+        "@value": "Vacuum-insulated stainless steel travel mug with leak-proof lid."
+      }
+    ],
+    "http://schema.org/gtin13": [
+      {
+        "@value": "4006381333931"
+      }
+    ],
+    "http://schema.org/image": [
+      {
+        "@id": "https://example.org/media/tm-450-ss.jpg"
+      }
+    ],
+    "http://schema.org/name": [
+      {
+        "@value": "Stainless Travel Mug 450ml"
+      }
+    ],
+    "http://schema.org/offers": [
+      {
+        "@type": [
+          "http://schema.org/Offer"
+        ],
+        "http://schema.org/availability": [
+          {
+            "@id": "http://schema.org/InStock"
+          }
+        ],
+        "http://schema.org/price": [
+          {
+            "@type": "http://www.w3.org/2001/XMLSchema#decimal",
+            "@value": "24.95"
+          }
+        ],
+        "http://schema.org/priceCurrency": [
+          {
+            "@value": "EUR"
+          }
+        ],
+        "http://schema.org/priceValidUntil": [
+          {
+            "@type": "http://www.w3.org/2001/XMLSchema#date",
+            "@value": "2026-12-31"
+          }
+        ],
+        "http://schema.org/seller": [
+          {
+            "@type": [
+              "http://schema.org/Organization"
+            ],
+            "http://schema.org/name": [
+              {
+                "@value": "Example Store GmbH"
+              }
+            ],
+            "http://schema.org/url": [
+              {
+                "@id": "https://example.org/store"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "http://schema.org/review": [
+      {
+        "@type": [
+          "http://schema.org/Review"
+        ],
+        "http://schema.org/author": [
+          {
+            "@type": [
+              "http://schema.org/Person"
+            ],
+            "http://schema.org/name": [
+              {
+                "@value": "Maren K."
+              }
+            ]
+          }
+        ],
+        "http://schema.org/datePublished": [
+          {
+            "@type": "http://www.w3.org/2001/XMLSchema#date",
+            "@value": "2026-03-14"
+          }
+        ],
+        "http://schema.org/name": [
+          {
+            "@value": "Keeps coffee hot for hours"
+          }
+        ],
+        "http://schema.org/reviewBody": [
+          {
+            "@value": "Still warm after a six-hour hike. The lid has never leaked."
+          }
+        ],
+        "http://schema.org/reviewRating": [
+          {
+            "@type": [
+              "http://schema.org/Rating"
+            ],
+            "http://schema.org/ratingValue": [
+              {
+                "@type": "http://www.w3.org/2001/XMLSchema#decimal",
+                "@value": "5"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "@type": [
+          "http://schema.org/Review"
+        ],
+        "http://schema.org/author": [
+          {
+            "@type": [
+              "http://schema.org/Person"
+            ],
+            "http://schema.org/name": [
+              {
+                "@value": "Jonas B."
+              }
+            ]
+          }
+        ],
+        "http://schema.org/datePublished": [
+          {
+            "@type": "http://www.w3.org/2001/XMLSchema#date",
+            "@value": "2026-05-02"
+          }
+        ],
+        "http://schema.org/name": [
+          {
+            "@value": "Good, but heavy"
+          }
+        ],
+        "http://schema.org/reviewBody": [
+          {
+            "@value": "Solid build quality, though noticeably heavier than my old mug."
+          }
+        ],
+        "http://schema.org/reviewRating": [
+          {
+            "@type": [
+              "http://schema.org/Rating"
+            ],
+            "http://schema.org/ratingValue": [
+              {
+                "@type": "http://www.w3.org/2001/XMLSchema#decimal",
+                "@value": "4"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "http://schema.org/sku": [
+      {
+        "@value": "TM-450-SS"
+      }
+    ],
+    "http://schema.org/url": [
+      {
+        "@id": "https://example.org/store/products/4006381333931"
+      }
+    ]
+  }
+]

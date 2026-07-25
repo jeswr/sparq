@@ -16,10 +16,13 @@
 //! [`compare_ids`] / [`sort_ids`] order ids exactly as the engine's `ORDER BY` orders the
 //! terms those ids denote: error/unbound < blank < IRI < literal < RDF 1.2 triple term,
 //! then within each class the engine's arms — blanks/IRIs by string form; literals
-//! numeric-aware (with the `exact_cmp` f64-collapse recheck for distinct integers beyond
-//! 2^53 / high-precision decimals), then strict typed/temporal (`xsd:dateTime`/`xsd:date`
-//! by TIMELINE via the shared `sparq_core::temporal::Timeline`, same-tag language strings
-//! and same-other-XSD lexically), then lexical string fallback; triple terms component-wise
+//! KIND-FIRST (the sq-wjl8i total-order fix: a fixed `LiteralKind` rank between literal
+//! kinds, then within the numeric kind the exact-rational order — NaN first, the
+//! `exact_cmp` f64-collapse recheck exact for integers beyond 2^53 / high-precision
+//! decimals / the mixed exact-vs-double tie — and within the other kinds strict
+//! typed/temporal (`xsd:dateTime`/`xsd:date` by TIMELINE via the shared
+//! `sparq_core::temporal::Timeline`, same-tag language strings and same-other-XSD
+//! lexically), then the lexical fallback); triple terms component-wise
 //! recursively. Every observation hook mirrors the engine's `Value` impl over the SAME
 //! shared machinery (`Timeline`, the substrate `Num`/`Dec` tower, `parse_xsd_f64`), and the
 //! full-multiset parity is pinned against a REAL engine `ORDER BY` over the same
@@ -41,8 +44,9 @@
 //! - Ids must come from the reasoner's id space: dictionary ids plus inline-integer ids
 //!   (`is_inline`). The engine's local-vocab ids (computed BIND/aggregate values above the
 //!   inline window) never appear in a materialised closure and are not meaningful here.
-//! - `None`-comparable pairs (e.g. a `NaN` double vs a numeric) collapse to `Equal`,
-//!   exactly as the engine's `ORDER BY` maps its comparator's `None` (`unwrap_or(Equal)`).
+//! - A `NaN` double is totalised FIRST among numerics (sq-wjl8i) — no numeric pair
+//!   reaches the `unwrap_or(Equal)` mapping any more; the mapping remains only for the
+//!   no-string-form / non-decomposing-triple `None`s, matching the engine exactly.
 //! - Two DISTINCT terms can compare `Equal` under SPARQL's lenient order (equal numeric
 //!   values across datatypes, equal instants across timezones, same-lexical unknown-datatype
 //!   literals). Their relative order after a stable sort is input-order on both sides —
@@ -52,7 +56,7 @@ use std::cmp::Ordering;
 
 use sparq_core::dict::{is_inline, split_lang_dir, Dict, Id, TermParts, INLINE_BASE};
 use sparq_core::temporal::Timeline;
-use sparq_substrate::compare::{compare_terms, CompareTerm, TermClass};
+use sparq_substrate::compare::{compare_terms, CompareTerm, LiteralKind, TermClass};
 use sparq_substrate::numeric::{parse_xsd_f32, parse_xsd_f64, Dec, Num};
 
 /// The XSD namespace prefix — the engine's `lit_kind` "other XSD datatype" family test.
@@ -221,19 +225,13 @@ fn num_of_parts(value: &str, datatype: &str) -> Option<Num> {
     None
 }
 
-/// The engine's `num_compare`: exact via the `Dec` fixed-point tower when both operands
-/// have an exact tier (int/decimal), else by `f64` value (float/double, whose value IS
-/// its f64). (The value-space relational-compare hoist into the substrate is the parked
-/// seam-2 remainder, sq-v5evr; until then this six-line mirror is pinned by the
-/// engine-parity test.)
+/// The numeric relational comparison for `strict_cmp` — delegates to
+/// `Num::cmp_relational` (the shared substrate function, sq-v5evr): exact via the
+/// `Dec` fixed-point tower when both operands have an exact tier (int/decimal), else
+/// by `f64` value (float/double). NaN → `None` (SPARQL type error). [OPUS-4.8] sq-v5evr
 #[inline]
 fn num_compare(a: Num, b: Num) -> Option<Ordering> {
-    if let (Some(x), Some(y)) = (a.to_dec(), b.to_dec()) {
-        if let Some(o) = x.cmp(y) {
-            return Some(o);
-        }
-    }
-    a.f64().partial_cmp(&b.f64())
+    a.cmp_relational(b)
 }
 
 impl CompareTerm for IdTerm<'_> {
@@ -279,21 +277,55 @@ impl CompareTerm for IdTerm<'_> {
             return None;
         }
         match self.dict.term_parts(self.id) {
-            // The engine's lenient `as_num` arm: numeric-datatype literals through
-            // `parse_xsd_f64` (the XSD acceptance set — INF/-INF/NaN, not inf/infinity).
-            TermParts::Lit { value, datatype, lang: None } if is_numeric_dt(datatype) => parse_xsd_f64(value),
+            // [FABLE-5] sq-74oy4 / sq-6b1lj: the engine's lenient `as_num` arm, now
+            // DATATYPE-AWARE and TRIMMED to match `Num::of_literal`: accept iff the lexical is
+            // well-formed FOR its datatype (`num_of_parts` — the borrowed-parts twin of
+            // `of_literal`), imaged by `parse_xsd_f64` on the trimmed value. A padded
+            // `" 1"^^xsd:integer` is value-1; a per-datatype-ill-formed `"1.5"^^xsd:integer`
+            // is `None` (type error), mirroring the engine seam and the graph cache. The XSD
+            // f64 spellings (INF/-INF/NaN, not inf/infinity) are enforced by `parse_xsd_f64`.
+            TermParts::Lit { value, datatype, lang: None }
+                if is_numeric_dt(datatype) && num_of_parts(value, datatype).is_some() =>
+            {
+                parse_xsd_f64(value.trim())
+            }
             _ => None,
         }
     }
 
     #[inline]
+    fn literal_kind(&self) -> LiteralKind {
+        // [FABLE-5] sq-wjl8i / sq-74oy4: the kind-first rank — mirrors the engine's
+        // `Value::literal_kind` exactly: Numeric tracks the `as_f64` membership, now
+        // DATATYPE-AWARE (a lexical ill-formed FOR its datatype like "1.5"^^xsd:integer is
+        // NOT numeric and sorts as Other/lexical, matching `of_literal`); ill-formed
+        // numeric/temporal lexicals classify as Other (a kind mixing value-ordered and
+        // lexical-fallback pairs is intransitive).
+        if is_inline(self.id) {
+            return LiteralKind::Numeric; // an inline id IS a well-formed xsd:integer
+        }
+        match self.kind() {
+            Kind::Bool(_) => LiteralKind::Boolean,
+            Kind::Num(_) if self.as_f64().is_some() => LiteralKind::Numeric,
+            Kind::Str(_) => LiteralKind::String,
+            Kind::Lang(..) => LiteralKind::Lang,
+            Kind::DateTime(Some(_)) => LiteralKind::DateTime,
+            Kind::Date(Some(_)) => LiteralKind::Date,
+            // Ill-formed numerics/temporals, other-XSD, unknown datatypes (and the
+            // unreachable non-literal case — `compare_terms` gates on the class).
+            _ => LiteralKind::Other,
+        }
+    }
+
+    #[inline]
     fn exact_cmp(&self, other: &Self) -> Option<Ordering> {
-        // The f64-collapse recheck (called by `compare_terms` only on an f64 tie):
-        // distinct integers beyond 2^53 / high-precision decimals sharing one f64 still
-        // order by exact value — the same `as_numeric` + `num_compare` recheck the engine
-        // makes, so a reasoner-side sort agrees with the engine's relational `=`/`<`.
+        // The f64-collapse recheck (called by `compare_terms` only on an f64 tie),
+        // mirroring the engine's `Value::exact_cmp` → `Num::cmp_total` (sq-wjl8i): the
+        // EXACT-RATIONAL total order — exact for int/decimal pairs AND for the mixed
+        // exact/inexact pair (against the double's exact decimal expansion), NaN
+        // totalised first — so a reasoner-side sort agrees with the engine's ORDER BY.
         match (self.as_num_typed(), other.as_num_typed()) {
-            (Some(a), Some(b)) => num_compare(a, b),
+            (Some(a), Some(b)) => Some(a.cmp_total(b)),
             _ => None,
         }
     }
@@ -334,9 +366,10 @@ impl CompareTerm for IdTerm<'_> {
     }
 }
 
-/// Compares two ids of `dict` under the engine's `ORDER BY` total order. Pairs the shared
-/// algorithm cannot decide (e.g. a `NaN` operand) collapse to `Equal`, exactly as the
-/// engine's sort maps its comparator's `None`.
+/// Compares two ids of `dict` under the engine's `ORDER BY` total order (a `NaN`
+/// operand takes its fixed first-among-numerics position, sq-wjl8i). The rare
+/// undecidable pairs (no string form / a non-decomposing triple) collapse to `Equal`,
+/// exactly as the engine's sort maps its comparator's `None`.
 #[inline]
 pub fn compare_ids(dict: &Dict, a: Id, b: Id) -> Ordering {
     compare_terms(&IdTerm::new(dict, a), &IdTerm::new(dict, b)).unwrap_or(Ordering::Equal)
@@ -438,9 +471,39 @@ mod tests {
         assert_eq!(compare_ids(&d, nine, dec), Ordering::Less);
         assert_eq!(compare_ids(&d, dec, dbl), Ordering::Less);
         assert_eq!(compare_ids(&d, dbl, ten), Ordering::Less);
-        // A NaN pair is undecidable -> collapses to Equal (the engine's unwrap_or(Equal)).
+        // NaN is totalised FIRST among numerics (sq-wjl8i): before every numeric,
+        // equal to itself — no longer an undecidable pair collapsing to Equal.
         let nan = lit(&mut d, "NaN", XSD_DOUBLE);
-        assert_eq!(compare_ids(&d, nan, nine), Ordering::Equal);
+        assert_eq!(compare_ids(&d, nan, nine), Ordering::Less);
+        assert_eq!(compare_ids(&d, nine, nan), Ordering::Greater);
+        assert_eq!(compare_ids(&d, nan, nan), Ordering::Equal);
+        let ninf = lit(&mut d, "-INF", XSD_DOUBLE);
+        assert_eq!(compare_ids(&d, nan, ninf), Ordering::Less);
+    }
+
+    /// [FABLE-5] sq-wjl8i: cross-KIND literal pairs rank by `LiteralKind` (numeric <
+    /// boolean < dateTime < date < string < lang < other), never by the lexical form —
+    /// the digit-inversion triple `10 / "11" / 2` that was intransitive under the
+    /// lexical fallback is consistent under the rank. And the mixed exact-vs-double tie
+    /// at the 2^53 collapse now orders exactly.
+    #[test]
+    fn kind_first_rank_and_exact_mixed_tier() {
+        let mut d = Dict::new();
+        let int = "http://www.w3.org/2001/XMLSchema#integer";
+        let ten = lit(&mut d, "10", int);
+        let two = lit(&mut d, "2", int);
+        let s11 = lit(&mut d, "11", XSD_STRING);
+        assert_eq!(compare_ids(&d, ten, s11), Ordering::Less, "Numeric < String by kind");
+        assert_eq!(compare_ids(&d, s11, two), Ordering::Greater, "String > Numeric (was lexical Less)");
+        assert_eq!(compare_ids(&d, ten, two), Ordering::Greater, "10 > 2 — consistent");
+        // Mixed exact/inexact at the collapse: double(2^53) equals int 2^53 exactly,
+        // and sits strictly below int 2^53+1 (was a three-way Equal tie).
+        let big = lit(&mut d, "9007199254740992", int);
+        let big1 = lit(&mut d, "9007199254740993", int);
+        let dbl = lit(&mut d, "9007199254740992E0", XSD_DOUBLE);
+        assert_eq!(compare_ids(&d, big, dbl), Ordering::Equal);
+        assert_eq!(compare_ids(&d, dbl, big1), Ordering::Less);
+        assert_eq!(compare_ids(&d, big1, dbl), Ordering::Greater);
     }
 
     /// The f64-collapse `exact_cmp` recheck: distinct integers beyond 2^53 share one f64
@@ -588,5 +651,26 @@ mod tests {
                 dt
             );
         }
+    }
+
+    /// Direct pin of `num_compare` → `Num::cmp_relational` (sq-v5evr): verifies the
+    /// delegation produces the expected relational semantics — exact for int/dec pairs,
+    /// f64 promotion for mixed/inexact, and `None` for NaN (SPARQL type error).
+    /// [OPUS-4.8] sq-v5evr
+    #[test]
+    fn num_compare_delegates_to_substrate_cmp_relational() {
+        use std::cmp::Ordering::*;
+        // Exact same-tier: integer vs integer
+        assert_eq!(num_compare(Num::Int(1), Num::Int(2)), Some(Less));
+        assert_eq!(num_compare(Num::Int(3), Num::Int(3)), Some(Equal));
+        assert_eq!(num_compare(Num::Int(5), Num::Int(4)), Some(Greater));
+        // Exact cross-tier: int vs decimal
+        let dec = Num::Dec(Dec { mant: 10, scale: 1 }); // 1.0
+        assert_eq!(num_compare(Num::Int(1), dec), Some(Equal));
+        // Double: normal
+        assert_eq!(num_compare(Num::Double(1.5), Num::Double(2.5)), Some(Less));
+        // NaN → None (SPARQL type error — the relational semantics, not cmp_total)
+        assert_eq!(num_compare(Num::Double(f64::NAN), Num::Int(0)), None);
+        assert_eq!(num_compare(Num::Int(0), Num::Double(f64::NAN)), None);
     }
 }

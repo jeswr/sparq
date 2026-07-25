@@ -1,0 +1,6 @@
+@prefix ufo: <urn:ufo-sn3:> .
+@prefix ex:  <urn:ufo-sn3:case:norm:> .
+
+ex:paymentObligation ufo:activeIn ex:w.
+ex:acmeCommitment ufo:activeIn ex:w.
+ex:aliceClaim ufo:activeIn ex:w.

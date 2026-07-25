@@ -1,0 +1,203 @@
+{
+  "focus": {
+    "kind": "iri",
+    "value": "http://example.org/apollo"
+  },
+  "mode": "edit",
+  "shapes": [
+    {
+      "shape": {
+        "kind": "iri",
+        "value": "http://example.org/ProjectShape"
+      },
+      "label": "Project",
+      "via": "target-class"
+    },
+    {
+      "shape": {
+        "kind": "iri",
+        "value": "http://example.org/AuditableShape"
+      },
+      "label": "Auditable thing",
+      "via": "applicable-to-class"
+    }
+  ],
+  "shape": {
+    "kind": "iri",
+    "value": "http://example.org/ProjectShape"
+  },
+  "groups": [
+    {
+      "kind": "default",
+      "fields": [
+        {
+          "property_shape": {
+            "kind": "bnode",
+            "value": "b0"
+          },
+          "path": "<http://example.org/title>",
+          "label": "Title",
+          "order": 1.0,
+          "required": true,
+          "multi": false,
+          "editable": true,
+          "widget": {
+            "editor": "http://datashapes.org/dash#TextFieldEditor",
+            "viewer": "http://datashapes.org/dash#LiteralViewer",
+            "score": 10,
+            "editor_alternatives": [
+              "http://datashapes.org/dash#TextAreaEditor"
+            ],
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#HyperlinkViewer",
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "literal",
+                "value": "Apollo"
+              }
+            }
+          ],
+          "constraints": {
+            "min_count": 1,
+            "max_count": 1,
+            "datatype": [
+              "http://www.w3.org/2001/XMLSchema#string"
+            ]
+          }
+        },
+        {
+          "property_shape": {
+            "kind": "bnode",
+            "value": "b1"
+          },
+          "path": "^(<http://example.org/worksOn>)",
+          "inverse": true,
+          "label": "Team members",
+          "order": 2.0,
+          "multi": true,
+          "editable": true,
+          "widget": {
+            "editor": "http://datashapes.org/dash#InstancesSelectEditor",
+            "viewer": "http://datashapes.org/dash#LabelViewer",
+            "score": 12,
+            "editor_alternatives": [
+              "http://datashapes.org/dash#AutoCompleteEditor",
+              "http://datashapes.org/dash#DetailsEditor",
+              "http://datashapes.org/dash#SubClassEditor",
+              "http://datashapes.org/dash#URIEditor"
+            ],
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#URIViewer",
+              "http://datashapes.org/dash#DetailsViewer",
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "iri",
+                "value": "http://example.org/neil"
+              }
+            },
+            {
+              "term": {
+                "kind": "iri",
+                "value": "http://example.org/buzz"
+              }
+            }
+          ],
+          "constraints": {
+            "class": [
+              {
+                "kind": "iri",
+                "value": "http://example.org/Person"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "kind": "other",
+      "label": "Other properties",
+      "fields": [
+        {
+          "path": "<http://example.org/budget>",
+          "label": "budget",
+          "multi": true,
+          "editable": false,
+          "widget": {
+            "viewer": "http://datashapes.org/dash#LiteralViewer",
+            "score": 1,
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "literal",
+                "value": "1000000",
+                "datatype": "http://www.w3.org/2001/XMLSchema#integer"
+              }
+            }
+          ],
+          "constraints": {}
+        },
+        {
+          "path": "<http://example.org/homepage>",
+          "label": "homepage",
+          "multi": true,
+          "editable": false,
+          "widget": {
+            "viewer": "http://datashapes.org/dash#ImageViewer",
+            "score": 50,
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#LabelViewer",
+              "http://datashapes.org/dash#URIViewer",
+              "http://datashapes.org/dash#DetailsViewer",
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "iri",
+                "value": "http://example.org/apollo/logo.svg"
+              }
+            }
+          ],
+          "constraints": {}
+        },
+        {
+          "path": "<http://www.w3.org/1999/02/22-rdf-syntax-ns#type>",
+          "label": "Type",
+          "multi": true,
+          "editable": false,
+          "widget": {
+            "viewer": "http://datashapes.org/dash#LabelViewer",
+            "score": 5,
+            "viewer_alternatives": [
+              "http://datashapes.org/dash#URIViewer",
+              "http://datashapes.org/dash#DetailsViewer",
+              "http://datashapes.org/dash#ValueTableViewer"
+            ]
+          },
+          "values": [
+            {
+              "term": {
+                "kind": "iri",
+                "value": "http://example.org/Project"
+              }
+            }
+          ],
+          "constraints": {}
+        }
+      ]
+    }
+  ]
+}

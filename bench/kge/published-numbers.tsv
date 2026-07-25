@@ -1,0 +1,39 @@
+# [SONNET-4.6] sq-hmd7l.23 — PyKEEN published reference numbers, pinned to two sources.
+#
+# SOURCE A: RotatE paper Table 5, Sun et al., ICLR 2019
+#   https://arxiv.org/pdf/1902.10197
+#   (the canonical FB15k-237 + WN18RR comparison table for shallow KGE models)
+#
+# SOURCE B: PyKEEN re-evaluation (Ali et al., "Bringing Light Into the Dark: A Large-scale
+#   Evaluation of Knowledge Graph Embedding Models Under a Unified Framework",
+#   IEEE TPAMI 2021 / JMLR, arXiv:2006.13365, Table 3 and supplementary material)
+#   https://arxiv.org/abs/2006.13365
+#   Key finding: with proper hyperparameter tuning, the gap between models largely collapses.
+#
+# HONESTY NOTES:
+#   - These are PUBLISHED numbers from cited sources; NOT re-run on this work-box.
+#   - FB15k and WN18 (without -237 / RR suffix) are DEPRECATED due to test-set leakage
+#     via inverse relations; only FB15k-237 and WN18RR are cited here.
+#   - ComplEx ~0.47 H@10 on WN18RR after retuning (Source B) is significantly higher
+#     than the RotatE-paper baseline (0.51 raw MRR, but Source A was DistMult = 0.49).
+#     The retuning result from Source B is noted in the "retuned" column.
+#   - sparq-kge runs on SYNTHETIC slices only in the per-commit tier (the kge_ablation
+#     example, which the CI does NOT run in the kge benchmark, only in the sparq-vectors
+#     test suite). A real-dataset sparq-kge run requires SPARQ_KGE_DATASET= (env-gated).
+#     Phase 2 (same-box measured) is deferred to sq-hmd7l.37.
+#
+# COLUMNS: model  dataset  mrr  hits_at_1  hits_at_3  hits_at_10  source
+# source codes: A=RotatE-paper-2019, B=PyKEEN-TPAMI-2021-retuned
+model	dataset	mrr	hits_at_1	hits_at_3	hits_at_10	source
+TransE	FB15k-237	0.294	-	-	0.465	A
+DistMult	FB15k-237	0.241	0.155	0.263	0.419	A
+ComplEx	FB15k-237	0.247	0.158	0.275	0.428	A
+RotatE	FB15k-237	0.338	0.241	0.375	0.533	A
+TransE	WN18RR	0.226	-	-	0.501	A
+DistMult	WN18RR	0.430	0.390	0.440	0.490	A
+ComplEx	WN18RR	0.440	0.410	0.460	0.510	A
+RotatE	WN18RR	0.476	0.428	0.492	0.571	A
+ComplEx_retuned	FB15k-237	0.317	0.221	0.352	0.506	B
+DistMult_retuned	FB15k-237	0.330	0.234	0.367	0.522	B
+ComplEx_retuned	WN18RR	0.475	0.438	0.490	0.547	B
+DistMult_retuned	WN18RR	0.454	0.412	0.479	0.531	B

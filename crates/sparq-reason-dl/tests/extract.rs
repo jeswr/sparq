@@ -329,6 +329,10 @@ fn reject_out_of_fragment_nominal_oneof() {
     ));
 }
 
+/// With the opt-in `dl_transitive` feature OFF (the default), `owl:TransitiveProperty`
+/// stays a fail-closed out-of-fragment refusal — byte-identical to the pre-sq-zfwzq
+/// behaviour. (The feature-ON extraction is pinned in the `transitive` module below.)
+#[cfg(not(feature = "dl_transitive"))]
 #[test]
 fn reject_out_of_fragment_property_characteristic() {
     let (d, t) = parse(":p a owl:TransitiveProperty .");
@@ -894,5 +898,414 @@ fn fail_closed_rejects_whole_graph_on_one_bad_triple() {
     assert!(
         matches!(extract(&d, &t), Err(ExtractError::OutOfFragment(_))),
         "one out-of-fragment triple must reject the whole graph"
+    );
+}
+
+// ============================== sq-pbz04.4.11 — named-composite EquivalentClasses (M1 fix) ======
+
+// [SONNET-4.6] sq-pbz04.4.11: the M1 fidelity gap — a NAMED class carrying an inline backbone
+// definition must emit EquivalentClasses(name, expr) so entailment through the name works.
+// These tests are the acceptance tests for the 12 M1 divergence cases identified by the
+// conformance arm in tests/dl_suite.rs.
+
+/// A NAMED class carrying an owl:intersectionOf definition must produce
+/// EquivalentClasses(A, x⊓y) — the M1 fix for intersection cases.
+/// [SONNET-4.6] sq-pbz04.4.11
+#[test]
+fn named_class_intersection_emits_equivalent_classes() {
+    // :A owl:intersectionOf (:B :C) — A is named; must produce EquivalentClasses(A, B⊓C).
+    let (d, t) = parse(":A owl:intersectionOf ( :B :C ) .");
+    let o = extract(&d, &t).expect("accept");
+    let a = class(&d, "A");
+    let expected_expr = CE::ObjectIntersectionOf(vec![class(&d, "B"), class(&d, "C")]);
+    assert!(
+        o.axioms.contains(&Axiom::EquivalentClasses(a.clone(), expected_expr.clone())),
+        "named intersectionOf must emit EquivalentClasses(A, B⊓C); got {:?}",
+        o.axioms
+    );
+    // Exactly one axiom: the name-binding.
+    assert_eq!(
+        o.len(),
+        1,
+        "only the EquivalentClasses name-binding should be emitted; got {:?}",
+        o.axioms
+    );
+}
+
+// -------------------------------------------------------------------------------------------
+// Opt-in transitive roles ([GPT-5.6] sq-zfwzq, feature `dl_transitive`)
+// -------------------------------------------------------------------------------------------
+
+#[cfg(feature = "dl_transitive")]
+mod transitive {
+    use super::*;
+    use sparq_reason_dl::model::ObjectPropertyExpression;
+
+    /// With the feature ON, `owl:TransitiveProperty` EXTRACTS as
+    /// `Axiom::TransitiveObjectProperty` on the named property — no longer refused.
+    #[test]
+    fn transitive_property_extracts_as_axiom() {
+        let (d, t) = parse(":p a owl:TransitiveProperty .");
+        let onto = extract(&d, &t).expect("in-fragment under dl_transitive");
+        let p = ex(&d, "p");
+        assert_eq!(
+            onto.axioms,
+            vec![Axiom::TransitiveObjectProperty {
+                property: ObjectPropertyExpression::ObjectProperty(p),
+            }]
+        );
+    }
+
+    /// The transitivity typing also TYPES the subject as an object property, so a role
+    /// assertion over it classifies without a separate `owl:ObjectProperty` declaration.
+    #[test]
+    fn transitivity_typing_enables_role_assertion_classification() {
+        let (d, t) = parse(":p a owl:TransitiveProperty .\n:a :p :b .");
+        let onto = extract(&d, &t).expect("extracts");
+        assert!(onto
+            .axioms
+            .iter()
+            .any(|a| matches!(a, Axiom::ObjectPropertyAssertion { .. })));
+        assert!(onto
+            .axioms
+            .iter()
+            .any(|a| matches!(a, Axiom::TransitiveObjectProperty { .. })));
+    }
+
+    /// Fail-closed edges stay closed: a BLANK-node subject of the transitivity typing is
+    /// refused (named object properties only in L1), and a cross-type punned subject
+    /// (also declared AnnotationProperty) is Unclassifiable — in EITHER assertion order.
+    #[test]
+    fn transitivity_on_blank_or_punned_subject_refuses() {
+        let (d, t) = parse("_:b a owl:TransitiveProperty .");
+        assert!(matches!(
+            extract(&d, &t),
+            Err(ExtractError::Unclassifiable(_))
+        ));
+        let (d, t) = parse(":p a owl:AnnotationProperty .\n:p a owl:TransitiveProperty .");
+        assert!(matches!(
+            extract(&d, &t),
+            Err(ExtractError::Unclassifiable(_))
+        ));
+        let (d, t) = parse(":p a owl:TransitiveProperty .\n:p a owl:AnnotationProperty .");
+        assert!(matches!(
+            extract(&d, &t),
+            Err(ExtractError::Unclassifiable(_))
+        ));
+    }
+
+    /// The OTHER property characteristics remain out-of-fragment refusals under the
+    /// feature — the opt-in admits transitivity ONLY.
+    #[test]
+    fn other_property_characteristics_still_refused() {
+        for ttl in [
+            ":p a owl:FunctionalProperty .",
+            ":p a owl:SymmetricProperty .",
+            ":p a owl:ReflexiveProperty .",
+        ] {
+            let (d, t) = parse(ttl);
+            assert!(
+                matches!(extract(&d, &t), Err(ExtractError::OutOfFragment(_))),
+                "{} must stay refused",
+                ttl
+            );
+        }
+    }
+}
+
+/// A NAMED class carrying an owl:unionOf definition must produce
+/// EquivalentClasses(A, x⊔y) — the M1 fix for union cases.
+/// [SONNET-4.6] sq-pbz04.4.11
+#[test]
+fn named_class_union_emits_equivalent_classes() {
+    let (d, t) = parse(":A owl:unionOf ( :Human :Animal ) .");
+    let o = extract(&d, &t).expect("accept");
+    let a = class(&d, "A");
+    let expected_expr = CE::ObjectUnionOf(vec![class(&d, "Human"), class(&d, "Animal")]);
+    assert!(
+        o.axioms.contains(&Axiom::EquivalentClasses(a, expected_expr)),
+        "named unionOf must emit EquivalentClasses(A, Human⊔Animal); got {:?}",
+        o.axioms
+    );
+}
+
+/// A NAMED class carrying an owl:complementOf definition must produce
+/// EquivalentClasses(A, ¬B).
+/// [SONNET-4.6] sq-pbz04.4.11
+#[test]
+fn named_class_complement_emits_equivalent_classes() {
+    let (d, t) = parse(":A owl:complementOf :B .");
+    let o = extract(&d, &t).expect("accept");
+    let a = class(&d, "A");
+    let expected_expr = CE::ObjectComplementOf(Box::new(class(&d, "B")));
+    assert!(
+        o.axioms.contains(&Axiom::EquivalentClasses(a, expected_expr)),
+        "named complementOf must emit EquivalentClasses(A, ¬B); got {:?}",
+        o.axioms
+    );
+}
+
+/// A NAMED class carrying an owl:Restriction backbone must produce
+/// EquivalentClasses(A, ∃r.C) — the M1 fix for restriction cases.
+/// [SONNET-4.6] sq-pbz04.4.11
+#[test]
+fn named_class_restriction_backbone_emits_equivalent_classes() {
+    // :z a owl:Restriction; owl:onProperty :p; owl:someValuesFrom :C  (z is named IRI)
+    let (d, t) = parse(":z a owl:Restriction .\n:z owl:onProperty :p .\n:z owl:someValuesFrom :C .");
+    let o = extract(&d, &t).expect("accept");
+    let z = class(&d, "z");
+    let expected_expr = CE::ObjectSomeValuesFrom(prop(&d, "p"), Box::new(class(&d, "C")));
+    assert!(
+        o.axioms.contains(&Axiom::EquivalentClasses(z, expected_expr)),
+        "named restriction must emit EquivalentClasses(z, ∃p.C); got {:?}",
+        o.axioms
+    );
+}
+
+/// The name-binding EquivalentClasses axiom must be PREPENDED before any use-site axioms,
+/// so the structural model sees "define name, then use name". This is the ordering contract
+/// the downstream tableau depends on.
+/// [SONNET-4.6] sq-pbz04.4.11
+#[test]
+fn named_composite_equiv_prepended_before_use_site_axioms() {
+    // :A owl:intersectionOf (:B :C); then a subClassOf using :A.
+    let (d, t) = parse(
+        ":A owl:intersectionOf ( :B :C ) .\n\
+         :D rdfs:subClassOf :A .",
+    );
+    let o = extract(&d, &t).expect("accept");
+    assert!(o.len() >= 2, "expected at least 2 axioms, got {:?}", o.axioms);
+    // The FIRST axiom must be the name-binding EquivalentClasses.
+    assert!(
+        matches!(&o.axioms[0], Axiom::EquivalentClasses(CE::Class(_), _)),
+        "first axiom must be EquivalentClasses (name-binding); got {:?}",
+        o.axioms[0]
+    );
+}
+
+/// A BLANK node carrying a backbone definition must NOT emit EquivalentClasses —
+/// only NAMED classes (IRIs) get the binding; anonymous nodes are just inline expressions.
+/// [SONNET-4.6] sq-pbz04.4.11
+#[test]
+fn blank_node_backbone_does_not_emit_equivalent_classes() {
+    // _:x owl:intersectionOf (:A :B) used in :D rdfs:subClassOf _:x — anonymous expression.
+    let (d, t) = parse(":D rdfs:subClassOf [ owl:intersectionOf ( :A :B ) ] .");
+    let o = extract(&d, &t).expect("accept");
+    // The only axiom must be the SubClassOf (the anonymous blank carries no binding).
+    assert_eq!(o.len(), 1, "blank backbone must yield only SubClassOf, got {:?}", o.axioms);
+    assert!(
+        matches!(&o.axioms[0], Axiom::SubClassOf { .. }),
+        "sole axiom must be SubClassOf, got {:?}",
+        o.axioms[0]
+    );
+    // Verify: no EquivalentClasses axiom.
+    for ax in &o.axioms {
+        assert!(
+            !matches!(ax, Axiom::EquivalentClasses(..)),
+            "blank backbone must NOT produce EquivalentClasses"
+        );
+    }
+}
+
+/// The M1 fix must not regress the existing union-name case: a named union class
+/// (like `A owl:unionOf (Human Animal)`) used with a ClassAssertion must now
+/// allow the downstream checker to derive A(John) from Human(John) — the
+/// EquivalentClasses binding is what makes that entailment possible.
+/// [SONNET-4.6] sq-pbz04.4.11
+#[test]
+fn named_union_with_class_assertion_emits_both_equiv_and_assertion() {
+    // :A owl:unionOf (:Human :Animal) — named union; :John a :Human.
+    let (d, t) = parse(
+        ":A owl:unionOf ( :Human :Animal ) .\n\
+         :John a :Human .",
+    );
+    let o = extract(&d, &t).expect("accept");
+    let a = class(&d, "A");
+    let equiv = Axiom::EquivalentClasses(
+        a,
+        CE::ObjectUnionOf(vec![class(&d, "Human"), class(&d, "Animal")]),
+    );
+    let assertion = Axiom::ClassAssertion {
+        class: class(&d, "Human"),
+        individual: ex(&d, "John"),
+    };
+    assert!(
+        o.axioms.contains(&equiv),
+        "EquivalentClasses(A, Human⊔Animal) must be present; got {:?}",
+        o.axioms
+    );
+    assert!(
+        o.axioms.contains(&assertion),
+        "ClassAssertion(Human, John) must be present; got {:?}",
+        o.axioms
+    );
+    // The EquivalentClasses axiom must come BEFORE the ClassAssertion (name binding first).
+    let equiv_pos = o.axioms.iter().position(|ax| ax == &equiv).unwrap();
+    let assert_pos = o.axioms.iter().position(|ax| ax == &assertion).unwrap();
+    assert!(
+        equiv_pos < assert_pos,
+        "EquivalentClasses must precede ClassAssertion (position {} vs {})",
+        equiv_pos, assert_pos
+    );
+}
+
+// ============================== REJECT (M4: orphan/cyclic list and unconsumed backbone) ======
+// [OPUS-4.8] sq-pbz04.4.12: the M4 fail-closed fix — orphan/cyclic rdf:first/rdf:rest cells
+// and unconsumed class-expression backbones must be REFUSED, not silently treated as inert.
+// These four cases correspond to the four M4 W3C Direct-Semantics corpus divergences:
+// I5.5-003, I5.5-004, I5.5-006, I5.5-007.
+//
+// Soundness invariant: an empty or partial extraction from a malformed/cyclic backbone is an
+// UNSOUND basis for entailment — the downstream reasoner must never reason over such a model.
+
+/// rdf:nil rdf:rest _:b — `rdf:nil` cannot be a list cell (W3C I5.5-003 analog).
+/// Before sq-pbz04.4.12, this extracted to an empty ontology (consistent).
+/// After: refused as MalformedList. [OPUS-4.8] sq-pbz04.4.12
+#[test]
+fn reject_rdf_nil_rdf_rest() {
+    // Directly build the triple <rdf:nil rdf:rest _:b> in Turtle.
+    // In Turtle we must reference rdf:nil explicitly.
+    let (d, t) = parse(
+        "_:holder rdf:type owl:Class .\n\
+         rdf:nil rdf:rest _:b .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::MalformedList(_))),
+        "rdf:nil rdf:rest _:b must be refused as MalformedList (I5.5-003 analog)"
+    );
+}
+
+/// rdf:nil rdf:first _:b — `rdf:nil` cannot be a list cell (W3C I5.5-004 analog).
+/// Before sq-pbz04.4.12, this extracted to an empty ontology (consistent).
+/// After: refused as MalformedList. [OPUS-4.8] sq-pbz04.4.12
+#[test]
+fn reject_rdf_nil_rdf_first() {
+    let (d, t) = parse(
+        "_:holder rdf:type owl:Class .\n\
+         rdf:nil rdf:first _:b .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::MalformedList(_))),
+        "rdf:nil rdf:first _:b must be refused as MalformedList (I5.5-004 analog)"
+    );
+}
+
+/// A cyclic orphan list — `_:l rdf:first :a; rdf:rest _:l` — never consumed by any axiom.
+/// FAITHFUL reconstruction of W3C WebOnt-I5.5-006: the corpus non-conclusion is
+/// `<rdf:List rdf:nodeID="list"> … <rdf:rest rdf:nodeID="list"/></rdf:List>`, which emits the
+/// `_:l rdf:type rdf:List` typing triple. That declaration typing is the BYPASS the [OPUS-4.8]
+/// sq-pbz04.4.12 fix closes: it produces no axiom, so it must NOT seed the cyclic cell
+/// reachable. Before the fix this (with the typing) extracted to an empty ontology — a WRONG
+/// definitive verdict. After: refused as MalformedList (abstention). [OPUS-4.8]
+#[test]
+fn reject_cyclic_orphan_list_i5_5_006() {
+    // A cyclic rdf:List with the `a rdf:List` typing and no owl:intersectionOf/unionOf
+    // pointing to it — exactly the corpus WebOnt-I5.5-006 encoding.
+    let (d, t) = parse(
+        "_:l rdf:type rdf:List .\n\
+         _:l rdf:first :a .\n\
+         _:l rdf:rest _:l .",
+    );
+    assert!(
+        matches!(extract(&d, &t), Err(ExtractError::MalformedList(_))),
+        "cyclic orphan list cell (with `a rdf:List` typing) must be refused as MalformedList \
+         (WebOnt-I5.5-006); got {:?}",
+        extract(&d, &t)
+    );
+}
+
+/// FAITHFUL reconstruction of W3C WebOnt-I5.5-007: an anonymous `owl:Class` whose
+/// `owl:unionOf` list's first member is an anonymous `owl:Class` with a CYCLIC
+/// `owl:intersectionOf` list (`_:il rdf:rest _:il`), and every `rdf:List` node carries the
+/// `a rdf:List` typing. None of it is referenced by any axiom predicate. Before [OPUS-4.8]
+/// sq-pbz04.4.12 the `a rdf:List` declaration typing seeded the cyclic intersection cell
+/// reachable, so the whole graph slipped past the refusal and extracted to an empty ontology
+/// (a WRONG definitive verdict). After: refused with MalformedList or MalformedClassExpression
+/// (whichever orphan is detected first — both are the correct fail-closed response).
+/// [OPUS-4.8] sq-pbz04.4.12
+#[test]
+fn reject_unconsumed_union_backbone_i5_5_007() {
+    // Nested cyclic union/intersection with the `a rdf:List` typings, exactly the corpus
+    // WebOnt-I5.5-007 non-conclusion encoding (the outer union head is an anonymous
+    // owl:Class; the intersection list `_:il` is self-cyclic via rdf:rest). Nothing here is
+    // consumed by an axiom, so it must be refused. Both MalformedClassExpression and
+    // MalformedList are correct fail-closed refusals (iteration order over the structural-node
+    // set is unspecified).
+    let (d, t) = parse(
+        "_:u rdf:type owl:Class .\n\
+         _:u owl:unionOf _:ul .\n\
+         _:ul rdf:type rdf:List .\n\
+         _:ul rdf:first _:inner .\n\
+         _:ul rdf:rest rdf:nil .\n\
+         _:inner rdf:type owl:Class .\n\
+         _:inner owl:intersectionOf _:il .\n\
+         _:il rdf:type rdf:List .\n\
+         _:il rdf:first :a .\n\
+         _:il rdf:rest _:il .",
+    );
+    let result = extract(&d, &t);
+    assert!(
+        matches!(
+            result,
+            Err(ExtractError::MalformedClassExpression(_)) | Err(ExtractError::MalformedList(_))
+        ),
+        "unconsumed cyclic union/intersection backbone (with `a rdf:List` typings) must be \
+         refused (WebOnt-I5.5-007); got {:?}",
+        result
+    );
+}
+
+/// Companion minimal case: a single unconsumed anonymous `owl:unionOf` list with the
+/// `a rdf:List` typing, ensuring the declaration typing does not rescue the orphan even
+/// without the full I5.5-007 nesting. [OPUS-4.8] sq-pbz04.4.12
+#[test]
+fn reject_unconsumed_union_backbone_typed_list() {
+    // _:x owl:unionOf ( :a :b ) where the list head carries `a rdf:List`. _:x is an
+    // anonymous blank, never referenced by any axiom predicate.
+    let (d, t) = parse(
+        "_:x owl:unionOf _:l .\n\
+         _:l rdf:type rdf:List .\n\
+         _:l rdf:first :a .\n\
+         _:l rdf:rest rdf:nil .",
+    );
+    let result = extract(&d, &t);
+    assert!(
+        matches!(
+            result,
+            Err(ExtractError::MalformedClassExpression(_)) | Err(ExtractError::MalformedList(_))
+        ),
+        "unconsumed anonymous union backbone with a typed list must be refused; got {:?}",
+        result
+    );
+}
+
+/// Control: an anonymous union backbone that IS consumed via a subClassOf still decodes
+/// normally. Ensures the new validation does not over-reject valid anonymous expressions.
+/// [OPUS-4.8] sq-pbz04.4.12
+#[test]
+fn accept_consumed_anonymous_union_backbone() {
+    // _:x owl:unionOf (:a :b) consumed by :C rdfs:subClassOf _:x.
+    let (d, t) = parse(":C rdfs:subClassOf [ owl:unionOf ( :a :b ) ] .");
+    assert!(
+        extract(&d, &t).is_ok(),
+        "anonymous union backbone consumed by an axiom must still be accepted"
+    );
+}
+
+/// Control: a named class with an inline intersectionOf definition consumed via a use-site
+/// axiom — should still produce the EquivalentClasses binding and the use-site axiom.
+/// The M4 fix must not regress the M1 fix. [OPUS-4.8] sq-pbz04.4.12
+#[test]
+fn accept_named_intersection_with_use_site() {
+    // :A owl:intersectionOf (:B :C) and :D rdfs:subClassOf :A — consumed.
+    let (d, t) = parse(
+        ":A owl:intersectionOf ( :B :C ) .\n\
+         :D rdfs:subClassOf :A .",
+    );
+    let o = extract(&d, &t).expect("named intersectionOf with use-site should be accepted");
+    assert!(
+        o.axioms.iter().any(|ax| matches!(ax, Axiom::EquivalentClasses(CE::Class(_), _))),
+        "named intersectionOf must still emit EquivalentClasses; got {:?}",
+        o.axioms
     );
 }

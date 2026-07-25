@@ -1,0 +1,276 @@
+# formal-verification — change-coupled proof enforcement ([FABLE-5] bead sq-63ups).
+# 🤖 SPARQ agent.
+#
+# WHY: the Kani lanes were 100% nightly/advisory and 0% change-coupled — a PR could
+# rewrite a formally-verified function (the vectorized reducer kernels, the compare
+# ORDER-law subject, the dict id-partition encoding) and merge with the proofs never
+# re-run, the nightly lane discovering the break a day later in an informational job
+# nobody gates on. Maintainer mandate: CI must (a) CHECK that the formal verifications
+# hold and (b) FORCE proofs to be re-obligated when the verified code changes.
+#
+# TWO JOBS ([FABLE-5] sq-6vshe.20, design research/ci-runner-consolidation-2026-07.md
+# §4.3: the seconds-cheap fv-select + fv-manifest jobs merged onto ONE runner; the
+# heavy kani matrix untouched):
+#   * fv-select (job id KEPT so kani's `needs:`/matrix wiring is untouched) — now
+#     carries BOTH former step-groups:
+#       - fv-select (change-based test selection) — scripts/fv_select.py maps this PR's
+#         diff onto ci/formal-verification.toml `proves` paths and emits the suite
+#         matrix. The job name deliberately carries the phrase "change-based test
+#         selection": that is the detection contract with scripts/ci_summary_gate.py
+#         (SELECT_RE) — if this job does not conclude SUCCESS, the required
+#         `ci-summary / gate` REDs outright, so a skipped proof job can never be
+#         trusted on the back of a broken selector. The selector steps run FIRST so
+#         the job outputs exist before anything else can fail.
+#       - fv-manifest (proof inventory) — scripts/check-fv-manifest.py: the
+#         completeness + drift gate. REDs when a `#[cfg(kani)]` module is uncovered by
+#         the manifest, when the source `#[kani::proof]` inventory and the manifest
+#         harness lists disagree in either direction, or when kani.yml's matrix drifts
+#         from the `nightly = true` suites. Runs on EVERY PR (any PR can introduce a
+#         new proof module); it is seconds-cheap. Diagnosability trade (accepted): a
+#         manifest violation reds the select-named check-run — still fail-closed, the
+#         failing STEP name preserves attribution, and a red here also skips kani,
+#         which is fail-closed too (the red check-run already reds `gate`).
+#   * kani (change-coupled proofs) — the selected suites' bounded proofs, run with the
+#     same per-harness timeout + step-summary machinery as the nightly kani.yml lane.
+#     GATING: the job name carries NO advisory/informational token, so the ci-summary
+#     aggregator waits on it; a counterexample OR a per-harness timeout is red.
+#
+# GATE SEMANTICS (unchanged aggregator, no ci-summary.yml edit):
+#   * unrelated PR  => fv-select succeeds with an empty matrix => the proof job is
+#     `if:`-skipped => `skipped` is satisfied (select-job-green rule) => no cost.
+#   * verified-path PR => the matching suites RUN and BLOCK the merge until green.
+#   * selector infra failure => fv-select not success => gate REDs (fail-closed).
+#
+# WHICH SUITES CAN GATE: `pr_gate = true` suites only. The two mmap-validator totality
+# suites are `pr_gate = false` (owner sq-og8u8): their harnesses exceed the 20m
+# per-harness CBMC budget on this runner class and have never completed in CI — gating
+# PRs on a proof that cannot terminate would block every dict.rs/store.rs PR on a
+# pre-existing solver-budget problem. They stay on the nightly lane (honest red there)
+# and flip to pr_gate = true when sq-og8u8 bounds them. This is recorded in the
+# manifest itself (`pr_gate_blocked_by`), enforced by the D4 manifest rule.
+#
+# COST CONTROL: the heavy job runs ONLY when a `proves` path changed. Suites are
+# file-precise (e.g. sparq-substrate LFTJ/kernel perf PRs do NOT trigger the compare
+# ORDER-law suite — only compare.rs edits do). The nightly kani.yml lane remains the
+# full-matrix backstop, so a missed coupling degrades to next-nightly detection, and
+# scripts/formal_lane_alarm.py (formal-alarm.yml) alarms if that backstop goes silent.
+#
+# Third-party actions are pinned by full commit SHA (supply-chain hardening); the
+# trailing `# vX.Y.Z` comment is what Dependabot follows to bump the pin. Toolchain
+# pin + install flow match kani.yml so a bump moves them together.
+name: formal-verification
+
+on:
+  pull_request:
+    # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
+    # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
+    types: [opened, synchronize, reopened, ready_for_review]
+  # [FABLE-5] (2026-07-18 maintainer directive, merge-queue subset) merge_group
+  # REMOVED, push-to-main ADDED: the Kani proofs already ran + gated on the PR head;
+  # the queue re-run added wall-clock to every enqueue without new signal. Coverage
+  # now lives at: PR head (this pull_request trigger, unchanged) + push-to-main
+  # below (POST-MERGE DETECTION on main; a break is recovered by revert / fix-forward
+  # — batch-merge.yml's failure handling does NOT bisect, that is explicitly a v1
+  # unimplemented item) + the nightly-full-sweep backstop (formal-alarm.yml alarms if
+  # it goes silent). The polling `ci-summary / gate` never waits on a check that was
+  # never scheduled. [FABLE-5] PR #3511 review finding 6b: honesty fix — the earlier
+  # "batch-merge/bisection is the recovery net" wording implied a bisection mechanism
+  # that batch-merge.yml states it does not have.
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: formal-verification-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Same per-harness wall-clock ceiling as the nightly kani.yml lane: a runaway proof
+  # is cut with a clean red TIMEOUT record instead of exhausting the runner.
+  KANI_HARNESS_TIMEOUT: "20m"
+
+jobs:
+  # The selector + the manifest gate ([FABLE-5] sq-6vshe.20: two former sub-minute
+  # jobs on one runner). The JOB ID stays `fv-select` so kani's `needs: fv-select` +
+  # `fromJSON(needs.fv-select.outputs.suites)` matrix are untouched. MUST stay
+  # unconditional (no `if:`/`needs:`): a check-run matching SELECT_RE with any
+  # conclusion other than success (including `skipped`) REDs the ci-summary gate —
+  # that is the fail-closed contract, not an accident. The selector step-group runs
+  # FIRST so the `any`/`suites` outputs are emitted before the manifest gate can fail.
+  fv-select:
+    name: fv-select (change-based test selection) + fv-manifest (proof inventory)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      any: ${{ steps.sel.outputs.any }}
+      suites: ${{ steps.sel.outputs.suites }}
+    steps:
+      # Full history so the merge-base for the three-dot diff always resolves; an
+      # unfetchable base fail-closes to running every pr_gate suite anyway.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # ---- former job: fv-select (change-based test selection) ----
+      # The selector's own fixtures run first so a broken selector cannot silently
+      # mis-select (red here => red gate, fail-closed).
+      - name: Self-test the FV selector (hermetic fixtures)
+        run: python3 scripts/fv_select.py --self-test
+      - name: Select proof suites for this diff (scripts/fv_select.py)
+        id: sel
+        env:
+          EVENT: ${{ github.event_name }}
+          # Exactly one pair is non-empty per event (same wiring as ci-select.yml).
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/fv_select.py --event "$EVENT" --base "$BASE" --head "$HEAD"
+
+      # ---- former job: fv-manifest (proof inventory completeness + drift) ----
+      # Unconditional: ANY PR can add a `#[cfg(kani)]` module or touch kani.yml/the
+      # manifest, and the check is seconds-cheap (a comment-aware source scan + two
+      # config parses — no cargo, no build).
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install PyYAML (hash-pinned)
+        # Needed only to parse kani.yml's matrix. HASH-pinned (Scorecard
+        # PinnedDependenciesID) against the same requirements file the docs-quality
+        # YAML jobs use — one pin to bump.
+        run: pip install --require-hashes -r .github/requirements/docs-quality.txt
+      - name: Self-test the drift gate (all drift classes must red)
+        run: python3 scripts/check-fv-manifest.py --self-test
+      - name: Manifest / source-inventory / kani.yml agreement — GATING
+        run: python3 scripts/check-fv-manifest.py
+
+  # The change-coupled bounded proofs. Mirrors the nightly kani.yml job mechanics
+  # (per-harness `--harness` invocation under a wall-clock timeout, solver reap,
+  # step-summary table) — see kani.yml's RUNNER/STRUCTURE header for the rationale.
+  # GATING: no advisory/informational token in the name. Skipped entirely (and
+  # correctly treated as satisfied) when fv-select selected nothing.
+  kani:
+    name: kani ${{ matrix.suite.name }} (change-coupled proofs)
+    needs: fv-select
+    if: needs.fv-select.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    # Cold Kani install + per-harness codegen + the slowest measured suite (the
+    # vectorized reducers: slowest harness ~10 min on the work box, six harnesses)
+    # need generous headroom; a hung harness is cut by KANI_HARNESS_TIMEOUT long
+    # before this backstop fires.
+    timeout-minutes: 120
+    strategy:
+      # One suite's timeout must not cancel another suite's verdict.
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(needs.fv-select.outputs.suites) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      # Same pinned nightly as kani.yml / miri.yml / asan.yml so a toolchain bump
+      # moves every formal lane together.
+      - name: Install Rust (nightly, pinned)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # nightly via toolchain input
+        with:
+          toolchain: nightly-2026-06-11
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Distinct from the nightly lane's `kani-<crate>` keys: the PR tier churns on
+          # branch content and must never poison the nightly backstop's warm cache.
+          key: kani-pr-${{ matrix.suite.crate }}
+      - name: Install Kani
+        run: |
+          cargo install --locked kani-verifier
+          cargo kani setup
+      # Identical loop to kani.yml (see that header for why per-harness + timeout +
+      # summary): every harness's PASS / FAIL / TIMEOUT is recorded before the job
+      # reds, so one cut proof cannot hide another's counterexample.
+      - name: Kani bounded proofs (per-harness, timeout, summary)
+        env:
+          SUITE_NAME: ${{ matrix.suite.name }}
+          SUITE_CRATE: ${{ matrix.suite.crate }}
+          SUITE_FEATURES: ${{ matrix.suite.features }}
+          SUITE_HARNESSES: ${{ matrix.suite.harnesses }}
+        run: |
+          set -u
+          summary="${GITHUB_STEP_SUMMARY:-/dev/stdout}"
+          tmo="${KANI_HARNESS_TIMEOUT:-20m}"
+          {
+            echo "### 🤖 Kani change-coupled proof results — ${SUITE_NAME}"
+            echo ""
+            echo "This PR touches source this suite PROVES (ci/formal-verification.toml), so its"
+            echo "bounded proofs are re-obligated here and GATE the merge. Each harness runs as its"
+            echo "own \`cargo kani --harness\` invocation under a \`${tmo}\` wall-clock ceiling."
+            echo ""
+            echo "| Harness | Result | Wall time |"
+            echo "| --- | --- | --- |"
+          } >> "$summary"
+
+          had_fail=0
+          had_timeout=0
+          for h in $SUITE_HARNESSES; do
+            log="kani-${SUITE_CRATE}-${h}.log"
+            start=$(date +%s)
+            # shellcheck disable=SC2086  # SUITE_FEATURES is an intentional word-split arg list.
+            # `&& ec=0 || ec=$?` — capture exit code without triggering `set -e` (bash -e {0}).
+            timeout -k 30s "$tmo" cargo kani -p "$SUITE_CRATE" $SUITE_FEATURES --harness "$h" \
+              > "$log" 2>&1 && ec=0 || ec=$?
+            # Anti-OOM invariant: reap any orphaned solver before the next harness starts.
+            pkill -9 -x cbmc 2>/dev/null || true
+            end=$(date +%s)
+            dur=$((end - start))
+            wall=$(printf '%dm%02ds' $((dur / 60)) $((dur % 60)))
+
+            case "$ec" in
+              0)
+                res="✅ PASS"
+                ;;
+              124 | 137)
+                res="⏱️ TIMEOUT (>${tmo})"
+                had_timeout=1
+                echo "::error title=Kani timeout::${SUITE_CRATE}::${h} exceeded ${tmo} on the PR tier — the changed code's proof no longer fits its budget (see step summary)."
+                ;;
+              *)
+                res="❌ FAIL (exit ${ec})"
+                had_fail=1
+                echo "::error title=Kani proof failed::${SUITE_CRATE}::${h} failed (exit ${ec}) — a reachable panic/OOB/UB counterexample or a build error against this PR's code (see step summary)."
+                ;;
+            esac
+            echo "| \`${h}\` | ${res} | ${wall} |" >> "$summary"
+
+            if [ "$ec" -ne 0 ]; then
+              {
+                echo ""
+                echo "<details><summary>Log tail — <code>${h}</code> (${res})</summary>"
+                echo ""
+                echo '```'
+                tail -n 40 "$log" 2>/dev/null || true
+                echo '```'
+                echo ""
+                echo "</details>"
+              } >> "$summary"
+            fi
+          done
+
+          {
+            echo ""
+            if [ "$had_fail" -eq 1 ]; then
+              echo "**Overall: ❌ FAIL** — this PR's changes break a bounded proof; fix the code or re-derive the harness honestly (never weaken the property to pass)."
+            elif [ "$had_timeout" -eq 1 ]; then
+              echo "**Overall: ⏱️ TIMEOUT** — every harness that finished passed, but this PR pushed one or more proofs past the \`${tmo}\` budget; re-bound the harness or simplify the change."
+            else
+              echo "**Overall: ✅ PASS** — every re-obligated proof verified within budget."
+            fi
+          } >> "$summary"
+
+          if [ "$had_fail" -eq 1 ] || [ "$had_timeout" -eq 1 ]; then
+            exit 1
+          fi

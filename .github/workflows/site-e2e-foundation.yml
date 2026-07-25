@@ -6,15 +6,21 @@
 # idle-preview state), so this lane needs NO wasm bundle and NO Typst — it is fast and
 # self-contained (contrast site-e2e.yml, which builds spec fragments for its ReSpec smoke).
 #
-# ADVISORY, by design: this lane is NOT wired into the `ci-summary` aggregator and NEVER gates the
-# merge queue. Promotion to a required check is the separate bead sq-ymr2e.12 (advisory-first,
-# promotion earned on a probation bar — research/web-gui-test-program.md §6.3). The browser-exec
-# step is `continue-on-error` so a browser flake can never block a PR; the deterministic lint +
-# grep-gate steps are hard (a broken foundation should be visible).
+# ADVISORY, by design: the whole word `advisory` in the job NAME is what excludes this lane from
+# the `ci-summary` aggregator, so it NEVER gates the merge queue. Promotion to a required check is
+# governed by the checked-in gating/probation policy `.github/E2E-GATING-POLICY.md` (advisory-first,
+# promotion earned on a probation bar + flake-quarantine — bead sq-ymr2e.12; design
+# research/web-gui-test-program.md §6.3). Promotion is the one-line flip in §4 of that policy (drop
+# ` (advisory)` from the job name + remove the step `continue-on-error`). The browser-exec step is
+# `continue-on-error` so a browser flake can never block a PR; the deterministic lint + grep-gate
+# steps are hard (a broken foundation should be visible).
 name: site-e2e-foundation (advisory)
 
 on:
   pull_request:
+    # [FABLE-5] Draft-tier CI: + ready_for_review so the un-draft moment re-runs
+    # this gate-feeding lane (docs/branch-protection.md §Draft-tier CI).
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "site/**"
       - "package.json"
@@ -51,7 +57,7 @@ jobs:
       # Repo-root npm workspaces: `site/` is a member; `npm ci` run FROM site/ installs the site
       # member's closure from the root lock and does NOT trigger sibling members' lifecycle scripts
       # (verified in site-e2e.yml — js/'s wasm `prepare` is not run, so no Rust/wasm toolchain here).
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm

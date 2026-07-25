@@ -243,6 +243,74 @@ pub fn split_decimal(s: &str) -> Option<(bool, &str, &str)> {
     Some((neg, int.trim_start_matches('0'), frac.trim_end_matches('0')))
 }
 
+/// Exact comparison of two plain decimal lexicals (`[+-]?digits(.digits)?`) of ANY
+/// length — pure string arithmetic, no `f64` and no `i128` bound. `None` if either
+/// lexical is not a well-formed decimal. Signed zeros (`-0`, `-0.0`) compare equal to
+/// zero. This is the string-exact tier [`Num::cmp_total`]'s f64-tie disambiguation
+/// rides on. [FABLE-5] sq-wjl8i
+pub fn cmp_plain_decimal(a: &str, b: &str) -> Option<Ordering> {
+    let (na, ia, fa) = split_decimal(a)?;
+    let (nb, ib, fb) = split_decimal(b)?;
+    let a_zero = ia.is_empty() && fa.is_empty();
+    let b_zero = ib.is_empty() && fb.is_empty();
+    if a_zero && b_zero {
+        return Some(Ordering::Equal);
+    }
+    // Magnitude: longer (normalised) integer part wins, then integer digits, then
+    // fraction digits with implicit trailing-zero padding.
+    let mag = ia.len().cmp(&ib.len()).then_with(|| ia.cmp(ib)).then_with(|| {
+        let n = fa.len().max(fb.len());
+        (0..n)
+            .map(|i| {
+                (
+                    fa.as_bytes().get(i).copied().unwrap_or(b'0'),
+                    fb.as_bytes().get(i).copied().unwrap_or(b'0'),
+                )
+            })
+            .find_map(|(x, y)| if x != y { Some(x.cmp(&y)) } else { None })
+            .unwrap_or(Ordering::Equal)
+    });
+    let neg_a = na && !a_zero;
+    let neg_b = nb && !b_zero;
+    Some(match (neg_a, neg_b) {
+        (true, false) => Ordering::Less,
+        (false, true) => Ordering::Greater,
+        (false, false) => mag,
+        (true, true) => mag.reverse(),
+    })
+}
+
+/// The EXACT plain-decimal expansion of a finite `f64` (every finite `f64` is an exact
+/// decimal rational; the longest needs 1074 fraction digits). `None` for `NaN` / `±INF`.
+/// Cold-path helper for the f64-tie disambiguation in [`Num::cmp_total`] and the
+/// engine's numeric sort cells. [FABLE-5] sq-wjl8i
+pub fn f64_exact_decimal(f: f64) -> Option<String> {
+    if !f.is_finite() {
+        return None;
+    }
+    // With precision >= the maximum exact digit count, Rust's correctly-rounded
+    // formatting IS the exact expansion.
+    Some(format!("{:.1074}", f))
+}
+
+/// Exact order of an exact fixed-point decimal against a (non-NaN) `f64`'s exact
+/// rational value: the decimal's lexical against the double's exact decimal expansion,
+/// pure string arithmetic throughout. Deliberately NO `f64` fast path: `Dec::f64` is a
+/// two-rounding image (mantissa conversion then a division), so a strict `f64` verdict
+/// here is not boundary-trustworthy — and this helper is only reached on the cold
+/// f64-tie path of the total order. [FABLE-5] sq-wjl8i
+fn cmp_dec_f64(d: Dec, f: f64) -> Ordering {
+    if f == f64::INFINITY {
+        return Ordering::Less;
+    }
+    if f == f64::NEG_INFINITY {
+        return Ordering::Greater;
+    }
+    f64_exact_decimal(f)
+        .and_then(|exp| cmp_plain_decimal(&d.lexical(), &exp))
+        .unwrap_or(Ordering::Equal)
+}
+
 /// The arithmetic operator for [`Num::binop`]: `+ - * /` under XPath operand promotion.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ArithOp {
@@ -319,6 +387,77 @@ impl Num {
             Num::Dec(d) => Some(d),
             _ => None,
         }
+    }
+
+    /// The TOTAL order over numeric values used by the SPARQL `ORDER BY` extension
+    /// (the `CompareTerm::exact_cmp` hook of `sparq_substrate::compare`) — [FABLE-5]
+    /// sq-wjl8i. Unlike the relational comparison (XPath `op:numeric-*`, where a
+    /// float/double operand PROMOTES the pair to a possibly-collapsing `f64` and `NaN`
+    /// is incomparable), this is the **exact-rational** order over the values,
+    /// totalised:
+    ///
+    /// - `NaN` sorts FIRST (before `-INF`), and `NaN == NaN` — the fixed position that
+    ///   makes the order total (the choice XPath 3.1's `fn:sort` makes: "NaN least");
+    /// - an exact-tier operand (`Int` / `Dec`) against a float/double compares against
+    ///   the float/double's EXACT rational value (every finite `f64` is one), so the
+    ///   2^53 collapse cannot make two distinct values tie with a third
+    ///   (the machine-checked intransitivity witness of bead sq-wjl8i);
+    /// - the order REFINES the promoted (`f64`) comparison: `f64` rounding is monotonic,
+    ///   so every strict promoted verdict is preserved — only promoted TIES are refined.
+    ///
+    /// Honest boundary: two `Dec`s whose scale alignment overflows `i128` fall back to
+    /// the `f64` image (as `Dec::cmp` documents); values whose lexicals exceed the
+    /// `i128` tower never reach this type (`as_numeric` classifies them out).
+    pub fn cmp_total(self, o: Num) -> Ordering {
+        let (fa, fb) = (self.f64(), o.f64());
+        match (fa.is_nan(), fb.is_nan()) {
+            (true, true) => return Ordering::Equal,
+            (true, false) => return Ordering::Less,
+            (false, true) => return Ordering::Greater,
+            (false, false) => {}
+        }
+        match (self.to_dec(), o.to_dec()) {
+            (Some(a), Some(b)) => a
+                .cmp(b)
+                .unwrap_or_else(|| fa.partial_cmp(&fb).unwrap_or(Ordering::Equal)),
+            (Some(a), None) => cmp_dec_f64(a, fb),
+            (None, Some(b)) => cmp_dec_f64(b, fa).reverse(),
+            // Both inexact: the value IS the f64 (an `f32` widens exactly); both are
+            // non-NaN here, so `partial_cmp` always decides.
+            (None, None) => fa.partial_cmp(&fb).unwrap_or(Ordering::Equal),
+        }
+    }
+
+    /// The **relational** numeric comparison used by the SPARQL `<`/`>`/`=` operators
+    /// and by `MIN`/`MAX` — XPath `op:numeric-less-than` / `op:numeric-equal` semantics.
+    ///
+    /// Unlike [`cmp_total`](Self::cmp_total), this comparison is **partial**: `NaN`
+    /// produces `None` (a SPARQL type error), and `+0.0` equals `-0.0`. Same-tier pairs
+    /// (`Int`/`Dec`) compare by exact value via [`Dec::cmp`]; mixed or inexact pairs fall
+    /// back to `f64::partial_cmp` (XPath promotion — a float/double operand promotes the
+    /// pair to `f64`, which is correct for the relational operators but can collapse
+    /// distinct exact values at the 2^53 boundary; that is an accepted consequence of the
+    /// XPath spec, not a bug). Returns `None` when either operand is `NaN`, matching the
+    /// engine's `values_equal`/`value_compare_strict` path (SPARQL type error on NaN).
+    ///
+    /// # When to use `cmp_total` vs `cmp_relational`
+    ///
+    /// - **`ORDER BY`, `MIN`/`MAX` (for the sort tie), `sort_ids`** — use `cmp_total`:
+    ///   NaN must be positioned somewhere to give a total order.
+    /// - **`<`, `>`, `=`, `!=` FILTER expressions and value-space equality**
+    ///   (D-entailment, RIF `pred:numeric-equal`) — use `cmp_relational`: NaN is an error.
+    ///
+    /// [OPUS-4.8] sq-v5evr — the value-space equality/relational-compare hoist.
+    #[inline]
+    pub fn cmp_relational(self, o: Num) -> Option<Ordering> {
+        // Exact tier: both Int/Dec → exact Dec comparison (no f64 promotion).
+        if let (Some(x), Some(y)) = (self.to_dec(), o.to_dec()) {
+            if let Some(ord) = x.cmp(y) {
+                return Some(ord);
+            }
+        }
+        // Mixed or inexact: f64 promotion.  NaN → None (SPARQL type error).
+        self.f64().partial_cmp(&o.f64())
     }
 
     /// `op` under XPath operand promotion. `None` is a SPARQL type error (exact-type
@@ -620,16 +759,15 @@ fn round_half_to_pos_inf(x: f64) -> f64 {
 
 /// Parse an xsd:float/xsd:double lexical: the XSD spellings of the specials, plus the
 /// ordinary scientific notation Rust's parser shares with XSD. `None` = ill-formed.
+///
+/// [FABLE-5] (sq-9781x) Delegates to the lowest-tier `sparq_core::parse_xsd_f64` — the
+/// SINGLE shared body of this parser — so the numeric-value CACHE (`Graph::numeric_value`,
+/// built in `sparq-core`) and this evaluator seam can never diverge on which double/float
+/// lexicals are numeric. `sparq-substrate` depends on `sparq-core`, so the shared body
+/// lives there; this re-export keeps the substrate's public `parse_xsd_f64` API stable.
 #[inline]
 pub fn parse_xsd_f64(v: &str) -> Option<f64> {
-    match v {
-        "NaN" => Some(f64::NAN),
-        "INF" | "+INF" => Some(f64::INFINITY),
-        "-INF" => Some(f64::NEG_INFINITY),
-        // Rust accepts "inf"/"infinity"/"nan" spellings XSD does not; exclude them.
-        _ if v.bytes().all(|c| c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.' | b'e' | b'E')) => v.parse::<f64>().ok(),
-        _ => None,
-    }
+    sparq_core::parse_xsd_f64(v)
 }
 
 /// Parse an xsd:float lexical (the [`parse_xsd_f64`] spellings, narrowed to `f32`).
@@ -1233,5 +1371,387 @@ mod tests {
         assert_eq!(fmt_xsd_double(f64::NEG_INFINITY), "-INF");
         assert_eq!(fmt_xsd_double(-6.0), "-6");
         assert_eq!(fmt_xsd_double(1.5), "1.5E0");
+    }
+
+    // --- Num::cmp_total — the ORDER BY total order over numeric values (sq-wjl8i) ---
+
+    const TWO53: i64 = 9_007_199_254_740_992;
+
+    /// NaN takes a FIXED position: before -INF, equal to itself — the totalisation.
+    #[test]
+    fn cmp_total_nan_sorts_first_and_equals_itself() {
+        use Ordering::*;
+        let nan = Num::Double(f64::NAN);
+        assert_eq!(nan.cmp_total(Num::Double(f64::NEG_INFINITY)), Less);
+        assert_eq!(nan.cmp_total(Num::Int(0)), Less);
+        assert_eq!(Num::Int(0).cmp_total(nan), Greater);
+        assert_eq!(nan.cmp_total(Num::Float(f32::NAN)), Equal);
+        assert_eq!(nan.cmp_total(nan), Equal);
+    }
+
+    /// The mixed exact/inexact tier at the 2^53 collapse: the double equal to the shared
+    /// f64 image is EQUAL to the integer it exactly is, and strictly BELOW the collapsed
+    /// neighbour 2^53+1 — the intransitivity witness of bead sq-wjl8i, now decided
+    /// exactly instead of collapsing to a three-way tie.
+    #[test]
+    fn cmp_total_mixed_tier_is_exact_at_the_2p53_collapse() {
+        use Ordering::*;
+        let dbl = Num::Double(TWO53 as f64);
+        let int_lo = Num::Int(TWO53);
+        let int_hi = Num::Dec(Dec { mant: TWO53 as i128 + 1, scale: 0 });
+        assert_eq!(int_lo.cmp_total(dbl), Equal, "2^53 IS the double exactly");
+        assert_eq!(dbl.cmp_total(int_hi), Less, "the collapsed neighbour still orders");
+        assert_eq!(int_hi.cmp_total(dbl), Greater);
+        assert_eq!(int_lo.cmp_total(int_hi), Less);
+    }
+
+    /// A decimal against the double it rounds to is NOT equal: `0.1` (exact) is below
+    /// the double `0.1` (exactly 0.1000000000000000055511151231257827…). And ±INF /
+    /// exact pairs order by sign of the infinity.
+    #[test]
+    fn cmp_total_decimal_vs_double_refines_the_f64_tie() {
+        use Ordering::*;
+        let dec = Num::Dec(Dec { mant: 1, scale: 1 });
+        let dbl = Num::Double(0.1);
+        assert_eq!(dec.cmp_total(dbl), Less);
+        assert_eq!(dbl.cmp_total(dec), Greater);
+        assert_eq!(Num::Int(1).cmp_total(Num::Double(f64::INFINITY)), Less);
+        assert_eq!(Num::Int(1).cmp_total(Num::Double(f64::NEG_INFINITY)), Greater);
+        // Both-inexact: the value IS the f64; a float widens exactly.
+        assert_eq!(Num::Float(0.5).cmp_total(Num::Double(0.5)), Equal);
+        assert_eq!(Num::Double(-0.0).cmp_total(Num::Double(0.0)), Equal);
+    }
+
+    /// Direct pin of `cmp_plain_decimal`: arbitrary-length string-exact decimals,
+    /// signed-zero equality, malformed inputs.
+    #[test]
+    fn cmp_plain_decimal_is_exact_and_total_on_decimals() {
+        use Ordering::*;
+        assert_eq!(cmp_plain_decimal("9007199254740992", "9007199254740993"), Some(Less));
+        assert_eq!(cmp_plain_decimal("0.123456789012345678", "0.123456789012345679"), Some(Less));
+        assert_eq!(cmp_plain_decimal("1.50", "1.5"), Some(Equal));
+        assert_eq!(cmp_plain_decimal("-0.0", "0"), Some(Equal));
+        assert_eq!(cmp_plain_decimal("-2", "-10"), Some(Greater));
+        assert_eq!(cmp_plain_decimal("10", "9"), Some(Greater));
+        assert_eq!(cmp_plain_decimal("abc", "1"), None);
+    }
+
+    /// Direct pin of `f64_exact_decimal`: exact expansions (not shortest round-trips),
+    /// and `None` on the non-finite values.
+    #[test]
+    fn f64_exact_decimal_is_the_exact_expansion() {
+        let exp = f64_exact_decimal(0.1).expect("finite");
+        assert!(exp.starts_with("0.1000000000000000055511151231257827"), "got {}", exp);
+        assert_eq!(
+            cmp_plain_decimal(&f64_exact_decimal(TWO53 as f64).unwrap(), "9007199254740992"),
+            Some(Ordering::Equal)
+        );
+        assert_eq!(f64_exact_decimal(f64::NAN), None);
+        assert_eq!(f64_exact_decimal(f64::INFINITY), None);
+        assert_eq!(f64_exact_decimal(f64::NEG_INFINITY), None);
+    }
+
+    // --- Num::cmp_relational — the SPARQL relational (</>/ =) numeric comparison ---
+    // [OPUS-4.8] sq-v5evr: the value-space equality/relational-compare hoist.
+
+    /// Basic ordering: int < dec < float < double ordering by value, and the identity
+    /// `cmp_relational(x, x) == Some(Equal)` for the non-NaN variants.
+    #[test]
+    fn cmp_relational_basic_ordering() {
+        use Ordering::*;
+        // Exact tier: int vs dec
+        assert_eq!(Num::Int(1).cmp_relational(Num::Int(2)), Some(Less));
+        assert_eq!(Num::Int(2).cmp_relational(Num::Int(1)), Some(Greater));
+        assert_eq!(Num::Int(1).cmp_relational(Num::Int(1)), Some(Equal));
+        let dec1 = Num::Dec(Dec { mant: 10, scale: 1 }); // 1.0
+        let dec2 = Num::Dec(Dec { mant: 15, scale: 1 }); // 1.5
+        assert_eq!(dec1.cmp_relational(dec2), Some(Less));
+        assert_eq!(Num::Int(1).cmp_relational(dec1), Some(Equal));
+        // Float / double
+        assert_eq!(Num::Double(1.0).cmp_relational(Num::Double(2.0)), Some(Less));
+        assert_eq!(Num::Float(3.0).cmp_relational(Num::Float(3.0)), Some(Equal));
+    }
+
+    /// NaN operands produce `None` (SPARQL type error) — unlike `cmp_total` which
+    /// totalises NaN first. This pin distinguishes `cmp_relational` from `cmp_total`.
+    #[test]
+    fn cmp_relational_nan_is_type_error() {
+        let nan = Num::Double(f64::NAN);
+        let fnan = Num::Float(f32::NAN);
+        assert_eq!(nan.cmp_relational(Num::Int(0)), None, "NaN vs int is type error");
+        assert_eq!(Num::Int(0).cmp_relational(nan), None, "int vs NaN is type error");
+        assert_eq!(nan.cmp_relational(nan), None, "NaN vs NaN is type error");
+        assert_eq!(fnan.cmp_relational(Num::Double(1.0)), None, "float-NaN is type error");
+    }
+
+    /// The XPath relational compare uses f64 promotion for mixed/inexact pairs — it does
+    /// NOT refine the f64 collapse at 2^53 (unlike `cmp_total`). Two integers that
+    /// collapse to the same f64 compare Equal under relational semantics (XPath spec).
+    #[test]
+    fn cmp_relational_mixed_tier_uses_f64_promotion() {
+        use Ordering::*;
+        // 2^53 and 2^53+1 collapse to the same f64 when compared as int vs double.
+        let int_lo = Num::Int(TWO53);
+        let dbl = Num::Double(TWO53 as f64);
+        // Int vs Int: exact dec path — distinct
+        let int_hi = Num::Dec(Dec { mant: TWO53 as i128 + 1, scale: 0 });
+        assert_eq!(int_lo.cmp_relational(int_hi), Some(Less));
+        // Int vs Double: f64 promotion — the double IS 2^53 exactly, so Equal
+        assert_eq!(int_lo.cmp_relational(dbl), Some(Equal));
+        // ±0.0 are equal (f64 comparison)
+        assert_eq!(Num::Double(-0.0).cmp_relational(Num::Double(0.0)), Some(Equal));
+    }
+
+    // [SONNET-4.6] sq-qcnn.40 — targeted tests killing the surviving mutants identified
+    // from nightly run 28776460517. Each asserts an EXACT value so a mutation of the
+    // comparison / arithmetic / sign logic goes red.
+
+    /// `Dec::parse` must preserve the negative sign of the input lexical.
+    /// Kills: `59:35 delete - in Dec::parse` (removes the `-mag` negation, making
+    /// negative parses return a positive mantissa).
+    #[test]
+    fn dec_parse_negative_mantissa_sign() {
+        assert_eq!(Dec::parse("-3"), Some(Dec { mant: -3, scale: 0 }));
+        assert_eq!(Dec::parse("-1.5"), Some(Dec { mant: -15, scale: 1 }));
+        assert_eq!(Dec::parse("-0.07"), Some(Dec { mant: -7, scale: 2 }));
+    }
+
+    /// `Dec::checked_div` with two negative operands must produce a positive result.
+    /// Kills: `129:46 replace < with == in Dec::checked_div` (changes `o.mant < 0`
+    /// to `o.mant == 0`; since the divisor is asserted non-zero, this makes the sign
+    /// depend only on the dividend, giving a wrong negative result for neg/neg).
+    #[test]
+    fn dec_checked_div_neg_divided_by_neg_is_positive() {
+        // −6 / −3 = 2.0 (positive, scale 1).
+        let r = Dec { mant: -6, scale: 0 }.checked_div(Dec { mant: -3, scale: 0 });
+        assert_eq!(r, Some(Dec { mant: 20, scale: 1 }));
+        // −4 / −2 = 2.0.
+        let r2 = Dec { mant: -4, scale: 0 }.checked_div(Dec { mant: -2, scale: 0 });
+        assert_eq!(r2, Some(Dec { mant: 20, scale: 1 }));
+    }
+
+    /// When the divisor has a non-zero scale the exponent `e = s + o.scale - self.scale`
+    /// uses `+` for `o.scale`; mutating that `+` to `-` gives the wrong exponent.
+    /// Kills: `134:30 replace + with - in Dec::checked_div`.
+    #[test]
+    fn dec_checked_div_nonzero_divisor_scale() {
+        // 10 / 0.5 = 20.0: o.scale=1, so e = s + 1 - 0 = s+1. At s=1: e=2, num=1000, den=5.
+        // Under mutation (−): e = s − 1 − 0 = s−1. At s=1: e=0, num=10, den=5 → 2.0. Wrong.
+        assert_eq!(
+            Dec { mant: 10, scale: 0 }.checked_div(Dec { mant: 5, scale: 1 }),
+            Some(Dec { mant: 200, scale: 1 })
+        );
+        // 3 / 0.3 = 10.0: o.scale=1. At s=1: e=2, num=300, den=3 → 100 → scale=1 → 10.0.
+        assert_eq!(
+            Dec { mant: 3, scale: 0 }.checked_div(Dec { mant: 3, scale: 1 }),
+            Some(Dec { mant: 100, scale: 1 })
+        );
+    }
+
+    /// Non-terminating division (1/3) rounds half-up: the quotient at max scale 18 is
+    /// 0.333...3 with the last digit 3 (rounds DOWN from 0.333...33…, rem=1, 1*2<3).
+    /// Non-terminating 2/3 rounds UP (rem=2, 2*2=4 ≥ 3), giving 0.666...7.
+    /// Kills: `151:27 replace + with - in Dec::checked_div` (rounds DOWN instead of UP)
+    ///        `151:50 replace * with / in Dec::checked_div` (rem/2 never ≥ den — no round).
+    #[test]
+    fn dec_checked_div_nonterminating_rounds_half_up() {
+        // 2/3: non-terminating at every scale. Round half-up at scale 18.
+        // rem = (2 * 10^18) % 3 = 2.  2*2=4 ≥ 3 → round UP.
+        let two_thirds = Dec { mant: 2, scale: 0 }.checked_div(Dec { mant: 3, scale: 0 }).unwrap();
+        assert_eq!(two_thirds.scale, 18);
+        assert_eq!(two_thirds.mant, 666_666_666_666_666_667i128);
+        // 1/3: rem = (1 * 10^18) % 3 = 1.  1*2=2 < 3 → round DOWN (no increment).
+        let one_third = Dec { mant: 1, scale: 0 }.checked_div(Dec { mant: 3, scale: 0 }).unwrap();
+        assert_eq!(one_third.scale, 18);
+        assert_eq!(one_third.mant, 333_333_333_333_333_333i128);
+    }
+
+    /// The non-terminating path preserves the negative sign of the result.
+    /// Kills: `153:35 delete - in Dec::checked_div` (removes the `-mant` negation in the
+    /// non-terminating branch, returning a positive mantissa for a negative quotient).
+    #[test]
+    fn dec_checked_div_nonterminating_negative_result() {
+        // −2/3 is non-terminating; result must have a negative mantissa.
+        let r = Dec { mant: -2, scale: 0 }.checked_div(Dec { mant: 3, scale: 0 }).unwrap();
+        assert_eq!(r.scale, 18);
+        assert_eq!(r.mant, -666_666_666_666_666_667i128);
+    }
+
+    /// `Dec::round_to_int` Ceil of an exact decimal (no remainder) must NOT add 1.
+    /// The condition `r > 0` must be STRICT; `>= 0` would always round up since rem_euclid ≥ 0.
+    /// Kills: `174:57 replace > with >= in Dec::round_to_int`.
+    #[test]
+    fn dec_round_to_int_ceil_of_exact_decimal_is_identity() {
+        // 3.0 is already an integer — ceil must stay 3, not become 4.
+        assert_eq!(
+            Dec { mant: 30, scale: 1 }.round_to_int(RoundMode::Ceil),
+            Dec { mant: 3, scale: 0 }
+        );
+        // 7.0 with a different scale.
+        assert_eq!(
+            Dec { mant: 700, scale: 2 }.round_to_int(RoundMode::Ceil),
+            Dec { mant: 7, scale: 0 }
+        );
+        // Negative exact decimal: ceil(-3.0) = -3, not -2.
+        assert_eq!(
+            Dec { mant: -30, scale: 1 }.round_to_int(RoundMode::Ceil),
+            Dec { mant: -3, scale: 0 }
+        );
+    }
+
+    /// `cmp_plain_decimal` must treat a negative non-zero value as Less than its
+    /// positive counterpart (same magnitude). Tests the sign detection path.
+    /// Kills:
+    ///   `254:32 replace && with || in cmp_plain_decimal` — `||` makes any number whose
+    ///     fraction part is empty (all integers) appear to be "zero", stripping the sign.
+    ///   `273:23 delete ! in cmp_plain_decimal` — removes the `!` from `na && !a_zero`,
+    ///     meaning neg_a is only true when the value IS zero (inverting the sign logic).
+    #[test]
+    fn cmp_plain_decimal_negative_vs_positive_same_magnitude() {
+        use Ordering::*;
+        assert_eq!(cmp_plain_decimal("-2", "2"), Some(Less));
+        assert_eq!(cmp_plain_decimal("2", "-2"), Some(Greater));
+        // Fraction form: -0.5 < 0.5.
+        assert_eq!(cmp_plain_decimal("-0.5", "0.5"), Some(Less));
+    }
+
+    /// Zero compared to a positive value must be Less, not Equal.
+    /// Kills: `256:15 replace && with || in cmp_plain_decimal` (the `a_zero || b_zero`
+    /// mutation returns Equal as soon as EITHER operand is zero, even when the other is not).
+    #[test]
+    fn cmp_plain_decimal_zero_vs_nonzero() {
+        use Ordering::*;
+        assert_eq!(cmp_plain_decimal("0", "5"), Some(Less));
+        assert_eq!(cmp_plain_decimal("5", "0"), Some(Greater));
+        assert_eq!(cmp_plain_decimal("-0", "3"), Some(Less));
+    }
+
+    /// When `Dec::checked_div` overflows the exact `i128` path it falls back to
+    /// `self.f64() / o.f64()` (division), not multiplication or remainder.
+    /// Kills: `486:53 replace / with * in Num::binop`
+    ///        `486:53 replace / with % in Num::binop`.
+    #[test]
+    fn num_binop_div_overflow_fallback_is_double_division() {
+        // i128::MAX / 0.1 overflows the exact Dec path (numerator would be ~1.7e40,
+        // exceeding u128::MAX), so falls back to Double.
+        // Expected: ~1.7e39. Mutation *: ~1.7e37. Mutation %: tiny value near 0.
+        let big = Num::Dec(Dec { mant: i128::MAX, scale: 0 });
+        let small = Num::Dec(Dec { mant: 1, scale: 1 }); // 0.1
+        let result = big.binop(small, ArithOp::Div).expect("never a type error here");
+        assert!(
+            matches!(result, Num::Double(d) if d > 1e38),
+            "overflow fallback must use f64 DIVISION (got {:?})",
+            result
+        );
+    }
+
+    /// `fmt_xsd_double` uses `< 1e15` (strict) for the integer-plain path; the
+    /// boundary value 1e15 itself must render as scientific notation, not as a plain integer.
+    /// Kills: `794:36 replace < with <= in fmt_xsd_double`.
+    #[test]
+    fn fmt_xsd_double_boundary_at_1e15_is_scientific() {
+        // 1e15.abs() < 1e15 is false → scientific "1.0E15".
+        // Under mutation (<= 1e15) it would be true → integer "1000000000000000".
+        assert_eq!(fmt_xsd_double(1e15), "1.0E15");
+        // 9.99e14 is strictly below 1e15 → still integer form.
+        assert_eq!(fmt_xsd_double(999_000_000_000_000.0_f64), "999000000000000");
+    }
+
+    /// `Num::lexical` for `Float` uses `f.abs() < 1e15` (strict); the nearest f32 to
+    /// 1e15 (`999_999_986_991_104.0_f32`) sits exactly AT the boundary — it must use
+    /// scientific notation, not integer form.
+    /// Kills: `610:55 replace < with <= in Num::lexical`.
+    #[test]
+    fn num_lexical_float_at_1e15_f32_boundary_is_scientific() {
+        // 1e15_f32 rounds to 999_999_986_991_104.0.  Its abs() is NOT strictly less
+        // than itself, so the original `< 1e15_f32` is false → scientific.
+        // Under mutation (`<=`), the condition is true → integer form (no 'E').
+        let at_boundary: f32 = 1e15_f32; // = 999_999_986_991_104.0
+        assert!(
+            Num::Float(at_boundary).lexical().contains('E'),
+            "float at 1e15_f32 boundary must render scientific; got {:?}",
+            Num::Float(at_boundary).lexical()
+        );
+    }
+
+    /// [FABLE-5] (sq-9781x / sq-74oy4 / sq-6b1lj) TRUE cross-seam differential: the sparq-core
+    /// numeric-value CACHE acceptance (`sparq_core::numeric_cache_value` — the EXACT acceptance
+    /// `numerics_of`/`numeric_of`/`dictspill` compute, NOT a re-implementation, so this is not
+    /// circular) vs the datatype-AWARE evaluator `as_numeric` (`Num::of_literal`, which decides
+    /// `values_equal`). As of sq-6b1lj the cache is DATATYPE-AWARE, so the two seams AGREE for
+    /// every case: a lexical ill-formed FOR its datatype (`"1.5"^^xsd:integer`,
+    /// `"1E2"^^xsd:decimal`, an i128-overflow decimal) MISSES the cache exactly as `of_literal`
+    /// type-errors it. This test now pins that agreement: any NEW divergence — the cache
+    /// admitting a lexical `of_literal` rejects, or rejecting one it accepts — fails here.
+    #[test]
+    fn cache_f64_seam_vs_as_numeric_differential() {
+        // (lexical, datatype). Post sq-6b1lj the cache acceptance ⟺ `Num::of_literal` acceptance
+        // (modulo the genuine-NaN-double sentinel, which both treat as a cache miss), so EVERY
+        // case must AGREE — the divergence surface is closed.
+        let cases: &[(&str, oxrdf::NamedNodeRef<'_>)] = &[
+            // ---- both accept (well-formed for datatype), same f64 image ----
+            ("42", xsd::INTEGER),
+            (" 7 ", xsd::DECIMAL),      // whitespace collapse — both trim
+            ("+3", xsd::INTEGER),
+            (" 1 ", xsd::INTEGER),      // padded integer: both value-1 (sq-74oy4)
+            ("1.5", xsd::DECIMAL),
+            ("1.5E2", xsd::DOUBLE),
+            ("INF", xsd::DOUBLE),
+            ("3.0", xsd::FLOAT),
+            // scale-0-after-normalisation integers `of_literal` accepts as `Dec` (mant, scale 0):
+            ("5.", xsd::INTEGER),        // trailing dot, no fraction -> value 5
+            ("5.0", xsd::INTEGER),       // trailing zero fraction -> normalised scale 0
+            ("5.00", xsd::INTEGER),      // ditto
+            ("-0", xsd::INTEGER),        // signed zero
+            (".5", xsd::DECIMAL),        // empty integer part
+            ("5.5", xsd::DECIMAL),       // ordinary decimal
+            ("007.50", xsd::DECIMAL),    // leading/trailing zeros
+            // ---- both reject (XSD f64 spellings) ----
+            ("inf", xsd::DOUBLE),       // Rust-only spelling: both reject
+            ("nan", xsd::DOUBLE),
+            ("abc", xsd::INTEGER),
+            ("", xsd::INTEGER),
+            // ---- both reject (per-datatype ill-formed) — the sq-6b1lj cases, now CLOSED ----
+            ("1.5", xsd::INTEGER),       // fraction on an integer (scale 1)
+            (".5", xsd::INTEGER),        // no integer part, scale 1 -> not an integer
+            ("1E2", xsd::DECIMAL),       // exponent on a decimal
+            ("1E2", xsd::INTEGER),       // exponent on an integer
+            // 40-digit decimal: beyond i128 -> of_literal None AND cache miss now.
+            ("9999999999999999999999999999999999999999.5", xsd::DECIMAL),
+            // 40-digit integer: beyond i128 -> of_literal None AND cache miss now.
+            ("9999999999999999999999999999999999999999", xsd::INTEGER),
+            // 39-digit integer that FITS i128 (i128::MAX ~1.7e38): both ACCEPT (large int).
+            ("123456789012345678901234567890123456789", xsd::INTEGER),
+        ];
+        for (lex, dt) in cases {
+            // CACHE seam: the ACTUAL cache acceptance (public wrapper over the fn `numerics_of`/
+            // `numeric_of`/`dictspill` call). NaN-double folds to `None` (cache-miss sentinel).
+            let cache_hit = sparq_core::numeric_cache_value(lex, dt.as_str()).is_some();
+            // EVALUATOR seam: datatype-aware acceptance (NaN-double excluded symmetrically —
+            // it is "accepted" as a term but is the cache's not-cached sentinel).
+            let eval_accepts = matches!(as_numeric(&typed(lex, *dt)), Some(n) if !n.f64().is_nan());
+            assert_eq!(
+                cache_hit, eval_accepts,
+                "cache seam vs as_numeric MUST agree for {:?}^^{:?}: cache_hit={} eval_accepts={}. \
+                 The datatype-aware cache (sq-6b1lj) means cache acceptance ⟺ of_literal acceptance; \
+                 a mismatch is a regression of that invariant.",
+                lex, dt.as_str(), cache_hit, eval_accepts
+            );
+            // Where BOTH accept, the f64 images MUST be VALUE-equal (the cache stores that f64).
+            // Compared by `==` not bits: `"-0"^^xsd:integer` caches `parse_xsd_f64("-0") = -0.0`
+            // while `of_literal` yields `Int(0).f64() = +0.0` — the SAME value (`-0.0 == 0.0`),
+            // and every consumer canonicalises signed zero (the `JKey::Num` path folds `-0.0`
+            // into `+0.0`) or compares by value. That signed-zero bit-difference is the only
+            // permitted one; any real value drift still fails here.
+            if cache_hit && eval_accepts {
+                let cache_f64 = sparq_core::numeric_cache_value(lex, dt.as_str()).unwrap();
+                let eval_f64 = as_numeric(&typed(lex, *dt)).unwrap().f64();
+                assert!(
+                    cache_f64 == eval_f64 || (cache_f64 == 0.0 && eval_f64 == 0.0),
+                    "f64 image mismatch for {:?}^^{:?}: cache={} eval={}",
+                    lex, dt.as_str(), cache_f64, eval_f64
+                );
+            }
+        }
     }
 }

@@ -131,3 +131,139 @@ Haiku NL-tool dispatch is documented in `README.md`. The token miner + coverage 
 `analyze.py` (run it against a directory of the run's `agent-*.jsonl` transcripts). Task
 discrimination — that each FO arm answers under closure while the no-FO arm returns 0 —
 is independently checked by `validate_tasks.py` (needs the `close` feature).
+
+
+---
+
+## RE-RUN — Fable subject (sq-2m6zm.9, 2026-07-05): schema.org's clear win does NOT reproduce — DOLCE-DUL ties
+
+> 🤖 **SPARQ agent** [FABLE-5]. Append-only re-run record for bead **sq-2m6zm.9**
+> (#1111 re-attempt program, thread A rung 1; design record
+> `research/neurosymbolic-fable-program.md`). Everything above this line is the
+> original **Haiku-subject** record, unchanged. Harness **byte-unchanged**: frozen
+> `tasks.jsonl`, `overlays/`, `analyze.py` (verified `git diff` clean against
+> `origin/main`). Subject substitution only: **Fable (`claude-fable-5`) replaces
+> Haiku as the NL-tool subject for every (arm, task) cell.**
+
+### Method delta (vs the original run)
+
+- Same 16 frozen tasks × 4 overlays = 64 cells; **one fresh headless `claude -p`
+  Fable session per cell** (`--allowedTools Bash Read Grep Glob Skill`; brief opens
+  with the `[FOKM task= arm=]` tag and drives `pkg-query --extra-graph
+  overlays/<arm>.ttl --close owl-rl` end to end), graded by the frozen `analyze.py`
+  miner + coverage grader.
+- **Serving-model gate (bead invariant).** Each transcript's `message.model` mined per
+  assistant line (`bench/pkg-dogfood/model_ids.py`). **64/64 cells VALID for
+  `claude-fable-5`, 0 excluded** — no silent model substitution observed. Per-task
+  evidence table below.
+- **Operational note (recorded for honesty).** The first dispatch wave
+  (2026-07-05 ≈ 18:07–18:25 UTC) hit the account session limit: 63 of 64 cells
+  returned 429 error results (only `th01`/no-fo, the smoke-test cell, completed
+  cleanly). The 63 poisoned cells were **discarded entirely and re-run after the
+  window reset** (≈ 20:10 UTC) under the same briefs — no partial or mixed transcript
+  was counted.
+
+### The measured result (verbatim `analyze.py` output)
+
+```
+tasks: 16 {'TH': 7, 'ER': 4, 'CC': 5}
+transcripts: 64 | FOKM-tagged: 64
+
+arm                  acc  abst  med_eff_tok  total_$  by-kind
+no-fo               0.25     0      216,002     4.27  CC=0.2 ER=0.5 TH=0.14
+gufo                0.31     0      182,498     3.85  CC=0.4 ER=0.25 TH=0.29
+dolce-dul           0.56     0      176,194     3.64  CC=0.6 ER=0.25 TH=0.71
+schema-org          0.56     0      187,845     3.92  CC=0.6 ER=0.25 TH=0.71
+
+wrote /tmp/sq2m6zm9/fokm_fable.json
+```
+
+`analyze.py`'s `total_$` column prices at its frozen **Haiku $1/$5** constants — kept
+verbatim per the re-run-not-rebuild invariant; with a Fable subject the actual $ is
+≈ 10× the input leg + the same output rate. **Accuracy is the decision metric for
+Metric 1** (design §5), so the mispriced column is informational only.
+
+### Side-by-side with the Haiku-subject record (accuracy, frozen grader)
+
+| Arm | Haiku subject (above) | Fable subject | abstains (Haiku → Fable) |
+|---|---|---|---|
+| no-FO (incumbent) | 0.58 | **0.25** | 5 → 0 |
+| gUFO | 0.54 | 0.31 | 2 → 0 |
+| DOLCE-DUL | 0.64 | **0.56** | 1 → 0 |
+| schema.org-as-top | **0.84** | **0.56** | 2 → 0 |
+
+Supplementary split (same frozen tasks + grader, splitting by each task's frozen
+per-arm `select` answerability): on the tasks an arm's overlay **can express**,
+schema.org still leads — **0.67 over its 12 expressible tasks vs DOLCE-DUL's 0.53
+over 15**; the tie on the full set comes from schema.org's 4 `select=null` tasks,
+where Fable attempts an answer anyway and misses 3 of 4, while DOLCE recovers its
+single null task by cross-inference (1/1).
+
+### Verdict vs the Haiku-era record — PARTIALLY SHIFTED
+
+1. **The headline dominance does not reproduce.** schema.org's +0.20 clear win over
+   DOLCE-DUL (0.84 vs 0.64) collapses to a **tie (0.56 vs 0.56)** with a Fable
+   subject; schema.org keeps only an expressibility-subset edge (0.67 vs 0.53).
+2. **The #1111 fluency thesis is half-confirmed.** The prediction was that richer FOs
+   become usable at higher fluency: **true for DOLCE-DUL** (gap to schema.org closes
+   from −0.20 to 0.00), **false for gUFO** (0.31 — still clearly behind, as in the
+   Haiku era).
+3. **FO typing now beats no-FO across the board.** The no-FO incumbent is the *worst*
+   arm at Fable fluency (0.25); in the Haiku era gUFO scored below no-FO. Any
+   overlay > none, for a strong agent.
+4. **Abstention collapses (0 vs 10)** — Fable always attempts an answer. It sometimes
+   recovers a formally unanswerable task by cross-inference and sometimes mis-answers
+   it; either way the graded denominators differ from the Haiku run, so **absolute
+   cross-run levels are not comparable** — only within-run ordering is.
+5. **Why every arm's absolute score fell.** Spot-checking graded-wrong cells shows the
+   drop is substantially **grader × answer-style interaction**, not a capability
+   regression: the frozen deterministic grader rewards verbatim row enumeration,
+   exact bucket counts, and Haiku-style abstain phrasing, while Fable summarizes
+   ("86 artifacts, in these categories…"), scopes categories differently, and answers
+   "0 — the data does not model this distinction" instead of the abstain phrases the
+   `is_abstain` regex recognizes. The same grader grades all four arms within the
+   run, so the **ordering** (schema.org = DOLCE > gUFO > no-FO) is the valid signal.
+
+**Consequence (gated bead `sq-mztg8.5`, per its invariant):** a Fable-tier tie does
+**not** auto-flip the schema.org-as-top default — the PKG is also queried by cheaper
+tiers, where the Haiku-era record (0.84 vs 0.64) stands. The per-tier reading this
+record supports: **schema.org remains the right default; DOLCE-DUL is no longer
+dominated at the Fable tier** (and is the natural second arm to watch in `sq-givgo`
+round 2).
+
+### Per-task serving-model ids (validity evidence)
+
+<details>
+<summary>64-cell model-id table (mined from transcript <code>message.model</code>; all VALID)</summary>
+
+| task | no-fo | gufo | dolce-dul | schema-org |
+|---|---|---|---|---|
+| cc01 | claude-fable-5 | claude-fable-5 | claude-fable-5 | claude-fable-5 |
+| cc02 | claude-fable-5 | claude-fable-5 | claude-fable-5 | claude-fable-5 |
+| cc03 | claude-fable-5 | claude-fable-5 | claude-fable-5 | claude-fable-5 |
+| cc04 | claude-fable-5 | claude-fable-5 | claude-fable-5 | claude-fable-5 |
+| cc05 | claude-fable-5 | claude-fable-5 | claude-fable-5 | claude-fable-5 |
+| er01 | claude-fable-5 | claude-fable-5 | claude-fable-5 | claude-fable-5 |
+| er02 | claude-fable-5 | claude-fable-5 | claude-fable-5 | claude-fable-5 |
+| er03 | claude-fable-5 | claude-fable-5 | claude-fable-5 | claude-fable-5 |
+| er04 | claude-fable-5 | claude-fable-5 | claude-fable-5 | claude-fable-5 |
+| th01 | claude-fable-5 | claude-fable-5 | claude-fable-5 | claude-fable-5 |
+| th02 | claude-fable-5 | claude-fable-5 | claude-fable-5 | claude-fable-5 |
+| th03 | claude-fable-5 | claude-fable-5 | claude-fable-5 | claude-fable-5 |
+| th04 | claude-fable-5 | claude-fable-5 | claude-fable-5 | claude-fable-5 |
+| th05 | claude-fable-5 | claude-fable-5 | claude-fable-5 | claude-fable-5 |
+| th06 | claude-fable-5 | claude-fable-5 | claude-fable-5 | claude-fable-5 |
+| th07 | claude-fable-5 | claude-fable-5 | claude-fable-5 | claude-fable-5 |
+
+</details>
+
+### Honest caveats
+
+- **N = 16, single run per subject**; point estimates carry run-to-run variance, and
+  the grader is heuristic (see item 5 above — quantified here because the re-run made
+  the style sensitivity visible).
+- **This is Metric 1 (the agent) only.** Metric 2 (KGE closure-prior MRR) remains
+  EC2-deferred (`sq-p5ro8`); nothing here reads on it.
+- **All numbers runtime / NON-CANONICAL** (work-box transcripts, list-price
+  approximations). Run artifacts are regenerable scratch; the committed artifact is
+  this record.

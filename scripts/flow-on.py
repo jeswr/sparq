@@ -4,7 +4,8 @@
 #
 # Reads a MERGED PR's changed-file list + labels + title, evaluates the
 # declarative rules in scripts/flow-on-rules.toml, and opens ONE GitHub issue
-# (labelled `flow-on` + `auto`) per triggered follow-on template.
+# (labelled `flow-on` + `auto` + role/priority/status routing labels — see
+# routing_labels(), #2474) per triggered follow-on template.
 #
 # WHY GITHUB ISSUES, NOT `bd create`:
 # (research/maintenance-flow-on-automation-design.md §2.2) In CI there is NO `bd`
@@ -44,8 +45,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_RULES = REPO_ROOT / "scripts" / "flow-on-rules.toml"
+BENCH_REGISTRY = REPO_ROOT / "bench" / "benchmarks.toml"
 
-# Labels every flow-on issue carries (in addition to a rule's own labels).
+# Labels every flow-on issue carries (in addition to a rule's own labels and the
+# routing labels computed by routing_labels() below).
 BASE_LABELS = ["flow-on", "auto"]
 
 # Public-surface paths whose change should trigger the "changed-public-feature"
@@ -55,6 +58,16 @@ SKILL_PATHS = ("skills/",)
 
 # The reactive docs rule that the pub-API-diff gate below applies to.
 DOCS_RULE_ID = "changed-public-feature-docs"
+BENCH_DASHBOARD_RULE_ID = "new-bench-dashboard-row"
+
+
+# Sibling scripts are loaded by path (the scripts dir is not an importable package).
+def _load_script_module(stem: str):
+    spec = importlib.util.spec_from_file_location(stem, REPO_ROOT / "scripts" / f"{stem}.py")
+    assert spec and spec.loader
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 # [OPUS-4.8] The `changed-public-feature-docs` rule must fire ONLY on a NET
@@ -62,19 +75,38 @@ DOCS_RULE_ID = "changed-public-feature-docs"
 # relocation diff (dogfooded: PR #250 mis-minted a skill-sync follow-on for a
 # comment+lint-attr-only diff — bead sq-l0a0). We reuse the EXACT `pub `-item
 # multiset-diff used by merge gate G2, factored into scripts/pub_api_diff.py, so
-# the reactive engine and the proactive gate can never drift. Loaded by path
-# (the scripts dir is not an importable package).
-def _load_pub_api_diff():
-    spec = importlib.util.spec_from_file_location(
-        "pub_api_diff", REPO_ROOT / "scripts" / "pub_api_diff.py"
-    )
-    assert spec and spec.loader
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
+# the reactive engine and the proactive gate can never drift.
+_pad = _load_script_module("pub_api_diff")
+
+# [FABLE-5] (#2474) The shared static-triage pass, also used by triage-issue.yml and
+# the retriage cron — flow-on computes each follow-on's routing labels with it so
+# the three triage surfaces can never drift.
+_triage = _load_script_module("triage")
+
+# [FABLE-5] (#2474) Default priority for minted follow-ons, matching the retriage
+# cron's convergence default (scripts/retriage.py DEFAULT_PRIORITY).
+DEFAULT_PRIORITY = "priority:P3"
 
 
-_pad = _load_pub_api_diff()
+def routing_labels(labels: list[str]) -> list[str]:
+    """Return the role/priority/status routing labels a follow-on needs at CREATION.
+
+    [FABLE-5] (#2474) GitHub SUPPRESSES workflow events for objects created under
+    `secrets.GITHUB_TOKEN` (recursion guard), so `triage-issue.yml` (`issues:
+    opened`) never runs on flow-on issues — minted without routing labels they were
+    invisible to the dispatch frontier forever. So flow-on labels each issue
+    dispatch-ready itself, via the SAME static pass (scripts/triage.py) the event
+    and cron triagers use. Trust is by construction: the title/body/labels come from
+    the checked-in rule table, not third-party input, so skipping the author
+    trust-probe (which would not recognise github-actions[bot]) is sound here.
+    A default `priority:P3` is applied when no rule label carries one, so the
+    result converges to `status:ready` instead of parking `status:untriaged`."""
+    base = set(labels)
+    effective = set(base)
+    if not any(_triage._PRIO.match(lb) for lb in effective):
+        effective.add(DEFAULT_PRIORITY)
+    verdict = _triage.triage(effective, "task")
+    return sorted((effective | verdict["add"]) - base)
 
 
 @dataclass
@@ -91,6 +123,14 @@ class Rule:
     description: str = ""
     when_paths: list[str] = field(default_factory=list)
     when_new_paths: list[str] = field(default_factory=list)
+    # [OPUS-4.8] sq-fyzq7: added paths matching any of these globs are DROPPED
+    # from the `when_new_paths` matching pool. This lets a `when_new_paths` rule
+    # ignore a sub-tree that is already covered elsewhere — e.g.
+    # `new-zk-circuit-gatecount` uses it to skip `zk/compose/**` members (owned by
+    # the hard `snapshot_covers_every_member` gate) so a new compose member does
+    # not mis-fire the "new top-level circuit" follow-on. Only filters the
+    # `when_new_paths` check; other predicates are unaffected.
+    exclude_new_paths: list[str] = field(default_factory=list)
     when_label: str | None = None
     when_title: str | None = None
     creates: list[CreateTemplate] = field(default_factory=list)
@@ -129,6 +169,7 @@ def load_rules(path: Path) -> list[Rule]:
             description=raw.get("description", ""),
             when_paths=list(raw.get("when_paths", [])),
             when_new_paths=list(raw.get("when_new_paths", [])),
+            exclude_new_paths=list(raw.get("exclude_new_paths", [])),
             when_label=raw.get("when_label"),
             when_title=raw.get("when_title"),
             creates=creates,
@@ -163,7 +204,7 @@ def build_context(
     changed: list[str],
     added: list[str],
 ) -> dict[str, str]:
-    """Compute the placeholder dict for {pr}/{pr_title}/{crate}/{suite}/{surface}.
+    """Compute the placeholder dict for {pr}/{pr_title}/{crate}/{suite}/{surface}/{zk_circuit}.
 
     Prefer ADDED paths for crate/suite (the rules that use them are new-* rules),
     falling back to all changed paths so changed-surface rules still resolve."""
@@ -171,12 +212,24 @@ def build_context(
     crate = _first_segment_after("crates/", pool_for_dir)
     suite = _first_segment_after("bench/", pool_for_dir) or _first_segment_after("zk/", pool_for_dir)
     surface = _first_segment_after("skills/", pool_for_dir)
+    # [OPUS-4.8] sq-fyzq7: the NEW top-level `zk/` circuit family, for the
+    # `new-zk-circuit-gatecount` rule. Derived ONLY from `zk/` (NEVER `bench/` —
+    # the shared `{suite}` above prefers `bench/`, which made a #1608-shaped diff
+    # mis-name the circuit `zk-compose` from the `bench/zk-compose/` output dir),
+    # and with `zk/compose/` EXCLUDED: compose members are already covered by the
+    # hard `snapshot_covers_every_member` gate, so a new member must not surface as
+    # a phantom new "circuit". The rule's `exclude_new_paths` keeps it from firing
+    # in that case, so a non-empty value here only appears for a genuine new family.
+    zk_circuit = _first_segment_after(
+        "zk/", [p for p in pool_for_dir if not p.startswith("zk/compose/")]
+    )
     return {
         "pr": str(pr),
         "pr_title": pr_title,
         "crate": crate or "",
         "suite": suite or "",
         "surface": surface or "",
+        "zk_circuit": zk_circuit or "",
     }
 
 
@@ -200,6 +253,32 @@ def _any_glob_match(globs: list[str], paths: list[str]) -> bool:
     return False
 
 
+def _bench_suite_needs_dashboard_follow_on(suite: str) -> bool:
+    """Return whether a registered suite lacks an unfeatured disposition."""
+    try:
+        registry = BENCH_REGISTRY.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    # [GPT-5.6] Match the same registry reference fields as merge gate G3. An
+    # unregistered research harness may live under bench/, but it has no metric
+    # feed and therefore must not mint a dead dashboard-card follow-on.
+    blocks = re.split(r"(?m)^\s*\[\[benchmark\]\]\s*$", registry)[1:]
+    needle = re.compile(rf"\bbench/{re.escape(suite)}/")
+    for block in blocks:
+        refs = " ".join(
+            re.findall(
+                r"^\s*(?:source|invoke|dataset|records_to)\s*=\s*(.*)$",
+                block,
+                re.MULTILINE,
+            )
+        )
+        if needle.search(refs):
+            return not re.search(
+                r"^\s*featured\s*=\s*false\b", block, re.MULTILINE
+            )
+    return False
+
+
 def rule_matches(
     rule: Rule,
     changed: list[str],
@@ -211,12 +290,24 @@ def rule_matches(
     # ALL present predicates must pass; absent predicates are ignored.
     if rule.when_paths and not _any_glob_match(rule.when_paths, changed):
         return False
-    if rule.when_new_paths and not _any_glob_match(rule.when_new_paths, added):
-        return False
+    if rule.when_new_paths:
+        # [OPUS-4.8] sq-fyzq7: drop any added path under an `exclude_new_paths`
+        # sub-tree BEFORE the match, so a rule can ignore additions already owned
+        # by another gate (e.g. `zk/compose/**` members → `snapshot_covers_every_member`).
+        new_pool = added
+        if rule.exclude_new_paths:
+            new_pool = [p for p in added if not _any_glob_match(rule.exclude_new_paths, [p])]
+        if not _any_glob_match(rule.when_new_paths, new_pool):
+            return False
     if rule.when_label is not None and rule.when_label not in labels:
         return False
     if rule.when_title is not None and not re.search(rule.when_title, title, re.IGNORECASE):
         return False
+
+    if rule.id == BENCH_DASHBOARD_RULE_ID:
+        suite = _first_segment_after("bench/", added)
+        if not suite or not _bench_suite_needs_dashboard_follow_on(suite):
+            return False
 
     # [OPUS-4.8] Special handling for the changed-public-feature docs rule
     # (bead sq-l0a0). The when_paths glob is only a cheap pre-filter; on top of it
@@ -273,6 +364,10 @@ def evaluate(
                 f"(rule `{rule.id}`) from merged PR #{pr}. Reconcile into a bead."
             )
             labels_full = list(dict.fromkeys(BASE_LABELS + tmpl.labels))
+            # [FABLE-5] (#2474) dispatch-visibility: append role/priority/status
+            # routing labels at creation (see routing_labels for why the event
+            # path can never label these issues).
+            labels_full += routing_labels(labels_full)
             out.append(
                 FollowOn(
                     rule_id=rule.id,

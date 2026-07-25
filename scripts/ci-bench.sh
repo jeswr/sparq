@@ -28,12 +28,32 @@ cd "$(dirname "$0")/.."
 # [OPUS-4.8] (sq-dzfu) --parse-only: cheap TIMING re-measure for the perf-gate best-of-N flake fix.
 # When present as the first arg, ONLY the parse_ns_per_byte metric is (re-)measured (see measure_parse
 # below) and written out — no big corpus, no wasm build, no well-known suites.
+#
+# [FABLE-5] (sq-6vshe.6 heavy-lane placement, MAINTAINER-DIRECTED extension) --deterministic-only:
+#   scripts/ci-bench.sh --deterministic-only [scale=200000] [out.json=bench-results.json]
+# emits ONLY the DETERMINISTIC (runner-noise-immune) hard-gated byte-count / memory-layout metrics —
+# store_bytes_per_triple, comp_store_bytes_per_triple, store_bytes_per_triple_small, dict_bytes_per_term,
+# wasm_bundle_bytes — and NOTHING else. It deliberately SKIPS every wall-clock timing measurement (the
+# min-of-3 load loop, the min-of-5 parse loop, the query-latency loops, RDFS-inference timing, wasm-opt
+# trend) AND every well-known / crate-example suite (sp2b/dbpsb/watdiv/bsbm/lubm/deeptax/sameas/shacl/
+# geo/fts/vector/rsp/hdt/solid/nlq/zk). This is the FAST, DETERMINISTIC form of the per-PR / merge_group
+# bench gate (bench.yml): the deterministic byte-count RATCHET (scripts/perf-gate.py) still hard-gates
+# every PR against bench/perf-baseline.json — a pure function of the code, seconds not minutes, immune to
+# shared-runner noise — while the noisy latency suites are RELOCATED to the nightly EC2 lane (bench-ec2.yml)
+# so they no longer drag the merge queue or flap the gate. The stanzas below are the EXACT same load/wasm
+# commands the full run uses (single source of truth), just without the timing/suite blocks.
 PARSE_ONLY=0
+DET_ONLY=0
 if [ "${1:-}" = "--parse-only" ]; then
   PARSE_ONLY=1
   shift
   OUT="${1:-bench-results.json}"
   SCALE=0
+elif [ "${1:-}" = "--deterministic-only" ]; then
+  DET_ONLY=1
+  shift
+  SCALE="${1:-200000}"
+  OUT="${2:-bench-results.json}"
 else
   SCALE="${1:-200000}"
   OUT="${2:-bench-results.json}"
@@ -197,6 +217,32 @@ print(json.dumps([{"name": n, "unit": u, "value": float(v)} for n, u, v in rows]
 PY
 }
 
+# [FABLE-5] (sq-3ul2n.2) assert_wasm_simd128 — prove the root-invoked wasm32 gate build actually
+# carries +simd128. `+simd128` lives in the WORKSPACE .cargo/config.toml (not a crate-level file
+# cargo discovers by CWD), so every wasm32 build — this gate build AND the shipped wasm-pack build —
+# gets it identically. The `release-wasm` profile's `strip = "symbols"` REMOVES the tiny
+# `target_features` custom section that records the feature, so we cannot read it off the
+# byte-ratchet artifact directly. Instead we build ONE probe with stripping disabled
+# (CARGO_PROFILE_RELEASE_WASM_STRIP=none) — identical profile / config / target otherwise — and
+# assert its `target_features` section contains simd128. It shares the dependency compile cache with
+# the ratchet build (same target dir; only the final crate re-links), and it CLOBBERS the ratchet
+# `.wasm` at that path, so this must be called ONLY AFTER wasm_bundle_bytes (and wasm_opt) have read
+# the stripped artifact. HARD failure (exit 1) if simd128 is absent: a silent drop would ship the
+# gate build without SIMD while the crate-dir build had it (the exact parity gap this closes).
+# Skipped gracefully when the wasm target or python3 is unavailable — same posture as the byte metric.
+assert_wasm_simd128() {
+  rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown || return 0
+  command -v python3 >/dev/null 2>&1 || return 0
+  [ -f scripts/check-wasm-features.py ] || return 0
+  local probe="target/wasm32-unknown-unknown/release-wasm/sparq_wasm.wasm"
+  if CARGO_PROFILE_RELEASE_WASM_STRIP=none cargo build --profile release-wasm -q -p sparq-wasm --target wasm32-unknown-unknown 2>/dev/null; then
+    if [ -f "$probe" ] && ! python3 scripts/check-wasm-features.py "$probe" --require simd128; then
+      echo "ci-bench: FATAL — wasm gate build is missing +simd128 (workspace .cargo/config.toml regressed?)" >&2
+      exit 1
+    fi
+  fi
+}
+
 # [OPUS-4.8] (sq-dzfu) measure_parse — the TIMING metric (parse_ns_per_byte) over the FIXED corpus.
 # Factored out so BOTH the full run and the cheap `--parse-only` re-measure path use the IDENTICAL
 # measurement (min-of-5 parse timing on the deterministic byte count). Leaves $TMP/fe populated so the
@@ -233,6 +279,46 @@ if [ "$PARSE_ONLY" = "1" ]; then
   exit 0
 fi
 
+# [FABLE-5] (sq-6vshe.6, MAINTAINER-DIRECTED) --deterministic-only: emit ONLY the DETERMINISTIC
+# byte-count / memory-layout metrics the perf-gate HARD-gates, then exit. This is the FAST per-PR /
+# merge_group form (bench.yml): NO timing loops, NO well-known / crate-example suites. Every command
+# here is byte-for-byte the same one the full run below uses (one load summary for store/dict bytes,
+# one compressed-profile load, one fixed-scale small load, one wasm build) — so the ratchet compares
+# the identical values, just measured without the noisy latency work. `add` is idempotent-per-name;
+# the full run measures these too when it runs on the nightly EC2 lane.
+if [ "$DET_ONLY" = "1" ]; then
+  "$GEN" dump "$SCALE" "$TMP/data.nt" >/dev/null 2>&1
+  # store/dict bytes-per-{triple,term} — DETERMINISTIC memory-layout from the load summary line.
+  "$CLI" bench "$TMP/data.nt" ntriples "$Q" 1 count >/dev/null 2>"$TMP/e" || true
+  dbtriple=$(grep -oE '\([0-9]+ B/triple\)' "$TMP/e" | head -1 | grep -oE '[0-9]+' | head -1)
+  [ -n "${dbtriple:-}" ] && add store_bytes_per_triple bytes "$dbtriple"
+  dbterm=$(grep -oE '[0-9]+ B/term' "$TMP/e" | head -1 | grep -oE '[0-9]+' | head -1)
+  [ -n "${dbterm:-}" ] && add dict_bytes_per_term bytes "$dbterm"
+  # compressed-profile B/triple (SPARQ_STORE_PROFILE=compressed => into_compressed()) — DETERMINISTIC.
+  SPARQ_STORE_PROFILE=compressed "$CLI" bench "$TMP/data.nt" ntriples "$Q" 1 count >/dev/null 2>"$TMP/e_comp" || true
+  dcbtriple=$(grep -oE '\([0-9]+ B/triple\)' "$TMP/e_comp" | head -1 | grep -oE '[0-9]+' | head -1)
+  [ -n "${dcbtriple:-}" ] && add comp_store_bytes_per_triple bytes "$dcbtriple"
+  # store bytes-per-triple at the SECOND (fixed 50k) scale — catches per-triple-overhead regressions.
+  DET_FIX="${PARSE_FIX:-50000}"
+  "$GEN" dump "$DET_FIX" "$TMP/fix.nt" >/dev/null 2>&1
+  "$CLI" bench "$TMP/fix.nt" ntriples "$Q" 1 count >/dev/null 2>"$TMP/fe" || true
+  dbtriple2=$(grep -oE '\([0-9]+ B/triple\)' "$TMP/fe" | head -1 | grep -oE '[0-9]+' | head -1)
+  [ -n "${dbtriple2:-}" ] && add store_bytes_per_triple_small bytes "$dbtriple2"
+  # wasm bundle size (bytes, DETERMINISTIC) — same release-wasm profile the shipped bundle uses.
+  if rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
+    if cargo build --profile release-wasm -q -p sparq-wasm --target wasm32-unknown-unknown 2>/dev/null; then
+      DET_WASM=$(ls target/wasm32-unknown-unknown/release-wasm/*.wasm 2>/dev/null | head -1)
+      [ -n "${DET_WASM:-}" ] && add wasm_bundle_bytes bytes "$(wc -c < "$DET_WASM" | tr -d ' ')"
+    fi
+  fi
+  # [FABLE-5] (sq-3ul2n.2) assert the gate build carries +simd128 — AFTER wasm_bundle_bytes read the
+  # stripped artifact (this clobbers it with an unstripped probe; nothing below reuses it).
+  assert_wasm_simd128
+  emit_json > "$OUT"
+  echo "wrote $OUT (--deterministic-only):"; cat "$OUT"
+  exit 0
+fi
+
 "$GEN" dump "$SCALE" "$TMP/data.nt" >/dev/null 2>&1
 
 # load (seconds, smaller better) — the "loaded … in Xs" line goes to stderr; min over 3 runs.
@@ -251,6 +337,17 @@ btriple=$(grep -oE '\([0-9]+ B/triple\)' "$TMP/e" | head -1 | grep -oE '[0-9]+' 
 [ -n "${btriple:-}" ] && add store_bytes_per_triple bytes "$btriple"
 bterm=$(grep -oE '[0-9]+ B/term' "$TMP/e" | head -1 | grep -oE '[0-9]+' | head -1)
 [ -n "${bterm:-}" ] && add dict_bytes_per_term bytes "$bterm"
+
+# [SONNET-4.6] (sq-7d3dj.32.2.5) comp_store_bytes_per_triple — DETERMINISTIC compressed-profile
+# B/triple ratchet. Mirrors the raw store_bytes_per_triple stanza exactly, differing only in that
+# SPARQ_STORE_PROFILE=compressed instructs load_quiet to call into_compressed() after the raw
+# index-build, so the stderr load summary line reports the compressed store's heap_bytes()/len().
+# The {:.0} format in load() is an INTEGER (rounded) — runner-noise-immune, mode:auto gated.
+# Mode=auto, threshold=2%: floor seeded at 56 (SPQCPRM2 V2 post-#1824, 200k scale, 3 consecutive
+# runs, all identical). The floor auto-ratchets DOWN on a genuine improvement, never auto-raises.
+SPARQ_STORE_PROFILE=compressed "$CLI" bench "$TMP/data.nt" ntriples "$Q" 1 count >/dev/null 2>"$TMP/e_comp" || true
+cbtriple=$(grep -oE '\([0-9]+ B/triple\)' "$TMP/e_comp" | head -1 | grep -oE '[0-9]+' | head -1)
+[ -n "${cbtriple:-}" ] && add comp_store_bytes_per_triple bytes "$cbtriple"
 
 # [OPUS-4.8] Two more DETERMINISTIC (runner-noise-immune) regression GATES on a FIXED corpus.
 # The bytes-per-triple figures vary with scale (fixed per-graph overhead amortises differently),
@@ -328,6 +425,15 @@ if [ -x "$SP2B_GEN" ] && [ -d "$SP2B_Q" ]; then
   else
     echo "note: sp2b skipped (generator unavailable — no network/g++?)" >&2
   fi
+fi
+
+# [SONNET-4.6] EC2/nightly-only SP2Bench heavy queries and full reference scales.
+# The runner applies a timeout to each query and fails closed on result-size drift.
+if [ "${SP2B_EC2:-0}" = 1 ]; then
+  bench/sp2b/run-ec2.sh > "$TMP/sp2b-ec2.tsv"
+  while IFS=$'\t' read -r name _rows us; do
+    [ -n "${us:-}" ] && add "$name" us "$us"
+  done < "$TMP/sp2b-ec2.tsv"
 fi
 
 # [OPUS-4.8] DBPSB/FEASIBLE per-commit subset. fetch.sh downloads ONE sha256-pinned DBpedia
@@ -955,6 +1061,7 @@ infs=$("$CLI" reason "$TMP/inf.ttl" turtle rdfs 2>&1 | grep -oE 'in [0-9.]+s' | 
 # crates + strip=symbols; hot engine crates stay opt-level 3). This ratchets the raw `cargo
 # build` `.wasm`, not the post-wasm-bindgen/wasm-opt npm artifact, so it tracks the profile
 # the shipped bundle uses. Skipped gracefully when the wasm target isn't installed.
+WASM_BIN=""
 if rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; then
   if cargo build --profile release-wasm -q -p sparq-wasm --target wasm32-unknown-unknown 2>/dev/null; then
     WASM_BIN=$(ls target/wasm32-unknown-unknown/release-wasm/*.wasm 2>/dev/null | head -1)
@@ -963,6 +1070,28 @@ if rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-unknown; 
     fi
   fi
 fi
+
+# [OPUS-4.8] (sq-7d3dj.14) wasm_opt_bundle_bytes — TREND-ONLY shipped size after wasm-opt -Oz.
+# The raw wasm_bundle_bytes above is the HARD-GATED deterministic ratchet (scripts/perf-gate.py,
+# 2% band). This companion series emits the post-wasm-opt -Oz size (the "shipped" artifact after
+# the same wasm-bindgen/wasm-opt pass that `wasm-pack build` runs for the published npm bundle).
+# The ~10% gap between the two is name-section and producer metadata that browsers strip at load
+# time — real bundle-size wins from the optimisation program show up here while the raw gate stays
+# bit-identical. TREND-ONLY: scripts/perf-gate.py is intentionally UNTOUCHED. The wasm-opt version
+# is logged to stderr so per-run comparisons can account for tool-version changes. Skipped gracefully
+# when wasm-opt (binaryen) is absent or the wasm binary was not built above.
+if command -v wasm-opt >/dev/null 2>&1 && [ -n "${WASM_BIN:-}" ] && [ -f "${WASM_BIN:-}" ]; then
+  WASM_OPT_VER="$(wasm-opt --version 2>&1 | head -1 || echo 'unknown')"
+  echo "note: wasm-opt version for wasm_opt_bundle_bytes: $WASM_OPT_VER" >&2
+  WASM_OPT_OUT="$TMP/opt.wasm"
+  if wasm-opt -Oz --strip-debug --strip-producers "$WASM_BIN" -o "$WASM_OPT_OUT" 2>/dev/null; then
+    add wasm_opt_bundle_bytes bytes "$(wc -c < "$WASM_OPT_OUT" | tr -d ' ')"
+  fi
+fi
+
+# [FABLE-5] (sq-3ul2n.2) assert the gate build carries +simd128 — LAST, after wasm_bundle_bytes and
+# wasm_opt have read the stripped artifact ($WASM_BIN); this clobbers it with an unstripped probe.
+assert_wasm_simd128
 
 emit_json > "$OUT"
 echo "wrote $OUT:"; cat "$OUT"

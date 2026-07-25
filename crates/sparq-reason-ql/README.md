@@ -17,15 +17,15 @@ This is a **separate crate** and the rewriter is behind an **off-by-default `exp
 feature** — the core engine and the wasm build carry zero QL code, deps, or cost by default.
 
 > **Soundness boundary (read this).** PerfectRef is sound + complete only for **conjunctive
-> queries**. Firing it on anything else silently mis-answers. So this crate is **FAIL-CLOSED**:
-> a query with `OPTIONAL` / `FILTER` / `MINUS` / `UNION` / a property path / aggregation / a
-> variable predicate is **rejected as out-of-scope**, never rewritten. The rewriter is validated
-> against a **hand-checked DL-Lite_R oracle**. On the **formal DL-Lite_R suite** (the hand-derived
-> certain-answer oracle from `sq-g19x0`) the rewrite is **sound AND complete case by case** — that
-> is now a **pinned floor** (`sparq-conformance`'s `ql_dllite_suite`, a *sparq-extension* ratchet,
-> **not** a full-OWL-2-QL-conformance claim — see Scope). The broader `pr:QL`
-> `sparql11/entailment` set stays **EXPERIMENTAL / OutOfScope** (it mixes intensional cases outside
-> sound rewriting).
+> queries** (and unions of them). Firing it on anything else silently mis-answers, so this crate
+> is **FAIL-CLOSED**: `OPTIONAL` / `MINUS` / aggregation / a variable predicate / a **recursive,
+> zero-length, or negated** property path (`+` `*` `?` `!p`) is **rejected as out-of-scope**,
+> never rewritten. Non-recursive paths (`/` `^` `|`) ARE handled — desugared to a CQ/UCQ before
+> rewriting (B5). The rewriter is validated against a **hand-checked DL-Lite_R oracle**: on the
+> **formal DL-Lite_R suite** (`sq-g19x0`) it is **sound AND complete case by case** — now a
+> **pinned floor** (`sparq-conformance`'s `ql_dllite_suite`, a *sparq-extension* ratchet, **not**
+> a full-OWL-2-QL-conformance claim). The broader `pr:QL` `sparql11/entailment` set stays
+> **EXPERIMENTAL / OutOfScope** (it mixes intensional cases outside sound rewriting).
 
 ## 🚀 Quickstart
 
@@ -61,8 +61,15 @@ classifies any query as a CQ or `CqError::OutOfScope(reason)` and is the soundne
   with bounded **tree-witness** folding (existential witnesses captured with no unbounded chase),
   then **UCQ-containment minimisation** (redundant disjuncts dropped by the homomorphism
   containment test). Returns the **same certain answers** as `rewrite` in a **smaller UCQ**.
-- **Fail-closed CQ-shape gate** *(always present)* — `OPTIONAL`/`FILTER`/`MINUS`/`UNION`/paths/
-  aggregation/variable-predicate queries are **rejected** as `OutOfScope`, not mis-answered.
+- **Broadened sound fragment** — **(B1)** top-level UCQ; **(B2)** literal-object role atoms;
+  **(B3)** `FILTER` / **(B4)** constant-only `VALUES` over distinguished-only vars (pass-through, applied **per-branch** in a multi-branch UCQ so a branch's filter never leaks — sq-sg542);
+  **(B5)** non-recursive property paths (`/` `^` `|`) desugared to a CQ/UCQ before rewriting —
+  fresh non-distinguished sequence intermediate (shared → a JOIN), inverse swap, alternation →
+  UCQ branches [sq-pbz04.3.2]; **(Bbnode)** body blank nodes → fresh existential vars [sq-pbz04.3.6].
+- **Intensional-atom guard (B6, always present)** — schema vocab predicates (`rdfs:subClassOf/
+  subPropertyOf/domain/range`, all `owl:`) are **rejected**; annotation predicates admitted.
+- **Fail-closed CQ-shape gate** *(always present)* — `OPTIONAL`/`MINUS`/paths/aggregation/
+  variable-predicate queries **rejected** as `OutOfScope`, never mis-answered.
 - **Query-rewriter seam** — emits a `Union`-folded UCQ as a `spargebra::Query`, run unchanged by
   the engine; no store or planner changes.
 - **Honest fragment reporting** — TBox axioms outside DL-Lite_R are counted in
@@ -73,9 +80,9 @@ classifies any query as a CQ or `CqError::OutOfScope(reason)` and is the soundne
 > Minimisation only ever removes a disjunct **proven contained** in a retained one — so it removes
 > no answers. (Dropping a non-contained disjunct would be an unsoundness bug.)
 
-**Scope (honest):** positive-inclusion rewriting + tree-witness folding + containment minimisation.
-**No consistency checking**, no qualified existentials. The rewriter is oracle-tested
-(`tests/oracle.rs`, incl. the tree-witness + minimisation cases).
+**Scope (honest):** positive-inclusion rewriting + tree-witness folding + containment minimisation, plus opt-in **DL-Lite_R consistency checking** (`ql-consistency` feature, `check_consistency`, sq-p6yb7) — a violation query per captured negative inclusion (`owl:disjointWith` / `owl:propertyDisjointWith`), rewritten with the same PerfectRef machinery and evaluated over the data: **INCONSISTENT** iff some violation query matches (sound at any capture level); definitive **CONSISTENT** only for a fully-captured TBox with every negative axiom structurally captured; fail-closed **Unknown** otherwise (e.g. any `owl:complementOf` — an equivalence-with-complement, stronger than a negative inclusion).
+No qualified existentials; the **combined-approach / H-complete-ABox** lever was **evaluated + NOT adopted** (measured minimised UCQ ≤ 4 on the real corpus, no blow-up to amortise — `sq-pbz04.3.5`, profile in `examples/ql_rewrite_bench.rs`, rationale in `research/owl2-ql-cq-gate-broadening.md` §10).
+The rewriter is oracle-tested (`tests/oracle.rs`); so is the consistency check (`tests/consistency_oracle.rs`, hand-derived verdicts).
 
 **Two conformance arms, two honesty stances (sq-qo1a9):**
 

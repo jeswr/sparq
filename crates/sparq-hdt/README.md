@@ -15,6 +15,15 @@ let graph = sparq_hdt::load("dataset.hdt")?;   // .hdt.gz sniffed + decompressed
 let meta  = sparq_hdt::header("dataset.hdt")?; // the HDT header (VoID stats, provenance) as a Graph
 // query them like any other sparq graph
 
+// filtered loading (opt-in `load-filter` feature): None means wildcard
+# #[cfg(feature = "load-filter")]
+# {
+let predicate = oxrdf::NamedNode::new_unchecked("http://www.w3.org/2000/01/rdf-schema#label");
+let pattern: sparq_hdt::TriplePattern = (None, Some(predicate), None);
+let reader = std::io::BufReader::new(std::fs::File::open("dataset.hdt")?);
+let _labels = sparq_hdt::load_reader_filtered(reader, &pattern)?;
+# }
+
 // writing (opt-in `write` feature): Graph -> .hdt (honours .gz/.zst/.bz2 by extension)
 # #[cfg(feature = "write")]
 # {
@@ -26,19 +35,20 @@ sparq_hdt::save(&graph, "out.hdt")?;
 
 In sparq-cli (behind the opt-in `hdt` cargo feature —
 `cargo build -p sparq-cli --features hdt`), the `hdt` format argument or a
-`.hdt`/`.hdt.gz` file extension routes loading through this crate.
+`.hdt`/`.hdt.gz` file extension routes loading through this crate; the opt-in
+`hdt-write` CLI feature adds `sparq-cli to-hdt <file> <in-fmt> <out.hdt>`, the
+export direction over `save` (sq-8ju74).
 
 ## ✨ Features
 
-- Wraps the maintained [`hdt`](https://crates.io/crates/hdt) crate
-  (KonradHoeffner/hdt, MIT) for the binary decode rather than reimplementing the
-  format (Plain/Log64 sequences, Plain-Front-Coded dictionary sections,
-  BitmapTriples).
-- **Format coverage**: the standard HDT v1.0 layout produced by hdt-cpp / hdt-java
-  / the `hdt` crate — `FourSectionDictionary` (PFC) + `BitmapTriples`, SPO order.
-  Exotic layouts from the W3C member submission that no mainstream tool emits
-  (triples lists, alternate dictionary implementations) are rejected with an error
-  by the wrapped reader.
+- **Direct decoder is the default binary ingest**: `load` / `load_reader` (and the
+  filtered/stats variants) decode the HDT sections locally (`src/decode.rs`) in a one-shot
+  SPO scan; the maintained [`hdt`](https://crates.io/crates/hdt) crate (KonradHoeffner/hdt, MIT)
+  remains the upstream-backed oracle/auxiliary path (`graph_from_hdt`, `write`-feature writers).
+- **Format coverage**: the standard HDT v1.0 layout produced by hdt-cpp / hdt-java /
+  the `hdt` crate — `FourSectionDictionary` (PFC) + `BitmapTriples`, SPO order. Exotic
+  layouts from the W3C member submission that no mainstream tool emits (triples lists,
+  alternate dictionary implementations) are rejected with an error by the direct decoder.
 - **Translation is id-level and single-pass**: each distinct HDT dictionary id is
   decompressed once, interned into the sparq dictionary, and memoized in a flat
   per-section table (shared-section terms are translated once even when used as
@@ -54,6 +64,11 @@ In sparq-cli (behind the opt-in `hdt` cargo feature —
 - **Header access**: `header()` / `header_reader()` decode just the dataset
   metadata triples (the "H" in HDT) into a queryable `Graph` without touching
   the dictionary/triples sections.
+- **Filtered loading and stats** (opt-in `load-filter` feature, [GPT-5.6]
+  sq-lsp7k.24 / sq-obhf1): `load_reader_filtered(reader, &pattern)` loads matches;
+  `stats_reader_filtered(reader, &pattern)` counts them without constructing a
+  result graph. Both filter during the one-shot SPO walk; an all-wildcard pattern
+  is identical to the corresponding unfiltered operation.
 - **Writing** (opt-in `write` feature): `save(&graph, path)` serialises a `Graph` to a
   standard-layout `.hdt` (or `.hdt.gz`/`.hdt.zst`/`.hdt.bz2`, chosen by the output
   extension), encoding the HDT sections **directly** from sparq's in-memory dictionary +
@@ -96,8 +111,9 @@ cargo run --release -p sparq-hdt --example bench_load -- --json /tmp/hdt.json
 
 - Skill: `skills/hdt-format/SKILL.md`
 - Perf dashboard: <https://sparq.jeswr.org/dev/bench>
-- Not yet supported / open work: `bd list -l area:sparq-hdt` (the decode-only ingest fast
-  path; upstream notes in `UPSTREAM.md`).
+- Not yet supported / open work: `bd list -l area:sparq-hdt`. (The decode-only ingest fast
+  path itself already ships as the default `load` path; what remains open is upstream
+  adoption of a decode-only entry point — status in `UPSTREAM.md` item 2.)
 
 ## License
 

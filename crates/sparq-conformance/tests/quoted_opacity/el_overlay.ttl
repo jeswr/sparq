@@ -1,0 +1,10 @@
+# EL variant overlay — a QUOTED (never asserted) subclass AXIOM. The quoted
+# `:C rdfs:subClassOf :D` is a triple TERM: it must not enter the TBox, so the
+# classified lattice is byte-identical with or without this overlay and
+# :C rdfs:subClassOf :D is never derived.
+@prefix : <urn:sparq:qto:> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+:qe rdf:reifies <<( :C rdfs:subClassOf :D )>> .
+:qe :certainty "0.9" .

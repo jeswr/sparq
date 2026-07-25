@@ -1,0 +1,37 @@
+@prefix ufo: <urn:ufo-sn3:> .
+@prefix ex:  <urn:ufo-sn3:case:norm:> .
+
+ex:w a ufo:World.
+ex:alice a ufo:Agent.
+ex:acme a ufo:Agent.
+
+ex:workCompleted a ufo:Proposition;
+    ufo:subj ex:alice;
+    ufo:pred ex:completed;
+    ufo:obj ex:assignedWork;
+    ufo:holdsIn ex:w.
+
+ex:paymentDue a ufo:Proposition;
+    ufo:subj ex:acme;
+    ufo:pred ex:mustPay;
+    ufo:obj ex:alice.
+
+ex:paymentNorm a ufo:Norm;
+    ufo:condition ex:workCompleted;
+    ufo:consequent ex:paymentDue.
+
+ex:paymentObligation a ufo:Obligation;
+    ufo:generatedBy ex:paymentNorm;
+    ufo:content ex:paymentDue;
+    ufo:appliesIn ex:w.
+
+ex:acmeCommitment a ufo:Commitment;
+    ufo:debtor ex:acme;
+    ufo:creditor ex:alice;
+    ufo:content ex:paymentDue;
+    ufo:groundedIn ex:paymentObligation;
+    ufo:counterpart ex:aliceClaim.
+
+ex:aliceClaim a ufo:Claim;
+    ufo:content ex:paymentDue;
+    ufo:counterpart ex:acmeCommitment.

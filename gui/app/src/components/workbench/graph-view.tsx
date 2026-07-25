@@ -24,6 +24,24 @@ import {
   type RdfTerm,
 } from "@sparq/client";
 
+// [FABLE-5] sq-ixc3.20 — canonical triple identity (the inferred-edge membership test) +
+// the clicked-triple shape the proof panel consumes.
+import { tripleKeyOfTerms } from "@/lib/inferred-facts";
+import type { ExplainTarget } from "@/components/workbench/proof-panel";
+
+/**
+ * [FABLE-5] sq-ixc3.20 — the optional INFERRED-fact affordance: when the active inference
+ * regime has a materialised closure, `keys` holds the canonical keys of every triple the
+ * closure ADDED (exact set difference, engine-context `entailedTripleKeys`), and an edge
+ * whose statement is in that set renders dashed in the primary colour and becomes a
+ * click-to-explain target (`onExplain` opens the why() proof panel). Asserted edges are
+ * untouched — no affordance, exactly as the honesty contract requires.
+ */
+export interface InferredAffordance {
+  keys: ReadonlySet<string>;
+  onExplain: (t: ExplainTarget) => void;
+}
+
 /** The max triples we lay out before capping (a render bound, labelled — not a result bound). */
 const MAX_TRIPLES = 200;
 
@@ -114,7 +132,14 @@ function layout(statements: RdfStatement[], size: number): {
  * Render a CONSTRUCT/DESCRIBE result's N-Triples document as an SVG node-link graph. Stateless +
  * deterministic; safe in a static export and in the Tauri webview.
  */
-export function GraphView({ ntriples }: { ntriples: string }) {
+export function GraphView({
+  ntriples,
+  inferred,
+}: {
+  ntriples: string;
+  /** [FABLE-5] sq-ixc3.20 — mark + explain inferred edges (absent = no affordance). */
+  inferred?: InferredAffordance | null;
+}) {
   const { statements, total } = React.useMemo(() => {
     // `parseNTriples` returns `{ statements, passthrough }`; we only graph the parsed triples.
     const { statements: all } = parseNTriples(ntriples);
@@ -123,6 +148,15 @@ export function GraphView({ ntriples }: { ntriples: string }) {
 
   const SIZE = 520;
   const { nodes, edges } = React.useMemo(() => layout(statements, SIZE), [statements]);
+
+  // [FABLE-5] sq-ixc3.20 — per-edge inferredness. `layout` pushes exactly ONE edge per
+  // statement in order, so edge i ↔ statement i; membership in the closure-added key set
+  // is the affordance gate (an asserted edge can never test true).
+  const inferredFlags = React.useMemo(() => {
+    if (!inferred || inferred.keys.size === 0) return null;
+    const flags = statements.map((st) => inferred.keys.has(tripleKeyOfTerms(st.s, st.p, st.o)));
+    return flags.some(Boolean) ? flags : null;
+  }, [statements, inferred]);
   const posByKey = React.useMemo(() => {
     const m = new Map<string, LaidOutNode>();
     for (const node of nodes) m.set(node.key, node);
@@ -141,6 +175,16 @@ export function GraphView({ ntriples }: { ntriples: string }) {
 
   return (
     <div className="flex h-full flex-col" data-result-view="graph">
+      {/* [FABLE-5] sq-ixc3.20 — the inferred-edge legend, only when something IS inferred. */}
+      {inferredFlags && (
+        <p
+          className="border-b bg-card px-3 py-1 text-[11px] text-muted-foreground"
+          data-graph-inferred-legend
+        >
+          <span className="font-medium text-primary">Dashed edges are inferred</span> by the
+          active inference regime (not asserted) — click one to see its derivation.
+        </p>
+      )}
       {truncated && (
         <p className="border-b bg-warning/10 px-3 py-1 text-[11px] text-muted-foreground">
           Showing the first {statements.length.toLocaleString()} of{" "}
@@ -176,21 +220,63 @@ export function GraphView({ ntriples }: { ntriples: string }) {
             if (!a || !b) return null;
             const mx = (a.x + b.x) / 2;
             const my = (a.y + b.y) / 2;
+            // [FABLE-5] sq-ixc3.20 — an INFERRED edge (in the closure-added set) renders
+            // dashed in the primary colour and is a click-to-explain target. Colour is not
+            // the only signal: the dash pattern + the legend + the tooltip carry it too.
+            const isInferred = inferredFlags?.[i] === true;
+            const st = statements[i];
+            const onExplain =
+              isInferred && inferred
+                ? () => inferred.onExplain({ s: st.s.nt, p: st.p.nt, o: st.o.nt })
+                : undefined;
             return (
-              <g key={i}>
+              <g
+                key={i}
+                {...(isInferred
+                  ? {
+                      role: "button",
+                      tabIndex: 0,
+                      className: "cursor-pointer focus:outline-1 focus:outline-primary",
+                      onClick: onExplain,
+                      onKeyDown: (ev: React.KeyboardEvent) => {
+                        if (ev.key === "Enter" || ev.key === " ") {
+                          ev.preventDefault();
+                          onExplain?.();
+                        }
+                      },
+                      "data-entailed-edge": true,
+                      "aria-label": `Inferred: ${e.label} — press Enter to see why`,
+                    }
+                  : {})}
+              >
+                {isInferred && (
+                  <title>Inferred (not asserted) — click to see the derivation</title>
+                )}
+                {/* A wide invisible hit line so a 1.25px inferred edge is actually clickable. */}
+                {isInferred && (
+                  <line
+                    x1={a.x}
+                    y1={a.y}
+                    x2={b.x}
+                    y2={b.y}
+                    stroke="transparent"
+                    strokeWidth={10}
+                  />
+                )}
                 <line
                   x1={a.x}
                   y1={a.y}
                   x2={b.x}
                   y2={b.y}
-                  stroke="var(--border)"
+                  stroke={isInferred ? "var(--primary)" : "var(--border)"}
                   strokeWidth={1.25}
+                  strokeDasharray={isInferred ? "4 3" : undefined}
                   markerEnd="url(#sq-arrow)"
                 />
                 <text
                   x={mx}
                   y={my}
-                  className="fill-muted-foreground"
+                  className={isInferred ? "fill-primary" : "fill-muted-foreground"}
                   fontSize={8}
                   textAnchor="middle"
                   dy={-2}

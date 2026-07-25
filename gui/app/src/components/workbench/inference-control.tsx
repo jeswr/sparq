@@ -33,6 +33,20 @@ export function InferenceModeBridge() {
   return null;
 }
 
+/**
+ * [sq-glo5r] Keep the ENGINE's N3 rules cache in lockstep with the active workspace's persisted
+ * rules docs. Renders null; mounted once alongside {@link InferenceModeBridge} so the N3 closure
+ * is rebuilt whenever rules change, regardless of the focused tool tab.
+ */
+export function N3RulesBridge() {
+  const { rulesDocs } = useWorkspace();
+  const { setN3Rules } = useEngine();
+  React.useEffect(() => {
+    setN3Rules(rulesDocs);
+  }, [rulesDocs, setN3Rules]);
+  return null;
+}
+
 /** A live status pill for the active regime: entailed-triple count / loading / honest error. */
 export function InferenceStatusPill() {
   const { inferenceStatus } = useEngine();

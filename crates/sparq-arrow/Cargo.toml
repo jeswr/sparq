@@ -1,11 +1,11 @@
-# sparq-arrow (gh-910, bead sq-v78l4): opt-in Apache Arrow columnar export for SPARQL
-# SELECT results. Converts a sparq-engine `QueryResult` (variable columns + RDF-term
-# rows) into an Arrow `RecordBatch` so results flow zero-copy-ish into the dataframe /
-# analytics ecosystem (Polars / DuckDB / pandas via the Python follow-up). [OPUS-4.8]
+# sparq-arrow (gh-910, beads sq-v78l4 + sq-lsp7k.16 + sq-lsp7k.21): opt-in Apache Arrow columnar
+# import/export for SPARQL SELECT results. Converts between a sparq-engine `QueryResult`
+# and an Arrow `RecordBatch` for dataframe / analytics interoperability.
+# [OPUS-4.8] [GPT-5.6]
 #
 # OPT-IN / LEAN-CORE by construction: this is a SEPARATE leaf crate, so the `arrow-*`
 # dependency closure NEVER enters sparq-core / sparq-engine / the wasm bundle. Nothing
-# in the workspace default build depends on it. The Arrow export is itself feature-gated
+# in the workspace default build depends on it. Arrow interop is feature-gated
 # (`arrow`, OFF by default) so even building THIS crate without the feature pulls no
 # Arrow code — the crate then exposes only the dependency-free schema documentation.
 
@@ -15,7 +15,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Opt-in Apache Arrow columnar export for sparq: convert a SPARQL SELECT QueryResult into an Arrow RecordBatch (one struct column per variable: kind / value / datatype / language / direction), a faithful round-trippable projection of the SPARQL-Results term model for zero-copy transfer into Polars / DuckDB / pandas"
+description = "Opt-in Apache Arrow columnar import/export for sparq: convert SPARQL SELECT QueryResult values to and from a faithful RecordBatch term-struct projection for Polars, DuckDB, and pandas interoperability"
 repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
@@ -23,7 +23,7 @@ categories.workspace = true
 readme = "README.md"
 
 # [OPUS-4.8] docs.rs: build with all features + the `docsrs` cfg so the `arrow`-gated
-# `to_record_batch` / `term_schema` items render on the docs.rs front page.
+# `to_record_batch` / `from_record_batch` / `term_schema` items render on docs.rs.
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
@@ -32,10 +32,24 @@ rustdoc-args = ["--cfg", "docsrs"]
 # OFF by default: the default build of this crate carries ZERO Arrow code and no
 # Arrow dependency — only the schema documentation + the public field-name constants
 # compile. Turning `arrow` ON pulls `arrow-array` + `arrow-schema` and enables
-# `to_record_batch` / `term_schema`. The crate is itself opt-in (a separate leaf crate
+# `to_record_batch` / `from_record_batch` / `term_schema`. The crate is itself opt-in
+# (a separate leaf crate
 # off the default workspace build), and the Arrow dependency is opt-in on top of that.
 default = []
 arrow = ["dep:arrow-array", "dep:arrow-schema", "dep:arrow-buffer"]
+# [GPT-5.6] Parquet is a second opt-in layer over the Arrow term-struct projection.
+# Enabling it necessarily enables `arrow`; without it, the Parquet dependency is absent.
+parquet = ["arrow", "dep:bytes", "dep:parquet"]
+# [GPT-5.6] Arrow IPC streams are another opt-in container over the term projection.
+ipc = ["arrow", "dep:arrow-ipc"]
+# [FABLE-5] CSV is a third opt-in container over the SAME term projection (issue #910's
+# BI/pandas/DuckDB target): each variable's five-field term struct is flattened to five
+# `var.field` Utf8 columns. The RFC-4180 serializer/parser is hand-rolled over std —
+# the schema is fixed, so it adds ZERO dependencies (measured faster than the arrow-csv
+# path, and it keeps the arrow-csv/arrow-cast/lexical vet closure out of the tree).
+# It still enables `arrow`: the reader shares the RecordBatch importers' schema
+# validation and error types.
+csv = ["arrow"]
 
 [dependencies]
 # The SELECT result we project (`QueryResult { vars, rows }`). Always present — the
@@ -50,11 +64,19 @@ oxrdf.workspace = true
 # which additionally pulls IPC / Flight / CSV / JSON / cast machinery we do not use. This
 # keeps the dependency (and cargo-vet exemption) closure as small as a RecordBatch export
 # can be. Only behind the `arrow` feature. [OPUS-4.8]
-arrow-array = { version = "55", optional = true }
-arrow-schema = { version = "55", optional = true }
+arrow-array = { version = "59", optional = true }
+arrow-schema = { version = "59", optional = true }
 # `NullBuffer` for the per-row struct validity (unbound cells). It is `arrow-array`'s
 # own dependency; named directly because the code references `arrow_buffer::NullBuffer`.
-arrow-buffer = { version = "55", optional = true }
+arrow-buffer = { version = "59", optional = true }
+# Arrow IPC stream serialization only; the `arrow` feature supplies RecordBatch values.
+arrow-ipc = { version = "59", optional = true }
+# Parquet serialization only; the `arrow` feature provides RecordBatch integration.
+# Compression codecs stay disabled so this opt-in surface pulls the narrowest closure.
+parquet = { version = "59", optional = true, default-features = false, features = ["arrow"] }
+# `Bytes` is parquet-rs's in-memory `ChunkReader`; it is optional with Parquet and is
+# already in that dependency's closure.
+bytes = { version = "1", optional = true }
 
 [dev-dependencies]
 # The integration tests (tests/record_batch.rs, `#![cfg(feature = "arrow")]`) drive the
@@ -64,3 +86,9 @@ arrow-buffer = { version = "55", optional = true }
 # (default-features=false) edge.
 sparq-core = { path = "../sparq-core" }
 sparq-engine = { path = "../sparq-engine" }
+# [GPT-5.6] Property generators for schema/shape/null-mask invariants.
+proptest = "1"
+
+[[example]]
+name = "arrow_interop"
+required-features = ["arrow"]

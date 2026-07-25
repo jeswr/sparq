@@ -9,22 +9,24 @@
 // is the Cmd-K palette (sq-vw3ax.1), which is WHY removing the sidebar is now safe — Cmd-K
 // shipped first. A mobile Sheet drawer mirrors the same slim links (no full tree).
 //
-// OPTION-B (the maintainer's decision after #1004 opened, sq-rclb8 / sq-vnd0i). Two DISTINCT
-// destinations, not one "Try the GUI": "Try" → /try is the lightweight in-browser SPARQL REPL
-// playground (kept unchanged); "App" → /app is the LIVE operational GUI. That GUI is a SEPARATE
-// Next.js app (gui/app), overlaid at /app/ by the Pages deploy (pages.yml) — it is NOT a
-// route of this site. The old single "Try the GUI" → /gui slot is dropped (/gui now redirects to
-// /app).
+// OPTION-B (the maintainer's decision after #1004 opened, sq-rclb8 / sq-vnd0i). The single
+// operational destination is "App" → /app, the LIVE GUI. That GUI is a SEPARATE Next.js app
+// (gui/app), overlaid at /app/ by the Pages deploy (pages.yml) — it is NOT a route of this site.
+// The old single "Try the GUI" → /gui slot, and the in-tab /try REPL playground, both redirect
+// to /app (sq-4hiqe, maintainer directive 2026-07-05: /try was "very broken" and the app has
+// everything you need — /app is now the ONE workbench).
 //
 // [OPUS-4.8] sq-vw3ax.11 — the "App" slot is therefore a HARD (full-page) link, not a next/link
 // soft navigation: soft-navigating across two distinct Next builds fetches the WRONG app's RSC
 // Flight payload (/app/index.txt) and lands on a raw .txt instead of the GUI. See NavLink.
 //
-// Destinations (research §2 + the maintainer's discoverability gaps), slim at 6:
-//   Home · Capabilities · Try · App · Benchmarks · Download
+// Destinations (research §2 + the maintainer's discoverability gaps):
+//   Home · Capabilities · App · Benchmarks · Papers · Download
 //   utility cluster: { Cmd-K · GitHub · theme }
-// Papers stays a real route but lives in Cmd-K (overflow) to keep the bar slim, not bloated.
-// (/examples and the deep-page rebuild are sequenced in sq-vw3ax.6 / .4 — not this PR.)
+// [OPUS-4.8] sq-1scgk (maintainer 2026-07-04 item 9b) — "Papers" is PROMOTED into the slim
+// top bar so the paper-factory output is prominently findable, not buried in Cmd-K overflow.
+// It stays in Cmd-K too (the palette indexes every top-bar page). The bar stays lean at 6 short
+// labels. (/examples and the deep-page rebuild are sequenced in sq-vw3ax.6 / .4 — not this PR.)
 
 import * as React from "react";
 import Link from "next/link";
@@ -47,33 +49,44 @@ import {
   CommandPaletteTrigger,
 } from "@/components/command-palette";
 // [OPUS-4.8] sq-ixc3.10 — the operational-command registry. Mounted once inside the palette so
-// the workbench (the REPL) can contribute live run / EXPLAIN / connect / export / import /
-// switch-workspace / named-graph / recent-query commands to the keyboard-first spine.
+// interactive surfaces can contribute live commands to the keyboard-first spine. On this
+// marketing site the registry now degrades to pure navigation (the in-tab REPL that used to
+// register run / EXPLAIN / connect verbs was removed with /try, sq-4hiqe — /app owns them).
 import { PaletteCommandsProvider } from "@/components/palette-commands";
 
-const REPO_URL = "https://github.com/jeswr/sparq";
+const REPO_URL = "https://github.com/sparq-org/sparq";
+// [GPT-5.6] sq-f8ufg — the published documentation surface currently lives in the repository's
+// Agent Skills router. The mdBook build is validation-only (not deployed at /docs or /guide), so
+// link to this canonical, live index rather than presenting a dead route on the marketing site.
+const DOCS_URL = "https://github.com/sparq-org/sparq/blob/main/skills/SKILL.md";
 
 // The slim top bar's content destinations. Capabilities is the single gallery that replaces
-// the collapsed /surface/* tree; Try is the lightweight in-browser SPARQL REPL playground; App
-// is the live operational GUI destination; Download surfaces the desktop GUI + CLI binaries (the
-// maintainer's discoverability ask). Each is a real, built route. Papers is intentionally NOT in
-// the bar (it stays a route, reachable via Cmd-K) so the bar stays slim at 6, not bloated.
-// `external: true` marks a destination that is served by a SEPARATE deployed app at the same
-// origin (here: /app = the gui/app workbench overlaid at /app/). Such a slot must be a hard,
-// full-page navigation — see NavLink — not a next/link soft nav (sq-vw3ax.11).
+// the collapsed /surface/* tree; App is the live operational GUI destination (the single
+// workbench — /try redirects here); Download surfaces the desktop GUI + CLI binaries (the
+// maintainer's discoverability ask). Each is a real, built route. [OPUS-4.8] sq-1scgk — Papers
+// is now a first-class bar destination (maintainer 2026-07-04 item 9b: make the paper-factory
+// output prominently findable), sitting between Benchmarks and Download; it remains reachable
+// via Cmd-K too. `external: true` marks a destination that is served by a SEPARATE deployed app
+// at the same origin (here: /app = the gui/app workbench overlaid at /app/). Such a slot must be
+// a hard, full-page navigation — see NavLink — not a next/link soft nav (sq-vw3ax.11).
 const NAV_ITEMS: { href: string; label: string; external?: boolean }[] = [
   { href: "/", label: "Home" },
+  { href: DOCS_URL, label: "Docs", external: true },
   { href: "/capabilities", label: "Capabilities" },
-  { href: "/try", label: "Try" },
   { href: "/app", label: "App", external: true },
   { href: "/benchmarks", label: "Benchmarks" },
+  { href: "/papers", label: "Papers" },
   { href: "/download", label: "Download" },
 ];
 
 function useIsActive() {
   const pathname = usePathname();
   return (href: string) =>
-    href === "/" ? pathname === "/" : pathname.startsWith(href);
+    href.startsWith("http")
+      ? false
+      : href === "/"
+        ? pathname === "/"
+        : pathname.startsWith(href);
 }
 
 function NavLink({
@@ -104,9 +117,12 @@ function NavLink({
   // /sparq (Pages) vs "" (Tauri) hosts — Next does NOT auto-prefix a plain <a>. The trailing
   // slash matches `trailingSlash: true` so the static export's directory index resolves.
   if (external) {
+    const resolvedHref = href.startsWith("http")
+      ? href
+      : withBasePath(href.endsWith("/") ? href : `${href}/`);
     return (
       <a
-        href={withBasePath(href.endsWith("/") ? href : `${href}/`)}
+        href={resolvedHref}
         onClick={onNavigate}
         aria-current={active ? "page" : undefined}
         className={className}

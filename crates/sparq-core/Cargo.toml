@@ -42,6 +42,23 @@ mmap = ["dep:memmap2"]
 # blocks decoded. The filter is in-RAM only and never serialised, so the on-disk SPQCPRM1
 # format is unchanged. See `compress::block_bloom`.
 block-bloom = []
+# [FABLE-5] sq-7d3dj.32.2.6 / sq-7d3dj.32.2.7: SPQCPRM2 frame-of-reference col2-reset
+# encoding. The SPQCPRM1 block stream writes a col2 that resets after a middle-column
+# change (`reset_d1`) as an ABSOLUTE varint; sq-7d3dj.32.2.4 attribution found that bucket
+# the dominant grower at scale. SPQCPRM2 instead frame-of-reference encodes that col2 as a
+# zigzag delta from the block's FIRST-row col2, which is cheaper when a block's objects
+# cluster.
+#
+# THE V2 *READER* SHIPS UNCONDITIONALLY WITH `mmap` (sq-7d3dj.32.2.7): `open` auto-detects
+# `FILE_MAGIC_V2` and decodes it via `decode_block_v2_at`, so any V2 file ever written
+# always decodes; a `SPQCPRM1` file decodes byte-identically forever (the backward-compat
+# soundness invariant). What `spqcprm2` gates is the *EMITTER*: turning it on lets a build
+# request V2 emission (via `with_emit_format` / `SPARQ_EMIT_FORMAT=v2`) plus the `encode_v2`
+# in-RAM writer and the round-trip/measurement tests. OFF by default so the shipped store
+# keeps *writing* SPQCPRM1 bit-exactly (V2 is NOT defaulted on — a separate decision pending
+# a positive real-data B/triple measurement). Requires `mmap` (the on-disk store is where
+# the versioned format lives). See `compress::CompressedPerm::encode_v2` and `EmitFormat`.
+spqcprm2 = ["mmap"]
 # [OPUS-4.8] sq-dvyi: JSON-LD ingest for the in-memory loaders (`load_str` /
 # `load_dataset` / `load_reader`). OPT-IN and OFF by default so the DEFAULT lean wasm
 # bundle (which the perf-gate tracks via `cargo build -p sparq-wasm`, no features) does
@@ -78,6 +95,17 @@ shared = []
 # fast path (accepting EXACTLY what `oxiri` accepts — a mandatory differential-fuzz gate), so
 # the parallel loader reaches conformance parity with the serial oxttl path at fast-path cost.
 iri-fast = ["dep:oxiri"]
+# [OPUS-4.8] sq-jocpn: a native, hand-rolled byte-level Turtle tokenizer/parser (`ttl` module)
+# that interns S/P/O directly into the `Dict`, replacing the oxttl per-chunk worker on the
+# serial Turtle path. OFF by default so the incumbent oxttl path stays the shipped behaviour and
+# the native parser can be A/B'd first; it must be a byte-identical drop-in (same triples, same
+# term canonicalisation, same accept/reject on the W3C TurtleTests) before any thought of
+# defaulting it on. Pulls `oxiri` for RFC-3987 base resolution + IRI validation IDENTICAL to
+# oxttl's (oxttl resolves through the same `oxiri` automaton) — so IRI resolution is byte-exact by
+# construction rather than a hand-rolled re-derivation. `oxiri` is already in-tree transitively via
+# oxttl, so naming it here adds no new compiled crate. The default / wasm build never references
+# any of this — sparq-core stays lean. See the `ttl` module.
+native-ttl = ["dep:oxiri"]
 
 [dependencies]
 oxrdf.workspace = true
@@ -102,6 +130,13 @@ rayon = { workspace = true, optional = true }
 memchr = { workspace = true, optional = true }
 memmap2 = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
+
+# [SONNET-4.6] sq-3dyje.2: property-based testing harness — DEV/TEST ONLY (does NOT appear
+# in [dependencies] or in any feature, so it is never pulled into the shipped crate or wasm
+# bundle). The supply-chain exemptions for proptest 1.11.0 + its rusty-fork 0.3.1 transitive
+# are declared in supply-chain/config.toml (safe-to-run, dev-only scope).
+[dev-dependencies]
+proptest = "1"
 
 # [OPUS-4.8] sq-ueuk (epic sq-toze, gap MS-G4) — register the `kani` cfg so the
 # `#[cfg(kani)]` bounded-proof harness in `dict.rs` (the mmap-free `validate_dict_bytes`

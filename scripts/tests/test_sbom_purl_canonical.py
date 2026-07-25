@@ -110,6 +110,19 @@ class TestEvaluate(unittest.TestCase):
         self.assertFalse(ok)
         self.assertTrue(any("NON-CANONICAL" in l for l in lines))
 
+    def test_vcs_url_qualifier_fails(self):
+        # [FABLE-5] sq-gg0qq.2 (GS-7): the raw purl cargo-cyclonedx 0.5.9 emits for a GIT
+        # dependency (sparq-lws-core's pinned solid-oidc-verifier). The normalizer must
+        # strip the vcs_url qualifier; the backstop must flag it if that ever regresses.
+        ok, lines = chk.evaluate(
+            [
+                "pkg:cargo/solid-oidc-verifier@0.1.0?vcs_url="
+                "git%2Bhttps://github.com/jeswr/solid-oidc-verifier%4089c8962"
+            ]
+        )
+        self.assertFalse(ok)
+        self.assertTrue(any("NON-CANONICAL" in l for l in lines))
+
     def test_future_decoration_qualifier_fails(self):
         # A hypothetical NEW qualifier a future cargo-cyclonedx could add — the whole
         # point of the backstop: the normalizer pattern wouldn't match it, but this does.

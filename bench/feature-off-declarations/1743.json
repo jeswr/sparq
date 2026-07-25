@@ -1,0 +1,5 @@
+{
+  "pr": 1743,
+  "date": "2026-07-07",
+  "reason": "inline subject/predicate intern cache in always-compiled nt parse_chunk (+473 B feature-OFF, +0.034%; under the 2% bundle ratchet)"
+}

@@ -1,43 +1,36 @@
 "use client";
 
-// [OPUS-4.8] sq-vw3ax.11 — the /download page client body: DIRECT per-asset downloads.
+// [SONNET-4.6] sq-vw3ax.11.2 — /download: prerelease fallback + fail-closed asset matching +
+// combined CLI+server card + sparq-org/sparq repo URLs.
 //
-// WHAT CHANGED (vs the old "link to the latest-release page" body). Every button is now a
-// one-click DIRECT download of the right file for the visitor's platform, using GitHub's
-// version-stable download endpoint:
+// CHANGES vs the prior implementation ([OPUS-4.8] sq-vw3ax.11):
 //
-//     https://github.com/jeswr/sparq/releases/latest/download/<alias>
+// (1) REPO_URL / API_LATEST → sparq-org/sparq (repo renamed; GitHub redirects mask the old name
+//     but we should reference the canonical home).
 //
-// GitHub 302-redirects that URL straight to the asset on its CDN (no interstitial), PROVIDED
-// the asset name is version-STABLE. The release pipeline names its primary bundles with the
-// version embedded (`sparq-gui_<version>_<arch>.<ext>`, `sparq-cli-<version>-<tier>.tar.gz`),
-// which is NOT stable, so this page targets version-agnostic ALIAS names
-// (`sparq-gui-arm64-darwin.dmg`, `sparq-cli-x64-linux.tar.gz`, …). Those aliases are published
-// by the release pipeline alongside the versioned assets (release.yml — a CI-infra-lane change
-// that is the companion to this site change; see the PR body). The upshot: the button hrefs are
-// STATIC and never need a per-release site rebuild — they resolve to whatever the latest release
-// carries the moment a release ships.
+// (2) PRERELEASE FALLBACK. Only v0.1.0-dev.3 (prerelease=true) exists right now, so
+//     `releases/latest` 404s and the old code degraded every control to "No release yet."
+//     Fix: on a definitive latest-404, fetch GET /releases?per_page=1 (returns newest release
+//     including prereleases) and render per-asset DIRECT browser_download_url buttons, explicitly
+//     labelled as unsigned development pre-release builds (keeps the unsigned banner). A card whose
+//     platform has NO matching asset in that release degrades per-card to the Releases-page link —
+//     never a dead button.  Matching is by pinned per-card pattern (see PRERELEASE_PATTERNS below).
 //
-// METADATA (progressive enhancement, NOT required for the buttons to work). On mount we fetch
-// `api.github.com/repos/jeswr/sparq/releases/latest` (CORS-open, unauthenticated) purely to
-// ENRICH each card with the version tag, the asset byte-size, and a copyable sha256 (the asset
-// `digest` field the API now returns, so we never need the CORS-blocked SHA256SUMS body). If that
-// fetch FAILS for any reason other than a definitive 404, the buttons stay live — the
-// latest/download URL needs no API.
+// (3) FAIL-CLOSED READY STATE. When a stable release IS ready, a direct latest/download/<alias>
+//     button only renders if the alias exists in the release's asset map (checked via
+//     assetIsPresent). On API *error* (network failure / rate-limit) buttons stay optimistically
+//     live, as documented in the component — the static alias URL needs no API.
 //
-// NO-RELEASE-YET STATE (current reality: `/releases/latest` 404s because only pre-releases exist,
-// and `/releases/latest/download/*` likewise only resolves to a non-prerelease release). On a
-// 404 we KNOW there is no published release, so every download control renders as a subdued
-// "No release yet — watch releases" link to the Releases page — the ONLY GitHub-page link
-// retained in that state. It flips to live direct-download buttons with ZERO code change the
-// moment the first non-prerelease ships.
+// (4) HONEST COMBINED CLI+SERVER CARD. The release pipeline ships ONE combined archive carrying
+//     BOTH sparq-cli AND sparq-server binaries (build-matrix.yml archive mode). The old separate
+//     `sparq-server-<token>.<ext>` alias had no source asset. Replaced with a single "CLI + server"
+//     card whose copy honestly states the archive carries both binaries.
 //
-// HONESTY: the desktop bundles are UNSIGNED developer builds (signing/notarization is the
-// separate needs:user bead sq-v286.8). The unsigned-builds banner stays front-and-centre in
-// BOTH states — no overclaiming.
+// INVARIANT: no capability inflation — every rendered download button resolves to an asset that
+// actually exists in the release the page is describing. Prerelease builds are explicitly labelled
+// unsigned dev builds.
 
 import * as React from "react";
-import Link from "next/link";
 import { toast } from "sonner";
 import {
   Apple,
@@ -49,13 +42,13 @@ import {
   ExternalLink,
   Loader2,
   MonitorSmartphone,
-  Server,
   ShieldCheck,
   Terminal,
   TriangleAlert,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { withBasePath } from "@/lib/base-path";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -65,18 +58,42 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 
-const REPO_URL = "https://github.com/jeswr/sparq";
+// [SONNET-4.6] sq-vw3ax.11.2 — repo renamed to sparq-org/sparq; update all URL roots.
+const REPO_URL = "https://github.com/sparq-org/sparq";
 const RELEASES_URL = `${REPO_URL}/releases`;
-// The version-STABLE download endpoint. GitHub 302s `<LATEST_DL>/<asset>` to the asset on its
-// CDN with no interstitial, so an <alias> that the latest release carries downloads in one click.
+// The version-STABLE download endpoint. GitHub 302s `<LATEST_DL>/<asset>` to the asset CDN.
 const LATEST_DL = `${REPO_URL}/releases/latest/download`;
 const API_LATEST =
-  "https://api.github.com/repos/jeswr/sparq/releases/latest";
+  "https://api.github.com/repos/sparq-org/sparq/releases/latest";
+// [SONNET-4.6] sq-vw3ax.11.2 — prerelease fallback: list endpoint (newest release incl. pre).
+const API_LIST =
+  "https://api.github.com/repos/sparq-org/sparq/releases?per_page=1";
 
-// The platforms the release matrix produces a desktop GUI installer for (release.yml `gui-bundle`
-// job). win-arm64 is deliberately absent (the Tauri bundler can't reliably cross-bundle an arm64
-// Windows installer from the x64 host) — an honest gap, not a silent drop.
+// The platforms the release matrix produces a desktop GUI installer for.
+// win-arm64 is deliberately absent (the Tauri bundler can't reliably cross-bundle it from x64).
 type OsKey = "macos-arm" | "macos-intel" | "windows" | "linux";
+
+// [SONNET-4.6] sq-vw3ax.11.2 — per-card prerelease asset matching patterns.
+// Versioned release asset names embed <version> and arch tokens; these patterns match them.
+// GUI patterns are per-platform; CLI patterns are per-token (matched per-card inside cliTarget).
+const GUI_PRERELEASE_PATTERNS: Record<OsKey, RegExp> = {
+  "macos-arm":   /^sparq-gui_.*_aarch64\.dmg$/,
+  "macos-intel": /^sparq-gui_.*_x86_64\.dmg$/,
+  windows:       /^sparq-gui_.*_x64\.msi$/,
+  linux:         /^sparq-gui_.*_amd64\.(AppImage|deb)$/,
+};
+
+// Linux secondary (.deb) has its own specific pattern to distinguish from AppImage.
+const LINUX_DEB_PRERELEASE_PATTERN = /^sparq-gui_.*_amd64\.deb$/;
+
+// [SONNET-4.6] sq-vw3ax.11.2 — CLI/server combined archive patterns per platform token.
+// Baseline-tier preference for portability.
+const CLI_PRERELEASE_PATTERNS: Record<string, RegExp> = {
+  "arm64-darwin": /^sparq-cli-.*-arm64-darwin\.tar\.gz$/,
+  "x64-darwin":   /^sparq-cli-.*-x64-darwin\.tar\.gz$/,
+  "win-x64":      /^sparq-cli-.*-win-x64-baseline\.zip$/,
+  "x64-linux":    /^sparq-cli-.*-x64-baseline\.tar\.gz$/,
+};
 
 interface SecondaryAsset {
   /** Version-agnostic alias file name served at `<LATEST_DL>/<file>`. */
@@ -86,22 +103,15 @@ interface SecondaryAsset {
 }
 
 interface GuiPlatform {
-  /** Detection bucket this card satisfies. */
   os: OsKey;
-  /** Card title, e.g. "macOS · Apple Silicon". */
   label: string;
-  /** Full-width primary-row heading when this is the detected platform. */
   forYou: string;
-  /** Version-agnostic alias file name (release.yml publishes it), served at `<LATEST_DL>/<file>`. */
+  /** Version-agnostic alias file name, served at `<LATEST_DL>/<file>` for stable releases. */
   file: string;
-  /** Human-facing short file name shown on the button, e.g. "sparq-gui.dmg". */
   shortName: string;
-  /** The installer file kind, e.g. ".dmg". */
   ext: string;
-  /** Optional extra download offered on the same card (Linux ships a .deb too). */
   secondary?: SecondaryAsset;
   icon: React.ReactNode;
-  /** Per-OS unsigned-bundle first-launch bypass instructions. */
   bypass: React.ReactNode;
 }
 
@@ -198,51 +208,70 @@ interface ReleaseAsset {
   size: number;
   /** e.g. "sha256:<hex>" — GitHub attaches this per asset (CORS-open on api.github.com). */
   digest: string | null;
+  /** Direct CDN URL — used for prerelease assets (no stable alias for versioned names). */
+  browser_download_url?: string;
 }
 
 /** The metadata fetch state machine. */
 type ReleaseState =
   | { kind: "loading" }
-  // A published (non-prerelease) release exists — enrich buttons with version/size/sha.
+  // A published (non-prerelease) stable release exists — enrich alias buttons with version/size/sha.
   | { kind: "ready"; version: string; assets: Map<string, ReleaseAsset> }
-  // HTTP 404: there is definitively no published release yet.
+  // [SONNET-4.6] sq-vw3ax.11.2 — prerelease fallback: latest-404 but a prerelease exists.
+  // Render direct browser_download_url buttons per card, labelled unsigned dev build.
+  | { kind: "prerelease"; version: string; assets: ReleaseAsset[] }
+  // HTTP 404 on /latest AND either no releases at all or empty list.
   | { kind: "none" }
-  // Network/other failure: we can't confirm, so buttons stay live (latest/download needs no API).
+  // Network/other failure: can't confirm, buttons stay live (static alias URL needs no API).
   | { kind: "error" };
 
 interface ApiReleaseShape {
   tag_name?: unknown;
   assets?: unknown;
+  prerelease?: unknown;
 }
 
 function parseRelease(
   json: unknown,
-): { version: string; assets: Map<string, ReleaseAsset> } | null {
+): { version: string; assets: Map<string, ReleaseAsset>; assetList: ReleaseAsset[]; isPrerelease: boolean } | null {
   if (typeof json !== "object" || json === null) return null;
-  const { tag_name, assets } = json as ApiReleaseShape;
+  const { tag_name, assets, prerelease } = json as ApiReleaseShape;
   if (typeof tag_name !== "string" || !Array.isArray(assets)) return null;
   const map = new Map<string, ReleaseAsset>();
+  const list: ReleaseAsset[] = [];
   for (const a of assets) {
     if (typeof a !== "object" || a === null) continue;
-    const { name, size, digest } = a as {
+    const { name, size, digest, browser_download_url } = a as {
       name?: unknown;
       size?: unknown;
       digest?: unknown;
+      browser_download_url?: unknown;
     };
     if (typeof name !== "string" || typeof size !== "number") continue;
-    map.set(name, {
+    const asset: ReleaseAsset = {
       name,
       size,
       digest: typeof digest === "string" ? digest : null,
-    });
+      browser_download_url:
+        typeof browser_download_url === "string" ? browser_download_url : undefined,
+    };
+    map.set(name, asset);
+    list.push(asset);
   }
-  return { version: tag_name, assets: map };
+  return { version: tag_name, assets: map, assetList: list, isPrerelease: prerelease === true };
 }
 
 /**
- * Fetch the latest published release once on mount. A definitive 404 → `none` (no release yet);
- * a 200 with a parseable body → `ready`; anything else (network error, rate limit, unparseable)
- * → `error`, which keeps the direct-download buttons live but without metadata.
+ * [SONNET-4.6] sq-vw3ax.11.2 — Fetch the latest published release with prerelease fallback.
+ *
+ * 1. Try GET /releases/latest (stable releases only).
+ *    - 200 → ready state (enrich alias buttons with version/size/sha).
+ *    - 404 → fall back to GET /releases?per_page=1 (newest including prereleases).
+ *      - 200 + isPrerelease → prerelease state (direct browser_download_url per card).
+ *      - 200 + empty list → none.
+ *      - 200 + stable (shouldn't happen if /latest 404'd) → none.
+ *      - error → none (conservative: /latest confirmed no stable).
+ *    - other HTTP error (rate-limit, 5xx) → error state (optimistic: alias buttons stay live).
  */
 function useLatestRelease(): ReleaseState {
   const [state, setState] = React.useState<ReleaseState>({ kind: "loading" });
@@ -255,17 +284,54 @@ function useLatestRelease(): ReleaseState {
           headers: { Accept: "application/vnd.github+json" },
         });
         if (cancelled) return;
+
+        if (res.ok) {
+          const parsed = parseRelease(await res.json());
+          if (cancelled) return;
+          setState(
+            parsed
+              ? { kind: "ready", version: parsed.version, assets: parsed.assets }
+              : { kind: "error" },
+          );
+          return;
+        }
+
         if (res.status === 404) {
-          setState({ kind: "none" });
+          // [SONNET-4.6] sq-vw3ax.11.2 — definitive no-stable-release: try list endpoint.
+          try {
+            const listRes = await fetch(API_LIST, {
+              headers: { Accept: "application/vnd.github+json" },
+            });
+            if (cancelled) return;
+            if (!listRes.ok) {
+              setState({ kind: "none" });
+              return;
+            }
+            const listJson = await listRes.json();
+            if (cancelled) return;
+            if (!Array.isArray(listJson) || listJson.length === 0) {
+              setState({ kind: "none" });
+              return;
+            }
+            const newest = parseRelease(listJson[0]);
+            if (!newest || !newest.isPrerelease) {
+              // Stable returned by list when /latest 404'd — shouldn't happen, treat as none.
+              setState({ kind: "none" });
+              return;
+            }
+            setState({
+              kind: "prerelease",
+              version: newest.version,
+              assets: newest.assetList,
+            });
+          } catch {
+            if (!cancelled) setState({ kind: "none" });
+          }
           return;
         }
-        if (!res.ok) {
-          setState({ kind: "error" });
-          return;
-        }
-        const parsed = parseRelease(await res.json());
-        if (cancelled) return;
-        setState(parsed ? { kind: "ready", ...parsed } : { kind: "error" });
+
+        // Other HTTP error — stay optimistic (alias buttons need no API).
+        setState({ kind: "error" });
       } catch {
         if (!cancelled) setState({ kind: "error" });
       }
@@ -291,13 +357,30 @@ function assetOf(state: ReleaseState, file: string): ReleaseAsset | undefined {
   return state.kind === "ready" ? state.assets.get(file) : undefined;
 }
 
-// ---- OS detection (progressive enhancement) ----------------------------------------------------
+/**
+ * [SONNET-4.6] sq-vw3ax.11.2 — Fail-closed presence check for stable (ready) state.
+ * Returns true only if the alias appears in the release's asset map.
+ * In error state, returns true (optimistic — static alias URL needs no API).
+ */
+function assetIsPresent(state: ReleaseState, file: string): boolean {
+  if (state.kind === "ready") return state.assets.has(file);
+  if (state.kind === "error") return true;
+  return false;
+}
 
 /**
- * Best-effort OS detection. Returns the bucket we think the visitor is on, or null when we can't
- * tell (in which case nothing is promoted and the full grid renders). We never branch behaviour
- * on this — it only promotes/annotates.
+ * [SONNET-4.6] sq-vw3ax.11.2 — Find the first prerelease asset matching a pattern.
+ * Returns null when none found — callers degrade to the Releases page link.
  */
+function findPrereleaseAsset(
+  assets: ReleaseAsset[],
+  pattern: RegExp,
+): ReleaseAsset | null {
+  return assets.find((a) => pattern.test(a.name)) ?? null;
+}
+
+// ---- OS detection (progressive enhancement) ----------------------------------------------------
+
 function detectOs(): OsKey | null {
   if (typeof navigator === "undefined") return null;
   const uaData = (
@@ -306,12 +389,27 @@ function detectOs(): OsKey | null {
   const platform = (uaData?.platform ?? "").toLowerCase();
   const ua = navigator.userAgent.toLowerCase();
   const hay = `${platform} ${ua}`;
-  // Apple Silicon vs Intel is not reliably distinguishable from the browser, so we default macOS
-  // to the Apple-Silicon card (the common case for new Macs); both are always visible.
   if (/mac|iphone|ipad|ipod/.test(hay)) return "macos-arm";
   if (/win/.test(hay)) return "windows";
   if (/linux|android|cros/.test(hay)) return "linux";
   return null;
+}
+
+// ---- CLI / server aliases ----------------------------------------------------------------------
+
+function cliTarget(os: OsKey | null): { token: string; ext: string; label: string } {
+  switch (os) {
+    case "macos-arm":
+      return { token: "arm64-darwin", ext: "tar.gz", label: "macOS · Apple Silicon" };
+    case "macos-intel":
+      return { token: "x64-darwin", ext: "tar.gz", label: "macOS · Intel" };
+    case "windows":
+      return { token: "win-x64", ext: "zip", label: "Windows · x64" };
+    case "linux":
+      return { token: "x64-linux", ext: "tar.gz", label: "Linux · x86-64" };
+    default:
+      return { token: "x64-linux", ext: "tar.gz", label: "Linux · x86-64" };
+  }
 }
 
 // ---- small presentational pieces ---------------------------------------------------------------
@@ -320,10 +418,7 @@ function detectOs(): OsKey | null {
 function Sha256Line({ digest }: { digest: string }) {
   const hex = digest.replace(/^sha256:/, "");
   const [copied, setCopied] = React.useState(false);
-  // [OPUS-4.8] track the reset timer id so it can be cancelled on unmount / re-arm to avoid leaks.
-  // `window.setTimeout` returns `number` in the DOM lib; type the ref as `number` to avoid the
-  // @types/node global-augmentation ambiguity where `ReturnType<typeof window.setTimeout>`
-  // resolves to Node's `Timeout` and the assignment fails typecheck (TS2322).
+  // [OPUS-4.8] track the reset timer id so it can be cancelled on unmount to avoid leaks.
   const timerRef = React.useRef<number | null>(null);
 
   React.useEffect(() => {
@@ -351,7 +446,11 @@ function Sha256Line({ digest }: { digest: string }) {
         Verify the download (sha256)
       </div>
       <div className="flex items-start gap-2">
-        <code className="min-w-0 flex-1 overflow-x-auto rounded-md bg-muted px-2 py-1 font-mono text-[11px] leading-relaxed break-all">
+        {/* [FABLE-5] sq-ymr2e.10 — data-vr-mask: the checksum hex is release-specific. */}
+        <code
+          data-vr-mask
+          className="min-w-0 flex-1 overflow-x-auto rounded-md bg-muted px-2 py-1 font-mono text-[11px] leading-relaxed break-all"
+        >
           {hex}
         </code>
         <Button
@@ -374,9 +473,15 @@ function Sha256Line({ digest }: { digest: string }) {
 }
 
 /**
- * A direct-download control for one alias. In the `none` state it degrades to a subdued
- * "watch releases" link (the only GitHub-page link retained). Otherwise it is a live
- * one-click download of `<LATEST_DL>/<file>`; `<meta>` (version · size) is appended when known.
+ * A direct-download control for one version-stable alias.
+ *
+ * State handling:
+ * - loading:    spinner button (static alias href, click downloads if stable exists)
+ * - ready + alias present:  static latest/download/<alias> with version·size meta
+ * - ready + alias MISSING:  per-card degradation to Releases link (fail-closed)
+ * - none:       "No release yet — watch releases" link
+ * - error:      optimistic static alias button
+ * - prerelease: NOT rendered here; use PrereleaseDownloadButton instead
  */
 function DownloadButton({
   file,
@@ -408,6 +513,24 @@ function DownloadButton({
       </Button>
     );
   }
+
+  // [SONNET-4.6] sq-vw3ax.11.2 — fail-closed: alias not in asset map → Releases link.
+  if (state.kind === "ready" && !assetIsPresent(state, file)) {
+    return (
+      <Button
+        asChild
+        variant="outline"
+        size={size}
+        className={cn("w-full text-muted-foreground", className)}
+      >
+        <a href={RELEASES_URL} target="_blank" rel="noopener noreferrer">
+          <ExternalLink className="size-4" />
+          See Releases page
+        </a>
+      </Button>
+    );
+  }
+
   const asset = assetOf(state, file);
   const meta =
     state.kind === "ready"
@@ -417,8 +540,6 @@ function DownloadButton({
       : null;
   return (
     <Button asChild variant={variant} size={size} className={cn("w-full", className)}>
-      {/* The `download` attribute hints a save; on a cross-origin 302 the browser downloads the
-          target regardless. The file name is version-stable, so no rebuild per release. */}
       <a href={`${LATEST_DL}/${file}`} download>
         {state.kind === "loading" ? (
           <Loader2 className="size-4 animate-spin" aria-hidden />
@@ -427,7 +548,68 @@ function DownloadButton({
         )}
         <span className="truncate">
           {children}
-          {meta ? <span className="opacity-80"> · {meta}</span> : null}
+          {/* [FABLE-5] sq-ymr2e.10 — data-vr-mask: version + byte-size churn per release. */}
+          {meta ? (
+            <span data-vr-mask className="opacity-80">
+              {" "}
+              · {meta}
+            </span>
+          ) : null}
+        </span>
+      </a>
+    </Button>
+  );
+}
+
+/**
+ * [SONNET-4.6] sq-vw3ax.11.2 — Prerelease direct download button.
+ * Uses the asset's browser_download_url (versioned CDN URL, not a stable alias).
+ * If no matching asset: degrade per-card to the Releases page link.
+ */
+function PrereleaseDownloadButton({
+  asset,
+  version,
+  children,
+  variant = "outline",
+  size = "sm",
+  className,
+}: {
+  asset: ReleaseAsset | null;
+  version: string;
+  children: React.ReactNode;
+  variant?: React.ComponentProps<typeof Button>["variant"];
+  size?: React.ComponentProps<typeof Button>["size"];
+  className?: string;
+}) {
+  if (!asset || !asset.browser_download_url) {
+    return (
+      <Button
+        asChild
+        variant="outline"
+        size={size}
+        className={cn("w-full text-muted-foreground", className)}
+      >
+        <a href={RELEASES_URL} target="_blank" rel="noopener noreferrer">
+          <ExternalLink className="size-4" />
+          See Releases page
+        </a>
+      </Button>
+    );
+  }
+  const meta = [version, formatBytes(asset.size)].filter(Boolean).join(" · ");
+  return (
+    <Button asChild variant={variant} size={size} className={cn("w-full", className)}>
+      <a href={asset.browser_download_url} download>
+        <Download className="size-4" aria-hidden />
+        <span className="truncate">
+          {children}
+          {/* [FABLE-5] sq-ymr2e.10 — data-vr-mask: version + byte-size churn per release. */}
+          {meta ? (
+            <span data-vr-mask className="opacity-80">
+              {" "}
+              · {meta}
+            </span>
+          ) : null}
         </span>
       </a>
     </Button>
@@ -437,14 +619,11 @@ function DownloadButton({
 /** The collapsed first-launch / verify details shared by every GUI card. */
 function LaunchDetails({
   bypass,
-  file,
-  state,
+  digest,
 }: {
   bypass: React.ReactNode;
-  file: string;
-  state: ReleaseState;
+  digest: string | null;
 }) {
-  const asset = assetOf(state, file);
   return (
     <details className="text-muted-foreground">
       <summary className="cursor-pointer select-none font-medium text-foreground">
@@ -452,37 +631,173 @@ function LaunchDetails({
       </summary>
       <div className="measure pt-2 leading-relaxed">
         {bypass}
-        {asset?.digest ? <Sha256Line digest={asset.digest} /> : null}
+        {digest ? <Sha256Line digest={digest} /> : null}
       </div>
     </details>
   );
 }
 
-// ---- CLI / server aliases ----------------------------------------------------------------------
-
-/** The CLI/server alias platform token + archive extension for the detected OS. */
-function cliTarget(os: OsKey | null): { token: string; ext: string; label: string } {
-  switch (os) {
-    case "macos-arm":
-      return { token: "arm64-darwin", ext: "tar.gz", label: "macOS · Apple Silicon" };
-    case "macos-intel":
-      return { token: "x64-darwin", ext: "tar.gz", label: "macOS · Intel" };
-    case "windows":
-      return { token: "win-x64", ext: "zip", label: "Windows · x64" };
-    case "linux":
-      return { token: "x64-linux", ext: "tar.gz", label: "Linux · x86-64" };
-    default:
-      // Undetected: default to the portable Linux x86-64 archive; every platform's build is on
-      // the Releases page (linked from the banner).
-      return { token: "x64-linux", ext: "tar.gz", label: "Linux · x86-64" };
+/**
+ * [SONNET-4.6] sq-vw3ax.11.2 — All download controls for one GUI platform card.
+ * Handles the three substantive states (ready, prerelease, none/error/loading).
+ */
+function GuiDownloadControls({
+  platform,
+  state,
+  primaryVariant = "outline",
+  primarySize = "sm",
+  primaryClass,
+}: {
+  platform: GuiPlatform;
+  state: ReleaseState;
+  primaryVariant?: React.ComponentProps<typeof Button>["variant"];
+  primarySize?: React.ComponentProps<typeof Button>["size"];
+  primaryClass?: string;
+}) {
+  if (state.kind === "prerelease") {
+    const primaryPattern = GUI_PRERELEASE_PATTERNS[platform.os];
+    const preAsset = findPrereleaseAsset(state.assets, primaryPattern);
+    const preSecondary = platform.secondary
+      ? findPrereleaseAsset(state.assets, LINUX_DEB_PRERELEASE_PATTERN)
+      : null;
+    return (
+      <>
+        <PrereleaseDownloadButton
+          asset={preAsset}
+          version={state.version}
+          variant={primaryVariant}
+          size={primarySize}
+          className={primaryClass}
+        >
+          Download {platform.shortName}
+        </PrereleaseDownloadButton>
+        {platform.secondary && (
+          <PrereleaseDownloadButton
+            asset={preSecondary}
+            version={state.version}
+          >
+            {platform.secondary.label}
+          </PrereleaseDownloadButton>
+        )}
+        <LaunchDetails
+          bypass={platform.bypass}
+          digest={preAsset?.digest ?? null}
+        />
+      </>
+    );
   }
+
+  // ready / error / loading / none — all handled by DownloadButton's internal state logic.
+  const stableDigest =
+    state.kind === "ready" ? (assetOf(state, platform.file)?.digest ?? null) : null;
+  return (
+    <>
+      <DownloadButton
+        file={platform.file}
+        state={state}
+        variant={primaryVariant}
+        size={primarySize}
+        className={primaryClass}
+      >
+        Download {platform.shortName}
+      </DownloadButton>
+      {platform.secondary && state.kind !== "none" && (
+        <DownloadButton file={platform.secondary.file} state={state}>
+          {platform.secondary.label}
+        </DownloadButton>
+      )}
+      <LaunchDetails bypass={platform.bypass} digest={stableDigest} />
+    </>
+  );
+}
+
+/**
+ * [SONNET-4.6] sq-vw3ax.11.2 — Combined CLI + server card.
+ * The release pipeline ships ONE archive carrying BOTH sparq-cli and sparq-server binaries.
+ * No separate sparq-server-<token>.<ext> alias exists; the old two-card design was dishonest.
+ */
+function CliServerCard({
+  state,
+  cliArchive,
+  cliToken,
+  cliLabel,
+  cliExt,
+}: {
+  state: ReleaseState;
+  cliArchive: string;
+  cliToken: string;
+  cliLabel: string;
+  cliExt: string;
+}) {
+  const bypass = (
+    <>
+      Portable archive for <strong>{cliLabel}</strong> (
+      <code className="font-mono text-xs">.{cliExt}</code>). Extract and run{" "}
+      <code className="font-mono text-xs">sparq</code> (CLI) or{" "}
+      <code className="font-mono text-xs">sparq-server</code> (HTTP server) —
+      no installer, no signing dialog.
+    </>
+  );
+
+  let downloadNode: React.ReactNode;
+  let digest: string | null = null;
+
+  if (state.kind === "prerelease") {
+    const cliPattern =
+      CLI_PRERELEASE_PATTERNS[cliToken] ?? /^sparq-cli-.*-x64-baseline\.tar\.gz$/;
+    const asset = findPrereleaseAsset(state.assets, cliPattern);
+    digest = asset?.digest ?? null;
+    downloadNode = (
+      <PrereleaseDownloadButton asset={asset} version={state.version}>
+        Download CLI + server ({cliLabel})
+      </PrereleaseDownloadButton>
+    );
+  } else {
+    digest =
+      state.kind === "ready" ? (assetOf(state, cliArchive)?.digest ?? null) : null;
+    downloadNode = (
+      <DownloadButton file={cliArchive} state={state}>
+        Download CLI + server ({cliLabel})
+      </DownloadButton>
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <Terminal className="size-5" aria-hidden />
+          CLI + server
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm text-muted-foreground">
+        <p className="measure">
+          The archive carries both the{" "}
+          <code className="font-mono text-xs">sparq</code> CLI and the{" "}
+          <code className="font-mono text-xs">sparq-server</code> HTTP server
+          binary. Extract and run either — no installer, no signing dialog.
+          Every platform&rsquo;s build is on the{" "}
+          <a
+            className="text-primary underline underline-offset-4"
+            href={RELEASES_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Releases page
+          </a>
+          .
+        </p>
+        {downloadNode}
+        <LaunchDetails bypass={bypass} digest={digest} />
+      </CardContent>
+    </Card>
+  );
 }
 
 // ---- page --------------------------------------------------------------------------------------
 
 export function DownloadClient() {
-  // null until hydrated → SSR renders the full grid with nothing promoted (no hydration mismatch;
-  // the server can't know the OS).
+  // null until hydrated → SSR renders the full grid with nothing promoted (no hydration mismatch).
   const [detected, setDetected] = React.useState<OsKey | null>(null);
   const release = useLatestRelease();
 
@@ -501,25 +816,24 @@ export function DownloadClient() {
 
   const cli = React.useMemo(() => cliTarget(detected), [detected]);
   const cliArchive = `sparq-cli-${cli.token}.${cli.ext}`;
-  const serverArchive = `sparq-server-${cli.token}.${cli.ext}`;
 
   return (
     <div className="space-y-10">
       <header className="space-y-3">
         <h1 className="text-2xl font-semibold">Download sparq</h1>
         <p className="measure text-muted-foreground">
-          The sparq desktop GUI bundles the engine and the playground into a
+          The sparq desktop GUI bundles the engine and the workbench into a
           native app for macOS, Windows, and Linux. Prefer not to install
-          anything? The full SPARQL playground runs entirely in your browser at{" "}
+          anything? The full SPARQL workbench runs entirely in your browser at{" "}
           {/* [OPUS-4.8] sq-ymr2e.4 — inline prose links carry a PERSISTENT underline (WCAG 2.1
-              §1.4.1 Use of Color / axe `link-in-text-block`): distinguishable without relying on
-              the teal colour alone, which fails the 3:1 contrast vs the surrounding muted text. */}
-          <Link
+              §1.4.1 Use of Color / axe `link-in-text-block`). */}
+          {/* [OPUS-4.8] sq-4hiqe — /app is the single workbench; hard anchor not next/link. */}
+          <a
             className="text-primary underline underline-offset-4"
-            href="/try"
+            href={withBasePath("/app/")}
           >
-            /try
-          </Link>{" "}
+            /app
+          </a>{" "}
           — no download required.
         </p>
       </header>
@@ -536,24 +850,47 @@ export function DownloadClient() {
         <div className="space-y-1 text-sm">
           <p className="font-medium">Developer builds — unsigned.</p>
           <p className="measure text-muted-foreground">
-            These desktop bundles are <strong>not code-signed or
-            notarized</strong>, so macOS Gatekeeper and Windows SmartScreen will
-            warn the first time you open them. That&rsquo;s expected — see the
-            per-OS instructions on each card to allow the app. Officially signed
-            and notarized builds (Apple Developer ID + Windows Authenticode) are
-            coming; until then, only install builds you fetched yourself from the{" "}
-            <a
-              className="text-primary underline underline-offset-4"
-              href={RELEASES_URL}
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              official Releases page
-            </a>
-            . Each release attaches a{" "}
-            <code className="font-mono text-xs">SHA256SUMS</code> manifest and
-            SLSA build-provenance attestations you can verify with{" "}
-            <code className="font-mono text-xs">gh attestation verify</code>.
+            {/* [SONNET-4.6] sq-vw3ax.11.2 — prerelease state adds explicit dev-build callout. */}
+            {release.kind === "prerelease" ? (
+              <>
+                These are <strong>unsigned development pre-release builds</strong>{" "}
+                ({release.version}), not production releases. macOS Gatekeeper
+                and Windows SmartScreen will warn on first open — see the per-OS
+                instructions. Only install builds you fetched directly from the{" "}
+                <a
+                  className="text-primary underline underline-offset-4"
+                  href={RELEASES_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  official Releases page
+                </a>
+                .
+              </>
+            ) : (
+              <>
+                These desktop bundles are{" "}
+                <strong>not code-signed or notarized</strong>, so macOS
+                Gatekeeper and Windows SmartScreen will warn the first time you
+                open them. That&rsquo;s expected — see the per-OS instructions
+                on each card to allow the app. Officially signed and notarized
+                builds (Apple Developer ID + Windows Authenticode) are coming;
+                until then, only install builds you fetched yourself from the{" "}
+                <a
+                  className="text-primary underline underline-offset-4"
+                  href={RELEASES_URL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  official Releases page
+                </a>
+                . Each release attaches a{" "}
+                <code className="font-mono text-xs">SHA256SUMS</code> manifest
+                and SLSA build-provenance attestations you can verify with{" "}
+                <code className="font-mono text-xs">gh attestation verify</code>
+                .
+              </>
+            )}
           </p>
         </div>
       </div>
@@ -562,8 +899,9 @@ export function DownloadClient() {
       <section className="space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-xl font-semibold">Desktop app</h2>
-          {release.kind === "ready" && (
-            <Badge variant="muted" className="h-6 font-mono">
+          {(release.kind === "ready" || release.kind === "prerelease") && (
+            // [FABLE-5] sq-ymr2e.10 — data-vr-mask: the version tag churns per release.
+            <Badge variant="muted" className="h-6 font-mono" data-vr-mask>
               {release.version}
             </Badge>
           )}
@@ -587,27 +925,13 @@ export function DownloadClient() {
                 </p>
               </div>
               <div className="w-full space-y-2 md:w-80">
-                <DownloadButton
-                  file={primary.file}
+                <GuiDownloadControls
+                  platform={primary}
                   state={release}
-                  variant="default"
-                  size="lg"
-                >
-                  Download {primary.shortName}
-                </DownloadButton>
-                {primary.secondary && release.kind !== "none" && (
-                  <DownloadButton file={primary.secondary.file} state={release}>
-                    {primary.secondary.label}
-                  </DownloadButton>
-                )}
+                  primaryVariant="default"
+                  primarySize="lg"
+                />
               </div>
-            </CardContent>
-            <CardContent className="text-sm">
-              <LaunchDetails
-                bypass={primary.bypass}
-                file={primary.file}
-                state={release}
-              />
             </CardContent>
           </Card>
         )}
@@ -632,105 +956,43 @@ export function DownloadClient() {
                   <Badge variant="muted">{p.ext}</Badge>
                   <Badge variant="warning">Unsigned</Badge>
                 </div>
-                <DownloadButton file={p.file} state={release}>
-                  Download {p.shortName}
-                </DownloadButton>
-                {p.secondary && release.kind !== "none" && (
-                  <DownloadButton file={p.secondary.file} state={release}>
-                    {p.secondary.label}
-                  </DownloadButton>
-                )}
-                <LaunchDetails bypass={p.bypass} file={p.file} state={release} />
+                <GuiDownloadControls platform={p} state={release} />
               </CardContent>
             </Card>
           ))}
         </div>
       </section>
 
-      {/* CLI + server binaries */}
+      {/* [SONNET-4.6] sq-vw3ax.11.2 — ONE combined CLI + server section (one archive). */}
       <section className="space-y-4">
         <h2 className="text-xl font-semibold">Command-line &amp; server</h2>
         <p className="measure text-sm text-muted-foreground">
-          The same releases also carry the standalone{" "}
+          The same releases carry the standalone{" "}
           <code className="font-mono text-xs">sparq</code> CLI and the{" "}
           <code className="font-mono text-xs">sparq-server</code> HTTP server
-          binaries, built across a broad OS &times; CPU matrix
-          (macOS/Windows/Linux, x86-64 micro-architecture tiers + arm64). These
-          are plain executables — no signing dialog. The buttons below fetch the
-          build for <strong>{cli.label}</strong>; every other platform&rsquo;s
-          archive is attached to the{" "}
+          in <strong>one combined archive</strong>, built across a broad OS &times;
+          CPU matrix (macOS/Windows/Linux, x86-64 + arm64). Plain executables —
+          no signing dialog. The button below fetches the build for{" "}
+          <strong>{cli.label}</strong>; every other platform&rsquo;s archive is
+          on the{" "}
           <a
             className="text-primary underline underline-offset-4"
             href={RELEASES_URL}
             target="_blank"
             rel="noopener noreferrer"
           >
-            latest release
+            Releases page
           </a>
           .
         </p>
         <div className="grid gap-4 md:grid-cols-2">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Terminal className="size-5" aria-hidden />
-                sparq CLI
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3 text-sm text-muted-foreground">
-              <p className="measure">
-                Load, query, and convert RDF from the terminal. Download the
-                archive, extract, and put the binary on your{" "}
-                <code className="font-mono text-xs">PATH</code>.
-              </p>
-              <DownloadButton file={cliArchive} state={release}>
-                Download sparq CLI
-              </DownloadButton>
-              <LaunchDetails
-                bypass={
-                  <>
-                    Portable archive for <strong>{cli.label}</strong> (
-                    <code className="font-mono text-xs">.{cli.ext}</code>).
-                    Extract and run{" "}
-                    <code className="font-mono text-xs">sparq</code> — no
-                    installer, no signing dialog.
-                  </>
-                }
-                file={cliArchive}
-                state={release}
-              />
-            </CardContent>
-          </Card>
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Server className="size-5" aria-hidden />
-                sparq-server
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3 text-sm text-muted-foreground">
-              <p className="measure">
-                Serve a dataset over the SPARQL 1.1 Protocol with metrics and a
-                Service Description. The desktop GUI can connect to a running
-                server in endpoint mode.
-              </p>
-              <DownloadButton file={serverArchive} state={release}>
-                Download sparq-server
-              </DownloadButton>
-              <LaunchDetails
-                bypass={
-                  <>
-                    Portable archive for <strong>{cli.label}</strong> (
-                    <code className="font-mono text-xs">.{cli.ext}</code>).
-                    Extract and run{" "}
-                    <code className="font-mono text-xs">sparq-server</code>.
-                  </>
-                }
-                file={serverArchive}
-                state={release}
-              />
-            </CardContent>
-          </Card>
+          <CliServerCard
+            state={release}
+            cliArchive={cliArchive}
+            cliToken={cli.token}
+            cliLabel={cli.label}
+            cliExt={cli.ext}
+          />
         </div>
       </section>
 
@@ -744,10 +1006,10 @@ export function DownloadClient() {
         </p>
         <div className="flex flex-wrap items-center gap-3">
           <Button asChild variant="default" size="sm">
-            <Link href="/try">
-              Open the playground
+            <a href={withBasePath("/app/")}>
+              Open the workbench
               <ExternalLink className="size-4" />
-            </Link>
+            </a>
           </Button>
           <Badge variant="success" className="h-6 gap-1.5">
             <ShieldCheck className="size-3.5" aria-hidden />

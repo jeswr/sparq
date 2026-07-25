@@ -32,10 +32,36 @@
   features: "jsonld"
   test: true
 
+# [SONNET-4.6] #3547: exercise the native Turtle parser's inline differential,
+# malformed-input parity, and loader tests on every feature-matrix run.
+- name: "sparq-core (native-ttl)"
+  crate: "sparq-core"
+  features: "native-ttl"
+  test: true
+
+# [SONNET-4.6] #3547: exercise the opt-in RFC-3987 IRI validation path. These
+# tests live in inline cfg(test) modules, so the structural C1 guard cannot infer
+# their need for a dedicated feature executor.
+- name: "sparq-core (iri-fast)"
+  crate: "sparq-core"
+  features: "iri-fast"
+  test: true
+
 # [OPUS-4.8] sq-wihld (survey §A1): opt-in per-block Bloom filters on the high-NDV
 # leading column of a block-compressed permutation. OFF by default (lean core); this
 # leg runs the bloom equivalence + block-skip tests (compress::tests::bloom_*).
 - name: "sparq-core (block-bloom)"
   crate: "sparq-core"
   features: "block-bloom"
+  test: true
+
+# [FABLE-5] sq-7d3dj.32.2.6 / sq-7d3dj.32.2.7: SPQCPRM2 frame-of-reference col2-reset format.
+# The V2 EMITTER is OFF by default (the store still WRITES SPQCPRM1 bit-exactly); this leg runs
+# the V2 emit-gate + write/open round-trip + streaming-writer byte-identity + cross-version +
+# corrupt-magic mutation-witness + SPQCPRM1-vs-SPQCPRM2 differential + zigzag tests, PLUS the
+# V2 corruption oracle (`mmap_loader_survives_corruption_compressed_v2`). `mmap` is co-enabled
+# (spqcprm2 implies it) so the on-disk write/open path and FILE_MAGIC_V2 tests run.
+- name: "sparq-core (spqcprm2, mmap)"
+  crate: "sparq-core"
+  features: "spqcprm2,mmap"
   test: true

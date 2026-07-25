@@ -346,9 +346,18 @@ async fn streamed_select_large_multichunk_is_byte_identical() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let advertised: usize = resp.headers()["content-length"].to_str().unwrap().parse().unwrap();
+    // [OPUS-4.8] (sq-7d3dj.34.2) A genuinely multi-chunk SELECT-JSON result now STREAMS: the
+    // body is written under chunked transfer-encoding as the engine serialises it (so the
+    // first byte is flushed before the whole result is built — TTFB), which means there is no
+    // `Content-Length` (the total is not known until the last row). The buffered small-result
+    // path still carries a `Content-Length` — see `streamed_select_json_is_byte_identical`.
+    assert!(
+        resp.headers().get("content-length").is_none(),
+        "a streamed multi-chunk result must not advertise Content-Length (chunked transfer-encoding)"
+    );
     let body = resp.text().await.unwrap();
-    assert_eq!(advertised, body.len());
+    // The load-bearing invariant: the streamed body is byte-identical to the engine's single
+    // materialised JSON string (same solution order, same escaping).
     assert_eq!(body, expect);
 }
 

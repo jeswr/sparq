@@ -35,6 +35,7 @@ import {
 import { useTheme } from "next-themes";
 
 import { cn } from "@/lib/utils";
+import { withBasePath } from "@/lib/base-path";
 import { Badge } from "@/components/ui/badge";
 import {
   FLAGSHIPS,
@@ -62,11 +63,14 @@ const REPO_URL = "https://github.com/jeswr/sparq";
 
 // [OPUS-4.8] sq-vw3ax.3 — the palette is the 0-click fast path now the sidebar is gone, so it
 // must jump to each surface's NEW home, not a removed /surface/* route that only redirects.
-// The 5 retained deep pages + /try keep their own route; every other surface lives as a row
-// under /capabilities#<theme>. Resolving here (not at the data source) keeps surfaces.ts a pure
-// structural source while the palette routes to the post-redesign IA.
+// The 5 retained deep pages keep their own /surface/<slug> route; every other surface lives as a
+// row under /capabilities#<theme>. Resolving here (not at the data source) keeps surfaces.ts a
+// pure structural source while the palette routes to the post-redesign IA.
+// [FABLE-5] sq-vw3ax.11.1 — the dead `slug === "try"` special case was removed: the /try surface
+// no longer exists in data/surfaces.ts (sq-4hiqe removed /try; it is now a hard-redirect stub to
+// /app), so the branch could never fire. Every remaining surface is a same-build /surface or
+// /capabilities route reachable by a soft push — none is the separate-build /app workbench.
 function surfaceHref(surface: Surface, groupId: string): string {
-  if (surface.slug === "try") return surface.href; // the live REPL keeps its own /try route
   if (DEEP_PAGE_SLUGS.has(surface.slug)) return surface.href; // retained deep page
   return capabilityAnchor(groupId); // a demo/soon row lives in the gallery
 }
@@ -90,22 +94,47 @@ export function useCommandPalette() {
 // The fixed top-level destinations of the slim top bar that are NOT capability surfaces (so
 // they are not in GROUPS). Option-B (sq-rclb8): "Try" (the live REPL) lives in the surface data
 // (the first Query & data surface), so it is not repeated here; "App" is the SEPARATE live
-// operational GUI destination (a placeholder today; the GUI track fills it) — it replaces the old
-// "/gui · Try the GUI" entry, which now client-redirects to /app. /about is folded into Home
-// #how-it-runs (it redirects), so the palette points there. /capabilities is the new gallery;
-// /download + /app are the discovery gaps the maintainer flagged.
-const TOP_PAGES: { href: string; title: string; blurb: string }[] = [
+// operational GUI destination — it replaces the old "/gui · Try the GUI" entry, which now
+// client-redirects to /app. /about is folded into Home #how-it-runs (it redirects), so the
+// palette points there. /capabilities is the new gallery; /download + /app are the discovery
+// gaps the maintainer flagged.
+//
+// [FABLE-5] sq-vw3ax.11.1 — `external: true` marks a destination served in production by a
+// SEPARATE deployed Next.js app at the same origin (here: /app = the gui/app workbench overlaid
+// at /app/ by pages.yml, sq-vnd0i). Such a slot MUST be a hard, full-page navigation (see `go`),
+// mirroring app-shell.tsx's NavLink — a next/router soft push across the two distinct Next builds
+// would fetch the foreign RSC Flight payload (/app/index.txt) and land on a raw .txt instead of
+// the GUI. Selecting "App" via Cmd-K was the last live instance of that /app txt-redirect bug.
+const TOP_PAGES: { href: string; title: string; blurb: string; external?: boolean }[] = [
   { href: "/", title: "Home", blurb: "Overview — what sparq is, the live REPL, the flagships." },
   // [OPUS-4.8] sq-vw3ax.6 — the curated "show me it working" gallery (3 flagships + Live REPL).
   // Discoverable here in Cmd-K (0 clicks) without bloating the slim top bar — the bar stays at 6.
   { href: "/examples", title: "Examples", blurb: "The curated 'show me it working' demo gallery." },
   { href: "/capabilities", title: "Capabilities", blurb: "Every surface in one gallery, by theme." },
-  { href: "/app", title: "App", blurb: "The live operational GUI (hosted web app coming soon)." },
+  // [FABLE-5] sq-vw3ax.11.1 — the hosted GUI is LIVE at /app now (not "coming soon"); marked
+  // external so `go` hard-navigates across the two Next builds (see TOP_PAGES comment above).
+  { href: "/app", title: "App", blurb: "The live operational GUI — the in-browser workbench.", external: true },
   { href: "/benchmarks", title: "Benchmarks", blurb: "Per-commit, same-box benchmark dashboard." },
+  // [OPUS-4.8] sq-1scgk — /papers is now a top-bar destination (maintainer 2026-07-04 item
+  // 9b); it stays indexed here too, exactly like the other bar pages above.
   { href: "/papers", title: "Papers", blurb: "The research papers behind sparq." },
   // [OPUS-4.8] sq-rvgr2.1 — the /specs section: W3C ReSpec-style Unofficial Proposal Drafts.
-  // Cmd-K only (like /papers) so the slim top bar stays at 6 destinations.
+  // Cmd-K only (unlike /papers, which is now in the bar) so the slim top bar stays lean.
   { href: "/specs", title: "Specs", blurb: "W3C ReSpec-style Unofficial Proposal Drafts (no W3C standing)." },
+  // (sq-gk9lq) [SONNET-4.6] — how sparq stores and queries its own project knowledge as RDF.
+  // Cmd-K only (like /papers, /specs) so the slim top bar stays at 6 destinations.
+  { href: "/dogfooding", title: "Dogfooding sparq", blurb: "How sparq uses itself as a knowledge-management system — the PKG loop, ingest workflow, NL query tool, and measured cost benefit." },
+  // (sq-0hv3o) [SONNET-4.6] — the web front door to the proof + testing estate (root
+  // ASSURANCE.md, PR #1562). Cmd-K only (like /papers, /specs, /dogfooding) so the slim
+  // top bar stays at 6 destinations; the maintainer asked to surface it, not to grow the bar.
+  { href: "/assurance", title: "Assurance", blurb: "How to check that sparq works in 15 minutes — the 5-minute health check, the layer-by-layer proof + testing estate, and what green does not mean." },
+  // (sq-549m0) [FABLE-5] — the honest GenAI-retrieval status ledger: implemented (crate +
+  // feature) vs proposed (bead id). Cmd-K only (like /assurance, /dogfooding) — bar stays at 6.
+  { href: "/genai-retrieval", title: "GenAI retrieval — implemented vs proposed", blurb: "The honest status ledger for the RDF-native retrieval composition — ANN-in-SPARQL, embedding provenance, NL→SPARQL, citations — implemented vs designed-only." },
+  // (sq-vw3ax.16) [OPUS-4.8] — the honest competitive feature matrix: LEAD/PARITY/PARTIAL/GAP
+  // vs RDFox/Stardog/GraphDB/TopBraid/Ent., GAP rows kept, bead links, zero perf numbers.
+  // Cmd-K only (like /assurance, /genai-retrieval) — the slim top bar stays fixed.
+  { href: "/compare", title: "How sparq compares", blurb: "The honest competitive feature matrix — sparq vs RDFox, Stardog, GraphDB, TopBraid and the enterprise cluster, with the GAP rows kept visible and zero performance numbers." },
   { href: "/download", title: "Download", blurb: "Desktop GUI + CLI/server binaries (latest release)." },
   { href: "/#how-it-runs", title: "How it runs", blurb: "The honest \"what runs where\" tier model." },
 ];
@@ -215,9 +244,28 @@ function PaletteItem({
 }
 
 export function CommandPalette({ children }: { children: React.ReactNode }) {
-  const [open, setOpen] = React.useState(false);
+  const [open, setOpenState] = React.useState(false);
   const router = useRouter();
   const { theme, setTheme, resolvedTheme } = useTheme();
+
+  // [FABLE-5] sq-ymr2e.9 — ESC must RESTORE focus to the INVOKER (WAI-ARIA dialog focus
+  // contract; asserted by e2e/a11y-keyboard.spec.ts). The palette has no Radix
+  // <Dialog.Trigger> (it opens from a global ⌘K/Ctrl-K listener or the header button), and
+  // without one the close left focus on <body> — invisible to a keyboard/AT user. So every
+  // open path records document.activeElement and onCloseAutoFocus returns focus there.
+  const invokerRef = React.useRef<HTMLElement | null>(null);
+  const setOpen = React.useCallback((next: boolean | ((v: boolean) => boolean)) => {
+    setOpenState((v) => {
+      const n = typeof next === "function" ? next(v) : next;
+      if (n && !v) {
+        // Capturing inside the updater keeps the ⌘K toggle race-free; it is idempotent, so a
+        // StrictMode double-invoke is harmless.
+        invokerRef.current =
+          document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      }
+      return n;
+    });
+  }, []);
 
   // [OPUS-4.8] sq-ixc3.10 — the live operational commands the mounted workbench contributes,
   // bucketed into their fixed-order groups. Empty off the workbench (pure navigation then).
@@ -227,7 +275,7 @@ export function CommandPalette({ children }: { children: React.ReactNode }) {
     [operationalCommands],
   );
 
-  const ctx = React.useMemo(() => ({ open, setOpen }), [open]);
+  const ctx = React.useMemo(() => ({ open, setOpen }), [open, setOpen]);
 
   // Global ⌘K (macOS) / Ctrl-K (Windows/Linux) toggles the palette. We also let the platform
   // browser-search shortcut stay free: only K with the platform modifier is intercepted.
@@ -240,23 +288,42 @@ export function CommandPalette({ children }: { children: React.ReactNode }) {
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, []);
+  }, [setOpen]);
 
-  // Navigate (or run an action), then close. next/navigation's router.push respects the
-  // configured basePath, so "/surface/zk" resolves under /sparq on Pages and at root under
-  // Tauri — no manual basePath juggling here.
+  // Navigate (or run an action), then close.
+  //
+  // A same-build route is a SOFT next/navigation push: router.push respects the configured
+  // basePath, so "/surface/zk" resolves under /sparq on Pages and at root under Tauri — no manual
+  // basePath juggling, and the SPA transition keeps the site's own client alive.
+  //
+  // [FABLE-5] sq-vw3ax.11.1 — an `external` destination (only /app today) is served by a SEPARATE
+  // Next.js build overlaid at /app/, so it MUST be a HARD full-page navigation: window.location
+  // .assign to the base-path-prefixed, trailing-slashed URL, mirroring app-shell.tsx's NavLink
+  // <a href={withBasePath(...)}>. A soft router.push across the two distinct Next builds would
+  // fetch the foreign RSC Flight payload /app/index.txt and land on a raw .txt — the exact
+  // txt-redirect bug. INVARIANT: every user-reachable navigation to /app from the site UI is a
+  // hard navigation. Next does NOT auto-prefix a hand-written location.assign, hence withBasePath;
+  // the trailing slash matches `trailingSlash: true` so the static export's directory index
+  // resolves (identical to the NavLink's `href.endsWith("/") ? href : ${href}/`).
   const go = React.useCallback(
-    (href: string) => {
+    (href: string, external?: boolean) => {
       setOpen(false);
+      if (external) {
+        window.location.assign(withBasePath(href.endsWith("/") ? href : `${href}/`));
+        return;
+      }
       router.push(href);
     },
-    [router],
+    [router, setOpen],
   );
 
-  const runAction = React.useCallback((fn: () => void) => {
-    setOpen(false);
-    fn();
-  }, []);
+  const runAction = React.useCallback(
+    (fn: () => void) => {
+      setOpen(false);
+      fn();
+    },
+    [setOpen],
+  );
 
   const isDark = (resolvedTheme ?? theme) === "dark";
 
@@ -272,6 +339,16 @@ export function CommandPalette({ children }: { children: React.ReactNode }) {
           )}
         />
         <DialogPrimitive.Content
+          // [FABLE-5] sq-ymr2e.9 — return focus to the recorded invoker (fall back to the
+          // Radix default only when it is gone, e.g. after a palette navigation unmounted it).
+          onCloseAutoFocus={(event) => {
+            const invoker = invokerRef.current;
+            invokerRef.current = null;
+            if (invoker?.isConnected) {
+              event.preventDefault();
+              invoker.focus();
+            }
+          }}
           className={cn(
             "bg-card text-card-foreground fixed left-1/2 top-[12vh] z-50 w-[min(38rem,calc(100vw-2rem))] -translate-x-1/2",
             "overflow-hidden rounded-xl p-0 shadow-2xl ring-1 ring-foreground/10",
@@ -388,7 +465,9 @@ export function CommandPalette({ children }: { children: React.ReactNode }) {
                     title={p.title}
                     blurb={p.blurb}
                     keywords={["page", p.blurb]}
-                    onSelect={() => go(p.href)}
+                    // [FABLE-5] sq-vw3ax.11.1 — an external page (/app) hard-navigates; every
+                    // other same-build page keeps the soft router.push.
+                    onSelect={() => go(p.href, p.external)}
                   />
                 ))}
               </Command.Group>

@@ -34,7 +34,8 @@ let d = derive_construct(
 
 let derived = d.triples();          // the data the operation produced
 let lineage = d.prov_graph();       // its PROV-O record (Vec<Triple>)
-let turtle  = d.prov_ntriples();    // …serialised (N-Triples ⊂ Turtle)
+let turtle  = d.prov_turtle();      // …serialised as prefix-compacted Turtle
+let nt      = d.prov_ntriples();    // …or canonical N-Triples
 ```
 
 ## ✨ Features
@@ -74,6 +75,15 @@ let turtle  = d.prov_ntriples();    // …serialised (N-Triples ⊂ Turtle)
   and exact premises for each fact). Entity/activity IRIs are content-addressed,
   so lineage from overlapping proofs **stitches** into one DAG. Non-default
   feature: the `sparq-reason` dep is pulled only when you ask for `reason`.
+- **Missing-answer explanation** (`why-not` feature) — `why_not` accepts one
+  basic graph pattern (BGP) plus a fully-ground target binding and reports every
+  substituted triple absent from the graph, in BGP order. It returns an empty
+  vector when every conjunct is present. `why_not_report_ntriples` /
+  `why_not_report_turtle` turn that vector into deterministic RDF 1.2: one
+  `prov:Entity` per missing conjunct carrying its exact grounded triple term and
+  an `urn:sparq:prov:absent true` marker. `OPTIONAL`, `UNION`, `FILTER`, property
+  paths, named graphs, and all other algebra fail closed as unsupported.
+  <!-- [GPT-5.6] sq-lsp7k -->
 - **Dependency-light** — `xsd:dateTime` is formatted in-crate (no `chrono`/
   `time` dep); the formatter is the inverse of `sparq-core`'s dateTime parser,
   so a recorded timestamp parses back to the same instant (tested).
@@ -86,6 +96,7 @@ let turtle  = d.prov_ntriples();    // …serialised (N-Triples ⊂ Turtle)
 | Reasoner materialization (RDFS / OWL-RL / N3) | ✅ covered (`reason` feature) — reuses `sparq-reason`'s per-fact `why()` proof trees: a *finer-grained* derivation provenance than PROV-O alone |
 | SPARQL UPDATE data ops (`INSERT … WHERE`, `INSERT DATA`, `DELETE …`, `LOAD`) | ✅ covered here (`derive_update`) — inserts ⇒ generated/derived, deletes ⇒ `wasInvalidatedBy` |
 | SPARQL UPDATE structural ops (`CLEAR` / `DROP` / `CREATE`) | ⛔ no per-triple entity (deliberate boundary — they change graph existence/emptiness, not triples-as-data; recorded only as the activity kind) |
+| Missing target binding for one BGP | ✅ covered under the non-default `why-not` feature; other algebra is unsupported |
 
 The CONSTRUCT path is the cleanest, best-tested derivation in the engine and the
 natural first PROV-O target; reasoner materialization reuses the existing proof

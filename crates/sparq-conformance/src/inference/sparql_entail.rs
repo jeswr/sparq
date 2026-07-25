@@ -488,80 +488,235 @@ fn add_rdfd2(dict: &mut Dict, ids: &mut Vec<[sparq_core::dict::Id; 3]>) {
 #[cfg(feature = "ql-experimental")]
 const PR_QL: &str = "http://www.w3.org/ns/owl-profile/QL";
 
-/// [OPUS-4.8] sq-kuvu3 — what the EXPERIMENTAL QL rewriting arm genuinely computed
-/// for one `pr:QL`-tagged entailment test. EVERY variant is reported in the
-/// `OutOfScope`/experimental bucket (never a graduated Pass/Fail that counts to a
-/// conformance rate or a ratchet floor), so a future QL regression can never
-/// silently claim OWL 2 QL conformance — yet the report still records, honestly,
-/// exactly what `sparq-reason-ql` produced.
+// ---------------------------------------------------------------------------
+// [FABLE-5] sq-pbz04.3.4 (epic sq-pbz04.3, design record
+// research/owl2-ql-cq-gate-broadening.md §4+§6) — the SIX-CONDITION GRADUATION
+// PREDICATE for the `pr:QL` entailment arm, plus the HONEST REASON TAXONOMY for
+// everything it holds back. A row graduates to the pinned named-case floor
+// (`tests/ql_entailment_floor.rs`, a `sparq extension` scoreboard row NEVER
+// summed into the standards-conformance total) iff ALL SIX conditions below are
+// CHECKED — in code, never assumed — and pass. A graduated case that is not
+// actually sound is the worst failure mode; an honest hold is always acceptable,
+// so every check is fail-closed and every hold carries a specific reason.
+// ---------------------------------------------------------------------------
+
+/// [FABLE-5] sq-pbz04.3.4 — why a `pr:QL` entailment row did NOT graduate to the
+/// pinned named-case floor. The taxonomy is EXHAUSTIVE by construction: every
+/// non-graduated case carries exactly one variant, and the only "we could not
+/// classify it" variant ([`QlHoldReason::UnclassifiedAbstain`]) is asserted EMPTY
+/// over the current corpus by `tests/ql_entailment_floor.rs`, so a new rewriter
+/// abstain class can never hide inside a catch-all.
 #[cfg(feature = "ql-experimental")]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum QlArmOutcome {
-    /// The rewriter ABSTAINED — the fail-closed CQ-shape gate (or a TBox/atom
-    /// mapping it cannot soundly handle) rejected the query as out of QL rewriting
-    /// scope. NEVER a guessed answer. Carries the rewriter's honest reason.
-    Abstained(String),
-    /// The query rewrote to a UCQ and its evaluation over the UNMODIFIED data was
-    /// RESULT-EQUIVALENT to the suite oracle (`disjuncts` = the minimised UCQ size).
-    /// Reported as experimental evidence, NOT a graduated conformance pass.
-    ComputedEquivalent { disjuncts: usize },
-    /// The query rewrote but its evaluation DIVERGED from the oracle (the honest
-    /// experimental gap — these are exactly the cases the deferred conformance-floor
-    /// graduation bead would have to close). Carries the observed mismatch.
-    ComputedDivergent { disjuncts: usize, detail: String },
-    /// The harness could not set the test up (e.g. a data/result parse error or a
-    /// missing result file) — distinct from an abstain, and never a pass.
+pub enum QlHoldReason {
+    /// No sound certain-answer UCQ rewriting for this shape exists in this design
+    /// (design record §5): BIND/aggregation, variable predicates, intensional
+    /// schema-vocabulary queries, OPTIONAL/MINUS, recursive or negated property
+    /// paths, GRAPH, sub-SELECT, SERVICE, RDF-star, CONSTRUCT/DESCRIBE. A
+    /// documented divergence — the case will never graduate under this design.
+    PermanentlyOutside(String),
+    /// Held at the CQ-shape gate on a shape scheduled for sound broadening
+    /// (design record §5 B1–B5: UCQ/UNION input, literal-object role atoms,
+    /// distinguished-only FILTER, constant VALUES, non-recursive path
+    /// desugaring) or a soundly-liftable rewriter-fragment gap (a blank-node
+    /// body term is just a non-distinguished variable). May graduate once the
+    /// broadening lands AND the remaining five conditions hold.
+    PendingGate(String),
+    /// Condition (2) failed: the TBox is NOT totally captured —
+    /// `TBox::fully_captured()` is false (axioms skipped as outside the DL-Lite_R
+    /// fragment, or unrecognised schema vocabulary), so the rewrite may be
+    /// silently incomplete for this TBox.
+    PendingCapture {
+        /// Axioms recognised-but-skipped as outside the DL-Lite_R fragment.
+        skipped: usize,
+        /// OWL/RDFS constructs the extractor does not model.
+        unrecognised_schema: usize,
+    },
+    /// Condition (3) failed: the TBox carries consistency-relevant (negative /
+    /// disjointness) axioms and the DL-Lite_R consistency check (sq-p6yb7,
+    /// `sparq_reason_ql::check_consistency_with`, opt-in `ql-consistency`)
+    /// returned UNKNOWN — some negative axiom was not structurally captured
+    /// (e.g. `owl:complementOf`), so an inconsistency could go unseen and the
+    /// UCQ answers may under-approximate. Fail-closed hold. (Before sq-p6yb7
+    /// this variant held EVERY negative-axiom TBox; a KB the check proves
+    /// CONSISTENT now passes condition (3), and a KB it proves INCONSISTENT
+    /// holds as [`QlHoldReason::InconsistentKb`].)
+    PendingConsistency {
+        /// Count of negative/disjointness axioms in the TBox.
+        negative_axioms: usize,
+    },
+    /// Condition (3) failed: the DL-Lite_R consistency check (sq-p6yb7) proved
+    /// the KB INCONSISTENT — a definitive verdict (everything is entailed under
+    /// certain-answer semantics), but the W3C entailment-regime spec leaves a
+    /// query on an inconsistent graph to the system (it MAY raise an error), so
+    /// there is no spec-pinned oracle semantics to graduate against. Fail-closed
+    /// hold — never a guessed everything-is-entailed pass. [FABLE-5] sq-p6yb7
+    InconsistentKb {
+        /// The violated negative inclusion (Display form) — the witness.
+        violated: String,
+    },
+    /// Condition (4) failed: the test uses a named-graph (`qt:graphData`)
+    /// dataset, or the query carries its own `FROM`/`FROM NAMED` dataset clause
+    /// (which the CQ-shape gate DROPS rather than honours — so it must be held
+    /// here, never silently ignored); per-graph rewriting semantics are not
+    /// wired (design record §8).
+    NamedGraphDataset,
+    /// Condition (5) failed: the regime-coincidence guard — the crate computes
+    /// CERTAIN ANSWERS (an anonymous existential witness can support an answer)
+    /// while W3C entailment-regime solution mappings bind every variable to an
+    /// RDF term. Held when a non-distinguished body position could be filled by
+    /// an anonymous witness (see `ql_regime_coincides` for the written argument).
+    PendingCoincidence(String),
+    /// Condition (6) failed: conditions (1)–(5) held a priori, but the rewritten
+    /// UCQ's evaluation over the unmodified data was NOT result-equivalent to
+    /// the W3C oracle — an honest gap (or a bug), never laundered into a pass.
+    OracleDivergent {
+        /// Minimised UCQ size of the rewrite that diverged.
+        disjuncts: usize,
+        /// The observed mismatch.
+        detail: String,
+    },
+    /// The rewriter abstained with a reason string this taxonomy does not yet
+    /// classify. Fail-closed (the case is held), but NEVER silently tolerated:
+    /// the pinned-floor test asserts this bucket is EMPTY, so a new abstain
+    /// class forces an explicit taxonomy decision instead of hiding.
+    UnclassifiedAbstain(String),
+    /// The harness could not set the case up (parse error, missing result file,
+    /// rewriter panic/timeout) — distinct from an abstain, and never a pass.
     Inconclusive(String),
 }
 
 #[cfg(feature = "ql-experimental")]
-impl QlArmOutcome {
-    /// The single-line `OutOfScope` reason this outcome is reported under. The
-    /// stable `QL experimental:` prefix lets the report group every QL row in one
-    /// experimental histogram bucket (and lets a reader see it is NOT a conformance
-    /// claim).
-    pub fn reason(&self) -> String {
+impl QlHoldReason {
+    /// The stable taxonomy bucket token (greppable in reports; asserted by the
+    /// floor + arm tests). One token per variant — no catch-all.
+    pub fn label(&self) -> &'static str {
         match self {
-            QlArmOutcome::Abstained(why) => {
-                format!("QL experimental (abstain, fail-closed): {}", why)
+            QlHoldReason::PermanentlyOutside(_) => "permanently-outside",
+            QlHoldReason::PendingGate(_) => "pending-gate",
+            QlHoldReason::PendingCapture { .. } => "pending-capture",
+            QlHoldReason::PendingConsistency { .. } => "pending-consistency",
+            QlHoldReason::InconsistentKb { .. } => "inconsistent-kb",
+            QlHoldReason::NamedGraphDataset => "named-graph-dataset",
+            QlHoldReason::PendingCoincidence(_) => "pending-coincidence",
+            QlHoldReason::OracleDivergent { .. } => "oracle-divergent",
+            QlHoldReason::UnclassifiedAbstain(_) => "unclassified-abstain",
+            QlHoldReason::Inconclusive(_) => "inconclusive",
+        }
+    }
+
+    /// The single-line `OutOfScope` reason a held row is reported under. The
+    /// stable `QL experimental (` prefix keeps every held row in the experimental
+    /// histogram bucket (visibly NOT a conformance claim); the taxonomy label
+    /// names the specific hold. Positional `format!` args per the CodeQL
+    /// `rust/unused-variable` guard in the shared agent contract.
+    pub fn reason(&self) -> String {
+        let detail = match self {
+            QlHoldReason::PermanentlyOutside(why) => {
+                format!("no sound rewriting in this design: {}", why)
             }
-            QlArmOutcome::ComputedEquivalent { disjuncts } => format!(
-                "QL experimental (computed result-equivalent to oracle, UCQ {} disjunct(s); \
-                 NOT a graduated conformance pass)",
-                disjuncts
+            QlHoldReason::PendingGate(why) => {
+                format!("held at the CQ-shape gate, fail-closed: {}", why)
+            }
+            QlHoldReason::PendingCapture { skipped, unrecognised_schema } => format!(
+                "TBox not totally captured ({} skipped, {} unrecognised schema) — \
+                 the rewrite may be incomplete for this TBox",
+                skipped, unrecognised_schema
             ),
-            QlArmOutcome::ComputedDivergent { disjuncts, detail } => format!(
-                "QL experimental (computed DIVERGENT from oracle, UCQ {} disjunct(s)): {}",
+            QlHoldReason::PendingConsistency { negative_axioms } => format!(
+                "TBox carries {} negative/disjointness axiom(s) and the DL-Lite_R \
+                 consistency check returned UNKNOWN (structurally-uncaptured negative \
+                 axiom) — certain answers may be under-approximated",
+                negative_axioms
+            ),
+            QlHoldReason::InconsistentKb { violated } => format!(
+                "KB proven INCONSISTENT (violated negative inclusion: {}) — the \
+                 entailment-regime behaviour on an inconsistent graph is \
+                 implementation-defined, so the case is held, never an \
+                 everything-is-entailed pass",
+                violated
+            ),
+            QlHoldReason::NamedGraphDataset => {
+                "named-graph or query-carried (FROM) QL dataset not wired (per-graph \
+                 rewriting semantics unsettled)"
+                    .to_string()
+            }
+            QlHoldReason::PendingCoincidence(why) => format!(
+                "certain-answer vs entailment-regime semantics may diverge: {}",
+                why
+            ),
+            QlHoldReason::OracleDivergent { disjuncts, detail } => format!(
+                "rewritten UCQ ({} disjunct(s)) DIVERGED from the W3C oracle: {}",
                 disjuncts, detail
             ),
-            QlArmOutcome::Inconclusive(why) => format!("QL experimental (inconclusive): {}", why),
-        }
+            QlHoldReason::UnclassifiedAbstain(why) => {
+                format!("rewriter abstain not yet classified by the taxonomy: {}", why)
+            }
+            QlHoldReason::Inconclusive(why) => why.clone(),
+        };
+        format!("QL experimental ({}): {}", self.label(), detail)
     }
 }
 
-/// [OPUS-4.8] sq-kuvu3 — run the EXPERIMENTAL OWL 2 QL query-rewriting arm over the
-/// `pr:QL`-tagged tests of the `sparql11/entailment` suite and append one
-/// `OutOfScope`/experimental `TestResult` per case.
-///
-/// HONESTY CONTRACT (the load-bearing invariant this arm preserves):
-/// * NO FLOOR GRADUATION — every result lands in the `Outcome::OutOfScope`
-///   (experimental) bucket; the arm registers NO `scoreboard::SUITES` row and NO
-///   ratchet `const`, so it can never assert OWL 2 QL conformance.
-/// * FAIL-CLOSED PRESERVED — a query the rewriter cannot soundly rewrite (the
-///   fail-closed `CqError::OutOfScope` gate) is reported `Abstained`, never a
-///   guessed pass.
-/// * NO FAKED PASSES — the arm reports exactly what `sparq-reason-ql` computes:
-///   `ComputedEquivalent` only when the rewritten UCQ's evaluation over the
-///   UNMODIFIED data genuinely matches the oracle; an abstain / divergence / setup
-///   failure is reported as such, never inflated into a pass.
-///
-/// The suite key is `sparql11/entailment (QL experimental)` so these rows are
-/// visibly separate from the gating regime rows.
+/// [FABLE-5] sq-pbz04.3.4 — the per-case verdict of the six-condition graduation
+/// predicate.
 #[cfg(feature = "ql-experimental")]
-pub fn run_ql_experimental_arm(
-    rdf_tests_root: &Path,
-    out: &mut Vec<TestResult>,
-) -> Result<(), String> {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum QlGraduationVerdict {
+    /// ALL SIX conditions passed: (1) the fail-closed CQ-shape gate accepts the
+    /// query AND it carries no intensional schema-vocabulary atom; (2) the TBox
+    /// is totally captured (`fully_captured()`); (3) zero consistency-relevant
+    /// axioms; (4) default-graph dataset only; (5) the regime-coincidence guard
+    /// holds; (6) the rewritten UCQ's evaluation over the unmodified data is
+    /// result-equivalent to the W3C oracle. Eligible for the pinned named-case
+    /// floor (a sparq-extension row, never a standards-conformance claim).
+    Graduated {
+        /// Minimised UCQ size of the sound rewrite.
+        disjuncts: usize,
+    },
+    /// At least one condition failed; carries the specific hold reason.
+    Held(QlHoldReason),
+}
+
+/// One `pr:QL` entailment case with its graduation verdict.
+#[cfg(feature = "ql-experimental")]
+#[derive(Clone, Debug)]
+pub struct QlCaseVerdict {
+    /// The STABLE case id — the fragment of the manifest entry IRI (unique across
+    /// the suite, unlike `name`: the suite reuses e.g. "RDFS inference test
+    /// subClassOf" for two distinct entries). The pinned floor is named over these.
+    pub id: String,
+    /// The human-readable manifest name (NOT unique).
+    pub name: String,
+    /// The six-condition verdict.
+    pub verdict: QlGraduationVerdict,
+}
+
+/// The `OutOfScope` reason a GRADUATED row is reported under in the inference
+/// binary. The binary keeps graduated rows out of its own pass/fail tally (the
+/// D-entailment precedent: graduation lives in the dedicated feature-gated
+/// crate-test lane, `tests/ql_entailment_floor.rs`, whose named-case ratchet is
+/// the actual enforcement) — so no QL row can ever inflate the binary's
+/// standards-conformance ratchet.
+#[cfg(feature = "ql-experimental")]
+pub fn ql_graduated_reason(disjuncts: usize) -> String {
+    format!(
+        "QL graduated (six-condition predicate, sq-pbz04.3.4): rewritten UCQ \
+         ({} disjunct(s)) result-equivalent to the W3C oracle; pinned by the \
+         ql_entailment_floor named-case ratchet as a sparq-extension row, NEVER \
+         summed into the standards-conformance total",
+        disjuncts
+    )
+}
+
+/// [FABLE-5] sq-pbz04.3.4 — run the SIX-CONDITION GRADUATION PREDICATE over every
+/// `pr:QL`-tagged test of the `sparql11/entailment` suite and return one
+/// [`QlCaseVerdict`] per case, in manifest order. This is the single computation
+/// both consumers share: `tests/ql_entailment_floor.rs` pins the graduated ids as
+/// the named-case ratchet, and [`run_ql_experimental_arm`] renders the verdicts as
+/// the inference binary's (still all-`OutOfScope`) QL rows.
+#[cfg(feature = "ql-experimental")]
+pub fn run_ql_graduation(rdf_tests_root: &Path) -> Result<Vec<QlCaseVerdict>, String> {
     let suites_root = rdf_tests_root
         .join("sparql")
         .canonicalize()
@@ -570,6 +725,7 @@ pub fn run_ql_experimental_arm(
     let mut entries: Vec<TestEntry> = Vec::new();
     manifest::collect(&manifest_path, &suites_root, &mut entries)?;
 
+    let mut out = Vec::new();
     for entry in &entries {
         if entry.kind != EntryKind::QueryEval {
             continue;
@@ -580,118 +736,563 @@ pub fn run_ql_experimental_arm(
         if !entry.action.entailment_profiles.iter().any(|p| p == PR_QL) {
             continue;
         }
-        let outcome = ql_arm_one(entry);
+        out.push(QlCaseVerdict {
+            id: case_fragment(&entry.id),
+            name: entry.name.clone(),
+            verdict: ql_graduation_one(entry),
+        });
+    }
+    Ok(out)
+}
+
+/// [OPUS-4.8] sq-kuvu3 / [FABLE-5] sq-pbz04.3.4 — run the OWL 2 QL arm over the
+/// `pr:QL`-tagged tests of the `sparql11/entailment` suite and append one
+/// `OutOfScope` `TestResult` per case.
+///
+/// HONESTY CONTRACT (the load-bearing invariant this arm preserves):
+/// * NO BINARY-RATCHET GRADUATION — every row (graduated or held) lands in the
+///   `Outcome::OutOfScope` bucket of the inference BINARY, so no QL row can ever
+///   count toward the binary's standards-conformance pass rate or ratchet floor.
+///   The actual graduation lives in the dedicated feature-gated crate-test lane
+///   (`tests/ql_entailment_floor.rs`, the D-entailment precedent) whose pinned
+///   named-case list is a `sparq extension` scoreboard row, tallied separately.
+/// * FAIL-CLOSED PRESERVED — a query the rewriter cannot soundly rewrite is held
+///   with its taxonomy reason, never a guessed pass.
+/// * NO FAKED PASSES — a row reads `QL graduated` only when ALL SIX graduation
+///   conditions genuinely passed (including empirical oracle result-equivalence);
+///   every other row carries its specific `QL experimental (<taxonomy>)` hold.
+///
+/// The suite key is `sparql11/entailment (QL experimental)` so these rows are
+/// visibly separate from the gating regime rows.
+#[cfg(feature = "ql-experimental")]
+pub fn run_ql_experimental_arm(
+    rdf_tests_root: &Path,
+    out: &mut Vec<TestResult>,
+) -> Result<(), String> {
+    for case in run_ql_graduation(rdf_tests_root)? {
+        let reason = match &case.verdict {
+            QlGraduationVerdict::Graduated { disjuncts } => ql_graduated_reason(*disjuncts),
+            QlGraduationVerdict::Held(hold) => hold.reason(),
+        };
         out.push(TestResult {
             suite: "sparql11/entailment (QL experimental)".into(),
-            name: entry.name.clone(),
-            // EVERY QL row is OutOfScope/experimental — never a graduated pass.
-            outcome: Outcome::OutOfScope(outcome.reason()),
+            name: case.name,
+            // EVERY QL row is OutOfScope in the binary — never a binary-ratchet pass.
+            outcome: Outcome::OutOfScope(reason),
         });
     }
     Ok(())
 }
 
 /// Notes rendered under the QL experimental section (when the arm is wired into a
-/// report). Honest scoping: this is a query-rewriting EXPERIMENT, not a
-/// conformance-graduated regime.
+/// report). Honest scoping: only the six-condition-sound subset graduates, and it
+/// graduates into a separate sparq-extension ratchet — never a conformance total.
 #[cfg(feature = "ql-experimental")]
 pub fn ql_experimental_notes() -> Vec<String> {
     vec![
-        "EXPERIMENTAL OWL 2 QL (DL-Lite_R) query-rewriting arm (sq-kuvu3, opt-in \
-         `ql-experimental`). Each `sd:EntailmentProfile pr:QL` case is rewritten by \
-         `sparq_reason_ql::rewrite_production` (PerfectRef ∪ bounded tree-witness ∪ \
-         UCQ-containment minimisation) into a union of conjunctive queries that is \
-         evaluated over the UNMODIFIED data (the DL-Lite query-rewriting semantics — no \
-         materialised closure) and compared to the suite oracle. The TBox is read from \
-         the test's own data graph. EVERY row is reported in the experimental \
-         OUT-OF-SCOPE bucket: this arm is NOT a graduated conformance floor and asserts \
-         NO OWL 2 QL conformance — it records, honestly, exactly what the rewriter \
-         computes. The rewriter is sound-but-FAIL-CLOSED: a query outside the \
-         conjunctive-query fragment (OPTIONAL / FILTER / MINUS / UNION / a property path \
-         / aggregation / a variable predicate) is reported as an ABSTAIN, never a \
-         guessed pass. Computed result-equivalence is experimental evidence only; the \
-         graduation of QL to a pinned conformance floor is a separate, deferred bead \
-         (it must sequence through the contended conformance scoreboard)."
+        "OWL 2 QL (DL-Lite_R) query-rewriting arm (sq-kuvu3 + sq-pbz04.3.4, opt-in \
+         `ql-experimental`). Each `sd:EntailmentProfile pr:QL` case runs through a \
+         SIX-CONDITION graduation predicate — every condition CHECKED in code: (1) the \
+         fail-closed CQ-shape gate accepts the query and it carries no intensional \
+         schema-vocabulary atom; (2) the DL-Lite_R TBox is totally captured \
+         (fully_captured()); (3) the consistency condition — zero consistency-relevant \
+         (negative/disjointness) axioms, OR the sq-p6yb7 DL-Lite_R violation-query \
+         consistency check proves the KB CONSISTENT (an INCONSISTENT or UNKNOWN verdict \
+         holds, fail-closed); (4) default-graph dataset only; (5) the regime-coincidence guard \
+         holds (all body terms distinguished, or no existential-generating \
+         inclusions — otherwise the crate's CERTAIN-ANSWER semantics may diverge \
+         from the W3C entailment-regime solution-mapping semantics); (6) the \
+         rewritten UCQ (`sparq_reason_ql::rewrite_production`: PerfectRef ∪ bounded \
+         tree-witness ∪ UCQ-containment minimisation), evaluated over the UNMODIFIED \
+         data, is result-equivalent to the suite oracle. Cases passing ALL SIX are \
+         pinned by name in the `ql_entailment_floor` ratchet — a sparq-EXTENSION row, \
+         NEVER summed into the standards-conformance total; every other case is held \
+         with an exhaustive taxonomy reason (permanently-outside / pending-gate / \
+         pending-capture / pending-consistency / inconsistent-kb / pending-coincidence / \
+         oracle-divergent / inconclusive), never a guessed pass. In THIS binary every \
+         QL row (graduated or held) stays in the out-of-scope bucket, so no QL row \
+         counts toward the binary's conformance ratchet."
             .to_string(),
     ]
 }
 
-/// Run the EXPERIMENTAL QL arm for ONE `pr:QL` test and report what the rewriter
-/// genuinely computed. Pure (no global state); the watchdog mirrors the other
-/// runners so a rewriter hang/panic becomes a recorded `Inconclusive`, not a dead
-/// harness.
+/// The stable per-case id: the fragment (after `#`, else the last `/` segment) of
+/// the manifest entry IRI. Unique across the `pr:QL` corpus (asserted by the
+/// floor test), unlike `mf:name`.
 #[cfg(feature = "ql-experimental")]
-fn ql_arm_one(entry: &TestEntry) -> QlArmOutcome {
-    // The QL entailment cases all use a single default-graph `qt:data` dataset
-    // (the same precondition `run_one` relies on); a named-graph dataset would
-    // need per-graph rewriting semantics, so report it inconclusive rather than
+fn case_fragment(id: &str) -> String {
+    match id.rsplit_once('#') {
+        Some((_, frag)) if !frag.is_empty() => frag.to_string(),
+        _ => id.rsplit('/').next().unwrap_or(id).to_string(),
+    }
+}
+
+/// Apply the six-condition graduation predicate to ONE `pr:QL` test. Conditions
+/// are checked fail-closed and first-fail names the hold reason; the check order
+/// is (4) dataset — it determines how the rest load — then (1) gate + intensional
+/// guard, (2) TBox capture, (3) consistency, (5) regime coincidence, (6) oracle
+/// result-equivalence. The watchdog mirrors the sibling runners so a rewriter
+/// hang/panic becomes a recorded hold, not a dead harness.
+#[cfg(feature = "ql-experimental")]
+fn ql_graduation_one(entry: &TestEntry) -> QlGraduationVerdict {
+    use QlGraduationVerdict::Held;
+
+    // CONDITION (4) — default-graph dataset only. A named-graph dataset would
+    // need per-graph rewriting semantics (design record §8), so hold rather than
     // silently rewrite over the wrong TBox.
     if !entry.action.graph_data.is_empty() {
-        return QlArmOutcome::Inconclusive("named-graph QL dataset not wired".into());
+        return Held(QlHoldReason::NamedGraphDataset);
     }
     let Some(query_path) = &entry.action.query else {
-        return QlArmOutcome::Inconclusive("manifest entry has no qt:query".into());
+        return Held(QlHoldReason::Inconclusive("manifest entry has no qt:query".into()));
     };
     let Some(result_path) = &entry.result_file else {
-        return QlArmOutcome::Inconclusive("manifest entry has no mf:result".into());
+        return Held(QlHoldReason::Inconclusive("manifest entry has no mf:result".into()));
     };
-
-    // Load the test's data triples — these carry BOTH the ABox and the (DL-Lite_R)
-    // TBox the rewriter extracts from. Blank-node labels are irrelevant to the
-    // schema axioms, so a plain triple parse suffices.
-    let mut tbox: Vec<oxrdf::Triple> = Vec::new();
-    for d in &entry.action.data {
-        match crate::rdf::parse_file(d) {
-            Ok(triples) => tbox.extend(triples),
-            // Positional `format!` args (not inline `{e}`) per the CodeQL
-            // `rust/unused-variable` false-positive guard in the shared agent contract.
-            Err(e) => return QlArmOutcome::Inconclusive(format!("data parse error: {}", e)),
-        }
-    }
 
     let query_text = match std::fs::read_to_string(query_path) {
         Ok(t) => t,
-        Err(e) => return QlArmOutcome::Inconclusive(format!("read query: {}", e)),
+        // Positional `format!` args (not inline `{e}`) per the CodeQL
+        // `rust/unused-variable` false-positive guard in the shared agent contract.
+        Err(e) => return Held(QlHoldReason::Inconclusive(format!("read query: {}", e))),
     };
     let base = crate::rdf::file_iri(query_path);
     let parser = match SparqlParser::new().with_base_iri(&base) {
         Ok(p) => p,
-        Err(e) => return QlArmOutcome::Inconclusive(format!("bad base IRI: {}", e)),
+        Err(e) => return Held(QlHoldReason::Inconclusive(format!("bad base IRI: {}", e))),
     };
     let query = match parser.parse_query(&query_text) {
         Ok(q) => q,
-        Err(e) => return QlArmOutcome::Inconclusive(format!("query parse error: {}", e)),
+        Err(e) => return Held(QlHoldReason::Inconclusive(format!("query parse error: {}", e))),
     };
+    // CONDITION (4, continued) — the query must not carry its own `FROM`/`FROM
+    // NAMED` dataset clause either: the CQ-shape gate DROPS `dataset` rather
+    // than rejecting it, so an overriding dataset would otherwise be silently
+    // ignored and the rewrite evaluated over the wrong graph. No current
+    // `pr:QL` case carries one (verified over the pinned rdf-tests revision);
+    // this keeps condition (4) complete against future re-pins. [FABLE-5]
+    if query_carries_dataset(&query) {
+        return Held(QlHoldReason::NamedGraphDataset);
+    }
 
-    // Rewrite under a watchdog: a rewriter hang/panic is a recorded Inconclusive.
+    // CONDITION (1a) — the REAL fail-closed CQ-shape gate (never re-implemented
+    // here: graduation calls the same `as_conjunctive_query` every rewriting
+    // entry point runs). A rejection is classified into the taxonomy.
+    let cq = match sparq_reason_ql::as_conjunctive_query(&query) {
+        Ok(cq) => cq,
+        Err(sparq_reason_ql::CqError::OutOfScope(reason)) => {
+            return Held(classify_gate_rejection(&query, &reason));
+        }
+    };
+    // CONDITION (1b) — the intensional-atom guard (design record §5 B6). The
+    // gate currently ADMITS a role atom whose predicate is semantics-bearing
+    // schema vocabulary (e.g. `?c rdfs:subClassOf ex:Student`), and the rewriter
+    // then evaluates it over ASSERTED triples only — silently missing
+    // TBox-entailed schema facts. Until the gate itself carries the guard
+    // (sq-pbz04.3.1), graduation checks it here: an intensional case is
+    // permanently outside this design's sound rewriting.
+    if let Some(what) = intensional_atom(&cq) {
+        return Held(QlHoldReason::PermanentlyOutside(format!(
+            "intensional/schema-vocabulary atom ({}) — the rewriter would evaluate \
+             it over asserted triples only, missing TBox-entailed schema facts",
+            what
+        )));
+    }
+
+    // Load the test's data triples — these carry BOTH the ABox and the DL-Lite_R
+    // TBox the rewriter extracts from.
+    let mut data: Vec<oxrdf::Triple> = Vec::new();
+    for d in &entry.action.data {
+        match crate::rdf::parse_file(d) {
+            Ok(triples) => data.extend(triples),
+            Err(e) => {
+                return Held(QlHoldReason::Inconclusive(format!("data parse error: {}", e)))
+            }
+        }
+    }
+
+    // CONDITIONS (2) + (3) — total TBox capture, then the consistency condition,
+    // on the SAME extraction the rewriter performs (sq-pbz04.3.3's accounting:
+    // `skipped == 0 && unrecognised_schema == 0` is the decisive "nothing was
+    // missed" signal). Condition (3) was UPGRADED by sq-p6yb7: a TBox with
+    // negative/disjointness axioms no longer holds unconditionally — the
+    // DL-Lite_R consistency check (violation-query composition) runs, and only
+    // an Unknown (uncaptured negative axiom) or Inconsistent verdict holds.
+    let tbox = sparq_reason_ql::TBox::extract(&data);
+    if !tbox.fully_captured() {
+        return Held(QlHoldReason::PendingCapture {
+            skipped: tbox.skipped,
+            unrecognised_schema: tbox.unrecognised_schema,
+        });
+    }
+    if let Err(hold) = ql_condition3_consistency(&tbox, &data) {
+        return Held(hold);
+    }
+
+    // CONDITION (5) — the regime-coincidence guard (design record §4).
+    if let Err(why) = ql_regime_coincides(&cq, &tbox) {
+        return Held(QlHoldReason::PendingCoincidence(why));
+    }
+
+    // CONDITION (6) — the empirical pin: rewrite under a watchdog, evaluate the
+    // UCQ over the UNMODIFIED data through the real engine, compare to the W3C
+    // oracle. A rewriter abstain here (the gate passed but the atom mapping is
+    // outside the fragment, e.g. a literal-object or blank-node term) is
+    // classified into the taxonomy.
     let q_for_thread = query.clone();
+    let tbox_triples = data;
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = std::panic::catch_unwind(move || {
-            sparq_reason_ql::rewrite_production(&q_for_thread, &tbox)
+            sparq_reason_ql::rewrite_production(&q_for_thread, &tbox_triples)
         });
         let _ = tx.send(result);
     });
     let rewritten = match rx.recv_timeout(std::time::Duration::from_secs(20)) {
         Ok(Ok(Ok(r))) => r,
-        // FAIL-CLOSED: the rewriter rejected a non-CQ / unsupported query — abstain,
+        // FAIL-CLOSED: the rewriter rejected the query past the gate — hold,
         // never a guessed answer.
-        Ok(Ok(Err(e))) => return QlArmOutcome::Abstained(e.to_string()),
-        Ok(Err(_)) => return QlArmOutcome::Inconclusive("rewriter panicked".into()),
-        Err(_) => return QlArmOutcome::Inconclusive("rewriter timeout (20s)".into()),
+        Ok(Ok(Err(sparq_reason_ql::CqError::OutOfScope(reason)))) => {
+            return Held(classify_rewrite_abstain(&reason));
+        }
+        Ok(Err(_)) => return Held(QlHoldReason::Inconclusive("rewriter panicked".into())),
+        Err(_) => return Held(QlHoldReason::Inconclusive("rewriter timeout (20s)".into())),
     };
-
-    // Evaluate the rewritten UCQ over the UNMODIFIED data and compare to the
-    // oracle. The rewritten query serialises to standard SPARQL and runs through
-    // the SAME engine the gating harness uses — but we report ONLY experimentally.
     let disjuncts = rewritten.report.disjuncts;
     match ql_eval_matches_oracle(entry, &rewritten.query, result_path) {
-        Ok(true) => QlArmOutcome::ComputedEquivalent { disjuncts },
-        Ok(false) => QlArmOutcome::ComputedDivergent {
+        Ok(true) => QlGraduationVerdict::Graduated { disjuncts },
+        Ok(false) => Held(QlHoldReason::OracleDivergent {
             disjuncts,
             detail: "rewritten-UCQ answers differ from the oracle".into(),
-        },
-        Err(e) => QlArmOutcome::Inconclusive(e),
+        }),
+        Err(e) => Held(QlHoldReason::Inconclusive(e)),
+    }
+}
+
+/// CONDITION (3) — the consistency condition, UPGRADED by sq-p6yb7 with its written argument.
+///
+/// The hold this condition exists for: an INCONSISTENT KB certain-answers EVERYTHING, so the
+/// positive UCQ rewriting's answers under-approximate the certain answers, and blind graduation
+/// against the W3C oracle would compare the wrong quantity. With zero consistency-relevant
+/// axioms a DL-Lite_R KB is always satisfiable (the canonical model of the positive inclusions
+/// is a model) — condition (3) passes trivially, as before.
+///
+/// With negative axioms present, the DL-Lite_R consistency check
+/// (`sparq_reason_ql::check_consistency_with`, sq-p6yb7 — violation-query composition rewritten
+/// through the SAME PerfectRef machinery the rewriter uses) now decides:
+///
+/// * `Consistent` — condition (3) PASSES. Written argument: the verdict is complete over the
+///   fully-captured fragment (condition (2) already holds here, and `Consistent` is only
+///   returned when every negative axiom was structurally captured), and for a SATISFIABLE
+///   DL-Lite_R KB the certain answers of a positive (U)CQ are determined by the positive
+///   inclusions alone (the canonical model is universal), which is exactly what the rewriting
+///   computes — no under-approximation remains.
+/// * `Inconsistent` — held as [`QlHoldReason::InconsistentKb`]. The verdict is definitive, but
+///   the SPARQL 1.1 Entailment Regimes spec leaves querying an inconsistent graph to the
+///   system (it MAY raise an error), so there is no spec-pinned oracle semantics to graduate
+///   an everything-is-entailed answer against. Fail-closed (and empirically vacuous at the
+///   pinned rdf-tests revision: the pending-consistency bucket measured ZERO before this
+///   upgrade, so no current case reaches this arm either).
+/// * `Unknown` — held as [`QlHoldReason::PendingConsistency`] (fail-closed: a
+///   structurally-uncaptured negative axiom, e.g. `owl:complementOf`, could hide an
+///   inconsistency).
+#[cfg(feature = "ql-experimental")]
+fn ql_condition3_consistency(
+    tbox: &sparq_reason_ql::TBox,
+    data: &[oxrdf::Triple],
+) -> Result<(), QlHoldReason> {
+    if tbox.consistency_relevant == 0 {
+        return Ok(());
+    }
+    match sparq_reason_ql::check_consistency_with(tbox, data) {
+        sparq_reason_ql::QlConsistency::Consistent => Ok(()),
+        sparq_reason_ql::QlConsistency::Inconsistent(v) => Err(QlHoldReason::InconsistentKb {
+            violated: v.axiom.to_string(),
+        }),
+        sparq_reason_ql::QlConsistency::Unknown(_) => Err(QlHoldReason::PendingConsistency {
+            negative_axioms: tbox.consistency_relevant,
+        }),
+    }
+}
+
+/// CONDITION (5) — the regime-coincidence guard, with its written argument.
+///
+/// The crate computes CERTAIN ANSWERS of the CQ: non-distinguished variables are
+/// existentially quantified, so an ANONYMOUS TBox-generated witness can support
+/// an answer (`Person ⊑ ∃hasParent`, data `:a a :Person`, query
+/// `SELECT ?x WHERE { ?x :hasParent ?y }` certain-answers `{a}` with no `?y`
+/// binding in the data). The W3C SPARQL 1.1 Entailment Regimes, by contrast,
+/// extend BGP matching but keep SPARQL solution mappings: the BGP's solutions
+/// bind EVERY BGP variable to an RDF term (projection happens above BGP
+/// matching), and condition (C1) restricts blank-node bindings to the blank
+/// nodes of the queried graph — an anonymous existential witness is not a term
+/// of the queried graph, so it supports NO regime solution.
+///
+/// The two semantics therefore provably coincide when NO answer can depend on an
+/// anonymous witness, i.e. when EITHER:
+/// * every body term is distinguished (a variable in the projection; a blank
+///   node in the body is a non-distinguished variable and fails this arm) — then
+///   every certain answer instantiates the whole BGP with real terms of the
+///   data, and conversely every regime solution is a certain answer (an entailed
+///   ground BGP holds in every model); OR
+/// * the TBox has no existential-generating inclusion (`exists_super` empty) —
+///   in DL-Lite_R anonymous individuals arise ONLY from `B ⊑ ∃R` inclusions, so
+///   the canonical model adds no anonymous individual and every certain answer's
+///   supporting homomorphism maps into the data's own terms.
+///
+/// This is the fail-closed DEFAULT of the design record §4, deliberately NOT
+/// widened: any widening needs a new written argument here.
+#[cfg(feature = "ql-experimental")]
+fn ql_regime_coincides(
+    cq: &sparq_reason_ql::ConjunctiveQuery,
+    tbox: &sparq_reason_ql::TBox,
+) -> Result<(), String> {
+    if tbox.exists_super.is_empty() {
+        return Ok(());
+    }
+    let distinguished: FxHashSet<&str> =
+        cq.distinguished.iter().map(|v| v.as_str()).collect();
+    let check = |t: &TermPattern| -> Result<(), String> {
+        match t {
+            TermPattern::Variable(v) if !distinguished.contains(v.as_str()) => Err(format!(
+                "non-distinguished body variable ?{} with {} existential-generating \
+                 inclusion(s) in the TBox — an anonymous witness could support a \
+                 certain answer that is not a regime solution",
+                v.as_str(),
+                tbox.exists_super.len()
+            )),
+            // A blank node in a query body is a non-distinguished variable.
+            TermPattern::BlankNode(_) => Err(format!(
+                "blank-node body term (a non-distinguished variable) with {} \
+                 existential-generating inclusion(s) in the TBox",
+                tbox.exists_super.len()
+            )),
+            _ => Ok(()),
+        }
+    };
+    for atom in &cq.atoms {
+        check(&atom.subject)?;
+        check(&atom.object)?;
+    }
+    Ok(())
+}
+
+/// CONDITION (1b) — detect an INTENSIONAL (schema-vocabulary) atom the current
+/// gate still admits (design record §5 B6). Semantics-bearing positions:
+/// * a constant predicate in the `rdfs:` namespace that is not one of the four
+///   annotation predicates (`rdfs:label` / `comment` / `seeAlso` /
+///   `isDefinedBy`, whose extensions no QL TBox axiom changes), or ANY constant
+///   predicate in the `owl:` namespace (all of it is axiom/semantics-bearing
+///   vocabulary under the regime — including `owl:sameAs`, which the rewriter
+///   does not reason over; fail-closed);
+/// * `rdf:type` whose object is a VARIABLE (a class-name-position variable — a
+///   query FOR schema) or a constant class in the `rdfs:`/`owl:` namespace.
+#[cfg(feature = "ql-experimental")]
+fn intensional_atom(cq: &sparq_reason_ql::ConjunctiveQuery) -> Option<String> {
+    const ANNOTATION: [&str; 4] = [
+        "http://www.w3.org/2000/01/rdf-schema#label",
+        "http://www.w3.org/2000/01/rdf-schema#comment",
+        "http://www.w3.org/2000/01/rdf-schema#seeAlso",
+        "http://www.w3.org/2000/01/rdf-schema#isDefinedBy",
+    ];
+    for atom in &cq.atoms {
+        let NamedNodePattern::NamedNode(pred) = &atom.predicate else {
+            // The gate already rejects variable predicates; unreachable here.
+            continue;
+        };
+        let p = pred.as_str();
+        if p == rdf::TYPE.as_str() {
+            match &atom.object {
+                TermPattern::Variable(v) => {
+                    return Some(format!(
+                        "rdf:type with class-name-position variable ?{}",
+                        v.as_str()
+                    ));
+                }
+                TermPattern::NamedNode(c)
+                    if c.as_str().starts_with(RDFS) || c.as_str().starts_with(OWL) =>
+                {
+                    return Some(format!("rdf:type with schema-vocabulary class {}", c));
+                }
+                _ => {}
+            }
+        } else if (p.starts_with(RDFS) && !ANNOTATION.contains(&p)) || p.starts_with(OWL) {
+            return Some(format!("schema-vocabulary predicate {}", pred));
+        }
+    }
+    None
+}
+
+/// Classify a CQ-SHAPE-GATE rejection into the hold taxonomy. Shapes on the
+/// design record's B1–B5 broadening path are `pending-gate`; shapes on its
+/// PERMANENT-REJECT list are `permanently-outside`; anything unmatched is the
+/// loud `unclassified-abstain` bucket (asserted EMPTY by the floor test).
+#[cfg(feature = "ql-experimental")]
+fn classify_gate_rejection(query: &Query, reason: &str) -> QlHoldReason {
+    // B1 UCQ input / B3 distinguished-only FILTER / B4 constant VALUES.
+    if reason.contains("UNION") {
+        return QlHoldReason::PendingGate(format!("{} (B1 UCQ input not yet landed)", reason));
+    }
+    if reason.contains("FILTER") {
+        return QlHoldReason::PendingGate(format!(
+            "{} (B3 distinguished-only FILTER not yet landed)",
+            reason
+        ));
+    }
+    if reason.contains("VALUES") {
+        return QlHoldReason::PendingGate(format!(
+            "{} (B4 constant VALUES not yet landed)",
+            reason
+        ));
+    }
+    // B5 — only the NON-recursive path forms (`/`, `^`, `|`) are on the
+    // broadening path; `+`/`*`/`?`/negated sets reintroduce the
+    // recursion/reflexivity QL deliberately excludes and stay permanent.
+    if reason.contains("property path") {
+        return if query_paths_all_nonrecursive(query) {
+            QlHoldReason::PendingGate(format!(
+                "{} (B5 non-recursive path desugaring not yet landed)",
+                reason
+            ))
+        } else {
+            QlHoldReason::PermanentlyOutside(format!(
+                "{} (recursive/zero-length/negated path form)",
+                reason
+            ))
+        };
+    }
+    // B6 gate-side intensional-atom guard (sq-pbz04.3.1): `check_atom_shape` now emits
+    // `"intensional/schema-vocabulary atom: predicate <...> ..."` for rdfs: schema
+    // vocabulary and owl: predicates used as role atoms.  This is a PERMANENT-REJECT
+    // (the rewriter evaluates over ABox data only; using a schema-vocabulary predicate
+    // as a data atom has no sound certain-answer rewriting in this design). [SONNET-4.6]
+    if reason.contains("intensional") {
+        return QlHoldReason::PermanentlyOutside(reason.to_string());
+    }
+    // The design record §5 PERMANENT-REJECT list (+ degenerate shapes).
+    const PERMANENT: [&str; 15] = [
+        "OPTIONAL",
+        "MINUS",
+        "BIND",
+        "aggregation",
+        "GROUP",
+        "variable predicate",
+        "CONSTRUCT",
+        "DESCRIBE",
+        "SERVICE",
+        "GRAPH",
+        "LATERAL",
+        "sub-SELECT",
+        "DISTINCT/REDUCED",
+        "RDF-star",
+        "ORDER BY",
+    ];
+    if PERMANENT.iter().any(|k| reason.contains(k))
+        || reason.contains("LIMIT/OFFSET")
+        || reason.contains("empty query body")
+        || reason.contains("projection")
+    {
+        return QlHoldReason::PermanentlyOutside(reason.to_string());
+    }
+    QlHoldReason::UnclassifiedAbstain(reason.to_string())
+}
+
+/// Classify a REWRITE-TIME abstain (the gate passed, the DL-Lite atom mapping
+/// rejected) into the hold taxonomy.
+#[cfg(feature = "ql-experimental")]
+fn classify_rewrite_abstain(reason: &str) -> QlHoldReason {
+    if reason.contains("literal in a class/role atom position") {
+        // B2 — a constant is never an unbound position; soundly liftable.
+        return QlHoldReason::PendingGate(format!(
+            "{} (B2 literal-object role atoms not yet landed)",
+            reason
+        ));
+    }
+    if reason.contains("blank-node term") {
+        // A blank node in a CQ body is just a fresh non-distinguished variable —
+        // soundly liftable, not yet implemented by the rewriter's atom mapping.
+        return QlHoldReason::PendingGate(format!(
+            "{} (soundly liftable as a fresh non-distinguished variable; not yet \
+             implemented)",
+            reason
+        ));
+    }
+    if reason.contains("rdf:type object must be a named class") {
+        // A class-name-position variable is an intensional/schema query.
+        return QlHoldReason::PermanentlyOutside(format!(
+            "{} (class-name-position variable — an intensional schema query)",
+            reason
+        ));
+    }
+    // Multi-branch UCQ with per-branch FILTER/VALUES (sq-pbz04.3.1 fail-closed guard):
+    // the branch-aware emitter is deferred to sq-pbz04.3.2, so this is pending-gate. The
+    // reason string starts with "multi-branch UCQ with per-branch FILTER or VALUES". [SONNET-4.6]
+    if reason.contains("multi-branch") && (reason.contains("FILTER") || reason.contains("VALUES")) {
+        return QlHoldReason::PendingGate(format!(
+            "{} (branch-aware emitter deferred to sq-pbz04.3.2)",
+            reason
+        ));
+    }
+    if reason.contains("variable predicate") || reason.contains("RDF-star") {
+        return QlHoldReason::PermanentlyOutside(reason.to_string());
+    }
+    QlHoldReason::UnclassifiedAbstain(reason.to_string())
+}
+
+/// True iff the query carries its own `FROM`/`FROM NAMED` dataset clause
+/// (condition (4): the CQ-shape gate drops `dataset` rather than honouring it,
+/// so a dataset-carrying query must be HELD, never rewritten over the wrong
+/// graph). [FABLE-5] sq-pbz04.3.4
+#[cfg(feature = "ql-experimental")]
+fn query_carries_dataset(query: &Query) -> bool {
+    match query {
+        Query::Select { dataset, .. }
+        | Query::Construct { dataset, .. }
+        | Query::Describe { dataset, .. }
+        | Query::Ask { dataset, .. } => dataset.is_some(),
+    }
+}
+
+/// True iff every property path in the query uses only the NON-recursive forms
+/// (`NamedNode` / `^` Reverse / `/` Sequence / `|` Alternative) the B5
+/// desugaring covers. `*`/`+`/`?`/negated property sets return false.
+#[cfg(feature = "ql-experimental")]
+fn query_paths_all_nonrecursive(query: &Query) -> bool {
+    use spargebra::algebra::PropertyPathExpression as P;
+    fn path_ok(p: &P) -> bool {
+        match p {
+            P::NamedNode(_) => true,
+            P::Reverse(inner) => path_ok(inner),
+            P::Sequence(a, b) | P::Alternative(a, b) => path_ok(a) && path_ok(b),
+            P::ZeroOrMore(_) | P::OneOrMore(_) | P::ZeroOrOne(_) | P::NegatedPropertySet(_) => {
+                false
+            }
+        }
+    }
+    fn walk(g: &GraphPattern) -> bool {
+        match g {
+            GraphPattern::Path { path, .. } => path_ok(path),
+            GraphPattern::Bgp { .. } | GraphPattern::Values { .. } => true,
+            GraphPattern::Join { left, right }
+            | GraphPattern::LeftJoin { left, right, .. }
+            | GraphPattern::Lateral { left, right }
+            | GraphPattern::Union { left, right }
+            | GraphPattern::Minus { left, right } => walk(left) && walk(right),
+            GraphPattern::Filter { inner, .. }
+            | GraphPattern::Graph { inner, .. }
+            | GraphPattern::Extend { inner, .. }
+            | GraphPattern::OrderBy { inner, .. }
+            | GraphPattern::Project { inner, .. }
+            | GraphPattern::Distinct { inner }
+            | GraphPattern::Reduced { inner }
+            | GraphPattern::Slice { inner, .. }
+            | GraphPattern::Group { inner, .. }
+            | GraphPattern::Service { inner, .. } => walk(inner),
+        }
+    }
+    match query {
+        Query::Select { pattern, .. } | Query::Ask { pattern, .. } => walk(pattern),
+        Query::Construct { pattern, .. } | Query::Describe { pattern, .. } => walk(pattern),
     }
 }
 
@@ -1142,57 +1743,319 @@ fn projected_vars(p: &GraphPattern) -> Vec<String> {
     }
 }
 
-// [OPUS-4.8] sq-kuvu3 — DIRECT unit tests for the new public QL-arm surface (the
-// coverage-ratchet rule: one direct test per new public fn). These are hermetic
-// (no fetched fixtures) and assert the HONESTY INVARIANTS the arm must preserve.
+// [OPUS-4.8] sq-kuvu3 / [FABLE-5] sq-pbz04.3.4 — DIRECT unit tests for the public
+// QL-arm surface (the coverage-ratchet rule: one direct test per new public fn).
+// Hermetic (no fetched fixtures) except the arm smoke test, which self-skips.
 #[cfg(all(test, feature = "ql-experimental"))]
 mod ql_tests {
     use super::*;
 
+    fn parse(q: &str) -> Query {
+        SparqlParser::new().parse_query(q).expect("parse")
+    }
+
+    fn cq_of(q: &str) -> sparq_reason_ql::ConjunctiveQuery {
+        sparq_reason_ql::as_conjunctive_query(&parse(q)).expect("CQ")
+    }
+
+    const PRE: &str = "PREFIX : <http://ex/> \
+                       PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> \
+                       PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#> \
+                       PREFIX owl: <http://www.w3.org/2002/07/owl#> ";
+
     #[test]
-    fn outcome_reason_strings_never_claim_conformance() {
-        // Every QL outcome's reason must carry the experimental marker AND must
-        // never read as a graduated conformance pass.
-        let abstain = QlArmOutcome::Abstained("BIND (Extend) is not conjunctive".into());
-        assert!(abstain.reason().contains("QL experimental"));
-        assert!(abstain.reason().contains("fail-closed"));
-
-        let equiv = QlArmOutcome::ComputedEquivalent { disjuncts: 2 };
-        let r = equiv.reason();
-        assert!(r.contains("QL experimental"));
-        // The load-bearing disclaimer: equivalence is evidence, NOT a graduated pass.
-        assert!(r.contains("NOT a graduated conformance pass"));
-        assert!(r.contains("2 disjunct"));
-
-        let div = QlArmOutcome::ComputedDivergent {
-            disjuncts: 1,
-            detail: "rewritten-UCQ answers differ from the oracle".into(),
-        };
-        assert!(div.reason().contains("DIVERGENT"));
-        assert!(div.reason().contains("QL experimental"));
-
-        let inc = QlArmOutcome::Inconclusive("named-graph QL dataset not wired".into());
-        assert!(inc.reason().contains("inconclusive"));
+    fn hold_reason_taxonomy_is_specific_and_never_claims_a_pass() {
+        // Every variant carries a distinct stable label, and every rendered reason
+        // keeps the `QL experimental (` marker + its label — no hold can ever read
+        // as a graduated pass or a conformance claim.
+        let all: [QlHoldReason; 10] = [
+            QlHoldReason::PermanentlyOutside("BIND (Extend) is not conjunctive".into()),
+            QlHoldReason::PendingGate("FILTER is not conjunctive".into()),
+            QlHoldReason::PendingCapture { skipped: 1, unrecognised_schema: 2 },
+            QlHoldReason::PendingConsistency { negative_axioms: 3 },
+            QlHoldReason::InconsistentKb {
+                violated: "<http://ex/A> ⊑ ¬<http://ex/B>".into(),
+            },
+            QlHoldReason::NamedGraphDataset,
+            QlHoldReason::PendingCoincidence("non-distinguished body variable ?y".into()),
+            QlHoldReason::OracleDivergent { disjuncts: 1, detail: "differ".into() },
+            QlHoldReason::UnclassifiedAbstain("new abstain class".into()),
+            QlHoldReason::Inconclusive("data parse error".into()),
+        ];
+        let mut labels: Vec<&str> = all.iter().map(|r| r.label()).collect();
+        labels.sort_unstable();
+        let n = labels.len();
+        labels.dedup();
+        assert_eq!(labels.len(), n, "taxonomy labels must be distinct (no catch-all)");
+        for r in &all {
+            let s = r.reason();
+            assert!(s.starts_with("QL experimental ("), "reason: {s}");
+            assert!(s.contains(r.label()), "reason must carry its label: {s}");
+            assert!(!s.contains("graduated"), "a hold must never read graduated: {s}");
+        }
+        // The consistency bucket carries its measured count (the §8 report input).
+        assert!(QlHoldReason::PendingConsistency { negative_axioms: 3 }
+            .reason()
+            .contains("3 negative/disjointness"));
     }
 
     #[test]
-    fn ql_experimental_notes_disclaim_a_conformance_floor() {
+    fn graduated_reason_is_scoped_as_an_extension_row() {
+        let r = ql_graduated_reason(4);
+        assert!(r.starts_with("QL graduated"));
+        assert!(r.contains("4 disjunct"));
+        // The load-bearing honesty disclaimer.
+        assert!(r.contains("NEVER summed into the standards-conformance total"));
+        // And the verdict enum distinguishes the two arms.
+        assert_ne!(
+            QlGraduationVerdict::Graduated { disjuncts: 1 },
+            QlGraduationVerdict::Held(QlHoldReason::NamedGraphDataset)
+        );
+    }
+
+    #[test]
+    fn ql_experimental_notes_state_the_six_conditions_honestly() {
         let notes = ql_experimental_notes();
         assert_eq!(notes.len(), 1);
         let n = &notes[0];
-        // The honest scoping note: experimental, fail-closed, NOT a conformance floor.
-        assert!(n.contains("EXPERIMENTAL"));
-        assert!(n.contains("NOT a graduated conformance floor"));
-        assert!(n.contains("FAIL-CLOSED"));
-        assert!(n.contains("ABSTAIN"));
+        assert!(n.contains("SIX-CONDITION"));
+        assert!(n.contains("NEVER summed into the standards-conformance total"));
+        assert!(n.contains("fully_captured()"));
+        assert!(n.contains("regime-coincidence"));
+        assert!(n.contains("never a guessed pass"));
+    }
+
+    #[test]
+    fn case_fragment_extracts_stable_ids() {
+        assert_eq!(case_fragment("http://ex/manifest#rdfs02"), "rdfs02");
+        assert_eq!(case_fragment("http://ex/path/leaf"), "leaf");
+        assert_eq!(case_fragment("bare"), "bare");
+    }
+
+    #[test]
+    fn intensional_guard_flags_schema_atoms_and_admits_extensional_ones() {
+        // B6 is now in the GATE (sq-pbz04.3.1): `check_atom_shape` rejects schema-vocabulary
+        // predicates directly, so `as_conjunctive_query` returns Err for those. We verify the
+        // gate rejects them, and that `intensional_atom()` still catches the remaining cases
+        // that slip past the gate (rdf:type with class-position variable or schema-ns constant).
+
+        // Schema-vocabulary predicate (paper-sparqldl-Q1 shape): gate now rejects. [SONNET-4.6]
+        let q_sub = parse(&format!("{PRE} SELECT ?c WHERE {{ ?c rdfs:subClassOf :Student }}"));
+        assert!(
+            sparq_reason_ql::as_conjunctive_query(&q_sub).is_err(),
+            "rdfs:subClassOf as predicate: gate must reject (B6 now in gate)"
+        );
+        // owl: predicates are all semantics-bearing — gate rejects. [SONNET-4.6]
+        let q_same = parse(&format!("{PRE} SELECT ?x WHERE {{ ?x owl:sameAs :a }}"));
+        assert!(
+            sparq_reason_ql::as_conjunctive_query(&q_same).is_err(),
+            "owl:sameAs as predicate: gate must reject (B6)"
+        );
+
+        // rdf:type with a class-position VARIABLE: gate admits (predicate rdf:type is not
+        // schema-vocabulary), but intensional_atom() flags it. [SONNET-4.6]
+        let cq = cq_of(&format!("{PRE} SELECT ?c WHERE {{ :a rdf:type ?c }}"));
+        assert!(intensional_atom(&cq).unwrap().contains("class-name-position"));
+        // rdf:type with a schema-namespace class constant: likewise gate admits, harness catches.
+        let cq = cq_of(&format!("{PRE} SELECT ?x WHERE {{ ?x rdf:type owl:Class }}"));
+        assert!(intensional_atom(&cq).is_some());
+        // Extensional class + role atoms are admitted by both gate and intensional_atom().
+        let cq = cq_of(&format!("{PRE} SELECT ?x WHERE {{ ?x rdf:type :A . ?x :r ?y }}"));
+        assert!(intensional_atom(&cq).is_none());
+        // Annotation predicates stay admitted (no QL axiom changes their extension).
+        let cq = cq_of(&format!("{PRE} SELECT ?x ?l WHERE {{ ?x rdfs:label ?l }}"));
+        assert!(intensional_atom(&cq).is_none());
+    }
+
+    #[test]
+    fn regime_coincidence_guard_is_fail_closed() {
+        use sparq_reason_ql::{Basic, Role, TBox};
+        let mut tbox_with_exists = TBox::default();
+        tbox_with_exists
+            .exists_super
+            .push((Basic::Class("http://ex/Employee".into()), Role::named("http://ex/worksFor")));
+        let empty_tbox = TBox::default();
+
+        // Non-distinguished ?y + an existential generator: MAY diverge — held.
+        let cq = cq_of(&format!("{PRE} SELECT ?x WHERE {{ ?x :worksFor ?y }}"));
+        assert!(ql_regime_coincides(&cq, &tbox_with_exists)
+            .unwrap_err()
+            .contains("non-distinguished body variable ?y"));
+        // Same query, NO existential generator: coincides.
+        assert!(ql_regime_coincides(&cq, &empty_tbox).is_ok());
+        // All body variables distinguished: coincides even WITH the generator.
+        let cq = cq_of(&format!("{PRE} SELECT ?x ?y WHERE {{ ?x :worksFor ?y }}"));
+        assert!(ql_regime_coincides(&cq, &tbox_with_exists).is_ok());
+        // A blank-node body term is a non-distinguished variable: held.
+        let cq = cq_of(&format!("{PRE} SELECT ?x WHERE {{ ?x :worksFor [] }}"));
+        assert!(ql_regime_coincides(&cq, &tbox_with_exists)
+            .unwrap_err()
+            .contains("blank-node body term"));
+    }
+
+    // [FABLE-5] sq-p6yb7 — CONDITION (3) upgraded: the consistency check decides, fail-closed.
+    // MUTATION WITNESS (verified during development): making `ql_condition3_consistency`
+    // return `Ok(())` unconditionally flips the `Inconsistent`/`Unknown` arms below red.
+    #[test]
+    fn condition3_runs_the_consistency_check_fail_closed() {
+        use oxrdf::{NamedNode, Triple};
+        let iri = |s: &str| NamedNode::new(s).unwrap();
+        let t = |s: &str, p: &str, o: &str| Triple::new(iri(s), iri(p), iri(o));
+        const RDF_TYPE: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#type";
+        const DISJOINT: &str = "http://www.w3.org/2002/07/owl#disjointWith";
+        const COMPLEMENT: &str = "http://www.w3.org/2002/07/owl#complementOf";
+
+        // No negative axioms: passes trivially (the pre-sq-p6yb7 behaviour, unchanged).
+        let data = vec![t("http://ex/i", RDF_TYPE, "http://ex/A")];
+        let tbox = sparq_reason_ql::TBox::extract(&data);
+        assert!(ql_condition3_consistency(&tbox, &data).is_ok());
+
+        // Negative axioms + satisfiable KB: the check proves Consistent → condition 3 PASSES
+        // (previously this held at pending-consistency unconditionally).
+        let data = vec![
+            t("http://ex/A", DISJOINT, "http://ex/B"),
+            t("http://ex/i", RDF_TYPE, "http://ex/A"),
+            t("http://ex/j", RDF_TYPE, "http://ex/B"),
+        ];
+        let tbox = sparq_reason_ql::TBox::extract(&data);
+        assert!(ql_condition3_consistency(&tbox, &data).is_ok());
+
+        // Violated disjointness: proven INCONSISTENT → held (fail-closed, with the witness).
+        let data = vec![
+            t("http://ex/A", DISJOINT, "http://ex/B"),
+            t("http://ex/i", RDF_TYPE, "http://ex/A"),
+            t("http://ex/i", RDF_TYPE, "http://ex/B"),
+        ];
+        let tbox = sparq_reason_ql::TBox::extract(&data);
+        match ql_condition3_consistency(&tbox, &data) {
+            Err(QlHoldReason::InconsistentKb { violated }) => {
+                assert!(violated.contains("http://ex/A"), "witness: {violated}");
+            }
+            other => panic!("expected InconsistentKb, got {:?}", other),
+        }
+
+        // complementOf: structurally uncaptured → the check returns Unknown → held at
+        // pending-consistency (fail-closed).
+        let data = vec![
+            t("http://ex/A", COMPLEMENT, "http://ex/B"),
+            t("http://ex/i", RDF_TYPE, "http://ex/A"),
+        ];
+        let tbox = sparq_reason_ql::TBox::extract(&data);
+        assert!(matches!(
+            ql_condition3_consistency(&tbox, &data),
+            Err(QlHoldReason::PendingConsistency { negative_axioms: 1 })
+        ));
+    }
+
+    #[test]
+    fn gate_rejections_classify_into_the_taxonomy() {
+        let classify = |q: &str| {
+            let query = parse(q);
+            match sparq_reason_ql::as_conjunctive_query(&query) {
+                Err(sparq_reason_ql::CqError::OutOfScope(reason)) => {
+                    classify_gate_rejection(&query, &reason)
+                }
+                Ok(_) => panic!("expected a gate rejection for: {}", q),
+            }
+        };
+        // B1 broadening shape → pending-gate. A UNION at the top level is a UCQ —
+        // `as_conjunctive_query` rejects multi-branch UCQs (use `as_ucq` for those), so
+        // it still generates a gate rejection classifiable as pending-gate (B1). [SONNET-4.6]
+        let r = classify(&format!(
+            "{PRE} SELECT ?x WHERE {{ {{ ?x rdf:type :A }} UNION {{ ?x rdf:type :B }} }}"
+        ));
+        assert_eq!(r.label(), "pending-gate");
+        assert!(r.reason().contains("B1"));
+        // B6 gate-side intensional-atom rejection → permanently-outside. [SONNET-4.6]
+        let r = classify(&format!(
+            "{PRE} SELECT ?c WHERE {{ ?c rdfs:subClassOf :A }}"
+        ));
+        assert_eq!(r.label(), "permanently-outside");
+        assert!(r.reason().contains("intensional"));
+        // NOTE: B3 (distinguished-only FILTER) has LANDED (sq-pbz04.3.1) — a FILTER on a
+        // projected variable is now ACCEPTED by the gate, not a gate rejection. The
+        // classify_gate_rejection FILTER arm handles the legacy pending-gate case for
+        // older gate-side rejections; we verify it still classifies those correctly via a
+        // non-distinguished FILTER (which the gate still rejects B3-fail-closed).
+        let r = classify(&format!(
+            "{PRE} SELECT ?x WHERE {{ ?x rdf:type :A . ?x :r ?y FILTER(?y = :b) }}"
+        ));
+        assert_eq!(r.label(), "pending-gate");
+        // Non-recursive path → pending-gate; recursive path → permanent.
+        // (Since sq-pbz04.3.2 the gate DESUGARS an alternation into a UCQ (B5 landed), so
+        // the single-CQ gate rejects it with the UNION/B1 message — still an honest
+        // pending-gate hold, because `ql_graduation_one` runs `as_conjunctive_query`, not
+        // `as_ucq`. The stale `contains("B5")` expectation was fixed by sq-p6yb7 — this lib
+        // test lane is not in any CI leg, so the drift went unnoticed; bead filed.)
+        let r = classify(&format!("{PRE} SELECT ?x WHERE {{ ?x (:p|:q) ?y }}"));
+        assert_eq!(r.label(), "pending-gate");
+        assert!(r.reason().contains("B1 UCQ input"), "reason: {}", r.reason());
+        let r = classify(&format!("{PRE} SELECT ?x WHERE {{ ?x :p+ ?y }}"));
+        assert_eq!(r.label(), "permanently-outside");
+        // Design-permanent shapes → permanently-outside.
+        let r = classify(&format!("{PRE} SELECT ?x WHERE {{ ?x rdf:type :A BIND(:b AS ?y) }}"));
+        assert_eq!(r.label(), "permanently-outside");
+        let r = classify(&format!(
+            "{PRE} SELECT ?x WHERE {{ ?x rdf:type :A MINUS {{ ?x rdf:type :B }} }}"
+        ));
+        assert_eq!(r.label(), "permanently-outside");
+        let r = classify(&format!("{PRE} SELECT ?x WHERE {{ ?x ?p :A }}"));
+        assert_eq!(r.label(), "permanently-outside");
+        // An unmatched reason lands in the LOUD unclassified bucket, never silently.
+        assert_eq!(
+            classify_gate_rejection(&parse(&format!("{PRE} SELECT ?x WHERE {{ ?x :p :a }}")), "some future rejection"),
+            QlHoldReason::UnclassifiedAbstain("some future rejection".into())
+        );
+    }
+
+    #[test]
+    fn rewrite_abstains_classify_into_the_taxonomy() {
+        let r = classify_rewrite_abstain("literal in a class/role atom position is out of DL-Lite scope");
+        assert_eq!(r.label(), "pending-gate");
+        assert!(r.reason().contains("B2"));
+        let r = classify_rewrite_abstain("blank-node term is out of DL-Lite atom scope");
+        assert_eq!(r.label(), "pending-gate");
+        let r = classify_rewrite_abstain("rdf:type object must be a named class for DL-Lite rewriting");
+        assert_eq!(r.label(), "permanently-outside");
+        let r = classify_rewrite_abstain("something the taxonomy has never seen");
+        assert_eq!(r.label(), "unclassified-abstain");
+    }
+
+    #[test]
+    fn query_carried_dataset_clauses_are_held_not_dropped() {
+        // Condition (4, continued): the CQ-shape gate DROPS a query's own
+        // FROM/FROM NAMED dataset, so the graduation predicate must detect and
+        // hold it — a dataset-carrying query must never be rewritten over the
+        // default graph as if the clause were not there.
+        assert!(query_carries_dataset(&parse(&format!(
+            "{PRE} SELECT ?x FROM <http://ex/g> WHERE {{ ?x rdf:type :A }}"
+        ))));
+        assert!(query_carries_dataset(&parse(&format!(
+            "{PRE} SELECT ?x FROM NAMED <http://ex/g> WHERE {{ ?x rdf:type :A }}"
+        ))));
+        assert!(query_carries_dataset(&parse(&format!(
+            "{PRE} ASK FROM <http://ex/g> {{ ?x rdf:type :A }}"
+        ))));
+        assert!(!query_carries_dataset(&parse(&format!(
+            "{PRE} SELECT ?x WHERE {{ ?x rdf:type :A }}"
+        ))));
+    }
+
+    #[test]
+    fn nonrecursive_path_detector_covers_the_b5_forms() {
+        let ok = |q: &str| query_paths_all_nonrecursive(&parse(q));
+        assert!(ok(&format!("{PRE} SELECT ?x WHERE {{ ?x :p/:q ?y }}")));
+        assert!(ok(&format!("{PRE} SELECT ?x WHERE {{ ?x ^:p ?y }}")));
+        assert!(ok(&format!("{PRE} SELECT ?x WHERE {{ ?x (:p|:q) ?y }}")));
+        assert!(!ok(&format!("{PRE} SELECT ?x WHERE {{ ?x :p* ?y }}")));
+        assert!(!ok(&format!("{PRE} SELECT ?x WHERE {{ ?x :p? ?y }}")));
+        assert!(!ok(&format!("{PRE} SELECT ?x WHERE {{ ?x !(:p) ?y }}")));
     }
 
     #[test]
     fn arm_reports_only_out_of_scope_rows() {
-        // The arm appends ONLY OutOfScope (experimental) rows — never a Pass / Fail /
-        // Divergence that would count toward a conformance rate or ratchet floor.
-        // (Drive it over the fixtures when present; otherwise this asserts the
-        // contract vacuously on an empty run — the floor invariant holds either way.)
+        // The arm appends ONLY OutOfScope rows — never a Pass / Fail that would
+        // count toward the inference binary's conformance rate or ratchet floor.
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../tests/w3c/rdf-tests");
         if !root.join("sparql/sparql11/entailment/manifest.ttl").exists() {
@@ -1206,12 +2069,15 @@ mod ql_tests {
             assert!(
                 matches!(r.outcome, Outcome::OutOfScope(_)),
                 "QL arm emitted a non-OutOfScope row ({:?}) — that would risk a faked \
-                 conformance pass / floor graduation",
+                 conformance pass in the binary ratchet",
                 r.outcome
             );
-            // Every reason carries the stable experimental marker.
+            // Every reason carries one of the two stable markers.
             if let Outcome::OutOfScope(reason) = &r.outcome {
-                assert!(reason.starts_with("QL experimental"), "reason: {reason}");
+                assert!(
+                    reason.starts_with("QL experimental") || reason.starts_with("QL graduated"),
+                    "reason: {reason}"
+                );
             }
         }
     }

@@ -6,6 +6,8 @@
 //! - literals: `"s"`, `"s"^^<dt>`, `"s"@lang`, integers, decimals, doubles, `true`/`false`
 //! - `_:blank`, `?var` (universally-quantified N3 variables)
 //! - `{ … }` formulae (graph terms), `( … )` collections (RDF lists)
+//! - `<< s p o >>` / `<<( s p o )>>` RDF-star quoted-triple TERMS (nested,
+//!   variables anywhere; both spellings are one [`Term::Triple`] value)
 //! - predicate sugar `=>` (log:implies), `<=` (reverse implies), `=` (owl:sameAs),
 //!   `is EXPR of` (inverse predicate) and `has EXPR`
 //! - paths (`!`/`^`, also in predicate position), inverted predicates (`<-`),
@@ -188,6 +190,14 @@ fn collect_blanks_term(t: &Term, into_formulae: bool, out: &mut std::collections
                 collect_blanks_term(m, into_formulae, out);
             }
         }
+        // Quoted triples are TRANSPARENT structure (like lists): a premise
+        // blank inside `<< … >>` is a rule-scoped existential and becomes a
+        // matching variable. [FABLE-5]
+        Term::Triple(t) => {
+            for m in t.iter() {
+                collect_blanks_term(m, into_formulae, out);
+            }
+        }
         _ => {}
     }
 }
@@ -209,6 +219,11 @@ fn rewrite_term(t: &mut Term, into_formulae: bool, f: &impl Fn(&mut Term)) {
         }
         Term::List(ms) => {
             for m in ms.iter_mut() {
+                rewrite_term(m, into_formulae, f);
+            }
+        }
+        Term::Triple(tr) => {
+            for m in tr.iter_mut() {
                 rewrite_term(m, into_formulae, f);
             }
         }
@@ -261,7 +276,7 @@ impl<'a> Parser<'a> {
     // ---- lexing helpers ------------------------------------------------------
     fn ws(&mut self) {
         loop {
-            while self.i < self.s.len() && (self.s[self.i] as char).is_whitespace() {
+            while self.i < self.s.len() && is_ws_byte(self.s[self.i]) {
                 self.i += 1;
             }
             if self.i < self.s.len() && self.s[self.i] == b'#' {
@@ -298,7 +313,7 @@ impl<'a> Parser<'a> {
             return false;
         }
         self.s[self.i..end].eq_ignore_ascii_case(kw.as_bytes())
-            && self.s.get(end).is_none_or(|c| (*c as char).is_whitespace() || *c == b'<' || *c == b':')
+            && self.s.get(end).is_none_or(|c| is_ws_byte(*c) || *c == b'<' || *c == b':')
     }
 
     // ---- top level -----------------------------------------------------------
@@ -521,14 +536,14 @@ impl<'a> Parser<'a> {
         };
         if a_allowed && self.starts_with("a") {
             let j = self.i + 1;
-            if j >= self.s.len() || (self.s[j] as char).is_whitespace() || self.s[j] == b'<' {
+            if j >= self.s.len() || is_ws_byte(self.s[j]) || self.s[j] == b'<' {
                 self.i += 1;
                 return Ok((Term::Iri(RDF_TYPE.into()), false));
             }
         }
         if !self.strict && self.starts_with("@a") {
             let j = self.i + 2;
-            if j >= self.s.len() || (self.s[j] as char).is_whitespace() {
+            if j >= self.s.len() || is_ws_byte(self.s[j]) {
                 self.i += 2;
                 return Ok((Term::Iri(RDF_TYPE.into()), false));
             }
@@ -561,7 +576,7 @@ impl<'a> Parser<'a> {
             match c {
                 b'>' => return true,
                 b'<' => return false, // a second '<' — not inside any IRIREF
-                c if (c as char).is_whitespace() => return false,
+                c if is_ws_byte(c) => return false,
                 _ => j += 1,
             }
         }
@@ -577,7 +592,7 @@ impl<'a> Parser<'a> {
         let end = start + kw.len();
         if self.s[start..].starts_with(kw.as_bytes())
             && self.s.get(end).is_none_or(|c| {
-                (*c as char).is_whitespace() || matches!(c, b'.' | b';' | b',' | b')' | b']' | b'}')
+                is_ws_byte(*c) || matches!(c, b'.' | b';' | b',' | b')' | b']' | b'}')
             })
         {
             self.i = end;
@@ -637,6 +652,15 @@ impl<'a> Parser<'a> {
     fn atom(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
         self.ws();
         match self.peek() {
+            // `<<` opens an RDF-star / RDF 1.2 quoted-triple term — never a valid
+            // IRIREF prefix (`<` is excluded inside an IRIREF), so one byte of
+            // lookahead disambiguates. [FABLE-5]
+            Some(b'<') if self.s.get(self.i + 1) == Some(&b'<') => {
+                if self.strict {
+                    return Err("quoted triples are not Turtle 1.1".into());
+                }
+                self.read_quoted_triple(out)
+            }
             Some(b'<') => {
                 let iri = self.read_iriref()?;
                 if let Some(q) = self.quantified(&iri) {
@@ -773,10 +797,14 @@ impl<'a> Parser<'a> {
     fn read_pname_prefix(&mut self) -> Result<String, String> {
         // read up to ':' (dots are legal inside a prefix name: `e.g:`)
         let start = self.i;
-        while self.i < self.s.len() && self.s[self.i] != b':' && !(self.s[self.i] as char).is_whitespace() {
+        while self.i < self.s.len() && self.s[self.i] != b':' && !is_ws_byte(self.s[self.i]) {
             self.i += 1;
         }
-        let pfx = std::str::from_utf8(&self.s[start..self.i]).unwrap().to_string();
+        // Unreachable on valid UTF-8 now that the scan only stops on ASCII bytes
+        // (always char boundaries), but the parser must REPORT, never panic.
+        let pfx = std::str::from_utf8(&self.s[start..self.i])
+            .map_err(|e| e.to_string())?
+            .to_string();
         if self.peek() != Some(b':') {
             return Err(format!("expected ':' after prefix name at byte {}", self.i));
         }
@@ -789,7 +817,7 @@ impl<'a> Parser<'a> {
         let mut tok = String::new();
         while self.i < self.s.len() {
             let c = self.s[self.i];
-            if (c as char).is_whitespace()
+            if is_ws_byte(c)
                 || matches!(c, b';' | b',' | b']' | b'}' | b')' | b'(' | b'[' | b'{' | b'!' | b'^' | b'#')
             {
                 break; // '#' starts a comment — never part of an (unescaped) pname
@@ -959,7 +987,7 @@ impl<'a> Parser<'a> {
             }
             // utf-8 safe push
             let ch_len = utf8_len(c);
-            val.push_str(std::str::from_utf8(&self.s[self.i..self.i + ch_len]).unwrap());
+            val.push_str(std::str::from_utf8(&self.s[self.i..self.i + ch_len]).map_err(|e| e.to_string())?);
             self.i += ch_len;
         }
         // datatype / lang
@@ -1047,7 +1075,9 @@ impl<'a> Parser<'a> {
         if digits == 0 {
             return Err(format!("expected a number at byte {start}"));
         }
-        let txt = std::str::from_utf8(&self.s[start..self.i]).unwrap().to_string();
+        let txt = std::str::from_utf8(&self.s[start..self.i])
+            .map_err(|e| e.to_string())?
+            .to_string();
         let dt = if is_double { XSD_DOUBLE } else if is_decimal { XSD_DECIMAL } else { XSD_INTEGER };
         Ok(Term::Lit(txt, dt.into(), None))
     }
@@ -1090,6 +1120,37 @@ impl<'a> Parser<'a> {
             return Ok(Term::Lit("true".into(), XSD_BOOLEAN.into(), None));
         }
         Ok(Term::Formula(triples))
+    }
+
+    /// An RDF-star / RDF 1.2 quoted-triple term: `<< s p o >>` or the RDF 1.2
+    /// triple-term spelling `<<( s p o )>>` (the `(` must FOLLOW `<<` with no
+    /// whitespace — `<< (1 2) :p :o >>` keeps its list subject). Both forms
+    /// produce the same first-class [`Term::Triple`] value; components may be
+    /// any N3 term, including variables and nested quoted triples. NOTE: N3
+    /// itself has not pinned RDF-star syntax (see GH #2012); this follows the
+    /// classic RDF-star reading where `<< s p o >>` IS the triple term — it is
+    /// NOT expanded into RDF 1.2's `rdf:reifies` reifier sugar. [FABLE-5]
+    fn read_quoted_triple(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
+        self.enter()?;
+        self.i += 2; // the caller verified `<<`
+        // RDF 1.2 triple-term form: the literal token `<<(` (no whitespace).
+        let paren = self.s.get(self.i) == Some(&b'(');
+        if paren {
+            self.i += 1;
+        }
+        let s = self.term(out)?;
+        let p = self.term(out)?;
+        let o = self.term(out)?;
+        if paren && !self.eat(b')') {
+            return Err(format!("expected ')' closing a <<( … )>> triple term at byte {}", self.i));
+        }
+        self.ws();
+        if !self.s[self.i..].starts_with(b">>") {
+            return Err(format!("expected '>>' closing a quoted triple at byte {}", self.i));
+        }
+        self.i += 2;
+        self.depth -= 1;
+        Ok(Term::Triple(Box::new([s, p, o])))
     }
 
     fn read_collection(&mut self, out: &mut Vec<[Term; 3]>) -> Result<Term, String> {
@@ -1225,6 +1286,18 @@ pub(super) fn resolve_iri(base: &str, iri: &str) -> String {
         joined.push('/');
     }
     format!("{prefix}{joined}{tail}")
+}
+
+/// Byte-level whitespace test for the byte-wise lexer — ONLY ASCII bytes count.
+/// In valid UTF-8 the byte values 0x85 / 0xA0 occur exclusively as CONTINUATION
+/// bytes of a multibyte character, yet read as U+0085 NEL / U+00A0 NBSP through
+/// `(byte as char).is_whitespace()`, which split token scans MID-character and
+/// panicked the `from_utf8` in `read_pname_prefix` (sq-t8z0r randomized-fuzz
+/// finding, GH #1903). Genuine non-ASCII whitespace (NEL / NBSP / U+2028 …) is
+/// not token whitespace in Turtle/N3 anyway, so restricting to ASCII both fixes
+/// the split and matches the spec. [FABLE-5]
+fn is_ws_byte(b: u8) -> bool {
+    b.is_ascii() && (b as char).is_whitespace()
 }
 
 fn utf8_len(b: u8) -> usize {

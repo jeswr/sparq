@@ -88,7 +88,9 @@ Materialize the authorization view from the access-control documents, then enfor
 - `PodStore::new(graph) -> PodStore` — wrap a loaded dataset. Before the first
   `materialize_*` call **every** session (including the owner) sees nothing.
 - `store.materialize_wac()` / `store.materialize_acp() -> Result<MaterializeStats, _>` —
-  run the N3 rules to (re)install `<urn:sparq:auth>`. On `wasm32-unknown-unknown` the
+  run the N3 rules to (re)install `<urn:sparq:auth>`. ACP uses one three-stratum
+  in-memory reasoning run; `MaterializeStats::strata_facts` reports its term-level closure
+  size after each stratum, before RDF list expansion and interning. On `wasm32-unknown-unknown` the
   informational `MaterializeStats::millis` is reported as `0.0` (no `std::time::Instant`);
   the auth view is identical ([OPUS-4.8] sq-7agop).
 - `store.materialize_acp_with(&AccessProvenance) -> Result<MaterializeStats, _>` —
@@ -108,10 +110,53 @@ Materialize the authorization view from the access-control documents, then enfor
   `store.query_json_as(...)` → JSON string; `store.ask_as(...)` → `bool`. These evaluate
   through the engine's **zero-copy `DatasetView`** filtered to the session's authorized
   graphs (the default, fast path).
+- **Empty default graph + union-default-graph opt-in — SPEC-COMPLIANT BY DEFAULT**
+  ([OPUS-4.8] sq-gq28y, issue #1546; maintainer decision "spec compliant - empty by default").
+  The read path (`query_as`/`query_json_as`/`ask_as`) implements the *Access-Controlled SPARQL
+  Query over a Solid Pod* [Editor's Draft](https://github.com/jeswr/solid-sparql-query)
+  empty-default + explicit-union semantics **out of the box**. The standing default graph is
+  **empty** (a bare `{ ?s ?p ?o }` matches nothing) UNLESS the query opts in with
+  `FROM <http://www.w3.org/ns/solid/sparql#union-default-graph>` (the spec-minted
+  `UNION_DEFAULT_GRAPH_IRI`), which makes the default graph the union of the authorized named
+  graphs **for that request only** (a pure function of the query's dataset clause — no
+  cross-request state leak). An explicit `GRAPH ?g` / `GRAPH <g>` pattern is unaffected either
+  way. Semantics + honest scope:
+  - the reserved IRI is a **signal, never a graph name**: it is stripped from BOTH `FROM`
+    and `FROM NAMED` positions before evaluation and never binds `GRAPH ?g`. In `FROM NAMED`
+    position it is treated as **absent** (stripped, not intersected) so `GRAPH ?g` keeps
+    ranging over the full authorized set (draft: "when only the reserved IRI is given, the
+    named-graph set remains the authorized set");
+  - **fail-closed, exact-match**: a near-miss IRI is a normal (absent, per-pod-model) dataset
+    reference that contributes nothing and never widens — it does NOT silently enable the
+    union default graph. At this string API there is no "malformed opt-in value" (the signal
+    is one exact IRI, present-or-absent); the `default-graph-uri` **protocol-parameter**
+    equivalent and its fail-closed validation are the Solid HTTP layer's responsibility
+    (`solid-server-rs`), not sparq;
+  - emulated at the **query layer** (the opt-in triggers the existing per-pattern `GRAPH`
+    wrap; the engine view keeps its `Empty` default graph — no `UnionOfVisible` engine mode
+    is added, design record §5.4(a)). Default public surface: `UNION_DEFAULT_GRAPH_IRI`
+    (const) + `wrap_for_view_opt_in(sparql) -> Result<String, _>` (the spec-conformant
+    read-path rewrite, the differential oracle for the enforcement path).
+  - **security invariant (preserved by the flip):** empty-by-default is strictly MORE
+    conservative than union-always — it can only ever REMOVE a bare pattern's default-graph
+    solutions, never add graphs. Both variants evaluate over exactly the session's authorized
+    named-graph set (the view enforces that at the graph-name layer before evaluation); the
+    default-graph choice changes what the *default graph* sees, never *which* graphs are
+    readable, so it cannot widen the readable set.
+  - **legacy escape hatch:** the opt-in `legacy-union-default-graph` feature (OFF by default)
+    reinstates the pre-flip union-always default (a bare pattern ranges over the authorized
+    union) for downstream deployments that relied on that idiom and need to migrate on their
+    own schedule; new code should use `GRAPH ?g` or the spec-minted opt-in.
+  - **conformance:** the query-semantics conformance class of the spec is vendored + run in
+    `crates/sparq-solid/tests/conformance_solid_sparql_query.rs` (upstream suite in
+    `jeswr/solid-sparql-query:test-suite/query-semantics/`) and passes all 15 cases.
 - `store.query_as_rewrite(&Session, Mode, sparql)` — the v1 **`FROM NAMED` rewrite**
   portability path: enforces the same policy on any standard SPARQL 1.1 engine (one
   deliberate semantic difference noted in-source: a caller `FROM <g>` can only restrict
-  the view, never widen it).
+  the view, never widen it). **NB the spec empty-default flip applies to the view path
+  (`query_as`) only** — this v1 portability path keeps its union-always default-graph
+  emulation (it predates the draft and is a standard-SPARQL-portability oracle, not the
+  spec-conformant surface).
 - `store.update_as(&Session, sparql)` / `store.update_as_acp(...)` — **write-path
   gating**: check every graph an update could mutate *before* applying, and
   auto-re-materialize on `.acl`/`.acr` writes.
@@ -128,10 +173,45 @@ Materialize the authorization view from the access-control documents, then enfor
   authorization** — the server authorizes the request itself (e.g. `decide(.., Mode::Control)`)
   and `update_as` remains the session-checked write path. Always-present API (no cargo gate;
   mirrors `update_as`/`decide` — adds no dependency).
+  **Scale ([OPUS-4.8] issue #1571, sq-b7k7u):** an atomic single-`.acl`/`.acr` write still
+  re-materializes the whole auth view (the incremental materializer is deferred), but the
+  session-cache invalidation is **diff-based** ([SONNET-4.6] sq-b7k7u fix): `reindex_with`
+  diffs old vs new `AuthIndex` per-origin and invalidates exactly the origins whose (allow,
+  deny, cond) buckets changed — so a write to one pod does **not** cold-start every other
+  pod's cached view, and cross-origin dependencies (WAC `acl:agentGroup` membership hosted on
+  a different pod, foreign-subject grant triples, ACP cross-document policy/matcher
+  indirection) are caught automatically: if a write at origin A changes B's effective grants,
+  B's new index buckets differ → B is invalidated too. If the matcher maps change (not
+  origin-bucketed), it falls back to a full cache clear. A differential property test asserts
+  the scoped-cache state equals a from-scratch rebuild after every write (incl. the
+  fail-open-critical revoke direction and cross-origin agentGroup revoke).
+  The same origin-partitioned index makes `decide` cost one pod's grants, not the whole store.
 - `store.accessible(&Session, Mode) -> Arc<Vec<NamedNode>>` /
   `store.accessible_set(...)` / `store.view_for(...) -> DatasetView` /
   `store.auth() -> &AuthIndex` — inspect the authorized graph set or the materialized
   index directly.
+- **Concurrent reads — the read side is `&self`** ([FABLE-5] sq-cnuqd, issue #1569). Every
+  read entry point (`accessible`, `accessible_set`, `view_for`, `query_as`, `query_json_as`,
+  `ask_as`, `query_as_rewrite`, `wac_allow`, `decide`) takes `&self`, so **N threads sharing
+  one `Arc<PodStore>` query the same materialized generation at once** — a per-request
+  Solid/SPARQL server no longer serialises every reader through one exclusive borrow. The
+  session cache behind these is **sharded + bounded**: `session_cache::SessionCache` stripes
+  the memoized per-session graph sets across independent `RwLock` shards keyed by the session
+  hash, so a warm hit is a shard *read* lock (+ two `Arc` clones) and only a miss/re-derive
+  takes that one shard's write lock; each shard is **LRU-bounded** (`SHARD_CAP`, with a
+  compacted recency queue) so a server keying per-request `now` timestamps cannot grow the
+  cache without bound. **Writes stay `&mut self`** (`materialize_*`, `put_acl`/`delete_acl`,
+  `update_as`) — they need exclusive access, so a server interleaves reads and writes by
+  wrapping the store in an `RwLock<PodStore>`/arc-swap (readers take the read lock, a write
+  takes the write lock). **Snapshot consistency (fail-closed, no torn set):** each read pins
+  ONE `Arc<AuthIndex>` snapshot for the whole set computation, and because writes are
+  `&mut self` (exclusive), a read observes either the whole pre-write generation or the whole
+  post-write one, never a half-and-half mix (generation pinning composes with #1584);
+  invalidation (`SessionCache::clear` / `invalidate_origin`, the diff-based #1585 path) visits
+  every shard so it reaches a session regardless of which shard it hashed into, and an
+  evicted/dropped set is re-derived on the current auth view — never assumed still authorized.
+  Covered by `tests/concurrent_readers.rs` (16 threads on one `Arc<PodStore>`; a revoke under
+  concurrent read observes only the two atomic snapshots and converges on the revoked view).
 - `store.wac_allow(&Session, &NamedNode) -> String` — build the public
   [`WAC-Allow`](https://solidproject.org/TR/wac#wac-allow) response-header value
   (`user="…",public="…"`) advertising the modes the session (and the public) hold on a
@@ -178,10 +258,22 @@ Materialize the authorization view from the access-control documents, then enfor
   `governing_acl`/`scope`, which `WacDecision::acl_link_header()` turns into the FR-5
   `Link: rel="acl"` surface (above). **Honest scope:** Phase-1 implements
   the WAC `accessTo` + container-`default` subset of [issue #992](https://github.com/jeswr/sparq/issues/992)
-  (FR-1/6/7) — the per-resource decision + fail-closed contract + ACL walk; it is NOT the
-  full WAC HTTP surface (FR-4's `POST /authz/*` on `sparq-server` is the separate sq-snopa.6
-  architecture call), and the `decide` `scope` is the ACL-*document* discovery scope, while
-  whether a grant within that ACL applies is the verdict the oracle computes.
+  (FR-1/6/7) — the per-resource decision + fail-closed contract + ACL walk. The **HTTP shell**
+  over this library surface (FR-4, sq-snopa.6) has LANDED as `sparq-server`'s opt-in
+  `solid-authz` feature — `POST /authz/decide`+`/wac-allow`+`/query`, a fail-closed thin wrapper
+  that maps these very verdicts onto HTTP status codes (an `AclStatus` `403`/`503` split). The
+  **ODRL lane on `/authz/*`** (sq-lrtc3.1 + sq-3mu76) has LANDED as `sparq-server`'s opt-in
+  `odrl-authz` feature — dataset-carried ODRL policies are fed through `materialize_odrl_policy`
+  (deny-overrides, fail-closed) before the access-controlled query runs, so an ODRL policy gates a
+  SPARQL query end-to-end over HTTP; since sq-3mu76 the advisory `/authz/decide` +
+  `/authz/wac-allow` run the same lane (read-scoped advertisement), so they never report an allow
+  the query lane would refuse to honour. The
+  **FR-5 `Link: <acl-iri>; rel="acl"` response header** (sq-snopa.7) is now wired: `/authz/decide`
+  and `/authz/wac-allow` emit it from `acl_link_header()` / `resolve_acl()` when a governing ACL
+  was discovered; `None` ⇒ no header (fail-closed). See the `http-server` skill. That HTTP layer
+  does NOT authenticate — it takes an already-resolved session, exactly as this library does. The
+  `decide` `scope` is the ACL-*document* discovery scope, while whether a grant within that ACL
+  applies is the verdict the oracle computes.
 - `store.materialize_odrl_permission(&Policy, &Request) -> BridgeOutcome` — **opt-in**
   (`odrl-bridge` feature, OFF by default; [OPUS-4.8] sq-h3uk): run the `sparq-policy` ODRL
   evaluator and, on a *definite Permit*, materialize the equivalent `principal auth:<mode>
@@ -203,14 +295,22 @@ Materialize the authorization view from the access-control documents, then enfor
   **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-hiz4): persists a *faithfully-mappable* ODRL
   constraint as a re-checked ACP `auth:ConditionalGrant` (agent matcher) instead of a
   one-shot allow — so the granted agent is verified **per session**, not frozen to the
-  materializing party. `odrl:recipient`/`odrl:assignee` (`eq`/`isA`/`isPartOf`/`neq`) maps
+  materializing party. `odrl:recipient`/`odrl:assignee`
+  (`eq`/`isA`/`isPartOf`/`isAnyOf`/`neq`/`isNoneOf` — the set operators one head /
+  exception per member, [FABLE-5] sq-5fkpp) maps
   faithfully (recipient-of-data = session agent); an `odrl:dateTime` **inclusive** bound
   (`lteq` → `auth:notAfter`, `gteq` → `auth:notBefore`) maps to a **live-clock window**
   re-checked against `Session::now` per request ([OPUS-4.8] sq-0q7n — a lapsed window denies
   immediately, no `refresh_odrl_grant` needed); `odrl:purpose`/`count`/a *strict* `dateTime`
-  bound have no faithful analogue and STAY one-shot; a rule mixing mappable + unmappable
+  bound, **and any compound `odrl:LogicalConstraint`** (`odrl:and`/`odrl:or`/`odrl:xone` —
+  no faithful single-head analogue; [OPUS-4.8] sq-izzak) have no faithful analogue and STAY
+  one-shot; a rule mixing mappable + unmappable
   constraints falls back **entirely** to one-shot (fail-safe — never drops a bound). A
-  dateTime window is mapped only on an **allow** (a lapsed *deny* would fail open). Mapping
+  dateTime window is mapped only on an **allow** (a lapsed *deny* would fail open). A bare
+  `odrl:assignee` **rule PROPERTY** (with zero constraints) scopes the grant head to that ONE
+  assignee — **not** `auth:Public` ([OPUS-4.8] sq-9n1q4; the deny dual likewise scopes to the
+  assignee, never an over-broad public deny). Only a rule with **no** recipient constraint AND
+  **no** assignee grants `auth:Public`. Mapping
   table in the [`usage-control-policy`](../usage-control-policy/SKILL.md) skill.
 - `store.refresh_odrl_grant(&Policy, &Request, BridgeKind)` / `refresh_odrl_grants()` —
   **opt-in** (`odrl-bridge`; [OPUS-4.8] sq-dpk4): re-evaluate **bridged** ODRL grants when
@@ -276,21 +376,25 @@ fn session_from_request<'a>(webid: Option<&'a str>, origin: Option<&'a str>) -> 
 }
 
 // Does this session have `mode` on the graph backing `resource`? (fail-closed)
-fn may(store: &mut PodStore, s: &Session, mode: Mode, resource: &NamedNode) -> bool {
+// [FABLE-5] sq-cnuqd: `&PodStore` (shared) — many request handlers call this at once.
+fn may(store: &PodStore, s: &Session, mode: Mode, resource: &NamedNode) -> bool {
     store.accessible(s, mode).iter().any(|g| g == resource)
 }
 
 // Build the WAC-Allow header value for the request, e.g. `user="read write",public="read"`.
-fn wac_allow_header(store: &mut PodStore, s: &Session, resource: &NamedNode) -> String {
+fn wac_allow_header(store: &PodStore, s: &Session, resource: &NamedNode) -> String {
     store.wac_allow(s, resource)
 }
 ```
 
-Per request: `session_from_request(...)` → `may(&mut store, &s, Mode::Read, &resource)`
+Per request: `session_from_request(...)` → `may(&store, &s, Mode::Read, &resource)`
 to allow/deny (a deny is `403`/`404` per your fail-closed policy) → set the response's
 `WAC-Allow` header to `store.wac_allow(&s, &resource)`. `wac_allow` runs four
 `accessible` sweeps that share the per-session cache (each an O(1) hash check over the
-materialized index), so it is cheap. To pair the `WAC-Allow` advertisement with the WAC
+materialized index), so it is cheap. Because these read helpers take **`&self`** (sq-cnuqd),
+a concurrent server shares ONE `Arc<PodStore>` (or `Arc<RwLock<PodStore>>` if it also serves
+writes) across all request workers — they read in parallel through the sharded session cache;
+only a `put_acl`/materialize write needs the exclusive (`&mut`/write-lock) side. To pair the `WAC-Allow` advertisement with the WAC
 **ACL-discovery** header, run `store.decide(&s, "<resource-iri>", Mode::Read)` and emit its
 `acl_link_header()` (`Some("<acl-iri>; rel=\"acl\"")`) as the response `Link` header value
 when present (FR-5) — fail-closed: it is `None` when no governing ACL was discovered, so
@@ -332,7 +436,7 @@ table of expected `(agent, client, mode, resource) → Allow | Deny` decisions �
 harness asserts the engine reproduces every expected decision, reporting **all** mismatches
 at once. The module is **always compiled** (no feature gate; it depends only on the
 always-present ACP path). The scenario corpus is a single reusable source in
-`crates/sparq-solid/tests/common/` (`common::acp_corpus()`, 12 scenarios / 40 decisions),
+`crates/sparq-solid/tests/common/` (`common::acp_corpus()`, 13 scenarios / 45 decisions),
 consumed by `crates/sparq-solid/tests/conformance_acp.rs` (the parity test, plus a negative
 control asserting a wrong expectation is *reported*, not panicked) so a second test target —
 the differential oracle (`sq-t58w.7`) — can run the IDENTICAL scenarios without copy-paste.
@@ -390,7 +494,7 @@ semantics. A scenario is an `.acl`-document corpus (`AclBuilder`) plus a table o
 `(agent, client, mode, resource) → Allow | Deny` decisions; the harness asserts the engine
 reproduces every one, reporting all mismatches at once. Always compiled (no feature gate).
 The corpus is a single reusable source in `crates/sparq-solid/tests/common/`
-(`common::wac_corpus()`, 12 scenarios / 40+ decisions), consumed by
+(`common::wac_corpus()`, 13 scenarios / 51 decisions), consumed by
 `crates/sparq-solid/tests/conformance_wac.rs` (the parity test, a `run_via_podstore` parity
 test over the full `PodStore` method-form path, and a negative control) and reusable by a
 second test target — the differential oracle (`sq-t58w.7`) — without copy-paste. The
@@ -542,7 +646,7 @@ SAME `Vec<TrustRule>` the gate consumes:
 
 Both install on top of the unchanged auth view (the ODRL-bridge precedent). The
 public surface is `sparq_trust::{vocab, policy, admit, wire, delegation}` (+ the opt-in
-`delegation_prov` / `did` / `store` / `secprop` modules) — see
+`delegation_prov` / `did` / `store` / `secprop` / `framework_vocab` modules) — see
 [`crates/sparq-trust/README.md`](../../crates/sparq-trust/README.md) and the design record
 `research/solid-trust-graph-authz-design.md` §6.0 (tracked in
 [issue #940](https://github.com/jeswr/sparq/issues/940); landing via design PR
@@ -620,6 +724,40 @@ sparq ZK method may be labelled `secx:Proven` while the external accredited-cryp
 (`sq-qhy4`) is open.** The vocabulary **records** a claim and its epistemic basis; it is **NOT** a
 proof of any property. DPV alignment is *Light* (#1002 Option 2): `skos:closeMatch` cross-refs to
 W3C DPV `CryptographicMethods` where a near-match exists, not a full regulation→requirement chain.
+
+### `trustx:` certification-scope vocabulary — opt-in `framework-vocab` ([FABLE-5] sq-6syab.2, issue #1592)
+
+The `sparq_trust::framework_vocab` module (behind the **default-OFF `framework-vocab`** cargo feature)
+is the trust-expression program's **certification-scope layer** (design record
+`research/trust-expression-spec.md` §3.4 / D4): the vocabulary a verifier uses to ask *"prove X can be
+attested by unrevoked attributes issued by parties [X, Y, Z] OR by certified issuers WITHIN the eIDAS /
+DIATF framework, that have only issued what they are certified to issue"* (#1592). It **extends** the
+`trust:` vocabulary (shared `https://sparq.dev/ns/trust#` base — `trustx:` is a prose sub-prefix, not a
+new namespace) and **`rdfs:seeAlso`s** the vendored `sec-req:` eIDAS 2.0 / UK-DVS individuals rather than
+duplicating them (extend, do not fork; the design's D5). Like `secprop`, it is **data + Rust constants
+only** — a `const &str` registry (`ALL_TRUSTX_IRIS`) pinned to the canonical
+[`trust-framework.ttl`](../../crates/sparq-trust/ontologies/trust/trust-framework.ttl) by a byte-drift
+test — **not** an evaluator (the holder-side contract evaluation is the later, `sq-3kd2g`-gated
+`sq-6syab.4`).
+
+The three surfaces the layer names: (1) the **trust requirements** (`trustx:TrustRequirements` + `question` /
+`trustsIssuer` / `trustsFramework` / `requiresScopeConformance` / `requiresValidStatusAt`) — the
+verifier→holder contract carrier; the trust conditions live in the requirements graph, **not** in the query (no
+new query syntax); (2) the **two trust modes** — enumerated parties (`trustsIssuer`) OR
+framework-certified issuers (`trustsFramework`), composing by plain OR; (3) the **certification-scope
+terms** (`trustx:Certification` + `certifies` / `underFramework` / `scope` / `validFrom` / `validUntil`),
+where `scope` ranges from service-level (`trustx:AnyServiceScope`, the honest DIATF granularity — DIATF
+certifies a *service*, not an attribute list) down to a predicate set / SHACL shape reusing the existing
+`trust:forShape` idiom. Non-revocation is a **positive**, time-windowed `trustx:StatusAttestation` —
+existence of a covering window at `requiresValidStatusAt`, never evidence-of-absence (OWA/monotonicity).
+
+**Honesty (load-bearing):** framework-anchored trust is **anchored, not proven** — a
+`trustx:Certification` bottoms out in the framework operator's signed trusted-list / register artifacts
+(a trust anchor, not cryptography); the scope-conformance check constrains what the *verifier accepts*
+and, via the published certification, what the issuer was *authorised* to issue, but cannot retroactively
+prove an issuer never mis-issued elsewhere. **No term asserts a settled cryptographic soundness or
+privacy guarantee** (`sq-qhy4` external audit open; `sparq-mpc` semi-honest only). All `trustx:` IRIs are
+**NON-STANDARD** placeholders a WG would rehome.
 
 ### N3 proof-admissibility ruleset — opt-in `secprop-admissibility` ([OPUS-4.8] sq-ufsi9, Phase 2)
 
@@ -736,6 +874,37 @@ wrong-key / unresolvable-issuer list VC, or a verified graph with no `encodedLis
 status-authority `did:key`/`did:web` issuer DID via `VerifyingLiveStatusCheck::with_did_issuer(.., did_resolver,
 authority_did, ..)` (the `did` feature, same binding the admission gate uses). Research-grade, externally
 **UNAUDITED** (`sq-qhy4`): a verified issuer signature, NOT a privacy/unlinkability guarantee.
+
+## Pattern-scoped masking spike — [FABLE-5] sq-lrtc3.3 (opt-in `pattern-scope`)
+
+Sub-named-graph (triple-pattern / row-level) result masking: an ODRL-style target as a
+set of **allow/deny triple patterns** over a source graph, so a session can be granted
+*"the contacts graph except phone numbers"*. Design record (options analysis, ODRL
+vocabulary, production caching path, follow-up beads):
+`research/odrl-pattern-scoped-targets-2026-07.md`. Measured envelope:
+`bench/pattern-scope/` (work-box JSONs, non-canonical).
+
+**Mechanism — masked-subgraph materialization, NOT per-scan filtering.** A scoped graph
+is decoded, filtered, and rebuilt as a physical replica; the engine evaluates a dataset
+in which masked triples are **physically absent**, so equivalence with an oracle store
+(the source with those triples deleted) under SELECT / `OPTIONAL` / `EXISTS` / `MINUS` /
+aggregates / `COUNT` / `ASK` / `GRAPH ?g` holds **by construction** (differential
+battery: `crates/sparq-solid/tests/pattern_scope.rs`). Zero engine/core changes; the
+graph-granular enforcement walk is reused unchanged.
+
+- `ScopePattern::new(s, p, o)` / `::any()` — per-triple predicate, `None` = wildcard,
+  **term-identity** matching (no join variables, no value equality).
+- `GraphScope::allow_only(patterns)` (permission shape) / `::deny_within(patterns)`
+  (prohibition carving a hole); a triple is visible iff it matches ≥1 allow AND 0 deny
+  (**deny overrides allow**; empty allow grants nothing — fail-closed).
+- `masked_graph(&Graph, &GraphScope) -> Graph`; `masked_dataset(&Graph, &decisions)`
+  (explicit-decision assembly: absent from the map = absent from the dataset; a fully
+  masked graph is **omitted** — indistinguishable from absent).
+- `store.scoped_dataset(&Session, Mode, &scopes) -> ScopedDataset` — **refinement-only**
+  (a scope can only shrink the session's graph-level accessible set, never widen), then
+  `ScopedDataset::{query, query_json, ask, view}` on the same `wrap_read`/empty-default
+  path as `query_as`. Build once per (session × scopes), query many; rebuild after any
+  store mutation. READ path only (UPDATE stays graph-granular, record §2.4).
 
 ## Related skills
 

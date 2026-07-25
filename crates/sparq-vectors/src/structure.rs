@@ -103,7 +103,12 @@ pub fn materialise_closure(
     let asserted_triples = triples.len();
     let entailed_triples = sparq_reason::materialize(profile, &mut dict, &mut triples);
     let graph = Graph::from_parts(dict, triples);
-    ClosedGraph { graph, asserted_triples, entailed_triples, profile }
+    ClosedGraph {
+        graph,
+        asserted_triples,
+        entailed_triples,
+        profile,
+    }
 }
 
 /// Parse RDF `text` of the given `format`, then [`materialise_closure`] under `profile`
@@ -188,7 +193,9 @@ impl TypeConstraints {
         let mut predicate_range: FxHashMap<Id, FxHashSet<Id>> = FxHashMap::default();
 
         for pred in &introspection.predicates {
-            let Some(pred_id) = class_id(&pred.predicate) else { continue };
+            let Some(pred_id) = class_id(&pred.predicate) else {
+                continue;
+            };
 
             let domain = predicate_domain.entry(pred_id).or_default();
             for c in &pred.declared_domains {
@@ -215,7 +222,11 @@ impl TypeConstraints {
             }
         }
 
-        TypeConstraints { entity_types, predicate_domain, predicate_range }
+        TypeConstraints {
+            entity_types,
+            predicate_domain,
+            predicate_range,
+        }
     }
 
     /// The interned `rdf:type` class ids of `entity` (empty if it has none).
@@ -235,12 +246,7 @@ impl TypeConstraints {
         self.admissible(&self.predicate_range, predicate, entity)
     }
 
-    fn admissible(
-        &self,
-        side: &FxHashMap<Id, FxHashSet<Id>>,
-        predicate: Id,
-        entity: Id,
-    ) -> bool {
+    fn admissible(&self, side: &FxHashMap<Id, FxHashSet<Id>>, predicate: Id, entity: Id) -> bool {
         match side.get(&predicate) {
             // Unconstrained side (no declared/observed classes) → every entity is admissible.
             None => true,
@@ -253,6 +259,53 @@ impl TypeConstraints {
                 Some(types) => types.iter().any(|t| classes.contains(t)),
             },
         }
+    }
+}
+
+/// Which term **sorts** participate in KGE entity space — the RDF 1.2 **quoted-terms ablation
+/// switch** (mirrors [`SamplingMode`]'s on/off discipline: ship the switch OFF, adopt nothing
+/// without a measured, multi-seed, paired-delta result).
+///
+/// [`TermScope::IriBlank`] is the pre-existing behaviour and the **default everywhere**: with it,
+/// `is_embeddable` reduces to the exact named-node/blank-node match the trainer, eval, and
+/// sampler previously performed via three private `is_entity` copies — baselines are
+/// byte-identical (asserted bit-for-bit by the `kge` tests). [`TermScope::Embeddable`]
+/// additionally admits RDF 1.2 quoted-triple terms (`TermParts::Triple`, the object of
+/// `rdf:reifies`) into entity space, so statement-level structure — `rdf:reifies` edges and
+/// content-addressed shared quoted-term nodes — becomes visible to the embedding layer instead of
+/// being silently dropped. Literals stay out under both scopes.
+///
+/// **What the ON arm does and does not buy:** a quoted term is embedded as a *node* — its
+/// `rdf:reifies` edge(s) and hub-sharing (two reifiers of the same claim share one content-
+/// addressed quoted-term node) become graph structure the trainer sees. The term's *compositional*
+/// `(s, p, o)` content stays opaque to the *trainer*; the deterministic statement-level encoding
+/// derived from a trained model is `TrainedModel::encode_quoted_term` (sq-1e5kk), a separate
+/// representation whose adoption stays measurement-gated. **No accuracy claim is made** — the
+/// switch exists so the quoted-term-visibility axis is measurable at all
+/// ([`crate::eval::run_quoted_ablation`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TermScope {
+    /// Named + blank nodes only — the ablation **OFF** baseline (and the default). Reduces
+    /// `is_embeddable` to exactly the former `is_entity` matcher, so every existing caller's
+    /// behaviour is byte-identical.
+    #[default]
+    IriBlank,
+    /// Also RDF 1.2 quoted-triple terms (`TermParts::Triple`) — the ablation **ON** arm.
+    Embeddable,
+}
+
+/// Is the term id **embeddable** under `scope` — i.e. does it get a row in KGE entity space?
+///
+/// Under [`TermScope::IriBlank`] this is the identical `Iri | Blank` match the three former
+/// private `is_entity` copies (train / eval / sampler) performed — the structural byte-stability
+/// guarantee: no float path, PRNG stream, or iteration order changes when the switch is off.
+/// Under [`TermScope::Embeddable`] quoted-triple terms are additionally admitted. Literals and
+/// inline values are excluded under both scopes.
+pub(crate) fn is_embeddable(graph: &Graph, id: Id, scope: TermScope) -> bool {
+    match graph.dict.term_parts(id) {
+        TermParts::Iri { .. } | TermParts::Blank(_) => true,
+        TermParts::Triple(_) => scope == TermScope::Embeddable,
+        _ => false,
     }
 }
 
@@ -286,8 +339,14 @@ pub enum Corrupt {
 /// the on/off ablation compares like with like.
 pub struct NegativeSampler<'a> {
     constraints: &'a TypeConstraints,
-    /// All candidate entity ids (sorted, deduplicated) — the corruption pool.
+    /// Atomic (IRI/blank) candidate entity ids (sorted, deduplicated) — the corruption pool for
+    /// atomic slots. Its meaning is unchanged from the pre-[`TermScope`] sampler.
     entities: Vec<Id>,
+    /// RDF 1.2 quoted-triple-term ids (sorted, deduplicated) — the corruption pool for
+    /// quoted-term slots. **Always empty under [`TermScope::IriBlank`]** (no positive can carry a
+    /// quoted-term endpoint there), so the OFF-scope draw loop, PRNG stream, and rejection
+    /// sequence are bit-identical to the pre-scope sampler.
+    triple_terms: Vec<Id>,
     /// Positive `(h, r, t)` triples, used to reject a corruption that accidentally reproduces a
     /// true triple (the standard "filtered" negative-sampling guard).
     positives: FxHashSet<[Id; 3]>,
@@ -299,71 +358,131 @@ impl<'a> NegativeSampler<'a> {
     /// places only entities in entity space; literals are handled by the typed-literal encoders of
     /// design Phase 1, not here). `constraints` should be mined from the **same, closed** graph.
     ///
-    /// `mode` is the ablation switch ([`SamplingMode`]).
+    /// `mode` is the ablation switch ([`SamplingMode`]). The term scope is the byte-stable
+    /// [`TermScope::IriBlank`] default — the existing signature and behaviour are preserved;
+    /// [`NegativeSampler::new_scoped`] is the quoted-terms opt-in.
     pub fn new(
         graph: &Graph,
         constraints: &'a TypeConstraints,
         mode: SamplingMode,
     ) -> NegativeSampler<'a> {
+        Self::new_scoped(graph, constraints, mode, TermScope::IriBlank)
+    }
+
+    /// [`NegativeSampler::new`] with an explicit [`TermScope`] — the quoted-terms ablation entry
+    /// point. Under [`TermScope::Embeddable`], triples with a quoted-term endpoint (RDF 1.2
+    /// `rdf:reifies` edges) count as positives, and their quoted terms land in a **separate,
+    /// sort-preserving corruption pool** (see [`NegativeSampler::sample`]).
+    pub fn new_scoped(
+        graph: &Graph,
+        constraints: &'a TypeConstraints,
+        mode: SamplingMode,
+        scope: TermScope,
+    ) -> NegativeSampler<'a> {
         let mut entity_set: FxHashSet<Id> = FxHashSet::default();
+        let mut triple_set: FxHashSet<Id> = FxHashSet::default();
         let mut positives: FxHashSet<[Id; 3]> = FxHashSet::default();
 
         for [s, p, o] in graph.iter_ids() {
-            // Only object-property triples (object is an entity, not a literal/inline value).
-            if is_entity(graph, o) && is_entity(graph, s) {
-                entity_set.insert(s);
-                entity_set.insert(o);
+            // Only object-property triples (object is an entity — or, under `Embeddable`, a
+            // quoted term — not a literal/inline value).
+            if is_embeddable(graph, o, scope) && is_embeddable(graph, s, scope) {
+                for id in [s, o] {
+                    // Route each endpoint into the pool of its sort. Under `IriBlank` no quoted
+                    // term can pass `is_embeddable`, so `triple_set` stays empty by construction.
+                    if matches!(graph.dict.term_parts(id), TermParts::Triple(_)) {
+                        triple_set.insert(id);
+                    } else {
+                        entity_set.insert(id);
+                    }
+                }
                 positives.insert([s, p, o]);
             }
         }
 
-        // Deterministic order: sort the dedup'd entity ids ascending, independent of the
-        // FxHashSet iteration order, so the sampler is reproducible across runs.
+        // Deterministic order: sort the dedup'd ids ascending, independent of the FxHashSet
+        // iteration order, so the sampler is reproducible across runs.
         let mut entities: Vec<Id> = entity_set.into_iter().collect();
         entities.sort_unstable();
+        let mut triple_terms: Vec<Id> = triple_set.into_iter().collect();
+        triple_terms.sort_unstable();
 
-        NegativeSampler { constraints, entities, positives, mode }
+        NegativeSampler {
+            constraints,
+            entities,
+            triple_terms,
+            positives,
+            mode,
+        }
     }
 
-    /// The number of candidate entities in the corruption pool.
+    /// The number of candidate entities in the **atomic** (IRI/blank) corruption pool.
     pub fn entity_count(&self) -> usize {
         self.entities.len()
+    }
+
+    /// The number of quoted-triple-term ids in the quoted corruption pool (0 unless the sampler
+    /// was built with [`TermScope::Embeddable`] over a graph bearing RDF 1.2 quoted terms).
+    pub fn triple_term_count(&self) -> usize {
+        self.triple_terms.len()
     }
 
     /// Sample up to `n` negatives for the positive triple `(h, r, t)` corrupting `side`, using
     /// `seed` to drive a deterministic stream. Returns fewer than `n` only when the admissible
     /// pool is exhausted (e.g. a tightly-typed predicate with few range entities).
     ///
+    /// **Sort-preserving corruption:** the candidate pool is chosen by the *sort of the term being
+    /// replaced* — a quoted-term slot draws only from the quoted pool, an atomic slot only from
+    /// the atomic pool. Replacing a quoted-triple object with an atomic IRI would yield a
+    /// sort-trivial negative the model detects from term class alone, polluting the training
+    /// margin (the same type-of-negative hygiene as Krompass type-constrained corruption). Under
+    /// [`TermScope::IriBlank`] the quoted pool is empty and no positive carries a quoted term, so
+    /// the draw loop, PRNG stream, and rejection sequence are bit-identical to the pre-scope
+    /// sampler.
+    ///
     /// A candidate is rejected when it (a) equals the original entity, (b) reproduces a true
     /// positive triple (filtered guard), or (c) under [`SamplingMode::TypeConstrained`] is not
     /// admissible for the corrupted side. Under [`SamplingMode::Unconstrained`] only (a) and (b)
-    /// apply — that is the ablation baseline.
+    /// apply — that is the ablation baseline. Quoted-term candidates **bypass the class filter**
+    /// of (c): a quoted term carries no `rdf:type`, so a constrained side would reject the whole
+    /// pool — statements have no class discipline until a statement-typing prior exists (a
+    /// tracked follow-up), and deadlocking the ON arm would be dishonest.
     pub fn sample(&self, triple: [Id; 3], side: Corrupt, n: usize, seed: u64) -> Vec<[Id; 3]> {
         let [h, r, t] = triple;
-        if self.entities.is_empty() || n == 0 {
+        let original = match side {
+            Corrupt::Head => h,
+            Corrupt::Tail => t,
+        };
+        // Sort-preserving pool selection: a slot holding a quoted term draws from the quoted
+        // pool. Membership is decided against the (sorted) quoted pool itself — every endpoint of
+        // a collected positive is in exactly one pool, and an id in neither pool falls back to the
+        // atomic pool (today's behaviour for out-of-graph callers).
+        let quoted_slot = self.triple_terms.binary_search(&original).is_ok();
+        let pool: &[Id] = if quoted_slot {
+            &self.triple_terms
+        } else {
+            &self.entities
+        };
+        if pool.is_empty() || n == 0 {
             return Vec::new();
         }
-        let mut out = Vec::with_capacity(n.min(self.entities.len()));
+        let mut out = Vec::with_capacity(n.min(pool.len()));
         let mut emitted: FxHashSet<Id> = FxHashSet::default();
         let mut state = seed ^ mix_triple(triple) ^ (side_salt(side));
 
         // Bounded attempts: at most a small multiple of the pool, so a near-empty admissible set
         // terminates instead of spinning. The cap is generous enough that a healthy pool fills `n`.
-        let max_attempts = self.entities.len().saturating_mul(8).max(64);
+        let max_attempts = pool.len().saturating_mul(8).max(64);
         for _ in 0..max_attempts {
             if out.len() >= n {
                 break;
             }
-            let idx = (splitmix64(&mut state) as usize) % self.entities.len();
-            let candidate = self.entities[idx];
+            let idx = (splitmix64(&mut state) as usize) % pool.len();
+            let candidate = pool[idx];
 
             let (nh, nt) = match side {
                 Corrupt::Head => (candidate, t),
                 Corrupt::Tail => (h, candidate),
-            };
-            let original = match side {
-                Corrupt::Head => h,
-                Corrupt::Tail => t,
             };
 
             if candidate == original || emitted.contains(&candidate) {
@@ -374,7 +493,8 @@ impl<'a> NegativeSampler<'a> {
                 continue;
             }
             // Type-constraint filter — the only behavioural difference between the two modes.
-            if self.mode == SamplingMode::TypeConstrained {
+            // Quoted-term candidates bypass it (no `rdf:type` on a quoted term; see above).
+            if self.mode == SamplingMode::TypeConstrained && !quoted_slot {
                 let ok = match side {
                     Corrupt::Head => self.constraints.admissible_subject(r, candidate),
                     Corrupt::Tail => self.constraints.admissible_object(r, candidate),
@@ -400,25 +520,22 @@ fn type_term() -> oxrdf::Term {
 
 /// Resolve an IRI string to its interned dictionary id, or `None` if absent.
 fn dict_iri_id(dict: &sparq_core::dict::Dict, iri: &str) -> Option<Id> {
-    let id = dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(iri)));
+    let id = dict.lookup(&oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(
+        iri,
+    )));
     (id != sparq_core::dict::NO_ID).then_some(id)
-}
-
-/// Is the term id an **entity** (a named node or blank node), as opposed to a literal / inline
-/// value? Only entities go in KGE entity space.
-fn is_entity(graph: &Graph, id: Id) -> bool {
-    matches!(
-        graph.dict.term_parts(id),
-        TermParts::Iri { .. } | TermParts::Blank(_)
-    )
 }
 
 /// Mix a triple into a 64-bit value so the per-triple stream differs for each positive (the
 /// sampler is otherwise deterministic for a fixed seed).
 fn mix_triple([s, p, o]: [Id; 3]) -> u64 {
     let mut v = (s as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    v ^= (p as u64).rotate_left(21).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    v ^= (o as u64).rotate_left(42).wrapping_mul(0x94D0_49BB_1331_11EB);
+    v ^= (p as u64)
+        .rotate_left(21)
+        .wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    v ^= (o as u64)
+        .rotate_left(42)
+        .wrapping_mul(0x94D0_49BB_1331_11EB);
     v
 }
 
@@ -479,15 +596,25 @@ ex:bob   ex:owns ex:tom .
         let c = closed();
         // RDFS must add at least: rex a Animal, tom a Animal, alice a Person, bob a Person (rdfs9
         // via subClassOf), and the domain/range entailments (rdfs2/rdfs3).
-        assert!(c.entailed_triples > 0, "closure added nothing: {}", c.entailed_triples);
+        assert!(
+            c.entailed_triples > 0,
+            "closure added nothing: {}",
+            c.entailed_triples
+        );
         assert_eq!(c.closed_triples(), c.asserted_triples + c.entailed_triples);
 
         // The entailed `ex:rex a ex:Animal` must now be a real triple visible to the encoder.
         let rex = c.graph.id_of(&iri("http://ex/rex")).unwrap();
         let animal = c.graph.id_of(&iri("http://ex/Animal")).unwrap();
         let type_p = c.graph.id_of(&type_term()).unwrap();
-        let has = c.graph.iter_ids().any(|[s, p, o]| s == rex && p == type_p && o == animal);
-        assert!(has, "closure-before-vectorise did not materialise ex:rex a ex:Animal");
+        let has = c
+            .graph
+            .iter_ids()
+            .any(|[s, p, o]| s == rex && p == type_p && o == animal);
+        assert!(
+            has,
+            "closure-before-vectorise did not materialise ex:rex a ex:Animal"
+        );
     }
 
     #[test]
@@ -501,13 +628,28 @@ ex:bob   ex:owns ex:tom .
         let car = c.graph.id_of(&iri("http://ex/car")).unwrap(); // Vehicle — neither
 
         // Subject (domain = Person): a Person is admissible; an Animal/Vehicle is not.
-        assert!(tc.admissible_subject(owns, alice), "Owner⊑Person must satisfy domain Person");
-        assert!(!tc.admissible_subject(owns, car), "Vehicle must not satisfy domain Person");
+        assert!(
+            tc.admissible_subject(owns, alice),
+            "Owner⊑Person must satisfy domain Person"
+        );
+        assert!(
+            !tc.admissible_subject(owns, car),
+            "Vehicle must not satisfy domain Person"
+        );
 
         // Object (range = Animal): an Animal is admissible; a Person/Vehicle is not.
-        assert!(tc.admissible_object(owns, rex), "Dog⊑Animal must satisfy range Animal");
-        assert!(!tc.admissible_object(owns, car), "Vehicle must not satisfy range Animal");
-        assert!(!tc.admissible_object(owns, alice), "Person must not satisfy range Animal");
+        assert!(
+            tc.admissible_object(owns, rex),
+            "Dog⊑Animal must satisfy range Animal"
+        );
+        assert!(
+            !tc.admissible_object(owns, car),
+            "Vehicle must not satisfy range Animal"
+        );
+        assert!(
+            !tc.admissible_object(owns, alice),
+            "Person must not satisfy range Animal"
+        );
     }
 
     #[test]
@@ -519,18 +661,23 @@ ex:bob   ex:owns ex:tom .
         let rex = c.graph.id_of(&iri("http://ex/rex")).unwrap();
         let car = c.graph.id_of(&iri("http://ex/car")).unwrap();
 
-        let sampler =
-            NegativeSampler::new(&c.graph, &tc, SamplingMode::TypeConstrained);
+        let sampler = NegativeSampler::new(&c.graph, &tc, SamplingMode::TypeConstrained);
 
         // Corrupt the TAIL of (alice owns rex): every emitted object must be range-admissible
         // (an Animal), so `ex:car` (Vehicle) can NEVER appear.
         let negs = sampler.sample([alice, owns, rex], Corrupt::Tail, 16, 42);
-        assert!(!negs.is_empty(), "expected some type-valid tail corruptions");
+        assert!(
+            !negs.is_empty(),
+            "expected some type-valid tail corruptions"
+        );
         for [h, r, t] in &negs {
             assert_eq!(*h, alice);
             assert_eq!(*r, owns);
             assert!(tc.admissible_object(owns, *t), "emitted non-range tail {t}");
-            assert_ne!(*t, car, "Vehicle must never be a type-constrained range corruption");
+            assert_ne!(
+                *t, car,
+                "Vehicle must never be a type-constrained range corruption"
+            );
             assert_ne!(*t, rex, "must not reproduce the original tail");
         }
     }
@@ -556,7 +703,10 @@ ex:bob   ex:owns ex:tom .
                 break;
             }
         }
-        assert!(saw_car, "Unconstrained ablation arm must be able to emit the wrong-typed entity");
+        assert!(
+            saw_car,
+            "Unconstrained ablation arm must be able to emit the wrong-typed entity"
+        );
         let _ = rex;
     }
 
@@ -570,7 +720,10 @@ ex:bob   ex:owns ex:tom .
         let s = NegativeSampler::new(&c.graph, &tc, SamplingMode::TypeConstrained);
         let a = s.sample([alice, owns, rex], Corrupt::Tail, 4, 7);
         let b = s.sample([alice, owns, rex], Corrupt::Tail, 4, 7);
-        assert_eq!(a, b, "fixed (seed, mode, triple) must reproduce identical negatives");
+        assert_eq!(
+            a, b,
+            "fixed (seed, mode, triple) must reproduce identical negatives"
+        );
     }
 
     #[test]
@@ -613,10 +766,176 @@ ex:c ex:rel ex:a .
         let b = c.graph.id_of(&iri("http://ex/b")).unwrap();
         let s = NegativeSampler::new(&c.graph, &tc, SamplingMode::TypeConstrained);
         let negs = s.sample([a, rel, b], Corrupt::Tail, 4, 1);
-        assert!(!negs.is_empty(), "unconstrained predicate must still produce negatives");
+        assert!(
+            !negs.is_empty(),
+            "unconstrained predicate must still produce negatives"
+        );
     }
 
     fn iri(s: &str) -> oxrdf::Term {
         oxrdf::Term::NamedNode(oxrdf::NamedNode::new_unchecked(s))
+    }
+
+    // ---- RDF 1.2 quoted-terms scope (TermScope / is_embeddable / sort-preserving sampling) ----
+
+    /// An N-Triples fixture bearing RDF 1.2 quoted-triple terms (`rdf:reifies` objects), atomic
+    /// triples, a blank-node subject, and a plain literal — one term of every sort.
+    const RDF12_NT: &str = "\
+<http://ex/alice> <http://ex/knows> <http://ex/bob> .\n\
+<http://ex/bob> <http://ex/knows> <http://ex/carol> .\n\
+<http://ex/carol> <http://ex/knows> <http://ex/alice> .\n\
+<http://ex/stmt1> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <http://ex/alice> <http://ex/knows> <http://ex/bob> )>> .\n\
+<http://ex/stmt2> <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <http://ex/bob> <http://ex/knows> <http://ex/carol> )>> .\n\
+<http://ex/stmt1> <http://ex/assertedBy> <http://ex/src1> .\n\
+<http://ex/stmt2> <http://ex/assertedBy> <http://ex/src2> .\n\
+<http://ex/alice> <http://ex/nick> \"al\" .\n\
+_:b0 <http://ex/knows> <http://ex/alice> .\n";
+
+    /// The quoted-triple-term ids of `graph` (objects whose parts are `TermParts::Triple`).
+    fn quoted_term_ids(graph: &Graph) -> Vec<Id> {
+        let mut ids: Vec<Id> = graph
+            .iter_ids()
+            .map(|[_, _, o]| o)
+            .filter(|&o| matches!(graph.dict.term_parts(o), TermParts::Triple(_)))
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    #[test]
+    fn is_embeddable_scope_matrix() {
+        let c = close_for_vectorise(RDF12_NT, "ntriples", Profile::Rdfs).unwrap();
+        let g = &c.graph;
+
+        // IRIs and blank nodes: embeddable under BOTH scopes (the pre-existing entity sorts).
+        let alice = g.id_of(&iri("http://ex/alice")).unwrap();
+        assert!(is_embeddable(g, alice, TermScope::IriBlank));
+        assert!(is_embeddable(g, alice, TermScope::Embeddable));
+        let blank = g
+            .iter_ids()
+            .map(|[s, _, _]| s)
+            .find(|&s| matches!(g.dict.term_parts(s), TermParts::Blank(_)))
+            .expect("fixture has a blank-node subject");
+        assert!(is_embeddable(g, blank, TermScope::IriBlank));
+        assert!(is_embeddable(g, blank, TermScope::Embeddable));
+
+        // Quoted-triple terms: embeddable ONLY under `Embeddable` — the ablation switch.
+        let quoted = quoted_term_ids(g);
+        assert_eq!(quoted.len(), 2, "fixture has two distinct quoted terms");
+        for &tt in &quoted {
+            assert!(!is_embeddable(g, tt, TermScope::IriBlank));
+            assert!(is_embeddable(g, tt, TermScope::Embeddable));
+        }
+
+        // Literals: excluded under BOTH scopes.
+        let lit = g
+            .iter_ids()
+            .map(|[_, _, o]| o)
+            .find(|&o| matches!(g.dict.term_parts(o), TermParts::Lit { .. }))
+            .expect("fixture has a literal object");
+        assert!(!is_embeddable(g, lit, TermScope::IriBlank));
+        assert!(!is_embeddable(g, lit, TermScope::Embeddable));
+
+        // The default scope IS the byte-stable baseline.
+        assert_eq!(TermScope::default(), TermScope::IriBlank);
+    }
+
+    #[test]
+    fn default_scope_sampler_is_blind_to_quoted_terms_and_matches_unscoped() {
+        // On a quoted-term-BEARING graph, the unscoped `new` and the explicit `IriBlank` scope
+        // must be the same sampler: an empty quoted pool and bit-identical draws (the structural
+        // byte-stability guarantee: the OFF arm's PRNG stream is untouched by this change).
+        let c = close_for_vectorise(RDF12_NT, "ntriples", Profile::Rdfs).unwrap();
+        let g = &c.graph;
+        let tc = TypeConstraints::mine(g);
+        let unscoped = NegativeSampler::new(g, &tc, SamplingMode::Unconstrained);
+        let off =
+            NegativeSampler::new_scoped(g, &tc, SamplingMode::Unconstrained, TermScope::IriBlank);
+        assert_eq!(unscoped.triple_term_count(), 0);
+        assert_eq!(off.triple_term_count(), 0);
+        assert_eq!(unscoped.entity_count(), off.entity_count());
+
+        let alice = g.id_of(&iri("http://ex/alice")).unwrap();
+        let knows = g.id_of(&iri("http://ex/knows")).unwrap();
+        let bob = g.id_of(&iri("http://ex/bob")).unwrap();
+        for side in [Corrupt::Head, Corrupt::Tail] {
+            for seed in 0..8u64 {
+                assert_eq!(
+                    unscoped.sample([alice, knows, bob], side, 4, seed),
+                    off.sample([alice, knows, bob], side, 4, seed),
+                    "unscoped `new` must bit-reproduce the explicit IriBlank draws"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn embeddable_scope_corruption_is_sort_preserving() {
+        let c = close_for_vectorise(RDF12_NT, "ntriples", Profile::Rdfs).unwrap();
+        let g = &c.graph;
+        let tc = TypeConstraints::mine(g);
+        let s =
+            NegativeSampler::new_scoped(g, &tc, SamplingMode::Unconstrained, TermScope::Embeddable);
+        let quoted = quoted_term_ids(g);
+        assert_eq!(
+            s.triple_term_count(),
+            quoted.len(),
+            "quoted pool holds the quoted terms"
+        );
+
+        let stmt1 = g.id_of(&iri("http://ex/stmt1")).unwrap();
+        let reifies = g
+            .id_of(&iri("http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies"))
+            .unwrap();
+        let tt1 = quoted
+            .iter()
+            .copied()
+            .find(|&tt| {
+                g.iter_ids()
+                    .any(|[su, p, o]| su == stmt1 && p == reifies && o == tt)
+            })
+            .expect("stmt1 reifies a quoted term");
+        let is_quoted = |id: Id| matches!(g.dict.term_parts(id), TermParts::Triple(_));
+
+        // Corrupting the quoted-term TAIL slot must only ever emit quoted terms…
+        let mut tail_negs = Vec::new();
+        for seed in 0..16u64 {
+            tail_negs.extend(s.sample([stmt1, reifies, tt1], Corrupt::Tail, 4, seed));
+        }
+        assert!(
+            !tail_negs.is_empty(),
+            "expected quoted-term tail corruptions"
+        );
+        for [h, r, t] in &tail_negs {
+            assert_eq!((*h, *r), (stmt1, reifies));
+            assert!(
+                is_quoted(*t),
+                "a quoted slot must never be corrupted to an atomic entity"
+            );
+            assert_ne!(*t, tt1, "must not reproduce the original quoted term");
+        }
+
+        // …and corrupting the atomic HEAD slot of the same positive only atomic entities.
+        let mut head_negs = Vec::new();
+        for seed in 0..16u64 {
+            head_negs.extend(s.sample([stmt1, reifies, tt1], Corrupt::Head, 4, seed));
+        }
+        assert!(!head_negs.is_empty(), "expected atomic head corruptions");
+        for [h, r, t] in &head_negs {
+            assert_eq!((*r, *t), (reifies, tt1));
+            assert!(
+                !is_quoted(*h),
+                "an atomic slot must never be corrupted to a quoted term"
+            );
+        }
+
+        // Deterministic per (seed, scope).
+        let a = s.sample([stmt1, reifies, tt1], Corrupt::Tail, 4, 9);
+        let b = s.sample([stmt1, reifies, tt1], Corrupt::Tail, 4, 9);
+        assert_eq!(
+            a, b,
+            "fixed (seed, scope, triple, side) must reproduce identical negatives"
+        );
     }
 }

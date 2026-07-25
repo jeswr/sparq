@@ -122,6 +122,33 @@ export const PAPERS: Paper[] = [
       "Negative result — asserts NO proven security/privacy/soundness/attestation property (the collaborative path is unbuilt: 6 proof/attestation entry points fail closed with NotYetImplemented). Committed structural counts only: 4 re-audit lenses, all RE-OPEN; a 5-clause R-WV witness-validation obligation encoded as a build-time gate; 12 prior single-prover findings under the open external-audit gate. Estate is research-grade and not externally audited; cites the gates sq-qhy4 (external single-prover audit, open) + sq-9hrn (coZK re-audit). No performance claim.",
   },
   {
+    // [FABLE-5] sq-3kd2g.1 (epic sq-3kd2g / #1591) — the PURE SINGLE-PROVER zkSPARQL
+    // ARCHITECTURE paper. Distinct from the two existing C-family papers by design (verified
+    // gap, research/zksparql-fragment-extension.md §6): cozk-witness-validation.typ is the
+    // COLLABORATIVE (multi-prover) negative result; verifiable-fed-sparql.typ is the SoK; THIS
+    // is the single-prover SYSTEM (commitment scheme + fixed named circuit family + manifest
+    // composition + verifier re-derivation + the provable fragment). Status `draft`: the
+    // architecture + gate counts are real and traceable today, but the family is under the OPEN
+    // external-audit gate sq-qhy4, so it is C-family and asserts NO proven property. Headline
+    // evidence is DETERMINISTIC gate counts (bb ultra_honk from the regression-gated snapshot) +
+    // structural verifier facts; NO wall-clock headline (work-box timings are non-canonical — a
+    // proving-cost MODEL is published instead). Evidence keys: zkarch.* (canonical) +
+    // cozk.single_prover_audit_issues (the 12 internal-audit findings).
+    slug: "zksparql-architecture",
+    source: "zksparql-architecture.typ",
+    title:
+      "A Single-Prover Zero-Knowledge Architecture for Verifiable SPARQL over Committed RDF Graphs",
+    blurb:
+      "The system design of a single-prover zero-knowledge stack that proves a SPARQL result is a genuine evaluation over committed, issuer-attested RDF graphs — without disclosing the graphs. It describes the pieces that make the prover-as-adversary model tractable: per-graph Poseidon2 commitments over the RDFC-1.0 canonical form bound to Schnorr issuer attestations; a fixed, named family of 13 circuit kinds (31 compiled members) each proving one operator instance of a monotone, open-world-conforming SPARQL fragment (BGP scans, datatype-bucketed value FILTER, a hidden-credential equality JOIN); a JSON manifest that composes sub-proofs through checkable binding edges; and a verifier that re-derives the circuit identity and the claimed statement from the query text and the relying party's trust anchors — a 12-obligation, 4-audit-gate fail-closed pipeline that trusts nothing the prover declares. Cost is reported as deterministic bb UltraHonk gate counts from the regression-gated snapshot plus a linear proving-cost model over them (no wall-clock headline: development timings are non-canonical, so the missing per-host constant is named rather than quoted). Security is stated under the OPEN external-audit gate: the verifier is internally re-audited (12 findings found and remediated, each pinned closed by a standing forge-negative regression test) but NOT externally audited, so no proven property is claimed and the internal audit is framed as necessary-not-sufficient.",
+    authors: "Jesse Wright · the sparq project",
+    venue:
+      "PoPETs / a security or semantic-web privacy workshop — WIP; C-family, so arXiv-only until the external audit gate (sq-qhy4) closes and a canonical proving-time runner replaces the gate-count cost model",
+    status: "draft",
+    family: "C",
+    evidence:
+      "Deterministic artifact facts only, asserting NO proven security/soundness/privacy/attestation property (external audit gate sq-qhy4 OPEN). Canonical headline evidence: bb UltraHonk gate counts from the regression-gated snapshot (scan lattice 5991–34821; composable filter lanes gate-identical at 17416; join 7025–18681; revocation/hidden-issuer/holder members) + structural verifier facts (13 circuit kinds, 31 compiled members, 12 fail-closed binding obligations, 4 audit gates) + the internal-audit posture (12 confirmed findings, each pinned by a 1:1 forge-negative regression test). NO wall-clock headline — a linear proving-cost model over the gate counts is published because development timings are non-canonical (no canonical runner for this family). Cites sq-qhy4 throughout; hidden-holder tiers explicitly not-yet-sound; dual-leaf lane an accepted invariant downgrade.",
+  },
+  {
     slug: "fo-km-agent",
     source: "fo-km-agent.typ",
     title:
@@ -153,6 +180,48 @@ export const PAPERS: Paper[] = [
     family: "C",
     evidence:
       "Systematization — asserts NO proven security/privacy/soundness/attestation property and cites no wall-clock measurement. The only build-injected counts are the deterministic structural facts already gated as canonical for the C-family estate (fail-closed collaborative entry points, re-audit lenses all RE-OPEN, witness-validation obligation clauses, prior single-prover audit findings under the open gate sq-qhy4). Capability tiers are documentary (spec corpus + reconciled capability review), stated as such in the paper's limitations.",
+  },
+  {
+    // [SONNET-4.6] sq-gum8.9 — Register the SPARQL logic-bug testing paper. Status is
+    // `draft`: the merged harness (sq-gum8.6, crates/sparq-metamorph) is the committed
+    // instrument, but the cross-engine bug-hunting campaign (bead sq-gum8.11) has NOT run
+    // yet. No third-party bug is claimed anywhere; every campaign table in the .typ is an
+    // explicitly marked PLACEHOLDER. Evidence keys wired: metamorph.selftest_oracles,
+    // metamorph.selftest_seeds, metamorph.grammar_exclusion_seeds (all deterministic, canonical).
+    // Campaign keys (confirmed/reported/rejected) are pending sq-gum8.11 and NOT wired here.
+    slug: "sparql-logic-bugs",
+    source: "sparql-logic-bugs.typ",
+    title:
+      "Reifying the Error: Metamorphic and Differential Logic-Bug Testing for SPARQL Engines",
+    blurb:
+      "SPARQL has no dedicated logic-bug testing work. We re-derive TLP and NoREC for SPARQL by reifying its third evaluation outcome — a type error, not a value — with the language's only error-absorbing forms, yielding a partition that provably recomposes the unpartitioned query under the SPARQL 1.1 spec. The merged instrument (crates/sparq-metamorph) includes a TLP + NoREC + differential oracle suite whose self-tests assert non-vacuity against a seeded wrong-result mutant on the real engine. This is a first draft against the merged instrument only; the cross-engine bug-hunting campaign has not run, every campaign table is an explicit placeholder, and the paper's honest publishability condition — previously-unknown, developer-confirmed bugs in third-party engines — is not yet met.",
+    authors: "Jesse Wright · the sparq project",
+    venue:
+      "ISSTA 2027 (testing track) — first choice; PVLDB Vol 20 rolling or FSE 2027 — second choice. Draft; not submittable until the campaign (bead sq-gum8.11) yields confirmed third-party bugs",
+    status: "draft",
+    family: "A",
+    evidence:
+      "Deterministic instrument self-tests only (no campaign results yet): 3 oracle types (TLP, NoREC, differential) each asserting non-vacuity against a seeded wrong-result mutant on the real sparq engine; oracle correctness verified across 50 generated seeds on the pristine engine; grammar exclusion list verified across 200 seeds (no banned non-deterministic construct). Campaign-dependent evidence (bugs confirmed/reported/rejected) is pending bead sq-gum8.11 and is shown as an explicit PLACEHOLDER in the paper. No third-party bug is claimed.",
+  },
+  {
+    // [HAIKU-4.5] sq-gum8.9 — Register the engine systems paper. Status is `draft`:
+    // the architecture + substrate extraction + conformance breadth are traceable to the
+    // codebase today; the submission-gating evaluation (bead sq-vw3ax.12) has NOT run, so
+    // all competitive performance/memory figures are at-risk. Evidence records will be wired
+    // when those measurements land; no records are added here.
+    slug: "sparq-engine-systems",
+    source: "sparq-engine-systems.typ",
+    title:
+      "One Substrate, Many Standards: An Out-of-Core SPARQL Engine and a Measured Zero-Overhead Evaluation Core Across the W3C/OGC Spec Families",
+    blurb:
+      "RDF triple stores historically force a speed/breadth/frugality three-way trade-off. This paper describes an out-of-core engine reaching for all three: it stores triples memory-mapped in six permutations with inline-tagged ids, evaluates queries via mixed binary/worst-case-optimal/bind joins, and extracts its evaluation core into a single substrate shared unchanged across SPARQL, OWL profiles, RIF, stream processing, GeoSPARQL, and SHACL — validated as behaviour-neutral by deterministic layout ratchets and a cross-family conformance scoreboard. Competitive performance and memory claims are gated on a canonical-host evaluation (not yet run) and are not asserted.",
+    authors: "Jesse Wright · the sparq project",
+    venue:
+      "PVLDB Vol 20 rolling (monthly deadline through 2027-03-01); ICDE 2027 R2 (2026-11-11) or EDBT 2027 cycle 3 (2026-10-07) as alternatives. Draft; not submittable until the canonical-host evaluation (bead sq-vw3ax.12) yields the gated performance/memory results",
+    status: "draft",
+    family: "A",
+    evidence:
+      "The architecture (six permutation indexes, inline-tagged ids, mixed join families), the substrate extraction (single leaf crate consumed by all standards), and the conformance breadth (OWL RL/EL/QL, RIF, RSP, GeoSPARQL, SHACL, each pinned with a ratchet floor) are real and traceable to crates/sparq-core, crates/sparq-engine, crates/sparq-substrate, crates/sparq-reason*, crates/sparq-rsp, crates/sparq-geo, crates/sparq-shacl. Competitive performance and memory figures (latency vs native QLever/Virtuoso, bytes-per-triple vs HDT/qEndpoint, substrate zero-overhead delta, Sparqloscope and qEndpoint comparisons) are deterministic gating measurements on bead sq-vw3ax.12 and carry environment=canonical; they are pending and not claimed here.",
   },
 ];
 

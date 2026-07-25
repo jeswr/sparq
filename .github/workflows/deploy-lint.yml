@@ -1,0 +1,215 @@
+# deploy-lint.yml — static validation for deploy/ templates
+# [OPUS-4.8] sq-0d744 — cloud-deploy epic sq-3vjdr §4 CI-smoke contract
+# [GPT-5.6] Mandatory, checksum-pinned Helm + kubeconform validation.
+#
+# This workflow is separate from the native Rust workspace gate (ci-summary).
+
+name: deploy-lint
+
+on:
+  push:
+    paths:
+      - "deploy/**"
+      - ".github/workflows/deploy-lint.yml"
+  pull_request:
+    paths:
+      - "deploy/**"
+      - ".github/workflows/deploy-lint.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  helm-validate:
+    name: Helm lint, render, and schema validation (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install checksum-pinned validators
+        run: |
+          set -euo pipefail
+          HELM_VERSION="3.17.3"
+          KUBECONFORM_VERSION="0.6.7"
+          ARCH="$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')"
+
+          # [GPT-5.6] Digests are pinned per architecture; do not pipe unverified
+          # downloads into tar or silently skip a missing validator.
+          case "${ARCH}" in
+            amd64)
+              HELM_SHA256="ee88b3c851ae6466a3de507f7be73fe94d54cbf2987cbaa3d1a3832ea331f2cd"
+              KUBECONFORM_SHA256="95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73"
+              ;;
+            arm64)
+              HELM_SHA256="7944e3defd386c76fd92d9e6fec5c2d65a323f6fadc19bfb5e704e3eee10348e"
+              KUBECONFORM_SHA256="dc82f79bb03c5479b1ae5fd4af221e4b5a3111f62bf01a2795d9c5c20fa96644"
+              ;;
+            *)
+              echo "Unsupported runner architecture: ${ARCH}" >&2
+              exit 1
+              ;;
+          esac
+
+          HELM_ARCHIVE="helm-v${HELM_VERSION}-linux-${ARCH}.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://get.helm.sh/${HELM_ARCHIVE}" \
+            --output "/tmp/${HELM_ARCHIVE}"
+          echo "${HELM_SHA256}  /tmp/${HELM_ARCHIVE}" | sha256sum --check --strict
+          tar xzf "/tmp/${HELM_ARCHIVE}" -C /tmp
+          sudo install -m 0755 "/tmp/linux-${ARCH}/helm" /usr/local/bin/helm
+
+          KUBECONFORM_ARCHIVE="kubeconform-linux-${ARCH}.tar.gz"
+          curl --fail --silent --show-error --location \
+            "https://github.com/yannh/kubeconform/releases/download/v${KUBECONFORM_VERSION}/${KUBECONFORM_ARCHIVE}" \
+            --output "/tmp/${KUBECONFORM_ARCHIVE}"
+          echo "${KUBECONFORM_SHA256}  /tmp/${KUBECONFORM_ARCHIVE}" | sha256sum --check --strict
+          tar xzf "/tmp/${KUBECONFORM_ARCHIVE}" -C /tmp kubeconform
+          sudo install -m 0755 /tmp/kubeconform /usr/local/bin/kubeconform
+
+          helm version --short
+          kubeconform -v
+
+      - name: Secret-literal hygiene check (R4)
+        run: |
+          set -euo pipefail
+          # [GPT-5.6] Quickstarts may reference a Secret but must never create an
+          # editable placeholder Secret in a committed manifest.
+          if grep -RIn --include="*.yaml" --include="*.yml" \
+               -E 'kind:[[:space:]]*Secret' deploy/helm/quickstart; then
+            echo "ERROR: quickstart manifests must reference, not create, Secrets (R4)." >&2
+            exit 1
+          fi
+          if grep -RIn --include="*.yaml" --include="*.yml" \
+               -E "^[[:space:]]*[A-Za-z0-9_.-]*(token|password|passwd|private[_-]?key)[A-Za-z0-9_.-]*[[:space:]]*:[[:space:]]*['\"]?[A-Za-z0-9+/=_-]{24,}['\"]?[[:space:]]*$" \
+               deploy/; then
+            echo "ERROR: possible plaintext credential in deploy/; use a Secret reference (R4)." >&2
+            exit 1
+          fi
+
+      - name: Helm lint
+        run: |
+          set -euo pipefail
+          helm lint ./deploy/helm/sparq \
+            --set auth.existingSecret=my-auth-secret
+          helm lint ./deploy/helm/sparq \
+            --set server=lws \
+            --set lws.trustedIssuer=https://solidcommunity.net \
+            --set lws.baseUrl=https://lws.example.com
+
+      - name: Render supported configurations
+        run: |
+          set -euo pipefail
+          helm template sparq ./deploy/helm/sparq \
+            --set auth.existingSecret=my-auth-secret \
+            > /tmp/sparq-server-rendered.yaml
+
+          helm template sparq ./deploy/helm/sparq \
+            --set auth.existingSecret=my-auth-secret \
+            --set service.port=8443 \
+            --set ingress.enabled=true \
+            --set ingress.host=sparq.example.com \
+            --set-string 'ingress.annotations.cert-manager\.io/cluster-issuer=letsencrypt-prod' \
+            --set ingress.tls.enabled=true \
+            --set ingress.tls.secretName=sparq-tls \
+            > /tmp/sparq-server-ingress-rendered.yaml
+
+          helm template sparq-lws ./deploy/helm/sparq \
+            --set server=lws \
+            --set lws.trustedIssuer=https://solidcommunity.net \
+            --set lws.baseUrl=https://lws.example.com \
+            --set ingress.enabled=true \
+            --set ingress.host=lws.example.com \
+            --set ingress.tls.enabled=true \
+            --set ingress.tls.secretName=lws-tls \
+            > /tmp/lws-rendered.yaml
+
+          # [GPT-5.6] Exercise the conditional storage path; it was a silent
+          # branch before review.
+          helm template sparq ./deploy/helm/sparq \
+            --set auth.existingSecret=my-auth-secret \
+            --set persistence.enabled=true \
+            > /tmp/sparq-server-pvc-rendered.yaml
+
+      - name: Assert rendered security and runtime contracts
+        run: |
+          set -euo pipefail
+          # [GPT-5.6] Pin the provider-specific facts that schema validation cannot
+          # infer: canonical image, bind address, per-server probes, TLS redirect,
+          # Secret injection, and non-root/read-only execution.
+          grep -q 'image: "ghcr.io/sparq-org/sparq-server:latest"' /tmp/sparq-server-rendered.yaml
+          grep -q 'name: SPARQ_AUTH_TOKEN' /tmp/sparq-server-rendered.yaml
+          grep -q 'secretKeyRef:' /tmp/sparq-server-rendered.yaml
+          grep -q 'path: /health' /tmp/sparq-server-rendered.yaml
+          grep -q 'imagePullPolicy: Always' /tmp/sparq-server-rendered.yaml
+          grep -q 'readOnlyRootFilesystem: true' /tmp/sparq-server-rendered.yaml
+          grep -q 'automountServiceAccountToken: false' /tmp/sparq-server-rendered.yaml
+          grep -q 'fsGroup: 65532' /tmp/sparq-server-rendered.yaml
+
+          grep -q 'nginx.ingress.kubernetes.io/force-ssl-redirect: "true"' /tmp/sparq-server-ingress-rendered.yaml
+          grep -q 'secretName: "sparq-tls"' /tmp/sparq-server-ingress-rendered.yaml
+          grep -q 'number: 8443' /tmp/sparq-server-ingress-rendered.yaml
+
+          grep -q 'image: "ghcr.io/sparq-org/sparq-lws-core:latest"' /tmp/lws-rendered.yaml
+          grep -q 'name: SOLID_SERVER_BIND' /tmp/lws-rendered.yaml
+          grep -q 'value: "0.0.0.0:3000"' /tmp/lws-rendered.yaml
+          grep -q 'path: /livez' /tmp/lws-rendered.yaml
+          grep -q 'path: /readyz' /tmp/lws-rendered.yaml
+
+          if grep -q '^kind: Secret$' \
+               /tmp/sparq-server-rendered.yaml \
+               /tmp/sparq-server-ingress-rendered.yaml \
+               /tmp/sparq-server-pvc-rendered.yaml \
+               /tmp/lws-rendered.yaml; then
+            echo "ERROR: rendered chart must not create a Secret (R4)." >&2
+            exit 1
+          fi
+
+      - name: Assert unsafe values fail closed
+        run: |
+          set -euo pipefail
+          assert_fails() {
+            if helm template rejected ./deploy/helm/sparq "$@" >/dev/null 2>&1; then
+              echo "ERROR: unsafe values unexpectedly rendered: $*" >&2
+              exit 1
+            fi
+          }
+
+          # [GPT-5.6] Each case previously rendered an unsafe or broken workload.
+          assert_fails
+          assert_fails --set auth.existingSecret=my-auth-secret --set server=typo
+          assert_fails --set auth.existingSecret=my-auth-secret --set service.type=LoadBalancer
+          assert_fails --set auth.existingSecret=my-auth-secret --set replicaCount=2
+          assert_fails --set auth.existingSecret=my-auth-secret \
+            --set ingress.enabled=true --set ingress.host=sparq.example.com
+          assert_fails --set auth.existingSecret=my-auth-secret \
+            --set ingress.enabled=true --set ingress.ingressClassName=traefik \
+            --set ingress.host=sparq.example.com --set ingress.tls.enabled=true \
+            --set ingress.tls.secretName=sparq-tls
+          assert_fails --set server=lws --set replicaCount=2 \
+            --set lws.trustedIssuer=https://solidcommunity.net \
+            --set lws.baseUrl=https://lws.example.com
+          assert_fails --set server=lws \
+            --set lws.trustedIssuer=http://idp.example.com \
+            --set lws.baseUrl=http://lws.example.com
+          assert_fails --set server=lws \
+            --set lws.trustedIssuer=https://solidcommunity.net \
+            --set lws.baseUrl=https://different.example.com \
+            --set ingress.enabled=true --set ingress.host=lws.example.com \
+            --set ingress.tls.enabled=true --set ingress.tls.secretName=lws-tls
+          assert_fails --set server=lws \
+            --set lws.trustedIssuer=https://solidcommunity.net \
+            --set lws.baseUrl=https://lws.example.com \
+            --set persistence.enabled=true
+
+      - name: Strict Kubernetes schema validation
+        run: |
+          set -euo pipefail
+          # [GPT-5.6] kubeconform is a required validator, not best-effort.
+          kubeconform -strict -summary -exit-on-error \
+            /tmp/sparq-server-rendered.yaml \
+            /tmp/sparq-server-ingress-rendered.yaml \
+            /tmp/sparq-server-pvc-rendered.yaml \
+            /tmp/lws-rendered.yaml \
+            deploy/helm/quickstart/sparq-server-quickstart.yaml

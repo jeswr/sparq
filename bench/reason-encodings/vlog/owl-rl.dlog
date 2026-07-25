@@ -1,0 +1,82 @@
+# [FABLE-5] sq-hmd7l.30 — VLog OWL 2 RL/RDF Datalog encoding that REPRODUCES sparq's
+# OWL-RL closure of LUBM(1) EXACTLY (150589 triples, set-for-set — validated, no delta).
+#
+# 🤖 SPARQ agent. VLog (github.com/karmaresearch/vlog, Apache-2.0) is a general
+# Datalog engine; this file is the validated OWL-RL rule program whose forward
+# materialization reproduces `sparq-cli reason … owl` on LUBM (crates/sparq-reason/
+# src/owl.rs). EDB: the input N-Triples is bound to TE(subject,predicate,object) via
+# edb.conf (scripts/bench-adapters/vlog_adapter.py writes it and runs `mat`).
+#
+# CLOSURE PREDICATE: T(S,P,O) accumulates the FULL materialized graph (base + every
+# entailed triple), so the stored |T| (mat --storemat) equals sparq's closure size.
+#
+# VLOG SYNTAX NOTES (load-bearing): (1) every rule MUST be on ONE line (VLog treats a
+# newline as a rule terminator; a wrapped body => "Missing ':-'"). (2) `#`-comment and
+# blank lines are NOT accepted in the rules stream — the adapter strips them before
+# `mat`. (3) rdf:/rdfs: are built-in prefix abbreviations; owl: vocab uses full IRIs.
+#
+# ── RULE SET (RDFS-6 + exactly the OWL-RL rules the LUBM TBox exercises) ──────────
+# The LUBM Univ-Bench TBox uses ONLY subClassOf/domain/range/subPropertyOf,
+# owl:inverseOf (3 pairs), owl:TransitiveProperty (subOrganizationOf),
+# owl:someValuesFrom restrictions (8), owl:intersectionOf (6). NO owl:sameAs /
+# functional / cardinality / unionOf / oneOf / hasValue / propertyChain / hasKey — those
+# rule families NEVER fire and are DELIBERATELY ABSENT (any would over-count). sparq
+# emits NO reflexive scm-*/eq-* triples and NO axiomatic owl:Thing typing on LUBM, so
+# this program adds none. VALIDATED set-identical to sparq (0 diff both directions,
+# 150589) — reconciliation cross-checked in scripts/bench/materialize-same-box.sh.
+#
+# NOTE: the intersectionOf list-membership rules (cls-int1) are written as an explicit
+# list-arity decode for lengths 1 and 2, the arities the LUBM TBox actually uses (all
+# owl:intersectionOf lists here are length 1 or 2). scm-int (C subClassOf each conjunct)
+# uses a recursive list walk so it generalises to any list length.
+
+# base graph flows into the closure predicate.
+T(S,P,O) :- TE(S,P,O)
+
+# ===== RDFS 6 rules ===========================================================
+T(P,rdfs:subPropertyOf,R) :- T(P,rdfs:subPropertyOf,Q), T(Q,rdfs:subPropertyOf,R)
+T(C,rdfs:subClassOf,E) :- T(C,rdfs:subClassOf,D), T(D,rdfs:subClassOf,E)
+T(S,Q,O) :- T(P,rdfs:subPropertyOf,Q), T(S,P,O)
+T(S,rdf:type,C) :- T(P,rdfs:domain,C), T(S,P,O)
+T(O,rdf:type,C) :- T(P,rdfs:range,C), T(S,P,O)
+T(S,rdf:type,D) :- T(S,rdf:type,C), T(C,rdfs:subClassOf,D)
+
+# ===== OWL property rules =====================================================
+# prp-inv1/2 — inverseOf, both directions
+T(Y,Q,X) :- T(P,<http://www.w3.org/2002/07/owl#inverseOf>,Q), T(X,P,Y)
+T(Y,P,X) :- T(P,<http://www.w3.org/2002/07/owl#inverseOf>,Q), T(X,Q,Y)
+# prp-trp — TransitiveProperty
+T(X,P,Z) :- T(P,rdf:type,<http://www.w3.org/2002/07/owl#TransitiveProperty>), T(X,P,Y), T(Y,P,Z)
+
+# ===== OWL restriction / class-expression rules ===============================
+# cls-svf1 — someValuesFrom membership:  R onProp pp, R svf cc, (x pp v),(v type cc) => (x type R)
+T(X,rdf:type,R) :- T(R,<http://www.w3.org/2002/07/owl#onProperty>,PP), T(R,<http://www.w3.org/2002/07/owl#someValuesFrom>,CC), T(X,PP,V), T(V,rdf:type,CC)
+
+# scm-int — C intersectionOf list => C subClassOf each conjunct (recursive list walk).
+IntTail(C,L) :- T(C,<http://www.w3.org/2002/07/owl#intersectionOf>,L)
+IntTail(C,R) :- IntTail(C,L), T(L,rdf:rest,R)
+T(C,rdfs:subClassOf,D) :- IntTail(C,L), T(L,rdf:first,D)
+
+# cls-int1 — intersection membership, explicit for list arities 1 and 2 (the arities
+# present in LUBM); conjunct classes are bound from the small list before the type join.
+Int1(C,A) :- T(C,<http://www.w3.org/2002/07/owl#intersectionOf>,L), T(L,rdf:first,A), T(L,rdf:rest,rdf:nil)
+Int2(C,A,B) :- T(C,<http://www.w3.org/2002/07/owl#intersectionOf>,L), T(L,rdf:first,A), T(L,rdf:rest,M), T(M,rdf:first,B), T(M,rdf:rest,rdf:nil)
+T(X,rdf:type,C) :- Int1(C,A), T(X,rdf:type,A)
+T(X,rdf:type,C) :- Int2(C,A,B), T(X,rdf:type,A), T(X,rdf:type,B)
+
+# ===== OWL schema-propagation rules ===========================================
+# scm-dom1/scm-rng1 — domain/range climb the subClassOf hierarchy
+T(P,rdfs:domain,C2) :- T(P,rdfs:domain,C1), T(C1,rdfs:subClassOf,C2)
+T(P,rdfs:range,C2) :- T(P,rdfs:range,C1), T(C1,rdfs:subClassOf,C2)
+# domain/range descend the subPropertyOf hierarchy
+T(P,rdfs:domain,C) :- T(P,rdfs:subPropertyOf,Q), T(Q,rdfs:domain,C)
+T(P,rdfs:range,C) :- T(P,rdfs:subPropertyOf,Q), T(Q,rdfs:range,C)
+# scm-dom2/scm-rng2 — domain/range swap across inverseOf
+T(P,rdfs:domain,C) :- T(P,<http://www.w3.org/2002/07/owl#inverseOf>,Q), T(Q,rdfs:range,C)
+T(P,rdfs:range,C) :- T(P,<http://www.w3.org/2002/07/owl#inverseOf>,Q), T(Q,rdfs:domain,C)
+
+# scm-svf2 — someValuesFrom restrictions on the same property, subClassOf fillers.
+# Restriction schema is collected into a small Restr relation first (avoids a wide
+# self-join over the full closure).
+Restr(R,PP,Y) :- T(R,<http://www.w3.org/2002/07/owl#onProperty>,PP), T(R,<http://www.w3.org/2002/07/owl#someValuesFrom>,Y)
+T(R1,rdfs:subClassOf,R2) :- Restr(R1,PP,Y1), Restr(R2,PP,Y2), T(Y1,rdfs:subClassOf,Y2)

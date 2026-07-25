@@ -1,0 +1,66 @@
+{
+  "_comment": [
+    "[FABLE-5] sq-hmd7l.15 — PINNED published W3C JSON-LD 1.1 conformance results for the",
+    "jsonld-bench peers (bench/competitors.json: jsonld-js, titanium-json-ld), plus sparq's",
+    "own MEASURED lane counts. Every peer number is FETCHED from the cited source on the",
+    "retrieval date — never estimated. Rendered as a table (with the comparability caveats)",
+    "in research/gap-jsonld-2026-07.md.",
+    "",
+    "COMPARABILITY CAVEATS (load-bearing — do not collapse into one pass-rate column):",
+    "1. DENOMINATORS DIFFER BY SUITE SNAPSHOT. The W3C EARL report and Titanium's README",
+    "   were generated against older w3c/json-ld-api revisions (e.g. expand total 376)",
+    "   than sparq's pinned revision (expand total 385; pin in scripts/fetch-jsonld-tests.sh).",
+    "   Percentages are only comparable within a row's own denominator.",
+    "2. ORACLES DIFFER FOR sparq's compact + frame LANES. sparq's compact/frame counts use a",
+    "   round-trip RDF losslessness oracle (reparse(compact(D,ctx)) == D), NOT the suite's",
+    "   structural expected-document assertion the peers report against — so those two rows",
+    "   are NOT 1:1 comparable and are marked oracle=roundtrip-rdf. sparq's expand/flatten",
+    "   (document-level deep-equality) and toRdf/fromRdf (dataset equality) lanes ARE the",
+    "   same assertion shape the peers run.",
+    "3. SKIP TAXONOMY. sparq SKIPS (never counts) NegativeEvaluationTests in the expand lane",
+    "   and the option-feature/remote buckets; peers typically run negatives. pass/fail/skip",
+    "   triples are given so no skip is silently folded into a pass rate."
+  ],
+  "sparq": {
+    "source": "MEASURED in-tree: cargo test -p sparq-conformance --features jsonld-suite --test jsonld_suite",
+    "suite_revision": "w3c/json-ld-api @ 8654ac22b6cf4f441d2fee915ae634d36b5a8067 (pin: scripts/fetch-jsonld-tests.sh); w3c/json-ld-framing @ 3bf782ba9a40dd1b143435abe386d38df64f2b47",
+    "measured_at": "2026-07-11",
+    "lanes": {
+      "expand": {"pass": 276, "fail": 0, "skip": 109, "total": 385, "oracle": "document-level deep-equality (json_ld_equal)"},
+      "flatten": {"pass": 53, "fail": 0, "skip": 5, "total": 58, "oracle": "document-level deep-equality (json_ld_equal)"},
+      "toRdf": {"pass": 413, "fail": 32, "skip": 22, "total": 467, "oracle": "canonical dataset equality"},
+      "fromRdf": {"pass": 52, "fail": 0, "skip": 1, "total": 53, "oracle": "canonical dataset equality"},
+      "compact": {"pass": 186, "fail": 35, "skip": 25, "total": 246, "oracle": "roundtrip-rdf (NOT the suite's structural assertion — see caveat 2)"},
+      "frame": {"pass": 61, "fail": 28, "skip": 3, "total": 92, "oracle": "roundtrip-rdf-shaped (NOT the suite's structural assertion — see caveat 2)"}
+    }
+  },
+  "jsonld-js": {
+    "source": "W3C JSON-LD 1.1 implementation report (EARL), https://w3c.github.io/json-ld-api/reports/",
+    "source_document_date": "2025-04-10",
+    "retrieved": "2026-07-11",
+    "note": "percentage-passed rows as published; totals are the REPORT's manifest sizes (older suite snapshot than sparq's pin — caveat 1)",
+    "lanes": {
+      "expansion": {"percent_passed": 97.3, "total": 376},
+      "compaction": {"percent_passed": 97.5, "total": 244},
+      "flattening": {"percent_passed": 100.0, "total": 55},
+      "framing": {"percent_passed": 97.8, "total": 91},
+      "toRdf": {"percent_passed": 95.2, "total": 456},
+      "fromRdf": {"percent_passed": 94.2, "total": 52},
+      "remote-doc": {"percent_passed": 94.4, "total": 18}
+    }
+  },
+  "titanium-json-ld": {
+    "source": "titanium-json-ld README conformance table, https://github.com/filip26/titanium-json-ld (commit ab0ccd4b50bdbd5d25422c486233f59e5ad8a679, 2026-06-06); EARL cross-reference https://w3c.github.io/json-ld-api/reports/#subj_Titanium_JSON_LD_Java",
+    "retrieved": "2026-07-11",
+    "note": "self-published table (newer than the EARL snapshot, which lists 98.1% expansion / 98.0% compaction / 96.7% framing / 97.6% toRdf for Titanium)",
+    "lanes": {
+      "expansion": {"pass": 376, "total": 376},
+      "compaction": {"pass": 244, "total": 244},
+      "flattening": {"pass": 55, "total": 55},
+      "toRdf": {"pass": 454, "total": 456},
+      "fromRdf": {"pass": 52, "total": 52},
+      "framing": {"pass": 90, "total": 91},
+      "remote-doc": {"pass": 17, "total": 18}
+    }
+  }
+}

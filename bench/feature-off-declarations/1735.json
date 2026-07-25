@@ -1,0 +1,5 @@
+{
+  "pr": 1735,
+  "date": "2026-07-07",
+  "reason": "adding the algebra-rewrite feature entry to sparq-engine Cargo.toml rehashes crate metadata (symbol re-mangle): feature-OFF bundle content changes at +0 bytes size delta; all added code is cfg-gated and the feature-OFF parse arm is token-identical to main"
+}

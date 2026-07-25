@@ -11,6 +11,34 @@
 //   CR4    ∃r.D ⊑ E ∈ T,  (X,Y) ∈ R(r),  D ∈ S(Y)   ⇒  E ∈ S(X)
 //   CR5    (X,Y) ∈ R(r),  ⊥ ∈ S(Y)         ⇒  ⊥ ∈ S(X)
 //   CR6    {a} ∈ S(X) ∩ S(Y),  X ⇝_R Y     ⇒  S(X) := S(X) ∪ S(Y)
+//   CRs1   ∃r.Self ∈ S(X)                  ⇒  (X,X) ∈ R(r)                       [sq-pbz04.2.6]
+//   CRs2   (X,X) ∈ R(r),  ∃r.Self ⊑ D ∈ T  ⇒  D ∈ S(X)   (self-concept atom + CR1; see below)
+//   CRs3   (X,X) ∈ R(r),  X a NOMINAL {a}  ⇒  ∃r.Self ∈ S(X)                     [sq-8zqwb]
+//
+// [OPUS-4.8] sq-pbz04.2.6 — the two EL++ self-restriction (`owl:hasSelf` / `ObjectHasSelf`)
+// completion rules. `∃r.Self` (the LOCAL reflexivity concept `{x | (x,x) ∈ r}`) is extracted as
+// a distinguished basic concept atom (`Names::self_concept`), so `X ⊑ ∃r.Self` and `∃r.Self ⊑ D`
+// reduce to ordinary `Normal::Sub` axioms and CR1/CR2/CR4 propagate `∃r.Self` memberships for
+// free. CRs1 is the ONE genuinely new rule (implemented in the worklist below): when the atom
+// `∃r.Self` lands in S(X) — i.e. `X ⊑ ∃r.Self` — it adds the reflexive link `(X,X) ∈ R(r)` (which
+// then feeds CR4/CR5). CRs2 is realised BY CR1: `∃r.Self ⊑ D` is the axiom `Sub(self_r, D)`, so
+// `∃r.Self ∈ S(X)` fires `D ∈ S(X)` directly. SOUNDNESS side-condition (load-bearing): CRs2's
+// premise `(X,X) ∈ R(r)` is tracked as the self-concept membership `∃r.Self ∈ S(X)`, NOT the raw
+// R-link — a general self-link from CR3 (`X ⊑ ∃r.X`, whose invariant is only `X ⊑ ∃r.X`, NOT
+// `X ⊑ ∃r.Self`) must NEVER trigger CRs2. CRs1 IS sound to add to the ordinary link set because
+// `X ⊑ ∃r.Self ⟹ X ⊑ ∃r.X` (the self-successor is X itself), so the R-invariant holds.
+//
+// [FABLE-5] sq-8zqwb (EL wave-2) — CRs3, the NOMINAL-REFLEXIVITY converse of CRs1: a SAME-NOMINAL
+// self-link `({a},{a}) ∈ R(r)` (e.g. the internalized assertion `a r a`, asserted OR derived)
+// reads off as `∃r.Self ∈ S({a})`. SOUND because a nominal denotes a singleton: the R-invariant
+// gives `T ⊨ {a} ⊑ ∃r.{a}`, so a^I's r-successor inside `{a^I}` IS a^I itself — `(a^I,a^I) ∈ r^I`,
+// which is exactly `a^I ∈ (∃r.Self)^I`, i.e. `T ⊨ {a} ⊑ ∃r.Self`. The nominal guard is
+// load-bearing: for a GENERAL X the CRs2 side-condition above stands unchanged (each member of X
+// has SOME r-successor in X, not necessarily itself). Implemented at the single link chokepoint
+// (`add_link`), so asserted, derived, and (under `rbox`) role-closed self-links all fire it in
+// BOTH engines; on a hasSelf-free ontology the `∃r.Self` lookup is `None` and nothing changes.
+// Graduates the WG `New-Feature-SelfRestriction-002` converse shape ("Peter likes Peter ⊨ Peter
+// ∈ ∃likes.Self") that sq-pbz04.2.6 pinned as an honest boundary (deferred from #1681).
 //
 // CR4 is the load-bearing existential-traversal rule that OWL 2 RL lacks (spike §1.2): it is
 // the only rule that reasons THROUGH an r-successor, and it is why running `--reason owl` over
@@ -18,7 +46,9 @@
 // saturation: a per-concept queue of newly-derived subsumers drives rule application, so each
 // derived membership is processed once. CR6 (the nominal rule, "Pushing the EL Envelope"
 // IJCAI-05) runs as a between-fixpoint pass — see `cr6_pass` for the rule, the ⇝_R
-// side-condition, and the soundness argument. Single-threaded (Phase E1; concurrency is E4).
+// side-condition, and the soundness argument. Single-threaded by default (Phase E1); the opt-in
+// `par` feature (Phase E4, sq-wy3i6) adds the deterministic bulk-synchronous parallel engine at
+// the tail of this file — same rules, same least fixpoint, identical closure at every thread count.
 //
 // ## Substrate adoption evaluation -- REASONED NON-ADOPTION [SONNET-4.6] sq-pbz04.2.3
 //
@@ -84,10 +114,11 @@
 // coupled, with no round boundary to hang a delta on.
 //
 // Conclusion: this module stays on its hand-rolled FxHashMap worklist. There is no
-// profitable behaviour-neutral seam to the substrate kernels for CR1-CR5. If a
-// concurrency refactor (Phase E4) eventually batches derivations by concept, that is
-// the point to reconsider whether a per-batch substrate probe makes sense -- that
-// decision belongs to E4, not here.
+// profitable behaviour-neutral seam to the substrate kernels for CR1-CR5. [FABLE-5]
+// sq-wy3i6 (the E4 concurrency this note anticipated): the `par` engine batches the
+// frontier into bulk-synchronous ROUNDS, but each rule firing is still a per-membership
+// hash-set probe against mutating S/R state (the apply phase mutates between rounds), so
+// reasons 2-4 hold unchanged and the non-adoption verdict stands for the parallel path too.
 
 use crate::normal::{Concept, Names, Normal, Role, BOTTOM, TOP};
 #[cfg(feature = "rbox")]
@@ -171,6 +202,9 @@ fn saturate_inner(
 ) -> Saturation {
     let ix = AxiomIndex::build(axioms);
     let n = names.concept_count();
+    // [OPUS-4.8] sq-pbz04.2.6: O(1) fast-path guard — on a hasSelf-free ontology CRs1 is skipped
+    // entirely, so classification is byte-identical (behaviour AND cost) to the pre-CR-Self path.
+    let has_self = names.has_self_restrictions();
     let mut sat = Saturation {
         s: vec![FxHashSet::default(); n],
         r_pred: FxHashMap::default(),
@@ -210,9 +244,24 @@ fn saturate_inner(
             if let Some(links) = ix.exists.get(&d) {
                 for &(r, f) in links {
                     #[cfg(feature = "rbox")]
-                    add_link_rbox(&mut sat, r, x, f, &ix, role_box, &mut queue);
+                    add_link_rbox(&mut sat, r, x, f, &ix, names, role_box, &mut queue);
                     #[cfg(not(feature = "rbox"))]
-                    add_link(&mut sat, r, x, f, &ix, &mut queue);
+                    add_link(&mut sat, r, x, f, &ix, names, &mut queue);
+                }
+            }
+            // CRs1 (sq-pbz04.2.6): the self-restriction concept `∃r.Self` just entered S(X) —
+            // i.e. `X ⊑ ∃r.Self` — so add the reflexive link `(X,X) ∈ R(r)`. `add_link` fires
+            // CR4/CR5 for it, and under `rbox` `add_link_rbox` closes it under role
+            // inclusion/composition. SOUND: `X ⊑ ∃r.Self ⟹ X ⊑ ∃r.X` (the r-successor is X
+            // itself), so `(X,X) ∈ R(r)` respects the `(C,D) ∈ R(r) ⟹ T ⊨ C ⊑ ∃r.D` invariant.
+            // CRs2 needs NO code here: `∃r.Self ⊑ D` is the axiom `Sub(self_r, D)`, so the `D ∈
+            // S(X)` conclusion already fired via CR1 above when `∃r.Self` entered S(X).
+            if has_self {
+                if let Some(r) = names.self_role(d) {
+                    #[cfg(feature = "rbox")]
+                    add_link_rbox(&mut sat, r, x, x, &ix, names, role_box, &mut queue);
+                    #[cfg(not(feature = "rbox"))]
+                    add_link(&mut sat, r, x, x, &ix, names, &mut queue);
                 }
             }
             // CR4 / CR5 with the new membership `D ∈ S(X)` as the trigger, where X is the
@@ -371,14 +420,18 @@ fn add(set: &mut FxHashSet<Concept>, x: Concept, e: Concept, queue: &mut Vec<(Co
 
 /// Adds the existential link `(x, f) ∈ R(r)` and fires the link-triggered half of CR4/CR5:
 /// for the NEW link, every `D ∈ S(f)` with an axiom `∃r.D ⊑ E` yields `E ∈ S(x)`, and a
-/// pre-existing `⊥ ∈ S(f)` yields `⊥ ∈ S(x)` (CR5). Returns `true` iff the link was new (so the
-/// `rbox` caller can decide whether to close it under CR10/CR11).
+/// pre-existing `⊥ ∈ S(f)` yields `⊥ ∈ S(x)` (CR5). Also fires CRs3 ([FABLE-5] sq-8zqwb): a
+/// SAME-NOMINAL self-link `({a},{a}) ∈ R(r)` adds `∃r.Self` to `S({a})` — this is the single
+/// chokepoint every link insertion (CR3, CRs1, the `rbox` closure, and the `par` apply phase)
+/// flows through, so asserted, derived, and role-closed self-links all read off. Returns `true`
+/// iff the link was new (so the `rbox` caller can decide whether to close it under CR10/CR11).
 fn add_link(
     sat: &mut Saturation,
     r: Role,
     x: Concept,
     f: Concept,
     ix: &AxiomIndex,
+    names: &Names,
     queue: &mut Vec<(Concept, Concept)>,
 ) -> bool {
     let succ = sat.r_succ.entry(r).or_default().entry(x).or_default();
@@ -391,6 +444,16 @@ fn add_link(
         .entry(f)
         .or_default()
         .insert(x);
+
+    // CRs3 ([FABLE-5] sq-8zqwb): a same-nominal self-link is LOCAL reflexivity — `({a},{a}) ∈
+    // R(r)` puts `∃r.Self` into S({a}). Sound because `{a}` is a singleton (see the module doc);
+    // the nominal guard is load-bearing (a general `(X,X)` link from `X ⊑ ∃r.X` must NOT fire).
+    // On a hasSelf-free ontology `self_concept_of` is `None` and the branch is dead.
+    if x == f && names.is_nominal(x) {
+        if let Some(sc) = names.self_concept_of(r) {
+            add(&mut sat.s[x as usize], x, sc, queue);
+        }
+    }
 
     // CR4 for the new link: scan S(f) for fillers D with an `∃r.D ⊑ E` axiom.
     let s_f: Vec<Concept> = sat.s[f as usize].iter().copied().collect();
@@ -420,20 +483,26 @@ fn add_link(
 /// super-roles of derived roles also propagate — the standard RBox link-saturation. The worklist
 /// is bounded by the number of distinct `(role, x, f)` triples (each is stored at most once in
 /// `r_succ`), so the fixpoint terminates.
+// [OPUS-4.8] Each argument is a genuinely distinct saturation input (the mutable state, the
+// seed link `(r, x, f)`, three read-only indices, and the shared queue); bundling them into a
+// context struct here would obscure the CR3/CR10/CR11 seam without simplifying anything, so we
+// take the clippy-documented override for this private RBox helper rather than churn the shape.
 #[cfg(feature = "rbox")]
+#[allow(clippy::too_many_arguments)]
 fn add_link_rbox(
     sat: &mut Saturation,
     r: Role,
     x: Concept,
     f: Concept,
     ix: &AxiomIndex,
+    names: &Names,
     role_box: &RoleBox,
     queue: &mut Vec<(Concept, Concept)>,
 ) {
     // Each work item is a link to STORE (already at its exact role). Seed with the CR3 link.
     let mut links: Vec<(Role, Concept, Concept)> = vec![(r, x, f)];
     while let Some((lr, lx, lf)) = links.pop() {
-        if !add_link(sat, lr, lx, lf, ix, queue) {
+        if !add_link(sat, lr, lx, lf, ix, names, queue) {
             continue; // link already present — its consequences were already enqueued.
         }
         // CR10: propagate to every strict super-role of `lr` (super_roles includes lr itself).
@@ -504,4 +573,252 @@ pub fn classify(sat: &Saturation, names: &Names) -> Classification {
         subsumers,
         unsatisfiable,
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// [FABLE-5] sq-wy3i6 (Phase E4): PARALLEL saturation — a deterministic bulk-synchronous
+// parallel (BSP) fixpoint over the SAME completion rules as `saturate_inner`.
+//
+// ## Design (why BSP rounds, not a lock-per-S-set pool)
+//
+// The single-threaded engine interleaves rule DERIVATION with state MUTATION per queue item.
+// The parallel engine splits every worklist drain into rounds:
+//
+//   1. COMPUTE (parallel, read-only): the current membership frontier — every `(X, D)` pair
+//      whose `D ∈ S(X)` was inserted since the previous round — is partitioned across a
+//      bounded `std::thread::scope` worker pool. Each worker derives the CR1/CR2/CR3/CRs1
+//      and membership-triggered CR4/CR5 firings for its chunk against the ROUND-START
+//      snapshot of `Saturation` (shared `&Saturation`; nothing mutates during compute).
+//   2. APPLY (sequential): the derived memberships/links are applied IN CHUNK ORDER through
+//      the exact single-threaded `add` / `add_link` (/ `add_link_rbox`) machinery, so the
+//      link-triggered half of CR4/CR5 — and the whole CR10/CR11 role closure under `rbox` —
+//      runs unchanged; newly-inserted memberships form the next round's frontier.
+//
+// The CR6 nominal pass alternates with the drained worklist exactly as in `saturate_inner`
+// (it is a between-fixpoint pass in both engines and stays sequential).
+//
+// ## Completeness (no rule firing is lost to an interleaving)
+//
+// The queue-item invariant of the sequential engine is preserved verbatim: a pair `(X, D)`
+// is enqueued ONLY after `D` is inserted into `S(X)`, so every frontier membership is
+// visible in the snapshot its own round computes against. For any rule instance whose
+// premises all eventually hold, order the premise-insertion events; the LAST one is either
+// (a) a membership event — its compute round starts after every other premise was inserted,
+// so the snapshot contains them all and the instance fires there (for CR2 this is exactly
+// the "partner conjunct already present" probe; for membership-triggered CR4/CR5 the link
+// premise is already in `r_pred`); or (b) a link event — `add_link` runs in the SEQUENTIAL
+// apply phase and scans the LIVE `S(f)` at insertion time, which contains every earlier
+// membership (and under `rbox`, `add_link_rbox` closes CR10/CR11 against the live link
+// relation exactly as in the sequential engine). Either way the instance fires; no firing
+// depends on two premises that each miss the other.
+//
+// ## Soundness + determinism of the RESULT
+//
+// Workers only READ the snapshot; since the state grows monotonically, every premise a
+// worker observes still holds at apply time, so each applied conclusion is a genuine rule
+// firing (duplicates are absorbed by the same set-insert dedup as the sequential engine).
+// All rules are monotone and bounded, so the closure is the unique LEAST FIXPOINT — the
+// same one `saturate_inner` computes — independent of thread count, chunk boundaries, or
+// interleaving. On top of that set-level guarantee, chunk results are applied in
+// deterministic (frontier) order, so a given input + thread count replays bit-identically.
+//
+// `Saturation`, `AxiomIndex` and `Names` are plain owned maps/vecs (no interior
+// mutability), hence `Sync`; the scoped borrows need no `unsafe` (the crate forbids it).
+
+/// [FABLE-5] sq-wy3i6 (E4, `par` + `rbox`): parallel CR1–CR6 + CR10/CR11 saturation. Same
+/// least fixpoint as [`saturate`] for every `threads` value — see the module-tail design
+/// note. `threads` is the worker-pool BOUND (small frontiers use fewer workers, never more).
+#[cfg(all(feature = "par", feature = "rbox"))]
+pub fn saturate_par(
+    axioms: &[Normal],
+    names: &Names,
+    role_box: &RoleBox,
+    threads: std::num::NonZeroUsize,
+) -> Saturation {
+    saturate_par_inner(axioms, names, role_box, threads)
+}
+
+/// [FABLE-5] sq-wy3i6 (E4, `par` without `rbox`): parallel CR1–CR6 saturation (roles compared
+/// for equality only, exactly like the sequential E1 entry point). Same least fixpoint as
+/// [`saturate`] for every `threads` value — see the module-tail design note.
+#[cfg(all(feature = "par", not(feature = "rbox")))]
+pub fn saturate_par(
+    axioms: &[Normal],
+    names: &Names,
+    threads: std::num::NonZeroUsize,
+) -> Saturation {
+    saturate_par_inner(axioms, names, threads)
+}
+
+/// The BSP round loop shared by both `saturate_par` overloads: drain the frontier in
+/// compute/apply rounds, then alternate with `cr6_pass` until neither derives anything —
+/// the same alternation structure (and therefore the same fixpoint) as `saturate_inner`.
+#[cfg(feature = "par")]
+fn saturate_par_inner(
+    axioms: &[Normal],
+    names: &Names,
+    #[cfg(feature = "rbox")] role_box: &RoleBox,
+    threads: std::num::NonZeroUsize,
+) -> Saturation {
+    let ix = AxiomIndex::build(axioms);
+    let n = names.concept_count();
+    let has_self = names.has_self_restrictions();
+    let mut sat = Saturation {
+        s: vec![FxHashSet::default(); n],
+        r_pred: FxHashMap::default(),
+        r_succ: FxHashMap::default(),
+    };
+    // Same seeding (and the same inserted-before-queued invariant) as `saturate_inner`.
+    let mut queue: Vec<(Concept, Concept)> = Vec::new();
+    for c in 0..n as Concept {
+        if sat.s[c as usize].insert(c) {
+            queue.push((c, c));
+        }
+        if sat.s[c as usize].insert(TOP) {
+            queue.push((c, TOP));
+        }
+    }
+
+    loop {
+        while !queue.is_empty() {
+            let frontier = std::mem::take(&mut queue);
+            // COMPUTE (parallel, read-only against the round-start snapshot).
+            let derived = derive_frontier(&sat, &ix, names, has_self, &frontier, threads);
+            // APPLY (sequential, deterministic chunk order) — reuses the single-threaded
+            // machinery so link-triggered CR4/CR5 (+ CR10/CR11 under `rbox`) fire exactly
+            // as in `saturate_inner`; new insertions refill `queue` for the next round.
+            for chunk in derived {
+                for (x, e) in chunk.members {
+                    add(&mut sat.s[x as usize], x, e, &mut queue);
+                }
+                for (r, x, f) in chunk.links {
+                    #[cfg(feature = "rbox")]
+                    add_link_rbox(&mut sat, r, x, f, &ix, names, role_box, &mut queue);
+                    #[cfg(not(feature = "rbox"))]
+                    add_link(&mut sat, r, x, f, &ix, names, &mut queue);
+                }
+            }
+        }
+        if !cr6_pass(&mut sat, names, &mut queue) {
+            break;
+        }
+    }
+    sat
+}
+
+/// One worker chunk's derivations, kept separate per chunk so the apply phase preserves
+/// deterministic frontier order (a set-level no-op — dedup happens at insert — but it makes
+/// a given input + thread count replay bit-identically).
+#[cfg(feature = "par")]
+#[derive(Default)]
+struct Derived {
+    /// Membership conclusions `e ∈ S(x)` (from CR1/CR2 and membership-triggered CR4/CR5).
+    members: Vec<(Concept, Concept)>,
+    /// Link conclusions `(x, f) ∈ R(r)` (from CR3 and CRs1).
+    links: Vec<(Role, Concept, Concept)>,
+}
+
+/// Partitions `frontier` across at most `threads` scoped workers and returns each chunk's
+/// [`Derived`] in chunk order. Small frontiers (< `PAR_MIN_CHUNK` items per would-be
+/// worker) run inline — spawning threads for a handful of memberships costs more than the
+/// rules themselves, and the result is identical either way (least-fixpoint determinism).
+#[cfg(feature = "par")]
+fn derive_frontier(
+    sat: &Saturation,
+    ix: &AxiomIndex,
+    names: &Names,
+    has_self: bool,
+    frontier: &[(Concept, Concept)],
+    threads: std::num::NonZeroUsize,
+) -> Vec<Derived> {
+    /// Minimum frontier items per worker before spawning is worth it.
+    const PAR_MIN_CHUNK: usize = 64;
+    let workers = threads
+        .get()
+        .min(frontier.len().div_ceil(PAR_MIN_CHUNK))
+        .max(1);
+    if workers == 1 {
+        return vec![derive_chunk(sat, ix, names, has_self, frontier)];
+    }
+    let chunk_len = frontier.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = frontier
+            .chunks(chunk_len)
+            .map(|items| scope.spawn(move || derive_chunk(sat, ix, names, has_self, items)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("EL parallel-saturation worker panicked"))
+            .collect()
+    })
+}
+
+/// The read-only rule-derivation kernel: mirrors the membership-triggered arm of
+/// `saturate_inner`'s worklist body (CR1, CR2, CR3, CRs1, CR4/CR5) but EMITS conclusions
+/// instead of applying them. Any drift between this and `saturate_inner` is a
+/// completeness/soundness bug — tests/par_differential.rs pins the two engines equal over
+/// the whole fixture corpus, and the `el-suite-par` conformance differential pins them
+/// equal over the W3C EL cases.
+#[cfg(feature = "par")]
+fn derive_chunk(
+    sat: &Saturation,
+    ix: &AxiomIndex,
+    names: &Names,
+    has_self: bool,
+    items: &[(Concept, Concept)],
+) -> Derived {
+    let mut out = Derived::default();
+    for &(x, d) in items {
+        // CR1: every `D ⊑ E` axiom concludes E ∈ S(X).
+        if let Some(es) = ix.sub.get(&d) {
+            for &e in es {
+                out.members.push((x, e));
+            }
+        }
+        // CR2: every `D ⊓ C2 ⊑ E` axiom fires if C2 ∈ S(X) in the snapshot. If C2 lands
+        // later, ITS frontier item probes with the partner (D) already inserted — the same
+        // symmetric argument the sequential worklist relies on.
+        if let Some(parts) = ix.and_by_conjunct.get(&d) {
+            for &(other, e) in parts {
+                if sat.s[x as usize].contains(&other) {
+                    out.members.push((x, e));
+                }
+            }
+        }
+        // CR3: every `D ⊑ ∃r.F` axiom concludes the link (X, F) ∈ R(r).
+        if let Some(links) = ix.exists.get(&d) {
+            for &(r, f) in links {
+                out.links.push((r, x, f));
+            }
+        }
+        // CRs1: `∃r.Self` entered S(X) ⇒ the reflexive link (X, X) ∈ R(r). (CRs2 is CR1 on
+        // the `Sub(self_r, D)` axiom, and CRs3 — the sq-8zqwb nominal-reflexivity converse —
+        // is link-triggered, firing inside `add_link` during the SEQUENTIAL apply phase,
+        // exactly as in the sequential engine.)
+        if has_self {
+            if let Some(r) = names.self_role(d) {
+                out.links.push((r, x, x));
+            }
+        }
+        // CR4 / CR5, membership-triggered: X is the SUCCESSOR of links in the snapshot.
+        // Links inserted later fire their own scan of the live S(X) inside `add_link`.
+        for (&r, preds_by_succ) in &sat.r_pred {
+            let Some(preds) = preds_by_succ.get(&x) else {
+                continue;
+            };
+            if let Some(es) = ix.exists_sub.get(&(r, d)) {
+                for &p in preds {
+                    for &e in es {
+                        out.members.push((p, e));
+                    }
+                }
+            }
+            if d == BOTTOM {
+                for &p in preds {
+                    out.members.push((p, BOTTOM));
+                }
+            }
+        }
+    }
+    out
 }

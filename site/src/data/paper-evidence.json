@@ -1,6 +1,6 @@
 {
   "_comment": "[OPUS-4.8] sq-gum8 — paper-bound EVIDENCE for the academic paper factory. Distinct from benchmarks.generated.json (which is per-commit TIMING, all environment=indicative on the dev work-box). Every record here is a DETERMINISTIC, machine-INDEPENDENT metric (recall floor / answer-safety invariant / cost-model crossover / conformance ratchet floor) lifted from a real test or the central conformance scoreboard, so environment=canonical. The honesty gate in scripts/build-papers.mjs FAILS the build if a paper-bound headline table references an environment=indicative record. To add a number a paper may cite as a headline, it MUST appear here as environment=canonical and trace to a named test or const (the `source` field).",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "records": {
     "filtered_ann.recall_at_10_floor": {
       "value": 0.90,
@@ -61,13 +61,18 @@
       "note": "Deterministic decision rule (not a measured latency): pre-filter is chosen iff m*scatter_penalty <= n, i.e. with the default scatter_penalty 2.0, iff the mask admits <= half the store. Whichever branch is picked the returned top-k is identical, so a mis-estimate costs throughput, never correctness."
     },
     "conformance.geosparql_topology_floor": {
-      "value": 119,
+      "value": 197,
       "unit": "passing-assertions",
       "environment": "canonical",
       "kind": "conformance-ratchet-floor",
       "family": "OGC GeoSPARQL",
       "source": "crates/sparq-geo/tests/ogc_compliance_ratchet.rs::OGC_RATCHET_FLOOR (mirrored in crates/sparq-conformance/src/scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
-      "note": "OGC GeoSPARQL topology compliance ratchet floor: a monotone lower bound on passing sf/eh/rcc8 topology + WKT/GML equivalence assertions that CI enforces and that may only RISE. Deterministic and machine-independent (a const a test asserts), not a timing."
+      "binding": {
+        "kind": "rust-anchor",
+        "file": "crates/sparq-geo/tests/ogc_compliance_ratchet.rs",
+        "anchor": "OGC_RATCHET_FLOOR"
+      },
+      "note": "OGC GeoSPARQL topology compliance ratchet floor: a monotone lower bound on passing sf/eh/rcc8 topology + WKT/GML equivalence assertions that CI enforces and that may only RISE (raised 119 -> 158 -> 197 as coverage grew). Deterministic and machine-independent (a const a test asserts), not a timing."
     },
     "conformance.sparql_floor": {
       "value": 1229,
@@ -94,6 +99,7 @@
       "kind": "conformance-ratchet-floor",
       "family": "W3C SHACL",
       "source": "crates/sparq-shacl/tests/w3c_core.rs::BASELINE_PASS (mirrored in scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
+      "binding": { "kind": "rust-anchor", "file": "crates/sparq-shacl/tests/w3c_core.rs", "anchor": "BASELINE_PASS" },
       "note": "W3C SHACL core (data-shapes sht:Validate) ratchet floor. Deterministic; CI-enforced; may only rise."
     },
     "conformance.shacl_sparql_floor": {
@@ -103,6 +109,7 @@
       "kind": "conformance-ratchet-floor",
       "family": "W3C SHACL",
       "source": "crates/sparq-shacl/tests/w3c_sparql.rs::SHACL_SPARQL_FLOOR (mirrored in scoreboard.rs; guarded by tests/scoreboard_floors.rs)",
+      "binding": { "kind": "rust-anchor", "file": "crates/sparq-shacl/tests/w3c_sparql.rs", "anchor": "SHACL_SPARQL_FLOOR" },
       "note": "W3C SHACL-SPARQL (sh:sparql node + property constraint sub-suites) ratchet floor. Deterministic; CI-enforced; may only rise."
     },
     "conformance.solid_wac_floor": {
@@ -142,49 +149,74 @@
       "note": "Number of distinct conformance suites the central scoreboard registers and ratchets across crates (W3C SPARQL, inference, SHACL core, SHACL-SPARQL, OGC GeoSPARQL, Solid WAC decision parity, Solid ACP decision parity)."
     },
     "memsafety.unsafe_sites_total": {
-      "value": 59,
+      "value": 87,
       "unit": "unsafe-sites",
       "environment": "canonical",
       "kind": "unsafe-count-ratchet-ceiling",
       "family": "memory-safety attestation",
       "source": "bench/unsafe-snapshot.json::total (enforced by scripts/unsafe-gate.py --check; CI job 'unsafe-register (count ratchet)' in .github/workflows/ci.yml; per-site rows in compliance/memsafety/unsafe-register.md)",
+      "binding": {
+        "kind": "json-pointer",
+        "file": "bench/unsafe-snapshot.json",
+        "pointer": "/total"
+      },
       "note": "Total first-party unsafe sites across the whole crates/ workspace, as counted by a deterministic comment-/string-stripped keyword scan (scripts/unsafe-gate.py). This is a CI-ENFORCED RATCHET CEILING: the gate fails a PR whose live count RISES above this snapshot without a matching register row + a // SAFETY: comment + a re-seed; smaller is always allowed. Deterministic and machine-independent (a source scan over committed code, not a timing). It is a COUNT/COVERAGE discipline, NOT a proof of memory safety — it bounds and documents the unsafe surface, it does not prove the absence of undefined behaviour."
     },
     "memsafety.unsafe_crates": {
-      "value": 5,
+      "value": 8,
       "unit": "crates",
       "environment": "canonical",
       "kind": "unsafe-surface-partition",
       "family": "memory-safety attestation",
-      "source": "bench/unsafe-snapshot.json::crates (keys: sparq-core, sparq-vectors, sparq-cli, sparq-zk-compose, sparq-bench); accounting in compliance/memsafety/evidence.md MS-1",
-      "note": "Number of first-party crates that contain ANY unsafe code. Deterministic: the unsafe surface is confined to exactly these five crates; the snapshot carries a per-crate count for each, and a new unsafe block anywhere else fails to compile (forbid(unsafe_code)). Machine-independent partition of the workspace, not a measurement."
+      "source": "bench/unsafe-snapshot.json::crates (keys: sparq-core, sparq-vectors, sparq-engine, sparq-py, sparq-cli, sparq-zk-compose, sparq-bench, sparq-lws-core); accounting in compliance/memsafety/evidence.md MS-1",
+      "binding": {
+        "kind": "doc-anchor",
+        "file": "compliance/memsafety/evidence.md",
+        "quote": "**8** are unsafe-bearing"
+      },
+      "note": "[GPT-5.6] Number of first-party crates carrying at least one counted unsafe site in bench/unsafe-snapshot.json. Two of the eight (sparq-py and sparq-lws-core) ALSO carry a source forbid(unsafe_code): sparq-py's sites are arrow-feature-gated (conditional forbid), and sparq-lws-core's are EXAMPLE-only counting allocators (sq-gg0qq.2). sparq-engine is now an unsafe-bearing library because sq-kq9ia adds four shipped cancellation-pointer sites; its four test-only allocator sites remain registered too. The count is a machine-independent partition of the workspace, not a measurement. NOTE: doc-anchor is existence-strength only (the quote must be present verbatim in evidence.md — it does not parse the number); the snapshot key count is the machine source of truth."
     },
     "memsafety.forbid_crates": {
-      "value": 30,
+      "value": 50,
       "unit": "crates",
       "environment": "canonical",
       "kind": "unsafe-surface-partition",
       "family": "memory-safety attestation",
-      "source": "compliance/memsafety/evidence.md MS-1 (grep -rl 'forbid(unsafe_code)' crates/ --include='*.rs' | de-duplicated by crate); 30 of 35 workspace crates",
-      "note": "Number of first-party crates carrying a crate-root #![forbid(unsafe_code)], which makes any unsafe block in that crate a COMPILE ERROR. Deterministic and machine-independent (a de-duplicated source grep over committed code). 30 forbid + 5 unsafe-bearing = 35 total workspace crates; no crate is unaccounted-for."
+      "source": "compliance/memsafety/evidence.md MS-1 (grep -rl 'forbid(unsafe_code)' crates/ --include='*.rs' | sed 's#crates/##;s#/.*##' | sort -u | wc -l); 50 of 60 workspace crates",
+      "binding": {
+        "kind": "doc-anchor",
+        "file": "compliance/memsafety/evidence.md",
+        "quote": "→ **50 crates** carry a `forbid(unsafe_code)` in their source"
+      },
+      "note": "[GPT-5.6] Number of first-party crates carrying a source forbid(unsafe_code); sparq-py is conditional — forbid without the arrow feature, deny-level with it. Deterministic and machine-independent (a de-duplicated source grep over committed code). The forbid set (50) and the unsafe-bearing set (8) OVERLAP on sparq-py + sparq-lws-core, so they do NOT sum to the 60 total — see evidence.md MS-1. NOTE: doc-anchor is existence-strength only (verbatim quote presence); the grep in `source` is the machine source of truth."
     },
     "memsafety.total_crates": {
-      "value": 35,
+      "value": 60,
       "unit": "crates",
       "environment": "canonical",
       "kind": "unsafe-surface-partition",
       "family": "memory-safety attestation",
-      "source": "compliance/memsafety/evidence.md MS-1 (ls -d crates/*/ | wc -l); accounting 30 forbid + 5 unsafe = 35",
-      "note": "Total first-party crates in the workspace. Deterministic structural count; the basis for the confinement accounting (30 forbid + 5 unsafe-bearing = 35, nothing unaccounted-for)."
+      "source": "compliance/memsafety/evidence.md MS-1 (ls -d crates/*/ | wc -l)",
+      "binding": {
+        "kind": "doc-anchor",
+        "file": "compliance/memsafety/evidence.md",
+        "quote": "ls -d crates/*/ | wc -l       # → 60 total crates"
+      },
+      "note": "[GPT-5.6] Total first-party crates in the workspace. Deterministic structural count. The forbid-in-src set (50) and the unsafe-bearing set (8) overlap on sparq-py + sparq-lws-core and 4 crates carry neither, so the two do NOT partition the 60 cleanly — see evidence.md MS-1. NOTE: doc-anchor is existence-strength only (verbatim quote presence); the `ls -d` count in `source` is the machine source of truth."
     },
     "memsafety.unsafe_sites_core": {
-      "value": 45,
+      "value": 50,
       "unit": "unsafe-sites",
       "environment": "canonical",
       "kind": "unsafe-count-ratchet-ceiling",
       "family": "memory-safety attestation",
-      "source": "bench/unsafe-snapshot.json::crates['sparq-core']; 45 register rows in compliance/memsafety/unsafe-register.md §sparq-core; enforced by scripts/unsafe-gate.py --check",
-      "note": "Unsafe sites in sparq-core, the single crate concentrating the storage/dictionary/mmap/parallel-scatter/SIMD unsafe (threat-model boundary B5). The largest share of the 59; ratchet-enforced per-crate. Deterministic source scan, not a measurement."
+      "source": "bench/unsafe-snapshot.json::crates['sparq-core']; register rows in compliance/memsafety/unsafe-register.md §sparq-core; enforced by scripts/unsafe-gate.py --check",
+      "binding": {
+        "kind": "json-pointer",
+        "file": "bench/unsafe-snapshot.json",
+        "pointer": "/crates/sparq-core"
+      },
+      "note": "Unsafe sites in sparq-core, the single crate concentrating the storage/dictionary/mmap/parallel-scatter/SIMD unsafe (threat-model boundary B5). The largest share of the 76-site total; ratchet-enforced per-crate. Deterministic source scan, not a measurement."
     },
     "cozk.reaudit_lenses": {
       "value": 4,
@@ -347,6 +379,185 @@
       "family": "FO-KM pilot",
       "source": "bench/fo-km/RESULTS.md ('The measured result' table, abstain column)",
       "note": "Tasks (of 16) on which the schema.org-as-top condition abstained in the single fully-crossed run. Indicative single-run outcome, not canonical. [FABLE-5 sq-gum8.3-fokm]"
+    },
+    "metamorph.selftest_oracles": {
+      "value": 3,
+      "unit": "oracles",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "SPARQL logic-bug testing instrument",
+      "source": "crates/sparq-metamorph/tests/oracle_self_tests.rs — tlp_flags_the_seeded_wrong_result_mutant, norec_flags_the_seeded_wrong_result_mutant, differential_flags_the_seeded_wrong_result_mutant",
+      "note": "Number of oracle types (TLP, NoREC, differential) whose self-tests assert non-vacuity: each must flag the seeded wrong-result mutant (FilterDropsRow, which silently removes a row from FILTER queries) as a Verdict::Violation. A deterministic structural count of test functions in the committed file; the tests run against the real InProcessSparq engine, not a mock. Campaign-dependent counts (bugs confirmed/reported/rejected) are NOT wired here — they are pending bead sq-gum8.11. [SONNET-4.6 sq-gum8.9]"
+    },
+    "metamorph.selftest_seeds": {
+      "value": 50,
+      "unit": "generator-seeds",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "SPARQL logic-bug testing instrument",
+      "source": "crates/sparq-metamorph/tests/oracle_self_tests.rs::generated_cases_hold_on_pristine_sparq (for seed in 0..50)",
+      "binding": { "kind": "rust-anchor", "file": "crates/sparq-metamorph/tests/oracle_self_tests.rs", "anchor": "generated_cases_hold_on_pristine_sparq" },
+      "note": "Number of seeds over which the generated_cases_hold_on_pristine_sparq self-test asserts that TLP and NoREC both hold on the pristine sparq engine (both oracles must return Pass for every generated case). A deterministic range constant in the committed test file, not a measurement. Establishes that the oracle passes on the real engine before any campaign dispatches generated cases to third-party engines. [SONNET-4.6 sq-gum8.9]"
+    },
+    "metamorph.grammar_exclusion_seeds": {
+      "value": 200,
+      "unit": "generator-seeds",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "SPARQL logic-bug testing instrument",
+      "source": "crates/sparq-metamorph/src/generate.rs::generated_predicates_respect_the_exclusion_list (for seed in 0..200)",
+      "binding": { "kind": "rust-anchor", "file": "crates/sparq-metamorph/src/generate.rs", "anchor": "generated_predicates_respect_the_exclusion_list" },
+      "note": "Number of seeds over which the grammar exclusion-list check asserts that no generated predicate contains a banned non-deterministic construct (RAND, NOW, UUID, STRUUID, BNODE, EXISTS). A deterministic range constant in the committed generate.rs test; ensures the seeded generator never produces non-reproducible predicates, making every campaign ledger entry's test case reproducible from its seed alone. [SONNET-4.6 sq-gum8.9]"
+    },
+    "zkarch.circuit_members": {
+      "value": 35,
+      "unit": "compiled-circuit-members",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members (coverage enforced by tests/gate_count.rs::snapshot_covers_every_member) — count of member keys",
+      "note": "Number of compiled Noir proving members in the fixed zk/compose circuit family (the scan (k,n,r) lattice, the datatype-bucketed filter lanes, the join_eq (n_a,n_b) buckets, the path_reach members, revocation, hidden-issuer, and the two hidden-holder members). A deterministic count over the committed, regression-gated gate-count snapshot; not a measurement. Still allowlisted (unbound): a count-of-map-keys has no scalar the json-pointer tier can pin — a derived-count binding tier is F3 (sq-gum8.15) follow-up. [OPUS-4.8 sq-i6gj6: corrected 31->35 vs the live snapshot]"
+    },
+    "zkarch.circuit_kinds": {
+      "value": 14,
+      "unit": "circuit-identifier-kinds",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/src/manifest.rs::CircuitId (14 enum variants: Scan, FilterInt, FilterF64, FilterSignedInt, FilterDecimal, FilterValueDl, FilterValueDlF64, FilterValueDlDecimal, RevokeUnset, HiddenIssuer, HolderPok, HolderSet, JoinEq, PathReach)",
+      "note": "Number of statement kinds in the fixed circuit-identifier space the verifier re-derives; each kind instantiates one or more compiled members on its size lattice. A deterministic enum-variant count over committed code. Still allowlisted (unbound): a variant COUNT is not a literal near the enum, so the rust-anchor literal-adjacency tier cannot pin it — a derived-count binding tier is F3 (sq-gum8.15) follow-up. [OPUS-4.8 sq-i6gj6: corrected 13->14 (PathReach added) vs the live enum]"
+    },
+    "zkarch.binding_obligations": {
+      "value": 12,
+      "unit": "verifier-obligations",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/src/verifier.rs (the twelve bind_* obligation functions: bind_query_correctness, bind_attributions, bind_issuer_attestations, bind_revocation, bind_joins, bind_entailment, bind_holder_pop, bind_holder_binding, bind_hidden_revocation, bind_hidden_issuer_attestations, bind_holder_pok, bind_holder_set); glossed in site/specs/zksparql.typ section 10.3",
+      "note": "Number of fail-closed binding obligations the reference verifier enforces on every manifest. A deterministic function count over committed code; enforcement quality is NOT asserted by this count (external audit gate sq-qhy4 open). [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.audit_gates": {
+      "value": 4,
+      "unit": "audit-gates",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "site/specs/zksparql.typ section 10.4 (public-input reconstruction; canonical verification key; issuer signature + external key set; nonce single-use and binding), each implemented in crates/sparq-zk-compose/src/verifier.rs",
+      "note": "Number of cross-cutting binding checks whose individual failure would each void the intended soundness on its own; layered around backend proof verification. A deterministic structural count over the committed spec + verifier; the gates are internally re-audited, NOT externally audited (sq-qhy4 open). [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_scan_min": {
+      "value": 5991,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['scan_k1_n16_r4'] (bb gates -s ultra_honk; regression-gated by tests/gate_count.rs, 3% tolerance)",
+      "note": "Committed circuit_size baseline of the smallest scan member (k=1 graph, n=16 slots, r=4 disclosed rows). A deterministic artifact fact of the committed circuit under the pinned toolchain (bb 5.0.0-nightly.20260324, nargo 1.0.0-beta.21); gate counts of scan members vary <1% across build platforms, absorbed by the regression gate's tolerance. Not a wall-clock measurement. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_scan_max": {
+      "value": 34821,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['scan_k2_n64_r8'] (bb gates -s ultra_honk; regression-gated by tests/gate_count.rs, 3% tolerance)",
+      "note": "Committed circuit_size baseline of the largest scan member (k=2 graphs, n=64 slots, r=8 disclosed rows). Deterministic artifact fact under the pinned toolchain; not a wall-clock measurement. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_filter_lane": {
+      "value": 17416,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['filter_int_d1'] (identical for filter_int_d{1,2,4}, filter_f64_d{1..4}, filter_signed_int_d{2,4}, filter_decimal_i3_f2; bb gates -s ultra_honk; regression-gated)",
+      "note": "Committed circuit_size baseline shared by every manifest-composable string-canonical filter lane: the blake3 binding of the canonical literal token dominates and the token fits one 64-byte blake3 block for all digit counts <= 19, so digit count does not move the gate count. Deterministic artifact fact under the pinned toolchain. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_filter_value_dl_int": {
+      "value": 3033,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['filter_value_dl_int'] (bb gates -s ultra_honk; regression-gated)",
+      "note": "Committed circuit_size baseline of the opt-in dual-leaf integer value-lane filter, which replaces the blake3 token binding with a value-leaf equality and carries a documented, accepted invariant downgrade (INV-VL); OFF by default and unaudited. Cited to quantify the cost of the blake3 binding, not to recommend the lane. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_join_min": {
+      "value": 7025,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['join_eq_na16_nb16'] (bb gates -s ultra_honk; regression-gated)",
+      "note": "Committed circuit_size baseline of the smallest hidden equality-join member (both sides in the n=16 slot bucket). Deterministic artifact fact under the pinned toolchain. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_join_max": {
+      "value": 18681,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['join_eq_na64_nb64'] (bb gates -s ultra_honk; regression-gated)",
+      "note": "Committed circuit_size baseline of the largest hidden equality-join member (both sides in the n=64 slot bucket). Deterministic artifact fact under the pinned toolchain. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_revoke": {
+      "value": 899,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['revoke_unset_d10'] (bb gates -s ultra_honk; regression-gated)",
+      "note": "Committed circuit_size baseline of the hidden-index revocation member (Merkle inclusion + bit-unset at depth 10) - the cheapest member of the family. Deterministic artifact fact under the pinned toolchain. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_hidden_issuer": {
+      "value": 16946,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['hidden_issuer_d4'] (bb gates -s ultra_honk; regression-gated)",
+      "note": "Committed circuit_size baseline of the hidden-issuer attestation member (in-circuit Schnorr-over-Baby-Jubjub verification + key-set Merkle membership at depth 4). Deterministic artifact fact under the pinned toolchain. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.gates_holder_pok": {
+      "value": 10334,
+      "unit": "ultra_honk-gates",
+      "environment": "canonical",
+      "kind": "gate-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/gate_count_snapshot.json::members['holder_pok'] (bb gates -s ultra_honk; regression-gated)",
+      "note": "Committed circuit_size baseline of the hidden-holder proof-of-knowledge member. The hidden-holder tiers are explicitly labelled NOT yet sound in the implementation and are opt-in only; the count quantifies circuit cost, it does NOT assert the tier's security. [FABLE-5 sq-3kd2g.1]"
+    },
+    "zkarch.forge_findings_mapped": {
+      "value": 12,
+      "unit": "forge-regression-tests",
+      "environment": "canonical",
+      "kind": "structural-count",
+      "family": "single-prover zkSPARQL architecture",
+      "source": "crates/sparq-zk-compose/tests/audit_forge_map.rs (bead sq-1gir): one named forge-and-verify regression test per historical audit finding #1-#12, each constructing that finding's specific forgery and asserting the mapped verifier reject path",
+      "note": "Number of historical single-prover audit findings (research/zk-soundness-audit.md) that carry a standing 1:1 forge-negative regression test pinning the remediation closed. A deterministic structural count over the committed test file; the map is internal evidence and does NOT substitute for the open external audit (sq-qhy4). [FABLE-5 sq-3kd2g.1]"
+    },
+    "compare.sp2b_answer_agreement": {
+      "value": 12,
+      "unit": "queries (of 14)",
+      "environment": "canonical",
+      "kind": "answer-equivalence-oracle",
+      "family": "comparative benchmarking (same-box)",
+      "total": 14,
+      "diff": 2,
+      "competitors": ["Oxigraph", "QLever", "Virtuoso"],
+      "source": "bench/dashboard/competitors.json same_box_comparisons[suite='sp2b'] (git 0ab87b2a) — per-query count_crosscheck.all_agree, computed by scripts/bench/ingest-canonical-competitors.mjs from the raw envelopes at bench/canonical-competitor-results/2026-07-07/",
+      "note": "Number of SP2Bench queries whose sparq solution COUNT agrees with every independent engine (Oxigraph / QLever / Virtuoso) AND the pinned expected-rows oracle. A count comparison is machine-INDEPENDENT (a deterministic answer-equivalence check, not a timing), so environment=canonical. The 2 non-agreeing queries (q08 / q12b) are recorded HONESTLY as a DIFF, never suppressed — they are the known OPTIONAL/negation optional-semantics divergences, not a sparq correctness gap; a paper citing this must present it as an answer-equivalence rate, NOT a speed claim. [FABLE-5 sq-hmd7l.28]"
+    },
+    "compare.watdiv_answer_agreement": {
+      "value": 16,
+      "unit": "queries (of 16)",
+      "environment": "canonical",
+      "kind": "answer-equivalence-oracle",
+      "family": "comparative benchmarking (same-box)",
+      "total": 16,
+      "diff": 0,
+      "competitors": ["Oxigraph", "QLever", "Virtuoso"],
+      "source": "bench/dashboard/competitors.json same_box_comparisons[suite='watdiv'] (git 0ab87b2a) — per-query count_crosscheck.all_agree, computed by scripts/bench/ingest-canonical-competitors.mjs from the raw envelopes at bench/canonical-competitor-results/2026-07-07/",
+      "note": "Number of WatDiv queries whose sparq solution COUNT agrees with every independent engine (Oxigraph / QLever / Virtuoso) AND the pinned expected-rows oracle — full agreement, 16/16. Machine-INDEPENDENT (a deterministic answer-equivalence check, not a timing), so environment=canonical. A paper citing this must present it as an answer-equivalence rate, NOT a speed claim. [FABLE-5 sq-hmd7l.28]"
     }
   }
 }

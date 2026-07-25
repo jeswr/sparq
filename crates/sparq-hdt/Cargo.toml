@@ -23,14 +23,17 @@ readme = "README.md"
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
-# [OPUS-4.8] sq-2te: HDT WRITE support (`save`: sparq `Graph` -> `.hdt`).
-# Opt-in because the only tractable path on hdt 0.4 is the crate's `Hdt::read_nt`
-# (N-Triples -> FourSectDict PFC + BitmapTriples) + `Hdt::write`, BOTH gated behind
-# the wrapped crate's experimental `sophia` feature — which pulls the sophia adapter
-# (a non-trivial dep tree we deliberately drop on the read path, see below). Reading
-# stays default and sophia-free; only writers pay for it.
+# [OPUS-4.8] sq-2te / [GPT-5] sq-2l1: HDT WRITE support (`save`: sparq `Graph` ->
+# `.hdt`). Opt-in because the upstream crate gates `Hdt::read_nt` (N-Triples ->
+# FourSectDict PFC + BitmapTriples) behind its experimental `nt` feature. Reading
+# stays default and N-Triples-parser-free; only writers pay for it.
 [features]
-write = ["hdt/sophia"]
+write = ["hdt/nt"]
+# [GPT-5.6] sq-lsp7k.24: opt-in triple-pattern filtering at the one-shot HDT
+# decode seam. `oxrdf` is already present through `sparq-core`; naming it as an
+# optional direct dependency exposes the RDF term types without changing the
+# default dependency graph.
+load-filter = ["dep:oxrdf"]
 # [OPUS-4.8] (sq-i3xc, lever H5) `zlib-ng`: opt-in, OFF by default, NATIVE-ONLY faster
 # gzip backend (zlib-ng C library via flate2) for `.hdt.gz` inflate — a measured 1.5–3×
 # at ~zero code change. SAFE because sparq-hdt is native-only and never in the sparq-wasm
@@ -48,16 +51,19 @@ zlib-ng = ["flate2/zlib-ng"]
 # sections, BitmapTriples). It reads the de-facto standard layout emitted by
 # hdt-cpp / hdt-java: FourSectionDictionary (Plain Front Coding) + BitmapTriples in
 # SPO order. `default-features = false` drops its sophia adapter — we translate at
-# the id level, not through sophia terms. Pinned to 0.4: 0.6 pulls `qwt`, whose
-# default `prefetch` feature needs NIGHTLY rustc on aarch64 (see bead sq-2l1).
+# the id level, not through sophia terms. [GPT-5] sq-2l1: hdt 0.7 moves to qwt 0.4,
+# whose aarch64 prefetch path uses stable inline assembly instead of a nightly-only
+# intrinsic.
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
 # (required to publish — crates.io strips `path`).
 sparq-core = { path = "../sparq-core", version = "0.1.0" }
+oxrdf = { workspace = true, optional = true }
 # Read path uses NO features (id-level translation, no sophia adapter). The `write`
-# feature (above) turns on `hdt/sophia` to reach `Hdt::read_nt` + `Hdt::write`.
-hdt = { version = "0.4", default-features = false }
+# feature (above) turns on `hdt/nt` to reach `Hdt::read_nt`; `Hdt::write` is
+# available on the lean read path too.
+hdt = { version = "0.7", default-features = false }
 # GZipped-HDT auto-detection (`.hdt.gz`): magic-byte sniff + streaming decode.
 # The default backend (miniz_oxide) is pure Rust; flate2 is already used
 # elsewhere in the workspace (sparq-cli, and previously this crate's dev-deps).
@@ -82,10 +88,10 @@ crc = "3"
 rayon = { workspace = true }
 
 [dev-dependencies]
-# The `sophia` feature provides hdt's (experimental) N-Triples -> HDT writer
+# The `nt` feature provides hdt's (experimental) N-Triples -> HDT writer
 # (`Hdt::read_nt`), used ONLY to build .hdt round-trip fixtures / benchmark inputs
 # from N-Triples ground truth in-process.
-hdt = { version = "0.4", features = ["sophia"] }
+hdt = { version = "0.7", default-features = false, features = ["nt"] }
 # [OPUS-4.8] sq-117n: per-test unique, auto-cleaned scratch dirs. The roundtrip
 # tests build `.hdt` archives by writing an N-Triples file to disk and reading it
 # back with `Hdt::read_nt`; using FIXED `CARGO_TARGET_TMPDIR` subdir names let
@@ -94,6 +100,9 @@ hdt = { version = "0.4", features = ["sophia"] }
 # under `cargo test` parallelism. `tempfile::tempdir()` hands each invocation a
 # unique directory (auto-removed on drop), so no two tests can ever collide.
 tempfile = "3"
+# [GPT-5.6] sq-agrtc: generate bounded, duplicate-heavy RDF fixtures that witness
+# HDT dictionary decode equivalence across explicit rayon thread counts.
+proptest = "1"
 # [OPUS-4.8] (sq-cxji) Test-only: PARSE the `examples/bench_load.rs` `--json` emit back
 # to assert it is valid, well-shaped JSON. The emit itself stays serde-free (hand-built
 # `format!`, mirroring `mpc_net_bench::cell_json`); serde_json is a dev-dependency so it

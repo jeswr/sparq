@@ -51,53 +51,66 @@ let n: Option<Num> = as_numeric(&lit);  // exact xsd:decimal (no f64 rounding)
   inline-integer id helpers (`inline_id_of_int`, `is_inline`, `NO_ID`). These mirror the
   engine's private `exec` aliases byte for byte so the eventual join-kernel move is a pure
   code-move. The aliases are concrete monomorphic types, **not** generic over a `dyn` trait.
-- **`numeric`** — the XSD numeric value tower: `Num` (`Int` / `Dec` / `Float` / `Double`,
-  the XPath promotion ranks), `as_numeric` (classifies an `oxrdf::Literal` into the tower
-  while keeping the **exact** integer / fixed-point `Dec` representation — a high-precision
-  decimal is not silently flattened to `f64`), the arithmetic ops (`binop` / `neg` / `abs` /
-  `ceil` / `floor` / `round`), the two serialisation surfaces — `canonical_lexical` (a
-  *finite* float/double in the XSD-mandatory scientific form, e.g. `6.0E0`; the specials keep
-  their XSD spellings `INF` / `-INF` / `NaN`, which are not scientific) and `lexical` (the plain
-  form the W3C SPARQL expected-result files use for computed arithmetic, e.g. `6`) — and the
-  shared lexical helpers (`split_decimal`, `parse_xsd_f32` / `parse_xsd_f64`, `fmt_xsd_double`).
-  `parse_xsd_f64`/`f32` accept the XSD `INF` / `+INF` / `-INF` / `NaN` spellings and reject the
-  Rust-`FromStr`-only `inf` / `infinity` / `nan`, so the engine's lenient compare seam agrees
-  with the exact classifier on which lexicals are numeric.
+- **`numeric`** — the XSD numeric value tower: `Num` (`Int`/`Dec`/`Float`/`Double`, XPath
+  promotion ranks), `as_numeric` (classifies an `oxrdf::Literal` while keeping the **exact**
+  integer / fixed-point `Dec` — a high-precision decimal is not silently flattened to `f64`),
+  the arithmetic ops (`binop`/`neg`/`abs`/`ceil`/`floor`/`round`), the two serialisation
+  surfaces (`canonical_lexical` — finite float/double in XSD scientific form; `lexical` — the
+  plain form the W3C expected-result files use), and the shared lexical helpers
+  (`split_decimal`, `parse_xsd_f32`/`parse_xsd_f64`, `fmt_xsd_double`; the parsers delegate to
+  `sparq_core::parse_xsd_f64` — one shared body with the core numeric cache, sq-9781x).
+  `Num::cmp_relational` is the XPath relational compare (`<`/`>` FILTER; NaN → `None`), vs
+  `cmp_total` (NaN totalised for `ORDER BY`). [OPUS-4.8] sq-v5evr
 - **`join`** — the four id-tuple join kernels over `&[Row]` slices: `merge_join` (sorted),
-  `hash_probe_serial` / `build_table` / `build_partitioned` / `probe_emit` (hash, with a
-  radix-partitioned parallel build), `bind_combine` (index-nested-loop), and `lftj_recurse`
-  over `Trie` / `TrieIter` (leapfrog trie-join / WCOJ), plus the `compatible` / `merge_rows` /
-  `any_unbound` solution-compatibility helpers. Also `join::delta::DeltaTable` — a persistent,
-  extendable build-side table (`build` / `extend` / `rebuild` / `probe_emit`) with an
-  insertion-order-deterministic match enumeration guarantee for the OWL-RL semi-naive Δ⋈full
-  fixpoint (sq-qonbz.1). Each kernel is generic over a `JoinKeys` column descriptor and a
-  `Budget` cooperative-cancel hook (both monomorphised, never a trait object). Pulls only
-  `rustc-hash` when enabled; implies `rows`.
+  `build_table` / `build_partitioned` / `probe_emit` / `probe_gather_indices` / `hash_probe_serial`
+  (hash, `JoinTable` type alias backed by `hashbrown::HashMap<Key, Posting, FxBuildHasher>`,
+  single-hash probe + batch-reserve), `bind_combine` (index-nested-loop), `lftj_recurse` over
+  `Trie` / `TrieIter` (WCOJ), plus `compatible` / `merge_rows` / `any_unbound` helpers.
+  `probe_gather_indices` is the M4 batch-emission contract (gather indices, materialise once
+  per chunk, sq-pntvh.7). Also `join::delta::DeltaTable` — persistent build-side table with
+  insertion-order-deterministic enumeration for the OWL-RL Δ⋈full fixpoint (sq-qonbz.1). Each
+  kernel is generic over `JoinKeys` + `Budget`; `JoinKeys` fast-paths the single-column key to a
+  direct push (result-identical, sq-4r8uy). Pulls `rustc-hash` + `hashbrown`; implies `rows`.
 - **`compare`** — the SPARQL **term total order** `compare_terms` (the engine's `compare_values`):
-  the class precedence error/unbound < blank < IRI < literal < triple, the numeric-aware /
-  strict typed-temporal / lexical-string arms within the literal class, and the recursive
-  component-wise triple-term order. Generic over a tiny `CompareTerm` trait (`term_class` /
-  `value_str` / `as_f64` / `exact_cmp` / `strict_cmp` / `triple_parts`) the consumer implements
-  for its own term type — a **monomorphisation seam**, never a `dyn` object. `exact_cmp` is the
-  f64-collapse recheck: when the lenient `as_f64` arm ties, it recovers the exact order of
-  distinct integers beyond 2^53 / high-precision decimals so `ORDER BY` / `MIN` / `MAX` agree
-  with the relational `=`/`<`. Pure-`std`: links nothing new.
+  the spec-fixed class precedence error/unbound < blank < IRI < literal < triple, then a
+  **kind-first** literal order (sq-wjl8i): a fixed `LiteralKind` rank BETWEEN literal kinds
+  (numeric < boolean < dateTime < date < string < lang < other — a documented extension where
+  the spec leaves cross-kind order undefined), value order only WITHIN a kind — numerics by
+  exact rational value (`NaN` totalised FIRST, before `-INF`; an f64 tie rechecked exactly via
+  `exact_cmp`, incl. the MIXED int/decimal-vs-float/double tie — `Num::cmp_total` under
+  `numeric`), dateTimes by timeline, else lexically — and the recursive component-wise
+  triple-term order. Generic over a tiny `CompareTerm` trait (`term_class`/`literal_kind`/
+  `value_str`/`as_f64`/`exact_cmp`/`strict_cmp`/`triple_parts`) the consumer implements for its
+  term type — a **monomorphisation seam**, never a `dyn` object. Pure-`std`. The order laws
+  (reflexivity, within-class totality, antisymmetry-consistency, transitivity — per kind AND
+  across mixed kinds, all NaN INCLUDED incl. the 2^53 collapse) are machine-checked by Kani
+  over a model impl — `cargo kani -p sparq-substrate --features compare` (sq-sqtk2.4 + sq-wjl8i).
+  Boundaries: the proofs cover the shared ALGORITHM over the bounded model, not the engine's
+  `Value` impl; the indeterminate mixed-timezone dateTime window falls back lexically.
+- **`overhead`** — the **zero-overhead DELTA harness** (the substrate half of the
+  sparq-engine-systems paper §8): `overhead::OverheadReport::run` measures each shared kernel
+  against a hand-SPECIALISED pre-extraction equivalent (SAME algorithm + data structure,
+  generalisation removed) and emits the house JSON envelope with `substrate.overhead_<kernel>`
+  records. It MEASURES the "zero measured marginal overhead" claim; a non-zero delta carries an
+  honest `root_cause`, never bent to the claim. Implies `join`+`numeric`+`compare`; links no new
+  dep. Run: `cargo run -p sparq-substrate --example substrate_overhead --features overhead
+  --release -- --json` (add `--canonical` only on a dedicated quiet host). [FABLE-5] sq-atjue
 
 All features are **off by default**. The crate is `forbid(unsafe_code)`.
 
 ### Zero-overhead intent
 
 Every item is monomorphic over `Id = u32` and the concrete numeric tiers — **never**
-`Box<dyn>` / `&dyn` / a vtable on a hot path — including between a join's probe loop and its
-key projection or its cooperative-cancel poll (the `JoinKeys` / `Budget` parameters are
-monomorphised, not trait objects). Each item carries `#[inline]`, so cross-crate inlining
-(with the workspace LTO profile) keeps the engine's FILTER / BIND / ORDER BY arithmetic and
-its join hot loops identical to pre-move codegen. This crate introduces no dynamic dispatch.
+`Box<dyn>` / `&dyn` / a vtable on a hot path (the `JoinKeys` / `Budget` parameters are
+monomorphised, not trait objects). Each item carries `#[inline]`, so cross-crate inlining keeps
+the engine's FILTER / BIND / ORDER BY and join hot loops identical to pre-move codegen. The
+`overhead` feature **measures** this (`substrate.overhead_<kernel>`); see §8 of the systems paper.
 
 ## 📚 Learn more
 
 - `research/shared-eval-substrate.md` — the design record: what is shareable vs
   engine-private, the options considered, and the layered perf-neutrality proof.
+- `research/mechanized-proof-program.md` — the `compare` Kani harnesses' proof program (B-1).
 - `crates/sparq-core` — the storage substrate this crate's `Id` / dictionary types come from.
 - `crates/sparq-engine` — the consumer that keeps its planner private and calls the shared
   numeric + join kernels through a thin `Bindings`-side adapter.

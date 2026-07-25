@@ -12,6 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { SolidPairsDemo } from "@/components/solid-pairs-demo";
 import { TIER_LABEL, TIER_VARIANT } from "@/data/surfaces";
+import { withBasePath } from "@/lib/base-path";
 
 export const metadata: Metadata = {
   title: "Solid (user, app)-pair result sets",
@@ -19,7 +20,7 @@ export const metadata: Metadata = {
     "The same SPARQL query over the same Solid Pod returns different result sets per (user, application) pair — because WAC/ACP access control filters which named graphs each requester may read. A faithful, live-in-tab illustration of sparq-solid's graph-level, fail-closed enforcement.",
 };
 
-const REPO_URL = "https://github.com/jeswr/sparq";
+const REPO_URL = "https://github.com/sparq-org/sparq";
 
 export default function SolidFlagshipPage() {
   return (
@@ -101,13 +102,13 @@ export default function SolidFlagshipPage() {
             deployment.
           </p>
           <p className="flex flex-wrap gap-4">
-            <Link
+            <a
               className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
-              href="/try"
+              href={withBasePath("/app/")}
             >
               <Info className="size-3.5" aria-hidden="true" />
-              The live SPARQL REPL
-            </Link>
+              The SPARQL workbench
+            </a>
             <a
               className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
               href={`${REPO_URL}/tree/main/crates/sparq-solid`}

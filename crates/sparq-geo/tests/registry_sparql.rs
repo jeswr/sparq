@@ -78,6 +78,52 @@ fn bind_distance_value() {
 }
 
 #[test]
+fn metric_measurements_and_centroid_through_sparql() {
+    // [GPT-5.6] sq-lsp7k.18: exercise custom-function dispatch, numeric RDF
+    // typing, and geometry-result re-entry through the real SPARQL evaluator.
+    let r = query_with_functions(
+        &cities(),
+        &format!(
+            "{PREFIXES} SELECT ?area ?length ?perimeter ?centroid WHERE {{ \
+               ex:france ex:area ?g . \
+               BIND(geof:metricArea(?g) AS ?area) \
+               BIND(geof:metricLength(?g) AS ?length) \
+               BIND(geof:metricPerimeter(?g) AS ?perimeter) \
+               BIND(geof:centroid(?g) AS ?centroid) \
+             }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(r.len(), 1);
+
+    let values = names(&r, 0)
+        .into_iter()
+        .chain(names(&r, 1))
+        .chain(names(&r, 2))
+        .collect::<Vec<_>>();
+    let numeric = values
+        .iter()
+        .map(|term| {
+            assert!(term.ends_with("^^<http://www.w3.org/2001/XMLSchema#double>"));
+            term.strip_prefix('"')
+                .and_then(|value| value.split('"').next())
+                .unwrap()
+                .parse::<f64>()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(numeric.iter().all(|value| *value > 0.0));
+    assert_eq!(numeric[1], numeric[2]);
+
+    let centroid = names(&r, 3).pop().unwrap();
+    assert!(centroid.contains("POINT"), "got {centroid}");
+    assert!(centroid.ends_with(
+        "^^<http://www.opengis.net/ont/geosparql#wktLiteral>"
+    ));
+}
+
+#[test]
 fn spatial_join_sf_within() {
     // Which city lies within which area — a real spatial join (FILTER over the
     // cross product of 3 points x 2 polygons).
@@ -121,6 +167,37 @@ fn unary_geometry_function_roundtrips_through_relations() {
     )
     .unwrap();
     assert_eq!(names(&r, 0), vec!["<http://ex/france>"]);
+}
+
+#[test]
+fn simplify_through_sparql_drops_the_midpoint() {
+    // [GPT-5.6] sq-lsp7k.23: witness the real custom-function dispatch, numeric
+    // tolerance parsing, and geometry-literal result type.
+    let graph = Graph::load_str(
+        r#"@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+           <http://ex/line> <http://ex/loc> "LINESTRING(0 0,1 0.1,2 0)"^^geo:wktLiteral ."#,
+        "turtle",
+    )
+    .unwrap();
+    let result = query_with_functions(
+        &graph,
+        &format!(
+            "{PREFIXES} SELECT ?simplified WHERE {{ \
+               ex:line ex:loc ?line . \
+               BIND(geof:simplify(?line, 0.2) AS ?simplified) \
+             }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        names(&result, 0),
+        vec![
+            "\"LINESTRING(0 0,2 0)\"^^<http://www.opengis.net/ont/geosparql#wktLiteral>"
+                .to_string()
+        ]
+    );
 }
 
 #[test]
@@ -415,4 +492,94 @@ fn unregistered_geof_iri_stays_a_hard_error() {
     .map(|r| r.len())
     .unwrap_err();
     assert!(err.contains("unsupported SPARQL function"), "got: {err}");
+}
+
+#[test]
+fn constant_polygon_filter_cold_and_warm_runs_agree() {
+    // sq-lkrgi [FABLE-5]: the Geographica large-constant selection shape — one
+    // constant POLYGON literal in the FILTER, evaluated against every row. The
+    // registry now serves the constant from a per-thread parsed-geometry cache
+    // after the first row; a cold run and a warm re-run (same thread, cache
+    // already populated) must return identical rows, and both must match the
+    // hand-derived answer.
+    let g = cities();
+    let q = format!(
+        "{PREFIXES} SELECT ?city WHERE {{ \
+           ?city ex:loc ?there . \
+           FILTER(geof:sfWithin(?there, \
+             \"POLYGON((-1 42.5, 7 42.5, 7 51, -1 51, -1 42.5))\"^^<http://www.opengis.net/ont/geosparql#wktLiteral>)) \
+         }} ORDER BY ?city"
+    );
+    let reg = geof_registry();
+    let cold = query_with_functions(&g, &q, &reg).unwrap();
+    let warm = query_with_functions(&g, &q, &reg).unwrap();
+    let expected = vec!["<http://ex/lyon>".to_string(), "<http://ex/paris>".to_string()];
+    assert_eq!(names(&cold, 0), expected);
+    assert_eq!(names(&warm, 0), expected, "warm (cached) run must equal the cold run");
+}
+
+#[test]
+#[cfg(feature = "geof_accessors")]
+fn geof_accessor_functions_through_sparql() {
+    // [FABLE-5] sq-lsp7k: the GeoSPARQL 1.1 non-topological accessors
+    // (opt-in `geof_accessors` feature) dispatch through real SPARQL BIND —
+    // integer/boolean/anyURI result typing included.
+    let r = query_with_functions(
+        &cities(),
+        &format!(
+            "{PREFIXES} SELECT ?d ?cd ?sd ?simple ?ty WHERE {{ \
+               ex:uk ex:area ?g . \
+               BIND(geof:dimension(?g) AS ?d) \
+               BIND(geof:coordinateDimension(?g) AS ?cd) \
+               BIND(geof:spatialDimension(?g) AS ?sd) \
+               BIND(geof:isSimple(?g) AS ?simple) \
+               BIND(geof:geometryType(?g) AS ?ty) \
+             }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(r.len(), 1);
+    let int = |v: &str| vec![format!("\"{v}\"^^<http://www.w3.org/2001/XMLSchema#integer>")];
+    assert_eq!(names(&r, 0), int("2"), "geof:dimension(polygon)");
+    assert_eq!(names(&r, 1), int("2"), "geof:coordinateDimension");
+    assert_eq!(names(&r, 2), int("2"), "geof:spatialDimension");
+    assert_eq!(
+        names(&r, 3),
+        vec!["\"true\"^^<http://www.w3.org/2001/XMLSchema#boolean>".to_string()]
+    );
+    assert_eq!(
+        names(&r, 4),
+        vec![
+            "\"http://www.opengis.net/ont/sf#Polygon\"^^<http://www.w3.org/2001/XMLSchema#anyURI>"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+#[cfg(feature = "geof_accessors")]
+fn geof_accessor_empty_geometry_is_a_per_row_expression_error() {
+    // [FABLE-5] sq-lsp7k: an accessor with NO defined value (the empty
+    // geometry's dimension) is a per-row expression error — the row is
+    // FILTERed out / left unbound, never a fabricated integer and never a
+    // hard query error.
+    let graph = Graph::load_str(
+        r#"@prefix geo: <http://www.opengis.net/ont/geosparql#> .
+           <http://ex/somewhere> <http://ex/loc> "POINT(1 2)"^^geo:wktLiteral .
+           <http://ex/nowhere>   <http://ex/loc> "POINT EMPTY"^^geo:wktLiteral ."#,
+        "turtle",
+    )
+    .unwrap();
+    let r = query_with_functions(
+        &graph,
+        &format!(
+            "{PREFIXES} SELECT ?s WHERE {{ \
+               ?s ex:loc ?g . FILTER(geof:dimension(?g) >= 0) \
+             }}"
+        ),
+        &geof_registry(),
+    )
+    .unwrap();
+    assert_eq!(names(&r, 0), vec!["<http://ex/somewhere>"]);
 }

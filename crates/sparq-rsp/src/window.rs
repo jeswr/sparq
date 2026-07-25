@@ -1,5 +1,6 @@
 //! Window operators (the RSP-QL S2R step): time-based sliding windows
-//! (`RANGE w STEP s`) and count-based windows (`ROWS n`).
+//! (`RANGE w STEP s`), count-based windows (`ROWS n`), and opt-in
+//! gap-triggered session windows.
 //!
 //! # Time-window semantics (read this; the tests pin it down)
 //!
@@ -46,6 +47,15 @@
 //! `[first.ts, last.ts]` of the content (empty never occurs: a count window is
 //! only reported after an arrival). [`flush`](WindowedStream::flush) is a
 //! no-op for count windows — there is no watermark to advance.
+//!
+//! # Session-window semantics (`session_windows` feature)
+//!
+//! `WindowSpec::session(gap)` groups timestamp-ordered events into maximal
+//! runs whose consecutive timestamp gaps are strictly less than `gap`. A gap
+//! equal to `gap` starts a new session. Closure is event-time-only: a session
+//! closes when the watermark reaches `last_event_ts + gap`; `flush` closes the
+//! final open session. Reported bounds are the inclusive
+//! `[first_event_ts, last_event_ts]` of the session content.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -66,6 +76,11 @@ pub enum WindowSpec {
     /// `ROWS rows` — count window over the last `rows` arrivals, reported
     /// every `slide` arrivals (CQL default: every arrival, `slide = 1`).
     Count { rows: usize, slide: usize },
+    /// A gap-triggered event-time session window. Consecutive events whose
+    /// timestamp difference is less than `gap` share a session; a difference
+    /// greater than or equal to `gap` starts a new session.
+    #[cfg(feature = "session_windows")]
+    Session { gap: u64 },
 }
 
 impl WindowSpec {
@@ -89,6 +104,20 @@ impl WindowSpec {
         WindowSpec::Count { rows, slide: 1 }
     }
 
+    /// Creates a gap-triggered event-time session window.
+    ///
+    /// `gap` uses the same application-supplied `u64` logical timestamp unit
+    /// as stream elements. A timestamp difference equal to `gap` starts a new
+    /// session. Session bounds are inclusive.
+    ///
+    /// # Panics
+    /// If `gap == 0`.
+    #[cfg(feature = "session_windows")]
+    pub fn session(gap: u64) -> Self {
+        assert!(gap > 0, "session window GAP must be > 0");
+        WindowSpec::Session { gap }
+    }
+
     /// Sets the out-of-order tolerance of a time window.
     ///
     /// # Panics
@@ -100,6 +129,8 @@ impl WindowSpec {
                 WindowSpec::Time { range, step, max_delay, t0 }
             }
             WindowSpec::Count { .. } => panic!("max_delay applies to time windows only"),
+            #[cfg(feature = "session_windows")]
+            WindowSpec::Session { .. } => panic!("max_delay applies to time windows only"),
         }
     }
 
@@ -116,6 +147,8 @@ impl WindowSpec {
                 WindowSpec::Time { range, step, max_delay, t0 }
             }
             WindowSpec::Count { .. } => panic!("t0 applies to time windows only"),
+            #[cfg(feature = "session_windows")]
+            WindowSpec::Session { .. } => panic!("t0 applies to time windows only"),
         }
     }
 
@@ -129,23 +162,25 @@ impl WindowSpec {
         match self {
             WindowSpec::Count { rows, .. } => WindowSpec::Count { rows, slide },
             WindowSpec::Time { .. } => panic!("slide applies to count windows only (use STEP)"),
+            #[cfg(feature = "session_windows")]
+            WindowSpec::Session { .. } => panic!("slide applies to count windows only"),
         }
     }
 }
 
-/// One CLOSED (time) or REPORTED (count) window: bounds + frozen content.
+/// One CLOSED (time/session) or REPORTED (count) window: bounds + frozen content.
 /// Generic over the stream payload (the public API works with `[Term; 3]`;
 /// the persistent-dictionary evaluation mode windows `[Id; 3]`s).
 #[derive(Debug, Clone)]
 pub struct Window<T = [Term; 3]> {
-    /// Time window: inclusive start `t0 + k·step`. Count window: `ts` of the
-    /// oldest content triple.
+    /// Time window: inclusive start `t0 + k·step`. Count/session window:
+    /// inclusive `ts` of the oldest content triple.
     pub start: u64,
-    /// Time window: EXCLUSIVE end `start + range`. Count window: INCLUSIVE
-    /// `ts` of the newest content triple.
+    /// Time window: EXCLUSIVE end `start + range`. Count/session window:
+    /// INCLUSIVE `ts` of the newest content triple.
     pub end: u64,
-    /// Content. Time windows: timestamp order (arrival order within equal
-    /// timestamps). Count windows: arrival order.
+    /// Content. Time/session windows: timestamp order (arrival order within
+    /// equal timestamps). Count windows: arrival order.
     pub triples: Vec<Timestamped<T>>,
 }
 
@@ -177,6 +212,14 @@ pub struct WindowedStream<T = [Term; 3]> {
     ring: VecDeque<Timestamped<T>>,
     /// Count-window arrival counter (drives `slide`).
     arrivals: u64,
+    /// End-of-stream horizon for session windows. A flush freezes the final
+    /// session, so later arrivals at or below this timestamp are late.
+    #[cfg(feature = "session_windows")]
+    session_flushed_horizon: Option<u64>,
+    /// Whether a session event has been accepted. Distinguishes an empty
+    /// stream from a first event at timestamp zero when recording a flush.
+    #[cfg(feature = "session_windows")]
+    session_seen_event: bool,
     /// Windows closed/reported but not yet taken.
     closed: Vec<Window<T>>,
 }
@@ -206,6 +249,10 @@ impl<T: Clone> WindowedStream<T> {
             late_dropped: 0,
             ring: VecDeque::new(),
             arrivals: 0,
+            #[cfg(feature = "session_windows")]
+            session_flushed_horizon: None,
+            #[cfg(feature = "session_windows")]
+            session_seen_event: false,
             closed: Vec::new(),
         }
     }
@@ -223,6 +270,75 @@ impl<T: Clone> WindowedStream<T> {
                 self.push_time(triple, ts, range, step, max_delay, t0)
             }
             WindowSpec::Count { rows, slide } => self.push_count(triple, ts, rows, slide),
+            #[cfg(feature = "session_windows")]
+            WindowSpec::Session { gap } => self.push_session(triple, ts, gap),
+        }
+    }
+
+    /// [GPT-5.6] sq-zckkq: Inserts into the still-open event-time session, or
+    /// starts a new one. With the v1 session watermark delay fixed at zero, an
+    /// out-of-order event is accepted only when it joins an open session; an
+    /// isolated session whose inactivity deadline is already behind the
+    /// watermark is late and cannot retroactively surface.
+    #[cfg(feature = "session_windows")]
+    fn push_session(&mut self, triple: T, ts: u64, gap: u64) {
+        if self.session_flushed_horizon.is_some_and(|horizon| ts <= horizon) {
+            self.late_dropped += 1;
+            return;
+        }
+
+        let watermark = self.max_ts.max(ts);
+        let joins_open_session = self
+            .buffer
+            .range(..=ts)
+            .next_back()
+            .is_some_and(|(&previous, _)| ts - previous < gap)
+            || self
+                .buffer
+                .range(ts..)
+                .next()
+                .is_some_and(|(&next, _)| next - ts < gap);
+
+        if !joins_open_session && ts.saturating_add(gap) <= watermark {
+            self.late_dropped += 1;
+            return;
+        }
+
+        self.buffer.entry(ts).or_default().push(triple);
+        self.session_seen_event = true;
+        self.max_ts = watermark;
+        self.close_ready_sessions(gap, watermark, false);
+    }
+
+    /// Closes timestamp-ordered session components from oldest to newest.
+    /// `force` is the end-of-stream path and ignores inactivity deadlines.
+    #[cfg(feature = "session_windows")]
+    fn close_ready_sessions(&mut self, gap: u64, watermark: u64, force: bool) {
+        while let Some(start) = self.buffer.first_key_value().map(|(&ts, _)| ts) {
+            let mut last = start;
+            for ts in self.buffer.range(start..).map(|(&ts, _)| ts) {
+                if ts - last >= gap {
+                    break;
+                }
+                last = ts;
+            }
+
+            if !force && watermark < last.saturating_add(gap) {
+                break;
+            }
+
+            let triples = self
+                .buffer
+                .range(start..=last)
+                .flat_map(|(&ts, ts_triples)| {
+                    ts_triples.iter().map(move |t| Timestamped { triple: t.clone(), ts })
+                })
+                .collect();
+            self.closed.push(Window { start, end: last, triples });
+
+            let mut after = self.buffer.split_off(&last);
+            after.remove(&last);
+            self.buffer = after;
         }
     }
 
@@ -279,10 +395,11 @@ impl<T: Clone> WindowedStream<T> {
     }
 
     /// [OPUS-4.8] Advances event time to `ts` WITHOUT inserting a triple — a
-    /// watermark heartbeat. Closes (and empty-reports) every window the new
-    /// watermark has reached, exactly as a gap arrival at `ts` would, but buffers
-    /// nothing. A no-op for count windows (no watermark) and when `ts` does not
-    /// advance `max_ts`.
+    /// watermark heartbeat. Closes every time/session window the new watermark
+    /// has reached, exactly as a gap arrival at `ts` would, but buffers nothing.
+    /// Time windows empty-report skipped intervals; session windows have no
+    /// empty intervals to report. A no-op for count windows (no watermark) and
+    /// when `ts` does not advance `max_ts`.
     ///
     /// Used by [`ContinuousMultiQuery`](crate::ContinuousMultiQuery) to drive
     /// every window off a SHARED event-time clock: a triple on one stream
@@ -293,6 +410,15 @@ impl<T: Clone> WindowedStream<T> {
     /// tracked and eventually emitted, possibly empty), matching the documented
     /// gap-first-arrival rule.
     pub fn advance(&mut self, ts: u64) {
+        #[cfg(feature = "session_windows")]
+        if let WindowSpec::Session { gap } = self.spec {
+            if ts > self.max_ts {
+                self.max_ts = ts;
+            }
+            self.close_ready_sessions(gap, self.max_ts, false);
+            return;
+        }
+
         let WindowSpec::Time { range, step, max_delay, t0 } = self.spec else {
             return; // count windows have no time axis / watermark
         };
@@ -349,11 +475,20 @@ impl<T: Clone> WindowedStream<T> {
     }
 
     /// End-of-stream: closes every time window up to and including the last
-    /// one covering `max_ts` — regardless of `max_delay` — and returns ALL
-    /// pending windows (the flushed ones plus any not yet taken). No-op for
-    /// count windows beyond draining. After a flush, further pushes at or
-    /// below the flushed horizon count as late.
+    /// one covering `max_ts` regardless of `max_delay`, or the final open
+    /// session, and returns ALL pending windows (the flushed ones plus any not
+    /// yet taken). No-op for count windows beyond draining. After a flush,
+    /// further pushes at or below the flushed horizon count as late.
     pub fn flush(&mut self) -> Vec<Window<T>> {
+        #[cfg(feature = "session_windows")]
+        if let WindowSpec::Session { gap } = self.spec {
+            if self.session_seen_event {
+                self.session_flushed_horizon = Some(self.max_ts);
+            }
+            self.close_ready_sessions(gap, self.max_ts, true);
+            return self.take_closed();
+        }
+
         if let WindowSpec::Time { range, step, t0, .. } = self.spec {
             while let Some(k) = self.next_close {
                 if t0 + k * step > self.max_ts {
@@ -370,7 +505,7 @@ impl<T: Clone> WindowedStream<T> {
         std::mem::take(&mut self.closed)
     }
 
-    /// How many arrivals were dropped as too late (time windows only).
+    /// How many arrivals were dropped as too late (time/session windows only).
     pub fn late_dropped(&self) -> u64 {
         self.late_dropped
     }

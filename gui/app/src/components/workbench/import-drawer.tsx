@@ -3,23 +3,30 @@
 // [OPUS-4.8] sq-ixc3.13 (epic sq-ixc3) — the IMPORT DRAWER: real disk / URL / paste ingest into
 // the active workspace's live store via the NATIVE loader (research/gui-design.md §A.4).
 //
-// This is the operational counterpart to the site's /try dataset picker: NOT a demo dataset
-// chooser, but the way a user gets THEIR OWN data into the workspace. Three tabs:
-//   * FILE  — a native file-open dialog → the native loader (`load_path`): every format incl.
-//             COMPRESSED (.gz/.bz2/.zst) + NATIVE-ONLY HDT, off the main thread, no wasm ceiling.
-//             Desktop only (a browser cannot read an arbitrary disk path).
-//   * URL   — fetch a remote document, then load it (native `load_text` on desktop, in-tab WASM
-//             on the web). Recorded as a re-fetchable WorkspaceSourceMeta.
-//   * PASTE — load a typed/pasted document (native `load_text` on desktop, in-tab WASM on web).
-// Plus a format auto-detect (overridable), a named-graph-preserving toggle (the `preserve_graphs`
-// loader arg), and a replace/add-to-current mode. On success it updates the datasets tree (via
-// the engine context) AND records the import + a workspace snapshot (sq-atb0) via the workspace
-// context. It is mounted ONCE in the workbench; the rail's "+ Import", the top bar, and Cmd-K all
-// open it through `useImportDrawer`.
+// (sq-eydh9) [SONNET-4.6] Browser-upload addition: the File tab now works in BOTH personas —
+//   * WEB  — multi-file picker via `file-ingest.ts` + drag-and-drop via `dropzone.tsx`;
+//            reads the file as binary, decompresses via `@sparq/client` when compressed
+//            (.gz/.bz2/.zst/.zip), then parses in-tab. Native-only HDT still needs the
+//            desktop app (stated honestly; no silent failure).
+//   * TAURI — multi-file native dialog (multiple:true, sq-eydh9 change to tauri-ipc.ts);
+//            each path loaded sequentially via the native loader.
 //
-// HONESTY. The drawer states plainly when the native loader is unavailable (the web target): on
-// the web, File import is disabled and paste/URL run in the in-tab WASM engine (no compressed-
-// file / HDT path). No performance number is shown.
+// (sq-1y04h) [SONNET-4.6] Decompression wiring: the web pane now routes compressed uploads
+//   through `maybeDecompressFile` (file-decompress.ts), which calls `decompressDatasetBytes`
+//   from `@sparq/client` (sq-epbw4). Codec selection is magic-bytes first, extension second.
+//   gzip/zip are native browser APIs; zstd/bzip2 load codec chunks on demand. The import
+//   drawer no longer tells web users "compressed files need the desktop app" for these four
+//   formats. Native-only HDT still requires the desktop (no JS/WASM bead for it).
+//
+// [GPT-5.6] sq-n18o5 — the URL tab now fetches response bytes with `arrayBuffer()` and sends
+//   them through that same decompression path before RDF parsing. Format detection uses the
+//   served RDF Content-Type when available, otherwise the decompressed archive's inner name.
+//
+// Three tabs:
+//   * FILE  — web: browser File upload (incl. compressed .gz/.zip/.zst/.bz2); desktop: native
+//             loader (every format incl. HDT), off the main thread.
+//   * URL   — fetch a remote document, then load it.
+//   * PASTE — load a typed/pasted document.
 
 import * as React from "react";
 import { Dialog as DialogPrimitive } from "radix-ui";
@@ -33,11 +40,13 @@ import {
   FolderOpen,
   CheckCircle2,
   AlertTriangle,
+  FileWarning,
 } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { useEngine, type ImportKind, type ImportMode } from "@/lib/engine-context";
+import { runImportBatch, type BatchSummary } from "@/lib/import-batch";
 import { useWorkspace } from "@/lib/workspace-context";
 import {
   FORMAT_OPTIONS,
@@ -49,6 +58,10 @@ import {
   urlLabel,
 } from "@/lib/rdf-format";
 import { hasNativeLoader, pickRdfFile } from "@/lib/tauri-ipc";
+import { hasDraggedFiles } from "@/lib/file-ingest";
+import type { IngestedFile, RejectedFile, IngestResult } from "@/lib/file-ingest";
+// [SONNET-4.6] sq-1y04h — decompression shim; codec chunks loaded lazily on demand.
+import { fetchRdfDocument, maybeDecompressFile } from "@/lib/file-decompress";
 import type { WorkspaceSourceMeta } from "@sparq/client";
 
 // ── Open-state context (so the rail / top bar / Cmd-K can open the drawer) ─────────────────────
@@ -76,6 +89,22 @@ export function ImportDrawerProvider({ children }: { children: React.ReactNode }
   );
 }
 
+// ── Per-file import result (shown in the FilePane while/after a batch runs) ───────────────────
+
+type FileItemStatus =
+  | { kind: "ok"; added: number }
+  | { kind: "error"; message: string };
+
+// ── RDF extensions the browser file picker + drop filter allow ─────────────────────────────────
+// [SONNET-4.6] sq-1y04h — compressed archives (.gz/.gzip/.zip/.zst/.zstd/.bz2/.bzip2) are now
+// accepted on the web persona too; `maybeDecompressFile` handles the decode before RDF parse.
+// Native-only HDT is NOT included — there is no JS/WASM decoder bead for it.
+
+const WEB_RDF_ACCEPT = [
+  ".ttl", ".nt", ".nq", ".trig", ".jsonld", ".json",
+  ".gz", ".gzip", ".tgz", ".zip", ".zst", ".zstd", ".bz2", ".bzip2",
+];
+
 // ── The drawer body ────────────────────────────────────────────────────────────────────────────
 
 type Tab = "file" | "url" | "paste";
@@ -89,6 +118,40 @@ interface FeedbackErr {
   message: string;
 }
 type Feedback = FeedbackOk | FeedbackErr | null;
+
+/**
+ * (sq-810a0) Build the batch-import completion feedback from a {@link BatchSummary}.
+ *
+ * Beyond the ok/failed counts, it now SIGNALS when a `replace` the user selected was NOT applied
+ * because every file that could have replaced the store failed — the old dataset was left intact.
+ * Before this fix that outcome was silent (the user could believe the store had been cleared).
+ */
+function batchFeedback(summary: BatchSummary): Feedback {
+  const { okCount, errCount, totalAdded, replaceRequested, replaceApplied } = summary;
+  const quads = `${totalAdded.toLocaleString()} quad${totalAdded === 1 ? "" : "s"}`;
+  // Replace was asked for but never landed on a file (all replace-eligible files failed).
+  const replaceNotApplied = replaceRequested && !replaceApplied && okCount > 0;
+
+  if (errCount === 0) {
+    return {
+      kind: "ok",
+      message: `Imported ${okCount} file${okCount === 1 ? "" : "s"} — ${quads} added.`,
+    };
+  }
+  if (okCount > 0) {
+    const replaceNote = replaceNotApplied
+      ? " The replace was NOT applied (the file(s) meant to replace the store failed); existing data was kept and the imported file(s) were added."
+      : "";
+    return {
+      kind: "error",
+      message: `${okCount} file${okCount === 1 ? "" : "s"} imported (${quads}); ${errCount} file${errCount === 1 ? "" : "s"} failed — see errors above.${replaceNote}`,
+    };
+  }
+  return {
+    kind: "error",
+    message: `All ${errCount} file${errCount === 1 ? "" : "s"} failed — see errors above.${replaceRequested ? " The store was left unchanged (replace not applied)." : ""}`,
+  };
+}
 
 function ImportDrawer({
   open,
@@ -109,8 +172,15 @@ function ImportDrawer({
   const [mode, setMode] = React.useState<ImportMode>("add");
   const [preserveGraphs, setPreserveGraphs] = React.useState(true);
 
-  // File tab.
-  const [filePath, setFilePath] = React.useState<string>("");
+  // ── File tab — per-persona state ─────────────────────────────────────────────────────────────
+  // Desktop: list of paths from the multi-file native dialog.
+  const [nativePaths, setNativePaths] = React.useState<string[]>([]);
+  // Browser: files already read from disk via the file-ingest library.
+  const [webFiles, setWebFiles] = React.useState<IngestedFile[]>([]);
+  const [webRejected, setWebRejected] = React.useState<RejectedFile[]>([]);
+  // Per-file import status (populated while/after the batch runs).
+  const [fileStatuses, setFileStatuses] = React.useState<Record<string, FileItemStatus>>({});
+
   // URL tab.
   const [url, setUrl] = React.useState<string>("");
   // Paste tab.
@@ -123,8 +193,14 @@ function ImportDrawer({
       setFeedback(null);
       setBusy(false);
       setTab(native ? "file" : "paste");
+      setNativePaths([]);
+      setWebFiles([]);
+      setWebRejected([]);
+      setFileStatuses({});
     }
   }, [open, native]);
+
+  // ── Single-file finish helper (URL / Paste) ────────────────────────────────────────────────
 
   const finishImport = React.useCallback(
     async (
@@ -135,10 +211,7 @@ function ImportDrawer({
       setFeedback(null);
       try {
         const { source, storeSize, added } = await run();
-        // Record the source + persist a fresh snapshot of the now-updated live store.
         await recordImport(source, snapshotStore());
-        // [OPUS-4.8] sq-cno90 — the snapshot was just written to disk; re-probe the OS-reported
-        // footprint so the desktop status bar reflects the new on-disk bytes (no-op on the web).
         refreshDiskUsage();
         setFeedback({
           kind: "ok",
@@ -156,53 +229,138 @@ function ImportDrawer({
     [recordImport, snapshotStore, refreshDiskUsage],
   );
 
-  // FILE — pick via the native dialog, then load via the native loader.
-  const onPickFile = React.useCallback(async () => {
-    const picked = await pickRdfFile();
-    if (picked) setFilePath(picked);
+  // ── FILE (WEB) — multi-file browser upload: per-file in-tab WASM parse ─────────────────────
+
+  const onIngestWebFiles = React.useCallback((result: IngestResult) => {
+    setWebFiles((prev) => {
+      // De-duplicate by name; later picks win.
+      const byName = new Map(prev.map((f) => [f.name, f]));
+      for (const f of result.accepted) byName.set(f.name, f);
+      return Array.from(byName.values());
+    });
+    setWebRejected((prev) => {
+      const byName = new Map(prev.map((r) => [r.name, r]));
+      for (const r of result.rejected) byName.set(r.name, r);
+      return Array.from(byName.values());
+    });
+    setFileStatuses({});
+    setFeedback(null);
   }, []);
 
-  const onImportFile = React.useCallback(() => {
-    if (!filePath) return;
-    void finishImport("file", async () => {
-      const label = fileLabel(filePath);
-      const format = guessFormat(filePath);
-      const result = await importRdf({
-        kind: "file",
-        mode,
-        preserveGraphs,
-        label,
-        format,
-        path: filePath,
-      });
-      const source: WorkspaceSourceMeta = {
-        kind: "local",
-        label,
-        format: result.format,
-        bytes: result.bytes,
-        importedAt: Date.now(),
-      };
-      return { source, storeSize: result.storeSize, added: result.added };
-    });
-  }, [filePath, finishImport, importRdf, mode, preserveGraphs]);
+  const onImportWebFiles = React.useCallback(() => {
+    if (webFiles.length === 0) return;
+    setBusy(true);
+    setFeedback(null);
+    setFileStatuses({});
 
-  // URL — fetch the document, prefer the served Content-Type for the format, then load.
+    void (async () => {
+      // Sequence the batch: the selected mode is applied to the FIRST file that imports
+      // SUCCESSFULLY (not to array index 0), 'add' thereafter (sq-810a0). Update each row
+      // incrementally so it lights up as it completes.
+      const { summary } = await runImportBatch(
+        webFiles,
+        mode,
+        (file) => file.name,
+        (file, fileMode) =>
+          importRdf({
+            kind: "paste",
+            mode: fileMode,
+            preserveGraphs,
+            label: file.name,
+            format: guessFormat(file.name),
+            text: file.text,
+          }),
+        (_key, _status, statuses) => setFileStatuses({ ...statuses }),
+      );
+
+      setFeedback(batchFeedback(summary));
+
+      // Record the batch in workspace history.
+      if (summary.okCount > 0) {
+        const label =
+          webFiles.length === 1 ? fileLabel(webFiles[0].name) : `${webFiles.length} files`;
+        await recordImport(
+          { kind: "local", label, format: "mixed", bytes: 0, importedAt: Date.now() },
+          snapshotStore(),
+        );
+        refreshDiskUsage();
+      }
+    })().finally(() => setBusy(false));
+  }, [webFiles, mode, preserveGraphs, importRdf, recordImport, snapshotStore, refreshDiskUsage]);
+
+  // ── FILE (NATIVE) — multi-path desktop import ────────────────────────────────────────────────
+
+  const onPickNativeFiles = React.useCallback(async () => {
+    const paths = await pickRdfFile();
+    if (paths.length > 0) {
+      setNativePaths(paths);
+      setFileStatuses({});
+      setFeedback(null);
+    }
+  }, []);
+
+  const onImportNativeFiles = React.useCallback(() => {
+    if (nativePaths.length === 0) return;
+    setBusy(true);
+    setFeedback(null);
+    setFileStatuses({});
+
+    void (async () => {
+      // Sequence the batch: the selected mode is applied to the FIRST path that imports
+      // SUCCESSFULLY (not to array index 0), 'add' thereafter (sq-810a0). Each successful path is
+      // recorded in workspace history inside the importer callback, so a failed leading file that
+      // does NOT clear the store is never recorded — mirroring the pre-fix per-success recording.
+      const { summary } = await runImportBatch(
+        nativePaths,
+        mode,
+        (path) => path,
+        async (path, fileMode) => {
+          const label = fileLabel(path);
+          const result = await importRdf({
+            kind: "file",
+            mode: fileMode,
+            preserveGraphs,
+            label,
+            format: guessFormat(path),
+            path,
+          });
+          await recordImport(
+            {
+              kind: "local",
+              label,
+              format: result.format,
+              bytes: result.bytes,
+              importedAt: Date.now(),
+            },
+            snapshotStore(),
+          );
+          refreshDiskUsage();
+          return { added: result.added };
+        },
+        (_key, _status, statuses) => setFileStatuses({ ...statuses }),
+      );
+
+      setFeedback(batchFeedback(summary));
+    })().finally(() => setBusy(false));
+  }, [nativePaths, mode, preserveGraphs, importRdf, recordImport, snapshotStore, refreshDiskUsage]);
+
+  // ── URL ────────────────────────────────────────────────────────────────────────────────────────
+
   const onImportUrl = React.useCallback(() => {
     const target = url.trim();
     if (!target) return;
     void finishImport("url", async () => {
-      const res = await fetch(target);
-      if (!res.ok) throw new Error(`Fetch failed: HTTP ${res.status} ${res.statusText}`);
-      const body = await res.text();
+      // [GPT-5.6] sq-n18o5 — keep compressed response bytes intact until after codec detection.
+      const document = await fetchRdfDocument(target);
       const format =
-        formatFromContentType(res.headers.get("content-type")) ?? guessFormat(target);
+        formatFromContentType(document.contentType) ?? guessFormat(document.effectiveName);
       const result = await importRdf({
         kind: "url",
         mode,
         preserveGraphs,
         label: urlLabel(target),
         format,
-        text: body,
+        text: document.text,
         url: target,
       });
       const source: WorkspaceSourceMeta = {
@@ -217,7 +375,8 @@ function ImportDrawer({
     });
   }, [url, finishImport, importRdf, mode, preserveGraphs]);
 
-  // PASTE — load the typed document with the chosen format.
+  // ── PASTE ────────────────────────────────────────────────────────────────────────────────────
+
   const onImportPaste = React.useCallback(() => {
     const text = pasteText.trim();
     if (!text) return;
@@ -240,6 +399,24 @@ function ImportDrawer({
       return { source, storeSize: result.storeSize, added: result.added };
     });
   }, [pasteText, pasteFormat, finishImport, importRdf, mode, preserveGraphs]);
+
+  // ── Shared import button enablement ─────────────────────────────────────────────────────────
+
+  const importDisabled =
+    busy ||
+    (tab === "file" && native && nativePaths.length === 0) ||
+    (tab === "file" && !native && webFiles.length === 0) ||
+    (tab === "url" && !url.trim()) ||
+    (tab === "paste" && !pasteText.trim());
+
+  const onImport =
+    tab === "url"
+      ? onImportUrl
+      : tab === "paste"
+        ? onImportPaste
+        : native
+          ? onImportNativeFiles
+          : onImportWebFiles;
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
@@ -278,16 +455,40 @@ function ImportDrawer({
           <div className="flex border-b text-xs" role="tablist">
             <DrawerTab id="file" current={tab} onSelect={setTab} icon={FileUp} label="File" />
             <DrawerTab id="url" current={tab} onSelect={setTab} icon={Link2} label="URL" />
-            <DrawerTab id="paste" current={tab} onSelect={setTab} icon={ClipboardPaste} label="Paste" />
+            <DrawerTab
+              id="paste"
+              current={tab}
+              onSelect={setTab}
+              icon={ClipboardPaste}
+              label="Paste"
+            />
           </div>
 
           <div className="flex-1 overflow-y-auto p-4">
-            {tab === "file" && (
-              <FilePane
-                native={native}
-                filePath={filePath}
-                onPickFile={onPickFile}
-                onClear={() => setFilePath("")}
+            {tab === "file" && native && (
+              <NativeFilePane
+                paths={nativePaths}
+                onPick={onPickNativeFiles}
+                onClear={(p) => setNativePaths((prev) => prev.filter((x) => x !== p))}
+                fileStatuses={fileStatuses}
+                busy={busy}
+              />
+            )}
+            {tab === "file" && !native && (
+              <WebFilePane
+                files={webFiles}
+                rejected={webRejected}
+                onIngest={onIngestWebFiles}
+                onRemove={(name) => {
+                  setWebFiles((prev) => prev.filter((f) => f.name !== name));
+                  setFileStatuses((prev) => {
+                    const next = { ...prev };
+                    delete next[name];
+                    return next;
+                  });
+                }}
+                fileStatuses={fileStatuses}
+                busy={busy}
               />
             )}
             {tab === "url" && <UrlPane url={url} onUrl={setUrl} />}
@@ -330,25 +531,15 @@ function ImportDrawer({
               </p>
             )}
 
-            <Button
-              className="w-full"
-              disabled={
-                busy ||
-                (tab === "file" && (!native || !filePath)) ||
-                (tab === "url" && !url.trim()) ||
-                (tab === "paste" && !pasteText.trim())
-              }
-              onClick={
-                tab === "file" ? onImportFile : tab === "url" ? onImportUrl : onImportPaste
-              }
-            >
+            <Button className="w-full" disabled={importDisabled} onClick={onImport}>
               {busy ? (
                 <>
                   <Loader2 className="size-4 animate-spin" /> Importing…
                 </>
               ) : (
                 <>
-                  <Upload className="size-4" /> Import {mode === "add" ? "(add to store)" : "(replace store)"}
+                  <Upload className="size-4" /> Import{" "}
+                  {mode === "add" ? "(add to store)" : "(replace store)"}
                 </>
               )}
             </Button>
@@ -393,60 +584,380 @@ function DrawerTab({
   );
 }
 
-function FilePane({
-  native,
-  filePath,
-  onPickFile,
-  onClear,
-}: {
-  native: boolean;
-  filePath: string;
-  onPickFile: () => void;
-  onClear: () => void;
-}) {
-  if (!native) {
-    return (
-      <div className="rounded-md border border-[var(--warning)]/40 bg-[var(--warning)]/5 p-3 text-xs text-muted-foreground">
-        <p className="mb-1 flex items-center gap-1.5 font-medium text-foreground">
-          <AlertTriangle className="size-3.5 text-[var(--warning)]" /> Desktop app only
-        </p>
-        Reading a file from disk — including <strong>compressed</strong> (.gz / .bz2 / .zst) and{" "}
-        <strong>native-only HDT</strong> archives — needs the desktop app&rsquo;s native loader (no
-        ~2&nbsp;GiB browser-tab ceiling). In this web build, use the <strong>URL</strong> or{" "}
-        <strong>Paste</strong> tab instead.
-      </div>
-    );
+// ── Web file read helper (decompress-aware) ────────────────────────────────────────────────────
+
+/**
+ * [SONNET-4.6] sq-1y04h — read a list of `File` objects into an `IngestResult`, routing each
+ * through `maybeDecompressFile` so compressed archives (.gz / .zip / .zst / .bz2) are decoded
+ * before the text is handed to the RDF parser. Replaces the `readDroppedFiles` / `File.text()`
+ * call paths in the web-upload pane; the `file-ingest.ts` text-only paths are unchanged and
+ * continue to serve SHACL shapes / N3 rules (no compression needed there).
+ */
+async function readFilesWithDecompress(files: File[]): Promise<IngestResult> {
+  const accepted: IngestedFile[] = [];
+  const rejected: RejectedFile[] = [];
+  for (const file of files) {
+    try {
+      const decoded = await maybeDecompressFile(file);
+      accepted.push({ name: file.name, text: decoded.text, bytes: file.size });
+    } catch (err) {
+      rejected.push({
+        name: file.name,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
+  return { accepted, rejected };
+}
+
+// ── Web FilePane — browser multi-file upload ──────────────────────────────────────────────────
+
+function WebFilePane({
+  files,
+  rejected,
+  onIngest,
+  onRemove,
+  fileStatuses,
+  busy,
+}: {
+  files: IngestedFile[];
+  rejected: RejectedFile[];
+  onIngest: (result: IngestResult) => void;
+  onRemove: (name: string) => void;
+  fileStatuses: Record<string, FileItemStatus>;
+  busy: boolean;
+}) {
+  // Stable <input type="file"> in the DOM so Playwright setInputFiles() can target it.
+  // The Dropzone "Browse files…" button uses pickTextFiles (a dynamic hidden input) for the
+  // keyboard/mouse path. This input is an additional test-accessible hook and accessible label.
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  // [SONNET-4.6] sq-1y04h — custom drop state: we handle the drop event ourselves (instead of
+  // delegating to Dropzone's readDroppedFiles) so that compressed archives are decoded BEFORE
+  // the RDF parser sees them. Dropzone's internal readDroppedFiles uses File.text() which
+  // corrupts binary payloads; here we extract File objects synchronously from the drop event
+  // and pass them through readFilesWithDecompress.
+  const [dragActive, setDragActive] = React.useState(false);
+  const dragDepth = React.useRef(0);
+
+  const handleInputChange = React.useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const fileArr = Array.from(e.target.files ?? []);
+      if (fileArr.length === 0) return;
+      // Reset so the same filenames can be re-picked after a remove.
+      if (inputRef.current) inputRef.current.value = "";
+      // [SONNET-4.6] sq-1y04h — readFilesWithDecompress routes each file through
+      // maybeDecompressFile (binary read + codec detection + decode) before handing text to
+      // the RDF parser; uncompressed files fall through with File.arrayBuffer() semantics.
+      const result = await readFilesWithDecompress(fileArr);
+      onIngest(result);
+    },
+    [onIngest],
+  );
+
+  // [SONNET-4.6] sq-1y04h — custom drag handlers that bypass the text-read path.
+  const handleDragEnter = React.useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (busy || !hasDraggedFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    dragDepth.current += 1;
+    setDragActive(true);
+  }, [busy]);
+
+  const handleDragOver = React.useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (busy || !hasDraggedFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  }, [busy]);
+
+  const handleDragLeave = React.useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (busy || !hasDraggedFiles(e.dataTransfer)) return;
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDragActive(false);
+  }, [busy]);
+
+  const handleDrop = React.useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (busy || !hasDraggedFiles(e.dataTransfer)) return;
+    e.preventDefault();
+    dragDepth.current = 0;
+    setDragActive(false);
+    // Extract File objects synchronously before the first await — browsers neuter the
+    // DataTransfer items list once this handler yields.
+    const files: File[] = [];
+    const rejected: RejectedFile[] = [];
+    if (e.dataTransfer.items?.length) {
+      for (const item of Array.from(e.dataTransfer.items)) {
+        if (item.kind !== "file") continue;
+        const entry = typeof item.webkitGetAsEntry === "function" ? item.webkitGetAsEntry() : null;
+        const file = item.getAsFile();
+        if (entry?.isDirectory) {
+          rejected.push({ name: entry.name || file?.name || "(directory)", reason: "directories cannot be ingested — drop the files inside it instead" });
+          continue;
+        }
+        if (!file) {
+          rejected.push({ name: entry?.name ?? "(unreadable item)", reason: "the browser could not expose this dropped item as a file" });
+          continue;
+        }
+        files.push(file);
+      }
+    } else {
+      files.push(...Array.from(e.dataTransfer.files ?? []));
+    }
+    void readFilesWithDecompress(files).then((res) => {
+      onIngest({ accepted: res.accepted, rejected: [...rejected, ...res.rejected] });
+    });
+  }, [busy, onIngest]);
+
+  const handleBrowse = React.useCallback(async () => {
+    // pickTextFiles opens a file picker; we then re-read the File objects as binary so
+    // compressed archives are handled. We can't get File objects back from pickTextFiles,
+    // so instead we open our own hidden input programmatically (same pattern as pickViaInput).
+    if (inputRef.current) inputRef.current.click();
+  }, []);
+
+  return (
+    <div className="space-y-3">
+      {/* [SONNET-4.6] sq-1y04h — updated copy: compressed archives are now handled in-tab.
+          Only native-only HDT still requires the desktop app (no JS decoder bead). */}
+      <p className="text-xs text-muted-foreground">
+        Upload RDF files from your computer — Turtle, N-Triples, N-Quads, TriG, JSON-LD, or a
+        compressed archive (.gz / .zip / .zst / .bz2). Each file is read and decompressed
+        in-tab by the WASM engine.{" "}
+        <span className="font-medium text-foreground">
+          Native-only HDT archives (.hdt) still require the desktop app.
+        </span>
+      </p>
+
+      {/* Stable file input: Playwright setInputFiles() target + accessible fallback.
+          Also the backing input for the "Browse files…" button below (handleBrowse → click). */}
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        accept={WEB_RDF_ACCEPT.join(",")}
+        data-web-file-input
+        aria-label="Select RDF files to import"
+        className="sr-only"
+        disabled={busy}
+        onChange={handleInputChange}
+      />
+
+      {/* [SONNET-4.6] sq-1y04h — custom drop zone panel: we handle drag/drop ourselves so that
+          Files are read as binary (maybeDecompressFile) rather than via readDroppedFiles/text(). */}
+      <div
+        role="region"
+        aria-label="File drop zone"
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+        className={cn(
+          "relative rounded-md border border-dashed p-5 text-center transition-colors",
+          dragActive ? "border-primary bg-primary/5" : "border-border",
+          busy && "opacity-50",
+        )}
+      >
+        <FileUp className="mx-auto size-6 text-muted-foreground" aria-hidden />
+        <p className="mt-2 text-sm">Drag &amp; drop RDF files here</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          .ttl · .nt · .nq · .trig · .jsonld · .gz · .zip · .zst · .bz2
+        </p>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="mt-3"
+          onClick={handleBrowse}
+          disabled={busy}
+        >
+          <Upload className="size-4" /> Browse files…
+        </Button>
+        <span className="sr-only" role="status">
+          {dragActive ? "Release to drop the files" : ""}
+        </span>
+      </div>
+
+      {/* Per-file list: queued + status (appears after first pick/drop). */}
+      {(files.length > 0 || rejected.length > 0) && (
+        <ul className="space-y-1.5" aria-label="Selected files">
+          {files.map((f) => (
+            <WebFileRow
+              key={f.name}
+              name={f.name}
+              bytes={f.bytes}
+              status={fileStatuses[f.name] ?? null}
+              onRemove={busy ? undefined : () => onRemove(f.name)}
+            />
+          ))}
+          {rejected.map((r) => (
+            <li
+              key={r.name}
+              className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-xs"
+            >
+              <FileWarning
+                className="mt-0.5 size-3.5 shrink-0 text-destructive"
+                aria-hidden
+              />
+              <span className="min-w-0 flex-1">
+                <span className="break-all font-mono">{r.name}</span>
+                <span className="block text-muted-foreground">{r.reason}</span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+function WebFileRow({
+  name,
+  bytes,
+  status,
+  onRemove,
+}: {
+  name: string;
+  bytes: number;
+  status: FileItemStatus | null;
+  onRemove?: () => void;
+}) {
+  const fmt = new Intl.NumberFormat("en", { notation: "compact" });
+  return (
+    <li
+      data-file-row={name}
+      className={cn(
+        "flex items-start gap-2 rounded-md border px-2.5 py-1.5 text-xs",
+        status?.kind === "ok" && "border-[var(--success)]/30 bg-[var(--success)]/5",
+        status?.kind === "error" && "border-destructive/30 bg-destructive/5",
+        !status && "border-border bg-background",
+      )}
+    >
+      {status?.kind === "ok" ? (
+        <CheckCircle2
+          className="mt-0.5 size-3.5 shrink-0 text-[var(--success)]"
+          aria-hidden
+        />
+      ) : status?.kind === "error" ? (
+        <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-destructive" aria-hidden />
+      ) : (
+        <FileUp className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+      )}
+      <span className="min-w-0 flex-1">
+        <span className="break-all font-mono">{name}</span>
+        {status?.kind === "ok" && (
+          <span className="block text-[var(--success)]">
+            {status.added.toLocaleString()} quad{status.added === 1 ? "" : "s"} imported
+          </span>
+        )}
+        {status?.kind === "error" && (
+          <span className="block text-destructive" data-file-error={name}>
+            {status.message}
+          </span>
+        )}
+        {!status && (
+          <span className="block text-muted-foreground">
+            {fmt.format(bytes)}&nbsp;B · {guessFormat(name)}
+          </span>
+        )}
+      </span>
+      {onRemove && !status && (
+        <button
+          onClick={onRemove}
+          aria-label={`Remove ${name}`}
+          className="shrink-0 text-muted-foreground hover:text-foreground"
+        >
+          <X className="size-3.5" />
+        </button>
+      )}
+    </li>
+  );
+}
+
+// ── Native FilePane — desktop multi-file import ───────────────────────────────────────────────
+
+function NativeFilePane({
+  paths,
+  onPick,
+  onClear,
+  fileStatuses,
+  busy,
+}: {
+  paths: string[];
+  onPick: () => void;
+  onClear: (path: string) => void;
+  fileStatuses: Record<string, FileItemStatus>;
+  busy: boolean;
+}) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        Load an RDF file through the native engine — Turtle / N-Triples / N-Quads / TriG / JSON-LD,
+        Load RDF files through the native engine — Turtle, N-Triples, N-Quads, TriG, JSON-LD,
         including <strong>compressed</strong> (.gz / .bz2 / .zst) streams and{" "}
-        <strong>native-only HDT</strong> (.hdt / .hdt.gz) archives. Named graphs are preserved.
+        <strong>native-only HDT</strong> (.hdt / .hdt.gz) archives. Multiple files are imported
+        sequentially. Named graphs are preserved.
       </p>
-      <Button variant="outline" className="w-full" onClick={onPickFile}>
-        <FolderOpen className="size-4" /> Choose a file…
+      <Button variant="outline" className="w-full" onClick={onPick} disabled={busy}>
+        <FolderOpen className="size-4" /> Choose files…
       </Button>
-      {filePath && (
-        <div className="flex items-start gap-2 rounded-md border bg-background px-3 py-2 text-xs">
-          <FileUp className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 flex-1 break-all font-mono">{filePath}</span>
-          <button
-            onClick={onClear}
-            aria-label="Clear selected file"
-            className="shrink-0 text-muted-foreground hover:text-foreground"
-          >
-            <X className="size-3.5" />
-          </button>
-        </div>
-      )}
-      {filePath && (
-        <FormatNote
-          label={fileLabel(filePath)}
-          format={guessFormat(filePath)}
-          compressed={isCompressed(filePath)}
-          hdt={isHdt(filePath)}
-        />
+      {paths.length > 0 && (
+        <ul className="space-y-1.5" aria-label="Selected files">
+          {paths.map((p) => {
+            const status = fileStatuses[p] ?? null;
+            return (
+              <li
+                key={p}
+                className={cn(
+                  "flex items-start gap-2 rounded-md border px-3 py-2 text-xs",
+                  status?.kind === "ok" && "border-[var(--success)]/30 bg-[var(--success)]/5",
+                  status?.kind === "error" && "border-destructive/30 bg-destructive/5",
+                  !status && "border-border bg-background",
+                )}
+              >
+                {status?.kind === "ok" ? (
+                  <CheckCircle2
+                    className="mt-0.5 size-3.5 shrink-0 text-[var(--success)]"
+                    aria-hidden
+                  />
+                ) : status?.kind === "error" ? (
+                  <AlertTriangle
+                    className="mt-0.5 size-3.5 shrink-0 text-destructive"
+                    aria-hidden
+                  />
+                ) : (
+                  <FileUp
+                    className="mt-0.5 size-3.5 shrink-0 text-muted-foreground"
+                    aria-hidden
+                  />
+                )}
+                <span className="min-w-0 flex-1">
+                  <span className="break-all font-mono">{fileLabel(p)}</span>
+                  {status?.kind === "ok" && (
+                    <span className="block text-[var(--success)]">
+                      {status.added.toLocaleString()} quads imported
+                    </span>
+                  )}
+                  {status?.kind === "error" && (
+                    <span className="block text-destructive">{status.message}</span>
+                  )}
+                  {!status && (
+                    <span className="block text-muted-foreground">
+                      {guessFormat(p)}
+                      {isCompressed(p) && !isHdt(p) && " · compressed"}
+                      {isHdt(p) && " · native HDT"}
+                    </span>
+                  )}
+                </span>
+                {!busy && !status && (
+                  <button
+                    onClick={() => onClear(p)}
+                    aria-label={`Remove ${fileLabel(p)}`}
+                    className="shrink-0 text-muted-foreground hover:text-foreground"
+                  >
+                    <X className="size-3.5" />
+                  </button>
+                )}
+              </li>
+            );
+          })}
+        </ul>
       )}
     </div>
   );
@@ -456,9 +967,9 @@ function UrlPane({ url, onUrl }: { url: string; onUrl: (v: string) => void }) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        Fetch an RDF document from a URL and load it into the store. The source is recorded as a
-        re-fetchable workspace source. The format is auto-detected from the served{" "}
-        <code>Content-Type</code> (or the URL extension).
+        Fetch an RDF document, including a compressed archive, from a URL and load it into the
+        store. The source is recorded as a re-fetchable workspace source. The format is
+        auto-detected from the served <code>Content-Type</code> (or the inner file extension).
       </p>
       <input
         type="url"
@@ -491,13 +1002,15 @@ function PastePane({
   format: string;
   onFormat: (v: string) => void;
 }) {
-  // HDT is a BINARY archive format — it cannot be pasted as text, so it is never a paste option
-  // (it is offered only on the File tab, where the native loader reads the binary off disk).
+  // HDT is a BINARY archive format — it cannot be pasted as text, so it is never a paste option.
   const options = FORMAT_OPTIONS.filter((f) => f.value !== "hdt");
   return (
     <div className="space-y-3">
       <div className="flex items-center gap-2">
-        <label htmlFor="import-paste-format" className="text-xs font-medium text-muted-foreground">
+        <label
+          htmlFor="import-paste-format"
+          className="text-xs font-medium text-muted-foreground"
+        >
           Format
         </label>
         <select

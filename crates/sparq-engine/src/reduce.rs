@@ -234,3 +234,225 @@ mod tests {
         assert_eq!(reduce_count(&[NO_ID, NO_ID]), 0);
     }
 }
+
+// [SONNET-4.6] (sq-sqtk2.3) Kani result-equivalence harnesses for the columnar reducer
+// kernels (SUM/COUNT/MIN/MAX + narrow). Each harness checks that the REAL implementation
+// function (reduce_sum / reduce_count / reduce_min_id / reduce_max_id / narrow_sum_to_i64)
+// equals an INDEPENDENT in-harness reference written as a plain scalar fold — the reference
+// intentionally does NOT call the columnar code to produce the expected value (that would be
+// vacuously true), and it does NOT call the exec.rs scalar path (to keep the TCB small).
+//
+// TIER: PROVED (bounded, slice length ≤ MAX_SLICE = 8; element values fully symbolic in
+// their stated domains). Kani/CBMC explores ALL inputs within the stated bounds exhaustively.
+// TCB: Kani/CBMC + slice-length bound + in-harness reference-as-spec.
+//
+// STATED BOUNDS (document honestly; "proved beyond bound" means extrapolated by induction
+// on the loop body, not model-checked):
+//   * Slice length: 0..=MAX_SLICE = 8 (the same element count per probe, not per-group row
+//     count at query time — production groups can be larger; 8 is a pragmatic Kani bound,
+//     not a completeness claim: behavior beyond this length is not model-checked — for
+//     example, reduce_sum's i128 accumulation can exceed i64::MAX at large cardinality). [SONNET-4.6]
+//   * reduce_sum / reduce_min_id / reduce_max_id: each element value is fully symbolic in
+//     [0, INLINE_MAX_I64] (= [0, 2^30 - 1]); the id encoding is id = INLINE_BASE + value.
+//   * reduce_count: each element is fully symbolic over the entire u32 domain (no assume on
+//     values; the count only tests id != NO_ID which covers all three partitions).
+//   * narrow_sum_to_i64: the input `sum: i128` is FULLY SYMBOLIC over the complete i128
+//     domain — no assume, no loop, proved without a bound (complete domain).
+//
+// The `kani` cfg is registered in crates/sparq-engine/Cargo.toml [lints.rust] so
+// `-D warnings` (unexpected_cfgs) is clean on the normal build. This module compiles ONLY
+// under `cargo kani -p sparq-engine --features vectorized` (Kani injects `cfg(kani)` itself);
+// under all other builds it is stripped to zero bytes — the default build and wasm bundle are
+// byte-identical to before this bead.
+//
+// NON-VACUITY (documented): locally perturbing one accumulation step — e.g. changing
+// `acc += i128::from(id - INLINE_BASE)` to `acc += 1` in `reduce_sum` — causes
+// `reduce_sum_equals_reference_fold` to go RED (counterexample: any non-unit value in the
+// slice). This mutation spot-check is documented in the PR body per the bead requirement.
+#[cfg(all(kani, feature = "vectorized"))]
+mod kani_proofs {
+    use super::*;
+    use sparq_core::dict::{is_inline, Id, INLINE_BASE, NO_ID};
+
+    /// Maximum slice length for the bounded proofs. CBMC symbolic exploration is exponential
+    /// in slice length, so 8 is chosen as a pragmatic bound; properties are verified
+    /// exhaustively up to this length and extrapolated by induction beyond it, but
+    /// behavior beyond MAX_SLICE is not model-checked. [SONNET-4.6]
+    const MAX_SLICE: usize = 8;
+
+    /// Build a symbolic Vec of `len` inline ids, each constrained to
+    /// `[INLINE_BASE, INLINE_BASE + INLINE_MAX_I64]` so every element is a valid inline
+    /// integer id. Values (offsets from INLINE_BASE) are fully symbolic in [0, INLINE_MAX_I64].
+    fn symbolic_inline_ids(len: usize) -> Vec<Id> {
+        let mut v = vec![0u32; len];
+        for id in v.iter_mut() {
+            let raw: u32 = kani::any();
+            kani::assume(raw <= INLINE_MAX_I64 as u32);
+            *id = INLINE_BASE + raw;
+        }
+        v
+    }
+
+    /// PROPERTY: `reduce_sum` on an all-inline slice equals the independent scalar reference
+    /// fold sum-of-decoded-values over the same slice.
+    ///
+    /// The reference is written fresh here — it does NOT call `reduce_sum` (no vacuity) and
+    /// does NOT call the exec.rs scalar path (to keep TCB minimal).
+    ///
+    /// Bound: slice length 0..=MAX_SLICE = 8; values symbolic in [0, INLINE_MAX_I64].
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn reduce_sum_equals_reference_fold() {
+        let len: usize = kani::any();
+        kani::assume(len <= MAX_SLICE);
+        let ids = symbolic_inline_ids(len);
+
+        // Independent reference: a fresh scalar fold over decoded values.
+        let mut ref_sum: i128 = 0;
+        for &id in ids.iter() {
+            // is_inline holds by construction; assert defensively so Kani can confirm it.
+            assert!(is_inline(id), "all ids must be inline by construction");
+            ref_sum += i128::from(id - INLINE_BASE);
+        }
+
+        // The implementation must return Some(ref_sum) for any all-inline slice.
+        assert_eq!(reduce_sum(&ids), Some(ref_sum));
+    }
+
+    /// PROPERTY: `reduce_count` on any id slice (symbolic over the full u32 domain) equals
+    /// the independent scalar reference count of non-NO_ID elements.
+    ///
+    /// Bound: slice length 0..=MAX_SLICE = 8; element values symbolic over all of u32.
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn reduce_count_equals_reference() {
+        let len: usize = kani::any();
+        kani::assume(len <= MAX_SLICE);
+        let mut ids = vec![0u32; len];
+        for id in ids.iter_mut() {
+            *id = kani::any(); // fully symbolic: inline, dict id, or NO_ID
+        }
+
+        // Independent reference: count non-NO_ID elements.
+        let mut ref_count: usize = 0;
+        for &id in ids.iter() {
+            if id != NO_ID {
+                ref_count += 1;
+            }
+        }
+
+        assert_eq!(reduce_count(&ids), ref_count);
+    }
+
+    /// PROPERTY: `reduce_min_id` on a non-empty all-inline slice returns the id with the
+    /// minimum decoded value (equivalently, the minimum id, since all share the same
+    /// INLINE_BASE offset and the mapping id → value is strictly monotone).
+    ///
+    /// Bound: slice length 1..=MAX_SLICE = 8; values symbolic in [0, INLINE_MAX_I64].
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn reduce_min_id_equals_reference() {
+        let len: usize = kani::any();
+        kani::assume(len >= 1 && len <= MAX_SLICE);
+        let ids = symbolic_inline_ids(len);
+
+        // Independent reference: linear scan for the minimum id.
+        // Initialise to u32::MAX (> any inline id: max inline id =
+        // INLINE_BASE + INLINE_MAX_I64 = 3_221_225_471 < u32::MAX = 4_294_967_295).
+        let mut ref_min: Id = u32::MAX;
+        for &id in ids.iter() {
+            if id < ref_min {
+                ref_min = id;
+            }
+        }
+
+        assert_eq!(reduce_min_id(&ids), Some(ref_min));
+    }
+
+    /// PROPERTY: `reduce_max_id` on a non-empty all-inline slice returns the id with the
+    /// maximum decoded value (equivalently, the maximum id).
+    ///
+    /// Bound: slice length 1..=MAX_SLICE = 8; values symbolic in [0, INLINE_MAX_I64].
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn reduce_max_id_equals_reference() {
+        let len: usize = kani::any();
+        kani::assume(len >= 1 && len <= MAX_SLICE);
+        let ids = symbolic_inline_ids(len);
+
+        // Independent reference: linear scan for the maximum id.
+        // Initialise to 0 (= NO_ID < INLINE_BASE <= any inline id), updated on first element.
+        let mut ref_max: Id = 0;
+        for &id in ids.iter() {
+            if id > ref_max {
+                ref_max = id;
+            }
+        }
+
+        assert_eq!(reduce_max_id(&ids), Some(ref_max));
+    }
+
+    /// PROPERTY: `narrow_sum_to_i64(s)` returns `Some(s as i64)` exactly when
+    /// `s ∈ [i64::MIN, i64::MAX]`, and `None` for every value outside that range.
+    ///
+    /// TIER: PROVED over the COMPLETE i128 domain — no slice, no loop, no unwind bound;
+    /// CBMC handles the 128-bit integer comparison exhaustively.
+    #[kani::proof]
+    fn narrow_sum_to_i64_iff_in_range() {
+        let s: i128 = kani::any(); // fully symbolic, no assume — complete i128 domain
+        let result = narrow_sum_to_i64(s);
+        if s >= i64::MIN as i128 && s <= i64::MAX as i128 {
+            assert_eq!(result, Some(s as i64));
+        } else {
+            assert_eq!(result, None);
+        }
+    }
+
+    /// DOMAIN-COVERAGE SELF-CHECK (the sq-og8u8 anti-vacuity pattern). Lesson of sq-sqtk2.1
+    /// (2026-07-04): a too-tight `#[kani::unwind]` on an `assume`-bounded generator can
+    /// SILENTLY `assume(false)`-prune the very inputs a harness means to cover, so the harness
+    /// passes VACUOUSLY while reporting nothing wrong (there, the 32–39-byte security-relevant
+    /// principals were pruned; a mutation spot-check cannot catch it — the mutant is pruned
+    /// too). Every harness suite must therefore ship a self-check proving its interesting
+    /// inputs genuinely survive the bounds. Two obligations here:
+    ///
+    ///   1. **The reducer value domain is genuinely ADVERSARIAL** — `MAX_SLICE >= 2` (a
+    ///      multi-element fold, not a degenerate singleton), `INLINE_MAX_I64 > 0` (a
+    ///      non-trivial value range, so `min != max` and a multi-term sum are reachable), and
+    ///      the id encoding classes correctly at BOTH ends of the inline range (`is_inline`
+    ///      on `INLINE_BASE` and on `INLINE_BASE + INLINE_MAX_I64`) but NOT on the `NO_ID`
+    ///      sentinel (`reduce_count` keys on `id != NO_ID`). These are concrete assertions
+    ///      over the domain constants — no loop, no unwind, so nothing here can itself be
+    ///      pruned; they go red if a future re-scope collapses the value/id domain.
+    ///
+    ///   2. **The MAXIMAL-length slice SURVIVES the `unwind(12)` bound** — a `kani::cover!`
+    ///      that a full `len == MAX_SLICE` slice with two DISTINCT endpoint values is
+    ///      reachable. If a future bound tightening pruned the full-length varied slice (the
+    ///      sq-sqtk2.1 failure mode), this cover becomes UNREACHABLE and goes red, rather than
+    ///      the equivalence harnesses silently proving the reducers ≡ a reference over only
+    ///      the short slices the bound still admits.
+    ///
+    /// Cost: one small harness at the same `unwind(12)` the reducer harnesses use. [OPUS-4.8]
+    #[kani::proof]
+    #[kani::unwind(12)]
+    fn domain_reducer_slice_is_adversarial_and_survives_the_bound() {
+        // (1) The domain constants are adversarial (concrete — cannot be unwind-pruned).
+        assert!(MAX_SLICE >= 2, "a singleton domain would not exercise the multi-element fold");
+        assert!(INLINE_MAX_I64 > 0, "a zero-width value range makes min == max == sum trivial");
+        assert!(INLINE_BASE > NO_ID, "the inline region must sit above the NO_ID sentinel");
+        assert!(is_inline(INLINE_BASE), "INLINE_BASE is the low end of the inline region");
+        assert!(
+            is_inline(INLINE_BASE + INLINE_MAX_I64 as u32),
+            "INLINE_BASE + INLINE_MAX_I64 is the high end of the inline region"
+        );
+        assert!(!is_inline(NO_ID), "NO_ID must not be classed inline (reduce_count keys on it)");
+
+        // (2) The maximal-length, value-varied slice SURVIVES unwind(12): a full MAX_SLICE
+        // slice whose endpoints can differ is reachable, i.e. NOT assume(false)-pruned.
+        let ids = symbolic_inline_ids(MAX_SLICE);
+        kani::cover!(
+            ids[0] != ids[MAX_SLICE - 1],
+            "a full-length slice with distinct endpoint values survives the unwind bound"
+        );
+    }
+}

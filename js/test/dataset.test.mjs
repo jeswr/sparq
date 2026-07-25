@@ -67,7 +67,7 @@ test('Dataset.fromQuads round-trips RDF/JS quads', async () => {
 
 test('Dataset.store exposes the full SPARQL surface', async () => {
   const ds = await Dataset.fromString(TTL, 'turtle');
-  const rows = ds.store.queryBindings('PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }');
+  const rows = ds.store.query('PREFIX ex: <http://ex/> SELECT ?n WHERE { ?s ex:name ?n }');
   assert.equal(rows.length, 2);
   ds.free();
 });

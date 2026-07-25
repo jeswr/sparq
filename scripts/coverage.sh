@@ -107,6 +107,9 @@ PER_COMMIT_CRATES=(
   # misleadingly-low artifact (measured 55-79% native; same class as sparq-cli's
   # subprocess artifact) — they are floor-0 + presence-gated in the JSONs instead.
   sparq-fedclient sparq-fedplan sparq-prov
+  # [FABLE-5] sq-lsp7k.1.1: sparq-forms — opt-in headless SHACL-to-form derivation.
+  # No cargo features (whole surface default-compiled), so no measure() case arm.
+  sparq-forms
   # [OPUS-4.8] sq-bif.7: the OPT-IN ODRL usage-control policy crate, untracked by BOTH
   # gates. The STATELESS evaluator (parse/eval/compare/hierarchy) is default-on, but the
   # stateful `odrl:count` counter stores (the `count`/`count_file`/`count_backend` modules
@@ -123,6 +126,27 @@ PER_COMMIT_CRATES=(
   # the focused bnode-isomorphism / oxrdf-bridge unit cases; sparq-algos' reflects the inline
   # PageRank/centrality/community oracles plus the tests/topology_oracles.rs integration suite.
   sparq-algos sparq-canon
+  # [OPUS-4.8] sq-qcnn.23 (epic sq-qcnn): the two CORE OWL 2 reasoners that were
+  # untracked by BOTH coverage gates.  Their whole gate-exercising surface is behind
+  # DEFAULT-OFF features, so a default-feature `cargo llvm-cov -p <crate>` would build
+  # the crate with the EL classifier / QL rewriter compiled OUT and report a
+  # non-representative (low or empty) number.  Each MUST be measured WITH its
+  # whole-surface features on — the `case` in measure() below names them:
+  #   * sparq-reason-el  —  `rbox` (CR10/CR11 role-inclusion automaton, Phase E2) +
+  #                          `hasse` (DirectHierarchy transitive-reduction, Phase E3).
+  #                          The E1 classify core is always present; rbox+hasse together
+  #                          exercise the full normalise->saturate->reduce pipeline.
+  #   * sparq-reason-ql  —  `experimental` (the PerfectRef rewriting pass; without it
+  #                          only the cheap CQ-shape gate types compile in, which is not
+  #                          a representative number for the rewriter floor).
+  # Neither cdomain (requires sparq-substrate dep) nor abox is included in the EL
+  # measurement: the bead architect explicitly specified rbox,hasse as the whole-surface
+  # ceiling for this gate wiring pass (those features close the SNOMED/EL+ gap; cdomain/
+  # abox are separately tracked beads).  Nothing in the workspace depends on these crates
+  # by default, so their tests are otherwise run ONLY by the feature-matrix leg; wiring
+  # them here brings both cores under the line-coverage ratchet ("no crate silently
+  # dropped", matching sparq-substrate/sparq-canon above). [OPUS-4.8]
+  sparq-reason-el sparq-reason-ql
   # [OPUS-4.8] sq-qcnn.3 (epic sq-qcnn, umbrella sq-qonbz): the shared zero-overhead
   # evaluation SUBSTRATE — the correctness core (the id-tuple Row/Key/Posting vocabulary,
   # the XSD numeric value tower, the four id-tuple join kernels, and the SPARQL term total
@@ -135,6 +159,18 @@ PER_COMMIT_CRATES=(
   # here brings the correctness core under the line-coverage ratchet ("no crate silently
   # dropped").
   sparq-substrate
+  # [OPUS-4.8] sq-6vshe.4: seam 1 of the sparq-engine facade split — the RDF writer matrix
+  # (Turtle/TriG/N-Quads/JSON-LD, buffered + streaming) peeled into an internal sub-crate. Its
+  # whole surface is behind DEFAULT-OFF `serialize-rdf`, so it MUST be measured WITH
+  # `serialize-rdf,streaming-serialization` (the `case` in measure() below names them). Bringing
+  # the moved writer + its ~2.9k test LOC under the ratchet keeps "no crate silently dropped".
+  sparq-engine-serialize
+  # [OPUS-4.8] sq-6vshe.4: seam A2 of the sparq-engine facade split — the SPARQL 1.1 federated-
+  # SERVICE client (HTTP transport, SPARQL-Results JSON/XML parse, bound-join batching, SSRF
+  # egress policy) peeled into an internal sub-crate. Its whole surface is behind DEFAULT-OFF
+  # `service`, so it MUST be measured WITH `service` (the `case` in measure() below names it).
+  # Brings the moved client + its ~1.3k test LOC under the ratchet ("no crate silently dropped").
+  sparq-engine-service
 )
 # Crates whose HEAVY tests are only run in the nightly tier.
 NIGHTLY_ONLY_NOTE="sparq-vectors heavy 50k recall/diskann tests run only in nightly tier"
@@ -148,59 +184,80 @@ NIGHTLY_ONLY_NOTE="sparq-vectors heavy 50k recall/diskann tests run only in nigh
 # path. Splitting the loop across parallel MATRIX shards makes crates measure concurrently;
 # the wall-clock then floors at the slowest single shard.
 #
-# The groups are LPT-bin-packed by that measured per-crate wall time so the slowest shard
-# is ~= the sparq-engine elephant ALONE (it cannot be split without cross-runner profraw
-# merging — see the follow-up bead). The other three shards carry ~336s of measured work
-# EACH (balanced), comfortably under engine. Each shard runs the IDENTICAL coverage.sh +
-# `coverage-gate.py --check-robust` over its subset, so the ratchet semantics are unchanged
-# (every per-crate floor still enforced; a shard whose crate is below floor fails, failing
-# the gate). NB: these seconds are a MEASUREMENT-ORDER lower bound — a fresh shard also
-# re-builds the shared instrumented deps — so keep the count SMALL (4): more shards only
-# add duplicated build overhead without lowering the engine-bound wall-clock floor.
+# The groups are LPT-bin-packed by that measured per-crate wall time. [FABLE-5] sq-piapk:
+# the sparq-engine elephant (668s) — which WAS the slowest shard ALONE — is no longer here;
+# it moved to the dedicated cross-runner SPLIT pipeline (DEDICATED_PIPELINE_CRATES below),
+# so the slowest of these 3 remaining shards (~336s of measured work EACH, balanced) now sets
+# the SHARD_GROUPS wall-clock floor, and the engine split's merged wall-clock sits alongside
+# it (target: both well under the old ~668s engine pole). Each shard runs the IDENTICAL
+# coverage.sh + `coverage-gate.py --check-robust` over its subset, so the ratchet semantics
+# are unchanged (every per-crate floor still enforced; a shard whose crate is below floor
+# fails, failing the gate). NB: these seconds are a MEASUREMENT-ORDER lower bound — a fresh
+# shard also re-builds the shared instrumented deps — so keep the count SMALL: more shards
+# only add duplicated build overhead without lowering the (now non-engine) wall-clock floor.
 #
+# [FABLE-5] sq-piapk: sparq-engine is NO LONGER a SHARD_GROUPS entry — it is measured by a
+# DEDICATED CROSS-RUNNER SPLIT pipeline (scripts/coverage-engine-shard.sh + the
+# coverage-engine-{archive,run,merge} jobs in ci.yml). Its per-commit `floor` is STILL
+# enforced — by that pipeline's merge+`coverage-gate.py --check` — so it must NOT appear in
+# any SHARD_GROUPS shard (measuring it twice would double the wall-clock it exists to cut),
+# but it must ALSO NOT be flagged "missing from every shard => un-gated" by --check-shards.
+# The DEDICATED_PIPELINE_CRATES set below records exactly that: crates that are in
+# PER_COMMIT_CRATES and gated, but gated OUTSIDE SHARD_GROUPS. The invariant becomes:
+#     union(SHARD_GROUPS) ∪ DEDICATED_PIPELINE_CRATES  ==  PER_COMMIT_CRATES   (disjoint).
+DEDICATED_PIPELINE_CRATES=(sparq-engine)
+
 # INVARIANT (guarded by `coverage.sh --check-shards`, a fast no-compile CI step): the union
-# of SHARD_GROUPS equals PER_COMMIT_CRATES exactly and the groups are pairwise-disjoint —
-# so a crate ADDED to PER_COMMIT_CRATES but not to a shard fails the guard LOUDLY instead of
-# being silently un-gated (dropped from every shard => measured nowhere => floor unenforced).
+# of SHARD_GROUPS PLUS DEDICATED_PIPELINE_CRATES equals PER_COMMIT_CRATES exactly and is
+# pairwise-disjoint — so a crate ADDED to PER_COMMIT_CRATES but not to a shard NOR the
+# dedicated set fails the guard LOUDLY instead of being silently un-gated (measured nowhere
+# => floor unenforced), and a crate in BOTH a shard and the dedicated set (double-measured)
+# also fails loudly.
 SHARD_GROUPS=(
-  # shard 1 — the sparq-engine elephant (668s): ALONE, it is the wall-clock floor.
-  "sparq-engine"
-  # shard 2 (~336s measured)
+  # [FABLE-5] sq-piapk: shard 1 (sparq-engine, ~668s ALONE) was REMOVED — engine now has the
+  # dedicated cross-runner split pipeline (DEDICATED_PIPELINE_CRATES). The 3 remaining shards
+  # are the old shards 2-4, unchanged. Their COVERAGE_SHARD indices renumber 1..3, but each
+  # shard's CRATE SET is byte-identical to before, so every non-engine floor is enforced by
+  # the SAME crate group as prior — only the shard NUMBER moved (the ci.yml matrix is [1,2,3]).
+  # shard 1 (was 2; ~336s measured)
   "sparq-core sparq-mpc sparq-fedclient sparq-geo sparq-cli sparq-conformance sparq-text sparq-policy sparq-nlq sparq-sim"
-  # shard 3 (~336s measured)
-  "sparq-vectors sparq-zk-compose sparq-gpu sparq-serve sparq-reason sparq-hdt sparq-shacl sparq-fedplan sparq-zk sparq-substrate sparq-introspect"
-  # shard 4 (~336s measured)
-  "sparq-solid sparq-server sparq-wasm sparq-canon sparq-rsp sparq-prov sparq-parse sparq-algos"
+  # shard 2 (was 3; ~336s measured; + sparq-reason-el [EL rbox+hasse] + sparq-reason-ql [QL experimental], sq-qcnn.23)
+  "sparq-vectors sparq-zk-compose sparq-gpu sparq-serve sparq-reason sparq-reason-el sparq-reason-ql sparq-hdt sparq-shacl sparq-fedplan sparq-zk sparq-substrate sparq-introspect"
+  # shard 3 (was 4; ~336s measured; + sparq-engine-serialize [seam 1] + sparq-engine-service [seam A2], sq-6vshe.4)
+  "sparq-solid sparq-server sparq-wasm sparq-canon sparq-rsp sparq-prov sparq-parse sparq-algos sparq-engine-serialize sparq-engine-service sparq-forms"
 )
 SHARD_TOTAL=${#SHARD_GROUPS[@]}
 
-# --check-shards: verify the SHARD_GROUPS partition invariant, then exit. Fast, NO compile —
-# run as an early CI gate (and locally) so a partition drift fails before any build. Emits
-# the offending crates on failure so the fix is obvious.
+# --check-shards: verify the SHARD_GROUPS + DEDICATED_PIPELINE_CRATES partition invariant,
+# then exit. Fast, NO compile — run as an early CI gate (and locally) so a partition drift
+# fails before any build. Emits the offending crates on failure so the fix is obvious.
 if [ "${1:-}" = "--check-shards" ]; then
-  python3 - "$SHARD_TOTAL" "${PER_COMMIT_CRATES[*]}" "${SHARD_GROUPS[@]}" <<'PY'
+  python3 - "$SHARD_TOTAL" "${PER_COMMIT_CRATES[*]}" "${DEDICATED_PIPELINE_CRATES[*]}" "${SHARD_GROUPS[@]}" <<'PY'
 import sys
 total = int(sys.argv[1])
 per_commit = sys.argv[2].split()
-groups = [g.split() for g in sys.argv[3:]]
+dedicated = sys.argv[3].split()      # [FABLE-5] sq-piapk: gated OUTSIDE SHARD_GROUPS
+groups = [g.split() for g in sys.argv[4:]]
 assert len(groups) == total, f"SHARD_TOTAL={total} but {len(groups)} groups"
-flat = [c for g in groups for c in g]
+flat = [c for g in groups for c in g] + dedicated
 dupes = sorted({c for c in flat if flat.count(c) > 1})
 union = set(flat)
 want = set(per_commit)
-missing = sorted(want - union)      # in PER_COMMIT_CRATES but NO shard -> would be UN-GATED
-extra = sorted(union - want)        # in a shard but not PER_COMMIT_CRATES -> stale/typo
+missing = sorted(want - union)      # in PER_COMMIT_CRATES but NO shard/dedicated -> UN-GATED
+extra = sorted(union - want)        # in a shard/dedicated but not PER_COMMIT_CRATES -> stale
 ok = True
 if dupes:
-    print(f"::error::coverage --check-shards: crate(s) in >1 shard (not disjoint): {dupes}"); ok = False
+    print(f"::error::coverage --check-shards: crate(s) measured in >1 place "
+          f"(shard overlap or shard∩dedicated — double-measured): {dupes}"); ok = False
 if missing:
     print(f"::error::coverage --check-shards: PER_COMMIT_CRATES crate(s) missing from every "
-          f"shard (would be silently UN-GATED): {missing}"); ok = False
+          f"shard AND the dedicated pipeline (would be silently UN-GATED): {missing}"); ok = False
 if extra:
-    print(f"::error::coverage --check-shards: shard crate(s) not in PER_COMMIT_CRATES "
-          f"(stale/typo): {extra}"); ok = False
+    print(f"::error::coverage --check-shards: shard/dedicated crate(s) not in "
+          f"PER_COMMIT_CRATES (stale/typo): {extra}"); ok = False
 if ok:
-    print(f"coverage --check-shards: OK — {total} shards partition "
+    print(f"coverage --check-shards: OK — {total} shard(s) + {len(dedicated)} dedicated-"
+          f"pipeline crate(s) ({', '.join(dedicated)}) partition "
           f"{len(per_commit)} PER_COMMIT_CRATES exactly (disjoint, complete)")
 sys.exit(0 if ok else 1)
 PY
@@ -467,6 +524,47 @@ measure() {
     sparq-substrate)
       cargo_args+=(--features numeric,join,compare,rows)
       features+=("numeric" "join" "compare" "rows") ;;
+    # [OPUS-4.8] sq-qcnn.23 (epic sq-qcnn): OWL 2 EL consequence-based classifier.
+    # Whole gate-exercising surface is behind DEFAULT-OFF `rbox` + `hasse`:
+    #   * `rbox`  — CR10/CR11 role-inclusion + property-chain automaton (Phase E2).
+    #   * `hasse` — DirectHierarchy transitive reduction to direct-subsumer diagram (E3).
+    # Without BOTH, the normalize->saturate->reduce pipeline is only partially compiled
+    # and the line% reflects only the E1 core — a non-representative measurement.
+    # Note: `cdomain` (concrete domains, requires sparq-substrate dep) and `abox`
+    # (ABox internalization) are NOT included: the architect-specified whole-surface for
+    # this gate wiring pass is rbox+hasse (Cargo.toml Phases E2+E3, the SNOMED/EL+ gap).
+    sparq-reason-el)
+      cargo_args+=(--features rbox,hasse)
+      features+=("rbox" "hasse") ;;
+    # [OPUS-4.8] sq-qcnn.23 (epic sq-qcnn): OWL 2 QL query-rewriting reasoner.
+    # Whole gate-exercising surface is behind DEFAULT-OFF `experimental`:
+    # without it only the cheap CQ-shape gate types compile in and the PerfectRef
+    # rewriter is compiled OUT — a non-representative (low) number. Mirrors the
+    # sparq-reason-el rbox+hasse quirk and the sparq-fedplan `fedplan` quirk above.
+    # [FABLE-5] sq-p6yb7: + `ql-consistency` (the DL-Lite_R violation-query consistency
+    # check module; without it consistency.rs compiles out and its tests run zero).
+    sparq-reason-ql)
+      cargo_args+=(--features experimental,ql-consistency)
+      features+=("experimental" "ql-consistency") ;;
+    # [OPUS-4.8] sq-6vshe.4: seam 1 of the sparq-engine facade split — the RDF writer matrix
+    # (Turtle/TriG/N-Quads/JSON-LD) peeled into this internal sub-crate. Its WHOLE surface is
+    # behind DEFAULT-OFF `serialize-rdf` (mirroring the gating it had inside sparq-engine), so a
+    # default-feature `cargo llvm-cov -p sparq-engine-serialize` builds an EMPTY crate — measure
+    # it WITH `serialize-rdf,streaming-serialization` (the maximal surface, incl. the streaming
+    # writers + their tests), exactly as sparq-substrate/-fedplan above name their whole-surface
+    # features. Brings the moved writer + its ~2.9k test LOC under the line-coverage ratchet.
+    sparq-engine-serialize)
+      cargo_args+=(--features serialize-rdf,streaming-serialization)
+      features+=("serialize-rdf" "streaming-serialization") ;;
+    # [OPUS-4.8] sq-6vshe.4: seam A2 of the sparq-engine facade split — the SPARQL 1.1 federated-
+    # SERVICE client peeled into this internal sub-crate. Its WHOLE surface is behind DEFAULT-OFF
+    # `service` (mirroring the gating it had inside sparq-engine), so a default-feature
+    # `cargo llvm-cov -p sparq-engine-service` builds an EMPTY crate — measure it WITH `service`
+    # (the maximal surface: HTTP transport + SRJ/SRX parse + bound-join + SSRF egress policy + their
+    # ~1.3k test LOC), exactly as the sibling extractions above name their whole-surface features.
+    sparq-engine-service)
+      cargo_args+=(--features service)
+      features+=("service") ;;
   esac
 
   local start end rc=0 json="$WORK/$crate.json"

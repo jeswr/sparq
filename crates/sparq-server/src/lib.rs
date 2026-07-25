@@ -98,7 +98,7 @@ pub mod tpf;
 /// (sq-b4fns / #1223). PURE response builder (parameter resolution + per-quad flattening +
 /// continuation maths; the async disk-poll handler is in [`http`]). Compiled ONLY behind the
 /// `change-stream` feature, and served only when [`ServerConfig::change_stream_dir`] is also set
-/// (`--change-stream <DIR>` / `SPARQ_CHANGE_STREAM`) — the same double-opt-in as [`tpf`]. The same
+/// (`--change-stream <DIR>` / `SPARQ_CHANGE_STREAM`) — the same double-opt-in as `tpf`. The same
 /// feature also records every commit to the durable log on the update path (see [`http`]). With
 /// the feature off this module + the route + the recording hook are `#[cfg]`-stripped, byte-
 /// identical to before.
@@ -119,6 +119,34 @@ pub mod streams;
 #[cfg(feature = "n3-patch")]
 pub mod n3_patch;
 
+/// [FABLE-5] (sq-snopa.6, issue #992 FR-4) OPT-IN Solid **WAC/ACP HTTP authorization** surface —
+/// the `POST /authz/decide`, `POST /authz/wac-allow` and `POST /authz/query` endpoints, a THIN
+/// HTTP shell over the `sparq-solid` library authoriser. Compiled ONLY behind the `solid-authz`
+/// feature (the deliberately-opt-in `sparq-server` -> `sparq-solid` workspace dependency the FR-4
+/// note flagged), and served only when [`ServerConfig::solid_authz`](http::ServerConfig) is also
+/// set (`--solid-authz` / `SPARQ_SOLID_AUTHZ=1`) — the same double-opt-in as `tpf` / `shacl` /
+/// `terse`. FAIL-CLOSED: every error path DENIES. `sparq-solid` is a LIBRARY authoriser with no
+/// HTTP surface (`research/sparq-solid-scope.md` §4); this is exactly that missing shell — it does
+/// NOT authenticate (it takes an already-resolved session + the pod dataset per request). With the
+/// feature off the module + the routes + the config field are `#[cfg]`-stripped, byte-identical to
+/// before. See the module docs.
+#[cfg(feature = "solid-authz")]
+pub mod solid_authz;
+
+/// [FABLE-5] (sq-lsp7k.10) OPT-IN named-parameterized-template REST surface (`/templates`):
+/// server-stored, IRI-identified SPARQL query/UPDATE templates with typed JSON parameter
+/// binding (GraphDB "SPARQL templates" / Stardog "stored queries" parity). Compiled ONLY
+/// behind the `templates` feature (which enables `sparq-engine/templates` on top of the
+/// #901 injection-safe `params` binding), and served only when
+/// [`ServerConfig::templates`](http::ServerConfig) is also set (`--templates` /
+/// `SPARQ_TEMPLATES=1`) — the same double-opt-in as `tpf` / `shacl` / `terse`. Template
+/// writes and UPDATE-template invocations are write-gated through the SAME sequenced-writer
+/// path as `/sparql` updates (the gated-update posture is preserved). With the feature off
+/// the module + the routes + the config fields are `#[cfg]`-stripped, byte-identical to
+/// before. See the module docs.
+#[cfg(feature = "templates")]
+pub mod templates;
+
 /// Prometheus metrics — hand-rolled text exposition at `GET /metrics` (T22).
 #[cfg(feature = "server")]
 pub mod metrics;
@@ -132,6 +160,22 @@ pub use http::{
     bind_posture, harden, router, serve, AppState, AuthPosture, BindPosture, PinnedGen,
     ServerConfig, GLOBAL_POD,
 }; // [OPUS-4.8] sq-o4qf: bind_posture / BindPosture for the bind gate; sq-zcby: AuthPosture folds the --auth-token gate into it; sq-2gqr: serve = the accept loop with the slow-loris header-read deadline
+
+/// [GPT-5.6] sq-oprna.6: TLS h1+h2 accept loop, opt-in with the `http2` feature.
+#[cfg(feature = "http2")]
+#[cfg_attr(docsrs, doc(cfg(feature = "http2")))]
+pub use http::serve_tls;
+
+/// [GPT-5.6] Loaded shapes wrapper for opt-in SHACL transaction guard mode.
+#[cfg(feature = "shacl")]
+pub use http::ShaclShapes;
+
+/// [FABLE-5] (sq-fy8ci) The RAII single-flight restore permit, re-exported at the crate root
+/// next to [`AppState`]. Obtained via `AppState::try_begin_restore`; while one is alive a
+/// second concurrent restore is refused (the `/admin/restore` route maps that to 409 Conflict).
+/// Present only with the `backup` cargo feature (which implies `server`).
+#[cfg(feature = "backup")]
+pub use http::RestoreGuard;
 
 /// [OPUS-4.8] (sq-4w18) The SERVICE egress allowlist config type, re-exported at the
 /// crate root next to [`ServerConfig`].

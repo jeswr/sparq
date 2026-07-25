@@ -662,8 +662,9 @@ fn gen_constraint(rng: &mut Rng, _support: &mut Vec<String>) -> Option<Constrain
     // 12..=14: the sq-0hj7 logical/node extensions (drawn ~1-in-5 of value cases).
     let choice = rng.below(15);
     Some(match choice {
-        0 => Constraint::Datatype(rng.pick(&["integer", "string", "boolean", "decimal"])),
-        1 => Constraint::NodeKind(rng.pick(&["sh:IRI", "sh:Literal", "sh:BlankNode"])),
+        // [GPT-5.6] (sq-qvqk7) Keep rustc 1.88 from inferring unsized `str` here.
+        0 => Constraint::Datatype(rng.pick::<&str>(&["integer", "string", "boolean", "decimal"])),
+        1 => Constraint::NodeKind(rng.pick::<&str>(&["sh:IRI", "sh:Literal", "sh:BlankNode"])),
         2 => {
             // sh:class: conforming values get a typed instance minted lazily by
             // `resolve_value` (so each conforming value points at its own typed
@@ -671,7 +672,7 @@ fn gen_constraint(rng: &mut Rng, _support: &mut Vec<String>) -> Option<Constrain
             let cls = format!("{EX}Kind{}", rng.below(100));
             Constraint::Class(cls)
         }
-        3 => Constraint::Pattern(rng.pick(&["^[a-z]+[0-9]+$", "^a.*$", "[0-9]"])),
+        3 => Constraint::Pattern(rng.pick::<&str>(&["^[a-z]+[0-9]+$", "^a.*$", "[0-9]"])),
         4 => {
             let n = 2 + rng.below(3);
             let vals: Vec<String> = (0..n).map(|j| format!("\"opt{j}\"")).collect();
@@ -718,9 +719,10 @@ fn gen_constraint(rng: &mut Rng, _support: &mut Vec<String>) -> Option<Constrain
 /// composites — one level is enough to stress the conformance memo).
 fn gen_leaf_for_node(rng: &mut Rng) -> Constraint {
     match rng.below(7) {
-        0 => Constraint::Datatype(rng.pick(&["integer", "string", "boolean"])),
-        1 => Constraint::NodeKind(rng.pick(&["sh:IRI", "sh:Literal"])),
-        2 => Constraint::Pattern(rng.pick(&["^[a-z]+[0-9]+$", "^a.*$"])),
+        // [GPT-5.6] (sq-qvqk7) Keep rustc 1.88 from inferring unsized `str` here.
+        0 => Constraint::Datatype(rng.pick::<&str>(&["integer", "string", "boolean"])),
+        1 => Constraint::NodeKind(rng.pick::<&str>(&["sh:IRI", "sh:Literal"])),
+        2 => Constraint::Pattern(rng.pick::<&str>(&["^[a-z]+[0-9]+$", "^a.*$"])),
         3 => {
             let n = 2 + rng.below(3);
             let vals: Vec<String> = (0..n).map(|j| format!("\"opt{j}\"")).collect();

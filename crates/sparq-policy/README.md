@@ -10,8 +10,8 @@ typed model (Permission / Prohibition / Duty / Action / Constraint) and **evalua
 a request to a **fail-closed** ALLOW/DENY `Decision`. The full public-API surface —
 the fail-closed evaluator, every constraint dimension (purpose / recipient /
 dateTime / spatial / count), the deny-overrides conflict semantics (with a fail-closed refusal of unimplementable `odrl:conflict` strategies, sq-ihqbl), the static
-conflict/containment lints, the stateful `count-enforcement` counter stores, and the
-opt-in `secprop-leftoperands` security-property ODRL profile (research-grade; sq-qhy4) —
+conflict/containment lints, the stateful `count-enforcement` counter stores, the opt-in `secprop-leftoperands` security-property ODRL profile (research-grade; sq-qhy4), and
+the opt-in `decision-report` deterministic summary of already-computed decisions —
 lives in [`skills/usage-control-policy/SKILL.md`](../../skills/usage-control-policy/SKILL.md).
 
 > **Internal crate — not published** to crates.io (`publish = false`); opt-in,
@@ -23,8 +23,8 @@ lives in [`skills/usage-control-policy/SKILL.md`](../../skills/usage-control-pol
 
 **Conformance:** ratcheted against the MIT-licensed [SolidLab ODRL Test Suite](https://github.com/SolidLabResearch/ODRL-Test-Suite) through the real `evaluate` path (`tests/odrl_test_suite.rs`, sq-tmsd6; **67/68 pass** after the constraint-matching batch added `odrl:LogicalConstraint` compound constraints, party/asset collection membership, and the `odrl:use` action hierarchy — sq-euhr3/sq-k7itg/sq-a0zef; 1 documented not-implemented divergence — the SKILL has the oracle).
 
+**ODRL conformance note:** when no `odrl:conflict` strategy is declared, sparq-policy applies deny-overrides (`odrl:prohibit`) as the default. The [ODRL 2.2 IM](https://www.w3.org/TR/odrl-model/#conflict) default is `odrl:invalid` (a conflicting policy is void as a whole); this divergence is intentional for security — deny-overrides is fail-closed and never authorises what a prohibition forbids — and is disclosed in the odrl-policy-bridge paper (Limitation #1) and issue [#1375](https://github.com/jeswr/sparq/issues/1375). A *declared* strategy the engine cannot honour is loudly refused, never coerced (sq-ihqbl).
+
 How-to: [`skills/usage-control-policy/SKILL.md`](../../skills/usage-control-policy/SKILL.md) · Design: [`research/feature-research-odrl-policy.md`](../../research/feature-research-odrl-policy.md) · Sibling: [`sparq-solid`](../sparq-solid/README.md) · Contributing: [`AGENTS.md`](../../AGENTS.md).
 
-## License
-
-[MIT](../../LICENSE).
+License: [MIT](../../LICENSE).

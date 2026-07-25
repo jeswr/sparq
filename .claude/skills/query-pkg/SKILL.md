@@ -25,8 +25,10 @@ an empty result is the honest "I don't know / none outstanding" answer.
 > measurement record) — this file only points at the headline. The win is scoped to
 > **PKG-answerable** questions by construction. The PKG is a Phase-1 *head slice* (the
 > AGENTS.md finding set + a mechanical bd→Task projection + the heaviest skills'
-> front-matter), not the whole corpus — a miss means "not in the head slice yet", so fall
-> back to Read/Grep.
+> front-matter + the trust-graph admission-program provenance tier of `sq-7utko` —
+> sourced, caveat-carrying findings from `research/trust-graph-authorisation-2026-07.md`,
+> e.g. "unlinkability is NOT a v1 guarantee, gated on `sq-qhy4`"), not the whole corpus —
+> a miss means "not in the head slice yet", so fall back to Read/Grep.
 
 ## The helper
 
@@ -37,7 +39,8 @@ default build a pure data crate):
 cargo run -p sparq-kb --features query --bin pkg-query -- <args>
 ```
 
-It loads `pkg.ttl` (the ontology) + `pkg-instances.ttl` (the ingested data) into a sparq
+It loads `pkg.ttl` (the ontology) + `pkg-instances.ttl` (the ingested data) +
+`trust-graph-findings.ttl` (the `sq-7utko` provenance tier) into a sparq
 store, runs a **named canned query** or a **raw SPARQL string**, prints the executed
 SPARQL (always — for verification) and the result rows. Add `--features close` and
 `--close owl-rl` to materialise the RDFS/OWL-RL closure first (entails the `pkg:dependsOn
@@ -334,6 +337,19 @@ batch — no hard-coded number. NOT appended to `pkg-instances.ttl`: bulk ingest
 on the Phase-6 per-topic recommend-adopt verdict. Run:
 `cargo test -p sparq-kb --features literature,validate --test literature_pipeline`.
 
+**CORE API v3 live connector** (`sq-tzars.1`, `connector_core`): a second connector
+(`parse_core_batch` → the same DOI-keyed `SourceStub`s as `parse_openalex_batch`) plus a
+live HTTP client behind the default-OFF **`literature-live`** feature (implies `literature`,
+pulls only `ureq`). The pure parse + paging/retry discipline (`fetch_paginated`,
+`backoff_delay`, the `Transport` trait) is under `literature` and runs over a **fake
+transport** + the committed `fixtures/literature/core-batch.json` (a REAL, SANITIZED CORE
+response — no key, no full-text) so CI stays **network-free**; only `CoreClient` (from the
+`CORE_API_KEY` env var, **never** committed/logged) touches sockets. `SourceStub` now carries
+`license: Option<String>`, captured **fail-closed** by both connectors — `None` (unknown) is
+treated as NON-REDISTRIBUTABLE by the downstream dump tiering (`sq-tzars.7`). Rate-limit
+discipline honours `429`/`Retry-After` with bounded backoff + a HARD per-run request cap.
+Run: `cargo test -p sparq-kb --features literature,literature-live --test core_connector`.
+
 ## When NOT to use this
 
 - The fact is **not in the head slice** (PKG is a Phase-1 subset) → an empty/partial
@@ -369,3 +385,12 @@ on the Phase-6 per-topic recommend-adopt verdict. Run:
   shapes `crates/sparq-kb/shapes/literature.shapes.ttl`, fixtures
   `crates/sparq-kb/fixtures/literature/`, gate
   `crates/sparq-kb/tests/literature_pipeline.rs`.
+- CORE v3 live connector (`literature`/`literature-live`, `sq-tzars.1`):
+  `crates/sparq-kb/src/literature/connector_core.rs`, fixture
+  `crates/sparq-kb/fixtures/literature/core-batch.json`, gate
+  `crates/sparq-kb/tests/core_connector.rs`.
+- **Citation renderer** (`query` feature, `sq-2489d.11`):
+  `crates/sparq-kb/src/query/citations.rs` — `render_citations(&graph, &rows)` renders
+  `prov:wasDerivedFrom` sources from `FINDING_PROVENANCE` rows as `[source: label]`
+  citations; returns `CitationReport` with `CitationMetrics` (resolution-rate + fabricated-count).
+  Gate: `crates/sparq-kb/tests/citations.rs`.

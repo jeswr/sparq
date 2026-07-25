@@ -15,8 +15,15 @@
 //!   Egenhofer (`geof:eh*`) and RCC8 (`geof:rcc8*`) families (the GeoSPARQL
 //!   1.0 Req 25/26 matrix patterns over the same machinery).
 //! - [`envelope`] / [`boundary`] / [`convex_hull`] — `geof:envelope`,
-//!   `geof:boundary`, `geof:convexHull` — and [`buffer`] (`geof:buffer`, geo
-//!   0.33's `Buffer`; metric radii via a local equirectangular frame).
+//!   `geof:boundary`, `geof:convexHull` — [`simplify`] (`geof:simplify`,
+//!   Douglas–Peucker), and [`buffer`] (`geof:buffer`, geo 0.33's `Buffer`;
+//!   metric radii via a local equirectangular frame).
+//! - [`max_x`] / [`min_x`] / [`max_y`] / [`min_y`] — the bounding-box
+//!   coordinates in the geometry's stored CRS.
+//! - [`is_empty`] — `geof:isEmpty`, a unit-free geometry predicate.
+//! - [`metric_area`] / [`metric_length`] / [`metric_perimeter`] and
+//!   [`centroid`] — metric measurements and the mathematical centroid, using
+//!   the same local equirectangular frame for geographic geometries.
 //! - the set operations [`intersection`] / [`union`] / [`difference`] /
 //!   [`sym_difference`] — point-set operations over `geo`'s `BooleanOps`
 //!   (polygon overlay) plus directly-implemented line/point cases: point-in/on
@@ -27,17 +34,21 @@
 //!   classify return an honest [`GeoError::Unsupported`]; see each function's
 //!   docs and the README for the supported matrix. [OPUS-4.8]
 //!
-//! The [`lex`] sub-module mirrors every function at the lexical level
-//! (wkt-literal strings in, values out) — the shape a SPARQL engine builtin
-//! receives. [`crate::registry::geof_registry`] packages these directly as a
-//! `sparq_engine::FunctionRegistry`, so they run inside SPARQL FILTER/BIND via
+//! The [`lex`] sub-module provides lexical-level WKT-string helpers for direct
+//! use. `crate::registry::geof_registry` parses geometry literals and invokes
+//! the typed functions in this module, so they run inside SPARQL FILTER/BIND via
 //! `sparq_engine::query_with_functions` (default-on `engine` cargo feature).
+//! (Code span, not an intra-doc link: `registry` is `engine`-gated, and this
+//! module doc is compiled in the engine-less build too — a link would break
+//! `--no-default-features` rustdoc. sq-wo5jw)
 
 use crate::literal::{Crs, GeoGeometry};
 use crate::GeoError;
+use geo::relate::IntersectionMatrix;
 use geo::{
-    BooleanOps, BoundingRect, Buffer, Closest, ConvexHull, CoordsIter, Distance, Euclidean,
-    Haversine, HaversineClosestPoint, Intersects, LineIntersection, MapCoords, Relate,
+    Area, BooleanOps, BoundingRect, Buffer, Centroid, Closest, ConvexHull, CoordsIter, Distance,
+    Euclidean, HasDimensions, Haversine, HaversineClosestPoint, Intersects, Length,
+    LineIntersection, MapCoords, Relate, Simplify,
 };
 use geo_types::{
     Coord, Geometry, LineString, MultiLineString, MultiPoint, MultiPolygon, Point, Polygon,
@@ -46,6 +57,43 @@ use geo_types::{
 /// Mean-Earth-radius metres per degree of arc (GRS80 mean radius 6 371 008.8 m,
 /// the same sphere `geo`'s `Haversine` measures on): π·R/180.
 const METERS_PER_DEGREE: f64 = std::f64::consts::PI * 6_371_008.8 / 180.0;
+
+/// The local equirectangular metre frame shared by metric measurement and
+/// buffering. Its latitude is the geometry bounding box's centre, matching
+/// the crate's established `geof:buffer` convention. [GPT-5.6] sq-lsp7k.18
+#[derive(Debug, Clone, Copy)]
+struct LocalMetricFrame {
+    x_scale: f64,
+}
+
+impl LocalMetricFrame {
+    fn for_geometry(g: &GeoGeometry, operation: &str) -> Result<Self, GeoError> {
+        if !g.crs.is_geographic() {
+            return Err(GeoError::NonGeographicCrs(g.crs.iri().to_string()));
+        }
+        let rect = g.geometry.bounding_rect().ok_or_else(|| {
+            GeoError::Unsupported(format!("geof:{operation} of an empty geometry"))
+        })?;
+        let x_scale = METERS_PER_DEGREE * rect.center().y.to_radians().cos();
+        if x_scale <= 0.0 {
+            return Err(GeoError::Unsupported(format!(
+                "geof:{operation} with metric units at the poles"
+            )));
+        }
+        Ok(Self { x_scale })
+    }
+
+    fn project(self, geometry: &Geometry<f64>) -> Geometry<f64> {
+        geometry.map_coords(|c| Coord {
+            x: c.x * self.x_scale,
+            y: c.y * METERS_PER_DEGREE,
+        })
+    }
+
+    fn unproject_point(self, point: Point<f64>) -> Point<f64> {
+        Point::new(point.x() / self.x_scale, point.y() / METERS_PER_DEGREE)
+    }
+}
 
 /// A unit of measure accepted by `geof:distance`, selected by IRI.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,7 +141,9 @@ impl Unit {
 /// Both arguments must be in the same coordinate space: the two geographic
 /// CRSs (CRS84 / EPSG:4326) are mutually compatible because parsing
 /// normalised them to long/lat; any other CRS must match exactly.
-fn ensure_compatible(a: &GeoGeometry, b: &GeoGeometry) -> Result<(), GeoError> {
+/// `pub(crate)` so the engine registry's prepared-relate path (sq-hq8t5)
+/// applies the SAME compatibility rule before relating. [FABLE-5]
+pub(crate) fn ensure_compatible(a: &GeoGeometry, b: &GeoGeometry) -> Result<(), GeoError> {
     let compatible = match (&a.crs, &b.crs) {
         (x, y) if x.is_geographic() && y.is_geographic() => true,
         (Crs::Other(x), Crs::Other(y)) => x == y,
@@ -224,6 +274,93 @@ pub fn distance(a: &GeoGeometry, b: &GeoGeometry, unit: Unit) -> Result<f64, Geo
     }
 }
 
+// ---- Metric measurements + centroid ----------------------------------------------
+
+/// `geof:metricArea(geom)` — planar area in square metres after projecting a
+/// geographic geometry into the same local equirectangular frame as
+/// [`buffer`]. Polygon holes are subtracted and multipolygon areas are summed.
+/// Degenerate polygon rings return zero. Non-areal and heterogeneous geometry
+/// types return [`GeoError::Unsupported`] rather than a dimensionally-wrong
+/// number.
+///
+/// This is a local planar approximation. Distortion grows with geographic
+/// extent and towards the poles. The deterministic acceptance oracle pins a
+/// one-degree square near the equator to the analytic area within one percent.
+pub fn metric_area(g: &GeoGeometry) -> Result<f64, GeoError> {
+    match &g.geometry {
+        Geometry::Polygon(_)
+        | Geometry::MultiPolygon(_)
+        | Geometry::Rect(_)
+        | Geometry::Triangle(_) => {
+            let frame = LocalMetricFrame::for_geometry(g, "metricArea")?;
+            Ok(frame.project(&g.geometry).unsigned_area())
+        }
+        other => Err(GeoError::Unsupported(format!(
+            "geof:metricArea is undefined for {}",
+            wkt_type_name(other)
+        ))),
+    }
+}
+
+/// Returns the local-equirectangular length of the geometry's one-dimensional
+/// components. Polygonal inputs include exterior and interior rings.
+fn metric_length_for(g: &GeoGeometry, operation: &str) -> Result<f64, GeoError> {
+    let frame = LocalMetricFrame::for_geometry(g, operation)?;
+    let projected = frame.project(&g.geometry);
+    let ring_length = |polygon: &Polygon<f64>| {
+        Euclidean.length(polygon.exterior())
+            + polygon.interiors().iter().map(|ring| Euclidean.length(ring)).sum::<f64>()
+    };
+    match &projected {
+        Geometry::Line(line) => Ok(Euclidean.length(line)),
+        Geometry::LineString(line) => Ok(Euclidean.length(line)),
+        Geometry::MultiLineString(lines) => Ok(Euclidean.length(lines)),
+        Geometry::Polygon(polygon) => Ok(ring_length(polygon)),
+        Geometry::MultiPolygon(polygons) => Ok(polygons.0.iter().map(ring_length).sum()),
+        Geometry::Rect(rect) => Ok(ring_length(&rect.to_polygon())),
+        Geometry::Triangle(triangle) => Ok(ring_length(&triangle.to_polygon())),
+        other => Err(GeoError::Unsupported(format!(
+            "geof:{operation} is undefined for {}",
+            wkt_type_name(other)
+        ))),
+    }
+}
+
+/// `geof:metricLength(geom)` — length in metres of a curve, or the boundary
+/// length of an areal geometry, in the local equirectangular frame. A
+/// `LineString` is measured as the sum of its segment lengths; the equatorial
+/// two-point acceptance oracle agrees with the haversine distance to floating-
+/// point tolerance.
+pub fn metric_length(g: &GeoGeometry) -> Result<f64, GeoError> {
+    metric_length_for(g, "metricLength")
+}
+
+/// `geof:metricPerimeter(geom)` — perimeter in metres. For areal geometries
+/// this is the sum of the exterior and interior ring lengths; for curve
+/// geometries it is equivalent to [`metric_length`].
+pub fn metric_perimeter(g: &GeoGeometry) -> Result<f64, GeoError> {
+    metric_length_for(g, "metricPerimeter")
+}
+
+/// `geof:centroid(geom)` — the mathematical centroid as a point in the input
+/// geometry's CRS. Geographic geometries are projected to the local metric
+/// frame for the calculation and then unprojected; other CRSs are evaluated in
+/// their coordinate space. Empty geometries return [`GeoError::Unsupported`].
+pub fn centroid(g: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
+    let point = if g.crs.is_geographic() {
+        let frame = LocalMetricFrame::for_geometry(g, "centroid")?;
+        let projected = frame.project(&g.geometry);
+        frame.unproject_point(projected.centroid().ok_or_else(|| {
+            GeoError::Unsupported("geof:centroid of an empty geometry".to_string())
+        })?)
+    } else {
+        g.geometry.centroid().ok_or_else(|| {
+            GeoError::Unsupported("geof:centroid of an empty geometry".to_string())
+        })?
+    };
+    Ok(GeoGeometry { crs: g.crs.clone(), geometry: Geometry::Point(point) })
+}
+
 // ---- Simple-features relations (DE-9IM via geo's Relate) -------------------------
 
 macro_rules! sf_relation {
@@ -284,25 +421,33 @@ pub fn relate(a: &GeoGeometry, b: &GeoGeometry, pattern: &str) -> Result<bool, G
         .map_err(|e| GeoError::Parse(format!("invalid DE-9IM pattern {pattern:?}: {e}")))
 }
 
+/// `true` iff `matrix` matches ANY of `patterns` — the spec defines some
+/// relations as a disjunction of matrices. `pub(crate)` so the engine
+/// registry's prepared-relate path (sq-hq8t5) evaluates the SAME disjunction
+/// over a matrix it computed from a cached prepared side. [FABLE-5]
+pub(crate) fn matrix_matches_any(matrix: &IntersectionMatrix, patterns: &[&str]) -> bool {
+    // Patterns are compile-time constants below — a failure is a crate bug.
+    patterns.iter().any(|p| matrix.matches(p).expect("valid built-in DE-9IM pattern"))
+}
+
 /// `true` iff the DE-9IM matrix of `a` vs `b` matches ANY of `patterns`
 /// (the spec defines some relations as a disjunction of matrices).
 fn relate_any(a: &GeoGeometry, b: &GeoGeometry, patterns: &[&str]) -> Result<bool, GeoError> {
     ensure_compatible(a, b)?;
-    let matrix = a.geometry.relate(&b.geometry);
-    for p in patterns {
-        // Patterns are compile-time constants below — a failure is a crate bug.
-        if matrix.matches(p).expect("valid built-in DE-9IM pattern") {
-            return Ok(true);
-        }
-    }
-    Ok(false)
+    Ok(matrix_matches_any(&a.geometry.relate(&b.geometry), patterns))
 }
 
 macro_rules! de9im_relation {
-    ($(#[$doc:meta])* $name:ident, [$($pattern:literal),+]) => {
+    ($(#[$doc:meta])* $name:ident, $patterns:ident, [$($pattern:literal),+]) => {
+        /// The GeoSPARQL DE-9IM matrix pattern disjunction defining the
+        /// relation of the same name. `pub(crate)` so the engine registry's
+        /// prepared-relate path (sq-hq8t5) tests the SAME spec matrices —
+        /// this const and the public function below are the single source
+        /// of truth. [FABLE-5]
+        pub(crate) const $patterns: &[&str] = &[$($pattern),+];
         $(#[$doc])*
         pub fn $name(a: &GeoGeometry, b: &GeoGeometry) -> Result<bool, GeoError> {
-            relate_any(a, b, &[$($pattern),+])
+            relate_any(a, b, $patterns)
         }
     };
 }
@@ -311,71 +456,123 @@ macro_rules! de9im_relation {
 // DE-9IM matrix patterns for each relation).
 de9im_relation!(
     /// `geof:ehEquals` — Egenhofer equal.
-    eh_equals, ["TFFFTFFFT"]
+    eh_equals, EH_EQUALS_PATTERNS, ["TFFFTFFFT"]
 );
 de9im_relation!(
     /// `geof:ehDisjoint` — Egenhofer disjoint.
-    eh_disjoint, ["FF*FF****"]
+    eh_disjoint, EH_DISJOINT_PATTERNS, ["FF*FF****"]
 );
 de9im_relation!(
     /// `geof:ehMeet` — Egenhofer meet (boundaries in contact, interiors not).
-    eh_meet, ["FT*******", "F**T*****", "F***T****"]
+    eh_meet, EH_MEET_PATTERNS, ["FT*******", "F**T*****", "F***T****"]
 );
 de9im_relation!(
     /// `geof:ehOverlap` — Egenhofer overlap.
-    eh_overlap, ["T*T***T**"]
+    eh_overlap, EH_OVERLAP_PATTERNS, ["T*T***T**"]
 );
 de9im_relation!(
     /// `geof:ehCovers` — Egenhofer covers.
-    eh_covers, ["T*TFT*FF*"]
+    eh_covers, EH_COVERS_PATTERNS, ["T*TFT*FF*"]
 );
 de9im_relation!(
     /// `geof:ehCoveredBy` — Egenhofer coveredBy.
-    eh_covered_by, ["TFF*TFT**"]
+    eh_covered_by, EH_COVERED_BY_PATTERNS, ["TFF*TFT**"]
 );
 de9im_relation!(
     /// `geof:ehInside` — Egenhofer inside.
-    eh_inside, ["TFF*FFT**"]
+    eh_inside, EH_INSIDE_PATTERNS, ["TFF*FFT**"]
 );
 de9im_relation!(
     /// `geof:ehContains` — Egenhofer contains.
-    eh_contains, ["T*TFF*FF*"]
+    eh_contains, EH_CONTAINS_PATTERNS, ["T*TFF*FF*"]
 );
 
 // The RCC8 relation family (GeoSPARQL 1.0 Req 26 / 1.1 §9). RCC8 is defined
 // over REGIONS (non-empty interiors); the matrices below are the spec's.
 de9im_relation!(
     /// `geof:rcc8eq` — equal.
-    rcc8_eq, ["TFFFTFFFT"]
+    rcc8_eq, RCC8_EQ_PATTERNS, ["TFFFTFFFT"]
 );
 de9im_relation!(
     /// `geof:rcc8dc` — disconnected.
-    rcc8_dc, ["FFTFFTTTT"]
+    rcc8_dc, RCC8_DC_PATTERNS, ["FFTFFTTTT"]
 );
 de9im_relation!(
     /// `geof:rcc8ec` — externally connected (boundaries touch).
-    rcc8_ec, ["FFTFTTTTT"]
+    rcc8_ec, RCC8_EC_PATTERNS, ["FFTFTTTTT"]
 );
 de9im_relation!(
     /// `geof:rcc8po` — partially overlapping.
-    rcc8_po, ["TTTTTTTTT"]
+    rcc8_po, RCC8_PO_PATTERNS, ["TTTTTTTTT"]
 );
 de9im_relation!(
     /// `geof:rcc8tppi` — tangential proper part inverse.
-    rcc8_tppi, ["TTTFTTFFT"]
+    rcc8_tppi, RCC8_TPPI_PATTERNS, ["TTTFTTFFT"]
 );
 de9im_relation!(
     /// `geof:rcc8tpp` — tangential proper part.
-    rcc8_tpp, ["TFFTTFTTT"]
+    rcc8_tpp, RCC8_TPP_PATTERNS, ["TFFTTFTTT"]
 );
 de9im_relation!(
     /// `geof:rcc8ntpp` — non-tangential proper part.
-    rcc8_ntpp, ["TFFTFFTTT"]
+    rcc8_ntpp, RCC8_NTPP_PATTERNS, ["TFFTFFTTT"]
 );
 de9im_relation!(
     /// `geof:rcc8ntppi` — non-tangential proper part inverse.
-    rcc8_ntppi, ["TTTFFTFFT"]
+    rcc8_ntppi, RCC8_NTPPI_PATTERNS, ["TTTFFTFFT"]
 );
+
+// ---- Envelope and bounding-coordinate functions -----------------------------------
+
+/// `geof:isEmpty` — whether the geometry is the empty set.
+///
+/// This predicate is pure geometry introspection and does not depend on the
+/// geometry's CRS or any unit convention. [GPT-5.6] sq-lc2io
+pub fn is_empty(g: &GeoGeometry) -> Result<bool, GeoError> {
+    Ok(g.geometry.is_empty())
+}
+
+fn bounding_box(g: &GeoGeometry) -> Result<geo_types::Rect<f64>, GeoError> {
+    g.geometry
+        .bounding_rect()
+        .ok_or_else(|| GeoError::Unsupported("empty geometry has no bounding box".to_string()))
+}
+
+/// `geof:maxX` — the maximum X (easting or longitude) of the geometry's
+/// envelope in its stored CRS.
+///
+/// Empty geometries return [`GeoError::Unsupported`]. No reprojection is
+/// performed.
+pub fn max_x(g: &GeoGeometry) -> Result<f64, GeoError> {
+    Ok(bounding_box(g)?.max().x)
+}
+
+/// `geof:minX` — the minimum X (easting or longitude) of the geometry's
+/// envelope in its stored CRS.
+///
+/// Empty geometries return [`GeoError::Unsupported`]. No reprojection is
+/// performed.
+pub fn min_x(g: &GeoGeometry) -> Result<f64, GeoError> {
+    Ok(bounding_box(g)?.min().x)
+}
+
+/// `geof:maxY` — the maximum Y (northing or latitude) of the geometry's
+/// envelope in its stored CRS.
+///
+/// Empty geometries return [`GeoError::Unsupported`]. No reprojection is
+/// performed.
+pub fn max_y(g: &GeoGeometry) -> Result<f64, GeoError> {
+    Ok(bounding_box(g)?.max().y)
+}
+
+/// `geof:minY` — the minimum Y (northing or latitude) of the geometry's
+/// envelope in its stored CRS.
+///
+/// Empty geometries return [`GeoError::Unsupported`]. No reprojection is
+/// performed.
+pub fn min_y(g: &GeoGeometry) -> Result<f64, GeoError> {
+    Ok(bounding_box(g)?.min().y)
+}
 
 // ---- Geometry-producing functions -------------------------------------------------
 
@@ -396,6 +593,48 @@ pub fn convex_hull(g: &GeoGeometry) -> Result<GeoGeometry, GeoError> {
     }
     let points: MultiPoint<f64> = g.geometry.coords_iter().map(Point::from).collect();
     Ok(GeoGeometry { crs: g.crs.clone(), geometry: Geometry::Polygon(points.convex_hull()) })
+}
+
+/// `geof:simplify(geom, tolerance)` — Ramer–Douglas–Peucker simplification in
+/// the input CRS's coordinate space. The result preserves the CRS and retains
+/// only vertices from the input. As with `geo`'s [`Simplify`] implementation,
+/// polygon simplification is not topology-preserving and can produce an invalid
+/// polygon.
+///
+/// A non-positive tolerance returns `g` unchanged. Points, multipoints, and a
+/// two-vertex [`geo_types::Line`] are also unchanged because they have no
+/// removable vertices. `LineString`, `MultiLineString`, `Polygon`, and
+/// `MultiPolygon` delegate directly to `geo`'s Douglas–Peucker implementation.
+/// Rectangles, triangles, and geometry collections return
+/// [`GeoError::Unsupported`] because `geo` does not implement [`Simplify`] for
+/// those types. A positive tolerance must be finite. [GPT-5.6] sq-lsp7k.23
+pub fn simplify(g: &GeoGeometry, tolerance: f64) -> Result<GeoGeometry, GeoError> {
+    if tolerance <= 0.0 {
+        return Ok(g.clone());
+    }
+    if !tolerance.is_finite() {
+        return Err(GeoError::Unsupported(
+            "geof:simplify requires a finite tolerance".to_string(),
+        ));
+    }
+
+    let geometry = match &g.geometry {
+        Geometry::Point(_) | Geometry::MultiPoint(_) | Geometry::Line(_) => g.geometry.clone(),
+        Geometry::LineString(line) => Geometry::LineString(line.simplify(tolerance)),
+        Geometry::MultiLineString(lines) => Geometry::MultiLineString(lines.simplify(tolerance)),
+        Geometry::Polygon(polygon) => Geometry::Polygon(polygon.simplify(tolerance)),
+        Geometry::MultiPolygon(polygons) => Geometry::MultiPolygon(polygons.simplify(tolerance)),
+        other => {
+            return Err(GeoError::Unsupported(format!(
+                "geof:simplify is undefined for {}",
+                wkt_type_name(other)
+            )))
+        }
+    };
+    Ok(GeoGeometry {
+        crs: g.crs.clone(),
+        geometry,
+    })
 }
 
 /// `geof:boundary` — the simple-features boundary:
@@ -1043,33 +1282,19 @@ fn sym_difference_geometry(
 ///
 /// - Metric units require a geographic CRS: the geometry is projected into a
 ///   LOCAL EQUIRECTANGULAR metre frame about its mean latitude, buffered
-///   there, and unprojected — accurate at local scale (the same approximation
-///   as extended-extended [`distance_meters`]), increasingly distorted for
-///   continent-scale geometries or near the poles.
+///   there, and unprojected — accurate at local scale and increasingly
+///   distorted for continent-scale geometries or near the poles.
 /// - [`Unit::Degree`] / [`Unit::Radian`] buffer in euclidean coordinate space
 ///   (degrees for geographic CRSs, raw units for [`Crs::Other`]).
 pub fn buffer(g: &GeoGeometry, radius: f64, unit: Unit) -> Result<GeoGeometry, GeoError> {
     let buffered = match unit.meters_scale() {
         Some(scale) => {
-            if !g.crs.is_geographic() {
-                return Err(GeoError::NonGeographicCrs(g.crs.iri().to_string()));
-            }
-            let rect = g.geometry.bounding_rect().ok_or_else(|| {
-                GeoError::Unsupported("geof:buffer of an empty geometry".to_string())
-            })?;
-            // Local equirectangular frame about the geometry's mean latitude.
-            let kx = METERS_PER_DEGREE * rect.center().y.to_radians().cos();
-            if kx <= 0.0 {
-                return Err(GeoError::Unsupported(
-                    "geof:buffer with metric units at the poles".to_string(),
-                ));
-            }
+            let frame = LocalMetricFrame::for_geometry(g, "buffer")?;
             let meters = radius * scale;
-            let projected =
-                g.geometry.map_coords(|c| Coord { x: c.x * kx, y: c.y * METERS_PER_DEGREE });
-            projected
-                .buffer(meters)
-                .map_coords(|c| Coord { x: c.x / kx, y: c.y / METERS_PER_DEGREE })
+            frame.project(&g.geometry).buffer(meters).map_coords(|c| Coord {
+                x: c.x / frame.x_scale,
+                y: c.y / METERS_PER_DEGREE,
+            })
         }
         None => {
             let d = match unit {
@@ -1084,12 +1309,8 @@ pub fn buffer(g: &GeoGeometry, radius: f64, unit: Unit) -> Result<GeoGeometry, G
 
 // ---- Lexical-level mirrors (the engine-builtin shape) ------------------------------
 
-/// Every `geof:` function at the LEXICAL level: arguments and results are
-/// `geo:wktLiteral` lexical forms (plus plain `f64` / `bool`), exactly what a
-/// SPARQL engine builtin sees after evaluating its argument expressions to
-/// literals. sparq-engine can register these one-to-one once it has an
-/// extension-function registry (the required API is tracked in beads —
-/// `bd list -l area:sparq-geo`).
+/// Lexical-level `geof:` helpers: arguments and geometry results are
+/// `geo:wktLiteral` lexical forms (plus plain `f64` / `bool`).
 pub mod lex {
     use super::Unit;
     use crate::literal::parse_wkt_literal;
@@ -1098,6 +1319,21 @@ pub mod lex {
     /// `geof:distance(?a, ?b, ?unitIri)`.
     pub fn distance(a: &str, b: &str, unit_iri: &str) -> Result<f64, GeoError> {
         super::distance(&parse_wkt_literal(a)?, &parse_wkt_literal(b)?, Unit::from_iri(unit_iri)?)
+    }
+
+    /// `geof:metricArea(?a)` -> square metres.
+    pub fn metric_area(a: &str) -> Result<f64, GeoError> {
+        super::metric_area(&parse_wkt_literal(a)?)
+    }
+
+    /// `geof:metricLength(?a)` -> metres.
+    pub fn metric_length(a: &str) -> Result<f64, GeoError> {
+        super::metric_length(&parse_wkt_literal(a)?)
+    }
+
+    /// `geof:metricPerimeter(?a)` -> metres.
+    pub fn metric_perimeter(a: &str) -> Result<f64, GeoError> {
+        super::metric_perimeter(&parse_wkt_literal(a)?)
     }
 
     macro_rules! lex_relation {
@@ -1163,6 +1399,15 @@ pub mod lex {
         /// `geof:boundary(?a)` -> wktLiteral lexical form.
         boundary
     );
+    lex_geometry_fn!(
+        /// `geof:centroid(?a)` -> wktLiteral point lexical form.
+        centroid
+    );
+
+    /// `geof:simplify(?a, ?tolerance)` -> wktLiteral lexical form.
+    pub fn simplify(a: &str, tolerance: f64) -> Result<String, GeoError> {
+        Ok(super::simplify(&parse_wkt_literal(a)?, tolerance)?.to_wkt_literal())
+    }
 
     /// `geof:getSRID(?a)` -> the geometry's CRS IRI (an `xsd:anyURI` value).
     pub fn get_srid(a: &str) -> Result<String, GeoError> {
@@ -1273,5 +1518,68 @@ pub mod lex {
     pub fn buffer(a: &str, radius: f64, unit_iri: &str) -> Result<String, GeoError> {
         Ok(super::buffer(&parse_wkt_literal(a)?, radius, Unit::from_iri(unit_iri)?)?
             .to_wkt_literal())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_empty, max_x, max_y, min_x, min_y};
+    use crate::{parse_wkt_literal, GeoError, GeoGeometry};
+
+    type CoordinateAccessor = fn(&GeoGeometry) -> Result<f64, GeoError>;
+
+    fn assert_close(actual: Result<f64, GeoError>, expected: f64) {
+        let actual = actual.expect("bounding coordinate");
+        assert!(
+            (actual - expected).abs() < 1e-12,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn bounding_coordinates_distinguish_polygon_extrema() {
+        let polygon = parse_wkt_literal("POLYGON((0 0, 4 0, 4 3, 0 3, 0 0))")
+            .expect("polygon WKT");
+
+        assert_close(max_x(&polygon), 4.0);
+        assert_close(min_x(&polygon), 0.0);
+        assert_close(max_y(&polygon), 3.0);
+        assert_close(min_y(&polygon), 0.0);
+    }
+
+    #[test]
+    fn point_has_identical_minimum_and_maximum_coordinates() {
+        let point = parse_wkt_literal("POINT(2.5 -1.5)").expect("point WKT");
+
+        assert_close(max_x(&point), 2.5);
+        assert_close(min_x(&point), 2.5);
+        assert_close(max_y(&point), -1.5);
+        assert_close(min_y(&point), -1.5);
+    }
+
+    #[test]
+    fn empty_geometry_has_no_bounding_coordinates() {
+        let empty = parse_wkt_literal("GEOMETRYCOLLECTION EMPTY").expect("empty WKT");
+        let accessors: [CoordinateAccessor; 4] = [max_x, min_x, max_y, min_y];
+
+        for accessor in accessors {
+            assert!(matches!(
+                accessor(&empty),
+                Err(GeoError::Unsupported(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn empty_predicate_distinguishes_empty_and_non_empty_geometries() {
+        for (wkt, expected) in [
+            ("POINT(1 2)", false),
+            ("POINT EMPTY", true),
+            ("LINESTRING EMPTY", true),
+            ("POLYGON((0 0,1 0,1 1,0 1,0 0))", false),
+        ] {
+            let geometry = parse_wkt_literal(wkt).expect("geometry WKT");
+            assert_eq!(is_empty(&geometry), Ok(expected), "WKT: {wkt}");
+        }
     }
 }

@@ -17,26 +17,81 @@
 // HONESTY: no performance number is asserted. A future result panel may TIME a query with
 // the engine's own measured latency and label it as such; it must never bake in a benchmark.
 
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use sparq_core::Graph;
 
-/// The desktop app's single native store: a `Graph` guarded by a `Mutex` (Tauri commands
-/// can run concurrently, and the engine's query/update take `&Graph` / `&mut Graph`). Held
-/// in Tauri managed state via [`tauri::Builder::manage`].
+/// [OPUS-4.8] sq-w2sod — the single GENERIC error the native disk loader returns for ANY
+/// open/read/authorisation failure. It carries NO OS error string, NO errno, and NO path, so a
+/// webview script cannot use `load_path` as a filesystem existence/permission ORACLE: a
+/// missing file, a permission-denied file, and an un-approved path are all indistinguishable
+/// from the frontend. The detailed cause is logged server-side (see [`log_load_failure`]) where
+/// only the operator — not the untrusted webview — can read it.
+const LOAD_FAILED_MESSAGE: &str =
+    "could not load the selected file. Pick the file again from the Import dialog and retry.";
+
+/// [OPUS-4.8] sq-w2sod — the desktop app's single native store PLUS the set of disk paths the
+/// user has actually picked through the native file-open dialog this session.
+///
+/// SECURITY (why the approved-set exists): an app-defined `#[tauri::command]` like [`load_path`]
+/// is invokable by ANY script in the webview via `window.__TAURI__.core.invoke('load_path', …)`
+/// and — unlike the `fs` PLUGIN commands — is NOT constrained by the capability allowlist in
+/// `capabilities/default.json`. Without a guard it would read any process-readable path. So
+/// [`load_path`] is bound to the approved set: a path is loadable ONLY if it was returned by
+/// [`pick_rdf_files`], which opens the dialog SERVER-SIDE (the user must physically choose the
+/// file — a script cannot forge a selection) and records the CANONICALISED path here. The set is
+/// the unforgeable "token": membership is the capability. Fails closed — an un-approved path is
+/// rejected with the same generic error as any other failure.
+///
+/// [OPUS-4.8] sq-w2sod — this no longer holds a `Graph`. The scaffolded in-process native store
+/// and its nine query/update commands were never invoked (the query/update path runs in the
+/// in-tab WASM engine), so they were removed to shrink the invocable surface; the native side owns
+/// only the disk-INGEST loader (`pick_rdf_files` / `load_path` / `load_text`), which returns
+/// N-Quads for the in-tab store to merge and keeps no server-side graph of its own.
 pub struct EngineState {
-    graph: Mutex<Graph>,
+    /// Canonicalised absolute paths the user picked via [`pick_rdf_files`] this session. Only a
+    /// path in this set may be loaded by [`load_path`]. Populated exclusively by the server-side
+    /// dialog flow, never by anything the webview controls.
+    approved_paths: Mutex<HashSet<PathBuf>>,
 }
 
 impl EngineState {
-    /// A fresh, empty native store. `sparq_core::Graph` has no `Default`/`new` (it is built
-    /// by loading), so the empty store is an empty N-Triples parse — the same way the wasm
-    /// `Store` constructs an empty receiver (`Store::load("", _)`).
+    /// A fresh state: the approved-path set starts empty, so nothing is loadable until the user
+    /// picks a file through the native dialog ([`pick_rdf_files`]).
     pub fn new() -> Self {
-        let graph = Graph::load_str("", "ntriples").expect("empty N-Triples is a valid graph");
         Self {
-            graph: Mutex::new(graph),
+            approved_paths: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Record a user-picked path as approved for loading. Canonicalises first so the stored key
+    /// matches what [`is_approved`](Self::is_approved) canonicalises the load argument to
+    /// (resolving `.`/`..`/symlinks); a path that does not canonicalise (e.g. it vanished between
+    /// the dialog and this call) is simply not approved. Returns the canonical string that is
+    /// handed back to the frontend to pass to [`load_path`].
+    fn approve(&self, raw: &Path) -> Option<String> {
+        let canonical = std::fs::canonicalize(raw).ok()?;
+        let as_string = canonical.to_string_lossy().into_owned();
+        if let Ok(mut set) = self.approved_paths.lock() {
+            set.insert(canonical);
+        }
+        Some(as_string)
+    }
+
+    /// Whether `raw` canonicalises to a path the user actually picked this session. The load
+    /// argument is canonicalised the SAME way [`approve`](Self::approve) canonicalised the
+    /// dialog result, so `.`/`..`/symlink spellings of an approved file still match, and a path
+    /// that never went through the dialog — or that fails to canonicalise — is not approved.
+    fn is_approved(&self, raw: &str) -> bool {
+        let Ok(canonical) = std::fs::canonicalize(raw) else {
+            return false;
+        };
+        self.approved_paths
+            .lock()
+            .map(|set| set.contains(&canonical))
+            .unwrap_or(false)
     }
 }
 
@@ -46,37 +101,19 @@ impl Default for EngineState {
     }
 }
 
-/// A small helper so command bodies can lock the graph and map a poisoned lock to a
-/// stringified error (Tauri commands return `Result<_, String>` to the webview).
-fn lock(state: &EngineState) -> Result<std::sync::MutexGuard<'_, Graph>, String> {
-    state
-        .graph
-        .lock()
-        .map_err(|_| "engine state lock poisoned".to_string())
-}
-
-/// Load RDF into the store, REPLACING its current contents. `format` is one of the syntaxes
-/// `Graph::load_str` / `load_dataset` accept (`turtle` / `ntriples` / `nquads` / `trig` /
-/// `jsonld`). `preserve_graphs` routes the quad-bearing formats through `load_dataset` so
-/// named graphs survive (mirrors the site's `loadIntoStore`). Returns the loaded triple
-/// count.
-#[tauri::command]
-pub fn load(
-    state: tauri::State<'_, EngineState>,
-    text: String,
-    format: String,
-    preserve_graphs: bool,
-) -> Result<usize, String> {
-    let graph = parse_graph(&text, &format, preserve_graphs)?;
-    let size = graph.len();
-    *lock(&state)? = graph;
-    Ok(size)
+/// [OPUS-4.8] sq-w2sod — log the DETAILED cause of a native-load failure server-side (stderr),
+/// where the operator can see it, and return the GENERIC [`LOAD_FAILED_MESSAGE`] to the webview.
+/// This keeps a useful diagnostic without leaking OS/path detail to the untrusted frontend
+/// (closing the existence/permission oracle). Called at every `load_path` failure edge.
+fn log_load_failure(context: &str, detail: &str) -> String {
+    eprintln!("[sparq-gui] native load failed ({context}): {detail}");
+    LOAD_FAILED_MESSAGE.to_string()
 }
 
 /// Parse an in-memory RDF document into a `Graph`, honouring the named-graph-preserving
-/// toggle. The ONE parse helper [`load`] / [`load_text`] share so the `preserve_graphs`
-/// routing (`load_dataset` for the quad-bearing formats vs the cheaper `load_str`) is decided
-/// in exactly one place.
+/// toggle. The ONE parse helper [`load_text`] / [`decode_file_to_graph`] share so the
+/// `preserve_graphs` routing (`load_dataset` for the quad-bearing formats vs the cheaper
+/// `load_str`) is decided in exactly one place.
 fn parse_graph(text: &str, format: &str, preserve_graphs: bool) -> Result<Graph, String> {
     if preserve_graphs {
         Graph::load_dataset(text, format)
@@ -140,6 +177,56 @@ pub fn load_text(
     Ok(to_loaded_document(&graph, format))
 }
 
+/// [OPUS-4.8] sq-w2sod — open the NATIVE file-open dialog for RDF documents SERVER-SIDE, record
+/// each chosen path (canonicalised) as approved in [`EngineState`], and return those canonical
+/// paths to the frontend. The returned paths are the ONLY ones [`load_path`] will subsequently
+/// load — the approved set is the unforgeable capability token.
+///
+/// WHY SERVER-SIDE (the security property): the dialog is driven from Rust here rather than from
+/// the webview, so a script cannot fabricate a "selection" — the user must physically pick the
+/// file(s) in the OS dialog. The chosen paths are canonicalised and stored; nothing the webview
+/// controls can add to the approved set. This replaces the frontend's direct `plugin:dialog|open`
+/// call, letting us drop the `dialog:allow-open` capability grant and shrink the invocable
+/// surface. `blocking_pick_files` runs the dialog on the OS thread and blocks this command's
+/// worker until the user confirms/cancels; a cancel returns an empty list.
+#[tauri::command]
+pub fn pick_rdf_files(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, EngineState>,
+) -> Result<Vec<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    // The SAME extension filter the old frontend dialog offered: RDF syntaxes plus the
+    // compression suffixes the native loader streams and the native-only HDT archive extensions.
+    let picked = app
+        .dialog()
+        .file()
+        .set_title("Import RDF files into the workspace")
+        .add_filter(
+            "RDF (incl. compressed + HDT)",
+            &[
+                "ttl", "nt", "nq", "trig", "jsonld", "json", "hdt", "gz", "bz2", "zst", "zstd",
+            ],
+        )
+        .add_filter("All files", &["*"])
+        .blocking_pick_files();
+
+    let Some(files) = picked else {
+        // User cancelled — no paths, nothing approved.
+        return Ok(Vec::new());
+    };
+
+    // Canonicalise + approve each pick, returning the canonical strings the frontend threads back
+    // into `load_path`. A pick that fails to canonicalise (vanished between dialog and now) is
+    // silently dropped rather than approved.
+    let approved = files
+        .into_iter()
+        .filter_map(|fp| fp.into_path().ok())
+        .filter_map(|p| state.approve(&p))
+        .collect();
+    Ok(approved)
+}
+
 /// Decode an RDF document FROM DISK and return it as N-Quads for the in-tab store to merge —
 /// the FILE tab of the Import drawer. This is the native loader's headline capability:
 ///
@@ -154,23 +241,56 @@ pub fn load_text(
 ///
 /// `format` is the frontend's extension-derived guess (it strips a compression suffix first);
 /// the loader trusts it for the parse but routes HDT by extension regardless.
+///
+/// SECURITY (sq-w2sod): this command is invokable by any webview script and is NOT bound by the
+/// `fs`-plugin capability allowlist. It is therefore GATED — `path` must be one the user picked
+/// through [`pick_rdf_files`] (recorded canonicalised in [`EngineState`]); any other path, and
+/// any open/read/parse failure, returns the single GENERIC [`LOAD_FAILED_MESSAGE`] (no OS detail,
+/// no path echo) so it cannot be used as a filesystem existence/permission oracle. Fails closed.
 #[tauri::command]
 pub fn load_path(
+    state: tauri::State<'_, EngineState>,
     path: String,
     format: String,
     preserve_graphs: bool,
 ) -> Result<LoadedDocument, String> {
+    load_approved_path(&state, &path, &format, preserve_graphs)
+}
+
+/// The gated load body, factored out of the [`load_path`] command so it can be unit-tested
+/// against a plain [`EngineState`] (no Tauri runtime / managed-state harness needed).
+///
+/// The security contract lives here: `path` must be in the approved set (a path the user picked
+/// through [`pick_rdf_files`]); an un-approved path — and every open/read/parse failure — returns
+/// the single generic [`LOAD_FAILED_MESSAGE`], with the detailed cause logged server-side only.
+fn load_approved_path(
+    state: &EngineState,
+    path: &str,
+    format: &str,
+    preserve_graphs: bool,
+) -> Result<LoadedDocument, String> {
+    // Fail closed: only a path the user actually picked through the native dialog this session is
+    // loadable. Everything else is rejected with the SAME generic error as any other failure, so
+    // an un-approved path is indistinguishable from a missing/unreadable one (no enumeration
+    // oracle). The detailed reason is logged server-side, not returned.
+    if !state.is_approved(path) {
+        return Err(log_load_failure(
+            "authorisation",
+            "path was not selected through the native Import dialog",
+        ));
+    }
+
     let lower = path.to_ascii_lowercase();
 
     // HDT archives route through sparq-hdt by extension OR an explicit `hdt` format. Opt-in:
     // a build without the `hdt` feature reports the actionable rebuild hint rather than
     // silently mis-parsing the binary as Turtle.
     if format == "hdt" || lower.ends_with(".hdt") || lower.ends_with(".hdt.gz") {
-        return load_hdt(&path);
+        return load_hdt(path);
     }
 
-    let graph = decode_file_to_graph(&path, &format, preserve_graphs)?;
-    Ok(to_loaded_document(&graph, format))
+    let graph = decode_file_to_graph(path, format, preserve_graphs)?;
+    Ok(to_loaded_document(&graph, format.to_string()))
 }
 
 /// Open a (possibly compressed) file as a streaming reader. Mirrors the CLI's `open_reader`
@@ -194,16 +314,20 @@ fn open_reader(path: &str) -> std::io::Result<Box<dyn std::io::Read + Send>> {
 /// pipelined parser (no whole-decompressed copy held in RAM); the other formats need the whole
 /// document buffered for the statement splitter. This mirrors the CLI's `load_quiet` shape.
 fn decode_file_to_graph(path: &str, format: &str, preserve_graphs: bool) -> Result<Graph, String> {
+    // Every failure edge below maps to the SAME generic error (the OS detail is logged
+    // server-side, not returned) so a caller cannot distinguish "does not exist" from
+    // "permission denied" from "not valid RDF" — closing the oracle (sq-w2sod).
     if matches!(format, "ntriples" | "n-triples") && !preserve_graphs {
-        let reader = open_reader(path).map_err(|e| format!("cannot open {path}: {e}"))?;
-        return Graph::load_reader_parallel(reader, format);
+        let reader = open_reader(path).map_err(|e| log_load_failure("open", &e.to_string()))?;
+        return Graph::load_reader_parallel(reader, format)
+            .map_err(|e| log_load_failure("parse", &e));
     }
     use std::io::Read;
     let mut text = String::new();
     open_reader(path)
         .and_then(|mut r| r.read_to_string(&mut text))
-        .map_err(|e| format!("cannot read {path}: {e}"))?;
-    parse_graph(&text, format, preserve_graphs)
+        .map_err(|e| log_load_failure("read", &e.to_string()))?;
+    parse_graph(&text, format, preserve_graphs).map_err(|e| log_load_failure("parse", &e))
 }
 
 /// Load an HDT archive via the opt-in `sparq-hdt` crate. Compiled out when the `hdt` feature
@@ -211,7 +335,9 @@ fn decode_file_to_graph(path: &str, format: &str, preserve_graphs: bool) -> Resu
 /// lean build fails LOUDLY rather than mis-parsing the binary — honest about the gate.
 #[cfg(feature = "hdt")]
 fn load_hdt(path: &str) -> Result<LoadedDocument, String> {
-    let graph = sparq_hdt::load(path).map_err(|e| e.to_string())?;
+    // The HDT decode error can carry the path / OS detail, so it is logged server-side and the
+    // caller gets the same generic message as any other load failure (sq-w2sod).
+    let graph = sparq_hdt::load(path).map_err(|e| log_load_failure("hdt", &e.to_string()))?;
     Ok(to_loaded_document(&graph, "hdt".to_string()))
 }
 
@@ -224,71 +350,14 @@ fn load_hdt(_path: &str) -> Result<LoadedDocument, String> {
     )
 }
 
-/// Run a SELECT/ASK query, returning the SPARQL 1.1 JSON results document — the exact shape
-/// the reused REPL frontend already renders (`@sparq/client`'s `SparqlResults`).
-#[tauri::command]
-pub fn query(state: tauri::State<'_, EngineState>, sparql: String) -> Result<String, String> {
-    let graph = lock(&state)?;
-    sparq_engine::query_json(&graph, &sparql)
-}
-
-/// Run a CONSTRUCT/DESCRIBE query, returning the constructed graph as an N-Triples document
-/// (mirrors the wasm `queryQuads`).
-#[tauri::command]
-pub fn query_quads(state: tauri::State<'_, EngineState>, sparql: String) -> Result<String, String> {
-    let graph = lock(&state)?;
-    sparq_engine::construct_ntriples(&graph, &sparql)
-}
-
-/// Apply a SPARQL 1.1 Update IN PLACE through the engine's delta overlay (mirrors the wasm
-/// `updateInPlace`). Returns the store's triple count after the update.
-#[tauri::command]
-pub fn update_in_place(
-    state: tauri::State<'_, EngineState>,
-    sparql: String,
-) -> Result<usize, String> {
-    let mut graph = lock(&state)?;
-    sparq_engine::update_in_place(&mut graph, &sparql)?;
-    Ok(graph.len())
-}
-
-/// The planning-only EXPLAIN plan text for any query form (mirrors the wasm `explain`).
-#[tauri::command]
-pub fn explain(state: tauri::State<'_, EngineState>, sparql: String) -> Result<String, String> {
-    let graph = lock(&state)?;
-    sparq_engine::explain(&graph, &sparql)
-}
-
-/// The plan + per-operator execution trace for SELECT/ASK (mirrors the wasm
-/// `explainAnalyze`).
-#[tauri::command]
-pub fn explain_analyze(
-    state: tauri::State<'_, EngineState>,
-    sparql: String,
-) -> Result<String, String> {
-    let graph = lock(&state)?;
-    sparq_engine::explain_analyze(&graph, &sparql)
-}
-
-/// A materialisation-free SELECT solution count (mirrors the wasm `count`).
-#[tauri::command]
-pub fn count(state: tauri::State<'_, EngineState>, sparql: String) -> Result<usize, String> {
-    let graph = lock(&state)?;
-    sparq_engine::count(&graph, &sparql)
-}
-
-/// The ASK fast path: a plain boolean, no SELECT materialised (mirrors the wasm `ask`).
-#[tauri::command]
-pub fn ask(state: tauri::State<'_, EngineState>, sparql: String) -> Result<bool, String> {
-    let graph = lock(&state)?;
-    sparq_engine::ask(&graph, &sparql)
-}
-
-/// The current store's total triple count (default graph + every named graph).
-#[tauri::command]
-pub fn store_size(state: tauri::State<'_, EngineState>) -> Result<usize, String> {
-    Ok(lock(&state)?.len())
-}
+// [OPUS-4.8] sq-w2sod — the nine scaffolded native query/update commands
+// (`load` / `query` / `query_quads` / `update_in_place` / `explain` / `explain_analyze` /
+// `count` / `ask` / `store_size`) that the frontend never invoked (query/update runs in the
+// in-tab WASM engine) were REMOVED here to shrink the invocable surface. The native side owns
+// only the disk-ingest loader (`pick_rdf_files` / `load_path` / `load_text`) plus the disk-usage
+// probe (`disk.rs`). Their equivalents remain available in `sparq_engine::{query_json, ask,
+// count, …}` if a future native query surface is ever wired — that would be a deliberate,
+// reviewed addition, not a pre-wired latent surface.
 
 #[cfg(test)]
 mod tests {
@@ -346,18 +415,21 @@ mod tests {
         );
     }
 
+    // Loading exercises the GATED body `load_approved_path`: the disk-loader tests must first
+    // APPROVE the path (as the server-side dialog would), so they double as proof that the
+    // approve → load handshake works end to end.
+
     #[test]
     fn load_path_decodes_a_plain_ntriples_file() {
         let dir = std::env::temp_dir().join(format!("sparq-gui-import-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mk tmp dir");
         let path = dir.join("data.nt");
         std::fs::write(&path, TTL).expect("write nt file");
-        let doc = load_path(
-            path.to_string_lossy().into_owned(),
-            "ntriples".to_string(),
-            false,
-        )
-        .expect("ntriples file loads");
+        let state = EngineState::new();
+        // Approve the pick exactly as the dialog flow would, then load it.
+        let approved = state.approve(&path).expect("canonicalise + approve");
+        let doc = load_approved_path(&state, &approved, "ntriples", false)
+            .expect("ntriples file loads");
         assert_eq!(doc.count, 1);
         assert!(doc.nquads.contains("http://example.org/a"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -374,39 +446,110 @@ mod tests {
         let mut enc = flate2::write::GzEncoder::new(file, flate2::Compression::default());
         enc.write_all(TTL.as_bytes()).expect("gz write");
         enc.finish().expect("gz finish");
+        let state = EngineState::new();
+        let approved = state.approve(&path).expect("canonicalise + approve");
         // The frontend strips the .gz suffix to derive the format; the loader sniffs .gz itself.
-        let doc = load_path(
-            path.to_string_lossy().into_owned(),
-            "ntriples".to_string(),
-            false,
-        )
-        .expect("gzip file decodes + parses natively");
+        let doc = load_approved_path(&state, &approved, "ntriples", false)
+            .expect("gzip file decodes + parses natively");
         assert_eq!(doc.count, 1);
         assert!(doc.nquads.contains("http://example.org/b"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ── [OPUS-4.8] sq-w2sod — the approved-path gate + generic-error oracle closure ──
+
     #[test]
-    fn load_path_reports_missing_file_as_an_error_not_a_panic() {
-        let err = load_path(
-            "/definitely/not/a/real/path/data.nt".to_string(),
-            "ntriples".to_string(),
+    fn load_path_rejects_an_unapproved_path_with_the_generic_error() {
+        // An EXISTING, readable RDF file that was NEVER picked through the dialog must NOT load —
+        // and the rejection must be the generic message, revealing nothing about the file.
+        let dir = std::env::temp_dir().join(format!("sparq-gui-unapproved-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mk tmp dir");
+        let path = dir.join("secret.nt");
+        std::fs::write(&path, TTL).expect("write nt file");
+        let state = EngineState::new(); // nothing approved
+
+        let err = load_approved_path(
+            &state,
+            &path.to_string_lossy(),
+            "ntriples",
             false,
         )
-        .expect_err("a missing file is an Err");
+        .expect_err("an un-approved path must be rejected");
+
+        // Fail closed with the EXACT generic message — no path, no OS detail.
+        assert_eq!(err, LOAD_FAILED_MESSAGE);
+        assert!(!err.contains("secret"), "must not echo the path: {err}");
         assert!(
-            err.contains("cannot open") || err.contains("cannot read"),
-            "got: {err}"
+            !err.to_ascii_lowercase().contains("permission"),
+            "must not leak permission state: {err}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_path_missing_file_returns_the_generic_error_not_an_oracle() {
+        // A missing path never went through the dialog, so approval rejects it first — and does so
+        // with the SAME generic message a missing/permission-denied file would give, so the caller
+        // cannot tell "does not exist" from "not approved" from "denied" (no enumeration oracle).
+        let state = EngineState::new();
+        let err = load_approved_path(
+            &state,
+            "/definitely/not/a/real/path/data.nt",
+            "ntriples",
+            false,
+        )
+        .expect_err("a missing / un-approved file is an Err");
+
+        assert_eq!(err, LOAD_FAILED_MESSAGE, "exact generic message");
+        // Assert the oracle is CLOSED: no path echo, no errno/OS-detail leakage.
+        for leak in ["/definitely", "data.nt", "No such file", "os error", "cannot open"] {
+            assert!(!err.contains(leak), "generic error must not contain {leak:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn approved_path_matches_across_dot_and_symlink_spellings() {
+        // A `.`-laden spelling of an approved path still canonicalises to the same key, so a
+        // legitimate re-spelling of the SAME picked file is accepted (the check is on the
+        // canonical identity, not the raw string).
+        let dir = std::env::temp_dir().join(format!("sparq-gui-canon-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mk tmp dir");
+        let path = dir.join("data.nt");
+        std::fs::write(&path, TTL).expect("write nt file");
+        let state = EngineState::new();
+        let _canonical = state.approve(&path).expect("approve");
+
+        // A `dir/./data.nt` spelling of the same file must be recognised as approved.
+        let dotted = dir.join(".").join("data.nt");
+        assert!(
+            state.is_approved(&dotted.to_string_lossy()),
+            "a `.`-spelling of an approved file must canonicalise to the approved key"
+        );
+        // A sibling that was never approved must NOT be.
+        let sibling = dir.join("other.nt");
+        std::fs::write(&sibling, TTL).expect("write sibling");
+        assert!(
+            !state.is_approved(&sibling.to_string_lossy()),
+            "a never-picked sibling must not be approved"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     #[cfg(not(feature = "hdt"))]
     fn hdt_import_in_a_lean_build_fails_loudly_with_a_rebuild_hint() {
-        // Without the `hdt` feature, an .hdt path must NOT be mis-parsed as Turtle — it must
-        // return the actionable rebuild hint.
-        let err = load_path("/tmp/whatever.hdt".to_string(), "hdt".to_string(), false)
+        // Without the `hdt` feature, an APPROVED .hdt path must NOT be mis-parsed as Turtle — it
+        // must return the actionable rebuild hint (an actionable BUILD-config message, distinct
+        // from the generic load error; it never touches the file so it is no FS oracle).
+        let dir = std::env::temp_dir().join(format!("sparq-gui-hdt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("mk tmp dir");
+        let path = dir.join("whatever.hdt");
+        std::fs::write(&path, b"not really hdt").expect("write stub .hdt");
+        let state = EngineState::new();
+        let approved = state.approve(&path).expect("approve");
+        let err = load_approved_path(&state, &approved, "hdt", false)
             .expect_err("HDT in a lean build is an Err");
         assert!(err.contains("--features hdt"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -2,8 +2,11 @@
 // interactive surfaces × their key UI states.
 //
 // WHAT IT GUARDS. Accessibility bugs live in the states a pristine page-load never shows — the
-// OPEN command palette, the EXPANDED connect drawer, the ERROR strip (a real ARIA tab/panel bug
-// already shipped on /try and was found by hand). This spec scans each of those states with axe
+// wasm-computed RESULTS table on the home hero, and the release/no-release states of /download.
+// [OPUS-4.8] sq-4hiqe — the /try SPARQL playground was removed, so its axe scans (default,
+// palette-open, connect-drawer, error) are gone with it; the historical FIXED FINDINGS below that
+// name /try states are kept only as a fix log (the globals.css / badge.tsx fixes still cover the
+// home + /download surfaces). This spec scans each remaining state with axe
 // pinned to the WCAG 2.1 A+AA rule tags and enforces the two-tier gate in e2e/support/a11y.ts:
 //   * ZERO tier      — serious + critical = HARD FAIL AT ZERO (unconditional).
 //   * KNOWN-GAP tier — a surface with a STRUCTURAL, beaded serious violation (a design-token
@@ -28,13 +31,12 @@
 // Design of record: research/web-gui-test-program.md §3.1. Determinism doctrine §1 (frozen clock,
 // seeded random, hermetic network, web-first waiters — inherited from the shared `test`).
 //
-// WASM PREREQ. Two states need the in-tab engine (home RESULTS, /try ERROR): they SKIP when the
-// lean wasm bundle is absent (the light site-e2e CI lane builds no Rust toolchain), exactly like
-// try-query-smoke.spec.ts. The wasm-FREE states (home idle, /try default/palette/drawer, /download
-// release+no-release) run on every lane. Run the full set after `npm run sync-wasm`.
+// WASM PREREQ. One state needs the in-tab engine (home RESULTS): it SKIPS when the lean wasm
+// bundle is absent (the light site-e2e CI lane builds no Rust toolchain). The wasm-FREE states
+// (home idle, /download release+no-release) run on every lane. Run the full set after
+// `npm run sync-wasm`.
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import type { Page } from "@playwright/test";
 import { test, expect, BasePage } from "./support";
 import { assertA11y, writeSeedBaseline, WCAG_TAGS } from "./support/a11y";
 
@@ -80,51 +82,6 @@ test.describe("a11y · home", () => {
     await page.getByRole("button", { name: /Run/ }).first().click();
     await home.expectRunnerState("home", "results");
     await assertA11y(page, "home:results"); // ZERO tier: sq-ymr2e.13 fixed.
-  });
-});
-
-// ── /try — the flagship interactive surface, in its major UI states (§2.2 / §3.1). ──────────────
-test.describe("a11y · /try", () => {
-  /** Navigate to /try and wait for the REPL editor (renders without the engine; wasm-free). */
-  async function gotoTry(page: Page): Promise<BasePage> {
-    const p = new BasePage(page);
-    await p.goto("try/");
-    await expect(page.getByRole("textbox", { name: "SPARQL query" })).toBeVisible();
-    return p;
-  }
-
-  test("default state — WCAG 2.1 AA", async ({ page }) => {
-    await gotoTry(page);
-    await assertA11y(page, "try:default"); // ZERO tier.
-  });
-
-  test("command palette open — WCAG 2.1 AA", async ({ page }) => {
-    const p = await gotoTry(page);
-    await p.openCommandPalette();
-    // ZERO tier: sq-ymr2e.14 fixed the --success badge contrast (4.09:1 → ~6.1:1).
-    await assertA11y(page, "try:palette-open");
-  });
-
-  test("connect drawer expanded — WCAG 2.1 AA", async ({ page }) => {
-    await gotoTry(page);
-    // The endpoint config is a collapsed <details> disclosure; expand it to scan the form fields
-    // (endpoint URL + token inputs) that only exist inside the open drawer.
-    await page.getByText(/Advanced · Connect to a sparq-server/).click();
-    await expect(page.locator("#endpoint-url")).toBeVisible();
-    await assertA11y(page, "try:connect-drawer-open"); // ZERO tier.
-  });
-
-  test("error state — WCAG 2.1 AA", async ({ page }) => {
-    test.skip(!WASM_PRESENT, "wasm bundle absent — the /try error state needs the in-tab engine to reject a query");
-    await gotoTry(page);
-    await expect(page.getByText("Engine ready")).toBeVisible({ timeout: 90_000 });
-    // A deliberately malformed query drives the error strip between editor and results.
-    await page.getByRole("textbox", { name: "SPARQL query" }).fill("SELECT ?s WHERE { ?s ?p");
-    await page.getByRole("button", { name: "Run query" }).click();
-    await expect(page.locator('[data-result-kind="error"]')).toBeVisible({ timeout: 30_000 });
-    // ZERO tier: the rich-colours error toast this state raises had a 4.34:1 color-contrast gap
-    // (the former GAP_ERROR / sq-ymr2e.14); it is now fixed in globals.css, so this surface is clean.
-    await assertA11y(page, "try:error");
   });
 });
 

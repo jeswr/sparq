@@ -75,3 +75,13 @@ node_modules/
 # reproducible cross-PR baseline at metrics/baseline.jsonl (GitHub/git/roborev-derived
 # columns only — no session tokens), which is regenerable via capture_baseline.py.
 metrics/runtime/
+
+# KB dump output (scripts/export-kb-dump.py, sq-tzars.8) — assembled locally then pushed
+# to sparq-org/research-kb; never committed to this repo.  A leak-abort leaves partial
+# content in this directory, so git-ignoring it prevents accidental staging.
+/dumps/
+
+# Local tool binaries (e.g. a session-installed cargo-nextest) — opaque executables are
+# unreviewable and a supply-chain risk; install tools via the pinned CI/dev bootstrap
+# instead. Ignored so one can never be accidentally committed (PR #3453 review).
+/.local-bin/

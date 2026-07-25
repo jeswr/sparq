@@ -1,0 +1,15 @@
+[package]
+name = "sparq-jsonld-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Offline, fail-closed registry of well-known JSON-LD context documents"
+publish = false
+readme = "README.md"
+
+[dependencies]
+sparq-jsonld = { path = "../sparq-jsonld" }
+

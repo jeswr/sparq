@@ -32,7 +32,10 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 # The crates under test. sparq-core needs `mmap` (for `Graph::open` over an on-disk
 # store) and `parallel` (for `load_reader_parallel`'s pipelined N-Triples path).
-sparq-core = { path = "../crates/sparq-core", features = ["mmap", "parallel"] }
+# The `jsonld` feature wires in oxjsonld so Graph::load_str("jsonld") exercises the
+# real oxjsonld toRdf parser path — the same path attacker-controlled GSP PUT bodies
+# reach in sparq-server. [SONNET-4.6] (sq-oy1f.46)
+sparq-core = { path = "../crates/sparq-core", features = ["mmap", "parallel", "jsonld"] }
 sparq-engine = { path = "../crates/sparq-engine" }
 # SHACL validation under test (bead sq-o4pi). Opt-in crate (the sparq-reason isolation
 # pattern). Used by the `validate_shacl` target. Like every entry here it is a
@@ -40,8 +43,46 @@ sparq-engine = { path = "../crates/sparq-engine" }
 # out of the workspace default build because this fuzz crate is excluded from the root
 # workspace (see the header note). [OPUS-4.8]
 sparq-shacl = { path = "../crates/sparq-shacl" }
+# sparq-jsonld: the native W3C JSON-LD 1.1 document pipeline (bead sq-oy1f.46). The
+# `jsonld_pipeline` fuzz target exercises Json::parse + expand + flatten_expanded
+# directly. Published = false (scaffold phase), path dep resolves in the fuzz crate's
+# standalone workspace. [SONNET-4.6]
+sparq-jsonld = { path = "../crates/sparq-jsonld" }
 # Temp store directories for the `Graph::open` hostile-bytes target.
 tempfile = "3"
+
+# ── bead sq-3dyje.5: untrusted-input decode surfaces ─────────────────────────────────
+# SERVICE federation result parsers (SRJ + SRX). The `service` feature gates the entire
+# client; without it sparq-engine-service compiles to an empty crate and the
+# parse_srj_srx target would have nothing to exercise. [SONNET-4.6]
+sparq-engine-service = { path = "../crates/sparq-engine-service", features = ["service"] }
+# HDT binary container decode: `graph_from_reader` is the network/file entry point that
+# turns hostile bytes into an in-memory Graph. [SONNET-4.6]
+sparq-hdt = { path = "../crates/sparq-hdt" }
+# RDFC-1.0 canonicalization: parse_nquads + canonicalize_nquads. The upstream
+# rdf_canon crate enforces the HNDQ poison-graph call limit (default 4000) so the
+# target rejects poison graphs via Err rather than hanging. [SONNET-4.6]
+sparq-canon = { path = "../crates/sparq-canon" }
+# N3 rules + RIF-XML: reason_n3_terms (N3 parse + close) and rif_xml::import (RIF/XML
+# presentation-syntax parse). `rif-xml` implies `rif-core`; both are off by default.
+# [SONNET-4.6]
+sparq-reason = { path = "../crates/sparq-reason", features = ["rif-xml"] }
+# GeoSPARQL WKT literal parser: parse_wkt_literal + parse_geometry_literal. The
+# `engine` default feature is not needed here — the geometry library (literal parsing
+# + geof: as plain Rust) is always compiled. [SONNET-4.6]
+sparq-geo = { path = "../crates/sparq-geo", default-features = false }
+# Terse SPARQL parser: terse_to_sparql is the single public entry point that covers
+# keyword expansion + the underlying spargebra SPARQL parser. [SONNET-4.6]
+sparq-terse = { path = "../crates/sparq-terse" }
+# Solid WAC/ACP access control: the `wac_fail_closed` target fuzzes the per-resource
+# DECISION surface (PodStore::decide / decide_batch) for the fail-closed invariant --
+# a corrupted/partial/unmaterialized AuthIndex must never allow (bead sq-b9afe).
+# Default features only: the decision surface is always-present (no cargo gate). [FABLE-5]
+sparq-solid = { path = "../crates/sparq-solid" }
+# oxrdf: the wac_fail_closed harness pattern-matches `Graph::named` graph-name Terms to
+# harvest candidate resource IRIs from the fuzzed dataset. Same 0.3 line the workspace
+# pins, so the standalone lockfile resolves to the one sparq-core/sparq-solid use. [FABLE-5]
+oxrdf = "0.3"
 
 # A fast-but-instrumentable profile: opt-level 3 keeps the fuzzer throughput high
 # while `debug-assertions = true` + `overflow-checks = true` turn latent UB / integer
@@ -93,6 +134,99 @@ bench = false
 [[bin]]
 name = "validate_shacl"
 path = "fuzz_targets/validate_shacl.rs"
+test = false
+doc = false
+bench = false
+
+# bead sq-oy1f.46 (security: attacker-reachable application/ld+json ingest, default-on
+# in sparq-server/sparq-py/sparq-cli). Exercises:
+#   - sparq-jsonld: Json::parse → expand() → flatten_expanded() — the native pipeline
+#   - oxjsonld leg: sparq_core::Graph::load_str(text, "jsonld") → the Oxigraph
+#     JSON-LD-to-RDF parser that GSP PUT/POST bodies reach in production
+# Auto-discovered by CI `cargo fuzz list`; no workflow edit needed. [SONNET-4.6]
+[[bin]]
+name = "jsonld_pipeline"
+path = "fuzz_targets/jsonld_pipeline.rs"
+test = false
+doc = false
+bench = false
+
+# ── bead sq-3dyje.5: untrusted-input fuzz targets ─────────────────────────────────────
+
+# SPARQL-Results-JSON (SRJ) + SPARQL-Results-XML (SRX) — the two wire formats consumed
+# by the SERVICE federation client from REMOTE endpoints (network-untrusted bytes). The
+# first byte picks SRJ vs SRX so a single corpus exercises both decoders; hostile input
+# must produce a clean Err — never a panic or UB. [SONNET-4.6]
+[[bin]]
+name = "parse_srj_srx"
+path = "fuzz_targets/parse_srj_srx.rs"
+test = false
+doc = false
+bench = false
+
+# HDT binary container decode: `sparq_hdt::graph_from_reader` fed hostile bytes over a
+# std::io::Cursor — the same path that loads a downloaded .hdt file. Must produce a
+# clean Err on any malformed input, never a panic or OOB. [SONNET-4.6]
+[[bin]]
+name = "hdt_open"
+path = "fuzz_targets/hdt_open.rs"
+test = false
+doc = false
+bench = false
+
+# RDFC-1.0 dataset canonicalization: hostile N-Quads text fed to
+# `sparq_canon::canonicalize_nquads`. The upstream rdf_canon crate enforces the HNDQ
+# poison-graph call limit (default 4000) — poison-graph inputs return Err, not hang.
+# [SONNET-4.6]
+[[bin]]
+name = "canonicalize_nquads"
+path = "fuzz_targets/canonicalize_nquads.rs"
+test = false
+doc = false
+bench = false
+
+# RIF-Core XML presentation syntax + N3 rules: feeds hostile bytes to
+# `sparq_reason::rif_xml::import` (RIF/XML) and arbitrary strings to
+# `sparq_reason::reason_n3_terms` (N3). Both must return Err — not panic — on any input.
+# [SONNET-4.6]
+[[bin]]
+name = "parse_rif_n3"
+path = "fuzz_targets/parse_rif_n3.rs"
+test = false
+doc = false
+bench = false
+
+# GeoSPARQL WKT geometry literal parser: `sparq_geo::parse_wkt_literal` +
+# `parse_geometry_literal` over hostile text. Must return Err on any malformed WKT,
+# never panic or OOB. [SONNET-4.6]
+[[bin]]
+name = "parse_wkt"
+path = "fuzz_targets/parse_wkt.rs"
+test = false
+doc = false
+bench = false
+
+# Terse SPARQL parser: `sparq_terse::terse_to_sparql` over hostile query text. Must
+# return Err on any invalid input, never panic. [SONNET-4.6]
+[[bin]]
+name = "parse_terse"
+path = "fuzz_targets/parse_terse.rs"
+test = false
+doc = false
+bench = false
+
+# bead sq-b9afe: the WAC decision-contract fail-closed target. Fuzzes
+# `sparq_solid::PodStore::decide`/`decide_batch` over corrupted/partial/hostile N-Quads
+# datasets (truncated fixtures via per-line salvage, unmaterialized AuthIndex, forged
+# `<urn:sparq:auth>` views, malformed resource IRIs) and ASSERTS the fail-closed
+# invariant: allow==true ⇒ status==Resolved with a discovered governing ACL; a
+# partial/errored index never allows; decide_batch ≡ decide; a panic in `decide` is
+# itself a finding. Auto-discovered by the CI fuzz lane's `cargo fuzz list`; seed corpus
+# committed at fuzz/seeds/wac_fail_closed/. De-risks gg0qq.5's fail-closed acceptance
+# clause. [FABLE-5]
+[[bin]]
+name = "wac_fail_closed"
+path = "fuzz_targets/wac_fail_closed.rs"
 test = false
 doc = false
 bench = false

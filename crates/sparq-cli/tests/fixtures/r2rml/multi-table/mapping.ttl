@@ -1,0 +1,13 @@
+# [FABLE-5] (sq-lsp7k.8) Two triples maps over two CSV logical tables (the join-free shape
+# of the W3C multi-table cases; rr:parentTriplesMap joins are explicitly out of scope and
+# fail loudly). Each rr:tableName binds to the CSV whose file stem matches.
+@prefix rr: <http://www.w3.org/ns/r2rml#> .
+@prefix ex: <http://example.com/> .
+<#Students> a rr:TriplesMap ;
+  rr:logicalTable [ rr:tableName "student" ] ;
+  rr:subjectMap [ rr:template "http://example.com/student/{ID}" ; rr:class ex:Student ] ;
+  rr:predicateObjectMap [ rr:predicate ex:name ; rr:objectMap [ rr:column "Name" ] ] .
+<#Sports> a rr:TriplesMap ;
+  rr:logicalTable [ rr:tableName "sport" ] ;
+  rr:subjectMap [ rr:template "http://example.com/sport/{ID}" ; rr:class ex:Sport ] ;
+  rr:predicateObjectMap [ rr:predicate ex:label ; rr:objectMap [ rr:column "Label" ] ] .

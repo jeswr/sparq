@@ -1,0 +1,87 @@
+# [FABLE-5] sq-t999y — compact WAC decision corpus, derived from the
+# crates/sparq-solid/src/fixture.rs seed (one document per policy-shape subtree).
+# Subtrees: priv0 (owner-only via root default), pub1 (public read), team2 (vcard
+# group, NO owner re-grant => nearest-ACL shadowing), friends3 (bob default-only /
+# owner accessTo-only), mixed4 (authenticated + one resource-specific override),
+# origin5 (agent+origin pair).
+<https://pod.ex/priv0/d0.ttl#it> <https://ex.dev/ns#title> "priv0 doc" <https://pod.ex/priv0/d0.ttl> .
+<https://pod.ex/pub1/d0.ttl#it> <https://ex.dev/ns#title> "pub1 doc" <https://pod.ex/pub1/d0.ttl> .
+<https://pod.ex/team2/d0.ttl#it> <https://ex.dev/ns#title> "team2 doc" <https://pod.ex/team2/d0.ttl> .
+<https://pod.ex/friends3/d0.ttl#it> <https://ex.dev/ns#title> "friends3 doc" <https://pod.ex/friends3/d0.ttl> .
+<https://pod.ex/mixed4/d0.ttl#it> <https://ex.dev/ns#title> "mixed4 doc" <https://pod.ex/mixed4/d0.ttl> .
+<https://pod.ex/mixed4/own.ttl#it> <https://ex.dev/ns#title> "mixed4 own-acl doc" <https://pod.ex/mixed4/own.ttl> .
+<https://pod.ex/origin5/d0.ttl#it> <https://ex.dev/ns#title> "origin5 doc" <https://pod.ex/origin5/d0.ttl> .
+# the vcard group document (a pod resource itself; members: bob, carol)
+<https://pod.ex/groups/team#g> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/2006/vcard/ns#Group> <https://pod.ex/groups/team> .
+<https://pod.ex/groups/team#g> <http://www.w3.org/2006/vcard/ns#hasMember> <https://bob.ex/card#me> <https://pod.ex/groups/team> .
+<https://pod.ex/groups/team#g> <http://www.w3.org/2006/vcard/ns#hasMember> <https://carol.ex/card#me> <https://pod.ex/groups/team> .
+# root .acl: alice owns everything (until a deeper ACL shadows it)
+<https://pod.ex/.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/.acl> .
+<https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/> <https://pod.ex/.acl> .
+<https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/> <https://pod.ex/.acl> .
+<https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/.acl> .
+<https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/.acl> .
+<https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> <https://pod.ex/.acl> .
+<https://pod.ex/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Control> <https://pod.ex/.acl> .
+# pub1/.acl: public read + owner re-grant
+<https://pod.ex/pub1/.acl#pub> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/pub1/.acl> .
+<https://pod.ex/pub1/.acl#pub> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/pub1/> <https://pod.ex/pub1/.acl> .
+<https://pod.ex/pub1/.acl#pub> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/pub1/> <https://pod.ex/pub1/.acl> .
+<https://pod.ex/pub1/.acl#pub> <http://www.w3.org/ns/auth/acl#agentClass> <http://xmlns.com/foaf/0.1/Agent> <https://pod.ex/pub1/.acl> .
+<https://pod.ex/pub1/.acl#pub> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/pub1/.acl> .
+<https://pod.ex/pub1/.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/pub1/.acl> .
+<https://pod.ex/pub1/.acl#owner> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/pub1/> <https://pod.ex/pub1/.acl> .
+<https://pod.ex/pub1/.acl#owner> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/pub1/> <https://pod.ex/pub1/.acl> .
+<https://pod.ex/pub1/.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/pub1/.acl> .
+<https://pod.ex/pub1/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/pub1/.acl> .
+<https://pod.ex/pub1/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> <https://pod.ex/pub1/.acl> .
+<https://pod.ex/pub1/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Control> <https://pod.ex/pub1/.acl> .
+# team2/.acl: GROUP read+write, NO alice re-grant (nearest-ACL shadows the root owner)
+<https://pod.ex/team2/.acl#team> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/team2/.acl> .
+<https://pod.ex/team2/.acl#team> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/team2/> <https://pod.ex/team2/.acl> .
+<https://pod.ex/team2/.acl#team> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/team2/> <https://pod.ex/team2/.acl> .
+<https://pod.ex/team2/.acl#team> <http://www.w3.org/ns/auth/acl#agentGroup> <https://pod.ex/groups/team#g> <https://pod.ex/team2/.acl> .
+<https://pod.ex/team2/.acl#team> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/team2/.acl> .
+<https://pod.ex/team2/.acl#team> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> <https://pod.ex/team2/.acl> .
+# friends3/.acl: bob may read MEMBERS (default only); alice owns the container (accessTo only)
+<https://pod.ex/friends3/.acl#bob> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/friends3/.acl> .
+<https://pod.ex/friends3/.acl#bob> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/friends3/> <https://pod.ex/friends3/.acl> .
+<https://pod.ex/friends3/.acl#bob> <http://www.w3.org/ns/auth/acl#agent> <https://bob.ex/card#me> <https://pod.ex/friends3/.acl> .
+<https://pod.ex/friends3/.acl#bob> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/friends3/.acl> .
+<https://pod.ex/friends3/.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/friends3/.acl> .
+<https://pod.ex/friends3/.acl#owner> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/friends3/> <https://pod.ex/friends3/.acl> .
+<https://pod.ex/friends3/.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/friends3/.acl> .
+<https://pod.ex/friends3/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/friends3/.acl> .
+<https://pod.ex/friends3/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> <https://pod.ex/friends3/.acl> .
+<https://pod.ex/friends3/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Control> <https://pod.ex/friends3/.acl> .
+# mixed4/.acl: any AUTHENTICATED agent reads members; alice owns
+<https://pod.ex/mixed4/.acl#authd> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/mixed4/.acl> .
+<https://pod.ex/mixed4/.acl#authd> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/mixed4/> <https://pod.ex/mixed4/.acl> .
+<https://pod.ex/mixed4/.acl#authd> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/mixed4/> <https://pod.ex/mixed4/.acl> .
+<https://pod.ex/mixed4/.acl#authd> <http://www.w3.org/ns/auth/acl#agentClass> <http://www.w3.org/ns/auth/acl#AuthenticatedAgent> <https://pod.ex/mixed4/.acl> .
+<https://pod.ex/mixed4/.acl#authd> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/mixed4/.acl> .
+<https://pod.ex/mixed4/.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/mixed4/.acl> .
+<https://pod.ex/mixed4/.acl#owner> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/mixed4/> <https://pod.ex/mixed4/.acl> .
+<https://pod.ex/mixed4/.acl#owner> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/mixed4/> <https://pod.ex/mixed4/.acl> .
+<https://pod.ex/mixed4/.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/mixed4/.acl> .
+<https://pod.ex/mixed4/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/mixed4/.acl> .
+<https://pod.ex/mixed4/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> <https://pod.ex/mixed4/.acl> .
+<https://pod.ex/mixed4/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Control> <https://pod.ex/mixed4/.acl> .
+# resource-specific override: mixed4/own.ttl readable by bob only (own ACL, accessTo scope)
+<https://pod.ex/mixed4/own.ttl.acl#doc> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/mixed4/own.ttl.acl> .
+<https://pod.ex/mixed4/own.ttl.acl#doc> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/mixed4/own.ttl> <https://pod.ex/mixed4/own.ttl.acl> .
+<https://pod.ex/mixed4/own.ttl.acl#doc> <http://www.w3.org/ns/auth/acl#agent> <https://bob.ex/card#me> <https://pod.ex/mixed4/own.ttl.acl> .
+<https://pod.ex/mixed4/own.ttl.acl#doc> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/mixed4/own.ttl.acl> .
+# origin5/.acl: bob ONLY through client/origin https://app.ex (default only); alice owns
+<https://pod.ex/origin5/.acl#app> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/origin5/.acl> .
+<https://pod.ex/origin5/.acl#app> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/origin5/> <https://pod.ex/origin5/.acl> .
+<https://pod.ex/origin5/.acl#app> <http://www.w3.org/ns/auth/acl#agent> <https://bob.ex/card#me> <https://pod.ex/origin5/.acl> .
+<https://pod.ex/origin5/.acl#app> <http://www.w3.org/ns/auth/acl#origin> <https://app.ex> <https://pod.ex/origin5/.acl> .
+<https://pod.ex/origin5/.acl#app> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/origin5/.acl> .
+<https://pod.ex/origin5/.acl#owner> <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> <http://www.w3.org/ns/auth/acl#Authorization> <https://pod.ex/origin5/.acl> .
+<https://pod.ex/origin5/.acl#owner> <http://www.w3.org/ns/auth/acl#accessTo> <https://pod.ex/origin5/> <https://pod.ex/origin5/.acl> .
+<https://pod.ex/origin5/.acl#owner> <http://www.w3.org/ns/auth/acl#default> <https://pod.ex/origin5/> <https://pod.ex/origin5/.acl> .
+<https://pod.ex/origin5/.acl#owner> <http://www.w3.org/ns/auth/acl#agent> <https://alice.ex/card#me> <https://pod.ex/origin5/.acl> .
+<https://pod.ex/origin5/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Read> <https://pod.ex/origin5/.acl> .
+<https://pod.ex/origin5/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Write> <https://pod.ex/origin5/.acl> .
+<https://pod.ex/origin5/.acl#owner> <http://www.w3.org/ns/auth/acl#mode> <http://www.w3.org/ns/auth/acl#Control> <https://pod.ex/origin5/.acl> .

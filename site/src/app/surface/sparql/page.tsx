@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { FileCode2 } from "lucide-react";
 
 import { SurfaceContent } from "@/components/surface-content";
+import { withBasePath } from "@/lib/base-path";
 
 export const metadata: Metadata = {
   title: "SPARQL 1.1 / 1.2",
@@ -23,8 +24,8 @@ export default function SparqlSurfacePage() {
         <p>
           sparq evaluates SPARQL 1.1/1.2 over an in-memory graph with a
           worst-case-optimal join engine; the same engine compiled to wasm ships as{" "}
-          <code className="font-mono text-foreground">@jeswr/sparq</code>, so the live
-          REPL runs real queries in your tab with no server round-trip.
+          <code className="font-mono text-foreground">@jeswr/sparq</code>, so you can
+          run real queries in your tab with no server round-trip.
         </p>
       }
       capabilities={[
@@ -60,9 +61,9 @@ export default function SparqlSurfacePage() {
           row counts but zero wall-times under wasm32 (no monotonic clock).
         </p>
       }
-      readmeHref="https://github.com/jeswr/sparq/tree/main/crates/sparq-engine"
-      skillHref="https://github.com/jeswr/sparq/blob/main/skills/sparql-query/SKILL.md"
-      links={[{ href: "/try", label: "Open the live REPL" }]}
+      readmeHref="https://github.com/sparq-org/sparq/tree/main/crates/sparq-engine"
+      skillHref="https://github.com/sparq-org/sparq/blob/main/skills/sparql-query/SKILL.md"
+      links={[{ href: withBasePath("/app/"), label: "Open the SPARQL workbench", external: true }]}
     />
   );
 }

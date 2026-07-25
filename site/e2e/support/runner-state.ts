@@ -7,14 +7,15 @@
 // §1.7: the timeout is a bound, not a measured value).
 //
 // The maps are keyed on the anchors that already ship today (the ZK prover `data-prover` pill, the
-// REPL/SHACL "Engine ready" pill, the home hero's preview pill + `data-hero-results-table`). Where
-// a component does not yet expose a state, the sibling journey beads (.2 /try, .3 home) add a
-// `data-testid`/`data-*` hook + a map entry here — that is the ONE shared extension point this
-// foundation deliberately leaves open (test hooks, not behaviour changes; per the design §8).
+// SHACL "Engine ready" pill, the home hero's preview pill + `data-hero-results-table`). Where a
+// component does not yet expose a state, a sibling journey bead adds a `data-testid`/`data-*` hook
+// + a map entry here — that is the ONE shared extension point this foundation deliberately leaves
+// open (test hooks, not behaviour changes; per the design §8).
+// [OPUS-4.8] sq-4hiqe — the "try" surface (the removed /try REPL) was dropped from the map.
 import { expect, type Locator, type Page } from "@playwright/test";
 
 /** A surface that hosts a WASM runner with observable UI states. */
-export type RunnerSurface = "home" | "try" | "zk" | "shacl";
+export type RunnerSurface = "home" | "zk" | "shacl";
 
 /** The canonical runner lifecycle states (superset across surfaces; each map is partial). */
 export type RunnerState =
@@ -37,10 +38,6 @@ const SURFACE_MAPS: Record<RunnerSurface, Partial<Record<RunnerState, StateResol
     running: (p) => p.getByText(/^Running…/),
     results: (p) => p.locator("[data-hero-results-table]"),
     error: (p) => p.getByRole("alert"),
-  },
-  // /try REPL (src/components/repl.tsx). Richer result/error anchors are added by sq-ymr2e.2.
-  try: {
-    "engine-ready": (p) => p.getByText("Engine ready"),
   },
   // ZK car-hire prover (src/components/zk-car-hire.tsx) — explicit data-* states already ship.
   zk: {

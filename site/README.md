@@ -10,25 +10,21 @@ Inter, `--radius 0.7rem`. Design record: `research/feature-showcase-site-design.
 
 - **App shell** — `w-64` sidebar (feature surfaces grouped by the IA), sticky `h-16`
   backdrop-blur header, `max-w-6xl` main, mobile `Sheet` drawer, light/dark theme.
-- **Landing / overview** — what sparq is, the live REPL, the three flagship cards, and
-  the full surface grid (each card links to its page; unbuilt pages render an honest
+- **Landing / overview** — what sparq is, the in-fold SPARQL runner, the three flagship cards,
+  and the full surface grid (each card links to its page; unbuilt pages render an honest
   "coming soon" placeholder that states the planned execution tier).
-- **Live SPARQL REPL** (`/try` and the landing marquee) — runs **real SPARQL** against a
+- **In-fold SPARQL runner** (the home hero's `hero-runner.tsx`) — runs **real SPARQL** against a
   sample graph via the actual Rust engine compiled to WebAssembly. Not a fixture; nothing is
-  sent to a server. The component is code-split and the wasm engine loads lazily on browser
-  idle, so it never blocks the initial page load (see *Lazy wasm loading* below — `sq-4296`).
-- **Persistent cross-session workspaces** (`sq-atb0`) — the REPL's workspace panel
-  saves a named workspace: a **snapshot** of the loaded dataset (the whole default+named-graph
-  content as N-Quads — a save/open cache, not a re-ingest-from-source), the imported-source
-  list (local + URL, with the URL kept so a remote source can be re-fetched), and the SPARQL
-  editor state (query text + run mode + endpoint URL — never a bearer token). The persistence
-  is **one abstraction, three runtime-selected backends** (`@sparq/client` `workspace.ts`):
-  Tauri local-disk on the desktop app (when the shell grants the `fs` capability), browser
-  `localStorage` on GitHub Pages (the static-export path), and an in-memory session fallback —
-  feature-detected, so the static export never depends on a Tauri API. The last workspace
-  re-hydrates on startup. **Honest limitation**: a previously chosen local file cannot be
-  silently re-read across sessions (the browser keeps no persistent handle), so the snapshot is
-  a local import's durable copy; the panel says so plainly.
+  sent to a server. The runner is code-split and the wasm engine loads lazily on browser idle,
+  so it never blocks the initial page load (see *Lazy wasm loading* below — `sq-4296`).
+  Its "Open in workbench →" button hard-navigates to `/app`, the single operational workbench.
+- **The full workbench lives at `/app`** (`sq-4hiqe`, maintainer directive 2026-07-05) — the
+  operational GUI (`gui/app`, overlaid at `/app/` by the Pages deploy) is the one place to load
+  data, run SELECT/CONSTRUCT/UPDATE, save cross-session workspaces, connect a server, and inspect
+  plans. The old in-tab `/try` REPL playground was removed ("very broken; the app has everything
+  you need") and `/try` now serves a permanent client redirect stub to `/app` (same static-export
+  pattern as `/gui`). Cross-session workspace persistence still ships in the `@sparq/client`
+  `workspace.ts` library (Tauri disk / `localStorage` / in-memory backends) consumed by `/app`.
 - **/about** — the honest "what runs where" matrix.
 
 The per-surface interactive demos and the three flagship demos (ZK car-hire, MPC £100k,
@@ -45,7 +41,7 @@ npm ci
 npm run dev        # sync-wasm → public/wasm, then next dev
 npm run build      # → out/  (static export)
 npm run lint
-npm run test:unit  # node:test — pure helper logic (REPL dataset, …)
+npm run test:unit  # node:test helpers + native sparq-policy parity fixture (needs cargo)
 npm run test:e2e   # Playwright — headless browser smoke tests (see below)
 ```
 
@@ -65,10 +61,10 @@ layers — the page paints and becomes interactive before any of it has finished
    (`public/wasm/sparq_wasm.js`) is fetched as a plain ESM module at runtime and the
    `sparq_wasm_bg.wasm` binary is a static asset — neither enters a webpack chunk. (Verify:
    no `_next` JS chunk embeds the `.wasm`; the loader chunk only holds the *URL string*.)
-2. **The REPL component is code-split.** `site/src/components/repl-lazy.tsx` wraps the heavy
-   `Repl` in `next/dynamic(..., { ssr: false })` with a skeleton fallback, so the home page
-   (`/`) and `/try` render their shell first and stream the REPL chunk in afterwards. The
-   server pages render `<ReplLazy />` rather than `<Repl />`.
+2. **The in-fold runner is code-split.** `site/src/components/home/hero-runner-lazy.tsx` wraps
+   the wasm-backed `HeroQueryRunner` in `next/dynamic(..., { ssr: false })` with a skeleton
+   fallback, so the home page (`/`) renders its hero shell first and streams the runner chunk in
+   afterwards. The server page renders the lazy wrapper rather than the runner directly.
 3. **The engine warm-up is deferred to browser idle.** Components call
    `prewarmSparqWhenIdle()` (not the eager `prewarmSparq()`), which schedules the
    fetch+instantiate via `requestIdleCallback` (with a `setTimeout` fallback) so the wasm
@@ -148,14 +144,15 @@ npm run test:e2e
 
 Coverage spans the critical site flows. **Critical-flow smoke** (bead sq-jp7ry, issue #835):
 `home-smoke.spec.ts` asserts the home hero + primary nav boot with zero console errors;
-`try-query-smoke.spec.ts` runs the trivial `SELECT * WHERE { ?s ?p ?o }` on the bundled
-sample in the `/try` REPL and asserts a non-empty results table; `capabilities-smoke.spec.ts`
+`home-runner.spec.ts` runs a trivial `SELECT * WHERE { ?s ?p ?o }` on the bundled sample in the
+home in-fold runner and asserts a non-empty results table; `capabilities-smoke.spec.ts`
 asserts the `/capabilities` showcase renders its hero, flagship band and all five theme
 sections. **Regression guards:** `shacl-rerun-regression.spec.ts` (sq-jp7ry) drives the
 `/surface/shacl` validator three times in one session and asserts no wasm object-lifecycle
 fault (`__wbg_ptr` / "null pointer passed to rust" / "recursive use of an object") and a
-fresh report each run — guarding the issue-#835 SHACL `__wbg_ptr` class; `repl-results.spec.ts`
-and `shacl-validator.spec.ts` cover the REPL result panel and single-validate report. The
+fresh report each run — guarding the issue-#835 SHACL `__wbg_ptr` class; `home-runner.spec.ts`
+and `shacl-validator.spec.ts` cover the home runner's typed result table and the single-validate
+report. The
 **ZK car-hire prover pre-warm** (`zk-prewarm.spec.ts`, sq-5q63) loads `/showcase/zk-car-hire`,
 waits for the *Prover ready* pill, and asserts the first **Generate ZK proof** click pays no
 cold start (observed via a test-only `window.__zkProverColdStarts` counter — pure observability).

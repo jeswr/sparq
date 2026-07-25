@@ -369,6 +369,152 @@ async fn poll_is_gated_by_read_auth() {
 }
 
 // ---------------------------------------------------------------------------
+// [FABLE-5] (gh-2436) POST /admin/change-stream/rebase — the operator resync of the RUNNING
+// server's tracked log (an honest gap record; the recorder never stops).
+// ---------------------------------------------------------------------------
+
+/// POSTs `/admin/change-stream/rebase` with the given JSON body (`None` = empty body) and
+/// returns the HTTP status + parsed JSON body.
+async fn rebase(
+    cl: &reqwest::Client,
+    base: &str,
+    body: Option<&str>,
+) -> (reqwest::StatusCode, serde_json::Value) {
+    let resp = cl
+        .post(format!("{base}/admin/change-stream/rebase"))
+        .body(body.unwrap_or("").to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status();
+    let body = resp
+        .json::<serde_json::Value>()
+        .await
+        .unwrap_or(serde_json::Value::Null);
+    (status, body)
+}
+
+#[tokio::test]
+async fn admin_rebase_404_when_not_configured() {
+    let base = spawn(None, None).await;
+    let (status, _) = rebase(&client(), &base, None).await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test]
+async fn admin_rebase_is_gated_by_write_auth() {
+    let dir = scratch("rebase-auth");
+    let base = spawn(Some(dir.clone()), Some("s3cret")).await;
+    let cl = client();
+    // No token → 401 (a rebase APPENDS to the durable log: the write/admin gate).
+    let resp = cl
+        .post(format!("{base}/admin/change-stream/rebase"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    // Correct token → 200.
+    let resp = cl
+        .post(format!("{base}/admin/change-stream/rebase"))
+        .header("authorization", "Bearer s3cret")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// THE e2e invariant (gh-2436): an empty-body rebase on the RUNNING server appends the gap
+/// record at the writer's current generation, `GET /streams` renders it as an explicit
+/// `"op": "REBASE"` marker (never silently flattened away), and recording chains forward —
+/// all without restarting the server or the recorder.
+#[tokio::test]
+async fn admin_rebase_appends_a_visible_gap_and_the_stream_resumes() {
+    let dir = scratch("rebase-live");
+    let base = spawn(Some(dir.clone()), None).await;
+    let cl = client();
+
+    // Explicit starting baseline at the current generation (0, nothing committed yet).
+    let (status, body) = rebase(&cl, &base, None).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["seq"], 0);
+    assert_eq!(body["generation"], 0);
+    assert_eq!(body["rebase"], true);
+    assert_eq!(body["nextSequenceNumber"], 1);
+
+    // The recorder never stopped: the next commit chains from the declared baseline.
+    post_update(
+        &cl,
+        &base,
+        "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/b> }",
+    )
+    .await;
+
+    let (status, body) = poll(&cl, &base, &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["totalRecords"], 2, "{body}");
+    let records = body["records"].as_array().unwrap();
+    assert_eq!(records.len(), 2, "one REBASE marker + one ADD: {body}");
+    assert_eq!(records[0]["op"], "REBASE");
+    assert_eq!(records[0]["eventId"]["commitNum"], 0);
+    assert_eq!(records[0]["generation"], 0);
+    assert!(
+        records[0].get("data").is_none(),
+        "a gap marker carries no quad: {body}"
+    );
+    assert_eq!(records[1]["op"], "ADD");
+    assert_eq!(records[1]["generation"], 1);
+    assert_eq!(body["nextSequenceNumber"], 2);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The fail-closed posture over HTTP: a same-lineage rebase that does not move the stream
+/// forward is a 409 (never a silent baseline rewrite); the explicit `newLineage` assertion
+/// (the post-restore case, where the ring's numbering restarts) is what overrides it; an
+/// unknown body field is a 400 (never a silently-defaulted typo).
+#[tokio::test]
+async fn admin_rebase_non_forward_is_409_unless_new_lineage() {
+    let dir = scratch("rebase-409");
+    let base = spawn(Some(dir.clone()), None).await;
+    let cl = client();
+    post_update(
+        &cl,
+        &base,
+        "INSERT DATA { <http://ex/a> <http://ex/p> <http://ex/b> }",
+    )
+    .await;
+
+    // Generation 1 is already the recorded baseline: not forward → 409, nothing appended.
+    let (status, _) = rebase(&cl, &base, Some(r#"{"generation": 1}"#)).await;
+    assert_eq!(status, 409);
+    // An unrecognised field never silently defaults → 400.
+    let (status, _) = rebase(&cl, &base, Some(r#"{"lineage": true}"#)).await;
+    assert_eq!(status, 400);
+
+    // The operator asserts a replaced lineage → the same target is accepted as a gap.
+    let (status, body) = rebase(&cl, &base, Some(r#"{"generation": 1, "newLineage": true}"#)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["seq"], 1);
+    assert_eq!(body["rebase"], true);
+
+    // Recording chains on: commit 2 lands after the gap.
+    post_update(
+        &cl,
+        &base,
+        "INSERT DATA { <http://ex/c> <http://ex/p> <http://ex/d> }",
+    )
+    .await;
+    let (_, body) = poll(&cl, &base, &[]).await;
+    assert_eq!(body["totalRecords"], 3, "{body}");
+    let records = body["records"].as_array().unwrap();
+    assert_eq!(records[1]["op"], "REBASE");
+    assert_eq!(records[2]["op"], "ADD");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------------
 // Durability: the records persist on disk (a fresh ChangeLog::open on the same dir sees them).
 // ---------------------------------------------------------------------------
 
@@ -403,8 +549,8 @@ async fn recorded_changes_are_durable_on_disk() {
 }
 
 // ---------------------------------------------------------------------------
-// Concurrency: CONCURRENT updates produce a gapless, monotonic stream (the recording lock
-// serialises recording so no commit is dropped and seq never skips).
+// [GPT-5.6] (sq-kqofk) Concurrency: concurrent updates may share a group-committed generation;
+// the writer-thread hook records one gapless, monotonic stream record per published generation.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -412,8 +558,8 @@ async fn concurrent_updates_record_a_gapless_monotonic_stream() {
     let dir = scratch("concurrent");
     let base = spawn(Some(dir.clone()), None).await;
 
-    // Fire 12 distinct updates concurrently from 4 tasks; each is a single-quad INSERT, so each
-    // produces one commit and one change record.
+    // Fire 12 distinct updates concurrently from 4 tasks. Group commit may place several updates
+    // in one generation, but every inserted quad must appear exactly once in the stream.
     const N: usize = 12;
     let mut handles = Vec::new();
     for i in 0..N {
@@ -432,28 +578,44 @@ async fn concurrent_updates_record_a_gapless_monotonic_stream() {
         h.await.unwrap();
     }
 
-    // Poll the whole stream: exactly N records, seqs 0..N gapless and strictly increasing, each
-    // generation strictly increasing (the gapless + monotonic ChangeLog contract under concurrency).
+    // Poll the whole stream: one record per PUBLISHED generation (not per submitter), gapless seqs,
+    // strictly increasing generations, and exactly N flattened quad changes.
     let cl = client();
     let (status, body) = poll(&cl, &base, &[("limit", "1000")]).await;
     assert_eq!(status, 200);
-    assert_eq!(
-        body["totalRecords"], N,
-        "every concurrent commit recorded: {body}"
+    let commit_count = body["totalRecords"].as_u64().unwrap();
+    assert!(
+        (1..=N as u64).contains(&commit_count),
+        "every published generation is recorded: {body}"
     );
     let records = body["records"].as_array().unwrap();
-    assert_eq!(records.len(), N, "one change per single-quad commit");
-    let mut prev_gen = 0u64;
-    for (i, r) in records.iter().enumerate() {
-        assert_eq!(
-            r["eventId"]["commitNum"], i as u64,
-            "gapless seq at index {i}: {body}"
+    assert_eq!(records.len(), N, "every concurrent insert is recorded once");
+    let mut commit_generations = std::collections::BTreeMap::new();
+    for record in records {
+        let commit = record["eventId"]["commitNum"].as_u64().unwrap();
+        let generation = record["generation"].as_u64().unwrap();
+        assert!(
+            commit < commit_count,
+            "commit seq stays inside the gapless range: {body}"
         );
-        let gen = r["generation"].as_u64().unwrap();
-        assert!(gen > prev_gen, "strictly increasing generation: {body}");
-        prev_gen = gen;
+        if let Some(previous) = commit_generations.insert(commit, generation) {
+            assert_eq!(
+                previous, generation,
+                "one commit seq identifies one generation: {body}"
+            );
+        }
     }
-    assert_eq!(body["nextSequenceNumber"], N as u64);
+    assert_eq!(commit_generations.len() as u64, commit_count);
+    let mut previous_generation = 0;
+    for (expected_seq, (&seq, &generation)) in commit_generations.iter().enumerate() {
+        assert_eq!(seq, expected_seq as u64, "commit seqs are gapless: {body}");
+        assert!(
+            generation > previous_generation,
+            "published generations are strictly increasing: {body}"
+        );
+        previous_generation = generation;
+    }
+    assert_eq!(body["nextSequenceNumber"], commit_count);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

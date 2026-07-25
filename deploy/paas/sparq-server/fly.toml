@@ -1,0 +1,68 @@
+# [SONNET-4.6] sq-dwame — Fly.io app config for sparq-server.
+# [GPT-5.6] Post-hoc hardening: full-surface auth and single-writer deployment guidance.
+#
+# SECURE-DEFAULTS NOTICE (R1/R9):
+# The sparq-server image is open-by-default (bakes SPARQ_ALLOW_REMOTE=1, no auth at the
+# image layer). This template enforces auth ON at the template layer via SPARQ_AUTH_TOKEN.
+# NEVER deploy this config without setting the secret:
+#
+#   fly secrets set SPARQ_AUTH_TOKEN="$(openssl rand -hex 32)"
+#
+# Auto-HTTPS (R3): Fly.io terminates TLS on its shared *.fly.dev domain and on any
+# custom domain you attach — plaintext HTTP on port 3030 never leaves Fly's edge.
+# Do not expose port 3030 directly (it is internal only in this config).
+
+# `fly launch --generate-name` replaces this schema-required placeholder.
+app = "sparq-server-change-me"
+primary_region = "iad"        # US East; change to the region nearest your users
+
+[build]
+  image = "ghcr.io/sparq-org/sparq-server:latest"
+  # Pin to a specific release tag in production:
+  #   image = "ghcr.io/sparq-org/sparq-server:0.1.0"
+
+[env]
+  # Override the image's open bind opt-in. Without a valid read+write token the server now
+  # refuses its public bind and the deployment fails closed instead of booting unauthenticated.
+  SPARQ_ALLOW_REMOTE = "0"
+
+  # Secure default: require the platform-secret token for reads as well as writes.
+  SPARQ_AUTH_TOKEN_READ = "1"
+  #
+  # CORS: set to your front-end origin in production.
+  # SPARQ_CORS_ALLOW_ORIGIN = "https://example.com"
+  #
+  # Optional tuning:
+  # SPARQ_MAX_CONCURRENT = "16"
+  # SPARQ_QUERY_TIMEOUT  = "30"
+
+[http_service]
+  internal_port       = 3030
+  force_https         = true   # R4: redirect plain HTTP to HTTPS at the Fly edge
+  auto_stop_machines  = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  # Fly creates two Machines by default for a service on first deploy. This file cannot cap
+  # Machine count: deploy with --ha=false, then run `fly scale count 1` (README). The dataset
+  # is in-memory and uncoordinated, so two writable Machines silently diverge.
+
+  [[http_service.checks]]
+    # R7: health-check path for sparq-server.
+    grace_period  = "10s"
+    interval      = "15s"
+    method        = "GET"
+    path          = "/health"
+    timeout       = "5s"
+    tls_skip_verify = false
+
+[[vm]]
+  memory = "512mb"
+  cpu_kind = "shared"
+  cpus = 1
+
+# Secret setup (R1/R2/R4 — required before first deploy):
+#   fly secrets set SPARQ_AUTH_TOKEN="$(openssl rand -hex 32)"
+#
+# The secret is injected as the SPARQ_AUTH_TOKEN env var at runtime and is NEVER stored
+# in this file. Unauthenticated reads and writes return 401. See §2 of the design record.

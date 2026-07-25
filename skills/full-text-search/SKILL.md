@@ -1,6 +1,6 @@
 ---
 name: full-text-search
-description: "Full-text search over RDF string literals in sparq via the sparq-text crate: build a BM25 inverted index (TextIndex) and run text: magic predicates (text:matches / text:matchesAny / text:phrase / text:near / text:slop / text:score) inside plain SPARQL. Use when an agent needs keyword/prefix/phrase/proximity search, BM25 or proximity relevance ranking, or autocomplete over literals in a sparq Graph."
+description: "Full-text search and IRI/label prefix completion via sparq-text: build TextIndex or CompletionIndex and run text: magic predicates inside SPARQL. Use for keyword/prefix/phrase/proximity or opt-in typo-tolerant search, relevance ranking, or entity autocomplete in a sparq Graph."
 ---
 
 # sparq full-text search (sparq-text)
@@ -47,20 +47,35 @@ The dictionary term id of a string literal **is** its document id, so search res
 
 ## Key APIs
 
-Index (always available, `index` module — re-exported at crate root as `TextIndex`, `Hit`):
+Index (always available, `index` module — re-exported at crate root as `TextIndex`, `Hit`, `TermStats`):
 - `TextIndex::build(graph: &Graph) -> TextIndex` — cheap 8-B-per-posting index, **no positions** (rayon-sharded under `parallel`; result identical to serial).
 - `TextIndex::build_with_positions(graph: &Graph) -> TextIndex` — also records token offsets, enabling `phrase`.
 - `TextIndex::with_positions() -> TextIndex` — empty position-enabled index for the delta-fed case (positional counterpart of `TextIndex::default()`).
 - **CJK n-gram analyzer (opt-in).** [OPUS-4.8] sq-m3ln The default analyzer splits an unspaced Han run per ideograph, so a multi-char CJK term searches as the (low-precision) AND of its characters. `TextIndex::build_with_analyzer(graph, Analyzer::CjkNgram)` (and `build_with_positions_analyzer` / `with_analyzer` / `with_positions_analyzer` for the positional and delta-fed cases) instead indexes each maximal Han run as its **overlapping character bigrams** (`東京都` → `東京`,`京都`), so `text:matches "東京"` (or `search("東京")`) matches only docs where that pair co-occurs. The index **records its analyzer** (`index.analyzer() -> Analyzer`), so `search`/`phrase`/`apply_delta`/`reconcile`/the `text:` rewrite all tokenize the query the same way. Non-CJK text is byte-for-byte the default analyzer (so a Latin corpus is unchanged); kana/Hangul are not bigrammed (UAX #29 already groups them). Trade-off: a single-ideograph query only matches docs where that char is an *isolated* run — hence opt-in. No new dependencies.
 - `TextIndex::search(&self, query: &str) -> Vec<Hit>` — AND of tokens (`*`-suffix = prefix token), BM25-ranked best-first.
 - `TextIndex::search_any(&self, query: &str) -> Vec<Hit>` — OR of tokens; scores sum over tokens present.
+- `TextIndex::term_stats(&self, token: &str) -> Option<TermStats>` — exact per-token corpus statistics using the index's analyzer: document frequency (`doc_count`), total term frequency (`total_tf`), and the same BM25 inverse document frequency (`idf`) used by search scoring. Returns `None` for absent tokens and input that does not analyze to exactly one token; it does not expand prefixes. [GPT-5.6] sq-rviwn
+- With `features = ["fuzzy"]`: `TextIndex::fuzzy(&self, term: &str, max_distance: u8) -> Result<Vec<FuzzyHit>, FuzzyError>` — exactly one analyzed query token; distance must be `0..=2`. A bounded deletion-neighbour index supplies candidates (no full token-dictionary scan), exact Unicode-scalar Levenshtein verifies them, and results order by `(distance asc, BM25 desc, matched term asc, id asc)`. `max_distance = 0` has exactly the `search(term)` hit set and scores. `FuzzyHit { id, distance, score, term }`; defaults/constants are `DEFAULT_MAX_DISTANCE = 1` and `MAX_DISTANCE = 2`. [GPT-5.6] sq-lsp7k.14
 - `TextIndex::phrase(&self, query: &str) -> Vec<Id>` — adjacent-and-in-order tokens, ascending ids (unranked). **Panics** if the index has no positions.
 - `TextIndex::phrase_near(&self, query: &str, slop: u32) -> Vec<Hit>` — proximity/slop: in-order tokens within a bounded total gap, **relevance-ranked** best-first (`score = 1/(1+gap)`, so adjacency = 1.0). `phrase_near(q, 0)` == `phrase(q)` (each at score 1.0); the hit set grows monotonically with `slop`; order stays significant. Same positions requirement / panic as `phrase`. [OPUS-4.8]
 - `TextIndex::apply_delta(&mut self, graph: &Graph, inserts: &[[Term;3]], deletes: &[[Term;3]])` — mirror a `Graph::apply_delta` batch (inserts of new string literals are indexed; deletes are a documented no-op).
 - `TextIndex::reconcile(&mut self, graph: &Graph) -> usize` — the **rebuild-on-boot + reconcile** warm fast-path: bring a warm index current with a grown graph in `O(new terms)` by scanning only the dictionary tail appended since the last build/reconcile/delta (the batch-free counterpart of `apply_delta`); returns the number of newly indexed docs, and afterwards `index == TextIndex::build(graph)`. Preserves the positions mode. **Panics** if `needs_rebuild` holds. [OPUS-4.8] sq-oddt
 - `TextIndex::indexed_dict_len(&self) -> usize` — generation marker: the graph `dict.len()` the index has indexed up to. `is_consistent_with(&graph) -> bool` — cheap staleness check (has it seen every term the graph now holds?). `needs_rebuild(&graph) -> bool` — flags the one unrepairable case: a **shorter** dictionary (a reopened, durably-recompacted base), mandating a fresh `build`. [OPUS-4.8] sq-oddt
-- `TextIndex::has_positions(&self) -> bool`, `len()`, `is_empty()`, `token_count()`, `heap_bytes()`.
+- `TextIndex::has_positions(&self) -> bool`, `len()`, `is_empty()`, `token_count()`, `total_postings()`, `heap_bytes()`. `len()` counts indexed literal documents, `token_count()` counts distinct tokens, and `total_postings()` counts `(token, document)` posting pairs. [GPT-5.6] sq-ukr2k
 - `struct Hit { pub id: sparq_core::dict::Id, pub score: f32 }` (`score` comparable within one query only).
+
+Highlighting (default-OFF `highlight` feature — re-exported at crate root as `snippet`, `Snippet`):
+- `snippet(text: &str, query_token: &str, context_chars: usize) -> Option<Snippet>` — after resolving a hit id to its literal lexical form, find every occurrence of one default-analyzer token and render a word-trimmed contiguous window with `<mark>` / `</mark>` around each occurrence. Matching is case-insensitive; `Snippet.spans` contains absolute half-open UTF-8 byte ranges into the complete `text`. Empty text, a query that is not exactly one token, and no match return `None`. [GPT-5.6] sq-lsp7k.19
+
+Completion (always available, `complete` module — re-exported at crate root):
+- `CompletionIndex::build(&graph)` indexes every IRI under its full IRI and local name,
+  plus literal values attached through `rdfs:label` or `skos:prefLabel`.
+- `CompletionIndex::apply_delta(&mut self, graph, inserts, deletes)` mirrors newly interned IRIs and inserted `rdfs:label`/`skos:prefLabel` triples after `Graph::apply_delta`; deletes are a documented no-op. `reconcile(&graph)` scans the appended dictionary tail plus label triples involving a new subject or object, while `is_consistent_with` / `needs_rebuild` expose the same append-only staleness contract as `TextIndex`. Label triples added solely between pre-existing terms must be forwarded through `apply_delta`.
+- `complete(prefix, k, scores)` returns case-insensitive prefix matches ordered by
+  descending injected entity score, then key and id. Pass `None` for lexical ordering.
+- Results are `Candidate { id, key, kind, score }`; label candidates carry the subject
+  entity id, and `CandidateKind::Label(predicate_id)` records their predicate.
+- Matching is prefix-only; fuzzy completion is intentionally outside this index.
 
 SPARQL rewrite (`engine` feature, default on — `rewrite` module):
 - `query_text(graph: &Graph, sparql: &str, index: &TextIndex) -> Result<QueryResult, String>` — parse, rewrite `text:` patterns, evaluate.
@@ -71,6 +86,7 @@ SPARQL rewrite (`engine` feature, default on — `rewrite` module):
 Magic predicates (`sparq_text::vocab`, namespace `http://sparq.dev/text#`):
 - `?lit text:matches "q"` — `?lit` ranges over literals containing **every** token of `q` (token ending in `*` = prefix).
 - `?lit text:matchesAny "q"` — literals containing **at least one** token.
+- With `fuzzy`: `?lit text:fuzzy "term"` — typo-tolerant single-token match, default edit distance one; add `?lit text:maxDistance N` on the same subject for `N` in `0..=2`. It is BM25-scored and accepts `text:score ?s`. [GPT-5.6]
 - `?lit text:phrase "foo bar"` — literals where the tokens are **adjacent and in order** (needs a positions-enabled index).
 - `?lit text:near "foo bar"` — proximity/slop generalisation of `text:phrase`: tokens **in order within a bounded gap**, **relevance-ranked**. Needs positions. Gap budget defaults to 0 (== `text:phrase`); set it with a `text:slop N` companion. Takes an optional `text:score ?s` (the proximity score). [OPUS-4.8]
 - `?lit text:slop N` — sets the proximity gap budget for the `text:near` on the same subject variable in the same BGP (a non-negative integer; at most one; valid only beside a `text:near`). [OPUS-4.8]
@@ -82,6 +98,33 @@ Magic predicates (`sparq_text::vocab`, namespace `http://sparq.dev/text#`):
 ```rust
 let hits = index.search("auto*");                       // matches "autonomous", "automatic", ...
 // In SPARQL: ?title text:matchesAny "fox auto*"
+```
+
+**Typo-tolerant search (default-OFF `fuzzy` feature).** Enable the feature explicitly; ordinary builds contain no fuzzy index or query code:
+```toml
+sparq-text = { path = "../sparq-text", features = ["fuzzy"] }
+```
+
+```rust
+let hits = index.fuzzy("quixkly", 1)?; // matches the indexed token "quickly"
+// In SPARQL:
+//   ?title text:fuzzy "quixkly" .
+//   ?title text:maxDistance 1 .
+//   ?title text:score ?s .
+```
+
+**Highlight a resolved hit (default-OFF `highlight` feature).** The hit carries only a dictionary id and score, so pass the literal text after resolving the id:
+```toml
+sparq-text = { path = "../sparq-text", features = ["highlight"] }
+```
+
+```rust
+use sparq_text::snippet;
+
+let text = "the quick fox jumps";
+let excerpt = snippet(text, "fox", 10).expect("matching token");
+assert_eq!(excerpt.spans, [(10, 13)]);
+assert_eq!(excerpt.rendered, "quick <mark>fox</mark> jumps");
 ```
 
 **Relevance-ranked SPARQL results.** `VALUES` rows carry no order through joins — always sort on a `text:score` variable:
@@ -136,7 +179,8 @@ sparq-text = { path = "../sparq-text", default-features = false }   # or default
 
 ## Gotchas / feature flags / prerequisites
 
-- **Feature flags.** `engine` (default on) brings in the `rewrite` module + `sparq-engine`/`spargebra` (with NO engine default features) — needed for `query_text`/`prepare_text`/`rewrite_query` and all `text:` magic predicates. `engine-builtins` (default on) turns the engine's `regex` (SPARQL REGEX/REPLACE) + `digest` (hash builtins) back on, so a `text:` rewrite over a query that ALSO uses those builtins works. `parallel` (default on) rayon-shards `TextIndex::build` and forwards the engine's parallel execution. Disable defaults for the bare index (tokenizer + `TextIndex` + BM25) with no engine in the graph; take `features = ["engine"]` ONLY for the lean wasm shape (engine present, but no rayon/regex/digest — what the `sparq-text-wasm` bundle does). [OPUS-4.8] sq-jbe6
+- **Feature flags.** `engine` (default on) brings in the `rewrite` module + `sparq-engine`/`spargebra` (with NO engine default features) — needed for `query_text`/`prepare_text`/`rewrite_query` and all `text:` magic predicates. `engine-builtins` (default on) turns the engine's `regex` (SPARQL REGEX/REPLACE) + `digest` (hash builtins) back on, so a `text:` rewrite over a query that ALSO uses those builtins works. `parallel` (default on) rayon-shards `TextIndex::build` and forwards the engine's parallel execution. `fuzzy` is default-OFF and adds only the bounded deletion-neighbour index/API plus the `text:fuzzy`/`text:maxDistance` rewrite arms. `highlight` is default-OFF and adds only literal snippet extraction; it has no index, engine, or dependency edge. Disable defaults for the bare index (tokenizer + `TextIndex` + BM25) with no engine in the graph; take `features = ["engine"]` ONLY for the lean wasm shape (engine present, but no rayon/regex/digest/fuzzy/highlight — what the `sparq-text-wasm` bundle does). [GPT-5.6] sq-lsp7k.14 sq-lsp7k.19
+- **Fuzzy constraints.** `TextIndex::fuzzy` and `text:fuzzy` accept exactly one analyzed token (not a phrase or prefix expression); `max_distance`/`text:maxDistance` must be `0..=2`. Each result is admitted iff exact Levenshtein distance is within the bound. When one literal contains several admitted tokens, its best `(distance, -BM25, term)` candidate wins, so each literal appears once. [GPT-5.6]
 - **In-browser ("W-text") bundle.** `crates/sparq-text-wasm` ([OPUS-4.8] sq-jbe6) compiles the `engine`-on `sparq-text` (BM25 index + `text:` rewrite + `sparq-engine`) to `wasm32-unknown-unknown` as a SEPARATE, lazy-loaded bundle (NOT in the lean `sparq-wasm` bundle), for the showcase site's `/surface/full-text` page. It exposes a stateless one-shot `TextSearch`: `query(data, format, sparql)` (parse → build a **positions-enabled** index → rewrite + run the `text:` query → SPARQL-1.1-JSON) and `indexStats(data, format)` (a `{docs,tokens,heapBytes,hasPositions}` footprint — the index-build memory is the bundle's risk, so keep the corpus small). `parallel` is off (no wasm threads); the tokenizer's `unicode-segmentation` is pure-Rust and wasm-portable. Build with `wasm-pack build crates/sparq-text-wasm --target web --release`.
 - **What gets indexed.** Only plain/`xsd:string` and language-tagged literals from the graph's dictionary. Typed literals (numbers, dates, `geo:wktLiteral`, ...) are skipped.
 - **Per-graph indexes.** Dictionary ids are local to each graph. Named graphs have their own dictionaries — build one `TextIndex` per graph you want searchable, and pass the matching index to `query_text`. Hits come from the index you pass (typically the default graph's).

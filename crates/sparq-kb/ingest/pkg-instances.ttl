@@ -20,6 +20,10 @@
 @prefix kb:      <https://sparq.dev/ns/pkg/kb#> .
 
 
+# === Tier stamp (sq-tzars.7): this graph IS the hand-authored tier ===
+<https://sparq.dev/ns/pkg/graph#hand-authored> rdfs:label "hand-authored tier -- the human-curated PKG (ingest_pkg.py projector output)"@en .
+
+
 # === Tasks (mechanical bd projection) ===
 
 

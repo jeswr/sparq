@@ -159,6 +159,107 @@ export interface LoadSparqOptions {
   basePath?: string;
 }
 
+// ---------------------------------------------------------------------------
+// [SONNET-4.6] sq-b66fc — wasm-manifest.json resolution.
+//
+// The sync scripts emit public/wasm/wasm-manifest.json mapping each logical runtime
+// filename (e.g. "sparq_wasm.js") to its content-hashed copy (e.g.
+// "sparq_wasm-a1b2c3d4ef56.js"). The loader resolves asset URLs through this manifest
+// so every redeploy to GitHub Pages (~10 min max-age) gets a fresh content-addressed
+// URL — eliminating stale-glue / new-wasm mismatches. When the manifest is absent
+// (dev mode / local disk / Tauri), we fall back to the unhashed URL transparently.
+// ---------------------------------------------------------------------------
+
+/**
+ * Maps logical wasm runtime filename → content-hashed filename (just the bare filename,
+ * not the full path). For tier-b bundles the key includes the subdirectory prefix,
+ * e.g. `"reason/sparq_reason_wasm.js"`.
+ *
+ * @example
+ * ```json
+ * {
+ *   "sparq_wasm.js": "sparq_wasm-a1b2c3d4ef56.js",
+ *   "sparq_wasm_bg.wasm": "sparq_wasm_bg-7890abcdef01.wasm",
+ *   "reason/sparq_reason_wasm.js": "sparq_reason_wasm-deadbeef1234.js"
+ * }
+ * ```
+ */
+export interface WasmManifest {
+  [logicalName: string]: string;
+}
+
+// Module-level cache: basePath → resolved manifest (or null on 404/fetch failure).
+const manifestCache = new Map<string, WasmManifest | null>();
+
+/**
+ * [SONNET-4.6] sq-b66fc — resolve a wasm asset URL through the content-hash manifest.
+ *
+ * Loads `${basePath}/wasm/wasm-manifest.json` once per basePath and caches the result.
+ * If the manifest has an entry for `logicalName`, returns the full content-addressed URL;
+ * otherwise falls back to the unhashed URL (dev mode / Tauri / absent manifest).
+ *
+ * In a non-browser environment (SSR / Node), fetch may be unavailable — falls back
+ * directly to the unhashed URL without attempting a network call.
+ *
+ * @param logicalName  The bare filename (or `"subdir/filename"` for tier-b bundles),
+ *                     e.g. `"sparq_wasm.js"` or `"reason/sparq_reason_wasm.js"`.
+ * @param basePath     The URL prefix (same as {@link LoadSparqOptions.basePath}).
+ *                     Defaults to the same `defaultBasePath()` the loader uses.
+ */
+export async function resolveWasmAsset(
+  logicalName: string,
+  basePath?: string,
+): Promise<string> {
+  const base = basePath ?? defaultBasePath();
+  // Non-browser environment: skip the network fetch and fall back immediately.
+  if (typeof fetch === "undefined") {
+    return `${base}/wasm/${logicalName}`;
+  }
+
+  if (!manifestCache.has(base)) {
+    const manifestUrl = `${base}/wasm/wasm-manifest.json`;
+    try {
+      const resp = await fetch(manifestUrl);
+      if (!resp.ok) {
+        // 404 or any non-2xx → treat as "no manifest" (dev mode / Tauri).
+        manifestCache.set(base, null);
+      } else {
+        manifestCache.set(base, (await resp.json()) as WasmManifest);
+      }
+    } catch {
+      // Network failure or JSON parse error → silent fallback.
+      manifestCache.set(base, null);
+    }
+  }
+
+  const manifest = manifestCache.get(base) ?? null;
+  return resolveWasmAssetWithManifest(logicalName, manifest, base);
+}
+
+/**
+ * [SONNET-4.6] sq-b66fc — pure resolution helper: resolve a wasm asset URL given an
+ * already-loaded manifest (or `null` when the manifest is absent). This function is
+ * exported so tests can call it directly without any network mocking.
+ *
+ * @param logicalName  The bare filename (or `"subdir/filename"` for tier-b bundles).
+ * @param manifest     A pre-loaded {@link WasmManifest}, or `null` to force the fallback.
+ * @param basePath     The URL prefix.
+ */
+export function resolveWasmAssetWithManifest(
+  logicalName: string,
+  manifest: WasmManifest | null,
+  basePath: string,
+): string {
+  // Determine the subdirectory and bare filename from the logical name.
+  const lastSlash = logicalName.lastIndexOf("/");
+  const subdir = lastSlash === -1 ? "" : logicalName.slice(0, lastSlash + 1);
+  const bareName = lastSlash === -1 ? logicalName : logicalName.slice(lastSlash + 1);
+
+  const hashedFilename = manifest?.[logicalName];
+  const resolvedName = hashedFilename ?? bareName;
+  return `${basePath}/wasm/${subdir}${resolvedName}`;
+}
+
 function defaultBasePath(): string {
   // The Next.js site sets basePath '/sparq'; mirror it for the runtime asset URLs.
   // Empty in local `next dev` without basePath, '/sparq' on Pages. A GUI host passes its
@@ -180,14 +281,20 @@ let modulePromiseBase: string | null = null;
  * plain ESM module at runtime, and the wasm URL is passed explicitly (the glue's own
  * `new URL('./sparq_wasm_bg.wasm', import.meta.url)` resolution is bypassed). If the
  * resolved base path changes between calls (e.g. site vs GUI), the module is re-loaded.
+ *
+ * [SONNET-4.6] sq-b66fc — glue and wasm paths are now resolved through the content-hash
+ * manifest via {@link resolveWasmAsset} so redeployments to GitHub Pages get fresh
+ * content-addressed URLs, eliminating stale-glue / new-wasm mismatches.
  */
 export async function loadSparq(opts: LoadSparqOptions = {}): Promise<WasmStoreCtor> {
   const base = opts.basePath ?? defaultBasePath();
   if (!modulePromise || modulePromiseBase !== base) {
     modulePromiseBase = base;
     modulePromise = (async () => {
-      const gluePath = `${base}/wasm/sparq_wasm.js`;
-      const wasmPath = `${base}/wasm/sparq_wasm_bg.wasm`;
+      // [SONNET-4.6] sq-b66fc — resolve through the manifest so a redeployed GitHub Pages
+      // site always fetches the content-addressed glue+wasm pair.
+      const gluePath = await resolveWasmAsset("sparq_wasm.js", base);
+      const wasmPath = await resolveWasmAsset("sparq_wasm_bg.wasm", base);
       // webpackIgnore keeps the glue out of the bundle: it's fetched as a plain ESM
       // module from the static asset root at runtime.
       const mod = (await import(/* webpackIgnore: true */ gluePath)) as WasmModule;
@@ -628,6 +735,26 @@ export {
 } from "./endpoint.js";
 
 // ---------------------------------------------------------------------------
+// [FABLE-5] sq-ixc3.19 — the STRUCTURED query-plan client: the typed EXPLAIN tree
+// (`explain_json::PlanNode`, the sq-jbqh4 camelCase schema contract) shared by all
+// three plan sources (in-tab wasm `explainPlanJson`, desktop-native `explain_native`,
+// server `Accept: application/x-sparq-explain+json`), the defensive parse, and the
+// endpoint fetch with its honest structured → text degradation ladder.
+// ---------------------------------------------------------------------------
+
+export {
+  type PlanNode,
+  type PlanExplainMode,
+  type EndpointExplainResult,
+  EXPLAIN_JSON_CT,
+  EXPLAIN_TEXT_CT,
+  buildExplainRequest,
+  parsePlanJson,
+  parsePlanNode,
+  runEndpointExplain,
+} from "./plan.js";
+
+// ---------------------------------------------------------------------------
 // [OPUS-4.8] sq-9ij6 — live subscriptions: the SSE transport of the server's
 // `/subscriptions` surface. Subscribe a SELECT and stream the result DELTAS as the dataset
 // mutates, reusing the SAME `EndpointConfig` + bearer posture as the endpoint query client
@@ -653,6 +780,24 @@ export {
   rowKey,
   splitSseFrames,
 } from "./subscriptions.js";
+
+// ---------------------------------------------------------------------------
+// [FABLE-5] sq-140b — live subscriptions, the MULTIPLEXED WebSocket transport of the same
+// `/subscriptions` surface: ONE socket carries many subscriptions via the server's
+// `subscribe` / `unsubscribe` frames, with the bearer token offered only as the
+// `bearer.<token>` subprotocol (`wsSubprotocols`) the server's `ws_auth_gate` validates.
+// Speaks the SAME SEPA envelopes as the SSE transport (`parseSubscriptionData` and the
+// `applyNotification` reducers are reused verbatim); bypasses no server gate.
+// ---------------------------------------------------------------------------
+
+export {
+  type SubscriptionSocket,
+  type SubscriptionSocketHandlers,
+  type WebSocketCtor,
+  type WebSocketLike,
+  buildSubscriptionSocketUrl,
+  openSubscriptionSocket,
+} from "./ws-subscriptions.js";
 
 // ---------------------------------------------------------------------------
 // [OPUS-4.8] sq-he72 — server health / capabilities: read the connected server's
@@ -706,14 +851,23 @@ export {
   type WorkspaceEditorState,
   type WorkspaceRunMode,
   type WorkspaceInferenceMode,
+  // [sq-glo5r] — N3 per-workspace rule documents.
+  type WorkspaceRulesDoc,
   type WorkspaceBackend,
   type WorkspaceStore,
   type WorkspaceStoreOptions,
   type KeyValueStorage,
   type TauriFsApi,
+  // (sq-9i1h9) serialized per-workspace saves + (sq-w3dmj) save-failure surfacing.
+  type SerializedWorkspaceSaver,
+  createSerializedWorkspaceSaver,
+  describeWorkspaceSaveError,
+  isQuotaExceededError,
   WORKSPACE_SCHEMA,
   WORKSPACE_INFERENCE_MODES,
   parseInferenceMode,
+  // [FABLE-5] sq-ixc3.14 — per-workspace federation egress allowlist (fail-closed parse).
+  parseServiceAllowlist,
   WebWorkspaceStore,
   MemoryWorkspaceStore,
   TauriWorkspaceStore,
@@ -725,6 +879,17 @@ export {
   workspaceId,
   workspaceSummary,
 } from "./workspace.js";
+
+// ---------------------------------------------------------------------------
+// [GPT-5.6] sq-epbw4 — shared browser dataset decompression. gzip/ZIP use native
+// browser streams; zstd/bzip2 stay in independent lazy chunks loaded only on demand.
+// ---------------------------------------------------------------------------
+
+export {
+  type DatasetCompressionCodec,
+  type DecompressedDatasetBytes,
+  decompressDatasetBytes,
+} from "./decompress.js";
 
 /** Renders a term for display, with a compact datatype/lang suffix. */
 export function formatTerm(t: SparqlTerm | undefined): string {

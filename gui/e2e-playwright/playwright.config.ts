@@ -15,6 +15,11 @@
 
 import { defineConfig, devices } from "@playwright/test";
 
+// (sq-eydh9) [SONNET-4.6] Allow overriding the dev-server port so concurrent worktree test runs
+// don't collide.  Default is 3007 (the canonical CI port); set PLAYWRIGHT_PORT=<n> locally when
+// another worktree already holds 3007.
+const SERVE_PORT = process.env.PLAYWRIGHT_PORT ?? "3007";
+
 export default defineConfig({
   testDir: "./specs",
 
@@ -31,7 +36,7 @@ export default defineConfig({
   reporter: process.env.CI ? [["github"], ["list"]] : [["list"]],
 
   use: {
-    baseURL: "http://127.0.0.1:3007",
+    baseURL: `http://127.0.0.1:${SERVE_PORT}`,
     // [SONNET-4.6] retain-on-failure: with retries=0, "on-first-retry" never fires → no trace
     // ever captured. retain-on-failure emits a trace for every failed test regardless of retries.
     trace: "retain-on-failure",
@@ -42,9 +47,26 @@ export default defineConfig({
     contextOptions: { reducedMotion: "reduce" },
   },
 
+  // [FABLE-5] sq-u0my5 — TWO personas over the SAME served export:
+  //   chromium-mock-ipc — desktop persona: support/fixtures.ts injects window.__TAURI__ via
+  //                       addInitScript, so isTauriRuntime() === true (the original lane).
+  //   chromium-web      — browser persona: support/web-fixtures.ts installs NO Tauri globals,
+  //                       so isTauriRuntime() === false and the pure-browser code paths (the
+  //                       deployed /app) are exercised in CI for the first time.
+  // The split is by filename: *.web.spec.ts → chromium-web; everything else → chromium-mock-ipc.
+  // Existing specs are untouched and keep their exact prior behavior.
   projects: [
     {
       name: "chromium-mock-ipc",
+      testIgnore: /.*\.web\.spec\.ts$/,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: { width: 1280, height: 720 },
+      },
+    },
+    {
+      name: "chromium-web",
+      testMatch: /.*\.web\.spec\.ts$/,
       use: {
         ...devices["Desktop Chrome"],
         viewport: { width: 1280, height: 720 },
@@ -64,8 +86,8 @@ export default defineConfig({
     // [SONNET-4.6] --no-install: fails CLOSED if serve is not already installed rather than
     // fetching from the registry. serve is a pinned devDependency so it WILL be present after
     // `npm install`; --no-install makes the dependency on that being true explicit + hermetic.
-    command: "npx --no-install serve -l 3007 -s ../app/out",
-    url: "http://127.0.0.1:3007",
+    command: `npx --no-install serve -l ${SERVE_PORT} -s ../app/out`,
+    url: `http://127.0.0.1:${SERVE_PORT}`,
     reuseExistingServer: !process.env.CI,
     timeout: 15_000,
   },

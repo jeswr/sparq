@@ -5,8 +5,9 @@
 //
 // WHY THESE LIVE HERE (and are framework-free). The demo's parse step runs the real wasm
 // Store (no mocks); but the *gzip ingest* path is plain Web-platform code: gzip is the one
-// codec the browser decompresses natively (zstd / bzip2 are NOT — see the page's honest
-// caveat), so the compressed-ingest demo is `gunzip(bytes)` -> `Store.load(text, fmt)`.
+// codec the browser decompresses natively (zstd reaches the LAZY-loaded decoder through
+// `js/src/decompress.ts`; bzip2 is native-only — see the page's honest caveat), so
+// the gzip round-trip demo is `gunzip(bytes)` -> `Store.load(text, fmt)`.
 // Keeping the codec round-trip + the sample catalogue here (no React, no wasm) lets them
 // unit-test directly under `node --test` (the Web Streams API is in Node ≥ 18).
 
@@ -153,7 +154,8 @@ export function sampleFor(format: DataFormat): FormatSample | undefined {
 
 // ---------------------------------------------------------------------------
 // gzip round-trip — the live compressed-ingest path (gzip is the one codec the
-// browser decompresses natively; zstd / bzip2 are native-only, see the page caveat).
+// browser decompresses natively; zstd is decoded by the shared lazy-loaded JS package
+// path; bzip2 is native-only, see the page caveat).
 // ---------------------------------------------------------------------------
 
 // All byte buffers here are backed by a plain `ArrayBuffer` (never `SharedArrayBuffer`),
@@ -211,4 +213,18 @@ export async function gunzipToString(
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   return `${(n / 1024).toFixed(1)} KB`;
+}
+
+/**
+ * [SONNET-4.6] sq-su1oe (#820) — formats a byte count for unintrusive store-stats readouts
+ * (B / KB / MB). {@link formatBytes} stops at KB (it serves the compression-ratio panel,
+ * where inputs are small); an in-memory store footprint or an uploaded source file can reach
+ * MB, so this carries the extra magnitude without over-precision. Negative or non-finite
+ * inputs clamp to `0 B` so a bad reading never renders a fabricated figure.
+ */
+export function formatFootprintBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return "0 B";
+  if (n < 1024) return `${Math.round(n)} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }

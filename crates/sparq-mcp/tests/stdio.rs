@@ -44,3 +44,48 @@ fn serve_handles_a_line_delimited_session() {
         serde_json::from_str(stats["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(payload["triples"], 1);
 }
+
+// [GPT-5.6] sq-y1ljq: malformed tools/call names are protocol errors, not tool results.
+#[test]
+fn serve_rejects_missing_or_non_string_tool_names() {
+    let graph = Graph::load_str("<http://ex/a> <http://ex/p> <http://ex/b> .", "ntriples").unwrap();
+    let mut server = McpServer::new(graph);
+
+    let input = concat!(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":null}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":123}}"#,
+        "\n",
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"stats","arguments":{}}}"#,
+        "\n",
+    );
+
+    let reader = std::io::BufReader::new(input.as_bytes());
+    let mut out: Vec<u8> = Vec::new();
+    sparq_mcp::serve(&mut server, reader, &mut out).expect("serve loop");
+
+    let text = String::from_utf8(out).unwrap();
+    let responses: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(responses.len(), 4);
+
+    for (index, response) in responses[..3].iter().enumerate() {
+        assert_eq!(response["id"], index + 1);
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("tools/call requires a string `name`")));
+        assert!(response.get("result").is_none());
+    }
+
+    let stats = &responses[3];
+    assert_eq!(stats["id"], 4);
+    assert!(stats.get("error").is_none());
+    let payload: Value =
+        serde_json::from_str(stats["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(payload["triples"], 1);
+}

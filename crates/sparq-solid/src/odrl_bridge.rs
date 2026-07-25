@@ -569,9 +569,38 @@ fn extend_named_graph(graph: &mut Graph, name: &str, additions: &[[Term; 3]]) {
     install_triples(graph, name, terms);
 }
 
+/// Reset the `<urn:sparq:auth>` enforcement view to exactly `terms`, PRESERVING the
+/// named graph's presence when `terms` is empty, the view already exists, AND
+/// `preserve_empty_marker` says a static materialization actually produced it. The
+/// view's PRESENCE is the "materialized" marker: `AclIndex::build` reports a retryable
+/// [`crate::AclStatus::Unloaded`] (a 503 at the server) when it is absent, and the
+/// static materializer deliberately installs an EMPTY view for a closure that grants
+/// nothing — a definitive "materialized, no grants" deny (403). Routing this reset
+/// through the plain [`install_triples`] (which drops an empty graph) silently turned
+/// that definitive deny into a retryable `Unloaded` on every post-materialize ledger
+/// reconcile (sq-37f1a). The converse must not happen either — the reset must not
+/// INVENT the marker: a bridged grant creates the view without any static
+/// materialization, so the graph's current presence alone cannot distinguish
+/// "statically materialized, no grants" from "bridged-only, all grants retracted".
+/// `preserve_empty_marker` (whether a static baseline was ever captured —
+/// `BridgeLedger::static_baseline.is_some()`) carries that distinction: when `false`,
+/// an empty reset REMOVES the view and the store returns to `Unloaded`.
+fn reset_auth_view(graph: &mut Graph, terms: Vec<[Term; 3]>, preserve_empty_marker: bool) {
+    if terms.is_empty() && preserve_empty_marker {
+        let g_name = Term::NamedNode(NamedNode::new_unchecked(AUTH_GRAPH));
+        if let Some(slot) = graph.named.iter_mut().find(|(n, _)| *n == g_name) {
+            slot.1 = Graph::from_parts(Dict::new(), Vec::new());
+        }
+        return;
+    }
+    install_triples(graph, AUTH_GRAPH, terms);
+}
+
 /// Replace `name`'s sub-graph with exactly `terms` (re-interned into a fresh dict).
 /// When `terms` is empty the named graph is removed entirely (fail-closed: no empty
 /// shell left behind that a reader could otherwise treat as an existing-but-empty view).
+/// NOT for the `<urn:sparq:auth>` view's baseline reset — that must keep an existing
+/// empty view present (see [`reset_auth_view`]).
 fn install_triples(graph: &mut Graph, name: &str, terms: Vec<[Term; 3]>) {
     let g_name = Term::NamedNode(NamedNode::new_unchecked(name));
     if terms.is_empty() {
@@ -656,12 +685,14 @@ enum AgentMapping {
     /// with the `except` principals carved out via an ACP `noneOf` exception matcher
     /// (the "everyone-except-X" / `recipient neq X` shape). [OPUS-4.8] sq-5037.
     Faithful {
-        /// Positive recipient principals (`eq`/`isA`/`isPartOf`). Empty ⇒ no positive
-        /// restriction → grant to `auth:Public` (everyone), narrowed only by `except`.
+        /// Positive recipient principals (`eq`/`isA`/`isPartOf`/`isAnyOf`). Empty ⇒ no
+        /// positive restriction → grant to `auth:Public` (everyone), narrowed only by
+        /// `except`.
         agents: Vec<String>,
-        /// Principals carved OUT (`recipient neq X`) — each becomes an ACP `noneOf`
-        /// exception matcher on the grant: a session matching the grant head is denied
-        /// the grant if it is one of these. Empty ⇒ no exception.
+        /// Principals carved OUT (`recipient neq X` / `recipient isNoneOf <set>`) —
+        /// each becomes an ACP `noneOf` exception matcher on the grant: a session
+        /// matching the grant head is denied the grant if it is one of these. Empty ⇒
+        /// no exception.
         except: Vec<String>,
         /// The live-clock validity window from a faithfully-mappable `odrl:dateTime`
         /// constraint (`gteq` → `not_before`, `lteq` → `not_after`). [OPUS-4.8] sq-0q7n.
@@ -679,17 +710,20 @@ enum AgentMapping {
 /// be persisted as re-checked ACP agent conditions.
 ///
 /// **Faithful (→ agent matcher):** an `odrl:recipient`/`odrl:assignee` constraint
-/// under `eq`/`isA` (the recipient IS this principal) or `isPartOf` (the recipient is
-/// a member of a static principal set). The recipient-of-data is exactly the session
-/// agent the ACP `auth:agent` head re-checks, so the persisted condition has the SAME
-/// semantics — it just re-evaluates per session instead of being frozen.
+/// under `eq`/`isA` (the recipient IS this principal) or `isPartOf`/`isAnyOf` (the
+/// recipient is a member of a static principal set — the evaluator matches both
+/// operators as the same flat lexical set, sq-uaz85). The recipient-of-data is exactly
+/// the session agent the ACP `auth:agent` head re-checks, so the persisted condition
+/// has the SAME semantics — it just re-evaluates per session instead of being frozen.
 ///
 /// **Faithful (→ noneOf exception):** an `odrl:recipient`/`odrl:assignee` constraint
 /// under `neq` (the recipient is everyone EXCEPT the named party — the
-/// "everyone-except-X" shape). This maps to an ACP `noneOf`: the grant head is the
-/// positive recipient set (or `auth:Public` if there is no positive constraint) with
-/// an `auth:exceptMatcher` carving out the named party, re-checked per session by the
-/// same machinery WAC/ACP `noneOf` already uses. [OPUS-4.8] sq-5037.
+/// "everyone-except-X" shape) or `isNoneOf` (everyone except the members of a static
+/// set — the list-valued dual, one exception matcher per member; [FABLE-5] sq-5fkpp).
+/// This maps to an ACP `noneOf`: the grant head is the positive recipient set (or
+/// `auth:Public` if there is no positive constraint) with an `auth:exceptMatcher`
+/// carving out each named party, re-checked per session by the same machinery WAC/ACP
+/// `noneOf` already uses. [OPUS-4.8] sq-5037.
 ///
 /// **Faithful (→ live-clock window):** an `odrl:dateTime` constraint under `lteq`
 /// ("until T", inclusive → `auth:notAfter`) or `gteq` ("from T", inclusive →
@@ -704,9 +738,34 @@ enum AgentMapping {
 /// **Unmappable (→ stay one-shot):** `odrl:purpose` (ACP sessions carry no purpose —
 /// a client app is not a purpose-of-use, so mapping it to a client matcher would
 /// over-grant), a STRICT `odrl:dateTime` bound (`lt`/`gt` — see above), `odrl:count`
-/// (ACP is stateless — no usage counter), and any unrecognised left-operand. Any one
-/// such constraint forces the whole rule one-shot.
+/// (ACP is stateless — no usage counter), any unrecognised left-operand, and a
+/// malformed set right-operand — an EMPTY member set under `isPartOf`/`isAnyOf`/
+/// `isNoneOf`, or a numeric/dateTime operand under `isNoneOf` (the evaluator never
+/// satisfies those — `set_negation_representable` — so persisting an exception for
+/// them would widen access). Any one such constraint forces the whole rule one-shot.
+///
+/// **Unmappable (→ stay one-shot): a COMPOUND `odrl:LogicalConstraint`** ([OPUS-4.8]
+/// sq-izzak — WIDENING FIX). A rule that carries ANY `odrl:and`/`odrl:or`/`odrl:xone`
+/// (`rule.logical_constraints`) has no faithful single-head ACP analogue and MUST stay
+/// one-shot, even when it has ZERO atomic constraints. A grant head is a UNION of
+/// `auth:agent` allows, so: an `odrl:and` of recipient constraints is an INTERSECTION
+/// (folding it as a union widens — wrong direction); an `odrl:or` may mix a recipient
+/// operand with a non-recipient dimension (time/purpose) that has no head analogue; and
+/// `odrl:xone` (exactly-one) has no ACP analogue at all. Over-approximating any compound
+/// agent-restriction into the head would grant unlisted/anonymous agents — the very
+/// widening this classification prevents. Before this fix the loop below examined only
+/// `rule.constraints`, so a rule whose ONLY restriction was a compound constraint mapped
+/// `Faithful` with an EMPTY recipient set → an `auth:Public` head (the compound
+/// restriction silently DROPPED). Fail-closed: any `logical_constraints` forces the whole
+/// rule to the one-shot path ([`materialize_permission`]/[`materialize_prohibition`]),
+/// whose evaluator DOES enforce the compound constraint (frozen) — never dropping it.
 fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
+    // [OPUS-4.8] sq-izzak: a rule carrying any compound `odrl:LogicalConstraint` has no
+    // faithful ACP-condition head — stay one-shot so the compound restriction is enforced
+    // (frozen) rather than silently dropped by folding an empty recipient set to public.
+    if !rule.logical_constraints.is_empty() {
+        return AgentMapping::Unmappable;
+    }
     let mut agents: Vec<String> = Vec::new();
     let mut except: Vec<String> = Vec::new();
     let mut window = TimeWindow::default();
@@ -745,15 +804,12 @@ fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
                 _ => return AgentMapping::Unmappable,
             },
             // recipient ∈ {a|b|c} (static set) → one agent matcher per member.
-            Operator::IsPartOf => {
-                let members: Vec<String> = c
-                    .right
-                    .as_str()
-                    .split(['|', ' ', ','])
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .map(str::to_owned)
-                    .collect();
+            // `odrl:isAnyOf` is evaluated by sparq-policy exactly as the flat
+            // `isPartOf` lexical set (sq-uaz85), so it maps identically. An EMPTY
+            // set (incl. a numeric operand, whose lexical form here is empty) is
+            // unsatisfiable under both operators → fail-closed. [FABLE-5] sq-5fkpp.
+            Operator::IsPartOf | Operator::IsAnyOf => {
+                let members = set_members(c.right.as_str());
                 if members.is_empty() {
                     return AgentMapping::Unmappable;
                 }
@@ -766,11 +822,45 @@ fn map_constraints_to_agents(rule: &Rule) -> AgentMapping {
                 Value::Iri(s) | Value::Str(s) => except.push(s.clone()),
                 _ => return AgentMapping::Unmappable,
             },
+            // recipient ∉ {a|b|c} (`odrl:isNoneOf` — the list-valued dual of `neq`)
+            // → one ACP noneOf exception matcher per member, carving each out of the
+            // grant. The evaluator only ever satisfies `isNoneOf` for IRI/string
+            // operands (`set_negation_representable`), so a numeric/dateTime operand
+            // is malformed here → fail-closed (persisting an exception for a value
+            // the evaluator flat-denies would WIDEN access). The degenerate EMPTY
+            // set also stays one-shot: it excludes nothing, and promoting a (likely
+            // malformed) empty operand to a bare re-checked grant is not worth the
+            // widened persistence — the one-shot path still enforces it, frozen.
+            // [FABLE-5] sq-5fkpp.
+            Operator::IsNoneOf => match &c.right {
+                Value::Iri(s) | Value::Str(s) => {
+                    let members = set_members(s);
+                    if members.is_empty() {
+                        return AgentMapping::Unmappable;
+                    }
+                    except.extend(members);
+                }
+                _ => return AgentMapping::Unmappable,
+            },
             // order operators (lt/gt/…) on a recipient are not meaningful → one-shot.
             _ => return AgentMapping::Unmappable,
         }
     }
     AgentMapping::Faithful { agents, except, window }
+}
+
+/// Split the compact `|`/space/comma right-operand set encoding into its members —
+/// the SAME lexical set `sparq_policy::evaluate` matches for the flat
+/// `isPartOf`/`isAnyOf`/`isNoneOf` base case (its `is_part_of`), so a bridged
+/// matcher-per-member grant re-checks exactly the set the evaluator would.
+/// Empty/whitespace-only members are dropped. [FABLE-5] sq-5fkpp.
+fn set_members(right: &str) -> Vec<String> {
+    right
+        .split(['|', ' ', ','])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Tighten an inclusive window bound with a new `xsd:dateTime` candidate `t`, compared
@@ -820,8 +910,9 @@ fn recipient_principal_allowed(p: &str) -> bool {
 /// # When a conditional grant is emitted (faithful)
 ///
 /// All of the matched permission's constraints are `odrl:recipient`/`odrl:assignee`
-/// constraints under `eq`/`isA`/`isPartOf` (see the crate-internal
-/// `map_constraints_to_agents`). The emitted grant is:
+/// constraints under `eq`/`isA`/`isPartOf`/`isAnyOf` (positive heads) or
+/// `neq`/`isNoneOf` (noneOf exceptions), plus an inclusive `odrl:dateTime` window
+/// (see the crate-internal `map_constraints_to_agents`). The emitted grant is:
 ///
 /// ```text
 /// <grant> a auth:ConditionalGrant ; auth:effect auth:Allow ;
@@ -832,8 +923,11 @@ fn recipient_principal_allowed(p: &str) -> bool {
 /// re-checked by [`crate::AuthIndex::accessible`]: a session whose agent is the
 /// recipient is granted; any other agent (or anonymous) is denied — **without**
 /// re-running the ODRL evaluator. A recipient *set* emits one grant per member (the
-/// auth view unions the allows). When the rule has NO recipient constraint, the grant
-/// head is `auth:Public` (any session) — only valid because the action/target/duties
+/// auth view unions the allows). When the rule has NO recipient constraint but carries
+/// an `odrl:assignee` PROPERTY, the grant head is scoped to that one assignee ([OPUS-4.8]
+/// sq-9n1q4 — a bare-assignee rule grants ONLY the assignee, never `auth:Public`). Only
+/// when the rule has NO recipient constraint AND NO assignee is the grant head
+/// `auth:Public` (any session) — legitimately public because the action/target/duties
 /// were already satisfied at materialization.
 ///
 /// # Fail-closed
@@ -842,9 +936,10 @@ fn recipient_principal_allowed(p: &str) -> bool {
 ///   materializes **nothing** — exactly as the one-shot path.
 /// - An unmapped action, or a missing target, materializes nothing.
 /// - **Mixed constraints fail safe:** if ANY constraint is unmappable (`purpose`,
-///   `dateTime`, `count`, a `neq`/order recipient), the WHOLE rule falls back to the
-///   one-shot path so the unmappable bound is still enforced (frozen) — a persisted
-///   condition is emitted ONLY when every constraint maps faithfully.
+///   a strict `dateTime` bound, `count`, an order/malformed-operand recipient), the
+///   WHOLE rule falls back to the one-shot path so the unmappable bound is still
+///   enforced (frozen) — a persisted condition is emitted ONLY when every constraint
+///   maps faithfully.
 /// - A recipient IRI inside the reserved pair encoding is dropped from the grant head
 ///   (it could otherwise impersonate a minted pair principal).
 ///
@@ -971,9 +1066,9 @@ pub fn materialize_permission_conditional(
 /// # When a conditional deny is emitted (faithful)
 ///
 /// All of the matched prohibition's constraints are `odrl:recipient`/`odrl:assignee`
-/// constraints under `eq`/`isA`/`isPartOf`/`neq` (see the crate-internal
-/// `map_constraints_to_agents`), the action [`action_to_mode`]-maps, and the request
-/// names a target. The recipient
+/// constraints under `eq`/`isA`/`isPartOf`/`isAnyOf`/`neq`/`isNoneOf` (see the
+/// crate-internal `map_constraints_to_agents`), the action [`action_to_mode`]-maps,
+/// and the request names a target. The recipient
 /// constraint is NOT required to hold against the request party — the persisted
 /// condition re-checks it per session, exactly as the allow path.
 ///
@@ -1090,11 +1185,35 @@ pub fn materialize_prohibition_conditional(
 }
 
 /// The principal-space `auth:agent` heads for a faithful recipient set, dropping any
-/// reserved-encoded recipient. An empty recipient list means the rule had NO agent
-/// restriction → a single `auth:Public` head (any session matches).
-fn condition_agents(_rule: &Rule, recipients: &[String]) -> Vec<String> {
+/// reserved-encoded recipient.
+///
+/// When the recipient CONSTRAINT set is empty, the rule's `odrl:assignee` PROPERTY (a
+/// distinct field on [`Rule`], not an `odrl:recipient`/`odrl:assignee` *constraint*
+/// block) still scopes the rule to a single party: fold it in as the sole head so a
+/// bare-assignee rule grants/denies ONLY that assignee. [OPUS-4.8] sq-9n1q4 — WIDENING
+/// FIX: this slot previously ignored `rule.assignee` and defaulted an empty set to
+/// `auth:Public`, so a permission scoped to one assignee granted EVERYONE (incl.
+/// anonymous) and the prohibition dual over-denied everyone. The assignee is normalised
+/// and reserved-encoding-filtered exactly like a recipient (so an all-reserved assignee
+/// yields an empty set, which the callers already treat as fail-closed).
+///
+/// Only when there is NO recipient constraint AND NO assignee does the head fall back to
+/// a single `auth:Public` head (any session matches) — a legitimately public rule whose
+/// action/target/duties were already satisfied at materialization.
+fn condition_agents(rule: &Rule, recipients: &[String]) -> Vec<String> {
     if recipients.is_empty() {
-        return vec![PUBLIC.to_owned()];
+        // [OPUS-4.8] sq-9n1q4: a bare `odrl:assignee` PROPERTY scopes the head to that
+        // one party — it is NOT an unrestricted (auth:Public) rule.
+        match &rule.assignee {
+            Some(assignee) if recipient_principal_allowed(assignee) => {
+                return vec![normalise_recipient_principal(assignee)];
+            }
+            // An all-reserved-encoded assignee → empty head → the caller fails closed
+            // (an empty grant/deny head is never widened to auth:Public here).
+            Some(_) => return Vec::new(),
+            // No recipient AND no assignee → legitimately public.
+            None => return vec![PUBLIC.to_owned()],
+        }
     }
     recipients
         .iter()
@@ -1487,8 +1606,10 @@ impl BridgeLedger {
     ///
     /// # Fail-closed
     ///
-    /// - The view is first reset to the static baseline (or empty if none captured) and
-    ///   the provenance graph cleared, so NO stale bridged triple can survive unless an
+    /// - The view is first reset to the static baseline (or REMOVED if none was ever
+    ///   captured — a bridged-only store returns to the retryable, view-absent
+    ///   [`crate::AclStatus::Unloaded`] state when every entry retracts) and the
+    ///   provenance graph cleared, so NO stale bridged triple can survive unless an
     ///   entry re-emits it.
     /// - Each entry is replayed through its original `materialize_*` function, which
     ///   re-runs the fail-closed ODRL evaluation: a withdrawn permission, a lapsed time
@@ -1499,8 +1620,13 @@ impl BridgeLedger {
     pub fn refresh(&mut self, graph: &mut Graph) -> usize {
         // 1. Reset the enforcement view to the captured static baseline, and clear ALL
         //    bridged provenance — nothing bridged survives unless an entry re-emits it.
+        //    `None` vs `Some(empty)` matters: only a CAPTURED (static) baseline may keep
+        //    an empty view present as the "materialized" marker — a bridged-only store
+        //    (baseline never captured) whose entries all retract must return to the
+        //    view-absent `Unloaded` state, not fake a definitive empty-view deny.
+        let preserve_empty_marker = self.static_baseline.is_some();
         let baseline = self.static_baseline.clone().unwrap_or_default();
-        install_triples(graph, AUTH_GRAPH, baseline);
+        reset_auth_view(graph, baseline, preserve_empty_marker);
         install_triples(graph, AUTH_BRIDGED_GRAPH, Vec::new());
 
         // 2. Replay each entry; keep only those that still materialize something. A

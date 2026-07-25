@@ -79,10 +79,13 @@ export function RdfEditor({
   return (
     <div className={cn("relative rounded-lg border bg-muted/40", className)}>
       {/* Highlight layer: aria-hidden (the textarea is the accessible control). A trailing
-          newline keeps the last line's height stable while typing at the very end. */}
+          newline keeps the last line's height stable while typing at the very end.
+          [FABLE-5] sq-ymr2e.9 — tabIndex -1: keeps this aria-hidden scroller OUT of the
+          keyboard Tab order (Chromium keyboard-focusable scrollers; see sparql-editor.tsx). */}
       <pre
         ref={preRef}
         aria-hidden="true"
+        tabIndex={-1}
         className={cn(
           "pointer-events-none absolute inset-0 m-0 overflow-auto",
           EDITOR_PAD_CLASS,

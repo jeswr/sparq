@@ -1,0 +1,4 @@
+BASE <http://example.org/basic-shape-with-targets>
+PREFIX ex: <>
+
+shape ex:TestShape -> ex:TestClass {}

@@ -35,10 +35,12 @@
 // KEY ARTIFACTS (per-surface, presence-only — no numbers asserted):
 //   home        → hero h1 "In this tab"
 //   capabilities→ h1 heading
-//   try         → h1 "SPARQL workbench"
 //   app         → h1 "App"
 //   download    → h1 heading
 //   examples    → h1 "Examples"
+//   assurance   → h1 matching /Assurance/i
+//   assurance/served-conformance → h1 heading (long title, first() match)
+//   dogfooding  → h1 matching /Dogfooding/i
 //   papers      → at least one "Read paper" link on the index page
 //   per-paper   → blurb text visible (always sourced from data module, not generated HTML)
 //   specs       → at least one "Read draft" link on the index page
@@ -86,6 +88,7 @@ const BENCHMARK_FAMILY_KEYS = [
   "zk",
   "solid",
   "hdt",
+  "update",
   "rsp",
   "genai",
   "gpu",
@@ -107,6 +110,7 @@ const DEEP_SURFACE_SLUGS = [
 // Surface slugs with their own folder but serving redirect stubs (not deep pages).
 // Guard test ensures every surface folder is either here or in DEEP_SURFACE_SLUGS.
 const REDIRECT_STUB_SURFACE_SLUGS = [
+  "federation",
   "full-text",
   "genai",
   "geosparql",
@@ -179,16 +183,6 @@ const STATIC_ROUTES: RouteEntry[] = [
     },
   },
   {
-    path: "try/",
-    name: "/try",
-    artifact: async (page) => {
-      // Server-rendered h1 added by sq-vw3ax — present before WASM loads.
-      await expect(
-        page.getByRole("heading", { name: /SPARQL workbench/i }),
-      ).toBeVisible();
-    },
-  },
-  {
     path: "app/",
     name: "/app",
     artifact: async (page) => {
@@ -208,6 +202,37 @@ const STATIC_ROUTES: RouteEntry[] = [
     artifact: async (page) => {
       await expect(
         page.getByRole("heading", { level: 1, name: "Examples" }),
+      ).toBeVisible();
+    },
+  },
+  // [SONNET-4.6] sq-yk2ho — 3 unlinked content routes added to inventory.
+  // These pages exist in src/app/ and each render an h1, but were absent from
+  // both e2e inventories before this PR.
+  {
+    path: "assurance/",
+    name: "/assurance",
+    artifact: async (page) => {
+      // h1: "Assurance — how to check that sparq works"
+      await expect(
+        page.getByRole("heading", { level: 1, name: /Assurance/i }),
+      ).toBeVisible();
+    },
+  },
+  {
+    path: "assurance/served-conformance/",
+    name: "/assurance/served-conformance",
+    artifact: async (page) => {
+      // h1: "Served-surface SPARQL 1.1 Protocol conformance"
+      await expect(page.getByRole("heading", { level: 1 }).first()).toBeVisible();
+    },
+  },
+  {
+    path: "dogfooding/",
+    name: "/dogfooding",
+    artifact: async (page) => {
+      // h1: "Dogfooding sparq"
+      await expect(
+        page.getByRole("heading", { level: 1, name: /Dogfooding/i }),
       ).toBeVisible();
     },
   },

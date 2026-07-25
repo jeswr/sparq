@@ -1,0 +1,331 @@
+@prefix ufo:  <urn:ufo-sn3:> .
+@prefix rdf:  <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix owl:  <http://www.w3.org/2002/07/owl#> .
+
+# UFO-SN3 v1 is function-free and range-restricted. Every term in a rule
+# conclusion is bound by its premise. No rule creates a world, proposition,
+# event, relator, obligation, or blank node.
+
+# --- Type metaproperties -------------------------------------------------
+
+# Kinds and Categories are rigid in this executable projection.
+{
+    ?type a ufo:Kind.
+}
+=>
+{
+    ?type ufo:rigidity ufo:Rigid.
+}.
+
+{
+    ?type a ufo:Category.
+}
+=>
+{
+    ?type ufo:rigidity ufo:Rigid.
+}.
+
+# Roles and Phases are anti-rigid.
+{
+    ?type a ufo:Role.
+}
+=>
+{
+    ?type ufo:rigidity ufo:AntiRigid.
+}.
+
+{
+    ?type a ufo:Phase.
+}
+=>
+{
+    ?type ufo:rigidity ufo:AntiRigid.
+}.
+
+# --- Inherence and existential dependence -------------------------------
+
+{
+    ?moment ufo:inheresIn ?bearer.
+}
+=>
+{
+    ?moment ufo:existentiallyDependsOn ?bearer.
+}.
+
+{
+    ?dependent ufo:existentiallyDependsOn ?dependency.
+    ?dependent ufo:existsIn ?world.
+}
+=>
+{
+    ?dependency ufo:existsIn ?world.
+}.
+
+# --- Rigidity and anti-rigidity ------------------------------------------
+
+# A rigid membership proposition propagates to an accessible situation only
+# while the represented individual exists there. The proposition node is
+# reused; no RDF 1.2 triple term or fresh proposition is required.
+{
+    ?type ufo:rigidity ufo:Rigid.
+    ?membership a ufo:Proposition;
+        ufo:subj ?individual;
+        ufo:pred rdf:type;
+        ufo:obj ?type;
+        ufo:holdsIn ?source.
+    ?source ufo:accessible ?target.
+    ?individual ufo:existsIn ?target.
+}
+=>
+{
+    ?membership ufo:holdsIn ?target.
+}.
+
+# An explicit contrary proposition in an accessible situation refutes rigid
+# membership. Explicit falsity avoids treating open-world absence as falsity.
+{
+    ?type ufo:rigidity ufo:Rigid.
+    ?membership a ufo:Proposition;
+        ufo:subj ?individual;
+        ufo:pred rdf:type;
+        ufo:obj ?type;
+        ufo:holdsIn ?source;
+        ufo:notHoldsIn ?target.
+    ?source ufo:accessible ?target.
+    ?individual ufo:existsIn ?target.
+}
+=>
+{
+    ?membership ufo:rigidityViolationIn ?target.
+}.
+
+# A supplied accessible counter-situation witnesses contingent membership
+# for a Role or Phase.
+{
+    ?type ufo:rigidity ufo:AntiRigid.
+    ?membership a ufo:Proposition;
+        ufo:subj ?individual;
+        ufo:pred rdf:type;
+        ufo:obj ?type;
+        ufo:holdsIn ?source;
+        ufo:notHoldsIn ?target.
+    ?source ufo:accessible ?target.
+    ?individual ufo:existsIn ?target.
+}
+=>
+{
+    ?type ufo:contingentFor ?individual.
+}.
+
+# --- Identity criteria ---------------------------------------------------
+
+# A Kind directly exposes the key compiled from its supplied criterion.
+{
+    ?type ufo:identityCriterion ?criterion.
+    ?criterion ufo:keyProperty ?keyProperty.
+}
+=>
+{
+    ?type ufo:identityKey ?keyProperty.
+}.
+
+# Roles, Phases, and other dependent sortals inherit the provider's compiled
+# operational key.
+{
+    ?type ufo:identityProvider ?provider.
+    ?provider ufo:identityCriterion ?criterion.
+    ?criterion ufo:keyProperty ?keyProperty.
+}
+=>
+{
+    ?type ufo:identityKey ?keyProperty.
+}.
+
+# Two represented instances of the same type with the same key value in one
+# situation are marked as the same continuant. Situation records are not
+# collapsed with owl:sameAs.
+{
+    ?type ufo:identityKey ?keyProperty.
+
+    ?leftType a ufo:Proposition;
+        ufo:subj ?left;
+        ufo:pred rdf:type;
+        ufo:obj ?type;
+        ufo:holdsIn ?world.
+    ?rightType a ufo:Proposition;
+        ufo:subj ?right;
+        ufo:pred rdf:type;
+        ufo:obj ?type;
+        ufo:holdsIn ?world.
+
+    ?leftKey a ufo:Proposition;
+        ufo:subj ?left;
+        ufo:pred ?keyProperty;
+        ufo:obj ?key;
+        ufo:holdsIn ?world.
+    ?rightKey a ufo:Proposition;
+        ufo:subj ?right;
+        ufo:pred ?keyProperty;
+        ufo:obj ?key;
+        ufo:holdsIn ?world.
+}
+=>
+{
+    ?left ufo:sameContinuant ?right.
+}.
+
+# --- Relators ------------------------------------------------------------
+
+# A relator existentially depends on every entity it mediates.
+{
+    ?relator a ufo:Relator;
+        ufo:mediates ?participant.
+}
+=>
+{
+    ?relator ufo:existentiallyDependsOn ?participant.
+}.
+
+# If the relator exists in a situation, each mediated participant exists there.
+{
+    ?relator a ufo:Relator;
+        ufo:mediates ?participant;
+        ufo:existsIn ?world.
+}
+=>
+{
+    ?participant ufo:existsIn ?world.
+}.
+
+# A supplied proposition whose truthmaker is an existing relator obtains when
+# the relator mediates its two explicitly distinct endpoints.
+{
+    ?relator a ufo:Relator;
+        ufo:mediates ?left;
+        ufo:mediates ?right;
+        ufo:existsIn ?world.
+    ?left owl:differentFrom ?right.
+    ?proposition a ufo:Proposition;
+        ufo:truthmaker ?relator;
+        ufo:subj ?left;
+        ufo:pred ?relation;
+        ufo:obj ?right.
+}
+=>
+{
+    ?proposition ufo:holdsIn ?world.
+}.
+
+# --- Events and participation -------------------------------------------
+
+{
+    ?participation a ufo:Participation;
+        ufo:event ?event;
+        ufo:participant ?participant;
+        ufo:occursIn ?world.
+}
+=>
+{
+    ?event ufo:hasParticipant ?participant;
+        ufo:existsIn ?world.
+    ?participant ufo:participatesIn ?event;
+        ufo:existsIn ?world.
+    ?participation ufo:existsIn ?world.
+}.
+
+# --- Dispositions --------------------------------------------------------
+
+# A disposition activates when its supplied trigger proposition holds.
+{
+    ?disposition a ufo:Disposition;
+        ufo:triggerCondition ?trigger.
+    ?trigger a ufo:Proposition;
+        ufo:holdsIn ?world.
+}
+=>
+{
+    ?disposition ufo:activatedIn ?world.
+}.
+
+# A supplied manifestation event occurs in the activation situation.
+{
+    ?disposition a ufo:Disposition;
+        ufo:activatedIn ?world;
+        ufo:manifestsIn ?event.
+}
+=>
+{
+    ?event ufo:manifestationOf ?disposition;
+        ufo:occursIn ?world.
+}.
+
+# --- Commitments and norms ----------------------------------------------
+
+# A satisfied norm condition activates an already supplied obligation record.
+{
+    ?norm a ufo:Norm;
+        ufo:condition ?condition;
+        ufo:consequent ?content.
+    ?condition a ufo:Proposition;
+        ufo:holdsIn ?world.
+    ?obligation a ufo:Obligation;
+        ufo:generatedBy ?norm;
+        ufo:content ?content;
+        ufo:appliesIn ?world.
+}
+=>
+{
+    ?obligation ufo:activeIn ?world.
+}.
+
+# A supplied commitment/claim pair becomes active with its grounding
+# obligation. No social moment is invented by the rule.
+{
+    ?obligation a ufo:Obligation;
+        ufo:content ?content;
+        ufo:activeIn ?world.
+    ?commitment a ufo:Commitment;
+        ufo:content ?content;
+        ufo:groundedIn ?obligation;
+        ufo:counterpart ?claim.
+    ?claim a ufo:Claim;
+        ufo:content ?content.
+}
+=>
+{
+    ?commitment ufo:activeIn ?world.
+    ?claim ufo:activeIn ?world.
+}.
+
+# --- Closed validation ---------------------------------------------------
+
+# Explicit negative information may refute a required proposition only when
+# the situation declares the applicable validation scope closed.
+{
+    ?world ufo:closedFor ?scope.
+    ?scope a ufo:ValidationScope;
+        ufo:requiredProposition ?proposition.
+    ?proposition a ufo:Proposition;
+        ufo:notHoldsIn ?world.
+}
+=>
+{
+    ?proposition ufo:refutedIn ?world.
+    ?scope ufo:hasFinding ?proposition.
+}.
+
+# --- Accessibility -------------------------------------------------------
+
+# A proposition explicitly marked necessary in a source situation propagates
+# across an accessibility edge. The proposition node and target world must
+# already occur in the finite input.
+{
+    ?proposition a ufo:Proposition;
+        ufo:holdsIn ?source;
+        ufo:necessaryIn ?source.
+    ?source ufo:accessible ?target.
+}
+=>
+{
+    ?proposition ufo:holdsIn ?target.
+}.

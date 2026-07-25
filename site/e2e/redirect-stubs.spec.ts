@@ -5,6 +5,9 @@
 // /about (folded into Home #how-it-runs); every old path ships a tiny stub that client-redirects
 // to the new destination so inbound links don't 404. This test drives a real browser to a few
 // removed paths and asserts the redirect lands on the right new home.
+// [OPUS-4.8] sq-4hiqe — the /try SPARQL playground was likewise removed; its page.tsx is now a
+// hard-redirect stub (window.location → /app, same mechanism as the legacy /gui path), so /try no
+// longer hosts a REPL. The case below asserts /try lands on /app.
 import { test, expect, type Page } from "@playwright/test";
 // [OPUS-4.8] sq-ymr2e.1 — shared deterministic navigation barrier (SW-reload absorption +
 // app-shell hydration). Its "Primary" nav wait re-resolves AFTER the client redirect lands on the
@@ -25,6 +28,7 @@ const SURFACE_REDIRECTS: { from: string; theme: string }[] = [
   { from: "surface/genai/", theme: "search-genai" },
   { from: "surface/http-server/", theme: "serve-embed" },
   { from: "surface/streaming-rsp/", theme: "serve-embed" },
+  { from: "surface/federation/", theme: "serve-embed" },
   { from: "surface/cli/", theme: "serve-embed" },
   { from: "surface/python/", theme: "serve-embed" },
 ];
@@ -49,6 +53,15 @@ test("removed /about client-redirects to the Home #how-it-runs section", async (
   const url = new URL(page.url());
   expect(url.hash).toBe("#how-it-runs");
   await expect(page.locator("#how-it-runs")).toBeVisible();
+});
+
+// [OPUS-4.8] sq-4hiqe — the removed /try playground hard-redirects to the live /app GUI (mirrors
+// the legacy /gui → /app stub asserted in site-nav.spec.ts).
+test("the removed /try playground hard-redirects to /app", async ({ page }) => {
+  await gotoSettled(page, "try/");
+  await page.waitForURL("**/app/**", { timeout: 15_000 });
+  expect(new URL(page.url()).pathname).toContain("/app");
+  await expect(page.getByRole("heading", { name: "App", level: 1 })).toBeVisible();
 });
 
 test("the 5 retained deep pages are NOT redirected (they keep their own route)", async ({

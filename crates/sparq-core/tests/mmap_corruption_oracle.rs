@@ -77,18 +77,47 @@ fn exercise(g: &Graph) -> Vec<[String; 3]> {
     dump
 }
 
-/// Save the sample graph into `dir` via the given save fn, returning the pristine term dump
+/// [FABLE-5] sq-7d3dj.32.2.7 — which compressed on-disk block-stream format a build emits.
+/// `V1` is the shipped `SPQCPRM1`; `V2` is `SPQCPRM2` (only reachable behind the `spqcprm2`
+/// feature). The oracle sweeps ALL of them so the mmap loader's memory-safety contract is
+/// proven on the V2 magic + frame-of-reference reader too, not just V1.
+#[derive(Clone, Copy)]
+enum SaveMode {
+    Raw,
+    CompressedV1,
+    #[cfg(feature = "spqcprm2")]
+    CompressedV2,
+}
+
+/// Save the sample graph into `dir` via the given save mode, returning the pristine term dump
 /// (the consistency reference any successfully-reopened corrupt store must still match).
-fn build_store(dir: &Path, compressed: bool) -> Vec<[String; 3]> {
+fn build_store(dir: &Path, mode: SaveMode) -> Vec<[String; 3]> {
     let g = sample_graph();
-    if compressed {
-        g.save_compressed(dir).expect("save_compressed");
-    } else {
-        g.save(dir).expect("save");
+    match mode {
+        SaveMode::Raw => g.save(dir).expect("save"),
+        SaveMode::CompressedV1 => g.save_compressed(dir).expect("save_compressed"),
+        // [FABLE-5] sq-7d3dj.32.2.7 — force V2 emission on THIS thread only (no env mutation),
+        // so the saved perms carry the SPQCPRM2 magic and decode through `decode_block_v2_at`.
+        #[cfg(feature = "spqcprm2")]
+        SaveMode::CompressedV2 => sparq_core::compress::with_emit_format(
+            sparq_core::compress::EmitFormat::V2,
+            || g.save_compressed(dir).expect("save_compressed V2"),
+        ),
     }
     // Reference dump comes from a clean reopen (so it reflects the on-disk decode, not the
     // in-RAM graph) — proves the pristine round-trip works before we corrupt anything.
     let clean = Graph::open(dir).expect("pristine store must open");
+    // For a compressed V2 save, at least one perm must actually carry the SPQCPRM2 magic (else
+    // the V2 arm of the oracle is vacuous — it would just be re-sweeping V1 files).
+    #[cfg(feature = "spqcprm2")]
+    if matches!(mode, SaveMode::CompressedV2) {
+        let saw_v2 = (0..6).any(|i| {
+            std::fs::read(dir.join(format!("perm{i}.bin")))
+                .map(|b| b.starts_with(b"SPQCPRM2"))
+                .unwrap_or(false)
+        });
+        assert!(saw_v2, "V2 save produced no SPQCPRM2 perm — the V2 oracle arm is vacuous");
+    }
     exercise(&clean)
 }
 
@@ -172,12 +201,18 @@ fn copy_dir(src: &Path, dst: &Path) {
     }
 }
 
-/// The core sweep, run for both save modes.
-fn corruption_sweep(compressed: bool) {
+/// The core sweep, run for every save mode.
+fn corruption_sweep(mode: SaveMode) {
     let tmp = tempdir();
     let pristine = tmp.join("pristine");
-    let reference = build_store(&pristine, compressed);
+    let reference = build_store(&pristine, mode);
     let scratch = tmp.join("scratch");
+    let mode_tag = match mode {
+        SaveMode::Raw => "raw",
+        SaveMode::CompressedV1 => "compressed-v1",
+        #[cfg(feature = "spqcprm2")]
+        SaveMode::CompressedV2 => "compressed-v2",
+    };
 
     let files = store_files(&pristine);
     assert!(files.iter().any(|p| p.ends_with("dict-terms.bin")), "the term blob must exist");
@@ -206,7 +241,7 @@ fn corruption_sweep(compressed: bool) {
         };
         for &cut in &cuts {
             corrupt_truncate(&pristine, &scratch, file, cut);
-            assert_safe(&scratch, &reference, &format!("truncate {name} -> {cut}/{len} (compressed={compressed})"));
+            assert_safe(&scratch, &reference, &format!("truncate {name} -> {cut}/{len} (mode={mode_tag})"));
         }
 
         // ---- BYTE-FLIP sweep: every position for small files; a stride for large ones,
@@ -216,7 +251,7 @@ fn corruption_sweep(compressed: bool) {
         while pos < len as usize {
             for xor in [0x80u8, 0xFF, 0x01] {
                 corrupt_flip(&pristine, &scratch, file, pos, xor);
-                assert_safe(&scratch, &reference, &format!("flip {name}@{pos}^{xor:#x} (compressed={compressed})"));
+                assert_safe(&scratch, &reference, &format!("flip {name}@{pos}^{xor:#x} (mode={mode_tag})"));
             }
             pos += stride;
         }
@@ -225,12 +260,22 @@ fn corruption_sweep(compressed: bool) {
 
 #[test]
 fn mmap_loader_survives_corruption_raw() {
-    corruption_sweep(false);
+    corruption_sweep(SaveMode::Raw);
 }
 
 #[test]
 fn mmap_loader_survives_corruption_compressed() {
-    corruption_sweep(true);
+    corruption_sweep(SaveMode::CompressedV1);
+}
+
+/// [FABLE-5] sq-7d3dj.32.2.7 — the SAME memory-safety oracle over a `SPQCPRM2` (V2) saved store:
+/// the V2 magic auto-detect + the frame-of-reference `decode_block_v2_at` reader must survive
+/// every truncation / byte-flip with a clean `Err` or a fully-materialising graph — never a
+/// panic / OOB / abort. This proves the migration did not open a new UB surface in the loader.
+#[cfg(feature = "spqcprm2")]
+#[test]
+fn mmap_loader_survives_corruption_compressed_v2() {
+    corruption_sweep(SaveMode::CompressedV2);
 }
 
 /// A FOCUSED, fast regression for the exact sq-znld soundness hole: flip a byte inside the

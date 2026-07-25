@@ -2,14 +2,18 @@
 # Upstream contributions to `KonradHoeffner/hdt`
 
 This crate WRAPS [`hdt`](https://github.com/KonradHoeffner/hdt) (MIT). This file
-tracks the two upstream gaps the sparq-hdt work originally queued against it and
-their CURRENT status against `hdt` master / 0.6.x.
+tracks the upstream gaps the sparq-hdt work has queued against it and
+their CURRENT status against `hdt` master / 0.7.x.
 
 > **Status (sq-v7be, verified 2026-06-19 against `KonradHoeffner/hdt` master):**
 > - **Builder gap — OBVIATED (no upstream change needed from us).** See item 1.
-> - **Decode-only entry point — OPEN UPSTREAM DRAFT PR
->   [`KonradHoeffner/hdt#124`](https://github.com/KonradHoeffner/hdt/pull/124).**
->   See item 2.
+> - **Decode-only entry point — STILL OPEN on the released line ([FABLE-5] sq-fkj,
+>   re-verified 2026-07-18 against the published `hdt` 0.7.3 source, the version
+>   sparq now pins): no release through 0.7.3 ships one. Upstream DRAFT PR
+>   [`KonradHoeffner/hdt#124`](https://github.com/KonradHoeffner/hdt/pull/124)
+>   remains the tracked path.** See item 2.
+> - **`read_nt` stores literal lexical forms N-Triples-ESCAPED (spec says raw) —
+>   DOCUMENTED LIMITATION (sq-qalqs).** See item 3.
 
 ---
 
@@ -39,15 +43,11 @@ round-trip (the `save` path — `crates/sparq-hdt/src/write.rs` — and the
 required for the write path; this item is closed (tracked under landed bead
 `sq-ashy`).
 
-> **Caveat — sparq is still pinned to `hdt` 0.4.** On the wrapped crate's **0.4**
-> line these section builders are reachable only via the experimental `sophia`
-> feature, so sparq-hdt's `write` cargo-feature still turns it on
-> (`Cargo.toml: write = ["hdt/sophia"]`); the `sophia`-free reachability described
-> above is the situation on `hdt` **master / 0.6**. The 0.4 → 0.6 bump is itself
-> blocked (the 0.6 path pulls `qwt`, whose default `prefetch` feature needs nightly
-> on aarch64) — tracked by `sq-2l1` / `sq-th5i`. So the *upstream contribution* is
-> obviated (we never need to file it), but sparq keeps paying the `sophia` gate for
-> writes until that dependency bump lands.
+> **Dependency status ([GPT-5] sq-2l1).** sparq now uses `hdt` 0.7 and enables its
+> narrower `nt` feature for N-Triples fixture generation. The upstream `sophia`
+> adapter is no longer part of sparq-hdt's read or write dependency graph. This
+> became portable on stable aarch64 when `hdt` moved to `qwt` 0.4, whose prefetch
+> path uses stable inline assembly.
 
 ---
 
@@ -59,10 +59,21 @@ required for the write path; this item is closed (tracked under landed bead
 authored by `@jeswr`. It is **jeswr-review-gated** — not yet marked ready for
 maintainer review — so it is not merged. Tracking bead: `sq-fkj`.
 
+> **Re-verified against the released line ([FABLE-5] sq-fkj, 2026-07-18).** With
+> sparq now pinning `hdt` 0.7 (the sq-2l1 bump), the gap was re-checked against the
+> published **0.7.3** crate source: no decode-only entry point has shipped in any
+> release through 0.7.3. `Hdt::read` still reaches `TriplesBitmap::read_sect` →
+> `TriplesBitmap::new`, which eagerly builds the query-only index structures below.
+> The 0.6 `sucds`→`qwt` swap changed the backing library (`WaveletMatrix<Rank9Sel>`
+> → `QWT512`, `Rank9Sel` bitmaps → `RSNarrow`), not the eager build itself. Item
+> stays open pending the upstream PR; the local cost is already avoided because
+> sparq's direct decoder (below) is the default load path.
+
 **What it adds.** `Hdt::read` eagerly calls `TriplesBitmap::new`, which builds —
-purely to serve triple-pattern / object / predicate QUERIES — a `WaveletMatrix`,
-a per-object `Vec<Vec<u32>>`, a `sort_by_cached_key`, and an OP-index
-(`CompactVector` + `Rank9Sel` bitmap). A consumer doing a one-shot bulk load (read
+purely to serve triple-pattern / object / predicate QUERIES — a wavelet matrix
+over `sequence_y` (`QWT512` on 0.7.x), a full sort of per-object entries
+(`build_op_index_from_entries`), and an OP-index (a compact position sequence + an
+`RSNarrow` rank/select bitmap). A consumer doing a one-shot bulk load (read
 every triple once, in SPO order, into its own store) never issues those queries, so
 all of that is built and immediately dropped — a large, cache-hostile cost on
 ingest. The PR adds a decode-only entry point that reads the dictionary +
@@ -86,3 +97,40 @@ against the full `Hdt::read` path (retained only as the oracle,
 `load_reader_via_upstream` in `lib.rs`) on real and generated archives. If the
 upstream PR lands we can delete our vendored decoder and call the upstream entry
 point instead.
+
+---
+
+## Item 3 — `read_nt` escapes literal lexical forms in the dictionary — DOCUMENTED LIMITATION
+
+<!-- [SONNET-4.6] sq-qalqs -->
+
+**Finding (sq-qalqs, verified against `hdt` 0.4.0).** The HDT spec — and the
+hdt-cpp / hdt-java reference implementations, and sparq's own `save` encoder
+(`encode.rs::hdt_term_string`) — store a literal's lexical form **RAW** in the
+dictionary (the sections are length-delimited, so no escaping is needed). Upstream
+`FourSectDict::read_nt` (0.4, `sophia` feature) instead stores the sophia/rio
+**N-Triples-escaped term rendering** (`q.object.to_string()` after only stripping
+IRI angle brackets), so a literal containing `"` or `\` lands in the dictionary
+with literal `\"` / `\\` byte sequences. Any spec-conformant reader — sparq's
+direct decoder, sparq's upstream-backed oracle path, and hdt-cpp alike — then
+decodes a lexical form escaped one time more than the N-Triples source, i.e.
+`Hdt::read_nt -> Hdt::write -> sparq_hdt::load` disagrees with `Graph::load_str`
+on such literals. (Upstream's own `hdt_graph::auto_term` reader does not unescape
+either, so the escaped bytes round-trip verbatim *within* the upstream crate —
+the non-conformance is confined to the `read_nt` **writer**.)
+
+**Impact on sparq: test fixtures only.** `read_nt` is used solely as the
+dev-dependency fixture builder (`tests/roundtrip.rs::nt_to_hdt_bytes` and
+friends); the production write path (`save`) encodes the raw lexical form
+directly from sparq's dict and round-trips escaped literals exactly
+(`tests/write_roundtrip.rs::save_round_trips_escaped_literals_exactly`).
+Fixture N-Triples containing `\"` / `\\` (or other N-Triples escapes, e.g.
+`\n`, `\t`) will NOT match a `Graph::load_str` ground truth — keep escape-worthy
+literals out of `read_nt`-built differential fixtures, or route them through
+`save`. Same family as `read_nt`'s verbatim (non-lowercased) language tags noted
+in `tests/roundtrip.rs::hdt_load_matches_ntriples_load`.
+
+**Regression oracle:** `tests/roundtrip.rs::escaped_literal_pins_upstream_writer_as_the_mangler`
+pins the stored dictionary bytes and the exact double-escaped round-trip rendering;
+if a future `hdt` bump fixes `read_nt`, that test goes red — then delete this item
+and tighten the oracle into an exact round-trip equality. Not yet reported upstream.

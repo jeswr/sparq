@@ -3,6 +3,7 @@ import { Database } from "lucide-react";
 
 import { SurfaceContent } from "@/components/surface-content";
 import { DataFormatsDemo } from "@/components/data-formats-demo";
+import { withBasePath } from "@/lib/base-path";
 
 export const metadata: Metadata = {
   title: "Data formats",
@@ -40,7 +41,7 @@ export default function DataFormatsSurfacePage() {
         },
         {
           title: "Compressed & streaming ingest",
-          body: "gzip / zstd / bzip2 dumps decode-and-load natively (fused decompress + parallel parse); gzip also decodes live in the browser.",
+          body: "gzip / zstd / bzip2 dumps decode-and-load natively (fused decompress + parallel parse); in the browser, gzip/zip decode natively and zstd via a small lazy-loaded decoder.",
         },
         {
           title: "HDT archives",
@@ -51,21 +52,25 @@ export default function DataFormatsSurfacePage() {
           body: "Serialize back out to Turtle / TriG / N-Quads / JSON-LD (engine serialize-rdf feature; N-Triples always on).",
         },
       ]}
-      runsNote="Live in your tab for the four text formats and JSON-LD — the demo runs the same loaders that ship in @jeswr/sparq, and the gzip panel decodes with the browser's native DecompressionStream before parsing, with no codec library and no server."
+      runsNote="Live in your tab for the four text formats and JSON-LD — the demo runs the same loaders that ship in @jeswr/sparq; gzip/zip decode with the browser's native DecompressionStream, and a .zst upload fetches a small zstd decoder on demand (a lazy chunk, never in the page's first-load bundle). No server."
       reproduce="cargo test -p sparq-core"
       caveat={
         <p>
-          Only <strong className="text-foreground">gzip</strong> decodes in the browser
+          <strong className="text-foreground">gzip</strong> and{" "}
+          <strong className="text-foreground">zip</strong> decode in the browser natively
           (via <code className="font-mono">DecompressionStream</code>);{" "}
-          <strong className="text-foreground">zstd</strong> and{" "}
+          <strong className="text-foreground">zstd</strong> decodes through a small
+          decoder that is lazy-loaded only when a{" "}
+          <code className="font-mono">.zst</code> file is actually picked (zstd
+          dictionary frames are not supported).{" "}
           <strong className="text-foreground">bzip2</strong> ingest, HDT loading, the
           mmap / external-memory path, and the fully-parallel fast loaders are
           native-only — in the browser the in-memory streaming loader is used.
         </p>
       }
-      readmeHref="https://github.com/jeswr/sparq/tree/main/crates/sparq-core"
-      skillHref="https://github.com/jeswr/sparq/blob/main/skills/data-formats/SKILL.md"
-      links={[{ href: "/try", label: "Open the full SPARQL REPL" }]}
+      readmeHref="https://github.com/sparq-org/sparq/tree/main/crates/sparq-core"
+      skillHref="https://github.com/sparq-org/sparq/blob/main/skills/data-formats/SKILL.md"
+      links={[{ href: withBasePath("/app/"), label: "Open the SPARQL workbench", external: true }]}
     >
       <DataFormatsDemo />
     </SurfaceContent>

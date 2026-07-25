@@ -1,0 +1,216 @@
+{
+  "gather": "sparql-same-box-comparison",
+  "wave": "canonical-http-ttfb-panel (sq-7d3dj.34)",
+  "canonical": true,
+  "canonical_note": "CANONICAL: dedicated QUIET c6i.4xlarge (16 vCPU / 32 GiB, x86_64) in eu-west-2, single-tenant, one engine active at a time on the SAME generated corpus + SAME query files. min-of-3 on a loaded store; per-query timeout recorded as honest 'timeout'/ERROR, never fabricated. Counts cross-checked engine-vs-engine AND vs bench/<suite>/expected-rows.tsv where present.",
+  "git_commit": "13bfa892",
+  "suite": "sp2b-http",
+  "scale": "SP2Bench 250000 triples (real Freiburg sp2b_gen, deterministic)",
+  "iters": 3,
+  "tsv_format": "<query>\\t<rows|ERROR>\\t<ka_best_us>\\t<ka_ttfb_us>\\t<fresh_best_us>\\t<fresh_ttfb_us>",
+  "engines": {
+    "sparq": {
+      "version": "13bfa892",
+      "mode": "HTTP server (sparq-server, SPARQL 1.1 protocol at /sparql) via http_sparql_adapter.py --profile"
+    },
+    "oxigraph": {
+      "version": "0.5.9",
+      "mode": "HTTP server (prebuilt sha256-pinned oxigraph serve-read-only, /query) via http_sparql_adapter.py --profile"
+    },
+    "fuseki": {
+      "version": "apache-jena-fuseki 6.1.0 (official Apache tarball)",
+      "mode": "HTTP server (OFFLINE tdb2.tdbloader bulk load -> fuseki-server --tdb2, the intended bulk path; fixes the 2026-07-07 docker-image load hang) via http_sparql_adapter.py --profile"
+    },
+    "virtuoso": {
+      "version": "openlink/virtuoso-opensource-7",
+      "image_digest": "openlink/virtuoso-opensource-7@sha256:2a9914b95f8a52927a73947c87ec2727f78f87d38e41c38c379efb121f9cbed1",
+      "mode": "HTTP server (isql ld_dir bulk load, /sparql) via http_sparql_adapter.py --profile"
+    },
+    "qlever": {
+      "version": "adfreiburg/qlever",
+      "image_digest": "adfreiburg/qlever@sha256:bc1958b921a731b088ffcf8b4f4524d1937dc35227abe6730c8e28f3797d5fd1",
+      "mode": "HTTP server (qlever-index -> qlever-server) via http_sparql_adapter.py --profile"
+    }
+  },
+  "load": {
+    "sparq_load_s": "0.515",
+    "oxigraph_load_s": "1.340",
+    "fuseki_wall_s": "615.6",
+    "virtuoso_wall_s": "74.8",
+    "qlever_wall_s": "24.3",
+    "note": "sparq = sparq-server spawn->first-HTTP-answer seconds (load+bind); oxigraph = pure offline bulk-load seconds; fuseki/virtuoso/qlever = whole-recipe wall (load+serve+query+teardown)"
+  },
+  "statuses": {
+    "sparq": "ok",
+    "oxigraph": "ok",
+    "fuseki": "ok",
+    "virtuoso": "ok",
+    "qlever": "ok"
+  },
+  "count_crosscheck": {
+    "q01": {
+      "sparq": "1",
+      "oxigraph": "1",
+      "fuseki": "1",
+      "virtuoso": "1",
+      "qlever": "1",
+      "all_agree": true,
+      "expected": "1",
+      "matches_expected": true
+    },
+    "q02": {
+      "sparq": "6067",
+      "oxigraph": "6067",
+      "fuseki": "6067",
+      "virtuoso": "6067",
+      "qlever": "6067",
+      "all_agree": true,
+      "expected": "6067",
+      "matches_expected": true
+    },
+    "q03a": {
+      "sparq": "15823",
+      "oxigraph": "15823",
+      "fuseki": "15823",
+      "virtuoso": "15823",
+      "qlever": "15823",
+      "all_agree": true,
+      "expected": "15823",
+      "matches_expected": true
+    },
+    "q03b": {
+      "sparq": "114",
+      "oxigraph": "114",
+      "fuseki": "114",
+      "virtuoso": "114",
+      "qlever": "114",
+      "all_agree": true,
+      "expected": "114",
+      "matches_expected": true
+    },
+    "q03c": {
+      "sparq": "0",
+      "oxigraph": "0",
+      "fuseki": "0",
+      "virtuoso": "0",
+      "qlever": "0",
+      "all_agree": true,
+      "expected": "0",
+      "matches_expected": true
+    },
+    "q04": {
+      "sparq": "541911",
+      "oxigraph": "541911",
+      "fuseki": "ERROR",
+      "virtuoso": "541911",
+      "qlever": "541911",
+      "all_agree": true,
+      "expected": "541911",
+      "matches_expected": true
+    },
+    "q05b": {
+      "sparq": "6933",
+      "oxigraph": "6933",
+      "fuseki": "6933",
+      "virtuoso": "6933",
+      "qlever": "6933",
+      "all_agree": true,
+      "expected": "6933",
+      "matches_expected": true
+    },
+    "q07": {
+      "sparq": "48",
+      "oxigraph": "ERROR",
+      "fuseki": "ERROR",
+      "virtuoso": "48",
+      "qlever": "48",
+      "all_agree": true,
+      "expected": "48",
+      "matches_expected": true
+    },
+    "q08": {
+      "sparq": "358",
+      "oxigraph": "ERROR",
+      "fuseki": "358",
+      "virtuoso": "358",
+      "qlever": "0",
+      "all_agree": false,
+      "expected": "358",
+      "matches_expected": false
+    },
+    "q09": {
+      "sparq": "4",
+      "oxigraph": "4",
+      "fuseki": "4",
+      "virtuoso": "4",
+      "qlever": "4",
+      "all_agree": true,
+      "expected": "4",
+      "matches_expected": true
+    },
+    "q10": {
+      "sparq": "452",
+      "oxigraph": "452",
+      "fuseki": "452",
+      "virtuoso": "452",
+      "qlever": "452",
+      "all_agree": true,
+      "expected": "452",
+      "matches_expected": true
+    },
+    "q11": {
+      "sparq": "10",
+      "oxigraph": "10",
+      "fuseki": "10",
+      "virtuoso": "10",
+      "qlever": "10",
+      "all_agree": true,
+      "expected": "10",
+      "matches_expected": true
+    },
+    "q12b": {
+      "sparq": "1",
+      "oxigraph": "ERROR",
+      "fuseki": "1",
+      "virtuoso": "1",
+      "qlever": "0",
+      "all_agree": false,
+      "expected": "1",
+      "matches_expected": false
+    },
+    "q12c": {
+      "sparq": "0",
+      "oxigraph": "0",
+      "fuseki": "0",
+      "virtuoso": "0",
+      "qlever": "0",
+      "all_agree": true,
+      "expected": "0",
+      "matches_expected": true
+    }
+  },
+  "count_crosscheck_note": "all_agree = every engine that produced a (non-ERROR) count agrees. matches_expected = those counts equal bench/<suite>/expected-rows.tsv. A disagreement is recorded HONESTLY (never adjusted); this is why COUNT is checked before trusting any timing.",
+  "env": {
+    "host_class": "dedicated-quiet-ec2-c6i.4xlarge (CANONICAL 16 vCPU / 32 GiB x86_64)",
+    "cpu_model": "Intel(R) Xeon(R) Platinum 8375C CPU @ 2.90GHz",
+    "nproc": 16,
+    "os": "Linux",
+    "kernel": "6.17.0-1019-aws",
+    "quiet_box": true,
+    "gathered_at_utc": "2026-07-07T09:24:34Z",
+    "git_commit": "13bfa892"
+  },
+  "sparq_tsv": "q01\t1\t205\t200\t222\t218\nq02\t6067\t21318\t18579\t20330\t18839\nq03a\t15823\t17985\t17061\t17170\t16549\nq03b\t114\t12698\t12667\t12272\t12259\nq03c\t0\t12742\t12730\t12359\t12351\nq04\t541911\t428428\t372029\t442724\t402129\nq05b\t6933\t23519\t23372\t22734\t22556\nq07\t48\t26150\t26143\t24486\t24479\nq08\t358\t159689\t159661\t160388\t160358\nq09\t4\t22897\t22890\t23059\t23050\nq10\t452\t309\t289\t347\t325\nq11\t10\t26793\t26783\t27319\t27309\nq12b\t1\t157778\t157762\t156199\t156183\nq12c\t0\t191\t187\t211\t206\n",
+  "oxigraph_tsv": "q01\t1\t1681\t1670\t1800\t1789\nq02\t6067\t410637\t319344\t408461\t318968\nq03a\t15823\t155704\t2069\t152722\t2172\nq03b\t114\t102706\t102666\t103769\t103728\nq03c\t0\t102515\t102505\t103843\t103829\nq04\t541911\t18114230\t7825\t17984944\t7722\nq05b\t6933\t553778\t13601\t551813\t13731\nq07\tERROR\toxigraph\nq08\tERROR\toxigraph\nq09\t4\t172986\t172973\t174057\t174041\nq10\t452\t2276\t616\t2325\t699\nq11\t10\t744528\t744512\t745141\t745127\nq12b\tERROR\toxigraph\nq12c\t0\t163\t158\t325\t321\n",
+  "fuseki_tsv": "q01\t1\t8178\t7773\t5792\t5482\nq02\t6067\t500860\t485522\t497612\t481655\nq03a\t15823\t138900\t135984\t138349\t135162\nq03b\t114\t34730\t34313\t35719\t35357\nq03c\t0\t31690\t31328\t32890\t32561\nq04\tERROR\tfuseki\nq05b\t6933\t380931\t380033\t378490\t377758\nq07\tERROR\tfuseki\nq08\t358\t25274\t24713\t23388\t22982\nq09\t4\t163621\t163242\t158518\t158079\nq10\t452\t8782\t8537\t9060\t8775\nq11\t10\t37805\t37416\t33360\t32943\nq12b\t1\t5131\t4886\t5130\t4923\nq12c\t0\t3471\t3259\t3553\t3350\n",
+  "virtuoso_tsv": "q01\t1\t574\t569\t590\t584\nq02\t6067\t353367\t348415\t349935\t346788\nq03a\t15823\t93568\t92261\t93215\t92557\nq03b\t114\t1235\t1225\t1255\t1244\nq03c\t0\t514\t508\t513\t508\nq04\t541911\t8075623\t7940246\t8044954\t7913151\nq05b\t6933\t108998\t108138\t108572\t108039\nq07\t48\t502369\t502357\t503275\t503261\nq08\t358\t12904\t12881\t12913\t12889\nq09\t4\t13404\t13396\t13435\t13428\nq10\t452\t5409\t5384\t5409\t5382\nq11\t10\t12625\t12619\t12620\t12612\nq12b\t1\t8665\t8660\t8703\t8696\nq12c\t0\t448\t443\t491\t486\n",
+  "qlever_tsv": "q01\t1\t8589\t3358\t2845\t2829\nq02\t6067\t237107\t181646\t234247\t179427\nq03a\t15823\t35476\t34040\t34563\t33538\nq03b\t114\t1384\t1363\t1479\t1460\nq03c\t0\t4146\t1318\t1258\t1242\nq04\t541911\t2115683\t89005\t2110505\t89386\nq05b\t6933\t24309\t24172\t24164\t23948\nq07\t48\t8124\t8102\t7737\t7721\nq08\t0\t48973\t8747\t8503\t8485\nq09\t4\t10878\t1342\t1237\t1215\nq10\t452\t3906\t3870\t3944\t3902\nq11\t10\t5258\t2010\t1826\t1810\nq12b\t0\t9899\t7208\t7606\t7589\nq12c\t0\t2906\t1302\t1327\t1312\n",
+  "connection": {
+    "modes_measured": [
+      "keep-alive",
+      "fresh-connect"
+    ],
+    "primary": "keep-alive",
+    "note": "EVERY query was measured in BOTH connection regimes (the fairness question research/perf-dominance-gap-2026-07.md D9 left open): cols 3-4 = keep-alive (ONE persistent HTTP/1.1 connection reused across iterations; min-of-N discards the connect-bearing first iteration), cols 5-6 = fresh-connect (a NEW TCP connection per iteration, connect cost included). TTFB = time from request start to status-line+headers received; full = entire body read. All values are per-mode minima over the iterations."
+  }
+}

@@ -54,7 +54,10 @@ numeric = ["dep:oxrdf"]
 # supplying their own key projection MONOMORPHICALLY. Requires `rows` (the Row/Key/Posting
 # aliases) and pulls `rustc-hash` (the FxHashMap the hash join builds) ONLY when enabled — the
 # lean default build links neither.
-join = ["rows", "dep:rustc-hash"]
+# [SONNET-4.6] sq-7d3dj.19: also pulls dep:hashbrown so probe_emit and probe_gather_indices
+# can call raw_entry().from_hash() — a single precomputed FxHash selects the radix partition
+# AND performs the table lookup without a second internal re-hash.
+join = ["rows", "dep:rustc-hash", "dep:hashbrown"]
 # [OPUS-4.8] sq-vezew (epic sq-qonbz, Phase 4): the SPARQL term TOTAL ORDER —
 # `compare::compare_terms` (the engine's `compare_values`: error < blank < IRI < literal <
 # triple, numeric-aware + strict typed/temporal + string fallback + recursive triple-term
@@ -66,6 +69,14 @@ join = ["rows", "dep:rustc-hash"]
 # stay behind the trait the consumer implements), so this feature links NOTHING new; the lean
 # default build compiles none of it.
 compare = []
+# [FABLE-5] sq-atjue: the zero-overhead DELTA harness (the substrate half of the
+# sparq-engine-systems paper §8, `site/papers/sparq-engine-systems.typ`). Measures each shared
+# kernel against a hand-rolled pre-extraction equivalent and emits the
+# `substrate.overhead_<kernel>` house JSON envelope. Implies `join` + `numeric` + `compare` (it
+# exercises all three kernel families). DEFAULT-OFF: the lean core/engine/wasm build compiles
+# none of it, and it links NO new dependency (the timing loop is `std::time::Instant` + a
+# hand-rolled JSON serialiser), so enabling it never bloats a consumer.
+overhead = ["join", "numeric", "compare"]
 
 [dependencies]
 # `version` alongside `path`: cargo uses the path locally and the version on crates.io
@@ -75,10 +86,15 @@ sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = fal
 # Inline small rows (avoid a heap allocation per solution row / join key). Same crate the
 # engine already uses for its `Row`/`Key` aliases, so the representation is byte-identical.
 smallvec.workspace = true
-# The hash join builds an `FxHashMap<Key, Posting>`. OPTIONAL: linked ONLY by the `join`
-# feature (`dep:rustc-hash`), so the default / `rows`-only / `numeric`-only build never pulls
-# it. Same hasher the engine uses, so the build/probe key hash is byte-identical.
+# The hash join builds a `JoinTable = hashbrown::HashMap<Key, Posting, FxBuildHasher>`.
+# OPTIONAL: linked ONLY by the `join` feature. Same FxBuildHasher the engine uses, so the
+# build/probe key hash is byte-identical. rustc-hash provides the FxBuildHasher; hashbrown
+# provides the HashMap with raw_entry() for single-hash probe lookup. [SONNET-4.6] sq-7d3dj.19
 rustc-hash = { workspace = true, optional = true }
+# hashbrown::HashMap exposes raw_entry().from_hash() — the probe uses a precomputed FxHash
+# for BOTH partition selection and table lookup (no second internal re-hash). OPTIONAL: linked
+# ONLY by the `join` feature (`dep:hashbrown`). [SONNET-4.6] sq-7d3dj.19
+hashbrown = { workspace = true, optional = true }
 # The numeric scaffold's `as_numeric` classifies an `oxrdf::Literal`. OPTIONAL: linked ONLY
 # by the `numeric` feature (`dep:oxrdf`), so the default / `rows`-only build never pulls it.
 # `oxrdf` is already in the workspace dep tree (via sparq-core), so this adds no new crate.
@@ -87,8 +103,11 @@ oxrdf = { workspace = true, optional = true }
 # [SONNET-4.6] sq-qonbz.4: criterion for the join/numeric micro-bench (dev-only, never
 # reaches the lean default or wasm build). Pinned at "0.5" to match the bench/zk pattern.
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 oxrdf = { workspace = true }
+# [SONNET-4.6] sq-3dyje.1: property-based tests for the term total-order and numeric tower.
+# Dev-dep ONLY — never reaches the shipped crate or any feature-OFF build.
+proptest = "1"
 
 # [SONNET-4.6] sq-qonbz.4: The micro-bench exercises merge_join + hash build/probe + Num
 # arithmetic. Feature-gated at bench time on `join` + `numeric` (which imply `rows`).
@@ -96,3 +115,18 @@ oxrdf = { workspace = true }
 name = "substrate"
 harness = false
 required-features = ["join", "numeric"]
+
+# [FABLE-5] sq-atjue: the zero-overhead DELTA runner — drives `overhead::OverheadReport::run`
+# and prints the human table + the `substrate.overhead_<kernel>` house JSON envelope. Pass
+# `--json` for the envelope only, `--canonical` on a dedicated quiet host (headline-eligible),
+# `--reps N` to set the min-of-N rep count. Gated on the `overhead` feature.
+[[example]]
+name = "substrate_overhead"
+required-features = ["overhead"]
+
+# [FABLE-5] sq-sqtk2.4: `compare.rs` hosts `#[cfg(kani)]` bounded-proof harnesses for the
+# term-total-order laws (run: `cargo kani -p sparq-substrate --features compare`). The Kani
+# model checker injects the `kani` cfg; register it so the normal `-D warnings` build does
+# not trip `unexpected_cfgs` (same pattern as sparq-vectors / sparq-core).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }

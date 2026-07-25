@@ -19,7 +19,7 @@
 // system browser (the design's rule: the GUI never renders the site, it links to it).
 
 import * as React from "react";
-import { PanelsTopLeft, X, Layers, Upload, Download, AlertTriangle } from "lucide-react";
+import { PanelsTopLeft, X, Layers, Upload, Download, AlertTriangle, FileUp } from "lucide-react";
 
 import { LeftRail } from "@/components/workbench/left-rail";
 import { TitleBar } from "@/components/workbench/title-bar";
@@ -29,6 +29,11 @@ import { StatusBar } from "@/components/workbench/status-bar";
 import { ToolPanel } from "@/components/workbench/tool-panel";
 import { TOOLS, toolById } from "@/data/tools";
 import { useEngine } from "@/lib/engine-context";
+// (sq-eydh9) [SONNET-4.6] — global workbench drop zone: dropping RDF files ANYWHERE on the
+// workbench opens the import drawer and runs the multi-file import (both personas — Tauri
+// webview drops also deliver File objects, so the browser path handles them too).
+import { useFileDrop } from "@/components/workbench/dropzone";
+import { guessFormat } from "@/lib/rdf-format";
 // [OPUS-4.8] sq-ixc3.10 — the keyboard-first spine: the Cmd-K palette provider + the shell's own
 // contributed commands (open every tool, switch / close open tabs). Tools register their OWN verbs
 // (the Query tool: run / EXPLAIN / recent queries) from inside their panels.
@@ -46,7 +51,11 @@ import {
 } from "@/components/workbench/import-drawer";
 // [OPUS-4.8] sq-tp1m (#757) — keeps the engine's inference regime in lockstep with the active
 // workspace's persisted choice (restores it on load), mounted once regardless of the active tab.
-import { InferenceModeBridge } from "@/components/workbench/inference-control";
+// [sq-glo5r] — N3RulesBridge keeps the engine's N3 rules cache in lockstep with the workspace.
+import { InferenceModeBridge, N3RulesBridge } from "@/components/workbench/inference-control";
+// [FABLE-5] sq-ixc3.14 — keeps the engine's federation egress allowlist in lockstep with the
+// active workspace's persisted setting (fail-closed until pushed), mounted once like the bridges above.
+import { FederationBridge } from "@/components/workbench/federation-control";
 // [OPUS-4.8] sq-xvj9 — the Cmd-K counterpart to the rail's "Export data…": serialise + download the
 // whole store as pretty Turtle / TriG / JSON-LD from the keyboard-first spine.
 import { downloadText } from "@/lib/download";
@@ -111,6 +120,12 @@ export function Workbench() {
         />
         {/* [OPUS-4.8] sq-tp1m — sync the persisted per-workspace inference regime into the engine. */}
         <InferenceModeBridge />
+        {/* [sq-glo5r] — sync the per-workspace N3 rules into the engine's closure cache. */}
+        <N3RulesBridge />
+        {/* [FABLE-5] sq-ixc3.14 — sync the per-workspace federation egress allowlist. */}
+        <FederationBridge />
+        {/* (sq-eydh9) [SONNET-4.6] — global RDF file drop overlay, mounted once here. */}
+        <GlobalDropOverlay />
         {/* [OPUS-4.8] sq-vw3ax (#820 redesign) — a native-feeling dark workspace. The ambient teal
             aura (a faint radial wash behind the chrome) makes the brand the lead, not garnish; the
             title bar above the top bar signals a real desktop window. */}
@@ -328,6 +343,125 @@ function ShellPaletteCommands({
           <X className="size-3.5" />
         </button>
       </div>
+    </div>
+  );
+}
+
+// ── (sq-eydh9) GlobalDropOverlay — drop RDF files ANYWHERE to import them ───────────────────
+//
+// Mounts a window-level drag/drop surface (via `useFileDrop`) so the user never has to open the
+// Import drawer just to drop a file. On drop: reads each file in-tab (File.text()), imports it
+// sequentially into the live store, then opens the drawer to show the aggregate result. Both the
+// Tauri webview and a plain browser deliver File objects on drop, so this path works in both
+// personas.
+//
+// The hidden `data-global-drop-input` is a stable <input type="file"> for Playwright
+// `setInputFiles()` — it exercises the same import code path the window-level drop uses.
+
+const GLOBAL_RDF_ACCEPT = [".ttl", ".nt", ".nq", ".trig", ".jsonld", ".json"];
+
+function GlobalDropOverlay() {
+  const { importRdf } = useEngine();
+  const { setOpen } = useImportDrawer();
+  const inputRef = React.useRef<HTMLInputElement>(null);
+
+  // Import a batch of already-read files: sequential, non-aborting per-file errors.
+  const runImportBatch = React.useCallback(
+    async (files: Array<{ name: string; text: string }>) => {
+      for (const file of files) {
+        try {
+          await importRdf({
+            kind: "paste",
+            mode: "add",
+            preserveGraphs: true,
+            label: file.name,
+            format: guessFormat(file.name),
+            text: file.text,
+          });
+        } catch {
+          // Per-file failure must not abort the rest — invariant from sq-eydh9.
+        }
+      }
+    },
+    [importRdf],
+  );
+
+  // Drop handler: extract File objects synchronously (before first await), then read + import.
+  const handleFiles = React.useCallback(
+    (result: import("@/lib/file-ingest").IngestResult) => {
+      if (result.accepted.length === 0) return;
+      // Open the drawer so the user can see the result after import.
+      setOpen(true);
+      void runImportBatch(result.accepted);
+    },
+    [runImportBatch, setOpen],
+  );
+
+  const { dragActive, targetProps } = useFileDrop({
+    onFiles: handleFiles,
+    accept: GLOBAL_RDF_ACCEPT,
+  });
+
+  // Hidden input: lets Playwright setInputFiles() exercise the global-drop code path.
+  const handleInputChange = React.useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const fileArr = Array.from(e.target.files ?? []);
+      if (fileArr.length === 0) return;
+      if (inputRef.current) inputRef.current.value = "";
+      const accepted: Array<{ name: string; text: string }> = [];
+      for (const file of fileArr) {
+        try {
+          const text = await file.text();
+          accepted.push({ name: file.name, text });
+        } catch {
+          // Unreadable files are silently skipped at the global-drop level; the drawer's own
+          // per-file upload shows explicit rejection reasons for user-initiated picks.
+        }
+      }
+      if (accepted.length > 0) {
+        setOpen(true);
+        void runImportBatch(accepted);
+      }
+    },
+    [runImportBatch, setOpen],
+  );
+
+  return (
+    // Full-screen transparent overlay: spread the drop handlers onto a fixed inset-0 div so the
+    // ENTIRE workbench surface is a drop target, not just a specific panel.
+    <div
+      data-global-drop
+      className="pointer-events-none fixed inset-0 z-40"
+      {...targetProps}
+      style={{ pointerEvents: dragActive ? "auto" : "none" }}
+    >
+      {/* Visible feedback ring only while a files drag is active over the window. */}
+      {dragActive && (
+        <div
+          aria-hidden
+          className="absolute inset-2 flex items-center justify-center rounded-xl border-2 border-dashed border-primary bg-background/70 backdrop-blur-sm"
+        >
+          <div className="flex items-center gap-3 text-sm font-medium text-foreground">
+            <FileUp className="size-6 text-primary" aria-hidden />
+            Drop RDF files to import
+          </div>
+        </div>
+      )}
+      <span className="sr-only" role="status">
+        {dragActive ? "Release to drop the RDF files and import them" : ""}
+      </span>
+      {/* Stable input for Playwright setInputFiles() — not visible; does not intercept pointer events. */}
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        accept={GLOBAL_RDF_ACCEPT.join(",")}
+        data-global-drop-input
+        aria-label="Drop files or use this input to import RDF"
+        className="sr-only"
+        style={{ pointerEvents: "auto" }}
+        onChange={handleInputChange}
+      />
     </div>
   );
 }

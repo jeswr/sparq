@@ -5,9 +5,13 @@
 // wasm bundle opens this panel, which states plainly what the tool WILL do over the live store,
 // its honesty tier, and which bead lands it. It NEVER fabricates a result or dresses a
 // walkthrough/soon capability up as live.
+//
+// [FABLE-5] sq-5lyme — the stub now also reads an optional per-tool honesty-metadata override
+// (ToolOverride, exported by the tool's own panel file and passed down by it), merged over the
+// base ToolDef. With no override (today's state for every tool) the rendering is IDENTICAL.
 
 import { Badge } from "@/components/ui/badge";
-import { toolById, TIER_META } from "@/data/tools";
+import { applyToolOverride, toolById, TIER_META, type ToolOverride } from "@/data/tools";
 
 /**
  * Which bead lands each remaining stub (so the stub is self-documenting, not a dead
@@ -37,15 +41,23 @@ const TIER_CAVEAT: Record<string, string> = {
     "This capability is a native-only crate not yet compiled to wasm, so it will start as a captured-I/O walkthrough until a portability spike or endpoint mode lands.",
 };
 
-export function ToolStub({ toolId }: { toolId: string }) {
-  const tool = toolById(toolId);
-  if (!tool) {
+export function ToolStub({
+  toolId,
+  override,
+}: {
+  toolId: string;
+  /** [FABLE-5] sq-5lyme — optional honesty-metadata override owned by the tool's panel file. */
+  override?: ToolOverride;
+}) {
+  const base = toolById(toolId);
+  if (!base) {
     return (
       <div className="flex h-full items-center justify-center p-8 text-sm text-muted-foreground">
         Unknown tool: {toolId}
       </div>
     );
   }
+  const tool = applyToolOverride(base, override);
   const Icon = tool.icon;
   const tier = TIER_META[tool.tier];
   const bead = TOOL_BEAD[toolId];

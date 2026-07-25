@@ -11,8 +11,8 @@
 //
 // NO WASM NEEDED. The hero + nav are server-rendered shell — they paint without the wasm engine,
 // so this spec runs on EVERY lane (including the light site-e2e CI lane that builds no wasm
-// bundle). The heavy in-tab REPL below the hero is its own (wasm-gated) concern, covered by
-// repl-results.spec.ts + try-query-smoke.spec.ts; here we only assert the shell boots clean.
+// bundle). The in-tab hero runner below the fold is its own (wasm-gated) concern, covered by
+// home-runner.spec.ts; here we only assert the shell boots clean.
 //
 // It is a CORRECTNESS smoke test, not a benchmark: it asserts the DOM + console, never a
 // wall-clock threshold (timings on a work-box / CI runner are non-canonical).
@@ -83,9 +83,13 @@ test("the home route renders the hero headline and the primary nav with no conso
 
   // The slim top bar (the AppShell "Primary" navigation landmark) carries the six content
   // destinations. Asserting the landmark + its core links proves the nav booted, not just copy.
+  // [SONNET-4.6] sq-4hiqe — "Try" was removed from the nav (the /try playground is gone).
+  // [OPUS-4.8] sq-1scgk — "Papers" was promoted INTO the bar (maintainer 2026-07-04 item 9b:
+  // make the paper-factory output prominently findable); the bar is now
+  // Home · Capabilities · App · Benchmarks · Papers · Download (no Try item).
   const primary = page.getByRole("navigation", { name: "Primary" }).first();
   await expect(primary).toBeVisible();
-  for (const label of ["Home", "Capabilities", "Try", "Benchmarks"]) {
+  for (const label of ["Home", "Capabilities", "App", "Benchmarks", "Papers", "Download"]) {
     await expect(primary.getByRole("link", { name: label, exact: true })).toBeVisible();
   }
 

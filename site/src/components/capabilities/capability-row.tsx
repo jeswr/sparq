@@ -4,18 +4,23 @@
 //
 // Three shapes (data/capabilities.ts `classify`):
 //   * deep  → a plain link "Open →" to the surface's retained /surface/<slug> deep page.
-//   * demo  → an expand-in-place disclosure "Demo ▸" that LAZILY mounts the surface's existing
-//             interactive component (LazyDemo) only on first expand, plus a "Details & caveats"
-//             <details> holding ONE caveat sentence + README + SKILL links.
+//   * demo  → a "Demo ▸" disclosure. The TILE is just the controlled button (DemoTileButton);
+//             its interactive body (LazyDemo + a "Details & caveats" <details>) is rendered
+//             SEPARATELY at full lane width by CapabilityDemoBody, so the lane grid can lay the
+//             body out as a full-content-width row instead of squeezing it into a half-column
+//             tile (sq-67qji — issue #1675). The lane grid (capability-lane-grid.tsx) owns the
+//             open/mounted state and pairs each button with its body by slug.
+//   * native → a static built-crate row with a one-line API snippet + crate/SKILL deep links.
 //   * soon  → a non-interactive "Coming soon" row that links out to GitHub.
 //
-// [OPUS-4.8] sq-vw3ax — BOLD redesign: each affordance now renders as a depth TILE (the
-// approved web-capabilities.html lane layout) instead of a flat 64px row, with a per-theme
-// accent line that reveals on hover. The lazy-mount machinery is UNCHANGED — it is the
-// load-bearing #1 risk (research/website-redesign.md §3 COLLAPSE): `mounted` flips true on
-// first expand and the demo chunk is fetched only then (see lazy-demo.tsx). Collapsing keeps
-// `mounted` true so a re-expand never re-fetches; we hide the body with CSS rather than
-// unmounting. The heavy bb.js / noir_js graph stays isolated to the ZK chunk alone.
+// [OPUS-4.8] sq-vw3ax — BOLD redesign: each affordance renders as a depth TILE (the approved
+// web-capabilities.html lane layout) instead of a flat 64px row, with a per-theme accent line
+// that reveals on hover (and pins on while the demo is open). The lazy-mount machinery is
+// UNCHANGED — it is the load-bearing #1 risk (research/website-redesign.md §3 COLLAPSE):
+// `mounted` flips true on first expand and the demo chunk is fetched only then (see
+// lazy-demo.tsx). Collapsing keeps `mounted` true so a re-expand never re-fetches; the body is
+// hidden with CSS rather than unmounted. The heavy bb.js / noir_js graph stays isolated to the
+// ZK chunk alone.
 
 import * as React from "react";
 import Link from "next/link";
@@ -24,14 +29,14 @@ import { ArrowRight, ChevronRight, ExternalLink } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { TIER_LABEL, TIER_VARIANT, type Surface } from "@/data/surfaces";
-import { surfaceBySlug } from "@/data/capabilities";
+import { surfaceBySlug, type CapabilityKind } from "@/data/capabilities";
 import {
   LazyDemo,
   hasLazyDemo,
   type LazyDemoSlug,
 } from "@/components/capabilities/lazy-demo";
 
-const REPO_URL = "https://github.com/jeswr/sparq";
+const REPO_URL = "https://github.com/sparq-org/sparq";
 
 interface RowMeta {
   /** ONE caveat sentence (honesty preserved; the full hedge lives in the SKILL/README). */
@@ -80,6 +85,12 @@ const META: Record<LazyDemoSlug, RowMeta> = {
     readme: `${REPO_URL}/tree/main/crates/sparq-rsp`,
     skill: `${REPO_URL}/blob/main/skills/streaming-rsp/SKILL.md`,
   },
+  federation: {
+    caveat:
+      "Captured-output walkthrough: the federation crates are opt-in native code (never in the wasm bundles), so the selection and plans are the real sparq-fedplan planner's verbatim output over the declared fixture — deterministic estimates, not a live multi-endpoint run and not benchmark numbers.",
+    readme: `${REPO_URL}/tree/main/crates/sparq-fedplan`,
+    skill: `${REPO_URL}/blob/main/skills/federated-planning/SKILL.md`,
+  },
   zk: {
     caveat:
       "Research-grade: the v1 ZK verifier is NOT externally audited — sound as landed under its stated threat model, pending re-review. Indicative engineering, not an audited cryptographic guarantee. Proving runs in-tab via 3rd-party bb.js UltraHonk (the ~MB prover chunk loads only on expand).",
@@ -91,6 +102,12 @@ const META: Record<LazyDemoSlug, RowMeta> = {
       "Research-grade in-tab SIMULATION of the protocol the native sparq-mpc crate runs — a faithful illustration, not the hardened crate in your browser and not a proof of correctness (that layer is a stub). Not externally audited.",
     readme: `${REPO_URL}/tree/main/crates/sparq-mpc`,
     skill: `${REPO_URL}/blob/main/skills/mpc/SKILL.md`,
+  },
+  policy: {
+    caveat:
+      "Captured-output walkthrough: sparq-policy is an opt-in native crate (evaluate() is pure Rust, no I/O) the wasm bundles never carry, so each Permit/Deny decision is the real evaluate() output for that (policy, request) pair — pinned by a named crate test — replayed rather than run in your tab. Single-node ODRL; the federated ODRL→MPC composition is deferred.",
+    readme: `${REPO_URL}/tree/main/crates/sparq-policy`,
+    skill: `${REPO_URL}/blob/main/skills/usage-control-policy/SKILL.md`,
   },
 };
 
@@ -112,27 +129,38 @@ function TileShell({
   surface,
   accent,
   cta,
+  details,
   interactive = true,
+  active = false,
 }: {
   surface: Surface;
   accent: string;
   cta: React.ReactNode;
+  /** Optional compact proof/deep-link block for a built native-only capability. */
+  details?: React.ReactNode;
   interactive?: boolean;
+  /** Pins the accent + elevation on (used while a demo tile's body is open). */
+  active?: boolean;
 }) {
   const Icon = surface.icon;
   return (
     <div
+      data-capability={surface.slug}
       className={cn(
         "relative flex items-start gap-3 overflow-hidden rounded-[var(--radius-lg)] border bg-card px-4 py-3.5 transition-all duration-150",
         interactive &&
           "hover:-translate-y-0.5 hover:border-primary/45 hover:shadow-elevation-2 [&:hover>[data-accent]]:opacity-90",
+        active && "border-primary/45 shadow-elevation-2",
       )}
     >
-      {/* The per-theme accent spine — revealed on hover. */}
+      {/* The per-theme accent spine — revealed on hover, and pinned on while the demo is open. */}
       <span
         data-accent
         aria-hidden
-        className="absolute inset-y-0 left-0 w-[3px] opacity-0 transition-opacity duration-150"
+        className={cn(
+          "absolute inset-y-0 left-0 w-[3px] transition-opacity duration-150",
+          active ? "opacity-90" : "opacity-0",
+        )}
         style={{ background: accent }}
       />
       <span className="flex size-9 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-primary/10 text-primary">
@@ -143,12 +171,54 @@ function TileShell({
         <div className="mt-1 text-[12.7px] leading-snug text-muted-foreground">
           {surface.blurb}
         </div>
+        {details}
       </div>
       <div className="flex shrink-0 flex-col items-end gap-2">
         <TierBadge surface={surface} />
         {cta}
       </div>
     </div>
+  );
+}
+
+/** [GPT-5.6] sq-vw3ax.15 — built native crate: copyable API proof + direct depth links,
+ *  without inventing a demo, route, or browser bundle. */
+function NativeTile({ surface, accent }: { surface: Surface; accent: string }) {
+  const native = surface.native;
+  if (!native) return null;
+
+  return (
+    <TileShell
+      surface={surface}
+      accent={accent}
+      interactive={false}
+      cta={null}
+      details={
+        <div className="mt-3 space-y-2 border-t pt-2.5">
+          <code className="block overflow-x-auto rounded-md bg-muted px-2.5 py-2 font-mono text-[11.5px] text-foreground">
+            {native.snippet}
+          </code>
+          <div className="flex flex-wrap gap-x-3 gap-y-1 text-[12px]">
+            <a
+              className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
+              href={native.readme}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Crate / source <ExternalLink className="size-3" aria-hidden />
+            </a>
+            <a
+              className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
+              href={native.skill}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              SKILL.md <ExternalLink className="size-3" aria-hidden />
+            </a>
+          </div>
+        </div>
+      }
+    />
   );
 }
 
@@ -199,91 +269,141 @@ function SoonTile({ surface, accent }: { surface: Surface; accent: string }) {
   );
 }
 
-/** "Demo ▸" expand-in-place tile — lazily mounts the demo on first expand. */
-function DemoTile({
+/** Internal /showcase route for the flagship demos that have a full end-to-end showcase page.
+ *  Surfaced as an "Open the full showcase" link in the expanded demo, so the maintainer's
+ *  "send me to the showcase" intent (issue #1675) is honoured without leaving the gallery or
+ *  fabricating a showcase page for the six demos that have none. */
+const SHOWCASE_HREF: Partial<Record<LazyDemoSlug, string>> = {
+  zk: "/showcase/zk-car-hire",
+  mpc: "/showcase/mpc-100k",
+};
+
+/** "Demo ▸" tile HEADER — a controlled disclosure button (grid cell). The interactive body is
+ *  rendered separately at full lane width by `CapabilityDemoBody`, so a wide demo is no longer
+ *  confined to a half-column tile (sq-67qji). Open state is owned by the lane grid, which pairs
+ *  this button with its body by slug. */
+function DemoTileButton({
   surface,
-  slug,
   accent,
+  open,
+  onToggle,
 }: {
   surface: Surface;
-  slug: LazyDemoSlug;
   accent: string;
+  open: boolean;
+  onToggle: () => void;
 }) {
-  const [open, setOpen] = React.useState(false);
-  // Once mounted, stay mounted across collapse/re-expand so the chunk is fetched at most once.
-  const [mounted, setMounted] = React.useState(false);
-  const meta = META[slug];
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-expanded={open}
+      className="group block w-full rounded-[var(--radius-lg)] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+    >
+      <TileShell
+        surface={surface}
+        accent={accent}
+        active={open}
+        cta={
+          <span className={CTA_CLASS}>
+            Demo
+            <ChevronRight
+              className={cn("size-3 transition-transform", open && "rotate-90")}
+              aria-hidden
+            />
+          </span>
+        }
+      />
+    </button>
+  );
+}
 
-  const toggle = () => {
-    setOpen((v) => {
-      const next = !v;
-      if (next) setMounted(true);
-      return next;
-    });
-  };
+/** The full-lane-width body for an expanded demo (sq-67qji). The lane grid renders this as a
+ *  `lg:col-span-2` row BELOW the tile grid (capability-lane-grid.tsx), reclaiming the numbered-
+ *  spine column so the interactive demo gets the full content width instead of ~1/3 of it —
+ *  the fix for issue #1675.
+ *
+ *  The lazy mount is UNCHANGED and load-bearing (the #1 risk, research/website-redesign.md §3):
+ *  this body is only rendered once its slug has been opened (the lane grid only mounts opened
+ *  slugs), and it stays mounted — hidden with CSS on collapse — so re-expanding never re-fetches
+ *  the demo's code-split chunk. `data-demo-body` + the CSS-hidden collapse are the invariants the
+ *  e2e lazy-mount test (e2e/capabilities-lazy.spec.ts) asserts, and are preserved verbatim. */
+export function CapabilityDemoBody({
+  slug,
+  open,
+  onCollapse,
+}: {
+  slug: LazyDemoSlug;
+  open: boolean;
+  onCollapse: () => void;
+}) {
+  const surface = surfaceBySlug(slug);
+  const meta = META[slug];
+  const showcaseHref = SHOWCASE_HREF[slug];
+  const Icon = surface?.icon;
 
   return (
-    <div>
-      <button
-        type="button"
-        onClick={toggle}
-        aria-expanded={open}
-        className="group block w-full rounded-[var(--radius-lg)] text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-      >
-        <TileShell
-          surface={surface}
-          accent={accent}
-          cta={
-            <span className={CTA_CLASS}>
-              Demo
-              <ChevronRight
-                className={cn(
-                  "size-3 transition-transform",
-                  open && "rotate-90",
-                )}
-                aria-hidden
-              />
-            </span>
-          }
-        />
-      </button>
-
-      {/* The body is only present in the DOM once first expanded; CSS hides it on collapse so a
-          re-expand does not re-fetch the chunk (mounted stays true). */}
-      {mounted && (
-        <div className={cn("px-1 pt-3", !open && "hidden")} data-demo-body={slug}>
-          <div className="rounded-[var(--radius-lg)] border bg-muted/20 p-3">
-            <LazyDemo slug={slug} mounted={mounted} />
+    <div data-demo-body={slug} className={cn("lg:col-span-2", !open && "hidden")}>
+      <div className="rounded-[var(--radius-lg)] border bg-muted/20 p-4 sm:p-5">
+        {/* Body header — re-anchors the now full-width demo to its tile and carries the
+            flagship's "full showcase" link + a nearby collapse control (the toggle button now
+            lives up in the grid, so a local collapse keeps the demo usable). */}
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b pb-3">
+          <div className="flex items-center gap-2 text-sm font-semibold tracking-tight">
+            {Icon && (
+              <span className="flex size-7 shrink-0 items-center justify-center rounded-[var(--radius-md)] bg-primary/10 text-primary">
+                <Icon className="size-4" aria-hidden />
+              </span>
+            )}
+            {surface?.title}
           </div>
-
-          <details className="mt-3 rounded-[var(--radius-lg)] border bg-card px-3 py-2 text-sm">
-            <summary className="cursor-pointer select-none font-medium text-foreground/90">
-              Details &amp; caveats
-            </summary>
-            <p className="mt-2 text-muted-foreground">{meta.caveat}</p>
-            <div className="mt-2 flex flex-wrap gap-3 text-sm">
-              <a
-                className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
-                href={meta.readme}
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                Crate / source <ExternalLink className="size-3.5" />
-              </a>
-              {meta.skill && (
-                <a
-                  className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
-                  href={meta.skill}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  SKILL.md <ExternalLink className="size-3.5" />
-                </a>
-              )}
-            </div>
-          </details>
+          <div className="flex items-center gap-4">
+            {showcaseHref && (
+              <Link href={showcaseHref} className={CTA_CLASS}>
+                Open the full showcase
+                <ArrowRight className="size-3" aria-hidden />
+              </Link>
+            )}
+            <button
+              type="button"
+              onClick={onCollapse}
+              className="inline-flex items-center gap-1 text-[12px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+            >
+              Collapse
+              <ChevronRight className="size-3 -rotate-90" aria-hidden />
+            </button>
+          </div>
         </div>
-      )}
+
+        <LazyDemo slug={slug} mounted />
+      </div>
+
+      <details className="mt-3 rounded-[var(--radius-lg)] border bg-card px-3 py-2 text-sm">
+        <summary className="cursor-pointer select-none font-medium text-foreground/90">
+          Details &amp; caveats
+        </summary>
+        <p className="mt-2 text-muted-foreground">{meta.caveat}</p>
+        <div className="mt-2 flex flex-wrap gap-3 text-sm">
+          <a
+            className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
+            href={meta.readme}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Crate / source <ExternalLink className="size-3.5" />
+          </a>
+          {meta.skill && (
+            <a
+              className="inline-flex items-center gap-1 text-primary underline-offset-4 hover:underline"
+              href={meta.skill}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              SKILL.md <ExternalLink className="size-3.5" />
+            </a>
+          )}
+        </div>
+      </details>
     </div>
   );
 }
@@ -296,18 +416,31 @@ export function CapabilityRowItem({
   slug,
   kind,
   accent = "var(--primary)",
+  open = false,
+  onToggle,
 }: {
   slug: string;
-  kind: "deep" | "demo" | "soon";
+  kind: CapabilityKind;
   accent?: string;
+  /** Controlled disclosure state for a demo tile — owned by the lane grid (sq-67qji). */
+  open?: boolean;
+  onToggle?: () => void;
 }) {
   const surface = surfaceBySlug(slug);
   if (!surface) return null; // data drift — a row for an unknown surface; render nothing.
   if (kind === "deep") return <DeepTile surface={surface} accent={accent} />;
+  if (kind === "native") return <NativeTile surface={surface} accent={accent} />;
   if (kind === "soon") return <SoonTile surface={surface} accent={accent} />;
   // demo — guard against a data drift where a "demo" surface lacks a registered demo.
   if (hasLazyDemo(surface.slug)) {
-    return <DemoTile surface={surface} slug={surface.slug} accent={accent} />;
+    return (
+      <DemoTileButton
+        surface={surface}
+        accent={accent}
+        open={open}
+        onToggle={onToggle ?? (() => {})}
+      />
+    );
   }
   return <SoonTile surface={surface} accent={accent} />;
 }

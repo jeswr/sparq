@@ -1,0 +1,7 @@
+BASE <http://example.org/rdf12>
+
+PREFIX ex: <http://example.org/test#>
+
+shape ex:TestShape {
+	ex:label in=["hi"@en--ltr "shalom"@he--rtl "plain"@fr] .
+}

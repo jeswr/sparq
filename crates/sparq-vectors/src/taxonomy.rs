@@ -31,7 +31,10 @@
 //!    neighbours (design §2 + §6.A "verify-soundness / answer-safety").
 //!
 //! `gufo:Kind`/`gufo:Role` rigidity split is the design's **optional/last** prior (§2, §9.5 — the
-//! annotations are rare in the wild); it is deferred (a tracked bead) and not implemented here.
+//! annotations are rare in the wild); its READ-ONLY reader now lives in [`crate::ufo_priors`],
+//! which feeds UFO-**proven** disjointness into this oracle via
+//! [`DisjointnessOracle::absorb_proven_pairs`] (the mask stays answer-safe: absorbed pairs carry
+//! the same proven-only contract).
 //!
 //! # What is provable vs what is empirical (stated honestly)
 //!
@@ -629,6 +632,21 @@ impl DisjointnessOracle {
         oracle
     }
 
+    /// Absorb externally-**proven** disjoint class pairs into the oracle — the seam the
+    /// [`crate::ufo_priors`] UFO/gUFO reader feeds ([FABLE-5] kern/ufo-priors, epic sq-0wo9e:
+    /// the design's "optional/last" gUFO prior, §2 + §9.5).
+    ///
+    /// SOUNDNESS CONTRACT: every pair passed here must be *proven* disjoint by the caller (e.g.
+    /// UFO's kind-partition / nature-partition theorems — see `ufo_priors`'s module docs). The
+    /// oracle performs no propagation on absorbed pairs (a caller like `UfoPriors` propagates
+    /// before feeding); it only records them, keeping [`is_disjoint`](Self::is_disjoint) and the
+    /// [`mask_candidates`](Self::mask_candidates) hard mask answer-safe. Self-pairs are ignored.
+    pub fn absorb_proven_pairs<I: IntoIterator<Item = (Id, Id)>>(&mut self, pairs: I) {
+        for (a, b) in pairs {
+            self.add_pair(a, b);
+        }
+    }
+
     fn add_pair(&mut self, a: Id, b: Id) {
         if a == b {
             return; // a class is never disjoint from itself.
@@ -951,6 +969,33 @@ ex:Animal owl:disjointWith ex:Plant .
         for &(x, y) in &a {
             assert!(oracle.is_disjoint(x, y));
         }
+    }
+
+    #[test]
+    fn absorbed_proven_pairs_join_the_mask_and_self_pairs_are_ignored() {
+        // [FABLE-5] kern/ufo-priors: the seam the UFO/gUFO reader feeds. Absorbed pairs behave
+        // exactly like mined ones (symmetric, mask-effective); a self-pair is silently ignored.
+        let c = closed();
+        let mut oracle = DisjointnessOracle::mine(&c.graph);
+        let dog = class(&c.graph, "Dog");
+        let lt = class(&c.graph, "LivingThing");
+        assert!(
+            !oracle.is_disjoint(dog, lt),
+            "not disjoint before absorbing"
+        );
+        let before = oracle.pair_count();
+        oracle.absorb_proven_pairs([(dog, lt), (dog, dog)]);
+        assert_eq!(
+            oracle.pair_count(),
+            before + 1,
+            "self-pair ignored, real pair added"
+        );
+        assert!(
+            oracle.is_disjoint(dog, lt) && oracle.is_disjoint(lt, dog),
+            "symmetric"
+        );
+        let kept = oracle.mask_candidates(&[dog], &[(lt, 1u8)]);
+        assert!(kept.is_empty(), "absorbed pair drives the hard mask");
     }
 
     #[test]

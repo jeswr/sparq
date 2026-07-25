@@ -43,15 +43,18 @@ let _public_only = store.query_as(&Session::default(), Mode::Read, q)?.rows.len(
   graph content (the loader hard-rejects `solidx:` triples, so a writer cannot self-grant).
 - **Triples-native + zero-copy enforcement** — pods, ACL/ACR docs, and the auth view are all ordinary
   named graphs ("who can read G?" is one SPARQL pattern); the default path evaluates through the engine's
-  zero-copy dataset view, with a v1 `FROM NAMED` rewrite as a standard-SPARQL portability path.
-- **Write-path gating, WAC-Allow, per-resource decision + ACL write-through (#992 FR-1/3/5/6/7)** — `update_as` gates writes; `put_acl`/`delete_acl` are the authoritative LDP-`PUT`/`DELETE`-on-`.acl` write-through (atomic graph replace + re-materialize, fail-closed rollback); `wac_allow` builds the header; `decide`/`decide_batch`/`resolve_acl` answer the per-request *"may X do M on R?"* with the
+  zero-copy dataset view, with a v1 `FROM NAMED` rewrite as a standard-SPARQL portability path. The default-graph semantics are **spec-compliant by default** ([solid-sparql-query](https://github.com/jeswr/solid-sparql-query) Editor's Draft, issue #1546): the standing default graph is **empty** and a bare `{ ?s ?p ?o }` opts into the authorized union only via `FROM <…#union-default-graph>`; the opt-in `legacy-union-default-graph` feature reinstates the old union-always default — see the SKILL.
+- **Write-path gating, WAC-Allow, per-resource decision + ACL write-through (#992 FR-1/3/5/6/7)** — `update_as` gates writes; `put_acl`/`delete_acl` are the authoritative LDP-`PUT`/`DELETE`-on-`.acl` write-through (atomic graph replace + re-materialize, fail-closed rollback; a single-`.acl` write uses **diff-based** invalidation — `reindex_with` diffs old vs new `AuthIndex` per-origin and invalidates exactly the origins whose buckets changed, so other pods stay warm and cross-origin dependencies (WAC agentGroup, foreign-subject grants, ACP cross-doc indirection) are caught automatically; sound by construction, `sq-b7k7u`); `wac_allow` builds the header; `decide`/`decide_batch`/`resolve_acl` answer the per-request *"may X do M on R?"* with the
   governing-ACL + `accessTo`/`default` scope (FR-5: `WacDecision::acl_link_header()` → the `Link: rel="acl"` value) and a typed fail-closed `AclStatus` (absent/unloaded/transient ⇒ deny, never open — for a server's 401/403-vs-503 mapping).
 - **ODRL bridge (opt-in `odrl-bridge`, research-track — not a production cutover)** — runs the
   [`sparq-policy`](../sparq-policy) ODRL evaluator and materializes the equivalent WAC/ACP grant (or dual
   `auth:deny*`) into the auth view — no new enforcement engine (zero ODRL code by default; see below).
-- **Trust-graph admission PoC (opt-in `trust-graph`, research — NOT a security guarantee)** — a
-  [`sparq-trust`](../sparq-trust) admission stratum injects an issuer-signed, trusted-source-scoped
-  credential fact ahead of the materialiser; OFF = byte-identical WAC/ACP. No privacy/ZK (`sq-qhy4` unaudited).
+- **Trust-graph admission PoC (opt-in `trust-graph`, research — NOT a security guarantee)** — a [`sparq-trust`](../sparq-trust)
+  admission stratum injects an issuer-signed, trusted-source-scoped credential fact ahead of the materialiser; OFF = byte-identical WAC/ACP. No privacy/ZK (`sq-qhy4` unaudited).
+- **Pattern-scoped masking (opt-in `pattern-scope`, spike `sq-lrtc3.3`)** — an ODRL target as allow/deny **triple patterns** over a
+  graph, enforced by **materializing the masked sub-graph replica** (masked triples physically absent ⇒ oracle-equivalent under `OPTIONAL`/`EXISTS`/`MINUS`/aggregates/`COUNT` by construction). Design: `research/odrl-pattern-scoped-targets-2026-07.md`; envelope: `bench/pattern-scope/`.
+- **Concurrent reads (`&self`, no feature flag)** — every read entry point (`accessible`, `view_for`,
+  `query_as`/`query_json_as`/`ask_as`, `wac_allow`) takes `&self`, so N threads sharing one `Arc<PodStore>` query at once via a **sharded + bounded** session cache (interior `RwLock` stripes, LRU eviction); writes stay `&mut self`.
 
 ## ODRL → AUTH_GRAPH bridge (opt-in `odrl-bridge`)
 
@@ -66,10 +69,9 @@ action, or partyless/targetless request materializes **nothing**.
 (`materialize_odrl_permission_conditional`) persists as a per-session-rechecked ACP `auth:ConditionalGrant`
 (recipient/assignee matchers; an inclusive `odrl:dateTime` window vs `Session::now`, **fail-closed with no
 clock**); `purpose`/`count`/strict bounds have no stateless analogue and stay **one-shot** (any unmappable
-constraint falls the whole rule back to one-shot). Bridged grants are ledger-tracked; `refresh_odrl_grant(s)`
+constraint falls the rule back to one-shot). Bridged grants are ledger-tracked; `refresh_odrl_grant(s)`
 rebuilds the view (static baseline + replay of valid entries), retracting lapsed ones. **Deny retraction is
-asymmetric (fail-OPEN risk):** an `auth:deny*` is retracted **only** on a *definite* `Withdrawn` verdict
-(kept on `Applies`/`Ambiguous`); static grants are never in the ledger. Full mapping/replay detail in the SKILL.
+asymmetric (fail-OPEN risk):** an `auth:deny*` is retracted **only** on a *definite* `Withdrawn` verdict. Full detail in the SKILL.
 
 ## WASM support
 
@@ -77,10 +79,10 @@ asymmetric (fail-OPEN risk):** an `auth:deny*` is retracted **only** on a *defin
 `wasm32-unknown-unknown`** (no native-only deps — rayon off, `sparq-reason`'s parallel path gated). Its
 transitive `oxrdf 0.3.3 → rand → getrandom` needs the host bundle to select a wasm RNG backend as
 `sparq-wasm` does (`getrandom`'s `wasm_js` feature + the `getrandom_backend` cfg; see the
-[migration guide](../../docs/migrating-from-oxigraph.md#wasm-compilation)). **Timing on wasm32:** with no
-monotonic clock (`Instant::now()` panics), `materialize_wac`/`materialize_acp` `cfg`-gate the wall-clock
-plumbing off and report `stats.millis == 0.0` rather than trapping (rest of `MaterializeStats` unchanged);
-`tests/wasm_materialize.rs` (`wasm-pack test --node`) guards it. Deno-wasm / Workers are run-feasible.
+[migration guide](../../docs/migrating-from-oxigraph.md#wasm-compilation)). **Timing on wasm32:**
+`std::time::Instant` panics (no monotonic clock), so `materialize_wac`/`materialize_acp` `cfg`-gate the
+wall-clock plumbing off and report `stats.millis == 0.0` (rest of `MaterializeStats` unchanged); a wasm32
+smoke test (`tests/wasm_materialize.rs`, `wasm-pack test --node`) guards it. Deno-wasm / Workers run-feasible.
 
 ## Conformance, security & containment
 
@@ -92,14 +94,12 @@ plumbing off and report `stats.millis == 0.0` rather than trapping (rest of `Mat
   deciders — the N3-rules engine, an **independent procedural reference evaluator** (`tests/reference/`, no
   shared code) and the hand `Expect` table — asserting **zero divergence**. An oracle, **not** an audit.
 - **Bounded machine-checked proofs (Kani)** — `cargo kani -p sparq-solid` proves fail-closed decision
-  structure, deny-wins set algebra, and container-walk termination **within the bounds stated in the harness
-  docs** (`decide.rs`/`authindex.rs`), plus exhaustive nearest-ancestor enumeration
-  (`tests/container_walk_exhaustive.rs`). Bounded *functional* proofs — **not** a security audit.
+  structure, deny-wins set algebra, and container-walk termination **within the bounds stated in the harness docs** (`decide.rs`/`authindex.rs`), plus exhaustive nearest-ancestor enumeration (`tests/container_walk_exhaustive.rs`). Bounded *functional* proofs — **not** a security audit.
 - **Security posture — fail-closed.** Absence of a grant makes a graph **invisible**. The reasoner is fed
-  only ACL/ACR + structural facts — **never pod content** — so no writable document can grant itself access;
-  the reserved `urn:sparq:` namespace is rejected on input and forged `<urn:sparq:auth>` graphs are stripped
-  at load. `ldp:contains` is PSS-written opaque content, never derived from IRI structure or read into the
-  reasoner; containment *ancestry* drives ACL inheritance only (`tests/containment_view_ownership.rs`).
+  only ACL/ACR + structural facts — **never pod content** — so no writable document can grant itself
+  access; the reserved `urn:sparq:` namespace is rejected on input and forged `<urn:sparq:auth>` graphs
+  are stripped at load. `ldp:contains` is PSS-written opaque content, never derived from IRI structure or
+  read into the reasoner; containment *ancestry* drives ACL inheritance only (`tests/containment_view_ownership.rs`).
 
 ## 📚 Learn more
 

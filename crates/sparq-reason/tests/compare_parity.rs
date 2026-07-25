@@ -7,13 +7,18 @@
 //! Non-vacuous by construction: the fixture packs the pairs each comparator arm alone
 //! decides — numeric-vs-lexical divergences (`9` < `10` by value, `"10"` < `"9"`
 //! lexically), a cross-timezone `xsd:dateTime` pair whose TIMELINE order is the reverse
-//! of its lexical order (pins `strict_cmp`), a beyond-2^53 integer pair sharing one f64,
+//! of its lexical order (pins `strict_cmp`), a beyond-2^53 integer pair sharing one f64
+//! PLUS the double carrying their collapse image (pins the sq-wjl8i exact mixed-tier
+//! tie on BOTH engine paths: the numeric sort-cell recheck and `compare_values`), a
+//! decimal/double exact-equal pair, `NaN` / `INF` / `-INF` (pins the NaN-first
+//! totalisation), the plain digit-string `"11"` against integers `10`/`2`-adjacent
+//! values (pins the kind-first rank that replaced the intransitive lexical fallback),
 //! inline and stored integer ids, RDF 1.2 triple terms (pins the component-wise recursion),
 //! plus blanks / IRIs / language-tagged / boolean / date / gYear / unknown-datatype
-//! literals for the class ranks and the string fallback.  Mis-wire any arm and the two
-//! sequences diverge.  The `exact_cmp` collapse-recheck for distinct integers beyond 2^53
-//! is pinned by the `exact_recheck_orders_big_integers_beyond_2_53` unit test in
-//! `compare.rs`, not by this RDFS-entailment multiset (mutation-verified).
+//! literals for the class and kind ranks and the string fallback.  Mis-wire any arm and
+//! the two sequences diverge.  The `exact_cmp` collapse-recheck for distinct integers
+//! beyond 2^53 is pinned by the `exact_recheck_orders_big_integers_beyond_2_53` unit
+//! test in `compare.rs`, not by this RDFS-entailment multiset (mutation-verified).
 //!
 //! ## Full-multiset ordering parity (main parity test)
 //!
@@ -59,7 +64,13 @@ ex:bob ex:tiny "9"^^xsd:integer .
 ex:bob ex:score "9.5"^^xsd:decimal .
 ex:bob ex:big1 "9007199254740992"^^xsd:integer .
 ex:bob ex:big2 "9007199254740993"^^xsd:integer .
+ex:bob ex:big3 "9007199254740992E0"^^xsd:double .
 ex:bob ex:height "1.75E0"^^xsd:double .
+ex:bob ex:heightDec "1.75"^^xsd:decimal .
+ex:bob ex:nan "NaN"^^xsd:double .
+ex:bob ex:inf "INF"^^xsd:double .
+ex:bob ex:ninf "-INF"^^xsd:double .
+ex:bob ex:code "11" .
 ex:bob ex:ok "true"^^xsd:boolean .
 ex:bob ex:no "false"^^xsd:boolean .
 ex:bob ex:t1 "2024-03-15T14:00:00+01:00"^^xsd:dateTime .

@@ -94,6 +94,12 @@ impl UpdateDerivation {
         &self.entity
     }
 
+    /// The configured input-source IRIs, in their original order.
+    // [GPT-5.6] sq-cg237
+    pub fn used_inputs(&self) -> &[NamedNode] {
+        &self.used
+    }
+
     /// Start/end wall-clock instants of the update activity.
     pub fn timing(&self) -> (SystemTime, SystemTime) {
         (self.started, self.ended)
@@ -214,6 +220,14 @@ impl UpdateDerivation {
     /// The PROV-O lineage serialised as N-Triples (also a valid Turtle document).
     pub fn prov_ntriples(&self) -> String {
         sparq_engine::triples_to_ntriples(&self.prov_graph())
+    }
+
+    /// The same PROV-O lineage as [`prov_graph`](Self::prov_graph), serialised as
+    /// prefix-compacted Turtle.
+    ///
+    /// [GPT-5.6] sq-ijw35
+    pub fn prov_turtle(&self) -> String {
+        crate::triples_to_prov_turtle(&self.prov_graph())
     }
 }
 
@@ -495,6 +509,30 @@ mod tests {
         assert!(d.deleted().is_empty());
     }
 
+    /// [GPT-5.6] sq-cg237: the direct accessor exposes the configured input and agrees
+    /// with the update activity's materialised `prov:used` edge.
+    #[test]
+    fn update_used_inputs_are_exposed_and_materialised() {
+        let source = NamedNode::new_unchecked("http://ex/update-source");
+        let mut graph = g();
+        let derivation = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+            ProvConfig::with_inputs([source.clone()]),
+        )
+        .unwrap();
+
+        assert_eq!(derivation.used_inputs(), std::slice::from_ref(&source));
+        assert_eq!(derivation.used_inputs().len(), 1);
+
+        let activity = NamedOrBlankNode::NamedNode(derivation.activity().clone());
+        assert!(derivation.prov_graph().iter().any(|triple| {
+            triple.subject == activity
+                && triple.predicate.as_str() == "http://www.w3.org/ns/prov#used"
+                && triple.object == Term::NamedNode(source.clone())
+        }));
+    }
+
     #[test]
     fn insert_where_is_applied_in_place() {
         let mut graph = g();
@@ -651,6 +689,36 @@ mod tests {
             .collect::<Result<_, _>>()
             .expect("emitted lineage must be well-formed N-Triples");
         assert_eq!(parsed.len(), d.prov_graph().len());
+    }
+
+    /// [GPT-5.6] sq-ijw35: the UpdateDerivation Turtle method preserves every
+    /// provenance triple, and the inserted-result entity uses the registered prefix.
+    #[test]
+    fn prov_turtle_round_trips_the_exact_update_graph() {
+        let mut graph = g();
+        let d = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+            cfg(),
+        )
+        .unwrap();
+
+        let turtle = d.prov_turtle();
+        assert!(
+            turtle.contains("prov:Entity"),
+            "expected the prefix-compacted result entity in {turtle}"
+        );
+
+        let parsed: Vec<_> = oxttl::TurtleParser::new()
+            .for_slice(turtle.as_bytes())
+            .collect::<Result<_, _>>()
+            .expect("emitted lineage must be well-formed Turtle");
+        let expected = d.prov_graph();
+        assert_eq!(parsed.len(), expected.len());
+        assert_eq!(
+            parsed.into_iter().collect::<HashSet<_>>(),
+            expected.into_iter().collect::<HashSet<_>>()
+        );
     }
 
     #[test]
@@ -1058,6 +1126,349 @@ mod tests {
                 "INSERT DATA { <http://ex/s> <http://ex/p> 'a; b' } ; CREATE GRAPH <http://ex/g>"
             ),
             "SPARQL UPDATE"
+        );
+    }
+
+    // ── sq-qcnn.39: mutation-kill additions — exact prov_graph triple counts,
+    // prov:value annotation check, and USING keyword coverage. [SONNET-4.6] ─────
+
+    /// `UpdateDerivation::prov_graph()` for an INSERT…WHERE update (inserts non-empty,
+    /// 1 used input, no agent) must emit exactly 9 triples (5 activity: type/label/value/
+    /// startedAt/endedAt; 3 entity: type/wasGeneratedBy/wasDerivedFrom; 1 used).
+    /// Pinning the count kills mutations that drop any single `push()` call.
+    #[test]
+    fn insert_where_prov_graph_exact_triple_count() {
+        let mut graph = g();
+        let d = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+            cfg(),
+        )
+        .unwrap();
+        // 5 activity + 3 entity (inserts non-empty) + 1 used = 9
+        assert_eq!(
+            d.prov_graph().len(),
+            9,
+            "INSERT WHERE with 1 input emits 9 prov triples"
+        );
+    }
+
+    /// For a pure-DELETE update (2 deleted triples, 1 used input, no agent), the exact
+    /// count is: 5 activity + 0 entity (inserts empty) + 1 used + 4 invalidation
+    /// (2 × entity-type + wasInvalidatedBy) = 10. [SONNET-4.6] sq-qcnn.39
+    #[test]
+    fn pure_delete_prov_graph_exact_triple_count() {
+        let mut graph = g();
+        let d = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> DELETE { ?s ex:name ?n } WHERE { ?s ex:name ?n }",
+            cfg(),
+        )
+        .unwrap();
+        assert_eq!(d.deleted().len(), 2, "two name triples deleted");
+        // 5 activity + 1 used + 4 invalidation (2 × rdf:type + wasInvalidatedBy) = 10
+        assert_eq!(
+            d.prov_graph().len(),
+            10,
+            "pure DELETE with 2 deletes + 1 input emits 10 prov triples"
+        );
+    }
+
+    /// For a DELETE/INSERT WHERE (2 inserts, 2 deletes, 1 used input), the exact count
+    /// is: 5 activity + 3 entity + 1 used + 4 invalidation = 13. [SONNET-4.6] sq-qcnn.39
+    #[test]
+    fn delete_insert_prov_graph_exact_triple_count() {
+        let mut graph = g();
+        let d = derive_update(
+            &mut graph,
+            "PREFIX ex: <http://ex/> \
+             DELETE { ?s ex:age ?a } INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+            cfg(),
+        )
+        .unwrap();
+        assert_eq!(d.inserted().len(), 2, "two inserts");
+        assert_eq!(d.deleted().len(), 2, "two deletes");
+        // 5 activity + 3 entity (wasGeneratedBy + type + wasDerivedFrom×1)
+        // + 1 used + 4 invalidation = 13
+        assert_eq!(
+            d.prov_graph().len(),
+            13,
+            "DELETE/INSERT WHERE with 2 inserts + 2 deletes + 1 input emits 13 prov triples"
+        );
+    }
+
+    /// The update activity records the verbatim update text as a `prov:value` recipe —
+    /// the same annotation that `Derivation` (CONSTRUCT) emits for the query text.
+    /// No existing test checks for `prov:value` in `UpdateDerivation::prov_graph()`,
+    /// so this test kills the mutation that drops that push. [SONNET-4.6] sq-qcnn.39
+    #[test]
+    fn update_prov_graph_contains_query_recipe() {
+        let q = "PREFIX ex: <http://ex/> INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }";
+        let mut graph = g();
+        let d = derive_update(&mut graph, q, cfg()).unwrap();
+        let ls = lines(&d);
+        let a = d.activity().as_str();
+        // The verbatim update text is recorded on the activity as prov:value.
+        assert!(
+            ls.contains(&format!(
+                "<{a}> <http://www.w3.org/ns/prov#value> \"{q}\" ."
+            )),
+            "update prov_graph must carry the query text as prov:value; lines: {ls:?}"
+        );
+    }
+
+    /// `kind_label` must classify a `USING`-prefixed update as `"DELETE/INSERT WHERE"`.
+    /// The `USING` form is covered by the same branch as `WITH` / `INSERT` / `DELETE`
+    /// (`starts_with("INSERT") || starts_with("DELETE") || starts_with("WITH") || starts_with("USING")`).
+    /// Not having a direct test for `USING` leaves that branch arm unexercised by an
+    /// exact-value assertion, allowing a mutation that removes the `starts_with("USING")`
+    /// conjunct to survive. [SONNET-4.6] sq-qcnn.39
+    #[test]
+    fn kind_label_using_is_delete_insert_where() {
+        assert_eq!(
+            kind_label("USING <http://ex/g> DELETE { ?s ?p ?o } WHERE { ?s ?p ?o }"),
+            "DELETE/INSERT WHERE"
+        );
+        // PREFIX-stripped form (strip_prologue removes the prologue, USING is then first).
+        assert_eq!(
+            kind_label(
+                "PREFIX ex: <http://ex/> USING <http://ex/g> \
+                 DELETE { ?s ex:p ?o } WHERE { ?s ex:p ?o }"
+            ),
+            "DELETE/INSERT WHERE"
+        );
+    }
+
+    /// Pins the exact minted activity and entity IRIs for a known UPDATE derivation
+    /// (fixed clock + fixed query text). The IRI is:
+    ///   `urn:sparq:prov:{role}:{s_nanos:x}-{e_nanos:x}-{fnv1a(query):016x}`
+    /// where s_nanos = e_nanos = 1_700_000_000 * 1_000_000_000 = 0x17979cfe362a0000
+    /// and fnv1a("PREFIX ex: <http://ex/> INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }")
+    /// = 0x5125ddbf0b0c39fd.
+    /// This kills any arithmetic mutation in `mint()` that alters the FNV-1a output,
+    /// exercising the UPDATE call path specifically. [SONNET-4.6] sq-qcnn.39
+    #[test]
+    fn minted_iri_for_update_has_exact_known_value() {
+        let q = "PREFIX ex: <http://ex/> INSERT { ?s ex:years ?a } WHERE { ?s ex:age ?a }";
+        let d = derive_update(&mut g(), q, cfg()).unwrap();
+        assert_eq!(
+            d.activity().as_str(),
+            "urn:sparq:prov:activity:17979cfe362a0000-17979cfe362a0000-5125ddbf0b0c39fd",
+            "activity IRI must match FNV-1a XOR hash of the update text + fixed-clock nanos"
+        );
+        assert_eq!(
+            d.entity().as_str(),
+            "urn:sparq:prov:entity:17979cfe362a0000-17979cfe362a0000-5125ddbf0b0c39fd",
+            "entity IRI must match FNV-1a XOR hash of the update text + fixed-clock nanos"
+        );
+    }
+
+    // ── sq-d6hen: mutation hardening (from #1723) — direct truth-table tests over the
+    // `is_multi_op` / `has_top_level_semicolon` boolean state machines. Testing only via
+    // `kind_label` lets first-pass mutants survive, because `has_top_level_semicolon` is
+    // a correcting second pass; these rows pin each scanner state (IRI / double-quote /
+    // single-quote / brace-depth) and each cross-state guard directly.
+    //
+    // Triage note for future mutation runs: mutants that make `is_multi_op`'s FIRST pass
+    // over-detect a `;` (e.g. `&&` → `||` on its guards) are semantically EQUIVALENT and
+    // unkillable — a falsely-detected in-term `;` can never have a blank tail (the term's
+    // closing delimiter follows it), so control always defers to the precise second pass,
+    // which returns the correct global answer. Only under-detection, stuck-state, and
+    // second-pass mutants are killable; the rows below cover those. [FABLE-5] ──────────
+
+    /// Baseline rows: presence/absence of a top-level `;`, the non-blank-tail
+    /// requirement, and degenerate inputs (a bare `;` also pins the `i + 1` tail-slice
+    /// arithmetic: `i - 1` underflows, `i * 1` would report the `;` itself as a tail).
+    #[test]
+    fn has_top_level_semicolon_baseline_truth_table() {
+        assert!(
+            has_top_level_semicolon("A ; B"),
+            "top-level ';' with a following op"
+        );
+        assert!(!has_top_level_semicolon("A B"), "no ';' at all");
+        assert!(!has_top_level_semicolon("A ;"), "blank tail after ';'");
+        assert!(
+            !has_top_level_semicolon("A ;   "),
+            "whitespace-only tail after ';'"
+        );
+        assert!(!has_top_level_semicolon(";"), "bare separator, no ops");
+        assert!(!has_top_level_semicolon(""), "empty input");
+    }
+
+    /// Brace-depth rows: a `;` inside `{ … }` is Turtle predicate-list shorthand, never
+    /// an op boundary; a `;` after the braces close is. The close-then-`;` row kills
+    /// `+=`/`-=` swaps on the depth counter; the unbalanced-`}` row pins `brace == 0`
+    /// exactly (a `<=`/`<` mutant would accept the negative depth).
+    #[test]
+    fn has_top_level_semicolon_brace_depth_truth_table() {
+        assert!(
+            !has_top_level_semicolon("{ A ; B }"),
+            "';' inside braces is a predicate list, not a boundary"
+        );
+        assert!(
+            has_top_level_semicolon("{ A } ; B"),
+            "';' after braces close IS a boundary"
+        );
+        assert!(
+            !has_top_level_semicolon("{ { A ; B } } C"),
+            "';' at nested depth 2 is not a boundary"
+        );
+        assert!(
+            has_top_level_semicolon("{ { A } } ; B"),
+            "';' after nested braces close back to depth 0"
+        );
+        assert!(
+            !has_top_level_semicolon("} ; A"),
+            "';' at negative depth (unbalanced '}}') is not depth 0"
+        );
+    }
+
+    /// Term-skip rows: a `;` inside an `<IRI>` / `"…"` / `'…'` is data; once the term
+    /// closes, a following `;` is a real boundary (the true rows kill stuck-state
+    /// mutants where a toggle becomes `= true`).
+    #[test]
+    fn has_top_level_semicolon_term_skip_truth_table() {
+        assert!(!has_top_level_semicolon("<A;B> C"), "';' inside an IRI");
+        assert!(
+            has_top_level_semicolon("<A;B> ; C"),
+            "IRI closes, then a real ';'"
+        );
+        assert!(
+            !has_top_level_semicolon("\"A;B\" C"),
+            "';' inside a double-quoted literal"
+        );
+        assert!(
+            has_top_level_semicolon("\"A;B\" ; C"),
+            "double-quoted literal closes, then a real ';'"
+        );
+        assert!(
+            !has_top_level_semicolon("'A;B' C"),
+            "';' inside a single-quoted literal"
+        );
+        assert!(
+            has_top_level_semicolon("'A;B' ; C"),
+            "single-quoted literal closes, then a real ';'"
+        );
+    }
+
+    /// Cross-state guard rows: each row is true ONLY if the named state-opening byte is
+    /// inert while a different state is active — dropping any one guard conjunct
+    /// (or `&&` → `||`) leaves the scanner stuck in a phantom state so the trailing
+    /// real `;` is missed.
+    #[test]
+    fn has_top_level_semicolon_cross_state_guard_truth_table() {
+        assert!(
+            has_top_level_semicolon("\"A'B\" ; C"),
+            "'\\'' inside a double-quoted literal must not open single-quote state"
+        );
+        assert!(
+            has_top_level_semicolon("'A\"B' ; C"),
+            "'\"' inside a single-quoted literal must not open double-quote state"
+        );
+        assert!(
+            has_top_level_semicolon("<A\"B> ; C"),
+            "'\"' inside an IRI must not open double-quote state"
+        );
+        assert!(
+            has_top_level_semicolon("<A'B> ; C"),
+            "'\\'' inside an IRI must not open single-quote state"
+        );
+        assert!(
+            has_top_level_semicolon("\"A<B\" ; C"),
+            "'<' inside a double-quoted literal must not open IRI state"
+        );
+        assert!(
+            has_top_level_semicolon("'A<B' ; C"),
+            "'<' inside a single-quoted literal must not open IRI state"
+        );
+        assert!(
+            has_top_level_semicolon("\"A{B\" ; C"),
+            "'{{' inside a double-quoted literal must not bump brace depth"
+        );
+        assert!(
+            has_top_level_semicolon("'A{B' ; C"),
+            "'{{' inside a single-quoted literal must not bump brace depth"
+        );
+        assert!(
+            has_top_level_semicolon("<A{B> ; C"),
+            "'{{' inside an IRI must not bump brace depth"
+        );
+        assert!(
+            has_top_level_semicolon("\"A}B\" ; C"),
+            "'}}' inside a double-quoted literal must not drop brace depth below 0"
+        );
+        assert!(
+            has_top_level_semicolon("'A}B' ; C"),
+            "'}}' inside a single-quoted literal must not drop brace depth below 0"
+        );
+        assert!(
+            has_top_level_semicolon("<A}B> ; C"),
+            "'}}' inside an IRI must not drop brace depth below 0"
+        );
+        assert!(
+            has_top_level_semicolon("A > B ; C"),
+            "a stray '>' with no open IRI is inert"
+        );
+    }
+
+    /// `is_multi_op` first-pass truth table: baseline rows plus the trailing-separator
+    /// early return (a bare `;` also pins the first pass's `i + 1` tail slice).
+    #[test]
+    fn is_multi_op_baseline_truth_table() {
+        assert!(
+            is_multi_op("DROP DEFAULT ; CREATE GRAPH <HTTP://EX/G>"),
+            "a genuine top-level op boundary"
+        );
+        assert!(!is_multi_op("DROP DEFAULT"), "single op, no ';'");
+        assert!(!is_multi_op("DROP DEFAULT ;"), "lone trailing separator");
+        assert!(
+            !is_multi_op("DROP DEFAULT ;   "),
+            "trailing separator + whitespace"
+        );
+        assert!(!is_multi_op(";"), "bare separator, no ops");
+        assert!(!is_multi_op(""), "empty input");
+        // First pass has no brace tracking, so it detects this ';' and must defer to
+        // the precise pass, which rejects it (predicate-list shorthand).
+        assert!(
+            !is_multi_op("INSERT DATA { <S> <P> <O> ; <P2> <O2> }"),
+            "';' inside a template is not a boundary"
+        );
+    }
+
+    /// `is_multi_op` state rows: each true row requires the first pass to correctly
+    /// LEAVE a term state again (a toggle mutated to `= true` sticks and hides the real
+    /// boundary); the cross-guard rows mirror the precise pass's guard conjuncts.
+    #[test]
+    fn is_multi_op_state_tracking_truth_table() {
+        assert!(!is_multi_op("CREATE GRAPH <HTTP://EX/A;B>"), "';' only inside an IRI");
+        assert!(!is_multi_op("X \"A;B\""), "';' only inside a double-quoted literal");
+        assert!(!is_multi_op("X 'A;B'"), "';' only inside a single-quoted literal");
+        assert!(is_multi_op("<A> ; B"), "IRI closes, then a real boundary");
+        assert!(is_multi_op("\"A\" ; B"), "double quote closes, then a real boundary");
+        assert!(is_multi_op("'A' ; B"), "single quote closes, then a real boundary");
+        assert!(
+            is_multi_op("\"A<B\" ; C"),
+            "'<' inside a double-quoted literal must not open IRI state"
+        );
+        assert!(
+            is_multi_op("'A<B' ; C"),
+            "'<' inside a single-quoted literal must not open IRI state"
+        );
+        assert!(
+            is_multi_op("<A\"B> ; C"),
+            "'\"' inside an IRI must not open double-quote state"
+        );
+        assert!(
+            is_multi_op("<A'B> ; C"),
+            "'\\'' inside an IRI must not open single-quote state"
+        );
+        assert!(
+            is_multi_op("\"A'B\" ; C"),
+            "'\\'' inside a double-quoted literal must not open single-quote state"
+        );
+        assert!(
+            is_multi_op("'A\"B' ; C"),
+            "'\"' inside a single-quoted literal must not open double-quote state"
         );
     }
 }

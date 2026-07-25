@@ -1,0 +1,2 @@
+@prefix ex: <http://example.org/> .
+оооооооооооооооооооооооооооооооооооооооооооооооооо{ ex:a a ex:B } => { ex:a ex:type ex:B } .

@@ -7,6 +7,13 @@
 Status: **v1 implemented** (`scripts/fable/`). The authoritative signal is the
 observed serving tier from real runs; everything else here is an advisory prior.
 
+> **Update (2026-07-24):** Opus 5 (`claude-opus-5`) is now the PRIMARY top tier, replacing
+> both the Fable 5 and Opus 4.8 heads (maintainer directive). The `fable → opus` pair this
+> record characterises is the ORIGINAL instance of the primary→downgrade pattern; the
+> mechanism is unchanged, and `scripts/fable/detect-tier.sh` now tracks `claude-opus-5` as
+> the primary with `claude-fable-5` / `claude-opus-4-8` as the downgrade tiers. The text
+> below is accurate history of the original pair — read its tier names accordingly.
+
 ## 0. The problem
 
 Claude Fable 5 carries extra dual-use safety measures. Empirically, a Fable run

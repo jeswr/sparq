@@ -34,6 +34,12 @@
 # consistent with `trust:` (https://sparq.dev/ns/trust#) and `zk:`
 # (https://sparq.dev/ns/zk#). It is NOT minted/resolvable today; a future
 # standardisation pass would rehome the net-new terms.
+#
+# FO CHOICE RATIFIED (sq-mztg8.5, 2026-07-06): schema.org-as-top is the PKG's top
+# foundational ontology, ratified after Fable-subject Metric-1 re-run (PR #1603).
+# No data changes required. Verdict record: research/provenance-driven-genai-kb.md §6
+# item 5. Revisit trigger: if the fleet's KM-query tier moves predominantly to
+# Fable-class models, re-run bench/fo-km Metric-1 before reopening.
 
 @prefix pkg:     <https://sparq.dev/ns/pkg#> .
 @prefix prov:    <http://www.w3.org/ns/prov#> .
@@ -157,7 +163,7 @@ pkg:about a owl:ObjectProperty ;
 
 pkg:verdict a owl:ObjectProperty ;
   rdfs:label "verdict"@en-GB ;
-  rdfs:comment "The Finding's verdict, reusing sig-impl:yes / sig-impl:no / sig-impl:partial (per the design's reuse decision; §2.5 flags that a research verdict space may later diverge, in which case a pkg:-specific enum subclasses this without forking the pattern)."@en-GB ;
+  rdfs:comment "The Finding's verdict, reusing sig-impl:yes / sig-impl:no / sig-impl:partial (per the design's reuse decision; §2.5 flags that a research verdict space may later diverge, in which case a pkg:-specific enum subclasses this without forking the pattern). ENUM-MAPPING CONVENTION (sq-2489d.8 / 2026-07-05): pkg:yes + secx:Proven = high-confidence asserted truth; pkg:yes + secx:Claimed = claimed fact (lower assurance); pkg:no + pkg:assurance X reverses polarity (claim is false, with assurance X). pkg:partial = nuanced/mixed result. A pkg:-specific research subclass ({holds/refuted/uncertain/superseded}) is deferred until literature ingestion measures strain on this generic enum (sq-2489d.6, Phase 5)."@en-GB ;
   rdfs:subPropertyOf sigimpl:verdict ;
   rdfs:domain pkg:Finding ;
   rdfs:range sigimpl:Verdict .

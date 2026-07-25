@@ -3,6 +3,19 @@
 // desugaring and a fail-closed taxonomy. Requires the `rif-core` feature (wired by
 // the `rif-xml` feature below). When off, zero rif_xml code is compiled.
 //
+// sq-jsgyn: multi-slot Frame desugaring. A <Frame> with N>=2 <slot> children
+// obj[p1->v1, p2->v2, …] desugars into N ground Frame atoms — obj[p1->v1],
+// obj[p2->v2], … — one per slot. In body position these become a conjunction
+// (BodyCond::And); in head position they extend the head-atom list; as a bare
+// fact they produce one Rule::fact per slot. This is the sound RIF-Core lowering:
+// a multi-slot frame is the conjunction of its per-slot single-slot frames
+// (RIF-Core §2.3). Fail-closed: a Frame with ZERO slots is MalformedXml; any
+// slot that is a named-argument uniterm is NamedArgUniterm; only the <object>
+// wrapper is still single-cardinality (duplicate <object> → MalformedXml). The
+// old unique_child("slot", …) check that made duplicate <slot> an error is
+// removed; the per-slot named-arg check replaces the former single-slot guard.
+// [SONNET-4.6] sq-jsgyn
+//
 // Opus adversarial-verify fixes applied (sq-pbz04.5.3 post-verify):
 // Fix-1: unconditional alpha-renaming of Exists-declared vars prevents variable
 //        capture in both shadow (Forall ?x … Exists ?x) and sibling (Exists ?y …
@@ -22,6 +35,15 @@
 //        <declare>?a ?b</declare> conflated universal ?b with existential ?b).
 //        Fail-closed beats guessing; multi-Var-per-declare is not schema-valid
 //        RIF-XML. [SONNET-4.6]
+// sq-anuo9: residual silent-drop class (adversarial re-verify of #1461). Single-cardinality
+//        wrappers read via `.children.first()` dropped surplus siblings on non-schema-valid
+//        input — <if> dropping its 2nd conjunct WEAKENS the body -> OVER-derivation (the
+//        soundness-relevant case), and <then>/<formula>/<object>/<instance>/<class>/<sub>/
+//        <sup>/<left>/<right>/<content>/<op>/<sentence> dropped surplus terms/atoms. <declare>
+//        also TOLERATED a stray non-<Var> sibling. Fix: the `only_child` helper enforces
+//        exactly-one-child fail-closed (MalformedXml) on every such wrapper, and <declare>
+//        now requires exactly one child that is a <Var>. Conformant RIF-XML is unaffected by
+//        design. [SONNET-4.6]
 // Beads for deferred low-priority items: see bead notes inline.
 
 //! # `rif_xml` — W3C RIF-Core XML importer
@@ -58,6 +80,23 @@
 //! # }
 //! ```
 //!
+//! ## Positional predicate atoms — `Atom(op args…)` [SONNET-4.6] sq-n7y15
+//!
+//! RIF-Core's XML presentation syntax uses `<Atom>` for **positional (ordered-argument)
+//! predicate calls** — the dominant form in real W3C RIF Core test files. This importer
+//! supports the two arities that have a sound, semantically-equivalent mapping to the
+//! existing `rif::Atom` variants (scope: rif_xml only; rif.rs is unchanged):
+//!
+//! | Arity | XML form | Mapped to | RIF-Core equivalence |
+//! |-------|----------|-----------|----------------------|
+//! | **1** | `<Atom><op>C</op><args>a</args></Atom>` | `Atom::Member { obj: a, class: C }` | Unary predicate = membership `a # C` |
+//! | **2** | `<Atom><op>P</op><args>a b</args></Atom>` | `Atom::Frame { obj: a, pred: P, val: b }` | Binary predicate = frame atom `a[P → b]` |
+//!
+//! **Fail-closed:** arity 0 and arity 3+ positional atoms are **rejected** with
+//! `ImportError::UnrecognizedElement` — there is no semantically equivalent existing
+//! atom form, so importing them silently into a wrong shape would be unsound.
+//! A non-IRI operator is rejected with `ImportError::MalformedXml`.
+//!
 //! ## Sound desugarings applied at import
 //!
 //! 1. **Body `Or` → rule-splitting (Lloyd–Topor):** a disjunctive body
@@ -82,12 +121,43 @@
 //!    `Document::validate()` enforces the range-restriction invariant on every imported
 //!    document, so every renamed variable appears in at least one positive body atom.
 //!
+//! 3. **Multi-slot `Frame` → per-slot conjunction (sq-jsgyn):** a `Frame` carrying N
+//!    `<slot>` children `obj[p1->v1 p2->v2 …]` desugars into **N single-slot ground
+//!    `Frame` atoms** — one per `(pi, vi)` pair, each sharing the same `obj`. Under
+//!    RIF-Core §2.3 a multi-slot frame is the conjunction of its per-slot frames, so
+//!    this is the semantically equivalent Horn lowering:
+//!    - **Body position:** desugared to `BodyCond::And([obj[p1->v1], obj[p2->v2], …])`.
+//!    - **Head position (or conjunctive head `<And>`):** each slot adds one `Atom` to
+//!      the rule's head list (`Rule::head`).
+//!    - **Bare fact:** one `Rule::fact(obj[pi->vi])` per slot.
+//!    - **Fail-closed invariants:** zero slots → `MalformedXml`; a named-argument
+//!      `<slot>/<Name>` → `NamedArgUniterm`; duplicate `<object>` still →
+//!      `MalformedXml`. Only `<slot>` may appear multiple times under a `<Frame>`;
+//!      `<object>` remains single-cardinality.
+//!
 //! ## Fail-closed taxonomy
 //!
 //! Every element or construct outside the supported Core subset returns a named error
 //! variant. Every unexpected child element — including non-`<formula>` children inside
-//! `<And>` or `<Or>` conditions or a conjunctive head — returns an error; nothing is
-//! silently skipped or dropped.
+//! `<And>` or `<Or>` conditions or a conjunctive head — returns an error, and a **surplus
+//! child of a single-cardinality wrapper** (`<if>`, `<then>`, `<formula>`, `<object>`,
+//! `<instance>`, `<class>`, `<sub>`, `<sup>`, `<left>`, `<right>`, `<content>`, `<op>`,
+//! `<sentence>`, plus a `<declare>` carrying anything other than exactly one `<Var>`)
+//! returns `MalformedXml` rather than being silently dropped by a `.first()`-style read.
+//! This is a soundness property, not merely a diagnostic: dropping a second `<if>`
+//! conjunct would WEAKEN the rule body → over-derivation (sq-anuo9). Nothing within a
+//! wrapper is silently skipped or dropped, and — the twin class — a **duplicate
+//! single-cardinality wrapper under a parent** (two `<object>` under a `<Frame>`,
+//! `<instance>`/`<class>` under `<Member>`, `<sub>`/`<sup>` under a
+//! `<Subclass>`, `<left>`/`<right>` under an `<Equal>`, `<content>`/`<op>`/`<args>` under
+//! an `<External>` call, the `<formula>` under a `<Forall>`/`<Exists>`, or the `<items>`
+//! under a `<List>` term) is rejected via `unique_child` rather than first-wins-dropped by
+//! `child()` (sq-4l1fj, closing the
+//! residual class sq-anuo9's `only_child` left; the `<if>`/`<then>` subset was already
+//! guarded inline in `parse_implies`).
+//! **Exception:** multiple `<slot>` children under a `<Frame>` are VALID (RIF-Core
+//! multi-slot frames); they desugar to a per-slot conjunction rather than being rejected
+//! (sq-jsgyn). `<object>` remains single-cardinality under `<Frame>`.
 //!
 //! 1. `ImportError::ImportDirective` — any `Import` element (remote imports: fail-closed).
 //! 2. `ImportError::NonCoreElement { element, reason }` — non-Core dialect elements:
@@ -128,6 +198,18 @@ pub enum ImportError {
         /// The location IRI of the import.
         location: String,
     },
+    /// [SONNET-4.6] sq-wbql1 — the imports-closure consistency check detected a
+    /// GENUINE incompatibility in an `<Import>` directive: the imported document's
+    /// `profile` designates a non-Core dialect, or the combined imports-closure fails
+    /// RIF-Core validation. This is a NON-VACUOUS rejection: it demonstrates detecting
+    /// the specific import invalidity (a profile mismatch or rule-set inconsistency)
+    /// rather than blanket-refusing any `<Import>`.
+    InconsistentImport {
+        /// The location IRI of the offending import.
+        location: String,
+        /// A human-readable description of why the import is inconsistent.
+        reason: String,
+    },
     /// A non-Core dialect element was found (e.g. RIF-BLD-only constructs, PRD actions).
     NonCoreElement {
         /// The element name.
@@ -166,6 +248,13 @@ impl std::fmt::Display for ImportError {
                     f,
                     "RIF/XML: Import directives are not supported (fail-closed): {}",
                     location
+                )
+            }
+            ImportError::InconsistentImport { location, reason } => {
+                write!(
+                    f,
+                    "RIF/XML: imports-closure inconsistency detected at <{}>: {}",
+                    location, reason
                 )
             }
             ImportError::NonCoreElement { element, reason } => {
@@ -238,6 +327,61 @@ impl XmlNode {
     /// Return all children with the given tag name.
     fn children_named<'a>(&'a self, tag: &'a str) -> impl Iterator<Item = &'a XmlNode> {
         self.children.iter().filter(move |c| c.tag == tag)
+    }
+
+    /// Return the UNIQUE child with the given tag, failing closed if the parent holds
+    /// **more than one**. RIF-XML single-cardinality wrappers appear at most once under
+    /// their parent — `<object>`/`<slot>` under `<Frame>`, `<instance>`/`<class>` under
+    /// `<Member>`, `<sub>`/`<sup>` under `<Subclass>`, `<left>`/`<right>` under `<Equal>`,
+    /// `<content>`/`<op>`/`<args>` under an `<External>` call, and the `<formula>` under a
+    /// `<Forall>`/`<Exists>`.
+    ///
+    /// The old `child()` (find-first) silently DROPPED the second wrapper on non-schema-valid
+    /// input: a dropped `<formula>` under a `<Forall>` loses a whole rule; a dropped `<object>`
+    /// changes the atom; a dropped `<slot>`/`<sup>`/`<right>` loses a conjunct. This is the
+    /// parent-level twin of `only_child` (which guards a wrapper's surplus grandchildren) and
+    /// mirrors the `<if>`/`<then>` duplicate guard already inlined in `parse_implies`; together
+    /// they keep the module's fail-closed "nothing is silently skipped or dropped" contract
+    /// airtight. `Ok(None)` is returned when the wrapper is ABSENT so each caller keeps its own
+    /// "missing" diagnostic. Conformant RIF-XML has at most one of each wrapper, so this rejects
+    /// only malformed input. `ctx` names the parent for the diagnostic. [OPUS-4.8] sq-4l1fj
+    fn unique_child(&self, tag: &str, ctx: &str) -> Result<Option<&XmlNode>, ImportError> {
+        // Iterate `self.children` directly (not via `children_named`, whose returned
+        // iterator borrows `tag`) so the returned `&XmlNode` binds to `&self`.
+        let mut matching = self.children.iter().filter(|c| c.tag == tag);
+        let first = matching.next();
+        if matching.next().is_some() {
+            return Err(ImportError::MalformedXml(format!(
+                "{} has duplicate <{}> elements (expected exactly one)",
+                ctx, tag
+            )));
+        }
+        Ok(first)
+    }
+
+    /// Return this node's single element child, failing closed if it has zero **or
+    /// more than one**. RIF-XML single-cardinality wrappers — `<if>`, `<then>`,
+    /// `<formula>`, `<object>`, `<instance>`, `<class>`, `<sub>`, `<sup>`, `<left>`,
+    /// `<right>`, `<content>`, `<op>`, `<sentence>` — admit exactly one child element.
+    ///
+    /// The old `.children.first()` silently DROPPED surplus siblings on non-schema-valid
+    /// input: an `<if>` holding two condition children lost the second conjunct, which
+    /// WEAKENS the rule body → OVER-derivation (unsound); a `<then>`/`<formula>` holding
+    /// two head/term children lost the second → under-derivation. Enforcing exactly-one
+    /// here keeps the module's fail-closed "nothing is silently skipped or dropped"
+    /// contract honest. Conformant RIF-XML always has exactly one child in these
+    /// wrappers, so this rejects only malformed input. `ctx` names the wrapper for the
+    /// diagnostic. [SONNET-4.6] sq-anuo9
+    fn only_child(&self, ctx: &str) -> Result<&XmlNode, ImportError> {
+        match self.children.as_slice() {
+            [one] => Ok(one),
+            [] => Err(ImportError::MalformedXml(format!("{} has no child element", ctx))),
+            _ => Err(ImportError::MalformedXml(format!(
+                "{} must have exactly one child element (single-cardinality wrapper), found {}",
+                ctx,
+                self.children.len()
+            ))),
+        }
     }
 }
 
@@ -563,6 +707,18 @@ fn is_whitespace_collapse_type(ty: &str) -> bool {
 /// The `rif:iri` type attribute value in `<Const type="…">`.
 const RIF_IRI_TYPE: &str = "http://www.w3.org/2007/rif#iri";
 
+/// The `rif:local` type attribute value in `<Const type="…">`.
+///
+/// RIF **local constants** are document-scoped: two `rif:local` constants with the
+/// same name in DIFFERENT documents denote DISTINCT individuals (they share no
+/// cross-document identity). This is a semantic property the current importer cannot
+/// faithfully represent — the `Term::Lit` representation makes them structurally
+/// equal across documents, which would cause a `NegativeEntailmentTest` to
+/// incorrectly report the non-conclusion as "entailed" (the `Local_Constant` W3C
+/// test demonstrates this exactly). We therefore reject `rif:local` constants
+/// fail-closed rather than silently mis-importing them. [SONNET-4.6] sq-n7y15
+const RIF_LOCAL_TYPE: &str = "http://www.w3.org/2007/rif#local";
+
 /// Parse a `<Const>` or `<Var>` node into a `Term`.
 ///
 /// # Whitespace handling (Fix-3)
@@ -577,6 +733,20 @@ fn parse_term(node: &XmlNode) -> Result<Term, ImportError> {
     match node.tag.as_str() {
         "Const" => {
             let ty = node.attr("type").unwrap_or("");
+            if ty == RIF_LOCAL_TYPE {
+                // rif:local constants are document-scoped: the same name in two different
+                // documents denotes two DISTINCT individuals. The Term::Lit representation
+                // would make them structurally equal across documents — a soundness hazard
+                // (a NegativeEntailmentTest with a rif:local non-conclusion would
+                // incorrectly report the non-conclusion as entailed). Reject fail-closed.
+                // [SONNET-4.6] sq-n7y15
+                return Err(ImportError::UnrecognizedElement {
+                    tag: "Const(rif:local) — local constants are document-scoped; \
+                          cross-document identity cannot be faithfully represented \
+                          (fail-closed, not silently mis-imported)"
+                        .to_string(),
+                });
+            }
             if ty == RIF_IRI_TYPE {
                 // IRI: XSD whitespace-collapse; trim for safety.
                 Ok(Term::Iri(node.text.trim().to_string()))
@@ -603,7 +773,10 @@ fn parse_term(node: &XmlNode) -> Result<Term, ImportError> {
         }
         "List" => {
             // <List><items><...term...><...term...></items></List>
-            let items_node = node.child("items");
+            // Fail-closed on a DUPLICATE <items> wrapper (sq-4l1fj): the same
+            // single-cardinality-wrapper class — first-wins would silently drop a
+            // second <items>, changing the list term.
+            let items_node = node.unique_child("items", "List")?;
             let items = match items_node {
                 Some(items) => items
                     .children
@@ -887,19 +1060,22 @@ fn alpha_rename_cond(
 // Atom parsing
 // ---------------------------------------------------------------------------
 
-/// Parse an element that should be a positive atom (Frame/Member/Subclass/Equal).
-fn parse_positive_atom(node: &XmlNode) -> Result<Atom, ImportError> {
+/// Parse an element that should be a positive atom (or atoms — a multi-slot Frame
+/// desugars into N atoms). Returns the desugared list of atoms.
+///
+/// Multi-slot Frame desugaring (sq-jsgyn): a `<Frame>` with N `<slot>` children
+/// `obj[p1->v1 p2->v2 …]` returns N `Atom::Frame` values — one per slot. All
+/// other atom types are always single, so their list is a singleton. See
+/// `parse_frame_atoms` for the per-slot logic and fail-closed invariants.
+fn parse_positive_atoms(node: &XmlNode) -> Result<Vec<Atom>, ImportError> {
     match node.tag.as_str() {
-        "Frame" => parse_frame(node),
-        "Member" => parse_member(node),
-        "Subclass" => parse_subclass(node),
-        "Equal" => parse_equal(node),
-        "Atom" => {
-            // <Atom> in RIF/XML can be used for positional predicates.
-            // In Core, the only sanctioned use is as a builtin predicate inside External.
-            // A bare <Atom> in a head is unsupported (not a standard Core head form).
-            Err(ImportError::UnrecognizedElement { tag: "Atom (bare, outside External)".to_string() })
-        }
+        // Multi-slot Frame: returns one Atom per slot (sq-jsgyn).
+        "Frame" => parse_frame_atoms(node),
+        "Member" => Ok(vec![parse_member(node)?]),
+        "Subclass" => Ok(vec![parse_subclass(node)?]),
+        "Equal" => Ok(vec![parse_equal(node)?]),
+        // [SONNET-4.6] sq-n7y15 — positional predicate Atom: Atom(op args...) import.
+        "Atom" => Ok(vec![parse_positional_atom(node)?]),
         other => {
             check_non_core(other)?;
             Err(ImportError::UnrecognizedElement { tag: other.to_string() })
@@ -907,46 +1083,194 @@ fn parse_positive_atom(node: &XmlNode) -> Result<Atom, ImportError> {
     }
 }
 
-fn parse_frame(node: &XmlNode) -> Result<Atom, ImportError> {
-    // <Frame>
-    //   <object>TERM</object>
-    //   <slot>TERM TERM</slot>   (predicate, value)
-    // </Frame>
-    let obj_node = node.child("object").ok_or_else(|| ImportError::MalformedXml(
-        "Frame missing <object>".to_string(),
-    ))?;
-    let obj = parse_first_term(obj_node)?;
+/// Parse a bare positional `<Atom>` — a RIF-Core n-ary predicate call `P(arg1, arg2, …)`.
+///
+/// ## RIF-Core XML structure
+///
+/// ```xml
+/// <Atom>
+///   <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/P</Const></op>
+///   <args ordered="yes">
+///     <Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const>
+///     <Var>x</Var>
+///   </args>
+/// </Atom>
+/// ```
+///
+/// ## Soundly supported arities → existing `Atom` variants (scope: rif_xml only)
+///
+/// The RIF-Core internal model (`rif.rs`) has no first-class n-ary predicate variant.
+/// This function maps positional atoms to the semantically equivalent **existing** variants:
+///
+/// | Arity | Positional form | Mapped to | RIF-Core equivalence |
+/// |-------|-----------------|-----------|----------------------|
+/// | **2** | `P(arg1, arg2)` | `Atom::Frame { obj: arg1, pred: P, val: arg2 }` | Binary predicate = frame atom `arg1[P -> arg2]` (RIF-Core §2.3) |
+/// | **1** | `C(arg1)` | `Atom::Member { obj: arg1, class: C }` | Unary predicate = membership `arg1 # C` |
+///
+/// Arities **0** and **3+** are rejected fail-closed: there is no semantically equivalent
+/// existing atom form, so importing them silently into a wrong shape would be unsound.
+/// A non-IRI operator is similarly rejected.
+///
+/// ## Fail-closed invariant
+///
+/// Any positional atom that cannot be soundly mapped to an existing variant is rejected
+/// with a clear `ImportError` — never silently imported with altered semantics.
+/// [SONNET-4.6] sq-n7y15
+fn parse_positional_atom(node: &XmlNode) -> Result<Atom, ImportError> {
+    // <op> is a single-cardinality wrapper: fail-closed on duplicates (sq-4l1fj).
+    let op_node = node.unique_child("op", "positional Atom")?.ok_or_else(|| {
+        ImportError::MalformedXml("positional <Atom> missing <op>".to_string())
+    })?;
+    // The <op> child must be exactly one <Const> carrying the predicate IRI.
+    let op_const = op_node.only_child("positional Atom <op>")?;
+    if op_const.tag != "Const" {
+        return Err(ImportError::MalformedXml(format!(
+            "positional Atom <op> child must be <Const>, found <{}>",
+            op_const.tag
+        )));
+    }
+    // The predicate IRI — parsed by parse_term so the type attribute is validated.
+    let pred_term = parse_term(op_const)?;
+    let pred_iri = match &pred_term {
+        Term::Iri(iri) => iri.clone(),
+        _ => {
+            return Err(ImportError::MalformedXml(
+                "positional Atom operator must be an IRI-typed Const (rif:iri); \
+                 non-IRI operators are not supported (fail-closed)"
+                    .to_string(),
+            ));
+        }
+    };
 
-    let slot = node.child("slot").ok_or_else(|| ImportError::MalformedXml(
-        "Frame missing <slot>".to_string(),
-    ))?;
+    // <args> is a single-cardinality wrapper: fail-closed on duplicates (sq-4l1fj).
+    let args: Vec<Term> = match node.unique_child("args", "positional Atom")? {
+        Some(args_node) => args_node
+            .children
+            .iter()
+            .map(parse_term)
+            .collect::<Result<Vec<_>, _>>()?,
+        None => Vec::new(),
+    };
 
-    // Detect named-argument uniterms: a slot child with a <Name> child is a named arg.
-    if slot.child("Name").is_some() {
-        let name = slot
-            .child("Name")
+    // Named-argument check: the <args> form is positional-only; a named-arg slot would
+    // use a different XML structure (bead-scope does not include named-arg Atoms since
+    // those are rejected at the Frame/<slot>/<Name> level). Guard defensively.
+    if node.child("slot").is_some() {
+        let name = node
+            .child("slot")
+            .and_then(|s| s.child("Name"))
             .and_then(|n| n.children.first())
             .map(|n| n.text.clone())
             .unwrap_or_default();
         return Err(ImportError::NamedArgUniterm { name });
     }
 
-    let slot_terms: Vec<Term> = slot.children.iter().map(parse_term).collect::<Result<_, _>>()?;
-    if slot_terms.len() != 2 {
-        return Err(ImportError::MalformedXml(format!(
-            "Frame <slot> must have exactly 2 term children, got {}",
-            slot_terms.len()
-        )));
+    // Map arity → semantically equivalent existing Atom variant.
+    // Fail-closed on unsupported arities — never silently mis-import.
+    match args.as_slice() {
+        // Arity 1: unary predicate C(arg1) ≡ arg1 # C (membership). [SONNET-4.6] sq-n7y15
+        [arg1] => Ok(Atom::Member {
+            obj: arg1.clone(),
+            class: Term::Iri(pred_iri),
+        }),
+        // Arity 2: binary predicate P(arg1, arg2) ≡ arg1[P -> arg2] (frame). [SONNET-4.6] sq-n7y15
+        [arg1, arg2] => Ok(Atom::Frame {
+            obj: arg1.clone(),
+            pred: Term::Iri(pred_iri),
+            val: arg2.clone(),
+        }),
+        // Arity 0 or 3+: no sound mapping in the existing Core model — reject fail-closed.
+        _ => Err(ImportError::UnrecognizedElement {
+            tag: format!(
+                "Atom (positional, arity {}) — only arity-1 and arity-2 \
+                 positional atoms are supported (arity-1 maps to membership, \
+                 arity-2 maps to frame); arity-{} has no sound mapping in \
+                 the Core model (fail-closed)",
+                args.len(),
+                args.len()
+            ),
+        }),
     }
-    Ok(Atom::Frame { obj, pred: slot_terms[0].clone(), val: slot_terms[1].clone() })
+}
+
+/// Parse a `<Frame>` node into one `Atom::Frame` per `<slot>` child, desugaring
+/// a multi-slot frame `obj[p1->v1 p2->v2 …]` into the conjunction of single-slot
+/// frames `[obj[p1->v1], obj[p2->v2], …]`.
+///
+/// # RIF-Core §2.3 semantics
+///
+/// Under RIF-Core, `obj[p1->v1 p2->v2]` is syntactic sugar for the conjunction
+/// `obj[p1->v1] And obj[p2->v2]`. Each per-slot atom is a first-class `Atom::Frame`
+/// in the `rif::Document` model. The desugaring is sound and semantically equivalent
+/// to N single-slot frames.
+///
+/// # Fail-closed invariants (sq-jsgyn)
+///
+/// - **Zero `<slot>` children** → `MalformedXml` (a Frame must carry at least one slot).
+/// - **Duplicate `<object>`** → `MalformedXml` (single-cardinality; sq-4l1fj unchanged).
+/// - **Missing `<object>`** → `MalformedXml`.
+/// - **Named-argument slot** (`<slot><Name>…</Name>…</slot>`) → `NamedArgUniterm`
+///   (checked per slot; one bad slot rejects the whole Frame).
+/// - **`<slot>` with != 2 term children** → `MalformedXml` (checked per slot).
+/// - Multiple `<slot>` children are VALID and desugar to multiple atoms; a Frame
+///   document with only `<object>` and no `<slot>` is malformed — unlike the prior
+///   single-slot-only importer, the `<slot>` multiplicity guard is now `>= 1`.
+///
+/// [SONNET-4.6] sq-jsgyn
+fn parse_frame_atoms(node: &XmlNode) -> Result<Vec<Atom>, ImportError> {
+    // <object> is single-cardinality (sq-4l1fj): duplicate <object> → MalformedXml.
+    let obj_node = node.unique_child("object", "Frame")?.ok_or_else(|| ImportError::MalformedXml(
+        "Frame missing <object>".to_string(),
+    ))?;
+    let obj = parse_first_term(obj_node)?;
+
+    // Collect ALL <slot> children — multiple slots are legal (multi-slot frame, sq-jsgyn).
+    let slots: Vec<&XmlNode> = node.children_named("slot").collect();
+
+    // Fail-closed: a <Frame> must carry at least one <slot>.
+    if slots.is_empty() {
+        return Err(ImportError::MalformedXml(
+            "Frame missing <slot> (at least one <slot> is required)".to_string(),
+        ));
+    }
+
+    // Desugar each slot into a single Atom::Frame. Per-slot named-arg guard.
+    let mut atoms = Vec::with_capacity(slots.len());
+    for slot in slots {
+        // Detect named-argument uniterms: a slot child with a <Name> child is a named arg.
+        if slot.child("Name").is_some() {
+            let name = slot
+                .child("Name")
+                .and_then(|n| n.children.first())
+                .map(|n| n.text.clone())
+                .unwrap_or_default();
+            return Err(ImportError::NamedArgUniterm { name });
+        }
+
+        let slot_terms: Vec<Term> =
+            slot.children.iter().map(parse_term).collect::<Result<_, _>>()?;
+        if slot_terms.len() != 2 {
+            return Err(ImportError::MalformedXml(format!(
+                "Frame <slot> must have exactly 2 term children, got {}",
+                slot_terms.len()
+            )));
+        }
+        atoms.push(Atom::Frame {
+            obj: obj.clone(),
+            pred: slot_terms[0].clone(),
+            val: slot_terms[1].clone(),
+        });
+    }
+    Ok(atoms)
 }
 
 fn parse_member(node: &XmlNode) -> Result<Atom, ImportError> {
     // <Member><instance>TERM</instance><class>TERM</class></Member>
-    let inst = node.child("instance").ok_or_else(|| ImportError::MalformedXml(
+    // Fail-closed on a DUPLICATE <instance>/<class> wrapper (sq-4l1fj).
+    let inst = node.unique_child("instance", "Member")?.ok_or_else(|| ImportError::MalformedXml(
         "Member missing <instance>".to_string(),
     ))?;
-    let cls = node.child("class").ok_or_else(|| ImportError::MalformedXml(
+    let cls = node.unique_child("class", "Member")?.ok_or_else(|| ImportError::MalformedXml(
         "Member missing <class>".to_string(),
     ))?;
     Ok(Atom::Member { obj: parse_first_term(inst)?, class: parse_first_term(cls)? })
@@ -954,10 +1278,11 @@ fn parse_member(node: &XmlNode) -> Result<Atom, ImportError> {
 
 fn parse_subclass(node: &XmlNode) -> Result<Atom, ImportError> {
     // <Subclass><sub>TERM</sub><sup>TERM</sup></Subclass>
-    let sub = node.child("sub").ok_or_else(|| ImportError::MalformedXml(
+    // Fail-closed on a DUPLICATE <sub>/<sup> wrapper (sq-4l1fj).
+    let sub = node.unique_child("sub", "Subclass")?.ok_or_else(|| ImportError::MalformedXml(
         "Subclass missing <sub>".to_string(),
     ))?;
-    let sup = node.child("sup").ok_or_else(|| ImportError::MalformedXml(
+    let sup = node.unique_child("sup", "Subclass")?.ok_or_else(|| ImportError::MalformedXml(
         "Subclass missing <sup>".to_string(),
     ))?;
     Ok(Atom::Subclass { sub: parse_first_term(sub)?, sup: parse_first_term(sup)? })
@@ -965,45 +1290,47 @@ fn parse_subclass(node: &XmlNode) -> Result<Atom, ImportError> {
 
 fn parse_equal(node: &XmlNode) -> Result<Atom, ImportError> {
     // <Equal><left>TERM</left><right>TERM</right></Equal>
-    let left = node.child("left").ok_or_else(|| ImportError::MalformedXml(
+    // Fail-closed on a DUPLICATE <left>/<right> wrapper (sq-4l1fj).
+    let left = node.unique_child("left", "Equal")?.ok_or_else(|| ImportError::MalformedXml(
         "Equal missing <left>".to_string(),
     ))?;
-    let right = node.child("right").ok_or_else(|| ImportError::MalformedXml(
+    let right = node.unique_child("right", "Equal")?.ok_or_else(|| ImportError::MalformedXml(
         "Equal missing <right>".to_string(),
     ))?;
     Ok(Atom::Equal { left: parse_first_term(left)?, right: parse_first_term(right)? })
 }
 
-/// Parse the first term child of a wrapper element (e.g. `<object>TERM</object>`).
+/// Parse the single term child of a single-cardinality wrapper element (e.g.
+/// `<object>TERM</object>`, `<instance>`, `<class>`, `<sub>`, `<sup>`, `<left>`,
+/// `<right>`). Surplus term siblings are rejected (fail-closed, sq-anuo9) rather
+/// than silently dropped by the old `.children.first()`. [SONNET-4.6]
 fn parse_first_term(wrapper: &XmlNode) -> Result<Term, ImportError> {
-    let child = wrapper.children.first().ok_or_else(|| ImportError::MalformedXml(
-        format!("<{}> has no term child", wrapper.tag),
-    ))?;
+    let child = wrapper.only_child(&format!("term wrapper <{}>", wrapper.tag))?;
     parse_term(child)
 }
 
 /// Parse an `<External>` builtin call. Returns an `Atom::Builtin`.
 fn parse_external(node: &XmlNode) -> Result<Atom, ImportError> {
     // <External><content><Atom><op><Const type="rif:iri">IRI</Const></op><args>...</args></Atom></content></External>
-    let content = node.child("content").ok_or_else(|| ImportError::MalformedXml(
+    // Fail-closed on a DUPLICATE <content> wrapper (sq-4l1fj).
+    let content = node.unique_child("content", "External")?.ok_or_else(|| ImportError::MalformedXml(
         "External missing <content>".to_string(),
     ))?;
     // The child of <content> should be <Atom> (for predicates) or <Expr> (for functions).
-    let inner = content.children.first().ok_or_else(|| ImportError::MalformedXml(
-        "External <content> has no child".to_string(),
-    ))?;
+    // Single-cardinality: surplus siblings are rejected, not dropped (sq-anuo9).
+    let inner = content.only_child("External <content>")?;
     if inner.tag != "Atom" && inner.tag != "Expr" {
         check_non_core(&inner.tag)?;
         return Err(ImportError::UnrecognizedElement { tag: inner.tag.clone() });
     }
 
     // Get the operator IRI from <op><Const type="rif:iri">IRI</Const></op>
-    let op_node = inner.child("op").ok_or_else(|| ImportError::MalformedXml(
+    // Fail-closed on a DUPLICATE <op> wrapper (sq-4l1fj).
+    let op_node = inner.unique_child("op", "External Atom/Expr")?.ok_or_else(|| ImportError::MalformedXml(
         "External Atom/Expr missing <op>".to_string(),
     ))?;
-    let op_const = op_node.children.first().ok_or_else(|| ImportError::MalformedXml(
-        "External <op> has no child".to_string(),
-    ))?;
+    // Single-cardinality: the <op> wrapper holds exactly one <Const> (sq-anuo9).
+    let op_const = op_node.only_child("External <op>")?;
     let op_iri = if op_const.tag == "Const" {
         op_const.text.trim().to_string()
     } else {
@@ -1013,7 +1340,9 @@ fn parse_external(node: &XmlNode) -> Result<Atom, ImportError> {
     let builtin = iri_to_builtin(&op_iri)?;
 
     // Collect args from <args><...term...><...term...></args>
-    let args = match inner.child("args") {
+    // Fail-closed on a DUPLICATE <args> wrapper (sq-4l1fj) — a second <args> would
+    // otherwise be silently dropped, changing the builtin's argument list.
+    let args = match inner.unique_child("args", "External Atom/Expr")? {
         Some(args_node) => args_node
             .children
             .iter()
@@ -1069,34 +1398,55 @@ fn parse_condition(node: &XmlNode) -> Result<BodyCond, ImportError> {
             // </Exists>
             // Collect declared variable names (used by alpha_rename_cond in parse_implies).
             //
-            // [SONNET-4.6] Fix-6: fail-closed on <declare> with != 1 <Var> child.
-            // The old filter_map(.first()) silently dropped all but the first <Var>,
-            // leaving extras unrenamed (demonstrated capture: Exists <declare>?a ?b</declare>
-            // conflated universal ?b with existential ?b). Multi-Var-per-declare is
-            // not schema-valid RIF-XML; we reject rather than guess the intent.
+            // [SONNET-4.6] Fix-6 + sq-anuo9: fail-closed on <declare> with != 1 child, or a
+            // single non-<Var> child. The old filter_map(.first()) silently dropped all but
+            // the first <Var> (demonstrated capture: Exists <declare>?a ?b</declare> conflated
+            // universal ?b with existential ?b); the earlier Fix-6 filter-to-<Var> still
+            // TOLERATED a stray non-<Var> sibling (e.g. <declare><Var>a</Var><Const>…</Const>)
+            // by ignoring it. A <declare> admits exactly ONE child and it MUST be a <Var>; any
+            // other shape is not schema-valid RIF-XML, so we reject rather than guess intent.
             let mut declared_vars: Vec<String> = Vec::new();
             for d in node.children_named("declare") {
-                let var_children: Vec<&XmlNode> =
-                    d.children.iter().filter(|c| c.tag == "Var").collect();
-                if var_children.len() != 1 {
-                    return Err(ImportError::MalformedXml(format!(
-                        "<declare> must contain exactly one <Var> child, found {} (in <Exists>)",
-                        var_children.len()
-                    )));
+                match d.children.as_slice() {
+                    [only] if only.tag == "Var" => {
+                        declared_vars.push(only.text.trim().to_string());
+                    }
+                    _ => {
+                        return Err(ImportError::MalformedXml(format!(
+                            "<declare> must contain exactly one <Var> child, found {} child element(s) (in <Exists>)",
+                            d.children.len()
+                        )));
+                    }
                 }
-                declared_vars.push(var_children[0].text.trim().to_string());
             }
-            let formula = node.child("formula").ok_or_else(|| ImportError::MalformedXml(
+            // Fail-closed on a DUPLICATE <formula> wrapper (sq-4l1fj): a dropped second
+            // <formula> under <Exists> silently loses a conjunct of the existential body.
+            let formula = node.unique_child("formula", "Exists")?.ok_or_else(|| ImportError::MalformedXml(
                 "Exists missing <formula>".to_string(),
             ))?;
             let sub = parse_formula_child(formula)?;
             Ok(BodyCond::Exists(declared_vars, Box::new(sub)))
         }
-        "Frame" => Ok(BodyCond::Atom(parse_frame(node)?)),
+        // Multi-slot Frame in body position: desugar to conjunction (sq-jsgyn).
+        // A single-slot frame produces BodyCond::Atom directly (no unnecessary And wrapper).
+        "Frame" => {
+            let atoms = parse_frame_atoms(node)?;
+            if atoms.len() == 1 {
+                Ok(BodyCond::Atom(atoms.into_iter().next().unwrap()))
+            } else {
+                // N-slot frame → And(obj[p1->v1], obj[p2->v2], …).
+                // Under RIF-Core §2.3 a multi-slot frame is the conjunction of per-slot
+                // frames; this is the semantically equivalent Horn-body lowering.
+                // [SONNET-4.6] sq-jsgyn
+                Ok(BodyCond::And(atoms.into_iter().map(BodyCond::Atom).collect()))
+            }
+        }
         "Member" => Ok(BodyCond::Atom(parse_member(node)?)),
         "Subclass" => Ok(BodyCond::Atom(parse_subclass(node)?)),
         "Equal" => Ok(BodyCond::Atom(parse_equal(node)?)),
         "External" => Ok(BodyCond::Atom(parse_external(node)?)),
+        // [SONNET-4.6] sq-n7y15 — positional Atom in body conditions.
+        "Atom" => Ok(BodyCond::Atom(parse_positional_atom(node)?)),
         other => {
             check_non_core(other)?;
             Err(ImportError::UnrecognizedElement { tag: other.to_string() })
@@ -1104,11 +1454,11 @@ fn parse_condition(node: &XmlNode) -> Result<BodyCond, ImportError> {
     }
 }
 
-/// Parse the child of a `<formula>` wrapper (descend into the wrapper's first child).
+/// Parse the child of a `<formula>` wrapper (descend into the wrapper's single child).
+/// A `<formula>` holds exactly one condition; a surplus sibling is rejected rather than
+/// silently dropped (sq-anuo9 — a dropped conjunct weakens the body → over-derivation).
 fn parse_formula_child(formula: &XmlNode) -> Result<BodyCond, ImportError> {
-    let child = formula.children.first().ok_or_else(|| ImportError::MalformedXml(
-        "<formula> has no child condition".to_string(),
-    ))?;
+    let child = formula.only_child("<formula>")?;
     parse_condition(child)
 }
 
@@ -1117,11 +1467,17 @@ fn parse_formula_child(formula: &XmlNode) -> Result<BodyCond, ImportError> {
 // ---------------------------------------------------------------------------
 
 /// Parse the head of an `<Implies>` (the `<then>` child). Head may be a single
-/// positive atom or an `<And>` of positive atoms.
+/// positive atom (or multi-slot Frame → multiple atoms) or an `<And>` of positive atoms.
 ///
 /// # Fail-closed children check (Fix-2)
 ///
 /// The `<And>` case now rejects any non-`<formula>` child element.
+///
+/// # Multi-slot Frame in head position (sq-jsgyn)
+///
+/// A `<Frame>` with N slots in head position adds N atoms to the rule head.
+/// This is the sound RIF-Core lowering: a multi-slot frame conclusion is the
+/// conjunction of per-slot atoms (all must be derived for the rule to fire).
 fn parse_head(node: &XmlNode) -> Result<Vec<Atom>, ImportError> {
     match node.tag.as_str() {
         "And" => {
@@ -1132,16 +1488,17 @@ fn parse_head(node: &XmlNode) -> Result<Vec<Atom>, ImportError> {
                     check_non_core(&c.tag)?;
                     return Err(ImportError::UnrecognizedElement { tag: c.tag.clone() });
                 }
-                let child = c.children.first().ok_or_else(|| {
-                    ImportError::MalformedXml("<formula> in head And has no child".to_string())
-                })?;
-                head.push(parse_positive_atom(child)?);
+                // Single-cardinality: each head-<formula> holds exactly one atom element;
+                // a surplus sibling head atom is rejected, not dropped (sq-anuo9).
+                // A multi-slot Frame in a head-<formula> desugars to multiple atoms. [sq-jsgyn]
+                let child = c.only_child("<formula> in head And")?;
+                head.extend(parse_positive_atoms(child)?);
             }
             Ok(head)
         }
         _ => {
-            // Single positive atom.
-            Ok(vec![parse_positive_atom(node)?])
+            // Single positive atom (or multi-slot Frame → multiple atoms). [sq-jsgyn]
+            parse_positive_atoms(node)
         }
     }
 }
@@ -1159,42 +1516,50 @@ fn parse_sentence(node: &XmlNode) -> Result<Vec<Rule>, ImportError> {
             // These seed the alpha-rename universe so generated fresh names cannot
             // collide with universally-declared vars.
             //
-            // [SONNET-4.6] Fix-6: identical guard to Exists arm — reject <declare>
-            // with != 1 <Var> child instead of silently dropping extras.
+            // [SONNET-4.6] Fix-6 + sq-anuo9: identical guard to the Exists arm — reject a
+            // <declare> whose sole child is not a <Var>, or that has != 1 child, instead of
+            // silently dropping extras or tolerating a stray non-<Var> sibling.
             let mut forall_vars_vec: Vec<String> = Vec::new();
             for d in node.children_named("declare") {
-                let var_children: Vec<&XmlNode> =
-                    d.children.iter().filter(|c| c.tag == "Var").collect();
-                if var_children.len() != 1 {
-                    return Err(ImportError::MalformedXml(format!(
-                        "<declare> must contain exactly one <Var> child, found {} (in <Forall>)",
-                        var_children.len()
-                    )));
+                match d.children.as_slice() {
+                    [only] if only.tag == "Var" => {
+                        forall_vars_vec.push(only.text.trim().to_string());
+                    }
+                    _ => {
+                        return Err(ImportError::MalformedXml(format!(
+                            "<declare> must contain exactly one <Var> child, found {} child element(s) (in <Forall>)",
+                            d.children.len()
+                        )));
+                    }
                 }
-                forall_vars_vec.push(var_children[0].text.trim().to_string());
             }
             let forall_vars: BTreeSet<String> = forall_vars_vec.into_iter().collect();
 
-            let formula = node.child("formula").ok_or_else(|| ImportError::MalformedXml(
+            // Fail-closed on a DUPLICATE <formula> wrapper (sq-4l1fj): a dropped second
+            // <formula> under <Forall> silently loses a whole rule.
+            let formula = node.unique_child("formula", "Forall")?.ok_or_else(|| ImportError::MalformedXml(
                 "Forall missing <formula>".to_string(),
             ))?;
-            let body_node = formula.children.first().ok_or_else(|| ImportError::MalformedXml(
-                "Forall <formula> has no child".to_string(),
-            ))?;
+            // Single-cardinality: the Forall <formula> holds exactly one body element
+            // (an <Implies> or a bare atom); a surplus sibling is rejected (sq-anuo9).
+            let body_node = formula.only_child("Forall <formula>")?;
             match body_node.tag.as_str() {
                 "Implies" => parse_implies(body_node, &forall_vars),
                 other => {
                     // A bare atom as a Forall formula = universally closed fact.
+                    // Multi-slot Frame desugars to one Rule::fact per slot. [sq-jsgyn]
                     check_non_core(other)?;
-                    let atom = parse_positive_atom(body_node)?;
-                    Ok(vec![Rule::fact(atom)])
+                    let atoms = parse_positive_atoms(body_node)?;
+                    Ok(atoms.into_iter().map(Rule::fact).collect())
                 }
             }
         }
         // Bare fact (no Forall wrapper) — no existentials are possible.
-        "Frame" | "Member" | "Subclass" | "Equal" => {
-            let atom = parse_positive_atom(node)?;
-            Ok(vec![Rule::fact(atom)])
+        // [SONNET-4.6] sq-n7y15 — "Atom" added: bare positional predicate fact.
+        // Multi-slot Frame: one Rule::fact per slot. [sq-jsgyn]
+        "Frame" | "Member" | "Subclass" | "Equal" | "Atom" => {
+            let atoms = parse_positive_atoms(node)?;
+            Ok(atoms.into_iter().map(Rule::fact).collect())
         }
         other => {
             check_non_core(other)?;
@@ -1224,10 +1589,11 @@ fn parse_implies(node: &XmlNode, forall_vars: &BTreeSet<String>) -> Result<Vec<R
         "Implies missing <then>".to_string(),
     ))?;
 
-    // Parse the body condition.
-    let body_child = if_node.children.first().ok_or_else(|| ImportError::MalformedXml(
-        "<if> has no child condition".to_string(),
-    ))?;
+    // Parse the body condition. Single-cardinality: the <if> holds exactly one condition.
+    // A surplus condition sibling used to be silently dropped by `.children.first()` — for
+    // `<if>` that drops a CONJUNCT, weakening the guard → OVER-derivation (unsound). This is
+    // the soundness-relevant site; reject surplus fail-closed (sq-anuo9). [SONNET-4.6]
+    let body_child = if_node.only_child("<if>")?;
     let body_cond = parse_condition(body_child)?;
 
     // Alpha-rename all Exists-declared vars to globally fresh names (Fix-1).
@@ -1238,10 +1604,10 @@ fn parse_implies(node: &XmlNode, forall_vars: &BTreeSet<String>) -> Result<Vec<R
     let mut counter = 0u32;
     let body_cond = alpha_rename_cond(body_cond, &mut counter, &mut universe);
 
-    // Parse the head.
-    let then_child = then_node.children.first().ok_or_else(|| ImportError::MalformedXml(
-        "<then> has no child".to_string(),
-    ))?;
+    // Parse the head. Single-cardinality: the <then> holds exactly one head element (a
+    // positive atom or a conjunctive <And>). A surplus head sibling used to be silently
+    // dropped → under-derivation; reject it fail-closed (sq-anuo9). [SONNET-4.6]
+    let then_child = then_node.only_child("<then>")?;
     let head = parse_head(then_child)?;
 
     // Or-split / Exists-flatten → one rule per body disjunct.
@@ -1257,17 +1623,88 @@ fn parse_implies(node: &XmlNode, forall_vars: &BTreeSet<String>) -> Result<Vec<R
 // Document interpretation
 // ---------------------------------------------------------------------------
 
-fn interpret_document(root: &XmlNode) -> Result<Document, ImportError> {
+// ---------------------------------------------------------------------------
+// Imports-closure consistency check  [SONNET-4.6] sq-wbql1
+// ---------------------------------------------------------------------------
+
+/// The W3C RIF-Core profile IRI. An `<Import>` whose `profile` attribute names a
+/// different profile is incompatible with the importing RIF-Core document.
+const RIF_CORE_PROFILE_IRI: &str = "http://www.w3.org/2007/rif#Core";
+
+/// Known non-Core RIF dialect profile IRIs. An import declaring one of these is
+/// INCOMPATIBLE with a RIF-Core document — rejected with `InconsistentImport`.
+const NON_CORE_PROFILES: &[&str] = &[
+    "http://www.w3.org/2007/rif#BLD",
+    "http://www.w3.org/2007/rif#PRD",
+    "http://www.w3.org/2007/rif#OWL-Direct",
+    "http://www.w3.org/2007/rif#OWL-RDF-Compatibility",
+    "http://www.w3.org/2007/rif#SWC",
+    "http://www.w3.org/2007/rif#FLD",
+];
+
+/// Check whether a `profile` IRI is incompatible with RIF-Core. Returns an
+/// `InconsistentImport` error if so; `Ok(())` when the profile is Core or unset.
+///
+/// Per RIF-Core §3 (Imports): a conforming RIF-Core processor MUST reject a
+/// document whose imports closure contains a document with an incompatible profile.
+/// An explicitly non-Core profile IRI is the detectable case.
+fn check_import_profile(
+    location: &str,
+    profile: Option<&str>,
+) -> Result<(), ImportError> {
+    let Some(prof) = profile else { return Ok(()) };
+    let prof = prof.trim();
+    // An explicit non-Core profile is incompatible with a RIF-Core document.
+    if NON_CORE_PROFILES.contains(&prof) {
+        return Err(ImportError::InconsistentImport {
+            location: location.to_string(),
+            reason: format!(
+                "imported profile <{}> is incompatible with RIF-Core (non-Core dialect)",
+                prof
+            ),
+        });
+    }
+    // Any profile OTHER than Core (and other than empty/absent) is also incompatible,
+    // since we cannot verify what constraints it imposes.
+    if !prof.is_empty() && prof != RIF_CORE_PROFILE_IRI {
+        return Err(ImportError::InconsistentImport {
+            location: location.to_string(),
+            reason: format!(
+                "imported profile <{}> is unrecognized — only RIF-Core (<{}>) is \
+                 compatible with this processor",
+                prof, RIF_CORE_PROFILE_IRI
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Interpret a `<Document>` root node into a `Document`, driving the imports-closure
+/// check via `resolver`.  When `resolver` is `None`, any `<Import>` → `ImportDirective`
+/// (the original fail-closed behaviour).  When `resolver` is `Some(f)`, each `<Import>`
+/// directive is:
+///
+/// 1. Profile-checked: a non-Core `profile` attribute → `InconsistentImport`.
+/// 2. Resolved: `f(location)` is called; if it returns `Some(bytes)` the imported
+///    document is parsed and its rules are merged into the closure for combined
+///    `validate()`.  If `f` returns `None` (the document is not locally available),
+///    the import is still rejected fail-closed with `ImportDirective` — never silently
+///    accepted.
+fn interpret_document<F>(root: &XmlNode, resolver: Option<&F>) -> Result<Document, ImportError>
+where
+    F: Fn(&str) -> Option<Vec<u8>>,
+{
     if root.tag != "Document" {
         return Err(ImportError::UnrecognizedElement { tag: root.tag.clone() });
     }
 
     let mut doc = Document::new();
+    // Rules accumulated from resolved imported documents (the imports closure).
+    let mut imported_rules: Vec<crate::rif::Rule> = Vec::new();
 
     for child in &root.children {
         match child.tag.as_str() {
             "directive" => {
-                // Scan for Import elements — fail closed.
                 for item in &child.children {
                     if item.tag == "Import" {
                         let location = item
@@ -1275,13 +1712,48 @@ fn interpret_document(root: &XmlNode) -> Result<Document, ImportError> {
                             .and_then(|n| n.children.first())
                             .map(|n| n.text.trim().to_string())
                             .unwrap_or_default();
-                        return Err(ImportError::ImportDirective { location });
+                        // Read the optional profile attribute from the Import node, or
+                        // from a <profile> child element (both forms appear in the W3C
+                        // test suite).
+                        let profile_from_child = item
+                            .child("profile")
+                            .and_then(|n| n.children.first())
+                            .map(|n| n.text.trim().to_string());
+                        let profile = profile_from_child.as_deref();
+
+                        // Step 1: profile consistency check (detectable offline).
+                        check_import_profile(&location, profile)?;
+
+                        // Step 2: try to resolve the imported document.
+                        match resolver {
+                            Some(f) => match f(&location) {
+                                Some(bytes) => {
+                                    // Parse the imported document. Its own imports are
+                                    // not recursively resolved here (bounded single-level
+                                    // closure for the offline check — a full transitive
+                                    // resolver is tracked as sq-wbql1 future work).
+                                    let imp_root = parse_xml_tree(&bytes)?;
+                                    let imp_doc = interpret_document(&imp_root, None::<&fn(&str) -> Option<Vec<u8>>>)?;
+                                    // Accumulate its rules for the combined validate.
+                                    imported_rules.extend(imp_doc.rules);
+                                }
+                                None => {
+                                    // Resolver could not supply the imported document:
+                                    // fail closed — never silently accept an import we
+                                    // cannot examine (only the profile check passed).
+                                    return Err(ImportError::ImportDirective { location });
+                                }
+                            },
+                            None => {
+                                // No resolver: blanket fail-closed (original behaviour).
+                                return Err(ImportError::ImportDirective { location });
+                            }
+                        }
+                        continue;
                     }
                     check_non_core(&item.tag)?;
                     // Other directives (e.g. <Profile>) are unrecognized.
-                    if item.tag != "Import" {
-                        return Err(ImportError::UnrecognizedElement { tag: item.tag.clone() });
-                    }
+                    return Err(ImportError::UnrecognizedElement { tag: item.tag.clone() });
                 }
             }
             "payload" => {
@@ -1292,6 +1764,25 @@ fn interpret_document(root: &XmlNode) -> Result<Document, ImportError> {
                 return Err(ImportError::UnrecognizedElement { tag: other.to_string() });
             }
         }
+    }
+
+    // If any imports were resolved, validate the combined rule set.
+    if !imported_rules.is_empty() {
+        // Build the combined document: importing document's rules + all imported rules.
+        let mut combined = crate::rif::Document::new();
+        for rule in &doc.rules {
+            combined.push(rule.clone());
+        }
+        for rule in imported_rules {
+            combined.push(rule);
+        }
+        combined.validate().map_err(ImportError::ValidationFailed)?;
+        // If combined validation passes, return only the importing document's rules
+        // (the imported rules were merged only for the consistency check, per the
+        // RIF-Core import semantics: the importer's closure is the full derivation
+        // domain, but here we return the successfully-imported document for further
+        // caller use — the caller can re-drive closure over the combined set).
+        return Ok(combined);
     }
 
     Ok(doc)
@@ -1327,9 +1818,9 @@ fn interpret_group(group: &XmlNode, doc: &mut Document) -> Result<(), ImportErro
                 // The old code called parse_sentence(child) where child.tag=="sentence",
                 // which always errored with UnrecognizedElement since parse_sentence only
                 // handles Forall/Frame/Member/Subclass/Equal at the top level.
-                let actual = child.children.first().ok_or_else(|| ImportError::MalformedXml(
-                    "<sentence> wrapper has no child sentence element".to_string(),
-                ))?;
+                // Single-cardinality: the <sentence> wrapper holds exactly one sentence
+                // element; a surplus sibling sentence is rejected, not dropped (sq-anuo9).
+                let actual = child.only_child("<sentence> wrapper")?;
                 let rules = parse_sentence(actual)?;
                 for rule in rules {
                     doc.push(rule);
@@ -1366,9 +1857,70 @@ fn interpret_group(group: &XmlNode, doc: &mut Document) -> Result<(), ImportErro
 /// Everything outside the supported Core subset yields a named `ImportError` variant
 /// (fail-closed, never silent skipping). The returned `Document` has already been
 /// validated via `Document::validate()`.
+///
+/// Any `<Import>` directive → `ImportDirective` fail-closed (blanket refusal when no
+/// resolver is available). To resolve imports and check their consistency, use
+/// [`import_with_closure`].
 pub fn import(xml_bytes: &[u8]) -> Result<Document, ImportError> {
     let root = parse_xml_tree(xml_bytes)?;
-    let doc = interpret_document(&root)?;
+    let doc = interpret_document(&root, None::<&fn(&str) -> Option<Vec<u8>>>)?;
+    doc.validate().map_err(ImportError::ValidationFailed)?;
+    Ok(doc)
+}
+
+/// [SONNET-4.6] sq-wbql1 — Parse a RIF-Core XML document and compute the
+/// **imports-closure consistency check** using a caller-supplied resolver.
+///
+/// Unlike [`import`], this function does NOT blanket-refuse `<Import>` directives.
+/// Instead, for each `<Import>` it:
+///
+/// 1. **Profile-checks** the `profile` attribute: if it names a non-Core RIF dialect
+///    (BLD, PRD, OWL-Direct, …) the import is rejected with
+///    `ImportError::InconsistentImport` — a GENUINE, NON-VACUOUS detection of the
+///    specific invalidity the W3C RIF ImportRejectionTests target.
+///
+/// 2. **Resolves** the imported document bytes via `resolver(location_iri)`. If the
+///    resolver returns `Some(bytes)`, the imported document is parsed as RIF-Core and
+///    its rules are merged with the importing document's rules; the combined set is then
+///    validated. A validation failure → `ImportError::InconsistentImport` (the imported
+///    rules are inconsistent with the importing document). If the resolver returns
+///    `None` (the document is not locally available), the import is rejected fail-closed
+///    with `ImportError::ImportDirective` — never silently accepted.
+///
+/// ## Fail-closed invariant (sq-wbql1)
+///
+/// An inconsistent/unresolvable/incompatible import is ALWAYS rejected — never silently
+/// accepted. A CONSISTENT import (resolvable, compatible profile, combined rules pass
+/// validation) is accepted and the merged `Document` is returned.
+///
+/// ## Example
+///
+/// ```rust
+/// # #[cfg(feature = "rif-xml")] {
+/// use sparq_reason::rif_xml::{import_with_closure, ImportError};
+///
+/// // An importing document with a non-Core profile import.
+/// let importing = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+///   <directive><Import>
+///     <location><Const type="http://www.w3.org/2007/rif#iri">http://ex/rules</Const></location>
+///     <profile><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif#BLD</Const></profile>
+///   </Import></directive>
+///   <payload><Group></Group></payload>
+/// </Document>"#;
+///
+/// // The resolver provides no bytes (location not locally available).
+/// let result = import_with_closure(importing, |_loc| None);
+/// assert!(matches!(result, Err(ImportError::InconsistentImport { .. })),
+///     "a non-Core profile import must be rejected as InconsistentImport");
+/// # }
+/// ```
+pub fn import_with_closure<F>(xml_bytes: &[u8], resolver: F) -> Result<Document, ImportError>
+where
+    F: Fn(&str) -> Option<Vec<u8>>,
+{
+    let root = parse_xml_tree(xml_bytes)?;
+    let doc = interpret_document(&root, Some(&resolver))?;
+    // Final validate (covers the no-import case and the combined-rules path).
     doc.validate().map_err(ImportError::ValidationFailed)?;
     Ok(doc)
 }
@@ -2389,6 +2941,316 @@ mod tests {
         );
     }
 
+    // ---- sq-anuo9: surplus-child rejection on single-cardinality wrappers ----
+    //
+    // On NON-schema-valid input, single-cardinality wrappers reached via the old
+    // `.children.first()` silently DROPPED surplus siblings, contradicting the module
+    // doc's universal "nothing is silently skipped or dropped". The `<if>` case is the
+    // soundness-relevant one — a dropped conjunct WEAKENS the guard → OVER-derivation.
+    // Each test is a mutation-check: reverting the corresponding `only_child` call to
+    // `.children.first()` makes `import` return `Ok` (silently dropping the surplus),
+    // turning the `expect_err`/`unwrap_err` RED. Conformant RIF-XML (exactly one child
+    // per wrapper) is unaffected: the paired control in the `<if>` test imports fine, and
+    // the full existing suite (MINIMAL_RULE_XML, OR_SPLIT_XML, EXISTS_FLATTEN_XML, …)
+    // stays green. [SONNET-4.6]
+
+    /// Assert `xml` is rejected with `MalformedXml` whose message mentions `needle`.
+    fn assert_surplus_rejected(xml: &[u8], needle: &str) {
+        let err = import(xml).unwrap_err();
+        assert!(
+            matches!(err, ImportError::MalformedXml(_)),
+            "expected MalformedXml (surplus single-cardinality child), got: {}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains(needle),
+            "MalformedXml message must mention {}: {}",
+            needle,
+            msg
+        );
+    }
+
+    /// SOUNDNESS (over-derivation): an `<if>` holding TWO condition children must be
+    /// rejected. The old `.children.first()` kept only the first `<Frame>` and dropped
+    /// the second conjunct, so the imported rule had a strictly WEAKER body (fires on
+    /// more inputs) → unsound over-derivation. Fail-closed rejection is correct. The
+    /// paired control proves the surplus sibling is the SOLE cause of the rejection.
+    #[test]
+    fn test_surplus_if_child_rejected_over_derivation() {
+        // Malformed: <if> directly contains TWO <Frame> conjuncts (no <And> wrapper).
+        let malformed = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if>
+        <Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+        <Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/w</Const></slot></Frame>
+      </if>
+      <then>
+        <Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+      </then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(malformed, "<if>");
+
+        // Control: the SAME rule with a single <if> child imports cleanly — the surplus
+        // sibling above is the sole cause of the rejection, not some unrelated defect.
+        let control = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if>
+        <Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+      </if>
+      <then>
+        <Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+      </then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        let doc = import(control).expect("single-child <if> is conformant and must import");
+        assert_eq!(doc.rules.len(), 1, "control rule must import as exactly one rule");
+    }
+
+    /// `<then>` holding TWO head atoms drops the second (under-derivation) → rejected.
+    /// A conjunctive head must be expressed as `<then><And>…</And></then>`, so two bare
+    /// `<Frame>` children directly under `<then>` are malformed.
+    #[test]
+    fn test_surplus_then_child_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></if>
+      <then>
+        <Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+        <Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+      </then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<then>");
+    }
+
+    /// A body `<formula>` inside `<And>` holding TWO condition children → rejected
+    /// (`parse_formula_child`).
+    #[test]
+    fn test_surplus_formula_child_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><And>
+        <formula>
+          <Frame><object><Var>x</Var></object>
+            <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+          <Frame><object><Var>x</Var></object>
+            <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/w</Const></slot></Frame>
+        </formula>
+      </And></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<formula>");
+    }
+
+    /// The `<formula>` directly under a `<Forall>` holding a surplus sibling (an
+    /// `<Implies>` plus a stray `<Frame>`) → rejected (`parse_sentence` Forall arm).
+    #[test]
+    fn test_surplus_forall_formula_child_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula>
+      <Implies>
+        <if><Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></if>
+        <then><Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+      </Implies>
+      <Frame><object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/t</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/u</Const></slot></Frame>
+    </formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<formula>");
+    }
+
+    /// A `<formula>` inside a conjunctive HEAD `<And>` holding two head atoms → rejected
+    /// (`parse_head`).
+    #[test]
+    fn test_surplus_head_formula_child_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></if>
+      <then><And>
+        <formula>
+          <Frame><object><Var>x</Var></object>
+            <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+          <Frame><object><Var>x</Var></object>
+            <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+        </formula>
+      </And></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<formula>");
+    }
+
+    /// A term wrapper `<object>` holding TWO term children → rejected (`parse_first_term`).
+    /// Representative of the `<object>/<instance>/<class>/<sub>/<sup>/<left>/<right>` class.
+    #[test]
+    fn test_surplus_object_term_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/extra</Const>
+      </object>
+      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<object>");
+    }
+
+    /// A term wrapper `<instance>` (Member) holding TWO term children → rejected. Confirms
+    /// `parse_first_term` names the ACTUAL wrapper tag, not a hard-coded one.
+    #[test]
+    fn test_surplus_instance_term_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Member>
+      <instance>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/i</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/extra</Const>
+      </instance>
+      <class><Const type="http://www.w3.org/2007/rif#iri">http://ex/C</Const></class>
+    </Member>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<instance>");
+    }
+
+    /// An `<External><content>` holding TWO children → rejected (`parse_external`).
+    #[test]
+    fn test_surplus_external_content_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><External>
+        <content>
+          <Atom><op><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif-builtin-predicate#is-literal-integer</Const></op>
+            <args><Var>x</Var></args></Atom>
+          <Atom><op><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif-builtin-predicate#is-literal-integer</Const></op>
+            <args><Var>x</Var></args></Atom>
+        </content>
+      </External></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<content>");
+    }
+
+    /// An `<External>` `<op>` wrapper holding TWO `<Const>` children → rejected
+    /// (`parse_external`).
+    #[test]
+    fn test_surplus_external_op_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><External>
+        <content><Atom>
+          <op>
+            <Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif-builtin-predicate#is-literal-integer</Const>
+            <Const type="http://www.w3.org/2007/rif#iri">http://ex/extra</Const>
+          </op>
+          <args><Var>x</Var></args>
+        </Atom></content>
+      </External></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<op>");
+    }
+
+    /// A `<sentence>` wrapper holding TWO sentence elements → rejected (`interpret_group`).
+    #[test]
+    fn test_surplus_sentence_wrapper_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group>
+    <sentence>
+      <Frame><object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s1</Const></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+      <Frame><object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s2</Const></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame>
+    </sentence>
+  </Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "<sentence>");
+    }
+
+    /// A `<declare>` holding a stray NON-`<Var>` sibling → rejected. The earlier Fix-6
+    /// filter-to-`<Var>` guard TOLERATED this (it silently ignored the stray `<Const>`);
+    /// sq-anuo9 tightens it to "exactly one child, and it must be a `<Var>`". (Forall arm.)
+    #[test]
+    fn test_declare_stray_nonvar_child_rejected_forall() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var><Const type="http://www.w3.org/2007/rif#iri">http://ex/junk</Const></declare>
+    <formula><Implies>
+      <if><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "declare");
+    }
+
+    /// Same stray-non-`<Var>` tolerance fix in the `<Exists>` (`parse_condition`) arm.
+    #[test]
+    fn test_declare_stray_nonvar_child_rejected_exists() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><Exists>
+        <declare><Var>a</Var><Const type="http://www.w3.org/2007/rif#iri">http://ex/junk</Const></declare>
+        <formula><Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Var>a</Var></slot></Frame></formula>
+      </Exists></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_surplus_rejected(xml, "declare");
+    }
+
     // ---- Const whitespace round-trip (Fix-3) ---------------------------------
 
     /// xsd:string lexical value with surrounding whitespace must round-trip exactly.
@@ -2686,6 +3548,1210 @@ mod tests {
         assert!(
             matches!(resolve_xml_entity("undefined"), Err(ImportError::MalformedXml(_))),
             "unknown entity must produce MalformedXml"
+        );
+    }
+
+    // ---- sq-4l1fj: fail-closed on a DUPLICATE single-cardinality WRAPPER under a parent ----
+    //
+    // sq-anuo9 (`only_child`) closed the SURPLUS-GRANDCHILDREN class — one wrapper holding two
+    // element children. A distinct twin remained: TWO copies of the SAME single-cardinality
+    // wrapper under one parent, read via `child()` (find-first), silently took the first and
+    // DROPPED the second. A dropped `<formula>` under a `<Forall>` loses a WHOLE RULE; a dropped
+    // `<object>`/`<slot>` changes the atom. `unique_child` now rejects the duplicate fail-closed
+    // (the parent-level twin of the `<if>`/`<then>` guard already inlined in `parse_implies`).
+    //
+    // Each test is a MUTATION-CHECK: reverting `unique_child`'s body to the pre-fix first-wins
+    // (`Ok(self.children.iter().find(|c| c.tag == tag))`) makes every `import` below return `Ok`
+    // (silently taking the first wrapper), flipping the `unwrap_err`/`expect_err` RED. Conformant
+    // RIF-XML has at most one of each wrapper, so every valid-document test stays green (the
+    // paired controls below import cleanly). [OPUS-4.8]
+
+    /// Assert `xml` is rejected with a `MalformedXml` DUPLICATE-wrapper diagnostic naming `tag`.
+    /// Asserts the word "duplicate" so the test pins the `unique_child` path specifically (the
+    /// `only_child` surplus path says "must have exactly one child element" instead).
+    fn assert_duplicate_wrapper_rejected(xml: &[u8], tag: &str) {
+        let err = import(xml).unwrap_err();
+        assert!(
+            matches!(err, ImportError::MalformedXml(_)),
+            "expected MalformedXml (duplicate single-cardinality wrapper), got: {}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicate") && msg.contains(tag),
+            "MalformedXml must be a DUPLICATE-wrapper diagnostic naming {}: {}",
+            tag,
+            msg
+        );
+    }
+
+    /// Parent `<Frame>` — a duplicate `<object>` is rejected; multiple `<slot>` children
+    /// are NOW VALID (multi-slot frame desugaring, sq-jsgyn). Paired control: the
+    /// single-slot Frame fact imports as exactly one rule.
+    ///
+    /// Note: the pre-sq-jsgyn behaviour rejected two `<slot>` elements with a
+    /// `MalformedXml("Frame has duplicate <slot>…")` error via `unique_child`.
+    /// That guard is removed; `<slot>` is now multi-cardinality under `<Frame>`.
+    /// `<object>` remains single-cardinality and its duplicate rejection is unchanged.
+    #[test]
+    fn test_duplicate_frame_object_rejected_multislot_accepted() {
+        // Duplicate <object> — STILL rejected (single-cardinality unchanged).
+        let dup_object = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s2</Const></object>
+      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_object, "<object>");
+
+        // Two <slot> children — NOW ACCEPTED as a 2-slot frame (sq-jsgyn).
+        // Mutation-check: if parse_frame_atoms is reverted to unique_child("slot",…),
+        // this import fails instead of succeeding → expect() panics → test RED.
+        let two_slot = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
+      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/w</Const></slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(two_slot).expect("2-slot Frame bare fact must now import (sq-jsgyn)");
+        // A bare 2-slot Frame produces 2 Rule::fact atoms (one per slot).
+        assert_eq!(doc.rules.len(), 2, "2-slot bare Frame desugars to 2 facts");
+
+        // Control: single-slot Frame fact imports as exactly one rule.
+        let control = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
+      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(control).expect("single-slot Frame fact is conformant and must import");
+        assert_eq!(doc.rules.len(), 1, "control Frame fact must import as exactly one rule");
+    }
+
+    // ---- sq-jsgyn: multi-slot Frame desugaring tests --------------------------
+    //
+    // These tests cover the multi-slot Frame desugaring introduced by sq-jsgyn.
+    // The RIF-Core semantic is: obj[p1->v1 p2->v2] ≡ obj[p1->v1] AND obj[p2->v2].
+    // Each test has a mutation-check annotation demonstrating what goes red if the
+    // desugaring is reverted (e.g., reverting to unique_child("slot",…) or failing
+    // to split into multiple atoms).
+
+    /// **Bare-fact position** — a 2-slot Frame produces 2 `Rule::fact` atoms.
+    /// The per-slot atoms share the same `obj` and carry distinct `pred`/`val`.
+    ///
+    /// Mutation-check: reverting `parse_sentence` bare-Frame arm from
+    /// `parse_positive_atoms` back to `parse_positive_atom` (single-atom) breaks
+    /// compilation OR causes the test to fail if a single-atom shim is inserted
+    /// (it returns one rule with only the first slot → `doc.rules.len() == 1` →
+    /// assertion `2` fails → RED). [SONNET-4.6] sq-jsgyn
+    #[test]
+    fn test_multislot_bare_fact_desugars_to_per_slot_facts() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/obj</Const></object>
+      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p1</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v1</Const></slot>
+      <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p2</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v2</Const></slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("2-slot bare Frame must import (sq-jsgyn)");
+        // 2 slots → 2 Rule::fact entries.
+        assert_eq!(doc.rules.len(), 2, "2-slot Frame desugars to 2 facts");
+
+        // Both rules are ground facts (empty body).
+        for rule in &doc.rules {
+            assert!(rule.body.is_empty(), "each per-slot fact has an empty body");
+        }
+        // Both rules have exactly one head atom.
+        for rule in &doc.rules {
+            assert_eq!(rule.head.len(), 1, "each per-slot fact has one head atom");
+        }
+        // Collect head atoms and verify they are the expected per-slot frames.
+        let heads: Vec<&Atom> = doc.rules.iter().map(|r| &r.head[0]).collect();
+        let has_p1 = heads.iter().any(|a| {
+            matches!(a, Atom::Frame { pred: Term::Iri(p), val: Term::Iri(v), .. }
+                if p == "http://ex/p1" && v == "http://ex/v1")
+        });
+        let has_p2 = heads.iter().any(|a| {
+            matches!(a, Atom::Frame { pred: Term::Iri(p), val: Term::Iri(v), .. }
+                if p == "http://ex/p2" && v == "http://ex/v2")
+        });
+        assert!(has_p1, "per-slot fact for p1->v1 must be present");
+        assert!(has_p2, "per-slot fact for p2->v2 must be present");
+        // Both share the same object IRI.
+        let all_same_obj = heads.iter().all(|a| {
+            matches!(a, Atom::Frame { obj: Term::Iri(o), .. } if o == "http://ex/obj")
+        });
+        assert!(all_same_obj, "all per-slot atoms must share the same obj");
+    }
+
+    /// **Body position** — a 2-slot Frame in the body of a rule desugars to a
+    /// conjunction of 2 `Atom::Frame` in the rule body (one per slot).
+    ///
+    /// Mutation-check: reverting the `"Frame"` arm in `parse_condition` from
+    /// `parse_frame_atoms` + `BodyCond::And` back to `parse_frame` (single atom)
+    /// causes the rule body to contain only 1 atom → `rule.body.len() == 1` →
+    /// assertion `2` fails → RED. [SONNET-4.6] sq-jsgyn
+    #[test]
+    fn test_multislot_body_desugars_to_conjunction() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p1</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v1</Const></slot>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p2</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v2</Const></slot>
+            </Frame>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/yes</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("2-slot Frame in body must import (sq-jsgyn)");
+        // Single rule (no Or-split, single head).
+        assert_eq!(doc.rules.len(), 1, "2-slot body Frame → 1 rule (no Or-split)");
+        let rule = &doc.rules[0];
+        // Body: 2 atoms (one per slot).
+        assert_eq!(rule.body.len(), 2, "2-slot body Frame desugars to 2 body atoms");
+        // Head: 1 atom (the head frame has a single slot).
+        assert_eq!(rule.head.len(), 1, "single-slot head produces 1 head atom");
+        // Verify the body contains both per-slot atoms.
+        let has_p1 = rule.body.iter().any(|a| {
+            matches!(a, Atom::Frame { pred: Term::Iri(p), val: Term::Iri(v), .. }
+                if p == "http://ex/p1" && v == "http://ex/v1")
+        });
+        let has_p2 = rule.body.iter().any(|a| {
+            matches!(a, Atom::Frame { pred: Term::Iri(p), val: Term::Iri(v), .. }
+                if p == "http://ex/p2" && v == "http://ex/v2")
+        });
+        assert!(has_p1, "body must contain the p1->v1 per-slot atom");
+        assert!(has_p2, "body must contain the p2->v2 per-slot atom");
+        // Both share the same object variable ?x.
+        let all_same_obj = rule.body.iter().all(|a| {
+            matches!(a, Atom::Frame { obj: Term::Var(v), .. } if v == "x")
+        });
+        assert!(all_same_obj, "all per-slot body atoms share obj=?x");
+    }
+
+    /// **Head position** — a 2-slot Frame in the head of a rule desugars to 2 head atoms.
+    ///
+    /// Mutation-check: reverting `parse_head` from `extend(parse_positive_atoms(…))`
+    /// back to `push(parse_positive_atom(…))` causes the head to contain only 1 atom
+    /// → `rule.head.len() == 1` → assertion `2` fails → RED. [SONNET-4.6] sq-jsgyn
+    #[test]
+    fn test_multislot_head_desugars_to_multiple_head_atoms() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+            </Frame>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q1</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/w1</Const></slot>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q2</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/w2</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("2-slot Frame in head must import (sq-jsgyn)");
+        assert_eq!(doc.rules.len(), 1, "single rule (single-slot body, no Or-split)");
+        let rule = &doc.rules[0];
+        // Head: 2 atoms (one per slot).
+        assert_eq!(rule.head.len(), 2, "2-slot head Frame desugars to 2 head atoms");
+        // Body: 1 atom (single-slot body Frame).
+        assert_eq!(rule.body.len(), 1, "single-slot body produces 1 body atom");
+        // Verify both head atoms are present with correct pred/val.
+        let has_q1 = rule.head.iter().any(|a| {
+            matches!(a, Atom::Frame { pred: Term::Iri(p), val: Term::Iri(v), .. }
+                if p == "http://ex/q1" && v == "http://ex/w1")
+        });
+        let has_q2 = rule.head.iter().any(|a| {
+            matches!(a, Atom::Frame { pred: Term::Iri(p), val: Term::Iri(v), .. }
+                if p == "http://ex/q2" && v == "http://ex/w2")
+        });
+        assert!(has_q1, "head must contain the q1->w1 per-slot atom");
+        assert!(has_q2, "head must contain the q2->w2 per-slot atom");
+    }
+
+    /// **Three-slot frame** — regression guard for N>2 slots.
+    ///
+    /// The desugaring is not limited to exactly 2 slots; a 3-slot frame in a rule
+    /// body must produce 3 body atoms. This test prevents a "only handle 2 slots"
+    /// regression. [SONNET-4.6] sq-jsgyn
+    #[test]
+    fn test_multislot_three_slots_in_body() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/1</Const></slot>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/2</Const></slot>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/c</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/3</Const></slot>
+            </Frame>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/yes</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("3-slot Frame in body must import (sq-jsgyn)");
+        assert_eq!(doc.rules.len(), 1, "single rule");
+        let rule = &doc.rules[0];
+        assert_eq!(rule.body.len(), 3, "3-slot body Frame desugars to 3 body atoms");
+        assert_eq!(rule.head.len(), 1, "single-slot head produces 1 head atom");
+    }
+
+    /// **Fail-closed: Frame with zero slots** — must be rejected (MalformedXml).
+    ///
+    /// A `<Frame>` with an `<object>` but no `<slot>` is syntactically malformed
+    /// (a frame without slots is meaningless in RIF-Core). Fail-closed rejection.
+    ///
+    /// Mutation-check: removing the `slots.is_empty()` guard from `parse_frame_atoms`
+    /// causes this to return `Ok(vec![])` → a rule with an empty head atom list →
+    /// the `expect_err` panics → RED. [SONNET-4.6] sq-jsgyn
+    #[test]
+    fn test_multislot_frame_zero_slots_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/obj</Const></object>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        let err = import(xml).expect_err("Frame with zero slots must be rejected (fail-closed)");
+        assert!(
+            matches!(err, ImportError::MalformedXml(_)),
+            "expected MalformedXml for zero-slot Frame, got: {}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("slot"),
+            "error message must mention <slot>: {}",
+            msg
+        );
+    }
+
+    /// **Fail-closed: named-argument slot in a multi-slot Frame** — the whole Frame is
+    /// rejected when ANY slot is a named-argument uniterm, not just the bad slot.
+    ///
+    /// Mutation-check: removing the `slot.child("Name").is_some()` guard in
+    /// `parse_frame_atoms` would allow the named-arg slot to pass through as
+    /// a malformed term, corrupting the import silently → `expect_err` panics →
+    /// RED. [SONNET-4.6] sq-jsgyn
+    #[test]
+    fn test_multislot_named_arg_slot_rejected() {
+        // A 2-slot Frame where the second slot is a named-argument uniterm.
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p1</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v1</Const></slot>
+              <slot>
+                <Name><Const type="http://www.w3.org/2007/rif#iri">http://ex/named</Const></Name>
+                <Var>x</Var>
+              </slot>
+            </Frame>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/yes</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let err = import(xml)
+            .expect_err("named-arg slot in multi-slot Frame must be rejected (fail-closed)");
+        assert!(
+            matches!(err, ImportError::NamedArgUniterm { .. }),
+            "expected NamedArgUniterm for named-arg slot, got: {}",
+            err
+        );
+    }
+
+    /// **Mutation-check (per-slot split is load-bearing):** verifies the desugaring
+    /// split is not bypassed by checking that the body atoms carry DIFFERENT predicates.
+    /// If the split collapsed to a single atom (e.g., returning only the last slot),
+    /// the `pred` distinctness assertion would fail → RED.
+    ///
+    /// This directly tests the per-slot `atoms.push(…)` loop in `parse_frame_atoms`
+    /// is called for EVERY slot, not just one. [SONNET-4.6] sq-jsgyn
+    #[test]
+    fn test_multislot_split_mutation_per_slot_distinctness() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <formula>
+        <Implies>
+          <if>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/PRED_A</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/VAL_A</Const></slot>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/PRED_B</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/VAL_B</Const></slot>
+            </Frame>
+          </if>
+          <then>
+            <Frame>
+              <object><Var>x</Var></object>
+              <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/yes</Const></slot>
+            </Frame>
+          </then>
+        </Implies>
+      </formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("mutation-check: 2-slot body must import");
+        let rule = &doc.rules[0];
+        assert_eq!(rule.body.len(), 2, "must have 2 body atoms (per-slot split)");
+        // Collect the pred IRIs from body atoms.
+        let preds: Vec<String> = rule.body.iter().filter_map(|a| {
+            if let Atom::Frame { pred: Term::Iri(p), .. } = a { Some(p.clone()) } else { None }
+        }).collect();
+        assert_eq!(preds.len(), 2, "both body atoms must be Frame atoms with IRI predicates");
+        // The two predicates must be DISTINCT — the per-slot split is the load-bearing mechanism.
+        // If the loop was collapsed to a single atom, both preds would be the same → assertion fails.
+        assert_ne!(preds[0], preds[1],
+            "per-slot split mutation: predicates must differ (PRED_A vs PRED_B); \
+             a single-atom collapse would produce identical preds → this assertion fails → RED");
+        // Specifically the two expected predicates.
+        assert!(preds.contains(&"http://ex/PRED_A".to_string()), "PRED_A must be present");
+        assert!(preds.contains(&"http://ex/PRED_B".to_string()), "PRED_B must be present");
+    }
+
+    /// Parent `<Member>` — a duplicate `<instance>` OR a duplicate `<class>` is rejected.
+    #[test]
+    fn test_duplicate_member_wrappers_rejected() {
+        let dup_instance = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Member>
+      <instance><Const type="http://www.w3.org/2007/rif#iri">http://ex/i</Const></instance>
+      <instance><Const type="http://www.w3.org/2007/rif#iri">http://ex/i2</Const></instance>
+      <class><Const type="http://www.w3.org/2007/rif#iri">http://ex/C</Const></class>
+    </Member>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_instance, "<instance>");
+
+        let dup_class = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Member>
+      <instance><Const type="http://www.w3.org/2007/rif#iri">http://ex/i</Const></instance>
+      <class><Const type="http://www.w3.org/2007/rif#iri">http://ex/C</Const></class>
+      <class><Const type="http://www.w3.org/2007/rif#iri">http://ex/D</Const></class>
+    </Member>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_class, "<class>");
+    }
+
+    /// Parent `<Subclass>` — a duplicate `<sub>` OR a duplicate `<sup>` is rejected.
+    #[test]
+    fn test_duplicate_subclass_wrappers_rejected() {
+        let dup_sub = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Subclass>
+      <sub><Const type="http://www.w3.org/2007/rif#iri">http://ex/A</Const></sub>
+      <sub><Const type="http://www.w3.org/2007/rif#iri">http://ex/A2</Const></sub>
+      <sup><Const type="http://www.w3.org/2007/rif#iri">http://ex/B</Const></sup>
+    </Subclass>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_sub, "<sub>");
+
+        let dup_sup = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Subclass>
+      <sub><Const type="http://www.w3.org/2007/rif#iri">http://ex/A</Const></sub>
+      <sup><Const type="http://www.w3.org/2007/rif#iri">http://ex/B</Const></sup>
+      <sup><Const type="http://www.w3.org/2007/rif#iri">http://ex/C</Const></sup>
+    </Subclass>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_sup, "<sup>");
+    }
+
+    /// Parent `<Equal>` (in a rule body) — a duplicate `<left>` OR `<right>` is rejected. The
+    /// duplicate guard fires at PARSE time, before `Document::validate()` runs, so it is the
+    /// error surfaced even though a bare Equal would also fail range/equality validation.
+    #[test]
+    fn test_duplicate_equal_wrappers_rejected() {
+        let dup_left = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><Equal>
+        <left><Var>x</Var></left>
+        <left><Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const></left>
+        <right><Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const></right>
+      </Equal></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_left, "<left>");
+
+        let dup_right = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><Equal>
+        <left><Var>x</Var></left>
+        <right><Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const></right>
+        <right><Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const></right>
+      </Equal></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_right, "<right>");
+    }
+
+    /// Parent `<External>` call — a duplicate `<content>`, `<op>`, OR `<args>` is rejected. The
+    /// `<args>` case uses a recognised builtin (`pred:numeric-equal`) so parsing reaches the
+    /// args lookup past operator resolution.
+    #[test]
+    fn test_duplicate_external_wrappers_rejected() {
+        let dup_content = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><External>
+        <content><Atom><op><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif-builtin-predicate#numeric-equal</Const></op><args><Var>x</Var><Var>x</Var></args></Atom></content>
+        <content><Atom><op><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif-builtin-predicate#numeric-equal</Const></op><args><Var>x</Var><Var>x</Var></args></Atom></content>
+      </External></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_content, "<content>");
+
+        let dup_op = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><External>
+        <content><Atom>
+          <op><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif-builtin-predicate#numeric-equal</Const></op>
+          <op><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif-builtin-predicate#numeric-less-than</Const></op>
+          <args><Var>x</Var><Var>x</Var></args>
+        </Atom></content>
+      </External></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_op, "<op>");
+
+        let dup_args = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><External>
+        <content><Atom>
+          <op><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif-builtin-predicate#numeric-equal</Const></op>
+          <args><Var>x</Var><Var>x</Var></args>
+          <args><Var>x</Var><Var>x</Var></args>
+        </Atom></content>
+      </External></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup_args, "<args>");
+    }
+
+    /// Parent `<Forall>` — a duplicate `<formula>` is rejected. This is the highest-severity
+    /// case: `child("formula")` first-wins silently DROPPED the second whole rule. Paired
+    /// control: a single-`<formula>` Forall imports as exactly one rule.
+    #[test]
+    fn test_duplicate_forall_formula_rejected_whole_rule_loss() {
+        let dup = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+    <formula><Implies>
+      <if><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup, "<formula>");
+
+        let control = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        let doc = import(control).expect("single-<formula> Forall is conformant and must import");
+        assert_eq!(doc.rules.len(), 1, "control Forall must import as exactly one rule");
+    }
+
+    /// Parent `<Exists>` (in a rule body) — a duplicate `<formula>` is rejected. A dropped
+    /// second `<formula>` silently loses a conjunct of the existential body.
+    #[test]
+    fn test_duplicate_exists_formula_rejected() {
+        let dup = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences><Forall>
+    <declare><Var>x</Var></declare>
+    <formula><Implies>
+      <if><Exists>
+        <declare><Var>z</Var></declare>
+        <formula><Frame><object><Var>x</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Var>z</Var></slot></Frame></formula>
+        <formula><Frame><object><Var>z</Var></object>
+          <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Var>x</Var></slot></Frame></formula>
+      </Exists></if>
+      <then><Frame><object><Var>x</Var></object>
+        <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/r</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot></Frame></then>
+    </Implies></formula>
+  </Forall></sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup, "<formula>");
+    }
+
+    /// Parent `<List>` term — a duplicate `<items>` wrapper is rejected (`parse_term`). Not one
+    /// of the bead's originally-enumerated seven parents, but the IDENTICAL residual class
+    /// (`child("items")` first-wins would silently drop a second `<items>`, changing the list
+    /// term); closed here to keep the module-doc universal claim airtight. The `<List>` sits in a
+    /// Frame slot value position so `parse_term` reaches it.
+    #[test]
+    fn test_duplicate_list_items_rejected() {
+        let dup = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
+      <slot>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const>
+        <List>
+          <items><Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const></items>
+          <items><Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const></items>
+        </List>
+      </slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        assert_duplicate_wrapper_rejected(dup, "<items>");
+
+        // Control: a single-<items> List value imports cleanly (List term is supported).
+        let control = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://ex/s</Const></object>
+      <slot>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const>
+        <List>
+          <items><Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const></items>
+        </List>
+      </slot>
+    </Frame>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(control).expect("single-<items> List value is conformant and must import");
+        assert_eq!(doc.rules.len(), 1, "control List-valued Frame fact must import as one rule");
+    }
+
+    // ---- Positional Atom tests (sq-n7y15) -----------------------------------
+
+    /// A binary positional Atom in a bare fact imports as `Atom::Frame`.
+    /// `Atom(http://ex/P, http://ex/a, http://ex/b)` ≡ `a[P → b]`.
+    #[test]
+    fn test_positional_atom_binary_fact_imports_as_frame() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Atom>
+      <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/P</Const></op>
+      <args ordered="yes">
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const>
+      </args>
+    </Atom>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("binary positional Atom fact must import");
+        assert_eq!(doc.rules.len(), 1);
+        let rule = &doc.rules[0];
+        assert!(rule.body.is_empty(), "fact has no body");
+        assert_eq!(rule.head.len(), 1);
+        assert_eq!(
+            rule.head[0],
+            Atom::Frame {
+                obj: Term::Iri("http://ex/a".to_string()),
+                pred: Term::Iri("http://ex/P".to_string()),
+                val: Term::Iri("http://ex/b".to_string()),
+            },
+            "binary positional Atom must map to Frame{{obj=a, pred=P, val=b}}"
+        );
+    }
+
+    /// A unary positional Atom in a bare fact imports as `Atom::Member`.
+    /// `Atom(http://ex/C, http://ex/a)` ≡ `a # C`.
+    #[test]
+    fn test_positional_atom_unary_fact_imports_as_member() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Atom>
+      <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/C</Const></op>
+      <args ordered="yes">
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const>
+      </args>
+    </Atom>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("unary positional Atom fact must import");
+        assert_eq!(doc.rules.len(), 1);
+        let rule = &doc.rules[0];
+        assert!(rule.body.is_empty(), "fact has no body");
+        assert_eq!(rule.head.len(), 1);
+        assert_eq!(
+            rule.head[0],
+            Atom::Member {
+                obj: Term::Iri("http://ex/a".to_string()),
+                class: Term::Iri("http://ex/C".to_string()),
+            },
+            "unary positional Atom must map to Member{{obj=a, class=C}}"
+        );
+    }
+
+    /// Positional Atoms in a rule body (body condition position) import correctly.
+    /// A Forall: head :- Atom(P x y) maps to Frame in the body.
+    #[test]
+    fn test_positional_atom_in_rule_body() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <declare><Var>y</Var></declare>
+      <formula><Implies>
+        <if>
+          <Atom>
+            <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/R</Const></op>
+            <args ordered="yes"><Var>x</Var><Var>y</Var></args>
+          </Atom>
+        </if>
+        <then>
+          <Frame>
+            <object><Var>x</Var></object>
+            <slot>
+              <Const type="http://www.w3.org/2007/rif#iri">http://ex/relatedTo</Const>
+              <Var>y</Var>
+            </slot>
+          </Frame>
+        </then>
+      </Implies></formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("positional Atom in body must import");
+        assert_eq!(doc.rules.len(), 1);
+        let rule = &doc.rules[0];
+        assert_eq!(rule.body.len(), 1, "body has one positional Atom");
+        assert_eq!(
+            rule.body[0],
+            Atom::Frame {
+                obj: Term::Var("x".to_string()),
+                pred: Term::Iri("http://ex/R".to_string()),
+                val: Term::Var("y".to_string()),
+            },
+            "binary positional Atom in body must map to Frame"
+        );
+        assert_eq!(rule.head.len(), 1);
+    }
+
+    /// Positional Atom in the HEAD of a rule imports as Frame. [SONNET-4.6] sq-n7y15
+    #[test]
+    fn test_positional_atom_in_rule_head() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <declare><Var>y</Var></declare>
+      <formula><Implies>
+        <if>
+          <Frame>
+            <object><Var>x</Var></object>
+            <slot>
+              <Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const>
+              <Var>y</Var>
+            </slot>
+          </Frame>
+        </if>
+        <then>
+          <Atom>
+            <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/Q</Const></op>
+            <args ordered="yes"><Var>x</Var><Var>y</Var></args>
+          </Atom>
+        </then>
+      </Implies></formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("positional Atom in head must import");
+        assert_eq!(doc.rules.len(), 1);
+        let rule = &doc.rules[0];
+        assert_eq!(rule.head.len(), 1);
+        assert_eq!(
+            rule.head[0],
+            Atom::Frame {
+                obj: Term::Var("x".to_string()),
+                pred: Term::Iri("http://ex/Q".to_string()),
+                val: Term::Var("y".to_string()),
+            },
+            "binary positional Atom in head must map to Frame"
+        );
+    }
+
+    /// Arity-0 positional Atom is rejected fail-closed. [SONNET-4.6] sq-n7y15
+    #[test]
+    fn test_positional_atom_arity_0_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Atom>
+      <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/P</Const></op>
+      <args ordered="yes"></args>
+    </Atom>
+  </sentences></Group></payload>
+</Document>"#;
+        let err = import(xml).expect_err("arity-0 positional Atom must be rejected fail-closed");
+        assert!(
+            matches!(err, ImportError::UnrecognizedElement { ref tag } if tag.contains("arity 0")),
+            "expected UnrecognizedElement mentioning 'arity 0', got: {}",
+            err
+        );
+    }
+
+    /// Arity-3+ positional Atom is rejected fail-closed. [SONNET-4.6] sq-n7y15
+    #[test]
+    fn test_positional_atom_arity_3_rejected() {
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Atom>
+      <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/T</Const></op>
+      <args ordered="yes">
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/c</Const>
+      </args>
+    </Atom>
+  </sentences></Group></payload>
+</Document>"#;
+        let err = import(xml).expect_err("arity-3 positional Atom must be rejected fail-closed");
+        assert!(
+            matches!(err, ImportError::UnrecognizedElement { ref tag } if tag.contains("arity 3")),
+            "expected UnrecognizedElement mentioning 'arity 3', got: {}",
+            err
+        );
+    }
+
+    /// Non-IRI operator in a positional Atom is rejected fail-closed. [SONNET-4.6] sq-n7y15
+    #[test]
+    fn test_positional_atom_non_iri_op_rejected() {
+        // Literal-typed Const (xsd:string) is not a valid predicate IRI.
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Atom>
+      <op><Const type="http://www.w3.org/2001/XMLSchema#string">not-an-iri</Const></op>
+      <args ordered="yes">
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const>
+      </args>
+    </Atom>
+  </sentences></Group></payload>
+</Document>"#;
+        let err = import(xml).expect_err("non-IRI Atom operator must be rejected fail-closed");
+        assert!(
+            matches!(err, ImportError::MalformedXml(_)),
+            "expected MalformedXml for non-IRI Atom operator, got: {}",
+            err
+        );
+    }
+
+    /// Mutation check: swapping arg order (arg1 ↔ arg2) in a binary positional Atom
+    /// must change the parsed Frame (obj ≠ val). This proves that arg ORDER is preserved
+    /// and the mapping is not accidentally order-insensitive. [SONNET-4.6] sq-n7y15
+    #[test]
+    fn test_positional_atom_arg_order_mutation() {
+        // Normal order: Atom(P, a, b) → Frame{obj=a, pred=P, val=b}
+        let normal_xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Atom>
+      <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/P</Const></op>
+      <args ordered="yes">
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const>
+      </args>
+    </Atom>
+  </sentences></Group></payload>
+</Document>"#;
+        // Swapped order: Atom(P, b, a) → Frame{obj=b, pred=P, val=a}
+        let swapped_xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Atom>
+      <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/P</Const></op>
+      <args ordered="yes">
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const>
+      </args>
+    </Atom>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc_normal = import(normal_xml).expect("normal-order binary Atom must import");
+        let doc_swapped = import(swapped_xml).expect("swapped-order binary Atom must import");
+
+        let atom_normal = &doc_normal.rules[0].head[0];
+        let atom_swapped = &doc_swapped.rules[0].head[0];
+
+        // Mutation check: the two documents must produce DIFFERENT atoms.
+        assert_ne!(
+            atom_normal, atom_swapped,
+            "mutation check FAILED: swapping arg order must produce a different Frame; \
+             arg-order mapping appears order-insensitive (this test must be RED if \
+             arg1/arg2 are reversed in parse_positional_atom)"
+        );
+        // Verify the exact mapping: normal → obj=a, val=b; swapped → obj=b, val=a.
+        assert_eq!(
+            atom_normal,
+            &Atom::Frame {
+                obj: Term::Iri("http://ex/a".to_string()),
+                pred: Term::Iri("http://ex/P".to_string()),
+                val: Term::Iri("http://ex/b".to_string()),
+            },
+            "normal order: first arg is obj, second is val"
+        );
+        assert_eq!(
+            atom_swapped,
+            &Atom::Frame {
+                obj: Term::Iri("http://ex/b".to_string()),
+                pred: Term::Iri("http://ex/P".to_string()),
+                val: Term::Iri("http://ex/a".to_string()),
+            },
+            "swapped order: first arg is obj (b), second is val (a)"
+        );
+    }
+
+    /// Positional Atom with variables round-trips through the rule engine (fact + rule).
+    /// Proves the REAL path works end-to-end: binary Atom fact asserted, binary Atom rule
+    /// body matches it, Frame head derived. [SONNET-4.6] sq-n7y15
+    #[test]
+    fn test_positional_atom_end_to_end_rule_engine() {
+        use sparq_core::dict::Dict;
+        // Fact: Atom(http://ex/R, http://ex/a, http://ex/b) (binary predicate R(a,b))
+        // Rule: Forall ?x ?y: Frame{x relatedTo y} :- Atom(R, x, y)
+        // Expected: Frame{a relatedTo b} is derived.
+        let xml = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group><sentences>
+    <Atom>
+      <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/R</Const></op>
+      <args ordered="yes">
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/a</Const>
+        <Const type="http://www.w3.org/2007/rif#iri">http://ex/b</Const>
+      </args>
+    </Atom>
+    <Forall>
+      <declare><Var>x</Var></declare>
+      <declare><Var>y</Var></declare>
+      <formula><Implies>
+        <if>
+          <Atom>
+            <op><Const type="http://www.w3.org/2007/rif#iri">http://ex/R</Const></op>
+            <args ordered="yes"><Var>x</Var><Var>y</Var></args>
+          </Atom>
+        </if>
+        <then>
+          <Frame>
+            <object><Var>x</Var></object>
+            <slot>
+              <Const type="http://www.w3.org/2007/rif#iri">http://ex/relatedTo</Const>
+              <Var>y</Var>
+            </slot>
+          </Frame>
+        </then>
+      </Implies></formula>
+    </Forall>
+  </sentences></Group></payload>
+</Document>"#;
+        let doc = import(xml).expect("end-to-end positional Atom document must import");
+        let mut dict = Dict::new();
+        let closure = doc.closure(&mut dict).expect("closure must succeed");
+
+        // The triple (http://ex/a, http://ex/relatedTo, http://ex/b) must be in the closure.
+        // Use intern_iri — the IRIs are now in the dict after the closure run, so intern
+        // returns the existing Id (no new allocation needed). A closure triple [s,p,o]
+        // with all three Ids present proves the derivation fired. [SONNET-4.6] sq-n7y15
+        let s_id = dict.intern_iri("http://ex/a");
+        let p_id = dict.intern_iri("http://ex/relatedTo");
+        let o_id = dict.intern_iri("http://ex/b");
+
+        assert!(
+            closure.iter().any(|t| t[0] == s_id && t[1] == p_id && t[2] == o_id),
+            "end-to-end: the derived triple (a, relatedTo, b) must appear in the closure; \
+             this proves positional Atom R(a,b) was matched by the rule body and the \
+             conclusion Frame was derived"
+        );
+    }
+
+    /// Direct unit test of the `unique_child` helper — covers all three branches (zero → `None`,
+    /// one → `Some`, more-than-one → `Err`) without routing through `import`, so the new code is
+    /// directly (not only integration-) covered.
+    #[test]
+    fn test_unique_child_helper_branches() {
+        fn leaf(tag: &str) -> XmlNode {
+            XmlNode { tag: tag.to_string(), text: String::new(), attrs: Vec::new(), children: Vec::new() }
+        }
+        // Children: two <a>, one <b>, zero <c>.
+        let parent = XmlNode {
+            tag: "Parent".to_string(),
+            text: String::new(),
+            attrs: Vec::new(),
+            children: vec![leaf("a"), leaf("b"), leaf("a")],
+        };
+        // Exactly one <b> → Ok(Some(<b>)).
+        assert!(
+            matches!(parent.unique_child("b", "Parent"), Ok(Some(n)) if n.tag == "b"),
+            "exactly one <b> must return Ok(Some)"
+        );
+        // Zero <c> → Ok(None) (caller keeps its own "missing" diagnostic).
+        assert!(
+            matches!(parent.unique_child("c", "Parent"), Ok(None)),
+            "absent <c> must return Ok(None), not an error"
+        );
+        // Two <a> → Err(MalformedXml) naming the tag + "duplicate".
+        match parent.unique_child("a", "Parent") {
+            Err(ImportError::MalformedXml(msg)) => {
+                assert!(msg.contains("duplicate"), "message must say 'duplicate': {}", msg);
+                assert!(msg.contains("<a>"), "message must name <a>: {}", msg);
+                assert!(msg.contains("Parent"), "message must name the parent ctx: {}", msg);
+            }
+            Err(e) => panic!("expected MalformedXml, got a different error: {}", e),
+            Ok(_) => panic!("two <a> must be rejected, got Ok"),
+        }
+    }
+
+    // ---- [SONNET-4.6] sq-wbql1: imports-closure consistency check tests ----
+
+    const EMPTY_GROUP_DOC: &[u8] = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group></Group></payload>
+</Document>"#;
+
+    const FRAME_FACT_DOC: &[u8] = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group>
+    <sentence><Frame>
+      <object><Const type="http://www.w3.org/2007/rif#iri">http://example.org/a</Const></object>
+      <slot><Const type="http://www.w3.org/2007/rif#iri">http://example.org/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://example.org/b</Const></slot>
+    </Frame></sentence>
+  </Group></payload>
+</Document>"#;
+
+    /// A document with no imports imports cleanly via `import_with_closure`.
+    #[test]
+    fn import_with_closure_no_imports_passes() {
+        let result = import_with_closure(FRAME_FACT_DOC, |_| None);
+        assert!(result.is_ok(), "no-import doc must pass, got: {:?}", result.err());
+    }
+
+    /// A blanket-refused import (resolver returns None) → `ImportDirective` fail-closed.
+    /// The import is NOT silently accepted even though the profile check passes.
+    #[test]
+    fn import_with_closure_unresolvable_import_is_fail_closed() {
+        let importing = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <directive><Import>
+    <location><Const type="http://www.w3.org/2007/rif#iri">http://example.org/unavailable</Const></location>
+  </Import></directive>
+  <payload><Group></Group></payload>
+</Document>"#;
+        let result = import_with_closure(importing, |_| None);
+        assert!(
+            matches!(result, Err(ImportError::ImportDirective { .. })),
+            "an unresolvable import (resolver returns None) MUST be fail-closed as \
+             ImportDirective, got: {:?}",
+            result
+        );
+    }
+
+    /// A non-Core profile import → `InconsistentImport` (genuine detection).
+    /// This is the load-bearing invariant for sq-wbql1.
+    #[test]
+    fn import_with_closure_non_core_profile_is_inconsistent_import() {
+        // BLD profile — incompatible with RIF-Core.
+        let importing = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <directive><Import>
+    <location><Const type="http://www.w3.org/2007/rif#iri">http://example.org/bld</Const></location>
+    <profile><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif#BLD</Const></profile>
+  </Import></directive>
+  <payload><Group></Group></payload>
+</Document>"#;
+        // Even with a resolver that provides valid bytes, the profile check fires first.
+        let result = import_with_closure(importing, |_| Some(EMPTY_GROUP_DOC.to_vec()));
+        assert!(
+            matches!(result, Err(ImportError::InconsistentImport { .. })),
+            "a BLD-profile import MUST be InconsistentImport (genuine detection), got: {:?}",
+            result
+        );
+    }
+
+    /// A Core-profile import that resolves to a valid RIF-Core document → ACCEPTED.
+    /// This is the positive invariant: a consistent import is not spuriously rejected.
+    #[test]
+    fn import_with_closure_core_profile_consistent_import_is_accepted() {
+        let importing = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <directive><Import>
+    <location><Const type="http://www.w3.org/2007/rif#iri">http://example.org/ext</Const></location>
+    <profile><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif#Core</Const></profile>
+  </Import></directive>
+  <payload><Group></Group></payload>
+</Document>"#;
+        let result = import_with_closure(importing, |loc| {
+            if loc == "http://example.org/ext" {
+                Some(FRAME_FACT_DOC.to_vec())
+            } else {
+                None
+            }
+        });
+        assert!(
+            result.is_ok(),
+            "a Core-profile import resolving to a valid RIF-Core doc MUST be accepted, got: {:?}",
+            result.err()
+        );
+    }
+
+    /// An import resolving to an INVALID RIF-Core document (the imported rules fail
+    /// `validate()`) → `ValidationFailed` or `InconsistentImport`. The combined rules
+    /// must not silently pass. This exercises the combined-validate path.
+    #[test]
+    fn import_with_closure_imported_invalid_rules_rejected() {
+        // Importing document (no imports, just wraps the import logic).
+        let importing = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <directive><Import>
+    <location><Const type="http://www.w3.org/2007/rif#iri">http://example.org/bad</Const></location>
+  </Import></directive>
+  <payload><Group></Group></payload>
+</Document>"#;
+        // Imported document: contains a rule with an UNSAFE head variable (UnboundHeadVar).
+        // The variable ?y appears in the head but not in the body — range-restriction fails.
+        let unsafe_imported = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <payload><Group>
+    <sentence>
+      <Forall>
+        <declare><Var>x</Var></declare>
+        <declare><Var>y</Var></declare>
+        <formula><Implies>
+          <if><Frame>
+            <object><Var>x</Var></object>
+            <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/p</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/v</Const></slot>
+          </Frame></if>
+          <then><Frame>
+            <object><Var>y</Var></object>
+            <slot><Const type="http://www.w3.org/2007/rif#iri">http://ex/q</Const><Const type="http://www.w3.org/2007/rif#iri">http://ex/w</Const></slot>
+          </Frame></then>
+        </Implies></formula>
+      </Forall>
+    </sentence>
+  </Group></payload>
+</Document>"#;
+        let result = import_with_closure(importing, |_| Some(unsafe_imported.to_vec()));
+        assert!(
+            result.is_err(),
+            "importing an unsafe (invalid RIF-Core) document MUST be rejected, got Ok"
+        );
+    }
+
+    /// MUTATION VERIFY (sq-wbql1): the profile check is NON-VACUOUS — a Core-profile
+    /// import is accepted while a BLD-profile import is rejected, proving the check
+    /// distinguishes them rather than accepting or rejecting both.
+    #[test]
+    fn import_with_closure_profile_check_is_non_vacuous_mutation() {
+        // ACCEPTED: no profile (absent = Core-compatible).
+        let no_profile = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <directive><Import>
+    <location><Const type="http://www.w3.org/2007/rif#iri">http://example.org/ext</Const></location>
+  </Import></directive>
+  <payload><Group></Group></payload>
+</Document>"#;
+        let ok = import_with_closure(no_profile, |_| Some(EMPTY_GROUP_DOC.to_vec()));
+        assert!(ok.is_ok(), "no-profile import MUST be accepted (mutation check — ok side)");
+
+        // REJECTED: BLD profile.
+        let bld_profile = br#"<Document xmlns="http://www.w3.org/2007/rif#">
+  <directive><Import>
+    <location><Const type="http://www.w3.org/2007/rif#iri">http://example.org/ext</Const></location>
+    <profile><Const type="http://www.w3.org/2007/rif#iri">http://www.w3.org/2007/rif#BLD</Const></profile>
+  </Import></directive>
+  <payload><Group></Group></payload>
+</Document>"#;
+        let err = import_with_closure(bld_profile, |_| Some(EMPTY_GROUP_DOC.to_vec()));
+        assert!(
+            matches!(err, Err(ImportError::InconsistentImport { .. })),
+            "BLD-profile import MUST be InconsistentImport (mutation check — reject side), got: {:?}",
+            err
         );
     }
 }

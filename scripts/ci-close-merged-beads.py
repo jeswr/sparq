@@ -36,10 +36,30 @@
 #   * GRACEFUL SKIP: a PR with no sq-XXXX token (most PRs) exits 0 having changed nothing.
 #   * A bare GH issue number (#123) is NOT a bead id and is ignored.
 #
+# ISSUE-NATIVE CLOSE (issue #2475 — the ruleset-blocked push made the JSONL commit-back a
+# guaranteed-lost write)
+# --------------------------------------------------------------------------------------
+# The default GITHUB_TOKEN cannot push to protected `main` (GH013, empty bypass list — see
+# bead-autoclose.yml's history, sq-roe3), and a PR-based write is equally dead from that
+# token: GITHUB_TOKEN-created events trigger NO workflows, so the required `ci-summary /
+# gate` check would never report and the PR would hang unmergeable forever. The one write
+# the token CAN durably land is the issue-native one: the bd->issues migration
+# (scripts/bd-to-issues.py) stamps every migrated issue with a `<!-- bd-id:sq-… -->` body
+# marker PLUS the migration-owned `bd-migration` label (bodies are forgeable by any issue
+# author; labels are not — see _MIGRATION_LABEL), so `--close-issues` resolves each bead
+# token to its mapped OPEN marker+label issue and closes it through the API
+# (`gh issue close --reason completed`) — mutating the tracker without committing to main
+# at all. Guardrail parity with
+# reconcile-merged-beads.sh: an epic (`kind:epic`) or human-gated (`needs:*`) issue is
+# never auto-closed, only reported. Beads NOT yet migrated are a logged no-op — exactly
+# the (non-)outcome the rejected push produced, minus the red-herring failure — and stay
+# covered by the orchestrator's manual reconcile-merged-beads.sh sweep.
+#
 # USAGE
 #   scripts/ci-close-merged-beads.py --pr 818 --title "ci(publish): ... (sq-v286.11)"
 #   scripts/ci-close-merged-beads.py --pr 818            # title fetched via gh
 #   scripts/ci-close-merged-beads.py --title "..." --no-verify   # extract-only, no API
+#   scripts/ci-close-merged-beads.py --pr 830 --close-issues --skip-jsonl   # CI issue-native mode
 #   scripts/ci-close-merged-beads.py --self-test         # hermetic; no gh, no file writes
 #
 # Exit 0 on success (whether or not anything changed); non-zero only on a real error.
@@ -61,6 +81,26 @@ _BEAD_RE = re.compile(r"\bsq-[a-z0-9]+(?:\.[0-9]+)?\b")
 
 # Statuses we are willing to transition to "closed". Anything else is left alone.
 _CLOSEABLE = {"open", "in_progress", "blocked"}
+
+# The migration's durable bead<->issue map: bd-to-issues.py stamps `<!-- bd-id:sq-… -->` into
+# every migrated issue body (its fetch_bd_map reads the SAME pattern — keep the two in sync).
+_MARKER_RE = re.compile(r"<!--\s*bd-id:(\S+?)\s*-->")
+
+# AUTHENTICATION (PR #2528 review): an issue BODY is written by its author — ANY GitHub user can
+# open a decoy issue copying a real `<!-- bd-id:… -->` marker, and a body-only mapping (with
+# first-wins on API ordering) could close the decoy and leave the canonical migrated issue open.
+# Issue LABELS, by contrast, cannot be attached by unprivileged issue authors (triage/write
+# permission required — and no issue template may ever auto-apply this label), so the migration
+# stamps every migrated issue with this dedicated label (bd-to-issues.py MIGRATION_LABEL — keep
+# the two in sync) and the mapping below trusts ONLY marker+label issues. Zero authenticated
+# issues => unmapped no-op; MULTIPLE => ambiguous, FAIL CLOSED (close nothing, exit non-zero so
+# the anomaly is visible).
+_MIGRATION_LABEL = "bd-migration"
+
+# Never auto-close an epic (container) or a human-gated issue — a merged child PR carrying the
+# parent's token must not silently close it. Mirrors reconcile-merged-beads.sh's guardrail.
+_GUARDED_LABELS = {"kind:epic"}
+_GUARDED_LABEL_PREFIXES = ("needs:",)
 
 
 def log(msg: str) -> None:
@@ -157,6 +197,74 @@ def close_beads_in_jsonl(path: str, bead_ids, reason: str, now: str = None):
     return closed, skipped_already, not_found, changed
 
 
+def _label_names(issue):
+    return {lb["name"] if isinstance(lb, dict) else lb for lb in issue.get("labels") or []}
+
+
+def map_beads_to_open_issues(bead_ids, issues):
+    """Pure core of the issue-native close. Returns (closable, guarded, unmapped, ambiguous).
+
+    `issues` is the OPEN-issue snapshot ({number, body, labels}); a bead maps to the issue
+    whose body carries its exact `<!-- bd-id:… -->` migration marker AND which is
+    AUTHENTICATED by the migration-owned `_MIGRATION_LABEL` (bodies are forgeable by any
+    issue author; labels are not). closable/guarded are (bead_id, issue_number) pairs;
+    guarded = mapped but epic/human-gated (never auto-closed). unmapped = no OPEN
+    authenticated marker-carrying issue (not migrated, not yet label-backfilled, or already
+    closed — either way a no-op, which keeps the close idempotent without needing the
+    closed-issue set). ambiguous = (bead_id, sorted issue_numbers) pairs where MULTIPLE
+    authenticated open issues carry the same marker — fail closed, never guess which to close.
+    """
+    by_bead = {}
+    for it in issues:
+        m = _MARKER_RE.search(it.get("body") or "")
+        if not m:
+            continue
+        if _MIGRATION_LABEL not in _label_names(it):
+            continue  # unauthenticated marker (forgeable body) — never trusted for mapping
+        by_bead.setdefault(m.group(1), []).append(it)
+    closable, guarded, unmapped, ambiguous = [], [], [], []
+    for bid in bead_ids:
+        cands = by_bead.get(bid) or []
+        if not cands:
+            unmapped.append(bid)
+            continue
+        if len(cands) > 1:
+            ambiguous.append((bid, sorted(c["number"] for c in cands)))
+            continue
+        it = cands[0]
+        labels = _label_names(it)
+        if labels & _GUARDED_LABELS or any(
+                lb.startswith(_GUARDED_LABEL_PREFIXES) for lb in labels):
+            guarded.append((bid, it["number"]))
+        else:
+            closable.append((bid, it["number"]))
+    return closable, guarded, unmapped, ambiguous
+
+
+def gh_list_open_issues(repo):
+    """OPEN-issue snapshot (number/body/labels) — the same shape bd-to-issues.fetch_bd_map
+    lists, restricted to open (a closed mapped issue is already the desired end state)."""
+    cmd = ["gh", "issue", "list", "--state", "open", "--limit", "10000",
+           "--json", "number,body,labels"]
+    if repo:
+        cmd += ["-R", repo]
+    try:
+        raw = subprocess.check_output(cmd, text=True)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        raise SystemExit(f"[{PROG}] ERROR: `gh issue list` failed: {e}")
+    return json.loads(raw or "[]")
+
+
+def gh_close_issue(number, comment, repo):
+    cmd = ["gh", "issue", "close", str(number), "--reason", "completed", "--comment", comment]
+    if repo:
+        cmd += ["-R", repo]
+    try:
+        subprocess.check_output(cmd, text=True)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        raise SystemExit(f"[{PROG}] ERROR: `gh issue close {number}` failed: {e}")
+
+
 # --------------------------------------------------------------------------------------
 # Hermetic self-test (no network, no gh, writes only to a temp file it removes).
 # --------------------------------------------------------------------------------------
@@ -193,6 +301,44 @@ def self_test() -> int:
     check("verified-merge: 'null' string", is_verified_merged("null"), False)
     check("verified-merge: empty", is_verified_merged(""), False)
     check("verified-merge: None", is_verified_merged(None), False)
+
+    # Issue-native mapping (issue #2475): bd-id marker match + epic/needs guard + unmapped no-op,
+    # authenticated by the migration-owned label (PR #2528 review — bodies are forgeable).
+    open_issues = [
+        # Forged decoy FIRST (so any first-wins-on-API-ordering regression is caught): an
+        # unprivileged author copied a real marker into a body but CANNOT attach the label.
+        {"number": 9, "body": "decoy copying <!-- bd-id:sq-open1 -->", "labels": []},
+        {"number": 10, "body": "work item\n\n<!-- bd-id:sq-open1 -->\n",
+         "labels": [{"name": "priority:P2"}, {"name": "role:impl"},
+                    {"name": _MIGRATION_LABEL}]},
+        {"number": 11, "body": "umbrella\n<!--bd-id:sq-epic2-->",
+         "labels": [{"name": "kind:epic"}, {"name": _MIGRATION_LABEL}]},
+        {"number": 12, "body": "gated\n<!-- bd-id:sq-gated3 -->",
+         "labels": ["needs:user", _MIGRATION_LABEL]},
+        {"number": 13, "body": "mentions sq-open1 in prose but carries NO marker",
+         "labels": [_MIGRATION_LABEL]},
+    ]
+    closable, guarded, unmapped, ambiguous = map_beads_to_open_issues(
+        ["sq-open1", "sq-epic2", "sq-gated3", "sq-ghost9"], open_issues)
+    check("authenticated marker maps; forged decoy #9 never shadows it",
+          closable, [("sq-open1", 10)])
+    check("epic + needs:* mapped issues are guarded, never auto-closed",
+          guarded, [("sq-epic2", 11), ("sq-gated3", 12)])
+    check("unmigrated bead is unmapped (no-op)", unmapped, ["sq-ghost9"])
+    check("single authenticated mapping is not ambiguous", ambiguous, [])
+    check("prose mention without a marker does not map",
+          map_beads_to_open_issues(["sq-open1"], [open_issues[4]]), ([], [], ["sq-open1"], []))
+    check("unauthenticated marker ALONE does not map (fail closed to no-op)",
+          map_beads_to_open_issues(["sq-open1"], [open_issues[0]]), ([], [], ["sq-open1"], []))
+    # Duplicate AUTHENTICATED mapping (e.g. a double-created migration): fail closed — never
+    # guess which issue is canonical, surface both for manual dedupe.
+    dup_issues = [
+        {"number": 20, "body": "<!-- bd-id:sq-dup1 -->", "labels": [_MIGRATION_LABEL]},
+        {"number": 21, "body": "<!-- bd-id:sq-dup1 -->", "labels": [{"name": _MIGRATION_LABEL}]},
+    ]
+    check("duplicate authenticated mapping is ambiguous (fail closed, nothing closable)",
+          map_beads_to_open_issues(["sq-dup1"], dup_issues),
+          ([], [], [], [("sq-dup1", [20, 21])]))
 
     # End-to-end minimal-edit close against a temp JSONL.
     fd, tmp = tempfile.mkstemp(suffix=".jsonl")
@@ -264,6 +410,14 @@ def main() -> int:
     ap.add_argument("--jsonl", default=".beads/issues.jsonl", help="Path to the beads JSONL source-of-record.")
     ap.add_argument("--no-verify", action="store_true",
                     help="Skip the gh merge-verification (extract + edit only; for local/manual use).")
+    ap.add_argument("--close-issues", action="store_true",
+                    help="Issue-native close: resolve each bead to its migrated GitHub issue via the "
+                         "`<!-- bd-id:… -->` marker and close it through the API (no push to main).")
+    ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY", ""),
+                    help="owner/repo for --close-issues (default: $GITHUB_REPOSITORY / gh's checkout context).")
+    ap.add_argument("--skip-jsonl", action="store_true",
+                    help="Skip the local JSONL edit (CI mode: a checkout edit cannot be pushed to "
+                         "protected main, so it would be a dead write).")
     ap.add_argument("--self-test", action="store_true", help="Run the hermetic self-test and exit.")
     args = ap.parse_args()
 
@@ -293,11 +447,43 @@ def main() -> int:
 
     log("candidate bead id(s): " + ", ".join(bead_ids))
 
+    pr_note = f" via PR #{args.pr}" if args.pr else ""
+    reason = f"merged{pr_note} (auto-closed by bead-autoclose CI; mergedAt={merged_at})"
+
+    ambiguous = []
+    if args.close_issues:
+        closable, guarded, unmapped, ambiguous = map_beads_to_open_issues(
+            bead_ids, gh_list_open_issues(args.repo))
+        comment = (f"> 🤖 SPARQ agent — bead-autoclose CI\n\n"
+                   f"Auto-closed: {reason}. Issue-native reconcile (issue #2475): the close is "
+                   f"written through the API because a direct commit-back to protected `main` is "
+                   f"ruleset-rejected (GH013, sq-roe3).")
+        for bid, num in closable:
+            gh_close_issue(num, comment, args.repo)
+            log(f"  {bid}: CLOSED mapped issue #{num} (issue-native).")
+        for bid, num in guarded:
+            log(f"  {bid}: mapped issue #{num} is an epic / human-gated (kind:epic|needs:*) — "
+                f"NOT auto-closed; left for manual review (reconcile-merged-beads.sh guardrail).")
+        for bid in unmapped:
+            log(f"  {bid}: no OPEN '{_MIGRATION_LABEL}'-authenticated issue carries its bd-id "
+                f"marker (not migrated, label not backfilled, or already closed) — no-op.")
+        for bid, nums in ambiguous:
+            log(f"  {bid}: ERROR — {len(nums)} authenticated open issues all carry its bd-id "
+                f"marker ({', '.join('#' + str(n) for n in nums)}); refusing to guess which is "
+                f"canonical (fail closed) — deduplicate the '{_MIGRATION_LABEL}' issues manually.")
+
+    # An ambiguous authenticated mapping is a real tracker anomaly: close nothing for it and
+    # exit non-zero so the (post-merge, non-gating) run turns red and gets seen.
+    rc = 1 if ambiguous else 0
+
+    if args.skip_jsonl:
+        log("skipping the JSONL edit (--skip-jsonl): a CI checkout edit cannot land on protected "
+            "main; the orchestrator's bd export / reconcile-merged-beads.sh owns the JSONL.")
+        return rc
+
     if not os.path.exists(args.jsonl):
         raise SystemExit(f"[{PROG}] ERROR: beads JSONL not found at {args.jsonl}")
 
-    pr_note = f" via PR #{args.pr}" if args.pr else ""
-    reason = f"merged{pr_note} (auto-closed by bead-autoclose CI; mergedAt={merged_at})"
     closed, skipped, not_found, changed = close_beads_in_jsonl(args.jsonl, bead_ids, reason)
 
     for b in closed:
@@ -311,7 +497,7 @@ def main() -> int:
         log(f"wrote {len(closed)} status change(s) to {args.jsonl}.")
     else:
         log("no changes to write (nothing matched-and-open).")
-    return 0
+    return rc
 
 
 if __name__ == "__main__":

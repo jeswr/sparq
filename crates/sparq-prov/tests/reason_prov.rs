@@ -154,6 +154,31 @@ fn lineage_is_valid_rdf_and_round_trips() {
 }
 
 #[test]
+fn prov_ntriples_matches_the_lineage_graph_and_parses() {
+    // [GPT-5.6] sq-8jn86: the exact string oracle witnesses the serializer call;
+    // replacing the wrapper body with an empty or differently rendered value fails.
+    let (g, dict, fact) = dog_setup();
+    let proof = g.why(&dict, fact).unwrap();
+    let cfg = ProvProofConfig::default();
+    let triples = prov_from_proof(&proof, &cfg);
+    let expected = triples
+        .iter()
+        .map(|t| format!("{} {} {} .\n", t.subject, t.predicate, t.object))
+        .collect::<String>();
+    assert!(!expected.is_empty(), "dog proof must emit lineage triples");
+
+    let nt = sparq_prov::prov_ntriples(&proof, &cfg);
+    assert_eq!(nt, expected);
+
+    use oxttl::NTriplesParser;
+    let parsed: Vec<_> = NTriplesParser::new()
+        .for_reader(nt.as_bytes())
+        .collect::<Result<_, _>>()
+        .expect("rendered lineage must be well-formed N-Triples");
+    assert_eq!(parsed.len(), triples.len());
+}
+
+#[test]
 fn deterministic_and_content_addressed() {
     let (g, dict, fact) = dog_setup();
     let proof = g.why(&dict, fact).unwrap();
@@ -602,4 +627,65 @@ fn exact_content_addressed_iris_for_dog_setup_proof() {
             && t.predicate.as_str() == format!("{PROV}wasGeneratedBy")
             && t.object.to_string() == "<urn:sparq:prov:rule:7b2aac0f7dbc51bf>"
     }));
+}
+
+// ── sq-qcnn.39: mutation-kill additions — exact prov triple counts. [SONNET-4.6] ─────
+
+/// `prov_from_proof` on the `dog_setup` proof (3 nodes: 2 asserted leaves plus
+/// 1 derived conclusion via rdfs9/cax-sco, no clock, no agent) must emit exactly 10
+/// triples: 2 leaf entity-types, 1 derived entity-type, 1 activity-type, 1 label,
+/// 1 wasGeneratedBy, 2 prov:used, 2 prov:wasDerivedFrom.
+/// Pinning the count kills any mutation that drops a single `push()` call.
+/// [SONNET-4.6] sq-qcnn.39
+#[test]
+fn dog_setup_prov_graph_exact_triple_count() {
+    let (g, dict, fact) = dog_setup();
+    let proof = g.why(&dict, fact).expect("inferred fact has proof");
+    let prov = prov_from_proof(&proof, &ProvProofConfig::default());
+    // 2 leaf entity-types + 1 derived entity-type + 1 activity-type + 1 label
+    // + 1 wasGeneratedBy + 2 used + 2 wasDerivedFrom = 10
+    assert_eq!(
+        prov.len(),
+        10,
+        "dog_setup proof (3 nodes, 2 premises) must emit 10 triples; \
+         got {}; triples: {:#?}",
+        prov.len(),
+        prov.iter()
+            .map(|t| format!("{} {} {}", t.subject, t.predicate, t.object))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// With a clock configured, each rule-application Activity gets an extra
+/// `prov:generatedAtTime` triple. For the dog_setup proof (1 rule firing), that adds
+/// 1 triple: total = 11. With an agent, another `wasAssociatedWith` triple: total = 12.
+/// Pinning these counts catches mutations that skip the clock or agent branches.
+/// [SONNET-4.6] sq-qcnn.39
+#[test]
+fn dog_setup_prov_graph_with_clock_and_agent_exact_count() {
+    fn fixed() -> std::time::SystemTime {
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000)
+    }
+    let (g, dict, fact) = dog_setup();
+    let proof = g.why(&dict, fact).expect("inferred fact has proof");
+
+    // Clock only: 10 base + 1 generatedAtTime = 11
+    let with_clock = prov_from_proof(&proof, &ProvProofConfig::with_clock(fixed));
+    assert_eq!(
+        with_clock.len(),
+        11,
+        "dog_setup proof with clock must emit 11 triples"
+    );
+
+    // Clock + agent: 11 + 1 wasAssociatedWith = 12
+    let cfg_full = ProvProofConfig {
+        agent: Some(oxrdf::NamedNode::new_unchecked("http://ex/reasoner")),
+        ..ProvProofConfig::with_clock(fixed)
+    };
+    let with_both = prov_from_proof(&proof, &cfg_full);
+    assert_eq!(
+        with_both.len(),
+        12,
+        "dog_setup proof with clock + agent must emit 12 triples"
+    );
 }

@@ -3,6 +3,11 @@
 #![warn(clippy::undocumented_unsafe_blocks)]
 
 pub mod ann;
+// [OPUS-4.8] (sq-lfo84) Explicit-SIMD (NEON/AVX2) squared-Euclidean distance kernel for the HNSW
+// ANN hot loop. `approx-ann` only (the HNSW backend it serves); no new dependency — pure
+// `core::arch` intrinsics with a scalar fallback bit-identical to the previous auto-vectorised loop.
+#[cfg(feature = "approx-ann")]
+mod simd;
 // [OPUS-4.8] (sq-ip3a) Pluggable ANN backend seam (exact default vs approximate) + the iterative
 // over-fetch FILTERED path — `filtered-ann` only (the approximate impl is additionally `approx-ann`).
 #[cfg(feature = "filtered-ann")]
@@ -70,9 +75,31 @@ pub mod compose;
 pub mod fuse;
 pub mod import;
 pub mod labels;
+// [GPT-5.6] sq-lsp7k.25: deterministic `.spqv` v4 metadata-block codec. Private implementation;
+// the public surface is `VectorStore::{put_with_meta,meta}` + `nearest_exact_with_meta`, all behind
+// the default-OFF `metadata-sidecar` feature.
+#[cfg(feature = "metadata-sidecar")]
+mod metadata;
+// [FABLE-5] (#2251) Recall-gated ANN over raw concept vectors — `build_ann` / `knn` / `dedup`:
+// an HNSW index over caller-supplied (id, vector) pairs plus type-level dedup whose merges are
+// emitted ONLY after the index's measured recall vs an exact O(m²) ground truth clears a
+// pre-registered gate (default 0.99; fail-closed). `approx-ann` only — it rides the same opt-in
+// instant-distance backend as `VectorIndex`, so the default build carries none of it and gains
+// no new dependency. First consumer: the Kernel-of-Truth scale track (issue #2251).
+#[cfg(feature = "approx-ann")]
+pub mod dedup;
 pub mod quant;
+// [FABLE-5] sq-lhcot.1 (GenAI review gap 1; spec estate sq-rvgr2.4): the `.spqv` v3 EMBEDDING
+// PROVENANCE record (model id / model+content version / metric / normalization / verbalization
+// regime) + the mandatory compatibility rejection. This module is ALWAYS compiled — a v3 store
+// written by a feature-on build must still OPEN on a feature-off build (mirroring how v1/v2 both
+// open regardless of features); only the v3 WRITE path (`VectorStore::with_provenance` → finalize)
+// and the demanding query check are gated behind the opt-in `spqv-provenance` feature. Lean: a
+// hand-rolled fixed-width LE codec, no new dependency. The extension point stays a reserved, opaque,
+// versioned area with NO fields defined (pending the #1746 profile freeze — the KERN boundary).
 #[cfg(feature = "vec-predicate")]
 pub mod rewrite;
+pub mod spqv_provenance;
 pub mod store;
 // [OPUS-4.8] sq-0wo9e.1 (epic sq-0wo9e): the P0 structure-aware-vectorisation preprocessing +
 // sampling-logic layer — closure-before-vectorise + type-constrained negative sampling. `structure`
@@ -105,6 +132,15 @@ pub mod train;
 // materialised closure via the P0 `close_for_vectorise` path and adds no new dependency.
 #[cfg(feature = "structure")]
 pub mod taxonomy;
+// [FABLE-5] kern/ufo-priors (epic sq-0wo9e): the READ-ONLY UFO/gUFO PRIORS READER — mines gUFO
+// meta-types (Kind/Role/Phase/Category/…), rigidity, identity providers, ontological natures, and
+// mediation/inherence witnesses from the graph, and derives a UFO-PROVABLE disjointness +
+// subsumption mask fed into the P3 `DisjointnessOracle` (answer-safe: only proven pairs, fail
+// closed on ill-formed models). Same `structure` feature (off by default); no new dependency —
+// the default build carries zero UFO-prior code. The eval harness's `gufo_prior` axis (default
+// OFF) is the only consumer that changes behaviour, and only when explicitly enabled.
+#[cfg(feature = "structure")]
+pub mod ufo_priors;
 pub mod verbalize;
 
 /// The `vec:` vocabulary — magic predicates recognised by `rewrite`
@@ -112,6 +148,13 @@ pub mod verbalize;
 pub mod vocab {
     /// `vec:` — the sparq vector-search namespace.
     pub const VEC_NS: &str = "http://sparq.dev/vec#";
+    /// [SONNET-4.6] (sq-tb9p0) The highest `vec:` **vocabulary revision** this build implements
+    /// (spec `site/specs/sparql-vector-genai.typ`, VG-GOV-2/VG-GOV-3). Revision 1's recognised
+    /// terms are exactly [`NEAREST`] and [`SEARCH`]; new terms are introduced only by a new spec
+    /// revision, and an unrecognised `vec:` IRI is a HARD query error naming this revision — the
+    /// loud failure IS the forward-compatibility mechanism (a query using a newer revision's term
+    /// against this processor fails instead of silently matching data).
+    pub const VOCAB_REVISION: u32 = 1;
     /// `?node vec:nearest ( <query> <k> )` — binds `?node` to the `<k>` nearest
     /// neighbours (best first) of `<query>`, which is either a node IRI (whose
     /// stored vector is the query, the seed excluded) or a comma-separated
@@ -122,12 +165,50 @@ pub mod vocab {
     pub const SEARCH: &str = "http://sparq.dev/vec#search";
 }
 
-pub use ann::{cosine, nearest_exact, nearest_term_exact, nearest_term_exact_checked};
+/// [FABLE-5] (sq-lhcot.1) The `spqvp:` **embedding-provenance vocabulary** — the RDF terms a caller
+/// uses to ASSERT (in the graph or a sidecar dataset) the embedding pipeline a `.spqv` v3 store was
+/// built with: model identifier, model/content version, similarity metric, normalization, dimension,
+/// and verbalization regime. These IRIs describe the compatibility axes the v3 header records so the
+/// provenance is expressible in RDF as well as in the binary header; the crate does NOT define or
+/// privilege any encoder — the values are caller-supplied.
+///
+/// The namespace is `http://sparq.dev/spqv-prov#`. The reserved extension terms are deliberately
+/// NOT defined here — extension fields are reserved pending the cross-implementation profile (#1746).
+pub mod prov_vocab {
+    /// `spqvp:` — the sparq embedding-provenance namespace.
+    pub const SPQVP_NS: &str = "http://sparq.dev/spqv-prov#";
+    /// `spqvp:model` — the model identifier the store's vectors were produced by (a literal token).
+    pub const MODEL: &str = "http://sparq.dev/spqv-prov#model";
+    /// `spqvp:modelVersion` — the model revision (a literal token).
+    pub const MODEL_VERSION: &str = "http://sparq.dev/spqv-prov#modelVersion";
+    /// `spqvp:contentVersion` — the graph→text (verbaliser) content revision (a literal token).
+    pub const CONTENT_VERSION: &str = "http://sparq.dev/spqv-prov#contentVersion";
+    /// `spqvp:metric` — the similarity metric (`cosine` / `dot` / `euclidean`, a literal token).
+    pub const METRIC: &str = "http://sparq.dev/spqv-prov#metric";
+    /// `spqvp:normalization` — the vector normalization (`none` / `l2`, a literal token).
+    pub const NORMALIZATION: &str = "http://sparq.dev/spqv-prov#normalization";
+    /// `spqvp:dimension` — the vector dimension (an `xsd:integer` literal; also the store header dim).
+    pub const DIMENSION: &str = "http://sparq.dev/spqv-prov#dimension";
+    /// `spqvp:verbalization` — the verbalization regime name (a literal token).
+    pub const VERBALIZATION: &str = "http://sparq.dev/spqv-prov#verbalization";
+}
+
+#[cfg(feature = "metadata-sidecar")]
+pub use ann::nearest_exact_with_meta;
+pub use ann::{
+    cosine, nearest_exact, nearest_exact_tiebreak, nearest_term_exact, nearest_term_exact_checked,
+};
 // [OPUS-4.8] (sq-ip3a) The in-RAM HNSW index is the approximate backend — `approx-ann` only
 // (the only feature pulling `instant-distance`). The default build re-exports just the exact
 // searchers above.
 #[cfg(feature = "approx-ann")]
 pub use ann::{HnswConfig, VectorIndex};
+// [FABLE-5] (#2251) The recall-gated concept-ANN + dedup surface — `approx-ann` only (`dedup.rs`).
+#[cfg(feature = "approx-ann")]
+pub use dedup::{
+    build_ann, dedup, exact_ground_truth, knn, ConceptAnnIndex, DedupPolicy, DedupReport,
+    GroundTruth,
+};
 pub use diskann::{sibling_graph_path, DiskAnnIndex, VamanaConfig, SPQG_MAGIC, SPQG_VERSION};
 pub use embed::{Embedder, HashEmbedder};
 // [OPUS-4.8] (sq-1wc1) Predicate-constrained (filtered) ANN — the `filtered-ann` feature only.
@@ -136,7 +217,8 @@ pub use filter::{nearest_exact_filtered, FilterConfig, IdMask};
 // [OPUS-4.8] (sq-7hx6) Pre-filter vs post-filter cost model — the `filtered-ann` feature only.
 #[cfg(feature = "filtered-ann")]
 pub use cost::{
-    nearest_filtered_costed, overfetch_target, postfilter_exact, CostEstimate, CostModel, Strategy,
+    nearest_filtered_costed, nearest_filtered_costed_tiebreak, overfetch_target, postfilter_exact,
+    CostEstimate, CostModel, Strategy,
 };
 // [OPUS-4.8] (sq-ip3a) Pluggable ANN backend + iterative over-fetch filtered path — `filtered-ann`
 // only. `ApproxBackend` is additionally `approx-ann` (re-exported below).
@@ -173,14 +255,23 @@ pub use sparq_engine::{query_prepared, PreparedQuery, QueryBudget, QueryResult};
 // (`save_delta`/`open_with_delta`/`sibling_delta_path`) live on `VectorStore` (also `delta`-gated).
 #[cfg(feature = "delta")]
 pub use delta::{VectorDelta, SPQD_MAGIC, SPQD_VERSION};
-pub use store::{StreamingWriter, VectorStore, SPQV_MAGIC, SPQV_VERSION};
+pub use store::{
+    LegacyMode, StreamingWriter, VectorStore, SPQV_MAGIC, SPQV_VERSION, SPQV_VERSION_V3,
+};
+// [FABLE-5] sq-lhcot.1: the `.spqv` v3 embedding-provenance surface — the record, its typed metric /
+// normalization axes, and the RDF vocabulary IRIs. Always compiled (the v3 read path); the vocab
+// namespace lets a caller assert provenance in RDF (see `skills/vector-search/SKILL.md`).
+pub use spqv_provenance::{
+    EmbeddingProvenance, Metric as EmbeddingMetric, Normalization, MAX_PROVENANCE_BLOCK_LEN,
+    PROVENANCE_BLOCK_VERSION,
+};
 // [OPUS-4.8] sq-0wo9e.1 (epic sq-0wo9e): the structure-aware-vectorisation P0 surface — the
 // closure-before-vectorise step, the type-constraint extractor, and the type-constrained negative
 // sampler with its on/off ablation switch. `structure` feature only.
 #[cfg(feature = "structure")]
 pub use structure::{
     close_for_vectorise, materialise_closure, ClosedGraph, Corrupt, NegativeSampler, SamplingMode,
-    TypeConstraints,
+    TermScope, TypeConstraints,
 };
 // [OPUS-4.8] sq-2489d.4 (epic sq-2489d, GenAI-KB Phase 4): the provenance-weight surface — the
 // PKG→`w(t)` reader, its on/off ablation switch, and the tunable factors. `structure` feature only.
@@ -190,10 +281,11 @@ pub use provenance::{ProvenanceWeights, WeightConfig, WeightMode};
 // harness surface — `kge` feature only.
 #[cfg(feature = "kge")]
 pub use eval::{
-    run_ablation, run_ablation_multiseed, run_ablation_multiseed_paired, run_weight_ablation,
-    synthetic_gufo_ttl, synthetic_gufo_ttl_sized, synthetic_provenance_ttl,
-    synthetic_relational_ttl, AblationCell, CellStats, EvalConfig, LongTail, MeanStd, Metrics,
-    MultiSeedCell, PairedAblation, PairedDelta, Splits, WeightAblation, SCHEMA_PREDICATES,
+    run_ablation, run_ablation_multiseed, run_ablation_multiseed_paired, run_quoted_ablation,
+    run_weight_ablation, synthetic_gufo_ttl, synthetic_gufo_ttl_sized, synthetic_provenance_ttl,
+    synthetic_rdf12_parts, synthetic_rdf12_ttl, synthetic_relational_ttl, AblationCell, CellStats,
+    EvalConfig, LongTail, MeanStd, Metrics, MultiSeedCell, PairedAblation, PairedDelta,
+    QuotedAblation, Rdf12Parts, Splits, WeightAblation, SCHEMA_PREDICATES,
 };
 #[cfg(feature = "kge")]
 pub use train::{train, ModelKind, TrainConfig, TrainReport, TrainedModel};
@@ -228,6 +320,10 @@ pub use taxonomy::{
     DisjointnessOracle, DistortionReport, EuclideanTaxonomyEncoder, Geometry, GeometryGate,
     HyperbolicTaxonomyEncoder, TaxonomyDag,
 };
+// [FABLE-5] kern/ufo-priors (epic sq-0wo9e): the READ-ONLY UFO/gUFO priors surface — the reader,
+// its meta-type/rigidity/nature vocabulary, and the canonical gUFO namespace. `structure` only.
+#[cfg(feature = "structure")]
+pub use ufo_priors::{MetaType, Nature, Rigidity, UfoPriors, GUFO_NS};
 // [OPUS-4.8] sq-0wo9e.5 (epic sq-0wo9e): the structure-aware-vectorisation P4 surface — the
 // flexible minimal-and-complete grounding selector + verbaliser. `structure` feature only.
 #[cfg(feature = "structure")]

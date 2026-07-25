@@ -1,0 +1,79 @@
+# [OPUS-4.8] (sq-6vshe.4) Seam A2 of the sparq-engine facade split (RFC
+# research/engine-split-rfc.md §4 Option A / §7 Phase A2). This crate holds the SPARQL
+# 1.1 federated-query (`SERVICE`) client surface peeled out of `sparq-engine`: the HTTP
+# `Transport` seam + production ureq `HttpTransport`, the SPARQL-Results JSON/XML
+# streaming parsers, the bound-join `VALUES` batching, and the SSRF egress-policy
+# allowlist. `sparq-engine` re-exports its public fns verbatim (`sparq_engine::
+# with_service_egress_allow`, `…::SERVICE_EGRESS_REFUSED_MARKER`, `…::allowlist_entry_permits`,
+# …) so the public API + the `service` feature name are unchanged for external users.
+# `publish = false` marks it an INTERNAL, unstable crate (RFC §5): it is exempt from the
+# new-crate bench + SKILL governance gate (G1, scripts/gate-new-crate.py) exactly like the
+# sibling sparq-engine-serialize / sparq-jsonld / sparq-substrate extractions — depend on
+# the `sparq-engine` facade, never on this crate directly.
+[package]
+name = "sparq-engine-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Internal SPARQL 1.1 federated-query (SERVICE) client for sparq-engine — HTTP transport, SPARQL-Results JSON/XML parse, bound-join batching, SSRF egress policy — re-exported through sparq-engine"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+# INTERNAL facade sub-crate: not published to crates.io. See the header note + RFC §5.
+publish = false
+
+# Render the README as the docs.rs front page and document with all features so the
+# `service` client surface appears (mirrors sparq-engine).
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[features]
+# The whole federated-SERVICE surface is behind `service`, mirroring the gating this code
+# had inside sparq-engine (`#[cfg(feature = "service")] mod service;`). When off (the
+# default), the crate compiles EMPTY and pulls in ZERO dependencies (serde / serde_json /
+# quick-xml / ureq are all optional and only enter via this feature) — the byte-identical
+# feature-off contract. `ureq` (the blocking HTTP client) is ADDITIONALLY `cfg(not(wasm32))`-
+# gated in the target block below, exactly as it was in sparq-engine: SERVICE makes no sense
+# in the browser (no arbitrary cross-origin HTTP, no blocking I/O), so the HTTP stack never
+# enters a wasm bundle even if the feature were forced on for a wasm target.
+service = ["dep:serde", "dep:serde_json", "dep:quick-xml", "dep:ureq", "dep:rustc-hash"]
+
+[dependencies]
+# `version` alongside `path`: cargo uses the path locally and the version on crates.io
+# (kept for parity even though this crate is publish = false).
+sparq-core = { path = "../sparq-core", version = "0.1.0", default-features = false }
+# oxrdf terms (Term / Variable / NamedNode / Literal / …) are the SERVICE result vocabulary
+# the parsers build and the caller interns; already in the engine's dep tree.
+oxrdf.workspace = true
+# rustc-hash (FxHashMap) backs the SRX parser's per-row binding accumulator; already in the
+# workspace tree (sparq-core / sparq-engine). Pulled in only when `service` is on.
+rustc-hash = { workspace = true, optional = true }
+# SPARQL-Results-JSON streaming parse drives serde's `DeserializeSeed`/`Visitor` traits
+# directly (one binding object at a time — no whole-document DOM). serde is pulled in only
+# by `service`; no derive, default-features off (only the core `serde::de` traits are used).
+serde = { version = "1", default-features = false, optional = true }
+# serde_json backs the SRJ `Value` term decode; platform-independent (no HTTP/TLS), pulled
+# in only when `service` is on.
+serde_json = { version = "1", optional = true }
+# SPARQL-Results-XML (SRX) parse: some endpoints ignore the `Accept: …+json` header and
+# return XML. Platform-independent; `default-features = false` drops its unused serde derive.
+quick-xml = { version = "0.41", default-features = false, optional = true }
+
+# `ureq` (the SERVICE feature's blocking HTTP client) is native-only: depending on it from
+# the wasm build would drag an HTTP/TLS stack into the browser graph, and SERVICE never runs
+# there. `tls-native-root` (rustls + platform-verifier) reuses the OS trust store for https
+# endpoints without bundling webpki-roots — the same runtime trust behaviour sparq-engine had
+# (ureq 3, off the archived rustls-pemfile / RUSTSEC-2025-0134). [OPUS-4.8]
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier"], optional = true }
+
+[dev-dependencies]
+# The SRJ/SRX round-trip and egress tests build/parse Terms with sparq-core's default
+# features (dict decode helpers) on.
+sparq-core = { path = "../sparq-core", version = "0.1.0" }
+# [GPT-5.6] (sq-zvavi) Value-level differential coverage for the SRJ/SRX codecs.
+proptest = "1"

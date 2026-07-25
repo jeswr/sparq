@@ -7,9 +7,8 @@
   <a href="../../LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
 </p>
 
-Opt-in GeoSPARQL 1.0/1.1 core for the [sparq](https://github.com/jeswr/sparq) RDF
-engine: `geo:wktLiteral` / `geo:gmlLiteral` parsing, the `geof:` spatial functions,
-and an R-tree `GeoIndex` over sparq `Graph`s.
+Opt-in GeoSPARQL 1.0/1.1 core for [sparq](https://github.com/jeswr/sparq):
+geometry-literal parsing and serialisation, `geof:` functions, and an R-tree `GeoIndex`.
 
 A **separate crate** by design — no other sparq crate (nor the wasm build) depends on
 it, so spatial support is engaged only by adding `sparq-geo`. Geometry wraps the
@@ -50,9 +49,7 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
 
 ## ✨ Features
 
-- **OGC conformance scoreboard** — `geof:` covers the `sf*`/`eh*`/`rcc8*` DE-9IM
-  relation families, `distance`/`buffer`/`envelope`/`boundary`/`convexHull`, the
-  point-set ops, and `getSRID` (35 registered IRIs). A self-written executable probe
+- **OGC conformance scoreboard** — 40 `geof:` IRIs cover topology, measurements, centroid, simplification, geometry/set operations, and `getSRID`. A self-written executable probe
   per OGC requirement ([`tests/ogc_geosparql_requirements.rs`](tests/ogc_geosparql_requirements.rs))
   scores **30 / 30** of the standard's R1–R30 taxonomy — OGC never shipped an executable
   ETS, and the GPL academic compliance benchmark cannot be vendored into this MIT tree,
@@ -63,7 +60,8 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
   hand-derived assertions.
 - **WKT + GML, two serializations** — `geo:wktLiteral` and the GML Simple-Features
   profile of `geo:gmlLiteral` parse to the same `geo_types` + CRS and interoperate in
-  one `geof:` call. Beyond the GML-SF profile, a few real-world (non-SF) forms are
+  one `geof:` call. [GPT-5.6] `GeoGeometry::to_gml_literal` emits the six GML 3
+  Simple Features forms with CRS-preserving axis order. Beyond GML-SF, non-SF forms are
   parsed additively into the same 2-D model: `gml:Envelope` (-> bbox `Polygon`),
   arc-segment `gml:Curve` / `gml:Surface` (`gml:Arc` / `gml:ArcString` /
   `gml:CircularArcByCenterPoint`), **densified** to a polyline at a fixed `5°`-per-chord
@@ -72,8 +70,8 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
   model is 2-D). Tessellated patches (`gml:Triangle` / `gml:TIN`) stay a clean
   `GeoError::Unsupported` (`bd list -l area:sparq-geo`).
 - **CRS handling** — CRS84 (default) / EPSG:4326 (axis-order normalised); other CRS IRIs
-  carried verbatim (relations valid within one CRS); opt-in CRS84 reprojection for a
-  curated EPSG set via the `reproject` feature (pure-Rust proj4rs).
+  carried verbatim (relations valid within one CRS); opt-in CRS84 reprojection (pure-Rust
+  proj4rs): a curated EPSG table (`reproject`) or the full EPSG registry (`epsg_full`).
 - **RDFS/OWL entailment + query rewrite** — GeoSPARQL ontology entailment runs through
   the GENERIC `sparq-reason` closure (no geo-specific reasoner). The OGC query-rewrite
   extension (`/conf/query-rewrite-extension`) — topology PROPERTY forms like
@@ -83,8 +81,13 @@ The `geof::*` / `geof::lex::*` plain-Rust API and the R-tree `GeoIndex`
   entry points stay W3C-conformant and untouched (a `geo:sfWithin` triple matches only
   asserted triples there), so default SPARQL semantics never change. A conformance
   ratchet pins the measured property-form pass count (`ogc_query_rewrite_ratchet`).
-- **R-tree `GeoIndex`** — packed-STR `rstar` build over the default and every named
-  graph, with antimeridian-safe windows and incremental `apply_delta` upkeep.
+- **R-tree `GeoIndex`** — packed-STR `rstar` build over all graphs, with antimeridian-safe windows,
+  incremental `apply_delta`, and opt-in prepared exact region scans via `topology_index` — which also certifies exact constant-region `sfWithin`/`sfContains` sets to the engine (`candidates_exact`), letting it skip the residual DE-9IM FILTER for indexed rows (sq-lk3aw.4).
+- **Constant-geometry parse + prepared-relate caching** — geometry arguments resolve
+  through a small bounded per-thread cache keyed by the exact lexical form: a constant
+  `FILTER` polygon is parsed once per thread, not once per row (sq-lkrgi), and the
+  DE-9IM relations lazily add a `geo::PreparedGeometry` per REUSED operand (sq-hq8t5).
+  Results are byte-identical (differential-tested); parse failures are never cached.
 
 **Distance accuracy.** Metric units measure great-circle distance on the GRS80 mean
 sphere; point↔point and point↔extended geometry are exact haversine (spherical
@@ -93,8 +96,10 @@ iteration** (sq-lk3aw.3): for each vertex of each geometry the haversine distanc
 the nearest point on the other geometry is computed, resolving the prior equirectangular
 projection distortion. Remaining approximation: interior-of-segment↔interior-of-segment
 pairs (bounded by vertex arc spacing; uncommon for typical GeoSPARQL geometries).
-`uom:degree`/`radian` measure coordinate-space distance. `geof:buffer` in metric units
-still uses a local equirectangular frame (no exact sphere-buffer equivalent). Line/polygon
+`uom:degree`/`radian` measure coordinate-space distance. `geof:buffer` and the metric
+area/length/perimeter functions use one local equirectangular frame; undefined
+dimensions are errors, and `geof:centroid` preserves the input CRS. `geof:simplify`
+uses coordinate-space Douglas–Peucker, retains input vertices, and preserves CRS. [GPT-5.6] sq-lsp7k.18 / sq-lsp7k.23. Line/polygon
 set-subtraction is rolled in-crate over `i_overlay`; a `LineString` difference is proposed
 upstream to [georust/geo](https://github.com/georust/geo) (bead `sq-fxv3`).
 
@@ -106,7 +111,8 @@ upstream to [georust/geo](https://github.com/georust/geo) (bead `sq-fxv3`).
 - **Spec** — GeoSPARQL 1.0/1.1; the implemented requirement subset is pinned by
   [`tests/ogc_geosparql_requirements.rs`](tests/ogc_geosparql_requirements.rs).
 - **Benchmark** — `cargo run --release -p sparq-geo --example bench_geo` (no figures
-  baked in here, per the repo's no-hard-coded-performance-numbers rule).
+  baked in here, per the repo's no-hard-coded-performance-numbers rule); its `query`
+  subcommand replays pinned `.rq` files (the Geographica family — `bench/geo/README.md`).
 - **Contribute** — [`AGENTS.md`](../../AGENTS.md).
 
 ## License

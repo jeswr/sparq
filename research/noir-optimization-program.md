@@ -1,0 +1,467 @@
+# Noir upstream optimization program — whole-compiler assessment (sq-rbfga)
+
+<!-- [OPUS-4.8] sq-5reoy (#1599): the in-tree `zk/ieee754` and `zk/xpath` Noir trees were externalized to the `sparq-org/noir_IEEE754` (v0.10.0) and `sparq-org/noir_XPath` (v0.2.0) face repos and REMOVED from this repo; `zk/compose` now consumes the released `sparq_ieee754` as a pinned Nargo git dependency. Any `zk/xpath/…` / `zk/ieee754/…` path below is a HISTORICAL in-tree reference — the live source is the corresponding face repo. -->
+
+> 🤖 **SPARQ agent** — assessment produced for epic `sq-uuvac` (Noir upstream
+> optimization program), bead `sq-rbfga`. [FABLE-5]
+> Analysis of noir-lang/noir @ `0df14918` (2026-07-04, version `1.0.0-beta.22`-dev),
+> workspace `~/noir-optim-workspace/noir` (outside the sparq repo, per the epic).
+> No upstream PRs were opened from this assessment.
+
+## 1. Scope and doctrine
+
+The maintainer (@jeswr) previously landed three upstream **draft** optimization PRs
+with a weaker model's help. This program re-derives similar optimizations **fresh**
+(no code reuse) plus any other optimizations found anywhere in the compiler, as a
+series of minimal, individually-measured upstream PRs. This record is the plan;
+implementation beads are children of `sq-uuvac`.
+
+**Program-level constraint discovered during the survey (load-bearing):**
+noir's `CONTRIBUTING.md` explicitly states that PRs consisting of *entirely
+AI-generated code* are likely to be closed. jeswr's established mitigation — and
+this program's mandatory protocol — is: **draft PR first, explicit disclosure
+("developed with support from generative AI; author review before maintainer
+review"), the author (@jeswr) reviews and takes ownership before requesting
+maintainer review**, every claim measured, every PR issue-linked. Transparent,
+engaged, measured contributions are the only acceptable mode. See §6.
+
+## 2. Digest of jeswr's three upstream PRs (themes only — code not reused)
+
+All three are OPEN drafts (checked 2026-07-04). **No human maintainer review has
+been posted on any of them yet** — only a Copilot review on #12927 — so the
+binding "reviewer objections" so far are the constraints the PRs impose on
+themselves (rejected-experiment notes), plus repo automation rules.
+
+| PR | Theme | Key files touched | Measurement style |
+|---|---|---|---|
+| [#12780](https://github.com/noir-lang/noir/pull/12780) | Track unsigned value ranges from unconditional `range_check` / `constrain lhs == rhs`; propagate through lossless casts, `not`, selected unsigned arithmetic; feed `checked_to_unchecked` | `ssa/ir/dfg/range_analysis.rs` (new), `ssa/ir/dfg.rs`, `ssa/opt/checked_to_unchecked.rs`, `acir/mod.rs` | Focused `test_programs/benchmarks/live_bit_width_*` fixtures; `cargo test -p noirc_evaluator` |
+| [#12781](https://github.com/noir-lang/noir/pull/12781) | Simplify unsigned `lhs / C → 0` and `lhs % C → lhs` when `max(lhs) < C`, `C != 0` (stacked on #12780) | `ssa/ir/dfg/simplify/binary.rs` + the range stack | Local `bb gates -s ultra_honk`: `live_bit_width_large_constant_div_mod` **2953 → 88** gates; `live_bit_width_ranges` 3753 → 3720 |
+| [#12927](https://github.com/noir-lang/noir/pull/12927) | Full SSA value-range analysis (unsigned + signed two's-complement domains): drop redundant range checks, narrow `Lt` widths, checked→unchecked; plus compile-time work (one fixed point per function) | same area + `ssa/opt/range_check_elision.rs` (new pass) | ACIR opcodes + bytecode per benchmark (`live_bit_width_ranges` 91→63 opcodes, −31%); compile-time table; standard circuits verified unchanged |
+
+**Design constraints recorded inside those PRs (treat as constraints for our fresh PRs):**
+
+- Constraint-derived ranges are only sound as *global* facts in single-block
+  functions without side-effect predicates — branch-local/predicated constraints
+  must not be treated globally (#12780 review notes; #12927 ⭐ commit `08806ed`).
+- Backward propagation from `Eq`/`Lt` *results* was tried and **rejected**: it
+  risks circularly narrowing the very comparison that enforces the assertion, and
+  did not improve UltraHonk gates (#12780 review notes).
+- Broader backward bit/range inference experiments were gate-neutral or
+  **regressed** UltraHonk gates and were dropped (#12781 review notes).
+- Every inferred range must be a **sound over-approximation** — a too-tight range
+  drops a needed constraint and under-constrains the circuit (#12927 module-doc
+  contract; four soundness fixes shipped with regression tests, incl. unchecked
+  add/mul exceeding its type width through a widening cast).
+- Compile-time discipline: an O(instructions²) inline recomputation did not finish
+  `sha512_100_bytes` in 12 min; the fix is one fixed point per function, elision as
+  a dedicated pass, not inline simplification (#12927 `bc74335`).
+- Repo automation: do **not force-push** after team review starts (sticky bot
+  comment on all three PRs).
+
+## 3. Compilation pipeline map (HEAD `0df14918`)
+
+### 3.1 Frontend
+
+`noirc_frontend`: lexing/parsing → **elaborator** (name resolution, type checking,
+comptime interpreter) → **monomorphization** (`noirc_frontend/src/monomorphization/`;
+identical instantiations are deduped via a multi-level cache keyed on
+(function id, unconstrained-ness, type, turbofish, bindings) —
+`monomorphization/mod.rs:425-437`) → **SSA generation**
+(`noirc_evaluator/src/ssa/ssa_gen/`). Array-index bounds checks are emitted here:
+power-of-two array lengths get `RangeCheck`, non-power-of-two get `Lt`+constrain
+(`ssa_gen/mod.rs:627-661`), with a known-odd cast-to-Field workaround
+(`ssa_gen/mod.rs:643-645`, upstream issue #9191).
+
+### 3.2 SSA pass pipeline
+
+`noirc_evaluator/src/ssa/mod.rs:205-424` defines the primary pass list — ~85
+sequential pass invocations (many repeated). Condensed phase map (each pass lives
+in `ssa/opt/<name>.rs`):
+
+1. **Early/infra**: black_box bypass, ArraySet/ArrayGet opts, expand signed
+   checks, remove unreachable functions, Brillig-only Mem2Reg + load-store
+   forwarding (LSF) + cleanups.
+2. **Pre-inlining**: defunctionalization, lower refs at ACIR/Brillig boundary,
+   inline simple functions.
+3. **Inlining + memory**: Mem2Reg, LSF, array opts, purity analysis, full
+   inlining, post-inline Mem2Reg/LSF, DIE, simplify, specialization.
+4. **Loops**: LICM, constant folding, simplify CFG, unrolling (iterated).
+5. **Lowering to branchless form**: `remove_bit_shifts` (dynamic shifts →
+   bit-decomposition), array opts, `expand_signed_checks` (after bit-shift
+   removal, which introduces signed divisions — ordering comment
+   `mod.rs:308-310`), **`flatten_cfg`** (non-optional: ACIR has no control flow;
+   both `if` arms cost), array-set window opt, Mem2Reg (cross-block, after
+   flattening — `mod.rs:321-324`), `inline_functions_with_no_predicates`.
+6. **Late cleanup (×4 DIE cycles)**: LSF, `remove_if_else`, constant folding,
+   simplify CFG, re-unrolling, static asserts, `make_constrain_not_equal`,
+   u128-overflow checks, `remove_truncate_after_range_check`,
+   **`checked_to_unchecked`** (local per-value max-bits map — *no global range
+   analysis exists on HEAD*; `ssa/opt/checked_to_unchecked.rs`), constraint-aware
+   constant folding (×2), remove `EnableSideEffectsIf`, final DIE, mutable
+   array-set opt.
+
+Ordering constraints are documented in-line (e.g. LSF must precede DIE because DIE
+removes Stores, `mod.rs:384-386`; remove-unreachable-instructions must precede
+Mem2Reg, `mod.rs:378-381`). Instruction-level algebraic simplification lives in
+`ssa/ir/dfg/simplify/` (`binary.rs`, `call.rs`, …) and is invoked on insertion by
+many passes.
+
+### 3.3 ACIR generation + ACVM transforms
+
+`noirc_evaluator/src/acir/`: SSA → ACIR opcodes. Load-bearing emission sites:
+
+- **Euclidean division** (`acir/acir_context/mod.rs:~850-940`): Brillig quotient
+  hint + quotient range check + remainder range check + `r < rhs` bound
+  constraint + the `a·p == (b·q + r)·p` relation. For constant `rhs` the bit
+  bounds are tightened (`bit_size - rhs_bits + 1` for `q`); for dynamic `rhs`
+  they default to full `bit_size`. The remainder range check is **deliberately
+  always emitted** — the in-code comment notes it is redundant for power-of-two
+  `rhs` and relies on the ACVM optimizer to drop it, but is *required* for
+  non-power-of-two `rhs` (the bound constraint introduces a fresh witness).
+- **Truncation** (`truncate_var`, `mod.rs:1145-1156`) is implemented as full
+  euclidean division by `2^rhs`.
+- **Comparisons** (`more_than_eq_var`, `mod.rs:1163-1228`): sign-bit extraction of
+  `diff + 2^max_bits` via euclidean division by `2^max_bits`, at the full type
+  bit width.
+- **Range checks** (`range_constrain_var`, `mod.rs:1106-1135`): constants are
+  checked at compile time; under a predicate the check applies to
+  `predicate · variable`.
+- **Bitwise AND/XOR** → black-box calls; range info is *not* re-applied to
+  outputs at ACIR-gen (`acir/acir_context/black_box.rs:91`, documented, issue
+  #1439); the ACVM `redundant_range` optimizer instead *assumes* the
+  Barretenberg AND/XOR gadget constrains inputs+outputs to `num_bits`
+  (`acvm-repo/acvm/src/compiler/optimizers/redundant_range.rs:172-181`). This is
+  a documented backend contract, not a bug — but it is a **portability
+  assumption** worth knowing when reasoning about range-check elision.
+
+ACVM-level pipeline (`acvm-repo/acvm/src/compiler/optimizers/mod.rs:55-111`):
+`general` (merge mul/linear terms — with an upstream TODO #10109 to do it on the
+fly, `optimizers/general.rs:16`) → unused-memory elimination → `redundant_range`
+(keeps the tightest range check per witness) → CSAT expression-width transformer.
+
+### 3.4 Brillig generation
+
+`noirc_evaluator/src/brillig/`: unconstrained code → Brillig VM bytecode. Brillig
+opcodes are free at proof time; only unconstrained execution speed and bytecode
+size are affected. Upstream appetite for Brillig micro-opts is **low** (closed
+NOT_PLANNED: #5791, #2936; PR #11580 rejected on maintenance-cost grounds) —
+deprioritized in this program.
+
+### 3.5 Stdlib
+
+`noir_stdlib/src/`: library-level circuit patterns. Cost-relevant hotspots:
+`field/mod.nr` decomposition + modulus-check loops (`to_le_bits`/`to_le_bytes`
+etc., lines ~36-153) and `lt_fallback` (32-byte scan, lines ~361-385); `pow_32`
+(32-iteration square-and-multiply, lines ~181-190); `array/quicksort.nr`
+(unconstrained — proof-cost-irrelevant). Upstream issue #6313 asks for tests that
+near-inverse stdlib pairs (`to_be_bytes`/`from_be_bytes`) optimize away.
+
+## 4. Upstream landscape
+
+### 4.1 Known-wanted optimizations (open issues; higher value because pre-endorsed)
+
+| Issue | Ask | Maintainer signal | Difficulty |
+|---|---|---|---|
+| [#8628](https://github.com/noir-lang/noir/issues/8628) | Don't emit `truncate` when the value is masked by `and` with a small constant | jfecher gave the implementation path: extend the max-bit tracking in `ssa/opt/remove_truncate_after_range_check.rs` to `and` | Low |
+| [#9463](https://github.com/noir-lang/noir/issues/9463) | Remove redundant `LessThan`/range constraints (`assert(a<16); assert(a<17)`; `t[a%3]` OOB check) | Wants a `remove_truncate_after_range_check`-style pass; cross-linked to #9429 | Low-medium |
+| [#9429](https://github.com/noir-lang/noir/issues/9429) | Track bool-condition facts / value ranges in the SSA optimizer | Concrete SSA examples in body; subsumes #9463 | Medium, high leverage |
+| [#5501](https://github.com/noir-lang/noir/issues/5501) | Push `ArrayGet` backwards through `IfElse` to avoid full array merges (~2000 reads to merge two 1000-elem arrays for one read) | jfecher pointed at `try_merge_only_changed_indices` in `ssa/opt/flatten_cfg/value_merger.rs`; precedent PR #11512 merged | Medium |
+| [#7161](https://github.com/noir-lang/noir/issues/7161) | Remove overflow checks on intermediate arithmetic dominated by a later check | Body notes a Brillig-side check may be needed | Medium |
+| [#8055](https://github.com/noir-lang/noir/issues/8055)/[#8317](https://github.com/noir-lang/noir/issues/8317) | Fold chained arithmetic (`sub 0,x; add …`), collect constants | Prior art PR #8064 (TomAFrench) closed unmerged — read before re-attempting | Medium |
+| [#6631](https://github.com/noir-lang/noir/issues/6631) | Loop unswitching | Accepted bytecode-size trade | Medium |
+| [#6629](https://github.com/noir-lang/noir/issues/6629) | Induction-variable elimination / strength reduction | Exact rewrite specified | Medium-high |
+| [#6624](https://github.com/noir-lang/noir/issues/6624) | Investigate `check_for_negated_jmpif_condition` for ACIR | Pure investigation | Low |
+| [#10439](https://github.com/noir-lang/noir/issues/10439)/[#10438](https://github.com/noir-lang/noir/issues/10438) | LICM ArrayGet hoisting too pessimistic | Incremental | Low-medium |
+| [#5027](https://github.com/noir-lang/noir/issues/5027) | Conditional RAM writes scale nonlinearly (1.65M vs 12k constraints) | TomAFrench isolated a removable `BoundedVec` capacity assert | High (sub-task easy) |
+| [#4629](https://github.com/noir-lang/noir/issues/4629) | ACIR size grows quadratically with loop iterations (SSA is linear ⇒ acir-gen expression growth) | `as_witness` added as workaround; #6539 dup | High, high value |
+| [#13046](https://github.com/noir-lang/noir/issues/13046) | Memory blowup during ACIR synthesis (Poseidon sponge) | aakoshh could not reproduce 48GB (saw 13GB); per-pass profile in comments | Medium-high |
+| [#6313](https://github.com/noir-lang/noir/issues/6313) | Verify near-inverse stdlib pairs optimize away | Investigation + tests | Low |
+| [#4972](https://github.com/noir-lang/noir/issues/4972) | Alternative ACIR-gen for predicated `array_get` (index-offset vs quadratic expression) | Measurement experiment suggested by TomAFrench | Low-medium |
+
+Also in-code TODOs that are genuine opportunities: simplify `to_bits`/`to_radix`
+to a range constraint when `limb_count == 1`
+(`ssa/ir/dfg/simplify/call.rs:59,79`); `IfElse` merging blocked on NOT
+instructions with distinct ValueIds (`ssa/ir/dfg/simplify.rs:343-344,361-362`);
+on-the-fly expression term merging (`acvm/src/compiler/optimizers/general.rs:16`,
+issue #10109).
+
+### 4.2 Rejected / landmine list
+
+- **PR #11580** (Brillig self-move peephole) — blocked, then closed by jfecher:
+  *"doesn't have enough optimizations to warrant the upkeep."* Small peephole
+  passes get rejected on **maintenance-cost** grounds; a new pass must pay rent.
+- **PR #10159** (asterite's own `less_than_var` "improvement") — produced *more*
+  opcodes/larger circuits because `a<b` and `!(a<b)` stopped sharing a witness.
+  Intuition misfires; **measure gates, not opcodes** (matches sparq's own PR-#37
+  experience in the `noir-optimisation` skill).
+- **PR #8064/#8053** (generic arithmetic-optimization pass) — closed unmerged;
+  direct prior art for #8055/#8317.
+- **PR #8876** (ownership/assign optimization) — abandoned: loop correctness
+  corner cases. **PR #7215** (skip defunctionalization for ACIR) — caused panics.
+- **#5791, #2936** (Brillig register/opcode dedup micro-opts) — closed NOT_PLANNED.
+- **Timing**: #9820 (loop constraint simplification) explicitly deferred *"after
+  1.0 is fully audited"*; the `audit` label period means semantics-touching SSA
+  changes with marginal wins face extra resistance. Safe, measured constraint
+  reductions are fine.
+- **CONTRIBUTING.md**: bans entirely-AI-generated PRs (see §1); typo-level PRs
+  closed on sight; issue-first; Conventional Commits v1.0.0 PR titles (scope =
+  crate, e.g. `feat(ssa): …`); squash-merge; one approval required; breaking
+  changes need DevRel sign-off.
+
+## 5. Measurement methodology + baseline
+
+### 5.1 Metrics (in order of authority)
+
+1. **Backend gate count** — `bb gates -s ultra_honk -b target/<pkg>.json
+   [--include_gates_per_opcode]`, `circuit_size` field. Ground truth for proving
+   cost. (sparq's `noir-optimisation` skill documents ACIR-opcode counts
+   diverging from gates by 5-50×; upstream PR #10159 is the upstream-side
+   demonstration.) `bb`/`nargo` are version-coupled — use `bbup`.
+2. **ACIR opcode count** — `nargo info [--json]`, per-function ACIR opcodes.
+   Cheap iteration proxy; never claim a win from it alone.
+3. **Upstream CI** — `.github/workflows/reports.yml` + `benchmark_projects.yml`:
+   every PR gets a gates-diff sticky comment (`noir-lang/noir-gates-diff`,
+   0.9-quantile summary), Brillig bytecode/trace reports at 3 inliner settings,
+   peak-memory reports, and **hard** compile/execution time+memory limits on
+   pinned real Aztec circuits. Fork PRs don't get sticky comments — a maintainer
+   (or @jeswr on his fork's CI) must surface the diff. SSA snapshot tests will
+   fail on circuit-changing PRs and must be regenerated + justified.
+4. **Compile time / memory** — wall-clock `nargo compile` and the CI memory
+   reports; a circuit-size win must not blow the compile-time budget (#12927's
+   O(n²) lesson).
+
+### 5.2 Baseline corpus (measured with HEAD nargo `1.0.0-beta.22+0df14918`, this box)
+
+Corpus = noir's own benchmark programs + sparq's real circuits (copied out of the
+sparq repo to `~/noir-optim-workspace/corpus-zk/`, compiled with the HEAD-built
+`nargo`). sparq's `zk/` libraries pin `nargo 1.0.0-beta.21`; HEAD is
+`beta.22`-dev — one release ahead.
+
+| Package | Source | ACIR opcodes (`main`) |
+|---|---|---:|
+| `sha512_100_bytes` | noir `test_programs/benchmarks` | 13173 |
+| `semaphore_depth_10` | noir `test_programs/benchmarks` | 5699 |
+| `bench_eddsa_poseidon` | noir `test_programs/benchmarks` | 4147 |
+| `bench_poseidon2_hash_100` | noir `test_programs/benchmarks` | 202 |
+| `scan_k2_n64_r8` | sparq `zk/compose` | 22313 |
+| `scan_k1_n16_r4` | sparq `zk/compose` | 1743 |
+| `filter_f64_d4` | sparq `zk/compose` | 335 |
+| `filter_f64` | sparq `zk/compose` | 266 |
+| `filter_decimal_i3_f2` | sparq `zk/compose` | 162 |
+| `filter_signed_int_d4` | sparq `zk/compose` | 149 |
+| `filter_int_d4` | sparq `zk/compose` | 110 |
+| `filter_int_d1` | sparq `zk/compose` | 65 |
+| `probe_xpath_add_double` | probe bin over sparq `zk/xpath` (`numeric_add_double`) | 396 |
+| `probe_xpath_divide_double` | probe bin over sparq `zk/xpath` (`numeric_divide_double`) | 341 |
+| `probe_xpath_multiply_double` | probe bin over sparq `zk/xpath` (`numeric_multiply_double`) | 336 |
+
+**Compatibility story:** the whole corpus (pinned to `beta.21`) compiles cleanly
+on HEAD `beta.22`-dev — no source changes needed. Caveats: `zk/ieee754` and
+`zk/compose/compose_core` and all `zk/xpath` `test_packages/*` are `type = "lib"`
+packages, so `nargo info` reports no circuits for them directly; ieee754 is
+covered transitively by the `compose` bins, and xpath by the three probe bins
+(written for this assessment, in `~/noir-optim-workspace/probes/`, two `pub u64`
+witness inputs each — kept out of the sparq repo).
+
+Numbers are ACIR-opcode counts (`nargo info --json`, sum over entry points unless
+noted) — the iteration proxy. Gate-level (`bb gates`) baselines should be taken
+per-PR on the specific benchmark the PR targets, on the PR's pinned `bb` (this
+box's EC2 measurements are non-canonical; upstream CI's gates-diff is the
+arbiter).
+
+## 6. Upstream-contribution protocol (binding for every child bead)
+
+1. **Issue-first**: link an existing upstream issue (§4.1) or open one with the
+   measured evidence before the PR.
+2. **One optimization per PR**, minimal diff, no drive-by refactors; prerequisite
+   work as separate PRs; upstream style (`cargo fmt`, clippy, existing pass
+   idioms; SSA passes documented with module-level `//!` docs like their
+   neighbors).
+3. **Draft PR** with the disclosure line: *"This change was developed with
+   support from generative AI. I am currently reviewing it before requesting
+   maintainer review."* Tag @jeswr for author review; only he flips it to ready.
+4. **Conventional-commit title** (`feat(ssa): …` / `fix(acir): …`); squash-merge;
+   never force-push after team review begins.
+5. **Measured perf analysis in the PR body**: focused benchmark fixture(s) under
+   `test_programs/benchmarks/` where appropriate, `bb gates` before/after,
+   ACIR-opcode table, compile-time check on a heavy program
+   (`sha512_100_bytes`), statement of soundness argument. Regenerate SSA
+   snapshots and explain the diffs.
+6. **Soundness rules**: every inferred bound a sound over-approximation; no
+   global use of branch-local facts; never optimize based on a comparison result
+   that the comparison itself enforces (circularity, §2).
+7. **Honesty**: numbers only from actual runs; if a win doesn't reproduce on
+   `bb gates`, the PR doesn't go up (cf. PR #10159).
+
+## 7. Ranked opportunities
+
+Ranking = (expected circuit-size win on the corpus) × (minimality/low risk of the
+diff). Verification status is stated honestly: "verified" means this assessment
+read the HEAD code and confirmed the gap; expected wins are *expectations*, not
+measurements, unless a number is cited.
+
+| # | Opportunity | Area / evidence | Win basis | Diff size / risk |
+|---|---|---|---|---|
+| 1 | **Unsigned `div`/`mod` by larger-than-max constant → `0` / `lhs`** (fresh re-derivation of theme c). Verified absent on HEAD: `simplify/binary.rs:144-176` has only `rhs==1`, field-div→mul-by-inverse, and `mod`-by-power-of-two→truncate. Needs a `max(lhs)` bound source: start with the *type* bit width vs constants `≥ 2^bit_size`… which ACIR-gen already rejects — so the useful bound is the local `value_max_num_bits`-style bound (cast/truncate/`and`-derived), scoped exactly like `checked_to_unchecked` | SSA `simplify/binary.rs` + a narrow bound query | jeswr measured 2953→88 gates on the focused fixture (#12781); real-world win on code that masks then divides | Small; low risk; must not duplicate #12781 — coordinate with @jeswr (fresh derivation, different bound source) |
+| 2 | **Extend `remove_truncate_after_range_check` to `and`-masked values** (#8628) | SSA `opt/remove_truncate_after_range_check.rs`; maintainer-specified fix | Truncates cost a full euclidean division each (§3.3); upstream wants it | Small; maintainer-blessed; lowest-risk opener |
+| 3 | **`to_bits`/`to_radix` with `limb_count == 1` → range constraint** (in-code TODOs `simplify/call.rs:59,79`) | SSA simplify | Removes an array + decomposition per site; win small but the TODO is upstream's own | Tiny; near-zero risk |
+| 4 | **Redundant range/`LessThan` constraint elision** (#9463): dominance-aware minimum-bound tracking, same skeleton as `remove_truncate_after_range_check` | SSA new/extended pass | Directly requested; overlaps theme a at its cheapest point | Small-medium; keep it a *pass*, not inline (compile-time lesson §2) |
+| 5 | **Push `ArrayGet` through `IfElse` / merge only accessed indices** (#5501) | `ssa/opt/flatten_cfg/value_merger.rs` (`try_merge_only_changed_indices`); precedent PR #11512 | ~2N constraints per merged N-array for one read today; large on array-heavy circuits (xpath corpus is array-heavy) | Medium; correctness-sensitive but issue + precedent exist |
+| 6 | **Overflow-check elision when dominated by a later check** (#7161) | SSA | Each elided check saves a range decomposition | Medium; needs the Brillig-side caveat in the issue body |
+| 7 | **Value-range / condition-fact tracking in SSA** (#9429; fresh re-derivation of themes a+b) — scope v1 to unconditional single-block facts (jeswr's own soundness boundary), feeding `checked_to_unchecked` + range-check elision | SSA (new analysis; consumers exist) | The general version of rows 1/4; jeswr's #12927 measured −31%/−12%/−22% opcodes on focused fixtures, unchanged on standard circuits | Large-for-this-program; land only after rows 1-4 build trust; coordinate with the open #12927 to avoid competing PRs |
+| 8 | **NOT-canonicalization to unlock `IfElse` merging** (TODOs `simplify.rs:343,361`) | SSA simplify / CSE of `not` | Unlocks nested-if merges currently skipped | Small-medium; upstream's own TODO |
+| 9 | **Comparison lowering: sign-bit extraction via specialized power-of-two split instead of full euclidean division** (`acir_context/mod.rs:1163-1228`; quotient is 0/1) | ACIR-gen | Every `<`/`>=` pays quotient+remainder range checks today | Medium; **landmine PR #10159 lives exactly here** — witness-sharing effects; `bb gates` before any claim |
+| 10 | **Quadratic ACIR expression growth in loops** (#4629; `as_witness` is the manual workaround) | ACIR-gen | High value (quadratic→linear on loop-heavy circuits) | High effort/risk; design-first |
+| 11 | **Conditional RAM writes: removable `BoundedVec` capacity assert** (#5027 sub-task identified by TomAFrench) | stdlib/SSA | Slice of a 1.65M-vs-12k constraint gap | Small sub-task of a hard issue |
+| 12 | **Investigations (on-ramps)**: #6624 negated-jmpif for ACIR; #6313 inverse-pair stdlib tests; #4972 predicated `array_get` alternative measurement | mixed | Zero-risk credibility builders; may spawn measured PRs | Tiny |
+
+**Explicitly rejected during this assessment (documented so they aren't re-derived):**
+
+- "Redundant remainder range check in `euclidean_division_var`" — intentional;
+  in-code comment says the ACVM optimizer removes it when redundant and it is
+  *required* for non-power-of-two divisors (`acir_context/mod.rs:~900-910`).
+- "AND/XOR outputs unconstrained vs `redundant_range` assumption is a bug" — it
+  is a documented Barretenberg backend contract (issue #1439 +
+  `redundant_range.rs:172` comment). A portability question, not a missed
+  optimization.
+- `x + x → 2x`, `x / x → 1` algebraic rules — no gate win in a field (both are
+  one linear/mul op), and `x/x` is unsound at `x = 0` for integer types.
+- `x * 2^k → x << k` — backwards on ACIR: multiplication by a constant is a free
+  linear term; shifts are the expensive lowering.
+- stdlib `lt_fallback` "early exit" and `quicksort` copy-elimination — flattened
+  circuits pay both arms (no early exit), and quicksort is unconstrained
+  (proof-cost-irrelevant).
+- Brillig peephole passes — rejected upstream (PR #11580, #5791, #2936).
+
+## 8. Program sequencing
+
+1. Open with rows 2-3 (tiny, maintainer-blessed/TODO-backed) to establish the
+   contribution channel and validate the measurement loop end-to-end (fixture →
+   `bb gates` → CI gates-diff).
+2. Then row 1 (theme-c re-derivation) and row 4 (#9463) as the first substantive
+   circuit-size PRs.
+3. Rows 5-6 next; row 7 (the range-analysis flagship) only after the small PRs
+   have maintainer trust *and* after checking the fate of jeswr's open #12780/#12927
+   (if upstream engages with those, our fresh version may be unnecessary — the
+   goal is upstream improvement, not duplicate PRs).
+4. Rows 9-11 opportunistically, each gated on a measured `bb gates` win; row 12
+   interleaved as cheap goodwill.
+
+Corpus regression check for every PR: recompile the sparq corpus packages (§5.2)
+with the patched compiler and diff ACIR opcodes; any unexplained increase is a
+stop signal.
+
+## 9. Beads
+
+One bead per ranked opportunity, children referenced to epic `sq-uuvac`:
+
+| Bead | Opportunity (row in §7) |
+|---|---|
+| `sq-3qwv1` | 1 — div/mod by larger-than-max constant (theme c) |
+| `sq-9xhoa` | 2 — `remove_truncate_after_range_check` × `and` masks (#8628) |
+| `sq-fwcuo` | 3 — `to_bits`/`to_radix` `limb_count == 1` TODO |
+| `sq-rxir8` | 4 — redundant range/`LessThan` elision (#9463) |
+| `sq-m3l62` | 5 — ArrayGet through IfElse (#5501) |
+| `sq-jthy1` | 6 — dominated overflow-check elision (#7161) |
+| `sq-jj3ne` | 7 — value-range/condition-fact tracking v1 (#9429, flagship) |
+| `sq-seust` | 8 — NOT canonicalization for IfElse merging |
+| `sq-jfkwk` | 9 — comparison lowering power-of-two split (measure-first) |
+| `sq-felqr` | 10 — quadratic ACIR expression growth (#4629, design-first) |
+| `sq-b0vpc` | 11 — BoundedVec capacity-assert slice (#5027) |
+| `sq-eesz3` | 12 — investigation on-ramps (#6624 / #6313 / #4972) |
+
+## 10. FRONT decomposition + program status (2026-07-10)
+
+> 🤖 **SPARQ agent** [FABLE-5] — architect pass for epic `sq-uuvac` (Fable
+> collaboration tier). This section reconciles the plan above with the shipped
+> state and re-specs the remaining beads for the implementation fleet. Nothing
+> above is retracted; where this section disagrees with §8–9, this section wins.
+
+### 10.1 Status (verified against GitHub + `bd` on 2026-07-10)
+
+Steps 1–2 of the §8 sequencing SHIPPED as four upstream draft PRs, all restyled
+to the maintainer's binding brevity feedback (2026-07-05):
+
+| PR | Opportunity (§7 row) | Bead | State 2026-07-10 |
+|---|---|---|---|
+| noir#13263 | 1 — div/mod by oversized constant (theme c) | `sq-3qwv1` done | draft open, `MERGEABLE`, no human review |
+| noir#13264 | 2 — truncate after AND mask (#8628) | `sq-9xhoa` in-progress | draft open, `MERGEABLE`, no human review |
+| noir#13265 | 3 — single-limb `to_bits`/`to_radix` | `sq-fwcuo` in-progress | draft open, `MERGEABLE`, no human review |
+| noir#13266 | 4 — dominating-bound range/`Lt` elision (#9463) | `sq-rxir8` in-progress | draft open, `MERGEABLE`, no human review |
+
+The pending gate on all four is @jeswr's author review (§6 protocol: only he
+flips draft → ready). jeswr's original #12780/#12781/#12927 also remain open
+with no maintainer engagement — their fate is the coordination pre-flight for
+the flagship bead. `sq-uuvac.1` closed as a duplicate of upstream #12794
+(already fixed in beta.22). The paper program (`sq-1j5ow` + children) stays
+deferred per the maintainer (P3, LOW priority).
+
+**Tracking correction:** the twelve §9 beads referenced this epic only in
+prose, so `sq-uuvac` falsely read "2/2 complete — eligible for close" while
+eight beads were open. All twelve are now wired as `bd` children of the epic,
+plus a new shepherd bead `sq-uuvac.2` (see §10.3). Visibility note: children
+under an epic do not surface in `bd ready` — drive this program by curated
+waves / enumerating the epic's children directly.
+
+### 10.2 Common acceptance protocol (every remaining implementation bead)
+
+The one load-bearing property of every bead is **circuit-semantics
+preservation**: a wrongly elided constraint *under-constrains* the produced
+circuit — in a proving system that is a correctness/soundness bug, not a perf
+bug. Acceptance is therefore mechanical and identical in shape across beads
+(each bead's `bd` acceptance field adds its specifics):
+
+1. `cargo test -p noirc_evaluator` green; SSA snapshot tests regenerated with
+   every diff justified in the PR.
+2. Differential execution on the focused fixture(s): `nargo execute --force`
+   vs `nargo execute --force-brillig` — identical witness/failure behavior.
+3. Corpus regression: recompile `~/noir-optim-workspace/corpus-zk` + `probes/`
+   with the patched compiler; any unexplained ACIR increase is a stop signal
+   (§8).
+4. `bb gates -s ultra_honk` before/after on the focused fixture — a win must
+   reproduce at gate level or the PR does not go up (§5.1; PR #10159 lesson).
+5. Compile-time sanity on `sha512_100_bytes` (the #12927 O(n²) lesson).
+6. Upstream etiquette per §6 **plus the maintainer's binding brevity feedback
+   (2026-07-04)**: 1–2-line upstream-style code comments; PR body = short
+   summary + small perf table + one-line caveat(s) + disclosure line, long
+   analysis at most in a collapsed `<details>` block. Draft, @jeswr tagged;
+   no agent arms anything — upstream merge is the only "arm".
+
+These criteria gate each change by tests + measurement; they are evidence of
+semantics preservation, not a formal proof of it.
+
+### 10.3 Fleet spec for the remaining beads
+
+Each row is mirrored into the bead's `bd` acceptance/notes fields so a fleet
+agent can pick it up cold. Worktree = fresh `~/noir-optim-workspace/wt-<bead>`
+off noir `master`; target files are pairwise DISJOINT except where a `bd dep`
+edge sequences them (§10.4).
+
+| Bead | Tier | Target (noir repo) | One-line scope + risk note |
+|---|---|---|---|
+| `sq-jthy1` | opus | `ssa/opt/checked_to_unchecked.rs` | elide overflow checks dominated by a later range check (#7161); Brillig failure-point semantics in scope |
+| `sq-m3l62` | opus | `ssa/opt/flatten_cfg/value_merger.rs` | ArrayGet through IfElse (#5501); conservative use/alias analysis; precedent PR #11512 |
+| `sq-seust` | sonnet | `ssa/ir/dfg/simplify.rs` | NOT canonicalization for IfElse merging; PARK with a findings note if measured neutral (PR #11580 upkeep landmine) |
+| `sq-jfkwk` | sonnet | findings first; `acir/acir_context/mod.rs` only on a win | comparison-lowering experiment; fail-closed on the #10159 witness-sharing landmine; null result acceptable |
+| `sq-felqr` | opus | design note on noir#4629 only | quadratic ACIR growth; NO implementation before upstream buy-in |
+| `sq-b0vpc` | sonnet | `noir_stdlib/src/collections/bounded_vec.nr` | only the TomAFrench capacity-assert slice of #5027 |
+| `sq-eesz3` | sonnet | none (findings-only) | #6624 / #6313 / #4972 measurement comments upstream |
+| `sq-jj3ne` | opus | new `ssa/ir/dfg/` range-analysis module + its two consumer passes | flagship v1; dep-gated on `sq-jthy1` + `sq-rxir8` (shared consumer files) and on the #12780/#12927 coordination pre-flight |
+| `sq-uuvac.2` | haiku | none (existing PR branches only) | shepherd the four open drafts: triage feedback (escalate substantive objections to an opus bead, never rebut directly), rebase on conflict, close sibling beads on merge, refresh the baseline on a new noir pin |
+
+Tier rationale: every bead that *removes* constraints or rewrites merge logic
+is opus — under-constraining risk, and per the standing routing rule this
+ZK-adjacent soundness-sensitive work goes to Opus rather than cheaper tiers.
+Measure-first experiments, the scoped stdlib slice, and findings-only work are
+sonnet; pure monitoring is haiku. All upstream PRs are maintainer-gated by
+construction (@jeswr author review), so no fleet auto-arm exists anywhere in
+this program.
+
+### 10.4 Disjointness + dependency edges
+
+No two beads touch the same noir file except `sq-jj3ne`, whose consumers are
+exactly `sq-jthy1`'s pass (`checked_to_unchecked.rs`) and the #13266 elision
+pass (`sq-rxir8`) — hence the `bd dep` edges: `sq-jthy1` blocks `sq-jj3ne` and
+`sq-rxir8` blocks `sq-jj3ne` (NON-parallel with either). All other beads run
+in parallel worktrees with zero textual conflict, and the one-optimization-
+per-PR rule (§6) keeps upstream review independence intact.

@@ -94,6 +94,30 @@ export const SPECS: Spec[] = [
     blurb:
       "The vec: vector-search extension to SPARQL — magic-predicate k-NN patterns with score bindings, answer-exact vs approximate modes, filtered-search answer-safety, the persisted store format and its staleness contract, embedding acquisition, and grounded-generation obligations — plus a normative embedding-provenance record (model, version, metric, normalisation, dimension) with a MUST-reject compatibility rule and a deterministic tie-break. Every normative assertion carries a testable ID; an informative report states which requirements the sparq build satisfies today.",
   },
+  {
+    slug: "trust-graph-authz",
+    source: "trust-graph-authz.typ",
+    title:
+      "Trust-Graph Authorisation for Solid/LWS: Pod-Side Admission of Certified Issuers",
+    shortName: "trust-graph-authz",
+    status: "unofficial",
+    date: "2026-07-12",
+    editors: "Jesse Wright · the sparq project",
+    blurb:
+      "Pod-side admission of certified issuers for Solid/LWS: a normative, fail-closed derivation from Control-gated anchor rules over signed, time-windowed, scope-attenuating certification edges to an effective trust-rule set, its five safety invariants (attenuation-only, no ambient edges, meta-scope non-escalation, deny-by-absence, strict additivity), and a stateless trust block on a WAC/ACP decision endpoint. Clear-path only — no ZK, privacy, or unlinkability claim; the signature estate is not externally audited (open gate sq-qhy4).",
+  },
+  // [GPT-5.6] sq-tag1q.4 — publish the greenfield SPARQL-CRDT proposal through /specs.
+  {
+    slug: "sparql-crdt",
+    source: "sparql-crdt.typ",
+    title: "SPARQL-CRDT: Conflict-Free Replicated RDF Datasets under SPARQL Update",
+    shortName: "sparql-crdt",
+    status: "unofficial",
+    date: "2026-07-15",
+    editors: "Jesse Wright · the sparq project",
+    blurb:
+      "A greenfield, implementation-ready proposal for named-graph-aware replicated RDF datasets: dotted add-wins observed-remove state, mandatory origin skolemisation, evaluate-at-origin SPARQL Update compilation, a canonical out-of-band delta journal, precisely scoped dataset convergence, and separate replica, delta-relay, and origin-evaluator conformance classes.",
+  },
 ];
 
 export function specBySlug(slug: string): Spec | undefined {

@@ -76,6 +76,35 @@ fn construct_derivation_emits_core_prov_shape() {
     assert!(lines.iter().any(|l| l.contains("#endedAtTime>")));
 }
 
+/// [GPT-5.6] sq-cg237: the direct accessor preserves configured order and agrees with
+/// every `prov:used` edge materialised for the derivation activity.
+#[test]
+fn construct_used_inputs_are_exposed_in_order_and_materialised() {
+    let source1 = NamedNode::new_unchecked("http://ex/source-1");
+    let source2 = NamedNode::new_unchecked("http://ex/source-2");
+    let inputs = [source1, source2];
+    let config = ProvConfig {
+        used: inputs.to_vec(),
+        clock: fixed_clock,
+        ..ProvConfig::default()
+    };
+    let derivation =
+        derive_construct(&g(), "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }", config).unwrap();
+
+    assert_eq!(derivation.used_inputs(), inputs.as_slice());
+    assert_eq!(derivation.used_inputs().len(), 2);
+
+    let activity = NamedOrBlankNode::NamedNode(derivation.activity().clone());
+    let provenance = derivation.prov_graph();
+    for input in &inputs {
+        assert!(provenance.iter().any(|triple| {
+            triple.subject == activity
+                && triple.predicate.as_str() == "http://www.w3.org/ns/prov#used"
+                && triple.object == Term::NamedNode(input.clone())
+        }));
+    }
+}
+
 #[test]
 fn prov_graph_is_valid_rdf_and_round_trips() {
     let d = derive_construct(
@@ -97,6 +126,35 @@ fn prov_graph_is_valid_rdf_and_round_trips() {
         .collect::<Result<_, _>>()
         .expect("emitted lineage must be well-formed N-Triples");
     assert_eq!(parsed.len(), d.prov_graph().len());
+}
+
+/// [GPT-5.6] sq-ijw35: the Derivation Turtle method preserves every provenance
+/// triple, and the generation edge uses the registered prefix.
+#[test]
+fn prov_turtle_round_trips_the_exact_derivation_graph() {
+    let d = derive_construct(
+        &g(),
+        "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+        cfg(),
+    )
+    .unwrap();
+
+    let turtle = d.prov_turtle();
+    assert!(
+        turtle.contains("prov:wasGeneratedBy"),
+        "expected the prefix-compacted generation predicate in {turtle}"
+    );
+
+    let parsed: Vec<_> = oxttl::TurtleParser::new()
+        .for_slice(turtle.as_bytes())
+        .collect::<Result<_, _>>()
+        .expect("emitted lineage must be well-formed Turtle");
+    let expected = d.prov_graph();
+    assert_eq!(parsed.len(), expected.len());
+    assert_eq!(
+        parsed.into_iter().collect::<HashSet<_>>(),
+        expected.into_iter().collect::<HashSet<_>>()
+    );
 }
 
 #[test]
@@ -360,4 +418,48 @@ fn minted_iri_has_exact_known_value() {
     );
     // Confirm the derived triples are the expected two age-renamed triples.
     assert_eq!(d.triples().len(), 2, "CONSTRUCT should produce two triples");
+}
+
+// ── sq-qcnn.39: mutation-kill tests — exact prov_graph triple counts for CONSTRUCT. [SONNET-4.6]
+
+/// `Derivation::prov_graph()` for a CONSTRUCT with 1 used input and no agent must emit
+/// exactly 9 triples: 2 type, 2 timing, rdfs:label, prov:value, wasGeneratedBy, used,
+/// wasDerivedFrom. Pinning the count kills mutations that drop any `push()` call.
+/// [SONNET-4.6] sq-qcnn.39
+#[test]
+fn construct_prov_graph_exact_triple_count() {
+    let q = "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }";
+    let d = derive_construct(&g(), q, cfg()).unwrap();
+    assert_eq!(
+        d.prov_graph().len(),
+        9,
+        "CONSTRUCT prov_graph with 1 input must emit exactly 9 triples; got {:?}",
+        d.prov_graph().len()
+    );
+}
+
+/// With an agent configured, one extra `wasAssociatedWith` triple is added, so the
+/// count is 10 (9 + 1). Confirms the agent branch emits exactly one triple.
+/// [SONNET-4.6] sq-qcnn.39
+#[test]
+fn construct_prov_graph_with_agent_exact_triple_count() {
+    let config = ProvConfig {
+        activity: Some(NamedNode::new_unchecked("http://ex/a")),
+        entity: Some(NamedNode::new_unchecked("http://ex/e")),
+        agent: Some(NamedNode::new_unchecked("http://ex/agent")),
+        used: vec![NamedNode::new_unchecked("http://ex/src")],
+        clock: fixed_clock,
+    };
+    let d = derive_construct(
+        &g(),
+        "PREFIX ex: <http://ex/> CONSTRUCT { ?s ex:years ?a } WHERE { ?s ex:age ?a }",
+        config,
+    )
+    .unwrap();
+    // 9 base + 1 wasAssociatedWith = 10
+    assert_eq!(
+        d.prov_graph().len(),
+        10,
+        "CONSTRUCT prov_graph with agent must emit 10 triples"
+    );
 }

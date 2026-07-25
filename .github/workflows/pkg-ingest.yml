@@ -1,0 +1,81 @@
+name: pkg-ingest
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/sparq-kb/ingest/**'
+      - 'crates/sparq-kb/ontology/**'
+      - 'crates/sparq-kb/shapes/**'
+      - '.beads/**'
+      - 'skills/**'
+  workflow_dispatch: {}
+
+concurrency:
+  group: pkg-ingest
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ingest:
+    name: pkg-ingest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+
+      - name: Run ingest
+        run: |
+          python3 crates/sparq-kb/ingest/ingest_pkg.py \
+              --beads .beads/issues.jsonl \
+              --skills-dir skills \
+              --findings-yamlld crates/sparq-kb/ingest/agents-findings.yaml.ld \
+              --out crates/sparq-kb/ingest/pkg-instances.ttl
+        shell: bash
+
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Build validate-pkg
+        run: |
+          cargo build --bin validate-pkg --features validate -p sparq-kb --release
+        shell: bash
+
+      - name: Validate ingest against SHACL shapes
+        run: |
+          ./target/release/validate-pkg crates/sparq-kb/ingest/pkg-instances.ttl
+        shell: bash
+
+      - name: Upload quarantine sidecar
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pkg-ingest-quarantine
+          path: crates/sparq-kb/ingest/pkg-instances.ttl.stale-edges.tsv
+          if-no-files-found: warn
+
+      - name: Upload ingested PKG
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pkg-ingested
+          path: crates/sparq-kb/ingest/pkg-instances.ttl
+          if-no-files-found: error

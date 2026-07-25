@@ -42,6 +42,103 @@
 use crate::source::{FederatedSource, FragPattern, FragTerm, PatternTerm, SubQuery};
 use sparq_fedplan::{Bgp, Term, TriplePattern};
 
+#[cfg(feature = "pattern_probe")]
+use crate::discovery::{PatternProbeOutcome, PatternProbeSession};
+#[cfg(feature = "pattern_probe")]
+use sparq_fedplan::{select_sources, PatternSources, SourceCandidate, SourceDescriptor};
+
+/// One endpoint and its optional served statistics for pattern-probed source selection.
+///
+/// The slice passed to [`select_sources_with_pattern_probes`] establishes source indices:
+/// item `i` here is source `i` in the returned [`PatternSources`]. A missing descriptor means
+/// capability/cardinality is unknown, never empty; the source starts with the configured
+/// uniform fallback and is removed only by a definitive ASK `false`. [GPT-5.6] sq-fx5id.
+#[cfg(feature = "pattern_probe")]
+#[derive(Debug, Clone, Copy)]
+pub struct ProbeSource<'a> {
+    /// Stable SPARQL endpoint URL used for pattern probes and cache identity.
+    pub endpoint: &'a str,
+    /// Served VoID/characteristic-set descriptor, when discovery found one.
+    pub descriptor: Option<&'a SourceDescriptor>,
+}
+
+/// Select sources and refine missing per-pattern statistics with bounded live probes.
+///
+/// Served VoID cardinalities always win and issue no request. When a source has no descriptor,
+/// or its descriptor lacks a cardinality for this pattern, the per-query `probe` session may:
+///
+/// * remove the source only after an exact ASK `false`;
+/// * replace the uniform fallback with a successful capped SELECT observation; or
+/// * retain the source and fallback unchanged on timeout, HTTP/parse error, inconsistency, or
+///   budget exhaustion.
+///
+/// This function changes source ranking/join order, never the set of answer-producing sources
+/// unless the endpoint itself definitively reported no match. [GPT-5.6] sq-fx5id.
+#[cfg(feature = "pattern_probe")]
+pub fn select_sources_with_pattern_probes(
+    bgp: &Bgp,
+    sources: &[ProbeSource<'_>],
+    probe: &mut PatternProbeSession<'_>,
+) -> Vec<PatternSources> {
+    bgp.patterns
+        .iter()
+        .enumerate()
+        .map(|(pattern_index, pattern)| {
+            let mut candidates = Vec::new();
+            for (source_index, source) in sources.iter().enumerate() {
+                let (baseline, has_served_cardinality) = match source.descriptor {
+                    Some(descriptor) => {
+                        let selected = select_sources(
+                            &Bgp::new(vec![pattern.clone()]),
+                            std::slice::from_ref(descriptor),
+                        );
+                        let Some(candidate) = selected[0].candidates.first() else {
+                            // The served capability descriptor definitively excludes this
+                            // source. Preserve fedplan's existing recall-safe prune.
+                            continue;
+                        };
+                        (
+                            candidate.estimated_cardinality,
+                            descriptor_has_cardinality(pattern, descriptor),
+                        )
+                    }
+                    None => (probe.config().fallback_cardinality, false),
+                };
+
+                let outcome = if has_served_cardinality {
+                    PatternProbeOutcome::Unknown
+                } else {
+                    probe.probe(source.endpoint, pattern)
+                };
+                match outcome {
+                    PatternProbeOutcome::Empty => {}
+                    PatternProbeOutcome::Cardinality { observed, .. } => {
+                        candidates.push(SourceCandidate {
+                            source: source_index,
+                            estimated_cardinality: observed as f64,
+                        });
+                    }
+                    PatternProbeOutcome::Unknown => candidates.push(SourceCandidate {
+                        source: source_index,
+                        estimated_cardinality: baseline,
+                    }),
+                }
+            }
+            PatternSources {
+                pattern: pattern_index,
+                candidates,
+            }
+        })
+        .collect()
+}
+
+#[cfg(feature = "pattern_probe")]
+fn descriptor_has_cardinality(tp: &TriplePattern, descriptor: &SourceDescriptor) -> bool {
+    tp.predicate_iri()
+        .map(|predicate| descriptor.predicate(predicate).is_some())
+        .unwrap_or(descriptor.total_triples > 0)
+}
+
 /// An error from resolving a plan index — the plan referenced an out-of-range
 /// pattern/source for the BGP / adapter slice this resolver carries. These are
 /// *programmer* errors (a plan and a resolver built from different inputs), surfaced
@@ -84,7 +181,7 @@ impl std::error::Error for ResolveError {}
 ///   ([`source`](Self::source)).
 ///
 /// The contract the rest of federation relies on: the `descriptors` slice handed to
-/// [`select_sources`](sparq_fedplan::select_sources) / [`plan_bgp`](sparq_fedplan::plan_bgp)
+/// [`select_sources`] / [`plan_bgp`](sparq_fedplan::plan_bgp)
 /// and the `adapters` slice handed here are in **the same order** — descriptor `i`
 /// describes the source adapter `i`. The resolver does not re-derive that order; it is the
 /// caller's single source of truth, and every lookup is range-checked so a mismatched plan
@@ -161,22 +258,32 @@ pub fn lower_leaf(tp: &TriplePattern) -> SubQuery {
          sparq-fedplan must never produce such a pattern"
     );
     let project = pattern_vars(tp);
-    let s = render_term(&tp.subject);
-    let p = render_term(&tp.predicate);
-    let o = render_term(&tp.object);
+    let pattern = render_pattern_clause(tp);
     let sparql = if project.is_empty() {
         // Fully-bound pattern: a 1-row existence probe (kept as a SELECT so the
         // interpreter's relation model is uniform — never an ASK boolean).
-        format!("SELECT * WHERE {{ {} {} {} }} LIMIT 1", s, p, o)
+        format!("SELECT * WHERE {{ {pattern} }} LIMIT 1")
     } else {
         let proj = project
             .iter()
             .map(|v| format!("?{}", v))
             .collect::<Vec<_>>()
             .join(" ");
-        format!("SELECT {} WHERE {{ {} {} {} }}", proj, s, p, o)
+        format!("SELECT {proj} WHERE {{ {pattern} }}")
     };
     SubQuery { sparql, project }
+}
+
+/// Render one triple pattern's body without the surrounding query form. Shared by normal leaf
+/// lowering and the opt-in pattern probe so the two paths cannot disagree about term escaping.
+/// [GPT-5.6] sq-fx5id.
+pub(crate) fn render_pattern_clause(tp: &TriplePattern) -> String {
+    format!(
+        "{} {} {}",
+        render_term(&tp.subject),
+        render_term(&tp.predicate),
+        render_term(&tp.object)
+    )
 }
 
 /// The variables a pattern produces, de-duplicated in position order (subject, predicate,
@@ -443,7 +550,10 @@ mod tests {
             iri("http://ex/bob"),
         );
         let sub = lower_leaf(&tp);
-        assert!(sub.project.is_empty(), "fully bound pattern projects nothing");
+        assert!(
+            sub.project.is_empty(),
+            "fully bound pattern projects nothing"
+        );
         assert_eq!(
             sub.sparql,
             "SELECT * WHERE { <http://ex/alice> <http://ex/knows> <http://ex/bob> } LIMIT 1"
@@ -482,9 +592,22 @@ mod tests {
             iri("http://ex/bob"),
         );
         let pat = lower_leaf_fragment(&tp);
-        assert_eq!(pat.subject, PatternTerm::Bound(FragTerm::Iri("http://ex/alice".into())));
-        assert_eq!(pat.predicate, PatternTerm::Bound(FragTerm::Iri("http://ex/knows".into())));
-        assert_eq!(pat.object, PatternTerm::Bound(FragTerm::Iri("http://ex/bob".into())));
-        assert_eq!(pat.vars(), Vec::<String>::new(), "fully bound pattern has no variables");
+        assert_eq!(
+            pat.subject,
+            PatternTerm::Bound(FragTerm::Iri("http://ex/alice".into()))
+        );
+        assert_eq!(
+            pat.predicate,
+            PatternTerm::Bound(FragTerm::Iri("http://ex/knows".into()))
+        );
+        assert_eq!(
+            pat.object,
+            PatternTerm::Bound(FragTerm::Iri("http://ex/bob".into()))
+        );
+        assert_eq!(
+            pat.vars(),
+            Vec::<String>::new(),
+            "fully bound pattern has no variables"
+        );
     }
 }

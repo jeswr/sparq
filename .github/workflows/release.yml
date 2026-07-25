@@ -112,14 +112,21 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Install Rust (stable)
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
       - name: Install cargo-cyclonedx
-        uses: taiki-e/install-action@9bcaee1dcae34154180f412e2fa69355a7cda9f6 # v2.82.6
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2.83.4
         with:
           tool: cargo-cyclonedx
       # [OPUS-4.8] sq-toze.27 (GS-3): Node for the JS/npm SBOM of the published WASM client.
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
       # [OPUS-4.8] sq-gl3cf: pass VERSION explicitly. gen-sbom-vex.sh honors $VERSION (falling
@@ -129,13 +136,12 @@ jobs:
         env:
           VERSION: ${{ needs.setup.outputs.version }}
         run: scripts/gen-sbom-vex.sh
-      # [OPUS-4.8] sq-toze.27 (GS-3): per-release CycloneDX SBOM for the published npm
-      # client (`js/` = @jeswr/sparq). Writes sbom/sparq-js-<ver>.sbom.cdx.json (runtime
-      # tree) + sbom/sparq-js-dev-<ver>.sbom.cdx.json (full build tree) into the same
-      # sbom/ dir, so they are attested + attached + checksummed alongside the Rust SBOMs.
+      # [OPUS-4.8] sq-toze.27 / [GPT-5.6] sq-epbw4: per-release CycloneDX SBOMs for
+      # `@jeswr/sparq` and the shared `@sparq/client` code bundled into browser artifacts.
+      # Runtime + full build trees land in sbom/, so the attestation glob below covers all four.
       # [OPUS-4.8] sq-gl3cf: gen-js-sbom.sh ALSO reads GITHUB_REF_NAME for the version-stamped
       # filenames, so it needs the same VERSION thread for the dispatch path to name JS SBOMs right.
-      - name: Generate per-release JS/npm SBOM (published WASM client)
+      - name: Generate per-release JS/npm SBOMs (WASM + shared browser clients)
         env:
           VERSION: ${{ needs.setup.outputs.version }}
         run: scripts/gen-js-sbom.sh
@@ -151,7 +157,65 @@ jobs:
           path: sbom/*.json
           if-no-files-found: error
 
-  # ---- 1c. Tauri desktop GUI bundles (UNSIGNED) ----
+  # ---- 1c. per-release served-surface SPARQL 1.1 Protocol conformance report ----
+  # [OPUS-4.8] sq-ro6if (PSS #1415/#1478): publish the MACHINE-READABLE served-surface conformance
+  # report for THIS release commit and attach it to the GitHub Release, so an HTTP consumer (e.g.
+  # prod-solid-server, which consumes only the served /sparql surface) can trust the served WIRE
+  # contract per released tag without re-verifying it against every SHA. Built by re-running the
+  # EXISTING served-surface lanes (sq-jaj38 http-protocol + sq-1uuxz Service-Description/GSP)
+  # in-process via the `served-conformance-report` binary — NO new conformance tests, publication
+  # only. FAIL-CLOSED: the binary exits non-zero (failing this job, blocking the whole release) if a
+  # lane produced zero assertions (the vacuous-artifact class), has any genuine failure, or
+  # regressed below its ratchet floor. SLSA build-provenance attested + uploaded exactly like the
+  # SBOM/VEX above, so the `release` job folds it into SHA256SUMS + the GitHub Release for free.
+  served-conformance:
+    name: served-surface conformance report
+    # [OPUS-4.8] sq-ro6if: needs the resolved version so the per-release report filename carries the
+    # release tag (mirrors the SBOM job's VERSION thread; on dispatch GITHUB_REF_NAME is the branch).
+    needs: setup
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Rust (preinstalled stable)
+        # [FABLE-5] CI-economy (2026-07-18 directive): the ubuntu runner image
+        # ships a rustup stable toolchain; the SHA-pinned action's `rustup
+        # toolchain install stable` re-downloads the whole toolchain whenever
+        # the image lags the newest release. Use the preinstalled one —
+        # `rustup default`/`component add` never trigger a toolchain download.
+        run: |
+          rustup default stable
+          rustup show active-toolchain
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - name: Emit served-surface conformance report (JSON, fail-closed)
+        env:
+          VERSION: ${{ needs.setup.outputs.version }}
+          SPARQ_CONFORMANCE_COMMIT: ${{ github.sha }}
+          SPARQ_CONFORMANCE_VERSION: ${{ needs.setup.outputs.version }}
+          SPARQ_CONFORMANCE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p conformance
+          # Debug (no --release): the report is a quick in-process run against the loopback server,
+          # so optimisation buys nothing and a debug compile is faster to produce the artifact.
+          cargo run -p sparq-conformance \
+            --features http-protocol,federation-descriptors \
+            --bin served-conformance-report -- \
+            --out "conformance/served-conformance-${VERSION}.json"
+      - name: Attest build provenance (served-surface conformance report)
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: conformance/served-conformance-*.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: served-conformance
+          path: conformance/served-conformance-*.json
+          if-no-files-found: error
+
+  # ---- 1d. Tauri desktop GUI bundles (UNSIGNED) ----
   # [OPUS-4.8] sq-8n1c: build the cross-platform Tauri 2 desktop INSTALLERS — .dmg (+ .app)
   # on macOS, .msi + NSIS .exe on Windows, .deb + .AppImage on Linux — as ADDITIONAL release
   # artifacts on the same desktop platforms the `package` matrix already covers, per the GUI
@@ -268,7 +332,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
 
@@ -459,7 +523,7 @@ jobs:
     # [OPUS-4.8] sq-gl3cf: `setup` added so the Release attaches to the resolved tag (tag_name
     # below) on BOTH triggers — on dispatch, action-gh-release's default tag_name is `github.ref`,
     # which is the BRANCH, so we must override it explicitly.
-    needs: [setup, package, sbom, gui-bundle]
+    needs: [setup, package, sbom, gui-bundle, served-conformance]
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the release + upload assets — the only write this pipeline needs
@@ -475,10 +539,16 @@ jobs:
         with:
           name: sbom-vex
           path: assets
+      # [OPUS-4.8] sq-ro6if (PSS #1415/#1478): pull the served-surface conformance report in
+      # alongside the archives + SBOM so it is covered by SHA256SUMS and attached to the release.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: served-conformance
+          path: assets
       - name: Generate SHA256SUMS
         run: cd assets && sha256sum -- * > SHA256SUMS
       - name: Create release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           # [OPUS-4.8] sq-gl3cf: attach to the RESOLVED tag. The action defaults tag_name to
           # `github.ref`, which on a workflow_dispatch is the branch (wrong) — pin it to the
@@ -496,18 +566,22 @@ jobs:
           body: |
             See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ needs.setup.outputs.version }}/CHANGELOG.md) for the curated changelog.
 
-            `SHA256SUMS` covers every attached archive plus the CycloneDX SBOM + VEX: `shasum -a 256 -c SHA256SUMS`.
+            `SHA256SUMS` covers every attached archive plus the CycloneDX SBOM + VEX and the served-surface conformance report: `shasum -a 256 -c SHA256SUMS`.
+
+            **Served-surface SPARQL 1.1 Protocol conformance.** This release attaches a machine-readable conformance report (`served-conformance-${{ needs.setup.outputs.version }}.json`) recording what the *served HTTP surface* (`sparq-server`'s `/sparql`) passes at this exact commit — the SPARQL 1.1 Protocol lane (GET/POST query+update, the QUERY method, dataset overrides, SRJ/SRX/CSV/TSV negotiation, status codes) and the Service-Description + Graph-Store-Protocol lane, with per-assertion pass/divergence/fail outcomes, per-suite counts + ratchet floors, and provenance (commit, date, CI run). Counts are conformance facts; documented divergences are reported separately and are never summed into the pass count. It is generated fail-closed (a vacuous, failing, or below-floor run blocks the release). See the [served-surface conformance page](https://github.com/${{ github.repository }}/blob/${{ needs.setup.outputs.version }}/site/src/app/assurance/served-conformance/page.tsx) for the rendered view.
 
             **Desktop GUI bundles (UNSIGNED).** This release also includes cross-platform [sparq GUI](https://github.com/${{ github.repository }}/tree/${{ needs.setup.outputs.version }}/gui) desktop installers (`sparq-gui_${{ needs.setup.outputs.version }}_*`): macOS `.dmg`, Windows `.msi` + NSIS `.exe`, and Linux `.deb` + `.AppImage`. **These bundles are NOT code-signed or notarized.** On macOS, Gatekeeper will quarantine them; on Windows, SmartScreen will warn — see [/download](https://github.com/${{ github.repository }}/tree/${{ needs.setup.outputs.version }}/gui) for the install bypass instructions (Gatekeeper/SmartScreen). OS-level code-signing (Apple Developer ID notarization + Windows Authenticode) requires maintainer-held credentials and is tracked separately — until then, treat the GUI bundles as developer/test installs. The SLSA attestation below proves *who built* each bundle (build provenance); it is not a substitute for OS code-signing. (No `win-arm64` GUI installer yet — the Tauri bundler cannot cross-bundle it from the x64 Windows runner; no mobile app bundles yet.)
 
-            **Supply chain:** each release carries a CycloneDX SBOM per binary (`*-${{ needs.setup.outputs.version }}.sbom.cdx.json`, including the GUI shell `sparq-gui-${{ needs.setup.outputs.version }}.sbom.cdx.json`), a CycloneDX SBOM for the published npm/WASM client (`sparq-js-${{ needs.setup.outputs.version }}.sbom.cdx.json` runtime tree + `sparq-js-dev-${{ needs.setup.outputs.version }}.sbom.cdx.json` full build tree), and a VEX (`sparq-${{ needs.setup.outputs.version }}.vex.cdx.json`) stating the exploitability of every advisory the dependency policy ignores. All artifacts (archives, GUI bundles, SBOMs, VEX) are SLSA build-provenance attested — verify with `gh attestation verify <file> --repo ${{ github.repository }}`.
+            **Supply chain:** each release carries a CycloneDX SBOM per binary (`*-${{ needs.setup.outputs.version }}.sbom.cdx.json`, including the GUI shell `sparq-gui-${{ needs.setup.outputs.version }}.sbom.cdx.json`), runtime + full-build CycloneDX SBOMs for the published npm/WASM client (`sparq-js-*`) and shared browser client (`sparq-js-client-*`), and a VEX (`sparq-${{ needs.setup.outputs.version }}.vex.cdx.json`) stating the exploitability of every advisory the dependency policy ignores. All artifacts (archives, GUI bundles, SBOMs, VEX) are SLSA build-provenance attested — verify with `gh attestation verify <file> --repo ${{ github.repository }}`.
           fail_on_unmatched_files: true
 
   # ---- 3. server container -> ghcr.io ----
   # Pushes ghcr.io/<owner>/sparq-server using the workflow's own GITHUB_TOKEN — ghcr needs no
-  # extra secrets. This workflow only runs on tags, so every run pushes; a maintainer who does
-  # not want container publishing can delete this job (or add `if: false`) without affecting
-  # the binaries/release jobs above.
+  # extra secrets. This workflow only runs on `v*` tag pushes and manual `workflow_dispatch`
+  # (both deliberate releasing acts — see the trigger notes at the top), so every run pushes,
+  # including dispatch-driven developer/test releases; a maintainer who does not want container
+  # publishing can delete this job (or add `if: false`) without affecting the binaries/release
+  # jobs above.
   docker:
     name: build + push container (ghcr.io)
     runs-on: ubuntu-latest
@@ -524,16 +598,22 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+      # [GPT-5.6] sq-fvzi6: register the arm64 binfmt emulator before Buildx so the final
+      # release push can build both target platforms on this native amd64 runner.
+      - name: Set up QEMU for arm64
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - name: Log in to ghcr.io
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Image metadata (tags + OCI labels from the git tag)
         id: meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository_owner }}/sparq-server
           tags: |
@@ -545,11 +625,14 @@ jobs:
       # boot (the sq-n6rv regression) can never reach ghcr.io. The build is cached to GHA, so
       # the subsequent push step is a cache hit (it does not rebuild from scratch).
       - name: Build image for smoke test (load locally)
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           load: true
           push: false
+          # [GPT-5.6] sq-fvzi6: keep the pre-push runtime and Trivy gate native/loadable;
+          # the final step reuses this amd64 cache and adds the arm64 descriptor.
+          platforms: linux/amd64
           tags: sparq-server:smoke
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -594,15 +677,18 @@ jobs:
           trivyignores: .trivyignore
       - name: Upload Trivy SARIF to code-scanning
         if: always()
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4.36.2
+        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
         with:
           sarif_file: trivy-results.sarif
           category: trivy-release-image
       - name: Build and push
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           push: true
+          # [GPT-5.6] sq-fvzi6: one OCI image index per metadata tag, with both supported
+          # runtime descriptors. Buildx pushes the index only after both builds succeed.
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

@@ -85,6 +85,23 @@ pub fn is_inline(id: Id) -> bool {
     id >= INLINE_BASE && id - INLINE_BASE <= INLINE_MAX
 }
 
+/// [FABLE-5] (sq-1ivw7) Whether `id` denotes an RDF LITERAL, given the dictionary that owns
+/// it. An inline-integer id is always an `xsd:integer` literal; any other id is classified by
+/// its stored record (`TermParts::Lit`). `NO_ID` is not a literal. This is the id-level term-kind
+/// predicate the engine's predicate-range non-literal inference is built on: an object column of a
+/// constant predicate is provably non-literal for a snapshot iff NONE of that predicate's object
+/// ids satisfy this. IRIs, blank nodes and triple terms all return `false`.
+#[inline]
+pub fn is_literal_id(dict: &Dict, id: Id) -> bool {
+    if id == NO_ID {
+        return false;
+    }
+    if is_inline(id) {
+        return true;
+    }
+    matches!(dict.term_parts(id), TermParts::Lit { .. })
+}
+
 /// The inline id of an integer VALUE in the inline range — the id the canonical
 /// `xsd:integer` literal of that value interns/looks up to. The engine's fast path for
 /// resolving COMPUTED (BIND/aggregate) integer values to ids without constructing a
@@ -956,25 +973,155 @@ fn validate_dict_bytes(
 // bounded symbolic byte domain — it always returns `Ok`/`Err`, never panics, never reads out
 // of bounds, never hits UB — for EVERY hostile input in that domain.
 //
-// UNTESTED-HERE: Kani is not installed in the authoring environment, so this harness has NOT
-// been run; it is written against Kani's documented API (`kani::any()`, `kani::assume()`,
-// `#[kani::proof]`, `#[kani::unwind]`) and is VALIDATED ON THE FIRST CI RUN of the `kani`
-// lane. It is `#[cfg(kani)]`, so the normal `cargo build`/`clippy`/`test` never compile it.
+// [SONNET-4.6] sq-sqtk2.2 — extended with PROVED (complete-domain) Kani harnesses for the
+// inline-id round-trip and four-region id-partition disjointness properties (§3.3 C-1 of
+// research/mechanized-proof-program.md). These prove purely numeric invariants of the `u32`
+// id space; CBMC models each type as a bit-vector and explores the full symbolic domain, so
+// "complete-domain" is a machine-verified claim (not just a bound). Unlike the mmap validator
+// harnesses below, these do NOT require the `mmap` feature and run under both
+// `cargo kani -p sparq-core` and `cargo kani -p sparq-core --features mmap`.
+//
+// TESTED in-worktree during sq-sqtk2.2 (see PR body for run log + mutation spot-check).
 // The `kani` cfg is registered in crates/sparq-core/Cargo.toml [lints.rust] so `-D warnings`
 // (unexpected_cfgs) is happy on the normal build.
-#[cfg(all(kani, feature = "mmap"))]
+#[cfg(kani)]
 mod kani_proofs {
     use super::*;
+
+    // ---- [SONNET-4.6] sq-sqtk2.2 — inline-id round-trip + id-partition disjointness ----
+    //
+    // Both harnesses are pure integer arithmetic — no loops, no heap, no strings. CBMC
+    // models `u32` and `i64` as bit-vectors and exhausts the full symbolic domain; no
+    // `#[kani::unwind]` annotation is needed (there is nothing to unroll).
+
+    /// PROPERTY — encode half of the inline-id round-trip: `inline_id_of_int(v)` encodes
+    /// every in-range value to a distinct inline id from which the value is exactly
+    /// recoverable by subtracting `INLINE_BASE`.
+    ///
+    /// Domain coverage: **complete** — `v` is any `u32`; the `assume` restricts to the
+    /// inline sub-domain `[0, INLINE_MAX]`, so CBMC exhausts the whole 30-bit value space.
+    /// Together with `inline_id_out_of_domain_is_none` this covers the full `Option` spec.
+    #[kani::proof]
+    fn inline_id_round_trip() {
+        let v: u32 = kani::any();
+        kani::assume(v <= INLINE_MAX);
+        let id = inline_id_of_int(v as i64)
+            .expect("inline_id_of_int must return Some for every v in [0, INLINE_MAX]");
+        assert!(is_inline(id), "inline_id_of_int result must satisfy is_inline");
+        assert_eq!(
+            id - INLINE_BASE,
+            v,
+            "id minus INLINE_BASE must recover the original value"
+        );
+    }
+
+    /// PROPERTY — complement half of the inline-id spec: `inline_id_of_int(v)` returns
+    /// `None` for every value outside `[0, INLINE_MAX]`.
+    ///
+    /// Domain coverage: **complete** — `v` is any `i64`; the `assume` restricts to the
+    /// complement of the inline domain (negative values and values above `INLINE_MAX`).
+    #[kani::proof]
+    fn inline_id_out_of_domain_is_none() {
+        let v: i64 = kani::any();
+        kani::assume(v < 0 || v > INLINE_MAX as i64);
+        assert!(
+            inline_id_of_int(v).is_none(),
+            "inline_id_of_int must return None for values outside [0, INLINE_MAX]"
+        );
+    }
+
+    /// PROPERTY — four-region id-partition disjointness: the four named regions of the
+    /// `u32` id space are pairwise disjoint and together exhaustive over all `u32` values.
+    ///
+    /// Regions (per the `INLINE_BASE` / `INLINE_MAX` partition constants):
+    ///   - `NO_ID`:      `{0}`
+    ///   - dict:         `[1, INLINE_BASE)` — non-inline dictionary ids
+    ///   - inline:       `[INLINE_BASE, INLINE_BASE + INLINE_MAX]` — `is_inline` ids
+    ///   - local-vocab:  `(INLINE_BASE + INLINE_MAX, u32::MAX]` — engine-private ids
+    ///
+    /// Domain coverage: **complete** — `id` is any `u32` bit-vector; CBMC exhausts the
+    /// full 2^32 symbolic value space. Each `in_*` predicate is stated INDEPENDENTLY
+    /// (not as a complement), so disjointness and exhaustiveness are non-trivial checks.
+    #[kani::proof]
+    fn id_partition_disjoint() {
+        let id: u32 = kani::any();
+        let in_no_id       = id == NO_ID;
+        let in_dict        = id > NO_ID && id < INLINE_BASE;
+        let in_inline      = is_inline(id);
+        let in_local_vocab = id > INLINE_BASE + INLINE_MAX;
+        // Disjointness: every pair is mutually exclusive.
+        assert!(!(in_no_id && in_dict),         "NO_ID region overlaps dict region");
+        assert!(!(in_no_id && in_inline),       "NO_ID region overlaps inline region");
+        assert!(!(in_no_id && in_local_vocab),  "NO_ID region overlaps local-vocab region");
+        assert!(!(in_dict && in_inline),        "dict region overlaps inline region");
+        assert!(!(in_dict && in_local_vocab),   "dict region overlaps local-vocab region");
+        assert!(!(in_inline && in_local_vocab), "inline region overlaps local-vocab region");
+        // Exhaustiveness: every id belongs to at least one region (combined with
+        // disjointness this gives exactly one).
+        assert!(
+            in_no_id || in_dict || in_inline || in_local_vocab,
+            "id does not belong to any region (partition is not exhaustive)"
+        );
+    }
+
+    /// DOMAIN-COVERAGE SELF-CHECK (the sq-og8u8 anti-vacuity pattern). Lesson of sq-sqtk2.1
+    /// (2026-07-04): a bound can SILENTLY prune the very inputs a harness means to cover, so
+    /// it passes VACUOUSLY. The three id harnesses above `assume`-restrict a symbolic id/value
+    /// to ONE partition sub-domain; a disjointness or round-trip proof over a sub-domain that
+    /// turned out EMPTY (or collapsed to fewer than four regions) would be vacuously true. This
+    /// self-check pins that every region is genuinely NON-EMPTY and the boundaries are sharp —
+    /// concrete arithmetic over the partition constants (no loop, no unwind, so nothing here
+    /// can itself be pruned) — plus two `kani::cover!`s proving the `inline_id_round_trip`
+    /// assume-domain (`v <= INLINE_MAX`) actually REACHES both its adversarial boundary
+    /// (`INLINE_MAX`) and zero. Runs in BOTH feature states (no `mmap`). [OPUS-4.8] sq-og8u8
+    #[kani::proof]
+    fn domain_id_partition_regions_are_all_nonempty() {
+        // Every one of the four regions has at least one member — else a "four-region"
+        // disjointness/exhaustiveness proof is secretly a three- or two-region one.
+        assert!(NO_ID == 0, "the NO_ID region is the singleton {0}");
+        assert!(INLINE_BASE > 1, "the dict region [1, INLINE_BASE) is non-empty");
+        assert!(INLINE_MAX > 0, "the inline region [INLINE_BASE, INLINE_BASE + INLINE_MAX] is non-empty");
+        // The local-vocab region (INLINE_BASE + INLINE_MAX, u32::MAX] is non-empty: its low
+        // bound is strictly below u32::MAX. Widen to u64 so the sum cannot wrap.
+        assert!(
+            u64::from(INLINE_BASE) + u64::from(INLINE_MAX) < u64::from(u32::MAX),
+            "the local-vocab region above the inline range is non-empty"
+        );
+        // Sharp boundaries: the ends of the inline region are inline; the ids just outside
+        // it (the last dict id, the first local-vocab id) are NOT.
+        assert!(is_inline(INLINE_BASE) && is_inline(INLINE_BASE + INLINE_MAX));
+        assert!(!is_inline(INLINE_BASE - 1), "the last dict id must not be classed inline");
+        assert!(
+            !is_inline(INLINE_BASE + INLINE_MAX + 1),
+            "the first local-vocab id must not be classed inline"
+        );
+
+        // The `inline_id_round_trip` assume-domain reaches BOTH ends — its adversarial
+        // boundary `INLINE_MAX` is not silently excluded by the `assume`.
+        let v: u32 = kani::any();
+        kani::assume(v <= INLINE_MAX);
+        kani::cover!(v == INLINE_MAX, "the round-trip domain reaches its inline boundary");
+        kani::cover!(v == 0, "the round-trip domain reaches zero");
+    }
+
+    // ---- [OPUS-4.8] sq-ueuk — mmap dict validator bounded proofs ----
+    //
+    // These harnesses require the `mmap` feature (they call `validate_dict_bytes`, which
+    // is `#[cfg(feature = "mmap")]`). They run only when both `kani` AND `mmap` are active,
+    // i.e. under `cargo kani -p sparq-core --features mmap`.
 
     /// Symbolic buffer ceiling. The four byte regions are independently symbolic but length-
     /// coupled to `len` by the early size checks, so a small `len` plus a small blob exercises
     /// every branch — the size-arithmetic rejections, the record parse + table-index range
     /// checks, the triple-term component/kind checks, and the hashid range loop — while
     /// keeping the bounded exploration tractable.
+    #[cfg(feature = "mmap")]
     const MAX_LEN: usize = 2; // up to 2 terms
+    #[cfg(feature = "mmap")]
     const MAX_BLOB: usize = 24; // a couple of small records / one triple term (1+12) + slack
 
     /// Fills a `Vec<u8>` of a symbolic length `<= cap` with symbolic bytes.
+    #[cfg(feature = "mmap")]
     fn symbolic_bytes(cap: usize) -> Vec<u8> {
         let n: usize = kani::any();
         kani::assume(n <= cap);
@@ -989,6 +1136,7 @@ mod kani_proofs {
     /// term count up to the bounds, with empty prefix/datatype tables. Empty tables make every
     /// non-zero IRI-prefix / literal-datatype index out of range (so that rejection branch is
     /// exercised) and keep the symbolic surface minimal.
+    #[cfg(feature = "mmap")]
     #[kani::proof]
     #[kani::unwind(28)] // > MAX_BLOB so every bounded record/slice loop fully unrolls.
     fn validate_dict_bytes_never_panics() {
@@ -1009,6 +1157,7 @@ mod kani_proofs {
     /// the size checks spends Kani's budget on the loop/arithmetic logic the corpus is least
     /// likely to have exhausted, with one prefix + one datatype so the in-range index branch
     /// is also taken.
+    #[cfg(feature = "mmap")]
     #[kani::proof]
     #[kani::unwind(28)]
     fn validate_dict_bytes_sized_tail_never_panics() {
@@ -1029,6 +1178,29 @@ mod kani_proofs {
         let prefixes: [Box<str>; 1] = [Box::from("p")];
         let datatypes = [NamedNode::new_unchecked("http://example.org/dt")];
         let _ = validate_dict_bytes(&blob, &offsets, &hashes, &hashids, LEN, &prefixes, &datatypes);
+    }
+
+    /// DOMAIN-COVERAGE SELF-CHECK (the sq-og8u8 anti-vacuity pattern) for the two mmap
+    /// validator totality harnesses above. `..._never_panics` proves `validate_dict_bytes`
+    /// is TOTAL (returns `Ok`/`Err`, never panics/OOB/UB) over the bounded symbolic domain —
+    /// but that is worthless if the ACCEPT path is never reachable within the bounds and every
+    /// symbolic input trips a size check before any record is parsed (a VACUOUS "never panics
+    /// on the tail"). This pins that the bounded domain genuinely CONTAINS an accepted dict:
+    /// the empty dict (`len == 0`, empty tables — in the harnesses' `len <= MAX_LEN` domain)
+    /// validates `Ok`. Concrete, so it cannot itself be pruned. The DEEPER accept path (a
+    /// `>= 1`-record dict that exercises the record-parse / triple-kind / hashid-range loops
+    /// to an `Ok`) is pinned by the unit test
+    /// [`validate_dict_bytes_seam_accepts_valid_and_rejects_corruption`], which builds a REAL
+    /// valid dict and asserts `Ok` — so the symbolic totality proof is non-vacuous on both the
+    /// shallow (here) and the deep (that unit test) accept paths. [OPUS-4.8] sq-og8u8
+    #[cfg(feature = "mmap")]
+    #[kani::proof]
+    fn domain_dict_validator_accepts_the_empty_dict() {
+        // len == 0 lies in the harnesses' `len <= MAX_LEN` domain and every table is empty.
+        assert!(
+            validate_dict_bytes(&[], &[], &[], &[], 0, &[], &[]).is_ok(),
+            "the empty dict must validate — else the accept path is vacuous"
+        );
     }
 }
 
@@ -1440,6 +1612,29 @@ impl Dict {
         }
     }
 
+    /// [FABLE-5] sq-7d3dj.30.21 — if `id` is a PLAIN `xsd:string` literal (datatype exactly
+    /// `xsd:string`, NO language tag), returns its value as a ZERO-COPY `&str` borrowed from
+    /// the record store; otherwise `None`. A single-probe eligibility test AND value accessor
+    /// for the engine's lazy top-k ORDER-BY string key — it matches EXACTLY the engine's
+    /// `LiteralKind::String` set (no lang tag + `datatype == xsd:string`), so routing such an
+    /// id to a zero-allocation id-carrying sort cell preserves the SPARQL `value()`-order
+    /// exactly (a plain string sorts by its value bytes). Inline-integer ids are numeric
+    /// literals, so they return `None` (no allocation, no reconstruction, unlike `term(id)`).
+    #[inline]
+    pub fn plain_string_value(&self, id: Id) -> Option<&str> {
+        if is_inline(id) {
+            return None;
+        }
+        match self.record(id) {
+            StoredRef::Lit { value, datatype, lang: None }
+                if self.datatypes[datatype as usize].as_ref() == xsd::STRING =>
+            {
+                Some(value)
+            }
+            _ => None,
+        }
+    }
+
     /// Returns the term for an id. Inline-integer ids are decoded directly; others are
     /// reconstructed from the compact record store (panics on an invalid index — ids
     /// come from the store).
@@ -1554,6 +1749,192 @@ impl Dict {
             remap.push(id);
         }
         remap
+    }
+
+    /// [GPT-5.6] (sq-eiv) Consumes this dictionary and builds a dense dictionary containing
+    /// only the real ids for which `retain` returns `true`. Returns the rebuilt dictionary
+    /// and an old-to-new remap where `remap[(old_id - 1) as usize]` is `NO_ID` for a dropped
+    /// term. Inline integers are not dictionary records, are not passed to `retain`, and keep
+    /// their value-carrying id when remapping payloads.
+    ///
+    /// RDF 1.2 triple terms make the filter dependency-aware: retaining a triple term also
+    /// retains its subject, predicate, object, and any recursively nested triple-term
+    /// components. Their remap entries are therefore populated even when `retain` returned
+    /// `false` for those component ids.
+    ///
+    /// The rebuild never materialises an `oxrdf::Term` and never re-interns survivors. It moves
+    /// the compact `Stored` payloads out of an arena dictionary (preserving their string
+    /// allocations), or copies compact records directly from a blob, mmap, or frozen base, then
+    /// rewrites only metadata and triple-component ids before building the lookup table once.
+    /// Prefix and datatype tables are filtered too, so dead metadata does not accumulate.
+    pub fn rebuild_filtered(mut self, mut retain: impl FnMut(Id) -> bool) -> (Dict, Vec<Id>) {
+        let old_len = self.len();
+
+        // First select the caller-visible survivors. The closure runs exactly once for each
+        // real dictionary id; dependency expansion below never calls it a second time.
+        let mut retained = vec![false; old_len];
+        let mut pending = Vec::new();
+        for (slot, retained_slot) in retained.iter_mut().enumerate() {
+            let id = slot as Id + 1;
+            if retain(id) {
+                *retained_slot = true;
+                pending.push(id);
+            }
+        }
+
+        // A structural triple record cannot outlive its components. Walk a small explicit
+        // worklist rather than reconstructing Terms (and rather than assuming only one nesting
+        // level). Valid dictionaries always reference earlier ids, but the visited bit also
+        // makes this total for a cyclic record forged by an in-crate producer.
+        while let Some(id) = pending.pop() {
+            let StoredRef::Triple(ids) = self.record(id) else {
+                continue;
+            };
+            for child in ids {
+                if is_inline(child) || child == NO_ID {
+                    continue;
+                }
+                let child_slot = (child - 1) as usize;
+                if child_slot < retained.len() && !retained[child_slot] {
+                    retained[child_slot] = true;
+                    pending.push(child);
+                }
+            }
+        }
+
+        // Dense ids preserve old-id order. That keeps every well-formed triple's children before
+        // the triple itself and makes rewriting structural component ids a direct table lookup.
+        let mut next_id: Id = 1;
+        let remap: Vec<Id> = retained
+            .iter()
+            .map(|&keep| {
+                if keep {
+                    let id = next_id;
+                    next_id += 1;
+                    id
+                } else {
+                    NO_ID
+                }
+            })
+            .collect();
+        let retained_len = (next_id - 1) as usize;
+
+        // Identify metadata referenced by survivors before consuming any arena fields.
+        let mut used_prefixes = vec![false; self.prefixes.len()];
+        let mut used_datatypes = vec![false; self.datatypes.len()];
+        for (slot, &keep) in retained.iter().enumerate() {
+            if !keep {
+                continue;
+            }
+            match self.record(slot as Id + 1) {
+                StoredRef::Iri { prefix, .. } => used_prefixes[prefix as usize] = true,
+                StoredRef::Lit { datatype, .. } => used_datatypes[datatype as usize] = true,
+                StoredRef::Blank(_) | StoredRef::Triple(_) => {}
+            }
+        }
+
+        // Arena mode can move each Box<str> survivor unchanged. Compact/frozen modes expose
+        // borrowed StoredRef records, so copy those compact fields directly exactly once.
+        let mut terms = Vec::with_capacity(retained_len);
+        if self.base == 0 {
+            for (slot, stored) in std::mem::take(&mut self.terms).into_iter().enumerate() {
+                if retained[slot] {
+                    terms.push(stored);
+                }
+            }
+        } else {
+            for (slot, &keep) in retained.iter().enumerate() {
+                if !keep {
+                    continue;
+                }
+                terms.push(match self.record(slot as Id + 1) {
+                    StoredRef::Iri { prefix, suffix } => Stored::Iri {
+                        prefix,
+                        suffix: suffix.into(),
+                    },
+                    StoredRef::Lit {
+                        value,
+                        datatype,
+                        lang,
+                    } => Stored::Lit {
+                        value: value.into(),
+                        datatype,
+                        lang: lang.map(Into::into),
+                    },
+                    StoredRef::Blank(label) => Stored::Blank(label.into()),
+                    StoredRef::Triple(ids) => Stored::Triple(ids),
+                });
+            }
+        }
+
+        // Move only live metadata, preserving its old-id order, and build the small reverse maps.
+        self.prefix_ids = FxHashMap::default();
+        let mut prefix_remap = vec![u32::MAX; self.prefixes.len()];
+        let mut prefixes = Vec::with_capacity(used_prefixes.iter().filter(|&&used| used).count());
+        let mut prefix_ids: FxHashMap<Box<str>, u32> = FxHashMap::default();
+        for (old, prefix) in std::mem::take(&mut self.prefixes).into_iter().enumerate() {
+            if used_prefixes[old] {
+                let new = prefixes.len() as u32;
+                prefix_remap[old] = new;
+                prefix_ids.insert(prefix.clone(), new);
+                prefixes.push(prefix);
+            }
+        }
+
+        self.datatype_ids = FxHashMap::default();
+        let mut datatype_remap = vec![u32::MAX; self.datatypes.len()];
+        let mut datatypes = Vec::with_capacity(used_datatypes.iter().filter(|&&used| used).count());
+        let mut datatype_ids: FxHashMap<Box<str>, u32> = FxHashMap::default();
+        for (old, datatype) in std::mem::take(&mut self.datatypes).into_iter().enumerate() {
+            if used_datatypes[old] {
+                let new = datatypes.len() as u32;
+                datatype_remap[old] = new;
+                datatype_ids.insert(datatype.as_str().into(), new);
+                datatypes.push(datatype);
+            }
+        }
+
+        let map_component = |old: Id| {
+            if is_inline(old) {
+                old
+            } else {
+                old.checked_sub(1)
+                    .and_then(|slot| remap.get(slot as usize).copied())
+                    .unwrap_or(NO_ID)
+            }
+        };
+        for stored in &mut terms {
+            match stored {
+                Stored::Iri { prefix, .. } => *prefix = prefix_remap[*prefix as usize],
+                Stored::Lit { datatype, .. } => {
+                    *datatype = datatype_remap[*datatype as usize];
+                }
+                Stored::Blank(_) => {}
+                Stored::Triple(ids) => {
+                    for id in ids {
+                        *id = map_component(*id);
+                    }
+                }
+            }
+        }
+
+        let mut rebuilt = Dict {
+            prefixes,
+            prefix_ids,
+            datatypes,
+            datatype_ids,
+            terms,
+            table: HashTable::new(),
+            blob: None,
+            #[cfg(feature = "mmap")]
+            mapped: None,
+            base: 0,
+            frozen: None,
+        };
+        // Release the old table/blob/mapping before allocating the rebuilt lookup table.
+        drop(self);
+        rebuilt.build_table();
+        (rebuilt, remap)
     }
 
     /// (Re)builds the content-hash lookup table from the term arena — for dictionaries
@@ -2659,6 +3040,48 @@ mod tests {
         assert_eq!(d.len(), 0, "no inline integer is stored in the dictionary");
     }
 
+    /// [FABLE-5] sq-7d3dj.30.21 — `plain_string_value` returns the ZERO-COPY value slice for
+    /// EXACTLY a plain `xsd:string` literal (no lang tag, datatype `xsd:string`) and `None` for
+    /// every other term kind — the eligibility gate the engine's lazy top-k string key relies
+    /// on to stay byte-identical to the `LiteralKind::String` set.
+    #[test]
+    fn plain_string_value_only_plain_strings() {
+        let mut d = Dict::new();
+        // Plain xsd:string (explicit datatype) and a "simple" literal (implicit xsd:string):
+        // both are plain strings and must return their value slice.
+        let s_typed = d.intern(&Term::Literal(Literal::new_typed_literal("hello", xsd::STRING)));
+        let s_simple = d.intern(&Term::Literal(Literal::new_simple_literal("world")));
+        let s_empty = d.intern(&Term::Literal(Literal::new_simple_literal("")));
+        assert_eq!(d.plain_string_value(s_typed), Some("hello"));
+        assert_eq!(d.plain_string_value(s_simple), Some("world"));
+        assert_eq!(d.plain_string_value(s_empty), Some(""));
+        // Same lexical, canonical id: a simple and an explicit-xsd:string literal of the same
+        // value intern to ONE id (both plain strings).
+        assert_eq!(
+            d.intern(&Term::Literal(Literal::new_simple_literal("hello"))),
+            s_typed,
+            "simple and explicit xsd:string of the same value share one id"
+        );
+
+        // Every non-plain-string kind must be `None`.
+        let lang = d.intern(&Term::Literal(Literal::new_language_tagged_literal("hello", "en").unwrap()));
+        let int_lit = d.intern(&Term::Literal(Literal::new_typed_literal("42", xsd::INTEGER)));
+        let other_dt = d.intern(&Term::Literal(Literal::new_typed_literal(
+            "x",
+            NamedNode::new("http://ex/dt").unwrap(),
+        )));
+        let iri = d.intern(&Term::NamedNode(NamedNode::new("http://ex/a").unwrap()));
+        let blank = d.intern(&Term::BlankNode(oxrdf::BlankNode::new("b0").unwrap()));
+        let inline_int = d.intern(&Term::Literal(Literal::new_typed_literal("7", xsd::INTEGER)));
+        assert_eq!(d.plain_string_value(lang), None, "lang-tagged is not a plain string");
+        assert_eq!(d.plain_string_value(int_lit), None, "large integer literal");
+        assert_eq!(d.plain_string_value(other_dt), None, "other datatype");
+        assert_eq!(d.plain_string_value(iri), None, "IRI");
+        assert_eq!(d.plain_string_value(blank), None, "blank node");
+        assert!(is_inline(inline_int), "small int inlines");
+        assert_eq!(d.plain_string_value(inline_int), None, "inline integer id is never a string");
+    }
+
     /// [OPUS-4.8] sq-cvug — a triple-term component id that is IN RANGE but resolves to the
     /// WRONG KIND (a literal where the subject must be IRI/blank, or where the predicate must
     /// be an IRI) used to hit `reconstruct_triple`'s `unreachable!()` → a clean panic (DoS) on
@@ -2919,6 +3342,110 @@ mod tests {
             NamedNode::new_unchecked(p),
             o,
         )))
+    }
+
+    #[test]
+    fn filtered_rebuild_moves_arena_records_and_filters_metadata() {
+        let mut d = Dict::new();
+        let kept_iri = Term::NamedNode(NamedNode::new_unchecked("http://keep.example/a"));
+        let dead_iri = Term::NamedNode(NamedNode::new_unchecked("http://dead.example/b"));
+        let kept_lit = Term::Literal(Literal::new_typed_literal("1.5", xsd::DECIMAL));
+        let dead_lit = Term::Literal(Literal::new_typed_literal(
+            "gone",
+            NamedNode::new_unchecked("http://dead.example/type"),
+        ));
+        let kept_blank = Term::BlankNode(oxrdf::BlankNode::new_unchecked("kept"));
+        let kept_iri_id = d.intern(&kept_iri);
+        let dead_iri_id = d.intern(&dead_iri);
+        let kept_lit_id = d.intern(&kept_lit);
+        let dead_lit_id = d.intern(&dead_lit);
+        let kept_blank_id = d.intern(&kept_blank);
+        let old_len = d.len();
+
+        // Raw payload pointers prove the arena path MOVES the compact Boxes instead of
+        // reconstructing Terms (which would allocate new suffix/value strings).
+        let kept_suffix_ptr = match d.record(kept_iri_id) {
+            StoredRef::Iri { suffix, .. } => suffix.as_ptr(),
+            _ => panic!("kept IRI did not have an IRI record"),
+        };
+        let kept_value_ptr = match d.record(kept_lit_id) {
+            StoredRef::Lit { value, .. } => value.as_ptr(),
+            _ => panic!("kept literal did not have a literal record"),
+        };
+
+        let (rebuilt, remap) =
+            d.rebuild_filtered(|id| id == kept_iri_id || id == kept_lit_id || id == kept_blank_id);
+
+        assert_eq!(remap.len(), old_len);
+        assert_eq!(remap[(kept_iri_id - 1) as usize], 1);
+        assert_eq!(remap[(dead_iri_id - 1) as usize], NO_ID);
+        assert_eq!(remap[(kept_lit_id - 1) as usize], 2);
+        assert_eq!(remap[(dead_lit_id - 1) as usize], NO_ID);
+        assert_eq!(remap[(kept_blank_id - 1) as usize], 3);
+        assert_eq!(rebuilt.len(), 3);
+        assert_eq!(rebuilt.lookup(&kept_iri), 1);
+        assert_eq!(rebuilt.lookup(&kept_lit), 2);
+        assert_eq!(rebuilt.lookup(&kept_blank), 3);
+        assert_eq!(rebuilt.lookup(&dead_iri), NO_ID);
+        assert_eq!(rebuilt.lookup(&dead_lit), NO_ID);
+
+        // Metadata belonging only to dead records must be reclaimed as well.
+        assert_eq!(rebuilt.prefixes.len(), 1);
+        assert_eq!(rebuilt.prefix_ids.len(), 1);
+        assert_eq!(rebuilt.datatypes.len(), 1);
+        assert_eq!(rebuilt.datatype_ids.len(), 1);
+        match rebuilt.record(1) {
+            StoredRef::Iri { suffix, .. } => {
+                assert!(std::ptr::eq(suffix.as_ptr(), kept_suffix_ptr));
+            }
+            _ => panic!("rebuilt IRI did not have an IRI record"),
+        }
+        match rebuilt.record(2) {
+            StoredRef::Lit { value, .. } => {
+                assert!(std::ptr::eq(value.as_ptr(), kept_value_ptr));
+            }
+            _ => panic!("rebuilt literal did not have a literal record"),
+        }
+    }
+
+    #[test]
+    fn filtered_rebuild_from_blob_retains_nested_triple_dependencies() {
+        let mut d = Dict::new();
+        let inner = triple(
+            "http://ex/a",
+            "http://ex/b",
+            Term::Literal(Literal::new_simple_literal("v")),
+        );
+        let outer = triple("http://ex/x", "http://ex/p", inner.clone());
+        let outer_id = d.intern(&outer);
+        let inner_id = d.lookup(&inner);
+        let dead = Term::NamedNode(NamedNode::new_unchecked("http://dead.example/gone"));
+        let dead_id = d.intern(&dead);
+        let old_len = d.len();
+
+        // Select ONLY the outer triple. Its leaves and nested triple are implicit survivors.
+        let (rebuilt, remap) = d.into_blob().rebuild_filtered(|id| id == outer_id);
+        let new_outer = remap[(outer_id - 1) as usize];
+        let new_inner = remap[(inner_id - 1) as usize];
+        assert_ne!(new_outer, NO_ID);
+        assert_ne!(
+            new_inner, NO_ID,
+            "nested triple dependency must be retained"
+        );
+        assert_eq!(remap[(dead_id - 1) as usize], NO_ID);
+        assert_eq!(
+            rebuilt.len(),
+            old_len - 1,
+            "only the unrelated dead term is dropped"
+        );
+        assert!(
+            rebuilt.len() > 1,
+            "the one selected triple must retain its dependencies"
+        );
+        assert_eq!(rebuilt.term(new_outer), outer);
+        assert_eq!(rebuilt.term(new_inner), inner);
+        assert_eq!(rebuilt.lookup(&outer), new_outer);
+        assert_eq!(rebuilt.lookup(&dead), NO_ID);
     }
 
     #[test]

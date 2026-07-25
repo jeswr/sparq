@@ -18,6 +18,17 @@
   features: "explain"
   test: true
 
+# [GPT-5.6] Exercise the standalone d-entail and rif-core feature-on states.
+- name: "sparq-reason (d-entail)"
+  crate: "sparq-reason"
+  features: "d-entail"
+  test: true
+
+- name: "sparq-reason (rif-core)"
+  crate: "sparq-reason"
+  features: "rif-core"
+  test: true
+
 # [SONNET-4.6] sq-pbz04.5.3: RIF/XML presentation-syntax importer. rif-xml is opt-in
 # (off by default); enables `sparq_reason::rif_xml::import` and pulls in quick-xml.
 # Wired here post-Opus adversarial-verify so CI covers capture-avoidance + fail-closed
@@ -46,4 +57,36 @@
 - name: "sparq-reason (substrate-compare)"
   crate: "sparq-reason"
   features: "substrate-compare"
+  test: true
+
+# [FABLE-5] sq-zgbso.3 (epic sq-zgbso, issue #1582): the id-level COMPILED-rule
+# evaluator for the scoped access-control N3 subset (n3::compiled — rule IR with
+# pre-interned symbols over the shared sparq-substrate join kernels). This leg builds +
+# tests + clippies the feature-ON state: the compile/eval unit suite AND
+# tests/compiled_equivalence.rs (the closure set-equality oracle vs reason_n3 over the
+# sparq-solid WAC/ACP/ODRL-spike rule corpus — a `required-features` target that would
+# otherwise run in NO CI lane).
+- name: "sparq-reason (compiled-rules)"
+  crate: "sparq-reason"
+  features: "compiled-rules"
+  test: true
+
+# [GPT-5.6] The existing default-OFF `datalog` surface includes incremental
+# maintenance plus the stratified NAF, comparison, and arithmetic extensions; exercise
+# their feature-gated implementations and tests.
+- name: "sparq-reason (datalog)"
+  crate: "sparq-reason"
+  features: "datalog"
+  test: true
+
+# [Kern] kern/quoted-triple-infer (first increment): the opt-in quoted-triple
+# (RDF 1.2 reifier) RL rules — reif-dtr destructure / reif-ctr construct with the
+# finite-Herbrand-base restrictions (src/reify.rs docs). This leg builds + tests +
+# clippies the feature-ON state: the in-module unit suite AND tests/owl_reify.rs
+# (the Turtle-1.2 end-to-end fixtures + MaterializedOwlGraph Fallback parity — a
+# `required-features` target that would otherwise run in NO CI lane, per the C1
+# feature-gated-test-execution guard).
+- name: "sparq-reason (quoted-triples)"
+  crate: "sparq-reason"
+  features: "quoted-triples"
   test: true

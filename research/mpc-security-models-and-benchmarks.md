@@ -579,7 +579,11 @@ composition is the contribution AND the principal research risk.**
   VSS-share its OWN input and parties must JOINTLY generate masks via distributed
   coin-tossing or, far cheaper in honest-majority, **PRSS** (replicated PRF seeds, eprint
   2021/1223, IETF draft-thomson-ppm-prss) — `dealer()` is a stand-in; a maliciously-fixed
-  mask `r=0` would flip equality verdicts. (b) The MPC core needs NO trusted setup
+  mask `r=0` would flip equality verdicts. **Design + code seam landed** for (a):
+  `research/mpc-distributed-randomness-design.md` (PRSS-vs-coin-toss decision, dealer-less
+  VSS, the `r=0` defense) + the `randomness` module (`DistributedRandomness` /
+  `RandomnessModel`; the current dealer reports `TrustedDealerSim`, `deployable() == false`);
+  the PRSS/coin-toss/VSS impl is follow-on beads behind the seam (sq-yyro). (b) The MPC core needs NO trusted setup
   (information-theoretic — a genuine trust-minimality advantage), but the collaborative-ZK
   layer does (a Groth16-style coSNARK needs a per-circuit CRS; a transparent system —
   UltraHonk/STARK, sparq's verifier target — avoids it). "Trusted-setup-free" is true for

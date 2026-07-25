@@ -38,3 +38,46 @@
   crate: "sparq-mcp"
   features: "nlq"
   test: true
+
+# [FABLE-5] sq-u16eq: the opt-in pod-backed MCP surface — LDP resource/container CRUD
+# tools over sparq-solid's `PodStore` per the MCP-Solid proposal draft
+# (site/specs/mcp-solid.typ §6.4/§7.3/§9.3). OFF by default — it pulls in `sparq-solid`
+# + `oxrdf`, so it must not touch the lean default build. This leg builds + tests the
+# feature-ON state — the src/solid.rs unit suite PLUS tests/solid.rs
+# (`#![cfg(feature = "solid")]`: end-to-end tool round-trips through the real JSON-RPC
+# dispatch against a real PodStore with a materialized WAC view, incl. the existence
+# non-disclosure + ACL write-through invariants) — with `clippy --all-targets
+# -D warnings`. The DEFAULT (feature-OFF) build is covered by the workspace lane.
+- name: "sparq-mcp (solid — pod-backed LDP resource/container CRUD tools)"
+  crate: "sparq-mcp"
+  features: "solid"
+  test: true
+
+# [GPT-5.6] sq-19f1i: compose `solid` with opt-in JSON-LD parsing so the
+# Solid resource PUT path and its media-type mapping execute with JSON-LD enabled.
+- name: "sparq-mcp (solid, jsonld — pod-backed CRUD with JSON-LD ingest)"
+  crate: "sparq-mcp"
+  features: "solid,jsonld"
+  test: true
+
+# [FABLE-5] sq-lsp7k.10: the template + full-text-search tool surfaces. `templates`
+# (template_list / template_invoke over sparq-engine's `templates` module — typed
+# fail-closed JSON binding; UPDATE templates behind the same allow_update gate as the raw
+# update tool) and `text` (text_search over sparq-text's BM25 literal index,
+# default-features = false: pure index, no rayon/engine seam). Both surfaces + the
+# tests/templates_text.rs integration suite (`#![cfg(all(feature = "templates",
+# feature = "text"))]`: template invocation result-equivalence, fail-closed arguments,
+# the gated-update posture incl. the hostile-literal scenario, BM25 and/any/prefix search,
+# update-then-search reconcile) are compiled EMPTY by the default build, so this ONE
+# combined leg (they co-enable cleanly and share no cfg divergence) closes the gap.
+- name: "sparq-mcp (templates, text — named-template invocation + BM25 text search tools)"
+  crate: "sparq-mcp"
+  features: "templates,text"
+  test: true
+
+# [GPT-5.6] sq-lsp7k.22: the opt-in read-only SHACL validation tool. Exercises real
+# JSON-RPC round trips for malformed, non-conforming, and conforming shapes graphs.
+- name: "sparq-mcp (shacl — caller-supplied shapes validation tool)"
+  crate: "sparq-mcp"
+  features: "shacl"
+  test: true

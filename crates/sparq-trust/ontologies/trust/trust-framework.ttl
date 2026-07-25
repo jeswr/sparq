@@ -1,0 +1,225 @@
+# trust-framework.ttl — the `trustx:` certification-scope vocabulary (machine-readable form)
+#
+# [FABLE-5] sq-6syab.2 (epic sq-6syab / issue #1592; decomposition design record
+# `research/trust-expression-spec.md` §3.4 / D4). 🤖 SPARQ agent — trust-expression
+# certification-scope layer. Written on the Fable-tier collaboration program.
+#
+# This is the canonical, machine-readable rendering of the certification-scope
+# vocabulary layer of the trust-expression program: the terms that let a verifier
+# express "certified issuers WITHIN the eIDAS / DIATF framework, that have only issued
+# information they are certified to issue" (issue #1592). It EXTENDS the `trust:`
+# vocabulary (`trust.ttl` in this directory) — it does NOT fork it — and REFERENCES the
+# vendored `sec-req:` regulatory-framework individuals (eIDAS 2.0 / UK DVS) via
+# `rdfs:seeAlso`, adding only the certification mechanics `sec-req:` lacks (an issuer
+# being CERTIFIED UNDER a framework, and a certification SCOPE). No `trust:` or
+# `sec-req:` term is redeclared here (the D5 no-duplication rule).
+#
+# It is byte-pinned against the Rust constants in
+# `crates/sparq-trust/src/framework_vocab.rs` by the `framework_ttl_iris_match_rust_constants`
+# sync test in that module — the two MUST NOT drift (the `trust.ttl`/`vocab.rs` and
+# `secprop-ext.ttl`/`secprop.rs` discipline).
+#
+# *** ALL `trustx:` IRIs ARE NON-STANDARD, INVENTED FOR THIS PROPOSAL. ***
+# `https://sparq.dev/ns/trust#` is a PLACEHOLDER namespace (shared with `trust:`, since
+# `trustx:` is a prose-only sub-prefix that extends it under the SAME base — NOT a
+# distinct namespace) to make the semantics concrete; it is NOT minted, NOT resolvable,
+# and NOT a claim of standardisation. A working group taking this design forward would
+# rename/rehome every term. See the design record §9.3 (upstream home / namespace) and
+# the honest-limitations §7.
+#
+# *** HONESTY (load-bearing — trust-expression program discipline). ***
+# Framework-anchored trust is ANCHORED, NOT PROVEN. A `trustx:Certification` bottoms out
+# in the framework operator's signed trusted-list / register artifacts — it is a trust
+# anchor, not cryptography. The scope-conformance check constrains what the VERIFIER
+# accepts and, via the published certification, what the issuer was AUTHORISED to issue;
+# it CANNOT retroactively prove an issuer never mis-issued elsewhere (design §7.2). No
+# term here asserts a settled cryptographic soundness or privacy guarantee: the sparq ZK
+# estate is internally re-audited but has NO external accredited-cryptographer sign-off
+# (open gate sq-qhy4), and sparq-mpc is honest-majority semi-honest only.
+
+@prefix trust:   <https://sparq.dev/ns/trust#> .
+@prefix trustx:  <https://sparq.dev/ns/trust#> .
+@prefix sh:      <http://www.w3.org/ns/shacl#> .
+@prefix rdf:     <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix rdfs:    <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix owl:     <http://www.w3.org/2002/07/owl#> .
+@prefix xsd:     <http://www.w3.org/2001/XMLSchema#> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix sec-req: <https://w3id.org/zkp-sparql/sec-req#> .
+
+# --- ontology metadata -------------------------------------------------------
+# NOTE: `trustx:` and `trust:` share the base IRI `https://sparq.dev/ns/trust#`. The
+# `owl:Ontology` node below is a SEPARATE ontology-metadata subject at a distinct IRI
+# (the framework-layer document IRI), so it does NOT collide with the `trust:` ontology
+# node in `trust.ttl` and is exempt from the term-declaration drift check (its subject
+# is the document IRI, not a `trustx:LocalName` term).
+
+<https://sparq.dev/ns/trust-framework> a owl:Ontology ;
+  rdfs:label "Trust-expression certification-scope vocabulary (NON-STANDARD, proposal)"@en ;
+  dcterms:description """The certification-scope layer of the trust-expression program
+(issue #1592): terms for expressing framework-certified-issuer trust and issuer
+certification scope over the trust requirements the verifier sends the holder. EXTENDS the
+trust: vocabulary (imported below) and REFERENCES the vendored sec-req: eIDAS 2.0 / UK
+DVS individuals via rdfs:seeAlso — it does not duplicate them. EVERY term here is
+NON-STANDARD and invented for this proposal; the namespace is a placeholder shared with
+trust:. Framework trust is ANCHORED (the framework operator's signed artifacts), not
+proven; no cryptographic soundness/privacy guarantee is asserted (sq-qhy4 open, MPC
+semi-honest). Companion: research/trust-expression-spec.md §3.4 / §7."""@en ;
+  owl:imports <https://sparq.dev/ns/trust> ;
+  rdfs:seeAlso <https://github.com/jeswr/sparq/issues/1592> ;
+  rdfs:comment "Placeholder namespace shared with trust:; a WG would rename/rehome every term."@en .
+
+# =============================================================================
+# The trust requirements — the verifier→holder contract carrier (design §3.1 / D1)
+# =============================================================================
+# The verifier sends ONE SPARQL query + ONE trust-requirements graph + the existing
+# zkSPARQL nonce. The trust requirements are a small RDF graph in this vocabulary; the
+# trust conditions live in the requirements, NOT in the query (there is no new query
+# syntax — design §3.1).
+
+trustx:TrustRequirements a rdfs:Class, owl:Class ;
+  rdfs:label "Trust requirements"@en ;
+  rdfs:comment "The verifier→holder contract carrier: a small RDF graph binding a query to its trust conditions (enumerated issuers and/or framework certification, plus a status-validity instant). One of the three things the verifier sends the holder (query + trust requirements + zkSPARQL nonce); the trust conditions live HERE, never in the query — there is no new query syntax (design §3.1)."@en ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+trustx:question a rdf:Property, owl:ObjectProperty ;
+  rdfs:label "question"@en ;
+  rdfs:comment "Binds the trust requirements to the SPARQL query they scope (the query's identifying IRI). Makes a trust-requirements graph reusable across queries by naming which one it applies to (design §3.2)."@en ;
+  rdfs:domain trustx:TrustRequirements ;
+  rdfs:range rdfs:Resource ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+trustx:trustsIssuer a rdf:Property, owl:ObjectProperty ;
+  rdfs:label "trusts issuer"@en ;
+  rdfs:comment "MODE 1 (enumerated parties): admit contributing statements issued by THIS enumerated issuer identity (a DID/key binding, reusing the sq-pfae.3 did:key/did:web work). Multiple values are the maintainer's '[X, Y and Z]' issuer set. Composes with trustx:trustsFramework by plain OR (design §3.2 / D2)."@en ;
+  rdfs:domain trustx:TrustRequirements ;
+  rdfs:range rdfs:Resource ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+trustx:trustsFramework a rdf:Property, owl:ObjectProperty ;
+  rdfs:label "trusts framework"@en ;
+  rdfs:comment "MODE 2 (framework-certified issuers): admit contributing statements from issuers CERTIFIED UNDER this trustx:Framework (subject to scope conformance). The maintainer's 'certified issuers WITHIN the eIDAS/DIATF framework'. Composes with trustx:trustsIssuer by plain OR (design §3.2 / D2)."@en ;
+  rdfs:domain trustx:TrustRequirements ;
+  rdfs:range trustx:Framework ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+trustx:requiresScopeConformance a rdf:Property, owl:DatatypeProperty ;
+  rdfs:label "requires scope conformance"@en ;
+  rdfs:comment "When true (mode 2), REQUIRES that every contributing attested statement's type/predicate falls under its issuer's trustx:Certification scope valid at the evaluation time — the maintainer's 'issuers have only issued information that they are certified/approved to issue'. A scope-conformance check against the framework's PUBLISHED certifications (a trust-anchored authorisation claim, NOT a cryptographic guarantee that the issuer never mis-issued elsewhere — design §7.2)."@en ;
+  rdfs:domain trustx:TrustRequirements ;
+  rdfs:range xsd:boolean ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+trustx:requiresValidStatusAt a rdf:Property, owl:DatatypeProperty ;
+  rdfs:label "requires valid status at"@en ;
+  rdfs:comment "The instant t at which a covering, positive trustx:StatusAttestation must hold for every contributing statement (and, in mode 2, every issuer certification). Non-revocation is asked as the EXISTENCE of a covering positive status window, never as absence of a revocation (OWA/monotonicity — design §3.3 / D3). A verifier-chosen parameter, not a spec constant (design §7.4)."@en ;
+  rdfs:domain trustx:TrustRequirements ;
+  rdfs:range xsd:dateTime ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+trustx:methodPolicy a rdf:Property, owl:ObjectProperty ;
+  rdfs:label "method policy"@en ;
+  rdfs:comment "OPTIONAL reference from the trust requirements to an ODRL policy consumed by the existing secprop/ODRL admissible() pre-check (sq-0dksu), which decides which PROOF METHODS are acceptable — an orthogonal axis to which SOURCES are trusted. The spec normatively REFERENCES, and does not restate, that machinery (design §3.5 / D5)."@en ;
+  rdfs:domain trustx:TrustRequirements ;
+  rdfs:range rdfs:Resource ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+# =============================================================================
+# The certification-scope layer (design §3.4 / D4)
+# =============================================================================
+
+# --- framework --------------------------------------------------------------
+
+trustx:Framework a rdfs:Class, owl:Class ;
+  rdfs:label "Governance framework"@en ;
+  rdfs:comment "A governance framework operating a trusted-list / register (e.g. eIDAS 2.0's Trusted Lists, the UK DIATF register of digital identity and attribute services). The framework individuals below carry rdfs:seeAlso to the EXISTING vendored sec-req: individuals — sec-req: stays the regulatory-requirement view; trustx: adds only the certification mechanics it lacks (design §3.4)."@en ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+# --- certification ----------------------------------------------------------
+
+trustx:Certification a rdfs:Class, owl:Class ;
+  rdfs:label "Certification"@en ;
+  rdfs:comment "A time-windowed, authority-signed attestation that an issuer is certified under a framework. A Trusted-List entry or a DIATF-register entry IS a trustx:Certification in this model. Groups the certified issuer (trustx:certifies), the framework (trustx:underFramework), the scope (trustx:scope), the validity window (trustx:validFrom / trustx:validUntil), and the signature/attestation binding. Certifications are status-checked exactly like credentials — same positive-attestation machinery (design §3.4 / §6 case 7)."@en ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+trustx:certifies a rdf:Property, owl:ObjectProperty ;
+  rdfs:label "certifies"@en ;
+  rdfs:comment "The issuer identity (DID/key) this certification certifies. Links a trustx:Certification to the issuer whose trustx:trustsFramework membership it establishes."@en ;
+  rdfs:domain trustx:Certification ;
+  rdfs:range rdfs:Resource ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+trustx:underFramework a rdf:Property, owl:ObjectProperty ;
+  rdfs:label "under framework"@en ;
+  rdfs:comment "The trustx:Framework this certification is issued under."@en ;
+  rdfs:domain trustx:Certification ;
+  rdfs:range trustx:Framework ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+trustx:scope a rdf:Property, owl:ObjectProperty ;
+  rdfs:label "certification scope"@en ;
+  rdfs:comment "What the issuer is certified to issue. Ranges over (i) trustx:AnyServiceScope (service-level — the honest DIATF granularity: DIATF certifies a SERVICE, not an attribute list), (ii) an attestation type / eIDAS Attestation Rulebook IRI, or (iii) a predicate set / SHACL shape — reusing trust:'s existing trust:forPredicate → trust:forShape desugaring rather than inventing a second scoping idiom (design §3.4). A hardwired attribute-level scope would misdescribe DIATF; omitting scope could not express 'only issued what certified to issue' (survey finding 1)."@en ;
+  rdfs:domain trustx:Certification ;
+  rdfs:range rdfs:Resource ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+trustx:validFrom a rdf:Property, owl:DatatypeProperty ;
+  rdfs:label "valid from"@en ;
+  rdfs:comment "Start of the certification's (or status attestation's) validity window (inclusive). Time-windowed by construction so a certification is checked at the evaluation instant exactly like a credential status (design §3.3 / §3.4)."@en ;
+  rdfs:domain trustx:Certification ;
+  rdfs:range xsd:dateTime ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+trustx:validUntil a rdf:Property, owl:DatatypeProperty ;
+  rdfs:label "valid until"@en ;
+  rdfs:comment "End of the certification's (or status attestation's) validity window (inclusive). A certification whose window does not cover the evaluation instant yields no admissible binding — fail-closed by construction, never by negation (design §3.3)."@en ;
+  rdfs:domain trustx:Certification ;
+  rdfs:range xsd:dateTime ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+trustx:AnyServiceScope a rdfs:Class, owl:Class ;
+  rdfs:label "Any-service scope"@en ;
+  rdfs:comment "The coarsest, service-level trustx:scope value: 'everything this certified service issues'. The HONEST DIATF granularity — DIATF certifies a service, not an attribute type (survey finding 1). A certification with this scope is scope-conformant for any contributing statement from the issuer; a spec that omitted this value could not faithfully describe DIATF."@en ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+# =============================================================================
+# Positive, time-windowed status attestation (design §3.3 / D3)
+# =============================================================================
+# Non-revocation is NEVER queried as absence. A trustx:StatusAttestation is a signed
+# statement by the status authority that a credential's (or certification's) status was
+# VALID in a window [validFrom, validUntil]. Realised on the clear path by the merged
+# signed Bitstring status-list machinery (SignedStatusList / VerifyingLiveStatusCheck /
+# justify_status_decision) and on the ZK path by the merged committed-index bit-unset
+# proof at an authoritative snapshot. The reference rewrite asks for the EXISTENCE of a
+# covering status attestation — monotone under OWA.
+
+trustx:StatusAttestation a rdfs:Class, owl:Class ;
+  rdfs:label "Status attestation"@en ;
+  rdfs:comment "A POSITIVE, time-windowed, authority-signed statement that a credential's (or certification's) status was valid in [trustx:validFrom, trustx:validUntil]. 'Unrevoked' is asked as the EXISTENCE of a covering status attestation at trustx:requiresValidStatusAt — never as absence of a revocation (OWA/monotonicity — the agreed #1592 constraint, design §3.3). IETF Token Status List (the eIDAS ARF mechanism) maps to this same shape. A revoked or stale-windowed credential simply yields no admissible binding (fail-closed by construction)."@en ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+trustx:coveredBy a rdf:Property, owl:ObjectProperty ;
+  rdfs:label "covered by"@en ;
+  rdfs:comment "Links a contributing statement's provenance reifier (design §4) to the trustx:StatusAttestation that covered it at the evaluation instant. Part of the machine-readable provenance the response carries so the verifier can re-check admissibility under the trust requirements (design §3.1)."@en ;
+  rdfs:range trustx:StatusAttestation ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+# =============================================================================
+# Framework individuals — thin, referencing the vendored sec-req: (design §9.4)
+# =============================================================================
+# These do NOT duplicate the vendored sec-req: regulatory-requirement individuals
+# (sec-req:Eidas20 / sec-req:UkDvs); they carry rdfs:seeAlso to them. sec-req: stays the
+# regulatory-requirement view; trustx: adds only the certification-mechanics view. No
+# vendored file is edited (the D5 no-duplication rule; design §9.4 default).
+
+trustx:eIDAS2 a trustx:Framework ;
+  rdfs:label "eIDAS 2.0 (EU Digital Identity Framework)"@en ;
+  rdfs:comment "The EU eIDAS 2.0 framework: issuer trust via Trusted Lists (PID/QEAA/PuB-EAA providers registered by a Registrar and notified to the Commission); attribute schemas via Attestation Rulebooks; revocation via status lists / identifier lists (IETF Token Status List is the ARF mechanism). Scope granularity: schema-level (Attestation Rulebook / attribute catalogue). Legal base: Regulation (EU) 2024/1183."@en ;
+  rdfs:seeAlso sec-req:Eidas20 ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .
+
+trustx:DIATF a trustx:Framework ;
+  rdfs:label "UK DIATF (Digital Identity and Attributes Trust Framework)"@en ;
+  rdfs:comment "The UK Digital Identity and Attributes Trust Framework: five certifiable roles (identity / attribute / holder / orchestration / component service providers); certification by an independent Conformity Assessment Body, valid three years, applying PER CERTIFIED SERVICE, not per attribute type; certified providers appear on the public register of digital identity and attribute services. Scope granularity: service-level (hence trustx:AnyServiceScope — survey finding 1). Referenced sec-req: individual is UK DVS (the UK Digital Verification Services requirement)."@en ;
+  rdfs:seeAlso sec-req:UkDvs ;
+  rdfs:isDefinedBy <https://sparq.dev/ns/trust-framework> .

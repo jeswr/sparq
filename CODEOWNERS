@@ -1,17 +1,24 @@
 # CODEOWNERS — sparq
 #
-# [OPUS-4.8] Governance: code ownership (bead sq-fvip).
+# [OPUS-4.8] Governance: code ownership (bead sq-fvip; policy revised under
+# noise-reduction-bench-selfmonitor).
 #
-# GitHub applies the LAST matching pattern in this file to a changed path, so the
-# catch-all comes FIRST and the high-risk, security-sensitive paths come AFTER it
-# (a later, more specific line overrides the earlier catch-all). When branch
-# protection requires CODEOWNERS review (see docs/branch-protection.md), a PR
-# touching any path below requires approval from its listed owner.
+# POLICY — codeowner review-requests are RESERVED for the rare, genuinely
+# security-critical surfaces. Everything else in the repo is covered by the
+# automated review pipeline (adversarial/mechanical verify + the Copilot review)
+# and the single required `ci-summary / gate` aggregator; it does NOT auto-request
+# a human review. A prior catch-all `* @jeswr` (plus high-churn /crates/sparq-core/,
+# /crates/sparq-server/, and /.github/ entries) auto-requested the maintainer on
+# EVERY pull request — an unsustainable review-notification load with no security
+# benefit, since those paths are already gated by CI. Those entries are removed.
+#
+# GitHub applies the LAST matching pattern to a changed path. With the catch-all
+# gone, a PR that touches NONE of the paths below requests no codeowner and merges
+# on the automated pipeline + the gate alone. A PR touching a path below still
+# requires that owner's approval when branch protection requires CODEOWNERS review
+# (see docs/branch-protection.md).
 
-# Default owner for everything in the repo.
-*                               @jeswr
-
-# --- High-risk / security-sensitive paths (override the catch-all above) ---
+# --- Security-critical paths ONLY (each is a deliberate, low-churn exception) ---
 
 # Zero-knowledge proof estate: cryptographic soundness is load-bearing here and
 # the v1 verifier is NOT sound yet (see research/zk-soundness-audit.md + SECURITY.md).
@@ -21,16 +28,7 @@
 # Multi-party computation scaffold: crypto deferred, no security guarantee.
 /crates/sparq-mpc/              @jeswr
 
-# Core engine: contains the `unsafe` and the mmap/encoding internals.
-/crates/sparq-core/             @jeswr
-
-# Network-facing surface: the SPARQL 1.1 Protocol HTTP server.
-/crates/sparq-server/           @jeswr
-
-# CI / workflows / issue + PR templates / this ownership file.
-/.github/                       @jeswr
-
-# Supply-chain policy (cargo-deny). Owned even before the file lands.
+# Supply-chain policy (cargo-deny): allow/deny lists gate what enters the build.
 deny.toml                       @jeswr
 
 # The security policy itself.

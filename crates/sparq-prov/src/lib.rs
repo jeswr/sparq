@@ -39,8 +39,16 @@
 //! inferred fact, one `prov:Activity` per rule firing, with
 //! `wasGeneratedBy`/`used`/`wasDerivedFrom` edges. Inference *is* derivation, and
 //! the proof tree is a finer-grained provenance (it names the rule and exact
-//! premises for each fact) than a single CONSTRUCT-style activity. See the
-//! `reason` module.
+//! premises for each fact) than a single CONSTRUCT-style activity.
+//! `prov_ntriples` renders that lineage as N-Triples in one call. See the
+//! `reason` module. <!-- [GPT-5.6] sq-8jn86 -->
+//!
+//! **Missing-answer explanation** is available under the non-default `why-not`
+//! feature. The `why_not` function accepts one basic graph pattern and a fully
+//! ground target binding, then reports exactly the substituted triples absent
+//! from the graph. `why_not_report_ntriples` and `why_not_report_turtle` render
+//! that result as deterministic, PROV-flavoured RDF 1.2. More general SPARQL
+//! algebra is rejected as unsupported. <!-- [GPT-5.6] sq-lsp7k -->
 //!
 //! **Out of scope for per-triple lineage** (a deliberate honesty boundary, not a TODO):
 //! the structural UPDATE operations `CLEAR` / `DROP` / `CREATE` change a graph's
@@ -74,10 +82,42 @@ pub use update::{derive_update, derive_update_with_budget, UpdateDerivation};
 #[cfg(feature = "reason")]
 pub mod reason;
 #[cfg(feature = "reason")]
-pub use reason::{prov_from_proof, ProvProofConfig};
+pub use reason::{prov_from_proof, prov_ntriples, ProvProofConfig};
+// [GPT-5.6] sq-lsp7k.17: exact missing-conjunct explanation, opt-in so the
+// default public API remains unchanged.
+#[cfg(feature = "why-not")]
+mod why_not;
+#[cfg(feature = "why-not")]
+pub use why_not::{
+    why_not, why_not_report_ntriples, why_not_report_turtle, MissingPattern, WhyNotError,
+};
 
 // ── PROV-O vocabulary IRIs ─────────────────────────────────────────────────
 const PROV: &str = "http://www.w3.org/ns/prov#";
+
+// [GPT-5.6] sq-ijw35: one Turtle writer for both derivation surfaces so they
+// always serialise the identical `prov_graph()` triple set with the same prefixes.
+fn triples_to_prov_turtle(triples: &[Triple]) -> String {
+    let serializer = oxttl::TurtleSerializer::new()
+        .with_prefix("prov", PROV)
+        .expect("the PROV namespace must be a valid prefix IRI")
+        .with_prefix("rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#")
+        .expect("the RDF namespace must be a valid prefix IRI")
+        .with_prefix("rdfs", "http://www.w3.org/2000/01/rdf-schema#")
+        .expect("the RDFS namespace must be a valid prefix IRI")
+        .with_prefix("xsd", "http://www.w3.org/2001/XMLSchema#")
+        .expect("the XSD namespace must be a valid prefix IRI");
+    let mut writer = serializer.for_writer(Vec::new());
+    for triple in triples {
+        writer
+            .serialize_triple(triple)
+            .expect("serialising Turtle into memory must succeed");
+    }
+    let bytes = writer
+        .finish()
+        .expect("finishing Turtle serialisation into memory must succeed");
+    String::from_utf8(bytes).expect("Turtle output must be valid UTF-8")
+}
 
 /// `prov:` term IRI (`http://www.w3.org/ns/prov#{local}`).
 fn prov(local: &str) -> NamedNode {
@@ -174,6 +214,12 @@ impl Derivation {
         &self.entity
     }
 
+    /// The configured input-source IRIs, in their original order.
+    // [GPT-5.6] sq-cg237
+    pub fn used_inputs(&self) -> &[NamedNode] {
+        &self.used
+    }
+
     /// The PROV-O lineage of this derivation as an RDF graph (a `Vec<Triple>`).
     ///
     /// Emits, for the result entity `E`, activity `A`, and each input `Iᵢ`:
@@ -258,6 +304,14 @@ impl Derivation {
     /// The PROV-O lineage serialised as N-Triples (also a valid Turtle document).
     pub fn prov_ntriples(&self) -> String {
         sparq_engine::triples_to_ntriples(&self.prov_graph())
+    }
+
+    /// The same PROV-O lineage as [`prov_graph`](Self::prov_graph), serialised as
+    /// prefix-compacted Turtle.
+    ///
+    /// [GPT-5.6] sq-ijw35
+    pub fn prov_turtle(&self) -> String {
+        triples_to_prov_turtle(&self.prov_graph())
     }
 
     /// Start/end wall-clock instants of the derivation activity.

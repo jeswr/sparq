@@ -1,0 +1,7 @@
+# [GPT-5.6] sq-r1ei8: compile-check the default-off full-tier selector, which
+# forwards to the real WAC-scoped `/sparql` route in sparq-lws-core. The default
+# lws-wasm build remains the route- and engine-free core artifact.
+- name: "sparq-lws-wasm (sparql-endpoint)"
+  crate: "sparq-lws-wasm"
+  features: "sparql-endpoint"
+  test: true

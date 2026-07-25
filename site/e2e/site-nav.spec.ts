@@ -2,12 +2,14 @@
 //
 // WHAT IT GUARDS. The redesign removed the persistent w-64 sidebar tree + the duplicate top-tab
 // bar, leaving ONE slim top bar of content destinations (research/website-redesign.md §2, §7).
-// Option-B (the maintainer's decision after #1004 opened) gives the bar TWO distinct destinations
-// instead of one "Try the GUI": "Try" → /try (the lightweight in-browser SPARQL REPL playground,
-// kept unchanged) and "App" → /app (the live operational GUI). The old single "Try the GUI" → /gui
-// entry is dropped; /gui now client-redirects to /app. This test asserts the slim bar's six
-// destinations route correctly, that the old full sidebar tree is GONE, that Try (/try) and App
-// (/app) are both reachable, and that the legacy /gui path redirects to /app.
+// [OPUS-4.8] sq-4hiqe — the /try SPARQL playground was removed entirely: the top-nav "Try" item is
+// GONE and /try now hard-redirects to /app (a redirect stub, like the legacy /gui path).
+// [OPUS-4.8] sq-1scgk — "Papers" was promoted INTO the slim bar (maintainer 2026-07-04 item 9b:
+// make the paper-factory output prominently findable). The slim bar's destinations are now
+// Home · Capabilities · App · Benchmarks · Papers · Download, where "App" → /app is the live
+// operational GUI. This test asserts the slim bar's six destinations route correctly, that the old
+// full sidebar tree is GONE, that there is NO "Try" nav item, and that both the legacy /gui path
+// and the removed /try path redirect to /app.
 // [OPUS-4.8] sq-ymr2e.1 — migrated onto the shared E2E foundation: the hermetic + deterministic
 // `test` (e2e/support) and the shared `gotoAppReady` barrier, which absorbs the coi-serviceworker
 // one-time reload via the SW-controller signal and waits for the app-shell hydration — replacing
@@ -26,23 +28,34 @@ async function gotoSettled(page: Page, route: string): Promise<void> {
   await gotoAppReady(page, route);
 }
 
-test("the slim top bar shows the 6 destinations (Try + App distinct) and no full sidebar tree", async ({
+test("the slim top bar shows the destinations (no Try item) and no full sidebar tree", async ({
   page,
 }) => {
   await gotoSettled(page, "");
 
   const primary = page.getByRole("navigation", { name: "Primary" }).first();
+  // [OPUS-4.8] sq-1scgk — "Papers" is now a first-class bar destination alongside the rest.
   for (const label of [
     "Home",
+    "Docs",
     "Capabilities",
-    "Try",
     "App",
     "Benchmarks",
+    "Papers",
     "Download",
   ]) {
     await expect(primary.getByRole("link", { name: label, exact: true })).toBeVisible();
   }
-  // The OLD single "Try the GUI" entry is gone — Try (REPL) and App (GUI) are separate now.
+  // [GPT-5.6] sq-f8ufg — mutation witness: removing Docs or pointing it at the nonexistent
+  // /docs route makes this assertion fail. The Skills router is the canonical live docs index.
+  await expect(primary.getByRole("link", { name: "Docs", exact: true })).toHaveAttribute(
+    "href",
+    "https://github.com/sparq-org/sparq/blob/main/skills/SKILL.md",
+  );
+  // [OPUS-4.8] sq-4hiqe — the "Try" nav item is REMOVED (the /try playground is gone). The bar
+  // must expose NO "Try" destination now.
+  await expect(primary.getByRole("link", { name: "Try", exact: true })).toHaveCount(0);
+  // The OLD single "Try the GUI" entry is likewise gone.
   await expect(page.getByRole("link", { name: /Try the GUI/i })).toHaveCount(0);
 
   // The OLD full sidebar tree is gone: there is no persistent "Feature surfaces" nav landmark
@@ -70,39 +83,27 @@ test("Capabilities is reachable from the top bar and renders the 5 themes", asyn
   }
 });
 
-test("the top bar points Try at the REPL (/try) and App at the GUI (/app)", async ({ page }) => {
+test("the top bar points App at the GUI (/app)", async ({ page }) => {
   await gotoSettled(page, "");
   const primary = page.getByRole("navigation", { name: "Primary" }).first();
-  // The two Option-B destinations are DISTINCT and point at the right routes (assert the href
-  // directly — deterministic, and not subject to the dev-server's one-time coi-serviceworker
-  // reload racing a click-then-navigate).
-  await expect(primary.getByRole("link", { name: "Try", exact: true })).toHaveAttribute(
-    "href",
-    /\/try\/?$/,
-  );
+  // The App destination points at the live operational GUI (assert the href directly —
+  // deterministic, and not subject to the dev-server's one-time coi-serviceworker reload racing a
+  // click-then-navigate).
   await expect(primary.getByRole("link", { name: "App", exact: true })).toHaveAttribute(
     "href",
     /\/app\/?$/,
   );
 });
 
-test("the Try destination (/try) is the lightweight live REPL playground", async ({ page }) => {
-  // The Try nav link's href is asserted above; here we confirm the destination it points at IS
-  // the REPL. We goto /try DIRECTLY (the same way every other /try spec reaches it) rather than
-  // click-navigating into it: under `next dev` the heavy lazy REPL route compiles on demand and
-  // can trigger a Fast Refresh full reload that interrupts a client-side click-navigation — the
-  // click mechanism itself is already covered by the App + Download click tests on the same bar.
+// [OPUS-4.8] sq-4hiqe — the /try SPARQL playground was removed; its page is now a hard-redirect
+// stub (window.location → /app, the same mechanism as the legacy /gui path). Navigating to /try
+// therefore lands on /app — there is no REPL/workbench there anymore. (The redirect is also
+// covered in redirect-stubs.spec.ts; kept here for the nav-facing regression.)
+test("the removed /try path redirects to the live /app GUI", async ({ page }) => {
   await gotoSettled(page, "try/");
-  expect(new URL(page.url()).pathname).toContain("/try");
-  // [OPUS-4.8] sq-vw3ax — the /try redesign moved the page-identity heading out of the heavy,
-  // lazily-loaded REPL card (the old `<h2>Live SPARQL REPL</h2>`) into a server-rendered hero
-  // `<h1>` ("Your SPARQL workbench.") that paints with the route shell. That deliberate copy
-  // (distinct from the home hero, see try/page.tsx) is the page identity; assert it by a stable
-  // substring — it confirms /try IS the SPARQL workbench/playground destination without waiting
-  // on the wasm REPL chunk to stream in.
-  await expect(
-    page.getByRole("heading", { name: /SPARQL workbench/i }),
-  ).toBeVisible();
+  await page.waitForURL("**/app/**", { timeout: 15_000 });
+  expect(new URL(page.url()).pathname).toContain("/app");
+  await expect(page.getByRole("heading", { name: "App", level: 1 })).toBeVisible();
 });
 
 test("App navigates to the live operational GUI destination", async ({ page }) => {
@@ -126,6 +127,19 @@ test("Download is a reachable destination", async ({ page }) => {
     .click();
   await page.waitForURL("**/download/**", { timeout: 30_000 });
   expect(new URL(page.url()).pathname).toContain("/download");
+});
+
+// [OPUS-4.8] sq-1scgk — "Papers" is promoted into the slim bar (maintainer 2026-07-04 item 9b);
+// assert the new bar link routes to the /papers index (the paper-factory output surface).
+test("Papers is a reachable destination", async ({ page }) => {
+  await gotoSettled(page, "");
+  await page
+    .getByRole("navigation", { name: "Primary" })
+    .first()
+    .getByRole("link", { name: "Papers", exact: true })
+    .click();
+  await page.waitForURL("**/papers/**", { timeout: 30_000 });
+  expect(new URL(page.url()).pathname).toContain("/papers");
 });
 
 test("the legacy /gui path client-redirects to /app", async ({ page }) => {

@@ -1,0 +1,44 @@
+# DASH-style widget-resolution shapes: sh:in enum (EnumSelect), sh:class
+# (InstancesSelect + AutoComplete alternative), nested sh:node (DetailsEditor
+# recursion into an address sub-form), explicit dash:viewer override,
+# dash:rootClass (SubClassEditor), rdf:HTML (RichText).
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+@prefix sh: <http://www.w3.org/ns/shacl#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix dash: <http://datashapes.org/dash#> .
+@prefix ex: <http://example.org/> .
+
+ex:OrderShape a sh:NodeShape ;
+  sh:targetClass ex:Order ;
+  sh:property [
+    sh:path ex:status ; sh:name "Status" ; sh:order 1 ;
+    sh:in ( "draft" "submitted" "shipped" ) ; sh:minCount 1 ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path ex:customer ; sh:name "Customer" ; sh:order 2 ;
+    sh:class ex:Customer ; sh:nodeKind sh:IRI ; sh:minCount 1 ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path ex:shippingAddress ; sh:name "Shipping address" ; sh:order 3 ;
+    sh:node ex:AddressShape ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path ex:category ; sh:name "Category" ; sh:order 4 ;
+    dash:rootClass ex:ProductCategory ; sh:nodeKind sh:IRI ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path ex:invoice ; sh:name "Invoice" ; sh:order 5 ;
+    sh:datatype rdf:HTML ; sh:maxCount 1 ; dash:viewer dash:HTMLViewer ;
+  ] .
+
+ex:AddressShape a sh:NodeShape ;
+  sh:name "Address" ;
+  sh:property [
+    sh:path ex:street ; sh:name "Street" ; sh:order 1 ;
+    sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ;
+  ] ;
+  sh:property [
+    sh:path ex:city ; sh:name "City" ; sh:order 2 ;
+    sh:datatype xsd:string ; sh:minCount 1 ; sh:maxCount 1 ;
+  ] .

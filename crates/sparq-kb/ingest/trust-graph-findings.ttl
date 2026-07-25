@@ -1,0 +1,84 @@
+# trust-graph-findings.ttl — GENERATED from trust-graph-findings.yaml.ld by
+# crates/sparq-kb/ingest/yamlld_compile.py (FO-bridge Phase 4, sq-mztg8.2).
+# DO NOT HAND-EDIT — edit the .yaml.ld authoring source and recompile.
+# 🤖 SPARQ agent [OPUS-4.8]. Conforms to pkg.shapes.ttl (0 violations).
+
+@prefix cito: <http://purl.org/spar/cito/> .
+@prefix dcterms: <http://purl.org/dc/terms/> .
+@prefix fabio: <http://purl.org/spar/fabio/> .
+@prefix kb: <https://sparq.dev/ns/pkg/kb#> .
+@prefix pkg: <https://sparq.dev/ns/pkg#> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+@prefix secx: <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix sigimpl: <https://w3id.org/zkp-sparql/sig-impl#> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+# === Concepts (the V()-resolution catalog) ===
+
+kb:topic-trust-graph-authz a skos:Concept ;
+  skos:inScheme pkg:Topics ;
+  skos:prefLabel "Trust-graph authorisation"@en-GB ;
+  skos:definition "The sq-pfae trust-graph admission program for Solid/LWS — certification-edge closure into effective trust rules, its clear-path honesty constraints, and the sq-qhy4 external-audit gate."@en-GB .
+
+# === Sources ===
+
+kb:doc-research-trust-graph-authorisation-2026-07 a pkg:Source , pkg:Document , fabio:Expression ;
+  dcterms:title "research/trust-graph-authorisation-2026-07.md — trust-graph estate audit + certification-closure design record"@en-GB ;
+  dcterms:identifier "research/trust-graph-authorisation-2026-07.md" ;
+  dcterms:format "text/markdown" ;
+  pkg:exploredStatus pkg:Explored ;
+  pkg:followUpPriority 2 ;
+  pkg:confidence 0.9 ;
+  dcterms:subject kb:topic-trust-graph-authz .
+
+# === Findings (the @graph) ===
+
+kb:find-trust-graph-unlinkability-not-v1 a pkg:Finding ;
+  rdfs:label "Trust-graph unlinkability is NOT a v1 guarantee — ZK/private certification-edge admission is hard-gated on sq-qhy4"@en-GB ;
+  pkg:about kb:topic-trust-graph-authz ;
+  pkg:verdict sigimpl:yes ;
+  sigimpl:justification "Unlinkable or hidden-issuer admission of certification edges is sq-pfae.8 + sq-6syab.5 territory, hard-gated on the open sq-qhy4 gate (external accredited-cryptographer sign-off pending; sparq-mpc is honest-majority semi-honest only); the clear-path trust-graph layer makes no anonymity, unlinkability, or ZK-soundness claim."@en-GB ;
+  pkg:confidence 0.97 ;
+  pkg:assurance secx:Claimed ;
+  prov:wasDerivedFrom kb:doc-research-trust-graph-authorisation-2026-07 ;
+  cito:citesAsEvidence kb:doc-research-trust-graph-authorisation-2026-07 ;
+  dcterms:source "research/trust-graph-authorisation-2026-07.md#2 (explicit non-goals: anything ZK/private)" ;
+  dcterms:subject kb:topic-trust-graph-authz .
+
+kb:find-trust-graph-clear-path a pkg:Finding ;
+  rdfs:label "The trust-graph layer is a clear-path authorisation mechanism — operator-anchored keys and signed attestations, not cryptographic anonymity"@en-GB ;
+  pkg:about kb:topic-trust-graph-authz ;
+  pkg:verdict sigimpl:yes ;
+  sigimpl:justification "The record's load-bearing honesty framing: the trust-graph layer bottoms out in operator-anchored keys and signed attestations, not cryptographic anonymity; signature verification rides the internally re-audited but externally unaudited sparq-zk estate (sq-qhy4 pending), and the whole layer is a research prototype behind default-OFF features."@en-GB ;
+  pkg:confidence 0.97 ;
+  pkg:assurance secx:Claimed ;
+  prov:wasDerivedFrom kb:doc-research-trust-graph-authorisation-2026-07 ;
+  cito:citesAsEvidence kb:doc-research-trust-graph-authorisation-2026-07 ;
+  dcterms:source "research/trust-graph-authorisation-2026-07.md#honesty-framing + #3 soundness posture" ;
+  dcterms:subject kb:topic-trust-graph-authz .
+
+kb:find-trust-graph-closure-decision-record a pkg:Finding ;
+  rdfs:label "The certification-edge closure model — a depth-bounded closure into effective trust rules ahead of the UNCHANGED admission gate — was decided in research/trust-graph-authorisation-2026-07.md"@en-GB ;
+  pkg:about kb:topic-trust-graph-authz ;
+  pkg:verdict sigimpl:yes ;
+  sigimpl:justification "The 2026-07 estate-audit record designs the one net-new increment: evaluating certification edges into the admission decision via a depth-bounded closure with a visited set (a cycle or depth exhaustion denies), the derived effective rules then feeding the unchanged admission gate; the model substrate remains research/solid-trust-graph-authz-design.md (sq-pfae.1, merged) and the prototype ships depth 1."@en-GB ;
+  pkg:confidence 0.95 ;
+  pkg:assurance secx:Claimed ;
+  prov:wasDerivedFrom kb:doc-research-trust-graph-authorisation-2026-07 ;
+  cito:citesAsEvidence kb:doc-research-trust-graph-authorisation-2026-07 ;
+  dcterms:source "research/trust-graph-authorisation-2026-07.md#2 design + #0 corrected premise" ;
+  dcterms:subject kb:topic-trust-graph-authz .
+
+kb:find-trust-graph-mpc-semi-honest a pkg:Finding ;
+  rdfs:label "sparq-mpc remains honest-majority semi-honest only; the trust-graph program asserts no settled cryptographic soundness, privacy, or unlinkability guarantee"@en-GB ;
+  pkg:about kb:topic-trust-graph-authz ;
+  pkg:verdict sigimpl:yes ;
+  sigimpl:justification "Standing discipline inherited by every child bead of the record: the sparq ZK verifier is remediated and internally re-audited but has no external accredited-cryptographer sign-off (open gate sq-qhy4), and sparq-mpc is honest-majority semi-honest only, so nothing in the record asserts a settled cryptographic soundness, privacy, or unlinkability guarantee."@en-GB ;
+  pkg:confidence 0.97 ;
+  pkg:assurance secx:Claimed ;
+  prov:wasDerivedFrom kb:doc-research-trust-graph-authorisation-2026-07 ;
+  cito:citesAsEvidence kb:doc-research-trust-graph-authorisation-2026-07 ;
+  dcterms:source "research/trust-graph-authorisation-2026-07.md#honesty-framing" ;
+  dcterms:subject kb:topic-trust-graph-authz .

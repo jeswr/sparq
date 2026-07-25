@@ -4,8 +4,9 @@
 // artifact). It replaces the heavy full REPL that used to be duplicated on the home page: a
 // LIGHTWEIGHT runner that fits in-fold on the right of the split hero — a two-tab editor
 // (Query | Data, both editable so the sample is inspectable), a big teal Run button bound to
-// Ctrl/Cmd+Enter, and a typed results table below. The full workbench lives at /try; "Open in
-// workbench →" hands the current query + data off there (src/lib/try-handoff.ts).
+// Ctrl/Cmd+Enter, and a typed results table below. The full workbench lives at /app; "Open in
+// workbench →" is a HARD full-page navigation to it (sq-4hiqe: /try was removed, /app is the
+// single workbench; /app is a separate overlaid Next app so a soft nav would fetch its RSC .txt).
 //
 // HONESTY (load-bearing). The idle state is an explicit, dimmed PREVIEW of the expected answer
 // behind a "Preview — press Run to compute it live in your tab" pill — never a fake skeleton and
@@ -20,20 +21,21 @@
 // a first Run before warm-up finishes simply shows a one-time "Starting engine…" substate.
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
 import { Play, Loader2, ArrowRight, ShieldCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { rovingTabIndex, useRovingTablist } from "@/lib/use-roving-tablist";
 import { SparqlEditor } from "@/components/sparql-editor";
 import { RdfEditor } from "@/components/rdf-editor";
 import { ResultCell } from "@/components/repl-result-cells";
+import { isGraphShaped } from "@/lib/result-graph-shape";
 import {
   loadSparq,
   loadIntoStore,
+  datasetSize,
   prewarmSparqWhenIdle,
   type SparqlResults,
-  type SparqlTerm,
 } from "@/lib/sparq-wasm";
 import {
   HERO_SAMPLE_TURTLE,
@@ -42,25 +44,21 @@ import {
   HERO_RESULT_VARS,
   HERO_PREVIEW_ROWS,
 } from "@/data/hero-sample";
-import { writeHandoff } from "@/lib/try-handoff";
+import { withBasePath } from "@/lib/base-path";
+import { isNumericLiteral } from "@/lib/numeric-literal";
 
-const XSD = "http://www.w3.org/2001/XMLSchema#";
-const NUMERIC_XSD = new Set(
-  ["integer", "decimal", "double", "float", "long", "int", "short", "nonNegativeInteger", "positiveInteger"].map(
-    (t) => XSD + t,
-  ),
+// [review #3601] The node-link SVG renderer AND the full node/edge derivation (deriveGraph, which
+// repl-graph-view imports) load through a LITERAL dynamic import() only when the visitor actually
+// switches to the Graph view — neither may sit in this (already-lazy) hero chunk for the majority
+// who never open Graph (site policy: rarely-used net-new frontend code loads on the invocation
+// path). The CHEAP eligibility check that decides whether to even OFFER the toggle stays
+// synchronous — it is `isGraphShaped` (imported above), a cheap capped scan that exactly models
+// deriveGraph's decline conditions (including the MAX_GRAPH_NODES cap) WITHOUT building the
+// node/edge maps — so the Table | Graph toggle still appears the instant a result is graph-shaped,
+// without eagerly running the full derivation for every result.
+const ResultGraphView = React.lazy(() =>
+  import("@/components/repl-graph-view").then((m) => ({ default: m.ResultGraphView })),
 );
-
-/** Whether a term is a numeric literal — used to right-align a numeric result column. */
-function isNumericTerm(t: SparqlTerm | undefined): boolean {
-  return (
-    !!t &&
-    t.type === "literal" &&
-    typeof t.datatype === "string" &&
-    NUMERIC_XSD.has(t.datatype) &&
-    Number.isFinite(Number(t.value))
-  );
-}
 
 /** The first non-empty line of an engine error (keeps the compact strip to one line + any col). */
 function firstErrorLine(err: unknown): string {
@@ -91,7 +89,7 @@ function ResultsTable({
         const t = row[v];
         if (!t) continue;
         sawBound = true;
-        if (!isNumericTerm(t)) allNumeric = false;
+        if (!isNumericLiteral(t)) allNumeric = false;
       }
       m[v] = sawBound && allNumeric;
     }
@@ -183,16 +181,26 @@ function PreviewTable() {
 }
 
 export function HeroQueryRunner() {
-  const router = useRouter();
   const [tab, setTab] = React.useState<"query" | "data">("query");
+  // [FABLE-5] sq-ymr2e.9 — APG tabs keyboard contract (arrow-key roving focus).
+  const tablistKeys = useRovingTablist();
   const [query, setQuery] = React.useState(HERO_DEFAULT_QUERY);
   const [data, setData] = React.useState(HERO_SAMPLE_TURTLE);
 
   const [phase, setPhase] = React.useState<RunnerPhase>("idle");
   const [results, setResults] = React.useState<SparqlResults | null>(null);
   const [ms, setMs] = React.useState<number | null>(null);
+  // [SONNET-4.6] sq-su1oe (#820) — the total triple count in the in-tab store after the most
+  // recent run (default + named graphs via datasetSize). Shown in the proof footer alongside
+  // the result count + timing so visitors can see the dataset size, not just the query output.
+  const [triples, setTriples] = React.useState<number | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [engineReady, setEngineReady] = React.useState(false);
+  // [OPUS-4.8] sq-vw3ax.10 — result view: the typed Table (default) or the node-link Graph. The
+  // Graph toggle only appears when the LIVE result is entity-relationship shaped (isGraphShaped is
+  // true); a non-graph result silently falls back to the table, so a stale "graph" choice can
+  // never render an empty picture.
+  const [resultView, setResultView] = React.useState<"table" | "graph">("table");
 
   // WARM-UP 1: pre-warm on this lazy chunk's hydration, on the next browser-idle slot so it never
   // competes with paint. Cancelled on unmount if it has not fired yet.
@@ -221,6 +229,9 @@ export function HeroQueryRunner() {
       setEngineReady(true);
       // Rebuild the store from the (possibly edited) Data tab each run, so editing data is live.
       const store = loadIntoStore(Store, data, HERO_SAMPLE_FORMAT);
+      // [SONNET-4.6] sq-su1oe (#820) — capture the dataset size for the proof footer.
+      // datasetSize counts the WHOLE dataset (default + named graphs) via a SELECT COUNT(*).
+      setTriples(datasetSize(store));
       const json = store.query(query);
       const parsed = JSON.parse(json) as SparqlResults;
       setResults(parsed);
@@ -268,12 +279,22 @@ export function HeroQueryRunner() {
   );
 
   const openInWorkbench = React.useCallback(() => {
-    writeHandoff({ query, data, format: HERO_SAMPLE_FORMAT });
-    router.push("/try");
-  }, [data, query, router]);
+    // [OPUS-4.8] sq-4hiqe — /app is the single workbench (the in-tab /try REPL was removed). It is
+    // a SEPARATE Next app overlaid at /app/, so hard-navigate the whole page rather than soft-push.
+    window.location.assign(withBasePath("/app/"));
+  }, []);
 
   const running = phase === "running";
   const rowCount = results?.results?.bindings?.length ?? 0;
+  // The node-link Graph view is offered only when the settled result is genuinely graph-shaped. We
+  // run only the CHEAP eligibility predicate here (isGraphShaped) — never the full node/edge
+  // derivation — so the majority who never open Graph don't pay for it; deriveGraph + the SVG
+  // renderer load lazily (ResultGraphView) the first time a visitor actually switches to Graph.
+  const graphAvailable = React.useMemo(
+    () => phase === "done" && results !== null && isGraphShaped(results),
+    [phase, results],
+  );
+  const showGraph = resultView === "graph" && graphAvailable;
 
   return (
     <div
@@ -283,11 +304,14 @@ export function HeroQueryRunner() {
       className="overflow-hidden rounded-xl border border-primary/25 bg-card shadow-elevation-2"
       style={{ boxShadow: "var(--elevation-2), 0 0 0 1px var(--teal-glow)" }}
     >
-      {/* Tabs: Query (default) | Data — both editable, so the sample is inspectable. */}
+      {/* Tabs: Query (default) | Data — both editable, so the sample is inspectable.
+          [FABLE-5] sq-ymr2e.9 — APG tabs keyboard contract: roving tabindex + arrow-key
+          focus movement via the shared hook (asserted by e2e/a11y-keyboard.spec.ts). */}
       <div
         role="tablist"
         aria-label="Runner editor"
         className="flex items-center gap-1 border-b bg-muted/25 px-2 py-1.5"
+        {...tablistKeys}
       >
         {(["query", "data"] as const).map((t) => (
           <button
@@ -297,6 +321,7 @@ export function HeroQueryRunner() {
             role="tab"
             aria-selected={tab === t}
             aria-controls={`hero-panel-${t}`}
+            tabIndex={rovingTabIndex(tab === t)}
             onClick={() => setTab(t)}
             className={cn(
               "rounded-md px-3 py-1 text-xs font-medium capitalize transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
@@ -394,13 +419,55 @@ export function HeroQueryRunner() {
         </div>
       )}
 
+      {/* View toggle: Table (default) | Graph — only when the live result is graph-shaped.
+          [OPUS-4.8] sq-vw3ax.10 — the node-link view for non-aggregate SELECT results, the
+          surviving home of the removed /try Graph view (the /app workbench is the other). */}
+      {graphAvailable && (
+        <div className="flex items-center gap-1 border-t bg-muted/15 px-3 py-1.5">
+          <span className="mr-1 font-mono text-[10px] uppercase tracking-[0.12em] text-muted-foreground">
+            view
+          </span>
+          {(["table", "graph"] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              aria-pressed={resultView === v}
+              onClick={() => setResultView(v)}
+              className={cn(
+                "rounded-md px-2.5 py-0.5 text-xs font-medium capitalize transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/40",
+                resultView === v
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {v}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Results area. */}
       <div className="relative border-t bg-background/40" data-hero-results>
         <div className="overflow-x-auto">
           {phase === "idle" ? (
             <PreviewTable />
           ) : results ? (
-            <ResultsTable results={results} dimmed={running || phase === "error"} />
+            showGraph ? (
+              // Suspense boundary for the lazily-imported renderer; the chunk is small and local,
+              // so the fallback is only briefly visible on the first Graph switch.
+              <React.Suspense
+                fallback={
+                  <div className="flex items-center justify-center gap-2 px-3 py-10 text-xs text-muted-foreground">
+                    <Loader2 className="size-3.5 animate-spin" aria-hidden />
+                    Loading graph view…
+                  </div>
+                }
+              >
+                <ResultGraphView results={results} />
+              </React.Suspense>
+            ) : (
+              <ResultsTable results={results} dimmed={running || phase === "error"} />
+            )
           ) : (
             <PreviewTable />
           )}
@@ -428,8 +495,19 @@ export function HeroQueryRunner() {
 
       {/* Proof footer — only in the results state (the real, measured proof line). */}
       {phase === "done" && ms !== null && (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t bg-muted/15 px-3 py-2 font-mono text-[11px] text-muted-foreground">
+        // [FABLE-5] sq-ymr2e.10 — data-vr-mask: the measured "N results · <t> ms" proof line is
+        // real wall-clock data, so the visual-regression rig masks it (mask, don't chase).
+        // [SONNET-4.6] sq-su1oe (#820) — triple count added: a live, measured figure from
+        // datasetSize(store) (the whole dataset, not just the default graph). Labelled
+        // "triples" not "rows" to distinguish from the SPARQL result-row count.
+        <div
+          data-vr-mask
+          className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t bg-muted/15 px-3 py-2 font-mono text-[11px] text-muted-foreground"
+        >
           <span aria-live="polite">
+            {triples !== null && (
+              <>{triples.toLocaleString()} triple{triples === 1 ? "" : "s"}{" · "}</>
+            )}
             {rowCount} result{rowCount === 1 ? "" : "s"} · {ms.toFixed(1)} ms · in-browser · 0
             network requests
           </span>

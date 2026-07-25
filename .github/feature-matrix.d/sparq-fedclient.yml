@@ -26,3 +26,10 @@
   crate: "sparq-fedclient"
   features: "fedclient"
   test: true
+
+# [GPT-5.6] `pattern_probe` is separately default-OFF and gates its integration
+# test at the crate level, so exercise the feature explicitly in CI.
+- name: "sparq-fedclient (pattern_probe)"
+  crate: "sparq-fedclient"
+  features: "pattern_probe"
+  test: true

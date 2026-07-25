@@ -5,7 +5,8 @@
 // sparq), `docs/`, every crate README/doc, AND (as of sq-rqyo) the `research/` design
 // records + the `zk/` research scaffolds, whose ~97-violation cosmetic backlog (mostly
 // missing code-fence languages) has been cleared. The only carve-out is third-party
-// `vendor/` trees (e.g. `zk/xpath/vendor`), kept in `ignores` below. `bench/` markdown
+// `vendor/` trees (any `**/vendor` subtree) and the vendored ontologies, kept in
+// `ignores` below. `bench/` markdown
 // is still out of HARD scope and is checked ADVISORY-only (whole-repo) so any new
 // backlog there stays visible.
 //
@@ -62,7 +63,9 @@
     "**/target",
     "vendor",
     "**/vendor",
-    "zk/xpath/vendor",
+    // [OPUS-4.8] sq-5reoy: the explicit "zk/xpath/vendor" ignore was dropped — the
+    // zk/xpath tree moved to the sparq-org/noir_XPath face repo (#1599); "**/vendor"
+    // still covers any remaining vendored subtree.
     // Vendored third-party ontologies (sparql-zkp-ontologies, ISWC 2025;
     // MIT-licensed as of 2026-06-21, see the directory LICENSE + PROVENANCE.md).
     // Reproduced verbatim and not reformatted; treat the whole vendored tree as

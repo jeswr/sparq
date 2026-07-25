@@ -1,0 +1,2 @@
+<http://example.org/s> <http://example.org/p> <http://examg/.loerpo> <http://example.org/g> .
+_:b0 <http://example.org/p> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .

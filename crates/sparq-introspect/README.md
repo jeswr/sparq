@@ -12,7 +12,7 @@ a SOTA star-join cardinality estimator).
 ## 🚀 Quickstart
 
 ```rust,ignore
-use sparq_introspect::{Introspection, BuildOptions};
+use sparq_introspect::{facets, FacetRequest, Introspection, BuildOptions};
 
 let ix = Introspection::build(&graph);              // or build_with(&graph, &BuildOptions{..})
 
@@ -33,6 +33,9 @@ ix.schema_summary_for(&seeds, 2500)           // retrieval-mode: schema scoped t
 // Persisted *.introspect sidecar — mine once, summarise forever without rescanning:
 ix.save(sparq_introspect::sidecar_path_for("data/g.nt"))?;        // → data/g.nt.introspect
 let ix = sparq_introspect::Introspection::load("data/g.nt.introspect")?; // O(output) reload
+
+let f = facets(&graph, &FacetRequest { class: Some("http://e/Person".into()),
+    top_k: 10, ..Default::default() }); // grouped type/predicate/value distributions
 ```
 
 ## ✨ Features
@@ -41,6 +44,8 @@ let ix = sparq_introspect::Introspection::load("data/g.nt.introspect")?; // O(ou
   subjects by their *exact* predicate set; each set carries its subject count,
   per-predicate triple counts (avg multiplicity), and the `rdf:type` histogram of its
   subjects. Top sets retained, exact tail aggregates.
+- **Facet counts** (`facets`) — deterministic type/predicate/value distributions; default-off
+  `numeric-facets` adds finite XSD numeric min/max/count plus ten equal-width buckets. [GPT-5.6]
 - **Schema summary** — classes with instance counts; per-class predicate usage with
   subject/triple counts, **coverage ratios**, and **per-class sample object labels**
   (`ClassPredicate::samples`, drawn only from *this* class's triples, so a minority class
@@ -93,8 +98,6 @@ let ix = sparq_introspect::Introspection::load("data/g.nt.introspect")?; // O(ou
   map. Separate opt-in crate: no core crate depends on it, the default build does not compile
   it, and it is read-only over `sparq-core`'s public scan surface.
 
-## Measured results
-
 The `olympics_introspect` example reports load / build / `to_json` / `to_text_summary` time
 over the olympics (1.78M triples) and qlever-synthetic (10M) fixtures (paths via
 `SPARQ_OLYMPICS_NT` / `SPARQ_SYNTHETIC_NT`); the design-doc §4 gates (scan stays within load
@@ -109,11 +112,8 @@ cargo run -p sparq-introspect --example olympics_introspect --release
 
 ## 📚 Learn more
 
-- Design records: [`research/genai-design.md`](../../research/genai-design.md),
-  [`research/genai-ontology-introspection.md`](../../research/genai-ontology-introspection.md)
+- Design: [`research/genai-design.md`](../../research/genai-design.md)
 - W3C VoID: <https://www.w3.org/TR/void/>
-- Perf dashboard: <https://sparq.jeswr.org/dev/bench>
-- Open work for this crate: `bd list -l area:sparq-introspect`
 
 ## License
 

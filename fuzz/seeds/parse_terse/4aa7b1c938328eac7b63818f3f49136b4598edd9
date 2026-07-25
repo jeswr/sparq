@@ -1,0 +1,1 @@
+SELECT ?s WHERE { 5s a <http://example.Œ˜Ð«†š> }

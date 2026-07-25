@@ -48,11 +48,33 @@
 //!   acknowledged record survives a crash.
 //! - **Segmented.** Records roll into a new segment file once the active segment reaches
 //!   [`ChangeLogConfig::segment_target_bytes`], so retention/truncation can drop whole old
-//!   segments (the truncation policy is a later, separate concern — see the deferred bead).
+//!   segments.
+//! - **Retention (truncation).** [FABLE-5] (sq-n9s4d) [`ChangeLog::apply_retention`] drops
+//!   whole OLD segments — oldest-first, never the active segment, never a partial segment —
+//!   under a [`RetentionPolicy`] combining consumer-ack (a HARD safety bound: a segment
+//!   holding any unacked record is never dropped), age, and total-size pressure. Trimming
+//!   preserves the gapless order of everything retained; a [`poll`](ChangeLog::poll) from a
+//!   trimmed-away offset **fails closed** (it never silently skips dropped records) — resume
+//!   from [`first_seq`](ChangeLog::first_seq) instead. Retention is EXPLICIT (the host
+//!   decides when to call it, e.g. periodically or after commits); nothing is dropped by
+//!   default.
 //! - **Replayable after restart.** [`ChangeLog::open`] re-reads every segment in order,
 //!   validates each record's framing + digest (fail-closed on a torn tail — a half-written
 //!   trailing record is truncated, not silently replayed), and resumes appending at the next
 //!   seq. [`ChangeLog::poll`] streams records from any `from_seq` onward.
+//! - **Re-baseline (honest gap).** [FABLE-5] (sq-r2cu1) A BROKEN stream — a dropped record
+//!   after a recording I/O failure (see [`into_commit_hook`](ChangeLog::into_commit_hook)'s
+//!   error policy), or a `Writer::restore` (new lineage; the commit hook deliberately never
+//!   fires) — fail-closes every later [`record_commit`](ChangeLog::record_commit) via the
+//!   discontinuity check. [`ChangeLog::rebase_to`] is the explicit operator resync: it
+//!   appends a **gap record** ([`ChangeRecord::rebase`] `= true`, no changes) honestly
+//!   marking the uncaptured span and re-arms recording from the given generation — the log
+//!   is never wiped, and a consumer replaying past the gap record KNOWS the stream is not a
+//!   complete diff history there (re-bootstrap from a backup at or after the gap's
+//!   generation, then resume). [FABLE-5] (gh-2436) On a RUNNING recorder, rebase through
+//!   [`ChangeLog::into_commit_hook_with_control`]'s [`ChangeStreamControl`] (no stop /
+//!   re-open needed); for a restore that REPLACED the lineage (generation numbering
+//!   restarted), use [`ChangeLog::rebase_to_new_lineage`].
 //!
 //! ## Fail-closed, same digest family as backup
 //!
@@ -65,7 +87,8 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use sparq_core::Graph;
 
@@ -139,6 +162,14 @@ pub struct ChangeRecord {
     pub timestamp_unix_nanos: u128,
     /// The quad-level changes of this commit (inserts first, then deletes — each sorted).
     pub changes: Vec<Change>,
+    /// [FABLE-5] (sq-r2cu1) `true` iff this record is an operator **re-base marker** — an
+    /// HONEST GAP in the stream ([`ChangeLog::rebase_to`]), not a commit diff. The changes
+    /// between the PREVIOUS record's generation and this record's [`generation`](Self::generation)
+    /// were NOT captured (a dropped record after a recording failure, or a `Writer::restore`
+    /// that replaced the lineage); `changes` is empty. A consumer that needs a complete view
+    /// must re-bootstrap (e.g. from a backup at or after this generation) before resuming
+    /// past this record — replaying the gap as "no changes" would be silently wrong.
+    pub rebase: bool,
 }
 
 impl ChangeRecord {
@@ -181,6 +212,54 @@ impl Default for ChangeLogConfig {
     }
 }
 
+/// [FABLE-5] (sq-n9s4d) A retention/truncation policy for [`ChangeLog::apply_retention`]:
+/// which whole OLD segments may be dropped. The three criteria compose as follows:
+///
+/// - [`acked_through_seq`](Self::acked_through_seq) is a **hard safety bound**: when set, a
+///   segment is only ever droppable if EVERY record it holds has `seq <=` the watermark (a
+///   consumer has durably acknowledged it). A segment holding any unacked record — and every
+///   segment after it (prefix rule) — is retained regardless of age/size pressure.
+/// - [`max_age`](Self::max_age) / [`max_total_bytes`](Self::max_total_bytes) are **pressure
+///   criteria**: an eligible segment is dropped if its NEWEST record is older than `max_age`,
+///   OR while the log's total on-disk size still exceeds `max_total_bytes` (oldest first).
+/// - With NO pressure criterion set but an ack watermark set, ack alone drives dropping:
+///   every fully-acked old segment is dropped (the "keep only what consumers still need"
+///   shape).
+///
+/// The default policy (all `None`) is a **no-op** — nothing is ever dropped implicitly.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RetentionPolicy {
+    /// Size pressure: drop oldest eligible segments while the total on-disk size of ALL
+    /// segment files (including the active one) exceeds this many bytes. The active segment
+    /// is never dropped, so the floor is one segment even under a `Some(0)` budget.
+    pub max_total_bytes: Option<u64>,
+    /// Age pressure: a segment whose NEWEST record's commit timestamp is at least this much
+    /// older than "now" is droppable (every record in it is stale).
+    pub max_age: Option<Duration>,
+    /// Consumer-ack watermark (hard safety bound): the highest `seq` every consumer has
+    /// durably processed. A segment holding any record with `seq >` this is never dropped.
+    pub acked_through_seq: Option<u64>,
+}
+
+impl RetentionPolicy {
+    /// `true` iff the policy can never drop anything (all criteria `None`).
+    /// [`ChangeLog::apply_retention`] short-circuits on a no-op policy.
+    pub fn is_noop(&self) -> bool {
+        self.max_total_bytes.is_none() && self.max_age.is_none() && self.acked_through_seq.is_none()
+    }
+}
+
+/// [FABLE-5] (sq-n9s4d) What one [`ChangeLog::apply_retention`] pass actually dropped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RetentionReport {
+    /// Number of whole segment files deleted by this pass.
+    pub segments_dropped: usize,
+    /// Total on-disk bytes reclaimed by this pass.
+    pub bytes_dropped: u64,
+    /// The earliest seq still retained after this pass (== [`ChangeLog::first_seq`]).
+    pub first_retained_seq: u64,
+}
+
 /// The durable, segmented, append-only change-data-capture log over one ring's commit
 /// history. Append with [`record_commit`](Self::record_commit); read with
 /// [`poll`](Self::poll); reopen after a restart with [`open`](Self::open) and resume.
@@ -202,6 +281,10 @@ pub struct ChangeLog {
     active_bytes: u64,
     /// The seq the NEXT recorded commit will get. `0` for a fresh, empty log.
     next_seq: u64,
+    /// The earliest seq still retained on disk — `0` until retention drops a segment, then
+    /// the first seq of the oldest surviving segment. Recovered from the segment filenames
+    /// on [`open`](Self::open).
+    first_seq: u64,
     /// The generation of the last recorded commit (`None` for an empty log), used to reject
     /// a non-forward commit.
     last_generation: Option<u64>,
@@ -234,8 +317,11 @@ impl ChangeLog {
         segments.sort_by_key(|(seq, _)| *seq);
 
         // Recover the stream by reading every segment in order; the last record's seq + the
-        // recovered next-seq / last-generation drive resumed appends.
-        let mut next_seq = 0u64;
+        // recovered next-seq / last-generation drive resumed appends. A retention-trimmed
+        // log no longer starts at seq 0: the stream (and the seq validation) starts at the
+        // oldest RETAINED segment's filename key.
+        let first_seq = segments.first().map(|(seq, _)| *seq).unwrap_or(0);
+        let mut next_seq = first_seq;
         let mut last_generation: Option<u64> = None;
         let mut active_first_seq = 0u64;
         let mut active_path: Option<PathBuf> = None;
@@ -275,6 +361,7 @@ impl ChangeLog {
             active_first_seq,
             active_bytes,
             next_seq,
+            first_seq,
             last_generation,
         })
     }
@@ -288,6 +375,135 @@ impl ChangeLog {
     /// The generation of the last recorded commit, or `None` for an empty log.
     pub fn last_generation(&self) -> Option<u64> {
         self.last_generation
+    }
+
+    /// [FABLE-5] (sq-n9s4d) The earliest seq still retained on disk — `0` until
+    /// [`apply_retention`](Self::apply_retention) drops a segment. A consumer whose resume
+    /// offset was trimmed away (its [`poll`](Self::poll) fails closed) restarts from here.
+    pub fn first_seq(&self) -> u64 {
+        self.first_seq
+    }
+
+    /// [FABLE-5] (sq-n9s4d) Applies `policy` (see [`RetentionPolicy`] for how the criteria
+    /// compose) against the wall clock, dropping whole OLD segments oldest-first. Equivalent
+    /// to [`apply_retention_at`](Self::apply_retention_at) with `now` = the current time.
+    ///
+    /// Only this handle's view is mutated ([`first_seq`](Self::first_seq)); a concurrent
+    /// reader handle observes the trim through its next `poll` (which re-reads the
+    /// directory). Never touches the active segment, so appends continue unaffected.
+    pub fn apply_retention(
+        &mut self,
+        policy: &RetentionPolicy,
+    ) -> Result<RetentionReport, BackupError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        self.apply_retention_at(policy, now)
+    }
+
+    /// [FABLE-5] (sq-n9s4d) [`apply_retention`](Self::apply_retention) with an explicit
+    /// `now` (nanoseconds since the Unix epoch, the same clock as
+    /// [`ChangeRecord::timestamp_unix_nanos`]) — the deterministic core, for hosts/tests
+    /// that inject time.
+    ///
+    /// Drops a PREFIX of whole segments, oldest-first, stopping at the first segment that
+    /// must be kept (so the retained stream stays gapless) and never touching the active
+    /// segment. A segment is dropped iff:
+    /// 1. every record it holds is acked (when [`RetentionPolicy::acked_through_seq`] is
+    ///    set — the hard safety bound), AND
+    /// 2. a pressure criterion trips — its newest record is older than
+    ///    [`RetentionPolicy::max_age`], or the log's total size still exceeds
+    ///    [`RetentionPolicy::max_total_bytes`] — or NO pressure criterion is configured
+    ///    (pure-ack mode).
+    ///
+    /// A no-op policy returns immediately with nothing dropped.
+    pub fn apply_retention_at(
+        &mut self,
+        policy: &RetentionPolicy,
+        now_unix_nanos: u128,
+    ) -> Result<RetentionReport, BackupError> {
+        let mut report = RetentionReport {
+            segments_dropped: 0,
+            bytes_dropped: 0,
+            first_retained_seq: self.first_seq,
+        };
+        if policy.is_noop() {
+            return Ok(report);
+        }
+
+        let mut segments = segment_files(&self.dir)?;
+        segments.sort_by_key(|(seq, _)| *seq);
+
+        // Total on-disk size of ALL segment files (including the active one) — the quantity
+        // the `max_total_bytes` budget is checked against, updated as segments drop.
+        let mut total_bytes = 0u64;
+        for (_, path) in &segments {
+            total_bytes += fs::metadata(path)?.len();
+        }
+
+        let has_pressure = policy.max_age.is_some() || policy.max_total_bytes.is_some();
+        // `windows(2)` pairs each segment with its successor, so (a) the LAST segment — the
+        // active one — is never a drop candidate, and (b) the successor's first seq bounds
+        // the candidate's record range: a segment keyed `first` whose successor is keyed
+        // `next_first` holds exactly seqs `first..next_first` (the stream is gapless).
+        for pair in segments.windows(2) {
+            let (first, path) = &pair[0];
+            let (next_first, _) = &pair[1];
+            if *first == self.active_first_seq {
+                break; // defence-in-depth: never drop the active segment
+            }
+            let last_seq = next_first - 1;
+
+            // 1. Hard safety bound: every record in the segment must be acked.
+            if let Some(acked) = policy.acked_through_seq {
+                if last_seq > acked {
+                    break; // an unacked record: keep this segment and everything after it
+                }
+            }
+
+            // 2. Pressure: age/size when configured; pure-ack mode drops every acked prefix.
+            let drop = if has_pressure {
+                let by_size = policy
+                    .max_total_bytes
+                    .is_some_and(|budget| total_bytes > budget);
+                let by_age = match policy.max_age {
+                    None => false,
+                    Some(age) => {
+                        // Re-read the segment (validated) to find its newest record's
+                        // timestamp; retention traffic is bounded by retention itself.
+                        let (_, records) = recover_segment(path, *first)?;
+                        match records.last() {
+                            // A sealed segment always holds >= 1 record; an empty one is
+                            // anomalous — keep it (fail-safe) rather than guess its age.
+                            None => false,
+                            Some(newest) => {
+                                newest
+                                    .timestamp_unix_nanos
+                                    .saturating_add(age.as_nanos())
+                                    <= now_unix_nanos
+                            }
+                        }
+                    }
+                };
+                by_size || by_age
+            } else {
+                true
+            };
+            if !drop {
+                break; // prefix rule: the retained stream must stay gapless
+            }
+
+            let len = fs::metadata(path)?.len();
+            fs::remove_file(path)?;
+            total_bytes -= len;
+            report.segments_dropped += 1;
+            report.bytes_dropped += len;
+            self.first_seq = *next_first;
+        }
+
+        report.first_retained_seq = self.first_seq;
+        Ok(report)
     }
 
     /// Records ONE commit — the change between the same-lineage `from` and `to` generations
@@ -334,6 +550,85 @@ impl ChangeLog {
             generation: to.number(),
             timestamp_unix_nanos,
             changes,
+            rebase: false,
+        };
+
+        self.append(&record)?;
+        self.next_seq = record.seq + 1;
+        self.last_generation = Some(record.generation);
+        Ok(record)
+    }
+
+    /// [FABLE-5] (sq-r2cu1) **Explicit operator re-base** — the resync primitive for a
+    /// BROKEN stream. Once a record is dropped (a recording I/O failure inside
+    /// [`into_commit_hook`](Self::into_commit_hook)) or a `Writer::restore` replaces the
+    /// lineage (the hook deliberately never fires for a restore publish),
+    /// [`last_generation`](Self::last_generation) stops matching the writer's next commit
+    /// and the discontinuity check fail-closes EVERY later
+    /// [`record_commit`](Self::record_commit). This appends an honest **gap record**
+    /// ([`ChangeRecord::rebase`] `= true`, empty changes, `generation` = the new baseline)
+    /// and re-arms recording: the next `record_commit` must start `from` exactly
+    /// `generation`. The log is never wiped — everything already recorded stays replayable,
+    /// and a consumer replaying past the gap record knows the span
+    /// `(previous generation, generation]` was NOT captured (re-bootstrap from a
+    /// [`backup`](crate::backup) at or after `generation`, then resume).
+    ///
+    /// `generation` is the generation the stream re-baselines TO — typically the ring's
+    /// CURRENT generation number at the moment the operator resyncs (the next commits will
+    /// chain forward from it). Fail-closed ([`BackupError::Format`], nothing appended) when
+    /// the stream would not move forward: `generation` must be strictly greater than the
+    /// last recorded generation (an equal generation means the stream is not broken there —
+    /// `record_commit` already chains — so a "re-base" to it is operator error, not a gap).
+    /// On an EMPTY log this sets the stream's explicit starting baseline.
+    ///
+    /// Single-writer discipline: call this on THE append handle. If the log has been
+    /// consumed into a commit hook ([`into_commit_hook`](Self::into_commit_hook)), use
+    /// [`into_commit_hook_with_control`](Self::into_commit_hook_with_control) instead — its
+    /// control handle rebases the LIVE log, serialized with the recorder — or stop the
+    /// recorder and re-open the directory (a second concurrent append handle is outside
+    /// the single-writer contract).
+    pub fn rebase_to(&mut self, generation: u64) -> Result<ChangeRecord, BackupError> {
+        if let Some(last) = self.last_generation {
+            if generation <= last {
+                return Err(BackupError::Format(format!(
+                    "rebase must move the stream forward: last recorded generation {} >= \
+                     rebase generation {}",
+                    last, generation
+                )));
+            }
+        }
+        self.append_gap(generation)
+    }
+
+    /// [FABLE-5] (gh-2436) [`rebase_to`](Self::rebase_to) for a **replaced writer lineage**
+    /// whose generation numbering RESTARTED — the post-restore resync. sparq-server's online
+    /// restore installs a fresh ring that restarts at generation 0, so the new baseline is
+    /// typically NOT strictly greater than the last recorded generation and the same-lineage
+    /// forward-only check in [`rebase_to`](Self::rebase_to) would reject it forever. This
+    /// variant appends the same honest gap record with NO forward check: the caller asserts
+    /// the lineage (and thus the numbering) was replaced. Record `seq`s still advance
+    /// monotonically — only the `generation` column may restart, exactly as it did
+    /// server-side. On a same-lineage stream prefer [`rebase_to`](Self::rebase_to): its
+    /// forward-only check catches an operator re-basing into already-recorded history.
+    pub fn rebase_to_new_lineage(&mut self, generation: u64) -> Result<ChangeRecord, BackupError> {
+        self.append_gap(generation)
+    }
+
+    /// Appends the honest **gap record** (`rebase = true`, empty changes) that re-arms
+    /// recording from `generation` — shared by [`rebase_to`](Self::rebase_to) (forward-only,
+    /// same lineage) and [`rebase_to_new_lineage`](Self::rebase_to_new_lineage) (numbering
+    /// restarted).
+    fn append_gap(&mut self, generation: u64) -> Result<ChangeRecord, BackupError> {
+        let timestamp_unix_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let record = ChangeRecord {
+            seq: self.next_seq,
+            generation,
+            timestamp_unix_nanos,
+            changes: Vec::new(),
+            rebase: true,
         };
 
         self.append(&record)?;
@@ -390,8 +685,118 @@ impl ChangeLog {
     ///
     /// This is the resume primitive: after a restart a consumer that persisted its last-seen
     /// `seq` calls `poll(last_seen + 1)` and continues exactly where it left off.
+    ///
+    /// [FABLE-5] (sq-n9s4d) If `from_seq` precedes the earliest RETAINED record (older
+    /// segments were dropped by [`apply_retention`](Self::apply_retention)), the poll
+    /// **fails closed** with [`BackupError::Format`] rather than silently skipping the
+    /// dropped records — a consumer that cannot tolerate the gap must handle it explicitly
+    /// (e.g. re-bootstrap from a [`backup`](crate::backup), then resume from
+    /// [`first_seq`](Self::first_seq)).
     pub fn poll(&self, from_seq: u64) -> Result<Vec<ChangeRecord>, BackupError> {
         read_from(&self.dir, from_seq)
+    }
+
+    /// [FABLE-5] (sq-bdaw5) Consumes the log into a **commit hook** for
+    /// [`Writer::spawn_with_commit_hook`](crate::Writer::spawn_with_commit_hook): every
+    /// commit the writer publishes is recorded via [`record_commit`](Self::record_commit)
+    /// ON THE WRITER THREAD — once per published generation, so recording rides the
+    /// group-commit batch instead of serialising submitters (the pre-hook wiring held a
+    /// caller-side `Mutex<ChangeLog>` across `submit`, forcing one commit per recording
+    /// update while the stream was on). The writer being the ring's sole publisher is
+    /// exactly what makes the recorded `(from, to)` pairs gapless and monotonic — the
+    /// [`record_commit`](Self::record_commit) contract — with no lock anywhere.
+    ///
+    /// **Error policy (a recording failure never fails the write):** by the time the
+    /// hook runs, the commit is already published (and, for a durable applier, already
+    /// durably sealed) — so a recording failure must not reject or roll back the write.
+    /// The failed append is DROPPED and reported to `on_error` (surface it to the
+    /// operator's log). Fail-closed honesty is preserved downstream: the log's
+    /// [`last_generation`](Self::last_generation) does not advance on a dropped record,
+    /// so the NEXT [`record_commit`](Self::record_commit) fails its discontinuity check
+    /// (and every later one, until the log is re-based) rather than silently papering
+    /// over the gap — `on_error` keeps firing, never a quietly incomplete stream.
+    /// Re-baselining a broken stream (as after a [`Writer::restore`](crate::Writer::restore),
+    /// which also breaks lineage and deliberately never fires the hook) is a separate,
+    /// explicit operator action: stop the recorder, re-open the log directory, and
+    /// [`rebase_to`](Self::rebase_to) the writer's current generation (sq-r2cu1) — the gap
+    /// record marks the uncaptured span honestly and recording resumes without wiping
+    /// the log.
+    ///
+    /// The hook performs the append + fsync on the writer thread, adding one record
+    /// write per generation to write-ack latency (amortised across the whole batch).
+    pub fn into_commit_hook<E>(
+        mut self,
+        mut on_error: E,
+    ) -> impl FnMut(&Generation<Graph>, &Generation<Graph>) + Send
+    where
+        E: FnMut(&BackupError) + Send,
+    {
+        move |from, to| {
+            if let Err(e) = self.record_commit(from, to) {
+                on_error(&e);
+            }
+        }
+    }
+
+    /// [FABLE-5] (gh-2436) [`into_commit_hook`](Self::into_commit_hook) plus an **operator
+    /// control handle** over the SAME live log. Plain `into_commit_hook` consumes the append
+    /// handle into the hook closure, so re-baselining a broken stream on a running server
+    /// used to require stopping the recorder and re-opening the directory offline. Here the
+    /// log instead lives behind one shared mutex: the returned hook locks it per recorded
+    /// commit (uncontended in the single-writer steady state — the cost is noise next to
+    /// the per-record fsync), and the returned [`ChangeStreamControl`] locks it to run
+    /// [`rebase_to`](Self::rebase_to) / [`rebase_to_new_lineage`](Self::rebase_to_new_lineage)
+    /// WITHOUT stopping the recorder. Same hook semantics and error policy as
+    /// `into_commit_hook` otherwise.
+    pub fn into_commit_hook_with_control<E>(
+        self,
+        mut on_error: E,
+    ) -> (
+        impl FnMut(&Generation<Graph>, &Generation<Graph>) + Send,
+        ChangeStreamControl,
+    )
+    where
+        E: FnMut(&BackupError) + Send,
+    {
+        let log = Arc::new(Mutex::new(self));
+        let hook_log = Arc::clone(&log);
+        let hook = move |from: &Generation<Graph>, to: &Generation<Graph>| {
+            let mut log = hook_log.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Err(e) = log.record_commit(from, to) {
+                on_error(&e);
+            }
+        };
+        (hook, ChangeStreamControl { log })
+    }
+}
+
+/// [FABLE-5] (gh-2436) Cloneable operator control handle over a [`ChangeLog`] that has been
+/// consumed into a live commit hook via
+/// [`into_commit_hook_with_control`](ChangeLog::into_commit_hook_with_control). Every call
+/// is serialized with the recording hook on the shared log mutex, so the single-writer
+/// append discipline holds without stopping the recorder. A rebase that loses the race with
+/// an in-flight commit stays honest either way: the commit either chains from the new
+/// baseline or is dropped fail-closed (reported to the hook's `on_error`), never silently
+/// mis-diffed — retry the rebase if the stream is still broken.
+#[derive(Clone)]
+pub struct ChangeStreamControl {
+    log: Arc<Mutex<ChangeLog>>,
+}
+
+impl ChangeStreamControl {
+    /// [`ChangeLog::rebase_to`] on the live log — the same-lineage, forward-only resync.
+    pub fn rebase_to(&self, generation: u64) -> Result<ChangeRecord, BackupError> {
+        self.lock().rebase_to(generation)
+    }
+
+    /// [`ChangeLog::rebase_to_new_lineage`] on the live log — the post-restore resync for a
+    /// replaced lineage whose generation numbering restarted.
+    pub fn rebase_to_new_lineage(&self, generation: u64) -> Result<ChangeRecord, BackupError> {
+        self.lock().rebase_to_new_lineage(generation)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ChangeLog> {
+        self.log.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -402,8 +807,20 @@ fn read_from(dir: &Path, from_seq: u64) -> Result<Vec<ChangeRecord>, BackupError
     let mut segments = segment_files(dir)?;
     segments.sort_by_key(|(seq, _)| *seq);
 
+    // [FABLE-5] (sq-n9s4d) The stream starts at the oldest RETAINED segment's key (0 for a
+    // never-trimmed log). Asking for records BEFORE that is fail-closed: retention dropped
+    // them, and silently resuming later would violate the gapless-replay contract.
+    let earliest = segments.first().map(|(seq, _)| *seq).unwrap_or(0);
+    if from_seq < earliest {
+        return Err(BackupError::Format(format!(
+            "poll offset {} precedes the earliest retained record {} — older segments were \
+             dropped by retention; resume at or after the earliest retained seq",
+            from_seq, earliest
+        )));
+    }
+
     let mut out = Vec::new();
-    let mut expected_seq = 0u64;
+    let mut expected_seq = earliest;
     for (_first_seq, path) in &segments {
         let (_end, recovered) = recover_segment(path, expected_seq)?;
         for rec in recovered {
@@ -528,6 +945,13 @@ fn encode_record_body(record: &ChangeRecord) -> String {
     s.push_str(&format!("seq {}\n", record.seq));
     s.push_str(&format!("generation {}\n", record.generation));
     s.push_str(&format!("timestamp {}\n", record.timestamp_unix_nanos));
+    // [FABLE-5] (sq-r2cu1) The re-base gap marker is an OPTIONAL header line, emitted only
+    // when set — every pre-rebase record body (and its digest) stays byte-identical, and a
+    // reader that predates the marker fails closed on the unknown key rather than replaying
+    // a gap record as an ordinary empty commit.
+    if record.rebase {
+        s.push_str("rebase 1\n");
+    }
     s.push_str(&format!("inserts {}\n", ins));
     s.push_str(&format!("deletes {}\n", del));
     for c in &record.changes {
@@ -548,6 +972,7 @@ fn decode_record_body(body: &str, path: &Path) -> Result<ChangeRecord, BackupErr
     let mut timestamp: Option<u128> = None;
     let mut declared_inserts: Option<usize> = None;
     let mut declared_deletes: Option<usize> = None;
+    let mut rebase = false;
 
     let mut change_lines: Vec<&str> = Vec::new();
     let mut in_changes = false;
@@ -560,6 +985,21 @@ fn decode_record_body(body: &str, path: &Path) -> Result<ChangeRecord, BackupErr
                 "seq" => seq = Some(parse_num(val, "seq", path)?),
                 "generation" => generation = Some(parse_num(val, "generation", path)?),
                 "timestamp" => timestamp = Some(parse_u128(val, "timestamp", path)?),
+                // [FABLE-5] (sq-r2cu1) Optional re-base gap marker (absent = ordinary
+                // commit record). Only the exact values `1`/`0` decode — anything else is
+                // fail-closed corruption, never a silent default.
+                "rebase" => {
+                    rebase = match val {
+                        "1" => true,
+                        "0" => false,
+                        _ => {
+                            return Err(BackupError::Corrupt(format!(
+                                "invalid `rebase` value {:?} in {:?}",
+                                val, path
+                            )))
+                        }
+                    }
+                }
                 "inserts" => declared_inserts = Some(parse_usize(val, "inserts", path)?),
                 "deletes" => {
                     declared_deletes = Some(parse_usize(val, "deletes", path)?);
@@ -624,6 +1064,7 @@ fn decode_record_body(body: &str, path: &Path) -> Result<ChangeRecord, BackupErr
         generation,
         timestamp_unix_nanos: timestamp,
         changes,
+        rebase,
     })
 }
 
@@ -1240,6 +1681,7 @@ mod tests {
                     quad: "<http://ex/x> <http://ex/y> <http://ex/z> .".to_string(),
                 },
             ],
+            rebase: false,
         };
         let tmp = scratch("wellformed");
         let _ = fs::remove_dir_all(&tmp);
@@ -1374,6 +1816,689 @@ mod tests {
         let tail = reader.poll(1).expect("reader resume");
         assert_eq!(tail.len(), 2);
         assert_eq!(tail[0].seq, 1);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // [FABLE-5] (sq-n9s4d) Retention/truncation coverage. Each test is mutation-
+    // witnessed: the comment names the specific regression that would turn it red.
+    // -----------------------------------------------------------------------
+
+    /// Builds a log with `n` records, ONE PER SEGMENT (`segment_target_bytes: 1`), so
+    /// retention has n segments to work with (the last is active). Returns the writer
+    /// handle, the ring, and the current (latest) generation for follow-on commits.
+    fn one_record_segments(
+        tmp: &Path,
+        n: u64,
+    ) -> (ChangeLog, GenerationRing<Graph>, std::sync::Arc<Generation<Graph>>) {
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let mut prev = ring.current();
+        let config = ChangeLogConfig {
+            segment_target_bytes: 1,
+            fsync: false,
+        };
+        let mut log = ChangeLog::open_with_config(tmp, config).expect("open");
+        for i in 0..n {
+            let next = ring.publish(
+                graph_with(&format!(
+                    "<http://ex/s{}> <http://ex/p> <http://ex/o{}> .\n",
+                    i, i
+                )),
+                [],
+            );
+            log.record_commit(&prev, &next).expect("record");
+            prev = next;
+        }
+        (log, ring, prev)
+    }
+
+    /// The default policy is a NO-OP and `first_seq` starts at 0 — nothing is ever dropped
+    /// implicitly. Direct unit tests for `RetentionPolicy::is_noop`, `ChangeLog::first_seq`,
+    /// and the no-op early-return arm of `apply_retention_at`. A regression that made the
+    /// empty policy drop segments (e.g. `is_noop` inverted, or pure-ack mode firing with no
+    /// ack set) turns this red.
+    #[test]
+    fn default_retention_policy_is_noop() {
+        assert!(RetentionPolicy::default().is_noop());
+        assert!(!RetentionPolicy {
+            max_total_bytes: Some(0),
+            ..Default::default()
+        }
+        .is_noop());
+        assert!(!RetentionPolicy {
+            max_age: Some(Duration::from_secs(1)),
+            ..Default::default()
+        }
+        .is_noop());
+        assert!(!RetentionPolicy {
+            acked_through_seq: Some(0),
+            ..Default::default()
+        }
+        .is_noop());
+
+        let tmp = scratch("noop");
+        let _ = fs::remove_dir_all(&tmp);
+        let (mut log, _ring, _g) = one_record_segments(&tmp, 4);
+        assert_eq!(log.first_seq(), 0, "fresh log starts at seq 0");
+        let report = log
+            .apply_retention_at(&RetentionPolicy::default(), u128::MAX)
+            .expect("noop retention");
+        assert_eq!(report.segments_dropped, 0);
+        assert_eq!(report.bytes_dropped, 0);
+        assert_eq!(report.first_retained_seq, 0);
+        assert_eq!(segment_files(&tmp).expect("list").len(), 4, "all kept");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Pure-ack retention (no pressure criteria): every FULLY-acked prefix segment is
+    /// dropped, the first partially/un-acked one stops the pass, and the report's byte
+    /// accounting equals the dropped files' actual sizes. Regressions witnessed: dropping
+    /// past the ack watermark (safety-bound check removed), off-by-one on a segment's
+    /// last seq, or bytes accounted from the wrong files.
+    #[test]
+    fn ack_retention_drops_fully_acked_prefix() {
+        let tmp = scratch("ack");
+        let _ = fs::remove_dir_all(&tmp);
+        let (mut log, _ring, _g) = one_record_segments(&tmp, 5); // segs 0..4, active = 4
+        let expected_bytes: u64 = (0..3)
+            .map(|s| fs::metadata(segment_path(&tmp, s)).expect("meta").len())
+            .sum();
+
+        let report = log
+            .apply_retention(&RetentionPolicy {
+                acked_through_seq: Some(2),
+                ..Default::default()
+            })
+            .expect("ack retention");
+        // Segments holding seqs 0, 1, 2 are fully acked -> dropped; seq 3 is not acked.
+        assert_eq!(report.segments_dropped, 3);
+        assert_eq!(report.bytes_dropped, expected_bytes);
+        assert_eq!(report.first_retained_seq, 3);
+        assert_eq!(log.first_seq(), 3);
+        assert_eq!(segment_files(&tmp).expect("list").len(), 2);
+        // The retained tail replays exactly (seqs 3 and 4).
+        let tail = log.poll(3).expect("poll retained tail");
+        assert_eq!(tail.len(), 2);
+        assert_eq!((tail[0].seq, tail[1].seq), (3, 4));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A segment holding ANY unacked record is never dropped — the hard safety bound at
+    /// sub-segment granularity. Seg 0 holds seqs {0,1}; acking only seq 0 must keep it,
+    /// acking through seq 1 drops it. A regression that compared the segment's FIRST seq
+    /// to the watermark (instead of its last) would drop the half-acked segment and turn
+    /// the first phase red.
+    #[test]
+    fn ack_never_drops_partially_acked_segment() {
+        let tmp = scratch("ackpart");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let mut prev = ring.current();
+        // Phase 1: a BIG segment target packs seqs 0 and 1 into segment 0.
+        {
+            let mut log = ChangeLog::open_with_config(
+                &tmp,
+                ChangeLogConfig {
+                    segment_target_bytes: 1_000_000,
+                    fsync: false,
+                },
+            )
+            .expect("open big");
+            for i in 0..2u64 {
+                let next = ring.publish(
+                    graph_with(&format!(
+                        "<http://ex/s{}> <http://ex/p> <http://ex/o{}> .\n",
+                        i, i
+                    )),
+                    [],
+                );
+                log.record_commit(&prev, &next).expect("record");
+                prev = next;
+            }
+        }
+        // Phase 2: reopen with a TINY target so seqs 2 and 3 land in their own segments.
+        let mut log = ChangeLog::open_with_config(
+            &tmp,
+            ChangeLogConfig {
+                segment_target_bytes: 1,
+                fsync: false,
+            },
+        )
+        .expect("reopen tiny");
+        for i in 2..4u64 {
+            let next = ring.publish(
+                graph_with(&format!(
+                    "<http://ex/s{}> <http://ex/p> <http://ex/o{}> .\n",
+                    i, i
+                )),
+                [],
+            );
+            log.record_commit(&prev, &next).expect("record");
+            prev = next;
+        }
+        assert_eq!(segment_files(&tmp).expect("list").len(), 3); // {0,1} {2} {3=active}
+
+        // Ack only seq 0: segment 0 also holds the UNACKED seq 1 -> nothing droppable.
+        let report = log
+            .apply_retention(&RetentionPolicy {
+                acked_through_seq: Some(0),
+                ..Default::default()
+            })
+            .expect("partial ack");
+        assert_eq!(report.segments_dropped, 0, "half-acked segment must survive");
+        assert_eq!(log.first_seq(), 0);
+
+        // Ack through seq 1: segment 0 is now fully acked -> dropped; seq 2 is not acked.
+        let report = log
+            .apply_retention(&RetentionPolicy {
+                acked_through_seq: Some(1),
+                ..Default::default()
+            })
+            .expect("full ack");
+        assert_eq!(report.segments_dropped, 1);
+        assert_eq!(log.first_seq(), 2);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Size pressure drops oldest-first until the total is within budget, and NEVER drops
+    /// the active segment even under a zero budget; appends continue cleanly afterwards.
+    /// Regressions witnessed: budget compared against the wrong total (drops too many /
+    /// too few), or the active segment entering the candidate set (the zero-budget phase
+    /// would empty the log and the follow-on commit would fail).
+    #[test]
+    fn size_retention_drops_oldest_until_within_budget() {
+        let tmp = scratch("size");
+        let _ = fs::remove_dir_all(&tmp);
+        let (mut log, ring, g4) = one_record_segments(&tmp, 4); // segs 0..3, active = 3
+        let total: u64 = segment_files(&tmp)
+            .expect("list")
+            .iter()
+            .map(|(_, p)| fs::metadata(p).expect("meta").len())
+            .sum();
+
+        // Budget = total - 1: dropping ONE segment (the oldest) is enough to fit.
+        let report = log
+            .apply_retention(&RetentionPolicy {
+                max_total_bytes: Some(total - 1),
+                ..Default::default()
+            })
+            .expect("size retention");
+        assert_eq!(report.segments_dropped, 1, "one segment suffices");
+        assert_eq!(log.first_seq(), 1);
+
+        // Budget = 0: everything except the active segment goes; the log stays usable.
+        let report = log
+            .apply_retention(&RetentionPolicy {
+                max_total_bytes: Some(0),
+                ..Default::default()
+            })
+            .expect("zero budget");
+        assert_eq!(report.segments_dropped, 2);
+        assert_eq!(log.first_seq(), 3);
+        assert_eq!(
+            segment_files(&tmp).expect("list").len(),
+            1,
+            "only the active segment survives a zero budget"
+        );
+        // Appends continue after aggressive truncation.
+        let g5 = ring.publish(
+            graph_with("<http://ex/s9> <http://ex/p> <http://ex/o9> .\n"),
+            [],
+        );
+        let rec = log.record_commit(&g4, &g5).expect("append after retention");
+        assert_eq!(rec.seq, 4);
+        let tail = log.poll(3).expect("poll retained");
+        assert_eq!(tail.len(), 2);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Age pressure via the deterministic `apply_retention_at`: with `now` before every
+    /// record's cutoff nothing is dropped; with `now` far in the future every non-active
+    /// segment is dropped. A flipped age comparison turns the first phase red (everything
+    /// would be "stale" at now=0); ignoring `max_age` entirely turns the second phase red.
+    #[test]
+    fn age_retention_drops_only_stale_segments() {
+        let tmp = scratch("age");
+        let _ = fs::remove_dir_all(&tmp);
+        let (mut log, _ring, _g) = one_record_segments(&tmp, 3); // segs 0..2, active = 2
+        let policy = RetentionPolicy {
+            max_age: Some(Duration::from_nanos(1_000)),
+            ..Default::default()
+        };
+
+        // now = 0: no record can be 1000ns old yet (timestamps are real wall-clock nanos).
+        let report = log.apply_retention_at(&policy, 0).expect("young");
+        assert_eq!(report.segments_dropped, 0, "nothing is stale at now=0");
+
+        // now = far future: every non-active segment's newest record is long stale.
+        let report = log.apply_retention_at(&policy, u128::MAX).expect("stale");
+        assert_eq!(report.segments_dropped, 2);
+        assert_eq!(log.first_seq(), 2);
+        assert_eq!(
+            segment_files(&tmp).expect("list").len(),
+            1,
+            "the active segment is kept even when stale"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// The ack watermark BOUNDS size pressure: a zero byte budget wants everything gone,
+    /// but only the fully-acked prefix may go. A regression that let a pressure criterion
+    /// bypass the ack safety bound would drop 2 segments here instead of 1.
+    #[test]
+    fn ack_bounds_size_pressure() {
+        let tmp = scratch("ackbound");
+        let _ = fs::remove_dir_all(&tmp);
+        let (mut log, _ring, _g) = one_record_segments(&tmp, 3); // segs 0..2, active = 2
+        let report = log
+            .apply_retention(&RetentionPolicy {
+                max_total_bytes: Some(0),
+                acked_through_seq: Some(0),
+                ..Default::default()
+            })
+            .expect("bounded");
+        assert_eq!(report.segments_dropped, 1, "only the acked seg 0 may go");
+        assert_eq!(log.first_seq(), 1);
+        assert_eq!(segment_files(&tmp).expect("list").len(), 2);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Polling from a trimmed-away offset FAILS CLOSED (never a silent skip), on the
+    /// trimming handle AND on a separate reader handle over the same directory. A
+    /// regression that made `poll` silently start at the trim horizon would return Ok
+    /// here and turn both phases red.
+    #[test]
+    fn poll_before_trim_horizon_fails_closed() {
+        let tmp = scratch("horizon");
+        let _ = fs::remove_dir_all(&tmp);
+        let (mut log, _ring, _g) = one_record_segments(&tmp, 4);
+        log.apply_retention(&RetentionPolicy {
+            acked_through_seq: Some(1),
+            ..Default::default()
+        })
+        .expect("trim");
+        assert_eq!(log.first_seq(), 2);
+
+        let err = err_of(log.poll(0));
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+        let err = err_of(log.poll(1));
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+        // The horizon itself and everything after it still replay.
+        assert_eq!(log.poll(2).expect("poll horizon").len(), 2);
+
+        // A SEPARATE reader handle observes the same fail-closed horizon from disk.
+        let reader = ChangeLog::open(&tmp).expect("reader");
+        let err = err_of(reader.poll(0));
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+        assert_eq!(reader.poll(2).expect("reader poll").len(), 2);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A trimmed log REOPENS correctly: `open` recovers the trim horizon from the segment
+    /// filenames, resumes the seq/generation counters, replays the retained tail, and
+    /// extends the stream. A regression that kept `open`'s seq validation anchored at 0
+    /// (instead of the oldest retained segment) would reject the trimmed log outright.
+    #[test]
+    fn reopen_after_retention_resumes_and_extends() {
+        let tmp = scratch("reopen");
+        let _ = fs::remove_dir_all(&tmp);
+        let (mut log, ring, g5) = one_record_segments(&tmp, 5);
+        log.apply_retention(&RetentionPolicy {
+            acked_through_seq: Some(2),
+            ..Default::default()
+        })
+        .expect("trim");
+        drop(log); // restart
+
+        let mut reopened = ChangeLog::open(&tmp).expect("reopen trimmed log");
+        assert_eq!(reopened.first_seq(), 3, "trim horizon recovered from disk");
+        assert_eq!(reopened.next_seq(), 5, "seq counter resumed");
+        assert_eq!(reopened.last_generation(), Some(5));
+        let tail = reopened.poll(3).expect("replay retained tail");
+        assert_eq!(tail.len(), 2);
+        assert_eq!((tail[0].seq, tail[1].seq), (3, 4));
+
+        // The stream extends past the restart.
+        let g6 = ring.publish(
+            graph_with("<http://ex/s9> <http://ex/p> <http://ex/o9> .\n"),
+            [],
+        );
+        let rec = reopened.record_commit(&g5, &g6).expect("extend");
+        assert_eq!(rec.seq, 5);
+        assert_eq!(reopened.poll(3).expect("poll").len(), 3);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // [FABLE-5] (sq-r2cu1) Re-baseline / resync coverage: the explicit operator
+    // primitive that resumes a broken stream (dropped record / Writer::restore)
+    // without wiping the log, via an honest gap record.
+    // -----------------------------------------------------------------------
+
+    /// THE acceptance invariant (sq-r2cu1): after a dropped record, `record_commit`
+    /// fail-closes every later append (the broken-stream state), `rebase_to` appends an
+    /// honest gap record, and recording resumes gapless from the new baseline — with the
+    /// full pre-gap history still replayable. A regression that let `record_commit`
+    /// succeed across the gap (discontinuity check weakened), or that made `rebase_to`
+    /// wipe/skip existing records, turns this red.
+    #[test]
+    fn rebase_resumes_broken_stream_with_honest_gap() {
+        let tmp = scratch("rebase");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with("<http://ex/c> <http://ex/p> <http://ex/d> .\n"),
+            [],
+        );
+        let g3 = ring.publish(
+            graph_with(
+                "<http://ex/c> <http://ex/p> <http://ex/d> .\n\
+                 <http://ex/e> <http://ex/p> <http://ex/f> .\n",
+            ),
+            [],
+        );
+
+        let mut log = ChangeLog::open(&tmp).expect("open");
+        log.record_commit(&g0, &g1).expect("0->1");
+        // The g1->g2 record is DROPPED (simulating the commit hook's recording I/O
+        // failure): last_generation stays at 1, so EVERY later commit fail-closes.
+        let err = err_of(log.record_commit(&g2, &g3));
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+        assert_eq!(log.next_seq(), 1, "the broken stream appends nothing");
+
+        // Explicit operator resync: re-base to the writer's current generation (2, the
+        // predecessor of the next commit that will be recorded).
+        let gap = log.rebase_to(g2.number()).expect("rebase");
+        assert_eq!(gap.seq, 1, "the gap record extends the stream, no wipe");
+        assert_eq!(gap.generation, 2);
+        assert!(gap.rebase, "the gap record is honestly marked");
+        assert!(gap.changes.is_empty(), "a gap record carries no diff");
+        assert_eq!(log.last_generation(), Some(2), "recording re-armed");
+
+        // Recording resumes gapless from the new baseline.
+        let rec = log.record_commit(&g2, &g3).expect("record after rebase");
+        assert_eq!((rec.seq, rec.generation), (2, 3));
+        assert!(!rec.rebase);
+
+        // The whole stream — pre-gap history, the gap marker, post-gap records — replays.
+        let all = log.poll(0).expect("poll");
+        assert_eq!(all.len(), 3);
+        assert_eq!(
+            all.iter().map(|r| (r.seq, r.generation, r.rebase)).collect::<Vec<_>>(),
+            vec![(0, 1, false), (1, 2, true), (2, 3, false)]
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A re-based stream survives a restart: `open` recovers the gap record (its `rebase`
+    /// flag round-trips through the on-disk body) and the resumed seq/generation counters
+    /// chain from the gap's baseline. A regression that dropped the `rebase` header on
+    /// encode, defaulted it on decode, or re-anchored `last_generation` elsewhere turns
+    /// this red.
+    #[test]
+    fn rebase_survives_restart() {
+        let tmp = scratch("rebase-restart");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with("<http://ex/c> <http://ex/p> <http://ex/d> .\n"),
+            [],
+        );
+        {
+            let mut log = ChangeLog::open(&tmp).expect("open");
+            log.record_commit(&g0, &g1).expect("0->1");
+            log.rebase_to(g2.number()).expect("rebase"); // g1->g2 was lost
+        }
+
+        let mut reopened = ChangeLog::open(&tmp).expect("reopen");
+        assert_eq!(reopened.next_seq(), 2);
+        assert_eq!(
+            reopened.last_generation(),
+            Some(2),
+            "the recovered baseline is the gap record's generation"
+        );
+        let all = reopened.poll(0).expect("poll");
+        assert!(!all[0].rebase);
+        assert!(all[1].rebase, "the gap marker round-trips through disk");
+
+        // The stream extends past the restart, chaining from the recovered baseline.
+        let g3 = ring.publish(
+            graph_with("<http://ex/e> <http://ex/p> <http://ex/f> .\n"),
+            [],
+        );
+        let rec = reopened.record_commit(&g2, &g3).expect("extend");
+        assert_eq!((rec.seq, rec.generation), (2, 3));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A re-base that does not move the stream FORWARD is rejected fail-closed and appends
+    /// nothing — both backwards (below the last recorded generation) and to the last
+    /// recorded generation itself (the stream is not broken there; `record_commit` already
+    /// chains). A regression that allowed `<=` would let an operator script silently
+    /// rewrite the baseline into already-recorded history.
+    #[test]
+    fn rebase_rejects_non_forward() {
+        let tmp = scratch("rebase-nf");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with("<http://ex/c> <http://ex/p> <http://ex/d> .\n"),
+            [],
+        );
+        let mut log = ChangeLog::open(&tmp).expect("open");
+        log.record_commit(&g0, &g1).expect("0->1");
+        log.record_commit(&g1, &g2).expect("1->2");
+
+        let err = err_of(log.rebase_to(1)); // backwards
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+        let err = err_of(log.rebase_to(2)); // equal: not a gap
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+        assert_eq!(log.next_seq(), 2, "nothing appended");
+        assert_eq!(log.last_generation(), Some(2), "baseline unchanged");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// On an EMPTY log, `rebase_to` sets an explicit starting baseline: the first
+    /// `record_commit` must then chain from exactly that generation (whereas a fresh,
+    /// never-rebased log accepts any starting `from`).
+    #[test]
+    fn rebase_on_empty_log_sets_baseline() {
+        let tmp = scratch("rebase-empty");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with("<http://ex/c> <http://ex/p> <http://ex/d> .\n"),
+            [],
+        );
+        let mut log = ChangeLog::open(&tmp).expect("open");
+        let gap = log.rebase_to(g1.number()).expect("baseline");
+        assert_eq!((gap.seq, gap.generation), (0, 1));
+        // A commit not starting from the declared baseline is discontinuous.
+        let err = err_of(log.record_commit(&g0, &g2));
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+        // The chained commit records.
+        let rec = log.record_commit(&g1, &g2).expect("1->2");
+        assert_eq!((rec.seq, rec.generation), (1, 2));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// A gap record's body round-trips exactly through encode/decode (the positive control
+    /// for the `rebase` header line), and a garbled `rebase` value is fail-closed
+    /// corruption — never silently defaulted.
+    #[test]
+    fn rebase_record_roundtrips_and_bad_value_fails_closed() {
+        let rec = ChangeRecord {
+            seq: 0,
+            generation: 7,
+            timestamp_unix_nanos: 5,
+            changes: Vec::new(),
+            rebase: true,
+        };
+        let tmp = scratch("rebase-rt");
+        let _ = fs::remove_dir_all(&tmp);
+        write_segment_with_body(&tmp, &encode_record_body(&rec));
+        let reopened = ChangeLog::open(&tmp).expect("a gap record must decode");
+        assert_eq!(reopened.poll(0).expect("poll"), vec![rec]);
+        assert_eq!(reopened.last_generation(), Some(7));
+        let _ = fs::remove_dir_all(&tmp);
+
+        let tmp = scratch("rebase-bad");
+        let _ = fs::remove_dir_all(&tmp);
+        write_segment_with_body(
+            &tmp,
+            "seq 0\ngeneration 7\ntimestamp 5\nrebase 2\ninserts 0\ndeletes 0\n",
+        );
+        let err = err_of(ChangeLog::open(&tmp));
+        assert!(matches!(err, BackupError::Corrupt(_)), "{:?}", err);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // [FABLE-5] (gh-2436) Operator surface on a RUNNING recorder: the control handle from
+    // `into_commit_hook_with_control` rebases the live log without stopping the recorder.
+    // -----------------------------------------------------------------------
+
+    /// THE acceptance invariant (gh-2436): with the append handle consumed into a LIVE
+    /// commit hook, `ChangeStreamControl::rebase_to` resyncs a broken stream in place —
+    /// no stop, no directory re-open — and the hook then resumes recording gapless from
+    /// the new baseline. A regression that made the control a second, unserialized append
+    /// handle (interleaved appends), or that lost the hook's error policy, turns this red.
+    #[test]
+    fn control_rebases_a_live_hook_without_stopping_the_recorder() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let tmp = scratch("control-rebase");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with("<http://ex/c> <http://ex/p> <http://ex/d> .\n"),
+            [],
+        );
+        let g3 = ring.publish(
+            graph_with(
+                "<http://ex/c> <http://ex/p> <http://ex/d> .\n\
+                 <http://ex/e> <http://ex/p> <http://ex/f> .\n",
+            ),
+            [],
+        );
+
+        let log = ChangeLog::open(&tmp).expect("open");
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let dropped_in_hook = dropped.clone();
+        let (mut hook, control) = log.into_commit_hook_with_control(move |_e| {
+            dropped_in_hook.fetch_add(1, Ordering::SeqCst);
+        });
+
+        hook(&g0, &g1); // recorded: seq 0, generation 1
+        hook(&g2, &g3); // the g1->g2 record was never made: discontinuity, dropped
+        assert_eq!(dropped.load(Ordering::SeqCst), 1, "the broken append is reported");
+
+        // Operator resync THROUGH THE CONTROL, with the hook still armed.
+        let gap = control.rebase_to(g2.number()).expect("live rebase");
+        assert_eq!((gap.seq, gap.generation, gap.rebase), (1, 2, true));
+
+        // The same still-armed hook resumes recording gapless from the new baseline.
+        hook(&g2, &g3); // recorded: seq 2, generation 3
+        assert_eq!(dropped.load(Ordering::SeqCst), 1, "no further drops");
+
+        drop(hook);
+        let reopened = ChangeLog::open(&tmp).expect("reopen");
+        let all = reopened.poll(0).expect("poll");
+        assert_eq!(
+            all.iter()
+                .map(|r| (r.seq, r.generation, r.rebase))
+                .collect::<Vec<_>>(),
+            vec![(0, 1, false), (1, 2, true), (2, 3, false)]
+        );
+        drop(reopened);
+
+        // The post-restore variant is exposed on the control too: a restarted numbering
+        // (generation 0 after generation 3) is accepted only through the explicit
+        // new-lineage path.
+        assert!(control.rebase_to(0).is_err(), "same-lineage stays forward-only");
+        let gap = control
+            .rebase_to_new_lineage(0)
+            .expect("lineage rebase via the control");
+        assert_eq!((gap.seq, gap.generation, gap.rebase), (3, 0, true));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// `rebase_to_new_lineage` accepts a baseline that does NOT move the generation column
+    /// forward — the post-restore case where the writer lineage was replaced and its
+    /// numbering restarted (sparq-server's online restore installs a ring that restarts at
+    /// generation 0). The forward-only `rebase_to` must keep rejecting the same target, and
+    /// the next commit must chain from the restarted baseline.
+    #[test]
+    fn rebase_to_new_lineage_accepts_a_restarted_numbering() {
+        let tmp = scratch("rebase-lineage");
+        let _ = fs::remove_dir_all(&tmp);
+        let ring: GenerationRing<Graph> = GenerationRing::new(graph_with(""));
+        let g0 = ring.current();
+        let g1 = ring.publish(
+            graph_with("<http://ex/a> <http://ex/p> <http://ex/b> .\n"),
+            [],
+        );
+        let g2 = ring.publish(
+            graph_with("<http://ex/c> <http://ex/p> <http://ex/d> .\n"),
+            [],
+        );
+        let mut log = ChangeLog::open(&tmp).expect("open");
+        log.record_commit(&g0, &g1).expect("0->1");
+        log.record_commit(&g1, &g2).expect("1->2");
+
+        // A restore replaced the lineage: the NEW ring restarts at generation 0.
+        let restored: GenerationRing<Graph> =
+            GenerationRing::new(graph_with("<http://ex/r> <http://ex/p> <http://ex/s> .\n"));
+        let r0 = restored.current();
+        let r1 = restored.publish(
+            graph_with(
+                "<http://ex/r> <http://ex/p> <http://ex/s> .\n\
+                 <http://ex/t> <http://ex/p> <http://ex/u> .\n",
+            ),
+            [],
+        );
+
+        // Same-lineage rebase is (correctly) fail-closed: 0 does not move gen 2 forward.
+        let err = err_of(log.rebase_to(r0.number()));
+        assert!(matches!(err, BackupError::Format(_)), "{:?}", err);
+
+        // The explicit new-lineage rebase accepts the restarted baseline.
+        let gap = log.rebase_to_new_lineage(r0.number()).expect("lineage rebase");
+        assert_eq!((gap.seq, gap.generation, gap.rebase), (2, 0, true));
+        assert_eq!(log.last_generation(), Some(0), "baseline restarted");
+
+        // Recording chains from the restarted numbering; seqs stay monotonic.
+        let rec = log.record_commit(&r0, &r1).expect("record on the new lineage");
+        assert_eq!((rec.seq, rec.generation), (3, 1));
+
+        let reopened = ChangeLog::open(&tmp).expect("reopen");
+        assert_eq!(reopened.next_seq(), 4);
+        assert_eq!(reopened.last_generation(), Some(1));
         let _ = fs::remove_dir_all(&tmp);
     }
 }

@@ -4,6 +4,7 @@ import { MonitorPlay, PlayCircle, Download } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { withBasePath } from "@/lib/base-path";
 import {
   Card,
   CardContent,
@@ -73,15 +74,17 @@ export default function AppPage() {
             <div className="rounded-xl border bg-muted/30 p-4">
               <h2 className="flex items-center gap-2 text-sm font-semibold">
                 <PlayCircle className="size-4 text-primary" aria-hidden />
-                The live REPL — no install
+                In your browser — no install
               </h2>
               <p className="mt-1.5 text-sm text-muted-foreground">
-                Just want to run a query? The live SPARQL REPL runs real queries
+                Just want to run a query? The web workbench runs real queries
                 against a sample graph right now, in this tab — the same Rust
                 engine compiled to wasm, nothing sent to a server.
               </p>
+              {/* [OPUS-4.8] sq-4hiqe — /app IS the single in-tab workbench (the /try REPL was
+                  removed). Hard anchor: /app is a separate overlaid Next app. */}
               <Button asChild size="sm" className="mt-3">
-                <Link href="/try">Use it now, in this tab</Link>
+                <a href={withBasePath("/app/")}>Open the workbench</a>
               </Button>
             </div>
             <div className="rounded-xl border bg-muted/30 p-4">

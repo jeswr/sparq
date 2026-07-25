@@ -123,7 +123,24 @@ export function datasetSize(store: WasmStore): number {
 }
 
 /**
- * [OPUS-4.8] sq-oy1f.7 — the JSON-LD output modes the /try REPL offers for a CONSTRUCT /
+ * [SONNET-4.6] sq-su1oe (#820) — a ROUGH estimate of the in-tab store's in-memory footprint,
+ * in bytes, via the wasm `store.heapBytes()` binding. This is an in-memory (heap) figure for
+ * the WASM triplestore, NOT a disk-usage figure: the site is a static, client-side
+ * GitHub-Pages app with no server "disk", so we report what is genuinely measurable — the
+ * store's heap footprint. Returns `null` if the binding is unavailable so callers can omit
+ * the stat rather than show a fabricated number.
+ */
+export function storeFootprint(store: WasmStore): number | null {
+  try {
+    const bytes = store.heapBytes();
+    return Number.isFinite(bytes) ? bytes : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * [OPUS-4.8] sq-oy1f.7 — the JSON-LD output modes offered for a CONSTRUCT /
  * DESCRIBE result graph. The three left-hand modes drive the wasm `Store.serialize`
  * binding's JSON-LD document forms (expanded / flattened / prefix-`@context`-compacted —
  * #900/#923); `"compact"` drives the SEPARATE `Store.serializeCompact` binding — the full

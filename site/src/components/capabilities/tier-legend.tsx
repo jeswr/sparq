@@ -16,6 +16,7 @@ const TIER_ORDER: Tier[] = [
   "live-bbjs",
   "live-sim",
   "hosted",
+  "native",
   "walkthrough",
   "soon",
 ];
@@ -27,6 +28,7 @@ const TIER_GLOSS: Record<Tier, string> = {
   "live-bbjs": "in-tab proving via 3rd-party bb.js UltraHonk",
   "live-sim": "a faithful in-tab JS simulation of the native protocol",
   hosted: "a sparq-server endpoint",
+  native: "a built, opt-in Rust crate with code and docs linked from this static site",
   walkthrough: "captured, verbatim engine output replayed (no backend on a static site)",
   soon: "not built yet — an honest placeholder",
 };

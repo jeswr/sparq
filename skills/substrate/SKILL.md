@@ -40,7 +40,17 @@ The XSD numeric value tower: `Num` (`Int(i64)` / `Dec(Dec)` / `Float(f32)` / `Do
 the fixed-point `Dec` struct (EXACT integer/decimal arithmetic, no f64 rounding), `ArithOp`
 (`Add`/`Sub`/`Mul`/`Div`), `RoundMode`, `as_numeric` (classifies an `oxrdf::Literal` into the
 tower), and the XSD lexical helpers `split_decimal`, `parse_xsd_f64`, `parse_xsd_f32`,
-`fmt_xsd_double`. Pulls `oxrdf` only when enabled.
+`fmt_xsd_double`. `parse_xsd_f64` delegates to `sparq_core::parse_xsd_f64` (sq-9781x) — the
+shared XSD f64 SPELLING body. The `sparq-core` numeric-value cache layers a DATATYPE-AWARE
+gate on top (`sparq_core::numeric_cache_value`, sq-74oy4/sq-6b1lj: integers scale-0, decimals
+no-exponent, i128-fit, trimmed), so a cache-hit ⟺ `Num::of_literal` accepts — a lexical
+ill-formed for its datatype (`"1.5"^^xsd:integer`) misses the cache exactly as `of_literal`
+type-errors it, uniformly on `=`/`<`/`>`. The differential test
+`cache_f64_seam_vs_as_numeric_differential` pins that agreement.
+Pulls `oxrdf` only when enabled. Two ordering methods on `Num`:
+- `Num::cmp_total` — ORDER BY / MIN/MAX total order; NaN totalised FIRST.
+- `Num::cmp_relational` — SPARQL `<`/`>` / D-entailment / RIF numeric equality; NaN → `None`
+  (type error). [OPUS-4.8] sq-v5evr.
 
 ```toml
 [dependencies]
@@ -74,15 +84,32 @@ The four id-tuple join kernels over `&[Row]` slices. Requires `rows`; pulls `rus
 | Function | Kind |
 |----------|------|
 | `merge_join` | sorted merge join — one shared key column |
-| `build_table` + `hash_probe_serial` | serial hash join — build `FxHashMap`, then probe |
-| `build_partitioned` | radix-partitioned hash build for parallel workers |
-| `probe_emit` | per-row probe emit (used by both serial and parallel paths) |
+| `build_table` + `build_partitioned` | build `JoinTable` (serial) or `Vec<JoinTable>` (radix-partitioned for parallel workers) |
+| `probe_emit` | per-row probe emit — single-hash (FxHash once for partition + `raw_entry().from_hash`), `reserve` before materialising (batch-emission contract) |
+| `probe_gather_indices` | M4 batch-emission primitive — collect build-row indices WITHOUT materialising `Row`s; morsel pipeline calls this, then materialises per output chunk (sq-pntvh.7) |
+| `hash_probe_serial` | probe loop: calls `probe_emit` per row with a `Budget` cooperative-cancel poll |
 | `bind_combine` | index-nested-loop combine step |
 | `lftj_recurse` over `Trie`/`TrieIter` | leapfrog trie-join (WCOJ) |
 | `join::delta::DeltaTable` | persistent build-side table for semi-naive Δ-vs-full shapes (built for the OWL-RL fixpoint; drives `sparq-rsp`'s Delta/Snapshot window diff) |
 
+`JoinTable` is a public type alias for `hashbrown::HashMap<Key, Posting, FxBuildHasher>`.
 All kernels are generic over a `JoinKeys` column descriptor and a `Budget` cooperative-cancel
 hook — both monomorphised, never a trait object. Use `NoBudget` for an unbounded join.
+
+**Single-hash optimisation ([SONNET-4.6] sq-7d3dj.19):** `probe_emit` and `probe_gather_indices`
+compute `key_hash` ONCE — it selects the radix partition AND drives `raw_entry().from_hash` on
+the `JoinTable`, eliminating the previous double-hash in the partitioned probe path. `probe_emit`
+calls `out.reserve(matches.len())` before the emit loop (batch-emission contract the sq-pntvh M4
+morsel pipeline inherits: reserve then materialise, not per-match).
+
+**Single-column key fast path ([OPUS-4.8] sq-4r8uy):** `JoinKeys::left_key`/`right_key` special-case
+the dominant `key_cols.len() == 1` case — the whole per-row key projection collapses to a direct
+one-element `Key` push instead of iterating the heap `key_cols` `Vec` and running the general
+`SmallVec::from_iter` collect. It is **result-identical** to the general projection (same length,
+same id, same order), a pure performance specialization on the existing path — no feature flag, no
+public-API change. Multi-column keys fall through to the general `iter().collect()` unchanged. This
+closes most of the `hash_probe` descriptor-projection overhead the #1810 delta measured; the
+`overhead` harness re-measures it (canonical re-measure is the acceptance gate).
 
 ```toml
 [dependencies]
@@ -116,16 +143,72 @@ hash_probe_serial(&right, &keys, &left, std::slice::from_ref(&table), &[1], &NoB
 
 ### `compare` — `#[cfg(feature = "compare")]`
 
-The SPARQL term total order `compare_terms`: the class precedence error/unbound < blank < IRI
-< literal < triple, numeric-aware within the literal class, strict typed-temporal, string
-fallback, and recursive component-wise triple-term order. Generic over a `CompareTerm` trait
-(`term_class`/`value_str`/`as_f64`/`exact_cmp`/`strict_cmp`/`triple_parts`) — a
-monomorphisation seam, never a `dyn` object. Pure-`std`; pulls nothing new.
+The SPARQL term total order `compare_terms`: the spec-fixed class precedence error/unbound <
+blank < IRI < literal < triple, then KIND-FIRST within the literal class (sq-wjl8i): a fixed
+`LiteralKind` rank between literal kinds — numeric < boolean < dateTime < date < string < lang
+< other, a documented extension where the spec leaves cross-kind order undefined — and value
+order only WITHIN a kind (numerics by exact rational value with NaN totalised FIRST before
+-INF and f64 ties rechecked exactly via `exact_cmp`, incl. the mixed int/decimal-vs-double tie
+— `Num::cmp_total`; dateTimes by timeline; else lexical), plus the recursive component-wise
+triple-term order. Generic over a `CompareTerm` trait
+(`term_class`/`literal_kind`/`value_str`/`as_f64`/`exact_cmp`/`strict_cmp`/`triple_parts`) — a
+monomorphisation seam, never a `dyn` object. Pure-`std`; pulls nothing new. The engine's
+relational `<`/`=` are deliberately untouched (XPath promotion, NaN type errors): only the
+ORDER BY total order refines promoted ties and positions NaN.
 
 ```toml
 [dependencies]
 sparq-substrate = { version = "0.1.0", features = ["compare"] }
 ```
+
+**Machine-checked order laws (Kani, sq-sqtk2.4 + sq-wjl8i).** `src/compare.rs` hosts a
+`#[cfg(kani)]` bounded-proof module proving, over an adversarial model `CompareTerm` impl
+whose numeric domain straddles the 2^53 f64-collapse boundary (2^53−1 / 2^53 / 2^53+1 /
+2^53+2 and their shared f64 images, ±0.0, NaN): reflexivity, antisymmetry-consistency,
+within-class totality and transitivity — per literal kind AND across MIXED literal kinds
+(`transitivity_mixed_literal_kinds_incl_nan`), ALL with NaN included — and exact-order
+agreement on the exact tier (the `exact_cmp` recheck's guarantee — delete the recheck and it
+goes red). The three sq-sqtk2.4 intransitivity findings (mixed-tier collapse, numeric-vs-
+string lexical fallback, NaN partiality) are FIXED and pinned by `witness_*` harnesses that
+go red on regression. Run `cargo kani -p sparq-substrate --features compare` (Kani injects
+the `kani` cfg; the normal build strips the module). Honest boundaries: this proves the
+shared ALGORITHM over the bounded model, NOT the engine's `Value` impl
+(`sparq-engine/src/exec.rs` — covered by unit tests, the sparq-reason engine-parity suite and
+W3C conformance; next-wave in `research/mechanized-proof-program.md` §6); within the dateTime
+kind the indeterminate mixed-timezone window still falls back lexically (residual seam,
+beaded); and `exact_cmp` impls bounded by the i128 tower keep collapsed ties for lexicals
+beyond ~38 significant digits (beaded).
+
+### `overhead` — `#[cfg(feature = "overhead")]` — the zero-overhead DELTA harness
+
+The **substrate half of the sparq-engine-systems paper's §8 protocol** (`site/papers/
+sparq-engine-systems.typ`, evidence key `substrate.overhead_<kernel>`, environment="canonical"
+ONLY). `overhead::OverheadReport::run(reps, environment, host_note)` times each shared kernel
+against a hand-**specialised** pre-extraction equivalent — the SAME algorithm over the SAME
+data structure, with ONLY the extraction's generalisation removed (the `JoinKeys` descriptor /
+generic `Budget` / `CompareTerm` trait replaced by hard-coded concrete access) — and reports
+the per-kernel `overhead_ratio = (substrate_ns − handrolled_ns)/handrolled_ns` plus the raw
+nanoseconds. It **measures** the title-level "zero measured marginal overhead" claim; a non-zero
+delta carries an honest `root_cause` and is reported as-measured, never bent to the claim. Every
+kernel's two implementations are asserted result-equivalent each rep (`agree`) so a fast-but-
+wrong baseline cannot flatter the ratio. Implies `join`+`numeric`+`compare`; links no new dep.
+
+Kernels measured: `merge_join`, `hash_probe`, `num_int_add`, `num_double_add`, `compare_terms`.
+The leapfrog trie-join (WCOJ) is **deliberately excluded** — net-new in the substrate, it has no
+hand-specialised pre-extraction predecessor to form an honest delta against (comparing a WCOJ to
+a nested-loop enumeration would measure an algorithm gap, not the extraction's overhead).
+
+```text
+# work box (non-canonical — PR-body only, never a paper headline):
+cargo run -p sparq-substrate --example substrate_overhead --features overhead --release -- --json
+# CANONICAL run on a dedicated quiet EC2 box (headline-eligible):
+cargo run -p sparq-substrate --example substrate_overhead --features overhead --release -- \
+    --canonical --reps 15 --host "c6i.4xlarge" --json
+```
+
+The envelope's `canonical` flag is true ONLY for a `--canonical` run; a work-box run is
+`environment="indicative"`. Registered in `bench/benchmarks.toml` as `substrate-overhead-delta`
+(`featured = false` — an internal micro-instrument). [FABLE-5] sq-atjue
 
 ## Cargo feature summary
 
@@ -133,8 +216,9 @@ sparq-substrate = { version = "0.1.0", features = ["compare"] }
 |---------|---------|------------|
 | `rows` | `sparq_substrate::rows` | — |
 | `numeric` | `sparq_substrate::numeric` | `oxrdf` |
-| `join` | `sparq_substrate::join` (implies `rows`) | `rustc-hash` |
+| `join` | `sparq_substrate::join` (implies `rows`) | `rustc-hash`, `hashbrown` |
 | `compare` | `sparq_substrate::compare` | — |
+| `overhead` | `sparq_substrate::overhead` (implies `join`+`numeric`+`compare`) | — |
 
 All features are off by default. The default build compiles nothing from this crate (byte-
 identical wasm bundle). The crate is `forbid(unsafe_code)`.

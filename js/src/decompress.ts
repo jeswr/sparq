@@ -37,7 +37,10 @@ const isNode = (): boolean => typeof process !== 'undefined' && Boolean(process?
 async function gunzip(bytes: Uint8Array): Promise<Uint8Array> {
   if (isNode()) {
     // node:zlib loops gzip members, so multi-member streams decode fully.
-    const { gunzipSync } = await import('node:zlib');
+    // [GPT-5.6] #1046 — browser bundles reuse this module for its zstd branch. Keep the
+    // runtime-guarded Node builtin external so webpack does not try to compile `node:zlib`
+    // into that browser-only lazy chunk; native Node import() semantics are unchanged.
+    const { gunzipSync } = await import(/* webpackIgnore: true */ 'node:zlib');
     return new Uint8Array(gunzipSync(bytes));
   }
   // Browser: DecompressionStream (single-member gzip only — see module doc).

@@ -13,13 +13,18 @@ import assert from "node:assert/strict";
 
 import {
   WORKSPACE_SCHEMA,
+  WORKSPACE_INFERENCE_MODES,
   WebWorkspaceStore,
   MemoryWorkspaceStore,
   TauriWorkspaceStore,
+  createSerializedWorkspaceSaver,
   createWorkspaceStore,
+  describeWorkspaceSaveError,
   detectWebStorage,
+  isQuotaExceededError,
   isTauriRuntime,
   newWorkspace,
+  parseInferenceMode,
   parseWorkspace,
   workspaceId,
   workspaceSummary,
@@ -258,4 +263,176 @@ test("createWorkspaceStore ignores a Tauri fs loader outside a Tauri runtime", a
   // Not in a Tauri webview → the loader is never invoked, and it degrades to memory.
   assert.equal(called, false);
   assert.equal(store.backend, "memory");
+});
+
+// --- sq-glo5r: N3 inference mode + rulesDocs --------------------------------
+
+test("parseInferenceMode recognises 'n3'", () => {
+  assert.equal(parseInferenceMode("n3"), "n3");
+});
+
+test("WORKSPACE_INFERENCE_MODES includes 'n3'", () => {
+  assert.ok(WORKSPACE_INFERENCE_MODES.includes("n3"));
+});
+
+test("parseWorkspace round-trips a workspace with rulesDocs", () => {
+  const ws = newWorkspace("N3-test", "SELECT 1");
+  ws.inference = "n3";
+  ws.rulesDocs = [
+    { name: "my-rule", text: "{ ?s a ex:A } => { ?s a ex:B . }", addedAt: 123456 },
+    { name: "disabled-rule", text: "{ ?x a ex:C } => { ?x a ex:D . }", addedAt: 123457, enabled: false },
+  ];
+  const parsed = parseWorkspace(JSON.parse(JSON.stringify(ws)));
+  assert.ok(parsed);
+  assert.equal(parsed.inference, "n3");
+  assert.equal(parsed.rulesDocs.length, 2);
+  assert.equal(parsed.rulesDocs[0].name, "my-rule");
+  assert.equal(parsed.rulesDocs[0].addedAt, 123456);
+  assert.equal(parsed.rulesDocs[0].enabled, undefined); // enabled=true is stored as absent
+  assert.equal(parsed.rulesDocs[1].enabled, false);
+});
+
+test("parseWorkspace defaults to empty rulesDocs when the field is absent (old record)", () => {
+  const ws = newWorkspace("old-record", "SELECT 1");
+  const raw = JSON.parse(JSON.stringify(ws));
+  delete raw.rulesDocs; // simulate a record from before sq-glo5r
+  const parsed = parseWorkspace(raw);
+  assert.ok(parsed);
+  assert.deepEqual(parsed.rulesDocs, []);
+});
+
+test("parseWorkspace skips malformed rulesDocs entries but keeps valid ones", () => {
+  const ws = newWorkspace("M", "SELECT 1");
+  const raw = JSON.parse(JSON.stringify(ws));
+  raw.rulesDocs = [
+    { name: "good", text: "...", addedAt: 1 },
+    { name: "no-text", addedAt: 2 }, // missing text → skipped
+    null, // null → skipped
+    { name: "no-addedAt", text: "..." }, // missing addedAt → skipped
+  ];
+  const parsed = parseWorkspace(raw);
+  assert.ok(parsed);
+  assert.equal(parsed.rulesDocs.length, 1);
+  assert.equal(parsed.rulesDocs[0].name, "good");
+});
+
+// --- (sq-9i1h9) serialized per-workspace saves -------------------------------
+
+test("createSerializedWorkspaceSaver: a DELAYED older save cannot overwrite a NEWER one (Tauri backend)", async () => {
+  const fs = fakeFs();
+  const store = new TauriWorkspaceStore(fs);
+  const ws = newWorkspace("Race", "SELECT 1");
+  // Delay only the FIRST underlying write — the exact out-of-order-overwrite scenario: fired
+  // un-serialized (plain store.save), the slow OLD write would land after — and clobber — the
+  // fast NEW one, leaving the on-disk file at the stale snapshot.
+  let firstDelay = 25;
+  const write = async (w) => {
+    const d = firstDelay;
+    firstDelay = 0;
+    if (d) await new Promise((r) => setTimeout(r, d));
+    await store.save(w);
+  };
+  const saver = createSerializedWorkspaceSaver(write);
+  const oldRev = { ...ws, editor: { ...ws.editor, query: "OLD" } };
+  const newRev = { ...ws, editor: { ...ws.editor, query: "NEW" } };
+  const p1 = saver.save(oldRev);
+  const p2 = saver.save(newRev);
+  await Promise.all([p1, p2]);
+  const loaded = await store.load(ws.id);
+  // Serialized + revision-countered, the file MUST end at the newest revision. (Mutation check:
+  // swap `saver.save` for the raw un-serialized `write` above and this assertion goes red —
+  // the delayed OLD write lands last.)
+  assert.equal(loaded.editor.query, "NEW");
+});
+
+test("createSerializedWorkspaceSaver: stale queued revisions are DROPPED (monotonic revision counter)", async () => {
+  const writes = [];
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const saver = createSerializedWorkspaceSaver(async (w) => {
+    if (writes.length === 0) await gate; // hold the FIRST write in flight
+    writes.push(w.editor.query);
+  });
+  const ws = newWorkspace("Coalesce", "SELECT 1");
+  const p1 = saver.save({ ...ws, editor: { ...ws.editor, query: "v1" } });
+  await new Promise((r) => setImmediate(r)); // let the v1 write actually START (held by the gate)
+  const p2 = saver.save({ ...ws, editor: { ...ws.editor, query: "v2" } });
+  const p3 = saver.save({ ...ws, editor: { ...ws.editor, query: "v3" } });
+  release();
+  await Promise.all([p1, p2, p3]);
+  // v1 was already in flight; while it ran, v2 went stale (v3 arrived) and is dropped — its
+  // state is covered by the newer whole-workspace write v3 in the same chain.
+  assert.deepEqual(writes, ["v1", "v3"]);
+});
+
+test("createSerializedWorkspaceSaver: a failing save rejects its caller but does NOT wedge the chain", async () => {
+  const writes = [];
+  let failFirst = true;
+  const saver = createSerializedWorkspaceSaver(async (w) => {
+    if (failFirst) {
+      failFirst = false;
+      throw new Error("disk full");
+    }
+    writes.push(w.editor.query);
+  });
+  const ws = newWorkspace("Wedge", "SELECT 1");
+  await assert.rejects(saver.save({ ...ws, editor: { ...ws.editor, query: "v1" } }), /disk full/);
+  await saver.save({ ...ws, editor: { ...ws.editor, query: "v2" } });
+  assert.deepEqual(writes, ["v2"]);
+});
+
+test("createSerializedWorkspaceSaver: chains are PER workspace — one slow workspace never blocks another", async () => {
+  const done = [];
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const saver = createSerializedWorkspaceSaver(async (w) => {
+    if (w.name === "slow") await gate;
+    done.push(w.name);
+  });
+  const a = newWorkspace("slow", "SELECT 1");
+  const b = newWorkspace("fast", "SELECT 1");
+  const pa = saver.save(a);
+  const pb = saver.save(b);
+  await pb; // resolves while `a`'s write is still gated — independent chains
+  assert.deepEqual(done, ["fast"]);
+  release();
+  await pa;
+  assert.deepEqual(done, ["fast", "slow"]);
+});
+
+// --- (sq-w3dmj) quota-exceeded surfacing -------------------------------------
+
+test("WebWorkspaceStore.save PROPAGATES QuotaExceededError — never swallowed at the store layer", async () => {
+  const kv = fakeKv();
+  kv.setItem = () => {
+    const e = new Error("the quota has been exceeded");
+    e.name = "QuotaExceededError";
+    throw e;
+  };
+  const store = new WebWorkspaceStore(kv);
+  await assert.rejects(store.save(newWorkspace("Big", "SELECT 1")), (e) => {
+    assert.equal(e.name, "QuotaExceededError");
+    return true;
+  });
+});
+
+test("isQuotaExceededError + describeWorkspaceSaveError classify a quota failure honestly", () => {
+  const quota = new Error("exceeded");
+  quota.name = "QuotaExceededError";
+  assert.equal(isQuotaExceededError(quota), true);
+  assert.match(describeWorkspaceSaveError(quota), /quota/i);
+
+  // Firefox's legacy name is covered too.
+  const legacy = new Error("legacy");
+  legacy.name = "NS_ERROR_DOM_QUOTA_REACHED";
+  assert.equal(isQuotaExceededError(legacy), true);
+  assert.match(describeWorkspaceSaveError(legacy), /quota/i);
+
+  // A non-quota failure keeps its underlying message; junk degrades to a generic label.
+  const other = new Error("boom");
+  assert.equal(isQuotaExceededError(other), false);
+  assert.match(describeWorkspaceSaveError(other), /boom/);
+  assert.equal(isQuotaExceededError(null), false);
+  assert.match(describeWorkspaceSaveError(null), /workspace save failed/);
+  assert.equal(isQuotaExceededError("string"), false);
 });
