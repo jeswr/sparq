@@ -18,7 +18,8 @@
 # on `schedule` + `workflow_dispatch`, so it never produces a check-run on any commit the gate
 # evaluates — it is structurally non-gating. As belt-and-suspenders (in case a trigger is ever
 # added), every routed job NAME carries the whole-word `advisory` token, which the aggregator
-# excludes by rule (`\b(advisory|informational)\b`). Two independent guarantees, both honest.
+# excludes because each is DECLARED in .github/advisory-registry.json (#3773). Two independent
+# guarantees, both honest.
 #
 # FAILURE ROUTING. A nightly that opened one alert per failing TEST would drown the tracker and
 # stop being believed (§6.2: "alert fatigue is how nightlies die"). Instead the `route-failures`
