@@ -28,31 +28,26 @@ on:
 # The App token is still PREFERRED when configured (same identity batch-merge.yml uses,
 # so a merge it triggers is attributed to the App rather than github-actions[bot]); the
 # workflow token is the fallback and, with write, is sufficient to arm.
-# [OPUS-5] #3777 — `workflows: write`, granted by the maintainer 2026-07-25.
+# [OPUS-5] #3777 — `workflows` is NOT settable here. MEASURED 2026-07-25.
 #
-# WHY IT IS NEEDED. GitHub refuses `enablePullRequestAutoMerge` on a PR touching
-# `.github/workflows/**` unless the token carries `workflows: write`:
-#   "refusing to allow a GitHub App to create or update workflow
-#    `.github/workflows/zk-toolchain.yml` without `workflows` permission"
-# Without it EVERY workflow-touching PR is unarmable forever while the sweep logs an
-# arm-failure each cycle — #3434 sat exactly that way.
+# GitHub refuses `enablePullRequestAutoMerge` on a PR touching `.github/workflows/**`
+# unless the acting identity holds the `workflows` permission. The obvious fix — adding
+# `workflows: write` to this block — DOES NOT WORK: `workflows` is not one of the
+# GITHUB_TOKEN permission scopes, and adding it makes the workflow fail to start at all
+# (run 30176307537: conclusion=failure, ZERO jobs, a startup failure — while the same
+# workflow succeeded on `main` thirteen minutes earlier). yaml.safe_load accepts the key;
+# GitHub does not.
 #
-# WHY IT IS SAFE HERE, AND ONLY HERE. This is a genuine privilege escalation — the arming
-# token can now approve merges of workflow changes — so it is bounded by the shape of this
-# job, not by good intentions:
-#   * it checks out ONLY its own policy script(s), `ref:` the DEFAULT BRANCH, never the
-#     candidate PR head, with `persist-credentials: false`;
-#   * it runs no target code and no model — nothing PR-supplied executes here;
-#   * what it does run is gated by the required `gate` check on the default branch.
-# A job that ran PR-head code under this permission WOULD be an escalation path. This one
-# cannot be: the permission and the untrusted input never share a job.
+# `workflows` is a GitHub APP INSTALLATION permission. It has to be granted in the App's
+# settings and the installation must then accept the updated permission — a maintainer
+# action, not a repository change. Until that happens, workflow-touching PRs stay unarmable
+# and must be merged by hand.
 #
-# PINNED EXACTLY by scripts/tests/test_arm_capability_wiring.py — a fourth permission fails
-# the suite, so this escalation cannot widen unnoticed.
+# The set below is PINNED EXACTLY by scripts/tests/test_arm_capability_wiring.py, so it
+# cannot widen unnoticed — including by a future attempt to add `workflows` here.
 permissions:
   contents: write
   pull-requests: write
-  workflows: write
 
 concurrency:
   group: re-arm-sweeper

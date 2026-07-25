@@ -137,37 +137,19 @@ class TestPermissionPin(unittest.TestCase):
                 f"{name} must keep `pull-requests: write`",
             )
 
-    def test_both_arm_workflows_declare_workflows_write(self) -> None:
-        """#3777: GitHub refuses `enablePullRequestAutoMerge` on a PR touching
-        `.github/workflows/**` without `workflows: write` — "refusing to allow a GitHub App
-        to create or update workflow ... without `workflows` permission". Without it EVERY
-        workflow-touching PR is unarmable forever while the sweep logs an arm-failure per
-        cycle (#3434 sat exactly that way). Granted by the maintainer 2026-07-25."""
-        for name, (path, _script) in ARM_WORKFLOWS.items():
-            permissions = load(path).get("permissions") or {}
-            self.assertEqual(
-                permissions.get("workflows"),
-                "write",
-                f"{name}: a workflow-touching PR cannot be armed without `workflows: write` "
-                f"(#3777). Removing it silently strands every such PR — the sweep keeps "
-                f"reporting arm-failures and nothing ever merges.",
-            )
-
     def test_arm_workflow_permissions_are_EXACTLY_the_approved_set(self) -> None:
         """The compensating control for #3777's escalation.
 
-        `workflows: write` lets the arming token approve merges of WORKFLOW changes. That is a
-        real privilege escalation, approved deliberately and bounded by this job's shape (it
-        checks out only its own policy script from the DEFAULT BRANCH, never the candidate PR
-        head, and runs no target code or model — so the permission and the untrusted input
-        never share a job).
+        The tests above assert that specific keys are PRESENT. Nothing asserted that others
+        were ABSENT, so any permission could be added to a token that arms ARBITRARY PRs
+        without the widening itself being reviewed. This pins the whole set.
 
-        That bound is only meaningful while the permission set stays exactly what was
-        approved. A FOURTH permission — `id-token`, `packages`, `actions: write` — would widen
-        the escalation with no review of the widening, because the two tests above only assert
-        that specific keys are present, never that others are absent. This pins the whole set,
-        so any addition fails here and has to be argued for on its own merits."""
-        approved = {"contents": "write", "pull-requests": "write", "workflows": "write"}
+        It also pins the #3777 finding: `workflows` cannot be added here. It is a GitHub APP
+        INSTALLATION permission, not a GITHUB_TOKEN scope — adding it makes the workflow fail
+        to START (run 30176307537: conclusion=failure, zero jobs, while the same workflow
+        succeeded on `main` minutes earlier). `yaml.safe_load` accepts the key and GitHub does
+        not, so a YAML-level check would not have caught it; this test does."""
+        approved = {"contents": "write", "pull-requests": "write"}
         for name, (path, _script) in ARM_WORKFLOWS.items():
             permissions = load(path).get("permissions")
             self.assertEqual(
