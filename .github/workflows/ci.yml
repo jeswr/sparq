@@ -3286,13 +3286,13 @@ jobs:
     # it is schedule + workflow_dispatch only, behind the same nightly-gate freshness check,
     # and is NEVER on the per-PR required `ci-summary` path (that would blow the PR budget).
     #
-    # ADVISORY (non-gating) FOR NOW — the job NAME contains the whole word "advisory", so the
-    # ci-summary aggregator (.github/workflows/ci-summary.yml `\b(advisory|informational)\b`)
-    # excludes it from the gating set: even a `failure` here cannot block a merge. This is
+    # ADVISORY (non-gating) FOR NOW — this job is DECLARED in .github/advisory-registry.json,
+    # which is what makes the ci-summary aggregator exclude it from the gating set (#3773: the
+    # "advisory" name token alone no longer does): even a `failure` here cannot block a merge. This is
     # the deliberate bootstrap idiom (mirroring how `geiger` started, and how the coverage
     # ratchet seeded its floor before gating): we seed bench/mutants-baseline.json across the
-    # workspace over the first few nightly runs, then PROMOTE to gating by renaming the job
-    # (drop "advisory") + flipping the step to fail on a regression, once broadly seeded.
+    # workspace over the first few nightly runs, then PROMOTE to gating by DELETING the registry
+    # entry + flipping the step to fail on a regression, once broadly seeded.
     # Until then `continue-on-error: true` keeps the run green while it seeds.
     #
     # SEEDED SO FAR (honest): the crates listed in bench/mutants-baseline.json carry a real

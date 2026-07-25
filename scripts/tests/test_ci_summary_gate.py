@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import sys
 import unittest
 from contextlib import redirect_stdout
@@ -45,6 +46,22 @@ def _load_module():
 
 
 g = _load_module()
+
+# [OPUS-5] #3773 — advisory status is DECLARED, never inferred from a name. Every
+# fixture below that expects a leg to be non-gating must therefore be DECLARED here,
+# exactly as a real `.github/advisory-registry.json` entry would declare it. Names NOT
+# in this set GATE even when they carry an "advisory"/"informational" token — which is
+# the property TestDeclaredAdvisoryRule pins.
+DECLARED_ADVISORY = (
+    "vale (prose, advisory)",
+    "unsafe report (cargo-geiger, informational)",
+    "markdownlint-advisory (whole repo)",
+    "external-links (lychee online, advisory)",
+    "GUI build + clippy (${{ matrix.label }}, advisory)",
+)
+# An advisory/informational NAME token with NO declaration — the #3773 defect fixture.
+UNDECLARED_ADVISORY_NAME = "site determinism grep-gate (advisory)"
+g.set_declared_advisory(DECLARED_ADVISORY)
 
 
 def R(name, status="completed", conclusion="success", url="", started="", rid=0,
@@ -152,7 +169,7 @@ class TestVerdictSemantics(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("stable empty set", out)
 
-    def test_advisory_failure_excluded(self):
+    def test_declared_advisory_failure_excluded(self):
         runs = [R("vale (prose, advisory)", conclusion="failure"),
                 R("unsafe report (cargo-geiger, informational)", conclusion="failure"),
                 GREEN]
@@ -161,7 +178,9 @@ class TestVerdictSemantics(unittest.TestCase):
         self.assertIn("2 advisory check(s) excluded", out)
 
     def test_advisories_plural_still_gates(self):
-        # sq-wjth word boundary: "advisories" must NOT match the advisory rule.
+        # sq-wjth: "cargo-deny (advisories, …)" is not declared, so it GATES. (Under
+        # the removed name rule this depended on a word boundary; it is now simply the
+        # default for everything undeclared.)
         runs = [R("cargo-deny (advisories, bans, licenses, sources)", conclusion="failure")]
         code, _ = run(tiny_cfg(), [runs])
         self.assertEqual(code, 1)
@@ -646,13 +665,225 @@ class TestNewestWorkflowRunResolution(unittest.TestCase):
 
 
 class TestAdvisoryRule(unittest.TestCase):
-    def test_word_boundary_rule(self):
+    def test_declared_names_are_excluded(self):
         self.assertTrue(g.is_advisory("markdownlint-advisory (whole repo)"))
         self.assertTrue(g.is_advisory("external-links (lychee online, advisory)"))
         self.assertTrue(g.is_advisory("unsafe report (cargo-geiger, informational)"))
         self.assertFalse(g.is_advisory("cargo-deny (advisories, bans, licenses, sources)"))
         self.assertFalse(g.is_advisory("build + test"))
         self.assertFalse(g.is_advisory("gate"))
+
+
+# [OPUS-5] #3773 — ADVISORY MUST BE DECLARED, NOT INFERRED FROM A JOB NAME.
+# The gate used to drop any check-run whose DISPLAY NAME matched
+# `\b(advisory|informational)\b`. That silently neutralised four REAL gates, so
+# `gate: SUCCESS` over-promised on every merge it authorised. These tests are the
+# regression barrier for the fix and are MUTATION-CHECKED: restoring
+#   is_advisory = lambda n: bool(ADVISORY_NAME_TOKEN_RE.search(n.lower())) or …
+# must turn test_undeclared_advisory_named_check_still_gates and
+# test_renaming_a_job_cannot_flip_gating_status RED.
+class TestDeclaredAdvisoryRule(unittest.TestCase):
+    """Exclusion requires an explicit registry declaration — nothing else."""
+
+    def test_undeclared_advisory_named_check_still_gates(self):
+        # THE CORE REGRESSION TEST. A name carrying the token, no declaration:
+        # the predicate must say "gating", and a FAILURE must RED the verdict.
+        self.assertFalse(g.is_declared_advisory(UNDECLARED_ADVISORY_NAME))
+        self.assertFalse(g.is_advisory(UNDECLARED_ADVISORY_NAME))
+        runs = [R(UNDECLARED_ADVISORY_NAME, conclusion="failure"), GREEN]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 1, out)
+        self.assertIn("FAILED", out)
+        self.assertIn(f"- ✗ {UNDECLARED_ADVISORY_NAME}: failure", out)
+        # ...and the exclusion count must not claim it was excluded.
+        self.assertIn("0 advisory check(s) excluded", out)
+
+    def test_the_four_neutralised_gates_gate_by_default(self):
+        # The four checks #3773 found neutralised. None is declared, so each one's
+        # failure must RED the gate on its own.
+        for name in (
+            "determinism gate + foundation smoke (advisory)",
+            "GUI tauri-driver browserName tripwire (advisory)",
+            "no-sleep-gate (advisory)",
+            "A11y — axe WCAG 2.1 AA (advisory)",
+        ):
+            with self.subTest(name=name):
+                self.assertFalse(g.is_advisory(name))
+                code, out = run(tiny_cfg(), [[R(name, conclusion="failure"), GREEN]])
+                self.assertEqual(code, 1, out)
+                self.assertIn(name, out)
+
+    def test_undeclared_token_is_reported_loudly_not_silently(self):
+        # The formerly-SILENT exclusion is now a visible note in the gate summary.
+        runs = [R(UNDECLARED_ADVISORY_NAME), GREEN]
+        code, out = run(tiny_cfg(), [runs])
+        self.assertEqual(code, 0, out)
+        self.assertIn(UNDECLARED_ADVISORY_NAME, out)
+        self.assertIn("has no declaration", out)
+        self.assertIn("it GATES", out)
+        # A DECLARED advisory check is not reported as undeclared.
+        self.assertEqual(g.undeclared_token_names([R("vale (prose, advisory)")]), [])
+
+    def test_renaming_a_job_cannot_flip_gating_status(self):
+        # RENAME INVARIANCE, both directions.
+        #  (a) ADDING the token to a gating job's name does NOT make it non-gating —
+        #      the pre-#3773 defect, where a one-word rename silently disarmed a gate.
+        for renamed in (
+            "clippy (advisory)",
+            "clippy — advisory",
+            "clippy (informational)",
+            "coverage ratchet (advisory)",
+        ):
+            with self.subTest(rename=renamed):
+                self.assertFalse(g.is_advisory(renamed))
+                code, out = run(tiny_cfg(), [[R(renamed, conclusion="failure")]])
+                self.assertEqual(code, 1, out)
+        #  (b) RENAMING a DECLARED job away from its declared name makes it GATE again
+        #      (fail-closed): the declaration is bound to one exact identity, so drift
+        #      can only ever over-gate. C4 in check-advisory-registry.py REDs on it.
+        self.assertTrue(g.is_advisory("vale (prose, advisory)"))
+        for drifted in (
+            "vale (prose style, advisory)",
+            "vale prose (advisory)",
+            "vale (prose, advisory) v2",
+            "docs vale (prose, advisory)",
+        ):
+            with self.subTest(rename=drifted):
+                self.assertFalse(g.is_advisory(drifted))
+                code, out = run(tiny_cfg(), [[R(drifted, conclusion="failure")]])
+                self.assertEqual(code, 1, out)
+
+    def test_declaration_is_a_whole_name_match_never_a_substring(self):
+        self.assertTrue(g.is_advisory("  vale (prose, advisory)  "))  # trimmed
+        self.assertTrue(g.is_advisory("VALE (PROSE, ADVISORY)"))      # case-insensitive
+        self.assertFalse(g.is_advisory("vale"))
+        self.assertFalse(g.is_advisory("re-run vale (prose, advisory) shard"))
+
+    def test_matrix_expression_in_a_declaration_matches_its_expansion(self):
+        # A registry key is the YAML `name:`, so it may embed `${{ matrix.x }}`.
+        self.assertTrue(g.is_advisory("GUI build + clippy (x64-linux, advisory)"))
+        self.assertTrue(g.is_advisory("GUI build + clippy (win-x64, advisory)"))
+        # The expression matches a NON-EMPTY run, and the literal frame must hold.
+        self.assertFalse(g.is_advisory("GUI build + clippy (, advisory)"))
+        self.assertFalse(g.is_advisory("GUI build + clippy (x64-linux)"))
+
+    def test_declared_set_is_empty_by_default_so_an_unwired_gate_over_gates(self):
+        # Fail-closed default: with no registry installed NOTHING is advisory.
+        saved = g._DECLARED_ADVISORY
+        try:
+            g.set_declared_advisory(())
+            self.assertFalse(g.is_advisory("vale (prose, advisory)"))
+            code, out = run(tiny_cfg(), [[R("vale (prose, advisory)", conclusion="failure")]])
+            self.assertEqual(code, 1, out)
+        finally:
+            g._DECLARED_ADVISORY = saved
+        self.assertTrue(g.is_advisory("vale (prose, advisory)"))
+
+    def test_failfast_and_resolver_inherit_the_declared_rule(self):
+        # is_advisory is the SINGLE classifier: fail-fast must red on an undeclared
+        # advisory-named failure while siblings are pending...
+        red = R(UNDECLARED_ADVISORY_NAME, conclusion="failure")
+        self.assertEqual([r["name"] for r in g.failfast_failures([red, PENDING])],
+                         [UNDECLARED_ADVISORY_NAME])
+        # ...and must NOT red on a declared one.
+        declared_red = R("vale (prose, advisory)", conclusion="failure")
+        self.assertEqual(g.failfast_failures([declared_red, PENDING]), [])
+        # The resolver's run-level synthetic check reads the same predicate: an
+        # UNDECLARED advisory-named job failure is a visible_required_failure, so no
+        # synthetic verdict is minted and the job's own red is what gates.
+        newest = W(311, 9, name="site-e2e-foundation", conclusion="failure")
+        job = {
+            "id": 4001,
+            "name": UNDECLARED_ADVISORY_NAME,
+            "status": "completed",
+            "conclusion": "failure",
+            "started_at": "2026-07-21T14:05:00Z",
+            "html_url": "https://github.test/o/r/actions/runs/311/job/1",
+        }
+        resolved, _ = g.resolve_newest_workflow_runs(
+            [], [newest], "999", attempt_jobs={311: [job]}
+        )
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(g.render_verdict(resolved), 1)
+
+
+class TestAdvisoryRegistryLoading(unittest.TestCase):
+    """[OPUS-5] #3773 — the registry loader is the gate's single source of truth."""
+
+    def _reload(self):
+        g.set_declared_advisory(DECLARED_ADVISORY)
+
+    def test_entry_without_required_fields_declares_nothing(self):
+        payload = {"jobs": {
+            "complete (advisory)": {"owner_bead": "sq-a", "promotion_criteria": "x",
+                                    "registered": "2026-01-01"},
+            "no-owner (advisory)": {"promotion_criteria": "x", "registered": "2026-01-01"},
+            "blank-owner (advisory)": {"owner_bead": "", "promotion_criteria": "x",
+                                       "registered": "2026-01-01"},
+            "not-an-object (advisory)": "oops",
+        }}
+        declared, warnings = g.parse_advisory_registry(payload)
+        self.assertEqual(declared, ["complete (advisory)"])
+        self.assertEqual(len(warnings), 3)
+        try:
+            g.set_declared_advisory(declared)
+            self.assertTrue(g.is_advisory("complete (advisory)"))
+            # Fail-closed per entry: an under-specified declaration buys nothing.
+            self.assertFalse(g.is_advisory("no-owner (advisory)"))
+            self.assertFalse(g.is_advisory("blank-owner (advisory)"))
+            self.assertFalse(g.is_advisory("not-an-object (advisory)"))
+        finally:
+            self._reload()
+
+    def test_malformed_root_raises(self):
+        for payload in ([], "x", {}, {"jobs": []}, {"jobs": "x"}):
+            with self.subTest(payload=payload):
+                with self.assertRaises(g.AdvisoryRegistryError):
+                    g.parse_advisory_registry(payload)
+
+    def test_missing_or_unparseable_file_raises(self):
+        with self.assertRaises(g.AdvisoryRegistryError):
+            g.load_advisory_registry(str(REPO_ROOT / "does-not-exist.json"))
+        self._reload()
+        bad = REPO_ROOT / "scripts" / "ci_summary_gate.py"  # valid path, not JSON
+        with self.assertRaises(g.AdvisoryRegistryError):
+            g.load_advisory_registry(str(bad))
+        self._reload()
+
+    def test_the_live_registry_loads_and_declares_only_real_entries(self):
+        # The REAL repo registry must parse, declare every complete entry, and
+        # (vacuity guard) actually contain some declarations.
+        path = REPO_ROOT / ".github" / "advisory-registry.json"
+        try:
+            declared = g.load_advisory_registry(str(path))
+            self.assertGreater(len(declared), 5)
+            # Every declared key must be one of the registry's own job keys.
+            raw = json.loads(path.read_text(encoding="utf-8"))["jobs"]
+            self.assertTrue(set(declared) <= set(raw))
+            # NEGATIVE: the four gates #3773 restored must NOT be declared advisory.
+            for restored in (
+                "site e2e determinism gate (no waitForTimeout calls)",
+                "GUI hermetic guards (browserName tripwire + no-sleep-gate)",
+                "site a11y ratchet — axe WCAG 2.1 AA (headless Chromium)",
+            ):
+                self.assertNotIn(restored, raw, restored)
+        finally:
+            self._reload()
+
+
+class TestAdvisoryRegistryWiring(unittest.TestCase):
+    """[OPUS-5] #3773 — ci-summary.yml must sparse-check-out the registry, or the
+    gate exits 1 on every run. A workflow-inspection test, like the required-check
+    anchor in test_ci_select_wiring.py."""
+
+    def test_ci_summary_sparse_checkout_includes_the_registry(self):
+        text = (REPO_ROOT / ".github" / "workflows" / "ci-summary.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("sparse-checkout:", text)
+        block = text.split("sparse-checkout:", 1)[1].split("sparse-checkout-cone-mode", 1)[0]
+        self.assertIn("scripts/ci_summary_gate.py", block)
+        self.assertIn(g.ADVISORY_REGISTRY_PATH, block)
 
 
 # [OPUS-5] PLATFORM-MANAGED advisory exclusion (the exact fail-closed allow-list).

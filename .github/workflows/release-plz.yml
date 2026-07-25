@@ -74,7 +74,8 @@ jobs:
   # would bypass that setting, but the App secrets are NOT configured (live: batch-merge run
   # 29990467905 — ORCHESTRATOR_APP_ID empty, HAVE_APP_TOKEN=false, hygiene-only mode), so there is
   # no working token to switch to. Instead: (1) the job name now contains the whole word
-  # "advisory", which ci-summary's `\b(advisory|informational)\b` name rule excludes from the
+  # "advisory" AND it is DECLARED in .github/advisory-registry.json, which is what excludes it
+  # (since #3773 the name token alone does nothing) from the
   # gating set (registered in .github/advisory-registry.json; owner bead sq-lonae); (2) the KNOWN
   # 403 (PR-creation setting disabled) is tolerated loudly — a `::warning` naming the needed
   # setting, exit 0 — but ONLY when BOTH the CAPTURED release-plz output matches the exact
