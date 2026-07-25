@@ -175,6 +175,24 @@
 #     consecutiveness. The earlier `int | None` probe let a falsy count stand in
 #     for a confirmed zero, so a transient probe failure could RED a hold that was
 #     in fact SATISFIABLE while reporting an idle queue it had never seen.
+#   * FAIL-CLOSED ALLOW-LIST (PR #3765 review round 3). THE INVARIANT: only an
+#     affirmatively-CONFIRMED_IDLE report whose count AGREES with that state can
+#     satisfy either exit; anything unrecognised is UNKNOWN, NEVER idle. Round 2
+#     left the state handling as a DENY-list — `if UNKNOWN / elif CONFIRMED_BUSY /
+#     else <assume idle>` — so a MALFORMED report object fell into the idle branch:
+#     HeadActivityReport("bogus", None, "malformed") accrued the full confirming
+#     streak and turned the gate RED as proven-unsatisfiable on a state nobody had
+#     ever observed. Now enforced twice (belt and braces — the exploit was DIRECT
+#     CONSTRUCTION): (a) `_head_report_violation` is the one definition of a
+#     well-formed (state, count) pair and `__post_init__` RAISES on any violation,
+#     so a malformed instance cannot be built — a state outside the enum, a
+#     CONFIRMED_IDLE whose count is not 0, a CONFIRMED_BUSY whose count is not >= 1,
+#     an UNKNOWN carrying a count; and (b) every consumer branches AFFIRMATIVELY —
+#     `confirms_idle` first (state AND count), `CONFIRMED_BUSY` explicitly, and a
+#     terminal `else` that treats everything remaining as UNKNOWN — while
+#     `_probe_head_activity`, the single accessor, re-checks the invariant via
+#     `normalized()` so a report that bypassed `__post_init__` still degrades to
+#     UNKNOWN instead of being read as evidence.
 # Both exits are exit-1-only and route through render_verdict's stale-draft-tier
 # belt, so they can never synthesise a pass; a hold that IS satisfiable (a queued
 # full-tier run exists) waits exactly as before. The RED names the remedy
@@ -332,21 +350,69 @@ class HeadActivity(Enum):
     UNKNOWN = "unknown"                    # NOT observed: absent / failed / raised
 
 
+def _head_report_violation(state, count) -> str | None:
+    """[OPUS-5] PR #3765 round-3 finding: the SINGLE definition of a WELL-FORMED
+    (state, count) pair for a `HeadActivityReport`. Returns None when the pair is
+    well-formed, else an operator-facing reason it is not.
+
+    THE INVARIANT (one place, two enforcers): only an affirmatively-CONFIRMED_IDLE
+    report whose count is CONSISTENT with that state can ever satisfy an
+    unsatisfiability exit. Anything unrecognised — a state outside the enum, a
+    confirmed state with no count, a CONFIRMED_IDLE whose count is not 0, a
+    CONFIRMED_BUSY whose count is not >= 1, an UNKNOWN that carries a count — is
+    UNKNOWN, NEVER idle. This function is called from `__post_init__` (so a malformed
+    instance cannot be CONSTRUCTED) and from `normalized()` (so a malformed instance
+    that reached a consumer anyway — smuggled past the frozen dataclass via
+    `object.__setattr__`, a subclass, or unpickling — still degrades to UNKNOWN
+    rather than being read as evidence). Belt and braces, because the round-2
+    exploit was DIRECT CONSTRUCTION: `HeadActivityReport("bogus", None, "malformed")`
+    fell through a consumer-side DENY-list (`if UNKNOWN / elif CONFIRMED_BUSY /
+    else assume idle`) into the idle branch, accrued the full confirming streak, and
+    turned the gate RED as proven-unsatisfiable on a state nobody had ever observed."""
+    if not isinstance(state, HeadActivity):
+        return f"state {state!r} is not a HeadActivity member"
+    if isinstance(count, bool) or not (count is None or isinstance(count, int)):
+        return f"count {count!r} is neither None nor an int"
+    if state is HeadActivity.UNKNOWN:
+        if count is not None:
+            return f"UNKNOWN carries count={count!r}; a NON-observation has no count"
+        return None
+    if count is None:
+        return f"{state.name} carries no count; a CONFIRMED observation must have one"
+    if state is HeadActivity.CONFIRMED_IDLE and count != 0:
+        return f"CONFIRMED_IDLE with count={count!r}; an idle head has exactly 0"
+    if state is HeadActivity.CONFIRMED_BUSY and count < 1:
+        return f"CONFIRMED_BUSY with count={count!r}; a busy head has >= 1"
+    return None
+
+
 @dataclass(frozen=True)
 class HeadActivityReport:
     """One per-head probe observation (#3758): a `HeadActivity` state plus the
     observed count (None iff UNKNOWN) and an operator-facing reason for UNKNOWN.
 
     Construct through `confirmed()` / `unknown()` — never by truthiness of a bare
-    count, which is the conflation PR #3765 finding 1 removed."""
+    count, which is the conflation PR #3765 finding 1 removed. [OPUS-5] round 3: the
+    invariants in `_head_report_violation` are now enforced at CONSTRUCTION
+    (`__post_init__` raises `ValueError`), so a malformed report cannot exist, and
+    re-checked at every consumer via `normalized()`."""
 
     state: HeadActivity
     count: int | None = None
     detail: str = ""
 
+    def __post_init__(self) -> None:
+        """[OPUS-5] PR #3765 round 3: reject a malformed report AT CONSTRUCTION. The
+        dataclass is frozen, so this validates (it never assigns) — a `ValueError`
+        here means no malformed instance is ever handed to the poll loop."""
+        bad = _head_report_violation(self.state, self.count)
+        if bad is not None:
+            raise ValueError(f"malformed HeadActivityReport: {bad}")
+
     @classmethod
     def confirmed(cls, count: int) -> HeadActivityReport:
-        """An ACTUAL observation of `count` non-terminal runs on the head SHA."""
+        """An ACTUAL observation of `count` non-terminal runs on the head SHA.
+        A negative / non-int count is malformed and raises (`__post_init__`)."""
         return cls(
             HeadActivity.CONFIRMED_IDLE if count == 0 else HeadActivity.CONFIRMED_BUSY,
             count,
@@ -357,12 +423,50 @@ class HeadActivityReport:
         """NO observation was obtained (`detail` says why). Never evidence."""
         return cls(HeadActivity.UNKNOWN, None, detail)
 
+    def normalized(self) -> HeadActivityReport:
+        """[OPUS-5] PR #3765 round 3: the CONSUMER-side half of the belt-and-braces.
+        Returns `self` when well-formed, else an UNKNOWN report naming the violation.
+        `__post_init__` already makes a malformed instance unconstructible, so this
+        only ever fires for one that bypassed it (`object.__setattr__` on the frozen
+        instance, a subclass overriding `__post_init__`, unpickling) — and then it
+        degrades to UNKNOWN instead of being mistaken for an idle head."""
+        bad = _head_report_violation(self.state, self.count)
+        if bad is None:
+            return self
+        return HeadActivityReport.unknown(f"malformed report ({bad})")
+
+    @property
+    def why_unknown(self) -> str:
+        """[OPUS-5] round 3: operator-facing text for a NON-observation, used by the
+        allow-lists' terminal `else`. Every UNKNOWN this loop can actually see carries
+        a `detail` (`_probe_head_activity` supplies one for all five non-observations);
+        the fallback exists only so an unrecognised state still logs something true
+        rather than an empty parenthesis."""
+        return self.detail or f"unrecognised state {self.state!r}"
+
     @property
     def confirms_idle(self) -> bool:
-        """The ONLY predicate any exit may condition on. Deliberately NOT
-        `not self.count`: an UNKNOWN report carries count=None, which is falsy —
-        exactly the bug (PR #3765 finding 1)."""
-        return self.state is HeadActivity.CONFIRMED_IDLE
+        """The ONLY predicate any exit may condition on: an ALLOW-LIST of one.
+        Deliberately NOT `not self.count` — an UNKNOWN report carries count=None,
+        which is falsy (PR #3765 finding 1) — and deliberately not the state test
+        alone: the count must AGREE with the state, so a CONFIRMED_IDLE smuggled in
+        with count=7 or count=None is not idle either (round-3 finding)."""
+        return (
+            self.state is HeadActivity.CONFIRMED_IDLE
+            and _head_report_violation(self.state, self.count) is None
+        )
+
+    @property
+    def confirms_busy(self) -> bool:
+        """The MIRROR allow-list, so a consumer's branch chain is TOTAL:
+        `confirms_idle` / `confirms_busy` / everything else is UNKNOWN. Also
+        count-consistent, so a CONFIRMED_BUSY smuggled in with count=0 is not busy
+        either — it must not be narrated as "0 non-terminal run(s) could still
+        register", a claim that contradicts itself (round-3 finding)."""
+        return (
+            self.state is HeadActivity.CONFIRMED_BUSY
+            and _head_report_violation(self.state, self.count) is None
+        )
 
 
 @dataclass
@@ -1456,11 +1560,14 @@ def _conclude_unsatisfiable_hold(
 
 
 def _probe_head_activity(fetch_head_activity) -> HeadActivityReport:
-    """[OPUS-5] PR #3765 finding 1: call the per-head probe and normalise EVERY
-    non-observation to `HeadActivity.UNKNOWN`. The four non-observations — no probe
-    wired, `None` returned (API failure), an exception, or a value that is not a
-    `HeadActivityReport` (e.g. a bare count from a future refactor) — are all
-    UNKNOWN, so no exit can mistake them for a confirmed-idle head."""
+    """[OPUS-5] PR #3765 finding 1: the SINGLE accessor for the per-head probe. It
+    normalises EVERY non-observation to `HeadActivity.UNKNOWN`. The five
+    non-observations — no probe wired, `None` returned (API failure), an exception, a
+    value that is not a `HeadActivityReport` (e.g. a bare count from a future
+    refactor), and (round 3) a `HeadActivityReport` whose (state, count) pair
+    VIOLATES the report invariant — are all UNKNOWN, so no exit can mistake any of
+    them for a confirmed-idle head. Every consumer reads the report through this
+    accessor; none of them may re-derive "idle" from the raw fetcher."""
     if fetch_head_activity is None:
         return HeadActivityReport.unknown("no probe wired")
     try:
@@ -1469,7 +1576,17 @@ def _probe_head_activity(fetch_head_activity) -> HeadActivityReport:
         print(f"  (head-activity probe raised {exc!r} — treating as unknown)")
         return HeadActivityReport.unknown(f"probe raised {type(exc).__name__}")
     if isinstance(report, HeadActivityReport):
-        return report
+        # [OPUS-5] round 3: a report OBJECT is not automatically a valid observation.
+        # `__post_init__` makes a malformed one unconstructible, but one that bypassed
+        # it (object.__setattr__ on the frozen instance, a subclass, unpickling) must
+        # still degrade to UNKNOWN here rather than reach the idle branch.
+        checked = report.normalized()
+        if checked is not report:
+            print(
+                f"  (head-activity probe returned a malformed report {report!r} "
+                f"— {checked.detail}; treating as unknown)"
+            )
+        return checked
     if report is None:
         return HeadActivityReport.unknown("probe unavailable (API failure)")
     # Fail-safe: a bare int/whatever is NOT a confirmed observation here. Coercing it
@@ -1668,23 +1785,16 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
         head = HeadActivityReport.unknown("probe not consulted (no zero-pending hold)")
         if awaiting_full and pending == 0:
             head = _probe_head_activity(fetch_head_activity)
-            if head.state is HeadActivity.UNKNOWN:
-                # PR #3765 finding 2: a non-observation BREAKS consecutiveness.
-                unsat_confirms = 0
-                print(
-                    "  awaiting_full hold with 0 pending sibling(s): head-activity "
-                    f"probe UNKNOWN ({head.detail}) — this head's Actions queue was "
-                    "NOT observed, so the hold cannot be proven unsatisfiable; the "
-                    "confirming streak is RESET and the gate keeps polling (#3758)."
-                )
-            elif head.state is HeadActivity.CONFIRMED_BUSY:
-                unsat_confirms = 0
-                print(
-                    f"  awaiting_full hold with 0 pending sibling(s): {head.count} "
-                    "non-terminal workflow run(s) on this head SHA could still register "
-                    "the full-tier successor — still settling (#3758)."
-                )
-            else:  # HeadActivity.CONFIRMED_IDLE — the ONLY evidential state
+            # [OPUS-5] PR #3765 round 3: an ALLOW-LIST, not a deny-list. This used to
+            # read `if UNKNOWN / elif CONFIRMED_BUSY / else <assume CONFIRMED_IDLE>`,
+            # so EVERY unrecognised report — a state outside the enum, a CONFIRMED_IDLE
+            # whose count contradicts it — landed in the idle branch and could accrue
+            # the full streak and RED the gate as proven-unsatisfiable. The affirmative
+            # `confirms_idle` test now comes FIRST and everything else resets, so the
+            # invariant holds by construction of the branch order: ONLY an
+            # affirmatively-CONFIRMED_IDLE report with a consistent count can satisfy
+            # this exit; anything unrecognised is UNKNOWN, NEVER idle.
+            if head.confirms_idle:
                 unsat_confirms += 1
                 print(
                     "  awaiting_full hold with 0 pending sibling(s) and NO queued/"
@@ -1701,6 +1811,29 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
                             "own workflow excluded)"
                         ),
                     )
+            elif head.confirms_busy:
+                # PR #3765 finding 2: a live head BREAKS consecutiveness. Affirmative
+                # (state AND a count that agrees) for the same reason as the branch
+                # above, so a CONFIRMED_BUSY with count=0 is not narrated here as "0
+                # run(s) could still register" — it falls to the UNKNOWN else.
+                unsat_confirms = 0
+                print(
+                    f"  awaiting_full hold with 0 pending sibling(s): {head.count} "
+                    "non-terminal workflow run(s) on this head SHA could still register "
+                    "the full-tier successor — still settling (#3758)."
+                )
+            else:
+                # UNKNOWN, and — fail-closed — every state this loop does not
+                # affirmatively recognise. A non-observation BREAKS consecutiveness
+                # (PR #3765 finding 2) and can never conclude anything.
+                unsat_confirms = 0
+                print(
+                    "  awaiting_full hold with 0 pending sibling(s): head-activity "
+                    f"probe UNKNOWN ({head.why_unknown}) — this head's "
+                    "Actions queue was NOT observed, so the hold cannot be proven "
+                    "unsatisfiable; the confirming streak is RESET and the gate keeps "
+                    "polling (#3758)."
+                )
         else:
             unsat_confirms = 0
 
@@ -1748,6 +1881,13 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
             # observed. Only `confirms_idle` is evidence; CONFIRMED_BUSY (that run may
             # yet register the awaited select) and UNKNOWN (nothing was observed at
             # all) both fall back to the pre-#3758 bound, the absolute budget.
+            # [OPUS-5] round 3: this is an ALLOW-LIST too, and now a total one.
+            # `confirms_idle` is AFFIRMATIVE (CONFIRMED_IDLE *and* a count that agrees
+            # with it), so every other report extends the wait — CONFIRMED_BUSY,
+            # UNKNOWN, and any unrecognised/self-contradictory report, which
+            # `_probe_head_activity` has already degraded to UNKNOWN. There is no
+            # (state, count) pair for which this exit fires without a confirmed
+            # observation of an idle head.
             if hold_only:
                 extend = progressing or not head.confirms_idle
             else:
@@ -1778,18 +1918,21 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
                 # hold is still being waited on. The sq-90cv4 notice below would
                 # misreport it as a throughput signal, and an UNKNOWN probe must never
                 # be logged as an idle queue.
+                # [OPUS-5] round 3: allow-list here as well — the previous `else`
+                # ASSUMED CONFIRMED_BUSY and printed `head.count`, so an unrecognised
+                # report would have been narrated as a live head with a `None` count.
                 if progressing:
                     reason = "live sibling progress (the set is still churning)"
-                elif head.state is HeadActivity.UNKNOWN:
-                    reason = (
-                        f"the head-activity probe is UNKNOWN ({head.detail}) — this "
-                        "head's Actions queue was NOT observed, so unsatisfiability is "
-                        "NOT proven"
-                    )
-                else:
+                elif head.confirms_busy:
                     reason = (
                         f"{head.count} non-terminal workflow run(s) on this head SHA "
                         "could still register the full-tier successor"
+                    )
+                else:  # UNKNOWN, and any state not affirmatively recognised above
+                    reason = (
+                        f"the head-activity probe is UNKNOWN ({head.why_unknown}) — "
+                        "this head's Actions queue was NOT observed, so "
+                        "unsatisfiability is NOT proven"
                     )
                 if not extension_started:
                     extension_started = True
@@ -2265,12 +2408,68 @@ def _self_test() -> int:
         "reset the consecutive-confirmation counter (PR #3765 finding 2)",
     )
 
+    # [OPUS-5] PR #3765 ROUND-3 finding: a MALFORMED report is UNKNOWN, never idle.
+    # The loop's state handling was a DENY-list, so HeadActivityReport("bogus", None,
+    # "malformed") reached the idle branch, accrued 2/2 and turned the gate RED as
+    # proven-unsatisfiable. Both halves of the belt-and-braces are asserted here.
+    for label, state, count in (
+        ("bogus-state", "bogus", None),
+        ("idle-count-none", HeadActivity.CONFIRMED_IDLE, None),
+        ("idle-count-nonzero", HeadActivity.CONFIRMED_IDLE, 7),
+        ("busy-count-zero", HeadActivity.CONFIRMED_BUSY, 0),
+    ):
+        # (a) construction-time: a malformed report cannot even be built.
+        try:
+            HeadActivityReport(state, count, "malformed")
+        except ValueError:
+            pass
+        else:
+            require(False, f"malformed HeadActivityReport ({label}) was constructible")
+        # (b) consumer-side: one smuggled past __post_init__ is still UNKNOWN.
+        smuggled = HeadActivityReport.unknown("smuggled")
+        object.__setattr__(smuggled, "state", state)
+        object.__setattr__(smuggled, "count", count)
+        # The two allow-list predicates the consumers branch on must BOTH refuse it,
+        # so the branch chain confirms_idle / confirms_busy / else falls through to
+        # UNKNOWN — the invariant, independent of the accessor's normalisation.
+        require(
+            not smuggled.confirms_idle and not smuggled.confirms_busy,
+            f"a malformed report ({label}) satisfied an allow-list predicate — "
+            "confirms_idle/confirms_busy must require the count to AGREE with the "
+            "state (PR #3765 round 3)",
+        )
+        require(
+            smuggled.normalized().state is HeadActivity.UNKNOWN,
+            f"normalized() did not degrade a malformed report ({label}) to UNKNOWN",
+        )
+        bad_log = io.StringIO()
+        with redirect_stdout(bad_log):
+            bad_code = run_gate(
+                Config(self_run_id="999", interval=0, min_polls=1, settle_polls=2,
+                       base_polls=3, sat_interval=0, max_total_polls=6,
+                       unsat_grace_polls=2, sat_queue_min=5, summary_path=""),
+                lambda: [dict(draft_select)], lambda: 0,
+                sleep_fn=lambda _s: None, tier_ctx=hold_ctx,
+                fetch_head_activity=lambda rep=smuggled: rep,
+            )
+        require(bad_code == 1, f"malformed report ({label}) must still RED at the cap")
+        require(
+            "UNSATISFIABLE" not in bad_log.getvalue()
+            and "confirming poll(s)" not in bad_log.getvalue()
+            and "probe UNKNOWN" in bad_log.getvalue()
+            and "attempt 6:" in bad_log.getvalue(),
+            f"a malformed report ({label}) concluded unsatisfiability or accrued the "
+            "confirming streak — the consumer allow-list is not fail-closed "
+            "(PR #3765 round 3)",
+        )
+
     print(
         "ci-summary --self-test: ALL ASSERTIONS PASSED "
         "(superseded cancellation ignored; newest failure preserved; redispatch "
         "bounded once; unsatisfiable draft-tier hold exits fast + RED while a "
         "satisfiable hold still waits; an UNKNOWN probe neither concludes nor "
-        "sustains a confirming streak)"
+        "sustains a confirming streak; a malformed report is unconstructible AND "
+        "degrades to UNKNOWN at every consumer)"
     )
     return 0
 

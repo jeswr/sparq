@@ -286,6 +286,11 @@ belts (all in `scripts/ci_summary_gate.py`, unit-tested in
    pre-existing absolute-budget bound in place; an `unknown` observation also
    **resets** the consecutive-confirmation counter (N consecutive polls must mean N
    consecutive *confirmed* observations) and is never logged as an idle queue.
+   "Only a confirmed zero is evidence" is enforced as a **fail-closed allow-list**,
+   not a deny-list: the report's `(state, count)` pair is validated at construction
+   (a state outside the enum, or a count that contradicts the state, raises), every
+   consumer branches **affirmatively** on confirmed-idle / confirmed-busy, and
+   anything the loop does not recognise is treated as **`unknown`** — never as idle.
    Both route through rule 4's own verdict — the exit can
    never render a pass — and the RED states the remedy explicitly: **re-running the
    `ci-summary` gate cannot clear it**; only a **full-tier re-dispatch of the

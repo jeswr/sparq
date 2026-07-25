@@ -1872,6 +1872,245 @@ class TestUnknownProbeIsNotConfirmedZero(unittest.TestCase):
         self.assertNotIn("2/2 confirming poll(s)", out)
 
 
+def smuggle(state, count, detail="smuggled"):
+    """[OPUS-5] PR #3765 round 3: build a MALFORMED HeadActivityReport that BYPASSES
+    `__post_init__`, so the CONSUMER-side allow-list can be exercised independently of
+    the construction-time guard. `object.__setattr__` past the frozen dataclass is the
+    same shape as the realistic bypasses (a subclass overriding `__post_init__`,
+    unpickling) — and is the only way to get such an object to the poll loop now that
+    direct construction raises. The belt-and-braces obligation is that BOTH halves
+    hold: construction raises, AND a report that got past it is still UNKNOWN."""
+    rep = g.HeadActivityReport.unknown(detail)
+    object.__setattr__(rep, "state", state)
+    object.__setattr__(rep, "count", count)
+    return rep
+
+
+class TestMalformedReportIsNeverIdle(unittest.TestCase):
+    """[OPUS-5] PR #3765 ROUND-3 finding (reproduced by the reviewer): malformed
+    HeadActivityReport instances bypassed normalisation. The poll loop's state
+    handling was a DENY-list — `if UNKNOWN / elif CONFIRMED_BUSY / else <assume
+    CONFIRMED_IDLE>` — so `HeadActivityReport("bogus", None, "malformed")` fell into
+    the idle branch, accrued the full 2/2 confirming streak and turned the gate RED as
+    proven-UNSATISFIABLE: a garbage state concluded the head was idle. Round 2's tests
+    covered bare-int and None RETURNS but not malformed report OBJECTS.
+
+    THE INVARIANT under test, both halves: only an affirmatively-CONFIRMED_IDLE report
+    whose count AGREES with that state can satisfy the exit — anything unrecognised is
+    UNKNOWN, NEVER idle — enforced at CONSTRUCTION (`__post_init__` raises) and again
+    at every CONSUMER (the affirmative `confirms_idle` branch first, everything else
+    resetting)."""
+
+    DRAFTS = TestUnsatisfiableDraftTierHold.DRAFTS
+
+    def _hold_polls(self):
+        return [list(self.DRAFTS) + [GREEN, GREEN2]]
+
+    # The four malformed shapes the reviewer named. Each is a (state, count) pair
+    # that the round-2 deny-list either read as idle or narrated incoherently.
+    MALFORMED = (
+        ("bogus-state-string", "bogus", None),
+        ("confirmed-idle-count-none", g.HeadActivity.CONFIRMED_IDLE, None),
+        ("confirmed-idle-count-nonzero", g.HeadActivity.CONFIRMED_IDLE, 7),
+        ("confirmed-busy-count-zero", g.HeadActivity.CONFIRMED_BUSY, 0),
+    )
+
+    def test_malformed_report_reaching_the_poll_loop_is_treated_as_unknown(self):
+        """THE round-3 regression. Each malformed report reaching the poll loop must
+        be UNKNOWN: never concludes UNSATISFIABLE, never accrues the confirming
+        streak, and the log says the probe is UNKNOWN. The pre-fix behaviour was
+        `2/2 confirming poll(s)` + `UNSATISFIABLE` at poll 2 for the first three."""
+        cfg = tiny_cfg(base_polls=99, max_total_polls=3, min_polls=1)
+        for label, state, count in self.MALFORMED:
+            with self.subTest(malformed=label):
+                p = probe(smuggle(state, count))
+                code, out = run(cfg, self._hold_polls(),
+                                tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                                head_activity=p)
+                # Fail-closed, not fail-silent: still RED, but only at the cap via
+                # the pre-existing stale-draft-tier belt — never as a PROVEN unsat.
+                self.assertEqual(code, 1, out)
+                self.assertNotIn("UNSATISFIABLE", out)
+                self.assertNotIn("confirming poll(s)", out)   # streak never accrued
+                self.assertNotIn("CONFIRMED ZERO", out)
+                self.assertIn("probe UNKNOWN", out)
+                self.assertIn("malformed report", out)
+                # It ran the whole budget rather than shortcutting at the base one.
+                self.assertIn("attempt 3:", out)
+                self.assertIn("stale draft-tier run, full run pending", out)
+
+    def test_malformed_report_never_takes_the_base_budget_shortcut(self):
+        """The SECOND consumer (the base-budget widening at `attempt >= base_polls`)
+        must also refuse a malformed report: an unrecognised state is not a confirmed
+        idle head, so the exit is vetoed and the log must not narrate it as a live
+        head with a `None` count (the round-2 `else` assumed CONFIRMED_BUSY there)."""
+        cfg = tiny_cfg(base_polls=2, max_total_polls=4, min_polls=1)
+        for label, state, count in self.MALFORMED:
+            with self.subTest(malformed=label):
+                code, out = run(cfg, self._hold_polls(),
+                                tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                                head_activity=probe(smuggle(state, count)))
+                self.assertEqual(code, 1, out)
+                self.assertNotIn("UNSATISFIABLE", out)
+                self.assertIn("probe is UNKNOWN", out)
+                self.assertNotIn("could still register", out)   # not narrated as busy
+                self.assertNotIn("None non-terminal workflow run", out)
+                self.assertIn("attempt 4:", out)
+
+    def test_malformed_report_cannot_bridge_two_confirmations(self):
+        """Consecutiveness, the finding-2 invariant, holds for THIS non-observation
+        too: [confirmed-zero, malformed, confirmed-zero] must not reach the grace,
+        while the paired [confirmed-zero, confirmed-zero] does (already pinned by
+        test_two_consecutive_confirmations_do_satisfy_the_grace)."""
+        cfg = tiny_cfg(base_polls=99, max_total_polls=3, min_polls=1)
+        for label, state, count in self.MALFORMED:
+            with self.subTest(malformed=label):
+                code, out = run(cfg, self._hold_polls(),
+                                tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                                head_activity=probe(0, smuggle(state, count), 0))
+                self.assertEqual(code, 1, out)
+                self.assertIn("1/2 confirming poll(s)", out)
+                self.assertNotIn("2/2 confirming poll(s)", out)
+                self.assertNotIn("UNSATISFIABLE", out)
+
+    def test_a_malformed_report_still_pins_a_satisfiable_hold_open(self):
+        """The soundness half: a malformed report must not RED a hold that is in fact
+        SATISFIABLE. With the full-tier wave landing mid-poll the gate still PASSES —
+        the malformed probe neither concluded nor short-circuited the wait."""
+        fulls = [R(SELECT_FULL, started=f"2026-07-23T11:40:0{i}Z", rid=10 + i)
+                 for i in range(1, 5)]
+        polls = [
+            list(self.DRAFTS) + [GREEN, GREEN2],
+            list(self.DRAFTS) + [GREEN, GREEN2],
+            list(self.DRAFTS) + fulls + [GREEN, GREEN2],
+            list(self.DRAFTS) + fulls + [GREEN, GREEN2],
+            list(self.DRAFTS) + fulls + [GREEN, GREEN2],
+        ]
+        for label, state, count in self.MALFORMED:
+            with self.subTest(malformed=label):
+                code, out = run(tiny_cfg(), polls,
+                                tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                                head_activity=probe(smuggle(state, count)))
+                self.assertEqual(code, 0, out)
+                self.assertIn("PASSED", out)
+                self.assertNotIn("UNSATISFIABLE", out)
+
+    def test_direct_construction_of_a_malformed_report_raises(self):
+        """The belt (the reviewer's exploit was DIRECT CONSTRUCTION): each malformed
+        (state, count) pair is rejected by `__post_init__`, so no such instance can
+        exist in the first place. The message names the violated invariant."""
+        for label, state, count in self.MALFORMED:
+            with self.subTest(malformed=label):
+                with self.assertRaises(ValueError) as ctx:
+                    g.HeadActivityReport(state, count, "malformed")
+                self.assertIn("malformed HeadActivityReport", str(ctx.exception))
+        # The reviewer's exact expression.
+        with self.assertRaises(ValueError):
+            g.HeadActivityReport("bogus", None, "malformed")
+        # Plus the remaining inconsistent pairs: UNKNOWN may not carry a count, a
+        # confirmed count may not be a bool or a non-int, and a busy count may not
+        # be negative.
+        for state, count in (
+            (g.HeadActivity.UNKNOWN, 0),
+            (g.HeadActivity.UNKNOWN, 3),
+            (g.HeadActivity.CONFIRMED_IDLE, False),
+            (g.HeadActivity.CONFIRMED_BUSY, True),
+            (g.HeadActivity.CONFIRMED_BUSY, -1),
+            (g.HeadActivity.CONFIRMED_BUSY, "2"),
+            (None, None),
+        ):
+            with self.subTest(state=state, count=count):
+                with self.assertRaises(ValueError):
+                    g.HeadActivityReport(state, count)
+
+    def test_the_well_formed_constructors_still_build_and_classify(self):
+        """The paired positive — `__post_init__` must not have broken the only two
+        sanctioned constructors, nor `normalized()` (a well-formed report is returned
+        AS-IS, identity-equal, so the accessor adds no allocation on the hot path)."""
+        idle = g.HeadActivityReport.confirmed(0)
+        self.assertTrue(idle.confirms_idle)
+        self.assertFalse(idle.confirms_busy)
+        self.assertIs(idle.normalized(), idle)
+        busy = g.HeadActivityReport.confirmed(4)
+        self.assertIs(busy.state, g.HeadActivity.CONFIRMED_BUSY)
+        self.assertFalse(busy.confirms_idle)
+        self.assertTrue(busy.confirms_busy)
+        self.assertIs(busy.normalized(), busy)
+        unk = g.HeadActivityReport.unknown("api down")
+        self.assertFalse(unk.confirms_idle)
+        self.assertFalse(unk.confirms_busy)
+        self.assertIs(unk.normalized(), unk)
+        self.assertEqual(unk.why_unknown, "api down")
+
+    def test_confirms_idle_requires_the_count_to_agree_with_the_state(self):
+        """Type-level pin on the consumer allow-list's sole predicate: `confirms_idle`
+        is not the state test alone. A smuggled CONFIRMED_IDLE whose count contradicts
+        it is NOT idle, and `normalized()` degrades it to UNKNOWN naming the
+        violation."""
+        for state, count in ((g.HeadActivity.CONFIRMED_IDLE, None),
+                             (g.HeadActivity.CONFIRMED_IDLE, 7),
+                             (g.HeadActivity.CONFIRMED_BUSY, 0),
+                             ("bogus", None)):
+            with self.subTest(state=state, count=count):
+                rep = smuggle(state, count)
+                # BOTH allow-list predicates refuse it, so the consumer branch chain
+                # confirms_idle / confirms_busy / else falls through to UNKNOWN.
+                self.assertFalse(rep.confirms_idle)
+                self.assertFalse(rep.confirms_busy)
+                norm = rep.normalized()
+                self.assertIsNot(norm, rep)
+                self.assertIs(norm.state, g.HeadActivity.UNKNOWN)
+                self.assertIsNone(norm.count)
+                self.assertFalse(norm.confirms_idle)
+                self.assertIn("malformed report", norm.detail)
+
+    def test_the_poll_loop_allow_list_is_fail_closed_without_the_accessor(self):
+        """The SECOND half of the belt-and-braces, pinned INDEPENDENTLY. The tests
+        above reach the loop through `_probe_head_activity`, which normalises — so
+        they would still pass on a loop whose own state handling was the round-2
+        DENY-list. This one patches the accessor out (the shape of a future refactor
+        that adds a probe path around it) and asserts the POLL LOOP is fail-closed on
+        its own: an unrecognised report must not accrue the streak or conclude.
+
+        Without this test the deny-list is invisible: restoring `if UNKNOWN / elif
+        CONFIRMED_BUSY / else <idle>` leaves all 162 other tests green while
+        reproducing the reviewer's exploit exactly (2/2 confirming + UNSATISFIABLE)."""
+        cfg = tiny_cfg(base_polls=99, max_total_polls=3, min_polls=1)
+        real = g._probe_head_activity
+        for label, state, count in self.MALFORMED:
+            with self.subTest(malformed=label):
+                bad = smuggle(state, count)
+                g._probe_head_activity = lambda _f, rep=bad: rep   # accessor bypassed
+                try:
+                    code, out = run(cfg, self._hold_polls(),
+                                    tier_ctx=draft_ctx(counting(True), run_tier="full"),
+                                    head_activity=lambda: bad)
+                finally:
+                    g._probe_head_activity = real
+                self.assertEqual(code, 1, out)
+                self.assertNotIn("UNSATISFIABLE", out)
+                self.assertNotIn("confirming poll(s)", out)
+                self.assertNotIn("CONFIRMED ZERO", out)
+                self.assertIn("probe UNKNOWN", out)
+                self.assertIn("attempt 3:", out)
+        # The accessor must be back exactly as it was (no leaked patch).
+        self.assertIs(g._probe_head_activity, real)
+
+    def test_the_probe_accessor_normalises_a_malformed_report(self):
+        """The single accessor is where normalisation happens, so pin it directly:
+        `_probe_head_activity` must hand back UNKNOWN for a malformed report and the
+        report ITSELF for a well-formed one."""
+        bad = smuggle(g.HeadActivity.CONFIRMED_IDLE, 7)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            got = g._probe_head_activity(lambda: bad)
+        self.assertIs(got.state, g.HeadActivity.UNKNOWN)
+        self.assertFalse(got.confirms_idle)
+        self.assertIn("malformed report", out.getvalue())
+        good = g.HeadActivityReport.confirmed(0)
+        self.assertIs(g._probe_head_activity(lambda: good), good)
+
+
 class TestMergeGroupChangeClassAccounting(unittest.TestCase):
     """[FABLE-5] merge-group change-class gate (extends #3420/#3421): the expected
     per-class leg accounting for a MERGE-GROUP sibling set. On a docs-only/
