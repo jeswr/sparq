@@ -233,7 +233,7 @@ sparq-engine = { path = "../sparq-engine", optional = true }
 # native tree), so the feature adds NO new external crate. Native-only: the wasm request
 # core keeps the policy layer out of its dependency graph.
 sparq-policy = { path = "../sparq-policy", optional = true }
-object_store = "0.13"
+object_store = "0.14"
 pin-project-lite = "0.2"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio", "server-auto", "server-graceful"] }

@@ -1,20 +1,27 @@
-# [OPUS-4.8] sq-ymr2e.1 — ADVISORY site E2E-foundation lane.
+# [OPUS-4.8] sq-ymr2e.1 — site E2E-foundation lane: TWO HARD jobs + one advisory one.
 #
-# WHAT: runs the shared E2E foundation smoke (site/e2e/support/foundation.smoke.spec.ts) — the
-# determinism-harness + hermetic-network demo — plus the deterministic no-timeout grep gate. The
-# smoke drives a WASM-FREE, deterministic surface (the home hero runner's server-rendered
-# idle-preview state), so this lane needs NO wasm bundle and NO Typst — it is fast and
-# self-contained (contrast site-e2e.yml, which builds spec fragments for its ReSpec smoke).
+# WHAT: the shared E2E foundation smoke (site/e2e/support/foundation.smoke.spec.ts) — the
+# determinism-harness + hermetic-network demo — the deterministic no-timeout grep gate, and the
+# axe-core a11y ratchet. The smoke drives a WASM-FREE, deterministic surface (the home hero
+# runner's server-rendered idle-preview state), so this lane needs NO wasm bundle and NO Typst —
+# it is fast and self-contained (contrast site-e2e.yml, which builds spec fragments for its
+# ReSpec smoke).
 #
-# ADVISORY, by design: the whole word `advisory` in the job NAME is what excludes this lane from
-# the `ci-summary` aggregator, so it NEVER gates the merge queue. Promotion to a required check is
-# governed by the checked-in gating/probation policy `.github/E2E-GATING-POLICY.md` (advisory-first,
-# promotion earned on a probation bar + flake-quarantine — bead sq-ymr2e.12; design
-# research/web-gui-test-program.md §6.3). Promotion is the one-line flip in §4 of that policy (drop
-# ` (advisory)` from the job name + remove the step `continue-on-error`). The browser-exec step is
-# `continue-on-error` so a browser flake can never block a PR; the deterministic lint + grep-gate
-# steps are hard (a broken foundation should be visible).
-name: site-e2e-foundation (advisory)
+# [OPUS-5] #3773 — GATING vs ADVISORY, corrected. Advisory status is now DECLARED in
+# `.github/advisory-registry.json`, NOT inferred from a job name; a check with no declaration
+# GATES. This workflow used to put THREE things in one advisory-named job, so two of them
+# gated NOTHING while this header claimed they were "hard":
+#   * `determinism-gate` (HARD, no declaration) — the no-waitForTimeout grep gate, ~15 s of
+#     pure grep with no npm install and no browser. Its previous home was the advisory job, so
+#     a `page.waitForTimeout` under site/e2e/ was mergeable. It gates now.
+#   * `a11y-ratchet` (HARD, no declaration) — the axe-core WCAG 2.1 AA scan + the committed
+#     bench/a11y-baseline.json ratchet. Deterministic given a successful scan, and non-vacuous
+#     (the suite's last test injects an unlabelled icon-button and asserts axe CATCHES it), so
+#     it is split OUT of the browser-smoke job and gates on its own.
+#   * `foundation-smoke` (DECLARED advisory) — the real-browser foundation smoke, which stays
+#     non-gating on the sq-ymr2e.12 probation bar (`.github/E2E-GATING-POLICY.md` §3).
+# Promotion of the advisory job = DELETE its registry entry (§4 of that policy).
+name: site-e2e-foundation
 
 on:
   pull_request:
@@ -44,8 +51,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # [OPUS-5] #3773 — HARD determinism gate, split out of the advisory smoke job it used to
+  # hide inside. Pure grep over site/e2e/**/*.ts (site/e2e/support/no-timeout-gate.sh): no npm
+  # install, no browser, no toolchain, ~15 s. NOT declared in
+  # `.github/advisory-registry.json`, so `ci-summary / gate` waits on it — which is what
+  # `.github/E2E-GATING-POLICY.md` §1.1 always claimed and, until now, was not true.
+  determinism-gate:
+    name: site e2e determinism gate (no waitForTimeout calls)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # Invoked directly rather than through `npm run test:e2e:grep-gate` so the gate needs
+      # no node_modules at all — the script resolves site/e2e relative to itself.
+      - name: Determinism grep gate (zero page.waitForTimeout under site/e2e)
+        run: bash site/e2e/support/no-timeout-gate.sh
+
+  # DECLARED advisory (`.github/advisory-registry.json`): a REAL browser smoke on the
+  # sq-ymr2e.12 probation bar. Renamed from "determinism gate + foundation smoke (advisory)"
+  # now that the determinism gate + a11y ratchet are their own HARD jobs — the old name
+  # advertised a gate this job no longer contains.
   foundation-smoke:
-    name: determinism gate + foundation smoke (advisory)
+    name: foundation smoke (advisory)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     defaults:
@@ -57,7 +84,7 @@ jobs:
       # Repo-root npm workspaces: `site/` is a member; `npm ci` run FROM site/ installs the site
       # member's closure from the root lock and does NOT trigger sibling members' lifecycle scripts
       # (verified in site-e2e.yml — js/'s wasm `prepare` is not run, so no Rust/wasm toolchain here).
-      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
           cache: npm
@@ -69,9 +96,8 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      # Deterministic, non-flaky — a HARD gate: zero page.waitForTimeout under site/e2e (§1.1).
-      - name: Determinism grep gate (no time-based waits)
-        run: npm run test:e2e:grep-gate
+      # [OPUS-5] #3773 — the determinism grep gate MOVED to the HARD `determinism-gate` job
+      # above. Running it here as well would only re-run it inside a non-gating job.
 
       # Cache the Playwright browser download keyed on the resolved @playwright/test version.
       - name: Resolve Playwright version
@@ -95,13 +121,50 @@ jobs:
         continue-on-error: true
         run: npm run test:e2e -- support/foundation.smoke.spec.ts
 
-      # [OPUS-4.8] sq-ymr2e.4 — ADVISORY axe-core WCAG 2.1 AA a11y scan of the P1 interactive
-      # surfaces x their key UI states (research/web-gui-test-program.md §3.1). This lane builds no
-      # wasm bundle, so the two engine-dependent states (home:results, /try:error) self-SKIP; the
-      # wasm-free states (home:idle, /try default/palette/drawer, /download release+no-release) run.
-      # Gate shape: serious+critical = ZERO on the ZERO-tier surfaces, a known-gap regression guard
-      # on the beaded color-contrast surfaces, and a moderate/minor ratchet (bench/a11y-baseline.json).
-      # continue-on-error keeps it advisory until the sq-ymr2e.12 promotion bar.
-      - name: A11y — axe WCAG 2.1 AA (headless Chromium)
-        continue-on-error: true
+  # [OPUS-4.8] sq-ymr2e.4 / [OPUS-5] #3773 — axe-core WCAG 2.1 AA a11y RATCHET, now its own
+  # HARD job. It used to be a `continue-on-error` step inside the advisory smoke job, i.e.
+  # double-swallowed: the committed ratchet in bench/a11y-baseline.json could not fail anything.
+  # WHY IT MAY GATE while the smoke beside it may not: the assertion set is a ratchet over
+  # axe's own rule output (serious+critical = ZERO on the ZERO-tier surfaces, a known-gap
+  # regression guard on the beaded colour-contrast surfaces, and a moderate/minor ceiling that
+  # may only fall), and the suite is non-vacuous by construction — its last test injects an
+  # unlabelled icon-button and asserts axe CATCHES it, so a green run proves the scanner ran.
+  # This lane builds no wasm bundle, so the engine-dependent states self-SKIP; the wasm-free
+  # states (home:idle, /download release+no-release) run — the same set as before.
+  # Design of record: research/web-gui-test-program.md §3.1.
+  a11y-ratchet:
+    name: site a11y ratchet — axe WCAG 2.1 AA (headless Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: site
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install npm dependencies (from the repo-root workspace lock)
+        run: npm ci
+
+      - name: Resolve Playwright version
+        id: pw
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+
+      - name: Install Playwright Chromium (+ OS deps)
+        run: npx playwright install --with-deps chromium
+
+      # NO continue-on-error: an axe regression is a real failure and now REDs `gate`.
+      - name: A11y — axe WCAG 2.1 AA + baseline ratchet (headless Chromium)
         run: npm run test:e2e -- a11y.spec.ts

@@ -23,6 +23,17 @@
   features: "cs-planner"
   test: true
 
+# [SONNET-4.6] sq-dzbg2: persistent planner statistics are entirely behind the
+# default-OFF `persistent-stats` feature, including the catalog round-trip,
+# corruption-rejection, deterministic-encoding, and query-equivalence tests in
+# `stats::tests`. The default workspace test archive therefore compiles this module
+# out. Exercise the real feature-ON path here, matching the other isolated planner
+# feature legs.
+- name: "sparq-engine (persistent-stats)"
+  crate: "sparq-engine"
+  features: "persistent-stats"
+  test: true
+
 - name: "sparq-engine (zk)"
   crate: "sparq-engine"
   features: "zk"

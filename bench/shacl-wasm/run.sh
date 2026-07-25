@@ -26,6 +26,12 @@
 #   OUT_DIR       envelope dir            (default ./results — git-ignored)
 #   REBUILD       1 = force wasm rebuild  (default: reuse existing pkg/)
 #   CANONICAL     1 = quiet-box run       (default 0: canonical:false)
+#   FEATURES      extra cargo features for the wasm build (default: none —
+#                 the canonical default-features artifact). FEATURES=stateful
+#                 exports the sq-01xlp `ParsedGraph` handle => the harness adds
+#                 the sparq validate-only column (sparq_validate_only_us); the
+#                 envelope then flags bundle bytes as NON-canonical (feature
+#                 build). pkg/ is auto-rebuilt when FEATURES changes.
 #   ALLOW_MISSING_PEER  1 = degrade to sparq-only self-assert WITH NOTICE
 #                 (peer column ABSENT — never fabricated). Default: the peer
 #                 is REQUIRED (the whole point is the comparison).
@@ -50,11 +56,17 @@ done
 log() { printf '[shacl-wasm] %s\n' "$*" >&2; }
 
 # ---- 1. the wasm artifact (deterministic-bytes column source) ---------------
+# A features marker forces a rebuild whenever FEATURES changes, so a stale pkg/
+# can never silently drop (or smuggle in) the stateful column.
+FEATURES="${FEATURES:-}"
 PKG="$HERE/pkg"
-if [ ! -f "$PKG/sparq_shacl_wasm.js" ] || [ "${REBUILD:-0}" = "1" ]; then
-  log "wasm-pack build crates/sparq-shacl-wasm (nodejs, release, default features)"
+MARKER="$PKG/.features"
+if [ ! -f "$PKG/sparq_shacl_wasm.js" ] || [ "${REBUILD:-0}" = "1" ] \
+   || [ "$(cat "$MARKER" 2>/dev/null || true)" != "$FEATURES" ]; then
+  log "wasm-pack build crates/sparq-shacl-wasm (nodejs, release, features: ${FEATURES:-default})"
   wasm-pack build "$ROOT/crates/sparq-shacl-wasm" --target nodejs --release \
-    --out-dir "$PKG" >&2
+    --out-dir "$PKG" ${FEATURES:+--features "$FEATURES"} >&2
+  printf '%s' "$FEATURES" > "$MARKER"
 else
   log "reusing existing $PKG (REBUILD=1 to force)"
 fi
@@ -95,6 +107,7 @@ WASM_PACK_VERSION="$WASM_PACK_VERSION" node "$HERE/harness.mjs" \
   --iters "$ITERS" \
   --canonical "$CANONICAL" \
   --git-commit "$GIT_COMMIT" \
+  --sparq-features "$FEATURES" \
   --out "$OUT" \
   ${EXTRA[@]:+"${EXTRA[@]}"}
 

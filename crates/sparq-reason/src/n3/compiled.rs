@@ -522,6 +522,11 @@ impl Compiler {
                 needs_full = true;
                 continue;
             }
+            if super::collect_op(p).is_some() {
+                return Err(
+                    "compiled-rules: log:collectAllIn / log:forAllIn are not in the compiled subset (scoped aggregation stays with the text engine)".into(),
+                );
+            }
             if super::list_generator(p).is_some() {
                 return Err(format!(
                     "compiled-rules: list generator {p:?} is not in the compiled subset"
