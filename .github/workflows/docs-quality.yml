@@ -709,6 +709,33 @@ jobs:
         run: python3 scripts/check-fast-fix-ring-guard.py --self-test
       - name: "Enforce the fast-fix ring fail-closed cross-repo guard (#3475) — GATING"
         run: python3 scripts/check-fast-fix-ring-guard.py
+      # [OPUS-5] sparq-org/sparq#3760 — THE ARM PATH. The re-arm sweeper spent days unable
+      # to enable auto-merge at all ("Resource not accessible by integration
+      # (enablePullRequestAutoMerge)") because its job declared `contents: read` while the
+      # operation needs repository WRITE. Both arm policies now (a) probe their token's arm
+      # capability at job start and fail with ONE actionable ::error, and (b) collect per-PR
+      # arm failures instead of aborting the sweep. Their own self-tests only ran inside the
+      # scheduled arm workflows, i.e. never on the PR that broke them — so they gate HERE:
+      #   * rearm-sweeper.py --self-test / auto-arm.py --self-test — probe verdicts
+      #     (can-arm / cannot-arm / inconclusive), per-PR failure collection + continue,
+      #     one-::error-per-run, and the exit semantics (an arm failure never exits 0).
+      #     [OPUS-5] #3766 adds the STICKY-FAILURE PRECEDENCE sequences —
+      #     `collected-failure > transient-exhaustion > clean` — because collecting the
+      #     failures was only half the job: the collected state lived in a LOCAL, so a
+      #     LATER candidate's exhausted transient unwound past the accumulated-failure
+      #     check and reported ::warning + exit 0, discarding a real arm failure.
+      #   * test_arm_capability_wiring.py — cross-file pins: `contents: write` +
+      #     `pull-requests: write` on both workflows (a downgrade reproduces #3760 and is
+      #     invisible in a python-only diff), the probe step present and BEFORE the arm step
+      #     with a byte-identical GH_TOKEN expression, the remediation naming every
+      #     flippable lever, and no drift between the two deliberately duplicated copies.
+      # The wiring test needs PyYAML — installed once in the shared setup above.
+      - name: Self-test the re-arm sweeper policy (arm capability + failure isolation — #3760)
+        run: python3 scripts/rearm-sweeper.py --self-test
+      - name: Self-test the auto-arm policy (arm capability + failure isolation — #3760)
+        run: python3 scripts/auto-arm.py --self-test
+      - name: "Arm-path wiring inspection (contents: write + probe-before-arm — #3760)"
+        run: python3 scripts/tests/test_arm_capability_wiring.py
 
   # ----------------------------- ADVISORY -----------------------------
   # [FABLE-5] sq-6vshe.20: the three former advisory jobs as step-groups on ONE
