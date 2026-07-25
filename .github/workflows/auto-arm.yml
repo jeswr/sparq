@@ -40,12 +40,21 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
-          # gh_retry.py is auto-arm.py's #3759 transient-retry dependency — the
-          # self-test below imports it, so a missing path fails BEFORE the live run.
-          sparse-checkout: |
-            scripts/auto-arm.py
-            scripts/gh_retry.py
-          sparse-checkout-cone-mode: false
+          # [OPUS-5] #3776 — CHECK OUT THE WHOLE DIRECTORY, never a file-by-file manifest.
+          # This step's `ref:` is the DEFAULT BRANCH, but on a `pull_request` event the
+          # WORKFLOW FILE (and so this manifest) comes from the PR's own ref. Enumerating
+          # individual files therefore couples a default-branch script to a per-ref
+          # snapshot of its dependency list: #3766 added `import gh_retry` to
+          # scripts/auto-arm.py and `scripts/gh_retry.py` to this list in one commit, and
+          # every PR ref cut before that commit kept the one-entry manifest — so the new
+          # script ran without gh_retry.py and died with ModuleNotFoundError on a GATING
+          # check (#3434, run 30143852994). A directory pattern cannot go stale when a new
+          # sibling import is added, so the skew is structurally impossible from here on.
+          # Cone mode (the actions/checkout default) is what makes `scripts` recursive;
+          # do NOT reintroduce `sparse-checkout-cone-mode: false`, under which this bare
+          # word would be a gitignore pattern with different semantics. Pinned by
+          # scripts/tests/test_arm_capability_wiring.py::TestSparseCheckoutManifest.
+          sparse-checkout: scripts
 
       - name: Self-test policy
         run: |

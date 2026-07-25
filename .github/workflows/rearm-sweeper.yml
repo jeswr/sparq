@@ -63,12 +63,16 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
-          # gh_retry.py is rearm-sweeper.py's #3759 transient-retry dependency — the
-          # self-test below imports it, so a missing path fails BEFORE the live run.
-          sparse-checkout: |
-            scripts/rearm-sweeper.py
-            scripts/gh_retry.py
-          sparse-checkout-cone-mode: false
+          # [OPUS-5] #3776 — CHECK OUT THE WHOLE DIRECTORY, never a file-by-file manifest.
+          # A file-by-file list has to be updated by hand every time a script gains a
+          # sibling import; forgetting once is what bricked the GATING arm check on every
+          # stale PR ref (#3776 — see auto-arm.yml for the full account). This sweep runs
+          # only on schedule/dispatch so its workflow file and its `ref:` are always the
+          # same commit, but the enumeration is the same latent trap; a directory pattern
+          # cannot go stale. Cone mode (the actions/checkout default) is what makes
+          # `scripts` recursive — do NOT reintroduce `sparse-checkout-cone-mode: false`.
+          # Pinned by scripts/tests/test_arm_capability_wiring.py.
+          sparse-checkout: scripts
 
       - name: Self-test policy
         run: |

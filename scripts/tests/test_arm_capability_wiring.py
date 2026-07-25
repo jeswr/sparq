@@ -41,8 +41,13 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
+import shutil
+import subprocess
 import sys
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from types import ModuleType
@@ -417,6 +422,330 @@ class TestSelfTestsRunInCi(unittest.TestCase):
                 blob,
                 f"docs-quality.yml must run `{needle}` in a GATING job",
             )
+
+
+# --------------------------------------------------------------------------------------
+# [OPUS-5] #3776 — THE MISSING-SIBLING-IMPORT CLASS.
+#
+# auto-arm.yml runs on `pull_request`, so GitHub takes the WORKFLOW FILE — and therefore
+# its `sparse-checkout` manifest — from the PR's own ref, while the checkout step takes the
+# SCRIPT from `ref: default_branch`. #3766 added `import gh_retry` to scripts/auto-arm.py
+# and `scripts/gh_retry.py` to that manifest in ONE commit: atomic on main, not atomic
+# across refs. Every PR ref snapshotted earlier kept the one-entry manifest, so the runner
+# paired the NEW script with a checkout that never materialised gh_retry.py:
+#   ModuleNotFoundError: No module named 'gh_retry'  (#3434, run 30143852994)
+# `arm reviewed PRs` is GATING, so ci-summary fail-fasted and no reviewed PR on a stale ref
+# could merge — a missing RESILIENCE helper became a merge blocker.
+#
+# These suites pin BOTH halves of the fix:
+#   * SURVIVABILITY (heals the already-stale refs) — each script must import and pass its
+#     own self-test with gh_retry.py ABSENT, and the degraded path must still do the
+#     load-bearing work (mark ready + issue the arm mutation), never quietly no-op.
+#   * IMPOSSIBILITY (stops new skew) — no workflow may enumerate individual .py files whose
+#     sibling imports are not also enumerated, and the arm workflows must sparse-check out
+#     the whole `scripts` directory.
+SCRIPTS_DIR = REPO_ROOT / "scripts"
+ARM_SCRIPTS = (REARM_PY, AUTO_ARM_PY)
+
+
+def run_without_gh_retry(script: Path, driver: str | None = None):
+    """Run ``script`` from a temp dir holding ONLY it, so `import gh_retry` cannot resolve.
+
+    This reproduces the runner's state exactly: sys.path[0] is the script's own directory,
+    and scripts/gh_retry.py was never checked out into it.
+    """
+    env = {k: v for k, v in __import__("os").environ.items() if k != "PYTHONPATH"}
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / script.name
+        shutil.copy2(script, target)
+        if (Path(tmp) / "gh_retry.py").exists():  # pragma: no cover - paranoia
+            raise AssertionError("the isolation dir must NOT contain gh_retry.py")
+        if driver is None:
+            argv = [sys.executable, str(target), "--self-test"]
+        else:
+            (Path(tmp) / "driver.py").write_text(driver, encoding="utf-8")
+            argv = [sys.executable, str(Path(tmp) / "driver.py"), target.name]
+        return subprocess.run(
+            argv, cwd=tmp, capture_output=True, text=True, check=False, env=env
+        )
+
+
+DRIVER_PRELUDE = textwrap.dedent(
+    '''
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    path = Path(sys.argv[1]).resolve()
+    spec = importlib.util.spec_from_file_location("under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["under_test"] = module
+    spec.loader.exec_module(module)
+
+    # The whole point: this driver must be running in the DEGRADED mode, not silently
+    # picking up the real helper from somewhere on sys.path.
+    assert module.GH_RETRY_DEGRADED is True, "expected degraded mode"
+    assert module.gh_retry is module._DegradedGhRetry, module.gh_retry
+    '''
+)
+
+# The degraded path must still MUTATE. "Gracefully degraded into doing nothing" is the
+# failure mode these two drivers exist to catch: they assert the draft->ready mutation AND
+# the arm mutation are really issued, and that the outcome counts the arm.
+AUTO_ARM_DRIVER = DRIVER_PRELUDE + textwrap.dedent(
+    """
+    # Draft in the list snapshot, ready on the live refresh: exercises BOTH mutations
+    # (gh pr ready, then the enablePullRequestAutoMerge CAS).
+    fake, messages, outcome = module.exercise(
+        module.fixture(draft=True), views=[module.fixture()]
+    )
+    assert outcome.armed == 1, (outcome, messages)
+    assert not outcome.arm_failures, outcome.arm_failures
+    assert any(call[:2] == ["pr", "ready"] for call in fake.calls), fake.calls
+    arm = module.graphql_calls(fake)
+    assert len(arm) == 1, fake.calls
+    assert any("enablePullRequestAutoMerge" in str(a) for a in arm[0]), arm
+    assert any("armed head" in m for m in messages), messages
+    print("DEGRADED-MUTATION-OK")
+    """
+)
+
+REARM_DRIVER = DRIVER_PRELUDE + textwrap.dedent(
+    """
+    fake, messages, outcome = module.exercise(module.fixture(4242))
+    assert outcome.armed == 1, (outcome, messages)
+    assert not outcome.arm_failures, outcome.arm_failures
+    arm = module.arm_calls(fake)
+    assert len(arm) == 1, fake.calls
+    assert "--auto" in arm[0], arm
+    print("DEGRADED-MUTATION-OK")
+    """
+)
+
+DEGRADED_DRIVERS = {REARM_PY: REARM_DRIVER, AUTO_ARM_PY: AUTO_ARM_DRIVER}
+
+
+class TestSurvivesMissingGhRetry(unittest.TestCase):
+    """#3776: a missing resilience helper must cost RETRIES, never the arm."""
+
+    def test_self_test_passes_with_gh_retry_absent(self) -> None:
+        # THE REGRESSION TEST. Before the import guard this reproduced the live
+        # ModuleNotFoundError from run 30143852994 verbatim.
+        for script in ARM_SCRIPTS:
+            with self.subTest(script=script.name):
+                result = run_without_gh_retry(script)
+                self.assertNotIn(
+                    "ModuleNotFoundError: No module named 'gh_retry'",
+                    result.stderr,
+                    f"{script.name} must not abort when gh_retry.py was not checked out "
+                    "(the #3434 outage); it must degrade to no-retry",
+                )
+                self.assertEqual(
+                    0,
+                    result.returncode,
+                    f"{script.name} --self-test must pass without gh_retry.py\n"
+                    f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+                )
+                self.assertIn("self-test: PASS", result.stdout, result.stdout)
+
+    def test_degraded_import_emits_exactly_one_loud_actionable_warning(self) -> None:
+        for script in ARM_SCRIPTS:
+            with self.subTest(script=script.name):
+                out = run_without_gh_retry(script).stdout
+                self.assertEqual(
+                    1,
+                    out.count("::warning title="),
+                    f"{script.name}: exactly ONE ::warning, never one per call\n{out}",
+                )
+                for needle in (
+                    "gh_retry.py",  # the missing file, by name
+                    "sparse-checkout",  # the mechanism
+                    "ONE-SHOT",  # what was actually lost
+                    "REMEDY",  # what to do about it
+                ):
+                    self.assertIn(needle, out, f"{script.name}: warning must name {needle!r}")
+
+    def test_degraded_path_still_performs_the_mutations(self) -> None:
+        # NOT-A-NO-OP. Degrading into silence would be worse than crashing: the check
+        # would go green while nothing was ever armed.
+        for script in ARM_SCRIPTS:
+            with self.subTest(script=script.name):
+                result = run_without_gh_retry(script, driver=DEGRADED_DRIVERS[script])
+                self.assertEqual(
+                    0,
+                    result.returncode,
+                    f"{script.name} degraded arm path\nstdout:\n{result.stdout}\n"
+                    f"stderr:\n{result.stderr}",
+                )
+                self.assertIn("DEGRADED-MUTATION-OK", result.stdout, result.stdout)
+
+
+class TestDegradedHelperContract(unittest.TestCase):
+    """The stand-in is exercised directly — it must not be a permissive stub."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.rearm = load_module(REARM_PY, "rearm_sweeper_under_test")
+        cls.auto = load_module(AUTO_ARM_PY, "auto_arm_under_test")
+
+    def modules(self):
+        return ((self.rearm, "rearm-sweeper"), (self.auto, "auto-arm"))
+
+    def test_the_real_helper_is_used_when_it_is_importable(self) -> None:
+        # Non-vacuity in the OTHER direction: a guard that always degraded would silently
+        # delete #3759's transient tolerance from every scheduled run.
+        for module, name in self.modules():
+            self.assertFalse(module.GH_RETRY_DEGRADED, name)
+            self.assertEqual("gh_retry", module.gh_retry.__name__, name)
+
+    def test_degraded_read_only_guard_still_refuses_the_arm_mutation(self) -> None:
+        for module, name in self.modules():
+            degraded = module._DegradedGhRetry
+            with self.assertRaises(degraded.GhRetryUsageError, msg=name):
+                degraded.assert_read_only(
+                    ["api", "graphql", "-f", f"query={module.ENABLE_AUTO_MERGE}"]
+                    if hasattr(module, "ENABLE_AUTO_MERGE")
+                    else ["pr", "merge", "1", "--auto"]
+                )
+            # ...and refuses a mutation whichever shape it takes.
+            for refused in (
+                ["pr", "merge", "1", "--auto", "--squash"],
+                ["pr", "edit", "1", "--add-label", "review:pass"],
+                ["api", "-X", "POST", "repos/o/r/issues"],
+                ["api", "graphql", "--input", "body.json"],
+                ["api", "graphql", "-f", "query=mutation{enablePullRequestAutoMerge}"],
+            ):
+                with self.assertRaises(degraded.GhRetryUsageError, msg=(name, refused)):
+                    degraded.assert_read_only(refused)
+            # The reads the sweeps actually issue must still be accepted, or the degraded
+            # mode would be a different kind of brick.
+            for allowed in (
+                ["pr", "list", "--repo", "o/r", "--json", "number"],
+                ["pr", "view", "1", "--repo", "o/r", "--json", "number"],
+                ["api", "graphql", "-f", f"query={module.CAPABILITY_QUERY}"],
+            ):
+                degraded.assert_read_only(allowed)
+
+    def test_degraded_read_failure_is_fatal_never_lenient(self) -> None:
+        # GhTransientExhausted is what #3759 converts into ::warning + exit 0. With no
+        # retries there is nothing to exhaust, so synthesising it here would turn a 403
+        # into a false success. Fail closed instead.
+        class _Failed:
+            returncode = 1
+            stdout = ""
+            stderr = "HTTP 504: 504 Gateway Timeout"
+
+        for module, name in self.modules():
+            degraded = module._DegradedGhRetry
+            with self.assertRaises(degraded.GhFatalError, msg=name) as caught:
+                degraded.run_gh_read(
+                    ["pr", "list", "--repo", "o/r"], run=lambda *_a, **_k: _Failed()
+                )
+            self.assertNotIsInstance(
+                caught.exception, degraded.GhTransientExhausted, name
+            )
+            self.assertIn("NOT retried", str(caught.exception), name)
+
+    def test_degraded_stand_ins_do_not_drift_between_the_two_scripts(self) -> None:
+        # Same rule as the denial-marker pin: the workflows cannot share a helper, so the
+        # duplication is pinned rather than left to rot.
+        self.assertEqual(
+            tuple(sorted(self.rearm._DegradedGhRetry.READ_SUBCOMMANDS)),
+            tuple(sorted(self.auto._DegradedGhRetry.READ_SUBCOMMANDS)),
+        )
+        for name in ("assert_read_only", "run_gh_read"):
+            self.assertTrue(callable(getattr(self.rearm._DegradedGhRetry, name)), name)
+            self.assertTrue(callable(getattr(self.auto._DegradedGhRetry, name)), name)
+
+
+class TestSparseCheckoutManifest(unittest.TestCase):
+    """#3776 IMPOSSIBILITY half: a manifest that can go stale must not exist."""
+
+    def test_arm_workflows_check_out_the_whole_scripts_directory(self) -> None:
+        for name, (path, _script) in ARM_WORKFLOWS.items():
+            for step in steps_of(load(path)):
+                with_ = step.get("with") or {}
+                if "sparse-checkout" not in with_:
+                    continue
+                pattern = str(with_["sparse-checkout"]).split()
+                self.assertEqual(
+                    ["scripts"],
+                    pattern,
+                    f"{name}: enumerate the DIRECTORY, not files — a file list must be "
+                    "hand-updated for every new sibling import and is snapshotted per "
+                    "PR ref (#3776)",
+                )
+                self.assertNotIn(
+                    "sparse-checkout-cone-mode",
+                    with_,
+                    f"{name}: cone mode is what makes the bare `scripts` pattern "
+                    "recursive; non-cone would reinterpret it as a gitignore pattern",
+                )
+
+    def test_no_script_shadows_a_stdlib_module(self) -> None:
+        """The hazard the whole-directory checkout introduces, closed up front.
+
+        `python3 scripts/auto-arm.py` puts scripts/ FIRST on sys.path. While the manifest
+        listed two files that was harmless; now the entire directory is materialised, so a
+        file named e.g. scripts/types.py would shadow the stdlib for every script run from
+        there. Cheap to pin, silent and confusing to debug.
+        """
+        offenders = sorted(
+            str(p.relative_to(REPO_ROOT))
+            for p in SCRIPTS_DIR.rglob("*.py")
+            if p.stem in sys.stdlib_module_names
+        )
+        self.assertEqual(
+            [],
+            offenders,
+            "these scripts shadow a stdlib module and would break any sibling script "
+            f"importing it: {offenders}",
+        )
+
+    def test_no_workflow_enumerates_a_python_file_without_its_sibling_imports(
+        self,
+    ) -> None:
+        """The whole CLASS, over every workflow — not just the two arm ones.
+
+        A `sparse-checkout` list that names individual .py files silently encodes that
+        script's import graph. If a listed script imports a sibling under scripts/ that
+        the list omits, the runner gets a script it cannot import: #3434 exactly.
+        """
+        local_modules = {p.stem: p for p in SCRIPTS_DIR.rglob("*.py")}
+        offenders: list[str] = []
+        for workflow in sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")):
+            document = load(workflow)
+            if not isinstance(document, dict):
+                continue
+            for step in steps_of(document):
+                with_ = step.get("with") or {}
+                raw = with_.get("sparse-checkout")
+                if not raw:
+                    continue
+                listed = [entry.strip() for entry in str(raw).split() if entry.strip()]
+                listed_stems = {Path(entry).stem for entry in listed}
+                for entry in listed:
+                    if not entry.endswith(".py"):
+                        continue
+                    script = REPO_ROOT / entry
+                    if not script.is_file():
+                        continue
+                    tree = ast.parse(script.read_text(encoding="utf-8"))
+                    imported: set[str] = set()
+                    for node in ast.walk(tree):
+                        if isinstance(node, ast.Import):
+                            imported.update(a.name.split(".")[0] for a in node.names)
+                        elif isinstance(node, ast.ImportFrom) and node.module:
+                            imported.add(node.module.split(".")[0])
+                    for sibling in sorted(imported & set(local_modules)):
+                        if sibling not in listed_stems:
+                            offenders.append(
+                                f"{workflow.name}: sparse-checkout lists {entry} which "
+                                f"imports sibling {sibling!r} "
+                                f"({local_modules[sibling].relative_to(REPO_ROOT)}) that "
+                                "the manifest omits — check out the directory instead"
+                            )
+        self.assertEqual([], offenders, "\n".join(offenders))
 
 
 if __name__ == "__main__":
