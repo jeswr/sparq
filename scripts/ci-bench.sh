@@ -39,7 +39,8 @@ cd "$(dirname "$0")/.."
 # geo/fts/vector/rsp/hdt/solid/nlq/zk). This is the FAST, DETERMINISTIC form of the per-PR / merge_group
 # bench gate (bench.yml): the deterministic byte-count RATCHET (scripts/perf-gate.py) still hard-gates
 # every PR against bench/perf-baseline.json — a pure function of the code, seconds not minutes, immune to
-# shared-runner noise — while the noisy latency suites are RELOCATED to the nightly EC2 lane (bench-ec2.yml)
+# shared-runner noise — while the noisy latency suites are RELOCATED to the EC2 full-suite lane
+# (bench-ec2.yml; [OPUS-5] #3784: MANUAL DISPATCH ONLY, cron retired with the descoped AWS OIDC role)
 # so they no longer drag the merge queue or flap the gate. The stanzas below are the EXACT same load/wasm
 # commands the full run uses (single source of truth), just without the timing/suite blocks.
 PARSE_ONLY=0

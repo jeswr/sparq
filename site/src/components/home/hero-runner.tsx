@@ -21,6 +21,7 @@
 // a first Run before warm-up finishes simply shows a one-time "Starting engine…" substate.
 
 import * as React from "react";
+import dynamic from "next/dynamic";
 import { Play, Loader2, ArrowRight, ShieldCheck } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -56,8 +57,17 @@ import { isNumericLiteral } from "@/lib/numeric-literal";
 // deriveGraph's decline conditions (including the MAX_GRAPH_NODES cap) WITHOUT building the
 // node/edge maps — so the Table | Graph toggle still appears the instant a result is graph-shaped,
 // without eagerly running the full derivation for every result.
-const ResultGraphView = React.lazy(() =>
-  import("@/components/repl-graph-view").then((m) => ({ default: m.ResultGraphView })),
+const ResultGraphView = dynamic(
+  () => import("@/components/repl-graph-view").then((m) => m.ResultGraphView),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex items-center justify-center gap-2 px-3 py-10 text-xs text-muted-foreground">
+        <Loader2 className="size-3.5 animate-spin" aria-hidden />
+        Loading graph view…
+      </div>
+    ),
+  },
 );
 
 /** The first non-empty line of an engine error (keeps the compact strip to one line + any col). */
@@ -453,18 +463,7 @@ export function HeroQueryRunner() {
             <PreviewTable />
           ) : results ? (
             showGraph ? (
-              // Suspense boundary for the lazily-imported renderer; the chunk is small and local,
-              // so the fallback is only briefly visible on the first Graph switch.
-              <React.Suspense
-                fallback={
-                  <div className="flex items-center justify-center gap-2 px-3 py-10 text-xs text-muted-foreground">
-                    <Loader2 className="size-3.5 animate-spin" aria-hidden />
-                    Loading graph view…
-                  </div>
-                }
-              >
-                <ResultGraphView results={results} />
-              </React.Suspense>
+              <ResultGraphView results={results} />
             ) : (
               <ResultsTable results={results} dimmed={running || phase === "error"} />
             )

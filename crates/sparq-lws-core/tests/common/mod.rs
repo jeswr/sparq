@@ -80,15 +80,23 @@ impl KeyKit {
 
 /// Mint a well-formed RFC-9068 access token bound to `cnf_jkt`, signed by `issuer_key`.
 pub fn mint_access_token(issuer_key: &KeyKit, cnf_jkt: &str) -> String {
+    mint_access_token_for(issuer_key, cnf_jkt, WEBID)
+}
+
+/// As [`mint_access_token`] but for an ARBITRARY `webid` — needed whenever a test must
+/// distinguish TWO different authenticated agents (e.g. the demo playground's disclosed
+/// cross-visitor overwrite/delete, where the grant is `acl:AuthenticatedAgent` so the
+/// identities must genuinely differ for the assertion to mean anything).
+pub fn mint_access_token_for(issuer_key: &KeyKit, cnf_jkt: &str, webid: &str) -> String {
     let header = json!({ "alg": "ES256", "typ": "at+jwt" });
     let iat = now();
     let claims = json!({
         "iss": ISSUER,
-        "sub": WEBID,
+        "sub": webid,
         "jti": format!("at-{}", next_id()),
         "client_id": CLIENT_ID,
         "aud": BASE_URL,
-        "webid": WEBID,
+        "webid": webid,
         "cnf": { "jkt": cnf_jkt },
         "iat": iat,
         "exp": iat + 300,

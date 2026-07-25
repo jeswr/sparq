@@ -109,6 +109,196 @@ def _workspace_members() -> set[str]:
     return members
 
 
+# ---------------------------------------------------------------------------------
+# [OPUS-5] #3781 — A TINY GITHUB-EXPRESSION EVALUATOR, so a workflow expression can
+# be MUTATION-TESTED instead of merely string-matched.
+#
+# WHY THIS EXISTS. A mutation sweep over these repos' CI guards found that every
+# UNCAUGHT mutant lived in a workflow `if:`, a step body, or a production call site —
+# never in a Python predicate. String-equality inspection tests (`assertEqual(name,
+# "gate" + MARKER_EXPR)`) catch a DELETED expression but say nothing about what it
+# EVALUATES to, so dropping a `!`, widening a label list, or swapping the two branches
+# of a ternary passes them. The #3781 defect was exactly of that shape: an expression
+# that was individually correct and composed into a deadlock. So the marker expression
+# is EVALUATED here, against synthetic event payloads, and the rendered check-run name
+# is fed to the real gate predicates — end to end, YAML → name → verdict.
+#
+# The grammar is deliberately the SMALLEST one that covers the live expression:
+# parenthesised `&&`/`||`/`!`/`==`, single-quoted literals, `true`/`false`, dotted
+# `github.…` context paths, and the two functions used (`contains`, `fromJSON`).
+# Anything outside it raises — an expression that outgrows this evaluator FAILS THE
+# TEST LOUDLY rather than silently going unchecked (fail-closed).
+_TOKEN_RE = re.compile(
+    r"""\s*(?:
+        (?P<str>'(?:[^']|'')*')
+      | (?P<op>&&|\|\||==|!=|!|\(|\)|,)
+      | (?P<word>[A-Za-z_][A-Za-z0-9_.\-]*)
+    )""",
+    re.VERBOSE,
+)
+
+
+class GhExprError(AssertionError):
+    """The expression used syntax outside the evaluator's supported grammar."""
+
+
+def _tokenize(src: str) -> list[tuple[str, str]]:
+    pos, out = 0, []
+    while pos < len(src):
+        if src[pos].isspace():
+            pos += 1
+            continue
+        m = _TOKEN_RE.match(src, pos)
+        if not m or m.end() == pos:
+            raise GhExprError(f"unsupported syntax at offset {pos}: {src[pos:pos + 30]!r}")
+        pos = m.end()
+        for kind in ("str", "op", "word"):
+            if m.group(kind) is not None:
+                out.append((kind, m.group(kind)))
+                break
+    return out
+
+
+def _truthy(value) -> bool:
+    """GitHub-expression truthiness: '' / false / null are falsy."""
+    if value is None or value is False:
+        return False
+    if value == "":
+        return False
+    return True
+
+
+class _GhExpr:
+    """Recursive-descent evaluator for the supported grammar (precedence:
+    ! > == > && > ||, matching GitHub's documented order)."""
+
+    def __init__(self, src: str, ctx: dict):
+        self.toks = _tokenize(src)
+        self.i = 0
+        self.ctx = ctx
+
+    def parse(self):
+        value = self._or()
+        if self.i != len(self.toks):
+            raise GhExprError(f"trailing tokens at {self.toks[self.i:]}")
+        return value
+
+    def _peek(self):
+        return self.toks[self.i] if self.i < len(self.toks) else (None, None)
+
+    def _eat(self, text):
+        if self._peek()[1] == text:
+            self.i += 1
+            return True
+        return False
+
+    def _or(self):
+        value = self._and()
+        while self._eat("||"):
+            right = self._and()
+            value = value if _truthy(value) else right
+        return value
+
+    def _and(self):
+        value = self._cmp()
+        while self._eat("&&"):
+            right = self._cmp()
+            value = right if _truthy(value) else value
+        return value
+
+    def _cmp(self):
+        left = self._unary()
+        for op in ("==", "!="):
+            if self._eat(op):
+                right = self._unary()
+                eq = left == right
+                return eq if op == "==" else not eq
+        return left
+
+    def _unary(self):
+        if self._eat("!"):
+            return not _truthy(self._unary())
+        return self._primary()
+
+    def _primary(self):
+        kind, text = self._peek()
+        if text == "(":
+            self.i += 1
+            value = self._or()
+            if not self._eat(")"):
+                raise GhExprError("unbalanced parenthesis")
+            return value
+        if kind == "str":
+            self.i += 1
+            return text[1:-1].replace("''", "'")
+        if kind == "word":
+            self.i += 1
+            if text == "true":
+                return True
+            if text == "false":
+                return False
+            if text in ("contains", "fromJSON") or self._peek()[1] == "(":
+                return self._call(text)
+            return self._lookup(text)
+        raise GhExprError(f"unexpected token {text!r}")
+
+    def _call(self, fn):
+        if not self._eat("("):
+            raise GhExprError(f"{fn}: expected '('")
+        args = []
+        if self._peek()[1] != ")":
+            args.append(self._or())
+            while self._eat(","):
+                args.append(self._or())
+        if not self._eat(")"):
+            raise GhExprError(f"{fn}: expected ')'")
+        if fn == "fromJSON":
+            return json.loads(args[0])
+        if fn == "contains":
+            haystack, needle = args
+            if isinstance(haystack, list):
+                return needle in haystack
+            return str(needle) in str(haystack or "")
+        raise GhExprError(f"unsupported function {fn}()")
+
+    def _lookup(self, path):
+        node = self.ctx
+        for part in path.split("."):
+            if not isinstance(node, dict) or part not in node:
+                return None  # an absent context value is null (falsy), as in GitHub
+            node = node[part]
+        return node
+
+
+def _marker_expr_of(name: str) -> str:
+    """The single `${{ … }}` substitution in a job `name:` (verbatim, braces included)."""
+    matches = re.findall(r"\$\{\{.*?\}\}", name)
+    assert len(matches) == 1, f"expected exactly one expression in {name!r}"
+    return matches[0]
+
+
+def render_job_name(name: str, ctx: dict) -> str:
+    """Render a job `name:` for a synthetic event payload by EVALUATING its
+    expression — the check-run name the gate would actually receive."""
+    expr = _marker_expr_of(name)
+    value = _GhExpr(expr[3:-2], ctx).parse()
+    if value is True:
+        value = "true"
+    elif value is False or value is None:
+        value = ""
+    return name.replace(expr, str(value))
+
+
+def pr_event(*, draft=False, action="synchronize", label=None, event="pull_request"):
+    """A synthetic `github` context for a pull_request (or other) event."""
+    ctx = {"event_name": event, "event": {}}
+    if event == "pull_request":
+        ctx["event"] = {"action": action, "pull_request": {"draft": draft}}
+        if label is not None:
+            ctx["event"]["label"] = {"name": label}
+    return {"github": ctx}
+
+
 class TestWiring(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -988,6 +1178,11 @@ class TestDraftTierWiring(unittest.TestCase):
     # disjunct => RUN; only a genuinely-draft PR head can skip.
     DRAFT_GUARD = "github.event_name != 'pull_request' || github.event.pull_request.draft != true"
     MARKER_EXPR = "${{ github.event.pull_request.draft == true && ', draft-tier' || '' }}"
+    # [OPUS-5] #3781: ci-select's own marker expression is now THREE-valued (", no-leg"
+    # takes precedence over ", draft-tier" on a guarded label-flip no-op run), so it is
+    # no longer the same literal as the ci-summary gate's. Its BEHAVIOUR — not its text
+    # — is pinned by TestNoLegMarkerWiring, which evaluates the live expression.
+    DRAFT_MARKER_LITERAL = ", draft-tier"
 
     # Every gate-feeding workflow with a pull_request trigger. Advisory-only
     # workflows (pr-title, deploy-lint, deploy-terraform-lint) are deliberately
@@ -1019,22 +1214,29 @@ class TestDraftTierWiring(unittest.TestCase):
     # ---- the tier marker (the gate's detection contract) ---------------------
     def test_select_job_name_carries_the_draft_tier_marker(self):
         name = self.sel["jobs"]["select"]["name"]
-        self.assertIn(self.MARKER_EXPR, name,
-                      "ci-select's job name must append the draft-tier marker on "
-                      "draft PR payloads (the gate's tier detection contract)")
         marker = self.gate.DRAFT_TIER_MARKER
-        self.assertIn(marker, self.MARKER_EXPR,
-                      "the YAML marker literal must be the gate's DRAFT_TIER_MARKER")
-        # Both RENDERED spellings must satisfy the SELECT_RE contract, carry no
-        # advisory token, and normalize to the same identity.
-        full = name.replace(self.MARKER_EXPR, "")
-        draft = name.replace(self.MARKER_EXPR, marker)
-        for rendered in (full, draft, f"select / {full}", f"select / {draft}"):
+        self.assertEqual(marker, self.DRAFT_MARKER_LITERAL)
+        self.assertIn(f"&& '{marker}'", name,
+                      "ci-select's job name must still append the draft-tier marker on "
+                      "draft PR payloads (the gate's tier detection contract)")
+        # Every RENDERED spelling must satisfy the SELECT_RE contract, carry no
+        # advisory token, and normalize to the same identity. ([OPUS-5] #3781 adds the
+        # third spelling, ", no-leg".)
+        expr = _marker_expr_of(name)
+        full = name.replace(expr, "")
+        draft = name.replace(expr, marker)
+        no_leg = name.replace(expr, self.gate.NO_LEG_MARKER)
+        for rendered in (full, draft, no_leg,
+                         f"select / {full}", f"select / {draft}", f"select / {no_leg}"):
             self.assertTrue(self.gate.is_select(rendered), rendered)
             self.assertFalse(self.gate.is_advisory(rendered), rendered)
         self.assertTrue(self.gate.is_draft_tier(draft))
         self.assertFalse(self.gate.is_draft_tier(full))
+        self.assertFalse(self.gate.is_draft_tier(no_leg),
+                         "a no-leg run must NOT be read as draft-tier — that is the "
+                         "#3781 deadlock")
         self.assertEqual(self.gate.normalized_name(draft), full)
+        self.assertEqual(self.gate.normalized_name(no_leg), full)
 
     # ---- draft skip guards ---------------------------------------------------
     def test_coverage_jobs_skip_on_draft_heads(self):
@@ -1199,6 +1401,229 @@ class TestDraftTierWiring(unittest.TestCase):
         self.assertIn("github.event.pull_request.number", str(conc.get("group", "")))
         self.assertTrue(conc.get("cancel-in-progress"),
                         "js.yml must cancel superseded PR runs")
+
+
+class TestNoLegMarkerWiring(unittest.TestCase):
+    """[OPUS-5] #3781 — the ", no-leg" marker, EVALUATED not string-matched.
+
+    THE DEFECT. `sparq-orchestrator[bot]` re-drafts a freshly-readied worker PR ~13
+    min after the ready and flips `review:needs` in the same breath. That label event
+    re-triggers ci.yml / bench.yml / feature-matrix.yml / fuzz.yml, whose #2546
+    label-trigger guard skips EVERY root job — measured on sparq #3472: 8 such runs,
+    each with exactly ONE non-skipped job (the unconditional select). Because the PR
+    was now a draft, each of those selects came out `…, draft-tier`, so the head
+    acquired four fresh draft-marked select instances whose full-tier successor could
+    never exist (only a NON-draft payload produces one). The gate burned all 155 polls
+    and refused a leg set with zero failing legs, three times in one pass.
+
+    THE CONTRACT PINNED HERE. ci-select.yml must name that job `…, no-leg` — never
+    `…, draft-tier` — on a guarded label-flip no-op, and must keep naming it
+    `…, draft-tier` on a genuinely draft-assembled run. Every case is checked by
+    EVALUATING the live expression (see the evaluator above) and feeding the rendered
+    name to the real gate predicates, so a mutated expression (a dropped `!`, a
+    widened label list, swapped ternary branches) REDs on behaviour."""
+
+    # The escape labels: on one of these at least one caller DOES do real work, so no
+    # no-leg claim may be made. Derived from the callers' own guards below.
+    ESCAPE_LABELS = ("ci-full", "bench-full", "fuzz-full")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sel = _load(SELECT_YML)
+        cls.gate = _gate_module()
+        cls.name = cls.sel["jobs"]["select"]["name"]
+
+    def _render(self, **kwargs) -> str:
+        return render_job_name(self.name, pr_event(**kwargs))
+
+    # ---- the load-bearing discrimination -------------------------------------
+    def test_guarded_label_flip_on_a_draft_pr_renders_no_leg_not_draft_tier(self):
+        """(a) THE FIX. A `review:needs` flip on a DRAFT PR — the exact #3472 event —
+        must render the no-leg marker. If it renders ", draft-tier" the run
+        manufactures an unsatisfiable hold and the whole parked backlog deadlocks."""
+        for action in ("labeled", "unlabeled"):
+            rendered = self._render(draft=True, action=action, label="review:needs")
+            self.assertIn(self.gate.NO_LEG_MARKER, rendered,
+                          f"{action} review:needs on a draft PR must render the "
+                          f"no-leg marker, got {rendered!r}")
+            self.assertFalse(
+                self.gate.is_draft_tier(rendered),
+                f"{action} review:needs on a draft PR must NOT be marked draft-tier: "
+                f"its run assembles ZERO legs, so the hold it would create can never "
+                f"be discharged while the PR stays a draft (#3781) — got {rendered!r}")
+            self.assertTrue(self.gate.is_no_leg_select(rendered), rendered)
+            self.assertTrue(self.gate.is_select(rendered), rendered)
+            self.assertFalse(self.gate.is_advisory(rendered), rendered)
+
+    def test_a_genuine_draft_run_still_renders_the_draft_tier_marker(self):
+        """(b) THE OTHER HALF OF THE DISCRIMINATION — the fix must not blind
+        draft-tier CI. An `opened`/`synchronize`/`reopened` run on a draft PR
+        assembles a REAL reduced leg set, so it must still be marked draft-tier and
+        still create the hold that keeps its legs out of the merge queue."""
+        for action in ("opened", "synchronize", "reopened"):
+            rendered = self._render(draft=True, action=action)
+            self.assertTrue(
+                self.gate.is_draft_tier(rendered),
+                f"a draft {action} run assembles real (reduced) legs and MUST stay "
+                f"draft-tier-marked — got {rendered!r}")
+            self.assertFalse(self.gate.is_no_leg_select(rendered), rendered)
+
+    def test_escape_label_flips_make_no_no_leg_claim(self):
+        """A ci-full/bench-full/fuzz-full flip DOES do real work in at least one
+        caller, so it must not claim to be evidence-free (conservative: the
+        pre-#3781 behaviour stands)."""
+        for label in self.ESCAPE_LABELS:
+            for draft in (True, False):
+                rendered = self._render(draft=draft, action="labeled", label=label)
+                self.assertFalse(
+                    self.gate.is_no_leg_select(rendered),
+                    f"{label} triggers real work — no no-leg claim allowed "
+                    f"(got {rendered!r})")
+                self.assertEqual(self.gate.is_draft_tier(rendered), draft, rendered)
+
+    def test_non_draft_and_non_pr_events_are_unchanged(self):
+        """push / merge_group / schedule and a non-draft synchronize must render the
+        BARE full-tier name, byte-identical to the pre-#3781 behaviour."""
+        bare = self.name.replace(_marker_expr_of(self.name), "")
+        self.assertEqual(self._render(draft=False, action="synchronize"), bare)
+        self.assertEqual(self._render(event="push"), bare)
+        self.assertEqual(self._render(event="merge_group"), bare)
+        self.assertEqual(self._render(event="schedule"), bare)
+        self.assertFalse(self.gate.is_draft_tier(bare))
+        self.assertFalse(self.gate.is_no_leg_select(bare))
+
+    def test_ready_for_review_renders_full_tier(self):
+        """The un-draft moment is the ONLY thing that can discharge a draft-tier
+        hold, so it must render the bare full-tier name."""
+        rendered = self._render(draft=False, action="ready_for_review")
+        self.assertFalse(self.gate.is_draft_tier(rendered))
+        self.assertFalse(self.gate.is_no_leg_select(rendered))
+
+    # ---- cross-file drift guards --------------------------------------------
+    def test_every_job_of_every_caller_is_inert_on_a_non_escape_label_flip(self):
+        """THE CLAIM BEHIND THE MARKER, checked by REACHABILITY, not by grep.
+
+        `…, no-leg` asserts the run assembled ZERO legs. That is true only because
+        every job of every ci-select caller is skipped on a non-escape label flip —
+        either by carrying the #2546 label-trigger guard itself, or by `needs:`-ing a
+        job that does, or by being restricted to a non-pull_request event. If any job
+        ever becomes reachable on such a flip, the shared select would claim `no-leg`
+        for a run that DID produce evidence, and the gate would then ignore that
+        evidence. Only the ci-select caller job is exempt — it is deliberately
+        unconditional, because a skipped select poisons the gate."""
+        guard = "contains(fromJSON('[\"labeled\",\"unlabeled\"]'), github.event.action)"
+        for wf_name in ("ci.yml", "feature-matrix.yml", "bench.yml", "fuzz.yml"):
+            wf = _load(REPO_ROOT / ".github" / "workflows" / wf_name)
+            jobs = wf["jobs"]
+
+            def needs_of(job_id):
+                raw = jobs[job_id].get("needs") or []
+                return [raw] if isinstance(raw, str) else list(raw)
+
+            def cond(job_id):
+                return " ".join(str(jobs[job_id].get("if", "")).split())
+
+            def event_restricted(job_id):
+                """`if:` pins the event to something that is not pull_request."""
+                text = cond(job_id)
+                return "github.event_name" in text and "pull_request" not in text
+
+            memo = {}
+
+            def inert(job_id):
+                if job_id in memo:
+                    return memo[job_id]
+                memo[job_id] = False  # a cycle can never prove inertness
+                text = cond(job_id)
+                alwaysish = "always()" in text or "!cancelled()" in text
+                memo[job_id] = (
+                    guard in text
+                    or event_restricted(job_id)
+                    or (bool(needs_of(job_id)) and not alwaysish
+                        and any(inert(n) for n in needs_of(job_id)))
+                )
+                return memo[job_id]
+
+            callers = [j for j, spec in jobs.items()
+                       if "ci-select.yml" in str(spec.get("uses", ""))]
+            self.assertEqual(len(callers), 1, f"{wf_name}: exactly one select caller")
+            live = sorted(j for j in jobs if j not in callers and not inert(j))
+            self.assertFalse(
+                live,
+                f"{wf_name}: {live} would still RUN on a non-escape label flip, so "
+                f"such a run does NOT assemble zero legs and the shared ci-select job "
+                f"must not claim `no-leg` for it — the gate would then ignore a run "
+                f"that produced real evidence (#3781 / the #2546 guard)")
+
+    def test_no_leg_condition_covers_every_caller_escape_label(self):
+        """Drift guard in the other direction: every label a caller treats as
+        'do real work' must be EXCLUDED from the no-leg condition, or a run that
+        does real work would be declared evidence-free and then IGNORED."""
+        expr = _marker_expr_of(self.name)
+        excluded = set()
+        for group in re.findall(
+            r"!contains\(fromJSON\('(\[[^']*\])'\), github\.event\.label\.name\)", expr
+        ):
+            excluded |= set(json.loads(group))
+        self.assertTrue(excluded, "the no-leg condition must exclude the escape labels")
+        self.assertEqual(excluded, set(self.ESCAPE_LABELS))
+        for wf_name in ("ci.yml", "feature-matrix.yml", "bench.yml", "fuzz.yml"):
+            text = (REPO_ROOT / ".github" / "workflows" / wf_name).read_text(
+                encoding="utf-8")
+            work_labels = set(
+                re.findall(r"github\.event\.label\.name == '([^']+)'", text)
+            )
+            for group in re.findall(
+                r"contains\(fromJSON\('(\[[^']*\])'\), github\.event\.label\.name\)",
+                text,
+            ):
+                work_labels |= set(json.loads(group))
+            missing = work_labels - excluded
+            self.assertFalse(
+                missing,
+                f"{wf_name} does real work on {sorted(missing)} — the no-leg "
+                f"condition must exclude those labels, or a run that produced real "
+                f"legs would be declared evidence-free and then IGNORED")
+
+    def test_the_step_summary_agrees_with_the_job_name(self):
+        """The human-facing step summary and the machine-facing job name must decide
+        `no-leg` from the SAME condition. A summary that said "Tier: draft" for a run
+        the gate is ignoring is exactly the misreading that cost a full drain pass to
+        unpick, so both expressions are evaluated side by side on every payload."""
+        step = next(s for s in self.sel["jobs"]["select"]["steps"]
+                    if "ci_select.py" in str(s.get("run", "")))
+        expr = str(step["env"]["IS_NO_LEG_RUN"])
+        cases = [
+            dict(draft=True, action="labeled", label="review:needs"),
+            dict(draft=True, action="unlabeled", label="review:pass"),
+            dict(draft=False, action="labeled", label="review:needs"),
+            dict(draft=True, action="labeled", label="ci-full"),
+            dict(draft=True, action="synchronize"),
+            dict(draft=False, action="ready_for_review"),
+            dict(event="push"),
+            dict(event="merge_group"),
+        ]
+        for case in cases:
+            ctx = pr_event(**case)
+            summary_says = _truthy(_GhExpr(expr[3:-2], ctx).parse())
+            name_says = self.gate.is_no_leg_select(render_job_name(self.name, ctx))
+            self.assertEqual(
+                summary_says, name_says,
+                f"{case}: the step summary and the job name disagree about whether "
+                f"this run assembled no legs (summary={summary_says}, "
+                f"name={name_says}) — one of the two conditions has drifted (#3781)")
+
+    def test_the_evaluator_itself_is_not_vacuous(self):
+        """A wiring test whose evaluator silently returns '' for everything would
+        pass every assertion above. Prove the evaluator discriminates."""
+        self.assertTrue(_GhExpr("true && 'x'", {}).parse())
+        self.assertEqual(_GhExpr("false && 'x' || 'y'", {}).parse(), "y")
+        self.assertEqual(_GhExpr("!false && 'x' || 'y'", {}).parse(), "x")
+        self.assertTrue(_GhExpr("contains(fromJSON('[\"a\"]'), 'a')", {}).parse())
+        self.assertFalse(_GhExpr("contains(fromJSON('[\"a\"]'), 'b')", {}).parse())
+        self.assertIsNone(_GhExpr("github.missing.path", {"github": {}}).parse())
+        with self.assertRaises(GhExprError):
+            _GhExpr("a $$ b", {}).parse()
 
 
 class TestContainerScanMergeGroupGate(unittest.TestCase):
