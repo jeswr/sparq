@@ -244,12 +244,18 @@ pub mod oblivious_join;
 // calibrated to an (eps,delta)-DP TARGET (a data-DEPENDENT, DP-noised bound — NOT a
 // certified/achieved DP guarantee; see the module HONESTY docs) instead of the
 // catastrophic worst-case |L|.|R| — cheaper, at the honest cost of a cardinality
-// leak that COMPOSES over queries (tracked per relying party, fails closed; the
-// caller-supplied sensitivity must bound the neighbouring-input count change — for
-// a join that is the join degree, generally NOT 1). Builds on the
-// sq-jnkm oblivious output transform. NOT information-theoretic; noise drawn
-// centrally in-simulation (distributed noise generation is the residual gate). See
-// the module docs for the sound-today vs gated split.
+// leak that COMPOSES over queries. That composition is bounded ONLY on the path that
+// charges it: `dp_release_result_rows_for_party` holds a borrow into the
+// `BudgetLedger`, so repeated releases for one relying party accumulate and are
+// REFUSED fail-closed once that party's (eps,delta) is exhausted. The single-budget
+// `dp_release_result_rows` charges exactly the `PrivacyBudget` handed to it — and
+// `PrivacyBudget` is `Copy`, so a caller who passes a detached copy of a stored
+// budget bounds nothing (that was [OPUS-5] review round 3's reproduced defect; the
+// ledger entry point is the fix). The caller-supplied sensitivity must also bound the
+// neighbouring-input count change — for a join that is the join degree, generally NOT
+// 1. Builds on the sq-jnkm oblivious output transform. NOT information-theoretic;
+// noise drawn centrally in-simulation (distributed noise generation is the residual
+// gate). See the module docs for the sound-today vs gated split.
 pub mod dp_output;
 // [OPUS-4.8] sq-tg6b: the NETWORK tier of the MPC benchmark matrix. `transport`
 // is the REAL multi-process loopback transport (Tier 2) — each party is its own
@@ -376,9 +382,11 @@ pub use oblivious_join::{
     MatchBit, ObliviousOutput, ObliviousOutputCost, OutputSlot,
 };
 // [OPUS-4.8] sq-shk5: the DP output-cardinality + epsilon-budget surface.
+// [OPUS-5] `dp_release_result_rows_for_party` is the ledger-charging release — the
+// only entry point whose budget accounting actually gates a repeated release.
 pub use dp_output::{
-    dp_oblivious_set_output_hidden_keys, dp_release_result_rows, BudgetLedger, DpCardinality,
-    DpParams, PrivacyBudget, MAX_DP_SHIFT,
+    dp_oblivious_set_output_hidden_keys, dp_release_result_rows, dp_release_result_rows_for_party,
+    BudgetLedger, DpCardinality, DpParams, PrivacyBudget, MAX_DP_SHIFT,
 };
 pub use rng::{MpcRng, SecureRng};
 // [OPUS-4.8] sq-yyro: the dealer-less correlated-randomness seam surface.

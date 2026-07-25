@@ -428,8 +428,19 @@ impl PrivacyBudget {
 /// A ledger of [`PrivacyBudget`]s keyed by **relying party** (the consumer of query
 /// results, identified by [`HolderId`]). Each relying party has its OWN budget that
 /// composes over the queries IT issues — so one party exhausting its budget does not
-/// affect another. This is the per-relying-party accounting the residual-leak
-/// honesty rule requires (a cardinality leak composes per observer).
+/// affect another.
+///
+/// **Use [`dp_release_result_rows_for_party`] to release against a ledger.** That is
+/// the entry point which actually charges the stored budget and refuses the release
+/// once a party is exhausted; a ledger nobody charges accounts for nothing.
+///
+/// [OPUS-5] Review round 3: [`PrivacyBudget`] is `Copy`, so
+/// `*ledger.budget(&rp).unwrap()` yields a DETACHED copy — spending through it
+/// compiles, releases data, and records **nothing** in the ledger. That was the only
+/// shape a caller could write, so composed releases ran unbounded past the budget.
+/// [`BudgetLedger::budget_mut`] and [`dp_release_result_rows_for_party`] exist to
+/// remove that footgun: both hand out / hold a borrow INTO the map, so a spend is
+/// recorded where it is checked.
 #[derive(Debug, Clone, Default)]
 pub struct BudgetLedger {
     budgets: HashMap<HolderId, PrivacyBudget>,
@@ -449,8 +460,21 @@ impl BudgetLedger {
     }
 
     /// The current budget for a relying party, if registered.
+    ///
+    /// This is a READ view. Do **not** dereference it to obtain a spendable budget:
+    /// [`PrivacyBudget`] is `Copy`, so `*ledger.budget(&rp).unwrap()` detaches a copy
+    /// whose spend the ledger never sees. Use [`BudgetLedger::budget_mut`] (or, for a
+    /// whole release, [`dp_release_result_rows_for_party`]) to spend.
     pub fn budget(&self, relying_party: &HolderId) -> Option<&PrivacyBudget> {
         self.budgets.get(relying_party)
+    }
+
+    /// [OPUS-5] A **mutable** borrow of a relying party's stored budget, if
+    /// registered — the accessor that lets a spend land in the ledger rather than in
+    /// a detached `Copy`. Charging through this borrow mutates the ledger's own
+    /// entry, so a later [`BudgetLedger::budget`] read observes the spend.
+    pub fn budget_mut(&mut self, relying_party: &HolderId) -> Option<&mut PrivacyBudget> {
+        self.budgets.get_mut(relying_party)
     }
 
     /// Charge `params` to a relying party's budget (sequential composition). Fails
@@ -524,6 +548,16 @@ fn geometric_draw(dealer: &mut ShamirDealer, alpha: f64) -> u64 {
 /// transform consumes NO budget — no release, no spend (an invalid request cannot
 /// be used to drain a relying party's budget).
 ///
+/// ## Which budget this charges — read this before wiring a ledger
+///
+/// It charges **exactly the `PrivacyBudget` you pass**, and nothing else. Because
+/// [`PrivacyBudget`] is `Copy`, passing a temporary copy of a stored budget spends
+/// that copy and records nothing anywhere else. For per-relying-party accounting
+/// that actually composes across queries, call
+/// [`dp_release_result_rows_for_party`], which holds a borrow into the
+/// [`BudgetLedger`] so the commit lands in the ledger and a later release for the
+/// same party is refused once its budget is exhausted.
+///
 /// ## Why this is sound today (and what is gated)
 ///
 /// The rows are already MATERIALIZED (the disclosed-regime match set is public, or
@@ -596,6 +630,53 @@ pub fn dp_release_result_rows(
         shift: params.shift(),
     };
     Ok((output, card))
+}
+
+/// [OPUS-5] **DP output-cardinality release charged to a relying party's ledger
+/// budget** — the entry point that makes the per-relying-party accounting real.
+///
+/// Identical to [`dp_release_result_rows`] except that the budget is the one stored
+/// in `ledger` for `relying_party`, held as a borrow INTO the ledger — so the
+/// committed charge is recorded where the next release will check it. Repeated
+/// releases therefore COMPOSE (basic sequential composition) and are **refused fail
+/// closed** once the party's `(ε, δ)` is exhausted, with no release and no reveal:
+///
+/// - **Unregistered party** → [`MpcError::Protocol`] (`"privacy budget exhausted:
+///   relying party … has no registered DP budget"`). An unknown consumer has no
+///   privacy to spend, so it gets nothing.
+/// - **Exhausted budget** → [`MpcError::Protocol`] (`"privacy budget exhausted"`),
+///   refused BEFORE any crypto or reveal.
+/// - **Invalid request** (row arity, bound overflow, transform failure) → the same
+///   error [`dp_release_result_rows`] returns, having spent NO budget.
+///
+/// Review round 3 filed this as a reproduced defect: before it existed, the only
+/// ledger-shaped call a caller could compile went through `*ledger.budget(&rp)`,
+/// which — [`PrivacyBudget`] being `Copy` — spent a detached copy, so composed
+/// releases ran arbitrarily far past the budget with the ledger reading zero spent.
+/// Pinned by `ledger_release_refuses_once_composed_epsilon_exceeds_budget`.
+///
+/// HONESTY: unchanged from [`dp_release_result_rows`] — research-grade, externally
+/// unaudited (`sq-qhy4`), honest-majority / semi-honest only, noise drawn centrally
+/// in-simulation, calibrated to an (ε, δ) target rather than a certified DP release.
+/// Budget accounting being enforced does **not** upgrade any of that; it only makes
+/// the composition bound the module documents actually binding.
+pub fn dp_release_result_rows_for_party(
+    backend: &ShamirBackend,
+    matched_rows: &[ResultRow],
+    payload_arity: usize,
+    params: &DpParams,
+    ledger: &mut BudgetLedger,
+    relying_party: &HolderId,
+) -> Result<(ObliviousOutput, DpCardinality), MpcError> {
+    // A borrow INTO the ledger — not a `Copy`. Every charge `dp_release_result_rows`
+    // commits below therefore mutates the stored budget.
+    let budget = ledger.budget_mut(relying_party).ok_or_else(|| {
+        MpcError::Protocol(format!(
+            "privacy budget exhausted: relying party {relying_party} has no registered \
+             DP budget — refusing a cardinality release fail-closed"
+        ))
+    })?;
+    dp_release_result_rows(backend, matched_rows, payload_arity, params, budget)
 }
 
 /// **DP output-cardinality over SECRET per-pair match bits** — the hidden-key
@@ -1067,6 +1148,168 @@ mod tests {
         let p = DpParams::new(0.5, 1e-6, 1).unwrap();
         let err = ledger.charge(&HolderId::new("mallory"), &p).unwrap_err();
         assert!(matches!(err, MpcError::Protocol(m) if m.contains("no registered")));
+    }
+
+    // ---- [OPUS-5] The ledger must actually GATE a release ----------------------
+    //
+    // Review round 3 reproduced this defect: `dp_release_result_rows` takes
+    // `&mut PrivacyBudget`, but `BudgetLedger` exposed only `budget(&self) ->
+    // Option<&PrivacyBudget>`. Since `PrivacyBudget` is `Copy`, the only ledger-shaped
+    // call that compiled — `let mut b = *ledger.budget(&rp).unwrap();` — spent a
+    // DETACHED copy: ten releases composed epsilon 5.0 against a 1.0 budget with the
+    // ledger still reading `spent_epsilon = 0` and no error. The two pre-existing
+    // ledger tests passed only because they call `ledger.charge()` directly and never
+    // touch a release. These tests drive the RELEASE path against the ledger.
+
+    /// Composing releases past the registered budget must be REFUSED, and the ledger
+    /// must carry the spend that makes that refusal happen. `ε_total = 1.0` with
+    /// `ε = 0.4` per release affords exactly two releases; the third is refused and
+    /// every subsequent one stays refused (the budget does not recover).
+    #[test]
+    fn ledger_release_refuses_once_composed_epsilon_exceeds_budget() {
+        let backend = ShamirBackend::new_seeded(3, 77).unwrap();
+        let params = DpParams::new(0.4, 1e-4, 1).unwrap();
+        let party = HolderId::new("analyst");
+        let mut ledger = BudgetLedger::new();
+        ledger.register(party.clone(), PrivacyBudget::new(1.0, 1e-3).unwrap());
+
+        // Two affordable releases: each must succeed AND be recorded in the ledger.
+        for i in 1..=2usize {
+            let (out, card) =
+                dp_release_result_rows_for_party(&backend, &rows(3), 1, &params, &mut ledger, &party)
+                    .unwrap_or_else(|e| panic!("release {i} should fit the budget: {e:?}"));
+            assert_eq!(card.true_count, 3);
+            assert!(card.revealed_bound >= 3, "the bound never truncates a match");
+            assert_eq!(reals(&out.0), 3);
+            let spent = ledger.budget(&party).unwrap().spent_epsilon();
+            let expected = 0.4 * i as f64;
+            assert!(
+                (spent - expected).abs() < 1e-9,
+                "after {i} release(s) the LEDGER must show {expected} epsilon spent, got {spent} \
+                 — the release is spending a detached copy, not the ledger's budget"
+            );
+        }
+
+        // The third release would compose to 1.2 > 1.0: refused fail-closed.
+        let err =
+            dp_release_result_rows_for_party(&backend, &rows(3), 1, &params, &mut ledger, &party)
+                .unwrap_err();
+        assert!(
+            matches!(&err, MpcError::Protocol(m) if m.contains("privacy budget exhausted")),
+            "an over-budget release must be refused, got {err:?}"
+        );
+
+        // ... and the refusal is stable: the budget neither recovers nor drifts.
+        for _ in 0..5 {
+            assert!(
+                dp_release_result_rows_for_party(
+                    &backend, &rows(3), 1, &params, &mut ledger, &party
+                )
+                .is_err(),
+                "an exhausted party must stay refused"
+            );
+        }
+        let spent = ledger.budget(&party).unwrap().spent_epsilon();
+        assert!(
+            (spent - 0.8).abs() < 1e-9,
+            "refused releases must not spend: ledger shows {spent}, expected 0.8"
+        );
+        assert!(ledger.budget(&party).unwrap().remaining_epsilon() > 0.19);
+    }
+
+    /// The `δ` axis gates a release independently of `ε` — the same composition, on
+    /// the axis a caller is most likely to over-provision.
+    #[test]
+    fn ledger_release_refuses_once_composed_delta_exceeds_budget() {
+        let backend = ShamirBackend::new_seeded(3, 78).unwrap();
+        let params = DpParams::new(0.1, 1e-6, 1).unwrap();
+        let party = HolderId::new("analyst");
+        let mut ledger = BudgetLedger::new();
+        // Plenty of epsilon; delta affords exactly one release.
+        ledger.register(party.clone(), PrivacyBudget::new(100.0, 1e-6).unwrap());
+
+        dp_release_result_rows_for_party(&backend, &rows(2), 1, &params, &mut ledger, &party)
+            .expect("the first release fits the delta budget");
+        let err =
+            dp_release_result_rows_for_party(&backend, &rows(2), 1, &params, &mut ledger, &party)
+                .unwrap_err();
+        assert!(
+            matches!(&err, MpcError::Protocol(m) if m.contains("privacy budget exhausted")),
+            "delta exhaustion must refuse the release, got {err:?}"
+        );
+    }
+
+    /// A release for a party with no registered budget is refused fail-closed — an
+    /// unknown consumer cannot obtain a cardinality release at all.
+    #[test]
+    fn ledger_release_refuses_unregistered_party() {
+        let backend = ShamirBackend::new_seeded(3, 79).unwrap();
+        let params = DpParams::new(0.5, 1e-6, 1).unwrap();
+        let mut ledger = BudgetLedger::new();
+        let err = dp_release_result_rows_for_party(
+            &backend,
+            &rows(2),
+            1,
+            &params,
+            &mut ledger,
+            &HolderId::new("mallory"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, MpcError::Protocol(m)
+                if m.contains("no registered") && m.contains("privacy budget exhausted")),
+            "an unregistered consumer must be refused, got {err:?}"
+        );
+    }
+
+    /// An invalid request routed through the ledger burns NO budget (the pre-authorize
+    /// probe is a copy; the commit happens only on a successful release).
+    #[test]
+    fn ledger_release_of_invalid_request_burns_no_budget() {
+        let backend = ShamirBackend::new_seeded(3, 80).unwrap();
+        let params = DpParams::new(0.4, 1e-4, 1).unwrap();
+        let party = HolderId::new("analyst");
+        let mut ledger = BudgetLedger::new();
+        ledger.register(party.clone(), PrivacyBudget::new(1.0, 1e-3).unwrap());
+
+        let bad = vec![vec![lit("a"), lit("b")]]; // arity 2 against payload_arity 1
+        let err = dp_release_result_rows_for_party(&backend, &bad, 1, &params, &mut ledger, &party)
+            .unwrap_err();
+        assert!(matches!(&err, MpcError::Protocol(m) if m.contains("arity")), "{err:?}");
+        assert_eq!(
+            ledger.budget(&party).unwrap().spent_epsilon(),
+            0.0,
+            "a request that released nothing must not spend the ledger's budget"
+        );
+    }
+
+    /// Direct unit test for the `budget_mut` accessor: a charge through the mutable
+    /// borrow is recorded IN the ledger (the read view observes it), which is exactly
+    /// what dereferencing the `Copy` read view fails to do.
+    #[test]
+    fn budget_mut_charge_is_recorded_in_the_ledger() {
+        let params = DpParams::new(0.3, 1e-5, 1).unwrap();
+        let party = HolderId::new("analyst");
+        let mut ledger = BudgetLedger::new();
+        ledger.register(party.clone(), PrivacyBudget::new(1.0, 1e-3).unwrap());
+        assert!(ledger.budget_mut(&HolderId::new("nobody")).is_none());
+
+        ledger.budget_mut(&party).unwrap().charge(&params).unwrap();
+        let spent = ledger.budget(&party).unwrap().spent_epsilon();
+        assert!(
+            (spent - 0.3).abs() < 1e-9,
+            "a charge through budget_mut must land in the ledger, got {spent}"
+        );
+
+        // The `Copy` read view is a DETACHED snapshot — spending it changes nothing.
+        // This is the footgun `budget_mut` exists to replace; pinned so the shape does
+        // not silently come back as the recommended path.
+        let mut detached = *ledger.budget(&party).unwrap();
+        detached.charge(&params).unwrap();
+        assert!(
+            (ledger.budget(&party).unwrap().spent_epsilon() - 0.3).abs() < 1e-9,
+            "spending a dereferenced copy must NOT be mistaken for ledger accounting"
+        );
     }
 
     // ---- The hidden-key variant is honestly gated ------------------------------
