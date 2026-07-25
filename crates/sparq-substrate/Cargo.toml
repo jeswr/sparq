@@ -23,17 +23,15 @@ all-features = true
 # [OPUS-4.8] sq-fmprw (epic sq-qonbz, umbrella sq-6tykl): the KEYSTONE leaf crate that
 # unblocks the substrate move-chain (research/shared-eval-substrate.md, Option C). It
 # depends ONLY on sparq-core (NOT sparq-engine) so BOTH the engine AND the reasoners
-# (sparq-reason / sparq-reason-el, which depend only on sparq-core) can later consume it
-# with NO dependency cycle. This crate is a SCAFFOLD: it defines / re-exports the shared
-# id-tuple vocabulary and the numeric value tower, behind DEFAULT-OFF features, with NO
-# evaluation logic moved yet (the join kernels + the engine `compare_values`/`Num`
-# arithmetic land in later beads of the epic). Nothing in the workspace depends on it, so
-# the lean default / wasm build does not compile any of it and the wasm_bundle_bytes floor
-# stays byte-identical (Phase-1 acceptance, research record §7.1).
+# (sparq-reason / sparq-reason-el, which depend only on sparq-core) can consume it with NO
+# dependency cycle. `sparq-engine` now consumes this crate unconditionally, while reasoner
+# integrations enable additional substrate features. It is therefore present in the
+# feature-OFF `sparq-wasm` dependency graph: changes to always-compiled substrate code can
+# move the `wasm_bundle_bytes` measurement and may require a feature-off declaration.
 
 [features]
-# DEFAULT-OFF by construction: the lean core/engine/wasm build must compile NONE of this
-# crate's surface. A consumer opts into exactly the slice it needs.
+# DEFAULT-OFF at this crate's boundary. Each consumer explicitly enables the slices it
+# needs; `sparq-engine` enables the slices that consequently reach its wasm builds.
 default = []
 # The shared id-tuple vocabulary: the SmallVec-based Row/Key/Posting aliases over the
 # sparq-core `Id`, plus the inline-integer id helpers. This is the representation BOTH the
