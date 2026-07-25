@@ -731,18 +731,36 @@ class WorkflowRunResolver:
         # redispatch decision, the attempt-jobs inventory and the resolver must all
         # agree on which run is authoritative, or a vacuous label-flip run could still
         # supersede a real predecessor through one of the other two paths.
-        no_leg_ids = no_leg_run_ids(checks)
+        # [OPUS-5] #3788: union in the OBSERVED-vacuous runs (every check-run they
+        # registered concluded `skipped`, and a sibling run of the same workflow has
+        # evidence). #3781's declared marker only reaches the four ci-select callers;
+        # `vectorized-feature-off.yml` emits no select, so once #3788 gave it the #2546
+        # label-trigger guard its guarded flip run would otherwise have superseded the
+        # in-flight real wasm build. Both sets feed the SAME downstream argument, so the
+        # redispatch decision, the attempt-jobs inventory and the resolver stay in
+        # agreement about which run is authoritative.
+        declared_no_leg = no_leg_run_ids(checks)
+        observed_no_leg = vacuous_run_ids(checks, workflows)
+        no_leg_ids = declared_no_leg | observed_no_leg
         authoritative = [
             r for r in workflows if _as_int(r.get("id")) not in no_leg_ids
         ]
-        fresh_no_leg = sorted(no_leg_ids - self._no_leg_reported)
-        if fresh_no_leg:
-            # Announced ONCE per run id, not once per poll: the gate can poll 155 times
-            # and this line is a standing fact about the head, not a per-poll event.
+        # Announced ONCE per run id, not once per poll: the gate can poll 155 times and
+        # these lines are standing facts about the head, not per-poll events. Reported
+        # per SOURCE so the log says which rule demoted the run (a run in both sets is
+        # announced once, by the declared rule).
+        for reason, ids in (
+            ("declared NO LEGS (guarded label-flip no-op, #3781)", declared_no_leg),
+            ("NO LEGS observed — every check-run they registered concluded `skipped` "
+             "(#3788)", observed_no_leg),
+        ):
+            fresh_no_leg = sorted(ids - self._no_leg_reported)
+            if not fresh_no_leg:
+                continue
             self._no_leg_reported |= set(fresh_no_leg)
             print(
-                f"  workflow-run resolver: {len(fresh_no_leg)} run(s) declared NO LEGS "
-                f"(guarded label-flip no-op, #3781) — ignored, so the previous real run "
+                f"  workflow-run resolver: {len(fresh_no_leg)} run(s) {reason} — "
+                f"ignored, so the previous real run "
                 f"of each workflow stays authoritative: "
                 f"{', '.join(str(i) for i in fresh_no_leg)}"
             )
@@ -882,6 +900,70 @@ def no_leg_run_ids(check_runs: list[dict]) -> set[int]:
         rid = _workflow_run_id_of_check(r)
         if rid:
             out.add(rid)
+    return out
+
+
+def vacuous_run_ids(
+    check_runs: list[dict], workflow_runs: list[dict]
+) -> set[int]:
+    """[OPUS-5] #3788: run ids that produced NO EVIDENCE — every check-run they
+    registered concluded `skipped` — while a SIBLING run of the same workflow on this
+    SHA did produce some. Such a run must not become the authoritative newest run and
+    erase the sibling's real legs.
+
+    WHY THIS EXISTS ALONGSIDE no_leg_run_ids. #3781's exclusion is DECLARED: it reads
+    the ", no-leg" marker off the pure ci-select pre-job, so it only reaches the four
+    lanes that call the reusable selector. `vectorized-feature-off.yml` emits no select
+    at all, so when #3788 gave it the #2546 label-trigger guard its guarded label-flip
+    run — two skipped jobs, completed in seconds — became that workflow's newest run and
+    the still-building real run's in-flight legs were dropped as superseded, rendering a
+    GREEN gate over an unfinished wasm feature-OFF build (measured against this module
+    before the fix). This exclusion is OBSERVED rather than declared: it is a fact about
+    the conclusions a run registered, so no workflow has to claim anything and no
+    name/marker can drift out from under it.
+
+    FAIL-CLOSED IN EVERY DIRECTION:
+      * a run with ANY non-skipped observed conclusion produced evidence and stays
+        authoritative (a real run can never be excluded, however cheap);
+      * a run with NO observed check-runs yet — the just-started `ready_for_review`
+        re-run on an unchanged SHA is exactly this — is NOT excluded, so it becomes
+        newest and the gate HOLDS on it rather than greening off its predecessor;
+      * a vacuous run is excluded only when a sibling run of the SAME workflow exists
+        to be authoritative instead, so this can never un-require a lane whose only
+        run on the SHA was all-skipped (that stays satisfied, as before).
+    The net direction matches #3781's: the gate keeps REAL conclusions in preference to
+    vacuous `skipped` ones, so a mid-flight sibling keeps it polling and a FAILED
+    sibling keeps failing it, instead of either being erased by a label flip."""
+    observed: dict[int, list[dict]] = {}
+    for r in check_runs:
+        rid = _workflow_run_id_of_check(r)
+        if rid:
+            observed.setdefault(rid, []).append(r)
+
+    def _vacuous(run_id: int) -> bool:
+        # `conclusion == "skipped"` is the WHOLE test. A queued/in-flight check-run has a
+        # null conclusion, so it already fails it; a separate `status == "completed"`
+        # conjunct would be a guard no input can distinguish (and, for a degraded payload
+        # reporting `skipped` on a non-terminal status, it would only NARROW the
+        # exclusion — the less safe direction), so it is deliberately absent. Same
+        # reasoning the resolver applies to its own unreachable-branch note above.
+        checks = observed.get(run_id) or []
+        return bool(checks) and all(
+            c.get("conclusion") == "skipped" for c in checks
+        )
+
+    by_workflow: dict[str, set[int]] = {}
+    for run in workflow_runs:
+        rid = _as_int(run.get("id"))
+        if rid:
+            by_workflow.setdefault(workflow_identity(run), set()).add(rid)
+
+    out: set[int] = set()
+    for run_ids in by_workflow.values():
+        vacuous = {rid for rid in run_ids if _vacuous(rid)}
+        # Only ever demote a vacuous run when a sibling survives to be authoritative.
+        if vacuous and vacuous != run_ids:
+            out |= vacuous
     return out
 
 

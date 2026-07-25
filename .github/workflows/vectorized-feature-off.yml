@@ -60,6 +60,23 @@ on:
   # must re-run the wasm-equality leg a draft head may have scoped out) +
   # labeled/unlabeled (the `ci-full` label toggle must re-evaluate the draft-tier
   # scope decision in the artifact-exact-equality decide step below).
+  #
+  # [OPUS-5] #3788 — LABEL-TRIGGER GUARD (the #2546 shape; full rationale in ci.yml's
+  # pull_request note). This was the LAST lane in this trigger class carrying NEITHER
+  # half of #2546: a `review:*` flip — which `sparq-orchestrator[bot]` performs several
+  # times per round on every open PR — entered the shared per-ref concurrency group and
+  # CANCELLED the in-flight run on the SAME head SHA, then re-did the real feature-OFF
+  # wasm double-build from scratch. Continuous waste, plus the runner congestion it adds
+  # (measured second-order cost: congestion delayed unrelated legs by 30+ min, #3783).
+  #
+  # `ci-full` is the ONE label that legitimately re-triggers this lane: it is read by
+  # the artifact-exact-equality `Decide rust_changed` step (CI_FULL_LABEL) to bypass the
+  # draft-tier narrowing, so toggling it on a DRAFT PR must still bring the heavy leg
+  # back. Every other label flip cannot change the feature-OFF bundle bytes and is
+  # guarded off BOTH jobs below (they are independent roots — sq-6vshe.20 replaced
+  # `artifact-exact-equality`'s `needs: changes` with its own in-job path filter, so a
+  # guard on `quick-gates` alone would NOT propagate). Label events also get a per-run
+  # concurrency group so a flip never cancels a genuine in-flight run.
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
   merge_group:
@@ -68,7 +85,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: vectorized-feature-off-${{ github.workflow }}-${{ github.ref }}
+  # [OPUS-5] #3788 label-trigger guard, half 2: labeled/unlabeled pull_request events
+  # get a PER-RUN group. Run-level cancellation precedes job-`if:` evaluation, so the
+  # job guards below are NOT sufficient on their own — a guarded no-op run entering the
+  # shared per-ref group would still cancel the in-flight real run on the same head SHA,
+  # which is the actual harm #3788 reports. All other events (push / merge_group /
+  # non-label PR events) keep the shared per-ref group and its cancel-in-progress
+  # behaviour byte-for-byte unchanged.
+  group: vectorized-feature-off-${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'pull_request' && contains(fromJSON('["labeled","unlabeled"]'), github.event.action)) && github.run_id || 'shared' }}
   cancel-in-progress: true
 
 env:
@@ -87,6 +111,15 @@ jobs:
   # ---------------------------------------------------------------------------
   quick-gates:
     name: vectorized-feature-off quick-gates (changes + feature-resolution + cfg-audit)
+    # [OPUS-5] #3788 label-trigger guard, half 1 (see the pull_request trigger note):
+    # a labeled/unlabeled event for any label other than `ci-full` cannot change what
+    # this job proves, so it skips. Every non-label event (push / merge_group /
+    # opened / synchronize / reopened / ready_for_review) falls through the FIRST two
+    # disjuncts unchanged, so no code-affecting event is ever guarded off.
+    if: >-
+      github.event_name != 'pull_request' ||
+      !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) ||
+      github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -219,6 +252,16 @@ jobs:
   # ---------------------------------------------------------------------------
   artifact-exact-equality:
     name: artifact-exact-equality (wasm bundle feature-OFF)
+    # [OPUS-5] #3788 label-trigger guard, half 1. This job carries the guard IN ITS OWN
+    # RIGHT: sq-6vshe.20 deliberately dropped its `needs: changes` in favour of an
+    # in-job path filter, so it is an independent ROOT — the guard on `quick-gates`
+    # does not reach it, and this is the job that runs the two real release-wasm builds
+    # a `review:*` flip was re-doing. `ci-full` stays allowed because the decide step
+    # below reads it (CI_FULL_LABEL) to bypass the draft-tier narrowing.
+    if: >-
+      github.event_name != 'pull_request' ||
+      !contains(fromJSON('["labeled","unlabeled"]'), github.event.action) ||
+      github.event.label.name == 'ci-full'
     runs-on: ubuntu-latest
     permissions:
       contents: read

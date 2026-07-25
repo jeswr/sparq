@@ -323,6 +323,27 @@ belts (all in `scripts/ci_summary_gate.py`, unit-tested in
    EVALUATES the marker expression against synthetic payloads and proves, by
    `needs:`-graph reachability, that every caller job really is inert on such a
    flip — the claim, not just the string.
+
+   **Extended to lanes with no `select` (#3788).** [OPUS-5] Rule 7's exclusion is
+   *declared*: it reads the marker off the pure `ci-select` pre-job, so it only reaches
+   the four callers. `vectorized-feature-off.yml` is in the same `labeled`/`unlabeled`
+   trigger class but emits no `select`, so when it received the #2546 label-trigger
+   guard the gate needed a second, *observed* route to the same conclusion: a run every
+   one of whose check-runs concluded `skipped`, while a SIBLING run of the same workflow
+   on that SHA has evidence, is excluded from newest-run candidacy on the strength of
+   its conclusions alone (`vacuous_run_ids`). Nothing is claimed in a job name, so
+   nothing can drift. Both routes feed one union, and both stay fail-closed: any
+   non-`skipped` conclusion is evidence and keeps the run authoritative; a run with no
+   check-runs observed yet is NOT vacuous (the just-started `ready_for_review` re-run on
+   an unchanged SHA is exactly that shape, and the gate must hold on it rather than
+   conclude off its predecessor); and a vacuous run is demoted only when a sibling can
+   be authoritative instead, so a lane whose only run on the SHA was all-`skipped` is
+   still satisfied, never silently un-required. Without this, guarding that lane would
+   have traded #3788's wasted wasm builds for a green gate rendered over an unfinished
+   one — pinned by
+   `scripts/tests/test_ci_summary_gate.py::TestVacuousRunExclusion`, and the whole
+   trigger class (both halves, every member) by
+   `test_ci_select_wiring.py::TestLabelFlipTriggerClass`.
 8. **An unsatisfiable hold REDs immediately, with the diagnosis (#3781).**
    [OPUS-5] Rule 4's hold is a WAIT for the `ready_for_review` full-tier re-runs.
    When every sibling has CONCLUDED, a draft-marked select still lacks a successor,

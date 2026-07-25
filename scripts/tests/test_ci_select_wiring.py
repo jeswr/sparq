@@ -252,6 +252,16 @@ class _GhExpr:
                 args.append(self._or())
         if not self._eat(")"):
             raise GhExprError(f"{fn}: expected ')'")
+        if fn == "always":
+            # [OPUS-5] #3788: the job-status function, needed to evaluate the `if:` of
+            # an always()-composed verdict job (ci.yml `coverage`). These tests only ask
+            # "would this job run at all on this EVENT", never "what does it do after a
+            # sibling failed", so always() is True — the reading under which the
+            # label-guard AND-term is the only thing left that can skip the job. Handled
+            # explicitly rather than by a catch-all so an `if:` that grows a
+            # cancelled()/success()/failure() term still FAILS LOUDLY below instead of
+            # being silently mis-evaluated.
+            return True
         if fn == "fromJSON":
             return json.loads(args[0])
         if fn == "contains":
@@ -1624,6 +1634,293 @@ class TestNoLegMarkerWiring(unittest.TestCase):
         self.assertIsNone(_GhExpr("github.missing.path", {"github": {}}).parse())
         with self.assertRaises(GhExprError):
             _GhExpr("a $$ b", {}).parse()
+
+
+WORKFLOWS_DIR = REPO_ROOT / ".github" / "workflows"
+# The canonical #2546 label-trigger-guard needle. Its `!` is load-bearing: without it
+# the guard runs the job ONLY on label events. Extracted as a constant so a test can
+# both look for it and EVALUATE the live text that contains it.
+LABEL_GUARD_NEEDLE = "!contains(fromJSON('[\"labeled\",\"unlabeled\"]'), github.event.action)"
+
+
+def render_template(text: str, ctx: dict) -> str:
+    """Render EVERY `${{ … }}` substitution in a workflow scalar (a `concurrency.group`
+    has several), by evaluating each one — the string GitHub would actually compute."""
+    out = text
+    for expr in re.findall(r"\$\{\{.*?\}\}", text):
+        value = _GhExpr(expr[3:-2], ctx).parse()
+        if value is True:
+            value = "true"
+        elif value is False or value is None:
+            value = ""
+        out = out.replace(expr, str(value))
+    return out
+
+
+def event_ctx(*, draft=False, action="synchronize", label=None, event="pull_request",
+              run_id="90001", workflow="wf", ref="refs/pull/1/merge") -> dict:
+    """`pr_event` plus the run-scoped context a `concurrency.group` reads."""
+    ctx = pr_event(draft=draft, action=action, label=label, event=event)
+    ctx["github"].update({"run_id": run_id, "workflow": workflow, "ref": ref})
+    return ctx
+
+
+def jobs_that_run(wf: dict, ctx: dict, *, wf_name: str) -> set[str]:
+    """The set of job ids that would RUN for this event, by EVALUATING each job's live
+    `if:` and propagating `needs:`. An `if:` the evaluator cannot parse raises — an
+    expression that outgrew the grammar must fail the test loudly, never be assumed
+    inert (that assumption is how #3788 stayed invisible)."""
+    jobs = wf["jobs"]
+    memo: dict[str, bool] = {}
+
+    def needs_of(job_id: str) -> list[str]:
+        raw = jobs[job_id].get("needs") or []
+        return [raw] if isinstance(raw, str) else list(raw)
+
+    def runs(job_id: str) -> bool:
+        if job_id in memo:
+            return memo[job_id]
+        memo[job_id] = False  # a cycle can never prove reachability
+        cond = " ".join(str(jobs[job_id].get("if", "")).split())
+        try:
+            own = _truthy(_GhExpr(cond, ctx).parse()) if cond else True
+        except GhExprError as exc:  # pragma: no cover - drift tripwire
+            raise GhExprError(
+                f"{wf_name}:{job_id}: this test must EVALUATE every job `if:` in the "
+                f"labeled/unlabeled trigger class, and this one uses syntax outside the "
+                f"grammar ({exc}). Extend the evaluator — do not leave the job "
+                f"unchecked: an unevaluated guard is exactly the #3788 blind spot."
+            ) from exc
+        # always()/!cancelled() bypass skipped-`needs:` propagation, so such a job must
+        # carry its own guard (the #2546 finding about ci.yml's `coverage`).
+        alwaysish = "always()" in cond or "!cancelled()" in cond
+        deps_ok = alwaysish or all(runs(n) for n in needs_of(job_id))
+        memo[job_id] = bool(own and deps_ok)
+        return memo[job_id]
+
+    return {job_id for job_id in jobs if runs(job_id)}
+
+
+class TestLabelFlipTriggerClass(unittest.TestCase):
+    """[OPUS-5] #3788 — THE WHOLE `labeled`/`unlabeled` TRIGGER CLASS, not just the four
+    ci-select callers.
+
+    THE DEFECT. `vectorized-feature-off.yml` reacted to pull_request
+    `labeled`/`unlabeled` with NO job guard and a SHARED per-ref `cancel-in-progress`
+    concurrency group — the last lane in this class with NEITHER half of #2546. So every
+    `review:*` flip (the orchestration bot performs several per round on every open PR)
+    cancelled the in-flight run on the SAME head SHA and re-did the real feature-OFF wasm
+    double-build from scratch: continuous wasted compute plus the runner congestion it
+    adds. #2546's own tests enumerated the four ci-select CALLERS by name, so this lane —
+    which emits no `select` — was never in scope for any of them.
+
+    WHY THIS CLASS AND NOT THAT LIST. The property that matters is a property of the
+    TRIGGER, not of who calls the selector: any workflow that reacts to a label event
+    needs both halves, or a label flip perturbs real CI. So the class is DERIVED from the
+    live `on:` blocks, its membership is pinned, and every member is checked for both
+    halves by EVALUATION — a mutated guard or concurrency expression REDs on behaviour."""
+
+    # Every workflow reacting to pull_request labeled AND unlabeled. Derived, then pinned
+    # below: a new lane joining the class must be made to carry both halves first.
+    EXPECTED_CLASS = {
+        "bench.yml", "ci.yml", "feature-matrix.yml", "fuzz.yml",
+        "vectorized-feature-off.yml",
+    }
+    # Non-label events that CAN change what these lanes prove. The guard must let every
+    # one of them through, or the fix would have blinded the lane instead of de-noising it.
+    CODE_AFFECTING = (
+        dict(event="push"),
+        dict(event="merge_group"),
+        dict(event="pull_request", action="opened"),
+        dict(event="pull_request", action="synchronize"),
+        dict(event="pull_request", action="reopened"),
+        dict(event="pull_request", action="ready_for_review"),
+    )
+    # Label flips the review pipeline actually performs (#3781 measured these).
+    REVIEW_FLIPS = (
+        dict(action="labeled", label="review:needs"),
+        dict(action="unlabeled", label="review:pass"),
+        dict(action="labeled", label="status:parked"),
+        dict(action="unlabeled", label="review:needs"),
+    )
+
+    @classmethod
+    def setUpClass(cls):
+        cls.wfs = {}
+        for path in sorted(WORKFLOWS_DIR.glob("*.y*ml")):
+            wf = _load(path)
+            types = set((_on_block(wf).get("pull_request") or {}).get("types") or [])
+            if {"labeled", "unlabeled"} <= types:
+                cls.wfs[path.name] = wf
+
+    def _guarded_jobs(self, wf: dict) -> dict[str, str]:
+        """job_id -> its live, whitespace-normalized `if:`, for jobs carrying the guard."""
+        out = {}
+        for job_id, job in wf["jobs"].items():
+            cond = " ".join(str(job.get("if", "")).split())
+            if LABEL_GUARD_NEEDLE in cond:
+                out[job_id] = cond
+        return out
+
+    def _select_callers(self, wf: dict) -> set[str]:
+        return {j for j, spec in wf["jobs"].items()
+                if "ci-select.yml" in str(spec.get("uses", ""))}
+
+    # ---- the class itself ----------------------------------------------------
+    def test_the_trigger_class_membership_is_pinned(self):
+        """A lane may not join this trigger class unnoticed. #3788 happened because
+        `vectorized-feature-off.yml` was added to the class while every existing test
+        enumerated the four ci-select callers by name."""
+        self.assertEqual(
+            set(self.wfs), self.EXPECTED_CLASS,
+            "the set of workflows reacting to pull_request labeled/unlabeled changed. "
+            "JOINING the class obliges a workflow to carry BOTH halves of #2546/#3788 — a "
+            "label-trigger guard on every root job AND a per-run concurrency group for "
+            "label events — before it is listed here; LEAVING the class (dropping the "
+            "label trigger types) is also a deliberate act and must be recorded here. "
+            "#3788 was precisely an unnoticed join: it cost a real wasm feature-OFF "
+            "double-build on every review-label flip",
+        )
+
+    # ---- half 1: the guard --------------------------------------------------
+    def test_a_review_label_flip_runs_no_job_in_the_class(self):
+        """(a) THE FIX. On a `review:*` flip — the event the orchestration bot generates
+        several times per round — no job of any lane in this class may run, except the
+        deliberately unconditional ci-select pre-job (a skipped select poisons the gate).
+        Evaluated over the live `if:`s + `needs:` graph, so deleting a guard, dropping its
+        `!`, or widening its label allowlist to a review label all RED here."""
+        for wf_name, wf in sorted(self.wfs.items()):
+            exempt = self._select_callers(wf)
+            for flip in self.REVIEW_FLIPS:
+                ctx = event_ctx(**flip)
+                running = jobs_that_run(wf, ctx, wf_name=wf_name) - exempt
+                self.assertEqual(
+                    running, set(),
+                    f"{wf_name}: {sorted(running)} would still RUN on a "
+                    f"{flip['action']} `{flip['label']}` flip. A review-label flip "
+                    f"cannot change what any of these jobs prove, so running them "
+                    f"re-does real CI work on an UNCHANGED head SHA — the #3788 waste "
+                    f"(for vectorized-feature-off, two full release-wasm builds)",
+                )
+
+    def test_a_code_affecting_event_still_runs_every_guarded_job(self):
+        """(b) THE OTHER HALF OF THE DISCRIMINATION — the guard must not blind the lane.
+        Every job carrying the label guard must still RUN on push, merge_group and every
+        non-label pull_request event. Without this, `if: false` would satisfy (a)."""
+        for wf_name, wf in sorted(self.wfs.items()):
+            for job_id, cond in sorted(self._guarded_jobs(wf).items()):
+                for case in self.CODE_AFFECTING:
+                    ctx = event_ctx(**case)
+                    verdict = _truthy(_GhExpr(cond, ctx).parse())
+                    self.assertTrue(
+                        verdict,
+                        f"{wf_name}:{job_id} would NOT run on "
+                        f"{case.get('action') or case['event']} — a genuine "
+                        f"code-affecting event. The label-trigger guard must skip ONLY "
+                        f"label-only events; guarding a real event off blinds the lane "
+                        f"(for vectorized-feature-off that is the wasm feature-OFF "
+                        f"byte-equality proof silently not running at all)",
+                    )
+
+    def test_every_escape_hatch_label_still_triggers_its_lane(self):
+        """(d) The opt-in labels are the reason these lanes take label events at all.
+        Each workflow's OWN allowlist is read out of its live guard and every label in it
+        must still run every guarded job — `ci-full` everywhere, plus `bench-full` /
+        `fuzz-full`, plus `ci-full` on vectorized-feature-off, where the
+        artifact-exact-equality decide step reads it (CI_FULL_LABEL) to bypass the
+        draft-tier narrowing. Deleting a label from an allowlist REDs here."""
+        seen = {}
+        for wf_name, wf in sorted(self.wfs.items()):
+            allowed: set[str] = set()
+            for cond in self._guarded_jobs(wf).values():
+                allowed |= set(re.findall(r"github\.event\.label\.name == '([^']+)'", cond))
+                for group in re.findall(
+                    r"contains\(fromJSON\('(\[[^']*\])'\), github\.event\.label\.name\)",
+                    cond,
+                ):
+                    allowed |= set(json.loads(group))
+            self.assertTrue(
+                allowed,
+                f"{wf_name}: the label-trigger guard allows NO label through, so no "
+                f"opt-in label can re-trigger this lane. If that is intended, say so "
+                f"explicitly — but this lane's `on:` still takes label events, which "
+                f"then only produce vacuous runs",
+            )
+            seen[wf_name] = sorted(allowed)
+            for job_id, cond in sorted(self._guarded_jobs(wf).items()):
+                for label in sorted(allowed):
+                    for action in ("labeled", "unlabeled"):
+                        ctx = event_ctx(action=action, label=label)
+                        self.assertTrue(
+                            _truthy(_GhExpr(cond, ctx).parse()),
+                            f"{wf_name}:{job_id} does NOT run when `{label}` is "
+                            f"{action} — but `{label}` is in this workflow's own guard "
+                            f"allowlist, i.e. it exists precisely to re-trigger this "
+                            f"lane. The escape hatch is broken",
+                        )
+        self.assertIn("ci-full", seen["vectorized-feature-off.yml"],
+                      "ci-full is the one label that legitimately re-triggers the wasm "
+                      "feature-OFF lane (the artifact-exact-equality decide step reads "
+                      "CI_FULL_LABEL to bypass draft-tier narrowing) — it must stay "
+                      f"allowed, got {seen['vectorized-feature-off.yml']}")
+
+    # ---- half 2: the concurrency group --------------------------------------
+    def test_a_label_event_gets_a_per_run_concurrency_group(self):
+        """(c) THE HALF THE JOB GUARD CANNOT DO. Run-level cancellation precedes job-`if:`
+        evaluation, so a guarded no-op run entering the SHARED per-ref group still
+        cancels the in-flight real run on the same head SHA — which is the actual harm
+        reported in #3788. Two concurrent label-flip runs must therefore render DIFFERENT
+        group keys, while every non-label event keeps ONE shared key. Evaluated, so
+        collapsing the ternary, swapping its branches, or dropping the run_id all RED."""
+        for wf_name, wf in sorted(self.wfs.items()):
+            group = str((wf.get("concurrency") or {}).get("group", ""))
+            self.assertTrue(group, f"{wf_name}: no concurrency.group")
+            for flip in self.REVIEW_FLIPS:
+                a = render_template(group, event_ctx(run_id="1111", **flip))
+                b = render_template(group, event_ctx(run_id="2222", **flip))
+                self.assertNotEqual(
+                    a, b,
+                    f"{wf_name}: a {flip['action']} `{flip['label']}` flip renders the "
+                    f"concurrency group {a!r} for two DIFFERENT runs, i.e. it shares a "
+                    f"group with the in-flight real run on the same head SHA and "
+                    f"cancels it. That cancel-and-rebuild is exactly the #3788 waste, "
+                    f"and the job guard cannot prevent it — run-level cancellation "
+                    f"happens before any job `if:` is evaluated",
+                )
+            for case in self.CODE_AFFECTING:
+                a = render_template(group, event_ctx(run_id="1111", **case))
+                b = render_template(group, event_ctx(run_id="2222", **case))
+                self.assertEqual(
+                    a, b,
+                    f"{wf_name}: {case.get('action') or case['event']} — a genuine "
+                    f"code-affecting event — now renders a PER-RUN concurrency group "
+                    f"({a!r} vs {b!r}), so a superseded push no longer cancels its "
+                    f"predecessor. The per-run group must apply to label events ONLY",
+                )
+
+    # ---- the lane #3788 is about -------------------------------------------
+    def test_both_vectorized_feature_off_roots_carry_the_guard(self):
+        """#3788's suggested fix said guarding `quick-gates` would be enough because
+        "artifact-exact-equality needs it, so the graph follows". It does NOT: sq-6vshe.20
+        deliberately replaced that `needs:` with an in-job path filter so the heavy long
+        pole starts earlier. Both jobs are independent ROOTS, and the heavy one is the
+        job doing the two real release-wasm builds, so it needs the guard in its own
+        right. Pinned so a future refactor cannot re-introduce the assumption."""
+        wf = self.wfs["vectorized-feature-off.yml"]
+        guarded = self._guarded_jobs(wf)
+        for job_id in ("quick-gates", "artifact-exact-equality"):
+            self.assertFalse(
+                wf["jobs"][job_id].get("needs"),
+                f"vectorized-feature-off:{job_id} grew a `needs:` — if the graph now "
+                f"chains, re-derive which jobs are roots before trusting a single guard",
+            )
+            self.assertIn(
+                job_id, guarded,
+                f"vectorized-feature-off:{job_id} is an independent ROOT (no `needs:`) "
+                f"and carries NO label-trigger guard, so a review-label flip runs it. "
+                f"For artifact-exact-equality that is two full release-wasm builds "
+                f"re-done on an unchanged head SHA (#3788)",
+            )
 
 
 class TestContainerScanMergeGroupGate(unittest.TestCase):

@@ -2357,6 +2357,300 @@ class TestNoLegRunExclusion(unittest.TestCase):
         self.assertEqual(forgiven2, [cancelled_draft])
 
 
+VFO_QUICK = "vectorized-feature-off quick-gates (changes + feature-resolution + cfg-audit)"
+VFO_HEAVY = "artifact-exact-equality (wasm bundle feature-OFF)"
+
+
+class TestVacuousRunExclusion(unittest.TestCase):
+    """[OPUS-5] #3788 — a run that produced NO EVIDENCE cannot supersede a sibling that
+    did, EVEN WHEN it has no ci-select pre-job to declare itself no-leg.
+
+    WHY #3781's EXCLUSION IS NOT ENOUGH. `no_leg_run_ids` reads the ", no-leg" marker off
+    the pure ci-select pre-job, so it only reaches the four lanes that call the reusable
+    selector. `vectorized-feature-off.yml` emits no `select` at all. #3788 gave that lane
+    the #2546 label-trigger guard (both halves), which means a `review:*` flip now yields
+    a run whose two jobs are SKIPPED and which completes in seconds — and, measured
+    against this module BEFORE this exclusion existed, that vacuous run became the
+    workflow's authoritative newest run, dropped the still-building real run's in-flight
+    legs as superseded, and the gate rendered `PASSED — all 2 gating check(s) green (or
+    skipped/neutral)` over an unfinished wasm feature-OFF double-build. Fixing the waste
+    without this would have traded wasted compute for a FALSE GREEN.
+
+    So the exclusion here is OBSERVED, not declared: a run every one of whose check-runs
+    concluded `skipped`, while a sibling run of the same workflow has evidence, is a
+    non-event. Nothing has to be claimed in a job name, so nothing can drift."""
+
+    def _resolver(self, checks_by_poll, workflows_by_poll):
+        """A WorkflowRunResolver over scripted (checks, workflows) polls — the PRODUCTION
+        call site, so dropping the union there is caught."""
+        state = {"i": 0}
+
+        def nth(seq):
+            i = min(state["i"], len(seq) - 1)
+            return [dict(x) for x in seq[i]]
+
+        def fetch_workflows():
+            out = nth(workflows_by_poll)
+            state["i"] += 1
+            return out
+
+        jobs = {}
+        resolver = g.WorkflowRunResolver(
+            self_run_id="999",
+            fetch_checks=lambda: nth(checks_by_poll),
+            fetch_workflows=fetch_workflows,
+            fetch_attempt_jobs=lambda rid, attempt: [dict(j) for j in jobs.get(rid, [])],
+            redispatch=lambda rid: None,
+        )
+        resolver.jobs = jobs
+        return resolver
+
+    def _drive(self, resolver, depth=0):
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = g.run_gate(tiny_cfg(), resolver, lambda: depth,
+                              sleep_fn=lambda s: None)
+        return code, out.getvalue()
+
+    def _vfo_flip_run(self, run_id, *, created="2026-07-25T07:28:57Z"):
+        return W(run_id, 77, name="vectorized-feature-off", conclusion="skipped",
+                 created=created)
+
+    def _vfo_flip_checks(self, run_id):
+        return [
+            _check(VFO_QUICK, run_id=run_id, conclusion="skipped", rid=31,
+                   started="2026-07-25T07:29:01Z"),
+            _check(VFO_HEAVY, run_id=run_id, conclusion="skipped", rid=32,
+                   started="2026-07-25T07:29:01Z"),
+        ]
+
+    # ---- (c) the suppression -------------------------------------------------
+    def test_a_label_flip_no_op_run_cannot_erase_a_real_wasm_FAILURE(self):
+        """THE SHARPEST FORM. The real vectorized-feature-off run FAILED (an undeclared
+        feature-OFF wasm byte change). A later `review:*` flip run — two skipped jobs, no
+        select to mark itself no-leg — must NOT supersede it. Removing the #3788 union at
+        the resolver call site, or making vacuous_run_ids return an empty set, makes the
+        vacuous run newest, its two `skipped` legs satisfy the gate, and this GREENS."""
+        real = W(101, 77, name="vectorized-feature-off", conclusion="failure",
+                 created="2026-07-25T07:15:37Z")
+        flip = self._vfo_flip_run(102)
+        checks = [
+            _check(VFO_QUICK, run_id=101, rid=1),
+            _check(VFO_HEAVY, run_id=101, conclusion="failure", rid=2),
+        ] + self._vfo_flip_checks(102)
+        resolver = self._resolver([checks], [[real, flip]])
+        resolver.jobs[101] = [_job(VFO_QUICK, run_id=101, jid=1),
+                              _job(VFO_HEAVY, run_id=101, conclusion="failure", jid=2)]
+        resolver.jobs[102] = [_job(VFO_QUICK, run_id=102, conclusion="skipped", jid=1),
+                              _job(VFO_HEAVY, run_id=102, conclusion="skipped", jid=2)]
+        code, out = self._drive(resolver)
+        self.assertEqual(
+            code, 1,
+            "a guarded label-flip no-op run of a lane with NO ci-select pre-job erased "
+            "the real run's wasm feature-OFF FAILURE and the gate went GREEN. A review "
+            "label flip must not be able to launder a red (#3788). Output:\n" + out)
+        self.assertIn("NO LEGS observed", out,
+                      "the resolver must SAY which runs it demoted and why")
+
+    def test_a_label_flip_no_op_run_cannot_discard_an_inflight_wasm_build(self):
+        """THE MEASURED SHAPE. The heavy leg is two full release-wasm builds, so the real
+        run is still in flight for many minutes after a flip lands. The gate must keep
+        WAITING on the real legs and conclude on THEM — never conclude immediately over
+        the flip run's skipped ones, which is a green rendered over a build that has not
+        finished."""
+        inflight = W(101, 77, name="vectorized-feature-off", status="in_progress",
+                     conclusion=None, created="2026-07-25T07:15:37Z")
+        done = W(101, 77, name="vectorized-feature-off", conclusion="success",
+                 created="2026-07-25T07:15:37Z")
+        flip = self._vfo_flip_run(102)
+        pending = [
+            _check(VFO_QUICK, run_id=101, rid=1),
+            _check(VFO_HEAVY, run_id=101, status="in_progress", conclusion=None, rid=2),
+        ] + self._vfo_flip_checks(102)
+        finished = [
+            _check(VFO_QUICK, run_id=101, rid=1),
+            _check(VFO_HEAVY, run_id=101, rid=2),
+        ] + self._vfo_flip_checks(102)
+        resolver = self._resolver(
+            [pending, pending, finished],
+            [[inflight, flip], [inflight, flip], [done, flip]],
+        )
+        resolver.jobs[101] = [_job(VFO_QUICK, run_id=101, jid=1),
+                              _job(VFO_HEAVY, run_id=101, jid=2)]
+        resolver.jobs[102] = [_job(VFO_QUICK, run_id=102, conclusion="skipped", jid=1),
+                              _job(VFO_HEAVY, run_id=102, conclusion="skipped", jid=2)]
+        code, out = self._drive(resolver, depth=1)
+        self.assertEqual(
+            code, 0,
+            "the gate must WAIT for the real in-flight wasm build and then conclude on "
+            f"it. Output:\n{out}")
+        self.assertIn(
+            "2 running", out,
+            "the gate concluded WITHOUT ever seeing the real run's legs in flight: the "
+            "flip run's two `skipped` check-runs stood in for the unfinished wasm "
+            "feature-OFF double-build. That is the #3788 false green — with the "
+            "exclusion removed the poll reads `0 running` and passes immediately. "
+            f"Output:\n{out}")
+        self.assertIn(
+            "attempt 3", out,
+            "the gate must still be polling after the flip run completed — it must wait "
+            f"for the REAL heavy leg, not conclude off the vacuous run. Output:\n{out}")
+
+    # ---- the discriminations: a real run is never demoted -------------------
+    def test_a_run_that_did_real_work_is_never_treated_as_vacuous(self):
+        """(b) THE OTHER HALF OF THE DISCRIMINATION — the exclusion must not blind the
+        lane. A `ci-full` flip DOES run both jobs, so its run carries evidence and must
+        stay authoritative even though it is a label event: its FAILURE must RED the
+        gate. Widening the vacuity test (e.g. to `conclusion in _PASSING`, or to any
+        completed run) makes this run non-authoritative, the older green run takes over,
+        and this GREENS over a genuine wasm-equality failure."""
+        earlier = W(201, 77, name="vectorized-feature-off", conclusion="success",
+                    created="2026-07-25T07:15:37Z")
+        ci_full = W(202, 77, name="vectorized-feature-off", conclusion="failure",
+                    created="2026-07-25T07:28:57Z")
+        checks = [
+            _check(VFO_QUICK, run_id=201, rid=1),
+            _check(VFO_HEAVY, run_id=201, rid=2),
+            _check(VFO_QUICK, run_id=202, rid=3, started="2026-07-25T07:29:01Z"),
+            _check(VFO_HEAVY, run_id=202, conclusion="failure", rid=4,
+                   started="2026-07-25T07:29:01Z"),
+        ]
+        resolver = self._resolver([checks], [[earlier, ci_full]])
+        resolver.jobs[201] = [_job(VFO_QUICK, run_id=201, jid=1),
+                              _job(VFO_HEAVY, run_id=201, jid=2)]
+        resolver.jobs[202] = [_job(VFO_QUICK, run_id=202, jid=1),
+                              _job(VFO_HEAVY, run_id=202, conclusion="failure", jid=2)]
+        code, out = self._drive(resolver)
+        self.assertEqual(
+            code, 1,
+            "a `ci-full` flip run DID both real builds, so it is evidence and must stay "
+            "authoritative — demoting it lets an older green run mask a genuine "
+            f"feature-OFF byte-equality failure. Output:\n{out}")
+        self.assertNotIn("NO LEGS observed", out,
+                         "a run that ran its jobs must never be reported as vacuous")
+
+    def test_a_run_with_no_checks_yet_is_not_vacuous(self):
+        """FAIL-CLOSED EDGE. `ready_for_review` re-runs a lane on an UNCHANGED head SHA,
+        so for a moment the newest run has registered no check-runs at all. Vacuity is
+        `>=1 observed check-run, all skipped` — an empty observation is NOT vacuity, or
+        the gate would demote the fresh real run and green off its predecessor."""
+        old = W(301, 77, name="vectorized-feature-off", conclusion="success",
+                created="2026-07-25T07:15:37Z")
+        fresh = W(302, 77, name="vectorized-feature-off", status="in_progress",
+                  conclusion=None, created="2026-07-25T07:40:00Z")
+        checks = [_check(VFO_QUICK, run_id=301, rid=1),
+                  _check(VFO_HEAVY, run_id=301, rid=2)]
+        self.assertEqual(
+            g.vacuous_run_ids(checks, [old, fresh]), set(),
+            "a run with NO observed check-runs was declared vacuous — the just-started "
+            "ready_for_review re-run is exactly that shape, and demoting it would let "
+            "the gate conclude off its predecessor while the real legs are still to come")
+        resolved, _ = g.resolve_newest_workflow_runs(
+            checks, [old, fresh], "999",
+            no_leg_ids=g.vacuous_run_ids(checks, [old, fresh]))
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                g.render_verdict(resolved), 1,
+                "the fresh run must be authoritative and the gate must HOLD on it, not "
+                "pass on the older run's legs")
+
+    def test_a_lone_all_skipped_run_is_left_authoritative(self):
+        """FAIL-CLOSED EDGE, other side. A vacuous run is demoted only when a SIBLING run
+        of the same workflow can be authoritative instead. With no sibling, demoting it
+        would remove the lane from the gate's view entirely — an un-required lane, which
+        is strictly worse than the pre-existing `skipped`-is-satisfied semantics."""
+        lone = self._vfo_flip_run(401, created="2026-07-25T07:28:57Z")
+        checks = self._vfo_flip_checks(401)
+        self.assertEqual(
+            g.vacuous_run_ids(checks, [lone]), set(),
+            "an all-skipped run that is its workflow's ONLY run on the SHA must stay "
+            "authoritative — there is no sibling to take over, and dropping it would "
+            "silently un-require the lane rather than satisfy it")
+
+    def test_a_partly_skipped_run_carries_evidence(self):
+        """One skipped job and one SUCCESS is a run that proved something. Loosening the
+        `all(...)` to `any(...)` REDs here."""
+        real = W(501, 77, name="vectorized-feature-off", conclusion="success",
+                 created="2026-07-25T07:15:37Z")
+        partial = W(502, 77, name="vectorized-feature-off", conclusion="success",
+                    created="2026-07-25T07:28:57Z")
+        checks = [
+            _check(VFO_QUICK, run_id=501, rid=1),
+            _check(VFO_HEAVY, run_id=501, rid=2),
+            _check(VFO_QUICK, run_id=502, conclusion="skipped", rid=3,
+                   started="2026-07-25T07:29:01Z"),
+            _check(VFO_HEAVY, run_id=502, rid=4, started="2026-07-25T07:29:01Z"),
+        ]
+        self.assertEqual(
+            g.vacuous_run_ids(checks, [real, partial]), set(),
+            "a run with a SUCCESS alongside a skip produced evidence and must stay "
+            "authoritative — only an ALL-skipped run is a non-event")
+
+    def test_only_a_skipped_conclusion_counts_as_no_evidence(self):
+        """The vacuity test is `conclusion == 'skipped'`, nothing looser. Pinned from BOTH
+        sides: an in-flight check (null conclusion) is not a skip, so a run still
+        producing legs is never demoted; and a `success`/`failure`/`neutral`/`cancelled`
+        conclusion is evidence, so relaxing the comparison (e.g. to `!= 'failure'`)
+        demotes runs that concluded something and REDs here."""
+        real = W(601, 77, name="vectorized-feature-off", conclusion="success",
+                 created="2026-07-25T07:15:37Z")
+        starting = W(602, 77, name="vectorized-feature-off", status="in_progress",
+                     conclusion=None, created="2026-07-25T07:28:57Z")
+        checks = [
+            _check(VFO_QUICK, run_id=601, rid=1),
+            _check(VFO_QUICK, run_id=602, status="in_progress", conclusion=None, rid=2,
+                   started="2026-07-25T07:29:01Z"),
+        ]
+        self.assertEqual(
+            g.vacuous_run_ids(checks, [real, starting]), set(),
+            "an in-flight check-run was counted as a skip — a run still producing legs "
+            "must never be demoted")
+        for conclusion in ("success", "failure", "neutral", "cancelled", "timed_out"):
+            with self.subTest(conclusion=conclusion):
+                sibling = W(604, 77, name="vectorized-feature-off",
+                            conclusion="success", created="2026-07-25T07:15:37Z")
+                concluded = W(605, 77, name="vectorized-feature-off",
+                              conclusion=conclusion, created="2026-07-25T07:28:57Z")
+                runs = [_check(VFO_QUICK, run_id=604, rid=1),
+                        _check(VFO_QUICK, run_id=605, conclusion=conclusion, rid=2,
+                               started="2026-07-25T07:29:01Z")]
+                self.assertEqual(
+                    g.vacuous_run_ids(runs, [sibling, concluded]), set(),
+                    f"a check-run concluding `{conclusion}` is EVIDENCE — only "
+                    f"`skipped` means the run proved nothing. Treating it as vacuity "
+                    f"lets an older run's verdict stand in for this one's")
+
+    def test_the_declared_and_observed_rules_compose(self):
+        """The two exclusions are a UNION, not a replacement: the #3781 ci-select lanes
+        must keep their declared no-leg suppression. Here CI's flip run has a `, no-leg`
+        select (SUCCESS, so the run is not all-skipped and the observed rule alone would
+        NOT demote it) — it must still be demoted, and the real CI failure must survive."""
+        real = W(701, 7, name="CI", conclusion="failure", created="2026-07-25T07:15:37Z")
+        flip = W(702, 7, name="CI", conclusion="success", created="2026-07-25T07:28:57Z")
+        checks = [
+            _check("test shard", run_id=701, conclusion="failure", rid=1),
+            _check(SELECT_FULL, run_id=701, rid=2),
+            _check("test shard", run_id=702, conclusion="skipped", rid=3,
+                   started="2026-07-25T07:29:23Z"),
+            _check(SELECT_NO_LEG, run_id=702, rid=4, started="2026-07-25T07:29:23Z"),
+        ]
+        self.assertEqual(g.vacuous_run_ids(checks, [real, flip]), set(),
+                         "the observed rule must not fire here (the no-leg select is a "
+                         "SUCCESS, not a skip) — so this case proves the DECLARED rule "
+                         "is still doing the work")
+        self.assertEqual(g.no_leg_run_ids(checks), {702})
+        resolver = self._resolver([checks], [[real, flip]])
+        resolver.jobs[701] = [_job("test shard", run_id=701, conclusion="failure"),
+                              _job(SELECT_FULL, run_id=701, jid=2)]
+        resolver.jobs[702] = [_job("test shard", run_id=702, conclusion="skipped"),
+                              _job(SELECT_NO_LEG, run_id=702, jid=2)]
+        code, out = self._drive(resolver)
+        self.assertEqual(code, 1,
+                         "#3788's union must not have displaced #3781's declared "
+                         f"suppression. Output:\n{out}")
+        self.assertIn("declared NO LEGS", out)
+
+
 class TestUnsatisfiableHoldFastFail(unittest.TestCase):
     """[OPUS-5] #3781 ask 2 — the gate can DETECT an unsatisfiable hold, so it must
     say so instead of burning the budget.
