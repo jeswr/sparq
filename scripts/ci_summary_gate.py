@@ -18,9 +18,47 @@
 #     already-terminal check-runs can never starve convergence.
 #   * A verdict renders only when EVERY discovered sibling is terminal, never before
 #     the MIN_POLLS startup floor, and only after SETTLE_POLLS consecutive quiet
-#     polls. Verdict: advisory/informational-named checks (whole-word, case-
-#     insensitive) are EXCLUDED; a gating check passes iff its conclusion is
-#     success/skipped/neutral; an empty stable set passes.
+#     polls. Verdict: only DECLARED-advisory checks (see §ADVISORY MUST BE DECLARED)
+#     are EXCLUDED; a gating check passes iff its conclusion is success/skipped/
+#     neutral; an empty stable set passes.
+#
+# ADVISORY MUST BE DECLARED, NOT INFERRED FROM A NAME (#3773). [OPUS-5] Until
+# 2026-07-25 this gate dropped a whole check-run from the gating set whenever its
+# DISPLAY NAME matched `\b(advisory|informational)\b`. That was a correctness hole in
+# the one check that authorises merges: any job whose name happened to contain those
+# words was neutralised wholesale — no waiver, no registry entry, no record — so
+# `gate: SUCCESS` over-promised. An adversarial audit (#3773) found FOUR genuinely
+# gating checks neutralised that way (the site determinism grep-gate, the #1740
+# browserName tripwire, the gui no-sleep-gate, the axe a11y ratchet), and two of
+# them were documented in-repo as "HARD" gates while gating nothing.
+# THE RULE NOW: a check-run is non-gating ONLY if it is EXPLICITLY DECLARED in
+# `.github/advisory-registry.json` (or is on the tiny platform-managed allow-list
+# below). Anything else GATES, whatever it is called. Consequences, deliberately:
+#   * a name token is DIAGNOSTIC ONLY — `foo (advisory)` with no registry entry
+#     GATES, and the verdict prints a loud UNDECLARED note naming it;
+#   * the registry declaration is BOUND to the job's stable identity
+#     (`workflow file` + `job_id`, enforced by scripts/check-advisory-registry.py
+#     C4), so a RENAME can never flip gating status silently: renaming a declared
+#     job makes it GATE (no entry matches the new name) and simultaneously REDs the
+#     C4 registry check until the declaration is deliberately updated;
+#   * a MISSING or unparseable registry is a LOUD, immediate exit-1 (fail-closed):
+#     the gate refuses to evaluate rather than silently gating everything;
+#   * a registry entry missing any of its five required fields — INCLUDING the
+#     `workflow`/`job_id` identity pair C4 binds to — does NOT declare anything; that
+#     check keeps gating (fail-closed per entry) and the load prints a warning. The
+#     gate and scripts/check-advisory-registry.py require the SAME five fields; when
+#     the gate required only three, a 3-field entry bought a silent exclusion that the
+#     checker reported as "all clear" (#3774 review, gpt-5.6-sol finding 2(a));
+#   * a registry key with NO literal anchor outside its `${{ … }}` expressions is
+#     REFUSED for the same reason: it compiles to `.+` and would neutralise every
+#     check-run on the commit, `gate` included (finding 2(b)).
+# The gate reads the registry from its own checkout, so ci-summary.yml's sparse
+# checkout MUST include `.github/advisory-registry.json` (pinned by a wiring test in
+# scripts/tests/test_ci_summary_gate.py). Trust model is unchanged: on
+# `pull_request` the registry, the workflow files and this script all come from the
+# same merge ref that already decided the job names, so nothing widens — the
+# difference is that an exclusion is now a reviewable diff in one file instead of an
+# invisible consequence of wording.
 #   * Exhausting the loop budget with pending == 0 renders the REAL verdict on the
 #     final all-terminal set (the #997 graceful timeout), never a blind RED.
 #
@@ -60,7 +98,7 @@
 #     / post-draft-gate-artifact set the final render sees — a cancelled-then-
 #     rerun leg or a concurrency race-loser select can never fire it (cancelled
 #     is not failure, and forgiven runs are dropped upstream);
-#   * advisory/informational legs never fire it (the same is_advisory predicate
+#   * DECLARED-advisory legs never fire it (the same is_advisory predicate
 #     render_verdict excludes by);
 #   * a red leg with a same-tier-normalized-name run still IN PROGRESS (a rerun
 #     already underway on the SHA) stands down — the gate keeps waiting on the
@@ -158,12 +196,40 @@ import time
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
 
-ADVISORY_RE = re.compile(r"\b(advisory|informational)\b")
+# [OPUS-5] #3773 — the DECLARED-advisory registry. See §ADVISORY MUST BE DECLARED.
+# Path is relative to the repo checkout the gate runs from (ci-summary.yml sparse-
+# checks out BOTH this script and this file).
+ADVISORY_REGISTRY_PATH = ".github/advisory-registry.json"
+# A registry entry declares nothing unless it carries ALL FIVE — the SAME required
+# set scripts/check-advisory-registry.py C2/C4 enforce. An under-specified entry must
+# not buy an exclusion.
+# [OPUS-5] #3774 review (gpt-5.6-sol, finding 2(a)): this tuple used to hold only the
+# three bookkeeping fields while the checker required five, so a 3-field entry with NO
+# `workflow`/`job_id` neutralised any check-run it named while C4 `continue`d past it
+# and the checker printed `all clear`. The identity pair is what C4 binds a
+# declaration to, so an entry without it is exactly the entry C4 cannot police:
+# requiring it HERE is what makes "an under-specified entry must not buy an exclusion"
+# true of the GATE and not merely of the checker.
+REGISTRY_REQUIRED_FIELDS = (
+    "owner_bead", "promotion_criteria", "registered", "workflow", "job_id",
+)
+# A registry key is the job's `name:` as written in the workflow YAML, so it may embed
+# `${{ matrix.x }}` expressions that only expand at runtime. Each expression matches a
+# non-empty run of characters; every other character is matched LITERALLY, whole-name,
+# case-insensitively. Nothing else is pattern-like: this is an exact declared-identity
+# match, never a substring/word search over the display name.
+_YAML_EXPR_RE = re.compile(r"\$\{\{.*?\}\}")
+# [OPUS-5] #3773 — DIAGNOSTIC ONLY, never a decision input. The old (removed) rule
+# excluded any name matching this; the verdict now prints an UNDECLARED note for a
+# check whose name carries the token but which has NO registry declaration, so the
+# formerly-silent hole is loud. Wiring this back into is_advisory() would restore the
+# defect — scripts/tests/test_ci_summary_gate.py::TestDeclaredAdvisoryRule pins that.
+ADVISORY_NAME_TOKEN_RE = re.compile(r"\b(advisory|informational)\b")
 # [OPUS-5] PLATFORM-MANAGED advisory check-runs — an EXACT, fail-closed allow-list.
-# The advisory NAME-TOKEN rule above only works for check-runs whose name THIS repo
-# controls: we can append "(advisory)" to a job we author. A GitHub-MANAGED job has a
-# name GitHub picks, so it can never carry the token — and it therefore GATES, however
-# non-gating it actually is. Entries here are matched WHOLE and case-insensitively
+# The registry declares jobs THIS repo authors, keyed on the workflow job it belongs
+# to. A GitHub-MANAGED job has no workflow file in this repo at all, so it cannot be
+# declared that way — and it therefore GATES, however non-gating it actually is.
+# Entries here are matched WHOLE and case-insensitively
 # (never as a substring / prefix / wildcard), so an unknown or newly-introduced name
 # still GATES: adding a platform surface is a deliberate, reviewed edit to this set.
 #
@@ -352,9 +418,11 @@ def _workflow_summary_check(run: dict, *, force_pending: bool = False) -> dict:
     """Run-level evidence used when jobs are pending/evaporated or failure is hidden."""
     completed = run.get("status") == "completed" and not force_pending
     return {
-        # Never copy the workflow display name here: a workflow containing the
-        # word "advisory" must not accidentally advisory-exclude its authoritative
-        # run-level FAILURE. Job checks retain the existing name-based policy.
+        # Never copy the workflow display name here: the synthetic name must not
+        # collide with any advisory-registry declaration, so a workflow's
+        # authoritative run-level FAILURE can never be excluded. (Under the pre-#3773
+        # name rule this also stopped a workflow merely CALLED "…advisory…" from
+        # excluding itself; the declared-registry rule makes that structural.)
         "name": f"workflow-run verdict ({workflow_identity(run)})",
         "status": "completed" if completed else (
             "queued" if force_pending else (run.get("status") or "queued")
@@ -799,18 +867,157 @@ def is_platform_managed_advisory(name: str) -> bool:
     return name.strip().lower() in PLATFORM_MANAGED_ADVISORY_NAMES
 
 
-def is_advisory(name: str) -> bool:
-    """Whole-word advisory/informational match (sq-wjth): excludes the standalone
-    words (hyphen-/paren-/comma-delimited too) but NOT substrings — notably
-    "cargo-deny (advisories, ...)" is plural and GATES.
+class AdvisoryRegistryError(RuntimeError):
+    """The declared-advisory registry could not be read (missing/unparseable)."""
 
-    [OPUS-5] ...OR the exact platform-managed allow-list. This stays the SINGLE
-    non-gating classifier so every consumer inherits the same answer — the verdict
-    (render_verdict), fail-fast (failfast_failures) AND the resolver's run-level
-    synthetic check (advisory_only_failure). Splitting them would leave the
-    Dependabot workflow's red run to acquire a synthetic gating verdict and red the
-    gate anyway."""
-    return bool(ADVISORY_RE.search(name.lower())) or is_platform_managed_advisory(name)
+
+def registry_key_has_literal_anchor(declared: str) -> bool:
+    """[OPUS-5] #3774 review (gpt-5.6-sol, finding 2(b)) — does this registry key pin
+    at least one LITERAL, non-whitespace character outside a `${{ … }}` expression?
+
+    Each expression compiles to an unbounded `.+`, so a key that is ONLY an expression
+    — the idiomatic `name: ${{ matrix.label }}` — compiles to `.+`, whole-name-matches
+    EVERY check-run including `gate` itself, and thereby declares the entire run
+    non-gating from a single registry line. C4 cannot catch it either: the key does
+    equal the live YAML `name:`, so the binding looks correct. A key with no literal
+    frame is therefore REFUSED outright rather than compiled: declare each expansion
+    with a literal frame around the expression (as the shipped Tauri key does)."""
+    return any(part.strip() for part in _YAML_EXPR_RE.split(declared or ""))
+
+
+def _compile_declared_name(declared: str) -> re.Pattern:
+    """Compile ONE registry key into a whole-name matcher (see _YAML_EXPR_RE).
+
+    Raises AdvisoryRegistryError for an ANCHORLESS key (see
+    registry_key_has_literal_anchor) — fail-closed: the gate refuses to install a
+    matcher that could neutralise arbitrary check-runs."""
+    if not registry_key_has_literal_anchor(declared):
+        raise AdvisoryRegistryError(
+            f"registry key {declared!r} has no literal anchor outside its "
+            "expression(s) — it would match EVERY check-run name (including `gate`)"
+        )
+    literals = _YAML_EXPR_RE.split(declared.strip())
+    return re.compile(
+        "".join(re.escape(part) for part in literals[:1])
+        + "".join(".+" + re.escape(part) for part in literals[1:]),
+        re.IGNORECASE,
+    )
+
+
+def parse_advisory_registry(payload: object) -> tuple[list[str], list[str]]:
+    """Split a loaded registry document into (declared_keys, warnings).
+
+    An entry declares its key non-gating ONLY when it is a mapping carrying every
+    REGISTRY_REQUIRED_FIELDS value AND its key carries a literal anchor
+    (registry_key_has_literal_anchor); anything else is skipped with a warning so the
+    check keeps GATING (fail-closed per entry) instead of buying a silent exclusion.
+    """
+    if not isinstance(payload, dict):
+        raise AdvisoryRegistryError("registry root is not a JSON object")
+    jobs = payload.get("jobs")
+    if not isinstance(jobs, dict):
+        raise AdvisoryRegistryError("registry has no `jobs` object")
+    declared: list[str] = []
+    warnings: list[str] = []
+    for key, entry in jobs.items():
+        if not isinstance(key, str) or not key.strip():
+            warnings.append("registry entry with an empty key ignored (it declares nothing)")
+            continue
+        if not isinstance(entry, dict):
+            warnings.append(f"registry entry {key!r} is not an object — it declares nothing (still GATES)")
+            continue
+        missing = [f for f in REGISTRY_REQUIRED_FIELDS if not entry.get(f)]
+        if missing:
+            warnings.append(
+                f"registry entry {key!r} is missing {missing} — it declares nothing (still GATES)"
+            )
+            continue
+        if not registry_key_has_literal_anchor(key):
+            warnings.append(
+                f"registry entry {key!r} has no literal anchor outside its "
+                "expression(s) — it would match EVERY check-run name; it declares "
+                "nothing (still GATES)"
+            )
+            continue
+        declared.append(key)
+    return declared, warnings
+
+
+# The installed declared-advisory matchers. EMPTY BY DEFAULT: with no registry loaded
+# NOTHING is advisory, so an un-wired gate fails closed (it can only over-gate, never
+# under-gate). main() loads the real registry and exits 1 loudly if it cannot.
+_DECLARED_ADVISORY: tuple[re.Pattern, ...] = ()
+
+
+def set_declared_advisory(names) -> None:
+    """Install the DECLARED-advisory check-name set (main() + hermetic tests)."""
+    global _DECLARED_ADVISORY
+    _DECLARED_ADVISORY = tuple(_compile_declared_name(n) for n in names)
+
+
+def declared_advisory_names() -> tuple[str, ...]:
+    """The installed declarations, as their compiled source (diagnostics/tests)."""
+    return tuple(m.pattern for m in _DECLARED_ADVISORY)
+
+
+def load_advisory_registry(path: str = ADVISORY_REGISTRY_PATH) -> list[str]:
+    """Read + install the declared-advisory set from the registry file.
+
+    Raises AdvisoryRegistryError when the file is missing or unreadable — main()
+    turns that into an immediate loud exit 1 rather than evaluating a gate whose
+    exclusion set it could not establish.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except FileNotFoundError as exc:
+        raise AdvisoryRegistryError(f"{path} not found in this checkout") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise AdvisoryRegistryError(f"{path} could not be read: {exc}") from exc
+    declared, warnings = parse_advisory_registry(payload)
+    for warning in warnings:
+        print(f"::warning::ci-summary: {warning}")
+    set_declared_advisory(declared)
+    return declared
+
+
+def is_declared_advisory(name: str) -> bool:
+    """[OPUS-5] #3773 — is this check-run EXPLICITLY DECLARED non-gating?
+
+    Matched WHOLE-NAME against the installed `.github/advisory-registry.json` keys
+    (case-insensitive; `${{ … }}` in a key matches its runtime expansion). No
+    substring reach, no word search: an undeclared check GATES no matter what it is
+    called, and a declared job that gets RENAMED stops matching — i.e. it GATES,
+    fail-closed, while C4 in scripts/check-advisory-registry.py REDs on the drift."""
+    candidate = (name or "").strip()
+    return any(m.fullmatch(candidate) for m in _DECLARED_ADVISORY)
+
+
+def is_advisory(name: str) -> bool:
+    """[OPUS-5] #3773 — the SINGLE non-gating classifier: DECLARED in the advisory
+    registry, or on the exact platform-managed allow-list. NOT a name rule — the
+    display-name regex this used to consult was the #3773 correctness hole.
+
+    Every consumer inherits the same answer — the verdict (render_verdict),
+    fail-fast (failfast_failures) AND the resolver's run-level synthetic check
+    (advisory_only_failure). Splitting them would leave the Dependabot workflow's red
+    run to acquire a synthetic gating verdict and red the gate anyway."""
+    return is_declared_advisory(name) or is_platform_managed_advisory(name)
+
+
+def undeclared_token_names(runs: list[dict]) -> list[str]:
+    """[OPUS-5] #3773 DIAGNOSTIC: check-runs whose NAME carries an advisory/
+    informational token but which are NOT declared — i.e. exactly the checks the old
+    name rule neutralised silently and that now GATE. Reported by render_verdict so
+    the transition is visible in every gate summary; never a decision input."""
+    return sorted(
+        {
+            r.get("name", "")
+            for r in runs
+            if ADVISORY_NAME_TOKEN_RE.search((r.get("name", "") or "").lower())
+            and not is_advisory(r.get("name", ""))
+        }
+    )
 
 
 def is_select(name: str) -> bool:
@@ -1184,6 +1391,16 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
         return 0
     gating = [r for r in runs if not is_advisory(r.get("name", ""))]
     excluded = total - len(gating)
+    # [OPUS-5] #3773: make the formerly-silent exclusion loud in BOTH directions —
+    # every check that carries an advisory name token but is NOT declared is listed
+    # here and IS in `gating` above. (Diagnostic only; see undeclared_token_names.)
+    for undeclared in undeclared_token_names(runs):
+        _emit(
+            f"note: `{undeclared}` carries an advisory/informational NAME token but has no "
+            f"declaration in {ADVISORY_REGISTRY_PATH} — it GATES (#3773). Declare it there "
+            f"(with an owner_bead + promotion_criteria) or drop the misleading token.",
+            summary_path,
+        )
     # Selection pre-job health — searched over ALL runs (not just gating) so a
     # hypothetical advisory-renamed select could still never green-light a skip.
     # NB superseded-cancelled select INSTANCES are already dropped upstream by
@@ -1218,7 +1435,9 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
     if failed:
         _emit(
             f"### ci-summary: FAILED — {len(failed)} non-passing gating check(s) of "
-            f"{len(gating)} gating ({excluded} advisory check(s) excluded)",
+            f"{len(gating)} gating ({excluded} advisory check(s) excluded — each "
+            f"DECLARED in {ADVISORY_REGISTRY_PATH} or on the platform-managed "
+            f"allow-list)",
             summary_path,
         )
         for r in failed:
@@ -1228,8 +1447,13 @@ def render_verdict(runs: list[dict], summary_path: str = "", tier_ctx: TierConte
     if _draft_recheck(tier_ctx, summary_path) != 0:
         return 1
     _emit(
+        # [OPUS-5] #3774 review: the excluded set is DECLARED-in-the-registry OR on the
+        # exact platform-managed allow-list (PLATFORM_MANAGED_ADVISORY_NAMES) — saying
+        # "each DECLARED in the registry" understated the second, smaller source.
         f"### ci-summary: PASSED — all {len(gating)} gating check(s) green (or skipped/neutral); "
-        f"{excluded} advisory check(s) excluded; set stable."
+        f"{excluded} advisory check(s) excluded (each DECLARED in "
+        f"{ADVISORY_REGISTRY_PATH}, or on the exact platform-managed allow-list); "
+        f"set stable."
         + (
             " DRAFT-TIER verdict (reduced leg set; PR draft state re-confirmed). This "
             f"check-run is `{DRAFT_TIER_GATE_NAME}`, never the required `{GATE_CHECK_NAME}` "
@@ -1796,6 +2020,25 @@ def main() -> int:
     if not repo or not sha or not self_run_id:
         print("::error::ci-summary: REPO, SHA and SELF_RUN_ID must all be set.")
         return 1
+    # [OPUS-5] #3773 — establish the DECLARED-advisory set BEFORE polling, and fail
+    # LOUD + FAST if it cannot be read. Evaluating a merge-authorising gate without
+    # knowing which checks were deliberately declared non-gating is exactly the
+    # over-promise this issue is about, so an unreadable registry is exit 1 in
+    # seconds, never a 37-minute wait or a silent "everything gates".
+    registry_path = os.environ.get("ADVISORY_REGISTRY", ADVISORY_REGISTRY_PATH)
+    try:
+        declared = load_advisory_registry(registry_path)
+    except AdvisoryRegistryError as exc:
+        print(
+            f"::error::ci-summary: the advisory registry is unreadable ({exc}). The gate "
+            f"cannot decide which checks are DECLARED non-gating, so it fails closed. "
+            f"Ensure ci-summary.yml's sparse-checkout includes {ADVISORY_REGISTRY_PATH}."
+        )
+        return 1
+    print(
+        f"ci-summary: {len(declared)} declared-advisory job name(s) loaded from "
+        f"{registry_path}; every other check GATES (#3773)."
+    )
     # [FABLE-5] Draft-tier CI: the tier THIS run evaluates is decided by its own
     # trigger payload — a pull_request event with draft == true is a DRAFT-tier
     # gate (ci-summary.yml exports the payload's draft flag + PR number). Every
