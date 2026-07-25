@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import re
 import shutil
 import subprocess
 import sys
@@ -746,6 +747,215 @@ class TestSparseCheckoutManifest(unittest.TestCase):
                                 "the manifest omits — check out the directory instead"
                             )
         self.assertEqual([], offenders, "\n".join(offenders))
+
+
+# --------------------------------------------------------------------------------------
+# [OPUS-5] #3776 SECOND HALF — AN EVENT-TRIGGERED RUN JUDGES THE PR THAT TRIGGERED IT.
+#
+# `AutoArmer.run()` swept EVERY open review:pass PR in BOTH modes. #3766 then made the exit
+# status STICKY over collected failures — correct for the cron sweep, catastrophic combined
+# with whole-repo scope on a GATING check: ONE permanently un-armable PR reds
+# `arm reviewed PRs` on every OTHER PR's label event.
+#
+# MEASURED blast radius (run 30144214363, 2026-07-25T04:33Z): sparq had exactly two
+# review:pass PRs and the sweep reported `considered=2 armed=0 arm-failures=1` — #3434
+# cannot be armed at all until the `workflows: write` question (#3777) is decided, so the
+# gating arm check was poisoned for the whole repository by one PR.
+#
+# The fix is SCOPE, not leniency. Two halves are pinned below, and the DISCRIMINATION
+# between them is the test:
+#   * an UNRELATED PR's un-armability must be invisible to an event-mode run, and
+#   * the TRIGGERING PR's own arm failure must still be a hard non-zero exit that no later
+#     transient can discard (#3766's precedence, unchanged, within the narrower scope).
+# Plus the two ways this could silently become a no-op: sweep mode must still cover the
+# whole repository, and the WORKFLOW must actually plumb the triggering PR number through
+# to the script (a production call site — the class a unit test on candidates() misses).
+UNARMABLE = 3434  # modifies a workflow file; no `workflows: write` on the arm token
+ARMABLE = 2521
+
+
+def arm_run(module: ModuleType, *, scope_pr: int | None, mode: str, failing=UNARMABLE):
+    """Replay the live shape: two review:pass PRs, one of them permanently un-armable."""
+    fake = module.FakeGh(
+        [module.fixture(number=ARMABLE), module.fixture(number=UNARMABLE)],
+        mutation_errors={failing: module.WORKFLOWS_DENIAL} if failing else None,
+    )
+    lines: list[str] = []
+    armer = module.AutoArmer(
+        "sparq-org/sparq", "main", fake, lines.append, scope_pr=scope_pr
+    )
+    try:
+        return fake, lines, module.run_sweep(armer, log=lines.append, mode=mode)
+    except module.GhError as error:  # event-mode transient exhaustion raises
+        return fake, lines, error
+
+
+class TestEventModeIsPerPr(unittest.TestCase):
+    """An event-triggered run must be accountable for the triggering PR and no other."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.auto = load_module(AUTO_ARM_PY, "auto_arm_under_test")
+
+    def test_an_unarmable_unrelated_pr_does_not_fail_an_event_run(self) -> None:
+        fake, lines, code = arm_run(self.auto, scope_pr=ARMABLE, mode="event")
+        self.assertEqual(
+            0,
+            code,
+            f"an event run for PR #{ARMABLE} must not fail because a DIFFERENT PR "
+            f"(#{UNARMABLE}) cannot be armed — that is what poisoned the gating check "
+            f"for the whole repo (#3776)\n" + "\n".join(lines),
+        )
+        self.assertTrue(any(f"PR #{ARMABLE}: armed head" in l for l in lines), lines)
+        # Not merely excused — never even READ, so nothing about it can reach this outcome.
+        self.assertEqual(
+            [], [l for l in lines if str(UNARMABLE) in l], "the bystander must be untouched"
+        )
+        self.assertEqual(
+            [], [c for c in fake.calls if str(UNARMABLE) in " ".join(c)], fake.calls
+        )
+
+    def test_the_triggering_prs_own_failure_is_still_fatal(self) -> None:
+        # THE DISCRIMINATION. Narrowing WHICH PRs a run answers for must not weaken
+        # accountability for the one it does: this is the half that keeps the check honest.
+        fake, lines, code = arm_run(self.auto, scope_pr=UNARMABLE, mode="event")
+        self.assertEqual(
+            1,
+            code,
+            "the TRIGGERING PR's own arm failure must still red the run\n"
+            + "\n".join(lines),
+        )
+        self.assertTrue(any(f"PR #{UNARMABLE}: arm-failed" in l for l in lines), lines)
+        self.assertEqual(
+            [], [l for l in lines if l.startswith("::warning")], "no lenient warning"
+        )
+
+    def test_a_later_transient_cannot_discard_the_triggering_prs_failure(self) -> None:
+        # #3766's sticky precedence, INSIDE the narrower scope: the arm fails, then that
+        # same PR's race diagnostic exhausts its bounded retries. Exit 1 must stand.
+        module = self.auto
+        fake = module.FakeGh(
+            [module.fixture(number=UNARMABLE)],
+            mutation_errors={UNARMABLE: module.WORKFLOWS_DENIAL},
+        )
+        views: list[list[str]] = []
+
+        def diagnostic_exhausts(argv: list[str]) -> str:
+            if argv[:2] == ["pr", "view"] and argv[2] == str(UNARMABLE):
+                views.append(argv)
+                if len(views) >= 3:  # candidates(), pre-arm refresh, then the diagnostic
+                    raise module.gh_retry.GhTransientExhausted("HTTP 504 (3 attempts)")
+            return fake(argv)
+
+        lines: list[str] = []
+        code = module.run_sweep(
+            module.AutoArmer(
+                "sparq-org/sparq",
+                "main",
+                fake,
+                lines.append,
+                gh_read=diagnostic_exhausts,
+                scope_pr=UNARMABLE,
+            ),
+            log=lines.append,
+            mode="event",
+        )
+        self.assertEqual(1, code, "\n".join(lines))
+        self.assertEqual([], [l for l in lines if l.startswith("::warning")], lines)
+        self.assertTrue(
+            any("race diagnostic could not resolve" in l for l in lines), lines
+        )
+
+    def test_sweep_mode_still_covers_the_whole_repo(self) -> None:
+        # Without this, the scoping fix could silently become "event mode does nothing and
+        # nothing else covers the repository".
+        _fake, lines, code = arm_run(
+            self.auto, scope_pr=None, mode="sweep", failing=None
+        )
+        self.assertEqual(0, code, "\n".join(lines))
+        self.assertEqual(
+            2,
+            sum("armed head" in l for l in lines),
+            "the periodic sweep must still consider EVERY open review:pass PR\n"
+            + "\n".join(lines),
+        )
+        self.assertTrue(
+            any("considered=2" in l and "scope=all" in l for l in lines), lines
+        )
+        # ...and it stays ACCOUNTABLE for all of them: one failure still reds the sweep.
+        _fake, lines, code = arm_run(self.auto, scope_pr=None, mode="sweep")
+        self.assertEqual(1, code, "\n".join(lines))
+        self.assertTrue(any(f"PR #{ARMABLE}: armed head" in l for l in lines), lines)
+        self.assertTrue(any(f"PR #{UNARMABLE}: arm-failed" in l for l in lines), lines)
+
+    def test_the_workflow_passes_the_triggering_pr_number_to_the_arm_step(self) -> None:
+        """THE CALL SITE. Scoping the script is worthless if nothing supplies the number."""
+        steps = steps_of(load(AUTO_ARM_YML))
+        arm = [
+            step
+            for step in steps
+            if "scripts/auto-arm.py" in run_of(step)
+            and PROBE_FLAG not in run_of(step)
+            and "--self-test" not in run_of(step)
+        ]
+        self.assertEqual(1, len(arm), "auto-arm.yml must have exactly one arming step")
+        run, env = run_of(arm[0]), (arm[0].get("env") or {})
+        match = re.search(r'--pr\s+"\$\{?([A-Z_]+)\}?"', run)
+        self.assertIsNotNone(
+            match,
+            "the arming step must pass --pr \"$VAR\" — without it an event-mode run "
+            "cannot know which PR it is accountable for (#3776)\n" + run,
+        )
+        variable = match.group(1)
+        self.assertIn(variable, env, f"{variable} must be set in the step env")
+        self.assertEqual(
+            "${{ github.event.pull_request.number }}",
+            str(env[variable]).strip(),
+            f"{variable} must be EXACTLY the triggering PR's number: any fallback value "
+            "would scope the periodic sweep too, and the sweep is the whole-repo backstop",
+        )
+        # The mode axis must survive alongside it — scope answers 'whose failure is this
+        # run's business', mode answers 'how loud is a missed cycle' (#3759 finding 5).
+        mode_match = re.search(r'--mode\s+"\$\{?([A-Z_]+)\}?"', run)
+        self.assertIsNotNone(mode_match, run)
+        self.assertIn("event", str(env[mode_match.group(1)]))
+        self.assertIn("sweep", str(env[mode_match.group(1)]))
+
+    def test_the_script_alone_can_scope_a_stale_ref(self) -> None:
+        """The half that heals ALREADY-FROZEN PR refs.
+
+        `ARM_PR` above is snapshotted per PR ref exactly like the sparse-checkout manifest
+        that caused #3776, so a stale ref cannot pass it. The script always comes from the
+        default branch, so it must be able to derive the number from the RUNNER's
+        environment on its own — otherwise this fix would only reach rebased PRs.
+        """
+        resolve = self.auto.resolve_scope_pr
+        self.assertEqual(ARMABLE, resolve("", {"GITHUB_REF": f"refs/pull/{ARMABLE}/merge"}))
+        self.assertIsNone(resolve("", {"GITHUB_REF": "refs/heads/main"}))
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = Path(tmp) / "event.json"
+            payload.write_text('{"pull_request": {"number": 909}}', encoding="utf-8")
+            self.assertEqual(
+                909,
+                resolve("", {"GITHUB_EVENT_PATH": str(payload)}),
+                "the event payload is the most specific environment source",
+            )
+        # An explicit --pr always wins, and a typo is loud rather than a whole-repo sweep.
+        self.assertEqual(42, resolve("42", {"GITHUB_REF": f"refs/pull/{ARMABLE}/merge"}))
+        with self.assertRaises(ValueError):
+            resolve("not-a-number", {})
+
+    def test_the_scoping_seam_is_documented_in_source(self) -> None:
+        source = AUTO_ARM_PY.read_text(encoding="utf-8")
+        for needle in (
+            "scope_pr",
+            "def candidates",
+            "def resolve_scope_pr",
+            # The distinction the maintainer asked to keep visible in the code: scoping is
+            # a CORRECTNESS fix; de-gating `arm reviewed PRs` is a POLICY decision (#3777).
+            "policy decision about what may block a merge",
+        ):
+            self.assertIn(needle, source, f"auto-arm.py must keep {needle!r}")
 
 
 if __name__ == "__main__":

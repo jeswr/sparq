@@ -88,8 +88,20 @@ jobs:
           # exit non-zero (visibly red + retried), NOT the sweep's lenient ::warning+0.
           # The scheduled/dispatch runs are SWEEP mode (a missed cycle is cron-covered).
           ARM_MODE: ${{ github.event_name == 'pull_request' && 'event' || 'sweep' }}
+          # [OPUS-5] #3776: WHICH PR this run answers for. Empty on schedule/dispatch (=>
+          # whole-repo sweep, the backstop); the triggering PR's number on a label event,
+          # so one permanently un-armable PR can no longer red this GATING check on every
+          # OTHER PR's label event. Pinned by
+          # scripts/tests/test_arm_capability_wiring.py::TestEventModeIsPerPr.
+          # NOTE: this expression is the FORWARD-LOOKING half only. Like the
+          # sparse-checkout manifest above, it is snapshotted per PR ref, so already-stale
+          # refs never pass it — which is why scripts/auto-arm.py ALSO derives the number
+          # from the runner environment (GITHUB_EVENT_PATH / GITHUB_REF). That script comes
+          # from the default branch, so it is the only half that can heal a frozen ref.
+          ARM_PR: ${{ github.event.pull_request.number }}
         run: >-
           python3 scripts/auto-arm.py
           --repo "$REPO"
           --default-branch "$DEFAULT_BRANCH"
           --mode "$ARM_MODE"
+          --pr "$ARM_PR"
