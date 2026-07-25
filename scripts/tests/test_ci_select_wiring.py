@@ -168,6 +168,24 @@ def _truthy(value) -> bool:
     return True
 
 
+def _gh_fold(value):
+    """GitHub Actions compares strings CASE-INSENSITIVELY. Non-strings pass through."""
+    return value.casefold() if isinstance(value, str) else value
+
+
+def _gh_eq(left, right):
+    """`==` with GitHub's semantics, not Python's.
+
+    [OPUS-5] #3791 review r3 finding 5: this evaluator used Python `==` and `in`, which are
+    case-SENSITIVE, while GitHub Actions string comparison and `contains()` are case-
+    INSENSITIVE. That made the evaluator disagree with the live workflow in the one direction
+    that matters here — adding `REVIEW:NEEDS` to a root allowlist left every wiring test GREEN
+    while GitHub would treat it as matching the real `review:needs` label and run the guarded
+    jobs. A test oracle that is stricter than the system it models reports a false green.
+    """
+    return _gh_fold(left) == _gh_fold(right)
+
+
 class _GhExpr:
     """Recursive-descent evaluator for the supported grammar (precedence:
     ! > == > && > ||, matching GitHub's documented order)."""
@@ -211,7 +229,7 @@ class _GhExpr:
         for op in ("==", "!="):
             if self._eat(op):
                 right = self._unary()
-                eq = left == right
+                eq = _gh_eq(left, right)
                 return eq if op == "==" else not eq
         return left
 
@@ -267,8 +285,8 @@ class _GhExpr:
         if fn == "contains":
             haystack, needle = args
             if isinstance(haystack, list):
-                return needle in haystack
-            return str(needle) in str(haystack or "")
+                return any(_gh_eq(item, needle) for item in haystack)
+            return _gh_fold(str(needle)) in _gh_fold(str(haystack or ""))
         raise GhExprError(f"unsupported function {fn}()")
 
     def _lookup(self, path):
@@ -1821,6 +1839,72 @@ class TestLabelFlipTriggerClass(unittest.TestCase):
                         f"(for vectorized-feature-off that is the wasm feature-OFF "
                         f"byte-equality proof silently not running at all)",
                     )
+
+    def test_no_review_label_may_appear_in_any_escape_hatch_allowlist(self):
+        """(#3791 review r3 finding 6) The escape-hatch test below derives its allowlist FROM
+        the live `if:` conditions and then asserts those labels work — so a `review:*` label
+        added to an allowlist would bless itself, and the only thing standing against it was a
+        SAMPLE of four flips in REVIEW_FLIPS. That is an existential check standing in for a
+        universal obligation.
+
+        MEASURED, and it changes the claim: this assertion is currently REDUNDANT. Injecting an
+        UNSAMPLED `review:changes` into a live allowlist is already caught by
+        `test_every_escape_hatch_label_still_triggers_its_lane`, which fails when an allow-listed
+        label turns out not to trigger its lane. Dropping this assertion leaves that one RED, so
+        finding 6's "sampling cannot catch a fifth label" concern is in fact covered — by a test
+        whose failure message is about escape hatches, not about review flips.
+
+        Kept anyway, as a NAMED statement of the invariant rather than for coverage: it fails
+        with a message about the actual security property, and it survives if the escape-hatch
+        test is ever narrowed or removed. Recorded honestly because a test that silently adds no
+        coverage while appearing to is the exact shape this suite keeps being burned by.
+
+        Case matters: GitHub compares label names case-insensitively, so `REVIEW:NEEDS` in an
+        allowlist is live-equivalent to `review:needs`. This assertion casefolds for the same
+        reason `_gh_eq` does."""
+        offenders = {}
+        for wf_name, wf in sorted(self.wfs.items()):
+            allowed: set[str] = set()
+            for cond in self._guarded_jobs(wf).values():
+                allowed |= set(re.findall(r"github\.event\.label\.name == '([^']+)'", cond))
+                for group in re.findall(
+                    r"contains\(fromJSON\('(\[[^']*\])'\), github\.event\.label\.name\)",
+                    cond,
+                ):
+                    allowed |= set(json.loads(group))
+            bad = sorted(l for l in allowed if l.casefold().startswith("review:"))
+            if bad:
+                offenders[wf_name] = bad
+        self.assertEqual(
+            offenders, {},
+            "a review:* label is allow-listed by a label-trigger guard, so the review "
+            "pipeline's own flip would re-trigger that heavy lane — which is the exact churn "
+            "these guards exist to stop. Sampling four flips in REVIEW_FLIPS cannot catch a "
+            "fifth; this is the universal form",
+        )
+
+    def test_the_expression_evaluator_matches_GitHubs_case_semantics(self):
+        """(#3791 review r3 finding 5) The oracle must not be STRICTER than the system it
+        models. `_GhExpr` used Python `==` and `in`, which are case-sensitive; GitHub Actions
+        string comparison and `contains()` are case-insensitive. Under the old evaluator,
+        `REVIEW:NEEDS` in an allowlist evaluated as NOT matching the live `review:needs` label,
+        so every wiring test stayed green while GitHub would have run the guarded jobs.
+
+        A test oracle that disagrees with production in the permissive direction reports a
+        false green, so the mismatch is pinned here directly."""
+        for expr, want in (
+            ("'REVIEW:NEEDS' == 'review:needs'", True),
+            ("'review:needs' == 'Review:Needs'", True),
+            ("'review:needs' == 'review:pass'", False),
+            ("'REVIEW:NEEDS' != 'review:needs'", False),
+            ("contains('a,review:needs,b', 'REVIEW:NEEDS')", True),
+            ("contains(fromJSON('[\"review:needs\"]'), 'REVIEW:NEEDS')", True),
+            ("contains(fromJSON('[\"ci-full\"]'), 'review:needs')", False),
+        ):
+            with self.subTest(expr=expr):
+                self.assertEqual(
+                    _GhExpr(expr, {}).parse(), want,
+                    f"{expr!r} must evaluate as GitHub Actions would, not as Python does")
 
     def test_every_escape_hatch_label_still_triggers_its_lane(self):
         """(d) The opt-in labels are the reason these lanes take label events at all.
