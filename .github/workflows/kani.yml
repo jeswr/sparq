@@ -264,6 +264,19 @@ jobs:
             features: ""
             harnesses: >-
               domain_corpus_exhibits_a_surviving_escalation
+    # [OPUS-5] PINNED-TOOLCHAIN ESCAPE — REQUIRED here, not belt-and-braces. The repo root
+    # carries a `rust-toolchain.toml` pinning STABLE, and rustup resolves that file
+    # (precedence 4) ABOVE the `rustup default <toolchain>` that `dtolnay/rust-toolchain`
+    # performs (precedence 5). Unlike the miri/asan/fuzz lanes, NOTHING in this job uses
+    # `cargo +<toolchain>`: `cargo install --locked kani-verifier`, `cargo kani setup` and
+    # every `cargo kani --harness` invocation are plain cargo calls, so without this env
+    # var they would all silently move from the declared nightly onto pinned stable —
+    # changing which compiler builds the driver and which host toolchain Kani's codegen
+    # sits on. `RUSTUP_TOOLCHAIN` is precedence 2 and beats the file, preserving exactly
+    # the toolchain this lane resolved to before the pin existed. Keep in sync with the
+    # `toolchain:` input below.
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-06-11
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # Kani pins its own internal toolchain via `cargo kani setup`, but it still needs a host

@@ -1269,6 +1269,20 @@ jobs:
       # ld is fine here: this lane is `cargo check` (only build scripts and
       # proc-macros link) and its meaning is the VERSION floor, not link speed.
       CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ""
+      # [OPUS-5] KEEPS THIS GATE NON-VACUOUS UNDER THE ROOT `rust-toolchain.toml`
+      # PIN. rustup resolves the toolchain file (precedence 4) ABOVE `rustup
+      # default` (precedence 5), so the `rustup default 1.88` below — which was
+      # the whole fix for the vacuity described in the step comment — would be
+      # SILENTLY OVERRIDDEN by the root pin and this lane would go back to
+      # compiling on pinned stable, i.e. vacuous again in exactly the way PR
+      # #3511 finding 4 called out. `RUSTUP_TOOLCHAIN` is precedence 2, so it
+      # beats the file; setting it at JOB level (rather than `cargo +1.88` at
+      # one call site) makes every cargo/rustc in the job — including anything
+      # nested — use the floor, and makes `rustup show active-toolchain` print
+      # "overridden by environment variable RUSTUP_TOOLCHAIN" so the log states
+      # which compiler actually ran. Keep this == the pin below == root
+      # Cargo.toml `rust-version`.
+      RUSTUP_TOOLCHAIN: "1.88"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - name: Rust (pinned MSRV toolchain 1.88)
@@ -2836,6 +2850,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: llvm-tools-preview
+      # [OPUS-5] REQUIRED once the root `rust-toolchain.toml` pin exists. The action
+      # above installs `llvm-tools-preview` onto the toolchain IT manages (`stable`)
+      # and then calls `rustup default` — precedence 5, which the toolchain file
+      # (precedence 4) outranks. So cargo here resolves to the PINNED toolchain, on
+      # which the component would be absent, and `cargo llvm-cov` fails with the
+      # llvm-tools missing rather than measuring anything. This adds the component to
+      # the ACTIVE (pinned) toolchain. Idempotent, and a no-op if it is already there.
+      - name: Ensure llvm-tools-preview on the pinned toolchain
+        run: rustup component add llvm-tools-preview
       # Per-shard cache key: each shard builds a DIFFERENT crate subset (different
       # instrumented objects), so keying the cache by shard keeps them from clobbering /
       # thrashing one another's saved target dir.
@@ -2985,6 +3008,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: llvm-tools-preview
+      # [OPUS-5] REQUIRED once the root `rust-toolchain.toml` pin exists. The action
+      # above installs `llvm-tools-preview` onto the toolchain IT manages (`stable`)
+      # and then calls `rustup default` — precedence 5, which the toolchain file
+      # (precedence 4) outranks. So cargo here resolves to the PINNED toolchain, on
+      # which the component would be absent, and `cargo llvm-cov` fails with the
+      # llvm-tools missing rather than measuring anything. This adds the component to
+      # the ACTIVE (pinned) toolchain. Idempotent, and a no-op if it is already there.
+      - name: Ensure llvm-tools-preview on the pinned toolchain
+        run: rustup component add llvm-tools-preview
       # Per-partition dep cache: each partition compiles the same instrumented engine, so a
       # shared-key cache warms the deps; keying by part avoids save-race clobbering.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -3036,6 +3068,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: llvm-tools-preview
+      # [OPUS-5] REQUIRED once the root `rust-toolchain.toml` pin exists. The action
+      # above installs `llvm-tools-preview` onto the toolchain IT manages (`stable`)
+      # and then calls `rustup default` — precedence 5, which the toolchain file
+      # (precedence 4) outranks. So cargo here resolves to the PINNED toolchain, on
+      # which the component would be absent, and `cargo llvm-cov` fails with the
+      # llvm-tools missing rather than measuring anything. This adds the component to
+      # the ACTIVE (pinned) toolchain. Idempotent, and a no-op if it is already there.
+      - name: Ensure llvm-tools-preview on the pinned toolchain
+        run: rustup component add llvm-tools-preview
       # Reuse a run partition's dep cache to warm the merge job's object compile.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
@@ -3246,6 +3287,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: llvm-tools-preview
+      # [OPUS-5] REQUIRED once the root `rust-toolchain.toml` pin exists. The action
+      # above installs `llvm-tools-preview` onto the toolchain IT manages (`stable`)
+      # and then calls `rustup default` — precedence 5, which the toolchain file
+      # (precedence 4) outranks. So cargo here resolves to the PINNED toolchain, on
+      # which the component would be absent, and `cargo llvm-cov` fails with the
+      # llvm-tools missing rather than measuring anything. This adds the component to
+      # the ACTIVE (pinned) toolchain. Idempotent, and a no-op if it is already there.
+      - name: Ensure llvm-tools-preview on the pinned toolchain
+        run: rustup component add llvm-tools-preview
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - name: Install cargo-llvm-cov
         # [OPUS-4.8] sq-tool-pin: explicit `with: tool:` is MANDATORY when SHA-pinning

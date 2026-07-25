@@ -192,6 +192,19 @@ jobs:
     # Generous ceiling above the worst case (nightly: 4 targets × 600s + build) so a
     # hung target fails with a clear timeout rather than running away.
     timeout-minutes: 60
+    # [OPUS-5] PINNED-TOOLCHAIN ESCAPE. The repo root carries a `rust-toolchain.toml`
+    # pinning STABLE, and rustup resolves that file (precedence 4) ABOVE the `rustup
+    # default <toolchain>` that `dtolnay/rust-toolchain` performs (precedence 5). The
+    # `cargo +nightly-2026-06-11 fuzz …` calls below are precedence 1 and were already
+    # immune; this env var (precedence 2) restores the pre-pin behaviour for the rest of
+    # the job. It matters most for `cargo fuzz`, which re-invokes cargo itself for the
+    # `fuzz/` sub-workspace: that nested invocation would otherwise resolve the ROOT pin
+    # (rustup searches upward from the cwd) and lose the nightly the lane declares. Note
+    # this env is scoped to THIS job only — the `differential-smoke` job below is a
+    # deliberate stable lane and correctly inherits the pin. Keep in sync with the
+    # `toolchain:` input below.
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-06-11
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       # [OPUS-4.8] sq-czlh: reclaim ~20-30 GB of pre-installed SDKs/toolchains BEFORE the
