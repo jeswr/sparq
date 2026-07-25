@@ -1,0 +1,111 @@
+# [GPT-5.6] Issue #3675 — restore auto-merge arms GitHub drops after merge-group churn.
+#
+# NOT A GATE. This runs only on schedule / workflow_dispatch, never on a PR head. The
+# review:pass label is the pipeline's attested verdict and remains mandatory; CI state
+# alone can never make this workflow arm a PR. A null autoMergeRequest is insufficient:
+# queued PRs expose a live mergeQueueEntry while autoMergeRequest is null and are skipped.
+name: re-arm sweeper
+
+on:
+  schedule:
+    # Offset from auto-arm's ten-minute cron so both policies do not start together.
+    - cron: "8,18,28,38,48,58 * * * *"
+  workflow_dispatch:
+
+# [OPUS-5] #3760 — `contents: write` IS THE FIX, and it is load-bearing.
+#
+# Enabling auto-merge is a repository WRITE operation. With `contents: read` this job's
+# token is denied with
+#     GraphQL: Resource not accessible by integration (enablePullRequestAutoMerge)
+# which is exactly what run 30033315483 (2026-07-23T18:21Z) hit on PR #3454 — OPEN,
+# non-draft, CLEAN, review:pass. auto-arm.yml armed two PRs 90 minutes earlier
+# (run 30027010495, 16:52Z) on the SAME repository with the SAME plain GITHUB_TOKEN; its
+# only difference was `contents: write`. This is NOT a maintainer-only setting:
+# `allow_auto_merge` is already true and the `main` ruleset carries no integration
+# restriction. Do not downgrade this back to `contents: read` — the wiring pin in
+# scripts/tests/test_arm_capability_wiring.py reds if anyone does.
+#
+# The App token is still PREFERRED when configured (same identity batch-merge.yml uses,
+# so a merge it triggers is attributed to the App rather than github-actions[bot]); the
+# workflow token is the fallback and, with write, is sufficient to arm.
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: re-arm-sweeper
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: restore dropped merge-queue arms
+    runs-on: ubuntu-latest
+    # 10 (was 5): headroom for the #3759 bounded transient-retry backoff (up to
+    # 10s+30s per idempotent READ during a platform blip) without hitting the
+    # job ceiling; the sweep itself is unchanged.
+    timeout-minutes: 10
+    env:
+      # Secrets are not readable from step `if:` expressions — mirror the id into env
+      # so the mint step can be skipped fail-soft when the App is not configured.
+      ORCHESTRATOR_APP_ID: ${{ secrets.ORCHESTRATOR_APP_ID }}
+    steps:
+      - name: Mint the sparq-orchestrator App token (arms must fire merge events)
+        id: app-token
+        if: env.ORCHESTRATOR_APP_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.ORCHESTRATOR_APP_ID }}
+          private-key: ${{ secrets.ORCHESTRATOR_APP_PRIVATE_KEY }}
+
+      # Always execute the trusted default-branch policy, including on manual dispatch.
+      - name: Checkout re-arm policy
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+          # [OPUS-5] #3776 — CHECK OUT THE WHOLE DIRECTORY, never a file-by-file manifest.
+          # A file-by-file list has to be updated by hand every time a script gains a
+          # sibling import; forgetting once is what bricked the GATING arm check on every
+          # stale PR ref (#3776 — see auto-arm.yml for the full account). This sweep runs
+          # only on schedule/dispatch so its workflow file and its `ref:` are always the
+          # same commit, but the enumeration is the same latent trap; a directory pattern
+          # cannot go stale. Cone mode (the actions/checkout default) is what makes
+          # `scripts` recursive — do NOT reintroduce `sparse-checkout-cone-mode: false`.
+          # Pinned by scripts/tests/test_arm_capability_wiring.py.
+          sparse-checkout: scripts
+
+      - name: Self-test policy
+        run: |
+          python3 scripts/gh_retry.py --self-test
+          python3 scripts/rearm-sweeper.py --self-test
+
+      # [OPUS-5] #3760 — FAIL LOUD ONCE, AT THE START. Before this step existed, a token
+      # that could not arm produced one per-PR SKIP line every ten minutes and nothing
+      # else; the arm gap was only noticed by hand. This probe reds the job in seconds
+      # with a single ::error naming the exact permission/setting/secret to change. It
+      # MUST consume the same GH_TOKEN expression as the sweep step below, or it would
+      # attest a token the sweep does not use (pinned by the wiring test).
+      - name: Probe arm capability (one loud error, never per-PR)
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: >-
+          python3 scripts/rearm-sweeper.py
+          --repo "$REPO"
+          --default-branch "$DEFAULT_BRANCH"
+          --probe-arm-capability
+
+      # A per-PR arm failure no longer aborts the sweep: failures are collected, every
+      # remaining candidate is still considered, the run summarises them, and it exits
+      # non-zero so a failed arm can never read as a green run.
+      - name: Re-arm dropped reviewed PRs
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: >-
+          python3 scripts/rearm-sweeper.py
+          --repo "$REPO"
+          --default-branch "$DEFAULT_BRANCH"
+          --max-rearms 10

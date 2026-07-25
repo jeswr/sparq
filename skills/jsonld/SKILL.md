@@ -1,6 +1,6 @@
 ---
 name: jsonld
-description: Parse, expand, flatten, compact, and frame W3C JSON-LD 1.1 with sparq — the native, dependency-free document-level pipeline in the `sparq-jsonld` crate (expand/flatten/compact/frame/fromRdf over a JSON AST, deny-by-default document loader) and how each surface exposes it (native CLI `dump … jsonld[-compact] --context/--frame`, the HTTP server's `application/ld+json` content-negotiation, the wasm `serializeCompact`, the engine's RDF-first writer matrix). Use when converting JSON-LD document forms, choosing a surface, or reasoning about the honest conformance / remote-loading posture.
+description: Parse, expand, flatten, compact, and frame W3C JSON-LD 1.1 with sparq — the native, dependency-free document-level pipeline in the `sparq-jsonld` crate (expand/flatten/compact/frame/fromRdf over a JSON AST, deny-by-default document loader) and how each surface exposes it (native CLI `dump … jsonld[-compact] --context/--frame`, the HTTP server's `application/ld+json` content-negotiation, the Solid/LWS server's profile-aware expanded/compacted negotiation, the wasm `serializeCompact`, the engine's RDF-first writer matrix). Use when converting JSON-LD document forms, choosing a surface, or reasoning about the honest conformance / remote-loading posture.
 license: MIT
 metadata:
   version: "0.1.0"
@@ -194,6 +194,24 @@ the only verified wire form today. Profile-parameterised negotiation for the exp
 compacted / framed forms (`Accept: application/ld+json;profile=…`) is planned
 (`sq-oy1f.34`); it is **not** a current server capability. See
 `skills/http-server/SKILL.md` for content negotiation generally.
+
+### Solid/LWS server (`sparq-lws-core`, experimental)
+
+[FABLE-5] The experimental Solid/LDP server serialises RDF resource reads through the
+vendored oxjsonld writer (neither the native pipeline nor the engine writer) and —
+unlike `sparq-server` — already honours the JSON-LD `profile` media-type parameter on
+an explicit `Accept: application/ld+json;profile="…"` range, for the LDP and identity
+read paths. The honoured profile is echoed back quoted in the response `Content-Type`
+(`NegotiatedFormat::content_type`; `JsonLdProfileParam::iri` pins the canonical IRIs).
+`expanded` is honoured byte-identically — the serialiser's default output IS the
+expanded document form — while `compacted` applies a local, **context-free** structural
+compaction over that output (`serialize_triples_negotiated` in
+`sparq_lws_core::ldp::content`): no context is used or fetched, preserving the crate's
+no-remote-context SSRF posture. This is a document-form step scoped to the server's own
+serialiser shape, **not** the full W3C Compaction Algorithm (that lives in
+`sparq-jsonld`). An honoured profile never serves stored bytes verbatim and derives a
+profile-specific variant ETag exactly when the bytes differ
+(`NegotiatedFormat::serves_stored_verbatim` / `variant_suffix`).
 
 ### wasm / npm (`@jeswr/sparq`, JSON-LD opt-in)
 

@@ -36,7 +36,7 @@ import {
   type LazyDemoSlug,
 } from "@/components/capabilities/lazy-demo";
 
-const REPO_URL = "https://github.com/jeswr/sparq";
+const REPO_URL = "https://github.com/sparq-org/sparq";
 
 interface RowMeta {
   /** ONE caveat sentence (honesty preserved; the full hedge lives in the SKILL/README). */
@@ -102,6 +102,12 @@ const META: Record<LazyDemoSlug, RowMeta> = {
       "Research-grade in-tab SIMULATION of the protocol the native sparq-mpc crate runs — a faithful illustration, not the hardened crate in your browser and not a proof of correctness (that layer is a stub). Not externally audited.",
     readme: `${REPO_URL}/tree/main/crates/sparq-mpc`,
     skill: `${REPO_URL}/blob/main/skills/mpc/SKILL.md`,
+  },
+  policy: {
+    caveat:
+      "Captured-output walkthrough: sparq-policy is an opt-in native crate (evaluate() is pure Rust, no I/O) the wasm bundles never carry, so each Permit/Deny decision is the real evaluate() output for that (policy, request) pair — pinned by a named crate test — replayed rather than run in your tab. Single-node ODRL; the federated ODRL→MPC composition is deferred.",
+    readme: `${REPO_URL}/tree/main/crates/sparq-policy`,
+    skill: `${REPO_URL}/blob/main/skills/usage-control-policy/SKILL.md`,
   },
 };
 

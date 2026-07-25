@@ -83,3 +83,8 @@ metrics/runtime/
 # to sparq-org/research-kb; never committed to this repo.  A leak-abort leaves partial
 # content in this directory, so git-ignoring it prevents accidental staging.
 /dumps/
+
+# Local tool binaries (e.g. a session-installed cargo-nextest) — opaque executables are
+# unreviewable and a supply-chain risk; install tools via the pinned CI/dev bootstrap
+# instead. Ignored so one can never be accidentally committed (PR #3453 review).
+/.local-bin/
