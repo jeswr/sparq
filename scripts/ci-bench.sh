@@ -427,6 +427,15 @@ if [ -x "$SP2B_GEN" ] && [ -d "$SP2B_Q" ]; then
   fi
 fi
 
+# [SONNET-4.6] EC2/nightly-only SP2Bench heavy queries and full reference scales.
+# The runner applies a timeout to each query and fails closed on result-size drift.
+if [ "${SP2B_EC2:-0}" = 1 ]; then
+  bench/sp2b/run-ec2.sh > "$TMP/sp2b-ec2.tsv"
+  while IFS=$'\t' read -r name _rows us; do
+    [ -n "${us:-}" ] && add "$name" us "$us"
+  done < "$TMP/sp2b-ec2.tsv"
+fi
+
 # [OPUS-4.8] DBPSB/FEASIBLE per-commit subset. fetch.sh downloads ONE sha256-pinned DBpedia
 # Databus slice (mappingbased-objects_lang=en 2019.09.01, CC-BY-SA — see bench/dbpsb/README.md)
 # and emits a FIXED, deterministic 750k-triple N-Triples cut, then runs the 13 sub-second

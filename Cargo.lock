@@ -1151,6 +1151,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
+name = "crs-definitions"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d18c61d944a9f854f35279f9a5d75ab562fb076dab3f49e53d6f0edbff4f44ea"
+
+[[package]]
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5059,6 +5065,7 @@ dependencies = [
 name = "sparq-geo"
 version = "0.1.0"
 dependencies = [
+ "crs-definitions",
  "geo",
  "geo-types",
  "i_overlay 7.0.2",
@@ -5726,9 +5733,12 @@ dependencies = [
  "ark-serialize",
  "ark-std",
  "blake3",
+ "ed25519-dalek",
  "getrandom 0.4.2",
  "oxrdf 0.3.3",
  "oxttl 0.2.3",
+ "p256",
+ "sha2 0.10.9",
  "spargebra",
  "sparq-canon",
  "sparq-core",

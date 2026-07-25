@@ -14,23 +14,44 @@
 
 `ci-summary / gate` (`.github/workflows/ci-summary.yml`) is the **single** required
 branch-protection context. It aggregates every other check-run on the head commit and
-**excludes any check whose name matches the whole word `advisory` or `informational`**
-(`\b(advisory|informational)\b`). So a lane's **gating status is decided by its job NAME**:
+**excludes only the check names DECLARED in
+[`.github/advisory-registry.json`](advisory-registry.json)**. A lane's gating status is
+therefore decided by whether it is **declared**, not by what it is called:
 
-- name contains `advisory` → the aggregator ignores it → **non-gating** (in probation).
-- name has no such token → the aggregator waits on it → **gating** (promoted).
+- an entry in the registry → the aggregator ignores it → **non-gating** (in probation).
+- no entry → the aggregator waits on it → **gating** (promoted, or never demoted).
+
+> **Corrected 2026-07-25 (#3773).** Until then the aggregator inferred advisory status from
+> the job **NAME** matching `\b(advisory|informational)\b`. That silently neutralised **four
+> real gates** — including the determinism grep-gates that §1.1 of the design and §4 below
+> both called "hard", and which in fact gated nothing — because any job whose name happened
+> to contain those words was dropped from the gating set wholesale, with no waiver and no
+> record. The name token is now **diagnostic only**: a check carrying it with no registry
+> entry GATES, and the gate summary prints a loud note naming it. A **rename can no longer
+> flip gating status** either: each declaration binds to the job's stable identity (workflow
+> file + job id), and `scripts/check-advisory-registry.py` C4 REDs when a job's current name
+> stops matching its declaration — while the renamed job GATES, fail-closed.
 
 Branch protection is therefore **never edited directly** to promote a lane. Promotion is a
-one-line change to a workflow file (§4). Adding a raw required context is forbidden.
+registry edit (§4). Adding a raw required context is forbidden.
 
 ## 2. Scope — the promotion-set lanes
 
 | Lane (what it proves) | Workflow · job | Today |
 |---|---|---|
-| Site functional E2E + a11y (foundation smoke, axe WCAG 2.1 AA) | `site-e2e-foundation.yml` · `determinism gate + foundation smoke (advisory)` | **advisory** |
+| Site foundation smoke (determinism harness + hermetic network, real browser) | `site-e2e-foundation.yml` · `foundation smoke (advisory)` | **advisory** |
 | Home hero-runner journeys (5 P1 journeys + stress) | `site-e2e-hero.yml` · `home hero-runner journeys (advisory)` | **advisory** |
 | GUI mocked-IPC desktop journeys (headless Chromium, `retries=0`) | `gui.yml` · `gui-mock-ipc` | **gating** — see §6 |
 | Visual key-layouts (container-pinned snapshots) | `site-visual.yml` · `visual key layouts (container-pinned, advisory)` | **advisory** (promotes **last**, §5) |
+
+**Already gating — NOT in the promotion set** (#3773 restored these; they are hermetic or
+ratcheted, and none of them is declared in the registry):
+
+| Check | Workflow · job | Why it gates |
+|---|---|---|
+| Site determinism grep-gate (zero `page.waitForTimeout` under `site/e2e/`) | `site-e2e-foundation.yml` · `determinism-gate` | pure grep, ~15 s, no npm install and no browser |
+| Axe WCAG 2.1 AA scan + `bench/a11y-baseline.json` ratchet | `site-e2e-foundation.yml` · `a11y-ratchet` | ratchet over axe's own rule output; non-vacuous by construction (the suite's last test injects an unlabelled icon-button and asserts axe catches it) |
+| #1740 `browserName` regression guard + gui/e2e `no-sleep-gate` | `gui.yml` · `gui-hermetic-guards` | find/grep over checked-in source; no webview, no driver, no toolchain |
 
 **Never promotable** (documented so nobody wires them by accident):
 
@@ -56,21 +77,31 @@ A lane may be promoted only once it has, **on `main`**, accumulated:
 green weeks with only two PRs is not enough surface coverage. Both floors must clear. The
 evidence (a link to the run history / the ledger row) goes in the **promotion PR body**.
 
-## 4. Promotion = a one-line flip (the runbook)
+## 4. Promotion = delete the declaration (the runbook)
 
-To promote a lane, edit **its job in the workflow file** and drop the `advisory` marker so
-the aggregator starts gating it. Concretely, per lane:
+To promote a lane, **delete its entry from `.github/advisory-registry.json`**. Concretely,
+per lane:
 
-1. Remove ` (advisory)` from the job `name:` (that is the load-bearing change — it takes the
-   job out of the aggregator's exclusion set).
+1. Delete the lane's entry from the registry (that is the load-bearing change — it takes the
+   job out of the aggregator's exclusion set). Optionally drop the now-meaningless
+   `(advisory)` token from the job `name:` in the same PR; if you do, the entry must go in
+   the same commit or C4/C2 in `scripts/check-advisory-registry.py` REDs.
 2. Remove the `continue-on-error: true` on the browser/exec step(s) so a real failure turns
-   the job red (the determinism grep-gates are already hard; leave them).
+   the job red.
 3. Record the evidence in the §8 ledger and cite it in the PR body.
 
-Nothing else changes — no branch-protection edit, no new required context. The rename alone
-moves the lane from "reported but ignored" to "waited on by `ci-summary / gate`". To **demote**
-(if a promoted lane starts flaking), do the reverse: it is equally a one-line flip, so an
-unstable gate is never left blocking the train while it is fixed.
+> **#3773 correction.** The previous wording of step 2 said "*the determinism grep-gates are
+> already hard; leave them*". That was **false**: those grep-gates lived inside
+> advisory-named jobs, so the aggregator excluded them and they gated nothing. They now run
+> in their own undeclared (gating) jobs — see the second table in §2 — and step 2 no longer
+> claims anything about them.
+
+Nothing else changes — no branch-protection edit, no new required context. Deleting the
+declaration alone moves the lane from "reported but ignored" to "waited on by
+`ci-summary / gate`". To **demote** (if a promoted lane starts flaking), do the reverse: add
+an entry back with an `owner_bead` + `promotion_criteria`, so an unstable gate is never left
+blocking the train while it is fixed — and, unlike the old name flip, the demotion is a
+reviewable diff in one file that carries its own justification.
 
 ## 5. Promotion sequence
 
@@ -84,7 +115,7 @@ unstable gate is never left blocking the train while it is fixed.
 
 ## 6. `gui-mock-ipc` early promotion — RATIFIED 2026-07-06 (#1656)
 
-The `gui-mock-ipc` job carries **no `advisory` token and no `continue-on-error`**, so it
+The `gui-mock-ipc` job carries **no registry declaration and no `continue-on-error`**, so it
 **gates** `ci-summary`. It was promoted at creation (`sq-ymr2e.5`, PR #1431) on the rationale
 that it is a fully deterministic headless-Chromium lane (`retries=0`, mocked IPC). That
 promotion **pre-dated this governance** and did not sit on recorded §3 probation evidence,
@@ -99,10 +130,12 @@ re-earn gating under §3) was considered and declined for that reason. Its §8 l
 backfilled to *gating — ratified 2026-07-06 (#1656)*. The decision is also recorded in the
 repo decision ledger, [`docs/decisions/README.md`](../docs/decisions/README.md).
 
-**Rollback (one line, if the lane later flakes):** apply the §4 flip in reverse — add
-` (advisory)` to the job `name:` **and** `continue-on-error: true` on the `Run Playwright
+**Rollback (if the lane later flakes):** apply §4 in reverse — add a
+`.github/advisory-registry.json` entry for `gui.yml` · `gui-mock-ipc` (with `owner_bead` +
+`promotion_criteria` + `job_id`) **and** `continue-on-error: true` on the `Run Playwright
 mocked-IPC tests` step in `gui.yml`; the lane then re-earns gating uniformly under §3. No
-branch-protection edit is involved either way (§1).
+branch-protection edit is involved either way (§1). Since #3773 a name edit alone does
+nothing — the declaration is what demotes.
 
 ## 7. Flake-quarantine policy (codified beside the suites)
 
@@ -130,7 +163,7 @@ lane is promotable only when its row clears **both** §3 floors with zero §7 qu
 
 | Lane | Window opened | Consecutive green (on main) | Distinct PRs | Quarantine events | Promotable? | Evidence |
 |---|---|---|---|---|---|---|
-| site functional E2E + a11y (`site-e2e-foundation`) | not yet opened | 0 — accumulating | 0 | 0 | **No** | — |
+| site foundation smoke (`site-e2e-foundation` · `foundation-smoke`) | not yet opened | 0 — accumulating | 0 | 0 | **No** | — |
 | home hero-runner (`site-e2e-hero`) | not yet opened | 0 — accumulating | 0 | 0 | **No** | — |
 | GUI mocked-IPC (`gui-mock-ipc`) | n/a (gating from creation, §6) | not tracked pre-governance | — | 0 known | **Gating — ratified 2026-07-06** | #1656 (ratified, §6); rollback = §4 reverse flip |
 | visual key-layouts (`site-visual`) | not yet opened | 0 — accumulating | 0 | 0 | **No** (promotes last, §5) | — |
@@ -146,3 +179,6 @@ lane is promotable only when its row clears **both** §3 floors with zero §7 qu
 - The GUI mocked-IPC suite: [`gui/e2e-playwright/README.md`](../gui/e2e-playwright/README.md).
 - The aggregator semantics: [`.github/workflows/ci-summary.yml`](workflows/ci-summary.yml)
   (header) + `scripts/ci_summary_gate.py`.
+- The declared-advisory registry + its integrity checks (C2/C3/C4):
+  [`.github/advisory-registry.json`](advisory-registry.json) +
+  `scripts/check-advisory-registry.py`.

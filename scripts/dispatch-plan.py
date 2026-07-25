@@ -167,7 +167,7 @@ def _self_test():
     sec = compute_ready([iss(2, R + ["priority:P0", "role:impl", "area:sparq-zk"])])
     p_sec = plan_dispatch(sec, doc)
     row = p_sec[0]
-    chk("zk -> opus", row["model_chain"], ["opus"])
+    chk("zk -> opus5-led", row["model_chain"], ["opus5", "opus"])
     chk("zk -> reviewer/escalate", (row["agent"], row["escalate"]), ("sparq-reviewer", True))
     chk("zk role stays declared", row["role"], "impl")
 
@@ -185,7 +185,7 @@ def _self_test():
     ci = compute_ready([iss(8, R + ["priority:P1", "role:ci", "area:ci"])])
     row = plan_dispatch(ci, doc)[0]
     chk("ci -> frontier-only row", (row["role"], row["model_chain"], row["agent"], row["escalate"]),
-        ("ci", ["sol", "fable"], "sparq-ci-infra", False))
+        ("ci", ["sol", "opus5", "fable"], "sparq-ci-infra", False))
     chk("ci row has no sub-frontier tier", sorted(set(row["model_chain"]) & {"sonnet", "haiku"}), [])
 
     # --- Fixture: package-conflict pair → only the higher-priority one is planned ----------------

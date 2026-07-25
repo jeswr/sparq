@@ -6,7 +6,8 @@
 # THIS GATES (it is NOT informational). The check name is `js` and carries NO
 # `advisory`/`informational` token, so the `ci-summary / gate` aggregator
 # (.github/workflows/ci-summary.yml — it excludes only names matching the whole word
-# `\b(advisory|informational)\b`) treats `js` as a HARD required gate. Gating is correct:
+# only DECLARED names, .github/advisory-registry.json — #3773) treats `js` as a HARD required
+# gate. Gating is correct:
 # this lane caught a real regression (PR #922's undeclared-npm-dep break, surfaced as a
 # red main and fixed in #953 / sq-fvz8). The old "Informational CI" header was stale.
 #
