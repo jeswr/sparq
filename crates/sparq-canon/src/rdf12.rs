@@ -74,10 +74,21 @@
 //! NON-STANDARD: the serialization carries RDF-1.2 `<<( … )>>` tokens, which
 //! W3C RDFC-1.0 has no notion of.
 //!
+//! ## Canonical-token tracking (sq-g6b6)
+//!
+//! Because the token rules above are single-sourced from oxrdf/oxttl, a
+//! serializer bump (or a canonical-escaping change once W3C rdf12-n-quads is
+//! final) would silently change every canonical document this profile emits.
+//! `tests/rdf12_nquads_token_tracking.rs` pins the resolved oxrdf/oxttl
+//! serializer versions and asserts the token edge cases byte-exactly, so any
+//! such change fails loudly with re-verification instructions.
+//!
 //! [OPUS-4.8] sq-hslb — full non-standard RDF-1.2 triple-term canon profile;
 //! sq-5i1d — `*_with::<D: Digest>` hash-profile parity (SHA-384).
 //! Fable unavailable; flag for re-review when Fable returns.
 //! [FABLE-5] sq-iaxd — constrained ground-triple-term (no-nested-bnode) variant.
+//! [FABLE-5] sq-g6b6 — canonical-token tracking suite (serializer version pin +
+//! byte-exact token expectations; re-verify once W3C rdf12-n-quads is final).
 
 use crate::CanonError;
 use digest::Digest;

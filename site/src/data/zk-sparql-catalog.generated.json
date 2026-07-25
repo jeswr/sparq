@@ -146,7 +146,7 @@
         "filter_f64_d4": 17416
       },
       "floor_member": "filter_f64",
-      "floor_circuit_size": 3113,
+      "floor_circuit_size": 3634,
       "reduction_target": "value-hook (research/zk-field-native-encoding.md §2.6)",
       "projected_after": "ESTIMATE ~3200 — MUST be re-measured with bb gates (NOT a measurement)",
       "note": "Manifest-composable double FILTER, blake3-bound like filter_int; the raw-compare floor `filter_f64` shows the achievable lower bound."
