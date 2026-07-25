@@ -124,6 +124,16 @@ let _ = (score, top10, by_sig, dice, overlap);
   original weight; hop `h` is attenuated by `0.5^(h - 1)`. A value of `0` is treated as
   `1`. Expansion order is deterministic, and the nearest path supplies an element's
   weight when several paths reach it.
+- `tbox_aware` (default `true`, available with the default-off `tbox` Cargo feature) —
+  expand `rdf:type` signature elements with the graph's own `rdfs:subClassOf` transitive
+  closure, and predicate elements with `rdfs:subPropertyOf` closure. Inferred elements
+  contribute at `0.5×` their IDF weight (direct elements always win). The closure is
+  computed self-containedly from the graph; no extra dependency is added.
+- `lexical_fallback` (default `true`, available with the default-off `lexical` Cargo
+  feature) — when structural and profile-fallback candidate generation yield fewer than `k`
+  results, fill remaining slots with IRI local-name trigram-Jaccard similarity (a sorted
+  dictionary index over `TermParts::Iri { suffix }` built at `Sim::with_config` time).
+  Lexical candidates rank below every structurally-scored result.
 
 ## How it works (cost)
 
@@ -178,14 +188,18 @@ reward. See the [`vector-search`](../vector-search/SKILL.md) skill for `fuse_sco
   (or the default graph) explicitly; the quads are not merged for you.
 
 _(status: Verified against `crates/sparq-sim/src/lib.rs` + README and the crate's tests
-on 2026-07-18 [FABLE-5] for sq-lgw (added the default-off `sketch` feature:
-`Sim::sketch_index` + `SketchConfig`/`SketchIndex` — MinHash/LSH dense-graph candidate
-generation with exact re-scoring, covered by a randomized differential that every
-returned score equals `Sim::similarity` plus twin-recall and decline witnesses);
-previously 2026-07-16 [FABLE-5] for sq-lsp7k (added the default-off `explain` feature:
-`Sim::explain_similarity` + `SharedElement`/`Direction`, with a differential test that
-the returned weights reconstruct the exact similarity score and a multi-hop min-weight
-witness); previously 2026-07-12 [GPT-5.6] for sq-da2bz.
+on 2026-07-18 [SONNET-4.6] for sq-181 v1.1 (added default-off `tbox` feature: T-box-aware
+signatures via `rdfs:subClassOf`/`rdfs:subPropertyOf` transitive closure, `TBOX_ATTENUATION=0.5`;
+and default-off `lexical` feature: sorted IRI local-name index + trigram-Jaccard tertiary
+fallback in `most_similar`; both behind `SimConfig::tbox_aware`/`lexical_fallback`; 8 new tests
+green in both feature states); also 2026-07-18 [FABLE-5] for sq-lgw (added the default-off
+`sketch` feature: `Sim::sketch_index` + `SketchConfig`/`SketchIndex` — MinHash/LSH dense-graph
+candidate generation with exact re-scoring, covered by a randomized differential that every
+returned score equals `Sim::similarity` plus twin-recall and decline witnesses); previously
+2026-07-16 [FABLE-5] for sq-lsp7k (added the default-off `explain` feature:
+`Sim::explain_similarity` + `SharedElement`/`Direction`, with a differential test that the
+returned weights reconstruct the exact similarity score and a multi-hop min-weight witness);
+previously 2026-07-12 [GPT-5.6] for sq-da2bz.
 Workspace v0.1.0, opt-in (GenAI phase 1, `research/genai-design.md`), zero `unsafe`
 (`#![forbid(unsafe_code)]`). Measured quality/latency gates (same-class precision@10;
 `Predicates`-mode class-separation AUC; `most_similar(k=10)` latency) are enforced by
