@@ -374,7 +374,8 @@ jobs:
             echo "::error::dev/bench/data.js is missing or EMPTY in the assembled artifact"; fail=1
           fi
           # EC2 dashboard (dev/bench-ec2): assert presence-in-artifact IFF it exists on the
-          # benchmark-data branch. bench-ec2.yml is not live until AWS_BENCH_ROLE_ARN is set, so
+          # benchmark-data branch. bench-ec2.yml is not live until AWS_BENCH_ROLE_ARN is set AND a
+          # maintainer dispatches it ([OPUS-5] #3784 retired its crons with the descoped OIDC role), so
           # dev/bench-ec2 may not exist on the branch yet — hard-failing on its absence would
           # brick every deploy and regress sq-iigf. But once the EC2 lane HAS pushed, a missing
           # out/dev/bench-ec2/index.html means the overlay dropped a subtree → hard fail.

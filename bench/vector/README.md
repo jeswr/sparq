@@ -132,10 +132,10 @@ this is **nightly/EC2, not per-PR CI** (design §3.3(c)).
 ```sh
 # SIFT1M (TEXMEX .fvecs/.ivecs under <root>/sift/) — L2:
 VECTOR_DATASET=sift-128-euclidean VECTOR_ROOT=/data/ann VECTOR_EF=16,32,64,128,256 \
-  scripts/gather-competitors.sh --run --only ann-benchmarks
+  scripts/gather-competitors.sh --run --only hnswlib
 # GloVe-100-angular (ann-benchmarks <root>/glove-100-angular.hdf5; needs h5py) — cosine:
 VECTOR_DATASET=glove-100-angular VECTOR_ROOT=/data/ann \
-  scripts/gather-competitors.sh --run --only ann-benchmarks
+  scripts/gather-competitors.sh --run --only hnswlib
 ```
 
 The pure halves — the `.fvecs`/`.ivecs` parser (`read_vecs`), the QPS/Pareto-frontier/matched-recall
