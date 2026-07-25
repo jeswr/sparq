@@ -74,12 +74,48 @@
 #     rose over the last PROGRESS_WINDOW polls). Keep polling, at the slower
 #     SAT_INTERVAL to cut API pressure, re-checking the signal each poll, up to the
 #     ABSOLUTE cap MAX_TOTAL_POLLS.
-#   * GENUINE HANG — pending work with an idle queue AND no recent completions.
-#     RED immediately (the old behaviour, now correctly scoped to real hangs).
+#   * GENUINE HANG — pending work with an idle queue AND no recent completions
+#     AND nothing executing (see §LIVENESS VETO). RED immediately (the old
+#     behaviour, now correctly scoped to real hangs).
 # The extension NEVER changes what a verdict says: exit 0 still happens ONLY via
 # render_verdict over an all-terminal set (or the stable-empty set), so a genuinely
 # failing leg still fails and nothing green is synthesised. The absolute cap +
 # the workflow-level timeout-minutes bound the wait — no infinite gate.
+#
+# LIVENESS VETO (#3783). [OPUS-5] The hang heuristic above shipped with TWO
+# signals — "the Actions queue is idle" AND "no completions in the last
+# PROGRESS_WINDOW polls" — and both are satisfied by a PERFECTLY HEALTHY long
+# bounded proof. On 2026-07-25 `gate` run 30149978128 on `main` declared a
+# "genuine hang" while three `kani` legs had been `in_progress` for 11 minutes:
+# the queue was idle precisely BECAUSE those jobs had dequeued and started, and a
+# `kani` harness emits no completion for tens of minutes by design. The two
+# signals meant to PROVE a hang are exactly what a live proof looks like.
+# THE RULE NOW: an awaited sibling in `in_progress` is POSITIVE LIVENESS EVIDENCE
+# and VETOES the genuine-hang verdict (live_siblings()). Queue depth may only
+# count toward "hang" when the awaited siblings are `queued` or absent — i.e.
+# genuinely not running. The veto is exit-1-only in effect: it can only POSTPONE
+# a red to the absolute cap, never synthesise a pass, and the absolute cap plus
+# ci-summary.yml's own `timeout-minutes` still bound the wait.
+# The #3677 case the detector exists for is UNTOUCHED: an evaporated check-run is
+# represented by _workflow_summary_check(force_pending=True), whose status is
+# `queued`, so a lost leg still REDs at the base budget. That discrimination
+# (in_progress => not a hang; queued/absent => still a hang) is the property the
+# tests pin, and it is deliberately name-INDEPENDENT: a hard-coded slow-lane list
+# (`kani`, `cargo-fuzz`, coverage shards) would re-introduce exactly the
+# rename-fragility #3773 removed from the advisory rule, so liveness is read from
+# the platform's own status field instead.
+#
+# VERDICT TAXONOMY (#3783 ask 3). [OPUS-5] "The gate could not determine an
+# answer" and "a gating check failed" are different events and must not read
+# identically — conflating them cost repeated wasted diagnosis (#3758/#3765
+# unsatisfiable hold, #3781 ready->re-draft race, #3783 this). So the two
+# ABSOLUTE-budget exits are now reported as `UNDETERMINED (not a test failure)`,
+# naming WHICH could-not-determine it was (siblings still EXECUTING vs the runner
+# pool never draining) and stating explicitly that nothing has been shown to be
+# broken. Both still exit 1 — an unobserved leg is never assumed green — so the
+# fail-closed posture is byte-for-byte unchanged; only the words changed. A
+# base-budget GENUINE HANG stays a FAILURE, because nothing executing plus an idle
+# queue plus no completions really is a broken pipeline.
 #
 # FETCH-FAILURE TOLERANCE: the bash `set -e` turned ONE transient `gh api` blip
 # into a gate RED. A failed poll is now skipped (state untouched) and only
@@ -1502,6 +1538,40 @@ def failfast_failures(runs: list[dict]) -> list[dict]:
     return out
 
 
+# [OPUS-5] #3783 — the LIVENESS VETO's single source of truth.
+LIVE_STATUS = "in_progress"
+
+
+def live_siblings(runs: list[dict]) -> list[dict]:
+    """[OPUS-5] #3783: the awaited siblings that are DEMONSTRABLY EXECUTING now.
+
+    GitHub gives a check-run exactly ONE non-terminal status once a runner has
+    picked the job up: `in_progress`. Every other non-terminal status a check-run
+    or an Actions job can carry — `queued`, `waiting`, `requested`, `pending` —
+    means the leg has NOT started, and *that* is the state an idle Actions queue
+    is evidence about.
+
+    So `in_progress` is POSITIVE LIVENESS EVIDENCE and vetoes the genuine-hang
+    verdict (header §LIVENESS VETO): the two hang signals (idle queue + no recent
+    completions) are both NORMAL for a healthy long bounded proof — the queue is
+    idle precisely BECAUSE the job dequeued and started, and a `kani` harness
+    emits no completion for tens of minutes by design.
+
+    The #3677 case the detector was built for is untouched: an EVAPORATED
+    check-run is represented by `_workflow_summary_check(..., force_pending=True)`,
+    whose status is `queued` — never `in_progress` — so a lost leg still REDs at
+    the base budget exactly as before.
+    """
+    return [r for r in runs if r.get("status") == LIVE_STATUS]
+
+
+def _name_list(runs: list[dict], limit: int = 6) -> str:
+    """Comma-joined check-run names for a diagnostic line (bounded, deterministic)."""
+    names = sorted({(r.get("name") or "<unnamed>") for r in runs})
+    shown = ", ".join(f"`{n}`" for n in names[:limit])
+    return shown + (f", +{len(names) - limit} more" if len(names) > limit else "")
+
+
 def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
              tier_ctx: TierContext | None = None) -> int:
     """The poll loop. `fetch_runs()` -> list of {name,status,conclusion,details_url,
@@ -1668,29 +1738,42 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
                 print(f"  (queue-depth fetch raised {exc!r} — treating depth as unknown)")
                 depth = None
             saturated = depth is not None and depth >= cfg.sat_queue_min
-            if not (saturated or progressing):
+            # [OPUS-5] #3783 LIVENESS VETO (header §LIVENESS VETO). An awaited
+            # sibling in `in_progress` is POSITIVE evidence the work is alive, and
+            # it invalidates BOTH hang signals at once: the queue is idle because
+            # that job already dequeued, and a long bounded proof emits no
+            # completion for tens of minutes by design. Queue depth may therefore
+            # only count toward "hang" when the awaited siblings are `queued` or
+            # absent — i.e. genuinely NOT running.
+            live = live_siblings(runs)
+            if not (saturated or progressing or live):
                 print(
                     f"::error::ci-summary timed out — {pending} sibling check-run(s) never "
-                    f"finished within the base budget, the Actions queue is idle "
+                    f"finished within the base budget, NO awaited sibling is `in_progress` "
+                    f"(nothing is executing), the Actions queue is idle "
                     f"(depth={depth if depth is not None else 'unknown'} < {cfg.sat_queue_min}) "
                     f"and no completions landed in the last {cfg.progress_window} poll(s): "
                     f"genuine hang, not a still-settling set. See the per-poll log above."
                 )
                 return 1
+            live_note = (
+                f", {len(live)} sibling(s) EXECUTING ({_name_list(live)})" if live else ""
+            )
             if not extension_started:
                 extension_started = True
                 print(
                     f"::notice::ci-summary base budget reached with {pending} sibling(s) still "
-                    f"pending, but the runner pool shows saturation/progress "
+                    f"pending, but the runner pool shows saturation/progress/liveness "
                     f"(queued runs={depth if depth is not None else 'unknown'}, "
-                    f"progressing={progressing}) — this is a throughput signal, not a hang. "
+                    f"progressing={progressing}{live_note}) — this is a throughput/liveness "
+                    f"signal, not a hang. "
                     f"Extending the wait (adaptive budget, sq-90cv4) up to poll "
                     f"{cfg.max_total_polls}."
                 )
             else:
                 print(
                     f"  extension: queued runs={depth if depth is not None else 'unknown'}, "
-                    f"progressing={progressing} — still settling."
+                    f"progressing={progressing}{live_note} — still settling."
                 )
             if attempt < cfg.max_total_polls:
                 sleep_fn(cfg.sat_interval)
@@ -1709,6 +1792,41 @@ def run_gate(cfg: Config, fetch_runs, fetch_queue_depth, sleep_fn=time.sleep,
             "the verdict on the final all-terminal set."
         )
         return render_verdict(runs, cfg.summary_path, tier_ctx)
+    # [OPUS-5] #3783 VERDICT TAXONOMY (header §VERDICT TAXONOMY). Exhausting the
+    # ABSOLUTE budget with work still outstanding is NOT the same event as a gating
+    # leg failing: nothing in the tree has been shown to be broken, the gate simply
+    # ran out of wall-clock before the answer existed. Both branches below still
+    # exit 1 (fail-closed — an unobserved leg can never be assumed green), but they
+    # must not READ like a test failure, because reading them that way is what
+    # burned repeated diagnosis on #3758/#3765/#3781/#3783.
+    live = live_siblings(runs)
+    if live:
+        _emit(
+            f"### ci-summary: UNDETERMINED (not a test failure) — the wait budget "
+            f"expired while {len(live)} awaited sibling(s) were STILL EXECUTING: "
+            f"{_name_list(live)}. Nothing has been shown to be broken; these legs are "
+            f"alive and governed by their own workflow `timeout-minutes`. This gate "
+            f"exits non-zero because an unobserved leg is never assumed green "
+            f"(fail-closed), NOT because a check failed — re-run this gate once the "
+            f"long-running legs conclude. ABSOLUTE budget (base + saturation "
+            f"extension, sq-90cv4) reached at poll {cfg.max_total_polls}.",
+            cfg.summary_path,
+        )
+        print(
+            "::error::ci-summary UNDETERMINED — budget expired with siblings still "
+            "executing (see the step summary); this is a could-not-determine, not a "
+            "failing check. See the per-poll log above."
+        )
+        return 1
+    _emit(
+        f"### ci-summary: UNDETERMINED (not a test failure) — {pending} sibling "
+        f"check-run(s) never finished within the ABSOLUTE budget (base + saturation "
+        f"extension, sq-90cv4). The runner pool stayed saturated longer than the "
+        f"extension allows, so the sibling set never resolved; no gating check has "
+        f"been shown to fail. Fail-closed exit — re-run this gate once the queue "
+        f"drains.",
+        cfg.summary_path,
+    )
     print(
         f"::error::ci-summary timed out — {pending} sibling check-run(s) never finished "
         f"within the ABSOLUTE budget (base + saturation extension, sq-90cv4). The runner "

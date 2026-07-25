@@ -120,10 +120,24 @@ From the binding/packaging workflows (when those surfaces are exercised):
 > it (the required set is the single `gate` context, not this job by name). The NOISY wall-clock timing
 > suites (query latencies + the well-known sp2b/dbpsb/watdiv/bsbm/lubm + cargo-only latency suites)
 > were dragging the merge queue and flapping the gate on shared runners, so they are RELOCATED to the
-> nightly EC2 lane (`bench-ec2.yml` `nightly-full-bench`, cron, quiet dedicated spot instance) which
-> publishes the full at-scale series to the `benchmark-data` branch the Pages dashboard reads — the
-> perf-tracking is moved, not lost. The weekly heavy EC2 campaign (`bench-ec2.yml` `ec2-bench`) and
-> release/dist workflows remain non-gating (release/dist fire only on tags). The **Scorecard** workflow
+> EC2 full-suite lane (`bench-ec2.yml` `nightly-full-bench`, quiet dedicated spot instance) which
+> publishes the full at-scale series to the `benchmark-data` branch the Pages dashboard reads.
+>
+> **[OPUS-5] #3784 — `bench-ec2.yml` is MANUAL DISPATCH ONLY, and the at-scale trend is on hold.**
+> Both of that workflow's crons are RETIRED. It authenticates through an AWS OIDC role
+> (`vars.AWS_BENCH_ROLE_ARN`) that the orchestration design deliberately descoped, so every scheduled
+> tick failed in `Configure AWS credentials (OIDC)` *before any benchmark ran* — and because the check
+> name carries no advisory token and no `.github/advisory-registry.json` declaration, that failure
+> **GATED** (see §ADVISORY MUST BE DECLARED in `scripts/ci_summary_gate.py`), which is why `main` could
+> not go green. The lane was RETIRED rather than declared advisory: muting a permanently-broken gate to
+> green a dashboard is exactly what the declared-not-inferred rule exists to prevent. Consequences to
+> read honestly: the at-scale timing series is **not** being collected on a cadence (the earlier
+> "perf-tracking is moved, not lost" claim no longer holds), and maintainer-run EC2 benchmarking is
+> unaffected — both campaigns stay dispatchable via the `lane` input, and every EC2 bench script stays
+> in the tree. Reviving the cadence means re-provisioning the role AND re-adding a `schedule:` block in
+> the same change. A cron-less workflow posts no check-runs on a `main` head SHA, so neither EC2
+> campaign can gate anything today; release/dist workflows likewise remain non-gating (they fire only
+> on tags). The **Scorecard** workflow
 > (`scorecard.yml`) re-scores posture on push to `main` and feeds the public OpenSSF
 > dashboard/badge (its SARIF upload to GitHub code-scanning is disabled and the job has
 > no `security-events: write` — see the Scorecard note later in this document); with
