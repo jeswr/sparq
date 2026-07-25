@@ -1,38 +1,51 @@
 {
- "_doc": "Advisory-job registry (sq-qcnn.32). [SONNET-4.6] Every job whose NAME matches the ci-summary exclusion pattern \\b(advisory|informational)\\b must have an entry here with {owner_bead, promotion_criteria, registered}. A job that intentionally runs a gate-classified script (scripts/*gate*.py) must also carry gate_script_waiver. Maintained by check-advisory-registry.py (C2/C3). See scripts/check-advisory-registry.py for the enforcement rule.",
+ "_doc": "Advisory-job registry. [OPUS-5] sparq-org/sparq#3773 made this file LOAD-BEARING: it is the ONLY thing that can make a check-run non-gating. scripts/ci_summary_gate.py excludes a check-run from the `gate` verdict IFF its name is a key here (whole-name, case-insensitive; a ${{ ... }} expression in a key matches its runtime expansion); everything else GATES, whatever it is called. Before #3773 the gate INFERRED advisory status from the job name matching \\b(advisory|informational)\\b, which silently neutralised four real gates. Every entry needs {owner_bead, promotion_criteria, registered, workflow, job_id}: workflow+job_id is the STABLE IDENTITY the declaration binds to, and check-advisory-registry.py C4 fails if that job's current YAML name is not exactly the key — so renaming a job can never silently flip whether it gates (the renamed job GATES, fail-closed, and C4 REDs until the declaration is updated). A job that intentionally runs a gate-classified command (python/shell/node/npm — C3, now language-agnostic) must also carry gate_script_waiver. C2 keeps requiring that any job whose NAME carries an advisory/informational token be declared here or lose the misleading token. Maintained by scripts/check-advisory-registry.py. PROMOTING a lane = deleting its entry.",
  "jobs": {
+  "changed-code mutation review (advisory)": {
+   "workflow": "mutants-diff.yml",
+   "job_id": "mutants-diff",
+   "owner_bead": "sq-qcnn.30",
+   "promotion_criteria": "promote only after the lane is stable across observed PRs, its runtime remains within the documented workload budget, and a reviewed allowlist mechanism exists for provably equivalent surviving mutants",
+   "registered": "2026-07-19"
+  },
   "secret-literal grep (advisory)": {
    "workflow": "deploy-terraform-lint.yml",
+   "job_id": "secret-grep-advisory",
    "owner_bead": "sq-sos84",
    "promotion_criteria": "advisory while the multi-cloud Terraform deploy templates are new; promote by moving the R4 secret-literal grep into a gating deploy-lint job once the deploy surface is proven stable on main",
    "registered": "2026-07-15"
   },
   "terraform validate (advisory)": {
    "workflow": "deploy-terraform-lint.yml",
+   "job_id": "terraform-validate-advisory",
    "owner_bead": "sq-sos84",
    "promotion_criteria": "advisory while terraform validate runs credential-free across provider-version drift; promote by removing the (advisory) token once validate is proven stable on main across the pinned terraform_version",
    "registered": "2026-07-15"
   },
   "asan (mmap corruption corpus, informational)": {
    "workflow": "asan.yml",
+   "job_id": "asan",
    "owner_bead": "sq-hybl",
    "promotion_criteria": "MS-G3 memsafety gap (epic sq-toze) addressed and lane proven stable on main with sufficient green runs",
    "registered": "2026-07-06"
   },
   "new-bench-registry-dashboard (G3, advisory)": {
    "workflow": "flow-on-gates.yml",
+   "job_id": "new-bench-registry-dashboard",
    "owner_bead": "sq-ncvq.6",
    "promotion_criteria": "G3 heuristic proven on real PR traffic with zero false-positives; promote by removing (advisory) token and --advisory flag",
    "registered": "2026-07-06"
   },
   "docs-quality quick-advisory (advisory)": {
    "workflow": "docs-quality.yml",
+   "job_id": "quick-advisory",
    "owner_bead": "sq-5fd1",
-   "promotion_criteria": "per-step (sq-6vshe.20 consolidation of the former markdownlint-advisory / vale / external-links jobs): a step promotes by MOVING into the quick-gates job \u2014 markdownlint-advisory once the whole-repo backlog (bench/, .claude/) is fully clean; vale once the prose-style backlog on README/skills/docs/crates is clean and the vale ruleset has settled; external-links never promotes (network-flaky by nature \u2014 dead external links must never block a merge)",
+   "promotion_criteria": "per-step (sq-6vshe.20 consolidation of the former markdownlint-advisory / vale / external-links jobs): a step promotes by MOVING into the quick-gates job — markdownlint-advisory once the whole-repo backlog (bench/, .claude/) is fully clean; vale once the prose-style backlog on README/skills/docs/crates is clean and the vale ruleset has settled; external-links never promotes (network-flaky by nature — dead external links must never block a merge)",
    "registered": "2026-07-11"
   },
   "mutation ratchet (cargo-mutants, advisory)": {
    "workflow": "ci.yml",
+   "job_id": "mutants-nightly-advisory",
    "owner_bead": "sq-qcnn.11",
    "promotion_criteria": "sq-qcnn.27: all seeded ceilings pass --check AND sq-qcnn.29 nightly-fix (concurrency-cancel + sharding) is merged and seeded",
    "registered": "2026-07-06",
@@ -40,117 +53,147 @@
   },
   "unsafe report (cargo-geiger, informational)": {
    "workflow": "ci.yml",
+   "job_id": "geiger",
    "owner_bead": "sq-4plh",
    "promotion_criteria": "not promotable; cargo-geiger is too heavy/flaky for per-PR gating; the HARD gate is unsafe-register (sq-toze.6 / cert gap GX-5)",
    "registered": "2026-07-06"
   },
   "resolve nightly run config (advisory)": {
    "workflow": "nightly-full-sweep.yml",
+   "job_id": "config",
    "owner_bead": "sq-ymr2e.11",
    "promotion_criteria": "never promotable; nightly workflows never gate the merge queue by design (sq-ymr2e.11)",
    "registered": "2026-07-06"
   },
   "a11y full sweep (chromium, advisory)": {
    "workflow": "nightly-full-sweep.yml",
+   "job_id": "a11y-sweep",
    "owner_bead": "sq-ymr2e.11",
    "promotion_criteria": "never promotable; nightly workflows never gate the merge queue by design (sq-ymr2e.11)",
    "registered": "2026-07-06"
   },
   "visual full-surface sweep (container-pinned, advisory)": {
    "workflow": "nightly-full-sweep.yml",
+   "job_id": "visual-sweep",
    "owner_bead": "sq-ymr2e.11",
    "promotion_criteria": "never promotable; nightly workflows never gate the merge queue by design (sq-ymr2e.11)",
-   "registered": "2026-07-06"
+   "registered": "2026-07-06",
+   "gate_script_waiver": "nightly lanes never gate the merge queue by design (sq-ymr2e.11), so this job's `npm run test:e2e:grep-gate` cannot gate. The determinism grep gate IS hard-gated per-PR in site-e2e-foundation.yml `determinism-gate` (#3773); running it here keeps the nightly self-contained."
   },
   "cross-browser P1 journeys firefox+webkit (advisory)": {
    "workflow": "nightly-full-sweep.yml",
+   "job_id": "cross-browser",
    "owner_bead": "sq-ymr2e.11",
    "promotion_criteria": "never promotable; nightly workflows never gate the merge queue by design (sq-ymr2e.11)",
    "registered": "2026-07-06"
   },
   "tauri-driver GUI smoke Linux (advisory)": {
    "workflow": "nightly-full-sweep.yml",
+   "job_id": "tauri-smoke",
    "owner_bead": "sq-ymr2e.11",
    "promotion_criteria": "never promotable; nightly workflows never gate the merge queue by design (sq-ymr2e.11)",
-   "registered": "2026-07-06"
+   "registered": "2026-07-06",
+   "gate_script_waiver": "nightly lanes never gate the merge queue by design (sq-ymr2e.11). Both gate-classified scripts it runs (gui/e2e/support/no-sleep-gate.sh and the drift tripwire's regression guard) are hard-gated per-PR in gui.yml `gui-hermetic-guards` (#3773); the nightly copies keep the sweep self-contained."
   },
   "tauri-driver GUI smoke ${{ matrix.os }} (advisory, documented-untested)": {
    "workflow": "nightly-full-sweep.yml",
+   "job_id": "tauri-smoke-other-os",
    "owner_bead": "sq-ymr2e.11",
    "promotion_criteria": "never promotable; nightly workflows never gate the merge queue by design (sq-ymr2e.11)",
    "registered": "2026-07-06"
   },
   "route consolidated failures (advisory)": {
    "workflow": "nightly-full-sweep.yml",
+   "job_id": "route-failures",
    "owner_bead": "sq-ymr2e.11",
    "promotion_criteria": "never promotable; nightly workflows never gate the merge queue by design (sq-ymr2e.11)",
    "registered": "2026-07-06"
   },
   "GUI build + clippy (${{ matrix.label }}, advisory)": {
    "workflow": "gui.yml",
+   "job_id": "tauri-build",
    "owner_bead": "sq-pnnl",
    "promotion_criteria": "sq-var9: macOS + Windows tauri-build matrix proven stable across main; remove advisory token",
    "registered": "2026-07-06"
   },
   "GUI tauri-driver e2e (Linux, advisory)": {
    "workflow": "gui.yml",
+   "job_id": "tauri-e2e",
    "owner_bead": "sq-ymr2e.6",
-   "promotion_criteria": "advisory forever; real WebKitWebDriver + xvfb is environment-coupled by nature (E2E-GATING-POLICY.md \u00a72)",
-   "registered": "2026-07-06"
+   "promotion_criteria": "advisory forever; real WebKitWebDriver + xvfb is environment-coupled by nature (E2E-GATING-POLICY.md §2)",
+   "registered": "2026-07-06",
+   "gate_script_waiver": "scripts/ci/tauri-driver-drift-tripwire.sh is re-run here for its VERSION TRIPWIRE only (it logs the runner's webkit2gtk + tauri-driver versions, which needs the apt packages this job installs). Its GATING half — the #1740 browserName regression guard — is hard-gated in gui.yml `gui-hermetic-guards`, so nothing load-bearing depends on this invocation (#3773)."
   },
   "GUI tauri-driver flake probe (Linux, advisory)": {
    "workflow": "gui.yml",
+   "job_id": "tauri-e2e-probe",
    "owner_bead": "sq-ymr2e.6",
-   "promotion_criteria": "never promotable; workflow_dispatch flake probe only \u2014 not a PR check",
-   "registered": "2026-07-06"
+   "promotion_criteria": "never promotable; workflow_dispatch flake probe only — not a PR check",
+   "registered": "2026-07-06",
+   "gate_script_waiver": "workflow_dispatch-only flake probe, never a PR check; it re-runs the drift tripwire purely to log versions alongside each probe iteration. The #1740 regression guard is hard-gated in gui.yml `gui-hermetic-guards` (#3773)."
   },
   "kani ${{ matrix.suite.name }} (bounded proofs, informational)": {
    "workflow": "kani.yml",
+   "job_id": "kani",
    "owner_bead": "sq-hkud",
    "promotion_criteria": "bounded proofs are informational until a credentialed formal-methods review validates coverage (sq-hkud + epic sq-toze MS-G4)",
    "registered": "2026-07-06"
   },
   "conventional-commits (advisory)": {
    "workflow": "pr-title.yml",
+   "job_id": "validate",
    "owner_bead": "sq-v286.5",
    "promotion_criteria": "heuristic proven on real PR traffic with zero false-positives; remove advisory token (sq-v286.5 follow-up bead)",
    "registered": "2026-07-06"
   },
   "home hero-runner journeys (advisory)": {
    "workflow": "site-e2e-hero.yml",
+   "job_id": "site-e2e-hero",
    "owner_bead": "sq-ymr2e.3",
-   "promotion_criteria": "sq-ymr2e.12 probation bar: 50 consecutive green runs spanning at least 10 distinct PRs or two weeks, zero quarantine events (E2E-GATING-POLICY.md \u00a73)",
+   "promotion_criteria": "sq-ymr2e.12 probation bar: 50 consecutive green runs spanning at least 10 distinct PRs or two weeks, zero quarantine events (E2E-GATING-POLICY.md §3)",
    "registered": "2026-07-06"
   },
   "visual key layouts (container-pinned, advisory)": {
    "workflow": "site-visual.yml",
+   "job_id": "site-visual",
    "owner_bead": "sq-ymr2e.10",
-   "promotion_criteria": "promotes last (E2E-GATING-POLICY.md \u00a75): after all functional E2E lanes are stable on the sq-ymr2e.12 probation bar",
+   "promotion_criteria": "promotes last (E2E-GATING-POLICY.md §5): after all functional E2E lanes are stable on the sq-ymr2e.12 probation bar",
    "registered": "2026-07-06"
   },
-  "determinism gate + foundation smoke (advisory)": {
+  "foundation smoke (advisory)": {
    "workflow": "site-e2e-foundation.yml",
+   "job_id": "foundation-smoke",
    "owner_bead": "sq-ymr2e.1",
-   "promotion_criteria": "sq-ymr2e.12 probation bar: 50 consecutive green runs spanning at least 10 distinct PRs or two weeks, zero quarantine events (E2E-GATING-POLICY.md \u00a73)",
+   "promotion_criteria": "sq-ymr2e.12 probation bar: 50 consecutive green runs spanning at least 10 distinct PRs or two weeks, zero quarantine events (E2E-GATING-POLICY.md §3). [OPUS-5] #3773: scope narrowed to the REAL-BROWSER foundation smoke only — the determinism grep gate and the axe a11y ratchet were hoisted out of this job into the HARD `determinism-gate` and `a11y-ratchet` jobs, which gate today. Promote by DELETING this entry.",
    "registered": "2026-07-06"
   },
   "Helm lint, render, and schema validation (advisory)": {
    "workflow": "deploy-lint.yml",
+   "job_id": "helm-validate",
    "owner_bead": "sq-0d744",
    "promotion_criteria": "advisory: the helm-validate job runs on push/PR (path-filtered to deploy/**), NOT merge_group, and installs network-fetched helm+kubeconform, so it must not gate the merge queue (a missing merge_group check otherwise fails ci-summary). Promote by running it on merge_group + removing the (advisory) token once proven non-flaky on main",
    "registered": "2026-07-15"
   },
   "fast-fix ring (advisory)": {
    "workflow": "fast-fix-ring.yml",
+   "job_id": "ring",
    "owner_bead": "sq-6vshe",
    "promotion_criteria": "not promotable to a gate: the ring runs post-hoc via workflow_run (on ci-summary completion), never on a PR/merge_group head commit, so it produces no gating check-run by design (sparq-org/sparq#3474 moved it here so the REGISTRY_RING_TOKEN doorbell is unreachable from PR-head content); it only notifies the registry doorbell after a gating-leg failure and must never gate a PR",
    "registered": "2026-07-18"
   },
   "release-plz / Release-PR (advisory)": {
    "workflow": "release-plz.yml",
+   "job_id": "release-plz-pr",
    "owner_bead": "sq-lonae",
    "promotion_criteria": "advisory while the repo/org setting 'Allow GitHub Actions to create and approve pull requests' is disabled (GITHUB_TOKEN cannot open the Release-PR: known 403, live run 29988505600, contained loudly via captured-output signature + side-effect-free probe). Promote when a maintainer enables that setting or configures the ORCHESTRATOR_APP_ID/_PRIVATE_KEY secrets (batch-merge.yml App-token pattern): drop the ' (advisory)' name token, remove the 403-containment step, and delete this entry",
    "registered": "2026-07-23"
+  },
+  "merge-queue dequeued feedback (advisory)": {
+   "workflow": "merge-queue-feedback.yml",
+   "job_id": "feedback",
+   "owner_bead": "registry jeswr/agent-account-registry#563 item 3 (durable fix for registry#556)",
+   "promotion_criteria": "permanently advisory BY DESIGN: this job runs on pull_request_target [dequeued] (write-only, no PR-head checkout) AFTER a gate verdict exists on the head SHA, and its writes (disable-auto + review:changes swap + comment) are orchestration feedback, not a merge-worthiness verdict — a feedback hiccup must never red a later gate evaluation on the same SHA. Promote never; delete this entry only if the workflow is removed",
+   "registered": "2026-07-24"
   }
  }
 }

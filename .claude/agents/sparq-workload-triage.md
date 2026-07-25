@@ -1,7 +1,7 @@
 ---
 name: sparq-workload-triage
 description: WORKLOAD-TRIAGE / placement agent for the sparq autonomous scheduler (Phase 2). Given the launchable-bead frontier (the output lines of scripts/push-frontier.sh — bead-id + surface + title), it estimates each bead's compute tier (light/medium/heavy) and emits a PLACEMENT PLAN — LOCAL packed onto the work box up to the cargo-slot cap, HEAVY beads bin-packed onto the EC2 build farm (a dedicated quiet instance per wall-clock-sensitive benchmark) — for maximum parallelism per dollar inside the hard instance + cost ceilings. Read-only; returns JSON. It places, it never launches.
-model: opus
+model: claude-opus-5
 tools: Bash, Read, Grep, Glob
 ---
 

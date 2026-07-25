@@ -101,9 +101,10 @@ jobs:
       - name: Sync wasm bundle into site/public/wasm/
         run: npm run sync-wasm
 
-      # Determinism gate over the whole e2e/ tree, visual specs included (HARD — must pass).
-      - name: Determinism grep gate (no waitForTimeout calls)
-        run: npm run test:e2e:grep-gate
+      # [OPUS-5] #3773 — the determinism grep gate (whole e2e/ tree, visual specs included) is
+      # HARD-gated in site-e2e-foundation.yml's `determinism-gate` job, on the same `site/**`
+      # path filter. It used to run HERE too, inside this advisory job, where the "HARD — must
+      # pass" comment it carried was simply false; a duplicate non-gating run adds nothing.
 
       # The visual suite, rendered inside the digest-pinned Playwright container (vr.sh pulls
       # the image by digest; the run fails fast if the locked @playwright/test version drifted
