@@ -1,0 +1,41 @@
+[package]
+name = "sparq-crdt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Opt-in SPARQL-CRDT replication primitives for the sparq RDF engine: canonical delta-envelope codec, causal summaries, durable append/recovery journal, snapshots, and sync/stability primitives"
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "README.md"
+# [FABLE-5] sq-tag1q.7.2: intentional partial surface — this bead lands the canonical
+# codec + durable journal layer of the SPARQL-CRDT design
+# (research/sparql-crdt-gpt56-2026-07.md §6/§8). The replicated dot-store state +
+# merge algebra and the evaluate-at-origin SPARQL Update compiler are sibling beads
+# of epic sq-tag1q.7; the crate stays `publish = false` (and README a stub) until
+# that surface is complete enough to claim a conformance class from
+# site/specs/sparql-crdt.typ. Opt-in by construction: nothing in the workspace
+# depends on this crate, so core builds and bundles carry zero CRDT code. No cargo
+# features — the whole crate is the opt-in unit (cf. sparq-shaclc/sparq-algos), so
+# the default workspace lane exercises the entire surface.
+publish = false
+
+[dependencies]
+# Term model + N-Quads parser for validating the canonical (blank-node-free)
+# N-Quads quad lines the envelope carries. Both are existing, attested workspace
+# dependencies (used by sparq-core / sparq-canon); no new supply-chain surface.
+oxrdf.workspace = true
+oxttl.workspace = true
+# Strict JSON *reader* for envelope/journal/snapshot decode. Canonical bytes are
+# produced only by this crate's own writer; decode re-encodes and byte-compares,
+# so serde_json never defines the canonical form. Already used by 30 crates.
+serde_json = "1"
+# Record checksums (journal framing, snapshot content hash) and the
+# domain-separated envelope content hash. Version matches the workspace majority.
+sha2 = "0.10"
+
+[dev-dependencies]
+# Crash-recovery / atomic-rename journal tests need real files; already in-tree.
+tempfile = "3"

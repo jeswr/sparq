@@ -322,10 +322,17 @@ class AdditionalReadersMapTests(unittest.TestCase):
         }
         self.assertEqual(
             readers_map.get("crates/sparq-trust/ontologies/zkp-sparql/**"),
-            ["sparq-zk", "sparq-trust"],
+            # [FABLE-5] sq-mgxz8 (PR #3440): + sparq-policy, whose cross-crate
+            # dimension-IRI drift guards include_str! the shared secprop vocab.
+            ["sparq-zk", "sparq-trust", "sparq-policy"],
         )
         self.assertEqual(
             readers_map.get("crates/sparq-solid/rules/**"), ["sparq-reason"],
+        )
+        # [FABLE-5] sq-mgxz8 (PR #3440): sparq-policy's drift guard also reads
+        # sparq-zk's per-method annotation graph (secprop-methods.ttl).
+        self.assertEqual(
+            readers_map.get("crates/sparq-zk/ontologies/**"), ["sparq-policy"],
         )
 
     def test_every_readers_name_is_a_real_member(self):

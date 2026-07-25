@@ -87,8 +87,54 @@ REQUIRED_KEYS = {"name", "crate", "features", "test"}
 # [SONNET-4.6] sq-ldg8c: keys a fragment leg MAY carry in addition to REQUIRED_KEYS.
 # `tier` demotes a leg to the check tier (see the header); `tier-reason` is an override
 # the ENFORCER (feature-matrix-tiers.py) reads — the assembler only allows the key.
-OPTIONAL_KEYS = {"tier", "tier-reason"}
+# [FABLE-5] CI-economy grouping: `weight` (positive number) is an OPTIONAL explicit
+# cost estimate for the leg (unit ≈ minutes of marginal work on a warm dependency
+# cache). When absent, a crate-source-size heuristic supplies the default — see
+# leg_weight(). The weight only steers bin-packing (--grouped); it never changes
+# WHICH legs run or their gate-critical `opt-in <name>` check-run names.
+OPTIONAL_KEYS = {"tier", "tier-reason", "weight"}
 VALID_TIERS = ("test", "check")
+
+# [FABLE-5] CI-economy grouping (maintainer directive 2026-07-18): bin-pack the
+# per-leg matrix into a SMALL number of grouped runner jobs, each targeting <5 min
+# wall time. GROUP_CAPACITY is the per-group weight budget in the same unit as
+# `weight` (≈ minutes of marginal work on a warm dependency cache — the group job
+# pays checkout/toolchain/cache-restore ONCE, so per-leg setup cost is excluded).
+GROUP_CAPACITY = 5.0
+CRATES_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "crates"
+)
+_CRATE_KB_CACHE = {}
+
+
+def _crate_rs_kb(crate):
+    """Total .rs source KiB under crates/<crate>/ (0 if absent) — the size signal
+    the default leg-weight heuristic uses. Memoised; deterministic on a checkout."""
+    if crate not in _CRATE_KB_CACHE:
+        total = 0
+        for root, _dirs, files in os.walk(os.path.join(CRATES_DIR, crate)):
+            for fn in files:
+                if fn.endswith(".rs"):
+                    try:
+                        total += os.path.getsize(os.path.join(root, fn))
+                    except OSError:
+                        pass
+        _CRATE_KB_CACHE[crate] = total // 1024
+    return _CRATE_KB_CACHE[crate]
+
+
+def leg_weight(leg):
+    """Effective weight of a leg: the fragment's explicit `weight` if given, else
+    a crate-size heuristic (bigger crate => longer compile per feature state; a
+    tested leg pays its test run on top). Calibrated so 1.0 ≈ one warm-cache
+    minute: base 0.3 (clippy + orchestration) + KiB/2000 (compile) + 0.2 if the
+    leg runs tests. sparq-engine (~2.6 MiB of .rs) lands ≈ 1.8; a small crate
+    ≈ 0.6. Tune per-leg via the fragment `weight:` field when reality disagrees."""
+    explicit = leg.get("weight")
+    if explicit is not None:
+        return float(explicit)
+    kb = _crate_rs_kb(leg["crate"])
+    return round(0.3 + kb / 2000.0 + (0.2 if leg["test"] else 0.0), 3)
 
 # [SONNET-4.6] sq-ldg8c: events on which the leg set is PARTITIONED by tier. Every other
 # event (push/schedule/workflow_dispatch/unknown/absent) is a FULL per-merge backstop —
@@ -169,6 +215,22 @@ def load_legs():
                     f"unrecognised value is never silently demoted to the check tier.\n"
                 )
                 sys.exit(1)
+            # [FABLE-5] CI-economy grouping: optional explicit weight — a positive,
+            # finite number. Anything else is a HARD error (a malformed weight must
+            # never silently skew the bin-packing).
+            weight = leg.get("weight")
+            if weight is not None and (
+                isinstance(weight, bool)
+                or not isinstance(weight, (int, float))
+                or not weight > 0
+                or weight != weight  # NaN
+                or weight == float("inf")
+            ):
+                sys.stderr.write(
+                    f"error: {where}: `weight` must be a positive finite number "
+                    f"(got {weight!r}); omit it to use the crate-size heuristic\n"
+                )
+                sys.exit(1)
             name = leg["name"]
             if name in seen_names:
                 sys.stderr.write(
@@ -188,6 +250,8 @@ def load_legs():
                     # STRIPPED before the matrix JSON is emitted (the workflow leg shape
                     # stays exactly {name, crate, features, test}).
                     "tier": tier,
+                    # Internal only: explicit weight (None => leg_weight() heuristic).
+                    "weight": weight,
                 }
             )
     return legs
@@ -281,6 +345,77 @@ def filter_legs_by_shard(legs, shard):
     return [leg for leg in legs if leg["crate"] != ENGINE_CRATE]
 
 
+def group_legs(legs, capacity=GROUP_CAPACITY):
+    """[FABLE-5] CI-economy grouping: deterministically bin-pack legs into groups.
+
+    Same-crate legs are clustered FIRST (they share the group's warm target dir —
+    consecutive feature-states of one crate recompile only the crate itself, never
+    the dependency stack), then each crate's legs are chunked to the capacity and
+    the chunks are packed first-fit-decreasing into bins. A single leg heavier
+    than the capacity gets its own chunk (never dropped, never split).
+
+    Returns a list of groups, each {"group", "cache_crate", "count", "legs"} where
+    `legs` is the ORDERED list of leg dicts (workflow shape: name/crate/features/
+    test). Group names/ids are NOT gate-critical — the gate-critical `opt-in
+    <name>` per-leg check-runs are emitted by scripts/run-feature-matrix-group.py
+    from inside the group job, name-preserved byte-for-byte."""
+    by_crate = {}
+    for leg in legs:
+        by_crate.setdefault(leg["crate"], []).append(leg)
+    # Crates ordered by total weight desc (then name for determinism).
+    crate_order = sorted(
+        by_crate,
+        key=lambda c: (-sum(leg_weight(leg) for leg in by_crate[c]), c),
+    )
+    chunks = []  # (weight, crate, [legs]) — same-crate, each <= capacity where possible
+    for crate in crate_order:
+        cur, cur_w = [], 0.0
+        for leg in by_crate[crate]:
+            w = leg_weight(leg)
+            if cur and cur_w + w > capacity:
+                chunks.append((cur_w, crate, cur))
+                cur, cur_w = [], 0.0
+            cur.append(leg)
+            cur_w += w
+        if cur:
+            chunks.append((cur_w, crate, cur))
+    # First-fit-decreasing over the chunks (stable: weight desc, then crate name,
+    # then original chunk position).
+    bins = []  # each: {"weight": float, "chunks": [(weight, crate, legs)]}
+    ordered_chunks = sorted(
+        ((w, crate, i, chunk) for i, (w, crate, chunk) in enumerate(chunks)),
+        key=lambda t: (-t[0], t[1], t[2]),
+    )
+    for w, crate, _i, chunk in ordered_chunks:
+        placed = False
+        for b in bins:
+            if b["weight"] + w <= capacity:
+                b["chunks"].append((w, crate, chunk))
+                b["weight"] += w
+                placed = True
+                break
+        if not placed:
+            bins.append({"weight": w, "chunks": [(w, crate, chunk)]})
+    groups = []
+    for idx, b in enumerate(bins, start=1):
+        # Dominant crate = the heaviest chunk's crate (chunks were appended in
+        # weight-desc order, so the first chunk is the heaviest) — it keys the
+        # group's rust-cache shared-key, reusing the existing per-crate cache
+        # entries (sq-3sbrr strategy unchanged).
+        dominant = b["chunks"][0][1]
+        group_legs_flat = [leg for _w, _c, chunk in b["chunks"] for leg in chunk]
+        groups.append(
+            {
+                "group": f"g{idx:02d} {dominant}",
+                "cache_crate": dominant,
+                "count": len(group_legs_flat),
+                "legs": group_legs_flat,
+                "weight": round(b["weight"], 3),
+            }
+        )
+    return groups
+
+
 def _flag_value(argv, flag):
     """Value of `--flag value` in argv, or None."""
     for i, a in enumerate(argv):
@@ -311,7 +446,7 @@ def main():
         _flag_value(argv, "--tier"),
     )
     legs = filter_legs_by_shard(legs, _flag_value(argv, "--shard"))
-    # Strip the internal `tier` key so the emitted leg shape stays exactly
+    # Strip the internal `tier`/`weight` keys so the emitted leg shape stays exactly
     # {name, crate, features, test} (the workflow matrix contract). Rebuilding in
     # this fixed key order keeps the default output BYTE-IDENTICAL to the pre-tier
     # assembler (sq-ldg8c behaviour-preservation invariant).
@@ -324,6 +459,39 @@ def main():
         }
         for leg in legs
     ]
+    if "--grouped" in argv:
+        # [FABLE-5] CI-economy grouping: emit ONE matrix entry per bin-packed GROUP
+        # of legs. `legs` is a JSON-encoded STRING (GitHub matrix values must be
+        # scalars) — the group job passes it to scripts/run-feature-matrix-group.py,
+        # which runs each leg and emits its gate-critical `opt-in <name>` check-run
+        # (name byte-identical to the per-leg matrix this replaces). `count` totals
+        # feed the workflow's `legs` output (skip-on-zero unchanged).
+        groups = group_legs(legs)
+        ginclude = []
+        for g in groups:
+            stripped = [
+                {
+                    "name": leg["name"],
+                    "crate": leg["crate"],
+                    "features": leg["features"],
+                    "test": leg["test"],
+                }
+                for leg in g["legs"]
+            ]
+            ginclude.append(
+                {
+                    "group": g["group"],
+                    "cache_crate": g["cache_crate"],
+                    "count": g["count"],
+                    "legs": json.dumps(
+                        stripped, ensure_ascii=False, separators=(",", ":")
+                    ),
+                }
+            )
+        print(
+            json.dumps({"include": ginclude}, ensure_ascii=False, separators=(",", ":"))
+        )
+        return
     # Emit a single-line JSON object so the workflow can capture it with
     # `echo "matrix=$(...)" >> "$GITHUB_OUTPUT"` and feed `fromJSON(... .matrix)`.
     print(json.dumps({"include": include}, ensure_ascii=False, separators=(",", ":")))

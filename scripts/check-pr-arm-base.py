@@ -45,10 +45,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 DEFAULT_TRUNK = "main"
 
@@ -293,6 +296,131 @@ def self_test() -> int:
               f"{got!r} (want {want!r})")
         if not ok:
             failures += 1
+
+    # [GPT-5.6] #3605: exercise the real hook command with fixture input from both
+    # the repository root and an unrelated cwd. Claude Code deliberately runs hooks
+    # in the shell's current cwd, so the settings entry MUST anchor the guard through
+    # CLAUDE_PROJECT_DIR. The launcher's own missing/unreadable/script-error path is
+    # fail-open, matching this guard's existing failure disposition: only a positively
+    # confirmed non-trunk base may deny an arm.
+    repo_root = Path(__file__).resolve().parent.parent
+    guard_script = Path(__file__).resolve()
+    settings_path = repo_root / ".claude" / "settings.json"
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        hook_command = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    except (OSError, KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
+        print(f"  [FAIL] load arm-guard hook command: {error}")
+        failures += 1
+        hook_command = ""
+
+    with tempfile.TemporaryDirectory(prefix="sparq-arm-guard-test-") as temp_dir:
+        fixture_root = Path(temp_dir)
+        off_root_cwd = fixture_root / "off-root-cwd"
+        fake_bin = fixture_root / "bin"
+        off_root_cwd.mkdir()
+        fake_bin.mkdir()
+        fake_gh = fake_bin / "gh"
+        fake_gh.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' "
+            "'{\"baseRefName\":\"feature/stacked\","
+            "\"headRefName\":\"fixture\",\"number\":1023}'\n",
+            encoding="utf-8",
+        )
+        fake_gh.chmod(0o755)
+
+        fixture_env = os.environ.copy()
+        fixture_env["CLAUDE_PROJECT_DIR"] = str(repo_root)
+        fixture_env["PATH"] = f"{fake_bin}{os.pathsep}{fixture_env.get('PATH', '')}"
+
+        fixture_cases = [
+            ("non-arm fixture", "printf harmless", "allow"),
+            ("stacked arm fixture", "gh pr merge 1023 --auto", "deny"),
+        ]
+        invocations = [
+            ("direct/root cwd", [sys.executable, str(guard_script)], repo_root),
+            ("direct/off-root cwd", [sys.executable, str(guard_script)], off_root_cwd),
+            ("settings/root cwd", ["bash", "-c", hook_command], repo_root),
+            ("settings/off-root cwd", ["bash", "-c", hook_command], off_root_cwd),
+        ]
+        for case_label, fixture_command, expected in fixture_cases:
+            payload = json.dumps({"tool_input": {"command": fixture_command}})
+            reference = None
+            for invocation_label, argv, cwd in invocations:
+                proc = subprocess.run(
+                    argv,
+                    cwd=cwd,
+                    env=fixture_env,
+                    input=payload,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                try:
+                    output = json.loads(proc.stdout)
+                    got = output["hookSpecificOutput"]["permissionDecision"]
+                except (KeyError, TypeError, json.JSONDecodeError):
+                    output = None
+                    got = None
+                if reference is None:
+                    reference = output
+                ok = proc.returncode == 0 and got == expected and output == reference
+                print(
+                    f"  [{'PASS' if ok else 'FAIL'}] {case_label}, "
+                    f"{invocation_label}: {got} (want {expected}, root-identical)"
+                )
+                if not ok:
+                    if proc.stderr:
+                        print(f"    stderr: {proc.stderr.strip()}")
+                    failures += 1
+
+        # A missing project script must produce an explicit allow with exit zero. A
+        # non-zero PreToolUse hook exit is fail-closed in Claude Code and caused the
+        # live all-Bash deadlock this regression test protects against.
+        unavailable_projects = [
+            ("missing guard script", fixture_root / "missing-project"),
+            ("unreadable guard script", fixture_root / "unreadable-project"),
+        ]
+        unavailable_projects[0][1].mkdir()
+        unreadable_scripts = unavailable_projects[1][1] / "scripts"
+        unreadable_scripts.mkdir(parents=True)
+        unreadable_guard = unreadable_scripts / "check-pr-arm-base.py"
+        unreadable_guard.write_text("raise SystemExit(1)\n", encoding="utf-8")
+        unreadable_guard.chmod(0o000)
+        unavailable_payload = json.dumps(
+            {"tool_input": {"command": "gh pr merge 1023 --auto"}}
+        )
+        for unavailable_label, project_dir in unavailable_projects:
+            unavailable_env = fixture_env.copy()
+            unavailable_env["CLAUDE_PROJECT_DIR"] = str(project_dir)
+            unavailable_proc = subprocess.run(
+                ["bash", "-c", hook_command],
+                cwd=off_root_cwd,
+                env=unavailable_env,
+                input=unavailable_payload,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            try:
+                unavailable_output = json.loads(unavailable_proc.stdout)
+                unavailable_decision = unavailable_output["hookSpecificOutput"][
+                    "permissionDecision"
+                ]
+            except (KeyError, TypeError, json.JSONDecodeError):
+                unavailable_decision = None
+            unavailable_ok = (
+                unavailable_proc.returncode == 0 and unavailable_decision == "allow"
+            )
+            print(
+                f"  [{'PASS' if unavailable_ok else 'FAIL'}] {unavailable_label}, "
+                f"off-root cwd: {unavailable_decision} (want allow + exit 0)"
+            )
+            if not unavailable_ok:
+                if unavailable_proc.stderr:
+                    print(f"    stderr: {unavailable_proc.stderr.strip()}")
+                failures += 1
 
     if failures:
         print(f"\nself-test: {failures} case(s) FAILED")
