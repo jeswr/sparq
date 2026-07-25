@@ -75,8 +75,8 @@ export default function ShaclSurfacePage() {
           </p>
         </>
       }
-      readmeHref="https://github.com/jeswr/sparq/tree/main/crates/sparq-shacl"
-      skillHref="https://github.com/jeswr/sparq/blob/main/skills/shacl-validation/SKILL.md"
+      readmeHref="https://github.com/sparq-org/sparq/tree/main/crates/sparq-shacl"
+      skillHref="https://github.com/sparq-org/sparq/blob/main/skills/shacl-validation/SKILL.md"
     >
       <ShaclPlayground />
     </SurfaceContent>
