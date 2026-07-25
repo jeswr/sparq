@@ -42,15 +42,24 @@ The gate covers **every newest Actions workflow run** and every external check-r
 head commit. As of this writing those expose the jobs below; this table is a map for
 reviewers, **not** a list of required checks.
 
-> **Advisory/informational checks are non-gating by NAME (sq-wjth).** `ci-summary`
-> excludes any check whose name contains the word `advisory` or `informational`
-> (case-insensitive) from the gating set — its conclusion, even `failure`, never blocks
-> a merge. So a job that should GATE must **not** put either word in its display name
-> (e.g. the clippy gate is named `clippy (gate) + fmt (non-blocking)`, *not*
-> `… (informational)`), and a new advisory/visibility-only job **should** carry one of
-> those words so the aggregator treats it as non-gating automatically. Note "advisories"
-> (plural, as in `cargo-deny (advisories + …)`) does **not** match `advisory`, so that
-> supply-chain check still gates correctly.
+> **Advisory checks are non-gating only when DECLARED (#3773).** `ci-summary` excludes a
+> check from the gating set **iff its name is a key in
+> [`.github/advisory-registry.json`](../.github/advisory-registry.json)** — its conclusion,
+> even `failure`, then never blocks a merge. **Everything else GATES**, whatever it is
+> called: a new job needs no naming ceremony to gate, and a visibility-only job must be
+> declared (with an `owner_bead`, `promotion_criteria`, `registered`, `workflow` and
+> `job_id`) or it will gate. `scripts/check-advisory-registry.py` enforces the registry's
+> integrity: C2 (a job whose *name* carries an `advisory`/`informational` token must be
+> declared or lose the token), C3 (a gate-classified python/shell/node/npm command inside a
+> declared job needs an explicit `gate_script_waiver`), C4 (each declaration binds to
+> `workflow` + `job_id` and must equal that job's **current** name — so a rename cannot
+> silently flip gating status; the renamed job gates, fail-closed).
+>
+> Until 2026-07-25 the aggregator instead inferred advisory status from the display name
+> matching `\b(advisory|informational)\b` (sq-wjth). That was removed in #3773: it silently
+> neutralised four real gates, because any job whose name happened to contain those words
+> was dropped from the gating set wholesale. The name token is now diagnostic only, and the
+> gate summary prints a loud note for any token-carrying check that has no declaration.
 
 From the **CI** workflow (`.github/workflows/ci.yml`):
 
@@ -95,7 +104,7 @@ From the binding/packaging workflows (when those surfaces are exercised):
 > maintainer-directed).** On a `pull_request` the `bench.yml` `run + track benchmarks` job runs the
 > FAST DETERMINISTIC form only (`ci-bench.sh --deterministic-only`): the byte-count / memory-layout
 > ratchet (store/dict/wasm bytes — a pure function of the code, immune to shared-runner noise) IS
-> aggregated by the gate (its name has no advisory token) and hard-fails the gate on a real
+> aggregated by the gate (it carries no advisory-registry declaration) and hard-fails the gate on a real
 > regression. `bench.yml` no longer triggers on `merge_group` at all — the deterministic ratchet
 > already ran on the PR head, re-runs on push-to-main, and the merged-tree wasm-feature-OFF invariant
 > is independently guarded on `merge_group` by `vectorized-feature-off.yml`'s `artifact-exact-equality`
@@ -233,8 +242,8 @@ belts (all in `scripts/ci_summary_gate.py`, unit-tested in
    only) `gate` check-run for that head.
 3. **The gate knows its tier.** Each `ci-summary` run derives its tier from its own
    trigger payload (`PR_DRAFT`), and the reusable `ci-select` job's check-run **name
-   carries a `", draft-tier"` marker** on draft-assembled runs (name-as-contract,
-   like the advisory rule).
+   carries a `", draft-tier"` marker** on draft-assembled runs (name-as-contract —
+   the one such contract left, now that #3773 removed the advisory NAME rule).
 4. **A full-tier gate refuses a draft-tier leg set — per INSTANCE.** `ci.yml`,
    `bench.yml`, `feature-matrix.yml` and `fuzz.yml` all call the same reusable
    `ci-select` job, so a head SHA carries up to **four** draft-marked selects
