@@ -47,6 +47,22 @@
 #   title     = "..."                      # required; issue title (placeholders expanded)
 #   body      = "..."                       # required; issue body (placeholders expanded)
 #   labels    = ["extra", "labels"]         # optional; `flow-on` + `auto` are ALWAYS added
+#
+# [FABLE-5] (#2474) On top of `flow-on` + `auto` + these labels, flow-on.py appends
+# role/priority/status ROUTING labels at creation via the shared static triage pass
+# (scripts/triage.py + a default priority:P3) — GITHUB_TOKEN-created issues fire no
+# `issues: opened` event, so triage-issue.yml can never label them post-hoc. Give a
+# template a `kind:*` label (see triage.py ROLE_BY_KIND) to steer its role; without
+# one the role falls back to type `task` → `role:impl` (a security keyword such as
+# `zk` still forces `role:soundness`).
+#
+# [OPUS-4.8] (#2474 CI-fix) Every template MUST also carry an `area:<crate>` label.
+# triage.py FAIL-CLOSES a no-area issue to `needs:area` + `status:untriaged` (a
+# no-area issue reserves the readiness engine's serializing `__global__` partition,
+# collapsing the whole dispatch frontier — scripts/triage.py / ready-issues.py), so
+# a follow-on without an area could never reach the `status:ready` this PR promises.
+# The area comes from the checked-in rule table (not third-party input), so setting
+# it here is sound; pick the crate/surface the follow-on's work actually lands in.
 # ---------------------------------------------------------------------------
 
 # --- New crate → benchmark + README + SKILL.md  [REMOVED — owned by gate G1] ----
@@ -89,7 +105,8 @@ when_paths = [
 [[rule.create]]
 dedup_key = "skill-sync-pr-{pr}"
 title = "docs: sync SKILL.md after public-surface change in PR #{pr}"
-labels = ["docs"]
+# [OPUS-4.8] area:docs → triage promotes to status:ready (role:docs) at creation.
+labels = ["docs", "kind:docs", "area:docs"]
 body = """
 Merged PR #{pr} ({pr_title}) changed a public surface (CLI / HTTP / Py / WASM)
 but did not touch any `skills/**/SKILL.md` in the same diff.
@@ -100,9 +117,12 @@ docs match the shipped surface. If no doc change is warranted, note why and clos
 """
 
 # --- New bench suite → dashboard row -------------------------------------------
-# Trigger: a brand-new `bench/<suite>/` directory (detected via an added
-# benchmarks.toml or run.sh under it). A capability suite should get a
-# FEATURED_SUITES row in the dashboard (produced out-of-band, so un-gateable).
+# Trigger: a brand-new REGISTERED `bench/<suite>/` directory (detected via an
+# added benchmarks.toml or run.sh under it, then resolved through the central
+# registry). Unregistered harnesses and entries already carrying
+# `featured = false` do not need a dashboard follow-on; this covers agent-token
+# research harnesses that emit no performance metrics. A capability suite should
+# get a FEATURED_SUITES row in the dashboard (produced out-of-band, so un-gateable).
 [[rule]]
 id = "new-bench-dashboard-row"
 description = "A new bench suite landed; add a dashboard FEATURED_SUITES row (or flag it unfeatured)."
@@ -111,7 +131,8 @@ when_new_paths = ["bench/*/benchmarks.toml", "bench/*/run.sh"]
 [[rule.create]]
 dedup_key = "dashboard-row-{suite}"
 title = "dashboard: add a FEATURED_SUITES row for bench suite {suite}"
-labels = ["docs", "dashboard"]
+# [OPUS-4.8] area:bench → triage promotes to status:ready (role:docs) at creation.
+labels = ["docs", "dashboard", "kind:docs", "area:bench"]
 body = """
 Merged PR #{pr} ({pr_title}) added a new bench suite `bench/{suite}`.
 
@@ -136,7 +157,8 @@ when_label = "competitor-relevant"
 [[rule.create]]
 dedup_key = "gather-pr-{pr}"
 title = "gather: refresh competitor baselines after PR #{pr}"
-labels = ["bench", "gather"]
+# [OPUS-4.8] area:bench → triage promotes to status:ready (role:perf) at creation.
+labels = ["bench", "gather", "kind:perf", "area:bench"]
 body = """
 Merged PR #{pr} ({pr_title}) touched a competitor-relevant engine/store path and
 was labelled `competitor-relevant`.
@@ -173,7 +195,8 @@ exclude_new_paths = ["zk/compose/**"]
 [[rule.create]]
 dedup_key = "zk-gatecount-{zk_circuit}"
 title = "zk: add a gate-count baseline for new circuit {zk_circuit}"
-labels = ["zk", "bench"]
+# [OPUS-4.8] area:sparq-zk → triage promotes to status:ready (role:soundness) at creation.
+labels = ["zk", "bench", "area:sparq-zk"]
 body = """
 Merged PR #{pr} ({pr_title}) added a new top-level ZK circuit `zk/{zk_circuit}`.
 

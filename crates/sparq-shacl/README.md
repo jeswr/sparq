@@ -88,9 +88,9 @@ and call `validate_with_model`. CLI: `cargo run -p sparq-shacl --example validat
 - **SHACL Compact Syntax parser (opt-in `scs`)** — `parse_scs(text, base)` /
   `parse_scs_to_graph(text, base)` turn a [W3C SHACL Compact Syntax](https://w3c.github.io/shacl/shacl-compact-syntax/)
   document into the same shapes triples `validate` consumes; round-trips **32/32** of the
-  vendored W3C `shacl12-cs` valid fixtures graph-isomorphically. A hand-rolled lexer +
-  recursive-descent parser over `SHACLC.g4` (full list in the SKILL); adds **zero new
-  dependencies**, returns a typed `ScsError` on unsupported constructs. Off ⇒ none compiles.
+  vendored W3C fixtures graph-isomorphically; zero new deps. Off ⇒ none compiles.
+- **Shapes-graph assembly (opt-in `imports`)** — `resolve_shapes_graph`/`resolve_imports`:
+  `sh:shapesGraph` + cycle-guarded `owl:imports` closure via a caller-supplied loader. Off ⇒ none compiles.
 
 ## 📚 Learn more
 

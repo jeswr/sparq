@@ -12,7 +12,7 @@
 
 use sparq_lws_core::ldp::content::{
     negotiate_accept, negotiate_accept_with_profile, parse_to_triples, serialize_triples,
-    JsonLdProfileParam, RdfFormat,
+    serialize_triples_negotiated, JsonLdProfileParam, NegotiatedFormat, RdfFormat,
 };
 
 const EXPANDED: &str = "http://www.w3.org/ns/json-ld#expanded";
@@ -211,6 +211,148 @@ fn jsonld_remote_context_is_rejected_not_fetched() {
         err.is_err(),
         "a remote @context must be rejected, got: {err:?}"
     );
+}
+
+// --- honouring the profile: Content-Type echo + document form (bead sq-10ty4) ----------------
+
+/// The negotiated outcome for an explicit `application/ld+json` range carrying `profile`.
+fn negotiated(profile_iri: &str) -> NegotiatedFormat {
+    negotiate_accept_with_profile(
+        Some(&format!("application/ld+json;profile=\"{profile_iri}\"")),
+        RdfFormat::Turtle,
+    )
+    .expect("acceptable")
+}
+
+#[test]
+fn content_type_echoes_the_honoured_profile_per_the_iana_registration() {
+    assert_eq!(
+        negotiated(COMPACTED).content_type(),
+        format!("application/ld+json;profile=\"{COMPACTED}\"")
+    );
+    assert_eq!(
+        negotiated(EXPANDED).content_type(),
+        format!("application/ld+json;profile=\"{EXPANDED}\"")
+    );
+    // No honoured profile ⇒ the bare media type (both formats).
+    let plain = negotiate_accept_with_profile(Some("application/ld+json"), RdfFormat::Turtle)
+        .expect("acceptable");
+    assert_eq!(plain.content_type(), "application/ld+json");
+    let turtle =
+        negotiate_accept_with_profile(Some("text/turtle"), RdfFormat::Turtle).expect("acceptable");
+    assert_eq!(turtle.content_type(), "text/turtle");
+}
+
+#[test]
+fn expanded_profile_output_is_the_default_serialisation_byte_for_byte() {
+    // The serialiser's default output IS the expanded document form (top-level array, no
+    // `@context`), so the expanded profile is honoured with byte-identical output — which is why
+    // it shares the plain-JSON-LD variant ETag.
+    let turtle = b"<https://pod.example/alice/data#me> <http://xmlns.com/foaf/0.1/name> \"Alice\" .";
+    let triples =
+        parse_to_triples(RdfFormat::Turtle, turtle, "https://pod.example/alice/data").unwrap();
+    let default = serialize_triples(RdfFormat::JsonLd, &triples).unwrap();
+    let expanded = serialize_triples_negotiated(negotiated(EXPANDED), &triples).unwrap();
+    assert_eq!(expanded, default);
+    // And it really is the expanded form: a top-level ARRAY of node objects.
+    let doc: serde_json::Value = serde_json::from_slice(&expanded).unwrap();
+    assert!(doc.is_array(), "expanded form is a top-level array: {doc}");
+}
+
+#[test]
+fn compacted_profile_output_is_genuinely_compacted_and_round_trips() {
+    // A resource with a plain literal, a typed literal, a language-tagged literal, an IRI object
+    // and a multi-valued property — covering every value-compaction rule.
+    let turtle = br#"@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+<https://pod.example/alice/data#me>
+    foaf:name "Alice" ;
+    foaf:age "30"^^<http://www.w3.org/2001/XMLSchema#integer> ;
+    foaf:label "Alice"@en ;
+    foaf:knows <https://pod.example/bob#me>, <https://pod.example/carol#me> .
+"#;
+    let triples =
+        parse_to_triples(RdfFormat::Turtle, turtle, "https://pod.example/alice/data").unwrap();
+    let bytes = serialize_triples_negotiated(negotiated(COMPACTED), &triples).unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    // Single subject ⇒ the top-level value is the node object itself (no @graph wrapper).
+    let node = doc
+        .as_object()
+        .expect("a single-subject document compacts to the node object");
+    assert_eq!(
+        node.get("@id").and_then(|v| v.as_str()),
+        Some("https://pod.example/alice/data#me")
+    );
+    // A lone plain-string @value compacts to the bare string (no array, no value object)…
+    assert_eq!(
+        node.get("http://xmlns.com/foaf/0.1/name"),
+        Some(&serde_json::json!("Alice"))
+    );
+    // …a typed literal keeps its value object (the @type must survive)…
+    assert_eq!(
+        node.get("http://xmlns.com/foaf/0.1/age"),
+        Some(&serde_json::json!({
+            "@type": "http://www.w3.org/2001/XMLSchema#integer",
+            "@value": "30"
+        }))
+    );
+    // …a language-tagged literal keeps its value object…
+    assert_eq!(
+        node.get("http://xmlns.com/foaf/0.1/label"),
+        Some(&serde_json::json!({"@language": "en", "@value": "Alice"}))
+    );
+    // …and a multi-valued property stays an array (of compacted node references).
+    assert_eq!(
+        node.get("http://xmlns.com/foaf/0.1/knows"),
+        Some(&serde_json::json!([
+            {"@id": "https://pod.example/bob#me"},
+            {"@id": "https://pod.example/carol#me"}
+        ]))
+    );
+
+    // The compacted document still parses back (locally — no context, nothing to fetch) to the
+    // SAME triples, so compaction preserves both the content and the SSRF posture.
+    let mut reparsed =
+        parse_to_triples(RdfFormat::JsonLd, &bytes, "https://pod.example/alice/data").unwrap();
+    let mut expected = triples.clone();
+    reparsed.sort_by_key(|t| t.to_string());
+    expected.sort_by_key(|t| t.to_string());
+    assert_eq!(reparsed, expected);
+}
+
+#[test]
+fn compacted_multi_subject_document_wraps_in_graph() {
+    let turtle = br#"<https://pod.example/a> <http://xmlns.com/foaf/0.1/name> "A" .
+<https://pod.example/b> <http://xmlns.com/foaf/0.1/name> "B" .
+"#;
+    let triples =
+        parse_to_triples(RdfFormat::Turtle, turtle, "https://pod.example/alice/data").unwrap();
+    let bytes = serialize_triples_negotiated(negotiated(COMPACTED), &triples).unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let graph = doc
+        .get("@graph")
+        .and_then(|v| v.as_array())
+        .expect("a multi-subject document compacts to {\"@graph\": [...]}");
+    assert_eq!(graph.len(), 2);
+    // Each member is a compacted node object.
+    assert_eq!(
+        graph[0].get("http://xmlns.com/foaf/0.1/name"),
+        Some(&serde_json::json!("A"))
+    );
+}
+
+#[test]
+fn variant_suffix_is_profile_specific_only_when_the_bytes_differ() {
+    // Compacted output differs from the default serialisation ⇒ a DISTINCT variant suffix;
+    // expanded output is byte-identical to it ⇒ the SAME suffix as plain JSON-LD.
+    let plain = negotiate_accept_with_profile(Some("application/ld+json"), RdfFormat::Turtle)
+        .expect("acceptable");
+    assert_eq!(plain.variant_suffix(), "jsonld");
+    assert_eq!(negotiated(EXPANDED).variant_suffix(), "jsonld");
+    assert_eq!(negotiated(COMPACTED).variant_suffix(), "jsonld-c");
+    let turtle =
+        negotiate_accept_with_profile(Some("text/turtle"), RdfFormat::JsonLd).expect("acceptable");
+    assert_eq!(turtle.variant_suffix(), "ttl");
 }
 
 #[test]

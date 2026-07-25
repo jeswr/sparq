@@ -57,7 +57,10 @@ const RDFS_SUB_PROPERTY_OF: &str = "http://www.w3.org/2000/01/rdf-schema#subProp
 /// self-restrictions** (sq-pbz04.2.6: `owl:hasSelf "true"^^xsd:boolean` — the `∃r.Self` local
 /// reflexivity concept, completion rules **CR-Self**); with
 /// the `rbox` feature it adds the RBox role automaton (`rdfs:subPropertyOf` role inclusions,
-/// `owl:propertyChainAxiom` chains, `owl:TransitiveProperty` — completion rules CR10/CR11).
+/// `owl:propertyChainAxiom` chains, `owl:TransitiveProperty` — completion rules CR10/CR11);
+/// completeness there additionally assumes a REGULAR told RBox — a non-regular one (forbidden
+/// by the OWL 2 global restrictions) is flagged via the `rbox_non_regular` field, not silently
+/// classified as if complete.
 /// Axioms using constructs outside the active fragment are NOT applied and their class-axiom
 /// occurrences are counted in [`Report::skipped_axioms`] (honest incompleteness rather than a
 /// silent wrong answer). Two kinds of skip are distinguished by the EL theory:
@@ -127,6 +130,22 @@ pub struct Report {
     /// typed `Classifier::classify` API leaves it `0`.
     #[cfg(feature = "rbox")]
     pub emitted_role_subsumptions: usize,
+    /// [SONNET-4.6] sq-oj06v (`rbox`): honest RBox-regularity flag — `true` when the TOLD RBox
+    /// (role inclusions + property chains + transitive roles) is NOT regular, i.e. its
+    /// dependency graph has a cycle through a property-chain constraint (detected by
+    /// `rbox::told_rbox_regular` over the pre-binarization axioms). The OWL 2 global
+    /// restrictions forbid such an RBox; the CR10/CR11 saturation still TERMINATES and every
+    /// derived subsumption stays SOUND, but the EL+ completeness argument assumes regularity —
+    /// so when this is `true` the classification MAY BE INCOMPLETE (the `skipped_axioms`
+    /// honesty posture: flagged, never silently wrong). Conservative: told-inclusion edges
+    /// participate in the cycle detection, so a chain constraint fed back through an inclusion
+    /// is also flagged; pure inclusion cycles (equivalent roles), binary transitivity
+    /// (`r ∘ r ⊑ r`), and chains with an `owl:topObjectProperty` superproperty (normatively
+    /// admissible, unconditionally) are NOT. Set by every extraction-based entry (`Classifier::classify`,
+    /// `classify_graph`, their `par` twins, and the `abox` realiser); `false` on a regular or
+    /// RBox-free input, and absent (like the whole role automaton) without the `rbox` feature.
+    #[cfg(feature = "rbox")]
+    pub rbox_non_regular: bool,
 }
 
 /// The complete class-subsumption lattice for the named classes of a TBox, as a typed view

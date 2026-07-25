@@ -122,7 +122,7 @@
 # waits on it. This lane is INFORMATIONAL / NON-BLOCKING, exactly the nightly-safety-net posture
 # of miri.yml + asan.yml + the nightly fuzz tier. (Each matrix job is ALSO belt-and-braces named
 # "…, informational" so that even if the lane were ever wired onto a PR ref it would be excluded
-# from the gate by the ci-summary `\b(advisory|informational)\b` rule.)
+# from the gate by its .github/advisory-registry.json declaration — #3773.)
 #
 # Third-party actions are pinned by full commit SHA (supply-chain hardening); the trailing
 # `# vX.Y.Z` comment is what Dependabot follows to bump the pin. Pins + the pinned nightly

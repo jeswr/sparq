@@ -492,7 +492,7 @@ impl SolidMcpServer {
     fn dispatch(&mut self, req: &Request) -> Result<Value, RpcError> {
         match req.method.as_str() {
             "initialize" => Ok(json!({
-                "protocolVersion": crate::server::PROTOCOL_VERSION,
+                "protocolVersion": crate::server::negotiate_protocol_version(&req.params),
                 "capabilities": { "tools": {} },
                 "serverInfo": {
                     "name": self.config.server_name,

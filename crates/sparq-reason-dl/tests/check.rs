@@ -271,10 +271,11 @@ fn el_consistent_for_top_free_tbox() {
 // -------------------------------------------------------------------------------------------
 
 #[test]
+#[cfg(not(feature = "dispatch_ql"))]
 fn ql_always_pending() {
     // In QL (super-∃ with a named filler kills RL; the complement kills EL), so the QL
-    // branch owns it — and QL consistency is wholly deferred (sq-pbz04.3.4), never decided
-    // here.
+    // branch owns it — and without `dispatch_ql` QL consistency is wholly deferred
+    // (engaged opt-in via sparq-reason-ql, sq-fj8lj), never decided here.
     let (verdict, branch) = check(
         ":A rdfs:subClassOf [ owl:onProperty :r ; owl:someValuesFrom :B ] . \
          :C rdfs:subClassOf [ owl:complementOf :D ] .",
@@ -284,6 +285,65 @@ fn ql_always_pending() {
         ConsistencyVerdict::Unknown(UnknownReason::QlConsistencyPending)
     );
     assert_eq!(branch, Branch::QlDeferred);
+}
+
+// [FABLE-5] sq-fj8lj acceptance: with `dispatch_ql` the QL branch delegates to the
+// sparq-reason-ql DL-Lite_R checker (its OWN capture accounting owns the verdict) instead of
+// abstaining `QlConsistencyPending`. Every graph below is in-QL but NOT in-RL/EL, so the QL
+// branch owns it (the complement kills EL; the super-∃ kills RL).
+#[cfg(feature = "dispatch_ql")]
+mod dispatch_ql {
+    use super::*;
+
+    // The complement + super-∃ shape (the routing witness) is NOT fully captured by the QL
+    // crate's DL-Lite_R extraction (a subClassOf-complement RHS is skipped; complementOf is
+    // structurally uncaptured), so with no violation found the branch abstains fail-closed
+    // with the QL crate's own gap accounting — never a guessed Consistent.
+    #[test]
+    fn ql_capture_gap_abstains_fail_closed() {
+        let (verdict, branch) = check(
+            ":A rdfs:subClassOf [ owl:onProperty :r ; owl:someValuesFrom :B ] . \
+             :C rdfs:subClassOf [ owl:complementOf :D ] .",
+        );
+        assert_eq!(branch, Branch::QlConsistency);
+        let ConsistencyVerdict::Unknown(UnknownReason::QlCaptureGap(_)) = verdict else {
+            panic!("expected Unknown(QlCaptureGap(_)), got {:?}", verdict);
+        };
+    }
+
+    // A violated captured disjointness graduates to a DEFINITIVE Inconsistent: sound at any
+    // capture level (monotonicity), even though the same graph's complement axiom blocks a
+    // Consistent claim. This was Unknown(QlConsistencyPending) before sq-fj8lj.
+    #[test]
+    fn ql_disjointness_violation_is_inconsistent() {
+        let (verdict, branch) = check(
+            ":C rdfs:subClassOf [ owl:complementOf :D ] . \
+             :A rdfs:subClassOf [ owl:onProperty :r ; owl:someValuesFrom owl:Thing ] . \
+             :E owl:disjointWith :F . \
+             :i rdf:type :E . \
+             :i rdf:type :F .",
+        );
+        assert_eq!(branch, Branch::QlConsistency);
+        assert_eq!(verdict, ConsistencyVerdict::Inconsistent);
+        // MUTATION WITNESS: drop the second :i typing and the violation disappears — the
+        // remaining complement axiom keeps the verdict an honest capture-gap abstention,
+        // pinning that Inconsistent above was carried by the violation query.
+        let (verdict, branch) = check(
+            ":C rdfs:subClassOf [ owl:complementOf :D ] . \
+             :A rdfs:subClassOf [ owl:onProperty :r ; owl:someValuesFrom owl:Thing ] . \
+             :E owl:disjointWith :F . \
+             :i rdf:type :E .",
+        );
+        assert_eq!(branch, Branch::QlConsistency);
+        assert!(
+            matches!(
+                verdict,
+                ConsistencyVerdict::Unknown(UnknownReason::QlCaptureGap(_))
+            ),
+            "expected Unknown(QlCaptureGap(_)), got {:?}",
+            verdict
+        );
+    }
 }
 
 #[test]

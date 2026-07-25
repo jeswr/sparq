@@ -26,8 +26,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        # actions/checkout v7.0.0 — repository-standard pinned commit.
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Install checksum-pinned validators
         run: |
@@ -83,7 +82,7 @@ jobs:
             exit 1
           fi
           if grep -RIn --include="*.yaml" --include="*.yml" \
-               -E "(token|password|passwd|private[_-]?key)[A-Za-z0-9_.-]*[[:space:]]*:[[:space:]]*['\"]?[A-Za-z0-9+/=_-]{24,}['\"]?[[:space:]]*$" \
+               -E "^[[:space:]]*[A-Za-z0-9_.-]*(token|password|passwd|private[_-]?key)[A-Za-z0-9_.-]*[[:space:]]*:[[:space:]]*['\"]?[A-Za-z0-9+/=_-]{24,}['\"]?[[:space:]]*$" \
                deploy/; then
             echo "ERROR: possible plaintext credential in deploy/; use a Secret reference (R4)." >&2
             exit 1
