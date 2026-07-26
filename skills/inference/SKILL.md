@@ -264,7 +264,13 @@ non-`ON` aggregate-body vars are aggregate-local (name collisions rejected). `CO
 counts distinct full-body matches per group; `COUNT(DISTINCT ?v)` de-duplicates the
 projected value within each group. Counts mint `xsd:integer` literals. `SUM`
 and `AVG` follow SPARQL numeric promotion (`AVG` of integers is `xsd:decimal`), while
-`MIN`/`MAX` preserve the original extremal term id. Semi-naive rounds run per stratum.
+`MIN`/`MAX` preserve the original extremal term id. `xsd:float`/`xsd:double` operands
+are accepted (not rejected) on all four, so `SUM`/`AVG` can emit float/double; because
+float addition is not associative the fold order is PINNED to ascending value, ties
+broken by RDF-term CONTENT (datatype, then lexical form — not by dictionary id, which
+follows interning order), and `MIN`/`MAX` order `NaN` below `-INF` (`NaN` is not a row
+failure here, unlike `FILTER`) with `+0.0`/`-0.0` a content-broken tie — so the closure
+is a function of the completed lower strata, not of derivation order. Semi-naive rounds run per stratum.
 Incremental maintenance is differential-pinned (closure == from-scratch `eval` after
 every randomized insert/delete step) and skips strata whose input predicates did not
 change; its per-update set/index bookkeeping is O(affected visible input) — the
