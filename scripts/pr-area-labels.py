@@ -57,9 +57,6 @@ WORKSPACE_MANIFEST = REPO_ROOT / "Cargo.toml"
 GLOBAL = "__global__"          # mirrors ready-issues.py / dispatch-claim.py
 AREA_PREFIX = "area:"
 CRATES_DIR = "crates"
-# Reasons the deriver declines to narrow a PR. Every one of these means "stay on
-# __global__"; they are distinguished only so the log says WHY.
-FAIL_CLOSED = ("no-paths", "unresolved", "cross-cutting")
 
 
 class PolicyError(RuntimeError):
@@ -191,6 +188,11 @@ def derive_areas(paths, policy, known_areas):
     `known_areas` is the set of area names for which an `area:<name>` label ACTUALLY
     exists in the repo; an area outside it is treated as unresolved, because applying
     it would silently create a label (see module docstring).
+
+    The reason vocabulary is exactly {"resolved", "no-paths", "unresolved",
+    "cross-cutting"}; the latter three all mean "emit nothing, stay on `__global__`" and
+    are distinguished only so the log says WHY. Callers branch on `== "resolved"`, so a
+    future reason is fail-closed by construction.
     """
     if not paths:
         return frozenset(), "no-paths"
