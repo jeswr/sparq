@@ -283,8 +283,8 @@
       "floor_basis": "pass",
       "is_extension": false,
       "label": "W3C RIF WG Core test suite",
-      "note": "the W3C RIF WG test cases (Core dialect, pinned Core_v1.22 archive) driven end-to-end through the real RIF/XML import -> validate -> closure -> conclusion oracle; an HONEST-denominator standards lane (the printed skip taxonomy is the honesty), NET-vacuity-guarded, floor = the MEASURED pass count (3 at the sq-n7y15 positional-Atom importer, rise-ready)",
-      "ratchet_floor": 3,
+      "note": "the W3C RIF WG test cases (Core dialect, pinned Core_v1.22 archive) driven end-to-end through the real RIF/XML import -> validate -> closure -> conclusion oracle; an HONEST-denominator standards lane (the printed skip taxonomy is the honesty), NET-vacuity-guarded, floor = the MEASURED pass count (5 at the sq-jsgyn multi-slot-frame importer, rise-ready)",
+      "ratchet_floor": 5,
       "runner": {
         "crate": "sparq-conformance",
         "feature": "rif-wg-core",
@@ -560,7 +560,7 @@
   ],
   "title": "sparq conformance scoreboard",
   "totals": {
-    "conformance_floor_total": 5313,
+    "conformance_floor_total": 5315,
     "conformance_suites": 25,
     "extension_assertion_total": 19663,
     "extension_suites": 11
