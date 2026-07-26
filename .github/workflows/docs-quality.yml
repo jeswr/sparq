@@ -758,8 +758,8 @@ jobs:
       # [GPT-5] #3770 — structural backstop for the recurring failure-swallow shape:
       # once a sweep records a hard failure, a later transient exception must never
       # short-circuit to exit 0. The hermetic fixture reproduces exactly that
-      # interleaving; enforcement audits every Python script.
-      - name: Self-test sticky-failure exit lint (#3770 interleaved sequence)
+      # interleaving; enforcement audits every Python script under scripts/.
+      - name: Self-test sticky-failure exit lint (#3770 cross-function sequence)
         run: python3 scripts/check-sticky-failure-exits.py --self-test
       - name: "Reject exception handlers that erase collected failures (#3770) — GATING"
         run: python3 scripts/check-sticky-failure-exits.py
