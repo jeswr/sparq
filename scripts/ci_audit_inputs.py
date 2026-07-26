@@ -107,27 +107,30 @@ class Residual:
 
 
 # --- acknowledged residuals (audit-proven; each has a fix bead) --------------
-# [FABLE-5] sq-m4bxc closed the two sibling-crate include residuals (sparq-zk ->
-# secprop-ext.ttl, sparq-reason -> sparq-solid/rules) with the ci_select
-# additional-readers mechanism (a `readers` entry in ci/path-ownership.toml
-# unions the extra reader into the affected set — monotone, fail-safe). They are
-# now COVERED "additional-readers map" below, not acknowledged. Residual 3 stays:
-# scoreboard_floors.rs reads sibling TEST SOURCES at a runtime-computed workspace
-# path; a `readers` entry cannot cover a statically-unresolvable ('.') read, and
-# the sound fix is a shared floors crate — its own design pass (see the fix bead).
-KNOWN_RESIDUALS: tuple[Residual, ...] = (
-    Residual(
-        "sparq-conformance",
-        ".",
-        "scoreboard_floors.rs reads sibling-crate test sources at a "
-        "runtime-computed workspace path to keep floor constants in sync "
-        "(sparq-shacl/sparq-geo are dep-covered; sparq-solid is not). The path "
-        "is statically unresolvable (a runtime arg), so the additional-readers "
-        "mechanism cannot attribute it. Backstop: nightly FULL run (design §6.1). "
-        "Fix: sq-z1xv8 (shared floors crate consumed by the conformance runner "
-        "tests instead of reading foreign test sources — own design pass).",
-    ),
-)
+# EMPTY — every out-of-crate input in the workspace is now COVERED (a full-run
+# trigger, an ownership-map attribution, a reverse-dependency closure, or an
+# additional-readers union). Keep it that way: a NEW uncovered read must be fixed
+# or attributed, not acknowledged, unless neither is genuinely available. If you do
+# add an entry, give it a justification AND a fix bead — and note that a residual
+# matching no discovered read is reported STALE, so a fixed one cannot linger.
+#
+# History (both closed by input-relocation-shaped fixes, not by weakening a gate):
+# * [FABLE-5] sq-m4bxc closed the two sibling-crate include residuals (sparq-zk ->
+#   secprop-ext.ttl, sparq-reason -> sparq-solid/rules) with the ci_select
+#   additional-readers mechanism (a `readers` entry in ci/path-ownership.toml
+#   unions the extra reader into the affected set — monotone, fail-safe). They are
+#   now COVERED "additional-readers map".
+# * [SONNET-4.6] sq-z1xv8 closed residual 3: sparq-conformance's
+#   tests/scoreboard_floors.rs read SIBLING-CRATE TEST SOURCES at a
+#   runtime-computed workspace path (statically unresolvable, so it collapsed to
+#   '.' and no `readers` entry could attribute it). The eleven affected floors moved
+#   into the zero-dependency `sparq-conformance-floors` crate, imported by BOTH the
+#   enforcing runner and sparq-conformance's scoreboard registry, so the guard reads
+#   no foreign source at all and the cargo edges put every enforcing crate in the
+#   floors crate's reverse-dependency closure. The surviving textual reads are
+#   crate-local (rooted at CARGO_MANIFEST_DIR), pinned by that guard's
+#   `textual_guard_reads_only_crate_local_sources` test.
+KNOWN_RESIDUALS: tuple[Residual, ...] = ()
 
 
 # --- discovery ---------------------------------------------------------------

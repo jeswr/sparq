@@ -29,6 +29,16 @@ reported. Count-comparable surface + first-read verdict:
 `rsp4j/Rsp4jReplayRunner.java` + `gather-rsp4j.sh` (the gather-time engine leg),
 `rsp4j-smoke.sh` (fast no-JVM smoke incl. the replay-fidelity guard).
 
+The count-comparable surface is **still `srbench_join` alone**. `sq-rpdae` evaluated whether
+RSP4J's `csparql2` module — whose `R2ROperatorSPARQL` runs full SPARQL (aggregates, `GROUP BY`)
+via Jena — could widen it, and the answer is **no**: csparql2 deadlocks under an externally
+driven clock (an upstream unclosed `SafeIterator`), its multi-window scenarios emit zero rows,
+and its single-window aggregate counts agree only *contingently* because its Esper sliding
+`win:time` is not boundary-aligned with the oracle's window. Where a count-match does pass, the
+gate now carries that qualification machine-readably via `rsp4j_compare.py --protocol-caveat`
+(envelope **and** every row), so it can never be read as a clean widening. Full verdict,
+evidence and the **CityBench dialect-mapping note**: `research/gap-rsp-2026-07.md`.
+
 ## The gate: per-window result-row counts (clock-free → deterministic)
 
 Because the pipeline is clock-free, replaying a **fixed `(triple, ts)` script**
@@ -107,6 +117,7 @@ gate. The fuller `EvalMode` head-to-head (1 M readings, all scenarios) lives in
 | `replay/*.ts.tsv` | the pinned timestamped replays (exports of the oracle's in-code scripts) both engines are driven from |
 | `rsp4j_compare.py` + `test_rsp4j_compare.py` | count-match gate + envelope emitter (+ replay-fidelity guard tests, stdlib-only) |
 | `rsp4j/Rsp4jReplayRunner.java` + `gather-rsp4j.sh` | gather-time RSP4J/YASPER replay driver (pinned build; never in CI) |
+| `rsp4j/Csparql2ReplayRunner.java` + `gather-csparql2.sh` | gather-time RSP4J/**csparql2** (full-SPARQL Jena/Esper R2R) driver — the reproduction artifact for the sq-rpdae verdict below, not a widened surface |
 | `rsp4j-smoke.sh` | fast no-JVM protocol smoke (fidelity guard + positive/negative gate paths) |
 
 ## Run it

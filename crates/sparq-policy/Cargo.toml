@@ -64,3 +64,12 @@ secprop-leftoperands = []
 # [GPT-5.6] sq-mu4au: deterministic, read-only aggregation of already-computed
 # authorization decisions. OFF by default and std-only; does not alter evaluation.
 decision-report = []
+
+[dev-dependencies]
+# [SONNET-4.6] sq-z1xv8 — the shared ratchet-floor constants. DEV-ONLY (zero-dep,
+# `publish = false`): the conformance ratchet floor this crate's test runner enforces is
+# the SAME `const` sparq-conformance's central scoreboard reports, so the two cannot
+# drift, and the dep edge puts this crate in the floors crate's reverse-dependency
+# closure (which is what makes CI test-selection sound for the floor — it replaces the
+# guard test's old runtime read of this file's source).
+sparq-conformance-floors = { path = "../sparq-conformance-floors" }

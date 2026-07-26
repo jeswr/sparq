@@ -625,28 +625,92 @@ pub fn classify(sat: &Saturation, names: &Names) -> Classification {
 // `Saturation`, `AxiomIndex` and `Names` are plain owned maps/vecs (no interior
 // mutability), hence `Sync`; the scoped borrows need no `unsafe` (the crate forbids it).
 
+/// [SONNET-4.6] sq-q0o82 (E4 follow-up): per-phase attribution for one parallel-saturation
+/// run — the MEASUREMENT the "should the apply phase be parallelised too?" question is
+/// decided on. (`saturate_par`, `add`, `add_link` and `add_link_rbox` below are private-module
+/// items, so they are code spans, never intra-doc links: this type is public through the
+/// crate-root re-export, so its docs must stay resolvable under the all-features rustdoc gate.)
+///
+/// The E4 engine parallelises only the COMPUTE phase (membership-triggered rule derivation
+/// against the round-start snapshot); the APPLY phase (`add` / `add_link`, and under `rbox`
+/// the CR10/CR11 closure inside `add_link_rbox`) stays sequential. Refining apply is only
+/// worth its determinism risk if apply actually dominates on a real ontology, so this struct
+/// exposes the split instead of guessing.
+///
+/// # Which fields are deterministic
+///
+/// `rounds`, `frontier_items`, `derived_members` and `derived_links` are a pure function of
+/// the input ontology and are INDEPENDENT of `threads`: chunking changes which worker
+/// derives a conclusion, never which conclusions are derived (each frontier item probes the
+/// same round-start snapshot in every partition). `tests/par_differential.rs` pins that
+/// invariance, so these counters are safe to assert on.
+///
+/// `compute_nanos` / `apply_nanos` are wall-clock and therefore NOT deterministic and NOT
+/// canonical — a contended box inflates both. Use them as a RATIO ([`ParPhaseStats::apply_fraction`]),
+/// never as an absolute figure, and never bake one into documentation.
+#[cfg(feature = "par")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ParPhaseStats {
+    /// Bulk-synchronous compute/apply rounds executed (one per drained frontier).
+    pub rounds: u64,
+    /// Total membership pairs `(X, D)` fed to the compute phase across all rounds.
+    pub frontier_items: u64,
+    /// Membership conclusions `E ∈ S(X)` emitted by the compute phase (pre-dedup: the apply
+    /// phase absorbs duplicates through the same set-insert as the sequential engine).
+    pub derived_members: u64,
+    /// Link conclusions `(X, F) ∈ R(r)` emitted by the compute phase (pre-dedup).
+    pub derived_links: u64,
+    /// Wall-clock nanoseconds spent in the PARALLEL compute phase. Non-canonical (see above).
+    pub compute_nanos: u64,
+    /// Wall-clock nanoseconds spent in the SEQUENTIAL apply phase. Non-canonical (see above).
+    pub apply_nanos: u64,
+}
+
+#[cfg(feature = "par")]
+impl ParPhaseStats {
+    /// Share of measured saturation time spent in the SEQUENTIAL apply phase, in `0.0..=1.0`.
+    /// This is the decision metric: a fraction near 1 means parallelising compute alone is
+    /// Amdahl-bound and an apply-phase refinement is worth its determinism risk; a small
+    /// fraction means it is not. Returns `0.0` when neither phase was measured (an empty
+    /// ontology derives nothing, so both timers stay at zero).
+    ///
+    /// The fields are public, so both timers may hold `u64::MAX`; the denominator is summed
+    /// in `u128` so the result stays in range instead of panicking (debug) or wrapping to a
+    /// division by zero (release).
+    pub fn apply_fraction(&self) -> f64 {
+        let total = u128::from(self.compute_nanos) + u128::from(self.apply_nanos);
+        if total == 0 {
+            return 0.0;
+        }
+        self.apply_nanos as f64 / total as f64
+    }
+}
+
 /// [FABLE-5] sq-wy3i6 (E4, `par` + `rbox`): parallel CR1–CR6 + CR10/CR11 saturation. Same
 /// least fixpoint as [`saturate`] for every `threads` value — see the module-tail design
 /// note. `threads` is the worker-pool BOUND (small frontiers use fewer workers, never more).
+/// Also returns the [`ParPhaseStats`] compute/apply attribution (sq-q0o82); the saturation
+/// itself is byte-identical with or without reading the stats.
 #[cfg(all(feature = "par", feature = "rbox"))]
 pub fn saturate_par(
     axioms: &[Normal],
     names: &Names,
     role_box: &RoleBox,
     threads: std::num::NonZeroUsize,
-) -> Saturation {
+) -> (Saturation, ParPhaseStats) {
     saturate_par_inner(axioms, names, role_box, threads)
 }
 
 /// [FABLE-5] sq-wy3i6 (E4, `par` without `rbox`): parallel CR1–CR6 saturation (roles compared
 /// for equality only, exactly like the sequential E1 entry point). Same least fixpoint as
-/// [`saturate`] for every `threads` value — see the module-tail design note.
+/// [`saturate`] for every `threads` value — see the module-tail design note. Also returns the
+/// [`ParPhaseStats`] compute/apply attribution (sq-q0o82).
 #[cfg(all(feature = "par", not(feature = "rbox")))]
 pub fn saturate_par(
     axioms: &[Normal],
     names: &Names,
     threads: std::num::NonZeroUsize,
-) -> Saturation {
+) -> (Saturation, ParPhaseStats) {
     saturate_par_inner(axioms, names, threads)
 }
 
@@ -659,7 +723,7 @@ fn saturate_par_inner(
     names: &Names,
     #[cfg(feature = "rbox")] role_box: &RoleBox,
     threads: std::num::NonZeroUsize,
-) -> Saturation {
+) -> (Saturation, ParPhaseStats) {
     let ix = AxiomIndex::build(axioms);
     let n = names.concept_count();
     let has_self = names.has_self_restrictions();
@@ -679,15 +743,28 @@ fn saturate_par_inner(
         }
     }
 
+    // [SONNET-4.6] sq-q0o82: per-phase attribution. The counters below are pure bookkeeping
+    // (two `Instant` reads per round, negligible beside a round's rule work) and change
+    // neither the frontier order nor the applied conclusions — the closure stays the one
+    // `saturate_inner` computes, at every thread count.
+    let mut stats = ParPhaseStats::default();
+
     loop {
         while !queue.is_empty() {
             let frontier = std::mem::take(&mut queue);
+            stats.rounds += 1;
+            stats.frontier_items += frontier.len() as u64;
             // COMPUTE (parallel, read-only against the round-start snapshot).
+            let t_compute = std::time::Instant::now();
             let derived = derive_frontier(&sat, &ix, names, has_self, &frontier, threads);
+            stats.compute_nanos += elapsed_nanos(t_compute);
             // APPLY (sequential, deterministic chunk order) — reuses the single-threaded
             // machinery so link-triggered CR4/CR5 (+ CR10/CR11 under `rbox`) fire exactly
             // as in `saturate_inner`; new insertions refill `queue` for the next round.
+            let t_apply = std::time::Instant::now();
             for chunk in derived {
+                stats.derived_members += chunk.members.len() as u64;
+                stats.derived_links += chunk.links.len() as u64;
                 for (x, e) in chunk.members {
                     add(&mut sat.s[x as usize], x, e, &mut queue);
                 }
@@ -698,12 +775,20 @@ fn saturate_par_inner(
                     add_link(&mut sat, r, x, f, &ix, names, &mut queue);
                 }
             }
+            stats.apply_nanos += elapsed_nanos(t_apply);
         }
         if !cr6_pass(&mut sat, names, &mut queue) {
             break;
         }
     }
-    sat
+    (sat, stats)
+}
+
+/// Nanoseconds since `since`, saturated into `u64` (~584 years of headroom — a saturating
+/// conversion keeps the counter monotone instead of wrapping on an absurd clock reading).
+#[cfg(feature = "par")]
+fn elapsed_nanos(since: std::time::Instant) -> u64 {
+    u64::try_from(since.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 /// One worker chunk's derivations, kept separate per chunk so the apply phase preserves

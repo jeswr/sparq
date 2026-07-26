@@ -45,7 +45,7 @@ pub mod params;
 #[cfg(feature = "paths")]
 pub mod paths;
 #[cfg(feature = "paths")]
-pub use paths::{enumerate_paths, PathMode, PathSolution, PathSpec, Via};
+pub use paths::{enumerate_paths, Endpoint, PathMode, PathSolution, PathSpec, Via};
 // [GPT-5.6] (sq-lsp7k.3.2) Dedicated non-standard PATHS syntax. The ordinary
 // SPARQL parser remains untouched, so this surface is available only by explicit opt-in.
 #[cfg(feature = "paths")]

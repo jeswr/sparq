@@ -23,6 +23,37 @@
 //!   gated behind the SAME off-by-default write enablement as the base server's
 //!   `update` tool ([`SolidServerConfig::allow_update`], draft §7.1).
 //!
+//! # The `resources` surface + notifications (Class N, draft §8 / §10)
+//!
+//! [SONNET-4.6] sq-cmjmr — the pod server declares the MCP **`resources`** capability
+//! with **`subscribe: true`** and binds it to Solid Notifications Protocol semantics:
+//!
+//! - `resources/list` — the pod documents THIS session may read, one MCP resource per
+//!   document with `uri` = the resource IRI. A document the session cannot read is
+//!   simply absent (never an entry, never an error), so the listing itself is the
+//!   authorization boundary.
+//! - `resources/read` — the same bytes [`SolidMcpServer`]'s `resource_get` tool serves,
+//!   from the same dataset the `query` tool evaluates over.
+//! - `resources/subscribe` / `resources/unsubscribe` — a subscription on the topic IRI,
+//!   the MCP-side spelling of a Solid Notifications subscription on that topic.
+//! - `notifications/resources/updated` — emitted when a subscribed topic's state
+//!   changes. The payload is **content-free**: the topic IRI plus an ActivityStreams 2.0
+//!   activity type (`Create`/`Update`/`Delete`/`Add`/`Remove`), never the triples. The
+//!   subscriber re-reads through the authorized read path.
+//!
+//! **Authorization is checked twice** (draft §10): once when the subscription is created
+//! (no read access ⇒ the same existence-non-disclosure not-found error described below,
+//! so subscribing cannot probe for resources) and AGAIN before every
+//! single delivery. If the session's read access is revoked after subscribing, deliveries
+//! simply stop — the client is **never told**, because a revocation notification would
+//! itself disclose that a resource it can no longer read had changed. If access is later
+//! restored, deliveries resume; the subscription is not silently torn down.
+//!
+//! Delivery is pull-based, matching this crate's transport-agnostic dispatch core: a
+//! mutating tool call queues the notifications it caused, and the embedder drains them
+//! with [`SolidMcpServer::take_notifications`] after each
+//! [`SolidMcpServer::handle_message`], writing them to its transport.
+//!
 //! # Existence non-disclosure (draft §9.3)
 //!
 //! For every resource-addressed tool, a session **lacking read access to the target
@@ -56,6 +87,7 @@
 //! - Time-windowed conditional grants fail closed unless [`SolidServerConfig::now`]
 //!   supplies a request clock.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use oxrdf::{NamedNode, Term};
@@ -66,7 +98,9 @@ use sparq_solid::{Mode, PodStore, Session};
 
 use crate::jsonrpc::{
     Request, Response, RpcError, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND,
+    RESOURCE_NOT_FOUND,
 };
+use crate::notifications::{classify, ActivityType, Subscriptions, TopicDigest};
 use crate::server::{arg_str, serialize, tool_text_result};
 use crate::tools::ToolSpec;
 
@@ -143,6 +177,11 @@ impl Default for SolidServerConfig {
 pub struct SolidMcpServer {
     store: PodStore,
     config: SolidServerConfig,
+    /// [SONNET-4.6] sq-cmjmr — the topics this session subscribed to plus the queue of
+    /// content-free notifications awaiting [`SolidMcpServer::take_notifications`]. Bound
+    /// to this server (⇒ to this one authenticated session), so a subscription can never
+    /// outlive or escape its authorization context.
+    subs: Subscriptions,
 }
 
 /// The pod `query` tool (session-scoped — distinct semantics from the base server's).
@@ -383,6 +422,14 @@ fn valid_target(url: &str) -> Result<NamedNode, String> {
     NamedNode::new(url).map_err(|e| format!("invalid resource IRI <{url}>: {e}"))
 }
 
+/// Extract the required string `uri` of a `resources/*` request, or the JSON-RPC
+/// invalid-params error naming the method. [SONNET-4.6] sq-cmjmr
+fn resource_uri_param<'a>(params: &'a Value, method: &str) -> Result<&'a str, RpcError> {
+    params.get("uri").and_then(Value::as_str).ok_or_else(|| {
+        RpcError::new(INVALID_PARAMS, format!("{} requires a string `uri`", method))
+    })
+}
+
 /// Pretty-print a JSON tool result.
 fn pretty(v: &Value) -> String {
     serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string())
@@ -413,7 +460,7 @@ impl SolidMcpServer {
     ///
     /// Returns `Err` if that materialization fails.
     pub fn with_config(store: PodStore, config: SolidServerConfig) -> Result<Self, String> {
-        let mut server = SolidMcpServer { store, config };
+        let mut server = SolidMcpServer { store, config, subs: Subscriptions::default() };
         server.rematerialize()?;
         Ok(server)
     }
@@ -510,7 +557,15 @@ impl SolidMcpServer {
         match req.method.as_str() {
             "initialize" => Ok(json!({
                 "protocolVersion": crate::server::negotiate_protocol_version(&req.params),
-                "capabilities": { "tools": {} },
+                // [SONNET-4.6] sq-cmjmr: `resources` with `subscribe: true` — pod
+                // documents are MCP resources and a client may subscribe to one.
+                // `listChanged` stays FALSE: this server never pushes an unsolicited
+                // list-changed notification, and declaring a capability it does not
+                // implement would be an overclaim.
+                "capabilities": {
+                    "tools": {},
+                    "resources": { "subscribe": true, "listChanged": false },
+                },
                 "serverInfo": {
                     "name": self.config.server_name,
                     "version": env!("CARGO_PKG_VERSION"),
@@ -523,9 +578,13 @@ impl SolidMcpServer {
                 Ok(json!({ "tools": tools }))
             }
             "tools/call" => self.tools_call(&req.params),
+            "resources/list" => Ok(self.resources_list()),
+            "resources/read" => self.resources_read(&req.params),
+            "resources/subscribe" => self.resources_subscribe(&req.params),
+            "resources/unsubscribe" => self.resources_unsubscribe(&req.params),
             other => Err(RpcError::new(
                 METHOD_NOT_FOUND,
-                format!("method not found: {other}"),
+                format!("method not found: {}", other),
             )),
         }
     }
@@ -538,9 +597,11 @@ impl SolidMcpServer {
             .ok_or_else(|| RpcError::new(INVALID_PARAMS, "tools/call requires a string `name`"))?;
         let args = params.get("arguments").cloned().unwrap_or(json!({}));
 
+        let mutating = MUTATING.contains(&name);
+
         // Reject every mutating tool up front when writes are disabled — before any
         // argument is even parsed (the same fail-closed shape as the base server).
-        if MUTATING.contains(&name) && !self.allow_update() {
+        if mutating && !self.allow_update() {
             return Err(RpcError::new(
                 METHOD_NOT_FOUND,
                 format!(
@@ -549,6 +610,19 @@ impl SolidMcpServer {
                 ),
             ));
         }
+
+        // [SONNET-4.6] sq-cmjmr: snapshot every subscribed topic BEFORE a mutating tool
+        // runs, so the change it causes is detected uniformly — including the SPARQL
+        // `update` tool, which does not report which documents it touched. Costs nothing
+        // when nothing is subscribed. The read-authorization snapshot is taken at the same
+        // instant: a topic the mutation DELETES no longer has a policy afterwards, so its
+        // pre-mutation readability is the only honest record of whether this session was
+        // still allowed to learn about it (see `queue_topic_changes`).
+        let (before, readable_before) = if mutating {
+            (self.digest_subscribed(), self.readable_subscribed())
+        } else {
+            (BTreeMap::new(), BTreeSet::new())
+        };
 
         let result = match name {
             "query" => self.tool_query(&args),
@@ -565,6 +639,12 @@ impl SolidMcpServer {
                 ))
             }
         };
+
+        if mutating {
+            // A tool that failed (or that rolled back) leaves every digest equal, so this
+            // emits nothing — no bespoke per-tool success plumbing needed.
+            self.queue_topic_changes(&before, &readable_before);
+        }
 
         match result {
             Ok(text) => Ok(tool_text_result(text, false)),
@@ -611,23 +691,32 @@ impl SolidMcpServer {
                 ));
             }
         }
-        // NON-DISCLOSURE: unauthorized-read and nonexistent produce the SAME error.
+        let nt = self.document_ntriples(url)?;
+        Ok(pretty(&json!({
+            "url": url,
+            "content_type": "application/n-triples",
+            "content": nt,
+        })))
+    }
+
+    /// The N-Triples representation of one pod document, behind the read gate. Shared by
+    /// the `resource_get` TOOL and the `resources/read` RESOURCE surface so the two can
+    /// never disagree (draft §6.4/§8).
+    ///
+    /// NON-DISCLOSURE (draft §9.3): unauthorized-read and nonexistent produce the SAME
+    /// error, so neither surface reveals that a resource exists.
+    fn document_ntriples(&self, url: &str) -> Result<String, String> {
         if !self.allowed(url, Mode::Read) {
             return Err(not_found_error(url));
         }
         let Some(doc) = self.find_doc(url) else {
             return Err(not_found_error(url));
         };
-        let nt = sparq_engine::construct_ntriples_with_budget(
+        sparq_engine::construct_ntriples_with_budget(
             doc,
             "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
             &self.budget(),
-        )?;
-        Ok(pretty(&json!({
-            "url": url,
-            "content_type": "application/n-triples",
-            "content": nt,
-        })))
+        )
     }
 
     /// `container_list`: direct `ldp:contains` members from the container's OWN stored
@@ -654,6 +743,184 @@ impl SolidMcpServer {
         }
         members.sort_by(|a, b| a["url"].as_str().cmp(&b["url"].as_str()));
         Ok(pretty(&json!({ "url": url, "members": members })))
+    }
+
+    // ───────── the MCP `resources` surface + notifications (draft §8/§10) ─────────
+
+    /// Drain every notification queued since the last call, each a complete JSON-RPC
+    /// notification message (`notifications/resources/updated`) ready to write to the
+    /// transport verbatim.
+    ///
+    /// Delivery is PULL-based because this crate's dispatch core owns no transport: call
+    /// this after each [`SolidMcpServer::handle_message`] and write whatever it returns
+    /// alongside the response. Each message carries only the topic IRI and the
+    /// ActivityStreams 2.0 activity type — the payload is content-free by construction
+    /// (draft §10). Only topics that passed the read check at delivery time appear.
+    /// [SONNET-4.6] sq-cmjmr
+    pub fn take_notifications(&mut self) -> Vec<String> {
+        self.subs.take()
+    }
+
+    /// The topic IRIs this session currently subscribes to, sorted (for embedders and
+    /// tests). [SONNET-4.6] sq-cmjmr
+    pub fn subscribed_topics(&self) -> Vec<String> {
+        self.subs.topics()
+    }
+
+    /// Digest every subscribed topic that currently exists. Topics absent from the map
+    /// do not exist right now — [`classify`] turns an absent→present transition into
+    /// `Create` and present→absent into `Delete`.
+    fn digest_subscribed(&self) -> BTreeMap<String, TopicDigest> {
+        let mut digests = BTreeMap::new();
+        if self.subs.is_empty() {
+            return digests;
+        }
+        for topic in self.subs.topics() {
+            if let Some(doc) = self.find_doc(&topic) {
+                digests.insert(topic, TopicDigest::of(doc));
+            }
+        }
+        digests
+    }
+
+    /// The subscribed topics this session may read RIGHT NOW, checked against each topic
+    /// ITSELF (never an ancestor). Snapshotted alongside [`Self::digest_subscribed`] so a
+    /// `Delete` delivery can be held to the topic's own pre-deletion policy — the policy
+    /// that vanishes with the resource. [SONNET-4.6] sq-cmjmr
+    fn readable_subscribed(&self) -> BTreeSet<String> {
+        let mut readable = BTreeSet::new();
+        if self.subs.is_empty() {
+            return readable;
+        }
+        for topic in self.subs.topics() {
+            if self.allowed(&topic, Mode::Read) {
+                readable.insert(topic);
+            }
+        }
+        readable
+    }
+
+    /// Compare the current topic digests against `before` and queue one notification per
+    /// changed topic — after RE-CHECKING read access against the post-mutation
+    /// authorization view.
+    ///
+    /// A session whose read access was revoked (possibly by this very write, e.g. an
+    /// `.acl` replacement) is dropped SILENTLY: no notification, no error, no "you were
+    /// unsubscribed" message. Telling it would itself disclose that a resource it may no
+    /// longer read had changed (draft §10). The subscription survives, so restoring
+    /// access resumes deliveries.
+    ///
+    /// The check runs at the topic's [authorization anchor](Self::auth_anchor), which is
+    /// the topic itself whenever the topic still exists. That matters for a `Delete`: a
+    /// just-deleted resource has no policy of its own left to evaluate, so a literal
+    /// check against it would fail closed and make deletion permanently unnotifiable.
+    /// The anchor — the nearest existing ancestor container, the same rule that
+    /// authorizes creating and deleting that IRI — is the policy that governs it.
+    ///
+    /// The ancestor fallback must not RE-GRANT what a resource-specific policy took away.
+    /// A session whose read access to the topic itself had been revoked (by an ACL on the
+    /// topic) can typically still read the parent container, so anchoring a `Delete` at
+    /// the parent alone would deliver — disclosing the deletion of a resource the session
+    /// was no longer allowed to read. So a `Delete` needs BOTH: the topic was readable
+    /// immediately BEFORE the mutation (`readable_before`, from
+    /// [`Self::readable_subscribed`] — the topic's own vanished policy), AND the surviving
+    /// governing policy at the anchor still permits disclosure.
+    fn queue_topic_changes(
+        &mut self,
+        before: &BTreeMap<String, TopicDigest>,
+        readable_before: &BTreeSet<String>,
+    ) {
+        if self.subs.is_empty() {
+            return;
+        }
+        let after = self.digest_subscribed();
+        for topic in self.subs.topics() {
+            let Some(activity) = classify(before.get(&topic), after.get(&topic)) else {
+                continue;
+            };
+            // A deleted topic's OWN pre-deletion policy still has to have allowed the
+            // read: the anchor stands in for a missing policy, never for a revoked one.
+            if activity == ActivityType::Delete && !readable_before.contains(&topic) {
+                continue;
+            }
+            // DELIVERY-TIME authorization — the second of the two checks (draft §10).
+            if !self.allowed(&self.auth_anchor(&topic), Mode::Read) {
+                continue;
+            }
+            self.subs.enqueue(&topic, activity);
+        }
+    }
+
+    /// `resources/list`: the pod documents THIS session may read, as MCP resources whose
+    /// `uri` IS the resource IRI. A document the session cannot read is simply absent —
+    /// the listing never errors and never hints that something was filtered.
+    fn resources_list(&self) -> Value {
+        let mut resources: Vec<Value> = Vec::new();
+        for (name, _) in &self.store.graph.named {
+            let Term::NamedNode(node) = name else { continue };
+            let uri = node.as_str();
+            // The reserved space holds the materialized auth view, not pod content.
+            if uri.starts_with(RESERVED_PREFIX) || !self.allowed(uri, Mode::Read) {
+                continue;
+            }
+            resources.push(json!({
+                "uri": uri,
+                // The IRI is the name: deriving a prettier label would be guessing, and
+                // the pod is the only authority on what a document is called.
+                "name": uri,
+                "mimeType": "application/n-triples",
+            }));
+        }
+        resources.sort_by(|a, b| a["uri"].as_str().cmp(&b["uri"].as_str()));
+        json!({ "resources": resources })
+    }
+
+    /// `resources/read`: the same representation the `resource_get` tool serves, in the
+    /// MCP `contents` shape. Unreadable and nonexistent are the same error (draft §9.3).
+    fn resources_read(&self, params: &Value) -> Result<Value, RpcError> {
+        let uri = resource_uri_param(params, "resources/read")?;
+        let text = self
+            .document_ntriples(uri)
+            .map_err(|message| RpcError::new(RESOURCE_NOT_FOUND, message))?;
+        Ok(json!({
+            "contents": [ {
+                "uri": uri,
+                "mimeType": "application/n-triples",
+                "text": text,
+            } ]
+        }))
+    }
+
+    /// `resources/subscribe`: bind an MCP subscription to a Solid Notifications
+    /// subscription on `uri` as the topic.
+    ///
+    /// SUBSCRIBE-TIME authorization (the first of the two checks, draft §10): a session
+    /// that cannot read the topic gets the existence-non-disclosure not-found error, so
+    /// subscribing cannot be used to probe which resources exist. v1 additionally
+    /// requires the topic to exist NOW — the fail-closed reading, since a decision on an
+    /// absent resource has no policy to evaluate.
+    fn resources_subscribe(&mut self, params: &Value) -> Result<Value, RpcError> {
+        let uri = resource_uri_param(params, "resources/subscribe")?;
+        NamedNode::new(uri).map_err(|e| {
+            RpcError::new(INVALID_PARAMS, format!("invalid resource IRI <{}>: {}", uri, e))
+        })?;
+        if uri.starts_with(RESERVED_PREFIX)
+            || !self.allowed(uri, Mode::Read)
+            || self.find_doc(uri).is_none()
+        {
+            return Err(RpcError::new(RESOURCE_NOT_FOUND, not_found_error(uri)));
+        }
+        self.subs.subscribe(uri);
+        Ok(json!({}))
+    }
+
+    /// `resources/unsubscribe`: drop the subscription. Idempotent and uniform — an
+    /// unknown topic gets the SAME empty result as a known one, so an unsubscribe never
+    /// discloses what this session was watching (or whether the topic exists).
+    fn resources_unsubscribe(&mut self, params: &Value) -> Result<Value, RpcError> {
+        let uri = resource_uri_param(params, "resources/unsubscribe")?;
+        self.subs.unsubscribe(uri);
+        Ok(json!({}))
     }
 
     /// `update`: session-checked SPARQL Update (`PodStore::update_as` — every touched

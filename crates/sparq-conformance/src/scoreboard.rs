@@ -125,24 +125,23 @@ pub struct Suite {
 /// crate-test ones against source):
 /// * SPARQL  1229  — `ci.yml` job `conformance` (`RATCHET=1229`).
 /// * inference 1967 — `ci.yml` job `inference-conformance` (`RATCHET=1967`).
-/// * SHACL core 98 — `sparq-shacl` `w3c_core.rs` `BASELINE_PASS = 98`.
-/// * SHACL-SPARQL 5 — `sparq-shacl` `w3c_sparql.rs` `SHACL_SPARQL_FLOOR = 5`.
-/// * OGC GeoSPARQL 197 — `sparq-geo` `ogc_compliance_ratchet.rs`
-///   `OGC_RATCHET_FLOOR = 197` (sq-cbe4t raised it 119 -> 158;
-///   sq-lk3aw.1 raised it 158 -> 197: 39 net-new assertions covering
-///   edge-adjacent polygons / disjoint line+polygon / parallel lines /
-///   point-on-line / and multi-pair rcc8/eh disjoint cells).
-/// * OGC GeoSPARQL query-rewrite 48 — `sparq-geo` `ogc_query_rewrite_ratchet.rs`
-///   `OGC_QUERY_REWRITE_FLOOR = 48` (sq-wf9qg raised to 38; sq-lk3aw.2 raised 38→48:
-///   [SONNET-4.6] strengthened semantics-preserving comparison + extended coverage;
-///   opt-in `geosparql_rewrite` feature; topology PROPERTY forms answered via the
-///   rewrite, MEASURED pass count).
-/// * Solid WAC 13 — `sparq-solid` `tests/common/mod.rs` `WAC_SCENARIO_FLOOR = 13`
-///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6;
-///   [GPT-5.6] sq-61uvs added the control-document authorization vector).
-/// * Solid ACP 13 — `sparq-solid` `tests/common/mod.rs` `ACP_SCENARIO_FLOOR = 13`
-///   (sq-j174; floor const moved to the shared parity-corpus module in sq-t58w.6;
-///   [GPT-5.6] sq-61uvs added the control-document authorization vector).
+///
+/// [SONNET-4.6] sq-z1xv8 — every floor whose ENFORCING runner lives in another crate
+/// (SHACL core/SPARQL, both OGC GeoSPARQL lanes, Solid WAC/ACP parity + the two
+/// differential oracles, the SolidLab ODRL suite, the sparq-text BM25 oracle and the
+/// sparq-rsp expressivity oracle) now lives in the zero-dependency
+/// `sparq-conformance-floors` crate and is IMPORTED into both the runner's
+/// `assert!(count >= FLOOR)` and the `Suite` row here
+/// (`ratchet_floor: sparq_conformance_floors::<module>::<FLOOR>`) — the same
+/// cannot-drift shape the six JSON-LD lanes get from `crate::floors`. This RETIRED
+/// their textual floor-sync rows in `tests/scoreboard_floors.rs`, which used to read
+/// those crates' test SOURCES at a runtime-built workspace path: an out-of-crate read
+/// that no dependency closure or `ci/path-ownership.toml` `readers` entry could
+/// attribute, i.e. CI test-selection "residual 3"
+/// (`scripts/ci_audit_inputs.py`; design `research/change-based-test-selection.md`
+/// §4.2). Raise such a floor in `sparq-conformance-floors`; the measurement narrative
+/// stays with the runner, and `tests/scoreboard_floors.rs`'s `SHARED_CRATE_EXPECTED`
+/// pins the value so a silent LOWERING still fails.
 ///
 /// [FABLE-5] sq-oy1f.40 — the SIX JSON-LD floors below now live LIB-SIDE in
 /// `src/floors/<lane>.rs` (`floors::<lane>::FLOOR`) and are IMPORTED directly into
@@ -294,7 +293,7 @@ pub const SUITES: &[Suite] = &[
         family: "W3C SHACL",
         runner: Runner::CrateTest { krate: "sparq-shacl", target: "w3c_core" },
         ci_job: "shacl-conformance",
-        ratchet_floor: 98,
+        ratchet_floor: sparq_conformance_floors::shacl::CORE_FLOOR,
         floor_basis: "pass",
         note: "data-shapes sht:Validate core suite (w3c/data-shapes)",
     },
@@ -303,7 +302,7 @@ pub const SUITES: &[Suite] = &[
         family: "W3C SHACL",
         runner: Runner::CrateTest { krate: "sparq-shacl", target: "w3c_sparql" },
         ci_job: "shacl-conformance",
-        ratchet_floor: 5,
+        ratchet_floor: sparq_conformance_floors::shacl::SPARQL_FLOOR,
         floor_basis: "pass",
         note: "sh:sparql node + property constraint sub-suites",
     },
@@ -319,7 +318,7 @@ pub const SUITES: &[Suite] = &[
         // [SONNET-4.6] sq-lk3aw.1 — raised 158 -> 197: 39 more net-new assertions
         // (edge-adjacent polygons / disjoint line+polygon / parallel lines /
         // point-on-line / multi-pair rcc8/eh disjoint cells).
-        ratchet_floor: 197,
+        ratchet_floor: sparq_conformance_floors::geo::OGC_TOPOLOGY_FLOOR,
         floor_basis: "pass",
         // [OPUS-4.8] sq-cbe4t — DISTANCE-APPROXIMATION HONESTY NOTE. This topology
         // ratchet is exact DE-9IM (no approximation). The `geof:distance` METRIC
@@ -354,7 +353,7 @@ pub const SUITES: &[Suite] = &[
             feature: "geosparql_rewrite",
         },
         ci_job: "geo-conformance",
-        ratchet_floor: 48,
+        ratchet_floor: sparq_conformance_floors::geo::OGC_QUERY_REWRITE_FLOOR,
         floor_basis: "pass",
         note: "topology PROPERTY forms (geo:sf*/eh*/rcc8*) answered end-to-end via the \
                opt-in query-rewrite extension, result-equivalent to the geof: oracle",
@@ -371,7 +370,7 @@ pub const SUITES: &[Suite] = &[
         family: "Solid WAC",
         runner: Runner::CrateTest { krate: "sparq-solid", target: "conformance_wac" },
         ci_job: "solid-conformance",
-        ratchet_floor: 13,
+        ratchet_floor: sparq_conformance_floors::solid::WAC_SCENARIO_FLOOR,
         floor_basis: "scenario",
         note: "library-level allow/deny parity over minimal per-construct WAC .acl scenarios",
     },
@@ -380,7 +379,7 @@ pub const SUITES: &[Suite] = &[
         family: "Solid ACP",
         runner: Runner::CrateTest { krate: "sparq-solid", target: "conformance_acp" },
         ci_job: "solid-conformance",
-        ratchet_floor: 13,
+        ratchet_floor: sparq_conformance_floors::solid::ACP_SCENARIO_FLOOR,
         floor_basis: "scenario",
         note: "library-level allow/deny parity over minimal per-construct ACP ACR scenarios",
     },
@@ -402,7 +401,7 @@ pub const SUITES: &[Suite] = &[
         family: "Solid WAC",
         runner: Runner::CrateTest { krate: "sparq-solid", target: "differential_oracle" },
         ci_job: "solid-conformance",
-        ratchet_floor: 0,
+        ratchet_floor: sparq_conformance_floors::solid::DIVERGENCE_FLOOR,
         floor_basis: "0 divergences",
         note: "engine vs an independent reference evaluator vs the hand Expect table, \
                over the WAC parity corpus (zero divergence)",
@@ -412,7 +411,7 @@ pub const SUITES: &[Suite] = &[
         family: "Solid ACP",
         runner: Runner::CrateTest { krate: "sparq-solid", target: "differential_oracle" },
         ci_job: "solid-conformance",
-        ratchet_floor: 0,
+        ratchet_floor: sparq_conformance_floors::solid::DIVERGENCE_FLOOR,
         floor_basis: "0 divergences",
         note: "engine vs an independent reference evaluator vs the hand Expect table, \
                over the ACP parity corpus (zero divergence)",
@@ -603,7 +602,7 @@ pub const SUITES: &[Suite] = &[
         family: "SolidLab ODRL",
         runner: Runner::CrateTest { krate: "sparq-policy", target: "odrl_test_suite" },
         ci_job: "odrl-conformance",
-        ratchet_floor: 67,
+        ratchet_floor: sparq_conformance_floors::policy::ODRL_SUITE_FLOOR,
         floor_basis: "scenario",
         note: "library-level allow/deny parity over the SolidLab self-describing ODRL \
                cases through sparq-policy's real evaluate() path",
@@ -848,7 +847,7 @@ pub const SUITES: &[Suite] = &[
         family: "sparq extension",
         runner: Runner::CrateTest { krate: "sparq-text", target: "bm25_oracle" },
         ci_job: "text-oracle",
-        ratchet_floor: 18750,
+        ratchet_floor: sparq_conformance_floors::text::BM25_ORACLE_FLOOR,
         floor_basis: "score-exact assertions (sparq EXTENSION, NOT standards conformance)",
         note: "EXTENSION ratchet — no normative full-text-over-RDF / BM25 standard \
                exists: sparq-text's BM25 search/ranking vs a from-scratch independent \
@@ -888,7 +887,8 @@ pub const SUITES: &[Suite] = &[
         family: "sparq extension",
         runner: Runner::CrateTest { krate: "sparq-rsp", target: "srbench_oracle" },
         ci_job: "rsp-oracle",
-        ratchet_floor: 317, // [SONNET-4.6] sq-2n1q3.3 raised from 303 (from 149 sq-mcb3q baseline)
+        // [SONNET-4.6] sq-2n1q3.3 raised from 303 (from 149 sq-mcb3q baseline).
+        ratchet_floor: sparq_conformance_floors::rsp::EXPRESSIVITY_FLOOR,
         floor_basis: "per-window correctness assertions (sparq EXTENSION, NOT standards conformance)",
         note: "EXTENSION ratchet — no normative RDF-Stream-Processing standard / RSP \
                conformance suite exists (RSP-QL is a W3C-community spec; SRBench a \
