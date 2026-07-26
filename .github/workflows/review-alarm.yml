@@ -82,9 +82,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
           MAX_AGE_HOURS: ${{ inputs.max_age_hours || '24' }}
-        run: >-
-          python3 scripts/review_lane_alarm.py
-          --max-age-hours "$MAX_AGE_HOURS"
-          $DRY_RUN
+        # An args array, not an unquoted `$DRY_RUN` splat: word-splitting an env var into
+        # a flag is exactly the shellcheck SC2086 shape actionlint rejects, and here it
+        # would also let a crafted dispatch input inject an extra flag.
+        run: |
+          set -euo pipefail
+          args=(--max-age-hours "$MAX_AGE_HOURS")
+          if [ -n "$DRY_RUN" ]; then
+            args+=(--dry-run)
+          fi
+          python3 scripts/review_lane_alarm.py "${args[@]}"

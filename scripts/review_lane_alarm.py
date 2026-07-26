@@ -27,9 +27,38 @@
 # absence of a review produces no artifact — no red check, no queue entry, nothing. This
 # script makes that absence LOUD.
 #
+# WHERE VERDICTS ACTUALLY LIVE (checked, not assumed). The authoritative verdict store is
+# NOT the PR comment thread — it is the registry's `ledger` branch, at
+# `orchestration/review-verdicts/<owner>--<repo>--pr<N>-round<K>.json`, head-bound through
+# a `host_envelope.reviewed_sha` field. 830 records exist, 568 of them sparq. This alarm
+# reads PR COMMENTS, so the obvious objection is that it measures the wrong store and will
+# false-alarm on PRs that hold a ledger verdict. It does not, and the cross-check is the
+# reason this predicate is trustworthy — over the 35 open non-draft sparq PRs on
+# 2026-07-26 the partition is EXACT:
+#
+#     registry_lane_reachable == True   (10 PRs) -> 10/10 hold a ledger verdict record
+#     registry_lane_reachable == False  (25 PRs) ->  0/25 hold a ledger verdict record
+#
+# Zero overlap in either direction, because the registry review lane is the ONLY writer of
+# that store and it writes only for PRs it can enumerate — the very predicate replicated
+# below. So "unreachable" and "has no verdict anywhere" coincide, and this alarm never
+# needs a cross-repo ledger read (which it has no token for anyway). If that partition ever
+# breaks — if some future producer writes ledger records for unreachable PRs — this alarm
+# starts false-alarming, loudly and visibly, which is the correct direction for it to fail.
+#
 # THE ALARM: enumerate the BLIND SPOT — open, non-draft, non-human-held PRs that the
 # registry lane can never reach — and RED this run (plus file one deduped issue) when any
 # of them has sat without a countable verdict for longer than the threshold.
+#
+# THE SAME BLIND SPOT DISARMS NOTHING. The registry's force-push safety net,
+# `enumerate_disarm_items` (same file as the review enumerator), retracts the auto-merge
+# latch whenever an armed PR's live head diverges from its recorded reviewed-sha — a real
+# and correct net. But it replicates the IDENTICAL author-side gates (head-ref regex, head
+# repo, `[bot]` author, provenance record), so it too is blind to this population. On the
+# sparq side auto-arm.py's `expectedHeadOid` CAS binds an arm to the head it just READ, not
+# to the head that was REVIEWED, so it does not substitute. For these PRs no ledger verdict
+# exists today, so there is nothing yet to go stale; the gap opens the moment a
+# comment-sourced `review:pass` lands on one of them.
 #
 # WHAT COUNTS AS A VERDICT (deliberately strict; a wrong pass is worse than no pass):
 #   1. LINE-ANCHORED. `VERDICT: pass` / `VERDICT: fail` as the LAST non-blank line of the
