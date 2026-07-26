@@ -1,0 +1,49 @@
+# sigimpl-ext.ttl — the sparq extension of the vendored `sig-impl:` ontology.
+#
+# [SONNET-4.6] Issue #2832. This file is sparq-authored and is not part of the
+# ontology vendored from origin SHA 0fe80ea7d858de9f02bd29df29f6e50cdada14a0.
+# It adds ML-DSA as a post-quantum migration target while the paper's round-1
+# signature-implementation graph remains unchanged.
+
+@prefix sig-impl: <https://w3id.org/zkp-sparql/sig-impl#> .
+@prefix sec-prop: <https://w3id.org/zkp-sparql/sec-prop#> .
+@prefix bibo: <http://purl.org/ontology/bibo/> .
+@prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+sig-impl:lattice
+  a sig-impl:Family ;
+  rdfs:label "Lattice-based signature family"@en-GB .
+
+sig-impl:MlDsa
+  a sig-impl:SignatureImplementation ;
+  rdfs:label "ML-DSA (FIPS 204 / CRYSTALS-Dilithium)"@en-GB ;
+  rdfs:comment "NIST-standardised lattice-based digital-signature scheme."@en-GB ;
+  sig-impl:family sig-impl:lattice ;
+  sig-impl:postQuantum true ;
+  prov:wasDerivedFrom bibo:nist-fips204-2024 ;
+  sig-impl:achieves
+    sig-impl:assert-mldsa-pq-forgery,
+    sig-impl:assert-mldsa-unlinkability,
+    sig-impl:assert-mldsa-sigtype-leakage .
+
+sig-impl:assert-mldsa-pq-forgery
+  a sig-impl:Assertion ;
+  sig-impl:property sec-prop:PostQuantumForgery ;
+  sig-impl:verdict sig-impl:yes ;
+  sig-impl:justification "ML-DSA is a FIPS 204 post-quantum digital-signature standard designed to resist attacks by large-scale quantum computers."@en-GB ;
+  prov:wasDerivedFrom bibo:nist-fips204-2024 .
+
+sig-impl:assert-mldsa-unlinkability
+  a sig-impl:Assertion ;
+  sig-impl:property sec-prop:Unlinkability ;
+  sig-impl:verdict sig-impl:no ;
+  sig-impl:justification "FIPS 204 specifies signing and verification, not presentation randomisation; presenting the issuer signature therefore provides no unlinkability mechanism."@en-GB ;
+  prov:wasDerivedFrom bibo:nist-fips204-2024 .
+
+sig-impl:assert-mldsa-sigtype-leakage
+  a sig-impl:Assertion ;
+  sig-impl:property sec-prop:SignatureTypeLeakage ;
+  sig-impl:verdict sig-impl:no ;
+  sig-impl:justification "ML-DSA public keys and signatures use parameter-set-specific fixed-length encodings, so their exposed representation reveals the algorithm family."@en-GB ;
+  prov:wasDerivedFrom bibo:nist-fips204-2024 .

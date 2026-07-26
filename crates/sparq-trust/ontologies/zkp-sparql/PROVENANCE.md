@@ -14,9 +14,10 @@ them. It is the companion ontology to the **ISWC 2025** ZKP-SPARQL paper.
 | Sub-vocabulary | Namespace | Scope |
 |----------------|-----------|-------|
 | `sec-prop:` | `https://w3id.org/zkp-sparql/sec-prop#` | The eight security properties from paper §7.7 (unlinkability, source-credential disclosure, PQ forgery, PQ snooping, signature-type leakage, proof-size leakage, circuit audit, validity-period leakage). |
-| `sig-impl:` | `https://w3id.org/zkp-sparql/sig-impl#` | Five signature implementations (BBS+, SD-JWT-VC, ed25519, ECDSA, ML-DSA), each carrying reified `sig-impl:Assertion` verdicts (`yes`/`no`/`partial`) about the properties it achieves/fails. |
+| `sig-impl:` | `https://w3id.org/zkp-sparql/sig-impl#` | Four signature implementations (BBS+, SD-JWT-VC, ed25519, ECDSA), each carrying reified `sig-impl:Assertion` verdicts (`yes`/`no`/`partial`) about the properties it achieves/fails. |
 | `sec-req:` | `https://w3id.org/zkp-sparql/sec-req#` | Three regulatory frameworks (eIDAS 2.0, NIST PQC migration, UK DVS) that pull on `sec-prop:` properties, with dated obligations. |
 | `prov-ext:` | `https://w3id.org/zkp-sparql/prov-ext#` | Minimal `bibo:`/`dcterms:`/`prov:` provenance extension (one coined term, `prov-ext:bibtexKey`) backing the `prov:wasDerivedFrom` citation chains. |
+| `sigimpl-ext.ttl` | `https://w3id.org/zkp-sparql/sig-impl#` | sparq-authored extension adding the ML-DSA implementation, its lattice family, and three property assertions. |
 
 ## Origin
 
@@ -106,7 +107,12 @@ the origin repo by a plain diff. That verifiability **is** the provenance
 guarantee, and it holds only while the files stay untouched — so a stale upstream
 comment is reconciled **in this record**, never by patching the vendored file.
 (`LICENSE` and this `PROVENANCE.md` are sparq-added files, not vendored ones;
-`secprop-ext.ttl` is the sparq *extension* and is ours to edit.)
+`secprop-ext.ttl` and `sigimpl-ext.ttl` are sparq *extensions* and are ours to
+edit.)
+
+The ML-DSA terms in `sigimpl-ext.ttl` were added by sparq on **2026-07-26**
+(issue #2832). They extend the existing `sig-impl:` namespace without changing
+or attributing new claims to the vendored ontology or its paper authors.
 
 The consequence is that some upstream comments describe the **origin repository**
 rather than this copy. This record supersedes them; the known cases are:

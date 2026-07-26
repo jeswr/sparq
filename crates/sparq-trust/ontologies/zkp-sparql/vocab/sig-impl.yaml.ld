@@ -1,5 +1,5 @@
-# yaml-ld source for the five signature implementations considered here:
-# BBS+, SD-JWT-VC, ed25519, ECDSA, and ML-DSA. Each is an instance of
+# yaml-ld source for the four signature implementations the paper considers
+# at round 1: BBS+, SD-JWT-VC, ed25519, ECDSA. Each is an instance of
 # `sig-impl:SignatureImplementation`. The relationship between an
 # implementation and a `sec-prop:SecurityProperty` is captured by an
 # `sig-impl:Assertion` reified node: this lets us record yes/no/partial
@@ -78,9 +78,6 @@
   - id: sig-impl:sdJwt
     type: sig-impl:Family
     label: "SD-JWT envelope (any underlying JOSE-supported algorithm)"
-  - id: sig-impl:lattice
-    type: sig-impl:Family
-    label: "Lattice-based signature family"
 
   # ─────────── Predicate definitions ───────────
   - id: sig-impl:achieves
@@ -309,50 +306,3 @@
           adapter.
         wasDerivedFrom:
           - bibo:w3c-vc-di-ecdsa-2025
-
-  # ─────────── ML-DSA ───────────
-  - id: sig-impl:MlDsa
-    type: sig-impl:SignatureImplementation
-    label: "ML-DSA (FIPS 204 / CRYSTALS-Dilithium)"
-    comment: >-
-      NIST-standardised lattice-based signature scheme. No deployed
-      W3C Verifiable Credentials cryptosuite currently binds ML-DSA,
-      so integration remains a migration target rather than a
-      presentation-ready suite.
-    family: sig-impl:lattice
-    postQuantum: true
-    wasDerivedFrom:
-      - bibo:nist-fips204-2024
-    achieves:
-      - id: sig-impl:assert-mldsa-pq-forgery
-        type: sig-impl:Assertion
-        property: sec-prop:PostQuantumForgery
-        verdict: sig-impl:yes
-        justification: >-
-          ML-DSA is the FIPS 204 post-quantum digital-signature
-          standard and is the migration target for resistance to
-          forgery by a cryptographically relevant quantum computer.
-        wasDerivedFrom:
-          - bibo:nist-fips204-2024
-      - id: sig-impl:assert-mldsa-unlinkability
-        type: sig-impl:Assertion
-        property: sec-prop:Unlinkability
-        verdict: sig-impl:no
-        justification: >-
-          ML-DSA signatures do not provide presentation
-          randomisation; replaying an issuer signature permits
-          correlation. Unlinkability requires a separate
-          proof-of-knowledge lift.
-        wasDerivedFrom:
-          - bibo:nist-fips204-2024
-      - id: sig-impl:assert-mldsa-sigtype-leakage
-        type: sig-impl:Assertion
-        property: sec-prop:SignatureTypeLeakage
-        verdict: sig-impl:partial
-        justification: >-
-          ML-DSA signatures and public keys have distinctive encodings
-          and parameter-set sizes, revealing the algorithm family; a
-          generic proof adapter can conceal the source signature from
-          a presentation verifier.
-        wasDerivedFrom:
-          - bibo:nist-fips204-2024
