@@ -58,6 +58,12 @@ than refusing to arm.  A verdict-shaped line that is quoted, fenced, blockquoted
 bulleted is NOT verdict-shaped for this purpose (it is a mention, not a declaration), so
 the instruction that tells reviewers what to write still cannot influence anything.
 
+The hole is CHANNEL-independent, so PR REVIEW bodies are read too — on the same GraphQL
+page as the PR itself, at no extra API call.  They are WITHHOLD-ONLY: a review body can
+retract or suppress a pass, never grant one.  Reading one as a pass would extend arming
+authority into a channel the standing review brief does not mandate, so including them
+can only ever SHRINK the promote-set.
+
 ACTIONS
 -------
 promote   head-bound verdict is pass, no hold label, ``review:pass`` absent -> add it.
@@ -211,6 +217,13 @@ def head_bound_verdict(comments: Sequence[dict], head_sha: str) -> Verdict | Non
 
     Ordering is by immutable ``created_at`` (then comment id) so that editing an older
     comment can never reorder it ahead of a newer retraction.
+
+    Entries carrying ``_channel == "review"`` come from a PR REVIEW body rather than an
+    issue comment.  They may only ever WITHHOLD (fail / AMBIGUOUS), never grant: reading
+    a review body as a PASS would extend arming authority into a channel the standing
+    review brief does not mandate, so the promote-set can only shrink by including them.
+    Their retractions DO count, because the composition hole is channel-independent — a
+    reviewer who withdraws a pass in a review body must not leave that pass standing.
     """
     found: list[Verdict] = []
     for comment in comments:
@@ -218,6 +231,8 @@ def head_bound_verdict(comments: Sequence[dict], head_sha: str) -> Verdict | Non
             continue
         value = trailing_verdict(comment.get("body"))
         if value is None:
+            continue
+        if value == "pass" and comment.get("_channel") == "review":
             continue
         association = str(comment.get("author_association") or "").upper()
         if association not in TRUSTED_ASSOCIATIONS:
@@ -353,6 +368,9 @@ PR_LIST_QUERY = """query($owner:String!,$name:String!,$cursor:String){
         number state isDraft baseRefName headRefOid mergeable
         labels(first:100){nodes{name} pageInfo{hasNextPage}}
         commits(last:1){nodes{commit{checkSuites(first:0){totalCount}}}}
+        reviews(last:30){nodes{
+          databaseId body authorAssociation submittedAt author{login}
+        }}
       }
     }
   }
@@ -496,6 +514,33 @@ class VerdictBridge:
 
     # -- writes -------------------------------------------------------------
 
+    @staticmethod
+    def review_withholdings(node: dict) -> list[dict]:
+        """PR REVIEW bodies, normalised onto the issue-comment shape.
+
+        Carried on the SAME GraphQL page as the PR itself, so this costs no extra API
+        call.  Tagged ``_channel="review"``, which makes them WITHHOLD-ONLY in
+        ``head_bound_verdict``: they can retract or suppress a pass, never grant one.
+        A reviewer who posts a pass as a comment and then withdraws it in a review body
+        would otherwise leave the superseded pass standing — the same composition hole
+        as an unparseable retraction, through a different channel.
+        """
+        out: list[dict] = []
+        for review in ((node.get("reviews") or {}).get("nodes") or []):
+            if not isinstance(review, dict) or not review.get("submittedAt"):
+                continue  # a PENDING review has not been submitted; it is not evidence.
+            out.append(
+                {
+                    "_channel": "review",
+                    "id": review.get("databaseId") or 0,
+                    "body": review.get("body"),
+                    "author_association": review.get("authorAssociation"),
+                    "created_at": review.get("submittedAt"),
+                    "user": review.get("author") or {},
+                }
+            )
+        return out
+
     def edit_labels(self, number: int, *, add: str = "", remove: str = "") -> None:
         argv = ["pr", "edit", str(number), "--repo", self.repo]
         if add:
@@ -540,8 +585,8 @@ class VerdictBridge:
                 # Cheap pre-filter: only PRs that could possibly need a gate read.
                 gate = self.gate_conclusion(head) if head else None
                 pr = self.parse_node(node, gate)
-                comments = self.comments(pr.number)
-                decision = decide(pr, comments)
+                evidence = self.comments(pr.number) + self.review_withholdings(node)
+                decision = decide(pr, evidence)
             except (GhError, json.JSONDecodeError, KeyError, ValueError) as error:
                 self.log(f"[{PROGRAM}] PR #{number}: SKIP inspect-failed ({error})")
                 errors += 1
@@ -756,6 +801,30 @@ def self_test() -> None:
 
     # Malformed comment payloads are ignored, never treated as a pass.
     assert head_bound_verdict([None, 7, {}, {"body": None}], HEAD) is None  # type: ignore[list-item]
+
+    # A PR REVIEW body may WITHHOLD but never GRANT.
+    review_fail = dict(
+        comment(f"{HEAD}\n\nVERDICT: fail", created_at="2026-02-01T00:00:00Z", cid=9),
+        _channel="review",
+    )
+    review_pass = dict(
+        comment(f"{HEAD}\n\nVERDICT: pass", created_at="2026-02-01T00:00:00Z", cid=9),
+        _channel="review",
+    )
+    old_pass = comment(f"{HEAD}\n\nVERDICT: pass", created_at="2026-01-01T00:00:00Z")
+    assert decide(pr_fixture(), [old_pass, review_fail]).action != "promote"
+    assert (
+        decide(pr_fixture(labels={REVIEW_ATTESTATION}), [old_pass, review_fail]).action
+        == "retract"
+    )
+    # ... and a review body ALONE never grants the attestation.
+    assert decide(pr_fixture(), [review_pass]).action == "flag"
+    # A review fail cannot be overridden by an even newer review pass either.
+    newest_review_pass = dict(
+        comment(f"{HEAD}\n\nVERDICT: pass", created_at="2026-03-01T00:00:00Z", cid=10),
+        _channel="review",
+    )
+    assert decide(pr_fixture(), [old_pass, review_fail, newest_review_pass]).action != "promote"
 
     print(f"{PROGRAM} self-test: PASS")
 

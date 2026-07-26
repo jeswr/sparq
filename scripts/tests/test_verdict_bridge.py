@@ -168,6 +168,58 @@ class TestVerdictParsing(unittest.TestCase):
         )
         self.assertEqual(decision(pr(), [fresh, old]), "promote")
 
+    def test_a_review_body_can_WITHHOLD_a_pass(self):
+        """The composition hole is channel-independent: a reviewer who posts a pass as a
+        comment and then withdraws it in a PR REVIEW body must not leave it standing."""
+        old_pass = comment(
+            f"{HEAD}\n\nVERDICT: pass", created_at="2026-01-01T00:00:00Z", cid=1
+        )
+        for line in ("VERDICT: fail", "VERDICT: FAIL"):
+            with self.subTest(line=line):
+                withheld = dict(
+                    comment(f"{HEAD}\n\n{line}", created_at="2026-02-01T00:00:00Z", cid=2),
+                    _channel="review",
+                )
+                self.assertNotEqual(decision(pr(), [old_pass, withheld]), "promote")
+                self.assertEqual(
+                    decision(pr(labels={vb.REVIEW_ATTESTATION}), [old_pass, withheld]),
+                    "retract",
+                )
+
+    def test_a_review_body_can_NEVER_grant_a_pass(self):
+        """Reading a review body as a pass would extend arming authority into a channel
+        the standing review brief does not mandate. The promote-set may only shrink."""
+        review_pass = dict(
+            comment(f"{HEAD}\n\nVERDICT: pass", created_at="2026-03-01T00:00:00Z", cid=3),
+            _channel="review",
+        )
+        self.assertIsNone(vb.head_bound_verdict([review_pass], HEAD))
+        self.assertEqual(decision(pr(), [review_pass]), "flag")
+        # ... not even as the NEWEST evidence over an older review fail.
+        review_fail = dict(
+            comment(f"{HEAD}\n\nVERDICT: fail", created_at="2026-02-01T00:00:00Z", cid=2),
+            _channel="review",
+        )
+        self.assertEqual(
+            vb.head_bound_verdict([review_fail, review_pass], HEAD).value, "fail"
+        )
+
+    def test_a_review_withholding_still_obeys_head_binding_and_provenance(self):
+        good_pass = comment(
+            f"{HEAD}\n\nVERDICT: pass", created_at="2026-01-01T00:00:00Z", cid=1
+        )
+        for kwargs, why in (
+            ({"association": "NONE"}, "untrusted author"),
+            ({}, "bound to another head"),
+        ):
+            body = f"{HEAD}\n\nVERDICT: fail" if kwargs else f"{OTHER}\n\nVERDICT: fail"
+            with self.subTest(why=why):
+                withheld = dict(
+                    comment(body, created_at="2026-02-01T00:00:00Z", cid=2, **kwargs),
+                    _channel="review",
+                )
+                self.assertEqual(decision(pr(), [good_pass, withheld]), "promote")
+
     def test_binds_head_requires_the_full_forty_hex_sha(self):
         self.assertTrue(vb.binds_head(f"reviewed {HEAD}", HEAD))
         self.assertFalse(vb.binds_head(f"reviewed {HEAD[:12]}", HEAD))
@@ -316,7 +368,20 @@ REPO = "sparq-org/sparq"
 def node(number: int, **overrides) -> dict:
     """A GraphQL pullRequest node as `list_open` returns it."""
     labels = overrides.pop("labels", ())
+    reviews = overrides.pop("reviews", ())
     base = {
+        "reviews": {
+            "nodes": [
+                {
+                    "databaseId": r.get("id", 1),
+                    "body": r.get("body"),
+                    "authorAssociation": r.get("association", "MEMBER"),
+                    "submittedAt": r.get("submitted_at", "2026-02-01T00:00:00Z"),
+                    "author": {"login": r.get("user", "reviewer")},
+                }
+                for r in reviews
+            ]
+        },
         "number": number,
         "state": "OPEN",
         "isDraft": False,
@@ -522,6 +587,78 @@ class TestWritePathDispatch(unittest.TestCase):
             ["pr", "edit", "4200", "--repo", REPO, "--remove-label", vb.UNREVIEWED_LABEL],
         )
         self.assertNotIn(vb.REVIEW_ATTESTATION, argv)
+
+    def test_a_review_body_retraction_reaches_the_write_path(self):
+        """Reviews ride the SAME GraphQL page as the PR, so this costs no extra API call
+        — and a withdrawal posted as a review must remove the attestation."""
+        fake = FakeGitHub(
+            [
+                node(
+                    4200,
+                    labels=[vb.REVIEW_ATTESTATION],
+                    reviews=[
+                        {
+                            "body": f"{HEAD}\n\nVERDICT: FAIL",
+                            "id": 7,
+                            "submitted_at": "2099-01-01T00:00:00Z",
+                        }
+                    ],
+                )
+            ],
+            comments={4200: PASS_COMMENT},
+        )
+        bridge(fake).run()
+        argv = self.edit(fake)
+        self.assertEqual(argv[argv.index("--remove-label") + 1], vb.REVIEW_ATTESTATION)
+        self.assertNotIn("--add-label", argv)
+
+    def test_a_review_body_pass_never_reaches_the_write_path_as_an_attestation(self):
+        fake = FakeGitHub(
+            [node(4200, reviews=[{"body": f"{HEAD}\n\nVERDICT: pass", "id": 7}])],
+            comments={4200: []},
+        )
+        bridge(fake).run()
+        argv = self.edit(fake)
+        self.assertNotIn(vb.REVIEW_ATTESTATION, argv)
+        self.assertIn(vb.UNREVIEWED_LABEL, argv)
+
+    def test_the_pr_list_query_actually_requests_the_review_bodies(self):
+        """Reviews ride the PR-list query. If the connection (or any field the
+        normaliser reads) is dropped, every review-body retraction silently vanishes and
+        the fake in these tests would happily keep serving them."""
+        query = vb.PR_LIST_QUERY
+        self.assertIn("reviews(", query, "the reviews connection is not requested")
+        for gql_field in ("databaseId", "body", "authorAssociation", "submittedAt", "author"):
+            with self.subTest(field=gql_field):
+                self.assertIn(gql_field, query.split("reviews(", 1)[1].split("}}", 1)[0])
+
+    def test_a_PENDING_review_is_not_evidence(self):
+        """An unsubmitted review body is a draft; it must not suppress anything."""
+        pending = node(
+            4200,
+            reviews=[{"body": f"{HEAD}\n\nVERDICT: FAIL", "id": 7, "submitted_at": None}],
+        )
+        self.assertEqual(
+            vb.VerdictBridge.review_withholdings(pending),
+            [],
+            "an unsubmitted review body must not be normalised into evidence at all",
+        )
+        fake = FakeGitHub(
+            [
+                node(
+                    4200,
+                    reviews=[
+                        {"body": f"{HEAD}\n\nVERDICT: FAIL", "id": 7, "submitted_at": None}
+                    ],
+                )
+            ],
+            comments={4200: PASS_COMMENT},
+        )
+        bridge(fake).run()
+        self.assertEqual(
+            self.edit(fake),
+            ["pr", "edit", "4200", "--repo", REPO, "--add-label", vb.REVIEW_ATTESTATION],
+        )
 
     def test_a_none_decision_writes_nothing(self):
         fake = FakeGitHub(
