@@ -84,6 +84,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # BOOTSTRAP / REVERT GUARD. The checkout above is the DEFAULT BRANCH, so on the
+          # PR that INTRODUCES the deriver — and on any ref taken after it is deleted or
+          # reverted — the file is simply not there (measured: this job failed exactly
+          # this way on its own PR, #4170). Report LOUDLY and exit 0 rather than reddening
+          # `gate` for every open PR over a condition no PR author can fix. It is a
+          # ::warning, not a ::notice, so a genuine disappearance is visible in the run
+          # summary instead of looking like a healthy no-op. The guarded path and the
+          # invoked path are asserted EQUAL by
+          # test_pr_area_labels.py::TestWorkflowSeam::test_the_run_block_guards_the_bootstrap_case,
+          # so guarding one file while running another cannot ship.
+          if [ ! -f scripts/pr-area-labels.py ]; then
+            echo "::warning title=pr-area-label inert::scripts/pr-area-labels.py is absent from the default branch, so NO area: label was derived and this PR keeps the serializing __global__ partition. Expected ONLY on the PR that adds the deriver; otherwise it has been deleted or reverted on the default branch."
+            exit 0
+          fi
           python3 scripts/pr-area-labels.py \
             --repo "${{ github.repository }}" \
             --pr "${{ github.event.pull_request.number || 0 }}" \

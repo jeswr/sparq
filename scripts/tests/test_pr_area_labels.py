@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import tomllib
 import unittest
@@ -566,6 +567,24 @@ class TestWorkflowSeam(unittest.TestCase):
             self.assertIn(arg, run, f"missing/altered call-site argument: {arg}")
         self.assertNotIn("--dry-run", run)
         self.assertNotIn("--backfill", run)
+
+    def test_the_run_block_guards_the_bootstrap_case(self):
+        """The checkout is the DEFAULT BRANCH, so the deriver is absent on the PR that
+        introduces it (measured: this job failed exactly that way on #4170) and on any ref
+        after a revert. The guard must exist, must exit 0, must be a ::warning (a genuine
+        disappearance has to be visible, not look like a healthy no-op), and — the
+        discriminating part — must guard the SAME path the step then executes."""
+        run = next(s["run"] for s in self.steps if "run" in s)
+        flat = " ".join(run.split())
+        guards = re.findall(r"if \[ ! -f (\S+) \]; then", flat)
+        self.assertEqual(len(guards), 1, "expected exactly one existence guard")
+        invoked = re.search(r"python3 (\S+\.py)", flat)
+        self.assertIsNotNone(invoked)
+        self.assertEqual(guards[0], invoked.group(1),
+                         "the guarded path and the invoked path must be the same file")
+        self.assertIn("exit 0", flat)
+        self.assertIn("::warning title=pr-area-label inert::", flat)
+        self.assertNotIn("::notice title=pr-area-label inert::", flat)
 
     def test_deriver_and_policy_paths_referenced_by_the_workflow_exist(self):
         run = " ".join(" ".join(s["run"] for s in self.steps if "run" in s).split())
