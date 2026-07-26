@@ -298,6 +298,37 @@ class TestFailClosed(unittest.TestCase):
         self.assertTrue(state.unknown)
         self.assertEqual(rsh._pr_state_cell(state), "⚠️ state unknown")
 
+    def test_a_partially_read_pr_is_unknown_even_though_it_looks_mergeable(self):
+        # DISCRIMINATING case for the `state.unknown` short-circuit in _pr_state_cell: a ref whose
+        # error is set but whose mergeable field happens to be populated (a read that failed
+        # half-way, a cached value). Falling through to the mergeable branch would print
+        # "MERGEABLE" about a PR we did not actually manage to read.
+        half_read = rsh.RefState(
+            ref="sparq-org/sparq#9",
+            is_pr=True,
+            state="open",
+            mergeable="MERGEABLE",
+            merge_state_status="CLEAN",
+            error="connection reset after the first read",
+        )
+        self.assertEqual(rsh._pr_state_cell(half_read), "⚠️ state unknown")
+        self.assertFalse(half_read.is_resolved())
+
+    def test_an_unexpected_state_string_is_unknown_not_trusted(self):
+        # `{"state": "reopened"}` / a non-string state must land in the UNKNOWN branch. Without the
+        # payload check the value is trusted verbatim, and `42.lower()` raises deep inside the
+        # render instead of being reported as an unreadable ref.
+        original = rsh._gh
+        try:
+            for payload in ({"state": "reopened"}, {"state": 42}, {"state": None}, {}):
+                rsh._gh = lambda args, p=payload: json.dumps(p)
+                state = rsh.live_ref_state("sparq-org/sparq#7")
+                self.assertTrue(state.unknown, f"{payload} must be UNKNOWN")
+                self.assertFalse(state.is_resolved())
+                self.assertEqual(rsh._pr_state_cell(state), "⚠️ state unknown")
+        finally:
+            rsh._gh = original
+
     def test_degradation_is_recorded_for_every_unreadable_ref(self):
         status = rsh.Status()
         states = rsh.collect_states(
@@ -318,6 +349,16 @@ class TestStickyStatus(unittest.TestCase):
         self.assertEqual(status.code, rsh.EXIT_OK)
         status.degrade("first failure")
         self.assertEqual(status.code, rsh.EXIT_DEGRADED)
+
+    def test_a_later_lower_severity_report_cannot_clear_an_earlier_failure(self):
+        # The exact shape of the three prior outages: a LATER transient (reported at a lower
+        # severity) overwriting an EARLIER earned hard failure. `degrade` must be a monotone
+        # maximum, not an assignment.
+        status = rsh.Status()
+        status.degrade("a ref could not be read", code=rsh.EXIT_DEGRADED)
+        status.degrade("something benign happened afterwards", code=rsh.EXIT_OK)
+        self.assertEqual(status.code, rsh.EXIT_DEGRADED)
+        self.assertTrue(status.degraded)
 
     def test_interleaved_sequence_keeps_the_failure(self):
         # failure -> successes -> failure -> successes must still exit non-zero.
