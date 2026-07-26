@@ -14,6 +14,12 @@ writer generation. The initial release supports positive basic graph patterns, d
 FILTER expressions, projection, DISTINCT, and simple grouped aggregates. Every other query
 continues to use the existing snapshot re-evaluation path.
 
+`subscription-ivm` has a hard runtime dependency on durable CDC: its Cargo feature depends
+on the `change-stream` feature, and `ivm` mode is available only when a change-stream
+directory is configured. Compiling either feature alone does not make CDC durable. If the
+directory is absent, registration still succeeds but reports `reevaluate` mode and provides
+no history cursor.
+
 The existing protocol v1 remains byte-for-byte compatible. A client explicitly requests
 protocol v2 when subscribing. V2 preserves `addedResults` and `removedResults` and adds
 commit identity, maintenance mode, and a durable history cursor. This answers open question
@@ -69,7 +75,10 @@ The following are eligible:
 - Projection and DISTINCT under the subscription protocol's existing distinct-binding
   output semantics.
 - `GROUP BY` variables with `COUNT`, `SUM`, `AVG`, `MIN`, and `MAX`, without DISTINCT
-  aggregate arguments. The ungrouped form is one global group.
+  aggregate arguments. The ungrouped form is one global group. Eligibility is provisional
+  until bootstrap has inspected the initial result: a projected result containing a blank
+  node falls back to `reevaluate` mode. If a later commit first produces such a result, the
+  subscription rebuilds and switches to `reevaluate` before emitting that commit's delta.
 
 The following force snapshot re-evaluation:
 
@@ -110,9 +119,21 @@ positive, and a removal only on a transition from positive to zero.
 Aggregate state is deletion-capable:
 
 - `COUNT` stores the contributing row count.
-- `SUM` stores count and numeric sum.
-- `AVG` stores count and numeric sum and derives the result.
-- `MIN` and `MAX` store a counted ordered multiset of values.
+- `SUM` and `AVG` store a counted member sequence, including expression errors and
+  non-numeric members. Every touched group is re-folded in the engine's deterministic member
+  order with the engine's `sum_values` and numeric canonicalisation path. This deliberately
+  does not use add/subtract accumulators: numeric promotion, floating-point order, overflow,
+  and recovery after deletion of an errored contributor must exactly match full evaluation.
+  In particular, any group containing an `xsd:double` is recomputed on touch; the initial
+  implementation applies that rule to every `SUM`/`AVG` group rather than maintaining two
+  subtly different paths.
+- `MIN` and `MAX` store a counted multiset keyed by RDF term identity plus enough stable
+  member-order information to reproduce full evaluation. Every touched group is derived by
+  the engine's `minmax_values` path rather than by taking the head of one fixed ordered
+  index. This preserves its numeric-only value order and canonicalisation, its fallback
+  lenient term order when any member is non-numeric, and the temporal fast path and tie
+  behavior. The representative RDF term, not merely an equal value, must match full
+  evaluation.
 
 Before and after each touched group is updated, its canonical output binding is compared.
 The old binding is removed and the new binding added when the aggregate value changes. An
@@ -135,14 +156,21 @@ For commit `C`, processing is serial and atomic per subscription:
 3. Propagate signed tuples through the BGP using differential join expansion. For relations
    `R` and `S`, a commit applies
    `Δ(R ⋈ S) = (ΔR ⋈ Sold) + (Rold ⋈ ΔS) + (ΔR ⋈ ΔS)`.
-   For a longer BGP, the same rule is applied in the plan's fixed left-deep order, with
-   each stage reading a consistent old-plus-current-commit view.
+   For a longer BGP in fixed left-deep order, let `P_i = P_(i-1) ⋈ Leaf_i`; then
+   `ΔP_i = (ΔP_(i-1) ⋈ Leaf_i^old) + (P_(i-1)^old ⋈ ΔLeaf_i) +
+   (ΔP_(i-1) ⋈ ΔLeaf_i)`. Every `^old` operand is the pre-commit relation. No stage state
+   is advanced until all deltas for the commit have been computed, so the delta-delta term
+   is included exactly once.
 4. Apply FILTER with the engine's expression/error semantics, then projection and support
    counting.
-5. Apply aggregate deltas to touched groups.
+5. Apply aggregate membership deltas to touched groups, then recompute each touched
+   `SUM`, `AVG`, `MIN`, or `MAX` with the engine path described above. When deletion changes
+   a group's errored-contributor count to zero, recomputation from its remaining members is
+   mandatory.
 6. Derive wire additions/removals from zero-crossings or changed group bindings.
-7. Append the history entry durably. Only after the append succeeds, publish the new
-   in-memory state and advance its CDC cursor.
+7. If answer history is enabled, append the history entry durably. Only after the append
+   succeeds (or immediately when history is disabled), publish the new in-memory state and
+   advance its CDC cursor.
 
 All arithmetic on support counts is checked. A negative count, overflow, missing delete,
 evaluation error that cannot be represented consistently, or history append failure aborts
@@ -180,6 +208,12 @@ IVM answer history is a separate segmented log rooted below the configured chang
 directory. Raw CDC and answer deltas have different retention and schema, and mixing them
 would make `/streams` compatibility and compaction harder.
 
+Answer history is independently configurable and disabled by default. When disabled, v2 can
+use live `ivm` maintenance but `subscribed` omits `historyCursor`, no history records are
+written, and the history retrieval route is unavailable. When enabled, its root is a
+dedicated child of the configured change-stream directory and cannot be redirected to an
+implicit default location.
+
 Each history record contains:
 
 ```text
@@ -196,13 +230,21 @@ continuity           # "continuous" or "reset"
 ```
 
 `subscription_key` is a server-issued opaque random identifier, distinct from the
-connection-local numeric `id`. It is returned only by protocol v2 and is the authorization
-and lookup key for history. The persisted record never contains bearer credentials.
+connection-local numeric `id`. It is returned only by protocol v2 and is a lookup handle,
+not an authorization capability. Registration stores the authenticated principal identity
+with the subscription, and retrieval requires the same principal. The persisted record
+never contains bearer credentials.
 
-History retention is segment-based and independently configurable. A cursor identifies
-`subscription_key`, CDC sequence, and record offset. Expired cursors return HTTP 410 with the
-earliest available cursor; malformed or unknown cursors return HTTP 400/404 without revealing
-other subscription keys.
+History retention is segment-based, independently configurable, and has a documented finite
+default upper bound. History is a durable copy of query answers and participates in the same
+at-rest encryption/key-erasure boundary selected for the change stream; until that boundary
+is available and configured, documentation and diagnostics must describe the history files
+as plaintext. Unsubscribe exposes a purge operation which physically removes the
+subscription's retained records and, when encryption is active, destroys any
+subscription-specific data key, so deletion of source quads need not leave their answers
+readable for the retention window. A cursor identifies `subscription_key`, CDC sequence, and
+record offset. Expired cursors return HTTP 410 with the earliest available cursor; malformed
+or unknown cursors return HTTP 400/404 without revealing other subscription keys.
 
 The retrieval surface is:
 
@@ -210,9 +252,13 @@ The retrieval surface is:
 GET /subscriptions/history/{subscription_key}?after=<opaque-cursor>&limit=<n>
 ```
 
-It uses the same read authentication gate as subscription registration. Deployments needing
-per-principal isolation must place the server behind an authorization layer; possession of a
-subscription key alone does not override the configured read gate.
+It uses the same read authentication gate as subscription registration and checks that the
+request principal owns the subscription. Where the in-server Solid authorization surface is
+active, retrieval is also subject to the same per-resource WAC/ACP/ODRL checks that permitted
+the original subscription. An external authorization layer remains an optional deployment
+choice, not the mechanism on which principal isolation depends. A deployment whose coarse
+read token does not yield distinct principal identities cannot enable durable history
+retrieval; it must configure principal-aware authentication first.
 
 On restart, history remains retrievable. Active subscriptions do not automatically resume:
 a v2 client resubscribes with its query and may provide its prior history cursor. The server
@@ -271,7 +317,8 @@ For an ineligible query, `mode` is `reevaluate`. V2 may coalesce commits in that
 notification includes `fromCommitSequence` and `throughCommitSequence` instead of claiming a
 single source commit. A mode or continuity change is explicit in the next notification.
 Clients which require commit-exact deltas can reject a `reevaluate` subscription after the
-`subscribed` response.
+`subscribed` response. A registration made while the change stream is disabled or
+unconfigured likewise reports `mode: "reevaluate"` and omits `historyCursor`.
 
 Unknown protocol versions are refused at registration. Servers never infer v2 from a header
 or silently add v2 semantics to an existing connection.
@@ -283,6 +330,9 @@ Correctness takes precedence over remaining incremental:
 | Condition | Result |
 | --- | --- |
 | Unsupported algebra at registration | Subscribe in `reevaluate` mode |
+| Change-stream feature disabled or directory unconfigured | Subscribe in `reevaluate` mode; omit `historyCursor` |
+| Initial projected result contains a blank node | Subscribe in `reevaluate` mode |
+| Incremental result first produces a blank node | Rebuild and remain in `reevaluate` mode before emitting its delta |
 | CDC gap, `REBASE`, or lineage change | Full rebuild; emit `continuity: "reset"` |
 | Receiver lag with retained CDC records | Replay in order, remain `ivm` |
 | Count invariant or expression-maintenance failure | Full rebuild from committed generation |
@@ -298,15 +348,28 @@ re-evaluation.
 
 The implementation is accepted only with differential tests that run the same eligible query
 through IVM and through full evaluation after every commit, comparing counted internal
-results and emitted set deltas. The corpus must cover:
+results and emitted set deltas by RDF term identity. Blank-node-producing results are
+explicitly tested as an eligibility fallback rather than fed to that string-key oracle,
+because v1 full re-evaluation may relabel blank nodes between snapshots. The corpus must
+cover:
 
-- insert and delete on every BGP leaf, including multiple changed leaves in one commit;
+- insert and delete on every BGP leaf, including a commit which changes multiple leaves and
+  a leaf pattern which participates in more than one left-deep join stage;
 - duplicate derivations and projection collisions;
 - FILTER true, false, error, and unbound cases;
 - named-graph constants;
-- each supported aggregate, empty groups, group creation/removal, and repeated extrema;
+- each supported aggregate, empty groups, group creation/removal, and repeated extrema with
+  counts greater than one;
+- mixed integer/decimal/double sums and averages with deletion of the promoting member,
+  ordered-double arithmetic, integer-overflow boundaries, and insertion/deletion of a
+  non-numeric or errored contributor;
+- numerically equal but lexically distinct extrema, deletion of the last non-numeric member,
+  and mixed temporal/numeric groups;
+- projected results containing blank nodes, which must select `reevaluate` mode;
 - group commits containing cancelling operations;
 - restart/replay, retention expiry, lag recovery, `REBASE`, and corrupted/truncated history;
+- denial when a second authenticated principal attempts to retrieve the first principal's
+  history, plus unsubscribe purge and history-disabled operation;
 - v1 compatibility and v2 WS/SSE parity; and
 - randomized short commit traces checked against full re-evaluation after each generation.
 
