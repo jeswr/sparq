@@ -118,6 +118,17 @@ tabular = []
 # feature the dispatch arm, implementation, and subprocess contract tests are absent.
 # The implementation uses only sparq-core's existing load path and adds no dependency.
 diff = []
+# [SONNET-4.6] (sq-2ch27, Phase E6) `reason-el` — the OWL 2 EL classifier surfaces: the
+# `classify <data-file> <format> [out.nt]` subcommand and the `--reason el` profile on
+# `reason` / `query`. Pulls the SEPARATE opt-in `sparq-reason-el` crate (depending on it IS
+# the opt-in) with its `rbox` feature ON, so the CLI applies `rdfs:subPropertyOf` inclusions,
+# property chains and transitive roles (CR10/CR11) instead of silently leaving every RBox
+# axiom unapplied — RBox skips are NOT counted in `Report::skipped_axioms`, so a no-`rbox`
+# CLI surface would be quietly incomplete on SNOMED/GO-shaped inputs. OFF by default: without
+# the feature the CLI carries no EL code, the `classify` arm is absent, and `--reason el`
+# loud-fails with a rebuild hint (never a silent fallback to the INCOMPLETE RL profile).
+# Enable with `cargo build -p sparq-cli --features reason-el`.
+reason-el = ["dep:sparq-reason-el", "sparq-reason-el/rbox"]
 
 [dependencies]
 # `version` alongside `path` on the sparq-* deps: cargo uses the path locally and the
@@ -163,6 +174,12 @@ mimalloc = { version = "0.1", optional = true }
 # Opt-in reasoning (RDFS/OWL-RL materialization) — engaged only by `--reason` / the `reason`
 # subcommand; the default query/build path never touches it.
 sparq-reason = { path = "../sparq-reason", version = "0.1.0" }
+# [SONNET-4.6] (sq-2ch27) Behind the opt-in `reason-el` feature only: the OWL 2 EL
+# consequence-based classifier backing `classify` / `--reason el`. RL (sparq-reason above) is
+# SOUND but silently INCOMPLETE for class classification, so this is a genuinely different
+# algorithm, not a profile of the same one. OFF by default — a build without the feature
+# carries no EL code.
+sparq-reason-el = { path = "../sparq-reason-el", version = "0.1.0", optional = true }
 # Opt-in HDT ingestion (the `hdt` feature; see [features] for why it is not default).
 sparq-hdt = { path = "../sparq-hdt", version = "0.1.0", optional = true }
 # [OPUS-4.8] (sq-vczh2) Behind the opt-in `terse` feature only: the verifiable LLM-ergonomic

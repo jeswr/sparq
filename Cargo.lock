@@ -4892,6 +4892,7 @@ dependencies = [
  "sparq-engine",
  "sparq-hdt",
  "sparq-reason",
+ "sparq-reason-el",
  "sparq-server",
  "sparq-terse",
  "zstd",

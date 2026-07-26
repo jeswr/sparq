@@ -23,6 +23,13 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("query") => cmd_query(&args),
         Some("reason") => cmd_reason(&args),
+        // [SONNET-4.6] (sq-2ch27) `classify` runs the OWL 2 EL consequence-based classifier
+        // (sparq-reason-el) over an ontology and reports the COMPLETE subsumption lattice —
+        // the class hierarchy `reason … owl` is sound but silently incomplete for. Gated
+        // behind the opt-in `reason-el` feature: the default CLI build carries no EL code, so
+        // the subcommand is only present when built with `--features reason-el`.
+        #[cfg(feature = "reason-el")]
+        Some("classify") => cmd_classify(&args),
         Some("bench") => cmd_bench(&args),
         Some("memstat") => cmd_memstat(&args),
         Some("bench-mmap") => cmd_bench_mmap(&args),
@@ -800,13 +807,13 @@ fn load_reasoned(path: &str, format: &str, profile: sparq_reason::Profile) -> sp
     apply_store_profile(sparq_core::Graph::from_parts(dict, triples), store_profile_from_env())
 }
 
-/// Pull an optional `--reason <profile>` flag (rdfs | owl | n3) out of the argument list.
+/// Pull an optional `--reason <profile>` flag (rdfs | owl | n3 | el) out of the argument list.
 fn reason_flag(args: &[String]) -> Option<String> {
     let i = args.iter().position(|a| a == "--reason")?;
     Some(
         args.get(i + 1)
             .unwrap_or_else(|| {
-                eprintln!("--reason needs a profile (rdfs | owl | n3)");
+                eprintln!("--reason needs a profile (rdfs | owl | n3 | el)");
                 std::process::exit(2);
             })
             .clone(),
@@ -814,16 +821,87 @@ fn reason_flag(args: &[String]) -> Option<String> {
 }
 
 /// Load a graph applying the named reasoning profile. `rdfs`/`owl` materialize over the
-/// parsed triples; `n3` parses the file as Notation3 (rules + facts) and forward-chains.
+/// parsed triples; `n3` parses the file as Notation3 (rules + facts) and forward-chains;
+/// `el` classifies the OWL 2 EL TBox with the separate `sparq-reason-el` crate.
 fn load_with_reasoning(path: &str, format: &str, profile: &str) -> sparq_core::Graph {
     if profile.eq_ignore_ascii_case("n3") {
         return load_n3(path);
     }
+    // [SONNET-4.6] (sq-2ch27) `el` is NOT a `sparq_reason::Profile`: OWL 2 RL is sound but
+    // silently INCOMPLETE for class classification (it never materializes the existential
+    // successor and has no rule concluding MEMBERSHIP in a class expression — see
+    // `cmd_classify`), so EL is a different algorithm in a different crate. Without the opt-in
+    // `reason-el` feature this loud-fails with a rebuild hint rather than silently falling
+    // back to the incomplete RL profile.
+    if profile.eq_ignore_ascii_case("el") {
+        #[cfg(feature = "reason-el")]
+        return load_el(path, format);
+        #[cfg(not(feature = "reason-el"))]
+        {
+            eprintln!(
+                "reasoning profile 'el' needs the opt-in `reason-el` feature — rebuild with `cargo build -p sparq-cli --features reason-el`"
+            );
+            std::process::exit(2);
+        }
+    }
     let prof = sparq_reason::Profile::parse(profile).unwrap_or_else(|| {
-        eprintln!("unknown reasoning profile '{profile}' (known: rdfs | owl | n3)");
+        eprintln!("unknown reasoning profile '{profile}' (known: rdfs | owl | n3 | el)");
         std::process::exit(2);
     });
     load_reasoned(path, format, prof)
+}
+
+/// [SONNET-4.6] (sq-2ch27) Parse `path`, materialize the COMPLETE OWL 2 EL subsumption
+/// lattice in place (`classify_graph`), then build the graph — the same
+/// `parse_to_triples` → `from_parts` seam the RL/RDFS path uses, so the emitted
+/// `rdfs:subClassOf` (and, with `rbox`, `rdfs:subPropertyOf`) triples are queryable by
+/// plain BGP eval. Reports the expansion and the honest incompleteness signals on stderr.
+#[cfg(feature = "reason-el")]
+fn load_el(path: &str, format: &str) -> sparq_core::Graph {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("error reading {path}: {e}");
+        std::process::exit(1);
+    });
+    let (mut dict, mut triples) = sparq_core::Graph::parse_to_triples(&text, format).unwrap_or_else(|e| {
+        eprintln!("parse error: {e}");
+        std::process::exit(1);
+    });
+    let base = triples.len();
+    let t = Instant::now();
+    let report = sparq_reason_el::classify_graph(&mut dict, &mut triples);
+    eprintln!(
+        "classified [EL]: {base} -> {} triples (+{} subsumptions, +{} role subsumptions) over {} concept names in {:.3}s",
+        triples.len(),
+        report.emitted_subsumptions,
+        report.emitted_role_subsumptions,
+        report.named_classes,
+        t.elapsed().as_secs_f64()
+    );
+    el_honesty_notes(&report);
+    // The EL load path honours `SPARQ_STORE_PROFILE` like every other reasoned load.
+    apply_store_profile(sparq_core::Graph::from_parts(dict, triples), store_profile_from_env())
+}
+
+/// [SONNET-4.6] (sq-2ch27) Surface the classifier's honest-incompleteness signals — the
+/// classifier is SOUND for everything it emits, but only COMPLETE for the fragment it
+/// recognises, so an out-of-fragment axiom or a non-regular RBox must be reported, never
+/// silently swallowed.
+#[cfg(feature = "reason-el")]
+fn el_honesty_notes(report: &sparq_reason_el::Report) {
+    if report.skipped_axioms > 0 {
+        eprintln!(
+            "note: {} class axiom(s) used constructs OUTSIDE the recognised EL fragment (union / complement / allValuesFrom / cardinality / multi-individual oneOf / concrete domains) and were NOT applied — the lattice may be incomplete for them",
+            report.skipped_axioms
+        );
+    }
+    if report.rbox_non_regular {
+        eprintln!(
+            "note: the told RBox is NOT regular (a role-dependency cycle through a property-chain axiom, which the OWL 2 global restrictions forbid) — saturation still terminates and every derived subsumption is sound, but classification may be incomplete"
+        );
+    }
+    if report.unsatisfiable_classes > 0 {
+        eprintln!("UNSATISFIABLE — {} named class(es) are forced ⊑ owl:Nothing", report.unsatisfiable_classes);
+    }
 }
 
 /// Parse a Notation3 document (facts + `{…}=>{…}` rules), run the rule closure, build a graph.
@@ -892,6 +970,76 @@ fn cmd_reason(args: &[String]) {
         w.flush().unwrap();
         eprintln!("wrote closure to {out}");
     }
+}
+
+/// [SONNET-4.6] (sq-2ch27, Phase E6) `classify <data-file> <format> [out.nt]` — run the OWL 2 EL
+/// consequence-based classifier (`sparq-reason-el`) over the ontology and report the COMPLETE
+/// named-class subsumption lattice: how many classes were classified, how many subsumptions were
+/// derived, which classes are unsatisfiable, and what fell outside the recognised fragment. With
+/// `out.nt`, ALSO materializes the lattice into the graph and writes it as N-Triples.
+///
+/// This is the class-hierarchy answer `reason … owl` cannot give: OWL 2 RL is sound but silently
+/// INCOMPLETE for classification — it never materializes the existential successor and has no rule
+/// concluding MEMBERSHIP in a class expression (`scm-int` only decomposes an intersection), so e.g.
+/// `A ⊑ ∃r.B ⊓ X`, `B ⊑ C`, `(∃r.C ⊓ X) ⊑ D` ⊬_RL `A ⊑ D` while EL derives it (Krötzsch, ISWC
+/// 2012). That witness is pinned end-to-end by `tests/classify_cli.rs`; note the plainer
+/// `A ⊑ ∃r.B`, `B ⊑ C`, `∃r.C ⊑ D` shape is NOT such a witness — `scm-svf1` + `scm-sco` relate the
+/// told restriction nodes, so RL gets that one right.
+#[cfg(feature = "reason-el")]
+fn cmd_classify(args: &[String]) {
+    let (path, format) = match (args.get(2), args.get(3)) {
+        (Some(p), Some(f)) => (p.as_str(), f.as_str()),
+        _ => {
+            eprintln!(
+                "usage: sparq-cli classify <data-file> <format> [out.nt]\n  \
+                 Classifies the OWL 2 EL TBox and reports the COMPLETE rdfs:subClassOf lattice\n  \
+                 (the hierarchy `reason <file> <format> owl` is sound but INCOMPLETE for).\n  \
+                 With out.nt, materializes the lattice into the graph and writes it as N-Triples."
+            );
+            std::process::exit(2);
+        }
+    };
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("error reading {path}: {e}");
+        std::process::exit(1);
+    });
+    let (mut dict, mut triples) = sparq_core::Graph::parse_to_triples(&text, format).unwrap_or_else(|e| {
+        eprintln!("parse error: {e}");
+        std::process::exit(1);
+    });
+    let t = Instant::now();
+    let report = sparq_reason_el::classify_graph(&mut dict, &mut triples);
+    // `Report::named_classes` counts every CONCEPT NAME the extractor put in the normalized
+    // signature — the named classes PLUS ⊤/⊥ and the anonymous (blank-node) class expressions —
+    // so it is reported under that honest label, not as a named-class total.
+    println!(
+        "classified [EL]: {} concept name(s) (named classes + ⊤/⊥ + anonymous class expressions), \
+         +{} subsumption(s), +{} role subsumption(s) in {:.3}s",
+        report.named_classes,
+        report.emitted_subsumptions,
+        report.emitted_role_subsumptions,
+        t.elapsed().as_secs_f64()
+    );
+    // Naming the unsatisfiable classes needs the typed view: `classify_graph` counts them but
+    // never emits `C ⊑ owl:Nothing` triples, so a second pass runs ONLY when there are any.
+    if report.unsatisfiable_classes > 0 {
+        let hierarchy = sparq_reason_el::Classifier::classify(&dict, &triples);
+        for c in hierarchy.unsatisfiable_classes() {
+            println!("  unsatisfiable: {} ⊑ owl:Nothing", dict.term(*c));
+        }
+    }
+    el_honesty_notes(&report);
+    let Some(out) = args.get(4) else { return };
+    use std::io::Write;
+    let mut w = std::io::BufWriter::new(std::fs::File::create(out).unwrap_or_else(|e| {
+        eprintln!("create {out}: {e}");
+        std::process::exit(1);
+    }));
+    for tr in triples.iter() {
+        writeln!(w, "{} {} {} .", dict.term(tr[0]), dict.term(tr[1]), dict.term(tr[2])).unwrap();
+    }
+    w.flush().unwrap();
+    eprintln!("wrote {} triples (asserted + derived lattice) to {out}", triples.len());
 }
 
 /// `query-mmap <dir> <sparql> [--format <out>] [--count]` — open a saved dataset with

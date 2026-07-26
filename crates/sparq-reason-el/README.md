@@ -11,11 +11,11 @@ consequence-based reasoner that computes the **complete `rdfs:subClassOf` subsum
 lattice** of an EL ontology, the one thing OWL 2 RL (`sparq-reason`) is **sound but silently
 incomplete** for.
 
-RL has no rule that reasons *through* an existential successor, so running `--reason owl` over
-a biomedical EL ontology (GO, ChEBI, SNOMED-style) returns a hierarchy that silently omits
-subsumptions like `A ⊑ D` from `A ⊑ ∃r.B`, `B ⊑ C`, `∃r.C ⊑ D` (Krötzsch, ISWC 2012). EL
-closes that gap with a deterministic least-fixpoint saturation (PTIME). This is a **separate
-crate** — the core engine and the wasm build carry zero EL code, deps, or cost by default.
+RL never materializes the existential successor and has no rule concluding MEMBERSHIP in a class
+expression, so `--reason owl` over a biomedical EL ontology (GO, ChEBI, SNOMED-style) silently
+omits entailed subsumptions — e.g. `A ⊑ D` from `A ⊑ ∃r.B ⊓ X`, `B ⊑ C`, `(∃r.C ⊓ X) ⊑ D`
+(Krötzsch, ISWC 2012). EL closes that gap with a deterministic least-fixpoint saturation (PTIME).
+A **separate crate** — the engine and the wasm build carry zero EL code, deps, or cost by default.
 
 ## 🚀 Quickstart
 
@@ -35,7 +35,9 @@ let g = Graph::from_parts(dict, triples);             // then query as usual
 ```
 
 For a typed view (super-classes, subsumption test, unsatisfiable classes) use
-`Classifier::classify`, which returns a `ClassHierarchy` without mutating the graph.
+`Classifier::classify`, which returns a `ClassHierarchy` without mutating the graph. From the
+command line both are reachable behind `sparq-cli`'s opt-in `reason-el` feature:
+`sparq-cli classify <file> <fmt> [out.nt]` for the summary, `--reason el` to classify then query.
 
 ## ✨ Features
 
@@ -49,12 +51,12 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
   (`∃r.{a}`) classify (the reachability-guarded merge rule; every derivation sound, with
   negative tests pinning the guard). Completeness is claimed for typical safe usage, NOT for
   every EL++ nominal interplay; ABox `rdf:type` assertions are not internalized (TBox only).
-- **Self-restrictions — CR-Self** — `owl:hasSelf "true"^^xsd:boolean` + `owl:onProperty r` is the
-  EL profile's `ObjectHasSelf` (`∃r.Self`, local reflexivity): `X ⊑ ∃r.Self ⇒ (X,X) ∈ R(r)`,
-  `∃r.Self ⊑ D` threads via the self-concept atom + CR1, and a SAME-NOMINAL self-link `({a},{a})
-  ∈ R(r)` (an asserted/derived `a r a`) reads off as `∃r.Self ∈ S({a})` (CRs3 — sound: a nominal
-  is a singleton). A general `(X,X)` link from `X ⊑ ∃r.X` never triggers either (load-bearing);
-  a malformed shape stays a counted skip. Under `abox` self-loops realise as `a r a` (WG -001/-002).
+- **Self-restrictions — CR-Self** — `owl:hasSelf "true"^^xsd:boolean` + `owl:onProperty r` is the EL
+  profile's `ObjectHasSelf` (`∃r.Self`): `X ⊑ ∃r.Self ⇒ (X,X) ∈ R(r)`, `∃r.Self ⊑ D` threads via the
+  self-concept atom + CR1, and a SAME-NOMINAL self-link (an asserted/derived `a r a`) reads off as
+  `∃r.Self ∈ S({a})` (CRs3 — sound: a nominal is a singleton). A general `(X,X)` link from `X ⊑ ∃r.X`
+  never triggers either (load-bearing); a malformed shape stays a counted skip. Under `abox`,
+  self-loops realise as `a r a` (WG -001/-002).
 - **RBox role automaton + lattice readoff** *(opt-in `rbox` feature, Phases E2/E3)* — `rdfs:subPropertyOf`
   inclusions (**CR10**), `owl:propertyChainAxiom` + `owl:TransitiveProperty` compositions (**CR11**), incl. the
   SNOMED-critical right-identity `r ∘ s ⊑ s`; and a **role-lattice readoff**: `classify_graph` also emits the
@@ -83,13 +85,11 @@ For a typed view (super-classes, subsumption test, unsatisfiable classes) use
   `Classifier::classify` / `classify_graph` stay **byte-identical** (they never internalize
   assertions). Data-property assertions and non-EL class expressions stay counted skips
   (`Report::skipped_assertions`, fail-closed — never a guessed typing).
-- **Keys, negative assertions & differentFrom** *(also `abox`)* — `owl:hasKey` merges two DISTINCT
-  named individuals in the key class that share a value on EVERY key property (`owl:sameAs`);
-  a PARTIAL key match cannot fire (object keys match a shared nominal successor, data keys a
-  shared literal term — sound). An `owl:NegativePropertyAssertion` is a clash iff the positive is
-  asserted/derived; `owl:differentFrom` is read off only from a derived nominal clash
-  (`{a} ⊓ {b} ⊑ ⊥`) or asserted-inequality symmetry, and a `sameAs`/`differentFrom` coincidence is
-  inconsistent. Unsupported key/NPA shapes stay counted skips (fail-closed).
+- **Keys, negative assertions & differentFrom** *(also `abox`)* — `owl:hasKey` merges two DISTINCT named individuals in the
+  key class that share a value on EVERY key property (`owl:sameAs`); a PARTIAL key match cannot fire (object keys match a
+  shared nominal successor, data keys a shared literal term — sound). An `owl:NegativePropertyAssertion` is a clash iff the
+  positive is asserted/derived; `owl:differentFrom` is read off only from a derived nominal clash (`{a} ⊓ {b} ⊑ ⊥`) or
+  asserted-inequality symmetry, and a `sameAs`/`differentFrom` coincidence is inconsistent. Unsupported key/NPA shapes stay counted skips (fail-closed).
 - **Parallel saturation** *(opt-in `par` feature, Phase E4)* — `Classifier::classify_par` /
   `classify_graph_par` run the SAME rules as deterministic bulk-synchronous rounds on a bounded
   `std::thread::scope` pool; the closure is **identical to single-threaded at every thread count**

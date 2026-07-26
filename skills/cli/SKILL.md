@@ -1,6 +1,6 @@
 ---
 name: cli
-description: Use when you need to drive the sparq RDF/SPARQL engine from the command line — load a Turtle/N-Triples/N-Quads/TriG (or HDT) file and run a SPARQL query, compare RDF triple sets, build/query memory-mapped on-disk indexes for datasets larger than RAM, materialize RDFS/OWL-RL/N3 reasoning closures, stream-ingest huge gzip/bzip2/zstd dumps, import CSV as RDF (direct mapping or R2RML), or benchmark query suites. Covers the actual `sparq-cli` subcommands, positional argument order, and cargo feature flags.
+description: Use when you need to drive the sparq RDF/SPARQL engine from the command line — load a Turtle/N-Triples/N-Quads/TriG (or HDT) file and run a SPARQL query, compare RDF triple sets, build/query memory-mapped on-disk indexes for datasets larger than RAM, materialize RDFS/OWL-RL/N3 reasoning closures, classify an OWL 2 EL ontology into its complete subsumption lattice, stream-ingest huge gzip/bzip2/zstd dumps, import CSV as RDF (direct mapping or R2RML), or benchmark query suites. Covers the actual `sparq-cli` subcommands, positional argument order, and cargo feature flags.
 ---
 
 # sparq-cli
@@ -29,14 +29,15 @@ cargo run --release -p sparq-cli -- \
 
 All invoked as `sparq-cli <subcommand> <args...>`:
 
-- `query <data-file> <format> <sparql> [--format <out>] [--count] [--reason <rdfs|owl|n3>]` — load file, run one query, print its **results** to stdout, dispatched by query form:
+- `query <data-file> <format> <sparql> [--format <out>] [--count] [--reason <rdfs|owl|n3|el>]` — load file, run one query, print its **results** to stdout, dispatched by query form:
   - **SELECT** → the solution bindings. `--format` chooses the serialisation: `table` (default, a readable fixed-width ASCII table with a `(K row(s))` footer), `tsv` / `csv` / `xml` (W3C SPARQL Results, reusing `sparq-server`'s serialisers), or `json` (SPARQL 1.1 Results JSON, the engine's direct serialiser). `ntriples` is not meaningful for bindings and falls back to `tsv`.
   - **ASK** → a boolean: `true` / `false`. `--format json` / `--format xml` emit the W3C boolean documents (`{"head":{},"boolean":…}` / `<sparql>…<boolean>…</boolean></sparql>`); other formats print the bare token.
   - **CONSTRUCT / DESCRIBE** → the resulting triples serialised as **N-Triples** (always; `--format` is a SELECT/ASK selector and is ignored for the graph forms).
   - `--count` restores the historical count-only output (`<n> solutions in <ms>ms` for SELECT/ASK, `<n> triples in <ms>ms` for the graph forms) — the backward-compatible escape hatch for scripts that scraped the count.
   - An unknown `--format` value is a usage error (exit 2); a query/runtime error exits 1.
 - `diff <file-a> <file-b> [--exact]` *(opt-in `diff` feature; [GPT-5.6] sq-lsp7k.28)* — auto-detect each RDF format from `.nt`, `.ttl`, `.nq`, `.trig`, or `.jsonld` (before an optional compression extension), compare the documents as triple sets, and emit a deterministic N-Triples patch. Lines prefixed by `-` form the first lexicographically sorted block; lines prefixed by `+` form the second. Exit 0 means identical sets and empty stdout; exit 1 means different sets. Named-graph names are discarded, duplicate triples collapse, and blank-node labels compare exactly as loaded. `--exact` is currently a compatibility alias for that same behavior.
-- `reason <data-file> <format> <rdfs|owl|n3> [out.nt]` — materialize the entailed closure; print closure triple count; with `out.nt`, write the full closure as N-Triples. Add `--proof` (N3 only) to print each derivation step.
+- `reason <data-file> <format> <rdfs|owl|n3|el> [out.nt]` — materialize the entailed closure; print closure triple count; with `out.nt`, write the full closure as N-Triples. Add `--proof` (N3 only) to print each derivation step. The `el` profile (opt-in `reason-el` feature) materializes the **OWL 2 EL subsumption lattice** instead of running a rule closure — see `classify` below.
+- `classify <data-file> <format> [out.nt]` *(opt-in `reason-el` feature; [SONNET-4.6] sq-2ch27)* — run the **OWL 2 EL consequence-based classifier** (`sparq-reason-el`, CR1–CR6 + the `rbox` role automaton) over the ontology and print the classification summary on stdout: the concept-name count, how many `rdfs:subClassOf` / `rdfs:subPropertyOf` edges were **derived**, and every **unsatisfiable** class (`C ⊑ owl:Nothing`, named — `reason … el` only counts them). With `out.nt`, also writes the asserted triples **plus** the materialized lattice as N-Triples. Honest incompleteness goes to stderr, never silently: axioms outside the recognised EL fragment (union / complement / `allValuesFrom` / cardinality / multi-individual `oneOf` / concrete domains) are **counted and reported, not applied**, and a non-regular told RBox is flagged. **Why it exists:** OWL 2 RL (`--reason owl`) is sound but **incomplete for class classification** — it has no rule concluding membership in an intersection or reasoning through an existential successor in general, so `--reason owl` returns a hierarchy that silently omits subsumptions EL derives. RL is not an approximation you can tune up with more rules. Off by default; build with `--features reason-el` (without it, `classify` is absent and `--reason el` exits 2 with a rebuild hint rather than falling back to the incomplete RL profile).
 - `build <file[.gz|.bz2|.zst]> <format> <dir> [chunk_millions=16]` — EXTERNAL-MEMORY build: stream the (compressed) document straight to on-disk memory-mapped indexes via disk-backed sort/merge. For datasets whose indexes exceed RAM. `chunk_millions` sets the in-memory run size. Writes RAW perms by default; set `SPARQ_BUILD_COMPRESSED=1` to emit block-compressed (`SPQCPRM1`) perms directly from the merge tail, skipping a later `recompress` (byte-identical to build-then-recompress).
 - `save <data-file> <format> <dir> [compressed]` — load into RAM then persist the six permutation indexes to `<dir>`. Add the literal word `compressed` for block-compressed permutations.
 - `query-mmap <dir> <sparql> [--format <out>] [--count]` — open a saved/built dir with indexes MEMORY-MAPPED (out-of-core) and run a query, printing its **results**. Output is at **parity with `query`**: SELECT → bindings (default a readable table; `--format <table|tsv|csv|xml|json|ntriples>` selects the serialisation), ASK → a boolean (`--format json|xml` → the W3C boolean documents), CONSTRUCT/DESCRIBE → the resulting triples as N-Triples; `--count` restores the legacy count-only line (`<n> solutions/triples in <ms>ms`). The only difference from `query` is the data source — an mmap-backed `Graph::open` instead of an in-RAM load (permutations stay in the OS page cache, not the process heap). An unknown `--format` is a usage error (exit 2); a query/runtime error exits 1.
@@ -82,6 +83,20 @@ cargo run --release -p sparq-cli -- reason rules.n3 turtle n3 --proof
 cargo run --release -p sparq-cli -- query data.ttl turtle \
   'SELECT ?s WHERE { ?s a ?c }' --reason owl
 ```
+(OWL 2 RL is sound but **incomplete for class classification** — for a complete `rdfs:subClassOf`
+hierarchy over an EL ontology use `--reason el` / `classify`, not `--reason owl`.)
+
+**Classify an OWL 2 EL ontology — the COMPLETE class hierarchy RL cannot give (opt-in `reason-el`):**
+```bash
+cargo run --release -p sparq-cli --features reason-el -- classify onto.ttl turtle lattice.nt
+# stdout: classified [EL]: N concept name(s) …, +M subsumption(s), +K role subsumption(s) in <t>s
+# stderr: notes for out-of-fragment axioms / a non-regular RBox / unsatisfiable classes
+
+# …or classify then query the derived lattice in one shot:
+cargo run --release -p sparq-cli --features reason-el -- query onto.ttl turtle \
+  'SELECT ?super WHERE { <http://ex/A> <http://www.w3.org/2000/01/rdf-schema#subClassOf> ?super }' \
+  --reason el
+```
 
 **Get serialised SELECT bindings (CSV/TSV/XML/JSON) or a CONSTRUCT graph:**
 ```bash
@@ -123,7 +138,7 @@ cargo run --release -p sparq-cli --features hdt-write -- \
 
 - **`query` and `query-mmap` print RESULTS** (a table by default for SELECT; a boolean for ASK; N-Triples for CONSTRUCT/DESCRIBE) on stdout — load stats and reasoning/inconsistency reports go to stderr. Use `--format <table|tsv|csv|xml|json|ntriples>` to pick the SELECT/ASK serialisation, or `--count` for the legacy count-only line (`<n> solutions/triples in <ms>ms`). The two are at output parity (they share one emission core; `query-mmap` only differs in opening the indexes memory-mapped instead of loading into RAM). `bench`/`bench-mmap` are unchanged and emit TSV.
 - **No `--help`.** Run a subcommand with too few args to see its one-line usage; an unknown subcommand prints the top-level usage and exits 2. Query errors exit 1.
-- **`--reason <profile>` is a flag on `query`** (scanned anywhere in argv); the standalone `reason` subcommand instead takes the profile as the 3rd positional. Profiles: `rdfs`, `owl`, `n3`.
+- **`--reason <profile>` is a flag on `query`** (scanned anywhere in argv); the standalone `reason` subcommand instead takes the profile as the 3rd positional. Profiles: `rdfs`, `owl`, `n3`, and — behind the opt-in `reason-el` feature — `el`. Note `el` is NOT a `sparq_reason::Profile`: it dispatches to the separate `sparq-reason-el` classifier (a different algorithm, not a rule set), and in a build WITHOUT the feature it exits 2 with a rebuild hint instead of silently falling back to the incomplete RL profile.
 - **Default cargo features:** `mmap` (out-of-core), `mimalloc` (global allocator — `--no-default-features --features mmap` falls back to the system allocator for A/B), `dict-spill`, and — [OPUS-4.8] sq-oy1f.4 (user-prioritised epic sq-oy1f) — `jsonld` (JSON-LD parse via `oxjsonld` + the `serialize-rdf` writer matrix). `jsonld` being default-on is a deliberate maintainer-directed exception to sparq's opt-in-by-default principle; it stays toggleable (`--no-default-features --features mmap,mimalloc,dict-spill` drops the JSON-LD parser + writers).
 - **Engine features every CLI build lights (dep features, so on even under `--no-default-features`):** the CLI's `sparq-engine` dependency enables `dp-planner` (DPccp cost-optimal join ordering, [SONNET-4.6] sq-7d3dj.30.5) and `algebra-rewrite` (the result-equivalent pre-execution rewrite of #1735 — `FILTER(?v = <iri>)` IRI-constant folding + `FILTER(!bound)` anti-join; [FABLE-5] sq-7d3dj.30.13). The shipped binary and every canonical benchmark therefore run the rewritten, DP-ordered plans; the sparq-engine LIBRARY defaults keep both OFF for lean library consumers.
 - **HDT is opt-in:** `--features hdt` (loader) / `--features hdt-write` (adds the `to-hdt` exporter, implies `hdt`). OFF by default partly because the wrapped `hdt` crate declares MSRV **1.87** and its decode stack is dead weight on the common paths.
@@ -140,6 +155,7 @@ cargo run --release -p sparq-cli --features hdt-write -- \
 - `core` — the `sparq_core::Graph` library API (load/save/open, the store, the Dict) used under the hood.
 - `engine` — `sparq_engine::{query, count, query_json}` and query budgets / prepared queries.
 - `reason` — RDFS/OWL-RL/N3 materialization (`sparq_reason`) invoked by `--reason` and the `reason` subcommand.
+- `inference` — the reasoning how-to, including the OWL 2 EL classifier (`sparq_reason_el`) behind `classify` / `--reason el` and why RL cannot replace it.
 - `hdt` — the opt-in HDT loader (`sparq_hdt::load`).
 - `hdt-write` — the opt-in `to-hdt` HDT exporter (`sparq_hdt::save`); implies `hdt`.
 - `server` — the HTTP SPARQL endpoint (`sparq-server`) for serving instead of one-shot CLI queries.
