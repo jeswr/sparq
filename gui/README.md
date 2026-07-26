@@ -180,8 +180,11 @@ Explorer's model-driven half (walk relationship paths, attribute filters, AND-NO
   (`FILTER NOT EXISTS` — the AND-NOT affordance) sit on the edge; attribute filters
   (`=`/`≠`/`<`/`≤`/`>`/`≥`/contains/starts/ends/regex, as literal, number or IRI) sit on the node.
   A filter on an OPTIONAL attribute is emitted **inside** the OPTIONAL block ("if present, it must
-  match"). The aggregate panel emits `GROUP BY` with aliased `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`/
-  `SAMPLE`/`GROUP_CONCAT`.
+  match"), and a node reached *only* through an OPTIONAL or excluded edge carries its class and
+  attribute patterns inside that group too — so the target is never bound independently of the
+  relationship the user drew. The aggregate panel emits `GROUP BY` with aliased
+  `COUNT`/`SUM`/`AVG`/`MIN`/`MAX`/`SAMPLE`/`GROUP_CONCAT`; `*` is offered for `COUNT` alone, the
+  only SPARQL 1.1 aggregate that takes it.
 * **Two-way, honestly.** The generated SPARQL is always visible and always editable. Hand-editing
   it flips the pane to *hand-edited* and stops regeneration until you press **Regenerate** — the
   builder does **not** parse text back into the diagram (v1 does not do that, and faking it would

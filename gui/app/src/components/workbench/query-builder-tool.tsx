@@ -58,6 +58,7 @@ import {
   addAttribute,
   addNode,
   addRelationship,
+  aggregatableVariables,
   buildSparql,
   buildSuggestionIndex,
   connectNodes,
@@ -68,6 +69,7 @@ import {
   nextId,
   partitionSuggestions,
   removeNode,
+  setAggregateFn,
   suggestionsFor,
   uniqueVariable,
   type AggregateFn,
@@ -1103,9 +1105,7 @@ function AggregatePanel({
   model: BuilderModel;
   onChange: React.Dispatch<React.SetStateAction<BuilderModel>>;
 }) {
-  const variables = modelVariables(model).filter(
-    (name) => !model.aggregates.some((aggregate) => aggregate.alias === name),
-  );
+  const variables = aggregatableVariables(model);
 
   const addAggregate = () =>
     onChange((current) => ({
@@ -1139,16 +1139,11 @@ function AggregatePanel({
                 <select
                   className={CONTROL}
                   value={aggregate.fn}
-                  onChange={(event) =>
-                    onChange((current) => ({
-                      ...current,
-                      aggregates: current.aggregates.map((entry) =>
-                        entry.id === aggregate.id
-                          ? { ...entry, fn: event.currentTarget.value as AggregateFn }
-                          : entry,
-                      ),
-                    }))
-                  }
+                  onChange={(event) => {
+                    const fn = event.currentTarget.value as AggregateFn;
+                    // Only COUNT takes `*`, so the model edit re-points a wildcard on the way out.
+                    onChange((current) => setAggregateFn(current, aggregate.id, fn));
+                  }}
                   aria-label="Aggregate function"
                 >
                   {AGGREGATE_FNS.map((fn) => (
@@ -1172,7 +1167,12 @@ function AggregatePanel({
                   }
                   aria-label="Aggregated variable"
                 >
-                  <option value="*">*</option>
+                  {aggregate.fn === "COUNT" ? (
+                    <option value="*">*</option>
+                  ) : aggregate.variable.trim() === "*" ? (
+                    // No bound variable to move to — surfaced, not silently emitted as `SUM(*)`.
+                    <option value="*">(pick a variable)</option>
+                  ) : null}
                   {variables.map((name) => (
                     <option key={name} value={name}>
                       ?{name}

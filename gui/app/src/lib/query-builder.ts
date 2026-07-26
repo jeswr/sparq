@@ -325,8 +325,12 @@ function aggregateExpression(aggregate: BuilderAggregate): string {
   return `(${aggregate.fn}(${distinct}${argument}) AS ?${alias})`;
 }
 
-/** Disjoint-set roots over the nodes joined by non-negated edges (NOT EXISTS never joins). */
-function connectedComponents(model: BuilderModel): number {
+/**
+ * Disjoint-set roots over the nodes joined by non-negated edges (NOT EXISTS never joins). Nodes
+ * a scoped group owns (`scopedOwner`) are not counted: they live inside that group rather than
+ * standing alone in the top-level body, so they are never a disconnected group of their own.
+ */
+function connectedComponents(model: BuilderModel, scopedOwner: Map<string, BuilderEdge>): number {
   const parent = new Map<string, string>();
   const find = (id: string): string => {
     let root = id;
@@ -344,7 +348,9 @@ function connectedComponents(model: BuilderModel): number {
     if (a !== b) parent.set(a, b);
   }
   const roots = new Set<string>();
-  for (const node of model.nodes) roots.add(find(node.id));
+  for (const node of model.nodes) {
+    if (!scopedOwner.has(node.id)) roots.add(find(node.id));
+  }
   return roots.size;
 }
 
@@ -385,12 +391,57 @@ export function buildSparql(model: BuilderModel): BuiltQuery {
     seenVariables.add(clean);
   }
 
-  // 1. Class constraints.
-  for (const node of model.nodes) {
-    if (node.classIri) body.push(triple(nodeVar(node), "a", ctx.w.write(node.classIri)));
+  const incident = new Map<string, BuilderEdge[]>();
+  for (const edge of model.edges) {
+    for (const id of [edge.from, edge.to]) {
+      const list = incident.get(id);
+      if (list) list.push(edge);
+      else incident.set(id, [edge]);
+    }
   }
 
-  // 2. Relationships.
+  // Which relationship group OWNS a walked-to node. A target reached SOLELY through one OPTIONAL
+  // or excluded edge belongs INSIDE that edge's group: emitted at the top level, its class triple
+  // and attributes would bind it independently of the group, which turns OPTIONAL into a cross
+  // product and FILTER NOT EXISTS into a per-pair test rather than "has no such relationship".
+  const scopedOwner = new Map<string, BuilderEdge>();
+  for (const edge of model.edges) {
+    if (!edge.optional && !edge.negated) continue;
+    if (!nodeById.has(edge.from) || !nodeById.has(edge.to)) continue;
+    // An edge that emits nothing (no predicate) can own nothing — the constraints would vanish.
+    if (![edge.predicate, ...edge.alternates].some((p) => p.trim() !== "")) continue;
+    // Anything the user constrained elsewhere too stays where they drew it. (A self-loop has the
+    // node incident twice, so it never qualifies.)
+    if ((incident.get(edge.to) ?? []).length !== 1) continue;
+    scopedOwner.set(edge.to, edge);
+  }
+
+  const classLine = (node: BuilderNode): string[] =>
+    node.classIri ? [triple(nodeVar(node), "a", ctx.w.write(node.classIri))] : [];
+
+  /** A node's attribute patterns. A filter on an OPTIONAL attribute goes INSIDE the OPTIONAL
+   *  block, so the row survives and the variable binds only when it matches. */
+  const attributePatterns = (node: BuilderNode): string[] => {
+    const out: string[] = [];
+    for (const attribute of node.attributes) {
+      if (attribute.predicate.trim() === "") {
+        warn(`An attribute on ${nodeVar(node)} has no predicate — it was skipped.`);
+        continue;
+      }
+      const variable = sanitizeVariable(attribute.variable, "value");
+      const lines = [triple(nodeVar(node), ctx.w.write(attribute.predicate), `?${variable}`)];
+      if (attribute.filter) lines.push(filterLine(variable, attribute.filter, ctx));
+      out.push(...(attribute.optional ? wrapBlock("OPTIONAL", lines) : lines));
+    }
+    return out;
+  };
+
+  // 1. Class constraints (except those owned by a scoped relationship group).
+  for (const node of model.nodes) {
+    if (!scopedOwner.has(node.id)) body.push(...classLine(node));
+  }
+
+  // 2. Relationships — each scoped group carrying the complete pattern for the node it owns.
   for (const edge of model.edges) {
     const from = nodeById.get(edge.from);
     const to = nodeById.get(edge.to);
@@ -411,6 +462,8 @@ export function buildSparql(model: BuilderModel): BuiltQuery {
         .map((p) => `{ ${triple(nodeVar(from), ctx.w.write(p), nodeVar(to))} }`)
         .flatMap((block, i) => (i === 0 ? [block] : ["UNION", block]));
     }
+    const walked = scopedOwner.get(edge.to) === edge ? nodeById.get(edge.to) : undefined;
+    if (walked) core.push(...classLine(walked), ...attributePatterns(walked));
     if (edge.negated) {
       if (edge.optional) {
         warn(
@@ -425,62 +478,53 @@ export function buildSparql(model: BuilderModel): BuiltQuery {
     }
   }
 
-  // 3. Attributes (and their filters). A filter on an OPTIONAL attribute goes INSIDE the
-  //    OPTIONAL block, so the row survives and the variable binds only when it matches.
+  // 3. Attributes (and their filters) of every node a scoped group does not own.
   for (const node of model.nodes) {
-    for (const attribute of node.attributes) {
-      if (attribute.predicate.trim() === "") {
-        warn(`An attribute on ${nodeVar(node)} has no predicate — it was skipped.`);
-        continue;
-      }
-      const variable = sanitizeVariable(attribute.variable, "value");
-      const lines = [
-        triple(nodeVar(node), ctx.w.write(attribute.predicate), `?${variable}`),
-      ];
-      if (attribute.filter) lines.push(filterLine(variable, attribute.filter, ctx));
-      body.push(...(attribute.optional ? wrapBlock("OPTIONAL", lines) : lines));
-    }
+    if (!scopedOwner.has(node.id)) body.push(...attributePatterns(node));
   }
 
   // 4. Honesty warnings about the SHAPE of the pattern.
-  const incident = new Map<string, BuilderEdge[]>();
-  for (const edge of model.edges) {
-    for (const id of [edge.from, edge.to]) {
-      const list = incident.get(id);
-      if (list) list.push(edge);
-      else incident.set(id, [edge]);
-    }
-  }
   for (const node of model.nodes) {
     const edges = incident.get(node.id) ?? [];
     const bare = !node.classIri && node.attributes.length === 0;
+    // A node scoped inside FILTER NOT EXISTS cannot escape it, whether or not it is otherwise bare.
+    const insideNotExists = scopedOwner.get(node.id)?.negated === true;
     if (bare && edges.length === 0) {
       warn(`${nodeVar(node)} is unconstrained — it matches every term in the store.`);
-    } else if (bare && node.projected && edges.every((e) => e.negated)) {
+    } else if (node.projected && (insideNotExists || (bare && edges.every((e) => e.negated)))) {
       warn(
         `${nodeVar(node)} only appears inside FILTER NOT EXISTS — it cannot be bound in the result.`,
       );
     }
   }
-  const components = connectedComponents(model);
+  const components = connectedComponents(model, scopedOwner);
   if (model.nodes.length > 1 && components > 1) {
     warn(`The canvas has ${components} disconnected groups — the result is their cross product.`);
   }
 
   // 5. Projection: an aggregate panel (GROUP BY) or the ticked variables.
+  //    Only COUNT takes `*` in SPARQL 1.1, so any other wildcard aggregate is dropped with a
+  //    note rather than emitted as the non-standard `SUM(*)` the grammar rejects.
+  const aggregates = model.aggregates.filter((aggregate) => {
+    if (aggregate.fn === "COUNT" || aggregate.variable.trim() !== "*") return true;
+    warn(
+      `${aggregate.fn}(*) is not legal SPARQL — only COUNT takes *. Pick a variable; the aggregate was skipped.`,
+    );
+    return false;
+  });
   const distinct = model.distinct ? "DISTINCT " : "";
   let selectLine: string;
   let projection: string[];
   let groupByLine: string | null = null;
 
-  if (model.aggregates.length > 0) {
+  if (aggregates.length > 0) {
     const groupVars: string[] = [];
     for (const name of model.groupBy) {
       const clean = sanitizeVariable(name);
       if (!groupVars.includes(clean)) groupVars.push(clean);
     }
-    const aliases = model.aggregates.map((a) => sanitizeVariable(a.alias, "agg"));
-    for (const aggregate of model.aggregates) {
+    const aliases = aggregates.map((a) => sanitizeVariable(a.alias, "agg"));
+    for (const aggregate of aggregates) {
       const argument = aggregate.variable.trim();
       if (argument !== "*" && !seenVariables.has(sanitizeVariable(argument))) {
         warn(`?${sanitizeVariable(argument)} is aggregated but never bound by the pattern.`);
@@ -495,7 +539,7 @@ export function buildSparql(model: BuilderModel): BuiltQuery {
     }
     selectLine = `SELECT ${distinct}${[
       ...groupVars.map((v) => `?${v}`),
-      ...model.aggregates.map(aggregateExpression),
+      ...aggregates.map(aggregateExpression),
     ].join(" ")}`;
     groupByLine = groupVars.length > 0 ? `GROUP BY ${groupVars.map((v) => `?${v}`).join(" ")}` : null;
     projection = [...groupVars, ...aliases];
@@ -646,6 +690,35 @@ export function addAttribute(
       ),
     },
     attributeId,
+  };
+}
+
+/** The variables an aggregate may be taken over — every bound name that is not itself an alias. */
+export function aggregatableVariables(model: BuilderModel): string[] {
+  return modelVariables(model).filter(
+    (name) => !model.aggregates.some((aggregate) => aggregate.alias === name),
+  );
+}
+
+/**
+ * Change an aggregate's function, keeping the pair legal: only `COUNT` accepts `*`, so moving
+ * away from COUNT coerces a wildcard onto the first variable the pattern binds. With no bound
+ * variable to move to, the wildcard is left in place and {@link buildSparql} reports it rather
+ * than emitting the non-standard `SUM(*)`.
+ */
+export function setAggregateFn(
+  model: BuilderModel,
+  aggregateId: string,
+  fn: AggregateFn,
+): BuilderModel {
+  const bound = aggregatableVariables(model);
+  return {
+    ...model,
+    aggregates: model.aggregates.map((aggregate) => {
+      if (aggregate.id !== aggregateId) return aggregate;
+      if (fn === "COUNT" || aggregate.variable.trim() !== "*") return { ...aggregate, fn };
+      return { ...aggregate, fn, variable: bound[0] ?? aggregate.variable };
+    }),
   };
 }
 

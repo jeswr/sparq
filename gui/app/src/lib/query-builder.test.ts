@@ -21,6 +21,7 @@ import {
   partitionSuggestions,
   removeNode,
   sanitizeVariable,
+  setAggregateFn,
   suggestionsFor,
   uniqueVariable,
   type BuilderModel,
@@ -106,6 +107,96 @@ test("OPTIONAL, exclusion (AND-NOT) and predicate alternatives emit the standard
     built.sparql.includes("FILTER NOT EXISTS { ?person <http://example.org/blocks> ?blocks . }"),
     built.sparql,
   );
+});
+
+test("a typed walked target's constraints stay INSIDE the OPTIONAL that reaches it", () => {
+  const start = addNode(emptyModel(), { classIri: `${EX}Person` });
+  const walked = addRelationship(start.model, start.nodeId, `${EX}worksAt`, {
+    targetClass: `${EX}Organisation`,
+  });
+  const withCity = addAttribute(walked.model, walked.nodeId, `${EX}city`);
+  const model: BuilderModel = {
+    ...withCity.model,
+    edges: withCity.model.edges.map((edge) => ({ ...edge, optional: true })),
+  };
+  const built = buildSparql(model);
+
+  // The complete target pattern is scoped: at the top level the type triple would bind
+  // ?organisation independently of the OPTIONAL, cross-producting every org with every person.
+  assert.equal(
+    built.sparql,
+    `SELECT ?person ?organisation ?city
+WHERE {
+  ?person a <http://example.org/Person> .
+  OPTIONAL {
+    ?person <http://example.org/worksAt> ?organisation .
+    ?organisation a <http://example.org/Organisation> .
+    ?organisation <http://example.org/city> ?city .
+  }
+}
+LIMIT 100`,
+  );
+  assert.deepEqual(built.warnings, []);
+});
+
+test("a typed excluded target's constraints stay INSIDE the FILTER NOT EXISTS", () => {
+  const start = addNode(emptyModel(), { classIri: `${EX}Person` });
+  const walked = addRelationship(start.model, start.nodeId, `${EX}worksAt`, {
+    targetClass: `${EX}Organisation`,
+  });
+  const model: BuilderModel = {
+    ...walked.model,
+    nodes: walked.model.nodes.map((node) =>
+      node.id === walked.nodeId ? { ...node, projected: false } : node,
+    ),
+    edges: walked.model.edges.map((edge) => ({ ...edge, negated: true })),
+  };
+  const built = buildSparql(model);
+
+  // "no person who works at ANY Organisation" — not "every (person, org) pair not linked".
+  assert.equal(
+    built.sparql,
+    `SELECT ?person
+WHERE {
+  ?person a <http://example.org/Person> .
+  FILTER NOT EXISTS {
+    ?person <http://example.org/worksAt> ?organisation .
+    ?organisation a <http://example.org/Organisation> .
+  }
+}
+LIMIT 100`,
+  );
+  // The excluded target is no longer a top-level pattern, so it is not a disconnected group.
+  assert.deepEqual(built.warnings, []);
+});
+
+test("a target also constrained elsewhere is left where the user drew it", () => {
+  const person = addNode(emptyModel(), { classIri: `${EX}Person` });
+  const org = addNode(person.model, { classIri: `${EX}Organisation` });
+  const works = connectNodes(org.model, person.nodeId, org.nodeId, `${EX}worksAt`);
+  const founded = connectNodes(works.model, person.nodeId, org.nodeId, `${EX}founded`);
+  const model: BuilderModel = {
+    ...founded.model,
+    edges: founded.model.edges.map((edge) =>
+      edge.id === works.edgeId ? { ...edge, optional: true } : edge,
+    ),
+  };
+  const built = buildSparql(model);
+
+  // ?organisation is bound by the mandatory `founded` edge too, so scoping its type triple into
+  // the OPTIONAL would be wrong — it stays at the top level.
+  assert.equal(
+    built.sparql,
+    `SELECT ?person ?organisation
+WHERE {
+  ?person a <http://example.org/Person> .
+  ?organisation a <http://example.org/Organisation> .
+  OPTIONAL { ?person <http://example.org/worksAt> ?organisation . }
+  ?person <http://example.org/founded> ?organisation .
+}
+LIMIT 100`,
+  );
+  assert.deepEqual(built.warnings, []);
 });
 
 test("a projected variable that only appears inside NOT EXISTS is flagged as unbindable", () => {
@@ -241,6 +332,43 @@ test("an aggregate over a variable the pattern never binds is flagged", () => {
   assert.ok(built.sparql.includes("(SUM(?salary) AS ?total)"));
   assert.ok(!built.sparql.includes("GROUP BY"));
   assert.ok(built.warnings.some((w) => w.includes("never bound")), built.warnings.join(" | "));
+});
+
+test("changing COUNT(*) to SUM re-points the wildcard at a bound variable", () => {
+  const start = addNode(emptyModel(), { classIri: `${EX}Person` });
+  const withSalary = addAttribute(start.model, start.nodeId, `${EX}salary`);
+  const counting: BuilderModel = {
+    ...withSalary.model,
+    aggregates: [{ id: "g1", fn: "COUNT", variable: "*", distinct: false, alias: "count" }],
+  };
+  assert.ok(buildSparql(counting).sparql.includes("(COUNT(*) AS ?count)"));
+
+  const summing = setAggregateFn(counting, "g1", "SUM");
+  assert.equal(summing.aggregates[0].variable, "person");
+  assert.ok(buildSparql(summing).sparql.includes("(SUM(?person) AS ?count)"));
+
+  // …and back: COUNT is the only function that may take the wildcard, so nothing is coerced.
+  assert.equal(setAggregateFn(summing, "g1", "COUNT").aggregates[0].variable, "person");
+});
+
+test("a non-COUNT wildcard aggregate is never emitted as the non-standard SUM(*)", () => {
+  const start = addNode(emptyModel(), { classIri: `${EX}Person` });
+  const model: BuilderModel = {
+    ...start.model,
+    aggregates: [{ id: "g1", fn: "SUM", variable: "*", distinct: false, alias: "total" }],
+    groupBy: [],
+  };
+  const built = buildSparql(model);
+
+  assert.ok(!built.sparql.includes("SUM(*)"), built.sparql);
+  assert.ok(!built.sparql.includes("?total"), built.sparql);
+  assert.ok(
+    built.warnings.some((w) => w.includes("SUM(*)") && w.includes("only COUNT")),
+    built.warnings.join(" | "),
+  );
+  // Dropping the only aggregate falls back to the plain row projection — still a valid query.
+  assert.equal(built.sparql.includes("GROUP BY"), false);
+  assert.deepEqual(built.projection, ["person"]);
 });
 
 test("serialisation is deterministic — the same model always yields identical text", () => {
