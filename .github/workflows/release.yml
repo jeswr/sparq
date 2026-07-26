@@ -403,9 +403,11 @@ jobs:
       # Build the UNSIGNED desktop bundle. `cargo tauri build` runs from gui/src-tauri, merges the
       # CI overlay (`-c tauri.ci.conf.json`) so the `beforeBuildCommand` hook is skipped (frontend
       # already exported to gui/app/out above), and enables the native capabilities promised by
-      # the desktop release: HDT import, SERVICE federation, and ODRL policy previews.
+      # the desktop release: HDT import, SERVICE federation, ODRL policy previews, and
+      # SHACL-derived forms.
       # [SONNET-4.6] sq-b1hdb — keep these explicit because the crate defaults intentionally remain
       # lean; omitting them silently compiles the rebuild-hint stubs into shipped installers.
+      # Keep this feature list in sync with gui.yml's "release feature union" clippy lane.
       # The command compiles the native Rust shell embedding gui/app/out (`frontendDist`) and
       # bundles installers for the host platform into
       # gui/src-tauri/target/release/bundle/<format>/. `--ci` disables interactive prompts;
@@ -418,8 +420,8 @@ jobs:
       #     gui/app/out) is REPRODUCED locally on this work box (x64-linux): it produces
       #     gui/app/out/index.html with ROOT-RELATIVE assets, the path `frontendDist` reads.
       #   * The empty-`beforeBuildCommand` skip is confirmed from tauri-cli source (run_hook).
-      #   * Linux rows (ubuntu-latest, ubuntu-24.04-arm): the GUI crate build + webkit deps are
-      #     already proven green in gui.yml; the .deb/.AppImage bundle step is the new surface.
+      #   * Linux rows (ubuntu-latest, ubuntu-24.04-arm): the exact native release feature union
+      #     is proven green by clippy in gui.yml; the .deb/.AppImage bundle step is the new surface.
       #   * macOS rows: WKWebView ships with the OS; the .dmg/.app bundle is documented-untested.
       #   * Windows row: WebView2 ships with the OS; the prepare-hook ENOENT root cause is fixed,
       #     and the .msi/NSIS .exe bundle step itself is still documented-untested. If a platform
@@ -427,7 +429,24 @@ jobs:
       #     on the matrix) so the release ships the working bundles + attestation; sq-gl3cf tracks it.
       - name: Build Tauri desktop bundle (unsigned)
         working-directory: gui/src-tauri
-        run: cargo tauri build --ci --verbose -c tauri.ci.conf.json --features hdt,federation,odrl
+        run: cargo tauri build --ci --verbose -c tauri.ci.conf.json --features hdt,federation,odrl,forms
+
+      # All optional native capabilities above have lean-build stubs with a developer-facing
+      # rebuild hint. A successful bundle build is insufficient evidence that the features were
+      # linked, so reject any release binary that still contains the shared stub wording.
+      - name: Verify native capabilities are compiled into the release binary
+        shell: bash
+        working-directory: gui/src-tauri
+        run: |
+          set -euo pipefail
+          binary="target/release/sparq-gui"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            binary="${binary}.exe"
+          fi
+          if grep -aEq "rebuild (the )?desktop app with" "$binary"; then
+            echo "ERROR: release binary contains a native-capability rebuild stub" >&2
+            exit 1
+          fi
 
       # Collect every produced installer into a flat staging dir under a STABLE, PREDICTABLE
       # per-OS name (the scheme the /download page hardcodes — see the documented names in the
