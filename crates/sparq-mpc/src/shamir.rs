@@ -704,7 +704,7 @@ pub(crate) enum MacCarry {
     /// input MAC that never saw the VALUE-reduce tamper, so it holds the TRUE `α·z`
     /// and the batched check fires on a tampered value.
     SoundIndependentReduce,
-    /// REJECTED route (design §2.4 warning): `[α·z] = reduce([z]·[α])` from the
+    /// REJECTED route (design §2.4 "REJECTED variant"): `[α·z] = reduce([z]·[α])` from the
     /// just-reduced (tampered) value times `[α]`, so the MAC TRACKS the tampered
     /// value and the batched check is fooled (`σ = 0`). Used only to demonstrate the
     /// false-negative the sound route avoids.
@@ -839,9 +839,12 @@ impl MacSession<'_> {
     /// - tamper the value reduce → `[z]` opens to `z+δ` while `[α·z]` still holds the
     ///   true `α·z` (computed from `[α·x]·[y]`) → `σ = α·z − (z+δ)·α = −δ·α ≠ 0`;
     /// - tamper the MAC reduce → `[α·z]` holds `α·z+δ` while `[z]` opens to the true
-    ///   `z` → `σ = δ ≠ 0`.
+    ///   `z` → `σ = δ ≠ 0`;
+    /// - tamper BOTH, coordinated (net shifts `δ_v`, `δ_m`) → `σ = δ_m − α·δ_v`, zero
+    ///   only if the adversary picks `δ_m = α·δ_v`, i.e. only by guessing the secret `α`
+    ///   (pinned by `auth_compare::tests::coordinated_tamper_in_both_reduces_is_caught`).
     ///
-    /// Either way the §2.5 batched check fires (`≈ 1 − 2^{−61}`): the adversary would
+    /// Every way the §2.5 batched check fires (`≈ 1 − 2^{−61}`): the adversary would
     /// have to fix the OTHER side without knowing the secret `α`, which it cannot. The
     /// reduction is therefore no longer *trusted* — its correctness is *checked*.
     /// (Recomputing `[α·z]` from `[z]·[α]` instead would NOT have this property — the
@@ -939,6 +942,52 @@ impl MacSession<'_> {
                 self.dealer.degree_reduce(&mac_2t)?
             }
         };
+        crate::authenticated::AuthenticatedShare::new(z, mac)
+    }
+
+    /// [SONNET-4.6] **test-only `auth_mul` that injects an in-re-sharing deviation into
+    /// BOTH degree-reduces at once** — the COORDINATED Hole-2 attack the design's
+    /// adversary model allows (up to `t` corrupted parties may deviate in both reduces
+    /// of the same multiplication, choosing the two deviations jointly).
+    ///
+    /// [`Self::auth_mul_with_value_reduce_tamper_for_test`] only deviates in the VALUE
+    /// reduce, so on its own it does not exercise the design's claim that the MAC reduce
+    /// is covered too, nor the joint case. This helper takes an independent `δ` for each
+    /// reduce (either may be zero) and otherwise runs the PRODUCTION sound carry
+    /// (`[α·z] = reduce([α·x]·[y])` over the input MAC).
+    ///
+    /// With net secret shifts `δ_v` (value) and `δ_m` (MAC), the pair the adversary lands
+    /// on is `(z + δ_v, α·z + δ_m)`, so the §2.5 check computes
+    /// `σ = δ_m − α·δ_v`, which is zero only if `δ_m = α·δ_v` — i.e. only by guessing the
+    /// secret `α` (probability `1/p`). `#[cfg(test)]`; NOT on any production path.
+    #[cfg(test)]
+    pub(crate) fn auth_mul_with_both_reduces_tampered_for_test(
+        &mut self,
+        x: &crate::authenticated::AuthenticatedShare,
+        y: &crate::authenticated::AuthenticatedShare,
+        reshare_party: usize,
+        value_delta: Fp,
+        mac_delta: Fp,
+    ) -> Result<crate::authenticated::AuthenticatedShare, MpcError> {
+        let mut scratch = Fp::zero();
+        // VALUE: [z] = reduce([x]·[y]) with δ_v injected inside the re-sharing.
+        let z_2t = mul_shares_raw(x.value_shares(), y.value_shares())?;
+        let z = self.dealer.degree_reduce_tamper_inside_reshare_for_test(
+            &z_2t,
+            reshare_party,
+            value_delta,
+            &mut scratch,
+        )?;
+        // MAC: the PRODUCTION independent carry [α·z] = reduce([α·x]·[y]), with δ_m
+        // injected inside ITS re-sharing. Different input shares from the value reduce —
+        // that independence is the property under test.
+        let mac_2t = mul_shares_raw(x.mac_shares(), y.value_shares())?;
+        let mac = self.dealer.degree_reduce_tamper_inside_reshare_for_test(
+            &mac_2t,
+            reshare_party,
+            mac_delta,
+            &mut scratch,
+        )?;
         crate::authenticated::AuthenticatedShare::new(z, mac)
     }
 
