@@ -71,6 +71,18 @@ def main():
                 elif isinstance(t["gold_keys"], list) and not isinstance(q, dict) and answered != gold_count:
                     failures.append(
                         f"{tid}/{arm}: FO arm returned {answered}, expected gold_count {gold_count}")
+                # A MULTI-PART task (dict-shaped `select`, e.g. th03's truth_bearers /
+                # info_bearers split) carries a dict-shaped gold_count keyed the same way.
+                # These were previously NOT count-checked at all, which is how a stale gold
+                # (Source 6 -> 71) survived validation while the single-query tasks failed
+                # loudly. Check each part against its own gold.
+                elif isinstance(q, dict) and isinstance(gold_count, dict):
+                    if part not in gold_count:
+                        failures.append(f"{tid}/{arm}/{part}: no gold_count entry for this part")
+                    elif answered != gold_count[part]:
+                        failures.append(
+                            f"{tid}/{arm}/{part}: FO arm returned {answered}, "
+                            f"expected gold_count {gold_count[part]}")
         # --- 2. the no-FO arm must NOT be able to answer (0 rows / can't) ---
         nofo = t["no_fo"]
         data = run(OVERLAY["no-fo"], nofo)
