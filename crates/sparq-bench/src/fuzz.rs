@@ -27,8 +27,9 @@
 //! mismatch outside the listed classes FAILS. A missing/empty allowlist runs STRICT.
 //!
 //! Usage: `sparq-bench fuzz <seed_start> <count> [category]`
-//! category ∈ { all (default) | bgp | filter | optional | union | minus | limit |
-//!              distinct | order } — lets a workflow shard the space across agents.
+//! category ∈ `CATEGORIES` (below) or `all` (default) — lets a workflow shard the
+//! space across agents (`.github/workflows/differential.yml` runs one shard per
+//! category).
 
 use oxigraph::store::Store;
 
@@ -216,16 +217,42 @@ fn gen_filter(rng: &mut Rng, var: &str) -> String {
     format!("FILTER({var} {op} {t})")
 }
 
-/// A random query in the chosen category. Always valid SPARQL 1.1 (both engines
-/// parse it); restricted to the surface sparq supports (no property paths).
+/// Every query category the generator can emit. `all` picks one uniformly at
+/// random per seed; `.github/workflows/differential.yml` runs ONE NIGHTLY SHARD PER
+/// ENTRY (running only `all` hides category-dense bugs — see that workflow's header),
+/// so adding a category here means adding a shard there too. `categories_have_a_shard`
+/// (below) pins the two lists together.
+const CATEGORIES: &[&str] = &[
+    "bgp", "filter", "equality", "optional", "union", "minus", "limit", "distinct", "order",
+    // sq-j80vk: the SPARQL 1.1 surfaces that previously had ZERO standing
+    // wrong-answer differential vs the Oxigraph oracle.
+    "path", "aggregate", "subquery", "exists", "values", "bind", "graph",
+];
+
+/// A random query in the chosen category. **Every category must keep these
+/// invariants** (sq-j80vk) or the comparator's oracles mis-fire:
+///
+/// * **Always-valid SPARQL 1.1**, restricted to the surface sparq supports —
+///   Oxigraph must parse it too. (A surface sparq declines is skipped as
+///   `unsupported`, which is fair; a WRONG ANSWER is not.)
+/// * **A deterministic solution multiset.** Never `LIMIT`/`OFFSET` without a total
+///   order over the projected rows, and never a `LIMIT` inside a sub-select that is
+///   then joined: SPARQL leaves the row CHOICE arbitrary there, so two conformant
+///   engines may legitimately return different (equally valid) rows.
+/// * **No `=` / `!=` outside the `equality` / `filter` categories.** Those exact
+///   texts are what `parse_eq_filter` recognises as the adjudicated sq-eibog shape;
+///   a look-alike elsewhere would be re-derived by a sub-oracle that does not model
+///   the surrounding query.
+/// * **No `ORDER BY` outside the `order` category** — `check_ordered` compares the
+///   first projected column against Oxigraph's `?a`.
+/// * **No blank nodes.** Keeping them out of the generator is exactly what keeps the
+///   sq-ai2wa (bnode-vs-IRI) allowlist class INERT; introducing one makes that class
+///   live (its detector is already wired) and needs its own adjudication first.
 fn gen_query(rng: &mut Rng, category: &str) -> String {
     let pfx = "PREFIX ex: <http://ex/>\nPREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n";
     // Pick an effective category (when "all", choose one at random).
-    let cats = [
-        "bgp", "filter", "equality", "optional", "union", "minus", "limit", "distinct", "order",
-    ];
     let cat = if category == "all" {
-        cats[rng.below(cats.len() as u64) as usize]
+        CATEGORIES[rng.below(CATEGORIES.len() as u64) as usize]
     } else {
         category
     };
@@ -290,6 +317,152 @@ fn gen_query(rng: &mut Rng, category: &str) -> String {
         }
         "union" => "{ ?s ex:age ?a } UNION { ?s ex:name ?a }".to_string(),
         "minus" => "?s ex:name ?n MINUS { ?s ex:age ?a }".to_string(),
+        // ── sq-j80vk categories ──────────────────────────────────────────────────
+        // PROPERTY PATHS (SPARQL 1.1 §9). `ex:p` is the edge predicate, so the graph
+        // is a small random digraph with chains and cycles — `+`/`*` closure, inverse,
+        // sequence and the negated property set all have non-trivial answers on it.
+        //
+        // ZERO-LENGTH forms (`*`, `?`) are emitted ONLY with their start end already
+        // bound to a term that OCCURS IN THE GRAPH (`?s ex:p ?x . ?x ex:p* ?o`). The
+        // zero-length match of a ground endpoint that does NOT occur in the data is a
+        // REAL, currently-unadjudicated cross-engine divergence (sparq yields the
+        // zero-length solution — which is what the W3C property-path tests expect,
+        // cf. sparq-conformance/FINDINGS.md F11 — while Oxigraph 0.5 returns nothing);
+        // absorbing it here would mean widening the allowlist without an adjudication,
+        // which sq-j80vk explicitly forbids. It is filed as its own follow-up instead.
+        "path" => match rng.below(9) {
+            0 => "?s ex:p/ex:p ?o".to_string(),      // sequence
+            1 => "?s ^ex:p ?o".to_string(),          // inverse
+            2 => "?s ex:p+ ?o".to_string(),          // transitive closure
+            3 => "?s (ex:p|ex:name) ?o".to_string(), // alternative
+            4 => "?s ex:p/ex:age ?a".to_string(),    // sequence into a value column
+            5 => "?s ex:p+/ex:name ?n".to_string(),  // closure then a value column
+            6 => "?s !(ex:p|ex:age) ?o".to_string(), // negated property set
+            // zero-or-more / zero-or-one from a start that is certainly a graph node.
+            7 => "?s ex:p ?x . ?x ex:p* ?o".to_string(),
+            _ => "?s ex:p ?x . ?x ex:p? ?o".to_string(),
+        },
+        // AGGREGATES / GROUP BY / HAVING (§11). The differential is over the SOLUTION
+        // COUNT, which for a bare aggregate is always 1 — so the aggregate's VALUE
+        // would be invisible. `HAVING` makes it observable again: the number of
+        // surviving groups is a function of the aggregated values themselves, so a
+        // wrong SUM/COUNT/MIN changes the count and the oracle catches it. Numeric
+        // aggregates stay on `ex:age` (an all-`xsd:integer` column) — SUM/AVG over the
+        // deliberately MIXED `ex:val` column is a type error whose propagation is not
+        // what this category is pinning.
+        "aggregate" => {
+            let k = rng.below(4);
+            let t = rng.below(200);
+            return match rng.below(7) {
+                0 => format!("{pfx}SELECT (COUNT(*) AS ?c) WHERE {{ ?s ex:age ?a }}"),
+                1 => format!("{pfx}SELECT ?s (COUNT(?o) AS ?c) WHERE {{ ?s ex:p ?o }} GROUP BY ?s"),
+                2 => format!(
+                    "{pfx}SELECT ?s (COUNT(?o) AS ?c) WHERE {{ ?s ex:p ?o }} GROUP BY ?s \
+                     HAVING(COUNT(?o) > {k})"
+                ),
+                3 => format!(
+                    "{pfx}SELECT ?s (SUM(?a) AS ?t) WHERE {{ ?s ex:age ?a }} GROUP BY ?s \
+                     HAVING(SUM(?a) > {t})"
+                ),
+                4 => format!(
+                    "{pfx}SELECT ?n (COUNT(DISTINCT ?s) AS ?c) WHERE {{ ?s ex:name ?n }} \
+                     GROUP BY ?n HAVING(COUNT(DISTINCT ?s) > {k})"
+                ),
+                5 => format!(
+                    "{pfx}SELECT (MIN(?a) AS ?mn) (MAX(?a) AS ?mx) WHERE {{ ?s ex:age ?a }} \
+                     HAVING(MAX(?a) > {t})"
+                ),
+                _ => format!(
+                    "{pfx}SELECT ?s (AVG(?a) AS ?av) WHERE {{ ?s ex:p ?o . ?o ex:age ?a }} \
+                     GROUP BY ?s HAVING(AVG(?a) > {t})"
+                ),
+            };
+        }
+        // SUB-SELECTS (§12). No `LIMIT` inside a joined sub-select (see the
+        // determinism invariant above). The aggregating shapes push the aggregate's
+        // VALUE into the outer row count via an outer `FILTER`, the same trick
+        // `HAVING` plays for the `aggregate` category.
+        "subquery" => {
+            let k = rng.below(4);
+            return match rng.below(5) {
+                0 => format!(
+                    "{pfx}SELECT * WHERE {{ ?s ex:name ?n {{ SELECT ?s WHERE {{ ?s ex:age ?a }} }} }}"
+                ),
+                1 => format!(
+                    "{pfx}SELECT * WHERE {{ {{ SELECT DISTINCT ?s WHERE {{ ?s ex:p ?o }} }} \
+                     ?s ex:age ?a }}"
+                ),
+                2 => format!(
+                    "{pfx}SELECT * WHERE {{ {{ SELECT ?s (COUNT(?o) AS ?c) WHERE {{ ?s ex:p ?o }} \
+                     GROUP BY ?s }} FILTER(?c > {k}) }}"
+                ),
+                3 => format!(
+                    "{pfx}SELECT * WHERE {{ ?s ex:age ?a \
+                     OPTIONAL {{ {{ SELECT ?s ?n WHERE {{ ?s ex:name ?n }} }} }} }}"
+                ),
+                _ => format!(
+                    "{pfx}SELECT * WHERE {{ ?s ex:name ?n \
+                     {{ SELECT ?s WHERE {{ ?s ex:age ?a . FILTER(?a > {}) }} }} }}",
+                    rng.below(120)
+                ),
+            };
+        }
+        // EXISTS / NOT EXISTS (§8.1.1, §17.4.1.4) — correlated, so the inner pattern
+        // is evaluated with the outer row substituted in.
+        "exists" => match rng.below(6) {
+            0 => "?s ex:age ?a FILTER EXISTS { ?s ex:name ?n }".to_string(),
+            1 => "?s ex:age ?a FILTER NOT EXISTS { ?s ex:p ?o }".to_string(),
+            2 => "?s ex:name ?n FILTER NOT EXISTS { ?s ex:age ?a . FILTER(?a > 50) }".to_string(),
+            3 => "?s ex:p ?o FILTER EXISTS { ?o ex:age ?a }".to_string(),
+            4 => format!(
+                "?s ex:age ?a FILTER(EXISTS {{ ?s ex:name ?n }} && ?a < {})",
+                rng.below(120)
+            ),
+            _ => "?s ex:name ?n FILTER NOT EXISTS { ?s ex:p ?o . ?o ex:age ?a }".to_string(),
+        },
+        // VALUES / inline data (§10.2.1), incl. the multi-column and UNDEF forms.
+        "values" => {
+            let (a, b) = (rng.below(120), rng.below(120));
+            match rng.below(4) {
+                0 => "?s ex:age ?a VALUES ?s { ex:n0 ex:n1 ex:n2 }".to_string(),
+                1 => format!("VALUES ?a {{ {a} {b} }} ?s ex:age ?a"),
+                2 => format!("?s ex:age ?a VALUES (?s ?a) {{ (ex:n0 {a}) (ex:n1 UNDEF) }}"),
+                _ => "?s ex:name ?n VALUES ?n { \"nm0\" \"nm1\"@en }".to_string(),
+            }
+        }
+        // BIND (§10.2.2). A bare BIND cannot change the row count, so every shape
+        // FILTERs on the bound variable — that makes the computed VALUE observable in
+        // the count differential. `COALESCE` over an OPTIONAL covers the UNBOUND path.
+        "bind" => {
+            let t = rng.below(160) as i64 - 40;
+            match rng.below(5) {
+                0 => format!("?s ex:age ?a BIND(?a + 1 AS ?b) FILTER(?b > {t})"),
+                1 => format!("?s ex:age ?a BIND(?a * 2 AS ?b) FILTER(?b < {t})"),
+                2 => format!(
+                    "?s ex:name ?n OPTIONAL {{ ?s ex:age ?a }} BIND(COALESCE(?a, 0) AS ?b) \
+                     FILTER(?b > {t})"
+                ),
+                3 => format!("?s ex:age ?a BIND(IF(?a > {t}, 1, 0) AS ?b) FILTER(?b > 0)"),
+                _ => format!(
+                    "?s ex:age ?a . ?s ex:name ?n BIND(STRLEN(STR(?n)) AS ?l) FILTER(?l > {})",
+                    rng.below(5)
+                ),
+            }
+        }
+        // GRAPH (§13.3). The harness loads ONE Turtle document, so the dataset has a
+        // default graph and NO named graphs — every `GRAPH` block is therefore empty,
+        // and what these shapes pin is that sparq agrees: a `GRAPH` block must NOT
+        // leak the default graph's triples, and an empty named-graph side must still
+        // COMPOSE correctly (UNION keeps the left rows; OPTIONAL keeps them with `?g`
+        // / `?n` unbound). Named-graph DATA is out of scope here — the store-mode
+        // shards (dict-spill) re-serialise through triples only, so quads in the
+        // generated document would diverge for harness reasons, not engine ones.
+        "graph" => match rng.below(4) {
+            0 => "GRAPH ?g { ?s ex:age ?a }".to_string(),
+            1 => "{ ?s ex:age ?a } UNION { GRAPH ?g { ?s ex:age ?a } }".to_string(),
+            2 => "?s ex:age ?a OPTIONAL { GRAPH ?g { ?s ex:name ?n } }".to_string(),
+            _ => "GRAPH ex:g1 { ?s ex:p ?o }".to_string(),
+        },
         "limit" => {
             let k = rng.below(8);
             let off = rng.below(5);
@@ -682,6 +855,16 @@ fn check_ordered(g: &sparq_core::Graph, store: &Store, q: &str) -> Result<(), St
 }
 
 pub fn run(seed_start: u64, count: u64, category: &str) {
+    // An unknown category would otherwise fall through `gen_query`'s catch-all arm
+    // and quietly fuzz a single BGP shape — i.e. a typo in the CI shard matrix would
+    // report a green shard that never exercised its surface. Fail loudly instead.
+    if category != "all" && !CATEGORIES.contains(&category) {
+        eprintln!(
+            "error: unknown fuzz category {category:?} — known: all, {}",
+            CATEGORIES.join(", ")
+        );
+        std::process::exit(2);
+    }
     // The adjudicated-divergence allowlist (bench/differential-divergences.json) —
     // loaded ONCE; the active state is printed so every CI log shows exactly which
     // classes were skip-with-count vs strict for this run.
@@ -912,6 +1095,18 @@ pub fn run(seed_start: u64, count: u64, category: &str) {
     );
     if let Some(r) = first_repro {
         println!("\nFIRST FAILING CASE:\n{r}");
+        std::process::exit(1);
+    }
+    // NON-VACUITY GUARD (sq-j80vk): a shard that skipped every case as unsupported
+    // compared NOTHING while still reporting success — which is exactly how a
+    // generator regression would hide (each new category is only worth a shard while
+    // both engines actually answer it). A run that asked for seeds and checked none
+    // is a harness failure, not a pass.
+    if count > 0 && checked == 0 {
+        println!(
+            "ERROR: fuzz[{category}] checked 0 of {count} seeds — the differential was \
+             VACUOUS (every generated query was rejected by an engine)."
+        );
         std::process::exit(1);
     }
 }
@@ -1281,6 +1476,131 @@ ex:n4 ex:val "s2" .
         );
         let q_range = "PREFIX ex: <http://ex/>\nSELECT ?s WHERE { ?s ex:age ?a FILTER(?a > 3) }";
         assert!(!is_bnode_iri_inequality(&store, q_range));
+    }
+
+    // ── sq-j80vk: invariants of the EXPANDED generator surface ──────────────────
+
+    /// One `(graph, query)` case, built exactly as `run` builds it for a seed.
+    fn case(seed: u64, category: &str) -> (String, String) {
+        let mut rng = Rng::new(seed);
+        let ttl = gen_graph(&mut rng);
+        let q = gen_query(&mut rng, category);
+        (ttl, q)
+    }
+
+    fn oxi_store(ttl: &str) -> Store {
+        let store = Store::new().unwrap();
+        store
+            .load_from_reader(oxigraph::io::RdfFormat::Turtle, ttl.as_bytes())
+            .unwrap();
+        store
+    }
+
+    /// EVERY category must emit SPARQL 1.1 that the INDEPENDENT oracle (Oxigraph)
+    /// parses AND evaluates — a query only sparq understands is not a differential at
+    /// all. Pinning that sparq answers it too is what keeps a category from silently
+    /// degrading into an all-`skipped(unsupported)` shard that reports green while
+    /// comparing nothing.
+    #[test]
+    fn every_category_is_evaluable_by_both_engines() {
+        for cat in CATEGORIES {
+            for seed in 0..60u64 {
+                let (ttl, q) = case(seed, cat);
+                oxi_count(&oxi_store(&ttl), &q).unwrap_or_else(|e| {
+                    panic!("category {cat} seed {seed}: oxigraph rejected\n{q}\n{e}")
+                });
+                let g = sparq_core::Graph::load_str(&ttl, "turtle").unwrap();
+                sparq_engine::query(&g, &q).unwrap_or_else(|e| {
+                    panic!("category {cat} seed {seed}: sparq rejected\n{q}\n{e}")
+                });
+            }
+        }
+    }
+
+    /// NON-VACUITY: a category whose queries always return ZERO rows compares 0 to 0
+    /// forever. Every category must bind rows on a healthy share of seeds. (`graph`
+    /// is the deliberate floor — the harness's dataset has no named graphs, so its
+    /// two bare-`GRAPH` shapes are empty BY DESIGN and only the UNION / OPTIONAL
+    /// compositions bind rows.)
+    #[test]
+    fn every_category_binds_rows_on_a_healthy_share_of_seeds() {
+        const SEEDS: u64 = 120;
+        for cat in CATEGORIES {
+            let mut non_empty = 0u64;
+            for seed in 0..SEEDS {
+                let (ttl, q) = case(seed, cat);
+                let g = sparq_core::Graph::load_str(&ttl, "turtle").unwrap();
+                if sparq_engine::query(&g, &q).map(|r| r.len()).unwrap_or(0) > 0 {
+                    non_empty += 1;
+                }
+            }
+            assert!(
+                non_empty * 4 >= SEEDS,
+                "category {cat}: only {non_empty}/{SEEDS} seeds bind ANY row — that \
+                 shard's differential is near-vacuous"
+            );
+        }
+    }
+
+    /// The oracle-safety invariants documented on `gen_query`. They are what keeps
+    /// each adjudicated-divergence sub-oracle (`parse_eq_filter` / `spec_filter_count`
+    /// for sq-eibog, `check_ordered`, the sq-ai2wa bnode detector) applicable ONLY to
+    /// the shapes it actually models — a category that broke one would manufacture
+    /// FALSE mismatches rather than find real ones.
+    #[test]
+    fn generator_invariants_hold_for_every_category() {
+        for cat in CATEGORIES {
+            for seed in 0..300u64 {
+                let (_, q) = case(seed, cat);
+                if !matches!(*cat, "equality" | "filter") {
+                    assert!(
+                        !q.contains("!=") && !q.contains(" = "),
+                        "category {cat}: an `=`/`!=` text outside equality/filter is \
+                         re-derived by the sq-eibog sub-oracle, which does not model \
+                         this query\n{q}"
+                    );
+                }
+                if *cat != "order" {
+                    assert!(
+                        !q.contains("ORDER BY"),
+                        "category {cat}: check_ordered compares the first projected \
+                         column against Oxigraph's `?a`\n{q}"
+                    );
+                }
+                assert!(
+                    !q.contains("_:"),
+                    "category {cat}: a blank node makes the sq-ai2wa allowlist class \
+                     LIVE — that needs its own adjudication first\n{q}"
+                );
+                if *cat == "subquery" {
+                    assert!(
+                        !q.contains("LIMIT"),
+                        "category {cat}: a LIMIT inside a joined sub-select makes the \
+                         row CHOICE arbitrary, so two conformant engines may return \
+                         different (equally valid) counts\n{q}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The nightly shard matrix (`.github/workflows/differential.yml`) must carry ONE
+    /// SHARD PER CATEGORY: running only `all` hides category-dense bugs (that
+    /// workflow's header records the sq-lr2ii case), so a category without its own
+    /// shard gets a fraction of the standing exploration it is supposed to get.
+    #[test]
+    fn every_category_has_a_nightly_shard() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../.github/workflows/differential.yml"
+        );
+        let wf = std::fs::read_to_string(path).expect("differential.yml readable");
+        for cat in CATEGORIES {
+            assert!(
+                wf.contains(&format!("category: {cat},")),
+                "no nightly shard for category {cat:?} in {path}"
+            );
+        }
     }
 
     /// Non-equality shapes are not recognised → the strict Oxigraph differential is
