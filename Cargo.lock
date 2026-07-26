@@ -5414,6 +5414,7 @@ dependencies = [
  "spargebra",
  "sparq-core",
  "sparq-engine",
+ "sparq-reason",
 ]
 
 [[package]]
