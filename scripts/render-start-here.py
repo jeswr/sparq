@@ -148,7 +148,20 @@ class RefState:
         return self.error is not None or not self.state
 
     def is_resolved(self) -> bool:
-        """True ONLY on positive evidence of resolution. Unknown is never resolved (rule 1)."""
+        """True ONLY on positive evidence of resolution. Unknown is never resolved (rule 1).
+
+        THE `unknown` GUARD IS DEFENCE IN DEPTH, AND IT NEEDS A CONSTRUCTED FIXTURE TO PIN.
+        No `live_ref_state` exit produces `error` set alongside a resolved-looking `state`
+        today: every error path leaves `state` at ''/'open', and the merged/closed paths
+        early-return before `error` can be set. So a fixture like
+        `RefState(error="HTTP 403")` does NOT discriminate this branch — it returns False via
+        `state.lower() != "closed"` even with the branch deleted. The branch only becomes
+        load-bearing when a ref LOOKS resolved and the read failed, which is the shape
+        `_self_test` and `test_a_resolved_looking_ref_whose_read_failed_is_not_resolved`
+        assert on. Keep both: the branch is what stops a future caller (a cached payload, a
+        partial GraphQL read, a second data source) from turning a 403 into "resolved, drop
+        the maintainer's P0".
+        """
         if self.unknown:
             return False
         return self.merged or self.state.lower() == "closed"
@@ -877,8 +890,27 @@ def _self_test(config_path: Path) -> int:
         merge_state_status="DIRTY",
     )
     broken = RefState(ref="sparq-org/sparq#5", error="HTTP 403")
+    # A ref that LOOKS resolved but whose read failed. This — not `broken` — is what pins
+    # `if self.unknown: return False` in is_resolved(); see that method's docstring. `broken`
+    # has no state at all, so it returns False via the empty-state fallback whether the guard
+    # is there or not, and an assertion on it alone would pass for the wrong reason on the most
+    # important invariant in the file.
+    half_closed = RefState(ref="sparq-org/sparq#6", state="closed", error="HTTP 403")
+    half_merged = RefState(
+        ref="sparq-org/sparq#7", is_pr=True, state="open", merged=True, error="HTTP 403"
+    )
     assert not open_i.is_resolved() and closed_i.is_resolved() and merged_pr.is_resolved()
-    assert not broken.is_resolved(), "an unreadable ref must NEVER count as resolved"
+    assert not broken.is_resolved(), "a ref with NO readable state must never count as resolved"
+    assert not half_closed.is_resolved(), (
+        "a ref that reads `closed` from a FAILED read must never count as resolved — "
+        "dropping it would delete an ask on the strength of an error"
+    )
+    assert not half_merged.is_resolved(), (
+        "a ref that reads `merged` from a FAILED read must never count as resolved"
+    )
+    assert broken.unknown and RefState(ref="sparq-org/sparq#8").unknown, (
+        "both clauses of `unknown` must hold: an error, and a state that never arrived"
+    )
     assert _pr_state_cell(conflicting).endswith("CONFLICTING")
     assert _pr_state_cell(broken) == "⚠️ state unknown"
 

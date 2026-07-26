@@ -27,10 +27,12 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import io
 import json
 import re
+import subprocess
 import sys
 import unittest
 from contextlib import redirect_stdout
@@ -269,6 +271,86 @@ class TestFailClosed(unittest.TestCase):
         self.assertFalse(rsh.RefState(ref="r", state="open").is_resolved())
         self.assertTrue(rsh.RefState(ref="r", state="closed").is_resolved())
         self.assertTrue(rsh.RefState(ref="r", state="open", merged=True).is_resolved())
+
+    def test_a_resolved_looking_ref_whose_read_failed_is_not_resolved(self):
+        """The `if self.unknown: return False` guard in is_resolved(), pinned for ITS reason.
+
+        `RefState(error="boom")` above does NOT discriminate that guard: with the guard deleted
+        it still returns False, via `state.lower() != "closed"`. So an assertion on that fixture
+        passes because the state is empty, not because unknown-is-never-resolved — a
+        non-discriminating fixture on the single most important invariant in the file. The guard
+        only becomes load-bearing when a ref LOOKS resolved and the read failed, which is what
+        this asserts. No live `live_ref_state` exit produces that combination today (every error
+        path leaves `state` at ''/'open'; the merged/closed paths early-return before `error`
+        can be set), which is precisely why it takes a constructed fixture: the guard is what
+        stops a future caller — a cached payload, a partial GraphQL read, a second data source —
+        from turning a 403 into "resolved, drop the maintainer's P0".
+        """
+        self.assertFalse(rsh.RefState(ref="r", state="closed", error="HTTP 403").is_resolved())
+        self.assertFalse(
+            rsh.RefState(ref="r", is_pr=True, state="open", merged=True, error="HTTP 403")
+            .is_resolved()
+        )
+        # ...and end to end: kept, marked, counted as degraded, never in the removed list.
+        ref = "sparq-org/sparq#111"
+        out = rsh.render(
+            cfg([entry(ref, ask="LOOKS DONE, READ FAILED")]),
+            {ref: rsh.RefState(ref=ref, state="closed", error="HTTP 403")},
+            COUNTS,
+            date="2026-07-26",
+        )
+        self.assertIn("LOOKS DONE, READ FAILED", out.body)
+        self.assertEqual(out.dropped, [])
+        self.assertEqual(len(out.unknown), 1)
+        self.assertNotIn("Removed as resolved", out.body)
+
+    def test_a_ref_whose_state_never_arrived_is_unknown_even_with_no_error(self):
+        """The `not self.state` clause of `unknown` — the other half of the same guard.
+
+        Deleting it leaves every `is_resolved()` assertion green (an empty state is still not
+        "closed"), so nothing above can see it go. What it actually controls is whether the ref
+        is REPORTED: without it a state-less ref renders with no `state unknown` marker and the
+        run exits 0.
+        """
+        empty = rsh.RefState(ref="sparq-org/sparq#112")
+        self.assertTrue(empty.unknown)
+        status = rsh.Status()
+        rsh.collect_states(cfg([entry(empty.ref)]), status, fetch=lambda ref: empty)
+        self.assertEqual(status.code, rsh.EXIT_DEGRADED)
+        out = rsh.render(
+            cfg([entry(empty.ref, ask="NO STATE AT ALL")]), {empty.ref: empty}, COUNTS,
+            date="2026-07-26",
+        )
+        self.assertIn("state unknown", out.body)
+        self.assertEqual(out.dropped, [])
+
+    def test_a_pr_whose_mergeable_field_never_arrived_is_recorded_as_an_error(self):
+        """`if not out.mergeable: out.error = ...` in live_ref_state.
+
+        Deleting it turns exit 3 into exit 0 AND reverts the ask to the curated "arm it" for a
+        PR whose mergeability was never read. `test_pr_detail_failure_leaves_the_entry_unknown`
+        covers the EXCEPTION path; `test_unknown_mergeability_is_not_reported_as_mergeable` uses
+        `mergeable="UNKNOWN"`, which is non-empty and never reaches this branch. So this is the
+        one that sees it.
+        """
+        original = rsh._gh
+
+        def fake(args):
+            if args[0] == "api":
+                return json.dumps({"state": "open", "pull_request": {"merged_at": None}})
+            # A 200 with the mergeability field simply absent (a partial GraphQL response, a
+            # schema change, a permissions-trimmed payload).
+            return json.dumps({"isDraft": False, "mergeStateStatus": "CLEAN"})
+
+        try:
+            rsh._gh = fake
+            state = rsh.live_ref_state("sparq-org/sparq#10")
+        finally:
+            rsh._gh = original
+        self.assertEqual(state.mergeable, "")
+        self.assertIsNotNone(state.error, "an absent mergeable field must be recorded as unread")
+        self.assertTrue(state.unknown)
+        self.assertFalse(state.is_resolved())
 
     def test_malformed_payload_is_unknown_not_open(self):
         # A 200 with a payload that has no usable `state` (a proxy error page, a schema change)
@@ -680,12 +762,19 @@ class TestTruncation(unittest.TestCase):
 class FakeGh:
     """Intercepts every `gh` invocation the renderer makes, and records it."""
 
-    def __init__(self, *, body="stale body", fail=(), counts=3):
+    CLEAN_DETAIL = {"isDraft": False, "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"}
+
+    def __init__(self, *, body="stale body", fail=(), counts=3, pr_numbers=(), pr_view=None):
         self.calls: list[list[str]] = []
         self.published: list[str] = []
         self.body = body
         self.fail = tuple(fail)
         self.counts = counts
+        # Refs the `issues` API should report as PULL REQUESTS (so the renderer goes on to read
+        # `gh pr view`), and the detail payload it gets back. Default: no ref is a PR, and the
+        # detail is a clean mergeable one — i.e. exactly the previous behaviour.
+        self.pr_numbers = {str(n).rpartition("#")[2] for n in pr_numbers}
+        self.pr_view = dict(self.CLEAN_DETAIL) if pr_view is None else dict(pr_view)
 
     def __call__(self, args: list[str]) -> str:
         self.calls.append(list(args))
@@ -694,11 +783,11 @@ class FakeGh:
             if token in joined:
                 raise RuntimeError(f"simulated failure for {token}")
         if args[:1] == ["api"]:
+            if args[1].rpartition("/")[2] in self.pr_numbers:
+                return json.dumps({"state": "open", "pull_request": {"merged_at": None}})
             return json.dumps({"state": "open"})
         if args[:2] == ["pr", "view"]:
-            return json.dumps(
-                {"isDraft": False, "mergeable": "MERGEABLE", "mergeStateStatus": "CLEAN"}
-            )
+            return json.dumps(self.pr_view)
         if args[:2] == ["issue", "list"]:
             return json.dumps([{"number": i} for i in range(self.counts)])
         if args[:2] == ["pr", "list"]:
@@ -808,6 +897,171 @@ class TestPublishPath(MainHarness):
         code, _ = self.run_main(["--config", str(FIXTURE)], fake)  # markdown, not TOML
         self.assertEqual(code, rsh.EXIT_ABORT)
         self.assertEqual(fake.calls, [])
+
+
+class TestEveryExitPathIsSticky(MainHarness):
+    """`return status.code` at EVERY return path of main(), not only the publish one.
+
+    Exit-zero-swallowing is the class this repo has now been bitten by EIGHT times, and this is
+    the PR that advertises sticky exit as a headline guard — so "the publish path is pinned" is
+    not good enough. `return status.code` -> `return EXIT_OK` survived at both the `--dry-run`
+    branch and the `already up to date` branch when only
+    `test_a_per_ref_failure_publishes_everything_but_still_exits_non_zero` existed.
+
+    The `already up to date` branch is REACHABLE and is where a swallowed non-zero costs most: a
+    persistent 403 on a 🔴 ref renders an IDENTICAL degraded body next pass, so no edit happens
+    and main falls through that branch. Because it reads "already up to date", `return EXIT_OK`
+    there is a natural-looking cleanup — and it would leave the cron green while the front door
+    carries an unverified P0 indefinitely with nobody alerted.
+    """
+
+    ARGV = ["--config", str(CONFIG)]
+    # The npm-bootstrap credential ask: P0, and something only the maintainer can do.
+    P0 = "repos/sparq-org/sparq/issues/53"
+
+    @staticmethod
+    def _refs_in_read_order() -> list[str]:
+        seen: list[str] = []
+        for e in rsh.load_config(CONFIG).entries:
+            for ref in e.refs:
+                if ref not in seen:
+                    seen.append(ref)
+        return seen
+
+    def _steady_state(self, fail) -> FakeGh:
+        """Publish once, then hand back a FakeGh primed with that EXACT body.
+
+        This is the real steady state of a persistent per-ref failure, so the second run takes
+        the `already up to date` branch for the same reason production does.
+        """
+        first = FakeGh(body="a stale hand-written body", fail=fail)
+        code, _ = self.run_main(self.ARGV, first)
+        self.assertEqual(code, rsh.EXIT_DEGRADED)
+        self.assertEqual(len(first.published), 1)
+        return FakeGh(body=first.published[0], fail=fail)
+
+    def test_dry_run_with_a_degraded_ref_still_exits_non_zero(self):
+        fake = FakeGh(body="stale", fail=(self.P0,))
+        code, printed = self.run_main([*self.ARGV, "--dry-run"], fake)
+        self.assertEqual(code, rsh.EXIT_DEGRADED, "--dry-run must not swallow the degradation")
+        self.assertEqual(fake.edits(), [])
+        self.assertIn("state unknown", printed)
+
+    def test_an_already_up_to_date_body_still_exits_non_zero_when_degraded(self):
+        again = self._steady_state((self.P0,))
+        code, _ = self.run_main(self.ARGV, again)
+        self.assertEqual(again.edits(), [], "an identical body must not be re-published")
+        self.assertEqual(
+            code, rsh.EXIT_DEGRADED,
+            "'already up to date' must not clear the 403 — the P0 is still unverified",
+        )
+
+    def test_a_failure_on_the_FIRST_ref_survives_every_later_success(self):
+        # Interleaving, order A: degrade first, then dozens of clean reads, then the up-to-date
+        # branch. A last-write-wins status, or a literal 0 on that branch, both go red here.
+        first_ref = self._refs_in_read_order()[0]
+        token = "issues/" + first_ref.rpartition("#")[2]
+        again = self._steady_state((token,))
+        code, _ = self.run_main(self.ARGV, again)
+        self.assertEqual(again.edits(), [])
+        self.assertEqual(code, rsh.EXIT_DEGRADED)
+
+    def test_a_failure_on_the_LAST_ref_survives_every_earlier_success(self):
+        # Interleaving, order B: the successes come FIRST. Neither order may return 0.
+        last_ref = self._refs_in_read_order()[-1]
+        token = "issues/" + last_ref.rpartition("#")[2]
+        again = self._steady_state((token,))
+        code, _ = self.run_main(self.ARGV, again)
+        self.assertEqual(again.edits(), [])
+        self.assertEqual(code, rsh.EXIT_DEGRADED)
+        # ...and on the --dry-run path too, in that same order.
+        dry = FakeGh(body="stale", fail=(token,))
+        self.assertEqual(self.run_main([*self.ARGV, "--dry-run"], dry)[0], rsh.EXIT_DEGRADED)
+
+    def test_no_return_after_the_live_read_hard_codes_an_exit_code(self):
+        """Structural backstop, so the NEXT branch added to main() inherits the rule.
+
+        The three behavioural tests above pin the three return paths that exist today. This one
+        pins the SHAPE: below the point where live state is read, a return may only be
+        `status.code` (sticky) or `EXIT_ABORT` (strictly worse than degraded, published nothing).
+        A literal `EXIT_OK` there is the bug by construction. The `--if-ref` cost guard returns
+        `EXIT_OK` legitimately — it sits ABOVE the live read and cannot be degraded yet, which
+        is why the boundary is a line number and not a whitelist of branches.
+        """
+        fn = next(
+            node for node in ast.parse(SCRIPT.read_text(encoding="utf-8")).body
+            if isinstance(node, ast.FunctionDef) and node.name == "main"
+        )
+        live_read = min(
+            node.lineno
+            for node in ast.walk(fn)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", "") in ("live_counts", "collect_states")
+        )
+        offenders = []
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Return) or node.lineno < live_read:
+                continue
+            value = node.value
+            sticky = isinstance(value, ast.Attribute) and value.attr == "code"
+            abort = isinstance(value, ast.Name) and value.id == "EXIT_ABORT"
+            if not (sticky or abort):
+                offenders.append(f"line {node.lineno}: return {ast.unparse(value)}")
+        self.assertEqual(
+            offenders, [],
+            "every return below the live read must be `status.code` (or EXIT_ABORT); a literal "
+            "exit code there discards an earned failure",
+        )
+
+
+class TestUnreadPrIsNeverPresentedAsArmable(MainHarness):
+    """A PR whose mergeability was never read must not be handed to the maintainer as "arm it"."""
+
+    ARGV = ["--config", str(CONFIG)]
+
+    def test_a_pr_view_missing_mergeable_degrades_and_drops_the_arm_it_ask(self):
+        # The State column does NOT discriminate here — `_pr_state_cell`'s else-branch prints
+        # "state unknown" for an empty `mergeable` whether or not the error was recorded. What
+        # discriminates is the ASK (curated `"arm it"` vs the unknown annotation) and the EXIT
+        # CODE (0 vs 3). Deleting `if not out.mergeable: out.error = ...` reds both assertions.
+        gated = rsh.load_config(CONFIG).bucket("gated-pr")
+        refs = [ref for e in gated for ref in e.refs]
+        self.assertTrue(refs, "the shipped TOML must carry the gated-PR table")
+        fake = FakeGh(
+            body="stale",
+            pr_numbers=refs,
+            pr_view={"isDraft": False, "mergeStateStatus": "CLEAN"},  # no `mergeable` key
+        )
+        code, _ = self.run_main(self.ARGV, fake)
+        self.assertEqual(
+            code, rsh.EXIT_DEGRADED,
+            "a PR whose mergeability never arrived must red the refresh job",
+        )
+        published = fake.published[0]
+        rows = [ln for ln in published.splitlines() if ln.startswith("| **[#") and ln.count("|") == 5]
+        self.assertEqual(len(rows), len(refs), "every gated PR must render exactly one row")
+        for row in rows:
+            ask = row.strip("|").split("|")[-1].strip()
+            self.assertIn(
+                "state unknown", ask,
+                f"an unread PR is presented as actionable: {ask[:80]}",
+            )
+
+    def test_a_clean_pr_read_is_not_degraded(self):
+        # Discrimination in the other direction: with the mergeability actually present, the
+        # same wiring must exit 0 and keep the curated ask. Without this, "everything is
+        # degraded" would satisfy the test above.
+        gated = rsh.load_config(CONFIG).bucket("gated-pr")
+        refs = [ref for e in gated for ref in e.refs]
+        fake = FakeGh(body="stale", pr_numbers=refs)
+        code, _ = self.run_main(self.ARGV, fake)
+        self.assertEqual(code, rsh.EXIT_OK)
+        published = fake.published[0]
+        rows = [ln for ln in published.splitlines() if ln.startswith("| **[#") and ln.count("|") == 5]
+        self.assertEqual(len(rows), len(refs))
+        for row in rows:
+            self.assertIn("MERGEABLE", row)
+            self.assertNotIn("state unknown", row)
 
 
 class TestLiveQueries(MainHarness):
